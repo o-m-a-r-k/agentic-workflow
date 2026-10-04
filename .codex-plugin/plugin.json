@@ -1,8 +1,12 @@
 {
   "name": "agentic-workflow",
-  "version": "0.0.0",
-  "description": "Delivery workflow for AI coding agents: isolated worktrees, evidence-based gates, independent review, tracker handoff. Design stage, not usable yet.",
-  "author": { "name": "Omar" },
+  "version": "0.1.0",
+  "description": "Delivery workflow for AI coding agents: isolated worktrees, evidence-based gates, independent review, tracker handoff.",
+  "author": {
+    "name": "Omar"
+  },
   "license": "MIT",
-  "skills": "./skills/"
+  "skills": "./skills/",
+  "homepage": "https://github.com/o-m-a-r-k/agentic-workflow",
+  "repository": "https://github.com/o-m-a-r-k/agentic-workflow"
 }

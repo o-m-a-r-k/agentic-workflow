@@ -1,0 +1,10 @@
+#!/usr/bin/env node
+import { main } from '../engine/cli.mjs';
+
+main(process.argv.slice(2)).then(
+  (code) => process.exit(code ?? 0),
+  (error) => {
+    process.stderr.write(`wf: ${error.stack ?? error}\n`);
+    process.exit(1);
+  },
+);

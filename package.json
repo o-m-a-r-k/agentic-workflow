@@ -1,0 +1,11 @@
+{
+  "name": "agentic-workflow",
+  "version": "0.1.0",
+  "description": "Delivery workflow for AI coding agents: isolated worktrees, evidence-based gates, independent review, tracker handoff.",
+  "type": "module",
+  "license": "MIT",
+  "bin": { "wf": "bin/wf" },
+  "engines": { "node": ">=20" },
+  "scripts": { "test": "node --test scenarios/" },
+  "repository": { "type": "git", "url": "https://github.com/o-m-a-r-k/agentic-workflow.git" }
+}

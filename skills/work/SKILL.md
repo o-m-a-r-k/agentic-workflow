@@ -1,0 +1,20 @@
+---
+name: work
+description: Implement and deliver a ticket with agentic-workflow. Use when the user asks to implement, fix or deliver a ticket in a project where agentic-workflow is enabled (`wf status --quiet` exits 0).
+---
+
+# Work a ticket
+
+Check `wf status --quiet` exits 0; otherwise this project is not onboarded (offer the onboard skill).
+
+The user's request to implement a ticket authorizes the whole lifecycle below, including delivery, unless they say otherwise. If they say hold, local only or don't push, run `wf hold --reason "<their words>"` immediately.
+
+1. `wf entry --item <ID>` (add `--intent analysis` for investigate-only requests; analysis never delivers). Perform the printed tracker actions, save the raw responses, run `wf tracker record --event admitted --capture <file>`.
+2. Planner: `wf handoff planner --agent <new agent id> --session <its session id if known>`, start a read-only subagent on the bundle, save its YAML, `wf plan --file <yaml>`.
+3. Implementer: `wf handoff implementer --agent <id>`, start the implementation subagent on the bundle. Make sure everything is committed in the worktrees.
+4. `wf gate`. On failure, read the step logs, fix the root cause (through the implementer), commit, rerun. Reuse is automatic; never rerun passing work by hand.
+5. Reviewer: `wf handoff reviewer --agent <a different agent id>`, start a read-only reviewer on the bundle. Then `wf review --closure <its file>`. Fix every open finding, gate again, hand to the reviewer again until all findings are fixed or verified non-issues. `wf accept`.
+6. `wf deliver`. Then do the printed tracker actions (comment, screenshots, status), save the readback, and `wf tracker record --event delivered --capture <file>`. Show the user every delivered screenshot with a caption.
+7. Report with a short summary: what changed, the proof, what's pending.
+
+`wf resume` tells you the next step at any point, including after an interruption.

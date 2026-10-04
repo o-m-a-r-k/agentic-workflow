@@ -1,0 +1,14 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "agentic-workflow",
+  "description": "Delivery workflow for AI coding agents.",
+  "owner": { "name": "Omar", "url": "https://github.com/o-m-a-r-k" },
+  "plugins": [
+    {
+      "name": "agentic-workflow",
+      "description": "Isolated worktrees, evidence-based gates, independent review and tracker handoff, with per-project adapters.",
+      "source": "./",
+      "category": "development"
+    }
+  ]
+}

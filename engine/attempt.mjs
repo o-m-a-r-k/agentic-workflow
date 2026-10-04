@@ -1,0 +1,215 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { loadConfig, loadConfigAtCommit, adapterLocation, repoDir } from './config.mjs';
+import { append, assertSchema, createAttempt, listAttempts, loadState } from './ledger.mjs';
+import { emitTrackerEvent } from './tracker.mjs';
+import { WfError, assertSafeId, git, hashFile, refuse, run, sessionIdentity, sha256 } from './util.mjs';
+
+export const worktreesRoot = (root) => path.join(root, '.wf-worktrees');
+export const worktreeDir = (root, id, repoName) => path.join(worktreesRoot(root), id, repoName);
+export const branchName = (id) => `wf/${id}`;
+
+export function actor(options = {}) {
+  if (options.owner) return String(options.owner);
+  const s = sessionIdentity();
+  if (s) return `${s.runtime}:${s.session}`;
+  return `human:${os.userInfo().username}`;
+}
+
+const OPEN = (s) => !['done', 'abandoned'].includes(s.phase);
+
+// --attempt wins; otherwise the attempt whose worktree contains cwd; otherwise the only open attempt.
+export function resolveAttempt(root, options = {}) {
+  if (options.attempt) return String(options.attempt);
+  const wt = worktreesRoot(root) + path.sep;
+  const cwd = fs.realpathSync(process.cwd()) + path.sep;
+  const realWt = fs.existsSync(worktreesRoot(root)) ? fs.realpathSync(worktreesRoot(root)) + path.sep : wt;
+  if (cwd.startsWith(realWt)) return cwd.slice(realWt.length).split(path.sep)[0];
+  const open = listAttempts(root).filter((id) => OPEN(loadState(root, id)));
+  if (open.length === 1) return open[0];
+  if (open.length === 0) throw new WfError('no open attempt', { hint: 'start one with `wf entry`' });
+  throw new WfError(`several open attempts (${open.join(', ')}); pass --attempt <id>`);
+}
+
+export function openState(root, options) {
+  const id = resolveAttempt(root, options);
+  const state = loadState(root, id);
+  assertSchema(state);
+  return state;
+}
+
+function nextNumber(root, prefix) {
+  const used = listAttempts(root)
+    .map((id) => id.match(new RegExp(`^${prefix}-(\\d+)`))?.[1])
+    .filter(Boolean)
+    .map(Number);
+  return used.length ? Math.max(...used) + 1 : 1;
+}
+
+export function nextAttemptId(root, item) {
+  const n = listAttempts(root).filter((id) => id.startsWith(`${item}.`)).length + 1;
+  return `${item}.${n}`;
+}
+
+function baseRef(dir, repo) {
+  const remotes = git(dir, ['remote']).split('\n').filter(Boolean);
+  if (remotes.includes(repo.remote)) {
+    run('git', ['fetch', '--quiet', repo.remote, repo.base], { cwd: dir });
+    return `${repo.remote}/${repo.base}`;
+  }
+  return repo.base;
+}
+
+// Copy-on-write clone where the filesystem supports it (APFS clonefile, btrfs/xfs reflink).
+function cloneTree(src, dest) {
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  const tries = process.platform === 'darwin' ? [['-c', '-R'], ['-R']] : [['--reflink=auto', '-R'], ['-R']];
+  for (const flags of tries) {
+    if (run('cp', [...flags, src, dest], { allowFail: true }).status === 0) return;
+  }
+  throw new WfError(`could not copy ${src} to ${dest}`);
+}
+
+export function provision(root, cfg, repo, dir) {
+  const source = repoDir(root, repo);
+  const p = repo.provision;
+  const report = { cloned: [], copied: [], installed: false };
+  for (const rel of p.clone) {
+    const src = path.join(source, rel);
+    if (fs.existsSync(src) && !fs.existsSync(path.join(dir, rel))) {
+      cloneTree(src, path.join(dir, rel));
+      report.cloned.push(rel);
+    }
+  }
+  for (const rel of p.copyIgnored) {
+    const src = path.join(source, rel);
+    if (fs.existsSync(src) && !fs.existsSync(path.join(dir, rel))) {
+      fs.mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true });
+      fs.copyFileSync(src, path.join(dir, rel));
+      fs.chmodSync(path.join(dir, rel), fs.statSync(src).mode);
+      report.copied.push(rel);
+    }
+  }
+  const drift = p.fingerprint.some((rel) => {
+    const a = path.join(source, rel);
+    const b = path.join(dir, rel);
+    return fs.existsSync(b) && (!fs.existsSync(a) || hashFile(a) !== hashFile(b));
+  });
+  const missingClone = p.clone.some((rel) => !fs.existsSync(path.join(dir, rel)));
+  if (p.install && (drift || missingClone)) {
+    run('sh', ['-c', p.install], { cwd: dir });
+    report.installed = true;
+  }
+  if (p.onWorktreeCreate) {
+    run(process.execPath, [path.resolve(root, '.workflow', p.onWorktreeCreate), dir], { cwd: dir, env: { ...process.env, WF_ROOT: root, WF_REPO: repo.name } });
+  }
+  return report;
+}
+
+export function entry(root, options) {
+  const cfg = loadConfig(root);
+  if (!cfg.enabled) throw refuse('the workflow is disabled for this project', 'run `wf enable`');
+  const intent = options.intent ?? 'implementation';
+  if (!['implementation', 'analysis'].includes(intent)) throw new WfError('--intent must be implementation or analysis');
+  const lane = options.lane ?? (options.item ? 'standard' : 'quick');
+  if (!cfg.lanes.includes(lane)) throw refuse(`lane \`${lane}\` is not enabled for this project (lanes: ${cfg.lanes.join(', ')})`);
+  let item = options.item ? assertSafeId(options.item, 'item') : null;
+  if (lane === 'standard' && !item) throw new WfError('standard lane needs --item <ticket id>');
+  if (lane === 'quick' && !item) item = `QF-${nextNumber(root, 'QF')}`;
+  const owner = actor(options);
+
+  for (const id of listAttempts(root)) {
+    const s = loadState(root, id);
+    if (s.item === item && OPEN(s)) throw refuse(`${item} already has an open attempt ${id} owned by ${s.owner}`, `continue it, or take it over with \`wf adopt --attempt ${id}\``);
+  }
+
+  const wanted = options.repos ? String(options.repos).split(',') : cfg.repos.map((r) => r.name);
+  const repos = {};
+  const id = assertSafeId(options.id ?? nextAttemptId(root, item), 'attempt id');
+  for (const name of wanted) {
+    const repo = cfg.repos.find((r) => r.name === name);
+    if (!repo) throw new WfError(`unknown repo \`${name}\``);
+    const dir = repoDir(root, repo);
+    const ref = baseRef(dir, repo);
+    const base = git(dir, ['rev-parse', ref]);
+    const wt = worktreeDir(root, id, name);
+    run('git', ['worktree', 'add', '--quiet', '-b', branchName(id), wt, base], { cwd: dir });
+    repos[name] = { base, baseRef: ref, branch: branchName(id), worktree: wt, provisioned: provision(root, cfg, repo, wt) };
+  }
+  const { repo: adapterRepo } = adapterLocation(root, cfg);
+  const adapterBase = repos[adapterRepo.name]?.base ?? git(repoDir(root, adapterRepo), ['rev-parse', baseRef(repoDir(root, adapterRepo), adapterRepo)]);
+  loadConfigAtCommit(root, cfg, adapterBase);
+
+  createAttempt(root, id, { id, item, lane, intent, repos, adapterBase, reopenedFrom: options.reopenedFrom ?? null, deferHeavy: options.deferHeavy === true || options.deferHeavy === 'true' }, owner);
+  if (lane === 'standard' && intent === 'implementation') emitTrackerEvent(root, cfg, id, 'admitted');
+  return loadState(root, id);
+}
+
+export function adopt(root, options) {
+  const state = openState(root, options);
+  const by = actor(options);
+  append(root, state.id, 'owner.adopted', { from: state.owner, reason: options.reason ?? null }, by);
+  return loadState(root, state.id);
+}
+
+export function abandon(root, options) {
+  const state = openState(root, options);
+  if (!options.reason) throw new WfError('--reason is required');
+  if (Object.keys(state.delivery.repos).length) throw refuse(`${state.id} is partly delivered; finish delivery instead of abandoning it`);
+  append(root, state.id, 'abandoned', { reason: String(options.reason) }, actor(options));
+  cleanupWorktrees(root, loadState(root, state.id));
+  return loadState(root, state.id);
+}
+
+export function hold(root, options) {
+  const state = openState(root, options);
+  if (!options.reason) throw new WfError('--reason is required');
+  append(root, state.id, 'hold', { reason: String(options.reason) }, actor(options));
+  return loadState(root, state.id);
+}
+
+export function release(root, options) {
+  const state = openState(root, options);
+  if (!state.activeHold) throw refuse(`${state.id} has no active hold`);
+  append(root, state.id, 'release', {}, actor(options));
+  return loadState(root, state.id);
+}
+
+export function cleanupWorktrees(root, state) {
+  const cfg = loadConfig(root);
+  for (const [name, r] of Object.entries(state.repos)) {
+    const repo = cfg.repos.find((x) => x.name === name);
+    if (!repo || !fs.existsSync(r.worktree)) continue;
+    run('git', ['worktree', 'remove', r.worktree], { cwd: repoDir(root, repo), allowFail: true });
+  }
+  const dir = path.join(worktreesRoot(root), state.id);
+  fs.rmSync(path.join(dir, '_review'), { recursive: true, force: true }); // closures were copied into evidence by `wf review`
+  if (fs.existsSync(dir) && fs.readdirSync(dir).length === 0) fs.rmdirSync(dir);
+}
+
+export function changedFiles(state, name) {
+  const r = state.repos[name];
+  const out = git(r.worktree, ['diff', '--name-only', `${r.baseRef ?? r.base}...HEAD`]);
+  return out ? out.split('\n') : [];
+}
+
+export function uncommitted(state) {
+  const dirty = {};
+  for (const [name, r] of Object.entries(state.repos)) {
+    const out = git(r.worktree, ['status', '--porcelain', '--untracked-files=normal']);
+    if (out) dirty[name] = out.split('\n');
+  }
+  return dirty;
+}
+
+export function treeHashes(state) {
+  const t = {};
+  for (const [name, r] of Object.entries(state.repos)) {
+    const head = git(r.worktree, ['rev-parse', 'HEAD']);
+    // Tracked content only: untracked files are never delivered (the gate refuses to start with any).
+    const status = git(r.worktree, ['status', '--porcelain', '--untracked-files=no']);
+    t[name] = status ? `${head}+dirty:${sha256(status + git(r.worktree, ['diff', 'HEAD']))}` : head;
+  }
+  return t;
+}

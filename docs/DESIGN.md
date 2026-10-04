@@ -1,6 +1,6 @@
 # agentic-workflow — design
 
-Status: draft, pre-implementation. Nothing here is built yet.
+Status: v0.1 implemented. Scenario tests in `scenarios/` are the executable form of this design; where they differ, the tests win and this file is fixed.
 
 agentic-workflow runs software changes through a fixed lifecycle with AI coding agents:
 admit a ticket → isolated worktree → plan → implement → gate → independent review → deliver → tracker handoff.
@@ -230,7 +230,7 @@ export default {
 
 ## Telemetry
 
-- **Engine events:** one `events.jsonl` per attempt: phase, role, step, suite, status, reuse, duration, resource peaks, chosen workers.
+- **Engine events:** the attempt ledger (`.wf-evidence/attempts/<id>/ledger.jsonl`) is the event log: every `wf` command appends a timestamped, hash-chained entry; gate entries carry per-step and per-suite status, reuse, duration and chosen workers.
 - **Agent usage:** `wf handoff <role>` records the agent's session id; `wf report` reads that session's transcript afterwards for model, tokens, wall time and tool calls. Measurement only — never grants or blocks anything.
 - **Cost:** tokens × a user-editable price table.
 - **Live:** `wf status --all` across enabled projects.
@@ -273,6 +273,14 @@ requires:
 5. **Skills, connectors, tools:** present/missing per runtime; vendor confirmed skills; exact steps for the rest.
 6. **Write** the adapter, the `AGENTS.md` block, generated agents.
 7. **Prove** with `wf doctor` on a clean base: config errors are fixed by onboarding; tests already failing on a clean base are fixed as the first quick fix, or reported to the user when large.
+
+## Trust model
+
+What the evidence proves, and what it does not:
+
+- **It catches mistakes.** The ledger is hash-chained, writes are serialised, gate results are bound to the exact tree and to the adapter committed at base, and the guard hook blocks careless edits of `.wf-evidence/` from Edit/Write and common shell writes. An agent that misremembers, skips a step or edits the wrong file is stopped.
+- **It does not stop a determined forger on the same machine.** The chain is unkeyed and agent identities (`--agent`, `--owner`) are names the owner supplies. An agent with shell access that sets out to fake a passing gate or a reviewer can. Independence and evidence are only as strong as the agents and the person running them.
+- **Adapter code is trusted at base.** Step plugins, delivery and tracker adapters run as committed on the base branch, never the ticket's copy. A ticket can still change the project scripts a step calls (for example a test script in `package.json`); that is visible in the diff the reviewer inspects, and changes to `sharedInfra` files force the affected package's steps to run.
 
 ## Versioning
 

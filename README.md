@@ -2,9 +2,40 @@
 
 A delivery workflow for AI coding agents, packaged as one plugin for Claude Code and Codex.
 
-> **Status: design stage.** Nothing is usable yet. The full design is in [docs/DESIGN.md](docs/DESIGN.md). Feedback through issues is welcome.
+> **Status: v0.1, early.** The engine, CLI, onboarding and all three lanes work and are covered by 44 scenario tests on real git repositories, and reviewed by an independent agent. It has not yet been used on a production project; expect rough edges. Design: [docs/DESIGN.md](docs/DESIGN.md). Feedback through issues is welcome.
 
 Every change runs through the same lifecycle: a ticket is admitted, worked on in isolated worktrees, planned, implemented, proven by a gate, reviewed by an agent that did not write it, delivered, and handed back to the tracker with a readback. Each step checks evidence the engine wrote, never what an agent says it did.
+
+## Install
+
+Requires Node.js 20+ and git.
+
+Claude Code:
+
+```bash
+claude plugin marketplace add o-m-a-r-k/agentic-workflow
+claude plugin install agentic-workflow@agentic-workflow
+```
+
+Then put the `wf` CLI on your PATH (once):
+
+```bash
+node ~/.claude/plugins/marketplaces/agentic-workflow/bin/wf install
+```
+
+Without a plugin system, clone the repo and run `node bin/wf install`.
+
+## Quick start
+
+```bash
+cd my-project            # a git repo, or a folder holding several
+wf init                  # drafts .workflow/ from what it finds (disabled)
+wf doctor                # proves the commands work on a clean checkout
+git add .workflow && git commit -m "Add agentic-workflow adapter"
+wf enable
+```
+
+Or ask your agent to "onboard this project to agentic-workflow": the `onboard` skill walks you through components, steps, tracker and secrets.
 
 ## Contents
 

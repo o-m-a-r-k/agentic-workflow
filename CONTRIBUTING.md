@@ -15,7 +15,7 @@ Thanks for helping. The project is at design stage, so the most useful contribut
 
 1. Open an issue first for anything beyond a small fix, so the approach can be agreed.
 2. Keep a PR to one change. Explain what it fixes or enables and how you verified it.
-3. Run the scenario suite before pushing (once it exists).
+3. Run `npm test` (the scenario suite in `scenarios/`) before pushing.
 4. By contributing you agree your work is released under the MIT license.
 
 ## Conduct
