@@ -1,0 +1,12 @@
+name: Project setup not covered
+description: A stack, tracker, delivery method or repo layout the design can't express
+labels: [design]
+body:
+  - type: textarea
+    id: setup
+    attributes: { label: Your setup, description: "Repos, components, stacks, tracker, how changes get merged" }
+    validations: { required: true }
+  - type: textarea
+    id: gap
+    attributes: { label: What the design can't express }
+    validations: { required: true }

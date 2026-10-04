@@ -1,0 +1,15 @@
+name: Bug report
+description: Something behaves differently from the design or docs
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes: { label: What happened, description: Include the command and its output. }
+    validations: { required: true }
+  - type: textarea
+    id: expected
+    attributes: { label: What you expected }
+    validations: { required: true }
+  - type: input
+    id: env
+    attributes: { label: Environment, description: "Plugin version, Claude Code / Codex version, OS" }
