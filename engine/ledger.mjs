@@ -15,6 +15,17 @@ function entryHash(entry) {
   return sha256(canonical(rest));
 }
 
+// The last entry, verified: a full chain check runs once per ledger size, then appends only read the tail.
+const verified = new Map();
+function lastEntry(root, id) {
+  const file = ledgerFile(root, id);
+  const size = fs.statSync(file).size;
+  const cached = verified.get(file);
+  if (cached && cached.size === size) return cached.entry;
+  const entries = readLedger(root, id);
+  return entries.at(-1) ?? null;
+}
+
 export function readLedger(root, id) {
   const file = ledgerFile(root, id);
   if (!fs.existsSync(file)) throw new WfError(`unknown attempt ${id}`);
@@ -34,6 +45,7 @@ export function readLedger(root, id) {
     prev = entry.hash;
     entries.push(entry);
   }
+  verified.set(file, { size: fs.statSync(file).size, entry: entries.at(-1) ?? null });
   return entries;
 }
 
@@ -42,11 +54,11 @@ export function append(root, id, type, data = {}, actor = null) {
   const file = ledgerFile(root, id);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   return withFileLock(`${file}.lock`, () => {
-    const entries = fs.existsSync(file) ? readLedger(root, id) : [];
-    const last = entries.at(-1);
-    const entry = { seq: entries.length + 1, at: now(), type, actor, data, prev: last?.hash ?? null };
+    const last = fs.existsSync(file) ? lastEntry(root, id) : null;
+    const entry = { seq: (last?.seq ?? 0) + 1, at: now(), type, actor, data, prev: last?.hash ?? null };
     entry.hash = entryHash(entry);
     fs.appendFileSync(file, `${JSON.stringify(entry)}\n`);
+    verified.set(file, { size: fs.statSync(file).size, entry });
     return entry;
   });
 }
@@ -111,6 +123,7 @@ export function reduce(entries) {
           batch: d.batch ?? null,
           deferHeavy: d.deferHeavy ?? false,
           reopenedFrom: d.reopenedFrom ?? null,
+          issue: d.issue ?? null,
           schemaVersion: d.schemaVersion,
           engineVersion: d.engineVersion,
         });

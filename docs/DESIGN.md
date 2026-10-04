@@ -34,8 +34,8 @@ agentic-workflow/
   .codex-plugin/plugin.json
   engine/          # state machine, evidence, gate runner, review closure, delivery (Node, stdlib + YAML)
   bin/wf           # the one CLI every agent calls
-  skills/          # onboard, work, quick-fix, resume, status, secrets guide
-  agents/          # role templates: planner, implementer, reviewer (tester: opt-in)
+  skills/          # onboard, work, quick-fix, resume, secrets
+  templates/agents # role templates: planner, implementer, reviewer (tester: opt-in); `wf sync` writes project agents from them
   hooks/           # manifest edit guard only
   adapters/
     tracker/       # linear, none
@@ -52,7 +52,7 @@ agentic-workflow/
 
 - Enabled = `.workflow/project.yaml` exists with `enabled: true`. The plugin is always installed and never activates itself.
 - `wf enable` / `wf disable` flip the flag and add/remove the generated block in every file listed in `instructionFiles` (default: each repo's root `AGENTS.md`).
-- The hook and every skill check `wf status --quiet` first; not enabled ⇒ exit 0 / "not enabled here, run onboarding".
+- Skills check `wf status --quiet` first; not enabled ⇒ "not enabled here, run onboarding". The guard hook acts only on paths under `.wf-evidence/`, which exist only in onboarded projects.
 - No tiers. A small project is just a small config: `tracker: none`, `lanes: [quick]`, `roles: { reviewer }`.
 
 ## Core model
@@ -77,7 +77,7 @@ agentic-workflow/
 | Takeover | `adopt` a live attempt from a new session | — |
 | Holds | `hold` / `release`, the only delivery veto | — |
 
-Commands: `init`, `doctor`, `sync`, `status [--all]`, `enable|disable`, `topology`, `entry`, `plan`, `criteria amend`, `handoff <role>`, `gate`, `stop`, `review`, `accept`, `deliver`, `tracker record`, `reopen`, `adopt`, `hold|release`, `resume`, `abandon`, `batch create|eject|deliver`, `secrets init|set|guide|status`, `skills update`, `report`.
+Commands: `install`, `init`, `doctor`, `sync`, `status [--all]`, `enable|disable`, `topology [--check]`, `entry`, `plan`, `criteria amend`, `handoff <role>`, `gate`, `stop`, `review`, `accept`, `deliver` (also delivers a batch), `tracker record`, `reopen`, `adopt`, `hold|release`, `resume`, `abandon`, `batch create|eject`, `secrets init|set|guide|status`, `skills update`, `report`.
 
 ## System topology
 
@@ -156,7 +156,7 @@ invariants: .workflow/AGENTS.invariants.md
 requires: { skills: [], connectors: [linear], tools: [{ name: docker, check: "docker info" }] }
 ```
 
-A step without `inputs` reruns every gate (no reuse).
+A step without `inputs` reruns every gate (no reuse). A passing result is reused only when every file changed in the package since that pass is in the step's `inputs`, its `ignores` (files the step provably does not depend on) or the package's `docsOnly`; otherwise the step reruns. A changed file that no step's `inputs` covers forces every step of its package to run (fail closed); a changed file in a package with no steps is listed as unchecked in the gate result. Files under the repo's `sharedInfra` (root lockfiles, shared config) force all of the repo's steps to run.
 
 ### Step plugin contract
 
@@ -179,7 +179,7 @@ Suite-level results without a plugin: `report: { junit: <path or glob> }` (PHPUn
 
 ## Parallelism and workers
 
-- **Steps:** `gate.maxParallelSteps`; `lease` names a resource (`docker`, `db`, `browser`, `simulator`) and `gate.leases` sets holders per lease. Leases are held while running, never queued across gates.
+- **Steps:** `gate.maxParallelSteps`; `lease` names a resource (`docker`, `db`, `browser`, `simulator`) and `gate.leases` sets holders per lease. Leases are machine-wide: a step waits for a slot another gate holds, the gate itself always starts at once.
 - **Inside a step:** `workers` is a number or `auto` (`min`, `max`, `perWorkerGiB`): free memory minus a reserve, divided per worker, capped by performance cores, never below `min`; probe failure ⇒ `min`. `shards` splits a step into shard processes. Placeholders `{workers}`, `{shard}`, `{shards}`; overrides `WF_WORKERS_<STEP>`, `WF_SHARDS_<STEP>`. Each run records the chosen numbers and why.
 
 ## Delivery adapter
@@ -230,7 +230,7 @@ export default {
 
 ## Telemetry
 
-- **Engine events:** the attempt ledger (`.wf-evidence/attempts/<id>/ledger.jsonl`) is the event log: every `wf` command appends a timestamped, hash-chained entry; gate entries carry per-step and per-suite status, reuse, duration and chosen workers.
+- **Engine events:** the attempt ledger (`.wf-evidence/attempts/<id>/ledger.jsonl`) is the event log: every `wf` command appends a timestamped, hash-chained entry; gate entries carry per-step and per-suite status, reuse, duration and chosen workers. Resource sampling (memory/CPU peaks) is not built yet.
 - **Agent usage:** `wf handoff <role>` records the agent's session id; `wf report` reads that session's transcript afterwards for model, tokens, wall time and tool calls. Measurement only — never grants or blocks anything.
 - **Cost:** tokens × a user-editable price table.
 - **Live:** `wf status --all` across enabled projects.

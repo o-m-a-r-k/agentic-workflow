@@ -10,7 +10,9 @@ import { emitTrackerEvent } from './tracker.mjs';
 import { WfError, YAML, canonical, git, hashValue, matchesAny, readJson, refuse, run, sessionIdentity, writeJson } from './util.mjs';
 
 const readStructured = (file) => {
-  const text = fs.readFileSync(path.resolve(String(file)), 'utf8');
+  let text = fs.readFileSync(path.resolve(String(file)), 'utf8');
+  const fenced = text.match(/```(?:ya?ml|json)?\s*\n([\s\S]*?)\n```/);
+  if (fenced) text = fenced[1];
   return file.endsWith('.json') ? JSON.parse(text) : YAML.parse(text);
 };
 
@@ -42,7 +44,7 @@ export function freezeCriteria(root, options) {
   const state = openState(root, options);
   const cfg = loadConfig(root);
   if (state.criteria) throw refuse('criteria are already frozen', 'change them with `wf criteria amend --file <f> --reason <why>`');
-  if (!options.file) throw new WfError('--file <criteria.yaml|json> is required');
+  if (typeof options.file !== 'string') throw new WfError('--file <criteria.yaml|json> is required');
   const doc = readStructured(options.file);
   validateCriteria(doc.criteria);
   if (needsPlanner(cfg, state)) {
@@ -58,7 +60,7 @@ export function freezeCriteria(root, options) {
 export function amendCriteria(root, options) {
   const state = openState(root, options);
   if (!state.criteria) throw refuse('criteria are not frozen yet; use `wf plan`');
-  if (!options.reason || String(options.reason).length < 10) throw new WfError('--reason is required (say why the criteria change)');
+  if (!options.reason || options.reason === true) throw new WfError('--reason is required (say why the criteria change)');
   const doc = readStructured(options.file);
   validateCriteria(doc.criteria);
   append(root, state.id, 'criteria.amended', { criteria: doc.criteria, reason: String(options.reason), previous: state.criteria }, actor(options));
@@ -122,6 +124,8 @@ export function handoff(root, role, options) {
     agent,
     worktrees: Object.fromEntries(Object.entries(state.repos).map(([k, v]) => [k, v.worktree])),
     bases: Object.fromEntries(Object.entries(state.repos).map(([k, v]) => [k, v.base])),
+    // What the planner (and every role) reads first: the issue as captured at entry and from the tracker.
+    issue: { file: state.issue?.file ?? null, trackerCaptures: state.tracker.done.map((d) => d.capture?.path).filter(Boolean) },
     criteria: state.criteria,
     plan: state.plan,
     criteriaAmendments: state.criteriaAmendments,
@@ -148,7 +152,7 @@ export function handoff(root, role, options) {
 
 export function recordReview(root, options) {
   const state = openState(root, options);
-  if (!options.closure) throw new WfError('--closure <file> is required');
+  if (typeof options.closure !== 'string') throw new WfError('--closure <file> is required');
   const closure = readJson(path.resolve(String(options.closure)));
   const reviewerHandoff = state.handoffs.filter((h) => h.role === 'reviewer').at(-1);
   if (!reviewerHandoff) throw refuse('no reviewer handoff: run `wf handoff reviewer --agent <id>`');
@@ -181,7 +185,7 @@ export function acceptReview(root, options) {
     }
     const kind = m.evidence?.kind;
     if (!EVIDENCE_KINDS.has(kind)) problems.push(`criterion ${c.id}: evidence kind must be one of ${[...EVIDENCE_KINDS].join(', ')}`);
-    else if (['not-applicable', 'dropped-with-reason'].includes(kind) && !(m.evidence.reason?.length >= 10)) problems.push(`criterion ${c.id}: ${kind} needs a reason`);
+    else if (['not-applicable', 'dropped-with-reason'].includes(kind) && !m.evidence.reason?.trim()) problems.push(`criterion ${c.id}: ${kind} needs a reason`);
     else if (!['not-applicable', 'dropped-with-reason'].includes(kind) && !m.evidence.ref) problems.push(`criterion ${c.id}: ${kind} evidence needs a ref`);
   }
   const shots = screenshots(state).map((s) => s.sha256);
@@ -241,7 +245,22 @@ function pushMain(root, state, repo) {
   const head = git(wt, ['rev-parse', 'HEAD']);
   const onRemote = run('git', ['merge-base', '--is-ancestor', head, `${repo.remote}/${repo.base}`], { cwd: wt, allowFail: true }).status === 0;
   if (!onRemote) throw refuse(`pushed ${repo.name} but ${head.slice(0, 10)} is not on ${repo.remote}/${repo.base}`);
-  return { repo: repo.name, commit: head, target: `${repo.remote}/${repo.base}`, mainAdvance };
+  return { repo: repo.name, commit: head, target: `${repo.remote}/${repo.base}`, mainAdvance, localBase: fastForwardLocalBase(root, state, repo) };
+}
+
+// Keeps the main checkout's base branch current after delivery, only when that is a safe fast-forward.
+function fastForwardLocalBase(root, state, repo) {
+  const dir = repoDir(root, repo);
+  const target = `${repo.remote}/${repo.base}`;
+  const local = git(dir, ['rev-parse', '--verify', '--quiet', `refs/heads/${repo.base}`], { allowFail: true });
+  if (!local) return 'no local branch';
+  if (run('git', ['merge-base', '--is-ancestor', local, target], { cwd: dir, allowFail: true }).status !== 0) return 'diverged; left as is';
+  const current = git(dir, ['branch', '--show-current'], { allowFail: true });
+  if (current === repo.base) {
+    if (git(dir, ['status', '--porcelain', '--untracked-files=no'])) return 'checked out with local changes; left as is';
+    return run('git', ['merge', '--ff-only', '--quiet', target], { cwd: dir, allowFail: true }).status === 0 ? 'fast-forwarded' : 'fast-forward failed';
+  }
+  return run('git', ['update-ref', `refs/heads/${repo.base}`, git(dir, ['rev-parse', target]), local], { cwd: dir, allowFail: true }).status === 0 ? 'fast-forwarded' : 'update failed';
 }
 
 export async function deliver(root, options) {
@@ -442,7 +461,11 @@ function phaseAction(cfg, state) {
   const g = state.lastGate;
   if (!g || g.status !== 'passed') return g ? `gate ${g.status}: fix and commit, then \`wf gate\`` : 'commit the change, then `wf gate`';
   if (!state.review) return 'hand to an independent reviewer: `wf handoff reviewer --agent <id>`';
-  if (!state.accepted) return 'record and accept the review: `wf review --closure <file>`, then `wf accept`';
+  if (!state.accepted) {
+    const open = state.review.closure.findings.filter((f) => !['fixed', 'verified-nonissue'].includes(f.status));
+    if (open.length) return `fix the open findings (${open.map((f) => f.id).join(', ')}) through the implementer, commit, \`wf gate\`, then hand to the reviewer again (\`wf handoff reviewer --agent <id>\`)`;
+    return 'accept the review: `wf accept`';
+  }
   if (state.batchOf) return `waiting for batch ${state.batchOf}`;
   return 'deliver: `wf deliver`';
 }

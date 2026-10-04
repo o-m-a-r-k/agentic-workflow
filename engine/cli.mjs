@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { abandon, adopt, entry, hold, openState, release } from './attempt.mjs';
 import { findRoot, loadConfig, requireRoot } from './config.mjs';
 import { runGate, stopGate } from './gate.mjs';
@@ -20,11 +21,12 @@ Onboarding
   wf doctor [--no-steps]            check config, tools, secrets, skills; run light steps on a clean base
   wf enable | wf disable            turn the workflow on/off for this project
   wf sync                           regenerate the AGENTS.md block, role agents, vendored skills
-  wf topology                       show components and what the current change touches
+  wf topology [--check]             show components and what the change touches; --check compares with the code
+  wf skills update NAME --from DIR  replace a vendored skill (review and commit it, then wf sync)
   wf secrets status|init|set KEY|guide [KEY]
 
 Work
-  wf entry [--item ID] [--lane quick|standard] [--intent implementation|analysis] [--repos a,b] [--defer-heavy]
+  wf entry [--item ID] [--lane quick|standard] [--intent implementation|analysis] [--repos a,b] [--defer-heavy] [--issue-file F]
   wf plan --file criteria.yaml      freeze acceptance criteria (and the plan)
   wf criteria amend --file f --reason "why"
   wf handoff planner|implementer|reviewer|tester --agent ID [--session SID] [--runtime claude|codex]
@@ -106,7 +108,7 @@ async function dispatch(cmd, sub, positional, options) {
     }
   }
   if (cmd === 'install') {
-    const bin = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', 'bin', 'wf');
+    const bin = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'wf');
     const dir = path.resolve(String(options.dir ?? path.join(process.env.HOME, '.local', 'bin')));
     fs.mkdirSync(dir, { recursive: true });
     const link = path.join(dir, 'wf');
@@ -121,7 +123,7 @@ async function dispatch(cmd, sub, positional, options) {
     const detected = detect(root);
     const file = writeDraft(root, detected, { force: options.force === true });
     register(root, false);
-    print(options, `drafted ${file} (disabled)\n  repos: ${detected.repos.map((r) => `${r.name}@${r.base} [${r.packages.map((p) => p.path).join(', ')}]`).join('; ')}\n  steps: ${detected.steps.map((s) => s.id).join(', ') || 'none detected'}\n  components: ${detected.components.map((c) => `${c.id} (${c.kind})`).join(', ')}\n  secrets: ${detected.secrets.map((s) => `${s.key} (${s.kind})`).join(', ') || 'none detected'}\nnext: review the draft with the user, then \`wf doctor\`, commit .workflow/, \`wf enable\``, { file, detected });
+    print(options, `drafted ${file} (disabled)${detected.compose.length ? `\n  docker compose: ${detected.compose.join(', ')} (steps using it should hold the \`docker\` lease)` : ''}\n  repos: ${detected.repos.map((r) => `${r.name}@${r.base} [${r.packages.map((p) => p.path).join(', ')}]`).join('; ')}\n  steps: ${detected.steps.map((s) => s.id).join(', ') || 'none detected'}\n  components: ${detected.components.map((c) => `${c.id} (${c.kind})`).join(', ')}\n  secrets: ${detected.secrets.map((s) => `${s.key} (${s.kind})`).join(', ') || 'none detected'}\nnext: review the draft with the user, commit .workflow/ on the base branch and push it, then \`wf doctor\` and \`wf enable\``, { file, detected });
     return 0;
   }
   if (cmd === 'report') {
@@ -148,11 +150,21 @@ async function dispatch(cmd, sub, positional, options) {
 
   const root = requireRoot(options.root);
   switch (cmd) {
+    case 'skills': {
+      if (sub !== 'update' || !positional[0] || !options.from) throw new WfError('usage: wf skills update NAME --from <folder with SKILL.md>');
+      const src = path.resolve(String(options.from));
+      if (!fs.existsSync(path.join(src, 'SKILL.md'))) throw new WfError(`${src} has no SKILL.md`);
+      const dest = path.join(root, '.workflow', 'skills', positional[0]);
+      fs.rmSync(dest, { recursive: true, force: true });
+      fs.cpSync(src, dest, { recursive: true });
+      print(options, `copied ${src} to ${path.relative(root, dest)}; review the diff, commit it, then \`wf sync\``);
+      return 0;
+    }
     case 'doctor': {
       const r = await doctor(root, { runSteps: options['no-steps'] !== true });
       const lines = [];
-      for (const section of ['config', 'tools', 'secrets', 'skills', 'steps', 'hooks']) {
-        for (const item of r[section]) lines.push(`${item.ok ? '✓' : '✗'} ${section}: ${item.check ?? item.tool ?? item.key ?? item.skill ?? item.step ?? `${item.event} ${item.matcher}`}${item.runtime ? ` (${item.runtime})` : ''}${item.problem ? ` — ${item.problem}` : ''}${item.kind ? ` [${item.kind}]` : ''}${item.fix ? `\n    fix: ${item.fix}` : ''}${item.log ? `\n    log: ${item.log}` : ''}${item.note ? `\n    ${item.note}` : ''}`);
+      for (const section of ['config', 'tools', 'secrets', 'skills', 'connectors', 'steps']) {
+        for (const item of r[section]) lines.push(`${item.ok ? '✓' : '✗'} ${section}: ${item.check ?? item.tool ?? item.key ?? item.skill ?? item.step ?? item.connector}${item.runtime ? ` (${item.runtime})` : ''}${item.problem ? ` — ${item.problem}` : ''}${item.kind ? ` [${item.kind}]` : ''}${item.fix ? `\n    fix: ${item.fix}` : ''}${item.log ? `\n    log: ${item.log}` : ''}${item.note ? `\n    ${item.note}` : ''}`);
       }
       print(options, `${lines.join('\n')}\n${r.ok ? 'doctor: all checks passed' : 'doctor: problems found'}`, r);
       return r.ok ? 0 : 1;
@@ -160,7 +172,12 @@ async function dispatch(cmd, sub, positional, options) {
     case 'enable':
     case 'disable': {
       setEnabled(root, cmd === 'enable');
-      print(options, `agentic-workflow ${cmd}d for ${root}`);
+      // Name only the changed files that live inside a repo; a multi-repo root is not one.
+      const cfgNow = loadConfig(root);
+      const repoDirs = cfgNow.repos.map((r) => fs.realpathSync(path.resolve(root, r.path)));
+      const changed = [path.join(root, '.workflow', 'project.yaml'), ...(cmd === 'enable' ? sync(root) : [])].map((f) => (fs.existsSync(f) ? fs.realpathSync(f) : f));
+      const committable = [...new Set(changed.filter((f) => repoDirs.some((d) => f === d || f.startsWith(d + path.sep))))];
+      print(options, `agentic-workflow ${cmd}d for ${root}\ncommit so every checkout sees it:\n${committable.map((f) => `  ${path.relative(root, f)}`).join('\n')}`);
       return 0;
     }
     case 'sync': {
@@ -170,6 +187,20 @@ async function dispatch(cmd, sub, positional, options) {
     }
     case 'topology': {
       const cfg = loadConfig(root);
+      if (options.check) {
+        const found = detect(root).components;
+        const key = (c) => `${c.repo}/${c.package ?? '.'}`;
+        const have = new Map(cfg.components.map((c) => [key(c), c]));
+        const seen = new Map(found.map((c) => [key(c), c]));
+        const drift = [
+          ...found.filter((c) => !have.has(key(c))).map((c) => `new in the code: ${key(c)} (${c.kind})`),
+          ...cfg.components.filter((c) => !seen.has(key(c))).map((c) => `in the adapter but not found: ${c.id} (${key(c)})`),
+          ...found.filter((c) => have.has(key(c)) && have.get(key(c)).kind !== c.kind).map((c) => `${key(c)} looks like ${c.kind}, adapter says ${have.get(key(c)).kind}`),
+          ...found.flatMap((c) => (c.provides ?? []).filter((p) => !(have.get(key(c))?.provides ?? []).some((q) => q.spec === p.spec)).map((p) => `${key(c)} has an unlisted contract ${p.spec}`)),
+        ];
+        print(options, drift.length ? drift.join('\n') : 'components match the code', drift);
+        return drift.length ? 1 : 0;
+      }
       let current = null;
       try {
         const s = openState(root, options);
@@ -289,7 +320,7 @@ async function dispatch(cmd, sub, positional, options) {
     }
     case 'abandon': {
       const s = abandon(root, options);
-      print(options, `${s.id} abandoned: ${s.abandoned.reason}`);
+      print(options, `${s.id} abandoned: ${s.abandoned.reason}\nits branch ${Object.values(s.repos)[0]?.branch ?? ''} is kept so no work is lost; delete it with \`git branch -D\` when you no longer need it`);
       return 0;
     }
     case 'batch': {

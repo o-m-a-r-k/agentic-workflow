@@ -21,7 +21,7 @@ const byId = (steps) => Object.fromEntries(steps.map((s) => [s.id, s]));
 
 test('unchanged inputs are reused; only steps whose inputs changed rerun', () => {
   const steps = [
-    { id: 'src-check', repo: 'app', run: 'cat src/a.txt > /dev/null', inputs: ['src/**'] },
+    { id: 'src-check', repo: 'app', run: 'cat src/a.txt > /dev/null', inputs: ['src/**'], ignores: ['docs/**'] },
     { id: 'docs-check', repo: 'app', run: 'cat docs/d.txt > /dev/null', inputs: ['docs/**'] },
     { id: 'always', repo: 'app', run: 'true' },
   ];

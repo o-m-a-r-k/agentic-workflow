@@ -6,10 +6,13 @@ export const ADAPTER_DIR = '.workflow';
 export const CONFIG_FILE = 'project.yaml';
 
 // The project root is the nearest ancestor holding `.workflow/project.yaml`.
+// Inside an attempt worktree (…/.wf-worktrees/<id>/<repo>/…) the worktree's own copy is skipped, so commands
+// run from where agents work resolve to the real project.
 export function findRoot(start = process.cwd()) {
   let dir = path.resolve(start);
   for (;;) {
-    if (fs.existsSync(path.join(dir, ADAPTER_DIR, CONFIG_FILE))) return dir;
+    const inWorktree = dir.split(path.sep).includes('.wf-worktrees');
+    if (!inWorktree && fs.existsSync(path.join(dir, ADAPTER_DIR, CONFIG_FILE))) return dir;
     const parent = path.dirname(dir);
     if (parent === dir) return null;
     dir = parent;
@@ -84,6 +87,7 @@ function normalize(raw, source) {
       path: r.path,
       base: r.base ?? 'main',
       remote: r.remote ?? 'origin',
+      sharedInfra: r.sharedInfra ?? [],
       packages,
       provision: { clone: [], fingerprint: [], install: null, copyIgnored: [], onWorktreeCreate: null, ...(r.provision ?? {}) },
     });
@@ -99,6 +103,7 @@ function normalize(raw, source) {
     if (!s.component && !repoNames.has(s.repo)) fail(`step \`${s.id}\`: unknown repo \`${s.repo}\``);
     if (!s.run && !s.plugin) fail(`step \`${s.id}\` needs \`run\` or \`plugin\``);
     if (s.tier && !['light', 'heavy'].includes(s.tier)) fail(`step \`${s.id}\`: tier must be light or heavy`);
+    if (s.ignores && !Array.isArray(s.ignores)) fail(`step \`${s.id}\`: ignores must be a list of globs`);
   }
   const compIds = new Set(cfg.components.map((c) => c.id));
   for (const c of cfg.components) {

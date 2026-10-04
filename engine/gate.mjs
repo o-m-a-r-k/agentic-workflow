@@ -3,13 +3,13 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { adapterFileAtCommit, adapterLocation, loadConfig, loadConfigAtCommit } from './config.mjs';
-import { changedFiles, treeHashes, uncommitted } from './attempt.mjs';
+import { changedFiles, treeHashes, uncommitted, untrackedSnapshot } from './attempt.mjs';
 import { chooseShards, chooseWorkers } from './host.mjs';
 import { readJUnitFiles } from './junit.mjs';
 import { append, attemptDir, loadState } from './ledger.mjs';
 import { missingFor, redactor, stepEnv } from './secrets.mjs';
 import { impact, inside, rel } from './topology.mjs';
-import { WfError, canonical, git, globToRegExp, hashFile, hashValue, isPidAlive, matchesAny, now, refuse, run, sha256, shellQuote, writeImmutable, writeJson } from './util.mjs';
+import { WfError, canonical, git, globToRegExp, hashFile, hashValue, isPidAlive, matchesAny, now, refuse, run, shellQuote, writeImmutable, writeJson } from './util.mjs';
 
 const gateDir = (root, id) => path.join(attemptDir(root, id), 'gate');
 const lockFile = (root, id) => path.join(gateDir(root, id), 'gate.lock');
@@ -74,6 +74,28 @@ export async function planGate(root, state, options = {}) {
     if (!eligible) throw refuse("focused proof refused: not every changed file is in the adapter's `focused` paths");
     focused = !full;
   }
+  const pkgOfStep = (st) => {
+    const r = cfg.repos.find((x) => x.name === st.repo);
+    return st.package ? r.packages.find((p) => p.name === st.package || p.path === st.package) : r.packages[0];
+  };
+  // A changed file that no step's `inputs` cover would let a stale result be reused: such a change forces
+  // every step of its package to run, and a file no step checks at all is listed as unchecked.
+  const uncovered = {};
+  const unchecked = [];
+  for (const [repoName, files] of Object.entries(changed)) {
+    const repoCfg = cfg.repos.find((r) => r.name === repoName);
+    for (const f of files) {
+      const pkg = [...repoCfg.packages].filter((p) => inside(f, p.path)).sort((a, b) => b.path.length - a.path.length)[0];
+      if (!pkg || matchesAny(rel(f, pkg.path), pkg.docsOnly)) continue;
+      const stepsHere = cfg.gate.steps.filter((st) => st.repo === repoName && pkgOfStep(st) === pkg);
+      if (!stepsHere.length) {
+        unchecked.push(`${repoName}:${f}`);
+        continue;
+      }
+      if (stepsHere.some((st) => !st.inputs?.length || matchesAny(rel(f, pkg.path), st.inputs))) continue;
+      (uncovered[`${repoName}|${pkg.path}`] ??= []).push(f);
+    }
+  }
   const steps = [];
   for (const step of cfg.gate.steps) {
     const entry = { id: step.id, repo: step.repo, package: step.package ?? null, tier: step.tier ?? 'light' };
@@ -84,10 +106,15 @@ export async function planGate(root, state, options = {}) {
     const { repo, pkg, dir } = stepPackage(cfg, state, step);
     const pkgChanged = (changed[repo.name] ?? []).filter((f) => inside(f, pkg.path));
     // Shared infrastructure (lockfiles, manifests, build config) can change what any step means: no skipping.
-    const infraChanged = pkgChanged.some((f) => matchesAny(rel(f, pkg.path), pkg.sharedInfra));
+    const infraChanged = pkgChanged.some((f) => matchesAny(rel(f, pkg.path), pkg.sharedInfra)) || (changed[repo.name] ?? []).some((f) => matchesAny(f, repo.sharedInfra ?? []));
+    const notCovered = uncovered[`${repo.name}|${pkg.path}`] ?? [];
     const component = cfg.components.find((c) => c.repo === repo.name && (c.package ?? '.') === pkg.path) ?? (step.component ? cfg.components.find((c) => c.id === step.component) : null);
     const isDependent = Boolean(component && imp.dependents.includes(component.id));
-    const mustRun = full || infraChanged || isDependent;
+    const mustRun = full || infraChanged || isDependent || notCovered.length > 0;
+    if (!mustRun && !(changed[repo.name] ?? []).length) {
+      steps.push({ ...entry, decision: 'skip', reason: 'no changes in this repo' });
+      continue;
+    }
     if (!mustRun) {
       if (step.when?.paths && !pkgChanged.some((f) => matchesAny(rel(f, pkg.path), step.when.paths))) {
         steps.push({ ...entry, decision: 'skip', reason: 'no change matches `when.paths`' });
@@ -111,7 +138,17 @@ export async function planGate(root, state, options = {}) {
     const inputs = stepInputs(state, step, repo, pkg);
     const runner = runnerIdentity(root, live, state, step);
     const key = inputs ? hashValue({ inputs: inputs.hash, runner }) : null;
-    const prior = findReuse(state, step.id, key);
+    let prior = findReuse(state, step.id, key);
+    let outside = [];
+    if (prior) {
+      // Since the commit the passing run saw, did anything change in this package that the step's inputs don't
+      // cover (and the step doesn't explicitly ignore)? Then the pass says nothing about the current code.
+      const ranOn = state.gates.find((g) => g.runId === prior.runId)?.tree?.[repo.name];
+      const head = ranOn && /^[0-9a-f]{40}$/.test(ranOn) ? ranOn : null;
+      const since = head ? git(state.repos[repo.name].worktree, ['diff', '--name-only', head, 'HEAD']).split('\n').filter(Boolean) : pkgChanged;
+      outside = since.filter((f) => inside(f, pkg.path) && !matchesAny(rel(f, pkg.path), pkg.docsOnly) && !matchesAny(rel(f, pkg.path), step.inputs ?? ['**']) && !matchesAny(rel(f, pkg.path), step.ignores ?? []));
+      if (outside.length || !head) prior = null;
+    }
     steps.push({
       ...entry,
       dir,
@@ -120,12 +157,12 @@ export async function planGate(root, state, options = {}) {
       fileHashes: step.select ? inputs?.fileHashes ?? null : undefined,
       runnerIdentity: runner,
       decision: prior ? 'reuse' : 'run',
-      reason: prior ? `same inputs and runner as ${prior.runId}` : key ? (isDependent ? 'dependent of a changed contract' : infraChanged ? 'shared infrastructure changed' : 'inputs changed or never passed') : 'no `inputs` declared: always runs',
+      reason: prior ? `same inputs and runner as ${prior.runId}` : outside.length ? `changed file(s) outside this step's inputs since its last pass: ${outside.slice(0, 3).join(', ')}${outside.length > 3 ? '…' : ''}` : notCovered.length ? `changed file(s) outside every step's inputs: ${notCovered.slice(0, 3).join(', ')}${notCovered.length > 3 ? '…' : ''}` : key ? (isDependent ? 'dependent of a changed contract' : infraChanged ? 'shared infrastructure changed' : 'inputs changed or never passed') : 'no `inputs` declared: always runs',
       reusedFrom: prior?.runId ?? null,
       missingSecrets: missingFor(root, cfg, step.id),
     });
   }
-  return { cfg, live, changed, impact: imp, full, adapterTouched, focused, steps, tree: treeHashes(state) };
+  return { cfg, live, changed, impact: imp, full, adapterTouched, focused, steps, unchecked, tree: treeHashes(state) };
 }
 
 function substitute(text, vars, quote = false) {
@@ -226,8 +263,17 @@ function collectArtifacts(step, dir, destDir, since) {
 }
 
 // Suite-level reuse is allowed only when nothing but the suite files themselves changed since the prior run.
+function priorFileHashes(prior) {
+  if (prior?.fileHashes) return prior.fileHashes;
+  const ref = prior?.fileHashesRef;
+  if (!ref?.path || !fs.existsSync(ref.path) || hashFile(ref.path) !== ref.sha256) return null;
+  return JSON.parse(fs.readFileSync(ref.path, 'utf8'));
+}
+
 function suitesToRerun(prior, planned) {
-  if (!prior?.suites?.length || !prior.fileHashes || !planned.fileHashes) return null;
+  const priorHashes = priorFileHashes(prior);
+  if (!prior?.suites?.length || !priorHashes || !planned.fileHashes) return null;
+  prior = { ...prior, fileHashes: priorHashes };
   const files = Object.keys(planned.fileHashes);
   const fileOf = (suite) => (suite.file ? files.find((f) => f === suite.file || f.endsWith(`/${suite.file}`) || suite.file.endsWith(`/${f}`)) : null);
   const suiteFiles = new Set(prior.suites.map(fileOf).filter(Boolean));
@@ -258,6 +304,10 @@ async function executeStep(root, cfg, state, planned, ctx) {
   if (step.plugin) {
     const mod = (await import(pathToFileURL(adapterFileAtCommit(root, ctx.live, state.adapterBase, step.plugin)).href)).default;
     const pctx = { root, attempt: state.id, step, dir: planned.dir, worktrees: Object.fromEntries(Object.entries(state.repos).map(([k, v]) => [k, v.worktree])), changed: ctx.changedSinceBase, evidenceDir, workers: workers.n, env, log: (s) => fs.appendFileSync(logFile, ctx.redact(`${s}\n`)) };
+    const decision = mod.plan ? await mod.plan(pctx) : null;
+    if (decision && decision.run === false) {
+      return { id: step.id, repo: step.repo, tier: planned.tier, key: planned.key, inputsHash: planned.inputsHash, runnerIdentity: planned.runnerIdentity, status: 'skipped', reason: decision.reason ?? 'step plugin decided not to run', suites: [], artifacts: [], runId: ctx.runId };
+    }
     ctx.running.set(step.id, { plugin: mod, ctx: pctx });
     ctx.onPlugin(step.id, true);
     try {
@@ -289,13 +339,20 @@ async function executeStep(root, cfg, state, planned, ctx) {
     result = { status: interrupted ? 'interrupted' : failed ? 'failed' : 'passed', suites, exitCodes: codes.map((c) => c.code), artifacts: [] };
   }
   result.artifacts.push(...collectArtifacts(step, planned.dir, path.join(evidenceDir, 'artifacts'), started));
+  let fileHashesRef = null;
+  if (planned.fileHashes) {
+    const f = path.join(evidenceDir, 'inputs.json');
+    fs.writeFileSync(f, JSON.stringify(planned.fileHashes));
+    fileHashesRef = { path: f, sha256: hashFile(f) };
+  }
   return {
     id: step.id,
     repo: step.repo,
     tier: planned.tier,
     key: planned.key,
     inputsHash: planned.inputsHash,
-    fileHashes: planned.fileHashes,
+    reason: planned.reason,
+    fileHashesRef,
     runnerIdentity: planned.runnerIdentity,
     ...result,
     rerunSuites: rerun,
@@ -307,6 +364,30 @@ async function executeStep(root, cfg, state, planned, ctx) {
     runId: ctx.runId,
     startedAt: new Date(started).toISOString(),
   };
+}
+
+const leasesDir = () => path.join(process.env.WF_CONFIG_HOME ?? path.join(process.env.HOME ?? '/tmp', '.config', 'agentic-workflow'), 'leases');
+// One file per slot (`docker.1`, `docker.2`…), created exclusively; a slot whose holder process is gone is free.
+function takeMachineLease(name, capacity) {
+  const dir = leasesDir();
+  fs.mkdirSync(dir, { recursive: true });
+  for (let i = 1; i <= capacity; i++) {
+    const file = path.join(dir, `${name.replace(/[^\w.-]/g, '_')}.${i}`);
+    try {
+      const fd = fs.openSync(file, 'wx');
+      fs.writeSync(fd, String(process.pid));
+      fs.closeSync(fd);
+      return file;
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      const holder = Number(fs.readFileSync(file, 'utf8') || 0);
+      if (holder && holder !== process.pid && !isPidAlive(holder)) {
+        fs.rmSync(file, { force: true });
+        i--;
+      }
+    }
+  }
+  return null;
 }
 
 // A pid in the lock belongs to us only if it is still a `wf` process (pids are reused after a crash).
@@ -438,19 +519,26 @@ async function execute(root, state, plan) {
   const queue = plan.steps.filter((s) => s.decision === 'run');
   for (const s of plan.steps.filter((x) => x.decision === 'reuse')) {
     const prior = findReuse(state, s.id, s.key);
-    results.push({ ...prior, status: 'reused', reusedFrom: prior.runId, runId });
+    results.push({ ...prior, status: 'reused', reusedFrom: prior.runId, reason: s.reason, runId });
   }
   for (const s of plan.steps.filter((x) => ['skip', 'defer'].includes(x.decision))) results.push({ id: s.id, repo: s.repo, tier: s.tier, status: s.decision === 'defer' ? 'deferred' : 'skipped', reason: s.reason, runId });
   saveProgress();
 
   const leases = plan.cfg.gate.leases ?? {};
   const held = {};
+  const machine = new Map(); // step id -> machine-wide lease slot file
   const max = Math.max(1, plan.cfg.gate.maxParallelSteps ?? 1);
   const active = new Set();
   const leaseOf = (p) => plan.cfg.gate.steps.find((x) => x.id === p.id).lease;
+  // Leases are machine-wide: two gates on one machine (other attempts or projects) never share a docker slot.
   const canStart = (p) => {
     const lease = leaseOf(p);
-    return !lease || (held[lease] ?? 0) < (leases[lease] ?? 1);
+    if (!lease) return true;
+    if ((held[lease] ?? 0) >= (leases[lease] ?? 1)) return false;
+    const slot = takeMachineLease(lease, leases[lease] ?? 1);
+    if (!slot) return false;
+    machine.set(p.id, slot);
+    return true;
   };
   await new Promise((resolve) => {
     const pump = () => {
@@ -464,6 +552,7 @@ async function execute(root, state, plan) {
           .catch((error) => ({ id: p.id, repo: p.repo, tier: p.tier, key: p.key, status: 'failed', error: error.message, runId }))
           .then((r) => {
             if (lease) held[lease] -= 1;
+            if (machine.has(p.id)) fs.rmSync(machine.get(p.id), { force: true });
             results.push(stopping && r.status !== 'passed' ? { ...r, status: 'interrupted' } : r);
             saveProgress();
             active.delete(job);
@@ -471,17 +560,23 @@ async function execute(root, state, plan) {
           });
         active.add(job);
       }
-      if (active.size === 0) resolve();
+      if (active.size === 0 && (queue.length === 0 || stopping)) return resolve();
+      // A step waiting for a lease another gate holds: look again shortly.
+      if (queue.length && !stopping) setTimeout(pump, 500);
     };
     pump();
   });
+  for (const slot of machine.values()) fs.rmSync(slot, { force: true });
   process.off('SIGTERM', onSignal);
   process.off('SIGINT', onSignal);
   for (const p of queue) results.push({ id: p.id, repo: p.repo, tier: p.tier, status: 'not-started', runId });
 
   const bad = results.filter((r) => ['failed', 'interrupted', 'not-started'].includes(r.status));
   const status = stopping ? 'stopped' : bad.length ? 'failed' : 'passed';
-  const record = { runId, status, full: plan.full, focused: plan.focused, adapterBase: state.adapterBase, tree: plan.tree, impact: plan.impact, steps: results, finishedAt: now() };
+  // Untracked files the steps produced (reports, screenshots) are recorded so they do not block the next gate.
+  const producedUntracked = {};
+  for (const [name, r] of Object.entries(state.repos)) producedUntracked[name] = untrackedSnapshot(r.worktree);
+  const record = { runId, status, producedUntracked, full: plan.full, focused: plan.focused, adapterBase: state.adapterBase, tree: plan.tree, impact: plan.impact, unchecked: plan.unchecked, steps: results, finishedAt: now() };
   writeImmutable(path.join(runDir, 'result.json'), `${JSON.stringify(record, null, 2)}\n`);
   append(root, state.id, 'gate.finished', { ...record, evidence: path.join(runDir, 'result.json') }, null);
   return record;
@@ -509,4 +604,3 @@ export function screenshots(state) {
   return (state.lastGate?.steps ?? []).flatMap((s) => s.artifacts ?? []).filter((a) => a.kind === 'screenshot');
 }
 
-export { sha256 };

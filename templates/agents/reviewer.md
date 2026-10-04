@@ -8,7 +8,7 @@ You are the independent reviewer for one agentic-workflow attempt. You did not p
 - Inspect the gate evidence yourself: step logs (including warnings in passing output) and every screenshot listed in the bundle. Record each screenshot's sha256 in `screenshotsInspected`.
 - Verify, do not fix. Every finding names the file and line, what is wrong, and why it matters.
 - Map every criterion to evidence: `test` (file and test name), `screenshot` (sha256), `output` (log path and line), or `not-applicable` / `dropped-with-reason` with a reason.
-- Write the closure JSON to the path in `reviewClosureFile`:
+- Write the closure JSON to the path in `reviewClosureFile` (outside `.wf-evidence/`; with Bash, use a heredoc: `cat > <path> <<'EOF' … EOF`):
   ```json
   { "reviewer": "<your agent id>",
     "findings": [{ "id": "F1", "severity": "major", "summary": "...", "status": "open", "evidence": "path:line" }],

@@ -6,7 +6,7 @@ import { ADAPTER_DIR, CONFIG_FILE, adapterLocation, findRoot, loadConfig, loadCo
 import { provision } from './attempt.mjs';
 import { chooseWorkers } from './host.mjs';
 import { missingFor, redactor, status as secretsStatus, stepEnv } from './secrets.mjs';
-import { WfError, YAML, git, refuse, run, shellQuote } from './util.mjs';
+import { ENGINE_VERSION, WfError, YAML, git, refuse, run, shellQuote } from './util.mjs';
 
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const exists = (...p) => fs.existsSync(path.join(...p));
@@ -64,9 +64,14 @@ function findPackages(repoPath) {
     }
   };
   walk(repoPath, 0);
-  // A root manifest with nested ones (monorepo) keeps the nested packages; a lone root manifest is the package.
+  // Monorepo: the nested packages plus the root (root lockfile, root config and root scripts belong to it).
   const nested = found.filter((p) => p !== '.');
-  return nested.length ? nested : found.length ? ['.'] : ['.'];
+  return nested.length && found.includes('.') ? ['.', ...nested] : nested.length ? nested : ['.'];
+}
+
+function isWorkspaceRoot(dir) {
+  const pkg = readJsonSafe(path.join(dir, 'package.json'));
+  return Boolean(pkg?.workspaces) || ['pnpm-workspace.yaml', 'lerna.json', 'nx.json', 'turbo.json'].some((f) => exists(dir, f));
 }
 
 function stepsFor(repoName, repoPath, pkgPath, sources) {
@@ -82,7 +87,9 @@ function stepsFor(repoName, repoPath, pkgPath, sources) {
     const pm = packageManager(dir) ?? 'npm';
     const runner = pm === 'npm' ? 'npm run' : pm;
     const has = (n) => pkg.scripts[n] !== undefined;
-    const inputs = ['src/**', 'test/**', 'tests/**', 'app/**', 'lib/**', 'e2e/**'].filter((g) => exists(dir, g.split('/')[0]));
+    // Everything in the package counts as input; docs-only changes are skipped through `docsOnly`, and any change a
+    // narrower list would miss still forces the step to run.
+    const inputs = ['**'];
     if (has('lint')) add({ id: id('lint'), run: `${runner} lint`, inputs, tier: 'light' }, `${pkgPath}/package.json scripts.lint`);
     if (has('typecheck')) add({ id: id('typecheck'), run: `${runner} typecheck`, inputs, tier: 'light' }, `${pkgPath}/package.json scripts.typecheck`);
     if (has('test')) {
@@ -173,6 +180,8 @@ export function detect(root) {
     const rp = path.join(root, r.path);
     r.base = defaultBranch(rp);
     const pkgs = findPackages(rp);
+    const workspace = isWorkspaceRoot(rp);
+    r.sharedInfra = workspace ? ['package.json', 'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'tsconfig*.json', '.eslintrc*', 'eslint.config.*'].filter((f) => f.includes('*') || exists(rp, f)) : [];
     r.packages = pkgs.map((p) => {
       const dir = path.join(rp, p);
       const lock = ['yarn.lock', 'pnpm-lock.yaml', 'package-lock.json', 'composer.lock', 'Gemfile.lock', 'poetry.lock', 'go.sum'].filter((l) => exists(dir, l)).map((l) => (p === '.' ? l : `${p}/${l}`));
@@ -188,8 +197,13 @@ export function detect(root) {
       if (pm) {
         clone.push(`${pre}node_modules`);
         const lock = { yarn: 'yarn.lock', pnpm: 'pnpm-lock.yaml', npm: 'package-lock.json', bun: 'bun.lock' }[pm];
-        if (exists(dir, lock)) fingerprint.push(`${pre}${lock}`);
-        installs.push(`(cd ${shellQuote(p)} && ${{ yarn: 'yarn install --immutable', pnpm: 'pnpm install --frozen-lockfile', npm: 'npm ci', bun: 'bun install --frozen-lockfile' }[pm]})`);
+        const locked = exists(dir, lock);
+        if (locked) fingerprint.push(`${pre}${lock}`);
+        // In a workspace monorepo the root install covers every package.
+        if (!(workspace && p !== '.')) {
+          const cmd = locked ? { yarn: 'yarn install --immutable', pnpm: 'pnpm install --frozen-lockfile', npm: 'npm ci', bun: 'bun install --frozen-lockfile' }[pm] : { yarn: 'yarn install', pnpm: 'pnpm install', npm: 'npm install', bun: 'bun install' }[pm];
+          installs.push(p === '.' ? cmd : `(cd ${shellQuote(p)} && ${cmd})`);
+        }
       }
       if (exists(dir, 'composer.json')) {
         clone.push(`${pre}vendor`);
@@ -202,7 +216,7 @@ export function detect(root) {
         installs.push(`(cd ${shellQuote(p)} && pod install)`);
       }
       steps.push(...stepsFor(r.name, rp, p, sources));
-      components.push(componentsFor(r.name, rp, p));
+      if (!(workspace && p === '.')) components.push(componentsFor(r.name, rp, p));
       for (const f of ['docker-compose.yml', 'docker-compose.yaml', 'compose.yaml']) if (exists(dir, f)) compose.push(`${r.name}/${pre}${f}`);
     }
     const ignored = ['.env.local', '.env'].filter((f) => exists(rp, f));
@@ -210,6 +224,17 @@ export function detect(root) {
     secrets.push(...secretsFor(r.name, rp));
   }
   if (new Set(components.map((c) => c.id)).size !== components.length) components.forEach((c) => (c.id = `${c.repo}-${c.id}`));
+  // Workspace packages that depend on each other: a change in the provider re-runs the consumer's steps.
+  for (const c of components) {
+    const repo = repos.find((r) => r.name === c.repo);
+    const pkg = readJsonSafe(path.join(root, repo.path, c.package ?? '.', 'package.json'));
+    const deps = Object.keys({ ...(pkg?.dependencies ?? {}), ...(pkg?.devDependencies ?? {}), ...(pkg?.peerDependencies ?? {}) });
+    for (const other of components) {
+      if (other === c || other.repo !== c.repo) continue;
+      const name = readJsonSafe(path.join(root, repo.path, other.package ?? '.', 'package.json'))?.name;
+      if (name && deps.includes(name)) (c.dependsOn ??= []).push({ component: other.id, via: 'package', contract: path.posix.join(repo.path, other.package ?? '.', '**') });
+    }
+  }
   return { root, repos, steps, components, secrets, compose, sources, agentsMd: repos.map((r) => ({ repo: r.name, exists: exists(root, r.path, 'AGENTS.md') })) };
 }
 
@@ -218,13 +243,21 @@ export function writeDraft(root, detected, { force = false } = {}) {
   const file = path.join(dir, CONFIG_FILE);
   if (fs.existsSync(file) && !force) throw refuse(`${file} already exists`, 'pass --force to overwrite, or edit it directly');
   const multi = detected.repos.length > 1 || detected.repos[0].path !== '.';
+  // Multi-repo workspace: the adapter lives in the first repo (so the gate can read it at a base commit) and the
+  // workspace root links to it.
+  const adapterHome = multi ? path.join(root, detected.repos[0].path, ADAPTER_DIR) : dir;
+  if (multi) {
+    if (fs.existsSync(path.join(adapterHome, CONFIG_FILE)) && !force) throw refuse(`${path.join(adapterHome, CONFIG_FILE)} already exists`, 'pass --force to overwrite, or edit it directly');
+    fs.mkdirSync(adapterHome, { recursive: true });
+    if (!fs.existsSync(dir)) fs.symlinkSync(path.relative(root, adapterHome), dir);
+  }
   const draft = {
     version: 1,
     enabled: false,
     name: path.basename(root),
     engine: '0.x',
     ...(multi ? { adapterRepo: detected.repos[0].name } : {}),
-    repos: detected.repos.map((r) => ({ name: r.name, path: r.path, base: r.base, packages: r.packages, provision: r.provision })),
+    repos: detected.repos.map((r) => ({ name: r.name, path: r.path, base: r.base, ...(r.sharedInfra?.length ? { sharedInfra: r.sharedInfra } : {}), packages: r.packages, provision: r.provision })),
     components: detected.components,
     lanes: ['quick', 'standard'],
     tracker: { kind: 'none' },
@@ -234,13 +267,14 @@ export function writeDraft(root, detected, { force = false } = {}) {
   };
   fs.mkdirSync(dir, { recursive: true });
   const header = `# agentic-workflow adapter, drafted by \`wf init\` on ${new Date().toISOString().slice(0, 10)}.\n# Review every value, then run \`wf doctor\` and \`wf enable\`.\n`;
-  fs.writeFileSync(file, header + YAML.stringify(draft, { lineWidth: 0 }));
+  fs.writeFileSync(file, header + YAML.stringify(draft, { lineWidth: 0, aliasDuplicateObjects: false }));
   if (detected.secrets.length && !fs.existsSync(path.join(dir, 'secrets.yaml'))) {
     fs.writeFileSync(path.join(dir, 'secrets.yaml'), `# Names only. Values are entered with \`wf secrets guide\` and never committed.\n${YAML.stringify({ keys: detected.secrets.map(({ detectedIn, ...k }) => ({ ...k, usedBy: [], obtain: { url: '', steps: [] } })) })}`);
   }
   if (!fs.existsSync(path.join(dir, 'AGENTS.invariants.md'))) {
     fs.writeFileSync(path.join(dir, 'AGENTS.invariants.md'), '# Project invariants\n\nRules every agent must keep in this project (security, data, contracts, product stage).\n\n- Product stage: pre-launch | live (choose one and say what it means for compatibility)\n');
   }
+  if (multi) return file; // evidence and worktrees live at the workspace root, outside every repo
   const ignoreTarget = path.join(root, '.gitignore');
   const ignore = fs.existsSync(ignoreTarget) ? fs.readFileSync(ignoreTarget, 'utf8') : '';
   const add = ['.wf-evidence/', '.wf-worktrees/'].filter((l) => !ignore.split('\n').includes(l));
@@ -307,7 +341,8 @@ export function sync(root) {
   const roles = ['planner', 'implementer', 'reviewer', ...(cfg.roles?.tester ? ['tester'] : [])];
   for (const [runtime, dirs] of Object.entries(RUNTIMES)) {
     for (const role of roles) {
-      const tpl = fs.readFileSync(path.join(PLUGIN_ROOT, 'agents', `${role}.md`), 'utf8');
+      // Role templates live under templates/ so the plugin does not register them as agents in every project.
+      const tpl = fs.readFileSync(path.join(PLUGIN_ROOT, 'templates', 'agents', `${role}.md`), 'utf8');
       const rc = cfg.roles?.[role] ?? {};
       const model = rc[runtime]?.model ?? (runtime === 'claude' ? rc.model : null);
       const effort = rc[runtime]?.effort ?? rc.effort;
@@ -353,7 +388,7 @@ export function setEnabled(root, enabled) {
 
 // ---------- doctor ----------
 export async function doctor(root, { runSteps = true } = {}) {
-  const report = { config: [], tools: [], secrets: [], skills: [], hooks: [], steps: [], ok: true };
+  const report = { config: [], tools: [], secrets: [], skills: [], connectors: [], steps: [], ok: true };
   const bad = (section, item) => {
     report[section].push({ ...item, ok: false });
     report.ok = false;
@@ -370,22 +405,33 @@ export async function doctor(root, { runSteps = true } = {}) {
   try {
     const { repo } = adapterLocation(root, cfg);
     const dir = repoDir(root, repo);
-    adapterBase = git(dir, ['rev-parse', repo.base], { allowFail: true }) || null;
+    const hasRemote = git(dir, ['remote']).split('\n').includes(repo.remote);
+    if (hasRemote) run('git', ['fetch', '--quiet', repo.remote, repo.base], { cwd: dir, allowFail: true });
+    const ref = hasRemote && git(dir, ['rev-parse', '--verify', '--quiet', `${repo.remote}/${repo.base}`], { allowFail: true }) ? `${repo.remote}/${repo.base}` : repo.base;
+    adapterBase = git(dir, ['rev-parse', ref], { allowFail: true }) || null;
     if (adapterBase) {
       loadConfigAtCommit(root, cfg, adapterBase);
-      report.config.push({ ok: true, check: `adapter committed on ${repo.name}/${repo.base}` });
+      report.config.push({ ok: true, check: `adapter committed on ${repo.name} ${ref}` });
     } else bad('config', { check: 'adapter at base', problem: `branch ${repo.base} not found in ${repo.name}` });
   } catch (error) {
-    bad('config', { check: 'adapter at base', problem: error.message, fix: 'commit .workflow/ to the base branch; the gate trusts only the committed adapter' });
+    bad('config', { check: 'adapter at base', problem: error.message.split('\n')[0], fix: 'commit .workflow/ on the base branch of the adapter repo and push it; the gate trusts only the adapter on the base it starts from' });
+    adapterBase = null;
   }
+  const major = ENGINE_VERSION.split('.')[0];
+  if (cfg.engine && /^\d+\.x$/.test(cfg.engine) && cfg.engine.split('.')[0] !== major) bad('config', { check: 'engine version', problem: `project pins engine ${cfg.engine}, this is ${ENGINE_VERSION}`, fix: `install agentic-workflow ${cfg.engine} or update the pin` });
   for (const t of cfg.requires.tools ?? []) {
     const r = run('sh', ['-c', t.check ?? `command -v ${t.name}`], { allowFail: true });
-    if (r.status === 0) report.tools.push({ ok: true, tool: t.name });
+    const have = (r.stdout + r.stderr).match(/(\d+)(?:\.(\d+))?/);
+    const want = String(t.version ?? '').match(/^>=\s*(\d+)(?:\.(\d+))?/);
+    const tooOld = want && have && (Number(have[1]) < Number(want[1]) || (Number(have[1]) === Number(want[1]) && Number(have[2] ?? 0) < Number(want[2] ?? 0)));
+    if (r.status === 0 && tooOld) bad('tools', { tool: t.name, problem: `version ${have[0]} is older than ${t.version}`, fix: t.install ?? `upgrade ${t.name}` });
+    else if (r.status === 0) report.tools.push({ ok: true, tool: t.name });
     else bad('tools', { tool: t.name, problem: `\`${t.check}\` failed`, fix: t.install ?? `install ${t.name}` });
   }
   for (const s of secretsStatus(root, cfg)) {
     if (s.state === 'filled') report.secrets.push({ ok: true, key: s.key });
-    else bad('secrets', { key: s.key, problem: s.state, fix: `run \`wf secrets guide ${s.key}\` in your terminal` });
+    else if (!s.usedBy.length) report.secrets.push({ ok: true, key: s.key, note: `${s.state}; no gate step uses it (set \`usedBy\` in secrets.yaml if one does)` });
+    else bad('secrets', { key: s.key, problem: s.state, fix: s.kind === 'generated' || s.kind === 'test' ? 'run `wf secrets init`' : `run \`wf secrets guide ${s.key}\` in your terminal` });
   }
   for (const s of cfg.requires.skills ?? []) {
     for (const [runtime, dirs] of Object.entries(RUNTIMES)) {
@@ -393,10 +439,7 @@ export async function doctor(root, { runSteps = true } = {}) {
       else bad('skills', { skill: s.name, runtime, problem: 'not installed for this runtime', fix: s.vendor ? 'run `wf sync`' : `install ${s.name} for ${runtime}` });
     }
   }
-  const settings = readJsonSafe(path.join(os.homedir(), '.claude', 'settings.json'));
-  for (const [event, list] of Object.entries(settings?.hooks ?? {})) {
-    for (const h of list) report.hooks.push({ ok: true, event, matcher: h.matcher ?? '*', note: 'user-level hook also runs on agentic-workflow sessions; check it does not duplicate review or block wf commands' });
-  }
+  for (const c of cfg.requires.connectors ?? []) report.connectors.push({ ok: true, connector: c.name, note: `not checkable from the CLI: the agent confirms ${c.name} with one read-only call` });
   if (runSteps && adapterBase) {
     const id = `_doctor-${Date.now()}`;
     const trusted = loadConfigAtCommit(root, cfg, adapterBase);
@@ -405,7 +448,8 @@ export async function doctor(root, { runSteps = true } = {}) {
       for (const repo of trusted.repos) {
         const dir = repoDir(root, repo);
         const wt = path.join(root, '.wf-worktrees', id, repo.name);
-        run('git', ['worktree', 'add', '--quiet', '--detach', wt, repo.base], { cwd: dir });
+        const rref = git(dir, ['rev-parse', '--verify', '--quiet', `${repo.remote}/${repo.base}`], { allowFail: true }) ? `${repo.remote}/${repo.base}` : repo.base;
+        run('git', ['worktree', 'add', '--quiet', '--detach', wt, rref], { cwd: dir });
         made.push({ dir, wt });
         provision(root, trusted, repo, wt);
       }

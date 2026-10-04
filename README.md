@@ -2,7 +2,7 @@
 
 A delivery workflow for AI coding agents, packaged as one plugin for Claude Code and Codex.
 
-> **Status: v0.1, early.** The engine, CLI, onboarding and all three lanes work and are covered by 44 scenario tests on real git repositories, and reviewed by an independent agent. It has not yet been used on a production project; expect rough edges. Design: [docs/DESIGN.md](docs/DESIGN.md). Feedback through issues is welcome.
+> **Status: v0.1, early.** The engine, CLI, onboarding and all three lanes work and are covered by 56 scenario tests on real git repositories, and reviewed by independent agents. It has not yet been used on a production project; expect rough edges. Design: [docs/DESIGN.md](docs/DESIGN.md). Feedback through issues is welcome.
 
 Every change runs through the same lifecycle: a ticket is admitted, worked on in isolated worktrees, planned, implemented, proven by a gate, reviewed by an agent that did not write it, delivered, and handed back to the tracker with a readback. Each step checks evidence the engine wrote, never what an agent says it did.
 
@@ -17,21 +17,21 @@ claude plugin marketplace add o-m-a-r-k/agentic-workflow
 claude plugin install agentic-workflow@agentic-workflow
 ```
 
-Then put the `wf` CLI on your PATH (once):
+Then put the `wf` CLI on your PATH (once). The plugin is cached under a versioned folder:
 
 ```bash
-node ~/.claude/plugins/marketplaces/agentic-workflow/bin/wf install
+node "$(ls -d ~/.claude/plugins/cache/agentic-workflow/agentic-workflow/*/ | tail -1)bin/wf" install
 ```
 
-Without a plugin system, clone the repo and run `node bin/wf install`.
+Without a plugin system, clone the repo and run `node bin/wf install`. Supported: macOS and Linux (it needs `sh`, `git` and `ps`); Windows is not supported.
 
 ## Quick start
 
 ```bash
 cd my-project            # a git repo, or a folder holding several
-wf init                  # drafts .workflow/ from what it finds (disabled)
-wf doctor                # proves the commands work on a clean checkout
-git add .workflow && git commit -m "Add agentic-workflow adapter"
+wf init                  # drafts .workflow/ from what it finds (disabled); review it
+git add .workflow && git commit -m "Add agentic-workflow adapter" && git push
+wf doctor                # proves the commands work on a clean checkout of the base
 wf enable
 ```
 

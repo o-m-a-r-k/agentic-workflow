@@ -52,11 +52,14 @@ export function nextAttemptId(root, item) {
   return `${item}.${n}`;
 }
 
+// The remote base when there is one (fetched; offline falls back to the last fetched copy), else the local branch.
 function baseRef(dir, repo) {
   const remotes = git(dir, ['remote']).split('\n').filter(Boolean);
   if (remotes.includes(repo.remote)) {
-    run('git', ['fetch', '--quiet', repo.remote, repo.base], { cwd: dir });
-    return `${repo.remote}/${repo.base}`;
+    const fetched = run('git', ['fetch', '--quiet', repo.remote, repo.base], { cwd: dir, allowFail: true });
+    const ref = `${repo.remote}/${repo.base}`;
+    if (fetched.status !== 0 && !git(dir, ['rev-parse', '--verify', '--quiet', ref], { allowFail: true })) throw new WfError(`cannot fetch ${ref} in ${repo.name}: ${fetched.stderr.trim()}`);
+    return ref;
   }
   return repo.base;
 }
@@ -125,23 +128,55 @@ export function entry(root, options) {
   }
 
   const wanted = options.repos ? String(options.repos).split(',') : cfg.repos.map((r) => r.name);
-  const repos = {};
+  for (const name of wanted) if (!cfg.repos.find((r) => r.name === name)) throw new WfError(`unknown repo \`${name}\``);
   const id = assertSafeId(options.id ?? nextAttemptId(root, item), 'attempt id');
-  for (const name of wanted) {
-    const repo = cfg.repos.find((r) => r.name === name);
-    if (!repo) throw new WfError(`unknown repo \`${name}\``);
-    const dir = repoDir(root, repo);
-    const ref = baseRef(dir, repo);
-    const base = git(dir, ['rev-parse', ref]);
-    const wt = worktreeDir(root, id, name);
-    run('git', ['worktree', 'add', '--quiet', '-b', branchName(id), wt, base], { cwd: dir });
-    repos[name] = { base, baseRef: ref, branch: branchName(id), worktree: wt, provisioned: provision(root, cfg, repo, wt) };
-  }
+  // Validate everything before creating anything: the adapter must be on the base the gate will trust.
   const { repo: adapterRepo } = adapterLocation(root, cfg);
-  const adapterBase = repos[adapterRepo.name]?.base ?? git(repoDir(root, adapterRepo), ['rev-parse', baseRef(repoDir(root, adapterRepo), adapterRepo)]);
-  loadConfigAtCommit(root, cfg, adapterBase);
+  const bases = {};
+  for (const name of new Set([...wanted, adapterRepo.name])) {
+    const repo = cfg.repos.find((r) => r.name === name);
+    const ref = baseRef(repoDir(root, repo), repo);
+    bases[name] = { ref, commit: git(repoDir(root, repo), ['rev-parse', ref]) };
+  }
+  const adapterBase = bases[adapterRepo.name].commit;
+  try {
+    loadConfigAtCommit(root, cfg, adapterBase);
+  } catch (error) {
+    throw refuse(`${error.message.split('\n')[0]}`, `commit .workflow/ on ${adapterRepo.base} in ${adapterRepo.name} and push it to ${adapterRepo.remote}; the gate trusts only the adapter on the base it starts from (${bases[adapterRepo.name].ref})`);
+  }
+  // Create worktrees; if any step fails, remove what was made so a retry starts clean.
+  const repos = {};
+  const made = [];
+  try {
+    for (const name of wanted) {
+      const repo = cfg.repos.find((r) => r.name === name);
+      const dir = repoDir(root, repo);
+      const wt = worktreeDir(root, id, name);
+      if (git(dir, ['branch', '--list', branchName(id)])) throw refuse(`branch ${branchName(id)} already exists in ${name} from an earlier attempt`, `inspect it, then delete it: git -C ${dir} branch -D ${branchName(id)}`);
+      run('git', ['worktree', 'add', '--quiet', '-b', branchName(id), wt, bases[name].commit], { cwd: dir });
+      made.push({ dir, wt });
+      const provisioned = provision(root, cfg, repo, wt);
+      repos[name] = { base: bases[name].commit, baseRef: bases[name].ref, branch: branchName(id), worktree: wt, provisioned, provisionedUntracked: untrackedSnapshot(wt) };
+    }
+  } catch (error) {
+    for (const m of made.reverse()) {
+      run('git', ['worktree', 'remove', '--force', m.wt], { cwd: m.dir, allowFail: true });
+      run('git', ['branch', '-D', branchName(id)], { cwd: m.dir, allowFail: true });
+    }
+    fs.rmSync(path.join(worktreesRoot(root), id), { recursive: true, force: true });
+    throw error;
+  }
 
-  createAttempt(root, id, { id, item, lane, intent, repos, adapterBase, reopenedFrom: options.reopenedFrom ?? null, deferHeavy: options.deferHeavy === true || options.deferHeavy === 'true' }, owner);
+  let issue = null;
+  if (options['issue-file']) {
+    const src = path.resolve(String(options['issue-file']));
+    if (!fs.existsSync(src)) throw new WfError(`--issue-file not found: ${src}`);
+    const dest = path.join(root, '.wf-evidence', 'attempts', id, 'issue', path.basename(src));
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.copyFileSync(src, dest);
+    issue = { file: dest, sha256: hashFile(dest) };
+  }
+  createAttempt(root, id, { id, item, lane, intent, repos, adapterBase, issue, reopenedFrom: options.reopenedFrom ?? null, deferHeavy: options.deferHeavy === true || options.deferHeavy === 'true' }, owner);
   if (lane === 'standard' && intent === 'implementation') emitTrackerEvent(root, cfg, id, 'admitted');
   return loadState(root, id);
 }
@@ -178,11 +213,19 @@ export function release(root, options) {
 
 export function cleanupWorktrees(root, state) {
   const cfg = loadConfig(root);
+  const problems = [];
   for (const [name, r] of Object.entries(state.repos)) {
     const repo = cfg.repos.find((x) => x.name === name);
-    if (!repo || !fs.existsSync(r.worktree)) continue;
-    run('git', ['worktree', 'remove', r.worktree], { cwd: repoDir(root, repo), allowFail: true });
+    if (!repo) continue;
+    const dir = repoDir(root, repo);
+    if (fs.existsSync(r.worktree)) {
+      const rm = run('git', ['worktree', 'remove', '--force', r.worktree], { cwd: dir, allowFail: true });
+      if (rm.status !== 0) problems.push(`${name}: ${rm.stderr.trim()}`);
+    }
+    // Delivered work is on the target branch; an abandoned attempt keeps its branch so nothing is lost.
+    if (state.delivery?.completedAt) run('git', ['branch', '-D', r.branch ?? branchName(state.id)], { cwd: dir, allowFail: true });
   }
+  if (problems.length) process.stderr.write(`wf: could not remove worktree(s):\n  ${problems.join('\n  ')}\n`);
   const dir = path.join(worktreesRoot(root), state.id);
   fs.rmSync(path.join(dir, '_review'), { recursive: true, force: true }); // closures were copied into evidence by `wf review`
   if (fs.existsSync(dir) && fs.readdirSync(dir).length === 0) fs.rmdirSync(dir);
@@ -194,11 +237,33 @@ export function changedFiles(state, name) {
   return out ? out.split('\n') : [];
 }
 
+export function untrackedFiles(worktree) {
+  const out = git(worktree, ['ls-files', '--others', '--exclude-standard', '--directory', '-z']);
+  return out ? out.split('\0').filter(Boolean) : [];
+}
+
+// Directories are recorded by presence, files by content.
+export function untrackedSnapshot(worktree) {
+  const snap = {};
+  for (const f of untrackedFiles(worktree)) snap[f] = f.endsWith('/') ? 'dir' : hashFile(path.join(worktree, f));
+  return snap;
+}
+
 export function uncommitted(state) {
+  const produced = state.lastGate?.producedUntracked ?? {};
   const dirty = {};
   for (const [name, r] of Object.entries(state.repos)) {
-    const out = git(r.worktree, ['status', '--porcelain', '--untracked-files=normal']);
-    if (out) dirty[name] = out.split('\n');
+    const tracked = git(r.worktree, ['status', '--porcelain', '--untracked-files=no']);
+    const lines = tracked ? tracked.split('\n') : [];
+    // Untracked files that provisioning (installs) or the last gate created are not the change; anything else is.
+    const known = { ...(r.provisionedUntracked ?? {}), ...(produced[name] ?? {}) };
+    for (const f of untrackedFiles(r.worktree)) {
+      const abs = path.join(r.worktree, f);
+      if (known[f] === 'dir' && f.endsWith('/')) continue;
+      if (known[f] && known[f] !== 'dir' && fs.existsSync(abs) && hashFile(abs) === known[f]) continue;
+      lines.push(`?? ${f}`);
+    }
+    if (lines.length) dirty[name] = lines;
   }
   return dirty;
 }
