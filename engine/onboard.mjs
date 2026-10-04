@@ -6,6 +6,7 @@ import { ADAPTER_DIR, CONFIG_FILE, adapterLocation, findRoot, loadConfig, loadCo
 import { provision } from './attempt.mjs';
 import { chooseWorkers } from './host.mjs';
 import { missingFor, redactor, status as secretsStatus, stepEnv } from './secrets.mjs';
+import { findSkill } from './skills.mjs';
 import { ENGINE_VERSION, WfError, YAML, git, refuse, run, shellQuote } from './util.mjs';
 
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -434,10 +435,18 @@ export async function doctor(root, { runSteps = true } = {}) {
     else bad('secrets', { key: s.key, problem: s.state, fix: s.kind === 'generated' || s.kind === 'test' ? 'run `wf secrets init`' : `run \`wf secrets guide ${s.key}\` in your terminal` });
   }
   for (const s of cfg.requires.skills ?? []) {
-    for (const [runtime, dirs] of Object.entries(RUNTIMES)) {
-      if (fs.existsSync(path.join(root, dirs.skills, s.name, 'SKILL.md'))) report.skills.push({ ok: true, skill: s.name, runtime });
-      else bad('skills', { skill: s.name, runtime, problem: 'not installed for this runtime', fix: s.vendor ? 'run `wf sync`' : `install ${s.name} for ${runtime}` });
+    const hashes = {};
+    for (const runtime of s.runtimes ?? Object.keys(RUNTIMES)) {
+      const found = findSkill(root, s.name, runtime);
+      if (!found) bad('skills', { skill: s.name, runtime, problem: 'not available to this runtime', fix: s.vendor ? 'run `wf sync`' : `install ${s.name} for ${runtime}` });
+      else if (found.broken) bad('skills', { skill: s.name, runtime, problem: `installed but does not load: ${found.broken}`, fix: found.broken });
+      else {
+        hashes[runtime] = found.sha256;
+        report.skills.push({ ok: true, skill: s.name, runtime, note: `${found.source}: ${found.path} (sha256 ${found.sha256.slice(0, 12)})` });
+      }
     }
+    // Different copies per runtime mean reviewers on different runtimes apply different checklists.
+    if (new Set(Object.values(hashes)).size > 1) report.skills.push({ ok: true, skill: s.name, note: `copies differ between runtimes (${Object.entries(hashes).map(([r, h]) => `${r} ${h.slice(0, 12)}`).join(', ')}); vendor it into .workflow/skills/ for one version everywhere` });
   }
   for (const c of cfg.requires.connectors ?? []) report.connectors.push({ ok: true, connector: c.name, note: `not checkable from the CLI: the agent confirms ${c.name} with one read-only call` });
   if (runSteps && adapterBase) {

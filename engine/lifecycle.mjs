@@ -6,6 +6,7 @@ import { ADAPTER_DIR, adapterFileAtCommit, loadConfig, loadConfigAtCommit, repoD
 import { gatePassedForCurrentTree, screenshots } from './gate.mjs';
 import { append, attemptDir, listAttempts, loadState } from './ledger.mjs';
 import { deliveryOrder, impact, inside, packageOf } from './topology.mjs';
+import { findSkill } from './skills.mjs';
 import { emitTrackerEvent } from './tracker.mjs';
 import { WfError, YAML, canonical, git, hashValue, matchesAny, readJson, refuse, run, sessionIdentity, writeJson } from './util.mjs';
 
@@ -83,9 +84,9 @@ function skillProblems(root, cfg, role, runtime, state) {
   for (const s of cfg.requires.skills ?? []) {
     if (!(s.roles ?? []).includes(role)) continue;
     if (s.when === 'visual' && !visual) continue;
-    const runtimeDir = runtime === 'codex' ? '.agents/skills' : '.claude/skills';
-    const placed = path.join(root, runtimeDir, s.name, 'SKILL.md');
-    if (!fs.existsSync(placed)) problems.push(`skill \`${s.name}\` is not installed for ${runtime} (${placed}); run \`wf sync\``);
+    const found = findSkill(root, s.name, runtime);
+    if (!found) problems.push(`skill \`${s.name}\` is not available to ${runtime}${s.vendor ? '; run `wf sync`' : '; install it for that runtime'}`);
+    else if (found.broken) problems.push(`skill \`${s.name}\` is installed for ${runtime} but does not load: ${found.broken}`);
   }
   return problems;
 }

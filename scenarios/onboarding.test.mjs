@@ -100,7 +100,7 @@ test('sync vendors required skills for every runtime; a reviewer handoff needs t
   const e = toAcceptedUntilGate(root, base);
   const refused = wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', e.id, '--runtime', 'codex']);
   assert.equal(refused.code, 75);
-  assert.match(refused.err, /skill `ui-review` is not installed for codex/);
+  assert.match(refused.err, /skill `ui-review` is not available to codex/);
   ok(wf(root, ['sync']));
   assert.ok(fs.existsSync(path.join(root, '.claude/skills/ui-review/SKILL.md')));
   assert.ok(fs.existsSync(path.join(root, '.agents/skills/ui-review/SKILL.md')));
@@ -144,4 +144,21 @@ test('report summarizes attempts as CSV and HTML', () => {
   assert.match(lines[0], /^project,id,item,lane,phase/);
   assert.match(lines[1], /R-1\.1,R-1,standard,done/);
   assert.match(fs.readFileSync(html, 'utf8'), /R-1\.1/);
+});
+
+test('installed skills are found per runtime, and a plugin whose marketplace is gone is reported as not loading', async () => {
+  const { findSkill } = await import('../engine/skills.mjs');
+  const home = tmp('home');
+  const pluginDir = path.join(home, 'pcache', 'ux');
+  write(pluginDir, '.claude/skills/ux-check/SKILL.md', '# ux\n');
+  write(home, '.claude/plugins/installed_plugins.json', JSON.stringify({ plugins: { 'ux@ux-market': [{ scope: 'user', installPath: pluginDir }] } }));
+  write(home, '.claude/settings.json', JSON.stringify({ enabledPlugins: { 'ux@ux-market': true } }));
+  write(home, '.codex/skills/ux-check/SKILL.md', '# ux codex\n');
+  assert.match(findSkill('/nowhere', 'ux-check', 'claude', home).broken, /marketplace ux-market is not registered/);
+  write(home, '.claude/plugins/known_marketplaces.json', JSON.stringify({ 'ux-market': {} }));
+  const claude = findSkill('/nowhere', 'ux-check', 'claude', home);
+  assert.equal(claude.broken, undefined);
+  assert.equal(claude.source, 'plugin ux@ux-market');
+  assert.equal(findSkill('/nowhere', 'ux-check', 'codex', home).source, 'user');
+  assert.equal(findSkill('/nowhere', 'missing', 'codex', home), null);
 });

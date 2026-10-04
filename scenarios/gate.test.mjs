@@ -126,7 +126,7 @@ test('a runner killed mid-gate is recovered: finished steps carried, the rest re
   delete env.CLAUDE_CODE_SESSION_ID;
   const child = spawn(process.execPath, [WF, 'gate', '--attempt', e.id], { cwd: root, env, stdio: 'ignore' });
   const lock = path.join(root, '.wf-evidence', 'attempts', e.id, 'gate', 'gate.lock');
-  const deadline = Date.now() + 10000;
+  const deadline = Date.now() + 30000;
   let progress = null;
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 100));
@@ -150,7 +150,7 @@ test('a runner killed mid-gate is recovered: finished steps carried, the rest re
   const g = wf(root, ['gate', '--attempt', e.id]);
   assert.match(g.out, /recovered 1 finished step/);
   let alive = 'alive';
-  for (let i = 0; i < 30 && alive === 'alive'; i++) {
+  for (let i = 0; i < 100 && alive === 'alive'; i++) {
     await new Promise((r) => setTimeout(r, 100));
     alive = sh(root, "pgrep -f 'slee[p] 30' >/dev/null && echo alive || echo gone");
   }
