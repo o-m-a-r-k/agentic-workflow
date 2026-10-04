@@ -74,6 +74,17 @@ function cloneTree(src, dest) {
   throw new WfError(`could not copy ${src} to ${dest}`);
 }
 
+export function missingNodeDependencies(pkgDir) {
+  let pkg;
+  try {
+    pkg = JSON.parse(fs.readFileSync(path.join(pkgDir, 'package.json'), 'utf8'));
+  } catch {
+    return [];
+  }
+  const names = Object.keys({ ...(pkg.dependencies ?? {}), ...(pkg.devDependencies ?? {}) });
+  return names.filter((n) => !fs.existsSync(path.join(pkgDir, 'node_modules', n, 'package.json')));
+}
+
 export function provision(root, cfg, repo, dir) {
   const source = repoDir(root, repo);
   const p = repo.provision;
@@ -100,7 +111,11 @@ export function provision(root, cfg, repo, dir) {
     return fs.existsSync(b) && (!fs.existsSync(a) || hashFile(a) !== hashFile(b));
   });
   const missingClone = p.clone.some((rel) => !fs.existsSync(path.join(dir, rel)));
-  if (p.install && (drift || missingClone)) {
+  // Matching lockfiles do not prove the copied dependencies were installed from them: the main checkout's
+  // node_modules can lag behind its package.json. A declared dependency that is absent means install.
+  const stale = p.clone.filter((rel) => path.basename(rel) === 'node_modules').some((rel) => missingNodeDependencies(path.join(dir, path.dirname(rel))).length > 0);
+  report.stale = stale;
+  if (p.install && (drift || missingClone || stale)) {
     run('sh', ['-c', p.install], { cwd: dir });
     report.installed = true;
   }

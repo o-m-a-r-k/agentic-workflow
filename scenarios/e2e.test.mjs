@@ -219,3 +219,17 @@ test('files an install creates in a worktree (node_modules, a new lockfile) do n
   ok(wf(root, ['gate', '--attempt', e.id]));
   ok(wf(root, ['gate', '--attempt', e.id]));
 });
+
+test('a copied node_modules missing a declared dependency is reinstalled, even when lockfiles match', () => {
+  const marker = 'echo installed > "$PWD/node_modules/.reinstalled" && mkdir -p node_modules/newdep && echo "{}" > node_modules/newdep/package.json';
+  const { root } = singleRepoProject('stale-deps', { repos: [{ name: 'app', path: '.', base: 'main', provision: { clone: ['node_modules'], fingerprint: ['yarn.lock'], install: marker } }], gate: { steps: [] } }, {
+    'package.json': JSON.stringify({ name: 'x', dependencies: { olddep: '1', newdep: '1' } }),
+    'yarn.lock': 'lock\n',
+  });
+  // The main checkout's node_modules predates `newdep`.
+  write(root, 'node_modules/olddep/package.json', '{}');
+  const e = ok(wf(root, ['entry', '--item', 'SD-1', '--owner', 'o', '--json'])).json();
+  assert.equal(e.repos.app.provisioned.stale, true);
+  assert.equal(e.repos.app.provisioned.installed, true);
+  assert.ok(fs.existsSync(path.join(e.repos.app.worktree, 'node_modules', 'newdep', 'package.json')));
+});

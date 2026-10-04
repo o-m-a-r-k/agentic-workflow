@@ -7,7 +7,7 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 export const YAML = require('./vendor/yaml/dist/index.js');
 
-export const ENGINE_VERSION = '0.1.1';
+export const ENGINE_VERSION = '0.1.2';
 export const SCHEMA_VERSION = 1;
 
 // Exit codes: 1 usage/config error, 2 invalid override, 75 refusal (state does not allow the action).
