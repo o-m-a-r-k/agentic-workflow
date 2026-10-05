@@ -121,10 +121,13 @@ export function init(root, cfg) {
   return done;
 }
 
+// A step receives only the secrets that list it in `usedBy`. An empty `usedBy` means no step uses the key
+// (doctor reports it that way): the tools read their own files, and injecting a developer's real local
+// values into every step would override the project's test configuration.
 export function stepEnv(root, cfg, stepId) {
   const env = {};
   for (const e of loadCatalog(root)) {
-    if (e.usedBy.length && !e.usedBy.includes(stepId)) continue;
+    if (!e.usedBy.includes(stepId)) continue;
     const v = readSecret(root, cfg, e);
     if (v !== null) env[e.key] = v;
   }

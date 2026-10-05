@@ -452,7 +452,7 @@ async function acquireGateLock(root, state) {
 
 export async function runGate(root, state, options = {}) {
   const dirty = uncommitted(state);
-  if (Object.keys(dirty).length) throw refuse(`commit changes before the gate: ${Object.entries(dirty).map(([r, l]) => `${r} (${l.length} file(s))`).join(', ')}`);
+  if (Object.keys(dirty).length) throw refuse(`commit changes before the gate: ${Object.entries(dirty).map(([r, l]) => `${r} (${l.slice(0, 5).join('; ')}${l.length > 5 ? `; +${l.length - 5} more` : ''})`).join(', ')}`);
   if (options.prepareOnly) {
     const plan = await planGate(root, state, options);
     return { plan, recovered: null };

@@ -179,6 +179,20 @@ test('missing secrets refuse the gate; values are masked in logs', () => {
   assert.doesNotMatch(wf(root, ['secrets', 'status']).out, /supersecretvalue/);
 });
 
+test('a stored secret reaches only the steps that list it in usedBy', () => {
+  const steps = [{ id: 'api', repo: 'app', run: 'echo "own=$OWN_KEY other=$OTHER_KEY"', inputs: ['src/**'] }];
+  const { base, root } = singleRepoProject('scoped-secrets', { gate: { steps } }, { '.workflow/secrets.yaml': yaml({ keys: [{ key: 'OWN_KEY', kind: 'provided', usedBy: ['api'] }, { key: 'OTHER_KEY', kind: 'provided', usedBy: [] }] }) });
+  const e = admitted(root, base, 'ENG-26b');
+  commitIn(e.repos.app.worktree, { 'src/a.txt': 's\n' });
+  ok(wf(root, ['secrets', 'set', 'OWN_KEY'], { input: 'own-value-123456' }));
+  ok(wf(root, ['secrets', 'set', 'OTHER_KEY'], { input: 'other-value-123456' }));
+  const r = gateJson(root, e.id);
+  assert.equal(r.code, 0);
+  const log = fs.readFileSync(r.data.steps[0].log, 'utf8');
+  assert.match(log, /own=\[secret\]/, 'the listed step receives its key');
+  assert.match(log, /other=\s*$/m, 'a key no step lists is not injected, so the project\'s own test configuration is not overridden');
+});
+
 test('a newer schema is refused with the version to use', () => {
   const { root } = singleRepoProject('schema', { gate: { steps: [] } });
   const e = ok(wf(root, ['entry', '--item', 'ENG-27', '--owner', 'o', '--json'])).json();
