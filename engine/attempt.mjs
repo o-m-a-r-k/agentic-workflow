@@ -283,13 +283,16 @@ export function uncommitted(state) {
   return dirty;
 }
 
+// HEAD, plus a hash of tracked changes when the tree is dirty. Untracked files are never delivered
+// (the gate refuses to start with any), so they are not part of it.
+export function treeHash(dir) {
+  const head = git(dir, ['rev-parse', 'HEAD']);
+  const status = git(dir, ['status', '--porcelain', '--untracked-files=no']);
+  return status ? `${head}+dirty:${sha256(status + git(dir, ['diff', 'HEAD']))}` : head;
+}
+
 export function treeHashes(state) {
   const t = {};
-  for (const [name, r] of Object.entries(state.repos)) {
-    const head = git(r.worktree, ['rev-parse', 'HEAD']);
-    // Tracked content only: untracked files are never delivered (the gate refuses to start with any).
-    const status = git(r.worktree, ['status', '--porcelain', '--untracked-files=no']);
-    t[name] = status ? `${head}+dirty:${sha256(status + git(r.worktree, ['diff', 'HEAD']))}` : head;
-  }
+  for (const [name, r] of Object.entries(state.repos)) t[name] = treeHash(r.worktree);
   return t;
 }

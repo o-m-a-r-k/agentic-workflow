@@ -2,8 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
-import { adapterFileAtCommit, adapterLocation, loadConfig, loadConfigAtCommit } from './config.mjs';
-import { changedFiles, treeHashes, uncommitted, untrackedSnapshot } from './attempt.mjs';
+import { adapterFileAtCommit, adapterLocation, loadConfig, loadConfigAtCommit, repoDir } from './config.mjs';
+import { changedFiles, treeHash, treeHashes, uncommitted, untrackedSnapshot } from './attempt.mjs';
 import { chooseShards, chooseWorkers } from './host.mjs';
 import { readJUnitFiles } from './junit.mjs';
 import { append, attemptDir, loadState } from './ledger.mjs';
@@ -47,6 +47,23 @@ function runnerIdentity(root, live, state, step) {
   const { workers, shards, ...definition } = step;
   const pluginHash = step.plugin ? hashFile(adapterFileAtCommit(root, live, state.adapterBase, step.plugin)) : null;
   return hashValue({ definition, pluginHash });
+}
+
+// Trees of the other repos a step reads (`alsoInputs`): the attempt's worktree when the repo is part of the
+// attempt, else its main checkout. A tree that cannot be read is null, and the step then always runs.
+function alsoInputTrees(root, cfg, state, step) {
+  if (!step.alsoInputs?.length) return { trees: null, unreadable: [] };
+  const trees = {};
+  const unreadable = [];
+  for (const name of step.alsoInputs) {
+    const repo = cfg.repos.find((r) => r.name === name);
+    try {
+      trees[name] = treeHash(state.repos[name]?.worktree ?? repoDir(root, repo));
+    } catch {
+      unreadable.push(name);
+    }
+  }
+  return { trees, unreadable };
 }
 
 const allGateSteps = (state) => state.gates.flatMap((g) => g.steps ?? []);
@@ -111,11 +128,19 @@ export async function planGate(root, state, options = {}) {
     const component = cfg.components.find((c) => c.repo === repo.name && (c.package ?? '.') === pkg.path) ?? (step.component ? cfg.components.find((c) => c.id === step.component) : null);
     const isDependent = Boolean(component && imp.dependents.includes(component.id));
     const mustRun = full || infraChanged || isDependent || notCovered.length > 0;
-    if (!mustRun && !(changed[repo.name] ?? []).length) {
+    // A change in a repo the step also reads keeps it from being skipped; reuse then depends on that repo's tree.
+    const alsoChanged = (step.alsoInputs ?? []).flatMap((name) => {
+      const other = cfg.repos.find((r) => r.name === name);
+      return (changed[name] ?? []).filter((f) => {
+        const p = [...other.packages].filter((x) => inside(f, x.path)).sort((a, b) => b.path.length - a.path.length)[0];
+        return !p || !matchesAny(rel(f, p.path), p.docsOnly);
+      }).map((f) => `${name}:${f}`);
+    });
+    if (!mustRun && !alsoChanged.length && !(changed[repo.name] ?? []).length) {
       steps.push({ ...entry, decision: 'skip', reason: 'no changes in this repo' });
       continue;
     }
-    if (!mustRun) {
+    if (!mustRun && !alsoChanged.length) {
       if (step.when?.paths && !pkgChanged.some((f) => matchesAny(rel(f, pkg.path), step.when.paths))) {
         steps.push({ ...entry, decision: 'skip', reason: 'no change matches `when.paths`' });
         continue;
@@ -137,7 +162,8 @@ export async function planGate(root, state, options = {}) {
     chooseShards(step);
     const inputs = stepInputs(state, step, repo, pkg);
     const runner = runnerIdentity(root, live, state, step);
-    const key = inputs ? hashValue({ inputs: inputs.hash, runner }) : null;
+    const also = alsoInputTrees(root, cfg, state, step);
+    const key = !inputs || also.unreadable.length ? null : hashValue(also.trees ? { inputs: inputs.hash, runner, also: also.trees } : { inputs: inputs.hash, runner });
     let prior = findReuse(state, step.id, key);
     let outside = [];
     if (prior) {
@@ -156,8 +182,9 @@ export async function planGate(root, state, options = {}) {
       inputsHash: inputs?.hash ?? null,
       fileHashes: step.select ? inputs?.fileHashes ?? null : undefined,
       runnerIdentity: runner,
+      alsoInputs: also.trees ?? undefined,
       decision: prior ? 'reuse' : 'run',
-      reason: prior ? `same inputs and runner as ${prior.runId}` : outside.length ? `changed file(s) outside this step's inputs since its last pass: ${outside.slice(0, 3).join(', ')}${outside.length > 3 ? '…' : ''}` : notCovered.length ? `changed file(s) outside every step's inputs: ${notCovered.slice(0, 3).join(', ')}${notCovered.length > 3 ? '…' : ''}` : key ? (isDependent ? 'dependent of a changed contract' : infraChanged ? 'shared infrastructure changed' : 'inputs changed or never passed') : 'no `inputs` declared: always runs',
+      reason: prior ? `same inputs and runner as ${prior.runId}` : outside.length ? `changed file(s) outside this step's inputs since its last pass: ${outside.slice(0, 3).join(', ')}${outside.length > 3 ? '…' : ''}` : notCovered.length ? `changed file(s) outside every step's inputs: ${notCovered.slice(0, 3).join(', ')}${notCovered.length > 3 ? '…' : ''}` : also.unreadable.length ? `cannot read the tree of ${also.unreadable.join(', ')} (alsoInputs): always runs` : key ? (isDependent ? 'dependent of a changed contract' : infraChanged ? 'shared infrastructure changed' : also.trees ? 'inputs or a repo in alsoInputs changed, or never passed' : 'inputs changed or never passed') : 'no `inputs` declared: always runs',
       reusedFrom: prior?.runId ?? null,
       missingSecrets: missingFor(root, cfg, step.id),
     });

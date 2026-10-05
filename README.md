@@ -204,6 +204,21 @@ flowchart TD
 - **Workers:** `auto` sizes them from measured free memory and performance cores, never below the minimum you set.
 - **Base movement:** when the base branch advances, the gate reopens only if the new commits touch the ticket's paths or shared infrastructure.
 
+### Gate step fields
+
+Each entry under `gate.steps` in `.workflow/project.yaml` (full example in [docs/DESIGN.md](docs/DESIGN.md#adapter-format)):
+
+| Field | Meaning |
+| --- | --- |
+| `id`, `repo` or `component`, `package` | Which step, and where it runs. |
+| `run` or `plugin` | The shell command, or a step plugin committed in `.workflow/`. |
+| `inputs`, `ignores` | Globs the step depends on and provably does not depend on. No `inputs`: the step runs every gate. |
+| `alsoInputs` | Other repos the step reads, e.g. an end-to-end step that builds a sibling repo's service. Their trees join the reuse key, so a change there reruns the step; an unreadable tree means it always runs. |
+| `tier` | `light` or `heavy`. `--focused` runs light steps only. |
+| `when.paths` | Run only when a changed file matches. |
+| `report.junit`, `select` | Per-suite results and suite-level reruns. |
+| `workers`, `shards`, `lease`, `deferrable`, `artifacts` | Sizing, resource leases, batch deferral, captured screenshots and files. |
+
 ## Delivery and the ticket
 
 ```mermaid

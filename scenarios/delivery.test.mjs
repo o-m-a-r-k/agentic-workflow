@@ -220,3 +220,40 @@ export default {
   assert.equal(sh(base, `git --git-dir=${remote} show main:src/a.txt`), 'b');
   assert.equal(state(root, id).phase, 'handoff-pending');
 });
+
+test('a step that reads another repo (alsoInputs) reruns when that repo changes, and always runs when its tree cannot be read', () => {
+  const e2e = 'cat "$WF_ROOT/.wf-worktrees/$WF_ATTEMPT/web/src/w.txt" && ! grep -q bad "$WF_ROOT/.wf-worktrees/$WF_ATTEMPT/web/src/w.txt"';
+  const gate = {
+    steps: [
+      { id: 'api-unit', repo: 'api', run: 'true', inputs: ['src/**'] },
+      { id: 'api-e2e', repo: 'api', run: e2e, inputs: ['src/**'], alsoInputs: ['web'] },
+    ],
+  };
+  const { base, root } = multiRepo('also-inputs', { gate });
+  const e = ok(wf(root, ['entry', '--item', 'ENG-38', '--owner', 'o', '--json'])).json();
+  ok(wf(root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id]));
+  ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id]));
+  ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
+  commitIn(e.repos.api.worktree, { 'src/a.txt': 'api change\n' });
+  ok(wf(root, ['gate', '--attempt', e.id]));
+  commitIn(e.repos.web.worktree, { 'src/w.txt': 'bad\n' });
+  const g = JSON.parse(wf(root, ['gate', '--attempt', e.id, '--json']).out);
+  const step = Object.fromEntries(g.steps.map((s) => [s.id, s]));
+  assert.equal(step['api-unit'].status, 'reused', 'a step that reads only its own repo is still reused');
+  assert.equal(step['api-e2e'].status, 'failed', 'the cross-repo step reran against the changed sibling instead of reusing a stale pass');
+  assert.equal(g.status, 'failed');
+
+  // Fail closed: the sibling is not in this attempt and its checkout is not a readable git tree.
+  const p2 = multiRepo('also-unreadable', { gate: { steps: [{ id: 'api-e2e', repo: 'api', run: 'true', inputs: ['src/**'], alsoInputs: ['web'] }] } });
+  const e2 = ok(wf(p2.root, ['entry', '--item', 'ENG-39', '--owner', 'o', '--repos', 'api', '--json'])).json();
+  ok(wf(p2.root, ['handoff', 'planner', '--agent', 'p', '--attempt', e2.id]));
+  ok(wf(p2.root, ['plan', '--file', criteriaFile(p2.base), '--attempt', e2.id]));
+  ok(wf(p2.root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e2.id]));
+  commitIn(e2.repos.api.worktree, { 'src/a.txt': 'api change\n' });
+  fs.renameSync(path.join(p2.root, 'web', '.git'), path.join(p2.root, 'web', '.git-away'));
+  const first = JSON.parse(wf(p2.root, ['gate', '--attempt', e2.id, '--json']).out).steps.find((s) => s.id === 'api-e2e');
+  const second = JSON.parse(wf(p2.root, ['gate', '--attempt', e2.id, '--json']).out).steps.find((s) => s.id === 'api-e2e');
+  assert.equal(first.status, 'passed');
+  assert.equal(second.status, 'passed', 'a passing step whose sibling tree is unreadable is rerun, not reused');
+  assert.match(second.reason, /cannot read the tree of web/);
+});
