@@ -156,3 +156,21 @@ test('quick fixes get the next QF number and close on delivery', () => {
   ok(wf(root, ['deliver', '--attempt', e.id]));
   assert.equal(state(root, e.id).phase, 'done');
 });
+
+test('the reviewer handoff prints only the one-line start prompt, and the bundle carries what the reviewer needs', () => {
+  const { base, root } = singleRepoProject('blind', { gate: { steps } });
+  const e = ok(wf(root, ['entry', '--item', 'ENG-60', '--owner', 'o', '--json'])).json();
+  ok(wf(root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id]));
+  ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id]));
+  ok(wf(root, ['criteria', 'amend', '--file', criteriaFile(base), '--reason', 'scope clarified', '--attempt', e.id]));
+  ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
+  commitIn(e.repos.app.worktree, { 'src/a.txt': 'blind\n' });
+  ok(wf(root, ['gate', '--attempt', e.id]));
+  const out = ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', e.id])).out;
+  const lines = out.trim().split('\n');
+  assert.equal(lines.length, 1, out);
+  const [, bundlePath] = lines[0].match(/^Read (\S+) and follow its instructions\.$/);
+  const bundle = JSON.parse(fs.readFileSync(bundlePath, 'utf8'));
+  assert.ok(bundle.criteria.length && bundle.criteriaAmendments[0].reason === 'scope clarified');
+  assert.ok(bundle.gate.evidence && bundle.worktrees.app && bundle.bases.app && bundle.changed.app.includes('src/a.txt'));
+});

@@ -274,7 +274,10 @@ async function dispatch(cmd, sub, positional, options) {
     }
     case 'handoff': {
       const r = handoff(root, sub, options);
-      print(options, `${sub} bundle: ${r.bundle}\nStart the ${sub} agent (${options.agent}) with: "Read ${r.bundle} and follow its instructions."`, r);
+      const startPrompt = `Read ${r.bundle} and follow its instructions.`;
+      // The reviewer is started blind: this one line is its whole prompt, so nothing else is printed to pass along.
+      if (sub === 'reviewer') print(options, startPrompt, { ...r, startPrompt });
+      else print(options, `${sub} bundle: ${r.bundle}\nStart the ${sub} agent (${options.agent}) with: "${startPrompt}"`, { ...r, startPrompt });
       return 0;
     }
     case 'gate': {

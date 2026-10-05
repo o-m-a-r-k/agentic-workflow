@@ -6,6 +6,7 @@ This project runs changes through agentic-workflow. The `wf` CLI enforces the ru
 
 **Rules**
 - Work only in the attempt's worktrees under `.wf-worktrees/`, never in the main checkouts.
+- Never edit the worktrees while a gate runs (`wf status` shows it). A `--focused` gate is repair proof only; review and delivery need a gate without it.
 - Report a step as done only after `wf` accepted it. Gate results, reviews and deliveries are proven by files under `.wf-evidence/`, which no one edits by hand.
 - The reviewer never planned, wrote or owns the change.
 - A user's "hold", "local only" or "don't push" is recorded at once with `wf hold --reason "<their words>"`; only they lift it (`wf release`).

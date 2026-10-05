@@ -272,6 +272,11 @@ requires:
 
 `wf sync` generates each project's agent files for every runtime from the plugin template + the adapter's `roles` entry + appendix. Generated files carry a header and are never hand-edited.
 
+- **Planner** returns `{ plan, criteria }`; `plan` holds `summary`, `contract` (what repos share: routes, DTO fields, error codes, permission subjects), `anchors` (file:line of each function to change), `tests` (`changed` specs, targeted `run` selectors), `doNotRun`, `externalServices` (default test runs need no provider keys or internet; provider/sandbox tests are opt-in) and `agentSplit`. The engine stores it with the frozen criteria and passes it to every later role; it does not police its size.
+- **Implementers:** after the contract is committed, one implementer per repo or area can run in parallel (several implementer handoffs are allowed). They run only the specs they changed and targeted reruns while iterating, never broad sweeps, then the repo's lint and full unit suite once before finishing, and commit at stage boundaries.
+- **Reviewer, blind:** its prompt is the one line `wf handoff reviewer` prints (the bundle path), with nothing from the owner or other agents; the bundle carries everything it needs. It may read the committed diff while the gate runs (started with a fixed line naming only the attempt and worktrees); the formal handoff after the gate passes uses the same agent id, and the reviewer then checks the gate evidence and screenshots. Independence is unchanged: `wf handoff reviewer` refuses the owner, the planner and every implementer.
+- Role agents registered by a runtime at session start may not include ones `wf sync` wrote later; the skills fall back to a general-purpose agent following the role file.
+
 ## Onboarding (`wf init`)
 
 1. **Detect:** repos, packages, base branches, package managers, scripts, test runners, compose files, specs and generated clients, mobile projects, trackers reachable, existing `AGENTS.md`.
@@ -288,6 +293,7 @@ What the evidence proves, and what it does not:
 
 - **It catches mistakes.** The ledger is hash-chained, writes are serialised, gate results are bound to the exact tree and to the adapter committed at base, only a gate that ran every step the tree needs (not a `--focused` one) opens review and delivery, a step that reads another repo (`alsoInputs`) is reused only while that repo's tree is unchanged, and the guard hook blocks careless edits of `.wf-evidence/` from Edit/Write and common shell writes. An agent that misremembers, skips a step or edits the wrong file is stopped.
 - **It does not stop a determined forger on the same machine.** The chain is unkeyed and agent identities (`--agent`, `--owner`) are names the owner supplies. An agent with shell access that sets out to fake a passing gate or a reviewer can. Independence and evidence are only as strong as the agents and the person running them.
+- **The blind reviewer is a rule, not a check.** The engine hands the reviewer only the bundle and prints a one-line start prompt, but it cannot see the prompt a runtime actually gives an agent, so it does not verify or record it. An owner who steers the reviewer (hints, focus areas, summaries of the work, other agents' findings) weakens the review without any refusal; the skills and the reviewer role forbid it, and the reviewer reports a prompt that carried more.
 - **Adapter code is trusted at base.** Step plugins, delivery and tracker adapters run as committed on the base branch, never the ticket's copy. A ticket can still change the project scripts a step calls (for example a test script in `package.json`); that is visible in the diff the reviewer inspects, and changes to `sharedInfra` files force the affected package's steps to run.
 
 ## Versioning

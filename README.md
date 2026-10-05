@@ -50,6 +50,7 @@ Or ask your agent to "onboard this project to agentic-workflow": the `onboard` s
 - [Onboarding a project](#onboarding-a-project)
 - [Secrets](#secrets)
 - [Telemetry](#telemetry)
+- [Trust model](#trust-model)
 - [Principles](#principles)
 - [Contributing](#contributing)
 
@@ -179,6 +180,10 @@ sequenceDiagram
 
 - Roles are agents your runtime starts: subagents in Claude Code, tasks in Codex.
 - `wf sync` writes each project's role files from the plugin's templates plus the project's own additions, including the model and effort for each role.
+- **Planner** returns the plan as a short checklist: summary, the cross-repo contract (routes, DTO fields, error codes, permission subjects), anchors (file:line of each function to change), tests to write and the targeted selectors to run, suites not to run, the external-services policy (default runs need no provider keys or internet) and the agent split (what can proceed in parallel once the contract is committed).
+- **Implementers** can run in parallel, one per repo or area, after the contract is committed (`wf handoff implementer` accepts several). They run only the specs they changed while iterating, then the repo's lint and full unit suite once before finishing; the gate runs the rest.
+- **Reviewer** is started blind: `wf handoff reviewer` prints one line (the bundle path), and that line is its whole prompt, with no hints, summaries or focus areas from the owner. The bundle holds the criteria, amendments with reasons, the plan, the diff's worktrees and bases, gate evidence and screenshots. It can start on the committed diff while the gate runs (with a fixed line naming only the attempt and worktrees); after the gate passes, the formal handoff uses the same agent id. It is never the planner or an implementer.
+- **Role appendices:** `roles.<role>.appendix` in the adapter names a file under `.workflow/` whose text `wf sync` appends to that role's generated agent under "Project additions". Role agents generated while a session runs may only register after it restarts; until then a general-purpose agent follows the role file.
 - A separate tester role is available but off by default. Frozen criteria plus review of the gate's evidence cover the same failure with one fewer handoff.
 
 ## The gate
@@ -328,6 +333,12 @@ sequenceDiagram
 - **Agent usage:** the model, tokens, time and tool calls for each role are read from the runtime's own session logs after the fact. This is measurement only; it never allows or blocks anything.
 - **`wf status --all`** shows open work across every enabled project.
 - **`wf report`** shows where time and tokens go: by phase, step, role and model, with reuse rate and repair rounds.
+
+## Trust model
+
+- **What the engine enforces:** a hash-chained ledger; gate results bound to the exact tree and to the adapter committed at base; only a gate that ran every step the tree needs (never a `--focused` one) opens review and delivery; a step that reads another repo (`alsoInputs`) is reused only while that repo is unchanged; the reviewer is never the owner, planner or an implementer; criteria are frozen before code.
+- **What it relies on you for:** agent identities are names the owner supplies, and the reviewer must be started blind, with only the one line `wf handoff reviewer` prints. The engine cannot see the prompt a runtime gives an agent, so it does not check it; steering the reviewer weakens the review silently.
+- **What it does not stop:** a determined forger with shell access on the same machine. It catches mistakes, not attacks. Details: [docs/DESIGN.md](docs/DESIGN.md#trust-model).
 
 ## Principles
 

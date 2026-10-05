@@ -138,9 +138,9 @@ export function handoff(root, role, options) {
     // Outside .wf-evidence/: the reviewer writes it, `wf review` copies it into the evidence.
     reviewClosureFile: role === 'reviewer' ? path.join(root, '.wf-worktrees', state.id, '_review', `closure-${n}.json`) : null,
     instructions: {
-      planner: 'Read the issue and the code. Do not change any file. Return a plan and criteria as YAML: { plan: <text>, criteria: [{ id: C1, text, uat }] }.',
-      implementer: 'Implement against the frozen criteria in the worktrees above. Write tests only for real behaviour. Commit everything when done.',
-      reviewer: 'Review the diff and the gate evidence. You did not write this change. Write the closure file: { reviewer, findings: [{ id, severity, summary, status: open|fixed|verified-nonissue, evidence }], criteria: [{ id, evidence: { kind: test|screenshot|output|not-applicable|dropped-with-reason, ref, reason } }], screenshotsInspected: [sha256] }. Then run `wf review --closure <file>`.',
+      planner: 'Read the issue and the code. Do not change any file. Return YAML: { plan: { summary, contract, anchors, tests: { changed, run }, doNotRun, externalServices, agentSplit }, criteria: [{ id: C1, text, uat }] }.',
+      implementer: "Implement against the frozen criteria and the plan's contract in the worktrees above. Write tests only for real behaviour. While iterating run only the specs you changed; before finishing run the repo's lint and full unit suite once. Commit at stage boundaries and everything when done.",
+      reviewer: 'Review the diff and the gate evidence. You did not write this change. Everything you need is in this bundle; judge the whole change yourself. Write the closure file: { reviewer, findings: [{ id, severity, summary, status: open|fixed|verified-nonissue, evidence }], criteria: [{ id, evidence: { kind: test|screenshot|output|not-applicable|dropped-with-reason, ref, reason } }], screenshotsInspected: [sha256] }. Then run `wf review --closure <file>`.',
       tester: 'Write requirement expectations from the issue before reading the implementation, then map each to gate tests.',
     }[role],
   };
