@@ -162,3 +162,11 @@ test('installed skills are found per runtime, and a plugin whose marketplace is 
   assert.equal(findSkill('/nowhere', 'ux-check', 'codex', home).source, 'user');
   assert.equal(findSkill('/nowhere', 'missing', 'codex', home), null);
 });
+
+test('wf --version reports the released plugin version, which package.json matches', () => {
+  const plugin = JSON.parse(fs.readFileSync(new URL('../.claude-plugin/plugin.json', import.meta.url), 'utf8')).version;
+  const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
+  const r = ok(wf(tmp('version'), ['--version']));
+  assert.equal(r.out.trim(), plugin);
+  assert.equal(pkg, plugin, 'package.json and plugin.json carry the same release version');
+});

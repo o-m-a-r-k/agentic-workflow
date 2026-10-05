@@ -13,7 +13,19 @@ import { impact } from './topology.mjs';
 import { recordTracker } from './tracker.mjs';
 import { ENGINE_VERSION, WfError, parseArgs } from './util.mjs';
 
-const HELP = `wf ${ENGINE_VERSION} — agentic-workflow
+const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+// The released plugin version. ENGINE_VERSION is the ledger's engine version and moves only with the ledger.
+function pluginVersion() {
+  for (const f of ['.claude-plugin/plugin.json', 'package.json']) {
+    try {
+      const v = JSON.parse(fs.readFileSync(path.join(PLUGIN_ROOT, f), 'utf8')).version;
+      if (v) return v;
+    } catch {}
+  }
+  return ENGINE_VERSION;
+}
+
+const HELP = `wf ${pluginVersion()} — agentic-workflow (ledger engine ${ENGINE_VERSION})
 
 Onboarding
   wf install [--dir DIR]            link wf into ~/.local/bin
@@ -90,7 +102,7 @@ export async function main(argv) {
     return 0;
   }
   if (cmd === 'version' || cmd === '--version') {
-    process.stdout.write(`${ENGINE_VERSION}\n`);
+    process.stdout.write(`${pluginVersion()}\n`);
     return 0;
   }
   try {
