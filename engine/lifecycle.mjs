@@ -6,7 +6,7 @@ import { actor, branchName, changedFiles, cleanupWorktrees, entry, openState, tr
 import { ADAPTER_DIR, adapterFileAtCommit, agentTypeFor, declared, loadConfig, loadConfigAtCommit, repoDir, roleClass } from './config.mjs';
 import { focusedSkips, gatePassedForCurrentTree, screenshots } from './gate.mjs';
 import { append, attemptDir, listAttempts, loadState } from './ledger.mjs';
-import { deliveryOrder, impact, inside, packageOf } from './topology.mjs';
+import { changedForStep, deliveryOrder, impact, inside, packageOf } from './topology.mjs';
 import { findSkill } from './skills.mjs';
 import { lastFencedYaml, lastModel, readTranscript, sessionModel, subagentModel, subagentTranscripts } from './telemetry.mjs';
 import { outsidePlan } from './scope.mjs';
@@ -295,7 +295,7 @@ export function handoff(root, role, options) {
     // needs a later round written after a passing gate on this tree, which inspects the evidence.
     gate: role === 'reviewer'
       ? gateNow.ok
-        ? { passedOnThisTree: true, runId: state.lastGate.runId, evidence: state.lastGate.evidence, screenshots: screenshots(state), artifacts: artifactsByStep(state), logs: state.lastGate.steps.filter((s) => s.log).map((s) => ({ step: s.id, log: s.log, status: s.status })) }
+        ? { passedOnThisTree: true, runId: state.lastGate.runId, evidence: state.lastGate.evidence, screenshots: screenshots(state), artifacts: artifactsByStep(state, trusted), logs: state.lastGate.steps.filter((s) => s.log).map((s) => ({ step: s.id, log: s.log, status: s.status })) }
         : { passedOnThisTree: false, reason: gateNow.reason, screenshots: [], logs: [] }
       : null,
     // Changed files no plan anchor or test path names. Informational: the reviewer may give a verdict per file.
@@ -309,7 +309,7 @@ export function handoff(root, role, options) {
     instructions: {
       planner: 'Read the issue and the code. Do not change any file. Return your plan as one ```yaml fenced block, last in your reply: { plan: { summary, contract, anchors, tests: { changed, run }, doNotRun, externalServices, agentSplit }, criteria: [{ id: C1, text, uat }], work: [{ id: W1, criteria: [C1], repos, class, why }] } (work is optional; classes: see your role file). The owner freezes it from your transcript unchanged. Leave no background command, monitor or sleep loop running when you report.',
       implementer: "Done means `check.command` passes for your repos (it runs the light steps listed under `check`; it never counts as the gate). Implement against the frozen criteria and the plan in the worktrees above: follow `plan.contract`, start from `plan.anchors`, while iterating run only `plan.tests.run` and the specs you changed, never what `plan.doNotRun` lists, and keep to `plan.externalServices` and `plan.agentSplit`. Write tests only for real behaviour. Before finishing run the repo's lint and full unit suite once, in the foreground. Commit at stage boundaries and everything when done. If `work` is set, do that work item only; if it turns out to touch something a stronger class covers, stop and tell the owner. Before you report, stop every background command, monitor or sleep loop you started: a waiter left running keeps notifying the owner after you are done.",
-      reviewer: 'Review the whole change against the frozen criteria, and the gate evidence when `gate.passedOnThisTree` is true (then open every screenshot listed under `gate.screenshots`, which are exactly the files `gate.artifacts` lists per glob, and record the sha256 of each one you viewed; a step marked no screenshots for this ticket needs none, and a file no glob lists is never required). When it is false, no gate has passed on this tree yet: judge the diff and list no screenshots. You did not write this change. Everything you need is in this bundle; judge the whole change yourself. Write the closure file: { reviewer, findings: [{ id, severity, summary, status: open|fixed|verified-nonissue, evidence, work }], criteria: [{ id, evidence: { kind: test|screenshot|output|not-applicable|dropped-with-reason, ref, reason } }], screenshotsInspected: [sha256], outsidePlan: [{ file, verdict }] }. Then run `wf review --closure <file>`. Only after your closure is recorded, `wf review` may list findings from earlier rounds for you to verify against the code: then add `priorFindings: [{ round, id, status: fixed|verified-nonissue|open, evidence }]` to the same file, change nothing else, and run `wf review --closure <file>` again.',
+      reviewer: 'Review the whole change against the frozen criteria, and the gate evidence when `gate.passedOnThisTree` is true (then open every screenshot listed under `gate.screenshots`, which are exactly the files `gate.artifacts` lists per glob, and record the sha256 of each one you viewed; a file no glob lists is never required; a step whose package did not change needs nothing; a step marked `uncovered` matched nothing although this ticket changed its package: judge whether the ticket needed a capture there and add `noEvidence: [{ step, reason }]` saying why none is needed, or raise a finding). When it is false, no gate has passed on this tree yet: judge the diff and list no screenshots. You did not write this change. Everything you need is in this bundle; judge the whole change yourself. Write the closure file: { reviewer, findings: [{ id, severity, summary, status: open|fixed|verified-nonissue, evidence, work }], criteria: [{ id, evidence: { kind: test|screenshot|output|not-applicable|dropped-with-reason, ref, reason } }] (a screenshot ref is the sha256 or source of a file in `gate.artifacts`), screenshotsInspected: [sha256], noEvidence: [{ step, reason }], outsidePlan: [{ file, verdict }] }. Then run `wf review --closure <file>`. Only after your closure is recorded, `wf review` may list findings from earlier rounds for you to verify against the code: then add `priorFindings: [{ round, id, status: fixed|verified-nonissue|open, evidence }]` to the same file, change nothing else, and run `wf review --closure <file>` again.',
       tester: 'Write requirement expectations from the issue before reading the implementation, then map each to gate tests.',
     }[role],
   };
@@ -330,13 +330,44 @@ export function handoff(root, role, options) {
   return { bundle: file, startPrompt: startPromptFor(file), agentType, class: cls, effort, model, work: work?.id ?? null, state: loadState(root, state.id) };
 }
 
-// Per step with `artifacts`: each glob as declared and as expanded for this attempt, and the files it matched. A step
-// whose globs matched nothing says so; acceptance then requires nothing from it.
-export function artifactsByStep(state) {
+// Per step with `artifacts`: each glob as declared and as expanded for this attempt, and the files it matched, and the
+// ticket's changed files in the step's package (`changedHere`, from the gate's recorded `changed`). A step whose globs
+// matched nothing while its package changed is `uncovered`: a UI change whose tests wrote no capture for the ticket
+// passed as "no screenshots for this ticket" and nothing flagged it, so acceptance needs the reviewer's verdict on it
+// (a `noEvidence` entry with a reason, or a finding). A step whose package did not change requires nothing.
+export function artifactsByStep(state, cfg) {
+  const changed = state.lastGate?.changed ?? {};
   return (state.lastGate?.steps ?? []).filter((s) => s.artifactGlobs?.length).map((s) => {
     const globs = s.artifactGlobs.map((g) => ({ glob: g.glob, expanded: g.expanded, files: g.files.map((f) => ({ source: f.source, path: f.path, sha256: f.sha256, kind: f.kind })) }));
     const none = globs.every((g) => !g.files.length);
-    return { step: s.id, globs, ...(none ? { note: `no screenshots for this ticket (globs: ${globs.flatMap((g) => g.expanded).join(', ')})` } : {}) };
+    const changedHere = cfg ? changedForStep(cfg, s.id, s.repo, changed) : [];
+    const uncovered = none && changedHere.length > 0;
+    const where = globs.flatMap((g) => g.expanded).join(', ');
+    const note = !none ? undefined : uncovered
+      ? `no captures for this ticket (globs: ${where}), though it changed ${changedHere.length} file(s) in this step's package: give a verdict in \`noEvidence\` ({ step, reason }) or raise a finding`
+      : `no screenshots for this ticket (globs: ${where}); this step's package did not change, nothing is required`;
+    return { step: s.id, globs, changedHere, uncovered, ...(note ? { note } : {}) };
+  });
+}
+
+// The same, with the adapter the gate ran with (committed at the attempt's base). Without it nothing is uncovered.
+export function evidenceSteps(root, state) {
+  let cfg = null;
+  try {
+    cfg = loadConfigAtCommit(root, loadConfig(root), state.adapterBase);
+  } catch {}
+  return artifactsByStep(state, cfg);
+}
+
+const escapeRe = (x) => String(x).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+// The reviewer's verdict on each uncovered step: its `noEvidence` entry (needs a reason) or a finding that names the step.
+export function noEvidenceVerdicts(steps, closure) {
+  const entries = Array.isArray(closure?.noEvidence) ? closure.noEvidence : [];
+  return steps.filter((a) => a.uncovered).map((a) => {
+    const entry = entries.find((v) => v?.step === a.step && String(v.reason ?? '').trim());
+    const named = new RegExp(`(^|[^\\w-])${escapeRe(a.step)}([^\\w-]|$)`);
+    const finding = (closure?.findings ?? []).find((f) => f.step === a.step || named.test(`${f.summary ?? ''} ${f.evidence ?? ''}`));
+    return { step: a.step, changed: a.changedHere.length, globs: a.globs.flatMap((g) => g.expanded), reason: entry ? String(entry.reason) : null, finding: finding?.id ?? null };
   });
 }
 
@@ -434,10 +465,21 @@ export function acceptReview(root, options) {
     else if (['not-applicable', 'dropped-with-reason'].includes(kind) && !m.evidence.reason?.trim()) problems.push(`criterion ${c.id}: ${kind} needs a reason`);
     else if (!['not-applicable', 'dropped-with-reason'].includes(kind) && !m.evidence.ref) problems.push(`criterion ${c.id}: ${kind} evidence needs a ref`);
   }
-  const shots = screenshots(state).map((s) => s.sha256);
+  const collected = screenshots(state);
+  for (const c of state.criteria ?? []) {
+    const ev = mapped.get(c.id)?.evidence;
+    if (ev?.kind !== 'screenshot' || !ev.ref) continue;
+    const ref = String(ev.ref).trim();
+    if (!collected.some((a) => [a.sha256, a.source, a.path].includes(ref))) problems.push(`criterion ${c.id}: screenshot \`${ref}\` is not one the gate collected for this ticket; reference a file in the bundle's \`gate.artifacts\` by sha256 or source path`);
+  }
+  const verdicts = noEvidenceVerdicts(evidenceSteps(root, state), r.closure);
+  for (const v of verdicts) {
+    if (!v.reason && !v.finding) problems.push(`step ${v.step}: its artifacts globs (${v.globs.join(', ')}) matched nothing though this ticket changed ${v.changed} file(s) in its package; the reviewer gives a verdict: \`noEvidence: [{ "step": "${v.step}", "reason": "<why no capture is needed>" }]\` in the closure, or a finding`);
+  }
+  const shots = collected.map((s) => s.sha256);
   const inspected = new Set(r.closure.screenshotsInspected ?? []);
   const unseen = shots.filter((h) => !inspected.has(h));
-  if (unseen.length) problems.push(`${unseen.length} gate screenshot(s) not inspected by the reviewer (the gate's expanded artifacts globs matched them for this ticket): ${screenshots(state).filter((a) => !inspected.has(a.sha256)).slice(0, 5).map((a) => a.source ?? a.path).join(', ')}${unseen.length > 5 ? ' …' : ''}`);
+  if (unseen.length) problems.push(`${unseen.length} gate screenshot(s) not inspected by the reviewer (the gate's expanded artifacts globs matched them for this ticket): ${collected.filter((a) => !inspected.has(a.sha256)).slice(0, 5).map((a) => a.source ?? a.path).join(', ')}${unseen.length > 5 ? ' …' : ''}`);
   const pending = unverifiedPrior(state, r);
   if (pending.length) problems.push(`earlier-round finding(s) not verified: ${pending.map((f) => `${f.round}:${f.id}`).join(', ')}; the reviewer of this round adds \`priorFindings\` (fixed or verified-nonissue, with evidence) after its blind closure and records it again`);
   // Acceptance needs three things on the current tree: a passing full gate, a clean closure written for this tree, and
@@ -449,7 +491,7 @@ export function acceptReview(root, options) {
   if (canonical(treeHashes(state)) !== canonical(reviewedTree)) problems.push(`no closure for the current tree: the code changed after the last review; ${fresh}`);
   else if (g.ok && !reviewedAfterGate(r)) problems.push(`the closure was written before a passing gate on this tree, so no reviewer has inspected the gate evidence; for the evidence pass ${fresh}`);
   if (problems.length) throw refuse(`review not accepted:\n  - ${problems.join('\n  - ')}`);
-  append(root, state.id, 'review.accepted', { reviewer: r.closure.reviewer, patch: patchIds(state), heads: treeHashes(state), gate: state.lastGate.runId }, actor(options));
+  append(root, state.id, 'review.accepted', { reviewer: r.closure.reviewer, patch: patchIds(state), heads: treeHashes(state), gate: state.lastGate.runId, ...(verdicts.length ? { noEvidence: verdicts } : {}) }, actor(options));
   return loadState(root, state.id);
 }
 

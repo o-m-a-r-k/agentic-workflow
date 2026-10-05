@@ -5,7 +5,7 @@ import { loadConfig, loadConfigAtCommit, adapterLocation, repoDir } from './conf
 import { append, assertSchema, createAttempt, listAttempts, loadState } from './ledger.mjs';
 import { projectEnv } from './env.mjs';
 import { emitTrackerEvent } from './tracker.mjs';
-import { WfError, assertSafeId, git, hashFile, refuse, run, sessionIdentity, sha256 } from './util.mjs';
+import { WfError, assertEngine, assertSafeId, git, hashFile, refuse, run, sessionIdentity, sha256 } from './util.mjs';
 
 export const worktreesRoot = (root) => path.join(root, '.wf-worktrees');
 export const worktreeDir = (root, id, repoName) => path.join(worktreesRoot(root), id, repoName);
@@ -129,6 +129,7 @@ export function provision(root, cfg, repo, dir) {
 export function entry(root, options) {
   const cfg = loadConfig(root);
   if (!cfg.enabled) throw refuse('the workflow is disabled for this project', 'run `wf enable`');
+  assertEngine(cfg);
   const intent = options.intent ?? 'implementation';
   if (!['implementation', 'analysis'].includes(intent)) throw new WfError('--intent must be implementation or analysis');
   const lane = options.lane ?? (options.item ? 'standard' : 'quick');
@@ -155,11 +156,14 @@ export function entry(root, options) {
     bases[name] = { ref, commit: git(repoDir(root, repo), ['rev-parse', ref]) };
   }
   const adapterBase = bases[adapterRepo.name].commit;
+  let trusted;
   try {
-    loadConfigAtCommit(root, cfg, adapterBase);
+    trusted = loadConfigAtCommit(root, cfg, adapterBase);
   } catch (error) {
     throw refuse(`${error.message.split('\n')[0]}`, `commit .workflow/ on ${adapterRepo.base} in ${adapterRepo.name} and push it to ${adapterRepo.remote}; the gate trusts only the adapter on the base it starts from (${bases[adapterRepo.name].ref})`);
   }
+  // The gate judges with the committed adapter, so its pin counts too.
+  assertEngine(trusted);
   // Create worktrees; if any step fails, remove what was made so a retry starts clean.
   const repos = {};
   const made = [];

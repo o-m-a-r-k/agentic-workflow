@@ -10,7 +10,7 @@ import { append, attemptDir, loadState } from './ledger.mjs';
 import { projectEnv } from './env.mjs';
 import { missingFor, redactor, stepEnv } from './secrets.mjs';
 import { impact, inside, rel } from './topology.mjs';
-import { WfError, canonical, git, globToRegExp, hashFile, hashValue, isPidAlive, matchesAny, now, refuse, run, shellQuote, writeImmutable, writeJson } from './util.mjs';
+import { WfError, assertEngine, canonical, git, globToRegExp, hashFile, hashValue, isPidAlive, matchesAny, now, refuse, run, shellQuote, writeImmutable, writeJson } from './util.mjs';
 
 const gateDir = (root, id) => path.join(attemptDir(root, id), 'gate');
 const lockFile = (root, id) => path.join(gateDir(root, id), 'gate.lock');
@@ -348,7 +348,10 @@ async function executeStep(root, cfg, state, planned, ctx) {
   const workers = chooseWorkers(step);
   const shards = chooseShards(step);
   // An allowlisted environment, never the owner's whole one (session tokens included): see engine/env.mjs.
-  const env = projectEnv(cfg, { ...stepEnv(root, cfg, step.id), WF_ROOT: root, WF_ATTEMPT: state.id, WF_STEP: step.id, WF_EVIDENCE: evidenceDir, WF_WORKERS: String(workers.n) });
+  // WF_ITEM / WF_ITEMS say WHICH tickets' captures the run is for (a batch runs its members' heavy steps); where the
+  // tests write them is the project's convention, matched by the step's `artifacts` globs.
+  const units = artifactUnits(root, state);
+  const env = projectEnv(cfg, { ...stepEnv(root, cfg, step.id), WF_ROOT: root, WF_ATTEMPT: state.id, WF_ITEM: String(state.item ?? state.id), WF_ITEMS: [...new Set(units.map((u) => String(u.item)))].join(' '), WF_STEP: step.id, WF_EVIDENCE: evidenceDir, WF_WORKERS: String(workers.n) });
   const started = Date.now();
   const prior = allGateSteps(state).filter((s) => s.id === step.id && s.status !== 'reused' && s.suites).at(-1);
   const rerun = step.select ? suitesToRerun(prior, planned) : null;
@@ -392,7 +395,7 @@ async function executeStep(root, cfg, state, planned, ctx) {
     const failed = codes.some((c) => c.code !== 0) || suites.some((s) => s.status === 'failed');
     result = { status: interrupted ? 'interrupted' : failed ? 'failed' : 'passed', suites, exitCodes: codes.map((c) => c.code), artifacts: [] };
   }
-  const collected = collectArtifacts(step, planned.dir, path.join(evidenceDir, 'artifacts'), started, artifactUnits(root, state));
+  const collected = collectArtifacts(step, planned.dir, path.join(evidenceDir, 'artifacts'), started, units);
   result.artifacts.push(...collected.artifacts);
   result.artifactGlobs = collected.artifactGlobs;
   let fileHashesRef = null;
@@ -539,6 +542,10 @@ async function acquireGateLock(root, state) {
 }
 
 export async function runGate(root, state, options = {}) {
+  // An engine older than the adapter's pin would judge the ticket by rules the project does not run on.
+  const live = loadConfig(root);
+  assertEngine(live);
+  assertEngine(loadConfigAtCommit(root, live, state.adapterBase));
   // `wf check` needs only the repos it checks to be committed; a gate needs every repo.
   const dirty = Object.fromEntries(Object.entries(uncommitted(state)).filter(([r]) => !options.check || !options.repos || options.repos.includes(r)));
   if (Object.keys(dirty).length) throw refuse(`commit changes before the ${options.check ? 'check' : 'gate'}: ${Object.entries(dirty).map(([r, l]) => `${r} (${l.slice(0, 5).join('; ')}${l.length > 5 ? `; +${l.length - 5} more` : ''})`).join(', ')}`);

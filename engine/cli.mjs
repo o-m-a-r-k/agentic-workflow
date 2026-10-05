@@ -17,19 +17,7 @@ import { impact } from './topology.mjs';
 import { performTracker, recordTracker } from './tracker.mjs';
 import { ENGINE_VERSION, WfError, parseArgs } from './util.mjs';
 
-const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-// The released plugin version. ENGINE_VERSION is the ledger's engine version and moves only with the ledger.
-function pluginVersion() {
-  for (const f of ['.claude-plugin/plugin.json', 'package.json']) {
-    try {
-      const v = JSON.parse(fs.readFileSync(path.join(PLUGIN_ROOT, f), 'utf8')).version;
-      if (v) return v;
-    } catch {}
-  }
-  return ENGINE_VERSION;
-}
-
-const HELP = `wf ${pluginVersion()} — agentic-workflow (ledger engine ${ENGINE_VERSION})
+const HELP = `wf ${ENGINE_VERSION} — agentic-workflow
 
 Onboarding
   wf install [--dir DIR]            link wf into ~/.local/bin
@@ -139,7 +127,7 @@ export async function main(argv) {
     return 0;
   }
   if (cmd === 'version' || cmd === '--version') {
-    process.stdout.write(`${pluginVersion()}\n`);
+    process.stdout.write(`${ENGINE_VERSION}\n`);
     return 0;
   }
   try {
@@ -199,7 +187,7 @@ async function dispatch(cmd, sub, positional, options) {
     const detected = detect(root);
     const file = writeDraft(root, detected, { force: options.force === true });
     register(root, false);
-    print(options, `drafted ${file} (disabled)${detected.compose.length ? `\n  docker compose: ${detected.compose.join(', ')} (steps using it should hold the \`docker\` lease)` : ''}\n  repos: ${detected.repos.map((r) => `${r.name}@${r.base} [${r.packages.map((p) => p.path).join(', ')}]`).join('; ')}\n  steps: ${detected.steps.map((s) => s.id).join(', ') || 'none detected'}\n  components: ${detected.components.map((c) => `${c.id} (${c.kind})`).join(', ')}\n  secrets: ${detected.secrets.filter((s) => s.usedBy.length).map((s) => `${s.key} (${s.kind}, used by ${s.usedBy.join(', ')})`).join(', ') || 'none a detected step uses'}${detected.secrets.some((s) => !s.usedBy.length) ? ` (not catalogued: ${detected.secrets.filter((s) => !s.usedBy.length).map((s) => s.key).join(', ')})` : ''}\nnext: review the draft with the user, commit .workflow/ on the base branch and push it, then \`wf doctor\` and \`wf enable\``, { file, detected });
+    print(options, `drafted ${file} (disabled)${detected.compose.length ? `\n  docker compose: ${detected.compose.join(', ')} (steps using it should hold the \`docker\` lease)` : ''}\n  repos: ${detected.repos.map((r) => `${r.name}@${r.base} [${r.packages.map((p) => p.path).join(', ')}]`).join('; ')}\n  steps: ${detected.steps.map((s) => s.id).join(', ') || 'none detected'}\n  components: ${detected.components.map((c) => `${c.id} (${c.kind})`).join(', ')}\n  secrets: ${detected.secrets.filter((s) => s.usedBy.length).map((s) => `${s.key} (${s.kind}, used by ${s.usedBy.join(', ')})`).join(', ') || 'none a detected step uses'}${detected.secrets.some((s) => !s.usedBy.length) ? ` (not catalogued: ${detected.secrets.filter((s) => !s.usedBy.length).map((s) => s.key).join(', ')})` : ''}${detected.notes.map((n) => `\n  note: ${n}`).join('')}\nnext: review the draft with the user, commit .workflow/ on the base branch and push it, then \`wf doctor\` and \`wf enable\``, { file, detected });
     return 0;
   }
   if (cmd === 'report') {

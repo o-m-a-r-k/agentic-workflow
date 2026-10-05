@@ -10,6 +10,22 @@ export function packageOf(repo, file) {
   return [...repo.packages].filter((p) => inside(file, p.path)).sort((a, b) => b.path.length - a.path.length)[0] ?? null;
 }
 
+// The package a gate step runs in: its `package` (by name or path), else the repo's first.
+export function packageOfStep(cfg, stepId, repoName) {
+  const def = cfg.gate.steps.find((x) => x.id === stepId);
+  const repo = cfg.repos.find((r) => r.name === (def?.repo ?? repoName));
+  if (!repo) return null;
+  return (def?.package ? repo.packages.find((p) => p.name === def.package || p.path === def.package) : repo.packages[0]) ?? null;
+}
+
+// The ticket's changed files (repo-relative, as a gate records them) inside a step's package, docs-only files left out
+// as the gate leaves them out.
+export function changedForStep(cfg, stepId, repoName, changed) {
+  const pkg = packageOfStep(cfg, stepId, repoName);
+  if (!pkg) return [];
+  return (changed?.[repoName] ?? []).filter((f) => inside(f, pkg.path) && !matchesAny(rel(f, pkg.path), pkg.docsOnly ?? []));
+}
+
 export function componentsOf(cfg, repoName, file) {
   return cfg.components.filter((c) => c.repo === repoName && inside(file, c.package ?? '.'));
 }

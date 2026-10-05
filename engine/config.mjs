@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { WfError, YAML, git, hashValue } from './util.mjs';
+import { ENGINE_PIN, WfError, YAML, git, hashValue } from './util.mjs';
 
 export const ADAPTER_DIR = '.workflow';
 export const CONFIG_FILE = 'project.yaml';
@@ -136,6 +136,7 @@ function normalize(raw, source) {
     repos: [],
   };
   cfg.classes = mergeClasses(raw.classes, fail);
+  if (cfg.engine !== null && !ENGINE_PIN.test(String(cfg.engine).trim())) fail(`\`engine\` must be \`N.x\` (same major) or \`>=x.y.z\` (at least that release), not \`${cfg.engine}\``);
   for (const [role, rc] of Object.entries(cfg.roles)) {
     if (!rc || typeof rc !== 'object') continue;
     // Pre-launch replacement: per-role model/effort moved to classes; refusing them keeps a stale setting from being silently ignored.

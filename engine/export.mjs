@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { loadConfig } from './config.mjs';
 import { attemptDir } from './ledger.mjs';
+import { evidenceSteps, noEvidenceVerdicts } from './lifecycle.mjs';
 import { redactor } from './secrets.mjs';
 import { now } from './util.mjs';
 
@@ -13,6 +14,8 @@ export const exportFile = (root, id, json = false) => path.join(attemptDir(root,
 const PLAN_KEYS = ['summary', 'contract', 'anchors', 'tests', 'doNotRun', 'externalServices', 'agentSplit'];
 
 export function exportData(root, s) {
+  // Steps whose globs matched nothing although the ticket changed their package, with the latest review's verdict.
+  const noEvidence = noEvidenceVerdicts(evidenceSteps(root, s), s.review?.closure);
   const steps = (g) => (g.steps ?? []).map((x) => ({ id: x.id, status: x.status, seconds: x.durationMs !== undefined && x.status !== 'reused' ? Math.round(x.durationMs / 100) / 10 : null, reusedFrom: x.reusedFrom ?? null, reason: x.reason ?? null }));
   return {
     exportedAt: now(),
@@ -30,12 +33,13 @@ export function exportData(root, s) {
     amendments: s.criteriaAmendments.map((a) => ({ at: a.at, by: a.by, reason: a.reason, changes: a.changes })),
     work: (s.work ?? []).map((w) => ({ ...w, agents: s.handoffs.filter((h) => h.role === 'implementer' && h.work === w.id).map((h) => h.agent) })),
     handoffs: s.handoffs.map((h) => ({ at: h.at, role: h.role, agent: h.agent, agentType: h.agentType ?? null, class: h.class ?? null, effort: h.effort ?? null, work: h.work ?? null })),
-    reviews: (s.reviews ?? []).map((r) => ({ at: r.at, reviewer: r.reviewer, provenance: r.provenance, findings: (r.closure?.findings ?? []).map((f) => ({ id: f.id, severity: f.severity ?? null, status: f.status ?? 'open', summary: f.summary ?? '', work: f.work ?? null })), priorFindings: r.closure?.priorFindings ?? [] })),
+    reviews: (s.reviews ?? []).map((r) => ({ at: r.at, reviewer: r.reviewer, provenance: r.provenance, findings: (r.closure?.findings ?? []).map((f) => ({ id: f.id, severity: f.severity ?? null, status: f.status ?? 'open', summary: f.summary ?? '', work: f.work ?? null })), priorFindings: r.closure?.priorFindings ?? [], noEvidence: Array.isArray(r.closure?.noEvidence) ? r.closure.noEvidence : [] })),
     accepted: s.accepted ? { at: s.accepted.at, reviewer: s.accepted.reviewer } : null,
     gates: s.gates.map((g) => ({ at: g.at, runId: g.runId, status: g.status, focused: Boolean(g.focused), carried: Boolean(g.carriedFrom), steps: steps(g) })),
     checks: (s.checks ?? []).map((g) => ({ at: g.at, runId: g.runId, status: g.status, steps: steps(g) })),
     // What the last gate collected per `artifacts` glob: exactly the files the reviewer must inspect.
     evidence: (s.lastGate?.steps ?? []).filter((x) => x.artifactGlobs?.length).flatMap((x) => x.artifactGlobs.map((g) => ({ step: x.id, glob: g.glob, expanded: g.expanded, files: g.files.map((f) => ({ source: f.source, sha256: f.sha256 })) }))),
+    noEvidence,
     flaky: s.flaky ?? [],
     tracker: { pending: s.tracker.pending.map((a) => ({ event: a.event, op: a.op, status: a.status ?? null })), done: s.tracker.done.map((d) => ({ event: d.event, at: d.at })) },
     delivery: { completedAt: s.delivery.completedAt, repos: Object.values(s.delivery.repos).map((d) => ({ repo: d.repo, commit: d.commit ?? null, skipped: d.skipped ?? null })) },
@@ -58,10 +62,11 @@ export function exportHtml(d) {
     sec('Work items', table(['Work', 'Class', 'Criteria', 'Repos', 'Agents', 'Why'], d.work.map((w) => [esc(w.id), esc(w.class), esc((w.criteria ?? []).join(', ')), esc((w.repos ?? []).join(', ')), esc(w.agents.join(', ')), esc(w.why ?? '')]))),
     sec('Criteria', table(['Id', 'Text', 'UAT'], d.criteria.map((c) => [esc(c.id), esc(c.text), esc(c.uat === false ? 'no' : c.uat ?? '')])) + (d.amendments.length ? `<h3>Amendments</h3>${table(['At', 'By', 'Reason', 'Changed', 'Added', 'Dropped'], d.amendments.map((a) => [esc(a.at), esc(a.by), esc(a.reason), esc((a.changes?.changed ?? []).join(', ')), esc((a.changes?.added ?? []).join(', ')), esc((a.changes?.dropped ?? []).map((x) => `${x.id} (${x.reason})`).join(', '))]))}` : '')),
     sec('Handoffs', table(['At', 'Role', 'Agent', 'Work', 'Class', 'Effort'], d.handoffs.map((h) => [esc(h.at), esc(h.role), esc(h.agent), esc(h.work ?? ''), esc(h.class ?? ''), esc(h.effort ?? '')]))),
-    sec('Review rounds', d.reviews.length ? d.reviews.map((r) => `<h3>${esc(r.reviewer)} <small>${esc(r.at)}${r.provenance ? ` · provenance ${esc(r.provenance)}` : ''}</small></h3>${table(['Finding', 'Severity', 'Status', 'Summary', 'Work'], r.findings.map((f) => [esc(f.id), esc(f.severity ?? ''), badge(f.status), esc(f.summary), esc(f.work ?? '')]))}${r.priorFindings.length ? `<p class="muted">verified from earlier rounds: ${r.priorFindings.map((p) => `${esc(p.round)}:${esc(p.id)} ${esc(p.status)}`).join(', ')}</p>` : ''}`).join('') + (d.accepted ? `<p>${badge('accepted')} by ${esc(d.accepted.reviewer)} at ${esc(d.accepted.at)}</p>` : '') : '<p class="muted">none yet</p>'),
+    sec('Review rounds', d.reviews.length ? d.reviews.map((r) => `<h3>${esc(r.reviewer)} <small>${esc(r.at)}${r.provenance ? ` · provenance ${esc(r.provenance)}` : ''}</small></h3>${table(['Finding', 'Severity', 'Status', 'Summary', 'Work'], r.findings.map((f) => [esc(f.id), esc(f.severity ?? ''), badge(f.status), esc(f.summary), esc(f.work ?? '')]))}${r.priorFindings.length ? `<p class="muted">verified from earlier rounds: ${r.priorFindings.map((p) => `${esc(p.round)}:${esc(p.id)} ${esc(p.status)}`).join(', ')}</p>` : ''}${r.noEvidence.length ? `<p class="muted">no-evidence verdicts: ${r.noEvidence.map((v) => `${esc(v.step)}: ${esc(v.reason ?? '')}`).join('; ')}</p>` : ''}`).join('') + (d.accepted ? `<p>${badge('accepted')} by ${esc(d.accepted.reviewer)} at ${esc(d.accepted.at)}</p>` : '') : '<p class="muted">none yet</p>'),
     sec('Gate runs', d.gates.length ? d.gates.map((g) => `<h3>${badge(g.status)} ${esc(g.runId)}${g.focused ? ' (focused)' : ''}${g.carried ? ' (carried to merged base)' : ''}</h3>${table(['Step', 'Status', 'Seconds', 'Reused from'], g.steps.map((x) => [esc(x.id), badge(x.status), esc(x.seconds ?? ''), esc(x.reusedFrom ?? '')]))}`).join('') : '<p class="muted">none yet</p>'),
     d.checks.length ? sec('Checks (light steps, never a gate)', d.checks.map((g) => `<h3>${badge(g.status)} ${esc(g.runId)}</h3>${table(['Step', 'Status', 'Seconds'], g.steps.map((x) => [esc(x.id), badge(x.status), esc(x.seconds ?? '')]))}`).join('')) : '',
     d.evidence.length ? sec('Gate evidence (last gate)', `<p class="muted">Each step's artifacts globs, expanded for this ticket. The reviewer inspects every file listed; nothing outside them is required. A glob that matched nothing means no screenshots for this ticket from it.</p>${table(['Step', 'Glob', 'Expanded', 'Files'], d.evidence.map((e) => [esc(e.step), esc(e.glob), esc(e.expanded.join(', ')), e.files.length ? e.files.map((f) => `${esc(f.source)} <small>${esc(f.sha256.slice(0, 12))}</small>`).join('<br>') : '<span class="muted">no screenshots for this ticket</span>']))}`) : '',
+    d.noEvidence.length ? sec('Steps without captures', `<p class="muted">These steps' globs matched nothing although the ticket changed their package. Acceptance needs the reviewer's verdict on each: a reason no capture is needed, or a finding.</p>${table(['Step', 'Changed files', 'Globs', 'Verdict'], d.noEvidence.map((v) => [esc(v.step), esc(v.changed), esc(v.globs.join(', ')), v.reason ? esc(v.reason) : v.finding ? `finding ${esc(v.finding)}` : '<span class="warn">no verdict yet</span>']))}`) : '',
     d.flaky.length ? sec('Flaky', table(['Step', 'Failed run', 'Passed run', 'Suites'], d.flaky.map((f) => [esc(f.step), esc(f.failedRun), esc(f.passedRun), esc((f.suites ?? []).join(', '))]))) : '',
     sec('Tracker', table(['Event', 'State'], [...d.tracker.done.map((t) => [esc(t.event), `${badge('recorded')} ${esc(t.at)}`]), ...d.tracker.pending.map((t) => [esc(t.event), `${badge('pending')} ${esc(t.op)}${t.status ? ` ${esc(t.status)}` : ''}`])])),
     sec('Delivery', d.delivery.completedAt ? `<p>${badge('delivered')} ${esc(d.delivery.completedAt)}</p>${table(['Repo', 'Commit'], d.delivery.repos.map((r) => [esc(r.repo), esc(r.commit ? r.commit.slice(0, 12) : r.skipped ?? '')]))}` : '<p class="muted">not delivered yet</p>'),

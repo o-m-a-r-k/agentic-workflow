@@ -7,7 +7,38 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 export const YAML = require('./vendor/yaml/dist/index.js');
 
-export const ENGINE_VERSION = '0.1.2';
+// The released version, read from package.json (kept in sync with both plugin manifests). It was a constant that
+// stayed at 0.1.2 through four releases, so the ledger recorded a version nothing could be checked against.
+export const ENGINE_VERSION = require('../package.json').version;
+
+// `x.y.z` as numbers, missing parts 0; null when it is not a version.
+export function parseVersion(v) {
+  const m = String(v ?? '').trim().match(/^(\d+)(?:\.(\d+))?(?:\.(\d+))?$/);
+  return m ? [Number(m[1]), Number(m[2] ?? 0), Number(m[3] ?? 0)] : null;
+}
+export function compareVersions(a, b) {
+  const x = parseVersion(a);
+  const y = parseVersion(b);
+  for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] < y[i] ? -1 : 1;
+  return 0;
+}
+
+// The adapter's `engine:` pin: `N.x` (same major) or `>=x.y.z` (at least that release). Returns why the installed
+// engine does not satisfy it, or null. The pin was only checked by `wf doctor`, major only, so a project that needed a
+// newer engine's behaviour ran tickets on an older one without a word.
+export const ENGINE_PIN = /^(?:\d+\.x|>=\s*\d+(?:\.\d+){0,2})$/;
+export function enginePinProblem(pin, installed = ENGINE_VERSION) {
+  if (pin === null || pin === undefined) return null;
+  const p = String(pin).trim();
+  if (/^\d+\.x$/.test(p)) return p.split('.')[0] === String(parseVersion(installed)[0]) ? null : `the project pins engine ${p}; installed is ${installed}`;
+  const min = p.match(/^>=\s*(.+)$/)?.[1];
+  if (min && parseVersion(min)) return compareVersions(installed, min) >= 0 ? null : `the project needs engine ${p}; installed is ${installed}`;
+  return `the engine pin \`${p}\` is not \`N.x\` or \`>=x.y.z\``;
+}
+export function assertEngine(cfg, installed = ENGINE_VERSION) {
+  const problem = enginePinProblem(cfg?.engine, installed);
+  if (problem) throw refuse(problem, 'upgrade the plugin (`claude plugin update agentic-workflow@agentic-workflow`, or `git pull` in a clone and `node bin/wf install`), or change `engine:` in .workflow/project.yaml');
+}
 export const SCHEMA_VERSION = 1;
 
 // Exit codes: 1 usage/config error, 2 invalid override, 75 refusal (state does not allow the action).

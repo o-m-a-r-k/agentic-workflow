@@ -114,7 +114,7 @@ The engine uses it for:
 # .workflow/project.yaml
 version: 1
 enabled: true
-engine: "1.x"
+engine: ">=0.1.10"          # or "0.x" (same major); wf entry and wf gate refuse an older engine
 name: example
 repos:                       # git roots
   - name: backend
@@ -187,7 +187,7 @@ Suite-level results without a plugin: `report: { junit: <path or glob> }` (PHPUn
 
 ## Per-ticket artifacts
 
-A step's `artifacts` globs (relative to its package) select which files a gate run produced are collected as evidence; screenshots among them must each be inspected by the reviewer before `wf accept`, and are what delivery attaches to the ticket. Placeholders `{item}`, `{itemLower}` and `{attempt}` are expanded per attempt at collection, once per unit (the attempt, plus each member of a batch, whose heavy steps run in the batch gate). `{name}` without a comma is a placeholder; `{a,b}` stays alternation; an unknown placeholder fails config validation (and so `wf doctor` and the gate) with the known list. Each step result records `artifactGlobs: [{ glob, expanded, files }]`; the reviewer bundle's `gate.artifacts` and `wf export` show them, with `no screenshots for this ticket (globs: …)` for a step whose globs matched nothing. The required set is exactly the collected screenshots, so a file outside the expanded globs is never required and every file inside them is. Named failure: placeholder-less globs made 1,300 other tickets' screenshots required evidence for one ticket. `wf doctor` prints per-glob counts from the most recent gate and warns (never fails) when a glob without a placeholder matched files and that gate's changed files (recorded as `changed` on the gate) include nothing under the glob's fixed directory.
+A step's `artifacts` globs (relative to its package) select which files a gate run produced are collected as evidence; screenshots among them must each be inspected by the reviewer before `wf accept`, and are what delivery attaches to the ticket. Placeholders `{item}`, `{itemLower}` and `{attempt}` are expanded per attempt at collection, once per unit (the attempt, plus each member of a batch, whose heavy steps run in the batch gate). `{name}` without a comma is a placeholder; `{a,b}` stays alternation; an unknown placeholder fails config validation (and so `wf doctor` and the gate) with the known list. Each step result records `artifactGlobs: [{ glob, expanded, files }]`; the reviewer bundle's `gate.artifacts` and `wf export` show them per step, with `changedHere` (the gate's recorded `changed` files inside the step's package, docs-only files left out, the same package scoping doctor uses) and `uncovered` (the step declares artifacts, every expanded glob matched nothing, and `changedHere` is non-empty). A step whose globs matched nothing and whose package did not change requires nothing. An uncovered step needs the reviewer's verdict: a closure `noEvidence: [{ step, reason }]` entry with a non-empty reason, or a finding that names the step; `wf accept` refuses otherwise, records the verdicts on `review.accepted`, and `wf export` lists them under "Steps without captures". Named failure: a UI-changing ticket whose tests wrote no capture passed as "no screenshots for this ticket" and nothing flagged it. No adapter config is involved. A criterion whose evidence is `kind: screenshot` must reference a collected screenshot by sha256 or source path. Steps receive `WF_ITEM` (the attempt's item) and `WF_ITEMS` (the items of every unit, space-separated): they decide which captures a run makes; where the tests write them is the project's convention, and a helper that defaulted every capture's folder from `WF_ITEM` would make every old spec's captures owed again. The required set is exactly the collected screenshots, so a file outside the expanded globs is never required and every file inside them is. Named failure: placeholder-less globs made 1,300 other tickets' screenshots required evidence for one ticket. `wf doctor` warns (never fails) from the adapter alone on every glob without a placeholder, prints per-glob counts from the most recent gate, and warns when a glob without a placeholder matched files and that gate's changed files (recorded as `changed` on the gate) include nothing under the glob's fixed directory.
 
 ## Live gate output
 
@@ -375,7 +375,7 @@ What the evidence proves, and what it does not:
 
 - agentic-workflow is delivered through itself (its own `.workflow/`).
 - Releases are tagged; the scenario suite passes before a tag.
-- Projects may pin `engine:`; `wf doctor` reports a mismatch. An update never changes an open attempt's frozen gate plan or criteria.
+- Projects may pin `engine:` as `N.x` or `>=x.y.z`; `wf entry` and `wf gate` refuse an engine that does not satisfy the live or base-committed pin (installed vs required, and how to upgrade), and `wf doctor` reports it. `ENGINE_VERSION` is read from `package.json`; ledgers keep the version they were admitted with (older attempts say 0.1.2), which the hash chain covers unchanged. An update never changes an open attempt's frozen gate plan or criteria.
 
 ## Not built until a project needs it
 

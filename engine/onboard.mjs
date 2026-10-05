@@ -10,7 +10,8 @@ import { chooseWorkers } from './host.mjs';
 import { missingFor, redactor, status as secretsStatus, stepEnv } from './secrets.mjs';
 import { findSkill } from './skills.mjs';
 import { report } from './telemetry.mjs';
-import { ENGINE_VERSION, WfError, YAML, git, refuse, run, shellQuote } from './util.mjs';
+import { packageOfStep } from './topology.mjs';
+import { ENGINE_VERSION, WfError, YAML, enginePinProblem, git, refuse, run, shellQuote } from './util.mjs';
 
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const exists = (...p) => fs.existsSync(path.join(...p));
@@ -78,6 +79,29 @@ function isWorkspaceRoot(dir) {
   return Boolean(pkg?.workspaces) || ['pnpm-workspace.yaml', 'lerna.json', 'nx.json', 'turbo.json'].some((f) => exists(dir, f));
 }
 
+// A browser test runner and the folder its tests live in (relative to the package). The drafted `artifacts` glob is
+// the ticket's own folder under it: the 0.1.9 draft's `test-results/**/*.png` matched every screenshot the suite wrote,
+// which a real ticket had to inspect 1,300 of. Other runners draft no artifacts.
+function uiRunner(dir, pkg) {
+  const deps = { ...(pkg?.dependencies ?? {}), ...(pkg?.devDependencies ?? {}) };
+  const configured = (names, key) => {
+    for (const f of names) {
+      const file = path.join(dir, f);
+      if (!fs.existsSync(file)) continue;
+      const m = fs.readFileSync(file, 'utf8').match(new RegExp(`${key}\\s*:\\s*['"\`]([^'"\`]+)['"\`]`));
+      if (m) return path.posix.normalize(m[1].replace(/\\/g, '/')).replace(/^\.\//, '').replace(/\/$/, '');
+    }
+    return null;
+  };
+  const firstDir = (dirs, fallback) => dirs.find((d) => exists(dir, d)) ?? fallback;
+  if (deps['@playwright/test'] || deps.playwright) {
+    const testDir = configured(['playwright.config.ts', 'playwright.config.js', 'playwright.config.mjs', 'playwright.config.cjs'], 'testDir');
+    return { name: 'playwright', dir: testDir && testDir !== '.' && !testDir.startsWith('..') ? testDir : firstDir(['e2e', 'tests/e2e', 'tests'], 'e2e') };
+  }
+  if (deps.cypress) return { name: 'cypress', dir: 'cypress' };
+  return null;
+}
+
 function stepsFor(repoName, repoPath, pkgPath, sources) {
   const dir = path.join(repoPath, pkgPath);
   const steps = [];
@@ -106,8 +130,8 @@ function stepsFor(repoName, repoPath, pkgPath, sources) {
     }
     for (const n of ['test:e2e', 'e2e']) {
       if (has(n)) {
-        const playwright = pkg.devDependencies?.['@playwright/test'];
-        add({ id: id('e2e'), run: `${runner} ${n}`, tier: 'heavy', ...(playwright ? { lease: 'browser', artifacts: ['test-results/**/*.png'] } : { lease: 'docker' }) }, `${pkgPath}/package.json scripts.${n}`);
+        const ui = uiRunner(dir, pkg);
+        add({ id: id('e2e'), run: `${runner} ${n}`, tier: 'heavy', ...(ui ? { lease: 'browser', artifacts: [`${ui.dir}/.evidence/{itemLower}/**/*.png`] } : { lease: 'docker' }) }, `${pkgPath}/package.json scripts.${n}${ui ? ` (${ui.name}, tests in ${ui.dir}/)` : ''}`);
         break;
       }
     }
@@ -241,7 +265,9 @@ export function detect(root) {
   }
   // A key counts as used by a step whose command names it ($KEY, ${KEY} or the bare name).
   for (const k of secrets) k.usedBy = steps.filter((s) => s.run && new RegExp(`(^|[^A-Za-z0-9_])${k.key}([^A-Za-z0-9_]|$)`).test(s.run)).map((s) => s.id);
-  return { root, repos, steps, components, secrets, compose, sources, agentsMd: repos.map((r) => ({ repo: r.name, exists: exists(root, r.path, 'AGENTS.md') })) };
+  // Said once per draft that collects captures: the glob only works if the tests write there.
+  const notes = steps.some((st) => st.artifacts?.length) ? [`${steps.filter((st) => st.artifacts?.length).map((st) => `${st.id}: ${st.artifacts.join(', ')}`).join('; ')}. UI tests must write each ticket's captures there; WF_ITEMS lists the tickets of the run.`] : [];
+  return { root, repos, steps, components, secrets, compose, sources, notes, agentsMd: repos.map((r) => ({ repo: r.name, exists: exists(root, r.path, 'AGENTS.md') })) };
 }
 
 export function writeDraft(root, detected, { force = false } = {}) {
@@ -462,9 +488,7 @@ export function artifactReport(root, cfg) {
   const counts = [];
   const warnings = [];
   for (const step of last.gate.steps.filter((x) => x.artifactGlobs?.length)) {
-    const def = cfg.gate.steps.find((x) => x.id === step.id);
-    const repo = cfg.repos.find((r) => r.name === step.repo);
-    const pkgPath = (def?.package ? repo?.packages.find((p) => p.name === def.package || p.path === def.package) : repo?.packages[0])?.path ?? '.';
+    const pkgPath = packageOfStep(cfg, step.id, step.repo)?.path ?? '.';
     const changed = last.gate.changed?.[step.repo] ?? [];
     for (const g of step.artifactGlobs) {
       counts.push(`${step.id}: ${g.glob} matched ${g.files.length}`);
@@ -477,6 +501,19 @@ export function artifactReport(root, cfg) {
     }
   }
   return { from: `${last.state.id} ${last.gate.runId}`, counts, warnings };
+}
+
+// Read from the adapter, so it shows before any gate has run: a glob without a placeholder collects every capture the
+// suite writes, and each one becomes evidence for every ticket.
+export function staticArtifactWarnings(cfg) {
+  const out = [];
+  for (const step of cfg.gate.steps) {
+    for (const g of step.artifacts ?? []) {
+      if (placeholdersIn(g).length) continue;
+      out.push({ check: `artifacts of step ${step.id}`, problem: `\`${g}\` has no ${ARTIFACT_PLACEHOLDERS.map((p) => `{${p}}`).join('/')} placeholder: every file the suite writes under it is evidence the reviewer must inspect for every ticket, not just this ticket's`, fix: 'have the UI tests write each ticket\'s captures under a ticket folder (the gate passes WF_ITEM and WF_ITEMS) and point the glob there, e.g. `e2e/.evidence/{itemLower}/**/*.png`' });
+    }
+  }
+  return out;
 }
 
 // A step whose command reads a sibling repo (`../web`, `$WF_ROOT/web`, the attempt's `web` worktree) but does not list
@@ -554,8 +591,9 @@ export async function doctor(root, { runSteps = true } = {}) {
     bad('config', { check: 'adapter at base', problem: error.message.split('\n')[0], fix: 'commit .workflow/ on the base branch of the adapter repo and push it; the gate trusts only the adapter on the base it starts from' });
     adapterBase = null;
   }
-  const major = ENGINE_VERSION.split('.')[0];
-  if (cfg.engine && /^\d+\.x$/.test(cfg.engine) && cfg.engine.split('.')[0] !== major) bad('config', { check: 'engine version', problem: `project pins engine ${cfg.engine}, this is ${ENGINE_VERSION}`, fix: `install agentic-workflow ${cfg.engine} or update the pin` });
+  const pin = enginePinProblem(cfg.engine);
+  if (pin) bad('config', { check: 'engine version', problem: pin, fix: `upgrade agentic-workflow to ${cfg.engine} or change the pin (\`wf entry\` and \`wf gate\` refuse until then)` });
+  else if (cfg.engine) report.config.push({ ok: true, check: `engine ${ENGINE_VERSION} satisfies the pin ${cfg.engine}` });
   for (const t of cfg.requires.tools ?? []) {
     const r = run('sh', ['-c', t.check ?? `command -v ${t.name}`], { allowFail: true, env: projectEnv(cfg) });
     const have = (r.stdout + r.stderr).match(/(\d+)(?:\.(\d+))?/);
@@ -588,6 +626,7 @@ export async function doctor(root, { runSteps = true } = {}) {
   // Warnings never fail doctor: each names a setup that let a stale or confounded result through.
   for (const w of siblingWarnings(root, cfg)) report.warnings.push({ ok: true, warn: true, check: w.check, problem: w.problem, fix: w.fix });
   for (const w of modelWarnings(root, cfg)) report.warnings.push({ ok: true, warn: true, check: w.check, problem: w.problem, fix: w.fix });
+  for (const w of staticArtifactWarnings(cfg)) report.warnings.push({ ok: true, warn: true, ...w });
   const art = artifactReport(root, cfg);
   if (art.counts.length) report.config.push({ ok: true, check: `artifacts matched in the last gate (${art.from})`, note: art.counts.join('\n    ') });
   for (const w of art.warnings) report.warnings.push({ ok: true, warn: true, ...w });
