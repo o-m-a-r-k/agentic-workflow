@@ -491,14 +491,24 @@ export async function runGate(root, state, options = {}) {
     const plan = await planGate(root, state, options);
     const missing = plan.steps.filter((s) => s.decision === 'run' && s.missingSecrets?.length);
     if (missing.length) throw refuse(`secrets missing: ${missing.map((s) => `${s.id} needs ${s.missingSecrets.join(', ')}`).join('; ')}`, 'run `wf secrets guide` in your terminal');
-    const record = await execute(root, state, plan);
+    const record = await execute(root, state, plan, options.live ?? null);
     return { record, recovered };
   } finally {
     release();
   }
 }
 
-async function execute(root, state, plan) {
+// One line per event, written as it happens, so a gate run in the background shows progress in its log.
+function failureExcerpt(result, redact) {
+  const suite = (result.suites ?? []).find((x) => x.status === 'failed');
+  if (suite) return [`first failure: ${suite.id}${suite.file && suite.file !== suite.id ? ` (${suite.file})` : ''}`];
+  if (result.error) return [redact(result.error)];
+  if (!result.log || !fs.existsSync(result.log)) return [];
+  const lines = fs.readFileSync(result.log, 'utf8').split('\n').filter((l) => l.trim());
+  return lines.slice(-5).map((l) => redact(l));
+}
+
+async function execute(root, state, plan, live = null) {
   const runId = `${now().replace(/[:.]/g, '-')}-${process.pid}`;
   const runDir = path.join(gateDir(root, state.id), runId);
   fs.mkdirSync(runDir, { recursive: true });
@@ -524,7 +534,9 @@ async function execute(root, state, plan) {
     },
   };
   const results = [];
-  const saveProgress = () => writeJson(progressFile(root, state.id, runId), { runId, steps: results });
+  const runningNow = new Map(); // step id -> start time
+  const saveProgress = () => writeJson(progressFile(root, state.id, runId), { runId, pid: process.pid, steps: results, running: [...runningNow].map(([id, at]) => ({ id, startedAt: new Date(at).toISOString() })) });
+  const say = (line) => live?.write(`wf gate: ${line}\n`);
   let stopping = false;
   const onSignal = async () => {
     if (stopping) return;
@@ -550,6 +562,8 @@ async function execute(root, state, plan) {
   }
   for (const s of plan.steps.filter((x) => ['skip', 'defer'].includes(x.decision))) results.push({ id: s.id, repo: s.repo, tier: s.tier, status: s.decision === 'defer' ? 'deferred' : 'skipped', reason: s.reason, skippedBy: s.skippedBy, runId });
   saveProgress();
+  say(`run ${runId}: ${queue.length} to run, ${results.filter((r) => r.status === 'reused').length} reused, ${results.length - results.filter((r) => r.status === 'reused').length} skipped or deferred`);
+  for (const r of results) say(`${r.status.padEnd(8)} ${r.id}  ${r.reason ?? ''}`.trimEnd());
 
   const leases = plan.cfg.gate.leases ?? {};
   const held = {};
@@ -575,13 +589,21 @@ async function execute(root, state, plan) {
         const p = queue.splice(idx, 1)[0];
         const lease = leaseOf(p);
         if (lease) held[lease] = (held[lease] ?? 0) + 1;
+        runningNow.set(p.id, Date.now());
+        saveProgress();
+        say(`start    ${p.id}`);
         const job = executeStep(root, plan.cfg, state, p, ctx)
           .catch((error) => ({ id: p.id, repo: p.repo, tier: p.tier, key: p.key, status: 'failed', error: error.message, runId }))
           .then((r) => {
             if (lease) held[lease] -= 1;
             if (machine.has(p.id)) fs.rmSync(machine.get(p.id), { force: true });
-            results.push(stopping && r.status !== 'passed' ? { ...r, status: 'interrupted' } : r);
+            const final = stopping && r.status !== 'passed' ? { ...r, status: 'interrupted' } : r;
+            const secs = ((Date.now() - runningNow.get(p.id)) / 1000).toFixed(1);
+            runningNow.delete(p.id);
+            results.push(final);
             saveProgress();
+            say(`${final.status.padEnd(8)} ${p.id}  ${secs}s`);
+            if (final.status === 'failed') for (const line of failureExcerpt(final, ctx.redact)) say(`  ${p.id} | ${line}`);
             active.delete(job);
             pump();
           });
@@ -603,10 +625,35 @@ async function execute(root, state, plan) {
   // Untracked files the steps produced (reports, screenshots) are recorded so they do not block the next gate.
   const producedUntracked = {};
   for (const [name, r] of Object.entries(state.repos)) producedUntracked[name] = untrackedSnapshot(r.worktree);
+  say(`${status} (${runId})`);
   const record = { runId, status, producedUntracked, full: plan.full, focused: plan.focused, adapterBase: state.adapterBase, tree: plan.tree, impact: plan.impact, unchecked: plan.unchecked, steps: results, finishedAt: now() };
   writeImmutable(path.join(runDir, 'result.json'), `${JSON.stringify(record, null, 2)}\n`);
   append(root, state.id, 'gate.finished', { ...record, evidence: path.join(runDir, 'result.json') }, null);
   return record;
+}
+
+// The gate running right now for this attempt, read from its lock and live progress file; null when none runs.
+export function liveGate(root, state) {
+  const file = lockFile(root, state.id);
+  let lock;
+  try {
+    lock = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {
+    return null;
+  }
+  if (!lock.runId || !isWfRunner(lock.pid)) return null;
+  let progress = { steps: [], running: [] };
+  try {
+    progress = JSON.parse(fs.readFileSync(progressFile(root, state.id, lock.runId), 'utf8'));
+  } catch {}
+  const at = Date.now();
+  return {
+    runId: lock.runId,
+    pid: lock.pid,
+    startedAt: lock.startedAt,
+    running: (progress.running ?? []).map((r) => ({ id: r.id, seconds: Math.round((at - Date.parse(r.startedAt)) / 1000) })),
+    finished: (progress.steps ?? []).map((r) => ({ id: r.id, status: r.status, seconds: r.durationMs !== undefined && r.status !== 'reused' ? Math.round(r.durationMs / 1000) : null })),
+  };
 }
 
 export function stopGate(root, state, reason) {

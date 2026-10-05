@@ -202,6 +202,7 @@ flowchart TD
 - **Reuse:** a suite reruns only when its inputs or its runner change. Worker counts never invalidate a pass.
 - **Parallelism:** `maxParallelSteps` sets how many steps run at once. Leases (`docker`, `browser`, `simulator`) stop resource-heavy steps from colliding.
 - **Workers:** `auto` sizes them from measured free memory and performance cores, never below the minimum you set.
+- **Live output:** `wf gate` prints a line as each step starts and finishes (status, seconds; for a failure the first failing suite or the last 5 log lines, secrets masked), so a gate run in the background shows progress in its log. With `--json` these lines go to stderr. A failing step never stops the others. While a gate runs, `wf status` and `wf resume` show the steps running and finished.
 - **Base movement:** when the base branch advances, the gate reopens only if the new commits touch the ticket's paths or shared infrastructure.
 
 ### Gate step fields

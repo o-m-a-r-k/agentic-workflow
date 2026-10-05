@@ -181,6 +181,10 @@ The engine runs shell commands and knows no framework. Onboarding proposes steps
 
 Suite-level results without a plugin: `report: { junit: <path or glob> }` (PHPUnit, Codeception, Jest, Vitest, Playwright, pytest, Gradle). Suite-level reuse also needs `select` (the engine substitutes the suites to rerun) and a suite → file mapping from JUnit `file`/`classname`; without `select` the step is reused or rerun as a whole. Xcode results need conversion to JUnit.
 
+## Live gate output
+
+`wf gate` writes one line per event as it happens: the run's plan (to run, reused, skipped), each step's start, and each finish with status and seconds; a failed step adds its first failing suite, or the last 5 lines of its log, through the redactor. Lines go to stdout, or stderr with `--json`. The gate never fails fast: independent steps keep running. The run's `progress.json` lists finished steps and the ones running now; `wf status` / `wf resume` read it (with the gate lock) and show both while the gate runs.
+
 ## Parallelism and workers
 
 - **Steps:** `gate.maxParallelSteps`; `lease` names a resource (`docker`, `db`, `browser`, `simulator`) and `gate.leases` sets holders per lease. Leases are machine-wide: a step waits for a slot another gate holds, the gate itself always starts at once.

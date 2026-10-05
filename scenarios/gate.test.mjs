@@ -241,3 +241,41 @@ test('a focused gate is repair proof only: review, accept and delivery need a ga
   assert.equal(accept.code, 75, 'a newer focused gate is not the full proof of the tree');
   assert.match(accept.err, /focused and skipped e2e/);
 });
+
+test('a running gate shows progress: wf gate prints each step as it starts and finishes, wf status shows running and finished steps', async () => {
+  const steps = [
+    { id: 'fast', repo: 'app', run: 'echo fast-ok' },
+    { id: 'slow', repo: 'app', run: 'while [ ! -f "$WF_ROOT/../go" ]; do sleep 0.1; done' },
+    { id: 'bad', repo: 'app', run: 'for i in 1 2 3 4 5 6 7; do echo "line$i"; done; exit 1' },
+  ];
+  const { base, root } = singleRepoProject('live', { gate: { maxParallelSteps: 3, steps } });
+  const e = admitted(root, base, 'ENG-29');
+  commitIn(e.repos.app.worktree, { 'src/a.txt': 'l\n' });
+  const outFile = path.join(base, 'gate.out');
+  const fd = fs.openSync(outFile, 'w');
+  const env = { ...process.env, WF_CONFIG_HOME: path.join(root, '..', '.wfhome') };
+  delete env.CLAUDE_CODE_SESSION_ID;
+  const child = spawn(process.execPath, [WF, 'gate', '--attempt', e.id], { cwd: root, env, stdio: ['ignore', fd, fd] });
+  const exited = new Promise((r) => child.on('exit', r));
+  const read = () => fs.readFileSync(outFile, 'utf8');
+  const deadline = Date.now() + 30000;
+  while (Date.now() < deadline && !(/passed\s+fast/.test(read()) && /failed\s+bad/.test(read()))) await new Promise((r) => setTimeout(r, 100));
+  const midway = read();
+  assert.match(midway, /start\s+slow/, 'a step start is printed when it starts');
+  assert.match(midway, /passed\s+fast\s+\d+\.\ds/, 'a finished step is printed before the gate ends');
+  assert.match(midway, /bad \| line7/);
+  assert.match(midway, /bad \| line3/);
+  assert.doesNotMatch(midway, /bad \| line2/, 'only the last 5 lines of a failing log are printed');
+  const status = ok(wf(root, ['status'])).out;
+  assert.match(status, /gate running/);
+  assert.match(status, /running: slow \(\d+s\)/);
+  assert.match(status, /finished: .*fast passed/);
+  assert.match(status, /bad failed/);
+  assert.match(ok(wf(root, ['resume', '--attempt', e.id])).out, /a gate is running/);
+  fs.writeFileSync(path.join(root, '..', 'go'), '');
+  assert.equal(await exited, 1);
+  fs.closeSync(fd);
+  assert.match(read(), /passed\s+slow/, 'a failing step does not stop the others');
+  assert.equal(byId(state(root, e.id).lastGate.steps).slow.status, 'passed');
+  assert.doesNotMatch(ok(wf(root, ['status'])).out, /gate running/);
+});

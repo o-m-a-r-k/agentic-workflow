@@ -3,7 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { abandon, adopt, entry, hold, openState, release } from './attempt.mjs';
 import { findRoot, loadConfig, requireRoot } from './config.mjs';
-import { runGate, stopGate } from './gate.mjs';
+import { liveGate, runGate, stopGate } from './gate.mjs';
 import { listAttempts, loadState } from './ledger.mjs';
 import { acceptReview, amendCriteria, batchCreate, batchEject, closeAfterHandoff, deliver, freezeCriteria, handoff, nextAction, recordReview, reopen } from './lifecycle.mjs';
 import { detect, doctor, register, registry, setEnabled, sync, writeDraft } from './onboard.mjs';
@@ -58,8 +58,14 @@ function summary(root, s) {
   const lines = [`${s.id}  ${s.item}  lane=${s.lane}  intent=${s.intent}  phase=${s.phase}`, `  owner: ${s.owner}`];
   for (const [name, r] of Object.entries(s.repos)) lines.push(`  ${name}: ${r.worktree} (base ${r.base.slice(0, 10)})`);
   if (s.activeHold) lines.push(`  HOLD: ${s.activeHold.reason}`);
+  const live = ['done', 'abandoned'].includes(s.phase) ? null : liveGate(root, s);
+  if (live) {
+    lines.push(`  gate running: ${live.runId} (pid ${live.pid})`);
+    lines.push(`    running: ${live.running.map((r) => `${r.id} (${r.seconds}s)`).join(', ') || 'none (waiting for a lease)'}`);
+    lines.push(`    finished: ${live.finished.map((r) => `${r.id} ${r.status}${r.seconds !== null ? ` ${r.seconds}s` : ''}`).join(', ') || 'none yet'}`);
+  }
   if (s.lastGate) lines.push(`  last gate: ${s.lastGate.status} (${s.lastGate.runId})`);
-  lines.push(`  next: ${nextAction(root, s)}`);
+  lines.push(`  next: ${live ? 'a gate is running: wait for it to finish (or `wf stop --reason "why"`); do not edit the worktrees meanwhile' : nextAction(root, s)}`);
   return lines.join('\n');
 }
 
@@ -261,7 +267,8 @@ async function dispatch(cmd, sub, positional, options) {
     }
     case 'gate': {
       const s = openState(root, options);
-      const r = await runGate(root, s, { prepareOnly: options['prepare-only'] === true, full: options.full === true, focused: options.focused === true });
+      // Live progress goes to stdout, or to stderr with --json so stdout stays one JSON document.
+      const r = await runGate(root, s, { prepareOnly: options['prepare-only'] === true, full: options.full === true, focused: options.focused === true, live: options.json ? process.stderr : process.stdout });
       print(options, gateText(r), r.record ?? r.plan);
       return r.record && r.record.status !== 'passed' ? 1 : 0;
     }
@@ -339,7 +346,7 @@ async function dispatch(cmd, sub, positional, options) {
     }
     case 'resume': {
       const s = openState(root, options);
-      print(options, summary(root, s), { ...s, next: nextAction(root, s) });
+      print(options, summary(root, s), { ...s, next: nextAction(root, s), liveGate: liveGate(root, s) });
       return 0;
     }
     case 'status': {
