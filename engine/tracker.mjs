@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { adapterFileAtCommit } from './config.mjs';
-import { append, attemptDir, loadState } from './ledger.mjs';
+import { append, attemptDir, listAttempts, loadState } from './ledger.mjs';
 import { WfError, hashFile, readJson, refuse, writeImmutable } from './util.mjs';
 
 const BUILTIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'adapters', 'tracker');
@@ -105,10 +105,25 @@ export async function recordTracker(root, cfg, state, options) {
   if (!pending.length) throw refuse(`no pending tracker actions for event \`${event}\``);
   if (!options.capture) throw new WfError('--capture <file> is required: the raw tracker response the agent saved');
   const adapter = await loadTrackerAdapter(root, cfg, state.adapterBase);
-  const raw = readJson(path.resolve(String(options.capture)));
+  const capturePath = path.resolve(String(options.capture));
+  const raw = readJson(capturePath);
   const issue = adapter.normalize(raw);
   const problems = [];
   if (issue.id !== state.item) problems.push(`capture is for ${issue.id}, not ${state.item}`);
+  // A hand-written capture without the issue body was accepted, and every later role then read the ticket without
+  // its description. Some issues are title-only: the capture says so with "descriptionEmpty": true.
+  if (event === 'admitted' && !String(issue.description ?? '').trim() && raw?.descriptionEmpty !== true) {
+    problems.push('the capture has no issue description; save the raw tracker response unchanged (the whole get_issue JSON), or, if the issue really has no description, add "descriptionEmpty": true to the capture');
+  }
+  // A capture byte-identical to one recorded for another attempt, or for another event of this one, was accepted:
+  // it was recycled, not read. `implementing` is exempt within its attempt: re-reading an unchanged issue gives the
+  // same bytes as the admission read.
+  const sha = hashFile(capturePath);
+  for (const id of listAttempts(root)) {
+    const other = id === state.id ? state : loadState(root, id);
+    const hit = other.tracker.done.find((d) => d.capture?.sha256 === sha && (id !== state.id || (d.event !== event && event !== 'implementing')));
+    if (hit) problems.push(`the capture is byte-identical to the one recorded for ${id === state.id ? `event \`${hit.event}\`` : `${id} (${hit.event})`}; read the issue again now and save that raw response`);
+  }
   for (const a of pending) {
     if (a.op === 'setStatus') {
       const ok = [a.status, ...(a.unless ?? [])];

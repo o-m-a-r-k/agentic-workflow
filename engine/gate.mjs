@@ -7,6 +7,7 @@ import { changedFiles, treeHash, treeHashes, uncommitted, untrackedSnapshot } fr
 import { chooseShards, chooseWorkers } from './host.mjs';
 import { readJUnitFiles } from './junit.mjs';
 import { append, attemptDir, loadState } from './ledger.mjs';
+import { projectEnv } from './env.mjs';
 import { missingFor, redactor, stepEnv } from './secrets.mjs';
 import { impact, inside, rel } from './topology.mjs';
 import { WfError, canonical, git, globToRegExp, hashFile, hashValue, isPidAlive, matchesAny, now, refuse, run, shellQuote, writeImmutable, writeJson } from './util.mjs';
@@ -321,7 +322,8 @@ async function executeStep(root, cfg, state, planned, ctx) {
   const logFile = path.join(evidenceDir, 'output.log');
   const workers = chooseWorkers(step);
   const shards = chooseShards(step);
-  const env = { ...process.env, ...stepEnv(root, cfg, step.id), WF_ROOT: root, WF_ATTEMPT: state.id, WF_STEP: step.id, WF_EVIDENCE: evidenceDir, WF_WORKERS: String(workers.n) };
+  // An allowlisted environment, never the owner's whole one (session tokens included): see engine/env.mjs.
+  const env = projectEnv(cfg, { ...stepEnv(root, cfg, step.id), WF_ROOT: root, WF_ATTEMPT: state.id, WF_STEP: step.id, WF_EVIDENCE: evidenceDir, WF_WORKERS: String(workers.n) });
   const started = Date.now();
   const prior = allGateSteps(state).filter((s) => s.id === step.id && s.status !== 'reused' && s.suites).at(-1);
   const rerun = step.select ? suitesToRerun(prior, planned) : null;

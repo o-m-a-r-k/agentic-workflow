@@ -158,7 +158,8 @@ test('wf report reads Claude subagent transcripts by agent name and shows declar
   assert.deepEqual([h.work, h.class, h.declaredEffort, h.observedEffort, h.effortMismatch, h.agentType, h.model], ['W1', 'light', 'low', 'medium', true, 'wf-implementer-light', 'claude-test']);
   assert.equal(h.outputTokens, 100, 'each request counted once at its final output count');
   assert.equal(h.wallMinutes, 6);
+  assert.equal(h.activeMinutes, 0, 'a gap of 5 minutes or more is idle, not work');
   const csv = toHandoffCsv(rows).trim().split('\n');
-  assert.match(csv[0], /^project,id,role,agent,runtime,work,class,declaredEffort,observedEffort,effortMismatch,agentType,model,wallMinutes,outputTokens,cost$/);
-  assert.ok(csv.some((l) => /,implementer,impl-ui,claude,W1,light,low,medium,true,wf-implementer-light,claude-test,6,100,/.test(l)), csv.join('\n'));
+  assert.match(csv[0], /^project,id,role,agent,runtime,work,class,declaredEffort,observedEffort,effortMismatch,agentType,model,sessionModel,wallMinutes,activeMinutes,rounds,outputTokens,cost$/);
+  assert.ok(csv.some((l) => /,implementer,impl-ui,claude,W1,light,low,medium,true,wf-implementer-light,claude-test,,6,0,1,100,/.test(l)), csv.join('\n'));
 });

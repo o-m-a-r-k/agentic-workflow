@@ -79,7 +79,7 @@ agentic-workflow/
 | Takeover | `adopt` a live attempt from a new session | — |
 | Holds | `hold` / `release`, the only delivery veto | — |
 
-Commands: `install`, `init`, `doctor`, `sync`, `status [--all]`, `enable|disable`, `topology [--check]`, `entry`, `plan`, `criteria amend`, `handoff <role>`, `gate`, `stop`, `review`, `accept`, `deliver` (also delivers a batch), `tracker record`, `reopen`, `adopt`, `hold|release`, `resume`, `abandon`, `batch create|eject`, `secrets init|set|guide|status`, `skills update`, `report`.
+Commands: `install`, `init`, `doctor`, `sync`, `status [--all] [--attempt]`, `base [merge]`, `enable|disable`, `topology [--check]`, `entry`, `plan`, `criteria amend`, `handoff <role>`, `gate`, `stop`, `review`, `accept`, `deliver` (also delivers a batch), `tracker record`, `reopen`, `adopt`, `hold|release`, `resume`, `abandon`, `batch create|eject`, `secrets init|set|guide|status`, `skills update`, `report`.
 
 ## System topology
 
@@ -164,7 +164,7 @@ requires: { skills: [], connectors: [linear], tools: [{ name: docker, check: "do
 
 A step without `inputs` reruns every gate (no reuse). A passing result is reused only when every file changed in the package since that pass is in the step's `inputs`, its `ignores` (files the step provably does not depend on) or the package's `docsOnly`; otherwise the step reruns. A changed file that no step's `inputs` covers forces every step of its package to run (fail closed); a changed file in a package with no steps is listed as unchecked in the gate result. Files under the repo's `sharedInfra` (root lockfiles, shared config) force all of the repo's steps to run.
 
-`alsoInputs: [repo, ...]` names other repos a step reads, for example an end-to-end step in one repo that builds a sibling repo's service from its worktree. The step's reuse key then also covers each listed repo's tree (HEAD plus a hash of tracked changes, the same as the gate's tree binding: the attempt's worktree when the repo is in the attempt, else its main checkout), so any change there reruns the step, and a non-docs change there keeps the step from being skipped as "no changes in this repo". A listed repo whose tree cannot be read makes the step always run (fail closed).
+`wf doctor` warns (never fails) when a `run` command references a sibling repo (`../web`, `$WF_ROOT/web`, `$WF_ATTEMPT/web`) that `alsoInputs` does not list: a portal end-to-end pass was reused against old API code. `alsoInputs: [repo, ...]` names other repos a step reads, for example an end-to-end step in one repo that builds a sibling repo's service from its worktree. The step's reuse key then also covers each listed repo's tree (HEAD plus a hash of tracked changes, the same as the gate's tree binding: the attempt's worktree when the repo is in the attempt, else its main checkout), so any change there reruns the step, and a non-docs change there keeps the step from being skipped as "no changes in this repo". A listed repo whose tree cannot be read makes the step always run (fail closed).
 
 ### Step plugin contract
 
@@ -194,6 +194,14 @@ Suite-level results without a plugin: `report: { junit: <path or glob> }` (PHPUn
 - **Steps:** `gate.maxParallelSteps`; `lease` names a resource (`docker`, `db`, `browser`, `simulator`) and `gate.leases` sets holders per lease. Leases are machine-wide: a step waits for a slot another gate holds, the gate itself always starts at once.
 - **Inside a step:** `workers` is a number or `auto` (`min`, `max`, `perWorkerGiB`): free memory minus a reserve, divided per worker, capped by performance cores, never below `min`; probe failure ⇒ `min`. `shards` splits a step into shard processes. Placeholders `{workers}`, `{shard}`, `{shards}`; overrides `WF_WORKERS_<STEP>`, `WF_SHARDS_<STEP>`. Each run records the chosen numbers and why.
 
+## Step environment
+
+Gate steps, provisioning, doctor checks and secret `verify` commands run with `projectEnv` (engine/env.mjs): an open base list of toolchain variables, `WF_*`, the adapter's `gate.env.pass` (names, or prefixes ending in `*`, read from the adapter at base) and the step's catalogued secrets. Variables of agent runtimes (`CLAUDE_CODE_*`, `ANTHROPIC_*`, `CODEX_*`, `OPENAI_*`, `GROK_*`, `XAI_*`) pass only when a `pass` entry names that family. Named failure: every step received the owner's environment, session tokens included.
+
+## Base movement before delivery
+
+`wf status`/`wf resume` fetch each base (15 s timeout, failure noted) and show commits ahead, files overlapping the ticket's change and shared infrastructure touched. `wf base merge [--repo r]` refuses a dirty tree or a running gate, merges, aborts on conflict (worktree unchanged, conflicting files named), records `base.merged` and says the gate and review no longer count for the moved tree. Bundles give `bases` as the merge-base with the base ref, so a reviewer's diff is the ticket's change only.
+
 ## Delivery adapter
 
 ```js
@@ -219,9 +227,9 @@ The engine emits events; the adapter maps them to tracker actions.
 | `reopened` | set `started` |
 | never | `done` — a human sets it |
 
-1. The engine lists pending actions; `wf resume` shows them.
+1. The engine lists pending actions; `wf resume` shows them. `implementing` is queued once per attempt.
 2. The agent performs them through a connector (or the adapter through an API), reusing a matching comment instead of duplicating.
-3. `wf tracker record` normalizes the saved response and checks: status equals the mapped name; the comment was written after delivery, has the template's fixed opening and UAT scope, and contains nothing from `commentRules.forbid`; every attested screenshot is attached with a matching filename.
+3. `wf tracker record` normalizes the saved response (the raw tracker JSON, never hand-written) and checks: for `admitted`, a non-empty description unless the capture says `"descriptionEmpty": true`; that the capture is not byte-identical to one recorded for another attempt or another event of this one (an `implementing` re-read of an unchanged issue excepted); status equals the mapped name; the comment was written after delivery, has the template's fixed opening and UAT scope, and contains nothing from `commentRules.forbid`; every attested screenshot is attached with a matching filename.
 4. Until the `delivered` readback passes, the attempt is `handoff-pending`.
 5. A rejected status write is reported; it never blocks implementation.
 
@@ -235,7 +243,7 @@ Screenshots come only from the gate's attested visual artifacts. They go to the 
 export default {
   idPattern,
   operations: { readIssue, setStatus, comment, attach, readBack },
-  normalize(rawCapture), // → { id, title, status, comments[], attachments[], updatedAt, url }
+  normalize(rawCapture), // → { id, title, description, status, comments[], attachments[], updatedAt, url }
   rules: {},             // tracker quirks
 }
 ```
@@ -243,7 +251,7 @@ export default {
 ## Telemetry
 
 - **Engine events:** the attempt ledger (`.wf-evidence/attempts/<id>/ledger.jsonl`) is the event log: every `wf` command appends a timestamped, hash-chained entry; gate entries carry per-step and per-suite status, reuse, duration and chosen workers. Resource sampling (memory/CPU peaks) is not built yet.
-- **Agent usage:** `wf handoff <role>` records the agent's session id when known, its class, declared effort, model and agent type. `wf report` reads the transcript afterwards: by session id, or, for a Claude Code subagent (no session id of its own), by the `subagents/agent-*.meta.json` whose `name` is the `--agent` id and whose `agentType` is the recorded one, active after admission. Per handoff it reports class, declared and observed effort, agent type, model, wall minutes and output tokens (each API request counted once); a declared/observed effort difference is shown, never enforced. A transcript shared by several handoffs (repair rounds on one agent) counts once in the attempt total. Measurement only — never grants or blocks anything.
+- **Agent usage:** `wf handoff <role>` records the agent's session id when known, its class, declared effort, model and agent type. `wf report` reads the transcript afterwards: by session id, or, for a Claude Code subagent (no session id of its own), by the `subagents/agent-*.meta.json` whose `name` is the `--agent` id and whose `agentType` is the recorded one, active after admission. Per handoff it reports class, declared and observed effort, agent type, model, the owner session's model recorded at the handoff (what an unpinned agent inherits), wall minutes, active minutes (gaps of 5 minutes or more between consecutive transcript entries left out), rounds (split at each fresh prompt) and output tokens (each API request counted once); the ledger also records the planner's model at `wf plan` and the reviewer's at `wf review` where transcripts exist, and `wf doctor` warns when no class pins a model and an attempt shows several; a declared/observed effort difference is shown, never enforced. A transcript shared by several handoffs (repair rounds on one agent) counts once in the attempt total. Measurement only — never grants or blocks anything.
 - **Cost:** tokens × a user-editable price table.
 - **Live:** `wf status --all` across enabled projects.
 - **Report:** time per phase/step, reuse rate, repair rounds, findings per role, tokens and cost per role and model. CSV per attempt (`--csv`), CSV per handoff (`--handoffs-csv`), and one HTML page with both.
@@ -276,7 +284,7 @@ requires:
 
 `wf sync` generates each project's agent files for every runtime from the plugin template + the adapter's `roles` entry + appendix. Generated files carry a header and are never hand-edited.
 
-- **Planner** returns `{ plan, criteria }`; `plan` holds `summary`, `contract` (what repos share: routes, DTO fields, error codes, permission subjects), `anchors` (file:line of each function to change), `tests` (`changed` specs, targeted `run` selectors), `doNotRun`, `externalServices` (default test runs need no provider keys or internet; provider/sandbox tests are opt-in) and `agentSplit`. The engine stores it with the frozen criteria and passes it to every later role; it does not police its size.
+- **Planner** returns `{ plan, criteria }` as the last ```` ```yaml ```` block of its reply; `wf plan --from-agent <id>` reads it from the subagent transcript (meta.json name, agent type, written after the handoff) and keeps the extracted block in the evidence with its sha256 and the planner's model. The file schema is closed at the top level (`plan`, `criteria`, `work`, and the plan sections, which may sit at the top level or under `plan:`; `plan:` may be text), because keys the engine did not read were silently dropped; the sections themselves are open; `plan` holds `summary`, `contract` (what repos share: routes, DTO fields, error codes, permission subjects), `anchors` (file:line of each function to change), `tests` (`changed` specs, targeted `run` selectors), `doNotRun`, `externalServices` (default test runs need no provider keys or internet; provider/sandbox tests are opt-in) and `agentSplit`. The engine stores it with the frozen criteria and passes it to every later role; it does not police its size.
 - **Planner work items (optional):** `work: [{ id, criteria: [..], repos: [..], class, why }]` next to `criteria`. `wf plan` refuses duplicate work ids, criteria that do not exist and classes that do not exist (the owner would otherwise be told to start an agent that is not there); a criterion no work item covers is shown, not refused. An amendment keeps the work items unless its file replaces them, and they must still name existing criteria.
 - **Implementers:** after the contract is committed, one implementer per work item (or per repo or area) can run in parallel (several implementer handoffs are allowed). `wf handoff implementer --work W1` records the work id, class, declared effort and model and the agent type in the bundle and ledger and prints the agent type to start; without `--work` the implementer role's class is used. They run only the specs they changed and targeted reruns while iterating, never broad sweeps, then the repo's lint and full unit suite once before finishing, and commit at stage boundaries.
 - **Reviewer, blind and fresh:** its prompt is the one line `wf handoff reviewer` prints (the bundle path), with nothing from the owner or other agents; the bundle carries everything it needs. `wf handoff reviewer` refuses the owner, the planner, every implementer, and any agent id that already reviewed a round of this attempt: a resumed reviewer is anchored on its earlier findings. Each round is a new agent that reviews the whole attempt against the frozen criteria; it is not given earlier rounds' findings.
@@ -327,6 +335,7 @@ What the evidence proves, and what it does not:
 - **Fresh reviewer per round is checked; blind is a rule.** The engine refuses a reviewer id that reviewed an earlier round, but the id is a name the owner supplies: resuming an old agent under a new id defeats it.
 - **The blind reviewer is a rule, not a check.** The engine hands the reviewer only the bundle and prints a one-line start prompt, but it cannot see the prompt a runtime actually gives an agent, so it does not verify or record it. An owner who steers the reviewer (hints, focus areas, summaries of the work, other agents' findings) weakens the review without any refusal; the skills and the reviewer role forbid it, and the reviewer reports a prompt that carried more.
 - **Classes do not change guarantees.** The gate, the blind independent review (always at the reviewer role's class, never a work item's), frozen criteria, evidence integrity and the hash-chained ledger are the same for every class. A class lowers only how hard an implementer thinks; a misclassified work item still meets the same gate and the same reviewer.
+- **Steps never see agent session tokens** unless the adapter passes them by name.
 - **Adapter code is trusted at base.** Step plugins, delivery and tracker adapters run as committed on the base branch, never the ticket's copy. A ticket can still change the project scripts a step calls (for example a test script in `package.json`); that is visible in the diff the reviewer inspects, and changes to `sharedInfra` files force the affected package's steps to run.
 
 ## Versioning

@@ -2,7 +2,7 @@
 
 A delivery workflow for AI coding agents, packaged as one plugin for Claude Code and Codex.
 
-> **Status: v0.1, early.** The engine, CLI, onboarding and all three lanes work and are covered by 71 scenario tests on real git repositories, and reviewed by independent agents. It has not yet been used on a production project; expect rough edges. Design: [docs/DESIGN.md](docs/DESIGN.md). Feedback through issues is welcome.
+> **Status: v0.1, early.** The engine, CLI, onboarding and all three lanes work and are covered by 86 scenario tests on real git repositories, and reviewed by independent agents. It has not yet been used on a production project; expect rough edges. Design: [docs/DESIGN.md](docs/DESIGN.md). Feedback through issues is welcome.
 
 Every change runs through the same lifecycle: a ticket is admitted, worked on in isolated worktrees, planned, implemented, proven by a gate, reviewed by an agent that did not write it, delivered, and handed back to the tracker with a readback. Each step checks evidence the engine wrote, never what an agent says it did.
 
@@ -131,7 +131,7 @@ flowchart TD
 | --- | --- | --- |
 | Admit | `wf entry` | Intent is `implementation` or `analysis`. Analysis can never deliver. |
 | Worktrees | automatic | One worktree per repo; dependencies cloned or installed; ignored files like `.env.local` copied in. |
-| Criteria | `wf plan` | Criteria are frozen before implementation. Later changes go through `wf criteria amend --reason`. |
+| Criteria | `wf plan --from-agent <planner id>` | Criteria and every plan section are frozen before implementation, taken from the planner's transcript unchanged; unknown top-level keys are refused. Later changes go through `wf criteria amend --reason`. |
 | Plan | `wf handoff planner` | The planner leaves the tree unchanged. |
 | Implement | `wf handoff implementer` | Changes are committed before review and the gate. |
 | Review | `wf handoff reviewer`, `wf review` | Allowed once the work is committed, before or during the gate. The reviewer isn't the owner, planner, an implementer or a reviewer of an earlier round. The closure is bound to the tree it was handed. |
@@ -140,7 +140,15 @@ flowchart TD
 | Deliver | `wf deliver` | Implementation intent, no hold, review accepted. |
 | Handoff | `wf tracker record` | The status, comment and screenshots are all read back from the tracker. |
 
-A stopped or interrupted attempt resumes with `wf resume`, which says exactly what's next.
+A stopped or interrupted attempt resumes with `wf resume`, which says exactly what's next. With more than one open attempt, every command it prints carries `--attempt <id>`.
+
+### The plan file
+
+`wf plan --from-agent <planner id>` reads the planner's last ```` ```yaml ```` block from its Claude Code subagent transcript (found by the name it was started with), so the owner never retypes it. `wf plan --file <file>` takes the same YAML from a file. The plan sections (`summary`, `contract`, `anchors`, `tests`, `doNotRun`, `externalServices`, `agentSplit`) may sit under `plan:` or at the top level beside `criteria` and `work`; `plan:` may also be plain text (the summary). Any other top-level key is refused with the list of known ones, because a section the engine does not read never reaches the implementers. Every section is stored in the frozen plan and handed to the implementers and reviewers in their bundles.
+
+### Base movement
+
+`wf status` and `wf resume` fetch each repo's base (a failed fetch is noted, never an error) and say `base moved: N commits` and whether it overlaps the files the ticket changed. `wf base merge` merges the base into each worktree: it refuses a dirty tree or a running gate, aborts a conflicting merge so the worktree is left as it was, records a ledger event, and notes when the merged commits touch the ticket's files. A merge that moves HEAD leaves the gate and the review without a pass for the new tree (both are bound to it): run `wf gate` and a fresh reviewer. Delivery still merges a moved base itself and reopens the gate only when it overlaps.
 
 ## Lanes
 
@@ -206,7 +214,7 @@ A work class says how hard an agent thinks on a kind of work. The planner groups
 | `light` | UI wired to a frozen contract, translations, generated docs or OpenAPI output, test fixtures. | low | inherited |
 
 - Any work item that touches something `full` covers is `full`. The planner and the reviewer run at `full` unless the project changes their role's class; the implementer role's own class (default `full`) is used when a handoff names no work item.
-- Model is unset by default, so the agent inherits the session's model.
+- Model is unset by default, so the agent inherits the session's model. **Pin it** with `classes.<name>.claude.model` (and `codex.model`) when you compare classes or efforts: one effort comparison was confounded because the owner's session switched model and every unpinned agent followed. `wf doctor` warns when no class pins a model and an attempt shows more than one observed model; `wf report` shows the session model recorded at each handoff.
 - The default effort values are starting points, not measurements. `wf report` shows the declared effort next to the effort observed in each agent's transcript; a difference is shown, never enforced.
 - **Classes change effort only.** The gate, the blind independent review, frozen criteria, evidence integrity and the hash-chained ledger are identical for every class. A light work item gets the same gate and the same full-class reviewer as a full one.
 - An implementer whose work turns out to touch something a stronger class covers stops and tells the owner.
@@ -279,11 +287,25 @@ Each entry under `gate.steps` in `.workflow/project.yaml` (full example in [docs
 | `id`, `repo` or `component`, `package` | Which step, and where it runs. |
 | `run` or `plugin` | The shell command, or a step plugin committed in `.workflow/`. |
 | `inputs`, `ignores` | Globs the step depends on and provably does not depend on. No `inputs`: the step runs every gate. |
-| `alsoInputs` | Other repos the step reads, e.g. an end-to-end step that builds a sibling repo's service. Their trees join the reuse key, so a change there reruns the step; an unreadable tree means it always runs. |
+| `alsoInputs` | **Required for any step that builds, starts or reads a sibling repo** (an end-to-end step that runs the API from `../api`, a contract test reading `$WF_ROOT/web`). Their trees join the reuse key, so a change there reruns the step; an unreadable tree means it always runs. Without it, a passing step is reused after the sibling changed: one portal end-to-end pass was reused against old API code. `wf doctor` warns when a step's command references another repo's path without listing it. |
 | `tier` | `light` or `heavy`. `--focused` runs light steps only. |
 | `when.paths` | Run only when a changed file matches. |
 | `report.junit`, `select` | Per-suite results and suite-level reruns. |
 | `workers`, `shards`, `lease`, `deferrable`, `artifacts` | Sizing, resource leases, batch deferral, captured screenshots and files. |
+
+`sharedInfra` (per package) lists files whose change reruns every step of the package. Keep it to real infrastructure (lockfiles, root build config): a broad glob such as `scripts/**` makes every edit to a data file under it rerun everything.
+
+### Step environment
+
+Steps, provisioning (`install`, `onWorktreeCreate`), `wf doctor` checks and secret `verify` commands get an allowlisted environment, not the owner's whole one: the toolchain variables in `engine/env.mjs` (`PATH`, `HOME`, `USER`, `SHELL`, `LANG`/`LC_*`, `TERM`, `TMPDIR`, `TZ`, `CI`, `NODE_OPTIONS`, `XDG_*`, `SSH_AUTH_SOCK`, `DOCKER_*`, `COMPOSE_*`, `npm_config_*`, `NVM_*`, `JAVA_HOME`, `VIRTUAL_ENV`, `PYENV_*`, `GOPATH`, `CARGO_HOME`, `RUSTUP_HOME`, proxies and CA bundles, and more), every `WF_*` variable, and the catalogued secrets a step lists in `usedBy`. Add project variables with names or `*` prefixes:
+
+```yaml
+gate:
+  env:
+    pass: [PLAYWRIGHT_BASE_URL, MYAPP_*]
+```
+
+Agent-runtime variables (`CLAUDE_CODE_*`, `ANTHROPIC_*`, `CODEX_*`, `OPENAI_*`, `GROK_*`, `XAI_*`) never reach a step unless `pass` names that family itself (`ANTHROPIC_BASE_URL`, `ANTHROPIC_*`); a broad prefix such as `C*` does not count. Step plugins get the filtered environment as `ctx.env`, but they run inside the `wf` process.
 
 ## Delivery and the ticket
 
@@ -306,6 +328,7 @@ stateDiagram-v2
 
   `push-main` is built in; anything else is one file in your project.
 - **Tracker adapters** map lifecycle events to status changes, comments and attachments. Linear is built in. Any other tracker, including your own product's API, is one adapter file.
+- **Captures are raw tracker responses.** Save the whole `get_issue` JSON unchanged and pass it to `wf tracker record --event <e> --capture <file>`. The `admitted` capture must carry the issue description (a title-only issue: add `"descriptionEmpty": true`), and a capture byte-identical to one recorded for another attempt, or for another event of the same attempt, is refused as recycled (an `implementing` re-read of an unchanged issue is the exception). The `implementing` read is queued once per attempt, not once per implementer.
 - **The handoff comment** comes from your template. It describes the UAT scope in product language and never includes file paths, commits or hashes.
 - **Screenshots** come only from the gate's recorded captures. They're attached to the ticket and shown in your session.
 - **Pending until read back:** until the tracker readback passes, the attempt is `handoff-pending`, not done.
@@ -390,7 +413,7 @@ sequenceDiagram
 ## Telemetry
 
 - **Engine events:** every `wf` command records phase, role, step, suite, status, reuse, duration and resource peaks.
-- **Agent usage:** the model, tokens, time and tool calls for each role are read from the runtime's own session logs after the fact. A Claude Code subagent is found by the name it was started with (the `--agent` id) and its agent type, so no session id is needed. Per handoff the report shows the work item, class, declared and observed effort, agent type, model, wall minutes and output tokens. This is measurement only; it never allows or blocks anything.
+- **Agent usage:** the model, tokens, time and tool calls for each role are read from the runtime's own session logs after the fact. A Claude Code subagent is found by the name it was started with (the `--agent` id) and its agent type, so no session id is needed. Per handoff the report shows the work item, class, declared and observed effort, agent type, model, the owner session's model at the handoff, wall minutes, active minutes (wall time minus gaps of 5 minutes or more), rounds (a fresh prompt to a finished agent starts a new one) and output tokens. One agent measured 185 wall minutes for about 21 active, so compare active minutes. This is measurement only; it never allows or blocks anything.
 - **`wf status --all`** shows open work across every enabled project.
 - **`wf report`** shows where time and tokens go: by phase, step, role and model, with reuse rate and repair rounds. `--csv` writes one row per attempt, `--handoffs-csv` one row per handoff, `--html` both.
 
@@ -398,6 +421,7 @@ sequenceDiagram
 
 - **What the engine enforces:** a hash-chained ledger; gate results bound to the exact tree and to the adapter committed at base; only a gate that ran every step the tree needs (never a `--focused` one) opens acceptance and delivery; acceptance needs a clean closure written for the current tree after a passing gate on it; a step that reads another repo (`alsoInputs`) is reused only while that repo is unchanged; the reviewer is never the owner, planner, an implementer or a reviewer of an earlier round; criteria are frozen before code.
 - **What classes change:** only how hard each agent thinks. Every guarantee above holds the same at every class.
+- **What a step sees:** an allowlisted environment, never agent session tokens unless the adapter passes them (see [Step environment](#step-environment)).
 - **What it relies on you for:** agent identities are names the owner supplies, and the reviewer must be a newly started agent (not an old one under a new id), started blind with only the one line `wf handoff reviewer` prints. The engine cannot see the prompt a runtime gives an agent, so it does not check it; steering the reviewer weakens the review silently.
 - **What it does not stop:** a determined forger with shell access on the same machine. It catches mistakes, not attacks. Details: [docs/DESIGN.md](docs/DESIGN.md#trust-model).
 

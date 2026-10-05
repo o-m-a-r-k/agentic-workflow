@@ -160,6 +160,11 @@ function normalize(raw, source) {
   if (cfg.adapterRepo && !repoNames.has(cfg.adapterRepo)) fail(`adapterRepo \`${cfg.adapterRepo}\` is not a listed repo`);
   const stepIds = new Set();
   for (const [name, n] of Object.entries(cfg.gate.leases ?? {})) if (!Number.isInteger(n) || n < 1) fail(`lease \`${name}\` must allow at least 1 holder`);
+  // Extra variables gate steps and provisioning receive beyond the base list (engine/env.mjs): names, or prefixes ending in `*`.
+  if (cfg.gate.env !== undefined) {
+    const pass = cfg.gate.env?.pass;
+    if (!cfg.gate.env || typeof cfg.gate.env !== 'object' || (pass !== undefined && (!Array.isArray(pass) || pass.some((x) => typeof x !== 'string' || !x)))) fail('`gate.env.pass` must be a list of variable names or prefixes ending in `*`');
+  }
   for (const s of cfg.gate.steps) {
     if (!s.id) fail('each gate step needs an `id`');
     if (stepIds.has(s.id)) fail(`duplicate gate step \`${s.id}\``);

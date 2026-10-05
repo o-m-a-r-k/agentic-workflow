@@ -5,6 +5,8 @@ description: Make a small fix without a ticket through agentic-workflow's quick 
 
 # Quick fix
 
+With more than one open attempt, pass `--attempt <id>` to every `wf` command.
+
 1. `wf entry` (no `--item`: the lane is `quick` and the id is the next `QF-<n>`).
 2. Write the criteria yourself from the user's request: `wf plan --file <yaml>`.
 3. `wf handoff implementer --agent <id>`, implement, commit. While iterating run only the specs you changed; before the gate run the repo's lint and full unit suite once.

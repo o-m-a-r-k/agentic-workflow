@@ -1,11 +1,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import os from 'node:os';
 import { abandon, adopt, entry, hold, openState, release } from './attempt.mjs';
+import { baseLines, baseMerge, baseStatus } from './base.mjs';
 import { findRoot, loadConfig, requireRoot } from './config.mjs';
 import { liveGate, runGate, stopGate } from './gate.mjs';
 import { listAttempts, loadState } from './ledger.mjs';
-import { acceptReview, amendCriteria, batchCreate, batchEject, closeAfterHandoff, deliver, freezeCriteria, handoff, nextAction, recordReview, reopen, uncovered } from './lifecycle.mjs';
+import { acceptReview, amendCriteria, batchCreate, batchEject, closeAfterHandoff, deliver, freezeCriteria, handoff, nextAction, recordReview, reopen, uncovered, withAttempt } from './lifecycle.mjs';
 import { detect, doctor, register, registry, setEnabled, sync, writeDraft } from './onboard.mjs';
 import * as secrets from './secrets.mjs';
 import { report, toCsv, toHandoffCsv, toHtml } from './telemetry.mjs';
@@ -39,10 +41,12 @@ Onboarding
 
 Work
   wf entry [--item ID] [--lane quick|standard] [--intent implementation|analysis] [--repos a,b] [--defer-heavy] [--issue-file F]
-  wf plan --file criteria.yaml      freeze acceptance criteria (and the plan)
+  wf plan --file plan.yaml | --from-agent PLANNER_ID
+                                    freeze acceptance criteria and the plan (--from-agent: the planner's last YAML block)
   wf criteria amend --file f --reason "why"
   wf handoff planner|implementer|reviewer|tester --agent ID [--work W1] [--session SID] [--runtime claude|codex]
   wf gate [--prepare-only] [--full] [--focused]
+  wf base [merge] [--repo R]        how far each base moved; merge merges it into the worktrees
   wf stop --reason "why"            pause a running gate; finished steps are kept
   wf review --closure file.json     record the reviewer's closure
   wf accept                         accept the review
@@ -66,9 +70,10 @@ const print = (options, human, data) => {
   else process.stdout.write(`${typeof human === 'string' ? human : JSON.stringify(human, null, 2)}\n`);
 };
 
-function summary(root, s) {
+function summary(root, s, { base = null } = {}) {
   const lines = [`${s.id}  ${s.item}  lane=${s.lane}  intent=${s.intent}  phase=${s.phase}`, `  owner: ${s.owner}`];
   for (const [name, r] of Object.entries(s.repos)) lines.push(`  ${name}: ${r.worktree} (base ${r.base.slice(0, 10)})`);
+  if (base) lines.push(...baseLines(base));
   if (s.activeHold) lines.push(`  HOLD: ${s.activeHold.reason}`);
   const live = ['done', 'abandoned'].includes(s.phase) ? null : liveGate(root, s);
   if (live) {
@@ -77,7 +82,7 @@ function summary(root, s) {
     lines.push(`    finished: ${live.finished.map((r) => `${r.id} ${r.status}${r.seconds !== null ? ` ${r.seconds}s` : ''}`).join(', ') || 'none yet'}`);
   }
   if (s.lastGate) lines.push(`  last gate: ${s.lastGate.status} (${s.lastGate.runId})`);
-  lines.push(`  next: ${live ? 'a gate is running: wait for it to finish (or `wf stop --reason "why"`); do not edit the worktrees meanwhile' : nextAction(root, s)}`);
+  lines.push(`  next: ${live ? withAttempt(root, s, 'a gate is running: wait for it to finish (or `wf stop --reason "why"`); do not edit the worktrees meanwhile') : nextAction(root, s)}`);
   return lines.join('\n');
 }
 
@@ -116,6 +121,16 @@ export async function main(argv) {
   }
 }
 
+const isOpen = (s) => !['done', 'abandoned'].includes(s.phase);
+// Base status is information: a failure to read it never fails the command.
+function safeBase(root, s) {
+  try {
+    return baseStatus(root, s);
+  } catch {
+    return null;
+  }
+}
+
 async function dispatch(cmd, sub, positional, options) {
   if (cmd === 'status' && options.quiet) {
     const root = findRoot();
@@ -147,7 +162,7 @@ async function dispatch(cmd, sub, positional, options) {
   }
   if (cmd === 'report') {
     const roots = options.all ? registry().projects.map((p) => p.root).filter((r) => fs.existsSync(r)) : [requireRoot()];
-    const rows = report(roots);
+    const rows = report(roots, { home: process.env.WF_HOME ?? os.homedir() });
     if (options.csv) fs.writeFileSync(String(options.csv), toCsv(rows));
     if (options['handoffs-csv']) fs.writeFileSync(String(options['handoffs-csv']), toHandoffCsv(rows));
     if (options.html) fs.writeFileSync(String(options.html), toHtml(rows));
@@ -184,10 +199,10 @@ async function dispatch(cmd, sub, positional, options) {
     case 'doctor': {
       const r = await doctor(root, { runSteps: options['no-steps'] !== true });
       const lines = [];
-      for (const section of ['config', 'tools', 'secrets', 'skills', 'connectors', 'steps']) {
-        for (const item of r[section]) lines.push(`${item.ok ? '✓' : '✗'} ${section}: ${item.check ?? item.tool ?? item.key ?? item.skill ?? item.step ?? item.connector}${item.runtime ? ` (${item.runtime})` : ''}${item.problem ? ` — ${item.problem}` : ''}${item.kind ? ` [${item.kind}]` : ''}${item.fix ? `\n    fix: ${item.fix}` : ''}${item.log ? `\n    log: ${item.log}` : ''}${item.note ? `\n    ${item.note}` : ''}`);
+      for (const section of ['config', 'tools', 'secrets', 'skills', 'connectors', 'steps', 'warnings']) {
+        for (const item of r[section]) lines.push(`${item.warn ? '!' : item.ok ? '✓' : '✗'} ${section === 'warnings' ? 'warning' : section}: ${item.check ?? item.tool ?? item.key ?? item.skill ?? item.step ?? item.connector}${item.runtime ? ` (${item.runtime})` : ''}${item.problem ? ` — ${item.problem}` : ''}${item.kind ? ` [${item.kind}]` : ''}${item.fix ? `\n    fix: ${item.fix}` : ''}${item.log ? `\n    log: ${item.log}` : ''}${item.note ? `\n    ${item.note}` : ''}`);
       }
-      print(options, `${lines.join('\n')}\n${r.ok ? 'doctor: all checks passed' : 'doctor: problems found'}`, r);
+      print(options, `${lines.join('\n')}\n${r.ok ? `doctor: all checks passed${r.warnings.length ? ` (${r.warnings.length} warning(s))` : ''}` : 'doctor: problems found'}`, r);
       return r.ok ? 0 : 1;
     }
     case 'enable':
@@ -266,7 +281,8 @@ async function dispatch(cmd, sub, positional, options) {
     case 'plan': {
       const s = freezeCriteria(root, options);
       const loose = uncovered(s);
-      print(options, `criteria frozen (${s.criteria.length}): ${s.criteria.map((c) => c.id).join(', ')}${s.work ? `\nwork items (${s.work.length}): ${s.work.map((w) => `${w.id} [${w.class}] ${w.criteria.join(',')}`).join('; ')}` : ''}${loose.length ? `\nnote: no work item covers ${loose.join(', ')}` : ''}\nnext: ${nextAction(root, s)}`, s);
+      const sections = s.plan && typeof s.plan === 'object' ? Object.keys(s.plan) : [];
+      print(options, `criteria frozen (${s.criteria.length}): ${s.criteria.map((c) => c.id).join(', ')}\nplan sections: ${sections.join(', ') || 'none'}${s.planSource?.transcript ? ` (from ${s.planSource.agent}'s transcript)` : ''}${s.work ? `\nwork items (${s.work.length}): ${s.work.map((w) => `${w.id} [${w.class}] ${w.criteria.join(',')}`).join('; ')}` : ''}${loose.length ? `\nnote: no work item covers ${loose.join(', ')}` : ''}\nnext: ${nextAction(root, s)}`, s);
       return 0;
     }
     case 'criteria': {
@@ -299,8 +315,10 @@ async function dispatch(cmd, sub, positional, options) {
       return 0;
     }
     case 'review': {
+      // The reviewer runs this. Its console shows nothing but the receipt: no owner next steps, tracker actions or
+      // state, which carried earlier rounds' findings and the owner's notes into a blind review.
       const s = recordReview(root, options);
-      print(options, `review recorded: ${s.review.closure.findings.length} finding(s). next: ${nextAction(root, s)}`, s);
+      print(options, `review recorded (${s.review.closure.findings.length} finding(s)).`, { recorded: true, attempt: s.id, findings: s.review.closure.findings.length, file: s.review.file });
       return 0;
     }
     case 'accept': {
@@ -365,14 +383,31 @@ async function dispatch(cmd, sub, positional, options) {
     }
     case 'resume': {
       const s = openState(root, options);
-      print(options, summary(root, s), { ...s, next: nextAction(root, s), liveGate: liveGate(root, s) });
+      const base = isOpen(s) ? safeBase(root, s) : null;
+      print(options, summary(root, s, { base }), { ...s, next: nextAction(root, s), liveGate: liveGate(root, s), base });
       return 0;
     }
     case 'status': {
-      const ids = listAttempts(root);
-      const states = ids.map((id) => loadState(root, id));
-      const open = states.filter((s) => !['done', 'abandoned'].includes(s.phase));
-      print(options, open.length ? open.map((s) => summary(root, s)).join('\n\n') : 'no open attempts', options.json ? open : undefined);
+      // --attempt narrows the listing to that attempt; without it every open attempt is shown.
+      const states = options.attempt ? [openState(root, options)] : listAttempts(root).map((id) => loadState(root, id)).filter(isOpen);
+      const rows = states.map((s) => ({ s, base: isOpen(s) ? safeBase(root, s) : null }));
+      print(options, rows.length ? rows.map(({ s, base }) => summary(root, s, { base })).join('\n\n') : 'no open attempts', options.json ? rows.map(({ s, base }) => ({ ...s, next: nextAction(root, s), base })) : undefined);
+      return 0;
+    }
+    case 'base': {
+      if (sub === 'merge') {
+        const r = baseMerge(root, options);
+        const lines = r.results.map((x) => (x.upToDate ? `${x.repo}: already on its base${x.note ? ` (${x.note})` : ''}` : `${x.repo}: merged ${x.ref} (${x.commits} commit(s), ${x.files} file(s)); HEAD ${x.headBefore.slice(0, 10)} -> ${x.headAfter.slice(0, 10)}${x.overlap.length ? `\n  note: the merge brought in changes to files this ticket also changes: ${x.overlap.join(', ')}; check the merged result` : ''}${x.infra.length ? `\n  note: shared infrastructure changed: ${x.infra.join(', ')}` : ''}`));
+        const moved = r.results.some((x) => !x.upToDate && x.headBefore !== x.headAfter);
+        if (moved) lines.push('HEAD changed: the gate and the review are bound to the tree, so neither counts for the merged tree. Run `wf gate`, then hand the tree to a fresh reviewer.');
+        print(options, `${lines.join('\n')}\nnext: ${nextAction(root, r.state)}`, r);
+        return 0;
+      }
+      if (sub && sub !== 'status') throw new WfError('usage: wf base [status] | wf base merge [--repo R]');
+      const s = openState(root, options);
+      const base = baseStatus(root, s);
+      const lines = baseLines(base);
+      print(options, lines.length ? lines.join('\n').replace(/^ {2}/gm, '') : 'every base is current', base);
       return 0;
     }
     default:

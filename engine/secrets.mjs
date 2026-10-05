@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { repoDir } from './config.mjs';
+import { projectEnv } from './env.mjs';
 import { WfError, YAML, refuse, run } from './util.mjs';
 
 // Values never leave this module except into a step's environment or the store.
@@ -83,7 +84,7 @@ export function checkFormat(entry, value) {
 
 export function verifySecret(root, cfg, entry, value) {
   if (!entry.verify) return { ran: false };
-  const r = run('sh', ['-c', entry.verify], { allowFail: true, cwd: root, env: { ...process.env, [entry.key]: value }, sensitive: true });
+  const r = run('sh', ['-c', entry.verify], { allowFail: true, cwd: root, env: projectEnv(cfg, { [entry.key]: value }), sensitive: true });
   return { ran: true, ok: r.status === 0, exit: r.status };
 }
 

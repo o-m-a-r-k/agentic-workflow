@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { actor, branchName, changedFiles, cleanupWorktrees, entry, openState, treeHashes, worktreeDir } from './attempt.mjs';
@@ -7,8 +8,9 @@ import { focusedSkips, gatePassedForCurrentTree, screenshots } from './gate.mjs'
 import { append, attemptDir, listAttempts, loadState } from './ledger.mjs';
 import { deliveryOrder, impact, inside, packageOf } from './topology.mjs';
 import { findSkill } from './skills.mjs';
+import { lastFencedYaml, lastModel, readTranscript, sessionModel, subagentModel, subagentTranscripts } from './telemetry.mjs';
 import { emitTrackerEvent } from './tracker.mjs';
-import { WfError, YAML, canonical, git, hashValue, matchesAny, readJson, refuse, run, sessionIdentity, writeJson } from './util.mjs';
+import { WfError, YAML, canonical, git, hashFile, hashValue, matchesAny, readJson, refuse, run, sessionIdentity, writeJson } from './util.mjs';
 
 const readStructured = (file) => {
   let text = fs.readFileSync(path.resolve(String(file)), 'utf8');
@@ -16,6 +18,48 @@ const readStructured = (file) => {
   if (fenced) text = fenced[1];
   return file.endsWith('.json') ? JSON.parse(text) : YAML.parse(text);
 };
+
+const home = () => process.env.WF_HOME ?? os.homedir();
+
+// The plan file's schema. `wf plan` once read only `plan`, so a contract, anchors or test selectors written as
+// top-level keys were dropped from the frozen plan and never reached the implementers. Plan sections may sit under
+// `plan:` (a mapping, or plain text for the summary) or at the top level beside `criteria` and `work`, as the planner
+// template writes them; any other top-level key is refused with this list. The sections themselves are open.
+export const PLAN_SECTIONS = ['summary', 'contract', 'anchors', 'tests', 'doNotRun', 'externalServices', 'agentSplit'];
+const PLAN_FILE_KEYS = ['plan', 'criteria', 'work', ...PLAN_SECTIONS];
+
+export function planFromDoc(doc) {
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc)) throw new WfError(`the plan file must be a mapping with \`criteria\` (known keys: ${PLAN_FILE_KEYS.join(', ')})`);
+  const unknown = Object.keys(doc).filter((k) => !PLAN_FILE_KEYS.includes(k));
+  if (unknown.length) throw new WfError(`unknown top-level key(s) in the plan file: ${unknown.join(', ')}; known keys: ${PLAN_FILE_KEYS.join(', ')} (plan sections may also sit under \`plan:\`)`);
+  const p = doc.plan;
+  if (p !== undefined && p !== null && typeof p !== 'string' && (typeof p !== 'object' || Array.isArray(p))) throw new WfError('`plan` must be text (the summary) or a mapping of plan sections');
+  const plan = typeof p === 'string' ? { summary: p } : { ...(p ?? {}) };
+  for (const k of PLAN_SECTIONS) {
+    if (doc[k] === undefined) continue;
+    if (plan[k] !== undefined) throw new WfError(`\`${k}\` is given both at the top level and under \`plan\`; keep one`);
+    plan[k] = doc[k];
+  }
+  return Object.keys(plan).length ? plan : null;
+}
+
+// The planner's own output, so the owner never retypes it: the last fenced YAML block in the transcript of the Claude
+// Code subagent started under this name (found by its meta.json, as `wf report` does).
+function planFromAgent(root, state, agent) {
+  const handoff = state.handoffs.filter((h) => h.role === 'planner' && h.agent === agent).at(-1);
+  const found = subagentTranscripts(home(), agent, handoff?.agentType ?? null, handoff?.at ?? null);
+  if (!found.length) throw refuse(`no Claude Code subagent transcript named \`${agent}\`${handoff?.agentType ? ` (agent type ${handoff.agentType})` : ''}${handoff ? ' written after its handoff' : ''} under ${path.join(home(), '.claude', 'projects')}`, 'check the agent id, or save the planner\'s YAML unchanged to a file and use `wf plan --file <file>`');
+  const entries = readTranscript(found[0].file);
+  const text = lastFencedYaml(entries);
+  if (text === null) throw refuse(`the transcript of ${agent} (${found[0].file}) has no fenced YAML block`, 'ask the planner to return its plan in one ```yaml block, or save it to a file and use `wf plan --file <file>`');
+  let doc;
+  try {
+    doc = YAML.parse(text);
+  } catch (error) {
+    throw refuse(`the last YAML block in ${agent}'s transcript does not parse: ${error.message.split('\n')[0]}`);
+  }
+  return { doc, text, source: { agent, transcript: found[0].file, agentType: found[0].agentType, model: lastModel(entries) } };
+}
 
 const plannerLanes = (cfg) => cfg.roles?.planner?.lanes ?? ['standard'];
 const needsPlanner = (cfg, state) => plannerLanes(cfg).includes(state.lane) && cfg.roles?.planner !== false;
@@ -70,8 +114,11 @@ export function freezeCriteria(root, options) {
   const state = openState(root, options);
   const cfg = loadConfig(root);
   if (state.criteria) throw refuse('criteria are already frozen', 'change them with `wf criteria amend --file <f> --reason <why>`');
-  if (typeof options.file !== 'string') throw new WfError('--file <criteria.yaml|json> is required');
-  const doc = readStructured(options.file);
+  if (typeof options.file !== 'string' && typeof options['from-agent'] !== 'string') throw new WfError('--file <plan.yaml|json> or --from-agent <planner agent id> is required');
+  if (typeof options.file === 'string' && typeof options['from-agent'] === 'string') throw new WfError('pass --file or --from-agent, not both');
+  const fromAgent = typeof options['from-agent'] === 'string' ? planFromAgent(root, state, options['from-agent']) : null;
+  const doc = fromAgent ? fromAgent.doc : readStructured(options.file);
+  const plan = planFromDoc(doc);
   validateCriteria(doc.criteria);
   const work = validateWork(cfg, doc.work, doc.criteria);
   if (needsPlanner(cfg, state)) {
@@ -80,7 +127,19 @@ export function freezeCriteria(root, options) {
     if (canonical(treeHashes(state)) !== canonical(planner.tree)) throw refuse('the planner changed the worktree; planning must be read-only');
   }
   if (state.handoffs.some((h) => h.role === 'implementer')) throw refuse('implementation already started; criteria must be frozen before implementation');
-  append(root, state.id, 'criteria.frozen', { criteria: doc.criteria, plan: doc.plan ?? null, ...(work ? { work } : {}) }, actor(options));
+  let source = null;
+  if (fromAgent) {
+    const dest = path.join(attemptDir(root, state.id), 'plan', `from-agent-${fromAgent.source.agent.replace(/[^\w.-]/g, '_')}.yaml`);
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.writeFileSync(dest, `${fromAgent.text}\n`);
+    source = { ...fromAgent.source, file: dest, sha256: hashFile(dest) };
+  } else {
+    // Where available, the model the planner ran on: an agent whose class pins no model inherits the session's.
+    const planner = state.handoffs.filter((h) => h.role === 'planner').at(-1);
+    const model = planner && planner.runtime === 'claude' ? subagentModel(home(), planner.agent, planner.agentType, planner.at) : null;
+    source = { file: path.resolve(String(options.file)), sha256: hashFile(path.resolve(String(options.file))), agent: planner?.agent ?? null, model };
+  }
+  append(root, state.id, 'criteria.frozen', { criteria: doc.criteria, plan, source, ...(work ? { work } : {}) }, actor(options));
   return loadState(root, state.id);
 }
 
@@ -205,7 +264,9 @@ export function handoff(root, role, options) {
     model,
     work,
     worktrees: Object.fromEntries(Object.entries(state.repos).map(([k, v]) => [k, v.worktree])),
-    bases: Object.fromEntries(Object.entries(state.repos).map(([k, v]) => [k, v.base])),
+    // Where the ticket's own change starts: after `wf base merge` this is the merged base, not the admission commit,
+    // so a diff against it shows the ticket's change only.
+    bases: Object.fromEntries(Object.entries(state.repos).map(([k, v]) => [k, git(v.worktree, ['merge-base', v.baseRef ?? v.base, 'HEAD'], { allowFail: true }) || v.base])),
     // What the planner (and every role) reads first: the issue as captured at entry and from the tracker.
     issue: { file: state.issue?.file ?? null, trackerCaptures: state.tracker.done.map((d) => d.capture?.path).filter(Boolean) },
     criteria: state.criteria,
@@ -228,16 +289,26 @@ export function handoff(root, role, options) {
     // Outside .wf-evidence/: the reviewer writes it, `wf review` copies it into the evidence.
     reviewClosureFile: role === 'reviewer' ? path.join(root, '.wf-worktrees', state.id, '_review', `closure-${n}.json`) : null,
     instructions: {
-      planner: 'Read the issue and the code. Do not change any file. Return YAML: { plan: { summary, contract, anchors, tests: { changed, run }, doNotRun, externalServices, agentSplit }, criteria: [{ id: C1, text, uat }], work: [{ id: W1, criteria: [C1], repos, class, why }] } (work is optional; classes: see your role file).',
-      implementer: "Implement against the frozen criteria and the plan's contract in the worktrees above. Write tests only for real behaviour. While iterating run only the specs you changed; before finishing run the repo's lint and full unit suite once. Commit at stage boundaries and everything when done. If `work` is set, do that work item only; if it turns out to touch something a stronger class covers, stop and tell the owner.",
+      planner: 'Read the issue and the code. Do not change any file. Return your plan as one ```yaml fenced block, last in your reply: { plan: { summary, contract, anchors, tests: { changed, run }, doNotRun, externalServices, agentSplit }, criteria: [{ id: C1, text, uat }], work: [{ id: W1, criteria: [C1], repos, class, why }] } (work is optional; classes: see your role file). The owner freezes it from your transcript unchanged. Leave no background command, monitor or sleep loop running when you report.',
+      implementer: "Implement against the frozen criteria and the plan in the worktrees above: follow `plan.contract`, start from `plan.anchors`, while iterating run only `plan.tests.run` and the specs you changed, never what `plan.doNotRun` lists, and keep to `plan.externalServices` and `plan.agentSplit`. Write tests only for real behaviour. Before finishing run the repo's lint and full unit suite once, in the foreground. Commit at stage boundaries and everything when done. If `work` is set, do that work item only; if it turns out to touch something a stronger class covers, stop and tell the owner. Before you report, stop every background command, monitor or sleep loop you started: a waiter left running keeps notifying the owner after you are done.",
       reviewer: 'Review the whole change against the frozen criteria, and the gate evidence when `gate.passedOnThisTree` is true (then open every listed screenshot and record its sha256). When it is false, no gate has passed on this tree yet: judge the diff and list no screenshots. You did not write this change. Everything you need is in this bundle; judge the whole change yourself. Write the closure file: { reviewer, findings: [{ id, severity, summary, status: open|fixed|verified-nonissue, evidence, work }], criteria: [{ id, evidence: { kind: test|screenshot|output|not-applicable|dropped-with-reason, ref, reason } }], screenshotsInspected: [sha256] }. Then run `wf review --closure <file>`.',
       tester: 'Write requirement expectations from the issue before reading the implementation, then map each to gate tests.',
     }[role],
   };
   writeJson(file, bundle);
   if (bundle.reviewClosureFile) fs.mkdirSync(path.dirname(bundle.reviewClosureFile), { recursive: true });
-  append(root, state.id, 'handoff', { role, agent, runtime, session: options.session ?? null, agentType, class: cls, effort, model, work: work?.id ?? null, bundle: file, tree: treeHashes(state), patch: patchIds(state), ...(role === 'reviewer' ? { gate: gateNow.ok ? state.lastGate.runId : null } : {}) }, actor(options));
-  if (role === 'implementer' && state.lane !== 'quick' && state.intent === 'implementation') emitTrackerEvent(root, cfg, state.id, 'implementing');
+  // The model the owner's session runs on now: an agent whose class pins no model inherits it (`wf report` shows it).
+  let sessionModelNow = null;
+  const owning = sessionIdentity();
+  if (!model && owning?.runtime === 'claude') {
+    try {
+      sessionModelNow = sessionModel(home(), owning.session);
+    } catch {}
+  }
+  append(root, state.id, 'handoff', { role, agent, runtime, session: options.session ?? null, agentType, class: cls, effort, model, sessionModel: sessionModelNow, work: work?.id ?? null, bundle: file, tree: treeHashes(state), patch: patchIds(state), ...(role === 'reviewer' ? { gate: gateNow.ok ? state.lastGate.runId : null } : {}) }, actor(options));
+  // Once per attempt: with parallel work items every implementer handoff queued another identical tracker read.
+  const firstImplementer = role === 'implementer' && !state.handoffs.some((h) => h.role === 'implementer');
+  if (firstImplementer && state.lane !== 'quick' && state.intent === 'implementation') emitTrackerEvent(root, cfg, state.id, 'implementing');
   return { bundle: file, agentType, class: cls, effort, model, work: work?.id ?? null, state: loadState(root, state.id) };
 }
 
@@ -254,7 +325,8 @@ export function recordReview(root, options) {
   // The closure is for the tree the reviewer was handed. It inspected gate evidence only if a passing gate on that tree
   // was in its bundle (0.1.5 and earlier handed a reviewer only after such a gate, so their handoffs carry no field).
   const gateEvidenceInspected = 'gate' in reviewerHandoff ? Boolean(reviewerHandoff.gate) : true;
-  append(root, state.id, 'review.recorded', { closure, file: dest, tree: reviewerHandoff.tree, gateRun: reviewerHandoff.gate ?? null, gateEvidenceInspected, handoffTree: reviewerHandoff.tree, handoffPatch: reviewerHandoff.patch }, closure.reviewer);
+  const reviewerModel = reviewerHandoff.runtime === 'claude' ? subagentModel(home(), reviewerHandoff.agent, reviewerHandoff.agentType, reviewerHandoff.at) : null;
+  append(root, state.id, 'review.recorded', { closure, file: dest, tree: reviewerHandoff.tree, gateRun: reviewerHandoff.gate ?? null, gateEvidenceInspected, handoffTree: reviewerHandoff.tree, handoffPatch: reviewerHandoff.patch, reviewerModel }, closure.reviewer);
   return loadState(root, state.id);
 }
 
@@ -539,7 +611,22 @@ export function batchEject(root, options) {
 
 export const batchMembers = (root, batchId) => loadState(root, batchId).batch?.members ?? [];
 
+// With several open attempts a command without --attempt is refused, so every command the engine prints names it.
+export function withAttempt(root, state, text) {
+  let open = 0;
+  for (const id of listAttempts(root)) {
+    if (!['done', 'abandoned'].includes(loadState(root, id).phase)) open += 1;
+    if (open > 1) break;
+  }
+  if (open < 2) return text;
+  return text.replace(/`wf ([^`]*)`/g, (m, cmd) => (/(^|\s)--attempt(\s|=|$)/.test(cmd) ? m : `\`wf ${cmd} --attempt ${state.id}\``));
+}
+
 export function nextAction(root, state) {
+  return withAttempt(root, state, nextStep(root, state));
+}
+
+function nextStep(root, state) {
   const cfg = loadConfig(root);
   if (state.phase === 'done') return 'nothing: this attempt is closed';
   if (state.phase === 'abandoned') return 'nothing: this attempt was abandoned';
@@ -555,7 +642,9 @@ export function nextAction(root, state) {
 }
 
 function phaseAction(cfg, state) {
-  if (state.stops.length && state.lastGate?.status === 'stopped') return `gate stopped (${state.stops.at(-1).reason}); run \`wf gate\` to continue with finished steps carried`;
+  // The stop reason is the owner's note about the tree it stopped on; once the code changed it is stale and, shown to a
+  // later reviewer, it carried an earlier round's findings into a blind review.
+  if (state.stops.length && state.lastGate?.status === 'stopped' && canonical(state.lastGate.tree) === canonical(treeHashes(state))) return `gate stopped (${state.stops.at(-1).reason}); run \`wf gate\` to continue with finished steps carried`;
   if (!state.criteria) {
     if (needsPlanner(cfg, state) && !state.handoffs.some((h) => h.role === 'planner')) return 'start the planner: `wf handoff planner --agent <id>`';
     return 'freeze the criteria: `wf plan --file <criteria.yaml>`';

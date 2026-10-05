@@ -17,23 +17,77 @@ function walk(dir, depth = 0, out = []) {
   return out;
 }
 
+// Wall time counts an agent that sat idle (waiting on a monitor, or finished and later resumed) as working: one agent
+// measured 185 wall minutes for about 21 active. Active time sums the gaps between consecutive transcript entries,
+// leaving out gaps of IDLE_GAP_MS or more.
+export const IDLE_GAP_MS = 5 * 60000;
+export function activeMs(timestamps) {
+  const t = timestamps.map((x) => Date.parse(x)).filter((x) => !Number.isNaN(x)).sort((a, b) => a - b);
+  let n = 0;
+  for (let i = 1; i < t.length; i++) if (t[i] - t[i - 1] < IDLE_GAP_MS) n += t[i] - t[i - 1];
+  return n;
+}
+const minutes = (msValue) => Math.round(msValue / 6000) / 10;
+
+// A fresh prompt (not a tool result) after the first one is a resume of the same agent: a new round.
+const isPrompt = (e) => e.type === 'user' && !e.isMeta && (typeof e.message?.content === 'string' || (Array.isArray(e.message?.content) && e.message.content.some((c) => c.type === 'text') && !e.message.content.some((c) => c.type === 'tool_result')));
+
+export function readTranscript(file) {
+  const out = [];
+  for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+    if (!line) continue;
+    try {
+      out.push(JSON.parse(line));
+    } catch {}
+  }
+  return out;
+}
+
+// Real model names only: Claude Code writes `<synthetic>` for messages it generated itself.
+const realModel = (m) => (m && !String(m).startsWith('<') ? m : null);
+
+// The model of the last assistant message in a transcript, or null.
+export function lastModel(entries) {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const m = realModel(entries[i].message?.model);
+    if (entries[i].type === 'assistant' && m) return m;
+  }
+  return null;
+}
+
+// The last fenced YAML block (```yaml, ```yml or an untagged fence) the agent wrote, or null.
+export function lastFencedYaml(entries) {
+  let found = null;
+  for (const e of entries) {
+    if (e.type !== 'assistant') continue;
+    const content = e.message?.content;
+    const texts = typeof content === 'string' ? [content] : Array.isArray(content) ? content.filter((c) => c.type === 'text').map((c) => c.text ?? '') : [];
+    for (const t of texts) for (const m of t.matchAll(/```(?:ya?ml)?[ \t]*\n([\s\S]*?)\n[ \t]*```/g)) found = m[1];
+  }
+  return found;
+}
+
 // Reads Claude Code transcript files. A response split over several lines (one per content block) repeats its usage
 // with a growing output count, so each request counts once, at its largest.
 function claudeUsageOf(files) {
-  const u = { runtime: 'claude', models: {}, efforts: {}, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, toolCalls: 0, first: null, last: null, transcripts: files };
+  const u = { runtime: 'claude', models: {}, efforts: {}, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, toolCalls: 0, first: null, last: null, activeMs: 0, rounds: [], transcripts: files };
   const requests = new Map();
   for (const f of files) {
-    for (const line of fs.readFileSync(f, 'utf8').split('\n')) {
-      if (!line) continue;
-      let e;
-      try {
-        e = JSON.parse(line);
-      } catch {
-        continue;
+    const stamps = [];
+    let round = null;
+    const closeRound = () => {
+      if (round?.stamps.length) u.rounds.push({ startedAt: round.stamps[0], wallMinutes: minutes(Date.parse(round.stamps.at(-1)) - Date.parse(round.stamps[0])), activeMinutes: minutes(activeMs(round.stamps)) });
+    };
+    for (const e of readTranscript(f)) {
+      if (isPrompt(e) && round?.stamps.length) {
+        closeRound();
+        round = null;
       }
       if (e.timestamp) {
         u.first = u.first && u.first < e.timestamp ? u.first : e.timestamp;
         u.last = u.last && u.last > e.timestamp ? u.last : e.timestamp;
+        stamps.push(e.timestamp);
+        (round ??= { stamps: [] }).stamps.push(e.timestamp);
       }
       const m = e.message;
       if (m?.usage) {
@@ -43,9 +97,11 @@ function claudeUsageOf(files) {
       }
       if (Array.isArray(m?.content)) u.toolCalls += m.content.filter((c) => c.type === 'tool_use').length;
     }
+    closeRound();
+    u.activeMs += activeMs(stamps);
   }
   for (const r of requests.values()) {
-    if (r.model) u.models[r.model] = (u.models[r.model] ?? 0) + 1;
+    if (realModel(r.model)) u.models[r.model] = (u.models[r.model] ?? 0) + 1;
     if (r.effort) u.efforts[r.effort] = (u.efforts[r.effort] ?? 0) + 1;
     u.input += r.usage.input_tokens ?? 0;
     u.output += r.usage.output_tokens ?? 0;
@@ -63,7 +119,7 @@ function claudeUsage(session, home) {
 // Subagents started by the owner have no session id of their own. Claude Code writes each one as
 // <session>/subagents/agent-<id>.jsonl beside a .meta.json holding the name it was started with (the --agent id)
 // and its agent type. Read once per report.
-function subagentIndex(home) {
+export function subagentIndex(home) {
   const out = [];
   for (const f of walk(path.join(home, '.claude', 'projects'))) {
     if (path.basename(path.dirname(f)) !== 'subagents') continue;
@@ -74,6 +130,52 @@ function subagentIndex(home) {
     } catch {}
   }
   return out;
+}
+
+// Transcripts of the Claude Code subagent started under this name (and agent type, when known), newest first.
+export function subagentTranscripts(home, name, agentType = null, since = null) {
+  return subagentIndex(home)
+    .filter((x) => x.name === name && (!agentType || x.agentType === agentType))
+    .map((x) => ({ ...x, mtime: fs.statSync(x.file).mtimeMs }))
+    .filter((x) => !since || x.mtime >= Date.parse(since))
+    .sort((a, b) => b.mtime - a.mtime);
+}
+
+// The model the owner's own session runs on right now: what an agent whose class pins no model inherits.
+// Session transcripts sit at ~/.claude/projects/<project>/<session>.jsonl; only the tail is read.
+export function sessionModel(home, session) {
+  if (!session) return null;
+  const dir = path.join(home, '.claude', 'projects');
+  if (!fs.existsSync(dir)) return null;
+  for (const p of fs.readdirSync(dir)) {
+    const f = path.join(dir, p, `${session}.jsonl`);
+    if (!fs.existsSync(f)) continue;
+    const size = fs.statSync(f).size;
+    const fd = fs.openSync(f, 'r');
+    const len = Math.min(size, 512 * 1024);
+    const buf = Buffer.alloc(len);
+    fs.readSync(fd, buf, 0, len, size - len);
+    fs.closeSync(fd);
+    const entries = buf.toString('utf8').split('\n').slice(size > len ? 1 : 0).flatMap((l) => {
+      try {
+        return [JSON.parse(l)];
+      } catch {
+        return [];
+      }
+    });
+    return lastModel(entries);
+  }
+  return null;
+}
+
+// Best effort: the model a Claude subagent ran on, from its transcript. Never throws.
+export function subagentModel(home, name, agentType = null, since = null) {
+  try {
+    const t = subagentTranscripts(home, name, agentType, since)[0];
+    return t ? lastModel(readTranscript(t.file)) : null;
+  } catch {
+    return null;
+  }
 }
 
 function subagentUsage(h, index, since) {
@@ -190,7 +292,13 @@ export function attemptReport(root, id, table = prices(), { home = os.homedir(),
       effortMismatch: Boolean(h.effort && observedEffort && observedEffort !== h.effort),
       agentType: usage?.agentType ?? h.agentType ?? null,
       model: top(usage?.models)[0] ?? h.model ?? null,
-      wallMinutes: usage?.first && usage?.last ? Math.round((new Date(usage.last) - new Date(usage.first)) / 6000) / 10 : null,
+      wallMinutes: usage?.first && usage?.last ? minutes(new Date(usage.last) - new Date(usage.first)) : null,
+      // Wall time minus idle gaps of 5 minutes or more; rounds split where the agent was resumed with a new prompt.
+      activeMinutes: usage?.first ? minutes(usage.activeMs ?? 0) : null,
+      rounds: usage?.rounds?.length ?? null,
+      roundDetail: usage?.rounds ?? [],
+      // The owner session's model when the handoff was made (what an unpinned agent inherits), from the ledger.
+      sessionModel: h.sessionModel ?? null,
       outputTokens: usage ? usage.output : null,
       usage,
       cost: usage ? cost(usage, table) : null,
@@ -205,6 +313,13 @@ export function attemptReport(root, id, table = prices(), { home = os.homedir(),
     counted.add(key);
     return n + r.usage.input + r.usage.output + r.usage.cacheRead + r.usage.cacheWrite;
   }, 0);
+  // Every model seen for this attempt: in agent transcripts and recorded in the ledger at plan, handoff and review.
+  const observedModels = [...new Set([
+    ...roles.flatMap((r) => Object.keys(r.usage?.models ?? {})),
+    ...s.handoffs.map((h) => h.sessionModel),
+    s.planSource?.model,
+    ...s.reviews.map((r) => r.reviewerModel),
+  ].filter((m) => realModel(m)))].sort();
   return {
     id,
     item: s.item,
@@ -226,6 +341,7 @@ export function attemptReport(root, id, table = prices(), { home = os.homedir(),
     criteriaAmendments: s.criteriaAmendments.length,
     holds: s.holds.length,
     roles,
+    observedModels,
     tokens,
     cost: roles.some((r) => r.cost !== null) ? roles.reduce((n, r) => n + (r.cost ?? 0), 0) : null,
   };
@@ -241,7 +357,7 @@ export function report(roots, { home = os.homedir() } = {}) {
   return rows;
 }
 
-const HANDOFF_COLS = ['project', 'id', 'role', 'agent', 'runtime', 'work', 'class', 'declaredEffort', 'observedEffort', 'effortMismatch', 'agentType', 'model', 'wallMinutes', 'outputTokens', 'cost'];
+const HANDOFF_COLS = ['project', 'id', 'role', 'agent', 'runtime', 'work', 'class', 'declaredEffort', 'observedEffort', 'effortMismatch', 'agentType', 'model', 'sessionModel', 'wallMinutes', 'activeMinutes', 'rounds', 'outputTokens', 'cost'];
 export const handoffRows = (rows) => rows.flatMap((r) => r.roles.map((h) => ({ project: r.project, id: r.id, ...h })));
 
 const esc = (v) => (v === null || v === undefined ? '' : /[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : String(v));
@@ -251,8 +367,8 @@ export function toHandoffCsv(rows) {
 }
 
 export function toCsv(rows) {
-  const cols = ['project', 'id', 'item', 'lane', 'phase', 'admittedAt', 'timeToGateMs', 'timeToDeliverMs', 'timeToCloseMs', 'gateRuns', 'repairRounds', 'stepRuns', 'stepReused', 'reuseRate', 'gateTimeMs', 'findings', 'criteria', 'criteriaAmendments', 'holds', 'tokens', 'cost'];
-  return [cols.join(','), ...rows.map((r) => cols.map((c) => esc(r[c])).join(','))].join('\n') + '\n';
+  const cols = ['project', 'id', 'item', 'lane', 'phase', 'admittedAt', 'timeToGateMs', 'timeToDeliverMs', 'timeToCloseMs', 'gateRuns', 'repairRounds', 'stepRuns', 'stepReused', 'reuseRate', 'gateTimeMs', 'findings', 'criteria', 'criteriaAmendments', 'holds', 'observedModels', 'tokens', 'cost'];
+  return [cols.join(','), ...rows.map((r) => cols.map((c) => esc(Array.isArray(r[c]) ? r[c].join(' ') : r[c])).join(','))].join('\n') + '\n';
 }
 
 const html = (v) => String(v ?? '—').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
@@ -260,8 +376,8 @@ const html = (v) => String(v ?? '—').replace(/[&<>"]/g, (c) => ({ '&': '&amp;'
 function handoffTable(rows) {
   const hs = handoffRows(rows);
   if (!hs.length) return '';
-  const head = ['Attempt', 'Role', 'Agent', 'Work', 'Class', 'Effort declared', 'Effort observed', 'Agent type', 'Model', 'Wall min', 'Output tokens'];
-  const body = hs.map((h) => `<tr><td>${html(h.id)}</td><td>${html(h.role)}</td><td>${html(h.agent)}</td><td>${html(h.work)}</td><td>${html(h.class)}</td><td>${html(h.declaredEffort)}</td><td>${html(h.observedEffort)}${h.effortMismatch ? ' <strong>(differs)</strong>' : ''}</td><td>${html(h.agentType)}</td><td>${html(h.model)}</td><td>${html(h.wallMinutes)}</td><td>${html(h.outputTokens)}</td></tr>`).join('\n');
+  const head = ['Attempt', 'Role', 'Agent', 'Work', 'Class', 'Effort declared', 'Effort observed', 'Agent type', 'Model', 'Session model', 'Wall min', 'Active min', 'Rounds', 'Output tokens'];
+  const body = hs.map((h) => `<tr><td>${html(h.id)}</td><td>${html(h.role)}</td><td>${html(h.agent)}</td><td>${html(h.work)}</td><td>${html(h.class)}</td><td>${html(h.declaredEffort)}</td><td>${html(h.observedEffort)}${h.effortMismatch ? ' <strong>(differs)</strong>' : ''}</td><td>${html(h.agentType)}</td><td>${html(h.model)}</td><td>${html(h.sessionModel)}</td><td>${html(h.wallMinutes)}</td><td>${html(h.activeMinutes)}</td><td>${html(h.rounds)}</td><td>${html(h.outputTokens)}</td></tr>`).join('\n');
   return `<h2>Agents</h2><table><tr>${head.map((x) => `<th>${x}</th>`).join('')}</tr>${body}</table>`;
 }
 

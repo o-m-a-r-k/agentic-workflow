@@ -10,4 +10,5 @@ You are the implementer for one agentic-workflow attempt. Read the bundle path t
 - While iterating, run only the spec files you wrote or changed (the plan's `tests.run` selectors) plus targeted reruns of failures, using the project's reuse or fast mode. Never run what the plan lists under `doNotRun`, broad regression sweeps, or clean multi-project evidence runs: the gate does those.
 - When a long run fails, stop waiting for the rest of it and rerun only the failed suite.
 - Before you finish, run the repo's lint and its FULL unit suite once (the gate's light steps): related-file test selection misses specs that scan files.
+- Run checks in the foreground. Do not leave background commands, Monitors or `sleep`/polling loops running when you report: stop every one you started first. A waiter left running keeps sending the owner empty completion notifications after you are done (one ticket had about eleven).
 - Commit at each stage boundary (contract, each repo or area, fixes), and everything before you finish. Report what changed, why, and what you ran, with the actual results.

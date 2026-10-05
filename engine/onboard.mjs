@@ -4,9 +4,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ADAPTER_DIR, CONFIG_FILE, adapterLocation, agentTypeFor, declared, findRoot, loadConfig, loadConfigAtCommit, repoDir, roleClass } from './config.mjs';
 import { provision } from './attempt.mjs';
+import { projectEnv } from './env.mjs';
 import { chooseWorkers } from './host.mjs';
 import { missingFor, redactor, status as secretsStatus, stepEnv } from './secrets.mjs';
 import { findSkill } from './skills.mjs';
+import { report } from './telemetry.mjs';
 import { ENGINE_VERSION, WfError, YAML, git, refuse, run, shellQuote } from './util.mjs';
 
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -432,8 +434,54 @@ export function setEnabled(root, enabled) {
 }
 
 // ---------- doctor ----------
+
+// A step whose command reads a sibling repo (`../web`, `$WF_ROOT/web`, the attempt's `web` worktree) but does not list
+// it in `alsoInputs` is reused after that repo changes: a passing end-to-end run was reused against old API code.
+export function siblingWarnings(root, cfg) {
+  const out = [];
+  for (const step of cfg.gate.steps) {
+    if (!step.run) continue;
+    const repo = cfg.repos.find((r) => r.name === step.repo);
+    if (!repo) continue;
+    const pkg = step.package ? repo.packages.find((p) => p.path === step.package || p.name === step.package) : repo.packages[0];
+    const from = path.join(repoDir(root, repo), pkg?.path ?? '.');
+    for (const other of cfg.repos) {
+      if (other.name === repo.name || (step.alsoInputs ?? []).includes(other.name)) continue;
+      const otherDir = repoDir(root, other);
+      const rel = path.relative(from, otherDir).split(path.sep).join('/');
+      const fromRoot = path.relative(root, otherDir).split(path.sep).join('/');
+      const refs = [
+        rel.startsWith('..') ? rel : null,
+        fromRoot && !fromRoot.startsWith('..') ? `WF_ROOT}/${fromRoot}` : null,
+        fromRoot && !fromRoot.startsWith('..') ? `WF_ROOT/${fromRoot}` : null,
+        `WF_ATTEMPT/${other.name}`,
+        `WF_ATTEMPT}/${other.name}`,
+      ].filter(Boolean);
+      const hit = refs.find((r) => new RegExp(`${r.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w.-])`).test(step.run));
+      if (hit) out.push({ check: `step ${step.id} reads repo ${other.name}`, problem: `its command references ${hit.replace(/^WF_/, '$WF_')} but \`alsoInputs\` does not list ${other.name}, so a pass is reused after ${other.name} changes`, fix: `add \`alsoInputs: [${other.name}]\` to step ${step.id}` });
+    }
+  }
+  return out;
+}
+
+// Agents whose class pins no model inherit the owner session's: an effort comparison was confounded when the session
+// model changed mid-attempt. Warned only when an attempt actually shows more than one model.
+export function modelWarnings(root, cfg) {
+  const pinned = Object.values(cfg.classes).some((c) => c.claude?.model || c.codex?.model);
+  if (pinned) return [];
+  let rows = [];
+  try {
+    rows = report([root], { home: process.env.WF_HOME ?? os.homedir() });
+  } catch {
+    return [];
+  }
+  return rows
+    .filter((r) => r.observedModels.length > 1)
+    .map((r) => ({ check: `models in ${r.id}`, problem: `agents ran on ${r.observedModels.join(', ')} and no class pins a model, so each agent inherits the owner session's model`, fix: 'pin `classes.<name>.claude.model` (and `codex.model`) in .workflow/project.yaml' }));
+}
+
 export async function doctor(root, { runSteps = true } = {}) {
-  const report = { config: [], tools: [], secrets: [], skills: [], connectors: [], steps: [], ok: true };
+  const report = { config: [], tools: [], secrets: [], skills: [], connectors: [], steps: [], warnings: [], ok: true };
   const bad = (section, item) => {
     report[section].push({ ...item, ok: false });
     report.ok = false;
@@ -465,7 +513,7 @@ export async function doctor(root, { runSteps = true } = {}) {
   const major = ENGINE_VERSION.split('.')[0];
   if (cfg.engine && /^\d+\.x$/.test(cfg.engine) && cfg.engine.split('.')[0] !== major) bad('config', { check: 'engine version', problem: `project pins engine ${cfg.engine}, this is ${ENGINE_VERSION}`, fix: `install agentic-workflow ${cfg.engine} or update the pin` });
   for (const t of cfg.requires.tools ?? []) {
-    const r = run('sh', ['-c', t.check ?? `command -v ${t.name}`], { allowFail: true });
+    const r = run('sh', ['-c', t.check ?? `command -v ${t.name}`], { allowFail: true, env: projectEnv(cfg) });
     const have = (r.stdout + r.stderr).match(/(\d+)(?:\.(\d+))?/);
     const want = String(t.version ?? '').match(/^>=\s*(\d+)(?:\.(\d+))?/);
     const tooOld = want && have && (Number(have[1]) < Number(want[1]) || (Number(have[1]) === Number(want[1]) && Number(have[2] ?? 0) < Number(want[2] ?? 0)));
@@ -493,6 +541,9 @@ export async function doctor(root, { runSteps = true } = {}) {
     if (new Set(Object.values(hashes)).size > 1) report.skills.push({ ok: true, skill: s.name, note: `copies differ between runtimes (${Object.entries(hashes).map(([r, h]) => `${r} ${h.slice(0, 12)}`).join(', ')}); vendor it into .workflow/skills/ for one version everywhere` });
   }
   for (const c of cfg.requires.connectors ?? []) report.connectors.push({ ok: true, connector: c.name, note: `not checkable from the CLI: the agent confirms ${c.name} with one read-only call` });
+  // Warnings never fail doctor: each names a setup that let a stale or confounded result through.
+  for (const w of siblingWarnings(root, cfg)) report.warnings.push({ ok: true, warn: true, check: w.check, problem: w.problem, fix: w.fix });
+  for (const w of modelWarnings(root, cfg)) report.warnings.push({ ok: true, warn: true, check: w.check, problem: w.problem, fix: w.fix });
   if (runSteps && adapterBase) {
     const id = `_doctor-${Date.now()}`;
     const trusted = loadConfigAtCommit(root, cfg, adapterBase);
@@ -526,7 +577,7 @@ export async function doctor(root, { runSteps = true } = {}) {
           bad('steps', { step: step.id, kind: 'config', problem: `directory ${path.relative(root, cwd)} does not exist at ${repo.base}` });
           continue;
         }
-        const r = run('sh', ['-c', command], { cwd, allowFail: true, env: { ...process.env, ...stepEnv(root, trusted, step.id), WF_ROOT: root, WF_EVIDENCE: evidence } });
+        const r = run('sh', ['-c', command], { cwd, allowFail: true, env: projectEnv(trusted, { ...stepEnv(root, trusted, step.id), WF_ROOT: root, WF_EVIDENCE: evidence }) });
         const redact = redactor(root, trusted);
         fs.writeFileSync(path.join(evidence, 'output.log'), redact(`${r.stdout}\n${r.stderr}`));
         if (r.status === 0) report.steps.push({ ok: true, step: step.id });

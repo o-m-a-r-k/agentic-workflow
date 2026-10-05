@@ -138,11 +138,12 @@ test('tracker: status, comment and screenshots are verified from the readback', 
     return f;
   };
   assert.equal(wf(root, ['tracker', 'record', '--event', 'admitted', '--capture', cap({ issue: { identifier: item, state: { name: 'Todo' } } }), '--attempt', e.id]).code, 75, 'wrong status refused');
-  ok(wf(root, ['tracker', 'record', '--event', 'admitted', '--capture', cap({ issue: { identifier: item, state: { name: 'In Progress' } } }), '--attempt', e.id]));
+  ok(wf(root, ['tracker', 'record', '--event', 'admitted', '--capture', cap({ issue: { identifier: item, description: 'Show the new text on the home screen.', state: { name: 'In Progress' } } }), '--attempt', e.id]));
   ok(wf(root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id]));
   ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id]));
   ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
-  ok(wf(root, ['tracker', 'record', '--event', 'implementing', '--capture', cap({ issue: { identifier: item, state: { name: 'In Progress' } } }), '--attempt', e.id]));
+  // Re-reading an unchanged issue gives the same bytes as the admission read: accepted for `implementing`.
+  ok(wf(root, ['tracker', 'record', '--event', 'implementing', '--capture', cap({ issue: { identifier: item, description: 'Show the new text on the home screen.', state: { name: 'In Progress' } } }), '--attempt', e.id]));
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'ui\n' });
   const g = JSON.parse(ok(wf(root, ['gate', '--attempt', e.id, '--json'])).out);
   const shot = g.steps[0].artifacts[0];

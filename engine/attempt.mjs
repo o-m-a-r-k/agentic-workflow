@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { loadConfig, loadConfigAtCommit, adapterLocation, repoDir } from './config.mjs';
 import { append, assertSchema, createAttempt, listAttempts, loadState } from './ledger.mjs';
+import { projectEnv } from './env.mjs';
 import { emitTrackerEvent } from './tracker.mjs';
 import { WfError, assertSafeId, git, hashFile, refuse, run, sessionIdentity, sha256 } from './util.mjs';
 
@@ -116,11 +117,11 @@ export function provision(root, cfg, repo, dir) {
   const stale = p.clone.filter((rel) => path.basename(rel) === 'node_modules').some((rel) => missingNodeDependencies(path.join(dir, path.dirname(rel))).length > 0);
   report.stale = stale;
   if (p.install && (drift || missingClone || stale)) {
-    run('sh', ['-c', p.install], { cwd: dir });
+    run('sh', ['-c', p.install], { cwd: dir, env: projectEnv(cfg) });
     report.installed = true;
   }
   if (p.onWorktreeCreate) {
-    run(process.execPath, [path.resolve(root, '.workflow', p.onWorktreeCreate), dir], { cwd: dir, env: { ...process.env, WF_ROOT: root, WF_REPO: repo.name } });
+    run(process.execPath, [path.resolve(root, '.workflow', p.onWorktreeCreate), dir], { cwd: dir, env: projectEnv(cfg, { WF_ROOT: root, WF_REPO: repo.name }) });
   }
   return report;
 }

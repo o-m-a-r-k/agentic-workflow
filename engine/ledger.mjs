@@ -89,11 +89,14 @@ export function reduce(entries) {
     criteria: null,
     criteriaAmendments: [],
     plan: null,
+    planSource: null,
     work: null,
     roles: { planner: [], implementer: [], reviewer: [], tester: [] },
     handoffs: [],
     gates: [],
     review: null,
+    reviews: [],
+    baseMerges: [],
     accepted: null,
     holds: [],
     delivery: { repos: {}, completedAt: null },
@@ -136,6 +139,7 @@ export function reduce(entries) {
       case 'criteria.frozen':
         s.criteria = d.criteria;
         s.plan = d.plan ?? null;
+        s.planSource = d.source ?? null;
         s.work = d.work ?? null;
         if (s.phase === 'admitted') s.phase = 'planned';
         break;
@@ -158,6 +162,10 @@ export function reduce(entries) {
         break;
       case 'review.recorded':
         s.review = { ...d, at: e.at };
+        s.reviews.push({ reviewer: d.closure?.reviewer ?? null, at: e.at, reviewerModel: d.reviewerModel ?? null });
+        break;
+      case 'base.merged':
+        s.baseMerges.push({ ...d, at: e.at });
         break;
       case 'review.accepted':
         s.accepted = { ...d, at: e.at };

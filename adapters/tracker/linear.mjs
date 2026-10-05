@@ -19,6 +19,8 @@ export default {
     return {
       id: first(issue.identifier, issue.id),
       title: issue.title ?? '',
+      // The issue body. `wf tracker record` refuses an `admitted` capture without it unless it says the issue has none.
+      description: typeof issue.description === 'string' ? issue.description : '',
       status: first(issue.state?.name, issue.status?.name, issue.status, issue.state),
       url: issue.url ?? null,
       updatedAt: issue.updatedAt ?? null,
