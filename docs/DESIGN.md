@@ -3,7 +3,7 @@
 Status: v0.1 implemented. Scenario tests in `scenarios/` are the executable form of this design; where they differ, the tests win and this file is fixed.
 
 agentic-workflow runs software changes through a fixed lifecycle with AI coding agents:
-admit a ticket → isolated worktree → plan → implement → gate → independent review → deliver → tracker handoff.
+admit a ticket → isolated worktree → plan → implement (committed) → independent review → fix → gate → evidence pass → accept → deliver → tracker handoff.
 It ships as one user-level plugin for Claude Code and Codex. Each project opts in with an adapter
 (`.workflow/`) that describes its repos, components, commands, tracker and delivery.
 
@@ -13,7 +13,7 @@ Each principle comes from a failure seen while running agent-driven delivery on 
 
 1. **One trust boundary.** Authority to deliver = the ticket was admitted with implementation intent and no hold is recorded. The engine never parses prompts or transcripts to decide what is allowed; doing so produced rotating false refusals and collapsed throughput.
 2. **Evidence, not statements.** Every lifecycle step reads evidence files the engine wrote. No step accepts an agent saying it did something.
-3. **Independent review.** The reviewer is never the owner, planner or an implementer (checked from the ledger). The planner leaves the tree unchanged; the tree is unchanged between review handoff and acceptance.
+3. **Independent review.** The reviewer is never the owner, planner or an implementer, and every review round is a new reviewer agent that reviewed no earlier round of the attempt (checked from the ledger). The planner leaves the tree unchanged; acceptance needs a clean closure written for the exact tree being accepted.
 4. **Requirements first.** Acceptance criteria are frozen before implementation. At acceptance each criterion maps to evidence (a gate test, a screenshot, a command output) or a justified `not-applicable` / `dropped-with-reason`. One test per criterion is not required.
 5. **Fast gates by reuse, not by skipping.** Suite-level content-hashed reuse; only related proof while repairing; one full gate per settled tree. No "break the fix to prove the test fails" steps.
 6. **Interruptions keep work.** Stop/resume and recovery from a dead runner keep the suites that already finished.
@@ -72,7 +72,7 @@ agentic-workflow/
 | Work classes | one generated agent per class; declared effort/model recorded per handoff | `classes`: `use` text, claude/codex `effort` and `model` |
 | Gate | plan (`--prepare-only`), run, suite-level reuse, stop/resume, dead-runner harvest, newer failure supersedes older pass, unknown paths count as dependencies | steps, step plugins |
 | Evidence | immutable, hash-bound, under `.wf-evidence/` | extra artifact kinds |
-| Review | bundle, attestation, closure (every finding fixed or verified-nonissue), criteria → evidence mapping, reviewer inspects gate screenshots and test output | pre-review check command |
+| Review | bundle (states whether a gate passed on the tree under review), closure bound to the tree it was handed, fresh reviewer per round, every finding fixed or verified-nonissue, criteria → evidence mapping, evidence pass after the gate (gate screenshots and test output inspected) | pre-review check command |
 | Delivery | authorization, cross-repo ordering, partial-delivery resume, base-advance carry-forward | delivery adapter |
 | Tracker | lifecycle events → actions, readback verification | tracker adapter, statuses, templates |
 | Follow-ups | `reopen` for amendments and visual feedback after delivery | — |
@@ -160,7 +160,7 @@ invariants: .workflow/AGENTS.invariants.md
 requires: { skills: [], connectors: [linear], tools: [{ name: docker, check: "docker info" }] }
 ```
 
-`wf gate --focused` (allowed only when every changed file matches `focused`) skips heavy steps and records `focused: true` and each skipped step's `skippedBy: focused`. It is repair proof only: review handoff, accept and delivery need a passing gate on the current tree that skipped no step because of `--focused`. Steps skipped by `when.paths`, docs-only changes, a plugin's own `plan`, or deferred to a batch do not make a gate partial.
+`wf gate --focused` (allowed only when every changed file matches `focused`) skips heavy steps and records `focused: true` and each skipped step's `skippedBy: focused`. It is repair proof only: accept and delivery need a passing gate on the current tree that skipped no step because of `--focused`. Steps skipped by `when.paths`, docs-only changes, a plugin's own `plan`, or deferred to a batch do not make a gate partial.
 
 A step without `inputs` reruns every gate (no reuse). A passing result is reused only when every file changed in the package since that pass is in the step's `inputs`, its `ignores` (files the step provably does not depend on) or the package's `docsOnly`; otherwise the step reruns. A changed file that no step's `inputs` covers forces every step of its package to run (fail closed); a changed file in a package with no steps is listed as unchecked in the gate result. Files under the repo's `sharedInfra` (root lockfiles, shared config) force all of the repo's steps to run.
 
@@ -279,7 +279,19 @@ requires:
 - **Planner** returns `{ plan, criteria }`; `plan` holds `summary`, `contract` (what repos share: routes, DTO fields, error codes, permission subjects), `anchors` (file:line of each function to change), `tests` (`changed` specs, targeted `run` selectors), `doNotRun`, `externalServices` (default test runs need no provider keys or internet; provider/sandbox tests are opt-in) and `agentSplit`. The engine stores it with the frozen criteria and passes it to every later role; it does not police its size.
 - **Planner work items (optional):** `work: [{ id, criteria: [..], repos: [..], class, why }]` next to `criteria`. `wf plan` refuses duplicate work ids, criteria that do not exist and classes that do not exist (the owner would otherwise be told to start an agent that is not there); a criterion no work item covers is shown, not refused. An amendment keeps the work items unless its file replaces them, and they must still name existing criteria.
 - **Implementers:** after the contract is committed, one implementer per work item (or per repo or area) can run in parallel (several implementer handoffs are allowed). `wf handoff implementer --work W1` records the work id, class, declared effort and model and the agent type in the bundle and ledger and prints the agent type to start; without `--work` the implementer role's class is used. They run only the specs they changed and targeted reruns while iterating, never broad sweeps, then the repo's lint and full unit suite once before finishing, and commit at stage boundaries.
-- **Reviewer, blind:** its prompt is the one line `wf handoff reviewer` prints (the bundle path), with nothing from the owner or other agents; the bundle carries everything it needs. It may read the committed diff while the gate runs (started with a fixed line naming only the attempt and worktrees); the formal handoff after the gate passes uses the same agent id, and the reviewer then checks the gate evidence and screenshots. Independence is unchanged: `wf handoff reviewer` refuses the owner, the planner and every implementer.
+- **Reviewer, blind and fresh:** its prompt is the one line `wf handoff reviewer` prints (the bundle path), with nothing from the owner or other agents; the bundle carries everything it needs. `wf handoff reviewer` refuses the owner, the planner, every implementer, and any agent id that already reviewed a round of this attempt: a resumed reviewer is anchored on its earlier findings. Each round is a new agent that reviews the whole attempt against the frozen criteria; it is not given earlier rounds' findings.
+
+### Review order
+
+A finding found after a full gate costs another full gate (about 40 minutes on the first real ticket), so review comes first:
+
+1. **Review the committed change.** `wf handoff reviewer` is allowed once an implementer has committed work (no uncommitted tracked changes), with or without a passing gate. The bundle's `gate.passedOnThisTree` says whether gate evidence exists for this tree and lists the logs and screenshots only when it does. `wf review --closure` records the tree the reviewer was handed and whether its bundle carried a passing gate on that tree (`gateEvidenceInspected`).
+2. **Fix** every open finding through the implementer of that work item, commit.
+3. **Gate** the fixed tree. The owner may start it in parallel with the review; nobody edits the worktrees while it runs.
+4. **Fresh reviewer** on the fixed tree. Once a passing gate exists on it, that round is also the evidence pass: it inspects the step logs and records every screenshot's sha256.
+5. **`wf accept`** needs all three on the current tree, and names whichever is missing with the next command: a passing gate that skipped nothing for `--focused`; a clean closure written for this tree (any change after the review needs a new round); and that closure written after the gate passed on this tree (otherwise an evidence pass).
+
+Review-first suits changes where findings are likely (money, authorization, migrations): each finding costs a fix and a light rerun instead of a full gate. Starting the review and the gate together suits changes where findings are rare: when the review comes back clean and the gate passes, only the short evidence pass remains. Attempts recorded by 0.1.5 or earlier, whose reviewers were handed the attempt only after a passing gate, count as evidence-inspected.
 - Role agents registered by a runtime at session start may not include ones `wf sync` wrote later; the skills then ask for a session restart. They never substitute a general-purpose agent or pass a model on the spawn, since either overrides the agent file's effort and model.
 - **Files:** Claude Code agents are Markdown with frontmatter (`name`, `description`, `effort`, `model`, `tools`) in `.claude/agents/`. Codex agents are TOML in `.codex/agents/<name>.toml` (`name`, `description`, `developer_instructions`, `model`, `model_reasoning_effort`). `wf sync` removes generated `wf-*` files it no longer produces (a removed class, the old Codex `.md` files); files without its generated marker are left alone.
 
@@ -310,8 +322,9 @@ Not built: automatic classification, path globs for critical code, and any gate 
 
 What the evidence proves, and what it does not:
 
-- **It catches mistakes.** The ledger is hash-chained, writes are serialised, gate results are bound to the exact tree and to the adapter committed at base, only a gate that ran every step the tree needs (not a `--focused` one) opens review and delivery, a step that reads another repo (`alsoInputs`) is reused only while that repo's tree is unchanged, and the guard hook blocks careless edits of `.wf-evidence/` from Edit/Write and common shell writes. An agent that misremembers, skips a step or edits the wrong file is stopped.
+- **It catches mistakes.** The ledger is hash-chained, writes are serialised, gate results are bound to the exact tree and to the adapter committed at base, only a gate that ran every step the tree needs (not a `--focused` one) opens acceptance and delivery, acceptance needs a clean closure written for the exact tree after a passing gate on it, a step that reads another repo (`alsoInputs`) is reused only while that repo's tree is unchanged, and the guard hook blocks careless edits of `.wf-evidence/` from Edit/Write and common shell writes. An agent that misremembers, skips a step or edits the wrong file is stopped.
 - **It does not stop a determined forger on the same machine.** The chain is unkeyed and agent identities (`--agent`, `--owner`) are names the owner supplies. An agent with shell access that sets out to fake a passing gate or a reviewer can. Independence and evidence are only as strong as the agents and the person running them.
+- **Fresh reviewer per round is checked; blind is a rule.** The engine refuses a reviewer id that reviewed an earlier round, but the id is a name the owner supplies: resuming an old agent under a new id defeats it.
 - **The blind reviewer is a rule, not a check.** The engine hands the reviewer only the bundle and prints a one-line start prompt, but it cannot see the prompt a runtime actually gives an agent, so it does not verify or record it. An owner who steers the reviewer (hints, focus areas, summaries of the work, other agents' findings) weakens the review without any refusal; the skills and the reviewer role forbid it, and the reviewer reports a prompt that carried more.
 - **Classes do not change guarantees.** The gate, the blind independent review (always at the reviewer role's class, never a work item's), frozen criteria, evidence integrity and the hash-chained ledger are the same for every class. A class lowers only how hard an implementer thinks; a misclassified work item still meets the same gate and the same reviewer.
 - **Adapter code is trusted at base.** Step plugins, delivery and tracker adapters run as committed on the base branch, never the ticket's copy. A ticket can still change the project scripts a step calls (for example a test script in `package.json`); that is visible in the diff the reviewer inspects, and changes to `sharedInfra` files force the affected package's steps to run.

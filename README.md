@@ -111,12 +111,14 @@ flowchart TD
   PL -- yes --> PLAN["Planner<br/>read-only, tree unchanged"]
   PL -- no --> IMP
   PLAN --> IMP["Implementer<br/>code + tests, committed"]
-  IMP --> GP["Gate plan<br/>wf gate --prepare-only"]
-  GP --> GR["Gate run<br/>reuse, stop/resume"]
-  GR -- fails --> IMP
-  GR -- passes --> RV["Independent review<br/>findings + criteria mapping"]
+  IMP --> RV["Independent review, fresh reviewer<br/>findings + criteria mapping"]
   RV -- findings --> IMP
-  RV -- accepted --> H{"Hold<br/>recorded?"}
+  RV -- clean --> GR["Gate run<br/>reuse, stop/resume"]
+  GR -- fails --> IMP
+  GR -- passes --> EV["Evidence pass, fresh reviewer<br/>gate logs + screenshots"]
+  EV -- findings --> IMP
+  EV -- clean --> AC["wf accept<br/>gate + clean closure on this tree"]
+  AC --> H{"Hold<br/>recorded?"}
   H -- yes --> WAIT["Wait for wf release"]
   WAIT --> H
   H -- no --> D["Deliver<br/>delivery adapter, repos in order"]
@@ -131,9 +133,10 @@ flowchart TD
 | Worktrees | automatic | One worktree per repo; dependencies cloned or installed; ignored files like `.env.local` copied in. |
 | Criteria | `wf plan` | Criteria are frozen before implementation. Later changes go through `wf criteria amend --reason`. |
 | Plan | `wf handoff planner` | The planner leaves the tree unchanged. |
-| Implement | `wf handoff implementer` | Changes are committed before the gate. |
+| Implement | `wf handoff implementer` | Changes are committed before review and the gate. |
+| Review | `wf handoff reviewer`, `wf review` | Allowed once the work is committed, before or during the gate. The reviewer isn't the owner, planner, an implementer or a reviewer of an earlier round. The closure is bound to the tree it was handed. |
 | Gate | `wf gate` | Each step's evidence is hashed. A newer failure beats an older pass. |
-| Review | `wf review`, `wf accept` | The reviewer isn't the owner, planner or an implementer. Every finding is fixed or shown to be a non-issue. Every criterion maps to evidence or a justified n/a. The tree hasn't changed since the review handoff. |
+| Accept | `wf accept` | On the current tree: a passing full gate, a closure with every finding fixed or shown to be a non-issue, written after that gate passed (an evidence pass when the review came first). Every criterion maps to evidence or a justified n/a. |
 | Deliver | `wf deliver` | Implementation intent, no hold, review accepted. |
 | Handoff | `wf tracker record` | The status, comment and screenshots are all read back from the tracker. |
 
@@ -143,15 +146,15 @@ A stopped or interrupted attempt resumes with `wf resume`, which says exactly wh
 
 ```mermaid
 flowchart LR
-  Q["quick<br/>small fix, no ticket needed"] --> QG["gate + review"] --> QD["deliver"]
-  S["standard<br/>one ticket"] --> SP["plan"] --> SG["gate + review"] --> SD["deliver + tracker handoff"]
-  B["batch<br/>several tickets"] --> BM["each member: plan, light gate, review"] --> BG["one shared heavy gate + review"] --> BD["one delivery, per-ticket handoff"]
+  Q["quick<br/>small fix, no ticket needed"] --> QG["review + gate"] --> QD["deliver"]
+  S["standard<br/>one ticket"] --> SP["plan"] --> SG["review + gate"] --> SD["deliver + tracker handoff"]
+  B["batch<br/>several tickets"] --> BM["each member: plan, review, light gate"] --> BG["one shared heavy gate + review"] --> BD["one delivery, per-ticket handoff"]
 ```
 
 - **quick:** for small fixes. Same gate and independent review, but no planner and no tracker.
 - **standard:** one ticket, the full lifecycle.
 - **batch:** tickets share their heavy gate. Each ticket defers its heavy steps, the batch runs them once, then everything is delivered together and each ticket gets its own handoff.
-- **focused:** a gate option, not a lane. When every changed file is in the adapter's `focused` paths, `wf gate --focused` runs only the light steps: fast proof while repairing. It never counts as the proof of a tree: review handoff, `wf accept` and `wf deliver` refuse a focused gate and name the heavy steps it skipped.
+- **focused:** a gate option, not a lane. When every changed file is in the adapter's `focused` paths, `wf gate --focused` runs only the light steps: fast proof while repairing. It never counts as the proof of a tree: `wf accept` and `wf deliver` refuse a focused gate, a reviewer handed a focused-gated tree is told no gate passed on it, and name the heavy steps it skipped.
 
 ## Roles and handoffs
 
@@ -170,11 +173,15 @@ sequenceDiagram
   O->>WF: wf handoff implementer
   WF->>IM: bundle (plan, criteria, affected components)
   IM-->>WF: commits
+  O->>WF: wf handoff reviewer (gate may run in parallel)
+  WF->>RV: bundle (diff, criteria; no gate evidence yet)
+  RV-->>WF: findings + criteria → evidence mapping
+  O->>IM: fix findings (same implementer), commit
   O->>WF: wf gate
   WF-->>O: evidence (suites, screenshots, logs)
-  O->>WF: wf handoff reviewer
-  WF->>RV: bundle (diff, gate evidence, criteria)
-  RV-->>WF: findings + criteria → evidence mapping
+  O->>WF: wf handoff reviewer (new agent: evidence pass)
+  WF->>RV: bundle (diff, criteria, gate evidence)
+  RV-->>WF: closure, screenshots inspected
   O->>WF: wf accept, then wf deliver
   WF-->>O: delivered, tracker actions pending
 ```
@@ -183,7 +190,8 @@ sequenceDiagram
 - `wf sync` writes each project's role files from the plugin's templates plus the project's own additions. Effort and model come from [work classes](#work-classes): one implementer agent per class, and the planner and reviewer at their role's class.
 - **Planner** returns the plan as a short checklist: summary, the cross-repo contract (routes, DTO fields, error codes, permission subjects), anchors (file:line of each function to change), tests to write and the targeted selectors to run, suites not to run, the external-services policy (default runs need no provider keys or internet) and the agent split (what can proceed in parallel once the contract is committed).
 - **Implementers** can run in parallel, one per work item (or per repo or area), after the contract is committed (`wf handoff implementer` accepts several; `--work W1` hands over one work item and prints the agent type to start). They run only the specs they changed while iterating, then the repo's lint and full unit suite once before finishing; the gate runs the rest.
-- **Reviewer** is started blind: `wf handoff reviewer` prints one line (the bundle path), and that line is its whole prompt, with no hints, summaries or focus areas from the owner. The bundle holds the criteria, amendments with reasons, the plan, the diff's worktrees and bases, gate evidence and screenshots. It can start on the committed diff while the gate runs (with a fixed line naming only the attempt and worktrees); after the gate passes, the formal handoff uses the same agent id. It is never the planner or an implementer.
+- **Reviewer** is started blind and fresh: `wf handoff reviewer` prints one line (the bundle path), and that line is its whole prompt, with no hints, summaries, focus areas or earlier findings. Every round is a new agent with a new id; the engine refuses an id that reviewed an earlier round of the attempt, because a resumed reviewer is anchored on what it found before. Each round reviews the whole attempt against the frozen criteria. The bundle holds the criteria, amendments with reasons, the plan, the diff's worktrees and bases, and says whether a gate passed on this tree (with its logs and screenshots when one did). It is never the planner or an implementer.
+- **Review order:** review comes before the gate, because each finding found after a full gate costs another full gate. Hand the committed change to a reviewer, fix its findings, gate the fixed tree, then a fresh reviewer does the evidence pass (gate logs and screenshots) and `wf accept`. The owner may start the review and the gate together (never editing the worktrees while the gate runs). Review first when findings are likely (money, authorization, migrations); both together when findings are rare, so a clean review and a passing gate leave only the evidence pass.
 - **Role appendices:** `roles.<role>.appendix` in the adapter names a file under `.workflow/` whose text `wf sync` appends to that role's generated agent under "Project additions". Role agents generated while a session runs register only after it restarts; start the agent type `wf handoff` names, never a general-purpose agent, and never pass a model on the spawn (both override the agent file's effort and model).
 - **Amending criteria:** `wf criteria amend --file f --reason "why"` merges by criterion id. Criteria in the file replace the frozen ones with the same id, a new id is added, and every id the file does not mention stays as it was. Removing one takes an explicit `{ id: C3, dropped: true, reason: "..." }` entry. The command prints the full list after the change and what changed, added or dropped. Adding by listing a new id is safe because nothing is lost: a mistyped id adds a criterion the reviewer must map rather than removing one.
 - A separate tester role is available but off by default. Frozen criteria plus review of the gate's evidence cover the same failure with one fewer handoff.
@@ -388,16 +396,16 @@ sequenceDiagram
 
 ## Trust model
 
-- **What the engine enforces:** a hash-chained ledger; gate results bound to the exact tree and to the adapter committed at base; only a gate that ran every step the tree needs (never a `--focused` one) opens review and delivery; a step that reads another repo (`alsoInputs`) is reused only while that repo is unchanged; the reviewer is never the owner, planner or an implementer; criteria are frozen before code.
+- **What the engine enforces:** a hash-chained ledger; gate results bound to the exact tree and to the adapter committed at base; only a gate that ran every step the tree needs (never a `--focused` one) opens acceptance and delivery; acceptance needs a clean closure written for the current tree after a passing gate on it; a step that reads another repo (`alsoInputs`) is reused only while that repo is unchanged; the reviewer is never the owner, planner, an implementer or a reviewer of an earlier round; criteria are frozen before code.
 - **What classes change:** only how hard each agent thinks. Every guarantee above holds the same at every class.
-- **What it relies on you for:** agent identities are names the owner supplies, and the reviewer must be started blind, with only the one line `wf handoff reviewer` prints. The engine cannot see the prompt a runtime gives an agent, so it does not check it; steering the reviewer weakens the review silently.
+- **What it relies on you for:** agent identities are names the owner supplies, and the reviewer must be a newly started agent (not an old one under a new id), started blind with only the one line `wf handoff reviewer` prints. The engine cannot see the prompt a runtime gives an agent, so it does not check it; steering the reviewer weakens the review silently.
 - **What it does not stop:** a determined forger with shell access on the same machine. It catches mistakes, not attacks. Details: [docs/DESIGN.md](docs/DESIGN.md#trust-model).
 
 ## Principles
 
 1. Authority to deliver comes from an admitted implementation intent with no hold. Nothing is inferred from prompts.
 2. Every step checks evidence the engine wrote, never an agent's claim.
-3. The reviewer never wrote or planned the change.
+3. The reviewer never wrote or planned the change, and each review round is a fresh agent.
 4. Criteria are frozen before code. Each one maps to evidence, not necessarily to a new test.
 5. Gates are fast through reuse, not by skipping.
 6. Interruptions keep finished work.

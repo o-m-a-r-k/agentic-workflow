@@ -161,10 +161,17 @@ export function handoff(root, role, options) {
   if (state.intent === 'analysis' && role !== 'planner') throw refuse('analysis attempts are read-only; only a planner handoff is allowed');
   if (role === 'implementer' && !state.criteria) throw refuse('freeze criteria first: `wf plan --file <criteria>`');
   if (role === 'tester' && !cfg.roles?.tester) throw refuse('this project has no tester role configured');
+  // Review runs before the gate: every finding found after a gate costs another full gate. The gate may run in parallel.
+  let gateNow = null;
   if (role === 'reviewer') {
-    const g = gatePassedForCurrentTree(state);
-    if (!g.ok) throw refuse(`review needs a passing gate on the current code: ${g.reason}`);
+    if (state.lane !== 'batch' && !state.handoffs.some((h) => h.role === 'implementer')) throw refuse('nothing to review yet: hand the work to an implementer first (`wf handoff implementer --agent <id>`)');
+    // Tracked changes only: a gate running in parallel writes untracked reports, and those are never the change.
+    const dirty = Object.entries(treeHashes(state)).filter(([, t]) => t.includes('+dirty')).map(([n]) => n);
+    if (dirty.length) throw refuse(`commit the change before the review (the reviewer reads the committed diff): uncommitted changes in ${dirty.join(', ')}`);
     if (authorsOf(root, state).has(agent)) throw refuse(`${agent} planned, wrote or owns this change and cannot review it`);
+    // A resumed reviewer is anchored on its earlier findings; each round is judged by an agent that has seen none of them.
+    if (state.roles.reviewer.includes(agent)) throw refuse(`${agent} already reviewed a round of this attempt; start a fresh reviewer agent with a new id; each review round uses a new agent`);
+    gateNow = gatePassedForCurrentTree(state);
   }
   if (role === 'implementer' && state.roles.reviewer.includes(agent)) throw refuse(`${agent} reviewed this attempt and cannot implement it`);
   const skillIssues = skillProblems(root, cfg, role, runtime, state);
@@ -211,19 +218,25 @@ export function handoff(root, role, options) {
     impact: impact(trusted, changed),
     invariants: cfg.invariants ? path.resolve(root, ADAPTER_DIR, cfg.invariants) : null,
     roleAppendix: appendix && fs.existsSync(appendix) ? appendix : null,
-    gate: role === 'reviewer' ? { evidence: state.lastGate.evidence, screenshots: screenshots(state), logs: state.lastGate.steps.filter((s) => s.log).map((s) => ({ step: s.id, log: s.log, status: s.status })) } : null,
+    // Whether gate evidence exists for the tree under review. Without it the reviewer judges the diff; acceptance then
+    // needs a later round written after a passing gate on this tree, which inspects the evidence.
+    gate: role === 'reviewer'
+      ? gateNow.ok
+        ? { passedOnThisTree: true, runId: state.lastGate.runId, evidence: state.lastGate.evidence, screenshots: screenshots(state), logs: state.lastGate.steps.filter((s) => s.log).map((s) => ({ step: s.id, log: s.log, status: s.status })) }
+        : { passedOnThisTree: false, reason: gateNow.reason, screenshots: [], logs: [] }
+      : null,
     // Outside .wf-evidence/: the reviewer writes it, `wf review` copies it into the evidence.
     reviewClosureFile: role === 'reviewer' ? path.join(root, '.wf-worktrees', state.id, '_review', `closure-${n}.json`) : null,
     instructions: {
       planner: 'Read the issue and the code. Do not change any file. Return YAML: { plan: { summary, contract, anchors, tests: { changed, run }, doNotRun, externalServices, agentSplit }, criteria: [{ id: C1, text, uat }], work: [{ id: W1, criteria: [C1], repos, class, why }] } (work is optional; classes: see your role file).',
       implementer: "Implement against the frozen criteria and the plan's contract in the worktrees above. Write tests only for real behaviour. While iterating run only the specs you changed; before finishing run the repo's lint and full unit suite once. Commit at stage boundaries and everything when done. If `work` is set, do that work item only; if it turns out to touch something a stronger class covers, stop and tell the owner.",
-      reviewer: 'Review the diff and the gate evidence. You did not write this change. Everything you need is in this bundle; judge the whole change yourself. Write the closure file: { reviewer, findings: [{ id, severity, summary, status: open|fixed|verified-nonissue, evidence, work }], criteria: [{ id, evidence: { kind: test|screenshot|output|not-applicable|dropped-with-reason, ref, reason } }], screenshotsInspected: [sha256] }. Then run `wf review --closure <file>`.',
+      reviewer: 'Review the whole change against the frozen criteria, and the gate evidence when `gate.passedOnThisTree` is true (then open every listed screenshot and record its sha256). When it is false, no gate has passed on this tree yet: judge the diff and list no screenshots. You did not write this change. Everything you need is in this bundle; judge the whole change yourself. Write the closure file: { reviewer, findings: [{ id, severity, summary, status: open|fixed|verified-nonissue, evidence, work }], criteria: [{ id, evidence: { kind: test|screenshot|output|not-applicable|dropped-with-reason, ref, reason } }], screenshotsInspected: [sha256] }. Then run `wf review --closure <file>`.',
       tester: 'Write requirement expectations from the issue before reading the implementation, then map each to gate tests.',
     }[role],
   };
   writeJson(file, bundle);
   if (bundle.reviewClosureFile) fs.mkdirSync(path.dirname(bundle.reviewClosureFile), { recursive: true });
-  append(root, state.id, 'handoff', { role, agent, runtime, session: options.session ?? null, agentType, class: cls, effort, model, work: work?.id ?? null, bundle: file, tree: treeHashes(state), patch: patchIds(state) }, actor(options));
+  append(root, state.id, 'handoff', { role, agent, runtime, session: options.session ?? null, agentType, class: cls, effort, model, work: work?.id ?? null, bundle: file, tree: treeHashes(state), patch: patchIds(state), ...(role === 'reviewer' ? { gate: gateNow.ok ? state.lastGate.runId : null } : {}) }, actor(options));
   if (role === 'implementer' && state.lane !== 'quick' && state.intent === 'implementation') emitTrackerEvent(root, cfg, state.id, 'implementing');
   return { bundle: file, agentType, class: cls, effort, model, work: work?.id ?? null, state: loadState(root, state.id) };
 }
@@ -238,9 +251,16 @@ export function recordReview(root, options) {
   if (!Array.isArray(closure.findings) || !Array.isArray(closure.criteria)) throw new WfError('closure needs `findings` and `criteria` lists');
   const dest = path.join(attemptDir(root, state.id), 'review', `closure-recorded-${state.handoffs.length}.json`);
   writeJson(dest, closure);
-  append(root, state.id, 'review.recorded', { closure, file: dest, handoffTree: reviewerHandoff.tree, handoffPatch: reviewerHandoff.patch }, closure.reviewer);
+  // The closure is for the tree the reviewer was handed. It inspected gate evidence only if a passing gate on that tree
+  // was in its bundle (0.1.5 and earlier handed a reviewer only after such a gate, so their handoffs carry no field).
+  const gateEvidenceInspected = 'gate' in reviewerHandoff ? Boolean(reviewerHandoff.gate) : true;
+  append(root, state.id, 'review.recorded', { closure, file: dest, tree: reviewerHandoff.tree, gateRun: reviewerHandoff.gate ?? null, gateEvidenceInspected, handoffTree: reviewerHandoff.tree, handoffPatch: reviewerHandoff.patch }, closure.reviewer);
   return loadState(root, state.id);
 }
+
+// 0.1.5 and earlier recorded no flag: their reviewers were handed the attempt only after a passing gate on that tree.
+const reviewedAfterGate = (r) => r.gateEvidenceInspected ?? true;
+const openFindings = (r) => r.closure.findings.filter((f) => !['fixed', 'verified-nonissue'].includes(f.status));
 
 const EVIDENCE_KINDS = new Set(['test', 'screenshot', 'output', 'not-applicable', 'dropped-with-reason']);
 
@@ -270,9 +290,14 @@ export function acceptReview(root, options) {
   const inspected = new Set(r.closure.screenshotsInspected ?? []);
   const unseen = shots.filter((h) => !inspected.has(h));
   if (unseen.length) problems.push(`${unseen.length} gate screenshot(s) not inspected by the reviewer`);
-  if (canonical(patchIds(state)) !== canonical(r.handoffPatch)) problems.push('the change was modified after the review handoff; hand it to a reviewer again');
+  // Acceptance needs three things on the current tree: a passing full gate, a clean closure written for this tree, and
+  // that closure written after the gate passed on it, so the reviewer inspected the gate evidence.
   const g = gatePassedForCurrentTree(state);
-  if (!g.ok) problems.push(`gate: ${g.reason}`);
+  if (!g.ok) problems.push(`gate: ${g.reason}; run \`wf gate\``);
+  const fresh = 'hand it to a fresh reviewer: `wf handoff reviewer --agent <new id>`, start it with only the printed line, then `wf review --closure <file>`';
+  const reviewedTree = r.tree ?? r.handoffTree;
+  if (canonical(treeHashes(state)) !== canonical(reviewedTree)) problems.push(`no closure for the current tree: the code changed after the last review; ${fresh}`);
+  else if (g.ok && !reviewedAfterGate(r)) problems.push(`the closure was written before a passing gate on this tree, so no reviewer has inspected the gate evidence; for the evidence pass ${fresh}`);
   if (problems.length) throw refuse(`review not accepted:\n  - ${problems.join('\n  - ')}`);
   append(root, state.id, 'review.accepted', { reviewer: r.closure.reviewer, patch: patchIds(state), heads: treeHashes(state), gate: state.lastGate.runId }, actor(options));
   return loadState(root, state.id);
@@ -541,15 +566,26 @@ function phaseAction(cfg, state) {
     if (open.length) return `start an implementer per open work item (agent type in brackets; never general-purpose): ${open.map((w) => `${w.id} class ${w.class} [${agentTypeFor(cfg, 'implementer', w.class)}] \`wf handoff implementer --work ${w.id} --agent <id>\``).join('; ')}`;
   }
   if (state.lane !== 'batch' && !state.handoffs.some((h) => h.role === 'implementer')) return `start the implementer: \`wf handoff implementer --agent <id>\` [${agentTypeFor(cfg, 'implementer')}]`;
+  if (state.accepted) return state.batchOf ? `waiting for batch ${state.batchOf}` : 'deliver: `wf deliver`';
+  // Order: review the committed change (the gate may run in parallel), fix findings, gate, then an evidence pass.
   const g = state.lastGate;
-  if (!g || g.status !== 'passed') return g ? `gate ${g.status}: fix and commit, then \`wf gate\`` : 'commit the change, then `wf gate`';
-  if (focusedSkips(g).length) return `the last gate was focused (skipped ${focusedSkips(g).join(', ')}): run \`wf gate\` without --focused before review`;
-  if (!state.review) return 'hand to an independent reviewer: `wf handoff reviewer --agent <id>`';
-  if (!state.accepted) {
-    const open = state.review.closure.findings.filter((f) => !['fixed', 'verified-nonissue'].includes(f.status));
-    if (open.length) return `fix the open findings (${open.map((f) => (f.work ? `${f.id} in ${f.work}` : f.id)).join(', ')}) through the implementer that did that work (continue it; do not start a new one), commit, \`wf gate\`, then hand to the reviewer again (\`wf handoff reviewer --agent <id>\`)`;
-    return 'accept the review: `wf accept`';
-  }
-  if (state.batchOf) return `waiting for batch ${state.batchOf}`;
-  return 'deliver: `wf deliver`';
+  const tree = treeHashes(state);
+  const onTree = (t) => t && canonical(t) === canonical(tree);
+  const pass = gatePassedForCurrentTree(state);
+  const fresh = `a fresh reviewer (new id, never one from an earlier round; start it with only the printed line): \`wf handoff reviewer --agent <new id>\` [${agentTypeFor(cfg, 'reviewer')}]`;
+  const focused = g?.status === 'passed' && onTree(g.tree) ? focusedSkips(g) : [];
+  const gateRun = focused.length ? `the last gate was focused (skipped ${focused.join(', ')}): run \`wf gate\` without --focused` : 'run `wf gate`';
+  const gateHint = pass.ok ? '' : `; the gate can run in parallel (${gateRun}; never edit the worktrees while it runs)`;
+  const uncommittedWork = Object.values(tree).some((t) => t.includes('+dirty')) || Object.keys(state.repos).every((n) => !changedFiles(state, n).length);
+  if (uncommittedWork) return `commit the change, then hand to ${fresh}${gateHint}`;
+  if (g?.status === 'failed' && onTree(g.tree)) return 'gate failed: fix and commit through the implementer that did that work, then `wf gate`';
+  const r = state.review;
+  const lastReviewer = state.handoffs.filter((h) => h.role === 'reviewer').at(-1);
+  if (lastReviewer && onTree(lastReviewer.tree) && r?.closure.reviewer !== lastReviewer.agent) return `waiting for reviewer ${lastReviewer.agent}: \`wf review --closure <its file>\`${gateHint}`;
+  if (!r || !onTree(r.tree ?? r.handoffTree)) return `hand to ${fresh}${gateHint}`;
+  const open = openFindings(r);
+  if (open.length) return `fix the open findings (${open.map((f) => (f.work ? `${f.id} in ${f.work}` : f.id)).join(', ')}) through the implementer that did that work (continue it; do not start a new one), commit, then hand to ${fresh}; \`wf gate\` on the fixed tree`;
+  if (!pass.ok) return `clean review on this tree: ${gateRun}`;
+  if (!reviewedAfterGate(r)) return `evidence pass: the gate passed after the review, so hand to ${fresh} to inspect the gate evidence and screenshots`;
+  return 'accept the review: `wf accept`';
 }

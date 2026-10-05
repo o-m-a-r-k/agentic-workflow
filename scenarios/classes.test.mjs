@@ -112,7 +112,7 @@ test('an implementer handoff for a work item names the agent type and records cl
   assert.doesNotMatch(s.next, /W1 class/);
   assert.match(wf(root, ['handoff', 'implementer', '--work', 'W9', '--agent', 'x', '--attempt', id]).err, /no work item `W9`.*W1, W2/);
   ok(wf(root, ['handoff', 'implementer', '--work', 'W2', '--agent', 'impl-api', '--attempt', id]));
-  assert.match(state(root, id).next, /commit the change, then `wf gate`/);
+  assert.match(state(root, id).next, /commit the change, then hand to a fresh reviewer/);
   const plain = ok(wf(root, ['handoff', 'implementer', '--agent', 'impl-3', '--attempt', id]));
   assert.match(plain.out, /class full, effort high\nStart agent type wf-implementer /);
 });

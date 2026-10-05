@@ -107,9 +107,12 @@ test('a newer gate failure supersedes an older pass', () => {
   ok(wf(root, ['gate', '--attempt', e.id]));
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'broken\n' });
   assert.equal(wf(root, ['gate', '--attempt', e.id]).code, 1);
-  const r = wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', e.id]);
-  assert.equal(r.code, 75);
-  assert.match(r.err, /last gate failed/);
+  assert.match(state(root, e.id).next, /gate failed: fix and commit/);
+  const h = JSON.parse(ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', e.id, '--json'])).out);
+  const bundle = JSON.parse(fs.readFileSync(h.bundle, 'utf8'));
+  assert.equal(bundle.gate.passedOnThisTree, false, 'the older pass is not evidence for this tree');
+  assert.match(bundle.gate.reason, /last gate failed/);
+  assert.match(wf(root, ['accept', '--attempt', e.id]).err, /no review recorded/);
 });
 
 test('uncommitted changes are refused at the gate; one open attempt per item; adopt transfers ownership', () => {
