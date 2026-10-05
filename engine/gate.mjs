@@ -308,7 +308,10 @@ function collectArtifacts(step, dir, destDir, since, units) {
     const dest = path.join(destDir, r);
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     fs.copyFileSync(file, dest);
-    const a = { path: dest, sha256: hashFile(dest), kind: /\.(png|jpe?g|webp|gif)$/i.test(r) ? 'screenshot' : 'file', source: r };
+    // Whose evidence the file is: the units whose own expansion of a matching glob matches it. A batch member delivers
+    // (and attaches to its ticket) only its own files; a placeholder-less glob matches for every unit.
+    const owners = units.filter((u) => hit.some((g) => matchesAny(r, expandArtifactGlob(g.glob, [u])))).map((u) => u.attempt);
+    const a = { path: dest, sha256: hashFile(dest), kind: /\.(png|jpe?g|webp|gif)$/i.test(r) ? 'screenshot' : 'file', source: r, units: owners };
     out.push(a);
     for (const g of hit) g.files.push(a);
   }

@@ -152,15 +152,41 @@ test('tracker: status, comment and screenshots are verified from the readback', 
   assert.match(wf(root, ['accept', '--attempt', e.id]).err, /not inspected/, 'reviewer must inspect every screenshot');
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r', { screenshotsInspected: [shot.sha256] })), '--attempt', e.id]));
   ok(wf(root, ['accept', '--attempt', e.id]));
-  ok(wf(root, ['deliver', '--attempt', e.id]));
+  const d = ok(wf(root, ['deliver', '--attempt', e.id]));
+  // The owner is told exactly which files to show and attach, with a proposed caption for each.
+  assert.match(d.out, /SHOW TO OWNER \(1 delivered screenshot\(s\) for ENG-50\)/);
+  assert.match(d.out, /attach as: home\.png/);
+  assert.match(d.out, /proposed caption: Home/);
+  assert.match(d.out, new RegExp(shot.path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.match(ok(wf(root, ['resume', '--attempt', e.id])).out, /next: show the owner, in the chat, each of the 1 delivered screenshot/);
   const after = new Date(Date.now() + 1000).toISOString();
-  const leaky = cap({ issue: { identifier: item, state: { name: 'Ready for UAT' } }, comments: [{ id: 'c1', body: `${item} is ready for UAT.\n\nUAT scope:\n- a shows the new text\nchanged src/app/home.tsx`, createdAt: after }], attachments: [{ id: 'a1', title: 'home.png' }] });
+  const comment = [{ id: 'c1', body: `${item} is ready for UAT.\n\nUAT scope:\n- a shows the new text`, createdAt: after }];
+  const upload = (subtitle) => ({ id: 'a1', title: 'home.png', subtitle, url: 'https://uploads.linear.app/x/y/home?signature=s' });
+  const good = cap({ issue: { identifier: item, state: { name: 'Ready for UAT' } }, comments: comment, attachments: [upload('Home screen showing the new text')] });
+  assert.match(wf(root, ['tracker', 'record', '--event', 'delivered', '--capture', good, '--attempt', e.id]).err, /not shown to the owner yet/, 'the handoff waits for the owner to see the screenshots');
+  const shown = (caption) => {
+    const f = path.join(base, `shown-${Math.random().toString(36).slice(2)}.json`);
+    fs.writeFileSync(f, JSON.stringify({ screenshots: [{ sha256: shot.sha256, caption }] }));
+    return f;
+  };
+  assert.match(wf(root, ['shown', '--file', shown('Home'), '--attempt', e.id]).err, /the engine's proposal unchanged/);
+  assert.match(wf(root, ['shown', '--file', path.join(base, 'none.json'), '--attempt', e.id]).err, /ENOENT|no such file/);
+  fs.writeFileSync(path.join(base, 'empty.json'), JSON.stringify({ screenshots: [] }));
+  assert.match(wf(root, ['shown', '--file', path.join(base, 'empty.json'), '--attempt', e.id]).err, /home\.png .*not acknowledged/);
+  ok(wf(root, ['shown', '--file', shown('Home screen showing the new text'), '--attempt', e.id]));
+  const leaky = cap({ issue: { identifier: item, state: { name: 'Ready for UAT' } }, comments: [{ ...comment[0], body: `${comment[0].body}\nchanged src/app/home.tsx` }], attachments: [upload('Home screen showing the new text')] });
   assert.match(wf(root, ['tracker', 'record', '--event', 'delivered', '--capture', leaky, '--attempt', e.id]).err, /internals: source file path/);
-  const noShot = cap({ issue: { identifier: item, state: { name: 'Ready for UAT' } }, comments: [{ id: 'c1', body: `${item} is ready for UAT.\n\nUAT scope:\n- a shows the new text`, createdAt: after }], attachments: [] });
-  assert.match(wf(root, ['tracker', 'record', '--event', 'delivered', '--capture', noShot, '--attempt', e.id]).err, /home\.png is not attached/);
-  const good = cap({ issue: { identifier: item, state: { name: 'Ready for UAT' } }, comments: [{ id: 'c1', body: `${item} is ready for UAT.\n\nUAT scope:\n- a shows the new text`, createdAt: after }], attachments: [{ id: 'a1', title: 'home.png' }] });
+  const noShot = cap({ issue: { identifier: item, state: { name: 'Ready for UAT' } }, comments: comment, attachments: [] });
+  assert.match(wf(root, ['tracker', 'record', '--event', 'delivered', '--capture', noShot, '--attempt', e.id]).err, /1 of 1 delivered screenshot\(s\) not attached[\s\S]*home\.png .*no attachment with this title/);
+  const link = cap({ issue: { identifier: item, state: { name: 'Ready for UAT' } }, comments: comment, attachments: [{ id: 'a1', title: 'home.png', url: 'https://example.test/home.png' }] });
+  assert.match(wf(root, ['tracker', 'record', '--event', 'delivered', '--capture', link, '--attempt', e.id]).err, /home\.png .*attached as a link, not an uploaded file/);
+  const earlier = cap({ issue: { identifier: item, state: { name: 'Ready for UAT' } }, comments: comment, attachments: [upload(null)] });
+  assert.match(wf(root, ['tracker', 'record', '--event', 'delivered', '--capture', earlier, '--attempt', e.id]).err, /uploaded, but no attachment of it has the subtitle "Home screen showing the new text"/, 'an earlier upload with the same name does not count');
   ok(wf(root, ['tracker', 'record', '--event', 'delivered', '--capture', good, '--attempt', e.id]));
-  assert.equal(state(root, e.id).phase, 'done');
+  const s = state(root, e.id);
+  assert.equal(s.phase, 'done');
+  assert.equal(s.delivery.shown.screenshots[0].caption, 'Home screen showing the new text');
+  assert.deepEqual(s.tracker.done.at(-1).attachments.map((a) => a.title), ['home.png']);
 });
 
 test('wf stop pauses a running gate and finished steps are kept', async () => {

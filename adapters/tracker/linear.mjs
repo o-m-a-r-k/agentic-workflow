@@ -7,11 +7,13 @@ import path from 'node:path';
 const ISSUE = `query Issue($id: String!) { issue(id: $id) { id identifier title description url updatedAt state { name }
   team { states { nodes { id name } } }
   comments { nodes { id body createdAt updatedAt } }
-  attachments { nodes { id title url } } } }`;
+  attachments { nodes { id title subtitle url } } } }`;
 const UPDATE = 'mutation Update($id: String!, $stateId: String!) { issueUpdate(id: $id, input: { stateId: $stateId }) { success } }';
 const COMMENT = 'mutation Comment($issueId: String!, $body: String!) { commentCreate(input: { issueId: $issueId, body: $body }) { success } }';
 const UPLOAD = 'mutation Upload($contentType: String!, $filename: String!, $size: Int!) { fileUpload(contentType: $contentType, filename: $filename, size: $size) { uploadFile { uploadUrl assetUrl headers { key value } } } }';
-const ATTACH = 'mutation Attach($issueId: String!, $title: String!, $url: String!) { attachmentCreate(input: { issueId: $issueId, title: $title, url: $url }) { success } }';
+const ATTACH = 'mutation Attach($issueId: String!, $title: String!, $subtitle: String, $url: String!) { attachmentCreate(input: { issueId: $issueId, title: $title, subtitle: $subtitle, url: $url }) { success } }';
+// Linear stores uploaded files on its own upload host; any other url is a link attachment.
+const UPLOAD_HOST = /^https:\/\/uploads\.linear\.app\//;
 const TYPES = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif' };
 
 const first = (...values) => values.find((v) => v !== undefined && v !== null);
@@ -23,10 +25,12 @@ export default {
     readIssue: 'Linear get_issue (include comments and attachments) or list_comments',
     setStatus: 'Linear save_issue with the status name',
     comment: 'Linear save_comment; reuse an existing comment with the same body instead of posting a duplicate',
-    attach: 'Linear create_attachment with title equal to the file name',
-    readBack: 'Linear get_issue + list_comments + attachments, saved together as JSON',
+    attach: 'Upload each file as a real attachment, one file at a time (a signed upload url expires in 60 s): Linear prepare_attachment_upload { issue, filename: <title>, contentType: image/png (or the file\'s type), size: <exact bytes, e.g. wc -c < path>, title: <title>, subtitle: <caption> }; then PUT the raw bytes to uploadRequest.url with every uploadRequest.headers entry sent verbatim (curl -X PUT --data-binary @<path> -H ...; never base64); then create_attachment_from_upload { issue, assetUrl, title: <title>, subtitle: <caption> }. Title is the file name `wf` lists, subtitle the caption recorded with `wf shown`. Never create a link attachment or paste the image into a comment: the readback must show an uploads.linear.app attachment with that title and subtitle',
+    readBack: 'Linear get_issue (its response carries the attachments with title, subtitle and url) + list_comments, saved together as JSON',
   },
   captureShape: '{ "issue": <get_issue response>, "comments": [<comments>], "attachments": [<attachments>] }',
+  // An uploaded file, not a link: what `wf tracker record` requires of every delivered screenshot.
+  isUpload: (a) => UPLOAD_HOST.test(String(a?.url ?? '')),
   rules: { attachmentTitleIsFilename: true },
   api: {
     url: 'https://api.linear.app/graphql',
@@ -55,14 +59,14 @@ export default {
           await gql(COMMENT, { issueId: issue.id, body: a.body });
         } else if (a.op === 'attach') {
           for (const f of a.files) {
-            const name = path.basename(f.path);
-            if ((issue.attachments?.nodes ?? []).some((x) => x.title === name)) continue;
+            const name = f.title ?? path.basename(f.path);
+            if ((issue.attachments?.nodes ?? []).some((x) => x.title === name && UPLOAD_HOST.test(x.url ?? '') && (x.subtitle ?? '') === (f.caption ?? ''))) continue;
             const body = fs.readFileSync(f.path);
             const contentType = TYPES[path.extname(name).toLowerCase()] ?? 'application/octet-stream';
             const up = (await gql(UPLOAD, { contentType, filename: name, size: body.length })).fileUpload.uploadFile;
             const put = await fetch(up.uploadUrl, { method: 'PUT', headers: { 'content-type': contentType, 'cache-control': 'public, max-age=31536000', ...Object.fromEntries((up.headers ?? []).map((h) => [h.key, h.value])) }, body });
             if (!put.ok) throw new Error(`Linear upload of ${name} failed: ${put.status}`);
-            await gql(ATTACH, { issueId: issue.id, title: name, url: up.assetUrl });
+            await gql(ATTACH, { issueId: issue.id, title: name, subtitle: f.caption ?? null, url: up.assetUrl });
           }
         }
       }
@@ -82,7 +86,7 @@ export default {
       url: issue.url ?? null,
       updatedAt: issue.updatedAt ?? null,
       comments: list(first(raw.comments, issue.comments)).map((c) => ({ id: c.id, body: c.body ?? '', createdAt: c.createdAt, updatedAt: c.updatedAt ?? c.createdAt })),
-      attachments: list(first(raw.attachments, issue.attachments)).map((a) => ({ id: a.id, title: a.title ?? '', filename: a.filename ?? a.title ?? '', url: a.url })),
+      attachments: list(first(raw.attachments, issue.attachments)).map((a) => ({ id: a.id, title: a.title ?? '', subtitle: a.subtitle ?? null, filename: a.filename ?? a.title ?? '', url: a.url ?? null })),
     };
   },
 };

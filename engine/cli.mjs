@@ -9,7 +9,7 @@ import { exportAttempt, exportFile } from './export.mjs';
 import { liveGate, runGate, runWithLease, stopGate } from './gate.mjs';
 import { append, listAttempts, loadState } from './ledger.mjs';
 import { outsidePlan } from './scope.mjs';
-import { acceptReview, amendCriteria, batchCreate, batchEject, closeAfterHandoff, deliver, freezeCriteria, handoff, nextAction, recordReview, reopen, uncovered, withAttempt } from './lifecycle.mjs';
+import { acceptReview, amendCriteria, batchCreate, batchEject, closeAfterHandoff, deliver, freezeCriteria, handoff, needsShown, nextAction, recordReview, recordShown, reopen, shownDraftFile, uncovered, withAttempt } from './lifecycle.mjs';
 import { detect, doctor, register, registry, setEnabled, sync, writeDraft } from './onboard.mjs';
 import * as secrets from './secrets.mjs';
 import { report, toCsv, toHandoffCsv, toHtml } from './telemetry.mjs';
@@ -43,6 +43,7 @@ Work
   wf review --closure file.json     record the reviewer's closure
   wf accept                         accept the review
   wf deliver                        integrate every repo, then start the tracker handoff
+  wf shown --file shown.json        record that every delivered screenshot was shown in the chat, with its caption
   wf tracker record --event E --capture file.json | wf tracker sync (tracker.via: api)
   wf hold --reason "why" | wf release
   wf reopen --item ID --reason "feedback"
@@ -91,6 +92,7 @@ function summary(root, s, { base = null, resume = false } = {}) {
       if (outside?.length) lines.push(`  outside the plan: ${outside.length} changed file(s) no plan anchor or test path names (listed in the reviewer bundle)`);
     } catch {}
   }
+  if (s.phase === 'handoff-pending' && s.delivery.screenshots) lines.push(showBlock(root, s).trim().replace(/^/gm, '  ').replace(/^ {2}SHOW TO OWNER/, '  delivered screenshots — SHOW TO OWNER'));
   if (resume) {
     const last = s.exports?.filter((x) => !x.json).at(-1)?.file ?? (fs.existsSync(exportFile(root, s.id)) ? exportFile(root, s.id) : null);
     lines.push(`  export: ${last ?? 'none yet'}${last ? '' : ' (`wf export` writes one page for this attempt)'}`);
@@ -100,6 +102,22 @@ function summary(root, s, { base = null, resume = false } = {}) {
   }
   lines.push(`  next: ${live ? withAttempt(root, s, 'a gate is running: wait for it to finish (or `wf stop --reason "why"`); do not edit the worktrees meanwhile') : nextAction(root, s)}`);
   return lines.join('\n');
+}
+
+// What the owner must show in the chat and attach to the ticket, per delivered file; or why there is nothing.
+function showBlock(root, s) {
+  const set = s.delivery.screenshots;
+  if (!set) return '';
+  if (!set.screenshots.length) return `\nSHOW TO OWNER: no screenshots for ${s.item}: ${set.none}\n  (recorded; tell the owner this in the delivery report)`;
+  const shown = s.delivery.shown?.screenshots ?? [];
+  const rows = set.screenshots.map((f, i) => {
+    const cap = shown.find((x) => x.sha256 === f.sha256)?.caption;
+    return `  ${i + 1}. ${f.path}\n     attach as: ${f.title}   sha256 ${f.sha256.slice(0, 12)}\n     ${cap ? `caption: ${cap}` : `proposed caption: ${f.proposed}  (refine it after viewing: which screen, which state)`}`;
+  });
+  const head = needsShown(s)
+    ? `SHOW TO OWNER (${set.screenshots.length} delivered screenshot(s) for ${s.item}): display each image in the chat with its caption, then record it with \`wf shown --file <f>\` (start from a copy of ${shownDraftFile(root, s.id)}). Each is also uploaded to the ticket as a file: title = "attach as", subtitle = its caption.`
+    : `delivered screenshots for ${s.item} (shown to the owner ${s.delivery.shown.at}):`;
+  return `\n${head}\n${rows.join('\n')}`;
 }
 
 function gateText(result) {
@@ -396,7 +414,8 @@ async function dispatch(cmd, sub, positional, options) {
       }
       const api = await trackerApi(root, r.state.id);
       const after = loadState(root, r.state.id);
-      print(options, `delivered ${after.id}: ${Object.values(after.delivery.repos).map((d) => `${d.repo}${d.commit ? `@${d.commit.slice(0, 10)}` : ' (no changes)'}`).join(', ')}${api}\nnext: ${nextAction(root, after)}`, after);
+      const members = (after.batch?.members ?? []).map((m) => showBlock(root, loadState(root, m))).join('');
+      print(options, `delivered ${after.id}: ${Object.values(after.delivery.repos).map((d) => `${d.repo}${d.commit ? `@${d.commit.slice(0, 10)}` : ' (no changes)'}`).join(', ')}${api}${showBlock(root, after)}${members}\nnext: ${nextAction(root, after)}`, after);
       return 0;
     }
     case 'tracker': {
@@ -411,6 +430,13 @@ async function dispatch(cmd, sub, positional, options) {
       let s = await recordTracker(root, cfg, openState(root, options), options);
       s = closeAfterHandoff(root, s);
       print(options, `tracker ${options.event} verified. ${s.phase === 'done' ? 'Attempt closed and worktrees removed.' : `next: ${nextAction(root, s)}`}`, s);
+      return 0;
+    }
+    case 'shown': {
+      let s = recordShown(root, options);
+      const api = await trackerApi(root, s.id);
+      s = closeAfterHandoff(root, loadState(root, s.id));
+      print(options, `shown recorded for ${s.id}: ${s.delivery.shown.screenshots.length} screenshot(s) with the owner's captions.${api}${s.phase === 'done' ? ' Attempt closed and worktrees removed.' : `\nnext: ${nextAction(root, s)}`}`, s);
       return 0;
     }
     case 'hold': {

@@ -244,8 +244,16 @@ test('tracker.via api: the engine performs and reads back admitted, implementing
     ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r', { screenshotsInspected: [g.steps[0].artifacts[0].sha256] })), '--attempt', id]));
     ok(wf(root, ['accept', '--attempt', id]));
     const d = ok(wf(root, ['deliver', '--attempt', id]));
-    assert.match(d.out, /tracker: delivered performed through the API and read back; attempt closed/);
+    assert.match(d.out, /tracker: delivered waits for the owner: show the delivered screenshots/);
+    assert.match(d.out, /SHOW TO OWNER \(1 delivered screenshot/);
+    assert.ok(!server.read().log.includes('upload home.png'), 'nothing is uploaded before the owner captions it');
+    const shownFile = path.join(base, 'shown.json');
+    fs.writeFileSync(shownFile, JSON.stringify({ screenshots: [{ sha256: g.steps[0].artifacts[0].sha256, caption: 'Home screen with the new text' }] }));
+    const sh = ok(wf(root, ['shown', '--file', shownFile, '--attempt', id]));
+    assert.match(sh.out, /tracker: delivered performed through the API and read back; attempt closed/);
     const linear = server.read();
+    assert.equal(linear.issue.attachments[0].subtitle, 'Home screen with the new text');
+    assert.match(linear.issue.attachments[0].url, /^https:\/\/uploads\.linear\.app\//);
     assert.equal(linear.issue.state.name, 'Ready for UAT');
     assert.match(linear.issue.comments[0].body, /ENG-90 is ready for UAT\.[\s\S]*- a shows the new text/);
     assert.deepEqual(linear.issue.attachments.map((a) => a.title), ['home.png']);

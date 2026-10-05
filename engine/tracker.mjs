@@ -56,8 +56,10 @@ export function trackerActions(root, cfg, state, event, extra = {}) {
       const rendered = renderTemplate(root, cfg, step.comment, vars);
       if (rendered) actions.push({ op: 'comment', templateKey: step.comment, body: rendered.body, reuseExisting: true });
     } else if (step.attach === 'screenshots') {
+      // The delivered set: each file uploaded (never a link) as an attachment titled `title`, its subtitle the caption
+      // the owner gives it in `wf shown`.
       const shots = extra.screenshots ?? [];
-      if (shots.length) actions.push({ op: 'attach', files: shots });
+      if (shots.length) actions.push({ op: 'attach', files: shots.map((f) => ({ path: f.path, sha256: f.sha256, source: f.source ?? null, title: f.title ?? path.basename(f.path) })) });
     }
   }
   return actions;
@@ -110,6 +112,7 @@ export async function recordTracker(root, cfg, state, options) {
   const raw = readJson(capturePath);
   const issue = adapter.normalize(raw);
   const problems = [];
+  const verified = [];
   if (issue.id !== state.item) problems.push(`capture is for ${issue.id}, not ${state.item}`);
   // A hand-written capture without the issue body was accepted, and every later role then read the ticket without
   // its description. Some issues are title-only: the capture says so with "descriptionEmpty": true.
@@ -143,17 +146,36 @@ export async function recordTracker(root, cfg, state, options) {
       }
     }
     if (a.op === 'attach') {
-      for (const f of a.files) {
-        const name = path.basename(f.path);
-        const hit = issue.attachments.find((x) => x.title === name || x.filename === name);
-        if (!hit) problems.push(`screenshot ${name} is not attached (attachment title must equal the file name)`);
+      // Every delivered screenshot must be on the issue as an uploaded file (the adapter's `isUpload` tells an upload
+      // from a link), titled with its name and subtitled with the caption the owner recorded in `wf shown`. Named
+      // failures: a link attachment passed as "attached"; a reopened ticket's earlier upload with the same file name
+      // satisfied a title-only check. Verified from the readback: title, upload, subtitle. Trusted: that the uploaded
+      // bytes are the file (the tracker returns no hash of them).
+      // An attempt delivered before 0.1.11 has no recorded set and no captions: its uploads are checked by title only.
+      const shown = state.delivery.shown;
+      if (state.delivery.screenshots && (!shown || shown.none)) problems.push(`the ${a.files.length} delivered screenshot(s) were not shown to the owner yet: show each in the chat with its caption, then \`wf shown --file <f>\`; the attachments' subtitles are those captions`);
+      if (typeof adapter.isUpload !== 'function') problems.push(`the \`${cfg.tracker.kind}\` tracker adapter has no \`isUpload(attachment)\`, so an uploaded file cannot be told from a link; add it to the adapter`);
+      else {
+        const missing = [];
+        for (const f of a.files) {
+          const title = f.title ?? path.basename(f.path);
+          const caption = shown?.screenshots?.find((x) => x.sha256 === f.sha256)?.caption ?? null;
+          const named = issue.attachments.filter((x) => x.title === title || x.filename === title);
+          const uploads = named.filter((x) => adapter.isUpload(x));
+          const exact = caption ? uploads.filter((x) => String(x.subtitle ?? '').trim() === caption) : uploads;
+          if (!named.length) missing.push(`${title} (${f.path}): no attachment with this title`);
+          else if (!uploads.length) missing.push(`${title} (${f.path}): attached as a link, not an uploaded file (${named[0].url ?? 'no url in the capture'})`);
+          else if (!exact.length) missing.push(`${title} (${f.path}): uploaded, but no attachment of it has the subtitle "${caption}" (an earlier attempt's file with the same name does not count)`);
+          else verified.push({ title, sha256: f.sha256, attachment: exact[0].id ?? null, caption });
+        }
+        if (missing.length) problems.push(`${missing.length} of ${a.files.length} delivered screenshot(s) not attached to ${state.item} as uploaded files (title = the name below, subtitle = its caption):\n    - ${missing.join('\n    - ')}`);
       }
     }
   }
   if (problems.length) throw refuse(`tracker readback for \`${event}\` failed:\n  - ${problems.join('\n  - ')}`);
   const dest = path.join(attemptDir(root, state.id), 'tracker', `${event}-capture.json`);
   writeImmutable(dest, fs.readFileSync(path.resolve(String(options.capture)), 'utf8'));
-  append(root, state.id, 'tracker.recorded', { event, capture: { path: dest, sha256: hashFile(dest) }, status: issue.status }, null);
+  append(root, state.id, 'tracker.recorded', { event, capture: { path: dest, sha256: hashFile(dest) }, status: issue.status, ...(verified.length ? { attachments: verified } : {}) }, null);
   return loadState(root, state.id);
 }
 
@@ -172,7 +194,11 @@ export async function performTracker(root, cfg, state) {
   let s = state;
   while (s.tracker.pending.length) {
     const event = s.tracker.pending[0].event;
-    const actions = s.tracker.pending.filter((a) => a.event === event);
+    // Attachments carry the owner's captions, so the delivered event waits for `wf shown`.
+    const shownBy = s.delivery.shown && !s.delivery.shown.none ? s.delivery.shown.screenshots : null;
+    const attaching = s.tracker.pending.some((a) => a.event === event && a.op === 'attach');
+    if (attaching && !shownBy && s.delivery.screenshots) return { performed, note: `${event} waits for the owner: show the delivered screenshots with their captions and run \`wf shown --file <f>\`; the API then uploads them with those captions`, state: s };
+    const actions = s.tracker.pending.filter((a) => a.event === event).map((a) => (a.op === 'attach' ? { ...a, files: a.files.map((f) => ({ ...f, caption: shownBy?.find((x) => x.sha256 === f.sha256)?.caption ?? null })) } : a));
     let raw;
     try {
       raw = await adapter.api.perform({ token, url: cfg.tracker.apiUrl ?? adapter.api.url, item: s.item, actions });

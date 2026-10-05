@@ -52,7 +52,9 @@ export class WfError extends Error {
 export const refuse = (message, hint) => new WfError(message, { code: 75, hint });
 
 export function canonical(value) {
-  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
+  // As JSON writes it: an undefined array element is stored as null, so it must hash as null, or the entry no longer
+  // verifies once read back (a component without an id put `undefined` in `impact.touched` and broke the chain).
+  if (Array.isArray(value)) return `[${value.map((v) => (v === undefined ? 'null' : canonical(v))).join(',')}]`;
   if (value && typeof value === 'object') {
     return `{${Object.keys(value)
       .filter((k) => value[k] !== undefined)

@@ -4,7 +4,7 @@ import { loadConfig } from './config.mjs';
 import { attemptDir } from './ledger.mjs';
 import { evidenceSteps, noEvidenceVerdicts } from './lifecycle.mjs';
 import { redactor } from './secrets.mjs';
-import { now } from './util.mjs';
+import { hashFile, now } from './util.mjs';
 
 // One readable view of an attempt, built from the ledger and evidence. It is a VIEW: the ledger and the evidence
 // files stay the source of truth. Works for a half-finished attempt. Every catalogued secret value is masked.
@@ -43,8 +43,51 @@ export function exportData(root, s) {
     flaky: s.flaky ?? [],
     tracker: { pending: s.tracker.pending.map((a) => ({ event: a.event, op: a.op, status: a.status ?? null })), done: s.tracker.done.map((d) => ({ event: d.event, at: d.at })) },
     delivery: { completedAt: s.delivery.completedAt, repos: Object.values(s.delivery.repos).map((d) => ({ repo: d.repo, commit: d.commit ?? null, skipped: d.skipped ?? null })) },
+    // The delivered screenshots: what the owner was shown (with the caption given) and what the ticket got.
+    delivered: deliveredView(s),
     closedAt: s.closedAt,
   };
+}
+
+function deliveredView(s) {
+  const set = s.delivery.screenshots;
+  if (!set) return null;
+  const shown = s.delivery.shown;
+  const attached = s.tracker.done.find((d) => d.event === 'delivered')?.attachments ?? [];
+  return {
+    none: set.none,
+    shownAt: shown && !shown.auto ? shown.at : null,
+    shownBy: shown && !shown.auto ? shown.by : null,
+    screenshots: set.screenshots.map((f) => {
+      const c = shown?.screenshots?.find((x) => x.sha256 === f.sha256);
+      return { title: f.title, source: f.source, path: f.path, sha256: f.sha256, caption: c?.caption ?? f.proposed, captionBy: c ? 'owner' : 'proposed', attached: attached.some((a) => a.sha256 === f.sha256) };
+    }),
+  };
+}
+
+const MIME = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif' };
+// Only the delivered set is embedded, as data URIs (no external requests), and only a file whose bytes still match
+// the recorded sha256; any other is listed as changed or missing.
+export function embedDelivered(d) {
+  const images = {};
+  for (const f of d.delivered?.screenshots ?? []) {
+    if (!f.path || !fs.existsSync(f.path)) images[f.sha256] = { problem: 'file missing' };
+    else if (hashFile(f.path) !== f.sha256) images[f.sha256] = { problem: 'file changed since the gate collected it' };
+    else images[f.sha256] = { uri: `data:${MIME[path.extname(f.path).toLowerCase()] ?? 'application/octet-stream'};base64,${fs.readFileSync(f.path).toString('base64')}` };
+  }
+  return images;
+}
+
+function deliveredSection(d, images) {
+  const v = d.delivered;
+  if (!v) return '';
+  if (!v.screenshots.length) return `<section><h2>Delivered screenshots</h2><p class="muted">No screenshots for this ticket: ${esc(v.none)}</p></section>`;
+  const figs = v.screenshots.map((f, i) => {
+    const img = images[f.sha256];
+    const pic = img?.uri ? `<label class="shot"><input type="checkbox" aria-label="enlarge ${esc(f.title)}"><img src="${img.uri}" alt="${esc(f.caption)}" loading="lazy"></label>` : `<p class="warn">${esc(img?.problem ?? 'not embedded')}</p>`;
+    return `<figure>${pic}<figcaption><strong>${i + 1}. ${esc(f.caption)}</strong>${f.captionBy === 'proposed' ? ' <span class="warn">(proposed, not yet shown to the owner)</span>' : ''}<br><small>${esc(f.title)} · sha256 ${esc(f.sha256.slice(0, 12))} · ${f.attached ? 'attached to the ticket' : 'not yet verified on the ticket'}</small></figcaption></figure>`;
+  }).join('');
+  return `<section><h2>Delivered screenshots</h2><p class="muted">${v.shownAt ? `Shown to the owner ${esc(v.shownAt)}${v.shownBy ? ` by ${esc(v.shownBy)}` : ''}.` : 'Not yet shown to the owner (`wf shown`).'} Click an image to enlarge it.</p><div class="shots">${figs}</div></section>`;
 }
 
 const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -52,7 +95,7 @@ const block = (v) => (v === null || v === undefined ? '<p class="muted">none</p>
 const table = (head, rows) => (rows.length ? `<div class="scroll"><table><tr>${head.map((h) => `<th>${esc(h)}</th>`).join('')}</tr>${rows.map((r) => `<tr>${r.map((c) => `<td>${c}</td>`).join('')}</tr>`).join('')}</table></div>` : '<p class="muted">none yet</p>');
 const badge = (s) => `<span class="b b-${esc(String(s).replace(/[^\w-]/g, ''))}">${esc(s)}</span>`;
 
-export function exportHtml(d) {
+export function exportHtml(d, images = {}) {
   const sec = (title, body) => `<section><h2>${esc(title)}</h2>${body}</section>`;
   const plan = d.plan ? PLAN_KEYS.concat(Object.keys(d.plan).filter((k) => !PLAN_KEYS.includes(k))).filter((k) => d.plan[k] !== undefined).map((k) => `<h3>${esc(k)}</h3>${block(d.plan[k])}`).join('') : '<p class="muted">not frozen yet</p>';
   const missing = d.plan ? ['contract', 'anchors'].filter((k) => d.plan[k] === undefined) : [];
@@ -69,6 +112,7 @@ export function exportHtml(d) {
     d.noEvidence.length ? sec('Steps without captures', `<p class="muted">These steps' globs matched nothing although the ticket changed their package. Acceptance needs the reviewer's verdict on each: a reason no capture is needed, or a finding.</p>${table(['Step', 'Changed files', 'Globs', 'Verdict'], d.noEvidence.map((v) => [esc(v.step), esc(v.changed), esc(v.globs.join(', ')), v.reason ? esc(v.reason) : v.finding ? `finding ${esc(v.finding)}` : '<span class="warn">no verdict yet</span>']))}`) : '',
     d.flaky.length ? sec('Flaky', table(['Step', 'Failed run', 'Passed run', 'Suites'], d.flaky.map((f) => [esc(f.step), esc(f.failedRun), esc(f.passedRun), esc((f.suites ?? []).join(', '))]))) : '',
     sec('Tracker', table(['Event', 'State'], [...d.tracker.done.map((t) => [esc(t.event), `${badge('recorded')} ${esc(t.at)}`]), ...d.tracker.pending.map((t) => [esc(t.event), `${badge('pending')} ${esc(t.op)}${t.status ? ` ${esc(t.status)}` : ''}`])])),
+    deliveredSection(d, images),
     sec('Delivery', d.delivery.completedAt ? `<p>${badge('delivered')} ${esc(d.delivery.completedAt)}</p>${table(['Repo', 'Commit'], d.delivery.repos.map((r) => [esc(r.repo), esc(r.commit ? r.commit.slice(0, 12) : r.skipped ?? '')]))}` : '<p class="muted">not delivered yet</p>'),
   ].join('\n');
   return `<!doctype html>
@@ -82,11 +126,24 @@ section{background:var(--card);border:1px solid var(--line);border-radius:10px;p
 pre{white-space:pre-wrap;word-break:break-word;background:var(--chip);padding:8px 10px;border-radius:6px;margin:4px 0;font:13px/1.45 ui-monospace,Menlo,monospace}
 .scroll{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:14px}td,th{padding:6px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{color:var(--muted);font-size:12px;text-transform:uppercase}
 .muted{color:var(--muted)}.warn{color:var(--warn);font-weight:600}.b{display:inline-block;padding:1px 8px;border-radius:99px;background:var(--chip);font-size:12px}
+.shots{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}figure{margin:0}figcaption{font-size:13px;margin-top:4px}
+.shot img{width:100%;border:1px solid var(--line);border-radius:6px;cursor:zoom-in;display:block}.shot input{position:absolute;opacity:0;pointer-events:none}
+.shot input:checked+img{position:fixed;inset:0;margin:auto;width:auto;max-width:96vw;max-height:96vh;z-index:10;cursor:zoom-out;box-shadow:0 0 0 100vmax rgba(0,0,0,.8);background:var(--card)}
 .b-passed,.b-fixed,.b-accepted,.b-delivered,.b-recorded,.b-done,.b-verified-nonissue,.b-reused{color:var(--ok)}.b-failed,.b-open,.b-interrupted{color:var(--bad)}.b-pending,.b-stopped{color:var(--warn)}
 </style></head><body><main>
 ${body}
 </main></body></html>
 `;
+}
+
+// Secrets are masked in the page text; the embedded images are added after masking, so base64 is never rewritten.
+function redactHtml(redact, data) {
+  const images = embedDelivered(data);
+  const marks = {};
+  for (const [sha, img] of Object.entries(images)) if (img.uri) marks[sha] = { uri: `wf-image:${sha}` };
+  let html = redact(exportHtml(data, marks));
+  for (const [sha, img] of Object.entries(images)) if (img.uri) html = html.split(`wf-image:${sha}`).join(img.uri);
+  return html;
 }
 
 export function exportAttempt(root, state, { out = null, json = false } = {}) {
@@ -96,7 +153,7 @@ export function exportAttempt(root, state, { out = null, json = false } = {}) {
     redact = redactor(root, loadConfig(root));
   } catch {}
   const file = out ? path.resolve(String(out)) : exportFile(root, state.id, json);
-  const text = redact(json ? `${JSON.stringify(data, null, 2)}\n` : exportHtml(data));
+  const text = json ? redact(`${JSON.stringify(data, null, 2)}\n`) : redactHtml(redact, data);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, text);
   return { file, data, text };

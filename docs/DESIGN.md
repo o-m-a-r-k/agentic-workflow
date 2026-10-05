@@ -79,7 +79,7 @@ agentic-workflow/
 | Takeover | `adopt` a live attempt from a new session | — |
 | Holds | `hold` / `release`, the only delivery veto | — |
 
-Commands: `install`, `init`, `doctor`, `sync`, `status [--all] [--attempt]`, `base [merge]`, `check [--repo]`, `run --lease`, `export [--json]`, `tracker sync`, `enable|disable`, `topology [--check]`, `entry`, `plan`, `criteria amend`, `handoff <role>`, `gate`, `stop`, `review`, `accept`, `deliver` (also delivers a batch), `tracker record`, `reopen`, `adopt`, `hold|release`, `resume`, `abandon`, `batch create|eject`, `secrets init|set|guide|status`, `skills update`, `report`.
+Commands: `install`, `init`, `doctor`, `sync`, `status [--all] [--attempt]`, `base [merge]`, `check [--repo]`, `run --lease`, `export [--json]`, `tracker sync`, `enable|disable`, `topology [--check]`, `entry`, `plan`, `criteria amend`, `handoff <role>`, `gate`, `stop`, `review`, `accept`, `deliver`, `shown` (also delivers a batch), `tracker record`, `reopen`, `adopt`, `hold|release`, `resume`, `abandon`, `batch create|eject`, `secrets init|set|guide|status`, `skills update`, `report`.
 
 ## System topology
 
@@ -214,7 +214,7 @@ Raw inputs are kept write-once under the attempt's evidence the moment they are 
 
 ## Tracker via API
 
-`tracker.via: api` (default `agent`): after `wf entry`, implementer handoffs, `wf deliver`, `wf reopen` and `wf tracker sync`, the engine performs each pending event through the adapter's `api.perform` (Linear GraphQL: read, status by workflow-state name, comment unless an identical one exists, file upload plus attachment titled with the file name), writes the readback under `tracker/` and records it through `wf tracker record`'s checks. The key is the catalogued secret `tracker.apiKey` (default `LINEAR_API_KEY`), never printed; without it the actions stay pending for the agent flow. `tracker.apiUrl` overrides the endpoint (tests use a local fake).
+`tracker.via: api` (default `agent`): after `wf entry`, implementer handoffs, `wf deliver`, `wf reopen` and `wf tracker sync`, the engine performs each pending event through the adapter's `api.perform` (Linear GraphQL: read, status by workflow-state name, comment unless an identical one exists, file upload plus attachment titled with the file name and subtitled with the owner's caption, after `wf shown`), writes the readback under `tracker/` and records it through `wf tracker record`'s checks. The key is the catalogued secret `tracker.apiKey` (default `LINEAR_API_KEY`), never printed; without it the actions stay pending for the agent flow. `tracker.apiUrl` overrides the endpoint (tests use a local fake).
 
 ## Secrets that are asked for
 
@@ -255,11 +255,16 @@ The engine emits events; the adapter maps them to tracker actions.
 
 1. The engine lists pending actions; `wf resume` shows them. `implementing` is queued once per attempt.
 2. The agent performs them through a connector (or the adapter through an API), reusing a matching comment instead of duplicating.
-3. `wf tracker record` normalizes the saved response (the raw tracker JSON, never hand-written) and checks: for `admitted`, a non-empty description unless the capture says `"descriptionEmpty": true`; that the capture is not byte-identical to one recorded for another attempt or another event of this one (an `implementing` re-read of an unchanged issue excepted); status equals the mapped name; the comment was written after delivery, has the template's fixed opening and UAT scope, and contains nothing from `commentRules.forbid`; every attested screenshot is attached with a matching filename.
+3. `wf tracker record` normalizes the saved response (the raw tracker JSON, never hand-written) and checks: for `admitted`, a non-empty description unless the capture says `"descriptionEmpty": true`; that the capture is not byte-identical to one recorded for another attempt or another event of this one (an `implementing` re-read of an unchanged issue excepted); status equals the mapped name; the comment was written after delivery, has the template's fixed opening and UAT scope, and contains nothing from `commentRules.forbid`; every delivered screenshot is an uploaded attachment (`isUpload`) titled with its name and subtitled with the caption recorded by `wf shown` (see below).
 4. Until the `delivered` readback passes, the attempt is `handoff-pending`.
 5. A rejected status write is reported; it never blocks implementation.
 
-Screenshots come only from the gate's attested visual artifacts. They go to the tracker and are shown in the session, captioned with the state they show.
+Screenshots come only from the gate's attested visual artifacts. Named failure: the owner session was only told to show them, so whether the owner saw them and what each showed existed nowhere, and a link attachment or an earlier attempt's upload with the same name passed the title check.
+
+- **Delivered set.** At delivery the engine records `delivery.screenshots`: the attempt's own gate screenshots plus, for a batch member, the batch gate's files whose `units` include it (each artifact records the units whose own expansion of a matching glob matches it). Each entry has path, sha256, source, attachment `title` (the file name; the source path with `/` → `-` when two share a name) and a `proposed` caption (file name in words, sequence prefixes and the item id dropped, plus each criterion whose screenshot evidence is the file or whose text names it). An empty set records `none`, the reason per step (no step declares artifacts; the reviewer's no-evidence verdict; globs matched nothing and the package did not change), and an automatic `delivery.shown` with that statement.
+- **SHOW TO OWNER.** `wf deliver` (and `wf resume` while handoff-pending) prints the set, or the reason, and writes `delivery/shown-draft.json`. `wf shown --file f` records `delivery.shown` (raw file kept write-once): one entry per delivered sha256, each with a non-empty caption that is not the proposal unchanged, nothing outside the set. The attempt closes only when `wf shown` is recorded and no tracker action is pending (quick lane and `tracker.kind: none` included); a batch shows nothing itself, its members do. Display is the owner session's job (the engine cannot render images in a chat): Claude Code sends each file with its file/image tool and publishes the export; Codex writes markdown images of the absolute paths.
+- **Attachments.** The `attach` action lists `{ path, sha256, source, title }`. `wf tracker record --event delivered` refuses until `wf shown` is recorded, and then until, for every file, the readback has an attachment with that title for which the adapter's `isUpload(attachment)` is true (Linear: url on `uploads.linear.app`) and whose subtitle equals the owner's caption; the refusal lists each missing file and why (no attachment, a link, or no upload with that caption). Verified attachments are recorded on `tracker.recorded`. Trusted: that the uploaded bytes equal the file (the tracker returns no hash). With `tracker.via: api` the delivered event waits for `wf shown`, then uploads through `fileUpload` + `PUT` + `attachmentCreate` with the caption as subtitle (tested against a local fake Linear only).
+- **Export.** `wf export` embeds exactly the delivered set as data URIs (no external requests), each re-hashed before embedding (a changed or missing file is listed, not shown), with the owner's caption or the proposal marked as such, and whether it was verified on the ticket; click to enlarge is CSS only. The JSON export carries no image bytes.
 
 ## Tracker adapters
 
@@ -269,7 +274,8 @@ Screenshots come only from the gate's attested visual artifacts. They go to the 
 export default {
   idPattern,
   operations: { readIssue, setStatus, comment, attach, readBack },
-  normalize(rawCapture), // → { id, title, description, status, comments[], attachments[], updatedAt, url }
+  normalize(rawCapture), // → { id, title, description, status, comments[], attachments[{ id, title, subtitle, url }], updatedAt, url }
+  isUpload(attachment),  // true for an uploaded file, false for a link; required to verify delivered screenshots
   rules: {},             // tracker quirks
 }
 ```

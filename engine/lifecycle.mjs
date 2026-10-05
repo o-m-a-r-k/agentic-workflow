@@ -646,18 +646,126 @@ export async function deliver(root, options) {
   return { state: loadState(root, state.id) };
 }
 
+// ---- Delivered screenshots: shown to the owner in the chat, attached to the ticket as uploaded files ----
+// Named failure: the owner session was told only "show the user every delivered screenshot", so whether the owner saw
+// them, and what each one showed, existed nowhere; a link attachment or an earlier attempt's file with the same name
+// passed the attachment check. The delivered set, each caption and the owner's acknowledgement are now in the ledger.
+
+const stem = (file) => path.posix.basename(String(file)).replace(/\.[^.]+$/, '');
+
+// A starting caption: the file name in words (sequence prefixes and the ticket id dropped), plus each criterion whose
+// screenshot evidence is this file or whose text names it. The owner refines it after viewing the image.
+export function proposeCaption(state, a) {
+  const name = stem(a.source ?? a.path);
+  const item = String(state.item ?? '').toLowerCase();
+  let words = name.replace(/([a-z0-9])([A-Z])/g, '$1 $2').toLowerCase();
+  if (item) words = words.split(item).join(' ');
+  words = words.replace(/^([\d]+[-_. ]+)+/, '').replace(/[-_.]+/g, ' ').replace(/\s+/g, ' ').trim() || name;
+  words = words.charAt(0).toUpperCase() + words.slice(1);
+  const refs = new Set([a.sha256, a.source, a.path].filter(Boolean));
+  const byEvidence = (state.review?.closure?.criteria ?? []).filter((c) => c.evidence?.kind === 'screenshot' && refs.has(String(c.evidence.ref ?? '').trim())).map((c) => c.id);
+  const named = (state.criteria ?? []).filter((c) => `${c.text ?? ''} ${typeof c.uat === 'string' ? c.uat : ''}`.includes(name)).map((c) => c.id);
+  const ids = [...new Set([...byEvidence, ...named])];
+  const shows = ids.map((id) => state.criteria?.find((c) => c.id === id)).filter(Boolean).map((c) => `${c.id}: ${typeof c.uat === 'string' ? c.uat : c.text}`);
+  return shows.length ? `${words} (shows ${shows.join('; ')})` : words;
+}
+
+// What this attempt delivers: its own gate's screenshots and, for a batch member, the batch gate's files that belong
+// to it (never another member's). Each gets the attachment title (the file name; the source path when two share a
+// name) and a proposed caption. A batch delivers nothing itself: each member shows and attaches its own.
+export function deliveredSet(root, state) {
+  if (state.lane === 'batch') return [];
+  const mine = (a) => !a.units || a.units.includes(state.id);
+  const batch = state.delivery.viaBatch ? loadState(root, state.delivery.viaBatch) : null;
+  const seen = new Set();
+  const files = [...screenshots(state), ...(batch ? screenshots(batch) : [])].filter(mine).filter((a) => !seen.has(a.sha256) && seen.add(a.sha256));
+  const base = (a) => path.posix.basename(a.source ?? a.path);
+  const count = {};
+  for (const a of files) count[base(a)] = (count[base(a)] ?? 0) + 1;
+  return files.map((a) => ({ path: a.path, sha256: a.sha256, source: a.source ?? null, title: count[base(a)] > 1 ? String(a.source ?? a.path).replace(/^\/+/, '').replace(/\//g, '-') : base(a), proposed: proposeCaption(state, a) }));
+}
+
+// Why an attempt delivers no screenshots, per step, from the gate's expanded globs and the reviewer's verdicts.
+export function noScreenshotsReason(root, state) {
+  const src = state.delivery.viaBatch ? loadState(root, state.delivery.viaBatch) : state;
+  const steps = evidenceSteps(root, src);
+  if (!steps.length) return 'no gate step declares `artifacts`, so the gate collected no screenshots';
+  const verdicts = [...(state.accepted?.noEvidence ?? []), ...(src.accepted?.noEvidence ?? [])];
+  return steps.map((st) => {
+    const v = verdicts.find((x) => x.step === st.step);
+    if (v?.reason) return `${st.step}: ${v.reason} (reviewer's verdict)`;
+    if (v?.finding) return `${st.step}: no capture (reviewer's finding ${v.finding})`;
+    const where = st.globs.flatMap((g) => g.expanded).join(', ');
+    return `${st.step}: its globs (${where}) matched no screenshot of this ticket${st.changedHere.length ? '' : ' and its package did not change'}`;
+  }).join('; ');
+}
+
+export const shownDraftFile = (root, id) => path.join(attemptDir(root, id), 'delivery', 'shown-draft.json');
+
+// The owner still has to show the delivered screenshots and record it (`wf shown`). An attempt delivered before
+// 0.1.11 has no recorded set and owes nothing.
+export const needsShown = (state) => Boolean(state.delivery.screenshots?.screenshots?.length) && !state.delivery.shown;
+
 function finishDelivered(root, cfg, state) {
-  const shots = screenshots(state.batch ? state : state.delivery.viaBatch ? loadState(root, state.delivery.viaBatch) : state);
-  const actions = state.lane === 'quick' || state.lane === 'batch' ? [] : emitTrackerEvent(root, cfg, state.id, 'delivered', { screenshots: shots });
-  if (!actions.length) {
+  if (state.lane !== 'batch') {
+    const set = deliveredSet(root, state);
+    const none = set.length ? null : noScreenshotsReason(root, state);
+    append(root, state.id, 'delivery.screenshots', { screenshots: set, none }, null);
+    // Nothing to show: the statement of why is the record, no acknowledgement of images is owed.
+    if (!set.length) append(root, state.id, 'delivery.shown', { screenshots: [], none, auto: true }, null);
+    else writeJson(shownDraftFile(root, state.id), { attempt: state.id, item: state.item, note: 'Copy this file outside .wf-evidence, view each image, replace each caption with what the image shows (which screen, which state), then `wf shown --file <copy>`.', screenshots: set.map((f) => ({ sha256: f.sha256, title: f.title, path: f.path, proposed: f.proposed, caption: f.proposed })) });
+    state = loadState(root, state.id);
+  }
+  const set = state.delivery.screenshots?.screenshots ?? [];
+  const actions = state.lane === 'quick' || state.lane === 'batch' ? [] : emitTrackerEvent(root, cfg, state.id, 'delivered', { screenshots: set });
+  if (!actions.length && !needsShown(state)) {
     append(root, state.id, 'closed', { reason: cfg.tracker.kind === 'none' || state.lane !== 'standard' ? 'no tracker handoff for this lane' : 'no tracker actions configured' }, null);
     cleanupWorktrees(root, loadState(root, state.id));
   }
 }
 
+// `wf shown --file f`: the owner session showed every delivered screenshot in the chat and records the caption it gave
+// each. Every file of the delivered set needs an entry with a caption the owner wrote after viewing it (the engine's
+// proposal, from the file name, says nothing about the state shown, so it is refused unchanged); nothing else may be
+// listed. Kept write-once; the tracker attachments carry these captions as their subtitles.
+export function recordShown(root, options) {
+  const state = openState(root, options);
+  if (!state.delivery.completedAt) throw refuse('not delivered yet: `wf deliver` first');
+  const set = state.delivery.screenshots;
+  if (!set) throw refuse(`${state.id} was delivered before screenshots were recorded at delivery; nothing to acknowledge`);
+  if (!set.screenshots.length) throw refuse(`no screenshots were delivered for ${state.item}; the statement is already recorded: ${set.none}`);
+  if (state.tracker.done.some((d) => d.event === 'delivered')) throw refuse('the delivered handoff is already verified with the recorded captions');
+  if (!options.file || options.file === true) throw new WfError('--file <shown.json> is required: { "screenshots": [{ "sha256", "caption" }] } (the draft `wf deliver` wrote is a starting point)');
+  const text = fs.readFileSync(path.resolve(String(options.file)), 'utf8');
+  let raw;
+  try {
+    raw = JSON.parse(text);
+  } catch (error) {
+    throw new WfError(`${options.file} is not JSON: ${error.message}`);
+  }
+  const entries = Array.isArray(raw) ? raw : Array.isArray(raw?.screenshots) ? raw.screenshots : [];
+  const match = (e, f) => e && (e.sha256 === f.sha256 || (!e.sha256 && e.title === f.title));
+  const problems = [];
+  const shown = [];
+  for (const f of set.screenshots) {
+    const e = entries.find((x) => match(x, f));
+    const caption = String(e?.caption ?? '').trim();
+    if (!e) problems.push(`${f.title} (${f.path}): not acknowledged; show it and give its caption`);
+    else if (!caption) problems.push(`${f.title}: no caption; say which screen and state it shows`);
+    else if (caption === f.proposed.trim()) problems.push(`${f.title}: the caption is the engine's proposal unchanged ("${f.proposed}"); view the image and say which screen and state it shows`);
+    else shown.push({ sha256: f.sha256, title: f.title, source: f.source, caption, proposed: f.proposed });
+  }
+  for (const e of entries) if (!set.screenshots.some((f) => match(e, f))) problems.push(`${e?.sha256 ?? e?.title ?? JSON.stringify(e)}: not in the delivered set`);
+  if (problems.length) throw refuse(`screenshots not acknowledged:\n  - ${problems.join('\n  - ')}`);
+  const n = (state.delivery.shownRecords ?? 0) + 1;
+  const kept = keepRaw(root, state.id, `delivery/shown-${n}.raw.json`, text);
+  append(root, state.id, 'delivery.shown', { screenshots: shown, none: null, raw: { path: kept.file, sha256: kept.sha256 } }, actor(options));
+  return loadState(root, state.id);
+}
+
 export function closeAfterHandoff(root, state) {
-  if (state.phase === 'handoff-pending' && !state.tracker.pending.length) {
-    append(root, state.id, 'closed', { reason: 'tracker handoff verified' }, null);
+  if (state.phase === 'handoff-pending' && !state.tracker.pending.length && !needsShown(state)) {
+    append(root, state.id, 'closed', { reason: state.tracker.done.some((d) => d.event === 'delivered') ? 'tracker handoff verified' : 'delivered screenshots shown' }, null);
     cleanupWorktrees(root, loadState(root, state.id));
   }
   return loadState(root, state.id);
@@ -751,9 +859,14 @@ function nextStep(root, state) {
   if (state.phase === 'done') return 'nothing: this attempt is closed';
   if (state.phase === 'abandoned') return 'nothing: this attempt was abandoned';
   const holdNote = state.activeHold ? ` (on hold: "${state.activeHold.reason}"; \`wf release\` lifts it)` : '';
+  const show = needsShown(state) ? `show the owner, in the chat, each of the ${state.delivery.screenshots.screenshots.length} delivered screenshot(s) listed under "delivered screenshots" with a caption saying which screen and state it shows, then record it: \`wf shown --file <copy of ${shownDraftFile(root, state.id)} with your captions>\`` : null;
+  if (show && state.phase === 'handoff-pending') {
+    const later = state.tracker.pending.length ? `; then the tracker (${state.tracker.pending[0].event}) actions` : '';
+    return `${show}${later}`;
+  }
   if (state.tracker.pending.length) {
     const ev = state.tracker.pending[0].event;
-    const ops = state.tracker.pending.filter((a) => a.event === ev).map((a) => (a.op === 'setStatus' ? `set status to "${a.status}"` : a.op === 'comment' ? 'post the comment (body in `wf status --json`)' : a.op === 'attach' ? `attach ${a.files.length} screenshot(s)` : a.op)).join(', ');
+    const ops = state.tracker.pending.filter((a) => a.event === ev).map((a) => (a.op === 'setStatus' ? `set status to "${a.status}"` : a.op === 'comment' ? 'post the comment (body in `wf status --json`)' : a.op === 'attach' ? `upload and attach ${a.files.length} screenshot(s) as files (title = the name, subtitle = its caption; listed under "delivered screenshots")` : a.op)).join(', ');
     const tracker = `tracker (${ev}): ${ops}; save the readback and run \`wf tracker record --event ${ev} --capture <file>\``;
     if (state.phase === 'handoff-pending') return tracker;
     return `${phaseAction(cfg, state)}${holdNote}. Pending ${tracker}`;

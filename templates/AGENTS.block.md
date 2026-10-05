@@ -2,7 +2,7 @@
 
 This project runs changes through agentic-workflow. The `wf` CLI enforces the rules below; when it refuses, fix the cause instead of working around it.
 
-**Lifecycle.** `wf entry` → `wf plan` (criteria frozen before code) → `wf handoff implementer` → commit → `wf gate` → `wf handoff reviewer` (a different agent) → `wf review` + `wf accept` → `wf deliver` → tracker handoff with `wf tracker record`. `wf resume` always says what is next.
+**Lifecycle.** `wf entry` → `wf plan` (criteria frozen before code) → `wf handoff implementer` → commit → `wf gate` → `wf handoff reviewer` (a different agent) → `wf review` + `wf accept` → `wf deliver` → show every delivered screenshot to the user in the chat with its caption and `wf shown` → tracker handoff (screenshots uploaded as files) with `wf tracker record`. `wf resume` always says what is next.
 
 **Rules**
 - Work only in the attempt's worktrees under `.wf-worktrees/`, never in the main checkouts.

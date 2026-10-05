@@ -197,6 +197,15 @@ export function reduce(entries) {
         s.delivery.completedAt = e.at;
         s.phase = 'handoff-pending';
         break;
+      // The delivered screenshot set (with titles and proposed captions), recorded at delivery, and the owner's
+      // acknowledgement that each was shown in the chat with its caption (or, for an empty set, the statement why).
+      case 'delivery.screenshots':
+        s.delivery.screenshots = { screenshots: d.screenshots ?? [], none: d.none ?? null, at: e.at };
+        break;
+      case 'delivery.shown':
+        s.delivery.shown = { screenshots: d.screenshots ?? [], none: d.none ?? null, auto: d.auto === true, raw: d.raw ?? null, at: e.at, by: e.actor };
+        if (!d.auto) s.delivery.shownRecords = (s.delivery.shownRecords ?? 0) + 1;
+        break;
       case 'batch.member.delivered':
         s.delivery.completedAt = e.at;
         s.delivery.viaBatch = d.batch;
@@ -216,7 +225,7 @@ export function reduce(entries) {
         break;
       case 'tracker.recorded':
         s.tracker.pending = s.tracker.pending.filter((a) => a.event !== d.event);
-        s.tracker.done.push({ event: d.event, at: e.at, capture: d.capture });
+        s.tracker.done.push({ event: d.event, at: e.at, capture: d.capture, ...(d.attachments ? { attachments: d.attachments } : {}) });
         break;
       case 'closed':
         s.closedAt = e.at;

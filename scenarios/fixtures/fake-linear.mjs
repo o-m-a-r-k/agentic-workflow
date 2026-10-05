@@ -43,9 +43,9 @@ const server = http.createServer((req, res) => {
     } else if (/fileUpload/.test(query)) {
       s.log.push(`fileUpload ${variables.filename}`);
       save(s);
-      return reply(200, { data: { fileUpload: { uploadFile: { uploadUrl: `http://127.0.0.1:${port}/upload/${encodeURIComponent(variables.filename)}`, assetUrl: `https://assets.example.test/${variables.filename}`, headers: [] } } } });
+      return reply(200, { data: { fileUpload: { uploadFile: { uploadUrl: `http://127.0.0.1:${port}/upload/${encodeURIComponent(variables.filename)}`, assetUrl: `https://uploads.linear.app/fake/${encodeURIComponent(variables.filename)}`, headers: [] } } } });
     } else if (/attachmentCreate/.test(query)) {
-      issue.attachments.push({ id: `a${issue.attachments.length + 1}`, title: variables.title, url: variables.url });
+      issue.attachments.push({ id: `a${issue.attachments.length + 1}`, title: variables.title, subtitle: variables.subtitle ?? null, url: variables.url });
       issue.updatedAt = at;
       s.log.push(`attach ${variables.title}`);
     }
