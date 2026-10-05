@@ -62,8 +62,19 @@ test('each review round is a fresh reviewer: a reviewer id from an earlier round
   assert.equal(again.code, 75);
   assert.match(again.err, /start a fresh reviewer agent with a new id; each review round uses a new agent/);
   ok(wf(root, ['gate', '--attempt', e.id]));
-  review(root, base, e.id, 'r2');
-  ok(wf(root, ['accept', '--attempt', e.id]), 'r2 was handed the tree after its gate passed');
+  // r2's blind closure may not carry earlier findings; they are revealed only once it is recorded.
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'r2', '--attempt', e.id]));
+  const peek = wf(root, ['review', '--closure', closureFile(base, goodClosure('r2', { priorFindings: [{ round: 'r1', id: 'F1', status: 'fixed', evidence: 'x' }] })), '--attempt', e.id]);
+  assert.match(peek.err, /`priorFindings` are listed only after your own blind closure is recorded/);
+  const blind = ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r2')), '--attempt', e.id])).out;
+  assert.match(blind, /1 finding\(s\) from earlier rounds to verify against the code: \S+prior-findings-\S+\.json/);
+  const revealed = JSON.parse(fs.readFileSync(blind.match(/code: (\S+)/)[1], 'utf8')).findings;
+  assert.deepEqual(revealed.map((f) => `${f.round}:${f.id}`), ['r1:F1']);
+  assert.match(wf(root, ['accept', '--attempt', e.id]).err, /earlier-round finding\(s\) not verified: r1:F1/);
+  assert.match(state(root, e.id).next, /reviewer r2 must verify 1 earlier-round finding/);
+  assert.match(wf(root, ['review', '--closure', closureFile(base, goodClosure('r2', { findings: [{ id: 'N1', status: 'fixed', evidence: 'y' }], priorFindings: [] })), '--attempt', e.id]).err, /recorded blind and cannot change/);
+  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r2', { priorFindings: [{ round: 'r1', id: 'F1', status: 'fixed', evidence: 'src/a.txt:1 now fixed' }] })), '--attempt', e.id]));
+  ok(wf(root, ['accept', '--attempt', e.id]), 'r2 was handed the tree after its gate passed and verified F1');
 });
 
 test('a tree change after the review forces a new review even with a passing gate on the new tree', () => {

@@ -3,7 +3,8 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { adapterFileAtCommit } from './config.mjs';
 import { append, attemptDir, listAttempts, loadState } from './ledger.mjs';
-import { WfError, hashFile, readJson, refuse, writeImmutable } from './util.mjs';
+import { loadCatalog, readSecret } from './secrets.mjs';
+import { WfError, hashFile, now, readJson, refuse, writeImmutable } from './util.mjs';
 
 const BUILTIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'adapters', 'tracker');
 
@@ -154,4 +155,35 @@ export async function recordTracker(root, cfg, state, options) {
   writeImmutable(dest, fs.readFileSync(path.resolve(String(options.capture)), 'utf8'));
   append(root, state.id, 'tracker.recorded', { event, capture: { path: dest, sha256: hashFile(dest) }, status: issue.status }, null);
   return loadState(root, state.id);
+}
+
+// `tracker.via: api`: the engine performs the pending actions itself and records its own readback as the capture,
+// through the same checks as an agent capture. Without the API key (or for an adapter without `api`) the pending
+// actions stay for the agent flow. Returns what happened, never the key.
+export async function performTracker(root, cfg, state) {
+  if (cfg.tracker.kind === 'none' || cfg.tracker.via !== 'api' || !state.tracker.pending.length) return { performed: [], note: null };
+  const adapter = await loadTrackerAdapter(root, cfg, state.adapterBase);
+  if (!adapter?.api?.perform) return { performed: [], note: `the \`${cfg.tracker.kind}\` tracker adapter has no API mode; perform the actions through the connector` };
+  const keyName = cfg.tracker.apiKey ?? 'LINEAR_API_KEY';
+  const entry = loadCatalog(root).find((k) => k.key === keyName);
+  const token = entry ? readSecret(root, cfg, entry) : null;
+  if (!token) return { performed: [], note: `${keyName} is ${entry ? 'not set (`wf secrets guide` in your terminal)' : 'not in .workflow/secrets.yaml (add it with `required: true`)'}; perform the tracker actions through the connector and record the raw readback` };
+  const performed = [];
+  let s = state;
+  while (s.tracker.pending.length) {
+    const event = s.tracker.pending[0].event;
+    const actions = s.tracker.pending.filter((a) => a.event === event);
+    let raw;
+    try {
+      raw = await adapter.api.perform({ token, url: cfg.tracker.apiUrl ?? adapter.api.url, item: s.item, actions });
+    } catch (error) {
+      return { performed, note: `tracker API (${event}) failed: ${String(error.message).split(token).join('[secret]')}; the actions stay pending` };
+    }
+    const file = path.join(attemptDir(root, s.id), 'tracker', `${event}-api-${now().replace(/[:.]/g, '-')}.json`);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, `${JSON.stringify(raw, null, 2)}\n`);
+    s = await recordTracker(root, cfg, s, { event, capture: file });
+    performed.push(event);
+  }
+  return { performed, note: null, state: s };
 }

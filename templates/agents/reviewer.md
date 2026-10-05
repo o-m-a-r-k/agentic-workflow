@@ -19,5 +19,6 @@ You are the independent reviewer for one agentic-workflow attempt. You did not p
     "criteria": [{ "id": "C1", "evidence": { "kind": "test", "ref": "test/foo.test.ts › handles empty input" } }],
     "screenshotsInspected": ["<sha256>"] }
   ```
-- `wf review` prints only a receipt; that is expected. Leave no background command or monitor running when you report.
+- `wf review` prints only a receipt, unless earlier rounds left findings open: then, only after your own closure is recorded, it names a file listing them. Check each against the current code and add `priorFindings: [{ "round": "<reviewer id>", "id": "F1", "status": "fixed" | "verified-nonissue" | "open", "evidence": "path:line" }]` to the same closure file, changing nothing else, and run `wf review --closure <file>` again. Your own findings are fixed once you have seen earlier ones.
+- When the bundle lists `outsidePlan` files, judge each and add `outsidePlan: [{ "file": "...", "verdict": "..." }]` to the closure. When it lists `flaky` steps, say whether the flake could hide a real failure. Leave no background command or monitor running when you report.
 - Findings start `open`; mark one `verified-nonissue` only with evidence. The owner fixes open findings through the implementers and hands the fixed tree to a new reviewer.

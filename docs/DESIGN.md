@@ -79,7 +79,7 @@ agentic-workflow/
 | Takeover | `adopt` a live attempt from a new session | — |
 | Holds | `hold` / `release`, the only delivery veto | — |
 
-Commands: `install`, `init`, `doctor`, `sync`, `status [--all] [--attempt]`, `base [merge]`, `enable|disable`, `topology [--check]`, `entry`, `plan`, `criteria amend`, `handoff <role>`, `gate`, `stop`, `review`, `accept`, `deliver` (also delivers a batch), `tracker record`, `reopen`, `adopt`, `hold|release`, `resume`, `abandon`, `batch create|eject`, `secrets init|set|guide|status`, `skills update`, `report`.
+Commands: `install`, `init`, `doctor`, `sync`, `status [--all] [--attempt]`, `base [merge]`, `check [--repo]`, `run --lease`, `export [--json]`, `tracker sync`, `enable|disable`, `topology [--check]`, `entry`, `plan`, `criteria amend`, `handoff <role>`, `gate`, `stop`, `review`, `accept`, `deliver` (also delivers a batch), `tracker record`, `reopen`, `adopt`, `hold|release`, `resume`, `abandon`, `batch create|eject`, `secrets init|set|guide|status`, `skills update`, `report`.
 
 ## System topology
 
@@ -194,6 +194,28 @@ Suite-level results without a plugin: `report: { junit: <path or glob> }` (PHPUn
 - **Steps:** `gate.maxParallelSteps`; `lease` names a resource (`docker`, `db`, `browser`, `simulator`) and `gate.leases` sets holders per lease. Leases are machine-wide: a step waits for a slot another gate holds, the gate itself always starts at once.
 - **Inside a step:** `workers` is a number or `auto` (`min`, `max`, `perWorkerGiB`): free memory minus a reserve, divided per worker, capped by performance cores, never below `min`; probe failure ⇒ `min`. `shards` splits a step into shard processes. Placeholders `{workers}`, `{shard}`, `{shards}`; overrides `WF_WORKERS_<STEP>`, `WF_SHARDS_<STEP>`. Each run records the chosen numbers and why.
 
+## Durable artifacts
+
+Raw inputs are kept write-once under the attempt's evidence the moment they are consumed: `plans/plan-1.raw.*` (the planner's block or the owner's file), `plans/amend-<n>.raw.*`, `review/closure-<round>-<n>.raw.json`, plus the bundles, gate results and tracker captures (API readbacks included). Ledger entries carry each file's path and sha256. `wf export` renders `export/attempt.html` (or `--out`), self-contained and secret-masked, from the ledger: a view, never read back. `wf resume` names the latest export and warns when the plan has no `contract`/`anchors`.
+
+## Checks, scheduling, flakes, scope
+
+- `wf check [--repo r]` plans like the gate with heavy steps (and other repos) skipped `skippedBy: check`, records `check.finished` (never a gate), and its steps join reuse lookup in time order with the gate's. The implementer bundle's `check` names the command and steps.
+- The run queue puts light steps first and heavy steps by last duration, longest first (unknown first).
+- After a run, a passed step whose key matches an earlier failed run is recorded in `gate.flaky` with the suites that flipped; shown in `wf status` and the reviewer bundle.
+- `--rerun-failed` skips (`skippedBy: rerun-failed`) every step that would run and did not fail last time; such a gate never counts, like `--focused`.
+- `outsidePlan` (bundles, `wf status`): changed files no plan anchor or test path names; informational.
+- `wf run --lease <name> -- <cmd>` takes a machine-wide lease slot like a gate step, waits while all are held, frees it on exit.
+- `wf doctor` lists untracked paths light steps leave on a clean base, with `.gitignore` lines.
+
+## Tracker via API
+
+`tracker.via: api` (default `agent`): after `wf entry`, implementer handoffs, `wf deliver`, `wf reopen` and `wf tracker sync`, the engine performs each pending event through the adapter's `api.perform` (Linear GraphQL: read, status by workflow-state name, comment unless an identical one exists, file upload plus attachment titled with the file name), writes the readback under `tracker/` and records it through `wf tracker record`'s checks. The key is the catalogued secret `tracker.apiKey` (default `LINEAR_API_KEY`), never printed; without it the actions stay pending for the agent flow. `tracker.apiUrl` overrides the endpoint (tests use a local fake).
+
+## Secrets that are asked for
+
+A key is needed when a step lists it in `usedBy` or it says `required: true` (`required` defaults to true only with a non-empty `usedBy`). `wf secrets status`/`guide` ask only for needed keys and list the others once; `wf init` drafts only keys a detected step's command names. Named failure: the guide asked for eleven secrets no step used.
+
 ## Step environment
 
 Gate steps, provisioning, doctor checks and secret `verify` commands run with `projectEnv` (engine/env.mjs): an open base list of toolchain variables, `WF_*`, the adapter's `gate.env.pass` (names, or prefixes ending in `*`, read from the adapter at base) and the step's catalogued secrets. Variables of agent runtimes (`CLAUDE_CODE_*`, `ANTHROPIC_*`, `CODEX_*`, `OPENAI_*`, `GROK_*`, `XAI_*`) pass only when a `pass` entry names that family. Named failure: every step received the owner's environment, session tokens included.
@@ -289,6 +311,11 @@ requires:
 - **Implementers:** after the contract is committed, one implementer per work item (or per repo or area) can run in parallel (several implementer handoffs are allowed). `wf handoff implementer --work W1` records the work id, class, declared effort and model and the agent type in the bundle and ledger and prints the agent type to start; without `--work` the implementer role's class is used. They run only the specs they changed and targeted reruns while iterating, never broad sweeps, then the repo's lint and full unit suite once before finishing, and commit at stage boundaries.
 - **Reviewer, blind and fresh:** its prompt is the one line `wf handoff reviewer` prints (the bundle path), with nothing from the owner or other agents; the bundle carries everything it needs. `wf handoff reviewer` refuses the owner, the planner, every implementer, and any agent id that already reviewed a round of this attempt: a resumed reviewer is anchored on its earlier findings. Each round is a new agent that reviews the whole attempt against the frozen criteria; it is not given earlier rounds' findings.
 
+### Review provenance and commit-then-reveal
+
+- Every handoff records its exact start line (`Read <bundle> and follow its instructions.`). Where Claude Code transcripts exist (`~/.claude/projects`), `wf review` finds the subagent transcripts named after the closure's reviewer and accepts the round only if one ran as the handed agent type, its first user message is exactly that line, and it started after the handoff; otherwise it refuses with the reason. `wf plan --from-agent` applies the same to the planner and needs a planner handoff under that name. Without a transcript store the round is recorded `unverified`. Named failures: a reviewer started with steering text, and a round run outside the engine.
+- A round's first closure is blind and may not carry `priorFindings`. After it is recorded, `wf review` writes the earlier rounds' still-open findings (oldest first, keyed `round:id`, a finding settled once a later round verified it `fixed` or `verified-nonissue` with evidence) to `_review/prior-findings-<round>.json` and names it. The reviewer re-records the same closure with `priorFindings`; its own `findings` are then frozen. `wf accept` refuses while any earlier open finding lacks such a verification. The bundle never carries earlier findings, so the blind rule holds.
+
 ### Review order
 
 A finding found after a full gate costs another full gate (about 40 minutes on the first real ticket), so review comes first:
@@ -335,6 +362,8 @@ What the evidence proves, and what it does not:
 - **Fresh reviewer per round is checked; blind is a rule.** The engine refuses a reviewer id that reviewed an earlier round, but the id is a name the owner supplies: resuming an old agent under a new id defeats it.
 - **The blind reviewer is a rule, not a check.** The engine hands the reviewer only the bundle and prints a one-line start prompt, but it cannot see the prompt a runtime actually gives an agent, so it does not verify or record it. An owner who steers the reviewer (hints, focus areas, summaries of the work, other agents' findings) weakens the review without any refusal; the skills and the reviewer role forbid it, and the reviewer reports a prompt that carried more.
 - **Classes do not change guarantees.** The gate, the blind independent review (always at the reviewer role's class, never a work item's), frozen criteria, evidence integrity and the hash-chained ledger are the same for every class. A class lowers only how hard an implementer thinks; a misclassified work item still meets the same gate and the same reviewer.
+- **Provenance is checked where transcripts exist.** A transcript can still be forged by someone with shell access; it stops steering and out-of-band rounds by mistake, not by design.
+- **The attempt page is a view.** Nothing reads it back.
 - **Steps never see agent session tokens** unless the adapter passes them by name.
 - **Adapter code is trusted at base.** Step plugins, delivery and tracker adapters run as committed on the base branch, never the ticket's copy. A ticket can still change the project scripts a step calls (for example a test script in `package.json`); that is visible in the diff the reviewer inspects, and changes to `sharedInfra` files force the affected package's steps to run.
 

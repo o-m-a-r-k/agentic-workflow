@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ADAPTER_DIR, CONFIG_FILE, adapterLocation, agentTypeFor, declared, findRoot, loadConfig, loadConfigAtCommit, repoDir, roleClass } from './config.mjs';
-import { provision } from './attempt.mjs';
+import { provision, untrackedFiles } from './attempt.mjs';
 import { projectEnv } from './env.mjs';
 import { chooseWorkers } from './host.mjs';
 import { missingFor, redactor, status as secretsStatus, stepEnv } from './secrets.mjs';
@@ -238,6 +238,8 @@ export function detect(root) {
       if (name && deps.includes(name)) (c.dependsOn ??= []).push({ component: other.id, via: 'package', contract: path.posix.join(repo.path, other.package ?? '.', '**') });
     }
   }
+  // A key counts as used by a step whose command names it ($KEY, ${KEY} or the bare name).
+  for (const k of secrets) k.usedBy = steps.filter((s) => s.run && new RegExp(`(^|[^A-Za-z0-9_])${k.key}([^A-Za-z0-9_]|$)`).test(s.run)).map((s) => s.id);
   return { root, repos, steps, components, secrets, compose, sources, agentsMd: repos.map((r) => ({ repo: r.name, exists: exists(root, r.path, 'AGENTS.md') })) };
 }
 
@@ -271,8 +273,12 @@ export function writeDraft(root, detected, { force = false } = {}) {
   fs.mkdirSync(dir, { recursive: true });
   const header = `# agentic-workflow adapter, drafted by \`wf init\` on ${new Date().toISOString().slice(0, 10)}.\n# Review every value, then run \`wf doctor\` and \`wf enable\`.\n`;
   fs.writeFileSync(file, header + YAML.stringify(draft, { lineWidth: 0, aliasDuplicateObjects: false }));
-  if (detected.secrets.length && !fs.existsSync(path.join(dir, 'secrets.yaml'))) {
-    fs.writeFileSync(path.join(dir, 'secrets.yaml'), `# Names only. Values are entered with \`wf secrets guide\` and never committed.\n${YAML.stringify({ keys: detected.secrets.map(({ detectedIn, ...k }) => ({ ...k, usedBy: [], obtain: { url: '', steps: [] } })) })}`);
+  // Only keys a detected step references are drafted: cataloguing every .env.example key as `provided` made
+  // `wf secrets guide` ask for secrets no step uses. The rest are named in a comment.
+  const used = detected.secrets.filter((k) => k.usedBy?.length);
+  const skipped = detected.secrets.filter((k) => !k.usedBy?.length).map((k) => k.key);
+  if (used.length && !fs.existsSync(path.join(dir, 'secrets.yaml'))) {
+    fs.writeFileSync(path.join(dir, 'secrets.yaml'), `# Names only. Values are entered with \`wf secrets guide\` and never committed.\n${skipped.length ? `# Not catalogued (no detected step uses them): ${skipped.join(', ')}\n` : ''}${YAML.stringify({ keys: used.map(({ detectedIn, ...k }) => ({ ...k, obtain: { url: '', steps: [] } })) })}`);
   }
   if (!fs.existsSync(path.join(dir, 'AGENTS.invariants.md'))) {
     fs.writeFileSync(path.join(dir, 'AGENTS.invariants.md'), '# Project invariants\n\nRules every agent must keep in this project (security, data, contracts, product stage).\n\n- Product stage: pre-launch | live (choose one and say what it means for compatibility)\n');
@@ -523,7 +529,7 @@ export async function doctor(root, { runSteps = true } = {}) {
   }
   for (const s of secretsStatus(root, cfg)) {
     if (s.state === 'filled') report.secrets.push({ ok: true, key: s.key });
-    else if (!s.usedBy.length) report.secrets.push({ ok: true, key: s.key, note: `${s.state}; no gate step uses it (set \`usedBy\` in secrets.yaml if one does)` });
+    else if (!s.needed) report.secrets.push({ ok: true, key: s.key, note: `${s.state}; not needed by any step (set \`usedBy\` in secrets.yaml if a step reads it)` });
     else bad('secrets', { key: s.key, problem: s.state, fix: s.kind === 'generated' || s.kind === 'test' ? 'run `wf secrets init`' : `run \`wf secrets guide ${s.key}\` in your terminal` });
   }
   for (const s of cfg.requires.skills ?? []) {
@@ -554,8 +560,9 @@ export async function doctor(root, { runSteps = true } = {}) {
         const wt = path.join(root, '.wf-worktrees', id, repo.name);
         const rref = git(dir, ['rev-parse', '--verify', '--quiet', `${repo.remote}/${repo.base}`], { allowFail: true }) ? `${repo.remote}/${repo.base}` : repo.base;
         run('git', ['worktree', 'add', '--quiet', '--detach', wt, rref], { cwd: dir });
-        made.push({ dir, wt });
+        made.push({ dir, wt, repo: repo.name });
         provision(root, trusted, repo, wt);
+        made.at(-1).before = new Set(untrackedFiles(wt));
       }
       for (const step of trusted.gate.steps.filter((s) => (s.tier ?? 'light') === 'light')) {
         if (!step.run) {
@@ -585,6 +592,12 @@ export async function doctor(root, { runSteps = true } = {}) {
           const configError = r.status === 127 || /command not found|not found:|No such file or directory|Missing script/i.test(r.stderr + r.stdout);
           bad('steps', { step: step.id, kind: configError ? 'config' : 'red-baseline', problem: `exit ${r.status}`, log: path.join(evidence, 'output.log'), fix: configError ? 'fix the command or path in project.yaml' : 'tests already fail on a clean base: fix them as the first quick fix' });
         }
+      }
+      // Files light steps leave untracked on a clean base (caches, reports) make every worktree look changed and get
+      // in the way of the gate's uncommitted-change check: they belong in .gitignore.
+      for (const m of made) {
+        const left = untrackedFiles(m.wt).filter((f) => !m.before.has(f));
+        if (left.length) report.warnings.push({ ok: true, warn: true, check: `untracked files in ${m.repo}`, problem: `light steps left ${left.length} untracked path(s) on a clean base: ${left.slice(0, 8).join(', ')}${left.length > 8 ? ' …' : ''}`, fix: `add to ${m.repo}/.gitignore:\n      ${left.map((f) => `/${f}`).join('\n      ')}`, gitignore: left.map((f) => `/${f}`) });
       }
     } finally {
       for (const m of made) run('git', ['worktree', 'remove', '--force', m.wt], { cwd: m.dir, allowFail: true });

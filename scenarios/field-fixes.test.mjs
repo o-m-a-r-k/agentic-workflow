@@ -80,7 +80,7 @@ test('wf plan keeps the planner\'s top-level sections, refuses unknown keys, and
 test('wf plan --from-agent freezes the planner\'s last YAML block from its transcript, and refuses when none is found', () => {
   // Failure: the owner retyped the planner's output and dropped sections on the way.
   const { root, id } = admitted('plan-agent');
-  ok(wf(root, ['handoff', 'planner', '--agent', 'planner-7', '--attempt', id]));
+  const start = ok(wf(root, ['handoff', 'planner', '--agent', 'planner-7', '--attempt', id, '--json'])).json().startPrompt;
   const missing = wf(root, ['plan', '--from-agent', 'planner-7', '--attempt', id]);
   assert.equal(missing.code, 75);
   assert.match(missing.err, /no Claude Code subagent transcript named `planner-7` \(agent type wf-planner\)/);
@@ -89,7 +89,7 @@ test('wf plan --from-agent freezes the planner\'s last YAML block from its trans
     name: 'planner-7',
     agentType: 'wf-planner',
     entries: [
-      { type: 'user', timestamp: t, message: { role: 'user', content: 'Read the bundle' } },
+      { type: 'user', timestamp: t, message: { role: 'user', content: start } },
       { type: 'assistant', timestamp: t, message: { model: 'model-b', content: [{ type: 'text', text: 'A first draft:\n```yaml\ncriteria: []\n```' }] } },
       { type: 'assistant', timestamp: t, message: { model: 'model-b', content: [{ type: 'text', text: `Final:\n\n\`\`\`yaml\n${PLANNER_YAML}\n\`\`\`` }] } },
     ],
@@ -102,7 +102,9 @@ test('wf plan --from-agent freezes the planner\'s last YAML block from its trans
   assert.equal(s.plan.contract, 'GET /a returns { text }\n');
   assert.deepEqual(s.plan.tests, { changed: ['test/a.spec.js'], run: ['node --test test/a.spec.js'] });
   assert.equal(s.planSource.model, 'model-b', 'the model the planner ran on is recorded');
-  assert.equal(fs.readFileSync(s.planSource.file, 'utf8'), `${PLANNER_YAML}\n`, 'the extracted block is kept in the evidence');
+  assert.equal(fs.readFileSync(s.planSource.file, 'utf8'), PLANNER_YAML, 'the extracted block is kept verbatim in the evidence');
+  assert.match(s.planSource.file, /plans\/plan-1\.raw\.yaml$/);
+  assert.equal(s.planSource.provenance, 'verified');
 });
 
 test('tracker captures: the admitted capture needs the description, a recycled capture is refused, implementing is queued once', () => {
@@ -174,7 +176,7 @@ test('a gate stop reason is shown only while the tree is unchanged, and wf revie
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', id]));
   const rec = ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r', { findings: [{ id: 'F1', status: 'open', summary: 's', evidence: 'x' }] })), '--attempt', id]));
   assert.equal(rec.out, 'review recorded (1 finding(s)).\n', 'no next steps, tracker actions or state on the reviewer console');
-  assert.deepEqual(Object.keys(ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r')), '--attempt', id, '--json'])).json()).sort(), ['attempt', 'file', 'findings', 'recorded']);
+  assert.deepEqual(Object.keys(ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r')), '--attempt', id, '--json'])).json()).sort(), ['attempt', 'file', 'findings', 'provenance', 'recorded', 'verify']);
 });
 
 test('wf status shows how far the base moved and whether it overlaps the change; wf base merge stops cleanly on conflicts', () => {

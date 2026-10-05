@@ -266,7 +266,10 @@ export function untrackedSnapshot(worktree) {
 }
 
 export function uncommitted(state) {
-  const produced = state.lastGate?.producedUntracked ?? {};
+  // What the last gate and the last `wf check` produced (reports, caches) is not the change.
+  const lastCheck = state.checks?.at(-1)?.producedUntracked ?? {};
+  const lastGate = state.lastGate?.producedUntracked ?? {};
+  const produced = Object.fromEntries([...new Set([...Object.keys(lastCheck), ...Object.keys(lastGate)])].map((r) => [r, { ...(lastCheck[r] ?? {}), ...(lastGate[r] ?? {}) }]));
   const dirty = {};
   for (const [name, r] of Object.entries(state.repos)) {
     const tracked = git(r.worktree, ['status', '--porcelain', '--untracked-files=no']);

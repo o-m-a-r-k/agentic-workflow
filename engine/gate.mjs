@@ -67,7 +67,8 @@ function alsoInputTrees(root, cfg, state, step) {
   return { trees, unreadable };
 }
 
-const allGateSteps = (state) => state.gates.flatMap((g) => g.steps ?? []);
+// `wf check` runs record their steps under the same keys, so a full gate reuses what a check already proved.
+const allGateSteps = (state) => [...state.gates, ...(state.checks ?? [])].sort((a, b) => String(a.at).localeCompare(String(b.at))).flatMap((g) => g.steps ?? []);
 
 function findReuse(state, stepId, key) {
   if (!key) return null;
@@ -155,6 +156,10 @@ export async function planGate(root, state, options = {}) {
       steps.push({ ...entry, decision: 'skip', skippedBy: 'focused', reason: 'focused proof runs light steps only' });
       continue;
     }
+    if (options.check && (entry.tier === 'heavy' || (options.repos && !options.repos.includes(step.repo)))) {
+      steps.push({ ...entry, decision: 'skip', skippedBy: 'check', reason: entry.tier === 'heavy' ? '`wf check` runs light steps only' : 'not one of the repos checked' });
+      continue;
+    }
     if (!full && state.deferHeavy && entry.tier === 'heavy' && step.deferrable !== false) {
       steps.push({ ...entry, decision: 'defer', reason: 'batch member: heavy steps run in the batch gate' });
       continue;
@@ -170,11 +175,15 @@ export async function planGate(root, state, options = {}) {
     if (prior) {
       // Since the commit the passing run saw, did anything change in this package that the step's inputs don't
       // cover (and the step doesn't explicitly ignore)? Then the pass says nothing about the current code.
-      const ranOn = state.gates.find((g) => g.runId === prior.runId)?.tree?.[repo.name];
+      const ranOn = [...state.gates, ...(state.checks ?? [])].find((g) => g.runId === prior.runId)?.tree?.[repo.name];
       const head = ranOn && /^[0-9a-f]{40}$/.test(ranOn) ? ranOn : null;
       const since = head ? git(state.repos[repo.name].worktree, ['diff', '--name-only', head, 'HEAD']).split('\n').filter(Boolean) : pkgChanged;
       outside = since.filter((f) => inside(f, pkg.path) && !matchesAny(rel(f, pkg.path), pkg.docsOnly) && !matchesAny(rel(f, pkg.path), step.inputs ?? ['**']) && !matchesAny(rel(f, pkg.path), step.ignores ?? []));
       if (outside.length || !head) prior = null;
+    }
+    if (options.rerunFailed && !prior && !options.rerunFailed.includes(step.id)) {
+      steps.push({ ...entry, decision: 'skip', skippedBy: 'rerun-failed', reason: '--rerun-failed reruns only the steps that failed last time' });
+      continue;
     }
     steps.push({
       ...entry,
@@ -190,7 +199,7 @@ export async function planGate(root, state, options = {}) {
       missingSecrets: missingFor(root, cfg, step.id),
     });
   }
-  return { cfg, live, changed, impact: imp, full, adapterTouched, focused, steps, unchecked, tree: treeHashes(state) };
+  return { cfg, live, changed, impact: imp, full, adapterTouched, focused, check: Boolean(options.check), rerunFailed: options.rerunFailed ?? null, steps, unchecked, tree: treeHashes(state) };
 }
 
 function substitute(text, vars, quote = false) {
@@ -419,6 +428,38 @@ function takeMachineLease(name, capacity) {
   return null;
 }
 
+// `wf run --lease <name> -- <cmd>`: an implementer's docker or end-to-end stack takes the same machine-wide slot a gate
+// step would, so concurrent attempts cannot start more stacks than `gate.leases` allows. Named failure: stacks started
+// outside the `docker: 1` lease overloaded the machine. The slot is held by this process and freed when it exits.
+export async function runWithLease(cfg, name, command, { log = process.stderr } = {}) {
+  const capacity = cfg.gate.leases?.[name] ?? 1;
+  let slot = takeMachineLease(name, capacity);
+  if (!slot) log.write(`wf run: waiting for a \`${name}\` lease (${capacity} slot(s), all held)\n`);
+  while (!slot) {
+    await new Promise((r) => setTimeout(r, 1000));
+    slot = takeMachineLease(name, capacity);
+  }
+  try {
+    return await new Promise((resolve) => {
+      const child = spawn(command[0], command.slice(1), { stdio: 'inherit' });
+      const forward = (sig) => child.kill(sig);
+      process.on('SIGINT', forward);
+      process.on('SIGTERM', forward);
+      child.on('error', (error) => {
+        log.write(`wf run: ${error.message}\n`);
+        resolve(127);
+      });
+      child.on('exit', (code, signal) => {
+        process.off('SIGINT', forward);
+        process.off('SIGTERM', forward);
+        resolve(code ?? (signal ? 128 : 1));
+      });
+    });
+  } finally {
+    fs.rmSync(slot, { force: true });
+  }
+}
+
 // A pid in the lock belongs to us only if it is still a `wf` process (pids are reused after a crash).
 function isWfRunner(pid) {
   if (!isPidAlive(pid)) return false;
@@ -446,7 +487,7 @@ async function harvest(root, state, lock) {
   }
   const pf = progressFile(root, state.id, lock.runId);
   const progress = fs.existsSync(pf) ? JSON.parse(fs.readFileSync(pf, 'utf8')) : { steps: [] };
-  append(root, state.id, 'gate.finished', { runId: lock.runId, status: 'recovered', reason: 'owner-dead', steps: progress.steps, tree: lock.tree }, null);
+  append(root, state.id, lock.kind === 'check' ? 'check.finished' : 'gate.finished', { runId: lock.runId, status: 'recovered', reason: 'owner-dead', steps: progress.steps, tree: lock.tree, ...(lock.kind === 'check' ? { check: true } : {}) }, null);
   return { runId: lock.runId, carried: progress.steps.filter((s) => s.status === 'passed').length };
 }
 
@@ -480,8 +521,14 @@ async function acquireGateLock(root, state) {
 }
 
 export async function runGate(root, state, options = {}) {
-  const dirty = uncommitted(state);
-  if (Object.keys(dirty).length) throw refuse(`commit changes before the gate: ${Object.entries(dirty).map(([r, l]) => `${r} (${l.slice(0, 5).join('; ')}${l.length > 5 ? `; +${l.length - 5} more` : ''})`).join(', ')}`);
+  // `wf check` needs only the repos it checks to be committed; a gate needs every repo.
+  const dirty = Object.fromEntries(Object.entries(uncommitted(state)).filter(([r]) => !options.check || !options.repos || options.repos.includes(r)));
+  if (Object.keys(dirty).length) throw refuse(`commit changes before the ${options.check ? 'check' : 'gate'}: ${Object.entries(dirty).map(([r, l]) => `${r} (${l.slice(0, 5).join('; ')}${l.length > 5 ? `; +${l.length - 5} more` : ''})`).join(', ')}`);
+  if (options.rerunFailed === true) {
+    const failed = (state.lastGate?.steps ?? []).filter((s) => ['failed', 'interrupted', 'not-started'].includes(s.status)).map((s) => s.id);
+    if (!failed.length) throw refuse('--rerun-failed: the last gate has no failed step', 'run `wf gate`');
+    options = { ...options, rerunFailed: failed };
+  }
   if (options.prepareOnly) {
     const plan = await planGate(root, state, options);
     return { plan, recovered: null };
@@ -491,6 +538,7 @@ export async function runGate(root, state, options = {}) {
   try {
     if (recovered) state = loadState(root, state.id);
     const plan = await planGate(root, state, options);
+    if (options.check && options.repos) for (const r of options.repos) if (!state.repos[r]) throw refuse(`repo \`${r}\` is not part of ${state.id}`);
     const missing = plan.steps.filter((s) => s.decision === 'run' && s.missingSecrets?.length);
     if (missing.length) throw refuse(`secrets missing: ${missing.map((s) => `${s.id} needs ${s.missingSecrets.join(', ')}`).join('; ')}`, 'run `wf secrets guide` in your terminal');
     const record = await execute(root, state, plan, options.live ?? null);
@@ -514,7 +562,7 @@ async function execute(root, state, plan, live = null) {
   const runId = `${now().replace(/[:.]/g, '-')}-${process.pid}`;
   const runDir = path.join(gateDir(root, state.id), runId);
   fs.mkdirSync(runDir, { recursive: true });
-  const lockData = { pid: process.pid, runId, startedAt: now(), tree: plan.tree, children: [], plugins: [] };
+  const lockData = { pid: process.pid, runId, kind: plan.check ? 'check' : 'gate', startedAt: now(), tree: plan.tree, children: [], plugins: [] };
   const persistLock = () => writeJson(lockFile(root, state.id), lockData);
   persistLock();
   const children = new Set();
@@ -538,7 +586,7 @@ async function execute(root, state, plan, live = null) {
   const results = [];
   const runningNow = new Map(); // step id -> start time
   const saveProgress = () => writeJson(progressFile(root, state.id, runId), { runId, pid: process.pid, steps: results, running: [...runningNow].map(([id, at]) => ({ id, startedAt: new Date(at).toISOString() })) });
-  const say = (line) => live?.write(`wf gate: ${line}\n`);
+  const say = (line) => live?.write(`wf ${plan.check ? 'check' : 'gate'}: ${line}\n`);
   let stopping = false;
   const onSignal = async () => {
     if (stopping) return;
@@ -557,7 +605,12 @@ async function execute(root, state, plan, live = null) {
   process.on('SIGTERM', onSignal);
   process.on('SIGINT', onSignal);
 
-  const queue = plan.steps.filter((s) => s.decision === 'run');
+  // Light steps first (their failures are cheap to learn early), then heavy steps longest first, so the gate's wall
+  // time is not the serial chain of heavy steps started in adapter order. Unknown durations count as longest.
+  const lastDuration = (id) => allGateSteps(state).filter((s) => s.id === id && s.durationMs !== undefined && s.status !== 'reused').at(-1)?.durationMs ?? Infinity;
+  const queue = plan.steps.filter((s) => s.decision === 'run').map((s, i) => ({ s, i, heavy: s.tier === 'heavy' ? 1 : 0, d: lastDuration(s.id) }))
+    .sort((a, b) => a.heavy - b.heavy || (a.heavy ? b.d - a.d : 0) || a.i - b.i)
+    .map((x) => x.s);
   for (const s of plan.steps.filter((x) => x.decision === 'reuse')) {
     const prior = findReuse(state, s.id, s.key);
     results.push({ ...prior, status: 'reused', reusedFrom: prior.runId, reason: s.reason, runId });
@@ -628,9 +681,12 @@ async function execute(root, state, plan, live = null) {
   const producedUntracked = {};
   for (const [name, r] of Object.entries(state.repos)) producedUntracked[name] = untrackedSnapshot(r.worktree);
   say(`${status} (${runId})`);
-  const record = { runId, status, producedUntracked, full: plan.full, focused: plan.focused, adapterBase: state.adapterBase, tree: plan.tree, impact: plan.impact, unchecked: plan.unchecked, steps: results, finishedAt: now() };
+  const record = { runId, status, producedUntracked, full: plan.full, focused: plan.focused, check: plan.check || undefined, rerunFailed: plan.rerunFailed ?? undefined, adapterBase: state.adapterBase, tree: plan.tree, impact: plan.impact, unchecked: plan.unchecked, steps: results, finishedAt: now() };
   writeImmutable(path.join(runDir, 'result.json'), `${JSON.stringify(record, null, 2)}\n`);
-  append(root, state.id, 'gate.finished', { ...record, evidence: path.join(runDir, 'result.json') }, null);
+  append(root, state.id, plan.check ? 'check.finished' : 'gate.finished', { ...record, evidence: path.join(runDir, 'result.json') }, null);
+  const flaky = flakesIn(state, results);
+  if (flaky.length) append(root, state.id, 'gate.flaky', { runId, flaky }, null);
+  record.flaky = flaky;
   return record;
 }
 
@@ -668,8 +724,22 @@ export function stopGate(root, state, reason) {
   return lock;
 }
 
+// A step (or suite) that failed and then passed with the same inputs and runner: the code did not change, so the
+// failure was the environment or the test. Recorded as evidence and shown to the reviewer and in `wf status`.
+function flakesIn(state, results) {
+  const out = [];
+  const earlier = allGateSteps(state);
+  for (const r of results.filter((x) => x.status === 'passed' && x.key)) {
+    const failed = earlier.filter((s) => s.id === r.id && s.key === r.key && s.status === 'failed').at(-1);
+    if (!failed) continue;
+    const suites = (failed.suites ?? []).filter((s) => s.status === 'failed' && (r.suites ?? []).some((p) => p.id === s.id && p.status === 'passed')).map((s) => s.id);
+    out.push({ step: r.id, key: r.key, failedRun: failed.runId, passedRun: r.runId, suites });
+  }
+  return out;
+}
+
 // Steps a `--focused` gate left out. Such a gate is proof while repairing, never the full proof of a tree.
-export const focusedSkips = (g) => (g?.steps ?? []).filter((s) => s.status === 'skipped' && (s.skippedBy === 'focused' || s.reason === 'focused proof runs light steps only')).map((s) => s.id);
+export const focusedSkips = (g) => (g?.steps ?? []).filter((s) => s.status === 'skipped' && (['focused', 'rerun-failed', 'check'].includes(s.skippedBy) || s.reason === 'focused proof runs light steps only')).map((s) => s.id);
 
 // A passing gate counts only for the exact tree it ran on, and only when it ran every step that tree needs.
 export function gatePassedForCurrentTree(state) {

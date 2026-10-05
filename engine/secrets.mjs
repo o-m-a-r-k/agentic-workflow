@@ -15,8 +15,13 @@ export function loadCatalog(root) {
   const raw = YAML.parse(fs.readFileSync(file, 'utf8')) ?? {};
   const keys = raw.keys ?? raw;
   if (!Array.isArray(keys)) throw new WfError(`${file}: expected a list under \`keys\``);
-  return keys.map((k) => ({ kind: 'provided', usedBy: [], ...k }));
+  // A key no step lists is not required unless the catalog says so: `wf secrets guide` once asked the owner for eleven
+  // secrets no gate step used.
+  return keys.map((k) => ({ kind: 'provided', ...k, usedBy: Array.isArray(k.usedBy) ? k.usedBy : [], required: k.required ?? (Array.isArray(k.usedBy) && k.usedBy.length > 0) }));
 }
+
+// Needed: a gate step lists it in `usedBy`, or the catalog marks it `required: true`.
+export const isNeeded = (e) => e.usedBy.length > 0 || e.required === true;
 
 const envFileFor = (root, cfg, entry) => {
   const repo = cfg.repos.find((r) => r.name === (entry.repo ?? cfg.repos[0].name));
@@ -91,7 +96,7 @@ export function verifySecret(root, cfg, entry, value) {
 export function status(root, cfg) {
   return loadCatalog(root).map((e) => {
     const v = readSecret(root, cfg, e);
-    return { key: e.key, kind: e.kind, purpose: e.purpose ?? '', usedBy: e.usedBy, state: v === null ? 'missing' : checkFormat(e, v).length ? 'invalid' : 'filled', store: cfg.secrets.store };
+    return { key: e.key, kind: e.kind, purpose: e.purpose ?? '', usedBy: e.usedBy, needed: isNeeded(e), state: v === null ? 'missing' : checkFormat(e, v).length ? 'invalid' : 'filled', store: cfg.secrets.store };
   });
 }
 
@@ -209,9 +214,13 @@ export async function set(root, cfg, key) {
 
 export async function guide(root, cfg, onlyKey) {
   const out = (s = '') => process.stdout.write(`${s}\n`);
-  const entries = loadCatalog(root).filter((e) => (onlyKey ? e.key === onlyKey : e.kind === 'provided'));
-  const pending = entries.filter((e) => readSecret(root, cfg, e) === null || checkFormat(e, readSecret(root, cfg, e)).length);
-  if (!pending.length) return out('Every provided secret is filled. Nothing to do.');
+  const all = loadCatalog(root).filter((e) => (onlyKey ? e.key === onlyKey : e.kind === 'provided'));
+  const unfilled = (e) => readSecret(root, cfg, e) === null || checkFormat(e, readSecret(root, cfg, e)).length;
+  // Only keys a step needs are asked for (or the one key named); the rest are listed once.
+  const pending = all.filter((e) => (onlyKey || isNeeded(e)) && unfilled(e));
+  const unused = all.filter((e) => !onlyKey && !isNeeded(e) && unfilled(e)).map((e) => e.key);
+  if (unused.length) out(`not needed by any step (not asked): ${unused.join(', ')}`);
+  if (!pending.length) return out('nothing to enter');
   out(`${pending.length} secret(s) to enter. Values are hidden as you paste and never shown again.\n`);
   let done = 0;
   for (const [i, e] of pending.entries()) {

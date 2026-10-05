@@ -130,6 +130,8 @@ function normalize(raw, source) {
     if (rc.class !== undefined && !cfg.classes[rc.class]) fail(`roles.${role}.class \`${rc.class}\` is not a known class (known: ${Object.keys(cfg.classes).join(', ')})`);
   }
   for (const lane of cfg.lanes) if (!LANES.has(lane)) fail(`unknown lane \`${lane}\``);
+  // A misspelt mode would silently fall back to the agent flow.
+  if (cfg.tracker.via !== undefined && !['agent', 'api'].includes(cfg.tracker.via)) fail('`tracker.via` must be `agent` (the agent records captures) or `api` (the engine calls the tracker)');
   if (!Array.isArray(raw.repos) || raw.repos.length === 0) fail('`repos` must list at least one git root');
   const names = new Set();
   for (const r of raw.repos ?? []) {

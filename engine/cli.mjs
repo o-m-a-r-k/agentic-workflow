@@ -2,17 +2,19 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
-import { abandon, adopt, entry, hold, openState, release } from './attempt.mjs';
+import { abandon, adopt, changedFiles, entry, hold, openState, release } from './attempt.mjs';
 import { baseLines, baseMerge, baseStatus } from './base.mjs';
 import { findRoot, loadConfig, requireRoot } from './config.mjs';
-import { liveGate, runGate, stopGate } from './gate.mjs';
-import { listAttempts, loadState } from './ledger.mjs';
+import { exportAttempt, exportFile } from './export.mjs';
+import { liveGate, runGate, runWithLease, stopGate } from './gate.mjs';
+import { append, listAttempts, loadState } from './ledger.mjs';
+import { outsidePlan } from './scope.mjs';
 import { acceptReview, amendCriteria, batchCreate, batchEject, closeAfterHandoff, deliver, freezeCriteria, handoff, nextAction, recordReview, reopen, uncovered, withAttempt } from './lifecycle.mjs';
 import { detect, doctor, register, registry, setEnabled, sync, writeDraft } from './onboard.mjs';
 import * as secrets from './secrets.mjs';
 import { report, toCsv, toHandoffCsv, toHtml } from './telemetry.mjs';
 import { impact } from './topology.mjs';
-import { recordTracker } from './tracker.mjs';
+import { performTracker, recordTracker } from './tracker.mjs';
 import { ENGINE_VERSION, WfError, parseArgs } from './util.mjs';
 
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -45,13 +47,15 @@ Work
                                     freeze acceptance criteria and the plan (--from-agent: the planner's last YAML block)
   wf criteria amend --file f --reason "why"
   wf handoff planner|implementer|reviewer|tester --agent ID [--work W1] [--session SID] [--runtime claude|codex]
-  wf gate [--prepare-only] [--full] [--focused]
+  wf check [--repo R]               light steps only, for the implementer; reused by the gate, never counts as one
+  wf gate [--prepare-only] [--full] [--focused] [--rerun-failed]
+  wf run --lease NAME -- CMD...     run a command holding a machine-wide lease (docker, browser...)
   wf base [merge] [--repo R]        how far each base moved; merge merges it into the worktrees
   wf stop --reason "why"            pause a running gate; finished steps are kept
   wf review --closure file.json     record the reviewer's closure
   wf accept                         accept the review
   wf deliver                        integrate every repo, then start the tracker handoff
-  wf tracker record --event E --capture file.json
+  wf tracker record --event E --capture file.json | wf tracker sync (tracker.via: api)
   wf hold --reason "why" | wf release
   wf reopen --item ID --reason "feedback"
   wf adopt [--attempt ID]           take over a live attempt from a new session
@@ -62,6 +66,7 @@ Status
   wf resume                         what to do next
   wf status [--all] [--json]
   wf report [--all] [--csv FILE] [--handoffs-csv FILE] [--html FILE]
+  wf export [--out FILE] [--json]   one self-contained page for the attempt (a view of the evidence)
 
 Common options: --attempt ID, --json, --owner ID`;
 
@@ -70,7 +75,15 @@ const print = (options, human, data) => {
   else process.stdout.write(`${typeof human === 'string' ? human : JSON.stringify(human, null, 2)}\n`);
 };
 
-function summary(root, s, { base = null } = {}) {
+function changedFilesOf(s, r) {
+  try {
+    return changedFiles(s, r);
+  } catch {
+    return [];
+  }
+}
+
+function summary(root, s, { base = null, resume = false } = {}) {
   const lines = [`${s.id}  ${s.item}  lane=${s.lane}  intent=${s.intent}  phase=${s.phase}`, `  owner: ${s.owner}`];
   for (const [name, r] of Object.entries(s.repos)) lines.push(`  ${name}: ${r.worktree} (base ${r.base.slice(0, 10)})`);
   if (base) lines.push(...baseLines(base));
@@ -82,6 +95,21 @@ function summary(root, s, { base = null } = {}) {
     lines.push(`    finished: ${live.finished.map((r) => `${r.id} ${r.status}${r.seconds !== null ? ` ${r.seconds}s` : ''}`).join(', ') || 'none yet'}`);
   }
   if (s.lastGate) lines.push(`  last gate: ${s.lastGate.status} (${s.lastGate.runId})`);
+  if (s.checks?.length) lines.push(`  last check: ${s.checks.at(-1).status} (${s.checks.at(-1).runId}; light steps only, never counts as the gate)`);
+  if (s.flaky?.length) lines.push(`  flaky: ${[...new Set(s.flaky.map((f) => `${f.step}${f.suites?.length ? ` (${f.suites.join(', ')})` : ''}`))].join(', ')} failed and then passed with the same inputs`);
+  if (s.criteria && isOpen(s)) {
+    try {
+      const outside = outsidePlan(s.plan, Object.fromEntries(Object.keys(s.repos).map((r) => [r, changedFilesOf(s, r)])));
+      if (outside?.length) lines.push(`  outside the plan: ${outside.length} changed file(s) no plan anchor or test path names (listed in the reviewer bundle)`);
+    } catch {}
+  }
+  if (resume) {
+    const last = s.exports?.filter((x) => !x.json).at(-1)?.file ?? (fs.existsSync(exportFile(root, s.id)) ? exportFile(root, s.id) : null);
+    lines.push(`  export: ${last ?? 'none yet'}${last ? '' : ' (`wf export` writes one page for this attempt)'}`);
+    const p = s.plan && typeof s.plan === 'object' ? s.plan : s.plan ? { summary: s.plan } : null;
+    const missing = p ? ['contract', 'anchors'].filter((k) => p[k] === undefined) : [];
+    if (missing.length) lines.push(`  warning: the frozen plan has no ${missing.join(' or ')} section, so implementers have none to follow`);
+  }
   lines.push(`  next: ${live ? withAttempt(root, s, 'a gate is running: wait for it to finish (or `wf stop --reason "why"`); do not edit the worktrees meanwhile') : nextAction(root, s)}`);
   return lines.join('\n');
 }
@@ -100,6 +128,10 @@ function gateText(result) {
 }
 
 export async function main(argv) {
+  // `wf run --lease docker -- <command...>`: everything after `--` is the command, untouched.
+  const dd = argv.indexOf('--');
+  const passthrough = dd >= 0 ? argv.slice(dd + 1) : [];
+  if (dd >= 0) argv = argv.slice(0, dd);
   const [cmd, sub, ...rest] = argv;
   const { positional, options } = parseArgs(sub && !sub.startsWith('--') ? rest : argv.slice(1));
   if (!cmd || cmd === 'help' || options.help) {
@@ -111,7 +143,7 @@ export async function main(argv) {
     return 0;
   }
   try {
-    return await dispatch(cmd, sub && !sub.startsWith('--') ? sub : null, positional, options);
+    return await dispatch(cmd, sub && !sub.startsWith('--') ? sub : null, positional, { ...options, _: passthrough });
   } catch (error) {
     if (error instanceof WfError) {
       process.stderr.write(`wf ${cmd}: ${error.message}\n${error.hint ? `  → ${error.hint}\n` : ''}`);
@@ -122,6 +154,16 @@ export async function main(argv) {
 }
 
 const isOpen = (s) => !['done', 'abandoned'].includes(s.phase);
+
+// With `tracker.via: api` the engine performs what a command queued and records its readback; otherwise a no-op.
+async function trackerApi(root, id) {
+  const cfg = loadConfig(root);
+  if (cfg.tracker.via !== 'api') return '';
+  const r = await performTracker(root, cfg, loadState(root, id));
+  let s = loadState(root, id);
+  if (r.performed.length) s = closeAfterHandoff(root, s);
+  return `${r.performed.length ? `\ntracker: ${r.performed.join(', ')} performed through the API and read back${s.phase === 'done' ? '; attempt closed' : ''}` : ''}${r.note ? `\ntracker: ${r.note}` : ''}`;
+}
 // Base status is information: a failure to read it never fails the command.
 function safeBase(root, s) {
   try {
@@ -157,7 +199,7 @@ async function dispatch(cmd, sub, positional, options) {
     const detected = detect(root);
     const file = writeDraft(root, detected, { force: options.force === true });
     register(root, false);
-    print(options, `drafted ${file} (disabled)${detected.compose.length ? `\n  docker compose: ${detected.compose.join(', ')} (steps using it should hold the \`docker\` lease)` : ''}\n  repos: ${detected.repos.map((r) => `${r.name}@${r.base} [${r.packages.map((p) => p.path).join(', ')}]`).join('; ')}\n  steps: ${detected.steps.map((s) => s.id).join(', ') || 'none detected'}\n  components: ${detected.components.map((c) => `${c.id} (${c.kind})`).join(', ')}\n  secrets: ${detected.secrets.map((s) => `${s.key} (${s.kind})`).join(', ') || 'none detected'}\nnext: review the draft with the user, commit .workflow/ on the base branch and push it, then \`wf doctor\` and \`wf enable\``, { file, detected });
+    print(options, `drafted ${file} (disabled)${detected.compose.length ? `\n  docker compose: ${detected.compose.join(', ')} (steps using it should hold the \`docker\` lease)` : ''}\n  repos: ${detected.repos.map((r) => `${r.name}@${r.base} [${r.packages.map((p) => p.path).join(', ')}]`).join('; ')}\n  steps: ${detected.steps.map((s) => s.id).join(', ') || 'none detected'}\n  components: ${detected.components.map((c) => `${c.id} (${c.kind})`).join(', ')}\n  secrets: ${detected.secrets.filter((s) => s.usedBy.length).map((s) => `${s.key} (${s.kind}, used by ${s.usedBy.join(', ')})`).join(', ') || 'none a detected step uses'}${detected.secrets.some((s) => !s.usedBy.length) ? ` (not catalogued: ${detected.secrets.filter((s) => !s.usedBy.length).map((s) => s.key).join(', ')})` : ''}\nnext: review the draft with the user, commit .workflow/ on the base branch and push it, then \`wf doctor\` and \`wf enable\``, { file, detected });
     return 0;
   }
   if (cmd === 'report') {
@@ -252,8 +294,12 @@ async function dispatch(cmd, sub, positional, options) {
       const cfg = loadConfig(root);
       if (sub === 'status' || !sub) {
         const rows = secrets.status(root, cfg);
-        print(options, rows.length ? rows.map((r) => `${r.state === 'filled' ? '✓' : '✗'} ${r.key.padEnd(28)} ${r.kind.padEnd(9)} ${r.state}${r.purpose ? `  ${r.purpose}` : ''}`).join('\n') : 'no secrets catalogued (.workflow/secrets.yaml)', rows);
-        return rows.every((r) => r.state === 'filled') ? 0 : 1;
+        const needed = rows.filter((r) => r.needed || r.state === 'filled');
+        const unused = rows.filter((r) => !r.needed && r.state !== 'filled').map((r) => r.key);
+        const text = [...needed.map((r) => `${r.state === 'filled' ? '✓' : '✗'} ${r.key.padEnd(28)} ${r.kind.padEnd(9)} ${r.state}${r.purpose ? `  ${r.purpose}` : ''}`), ...(unused.length ? [`not needed by any step: ${unused.join(', ')}`] : [])];
+        const missing = needed.filter((r) => r.state !== 'filled');
+        print(options, rows.length ? `${text.join('\n')}${missing.length ? '' : '\nnothing to enter'}` : 'no secrets catalogued (.workflow/secrets.yaml)', rows);
+        return missing.length ? 1 : 0;
       }
       if (sub === 'init') {
         const done = secrets.init(root, cfg);
@@ -274,8 +320,10 @@ async function dispatch(cmd, sub, positional, options) {
       throw new WfError(`unknown: wf secrets ${sub}`);
     }
     case 'entry': {
-      const s = entry(root, { ...options, deferHeavy: options['defer-heavy'] === true });
-      print(options, summary(root, s), s);
+      const created = entry(root, { ...options, deferHeavy: options['defer-heavy'] === true });
+      const api = await trackerApi(root, created.id);
+      const s = loadState(root, created.id);
+      print(options, `${summary(root, s)}${api}`, s);
       return 0;
     }
     case 'plan': {
@@ -294,18 +342,42 @@ async function dispatch(cmd, sub, positional, options) {
     }
     case 'handoff': {
       const r = handoff(root, sub, options);
-      const startPrompt = `Read ${r.bundle} and follow its instructions.`;
+      const startPrompt = r.startPrompt;
+      // Never printed for a reviewer: its console carries only the start line.
+      const api = await trackerApi(root, r.state.id);
+      if (api && sub !== 'reviewer') process.stderr.write(`${api.trim()}\n`);
       // The reviewer is started blind: this one line is its whole prompt, so nothing else is printed to pass along.
       if (sub === 'reviewer') print(options, startPrompt, { ...r, startPrompt });
       else print(options, `${sub} bundle: ${r.bundle}${r.work ? `\nwork item ${r.work}, class ${r.class}` : `\nclass ${r.class}`}${r.effort ? `, effort ${r.effort}` : ''}${r.model ? `, model ${r.model}` : ''}\nStart agent type ${r.agentType} (name it ${options.agent}; do not pass a model) with: "${startPrompt}"`, { ...r, startPrompt });
       return 0;
     }
-    case 'gate': {
+    case 'gate':
+    case 'check': {
       const s = openState(root, options);
+      const check = cmd === 'check';
+      const repos = check && options.repo ? String(options.repo).split(',') : null;
       // Live progress goes to stdout, or to stderr with --json so stdout stays one JSON document.
-      const r = await runGate(root, s, { prepareOnly: options['prepare-only'] === true, full: options.full === true, focused: options.focused === true, live: options.json ? process.stderr : process.stdout });
-      print(options, gateText(r), r.record ?? r.plan);
+      const r = await runGate(root, s, { prepareOnly: options['prepare-only'] === true, full: !check && options.full === true, focused: !check && options.focused === true, rerunFailed: !check && options['rerun-failed'] === true ? true : undefined, check, repos, live: options.json ? process.stderr : process.stdout });
+      const note = check ? '\n  (a check runs light steps only; it is reused by the gate but never counts as one)' : r.record?.rerunFailed ? '\n  (--rerun-failed: proof while repairing; acceptance and delivery need a full `wf gate`)' : '';
+      const flaky = r.record?.flaky?.length ? `\n  flaky: ${r.record.flaky.map((f) => f.step).join(', ')} failed earlier and passed now with the same inputs` : '';
+      print(options, `${gateText(r).replace(/^gate /, check ? 'check ' : 'gate ')}${note}${flaky}`, r.record ?? r.plan);
       return r.record && r.record.status !== 'passed' ? 1 : 0;
+    }
+    case 'run': {
+      if (!options.lease || options.lease === true || !options._.length) throw new WfError('usage: wf run --lease <name> -- <command...>');
+      const cfg = loadConfig(root);
+      return await runWithLease(cfg, String(options.lease), options._);
+    }
+    case 'export': {
+      const s = openState(root, options);
+      const r = exportAttempt(root, s, { out: options.out ?? null, json: options.json === true });
+      append(root, s.id, 'exported', { file: r.file, json: options.json === true }, null);
+      if (options.json) {
+        process.stdout.write(r.text);
+        return 0;
+      }
+      print(options, `exported ${s.id} to ${r.file}\n  a view of the ledger and evidence, which stay the source of truth`);
+      return 0;
     }
     case 'stop': {
       const s = openState(root, options);
@@ -317,8 +389,10 @@ async function dispatch(cmd, sub, positional, options) {
     case 'review': {
       // The reviewer runs this. Its console shows nothing but the receipt: no owner next steps, tracker actions or
       // state, which carried earlier rounds' findings and the owner's notes into a blind review.
-      const s = recordReview(root, options);
-      print(options, `review recorded (${s.review.closure.findings.length} finding(s)).`, { recorded: true, attempt: s.id, findings: s.review.closure.findings.length, file: s.review.file });
+      const { state: s, reveal, toVerify } = recordReview(root, options);
+      // Revealed only now, after this round's own closure is recorded blind.
+      const verify = reveal ? `\n${toVerify.length} finding(s) from earlier rounds to verify against the code: ${reveal}\nAdd \`priorFindings: [{ round, id, status, evidence }]\` to your closure (change nothing else) and run \`wf review --closure <file>\` again.` : '';
+      print(options, `review recorded (${s.review.closure.findings.length} finding(s)).${verify}`, { recorded: true, attempt: s.id, findings: s.review.closure.findings.length, file: s.review.file, provenance: s.review.provenance, verify: reveal ? { file: reveal, count: toVerify.length } : null });
       return 0;
     }
     case 'accept': {
@@ -332,11 +406,19 @@ async function dispatch(cmd, sub, positional, options) {
         print(options, `${r.waiting.repo}: ${r.waiting.state}${r.waiting.url ? ` (${r.waiting.url})` : ''}. Run \`wf deliver\` again once it is merged.`, r);
         return 0;
       }
-      print(options, `delivered ${r.state.id}: ${Object.values(r.state.delivery.repos).map((d) => `${d.repo}${d.commit ? `@${d.commit.slice(0, 10)}` : ' (no changes)'}`).join(', ')}\nnext: ${nextAction(root, r.state)}`, r.state);
+      const api = await trackerApi(root, r.state.id);
+      const after = loadState(root, r.state.id);
+      print(options, `delivered ${after.id}: ${Object.values(after.delivery.repos).map((d) => `${d.repo}${d.commit ? `@${d.commit.slice(0, 10)}` : ' (no changes)'}`).join(', ')}${api}\nnext: ${nextAction(root, after)}`, after);
       return 0;
     }
     case 'tracker': {
-      if (sub !== 'record') throw new WfError('usage: wf tracker record --event E --capture file.json');
+      if (sub === 'sync') {
+        const s = openState(root, options);
+        const api = await trackerApi(root, s.id);
+        print(options, `${api.trim() || 'tracker: nothing to perform (no pending actions, or `tracker.via` is not `api`)'}\nnext: ${nextAction(root, loadState(root, s.id))}`);
+        return 0;
+      }
+      if (sub !== 'record') throw new WfError('usage: wf tracker record --event E --capture file.json | wf tracker sync');
       const cfg = loadConfig(root);
       let s = await recordTracker(root, cfg, openState(root, options), options);
       s = closeAfterHandoff(root, s);
@@ -354,8 +436,10 @@ async function dispatch(cmd, sub, positional, options) {
       return 0;
     }
     case 'reopen': {
-      const s = reopen(root, options);
-      print(options, summary(root, s), s);
+      const opened = reopen(root, options);
+      const api = await trackerApi(root, opened.id);
+      const s = loadState(root, opened.id);
+      print(options, `${summary(root, s)}${api}`, s);
       return 0;
     }
     case 'adopt': {
@@ -384,7 +468,7 @@ async function dispatch(cmd, sub, positional, options) {
     case 'resume': {
       const s = openState(root, options);
       const base = isOpen(s) ? safeBase(root, s) : null;
-      print(options, summary(root, s, { base }), { ...s, next: nextAction(root, s), liveGate: liveGate(root, s), base });
+      print(options, summary(root, s, { base, resume: true }), { ...s, next: nextAction(root, s), liveGate: liveGate(root, s), base });
       return 0;
     }
     case 'status': {

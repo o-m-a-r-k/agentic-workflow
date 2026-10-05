@@ -9,8 +9,10 @@ import { append, attemptDir, listAttempts, loadState } from './ledger.mjs';
 import { deliveryOrder, impact, inside, packageOf } from './topology.mjs';
 import { findSkill } from './skills.mjs';
 import { lastFencedYaml, lastModel, readTranscript, sessionModel, subagentModel, subagentTranscripts } from './telemetry.mjs';
+import { outsidePlan } from './scope.mjs';
 import { emitTrackerEvent } from './tracker.mjs';
-import { WfError, YAML, canonical, git, hashFile, hashValue, matchesAny, readJson, refuse, run, sessionIdentity, writeJson } from './util.mjs';
+import { home, startPromptFor, verifyAgent } from './provenance.mjs';
+import { WfError, YAML, canonical, git, hashFile, hashValue, matchesAny, readJson, refuse, run, sessionIdentity, writeImmutable, writeJson } from './util.mjs';
 
 const readStructured = (file) => {
   let text = fs.readFileSync(path.resolve(String(file)), 'utf8');
@@ -19,7 +21,14 @@ const readStructured = (file) => {
   return file.endsWith('.json') ? JSON.parse(text) : YAML.parse(text);
 };
 
-const home = () => process.env.WF_HOME ?? os.homedir();
+// Every raw output the owner or an agent produced is kept verbatim, write-once and hash-bound, at the moment the
+// engine consumes it: nothing may exist only in chat.
+function keepRaw(root, id, rel, content) {
+  const file = path.join(attemptDir(root, id), rel);
+  writeImmutable(file, content);
+  return { file, sha256: hashFile(file) };
+}
+const extOf = (file) => (String(file).endsWith('.json') ? 'json' : 'yaml');
 
 // The plan file's schema. `wf plan` once read only `plan`, so a contract, anchors or test selectors written as
 // top-level keys were dropped from the frozen plan and never reached the implementers. Plan sections may sit under
@@ -47,6 +56,9 @@ export function planFromDoc(doc) {
 // Code subagent started under this name (found by its meta.json, as `wf report` does).
 function planFromAgent(root, state, agent) {
   const handoff = state.handoffs.filter((h) => h.role === 'planner' && h.agent === agent).at(-1);
+  if (!handoff) throw refuse(`\`${agent}\` was not handed this attempt as its planner${state.roles.planner.length ? ` (planners: ${state.roles.planner.join(', ')})` : ''}`, 'run `wf handoff planner --agent <id>` and start that agent with the printed line');
+  const check = verifyAgent(handoff);
+  if (check.status === 'mismatch') throw refuse(`the planner transcript does not match its handoff: ${check.reason}`);
   const found = subagentTranscripts(home(), agent, handoff?.agentType ?? null, handoff?.at ?? null);
   if (!found.length) throw refuse(`no Claude Code subagent transcript named \`${agent}\`${handoff?.agentType ? ` (agent type ${handoff.agentType})` : ''}${handoff ? ' written after its handoff' : ''} under ${path.join(home(), '.claude', 'projects')}`, 'check the agent id, or save the planner\'s YAML unchanged to a file and use `wf plan --file <file>`');
   const entries = readTranscript(found[0].file);
@@ -58,7 +70,7 @@ function planFromAgent(root, state, agent) {
   } catch (error) {
     throw refuse(`the last YAML block in ${agent}'s transcript does not parse: ${error.message.split('\n')[0]}`);
   }
-  return { doc, text, source: { agent, transcript: found[0].file, agentType: found[0].agentType, model: lastModel(entries) } };
+  return { doc, text, source: { agent, transcript: found[0].file, agentType: found[0].agentType, model: lastModel(entries), provenance: check.status } };
 }
 
 const plannerLanes = (cfg) => cfg.roles?.planner?.lanes ?? ['standard'];
@@ -129,15 +141,13 @@ export function freezeCriteria(root, options) {
   if (state.handoffs.some((h) => h.role === 'implementer')) throw refuse('implementation already started; criteria must be frozen before implementation');
   let source = null;
   if (fromAgent) {
-    const dest = path.join(attemptDir(root, state.id), 'plan', `from-agent-${fromAgent.source.agent.replace(/[^\w.-]/g, '_')}.yaml`);
-    fs.mkdirSync(path.dirname(dest), { recursive: true });
-    fs.writeFileSync(dest, `${fromAgent.text}\n`);
-    source = { ...fromAgent.source, file: dest, sha256: hashFile(dest) };
+    source = { ...fromAgent.source, ...keepRaw(root, state.id, 'plans/plan-1.raw.yaml', fromAgent.text) };
   } else {
     // Where available, the model the planner ran on: an agent whose class pins no model inherits the session's.
     const planner = state.handoffs.filter((h) => h.role === 'planner').at(-1);
     const model = planner && planner.runtime === 'claude' ? subagentModel(home(), planner.agent, planner.agentType, planner.at) : null;
-    source = { file: path.resolve(String(options.file)), sha256: hashFile(path.resolve(String(options.file))), agent: planner?.agent ?? null, model };
+    const from = path.resolve(String(options.file));
+    source = { ...keepRaw(root, state.id, `plans/plan-1.raw.${extOf(from)}`, fs.readFileSync(from, 'utf8')), from, agent: planner?.agent ?? null, model };
   }
   append(root, state.id, 'criteria.frozen', { criteria: doc.criteria, plan, source, ...(work ? { work } : {}) }, actor(options));
   return loadState(root, state.id);
@@ -181,7 +191,9 @@ export function amendCriteria(root, options) {
   const { criteria, changes } = mergeAmendment(state.criteria, doc.criteria);
   // Work items survive an amendment unless the file replaces them; either way they must name criteria that still exist.
   const work = validateWork(loadConfig(root), doc.work ?? state.work, criteria);
-  append(root, state.id, 'criteria.amended', { criteria, changes, reason: String(options.reason), previous: state.criteria, ...(doc.work ? { work } : {}) }, actor(options));
+  const from = path.resolve(String(options.file));
+  const raw = keepRaw(root, state.id, `plans/amend-${state.criteriaAmendments.length + 1}.raw.${extOf(from)}`, fs.readFileSync(from, 'utf8'));
+  append(root, state.id, 'criteria.amended', { criteria, changes, reason: String(options.reason), previous: state.criteria, raw, ...(doc.work ? { work } : {}) }, actor(options));
   return { state: loadState(root, state.id), changes };
 }
 
@@ -286,12 +298,18 @@ export function handoff(root, role, options) {
         ? { passedOnThisTree: true, runId: state.lastGate.runId, evidence: state.lastGate.evidence, screenshots: screenshots(state), logs: state.lastGate.steps.filter((s) => s.log).map((s) => ({ step: s.id, log: s.log, status: s.status })) }
         : { passedOnThisTree: false, reason: gateNow.reason, screenshots: [], logs: [] }
       : null,
+    // Changed files no plan anchor or test path names. Informational: the reviewer may give a verdict per file.
+    outsidePlan: state.criteria ? outsidePlan(state.plan, changed) : null,
+    // The implementer's definition of done: these light steps pass for its repos (`wf check`). Never counts as a gate.
+    check: role === 'implementer' ? { command: `wf check --attempt ${state.id}${work?.repos?.length === 1 ? ` --repo ${work.repos[0]}` : ''}`, steps: trusted.gate.steps.filter((s) => (s.tier ?? 'light') === 'light' && state.repos[s.repo] && (!work?.repos?.length || work.repos.includes(s.repo))).map((s) => ({ id: s.id, repo: s.repo, run: s.run ?? `plugin ${s.plugin}` })) } : undefined,
+    // Steps that failed and then passed with the same inputs and runner.
+    flaky: role === 'reviewer' ? state.flaky : undefined,
     // Outside .wf-evidence/: the reviewer writes it, `wf review` copies it into the evidence.
     reviewClosureFile: role === 'reviewer' ? path.join(root, '.wf-worktrees', state.id, '_review', `closure-${n}.json`) : null,
     instructions: {
       planner: 'Read the issue and the code. Do not change any file. Return your plan as one ```yaml fenced block, last in your reply: { plan: { summary, contract, anchors, tests: { changed, run }, doNotRun, externalServices, agentSplit }, criteria: [{ id: C1, text, uat }], work: [{ id: W1, criteria: [C1], repos, class, why }] } (work is optional; classes: see your role file). The owner freezes it from your transcript unchanged. Leave no background command, monitor or sleep loop running when you report.',
-      implementer: "Implement against the frozen criteria and the plan in the worktrees above: follow `plan.contract`, start from `plan.anchors`, while iterating run only `plan.tests.run` and the specs you changed, never what `plan.doNotRun` lists, and keep to `plan.externalServices` and `plan.agentSplit`. Write tests only for real behaviour. Before finishing run the repo's lint and full unit suite once, in the foreground. Commit at stage boundaries and everything when done. If `work` is set, do that work item only; if it turns out to touch something a stronger class covers, stop and tell the owner. Before you report, stop every background command, monitor or sleep loop you started: a waiter left running keeps notifying the owner after you are done.",
-      reviewer: 'Review the whole change against the frozen criteria, and the gate evidence when `gate.passedOnThisTree` is true (then open every listed screenshot and record its sha256). When it is false, no gate has passed on this tree yet: judge the diff and list no screenshots. You did not write this change. Everything you need is in this bundle; judge the whole change yourself. Write the closure file: { reviewer, findings: [{ id, severity, summary, status: open|fixed|verified-nonissue, evidence, work }], criteria: [{ id, evidence: { kind: test|screenshot|output|not-applicable|dropped-with-reason, ref, reason } }], screenshotsInspected: [sha256] }. Then run `wf review --closure <file>`.',
+      implementer: "Done means `check.command` passes for your repos (it runs the light steps listed under `check`; it never counts as the gate). Implement against the frozen criteria and the plan in the worktrees above: follow `plan.contract`, start from `plan.anchors`, while iterating run only `plan.tests.run` and the specs you changed, never what `plan.doNotRun` lists, and keep to `plan.externalServices` and `plan.agentSplit`. Write tests only for real behaviour. Before finishing run the repo's lint and full unit suite once, in the foreground. Commit at stage boundaries and everything when done. If `work` is set, do that work item only; if it turns out to touch something a stronger class covers, stop and tell the owner. Before you report, stop every background command, monitor or sleep loop you started: a waiter left running keeps notifying the owner after you are done.",
+      reviewer: 'Review the whole change against the frozen criteria, and the gate evidence when `gate.passedOnThisTree` is true (then open every listed screenshot and record its sha256). When it is false, no gate has passed on this tree yet: judge the diff and list no screenshots. You did not write this change. Everything you need is in this bundle; judge the whole change yourself. Write the closure file: { reviewer, findings: [{ id, severity, summary, status: open|fixed|verified-nonissue, evidence, work }], criteria: [{ id, evidence: { kind: test|screenshot|output|not-applicable|dropped-with-reason, ref, reason } }], screenshotsInspected: [sha256], outsidePlan: [{ file, verdict }] }. Then run `wf review --closure <file>`. Only after your closure is recorded, `wf review` may list findings from earlier rounds for you to verify against the code: then add `priorFindings: [{ round, id, status: fixed|verified-nonissue|open, evidence }]` to the same file, change nothing else, and run `wf review --closure <file>` again.',
       tester: 'Write requirement expectations from the issue before reading the implementation, then map each to gate tests.',
     }[role],
   };
@@ -305,11 +323,38 @@ export function handoff(root, role, options) {
       sessionModelNow = sessionModel(home(), owning.session);
     } catch {}
   }
-  append(root, state.id, 'handoff', { role, agent, runtime, session: options.session ?? null, agentType, class: cls, effort, model, sessionModel: sessionModelNow, work: work?.id ?? null, bundle: file, tree: treeHashes(state), patch: patchIds(state), ...(role === 'reviewer' ? { gate: gateNow.ok ? state.lastGate.runId : null } : {}) }, actor(options));
+  append(root, state.id, 'handoff', { role, agent, runtime, session: options.session ?? null, agentType, class: cls, effort, model, sessionModel: sessionModelNow, startPrompt: startPromptFor(file), work: work?.id ?? null, bundle: file, tree: treeHashes(state), patch: patchIds(state), ...(role === 'reviewer' ? { gate: gateNow.ok ? state.lastGate.runId : null } : {}) }, actor(options));
   // Once per attempt: with parallel work items every implementer handoff queued another identical tracker read.
   const firstImplementer = role === 'implementer' && !state.handoffs.some((h) => h.role === 'implementer');
   if (firstImplementer && state.lane !== 'quick' && state.intent === 'implementation') emitTrackerEvent(root, cfg, state.id, 'implementing');
-  return { bundle: file, agentType, class: cls, effort, model, work: work?.id ?? null, state: loadState(root, state.id) };
+  return { bundle: file, startPrompt: startPromptFor(file), agentType, class: cls, effort, model, work: work?.id ?? null, state: loadState(root, state.id) };
+}
+
+const settled = (status) => ['fixed', 'verified-nonissue'].includes(status);
+const roundKey = (r) => r.handoff ?? `reviewer:${r.reviewer}`;
+
+// Findings earlier review rounds left open and no later round has verified, oldest first. A round's own findings are
+// recorded blind; only after that does it see these, and acceptance needs each verified (fixed or verified-nonissue,
+// with evidence) by a round after the one that found it.
+export function earlierOpenFindings(state, currentHandoff) {
+  const last = new Map();
+  for (const r of state.reviews ?? []) last.set(roundKey(r), r);
+  const open = new Map();
+  for (const [key, r] of last) {
+    if (key === currentHandoff) continue;
+    for (const p of r.closure.priorFindings ?? []) if (settled(p.status) && p.evidence) open.delete(`${p.round}:${p.id}`);
+    for (const f of r.closure.findings ?? []) if (!settled(f.status)) open.set(`${r.reviewer}:${f.id}`, { round: r.reviewer, id: f.id, severity: f.severity ?? null, summary: f.summary ?? '', evidence: f.evidence ?? null, work: f.work ?? null });
+  }
+  return [...open.values()];
+}
+
+function unverifiedPrior(state, review) {
+  const required = earlierOpenFindings(state, roundKey(review));
+  const verified = new Map((review.closure.priorFindings ?? []).map((p) => [`${p.round}:${p.id}`, p]));
+  return required.filter((f) => {
+    const v = verified.get(`${f.round}:${f.id}`);
+    return !v || !settled(v.status) || !v.evidence;
+  });
 }
 
 export function recordReview(root, options) {
@@ -320,14 +365,35 @@ export function recordReview(root, options) {
   if (!reviewerHandoff) throw refuse('no reviewer handoff: run `wf handoff reviewer --agent <id>`');
   if (closure.reviewer !== reviewerHandoff.agent) throw refuse(`closure reviewer \`${closure.reviewer}\` is not the reviewer handed this attempt (\`${reviewerHandoff.agent}\`)`);
   if (!Array.isArray(closure.findings) || !Array.isArray(closure.criteria)) throw new WfError('closure needs `findings` and `criteria` lists');
+  // Provenance: where transcripts exist, the closure must come from the agent handed this round, started with exactly
+  // the printed line after its handoff. A steered reviewer, or a round run outside the engine, is refused.
+  const provenance = verifyAgent(reviewerHandoff);
+  if (provenance.status === 'mismatch') throw refuse(`review provenance: ${provenance.reason}`, 'start a fresh reviewer: `wf handoff reviewer --agent <new id>` and give it only the printed line');
+  // Commit, then reveal: the first closure of a round is blind. Earlier rounds' findings are shown only after it is
+  // recorded, and a later closure of the same round may only add their verification.
+  const round = reviewerHandoff.bundle;
+  const revealed = (state.reviews ?? []).find((r) => r.handoff === round && r.revealed);
+  if (!revealed && closure.priorFindings?.length) throw refuse('`priorFindings` are listed only after your own blind closure is recorded; record the closure without them first');
+  if (revealed && canonical(revealed.closure.findings) !== canonical(closure.findings)) throw refuse('your own findings were recorded blind and cannot change after earlier rounds were revealed; only add `priorFindings`');
+  const revealNow = !revealed && earlierOpenFindings(state, round).length > 0;
+  const n = state.reviews.filter((r) => r.handoff === round).length + 1;
+  const tag = `${String(state.handoffs.indexOf(reviewerHandoff) + 1).padStart(2, '0')}-${n}`;
+  const raw = keepRaw(root, state.id, `review/closure-${tag}.raw.json`, fs.readFileSync(path.resolve(String(options.closure)), 'utf8'));
   const dest = path.join(attemptDir(root, state.id), 'review', `closure-recorded-${state.handoffs.length}.json`);
   writeJson(dest, closure);
   // The closure is for the tree the reviewer was handed. It inspected gate evidence only if a passing gate on that tree
   // was in its bundle (0.1.5 and earlier handed a reviewer only after such a gate, so their handoffs carry no field).
   const gateEvidenceInspected = 'gate' in reviewerHandoff ? Boolean(reviewerHandoff.gate) : true;
   const reviewerModel = reviewerHandoff.runtime === 'claude' ? subagentModel(home(), reviewerHandoff.agent, reviewerHandoff.agentType, reviewerHandoff.at) : null;
-  append(root, state.id, 'review.recorded', { closure, file: dest, tree: reviewerHandoff.tree, gateRun: reviewerHandoff.gate ?? null, gateEvidenceInspected, handoffTree: reviewerHandoff.tree, handoffPatch: reviewerHandoff.patch, reviewerModel }, closure.reviewer);
-  return loadState(root, state.id);
+  append(root, state.id, 'review.recorded', { closure, file: dest, raw, handoff: round, revealed: Boolean(revealed) || revealNow, provenance: provenance.status, provenanceReason: provenance.reason ?? null, transcript: provenance.transcript ?? null, tree: reviewerHandoff.tree, gateRun: reviewerHandoff.gate ?? null, gateEvidenceInspected, handoffTree: reviewerHandoff.tree, handoffPatch: reviewerHandoff.patch, reviewerModel }, closure.reviewer);
+  const after = loadState(root, state.id);
+  const toVerify = unverifiedPrior(after, after.review);
+  let reveal = null;
+  if (toVerify.length) {
+    reveal = path.join(root, '.wf-worktrees', state.id, '_review', `prior-findings-${tag}.json`);
+    writeJson(reveal, { note: 'Findings earlier review rounds left open. Check each against the current code; add priorFindings to your closure.', findings: toVerify });
+  }
+  return { state: after, reveal, toVerify };
 }
 
 // 0.1.5 and earlier recorded no flag: their reviewers were handed the attempt only after a passing gate on that tree.
@@ -362,6 +428,8 @@ export function acceptReview(root, options) {
   const inspected = new Set(r.closure.screenshotsInspected ?? []);
   const unseen = shots.filter((h) => !inspected.has(h));
   if (unseen.length) problems.push(`${unseen.length} gate screenshot(s) not inspected by the reviewer`);
+  const pending = unverifiedPrior(state, r);
+  if (pending.length) problems.push(`earlier-round finding(s) not verified: ${pending.map((f) => `${f.round}:${f.id}`).join(', ')}; the reviewer of this round adds \`priorFindings\` (fixed or verified-nonissue, with evidence) after its blind closure and records it again`);
   // Acceptance needs three things on the current tree: a passing full gate, a clean closure written for this tree, and
   // that closure written after the gate passed on it, so the reviewer inspected the gate evidence.
   const g = gatePassedForCurrentTree(state);
@@ -674,6 +742,8 @@ function phaseAction(cfg, state) {
   if (!r || !onTree(r.tree ?? r.handoffTree)) return `hand to ${fresh}${gateHint}`;
   const open = openFindings(r);
   if (open.length) return `fix the open findings (${open.map((f) => (f.work ? `${f.id} in ${f.work}` : f.id)).join(', ')}) through the implementer that did that work (continue it; do not start a new one), commit, then hand to ${fresh}; \`wf gate\` on the fixed tree`;
+  const toVerify = unverifiedPrior(state, r);
+  if (toVerify.length) return `reviewer ${r.closure.reviewer} must verify ${toVerify.length} earlier-round finding(s) (${toVerify.map((f) => `${f.round}:${f.id}`).join(', ')}): it adds \`priorFindings\` to its closure and runs \`wf review --closure <its file>\` again; if it is gone, hand to ${fresh}`;
   if (!pass.ok) return `clean review on this tree: ${gateRun}`;
   if (!reviewedAfterGate(r)) return `evidence pass: the gate passed after the review, so hand to ${fresh} to inspect the gate evidence and screenshots`;
   return 'accept the review: `wf accept`';

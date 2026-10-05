@@ -2,7 +2,7 @@
 
 A delivery workflow for AI coding agents, packaged as one plugin for Claude Code and Codex.
 
-> **Status: v0.1, early.** The engine, CLI, onboarding and all three lanes work and are covered by 86 scenario tests on real git repositories, and reviewed by independent agents. It has not yet been used on a production project; expect rough edges. Design: [docs/DESIGN.md](docs/DESIGN.md). Feedback through issues is welcome.
+> **Status: v0.1, early.** The engine, CLI, onboarding and all three lanes work and are covered by 97 scenario tests (including a game day that runs one ticket through every fault seen on real tickets) on real git repositories, and reviewed by independent agents. It has not yet been used on a production project; expect rough edges. Design: [docs/DESIGN.md](docs/DESIGN.md). Feedback through issues is welcome.
 
 Every change runs through the same lifecycle: a ticket is admitted, worked on in isolated worktrees, planned, implemented, proven by a gate, reviewed by an agent that did not write it, delivered, and handed back to the tracker with a readback. Each step checks evidence the engine wrote, never what an agent says it did.
 
@@ -134,7 +134,7 @@ flowchart TD
 | Criteria | `wf plan --from-agent <planner id>` | Criteria and every plan section are frozen before implementation, taken from the planner's transcript unchanged; unknown top-level keys are refused. Later changes go through `wf criteria amend --reason`. |
 | Plan | `wf handoff planner` | The planner leaves the tree unchanged. |
 | Implement | `wf handoff implementer` | Changes are committed before review and the gate. |
-| Review | `wf handoff reviewer`, `wf review` | Allowed once the work is committed, before or during the gate. The reviewer isn't the owner, planner, an implementer or a reviewer of an earlier round. The closure is bound to the tree it was handed. |
+| Review | `wf handoff reviewer`, `wf review` | Allowed once the work is committed, before or during the gate. The reviewer isn't the owner, planner, an implementer or a reviewer of an earlier round. Where transcripts exist, its transcript must show the agent type handed and exactly the printed start line. The closure is bound to the tree it was handed; earlier rounds' open findings are revealed only after it, for verification. |
 | Gate | `wf gate` | Each step's evidence is hashed. A newer failure beats an older pass. |
 | Accept | `wf accept` | On the current tree: a passing full gate, a closure with every finding fixed or shown to be a non-issue, written after that gate passed (an evidence pass when the review came first). Every criterion maps to evidence or a justified n/a. |
 | Deliver | `wf deliver` | Implementation intent, no hold, review accepted. |
@@ -145,6 +145,12 @@ A stopped or interrupted attempt resumes with `wf resume`, which says exactly wh
 ### The plan file
 
 `wf plan --from-agent <planner id>` reads the planner's last ```` ```yaml ```` block from its Claude Code subagent transcript (found by the name it was started with), so the owner never retypes it. `wf plan --file <file>` takes the same YAML from a file. The plan sections (`summary`, `contract`, `anchors`, `tests`, `doNotRun`, `externalServices`, `agentSplit`) may sit under `plan:` or at the top level beside `criteria` and `work`; `plan:` may also be plain text (the summary). Any other top-level key is refused with the list of known ones, because a section the engine does not read never reaches the implementers. Every section is stored in the frozen plan and handed to the implementers and reviewers in their bundles.
+
+### Durable artifacts and the attempt page
+
+Everything an agent or the owner produced is kept verbatim, write-once and hash-bound in `.wf-evidence/attempts/<id>/` at the moment the engine consumes it: the raw plan (`plans/plan-1.raw.yaml`, or `.json`), every amendment file (`plans/amend-<n>.raw.*`), every closure as written (`review/closure-<round>.raw.json`), the handoff bundles, gate results and tracker captures. Nothing exists only in chat.
+
+`wf export [--attempt id] [--out file]` writes one self-contained HTML page (no external requests, light and dark, phone width) for the attempt at any phase: item and phase, every plan section, work items with class and agents, criteria with each amendment and its reason, handoffs, review rounds with findings, gate and check runs per step, flakes, tracker events and delivery. `--json` prints the same data. Catalogued secrets are masked. The page is a view; the ledger and evidence are the source of truth. `wf resume` prints the path of the latest export and warns when the frozen plan has no `contract` or `anchors`.
 
 ### Base movement
 
@@ -295,6 +301,22 @@ Each entry under `gate.steps` in `.workflow/project.yaml` (full example in [docs
 
 `sharedInfra` (per package) lists files whose change reruns every step of the package. Keep it to real infrastructure (lockfiles, root build config): a broad glob such as `scripts/**` makes every edit to a data file under it rerun everything.
 
+### Light checks, flakes and repair reruns
+
+- **`wf check [--repo r]`** runs the adapter's light steps for the attempt's repos (only the named repos need to be committed). It is the implementer's definition of done: the bundle lists the exact steps and the command. Its results use the gate's keys, so the full gate reuses them, but a check never counts as a gate for acceptance or delivery.
+- **Scheduling:** the gate starts light steps first, then heavy steps longest first (by their last recorded duration), so wall time is not the heavy steps run in adapter order and light failures show early.
+- **Flakes:** a step that failed and then passed with the same key (same inputs and runner) is recorded as `gate.flaky`, with the suites that flipped; `wf status` and the reviewer bundle show it.
+- **Suite-level reruns:** declare `report: { junit: <path> }` and `select: "<how the runner takes files>"` (for example `select: "--runTestsByPath {suites}"` for Jest, `select: "{suites}"` for a runner that takes paths) and put `{select}` in `run`. A failing step then reruns only its failed or changed suites; passing suites are carried.
+- **`wf gate --rerun-failed`** runs only the steps that failed last time (reusing what still passes). Like `--focused`, it is proof while repairing and never counts.
+
+### Scope
+
+Bundles list `outsidePlan`: changed files that no plan anchor or test path names (an implementer once changed audit-read code outside the plan). The reviewer may add a verdict per file; `wf status` shows the count. It never blocks.
+
+### Leases for agents' own stacks
+
+`wf run --lease docker -- docker compose up --wait` runs a command holding the same machine-wide slot a gate step with `lease: docker` takes, waiting while every slot is held, and frees it when the command exits. Implementers start docker stacks and browsers this way so concurrent attempts never exceed `gate.leases`.
+
 ### Step environment
 
 Steps, provisioning (`install`, `onWorktreeCreate`), `wf doctor` checks and secret `verify` commands get an allowlisted environment, not the owner's whole one: the toolchain variables in `engine/env.mjs` (`PATH`, `HOME`, `USER`, `SHELL`, `LANG`/`LC_*`, `TERM`, `TMPDIR`, `TZ`, `CI`, `NODE_OPTIONS`, `XDG_*`, `SSH_AUTH_SOCK`, `DOCKER_*`, `COMPOSE_*`, `npm_config_*`, `NVM_*`, `JAVA_HOME`, `VIRTUAL_ENV`, `PYENV_*`, `GOPATH`, `CARGO_HOME`, `RUSTUP_HOME`, proxies and CA bundles, and more), every `WF_*` variable, and the catalogued secrets a step lists in `usedBy`. Add project variables with names or `*` prefixes:
@@ -328,6 +350,16 @@ stateDiagram-v2
 
   `push-main` is built in; anything else is one file in your project.
 - **Tracker adapters** map lifecycle events to status changes, comments and attachments. Linear is built in. Any other tracker, including your own product's API, is one adapter file.
+- **Engine-side Linear (`tracker.via: api`):** the engine performs the pending actions itself (read, status, comment, screenshot upload) with a personal API key and stores its own readback as the capture, through the same checks. Catalogue the key once and enter it in your terminal:
+
+  ```yaml
+  # .workflow/project.yaml
+  tracker: { kind: linear, via: api, apiKey: LINEAR_API_KEY, statuses: { started: In Progress, delivered: Ready for UAT, done: Done } }
+  # .workflow/secrets.yaml
+  keys: [{ key: LINEAR_API_KEY, kind: provided, required: true, purpose: Linear personal API key }]
+  ```
+
+  Without the key, the actions stay pending for the agent flow below; `wf tracker sync` performs them once it is set.
 - **Captures are raw tracker responses.** Save the whole `get_issue` JSON unchanged and pass it to `wf tracker record --event <e> --capture <file>`. The `admitted` capture must carry the issue description (a title-only issue: add `"descriptionEmpty": true`), and a capture byte-identical to one recorded for another attempt, or for another event of the same attempt, is refused as recycled (an `implementing` re-read of an unchanged issue is the exception). The `implementing` read is queued once per attempt, not once per implementer.
 - **The handoff comment** comes from your template. It describes the UAT scope in product language and never includes file paths, commits or hashes.
 - **Screenshots** come only from the gate's recorded captures. They're attached to the ticket and shown in your session.
@@ -406,6 +438,7 @@ sequenceDiagram
 ```
 
 - **Agents never see a secret value.** They see key names only.
+- **Only needed keys are asked for.** A key is needed when a gate step lists it in `usedBy` or the catalog marks it `required: true`; `wf secrets status` and `wf secrets guide` list every other missing key once as "not needed by any step" and print `nothing to enter` when nothing is needed. `wf init` catalogues only keys a detected step's command names and lists the rest in a comment.
 - **Generated keys** (signing secrets, local database passwords) are created for you.
 - **Test values** come from the project's example files.
 - **Masking:** every catalogued value is masked in logs, evidence and telemetry.
@@ -421,6 +454,9 @@ sequenceDiagram
 
 - **What the engine enforces:** a hash-chained ledger; gate results bound to the exact tree and to the adapter committed at base; only a gate that ran every step the tree needs (never a `--focused` one) opens acceptance and delivery; acceptance needs a clean closure written for the current tree after a passing gate on it; a step that reads another repo (`alsoInputs`) is reused only while that repo is unchanged; the reviewer is never the owner, planner, an implementer or a reviewer of an earlier round; criteria are frozen before code.
 - **What classes change:** only how hard each agent thinks. Every guarantee above holds the same at every class.
+- **Review provenance:** where Claude Code transcripts exist, `wf review` and `wf plan --from-agent` refuse a round whose transcript is missing, ran as another agent type, started before its handoff, or was started with anything but the printed line. Elsewhere the round is recorded `unverified`.
+- **Commit, then reveal:** a round's own findings are recorded blind; only then does it see earlier rounds' open findings, and acceptance needs each verified by a later round. Its own findings cannot change after the reveal.
+- **The attempt page is a view:** `wf export` renders the ledger and evidence; it is never read back.
 - **What a step sees:** an allowlisted environment, never agent session tokens unless the adapter passes them (see [Step environment](#step-environment)).
 - **What it relies on you for:** agent identities are names the owner supplies, and the reviewer must be a newly started agent (not an old one under a new id), started blind with only the one line `wf handoff reviewer` prints. The engine cannot see the prompt a runtime gives an agent, so it does not check it; steering the reviewer weakens the review silently.
 - **What it does not stop:** a determined forger with shell access on the same machine. It catches mistakes, not attacks. Details: [docs/DESIGN.md](docs/DESIGN.md#trust-model).
@@ -437,6 +473,10 @@ sequenceDiagram
 8. Every refusal, limit or check names the failure it catches.
 9. Agents never handle secrets.
 10. The engine stays framework- and tracker-agnostic. Specifics live in adapters.
+
+## Game day
+
+`node --test scenarios/gameday.test.mjs` runs one ticket through a backend/frontend pair with every fault seen on real tickets: a hand-written and a recycled capture, a misspelt plan section, parallel work items, an amendment, a superseded handoff, a steered reviewer and a reused reviewer id, someone else's push with and without overlap, a flaky suite, a cache directory, a canary environment variable, three attempts at once, an export at every phase, and delivery with the tracker readback. The file's header says how to add a fault.
 
 ## Contributing
 

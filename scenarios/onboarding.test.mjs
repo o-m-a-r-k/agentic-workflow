@@ -121,7 +121,7 @@ function toAcceptedUntilGate(root, base) {
 }
 
 test('secrets init generates what can be generated; status never prints values', () => {
-  const { root } = singleRepoProject('gen', { gate: { steps: [] } }, { '.workflow/secrets.yaml': YAML.stringify({ keys: [{ key: 'JWT_SECRET', kind: 'generated' }, { key: 'TEST_KEY', kind: 'test', from: '.env.example' }, { key: 'VENDOR_TOKEN', kind: 'provided' }] }), '.env.example': 'TEST_KEY=sandbox_abc123\n' });
+  const { root } = singleRepoProject('gen', { gate: { steps: [] } }, { '.workflow/secrets.yaml': YAML.stringify({ keys: [{ key: 'JWT_SECRET', kind: 'generated' }, { key: 'TEST_KEY', kind: 'test', from: '.env.example' }, { key: 'VENDOR_TOKEN', kind: 'provided', required: true }] }), '.env.example': 'TEST_KEY=sandbox_abc123\n' });
   const r = ok(wf(root, ['secrets', 'init', '--json'])).json();
   assert.deepEqual(r.map((x) => x.key).sort(), ['JWT_SECRET', 'TEST_KEY']);
   const env = fs.readFileSync(path.join(root, '.env.local'), 'utf8');

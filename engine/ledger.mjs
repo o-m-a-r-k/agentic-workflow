@@ -94,6 +94,9 @@ export function reduce(entries) {
     roles: { planner: [], implementer: [], reviewer: [], tester: [] },
     handoffs: [],
     gates: [],
+    checks: [],
+    flaky: [],
+    exports: [],
     review: null,
     reviews: [],
     baseMerges: [],
@@ -157,12 +160,22 @@ export function reduce(entries) {
         s.gates.push({ ...d, at: e.at });
         s.phase = d.status === 'passed' ? 'gated' : 'implementing';
         break;
+      // `wf check`: light steps only, recorded for reuse, never a gate (acceptance and delivery read `gates` only).
+      case 'check.finished':
+        s.checks.push({ ...d, at: e.at });
+        break;
+      case 'gate.flaky':
+        s.flaky.push(...d.flaky.map((f) => ({ ...f, at: e.at })));
+        break;
+      case 'exported':
+        s.exports.push({ ...d, at: e.at });
+        break;
       case 'gate.stopped':
         s.stops.push({ at: e.at, reason: d.reason });
         break;
       case 'review.recorded':
         s.review = { ...d, at: e.at };
-        s.reviews.push({ reviewer: d.closure?.reviewer ?? null, at: e.at, reviewerModel: d.reviewerModel ?? null });
+        s.reviews.push({ reviewer: d.closure?.reviewer ?? null, at: e.at, reviewerModel: d.reviewerModel ?? null, handoff: d.handoff ?? null, revealed: d.revealed ?? false, closure: d.closure, provenance: d.provenance ?? null, raw: d.raw ?? null, tree: d.tree });
         break;
       case 'base.merged':
         s.baseMerges.push({ ...d, at: e.at });
