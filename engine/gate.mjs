@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
-import { adapterFileAtCommit, adapterLocation, loadConfig, loadConfigAtCommit, repoDir } from './config.mjs';
+import { adapterFileAtCommit, adapterLocation, expandArtifactGlob, loadConfig, loadConfigAtCommit, repoDir } from './config.mjs';
 import { changedFiles, treeHash, treeHashes, uncommitted, untrackedSnapshot } from './attempt.mjs';
 import { chooseShards, chooseWorkers } from './host.mjs';
 import { readJUnitFiles } from './junit.mjs';
@@ -284,19 +284,35 @@ export function globFiles(baseDir, pattern) {
   return walkFiles(start).filter((f) => re.test(f));
 }
 
-function collectArtifacts(step, dir, destDir, since) {
+// Whose evidence a gate collects: the attempt itself, and for a batch every member (their heavy steps run here).
+export function artifactUnits(root, state) {
+  const units = [{ item: state.item ?? state.id, attempt: state.id }];
+  for (const m of state.batch?.members ?? []) {
+    const ms = loadState(root, m);
+    units.push({ item: ms.item ?? ms.id, attempt: ms.id });
+  }
+  return units;
+}
+
+// Files this run produced under the step's `artifacts` globs, placeholders expanded for this attempt. Each glob records
+// what it matched, so the reviewer is told exactly what to inspect; a file outside every expanded glob is not collected.
+function collectArtifacts(step, dir, destDir, since, units) {
   const out = [];
-  if (!step.artifacts?.length) return out;
+  if (!step.artifacts?.length) return { artifacts: out, artifactGlobs: undefined };
+  const globs = step.artifacts.map((glob) => ({ glob, expanded: expandArtifactGlob(glob, units), files: [] }));
   for (const file of walkFiles(dir)) {
     const r = path.relative(dir, file).split(path.sep).join('/');
-    if (!matchesAny(r, step.artifacts)) continue;
+    const hit = globs.filter((g) => matchesAny(r, g.expanded));
+    if (!hit.length) continue;
     if (fs.statSync(file).mtimeMs < since - 1000) continue; // only what this run produced
     const dest = path.join(destDir, r);
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     fs.copyFileSync(file, dest);
-    out.push({ path: dest, sha256: hashFile(dest), kind: /\.(png|jpe?g|webp|gif)$/i.test(r) ? 'screenshot' : 'file', source: r });
+    const a = { path: dest, sha256: hashFile(dest), kind: /\.(png|jpe?g|webp|gif)$/i.test(r) ? 'screenshot' : 'file', source: r };
+    out.push(a);
+    for (const g of hit) g.files.push(a);
   }
-  return out;
+  return { artifacts: out, artifactGlobs: globs };
 }
 
 // Suite-level reuse is allowed only when nothing but the suite files themselves changed since the prior run.
@@ -376,7 +392,9 @@ async function executeStep(root, cfg, state, planned, ctx) {
     const failed = codes.some((c) => c.code !== 0) || suites.some((s) => s.status === 'failed');
     result = { status: interrupted ? 'interrupted' : failed ? 'failed' : 'passed', suites, exitCodes: codes.map((c) => c.code), artifacts: [] };
   }
-  result.artifacts.push(...collectArtifacts(step, planned.dir, path.join(evidenceDir, 'artifacts'), started));
+  const collected = collectArtifacts(step, planned.dir, path.join(evidenceDir, 'artifacts'), started, artifactUnits(root, state));
+  result.artifacts.push(...collected.artifacts);
+  result.artifactGlobs = collected.artifactGlobs;
   let fileHashesRef = null;
   if (planned.fileHashes) {
     const f = path.join(evidenceDir, 'inputs.json');
@@ -681,7 +699,7 @@ async function execute(root, state, plan, live = null) {
   const producedUntracked = {};
   for (const [name, r] of Object.entries(state.repos)) producedUntracked[name] = untrackedSnapshot(r.worktree);
   say(`${status} (${runId})`);
-  const record = { runId, status, producedUntracked, full: plan.full, focused: plan.focused, check: plan.check || undefined, rerunFailed: plan.rerunFailed ?? undefined, adapterBase: state.adapterBase, tree: plan.tree, impact: plan.impact, unchecked: plan.unchecked, steps: results, finishedAt: now() };
+  const record = { runId, status, producedUntracked, changed: plan.changed, full: plan.full, focused: plan.focused, check: plan.check || undefined, rerunFailed: plan.rerunFailed ?? undefined, adapterBase: state.adapterBase, tree: plan.tree, impact: plan.impact, unchecked: plan.unchecked, steps: results, finishedAt: now() };
   writeImmutable(path.join(runDir, 'result.json'), `${JSON.stringify(record, null, 2)}\n`);
   append(root, state.id, plan.check ? 'check.finished' : 'gate.finished', { ...record, evidence: path.join(runDir, 'result.json') }, null);
   const flaky = flakesIn(state, results);

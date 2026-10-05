@@ -150,7 +150,7 @@ A stopped or interrupted attempt resumes with `wf resume`, which says exactly wh
 
 Everything an agent or the owner produced is kept verbatim, write-once and hash-bound in `.wf-evidence/attempts/<id>/` at the moment the engine consumes it: the raw plan (`plans/plan-1.raw.yaml`, or `.json`), every amendment file (`plans/amend-<n>.raw.*`), every closure as written (`review/closure-<round>.raw.json`), the handoff bundles, gate results and tracker captures. Nothing exists only in chat.
 
-`wf export [--attempt id] [--out file]` writes one self-contained HTML page (no external requests, light and dark, phone width) for the attempt at any phase: item and phase, every plan section, work items with class and agents, criteria with each amendment and its reason, handoffs, review rounds with findings, gate and check runs per step, flakes, tracker events and delivery. `--json` prints the same data. Catalogued secrets are masked. The page is a view; the ledger and evidence are the source of truth. `wf resume` prints the path of the latest export and warns when the frozen plan has no `contract` or `anchors`.
+`wf export [--attempt id] [--out file]` writes one self-contained HTML page (no external requests, light and dark, phone width) for the attempt at any phase: item and phase, every plan section, work items with class and agents, criteria with each amendment and its reason, handoffs, review rounds with findings, gate and check runs per step, the last gate's evidence per artifacts glob (expanded, with matched files, or none for this ticket), flakes, tracker events and delivery. `--json` prints the same data. Catalogued secrets are masked. The page is a view; the ledger and evidence are the source of truth. `wf resume` prints the path of the latest export and warns when the frozen plan has no `contract` or `anchors`.
 
 ### Base movement
 
@@ -297,9 +297,20 @@ Each entry under `gate.steps` in `.workflow/project.yaml` (full example in [docs
 | `tier` | `light` or `heavy`. `--focused` runs light steps only. |
 | `when.paths` | Run only when a changed file matches. |
 | `report.junit`, `select` | Per-suite results and suite-level reruns. |
-| `workers`, `shards`, `lease`, `deferrable`, `artifacts` | Sizing, resource leases, batch deferral, captured screenshots and files. |
+| `workers`, `shards`, `lease`, `deferrable` | Sizing, resource leases, batch deferral. |
+| `artifacts` | Globs of screenshots and files the step writes that count as this ticket's evidence. Placeholders `{item}` (the tracker id as given, `ENG-12`), `{itemLower}` (`eng-12`) and `{attempt}` (`ENG-12.1`) are expanded per attempt (for a batch, once per member too); any other `{name}` is refused. See [Per-ticket evidence](#per-ticket-evidence). |
 
 `sharedInfra` (per package) lists files whose change reruns every step of the package. Keep it to real infrastructure (lockfiles, root build config): a broad glob such as `scripts/**` makes every edit to a data file under it rerun everything.
+
+### Per-ticket evidence
+
+Every screenshot a step's `artifacts` globs match on a gate run is evidence the reviewer must inspect (`wf accept` refuses until each sha256 is in `screenshotsInspected`). A glob without a placeholder (`e2e/.results/**/*.png`) matches everything the whole suite wrote: a real ticket was refused with 1,300 screenshots from other tickets' specs, none of them its own. The convention:
+
+- The project's UI tests write a ticket's evidence under a ticket folder (for example `e2e/.evidence/eng-12/…`, from the spec that covers that ticket), and the adapter points `artifacts` there: `e2e/.evidence/{itemLower}/**/*.png`.
+- A ticket with no UI evidence matches nothing. That is fine: the bundle says `no screenshots for this ticket (globs: …)` for the step and acceptance requires nothing from it.
+- Every file that is matched must still be inspected. The reviewer bundle's `gate.artifacts` lists, per step and glob (as declared and as expanded), the matched files with their sha256; nothing outside the expanded globs is ever required.
+- The adapter is read at the attempt's base, so fix the globs on the base branch before the next ticket, not mid-attempt.
+- `wf doctor` prints each glob's matched count from the most recent gate, and warns when a glob has no placeholder, matched files, and that ticket changed nothing under the glob's directory.
 
 ### Light checks, flakes and repair reruns
 

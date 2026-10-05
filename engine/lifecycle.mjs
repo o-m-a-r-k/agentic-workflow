@@ -295,7 +295,7 @@ export function handoff(root, role, options) {
     // needs a later round written after a passing gate on this tree, which inspects the evidence.
     gate: role === 'reviewer'
       ? gateNow.ok
-        ? { passedOnThisTree: true, runId: state.lastGate.runId, evidence: state.lastGate.evidence, screenshots: screenshots(state), logs: state.lastGate.steps.filter((s) => s.log).map((s) => ({ step: s.id, log: s.log, status: s.status })) }
+        ? { passedOnThisTree: true, runId: state.lastGate.runId, evidence: state.lastGate.evidence, screenshots: screenshots(state), artifacts: artifactsByStep(state), logs: state.lastGate.steps.filter((s) => s.log).map((s) => ({ step: s.id, log: s.log, status: s.status })) }
         : { passedOnThisTree: false, reason: gateNow.reason, screenshots: [], logs: [] }
       : null,
     // Changed files no plan anchor or test path names. Informational: the reviewer may give a verdict per file.
@@ -309,7 +309,7 @@ export function handoff(root, role, options) {
     instructions: {
       planner: 'Read the issue and the code. Do not change any file. Return your plan as one ```yaml fenced block, last in your reply: { plan: { summary, contract, anchors, tests: { changed, run }, doNotRun, externalServices, agentSplit }, criteria: [{ id: C1, text, uat }], work: [{ id: W1, criteria: [C1], repos, class, why }] } (work is optional; classes: see your role file). The owner freezes it from your transcript unchanged. Leave no background command, monitor or sleep loop running when you report.',
       implementer: "Done means `check.command` passes for your repos (it runs the light steps listed under `check`; it never counts as the gate). Implement against the frozen criteria and the plan in the worktrees above: follow `plan.contract`, start from `plan.anchors`, while iterating run only `plan.tests.run` and the specs you changed, never what `plan.doNotRun` lists, and keep to `plan.externalServices` and `plan.agentSplit`. Write tests only for real behaviour. Before finishing run the repo's lint and full unit suite once, in the foreground. Commit at stage boundaries and everything when done. If `work` is set, do that work item only; if it turns out to touch something a stronger class covers, stop and tell the owner. Before you report, stop every background command, monitor or sleep loop you started: a waiter left running keeps notifying the owner after you are done.",
-      reviewer: 'Review the whole change against the frozen criteria, and the gate evidence when `gate.passedOnThisTree` is true (then open every listed screenshot and record its sha256). When it is false, no gate has passed on this tree yet: judge the diff and list no screenshots. You did not write this change. Everything you need is in this bundle; judge the whole change yourself. Write the closure file: { reviewer, findings: [{ id, severity, summary, status: open|fixed|verified-nonissue, evidence, work }], criteria: [{ id, evidence: { kind: test|screenshot|output|not-applicable|dropped-with-reason, ref, reason } }], screenshotsInspected: [sha256], outsidePlan: [{ file, verdict }] }. Then run `wf review --closure <file>`. Only after your closure is recorded, `wf review` may list findings from earlier rounds for you to verify against the code: then add `priorFindings: [{ round, id, status: fixed|verified-nonissue|open, evidence }]` to the same file, change nothing else, and run `wf review --closure <file>` again.',
+      reviewer: 'Review the whole change against the frozen criteria, and the gate evidence when `gate.passedOnThisTree` is true (then open every screenshot listed under `gate.screenshots`, which are exactly the files `gate.artifacts` lists per glob, and record the sha256 of each one you viewed; a step marked no screenshots for this ticket needs none, and a file no glob lists is never required). When it is false, no gate has passed on this tree yet: judge the diff and list no screenshots. You did not write this change. Everything you need is in this bundle; judge the whole change yourself. Write the closure file: { reviewer, findings: [{ id, severity, summary, status: open|fixed|verified-nonissue, evidence, work }], criteria: [{ id, evidence: { kind: test|screenshot|output|not-applicable|dropped-with-reason, ref, reason } }], screenshotsInspected: [sha256], outsidePlan: [{ file, verdict }] }. Then run `wf review --closure <file>`. Only after your closure is recorded, `wf review` may list findings from earlier rounds for you to verify against the code: then add `priorFindings: [{ round, id, status: fixed|verified-nonissue|open, evidence }]` to the same file, change nothing else, and run `wf review --closure <file>` again.',
       tester: 'Write requirement expectations from the issue before reading the implementation, then map each to gate tests.',
     }[role],
   };
@@ -328,6 +328,16 @@ export function handoff(root, role, options) {
   const firstImplementer = role === 'implementer' && !state.handoffs.some((h) => h.role === 'implementer');
   if (firstImplementer && state.lane !== 'quick' && state.intent === 'implementation') emitTrackerEvent(root, cfg, state.id, 'implementing');
   return { bundle: file, startPrompt: startPromptFor(file), agentType, class: cls, effort, model, work: work?.id ?? null, state: loadState(root, state.id) };
+}
+
+// Per step with `artifacts`: each glob as declared and as expanded for this attempt, and the files it matched. A step
+// whose globs matched nothing says so; acceptance then requires nothing from it.
+export function artifactsByStep(state) {
+  return (state.lastGate?.steps ?? []).filter((s) => s.artifactGlobs?.length).map((s) => {
+    const globs = s.artifactGlobs.map((g) => ({ glob: g.glob, expanded: g.expanded, files: g.files.map((f) => ({ source: f.source, path: f.path, sha256: f.sha256, kind: f.kind })) }));
+    const none = globs.every((g) => !g.files.length);
+    return { step: s.id, globs, ...(none ? { note: `no screenshots for this ticket (globs: ${globs.flatMap((g) => g.expanded).join(', ')})` } : {}) };
+  });
 }
 
 const settled = (status) => ['fixed', 'verified-nonissue'].includes(status);
@@ -427,7 +437,7 @@ export function acceptReview(root, options) {
   const shots = screenshots(state).map((s) => s.sha256);
   const inspected = new Set(r.closure.screenshotsInspected ?? []);
   const unseen = shots.filter((h) => !inspected.has(h));
-  if (unseen.length) problems.push(`${unseen.length} gate screenshot(s) not inspected by the reviewer`);
+  if (unseen.length) problems.push(`${unseen.length} gate screenshot(s) not inspected by the reviewer (the gate's expanded artifacts globs matched them for this ticket): ${screenshots(state).filter((a) => !inspected.has(a.sha256)).slice(0, 5).map((a) => a.source ?? a.path).join(', ')}${unseen.length > 5 ? ' …' : ''}`);
   const pending = unverifiedPrior(state, r);
   if (pending.length) problems.push(`earlier-round finding(s) not verified: ${pending.map((f) => `${f.round}:${f.id}`).join(', ')}; the reviewer of this round adds \`priorFindings\` (fixed or verified-nonissue, with evidence) after its blind closure and records it again`);
   // Acceptance needs three things on the current tree: a passing full gate, a clean closure written for this tree, and

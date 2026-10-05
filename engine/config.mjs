@@ -98,6 +98,20 @@ export function declared(cfg, cls, runtime) {
   return { effort: c[runtime]?.effort ?? null, model: c[runtime]?.model ?? null };
 }
 
+// Placeholders an `artifacts` glob may carry, expanded per attempt when the gate collects artifacts. They let a step
+// collect one ticket's evidence (`e2e/.evidence/{itemLower}/**/*.png`) instead of every screenshot the suite writes:
+// a real ticket was refused because a placeholder-less glob made 1,300 other tickets' screenshots required evidence.
+export const ARTIFACT_PLACEHOLDERS = ['item', 'itemLower', 'attempt'];
+// `{name}` without a comma is a placeholder; `{a,b}` stays glob alternation.
+export const placeholdersIn = (glob) => [...String(glob).matchAll(/\{(\w+)\}/g)].map((m) => m[1]);
+
+// Each glob once per unit ({ item, attempt }: the attempt, plus every member of a batch), duplicates dropped.
+export function expandArtifactGlob(glob, units) {
+  if (!placeholdersIn(glob).length) return [glob];
+  const vars = (u) => ({ item: u.item, itemLower: String(u.item).toLowerCase(), attempt: u.attempt });
+  return [...new Set(units.map((u) => glob.replace(/\{(\w+)\}/g, (m, k) => vars(u)[k] ?? m)))];
+}
+
 function normalize(raw, source) {
   const errors = [];
   const fail = (m) => errors.push(m);
@@ -175,6 +189,13 @@ function normalize(raw, source) {
     if (!s.run && !s.plugin) fail(`step \`${s.id}\` needs \`run\` or \`plugin\``);
     if (s.tier && !['light', 'heavy'].includes(s.tier)) fail(`step \`${s.id}\`: tier must be light or heavy`);
     if (s.ignores && !Array.isArray(s.ignores)) fail(`step \`${s.id}\`: ignores must be a list of globs`);
+    if (s.artifacts !== undefined) {
+      if (!Array.isArray(s.artifacts) || s.artifacts.some((g) => typeof g !== 'string' || !g)) fail(`step \`${s.id}\`: artifacts must be a list of globs`);
+      else for (const g of s.artifacts) {
+        const unknown = placeholdersIn(g).filter((p) => !ARTIFACT_PLACEHOLDERS.includes(p));
+        if (unknown.length) fail(`step \`${s.id}\`: artifacts glob \`${g}\` uses unknown placeholder(s) ${unknown.map((p) => `{${p}}`).join(', ')} (known: ${ARTIFACT_PLACEHOLDERS.map((p) => `{${p}}`).join(', ')})`);
+      }
+    }
     if (s.alsoInputs !== undefined) {
       if (!Array.isArray(s.alsoInputs)) fail(`step \`${s.id}\`: alsoInputs must be a list of repo names`);
       else for (const r of s.alsoInputs) if (!repoNames.has(r)) fail(`step \`${s.id}\`: alsoInputs names unknown repo \`${r}\``);

@@ -2,7 +2,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ADAPTER_DIR, CONFIG_FILE, adapterLocation, agentTypeFor, declared, findRoot, loadConfig, loadConfigAtCommit, repoDir, roleClass } from './config.mjs';
+import { ADAPTER_DIR, ARTIFACT_PLACEHOLDERS, CONFIG_FILE, adapterLocation, agentTypeFor, declared, findRoot, loadConfig, loadConfigAtCommit, placeholdersIn, repoDir, roleClass } from './config.mjs';
+import { listAttempts, loadState } from './ledger.mjs';
 import { provision, untrackedFiles } from './attempt.mjs';
 import { projectEnv } from './env.mjs';
 import { chooseWorkers } from './host.mjs';
@@ -441,6 +442,43 @@ export function setEnabled(root, enabled) {
 
 // ---------- doctor ----------
 
+// The most recent full gate of any attempt, and what each `artifacts` glob matched in it. A glob with no placeholder
+// matches whatever the whole suite wrote, so every other ticket's screenshots became required evidence: a real ticket
+// was refused with 1,300 unrelated screenshots. Warned when such a glob matched files and the ticket changed nothing
+// under the glob's directory (the matches cannot be this ticket's own files).
+export function artifactReport(root, cfg) {
+  let last = null;
+  for (const id of listAttempts(root)) {
+    let st;
+    try {
+      st = loadState(root, id);
+    } catch {
+      continue;
+    }
+    const g = st.lastGate;
+    if (g && (g.steps ?? []).some((x) => x.artifactGlobs?.length) && (!last || String(g.finishedAt ?? g.at) > String(last.gate.finishedAt ?? last.gate.at))) last = { state: st, gate: g };
+  }
+  if (!last) return { counts: [], warnings: [] };
+  const counts = [];
+  const warnings = [];
+  for (const step of last.gate.steps.filter((x) => x.artifactGlobs?.length)) {
+    const def = cfg.gate.steps.find((x) => x.id === step.id);
+    const repo = cfg.repos.find((r) => r.name === step.repo);
+    const pkgPath = (def?.package ? repo?.packages.find((p) => p.name === def.package || p.path === def.package) : repo?.packages[0])?.path ?? '.';
+    const changed = last.gate.changed?.[step.repo] ?? [];
+    for (const g of step.artifactGlobs) {
+      counts.push(`${step.id}: ${g.glob} matched ${g.files.length}`);
+      if (placeholdersIn(g.glob).length || !g.files.length) continue;
+      const parts = g.glob.split('/');
+      const fixed = parts.slice(0, parts.findIndex((p) => /[*?{[]/.test(p))).join('/');
+      const dir = path.posix.join(pkgPath, fixed);
+      if (changed.some((f) => dir === '.' || f === dir || f.startsWith(`${dir}/`))) continue;
+      warnings.push({ check: `artifacts of step ${step.id}`, problem: `\`${g.glob}\` has no ${ARTIFACT_PLACEHOLDERS.map((p) => `{${p}}`).join('/')} placeholder and matched ${g.files.length} file(s) in the last gate (${last.state.id}, ${last.gate.runId}), though that ticket changed nothing under ${dir}/: every screenshot the suite writes becomes evidence the reviewer must inspect (a real ticket was refused with 1,300 unrelated screenshots)`, fix: 'have the UI tests write each ticket\'s evidence under a ticket folder and point the glob there, e.g. `e2e/.evidence/{itemLower}/**/*.png`' });
+    }
+  }
+  return { from: `${last.state.id} ${last.gate.runId}`, counts, warnings };
+}
+
 // A step whose command reads a sibling repo (`../web`, `$WF_ROOT/web`, the attempt's `web` worktree) but does not list
 // it in `alsoInputs` is reused after that repo changes: a passing end-to-end run was reused against old API code.
 export function siblingWarnings(root, cfg) {
@@ -550,6 +588,9 @@ export async function doctor(root, { runSteps = true } = {}) {
   // Warnings never fail doctor: each names a setup that let a stale or confounded result through.
   for (const w of siblingWarnings(root, cfg)) report.warnings.push({ ok: true, warn: true, check: w.check, problem: w.problem, fix: w.fix });
   for (const w of modelWarnings(root, cfg)) report.warnings.push({ ok: true, warn: true, check: w.check, problem: w.problem, fix: w.fix });
+  const art = artifactReport(root, cfg);
+  if (art.counts.length) report.config.push({ ok: true, check: `artifacts matched in the last gate (${art.from})`, note: art.counts.join('\n    ') });
+  for (const w of art.warnings) report.warnings.push({ ok: true, warn: true, ...w });
   if (runSteps && adapterBase) {
     const id = `_doctor-${Date.now()}`;
     const trusted = loadConfigAtCommit(root, cfg, adapterBase);
