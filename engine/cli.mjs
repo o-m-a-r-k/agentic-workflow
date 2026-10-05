@@ -43,7 +43,7 @@ Work
   wf accept                         accept the review
   wf deliver                        integrate every repo, then start the tracker handoff
   wf shown --file shown.json        record that every delivered screenshot was shown in the chat, with its caption
-  wf delivery narrow --keep SHA,... | --file keep.json --reason "why"
+  wf delivery narrow --keep SHA,... | --file keep.json --reason "why" [--dry-run]
                                     once, before \`wf shown\`: keep only this ticket's files of a delivered set an over-broad glob filled
   wf tracker record --event E --capture file.json | wf tracker sync (tracker.via: api)
   wf hold --reason "why" | wf release
@@ -85,6 +85,7 @@ function summary(root, s, { base = null, resume = false } = {}) {
       if (w) lines.push(`  warning: ${w}`);
     } catch {}
   }
+  if (s.delivery.narrowed && !s.delivery.screenshots) lines.push(`  delivered files narrowed from ${s.delivery.narrowed.from} to ${s.delivery.narrowed.to}: ${s.delivery.narrowed.reason} (${s.delivery.narrowed.by}, ${s.delivery.narrowed.at})`);
   if (s.phase === 'handoff-pending' && s.delivery.screenshots) lines.push(showBlock(root, s).trim().replace(/^/gm, '  ').replace(/^ {2}SHOW TO OWNER/, '  delivered screenshots — SHOW TO OWNER'));
   if (resume) {
     const last = s.exports?.filter((x) => !x.json).at(-1)?.file ?? (fs.existsSync(exportFile(root, s.id)) ? exportFile(root, s.id) : null);
@@ -439,9 +440,13 @@ async function dispatch(cmd, sub, positional, options) {
     }
     case 'delivery': {
       if (sub !== 'narrow') throw new WfError('usage: wf delivery narrow --keep <sha256,...> | --file keep.json --reason "why" [--attempt ID]');
-      const s = narrowDelivery(root, options);
+      const { state: s, dryRun } = narrowDelivery(root, options);
+      if (dryRun) {
+        print(options, `dry run, nothing recorded: ${s.id} would be narrowed from ${dryRun.from} to ${dryRun.to} (${dryRun.dropped} dropped${dryRun.legacy ? '; delivered before 0.1.11: the pending attach action is narrowed, uploads checked by title' : ''}): ${dryRun.reason}\n${dryRun.kept.map((f, i) => `  ${i + 1}. ${f.title}  sha256 ${f.sha256.slice(0, 12)}  ${f.path}`).join('\n')}`, dryRun);
+        return 0;
+      }
       const n = s.delivery.narrowed;
-      print(options, `delivered set of ${s.id} narrowed from ${n.from} to ${n.to}: ${n.reason}${showBlock(root, s)}\nnext: ${nextAction(root, s)}`, s);
+      print(options, `delivered set of ${s.id} narrowed from ${n.from} to ${n.to}: ${n.reason}${showBlock(root, s)}${n.legacy ? `\n  delivered before 0.1.11: the pending attach action now lists ${n.to} file(s); uploads are checked by title` : ''}\nnext: ${nextAction(root, s)}`, s);
       return 0;
     }
     case 'shown': {

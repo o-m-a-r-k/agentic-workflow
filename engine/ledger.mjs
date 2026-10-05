@@ -210,7 +210,7 @@ export function reduce(entries) {
       case 'delivery.narrowed': {
         const keep = new Set(d.keep ?? []);
         if (s.delivery.screenshots) s.delivery.screenshots = { ...s.delivery.screenshots, screenshots: s.delivery.screenshots.screenshots.filter((f) => keep.has(f.sha256)) };
-        s.delivery.narrowed = { from: d.from, to: d.to, dropped: d.dropped, reason: d.reason, keep: [...keep], raw: d.raw ?? null, at: e.at, by: e.actor };
+        s.delivery.narrowed = { from: d.from, to: d.to, dropped: d.dropped, reason: d.reason, legacy: d.legacy === true, keep: [...keep], raw: d.raw ?? null, at: e.at, by: e.actor };
         s.tracker.pending = s.tracker.pending.map((a) => narrowAttach(a, s.delivery.narrowed));
         break;
       }

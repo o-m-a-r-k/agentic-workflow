@@ -837,32 +837,43 @@ function keepList(options) {
   return { keep: list.map((x) => String(typeof x === 'string' ? x : x?.sha256 ?? '').trim()).filter(Boolean), text };
 }
 
+// The set to narrow: the recorded delivered set, or, for an attempt delivered before 0.1.11 (no recorded set, no
+// captions, attachments checked by title only), the pending `delivered` attach action's files.
+function narrowSource(state) {
+  const set = state.delivery.screenshots;
+  if (set) return set.screenshots.length ? { files: set.screenshots, legacy: false } : null;
+  const attach = state.tracker.pending.find((a) => a.event === 'delivered' && a.op === 'attach');
+  return attach?.files?.length ? { files: attach.files, legacy: true } : null;
+}
+
 export function narrowDelivery(root, options) {
   const state = openState(root, options);
   const reason = String(options.reason ?? '').trim();
   if (!reason || options.reason === true) throw new WfError('--reason "<why the other files are not this ticket\'s>" is required');
   if (!state.delivery.completedAt) throw refuse('not delivered yet: `wf deliver` first');
   if (state.phase !== 'handoff-pending') throw refuse(`${state.id} is ${state.phase}; a delivered set can be narrowed only while the handoff is pending`);
-  const set = state.delivery.screenshots;
-  if (!set) throw refuse(`${state.id} was delivered before screenshots were recorded at delivery; there is no set to narrow`);
-  if (!set.screenshots.length) throw refuse(`no screenshots were delivered for ${state.item}; nothing to narrow`);
   if (state.delivery.narrowed) throw refuse(`the delivered set was already narrowed (${state.delivery.narrowed.from} to ${state.delivery.narrowed.to}: ${state.delivery.narrowed.reason}); it is narrowed once`);
   if (state.delivery.shown && !state.delivery.shown.auto) throw refuse('the delivered screenshots are already acknowledged with `wf shown`; the set can no longer change');
   if (state.tracker.done.some((d) => d.event === 'delivered')) throw refuse('the delivered handoff is already verified');
+  const source = narrowSource(state);
+  if (!source) throw refuse(state.delivery.screenshots ? `no screenshots were delivered for ${state.item}; nothing to narrow` : `${state.id} has no recorded delivered set and no pending \`delivered\` attach action; nothing to narrow`);
   const parsed = keepList(options);
   const given = Array.isArray(parsed) ? parsed : parsed.keep;
   const keep = [...new Set(given)];
   if (!keep.length) throw refuse('keep at least one file: a delivery with no screenshots of its own is a different statement, not a narrowing');
-  const unknown = keep.filter((k) => !set.screenshots.some((f) => f.sha256 === k));
-  if (unknown.length) throw refuse(`${unknown.length} kept sha256 not in the delivered set (full 64-character sha256 from \`wf status --json\` → delivery.screenshots):\n  - ${unknown.join('\n  - ')}`);
-  const from = set.screenshots.length;
+  const unknown = keep.filter((k) => !source.files.some((f) => f.sha256 === k));
+  if (unknown.length) throw refuse(`${unknown.length} kept sha256 not in the delivered set (full 64-character sha256 from \`wf status --json\` → ${source.legacy ? 'tracker.pending, the delivered attach action\'s files' : 'delivery.screenshots'}):\n  - ${unknown.join('\n  - ')}`);
+  const from = source.files.length;
   if (keep.length === from) throw refuse(`all ${from} delivered files are kept; nothing to narrow`);
+  const kept = source.files.filter((f) => keep.includes(f.sha256));
+  const plan = { keep, from, to: keep.length, dropped: from - keep.length, reason, legacy: source.legacy, kept: kept.map((f) => ({ sha256: f.sha256, title: f.title ?? path.basename(f.path), path: f.path })) };
+  if (options['dry-run']) return { state, dryRun: plan };
   const raw = Array.isArray(parsed) ? null : keepRaw(root, state.id, 'delivery/narrow.raw.json', parsed.text);
-  append(root, state.id, 'delivery.narrowed', { keep, from, to: keep.length, dropped: from - keep.length, reason, raw: raw ? { path: raw.file, sha256: raw.sha256 } : null }, actor(options));
+  append(root, state.id, 'delivery.narrowed', { keep, from, to: keep.length, dropped: from - keep.length, reason, legacy: source.legacy, raw: raw ? { path: raw.file, sha256: raw.sha256 } : null }, actor(options));
   const after = loadState(root, state.id);
-  const kept = after.delivery.screenshots.screenshots;
-  writeJson(shownDraftFile(root, state.id), { attempt: state.id, item: state.item, note: 'Copy this file outside .wf-evidence, view each image, replace each caption with what the image shows (which screen, which state), then `wf shown --file <copy>`.', screenshots: kept.map((f) => ({ sha256: f.sha256, title: f.title, path: f.path, proposed: f.proposed, caption: f.proposed })) });
-  return after;
+  // A legacy attempt has no draft and owes no `wf shown`: its kept uploads are checked by title only, as before.
+  if (!source.legacy) writeJson(shownDraftFile(root, state.id), { attempt: state.id, item: state.item, note: 'Copy this file outside .wf-evidence, view each image, replace each caption with what the image shows (which screen, which state), then `wf shown --file <copy>`.', screenshots: after.delivery.screenshots.screenshots.map((f) => ({ sha256: f.sha256, title: f.title, path: f.path, proposed: f.proposed, caption: f.proposed })) });
+  return { state: after, dryRun: null };
 }
 
 export function closeAfterHandoff(root, state) {

@@ -207,3 +207,65 @@ test('linear readback shapes: raw get_issue alone, with list_comments, as an MCP
   assert.equal(linear.normalize([getIssue, listComments]).comments[0].body, 'hello');
   assert.equal(linear.normalize({ issue: { identifier: 'ENG-78', id: 'uuid', state: { name: 'Done' } } }).id, 'ENG-78', 'the GraphQL shape: identifier wins over the uuid');
 });
+
+// 0.1.15: an attempt delivered by 0.1.6 has no recorded set (no `delivery.screenshots`, no `wf shown`), only a pending
+// `delivered` attach action listing every gate capture, checked by title. Named failure: 1,320 listed, narrow refused
+// "no set to narrow". The ledger entries below are the ones 0.1.6 wrote at delivery.
+test('delivery narrow on an attempt delivered before 0.1.11: the pending attach action is narrowed; the readback needs only the kept titles', async () => {
+  const { append } = await import('../engine/ledger.mjs');
+  const visual = [{ id: 'ui', repo: 'app', run: 'mkdir -p shots && for n in mine-a mine-b other-1 other-2 other-3 other-4; do printf $n > shots/$n.png; done', artifacts: ['shots/*.png'] }];
+  const tracker = { kind: 'linear', statuses: { started: 'In Progress', delivered: 'Ready for UAT', done: 'Done' } };
+  const { base, root } = singleRepoProject('narrow-legacy', { tracker, gate: { steps: visual } }, ignore);
+  const item = 'ENG-79';
+  const cap = (obj) => {
+    const f = path.join(base, `cap-${Math.random().toString(36).slice(2)}.json`);
+    fs.writeFileSync(f, JSON.stringify(obj));
+    return f;
+  };
+  const e = ok(wf(root, ['entry', '--item', item, '--owner', 'o', '--json'])).json();
+  ok(wf(root, ['tracker', 'record', '--event', 'admitted', '--capture', cap({ issue: { identifier: item, description: 'd', state: { name: 'In Progress' } } }), '--attempt', e.id]));
+  ok(wf(root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id]));
+  ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id]));
+  ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
+  ok(wf(root, ['tracker', 'record', '--event', 'implementing', '--capture', cap({ issue: { identifier: item, description: 'd', state: { name: 'In Progress' } } }), '--attempt', e.id]));
+  commitIn(e.repos.app.worktree, { 'src/a.txt': 'ui\n' });
+  const all = ok(wf(root, ['gate', '--attempt', e.id, '--json'])).json().steps[0].artifacts;
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', e.id]));
+  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r', { screenshotsInspected: all.map((a) => a.sha256) })), '--attempt', e.id]));
+  ok(wf(root, ['accept', '--attempt', e.id]));
+  append(root, e.id, 'delivered', { order: ['app'] }, 'o');
+  append(root, e.id, 'tracker.pending', { event: 'delivered', actions: [{ op: 'attach', files: all }, { op: 'setStatus', key: 'delivered', status: 'Ready for UAT', unless: [] }, { op: 'readback', what: 'x' }] }, null);
+  let s = state(root, e.id);
+  assert.equal(s.delivery.screenshots, undefined);
+  assert.equal(s.phase, 'handoff-pending');
+
+  const mine = all.filter((a) => /mine-/.test(a.source)).map((a) => a.sha256);
+  const reason = 'the glob matched every spec\'s captures; only mine-a and mine-b are this ticket\'s';
+  const narrow = (args) => wf(root, ['delivery', 'narrow', ...args, '--attempt', e.id]);
+  assert.match(narrow(['--keep', 'f'.repeat(64), '--reason', reason]).err, /not in the delivered set[\s\S]*tracker\.pending/);
+  const ledger = path.join(root, '.wf-evidence', 'attempts', e.id, 'ledger.jsonl');
+  const bytes = fs.readFileSync(ledger, 'utf8');
+  const dry = ok(narrow(['--keep', mine.join(','), '--reason', reason, '--dry-run']));
+  assert.match(dry.out, /dry run, nothing recorded: .* from 6 to 2 \(4 dropped; delivered before 0\.1\.11/);
+  assert.match(dry.out, /mine-a\.png/);
+  assert.equal(fs.readFileSync(ledger, 'utf8'), bytes, 'a dry run writes nothing');
+
+  ok(narrow(['--keep', mine.join(','), '--reason', reason]));
+  s = state(root, e.id);
+  assert.deepEqual(s.tracker.pending.find((a) => a.op === 'attach').files.map((f) => f.sha256).sort(), [...mine].sort());
+  assert.equal(s.delivery.narrowed.legacy, true);
+  assert.equal(s.delivery.screenshots, undefined, 'no set is invented: the legacy check stays title-only');
+  assert.match(ok(wf(root, ['status', '--attempt', e.id])).out, /delivered files narrowed from 6 to 2/);
+  assert.match(ok(wf(root, ['resume', '--attempt', e.id])).out, /upload and attach 2 screenshot\(s\)/);
+  assert.match(narrow(['--keep', mine[0], '--reason', reason]).err, /already narrowed/);
+  assert.match(wf(root, ['shown', '--file', shownFile(base, []), '--attempt', e.id]).err, /delivered before screenshots were recorded/);
+
+  const upload = (t) => ({ id: t, title: t, url: `https://uploads.linear.app/x/${t}` });
+  const missing = wf(root, ['tracker', 'record', '--event', 'delivered', '--capture', cap({ id: item, status: 'Ready for UAT', attachments: [upload('mine-a.png')] }), '--attempt', e.id]);
+  assert.match(missing.err, /1 of 2 delivered screenshot\(s\) not attached[\s\S]*mine-b\.png/);
+  ok(wf(root, ['tracker', 'record', '--event', 'delivered', '--capture', cap({ id: item, status: 'Ready for UAT', attachments: [upload('mine-a.png'), upload('mine-b.png')] }), '--attempt', e.id]));
+  s = state(root, e.id);
+  assert.equal(s.phase, 'done');
+  assert.deepEqual(s.tracker.done.at(-1).attachments.map((a) => a.title).sort(), ['mine-a.png', 'mine-b.png']);
+  assert.equal(ok(wf(root, ['export', '--attempt', e.id, '--json'])).json().delivery.narrowed.to, 2);
+});

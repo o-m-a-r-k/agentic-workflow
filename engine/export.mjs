@@ -44,7 +44,7 @@ export function exportData(root, s) {
     outsidePlan: outsideView(s),
     flaky: s.flaky ?? [],
     tracker: { pending: s.tracker.pending.map((a) => ({ event: a.event, op: a.op, status: a.status ?? null })), done: s.tracker.done.map((d) => ({ event: d.event, at: d.at })) },
-    delivery: { completedAt: s.delivery.completedAt, repos: Object.values(s.delivery.repos).map((d) => ({ repo: d.repo, commit: d.commit ?? null, skipped: d.skipped ?? null })) },
+    delivery: { completedAt: s.delivery.completedAt, narrowed: s.delivery.narrowed ? { from: s.delivery.narrowed.from, to: s.delivery.narrowed.to, dropped: s.delivery.narrowed.dropped, reason: s.delivery.narrowed.reason, legacy: s.delivery.narrowed.legacy, by: s.delivery.narrowed.by, at: s.delivery.narrowed.at } : null, repos: Object.values(s.delivery.repos).map((d) => ({ repo: d.repo, commit: d.commit ?? null, skipped: d.skipped ?? null })) },
     // The delivered screenshots: what the owner was shown (with the caption given) and what the ticket got.
     delivered: deliveredView(s),
     closedAt: s.closedAt,
@@ -143,7 +143,7 @@ export function exportHtml(d, images = {}) {
     d.flaky.length ? sec('Flaky', table(['Step', 'Failed run', 'Passed run', 'Suites'], d.flaky.map((f) => [esc(f.step), esc(f.failedRun), esc(f.passedRun), esc((f.suites ?? []).join(', '))]))) : '',
     sec('Tracker', table(['Event', 'State'], [...d.tracker.done.map((t) => [esc(t.event), `${badge('recorded')} ${esc(t.at)}`]), ...d.tracker.pending.map((t) => [esc(t.event), `${badge('pending')} ${esc(t.op)}${t.status ? ` ${esc(t.status)}` : ''}`])])),
     deliveredSection(d, images),
-    sec('Delivery', d.delivery.completedAt ? `<p>${badge('delivered')} ${esc(d.delivery.completedAt)}</p>${table(['Repo', 'Commit'], d.delivery.repos.map((r) => [esc(r.repo), esc(r.commit ? r.commit.slice(0, 12) : r.skipped ?? '')]))}` : '<p class="muted">not delivered yet</p>'),
+    sec('Delivery', d.delivery.completedAt ? `<p>${badge('delivered')} ${esc(d.delivery.completedAt)}</p>${d.delivery.narrowed ? `<p class="warn">Delivered files narrowed from ${esc(d.delivery.narrowed.from)} to ${esc(d.delivery.narrowed.to)}: ${esc(d.delivery.narrowed.reason)}</p>` : ''}${table(['Repo', 'Commit'], d.delivery.repos.map((r) => [esc(r.repo), esc(r.commit ? r.commit.slice(0, 12) : r.skipped ?? '')]))}` : '<p class="muted">not delivered yet</p>'),
   ].join('\n');
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${esc(d.item)} attempt</title>
