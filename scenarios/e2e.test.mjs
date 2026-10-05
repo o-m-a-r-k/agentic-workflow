@@ -186,6 +186,29 @@ test('the guard hook resolves relative write targets after cd', async () => {
   assert.equal(blocked('echo "a > .wf-evidence/x"'), false);
 });
 
+test('the guard hook lets interpreters read evidence and still blocks their writes', async () => {
+  const { check } = await import('../hooks/guard-evidence.mjs');
+  const gateDir = '/p/.wf-evidence/attempts/A/gate';
+  const blocked = (command, cwd = gateDir) => Boolean(check({ cwd, tool_input: { command } }));
+  // The read-only command the hook refused on a real ticket.
+  assert.equal(blocked(`python3 -c "import json,glob; p=sorted(glob.glob('*/progress.json'))[-1]; d=json.load(open(p)); print([s['id'] for s in d['steps']])"`), false);
+  assert.equal(blocked(`python3 -c "print(open('/p/.wf-evidence/x.json', 'r', encoding='utf8').read())"`, '/p'), false);
+  assert.equal(blocked(`node -e "const d=JSON.parse(require('fs').readFileSync('progress.json','utf8')); console.log(d.steps.length)"`), false);
+  assert.equal(blocked(`perl -ne 'print if /FAIL/' output.log`), false);
+  assert.equal(blocked(`python3 -c "open('progress.json','w').write('{}')"`), true);
+  assert.equal(blocked(`python3 -c "from pathlib import Path; Path('x').open('a')"`), true);
+  assert.equal(blocked(`python3 -c "import json; json.dump({}, open('/p/.wf-evidence/x', mode='w'))"`, '/p'), true);
+  assert.equal(blocked(`python3 -c "import shutil; shutil.rmtree('A')"`), true);
+  assert.equal(blocked(`python3 -c "import os; os.remove('ledger.jsonl')"`), true);
+  assert.equal(blocked(`python3 -c "import subprocess; subprocess.run(['rm','x'])"`), true);
+  assert.equal(blocked(`python3 -c "m='w'; open('x', m)"`), true, 'a mode that is not a literal counts as a write');
+  assert.equal(blocked(`node -e "require('fs').openSync('x','w')"`), true);
+  assert.equal(blocked(`node -e "require('fs').rmSync('x')"`), true);
+  assert.equal(blocked(`perl -pi -e 's/failed/passed/' output.log`), true);
+  assert.equal(blocked(`ruby -e "File.write('x', '1')"`), true);
+  assert.equal(blocked(`python3 -c "open('x','w')"`, '/p'), false, 'outside evidence nothing is checked');
+});
+
 test('one step with narrow inputs is not reused just because another step covers the changed file', () => {
   const steps = [
     { id: 'lint', repo: 'app', run: 'true', inputs: ['**'] },
