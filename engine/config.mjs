@@ -133,6 +133,7 @@ function normalize(raw, source) {
     secrets: { store: 'env-file', ...(raw.secrets ?? {}) },
     gate: { maxParallelSteps: 1, leases: {}, steps: [], ...(raw.gate ?? {}) },
     components: raw.components ?? [],
+    review: { rules: raw.review?.rules ?? [] },
     repos: [],
   };
   cfg.classes = mergeClasses(raw.classes, fail);
@@ -201,6 +202,27 @@ function normalize(raw, source) {
       if (!Array.isArray(s.alsoInputs)) fail(`step \`${s.id}\`: alsoInputs must be a list of repo names`);
       else for (const r of s.alsoInputs) if (!repoNames.has(r)) fail(`step \`${s.id}\`: alsoInputs names unknown repo \`${r}\``);
     }
+  }
+  // Review rules: documents a reviewer reads when the change touches the paths they govern (engine/rules.mjs).
+  if (!Array.isArray(cfg.review.rules)) fail('`review.rules` must be a list of { id, repo?, paths?, read: [documents] }');
+  else {
+    const ruleIds = new Set();
+    for (const r of cfg.review.rules) {
+      if (!r?.id || typeof r.id !== 'string') {
+        fail('each review rule needs a string `id`');
+        continue;
+      }
+      if (ruleIds.has(r.id)) fail(`duplicate review rule \`${r.id}\``);
+      ruleIds.add(r.id);
+      if (!Array.isArray(r.read) || !r.read.length || r.read.some((d) => typeof d !== 'string' || !d)) fail(`review rule \`${r.id}\`: \`read\` must list at least one document path`);
+      if (r.paths !== undefined && (!Array.isArray(r.paths) || !r.paths.length || r.paths.some((g) => typeof g !== 'string' || !g))) fail(`review rule \`${r.id}\`: \`paths\` must be a list of globs (omit it to use the first document's \`paths:\` frontmatter)`);
+      if (r.repo !== undefined && !repoNames.has(r.repo)) fail(`review rule \`${r.id}\`: unknown repo \`${r.repo}\``);
+    }
+  }
+  for (const sk of cfg.requires.skills) {
+    const w = sk?.when;
+    const okWhen = w === undefined || w === null || w === 'visual' || (w && typeof w === 'object' && Array.isArray(w.paths) && w.paths.length && w.paths.every((g) => typeof g === 'string' && g));
+    if (!okWhen) fail(`requires.skills \`${sk?.name}\`: \`when\` must be \`visual\` or { paths: [globs] }`);
   }
   const compIds = new Set(cfg.components.map((c) => c.id));
   for (const c of cfg.components) {

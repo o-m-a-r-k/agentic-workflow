@@ -310,7 +310,23 @@ requires:
 - **Skills are vendored** into the project when the license allows, and `wf sync` places them for each runtime, so every agent applies the same bytes and updates go through review. Otherwise pinned install, checked per runtime.
 - **Connectors** are checked with a read-only call; the user is told where to connect them.
 - **Tools** are checked with their `check` command.
-- `wf handoff <role>` refuses when a skill required for that role is missing in that role's runtime.
+- `when` is `visual` (the gate collected screenshots), `{ paths: [globs] }` (a changed file in any repo matches; a review before the gate needs it too) or omitted (always). `wf handoff <role>` refuses when a skill required for that role this round is missing in that role's runtime; the evaluation is the adapter at base and the changed files, and the reviewer bundle lists the round's skills under `skills: [{ name, file }]`.
+
+## Review rules
+
+Named failure: in eleven review rounds no reviewer read any of the project's rule documents (design system, coding rules), and the required skill was only checked as installed; `visual` keyed on collected screenshots, so a review before the gate never needed it.
+
+```yaml
+review:
+  rules:
+    - { id: ui, read: [.claude/rules/design-system.md] }             # paths from the document's `paths:` frontmatter
+    - { id: api-errors, repo: api, paths: ["src/**/*.controller.ts"], read: [docs/errors.md] }
+```
+
+- **Adapter.** `review.rules: [{ id, repo?, paths?, read: [docs] }]`; ids unique, `read` non-empty, `paths` a glob list, `repo` a listed repo (default: the adapter's repo for the documents; changed files of every repo are matched). Without `paths`, the first readable document's `paths:` (or `globs:`) frontmatter is used; without either, the rule applies to every change (doctor warns). `wf doctor` warns on a document not committed on the base; such a document is skipped, and a rule with none readable is skipped.
+- **Bundle.** The reviewer bundle's `rules: [{ id, read, docs, matched, paths, docChangedByTicket, missing }]` lists each rule a changed file matches, computed from the adapter at the attempt's base (`loadConfigAtCommit`), so neither a ticket nor the owner's checkout can drop a rule. `read` are the documents as committed at the base, written into the attempt's evidence (`rules/<sha12>-<name>`); `docChangedByTicket` flags a rule whose document the ticket changed (judge against the base copy).
+- **Verdicts.** The closure carries `rules: [{ rule, verdict: complies|finding|not-applicable, evidence, finding }]`. `wf accept` refuses, per rule id, a missing verdict, an unknown verdict, empty evidence, or a `finding` verdict whose `finding` is not a finding id of that closure, and says to hand the tree to a fresh reviewer. Verdicts are recorded on `review.accepted` and shown in `wf export` (Rules).
+- **Reads.** Where the reviewer's Claude Code transcript exists (the provenance machinery: subagent transcript by name and agent type), `wf review` refuses unless, for every `read` document of every listed rule and every listed skill, the transcript has a successful tool call reading it: a `Read` of that path (or of the worktree copy when the ticket did not change it), a `Bash` read (`cat`, `sed`, `head`, `tail`, `grep`, `rg`, `less`, `more`, `nl`, `awk`, `bat`, `wc`) naming the path, and for a skill a `Skill` call by its name or a read of its `SKILL.md`. A call whose result is an error does not count. The refusal lists every document not read and says to start a fresh round. Without a transcript the round records `reads: unverified`, as provenance does.
 
 ## Agents per project
 
@@ -372,6 +388,7 @@ What the evidence proves, and what it does not:
 - **Fresh reviewer per round is checked; blind is a rule.** The engine refuses a reviewer id that reviewed an earlier round, but the id is a name the owner supplies: resuming an old agent under a new id defeats it.
 - **The blind reviewer is a rule, not a check.** The engine hands the reviewer only the bundle and prints a one-line start prompt, but it cannot see the prompt a runtime actually gives an agent, so it does not verify or record it. An owner who steers the reviewer (hints, focus areas, summaries of the work, other agents' findings) weakens the review without any refusal; the skills and the reviewer role forbid it, and the reviewer reports a prompt that carried more.
 - **Classes do not change guarantees.** The gate, the blind independent review (always at the reviewer role's class, never a work item's), frozen criteria, evidence integrity and the hash-chained ledger are the same for every class. A class lowers only how hard an implementer thinks; a misclassified work item still meets the same gate and the same reviewer.
+- **Rules are a pure function of the base, not steering.** The bundle's `rules` and `skills` come from the adapter committed at the attempt's base and the changed files, so every reviewer of the tree gets the same list; they add documents to read and never narrow what the reviewer judges. The read check proves the document's content reached the reviewer (a successful tool call returned it), not that it was understood or applied; the verdicts with evidence are the only check on that. Known limit: a rubber-stamped `complies` passes.
 - **Provenance is checked where transcripts exist.** A transcript can still be forged by someone with shell access; it stops steering and out-of-band rounds by mistake, not by design.
 - **The attempt page is a view.** Nothing reads it back.
 - **Steps never see agent session tokens** unless the adapter passes them by name.

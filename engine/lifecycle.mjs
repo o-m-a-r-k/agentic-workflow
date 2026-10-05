@@ -11,6 +11,7 @@ import { findSkill } from './skills.mjs';
 import { lastFencedYaml, lastModel, readTranscript, sessionModel, subagentModel, subagentTranscripts } from './telemetry.mjs';
 import { outsidePlan } from './scope.mjs';
 import { emitTrackerEvent } from './tracker.mjs';
+import { requiredSkills, reviewRules, ruleVerdicts, skillFiles, unreadDocs } from './rules.mjs';
 import { home, startPromptFor, verifyAgent } from './provenance.mjs';
 import { WfError, YAML, canonical, git, hashFile, hashValue, matchesAny, readJson, refuse, run, sessionIdentity, writeImmutable, writeJson } from './util.mjs';
 
@@ -20,6 +21,15 @@ const readStructured = (file) => {
   if (fenced) text = fenced[1];
   return file.endsWith('.json') ? JSON.parse(text) : YAML.parse(text);
 };
+
+// A handoff bundle as written (a missing or unreadable one reads as empty: nothing listed, nothing required).
+export function readBundle(file) {
+  try {
+    return file ? JSON.parse(fs.readFileSync(file, 'utf8')) : {};
+  } catch {
+    return {};
+  }
+}
 
 // Every raw output the owner or an agent produced is kept verbatim, write-once and hash-bound, at the moment the
 // engine consumes it: nothing may exist only in chat.
@@ -207,12 +217,10 @@ export function authorsOf(root, state) {
   return set;
 }
 
-function skillProblems(root, cfg, role, runtime, state) {
+// Every skill this role needs this round (same evaluation as the bundle's `skills`) must load for the runtime.
+function skillProblems(root, cfg, role, runtime, state, changed) {
   const problems = [];
-  const visual = screenshots(state).length > 0;
-  for (const s of cfg.requires.skills ?? []) {
-    if (!(s.roles ?? []).includes(role)) continue;
-    if (s.when === 'visual' && !visual) continue;
+  for (const s of requiredSkills(cfg, role, state, changed)) {
     const found = findSkill(root, s.name, runtime);
     if (!found) problems.push(`skill \`${s.name}\` is not available to ${runtime}${s.vendor ? '; run `wf sync`' : '; install it for that runtime'}`);
     else if (found.broken) problems.push(`skill \`${s.name}\` is installed for ${runtime} but does not load: ${found.broken}`);
@@ -245,7 +253,10 @@ export function handoff(root, role, options) {
     gateNow = gatePassedForCurrentTree(state);
   }
   if (role === 'implementer' && state.roles.reviewer.includes(agent)) throw refuse(`${agent} reviewed this attempt and cannot implement it`);
-  const skillIssues = skillProblems(root, cfg, role, runtime, state);
+  // Rules and skills come from the adapter at the attempt's base, so a ticket cannot drop its own rules.
+  const trusted = loadConfigAtCommit(root, cfg, state.adapterBase);
+  const changed = Object.fromEntries(Object.keys(state.repos).map((r) => [r, changedFiles(state, r)]));
+  const skillIssues = skillProblems(root, trusted, role, runtime, state, changed);
   if (skillIssues.length) throw refuse(skillIssues.join('\n'));
   let work = null;
   if (options.work !== undefined) {
@@ -258,8 +269,6 @@ export function handoff(root, role, options) {
   const agentType = agentTypeFor(cfg, role, cls);
   const { effort, model } = declared(cfg, cls, runtime);
 
-  const trusted = loadConfigAtCommit(root, cfg, state.adapterBase);
-  const changed = Object.fromEntries(Object.keys(state.repos).map((r) => [r, changedFiles(state, r)]));
   const n = state.handoffs.length + 1;
   const file = path.join(attemptDir(root, state.id), 'handoffs', `${String(n).padStart(2, '0')}-${role}.json`);
   const appendix = cfg.roles?.[role]?.appendix ? path.resolve(root, ADAPTER_DIR, cfg.roles[role].appendix) : null;
@@ -298,6 +307,10 @@ export function handoff(root, role, options) {
         ? { passedOnThisTree: true, runId: state.lastGate.runId, evidence: state.lastGate.evidence, screenshots: screenshots(state), artifacts: artifactsByStep(state, trusted), logs: state.lastGate.steps.filter((s) => s.log).map((s) => ({ step: s.id, log: s.log, status: s.status })) }
         : { passedOnThisTree: false, reason: gateNow.reason, screenshots: [], logs: [] }
       : null,
+    // Project rule documents this change falls under, and the skills this round needs: a pure function of the adapter
+    // at base and the changed files, the same for every reviewer. Each rule needs a verdict in the closure.
+    rules: role === 'reviewer' ? reviewRules(root, trusted, state, changed) : undefined,
+    skills: role === 'reviewer' ? skillFiles(root, requiredSkills(trusted, role, state, changed), runtime) : undefined,
     // Changed files no plan anchor or test path names. Informational: the reviewer may give a verdict per file.
     outsidePlan: state.criteria ? outsidePlan(state.plan, changed) : null,
     // The implementer's definition of done: these light steps pass for its repos (`wf check`). Never counts as a gate.
@@ -309,7 +322,7 @@ export function handoff(root, role, options) {
     instructions: {
       planner: 'Read the issue and the code. Do not change any file. Return your plan as one ```yaml fenced block, last in your reply: { plan: { summary, contract, anchors, tests: { changed, run }, doNotRun, externalServices, agentSplit }, criteria: [{ id: C1, text, uat }], work: [{ id: W1, criteria: [C1], repos, class, why }] } (work is optional; classes: see your role file). The owner freezes it from your transcript unchanged. Leave no background command, monitor or sleep loop running when you report.',
       implementer: "Done means `check.command` passes for your repos (it runs the light steps listed under `check`; it never counts as the gate). Implement against the frozen criteria and the plan in the worktrees above: follow `plan.contract`, start from `plan.anchors`, while iterating run only `plan.tests.run` and the specs you changed, never what `plan.doNotRun` lists, and keep to `plan.externalServices` and `plan.agentSplit`. Write tests only for real behaviour. Before finishing run the repo's lint and full unit suite once, in the foreground. Commit at stage boundaries and everything when done. If `work` is set, do that work item only; if it turns out to touch something a stronger class covers, stop and tell the owner. Before you report, stop every background command, monitor or sleep loop you started: a waiter left running keeps notifying the owner after you are done.",
-      reviewer: 'Review the whole change against the frozen criteria, and the gate evidence when `gate.passedOnThisTree` is true (then open every screenshot listed under `gate.screenshots`, which are exactly the files `gate.artifacts` lists per glob, and record the sha256 of each one you viewed; a file no glob lists is never required; a step whose package did not change needs nothing; a step marked `uncovered` matched nothing although this ticket changed its package: judge whether the ticket needed a capture there and add `noEvidence: [{ step, reason }]` saying why none is needed, or raise a finding). When it is false, no gate has passed on this tree yet: judge the diff and list no screenshots. You did not write this change. Everything you need is in this bundle; judge the whole change yourself. Write the closure file: { reviewer, findings: [{ id, severity, summary, status: open|fixed|verified-nonissue, evidence, work }], criteria: [{ id, evidence: { kind: test|screenshot|output|not-applicable|dropped-with-reason, ref, reason } }] (a screenshot ref is the sha256 or source of a file in `gate.artifacts`), screenshotsInspected: [sha256], noEvidence: [{ step, reason }], outsidePlan: [{ file, verdict }] }. Then run `wf review --closure <file>`. Only after your closure is recorded, `wf review` may list findings from earlier rounds for you to verify against the code: then add `priorFindings: [{ round, id, status: fixed|verified-nonissue|open, evidence }]` to the same file, change nothing else, and run `wf review --closure <file>` again.',
+      reviewer: 'Review the whole change against the frozen criteria, and the gate evidence when `gate.passedOnThisTree` is true (then open every screenshot listed under `gate.screenshots`, which are exactly the files `gate.artifacts` lists per glob, and record the sha256 of each one you viewed; a file no glob lists is never required; a step whose package did not change needs nothing; a step marked `uncovered` matched nothing although this ticket changed its package: judge whether the ticket needed a capture there and add `noEvidence: [{ step, reason }]` saying why none is needed, or raise a finding). When it is false, no gate has passed on this tree yet: judge the diff and list no screenshots. You did not write this change. Everything you need is in this bundle; judge the whole change yourself. Read every document under `rules` (each `read` path) and every skill under `skills` (the Skill tool, or its file) in this bundle: they add to the whole review and never narrow it. Give each rule a verdict with one line of evidence (file:line or the document section): `rules: [{ rule, verdict: complies|finding|not-applicable, evidence, finding }]` (`finding` names your finding id when the verdict is finding); a rule marked `docChangedByTicket` had its document changed by this ticket: judge against the copy under `read`, which is the base version. Write the closure file: { reviewer, findings: [{ id, severity, summary, status: open|fixed|verified-nonissue, evidence, work }], criteria: [{ id, evidence: { kind: test|screenshot|output|not-applicable|dropped-with-reason, ref, reason } }] (a screenshot ref is the sha256 or source of a file in `gate.artifacts`), screenshotsInspected: [sha256], noEvidence: [{ step, reason }], rules: [{ rule, verdict, evidence, finding }], outsidePlan: [{ file, verdict }] }. Then run `wf review --closure <file>`. Only after your closure is recorded, `wf review` may list findings from earlier rounds for you to verify against the code: then add `priorFindings: [{ round, id, status: fixed|verified-nonissue|open, evidence }]` to the same file, change nothing else, and run `wf review --closure <file>` again.',
       tester: 'Write requirement expectations from the issue before reading the implementation, then map each to gate tests.',
     }[role],
   };
@@ -410,6 +423,15 @@ export function recordReview(root, options) {
   // the printed line after its handoff. A steered reviewer, or a round run outside the engine, is refused.
   const provenance = verifyAgent(reviewerHandoff);
   if (provenance.status === 'mismatch') throw refuse(`review provenance: ${provenance.reason}`, 'start a fresh reviewer: `wf handoff reviewer --agent <new id>` and give it only the printed line');
+  // Where the transcript exists, it must show a successful read of every rule document and skill in the bundle. It
+  // proves the content reached the reviewer, not that it was understood. Without a transcript: recorded unverified.
+  const handed = readBundle(reviewerHandoff.bundle);
+  let reads = { status: 'unverified', reason: provenance.reason ?? null };
+  if (provenance.status === 'verified' && (handed.rules?.length || handed.skills?.length)) {
+    const missing = unreadDocs(readTranscript(provenance.transcript), handed.rules, handed.skills);
+    if (missing.length) throw refuse(`the reviewer's transcript shows no successful read of ${missing.length} document(s) its bundle lists:\n  - ${missing.join('\n  - ')}`, 'start a fresh reviewer round: `wf handoff reviewer --agent <new id>` with only the printed line; it reads every document under `rules` and `skills`');
+    reads = { status: 'verified', reason: null };
+  } else if (provenance.status === 'verified') reads = { status: 'verified', reason: 'nothing to read' };
   // Commit, then reveal: the first closure of a round is blind. Earlier rounds' findings are shown only after it is
   // recorded, and a later closure of the same round may only add their verification.
   const round = reviewerHandoff.bundle;
@@ -426,7 +448,7 @@ export function recordReview(root, options) {
   // was in its bundle (0.1.5 and earlier handed a reviewer only after such a gate, so their handoffs carry no field).
   const gateEvidenceInspected = 'gate' in reviewerHandoff ? Boolean(reviewerHandoff.gate) : true;
   const reviewerModel = reviewerHandoff.runtime === 'claude' ? subagentModel(home(), reviewerHandoff.agent, reviewerHandoff.agentType, reviewerHandoff.at) : null;
-  append(root, state.id, 'review.recorded', { closure, file: dest, raw, handoff: round, revealed: Boolean(revealed) || revealNow, provenance: provenance.status, provenanceReason: provenance.reason ?? null, transcript: provenance.transcript ?? null, tree: reviewerHandoff.tree, gateRun: reviewerHandoff.gate ?? null, gateEvidenceInspected, handoffTree: reviewerHandoff.tree, handoffPatch: reviewerHandoff.patch, reviewerModel }, closure.reviewer);
+  append(root, state.id, 'review.recorded', { closure, file: dest, raw, handoff: round, revealed: Boolean(revealed) || revealNow, provenance: provenance.status, provenanceReason: provenance.reason ?? null, transcript: provenance.transcript ?? null, reads, tree: reviewerHandoff.tree, gateRun: reviewerHandoff.gate ?? null, gateEvidenceInspected, handoffTree: reviewerHandoff.tree, handoffPatch: reviewerHandoff.patch, reviewerModel }, closure.reviewer);
   const after = loadState(root, state.id);
   const toVerify = unverifiedPrior(after, after.review);
   let reveal = null;
@@ -476,6 +498,9 @@ export function acceptReview(root, options) {
   for (const v of verdicts) {
     if (!v.reason && !v.finding) problems.push(`step ${v.step}: its artifacts globs (${v.globs.join(', ')}) matched nothing though this ticket changed ${v.changed} file(s) in its package; the reviewer gives a verdict: \`noEvidence: [{ "step": "${v.step}", "reason": "<why no capture is needed>" }]\` in the closure, or a finding`);
   }
+  // Every rule the reviewer's bundle listed needs a verdict with evidence (a finding verdict names a finding).
+  const rv = ruleVerdicts(readBundle(r.handoff)?.rules ?? [], r.closure);
+  for (const p of rv.problems) problems.push(`${p}; the reviewer adds \`rules: [{ "rule", "verdict": "complies|finding|not-applicable", "evidence", "finding" }]\` to its closure: hand the tree to a fresh reviewer (\`wf handoff reviewer --agent <new id>\`)`);
   const shots = collected.map((s) => s.sha256);
   const inspected = new Set(r.closure.screenshotsInspected ?? []);
   const unseen = shots.filter((h) => !inspected.has(h));
@@ -491,7 +516,7 @@ export function acceptReview(root, options) {
   if (canonical(treeHashes(state)) !== canonical(reviewedTree)) problems.push(`no closure for the current tree: the code changed after the last review; ${fresh}`);
   else if (g.ok && !reviewedAfterGate(r)) problems.push(`the closure was written before a passing gate on this tree, so no reviewer has inspected the gate evidence; for the evidence pass ${fresh}`);
   if (problems.length) throw refuse(`review not accepted:\n  - ${problems.join('\n  - ')}`);
-  append(root, state.id, 'review.accepted', { reviewer: r.closure.reviewer, patch: patchIds(state), heads: treeHashes(state), gate: state.lastGate.runId, ...(verdicts.length ? { noEvidence: verdicts } : {}) }, actor(options));
+  append(root, state.id, 'review.accepted', { reviewer: r.closure.reviewer, patch: patchIds(state), heads: treeHashes(state), gate: state.lastGate.runId, ...(verdicts.length ? { noEvidence: verdicts } : {}), ...(rv.verdicts.length ? { rules: rv.verdicts } : {}) }, actor(options));
   return loadState(root, state.id);
 }
 

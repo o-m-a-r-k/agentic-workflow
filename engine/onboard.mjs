@@ -1,3 +1,4 @@
+import { ruleWarnings } from './rules.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -627,6 +628,11 @@ export async function doctor(root, { runSteps = true } = {}) {
   for (const w of siblingWarnings(root, cfg)) report.warnings.push({ ok: true, warn: true, check: w.check, problem: w.problem, fix: w.fix });
   for (const w of modelWarnings(root, cfg)) report.warnings.push({ ok: true, warn: true, check: w.check, problem: w.problem, fix: w.fix });
   for (const w of staticArtifactWarnings(cfg)) report.warnings.push({ ok: true, warn: true, ...w });
+  if (adapterBase) {
+    try {
+      for (const w of ruleWarnings(root, loadConfigAtCommit(root, cfg, adapterBase), adapterBase)) report.warnings.push({ ok: true, warn: true, ...w });
+    } catch {}
+  }
   const art = artifactReport(root, cfg);
   if (art.counts.length) report.config.push({ ok: true, check: `artifacts matched in the last gate (${art.from})`, note: art.counts.join('\n    ') });
   for (const w of art.warnings) report.warnings.push({ ok: true, warn: true, ...w });

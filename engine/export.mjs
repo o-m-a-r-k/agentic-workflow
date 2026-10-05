@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { loadConfig } from './config.mjs';
 import { attemptDir } from './ledger.mjs';
-import { evidenceSteps, noEvidenceVerdicts } from './lifecycle.mjs';
+import { evidenceSteps, noEvidenceVerdicts, readBundle } from './lifecycle.mjs';
 import { redactor } from './secrets.mjs';
 import { hashFile, now } from './util.mjs';
 
@@ -40,6 +40,7 @@ export function exportData(root, s) {
     // What the last gate collected per `artifacts` glob: exactly the files the reviewer must inspect.
     evidence: (s.lastGate?.steps ?? []).filter((x) => x.artifactGlobs?.length).flatMap((x) => x.artifactGlobs.map((g) => ({ step: x.id, glob: g.glob, expanded: g.expanded, files: g.files.map((f) => ({ source: f.source, sha256: f.sha256 })) }))),
     noEvidence,
+    rules: rulesView(s),
     flaky: s.flaky ?? [],
     tracker: { pending: s.tracker.pending.map((a) => ({ event: a.event, op: a.op, status: a.status ?? null })), done: s.tracker.done.map((d) => ({ event: d.event, at: d.at })) },
     delivery: { completedAt: s.delivery.completedAt, repos: Object.values(s.delivery.repos).map((d) => ({ repo: d.repo, commit: d.commit ?? null, skipped: d.skipped ?? null })) },
@@ -47,6 +48,18 @@ export function exportData(root, s) {
     delivered: deliveredView(s),
     closedAt: s.closedAt,
   };
+}
+
+// The rules the latest reviewer's bundle listed, with that round's verdicts (as accepted, when accepted).
+function rulesView(s) {
+  const h = s.handoffs.filter((x) => x.role === 'reviewer').at(-1);
+  const listed = readBundle(h?.bundle).rules ?? [];
+  const review = s.reviews.filter((r) => r.handoff === h?.bundle).at(-1);
+  const given = s.accepted?.rules ?? (Array.isArray(review?.closure?.rules) ? review.closure.rules : []);
+  return listed.map((r) => {
+    const v = given.find((x) => x?.rule === r.id);
+    return { rule: r.id, docs: r.docs ?? [], matched: r.matched.length, docChangedByTicket: r.docChangedByTicket, verdict: v?.verdict ?? null, evidence: v?.evidence ?? null, finding: v?.finding ?? null, reads: review?.reads?.status ?? null };
+  });
 }
 
 function deliveredView(s) {
@@ -110,6 +123,7 @@ export function exportHtml(d, images = {}) {
     d.checks.length ? sec('Checks (light steps, never a gate)', d.checks.map((g) => `<h3>${badge(g.status)} ${esc(g.runId)}</h3>${table(['Step', 'Status', 'Seconds'], g.steps.map((x) => [esc(x.id), badge(x.status), esc(x.seconds ?? '')]))}`).join('')) : '',
     d.evidence.length ? sec('Gate evidence (last gate)', `<p class="muted">Each step's artifacts globs, expanded for this ticket. The reviewer inspects every file listed; nothing outside them is required. A glob that matched nothing means no screenshots for this ticket from it.</p>${table(['Step', 'Glob', 'Expanded', 'Files'], d.evidence.map((e) => [esc(e.step), esc(e.glob), esc(e.expanded.join(', ')), e.files.length ? e.files.map((f) => `${esc(f.source)} <small>${esc(f.sha256.slice(0, 12))}</small>`).join('<br>') : '<span class="muted">no screenshots for this ticket</span>']))}`) : '',
     d.noEvidence.length ? sec('Steps without captures', `<p class="muted">These steps' globs matched nothing although the ticket changed their package. Acceptance needs the reviewer's verdict on each: a reason no capture is needed, or a finding.</p>${table(['Step', 'Changed files', 'Globs', 'Verdict'], d.noEvidence.map((v) => [esc(v.step), esc(v.changed), esc(v.globs.join(', ')), v.reason ? esc(v.reason) : v.finding ? `finding ${esc(v.finding)}` : '<span class="warn">no verdict yet</span>']))}`) : '',
+    d.rules.length ? sec('Rules', `<p class="muted">Project rule documents this change falls under (adapter at base, matched against the changed files); the reviewer reads each and gives a verdict.</p>${table(['Rule', 'Documents', 'Files matched', 'Verdict', 'Evidence', 'Read'], d.rules.map((r) => [esc(r.rule), esc(r.docs.join(', ')) + (r.docChangedByTicket ? ' <span class="warn">(changed by this ticket)</span>' : ''), esc(r.matched), r.verdict ? `${badge(r.verdict)}${r.finding ? ` ${esc(r.finding)}` : ''}` : '<span class="warn">no verdict yet</span>', esc(r.evidence ?? ''), esc(r.reads ?? '')]))}`) : '',
     d.flaky.length ? sec('Flaky', table(['Step', 'Failed run', 'Passed run', 'Suites'], d.flaky.map((f) => [esc(f.step), esc(f.failedRun), esc(f.passedRun), esc((f.suites ?? []).join(', '))]))) : '',
     sec('Tracker', table(['Event', 'State'], [...d.tracker.done.map((t) => [esc(t.event), `${badge('recorded')} ${esc(t.at)}`]), ...d.tracker.pending.map((t) => [esc(t.event), `${badge('pending')} ${esc(t.op)}${t.status ? ` ${esc(t.status)}` : ''}`])])),
     deliveredSection(d, images),
@@ -129,7 +143,7 @@ pre{white-space:pre-wrap;word-break:break-word;background:var(--chip);padding:8p
 .shots{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}figure{margin:0}figcaption{font-size:13px;margin-top:4px}
 .shot img{width:100%;border:1px solid var(--line);border-radius:6px;cursor:zoom-in;display:block}.shot input{position:absolute;opacity:0;pointer-events:none}
 .shot input:checked+img{position:fixed;inset:0;margin:auto;width:auto;max-width:96vw;max-height:96vh;z-index:10;cursor:zoom-out;box-shadow:0 0 0 100vmax rgba(0,0,0,.8);background:var(--card)}
-.b-passed,.b-fixed,.b-accepted,.b-delivered,.b-recorded,.b-done,.b-verified-nonissue,.b-reused{color:var(--ok)}.b-failed,.b-open,.b-interrupted{color:var(--bad)}.b-pending,.b-stopped{color:var(--warn)}
+.b-complies,.b-passed,.b-fixed,.b-accepted,.b-delivered,.b-recorded,.b-done,.b-verified-nonissue,.b-reused{color:var(--ok)}.b-finding,.b-failed,.b-open,.b-interrupted{color:var(--bad)}.b-pending,.b-stopped{color:var(--warn)}
 </style></head><body><main>
 ${body}
 </main></body></html>
