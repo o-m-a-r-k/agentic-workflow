@@ -69,7 +69,8 @@ function gateText(result) {
     const extra = s.reason ? `  ${s.reason}` : s.durationMs !== undefined ? `  ${(s.durationMs / 1000).toFixed(1)}s${s.workers ? ` workers=${s.workers.n}(${s.workers.source})` : ''}${s.log && s.status === 'failed' ? `  log: ${s.log}` : ''}` : '';
     return `  ${d.padEnd(11)} ${s.id}${extra}`;
   });
-  const head = result.record ? `gate ${result.record.status} (${result.record.runId})` : `gate plan${result.plan.full ? ' (full: the adapter changed)' : ''}`;
+  const focused = (result.record ?? result.plan)?.focused ? ' (focused: proof while repairing; review and delivery need a gate without --focused)' : '';
+  const head = result.record ? `gate ${result.record.status} (${result.record.runId})${focused}` : `gate plan${result.plan.full ? ' (full: the adapter changed)' : ''}${focused}`;
   const imp = result.plan?.impact ?? result.record?.impact;
   const impLine = imp && (imp.contractsChanged.length || imp.dependents.length) ? `\n  contracts changed: ${imp.contractsChanged.map((c) => c.contract).join(', ') || 'none'}; dependents pulled in: ${imp.dependents.join(', ') || 'none'}` : '';
   return `${head}${result.recovered ? `\n  recovered ${result.recovered.carried} finished step(s) from run ${result.recovered.runId} (runner died)` : ''}${impLine}\n${rows.join('\n')}`;

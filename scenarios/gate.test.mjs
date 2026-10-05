@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { WF, commitIn, criteriaFile, ok, sh, singleRepoProject, state, wf, write, yaml } from './helpers.mjs';
+import { WF, closureFile, commitIn, criteriaFile, goodClosure, ok, sh, singleRepoProject, state, wf, write, yaml } from './helpers.mjs';
 
 function admitted(root, base, item) {
   const e = ok(wf(root, ['entry', '--item', item, '--owner', 'o', '--json'])).json();
@@ -214,3 +214,30 @@ import * as util from '../engine/util.mjs';
 function awaitUtil() {
   return util;
 }
+
+test('a focused gate is repair proof only: review, accept and delivery need a gate that ran the heavy steps', () => {
+  const steps = [
+    { id: 'unit', repo: 'app', run: 'true', inputs: ['src/**'], tier: 'light' },
+    { id: 'e2e', repo: 'app', run: 'true', inputs: ['src/**'], tier: 'heavy' },
+  ];
+  const { base, root } = singleRepoProject('focused', { focused: ['src/**'], gate: { steps } });
+  const e = admitted(root, base, 'ENG-28');
+  commitIn(e.repos.app.worktree, { 'src/a.txt': 'f\n' });
+  const g1 = gateJson(root, e.id, ['--focused']);
+  assert.equal(g1.code, 0);
+  assert.equal(g1.data.focused, true, 'the run records that it was focused');
+  assert.equal(byId(g1.data.steps).e2e.skippedBy, 'focused');
+  const refused = wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', e.id]);
+  assert.equal(refused.code, 75);
+  assert.match(refused.err, /focused and skipped e2e/);
+  assert.match(state(root, e.id).next, /without --focused/);
+  const g2 = byId(gateJson(root, e.id).data.steps);
+  assert.equal(g2.unit.status, 'reused', 'light steps that passed in the focused run are reused');
+  assert.equal(g2.e2e.status, 'passed');
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', e.id]));
+  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r')), '--attempt', e.id]));
+  assert.equal(gateJson(root, e.id, ['--focused']).code, 0);
+  const accept = wf(root, ['accept', '--attempt', e.id]);
+  assert.equal(accept.code, 75, 'a newer focused gate is not the full proof of the tree');
+  assert.match(accept.err, /focused and skipped e2e/);
+});

@@ -149,7 +149,7 @@ flowchart LR
 - **quick:** for small fixes. Same gate and independent review, but no planner and no tracker.
 - **standard:** one ticket, the full lifecycle.
 - **batch:** tickets share their heavy gate. Each ticket defers its heavy steps, the batch runs them once, then everything is delivered together and each ticket gets its own handoff.
-- **focused:** a gate option, not a lane. Changes to paths the adapter marks as isolated run a narrower proof.
+- **focused:** a gate option, not a lane. When every changed file is in the adapter's `focused` paths, `wf gate --focused` runs only the light steps: fast proof while repairing. It never counts as the proof of a tree: review handoff, `wf accept` and `wf deliver` refuse a focused gate and name the heavy steps it skipped.
 
 ## Roles and handoffs
 

@@ -3,7 +3,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { actor, branchName, changedFiles, cleanupWorktrees, entry, openState, treeHashes, worktreeDir } from './attempt.mjs';
 import { ADAPTER_DIR, adapterFileAtCommit, loadConfig, loadConfigAtCommit, repoDir } from './config.mjs';
-import { gatePassedForCurrentTree, screenshots } from './gate.mjs';
+import { focusedSkips, gatePassedForCurrentTree, screenshots } from './gate.mjs';
 import { append, attemptDir, listAttempts, loadState } from './ledger.mjs';
 import { deliveryOrder, impact, inside, packageOf } from './topology.mjs';
 import { findSkill } from './skills.mjs';
@@ -461,6 +461,7 @@ function phaseAction(cfg, state) {
   if (state.lane !== 'batch' && !state.handoffs.some((h) => h.role === 'implementer')) return 'start the implementer: `wf handoff implementer --agent <id>`';
   const g = state.lastGate;
   if (!g || g.status !== 'passed') return g ? `gate ${g.status}: fix and commit, then \`wf gate\`` : 'commit the change, then `wf gate`';
+  if (focusedSkips(g).length) return `the last gate was focused (skipped ${focusedSkips(g).join(', ')}): run \`wf gate\` without --focused before review`;
   if (!state.review) return 'hand to an independent reviewer: `wf handoff reviewer --agent <id>`';
   if (!state.accepted) {
     const open = state.review.closure.findings.filter((f) => !['fixed', 'verified-nonissue'].includes(f.status));

@@ -126,7 +126,7 @@ export async function planGate(root, state, options = {}) {
       }
     }
     if (!full && focused && entry.tier === 'heavy') {
-      steps.push({ ...entry, decision: 'skip', reason: 'focused proof runs light steps only' });
+      steps.push({ ...entry, decision: 'skip', skippedBy: 'focused', reason: 'focused proof runs light steps only' });
       continue;
     }
     if (!full && state.deferHeavy && entry.tier === 'heavy' && step.deferrable !== false) {
@@ -521,7 +521,7 @@ async function execute(root, state, plan) {
     const prior = findReuse(state, s.id, s.key);
     results.push({ ...prior, status: 'reused', reusedFrom: prior.runId, reason: s.reason, runId });
   }
-  for (const s of plan.steps.filter((x) => ['skip', 'defer'].includes(x.decision))) results.push({ id: s.id, repo: s.repo, tier: s.tier, status: s.decision === 'defer' ? 'deferred' : 'skipped', reason: s.reason, runId });
+  for (const s of plan.steps.filter((x) => ['skip', 'defer'].includes(x.decision))) results.push({ id: s.id, repo: s.repo, tier: s.tier, status: s.decision === 'defer' ? 'deferred' : 'skipped', reason: s.reason, skippedBy: s.skippedBy, runId });
   saveProgress();
 
   const leases = plan.cfg.gate.leases ?? {};
@@ -592,10 +592,15 @@ export function stopGate(root, state, reason) {
   return lock;
 }
 
-// A passing gate counts only for the exact tree it ran on.
+// Steps a `--focused` gate left out. Such a gate is proof while repairing, never the full proof of a tree.
+export const focusedSkips = (g) => (g?.steps ?? []).filter((s) => s.status === 'skipped' && (s.skippedBy === 'focused' || s.reason === 'focused proof runs light steps only')).map((s) => s.id);
+
+// A passing gate counts only for the exact tree it ran on, and only when it ran every step that tree needs.
 export function gatePassedForCurrentTree(state) {
   const g = state.lastGate;
   if (!g || g.status !== 'passed') return { ok: false, reason: g ? `last gate ${g.status}` : 'no gate has run' };
+  const skipped = focusedSkips(g);
+  if (skipped.length) return { ok: false, reason: `the last gate was focused and skipped ${skipped.join(', ')}; run \`wf gate\` without --focused` };
   if (canonical(treeHashes(state)) !== canonical(g.tree)) return { ok: false, reason: 'the code changed after the last passing gate' };
   return { ok: true, gate: g };
 }
