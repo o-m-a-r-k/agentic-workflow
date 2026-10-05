@@ -143,14 +143,14 @@ test('the gate starts light steps first and the longest heavy step first', () =>
   assert.deepEqual(starts(ok(wf(root, ['gate', '--attempt', id])).out), ['light', 'h-long', 'h-short'], 'then the longest heavy step first');
 });
 
-test('changed files outside the plan are listed for the reviewer and counted in wf status', () => {
+test('changed files outside the plan are listed for the reviewer and warned about in wf status', () => {
   // Named failure: an implementer changed audit-read code outside the plan and nothing pointed the reviewer at it.
   const plan = { plan: { summary: 's', anchors: ['src/a.txt:1 the text'], tests: { changed: ['test/a.test.js'] } }, criteria: [{ id: 'C1', text: 'a' }] };
   const { base, root, id } = implemented('scope', {}, {}, { plan, change: { 'src/a.txt': 'b\n', 'test/a.test.js': 't\n', 'src/audit.txt': 'x\n' } });
-  assert.match(ok(wf(root, ['status'])).out, /outside the plan: 1 changed file\(s\)/);
+  assert.match(ok(wf(root, ['status'])).out, /warning: 1 changed file\(s\) outside the plan: app:src\/audit\.txt/);
   const rev = ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', id, '--json'])).json();
   assert.deepEqual(JSON.parse(fs.readFileSync(rev.bundle, 'utf8')).outsidePlan, ['app:src/audit.txt']);
-  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r', { outsidePlan: [{ file: 'app:src/audit.txt', verdict: 'needed for C1' }] })), '--attempt', id]));
+  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r', { outsidePlan: [{ file: 'app:src/audit.txt', verdict: 'covered', by: 'C1', evidence: 'C1 needs the audit read' }] })), '--attempt', id]));
 });
 
 test('wf run --lease holds a machine-wide slot for its command and waits while another holder has it', async () => {

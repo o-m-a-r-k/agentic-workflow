@@ -2,7 +2,7 @@
 
 A delivery workflow for AI coding agents, packaged as one plugin for Claude Code and Codex.
 
-> **Status: v0.1, early.** The engine, CLI, onboarding and all three lanes work and are covered by 117 scenario tests (including a game day that runs one ticket through every fault seen on real tickets) on real git repositories, and reviewed by independent agents. It has not yet been used on a production project; expect rough edges. Design: [docs/DESIGN.md](docs/DESIGN.md). Feedback through issues is welcome.
+> **Status: v0.1, early.** The engine, CLI, onboarding and all three lanes work and are covered by 119 scenario tests (including a game day that runs one ticket through every fault seen on real tickets) on real git repositories, and reviewed by independent agents. It has not yet been used on a production project; expect rough edges. Design: [docs/DESIGN.md](docs/DESIGN.md). Feedback through issues is welcome.
 
 Every change runs through the same lifecycle: a ticket is admitted, worked on in isolated worktrees, planned, implemented, proven by a gate, reviewed by an agent that did not write it, delivered, and handed back to the tracker with a readback. Each step checks evidence the engine wrote, never what an agent says it did.
 
@@ -324,7 +324,11 @@ Every screenshot a step's `artifacts` globs match on a gate run is evidence the 
 
 ### Scope
 
-Bundles list `outsidePlan`: changed files that no plan anchor or test path names (an implementer once changed audit-read code outside the plan). The reviewer may add a verdict per file; `wf status` shows the count. It never blocks.
+When the frozen plan names paths (`anchors`, `tests.changed`, `tests.run`), every changed file none of them names is outside the plan. Named failures: an implementer changed audit-read code outside the plan and the reviewer marked it minor; a capture fix and an e2e build change with `.gitignore` entries were covered by no criterion until the owner amended the criteria after the review.
+
+- **The owner is told before the review.** `wf status`, `wf resume`, `wf check` and `wf gate` (before the run starts) print `N changed file(s) outside the plan: <every file> — amend the criteria (wf criteria amend) or fix it, before the review`, and `wf handoff reviewer` repeats it on stderr (never in the reviewer's one-line prompt). It is a warning, never a refusal. For an intended change, amend the criteria before handing to the reviewer.
+- **The reviewer gives each file a verdict.** The bundle lists them under `outsidePlan`; the closure carries `outsidePlan: [{ "file": "app:src/audit.ts", "verdict": "covered", "by": "C2", "evidence": "C2 logs the audit read" }]`. `covered` needs `by` to be a criterion id (amended criteria included); anything no criterion covers is `"verdict": "finding"` with the finding id in `by`. `wf accept` refuses, listing each file, until every listed file has a valid verdict with evidence. Verdicts are recorded on the acceptance and shown in `wf export`.
+- **Not scope:** a package's `docsOnly` files, files a step `ignores` (generated output), and the plugin's own `.wf-evidence/` and `.wf-worktrees/` paths. A plan that names no paths requires nothing.
 
 ### Leases for agents' own stacks
 

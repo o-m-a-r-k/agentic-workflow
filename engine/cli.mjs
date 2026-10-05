@@ -8,8 +8,7 @@ import { findRoot, loadConfig, requireRoot } from './config.mjs';
 import { exportAttempt, exportFile } from './export.mjs';
 import { liveGate, runGate, runWithLease, stopGate } from './gate.mjs';
 import { append, listAttempts, loadState } from './ledger.mjs';
-import { outsidePlan } from './scope.mjs';
-import { acceptReview, amendCriteria, batchCreate, batchEject, closeAfterHandoff, deliver, freezeCriteria, handoff, needsShown, nextAction, recordReview, recordShown, reopen, shownDraftFile, uncovered, withAttempt } from './lifecycle.mjs';
+import { acceptReview, amendCriteria, batchCreate, batchEject, closeAfterHandoff, deliver, freezeCriteria, handoff, needsShown, nextAction, outsideWarning, recordReview, recordShown, reopen, shownDraftFile, uncovered, withAttempt } from './lifecycle.mjs';
 import { detect, doctor, register, registry, setEnabled, sync, writeDraft } from './onboard.mjs';
 import * as secrets from './secrets.mjs';
 import { report, toCsv, toHandoffCsv, toHtml } from './telemetry.mjs';
@@ -64,14 +63,6 @@ const print = (options, human, data) => {
   else process.stdout.write(`${typeof human === 'string' ? human : JSON.stringify(human, null, 2)}\n`);
 };
 
-function changedFilesOf(s, r) {
-  try {
-    return changedFiles(s, r);
-  } catch {
-    return [];
-  }
-}
-
 function summary(root, s, { base = null, resume = false } = {}) {
   const lines = [`${s.id}  ${s.item}  lane=${s.lane}  intent=${s.intent}  phase=${s.phase}`, `  owner: ${s.owner}`];
   for (const [name, r] of Object.entries(s.repos)) lines.push(`  ${name}: ${r.worktree} (base ${r.base.slice(0, 10)})`);
@@ -86,10 +77,10 @@ function summary(root, s, { base = null, resume = false } = {}) {
   if (s.lastGate) lines.push(`  last gate: ${s.lastGate.status} (${s.lastGate.runId})`);
   if (s.checks?.length) lines.push(`  last check: ${s.checks.at(-1).status} (${s.checks.at(-1).runId}; light steps only, never counts as the gate)`);
   if (s.flaky?.length) lines.push(`  flaky: ${[...new Set(s.flaky.map((f) => `${f.step}${f.suites?.length ? ` (${f.suites.join(', ')})` : ''}`))].join(', ')} failed and then passed with the same inputs`);
-  if (s.criteria && isOpen(s)) {
+  if (s.criteria && isOpen(s) && !s.accepted) {
     try {
-      const outside = outsidePlan(s.plan, Object.fromEntries(Object.keys(s.repos).map((r) => [r, changedFilesOf(s, r)])));
-      if (outside?.length) lines.push(`  outside the plan: ${outside.length} changed file(s) no plan anchor or test path names (listed in the reviewer bundle)`);
+      const w = outsideWarning(root, s);
+      if (w) lines.push(`  warning: ${w}`);
     } catch {}
   }
   if (s.phase === 'handoff-pending' && s.delivery.screenshots) lines.push(showBlock(root, s).trim().replace(/^/gm, '  ').replace(/^ {2}SHOW TO OWNER/, '  delivered screenshots — SHOW TO OWNER'));
@@ -353,7 +344,12 @@ async function dispatch(cmd, sub, positional, options) {
       const api = await trackerApi(root, r.state.id);
       if (api && sub !== 'reviewer') process.stderr.write(`${api.trim()}\n`);
       // The reviewer is started blind: this one line is its whole prompt, so nothing else is printed to pass along.
-      if (sub === 'reviewer') print(options, startPrompt, { ...r, startPrompt });
+      if (sub === 'reviewer') {
+        // To the owner on stderr, never into the reviewer's one-line prompt on stdout.
+        const w = outsideWarning(root, r.state);
+        if (w) process.stderr.write(`warning: ${w}\n`);
+        print(options, startPrompt, { ...r, startPrompt });
+      }
       else print(options, `${sub} bundle: ${r.bundle}${r.work ? `\nwork item ${r.work}, class ${r.class}` : `\nclass ${r.class}`}${r.effort ? `, effort ${r.effort}` : ''}${r.model ? `, model ${r.model}` : ''}\nStart agent type ${r.agentType} (name it ${options.agent}; do not pass a model) with: "${startPrompt}"`, { ...r, startPrompt });
       return 0;
     }
@@ -362,6 +358,11 @@ async function dispatch(cmd, sub, positional, options) {
       const s = openState(root, options);
       const check = cmd === 'check';
       const repos = check && options.repo ? String(options.repo).split(',') : null;
+      // Before the run: an unplanned change is amended into the criteria (or fixed) before the review, not after.
+      try {
+        const w = s.accepted ? null : outsideWarning(root, s);
+        if (w) (options.json ? process.stderr : process.stdout).write(`wf ${cmd}: warning: ${w}\n`);
+      } catch {}
       // Live progress goes to stdout, or to stderr with --json so stdout stays one JSON document.
       const r = await runGate(root, s, { prepareOnly: options['prepare-only'] === true, full: !check && options.full === true, focused: !check && options.focused === true, rerunFailed: !check && options['rerun-failed'] === true ? true : undefined, check, repos, live: options.json ? process.stderr : process.stdout });
       const note = check ? '\n  (a check runs light steps only; it is reused by the gate but never counts as one)' : r.record?.rerunFailed ? '\n  (--rerun-failed: proof while repairing; acceptance and delivery need a full `wf gate`)' : '';

@@ -9,7 +9,7 @@ import { append, attemptDir, listAttempts, loadState } from './ledger.mjs';
 import { changedForStep, deliveryOrder, impact, inside, packageOf } from './topology.mjs';
 import { findSkill } from './skills.mjs';
 import { lastFencedYaml, lastModel, readTranscript, sessionModel, subagentModel, subagentTranscripts } from './telemetry.mjs';
-import { outsidePlan } from './scope.mjs';
+import { outsidePlan, outsideVerdicts } from './scope.mjs';
 import { emitTrackerEvent } from './tracker.mjs';
 import { requiredSkills, reviewRules, ruleVerdicts, skillFiles, unreadDocs } from './rules.mjs';
 import { home, startPromptFor, verifyAgent } from './provenance.mjs';
@@ -21,6 +21,30 @@ const readStructured = (file) => {
   if (fenced) text = fenced[1];
   return file.endsWith('.json') ? JSON.parse(text) : YAML.parse(text);
 };
+
+// Changed files the plan names nowhere (noise filtered with the adapter at base), or null when the plan names no paths.
+export function outsideFiles(root, state) {
+  if (!state.criteria) return null;
+  let trusted = null;
+  try {
+    trusted = loadConfigAtCommit(root, loadConfig(root), state.adapterBase);
+  } catch {}
+  const changed = Object.fromEntries(Object.keys(state.repos).map((r) => {
+    try {
+      return [r, changedFiles(state, r)];
+    } catch {
+      return [r, []];
+    }
+  }));
+  return outsidePlan(state.plan, changed, trusted);
+}
+
+// The owner's warning before a review: amend the criteria for an intentional change, or fix it. Never a refusal.
+export function outsideWarning(root, state) {
+  const files = outsideFiles(root, state);
+  if (!files?.length) return null;
+  return withAttempt(root, state, `${files.length} changed file(s) outside the plan: ${files.join(', ')} — amend the criteria (\`wf criteria amend --file <f> --reason "why"\`) for an intended change, or fix it, before the review; the reviewer must give each a verdict (covered by a criterion, or a finding)`);
+}
 
 // A handoff bundle as written (a missing or unreadable one reads as empty: nothing listed, nothing required).
 export function readBundle(file) {
@@ -311,8 +335,9 @@ export function handoff(root, role, options) {
     // at base and the changed files, the same for every reviewer. Each rule needs a verdict in the closure.
     rules: role === 'reviewer' ? reviewRules(root, trusted, state, changed) : undefined,
     skills: role === 'reviewer' ? skillFiles(root, requiredSkills(trusted, role, state, changed), runtime) : undefined,
-    // Changed files no plan anchor or test path names. Informational: the reviewer may give a verdict per file.
-    outsidePlan: state.criteria ? outsidePlan(state.plan, changed) : null,
+    // Changed files no plan anchor or test path names (docs-only, ignored and evidence files left out). Each needs the
+    // reviewer's verdict: covered by a criterion id, or a finding.
+    outsidePlan: state.criteria ? outsidePlan(state.plan, changed, trusted) : null,
     // The implementer's definition of done: these light steps pass for its repos (`wf check`). Never counts as a gate.
     check: role === 'implementer' ? { command: `wf check --attempt ${state.id}${work?.repos?.length === 1 ? ` --repo ${work.repos[0]}` : ''}`, steps: trusted.gate.steps.filter((s) => (s.tier ?? 'light') === 'light' && state.repos[s.repo] && (!work?.repos?.length || work.repos.includes(s.repo))).map((s) => ({ id: s.id, repo: s.repo, run: s.run ?? `plugin ${s.plugin}` })) } : undefined,
     // Steps that failed and then passed with the same inputs and runner.
@@ -322,7 +347,7 @@ export function handoff(root, role, options) {
     instructions: {
       planner: 'Read the issue and the code. Do not change any file. Return your plan as one ```yaml fenced block, last in your reply: { plan: { summary, contract, anchors, tests: { changed, run }, doNotRun, externalServices, agentSplit }, criteria: [{ id: C1, text, uat }], work: [{ id: W1, criteria: [C1], repos, class, why }] } (work is optional; classes: see your role file). The owner freezes it from your transcript unchanged. Leave no background command, monitor or sleep loop running when you report.',
       implementer: "Done means `check.command` passes for your repos (it runs the light steps listed under `check`; it never counts as the gate). Implement against the frozen criteria and the plan in the worktrees above: follow `plan.contract`, start from `plan.anchors`, while iterating run only `plan.tests.run` and the specs you changed, never what `plan.doNotRun` lists, and keep to `plan.externalServices` and `plan.agentSplit`. Write tests only for real behaviour. Before finishing run the repo's lint and full unit suite once, in the foreground. Commit at stage boundaries and everything when done. If `work` is set, do that work item only; if it turns out to touch something a stronger class covers, stop and tell the owner. Before you report, stop every background command, monitor or sleep loop you started: a waiter left running keeps notifying the owner after you are done.",
-      reviewer: 'Review the whole change against the frozen criteria, and the gate evidence when `gate.passedOnThisTree` is true (then open every screenshot listed under `gate.screenshots`, which are exactly the files `gate.artifacts` lists per glob, and record the sha256 of each one you viewed; a file no glob lists is never required; a step whose package did not change needs nothing; a step marked `uncovered` matched nothing although this ticket changed its package: judge whether the ticket needed a capture there and add `noEvidence: [{ step, reason }]` saying why none is needed, or raise a finding). When it is false, no gate has passed on this tree yet: judge the diff and list no screenshots. You did not write this change. Everything you need is in this bundle; judge the whole change yourself. Read every document under `rules` (each `read` path) and every skill under `skills` (the Skill tool, or its file) in this bundle: they add to the whole review and never narrow it. Give each rule a verdict with one line of evidence (file:line or the document section): `rules: [{ rule, verdict: complies|finding|not-applicable, evidence, finding }]` (`finding` names your finding id when the verdict is finding); a rule marked `docChangedByTicket` had its document changed by this ticket: judge against the copy under `read`, which is the base version. Write the closure file: { reviewer, findings: [{ id, severity, summary, status: open|fixed|verified-nonissue, evidence, work }], criteria: [{ id, evidence: { kind: test|screenshot|output|not-applicable|dropped-with-reason, ref, reason } }] (a screenshot ref is the sha256 or source of a file in `gate.artifacts`), screenshotsInspected: [sha256], noEvidence: [{ step, reason }], rules: [{ rule, verdict, evidence, finding }], outsidePlan: [{ file, verdict }] }. Then run `wf review --closure <file>`. Only after your closure is recorded, `wf review` may list findings from earlier rounds for you to verify against the code: then add `priorFindings: [{ round, id, status: fixed|verified-nonissue|open, evidence }]` to the same file, change nothing else, and run `wf review --closure <file>` again.',
+      reviewer: 'Review the whole change against the frozen criteria, and the gate evidence when `gate.passedOnThisTree` is true (then open every screenshot listed under `gate.screenshots`, which are exactly the files `gate.artifacts` lists per glob, and record the sha256 of each one you viewed; a file no glob lists is never required; a step whose package did not change needs nothing; a step marked `uncovered` matched nothing although this ticket changed its package: judge whether the ticket needed a capture there and add `noEvidence: [{ step, reason }]` saying why none is needed, or raise a finding). When it is false, no gate has passed on this tree yet: judge the diff and list no screenshots. You did not write this change. Everything you need is in this bundle; judge the whole change yourself. Read every document under `rules` (each `read` path) and every skill under `skills` (the Skill tool, or its file) in this bundle: they add to the whole review and never narrow it. Give each rule a verdict with one line of evidence (file:line or the document section): `rules: [{ rule, verdict: complies|finding|not-applicable, evidence, finding }]` (`finding` names your finding id when the verdict is finding); a rule marked `docChangedByTicket` had its document changed by this ticket: judge against the copy under `read`, which is the base version. Write the closure file: { reviewer, findings: [{ id, severity, summary, status: open|fixed|verified-nonissue, evidence, work }], criteria: [{ id, evidence: { kind: test|screenshot|output|not-applicable|dropped-with-reason, ref, reason } }] (a screenshot ref is the sha256 or source of a file in `gate.artifacts`), screenshotsInspected: [sha256], noEvidence: [{ step, reason }], rules: [{ rule, verdict, evidence, finding }], outsidePlan: [{ file, verdict: covered|finding, by, evidence }] } (one outsidePlan entry per file the bundle lists under `outsidePlan`: `covered` when a criterion covers that change, with its id in `by`; otherwise `finding` with your finding id in `by`). Then run `wf review --closure <file>`. Only after your closure is recorded, `wf review` may list findings from earlier rounds for you to verify against the code: then add `priorFindings: [{ round, id, status: fixed|verified-nonissue|open, evidence }]` to the same file, change nothing else, and run `wf review --closure <file>` again.',
       tester: 'Write requirement expectations from the issue before reading the implementation, then map each to gate tests.',
     }[role],
   };
@@ -498,6 +523,9 @@ export function acceptReview(root, options) {
   for (const v of verdicts) {
     if (!v.reason && !v.finding) problems.push(`step ${v.step}: its artifacts globs (${v.globs.join(', ')}) matched nothing though this ticket changed ${v.changed} file(s) in its package; the reviewer gives a verdict: \`noEvidence: [{ "step": "${v.step}", "reason": "<why no capture is needed>" }]\` in the closure, or a finding`);
   }
+  // Every changed file outside the plan the reviewer's bundle listed needs a verdict: covered by a criterion, or a finding.
+  const ov = outsideVerdicts(readBundle(r.handoff)?.outsidePlan ?? [], r.closure, state.criteria);
+  if (ov.problems.length) problems.push(`${ov.problems.length} changed file(s) outside the plan without a valid verdict:\n    - ${ov.problems.join('\n    - ')}\n    the reviewer adds \`outsidePlan: [{ "file", "verdict": "covered|finding", "by": "<criterion or finding id>", "evidence" }]\`; for an intended change, amend the criteria (\`wf criteria amend\`) and hand the tree to a fresh reviewer (\`wf handoff reviewer --agent <new id>\`)`);
   // Every rule the reviewer's bundle listed needs a verdict with evidence (a finding verdict names a finding).
   const rv = ruleVerdicts(readBundle(r.handoff)?.rules ?? [], r.closure);
   for (const p of rv.problems) problems.push(`${p}; the reviewer adds \`rules: [{ "rule", "verdict": "complies|finding|not-applicable", "evidence", "finding" }]\` to its closure: hand the tree to a fresh reviewer (\`wf handoff reviewer --agent <new id>\`)`);
@@ -516,7 +544,7 @@ export function acceptReview(root, options) {
   if (canonical(treeHashes(state)) !== canonical(reviewedTree)) problems.push(`no closure for the current tree: the code changed after the last review; ${fresh}`);
   else if (g.ok && !reviewedAfterGate(r)) problems.push(`the closure was written before a passing gate on this tree, so no reviewer has inspected the gate evidence; for the evidence pass ${fresh}`);
   if (problems.length) throw refuse(`review not accepted:\n  - ${problems.join('\n  - ')}`);
-  append(root, state.id, 'review.accepted', { reviewer: r.closure.reviewer, patch: patchIds(state), heads: treeHashes(state), gate: state.lastGate.runId, ...(verdicts.length ? { noEvidence: verdicts } : {}), ...(rv.verdicts.length ? { rules: rv.verdicts } : {}) }, actor(options));
+  append(root, state.id, 'review.accepted', { reviewer: r.closure.reviewer, patch: patchIds(state), heads: treeHashes(state), gate: state.lastGate.runId, ...(verdicts.length ? { noEvidence: verdicts } : {}), ...(rv.verdicts.length ? { rules: rv.verdicts } : {}), ...(ov.verdicts.length ? { outsidePlan: ov.verdicts } : {}) }, actor(options));
   return loadState(root, state.id);
 }
 
