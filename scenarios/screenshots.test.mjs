@@ -114,3 +114,96 @@ test('batch: each member delivers only its own screenshots from the shared gate'
   assert.equal(state(root, m1.id).phase, 'done');
   assert.equal(state(root, m2.id).phase, 'handoff-pending');
 });
+
+// 0.1.14: an over-broad glob filled a delivered set with other tickets' files (named failure: 1,320 delivered, 8 the
+// ticket's), and `wf shown` and the readback required every one. `wf delivery narrow` keeps a subset, once, ledgered.
+test('delivery narrow: the owner keeps the ticket\'s files of an over-broad set, once, with a reason; shown and the readback need only those', () => {
+  const visual = [{ id: 'ui', repo: 'app', run: 'mkdir -p shots && for n in mine-a mine-b other-1 other-2 other-3; do printf $n > shots/$n.png; done', artifacts: ['shots/*.png'] }];
+  const tracker = { kind: 'linear', statuses: { started: 'In Progress', delivered: 'Ready for UAT', done: 'Done' }, deliveredComment: 'uat.md' };
+  const { base, root } = singleRepoProject('narrow', { tracker, gate: { steps: visual } }, { ...ignore, '.workflow/uat.md': '{id} is ready for UAT.\n\nUAT scope:\n{uatScope}\n' });
+  const item = 'ENG-76';
+  const cap = (obj) => {
+    const f = path.join(base, `cap-${Math.random().toString(36).slice(2)}.json`);
+    fs.writeFileSync(f, JSON.stringify(obj));
+    return f;
+  };
+  const e = ok(wf(root, ['entry', '--item', item, '--owner', 'o', '--json'])).json();
+  ok(wf(root, ['tracker', 'record', '--event', 'admitted', '--capture', cap({ issue: { identifier: item, description: 'd', state: { name: 'In Progress' } } }), '--attempt', e.id]));
+  ok(wf(root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id]));
+  ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id]));
+  ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
+  ok(wf(root, ['tracker', 'record', '--event', 'implementing', '--capture', cap({ issue: { identifier: item, description: 'd', state: { name: 'In Progress' } } }), '--attempt', e.id]));
+  commitIn(e.repos.app.worktree, { 'src/a.txt': 'ui\n' });
+  const g = ok(wf(root, ['gate', '--attempt', e.id, '--json'])).json();
+  const all = g.steps[0].artifacts;
+  assert.equal(all.length, 5);
+  const mine = all.filter((a) => /mine-/.test(a.source ?? a.path)).map((a) => a.sha256);
+  const reason = 'the glob shots/*.png matched other tickets\' captures; only mine-a and mine-b are this ticket\'s';
+  assert.match(wf(root, ['delivery', 'narrow', '--keep', mine.join(','), '--reason', reason, '--attempt', e.id]).err, /not delivered yet/);
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', e.id]));
+  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r', { screenshotsInspected: all.map((a) => a.sha256) })), '--attempt', e.id]));
+  ok(wf(root, ['accept', '--attempt', e.id]));
+  assert.match(ok(wf(root, ['deliver', '--attempt', e.id])).out, /SHOW TO OWNER \(5 delivered screenshot\(s\) for ENG-76\)/);
+  assert.equal(state(root, e.id).tracker.pending.find((a) => a.op === 'attach').files.length, 5);
+
+  const narrow = (args) => wf(root, ['delivery', 'narrow', ...args, '--attempt', e.id]);
+  assert.match(narrow(['--keep', mine.join(',')]).err, /--reason/);
+  assert.match(narrow(['--keep', 'f'.repeat(64), '--reason', reason]).err, /1 kept sha256 not in the delivered set[\s\S]*f{64}/);
+  assert.match(narrow(['--keep', mine[0].slice(0, 12), '--reason', reason]).err, /not in the delivered set/, 'a prefix is not a sha256');
+  assert.match(narrow(['--keep', all.map((a) => a.sha256).join(','), '--reason', reason]).err, /all 5 delivered files are kept; nothing to narrow/);
+  fs.writeFileSync(path.join(base, 'keep-empty.json'), JSON.stringify({ keep: [] }));
+  assert.match(narrow(['--file', path.join(base, 'keep-empty.json'), '--reason', reason]).err, /keep at least one file/);
+  const before = state(root, e.id).delivery.screenshots.screenshots.length;
+  assert.equal(before, 5, 'refusals change nothing');
+
+  const keepFile = path.join(base, 'keep.json');
+  fs.writeFileSync(keepFile, JSON.stringify({ keep: [...mine, mine[0]] }));
+  const r = ok(narrow(['--file', keepFile, '--reason', reason]));
+  assert.match(r.out, /narrowed from 5 to 2: the glob shots\/\*\.png matched/);
+  let s = state(root, e.id);
+  assert.deepEqual(s.delivery.screenshots.screenshots.map((f) => f.sha256).sort(), [...mine].sort());
+  assert.deepEqual(s.tracker.pending.find((a) => a.op === 'attach').files.map((f) => f.sha256).sort(), [...mine].sort(), 'the pending attach action is narrowed the same way');
+  assert.deepEqual({ from: s.delivery.narrowed.from, to: s.delivery.narrowed.to, dropped: s.delivery.narrowed.dropped, reason: s.delivery.narrowed.reason }, { from: 5, to: 2, dropped: 3, reason });
+  assert.match(fs.readFileSync(s.delivery.narrowed.raw.path, 'utf8'), /keep/, 'the keep file is kept raw');
+  const draft = JSON.parse(fs.readFileSync(path.join(root, '.wf-evidence', 'attempts', e.id, 'delivery', 'shown-draft.json'), 'utf8'));
+  assert.equal(draft.screenshots.length, 2, 'the draft lists only the kept files');
+  assert.match(ok(wf(root, ['status', '--attempt', e.id])).out, /narrowed from 5 to 2: the glob/);
+  assert.match(ok(wf(root, ['resume', '--attempt', e.id])).out, /each of the 2 delivered screenshot/);
+  assert.match(narrow(['--keep', mine[0], '--reason', 'again']).err, /already narrowed \(5 to 2/, 'narrowed once');
+
+  // A dropped file in the acknowledgement is outside the set now.
+  const dropped = all.find((a) => !mine.includes(a.sha256)).sha256;
+  assert.match(wf(root, ['shown', '--file', shownFile(base, [...mine.map((sha, i) => ({ sha256: sha, caption: `Home, variant ${i + 1}` })), { sha256: dropped, caption: 'other ticket' }]), '--attempt', e.id]).err, /not in the delivered set/);
+  ok(wf(root, ['shown', '--file', shownFile(base, mine.map((sha, i) => ({ sha256: sha, caption: `Home, variant ${i + 1}` }))), '--attempt', e.id]));
+  assert.match(narrow(['--keep', mine[0], '--reason', reason]).err, /already narrowed|already acknowledged/);
+
+  const titles = s.delivery.screenshots.screenshots.map((f) => f.title);
+  const after = new Date(Date.now() + 1000).toISOString();
+  // The raw get_issue JSON as the Linear connector returns it (identifier in `id`, status a string, attachments a
+  // list) and the list_comments response, saved together unchanged.
+  const getIssue = { id: item, uuid: '00000000-0000-0000-0000-000000000000', title: 't', description: 'd', status: 'Ready for UAT', statusType: 'started', attachments: titles.map((t, i) => ({ id: `a${i}`, title: t, subtitle: `Home, variant ${i + 1}`, url: `https://uploads.linear.app/x/${i}?signature=s` })) };
+  const listComments = { comments: [{ id: 'c1', body: `${item} is ready for UAT.\n\nUAT scope:\n- a shows the new text`, createdAt: after, updatedAt: after }], hasNextPage: false };
+  ok(wf(root, ['tracker', 'record', '--event', 'delivered', '--capture', cap({ issue: getIssue, comments: listComments }), '--attempt', e.id]));
+  s = state(root, e.id);
+  assert.equal(s.phase, 'done');
+  assert.equal(s.tracker.done.at(-1).attachments.length, 2, 'only the kept files were required on the ticket');
+  ok(wf(root, ['export', '--attempt', e.id]));
+  assert.match(fs.readFileSync(path.join(root, '.wf-evidence', 'attempts', e.id, 'export', 'attempt.html'), 'utf8'), /Narrowed from 5 to 2/);
+  assert.equal(ok(wf(root, ['export', '--attempt', e.id, '--json'])).json().delivered.narrowed.dropped, 3);
+});
+
+test('linear readback shapes: raw get_issue alone, with list_comments, as an MCP envelope, as a list, and a hand-written issue id', async () => {
+  const linear = (await import('../adapters/tracker/linear.mjs')).default;
+  const getIssue = { id: 'ENG-77', uuid: 'u', title: 't', status: 'Ready for UAT', attachments: [{ id: 'a', title: 'home.png', subtitle: 'Home', url: 'https://uploads.linear.app/x' }] };
+  const listComments = { comments: [{ id: 'c', body: 'hello', createdAt: '2026-01-01T00:00:00Z' }], hasNextPage: false };
+  const envelope = (v) => ({ content: [{ type: 'text', text: JSON.stringify(v) }] });
+  for (const raw of [getIssue, { issue: getIssue, comments: listComments }, { issue: envelope(getIssue), comments: envelope(listComments) }, envelope(getIssue), [getIssue, listComments], [envelope(getIssue), envelope(listComments)], { issue: 'ENG-77', status: 'Ready for UAT', attachments: getIssue.attachments }]) {
+    const n = linear.normalize(raw);
+    assert.equal(n.id, 'ENG-77', JSON.stringify(raw).slice(0, 80));
+    assert.equal(n.status, 'Ready for UAT');
+    assert.equal(n.attachments[0].title, 'home.png');
+  }
+  assert.equal(linear.normalize({ issue: getIssue, comments: listComments }).comments[0].body, 'hello');
+  assert.equal(linear.normalize([getIssue, listComments]).comments[0].body, 'hello');
+  assert.equal(linear.normalize({ issue: { identifier: 'ENG-78', id: 'uuid', state: { name: 'Done' } } }).id, 'ENG-78', 'the GraphQL shape: identifier wins over the uuid');
+});

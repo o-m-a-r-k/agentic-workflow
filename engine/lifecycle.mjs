@@ -816,6 +816,55 @@ export function recordShown(root, options) {
   return loadState(root, state.id);
 }
 
+// `wf delivery narrow --keep <sha256,...> | --file keep.json --reason "why"`: an over-broad `artifacts` glob put
+// files of other tickets into the delivered set, and `wf shown` and the tracker readback require every one of them.
+// Named failure: a delivered set of 1,320 files, 8 of them the ticket's, could only be finished by uploading the other
+// 1,312 or by editing the hash-chained ledger. The owner keeps a subset, once, with a reason, after delivery and before
+// the screenshots are acknowledged; the ledger records what was kept and how many were dropped, and the set and the
+// pending attach action both derive from it on every replay.
+function keepList(options) {
+  if (options.keep && options.keep !== true) return String(options.keep).split(',').map((x) => x.trim()).filter(Boolean);
+  if (!options.file || options.file === true) throw new WfError('--keep <sha256,...> or --file <keep.json> is required ({ "keep": [sha256...] }, a list of sha256, or { "screenshots": [{ "sha256" }] })');
+  const text = fs.readFileSync(path.resolve(String(options.file)), 'utf8');
+  let raw;
+  try {
+    raw = JSON.parse(text);
+  } catch (error) {
+    throw new WfError(`${options.file} is not JSON: ${error.message}`);
+  }
+  const list = Array.isArray(raw) ? raw : Array.isArray(raw?.keep) ? raw.keep : Array.isArray(raw?.screenshots) ? raw.screenshots : null;
+  if (!list) throw new WfError(`${options.file}: expected { "keep": [sha256...] }, a list of sha256, or { "screenshots": [{ "sha256" }] }`);
+  return { keep: list.map((x) => String(typeof x === 'string' ? x : x?.sha256 ?? '').trim()).filter(Boolean), text };
+}
+
+export function narrowDelivery(root, options) {
+  const state = openState(root, options);
+  const reason = String(options.reason ?? '').trim();
+  if (!reason || options.reason === true) throw new WfError('--reason "<why the other files are not this ticket\'s>" is required');
+  if (!state.delivery.completedAt) throw refuse('not delivered yet: `wf deliver` first');
+  if (state.phase !== 'handoff-pending') throw refuse(`${state.id} is ${state.phase}; a delivered set can be narrowed only while the handoff is pending`);
+  const set = state.delivery.screenshots;
+  if (!set) throw refuse(`${state.id} was delivered before screenshots were recorded at delivery; there is no set to narrow`);
+  if (!set.screenshots.length) throw refuse(`no screenshots were delivered for ${state.item}; nothing to narrow`);
+  if (state.delivery.narrowed) throw refuse(`the delivered set was already narrowed (${state.delivery.narrowed.from} to ${state.delivery.narrowed.to}: ${state.delivery.narrowed.reason}); it is narrowed once`);
+  if (state.delivery.shown && !state.delivery.shown.auto) throw refuse('the delivered screenshots are already acknowledged with `wf shown`; the set can no longer change');
+  if (state.tracker.done.some((d) => d.event === 'delivered')) throw refuse('the delivered handoff is already verified');
+  const parsed = keepList(options);
+  const given = Array.isArray(parsed) ? parsed : parsed.keep;
+  const keep = [...new Set(given)];
+  if (!keep.length) throw refuse('keep at least one file: a delivery with no screenshots of its own is a different statement, not a narrowing');
+  const unknown = keep.filter((k) => !set.screenshots.some((f) => f.sha256 === k));
+  if (unknown.length) throw refuse(`${unknown.length} kept sha256 not in the delivered set (full 64-character sha256 from \`wf status --json\` → delivery.screenshots):\n  - ${unknown.join('\n  - ')}`);
+  const from = set.screenshots.length;
+  if (keep.length === from) throw refuse(`all ${from} delivered files are kept; nothing to narrow`);
+  const raw = Array.isArray(parsed) ? null : keepRaw(root, state.id, 'delivery/narrow.raw.json', parsed.text);
+  append(root, state.id, 'delivery.narrowed', { keep, from, to: keep.length, dropped: from - keep.length, reason, raw: raw ? { path: raw.file, sha256: raw.sha256 } : null }, actor(options));
+  const after = loadState(root, state.id);
+  const kept = after.delivery.screenshots.screenshots;
+  writeJson(shownDraftFile(root, state.id), { attempt: state.id, item: state.item, note: 'Copy this file outside .wf-evidence, view each image, replace each caption with what the image shows (which screen, which state), then `wf shown --file <copy>`.', screenshots: kept.map((f) => ({ sha256: f.sha256, title: f.title, path: f.path, proposed: f.proposed, caption: f.proposed })) });
+  return after;
+}
+
 export function closeAfterHandoff(root, state) {
   if (state.phase === 'handoff-pending' && !state.tracker.pending.length && !needsShown(state)) {
     append(root, state.id, 'closed', { reason: state.tracker.done.some((d) => d.event === 'delivered') ? 'tracker handoff verified' : 'delivered screenshots shown' }, null);

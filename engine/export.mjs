@@ -82,6 +82,7 @@ function deliveredView(s) {
   const attached = s.tracker.done.find((d) => d.event === 'delivered')?.attachments ?? [];
   return {
     none: set.none,
+    narrowed: s.delivery.narrowed ? { from: s.delivery.narrowed.from, to: s.delivery.narrowed.to, dropped: s.delivery.narrowed.dropped, reason: s.delivery.narrowed.reason, by: s.delivery.narrowed.by, at: s.delivery.narrowed.at } : null,
     shownAt: shown && !shown.auto ? shown.at : null,
     shownBy: shown && !shown.auto ? shown.by : null,
     screenshots: set.screenshots.map((f) => {
@@ -113,7 +114,8 @@ function deliveredSection(d, images) {
     const pic = img?.uri ? `<label class="shot"><input type="checkbox" aria-label="enlarge ${esc(f.title)}"><img src="${img.uri}" alt="${esc(f.caption)}" loading="lazy"></label>` : `<p class="warn">${esc(img?.problem ?? 'not embedded')}</p>`;
     return `<figure>${pic}<figcaption><strong>${i + 1}. ${esc(f.caption)}</strong>${f.captionBy === 'proposed' ? ' <span class="warn">(proposed, not yet shown to the owner)</span>' : ''}<br><small>${esc(f.title)} · sha256 ${esc(f.sha256.slice(0, 12))} · ${f.attached ? 'attached to the ticket' : 'not yet verified on the ticket'}</small></figcaption></figure>`;
   }).join('');
-  return `<section><h2>Delivered screenshots</h2><p class="muted">${v.shownAt ? `Shown to the owner ${esc(v.shownAt)}${v.shownBy ? ` by ${esc(v.shownBy)}` : ''}.` : 'Not yet shown to the owner (`wf shown`).'} Click an image to enlarge it.</p><div class="shots">${figs}</div></section>`;
+  const narrowed = v.narrowed ? `<p class="warn">Narrowed from ${esc(v.narrowed.from)} to ${esc(v.narrowed.to)}: ${esc(v.narrowed.reason)} (${esc(v.narrowed.by)}, ${esc(v.narrowed.at)})</p>` : '';
+  return `<section><h2>Delivered screenshots</h2>${narrowed}<p class="muted">${v.shownAt ? `Shown to the owner ${esc(v.shownAt)}${v.shownBy ? ` by ${esc(v.shownBy)}` : ''}.` : 'Not yet shown to the owner (`wf shown`).'} Click an image to enlarge it.</p><div class="shots">${figs}</div></section>`;
 }
 
 const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);

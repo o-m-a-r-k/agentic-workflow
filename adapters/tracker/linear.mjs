@@ -17,7 +17,22 @@ const UPLOAD_HOST = /^https:\/\/uploads\.linear\.app\//;
 const TYPES = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif' };
 
 const first = (...values) => values.find((v) => v !== undefined && v !== null);
-const list = (v) => (Array.isArray(v) ? v : Array.isArray(v?.nodes) ? v.nodes : []);
+// A connection (`{ nodes }`), a list_comments response (`{ comments, hasNextPage }`), or a plain list.
+const list = (v, key) => (Array.isArray(v) ? v : Array.isArray(v?.nodes) ? v.nodes : Array.isArray(v?.[key]) ? v[key] : []);
+// An MCP tool result saved whole (`{ content: [{ type: 'text', text: '<json>' }] }`) is unwrapped to its JSON.
+const unwrap = (v) => {
+  const texts = Array.isArray(v?.content) ? v.content.filter((c) => c?.type === 'text' && typeof c.text === 'string') : [];
+  if (!texts.length) return v;
+  const parsed = texts.map((c) => {
+    try {
+      return JSON.parse(c.text);
+    } catch {
+      return null;
+    }
+  }).filter(Boolean);
+  return parsed.length === 1 ? parsed[0] : parsed.length ? parsed : v;
+};
+const isIssue = (v) => v && typeof v === 'object' && !Array.isArray(v) && (v.identifier || v.id) && ('title' in v || 'status' in v || 'state' in v);
 
 export default {
   via: 'agent',
@@ -28,7 +43,7 @@ export default {
     attach: 'Upload each file as a real attachment, one file at a time (a signed upload url expires in 60 s): Linear prepare_attachment_upload { issue, filename: <title>, contentType: image/png (or the file\'s type), size: <exact bytes, e.g. wc -c < path>, title: <title>, subtitle: <caption> }; then PUT the raw bytes to uploadRequest.url with every uploadRequest.headers entry sent verbatim (curl -X PUT --data-binary @<path> -H ...; never base64); then create_attachment_from_upload { issue, assetUrl, title: <title>, subtitle: <caption> }. Title is the file name `wf` lists, subtitle the caption recorded with `wf shown`. Never create a link attachment or paste the image into a comment: the readback must show an uploads.linear.app attachment with that title and subtitle',
     readBack: 'Linear get_issue (its response carries the attachments with title, subtitle and url) + list_comments, saved together as JSON',
   },
-  captureShape: '{ "issue": <get_issue response>, "comments": [<comments>], "attachments": [<attachments>] }',
+  captureShape: '{ "issue": <get_issue response, unchanged>, "comments": <list_comments response, unchanged> } (get_issue alone is enough when no comment is checked)',
   // An uploaded file, not a link: what `wf tracker record` requires of every delivered screenshot.
   isUpload: (a) => UPLOAD_HOST.test(String(a?.url ?? '')),
   rules: { attachmentTitleIsFilename: true },
@@ -75,8 +90,20 @@ export default {
       return { issue: rest, comments: issue.comments?.nodes ?? [], attachments: issue.attachments?.nodes ?? [], via: 'linear-api' };
     },
   },
-  normalize(raw) {
-    const issue = raw.issue ?? raw;
+  // Accepted readbacks: the raw get_issue JSON alone (`id` is the identifier, `status` the state name, `attachments`
+  // a list); `{ "issue": <get_issue>, "comments": <list_comments response or its comments> }`; the API mode's
+  // `{ issue, comments, attachments }`; a list of tool results ([get_issue, list_comments]); either tool result saved
+  // whole as an MCP `content` envelope.
+  normalize(input) {
+    let raw = unwrap(input);
+    if (Array.isArray(raw)) {
+      const parts = raw.map(unwrap);
+      const found = parts.find((p) => isIssue(p) || isIssue(p?.issue));
+      raw = { issue: found?.issue ?? found ?? {}, comments: parts.find((p) => Array.isArray(p?.comments))?.comments ?? found?.comments };
+    }
+    raw = { ...raw, issue: unwrap(raw.issue) };
+    // A hand-written `{ "issue": "ENG-1", "status": ... }`: the string is the identifier, the rest is the issue.
+    const issue = typeof raw.issue === 'string' ? { ...raw, identifier: raw.issue } : raw.issue && typeof raw.issue === 'object' ? raw.issue : raw;
     return {
       id: first(issue.identifier, issue.id),
       title: issue.title ?? '',
@@ -85,8 +112,8 @@ export default {
       status: first(issue.state?.name, issue.status?.name, issue.status, issue.state),
       url: issue.url ?? null,
       updatedAt: issue.updatedAt ?? null,
-      comments: list(first(raw.comments, issue.comments)).map((c) => ({ id: c.id, body: c.body ?? '', createdAt: c.createdAt, updatedAt: c.updatedAt ?? c.createdAt })),
-      attachments: list(first(raw.attachments, issue.attachments)).map((a) => ({ id: a.id, title: a.title ?? '', subtitle: a.subtitle ?? null, filename: a.filename ?? a.title ?? '', url: a.url ?? null })),
+      comments: list(unwrap(first(raw.comments, issue.comments)), 'comments').map((c) => ({ id: c.id, body: c.body ?? '', createdAt: c.createdAt, updatedAt: c.updatedAt ?? c.createdAt })),
+      attachments: list(unwrap(first(raw.attachments, issue.attachments)), 'attachments').map((a) => ({ id: a.id, title: a.title ?? '', subtitle: a.subtitle ?? null, filename: a.filename ?? a.title ?? '', url: a.url ?? null })),
     };
   },
 };

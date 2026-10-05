@@ -8,7 +8,7 @@ import { findRoot, loadConfig, requireRoot } from './config.mjs';
 import { exportAttempt, exportFile } from './export.mjs';
 import { liveGate, runGate, runWithLease, stopGate } from './gate.mjs';
 import { append, listAttempts, loadState } from './ledger.mjs';
-import { acceptReview, amendCriteria, batchCreate, batchEject, closeAfterHandoff, deliver, freezeCriteria, handoff, needsShown, nextAction, outsideWarning, recordReview, recordShown, reopen, shownDraftFile, uncovered, withAttempt } from './lifecycle.mjs';
+import { acceptReview, amendCriteria, batchCreate, batchEject, closeAfterHandoff, deliver, freezeCriteria, handoff, narrowDelivery, needsShown, nextAction, outsideWarning, recordReview, recordShown, reopen, shownDraftFile, uncovered, withAttempt } from './lifecycle.mjs';
 import { detect, doctor, register, registry, setEnabled, sync, writeDraft } from './onboard.mjs';
 import * as secrets from './secrets.mjs';
 import { report, toCsv, toHandoffCsv, toHtml } from './telemetry.mjs';
@@ -43,6 +43,8 @@ Work
   wf accept                         accept the review
   wf deliver                        integrate every repo, then start the tracker handoff
   wf shown --file shown.json        record that every delivered screenshot was shown in the chat, with its caption
+  wf delivery narrow --keep SHA,... | --file keep.json --reason "why"
+                                    once, before \`wf shown\`: keep only this ticket's files of a delivered set an over-broad glob filled
   wf tracker record --event E --capture file.json | wf tracker sync (tracker.via: api)
   wf hold --reason "why" | wf release
   wf reopen --item ID --reason "feedback"
@@ -101,6 +103,8 @@ function showBlock(root, s) {
   if (!set) return '';
   if (!set.screenshots.length) return `\nSHOW TO OWNER: no screenshots for ${s.item}: ${set.none}\n  (recorded; tell the owner this in the delivery report)`;
   const shown = s.delivery.shown?.screenshots ?? [];
+  const n = s.delivery.narrowed;
+  const narrowed = n ? `\n  narrowed from ${n.from} to ${n.to}: ${n.reason} (${n.by}, ${n.at})` : '';
   const rows = set.screenshots.map((f, i) => {
     const cap = shown.find((x) => x.sha256 === f.sha256)?.caption;
     return `  ${i + 1}. ${f.path}\n     attach as: ${f.title}   sha256 ${f.sha256.slice(0, 12)}\n     ${cap ? `caption: ${cap}` : `proposed caption: ${f.proposed}  (refine it after viewing: which screen, which state)`}`;
@@ -108,7 +112,7 @@ function showBlock(root, s) {
   const head = needsShown(s)
     ? `SHOW TO OWNER (${set.screenshots.length} delivered screenshot(s) for ${s.item}): display each image in the chat with its caption, then record it with \`wf shown --file <f>\` (start from a copy of ${shownDraftFile(root, s.id)}). Each is also uploaded to the ticket as a file: title = "attach as", subtitle = its caption.`
     : `delivered screenshots for ${s.item} (shown to the owner ${s.delivery.shown.at}):`;
-  return `\n${head}\n${rows.join('\n')}`;
+  return `\n${head}${narrowed}\n${rows.join('\n')}`;
 }
 
 function gateText(result) {
@@ -431,6 +435,13 @@ async function dispatch(cmd, sub, positional, options) {
       let s = await recordTracker(root, cfg, openState(root, options), options);
       s = closeAfterHandoff(root, s);
       print(options, `tracker ${options.event} verified. ${s.phase === 'done' ? 'Attempt closed and worktrees removed.' : `next: ${nextAction(root, s)}`}`, s);
+      return 0;
+    }
+    case 'delivery': {
+      if (sub !== 'narrow') throw new WfError('usage: wf delivery narrow --keep <sha256,...> | --file keep.json --reason "why" [--attempt ID]');
+      const s = narrowDelivery(root, options);
+      const n = s.delivery.narrowed;
+      print(options, `delivered set of ${s.id} narrowed from ${n.from} to ${n.to}: ${n.reason}${showBlock(root, s)}\nnext: ${nextAction(root, s)}`, s);
       return 0;
     }
     case 'shown': {

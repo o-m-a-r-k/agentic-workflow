@@ -113,7 +113,8 @@ export async function recordTracker(root, cfg, state, options) {
   const issue = adapter.normalize(raw);
   const problems = [];
   const verified = [];
-  if (issue.id !== state.item) problems.push(`capture is for ${issue.id}, not ${state.item}`);
+  if (issue.id === undefined || issue.id === null || issue.id === '') problems.push(`the capture names no issue (no \`identifier\` or \`id\` found); save the raw tracker responses unchanged${adapter.captureShape ? `, shaped ${adapter.captureShape}` : ''}`);
+  else if (issue.id !== state.item) problems.push(`capture is for ${issue.id}, not ${state.item}`);
   // A hand-written capture without the issue body was accepted, and every later role then read the ticket without
   // its description. Some issues are title-only: the capture says so with "descriptionEmpty": true.
   if (event === 'admitted' && !String(issue.description ?? '').trim() && raw?.descriptionEmpty !== true) {

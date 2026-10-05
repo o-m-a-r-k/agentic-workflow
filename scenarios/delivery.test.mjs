@@ -174,6 +174,8 @@ test('tracker: status, comment and screenshots are verified from the readback', 
   fs.writeFileSync(path.join(base, 'empty.json'), JSON.stringify({ screenshots: [] }));
   assert.match(wf(root, ['shown', '--file', path.join(base, 'empty.json'), '--attempt', e.id]).err, /home\.png .*not acknowledged/);
   ok(wf(root, ['shown', '--file', shown('Home screen showing the new text'), '--attempt', e.id]));
+  assert.match(wf(root, ['delivery', 'narrow', '--keep', shot.sha256, '--reason', 'r', '--attempt', e.id]).err, /already acknowledged with `wf shown`/, 'the set is fixed once acknowledged');
+  assert.match(wf(root, ['tracker', 'record', '--event', 'delivered', '--capture', cap({ issue: { state: { name: 'Ready for UAT' } }, comments: comment }), '--attempt', e.id]).err, /the capture names no issue/);
   const leaky = cap({ issue: { identifier: item, state: { name: 'Ready for UAT' } }, comments: [{ ...comment[0], body: `${comment[0].body}\nchanged src/app/home.tsx` }], attachments: [upload('Home screen showing the new text')] });
   assert.match(wf(root, ['tracker', 'record', '--event', 'delivered', '--capture', leaky, '--attempt', e.id]).err, /internals: source file path/);
   const noShot = cap({ issue: { identifier: item, state: { name: 'Ready for UAT' } }, comments: comment, attachments: [] });

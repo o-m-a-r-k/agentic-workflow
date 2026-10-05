@@ -74,6 +74,9 @@ export function listAttempts(root) {
   return fs.readdirSync(dir).filter((d) => fs.existsSync(ledgerFile(root, d)));
 }
 
+// A pending `delivered` attach action, limited to the files a `delivery.narrowed` entry kept.
+const narrowAttach = (a, narrowed) => (narrowed && a.event === 'delivered' && a.op === 'attach' ? { ...a, files: a.files.filter((f) => narrowed.keep.includes(f.sha256)) } : a);
+
 // Derived state. Everything a command decides is computed from the ledger, never stored separately.
 export function reduce(entries) {
   const s = {
@@ -202,6 +205,15 @@ export function reduce(entries) {
       case 'delivery.screenshots':
         s.delivery.screenshots = { screenshots: d.screenshots ?? [], none: d.none ?? null, at: e.at };
         break;
+      // `wf delivery narrow`: the owner kept a subset of a delivered set an over-broad glob filled. The set, and the
+      // pending `delivered` attach action whichever came first in the ledger, both derive from the kept list.
+      case 'delivery.narrowed': {
+        const keep = new Set(d.keep ?? []);
+        if (s.delivery.screenshots) s.delivery.screenshots = { ...s.delivery.screenshots, screenshots: s.delivery.screenshots.screenshots.filter((f) => keep.has(f.sha256)) };
+        s.delivery.narrowed = { from: d.from, to: d.to, dropped: d.dropped, reason: d.reason, keep: [...keep], raw: d.raw ?? null, at: e.at, by: e.actor };
+        s.tracker.pending = s.tracker.pending.map((a) => narrowAttach(a, s.delivery.narrowed));
+        break;
+      }
       case 'delivery.shown':
         s.delivery.shown = { screenshots: d.screenshots ?? [], none: d.none ?? null, auto: d.auto === true, raw: d.raw ?? null, at: e.at, by: e.actor };
         if (!d.auto) s.delivery.shownRecords = (s.delivery.shownRecords ?? 0) + 1;
@@ -221,7 +233,7 @@ export function reduce(entries) {
         s.batchOf = null;
         break;
       case 'tracker.pending':
-        s.tracker.pending.push(...d.actions.map((a) => ({ ...a, event: d.event })));
+        s.tracker.pending.push(...d.actions.map((a) => narrowAttach({ ...a, event: d.event }, s.delivery.narrowed)));
         break;
       case 'tracker.recorded':
         s.tracker.pending = s.tracker.pending.filter((a) => a.event !== d.event);
