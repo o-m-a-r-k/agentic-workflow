@@ -27,6 +27,10 @@ Each scenario runs the real `wf` CLI against temporary git repositories with bar
 | Batch | Members defer heavy steps and cannot deliver alone; the batch runs heavy steps once and delivers every member | delivery |
 | Tracker | Status, comment (template lines, UAT bullets, no internals) and screenshot attachments verified from the readback; reviewer must inspect every screenshot | delivery |
 | Merge requests | A project delivery adapter waits for merge (ticket moves to In Review), then reads back | delivery |
+| Work classes | `wf sync` writes one implementer per class with its effort (Claude frontmatter, Codex TOML) and removes stale generated agents; unknown classes, undocumented efforts and old per-role fields are refused | classes |
+| Work items | Duplicate ids, unknown criteria and unknown classes are refused; uncovered criteria are shown; `--work` handoffs name the agent type and record class and effort; `wf resume` lists open work items | classes |
+| Amendments | Amendments merge by id: unmentioned criteria survive; a drop needs `dropped: true` and a reason | classes |
+| Agent telemetry | Subagent transcripts are found by name and agent type; declared vs observed effort, model, wall minutes and output tokens per handoff | classes |
 | Onboarding | `wf init` detects repos, packages, components, steps and secrets; never overwrites; doctor tells config errors from red tests and cleans up | onboarding |
 | Enable | Enable writes the AGENTS.md block and role agents without touching other content; disable removes only the block; disabled projects refuse work | onboarding |
 | Skills | `sync` vendors skills for every runtime; a reviewer handoff needs them | onboarding |

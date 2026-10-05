@@ -81,7 +81,7 @@ test('enable writes the AGENTS.md block and role agents; disable removes the blo
   const agents = fs.readFileSync(path.join(root, 'AGENTS.md'), 'utf8');
   assert.match(agents, /Keep me\./);
   assert.match(agents, /agentic-workflow:begin[\s\S]*wf entry[\s\S]*agentic-workflow:end/);
-  for (const f of ['.claude/agents/wf-reviewer.md', '.codex/agents/wf-reviewer.md', '.claude/agents/wf-implementer.md']) assert.ok(fs.existsSync(path.join(root, f)), f);
+  for (const f of ['.claude/agents/wf-reviewer.md', '.codex/agents/wf-reviewer.toml', '.claude/agents/wf-implementer.md']) assert.ok(fs.existsSync(path.join(root, f)), f);
   assert.match(fs.readFileSync(path.join(root, '.claude/agents/wf-reviewer.md'), 'utf8'), /^---\nname: wf-reviewer\n/);
   ok(wf(root, ['enable']));
   assert.equal((fs.readFileSync(path.join(root, 'AGENTS.md'), 'utf8').match(/agentic-workflow:begin/g) ?? []).length, 1, 'block is replaced, not duplicated');

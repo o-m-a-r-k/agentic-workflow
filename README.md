@@ -2,7 +2,7 @@
 
 A delivery workflow for AI coding agents, packaged as one plugin for Claude Code and Codex.
 
-> **Status: v0.1, early.** The engine, CLI, onboarding and all three lanes work and are covered by 65 scenario tests on real git repositories, and reviewed by independent agents. It has not yet been used on a production project; expect rough edges. Design: [docs/DESIGN.md](docs/DESIGN.md). Feedback through issues is welcome.
+> **Status: v0.1, early.** The engine, CLI, onboarding and all three lanes work and are covered by 71 scenario tests on real git repositories, and reviewed by independent agents. It has not yet been used on a production project; expect rough edges. Design: [docs/DESIGN.md](docs/DESIGN.md). Feedback through issues is welcome.
 
 Every change runs through the same lifecycle: a ticket is admitted, worked on in isolated worktrees, planned, implemented, proven by a gate, reviewed by an agent that did not write it, delivered, and handed back to the tracker with a readback. Each step checks evidence the engine wrote, never what an agent says it did.
 
@@ -44,6 +44,7 @@ Or ask your agent to "onboard this project to agentic-workflow": the `onboard` s
 - [The lifecycle](#the-lifecycle)
 - [Lanes](#lanes)
 - [Roles and handoffs](#roles-and-handoffs)
+- [Work classes](#work-classes)
 - [The gate](#the-gate)
 - [Delivery and the ticket](#delivery-and-the-ticket)
 - [Your system: repos and components](#your-system-repos-and-components)
@@ -179,12 +180,63 @@ sequenceDiagram
 ```
 
 - Roles are agents your runtime starts: subagents in Claude Code, tasks in Codex.
-- `wf sync` writes each project's role files from the plugin's templates plus the project's own additions, including the model and effort for each role.
+- `wf sync` writes each project's role files from the plugin's templates plus the project's own additions. Effort and model come from [work classes](#work-classes): one implementer agent per class, and the planner and reviewer at their role's class.
 - **Planner** returns the plan as a short checklist: summary, the cross-repo contract (routes, DTO fields, error codes, permission subjects), anchors (file:line of each function to change), tests to write and the targeted selectors to run, suites not to run, the external-services policy (default runs need no provider keys or internet) and the agent split (what can proceed in parallel once the contract is committed).
-- **Implementers** can run in parallel, one per repo or area, after the contract is committed (`wf handoff implementer` accepts several). They run only the specs they changed while iterating, then the repo's lint and full unit suite once before finishing; the gate runs the rest.
+- **Implementers** can run in parallel, one per work item (or per repo or area), after the contract is committed (`wf handoff implementer` accepts several; `--work W1` hands over one work item and prints the agent type to start). They run only the specs they changed while iterating, then the repo's lint and full unit suite once before finishing; the gate runs the rest.
 - **Reviewer** is started blind: `wf handoff reviewer` prints one line (the bundle path), and that line is its whole prompt, with no hints, summaries or focus areas from the owner. The bundle holds the criteria, amendments with reasons, the plan, the diff's worktrees and bases, gate evidence and screenshots. It can start on the committed diff while the gate runs (with a fixed line naming only the attempt and worktrees); after the gate passes, the formal handoff uses the same agent id. It is never the planner or an implementer.
-- **Role appendices:** `roles.<role>.appendix` in the adapter names a file under `.workflow/` whose text `wf sync` appends to that role's generated agent under "Project additions". Role agents generated while a session runs may only register after it restarts; until then a general-purpose agent follows the role file.
+- **Role appendices:** `roles.<role>.appendix` in the adapter names a file under `.workflow/` whose text `wf sync` appends to that role's generated agent under "Project additions". Role agents generated while a session runs register only after it restarts; start the agent type `wf handoff` names, never a general-purpose agent, and never pass a model on the spawn (both override the agent file's effort and model).
+- **Amending criteria:** `wf criteria amend --file f --reason "why"` merges by criterion id. Criteria in the file replace the frozen ones with the same id, a new id is added, and every id the file does not mention stays as it was. Removing one takes an explicit `{ id: C3, dropped: true, reason: "..." }` entry. The command prints the full list after the change and what changed, added or dropped. Adding by listing a new id is safe because nothing is lost: a mistyped id adds a criterion the reviewer must map rather than removing one.
 - A separate tester role is available but off by default. Frozen criteria plus review of the gate's evidence cover the same failure with one fewer handoff.
+
+## Work classes
+
+A work class says how hard an agent thinks on a kind of work. The planner groups the criteria into work items and gives each one a class; `wf handoff implementer --work W1` then names the agent generated for that class (`wf-implementer` for the implementer role's class, `wf-implementer-<class>` for every other), whose file sets the effort and, if configured, the model.
+
+| Class | Default `use` text | Claude effort | Codex effort |
+| --- | --- | --- | --- |
+| `full` | Money, payments, audit, authorization, tenant isolation, migrations, external protocols, and anything the project's invariants file calls a critical boundary. | high | inherited |
+| `light` | UI wired to a frozen contract, translations, generated docs or OpenAPI output, test fixtures. | low | inherited |
+
+- Any work item that touches something `full` covers is `full`. The planner and the reviewer run at `full` unless the project changes their role's class; the implementer role's own class (default `full`) is used when a handoff names no work item.
+- Model is unset by default, so the agent inherits the session's model.
+- The default effort values are starting points, not measurements. `wf report` shows the declared effort next to the effort observed in each agent's transcript; a difference is shown, never enforced.
+- **Classes change effort only.** The gate, the blind independent review, frozen criteria, evidence integrity and the hash-chained ledger are identical for every class. A light work item gets the same gate and the same full-class reviewer as a full one.
+- An implementer whose work turns out to touch something a stronger class covers stops and tells the owner.
+- The list is open: add classes or override the defaults in the adapter (entries merge with the defaults by name). Claude effort is one of `low`, `medium`, `high`, `xhigh`, `max`; Codex effort is one of `minimal`, `low`, `medium`, `high`, `xhigh`. Those are the values each runtime documents today, checked so a typo fails at load; a new runtime value needs a plugin update. An unknown class anywhere (a role, a work item) is refused with the list of known classes.
+
+A web SaaS with a backend and a web app, adding a class for copy changes:
+
+```yaml
+classes:
+  full:
+    use: Billing, invoices and payment webhooks; permissions and workspace isolation; database migrations; OAuth and public API contracts.
+  light:
+    use: Screens wired to an already-merged API contract, translation files, generated API docs, test fixtures and seed data.
+  copy:
+    use: Marketing pages and in-app wording with no logic change.
+    claude: { effort: low }
+    codex: { effort: minimal }
+roles:
+  planner: { class: full }
+  reviewer: { class: full }
+  implementer: { class: full }
+```
+
+A small single-repo library, where most work is ordinary and only the public API needs the strongest agent:
+
+```yaml
+classes:
+  full:
+    use: The public API surface, serialization formats, and anything semver depends on.
+    claude: { effort: xhigh }
+  standard:
+    use: Internal changes behind an unchanged public API.
+    claude: { effort: medium }
+  light:
+    use: Docs, examples and test fixtures.
+roles:
+  implementer: { class: standard }
+```
 
 ## The gate
 
@@ -330,13 +382,14 @@ sequenceDiagram
 ## Telemetry
 
 - **Engine events:** every `wf` command records phase, role, step, suite, status, reuse, duration and resource peaks.
-- **Agent usage:** the model, tokens, time and tool calls for each role are read from the runtime's own session logs after the fact. This is measurement only; it never allows or blocks anything.
+- **Agent usage:** the model, tokens, time and tool calls for each role are read from the runtime's own session logs after the fact. A Claude Code subagent is found by the name it was started with (the `--agent` id) and its agent type, so no session id is needed. Per handoff the report shows the work item, class, declared and observed effort, agent type, model, wall minutes and output tokens. This is measurement only; it never allows or blocks anything.
 - **`wf status --all`** shows open work across every enabled project.
-- **`wf report`** shows where time and tokens go: by phase, step, role and model, with reuse rate and repair rounds.
+- **`wf report`** shows where time and tokens go: by phase, step, role and model, with reuse rate and repair rounds. `--csv` writes one row per attempt, `--handoffs-csv` one row per handoff, `--html` both.
 
 ## Trust model
 
 - **What the engine enforces:** a hash-chained ledger; gate results bound to the exact tree and to the adapter committed at base; only a gate that ran every step the tree needs (never a `--focused` one) opens review and delivery; a step that reads another repo (`alsoInputs`) is reused only while that repo is unchanged; the reviewer is never the owner, planner or an implementer; criteria are frozen before code.
+- **What classes change:** only how hard each agent thinks. Every guarantee above holds the same at every class.
 - **What it relies on you for:** agent identities are names the owner supplies, and the reviewer must be started blind, with only the one line `wf handoff reviewer` prints. The engine cannot see the prompt a runtime gives an agent, so it does not check it; steering the reviewer weakens the review silently.
 - **What it does not stop:** a determined forger with shell access on the same machine. It catches mistakes, not attacks. Details: [docs/DESIGN.md](docs/DESIGN.md#trust-model).
 

@@ -66,8 +66,10 @@ agentic-workflow/
 | Adapter trust | gate plan reads the adapter at the adapter repo's base commit recorded at admission, never the ticket worktree; touching `.workflow/**` forces the full gate | which repo holds `.workflow/` |
 | Manifest | append-only ledger per attempt, schema-versioned, guarded against hand edits | — |
 | Lanes | `quick`, `standard`, `batch`; `focused` as a gate option | enabled lanes, focused-eligible paths |
-| Criteria | frozen before implementation (planner's plan, or owner-written from the issue); changes only via `wf criteria amend --reason`, shown to the reviewer | — |
-| Roles | planner, implementer, reviewer, optional tester; independence checks | lanes per role, appendices, model/effort per runtime |
+| Criteria | frozen before implementation (planner's plan, or owner-written from the issue); changes only via `wf criteria amend --reason`, merged by id (drops need an explicit `dropped: true` + reason), shown to the reviewer | — |
+| Work items | optional planner grouping of criteria `{ id, criteria, repos, class, why }`, frozen with the criteria; `wf handoff implementer --work` names the class's agent | — |
+| Roles | planner, implementer, reviewer, optional tester; independence checks | lanes per role, appendices, `class` per role |
+| Work classes | one generated agent per class; declared effort/model recorded per handoff | `classes`: `use` text, claude/codex `effort` and `model` |
 | Gate | plan (`--prepare-only`), run, suite-level reuse, stop/resume, dead-runner harvest, newer failure supersedes older pass, unknown paths count as dependencies | steps, step plugins |
 | Evidence | immutable, hash-bound, under `.wf-evidence/` | extra artifact kinds |
 | Review | bundle, attestation, closure (every finding fixed or verified-nonissue), criteria → evidence mapping, reviewer inspects gate screenshots and test output | pre-review check command |
@@ -133,10 +135,12 @@ components: [...]
 delivery: { kind: push-main }
 tracker: { kind: linear, idPrefix: ENG, statuses: { started: In Progress, delivered: Ready for UAT, done: Done } }
 lanes: [quick, standard, batch]
+classes:                     # merged over the plugin's full/light defaults by name; open list
+  light: { use: "Screens on a frozen API contract, translations, fixtures.", claude: { effort: low }, codex: { effort: low } }
 roles:
-  planner:     { lanes: [standard], appendix: .workflow/roles/planner.md }
-  implementer: { appendix: .workflow/roles/implementer.md }
-  reviewer:    { appendix: .workflow/roles/reviewer.md }
+  planner:     { lanes: [standard], class: full, appendix: .workflow/roles/planner.md }
+  implementer: { class: full, appendix: .workflow/roles/implementer.md }
+  reviewer:    { class: full, appendix: .workflow/roles/reviewer.md }
 gate:
   maxParallelSteps: 2
   leases: { docker: 1, browser: 1 }
@@ -239,10 +243,10 @@ export default {
 ## Telemetry
 
 - **Engine events:** the attempt ledger (`.wf-evidence/attempts/<id>/ledger.jsonl`) is the event log: every `wf` command appends a timestamped, hash-chained entry; gate entries carry per-step and per-suite status, reuse, duration and chosen workers. Resource sampling (memory/CPU peaks) is not built yet.
-- **Agent usage:** `wf handoff <role>` records the agent's session id; `wf report` reads that session's transcript afterwards for model, tokens, wall time and tool calls. Measurement only — never grants or blocks anything.
+- **Agent usage:** `wf handoff <role>` records the agent's session id when known, its class, declared effort, model and agent type. `wf report` reads the transcript afterwards: by session id, or, for a Claude Code subagent (no session id of its own), by the `subagents/agent-*.meta.json` whose `name` is the `--agent` id and whose `agentType` is the recorded one, active after admission. Per handoff it reports class, declared and observed effort, agent type, model, wall minutes and output tokens (each API request counted once); a declared/observed effort difference is shown, never enforced. A transcript shared by several handoffs (repair rounds on one agent) counts once in the attempt total. Measurement only — never grants or blocks anything.
 - **Cost:** tokens × a user-editable price table.
 - **Live:** `wf status --all` across enabled projects.
-- **Report:** time per phase/step, reuse rate, repair rounds, findings per role, tokens and cost per role and model. CSV + one HTML page.
+- **Report:** time per phase/step, reuse rate, repair rounds, findings per role, tokens and cost per role and model. CSV per attempt (`--csv`), CSV per handoff (`--handoffs-csv`), and one HTML page with both.
 - Missing telemetry never fails anything.
 
 ## Secrets
@@ -273,9 +277,24 @@ requires:
 `wf sync` generates each project's agent files for every runtime from the plugin template + the adapter's `roles` entry + appendix. Generated files carry a header and are never hand-edited.
 
 - **Planner** returns `{ plan, criteria }`; `plan` holds `summary`, `contract` (what repos share: routes, DTO fields, error codes, permission subjects), `anchors` (file:line of each function to change), `tests` (`changed` specs, targeted `run` selectors), `doNotRun`, `externalServices` (default test runs need no provider keys or internet; provider/sandbox tests are opt-in) and `agentSplit`. The engine stores it with the frozen criteria and passes it to every later role; it does not police its size.
-- **Implementers:** after the contract is committed, one implementer per repo or area can run in parallel (several implementer handoffs are allowed). They run only the specs they changed and targeted reruns while iterating, never broad sweeps, then the repo's lint and full unit suite once before finishing, and commit at stage boundaries.
+- **Planner work items (optional):** `work: [{ id, criteria: [..], repos: [..], class, why }]` next to `criteria`. `wf plan` refuses duplicate work ids, criteria that do not exist and classes that do not exist (the owner would otherwise be told to start an agent that is not there); a criterion no work item covers is shown, not refused. An amendment keeps the work items unless its file replaces them, and they must still name existing criteria.
+- **Implementers:** after the contract is committed, one implementer per work item (or per repo or area) can run in parallel (several implementer handoffs are allowed). `wf handoff implementer --work W1` records the work id, class, declared effort and model and the agent type in the bundle and ledger and prints the agent type to start; without `--work` the implementer role's class is used. They run only the specs they changed and targeted reruns while iterating, never broad sweeps, then the repo's lint and full unit suite once before finishing, and commit at stage boundaries.
 - **Reviewer, blind:** its prompt is the one line `wf handoff reviewer` prints (the bundle path), with nothing from the owner or other agents; the bundle carries everything it needs. It may read the committed diff while the gate runs (started with a fixed line naming only the attempt and worktrees); the formal handoff after the gate passes uses the same agent id, and the reviewer then checks the gate evidence and screenshots. Independence is unchanged: `wf handoff reviewer` refuses the owner, the planner and every implementer.
-- Role agents registered by a runtime at session start may not include ones `wf sync` wrote later; the skills fall back to a general-purpose agent following the role file.
+- Role agents registered by a runtime at session start may not include ones `wf sync` wrote later; the skills then ask for a session restart. They never substitute a general-purpose agent or pass a model on the spawn, since either overrides the agent file's effort and model.
+- **Files:** Claude Code agents are Markdown with frontmatter (`name`, `description`, `effort`, `model`, `tools`) in `.claude/agents/`. Codex agents are TOML in `.codex/agents/<name>.toml` (`name`, `description`, `developer_instructions`, `model`, `model_reasoning_effort`). `wf sync` removes generated `wf-*` files it no longer produces (a removed class, the old Codex `.md` files); files without its generated marker are left alone.
+
+## Work classes
+
+Claude Code sets effort only in an agent file's frontmatter, not per spawn, so effort is chosen by choosing which generated agent to start. A class is `{ use, claude: { effort, model? }, codex: { effort, model? } }`:
+
+- `full` (default: Claude effort `high`): money, payments, audit, authorization, tenant isolation, migrations, external protocols, and anything the project's invariants file calls a critical boundary.
+- `light` (default: Claude effort `low`): UI wired to a frozen contract, translations, generated docs or OpenAPI output, test fixtures.
+
+The adapter's `classes` merge over these by name and may add more. `roles.<role>.class` sets a role's class; planner, reviewer, implementer and tester default to `full`. Codex effort and every model are unset by default (inherited). The default effort values are unmeasured starting points. Effort values are checked against the sets each runtime documents today (Claude `low|medium|high|xhigh|max`, Codex `minimal|low|medium|high|xhigh`) so a typo fails at load instead of silently running at the inherited effort; a runtime that adds a value needs a plugin update. Per-role `model`/`effort` from 0.1.4 are refused with a pointer to `classes`.
+
+`wf sync` writes `wf-planner` and `wf-reviewer` at their role's class, `wf-implementer` at the implementer role's class, and `wf-implementer-<class>` for every other class; each description carries the class's `use` text, and the planner's file lists every class. The planner assigns classes from that text; any work touching something `full` covers is `full`. An implementer whose work turns out to touch something a stronger class covers stops and tells the owner (text only; no engine check). Repair rounds continue the same agent and are not re-classified. Reviewer findings may carry the `work` id they belong to.
+
+Not built: automatic classification, path globs for critical code, and any gate or review rule that depends on class. Classes change effort, never a guarantee.
 
 ## Onboarding (`wf init`)
 
@@ -294,6 +313,7 @@ What the evidence proves, and what it does not:
 - **It catches mistakes.** The ledger is hash-chained, writes are serialised, gate results are bound to the exact tree and to the adapter committed at base, only a gate that ran every step the tree needs (not a `--focused` one) opens review and delivery, a step that reads another repo (`alsoInputs`) is reused only while that repo's tree is unchanged, and the guard hook blocks careless edits of `.wf-evidence/` from Edit/Write and common shell writes. An agent that misremembers, skips a step or edits the wrong file is stopped.
 - **It does not stop a determined forger on the same machine.** The chain is unkeyed and agent identities (`--agent`, `--owner`) are names the owner supplies. An agent with shell access that sets out to fake a passing gate or a reviewer can. Independence and evidence are only as strong as the agents and the person running them.
 - **The blind reviewer is a rule, not a check.** The engine hands the reviewer only the bundle and prints a one-line start prompt, but it cannot see the prompt a runtime actually gives an agent, so it does not verify or record it. An owner who steers the reviewer (hints, focus areas, summaries of the work, other agents' findings) weakens the review without any refusal; the skills and the reviewer role forbid it, and the reviewer reports a prompt that carried more.
+- **Classes do not change guarantees.** The gate, the blind independent review (always at the reviewer role's class, never a work item's), frozen criteria, evidence integrity and the hash-chained ledger are the same for every class. A class lowers only how hard an implementer thinks; a misclassified work item still meets the same gate and the same reviewer.
 - **Adapter code is trusted at base.** Step plugins, delivery and tracker adapters run as committed on the base branch, never the ticket's copy. A ticket can still change the project scripts a step calls (for example a test script in `package.json`); that is visible in the diff the reviewer inspects, and changes to `sharedInfra` files force the affected package's steps to run.
 
 ## Versioning

@@ -5,10 +5,10 @@ import { abandon, adopt, entry, hold, openState, release } from './attempt.mjs';
 import { findRoot, loadConfig, requireRoot } from './config.mjs';
 import { liveGate, runGate, stopGate } from './gate.mjs';
 import { listAttempts, loadState } from './ledger.mjs';
-import { acceptReview, amendCriteria, batchCreate, batchEject, closeAfterHandoff, deliver, freezeCriteria, handoff, nextAction, recordReview, reopen } from './lifecycle.mjs';
+import { acceptReview, amendCriteria, batchCreate, batchEject, closeAfterHandoff, deliver, freezeCriteria, handoff, nextAction, recordReview, reopen, uncovered } from './lifecycle.mjs';
 import { detect, doctor, register, registry, setEnabled, sync, writeDraft } from './onboard.mjs';
 import * as secrets from './secrets.mjs';
-import { report, toCsv, toHtml } from './telemetry.mjs';
+import { report, toCsv, toHandoffCsv, toHtml } from './telemetry.mjs';
 import { impact } from './topology.mjs';
 import { recordTracker } from './tracker.mjs';
 import { ENGINE_VERSION, WfError, parseArgs } from './util.mjs';
@@ -41,7 +41,7 @@ Work
   wf entry [--item ID] [--lane quick|standard] [--intent implementation|analysis] [--repos a,b] [--defer-heavy] [--issue-file F]
   wf plan --file criteria.yaml      freeze acceptance criteria (and the plan)
   wf criteria amend --file f --reason "why"
-  wf handoff planner|implementer|reviewer|tester --agent ID [--session SID] [--runtime claude|codex]
+  wf handoff planner|implementer|reviewer|tester --agent ID [--work W1] [--session SID] [--runtime claude|codex]
   wf gate [--prepare-only] [--full] [--focused]
   wf stop --reason "why"            pause a running gate; finished steps are kept
   wf review --closure file.json     record the reviewer's closure
@@ -57,7 +57,7 @@ Work
 Status
   wf resume                         what to do next
   wf status [--all] [--json]
-  wf report [--all] [--csv FILE] [--html FILE]
+  wf report [--all] [--csv FILE] [--handoffs-csv FILE] [--html FILE]
 
 Common options: --attempt ID, --json, --owner ID`;
 
@@ -149,8 +149,10 @@ async function dispatch(cmd, sub, positional, options) {
     const roots = options.all ? registry().projects.map((p) => p.root).filter((r) => fs.existsSync(r)) : [requireRoot()];
     const rows = report(roots);
     if (options.csv) fs.writeFileSync(String(options.csv), toCsv(rows));
+    if (options['handoffs-csv']) fs.writeFileSync(String(options['handoffs-csv']), toHandoffCsv(rows));
     if (options.html) fs.writeFileSync(String(options.html), toHtml(rows));
-    print(options, options.csv || options.html ? `wrote ${[options.csv, options.html].filter(Boolean).join(' and ')} (${rows.length} attempt(s))` : toCsv(rows), rows);
+    const files = [options.csv, options['handoffs-csv'], options.html].filter(Boolean);
+    print(options, files.length ? `wrote ${files.join(' and ')} (${rows.length} attempt(s))` : `${toCsv(rows)}\n${toHandoffCsv(rows)}`, rows);
     return 0;
   }
   if (cmd === 'status' && options.all) {
@@ -263,13 +265,15 @@ async function dispatch(cmd, sub, positional, options) {
     }
     case 'plan': {
       const s = freezeCriteria(root, options);
-      print(options, `criteria frozen (${s.criteria.length}): ${s.criteria.map((c) => c.id).join(', ')}\nnext: ${nextAction(root, s)}`, s);
+      const loose = uncovered(s);
+      print(options, `criteria frozen (${s.criteria.length}): ${s.criteria.map((c) => c.id).join(', ')}${s.work ? `\nwork items (${s.work.length}): ${s.work.map((w) => `${w.id} [${w.class}] ${w.criteria.join(',')}`).join('; ')}` : ''}${loose.length ? `\nnote: no work item covers ${loose.join(', ')}` : ''}\nnext: ${nextAction(root, s)}`, s);
       return 0;
     }
     case 'criteria': {
       if (sub !== 'amend') throw new WfError('usage: wf criteria amend --file f --reason "why"');
-      const s = amendCriteria(root, options);
-      print(options, `criteria amended (${s.criteriaAmendments.length} amendment(s)); the reviewer will see the reason`, s);
+      const { state: s, changes } = amendCriteria(root, options);
+      const list = (ids) => ids.join(', ') || 'none';
+      print(options, `criteria amended (${s.criteriaAmendments.length} amendment(s)); the reviewer will see the reason\n  criteria now (${s.criteria.length}): ${list(s.criteria.map((c) => c.id))}\n  changed: ${list(changes.changed)}; added: ${list(changes.added)}; dropped: ${list(changes.dropped.map((d) => `${d.id} (${d.reason})`))}`, { ...s, changes });
       return 0;
     }
     case 'handoff': {
@@ -277,7 +281,7 @@ async function dispatch(cmd, sub, positional, options) {
       const startPrompt = `Read ${r.bundle} and follow its instructions.`;
       // The reviewer is started blind: this one line is its whole prompt, so nothing else is printed to pass along.
       if (sub === 'reviewer') print(options, startPrompt, { ...r, startPrompt });
-      else print(options, `${sub} bundle: ${r.bundle}\nStart the ${sub} agent (${options.agent}) with: "${startPrompt}"`, { ...r, startPrompt });
+      else print(options, `${sub} bundle: ${r.bundle}${r.work ? `\nwork item ${r.work}, class ${r.class}` : `\nclass ${r.class}`}${r.effort ? `, effort ${r.effort}` : ''}${r.model ? `, model ${r.model}` : ''}\nStart agent type ${r.agentType} (name it ${options.agent}; do not pass a model) with: "${startPrompt}"`, { ...r, startPrompt });
       return 0;
     }
     case 'gate': {

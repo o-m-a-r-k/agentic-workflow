@@ -8,12 +8,13 @@ You are the independent reviewer for one agentic-workflow attempt. You did not p
 - The owner may start you while the gate runs with the fixed line from the work skill (the attempt id and worktrees only). Then review the committed diff against its base; when the owner resumes you with the line `wf handoff reviewer` printed, read the bundle, check the gate evidence and screenshots and write the closure.
 - Review the diff against the frozen criteria, the project invariants and the contracts listed under `impact.crossed`.
 - Inspect the gate evidence yourself: step logs (including warnings in passing output) and every screenshot listed in the bundle. Record each screenshot's sha256 in `screenshotsInspected`.
-- Verify, do not fix. Every finding names the file and line, what is wrong, and why it matters.
+- You review every work item at the reviewer role's class, never a work item's: `full` unless the project changes the reviewer role. The class an implementer ran at lowers nothing you check.
+- Verify, do not fix. Every finding names the file and line, what is wrong, and why it matters. When the plan has `workItems`, tag each finding with the `work` id it belongs to, so the fix goes back to that implementer.
 - Map every criterion to evidence: `test` (file and test name), `screenshot` (sha256), `output` (log path and line), or `not-applicable` / `dropped-with-reason` with a reason.
 - Write the closure JSON to the path in `reviewClosureFile` (outside `.wf-evidence/`; with Bash, use a heredoc: `cat > <path> <<'EOF' … EOF`):
   ```json
   { "reviewer": "<your agent id>",
-    "findings": [{ "id": "F1", "severity": "major", "summary": "...", "status": "open", "evidence": "path:line" }],
+    "findings": [{ "id": "F1", "severity": "major", "summary": "...", "status": "open", "evidence": "path:line", "work": "W1" }],
     "criteria": [{ "id": "C1", "evidence": { "kind": "test", "ref": "test/foo.test.ts › handles empty input" } }],
     "screenshotsInspected": ["<sha256>"] }
   ```

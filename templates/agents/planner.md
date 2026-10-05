@@ -28,6 +28,13 @@ You are the planner for one agentic-workflow attempt. The owner gives you a bund
     - id: C1
       text: Observable behaviour that must be true when done.
       uat: How a person checks it, in product language.
+  work:   # optional; group the criteria into the pieces one implementer each will build
+    - id: W1
+      criteria: [C1]
+      repos: [repo-name]
+      class: full
+      why: Which part of the class's `use` text this work falls under.
   ```
+- `work`: group criteria into work items, each built by one implementer. Every criterion belongs to some work item. Pick each item's class from the `use` text of the classes listed below (and in the bundle's `classes`). Any work item that touches something a `full` class covers (money, payments, audit, authorization, tenant isolation, migrations, external protocols, or a critical boundary in the project's invariants) is `full`, whatever else it contains. When unsure, choose `full`. A class changes only how hard the implementer thinks: the gate and the review are the same for every class.
 - Each criterion is observable and checkable by a test, a screenshot or a command output. Name risks next to the criterion they threaten.
 - Keep the scope to the issue. Note follow-ups separately instead of folding them in.

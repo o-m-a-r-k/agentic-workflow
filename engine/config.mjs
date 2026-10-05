@@ -42,6 +42,62 @@ export function loadConfig(root) {
 
 const LANES = new Set(['quick', 'standard', 'batch']);
 
+// Work classes: how hard a role's agent thinks, per runtime. The adapter's `classes` merge over these by name.
+// Defaults are unmeasured starting points; guarantees (gate, blind review, frozen criteria) never depend on a class.
+export const DEFAULT_CLASSES = {
+  full: {
+    use: "Money, payments, audit, authorization, tenant isolation, migrations, external protocols, and anything the project's invariants file calls a critical boundary.",
+    claude: { effort: 'high' },
+    codex: {},
+  },
+  light: {
+    use: 'UI wired to a frozen contract, translations, generated docs or OpenAPI output, test fixtures.',
+    claude: { effort: 'low' },
+    codex: {},
+  },
+};
+// The effort values each runtime documents today. Checked so a typo fails at load instead of silently running at the
+// inherited effort; a runtime that adds a value needs it added here.
+export const EFFORTS = { claude: ['low', 'medium', 'high', 'xhigh', 'max'], codex: ['minimal', 'low', 'medium', 'high', 'xhigh'] };
+export const ROLE_DEFAULT_CLASS = { planner: 'full', reviewer: 'full', implementer: 'full', tester: 'full' };
+
+function mergeClasses(raw, fail) {
+  const out = {};
+  for (const [name, c] of Object.entries(DEFAULT_CLASSES)) out[name] = { ...c, claude: { ...c.claude }, codex: { ...c.codex } };
+  if (raw !== undefined && (raw === null || typeof raw !== 'object' || Array.isArray(raw))) {
+    fail('`classes` must map class names to { use, claude, codex }');
+    return out;
+  }
+  for (const [name, c] of Object.entries(raw ?? {})) {
+    // The name becomes an agent file name (wf-implementer-<class>).
+    if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) fail(`class \`${name}\`: use lowercase letters, digits and dashes`);
+    const prev = out[name] ?? { claude: {}, codex: {} };
+    out[name] = { ...prev, ...(c ?? {}), claude: { ...prev.claude, ...(c?.claude ?? {}) }, codex: { ...prev.codex, ...(c?.codex ?? {}) } };
+  }
+  for (const [name, c] of Object.entries(out)) {
+    if (typeof c.use !== 'string' || !c.use.trim()) fail(`class \`${name}\` needs \`use\`: what work belongs in it (the planner assigns classes from this text)`);
+    for (const runtime of Object.keys(EFFORTS)) {
+      const e = c[runtime]?.effort;
+      if (e !== undefined && e !== null && !EFFORTS[runtime].includes(e)) fail(`class \`${name}\`: ${runtime} effort \`${e}\` is not one of ${EFFORTS[runtime].join(', ')}`);
+    }
+  }
+  return out;
+}
+
+// The class a role runs at, and what it declares per runtime.
+export function roleClass(cfg, role) {
+  const rc = cfg.roles?.[role];
+  return (rc && typeof rc === 'object' ? rc.class : null) ?? ROLE_DEFAULT_CLASS[role] ?? 'full';
+}
+export function agentTypeFor(cfg, role, cls = roleClass(cfg, role)) {
+  if (role !== 'implementer') return `wf-${role}`;
+  return cls === roleClass(cfg, 'implementer') ? 'wf-implementer' : `wf-implementer-${cls}`;
+}
+export function declared(cfg, cls, runtime) {
+  const c = cfg.classes[cls] ?? {};
+  return { effort: c[runtime]?.effort ?? null, model: c[runtime]?.model ?? null };
+}
+
 function normalize(raw, source) {
   const errors = [];
   const fail = (m) => errors.push(m);
@@ -65,6 +121,14 @@ function normalize(raw, source) {
     components: raw.components ?? [],
     repos: [],
   };
+  cfg.classes = mergeClasses(raw.classes, fail);
+  for (const [role, rc] of Object.entries(cfg.roles)) {
+    if (!rc || typeof rc !== 'object') continue;
+    // Pre-launch replacement: per-role model/effort moved to classes; refusing them keeps a stale setting from being silently ignored.
+    const moved = ['model', 'effort', 'claude', 'codex'].filter((k) => k in rc);
+    if (moved.length) fail(`roles.${role}: ${moved.join(', ')} moved to \`classes\`; set \`roles.${role}.class\` and the class's claude/codex effort and model`);
+    if (rc.class !== undefined && !cfg.classes[rc.class]) fail(`roles.${role}.class \`${rc.class}\` is not a known class (known: ${Object.keys(cfg.classes).join(', ')})`);
+  }
   for (const lane of cfg.lanes) if (!LANES.has(lane)) fail(`unknown lane \`${lane}\``);
   if (!Array.isArray(raw.repos) || raw.repos.length === 0) fail('`repos` must list at least one git root');
   const names = new Set();

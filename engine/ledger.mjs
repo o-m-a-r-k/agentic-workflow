@@ -89,6 +89,7 @@ export function reduce(entries) {
     criteria: null,
     criteriaAmendments: [],
     plan: null,
+    work: null,
     roles: { planner: [], implementer: [], reviewer: [], tester: [] },
     handoffs: [],
     gates: [],
@@ -135,11 +136,13 @@ export function reduce(entries) {
       case 'criteria.frozen':
         s.criteria = d.criteria;
         s.plan = d.plan ?? null;
+        s.work = d.work ?? null;
         if (s.phase === 'admitted') s.phase = 'planned';
         break;
       case 'criteria.amended':
         s.criteria = d.criteria;
-        s.criteriaAmendments.push({ at: e.at, reason: d.reason, by: e.actor });
+        if (d.work) s.work = d.work;
+        s.criteriaAmendments.push({ at: e.at, reason: d.reason, by: e.actor, changes: d.changes ?? null });
         break;
       case 'handoff':
         s.handoffs.push({ ...d, at: e.at, by: e.actor });

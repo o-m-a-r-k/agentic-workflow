@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { actor, branchName, changedFiles, cleanupWorktrees, entry, openState, treeHashes, worktreeDir } from './attempt.mjs';
-import { ADAPTER_DIR, adapterFileAtCommit, loadConfig, loadConfigAtCommit, repoDir } from './config.mjs';
+import { ADAPTER_DIR, adapterFileAtCommit, agentTypeFor, declared, loadConfig, loadConfigAtCommit, repoDir, roleClass } from './config.mjs';
 import { focusedSkips, gatePassedForCurrentTree, screenshots } from './gate.mjs';
 import { append, attemptDir, listAttempts, loadState } from './ledger.mjs';
 import { deliveryOrder, impact, inside, packageOf } from './topology.mjs';
@@ -41,6 +41,31 @@ function validateCriteria(list) {
   }
 }
 
+// The planner's optional grouping of criteria into work items, each with a class. Refused only where the owner would
+// otherwise be told to start an agent that does not exist or to cover a criterion that does not exist.
+function validateWork(cfg, work, criteria) {
+  if (work === undefined || work === null) return null;
+  if (!Array.isArray(work)) throw new WfError('`work` must be a list of { id, criteria, repos, class, why }');
+  const known = new Set(criteria.map((c) => c.id));
+  const ids = new Set();
+  const out = [];
+  for (const w of work) {
+    if (!w?.id) throw new WfError('each work item needs an `id`');
+    if (ids.has(w.id)) throw new WfError(`duplicate work item id ${w.id}`);
+    ids.add(w.id);
+    const crit = Array.isArray(w.criteria) ? w.criteria.map(String) : [];
+    const unknown = crit.filter((c) => !known.has(c));
+    if (unknown.length) throw new WfError(`work item ${w.id} names unknown criteria ${unknown.join(', ')} (criteria: ${[...known].join(', ')})`);
+    const cls = w.class ?? roleClass(cfg, 'implementer');
+    if (!cfg.classes[cls]) throw new WfError(`work item ${w.id}: class \`${cls}\` is not a known class (known: ${Object.keys(cfg.classes).join(', ')})`);
+    out.push({ ...w, criteria: crit, repos: Array.isArray(w.repos) ? w.repos : w.repos ? [w.repos] : [], class: cls });
+  }
+  return out;
+}
+
+// Criteria no work item covers. Shown to the owner, never refused.
+export const uncovered = (state) => (state.work ? (state.criteria ?? []).map((c) => c.id).filter((id) => !state.work.some((w) => w.criteria.includes(id))) : []);
+
 export function freezeCriteria(root, options) {
   const state = openState(root, options);
   const cfg = loadConfig(root);
@@ -48,14 +73,45 @@ export function freezeCriteria(root, options) {
   if (typeof options.file !== 'string') throw new WfError('--file <criteria.yaml|json> is required');
   const doc = readStructured(options.file);
   validateCriteria(doc.criteria);
+  const work = validateWork(cfg, doc.work, doc.criteria);
   if (needsPlanner(cfg, state)) {
     const planner = state.handoffs.filter((h) => h.role === 'planner').at(-1);
     if (!planner) throw refuse(`the ${state.lane} lane needs a planner: run \`wf handoff planner --agent <id>\` first`);
     if (canonical(treeHashes(state)) !== canonical(planner.tree)) throw refuse('the planner changed the worktree; planning must be read-only');
   }
   if (state.handoffs.some((h) => h.role === 'implementer')) throw refuse('implementation already started; criteria must be frozen before implementation');
-  append(root, state.id, 'criteria.frozen', { criteria: doc.criteria, plan: doc.plan ?? null }, actor(options));
+  append(root, state.id, 'criteria.frozen', { criteria: doc.criteria, plan: doc.plan ?? null, ...(work ? { work } : {}) }, actor(options));
   return loadState(root, state.id);
+}
+
+// An amendment merges by criterion id: listed ids replace the frozen ones, new ids are added, ids not listed stay.
+// Removing one needs an explicit `{ id, dropped: true, reason }` entry. Replacing the whole list silently dropped
+// every criterion the amendment file did not repeat.
+export function mergeAmendment(frozen, entries) {
+  if (!Array.isArray(entries) || !entries.length) throw new WfError('the amendment file needs `criteria`: the changed, added or dropped criteria only');
+  const seen = new Set();
+  const byId = new Map(frozen.map((c) => [c.id, c]));
+  const changes = { changed: [], added: [], dropped: [] };
+  for (const e of entries) {
+    if (!e?.id) throw new WfError('each criterion needs `id`');
+    if (seen.has(e.id)) throw new WfError(`duplicate criterion id ${e.id}`);
+    seen.add(e.id);
+    if (e.dropped === true) {
+      if (!byId.has(e.id)) throw new WfError(`cannot drop ${e.id}: it is not a frozen criterion (criteria: ${[...byId.keys()].join(', ')})`);
+      if (!String(e.reason ?? '').trim()) throw new WfError(`dropping ${e.id} needs a \`reason\``);
+      byId.delete(e.id);
+      changes.dropped.push({ id: e.id, reason: String(e.reason) });
+      continue;
+    }
+    if (!e.text) throw new WfError(`criterion ${e.id} needs \`text\` (or \`dropped: true\` with a \`reason\` to remove it)`);
+    const { dropped, reason, ...criterion } = e;
+    if (!byId.has(e.id)) changes.added.push(e.id);
+    else if (canonical(byId.get(e.id)) !== canonical(criterion)) changes.changed.push(e.id);
+    byId.set(e.id, criterion);
+  }
+  const criteria = [...byId.values()];
+  if (!criteria.length) throw new WfError('the amendment drops every criterion; abandon the attempt instead');
+  return { criteria, changes };
 }
 
 export function amendCriteria(root, options) {
@@ -63,9 +119,11 @@ export function amendCriteria(root, options) {
   if (!state.criteria) throw refuse('criteria are not frozen yet; use `wf plan`');
   if (!options.reason || options.reason === true) throw new WfError('--reason is required (say why the criteria change)');
   const doc = readStructured(options.file);
-  validateCriteria(doc.criteria);
-  append(root, state.id, 'criteria.amended', { criteria: doc.criteria, reason: String(options.reason), previous: state.criteria }, actor(options));
-  return loadState(root, state.id);
+  const { criteria, changes } = mergeAmendment(state.criteria, doc.criteria);
+  // Work items survive an amendment unless the file replaces them; either way they must name criteria that still exist.
+  const work = validateWork(loadConfig(root), doc.work ?? state.work, criteria);
+  append(root, state.id, 'criteria.amended', { criteria, changes, reason: String(options.reason), previous: state.criteria, ...(doc.work ? { work } : {}) }, actor(options));
+  return { state: loadState(root, state.id), changes };
 }
 
 // Everyone who owned, planned, implemented or tested the change, including batch members' authors.
@@ -111,6 +169,16 @@ export function handoff(root, role, options) {
   if (role === 'implementer' && state.roles.reviewer.includes(agent)) throw refuse(`${agent} reviewed this attempt and cannot implement it`);
   const skillIssues = skillProblems(root, cfg, role, runtime, state);
   if (skillIssues.length) throw refuse(skillIssues.join('\n'));
+  let work = null;
+  if (options.work !== undefined) {
+    if (role !== 'implementer') throw new WfError('--work applies to implementer handoffs only');
+    work = (state.work ?? []).find((w) => w.id === String(options.work));
+    if (!work) throw refuse(`no work item \`${options.work}\` in the frozen plan${state.work?.length ? ` (work items: ${state.work.map((w) => w.id).join(', ')})` : ''}`);
+    if (!cfg.classes[work.class]) throw refuse(`work item ${work.id}: class \`${work.class}\` is no longer in the adapter (known: ${Object.keys(cfg.classes).join(', ')})`);
+  }
+  const cls = work?.class ?? roleClass(cfg, role);
+  const agentType = agentTypeFor(cfg, role, cls);
+  const { effort, model } = declared(cfg, cls, runtime);
 
   const trusted = loadConfigAtCommit(root, cfg, state.adapterBase);
   const changed = Object.fromEntries(Object.keys(state.repos).map((r) => [r, changedFiles(state, r)]));
@@ -123,12 +191,21 @@ export function handoff(root, role, options) {
     lane: state.lane,
     role,
     agent,
+    // The agent type the owner starts; its generated file (wf sync) sets this effort and model.
+    agentType,
+    class: cls,
+    effort,
+    model,
+    work,
     worktrees: Object.fromEntries(Object.entries(state.repos).map(([k, v]) => [k, v.worktree])),
     bases: Object.fromEntries(Object.entries(state.repos).map(([k, v]) => [k, v.base])),
     // What the planner (and every role) reads first: the issue as captured at entry and from the tracker.
     issue: { file: state.issue?.file ?? null, trackerCaptures: state.tracker.done.map((d) => d.capture?.path).filter(Boolean) },
     criteria: state.criteria,
     plan: state.plan,
+    workItems: state.work,
+    // The planner assigns each work item a class from these texts.
+    classes: role === 'planner' ? Object.fromEntries(Object.entries(cfg.classes).map(([n, c]) => [n, { use: c.use, agentType: agentTypeFor(cfg, 'implementer', n) }])) : undefined,
     criteriaAmendments: state.criteriaAmendments,
     changed,
     impact: impact(trusted, changed),
@@ -138,17 +215,17 @@ export function handoff(root, role, options) {
     // Outside .wf-evidence/: the reviewer writes it, `wf review` copies it into the evidence.
     reviewClosureFile: role === 'reviewer' ? path.join(root, '.wf-worktrees', state.id, '_review', `closure-${n}.json`) : null,
     instructions: {
-      planner: 'Read the issue and the code. Do not change any file. Return YAML: { plan: { summary, contract, anchors, tests: { changed, run }, doNotRun, externalServices, agentSplit }, criteria: [{ id: C1, text, uat }] }.',
-      implementer: "Implement against the frozen criteria and the plan's contract in the worktrees above. Write tests only for real behaviour. While iterating run only the specs you changed; before finishing run the repo's lint and full unit suite once. Commit at stage boundaries and everything when done.",
-      reviewer: 'Review the diff and the gate evidence. You did not write this change. Everything you need is in this bundle; judge the whole change yourself. Write the closure file: { reviewer, findings: [{ id, severity, summary, status: open|fixed|verified-nonissue, evidence }], criteria: [{ id, evidence: { kind: test|screenshot|output|not-applicable|dropped-with-reason, ref, reason } }], screenshotsInspected: [sha256] }. Then run `wf review --closure <file>`.',
+      planner: 'Read the issue and the code. Do not change any file. Return YAML: { plan: { summary, contract, anchors, tests: { changed, run }, doNotRun, externalServices, agentSplit }, criteria: [{ id: C1, text, uat }], work: [{ id: W1, criteria: [C1], repos, class, why }] } (work is optional; classes: see your role file).',
+      implementer: "Implement against the frozen criteria and the plan's contract in the worktrees above. Write tests only for real behaviour. While iterating run only the specs you changed; before finishing run the repo's lint and full unit suite once. Commit at stage boundaries and everything when done. If `work` is set, do that work item only; if it turns out to touch something a stronger class covers, stop and tell the owner.",
+      reviewer: 'Review the diff and the gate evidence. You did not write this change. Everything you need is in this bundle; judge the whole change yourself. Write the closure file: { reviewer, findings: [{ id, severity, summary, status: open|fixed|verified-nonissue, evidence, work }], criteria: [{ id, evidence: { kind: test|screenshot|output|not-applicable|dropped-with-reason, ref, reason } }], screenshotsInspected: [sha256] }. Then run `wf review --closure <file>`.',
       tester: 'Write requirement expectations from the issue before reading the implementation, then map each to gate tests.',
     }[role],
   };
   writeJson(file, bundle);
   if (bundle.reviewClosureFile) fs.mkdirSync(path.dirname(bundle.reviewClosureFile), { recursive: true });
-  append(root, state.id, 'handoff', { role, agent, runtime, session: options.session ?? null, bundle: file, tree: treeHashes(state), patch: patchIds(state) }, actor(options));
+  append(root, state.id, 'handoff', { role, agent, runtime, session: options.session ?? null, agentType, class: cls, effort, model, work: work?.id ?? null, bundle: file, tree: treeHashes(state), patch: patchIds(state) }, actor(options));
   if (role === 'implementer' && state.lane !== 'quick' && state.intent === 'implementation') emitTrackerEvent(root, cfg, state.id, 'implementing');
-  return { bundle: file, state: loadState(root, state.id) };
+  return { bundle: file, agentType, class: cls, effort, model, work: work?.id ?? null, state: loadState(root, state.id) };
 }
 
 export function recordReview(root, options) {
@@ -458,14 +535,19 @@ function phaseAction(cfg, state) {
     if (needsPlanner(cfg, state) && !state.handoffs.some((h) => h.role === 'planner')) return 'start the planner: `wf handoff planner --agent <id>`';
     return 'freeze the criteria: `wf plan --file <criteria.yaml>`';
   }
-  if (state.lane !== 'batch' && !state.handoffs.some((h) => h.role === 'implementer')) return 'start the implementer: `wf handoff implementer --agent <id>`';
+  if (state.lane !== 'batch' && state.work?.length) {
+    const started = new Set(state.handoffs.filter((h) => h.role === 'implementer' && h.work).map((h) => h.work));
+    const open = state.work.filter((w) => !started.has(w.id));
+    if (open.length) return `start an implementer per open work item (agent type in brackets; never general-purpose): ${open.map((w) => `${w.id} class ${w.class} [${agentTypeFor(cfg, 'implementer', w.class)}] \`wf handoff implementer --work ${w.id} --agent <id>\``).join('; ')}`;
+  }
+  if (state.lane !== 'batch' && !state.handoffs.some((h) => h.role === 'implementer')) return `start the implementer: \`wf handoff implementer --agent <id>\` [${agentTypeFor(cfg, 'implementer')}]`;
   const g = state.lastGate;
   if (!g || g.status !== 'passed') return g ? `gate ${g.status}: fix and commit, then \`wf gate\`` : 'commit the change, then `wf gate`';
   if (focusedSkips(g).length) return `the last gate was focused (skipped ${focusedSkips(g).join(', ')}): run \`wf gate\` without --focused before review`;
   if (!state.review) return 'hand to an independent reviewer: `wf handoff reviewer --agent <id>`';
   if (!state.accepted) {
     const open = state.review.closure.findings.filter((f) => !['fixed', 'verified-nonissue'].includes(f.status));
-    if (open.length) return `fix the open findings (${open.map((f) => f.id).join(', ')}) through the implementer, commit, \`wf gate\`, then hand to the reviewer again (\`wf handoff reviewer --agent <id>\`)`;
+    if (open.length) return `fix the open findings (${open.map((f) => (f.work ? `${f.id} in ${f.work}` : f.id)).join(', ')}) through the implementer that did that work (continue it; do not start a new one), commit, \`wf gate\`, then hand to the reviewer again (\`wf handoff reviewer --agent <id>\`)`;
     return 'accept the review: `wf accept`';
   }
   if (state.batchOf) return `waiting for batch ${state.batchOf}`;
