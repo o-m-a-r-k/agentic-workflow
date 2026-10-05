@@ -5,7 +5,7 @@ import { pathToFileURL } from 'node:url';
 import { actor, branchName, changedFiles, cleanupWorktrees, entry, openState, treeHashes, worktreeDir } from './attempt.mjs';
 import { ADAPTER_DIR, adapterFileAtCommit, agentTypeFor, declared, loadConfig, loadConfigAtCommit, repoDir, roleClass } from './config.mjs';
 import { focusedSkips, gatePassedForCurrentTree, screenshots } from './gate.mjs';
-import { append, attemptDir, listAttempts, loadState } from './ledger.mjs';
+import { append, attemptDir, keptFiles, listAttempts, loadState } from './ledger.mjs';
 import { changedForStep, deliveryOrder, impact, inside, packageOf } from './topology.mjs';
 import { findSkill } from './skills.mjs';
 import { lastFencedYaml, lastModel, readTranscript, sessionModel, subagentModel, subagentTranscripts } from './telemetry.mjs';
@@ -864,12 +864,12 @@ export function narrowDelivery(root, options) {
   const unknown = keep.filter((k) => !source.files.some((f) => f.sha256 === k));
   if (unknown.length) throw refuse(`${unknown.length} kept sha256 not in the delivered set (full 64-character sha256 from \`wf status --json\` → ${source.legacy ? 'tracker.pending, the delivered attach action\'s files' : 'delivery.screenshots'}):\n  - ${unknown.join('\n  - ')}`);
   const from = source.files.length;
-  if (keep.length === from) throw refuse(`all ${from} delivered files are kept; nothing to narrow`);
-  const kept = source.files.filter((f) => keep.includes(f.sha256));
-  const plan = { keep, from, to: keep.length, dropped: from - keep.length, reason, legacy: source.legacy, kept: kept.map((f) => ({ sha256: f.sha256, title: f.title ?? path.basename(f.path), path: f.path })) };
+  const kept = keptFiles(source.files, keep);
+  if (kept.length === from) throw refuse(`all ${from} delivered files are kept; nothing to narrow`);
+  const plan = { keep, from, to: kept.length, dropped: from - kept.length, reason, legacy: source.legacy, kept: kept.map((f) => ({ sha256: f.sha256, title: f.title ?? path.basename(f.path), path: f.path })) };
   if (options['dry-run']) return { state, dryRun: plan };
   const raw = Array.isArray(parsed) ? null : keepRaw(root, state.id, 'delivery/narrow.raw.json', parsed.text);
-  append(root, state.id, 'delivery.narrowed', { keep, from, to: keep.length, dropped: from - keep.length, reason, legacy: source.legacy, raw: raw ? { path: raw.file, sha256: raw.sha256 } : null }, actor(options));
+  append(root, state.id, 'delivery.narrowed', { keep, from, to: kept.length, dropped: from - kept.length, reason, legacy: source.legacy, raw: raw ? { path: raw.file, sha256: raw.sha256 } : null }, actor(options));
   const after = loadState(root, state.id);
   // A legacy attempt has no draft and owes no `wf shown`: its kept uploads are checked by title only, as before.
   if (!source.legacy) writeJson(shownDraftFile(root, state.id), { attempt: state.id, item: state.item, note: 'Copy this file outside .wf-evidence, view each image, replace each caption with what the image shows (which screen, which state), then `wf shown --file <copy>`.', screenshots: after.delivery.screenshots.screenshots.map((f) => ({ sha256: f.sha256, title: f.title, path: f.path, proposed: f.proposed, caption: f.proposed })) });

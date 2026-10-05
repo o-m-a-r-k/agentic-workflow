@@ -75,7 +75,13 @@ export function listAttempts(root) {
 }
 
 // A pending `delivered` attach action, limited to the files a `delivery.narrowed` entry kept.
-const narrowAttach = (a, narrowed) => (narrowed && a.event === 'delivered' && a.op === 'attach' ? { ...a, files: a.files.filter((f) => narrowed.keep.includes(f.sha256)) } : a);
+// One file per kept sha256, the first in recorded order: the same capture copied to two paths (a spec's evidence folder
+// and the runner's attachment folder) would otherwise be owed twice, once under a title the ticket never got.
+export const keptFiles = (files, keep) => {
+  const seen = new Set();
+  return files.filter((f) => keep.includes(f.sha256) && !seen.has(f.sha256) && seen.add(f.sha256));
+};
+const narrowAttach = (a, narrowed) => (narrowed && a.event === 'delivered' && a.op === 'attach' ? { ...a, files: keptFiles(a.files, narrowed.keep) } : a);
 
 // Derived state. Everything a command decides is computed from the ledger, never stored separately.
 export function reduce(entries) {
@@ -209,7 +215,7 @@ export function reduce(entries) {
       // pending `delivered` attach action whichever came first in the ledger, both derive from the kept list.
       case 'delivery.narrowed': {
         const keep = new Set(d.keep ?? []);
-        if (s.delivery.screenshots) s.delivery.screenshots = { ...s.delivery.screenshots, screenshots: s.delivery.screenshots.screenshots.filter((f) => keep.has(f.sha256)) };
+        if (s.delivery.screenshots) s.delivery.screenshots = { ...s.delivery.screenshots, screenshots: keptFiles(s.delivery.screenshots.screenshots, [...keep]) };
         s.delivery.narrowed = { from: d.from, to: d.to, dropped: d.dropped, reason: d.reason, legacy: d.legacy === true, keep: [...keep], raw: d.raw ?? null, at: e.at, by: e.actor };
         s.tracker.pending = s.tracker.pending.map((a) => narrowAttach(a, s.delivery.narrowed));
         break;

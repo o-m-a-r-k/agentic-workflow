@@ -213,7 +213,7 @@ test('linear readback shapes: raw get_issue alone, with list_comments, as an MCP
 // "no set to narrow". The ledger entries below are the ones 0.1.6 wrote at delivery.
 test('delivery narrow on an attempt delivered before 0.1.11: the pending attach action is narrowed; the readback needs only the kept titles', async () => {
   const { append } = await import('../engine/ledger.mjs');
-  const visual = [{ id: 'ui', repo: 'app', run: 'mkdir -p shots && for n in mine-a mine-b other-1 other-2 other-3 other-4; do printf $n > shots/$n.png; done', artifacts: ['shots/*.png'] }];
+  const visual = [{ id: 'ui', repo: 'app', run: 'mkdir -p shots && for n in mine-a mine-b other-1 other-2 other-3 other-4; do printf $n > shots/$n.png; done && mkdir -p shots/results && cp shots/mine-a.png shots/results/run-mine-a-0f3c.png', artifacts: ['shots/*.png', 'shots/results/*.png'] }];
   const tracker = { kind: 'linear', statuses: { started: 'In Progress', delivered: 'Ready for UAT', done: 'Done' } };
   const { base, root } = singleRepoProject('narrow-legacy', { tracker, gate: { steps: visual } }, ignore);
   const item = 'ENG-79';
@@ -239,23 +239,25 @@ test('delivery narrow on an attempt delivered before 0.1.11: the pending attach 
   assert.equal(s.delivery.screenshots, undefined);
   assert.equal(s.phase, 'handoff-pending');
 
-  const mine = all.filter((a) => /mine-/.test(a.source)).map((a) => a.sha256);
+  assert.equal(all.length, 7, 'mine-a is collected twice: its evidence copy and the runner\'s copy');
+  const mine = [...new Set(all.filter((a) => /mine-/.test(a.source)).map((a) => a.sha256))];
+  assert.equal(mine.length, 2);
   const reason = 'the glob matched every spec\'s captures; only mine-a and mine-b are this ticket\'s';
   const narrow = (args) => wf(root, ['delivery', 'narrow', ...args, '--attempt', e.id]);
   assert.match(narrow(['--keep', 'f'.repeat(64), '--reason', reason]).err, /not in the delivered set[\s\S]*tracker\.pending/);
   const ledger = path.join(root, '.wf-evidence', 'attempts', e.id, 'ledger.jsonl');
   const bytes = fs.readFileSync(ledger, 'utf8');
   const dry = ok(narrow(['--keep', mine.join(','), '--reason', reason, '--dry-run']));
-  assert.match(dry.out, /dry run, nothing recorded: .* from 6 to 2 \(4 dropped; delivered before 0\.1\.11/);
+  assert.match(dry.out, /dry run, nothing recorded: .* from 7 to 2 \(5 dropped; delivered before 0\.1\.11/);
   assert.match(dry.out, /mine-a\.png/);
   assert.equal(fs.readFileSync(ledger, 'utf8'), bytes, 'a dry run writes nothing');
 
   ok(narrow(['--keep', mine.join(','), '--reason', reason]));
   s = state(root, e.id);
-  assert.deepEqual(s.tracker.pending.find((a) => a.op === 'attach').files.map((f) => f.sha256).sort(), [...mine].sort());
+  assert.deepEqual(s.tracker.pending.find((a) => a.op === 'attach').files.map((f) => path.basename(f.path)).sort(), ['mine-a.png', 'mine-b.png'], 'one file per kept sha256, the first recorded; the runner\'s copy is dropped');
   assert.equal(s.delivery.narrowed.legacy, true);
   assert.equal(s.delivery.screenshots, undefined, 'no set is invented: the legacy check stays title-only');
-  assert.match(ok(wf(root, ['status', '--attempt', e.id])).out, /delivered files narrowed from 6 to 2/);
+  assert.match(ok(wf(root, ['status', '--attempt', e.id])).out, /delivered files narrowed from 7 to 2/);
   assert.match(ok(wf(root, ['resume', '--attempt', e.id])).out, /upload and attach 2 screenshot\(s\)/);
   assert.match(narrow(['--keep', mine[0], '--reason', reason]).err, /already narrowed/);
   assert.match(wf(root, ['shown', '--file', shownFile(base, []), '--attempt', e.id]).err, /delivered before screenshots were recorded/);
