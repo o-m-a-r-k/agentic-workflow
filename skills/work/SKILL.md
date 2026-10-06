@@ -32,4 +32,4 @@ Agents you start must not leave background waiters, Monitors or `sleep` loops ru
 
 `wf resume` tells you the next step at any point, including after an interruption.
 
-Evidence is write-protected and verified at every use. If a command refuses with "the evidence of <attempt> does not match what wf recorded", stop: run `wf verify --attempt <id>`, find what changed the listed files (a tool, a gate step, a person) and tell the user. Never edit, restore or lift the protection of evidence files yourself.
+Evidence is write-protected and verified at every use. If a command refuses with "the evidence of <attempt> does not match what wf recorded", stop: run `wf verify --attempt <id>`, find what changed the listed files (a tool, a gate step, a person) and tell the user. Never edit, restore or lift the protection of evidence files yourself. Only the user decides to accept a change (`wf verify --accept-changes --reason "<their words>"`, recorded and shown to the reviewer) or to delete closed attempts' evidence (`wf evidence release`).

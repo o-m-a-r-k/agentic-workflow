@@ -1,4 +1,5 @@
 import { ruleWarnings } from './rules.mjs';
+import { protectionLayers } from './evidence.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -563,7 +564,8 @@ export function modelWarnings(root, cfg) {
 }
 
 export async function doctor(root, { runSteps = true } = {}) {
-  const report = { config: [], tools: [], secrets: [], skills: [], connectors: [], steps: [], warnings: [], ok: true };
+  // Which evidence protection layers this machine provides (informational; a missing flag never fails doctor).
+  const report = { config: [], tools: [], secrets: [], skills: [], connectors: [], steps: [], warnings: [], protection: protectionLayers(root).map((l) => ({ ok: true, warn: !l.active, check: l.layer, note: l.detail ?? (l.active ? 'on' : 'off') })), ok: true };
   const bad = (section, item) => {
     report[section].push({ ...item, ok: false });
     report.ok = false;

@@ -49,6 +49,7 @@ export function exportData(root, s) {
     // The delivered screenshots: what the owner was shown (with the caption given) and what the ticket got.
     delivered: deliveredView(s),
     closedAt: s.closedAt,
+    rebaselined: s.rebaselines ?? [],
   };
 }
 
@@ -149,6 +150,7 @@ export function exportHtml(d, images = {}) {
     d.outsidePlan.length ? sec('Outside the plan', `<p class="muted">Changed files no plan anchor or test path names. Each needs the reviewer's verdict: covered by a criterion, or a finding.</p>${table(['File', 'Verdict', 'By', 'Evidence'], d.outsidePlan.map((o) => [esc(o.file), o.verdict ? badge(o.verdict) : '<span class="warn">no verdict yet</span>', esc(o.by ?? ''), esc(o.evidence ?? '')]))}`) : '',
     d.flaky.length ? sec('Flaky', table(['Step', 'Failed run', 'Passed run', 'Suites'], d.flaky.map((f) => [esc(f.step), esc(f.failedRun), esc(f.passedRun), esc((f.suites ?? []).join(', '))]))) : '',
     sec('Tracker', table(['Event', 'State'], [...d.tracker.done.map((t) => [esc(t.event), `${badge('recorded')} ${esc(t.at)}`]), ...d.tracker.pending.map((t) => [esc(t.event), `${badge('pending')} ${esc(t.op)}${t.status ? ` ${esc(t.status)}` : ''}`])])),
+    d.rebaselined?.length ? sec('Evidence re-baselined', `<p class="warn">Evidence files changed outside wf and the owner accepted them (\`wf verify --accept-changes\`). The originals are not available.</p>${table(['At', 'By', 'Reason', 'Changes'], d.rebaselined.map((r) => [esc(r.at), esc(r.by), esc(r.reason), r.changes.map((c) => `${esc(c.kind)} ${esc(c.path)} <small>${esc((c.old ?? '').slice(0, 12))} → ${esc((c.new ?? 'removed').slice(0, 12))}</small>`).join('<br>')]))}`) : '',
     deliveredSection(d, images),
     sec('Delivery', d.delivery.completedAt ? `<p>${badge('delivered')} ${esc(d.delivery.completedAt)}</p>${d.delivery.narrowed ? `<p class="warn">Delivered files narrowed from ${esc(d.delivery.narrowed.from)} to ${esc(d.delivery.narrowed.to)}: ${esc(d.delivery.narrowed.reason)}</p>` : ''}${table(['Repo', 'Commit'], d.delivery.repos.map((r) => [esc(r.repo), esc(r.commit ? r.commit.slice(0, 12) : r.skipped ?? '')]))}` : '<p class="muted">not delivered yet</p>'),
   ].join('\n');

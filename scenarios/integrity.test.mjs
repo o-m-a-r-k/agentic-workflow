@@ -41,8 +41,11 @@ test('every evidence file is recorded in the ledger and protected; `wf verify` c
   const log = JSON.parse(g.out).steps[0].log;
   assert.equal(fs.statSync(log).mode & 0o777, 0o444, 'recorded files are read-only');
   assert.equal(fs.statSync(path.dirname(log)).mode & 0o777, 0o555, 'folders are read-only between commands');
-  assert.throws(() => fs.writeFileSync(log, 'x'), /EACCES|EPERM/, 'a careless write fails with a permission error');
-  assert.throws(() => fs.writeFileSync(path.join(path.dirname(log), 'stray.txt'), 'x'), /EACCES|EPERM/);
+  // Root ignores modes (Linux containers run as root by default): there only detection applies, as `wf doctor` says.
+  if (process.getuid?.() !== 0) {
+    assert.throws(() => fs.writeFileSync(log, 'x'), /EACCES|EPERM/, 'a careless write fails with a permission error');
+    assert.throws(() => fs.writeFileSync(path.join(path.dirname(log), 'stray.txt'), 'x'), /EACCES|EPERM/);
+  }
   const recorded = fs.readFileSync(path.join(dir, 'ledger.jsonl'), 'utf8').split('\n').filter(Boolean).map(JSON.parse).filter((e) => e.type === 'evidence.recorded').flatMap((e) => e.data.files);
   for (const rel of ['ui/output.log', 'ui/artifacts/shots/home.png', 'result.json']) assert.ok(recorded.some((f) => f.path.endsWith(rel) && /^[0-9a-f]{64}$/.test(f.sha256) && f.size >= 0 && f.mode === 0o444), rel);
   assert.ok(recorded.some((f) => f.path.startsWith('handoffs/')), 'handoff bundles too');
@@ -54,7 +57,7 @@ test('every evidence file is recorded in the ledger and protected; `wf verify` c
   const envStep = [{ id: 'env', repo: 'app', run: 'printf "$WF_EVIDENCE" > "$WF_EVIDENCE/where.txt"' }];
   const e2 = gated('integrity-scratch', 'ENG-201', envStep);
   ok(e2.g);
-  const where = fs.readFileSync(path.join(path.dirname(JSON.parse(e2.g.out).steps[0].log), 'where.txt'), 'utf8');
+  const where = fs.readFileSync(path.join(path.dirname(JSON.parse(e2.g.out).steps[0].log), 'out', 'where.txt'), 'utf8');
   assert.doesNotMatch(where, /\.wf-evidence/);
   assert.match(where, /\.wf-worktrees\/_gate\//);
 });
@@ -82,11 +85,12 @@ test('attacks after the gate are refused at the next use: changed log, replaced 
   restore(log, logBytes);
   ok(status());
 
-  // The same size, other bytes: the quick check sees nothing; every command that relies on content re-hashes.
+  // The same size, other bytes: even a non-content command sees it (the file's ctime changed, so it is re-hashed);
+  // every content command re-hashes anyway.
   writable(log);
   fs.writeFileSync(log, Buffer.alloc(logBytes.length, 0x41));
   fs.chmodSync(log, 0o444);
-  ok(status());
+  refusedWith(status(), /output\.log: content differs from its recorded sha256/);
   refusedWith(verify(), /output\.log: content differs from its recorded sha256/);
   refusedWith(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', id]), /output\.log: content differs/);
   restore(log, logBytes);
@@ -133,6 +137,7 @@ test('attacks after the gate are refused at the next use: changed log, replaced 
   const r = status();
   assert.notEqual(r.code, 0);
   assert.match(r.err, /hash chain broken at entry \d+; the ledger was edited by hand/);
+  assert.doesNotMatch(r.err, /content differs/, 'nothing is checked against a broken chain');
   fs.writeFileSync(ledger, ledgerText);
 
   // The anchor removed.
@@ -173,7 +178,7 @@ test('an attempt delivered before 0.1.20 is adopted once, as found; later change
   fs.writeFileSync(ledger, `${old.map((e) => JSON.stringify(e)).join('\n')}\n`);
   fs.rmSync(path.join(root, '.wf-worktrees', '_anchor', `${id}.json`), { force: true });
   ok(wf(root, ['status', '--attempt', id]));
-  assert.ok(fs.readFileSync(ledger, 'utf8').includes('"evidence.recorded"'), 'baselined');
+  assert.ok(fs.readFileSync(ledger, 'utf8').includes('"evidence.baseline"'), 'adopted with an evidence.baseline entry');
   ok(wf(root, ['verify', '--attempt', id]));
   const log = path.join(path.dirname(ledger), 'gate');
   const stray = path.join(log, 'stray.txt');

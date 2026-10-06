@@ -260,7 +260,7 @@ test('gate steps get an allowlisted environment: no session tokens, adapter pass
   commitIn(wt, { 'src/a.txt': 'b\n' });
   const env = { SECRET_CANARY: 'canary-value', CLAUDE_CODE_OAUTH_TOKEN: 'session-token', ANTHROPIC_API_KEY: 'sk-x', ANTHROPIC_BASE_URL: 'http://proxy.test', MY_PROJECT_FLAG: 'on', CLOUDSDK_X: 'c' };
   const g = JSON.parse(ok(wf(root, ['gate', '--attempt', id, '--json'], { env })).out);
-  const seen = fs.readFileSync(path.join(path.dirname(g.steps[0].log), 'env.txt'), 'utf8');
+  const seen = fs.readFileSync(path.join(path.dirname(g.steps[0].log), 'out', 'env.txt'), 'utf8');
   for (const leak of ['SECRET_CANARY', 'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']) assert.doesNotMatch(seen, new RegExp(`^${leak}=`, 'm'), `${leak} reached the step`);
   for (const passed of ['MY_PROJECT_FLAG=on', 'ANTHROPIC_BASE_URL=http://proxy.test', 'CLOUDSDK_X=c', `WF_STEP=env`]) assert.match(seen, new RegExp(`^${passed.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}$`, 'm'));
   assert.match(seen, /^PATH=/m);

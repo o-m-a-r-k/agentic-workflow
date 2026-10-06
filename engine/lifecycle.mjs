@@ -5,7 +5,8 @@ import { pathToFileURL } from 'node:url';
 import { actor, branchName, changedFiles, cleanupWorktrees, entry, openState, treeHashes, worktreeDir } from './attempt.mjs';
 import { ADAPTER_DIR, adapterFileAtCommit, agentTypeFor, declared, loadConfig, loadConfigAtCommit, repoDir, roleClass } from './config.mjs';
 import { focusedSkips, gatePassedForCurrentTree, screenshots } from './gate.mjs';
-import { append, attemptDir, evidenceRoot, keptFiles, listAttempts, loadState } from './ledger.mjs';
+import { append, attemptDir, evidenceRoot, keptFiles, listAttempts, loadState, openEvidence } from './ledger.mjs';
+import { assertUnchanged } from './evidence.mjs';
 import { changedForStep, deliveryOrder, impact, inside, packageOf } from './topology.mjs';
 import { findSkill } from './skills.mjs';
 import { lastFencedYaml, lastModel, readTranscript, sessionModel, subagentModel, subagentTranscripts } from './telemetry.mjs';
@@ -334,6 +335,8 @@ export function handoff(root, role, options) {
     // The planner assigns each work item a class from these texts.
     classes: role === 'planner' ? Object.fromEntries(Object.entries(cfg.classes).map(([n, c]) => [n, { use: c.use, agentType: agentTypeFor(cfg, 'implementer', n) }])) : undefined,
     criteriaAmendments: state.criteriaAmendments,
+    // Evidence files the owner accepted after they changed outside wf (`wf verify --accept-changes`): judge with that in mind.
+    rebaselined: state.rebaselines ?? [],
     changed,
     impact: impact(trusted, changed),
     invariants: cfg.invariants ? path.resolve(root, ADAPTER_DIR, cfg.invariants) : null,
@@ -566,6 +569,9 @@ export function acceptReview(root, options) {
   if (canonical(treeHashes(state)) !== canonical(reviewedTree)) problems.push(`no closure for the current tree: the code changed after the last review; ${fresh}`);
   else if (g.ok && !reviewedAfterGate(r)) problems.push(`the closure was written before a passing gate on this tree, so no reviewer has inspected the gate evidence; for the evidence pass ${fresh}`);
   if (problems.length) throw refuse(`review not accepted:\n  - ${problems.join('\n  - ')}`);
+  // Nothing verified when this command opened the attempt may have changed while it decided.
+  const moved = assertUnchanged(root, state.id);
+  if (moved.length) throw refuse(`review not accepted: the evidence changed while it was checked:\n  - ${moved.slice(0, 10).join('\n  - ')}`);
   append(root, state.id, 'review.accepted', { reviewer: r.closure.reviewer, patch: patchIds(state), heads: treeHashes(state), gate: state.lastGate.runId, ...(verdicts.length ? { noEvidence: verdicts } : {}), ...(rv.verdicts.length ? { rules: rv.verdicts } : {}), ...(ov.verdicts.length ? { outsidePlan: ov.verdicts } : {}), ...(dv.verdicts.length ? { designHits: dv.verdicts } : {}) }, actor(options));
   return loadState(root, state.id);
 }
@@ -682,6 +688,12 @@ export async function deliver(root, options) {
   if (changedAfter.length) throw refuse(`the change was modified after acceptance (${changedAfter.join(', ')}); gate and review it again`);
   const g = gatePassedForCurrentTree(state);
   if (!g.ok) throw refuse(`delivery needs a passing gate on the current code: ${g.reason}`);
+  // Right before anything is pushed: nothing verified at open has changed since (members of a batch too).
+  for (const id of [state.id, ...(state.batch?.members ?? [])]) {
+    if (id !== state.id) openEvidence(root, id);
+    const moved = assertUnchanged(root, id);
+    if (moved.length) throw refuse(`not delivered: the evidence of ${id} changed while it was checked:\n  - ${moved.slice(0, 10).join('\n  - ')}`);
+  }
   const adapter = await loadDeliveryAdapter(root, cfg, state);
   const order = deliveryOrder(cfg, Object.keys(state.repos));
   for (const name of order) {

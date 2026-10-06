@@ -11,7 +11,7 @@ import { projectEnv } from './env.mjs';
 import { missingFor, redactor, stepEnv } from './secrets.mjs';
 import { impact, inside, rel } from './topology.mjs';
 import { WfError, assertEngine, canonical, git, globToRegExp, hashFile, hashValue, isPidAlive, matchesAny, now, refuse, run, sha256, shellQuote, writeImmutable, writeJson } from './util.mjs';
-import { ownGateRun, prepareWrite, seal } from './evidence.mjs';
+import { ownGateRun, prepareWrite, readRegular, seal } from './evidence.mjs';
 
 const gateDir = (root, id) => path.join(attemptDir(root, id), 'gate');
 const lockFile = (root, id) => path.join(gateDir(root, id), 'gate.lock');
@@ -309,8 +309,11 @@ function collectArtifacts(step, dir, destDir, since, units) {
     const dest = path.join(destDir, r);
     prepareWrite(dest);
     fs.mkdirSync(path.dirname(dest), { recursive: true });
-    // Read once: the file recorded is the bytes hashed (a capture rewritten meanwhile cannot slip in another).
-    const bytes = fs.readFileSync(file);
+    // Read once, never through a link: the file recorded is the bytes hashed (a capture rewritten, or swapped for a link
+    // to a file outside the worktree, meanwhile cannot slip in another).
+    const read = readRegular(file);
+    if (!read) continue;
+    const bytes = read.bytes;
     fs.writeFileSync(dest, bytes);
     // Whose evidence the file is: the units whose own expansion of a matching glob matches it. A batch member delivers
     // (and attaches to its ticket) only its own files; a placeholder-less glob matches for every unit.
@@ -348,15 +351,18 @@ function suitesToRerun(prior, planned) {
 }
 
 // A step's scratch folder, copied into its evidence folder: regular files only (a link is skipped), each read once.
+// Into the step's own `out/` folder, so a scratch file can never take the name of an engine file (its log, its
+// artifacts); each file opened without following a link (a link swapped in is skipped), read once.
 function copyScratch(scratch, dest) {
   for (const file of walkFiles(scratch)) {
-    const st = fs.lstatSync(file);
-    if (!st.isFile()) continue;
-    const to = path.join(dest, path.relative(scratch, file));
+    const r = readRegular(file);
+    if (!r) continue;
+    const relPath = path.relative(scratch, file);
+    if (relPath.startsWith('..') || path.isAbsolute(relPath)) continue;
+    const to = path.join(dest, 'out', relPath);
     prepareWrite(to);
     fs.mkdirSync(path.dirname(to), { recursive: true });
-    if (fs.existsSync(to)) continue;
-    fs.writeFileSync(to, fs.readFileSync(file));
+    fs.writeFileSync(to, r.bytes, { flag: 'wx' });
   }
 }
 
@@ -536,8 +542,9 @@ async function harvest(root, state, lock) {
       } catch {}
     }
   }
-  const pf = progressFile(root, state.id, lock.runId);
-  const progress = fs.existsSync(pf) ? JSON.parse(fs.readFileSync(pf, 'utf8')) : { steps: [] };
+  // The run's results come from the ledger (each step was appended as it finished), never from its progress file: a
+  // progress file is not recorded evidence and could claim steps that never ran.
+  const progress = { steps: loadState(root, state.id).gateRuns?.[lock.runId]?.steps ?? [] };
   // A dead runner's folder is recorded by the process that harvests it, as found.
   ownGateRun(root, state.id, lock.runId);
   seal(append, { root, id: state.id, runId: lock.runId });
@@ -622,6 +629,7 @@ async function execute(root, state, plan, live = null) {
   ownGateRun(root, state.id, runId);
   prepareWrite(path.join(runDir, 'x'));
   fs.mkdirSync(runDir, { recursive: true });
+  append(root, state.id, 'gate.started', { runId, kind: plan.check ? 'check' : 'gate' }, null);
   const lockData = { pid: process.pid, runId, kind: plan.check ? 'check' : 'gate', startedAt: now(), tree: plan.tree, children: [], plugins: [] };
   const persistLock = () => writeJson(lockFile(root, state.id), lockData);
   persistLock();
@@ -676,6 +684,7 @@ async function execute(root, state, plan, live = null) {
     results.push({ ...prior, status: 'reused', reusedFrom: prior.runId, reason: s.reason, runId });
   }
   for (const s of plan.steps.filter((x) => ['skip', 'defer'].includes(x.decision))) results.push({ id: s.id, repo: s.repo, tier: s.tier, status: s.decision === 'defer' ? 'deferred' : 'skipped', reason: s.reason, skippedBy: s.skippedBy, runId });
+  if (results.length) append(root, state.id, 'gate.step', { runId, steps: results }, null);
   saveProgress();
   say(`run ${runId}: ${queue.length} to run, ${results.filter((r) => r.status === 'reused').length} reused, ${results.length - results.filter((r) => r.status === 'reused').length} skipped or deferred`);
   for (const r of results) say(`${r.status.padEnd(8)} ${r.id}  ${r.reason ?? ''}`.trimEnd());
@@ -716,6 +725,7 @@ async function execute(root, state, plan, live = null) {
             const secs = ((Date.now() - runningNow.get(p.id)) / 1000).toFixed(1);
             runningNow.delete(p.id);
             results.push(final);
+            append(root, state.id, 'gate.step', { runId, step: final }, null);
             saveProgress();
             say(`${final.status.padEnd(8)} ${p.id}  ${secs}s`);
             if (final.status === 'failed') for (const line of failureExcerpt(final, ctx.redact)) say(`  ${p.id} | ${line}`);

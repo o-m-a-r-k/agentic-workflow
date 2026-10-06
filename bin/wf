@@ -1,10 +1,18 @@
 #!/usr/bin/env node
 import { main } from '../engine/cli.mjs';
 
+// Exit only once stdout and stderr are drained: `process.exit` right after a large write to a pipe cut `--json`
+// output at 64 KB (named failure: a gate with 1,320 screenshots printed unparsable JSON).
+const drained = (stream) => new Promise((resolve) => (stream.writableLength ? stream.once('drain', resolve) : resolve()));
+const finish = async (code) => {
+  await Promise.all([drained(process.stdout), drained(process.stderr)]);
+  process.exit(code);
+};
+
 main(process.argv.slice(2)).then(
-  (code) => process.exit(code ?? 0),
+  (code) => finish(code ?? 0),
   (error) => {
     process.stderr.write(`wf: ${error.stack ?? error}\n`);
-    process.exit(1);
+    finish(1);
   },
 );

@@ -131,7 +131,7 @@ test('a hand-edited ledger is detected', () => {
   const ledger = path.join(root, '.wf-evidence', 'attempts', e.id, 'ledger.jsonl');
   fs.writeFileSync(ledger, fs.readFileSync(ledger, 'utf8').replace('"intent":"implementation"', '"intent":"analysis"'));
   const r = wf(root, ['resume', '--attempt', e.id]);
-  assert.equal(r.code, 1);
+  assert.notEqual(r.code, 0);
   assert.match(r.err, /hash chain broken/);
 });
 

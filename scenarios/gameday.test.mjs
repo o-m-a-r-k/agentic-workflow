@@ -194,7 +194,7 @@ test('game day: one ticket through every fault seen on real tickets', () => {
   assert.deepEqual(byId['api-unit'].rerunSuites, ['test/checkout.test.js'], 'only the failed suite reran');
   assert.deepEqual(g2.flaky.map((f) => [f.step, f.suites]), [['api-unit', ['test/checkout.test.js']]]);
   assert.equal(byId['web-unit'].status, 'reused', `the cache web-unit wrote did not block the next gate: ${byId['web-unit'].reason}`);
-  const seen = fs.readFileSync(path.join(path.dirname(byId.e2e.log), 'env.txt'), 'utf8');
+  const seen = fs.readFileSync(path.join(path.dirname(byId.e2e.log), 'out', 'env.txt'), 'utf8');
   assert.doesNotMatch(seen, /GAMEDAY_CANARY|CLAUDE_CODE_OAUTH_TOKEN/);
   assert.match(w(['status', '--attempt', ID]).out, /flaky: api-unit \(test\/checkout\.test\.js\)/);
   assert.equal(exported('gated').flaky[0].step, 'api-unit');

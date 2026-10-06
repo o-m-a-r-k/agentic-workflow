@@ -67,7 +67,9 @@ export function readLedger(root, id) {
 // Appends are serialised per attempt, so concurrent commands never interleave or fork the chain.
 export function append(root, id, type, data = {}, actor = null) {
   const file = ledgerFile(root, id);
-  openEvidence(root, id);
+  // A re-baseline is the one entry appended to an attempt that does not verify: `wf verify --accept-changes` has just
+  // checked its chain and anchor and shown the owner every difference.
+  if (type !== 'evidence.rebaselined') openEvidence(root, id);
   prepareWrite(file);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   return withFileLock(`${file}.lock`, () => {
@@ -253,7 +255,20 @@ export function reduce(entries) {
         break;
       // The evidence manifest: every file wf wrote into this attempt's evidence, with its sha256, size and mode.
       case 'evidence.recorded':
+      case 'evidence.baseline':
         s.evidenceFiles = (s.evidenceFiles ?? 0) + (d.files?.length ?? 0);
+        if (e.type === 'evidence.baseline') s.evidenceBaseline = { at: e.at, files: d.files?.length ?? 0 };
+        break;
+      // `wf verify --accept-changes`: the owner accepted changed, added or removed evidence files, with a reason.
+      case 'evidence.rebaselined':
+        (s.rebaselines ??= []).push({ at: e.at, by: e.actor, reason: d.reason, changes: d.changes ?? [] });
+        break;
+      // A gate run's steps as each finished: what a dead runner's run is recovered from (never its progress file).
+      case 'gate.started':
+        (s.gateRuns ??= {})[d.runId] = { kind: d.kind ?? 'gate', steps: [] };
+        break;
+      case 'gate.step':
+        ((s.gateRuns ??= {})[d.runId] ??= { kind: 'gate', steps: [] }).steps.push(...(d.steps ?? [d.step]).filter(Boolean));
         break;
       case 'batch.member.delivered':
         s.delivery.completedAt = e.at;

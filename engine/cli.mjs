@@ -8,7 +8,7 @@ import { findRoot, loadConfig, requireRoot } from './config.mjs';
 import { exportAttempt, exportFile } from './export.mjs';
 import { liveGate, runGate, runWithLease, stopGate } from './gate.mjs';
 import { append, listAttempts, loadState, openEvidence } from './ledger.mjs';
-import { seal, setVerifyLevel, verifyAttempt } from './evidence.mjs';
+import { changesOf, rebaseline, releaseAttempt, seal, setVerifyLevel, verifyAttempt } from './evidence.mjs';
 import { acceptReview, amendCriteria, designWarning, batchCreate, batchEject, closeAfterHandoff, deliver, deliveredFiles, exportScreenshots, freezeCriteria, handoff, narrowDelivery, needsShown, nextAction, outsideWarning, recordReview, recordShown, reopen, screenshotsExportDir, shownDraftFile, uncovered, withAttempt } from './lifecycle.mjs';
 import { detect, doctor, register, registry, setEnabled, sync, writeDraft } from './onboard.mjs';
 import * as secrets from './secrets.mjs';
@@ -59,6 +59,9 @@ Status
   wf status [--all] [--json]
   wf report [--all] [--csv FILE] [--handoffs-csv FILE] [--html FILE]
   wf verify [--attempt ID | --all]  re-hash every recorded evidence file, check the chain and its anchor
+  wf verify --accept-changes --reason "why"   show changed evidence files and accept them (recorded, shown everywhere)
+  wf evidence release [--attempt ID | --closed | --older-than DAYS] [--dry-run]
+                                    delete closed attempts' evidence through the engine (protection lifted, tombstone kept)
   wf export [--out FILE] [--json]   one self-contained page for the attempt (a view of the evidence)
   wf export screenshots [--gate] [--to DIR]
                                     copy the delivered (or, --gate, the last gate's) screenshots out of the evidence
@@ -75,6 +78,7 @@ function summary(root, s, { base = null, resume = false } = {}) {
   for (const [name, r] of Object.entries(s.repos)) lines.push(`  ${name}: ${r.worktree} (base ${r.base.slice(0, 10)})`);
   if (base) lines.push(...baseLines(base));
   if (s.activeHold) lines.push(`  HOLD: ${s.activeHold.reason}`);
+  for (const r of s.rebaselines ?? []) lines.push(`  EVIDENCE RE-BASELINED ${r.at} by ${r.by}: ${r.changes.length} file(s) changed outside wf were accepted ("${r.reason}"): ${r.changes.slice(0, 5).map((c) => `${c.kind} ${c.path}`).join(', ')}${r.changes.length > 5 ? ' …' : ''}`);
   const live = ['done', 'abandoned'].includes(s.phase) ? null : liveGate(root, s);
   if (live) {
     lines.push(`  gate running: ${live.runId} (pid ${live.pid})`);
@@ -178,7 +182,7 @@ export async function main(argv) {
   }
 }
 
-const FULL_VERIFY = new Set(['accept', 'deliver', 'verify', 'review', 'tracker', 'export', 'shown', 'delivery', 'summary', 'handoff']);
+const FULL_VERIFY = new Set(['accept', 'deliver', 'verify', 'review', 'tracker', 'export', 'shown', 'delivery', 'summary', 'handoff', 'gate', 'check', 'evidence']);
 
 const WRITE_OPTIONS = ['out', 'csv', 'handoffs-csv', 'html', 'dir', 'to', 'root'];
 const READ_OPTIONS = ['file', 'capture', 'summary-file', 'closure', 'issue-file', 'from'];
@@ -304,7 +308,7 @@ async function dispatch(cmd, sub, positional, options) {
     case 'doctor': {
       const r = await doctor(root, { runSteps: options['no-steps'] !== true });
       const lines = [];
-      for (const section of ['config', 'tools', 'secrets', 'skills', 'connectors', 'steps', 'warnings']) {
+      for (const section of ['config', 'tools', 'secrets', 'skills', 'connectors', 'steps', 'protection', 'warnings']) {
         for (const item of r[section]) lines.push(`${item.warn ? '!' : item.ok ? '✓' : '✗'} ${section === 'warnings' ? 'warning' : section}: ${item.check ?? item.tool ?? item.key ?? item.skill ?? item.step ?? item.connector}${item.runtime ? ` (${item.runtime})` : ''}${item.problem ? ` — ${item.problem}` : ''}${item.kind ? ` [${item.kind}]` : ''}${item.fix ? `\n    fix: ${item.fix}` : ''}${item.log ? `\n    log: ${item.log}` : ''}${item.note ? `\n    ${item.note}` : ''}`);
       }
       print(options, `${lines.join('\n')}\n${r.ok ? `doctor: all checks passed${r.warnings.length ? ` (${r.warnings.length} warning(s))` : ''}` : 'doctor: problems found'}`, r);
@@ -574,6 +578,24 @@ async function dispatch(cmd, sub, positional, options) {
       throw new WfError('usage: wf batch create --members A,B | wf batch eject --batch B --member A');
     }
     case 'verify': {
+      if (options['accept-changes']) {
+        // Repair: the owner accepts what changed, with a reason, recorded in the ledger and shown to everyone after.
+        const id = resolveAttempt(root, options);
+        const reason = String(options.reason ?? '').trim();
+        const { blocking, changes } = changesOf(root, id);
+        const list = changes.map((c) => `  ${c.kind.padEnd(8)} ${c.path}  ${c.old ? c.old.slice(0, 12) : '(none)'} -> ${c.new ? c.new.slice(0, 12) : '(removed)'}`).join('\n');
+        if (blocking.length) throw new WfError(`cannot re-baseline ${id}:\n  - ${blocking.join('\n  - ')}\n  the ledger itself is never re-baselined; links and non-regular files must be replaced or removed first`);
+        if (!changes.length) {
+          print(options, `${id}: nothing to re-baseline; the evidence matches what wf recorded`, { changes: [] });
+          return 0;
+        }
+        if (!reason || options.reason === true) throw new WfError(`${changes.length} change(s) in the evidence of ${id}:\n${list}\nto accept them, give the reason: \`wf verify --accept-changes --reason "<why>" --attempt ${id}\` (recorded in the ledger and shown in status, export and the reviewer's bundle)`);
+        const { actor } = await import('./attempt.mjs');
+        const r = rebaseline(root, id, reason, append, actor(options));
+        if (r.blocking.length) throw new WfError(`cannot re-baseline ${id}:\n  - ${r.blocking.join('\n  - ')}`);
+        print(options, `re-baselined ${id}: ${r.changes.length} change(s) accepted ("${reason}"), recorded as evidence.rebaselined:\n${list}`, r);
+        return 0;
+      }
       // Reports, never refuses on open: the point is to list every problem.
       const ids = options.all ? listAttempts(root) : [resolveAttempt(root, options)];
       const bad = [];
@@ -583,6 +605,35 @@ async function dispatch(cmd, sub, positional, options) {
       }
       print(options, bad.length ? bad.map((b) => `${b.id}: ${b.problems.length} problem(s): the evidence does not match what wf recorded\n  - ${b.problems.slice(0, 20).join('\n  - ')}`).join('\n') : `verified ${ids.length} attempt(s): ledger chain, anchor and every recorded evidence file (sha256, size, mode) match; no extra file`, bad);
       return bad.length ? 1 : 0;
+    }
+    case 'evidence': {
+      if (sub !== 'release') throw new WfError('usage: wf evidence release [--attempt ID | --closed | --older-than DAYS] [--reason "why"] [--dry-run]');
+      // The sanctioned way to delete evidence: closed attempts only, protection lifted by the engine, a tombstone left.
+      const pick = options.attempt ? [resolveAttempt(root, options)] : listAttempts(root);
+      const cutoff = options['older-than'] !== undefined ? Date.now() - Number(options['older-than']) * 86400000 : null;
+      if (cutoff !== null && !Number.isFinite(cutoff)) throw new WfError('--older-than takes a number of days');
+      if (!options.attempt && !options.closed && cutoff === null) throw new WfError('name what to release: --attempt ID, --closed, or --older-than DAYS');
+      const chosen = [];
+      const refused = [];
+      for (const id of pick) {
+        const s = loadState(root, id);
+        if (!['done', 'abandoned'].includes(s.phase)) {
+          if (options.attempt) refused.push(`${id} is ${s.phase}; only closed or abandoned attempts are released`);
+          continue;
+        }
+        const at = Date.parse(s.closedAt ?? s.abandoned?.at ?? '');
+        if (cutoff !== null && !(at < cutoff)) continue;
+        chosen.push(id);
+      }
+      if (refused.length) throw new WfError(refused.join('\n'));
+      if (options['dry-run'] || !chosen.length) {
+        print(options, chosen.length ? `would release ${chosen.length} attempt(s): ${chosen.join(', ')} (nothing changed)` : 'nothing to release', { chosen });
+        return 0;
+      }
+      const out = chosen.map((id) => releaseAttempt(root, id, String(options.reason ?? 'released by the owner')));
+      const left = out.filter((r) => r.leftover);
+      print(options, `released ${out.length} attempt(s): ${out.map((r) => r.id).join(', ')}; their ids are tombstoned (a ledger reappearing under one is refused)${left.length ? `\n  not fully removed (moved out of attempts/, so not listed): ${left.map((r) => r.leftover).join('; ')}` : ''}`, out);
+      return left.length ? 1 : 0;
     }
     case 'resume': {
       const s = openState(root, options);
