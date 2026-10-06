@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { prepareWrite } from './evidence.mjs';
+import { prepareWrite, writeNoFollow } from './evidence.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -84,18 +84,27 @@ export function readJson(file) {
 export function writeJson(file, value) {
   prepareWrite(file);
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
+  writeNoFollow(file, `${JSON.stringify(value, null, 2)}\n`);
 }
 
 // Write-once: refuses to overwrite different content.
 export function writeImmutable(file, content) {
-  if (fs.existsSync(file)) {
-    if (fs.readFileSync(file, 'utf8') !== content) throw new WfError(`immutable evidence already exists with different content: ${file}`);
+  const st = fs.lstatSync(file, { throwIfNoEntry: false });
+  if (st && !st.isFile()) throw new WfError(`${file} is ${st.isSymbolicLink() ? 'a symlink' : 'not a regular file'}; nothing is read or written through it`, { code: 75 });
+  if (st) {
+    const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    let same;
+    try {
+      same = fs.readFileSync(fd, 'utf8') === content;
+    } finally {
+      fs.closeSync(fd);
+    }
+    if (!same) throw new WfError(`immutable evidence already exists with different content: ${file}`);
     return file;
   }
   prepareWrite(file);
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, content, { mode: 0o444 });
+  writeNoFollow(file, content, { mode: 0o444, exclusive: true });
   return file;
 }
 

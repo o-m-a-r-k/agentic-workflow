@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { ENGINE_VERSION, SCHEMA_VERSION, WfError, canonical, now, refuse, sha256, withFileLock } from './util.mjs';
-import { prepareWrite, touch, writeAnchor } from './evidence.mjs';
+import { prepareWrite, touch, writeAnchor, writeNoFollow } from './evidence.mjs';
 
 // Opens an attempt for this process: verifies its evidence (chain, anchor, every recorded file) once, refusing on any
 // difference. Every command that reads or writes an attempt goes through here (`openState`, the first `append`).
@@ -76,7 +76,7 @@ export function append(root, id, type, data = {}, actor = null) {
     const last = fs.existsSync(file) ? lastEntry(root, id) : null;
     const entry = { seq: (last?.seq ?? 0) + 1, at: now(), type, actor, data, prev: last?.hash ?? null };
     entry.hash = entryHash(entry);
-    fs.appendFileSync(file, `${JSON.stringify(entry)}\n`);
+    writeNoFollow(file, `${JSON.stringify(entry)}\n`, { append: true });
     verified.set(file, { size: fs.statSync(file).size, entry });
     writeAnchor(root, id, entry);
     return entry;

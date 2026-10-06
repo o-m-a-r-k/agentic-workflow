@@ -5,7 +5,7 @@ import { adapterFileAtCommit } from './config.mjs';
 import { append, attemptDir, listAttempts, loadState } from './ledger.mjs';
 import { loadCatalog, readSecret } from './secrets.mjs';
 import { WfError, canonical, hashFile, now, readJson, refuse, sha256, writeImmutable } from './util.mjs';
-import { prepareWrite } from './evidence.mjs';
+import { prepareWrite, writeNoFollow } from './evidence.mjs';
 
 const BUILTIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'adapters', 'tracker');
 
@@ -109,7 +109,7 @@ export function writeDeliveredComment(root, cfg, state) {
   if (!c) return null;
   prepareWrite(commentFile(root, state.id));
   fs.mkdirSync(path.dirname(commentFile(root, state.id)), { recursive: true });
-  fs.writeFileSync(commentFile(root, state.id), c.body);
+  writeNoFollow(commentFile(root, state.id), c.body);
   return commentFile(root, state.id);
 }
 
@@ -369,7 +369,7 @@ export async function performTracker(root, cfg, state) {
     const file = path.join(attemptDir(root, s.id), 'tracker', `${event}-api-${now().replace(/[:.]/g, '-')}.json`);
     prepareWrite(file);
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, `${JSON.stringify(raw, null, 2)}\n`);
+    writeNoFollow(file, `${JSON.stringify(raw, null, 2)}\n`);
     s = await recordTracker(root, cfg, s, { event, capture: file, engineCapture: true });
     performed.push(event);
   }

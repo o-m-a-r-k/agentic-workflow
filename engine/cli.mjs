@@ -8,7 +8,7 @@ import { findRoot, loadConfig, requireRoot } from './config.mjs';
 import { exportAttempt, exportFile } from './export.mjs';
 import { liveGate, runGate, runWithLease, stopGate } from './gate.mjs';
 import { append, listAttempts, loadState, openEvidence } from './ledger.mjs';
-import { changesOf, rebaseline, releaseAttempt, seal, setVerifyLevel, verifyAttempt } from './evidence.mjs';
+import { LinkRefused, changesOf, rebaseline, releaseAttempt, seal, setVerifyLevel, verifyAttempt } from './evidence.mjs';
 import { acceptReview, amendCriteria, designWarning, batchCreate, batchEject, closeAfterHandoff, deliver, deliveredFiles, exportScreenshots, freezeCriteria, handoff, narrowDelivery, needsShown, nextAction, outsideWarning, recordReview, recordShown, reopen, screenshotsExportDir, shownDraftFile, uncovered, withAttempt } from './lifecycle.mjs';
 import { detect, doctor, register, registry, setEnabled, sync, writeDraft } from './onboard.mjs';
 import * as secrets from './secrets.mjs';
@@ -168,6 +168,10 @@ export async function main(argv) {
   try {
     return await dispatch(cmd, sub && !sub.startsWith('--') ? sub : null, positional, { ...options, _: passthrough });
   } catch (error) {
+    if (error instanceof LinkRefused) {
+      process.stderr.write(`wf ${cmd}: refused: ${error.message}\n  → a symlink or odd entry sits in the evidence or its anchor; \`wf verify --attempt <id>\` lists them, and nothing was changed through it\n`);
+      return 75;
+    }
     if (error instanceof WfError) {
       process.stderr.write(`wf ${cmd}: ${error.message}\n${error.hint ? `  → ${error.hint}\n` : ''}`);
       return error.code;
@@ -616,6 +620,12 @@ async function dispatch(cmd, sub, positional, options) {
       const chosen = [];
       const refused = [];
       for (const id of pick) {
+        const folder = path.join(root, '.wf-evidence', 'attempts', id);
+        const fst = fs.lstatSync(folder, { throwIfNoEntry: false });
+        if (fst && !fst.isDirectory()) {
+          refused.push(`${folder} is a symlink or not a folder; nothing released through it`);
+          continue;
+        }
         const s = loadState(root, id);
         if (!['done', 'abandoned'].includes(s.phase)) {
           if (options.attempt) refused.push(`${id} is ${s.phase}; only closed or abandoned attempts are released`);

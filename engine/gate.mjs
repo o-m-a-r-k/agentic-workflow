@@ -11,7 +11,7 @@ import { projectEnv } from './env.mjs';
 import { missingFor, redactor, stepEnv } from './secrets.mjs';
 import { impact, inside, rel } from './topology.mjs';
 import { WfError, assertEngine, canonical, git, globToRegExp, hashFile, hashValue, isPidAlive, matchesAny, now, refuse, run, sha256, shellQuote, writeImmutable, writeJson } from './util.mjs';
-import { ownGateRun, prepareWrite, readRegular, seal } from './evidence.mjs';
+import { appendStreamNoFollow, ownGateRun, prepareWrite, readRegular, seal, writeNoFollow } from './evidence.mjs';
 
 const gateDir = (root, id) => path.join(attemptDir(root, id), 'gate');
 const lockFile = (root, id) => path.join(gateDir(root, id), 'gate.lock');
@@ -214,7 +214,7 @@ function substitute(text, vars, quote = false) {
 // Output is redacted on a rolling window so a secret split across two chunks is still masked.
 function spawnStep(command, { cwd, env, logFile, redact, onSpawn }) {
   return new Promise((resolve) => {
-    const out = fs.createWriteStream(logFile, { flags: 'a' });
+    const out = appendStreamNoFollow(logFile);
     const keep = Math.max(0, (redact.maxLen ?? 0) - 1);
     let pending = '';
     const write = (b) => {
@@ -314,7 +314,7 @@ function collectArtifacts(step, dir, destDir, since, units) {
     const read = readRegular(file);
     if (!read) continue;
     const bytes = read.bytes;
-    fs.writeFileSync(dest, bytes);
+    writeNoFollow(dest, bytes);
     // Whose evidence the file is: the units whose own expansion of a matching glob matches it. A batch member delivers
     // (and attaches to its ticket) only its own files; a placeholder-less glob matches for every unit.
     const owners = units.filter((u) => hit.some((g) => matchesAny(r, expandArtifactGlob(g.glob, [u])))).map((u) => u.attempt);
@@ -362,7 +362,7 @@ function copyScratch(scratch, dest) {
     const to = path.join(dest, 'out', relPath);
     prepareWrite(to);
     fs.mkdirSync(path.dirname(to), { recursive: true });
-    fs.writeFileSync(to, r.bytes, { flag: 'wx' });
+    writeNoFollow(to, r.bytes, { exclusive: true });
   }
 }
 
@@ -391,7 +391,7 @@ async function executeStep(root, cfg, state, planned, ctx) {
   let result;
   if (step.plugin) {
     const mod = (await import(pathToFileURL(adapterFileAtCommit(root, ctx.live, state.adapterBase, step.plugin)).href)).default;
-    const pctx = { root, attempt: state.id, step, dir: planned.dir, worktrees: Object.fromEntries(Object.entries(state.repos).map(([k, v]) => [k, v.worktree])), changed: ctx.changedSinceBase, evidenceDir: scratch, workers: workers.n, env, log: (s) => fs.appendFileSync(logFile, ctx.redact(`${s}\n`)) };
+    const pctx = { root, attempt: state.id, step, dir: planned.dir, worktrees: Object.fromEntries(Object.entries(state.repos).map(([k, v]) => [k, v.worktree])), changed: ctx.changedSinceBase, evidenceDir: scratch, workers: workers.n, env, log: (s) => writeNoFollow(logFile, ctx.redact(`${s}\n`), { append: true }) };
     const decision = mod.plan ? await mod.plan(pctx) : null;
     if (decision && decision.run === false) {
       return { id: step.id, repo: step.repo, tier: planned.tier, key: planned.key, inputsHash: planned.inputsHash, runnerIdentity: planned.runnerIdentity, status: 'skipped', reason: decision.reason ?? 'step plugin decided not to run', suites: [], artifacts: [], runId: ctx.runId };
@@ -402,7 +402,7 @@ async function executeStep(root, cfg, state, planned, ctx) {
       const r = await mod.run(pctx);
       result = { status: r.status, suites: r.suites ?? [], artifacts: (r.artifacts ?? []).map((a) => ({ ...a, sha256: a.sha256 ?? hashFile(a.path) })) };
     } catch (error) {
-      fs.appendFileSync(logFile, ctx.redact(`step plugin threw: ${error.stack ?? error.message}\n`));
+      writeNoFollow(logFile, ctx.redact(`step plugin threw: ${error.stack ?? error.message}\n`), { append: true });
       result = { status: 'failed', suites: [], artifacts: [] };
     } finally {
       ctx.running.delete(step.id);
@@ -412,14 +412,15 @@ async function executeStep(root, cfg, state, planned, ctx) {
     const codes = [];
     for (let shard = 1; shard <= shards.n; shard++) {
       const command = substitute(step.run, { ...vars, shard }, true);
-      fs.appendFileSync(logFile, ctx.redact(`$ ${command}\n`));
+      writeNoFollow(logFile, ctx.redact(`$ ${command}\n`), { append: true });
       codes.push(await spawnStep(command, { cwd: planned.dir, env: { ...env, WF_SHARD: String(shard), WF_SHARDS: String(shards.n) }, logFile, redact: ctx.redact, onSpawn: (pid) => ctx.addChild(pid) }));
     }
     const files = (step.report?.junit ? [step.report.junit].flat() : []).flatMap((p) => globFiles(planned.dir, substitute(p, vars)));
     let suites = readJUnitFiles(files);
     for (const f of files) {
       prepareWrite(path.join(evidenceDir, `junit-${path.basename(f)}`));
-      fs.writeFileSync(path.join(evidenceDir, `junit-${path.basename(f)}`), fs.readFileSync(f));
+      const junit = readRegular(f);
+      if (junit) writeNoFollow(path.join(evidenceDir, `junit-${path.basename(f)}`), junit.bytes);
     }
     if (rerun && prior?.suites) {
       const fresh = new Map(suites.map((s) => [s.id, s]));
@@ -437,7 +438,7 @@ async function executeStep(root, cfg, state, planned, ctx) {
   if (planned.fileHashes) {
     const f = path.join(evidenceDir, 'inputs.json');
     prepareWrite(f);
-    fs.writeFileSync(f, JSON.stringify(planned.fileHashes));
+    writeNoFollow(f, JSON.stringify(planned.fileHashes));
     fileHashesRef = { path: f, sha256: hashFile(f) };
   }
   return {

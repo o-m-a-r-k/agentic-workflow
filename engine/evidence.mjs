@@ -27,6 +27,63 @@ import { canonical } from './util.mjs';
 
 const hashBuf = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
 
+// ---- no-follow primitives (named finding, 0.1.21 review: chmod, chflags and writes followed a symlink planted at an
+// evidence path, so the engine could chmod, unflag or overwrite an arbitrary file outside the evidence) ----
+const { O_RDONLY, O_WRONLY, O_CREAT, O_TRUNC, O_APPEND, O_EXCL, O_NOFOLLOW } = fs.constants;
+const O_DIRECTORY = fs.constants.O_DIRECTORY ?? 0;
+export class LinkRefused extends Error {}
+
+// chmod of exactly this entry: opened without following a link, changed through its descriptor.
+export function chmodNoFollow(p, mode, { dir = false } = {}) {
+  let fd;
+  try {
+    fd = fs.openSync(p, O_RDONLY | O_NOFOLLOW | (dir ? O_DIRECTORY : 0));
+  } catch (error) {
+    if (error.code === 'ELOOP' || error.code === 'ENOTDIR') throw new LinkRefused(`${p} is a symlink or not a ${dir ? 'folder' : 'file'}; not changed`);
+    throw error;
+  }
+  try {
+    const st = fs.fstatSync(fd);
+    if (dir ? !st.isDirectory() : !st.isFile()) throw new LinkRefused(`${p} is not a regular ${dir ? 'folder' : 'file'}; not changed`);
+    fs.fchmodSync(fd, mode);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+// A write to exactly this path: never through a link at it (O_NOFOLLOW), only to a regular file.
+export function writeNoFollow(file, data, { append = false, exclusive = false, mode = 0o644 } = {}) {
+  let fd;
+  try {
+    fd = fs.openSync(file, O_WRONLY | O_CREAT | O_NOFOLLOW | (append ? O_APPEND : O_TRUNC) | (exclusive ? O_EXCL : 0), mode);
+  } catch (error) {
+    if (error.code === 'ELOOP') throw new LinkRefused(`${file} is a symlink; not written through`);
+    throw error;
+  }
+  try {
+    if (!fs.fstatSync(fd).isFile()) throw new LinkRefused(`${file} is not a regular file; not written`);
+    fs.writeSync(fd, typeof data === 'string' ? data : Buffer.from(data));
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+// An append stream on exactly this file (a gate step's log).
+export const appendStreamNoFollow = (file) => fs.createWriteStream(null, { fd: fs.openSync(file, O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW, 0o644) });
+
+// The nearest existing ancestor and the rest; every existing component from `from` down must be a real folder.
+function assertRealFolders(dir, from) {
+  const rel = path.relative(from, dir);
+  if (rel.startsWith('..')) return;
+  let cur = from;
+  for (const part of rel ? rel.split(path.sep) : []) {
+    cur = path.join(cur, part);
+    const st = fs.lstatSync(cur, { throwIfNoEntry: false });
+    if (!st) return;
+    if (!st.isDirectory()) throw new LinkRefused(`${cur} is ${st.isSymbolicLink() ? 'a symlink' : 'not a folder'}; nothing is written through it`);
+  }
+}
+
 export const evidenceRootOf = (root) => path.join(root, '.wf-evidence');
 const attemptDirOf = (root, id) => path.join(evidenceRootOf(root), 'attempts', id);
 export const anchorFile = (root, id) => path.join(root, '.wf-worktrees', '_anchor', `${id}.json`);
@@ -51,11 +108,13 @@ export const setVerifyLevel = (l) => (level = l);
 export const ownGateRun = (root, id, runId) => gateRuns.add(`${root}\0${id}\0${runId}`);
 
 // ---- protection ----
+// Only regular files, checked with lstat; `chflags -h` acts on a link itself, never its target (chattr refuses links).
 function setImmutable(files, on) {
   if (!flagsOn() || !files.length) return;
-  const tool = process.platform === 'darwin' ? ['chflags', on ? 'uchg' : 'nouchg'] : process.platform === 'linux' && process.getuid?.() === 0 ? ['chattr', on ? '+i' : '-i'] : null;
+  const tool = process.platform === 'darwin' ? ['chflags', '-h', on ? 'uchg' : 'nouchg'] : process.platform === 'linux' && process.getuid?.() === 0 ? ['chattr', on ? '+i' : '-i'] : null;
   if (!tool) return;
-  for (let i = 0; i < files.length; i += 200) spawnSync(tool[0], [tool[1], ...files.slice(i, i + 200)], { stdio: 'ignore' });
+  const real = files.filter((f) => fs.lstatSync(f, { throwIfNoEntry: false })?.isFile());
+  for (let i = 0; i < real.length; i += 200) spawnSync(tool[0], [...tool.slice(1), ...real.slice(i, i + 200)], { stdio: 'ignore' });
 }
 
 // What this machine can do, for `wf doctor`: probed on a scratch file next to the evidence.
@@ -65,12 +124,13 @@ export function protectionLayers(root) {
   const out = [];
   try {
     fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(file, 'x');
-    fs.chmodSync(file, 0o444);
+    assertRealFolders(dir, root);
+    writeNoFollow(file, 'x', { exclusive: true });
+    chmodNoFollow(file, 0o444);
     // Tried, not assumed: root (and some filesystems) ignore the modes.
     let modes = true;
     try {
-      fs.appendFileSync(file, 'y');
+      writeNoFollow(file, 'y', { append: true });
       modes = false;
     } catch {}
     out.push({ layer: 'read-only modes (0444 files, 0555 folders)', active: modes, ...(modes ? {} : { detail: `off: a write to a 0444 file succeeded${process.getuid?.() === 0 ? ' (running as root, which ignores modes)' : ''}` }) });
@@ -96,8 +156,10 @@ export function protectionLayers(root) {
     out.push({ layer: 'protection probe', active: false, detail: error.message });
   } finally {
     try {
-      fs.chmodSync(file, 0o644);
-      fs.rmSync(file, { force: true });
+      chmodNoFollow(file, 0o644);
+    } catch {}
+    try {
+      if (fs.lstatSync(file, { throwIfNoEntry: false })) fs.unlinkSync(file);
       fs.rmdirSync(dir);
     } catch {}
   }
@@ -106,6 +168,11 @@ export function protectionLayers(root) {
 }
 
 function walk(dir, out = { files: [], dirs: [], odd: [], errors: [] }, base = dir) {
+  // Never into a link, the starting folder included.
+  if (dir === base && fs.lstatSync(dir, { throwIfNoEntry: false })?.isSymbolicLink()) {
+    out.errors.push(`${dir}: symlink (not followed)`);
+    return out;
+  }
   let entries;
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -149,46 +216,47 @@ const sigOf = (st) => [st.size, Math.round(st.mtimeMs), Math.round(st.ctimeMs), 
 // Makes the attempt's directories writable for the engine (files stay protected).
 export function unlockDirs(root, id) {
   const dir = attemptDirOf(root, id);
-  if (!fs.existsSync(dir)) return;
+  if (!fs.lstatSync(dir, { throwIfNoEntry: false })?.isDirectory()) return;
   for (const d of [dir, ...walk(dir).dirs]) {
     try {
-      fs.chmodSync(d, 0o755);
+      chmodNoFollow(d, 0o755, { dir: true });
     } catch {}
   }
 }
 
 function lockDirs(root, id) {
   const dir = attemptDirOf(root, id);
-  if (!fs.existsSync(dir)) return;
+  if (!fs.lstatSync(dir, { throwIfNoEntry: false })?.isDirectory()) return;
   // A gate run that is still open keeps its own folders writable (its runner is still writing them).
   const open = loadLedgerLite(root, id).openRuns;
   for (const d of walk(dir).dirs.reverse().concat(dir)) {
     const rel = path.relative(dir, d).split(path.sep).join('/');
     if (rel === 'gate' || rel === '' || open.some((r) => rel === `gate/${r}` || rel.startsWith(`gate/${r}/`))) continue;
     try {
-      fs.chmodSync(d, 0o555);
+      chmodNoFollow(d, 0o555, { dir: true });
     } catch {}
   }
 }
 
 // Before the engine creates or rewrites `file` inside an attempt's evidence: its folders writable, its protection lifted.
+// Refuses (LinkRefused) when any folder below `.wf-evidence`, or the file itself, is a symlink or not what it should be:
+// nothing is unprotected, chmodded or written through a link. Callers write with `writeNoFollow`.
 export function prepareWrite(file) {
   const abs = path.resolve(file);
   const parts = abs.split(path.sep);
   const at = parts.lastIndexOf('.wf-evidence');
   if (at < 0) return abs;
-  for (let i = at + 1; i < parts.length; i++) {
-    const d = parts.slice(0, i).join(path.sep) || path.sep;
-    try {
-      if (fs.lstatSync(d).isDirectory()) fs.chmodSync(d, 0o755);
-    } catch {}
+  const evRoot = parts.slice(0, at + 1).join(path.sep);
+  assertRealFolders(path.dirname(abs), evRoot);
+  for (let i = at + 2; i < parts.length; i++) {
+    const d = parts.slice(0, i).join(path.sep);
+    if (fs.lstatSync(d, { throwIfNoEntry: false })?.isDirectory()) chmodNoFollow(d, 0o755, { dir: true });
   }
   const st = fs.lstatSync(abs, { throwIfNoEntry: false });
-  if (st?.isFile()) {
+  if (st && !st.isFile()) throw new LinkRefused(`${abs} is ${st.isSymbolicLink() ? 'a symlink' : 'not a regular file'}; not unprotected or written`);
+  if (st) {
     setImmutable([abs], false);
-    try {
-      fs.chmodSync(abs, 0o644);
-    } catch {}
+    chmodNoFollow(abs, 0o644);
     rewritten.add(abs);
   }
   return abs;
@@ -255,13 +323,17 @@ function semverLt(a, b) {
 // ---- anchor ----
 export function writeAnchor(root, id, entry, extra = {}) {
   const file = anchorFile(root, id);
+  // Never through a link: a symlinked `.wf-worktrees`, `_anchor` or anchor file leaves the anchor stale, and the next
+  // verification refuses the attempt (anchor not a regular file, or head mismatch).
   try {
+    assertRealFolders(path.dirname(file), root);
     fs.mkdirSync(path.dirname(file), { recursive: true });
+    assertRealFolders(path.dirname(file), root);
     const st = fs.lstatSync(file, { throwIfNoEntry: false });
     if (st && !st.isFile()) return;
-    if (st) fs.chmodSync(file, 0o644);
-    fs.writeFileSync(file, `${JSON.stringify({ attempt: id, seq: entry?.seq ?? null, hash: entry?.hash ?? null, ...extra })}\n`, { mode: 0o444 });
-    fs.chmodSync(file, 0o444);
+    if (st) chmodNoFollow(file, 0o644);
+    writeNoFollow(file, `${JSON.stringify({ attempt: id, seq: entry?.seq ?? null, hash: entry?.hash ?? null, ...extra })}\n`, { mode: 0o444 });
+    chmodNoFollow(file, 0o444);
   } catch {}
 }
 const readAnchor = (root, id) => {
@@ -287,8 +359,9 @@ function readCache(root, id) {
 function writeCache(root, id, cache) {
   try {
     const f = statCacheFile(root, id);
+    assertRealFolders(path.dirname(f), root);
     fs.mkdirSync(path.dirname(f), { recursive: true });
-    fs.writeFileSync(f, JSON.stringify({ files: Object.fromEntries(cache) }));
+    writeNoFollow(f, JSON.stringify({ files: Object.fromEntries(cache) }));
   } catch {}
 }
 
@@ -318,6 +391,12 @@ function verifyInner(root, id, full, sigs) {
   } else if (head && (a.seq !== head.seq || a.hash !== head.hash)) problems.push(`ledger head (entry ${head.seq}) does not match its anchor (entry ${a.seq}): the ledger was ${a.seq > head.seq ? 'truncated' : 'rewritten or appended outside wf'}`);
   if (head && !lite.admitted) problems.push('the ledger does not start with its admission entry');
   if (preManifest(lite)) return problems; // adopted by `touch` on first use
+  const top = fs.lstatSync(dir, { throwIfNoEntry: false });
+  if (top && !top.isDirectory()) return [...problems, `the attempt folder ${dir} is ${top.isSymbolicLink() ? 'a symlink' : 'not a folder'}; nothing in it is used`];
+  for (const p of [evidenceRootOf(root), path.dirname(dir)]) {
+    const s = fs.lstatSync(p, { throwIfNoEntry: false });
+    if (s && !s.isDirectory() && p !== evidenceRootOf(root)) return [...problems, `${p} is a symlink or not a folder; nothing in it is used`];
+  }
   const { files, odd, errors } = walk(dir);
   problems.push(...errors);
   for (const o of odd) problems.push(`${o.rel}: ${o.kind}`);
@@ -392,8 +471,10 @@ export function recordFiles(root, id, rels, appendFn, type = 'evidence.recorded'
     if (MUTABLE(rel, exemptRuns ?? lite.openRuns)) continue;
     const p = path.join(dir, rel);
     try {
-      fs.chmodSync(p, 0o444);
-    } catch {}
+      chmodNoFollow(p, 0o444);
+    } catch {
+      continue; // a link or not a regular file: never recorded (verification names it)
+    }
     const r = readRegular(p);
     if (!r) continue;
     const m = lite.manifest.get(rel);
@@ -498,8 +579,9 @@ export function rebaseline(root, id, reason, appendFn, actor) {
   unlockDirs(root, id);
   const keep = changes.filter((c) => c.kind !== 'removed').map((c) => path.join(dir, c.path));
   for (const p of keep) {
+    if (!fs.lstatSync(p, { throwIfNoEntry: false })?.isFile()) return { blocking: [`${p}: not a regular file; nothing re-baselined`], changes: [] };
     setImmutable([p], false);
-    fs.chmodSync(p, 0o444);
+    chmodNoFollow(p, 0o444);
   }
   appendFn(root, id, 'evidence.rebaselined', { reason, changes }, actor);
   setImmutable(keep, true);
@@ -523,9 +605,12 @@ export function releaseAttempt(root, id, reason) {
   const dir = attemptDirOf(root, id);
   const lite = loadLedgerLite(root, id);
   const head = lite.entries.at(-1);
+  const st = fs.lstatSync(dir, { throwIfNoEntry: false });
+  if (!st?.isDirectory()) throw new LinkRefused(`${dir} is ${st ? 'a symlink or not a folder' : 'missing'}; nothing released`);
   const dest = path.join(evidenceRootOf(root), 'released', `${id}-${Date.now()}`);
+  assertRealFolders(path.dirname(dest), evidenceRootOf(root));
   fs.mkdirSync(path.dirname(dest), { recursive: true });
-  fs.chmodSync(dir, 0o755);
+  chmodNoFollow(dir, 0o755, { dir: true });
   fs.renameSync(dir, dest);
   writeAnchor(root, id, head, { released: true, at: new Date().toISOString(), reason });
   const leftover = removeTree(dest);
@@ -541,10 +626,11 @@ function removeTree(dir) {
   setImmutable(files.map((rel) => path.join(dir, rel)), false);
   for (const d of [dir, ...dirs]) {
     try {
-      fs.chmodSync(d, 0o755);
+      chmodNoFollow(d, 0o755, { dir: true });
     } catch {}
   }
   try {
+    // rm removes links themselves and does not descend into them.
     fs.rmSync(dir, { recursive: true, force: true });
     return null;
   } catch (error) {

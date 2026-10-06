@@ -5,7 +5,7 @@ import { screenshots } from './gate.mjs';
 import { attemptDir } from './ledger.mjs';
 import { findSkill } from './skills.mjs';
 import { YAML, git, matchesAny, sha256 } from './util.mjs';
-import { prepareWrite } from './evidence.mjs';
+import { prepareWrite, writeNoFollow } from './evidence.mjs';
 
 // Review rules: project documents (design system, coding rules) a reviewer must read when the change touches the paths
 // they govern. Named failure: in eleven review rounds no reviewer read any of the project's rule documents, and the
@@ -67,7 +67,7 @@ export function reviewRules(root, trusted, state, changed) {
       if (!fs.existsSync(file)) {
         prepareWrite(file);
         fs.mkdirSync(path.dirname(file), { recursive: true });
-        fs.writeFileSync(file, d.text);
+        writeNoFollow(file, d.text);
       }
       read.push(file);
       // The worktree copy counts as read only when the ticket did not change it (then it is the same document).
