@@ -14,11 +14,12 @@ export function handle(db, method, target, body) {
   const p = u.pathname.replace(/^\/api\/v3/, '');
   const m = (re) => re.exec(p);
   const repo = `/repos/${db.repo}`;
-  if (!p.startsWith(`${repo}/`)) return { status: 404, data: { message: 'Not Found' } };
+  if (p !== repo && !p.startsWith(`${repo}/`)) return { status: 404, data: { message: 'Not Found' } };
   const rest = p.slice(repo.length);
   const issue = db.issue;
   const at = () => new Date().toISOString();
   let r;
+  if (rest === '' && method === 'GET') return { status: 200, data: { full_name: db.repo, private: db.private === true } };
   if ((r = m(/^\/repos\/[^/]+\/[^/]+\/issues\/(\d+)$/)) && method === 'GET') return r[1] === String(issue.number) ? { status: 200, data: issue } : { status: 404, data: { message: 'Not Found' } };
   if (rest === `/issues/${issue.number}/comments` && method === 'GET') return { status: 200, data: db.comments };
   if (rest === `/issues/${issue.number}/comments` && method === 'POST') {
@@ -69,8 +70,8 @@ export function handle(db, method, target, body) {
   return { status: 404, data: { message: `fake: no route ${method} ${p}` } };
 }
 
-export function seed(file, { repo = 'acme/app', number = 12, title = 'Show the new text', body = 'The home screen shows the new text.', labels = [] } = {}) {
-  save(file, { repo, issue: { number, title, body, state: 'open', labels: labels.map((name) => ({ name })), html_url: `https://github.com/${repo}/issues/${number}`, updated_at: '2026-01-01T00:00:00Z' }, comments: [], releases: [], nextAsset: 0, log: [] });
+export function seed(file, { repo = 'acme/app', private: isPrivate = false, number = 12, title = 'Show the new text', body = 'The home screen shows the new text.', labels = [] } = {}) {
+  save(file, { repo, private: isPrivate, issue: { number, title, body, state: 'open', labels: labels.map((name) => ({ name })), html_url: `https://github.com/${repo}/issues/${number}`, updated_at: '2026-01-01T00:00:00Z' }, comments: [], releases: [], nextAsset: 0, log: [] });
 }
 
 export function apply(file, method, target, body) {

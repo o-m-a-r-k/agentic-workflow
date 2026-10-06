@@ -14,7 +14,7 @@ labels:
 $ wf entry --item HT-1 --owner you
 HT-1.1  HT-1  lane=standard  intent=implementation  phase=admitted
   owner: you
-  hello-ticket: ~/demo/hello-ticket/.wf-worktrees/HT-1.1/hello-ticket (base b1f821a3ed)
+  hello-ticket: ~/demo/hello-ticket/.wf-worktrees/HT-1.1/hello-ticket (base 116d493e4a)
   next: start the planner: `wf handoff planner --agent <id>`
 tracker: admitted performed on the ticket files and read back
 
@@ -37,7 +37,7 @@ implementer bundle: ~/demo/hello-ticket/.wf-evidence/attempts/HT-1.1/handoffs/02
 class full, effort high
 Start agent type wf-implementer (name it implementer-1; do not pass a model) with: "Read ~/demo/hello-ticket/.wf-evidence/attempts/HT-1.1/handoffs/02-implementer.json and follow its instructions."
 $ wf gate --attempt HT-1.1
-wf gate: run 2026-10-06T10-53-38-974Z-8917: 1 to run, 0 reused, 0 skipped or deferred
+wf gate: run 2026-10-06T11-46-09-757Z-35605: 1 to run, 0 reused, 0 skipped or deferred
 wf gate: start    unit
 wf gate: failed   unit  0.1s
 wf gate:   unit |     actual: 'Hello Ada!',
@@ -45,18 +45,18 @@ wf gate:   unit |     expected: 'Hello, Ada!',
 wf gate:   unit |     operator: 'strictEqual',
 wf gate:   unit |     diff: 'simple'
 wf gate:   unit |   }
-wf gate: failed (2026-10-06T10-53-38-974Z-8917)
-gate failed (2026-10-06T10-53-38-974Z-8917)
+wf gate: failed (2026-10-06T11-46-09-757Z-35605)
+gate failed (2026-10-06T11-46-09-757Z-35605)
   failed      unit  no `inputs` declared: always runs
 (exit 1: refused)
 
 # Fixed and committed: the gate runs again on the new tree
 $ wf gate --attempt HT-1.1
-wf gate: run 2026-10-06T10-53-39-249Z-9037: 1 to run, 0 reused, 0 skipped or deferred
+wf gate: run 2026-10-06T11-46-10-052Z-35723: 1 to run, 0 reused, 0 skipped or deferred
 wf gate: start    unit
 wf gate: passed   unit  0.1s
-wf gate: passed (2026-10-06T10-53-39-249Z-9037)
-gate passed (2026-10-06T10-53-39-249Z-9037)
+wf gate: passed (2026-10-06T11-46-10-052Z-35723)
+gate passed (2026-10-06T11-46-10-052Z-35723)
   passed      unit  no `inputs` declared: always runs
 
 # The implementer cannot review its own work
@@ -75,7 +75,7 @@ review accepted. next: deliver: `wf deliver`
 
 # Delivery: merged to main, pushed, and the ticket handed off
 $ wf deliver --attempt HT-1.1 --summary-file ~/demo/work/summary.md
-delivered HT-1.1: hello-ticket@b966b91c31
+delivered HT-1.1: hello-ticket@4ad3048640
 tracker: delivered performed on the ticket files and read back; attempt closed
 SHOW TO OWNER: no screenshots for HT-1: no gate step declares `artifacts`, so the gate collected no screenshots
   (recorded; tell the owner this in the delivery report)
@@ -94,7 +94,7 @@ labels:
 
 ## Comments
 
-<!-- wf:comment id=c-1 at=2026-10-06T10:53:40.231Z -->
+<!-- wf:comment id=c-1 at=2026-10-06T11:46:11.108Z -->
 HT-1 is ready for UAT.
 
 greet() now takes an optional name: greet("Ada") returns "Hello, Ada!".
@@ -104,12 +104,12 @@ UAT scope:
 - greet() prints Hello!
 <!-- /wf:comment -->
 $ git --no-pager -C ~/demo/origin.git log --oneline -3 main
-b966b91 greet: add the comma
-2c6762c greet by name
-b1f821a hello-ticket
+4ad3048 greet: add the comma
+bd4408f greet by name
+116d493 hello-ticket
 $ wf status --attempt HT-1.1
 HT-1.1  HT-1  lane=standard  intent=implementation  phase=done
   owner: you
-  hello-ticket: ~/demo/hello-ticket/.wf-worktrees/HT-1.1/hello-ticket (base b1f821a3ed)
-  last gate: passed (2026-10-06T10-53-39-249Z-9037)
+  hello-ticket: ~/demo/hello-ticket/.wf-worktrees/HT-1.1/hello-ticket (base 116d493e4a)
+  last gate: passed (2026-10-06T11-46-10-052Z-35723)
   next: nothing: this attempt is closed

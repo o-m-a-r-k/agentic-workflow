@@ -1,0 +1,13 @@
+# Trust model
+
+[Back to the README](../README.md) · [Docs map](../README.md#docs)
+
+- **What the engine enforces:** a hash-chained ledger; gate results bound to the exact tree and to the adapter committed at base; only a gate that ran every step the tree needs (never a `--focused` one) opens acceptance and delivery; acceptance needs a clean closure written for the current tree after a passing gate on it; a step that reads another repo (`alsoInputs`) is reused only while that repo is unchanged; the reviewer is never the owner, planner, an implementer or a reviewer of an earlier round; criteria are frozen before code.
+- **What classes change:** only how hard each agent thinks. Every guarantee above holds the same at every class.
+- **Review rules:** the reviewer bundle lists the project rule documents and skills the change falls under, from the adapter at base; where transcripts exist `wf review` refuses a round that did not read each one, and `wf accept` needs a verdict per rule. A read proves the document reached the reviewer, not that it was applied.
+- **Review provenance:** where Claude Code transcripts exist, `wf review` and `wf plan --from-agent` refuse a round whose transcript is missing, ran as another agent type, started before its handoff, or was started with anything but the printed line. Elsewhere the round is recorded `unverified`.
+- **Commit, then reveal:** a round's own findings are recorded blind; only then does it see earlier rounds' open findings, and acceptance needs each verified by a later round. Its own findings cannot change after the reveal.
+- **The attempt page is a view:** `wf export` renders the ledger and evidence; it is never read back.
+- **What a step sees:** an allowlisted environment, never agent session tokens unless the adapter passes them (see [Step environment](gate.md#step-environment)).
+- **What it relies on you for:** agent identities are names the owner supplies, and the reviewer must be a newly started agent (not an old one under a new id), started blind with only the one line `wf handoff reviewer` prints. The engine cannot see the prompt a runtime gives an agent, so it does not check it; steering the reviewer weakens the review silently.
+- **What it does not stop:** a determined forger with shell access on the same machine. It catches mistakes, not attacks. Details: [DESIGN.md](DESIGN.md#trust-model); the evidence layers and their accepted limits: [gate.md](gate.md#evidence-integrity); tracker credentials: [delivery-and-tracker.md](delivery-and-tracker.md#where-tasks-live-and-how-wf-reaches-them).

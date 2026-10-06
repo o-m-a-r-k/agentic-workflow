@@ -17,8 +17,8 @@ import { detect, doctor, register, registry, setEnabled, sync, writeDraft } from
 import * as secrets from './secrets.mjs';
 import { report, toCsv, toHandoffCsv, toHtml } from './telemetry.mjs';
 import { impact } from './topology.mjs';
-import { commentFile, performTracker, recordSummary, recordTracker } from './tracker.mjs';
-import { ENGINE_VERSION, WfError, parseArgs } from './util.mjs';
+import { commentFile, performTracker, publicAssetsProblem, recordSummary, recordTracker } from './tracker.mjs';
+import { ENGINE_VERSION, WfError, parseArgs, refuse } from './util.mjs';
 
 const HELP = `wf ${ENGINE_VERSION} — agentic-workflow
 
@@ -590,6 +590,14 @@ async function dispatch(cmd, sub, positional, options) {
       return 0;
     }
     case 'deliver': {
+      {
+        // Before anything is pushed: screenshots bound for a public GitHub repository need the owner's acknowledgement.
+        const { gateFiles } = await import('./lifecycle.mjs');
+        const s0 = openState(root, options);
+        const cfg0 = loadConfig(root);
+        const problem = await publicAssetsProblem(root, cfg0, { screenshots: gateFiles(s0).length > 0 && s0.lane !== 'quick' });
+        if (problem) throw refuse(`not delivered: ${problem}`);
+      }
       const r = await deliver(root, options);
       if (r.waiting) {
         print(options, `${r.waiting.repo}: ${r.waiting.state}${r.waiting.url ? ` (${r.waiting.url})` : ''}. Run \`wf deliver\` again once it is merged.`, r);

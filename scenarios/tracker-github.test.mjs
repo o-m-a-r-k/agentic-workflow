@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { closureFile, commitIn, criteriaFile, goodClosure, ok, singleRepoProject, state, summaryFile, tmp, wf, yaml } from './helpers.mjs';
+import { closureFile, commitIn, criteriaFile, goodClosure, ok, singleRepoProject, state, sh, summaryFile, tmp, wf, yaml } from './helpers.mjs';
 import { seed } from './fixtures/fake-github.mjs';
 
 // 0.4.0: GitHub Issues through `gh` (the owner's login) or the REST API (a token from `wf secrets`), against a fake
@@ -21,7 +21,7 @@ function ghOnPath(base) {
 
 function project(name, tracker, files = {}) {
   const visual = [{ id: 'ui', repo: 'app', run: 'mkdir -p shots && printf png > shots/home.png', artifacts: ['shots/*.png'] }];
-  return singleRepoProject(name, { tracker: { kind: 'github', repo: 'acme/app', statuses, deliveredComment: 'uat.md', ...tracker }, gate: { steps: visual } }, { '.gitignore': '.wf-evidence/\n.wf-worktrees/\nshots/\n', '.workflow/uat.md': '{id} is ready for UAT.\n\nUAT scope:\n{uatScope}\n', ...files });
+  return singleRepoProject(name, { tracker: { kind: 'github', repo: 'acme/app', statuses, deliveredComment: 'uat.md', publicAssets: 'acknowledged', ...tracker }, gate: { steps: visual } }, { '.gitignore': '.wf-evidence/\n.wf-worktrees/\nshots/\n', '.workflow/uat.md': '{id} is ready for UAT.\n\nUAT scope:\n{uatScope}\n', ...files });
 }
 
 // Plan, implement, gate, review, accept, deliver and show: returns the gate's screenshot.
@@ -171,4 +171,65 @@ test('github: an item that is not an issue number is refused before any call', (
   const e = ok(wf(root, ['entry', '--item', 'ENG-abc', '--owner', 'o', '--json'], { env })).json();
   assert.match(ok(wf(root, ['tracker', 'sync', '--attempt', e.id], { env })).out, /a GitHub issue item is its number \(`123` or `GH-123`\), not `ENG-abc`/);
   assert.equal(fs.existsSync(`${db}.argv`), false, 'gh was not called');
+});
+
+test('github public repo: doctor warns screenshots will be public; deliver refuses until the owner acknowledges on the base branch', () => {
+  const run = (isPrivate, ack) => {
+    const { base, root } = project(`gh-public-${isPrivate}-${ack}`, { via: 'cli', publicAssets: ack ? 'acknowledged' : undefined });
+    const db = path.join(base, 'github.json');
+    seed(db, { private: isPrivate });
+    return { base, root, db, env: { PATH: ghOnPath(base), FAKE_GH_STATE: db } };
+  };
+  // Public, not acknowledged: a loud notice, and nothing pushed or uploaded.
+  const p = run(false, false);
+  assert.match(wf(p.root, ['doctor', '--no-steps'], { env: p.env }).out, /NOTICE: screenshots will be publicly downloadable[\s\S]*fix: the owner decides: keep it with `publicAssets: acknowledged`/);
+  const e = ok(wf(p.root, ['entry', '--item', 'GH-12', '--owner', 'o', '--json'], { env: p.env })).json();
+  const id = e.id;
+  ok(wf(p.root, ['handoff', 'planner', '--agent', 'p', '--attempt', id], { env: p.env }));
+  ok(wf(p.root, ['plan', '--file', criteriaFile(p.base), '--attempt', id], { env: p.env }));
+  ok(wf(p.root, ['handoff', 'implementer', '--agent', 'i', '--attempt', id], { env: p.env }));
+  commitIn(state(p.root, id).repos.app.worktree, { 'src/a.txt': 'ui\n' });
+  const g = ok(wf(p.root, ['gate', '--attempt', id, '--json'], { env: p.env })).json();
+  ok(wf(p.root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', id], { env: p.env }));
+  ok(wf(p.root, ['review', '--closure', closureFile(p.base, goodClosure('r', { screenshotsInspected: [g.steps[0].artifacts[0].sha256] })), '--attempt', id], { env: p.env }));
+  ok(wf(p.root, ['accept', '--attempt', id], { env: p.env }));
+  const d = wf(p.root, ['deliver', '--attempt', id, '--summary-file', summaryFile(p.base)], { env: p.env });
+  assert.equal(d.code, 75);
+  assert.match(d.err, /not delivered: screenshots will be publicly downloadable.*Fix: the owner decides: keep it with `publicAssets: acknowledged` under `tracker:` committed on the base branch, use the files tracker/);
+  assert.equal(state(p.root, id).phase, 'accepted', 'nothing was delivered');
+  assert.equal(JSON.parse(fs.readFileSync(p.db, 'utf8')).releases.length, 0, 'nothing was uploaded');
+  // An acknowledgement only in the working copy does not count.
+  const cfgFile = path.join(p.root, '.workflow', 'project.yaml');
+  const cfg = JSON.parse(fs.readFileSync(cfgFile, 'utf8'));
+  cfg.tracker.publicAssets = 'acknowledged';
+  fs.writeFileSync(cfgFile, JSON.stringify(cfg, null, 2));
+  assert.equal(wf(p.root, ['deliver', '--attempt', id, '--summary-file', summaryFile(p.base)], { env: p.env }).code, 75);
+  // Committed on the base branch: delivered, and doctor says the choice was made.
+  sh(p.root, 'git commit -qam "acknowledge public screenshots" && git push -q origin main');
+  ok(wf(p.root, ['deliver', '--attempt', id, '--summary-file', summaryFile(p.base)], { env: p.env }));
+  assert.match(wf(p.root, ['doctor', '--no-steps'], { env: p.env }).out, /public screenshots acknowledged/);
+  // A private repository needs no acknowledgement.
+  const q = run(true, false);
+  assert.doesNotMatch(wf(q.root, ['doctor', '--no-steps'], { env: q.env }).out, /publicly downloadable/);
+});
+
+test('github adapter: an upload to a public repository without the acknowledgement is refused by the adapter itself', async () => {
+  const { default: github } = await import('../adapters/tracker/github.mjs');
+  const calls = [];
+  const real = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    calls.push(`${init.method} ${new URL(url).pathname}`);
+    const p = new URL(url).pathname;
+    if (p === '/repos/acme/app') return Response.json({ private: false });
+    if (p.endsWith('/comments')) return Response.json([]);
+    if (p.includes('/releases/tags/')) return Response.json({ message: 'Not Found' }, { status: 404 });
+    return Response.json({ number: 12, labels: [], state: 'open' });
+  };
+  try {
+    const files = [{ name: 'home.png', bytes: Buffer.from('png'), size: 3, sha256: 'x', caption: 'c' }];
+    await assert.rejects(github.api.perform({ token: 't', url: 'https://api.github.com', item: 'GH-12', actions: [{ op: 'attach', files }], cfg: { tracker: { repo: 'acme/app', statuses } } }), /screenshots will be publicly downloadable.*not uploaded/);
+    assert.ok(!calls.some((c) => c.startsWith('POST')), 'nothing was created or uploaded');
+  } finally {
+    globalThis.fetch = real;
+  }
 });

@@ -1,0 +1,24 @@
+name: Workflow improvement
+description: Something in the workflow itself went wrong or wasted time (the engine, a template, a skill, the guard, tracker handling, onboarding, docs)
+labels: [improvement]
+body:
+  - type: markdown
+    attributes:
+      value: "If you use wf, `wf improve show <id>` prints an item from your own inbox you can paste here. Leave out project, company and person names, ticket ids, paths, emails and URLs."
+  - type: dropdown
+    id: class
+    attributes:
+      label: Class
+      options: [engine, template, skill, guard, tracker, onboarding, docs, other]
+    validations: { required: true }
+  - type: textarea
+    id: failure
+    attributes: { label: What went wrong, description: "The step or command, what happened and what it cost (a lost round, a wrong refusal, a missed check)." }
+    validations: { required: true }
+  - type: textarea
+    id: expected
+    attributes: { label: What should have happened }
+    validations: { required: true }
+  - type: input
+    id: version
+    attributes: { label: Plugin version, description: "`wf --version`" }

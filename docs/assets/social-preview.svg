@@ -14,6 +14,6 @@
 <text class="m" x="108" y="379" fill="var(--fg)">wf gate:   unit |     actual: 'Hello Ada!',</text>
 <text class="m" x="108" y="413" fill="var(--bad)">(exit 1: refused)</text>
 <text class="m" x="108" y="447" fill="var(--fg)">wf handoff: implementer-1 planned, wrote or owns this change and cannot review it</text>
-<text class="m" x="108" y="481" fill="var(--good)">delivered HT-1.1: hello-ticket@b966b91c31</text>
+<text class="m" x="108" y="481" fill="var(--good)">delivered HT-1.1: hello-ticket@4ad3048640</text>
 <text class="m" x="108" y="515" fill="var(--good)">tracker: delivered performed on the ticket files and read back; attempt closed</text>
 </svg>

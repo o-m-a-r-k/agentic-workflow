@@ -14,6 +14,10 @@ A tiny library (`examples/hello-ticket/`) with two tickets as files and `node --
 
 `node scripts/record-demo.mjs` re-records `docs/assets/` from a fresh run: `demo.txt` (the output, with the temporary folder shown as `~/demo`), `demo.svg` (that text animated; only the pacing is chosen) and the 1280x640 `social-preview` (SVG, and PNG when a local Chrome or Chromium exists).
 
+## Game day
+
+`node --test scenarios/gameday.test.mjs` runs one ticket through a backend/frontend pair with every fault seen on real tickets: a hand-written and a recycled capture, a misspelt plan section, parallel work items, an amendment, a superseded handoff, a steered reviewer and a reused reviewer id, someone else's push with and without overlap, a flaky suite, a cache directory, a canary environment variable, three attempts at once, an export at every phase, and delivery with the tracker readback. The file's header says how to add a fault.
+
 ## Scenarios
 
 
@@ -80,6 +84,8 @@ A tiny library (`examples/hello-ticket/`) with two tickets as files and `node --
 | GitHub tracker | `via: cli` through a fake `gh` and `via: api` against a fake server: status labels, release-asset screenshots, comment, engine readback; no token printed or captured | tracker-github |
 | Role tools | every generated role names only tools its list grants (the reviewer has Write for its closure); a closure is refused when the worktree changed during the round | role-tools |
 | Files tracker ids | traversal ids (`../x`, `..`, `a/b`, `/abs`, `.hidden`, NUL, 200 characters, invisible or look-alike characters), a linked ticket folder, a case twin and traversal titles are refused by name before any file is touched | tracker-files |
+| GitHub public assets | a public repository: doctor's NOTICE, `wf deliver` refused until the acknowledgement is committed on the base (a working-copy edit does not count), the adapter refusing an unacknowledged upload; a private repository needs none | tracker-github |
+| Docs links | every relative link and heading in the README and docs resolves | docs-links |
 | Tracker credentials | an endpoint edited in the working copy, a plain-http host and a redirect never receive the token (an attacker sink records nothing); a non-default https host is named loudly by doctor; issue titles and flag-like labels never become arguments | tracker-github |
 | Safe reads | one reader for every upload and export: a symlink, hard link, `..` escape, linked folder, FIFO, swap at open and changed bytes are refused; a linked summary file is refused; Linear uploads only to its storage, without an authorization header, never following a redirect | tracker-safe-read |
 | Per-ticket evidence | `{item}`/`{itemLower}`/`{attempt}` in `artifacts` collect only the ticket's files, listed per glob in the bundle; a matched file not inspected blocks accept; a step that matched nothing while its package changed needs a `noEvidence` reason or a finding naming it (empty reason refused; verdict ledgered and exported); a step whose package did not change needs nothing; a screenshot criterion ref the gate did not collect is refused; steps get `WF_ITEM`/`WF_ITEMS` for one attempt and for a batch; `wf init` drafts `<testDir>/.evidence/{itemLower}/**/*.png` for Playwright and Cypress, nothing for other runners; unknown placeholders refused; doctor warns statically on a placeholder-less glob, prints per-glob counts and warns on one matching files the ticket did not touch | evidence |

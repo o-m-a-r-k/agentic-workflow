@@ -416,6 +416,11 @@ export async function trackerModeChecks(root, cfg, { loadCatalog: catalog, readS
   const combo = `${cfg.tracker.kind}/${cfg.tracker.via}`;
   if (VERIFIABLE[combo]) out.push({ info: true, check: `tracker ${combo}`, problem: VERIFIABLE[combo] });
   out.push(...endpointNotices(cfg));
+  if (cfg.tracker.kind === 'github') {
+    const p = await publicAssetsProblem(root, cfg);
+    if (p) out.push({ check: 'tracker screenshots', problem: `NOTICE: ${p.split('. Fix: ')[0]}`, fix: p.split('. Fix: ')[1] });
+    else if (publicAcknowledged(root, cfg)) out.push({ info: true, check: 'tracker screenshots', problem: 'public screenshots acknowledged (`tracker.publicAssets: acknowledged`): release assets may be publicly downloadable' });
+  }
   const keyName = cfg.tracker.apiKey ?? adapter?.apiKey ?? 'LINEAR_API_KEY';
   if (cfg.tracker.via === 'cli') {
     const gh = spawnSync('gh', ['auth', 'status'], { encoding: 'utf8' });
@@ -452,6 +457,40 @@ export function captureProvenance(files) {
 // through the same checks as an agent capture. Without the API key (or for an adapter without `api`) the pending
 // actions stay for the agent flow. Returns what happened, never the key.
 export const ENGINE_VIAS = ['api', 'cli', 'files'];
+
+// The tracker's key for `via: api` (null for other routes or when unset); never printed.
+function trackerToken(root, cfg, adapter) {
+  if (cfg.tracker.via !== 'api') return null;
+  const keyName = cfg.tracker.apiKey ?? adapter?.apiKey ?? 'LINEAR_API_KEY';
+  const entry = loadCatalog(root).find((k) => k.key === keyName);
+  return entry ? readSecret(root, cfg, entry) : null;
+}
+
+// Whether the owner acknowledged public screenshots: only as committed on the base branch of the adapter repo (an
+// edit in a working copy does not count).
+function publicAcknowledged(root, cfg) {
+  try {
+    const repo = cfg.adapterRepo ? cfg.repos.find((r) => r.name === cfg.adapterRepo) : cfg.repos[0];
+    return loadConfigAtCommit(root, cfg, repo.base).tracker.publicAssets === 'acknowledged';
+  } catch {
+    return false;
+  }
+}
+
+// GitHub screenshots are release assets; on a public repository anyone can download them. Returns the refusal text
+// when screenshots would go to a repository that is not known to be private without the owner's acknowledgement.
+export async function publicAssetsProblem(root, cfg, { screenshots = true } = {}) {
+  if (cfg.tracker.kind !== 'github' || !screenshots || !['cli', 'api'].includes(cfg.tracker.via)) return null;
+  if (publicAcknowledged(root, cfg)) return null;
+  const adapter = await loadTrackerAdapter(root, cfg, null);
+  const impl = adapter?.[cfg.tracker.via];
+  const endpoint = cfg.tracker.apiUrl ?? impl?.url ?? null;
+  const token = trackerToken(root, cfg, adapter);
+  // The token goes only to an endpoint the credential rules accept and that is GitHub's own or this machine.
+  const safe = cfg.tracker.via === 'cli' || (endpoint && !endpointProblem(endpoint) && (isLoopback(endpoint) || DEFAULT_HOSTS.github.includes(new URL(endpoint).hostname)));
+  const isPrivate = safe && impl?.visibility && (cfg.tracker.via === 'cli' || token) ? await impl.visibility({ token, url: endpoint, cfg }) : null;
+  return isPrivate === true ? null : `${adapter.publicNotice}. Fix: ${adapter.publicFix}`;
+}
 export async function performTracker(root, cfg, state) {
   const via = cfg.tracker.via;
   if (cfg.tracker.kind === 'none' || !ENGINE_VIAS.includes(via) || !state.tracker.pending.length) return { performed: [], note: null };
@@ -478,7 +517,7 @@ export async function performTracker(root, cfg, state) {
   if (via === 'api') {
     const keyName = cfg.tracker.apiKey ?? adapter.apiKey ?? 'LINEAR_API_KEY';
     const entry = loadCatalog(root).find((k) => k.key === keyName);
-    token = entry ? readSecret(root, cfg, entry) : null;
+    token = trackerToken(root, cfg, adapter);
     if (!token) return { performed: [], note: `${keyName} is ${entry ? 'not set (`wf secrets guide` in your terminal)' : 'not in .workflow/secrets.yaml (add it with `required: true`)'}; perform the tracker actions through the connector and record the raw readback` };
   }
   const performed = [];

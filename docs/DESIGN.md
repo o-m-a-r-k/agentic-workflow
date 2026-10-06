@@ -110,74 +110,7 @@ The engine uses it for:
 
 ## Adapter format
 
-```yaml
-# .workflow/project.yaml
-version: 1
-enabled: true
-engine: ">=0.1.10"          # or "0.x" (same major); wf entry and wf gate refuse an older engine
-name: example
-repos:                       # git roots
-  - name: backend
-    path: backend
-    base: main
-    packages:
-      - { path: ., sharedInfra: [package.json, yarn.lock, "docker-compose*.yml"], docsOnly: ["docs/**", "**/*.md"] }
-    provision: { clone: [node_modules], fingerprint: [yarn.lock], install: yarn install --immutable, copyIgnored: [.env.local] }
-  - name: frontend
-    path: frontend
-    base: main
-    packages:
-      - { path: ., sharedInfra: [package.json, yarn.lock], docsOnly: ["**/*.md"] }
-    provision: { clone: [node_modules], fingerprint: [yarn.lock], install: yarn install --immutable }
-adapterRepo: backend
-instructionFiles: [backend/AGENTS.md, frontend/AGENTS.md]
-components: [...]
-delivery: { kind: push-main }
-tracker: { kind: linear, idPrefix: ENG, statuses: { started: In Progress, delivered: Ready for UAT, done: Done } }
-lanes: [quick, standard, batch]
-classes:                     # merged over the plugin's full/light defaults by name; open list
-  light: { use: "Screens on a frozen API contract, translations, fixtures.", claude: { effort: low }, codex: { effort: low } }
-roles:
-  planner:     { lanes: [standard], class: full, appendix: .workflow/roles/planner.md }
-  implementer: { class: full, appendix: .workflow/roles/implementer.md }
-  reviewer:    { class: full, appendix: .workflow/roles/reviewer.md }
-gate:
-  maxParallelSteps: 2
-  leases: { docker: 1, browser: 1 }
-  steps:
-    - { id: backend-lint, repo: backend, run: yarn lint, inputs: ["src/**", "test/**"], tier: light }
-    - id: backend-unit
-      repo: backend
-      run: yarn jest --maxWorkers={workers} {select}
-      select: "--runTestsByPath {suites}"
-      report: { junit: junit.xml }
-      workers: { auto: true, min: 2, max: 8, perWorkerGiB: 2 }
-      inputs: ["src/**", "test/**"]
-      tier: light
-    - { id: backend-e2e, repo: backend, plugin: ./steps/e2e.mjs, tier: heavy, deferrable: true, lease: docker }
-    - { id: web-e2e, repo: frontend, run: "npx playwright test --workers={workers} --reporter=junit", report: { junit: results.xml }, workers: { auto: true, min: 2, max: 8, perWorkerGiB: 1 }, tier: heavy, lease: browser, alsoInputs: [backend] }
-invariants: .workflow/AGENTS.invariants.md
-requires: { skills: [], connectors: [linear], tools: [{ name: docker, check: "docker info" }] }
-```
-
-`wf gate --focused` (allowed only when every changed file matches `focused`) skips heavy steps and records `focused: true` and each skipped step's `skippedBy: focused`. It is repair proof only: accept and delivery need a passing gate on the current tree that skipped no step because of `--focused`. Steps skipped by `when.paths`, docs-only changes, a plugin's own `plan`, or deferred to a batch do not make a gate partial.
-
-A step without `inputs` reruns every gate (no reuse). A passing result is reused only when every file changed in the package since that pass is in the step's `inputs`, its `ignores` (files the step provably does not depend on) or the package's `docsOnly`; otherwise the step reruns. A changed file that no step's `inputs` covers forces every step of its package to run (fail closed); a changed file in a package with no steps is listed as unchecked in the gate result. Files under the repo's `sharedInfra` (root lockfiles, shared config) force all of the repo's steps to run.
-
-`wf doctor` warns (never fails) when a `run` command references a sibling repo (`../web`, `$WF_ROOT/web`, `$WF_ATTEMPT/web`) that `alsoInputs` does not list: a portal end-to-end pass was reused against old API code. `alsoInputs: [repo, ...]` names other repos a step reads, for example an end-to-end step in one repo that builds a sibling repo's service from its worktree. The step's reuse key then also covers each listed repo's tree (HEAD plus a hash of tracked changes, the same as the gate's tree binding: the attempt's worktree when the repo is in the attempt, else its main checkout), so any change there reruns the step, and a non-docs change there keeps the step from being skipped as "no changes in this repo". A listed repo whose tree cannot be read makes the step always run (fail closed).
-
-### Step plugin contract
-
-```js
-export default {
-  plan(ctx)    // → { run: boolean, reason, inputs: string[], runnerIdentity: string }
-  run(ctx)     // → { status, suites: [{ id, inputsHash, status, durationMs }], artifacts: [] }
-               //   interrupted: { status: 'interrupted', suites: [...finished only] }
-  cleanup(ctx) // called on stop and dead-runner harvest; frees containers, leases
-}
-```
-
-The engine owns suite merging, reuse eligibility (same `runnerIdentity` + same suite `inputsHash`) and harvest. Worker counts are not part of the reuse fingerprint.
+The adapter schema, with a full example and the step plugin contract: [adapter.md](adapter.md).
 
 ## Commands in any language
 
@@ -220,14 +153,14 @@ Raw inputs are kept write-once under the attempt's evidence the moment they are 
 |---|---|---|---|
 | `linear` | `api` | engine, key `LINEAR_API_KEY` from `wf secrets` | status, comment body, each attachment (title, caption) and its embedding, on Linear's own answer; uploaded bytes are trusted (no hash) |
 | `linear` | `connector` (default) | agent, MCP tools | only what the agent saved, unless it is the host's saved tool-result file |
-| `github` | `cli` (default) | engine, through `gh api` and the owner's `gh` login (wf never sees or prints the token) | status label, comment body, release assets (name, caption label, size) on GitHub's own answer; bytes by size, not hash |
+| `github` | `cli` (default) | engine, through `gh api` and the owner's `gh` login (wf never sees or prints the token) | status label, comment body, release assets (name, caption label, size) on GitHub's own answer; bytes by size, not hash; assets are public on a public repository |
 | `github` | `api` | engine, token `GITHUB_TOKEN` from `wf secrets` | as `cli` |
 | `github` | `connector` | agent | agent-reported |
 | `files` | `files` (only) | engine, on `tickets/<id>.md` in the repo | status, comment and each attachment by sha256, read back from the files; anyone who can edit the repo can edit a ticket, git history is the audit trail |
 | `none` | | | requests come as files (`--issue-file`) |
 
 - **Linear.** GraphQL; status by workflow-state name; a comment is skipped when an identical one exists; each screenshot is a file upload plus an attachment titled with the file name and subtitled with the caption. `tracker.apiKey` names the secret, `tracker.apiUrl` overrides the endpoint (tests use a local fake).
-- **GitHub Issues.** `tracker.repo: owner/name`; the item is the issue number (`12` or `GH-12`). Each status name in `tracker.statuses` is a label; setting one removes the other status labels and keeps every other label. GitHub has no API to attach a file to an issue, so each screenshot is uploaded as an asset of one prerelease (`tracker.releaseTag`, default `wf-attachments`, created on first use together with its git tag), named `<item>--<title>` with the caption as its label, and the comment embeds it by its download url. Release assets of a public repository are public. `tracker.apiUrl` / `tracker.uploadUrl` point at GitHub Enterprise.
+- **GitHub Issues.** `tracker.repo: owner/name`; the item is the issue number (`12` or `GH-12`). Each status name in `tracker.statuses` is a label; setting one removes the other status labels and keeps every other label. GitHub has no API to attach a file to an issue, so each screenshot is uploaded as an asset of one prerelease (`tracker.releaseTag`, default `wf-attachments`, created on first use together with its git tag), named `<item>--<title>` with the caption as its label, and the comment embeds it by its download url. Release assets of a public repository are public: `wf doctor` prints a NOTICE when the repository is public or its visibility unknown, and `wf deliver` refuses to deliver screenshots there until `tracker.publicAssets: acknowledged` is committed on the base branch (the adapter checks again before each upload). `tracker.apiUrl` / `tracker.uploadUrl` point at GitHub Enterprise.
 - **Files.** `tracker.folder` (default `tickets`) inside the project and outside the evidence; one `<id>.md` per ticket with YAML frontmatter (`id`, `title`, `status`, `labels`) and the description as the body. Status rewrites the frontmatter; comments are appended between `<!-- wf:comment -->` markers under `## Comments`; screenshots are copied to `<folder>/<id>/attachments/` and listed with caption and sha256 in `attachments.json`. Ids are an allowlist; no folder or ticket is read or written through a link. `wf init` drafts this tracker when it finds such a folder.
 - **Credentials and local files.** The engine reads every endpoint (`tracker.apiUrl`, `tracker.uploadUrl`), the repository and the folder from the adapter committed at the attempt's base, never the working copy (a different working value leaves the actions pending). A token goes only over https (plain http only to this machine's loopback), to an URL without credentials; a host other than the tracker's own (`api.github.com`, `uploads.github.com`, `api.linear.app`) is used only as committed, and `wf doctor` prints a NOTICE naming it. Requests that carry a token never follow a redirect. `gh` gets no token from wf (it uses its own login); every value reaches it as one argv element or on stdin, never through a shell, so issue titles, labels and comments stay data. Linear screenshots are PUT only to Linear's upload storage over https, without an authorization header. Every screenshot sent anywhere (uploads, the files tracker's copy, `wf export screenshots`, the export page) is read by one reader (`readEvidenceFile`): inside this project's attempt evidence with every folder resolved, the last name opened without following a link or blocking on a FIFO, a regular file with one name, its sha256 and size taken from the bytes read and equal to what the gate recorded; adapters receive those bytes and never open a path. Input files (`--summary-file`, `--file`, captures) are refused when they are a link.
 - **Later extension:** one `TODO.md` checklist as a tracker. Not shipped: a checklist line has no stable place for comments and attachments, so it would need its own format and tests.

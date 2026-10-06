@@ -70,6 +70,18 @@ function transport(via, { token, url, cfg }) {
   };
 }
 
+// Whether the repository is private: true, false, or null when GitHub did not say (treated as public).
+async function visibility(via, { token, url, cfg }) {
+  try {
+    const r = await transport(via, { token, url, cfg })('GET', `/repos/${repoOf(cfg)}`);
+    return typeof r.data?.private === 'boolean' ? r.data.private : null;
+  } catch {
+    return null;
+  }
+}
+export const PUBLIC_NOTICE = 'screenshots will be publicly downloadable: they are stored as release assets of a public repository (or one whose visibility GitHub did not report)';
+export const PUBLIC_FIX = 'the owner decides: keep it with `publicAssets: acknowledged` under `tracker:` committed on the base branch, use the files tracker (`tracker.kind: files`), or keep the issues in a private repository';
+
 async function perform(via, { token, url, item, actions, cfg }) {
   const call = transport(via, { token, url, cfg });
   const repo = repoOf(cfg);
@@ -107,6 +119,9 @@ async function perform(via, { token, url, item, actions, cfg }) {
       for (const old of labels.filter((l) => statuses.includes(l) && l !== a.status)) await call('DELETE', `/repos/${repo}/issues/${n}/labels/${encodeURIComponent(old)}`);
       await call('POST', `/repos/${repo}/issues/${n}/labels`, { labels: [a.status] });
     } else if (a.op === 'attach') {
+      // Release assets of a public repository are downloadable by anyone: uploaded only with the owner's
+      // acknowledgement (checked again here, whatever the caller did).
+      if (a.files.length && cfg.tracker.publicAssets !== 'acknowledged' && (await visibility(via, { token, url, cfg })) !== true) throw new Error(`${PUBLIC_NOTICE}; not uploaded. Fix: ${PUBLIC_FIX}`);
       const rel = await getRelease(true);
       for (const f of a.files) {
         const title = f.name;
@@ -139,8 +154,10 @@ export default {
   apiKey: 'GITHUB_TOKEN',
   operations: { readIssue: 'the engine reads the issue', setStatus: 'the engine sets the status label', comment: 'the engine comments', attach: 'the engine uploads release assets', readBack: 'the engine reads the issue, its comments and the assets back' },
   isUpload: (a) => /\/releases\/download\//.test(String(a?.url ?? '')),
-  cli: { perform: (ctx) => perform('cli', ctx) },
-  api: { url: 'https://api.github.com', perform: (ctx) => perform('api', ctx) },
+  cli: { perform: (ctx) => perform('cli', ctx), visibility: (ctx) => visibility('cli', ctx) },
+  api: { url: 'https://api.github.com', perform: (ctx) => perform('api', ctx), visibility: (ctx) => visibility('api', ctx) },
+  publicNotice: PUBLIC_NOTICE,
+  publicFix: PUBLIC_FIX,
   normalize(raw) {
     const issue = raw?.issue ?? {};
     const labels = (issue.labels ?? []).map((l) => (typeof l === 'string' ? l : l.name));
