@@ -212,9 +212,24 @@ Raw inputs are kept write-once under the attempt's evidence the moment they are 
 - `wf run --lease <name> -- <cmd>` takes a machine-wide lease slot like a gate step, waits while all are held, frees it on exit.
 - `wf doctor` lists untracked paths light steps leave on a clean base, with `.gitignore` lines.
 
-## Tracker via API
+## Trackers: where tasks live and how wf reaches them
 
-`tracker.via: api` (default `agent`): after `wf entry`, implementer handoffs, `wf deliver`, `wf reopen` and `wf tracker sync`, the engine performs each pending event through the adapter's `api.perform` (Linear GraphQL: read, status by workflow-state name, comment unless an identical one exists, file upload plus attachment titled with the file name and subtitled with the owner's caption, after `wf shown`), writes the readback under `tracker/` and records it through `wf tracker record`'s checks. The key is the catalogued secret `tracker.apiKey` (default `LINEAR_API_KEY`), never printed; without it the actions stay pending for the agent flow. `tracker.apiUrl` overrides the endpoint (tests use a local fake).
+`tracker.kind` says where the tasks live; `tracker.via` says how wf reaches it. With an engine route (`api`, `cli`, `files`), after `wf entry`, implementer handoffs, `wf deliver`, `wf shown`, `wf reopen` and `wf tracker sync` the engine performs each pending event itself (read, status, the screenshots after `wf shown` with the owner's captions, then the comment that embeds them), writes its readback under `tracker/` and records it through `wf tracker record`'s checks. With `connector`, the agent acts through its tools and saves the readback; it is recorded as agent-reported, unverified. `wf doctor` prints the verifiable line for the configured combination.
+
+| kind | via | Who acts | What wf can verify |
+|---|---|---|---|
+| `linear` | `api` | engine, key `LINEAR_API_KEY` from `wf secrets` | status, comment body, each attachment (title, caption) and its embedding, on Linear's own answer; uploaded bytes are trusted (no hash) |
+| `linear` | `connector` (default) | agent, MCP tools | only what the agent saved, unless it is the host's saved tool-result file |
+| `github` | `cli` (default) | engine, through `gh api` and the owner's `gh` login (wf never sees or prints the token) | status label, comment body, release assets (name, caption label, size) on GitHub's own answer; bytes by size, not hash |
+| `github` | `api` | engine, token `GITHUB_TOKEN` from `wf secrets` | as `cli` |
+| `github` | `connector` | agent | agent-reported |
+| `files` | `files` (only) | engine, on `tickets/<id>.md` in the repo | status, comment and each attachment by sha256, read back from the files; anyone who can edit the repo can edit a ticket, git history is the audit trail |
+| `none` | | | requests come as files (`--issue-file`) |
+
+- **Linear.** GraphQL; status by workflow-state name; a comment is skipped when an identical one exists; each screenshot is a file upload plus an attachment titled with the file name and subtitled with the caption. `tracker.apiKey` names the secret, `tracker.apiUrl` overrides the endpoint (tests use a local fake).
+- **GitHub Issues.** `tracker.repo: owner/name`; the item is the issue number (`12` or `GH-12`). Each status name in `tracker.statuses` is a label; setting one removes the other status labels and keeps every other label. GitHub has no API to attach a file to an issue, so each screenshot is uploaded as an asset of one prerelease (`tracker.releaseTag`, default `wf-attachments`, created on first use together with its git tag), named `<item>--<title>` with the caption as its label, and the comment embeds it by its download url. Release assets of a public repository are public. `tracker.apiUrl` / `tracker.uploadUrl` point at GitHub Enterprise.
+- **Files.** `tracker.folder` (default `tickets`) inside the project and outside the evidence; one `<id>.md` per ticket with YAML frontmatter (`id`, `title`, `status`, `labels`) and the description as the body. Status rewrites the frontmatter; comments are appended between `<!-- wf:comment -->` markers under `## Comments`; screenshots are copied to `<folder>/<id>/attachments/` and listed with caption and sha256 in `attachments.json`. Ids are an allowlist; no folder or ticket is read or written through a link. `wf init` drafts this tracker when it finds such a folder.
+- **Later extension:** one `TODO.md` checklist as a tracker. Not shipped: a checklist line has no stable place for comments and attachments, so it would need its own format and tests.
 
 ## Secrets that are asked for
 
@@ -269,7 +284,7 @@ Screenshots come only from the gate's attested visual artifacts. Named failure: 
 
 ## Tracker adapters
 
-`kind` is a built-in name (`linear`, `none`) or a path (`./.workflow/tracker/<name>.mjs`). Each operation runs `via: agent` (MCP connector; no credentials in the engine) or `via: adapter` (HTTP API; token is a `provided` secret in the keychain store).
+`kind` is a built-in name (`linear`, `github`, `files`, `none`) or a path (`./.workflow/tracker/<name>.mjs`). An adapter implements each engine route it supports as `{ api | cli | files: { perform({ token, url, item, actions, root, cfg, state }) } }` returning its raw readback, plus `normalize(raw)` and `isUpload(attachment)`; `via: connector` needs neither.
 
 ```js
 export default {

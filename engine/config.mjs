@@ -147,8 +147,14 @@ function normalize(raw, source) {
     if (rc.class !== undefined && !cfg.classes[rc.class]) fail(`roles.${role}.class \`${rc.class}\` is not a known class (known: ${Object.keys(cfg.classes).join(', ')})`);
   }
   for (const lane of cfg.lanes) if (!LANES.has(lane)) fail(`unknown lane \`${lane}\``);
-  // A misspelt mode would silently fall back to the agent flow.
-  if (cfg.tracker.via !== undefined && !['agent', 'api'].includes(cfg.tracker.via)) fail('`tracker.via` must be `agent` (the agent records captures) or `api` (the engine calls the tracker)');
+  // A tracker is a kind (where the tasks live) and a via (how wf reaches it). A misspelt mode would silently fall back to
+  // the agent flow. `agent` is the older name of `connector`.
+  const VIAS = { linear: ['api', 'connector'], github: ['cli', 'api', 'connector'], files: ['files'], none: [] };
+  if (cfg.tracker.via === 'agent') cfg.tracker.via = 'connector';
+  if (cfg.tracker.via === undefined) cfg.tracker.via = { linear: 'connector', github: 'cli', files: 'files' }[cfg.tracker.kind] ?? 'connector';
+  if (VIAS[cfg.tracker.kind] && cfg.tracker.kind !== 'none' && !VIAS[cfg.tracker.kind].includes(cfg.tracker.via)) fail(`\`tracker.via\` for ${cfg.tracker.kind} is one of ${VIAS[cfg.tracker.kind].join(', ')}, not \`${cfg.tracker.via}\``);
+  if (!VIAS[cfg.tracker.kind] && !String(cfg.tracker.kind).startsWith('.')) fail(`\`tracker.kind\` is one of linear, github, files, none (or a project adapter \`./file.mjs\`), not \`${cfg.tracker.kind}\``);
+  if (cfg.tracker.kind === 'github' && !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(String(cfg.tracker.repo ?? ''))) fail('`tracker.repo` names the GitHub repository holding the issues: `owner/name`');
   if (!Array.isArray(raw.repos) || raw.repos.length === 0) fail('`repos` must list at least one git root');
   const names = new Set();
   for (const r of raw.repos ?? []) {

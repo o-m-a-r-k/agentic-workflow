@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { adapterFileAtCommit } from './config.mjs';
@@ -266,7 +267,7 @@ export async function recordTracker(root, cfg, state, options) {
   if (event === 'delivered' && !options.engineCapture && typeof adapter.rawProblems === 'function') {
     const shape = adapter.rawProblems(raw, { comments: pending.some((a) => a.op === 'comment') });
     if (shape.length) {
-      const api = adapter.api && cfg.tracker.via !== 'api' ? ` Prefer \`tracker.via: api\` (its key through \`wf secrets\`): the engine then performs the actions and records its own readback, so nothing is saved by hand.` : '';
+      const api = (adapter.api || adapter.cli) && !ENGINE_VIAS.includes(cfg.tracker.via) ? ` Prefer \`tracker.via: ${adapter.cli ? 'cli' : 'api'}\`${adapter.cli ? ' (your `gh` login)' : ' (its key through `wf secrets`)'}: the engine then performs the actions and records its own readback, so nothing is saved by hand.` : '';
       problems.push(`the capture is not the unmodified tracker output (${shape.join('; ')}). Save each tool result unchanged, never rebuilt, abridged or reformatted: ${adapter.saveRaw ?? 'write the tool\'s whole JSON output to a file byte for byte'}.${api}`);
     }
   }
@@ -333,6 +334,9 @@ export async function recordTracker(root, cfg, state, options) {
           if (!named.length) missing.push(`${title} (${f.path}): no attachment with this title`);
           else if (!uploads.length) missing.push(`${title} (${f.path}): attached as a link, not an uploaded file (${named[0].url ?? 'no url in the capture'})`);
           else if (!exact.length) missing.push(`${title} (${f.path}): uploaded, but no attachment of it has the subtitle "${caption}" (an earlier attempt's file with the same name does not count)`);
+          // A tracker that reports the stored bytes' sha256 (files) or size (GitHub release assets): they must match.
+          else if (exact[0].sha256 && exact[0].sha256 !== f.sha256) missing.push(`${title}: the stored file's sha256 differs from the delivered screenshot`);
+          else if (exact[0].size !== undefined && exact[0].size !== null && fs.existsSync(f.path) && Number(exact[0].size) !== fs.statSync(f.path).size) missing.push(`${title}: the stored file's size (${exact[0].size}) differs from the delivered screenshot (${fs.statSync(f.path).size})`);
           else {
             verified.push({ title, sha256: f.sha256, attachment: exact[0].id ?? null, caption });
             verifiedAttachments.set(f.sha256, exact[0]);
@@ -351,6 +355,16 @@ export async function recordTracker(root, cfg, state, options) {
 
 // Doctor: the tracker mode and what it costs. api: the key must be there. agent (connector): the readback is only what
 // the agent saved, so the engine cannot prove it is the tracker's raw answer; say so and how to switch.
+// What wf can verify for each kind x via, said by `wf doctor` and the docs.
+export const VERIFIABLE = {
+  'linear/api': 'the engine posts, uploads and reads back itself through the API: status, comment body, every attachment (title, caption) and its embedding are checked on the tracker\'s own answer; uploaded bytes are trusted (no hash from the tracker)',
+  'linear/connector': 'the agent acts through its connector; the readback is what it saved (agent-reported) unless it is the host\'s saved tool-result file; nothing is the tracker\'s answer as wf received it',
+  'github/cli': 'the engine calls the GitHub REST API through your `gh` login: labels (status), the comment body and release assets (name, caption label, size) are read back from GitHub itself; asset bytes are checked by size, not hash',
+  'github/api': 'as github/cli, with a token from `wf secrets` instead of your `gh` login',
+  'github/connector': 'the agent acts through its connector; the readback is agent-reported',
+  'files/files': 'the engine does every action on the ticket files in the repo and reads them back: status, comment, attachments (each by sha256); anyone who can edit the repo can edit a ticket, and git history is the audit trail',
+};
+
 export async function trackerModeChecks(root, cfg, { loadCatalog: catalog, readSecret: secret }) {
   if (cfg.tracker.kind === 'none') return [];
   const out = [];
@@ -358,13 +372,25 @@ export async function trackerModeChecks(root, cfg, { loadCatalog: catalog, readS
   try {
     adapter = await loadTrackerAdapter(root, cfg, null);
   } catch {}
-  const keyName = cfg.tracker.apiKey ?? 'LINEAR_API_KEY';
-  if (cfg.tracker.via === 'api') {
+  const combo = `${cfg.tracker.kind}/${cfg.tracker.via}`;
+  if (VERIFIABLE[combo]) out.push({ info: true, check: `tracker ${combo}`, problem: VERIFIABLE[combo] });
+  const keyName = cfg.tracker.apiKey ?? adapter?.apiKey ?? 'LINEAR_API_KEY';
+  if (cfg.tracker.via === 'cli') {
+    const gh = spawnSync('gh', ['auth', 'status'], { encoding: 'utf8' });
+    if (gh.error) out.push({ fail: true, key: 'gh', problem: 'tracker.via is cli but the GitHub CLI `gh` is not on PATH', fix: 'install gh and sign in with `gh auth login` (wf uses your login and never prints its token)' });
+    else if (gh.status !== 0) out.push({ fail: true, key: 'gh', problem: 'tracker.via is cli but `gh auth status` reports no login', fix: 'the owner runs `gh auth login` in their own terminal' });
+  } else if (cfg.tracker.via === 'files') {
+    const folder = path.resolve(root, cfg.tracker.folder ?? 'tickets');
+    const st = fs.lstatSync(folder, { throwIfNoEntry: false });
+    if (!st) out.push({ check: 'tracker files', problem: `the tickets folder ${folder} does not exist yet`, fix: `create it with one <id>.md per ticket (YAML frontmatter: id, title, status, labels)` });
+    else if (!st.isDirectory()) out.push({ fail: true, key: 'tickets folder', problem: `${folder} is ${st.isSymbolicLink() ? 'a symlink' : 'not a folder'}; tickets are not read or written through it`, fix: 'make it a real folder in the repo' });
+  } else if (cfg.tracker.via === 'api') {
     const entry = catalog(root).find((k) => k.key === keyName);
     if (!entry) out.push({ fail: true, key: keyName, problem: `tracker.via is api but ${keyName} is not catalogued in .workflow/secrets.yaml`, fix: `add { key: ${keyName}, kind: provided, required: true, purpose: "${cfg.tracker.kind} API key" } to .workflow/secrets.yaml, then the owner runs \`wf secrets guide ${keyName}\` in their own terminal` });
     else if (!secret(root, cfg, entry)) out.push({ fail: true, key: keyName, problem: `tracker.via is api but ${keyName} is not set`, fix: `the owner runs \`wf secrets guide ${keyName}\` in their own terminal` });
-  } else if (adapter?.api) {
-    out.push({ check: 'tracker mode', problem: `the ${cfg.tracker.kind} tracker is driven by the agent's connector: the readback is what the agent saved, so wf cannot prove the status, the comment or the attachments it checks are the tracker's own answer (it records the readback as "agent-reported, unverified" unless it is the host's saved tool-result file)`, fix: `switch to the engine's API: \`wf tracker mode api\` (then the owner runs \`wf secrets guide ${keyName}\`)` });
+  } else if (adapter?.api || adapter?.cli) {
+    const better = adapter.cli ? 'cli' : 'api';
+    out.push({ check: 'tracker mode', problem: `the ${cfg.tracker.kind} tracker is driven by the agent's connector: the readback is what the agent saved, so wf cannot prove the status, the comment or the attachments it checks are the tracker's own answer (it records the readback as "agent-reported, unverified" unless it is the host's saved tool-result file)`, fix: `let the engine reach it: \`wf tracker mode ${better}\`${better === 'api' ? ` (then the owner runs \`wf secrets guide ${keyName}\`)` : ' (uses your `gh` login)'}` });
   }
   return out;
 }
@@ -383,14 +409,20 @@ export function captureProvenance(files) {
 // `tracker.via: api`: the engine performs the pending actions itself and records its own readback as the capture,
 // through the same checks as an agent capture. Without the API key (or for an adapter without `api`) the pending
 // actions stay for the agent flow. Returns what happened, never the key.
+export const ENGINE_VIAS = ['api', 'cli', 'files'];
 export async function performTracker(root, cfg, state) {
-  if (cfg.tracker.kind === 'none' || cfg.tracker.via !== 'api' || !state.tracker.pending.length) return { performed: [], note: null };
+  const via = cfg.tracker.via;
+  if (cfg.tracker.kind === 'none' || !ENGINE_VIAS.includes(via) || !state.tracker.pending.length) return { performed: [], note: null };
   const adapter = await loadTrackerAdapter(root, cfg, state.adapterBase);
-  if (!adapter?.api?.perform) return { performed: [], note: `the \`${cfg.tracker.kind}\` tracker adapter has no API mode; perform the actions through the connector` };
-  const keyName = cfg.tracker.apiKey ?? 'LINEAR_API_KEY';
-  const entry = loadCatalog(root).find((k) => k.key === keyName);
-  const token = entry ? readSecret(root, cfg, entry) : null;
-  if (!token) return { performed: [], note: `${keyName} is ${entry ? 'not set (`wf secrets guide` in your terminal)' : 'not in .workflow/secrets.yaml (add it with `required: true`)'}; perform the tracker actions through the connector and record the raw readback` };
+  const impl = adapter?.[via];
+  if (!impl?.perform) return { performed: [], note: `the \`${cfg.tracker.kind}\` tracker adapter has no \`${via}\` mode; perform the actions through the connector` };
+  let token = null;
+  if (via === 'api') {
+    const keyName = cfg.tracker.apiKey ?? adapter.apiKey ?? 'LINEAR_API_KEY';
+    const entry = loadCatalog(root).find((k) => k.key === keyName);
+    token = entry ? readSecret(root, cfg, entry) : null;
+    if (!token) return { performed: [], note: `${keyName} is ${entry ? 'not set (`wf secrets guide` in your terminal)' : 'not in .workflow/secrets.yaml (add it with `required: true`)'}; perform the tracker actions through the connector and record the raw readback` };
+  }
   const performed = [];
   let s = state;
   while (s.tracker.pending.length) {
@@ -403,11 +435,11 @@ export async function performTracker(root, cfg, state) {
     if (actions.some((a) => a.rendered === 'delivered' && !s.delivery.summary)) return { performed, note: `${event} waits for the owner's summary: \`wf summary --file <summary.md>\``, state: s };
     let raw;
     try {
-      raw = await adapter.api.perform({ token, url: cfg.tracker.apiUrl ?? adapter.api.url, item: s.item, actions });
+      raw = await impl.perform({ token, url: cfg.tracker.apiUrl ?? impl.url, item: s.item, actions, root, cfg, state: s });
     } catch (error) {
-      return { performed, note: `tracker API (${event}) failed: ${String(error.message).split(token).join('[secret]')}; the actions stay pending` };
+      return { performed, note: `tracker ${via} (${event}) failed: ${token ? String(error.message).split(token).join('[secret]') : error.message}; the actions stay pending` };
     }
-    const file = path.join(attemptDir(root, s.id), 'tracker', `${event}-api-${now().replace(/[:.]/g, '-')}.json`);
+    const file = path.join(attemptDir(root, s.id), 'tracker', `${event}-${via}-${now().replace(/[:.]/g, '-')}.json`);
     prepareWrite(file);
     fs.mkdirSync(path.dirname(file), { recursive: true });
     writeNoFollow(file, `${JSON.stringify(raw, null, 2)}\n`);

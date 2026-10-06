@@ -51,6 +51,21 @@ function defaultBranch(dir) {
   return git(dir, ['branch', '--show-current'], { allowFail: true }) || 'main';
 }
 
+// Where the tasks live, when the repo says so: a `tickets/` folder of frontmatter tickets drafts the files tracker; a
+// GitHub origin is only named (whether its issues are the tracker is the owner's answer).
+const DEFAULT_STATUSES = { started: 'In Progress', delivered: 'Ready for UAT', done: 'Done' };
+function trackerFor(root, repos) {
+  const tickets = path.join(root, 'tickets');
+  const st = fs.lstatSync(tickets, { throwIfNoEntry: false });
+  if (st?.isDirectory() && fs.readdirSync(tickets).some((f) => f.endsWith('.md') && fs.readFileSync(path.join(tickets, f), 'utf8').startsWith('---\n'))) {
+    return { tracker: { kind: 'files', via: 'files', folder: 'tickets', statuses: DEFAULT_STATUSES }, note: 'tracker: tickets/ holds frontmatter tickets, drafted as `tracker.kind: files` (the engine writes and reads them back itself)' };
+  }
+  const remote = git(path.join(root, repos[0].path), ['remote', 'get-url', 'origin'], { allowFail: true }) ?? '';
+  const m = /github\.com[-\w]*[:/]([\w.-]+\/[\w.-]+?)(?:\.git)?$/.exec(remote.trim());
+  if (m) return { tracker: { kind: 'none' }, note: `tracker: origin is GitHub (${m[1]}). If its issues are your tasks: \`tracker: { kind: github, repo: ${m[1]}, via: cli }\` (your \`gh\` login) or \`via: api\` (a GITHUB_TOKEN in \`wf secrets\`); a Linear team: \`kind: linear\`; tickets in the repo: \`kind: files\`` };
+  return { tracker: { kind: 'none' }, note: null };
+}
+
 function packageManager(dir) {
   if (exists(dir, 'yarn.lock')) return 'yarn';
   if (exists(dir, 'pnpm-lock.yaml')) return 'pnpm';
@@ -271,7 +286,9 @@ export function detect(root) {
   for (const k of secrets) k.usedBy = steps.filter((s) => s.run && new RegExp(`(^|[^A-Za-z0-9_])${k.key}([^A-Za-z0-9_]|$)`).test(s.run)).map((s) => s.id);
   // Said once per draft that collects captures: the glob only works if the tests write there.
   const notes = steps.some((st) => st.artifacts?.length) ? [`${steps.filter((st) => st.artifacts?.length).map((st) => `${st.id}: ${st.artifacts.join(', ')}`).join('; ')}. UI tests must write each ticket's captures there; WF_ITEMS lists the tickets of the run.`] : [];
-  return { root, repos, steps, components, secrets, compose, sources, notes, agentsMd: repos.map((r) => ({ repo: r.name, exists: exists(root, r.path, 'AGENTS.md') })) };
+  const tracked = trackerFor(root, repos);
+  if (tracked.note) notes.push(tracked.note);
+  return { root, repos, steps, components, secrets, compose, sources, notes, tracker: tracked.tracker, agentsMd: repos.map((r) => ({ repo: r.name, exists: exists(root, r.path, 'AGENTS.md') })) };
 }
 
 export function writeDraft(root, detected, { force = false } = {}) {
@@ -296,7 +313,7 @@ export function writeDraft(root, detected, { force = false } = {}) {
     repos: detected.repos.map((r) => ({ name: r.name, path: r.path, base: r.base, ...(r.sharedInfra?.length ? { sharedInfra: r.sharedInfra } : {}), packages: r.packages, provision: r.provision })),
     components: detected.components,
     lanes: ['quick', 'standard'],
-    tracker: { kind: 'none' },
+    tracker: detected.tracker ?? { kind: 'none' },
     delivery: { kind: 'push-main' },
     gate: { maxParallelSteps: 2, leases: { docker: 1, browser: 1, simulator: 1 }, steps: detected.steps },
     invariants: 'AGENTS.invariants.md',
@@ -630,7 +647,8 @@ export async function doctor(root, { runSteps = true } = {}) {
   for (const c of cfg.requires.connectors ?? []) report.connectors.push({ ok: true, connector: c.name, note: `not checkable from the CLI: the agent confirms ${c.name} with one read-only call` });
   // How wf talks to the tracker: api (verifiable readback) or the agent's connector (agent-reported readback).
   for (const t of await trackerModeChecks(root, cfg, { loadCatalog, readSecret })) {
-    if (t.fail) bad('secrets', { key: t.key, problem: t.problem, fix: t.fix });
+    if (t.info) report.connectors.push({ ok: true, connector: t.check, note: `verifiable: ${t.problem}` });
+    else if (t.fail) bad('secrets', { key: t.key, problem: t.problem, fix: t.fix });
     else report.warnings.push({ ok: true, warn: true, check: t.check, problem: t.problem, fix: t.fix });
   }
   const inbox = openCount();

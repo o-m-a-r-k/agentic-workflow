@@ -1,4 +1,4 @@
-// Linear, two ways. `via: agent` (default): the agent performs each operation through its MCP connector and saves the
+// Linear, two ways. `via: connector` (default): the agent performs each operation through its MCP connector and saves the
 // raw response as the capture; the engine holds no credentials. `via: api`: the engine performs the pending actions
 // itself with a personal API key from `wf secrets` and stores its own readback as the capture.
 import fs from 'node:fs';
@@ -92,6 +92,7 @@ export default {
   captureShape: '{ "issue": <get_issue response, unchanged>, "comments": <list_comments response, unchanged> } (get_issue alone is enough when no comment is checked)',
   // An uploaded file, not a link: what `wf tracker record` requires of every delivered screenshot.
   isUpload: (a) => UPLOAD_HOST.test(String(a?.url ?? '')),
+  apiKey: 'LINEAR_API_KEY',
   rules: { attachmentTitleIsFilename: true },
   api: {
     url: 'https://api.linear.app/graphql',

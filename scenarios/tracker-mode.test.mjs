@@ -13,7 +13,8 @@ test('doctor states the tracker mode trade-off; api mode needs its key; the read
   // Connector mode: a warning naming the gap and the one-line switch.
   const a = singleRepoProject('mode-agent', { tracker: { kind: 'linear', statuses } });
   const d = wf(a.root, ['doctor', '--no-steps']);
-  assert.match(d.out, /warning: tracker mode — the linear tracker is driven by the agent's connector: the readback is what the agent saved, so wf cannot prove the status, the comment or the attachments it checks are the tracker's own answer[\s\S]*fix: switch to the engine's API: `wf tracker mode api` \(then the owner runs `wf secrets guide LINEAR_API_KEY`\)/);
+  assert.match(d.out, /warning: tracker mode — the linear tracker is driven by the agent's connector: the readback is what the agent saved, so wf cannot prove the status, the comment or the attachments it checks are the tracker's own answer[\s\S]*fix: let the engine reach it: `wf tracker mode api` \(then the owner runs `wf secrets guide LINEAR_API_KEY`\)/);
+  assert.match(d.out, /connectors: tracker linear\/connector\n {4}verifiable: the agent acts through its connector/);
   // Api mode without the key catalogued, then catalogued but not set: doctor fails with the exact command.
   const b = singleRepoProject('mode-api', { tracker: { kind: 'linear', via: 'api', statuses } });
   const d1 = wf(b.root, ['doctor', '--no-steps']);

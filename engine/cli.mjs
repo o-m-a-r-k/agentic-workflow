@@ -50,8 +50,9 @@ Work
   wf shown --file shown.json        record that every delivered screenshot was shown in the chat, with its caption and anomalies
   wf delivery narrow --keep SHA,... | --file keep.json --reason "why" [--dry-run]
                                     once, before \`wf shown\`: keep only this ticket's files of a delivered set an over-broad glob filled
-  wf tracker record --event E --capture file.json [--comments file.json] | wf tracker sync (tracker.via: api)
-  wf tracker mode api|agent [--write]  how wf talks to the tracker (api: the engine records its own readback)
+  wf tracker record --event E --capture file.json [--comments file.json] | wf tracker sync (tracker.via: api|cli|files)
+  wf tracker mode api|cli|files|connector [--write]
+                                    how wf reaches the tracker (all but connector: the engine records its own readback)
   wf improve add|list|show|next|close  plugin improvements: workflow findings, kept in your inbox outside every repo
   wf hold --reason "why" | wf release
   wf lesson add|waive|recur|set|apply|show|list|review|export
@@ -257,7 +258,7 @@ const isOpen = (s) => !['done', 'abandoned'].includes(s.phase);
 // With `tracker.via: api` the engine performs what a command queued and records its readback; otherwise a no-op.
 async function trackerApi(root, id) {
   const cfg = loadConfig(root);
-  if (cfg.tracker.via !== 'api') return '';
+  if (!['api', 'cli', 'files'].includes(cfg.tracker.via)) return '';
   const r = await performTracker(root, cfg, loadState(root, id));
   let s = loadState(root, id);
   if (r.performed.length) s = closeAfterHandoff(root, s);
@@ -349,7 +350,7 @@ async function dispatch(cmd, sub, positional, options) {
     const detected = detect(root);
     const file = writeDraft(root, detected, { force: options.force === true });
     register(root, false);
-    print(options, `drafted ${file} (disabled)${detected.compose.length ? `\n  docker compose: ${detected.compose.join(', ')} (steps using it should hold the \`docker\` lease)` : ''}\n  repos: ${detected.repos.map((r) => `${r.name}@${r.base} [${r.packages.map((p) => p.path).join(', ')}]`).join('; ')}\n  steps: ${detected.steps.map((s) => s.id).join(', ') || 'none detected'}\n  components: ${detected.components.map((c) => `${c.id} (${c.kind})`).join(', ')}\n  secrets: ${detected.secrets.filter((s) => s.usedBy.length).map((s) => `${s.key} (${s.kind}, used by ${s.usedBy.join(', ')})`).join(', ') || 'none a detected step uses'}${detected.secrets.some((s) => !s.usedBy.length) ? ` (not catalogued: ${detected.secrets.filter((s) => !s.usedBy.length).map((s) => s.key).join(', ')})` : ''}${detected.notes.map((n) => `\n  note: ${n}`).join('')}\nnext: review the draft with the user (a tracker: choose how wf talks to it; \`tracker.via: api\` is recommended, see the onboard skill), commit .workflow/ on the base branch and push it, then \`wf doctor\` and \`wf enable\``, { file, detected });
+    print(options, `drafted ${file} (disabled)${detected.compose.length ? `\n  docker compose: ${detected.compose.join(', ')} (steps using it should hold the \`docker\` lease)` : ''}\n  repos: ${detected.repos.map((r) => `${r.name}@${r.base} [${r.packages.map((p) => p.path).join(', ')}]`).join('; ')}\n  steps: ${detected.steps.map((s) => s.id).join(', ') || 'none detected'}\n  components: ${detected.components.map((c) => `${c.id} (${c.kind})`).join(', ')}\n  secrets: ${detected.secrets.filter((s) => s.usedBy.length).map((s) => `${s.key} (${s.kind}, used by ${s.usedBy.join(', ')})`).join(', ') || 'none a detected step uses'}${detected.secrets.some((s) => !s.usedBy.length) ? ` (not catalogued: ${detected.secrets.filter((s) => !s.usedBy.length).map((s) => s.key).join(', ')})` : ''}${detected.notes.map((n) => `\n  note: ${n}`).join('')}\nnext: review the draft with the user (where the tasks live and how wf reaches them: see the onboard skill; \`wf doctor\` says what is verifiable for that choice), commit .workflow/ on the base branch and push it, then \`wf doctor\` and \`wf enable\``, { file, detected });
     return 0;
   }
   if (cmd === 'report') {
@@ -595,13 +596,13 @@ async function dispatch(cmd, sub, positional, options) {
       if (sub === 'sync') {
         const s = openState(root, options);
         const api = await trackerApi(root, s.id);
-        print(options, `${api.trim() || 'tracker: nothing to perform (no pending actions, or `tracker.via` is not `api`)'}\nnext: ${nextAction(root, loadState(root, s.id))}`);
+        print(options, `${api.trim() || 'tracker: nothing to perform (no pending actions, or `tracker.via` is the connector)'}\nnext: ${nextAction(root, loadState(root, s.id))}`);
         return 0;
       }
       if (sub === 'mode') {
         // The adapter edit that switches how wf talks to the tracker; with --write it is made (comments kept).
-        const mode = positional[0];
-        if (!['api', 'agent'].includes(mode)) throw new WfError('usage: wf tracker mode api|agent [--write]');
+        const mode = positional[0] === 'agent' ? 'connector' : positional[0];
+        if (!['api', 'cli', 'files', 'connector'].includes(mode)) throw new WfError('usage: wf tracker mode api|cli|files|connector [--write]');
         const cfg = loadConfig(root);
         const key = cfg.tracker.apiKey ?? 'LINEAR_API_KEY';
         const file = path.join(root, '.workflow', 'project.yaml');
@@ -616,7 +617,7 @@ async function dispatch(cmd, sub, positional, options) {
         } else print(options, `set in .workflow/project.yaml:\n  tracker:\n    via: ${mode}${mode === 'api' ? `\n    apiKey: ${key}` : ''}\n(or run \`wf tracker mode ${mode} --write\`)${next}`);
         return 0;
       }
-      if (sub !== 'record') throw new WfError('usage: wf tracker record --event E --capture file.json [--comments file.json] | wf tracker sync | wf tracker mode api|agent');
+      if (sub !== 'record') throw new WfError('usage: wf tracker record --event E --capture file.json [--comments file.json] | wf tracker sync | wf tracker mode api|cli|files|connector');
       const cfg = loadConfig(root);
       let s = await recordTracker(root, cfg, openState(root, options), { ...options, engineCapture: undefined });
       s = closeAfterHandoff(root, s);
