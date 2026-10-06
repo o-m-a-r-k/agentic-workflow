@@ -197,7 +197,7 @@ function ownerDecision(state, entry) {
   if (a.file !== t.file) throw refuse(`the owner session's transcript is now ${t.file}, not ${a.file} as when ${entry.id} was recorded`, fix);
   const bytes = readCapped(t.file);
   if (bytes.length < a.size || sha(bytes.subarray(0, a.size)) !== a.sha256) throw refuse(`the owner session's transcript changed before the point where ${entry.id} was recorded (its first ${a.size} bytes no longer match the anchor); no deferral is taken from it`, fix);
-  const start = new RegExp(`^${esc(phrase)}(?![a-z0-9._-])`, 'i');
+  const start = new RegExp(`^${esc(phrase)}(?![a-z0-9_-]|\\.[a-z0-9])`, 'i');
   const found = ownerTurns(t, bytes).filter((m) => m.offset >= a.size && start.test(fold(m.text)));
   if (found.length > 1) throw refuse(`${found.length} owner messages after ${entry.id} was recorded start with \`${phrase}\` (lines ${found.map((m) => m.line).join(', ')}); a deferral is taken only from exactly one`, fix);
   if (!found.length) throw refuse(`no owner message after ${entry.id} was recorded starts with \`${phrase}\` in the owner session's transcript (${t.file}); tool results, notifications, scheduled tasks, injected lines and subagent transcripts never count`, fix);
@@ -244,10 +244,10 @@ export { CHANNEL, channelOf } from './channels.mjs';
 import { channelOf } from './channels.mjs';
 
 // The deferrals still owed the owner's acknowledgement at delivery, qualified by attempt for batch members.
-export function unacknowledged(root, state, loadMember) {
+export function unacknowledged(root, state, loadMember, { acknowledged = false } = {}) {
   const out = [];
   for (const x of [state, ...(state.batch?.members ?? []).map(loadMember)]) {
-    for (const d of x.discovered ?? []) if (d.status === 'deferred' && !d.deferred.acknowledged) out.push({ key: x.id === state.id ? d.id : `${x.id}:${d.id}`, attempt: x.id, d });
+    for (const d of x.discovered ?? []) if (d.status === 'deferred' && Boolean(d.deferred.acknowledged) === acknowledged) out.push({ key: x.id === state.id ? d.id : `${x.id}:${d.id}`, attempt: x.id, d });
   }
   return out;
 }

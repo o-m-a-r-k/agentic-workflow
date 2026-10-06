@@ -35,6 +35,38 @@ test('I-16: the refusal names the matched token and says how to avoid it; nothin
   assert.equal(check({ cwd: '/p', tool_input: { command: 'wf evidence show gate/run-1/unit/output.log --attempt ENG-1.1' } }), null);
 });
 
+// Review of 76ad8d8: the refusal now carries the matched token, so check() must refuse on every branch even when the
+// token is long, the whole input, or built from parts. Every predicate branch returns a non-empty string, and the same
+// inputs are refused exactly as the 0.4.4 predicate (mentionsEvidence) refused them.
+test('I-16: every evidenceMatch branch returns a non-empty token and refuses; wf run is judged like any command', async () => {
+  const { evidenceMatch, mentionsEvidence } = await import('../hooks/guard-evidence.mjs');
+  const branches = {
+    raw: 'cat EV/a',
+    unescaped: "cat $'\\x2ewf-evidence'/a",
+    assembled: 'a=.wf-; b=evidence; rm -rf $a$b',
+    squeezed: 'cat {.wf-,}evidence/a',
+    spans: 'cat .wf- evidence/a'.replace(' ', '\u3000'),
+    glued: 'cat *evidence/a',
+    glob: 'cat .w?-evidence/a',
+    long: `cat ${'x'.repeat(300)}EV/a`,
+    whitespaceAround: `  \t cat EV/a \n `,
+  };
+  for (const [name, raw] of Object.entries(branches)) {
+    const c = raw.replace(/EV/g, '.wf-' + 'evidence');
+    const m = evidenceMatch(c);
+    assert.equal(typeof m, 'string', name);
+    assert.ok(m.trim().length > 0 && m.length <= 80, `${name}: ${JSON.stringify(m)}`);
+    assert.ok(mentionsEvidence(c), name);
+    const r = check({ cwd: '/p', tool_input: { command: c } });
+    assert.ok(r && r.startsWith('matched "'), `${name}: ${r}`);
+  }
+  assert.equal(evidenceMatch('ls -la src'), null);
+  assert.equal(evidenceMatch('   '), null);
+  // `wf run` executes its command, so it is never the plain-wf exception.
+  for (const c of ['wf run --lease docker -- rm -rf EV', 'wf run --lease x -- cat EV/a', 'wf run -- ls EV']) assert.ok(check({ cwd: '/p', tool_input: { command: c.replace(/EV/g, '.wf-' + 'evidence') } }), c);
+  for (const c of ['wf run --lease docker -- docker compose up --wait', 'wf run --lease browser -- npx playwright test']) assert.equal(check({ cwd: '/p', tool_input: { command: c } }), null, c);
+});
+
 test('I-16: `wf evidence list` lists an attempt\'s evidence by kind; `wf evidence show` prints a text file, never an image or a path outside it', () => {
   const steps = [{ id: 'ui', repo: 'app', run: 'mkdir -p shots && printf one > shots/home.png && echo step-output-line', artifacts: ['shots/*.png'] }];
   const { base, root } = singleRepoProject('evidence-read', { gate: { steps } }, { '.gitignore': '.wf-evidence/\n.wf-worktrees/\nshots/\n' });

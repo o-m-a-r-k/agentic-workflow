@@ -211,7 +211,17 @@ test('wf stop pauses a running gate and finished steps are kept', async () => {
   delete env.CLAUDE_CODE_SESSION_ID;
   const child = spawn(process.execPath, [WF, 'gate', '--attempt', e.id], { cwd: root, env, stdio: 'ignore' });
   const lock = path.join(root, '.wf-evidence', 'attempts', e.id, 'gate', 'gate.lock');
-  for (let i = 0; i < 100 && !(fs.existsSync(lock) && JSON.parse(fs.readFileSync(lock, 'utf8')).children.length >= 2); i++) await new Promise((r) => setTimeout(r, 100));
+  // Named failure (0.4.5, Linux as root under full-suite load): the gate creates its lock with O_EXCL and writes the JSON
+  // in a second call, so the lock can be read empty; JSON.parse threw and failed the test. An unreadable lock is "not
+  // ready yet", as the engine's own reader treats it (engine/gate.mjs acquireGateLock).
+  const ready = () => {
+    try {
+      return JSON.parse(fs.readFileSync(lock, 'utf8')).children.length >= 2;
+    } catch {
+      return false;
+    }
+  };
+  for (let i = 0; i < 100 && !ready(); i++) await new Promise((r) => setTimeout(r, 100));
   ok(wf(root, ['stop', '--reason', 'need the machine', '--attempt', e.id]));
   const code = await new Promise((r) => child.on('exit', r));
   assert.equal(code, 1);

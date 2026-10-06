@@ -193,7 +193,9 @@ test('0.4.5: the phrase carries the attempt id, so the same issue id in two atte
     ok(disc(root, ['add', '--attempt', e.id, '--summary', `issue in ${item}`]));
     return e.id;
   });
-  ownerSays(root, `defer ${ids[0]}:D1: only this one`);
+  // A full stop after the id ends the phrase (review of 76ad8d8); `D1.5` would not.
+  ownerSays(root, `defer ${ids[0]}:D1.5 is another entry`);
+  ownerSays(root, `defer ${ids[0]}:D1.`);
   ok(disc(root, ['close', 'D1', '--deferred', '--attempt', ids[0]]));
   assert.match(disc(root, ['close', 'D1', '--deferred', '--attempt', ids[1]]).err, new RegExp(`no owner message after D1 was recorded starts with \`defer ${ids[1].replace('.', '\\.')}:D1\``));
   assert.equal(state(root, ids[1]).discovered[0].status, 'open');
@@ -441,4 +443,36 @@ test('0.4.5: a batch delivery needs each member deferral acknowledged as <member
     assert.match(d.out, new RegExp(`${m.replace('.', '\\.')}:D1 deferred \\(host-recorded, [^)]*\\): limit in ${m.replace('.', '\\.')}\\n {4}taken as the owner's decision: "defer ${m.replace('.', '\\.')}:D1: next sprint"`));
     assert.ok(state(root, m).discovered[0].deferred.acknowledged, `${m} acknowledged`);
   }
+});
+
+// Review of 76ad8d8: the acknowledgement was recorded before refusals that can still follow (a push conflict, an
+// adapter readback, an adapter still waiting for merge), so the same command was then refused as "not awaiting". An
+// id already acknowledged is accepted again, so a refused delivery is always retried with the same command.
+test('0.4.5: a delivery refused after the acknowledgement is retried with the same command', () => {
+  const { base, root, remote } = singleRepoProject('discovered-ackretry', { gate: { steps: [{ id: 'unit', repo: 'app', run: 'true' }] } });
+  ownerSays(root, 'Implement ENG-800.');
+  const e = ok(wf(root, ['entry', '--item', 'ENG-800', '--owner', OWNER, '--json'])).json();
+  const id = e.id;
+  ok(wf(root, ['handoff', 'planner', '--agent', 'plan-1', '--attempt', id, '--owner', OWNER, '--runtime', 'codex']));
+  ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', id, '--owner', OWNER]));
+  ok(wf(root, ['handoff', 'implementer', '--agent', 'impl-1', '--attempt', id, '--owner', OWNER, '--runtime', 'codex']));
+  commitIn(e.repos.app.worktree, { 'src/a.txt': 'b\n' }, 'change');
+  ok(disc(root, ['add', '--attempt', id, '--summary', 'x', '--found-by', 'impl-1']));
+  ownerSays(root, `defer ${id}:D1: later`);
+  ok(disc(root, ['close', 'D1', '--deferred', '--attempt', id]));
+  ok(wf(root, ['gate', '--attempt', id]));
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-1', '--attempt', id, '--owner', OWNER, '--runtime', 'codex']));
+  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('rev-1', { discovered: [{ id: 'D1', verdict: 'deferred', evidence: 'r' }] })), '--attempt', id]));
+  ok(wf(root, ['accept', '--attempt', id, '--owner', OWNER]));
+  // The base moves with a conflicting change: the push refuses after the acknowledgement was recorded.
+  sh(base, `git clone -q ${JSON.stringify(remote)} other`);
+  const other = path.join(base, 'other');
+  sh(other, "git config user.email t@example.test && git config user.name t && printf 'c\\n' > src/a.txt && git commit -qam conflict && git push -q origin main");
+  const first = wf(root, ['deliver', '--attempt', id, '--owner', OWNER, '--acknowledge-deferrals', 'D1']);
+  assert.notEqual(first.code, 0);
+  assert.doesNotMatch(first.err, /awaiting acknowledgement/);
+  const retry = wf(root, ['deliver', '--attempt', id, '--owner', OWNER, '--acknowledge-deferrals', 'D1']);
+  assert.notEqual(retry.code, 0);
+  assert.doesNotMatch(retry.err, /not a deferred issue|awaiting acknowledgement/, 'the same command is accepted again; only the conflict refuses');
+  assert.equal(retry.err.split('\n')[0], first.err.split('\n')[0], 'the retry fails for the same reason as the first try');
 });

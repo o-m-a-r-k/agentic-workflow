@@ -94,9 +94,10 @@ const unescape = (text) => text.replace(/\\x([0-9a-f]{1,2})|\\u([0-9a-f]{4})|\\U
 // the whitespace-separated token of the input that triggers the check, or the input itself when the match spans tokens.
 // Null when nothing does. Only the report is new; every predicate is unchanged.
 const shown = (t) => (t.length > 80 ? `${t.slice(0, 77)}...` : t);
+// Never empty: a match always refuses, whatever is shown (review of 76ad8d8).
 const tokenOf = (text, pred) => {
   const t = String(text ?? '').split(/\s+/).find((x) => x && pred(x));
-  return shown(t ?? String(text ?? '').trim());
+  return shown(t ?? String(text ?? '').trim()) || '(the whole input)';
 };
 const assembled = (raw) => /[$`]/.test(raw) && (/wf-|\.wf\b/.test(raw) || /=\s*['"]?evidence|[$`})]evidence|evidence[$`{(]/.test(raw));
 const squeeze = (raw) => raw.replace(/\$'|\$\{|[\s'"`\\{},]/g, '');
@@ -117,7 +118,7 @@ export function evidenceMatch(text) {
   // brace or a bracket in prose or code (named false positive, 0.3.0: "keep evidence, ledger" was refused).
   if (glued(raw)) return tokenOf(text, (t) => glued(fold(t)));
   const glob = raw.split(/[\s;&|()<>'"`=]+/).find((t) => t && globMatchesEvidence(t));
-  return glob ? shown(glob) : null;
+  return glob ? shown(glob) || '(the whole input)' : null;
 }
 
 export const mentionsEvidence = (text) => evidenceMatch(text) !== null;
@@ -165,7 +166,7 @@ export function check(data) {
     // A Bash command; an unexpected `command` on another tool is judged the same way, never as a whitelist.
     if (bashTool && isPlainWf(t.command)) return null;
     const matched = evidenceMatch(t.command);
-    if (matched) return `matched ${JSON.stringify(matched)}`;
+    if (matched !== null) return `matched ${JSON.stringify(matched)}`;
     if (cwdInEvidence) return `the command runs inside the evidence folder (working directory ${cwd})`;
     return null;
   }

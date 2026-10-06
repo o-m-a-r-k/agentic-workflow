@@ -747,13 +747,17 @@ export async function deliver(root, options) {
     if (open.length) throw refuse(`not delivered: ${open.length} discovered issue(s) are open${x.id !== state.id ? ` in ${x.id}` : ''}: ${open.map((d) => `${d.id} ${d.summary}`).join('; ')}`, `fix it in this ticket and close it with the fix commit (\`wf discovered close <id> --fixed <commit>\`; a fix after acceptance needs the gate and a fresh review), or, only on the owner's decision, \`wf discovered close <id> --deferred\` once the owner's message starts with \`defer ${x.id}:<id>\``);
   }
   // Every deferral counts only once the owner has seen it here and acknowledged it: no channel proves a person. It is
-  // checked here and recorded only after every later refusal passed, so a refused delivery is retried with the same command.
+  // checked here and recorded after every check before the push; an acknowledgement recorded by a try that a later step
+  // refused is accepted again, so a refused delivery is retried with the same command.
   let ackOwed = [];
   {
     const owed = unacknowledged(root, state, (m) => loadState(root, m));
     const given = typeof options['acknowledge-deferrals'] === 'string' ? options['acknowledge-deferrals'].split(',').map((x) => x.trim()).filter(Boolean) : [];
     const keys = new Set(owed.map((o) => o.key));
-    const stray = given.filter((g) => !keys.has(g));
+    // An id acknowledged by an earlier try that a later check refused (a push conflict, an adapter readback, a merge
+    // still pending) is accepted again: a refused delivery is retried with the same command (review of 76ad8d8).
+    const done = new Set(unacknowledged(root, state, (m) => loadState(root, m), { acknowledged: true }).map((o) => o.key));
+    const stray = given.filter((g) => !keys.has(g) && !done.has(g));
     if (stray.length) throw refuse(`${stray.join(', ')} ${stray.length > 1 ? 'are' : 'is'} not a deferred issue of ${state.id} awaiting acknowledgement${owed.length ? ` (awaiting: ${[...keys].join(', ')})` : ''}`);
     const missing = owed.filter((o) => !given.includes(o.key));
     if (missing.length) {
