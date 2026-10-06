@@ -108,7 +108,7 @@ if (process.argv[2] === 'serve') {
         res.writeHead(status, { 'content-type': 'application/json' });
         res.end(data === null ? '' : JSON.stringify(data));
       };
-      if (req.headers.authorization !== `Bearer ${token}`) return send(401, { message: 'Bad credentials' });
+      if (req.headers.authorization !== `Bearer ${token}`) return send(401, { message: load(file).echoAuth ? `Bad credentials for ${req.headers.authorization}` : 'Bad credentials' });
       const isJson = String(req.headers['content-type'] ?? '').includes('json');
       const r = apply(file, req.method, req.url, isJson ? JSON.parse(raw.toString('utf8') || 'null') : raw);
       send(r.status, r.data);

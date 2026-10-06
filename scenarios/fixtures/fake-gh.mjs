@@ -1,12 +1,12 @@
 // A fake `gh` for the tracker tests: `gh auth status` and `gh api -X M <path|url> [-H h]... [--input file|-]`, backed by
-// the fake GitHub in FAKE_GH_STATE. `gh auth status` prints a token-like line so the tests can prove wf never prints it.
+// the fake GitHub in WF_TEST_GH_STATE. `gh auth status` prints a token-like line so the tests can prove wf never prints it.
 import fs from 'node:fs';
 import { apply } from './fake-github.mjs';
 
 const args = process.argv.slice(2);
-const file = process.env.FAKE_GH_STATE;
+const file = process.env.WF_TEST_GH_STATE;
 if (args[0] === 'auth' && args[1] === 'status') {
-  if (process.env.FAKE_GH_LOGGED_OUT) {
+  if (process.env.WF_TEST_GH_LOGGED_OUT) {
     process.stderr.write('You are not logged into any GitHub hosts. To log in, run: gh auth login\n');
     process.exit(1);
   }
@@ -35,6 +35,7 @@ if (input !== undefined) {
   body = String(headers['content-type'] ?? 'application/json').includes('json') ? JSON.parse(raw.toString('utf8')) : raw;
 }
 fs.appendFileSync(`${file}.argv`, `${JSON.stringify(args)}\n`);
+fs.appendFileSync(`${file}.env`, `${JSON.stringify(Object.keys(process.env).sort())}\n`);
 const r = apply(file, method, target, body);
 if (r.status >= 400) {
   process.stderr.write(`gh: ${r.data?.message ?? 'error'} (HTTP ${r.status})\n`);

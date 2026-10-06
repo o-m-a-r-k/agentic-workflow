@@ -13,7 +13,8 @@ test('doctor states the tracker mode trade-off; api mode needs its key; the read
   // Connector mode: a warning naming the gap and the one-line switch.
   const a = singleRepoProject('mode-agent', { tracker: { kind: 'linear', statuses } });
   const d = wf(a.root, ['doctor', '--no-steps']);
-  assert.match(d.out, /warning: tracker mode — the linear tracker is driven by the agent's connector: the readback is what the agent saved, so wf cannot prove the status, the comment or the attachments it checks are the tracker's own answer[\s\S]*fix: let the engine reach it: `wf tracker mode api` \(then the owner runs `wf secrets guide LINEAR_API_KEY`\)/);
+  assert.match(d.out, /warning: tracker mode — the linear tracker is driven by the agent's connector: convenient, but the handoff is agent-reported \(recorded "agent-reported, unverified"\), so wf cannot prove the status, the comment or the attachments are the tracker's own answer[\s\S]*fix: let the engine reach it: `wf tracker mode api` \(then the owner runs `wf secrets guide LINEAR_API_KEY`\)/);
+  assert.match(d.out, /tracker readback level\n {4}verifiable: agent-reported in this shell \(no Claude Code or Codex session\); host-recorded when the owner runs wf from Claude Code or Codex/);
   assert.match(d.out, /connectors: tracker linear\/connector\n {4}verifiable: the agent acts through its connector/);
   // Api mode without the key catalogued, then catalogued but not set: doctor fails with the exact command.
   const b = singleRepoProject('mode-api', { tracker: { kind: 'linear', via: 'api', statuses } });
@@ -41,7 +42,7 @@ test('a connector readback is labelled agent-reported unless it is the host\'s o
   fs.writeFileSync(saved, JSON.stringify({ issue: { identifier: item, description: 'd', state: { name: 'In Progress' } } }));
   ok(wf(root, ['tracker', 'record', '--event', 'admitted', '--capture', saved, '--attempt', e.id]));
   assert.equal(state(root, e.id).tracker.done[0].provenance, 'agent-reported, unverified');
-  assert.match(ok(wf(root, ['status', '--attempt', e.id])).out, /tracker admitted: readback agent-reported, unverified \(switch with `wf tracker mode api`\)/);
+  assert.match(ok(wf(root, ['status', '--attempt', e.id])).out, /tracker admitted: readback agent-reported, unverified \(an engine route verifies it: `wf tracker mode api\|cli\|files`\)/);
   // The host's tool-result files (Claude Code saves long tool results there), given as issue and comments.
   const home = tmp('home');
   const results = path.join(home, '.claude', 'projects', 'p', 's', 'tool-results');

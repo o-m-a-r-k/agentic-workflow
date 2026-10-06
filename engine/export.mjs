@@ -4,6 +4,7 @@ import { loadConfig } from './config.mjs';
 import { attemptDir } from './ledger.mjs';
 import { evidenceSteps, noEvidenceVerdicts, readBundle } from './lifecycle.mjs';
 import { redactor } from './secrets.mjs';
+import { scrub } from './scrub.mjs';
 import { hashFile, now } from './util.mjs';
 import { prepareWrite, readEvidenceFile, writeNoFollow } from './evidence.mjs';
 
@@ -44,7 +45,7 @@ export function exportData(root, s) {
     rules: rulesView(s),
     outsidePlan: outsideView(s),
     flaky: s.flaky ?? [],
-    tracker: { pending: s.tracker.pending.map((a) => ({ event: a.event, op: a.op, status: a.status ?? null })), done: s.tracker.done.map((d) => ({ event: d.event, at: d.at })) },
+    tracker: { pending: s.tracker.pending.map((a) => ({ event: a.event, op: a.op, status: a.status ?? null })), done: s.tracker.done.map((d) => ({ event: d.event, at: d.at, provenance: d.provenance ?? null, ...(d.extraLines?.length ? { extraLines: d.extraLines } : {}) })) },
     delivery: { completedAt: s.delivery.completedAt, narrowed: s.delivery.narrowed ? { from: s.delivery.narrowed.from, to: s.delivery.narrowed.to, dropped: s.delivery.narrowed.dropped, reason: s.delivery.narrowed.reason, legacy: s.delivery.narrowed.legacy, by: s.delivery.narrowed.by, at: s.delivery.narrowed.at } : null, repos: Object.values(s.delivery.repos).map((d) => ({ repo: d.repo, commit: d.commit ?? null, skipped: d.skipped ?? null })) },
     // The delivered screenshots: what the owner was shown (with the caption given) and what the ticket got.
     delivered: deliveredView(s),
@@ -158,7 +159,7 @@ export function exportHtml(d, images = {}) {
     d.rules.length ? sec('Rules', `<p class="muted">Project rule documents this change falls under (adapter at base, matched against the changed files); the reviewer reads each and gives a verdict.</p>${table(['Rule', 'Documents', 'Files matched', 'Verdict', 'Evidence', 'Read'], d.rules.map((r) => [esc(r.rule), esc(r.docs.join(', ')) + (r.docChangedByTicket ? ' <span class="warn">(changed by this ticket)</span>' : ''), esc(r.matched), r.verdict ? `${badge(r.verdict)}${r.finding ? ` ${esc(r.finding)}` : ''}` : '<span class="warn">no verdict yet</span>', esc(r.evidence ?? ''), esc(r.reads ?? '')]))}`) : '',
     d.outsidePlan.length ? sec('Outside the plan', `<p class="muted">Changed files no plan anchor or test path names. Each needs the reviewer's verdict: covered by a criterion, or a finding.</p>${table(['File', 'Verdict', 'By', 'Evidence'], d.outsidePlan.map((o) => [esc(o.file), o.verdict ? badge(o.verdict) : '<span class="warn">no verdict yet</span>', esc(o.by ?? ''), esc(o.evidence ?? '')]))}`) : '',
     d.flaky.length ? sec('Flaky', table(['Step', 'Failed run', 'Passed run', 'Suites'], d.flaky.map((f) => [esc(f.step), esc(f.failedRun), esc(f.passedRun), esc((f.suites ?? []).join(', '))]))) : '',
-    sec('Tracker', table(['Event', 'State'], [...d.tracker.done.map((t) => [esc(t.event), `${badge('recorded')} ${esc(t.at)}`]), ...d.tracker.pending.map((t) => [esc(t.event), `${badge('pending')} ${esc(t.op)}${t.status ? ` ${esc(t.status)}` : ''}`])])),
+    sec('Tracker', table(['Event', 'State'], [...d.tracker.done.map((t) => [esc(t.event), `${badge('recorded')} ${esc(t.at)}${t.provenance ? ` <span class="${t.provenance === 'agent-reported, unverified' ? 'warn' : 'muted'}">${esc(t.provenance === 'host-recorded' ? 'host-recorded: the tracker\'s answer as the host wrote it in the owner\'s transcript (a same-user process could edit that file)' : t.provenance)}</span>` : ''}${t.extraLines?.length ? ` <span class="muted">(${t.extraLines.length} line(s) added to the comment)</span>` : ''}`]), ...d.tracker.pending.map((t) => [esc(t.event), `${badge('pending')} ${esc(t.op)}${t.status ? ` ${esc(t.status)}` : ''}`])])),
     d.rebaselined?.length ? sec('Evidence re-baselined', `<p class="warn">Evidence files changed outside wf and the owner accepted them (\`wf verify --accept-changes\`). The originals are not available.</p>${table(['At', 'By', 'Reason', 'Changes'], d.rebaselined.map((r) => [esc(r.at), esc(r.by), esc(r.reason), r.changes.map((c) => `${esc(c.kind)} ${esc(c.path)} <small>${esc((c.old ?? '').slice(0, 12))} → ${esc((c.new ?? 'removed').slice(0, 12))}</small>`).join('<br>')]))}`) : '',
     d.lessons && (d.lessons.injected.length || d.lessons.recorded.length || d.lessons.waived || d.lessons.recurred.length) ? sec('Lessons', `<p class="muted">Project lessons that applied to this change, the reviewer's verdicts, and what this attempt taught.</p>${table(['Lesson', 'Verdict', 'Evidence'], d.lessons.injected.map((id) => { const v = d.lessons.verdicts.find((x) => x.lesson === id); return [esc(id), v ? badge(v.verdict) : '<span class="muted">not yet judged</span>', esc(v?.evidence ?? '')]; }))}${d.lessons.recorded.length ? `<p>Recorded here: ${d.lessons.recorded.map((r) => esc(r.id)).join(', ')}</p>` : ''}${d.lessons.waived ? `<p class="muted">No lesson needed: ${esc(d.lessons.waived.reason)}</p>` : ''}${d.lessons.recurred.map((r) => `<p class="warn">Lesson ${esc(r.id)} recurred (recurrence ${esc(r.recurrence)}): its mechanism failed.</p>`).join('')}`) : '',
     deliveredSection(d, images),
@@ -197,10 +198,13 @@ function redactHtml(root, id, redact, data) {
 
 export function exportAttempt(root, state, { out = null, json = false } = {}) {
   const data = exportData(root, state);
-  let redact = (x) => x;
+  // Catalogued secrets, plus signed-URL signatures, Authorization values and prefixed tokens: an export is shown to
+  // other people.
+  let catalogued = (x) => x;
   try {
-    redact = redactor(root, loadConfig(root));
+    catalogued = redactor(root, loadConfig(root));
   } catch {}
+  const redact = (x) => scrub(catalogued(x));
   const file = out ? path.resolve(String(out)) : exportFile(root, state.id, json);
   const text = json ? redact(`${JSON.stringify(data, null, 2)}\n`) : redactHtml(root, state.id, redact, data);
   prepareWrite(file);

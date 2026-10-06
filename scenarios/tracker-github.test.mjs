@@ -53,11 +53,11 @@ test('github via cli: the engine labels, uploads, comments and reads back throug
   const { base, root } = project('gh-cli', { via: 'cli' });
   const db = path.join(base, 'github.json');
   seed(db, { labels: ['bug'] });
-  const env = { PATH: ghOnPath(base), FAKE_GH_STATE: db };
+  const env = { PATH: ghOnPath(base), WF_TEST_GH_STATE: db };
   const d = ok(wf(root, ['doctor', '--no-steps'], { env }));
   assert.match(d.out, /tracker github\/cli\n {4}verifiable: the engine calls the GitHub REST API through your `gh` login/);
   assert.doesNotMatch(`${d.out}${d.err}`, /gho_/, 'the gh token is never printed');
-  const out = wf(root, ['doctor', '--no-steps'], { env: { ...env, FAKE_GH_LOGGED_OUT: '1' } });
+  const out = wf(root, ['doctor', '--no-steps'], { env: { ...env, WF_TEST_GH_LOGGED_OUT: '1' } });
   assert.notEqual(out.code, 0);
   assert.match(out.out, /`gh auth status` reports no login\n {4}fix: the owner runs `gh auth login` in their own terminal/);
 
@@ -150,7 +150,7 @@ test('github attack: an issue title with shell syntax and a label that looks lik
   const db = path.join(base, 'github.json');
   const pwned = path.join(base, 'pwned');
   seed(db, { title: `$(touch ${pwned})\n\`touch ${pwned}\`; touch ${pwned}`, labels: ['--hostname=evil.example.test', `In Progress\n-X DELETE`] });
-  const env = { PATH: ghOnPath(base), FAKE_GH_STATE: db };
+  const env = { PATH: ghOnPath(base), WF_TEST_GH_STATE: db };
   const e = ok(wf(root, ['entry', '--item', 'GH-12', '--owner', 'o', '--json'], { env })).json();
   assert.equal(state(root, e.id).tracker.done.length, 1, 'admitted and read back');
   assert.equal(fs.existsSync(pwned), false, 'nothing from the issue ran');
@@ -167,7 +167,7 @@ test('github: an item that is not an issue number is refused before any call', (
   const { base, root } = project('gh-item', { via: 'cli' });
   const db = path.join(base, 'github.json');
   seed(db);
-  const env = { PATH: ghOnPath(base), FAKE_GH_STATE: db };
+  const env = { PATH: ghOnPath(base), WF_TEST_GH_STATE: db };
   const e = ok(wf(root, ['entry', '--item', 'ENG-abc', '--owner', 'o', '--json'], { env })).json();
   assert.match(ok(wf(root, ['tracker', 'sync', '--attempt', e.id], { env })).out, /a GitHub issue item is its number \(`123` or `GH-123`\), not `ENG-abc`/);
   assert.equal(fs.existsSync(`${db}.argv`), false, 'gh was not called');
@@ -178,7 +178,7 @@ test('github public repo: doctor warns screenshots will be public; deliver refus
     const { base, root } = project(`gh-public-${isPrivate}-${ack}`, { via: 'cli', publicAssets: ack ? 'acknowledged' : undefined });
     const db = path.join(base, 'github.json');
     seed(db, { private: isPrivate });
-    return { base, root, db, env: { PATH: ghOnPath(base), FAKE_GH_STATE: db } };
+    return { base, root, db, env: { PATH: ghOnPath(base), WF_TEST_GH_STATE: db } };
   };
   // Public, not acknowledged: a loud notice, and nothing pushed or uploaded.
   const p = run(false, false);

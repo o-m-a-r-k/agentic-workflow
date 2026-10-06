@@ -5,8 +5,11 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { adapterFileAtCommit, loadConfigAtCommit } from './config.mjs';
 import { append, attemptDir, listAttempts, loadState } from './ledger.mjs';
 import { loadCatalog, readSecret } from './secrets.mjs';
-import { WfError, canonical, hashFile, now, readJson, refuse, sha256, writeImmutable } from './util.mjs';
+import { WfError, canonical, hashFile, now, readJson, refuse, sessionIdentity, sha256, writeImmutable } from './util.mjs';
+import { home } from './provenance.mjs';
 import { prepareWrite, readEvidenceFile, readRegular, writeNoFollow } from './evidence.mjs';
+import { connectorCalls, ownerTranscript } from './host-record.mjs';
+import { cliEnv, scrub } from './scrub.mjs';
 
 const BUILTIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'adapters', 'tracker');
 
@@ -229,20 +232,180 @@ function fixedLines(template) {
   return template.split('\n').map((l) => l.trim()).filter((l) => l && !/\{\w+\}/.test(l));
 }
 
+export const AGENT_REPORTED = 'agent-reported, unverified';
+export const HOST_RECORDED = 'host-recorded';
+
+const parseJson = (t) => {
+  try {
+    return JSON.parse(t);
+  } catch {
+    return null;
+  }
+};
+
+// `wf tracker record --from-transcript`: the tracker's answer as the host recorded it in the owner's transcript (see
+// engine/host-record.mjs), then exactly the checks a raw capture gets.
+async function recordFromTranscript(root, cfg, state, options, event, pending, adapter) {
+  if (cfg.tracker.via !== 'connector') throw refuse(`\`--from-transcript\` is for \`tracker.via: connector\`; with \`${cfg.tracker.via}\` the engine performs and verifies the handoff itself (\`wf tracker sync\`)`);
+  const tools = adapter.connectorTools;
+  if (!tools) throw refuse(`the \`${cfg.tracker.kind}\` adapter names no connector tools, so no host-recorded readback can be read; record with \`--capture\` or \`--agent-reported\``);
+  const t = ownerTranscript(state.owner);
+  if (t.problem) throw refuse(`no host-recorded readback: ${t.problem}`);
+  const calls = await connectorCalls(t, [tools.read, tools.comments, ...(tools.comment ?? []), ...(tools.status ?? []), ...(tools.attach ?? [])]);
+  const since = event === 'delivered' ? state.delivery.completedAt : state.tracker.pendingAt?.[event] ?? null;
+  const after = (c) => c.result !== undefined && !c.error && (!since || (c.at && Date.parse(c.at) >= Date.parse(since)));
+  const forItem = (c, ids) => [c.input?.id, c.input?.issueId, c.input?.issue].some((x) => x !== undefined && ids.includes(String(x)));
+  const reads = calls.filter((c) => c.tool === tools.read && (forItem(c, [state.item]) || [parseJson(c.result)?.id, parseJson(c.result)?.identifier].includes(state.item)));
+  const read = reads.filter(after).sort((a, b) => b.resultLine - a.resultLine)[0];
+  if (!read) throw refuse(`no host-recorded readback: the owner's transcript has no ${tools.read} result for ${state.item}${reads.length ? ` after ${event === 'delivered' ? 'delivery' : 'the event'} (${since}); the ones there are older` : ''}`, `call the connector's ${tools.read} for ${state.item} now${pending.some((a) => a.op === 'comment') ? ` and ${tools.comments}` : ''}, then run this again`);
+  const uuid = parseJson(read.result)?.uuid ?? null;
+  const ids = [state.item, ...(uuid ? [uuid] : [])];
+  const dir = path.join(root, '.wf-worktrees', state.id, '_host');
+  fs.mkdirSync(dir, { recursive: true });
+  const capture = path.join(dir, `${event}-${tools.read}-${read.resultLine}.json`);
+  writeNoFollow(capture, read.result);
+  let comments = null;
+  if (pending.some((a) => a.op === 'comment')) {
+    const list = calls.filter((c) => c.tool === tools.comments && forItem(c, ids) && after(c)).sort((a, b) => b.resultLine - a.resultLine)[0];
+    if (!list) throw refuse(`no host-recorded readback: the owner's transcript has no ${tools.comments} result for ${state.item} after ${event === 'delivered' ? 'delivery' : 'the event'}`, `call the connector's ${tools.comments} for ${state.item} now, then run this again`);
+    comments = path.join(dir, `${event}-${tools.comments}-${list.resultLine}.json`);
+    writeNoFollow(comments, list.result);
+  }
+  const mine = calls.filter((c) => forItem(c, ids) && (!since || (c.calledAt && Date.parse(c.calledAt) >= Date.parse(since))));
+  const posted = {
+    comments: mine.filter((c) => (tools.comment ?? []).includes(c.tool)).map((c) => String(c.input?.body ?? '')),
+    statuses: mine.filter((c) => (tools.status ?? []).includes(c.tool)).map((c) => c.input?.state ?? c.input?.status ?? null).filter(Boolean),
+    attachments: mine.filter((c) => (tools.attach ?? []).includes(c.tool)).map((c) => ({ title: c.input?.title ?? null, subtitle: c.input?.subtitle ?? null })),
+  };
+  try {
+    return await recordTracker(root, cfg, state, { ...options, capture, comments, 'from-transcript': undefined, hostRecorded: { runtime: t.runtime, transcript: t.file, lines: [read.resultLine], posted } });
+  } finally {
+    // Only the matched results go into the evidence (through the manifest); the scratch copies do not stay.
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// `wf tracker record --agent-reported --file reported.json [--comment-file posted.md]`, connector mode only. In Claude
+// Code the connector's tool results arrive inline in the chat, not as saved files, so the raw-capture path could only
+// be met by retyping them (named failure: ~35 KB of signed URLs retyped, which proves nothing). Here the agent reports
+// what the tracker showed it, and the engine checks what it can: the item, the status, the posted comment's text (its
+// sha256, the template's fixed lines, the owner's summary, an image for every delivered screenshot, no internals), the
+// attachment titles and captions, and a read time after delivery that no earlier readback used. Additions the owner
+// made to the comment are allowed and listed. It is recorded as agent-reported, unverified: the engine never saw the
+// tracker's answer.
+async function recordAgentReported(root, cfg, state, options, event, pending) {
+  if (cfg.tracker.via !== 'connector') throw refuse(`\`--agent-reported\` is for \`tracker.via: connector\`; with \`${cfg.tracker.via}\` the engine performs and verifies the handoff itself (\`wf tracker sync\`)`);
+  if (typeof options.file !== 'string') throw new WfError('--file <reported.json> is required: { issue, status, comment: { id, bodySha256, createdAt }, attachments: [{ title, subtitle }], readAt }');
+  const reportRead = readRegular(path.resolve(options.file));
+  if (!reportRead) throw refuse(`${options.file} is missing, a link or not a regular file`);
+  const reportText = reportRead.bytes.toString('utf8');
+  let r;
+  try {
+    r = JSON.parse(reportText);
+  } catch (error) {
+    throw new WfError(`invalid JSON in ${options.file}: ${error.message}`);
+  }
+  const problems = [];
+  if (String(r.issue ?? '') !== state.item) problems.push(`the report is for \`${r.issue ?? '(no issue)'}\`, not ${state.item}`);
+  // The roles read the ticket from the admitted readback: it must carry the description (or say there is none).
+  if (event === 'admitted' && !String(r.description ?? '').trim() && r.descriptionEmpty !== true) problems.push('the admitted report needs the issue\'s `title` and `description` as the tracker shows them (or `"descriptionEmpty": true` for a title-only issue)');
+  const readAt = Date.parse(r.readAt ?? '');
+  const since = event === 'delivered' ? state.delivery.completedAt : state.tracker.pendingAt?.[event] ?? null;
+  if (!Number.isFinite(readAt) || !/^\d{4}-\d{2}-\d{2}T/.test(String(r.readAt))) problems.push('`readAt` must be the ISO time the agent read the issue back');
+  else {
+    if (since && readAt < Date.parse(since)) problems.push(`\`readAt\` ${r.readAt} is before ${event === 'delivered' ? 'delivery' : 'the event'} (${since}): read the issue again now`);
+    if (readAt > Date.now() + 5 * 60 * 1000) problems.push(`\`readAt\` ${r.readAt} is in the future`);
+  }
+  const reportSha = sha256(reportText);
+  for (const id of listAttempts(root)) {
+    const other = id === state.id ? state : loadState(root, id);
+    for (const d of other.tracker.done) {
+      if (d.readAt && d.readAt === r.readAt) problems.push(`\`readAt\` ${r.readAt} was already recorded for ${id === state.id ? `event \`${d.event}\`` : `${id} (${d.event})`}: read the issue again now`);
+      else if (d.capture?.sha256 === reportSha) problems.push(`the report is byte-identical to the one recorded for ${id === state.id ? `event \`${d.event}\`` : `${id} (${d.event})`}`);
+    }
+  }
+  let comment = null;
+  const extra = [];
+  for (const a of pending) {
+    if (a.op === 'setStatus' && ![a.status, ...(a.unless ?? [])].includes(r.status)) problems.push(`status is \`${r.status ?? '(none)'}\`, expected \`${a.status}\``);
+    if (a.op === 'comment') {
+      if (typeof options['comment-file'] !== 'string') {
+        problems.push('--comment-file <posted.md> is required: the comment text exactly as posted (copy it from the tracker), so the engine can check and hash it');
+        continue;
+      }
+      const read = readRegular(path.resolve(options['comment-file']));
+      if (!read) {
+        problems.push(`${options['comment-file']} is missing, a link or not a regular file`);
+        continue;
+      }
+      const body = read.bytes.toString('utf8');
+      comment = { text: body, sha256: sha256(body) };
+      if (r.comment?.bodySha256 !== comment.sha256) problems.push(`the posted comment's sha256 is ${comment.sha256.slice(0, 12)}…, the report declares ${String(r.comment?.bodySha256 ?? 'none').slice(0, 12)}…: report the hash of the text in --comment-file`);
+      if (since && r.comment?.createdAt && Date.parse(r.comment.createdAt) < Date.parse(since)) problems.push(`the comment was written at ${r.comment.createdAt}, before ${event === 'delivered' ? 'delivery' : 'the event'}`);
+      const tpl = renderTemplate(root, cfg, a.templateKey, {});
+      const missingLines = fixedLines(tpl?.template ?? a.body ?? '').filter((l) => !body.includes(l));
+      if (missingLines.length) problems.push(`the comment lacks the template's fixed line(s): ${missingLines.map((l) => JSON.stringify(l)).join(', ')}`);
+      const hits = forbidden(cfg, body);
+      if (hits.length) problems.push(`comment contains internals: ${hits.join(', ')}`);
+      if (a.rendered === 'delivered') {
+        const expected = deliveredComment(root, cfg, state);
+        const got = canonicalComment(body);
+        if (!expected?.summary) problems.push('no summary recorded for the delivered comment: `wf summary --file <summary.md>`, then post the comment `wf` renders');
+        else {
+          const missing = canonicalComment(expected.summary).filter((l) => !got.includes(l));
+          if (missing.length) problems.push(`the comment lacks the owner's summary (first missing line: ${JSON.stringify(missing[0])})`);
+        }
+        const refs = imageRefs(body);
+        const noImage = (state.delivery.screenshots?.screenshots ?? []).filter((f) => !refs.some((x) => x.alt === f.title || x.path.endsWith(`/${f.title}`) || x.path === f.title)).map((f) => f.title);
+        if (noImage.length) problems.push(`the comment has no inline image for ${noImage.length} delivered screenshot(s): ${noImage.join(', ')} (\`![<title>](<url>)\` under each caption)`);
+        // Owner additions beyond the rendered comment are allowed; they are listed in the record.
+        const want = new Set(expected ? canonicalComment(expected.body) : []);
+        extra.push(...got.filter((l) => !want.has(l)));
+      }
+    }
+    if (a.op === 'attach') {
+      const shown = state.delivery.shown;
+      if (state.delivery.screenshots && (!shown || shown.none)) problems.push(`the ${a.files.length} delivered screenshot(s) were not shown to the owner yet: \`wf shown --file <f>\` first`);
+      const listed = Array.isArray(r.attachments) ? r.attachments : [];
+      for (const f of a.files) {
+        const title = f.title ?? path.basename(f.path);
+        const caption = shown?.screenshots?.find((x) => x.sha256 === f.sha256)?.caption ?? null;
+        const named = listed.filter((x) => x.title === title || x.filename === title);
+        if (!named.length) problems.push(`${title}: not among the reported attachments`);
+        else if (caption && !named.some((x) => String(x.subtitle ?? '').trim() === caption)) problems.push(`${title}: reported without the subtitle "${caption}"`);
+      }
+    }
+  }
+  if (problems.length) throw refuse(`agent-reported readback for \`${event}\` refused:\n  - ${problems.join('\n  - ')}`);
+  const dest = path.join(attemptDir(root, state.id), 'tracker', `${event}-reported.json`);
+  writeImmutable(dest, reportText);
+  let commentRec = null;
+  if (comment) {
+    const cdest = path.join(attemptDir(root, state.id), 'tracker', `${event}-posted-comment.md`);
+    writeImmutable(cdest, comment.text);
+    commentRec = { path: cdest, sha256: comment.sha256, id: r.comment?.id ?? null };
+  }
+  append(root, state.id, 'tracker.recorded', { event, provenance: AGENT_REPORTED, verified: false, mode: 'agent-reported', capture: { path: dest, sha256: hashFile(dest) }, readAt: r.readAt, status: r.status ?? null, ...(commentRec ? { comment: commentRec } : {}), ...(extra.length ? { extraLines: extra.slice(0, 50).map((l) => scrub(l)) } : {}), attachments: (r.attachments ?? []).map((x) => ({ title: x.title, caption: x.subtitle ?? null })) }, null);
+  return loadState(root, state.id);
+}
+
 export async function recordTracker(root, cfg, state, options) {
   if (cfg.tracker.kind === 'none') throw refuse('this project has no tracker (`tracker.kind: none`)');
   const event = options.event;
   if (!event) throw new WfError('--event is required');
   const pending = state.tracker.pending.filter((a) => a.event === event);
   if (!pending.length) throw refuse(`no pending tracker actions for event \`${event}\``);
-  if (!options.capture) throw new WfError('--capture <file> is required: the raw tracker response the agent saved');
+  if (options['agent-reported']) return recordAgentReported(root, cfg, state, options, event, pending);
+  if (options['from-transcript']) return recordFromTranscript(root, cfg, state, options, event, pending, await loadTrackerAdapter(root, cfg, state.adapterBase));
+  if (!options.capture) throw new WfError(`--capture <file> is required: the raw tracker response the agent saved${cfg.tracker.via === 'connector' ? ' (or, when the tool results are only in the chat, `--agent-reported --file <reported.json> --comment-file <posted.md>`)' : ''}`);
   const adapter = await loadTrackerAdapter(root, cfg, state.adapterBase);
   const capturePath = path.resolve(String(options.capture));
   // Read once: the bytes checked are the bytes kept (and the ones hashed for the recycled-capture check). With
   // --comments, the two saved tool results (get_issue, list_comments) are kept together, unchanged, as one list.
   const commentsPath = typeof options.comments === 'string' ? path.resolve(options.comments) : null;
   const captureText = commentsPath ? `[${fs.readFileSync(capturePath, 'utf8').trim()},\n${fs.readFileSync(commentsPath, 'utf8').trim()}]\n` : fs.readFileSync(capturePath, 'utf8');
-  const provenance = options.engineCapture ? 'engine (tracker API)' : captureProvenance([capturePath, ...(commentsPath ? [commentsPath] : [])]);
+  const provenance = options.engineCapture ? 'engine (tracker API)' : options.hostRecorded ? HOST_RECORDED : captureProvenance([capturePath, ...(commentsPath ? [commentsPath] : [])]);
+  const extraLines = [];
   let raw;
   try {
     raw = JSON.parse(captureText);
@@ -294,7 +457,15 @@ export async function recordTracker(root, cfg, state, options) {
       const expected = a.rendered === 'delivered' ? deliveredComment(root, cfg, state) : null;
       if (a.rendered === 'delivered' && !expected?.summary) problems.push('no summary recorded for the delivered comment: `wf summary --file <summary.md>` (plain language, for the person who tests it), then post the comment `wf` renders');
       const want = expected ? canonicalComment(expected.body) : null;
-      const exact = want ? fresh.find((c) => canonical(canonicalComment(c.body)) === canonical(want)) : null;
+      // The rendered comment with sections the owner added (its lines all present, in order) counts as posted.
+      const contains = (got) => {
+        let i = 0;
+        for (const l of got) if (l === want[i]) i++;
+        return i === want.length;
+      };
+      const exact = want ? fresh.find((c) => canonical(canonicalComment(c.body)) === canonical(want)) ?? fresh.find((c) => contains(canonicalComment(c.body))) : null;
+      if (exact && want) extraLines.push(...canonicalComment(exact.body).filter((l) => !want.includes(l)));
+      if (exact && want && options.hostRecorded?.posted?.comments?.length && !options.hostRecorded.posted.comments.some((b) => canonical(canonicalComment(b)) === canonical(canonicalComment(exact.body)))) problems.push('the comment on the ticket is not one the owner session posted after this event (by the transcript); post the rendered comment, then read it back');
       const match = exact ?? fresh.find((c) => lines.every((l) => c.body.includes(l)));
       if (!match) problems.push(`no comment ${since ? 'written after delivery ' : ''}containing the template's fixed lines: ${lines.map((l) => JSON.stringify(l)).join(', ')}${expected ? `; post the body in ${commentFile(root, state.id)}` : ''}`);
       else {
@@ -356,7 +527,9 @@ export async function recordTracker(root, cfg, state, options) {
   if (problems.length) throw refuse(`tracker readback for \`${event}\` failed:\n  - ${problems.join('\n  - ')}`);
   const dest = path.join(attemptDir(root, state.id), 'tracker', `${event}-capture.json`);
   writeImmutable(dest, captureText);
-  append(root, state.id, 'tracker.recorded', { event, provenance, capture: { path: dest, sha256: hashFile(dest) }, status: issue.status, ...(verified.length ? { attachments: verified } : {}) }, null);
+  const level = options.engineCapture ? 'engine-read' : options.hostRecorded ? 'host-recorded' : provenance === 'host tool-result file' ? 'host-saved' : false;
+  const host = options.hostRecorded ? { runtime: options.hostRecorded.runtime, transcript: options.hostRecorded.transcript, lines: options.hostRecorded.lines, posted: { comments: options.hostRecorded.posted.comments.map((b) => sha256(b)), statuses: options.hostRecorded.posted.statuses, attachments: options.hostRecorded.posted.attachments } } : null;
+  append(root, state.id, 'tracker.recorded', { event, provenance, verified: level, capture: { path: dest, sha256: hashFile(dest) }, status: issue.status, ...(host ? { host } : {}), ...(extraLines.length ? { extraLines: extraLines.slice(0, 50).map((l) => scrub(l)) } : {}), ...(verified.length ? { attachments: verified } : {}) }, null);
   return loadState(root, state.id);
 }
 
@@ -365,10 +538,10 @@ export async function recordTracker(root, cfg, state, options) {
 // What wf can verify for each kind x via, said by `wf doctor` and the docs.
 export const VERIFIABLE = {
   'linear/api': 'the engine posts, uploads and reads back itself through the API: status, comment body, every attachment (title, caption) and its embedding are checked on the tracker\'s own answer; uploaded bytes are trusted (no hash from the tracker)',
-  'linear/connector': 'the agent acts through its connector; the readback is what it saved (agent-reported) unless it is the host\'s saved tool-result file; nothing is the tracker\'s answer as wf received it',
+  'linear/connector': 'the agent acts through its connector; the readback is host-recorded where the host keeps a transcript (`wf tracker record --from-transcript`: the tracker\'s answer as Claude Code or Codex recorded it, checked like an API readback), else a saved tool-result file, else agent-reported (`--agent-reported`: checked as reported, recorded unverified)',
   'github/cli': 'the engine calls the GitHub REST API through your `gh` login: labels (status), the comment body and release assets (name, caption label, size) are read back from GitHub itself; asset bytes are checked by size, not hash',
   'github/api': 'as github/cli, with a token from `wf secrets` instead of your `gh` login',
-  'github/connector': 'the agent acts through its connector; the readback is agent-reported',
+  'github/connector': 'agent-reported: no host-recorded readback for GitHub connectors yet; for a verified handoff use `cli` (your `gh` login) or `api`',
   'files/files': 'the engine does every action on the ticket files in the repo and reads them back: status, comment, attachments (each by sha256); anyone who can edit the repo can edit a ticket, and git history is the audit trail',
 };
 
@@ -415,6 +588,12 @@ export async function trackerModeChecks(root, cfg, { loadCatalog: catalog, readS
   } catch {}
   const combo = `${cfg.tracker.kind}/${cfg.tracker.via}`;
   if (VERIFIABLE[combo]) out.push({ info: true, check: `tracker ${combo}`, problem: VERIFIABLE[combo] });
+  if (cfg.tracker.via === 'connector') {
+    const s = sessionIdentity();
+    const store = s?.runtime === 'claude' ? path.join(home(), '.claude', 'projects') : s?.runtime === 'codex' ? path.join(home(), '.codex') : null;
+    const level = !adapter?.connectorTools ? 'agent-reported (this adapter names no connector tools)' : store && fs.existsSync(store) ? `host-recorded (${s.runtime === 'claude' ? 'Claude Code' : 'Codex'} transcripts at ${store}; run the connector actions, then \`wf tracker record --event <e> --from-transcript\`)` : 'agent-reported in this shell (no Claude Code or Codex session); host-recorded when the owner runs wf from Claude Code or Codex';
+    out.push({ info: true, check: 'tracker readback level', problem: level });
+  }
   out.push(...endpointNotices(cfg));
   if (cfg.tracker.kind === 'github') {
     const p = await publicAssetsProblem(root, cfg);
@@ -423,7 +602,7 @@ export async function trackerModeChecks(root, cfg, { loadCatalog: catalog, readS
   }
   const keyName = cfg.tracker.apiKey ?? adapter?.apiKey ?? 'LINEAR_API_KEY';
   if (cfg.tracker.via === 'cli') {
-    const gh = spawnSync('gh', ['auth', 'status'], { encoding: 'utf8' });
+    const gh = spawnSync('gh', ['auth', 'status'], { encoding: 'utf8', env: cliEnv() });
     if (gh.error) out.push({ fail: true, key: 'gh', problem: 'tracker.via is cli but the GitHub CLI `gh` is not on PATH', fix: 'install gh and sign in with `gh auth login` (wf uses your login and never prints its token)' });
     else if (gh.status !== 0) out.push({ fail: true, key: 'gh', problem: 'tracker.via is cli but `gh auth status` reports no login', fix: 'the owner runs `gh auth login` in their own terminal' });
   } else if (cfg.tracker.via === 'files') {
@@ -437,7 +616,7 @@ export async function trackerModeChecks(root, cfg, { loadCatalog: catalog, readS
     else if (!secret(root, cfg, entry)) out.push({ fail: true, key: keyName, problem: `tracker.via is api but ${keyName} is not set`, fix: `the owner runs \`wf secrets guide ${keyName}\` in their own terminal` });
   } else if (adapter?.api || adapter?.cli) {
     const better = adapter.cli ? 'cli' : 'api';
-    out.push({ check: 'tracker mode', problem: `the ${cfg.tracker.kind} tracker is driven by the agent's connector: the readback is what the agent saved, so wf cannot prove the status, the comment or the attachments it checks are the tracker's own answer (it records the readback as "agent-reported, unverified" unless it is the host's saved tool-result file)`, fix: `let the engine reach it: \`wf tracker mode ${better}\`${better === 'api' ? ` (then the owner runs \`wf secrets guide ${keyName}\`)` : ' (uses your `gh` login)'}` });
+    out.push({ check: 'tracker mode', problem: `the ${cfg.tracker.kind} tracker is driven by the agent's connector: convenient, but the handoff is agent-reported (recorded "agent-reported, unverified"), so wf cannot prove the status, the comment or the attachments are the tracker's own answer`, fix: `let the engine reach it: \`wf tracker mode ${better}\`${better === 'api' ? ` (then the owner runs \`wf secrets guide ${keyName}\`)` : ' (uses your `gh` login)'}` });
   }
   return out;
 }
@@ -540,7 +719,8 @@ export async function performTracker(root, cfg, state) {
     try {
       raw = await impl.perform({ token, url: endpoint, item: s.item, actions, root, cfg, state: s });
     } catch (error) {
-      return { performed, note: `tracker ${via} (${event}) failed: ${token ? String(error.message).split(token).join('[secret]') : error.message}; the actions stay pending` };
+      // Only the message, never the error object (a fetch error's cause can carry the request), scrubbed of the key.
+      return { performed, note: `tracker ${via} (${event}) failed: ${scrub(String(error?.message ?? error), [token])}; the actions stay pending` };
     }
     const file = path.join(attemptDir(root, s.id), 'tracker', `${event}-${via}-${now().replace(/[:.]/g, '-')}.json`);
     prepareWrite(file);

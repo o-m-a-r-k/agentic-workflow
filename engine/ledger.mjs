@@ -302,10 +302,11 @@ export function reduce(entries) {
         break;
       case 'tracker.pending':
         s.tracker.pending.push(...d.actions.map((a) => narrowAttach({ ...a, event: d.event }, s.delivery.narrowed)));
+        s.tracker.pendingAt = { ...(s.tracker.pendingAt ?? {}), [d.event]: e.at };
         break;
       case 'tracker.recorded':
         s.tracker.pending = s.tracker.pending.filter((a) => a.event !== d.event);
-        s.tracker.done.push({ event: d.event, at: e.at, capture: d.capture, provenance: d.provenance ?? null, ...(d.attachments ? { attachments: d.attachments } : {}) });
+        s.tracker.done.push({ event: d.event, at: e.at, capture: d.capture, provenance: d.provenance ?? null, verified: d.verified ?? null, ...(d.mode ? { mode: d.mode, readAt: d.readAt ?? null, comment: d.comment ?? null } : {}), ...(d.host ? { host: d.host } : {}), extraLines: d.extraLines ?? [], ...(d.attachments ? { attachments: d.attachments } : {}) });
         break;
       case 'closed':
         s.closedAt = e.at;

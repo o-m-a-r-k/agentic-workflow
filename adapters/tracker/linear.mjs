@@ -110,6 +110,8 @@ export default {
   // An uploaded file, not a link: what `wf tracker record` requires of every delivered screenshot.
   isUpload: (a) => UPLOAD_HOST.test(String(a?.url ?? '')),
   apiKey: 'LINEAR_API_KEY',
+  // The connector's tools, matched by suffix in a host transcript (`wf tracker record --from-transcript`).
+  connectorTools: { read: 'get_issue', comments: 'list_comments', comment: ['save_comment'], status: ['save_issue'], attach: ['create_attachment_from_upload'] },
   rules: { attachmentTitleIsFilename: true },
   api: {
     url: 'https://api.linear.app/graphql',

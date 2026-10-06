@@ -51,6 +51,8 @@ Work
   wf delivery narrow --keep SHA,... | --file keep.json --reason "why" [--dry-run]
                                     once, before \`wf shown\`: keep only this ticket's files of a delivered set an over-broad glob filled
   wf tracker record --event E --capture file.json [--comments file.json] | wf tracker sync (tracker.via: api|cli|files)
+  wf tracker record --event E --from-transcript   (tracker.via: connector: the readback from the owner's host transcript)
+  wf tracker record --event E --agent-reported --file reported.json [--comment-file posted.md]   (connector, no host record)
   wf tracker mode api|cli|files|connector [--write]
                                     how wf reaches the tracker (all but connector: the engine records its own readback)
   wf improve add|list|show|next|close  plugin improvements: workflow findings, kept in your inbox outside every repo
@@ -113,7 +115,8 @@ function summary(root, s, { base = null, resume = false } = {}) {
     lines.push(`    finished: ${live.finished.map((r) => `${r.id} ${r.status}${r.seconds !== null ? ` ${r.seconds}s` : ''}`).join(', ') || 'none yet'}`);
   }
   if (s.lastGate) lines.push(`  last gate: ${s.lastGate.status} (${s.lastGate.runId})`);
-  for (const t of s.tracker.done) if (t.provenance === 'agent-reported, unverified') lines.push(`  tracker ${t.event}: readback agent-reported, unverified (switch with \`wf tracker mode api\`)`);
+  for (const t of s.tracker.done) if (t.provenance === 'host-recorded') lines.push(`  tracker ${t.event}: readback host-recorded (the tracker's answer as the ${t.host?.runtime === 'codex' ? 'Codex' : 'Claude Code'} host wrote it in the owner's transcript, not the agent; a process running as the same user could edit that file)`);
+  for (const t of s.tracker.done) if (t.provenance === 'agent-reported, unverified') lines.push(`  tracker ${t.event}: readback agent-reported, unverified (an engine route verifies it: \`wf tracker mode api|cli|files\`)`);
   if (s.checks?.length) lines.push(`  last check: ${s.checks.at(-1).status} (${s.checks.at(-1).runId}; light steps only, never counts as the gate)`);
   if (s.flaky?.length) lines.push(`  flaky: ${[...new Set(s.flaky.map((f) => `${f.step}${f.suites?.length ? ` (${f.suites.join(', ')})` : ''}`))].join(', ')} failed and then passed with the same inputs`);
   if (s.criteria && isOpen(s) && !s.accepted) {
@@ -222,7 +225,7 @@ export async function main(argv) {
 const FULL_VERIFY = new Set(['accept', 'deliver', 'verify', 'review', 'tracker', 'export', 'shown', 'delivery', 'summary', 'handoff', 'gate', 'check', 'evidence']);
 
 const WRITE_OPTIONS = ['out', 'csv', 'handoffs-csv', 'html', 'dir', 'to', 'root'];
-const READ_OPTIONS = ['file', 'capture', 'comments', 'summary-file', 'closure', 'issue-file', 'from'];
+const READ_OPTIONS = ['file', 'capture', 'comments', 'summary-file', 'closure', 'issue-file', 'from', 'comment-file'];
 const PATH_OPTIONS = [...WRITE_OPTIONS, ...READ_OPTIONS];
 const FOLDER_OPTIONS = new Set(['dir', 'to', 'root', 'from']);
 
@@ -639,7 +642,9 @@ async function dispatch(cmd, sub, positional, options) {
       const cfg = loadConfig(root);
       let s = await recordTracker(root, cfg, openState(root, options), { ...options, engineCapture: undefined });
       s = closeAfterHandoff(root, s);
-      print(options, `tracker ${options.event} verified. ${s.phase === 'done' ? 'Attempt closed and worktrees removed.' : `next: ${nextAction(root, s)}`}`, s);
+      const rec = s.tracker.done.filter((d) => d.event === options.event).at(-1);
+      const how = rec?.verified === 'host-recorded' ? `verified from the host's record (host-recorded: the ${rec.host?.runtime === 'codex' ? 'Codex' : 'Claude Code'} transcript holds the tracker's answer; a same-user process could edit that file)${rec.extraLines?.length ? `; ${rec.extraLines.length} line(s) added to the comment beyond the rendered one` : ''}` : rec?.mode === 'agent-reported' ? `recorded as agent-reported, unverified (the engine checked what the agent reported, not the tracker's answer${rec.extraLines?.length ? `; ${rec.extraLines.length} line(s) added to the comment beyond the rendered one` : ''})` : 'verified';
+      print(options, `tracker ${options.event} ${how}. ${s.phase === 'done' ? 'Attempt closed and worktrees removed.' : `next: ${nextAction(root, s)}`}`, s);
       return 0;
     }
     case 'delivery': {

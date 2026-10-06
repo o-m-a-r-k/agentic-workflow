@@ -13,6 +13,7 @@
 // through a shell.
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { cliEnv } from '../../engine/scrub.mjs';
 
 const TYPES = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif' };
 const numberOf = (item) => {
@@ -42,7 +43,7 @@ function transport(via, { token, url, cfg }) {
         args.push('--input', '-');
         input = JSON.stringify(body);
       }
-      const r = spawnSync('gh', args, { input, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, shell: false });
+      const r = spawnSync('gh', args, { input, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, shell: false, env: cliEnv() });
       if (r.error) throw new Error('the GitHub CLI `gh` is not on PATH');
       if (r.status !== 0) {
         if (/HTTP 404/.test(r.stderr)) return { status: 404, data: null };

@@ -34,25 +34,39 @@ fs.writeFileSync(path.join(OUT, 'demo.txt'), text);
 
 // 2. The animated terminal.
 const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-const lines = text.replace(/\n$/, '').split('\n');
+const out = text.replace(/\n$/, '').split('\n');
 const W = 1100;
 const LH = 18;
 const ROWS = 30;
 const PAD = 16;
 const TOP = 40;
 const H = TOP + ROWS * LH + PAD;
-const CHARS = Math.floor((W - 2 * PAD) / 7.8);
+// Monospace at 13px is 0.6em per character: a line longer than the window wraps onto the next rows (indented), so
+// nothing is clipped. Wrapped rows appear with their line.
+const CHARS = Math.floor((W - 2 * PAD) / (13 * 0.6));
 let t = 0.6;
-const at = lines.map((l) => {
+const lines = [];
+const at = [];
+for (const l of out) {
   t += l.startsWith('$ ') ? 1.1 : l.startsWith('# ') ? 0.9 : l === '' ? 0.15 : 0.06;
-  return t;
-});
+  const parts = [];
+  for (let rest = l; ; ) {
+    parts.push(rest.slice(0, CHARS));
+    rest = rest.slice(CHARS);
+    if (!rest) break;
+    rest = `    ${rest}`;
+  }
+  for (const p of parts) {
+    lines.push({ text: p, kind: l });
+    at.push(t);
+  }
+}
 const total = t + 5;
 const kt = (x) => (x / total).toFixed(4);
-const color = (l) => (l.startsWith('$ ') ? 'var(--cmd)' : l.startsWith('# ') ? 'var(--note)' : /refused|failed/.test(l) ? 'var(--bad)' : /passed|delivered|accepted|read back/.test(l) ? 'var(--good)' : 'var(--fg)');
+const color = (l) => (l.startsWith('$ ') ? 'var(--cmd)' : l.startsWith('# ') ? 'var(--note)' : /refused|failed|cannot review/.test(l) ? 'var(--bad)' : /passed|delivered|accepted|read back/.test(l) ? 'var(--good)' : 'var(--fg)');
 const rows = lines.map((l, i) => {
-  const shown = l.length > CHARS ? `${l.slice(0, CHARS - 1)}…` : l;
-  return `<text x="${PAD}" y="${TOP + (i + 1) * LH - 4}" fill="${color(l)}" opacity="0">${esc(shown)}<animate attributeName="opacity" values="0;1;0" keyTimes="0;${kt(at[i])};${kt(total - 0.01)}" calcMode="discrete" dur="${total.toFixed(2)}s" repeatCount="indefinite"/></text>`;
+  if (l.text.length > CHARS) throw new Error(`demo row ${i + 1} is ${l.text.length} characters, over ${CHARS}`);
+  return `<text x="${PAD}" y="${TOP + (i + 1) * LH - 4}" fill="${color(l.kind)}" opacity="0">${esc(l.text)}<animate attributeName="opacity" values="0;1;0" keyTimes="0;${kt(at[i])};${kt(total - 0.01)}" calcMode="discrete" dur="${total.toFixed(2)}s" repeatCount="indefinite"/></text>`;
 });
 const shifts = [];
 for (let i = ROWS; i < lines.length; i++) shifts.push([at[i], -(i - ROWS + 1) * LH]);
@@ -78,8 +92,15 @@ ${rows.join('\n')}
 fs.writeFileSync(path.join(OUT, 'demo.svg'), svg);
 
 // 3. The social preview: the project name and real lines from this run.
-const pick = (re) => lines.find((l) => re.test(l)) ?? '';
-const quote = [pick(/^\$ wf gate/), pick(/actual: 'Hello Ada!'/), pick(/^\(exit 1: refused\)/), pick(/cannot review it$/), pick(/^delivered HT-1\.1/), pick(/^tracker: delivered performed/)].filter(Boolean);
+// Whole lines only, each a step of the story; refused if any is missing or too wide for the panel (no clipping).
+const pick = (re) => {
+  const l = out.find((x) => re.test(x));
+  if (!l) throw new Error(`the demo output has no line matching ${re}`);
+  return l;
+};
+const quote = [pick(/^\$ wf gate --attempt/), pick(/^wf gate: failed {3}unit/), pick(/^\(exit 1: refused\)$/), pick(/^\$ wf handoff reviewer --agent implementer-1/), pick(/cannot review it$/), pick(/^delivered HT-1\.1: /), pick(/^tracker: delivered performed .* read back; attempt closed$/)];
+const PANEL = Math.floor((1120 - 2 * 28) / (20 * 0.6));
+for (const l of quote) if (l.length > PANEL) throw new Error(`social preview line is ${l.length} characters, over ${PANEL}: ${l}`);
 const social = `<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640">
 <style>
   svg { --fg: #d6dde4; --cmd: #ffffff; --note: #7f8b96; --good: #6fcf97; --bad: #ff7b72; }
@@ -89,10 +110,10 @@ const social = `<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640
 </style>
 <rect width="1280" height="640" fill="#0f1419"/>
 <text class="t" x="80" y="150">agentic-workflow</text>
-<text class="s" x="80" y="205">Ticket work for coding agents: frozen criteria, a gate, an independent</text>
-<text class="s" x="80" y="245">review and a tracker handoff the engine checks itself.</text>
-<rect x="80" y="300" width="1120" height="${40 + quote.length * 34}" rx="10" fill="#1c232b"/>
-${quote.map((l, i) => `<text class="m" x="108" y="${345 + i * 34}" fill="${color(l)}">${esc(l.length > 88 ? `${l.slice(0, 87)}…` : l)}</text>`).join('\n')}
+<text class="s" x="80" y="205">Your agent says the tests passed. wf makes it prove it.</text>
+<text class="s" x="80" y="245">Frozen criteria, a gate on the exact tree, an independent review, a verified handoff.</text>
+<rect x="80" y="290" width="1120" height="${36 + quote.length * 34}" rx="10" fill="#1c232b"/>
+${quote.map((l, i) => `<text class="m" x="108" y="${330 + i * 34}" fill="${color(l)}">${esc(l)}</text>`).join('\n')}
 </svg>
 `;
 fs.writeFileSync(path.join(OUT, 'social-preview.svg'), social);
@@ -107,4 +128,4 @@ if (chrome) {
   console.log(fs.existsSync(png) && fs.statSync(png).mtimeMs >= started ? 'social-preview.png rendered with the local browser' : `social-preview.png not rendered: ${String(r.stderr ?? r.error).trim().split('\n').at(-1)}`);
 } else console.log('no local Chrome or Chromium: social-preview.png not rendered (the SVG is written)');
 fs.rmSync(demoDir, { recursive: true, force: true });
-console.log(`recorded ${lines.length} lines into ${path.relative(ROOT, OUT)}/: demo.txt, demo.svg, social-preview.svg`);
+console.log(`recorded ${out.length} lines into ${path.relative(ROOT, OUT)}/: demo.txt, demo.svg, social-preview.svg`);
