@@ -101,3 +101,37 @@ test('wf init: a tickets/ folder drafts the files tracker; a GitHub origin is na
   assert.match(ib.out, /note: tracker: origin is GitHub \(acme\/app\)\. If its issues are your tasks: `tracker: \{ kind: github, repo: acme\/app, via: cli \}`/);
   assert.match(fs.readFileSync(path.join(b, '.workflow', 'project.yaml'), 'utf8'), /tracker:\n {2}kind: none/);
 });
+
+test('files tracker attack: traversal ids and titles are refused by name before any file is touched', async () => {
+  const { default: files } = await import('../adapters/tracker/files.mjs');
+  const base = tmp('tracker-files-ids');
+  const root = path.join(base, 'proj');
+  fs.mkdirSync(path.join(root, 'tickets'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'tickets', 'OK-1.md'), ticket('OK-1'));
+  const outside = path.join(base, 'outside');
+  fs.mkdirSync(outside);
+  fs.symlinkSync(outside, path.join(root, 'tickets', 'LINK-1'));
+  fs.writeFileSync(path.join(root, 'tickets', 'LINK-1.md'), ticket('LINK-1'));
+  const shot = { name: 'home.png', bytes: Buffer.from('png'), size: 3, sha256: 'x', caption: 'c' };
+  const perform = (item, f = shot) => files.files.perform({ root, cfg: { tracker: { folder: 'tickets' } }, item, actions: [{ op: 'attach', files: [f] }, { op: 'setStatus', status: 'Done' }] });
+  const snapshot = () => {
+    const all = [];
+    const walk = (d) => fs.readdirSync(d, { withFileTypes: true }).forEach((e) => (all.push(path.join(d, e.name)), e.isDirectory() && !e.isSymbolicLink() && walk(path.join(d, e.name))));
+    walk(base);
+    return all.sort();
+  };
+  const before = snapshot();
+  for (const id of ['../x', '..', 'a/b', '/abs', '.hidden', '-flag', 'a\u0000b', 'x'.repeat(200), 'O​K-1', 'ОK-1', 'a\\b', 'trail.']) {
+    await assert.rejects(perform(id), /invalid ticket id/, JSON.stringify(id));
+  }
+  await assert.rejects(perform('LINK-1'), /tickets\/LINK-1 is a symlink; not written through/);
+  for (const name of ['../evil.png', '/etc/evil.png', '..', '.png', 'a/b.png', 'x\nb.png']) {
+    await assert.rejects(perform('OK-1', { ...shot, name }), /invalid attachment name/, JSON.stringify(name));
+  }
+  assert.deepEqual(snapshot(), before, 'nothing was created, inside or outside the folder');
+  assert.deepEqual(fs.readdirSync(outside), [], 'nothing written through the linked ticket folder');
+  assert.match(fs.readFileSync(path.join(root, 'tickets', 'OK-1.md'), 'utf8'), /"status": "Todo"/, 'no action ran before validation');
+  // A ticket whose file name differs only in case (one file on a case-insensitive volume, two names elsewhere).
+  fs.writeFileSync(path.join(root, 'tickets', 'ok-3.md'), ticket('ok-3'));
+  await assert.rejects(perform('OK-3'), /ticket OK-3: ok-3\.md differs only in case; refused/);
+});

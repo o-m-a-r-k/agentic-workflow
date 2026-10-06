@@ -15,7 +15,41 @@ import { readRegular, writeNoFollow } from '../../engine/evidence.mjs';
 import { canonical, isInside, touchesEvidence } from '../../engine/paths.mjs';
 import { YAML } from '../../engine/util.mjs';
 
-const ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+// Named finding (0.4.0 review: path traversal): the item id was joined into paths, and folders created, before it
+// was validated. Every entry point now validates the id first, before any filesystem call: ASCII letters, digits,
+// `-`, `_`, and `.` only inside the name (no leading `.` or `-`, no `..`), at most 64 characters; no separator, NUL,
+// look-alike or invisible character can pass. The ticket's paths are then resolved and must lie strictly inside the
+// resolved tickets folder and outside the evidence; on a case-insensitive volume a ticket whose name differs only
+// in case is refused. Attachment titles pass the same kind of allowlist as plain file names.
+const ID = /^[A-Za-z0-9_](?:[A-Za-z0-9_.-]{0,62}[A-Za-z0-9_])?$/;
+const TITLE = /^[A-Za-z0-9_](?:[A-Za-z0-9_. -]{0,126}[A-Za-z0-9_])?$/;
+export function checkItem(item) {
+  const s = String(item ?? '');
+  if (!ID.test(s) || s.includes('..')) throw new Error(`invalid ticket id ${JSON.stringify(s.slice(0, 80))}: letters, digits, -, _ and inner dots only, at most 64, no path`);
+  return s;
+}
+export function checkTitle(title) {
+  const s = String(title ?? '');
+  if (!TITLE.test(s) || s.includes('..')) throw new Error(`invalid attachment name ${JSON.stringify(s.slice(0, 80))}: a plain file name (letters, digits, space, -, _, inner dots), no path`);
+  return s;
+}
+function ticketPaths(folder, item) {
+  checkItem(item);
+  const real = canonical(folder);
+  const file = path.join(folder, `${item}.md`);
+  const dir = path.join(folder, item);
+  // The folder resolved, the last name kept as is: a link there is never followed (no-follow reads and writes, and
+  // the ticket's folder must be a real folder), so it cannot lead outside.
+  for (const p of [file, dir]) {
+    const c = path.join(real, path.basename(p));
+    if (c === real || path.dirname(c) !== real || path.basename(c) !== path.basename(p)) throw new Error(`ticket ${item}: ${p} resolves outside the tickets folder`);
+    if (touchesEvidence(c)) throw new Error(`ticket ${item}: ${p} is in the evidence`);
+  }
+  const names = fs.readdirSync(folder);
+  const twin = names.find((n) => n !== `${item}.md` && n !== item && [`${item}.md`, item].some((x) => n.toLowerCase() === x.toLowerCase()));
+  if (twin) throw new Error(`ticket ${item}: ${twin} differs only in case; refused (one name per ticket on every volume)`);
+  return { file, dir };
+}
 const sha256 = (b) => crypto.createHash('sha256').update(b).digest('hex');
 const COMMENT = /<!-- wf:comment id=(\S+) at=(\S+) -->\n([\s\S]*?)\n<!-- \/wf:comment -->/g;
 
@@ -37,8 +71,7 @@ function realDir(dir, create) {
 }
 
 function readTicket(folder, item) {
-  if (!ID.test(item) || item.includes('..')) throw new Error(`invalid ticket id \`${item}\``);
-  const file = path.join(folder, `${item}.md`);
+  const { file } = ticketPaths(folder, item);
   const r = readRegular(file);
   if (!r) throw new Error(`no ticket ${item}: ${file} is missing, a link or not a regular file with one name`);
   const text = r.bytes.toString('utf8');
@@ -54,15 +87,19 @@ function readTicket(folder, item) {
 }
 
 function readAttachments(folder, item) {
-  const dir = path.join(folder, item, 'attachments');
+  const dir = path.join(ticketPaths(folder, item).dir, 'attachments');
   const st = fs.lstatSync(dir, { throwIfNoEntry: false });
   if (!st || !st.isDirectory()) return [];
   const r = readRegular(path.join(dir, 'attachments.json'));
   const listed = r ? JSON.parse(r.bytes.toString('utf8')) : [];
   // Each listed file is read back: its bytes' sha256 is what the readback reports (a changed file shows as changed).
   return listed.map((a) => {
-    const f = readRegular(path.join(dir, path.basename(String(a.title))));
-    return { id: a.title, title: a.title, subtitle: a.subtitle ?? null, url: `${item}/attachments/${path.basename(String(a.title))}`, sha256: f ? sha256(f.bytes) : null, stored: Boolean(f) };
+    let title = null;
+    try {
+      title = checkTitle(a.title);
+    } catch {}
+    const f = title ? readRegular(path.join(dir, title)) : null;
+    return { id: a.title, title: a.title, subtitle: a.subtitle ?? null, url: `${item}/attachments/${title ?? 'invalid-name'}`, sha256: f ? sha256(f.bytes) : null, stored: Boolean(f) };
   });
 }
 
@@ -87,12 +124,15 @@ export default {
   isUpload: (a) => Boolean(a?.stored) && /^[^/]+\/attachments\/[^/]+$/.test(String(a?.url ?? '')),
   files: {
     async perform({ root, cfg, item, actions }) {
+      checkItem(item);
+      for (const a of actions) for (const f of a.op === 'attach' ? a.files : []) checkTitle(f.name);
       const folder = folderOf(root, cfg);
+      const { dir: ticketDir } = ticketPaths(folder, item);
       const assets = {};
       const ordered = [...actions].sort((x, y) => (x.op === 'attach' ? -1 : 0) - (y.op === 'attach' ? -1 : 0));
       for (const a of ordered) {
         if (a.op === 'attach') {
-          const dir = realDir(path.join(realDir(path.join(folder, item), true), 'attachments'), true);
+          const dir = realDir(path.join(realDir(ticketDir, true), 'attachments'), true);
           const listFile = path.join(dir, 'attachments.json');
           const listed = readRegular(listFile);
           const list = listed ? JSON.parse(listed.bytes.toString('utf8')) : [];

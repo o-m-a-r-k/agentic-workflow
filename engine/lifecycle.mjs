@@ -487,6 +487,12 @@ export function recordReview(root, options) {
   if (!reviewerHandoff) throw refuse('no reviewer handoff: run `wf handoff reviewer --agent <id>`');
   if (closure.reviewer !== reviewerHandoff.agent) throw refuse(`closure reviewer \`${closure.reviewer}\` is not the reviewer handed this attempt (\`${reviewerHandoff.agent}\`)`);
   if (!Array.isArray(closure.findings) || !Array.isArray(closure.criteria)) throw new WfError('closure needs `findings` and `criteria` lists');
+  // The review is bound to the tree the reviewer was handed: a write anywhere in the worktrees during the round
+  // (the reviewer may write only its closure file, outside them) invalidates it.
+  if (reviewerHandoff.tree && canonical(treeHashes(state)) !== canonical(reviewerHandoff.tree)) {
+    const moved = Object.keys({ ...treeHashes(state), ...reviewerHandoff.tree }).filter((k) => treeHashes(state)[k] !== reviewerHandoff.tree[k]);
+    throw refuse(`the worktree changed during the review round (${moved.join(', ')}): the closure no longer describes the tree under review; a reviewer writes only the file in \`reviewClosureFile\``, 'restore or commit the change through the implementer, then start a fresh reviewer: `wf handoff reviewer --agent <new id>`');
+  }
   // Provenance: where transcripts exist, the closure must come from the agent handed this round, started with exactly
   // the printed line after its handoff. A steered reviewer, or a round run outside the engine, is refused.
   const provenance = verifyAgent(reviewerHandoff);

@@ -340,6 +340,11 @@ export function writeDraft(root, detected, { force = false } = {}) {
 }
 
 // ---------- sync: AGENTS.md block, role agents, vendored skills ----------
+// Tools each generated Claude role may use (the implementer gets every tool). Every tool a role's instructions name
+// must be here. Named failure (0.3.3, a live round): the reviewer was told to write its closure with the Write tool,
+// which its list lacked, so it could not record the closure and the round was lost. The reviewer's Write is for its
+// closure file only: `wf review` refuses a closure when the worktree changed during the round.
+export const ROLE_TOOLS = { planner: ['Read', 'Grep', 'Glob', 'Bash'], reviewer: ['Read', 'Grep', 'Glob', 'Bash', 'Write', 'Skill'], tester: ['Read', 'Grep', 'Glob', 'Bash'] };
 const BEGIN = '<!-- agentic-workflow:begin -->';
 const END = '<!-- agentic-workflow:end -->';
 
@@ -439,7 +444,7 @@ export function sync(root) {
       } else {
         file = path.join(root, dirs.agents, `${name}.md`);
         // JSON strings are valid YAML scalars, so a `use` text with colons cannot break the frontmatter.
-        const front = ['---', `name: ${name}`, `description: ${JSON.stringify(description)}`, model ? `model: ${model}` : null, effort ? `effort: ${effort}` : null, role !== 'implementer' ? 'tools: Read, Grep, Glob, Bash' : null, '---'].filter(Boolean).join('\n');
+        const front = ['---', `name: ${name}`, `description: ${JSON.stringify(description)}`, model ? `model: ${model}` : null, effort ? `effort: ${effort}` : null, ROLE_TOOLS[role] ? `tools: ${ROLE_TOOLS[role].join(', ')}` : null, '---'].filter(Boolean).join('\n');
         fs.mkdirSync(path.dirname(file), { recursive: true });
         fs.writeFileSync(file, `${front}\n${GENERATED_MD}\n${body.trimEnd()}\n`);
       }
