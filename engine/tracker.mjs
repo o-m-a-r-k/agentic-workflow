@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { channelOf } from './channels.mjs';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -60,7 +61,7 @@ export function knownLimits(state) {
   for (const a of state.criteriaAmendments ?? []) for (const d of a.changes?.dropped ?? []) out.push(`Not delivered: ${d.reason}`);
   for (const a of state.delivery?.shown?.anomalies ?? []) if (a.followUp) out.push(`Follow-up: ${a.observation} (${a.followUp})`);
   // An issue found during the ticket that the owner deferred (I-18): the tester sees it with the owner's words.
-  for (const d of state.discovered ?? []) if (d.status === 'deferred') out.push(`Deferred: ${d.summary} (the owner's words: "${d.deferred.decision}"; recorded ${d.deferred.source?.provenance ?? 'without a source (before 0.4.5)'}; ${d.deferred.acknowledged ? 'acknowledged at delivery' : 'not acknowledged'})`);
+  for (const d of state.discovered ?? []) if (d.status === 'deferred') out.push(`Deferred ${state.id}:${d.id}: ${d.summary}. The owner's words: "${d.deferred.decision}". Channel: ${channelOf(d)}. ${d.deferred.acknowledged ? 'Acknowledged by the owner at delivery.' : 'Not acknowledged.'}`);
   return out.map((l) => `- ${l.replace(/\s*\n\s*/g, ' ')}`).join('\n');
 }
 

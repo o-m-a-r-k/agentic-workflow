@@ -122,20 +122,28 @@ export function evidenceMatch(text) {
 
 export const mentionsEvidence = (text) => evidenceMatch(text) !== null;
 
-// A speed bump, not a defence (second and third security reviews of 0.4.5): `wf discovered defer` runs only at an
-// interactive terminal, and a pseudo-terminal wrapper gives an agent one; `wf discovered close --deferred` takes the
-// owner's words from text. Raw matching only, fail closed, nothing tokenised or unquoted (0.1.16 and 0.1.17 parsed and
-// opened differentials): when the folded text holds `discovered` followed anywhere by `defer` or `close`, any wrapper,
-// interpreter, indirection or chaining token anywhere in it refuses the command. An agent determined to get around it
-// can (docs/trust-model.md); the plain, single command passes.
-const PTY = 'agentic-workflow: refused: `wf discovered defer` and `wf discovered close` run as one plain command, never through a wrapper or shell indirection';
-const DEFER = /\bdiscovered\b[\s\S]*\b(?:defer|close)\b/i;
-const WRAPPER = /(?:^|[^\w-])(script|expect|unbuffer|socat|faketty|empty|tmux|screen|ptyrun|openpty|forkpty|node-pty|pexpect|pty|ssh|bash|sh|zsh|dash|ksh|fish|eval|exec|source|base64|xxd|xargs|python\d*(?:\.\d+)?|node|perl|ruby|deno|bun|osascript|env|nohup|setsid|timeout|watch|parallel)(?![\w-])|(\$\(|`|\$\{|<\(|>\(|[;&|<>]|\n)/i;
+// A speed bump, not a defence (security reviews of 0.4.5): `wf discovered defer` runs only at an interactive terminal,
+// and a pseudo-terminal wrapper gives an agent one. Raw matching only, fail closed, nothing tokenised (0.1.16 and 0.1.17
+// parsed and opened differentials). It applies when the folded text, with quotes and backslashes dropped, holds
+// `discovered` and then `defer` or `close` with only non-word characters between:
+// - a command that starts with `wf discovered defer|close` is the plain invocation: refused when it holds any of
+//   ; & | ` $ ( ) < > \ or a newline anywhere (quotes are fine);
+// - any other command is refused when it holds such a character or a wrapper, interpreter or indirection word anywhere.
+//   A command that only mentions the feature in prose with none of them passes; one that does is told to put the text
+//   in a file (`git commit -F <file>`).
+const PTY = 'agentic-workflow: refused: `wf discovered defer` and `wf discovered close` run only as one plain command, never through a wrapper or shell indirection';
+const PTY_HINT = 'Run it on its own (`wf discovered defer D1 --reason "..."` or `wf discovered close D1 --deferred`), with no ; & | ` $ ( ) < > or backslash. If the command only mentions it in text (a commit message, a note), put that text in a file instead (`git commit -F <file>`).';
+const INVOKES = /\bdiscovered\W+(?:defer|close)\b/;
+const PLAIN_DISCOVERED = /^wf\s+discovered\s+(?:defer|close)\b/;
+const META = /[;&|`$()<>\\\n\r]/;
+const WRAPPER = /(?:^|[^\w-])(script|expect|unbuffer|socat|faketty|empty|tmux|screen|ptyrun|openpty|forkpty|node-pty|pexpect|pty|ssh|bash|sh|zsh|dash|ksh|fish|eval|exec|source|base64|xxd|xargs|python\d*(?:\.\d+)?|node|perl|ruby|deno|bun|osascript|env|nohup|setsid|timeout|watch|parallel|sudo|doas|stdbuf|caffeinate|systemd-run|npx)(?![\w-])/;
 export function ptyWrapped(command) {
-  const c = fold(command);
-  if (!DEFER.test(c)) return null;
-  const m = WRAPPER.exec(c);
-  return m ? `${PTY} (matched "${(m[1] ?? m[2]).replace(/\n/, '\\n')}")` : null;
+  const c = fold(command).trim();
+  if (!INVOKES.test(c.replace(/['"\\]/g, ''))) return null;
+  const meta = META.exec(c);
+  const word = PLAIN_DISCOVERED.test(c) ? null : WRAPPER.exec(c);
+  const hit = meta?.[0] ?? word?.[1];
+  return hit ? `${PTY} (matched ${JSON.stringify(hit)}). ${PTY_HINT}` : null;
 }
 
 // Exactly one plain `wf` invocation: nothing that chains, substitutes, redirects, quotes or escapes. `wf run` is not

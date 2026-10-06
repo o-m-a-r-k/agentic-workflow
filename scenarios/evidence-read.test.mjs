@@ -45,7 +45,7 @@ test('0.4.5: a pty wrapper around `wf discovered defer` is refused; the plain co
   ]) {
     const r = run(c);
     assert.equal(r.status, 2, c);
-    assert.match(r.stderr, /refused: `wf discovered defer` and `wf discovered close` run as one plain command, never through a wrapper or shell indirection \(matched "[^"]+"\)/, c);
+    assert.match(r.stderr, /refused: `wf discovered defer` and `wf discovered close` run only as one plain command, never through a wrapper or shell indirection \(matched "[^"]+"\)\. [\s\S]*`git commit -F <file>`/, c);
   }
   // Third review of 0.4.5: raw matching only, fail closed. `discovered defer` or `discovered close` (in any spelling the
   // fold leaves: quoted parts, other words between) with any wrapper or shell-indirection token anywhere is refused.
@@ -54,10 +54,15 @@ test('0.4.5: a pty wrapper around `wf discovered defer` is refused; the plain co
     "python3 -c 'import os; os.system(\"wf discovered defer D1\")'", "node -e 'require(\"child_process\").execSync(\"wf discovered defer D1\")'", 'echo D1 | xargs wf discovered defer',
     'wf discovered close D1 --deferred --quote "$(cat /tmp/q)"', 'wf discovered close D1 --deferred --quote `cat /tmp/q`', "wf discovered 'defer' D1 --reason x; script -q /dev/null true",
     "screen -dm wf discovered defer D1", 'wf discovered close D1 --deferred --quote x | tee /tmp/o',
-  ]) assert.match(run(c).stderr, /refused: `wf discovered defer` and `wf discovered close` run as one plain command, never through a wrapper or shell indirection/, c);
+  ]) assert.match(run(c).stderr, /refused: `wf discovered defer` and `wf discovered close` run only as one plain command, never through a wrapper or shell indirection \(matched "[^"]+"\)\. [\s\S]*`git commit -F <file>`/, c);
   assert.equal(check({ cwd: '/p', tool_input: { command: 'wf discovered defer D1 --reason x' } }), null);
   assert.equal(check({ cwd: '/p', tool_input: { command: 'wf discovered close D1 --fixed abc123' } }), null);
-  assert.equal(check({ cwd: '/p', tool_input: { command: 'wf discovered close D1 --deferred --quote "D1: defer it to the next sprint"' } }), null);
+  assert.equal(check({ cwd: '/p', tool_input: { command: 'wf discovered close D1 --deferred --attempt ENG-1.1' } }), null);
+  // Independent review: a command that only mentions the feature in a message is not refused unless it carries a
+  // wrapper or indirection token; then the refusal says to put the text in a file.
+  assert.equal(check({ cwd: '/p', tool_input: { command: 'git commit -m "docs: wf discovered defer asks the owner for the id"' } }), null);
+  assert.equal(check({ cwd: '/p', tool_input: { command: 'wf lesson add --title "close D1 with wf discovered close"' } }), null);
+  assert.match(run('git commit -m "wf discovered defer: never through script"').stderr, /matched "script"[\s\S]*git commit -F <file>/);
   assert.equal(check({ cwd: '/p', tool_input: { command: 'script -q /dev/null npm test' } }), null);
   assert.equal(check({ cwd: '/p', tool_input: { command: 'npm run script' } }), null);
 });

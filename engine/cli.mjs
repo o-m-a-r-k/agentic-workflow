@@ -40,7 +40,7 @@ Work
   wf criteria amend --file f --reason "why" [--add-repo R]
                                     --add-repo: a fix needs another repo; its worktree joins the attempt with the work items
   wf discovered add --summary "..." [--where file:line] [--found-by ID] [--blocked-by W] | list
-  wf discovered close D1 --fixed SHA | --deferred --quote "<their exact words>"
+  wf discovered close D1 --fixed SHA | --deferred   (after the owner wrote: defer <attempt>:D1: <reason>)
   wf discovered defer D1 --reason "why"   the owner, in their own terminal: types the id to confirm
                                     every issue found during the ticket: fixed in it, or deferred only by the owner
   wf handoff planner|implementer|reviewer|tester --agent ID [--work W1] [--session SID] [--runtime claude|codex]
@@ -526,7 +526,7 @@ async function dispatch(cmd, sub, positional, options) {
       // I-18: the discovered-issue ledger. Any role records what it finds; only the owner defers, in their own words.
       if (sub === 'add') {
         const r = addDiscovered(root, options);
-        print(options, `discovered ${r.id} recorded on ${r.state.id}${r.anchored ? '' : ` (no transcript anchor: ${r.anchorProblem}; only \`wf discovered defer ${r.id}\` at the owner's terminal can defer it)`}; fix it in this ticket and close it with the fix commit: \`wf discovered close ${r.id} --fixed <commit>\` (only the owner defers: \`--deferred --quote "<their exact words>"\`)`, r.state.discovered.at(-1));
+        print(options, `discovered ${r.id} recorded on ${r.state.id}${r.anchored ? '' : ` (no transcript anchor: ${r.anchorProblem}; only \`wf discovered defer ${r.id}\` at the owner's terminal can defer it)`}; fix it in this ticket and close it with the fix commit: \`wf discovered close ${r.id} --fixed <commit>\` (only the owner defers: \`--deferred\` once the owner's message starts with \`defer ${r.state.id}:${r.id}\`)`, r.state.discovered.at(-1));
         return 0;
       }
       if (sub === 'close') {
@@ -544,10 +544,10 @@ async function dispatch(cmd, sub, positional, options) {
       }
       if (sub === 'list' || !sub) {
         const s = openState(root, options);
-        print(options, s.discovered.length ? s.discovered.map(discoveredLine).join('\n') : `no discovered issues on ${s.id}`, s.discovered);
+        print(options, s.discovered.length ? s.discovered.map((d) => discoveredLine(d, s.id)).join('\n') : `no discovered issues on ${s.id}`, s.discovered);
         return 0;
       }
-      throw new WfError('usage: wf discovered add --summary "..." [--where file:line] [--found-by ID] | list | close D1 --fixed SHA | --deferred --quote "<their exact words>"');
+      throw new WfError('usage: wf discovered add --summary "..." [--where file:line] [--found-by ID] | list | close D1 --fixed SHA | --deferred (once the owner\'s message starts with: defer <attempt>:<id>)');
     }
     case 'handoff': {
       const r = handoff(root, sub, options);
@@ -662,7 +662,7 @@ async function dispatch(cmd, sub, positional, options) {
       const after = loadState(root, r.state.id);
       const members = (after.batch?.members ?? []).map((m) => showBlock(root, loadState(root, m))).join('');
       const comment = after.tracker.pending.some((a) => a.rendered === 'delivered') ? `\ndelivered comment to post (rendered from your summary, the user-visible UAT scope, the screenshots and known limits): ${commentFile(root, after.id)}\n  replace each {assetUrl:<title>} with the assetUrl its upload returned, so every screenshot shows inline; post it unchanged otherwise` : '';
-      const deferrals = (after.discovered ?? []).filter((x) => x.status === 'deferred').map((x) => `\n  ${x.id} deferred (${x.deferred.source?.provenance ?? 'recorded'}${x.deferred.source?.file ? `, ${x.deferred.source.file}:${x.deferred.source.line}` : ''}): ${x.summary}\n    taken as the owner's decision: "${x.deferred.decision}"\n    channel: ${channelOf(x)}`).join('');
+      const deferrals = [after, ...(after.batch?.members ?? []).map((m) => loadState(root, m))].flatMap((st) => (st.discovered ?? []).filter((x) => x.status === 'deferred').map((x) => ({ ...x, id: st.id === after.id ? x.id : `${st.id}:${x.id}` }))).map((x) => `\n  ${x.id} deferred (${x.deferred.source?.provenance ?? 'recorded'}${x.deferred.source?.file ? `, ${x.deferred.source.file}:${x.deferred.source.line}` : ''}): ${x.summary}\n    taken as the owner's decision: "${x.deferred.decision}"\n    channel: ${channelOf(x)}`).join('');
       print(options, `delivered ${after.id}: ${Object.values(after.delivery.repos).map((d) => `${d.repo}${d.commit ? `@${d.commit.slice(0, 10)}` : ' (no changes)'}`).join(', ')}${api}${deferrals ? `\ndeferred issues (show these to the owner: this is what was taken as their decision):${deferrals}` : ''}${showBlock(root, after)}${members}${comment}\nnext: ${nextAction(root, after)}`, after);
       return 0;
     }

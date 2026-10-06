@@ -277,7 +277,7 @@ export function reduce(entries) {
         if (!x) break;
         x.status = d.outcome;
         if (d.outcome === 'fixed') x.fixed = { repo: d.repo, commit: d.commit, evidence: d.evidence ?? null, at: e.at, by: e.actor };
-        else x.deferred = { decision: d.decision, quote: d.quote ?? null, source: d.source ?? null, attributedTo: d.attributedTo ?? null, at: e.at, by: e.actor };
+        else x.deferred = { decision: d.decision, source: d.source ?? null, attributedTo: d.attributedTo ?? null, at: e.at, by: e.actor };
         break;
       }
       // The owner saw each deferral at delivery and acknowledged it (second security review of 0.4.5).
