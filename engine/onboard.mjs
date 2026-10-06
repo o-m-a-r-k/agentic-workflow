@@ -412,9 +412,25 @@ export function roleAgents(cfg) {
   return out;
 }
 
+// Named failure (I-15): a role file `wf sync` changed does not reach agents started from a session that was already
+// running (Claude Code and Codex read agent files when a session starts). Role files are written only when their content
+// changes, so a file's mtime says when the role last changed, and each changed one is reported (`sync.changedRoles`).
+function writeIfChanged(file, content, changed) {
+  let before = null;
+  try {
+    before = fs.readFileSync(file, 'utf8');
+  } catch {}
+  if (before === content) return;
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, content);
+  changed.push({ file, created: before === null });
+}
+
 export function sync(root) {
   const cfg = loadConfig(root);
   const written = [];
+  const changedRoles = [];
+  written.changedRoles = changedRoles;
   if (cfg.enabled) {
     const block = agentsBlock(root, cfg);
     for (const f of instructionFiles(root, cfg)) {
@@ -439,14 +455,12 @@ export function sync(root) {
         // Codex loads custom agents from TOML files in .codex/agents/.
         file = path.join(root, dirs.agents, `${name}.toml`);
         const lines = [GENERATED_TOML, `name = ${tomlString(name)}`, `description = ${tomlString(description)}`, model ? `model = ${tomlString(model)}` : null, effort ? `model_reasoning_effort = ${tomlString(effort)}` : null, `developer_instructions = ${tomlMultiline(body)}`];
-        fs.mkdirSync(path.dirname(file), { recursive: true });
-        fs.writeFileSync(file, `${lines.filter(Boolean).join('\n')}\n`);
+        writeIfChanged(file, `${lines.filter(Boolean).join('\n')}\n`, changedRoles);
       } else {
         file = path.join(root, dirs.agents, `${name}.md`);
         // JSON strings are valid YAML scalars, so a `use` text with colons cannot break the frontmatter.
         const front = ['---', `name: ${name}`, `description: ${JSON.stringify(description)}`, model ? `model: ${model}` : null, effort ? `effort: ${effort}` : null, ROLE_TOOLS[role] ? `tools: ${ROLE_TOOLS[role].join(', ')}` : null, '---'].filter(Boolean).join('\n');
-        fs.mkdirSync(path.dirname(file), { recursive: true });
-        fs.writeFileSync(file, `${front}\n${GENERATED_MD}\n${body.trimEnd()}\n`);
+        writeIfChanged(file, `${front}\n${GENERATED_MD}\n${body.trimEnd()}\n`, changedRoles);
       }
       ours.add(file);
       written.push(file);
@@ -458,7 +472,10 @@ export function sync(root) {
       const p = path.join(dir, f);
       if (!/^wf-.*\.(md|toml)$/.test(f) || ours.has(p)) continue;
       const text = fs.readFileSync(p, 'utf8');
-      if (text.includes(GENERATED_MD) || text.includes(GENERATED_TOML)) fs.rmSync(p);
+      if (text.includes(GENERATED_MD) || text.includes(GENERATED_TOML)) {
+        fs.rmSync(p);
+        changedRoles.push({ file: p, removed: true });
+      }
     }
     for (const s of cfg.requires.skills ?? []) {
       if (!s.vendor) continue;

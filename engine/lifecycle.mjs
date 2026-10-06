@@ -15,7 +15,7 @@ import { lastFencedYaml, lastModel, readTranscript, sessionModel, subagentModel,
 import { outsidePlan, outsideVerdicts } from './scope.mjs';
 import { commentFile, emitTrackerEvent, needsSummary, recordSummary, writeDeliveredComment } from './tracker.mjs';
 import { designChecks, designVerdicts, requiredSkills, reviewRules, ruleVerdicts, skillFiles, unreadDocs } from './rules.mjs';
-import { home, startPromptFor, verifyAgent } from './provenance.mjs';
+import { home, howToStart, roleChangedSinceSessionStart, startPromptFor, verifyAgent } from './provenance.mjs';
 import { WfError, YAML, assertSafeId, canonical, git, hashFile, hashValue, matchesAny, readJson, refuse, run, sessionIdentity, sha256, writeImmutable, writeJson } from './util.mjs';
 
 // An input file is read once: the text parsed is the text kept raw (a file rewritten between two reads could otherwise
@@ -113,8 +113,10 @@ function planFromAgent(root, state, agent) {
   if (!handoff) throw refuse(`\`${agent}\` was not handed this attempt as its planner${state.roles.planner.length ? ` (planners: ${state.roles.planner.join(', ')})` : ''}`, 'run `wf handoff planner --agent <id>` and start that agent with the printed line');
   const check = verifyAgent(handoff);
   if (check.status === 'mismatch') throw refuse(`the planner transcript does not match its handoff: ${check.reason}`);
-  const found = subagentTranscripts(home(), agent, handoff?.agentType ?? null, handoff?.at ?? null);
-  if (!found.length) throw refuse(`no Claude Code subagent transcript named \`${agent}\`${handoff?.agentType ? ` (agent type ${handoff.agentType})` : ''}${handoff ? ' written after its handoff' : ''} under ${path.join(home(), '.claude', 'projects')}`, 'check the agent id, or save the planner\'s YAML unchanged to a file and use `wf plan --file <file>`');
+  let found = subagentTranscripts(home(), agent, handoff?.agentType ?? null, handoff?.at ?? null);
+  // A planner started without a name, identified by its start line (verifyAgent, I-14).
+  if (!found.length && check.status === 'verified' && check.identity === 'unnamed') found = [{ file: check.transcript, agentType: handoff.agentType ?? null }];
+  if (!found.length) throw refuse(`no Claude Code subagent transcript named \`${agent}\`${handoff?.agentType ? ` (agent type ${handoff.agentType})` : ''}${handoff ? ' written after its handoff' : ''} under ${path.join(home(), '.claude', 'projects')}`, `check the agent id (${howToStart(handoff)}), or save the planner's YAML unchanged to a file and use \`wf plan --file <file>\``);
   const entries = readTranscript(found[0].file);
   const text = lastFencedYaml(entries);
   if (text === null) throw refuse(`the transcript of ${agent} (${found[0].file}) has no fenced YAML block`, 'ask the planner to return its plan in one ```yaml block, or save it to a file and use `wf plan --file <file>`');
@@ -322,6 +324,7 @@ export function handoff(root, role, options) {
   const agentType = agentTypeFor(cfg, role, cls);
   const { effort, model } = declared(cfg, cls, runtime);
 
+  const selected = ['planner', 'implementer', 'reviewer'].includes(role) ? relevantLessons(root, role, state, changed, { work }) : null;
   const n = state.handoffs.length + 1;
   const file = path.join(attemptDir(root, state.id), 'handoffs', `${String(n).padStart(2, '0')}-${role}.json`);
   const appendix = cfg.roles?.[role]?.appendix ? path.resolve(root, ADAPTER_DIR, cfg.roles[role].appendix) : null;
@@ -349,9 +352,12 @@ export function handoff(root, role, options) {
     // The planner assigns each work item a class from these texts.
     classes: role === 'planner' ? Object.fromEntries(Object.entries(cfg.classes).map(([n, c]) => [n, { use: c.use, agentType: agentTypeFor(cfg, 'implementer', n) }])) : undefined,
     criteriaAmendments: state.criteriaAmendments,
-    // Project lessons that apply to this change (by paths and work class), most recurring first, capped. The reviewer
+    // Project lessons whose declared scope this change falls in (or whose tags the ticket mentions), most recurring
+    // first, capped. The reviewer
     // gives each a verdict in `lessons`; they are project rules, not other agents' findings.
-    lessons: ['planner', 'implementer', 'reviewer'].includes(role) ? { ...relevantLessons(root, role, state, changed), ...(role === 'reviewer' ? { acknowledged: implementerAcks(loadState(root, state.id)).acks } : {}) } : undefined,
+    // Lessons outside the change's scope are left out of the bundle (no verdict is owed on them); the handoff prints
+    // their ids and `wf lesson preview` says why each was filtered.
+    lessons: selected ? { apply: selected.apply, omitted: selected.omitted, more: selected.more, ...(role === 'reviewer' ? { acknowledged: implementerAcks(loadState(root, state.id)).acks } : {}) } : undefined,
     // Evidence files the owner accepted after they changed outside wf (`wf verify --accept-changes`): judge with that in mind.
     rebaselined: state.rebaselines ?? [],
     changed,
@@ -398,11 +404,16 @@ export function handoff(root, role, options) {
       sessionModelNow = sessionModel(home(), owning.session);
     } catch {}
   }
-  append(root, state.id, 'handoff', { lessons: (bundle.lessons?.apply ?? []).map((l) => l.id), role, agent, runtime, session: options.session ?? null, agentType, class: cls, effort, model, sessionModel: sessionModelNow, startPrompt: startPromptFor(file), work: work?.id ?? null, bundle: file, tree: treeHashes(state), patch: patchIds(state), ...(role === 'reviewer' ? { gate: gateNow.ok ? state.lastGate.runId : null } : {}) }, actor(options));
+  append(root, state.id, 'handoff', { lessons: (bundle.lessons?.apply ?? []).map((l) => l.id), lessonsFiltered: (selected?.filtered ?? []).map((l) => l.id), role, agent, runtime, session: options.session ?? null, agentType, class: cls, effort, model, sessionModel: sessionModelNow, startPrompt: startPromptFor(file), work: work?.id ?? null, bundle: file, tree: treeHashes(state), patch: patchIds(state), ...(role === 'reviewer' ? { gate: gateNow.ok ? state.lastGate.runId : null } : {}) }, actor(options));
   // Once per attempt: with parallel work items every implementer handoff queued another identical tracker read.
   const firstImplementer = role === 'implementer' && !state.handoffs.some((h) => h.role === 'implementer');
   if (firstImplementer && state.lane !== 'quick' && state.intent === 'implementation') emitTrackerEvent(root, cfg, state.id, 'implementing');
-  return { bundle: file, startPrompt: startPromptFor(file), agentType, class: cls, effort, model, work: work?.id ?? null, lessons: bundle.lessons ?? null, state: loadState(root, state.id) };
+  // The agent type's role file changed after the owner's session loaded it (I-15): the agent would run the old role.
+  let roleStale = null;
+  try {
+    roleStale = runtime === 'claude' ? roleChangedSinceSessionStart(root, agentType, owning) : null;
+  } catch {}
+  return { bundle: file, startPrompt: startPromptFor(file), agentType, agent, roleStale, class: cls, effort, model, work: work?.id ?? null, lessons: bundle.lessons ? { ...bundle.lessons, filtered: selected.filtered } : null, state: loadState(root, state.id) };
 }
 
 // Per step with `artifacts`: each glob as declared and as expanded for this attempt, and the files it matched, and the
@@ -496,7 +507,7 @@ export function recordReview(root, options) {
   // Provenance: where transcripts exist, the closure must come from the agent handed this round, started with exactly
   // the printed line after its handoff. A steered reviewer, or a round run outside the engine, is refused.
   const provenance = verifyAgent(reviewerHandoff);
-  if (provenance.status === 'mismatch') throw refuse(`review provenance: ${provenance.reason}`, 'start a fresh reviewer: `wf handoff reviewer --agent <new id>` and give it only the printed line');
+  if (provenance.status === 'mismatch') throw refuse(`review provenance: ${provenance.reason}`, `start a fresh reviewer: \`wf handoff reviewer --agent <new id>\`, then start it as the agent type that command prints, named <new id> (the Agent tool's name), with only the printed line as its prompt`);
   // Where the transcript exists, it must show a successful read of every rule document and skill in the bundle. It
   // proves the content reached the reviewer, not that it was understood. Without a transcript: recorded unverified.
   const handed = readBundle(reviewerHandoff.bundle);
@@ -527,8 +538,9 @@ export function recordReview(root, options) {
   // The closure is for the tree the reviewer was handed. It inspected gate evidence only if a passing gate on that tree
   // was in its bundle (0.1.5 and earlier handed a reviewer only after such a gate, so their handoffs carry no field).
   const gateEvidenceInspected = 'gate' in reviewerHandoff ? Boolean(reviewerHandoff.gate) : true;
-  const reviewerModel = reviewerHandoff.runtime === 'claude' ? subagentModel(home(), reviewerHandoff.agent, reviewerHandoff.agentType, reviewerHandoff.at) : null;
-  append(root, state.id, 'review.recorded', { closure, file: dest, raw, handoff: round, revealed: Boolean(revealed) || revealNow, provenance: provenance.status, provenanceReason: provenance.reason ?? null, transcript: provenance.transcript ?? null, reads, tree: reviewerHandoff.tree, gateRun: reviewerHandoff.gate ?? null, gateEvidenceInspected, handoffTree: reviewerHandoff.tree, handoffPatch: reviewerHandoff.patch, reviewerModel }, closure.reviewer);
+  let reviewerModel = reviewerHandoff.runtime === 'claude' ? subagentModel(home(), reviewerHandoff.agent, reviewerHandoff.agentType, reviewerHandoff.at) : null;
+  if (!reviewerModel && provenance.identity === 'unnamed') reviewerModel = lastModel(readTranscript(provenance.transcript));
+  append(root, state.id, 'review.recorded', { closure, file: dest, raw, handoff: round, revealed: Boolean(revealed) || revealNow, provenance: provenance.status, provenanceReason: provenance.reason ?? null, identity: provenance.identity ?? null, transcript: provenance.transcript ?? null, reads, tree: reviewerHandoff.tree, gateRun: reviewerHandoff.gate ?? null, gateEvidenceInspected, handoffTree: reviewerHandoff.tree, handoffPatch: reviewerHandoff.patch, reviewerModel }, closure.reviewer);
   const after = loadState(root, state.id);
   const toVerify = unverifiedPrior(after, after.review);
   let reveal = null;

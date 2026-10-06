@@ -181,7 +181,7 @@ test('repo and project lessons: a project lesson spans repos and lives in the ad
   assert.match(ok(wf(root, ['lesson', 'move', 'L-9', '--repo', 'web'])).out, /lesson L-9 moved: .*api\/\.workflow\/lessons\/L-9\.yaml -> .*web\/\.workflow\/lessons\/L-9\.yaml; commit both repos/);
   assert.ok(!fs.existsSync(path.join(dir, 'L-9.yaml')));
   assert.match(fs.readFileSync(path.join(root, 'web', '.workflow', 'lessons', 'L-9.yaml'), 'utf8'), /repo: web/);
-  assert.doesNotMatch(ok(wf(root, ['lesson', 'list'])).out, /warning/);
+  assert.doesNotMatch(ok(wf(root, ['lesson', 'list'])).out, /warning: (?!lesson L-1 declares no scope)/);
 });
 
 test('plugin lessons stored in a project (from before 0.3.0) still export as generic issue text, names stripped', () => {
@@ -216,4 +216,58 @@ test('prior decisions are inputs: a criterion kept only on precedent needs a pur
   assert.match(text, /Prior decisions are inputs, not authority/);
   assert.match(text, /precedent-only/);
   assert.match(text, /Invariant scope check/);
+});
+
+test('lessons are matched by their declared scope: a scripts-only fix in one repo gets no UI lessons of another repo, and what was filtered is shown', () => {
+  // Named failure: a quick fix that changed only scripts in the api repo was handed the web repo's UI lessons (no paths,
+  // so "every change in web", because web was admitted) and a project lesson about another subject (no paths, so "every
+  // change"); the reviewer had to give each a verdict.
+  const base = tmp('lessons-scope');
+  const root = path.join(base, 'ws');
+  fs.mkdirSync(root);
+  const cfg = { version: 1, enabled: true, name: 'lessons-scope', adapterRepo: 'api', repos: [{ name: 'api', path: 'api', base: 'main' }, { name: 'web', path: 'web', base: 'main' }], components: [{ id: 'api', kind: 'service', repo: 'api' }, { id: 'web', kind: 'web', repo: 'web' }], lanes: ['quick', 'standard'], gate: { steps: [{ id: 'api-unit', repo: 'api', run: 'true' }, { id: 'web-unit', repo: 'web', run: 'true' }] } };
+  makeRepo(path.join(root, 'api'), { '.workflow/project.yaml': yaml(cfg), 'src/a.ts': 'a\n', 'scripts/janitor.sh': 'echo a\n' });
+  makeRepo(path.join(root, 'web'), { 'src/table.tsx': 'x\n' });
+  fs.symlinkSync(path.join('api', '.workflow'), path.join(root, '.workflow'));
+  const lesson = (args, title) => ok(add(root, [...args, '--title', title, '--what', 'w', '--cause', 'review', '--mechanism', 'reviewer-checklist']));
+  lesson(['--repo', 'web', '--tags', 'ui,tables'], 'UI tables use the shared table'); // L-1: repo only
+  lesson(['--repo', 'web', '--tags', 'e2e,evidence'], 'Evidence assertions prove the value'); // L-2: repo only
+  lesson(['--project', '--tags', 'analytics,timezone'], 'Operator views use one clock'); // L-3: no scope at all
+  lesson(['--project', '--kinds', 'script', '--tags', 'docker'], 'Scripts fail fast'); // L-4: file kind
+  lesson(['--project', '--components', 'web', '--kinds', 'ui'], 'Pages use the layout'); // L-5: component and kind
+  lesson(['--repo', 'api', '--paths', 'src/**'], 'Services log the request id'); // L-6: paths in api
+  lesson(['--project', '--paths', '**'], 'Every change names its rollback'); // L-7: every change
+  assert.match(add(root, ['--project', '--kinds', 'widgets', '--title', 't', '--what', 'w', '--cause', 'review', '--mechanism', 'doc']).err, /`kinds` are file kinds: ui, test, migration, docs, script, config, source \(not widgets\)/);
+  assert.match(add(root, ['--project', '--components', 'nope', '--title', 't', '--what', 'w', '--cause', 'review', '--mechanism', 'doc']).err, /`components` names components of the adapter: api, web \(not nope\)/);
+  assert.match(ok(wf(root, ['lesson', 'list'])).out, /warning: lesson L-3 declares no scope \(repo, components, paths or kinds\): it is injected only when the ticket mentions one of its tags \(analytics, timezone\)/);
+  const e = ok(wf(root, ['entry', '--owner', 'o', '--json'])).json();
+  assert.deepEqual(Object.keys(e.repos).sort(), ['api', 'web'], 'both repos admitted, as in the field');
+  ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id]));
+  const impl = ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
+  assert.deepEqual(bundleOf(impl.out).lessons.apply.map((l) => l.id), ['L-7'], 'two repos, nothing planned or changed yet: only the every-change lesson');
+  assert.match(impl.out, /lessons filtered out \(outside this change's scope\): L-1, L-2, L-3, L-4, L-5, L-6; `wf lesson preview --attempt QF-1\.1 --role implementer` says why/);
+  commitIn(e.repos.api.worktree, { 'scripts/janitor.sh': 'set -e\necho b\n' }, 'Lesson L-7: applied - rollback is reverting the script');
+  ok(wf(root, ['gate', '--attempt', e.id]));
+  const rv = ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', e.id]));
+  assert.match(rv.err, /^lessons injected: L-4, L-7$/m);
+  assert.match(rv.err, /lessons filtered out \(outside this change's scope\): L-1, L-2, L-3, L-5, L-6/);
+  const rb = bundleOf(rv.out);
+  assert.deepEqual(rb.lessons.apply.map((l) => [l.id, l.matched]), [['L-4', ['api:scripts/janitor.sh is in its scope (kinds script)']], ['L-7', ['it applies to every change (paths **)']]]);
+  assert.equal(rb.lessons.filtered, undefined, 'the reviewer is handed only the lessons it judges');
+  assert.deepEqual(state(root, e.id).handoffs.at(-1).lessonsFiltered, ['L-1', 'L-2', 'L-3', 'L-5', 'L-6'], 'the ledger keeps what was filtered');
+  const preview = ok(wf(root, ['lesson', 'preview', '--attempt', e.id, '--role', 'reviewer'])).out;
+  assert.match(preview, /filtered out, outside this change's scope \(5\):/);
+  assert.match(preview, /L-1 web: UI tables use the shared table\n {5}filtered: no changed file is in its scope \(repo web\)/);
+  assert.match(preview, /L-3 Operator views use one clock\n {5}filtered: declares no scope \(repo, components, paths or kinds\), so only its tags match, and the ticket mentions none of analytics, timezone/);
+  assert.match(preview, /L-5 Pages use the layout\n {5}filtered: no changed file is in its scope \(components web; kinds ui\)/);
+  assert.match(preview, /L-6 api: Services log the request id\n {5}filtered: no changed file is in its scope \(repo api; paths src\/\*\*\)/);
+  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r', { lessons: [{ lesson: 'L-4', verdict: 'complied', evidence: 'scripts/janitor.sh:1 set -e' }, { lesson: 'L-7', verdict: 'complied', evidence: 'commit message' }] })), '--attempt', e.id]));
+  // The same lessons still reach a change inside their scope.
+  const e2 = ok(wf(root, ['entry', '--owner', 'o', '--json'])).json();
+  ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e2.id]));
+  ok(wf(root, ['handoff', 'implementer', '--agent', 'i2', '--attempt', e2.id]));
+  commitIn(e2.repos.web.worktree, { 'src/table.tsx': 'y\n' }, 'Lesson L-7: applied - revert');
+  const p2 = ok(wf(root, ['lesson', 'preview', '--attempt', e2.id, '--role', 'reviewer'])).out;
+  assert.match(p2, /would receive 4 lesson\(s\)/);
+  for (const id of ['L-1', 'L-2', 'L-5', 'L-7']) assert.match(p2, new RegExp(`^ {2}${id} \\[`, 'm'));
 });

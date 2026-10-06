@@ -425,7 +425,9 @@ async function dispatch(cmd, sub, positional, options) {
     }
     case 'sync': {
       const files = sync(root);
-      print(options, `wrote ${files.length} file(s):\n${files.map((f) => `  ${path.relative(root, f)}`).join('\n')}`, files);
+      const roles = files.changedRoles ?? [];
+      const note = roles.length ? `\nrole file(s) changed: ${roles.map((c) => `${path.relative(root, c.file)}${c.removed ? ' (removed)' : c.created ? ' (new)' : ''}`).join(', ')}\n  Claude Code and Codex read agent files when a session starts: a session that was already running keeps the old roles, and agents it starts run them. Restart each running session (\`claude --resume\` keeps the conversation) before its next handoff.` : '\nno role file changed';
+      print(options, `wrote ${files.length} file(s):\n${files.map((f) => `  ${path.relative(root, f)}`).join('\n')}${note}`, files);
       return 0;
     }
     case 'topology': {
@@ -511,15 +513,23 @@ async function dispatch(cmd, sub, positional, options) {
       // Never printed for a reviewer: its console carries only the start line.
       const api = await trackerApi(root, r.state.id);
       if (api && sub !== 'reviewer') process.stderr.write(`${api.trim()}\n`);
+      const lessonsLine = r.lessons ? `lessons injected: ${r.lessons.apply.map((l) => l.id).join(', ') || 'none'}${r.lessons.omitted?.length ? ` (omitted by the cap: ${r.lessons.omitted.join(', ')})` : ''}${r.lessons.filtered?.length ? `\nlessons filtered out (outside this change's scope): ${r.lessons.filtered.map((l) => l.id).join(', ')}; \`wf lesson preview --attempt ${r.state.id} --role ${sub}\` says why` : ''}\n` : '';
+      // Named failure (I-15): a role file `wf sync` changed after this session started is not what the agent loads.
+      const stale = r.roleStale ? `warning: ${path.relative(root, r.roleStale.file)} changed at ${r.roleStale.changedAt}, after this Claude Code session started (${r.roleStale.sessionStartedAt}). Claude Code reads agent files when a session starts, so an agent of type ${r.agentType} started from this session runs the old role (its tools and instructions). Restart Claude Code (\`claude --resume\` keeps this conversation) before starting it.\n` : '';
+      // Named failure (I-14): the reviewer handoff printed no agent name, the reviewer was started unnamed, and its
+      // closure was refused after the whole review. The owner is told the agent type and name on stderr.
+      const how = `Start agent type ${r.agentType} (name it ${r.agent}; do not pass a model)`;
       // The reviewer is started blind: this one line is its whole prompt, so nothing else is printed to pass along.
       if (sub === 'reviewer') {
         // To the owner on stderr, never into the reviewer's one-line prompt on stdout.
         const w = outsideWarning(root, r.state);
         if (w) process.stderr.write(`warning: ${w}\n`);
-        if (r.lessons) process.stderr.write(`lessons injected: ${r.lessons.apply.map((l) => l.id).join(', ') || 'none'}${r.lessons.omitted?.length ? ` (omitted by the cap: ${r.lessons.omitted.join(', ')})` : ''}\n`);
+        process.stderr.write(`${lessonsLine}${stale}${how} with only the line on stdout as its prompt:\n`);
         print(options, startPrompt, { ...r, startPrompt });
+      } else {
+        if (stale) process.stderr.write(stale);
+        print(options, `${lessonsLine}${sub} bundle: ${r.bundle}${r.work ? `\nwork item ${r.work}, class ${r.class}` : `\nclass ${r.class}`}${r.effort ? `, effort ${r.effort}` : ''}${r.model ? `, model ${r.model}` : ''}\n${how} with: "${startPrompt}"`, { ...r, startPrompt });
       }
-      else print(options, `${r.lessons ? `lessons injected: ${r.lessons.apply.map((l) => l.id).join(', ') || 'none'}${r.lessons.omitted?.length ? ` (omitted by the cap: ${r.lessons.omitted.join(', ')})` : ''}\n` : ''}${sub} bundle: ${r.bundle}${r.work ? `\nwork item ${r.work}, class ${r.class}` : `\nclass ${r.class}`}${r.effort ? `, effort ${r.effort}` : ''}${r.model ? `, model ${r.model}` : ''}\nStart agent type ${r.agentType} (name it ${options.agent}; do not pass a model) with: "${startPrompt}"`, { ...r, startPrompt });
       return 0;
     }
     case 'gate':
@@ -789,7 +799,8 @@ async function dispatch(cmd, sub, positional, options) {
         const changed = Object.fromEntries(Object.keys(s.repos).map((r) => [r, changedFiles(s, r)]));
         const sel = relevantLessons(root, role, s, role === 'planner' ? {} : changed);
         const rows = sel.apply.map((l) => `  ${l.id} [${l.label}] ${l.repo ? `${l.repo}: ` : ''}${l.title}\n     matched: ${l.matched.join('; ')}`);
-        print(options, `the ${role} of ${s.id} would receive ${sel.apply.length} lesson(s)${sel.omitted.length ? `; ${sel.omitted.length} advisory omitted by the cap: ${sel.omitted.join(', ')}` : ''}\n${rows.join('\n') || '  none'}`, sel);
+        const out = sel.filtered.map((l) => `  ${l.id} ${l.repo ? `${l.repo}: ` : ''}${l.title}\n     filtered: ${l.reason}`);
+        print(options, `the ${role} of ${s.id} would receive ${sel.apply.length} lesson(s)${sel.omitted.length ? `; ${sel.omitted.length} advisory omitted by the cap: ${sel.omitted.join(', ')}` : ''}\n${rows.join('\n') || '  none'}${out.length ? `\nfiltered out, outside this change's scope (${out.length}):\n${out.join('\n')}` : ''}`, sel);
         return 0;
       }
       if (sub === 'set') {
@@ -807,7 +818,7 @@ async function dispatch(cmd, sub, positional, options) {
       if (sub === 'show') {
         const l = loadLessons(root).find((x) => x.id === positional[0]);
         if (!l) throw new WfError(`no lesson ${positional[0] ?? ''}`);
-        print(options, `${show(l)}\n  what happened: ${l.trigger?.what ?? ''}${l.trigger?.quote ? `\n  in their words: "${l.trigger.quote}"` : ''}${l.trigger?.attempt ? `\n  seen in: ${l.trigger.attempt}${l.trigger.finding ? ` (finding ${l.trigger.finding})` : ''}` : ''}\n  tags: ${l.tags.join(', ') || 'none'}; paths: ${l.paths.join(', ') || 'every change'}\n  ${l.file}`, l);
+        print(options, `${show(l)}\n  what happened: ${l.trigger?.what ?? ''}${l.trigger?.quote ? `\n  in their words: "${l.trigger.quote}"` : ''}${l.trigger?.attempt ? `\n  seen in: ${l.trigger.attempt}${l.trigger.finding ? ` (finding ${l.trigger.finding})` : ''}` : ''}\n  tags: ${l.tags.join(', ') || 'none'}; scope: ${[l.repo ? `repo ${l.repo}` : null, l.components?.length ? `components ${l.components.join(', ')}` : null, l.paths.length ? `paths ${l.paths.join(', ')}` : null, l.kinds?.length ? `kinds ${l.kinds.join(', ')}` : null].filter(Boolean).join('; ') || 'none declared (matched only by its tags in the ticket)'}\n  ${l.file}`, l);
         return 0;
       }
       if (sub === 'review') {
@@ -826,7 +837,9 @@ async function dispatch(cmd, sub, positional, options) {
       }
       if (sub === 'list' || !sub) {
         const all = loadLessons(root);
-        const warn = lessonWarnings(root).map((w) => `\nwarning: ${w}`).join('');
+        // A lesson declaring no scope is injected only when the ticket mentions one of its tags.
+        const unscoped = all.filter((l) => l.status !== 'retired' && l.scope !== 'plugin' && !l.repo && !l.paths.length && !l.components?.length && !l.kinds?.length).map((l) => `lesson ${l.id} declares no scope (repo, components, paths or kinds): it is injected only when the ticket mentions one of its tags (${l.tags.join(', ') || 'it has none'}); add \`components\`, \`paths\` or \`kinds\` to its file, or \`paths: ["**"]\` for every change`);
+        const warn = [...lessonWarnings(root), ...unscoped].map((w) => `\nwarning: ${w}`).join('');
         print(options, `${all.length ? all.map(show).join('\n') : `no lessons yet (${path.join('.workflow', 'lessons')})`}${warn}`, all);
         return 0;
       }

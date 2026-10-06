@@ -126,7 +126,9 @@ export function subagentIndex(home) {
     const meta = f.replace(/\.jsonl$/, '.meta.json');
     try {
       const m = JSON.parse(fs.readFileSync(meta, 'utf8'));
-      if (m?.name) out.push({ file: f, name: m.name, agentType: m.agentType ?? null });
+      // An agent started without a name is listed with `name: null` (review provenance can still identify it by its
+      // start line); every lookup by name skips it.
+      if (m && typeof m === 'object') out.push({ file: f, name: typeof m.name === 'string' && m.name ? m.name : null, agentType: m.agentType ?? null });
     } catch {}
   }
   return out;

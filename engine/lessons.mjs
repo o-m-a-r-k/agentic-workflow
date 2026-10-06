@@ -13,6 +13,7 @@ import { ADAPTER_DIR, adapterLocation, loadConfig, repoDir } from './config.mjs'
 import { readRegular, writeNoFollow } from './evidence.mjs';
 import { canonical, isInside, touchesEvidence } from './paths.mjs';
 import { append, listAttempts, loadState, readLedger } from './ledger.mjs';
+import { componentsOf } from './topology.mjs';
 import { WfError, YAML, git, matchesAny, now, refuse } from './util.mjs';
 
 export const CAUSES = ['process', 'tooling', 'criteria', 'review', 'test', 'design-system', 'other'];
@@ -76,7 +77,7 @@ function parseLesson(name, text, where, problems) {
   }
   // Older files: `scope: project` with a `repo` meant one repo (now `repo`); without one it spans the project.
   const scope = l.scope === 'plugin' ? 'plugin' : l.repo !== undefined && l.scope !== 'project-wide' ? (l.scope === 'project' && l.repo === null ? 'project' : 'repo') : 'project';
-  return { ...l, id, scope, declaredRepo: l.repo, recurrence: Number(l.recurrence ?? 0), tags: asList(l.tags), paths: asList(l.paths) };
+  return { ...l, id, scope, declaredRepo: l.repo, recurrence: Number(l.recurrence ?? 0), tags: asList(l.tags), paths: asList(l.paths), components: asList(l.components), kinds: asList(l.kinds) };
 }
 
 function readDir(dir, extra, problems) {
@@ -166,6 +167,11 @@ function validate(l, cfg = null) {
   if (!SCOPES.includes(l.scope)) p.push('`scope` is repo (about one repository: `--repo <name>`) or project (spans repos: `--project`); a finding about the workflow itself is a plugin improvement: `wf improve add`');
   if (!STATUSES.includes(l.status)) p.push(`\`status\` is one of ${STATUSES.join(', ')}`);
   if (l.status === 'enforced' && !String(l.mechanism?.ref ?? '').trim()) p.push('an enforced lesson names its mechanism: `mechanism.ref` (the rule id, step id or document that enforces it; `wf lesson apply <id>` prints what to add)');
+  const kinds = asList(l.kinds);
+  if (kinds.some((k) => !FILE_KINDS.includes(k))) p.push(`\`kinds\` are file kinds: ${FILE_KINDS.join(', ')} (not ${kinds.filter((k) => !FILE_KINDS.includes(k)).join(', ')})`);
+  const comps = asList(l.components);
+  if (cfg && comps.some((c) => !cfg.components.some((x) => x.id === c))) p.push(`\`components\` names components of the adapter: ${cfg.components.map((c) => c.id).join(', ') || 'none are declared'} (not ${comps.filter((c) => !cfg.components.some((x) => x.id === c)).join(', ')})`);
+  if (l.scope === 'repo' && cfg && comps.some((c) => cfg.components.some((x) => x.id === c && x.repo !== l.repo))) p.push(`a repo lesson's \`components\` are in its repo ${l.repo}`);
   if (l.scope === 'repo' && cfg && !cfg.repos.some((r) => r.name === l.repo)) p.push(`\`repo\` names the repository the lesson concerns: one of ${cfg.repos.map((r) => r.name).join(', ')}`);
   return p;
 }
@@ -235,6 +241,8 @@ export function addLesson(root, options, actorId) {
     status: doc.status ?? options.status ?? 'proposed',
     tags: asList(doc.tags ?? options.tags),
     paths: asList(doc.paths ?? options.paths),
+    components: asList(doc.components ?? options.components),
+    kinds: asList(doc.kinds ?? options.kinds),
     classes: asList(doc.classes ?? options.classes),
     recurrence: 0,
     created: now(),
@@ -338,38 +346,93 @@ function ticketText(state) {
 
 const label = (l) => (l.status === 'enforced' ? `enforced by ${l.mechanism?.kind}${l.mechanism?.ref ? ` (${l.mechanism.ref})` : ''}` : 'advisory (proposed: no mechanism enforces it yet)');
 
-// Lessons for a role: every non-retired project lesson (proposed and enforced), each with the reasons it matched.
-// Planner (nothing changed yet): a lesson whose repo is in this attempt, or whose tags the ticket mentions, or whose
-// paths the plan predicts. Implementer and reviewer: a changed file in the lesson's repo matching its paths, a lesson
-// without paths for a repo in scope, or a tag the ticket mentions. Enforced and recurring lessons are always kept; the
-// rest are capped at CAP, the omitted ones listed by id.
-export function relevantLessons(root, role, state, changed) {
+// File kinds a lesson may declare (`kinds: [ui, test]`), from the file's path alone. A file can be of several kinds.
+export const FILE_KINDS = ['ui', 'test', 'migration', 'docs', 'script', 'config', 'source'];
+export function kindsOf(file) {
+  const f = String(file).toLowerCase();
+  const base = f.split('/').at(-1);
+  const out = new Set();
+  if (/\.(test|spec|e2e)\.[a-z0-9]+$/.test(f) || /(^|\/)(__tests__|tests?|e2e|specs?|fixtures?)\//.test(f)) out.add('test');
+  if (/(^|\/)migrations?\//.test(f) || /\.migration\.[a-z0-9]+$/.test(f)) out.add('migration');
+  if (/\.(md|mdx|rst|adoc|txt)$/.test(f) || /(^|\/)docs?\//.test(f)) out.add('docs');
+  if (/\.(sh|bash|zsh|ps1)$/.test(f) || /(^|\/)(scripts?|bin)\//.test(f)) out.add('script');
+  if (/^(dockerfile.*|.*\.dockerfile|(docker-)?compose[^/]*\.ya?ml|package\.json|tsconfig[^/]*\.json|\.env.*|makefile)$/.test(base) || /\.(ya?ml|toml|ini|conf)$/.test(f)) out.add('config');
+  if (/\.(tsx|jsx|vue|svelte|css|scss|sass|less|html?)$/.test(f) || /(^|\/)(components?|pages|views|app|styles?)\//.test(f) && /\.(tsx|jsx|ts|js)$/.test(f)) out.add('ui');
+  if (/\.(ts|js|mjs|cjs|py|go|rb|java|kt|rs|cs|php|swift|scala|ex|exs)$/.test(f) && !out.has('test') && !out.has('migration')) out.add('source');
+  return out;
+}
+
+// What a lesson declares about where it applies, in words.
+const declaredScope = (l) => [l.repo ? `repo ${l.repo}` : null, l.components.length ? `components ${l.components.join(', ')}` : null, l.paths.length ? `paths ${l.paths.join(', ')}` : null, l.kinds.length ? `kinds ${l.kinds.join(', ')}` : null].filter(Boolean);
+
+// Named failure: UI lessons of one repo were injected into a quick fix that changed only scripts in another repo, because
+// a lesson without paths matched any repo admitted to the attempt (and a project lesson without paths matched every
+// change); the reviewer had to give each a verdict. A lesson now applies where it declares it does: a changed (or
+// planned) file inside its repo, its components, its path globs and its file kinds, all that it declares. A lesson that
+// declares none of them matches only by its tags in the ticket (`paths: ["**"]` declares "every change").
+function inLessonScope(cfg, l, repo, file) {
+  if (l.repo && repo !== l.repo) return false;
+  if (l.components.length) {
+    if (!repo || !cfg) return false;
+    const comps = componentsOf(cfg, repo, file).map((c) => c.id);
+    if (!l.components.some((c) => comps.includes(c))) return false;
+  }
+  if (l.paths.length && !matchesAny(file, l.paths)) return false;
+  if (l.kinds.length) {
+    const k = kindsOf(file);
+    if (!l.kinds.some((x) => k.has(x))) return false;
+  }
+  return true;
+}
+
+// Lessons for a role: every non-retired project lesson (proposed and enforced) whose declared scope this change falls
+// in, each with the reasons it matched; the rest are returned under `filtered` with why (never put in a bundle).
+// Planner (nothing changed yet): a tag the ticket mentions, a file the plan names that is in the lesson's scope, or the
+// lesson's repo (or one of its components' repos) admitted to the attempt. Implementer: a tag, a planned or already
+// changed file in scope, and its repo only when that repo is the attempt's only repo or the work item's. Reviewer: a tag,
+// or a changed file in scope. Enforced and recurring lessons are always kept; the rest are capped at CAP, the omitted
+// ones listed by id.
+export function relevantLessons(root, role, state, changed, { work = null } = {}) {
+  let cfg = null;
+  try {
+    cfg = loadConfig(root);
+  } catch {}
   const scope = new Set(Object.keys(state.repos ?? {}));
   const classes = new Set((state.work ?? []).map((w) => w.class));
   const text = ticketText(state);
-  const predicted = role === 'planner' ? [] : [];
-  const planned = [...(state.plan?.anchors ?? []), ...(state.plan?.tests?.changed ?? [])].map((a) => String(a).split(/[:\s]/)[0]);
+  const planned = [...(state.plan?.anchors ?? []), ...(state.plan?.tests?.changed ?? [])].map((a) => String(a).split(/[:\s]/)[0]).filter(Boolean);
+  const workRepos = new Set(work?.repos ?? []);
+  const files = Object.entries(changed ?? {}).flatMap(([r, list]) => (list ?? []).map((f) => [r, f]));
   const matches = [];
-  for (const l of loadLessons(root, { state })) {
-    if (l.status === 'retired' || l.scope === 'plugin') continue;
-    if (l.classes?.length && classes.size && !l.classes.some((c) => classes.has(c))) continue;
-    const why = [];
-    for (const t of l.tags) if (new RegExp(`(^|[^a-z0-9])${t.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([^a-z0-9]|$)`).test(text)) why.push(`the ticket mentions "${t}"`);
-    const inScope = !l.repo || scope.has(l.repo);
-    // Before the change exists (planner, implementer): by repo in scope, the ticket and the plan; the implementer also by
-    // anything already changed. The reviewer: by what changed.
-    if (role !== 'reviewer') {
-      if (inScope && l.repo) why.push(`its repo ${l.repo} is in this attempt`);
-      if (!l.repo && !l.paths.length) why.push('it applies to every change');
-      for (const p of [...planned, ...predicted]) if (l.paths.length && matchesAny(p, l.paths)) why.push(`the plan names ${p}`);
+  const filtered = [];
+  for (const l0 of loadLessons(root, { state })) {
+    if (l0.status === 'retired' || l0.scope === 'plugin') continue;
+    const l = { ...l0, components: l0.components ?? [], kinds: l0.kinds ?? [] };
+    const declared = declaredScope(l);
+    if (l.classes?.length && classes.size && !l.classes.some((c) => classes.has(c))) {
+      filtered.push({ id: l.id, title: l.title, repo: l.repo ?? null, reason: `its classes (${l.classes.join(', ')}) are not this attempt's (${[...classes].join(', ')})` });
+      continue;
     }
-    if (role !== 'planner') {
-      const files = Object.entries(changed ?? {}).filter(([r]) => !l.repo || r === l.repo).flatMap(([r, fs]) => fs.map((f) => [r, f]));
-      const hit = l.paths.length ? files.find(([, f]) => matchesAny(f, l.paths)) : null;
-      if (hit) why.push(`${hit[0]}:${hit[1]} matches ${l.paths.join(', ')}`);
-      if (!l.paths.length && inScope) why.push(l.repo ? `it applies to every change in ${l.repo}` : 'it applies to every change');
+    const why = [];
+    // `paths: ["**"]` and nothing else: the lesson says it applies to every change.
+    const everyChange = !l.repo && !l.components.length && !l.kinds.length && l.paths.length > 0 && l.paths.every((p) => p === '**');
+    if (everyChange) why.push('it applies to every change (paths **)');
+    for (const t of l.tags) if (new RegExp(`(^|[^a-z0-9])${t.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([^a-z0-9]|$)`).test(text)) why.push(`the ticket mentions "${t}"`);
+    if (declared.length && !everyChange && role !== 'reviewer') {
+      // A planned file has no repo: judged by the lesson's paths and kinds (a lesson declaring only a repo or components
+      // is matched by its repos below).
+      if (l.paths.length || l.kinds.length) for (const p of planned) if (inLessonScope(null, { ...l, repo: null, components: [] }, null, p)) why.push(`the plan names ${p}`);
+      const repos = [...new Set([l.repo, ...(cfg ? l.components.map((c) => cfg.components.find((x) => x.id === c)?.repo) : [])].filter(Boolean))];
+      const admitted = repos.filter((r) => scope.has(r));
+      if (role === 'planner') for (const r of admitted) why.push(`its repo ${r} is in this attempt`);
+      else for (const r of admitted) if (scope.size === 1 || workRepos.has(r)) why.push(workRepos.has(r) ? `its repo ${r} is this work item's` : `its repo ${r} is in this attempt`);
+    }
+    if (declared.length && !everyChange && role !== 'planner') {
+      const hit = files.find(([r, f]) => inLessonScope(cfg, l, r, f));
+      if (hit) why.push(`${hit[0]}:${hit[1]} is in its scope (${declared.join('; ')})`);
     }
     if (why.length) matches.push({ l, why: [...new Set(why)] });
+    else filtered.push({ id: l.id, title: l.title, repo: l.repo ?? null, reason: !declared.length ? `declares no scope (repo, components, paths or kinds), so only its tags match${l.tags.length ? `, and the ticket mentions none of ${l.tags.join(', ')}` : ', and it has none'}; add \`paths: ["**"]\` if it applies to every change` : role === 'planner' ? `nothing planned is in its scope (${declared.join('; ')})` : `no ${role === 'reviewer' ? 'changed' : 'changed or planned'} file is in its scope (${declared.join('; ')})` });
   }
   const must = (m) => m.l.status === 'enforced' || m.l.recurrence >= 1;
   const order = (a, b) => b.l.recurrence - a.l.recurrence || String(a.l.id).localeCompare(String(b.l.id), undefined, { numeric: true });
@@ -381,6 +444,7 @@ export function relevantLessons(root, role, state, changed) {
     apply: chosen.map(({ l, why }) => ({ id: l.id, title: l.title, repo: l.repo ?? null, cause: l.cause, mechanism: l.mechanism, status: l.status, label: label(l), recurrence: l.recurrence, matched: why, what: l.trigger?.what ?? null })),
     omitted,
     more: omitted.length,
+    filtered: filtered.sort((a, b) => String(a.id).localeCompare(String(b.id), undefined, { numeric: true })),
   };
 }
 

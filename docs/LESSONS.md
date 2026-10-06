@@ -71,8 +71,10 @@ mechanism:
   kind: designSystem-rule    # review-rule | designSystem-rule | planner-criterion-template | reviewer-checklist | gate-check | engine-change | doc
   ref: table-has-pagination  # what enforces it (required when enforced)
 status: proposed             # proposed (advisory) | enforced | retired
-tags: [ui, tables]
-paths: ["src/**/*.tsx"]      # in its repo; none = every change in it
+tags: [ui, tables]           # matched against the ticket's words
+paths: ["src/**/*.tsx"]      # scope: globs (in its repo for a repo lesson); ["**"] on a project lesson = every change
+components: [web]            # scope: adapter component ids (optional)
+kinds: [ui]                  # scope: ui | test | migration | docs | script | config | source (optional)
 recurrence: 0
 ```
 
@@ -81,11 +83,14 @@ recurrence: 0
 - **Capture**: `wf lesson add` (flags or `--file`), recorded in the attempt's ledger. A reopened attempt records its
   lesson before `wf handoff reviewer` (or `--no-lesson "<why>"` / `wf lesson waive --reason`), so it is reviewed and
   delivered with the change.
-- **Use**: every non-retired lesson that applies is in the planner, implementer and reviewer bundles, with why it
-  matched, labelled enforced or advisory. Planner: the ticket's words, the repos in scope, the plan's paths.
-  Implementer: the same, plus what has already changed. Reviewer: the changed files, the ticket's words. Enforced and
-  recurring lessons are never capped; the rest at most 5, omitted ids listed. Handoffs print `lessons injected: ...`;
-  `wf lesson preview --attempt ID --role ...` shows it beforehand.
+- **Use**: every non-retired lesson whose declared scope (repo, components, paths, kinds: all it declares) the change
+  falls in is in the planner, implementer and reviewer bundles, with why it matched, labelled enforced or advisory.
+  Planner: the ticket's words (tags), the plan's paths, the lesson's repo admitted. Implementer: tags, planned and
+  changed files in scope, its repo only when it is the attempt's only repo or the work item's. Reviewer: tags and the
+  changed files in scope. A lesson declaring no scope matches by its tags only. Enforced and recurring lessons are never
+  capped; the rest at most 5, omitted ids listed. Handoffs print `lessons injected: ...` and the filtered ids; filtered
+  lessons stay out of the bundle (no verdict owed). `wf lesson preview --attempt ID --role ...` shows both, with why
+  each was filtered.
 - **Acknowledge**: the implementer adds a commit trailer per lesson (`Lesson <id>: applied - <how>` or
   `Lesson <id>: not-applicable - <why>`); `wf handoff reviewer` refuses until each is there and records them.
 - **Judge**: the reviewer gives each a verdict (`complied | not-applicable | finding`); a `finding` is a recurrence.

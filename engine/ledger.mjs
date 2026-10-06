@@ -204,7 +204,7 @@ export function reduce(entries) {
         break;
       case 'review.recorded':
         s.review = { ...d, at: e.at };
-        s.reviews.push({ reviewer: d.closure?.reviewer ?? null, at: e.at, reviewerModel: d.reviewerModel ?? null, handoff: d.handoff ?? null, revealed: d.revealed ?? false, closure: d.closure, provenance: d.provenance ?? null, reads: d.reads ?? null, raw: d.raw ?? null, tree: d.tree });
+        s.reviews.push({ reviewer: d.closure?.reviewer ?? null, at: e.at, reviewerModel: d.reviewerModel ?? null, handoff: d.handoff ?? null, revealed: d.revealed ?? false, closure: d.closure, provenance: d.provenance ?? null, identity: d.identity ?? null, reads: d.reads ?? null, raw: d.raw ?? null, tree: d.tree });
         break;
       case 'base.merged':
         s.baseMerges.push({ ...d, at: e.at });
