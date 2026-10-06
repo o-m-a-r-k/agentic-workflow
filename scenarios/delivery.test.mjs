@@ -268,7 +268,7 @@ export default {
 
 // Named failure (0.4.5, delta review of 40da633): an adapter reporting `rejected` or `ci-failed` took the same path as a
 // pending merge, so `wf deliver` exited 0 and a rejected delivery read as success. Both now refuse; waiting stays exit 0.
-test('a delivery adapter that reports rejected or ci-failed refuses; awaiting-merge waits with exit 0', () => {
+test('a delivery adapter that reports rejected, ci-failed or an unknown state refuses; awaiting-merge and ci-running wait with exit 0', () => {
   const adapter = `
 import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -278,17 +278,28 @@ export default {
     return { url: 'https://git.example.test/mr/2', branch: ctx.branch };
   },
   observe(ctx) {
-    return { state: fs.readFileSync(ctx.root + '/../observe.state', 'utf8').trim(), evidence: 'pipeline 7' };
+    const st = fs.readFileSync(ctx.root + '/../observe.state', 'utf8').trim();
+    return st === '(none)' ? { evidence: 'pipeline 7' } : { state: st, evidence: 'pipeline 7' };
   },
   readback() { return { ok: true }; },
 };`;
   const { base, root } = singleRepoProject('mr-states', { delivery: { kind: './delivery/mr.mjs' }, gate: { steps } }, { '.workflow/delivery/mr.mjs': adapter });
   const { id } = toAccepted(root, base, { item: 'ENG-71' });
   const say = (st) => fs.writeFileSync(path.join(root, '..', 'observe.state'), st);
-  say('awaiting-merge');
-  const w = wf(root, ['deliver', '--attempt', id]);
-  assert.equal(w.code, 0, w.err);
-  assert.match(w.out, /awaiting-merge \(https:\/\/git\.example\.test\/mr\/2\)\. Run `wf deliver` again once it is merged\./);
+  for (const st of ['awaiting-merge', 'ci-running']) {
+    say(st);
+    const w = wf(root, ['deliver', '--attempt', id]);
+    assert.equal(w.code, 0, w.err);
+    assert.match(w.out, new RegExp(`${st} \\(https://git\\.example\\.test/mr/2\\)\\. Run \`wf deliver\` again once it is merged\\.`));
+  }
+  // Delta review of b28681a: only the pending states wait. An unknown state, a typo or no state at all refuses too.
+  for (const st of ['failed', 'ci_failed', '(none)']) {
+    say(st);
+    const r = wf(root, ['deliver', '--attempt', id]);
+    assert.notEqual(r.code, 0, st);
+    assert.match(r.err, new RegExp(`not delivered: app: the delivery adapter reported ${st === '(none)' ? 'no state' : `an unknown state "${st}"`}; it must report one of integrated, awaiting-merge, ci-running, ci-failed, rejected`), st);
+    assert.equal(state(root, id).delivery.completedAt, null, `${st}: nothing delivered`);
+  }
   for (const st of ['rejected', 'ci-failed']) {
     say(st);
     const r = wf(root, ['deliver', '--attempt', id]);

@@ -671,6 +671,17 @@ export function acceptReview(root, options) {
   return loadState(root, state.id);
 }
 
+// The states an adapter's `observe` reports (docs/DESIGN.md). Only the pending ones wait.
+const ADAPTER_STATES = ['integrated', 'awaiting-merge', 'ci-running', 'ci-failed', 'rejected'];
+const PENDING = ['awaiting-merge', 'ci-running'];
+const trustedAdapterKind = (root, cfg, state) => {
+  try {
+    return loadConfigAtCommit(root, cfg, state.adapterBase).delivery.kind;
+  } catch {
+    return 'the adapter file';
+  }
+};
+
 async function loadDeliveryAdapter(root, cfg, state) {
   const trusted = loadConfigAtCommit(root, cfg, state.adapterBase);
   if (trusted.delivery.kind === 'push-main') return null;
@@ -847,10 +858,13 @@ export async function deliver(root, options) {
       const ctx = { root, repo, worktree: state.repos[name].worktree, attempt: state.id, item: state.item, branch: branchName(state.id) };
       const integrated = await adapter.integrate(ctx);
       const observed = await adapter.observe({ ...ctx, ...integrated });
-      if (observed.state !== 'integrated') {
+      if (observed?.state !== 'integrated') {
         append(root, state.id, 'repo.integrating', { repo: name, ...integrated, observed }, actor(options));
-        // Named failure (0.4.5, delta review of 40da633): `rejected` and `ci-failed` took the waiting path, so a rejected
-        // delivery exited 0 and read as success. Only a pending state waits; these refuse.
+        // Named failure (0.4.5, delta reviews of 40da633 and b28681a): every state but `integrated` took the waiting path,
+        // so a rejected delivery, a failed CI, a typo or no state at all exited 0 and read as success. Only a pending state
+        // (`awaiting-merge`, `ci-running`) waits; `rejected` and `ci-failed` refuse with what to do; anything else refuses
+        // as an adapter that does not report a documented state (docs/DESIGN.md).
+        if (!PENDING.includes(observed?.state) && !['rejected', 'ci-failed'].includes(observed?.state)) throw refuse(`not delivered: ${name}: the delivery adapter reported ${observed?.state === undefined || observed?.state === null || observed?.state === '' ? 'no state' : `an unknown state ${JSON.stringify(String(observed.state))}`}; it must report one of ${ADAPTER_STATES.join(', ')}`, `fix the delivery adapter (${trustedAdapterKind(root, cfg, state)}) so that \`observe\` returns one of the documented states, commit it on the base branch, then \`wf deliver\` again`);
         if (observed.state === 'rejected' || observed.state === 'ci-failed') throw refuse(`not delivered: ${name}: the delivery adapter reports ${observed.state}${integrated.url ? ` (${integrated.url})` : ''}${observed.evidence ? `: ${observed.evidence}` : ''}`, observed.state === 'rejected' ? 'the change was rejected where it is integrated: find out why, fix it through the implementer (a new gate and review follow), or abandon the attempt; then `wf deliver` again' : 'its CI failed where it is integrated: read that CI run, fix the cause through the implementer, gate it, then `wf deliver` again');
         if (!state.tracker.done.some((d) => d.event === 'integrating')) emitTrackerEvent(root, cfg, state.id, 'integrating', { url: integrated.url ?? '' });
         return { state: loadState(root, state.id), waiting: { repo: name, ...observed, url: integrated.url } };
