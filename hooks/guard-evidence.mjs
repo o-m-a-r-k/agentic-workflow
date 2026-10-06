@@ -18,7 +18,9 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { touchesEvidence } from '../engine/paths.mjs';
 
-const REFUSAL = 'agentic-workflow: this touches workflow evidence. Evidence under .wf-evidence/ is written only by `wf` commands: read it with the Read tool, get screenshots out with `wf export screenshots`, and run every other `wf` command as one plain invocation.';
+// I-16, named failure: the refusal said neither what matched nor how to avoid it, so agents split commands or switched
+// tools by trial. It names the matched token (in `verdict`) and the ways around it that need no exception here.
+const REFUSAL = 'agentic-workflow: refused: this names or targets the workflow evidence folder, which only `wf` writes. To avoid this: say "the evidence folder" instead of its name in commit messages, echo text and grep patterns; read evidence with the Read tool or `wf evidence list` / `wf evidence show <path>`; copy screenshots out with `wf export screenshots`; run each `wf` command as one plain invocation (no ; && | $( ) redirections or quotes).';
 
 // Run as a hook only when executed directly; importing (tests) has no side effects.
 if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
@@ -35,7 +37,7 @@ if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === imp
       verdict = mentionsEvidence(input) ? 'the hook could not judge this input' : null;
     }
     if (verdict) {
-      process.stderr.write(`${REFUSAL} (${verdict})\n`);
+      process.stderr.write(verdict.startsWith(PTY) ? `${verdict}\n` : `${REFUSAL} (${verdict})\n`);
       process.exit(2);
     }
     process.exit(0);
@@ -88,26 +90,57 @@ const unescape = (text) => text.replace(/\\x([0-9a-f]{1,2})|\\u([0-9a-f]{4})|\\U
   }
 });
 
-export function mentionsEvidence(text) {
+// The same decision as always (whether text refers to the evidence), returning what matched for the refusal (I-16):
+// the whitespace-separated token of the input that triggers the check, or the input itself when the match spans tokens.
+// Null when nothing does. Only the report is new; every predicate is unchanged.
+const shown = (t) => (t.length > 80 ? `${t.slice(0, 77)}...` : t);
+const tokenOf = (text, pred) => {
+  const t = String(text ?? '').split(/\s+/).find((x) => x && pred(x));
+  return shown(t ?? String(text ?? '').trim());
+};
+const assembled = (raw) => /[$`]/.test(raw) && (/wf-|\.wf\b/.test(raw) || /=\s*['"]?evidence|[$`})]evidence|evidence[$`{(]/.test(raw));
+const squeeze = (raw) => raw.replace(/\$'|\$\{|[\s'"`\\{},]/g, '');
+const glued = (raw) => /(^|[^a-z0-9])[*?$]+evidence\b|\bevidence[*?]/.test(raw.replace(/['"\\]/g, ''));
+
+export function evidenceMatch(text) {
   const raw = fold(text);
-  if (raw.includes('wf-evidence') || fold(unescape(raw)).includes('wf-evidence')) return true;
+  if (raw.includes('wf-evidence')) return tokenOf(text, (t) => fold(t).includes('wf-evidence'));
+  if (fold(unescape(raw)).includes('wf-evidence')) return tokenOf(text, (t) => fold(unescape(fold(t))).includes('wf-evidence'));
   // A path assembled at run time: an expansion or substitution together with a part of the name (`wf-` or `.wf`, or
   // `evidence` assigned to a variable or touching an expansion). The word evidence alone in prose next to a `$` does not
   // count (named false positive, 0.3.0).
-  if (/[$`]/.test(raw) && (/wf-|\.wf\b/.test(raw) || /=\s*['"]?evidence|[$`})]evidence|evidence[$`{(]/.test(raw))) return true;
+  if (assembled(raw)) return tokenOf(text, (t) => /wf-|\.wf\b|evidence/.test(fold(t)));
   // Brace alternatives reassemble when braces and commas are dropped.
-  const squeezed = raw.replace(/\$'|\$\{|[\s'"`\\{},]/g, '');
-  if (squeezed.includes('wf-evidence') || squeezed.includes('wf-ev')) return true;
+  const squeezed = squeeze(raw);
+  if (squeezed.includes('wf-evidence') || squeezed.includes('wf-ev')) return tokenOf(text, (t) => squeeze(fold(t)).includes('wf-ev'));
   // `evidence` glued to a glob or expansion character (`*evidence`, `.wf-{evidence,x}` is caught above): not a comma, a
   // brace or a bracket in prose or code (named false positive, 0.3.0: "keep evidence, ledger" was refused).
-  if (/(^|[^a-z0-9])[*?$]+evidence\b|\bevidence[*?]/.test(raw.replace(/['"\\]/g, ''))) return true;
-  return raw.split(/[\s;&|()<>'"`=]+/).some((t) => t && globMatchesEvidence(t));
+  if (glued(raw)) return tokenOf(text, (t) => glued(fold(t)));
+  const glob = raw.split(/[\s;&|()<>'"`=]+/).find((t) => t && globMatchesEvidence(t));
+  return glob ? shown(glob) : null;
 }
 
-// Exactly one plain `wf` invocation: nothing that chains, substitutes, redirects, quotes or escapes.
+export const mentionsEvidence = (text) => evidenceMatch(text) !== null;
+
+// A speed bump, not a defence (second security review of 0.4.5): `wf discovered defer` runs only at an interactive
+// terminal, and a pseudo-terminal wrapper gives an agent one. A Bash command that mentions it together with a wrapper is
+// refused. Raw text, like the rest of this hook; an agent determined to wrap it can (docs/trust-model.md).
+const PTY = 'agentic-workflow: refused: `wf discovered defer` is for the owner at their own terminal; it is never run through a pseudo-terminal wrapper';
+const DEFER = /\bdiscovered\b[\s\S]*\bdefer\b/i;
+const WRAPPER = /(?:^|[^\w-])(script|expect|unbuffer|socat|faketty|empty|tmux|screen|ptyrun|pty\.spawn|pty\.fork|openpty|forkpty|ssh\s+-\S*t|node-pty|pexpect)(?![\w-])/i;
+export function ptyWrapped(command) {
+  const c = fold(command);
+  if (!DEFER.test(c)) return null;
+  const m = WRAPPER.exec(c);
+  return m ? `${PTY} (matched "${m[1]}")` : null;
+}
+
+// Exactly one plain `wf` invocation: nothing that chains, substitutes, redirects, quotes or escapes. `wf run` is not
+// one (named failure, 0.4.5: `wf run --lease X -- <command>` executes its command, so a command on the evidence passed
+// as a plain `wf` invocation); it is judged like any other command.
 export const isPlainWf = (command) => {
   const c = String(command).trim();
-  return /^wf [a-z][a-z-]*( [^\s].*)?$/.test(c) && !/[;&|`$()<>\n\r\\'"]/.test(c);
+  return /^wf [a-z][a-z-]*( [^\s].*)?$/.test(c) && !/[;&|`$()<>\n\r\\'"]/.test(c) && !/^wf run(\s|$)/.test(c);
 };
 
 // The real location of a path whose ancestors may be symlinks (the nearest existing ancestor is resolved).
@@ -142,10 +175,15 @@ export function check(data) {
   }
   const bashTool = data.tool_name === undefined || data.tool_name === 'Bash';
   if (typeof t.command === 'string') {
+    if (bashTool) {
+      const pty = ptyWrapped(t.command);
+      if (pty) return pty;
+    }
     // A Bash command; an unexpected `command` on another tool is judged the same way, never as a whitelist.
     if (bashTool && isPlainWf(t.command)) return null;
-    if (mentionsEvidence(t.command)) return 'the command mentions .wf-evidence';
-    if (cwdInEvidence) return 'the command runs inside .wf-evidence';
+    const matched = evidenceMatch(t.command);
+    if (matched) return `matched ${JSON.stringify(matched)}`;
+    if (cwdInEvidence) return `the command runs inside the evidence folder (working directory ${cwd})`;
     return null;
   }
   if (t.command !== undefined) return mentionsEvidence(JSON.stringify(t.command)) || cwdInEvidence ? 'a command that is not text' : null;

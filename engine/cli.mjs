@@ -13,7 +13,7 @@ import { openCount } from './improve.mjs';
 import { LESSON_FILE, addLesson, applySnippet, exportPluginLessons, lessonPrompts, lessonWarnings, loadLessons, moveLesson, recur, relevantLessons, reviewLessons, setLesson } from './lessons.mjs';
 import { LinkRefused, changesOf, rebaseline, releaseAttempt, seal, setVerifyLevel, verifyAttempt } from './evidence.mjs';
 import { acceptReview, amendCriteria, designWarning, batchCreate, batchEject, closeAfterHandoff, deliver, deliveredFiles, exportScreenshots, freezeCriteria, handoff, narrowDelivery, needsShown, nextAction, outsideWarning, recordReview, recordShown, reopen, screenshotsExportDir, shownDraftFile, uncovered, withAttempt } from './lifecycle.mjs';
-import { addDiscovered, closeDiscovered, discoveredLine, openDiscovered } from './discovered.mjs';
+import { addDiscovered, channelOf, closeDiscovered, discoveredLine, openDiscovered } from './discovered.mjs';
 import { detect, doctor, register, registry, setEnabled, sync, writeDraft } from './onboard.mjs';
 import * as secrets from './secrets.mjs';
 import { report, toCsv, toHandoffCsv, toHtml } from './telemetry.mjs';
@@ -40,7 +40,8 @@ Work
   wf criteria amend --file f --reason "why" [--add-repo R]
                                     --add-repo: a fix needs another repo; its worktree joins the attempt with the work items
   wf discovered add --summary "..." [--where file:line] [--found-by ID] [--blocked-by W] | list
-  wf discovered close D1 --fixed SHA | --deferred --decision "<the owner's words>"
+  wf discovered close D1 --fixed SHA | --deferred --quote "<their exact words>"
+  wf discovered defer D1 --reason "why"   the owner, in their own terminal: types the id to confirm
                                     every issue found during the ticket: fixed in it, or deferred only by the owner
   wf handoff planner|implementer|reviewer|tester --agent ID [--work W1] [--session SID] [--runtime claude|codex]
   wf check [--repo R]               light steps only, for the implementer; reused by the gate, never counts as one
@@ -51,7 +52,8 @@ Work
   wf review --closure file.json     record the reviewer's closure
   wf accept                         accept the review
   wf summary --file summary.md      the owner's plain-language summary for the delivered comment
-  wf deliver [--summary-file F]     integrate every repo, then start the tracker handoff
+  wf deliver [--summary-file F] [--acknowledge-deferrals D2,D3]
+                                    integrate every repo, then start the tracker handoff (every deferral acknowledged first)
   wf shown --file shown.json        record that every delivered screenshot was shown in the chat, with its caption and anomalies
   wf delivery narrow --keep SHA,... | --file keep.json --reason "why" [--dry-run]
                                     once, before \`wf shown\`: keep only this ticket's files of a delivered set an over-broad glob filled
@@ -75,6 +77,8 @@ Status
   wf report [--all] [--csv FILE] [--handoffs-csv FILE] [--html FILE]
   wf verify [--attempt ID | --all]  re-hash every recorded evidence file, check the chain and its anchor
   wf verify --accept-changes --reason "why"   show changed evidence files and accept them (recorded, shown everywhere)
+  wf evidence list [--kind K] | wf evidence show PATH
+                                    read an attempt's evidence (read-only; no shell command needs the folder name)
   wf evidence release [--attempt ID | --closed | --older-than DAYS] [--dry-run]
                                     delete closed attempts' evidence through the engine (protection lifted, tombstone kept)
   wf export [--out FILE] [--json]   one self-contained page for the attempt (a view of the evidence)
@@ -522,7 +526,7 @@ async function dispatch(cmd, sub, positional, options) {
       // I-18: the discovered-issue ledger. Any role records what it finds; only the owner defers, in their own words.
       if (sub === 'add') {
         const r = addDiscovered(root, options);
-        print(options, `discovered ${r.id} recorded on ${r.state.id}; fix it in this ticket and close it with the fix commit: \`wf discovered close ${r.id} --fixed <commit>\` (only the owner defers: \`--deferred --decision "<their words>"\`)`, r.state.discovered.at(-1));
+        print(options, `discovered ${r.id} recorded on ${r.state.id}${r.anchored ? '' : ` (no transcript anchor: ${r.anchorProblem}; only \`wf discovered defer ${r.id}\` at the owner's terminal can defer it)`}; fix it in this ticket and close it with the fix commit: \`wf discovered close ${r.id} --fixed <commit>\` (only the owner defers: \`--deferred --quote "<their exact words>"\`)`, r.state.discovered.at(-1));
         return 0;
       }
       if (sub === 'close') {
@@ -531,12 +535,19 @@ async function dispatch(cmd, sub, positional, options) {
         print(options, r.outcome === 'fixed' ? `${d.id} fixed in ${r.repo}@${r.commit.slice(0, 10)}` : `${d.id} deferred on the owner's decision: "${d.deferred.decision}"`, d);
         return 0;
       }
+      if (sub === 'defer') {
+        const { deferInTerminal } = await import('./discovered.mjs');
+        const r = await deferInTerminal(root, positional[0], options);
+        const d = r.state.discovered.find((x) => x.id === positional[0]);
+        print(options, `${d.id} deferred by the owner at the terminal: "${d.deferred.decision}"`, d);
+        return 0;
+      }
       if (sub === 'list' || !sub) {
         const s = openState(root, options);
         print(options, s.discovered.length ? s.discovered.map(discoveredLine).join('\n') : `no discovered issues on ${s.id}`, s.discovered);
         return 0;
       }
-      throw new WfError('usage: wf discovered add --summary "..." [--where file:line] [--found-by ID] | list | close D1 --fixed SHA | --deferred --decision "<the owner\'s words>"');
+      throw new WfError('usage: wf discovered add --summary "..." [--where file:line] [--found-by ID] | list | close D1 --fixed SHA | --deferred --quote "<their exact words>"');
     }
     case 'handoff': {
       const r = handoff(root, sub, options);
@@ -651,7 +662,8 @@ async function dispatch(cmd, sub, positional, options) {
       const after = loadState(root, r.state.id);
       const members = (after.batch?.members ?? []).map((m) => showBlock(root, loadState(root, m))).join('');
       const comment = after.tracker.pending.some((a) => a.rendered === 'delivered') ? `\ndelivered comment to post (rendered from your summary, the user-visible UAT scope, the screenshots and known limits): ${commentFile(root, after.id)}\n  replace each {assetUrl:<title>} with the assetUrl its upload returned, so every screenshot shows inline; post it unchanged otherwise` : '';
-      print(options, `delivered ${after.id}: ${Object.values(after.delivery.repos).map((d) => `${d.repo}${d.commit ? `@${d.commit.slice(0, 10)}` : ' (no changes)'}`).join(', ')}${api}${showBlock(root, after)}${members}${comment}\nnext: ${nextAction(root, after)}`, after);
+      const deferrals = (after.discovered ?? []).filter((x) => x.status === 'deferred').map((x) => `\n  ${x.id} deferred (${x.deferred.source?.provenance ?? 'recorded'}${x.deferred.source?.file ? `, ${x.deferred.source.file}:${x.deferred.source.line}` : ''}): ${x.summary}\n    taken as the owner's decision: "${x.deferred.decision}"\n    channel: ${channelOf(x)}`).join('');
+      print(options, `delivered ${after.id}: ${Object.values(after.delivery.repos).map((d) => `${d.repo}${d.commit ? `@${d.commit.slice(0, 10)}` : ' (no changes)'}`).join(', ')}${api}${deferrals ? `\ndeferred issues (show these to the owner: this is what was taken as their decision):${deferrals}` : ''}${showBlock(root, after)}${members}${comment}\nnext: ${nextAction(root, after)}`, after);
       return 0;
     }
     case 'tracker': {
@@ -877,7 +889,27 @@ async function dispatch(cmd, sub, positional, options) {
       throw new WfError('usage: wf lesson add|waive|recur|move|set|apply|show|list|preview|review|export');
     }
     case 'evidence': {
-      if (sub !== 'release') throw new WfError('usage: wf evidence release [--attempt ID | --closed | --older-than DAYS] [--reason "why"] [--dry-run]');
+      // I-16: read-only access to an attempt's evidence, so no shell command needs the folder's name.
+      if (sub === 'list') {
+        const { listEvidence } = await import('./evidence-read.mjs');
+        const s = openState(root, options);
+        const r = listEvidence(root, s, { kind: typeof options.kind === 'string' ? options.kind : null });
+        const groups = new Map();
+        for (const f of r.files) groups.set(f.kind, [...(groups.get(f.kind) ?? []), f]);
+        const text = [...groups].map(([k, fs]) => `${k} (${fs.length}):\n${fs.map((f) => `  ${f.path}${f.size !== null ? `  ${f.size} B` : ''}\n    ${f.file}`).join('\n')}`).join('\n');
+        const shots = groups.has('screenshot') ? `\nscreenshots: copy them out with \`wf export screenshots --gate --attempt ${s.id} --to <folder>\` and view the copies` : '';
+        print(options, `${r.files.length ? text : `no evidence files${options.kind ? ` of kind ${options.kind}` : ''} in ${s.id}`}${shots}\nread a text file: \`wf evidence show <path> --attempt ${s.id}\`, or the Read tool on the full path`, r);
+        return 0;
+      }
+      if (sub === 'show') {
+        const { showEvidence } = await import('./evidence-read.mjs');
+        const s = openState(root, options);
+        const r = showEvidence(root, s, positional[0]);
+        if (options.json) print(options, '', r);
+        else process.stdout.write(`${r.text}${r.text.endsWith('\n') ? '' : '\n'}${r.truncated ? `… (${r.size} B; the first part only: read the rest with the Read tool on ${r.file})\n` : ''}`);
+        return 0;
+      }
+      if (sub !== 'release') throw new WfError('usage: wf evidence list [--kind K] | show <path> | release [--attempt ID | --closed | --older-than DAYS] [--reason "why"] [--dry-run]');
       // The sanctioned way to delete evidence: closed attempts only, protection lifted by the engine, a tombstone left.
       const pick = options.attempt ? [resolveAttempt(root, options)] : listAttempts(root);
       const cutoff = options['older-than'] !== undefined ? Date.now() - Number(options['older-than']) * 86400000 : null;

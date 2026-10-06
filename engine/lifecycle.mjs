@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { actor, addRepoWorktree, branchName, changedFiles, cleanupWorktrees, entry, openState, treeHashes, worktreeDir } from './attempt.mjs';
-import { discoveredVerdicts, openDiscovered, seamVerdicts, unrecordedInReports } from './discovered.mjs';
+import { channelOf, discoveredVerdicts, openDiscovered, seamVerdicts, unacknowledged, unrecordedInReports } from './discovered.mjs';
 import { ADAPTER_DIR, adapterFileAtCommit, agentTypeFor, declared, loadConfig, loadConfigAtCommit, repoDir, roleClass } from './config.mjs';
 import { focusedSkips, gatePassedForCurrentTree, screenshots } from './gate.mjs';
 import { append, attemptDir, evidenceRoot, keptFiles, listAttempts, loadState, openEvidence } from './ledger.mjs';
@@ -640,7 +640,7 @@ export function acceptReview(root, options) {
   for (const d of state.discovered ?? []) if (!handedIds.has(d.id)) problems.push(`discovered ${d.id} was recorded after this review round was handed (${d.summary}); hand the tree to a fresh reviewer (\`wf handoff reviewer --agent <new id>\`)`);
   const xv = discoveredVerdicts(reviewedBundle?.discovered ?? [], r.closure);
   for (const p of xv.problems) problems.push(`discovered ${p}; hand the tree to a fresh reviewer (\`wf handoff reviewer --agent <new id>\`)`);
-  for (const v of xv.verdicts) if (v.verdict === 'open') problems.push(`discovered ${v.id}: the reviewer found it open (${v.evidence}); fix it in this ticket through the implementer (or record the owner's deferral: \`wf discovered close ${v.id} --deferred --decision "<their words>"\`), then hand the tree to a fresh reviewer`);
+  for (const v of xv.verdicts) if (v.verdict === 'open') problems.push(`discovered ${v.id}: the reviewer found it open (${v.evidence}); fix it in this ticket through the implementer (or record the owner's deferral: \`wf discovered close ${v.id} --deferred --quote "<their exact words>"\`), then hand the tree to a fresh reviewer`);
   // I-19: every repo added for a fix had its seam judged on both sides by this round.
   const handedRepos = new Set((reviewedBundle?.addedRepos ?? []).map((a) => a.repo));
   for (const a of state.addedRepos ?? []) if (!handedRepos.has(a.repo)) problems.push(`repo ${a.repo} was added after this review round was handed; hand the tree to a fresh reviewer`);
@@ -744,7 +744,24 @@ export async function deliver(root, options) {
   // I-18: an issue found during the ticket ends fixed in it or deferred by the owner, never open at delivery.
   for (const x of [state, ...(state.batch?.members ?? []).map((m) => loadState(root, m))]) {
     const open = openDiscovered(x);
-    if (open.length) throw refuse(`not delivered: ${open.length} discovered issue(s) are open${x.id !== state.id ? ` in ${x.id}` : ''}: ${open.map((d) => `${d.id} ${d.summary}`).join('; ')}`, `fix it in this ticket and close it with the fix commit (\`wf discovered close <id> --fixed <commit>\`; a fix after acceptance needs the gate and a fresh review), or, only on the owner's decision, \`wf discovered close <id> --deferred --decision "<the owner's own words>"\``);
+    if (open.length) throw refuse(`not delivered: ${open.length} discovered issue(s) are open${x.id !== state.id ? ` in ${x.id}` : ''}: ${open.map((d) => `${d.id} ${d.summary}`).join('; ')}`, `fix it in this ticket and close it with the fix commit (\`wf discovered close <id> --fixed <commit>\`; a fix after acceptance needs the gate and a fresh review), or, only on the owner's decision, \`wf discovered close <id> --deferred --quote "<their exact words>"\``);
+  }
+  // Every deferral counts only once the owner has seen it here and acknowledged it: no channel proves a person.
+  {
+    const owed = unacknowledged(root, state, (m) => loadState(root, m));
+    const given = typeof options['acknowledge-deferrals'] === 'string' ? options['acknowledge-deferrals'].split(',').map((x) => x.trim()).filter(Boolean) : [];
+    const keys = new Set(owed.map((o) => o.key));
+    const stray = given.filter((g) => !keys.has(g));
+    if (stray.length) throw refuse(`${stray.join(', ')} ${stray.length > 1 ? 'are' : 'is'} not a deferred issue of ${state.id} awaiting acknowledgement${owed.length ? ` (awaiting: ${[...keys].join(', ')})` : ''}`);
+    const missing = owed.filter((o) => !given.includes(o.key));
+    if (missing.length) {
+      const list = owed.map((o) => `  - ${o.key}: ${o.d.summary}\n      owner's words: "${o.d.deferred.decision}"\n      channel: ${channelOf(o.d)}`).join('\n');
+      throw refuse(`not delivered: ${owed.length} deferral(s) not acknowledged by the owner at delivery:\n${list}${given.length ? `\n  not acknowledged: ${missing.map((o) => o.key).join(', ')}` : ''}`, `show this list to the owner; once they confirm each is theirs, \`wf deliver --acknowledge-deferrals ${[...keys].join(',')}\` (anything they did not decide: reopen it with the fix instead)`);
+    }
+    const byAttempt = new Map();
+    for (const o of owed) byAttempt.set(o.attempt, [...(byAttempt.get(o.attempt) ?? []), o.d.id]);
+    for (const [aid, ids] of byAttempt) append(root, aid, 'discovered.acknowledged', { ids }, actor(options));
+    if (owed.length) state = loadState(root, state.id);
   }
   if (state.batch) {
     for (const m of state.batch.members) {
@@ -1366,7 +1383,7 @@ function phaseAction(cfg, state) {
   }
   if (state.lane !== 'batch' && !state.handoffs.some((h) => h.role === 'implementer')) return `start the implementer: \`wf handoff implementer --agent <id>\` [${agentTypeFor(cfg, 'implementer')}]`;
   const openIssues = openDiscovered(state);
-  if (openIssues.length) return `${openIssues.filter((d) => d.blockedBy).map((d) => `route ${d.id} to the implementer of ${d.blockedBy} (continue it with SendMessage); `).join('')}fix the discovered issue(s) ${openIssues.map((d) => d.id).join(', ')} in this ticket through the implementer that found each (never yourself) (\`wf discovered list\`), commit, then \`wf discovered close <id> --fixed <commit>\`; a criterion or scope that blocks the fix is amended (\`wf criteria amend --file <f> --reason "why"\`, \`--add-repo <repo>\` when the fix needs another repo); defer only on the owner's own decision (\`--deferred --decision "<their words>"\`)`;
+  if (openIssues.length) return `${openIssues.filter((d) => d.blockedBy).map((d) => `route ${d.id} to the implementer of ${d.blockedBy} (continue it with SendMessage); `).join('')}fix the discovered issue(s) ${openIssues.map((d) => d.id).join(', ')} in this ticket through the implementer that found each (never yourself) (\`wf discovered list\`), commit, then \`wf discovered close <id> --fixed <commit>\`; a criterion or scope that blocks the fix is amended (\`wf criteria amend --file <f> --reason "why"\`, \`--add-repo <repo>\` when the fix needs another repo); defer only on the owner's own decision (\`--deferred --quote "<their exact words>"\`)`;
   if (state.accepted) return state.batchOf ? `waiting for batch ${state.batchOf}` : 'deliver: `wf deliver`';
   // Order: review the committed change (the gate may run in parallel), fix findings, gate, then an evidence pass.
   const g = state.lastGate;
