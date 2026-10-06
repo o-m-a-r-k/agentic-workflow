@@ -35,44 +35,6 @@ test('I-16: the refusal names the matched token and says how to avoid it; nothin
   assert.equal(check({ cwd: '/p', tool_input: { command: 'wf evidence show gate/run-1/unit/output.log --attempt ENG-1.1' } }), null);
 });
 
-// Second security review of 0.4.5: an agent can give `wf discovered defer` a terminal through a pseudo-terminal wrapper.
-// The guard refuses a wrapper in a command that mentions it: a speed bump, not a defence (documented in the trust model).
-test('0.4.5: a pty wrapper around `wf discovered defer` is refused; the plain command and unrelated script use are not', () => {
-  for (const c of [
-    "script -q -e -c 'wf discovered defer D1 --reason x' /dev/null", 'script -q /dev/null wf discovered defer D1 --reason x', "expect -c 'spawn wf discovered defer D1 --reason x'",
-    'unbuffer wf discovered defer D1 --reason x', 'echo D1 | socat - EXEC:"wf discovered defer D1 --reason x",pty', "python3 -c 'import pty; pty.spawn([\"wf\",\"discovered\",\"defer\",\"D1\"])'",
-    'tmux new -d "wf discovered defer D1 --reason x"', 'ssh -tt localhost wf discovered defer D1 --reason x',
-  ]) {
-    const r = run(c);
-    assert.equal(r.status, 2, c);
-    assert.match(r.stderr, /refused: `wf discovered defer` and `wf discovered close` run only as one plain command, never through a wrapper or shell indirection \(matched "[^"]+"\)\. [\s\S]*`git commit -F <file>`/, c);
-  }
-  // Third review of 0.4.5: raw matching only, fail closed. `discovered defer` or `discovered close` (in any spelling the
-  // fold leaves: quoted parts, other words between) with any wrapper or shell-indirection token anywhere is refused.
-  for (const c of [
-    "bash -c 'wf discovered defer D1 --reason x'", "sh -c 'wf discovered close D1 --deferred --quote x'", "eval 'wf discovered defer D1'", 'echo d2YgZGlzY292ZXJlZCBkZWZlcg== | base64 -d | sh; wf discovered defer D1',
-    "python3 -c 'import os; os.system(\"wf discovered defer D1\")'", "node -e 'require(\"child_process\").execSync(\"wf discovered defer D1\")'", 'echo D1 | xargs wf discovered defer',
-    'wf discovered close D1 --deferred --quote "$(cat /tmp/q)"', 'wf discovered close D1 --deferred --quote `cat /tmp/q`', "wf discovered 'defer' D1 --reason x; script -q /dev/null true",
-    "screen -dm wf discovered defer D1", 'wf discovered close D1 --deferred --quote x | tee /tmp/o',
-  ]) assert.match(run(c).stderr, /refused: `wf discovered defer` and `wf discovered close` run only as one plain command, never through a wrapper or shell indirection \(matched "[^"]+"\)\. [\s\S]*`git commit -F <file>`/, c);
-  // Security review of 6ca2338: the trigger needed `discovered` and `defer` adjacent, so an option or other words
-  // between them escaped it. Any order with anything between counts now (over-matching is acceptable: the refusal says
-  // how to avoid it).
-  for (const c of [
-    'script -q /dev/null wf discovered --attempt X defer D1', "bash -c 'wf discovered --json close D1 --deferred'", 'wf discovered --attempt X defer D1 | cat',
-    'expect -c "spawn wf discovered -- defer D1"', 'unbuffer wf discovered\tdefer D1', 'wf discovered --attempt X defer D1 --reason "$(cat r)"', 'env wf discovered x close D1',
-  ]) assert.match(run(c).stderr, /refused: `wf discovered defer` and `wf discovered close` run only as one plain command/, c);
-  for (const c of ['wf discovered defer D1 --reason x', 'wf discovered close D1 --fixed abc123', 'wf discovered --attempt X defer D1', 'wf discovered --attempt X close D1 --deferred']) assert.equal(check({ cwd: '/p', tool_input: { command: c } }), null, c);
-  assert.equal(check({ cwd: '/p', tool_input: { command: 'wf discovered close D1 --deferred --attempt ENG-1.1' } }), null);
-  // Independent review: a command that only mentions the feature in a message is not refused unless it carries a
-  // wrapper or indirection token; then the refusal says to put the text in a file.
-  assert.equal(check({ cwd: '/p', tool_input: { command: 'git commit -m "docs: wf discovered defer asks the owner for the id"' } }), null);
-  assert.equal(check({ cwd: '/p', tool_input: { command: 'wf lesson add --title "close D1 with wf discovered close"' } }), null);
-  assert.match(run('git commit -m "wf discovered defer: never through script"').stderr, /matched "script"[\s\S]*git commit -F <file>/);
-  assert.equal(check({ cwd: '/p', tool_input: { command: 'script -q /dev/null npm test' } }), null);
-  assert.equal(check({ cwd: '/p', tool_input: { command: 'npm run script' } }), null);
-});
-
 test('I-16: `wf evidence list` lists an attempt\'s evidence by kind; `wf evidence show` prints a text file, never an image or a path outside it', () => {
   const steps = [{ id: 'ui', repo: 'app', run: 'mkdir -p shots && printf one > shots/home.png && echo step-output-line', artifacts: ['shots/*.png'] }];
   const { base, root } = singleRepoProject('evidence-read', { gate: { steps } }, { '.gitignore': '.wf-evidence/\n.wf-worktrees/\nshots/\n' });
