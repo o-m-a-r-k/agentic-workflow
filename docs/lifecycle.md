@@ -67,9 +67,11 @@ Named failure (I-18): implementers, reviewers and the owner agent noted real def
 
 ### Recovering from an adapter fault
 
-An attempt is pinned to the adapter (`.workflow/`, the delivery adapter included) as committed at its admission. When the delivery adapter reports a state that is not documented, `wf deliver` refuses with the state it received. Committing a fixed adapter on the base branch helps only new attempts; the running attempt keeps refusing (proven: `scenarios/delivery.test.mjs`, "a broken delivery adapter").
+An attempt is pinned to the adapter (`.workflow/`, the delivery adapter included) as committed at its admission. When the delivery adapter reports a state that is not documented, `wf deliver` refuses with the state it received. Committing a fixed adapter on the base branch helps only new attempts; the running attempt keeps refusing (proven: `scenarios/delivery.test.mjs`, "a broken delivery adapter"). The owner decides the recovery.
 
-**Single repo, standard lane** (proven by two scenarios, with and without a `wf base merge` before the fault):
+The steps below apply only when `wf abandon` accepts the attempt. `wf abandon` refuses once any repo is recorded as delivered or skipped, including an unchanged repo that delivery records as skipped. Its refusal does not say which case applies, so check the delivery record first: `wf status --attempt <id> --json` shows it under `delivery.repos`; the steps apply only when that is empty.
+
+**Single repo, standard lane, `delivery.repos` empty** (proven by two scenarios, with and without a `wf base merge` before the fault):
 1. Commit and push the fixed adapter on the base branch.
 2. `wf abandon --reason "<why>" --attempt <id>`. The attempt's branch `wf/<id>` is kept and holds the changes.
 3. `wf entry --item <item>` starts a new attempt from the current base, with the fixed adapter.
@@ -77,10 +79,10 @@ An attempt is pinned to the adapter (`.workflow/`, the delivery adapter included
 5. Plan, hand off, gate, review, accept and deliver the new attempt as usual.
 
 Not covered by those scenarios:
-- **Several repos, one already delivered** (not tested): `wf abandon` refuses an attempt that is partly delivered, and the pinned adapter cannot change for it. There is no supported recovery in this release (inbox entry I-21).
-- **Several repos, none delivered yet** (not tested): steps 2 to 5 should apply in each repo the attempt changed, with one `git merge --squash` per repo.
-- **Quick lane** (not tested): step 3 is `wf entry` without `--item`, which starts a new `QF-<n>`. Neither a planner nor a tracker issue is involved.
-- **Batch** (not tested): each member is its own attempt. Eject it (`wf batch eject`), then recover each member as above, or build a new batch from the new attempts.
+- **Any repo recorded as delivered or skipped** (not tested): `wf abandon` refuses, and the pinned adapter cannot change for this attempt. There is no supported recovery in this release (inbox entry I-21).
+- **Several repos, `delivery.repos` empty** (not tested).
+- **Quick lane** (not tested): the new attempt is admitted with `wf entry` (a new `QF-<n>`) or with `wf entry --item <id> --lane quick`; whether a planner is involved depends on the project's `roles.planner.lanes`.
+- **Batch**: there is no tested recovery (inbox entry I-22).
 
 ### Durable artifacts and the attempt page
 

@@ -344,13 +344,14 @@ function recoverFromBrokenAdapter(name, { baseMerge }) {
   const r = wf(root, ['deliver', '--attempt', id]);
   assert.notEqual(r.code, 0);
   assert.match(r.err, /the delivery adapter reported an unknown state "merged"/);
-  assert.match(r.err, /this attempt is pinned to the delivery adapter as of its admission, so fixing the adapter on the base branch does not change this attempt; fix it there for new attempts\. To finish this ticket, abandon this attempt and enter it again: the abandoned attempt's branch wf\/ENG-72\.1 is kept and holds the changes\. The steps depend on the lane and the repos: docs\/lifecycle\.md#recovering-from-an-adapter-fault/);
-  assert.doesNotMatch(r.err, /cherry-pick|[0-9a-f]{10}\.\./, 'no shell recipe or hash range in the refusal');
+  assert.match(r.err, /this attempt is pinned to the delivery adapter as of its admission, so fixing the adapter on the base branch does not change this attempt; the adapter must report one of the documented states, and the owner decides the recovery: see docs\/lifecycle\.md, "Recovering from an adapter fault"/);
+  assert.doesNotMatch(r.err, /cherry-pick|abandon|wf\/ENG-72|[0-9a-f]{10}\.\./, 'no recipe, branch name or hash range in the refusal');
   // A fix committed on the base branch alone does not reach this attempt: the same refusal.
   fs.writeFileSync(path.join(root, '.workflow', 'delivery', 'mr.mjs'), fixedAdapter);
   sh(root, 'git add -A && git commit -qm "fix the delivery adapter" && git push -q origin main');
   assert.match(wf(root, ['deliver', '--attempt', id]).err, /reported an unknown state "merged"/);
-  // The documented recipe.
+  // The documented recipe. First the delivery record: `wf abandon` accepts the attempt only while no repo is recorded.
+  assert.deepEqual(ok(wf(root, ['status', '--attempt', id, '--json'])).json()[0].delivery.repos, {});
   ok(wf(root, ['abandon', '--reason', 'the delivery adapter was broken', '--attempt', id]));
   const e2 = ok(wf(root, ['entry', '--item', 'ENG-72', '--owner', 'owner-1', '--json'])).json();
   sh(e2.repos.app.worktree, `git merge --squash wf/${id} && git commit -qm "ENG-72: the change from ${id}"`);
