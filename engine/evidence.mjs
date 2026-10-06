@@ -35,7 +35,12 @@ const O_DIRECTORY = fs.constants.O_DIRECTORY ?? 0;
 export class LinkRefused extends Error {}
 // Test seams: called between the check of an entry and the operation on it (to swap something in).
 export const linkSeams = { beforeOpen: null, beforeFlag: null };
-const sameEntry = (a, b) => a && b && a.dev === b.dev && a.ino === b.ino;
+// Identity of an entry. Device and inode alone are not enough: Linux reuses a freed inode number at once, so a file
+// removed and recreated between a check and its use had the same pair (named failure, 0.3.0 CI on Linux). The birth
+// time (statx, nanoseconds) tells a recreated file apart and survives chmod and chflags; the change time also does
+// where nothing is expected to touch the entry in between.
+const idStat = (p) => fs.lstatSync(p, { throwIfNoEntry: false, bigint: true });
+const sameEntry = (a, b, { ctime = false } = {}) => Boolean(a && b && a.dev === b.dev && a.ino === b.ino && a.birthtimeNs === b.birthtimeNs && (!ctime || a.ctimeNs === b.ctimeNs));
 
 // chmod of exactly this entry: lstat, open without following a link, fstat compared with the lstat (same device and
 // inode; a file not hard-linked elsewhere), changed through the descriptor.
@@ -43,6 +48,7 @@ export function chmodNoFollow(p, mode, { dir = false } = {}) {
   const before = fs.lstatSync(p, { throwIfNoEntry: false });
   if (!before || (dir ? !before.isDirectory() : !before.isFile())) throw new LinkRefused(`${p} is ${before?.isSymbolicLink() ? 'a symlink' : before ? `not a ${dir ? 'folder' : 'regular file'}` : 'missing'}; not changed`);
   if (!dir && before.nlink > 1) throw new LinkRefused(`${p} is a hard link (${before.nlink} names share its data); not changed`);
+  const beforeId = idStat(p);
   linkSeams.beforeOpen?.(p);
   let fd;
   try {
@@ -54,7 +60,7 @@ export function chmodNoFollow(p, mode, { dir = false } = {}) {
   try {
     const st = fs.fstatSync(fd);
     if (dir ? !st.isDirectory() : !st.isFile()) throw new LinkRefused(`${p} is not a regular ${dir ? 'folder' : 'file'}; not changed`);
-    if (!sameEntry(st, before)) throw new LinkRefused(`${p} was replaced between its check and its use; not changed`);
+    if (!sameEntry(fs.fstatSync(fd, { bigint: true }), beforeId, { ctime: true })) throw new LinkRefused(`${p} was replaced between its check and its use; not changed`);
     if (!dir && st.nlink > 1) throw new LinkRefused(`${p} is a hard link (${st.nlink} names share its data); not changed`);
     fs.fchmodSync(fd, mode);
   } finally {
@@ -159,13 +165,13 @@ function setImmutable(files, on) {
   if (!tool) return;
   const before = new Map();
   for (const f of files) {
-    const st = fs.lstatSync(f, { throwIfNoEntry: false });
-    if (st?.isFile() && st.nlink === 1) before.set(f, st);
+    const st = idStat(f);
+    if (st?.isFile() && st.nlink === 1n) before.set(f, st);
   }
   const real = [...before.keys()];
   linkSeams.beforeFlag?.(real);
   for (let i = 0; i < real.length; i += 200) spawnSync(tool[0], [...tool.slice(1), ...real.slice(i, i + 200)], { stdio: 'ignore' });
-  const swapped = real.filter((f) => !sameEntry(fs.lstatSync(f, { throwIfNoEntry: false }), before.get(f)));
+  const swapped = real.filter((f) => !sameEntry(idStat(f), before.get(f)));
   if (swapped.length) {
     const undo = flag(!on);
     spawnSync(undo[0], [...undo.slice(1), ...swapped], { stdio: 'ignore' });
