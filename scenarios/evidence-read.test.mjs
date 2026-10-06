@@ -110,7 +110,7 @@ test('I-16: `wf evidence list` lists an attempt\'s evidence by kind; `wf evidenc
 });
 
 // Review of b5b2183: `show` refuses a file that is a link, and reads at most 4 MiB of a large file.
-test('I-16: `wf evidence show` refuses a link and cuts a large file at 4 MiB', () => {
+test('I-16: `wf evidence show` refuses a link and cuts a large file at 4 MiB', async () => {
   const steps = [{ id: 'big', repo: 'app', run: "head -c 5000000 /dev/zero | tr '\\000' a; echo" }];
   const { base, root } = singleRepoProject('evidence-show-limits', { gate: { steps } });
   const e = ok(wf(root, ['entry', '--item', 'ENG-770', '--lane', 'quick', '--owner', 'o', '--json'])).json();
@@ -123,7 +123,8 @@ test('I-16: `wf evidence show` refuses a link and cuts a large file at 4 MiB', (
   const r = ok(wf(root, ['evidence', 'show', log.path, '--attempt', e.id]));
   assert.match(r.out, /… \(\d+ B; the first part only: read the rest with the Read tool on /);
   assert.ok(r.out.length < 4 * 1024 * 1024 + 4096 && r.out.length >= 4 * 1024 * 1024, `printed ${r.out.length} characters`);
-  // A link planted in the attempt's evidence: never read through (the open-time verification may refuse first).
+  // A link planted in the attempt's evidence. Through the CLI, the open-time evidence verification (openState) refuses
+  // it first, before `wf evidence show` runs; showEvidence's own link check is exercised directly below.
   const secret = path.join(base, 'secret.txt');
   fs.writeFileSync(secret, 'SECRET-OUTSIDE\n');
   const linkDir = path.join(root, '.wf-evidence', 'attempts', e.id);
@@ -131,7 +132,11 @@ test('I-16: `wf evidence show` refuses a link and cuts a large file at 4 MiB', (
   fs.symlinkSync(secret, path.join(linkDir, 'link.txt'));
   const shown = wf(root, ['evidence', 'show', 'link.txt', '--attempt', e.id]);
   assert.notEqual(shown.code, 0);
+  assert.match(shown.err, /does not match what wf recorded[\s\S]*link\.txt: symlink/);
   assert.doesNotMatch(shown.out, /SECRET-OUTSIDE/);
+  // showEvidence itself (no open-time verification in front of it) refuses the link and reads nothing through it.
+  const { showEvidence } = await import('../engine/evidence-read.mjs');
+  assert.throws(() => showEvidence(root, { id: e.id }, 'link.txt'), /link\.txt is not a regular file; nothing is read through it/);
 });
 
 test('I-16: role texts and skills read evidence with `wf evidence` and say how to avoid the guard', () => {

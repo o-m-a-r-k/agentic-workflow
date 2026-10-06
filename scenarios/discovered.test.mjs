@@ -517,11 +517,13 @@ export default {
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('rev-1', { discovered: [{ id: 'D1', verdict: 'deferred', evidence: 'r' }] })), '--attempt', id]));
   ok(wf(root, ['accept', '--attempt', id, '--owner', OWNER]));
   const deliver = () => wf(root, ['deliver', '--attempt', id, '--owner', OWNER, '--acknowledge-deferrals', 'D1']);
-  // The adapter waits for merge: the acknowledgement is recorded, and the same command waits again.
+  // The adapter waits for merge (exit 0, not a refusal): the acknowledgement is recorded, and the same command waits again.
   assert.match(ok(deliver()).out, /awaiting-merge/);
   assert.ok(state(root, id).discovered[0].deferred.acknowledged);
   assert.match(ok(deliver()).out, /awaiting-merge/, 'the same command after the wait');
-  // Merged, but the readback fails: refused; the same command is accepted again and refused for the same reason.
+  // Merged, but the readback fails: refused. The same command is accepted again (the acknowledgement is not refused as
+  // stray) and, because the accepted commit is now on the target branch, records the delivery as recovered without
+  // calling the adapter's readback again.
   fs.writeFileSync(path.join(root, '..', 'merged.flag'), '');
   fs.writeFileSync(path.join(root, '..', 'readback-fails.flag'), '');
   assert.match(deliver().err, /readback failed: the merge is not visible yet/);
