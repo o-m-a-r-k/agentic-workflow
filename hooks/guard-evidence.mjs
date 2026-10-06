@@ -122,17 +122,20 @@ export function evidenceMatch(text) {
 
 export const mentionsEvidence = (text) => evidenceMatch(text) !== null;
 
-// A speed bump, not a defence (second security review of 0.4.5): `wf discovered defer` runs only at an interactive
-// terminal, and a pseudo-terminal wrapper gives an agent one. A Bash command that mentions it together with a wrapper is
-// refused. Raw text, like the rest of this hook; an agent determined to wrap it can (docs/trust-model.md).
-const PTY = 'agentic-workflow: refused: `wf discovered defer` is for the owner at their own terminal; it is never run through a pseudo-terminal wrapper';
-const DEFER = /\bdiscovered\b[\s\S]*\bdefer\b/i;
-const WRAPPER = /(?:^|[^\w-])(script|expect|unbuffer|socat|faketty|empty|tmux|screen|ptyrun|pty\.spawn|pty\.fork|openpty|forkpty|ssh\s+-\S*t|node-pty|pexpect)(?![\w-])/i;
+// A speed bump, not a defence (second and third security reviews of 0.4.5): `wf discovered defer` runs only at an
+// interactive terminal, and a pseudo-terminal wrapper gives an agent one; `wf discovered close --deferred` takes the
+// owner's words from text. Raw matching only, fail closed, nothing tokenised or unquoted (0.1.16 and 0.1.17 parsed and
+// opened differentials): when the folded text holds `discovered` followed anywhere by `defer` or `close`, any wrapper,
+// interpreter, indirection or chaining token anywhere in it refuses the command. An agent determined to get around it
+// can (docs/trust-model.md); the plain, single command passes.
+const PTY = 'agentic-workflow: refused: `wf discovered defer` and `wf discovered close` run as one plain command, never through a wrapper or shell indirection';
+const DEFER = /\bdiscovered\b[\s\S]*\b(?:defer|close)\b/i;
+const WRAPPER = /(?:^|[^\w-])(script|expect|unbuffer|socat|faketty|empty|tmux|screen|ptyrun|openpty|forkpty|node-pty|pexpect|pty|ssh|bash|sh|zsh|dash|ksh|fish|eval|exec|source|base64|xxd|xargs|python\d*(?:\.\d+)?|node|perl|ruby|deno|bun|osascript|env|nohup|setsid|timeout|watch|parallel)(?![\w-])|(\$\(|`|\$\{|<\(|>\(|[;&|<>]|\n)/i;
 export function ptyWrapped(command) {
   const c = fold(command);
   if (!DEFER.test(c)) return null;
   const m = WRAPPER.exec(c);
-  return m ? `${PTY} (matched "${m[1]}")` : null;
+  return m ? `${PTY} (matched "${(m[1] ?? m[2]).replace(/\n/, '\\n')}")` : null;
 }
 
 // Exactly one plain `wf` invocation: nothing that chains, substitutes, redirects, quotes or escapes. `wf run` is not

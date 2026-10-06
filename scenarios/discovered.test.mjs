@@ -177,6 +177,10 @@ test('0.4.5: a transcript deferral is bound to the entry: id, intent, a substant
   fs.writeFileSync(file, Buffer.concat([Buffer.from(keep.toString('utf8').replace('Implement ENG-730.', 'Implement ENG-731.')), Buffer.alloc(0)]));
   assert.match(close('D1: defer it.').err, /the owner session's transcript changed before the point where D1 was recorded/);
   fs.writeFileSync(file, keep);
+  // Ambiguity is refused: the same words in two owner turns after the anchor.
+  ownerSays(root, 'D1: defer it to the next sprint, please.');
+  ownerSays(root, 'D1: defer it to the next sprint, please.');
+  assert.match(close('D1: defer it to the next sprint, please.').err, /2 owner messages after D1 was recorded contain these words; quote one that only a single message holds/);
   // A genuine bound turn: accepted, the whole turn recorded with its reference.
   const r = ok(disc(root, ['close', 'D1', '--deferred', '--quote', 'D1: defer it.', '--attempt', id, '--json'])).json();
   assert.equal(r.deferred.decision, 'D1: defer it.');

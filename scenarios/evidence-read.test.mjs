@@ -45,9 +45,19 @@ test('0.4.5: a pty wrapper around `wf discovered defer` is refused; the plain co
   ]) {
     const r = run(c);
     assert.equal(r.status, 2, c);
-    assert.match(r.stderr, /refused: `wf discovered defer` is for the owner at their own terminal; it is never run through a pseudo-terminal wrapper \(matched "[^"]+"\)/, c);
+    assert.match(r.stderr, /refused: `wf discovered defer` and `wf discovered close` run as one plain command, never through a wrapper or shell indirection \(matched "[^"]+"\)/, c);
   }
+  // Third review of 0.4.5: raw matching only, fail closed. `discovered defer` or `discovered close` (in any spelling the
+  // fold leaves: quoted parts, other words between) with any wrapper or shell-indirection token anywhere is refused.
+  for (const c of [
+    "bash -c 'wf discovered defer D1 --reason x'", "sh -c 'wf discovered close D1 --deferred --quote x'", "eval 'wf discovered defer D1'", 'echo d2YgZGlzY292ZXJlZCBkZWZlcg== | base64 -d | sh; wf discovered defer D1',
+    "python3 -c 'import os; os.system(\"wf discovered defer D1\")'", "node -e 'require(\"child_process\").execSync(\"wf discovered defer D1\")'", 'echo D1 | xargs wf discovered defer',
+    'wf discovered close D1 --deferred --quote "$(cat /tmp/q)"', 'wf discovered close D1 --deferred --quote `cat /tmp/q`', "wf discovered 'defer' D1 --reason x; script -q /dev/null true",
+    "screen -dm wf discovered defer D1", 'wf discovered close D1 --deferred --quote x | tee /tmp/o',
+  ]) assert.match(run(c).stderr, /refused: `wf discovered defer` and `wf discovered close` run as one plain command, never through a wrapper or shell indirection/, c);
   assert.equal(check({ cwd: '/p', tool_input: { command: 'wf discovered defer D1 --reason x' } }), null);
+  assert.equal(check({ cwd: '/p', tool_input: { command: 'wf discovered close D1 --fixed abc123' } }), null);
+  assert.equal(check({ cwd: '/p', tool_input: { command: 'wf discovered close D1 --deferred --quote "D1: defer it to the next sprint"' } }), null);
   assert.equal(check({ cwd: '/p', tool_input: { command: 'script -q /dev/null npm test' } }), null);
   assert.equal(check({ cwd: '/p', tool_input: { command: 'npm run script' } }), null);
 });

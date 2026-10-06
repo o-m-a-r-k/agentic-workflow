@@ -198,6 +198,8 @@ function ownerDecision(state, entry, quote) {
   const named = new RegExp(`(^|[^A-Za-z0-9])${entry.id}([^0-9]|$)`, 'i');
   const after = ownerTurns(t, bytes).filter((m) => m.offset >= a.size);
   const containing = after.filter((m) => fold(m.text).includes(q));
+  // Ambiguity refuses (third review): the words must pick out one owner message.
+  if (containing.length > 1) throw refuse(`${containing.length} owner messages after ${entry.id} was recorded contain these words; quote one that only a single message holds (lines ${containing.map((m) => m.line).join(', ')})`, fix);
   const problems = [];
   let match = null;
   for (const m of containing.reverse()) {
