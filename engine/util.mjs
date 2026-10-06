@@ -147,19 +147,26 @@ export function globToRegExp(glob) {
 }
 export const matchesAny = (file, globs = []) => globs.some((g) => globToRegExp(g).test(file));
 
+// `--opt=value` and `--opt value` give the same key; a repeated option is reported (`repeated`) so a caller can refuse
+// it instead of validating one occurrence and using another.
 export function parseArgs(argv) {
   const positional = [];
   const options = {};
+  const repeated = new Set();
+  const set = (k, v) => {
+    if (Object.prototype.hasOwnProperty.call(options, k)) repeated.add(k);
+    options[k] = v;
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a.startsWith('--')) {
       const eq = a.indexOf('=');
-      if (eq > 0) options[a.slice(2, eq)] = a.slice(eq + 1);
-      else if (argv[i + 1] !== undefined && !argv[i + 1].startsWith('--')) options[a.slice(2)] = argv[++i];
-      else options[a.slice(2)] = true;
+      if (eq > 0) set(a.slice(2, eq), a.slice(eq + 1));
+      else if (argv[i + 1] !== undefined && !argv[i + 1].startsWith('--')) set(a.slice(2), argv[++i]);
+      else set(a.slice(2), true);
     } else positional.push(a);
   }
-  return { positional, options };
+  return { positional, options, repeated: [...repeated] };
 }
 
 export function sessionIdentity(env = process.env) {

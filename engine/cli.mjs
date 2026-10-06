@@ -154,7 +154,12 @@ export async function main(argv) {
   const passthrough = dd >= 0 ? argv.slice(dd + 1) : [];
   if (dd >= 0) argv = argv.slice(0, dd);
   const [cmd, sub, ...rest] = argv;
-  const { positional, options } = parseArgs(sub && !sub.startsWith('--') ? rest : argv.slice(1));
+  const { positional, options, repeated } = parseArgs(sub && !sub.startsWith('--') ? rest : argv.slice(1));
+  const repeatedPaths = repeated.filter((k) => PATH_OPTIONS.includes(k));
+  if (repeatedPaths.length) {
+    process.stderr.write(`wf ${cmd}: ${repeatedPaths.map((k) => `--${k}`).join(', ')} given more than once; give each path once\n`);
+    return 2;
+  }
   if (!cmd || cmd === 'help' || options.help) {
     process.stdout.write(`${HELP}\n`);
     return 0;
@@ -191,6 +196,32 @@ const FULL_VERIFY = new Set(['accept', 'deliver', 'verify', 'review', 'tracker',
 
 const WRITE_OPTIONS = ['out', 'csv', 'handoffs-csv', 'html', 'dir', 'to', 'root'];
 const READ_OPTIONS = ['file', 'capture', 'summary-file', 'closure', 'issue-file', 'from'];
+const PATH_OPTIONS = [...WRITE_OPTIONS, ...READ_OPTIONS];
+const FOLDER_OPTIONS = new Set(['dir', 'to', 'root', 'from']);
+
+// One path option, resolved as the OS will resolve it and refused when it is ambiguous: empty, a flag with no value, a
+// NUL, a URL (`file://`, `https://`: never a path to node), a `~` the shell did not expand, a trailing slash on a file
+// input, or anything in the evidence (written or read: another attempt's evidence is not an input either).
+function resolvePathOption(k, v) {
+  const bad = (why) => {
+    throw new WfError(`--${k} ${JSON.stringify(v)}: ${why}`, { code: 2 });
+  };
+  if (v === true) bad('needs a path');
+  const raw = String(v);
+  if (!raw.trim()) bad('is empty');
+  if (raw.includes('\0')) bad('contains a NUL character');
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) bad('looks like a URL; give a file path');
+  if (/^~/.test(raw)) bad('starts with `~`, which only a shell expands; give the full path');
+  if (touchesEvidence(raw)) bad(`is inside .wf-evidence/ (checked where it really points); ${WRITE_OPTIONS.includes(k) ? 'write outside it (the evidence is written only by wf itself)' : 'pass a file outside it'}`);
+  const resolved = canonical(raw);
+  if (touchesEvidence(resolved)) bad('resolves into .wf-evidence/');
+  const st = fs.statSync(resolved, { throwIfNoEntry: false });
+  if (READ_OPTIONS.includes(k)) {
+    if (!FOLDER_OPTIONS.has(k) && /[\\/]$/.test(raw)) bad('ends with a slash but names a file');
+    if (st && !(FOLDER_OPTIONS.has(k) ? st.isDirectory() : st.isFile())) bad(`is not a regular ${FOLDER_OPTIONS.has(k) ? 'folder' : 'file'}`);
+  } else if (st && FOLDER_OPTIONS.has(k) !== st.isDirectory()) bad(FOLDER_OPTIONS.has(k) ? 'is not a folder' : 'is a folder; give a file path');
+  return resolved;
+}
 
 // Lexically or where the OS resolves it, case and Unicode forms folded (engine/paths.mjs, shared with every caller).
 const pathInEvidence = (p) => touchesEvidence(p);
@@ -218,18 +249,11 @@ function safeBase(root, s) {
 async function dispatch(cmd, sub, positional, options) {
   // `wf` is the one command the evidence guard lets name .wf-evidence/. No option of it may write there, and an input
   // file is read only when it is a regular file outside the evidence (another attempt's evidence is not an input).
-  for (const k of WRITE_OPTIONS) {
-    const v = options[k];
-    // The raw value, resolved as the OS will resolve it (path.resolve would fold `..` before following a link).
-    if (typeof v === 'string' && pathInEvidence(v)) throw new WfError(`--${k} ${v} is inside .wf-evidence/ (checked where it really points); write outside it (the evidence is written only by wf itself)`);
-  }
-  for (const k of READ_OPTIONS) {
-    const v = options[k];
-    if (typeof v !== 'string') continue;
-    const p = canonical(v);
-    if (pathInEvidence(v)) throw new WfError(`--${k} ${v} is inside .wf-evidence/ (checked where it really points); pass a file outside it`);
-    const st = fs.statSync(p, { throwIfNoEntry: false });
-    if (st && !(k === 'from' ? st.isDirectory() : st.isFile())) throw new WfError(`--${k} ${v} is not a regular ${k === 'from' ? 'folder' : 'file'}`);
+  // Every path option is resolved once here, through engine/paths.mjs, validated, and replaced by that resolved path:
+  // what is checked is what every later open or write uses (never re-derived from the raw argument).
+  for (const k of PATH_OPTIONS) {
+    if (!(k in options)) continue;
+    options[k] = resolvePathOption(k, options[k]);
   }
   if (cmd === 'skills' && positional[0] !== undefined && (!/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(positional[0]) || positional[0].includes('..'))) throw new WfError(`invalid skill name \`${positional[0]}\`: letters, digits, dot, dash, underscore and colon only`);
   if (cmd === 'status' && options.quiet) {

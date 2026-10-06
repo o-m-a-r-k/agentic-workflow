@@ -17,11 +17,14 @@ import { designChecks, designVerdicts, requiredSkills, reviewRules, ruleVerdicts
 import { home, startPromptFor, verifyAgent } from './provenance.mjs';
 import { WfError, YAML, assertSafeId, canonical, git, hashFile, hashValue, matchesAny, readJson, refuse, run, sessionIdentity, sha256, writeImmutable, writeJson } from './util.mjs';
 
-const readStructured = (file) => {
-  let text = fs.readFileSync(path.resolve(String(file)), 'utf8');
+// An input file is read once: the text parsed is the text kept raw (a file rewritten between two reads could otherwise
+// be judged on one content and recorded with another).
+const readOnce = (file) => fs.readFileSync(path.resolve(String(file)), 'utf8');
+const parseStructured = (file, original) => {
+  let text = original;
   const fenced = text.match(/```(?:ya?ml|json)?\s*\n([\s\S]*?)\n```/);
   if (fenced) text = fenced[1];
-  return file.endsWith('.json') ? JSON.parse(text) : YAML.parse(text);
+  return String(file).endsWith('.json') ? JSON.parse(text) : YAML.parse(text);
 };
 
 // Changed files the plan names nowhere (noise filtered with the adapter at base), or null when the plan names no paths.
@@ -179,7 +182,8 @@ export function freezeCriteria(root, options) {
   if (typeof options.file !== 'string' && typeof options['from-agent'] !== 'string') throw new WfError('--file <plan.yaml|json> or --from-agent <planner agent id> is required');
   if (typeof options.file === 'string' && typeof options['from-agent'] === 'string') throw new WfError('pass --file or --from-agent, not both');
   const fromAgent = typeof options['from-agent'] === 'string' ? planFromAgent(root, state, options['from-agent']) : null;
-  const doc = fromAgent ? fromAgent.doc : readStructured(options.file);
+  const fileText = fromAgent ? null : readOnce(options.file);
+  const doc = fromAgent ? fromAgent.doc : parseStructured(options.file, fileText);
   const plan = planFromDoc(doc);
   validateCriteria(doc.criteria);
   const work = validateWork(cfg, doc.work, doc.criteria);
@@ -197,7 +201,7 @@ export function freezeCriteria(root, options) {
     const planner = state.handoffs.filter((h) => h.role === 'planner').at(-1);
     const model = planner && planner.runtime === 'claude' ? subagentModel(home(), planner.agent, planner.agentType, planner.at) : null;
     const from = path.resolve(String(options.file));
-    source = { ...keepRaw(root, state.id, `plans/plan-1.raw.${extOf(from)}`, fs.readFileSync(from, 'utf8')), from, agent: planner?.agent ?? null, model };
+    source = { ...keepRaw(root, state.id, `plans/plan-1.raw.${extOf(from)}`, fileText), from, agent: planner?.agent ?? null, model };
   }
   append(root, state.id, 'criteria.frozen', { criteria: doc.criteria, plan, source, ...(work ? { work } : {}) }, actor(options));
   return loadState(root, state.id);
@@ -237,12 +241,13 @@ export function amendCriteria(root, options) {
   const state = openState(root, options);
   if (!state.criteria) throw refuse('criteria are not frozen yet; use `wf plan`');
   if (!options.reason || options.reason === true) throw new WfError('--reason is required (say why the criteria change)');
-  const doc = readStructured(options.file);
+  const amendText = readOnce(options.file);
+  const doc = parseStructured(options.file, amendText);
   const { criteria, changes } = mergeAmendment(state.criteria, doc.criteria);
   // Work items survive an amendment unless the file replaces them; either way they must name criteria that still exist.
   const work = validateWork(loadConfig(root), doc.work ?? state.work, criteria);
   const from = path.resolve(String(options.file));
-  const raw = keepRaw(root, state.id, `plans/amend-${state.criteriaAmendments.length + 1}.raw.${extOf(from)}`, fs.readFileSync(from, 'utf8'));
+  const raw = keepRaw(root, state.id, `plans/amend-${state.criteriaAmendments.length + 1}.raw.${extOf(from)}`, amendText);
   append(root, state.id, 'criteria.amended', { criteria, changes, reason: String(options.reason), previous: state.criteria, raw, ...(doc.work ? { work } : {}) }, actor(options));
   return { state: loadState(root, state.id), changes };
 }
@@ -460,7 +465,13 @@ function unverifiedPrior(state, review) {
 export function recordReview(root, options) {
   const state = openState(root, options);
   if (typeof options.closure !== 'string') throw new WfError('--closure <file> is required');
-  const closure = readJson(path.resolve(String(options.closure)));
+  const closureText = readOnce(options.closure);
+  let closure;
+  try {
+    closure = JSON.parse(closureText);
+  } catch (error) {
+    throw new WfError(`invalid JSON in ${options.closure}: ${error.message}`);
+  }
   const reviewerHandoff = state.handoffs.filter((h) => h.role === 'reviewer').at(-1);
   if (!reviewerHandoff) throw refuse('no reviewer handoff: run `wf handoff reviewer --agent <id>`');
   if (closure.reviewer !== reviewerHandoff.agent) throw refuse(`closure reviewer \`${closure.reviewer}\` is not the reviewer handed this attempt (\`${reviewerHandoff.agent}\`)`);
@@ -490,7 +501,7 @@ export function recordReview(root, options) {
   const revealNow = !revealed && earlierOpenFindings(state, round).length > 0;
   const n = state.reviews.filter((r) => r.handoff === round).length + 1;
   const tag = `${String(state.handoffs.indexOf(reviewerHandoff) + 1).padStart(2, '0')}-${n}`;
-  const raw = keepRaw(root, state.id, `review/closure-${tag}.raw.json`, fs.readFileSync(path.resolve(String(options.closure)), 'utf8'));
+  const raw = keepRaw(root, state.id, `review/closure-${tag}.raw.json`, closureText);
   const dest = path.join(attemptDir(root, state.id), 'review', `closure-recorded-${state.handoffs.length}.json`);
   writeJson(dest, closure);
   // The closure is for the tree the reviewer was handed. It inspected gate evidence only if a passing gate on that tree

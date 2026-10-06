@@ -230,7 +230,14 @@ export async function recordTracker(root, cfg, state, options) {
   if (!options.capture) throw new WfError('--capture <file> is required: the raw tracker response the agent saved');
   const adapter = await loadTrackerAdapter(root, cfg, state.adapterBase);
   const capturePath = path.resolve(String(options.capture));
-  const raw = readJson(capturePath);
+  // Read once: the bytes checked are the bytes kept (and the ones hashed for the recycled-capture check).
+  const captureText = fs.readFileSync(capturePath, 'utf8');
+  let raw;
+  try {
+    raw = JSON.parse(captureText);
+  } catch (error) {
+    throw new WfError(`invalid JSON in ${capturePath}: ${error.message}`);
+  }
   const issue = adapter.normalize(raw);
   const problems = [];
   const verified = [];
@@ -244,7 +251,7 @@ export async function recordTracker(root, cfg, state, options) {
   // A capture byte-identical to one recorded for another attempt, or for another event of this one, was accepted:
   // it was recycled, not read. `implementing` is exempt within its attempt: re-reading an unchanged issue gives the
   // same bytes as the admission read.
-  const sha = hashFile(capturePath);
+  const sha = sha256(captureText);
   for (const id of listAttempts(root)) {
     const other = id === state.id ? state : loadState(root, id);
     const hit = other.tracker.done.find((d) => d.capture?.sha256 === sha && (id !== state.id || (d.event !== event && event !== 'implementing')));
@@ -334,7 +341,7 @@ export async function recordTracker(root, cfg, state, options) {
   }
   if (problems.length) throw refuse(`tracker readback for \`${event}\` failed:\n  - ${problems.join('\n  - ')}`);
   const dest = path.join(attemptDir(root, state.id), 'tracker', `${event}-capture.json`);
-  writeImmutable(dest, fs.readFileSync(path.resolve(String(options.capture)), 'utf8'));
+  writeImmutable(dest, captureText);
   append(root, state.id, 'tracker.recorded', { event, capture: { path: dest, sha256: hashFile(dest) }, status: issue.status, ...(verified.length ? { attachments: verified } : {}) }, null);
   return loadState(root, state.id);
 }
