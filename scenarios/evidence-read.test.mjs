@@ -55,8 +55,14 @@ test('0.4.5: a pty wrapper around `wf discovered defer` is refused; the plain co
     'wf discovered close D1 --deferred --quote "$(cat /tmp/q)"', 'wf discovered close D1 --deferred --quote `cat /tmp/q`', "wf discovered 'defer' D1 --reason x; script -q /dev/null true",
     "screen -dm wf discovered defer D1", 'wf discovered close D1 --deferred --quote x | tee /tmp/o',
   ]) assert.match(run(c).stderr, /refused: `wf discovered defer` and `wf discovered close` run only as one plain command, never through a wrapper or shell indirection \(matched "[^"]+"\)\. [\s\S]*`git commit -F <file>`/, c);
-  assert.equal(check({ cwd: '/p', tool_input: { command: 'wf discovered defer D1 --reason x' } }), null);
-  assert.equal(check({ cwd: '/p', tool_input: { command: 'wf discovered close D1 --fixed abc123' } }), null);
+  // Security review of 6ca2338: the trigger needed `discovered` and `defer` adjacent, so an option or other words
+  // between them escaped it. Any order with anything between counts now (over-matching is acceptable: the refusal says
+  // how to avoid it).
+  for (const c of [
+    'script -q /dev/null wf discovered --attempt X defer D1', "bash -c 'wf discovered --json close D1 --deferred'", 'wf discovered --attempt X defer D1 | cat',
+    'expect -c "spawn wf discovered -- defer D1"', 'unbuffer wf discovered\tdefer D1', 'wf discovered --attempt X defer D1 --reason "$(cat r)"', 'env wf discovered x close D1',
+  ]) assert.match(run(c).stderr, /refused: `wf discovered defer` and `wf discovered close` run only as one plain command/, c);
+  for (const c of ['wf discovered defer D1 --reason x', 'wf discovered close D1 --fixed abc123', 'wf discovered --attempt X defer D1', 'wf discovered --attempt X close D1 --deferred']) assert.equal(check({ cwd: '/p', tool_input: { command: c } }), null, c);
   assert.equal(check({ cwd: '/p', tool_input: { command: 'wf discovered close D1 --deferred --attempt ENG-1.1' } }), null);
   // Independent review: a command that only mentions the feature in a message is not refused unless it carries a
   // wrapper or indirection token; then the refusal says to put the text in a file.

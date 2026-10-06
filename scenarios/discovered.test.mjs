@@ -199,7 +199,7 @@ test('0.4.5: the phrase carries the attempt id, so the same issue id in two atte
   assert.equal(state(root, ids[1]).discovered[0].status, 'open');
 });
 
-test('0.4.5: `wf discovered defer` runs only at an interactive terminal and needs the id typed', () => {
+test('0.4.5: `wf discovered defer` runs only at an interactive terminal and needs the id typed', async () => {
   const { base, root } = singleRepoProject('discovered-tty', {});
   const e = ok(wf(root, ['entry', '--item', 'ENG-740', '--owner', 'o', '--json'])).json();
   ok(wf(root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id, '--owner', 'o']));
@@ -210,6 +210,28 @@ test('0.4.5: `wf discovered defer` runs only at an interactive terminal and need
   const piped = wf(root, ['discovered', 'defer', 'D1', '--reason', 'next sprint', '--attempt', e.id], { input: 'D1\n' });
   assert.notEqual(piped.code, 0);
   assert.match(piped.err, /not an interactive terminal: `wf discovered defer` is run by the owner in their own terminal/);
+  assert.match(piped.err, /start a message in this session with `defer ENG-740\.1:D1: <reason>` \(then `wf discovered close D1 --deferred --attempt ENG-740\.1`\)/);
+  assert.equal(state(root, e.id).discovered[0].status, 'open');
+  // End of input at the prompt (Ctrl-D) is no answer: refused, nothing recorded (review of 6ca2338).
+  {
+    const { PassThrough } = await import('node:stream');
+    const { deferInTerminal } = await import('../engine/discovered.mjs');
+    const input = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => {} });
+    const output = Object.assign(new PassThrough(), { isTTY: true, columns: 80 });
+    const cwd = process.cwd();
+    const keep = { ...process.env };
+    Object.assign(process.env, { WF_EVIDENCE_FLAGS: '0', WF_CONFIG_HOME: path.join(root, '..', '.wfhome'), WF_HOME: path.join(root, '..', '.home') });
+    process.chdir(root);
+    try {
+      const pending = deferInTerminal(root, 'D1', { attempt: e.id, reason: 'next sprint', owner: 'o' }, { input, output });
+      setImmediate(() => input.end());
+      await assert.rejects(pending, /not confirmed \(the input ended before D1 was typed\); nothing recorded/);
+    } finally {
+      process.chdir(cwd);
+      for (const k of Object.keys(process.env)) if (!(k in keep)) delete process.env[k];
+      Object.assign(process.env, keep);
+    }
+  }
   assert.equal(state(root, e.id).discovered[0].status, 'open');
   // At a terminal, the typed id confirms it. Run through util-linux `script` (Linux only: BSD `script` needs a terminal
   // of its own). This is also the documented limit: a pseudo-terminal counts as a terminal, so it proves an

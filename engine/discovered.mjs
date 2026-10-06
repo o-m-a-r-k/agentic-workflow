@@ -90,13 +90,18 @@ export async function deferInTerminal(root, id, options, { input = process.stdin
   if (entry.status !== 'open') throw refuse(`${id} is already ${entry.status}`);
   const reason = text(options.reason);
   if (!reason) throw new WfError(`usage: wf discovered defer ${id} --reason "<why it waits>" (run by the owner in their own terminal)`);
-  if (!input.isTTY || !output.isTTY) throw refuse(`not an interactive terminal: \`wf discovered defer\` is run by the owner in their own terminal, where it asks them to type ${id}`, `ask the owner to run \`wf discovered defer ${id} --reason "..." --attempt ${state.id}\` themselves, or to answer in this session with a message naming ${id} (then \`wf discovered close ${id} --deferred --quote "<their words>"\`); otherwise fix it in this ticket`);
+  if (!input.isTTY || !output.isTTY) throw refuse(`not an interactive terminal: \`wf discovered defer\` is run by the owner in their own terminal, where it asks them to type ${id}`, `ask the owner to run \`wf discovered defer ${id} --reason "..." --attempt ${state.id}\` themselves, or to start a message in this session with \`${deferPhrase(state.id, id)}: <reason>\` (then \`wf discovered close ${id} --deferred --attempt ${state.id}\`); otherwise fix it in this ticket`);
   output.write(`${state.id} ${id}: ${entry.summary}\nDefer it with the reason "${reason}"? Type ${id} to confirm: `);
   const rl = readline.createInterface({ input, output, terminal: true });
-  const answer = await new Promise((resolve) => rl.once('line', (l) => resolve(l)));
+  // End of input (Ctrl-D) or a closed terminal is no answer: refused, never a silent success (review of 6ca2338).
+  const answer = await new Promise((resolve) => {
+    rl.once('line', (l) => resolve(l));
+    rl.once('close', () => resolve(null));
+  });
   rl.close();
+  if (answer === null) throw refuse(`not confirmed (the input ended before ${id} was typed); nothing recorded`);
   if (String(answer).trim() !== id) throw refuse(`not confirmed (typed ${JSON.stringify(String(answer).trim())}, not ${id}); nothing recorded`);
-  append(root, state.id, 'discovered.closed', { id, outcome: 'deferred', decision: reason, quote: null, source: { provenance: 'interactive-terminal (unverified)', confirmed: id } }, actor(options));
+  append(root, state.id, 'discovered.closed', { id, outcome: 'deferred', decision: reason, source: { provenance: 'interactive-terminal (unverified)', confirmed: id } }, actor(options));
   return { state: loadState(root, state.id), outcome: 'deferred' };
 }
 

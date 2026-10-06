@@ -125,16 +125,20 @@ export const mentionsEvidence = (text) => evidenceMatch(text) !== null;
 // A speed bump, not a defence (security reviews of 0.4.5): `wf discovered defer` runs only at an interactive terminal,
 // and a pseudo-terminal wrapper gives an agent one. Raw matching only, fail closed, nothing tokenised (0.1.16 and 0.1.17
 // parsed and opened differentials). It applies when the folded text, with quotes and backslashes dropped, holds
-// `discovered` and then `defer` or `close` with only non-word characters between:
-// - a command that starts with `wf discovered defer|close` is the plain invocation: refused when it holds any of
+// `discovered` and, anywhere after it, `defer` or `close`:
+// - a command that starts with `wf discovered` is the plain invocation: refused when it holds any of
 //   ; & | ` $ ( ) < > \ or a newline anywhere (quotes are fine);
 // - any other command is refused when it holds such a character or a wrapper, interpreter or indirection word anywhere.
 //   A command that only mentions the feature in prose with none of them passes; one that does is told to put the text
 //   in a file (`git commit -F <file>`).
 const PTY = 'agentic-workflow: refused: `wf discovered defer` and `wf discovered close` run only as one plain command, never through a wrapper or shell indirection';
-const PTY_HINT = 'Run it on its own (`wf discovered defer D1 --reason "..."` or `wf discovered close D1 --deferred`), with no ; & | ` $ ( ) < > or backslash. If the command only mentions it in text (a commit message, a note), put that text in a file instead (`git commit -F <file>`).';
-const INVOKES = /\bdiscovered\W+(?:defer|close)\b/;
-const PLAIN_DISCOVERED = /^wf\s+discovered\s+(?:defer|close)\b/;
+const PTY_HINT = 'Run it on its own (`wf discovered defer D1 --reason "..."` or `wf discovered close D1 --deferred`), with no ; & | ` $ ( ) < > or backslash. If the command only mentions it in text (a commit message, a note), put that text in a file instead (`git commit -F <file>`), or avoid writing "discovered" followed by "defer" or "close" in it.';
+// Broad on purpose (security review of 6ca2338: `wf discovered --attempt X defer` escaped an adjacent-words match):
+// `discovered`, then `defer` or `close` anywhere after it, on the text with quotes and backslashes dropped.
+const INVOKES = /\bdiscovered\b[\s\S]*\b(?:defer|close)\b/;
+// Only skips the wrapper-word scan: a command that is itself a `wf discovered ...` invocation. Meta characters are
+// refused in every command INVOKES matches.
+const PLAIN_DISCOVERED = /^wf\s+discovered\s/;
 const META = /[;&|`$()<>\\\n\r]/;
 const WRAPPER = /(?:^|[^\w-])(script|expect|unbuffer|socat|faketty|empty|tmux|screen|ptyrun|openpty|forkpty|node-pty|pexpect|pty|ssh|bash|sh|zsh|dash|ksh|fish|eval|exec|source|base64|xxd|xargs|python\d*(?:\.\d+)?|node|perl|ruby|deno|bun|osascript|env|nohup|setsid|timeout|watch|parallel|sudo|doas|stdbuf|caffeinate|systemd-run|npx)(?![\w-])/;
 export function ptyWrapped(command) {
