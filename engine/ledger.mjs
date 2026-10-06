@@ -1,6 +1,21 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { ENGINE_VERSION, SCHEMA_VERSION, WfError, canonical, now, refuse, sha256, withFileLock } from './util.mjs';
+import { prepareWrite, touch, writeAnchor } from './evidence.mjs';
+
+// Opens an attempt for this process: verifies its evidence (chain, anchor, every recorded file) once, refusing on any
+// difference. Every command that reads or writes an attempt goes through here (`openState`, the first `append`).
+let opening = false;
+export function openEvidence(root, id) {
+  if (opening) return;
+  opening = true;
+  try {
+    const problems = touch(root, id, append);
+    if (problems.length) throw refuse(`the evidence of ${id} does not match what wf recorded (${problems.length} problem(s)); it was changed outside wf:\n  - ${problems.slice(0, 10).join('\n  - ')}${problems.length > 10 ? `\n  … ${problems.length - 10} more` : ''}`, `find out what changed it (a tool, a gate step, a person) and restore the files; \`wf verify --attempt ${id}\` lists every problem`);
+  } finally {
+    opening = false;
+  }
+}
 
 // Evidence layout: <root>/.wf-evidence/attempts/<attemptId>/ledger.jsonl (+ gate/, review/, tracker/ ...).
 export const evidenceRoot = (root) => path.join(root, '.wf-evidence');
@@ -52,6 +67,8 @@ export function readLedger(root, id) {
 // Appends are serialised per attempt, so concurrent commands never interleave or fork the chain.
 export function append(root, id, type, data = {}, actor = null) {
   const file = ledgerFile(root, id);
+  openEvidence(root, id);
+  prepareWrite(file);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   return withFileLock(`${file}.lock`, () => {
     const last = fs.existsSync(file) ? lastEntry(root, id) : null;
@@ -59,6 +76,7 @@ export function append(root, id, type, data = {}, actor = null) {
     entry.hash = entryHash(entry);
     fs.appendFileSync(file, `${JSON.stringify(entry)}\n`);
     verified.set(file, { size: fs.statSync(file).size, entry });
+    writeAnchor(root, id, entry);
     return entry;
   });
 }
@@ -232,6 +250,10 @@ export function reduce(entries) {
       // `wf export screenshots` (and closing): viewable copies of the delivered set outside the evidence.
       case 'screenshots.exported':
         s.delivery.exported = { dir: d.dir, files: d.files ?? [], at: e.at };
+        break;
+      // The evidence manifest: every file wf wrote into this attempt's evidence, with its sha256, size and mode.
+      case 'evidence.recorded':
+        s.evidenceFiles = (s.evidenceFiles ?? 0) + (d.files?.length ?? 0);
         break;
       case 'batch.member.delivered':
         s.delivery.completedAt = e.at;

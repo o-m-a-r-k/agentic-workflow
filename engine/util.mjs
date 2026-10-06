@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { prepareWrite } from './evidence.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -81,6 +82,7 @@ export function readJson(file) {
 }
 
 export function writeJson(file, value) {
+  prepareWrite(file);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
 }
@@ -91,6 +93,7 @@ export function writeImmutable(file, content) {
     if (fs.readFileSync(file, 'utf8') !== content) throw new WfError(`immutable evidence already exists with different content: ${file}`);
     return file;
   }
+  prepareWrite(file);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, content, { mode: 0o444 });
   return file;

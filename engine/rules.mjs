@@ -5,6 +5,7 @@ import { screenshots } from './gate.mjs';
 import { attemptDir } from './ledger.mjs';
 import { findSkill } from './skills.mjs';
 import { YAML, git, matchesAny, sha256 } from './util.mjs';
+import { prepareWrite } from './evidence.mjs';
 
 // Review rules: project documents (design system, coding rules) a reviewer must read when the change touches the paths
 // they govern. Named failure: in eleven review rounds no reviewer read any of the project's rule documents, and the
@@ -64,6 +65,7 @@ export function reviewRules(root, trusted, state, changed) {
     for (const d of docs.filter((x) => x.text)) {
       const file = path.join(attemptDir(root, state.id), 'rules', `${sha256(d.text).slice(0, 12)}-${path.posix.basename(d.doc)}`);
       if (!fs.existsSync(file)) {
+        prepareWrite(file);
         fs.mkdirSync(path.dirname(file), { recursive: true });
         fs.writeFileSync(file, d.text);
       }

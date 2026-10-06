@@ -2,12 +2,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
-import { abandon, adopt, changedFiles, entry, hold, openState, release } from './attempt.mjs';
+import { abandon, adopt, changedFiles, entry, hold, openState, release, resolveAttempt } from './attempt.mjs';
 import { baseLines, baseMerge, baseStatus } from './base.mjs';
 import { findRoot, loadConfig, requireRoot } from './config.mjs';
 import { exportAttempt, exportFile } from './export.mjs';
 import { liveGate, runGate, runWithLease, stopGate } from './gate.mjs';
-import { append, listAttempts, loadState } from './ledger.mjs';
+import { append, listAttempts, loadState, openEvidence } from './ledger.mjs';
+import { seal, setVerifyLevel, verifyAttempt } from './evidence.mjs';
 import { acceptReview, amendCriteria, designWarning, batchCreate, batchEject, closeAfterHandoff, deliver, deliveredFiles, exportScreenshots, freezeCriteria, handoff, narrowDelivery, needsShown, nextAction, outsideWarning, recordReview, recordShown, reopen, screenshotsExportDir, shownDraftFile, uncovered, withAttempt } from './lifecycle.mjs';
 import { detect, doctor, register, registry, setEnabled, sync, writeDraft } from './onboard.mjs';
 import * as secrets from './secrets.mjs';
@@ -57,6 +58,7 @@ Status
   wf resume                         what to do next
   wf status [--all] [--json]
   wf report [--all] [--csv FILE] [--handoffs-csv FILE] [--html FILE]
+  wf verify [--attempt ID | --all]  re-hash every recorded evidence file, check the chain and its anchor
   wf export [--out FILE] [--json]   one self-contained page for the attempt (a view of the evidence)
   wf export screenshots [--gate] [--to DIR]
                                     copy the delivered (or, --gate, the last gate's) screenshots out of the evidence
@@ -156,6 +158,9 @@ export async function main(argv) {
     process.stdout.write(`${ENGINE_VERSION}\n`);
     return 0;
   }
+  // Commands that rely on evidence content re-hash every recorded file first; the others check presence, type, size
+  // and mode. Whatever this process wrote into an attempt's evidence is recorded and protected when it ends.
+  setVerifyLevel(FULL_VERIFY.has(cmd) ? 'full' : 'quick');
   try {
     return await dispatch(cmd, sub && !sub.startsWith('--') ? sub : null, positional, { ...options, _: passthrough });
   } catch (error) {
@@ -164,8 +169,16 @@ export async function main(argv) {
       return error.code;
     }
     throw error;
+  } finally {
+    try {
+      seal(append);
+    } catch (error) {
+      process.stderr.write(`wf: evidence not recorded: ${error.message}\n`);
+    }
   }
 }
+
+const FULL_VERIFY = new Set(['accept', 'deliver', 'verify', 'review', 'tracker', 'export', 'shown', 'delivery', 'summary', 'handoff']);
 
 const WRITE_OPTIONS = ['out', 'csv', 'handoffs-csv', 'html', 'dir', 'to', 'root'];
 const READ_OPTIONS = ['file', 'capture', 'summary-file', 'closure', 'issue-file', 'from'];
@@ -560,6 +573,17 @@ async function dispatch(cmd, sub, positional, options) {
       }
       throw new WfError('usage: wf batch create --members A,B | wf batch eject --batch B --member A');
     }
+    case 'verify': {
+      // Reports, never refuses on open: the point is to list every problem.
+      const ids = options.all ? listAttempts(root) : [resolveAttempt(root, options)];
+      const bad = [];
+      for (const id of ids) {
+        const p = verifyAttempt(root, id, { full: true });
+        if (p.length) bad.push({ id, problems: p });
+      }
+      print(options, bad.length ? bad.map((b) => `${b.id}: ${b.problems.length} problem(s): the evidence does not match what wf recorded\n  - ${b.problems.slice(0, 20).join('\n  - ')}`).join('\n') : `verified ${ids.length} attempt(s): ledger chain, anchor and every recorded evidence file (sha256, size, mode) match; no extra file`, bad);
+      return bad.length ? 1 : 0;
+    }
     case 'resume': {
       const s = openState(root, options);
       const base = isOpen(s) ? safeBase(root, s) : null;
@@ -568,7 +592,7 @@ async function dispatch(cmd, sub, positional, options) {
     }
     case 'status': {
       // --attempt narrows the listing to that attempt; without it every open attempt is shown.
-      const states = options.attempt ? [openState(root, options)] : listAttempts(root).map((id) => loadState(root, id)).filter(isOpen);
+      const states = options.attempt ? [openState(root, options)] : listAttempts(root).map((id) => loadState(root, id)).filter(isOpen).map((s) => (openEvidence(root, s.id), s));
       const rows = states.map((s) => ({ s, base: isOpen(s) ? safeBase(root, s) : null }));
       print(options, rows.length ? rows.map(({ s, base }) => summary(root, s, { base })).join('\n\n') : 'no open attempts', options.json ? rows.map(({ s, base }) => ({ ...s, next: nextAction(root, s), base })) : undefined);
       return 0;

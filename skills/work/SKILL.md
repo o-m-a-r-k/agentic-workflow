@@ -31,3 +31,5 @@ With more than one open attempt, pass `--attempt <id>` to every `wf` command; th
 Agents you start must not leave background waiters, Monitors or `sleep` loops running when they report; if one does, stop it (TaskStop) before continuing. `wf status` shows when a base moved and whether it overlaps the ticket; `wf base merge` merges it in (the gate and the review then need to run again on the merged tree).
 
 `wf resume` tells you the next step at any point, including after an interruption.
+
+Evidence is write-protected and verified at every use. If a command refuses with "the evidence of <attempt> does not match what wf recorded", stop: run `wf verify --attempt <id>`, find what changed the listed files (a tool, a gate step, a person) and tell the user. Never edit, restore or lift the protection of evidence files yourself.

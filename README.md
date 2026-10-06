@@ -344,7 +344,7 @@ gate:
     pass: [PLAYWRIGHT_BASE_URL, MYAPP_*]
 ```
 
-The engine sets `WF_ROOT`, `WF_ATTEMPT`, `WF_ITEM`, `WF_ITEMS`, `WF_STEP`, `WF_EVIDENCE`, `WF_WORKERS` (and `WF_SHARD`/`WF_SHARDS` per shard) for every step; see [Per-ticket evidence](#per-ticket-evidence) for `WF_ITEM(S)`.
+The engine sets `WF_ROOT`, `WF_ATTEMPT`, `WF_ITEM`, `WF_ITEMS`, `WF_STEP`, `WF_EVIDENCE` (a scratch folder outside the evidence, copied in after the step), `WF_WORKERS` (and `WF_SHARD`/`WF_SHARDS` per shard) for every step; see [Per-ticket evidence](#per-ticket-evidence) for `WF_ITEM(S)`.
 
 Agent-runtime variables (`CLAUDE_CODE_*`, `ANTHROPIC_*`, `CODEX_*`, `OPENAI_*`, `GROK_*`, `XAI_*`) never reach a step unless `pass` names that family itself (`ANTHROPIC_BASE_URL`, `ANTHROPIC_*`); a broad prefix such as `C*` does not count. Step plugins get the filtered environment as `ctx.env`, but they run inside the `wf` process.
 
@@ -394,16 +394,36 @@ designSystem:
 - `wf gate` and `wf check` warn with the hits. The reviewer bundle lists them under `designSystem.hits` (with the components); the reviewer gives each a verdict, `designHits: [{ "id", "verdict": "justified|finding", "evidence", "finding" }]`, and `wf review` refuses a closure missing one (`wf accept` checks again and records the verdicts).
 - The planner and implementer bundles carry the components and rules; the planner turns a changed UI surface into a criterion "uses the shared components: <list>". The reviewer lists, for every changed UI file, each table, list, form and dialog it renders and the shared component used or the justified exception.
 
-### The evidence guard
+### Evidence integrity
 
-A `PreToolUse` hook (`hooks/guard-evidence.mjs`, matcher `Edit|Write|MultiEdit|NotebookEdit|Bash`) keeps agents out of `.wf-evidence/`. It decides on the raw text and never parses shell (named failure: 0.1.16 and 0.1.17 parsed commands to let copies *out* through, and every rule added for that opened a new way in):
+The evidence (`.wf-evidence/attempts/<attempt>/`) is protected in three layers. Only the third is relied on; the first two keep mistakes from happening, the third catches what gets through.
 
-- **Bash:** a command that mentions the evidence in any form is refused (case-insensitive; also after removing quotes, backslashes, `$'`, `${`, braces and whitespace; Unicode folded with NFKC and invisible characters dropped; a glob such as `.wf-*` or `.[w]f-evidence` that can match it; `evidence` next to a glob, brace or variable character), and so is any command run with its working directory inside the evidence. The one exception: the whole trimmed command is exactly one `wf <subcommand> [args]` with none of `; & | \` $ ( ) < >`, newline, backslash or quote characters. Reads included: read evidence with the Read tool, and copy files out with `wf export screenshots`.
-- **Edit, Write, MultiEdit, NotebookEdit:** a target path that mentions the evidence, is relative inside it, or really lies in it (symlinks resolved) is refused. The content written is not inspected, so a closure may cite evidence paths.
-- **Fails closed:** unparsable input, an unknown tool shape or an exception is refused when the input mentions the evidence.
-- **Never more permissive than 0.1.15:** a scenario test runs a corpus of over a thousand commands and paths through the frozen 0.1.15 hook and the current one.
-- **`wf` itself:** a plain `wf` invocation passes the hook, so the engine checks its own paths: no output option (`--out`, `--csv`, `--handoffs-csv`, `--html`, `--dir`, `--to`, `--root`) may resolve into `.wf-evidence/`; an input option (`--file`, `--capture`, `--summary-file`, `--closure`, `--issue-file`, `--from`) must be a regular file (a folder for `--from`) outside it, symlinks resolved; attempt ids and skill names are refused unless they are plain names. Cleanup at close deletes nothing through a link: `.wf-worktrees`, the attempt folder and `_review` must be real directories where they should be, links inside are unlinked (never followed), and anything uncertain is left in place with a warning.
-- **What it is:** defense in depth against a careless agent, not a boundary against a determined process running as the same user. **Not guarded:** Read, Grep and Glob (read-only, by design); tools the matcher does not name (MCP tools, Agent prompts, other runtimes: Codex has no hook); a path computed so that no part of its name appears in the command (base64 or other encodings decoded at run time, a path read from a file, `ls`/`find` output piped into a writer without naming it); writes through a symlink created earlier (the shell side never resolves links); and anything that runs outside the agent's tools (a gate step, a test, a git hook, the user). The ledger's hash chain detects an edit to the ledger the guard missed; nothing detects an edit to other evidence files except their recorded sha256 where one exists.
+| Layer | What it does | What it catches |
+| --- | --- | --- |
+| 1. Guard hook (convenience) | `hooks/guard-evidence.mjs` refuses Edit/Write/MultiEdit/NotebookEdit on evidence paths and any Bash command that names the evidence, except one plain `wf` invocation (details below). | An agent in Claude Code reaching for the evidence by habit, before anything is written. |
+| 2. Write protection (accident-proofing) | Every recorded file is `0444` and, on macOS, user-immutable (`chflags uchg`; on Linux `chattr +i` only when running as root); folders are `0555` between commands. Only the engine lifts it, for its own writes. | A careless write from any tool or process (MCP tools, Codex, a script, a person): it fails with a permission error. |
+| 3. Manifest, verified at use (detection) | Every file the engine writes into an attempt's evidence is recorded in the hash-chained ledger (`evidence.recorded`: path, sha256, size, mode, hashed from the one read of its bytes). Every `wf` command that opens an attempt verifies the chain, the chain-head anchor, and every recorded file: present, a regular file (not a link), recorded size and mode, and no file the engine did not write. The commands that rely on content (`handoff`, `review`, `accept`, `deliver`, `tracker`, `shown`, `summary`, `delivery`, `export`, `verify`) re-hash every file. | Any change that got past 1 and 2, made by anything: a refusal naming the first offenders at the next use. `wf verify [--attempt ID \| --all]` lists every problem. |
+
+- **Gate steps** get `WF_EVIDENCE` (and `{evidence}`) pointing at a scratch folder outside the evidence (`.wf-worktrees/_gate/<attempt>/<run>/<step>/`); the engine copies it in after the step, and collects `artifacts` from the worktree by reading each file once (the recorded sha256 is of the bytes copied). The gate's own record of each artifact's sha256 is checked against the manifest, so a capture changed between collection and recording is refused too.
+- **The anchor**: every ledger append also writes the chain head (`{ seq, hash }`) to `.wf-worktrees/_anchor/<attempt>.json`. A ledger that is truncated, restored from an older copy or rewritten without it is refused. It proves only that the ledger and the anchor agree: a process that rewrites the ledger, recomputes the chain *and* rewrites the anchor is not detected (it is not a signature, and there is no key).
+- **Attempts from before 0.1.20** are adopted on first use, as found: their existing files are recorded once (a baseline, not proof of what came before).
+- **Removing evidence** (an old project): `chflags -R nouchg .wf-evidence && chmod -R u+w .wf-evidence` first.
+
+**Accepted limits, plainly.** This makes careless writes fail and every other change visible at the next use; it does not stop a determined process running as the same user:
+- such a process can lift the protection, rewrite files, the ledger, recompute the chain and rewrite the anchor consistently; nothing local can prove otherwise;
+- while a `wf` command runs, the attempt's folders are writable for it: a file planted *during* that command in the folder of the gate run it is recording, or a recorded file changed before the command records it, is recorded as the engine's (the gate's own artifact hashes still catch a changed capture);
+- reading is not controlled: Read, Grep and Glob are allowed (reviewers need them), so the **blind-review** property cannot be proven from file access. It rests on the provenance checks (the transcript shows the handed agent type and exactly the printed start line, a fresh id each round) and on the reviewer reading only what its bundle names;
+- the engine's own reads of an input file (`--file`, `--capture` ...) are checked, then read: a file swapped between the two is read as swapped.
+
+#### The guard hook (layer 1)
+
+The hook (matcher `Edit|Write|MultiEdit|NotebookEdit|Bash`) decides on the raw text and never parses shell:
+
+- **Bash:** a command that mentions the evidence in any form is refused (case-insensitive; also after removing quotes, backslashes, `$'`, `${`, braces and whitespace; Unicode folded with NFKC and invisible characters dropped; escapes decoded; a glob such as `.wf-*` that can match it; an expansion next to part of the name), and so is any command run inside it. The one exception: the whole trimmed command is exactly one `wf <subcommand> [args]` with none of `; & | \` $ ( ) < >`, newline, backslash or quote characters. Read evidence with the Read tool; copy screenshots out with `wf export screenshots`.
+- **File tools:** a target that mentions the evidence, is relative inside it, or really lies in it (symlinks resolved) is refused, whatever else the input carries. The content written is not inspected (a closure may cite evidence paths).
+- **Fails closed** on unreadable input, an unknown shape or an exception when the input mentions the evidence. It is never more permissive than the 0.1.15 hook (a 1,000+ case corpus test).
+- **`wf` itself** checks its own paths: no output option (`--out`, `--csv`, `--handoffs-csv`, `--html`, `--dir`, `--to`, `--root`) may resolve into the evidence; input options must be regular files outside it; attempt ids and skill names must be plain names. Cleanup at close deletes nothing through a link and leaves anything uncertain in place.
+- It sees only the tools its matcher names in Claude Code; everything else is covered by layers 2 and 3.
 
 ## Delivery and the ticket
 

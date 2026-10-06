@@ -10,7 +10,8 @@ import { append, attemptDir, loadState } from './ledger.mjs';
 import { projectEnv } from './env.mjs';
 import { missingFor, redactor, stepEnv } from './secrets.mjs';
 import { impact, inside, rel } from './topology.mjs';
-import { WfError, assertEngine, canonical, git, globToRegExp, hashFile, hashValue, isPidAlive, matchesAny, now, refuse, run, shellQuote, writeImmutable, writeJson } from './util.mjs';
+import { WfError, assertEngine, canonical, git, globToRegExp, hashFile, hashValue, isPidAlive, matchesAny, now, refuse, run, sha256, shellQuote, writeImmutable, writeJson } from './util.mjs';
+import { ownGateRun, prepareWrite, seal } from './evidence.mjs';
 
 const gateDir = (root, id) => path.join(attemptDir(root, id), 'gate');
 const lockFile = (root, id) => path.join(gateDir(root, id), 'gate.lock');
@@ -306,12 +307,15 @@ function collectArtifacts(step, dir, destDir, since, units) {
     if (!hit.length) continue;
     if (fs.statSync(file).mtimeMs < since - 1000) continue; // only what this run produced
     const dest = path.join(destDir, r);
+    prepareWrite(dest);
     fs.mkdirSync(path.dirname(dest), { recursive: true });
-    fs.copyFileSync(file, dest);
+    // Read once: the file recorded is the bytes hashed (a capture rewritten meanwhile cannot slip in another).
+    const bytes = fs.readFileSync(file);
+    fs.writeFileSync(dest, bytes);
     // Whose evidence the file is: the units whose own expansion of a matching glob matches it. A batch member delivers
     // (and attaches to its ticket) only its own files; a placeholder-less glob matches for every unit.
     const owners = units.filter((u) => hit.some((g) => matchesAny(r, expandArtifactGlob(g.glob, [u])))).map((u) => u.attempt);
-    const a = { path: dest, sha256: hashFile(dest), kind: /\.(png|jpe?g|webp|gif)$/i.test(r) ? 'screenshot' : 'file', source: r, units: owners };
+    const a = { path: dest, sha256: sha256(bytes), kind: /\.(png|jpe?g|webp|gif)$/i.test(r) ? 'screenshot' : 'file', source: r, units: owners };
     out.push(a);
     for (const g of hit) g.files.push(a);
   }
@@ -343,27 +347,45 @@ function suitesToRerun(prior, planned) {
   return rerun.length ? [...new Set(rerun)] : null;
 }
 
+// A step's scratch folder, copied into its evidence folder: regular files only (a link is skipped), each read once.
+function copyScratch(scratch, dest) {
+  for (const file of walkFiles(scratch)) {
+    const st = fs.lstatSync(file);
+    if (!st.isFile()) continue;
+    const to = path.join(dest, path.relative(scratch, file));
+    prepareWrite(to);
+    fs.mkdirSync(path.dirname(to), { recursive: true });
+    if (fs.existsSync(to)) continue;
+    fs.writeFileSync(to, fs.readFileSync(file));
+  }
+}
+
 async function executeStep(root, cfg, state, planned, ctx) {
   const step = cfg.gate.steps.find((s) => s.id === planned.id);
   const evidenceDir = path.join(ctx.runDir, step.id);
+  prepareWrite(path.join(evidenceDir, 'x'));
   fs.mkdirSync(evidenceDir, { recursive: true });
   const logFile = path.join(evidenceDir, 'output.log');
+  // Steps and plugins write their reports into a scratch folder outside the evidence; the engine copies it in after
+  // the step (WF_EVIDENCE and {evidence} name the scratch folder). Their processes are never handed an evidence path.
+  const scratch = path.join(root, '.wf-worktrees', '_gate', state.id, ctx.runId, step.id);
+  fs.mkdirSync(scratch, { recursive: true });
   const workers = chooseWorkers(step);
   const shards = chooseShards(step);
   // An allowlisted environment, never the owner's whole one (session tokens included): see engine/env.mjs.
   // WF_ITEM / WF_ITEMS say WHICH tickets' captures the run is for (a batch runs its members' heavy steps); where the
   // tests write them is the project's convention, matched by the step's `artifacts` globs.
   const units = artifactUnits(root, state);
-  const env = projectEnv(cfg, { ...stepEnv(root, cfg, step.id), WF_ROOT: root, WF_ATTEMPT: state.id, WF_ITEM: String(state.item ?? state.id), WF_ITEMS: [...new Set(units.map((u) => String(u.item)))].join(' '), WF_STEP: step.id, WF_EVIDENCE: evidenceDir, WF_WORKERS: String(workers.n) });
+  const env = projectEnv(cfg, { ...stepEnv(root, cfg, step.id), WF_ROOT: root, WF_ATTEMPT: state.id, WF_ITEM: String(state.item ?? state.id), WF_ITEMS: [...new Set(units.map((u) => String(u.item)))].join(' '), WF_STEP: step.id, WF_EVIDENCE: scratch, WF_WORKERS: String(workers.n) });
   const started = Date.now();
   const prior = allGateSteps(state).filter((s) => s.id === step.id && s.status !== 'reused' && s.suites).at(-1);
   const rerun = step.select ? suitesToRerun(prior, planned) : null;
-  const vars = { workers: workers.n, shards: shards.n, evidence: evidenceDir };
+  const vars = { workers: workers.n, shards: shards.n, evidence: scratch };
   vars.select = rerun ? substitute(step.select, { suites: rerun.map(shellQuote).join(' ') }) : '';
   let result;
   if (step.plugin) {
     const mod = (await import(pathToFileURL(adapterFileAtCommit(root, ctx.live, state.adapterBase, step.plugin)).href)).default;
-    const pctx = { root, attempt: state.id, step, dir: planned.dir, worktrees: Object.fromEntries(Object.entries(state.repos).map(([k, v]) => [k, v.worktree])), changed: ctx.changedSinceBase, evidenceDir, workers: workers.n, env, log: (s) => fs.appendFileSync(logFile, ctx.redact(`${s}\n`)) };
+    const pctx = { root, attempt: state.id, step, dir: planned.dir, worktrees: Object.fromEntries(Object.entries(state.repos).map(([k, v]) => [k, v.worktree])), changed: ctx.changedSinceBase, evidenceDir: scratch, workers: workers.n, env, log: (s) => fs.appendFileSync(logFile, ctx.redact(`${s}\n`)) };
     const decision = mod.plan ? await mod.plan(pctx) : null;
     if (decision && decision.run === false) {
       return { id: step.id, repo: step.repo, tier: planned.tier, key: planned.key, inputsHash: planned.inputsHash, runnerIdentity: planned.runnerIdentity, status: 'skipped', reason: decision.reason ?? 'step plugin decided not to run', suites: [], artifacts: [], runId: ctx.runId };
@@ -389,7 +411,10 @@ async function executeStep(root, cfg, state, planned, ctx) {
     }
     const files = (step.report?.junit ? [step.report.junit].flat() : []).flatMap((p) => globFiles(planned.dir, substitute(p, vars)));
     let suites = readJUnitFiles(files);
-    for (const f of files) fs.copyFileSync(f, path.join(evidenceDir, `junit-${path.basename(f)}`));
+    for (const f of files) {
+      prepareWrite(path.join(evidenceDir, `junit-${path.basename(f)}`));
+      fs.writeFileSync(path.join(evidenceDir, `junit-${path.basename(f)}`), fs.readFileSync(f));
+    }
     if (rerun && prior?.suites) {
       const fresh = new Map(suites.map((s) => [s.id, s]));
       suites = [...prior.suites.filter((s) => !fresh.has(s.id) && !rerun.includes(s.file ?? s.id)).map((s) => ({ ...s, carried: true })), ...fresh.values()];
@@ -398,12 +423,14 @@ async function executeStep(root, cfg, state, planned, ctx) {
     const failed = codes.some((c) => c.code !== 0) || suites.some((s) => s.status === 'failed');
     result = { status: interrupted ? 'interrupted' : failed ? 'failed' : 'passed', suites, exitCodes: codes.map((c) => c.code), artifacts: [] };
   }
+  copyScratch(scratch, evidenceDir);
   const collected = collectArtifacts(step, planned.dir, path.join(evidenceDir, 'artifacts'), started, units);
   result.artifacts.push(...collected.artifacts);
   result.artifactGlobs = collected.artifactGlobs;
   let fileHashesRef = null;
   if (planned.fileHashes) {
     const f = path.join(evidenceDir, 'inputs.json');
+    prepareWrite(f);
     fs.writeFileSync(f, JSON.stringify(planned.fileHashes));
     fileHashesRef = { path: f, sha256: hashFile(f) };
   }
@@ -511,6 +538,9 @@ async function harvest(root, state, lock) {
   }
   const pf = progressFile(root, state.id, lock.runId);
   const progress = fs.existsSync(pf) ? JSON.parse(fs.readFileSync(pf, 'utf8')) : { steps: [] };
+  // A dead runner's folder is recorded by the process that harvests it, as found.
+  ownGateRun(root, state.id, lock.runId);
+  seal(append, { root, id: state.id, runId: lock.runId });
   append(root, state.id, lock.kind === 'check' ? 'check.finished' : 'gate.finished', { runId: lock.runId, status: 'recovered', reason: 'owner-dead', steps: progress.steps, tree: lock.tree, ...(lock.kind === 'check' ? { check: true } : {}) }, null);
   return { runId: lock.runId, carried: progress.steps.filter((s) => s.status === 'passed').length };
 }
@@ -589,6 +619,8 @@ function failureExcerpt(result, redact) {
 async function execute(root, state, plan, live = null) {
   const runId = `${now().replace(/[:.]/g, '-')}-${process.pid}`;
   const runDir = path.join(gateDir(root, state.id), runId);
+  ownGateRun(root, state.id, runId);
+  prepareWrite(path.join(runDir, 'x'));
   fs.mkdirSync(runDir, { recursive: true });
   const lockData = { pid: process.pid, runId, kind: plan.check ? 'check' : 'gate', startedAt: now(), tree: plan.tree, children: [], plugins: [] };
   const persistLock = () => writeJson(lockFile(root, state.id), lockData);
@@ -711,6 +743,8 @@ async function execute(root, state, plan, live = null) {
   say(`${status} (${runId})`);
   const record = { runId, status, producedUntracked, changed: plan.changed, full: plan.full, focused: plan.focused, check: plan.check || undefined, rerunFailed: plan.rerunFailed ?? undefined, adapterBase: state.adapterBase, tree: plan.tree, impact: plan.impact, unchecked: plan.unchecked, steps: results, finishedAt: now() };
   writeImmutable(path.join(runDir, 'result.json'), `${JSON.stringify(record, null, 2)}\n`);
+  // Recorded before the run is: once it is finished, an unrecorded file in its folder is an extra file.
+  seal(append, { root, id: state.id, runId });
   append(root, state.id, plan.check ? 'check.finished' : 'gate.finished', { ...record, evidence: path.join(runDir, 'result.json') }, null);
   const flaky = flakesIn(state, results);
   if (flaky.length) append(root, state.id, 'gate.flaky', { runId, flaky }, null);

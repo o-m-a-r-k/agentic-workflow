@@ -5,6 +5,7 @@ import { attemptDir } from './ledger.mjs';
 import { evidenceSteps, noEvidenceVerdicts, readBundle } from './lifecycle.mjs';
 import { redactor } from './secrets.mjs';
 import { hashFile, now } from './util.mjs';
+import { prepareWrite } from './evidence.mjs';
 
 // One readable view of an attempt, built from the ledger and evidence. It is a VIEW: the ledger and the evidence
 // files stay the source of truth. Works for a half-finished attempt. Every catalogued secret value is masked.
@@ -190,6 +191,7 @@ export function exportAttempt(root, state, { out = null, json = false } = {}) {
   } catch {}
   const file = out ? path.resolve(String(out)) : exportFile(root, state.id, json);
   const text = json ? redact(`${JSON.stringify(data, null, 2)}\n`) : redactHtml(redact, data);
+  prepareWrite(file);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, text);
   return { file, data, text };

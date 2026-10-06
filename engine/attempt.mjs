@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { loadConfig, loadConfigAtCommit, adapterLocation, repoDir } from './config.mjs';
-import { append, assertSchema, createAttempt, listAttempts, loadState } from './ledger.mjs';
+import { append, assertSchema, createAttempt, listAttempts, loadState, openEvidence } from './ledger.mjs';
 import { projectEnv } from './env.mjs';
 import { emitTrackerEvent } from './tracker.mjs';
 import { WfError, assertEngine, assertSafeId, git, hashFile, refuse, run, sessionIdentity, sha256 } from './util.mjs';
@@ -35,6 +35,7 @@ export function resolveAttempt(root, options = {}) {
 
 export function openState(root, options) {
   const id = resolveAttempt(root, options);
+  openEvidence(root, id);
   const state = loadState(root, id);
   assertSchema(state);
   return state;

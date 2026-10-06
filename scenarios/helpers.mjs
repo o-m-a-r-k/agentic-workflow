@@ -13,7 +13,8 @@ export function sh(cwd, cmd) {
 }
 
 const baseEnv = () => {
-  const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.test', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.test' };
+  // The immutable flag stays off in tests (temporary folders must stay removable); modes and the manifest still apply.
+  const env = { ...process.env, WF_EVIDENCE_FLAGS: '0', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.test', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.test' };
   delete env.CLAUDE_CODE_SESSION_ID;
   delete env.CODEX_THREAD_ID;
   delete env.GROK_SESSION_ID;

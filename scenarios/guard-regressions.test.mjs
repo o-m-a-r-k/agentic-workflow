@@ -191,17 +191,22 @@ test('export screenshots: a symlink or file swapped in during the copy is never 
     // The source swapped for a symlink (O_NOFOLLOW), or its bytes changed after the check (hash of the written bytes).
     const src = s.delivery.screenshots.screenshots[0].path;
     const keep = fs.readFileSync(src);
+    // The evidence folders are 0555 between commands: an attacker would lift that first.
+    const unlock = () => fs.chmodSync(path.dirname(src), 0o755);
     exportSeams.beforeSourceOpen = (p) => {
       if (p !== src) return;
+      unlock();
       fs.chmodSync(src, 0o644);
       fs.rmSync(src);
       fs.symlinkSync('/etc/hosts', src);
     };
     assert.throws(() => exportScreenshots(root, s, out), /source not readable as a regular file \(ELOOP\)/);
     fs.rmSync(src);
-    exportSeams.beforeSourceOpen = (p) => p === src && fs.writeFileSync(src, 'tampered');
+    exportSeams.beforeSourceOpen = (p) => p === src && fs.writeFileSync(src, 'tampered', { mode: 0o444 });
     assert.throws(() => exportScreenshots(root, s, out), /bytes differ from the recorded sha256/);
+    fs.chmodSync(src, 0o644);
     fs.writeFileSync(src, keep);
+    fs.chmodSync(src, 0o444);
   } finally {
     exportSeams.beforeDestOpen = null;
     exportSeams.beforeSourceOpen = null;

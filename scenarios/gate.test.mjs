@@ -85,7 +85,8 @@ process.exit(run.includes('tests/b.test')&&fail?1:0);`;
   commitIn(e.repos.app.worktree, { 'tests/b.test': 'good\n' });
   const g2 = gateJson(root, e.id);
   assert.equal(g2.code, 0);
-  const ran = fs.readFileSync(path.join(path.dirname(g2.data.steps[0].log), '..', 'ran.txt'), 'utf8').trim();
+  // Steps write into their scratch folder (WF_EVIDENCE), outside the evidence; its parent is the run's scratch folder.
+  const ran = fs.readFileSync(path.join(root, '.wf-worktrees', '_gate', e.id, g2.data.runId, 'ran.txt'), 'utf8').trim();
   assert.equal(ran, 'tests/b.test', 'only the failed/changed suite reran');
   assert.ok(g2.data.steps[0].suites.find((s) => s.id === 'tests/a.test').carried, 'the passing suite is carried');
 });
@@ -205,6 +206,10 @@ test('a newer schema is refused with the version to use', () => {
   delete first.hash;
   first.hash = sha256(canonical(first));
   fs.writeFileSync(file, `${JSON.stringify(first)}\n`);
+  // As a future engine would, it also moves the chain-head anchor (without that, the rewrite is refused as tampering).
+  const anchor = path.join(root, '.wf-worktrees', '_anchor', `${e.id}.json`);
+  fs.chmodSync(anchor, 0o644);
+  fs.writeFileSync(anchor, JSON.stringify({ attempt: e.id, seq: first.seq, hash: first.hash }));
   const r = wf(root, ['resume', '--attempt', e.id]);
   assert.equal(r.code, 75);
   assert.match(r.err, /9\.0\.0/);
