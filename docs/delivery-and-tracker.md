@@ -16,7 +16,7 @@ stateDiagram-v2
 
 - **Delivery adapters** do the git side, in three parts:
   - `integrate`: push to main, or open a PR/MR.
-  - `observe`: report the state: `integrated`, `awaiting-merge` or `ci-running` (`wf deliver` exits 0 and says to run it again once merged), or `rejected` or `ci-failed` (`wf deliver` refuses with the state and what to do). Any other value, a typo or no state at all refuses too, naming what was received and the valid states. The adapter is read from the commit the attempt was admitted at, so committing a fixed adapter does not reach the running attempt. The refusal names the recovery: commit and push the fixed adapter, `wf abandon` the attempt (its branch is kept), `wf entry` again, cherry-pick the change into the new worktree, then gate, review and deliver it.
+  - `observe`: report the state: `integrated`, `awaiting-merge` or `ci-running` (`wf deliver` exits 0 and says to run it again once merged), or `rejected` or `ci-failed` (`wf deliver` refuses with the state and what to do). Any other value, a typo or no state at all refuses too, naming what was received and the valid states. The adapter is read from the commit the attempt was admitted at, so committing a fixed adapter does not reach the running attempt. The refusal says so and points to [Recovering from an adapter fault](lifecycle.md#recovering-from-an-adapter-fault), which gives the steps and the cases they do not cover.
   - `readback`: prove the change is on the target branch.
 
   `push-main` is built in; anything else is one file in your project.

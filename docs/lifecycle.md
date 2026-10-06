@@ -65,6 +65,23 @@ Named failure (I-18): implementers, reviewers and the owner agent noted real def
 - **The reviewer judges each.** The implementer and reviewer bundles list every entry under `discovered`. The closure gives each a verdict: `discovered: [{ id, verdict: fixed|deferred|open, evidence }]` (`deferred` only for an entry the owner deferred). `wf review` refuses a closure missing one; `wf accept` refuses an `open` verdict and an entry recorded after the round was handed (a fresh reviewer judges it).
 - **A fence that blocks a fix is a criteria defect.** The planner states invariants ("the contract seam stays matched; existing fields, permissions and tenant isolation are unchanged"), never a blanket "no change in X". When a criterion, a work item's repos or the admitted repos block a fix, the owner amends the criteria; the fence is never the reason to defer or to ship a cosmetic workaround. A fix that needs another repo adds it in the same step: `wf criteria amend --file f --reason "why" --add-repo api` creates the repo's worktree on the attempt's branch from its current base, provisioned as at admission, and records the amendment. When the attempt has work items, the amendment must include one for the added repo. The gate and delivery then cover that repo like any other, and the reviewer bundle lists it under `addedRepos`: the closure judges the contract seam on both sides, `seams: [{ repo, verdict: matched|finding, evidence, finding }]` (`matched` cites the producer's file:line and the consumer's), and is refused without it.
 
+### Recovering from an adapter fault
+
+An attempt is pinned to the adapter (`.workflow/`, the delivery adapter included) as committed at its admission. When the delivery adapter reports a state that is not documented, `wf deliver` refuses with the state it received. Committing a fixed adapter on the base branch helps only new attempts; the running attempt keeps refusing (proven: `scenarios/delivery.test.mjs`, "a broken delivery adapter").
+
+**Single repo, standard lane** (proven by two scenarios, with and without a `wf base merge` before the fault):
+1. Commit and push the fixed adapter on the base branch.
+2. `wf abandon --reason "<why>" --attempt <id>`. The attempt's branch `wf/<id>` is kept and holds the changes.
+3. `wf entry --item <item>` starts a new attempt from the current base, with the fixed adapter.
+4. In the new worktree: `git merge --squash wf/<old id>`, then `git commit`. A squash merge brings in exactly the ticket's change, also when the old attempt merged an advanced base. A `git cherry-pick <base>..wf/<old id>` range fails after a `wf base merge`, because of the merge commit.
+5. Plan, hand off, gate, review, accept and deliver the new attempt as usual.
+
+Not covered by those scenarios:
+- **Several repos, one already delivered** (not tested): `wf abandon` refuses an attempt that is partly delivered, and the pinned adapter cannot change for it. There is no supported recovery in this release (inbox entry I-21).
+- **Several repos, none delivered yet** (not tested): steps 2 to 5 should apply in each repo the attempt changed, with one `git merge --squash` per repo.
+- **Quick lane** (not tested): step 3 is `wf entry` without `--item`, which starts a new `QF-<n>`. Neither a planner nor a tracker issue is involved.
+- **Batch** (not tested): each member is its own attempt. Eject it (`wf batch eject`), then recover each member as above, or build a new batch from the new attempts.
+
 ### Durable artifacts and the attempt page
 
 Everything an agent or the owner produced is kept verbatim, write-once and hash-bound in `.wf-evidence/attempts/<id>/` at the moment the engine consumes it: the raw plan (`plans/plan-1.raw.yaml`, or `.json`), every amendment file (`plans/amend-<n>.raw.*`), every closure as written (`review/closure-<round>.raw.json`), the handoff bundles, gate results and tracker captures. Nothing exists only in chat.

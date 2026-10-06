@@ -311,33 +311,49 @@ export default {
   }
 });
 
-// Delta review of 3338382: the adapter is read at the attempt's base, pinned at admission, so committing a fixed adapter
-// on the base branch does not reach the running attempt. The refusal says so and names the recovery this test follows
-// step by step: commit and push the fixed adapter, abandon, start a new attempt, bring the change over, then gate,
-// review and deliver it.
-test('a broken delivery adapter: the refusal names the recovery that works, and following it delivers', () => {
-  const broken = `export default { integrate(ctx) { return { url: 'https://git.example.test/mr/3' }; }, observe() { return { state: 'merged' }; }, readback() { return { ok: true }; } };`;
-  const fixed = `import { execFileSync } from 'node:child_process';
+// Delta reviews of 3338382 and f250f98: the adapter is read at the attempt's base, pinned at admission, so a fixed adapter
+// on the base branch does not reach the running attempt, and a shell recipe in the refusal was wrong for other lanes and
+// for merged bases. The refusal states the facts and points to docs/lifecycle.md "Recovering from an adapter fault",
+// whose single-repo standard-lane recipe these two scenarios follow: commit the fixed adapter, abandon, `wf entry
+// --item`, `git merge --squash` the old branch and commit, then plan, gate, review and deliver. The second one runs
+// `wf base merge` first.
+const brokenAdapter = `export default { integrate(ctx) { return { url: 'https://git.example.test/mr/3' }; }, observe() { return { state: 'merged' }; }, readback() { return { ok: true }; } };`;
+const fixedAdapter = `import { execFileSync } from 'node:child_process';
 export default {
   integrate(ctx) { return { url: 'https://git.example.test/mr/3' }; },
   observe(ctx) { execFileSync('git', ['push', '-q', 'origin', 'HEAD:refs/heads/main'], { cwd: ctx.worktree }); return { state: 'integrated' }; },
   readback() { return { ok: true }; },
 };`;
-  const { base, root, remote } = singleRepoProject('mr-broken', { delivery: { kind: './delivery/mr.mjs' }, gate: { steps } }, { '.workflow/delivery/mr.mjs': broken });
-  const { id, wt } = toAccepted(root, base, { item: 'ENG-72' });
+function recoverFromBrokenAdapter(name, { baseMerge }) {
+  const { base, root, remote } = singleRepoProject(name, { delivery: { kind: './delivery/mr.mjs' }, gate: { steps } }, { '.workflow/delivery/mr.mjs': brokenAdapter, 'src/other.txt': 'o\n' });
+  const e = ok(wf(root, ['entry', '--item', 'ENG-72', '--owner', 'owner-1', '--json'])).json();
+  const id = e.id;
+  ok(wf(root, ['handoff', 'planner', '--agent', 'plan-1', '--attempt', id, '--owner', 'owner-1']));
+  ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', id, '--owner', 'owner-1']));
+  ok(wf(root, ['handoff', 'implementer', '--agent', 'impl-1', '--attempt', id, '--owner', 'owner-1']));
+  commitIn(e.repos.app.worktree, { 'src/a.txt': 'b\n' });
+  if (baseMerge) {
+    // The base advances with an unrelated change, and the attempt merges it in.
+    sh(root, "printf 'o2\\n' > src/other.txt && git commit -qam 'unrelated base change' && git push -q origin main");
+    ok(wf(root, ['base', 'merge', '--attempt', id]));
+  }
+  ok(wf(root, ['gate', '--attempt', id]));
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-1', '--attempt', id, '--owner', 'owner-1']));
+  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('rev-1')), '--attempt', id]));
+  ok(wf(root, ['accept', '--attempt', id, '--owner', 'owner-1']));
   const r = wf(root, ['deliver', '--attempt', id]);
   assert.notEqual(r.code, 0);
   assert.match(r.err, /the delivery adapter reported an unknown state "merged"/);
-  assert.match(r.err, /read at this attempt's base, so a fix reaches only a new attempt: commit and push the fixed adapter on the base branch, `wf abandon --reason "\.\.\." --attempt ENG-72\.1` \(its branch wf\/ENG-72\.1 is kept\), `wf entry --item ENG-72`, bring the change over \(`git cherry-pick [0-9a-f]{10}\.\.wf\/ENG-72\.1` in the new worktree\), then gate, review and deliver it/);
+  assert.match(r.err, /this attempt is pinned to the delivery adapter as of its admission, so fixing the adapter on the base branch does not change this attempt; fix it there for new attempts\. To finish this ticket, abandon this attempt and enter it again: the abandoned attempt's branch wf\/ENG-72\.1 is kept and holds the changes\. The steps depend on the lane and the repos: docs\/lifecycle\.md#recovering-from-an-adapter-fault/);
+  assert.doesNotMatch(r.err, /cherry-pick|[0-9a-f]{10}\.\./, 'no shell recipe or hash range in the refusal');
   // A fix committed on the base branch alone does not reach this attempt: the same refusal.
-  fs.writeFileSync(path.join(root, '.workflow', 'delivery', 'mr.mjs'), fixed);
+  fs.writeFileSync(path.join(root, '.workflow', 'delivery', 'mr.mjs'), fixedAdapter);
   sh(root, 'git add -A && git commit -qm "fix the delivery adapter" && git push -q origin main');
   assert.match(wf(root, ['deliver', '--attempt', id]).err, /reported an unknown state "merged"/);
-  // The hint, step by step.
-  const pick = r.err.match(/git cherry-pick ([0-9a-f]{10})\.\.wf\/ENG-72\.1/)[1];
+  // The documented recipe.
   ok(wf(root, ['abandon', '--reason', 'the delivery adapter was broken', '--attempt', id]));
   const e2 = ok(wf(root, ['entry', '--item', 'ENG-72', '--owner', 'owner-1', '--json'])).json();
-  sh(e2.repos.app.worktree, `git cherry-pick ${pick}..wf/${id}`);
+  sh(e2.repos.app.worktree, `git merge --squash wf/${id} && git commit -qm "ENG-72: the change from ${id}"`);
   ok(wf(root, ['handoff', 'planner', '--agent', 'plan-2', '--attempt', e2.id, '--owner', 'owner-1']));
   ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e2.id, '--owner', 'owner-1']));
   ok(wf(root, ['handoff', 'implementer', '--agent', 'impl-2', '--attempt', e2.id, '--owner', 'owner-1']));
@@ -348,7 +364,15 @@ export default {
   ok(wf(root, ['deliver', '--attempt', e2.id]));
   assert.ok(state(root, e2.id).delivery.completedAt, 'delivered');
   assert.equal(sh(base, `git --git-dir=${remote} show main:src/a.txt`), 'b');
-  void wt;
+  if (baseMerge) assert.equal(sh(base, `git --git-dir=${remote} show main:src/other.txt`), 'o2');
+}
+
+test('a broken delivery adapter: the refusal states the facts, and the documented recovery delivers', () => {
+  recoverFromBrokenAdapter('mr-broken', { baseMerge: false });
+});
+
+test('a broken delivery adapter after `wf base merge`: the documented recovery (merge --squash) still delivers', () => {
+  recoverFromBrokenAdapter('mr-broken-merged', { baseMerge: true });
 });
 
 test('a step that reads another repo (alsoInputs) reruns when that repo changes, and always runs when its tree cannot be read', () => {
