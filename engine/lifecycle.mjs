@@ -13,7 +13,7 @@ import { outsidePlan, outsideVerdicts } from './scope.mjs';
 import { commentFile, emitTrackerEvent, needsSummary, recordSummary, writeDeliveredComment } from './tracker.mjs';
 import { designChecks, designVerdicts, requiredSkills, reviewRules, ruleVerdicts, skillFiles, unreadDocs } from './rules.mjs';
 import { home, startPromptFor, verifyAgent } from './provenance.mjs';
-import { WfError, YAML, canonical, git, hashFile, hashValue, matchesAny, readJson, refuse, run, sessionIdentity, sha256, writeImmutable, writeJson } from './util.mjs';
+import { WfError, YAML, assertSafeId, canonical, git, hashFile, hashValue, matchesAny, readJson, refuse, run, sessionIdentity, sha256, writeImmutable, writeJson } from './util.mjs';
 
 const readStructured = (file) => {
   let text = fs.readFileSync(path.resolve(String(file)), 'utf8');
@@ -1171,7 +1171,7 @@ export function reopen(root, options) {
 export function batchCreate(root, options) {
   const cfg = loadConfig(root);
   if (!cfg.lanes.includes('batch')) throw refuse('the batch lane is not enabled for this project');
-  const members = String(options.members ?? '').split(',').filter(Boolean);
+  const members = String(options.members ?? '').split(',').filter(Boolean).map((m) => assertSafeId(m, 'attempt id'));
   if (members.length < 2) throw new WfError('--members needs at least two attempt ids');
   const states = members.map((m) => loadState(root, m));
   for (const s of states) {
@@ -1203,7 +1203,7 @@ export function batchCreate(root, options) {
 
 export function batchEject(root, options) {
   const batch = openState(root, { attempt: options.batch });
-  const member = String(options.member ?? '');
+  const member = assertSafeId(options.member ?? '', 'attempt id');
   const members = batchMembers(root, batch.id);
   if (!members.includes(member)) throw refuse(`${member} is not in ${batch.id}`);
   if (batch.delivery.completedAt || Object.keys(batch.delivery.repos).length) throw refuse(`${batch.id} is already being delivered`);

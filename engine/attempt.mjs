@@ -22,7 +22,7 @@ const OPEN = (s) => !['done', 'abandoned'].includes(s.phase);
 
 // --attempt wins; otherwise the attempt whose worktree contains cwd; otherwise the only open attempt.
 export function resolveAttempt(root, options = {}) {
-  if (options.attempt) return String(options.attempt);
+  if (options.attempt) return assertSafeId(options.attempt, 'attempt id');
   const wt = worktreesRoot(root) + path.sep;
   const cwd = fs.realpathSync(process.cwd()) + path.sep;
   const realWt = fs.existsSync(worktreesRoot(root)) ? fs.realpathSync(worktreesRoot(root)) + path.sep : wt;
@@ -246,9 +246,54 @@ export function cleanupWorktrees(root, state) {
     if (state.delivery?.completedAt) run('git', ['branch', '-D', r.branch ?? branchName(state.id)], { cwd: dir, allowFail: true });
   }
   if (problems.length) process.stderr.write(`wf: could not remove worktree(s):\n  ${problems.join('\n  ')}\n`);
-  const dir = path.join(worktreesRoot(root), state.id);
-  fs.rmSync(path.join(dir, '_review'), { recursive: true, force: true }); // closures were copied into evidence by `wf review`
-  if (fs.existsSync(dir) && fs.readdirSync(dir).length === 0) fs.rmdirSync(dir);
+  removeReviewScratch(root, state.id);
+}
+
+// Removes the attempt's `_review` scratch folder (closures were copied into evidence by `wf review`). Fails closed:
+// nothing is deleted unless `.wf-worktrees`, the attempt folder and `_review` are real directories (not links) that
+// really lie where they should; entries are removed one by one without following links; anything uncertain is left
+// in place with a warning. Named finding (0.1.18 review): a recursive delete under `.wf-worktrees` would follow a
+// symlinked folder (for example `.wf-worktrees` itself pointing at the evidence).
+export function removeReviewScratch(root, id) {
+  assertSafeId(id, 'attempt id');
+  const warn = (why) => process.stderr.write(`wf: left ${path.join(worktreesRoot(root), id)} in place: ${why}\n`);
+  const wtRoot = worktreesRoot(root);
+  const isDir = (p) => {
+    const st = fs.lstatSync(p, { throwIfNoEntry: false });
+    return st ? (st.isDirectory() && !st.isSymbolicLink() ? 'dir' : 'other') : null;
+  };
+  const top = isDir(wtRoot);
+  if (top === null) return;
+  if (top !== 'dir') return warn('.wf-worktrees is not a real directory');
+  const rootReal = fs.realpathSync(root);
+  if (fs.realpathSync(wtRoot) !== path.join(rootReal, '.wf-worktrees')) return warn('.wf-worktrees does not really lie in the project');
+  const dir = path.join(wtRoot, id);
+  const d = isDir(dir);
+  if (d === null) return;
+  if (d !== 'dir' || fs.realpathSync(dir) !== path.join(rootReal, '.wf-worktrees', id)) return warn('the attempt folder is a link or lies elsewhere');
+  const review = path.join(dir, '_review');
+  const rv = isDir(review);
+  if (rv === 'other') return warn('_review is a link or not a directory');
+  if (rv === 'dir') {
+    const ok = removeTree(review, fs.realpathSync(review));
+    if (!ok) return warn('_review held something that is not a plain file or folder');
+  }
+  if (fs.readdirSync(dir).length === 0) fs.rmdirSync(dir);
+}
+
+// Deletes a folder's plain files and folders bottom-up, unlinking (never following) a symlink; refuses anything that
+// leaves `expected`. Returns false and leaves the rest in place when it meets something else.
+function removeTree(dir, expected) {
+  let clean = true;
+  for (const name of fs.readdirSync(dir)) {
+    const p = path.join(dir, name);
+    const st = fs.lstatSync(p);
+    if (st.isSymbolicLink() || st.isFile()) fs.unlinkSync(p);
+    else if (st.isDirectory() && fs.realpathSync(p) === path.join(expected, name)) clean = removeTree(p, path.join(expected, name)) && clean;
+    else clean = false;
+  }
+  if (clean) fs.rmdirSync(dir);
+  return clean;
 }
 
 export function changedFiles(state, name) {

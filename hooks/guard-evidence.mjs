@@ -21,11 +21,14 @@ const REFUSAL = 'agentic-workflow: this touches workflow evidence. Evidence unde
 
 // Run as a hook only when executed directly; importing (tests) has no side effects.
 if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
-  let input = '';
-  process.stdin.on('data', (c) => (input += c));
+  const chunks = [];
+  process.stdin.on('data', (c) => chunks.push(c));
   process.stdin.on('end', () => {
     let verdict;
+    let input = '';
     try {
+      // Decoded once: a multi-byte character split across chunks must not turn into replacement characters.
+      input = Buffer.concat(chunks).toString('utf8');
       verdict = decide(input);
     } catch {
       verdict = mentionsEvidence(input) ? 'the hook could not judge this input' : null;
@@ -56,11 +59,21 @@ function globMatchesEvidence(token) {
 // Whether text refers to the evidence in any form the shell could turn into its path.
 // Unicode is folded first (NFKC: full-width and compatibility forms; zero-width and other invisible format characters
 // removed), so a look-alike spelling counts too.
-const fold = (text) => String(text ?? '').normalize('NFKC').replace(/[\p{Cf}\u00ad]/gu, '').toLowerCase();
+const fold = (text) => String(text ?? '').normalize('NFKC').replace(/[\p{Cf}\u00ad]|[\p{Cc}](?<![\n\t\r])/gu, '').toLowerCase();
+// Escapes a shell or printf turns into characters: \xHH, \NNN (octal), \uHHHH, \UHHHHHHHH.
+const unescape = (text) => text.replace(/\\x([0-9a-f]{1,2})|\\u([0-9a-f]{4})|\\U([0-9a-f]{8})|\\0?([0-7]{1,3})/gi, (m, x, u, U, o) => {
+  try {
+    return String.fromCodePoint(parseInt(x ?? u ?? U ?? o, x || u || U ? 16 : 8));
+  } catch {
+    return m;
+  }
+});
 
 export function mentionsEvidence(text) {
   const raw = fold(text);
-  if (raw.includes('wf-evidence')) return true;
+  if (raw.includes('wf-evidence') || fold(unescape(raw)).includes('wf-evidence')) return true;
+  // A path assembled at run time: any expansion or substitution together with a part of the name.
+  if (/[$`]/.test(raw) && /wf-|evidence|\.wf\b/.test(raw)) return true;
   const squeezed = raw.replace(/\$'|\$\{|[\s'"`\\{}]/g, '');
   if (squeezed.includes('wf-evidence') || squeezed.includes('wf-ev')) return true;
   if (/[*?[\]{},$]\s*evidence|evidence\s*[*?[\]{},$]/.test(raw.replace(/['"\\]/g, ''))) return true;
@@ -95,18 +108,24 @@ export function check(data) {
   const cwd = typeof data.cwd === 'string' && data.cwd ? data.cwd : process.cwd();
   const cwdInEvidence = inEvidence(cwd) || inEvidence(real(path.resolve(cwd)));
   if (!t || typeof t !== 'object') return mentionsEvidence(JSON.stringify(data)) || cwdInEvidence ? 'unknown tool input' : null;
+  // Every file target is checked whatever else the input carries (a `command` next to a `file_path` whitelists nothing).
+  const files = [t.file_path, t.notebook_path, t.path, ...(Array.isArray(t.edits) ? t.edits.map((e) => e?.file_path) : [])];
+  for (const file of files) {
+    if (file === undefined || file === null) continue;
+    if (typeof file !== 'string') return mentionsEvidence(JSON.stringify(file)) || cwdInEvidence ? 'unknown file target' : null;
+    const abs = path.resolve(cwd, file.replace(/^~(?=\/|$)/, process.env.HOME ?? '~'));
+    if (mentionsEvidence(file) || inEvidence(abs) || inEvidence(real(abs))) return `${file} is workflow evidence`;
+  }
+  const bashTool = data.tool_name === undefined || data.tool_name === 'Bash';
   if (typeof t.command === 'string') {
-    if (isPlainWf(t.command)) return null;
+    // A Bash command; an unexpected `command` on another tool is judged the same way, never as a whitelist.
+    if (bashTool && isPlainWf(t.command)) return null;
     if (mentionsEvidence(t.command)) return 'the command mentions .wf-evidence';
     if (cwdInEvidence) return 'the command runs inside .wf-evidence';
     return null;
   }
-  const file = [t.file_path, t.notebook_path, t.path].find((v) => typeof v === 'string' && v);
-  if (file) {
-    const abs = path.resolve(cwd, file);
-    if (mentionsEvidence(file) || inEvidence(abs) || inEvidence(real(abs))) return `${file} is workflow evidence`;
-    return null;
-  }
+  if (t.command !== undefined) return mentionsEvidence(JSON.stringify(t.command)) || cwdInEvidence ? 'a command that is not text' : null;
+  if (files.some((f) => typeof f === 'string')) return null;
   // Neither a command nor a file target: judged on everything it carries.
   return mentionsEvidence(JSON.stringify(t)) || cwdInEvidence ? 'unknown tool input' : null;
 }

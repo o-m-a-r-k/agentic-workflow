@@ -287,3 +287,98 @@ test('the shown draft and every other engine write outside the evidence never fo
   assert.throws(() => safeWrite(a.root, path.join(a.exports, 'new', 'x.json'), 'x'), /really lies in \.wf-evidence/);
   assert.ok(!fs.existsSync(path.join(a.evidence, 'new')), 'no folder created inside the evidence');
 });
+
+// ---- 0.1.19: the last adversarial pass ----
+
+test('guard: 30 attack inputs of new kinds are refused', () => {
+  const bashCases = [
+    'a=.wf-; b=evidence; rm -rf $a$b', 'a=.wf; rm -rf ${a}-evidence', 'p=evidence; cat .wf-$p/a', 'cat${IFS}.wf-evidence/a', 'IFS=/; x=".wf-evidence"; cat $x',
+    "cat $'\\x2ewf-evidence/a'", "cat $'\\056wf-evidence/a'", "cat \"$(printf '\\x2ewf-evidence')\"/a", 'cat $(echo .wf-ev)idence/a', 'rm -rf "$(ls -a | grep wf-e)"',
+    'cat .wf-\u0000evidence/a', 'cat .wf-\u0007evidence/a', 'cat .wf-ev"$x"idence/a', 'cat .wf-ev\u200didence/a',
+    'wf export screenshots --to /p/.wf-evidence/x; true', 'env -i cat .wf-evidence/a', `cat ${'x'.repeat(200000)} .wf-evidence/a`,
+    'cd ../p/.wf-evidence', 'pushd /p/.WF-EVIDENCE', 'command -p cat .wf-evidence/a',
+  ];
+  for (const c of bashCases) assert.ok(check({ cwd: '/p', tool_input: { command: c } }), JSON.stringify(c.slice(0, 80)));
+  const shapes = [
+    { tool_name: 'Edit', tool_input: { command: 'wf status', file_path: '/p/.wf-evidence/a' } },
+    { tool_name: 'Write', tool_input: { file_path: ['/p/.wf-evidence/a'] } },
+    { tool_name: 'MultiEdit', tool_input: { file_path: '/tmp/x', edits: [{ file_path: '/p/.wf-evidence/a', old_string: 'a', new_string: 'b' }] } },
+    { tool_name: 'Write', tool_input: { command: 'wf status', file_path: '~/p/.wf-evidence/a' } },
+    { tool_name: 'Edit', tool_input: { command: 'wf status' }, cwd: '/p/.wf-evidence' },
+    { tool_name: 'Bash', tool_input: { command: { toString: 'rm .wf-evidence' } } },
+    { tool_name: 'Bash', tool_input: { command: 'wf status', file_path: '/p/.wf-evidence/a' } },
+    { tool_name: 'NotebookEdit', tool_input: { notebook_path: '/p/.wf-evidence/n.ipynb', new_source: 'x' } },
+  ];
+  for (const d of shapes) assert.ok(check(d), JSON.stringify(d));
+  const run = (input) => spawnSync(process.execPath, [HOOK], { input, encoding: 'buffer' }).status;
+  assert.equal(run(Buffer.concat([Buffer.from('{"tool_input":{"command":"cat .wf-evid'), Buffer.from([0xff, 0xfe]), Buffer.from('ence/a"}}')])), 2, 'invalid UTF-8');
+  assert.equal(run(Buffer.from(JSON.stringify({ tool_input: { command: `echo ${'é'.repeat(100000)} > .wf-evidence/a` } }))), 2, 'large multi-byte input');
+  assert.equal(check({ cwd: '/p', tool_input: { command: 'echo $HOME/notes.txt' } }), null, 'an expansion alone is fine');
+  // One plain `wf` invocation passes the hook; the engine then refuses a path option into the evidence.
+  assert.equal(check({ cwd: '/p', tool_input: { command: 'wf status --attempt ../../.wf-evidence' } }), null);
+});
+
+test('wf input files: regular files outside the evidence only; attempt ids and skill names are not paths', () => {
+  const { base, root } = singleRepoProject('cli-paths', {});
+  const e = ok(wf(root, ['entry', '--item', 'ENG-190', '--owner', 'o', '--json'])).json();
+  const other = path.join(root, '.wf-evidence', 'attempts', e.id, 'ledger.jsonl');
+  const link = path.join(base, 'innocent.json');
+  fs.symlinkSync(other, link);
+  for (const args of [['plan', '--file', other], ['plan', '--file', link], ['review', '--closure', link], ['tracker', 'record', '--event', 'admitted', '--capture', link], ['summary', '--file', link], ['shown', '--file', link], ['entry', '--item', 'ENG-191', '--issue-file', link]]) {
+    assert.match(wf(root, [...args, '--attempt', e.id]).err, /is inside \.wf-evidence\/ \(checked where it really points\); pass a file outside it/, args.join(' '));
+  }
+  assert.match(wf(root, ['plan', '--file', base, '--attempt', e.id]).err, /--file .* is not a regular file/);
+  assert.match(wf(root, ['init', '--root', path.join(root, '.wf-evidence', 'x')]).err, /--root .* is inside \.wf-evidence/);
+  for (const id of ['../../x', '..', 'a/b', '.hidden']) assert.match(wf(root, ['resume', '--attempt', id]).err, /invalid attempt id/, id);
+  assert.match(wf(root, ['skills', 'update', '../../.wf-evidence', '--from', base]).err, /invalid skill name/);
+  assert.ok(fs.existsSync(other), 'nothing deleted');
+  assert.match(wf(root, ['batch', 'eject', '--batch', e.id, '--member', '../x']).err, /invalid attempt id/);
+});
+
+test('cleanup at close never deletes through a link and leaves anything uncertain in place', async () => {
+  const { removeReviewScratch } = await import('../engine/attempt.mjs');
+  const base = tmp('cleanup');
+  const root = path.join(base, 'proj');
+  const evidence = path.join(root, '.wf-evidence', 'attempts', 'A-1.1');
+  fs.mkdirSync(evidence, { recursive: true });
+  fs.writeFileSync(path.join(evidence, 'ledger.jsonl'), 'keep\n');
+  fs.mkdirSync(path.join(evidence, '_review'));
+  fs.writeFileSync(path.join(evidence, '_review', 'closure.json'), 'keep');
+  const err = [];
+  const write = process.stderr.write;
+  process.stderr.write = (m) => err.push(String(m));
+  try {
+    // .wf-worktrees itself a link to the evidence: nothing is deleted.
+    fs.symlinkSync(path.join(root, '.wf-evidence', 'attempts'), path.join(root, '.wf-worktrees'));
+    removeReviewScratch(root, 'A-1.1');
+    assert.ok(fs.existsSync(path.join(evidence, '_review', 'closure.json')));
+    fs.unlinkSync(path.join(root, '.wf-worktrees'));
+    // The attempt folder, then `_review`, a link into the evidence.
+    fs.mkdirSync(path.join(root, '.wf-worktrees'));
+    fs.symlinkSync(evidence, path.join(root, '.wf-worktrees', 'A-1.1'));
+    removeReviewScratch(root, 'A-1.1');
+    fs.unlinkSync(path.join(root, '.wf-worktrees', 'A-1.1'));
+    fs.mkdirSync(path.join(root, '.wf-worktrees', 'A-1.1'));
+    fs.symlinkSync(path.join(evidence, '_review'), path.join(root, '.wf-worktrees', 'A-1.1', '_review'));
+    removeReviewScratch(root, 'A-1.1');
+    assert.ok(fs.existsSync(path.join(evidence, '_review', 'closure.json')), 'the evidence survived every link');
+    fs.unlinkSync(path.join(root, '.wf-worktrees', 'A-1.1', '_review'));
+    // A real _review holding a link into the evidence: the link is unlinked, its target kept.
+    const rv = path.join(root, '.wf-worktrees', 'A-1.1', '_review');
+    fs.mkdirSync(path.join(rv, 'sub'), { recursive: true });
+    fs.writeFileSync(path.join(rv, 'closure-1.json'), '{}');
+    fs.symlinkSync(evidence, path.join(rv, 'sub', 'ev'));
+    removeReviewScratch(root, 'A-1.1');
+    assert.ok(!fs.existsSync(path.join(root, '.wf-worktrees', 'A-1.1')), 'a plain scratch folder is removed');
+    assert.equal(fs.readFileSync(path.join(evidence, 'ledger.jsonl'), 'utf8'), 'keep\n');
+    // A FIFO in _review is uncertain: everything else stays.
+    fs.mkdirSync(rv, { recursive: true });
+    spawnSync('mkfifo', [path.join(rv, 'pipe')]);
+    removeReviewScratch(root, 'A-1.1');
+    assert.ok(fs.existsSync(path.join(rv, 'pipe')));
+  } finally {
+    process.stderr.write = write;
+  }
+  assert.equal(err.filter((m) => /left .* in place/.test(m)).length, 4, err.join(''));
+  assert.throws(() => removeReviewScratch(root, '../x'), /invalid attempt id/);
+});

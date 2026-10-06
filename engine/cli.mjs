@@ -167,6 +167,9 @@ export async function main(argv) {
   }
 }
 
+const WRITE_OPTIONS = ['out', 'csv', 'handoffs-csv', 'html', 'dir', 'to', 'root'];
+const READ_OPTIONS = ['file', 'capture', 'summary-file', 'closure', 'issue-file', 'from'];
+
 // Lexically or where it really points (the nearest existing ancestor resolved), case-insensitively.
 function pathInEvidence(p) {
   const hit = (x) => x.split(/[\\/]+/).some((seg) => seg.toLowerCase() === '.wf-evidence');
@@ -206,11 +209,21 @@ function safeBase(root, s) {
 }
 
 async function dispatch(cmd, sub, positional, options) {
-  // `wf` is the one command the evidence guard lets name .wf-evidence/; no option of it may write there.
-  for (const k of ['out', 'csv', 'handoffs-csv', 'html', 'dir', 'to']) {
+  // `wf` is the one command the evidence guard lets name .wf-evidence/. No option of it may write there, and an input
+  // file is read only when it is a regular file outside the evidence (another attempt's evidence is not an input).
+  for (const k of WRITE_OPTIONS) {
     const v = options[k];
-    if (typeof v === 'string' && pathInEvidence(path.resolve(v))) throw new WfError(`--${k} ${v} is inside .wf-evidence/; write outside it (the evidence is written only by wf itself)`);
+    if (typeof v === 'string' && pathInEvidence(path.resolve(v))) throw new WfError(`--${k} ${v} is inside .wf-evidence/ (checked where it really points); write outside it (the evidence is written only by wf itself)`);
   }
+  for (const k of READ_OPTIONS) {
+    const v = options[k];
+    if (typeof v !== 'string') continue;
+    const p = path.resolve(v);
+    if (pathInEvidence(p)) throw new WfError(`--${k} ${v} is inside .wf-evidence/ (checked where it really points); pass a file outside it`);
+    const st = fs.statSync(p, { throwIfNoEntry: false });
+    if (st && !(k === 'from' ? st.isDirectory() : st.isFile())) throw new WfError(`--${k} ${v} is not a regular ${k === 'from' ? 'folder' : 'file'}`);
+  }
+  if (cmd === 'skills' && positional[0] !== undefined && (!/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(positional[0]) || positional[0].includes('..'))) throw new WfError(`invalid skill name \`${positional[0]}\`: letters, digits, dot, dash, underscore and colon only`);
   if (cmd === 'status' && options.quiet) {
     const root = findRoot();
     if (!root) return 3;
