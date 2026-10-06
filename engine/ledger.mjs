@@ -253,6 +253,19 @@ export function reduce(entries) {
       case 'screenshots.exported':
         s.delivery.exported = { dir: d.dir, files: d.files ?? [], at: e.at };
         break;
+      // Lessons (engine/lessons.mjs): recorded for this attempt, waived with a reason, or recurring.
+      case 'lesson.recorded':
+        (s.lessons ??= { recorded: [], waived: null, recurred: [] }).recorded.push({ id: d.id, for: d.for ?? null, at: e.at, by: e.actor });
+        break;
+      case 'lesson.waived':
+        (s.lessons ??= { recorded: [], waived: null, recurred: [] }).waived = { reason: d.reason, at: e.at, by: e.actor };
+        break;
+      case 'lesson.recurred':
+        (s.lessons ??= { recorded: [], waived: null, recurred: [] }).recurred.push({ id: d.id, recurrence: d.recurrence, why: d.why ?? null, at: e.at });
+        break;
+      case 'reopen.reason':
+        s.reopenReason = d.reason;
+        break;
       // The evidence manifest: every file wf wrote into this attempt's evidence, with its sha256, size and mode.
       case 'evidence.recorded':
       case 'evidence.baseline':

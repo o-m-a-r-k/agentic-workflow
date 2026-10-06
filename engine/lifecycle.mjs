@@ -7,6 +7,7 @@ import { ADAPTER_DIR, adapterFileAtCommit, agentTypeFor, declared, loadConfig, l
 import { focusedSkips, gatePassedForCurrentTree, screenshots } from './gate.mjs';
 import { append, attemptDir, evidenceRoot, keptFiles, listAttempts, loadState, openEvidence } from './ledger.mjs';
 import { assertUnchanged } from './evidence.mjs';
+import { lessonPrompts, lessonVerdicts, owesLesson, recur, relevantLessons } from './lessons.mjs';
 import { canonical as canonicalPath, isInside, touchesEvidence } from './paths.mjs';
 import { changedForStep, deliveryOrder, impact, inside, packageOf } from './topology.mjs';
 import { findSkill } from './skills.mjs';
@@ -341,6 +342,9 @@ export function handoff(root, role, options) {
     // The planner assigns each work item a class from these texts.
     classes: role === 'planner' ? Object.fromEntries(Object.entries(cfg.classes).map(([n, c]) => [n, { use: c.use, agentType: agentTypeFor(cfg, 'implementer', n) }])) : undefined,
     criteriaAmendments: state.criteriaAmendments,
+    // Project lessons that apply to this change (by paths and work class), most recurring first, capped. The reviewer
+    // gives each a verdict in `lessons`; they are project rules, not other agents' findings.
+    lessons: ['planner', 'implementer', 'reviewer'].includes(role) ? relevantLessons(root, role, state, changed) : undefined,
     // Evidence files the owner accepted after they changed outside wf (`wf verify --accept-changes`): judge with that in mind.
     rebaselined: state.rebaselines ?? [],
     changed,
@@ -387,7 +391,7 @@ export function handoff(root, role, options) {
       sessionModelNow = sessionModel(home(), owning.session);
     } catch {}
   }
-  append(root, state.id, 'handoff', { role, agent, runtime, session: options.session ?? null, agentType, class: cls, effort, model, sessionModel: sessionModelNow, startPrompt: startPromptFor(file), work: work?.id ?? null, bundle: file, tree: treeHashes(state), patch: patchIds(state), ...(role === 'reviewer' ? { gate: gateNow.ok ? state.lastGate.runId : null } : {}) }, actor(options));
+  append(root, state.id, 'handoff', { lessons: (bundle.lessons?.apply ?? []).map((l) => l.id), role, agent, runtime, session: options.session ?? null, agentType, class: cls, effort, model, sessionModel: sessionModelNow, startPrompt: startPromptFor(file), work: work?.id ?? null, bundle: file, tree: treeHashes(state), patch: patchIds(state), ...(role === 'reviewer' ? { gate: gateNow.ok ? state.lastGate.runId : null } : {}) }, actor(options));
   // Once per attempt: with parallel work items every implementer handoff queued another identical tracker read.
   const firstImplementer = role === 'implementer' && !state.handoffs.some((h) => h.role === 'implementer');
   if (firstImplementer && state.lane !== 'quick' && state.intent === 'implementation') emitTrackerEvent(root, cfg, state.id, 'implementing');
@@ -489,6 +493,9 @@ export function recordReview(root, options) {
     if (missing.length) throw refuse(`the reviewer's transcript shows no successful read of ${missing.length} document(s) its bundle lists:\n  - ${missing.join('\n  - ')}`, 'start a fresh reviewer round: `wf handoff reviewer --agent <new id>` with only the printed line; it reads every document under `rules` and `skills`');
     reads = { status: 'verified', reason: null };
   } else if (provenance.status === 'verified') reads = { status: 'verified', reason: 'nothing to read' };
+  // Every lesson injected into the reviewer's bundle needs a verdict before the closure is recorded.
+  const lv = lessonVerdicts(handed.lessons?.apply ?? [], closure);
+  if (lv.problems.length) throw refuse(`closure refused: ${lv.problems.length} lesson(s) in your bundle have no valid verdict:\n  - ${lv.problems.join('\n  - ')}`, 'add `lessons: [{ "lesson": "<id>", "verdict": "complied|not-applicable|finding", "evidence": "...", "finding": "<finding id when a finding>" }]` and run `wf review --closure <file>` again');
   // Every design-system hit in the reviewer's bundle needs a verdict before the closure is recorded.
   const dv = designVerdicts(handed.designSystem?.hits ?? [], closure);
   if (dv.problems.length) throw refuse(`closure refused: ${dv.problems.length} design-system hit(s) on lines this attempt added have no valid verdict:\n  - ${dv.problems.join('\n  - ')}`, 'add `designHits: [{ "id": "<hit id>", "verdict": "justified|finding", "evidence": "...", "finding": "<finding id when a finding>" }]` to the closure and run `wf review --closure <file>` again');
@@ -542,6 +549,9 @@ export function acceptReview(root, options) {
       problems.push(`criterion ${c.id} is not mapped to evidence`);
       continue;
     }
+    // A criterion kept only because of precedent (a past merge, an existing test, an earlier verdict) needs a
+    // purpose-based rationale naming the user of the surface, or a `precedent-only` finding.
+    if (m.precedentOnly === true && !String(m.rationale ?? c.rationale ?? '').trim() && !r.closure.findings.some((f) => f.category === 'precedent-only')) problems.push(`criterion ${c.id}: kept only on precedent; give a purpose-based \`rationale\` (who uses this surface and what they need) or raise a \`precedent-only\` finding`);
     const kind = m.evidence?.kind;
     if (!EVIDENCE_KINDS.has(kind)) problems.push(`criterion ${c.id}: evidence kind must be one of ${[...EVIDENCE_KINDS].join(', ')}`);
     else if (['not-applicable', 'dropped-with-reason'].includes(kind) && !m.evidence.reason?.trim()) problems.push(`criterion ${c.id}: ${kind} needs a reason`);
@@ -564,6 +574,8 @@ export function acceptReview(root, options) {
   // Every rule the reviewer's bundle listed needs a verdict with evidence (a finding verdict names a finding).
   const rv = ruleVerdicts(readBundle(r.handoff)?.rules ?? [], r.closure);
   for (const p of rv.problems) problems.push(`${p}; the reviewer adds \`rules: [{ "rule", "verdict": "complies|finding|not-applicable", "evidence", "finding" }]\` to its closure: hand the tree to a fresh reviewer (\`wf handoff reviewer --agent <new id>\`)`);
+  const lv = lessonVerdicts(readBundle(r.handoff)?.lessons?.apply ?? [], r.closure);
+  for (const p of lv.problems) problems.push(`${p}; hand the tree to a fresh reviewer (\`wf handoff reviewer --agent <new id>\`)`);
   const dv = designVerdicts(readBundle(r.handoff)?.designSystem?.hits ?? [], r.closure);
   for (const p of dv.problems) problems.push(`${p}; hand the tree to a fresh reviewer (\`wf handoff reviewer --agent <new id>\`)`);
   const shots = collected.map((s) => s.sha256);
@@ -584,7 +596,10 @@ export function acceptReview(root, options) {
   // Nothing verified when this command opened the attempt may have changed while it decided.
   const moved = assertUnchanged(root, state.id);
   if (moved.length) throw refuse(`review not accepted: the evidence changed while it was checked:\n  - ${moved.slice(0, 10).join('\n  - ')}`);
-  append(root, state.id, 'review.accepted', { reviewer: r.closure.reviewer, patch: patchIds(state), heads: treeHashes(state), gate: state.lastGate.runId, ...(verdicts.length ? { noEvidence: verdicts } : {}), ...(rv.verdicts.length ? { rules: rv.verdicts } : {}), ...(ov.verdicts.length ? { outsidePlan: ov.verdicts } : {}), ...(dv.verdicts.length ? { designHits: dv.verdicts } : {}) }, actor(options));
+  append(root, state.id, 'review.accepted', { reviewer: r.closure.reviewer, patch: patchIds(state), heads: treeHashes(state), gate: state.lastGate.runId, ...(verdicts.length ? { noEvidence: verdicts } : {}), ...(rv.verdicts.length ? { rules: rv.verdicts } : {}), ...(ov.verdicts.length ? { outsidePlan: ov.verdicts } : {}), ...(dv.verdicts.length ? { designHits: dv.verdicts } : {}), ...(lv.verdicts.length ? { lessons: lv.verdicts } : {}) }, actor(options));
+  // A lesson the change did not comply with recurred: its mechanism failed (once per lesson per attempt).
+  const already = new Set((state.lessons?.recurred ?? []).map((x) => x.id));
+  for (const v of lv.verdicts) if (v.verdict === 'finding' && !already.has(v.lesson)) recur(root, v.lesson, state.id, actor(options), `review finding ${v.finding}`);
   return loadState(root, state.id);
 }
 
@@ -671,6 +686,10 @@ export async function deliver(root, options) {
   }
   if (state.deferHeavy && !state.batch) throw refuse(`${state.id} deferred its heavy steps to a batch; deliver it through \`wf batch create\``);
   if (state.phase === 'handoff-pending' || state.phase === 'done') throw refuse(`${state.id} is already delivered`);
+  if (typeof options['no-lesson'] === 'string' && options['no-lesson'].trim() && owesLesson(state)) {
+    append(root, state.id, 'lesson.waived', { reason: options['no-lesson'].trim(), on: 'deliver' }, actor(options));
+    state = loadState(root, state.id);
+  }
   // The delivered comment carries the owner's plain-language summary; it is recorded before anything is pushed.
   if (options['summary-file'] && options['summary-file'] !== true) {
     if (state.batch) throw new WfError('a batch delivers no comment of its own: record each member\'s summary with `wf summary --file <f> --attempt <member>`');
@@ -871,7 +890,7 @@ function finishDelivered(root, cfg, state) {
   const set = state.delivery.screenshots?.screenshots ?? [];
   const actions = state.lane === 'quick' || state.lane === 'batch' ? [] : emitTrackerEvent(root, cfg, state.id, 'delivered', { screenshots: set });
   if (actions.some((a) => a.rendered === 'delivered')) writeDeliveredComment(root, cfg, loadState(root, state.id));
-  if (!actions.length && !needsShown(state)) {
+  if (!actions.length && !needsShown(state) && !owesLesson(loadState(root, state.id))) {
     append(root, state.id, 'closed', { reason: cfg.tracker.kind === 'none' || state.lane !== 'standard' ? 'no tracker handoff for this lane' : 'no tracker actions configured' }, null);
     closeExport(root, loadState(root, state.id));
     cleanupWorktrees(root, loadState(root, state.id));
@@ -1152,7 +1171,7 @@ export function narrowDelivery(root, options) {
 }
 
 export function closeAfterHandoff(root, state) {
-  if (state.phase === 'handoff-pending' && !state.tracker.pending.length && !needsShown(state)) {
+  if (state.phase === 'handoff-pending' && !state.tracker.pending.length && !needsShown(state) && !owesLesson(state)) {
     append(root, state.id, 'closed', { reason: state.tracker.done.some((d) => d.event === 'delivered') ? 'tracker handoff verified' : 'delivered screenshots shown' }, null);
     closeExport(root, loadState(root, state.id));
     cleanupWorktrees(root, loadState(root, state.id));
@@ -1169,6 +1188,7 @@ export function reopen(root, options) {
   if (!delivered) throw refuse(`${options.item} has no delivered attempt to reopen`);
   const s = entry(root, { ...options, lane: delivered.lane === 'quick' ? 'quick' : 'standard', repos: Object.keys(delivered.repos).join(','), reopenedFrom: delivered.id });
   append(root, s.id, 'reopen.reason', { reason: String(options.reason), from: delivered.id }, actor(options));
+  if (typeof options['no-lesson'] === 'string' && options['no-lesson'].trim()) append(root, s.id, 'lesson.waived', { reason: options['no-lesson'].trim(), on: 'reopen' }, actor(options));
   const cfg = loadConfig(root);
   if (s.lane !== 'quick') emitTrackerEvent(root, cfg, s.id, 'reopened');
   return loadState(root, s.id);
@@ -1246,6 +1266,7 @@ export function nextAction(root, state) {
 function nextStep(root, state) {
   const cfg = loadConfig(root);
   if (state.phase === 'done') return 'nothing: this attempt is closed';
+  if (state.phase === 'handoff-pending' && owesLesson(state) && !state.tracker.pending.length && !needsShown(state)) return lessonPrompts(state)[0];
   if (state.phase === 'abandoned') return 'nothing: this attempt was abandoned';
   const holdNote = state.activeHold ? ` (on hold: "${state.activeHold.reason}"; \`wf release\` lifts it)` : '';
   const show = needsShown(state) ? `show the owner, in the chat, each of the ${state.delivery.screenshots.screenshots.length} delivered screenshot(s) listed under "delivered screenshots" with a caption saying which screen and state it shows, then record it: \`wf shown --file <copy of ${shownDraftFile(root, state.id)} with your captions>\`` : null;

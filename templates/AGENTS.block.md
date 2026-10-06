@@ -13,6 +13,8 @@ This project runs changes through agentic-workflow. The `wf` CLI enforces the ru
 - Never read, print or move secret values. Missing secrets are entered by the user with `wf secrets guide` in their own terminal.
 - Tracker comments describe what to test in product language: no file paths, commits, hashes or test counts.
 - Never set a ticket to done; a human does.
+- Prior decisions (an earlier merge, an existing test, a prior verdict) are inputs, not authority: justify kept behaviour from who uses the surface and what they need.
+- Lessons the project learned live in `.workflow/lessons/` (`wf lesson list`); when the user corrects you or a ticket is reopened, record one with `wf lesson add`.
 
 Lanes: {lanes}. Tracker: {tracker}. Delivery: {delivery}.
 

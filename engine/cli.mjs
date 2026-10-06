@@ -9,6 +9,7 @@ import { exportAttempt, exportFile } from './export.mjs';
 import { liveGate, runGate, runWithLease, stopGate } from './gate.mjs';
 import { append, listAttempts, loadState, openEvidence } from './ledger.mjs';
 import { canonical, touchesEvidence } from './paths.mjs';
+import { addLesson, applySnippet, exportPluginLessons, lessonPrompts, loadLessons, recur, reviewLessons, setLesson } from './lessons.mjs';
 import { LinkRefused, changesOf, rebaseline, releaseAttempt, seal, setVerifyLevel, verifyAttempt } from './evidence.mjs';
 import { acceptReview, amendCriteria, designWarning, batchCreate, batchEject, closeAfterHandoff, deliver, deliveredFiles, exportScreenshots, freezeCriteria, handoff, narrowDelivery, needsShown, nextAction, outsideWarning, recordReview, recordShown, reopen, screenshotsExportDir, shownDraftFile, uncovered, withAttempt } from './lifecycle.mjs';
 import { detect, doctor, register, registry, setEnabled, sync, writeDraft } from './onboard.mjs';
@@ -50,7 +51,9 @@ Work
                                     once, before \`wf shown\`: keep only this ticket's files of a delivered set an over-broad glob filled
   wf tracker record --event E --capture file.json | wf tracker sync (tracker.via: api)
   wf hold --reason "why" | wf release
-  wf reopen --item ID --reason "feedback"
+  wf lesson add|waive|recur|set|apply|show|list|review|export
+                                    the project's lessons (.workflow/lessons/): capture, enforce, recurrence
+  wf reopen --item ID --reason "feedback" [--no-lesson "why"]
   wf adopt [--attempt ID]           take over a live attempt from a new session
   wf abandon --reason "why"
   wf batch create --members A,B | wf batch eject --batch B --member A
@@ -79,6 +82,15 @@ function summary(root, s, { base = null, resume = false } = {}) {
   for (const [name, r] of Object.entries(s.repos)) lines.push(`  ${name}: ${r.worktree} (base ${r.base.slice(0, 10)})`);
   if (base) lines.push(...baseLines(base));
   if (s.activeHold) lines.push(`  HOLD: ${s.activeHold.reason}`);
+  try {
+    const all = loadLessons(root);
+    if (all.length || s.lessons) {
+      const by = (st) => all.filter((l) => l.status === st).length;
+      lines.push(`  lessons: ${all.length} in the project (${by('enforced')} enforced, ${by('proposed')} proposed); this attempt: ${s.lessons?.recorded?.length ?? 0} recorded${s.lessons?.waived ? `, none needed ("${s.lessons.waived.reason}")` : ''}`);
+    }
+    for (const r of s.lessons?.recurred ?? []) lines.push(`  LESSON ${r.id} RECURRED (recurrence ${r.recurrence}): its mechanism failed${r.recurrence >= 2 ? '; `wf lesson review` proposes promoting it to a gate check' : ''}`);
+    if (!['done', 'abandoned'].includes(s.phase)) for (const p of lessonPrompts(s)) lines.push(`  lesson: ${p}`);
+  } catch {}
   for (const r of s.rebaselines ?? []) lines.push(`  EVIDENCE RE-BASELINED ${r.at} by ${r.by}: ${r.changes.length} file(s) changed outside wf were accepted ("${r.reason}"): ${r.changes.slice(0, 5).map((c) => `${c.kind} ${c.path}`).join(', ')}${r.changes.length > 5 ? ' …' : ''}`);
   const live = ['done', 'abandoned'].includes(s.phase) ? null : liveGate(root, s);
   if (live) {
@@ -504,7 +516,8 @@ async function dispatch(cmd, sub, positional, options) {
     }
     case 'accept': {
       const s = acceptReview(root, options);
-      print(options, `review accepted. next: ${nextAction(root, s)}`, s);
+      const lp = lessonPrompts(s).filter((p) => p.startsWith('finding'));
+      print(options, `review accepted.${lp.map((p) => `\nlesson: ${p}`).join('')} next: ${nextAction(root, s)}`, s);
       return 0;
     }
     case 'deliver': {
@@ -549,7 +562,8 @@ async function dispatch(cmd, sub, positional, options) {
       let s = recordShown(root, options);
       const api = await trackerApi(root, s.id);
       s = closeAfterHandoff(root, loadState(root, s.id));
-      print(options, `shown recorded for ${s.id}: ${s.delivery.shown.screenshots.length} screenshot(s) with the owner's captions.${api}${s.phase === 'done' ? ' Attempt closed and worktrees removed.' : `\nnext: ${nextAction(root, s)}`}`, s);
+      const lp = lessonPrompts(s).filter((p) => p.startsWith('anomaly'));
+      print(options, `shown recorded for ${s.id}: ${s.delivery.shown.screenshots.length} screenshot(s) with the owner's captions.${lp.map((p) => `\nlesson: ${p}`).join('')}${api}${s.phase === 'done' ? ' Attempt closed and worktrees removed.' : `\nnext: ${nextAction(root, s)}`}`, s);
       return 0;
     }
     case 'hold': {
@@ -566,7 +580,8 @@ async function dispatch(cmd, sub, positional, options) {
       const opened = reopen(root, options);
       const api = await trackerApi(root, opened.id);
       const s = loadState(root, opened.id);
-      print(options, `${summary(root, s)}${api}`, s);
+      const prompt = s.lessons?.waived ? '' : `\nrecord a lesson: \`wf lesson add --attempt ${s.id} --title "..." --what "..." --cause <class> --mechanism <kind> --quote ${JSON.stringify(String(options.reason))}\` (or \`--no-lesson "<why>"\` on \`wf deliver\`); the delivery does not close without one`;
+      print(options, `${summary(root, s)}${api}${prompt}`, s);
       return 0;
     }
     case 'adopt': {
@@ -620,6 +635,78 @@ async function dispatch(cmd, sub, positional, options) {
       }
       print(options, bad.length ? bad.map((b) => `${b.id}: ${b.problems.length} problem(s): the evidence does not match what wf recorded\n  - ${b.problems.slice(0, 20).join('\n  - ')}`).join('\n') : `verified ${ids.length} attempt(s): ledger chain, anchor and every recorded evidence file (sha256, size, mode) match; no extra file`, bad);
       return bad.length ? 1 : 0;
+    }
+    case 'lesson': {
+      const { actor } = await import('./attempt.mjs');
+      const cfg = loadConfig(root);
+      const show = (l) => `${l.id}  [${l.status}, ${l.scope}, ${l.cause}, ${l.mechanism?.kind}${l.mechanism?.ref ? ` ${l.mechanism.ref}` : ''}] recurrence ${l.recurrence}  ${l.title}`;
+      if (sub === 'add') {
+        if (options.attempt) openState(root, options);
+        const r = addLesson(root, options, actor(options));
+        const flags = r.recurred.map((x) => `\nlesson ${x.id} recurred (recurrence ${x.recurrence}): its mechanism failed${x.promote ? `; promote it to a gate check (\`wf lesson apply ${x.id}\` after setting \`mechanism.kind: gate-check\`)` : ''}`).join('');
+        let closed = '';
+        if (options.attempt) {
+          const s = closeAfterHandoff(root, loadState(root, String(options.attempt)));
+          if (s.phase === 'done') closed = `\n${s.id} closed.`;
+        }
+        print(options, `lesson ${r.lesson.id} recorded: ${r.file}\n  commit it with the adapter; to enforce it: \`wf lesson apply ${r.lesson.id}\`${flags}${closed}`, r);
+        return 0;
+      }
+      if (sub === 'waive') {
+        const s = openState(root, options);
+        const reason = String(options.reason ?? '').trim();
+        if (!reason || options.reason === true) throw new WfError('--reason "<why this needs no lesson>" is required');
+        append(root, s.id, 'lesson.waived', { reason, on: 'waive' }, actor(options));
+        const after = closeAfterHandoff(root, loadState(root, s.id));
+        print(options, `no lesson for ${s.id}: "${reason}" (recorded)${after.phase === 'done' ? `\n${s.id} closed.` : `\nnext: ${nextAction(root, after)}`}`);
+        return 0;
+      }
+      if (sub === 'recur') {
+        const id = positional[0];
+        if (!id) throw new WfError('usage: wf lesson recur <id> --attempt <attempt>');
+        const s = options.attempt ? openState(root, options) : null;
+        const r = recur(root, id, s?.id ?? null, actor(options), options.reason ?? null);
+        print(options, `lesson ${id} recurred (recurrence ${r.recurrence}): its mechanism failed${r.promote ? '; promote it to a gate check' : ''}`, r);
+        return 0;
+      }
+      if (sub === 'set') {
+        const r = setLesson(root, positional[0], options);
+        print(options, `lesson ${r.lesson.id}: ${show(r.lesson)}\n  ${r.file} (commit it)`, r);
+        return 0;
+      }
+      if (sub === 'apply') {
+        const l = loadLessons(root).find((x) => x.id === positional[0]);
+        if (!l) throw new WfError(`no lesson ${positional[0] ?? ''}`);
+        const a = applySnippet(l);
+        print(options, `to enforce ${l.id} (${l.mechanism?.kind}), add to ${a.where}:\n\n${a.snippet}\nwf changes nothing itself: add it, commit it with the owner's approval, then \`wf lesson set ${l.id} --status enforced${a.ref ? ` --ref ${a.ref}` : ' --ref <what enforces it>'}\``, a);
+        return 0;
+      }
+      if (sub === 'show') {
+        const l = loadLessons(root).find((x) => x.id === positional[0]);
+        if (!l) throw new WfError(`no lesson ${positional[0] ?? ''}`);
+        print(options, `${show(l)}\n  what happened: ${l.trigger?.what ?? ''}${l.trigger?.quote ? `\n  in their words: "${l.trigger.quote}"` : ''}${l.trigger?.attempt ? `\n  seen in: ${l.trigger.attempt}${l.trigger.finding ? ` (finding ${l.trigger.finding})` : ''}` : ''}\n  tags: ${l.tags.join(', ') || 'none'}; paths: ${l.paths.join(', ') || 'every change'}\n  ${l.file}`, l);
+        return 0;
+      }
+      if (sub === 'review') {
+        const r = reviewLessons(root, { after: options.after ? Number(options.after) : 10 });
+        const part = (title, list, hint) => `${title} (${list.length})${list.length ? `:\n${list.map((l) => `  ${show(l)}`).join('\n')}\n  → ${hint}` : ''}`;
+        print(options, [part('recurring: promote the mechanism to a gate check', r.promote, '`wf lesson apply <id>` with mechanism gate-check'), part('proposed: apply the mechanism', r.apply, '`wf lesson apply <id>`, then `wf lesson set <id> --status enforced --ref ...`'), part(`not injected into any of the last ${r.attempts} attempts: retire?`, r.retire, '`wf lesson set <id> --status retired`')].join('\n'), r);
+        return 0;
+      }
+      if (sub === 'export') {
+        if (!options.plugin) throw new WfError('usage: wf lesson export --plugin [--out FILE]');
+        const items = exportPluginLessons(root, cfg);
+        const text = items.length ? `# Lessons for agentic-workflow\n\nGeneric issue text, names stripped. Review it before filing; wf never posts it.\n\n${items.map((x) => x.text).join('\n')}` : 'no plugin lessons';
+        if (typeof options.out === 'string') fs.writeFileSync(options.out, text);
+        print(options, typeof options.out === 'string' ? `wrote ${items.length} plugin lesson(s) to ${options.out}; review it and file it yourself` : text, items);
+        return 0;
+      }
+      if (sub === 'list' || !sub) {
+        const all = loadLessons(root);
+        print(options, all.length ? all.map(show).join('\n') : `no lessons yet (${path.join('.workflow', 'lessons')})`, all);
+        return 0;
+      }
+      throw new WfError('usage: wf lesson add|waive|recur|set|apply|show|list|review|export');
     }
     case 'evidence': {
       if (sub !== 'release') throw new WfError('usage: wf evidence release [--attempt ID | --closed | --older-than DAYS] [--reason "why"] [--dry-run]');

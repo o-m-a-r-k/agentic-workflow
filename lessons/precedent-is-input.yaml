@@ -1,0 +1,25 @@
+id: P-1
+title: Prior decisions are inputs, not authority
+trigger:
+  what: >-
+    An owner agent kept a behaviour because an earlier merge had chosen it, with tests asserting it, and because an
+    invariant was cited, without re-deriving it from the purpose of the surface. The invariant was about a different
+    subject. The owner corrected it: earlier decisions can be wrong; ask who uses this view and what they need.
+  quote: "earlier decisions can be wrong; ask who the user of this view is and what they need"
+cause: review
+mechanism:
+  kind: reviewer-checklist
+  ref: templates/agents/reviewer.md (precedent check, invariant scope check, finding category precedent-only)
+  text: >-
+    A past merge, an existing test, a prior review verdict or an existing comment is evidence of what was decided,
+    never a reason for what should be. Keeping or changing behaviour is justified from the current purpose: who uses
+    this surface, what they need, and which invariant applies to this subject and why. A test asserting a wrong old
+    behaviour is rewritten.
+scope: plugin
+status: enforced
+tags: [precedent, review, invariants]
+paths: []
+recurrence: 0
+builtin: true
+inject: false
+created: 2026-10-06T00:00:00Z

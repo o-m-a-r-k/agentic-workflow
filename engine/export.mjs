@@ -50,6 +50,7 @@ export function exportData(root, s) {
     delivered: deliveredView(s),
     closedAt: s.closedAt,
     rebaselined: s.rebaselines ?? [],
+    lessons: { injected: [...new Set(s.handoffs.flatMap((h) => h.lessons ?? []))], verdicts: s.accepted?.lessons ?? [], recorded: s.lessons?.recorded ?? [], waived: s.lessons?.waived ?? null, recurred: s.lessons?.recurred ?? [] },
   };
 }
 
@@ -151,6 +152,7 @@ export function exportHtml(d, images = {}) {
     d.flaky.length ? sec('Flaky', table(['Step', 'Failed run', 'Passed run', 'Suites'], d.flaky.map((f) => [esc(f.step), esc(f.failedRun), esc(f.passedRun), esc((f.suites ?? []).join(', '))]))) : '',
     sec('Tracker', table(['Event', 'State'], [...d.tracker.done.map((t) => [esc(t.event), `${badge('recorded')} ${esc(t.at)}`]), ...d.tracker.pending.map((t) => [esc(t.event), `${badge('pending')} ${esc(t.op)}${t.status ? ` ${esc(t.status)}` : ''}`])])),
     d.rebaselined?.length ? sec('Evidence re-baselined', `<p class="warn">Evidence files changed outside wf and the owner accepted them (\`wf verify --accept-changes\`). The originals are not available.</p>${table(['At', 'By', 'Reason', 'Changes'], d.rebaselined.map((r) => [esc(r.at), esc(r.by), esc(r.reason), r.changes.map((c) => `${esc(c.kind)} ${esc(c.path)} <small>${esc((c.old ?? '').slice(0, 12))} → ${esc((c.new ?? 'removed').slice(0, 12))}</small>`).join('<br>')]))}`) : '',
+    d.lessons && (d.lessons.injected.length || d.lessons.recorded.length || d.lessons.waived || d.lessons.recurred.length) ? sec('Lessons', `<p class="muted">Project lessons that applied to this change, the reviewer's verdicts, and what this attempt taught.</p>${table(['Lesson', 'Verdict', 'Evidence'], d.lessons.injected.map((id) => { const v = d.lessons.verdicts.find((x) => x.lesson === id); return [esc(id), v ? badge(v.verdict) : '<span class="muted">not yet judged</span>', esc(v?.evidence ?? '')]; }))}${d.lessons.recorded.length ? `<p>Recorded here: ${d.lessons.recorded.map((r) => esc(r.id)).join(', ')}</p>` : ''}${d.lessons.waived ? `<p class="muted">No lesson needed: ${esc(d.lessons.waived.reason)}</p>` : ''}${d.lessons.recurred.map((r) => `<p class="warn">Lesson ${esc(r.id)} recurred (recurrence ${esc(r.recurrence)}): its mechanism failed.</p>`).join('')}`) : '',
     deliveredSection(d, images),
     sec('Delivery', d.delivery.completedAt ? `<p>${badge('delivered')} ${esc(d.delivery.completedAt)}</p>${d.delivery.narrowed ? `<p class="warn">Delivered files narrowed from ${esc(d.delivery.narrowed.from)} to ${esc(d.delivery.narrowed.to)}: ${esc(d.delivery.narrowed.reason)}</p>` : ''}${table(['Repo', 'Commit'], d.delivery.repos.map((r) => [esc(r.repo), esc(r.commit ? r.commit.slice(0, 12) : r.skipped ?? '')]))}` : '<p class="muted">not delivered yet</p>'),
   ].join('\n');
