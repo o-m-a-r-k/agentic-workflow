@@ -9,7 +9,7 @@ import { exportAttempt, exportFile } from './export.mjs';
 import { liveGate, runGate, runWithLease, stopGate } from './gate.mjs';
 import { append, listAttempts, loadState, openEvidence } from './ledger.mjs';
 import { canonical, touchesEvidence } from './paths.mjs';
-import { addLesson, applySnippet, exportPluginLessons, lessonPrompts, loadLessons, recur, reviewLessons, setLesson } from './lessons.mjs';
+import { addLesson, applySnippet, exportPluginLessons, lessonPrompts, lessonWarnings, loadLessons, recur, reviewLessons, setLesson } from './lessons.mjs';
 import { LinkRefused, changesOf, rebaseline, releaseAttempt, seal, setVerifyLevel, verifyAttempt } from './evidence.mjs';
 import { acceptReview, amendCriteria, designWarning, batchCreate, batchEject, closeAfterHandoff, deliver, deliveredFiles, exportScreenshots, freezeCriteria, handoff, narrowDelivery, needsShown, nextAction, outsideWarning, recordReview, recordShown, reopen, screenshotsExportDir, shownDraftFile, uncovered, withAttempt } from './lifecycle.mjs';
 import { detect, doctor, register, registry, setEnabled, sync, writeDraft } from './onboard.mjs';
@@ -703,7 +703,8 @@ async function dispatch(cmd, sub, positional, options) {
       }
       if (sub === 'list' || !sub) {
         const all = loadLessons(root);
-        print(options, all.length ? all.map(show).join('\n') : `no lessons yet (${path.join('.workflow', 'lessons')})`, all);
+        const warn = lessonWarnings(root).map((w) => `\nwarning: ${w}`).join('');
+        print(options, `${all.length ? all.map(show).join('\n') : `no lessons yet (${path.join('.workflow', 'lessons')})`}${warn}`, all);
         return 0;
       }
       throw new WfError('usage: wf lesson add|waive|recur|set|apply|show|list|review|export');

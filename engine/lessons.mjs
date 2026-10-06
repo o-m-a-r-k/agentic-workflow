@@ -3,7 +3,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ADAPTER_DIR } from './config.mjs';
+import { ADAPTER_DIR, adapterLocation, loadConfig, repoDir } from './config.mjs';
+import { readRegular, writeNoFollow } from './evidence.mjs';
+import { canonical, isInside, touchesEvidence } from './paths.mjs';
 import { append, listAttempts, loadState, readLedger } from './ledger.mjs';
 import { WfError, YAML, matchesAny, now, refuse } from './util.mjs';
 
@@ -16,26 +18,88 @@ export const LESSON_CATEGORIES = new Set(['process', 'tooling', 'criteria', 'rev
 export const CAP = 5;
 
 export const lessonsDir = (root) => path.join(root, ADAPTER_DIR, 'lessons');
-const fileOf = (root, id) => path.join(lessonsDir(root), `${id}.yaml`);
+// Named finding (0.2.0 review): a lesson id became a path. Ids are a strict allowlist; the file is named by its id (and
+// an id is only ever taken from a file's name, never from its content); the folder must be a real folder that really
+// lies in the adapter repo and outside the evidence; files are read and written without following links, never through
+// a hard link.
+export const LESSON_ID = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
+const fileOf = (root, id) => {
+  if (!LESSON_ID.test(String(id))) throw refuse(`invalid lesson id \`${String(id).slice(0, 80)}\`: letters, digits and dashes, starting with a letter or digit, at most 64 characters`);
+  return path.join(lessonsDir(root), `${id}.yaml`);
+};
+
+// The lessons folder, checked: problems (empty when it is fine or absent).
+function dirProblems(root) {
+  const dir = lessonsDir(root);
+  const st = fs.lstatSync(dir, { throwIfNoEntry: false });
+  if (!st) return [];
+  if (!st.isDirectory()) return [`${dir} is ${st.isSymbolicLink() ? 'a symlink' : 'not a folder'}; lessons are not read or written through it`];
+  const out = [];
+  if (touchesEvidence(dir)) out.push(`${dir} resolves into .wf-evidence/`);
+  let repo = null;
+  try {
+    const cfg = loadConfig(root);
+    repo = repoDir(root, adapterLocation(root, cfg).repo);
+  } catch {}
+  if (repo && !isInside(canonical(dir), canonical(repo))) out.push(`${dir} really lies outside the adapter repo (${canonical(dir)})`);
+  return out;
+}
+const lessonProblems = new Map();
+export const lessonWarnings = (root) => lessonProblems.get(root) ?? [];
 const asList = (v) => (v === undefined || v === null || v === '' ? [] : Array.isArray(v) ? v.map(String) : String(v).split(',').map((x) => x.trim()).filter(Boolean));
 
 // Lessons the plugin ships (scope plugin, enforced through its own templates): listed with the project's, never
 // injected (`inject: false`: the mechanism is already in every role file), never written by a project.
 const BUILTIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'lessons');
-const readDir = (dir, extra = {}) => (fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => /\.ya?ml$/.test(f)).sort().map((f) => {
-  const l = YAML.parse(fs.readFileSync(path.join(dir, f), 'utf8')) ?? {};
-  return { ...l, ...extra, recurrence: Number(l.recurrence ?? 0), tags: asList(l.tags), paths: asList(l.paths), file: path.join(dir, f) };
-}) : []);
+// Each `<id>.yaml` whose name is a valid id, read without following a link (a regular file with one name), whose
+// content's `id` (if any) matches its name. Anything else is skipped and reported.
+function readDir(dir, extra = {}, problems = []) {
+  if (!fs.existsSync(dir)) return [];
+  const out = [];
+  for (const e of fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+    if (!/\.ya?ml$/.test(e.name)) continue;
+    const id = e.name.replace(/\.ya?ml$/, '');
+    const p = path.join(dir, e.name);
+    if (!LESSON_ID.test(id)) {
+      problems.push(`${p}: not a valid lesson file name (skipped)`);
+      continue;
+    }
+    if (!e.isFile()) {
+      problems.push(`${p}: ${e.isSymbolicLink() ? 'a symlink' : 'not a regular file'} (skipped)`);
+      continue;
+    }
+    const r = readRegular(p);
+    if (!r) {
+      problems.push(`${p}: not a regular file with one name (a hard link?) (skipped)`);
+      continue;
+    }
+    let l;
+    try {
+      l = YAML.parse(r.bytes.toString('utf8')) ?? {};
+    } catch (error) {
+      problems.push(`${p}: not YAML (${error.message.split('\n')[0]}) (skipped)`);
+      continue;
+    }
+    if (l.id !== undefined && String(l.id) !== id) {
+      problems.push(`${p}: its id \`${String(l.id).slice(0, 80)}\` differs from its file name (skipped)`);
+      continue;
+    }
+    out.push({ ...l, ...extra, id, recurrence: Number(l.recurrence ?? 0), tags: asList(l.tags), paths: asList(l.paths), file: p });
+  }
+  return out;
+}
 
 export function loadLessons(root, { builtin = true } = {}) {
-  const own = readDir(lessonsDir(root));
+  const problems = dirProblems(root);
+  const own = problems.length ? [] : readDir(lessonsDir(root), {}, problems);
+  lessonProblems.set(root, problems);
   const shipped = builtin ? readDir(BUILTIN, { builtin: true }).filter((b) => !own.some((l) => l.id === b.id)) : [];
   return [...own, ...shipped];
 }
 
 function validate(l) {
   const p = [];
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(String(l.id ?? ''))) p.push('`id` must be a plain name (letters, digits, dot, dash, underscore)');
+  if (!LESSON_ID.test(String(l.id ?? ''))) p.push('`id` must be letters, digits and dashes, starting with a letter or digit, at most 64 characters');
   if (!String(l.title ?? '').trim()) p.push('`title` says in one line what the project learned');
   if (!String(l.trigger?.what ?? '').trim()) p.push('`trigger.what` says what happened and where it was seen');
   if (!CAUSES.includes(l.cause)) p.push(`\`cause\` is one of ${CAUSES.join(', ')}`);
@@ -46,11 +110,23 @@ function validate(l) {
   return p;
 }
 
-function writeLesson(root, l) {
-  const { file, ...rest } = l;
+function writeLesson(root, l, { create = false } = {}) {
+  const { file, builtin, ...rest } = l;
+  const target = fileOf(root, l.id);
+  const before = dirProblems(root);
+  if (before.length) throw refuse(`lessons not written: ${before.join('; ')}`);
   fs.mkdirSync(lessonsDir(root), { recursive: true });
-  fs.writeFileSync(fileOf(root, l.id), YAML.stringify(rest));
-  return fileOf(root, l.id);
+  const after = dirProblems(root);
+  if (after.length) throw refuse(`lessons not written: ${after.join('; ')}`);
+  // Case and Unicode variants of an id name the same file on a case-insensitive volume: one id per folded name.
+  const folded = `${String(l.id).normalize('NFC').toLowerCase()}.yaml`;
+  const clash = fs.readdirSync(lessonsDir(root)).find((f) => f.normalize('NFC').toLowerCase() === folded && f !== `${l.id}.yaml`);
+  if (clash) throw refuse(`lesson ${l.id} would collide with ${clash}`);
+  const st = fs.lstatSync(target, { throwIfNoEntry: false });
+  if (create && st) throw refuse(`lesson ${l.id} already exists (${target})`);
+  if (st && (!st.isFile() || st.nlink > 1)) throw refuse(`${target} is ${st.isSymbolicLink() ? 'a symlink' : st.isFile() ? 'a hard link' : 'not a regular file'}; not written through`);
+  writeNoFollow(target, YAML.stringify(rest), { exclusive: create });
+  return target;
 }
 
 const nextId = (lessons) => `L-${Math.max(0, ...lessons.map((l) => Number(/^L-(\d+)$/.exec(l.id)?.[1] ?? 0))) + 1}`;
@@ -78,11 +154,11 @@ export function addLesson(root, options, actorId) {
     recurrence: 0,
     created: now(),
   };
-  if (lessons.some((x) => x.id === l.id)) throw refuse(`lesson ${l.id} already exists (${fileOf(root, l.id)}); a recurrence of it is recorded with \`wf lesson recur ${l.id} --attempt <id>\``);
+  if (lessons.some((x) => String(x.id).toLowerCase() === String(l.id).toLowerCase())) throw refuse(`lesson ${l.id} already exists (${fileOf(root, l.id)}); a recurrence of it is recorded with \`wf lesson recur ${l.id} --attempt <id>\``);
   const problems = validate(l);
   if (problems.length) throw new WfError(`lesson not recorded:\n  - ${problems.join('\n  - ')}`);
   const recurs = [...new Set([...recurrenceOf(lessons, l).map((x) => x.id), ...asList(options.recurs)])];
-  const file = writeLesson(root, l);
+  const file = writeLesson(root, l, { create: true });
   if (l.trigger.attempt) append(root, String(l.trigger.attempt), 'lesson.recorded', { id: l.id, for: options.for ?? (loadState(root, String(l.trigger.attempt)).reopenedFrom ? 'reopen' : 'finding'), file }, actorId);
   const flagged = recurs.map((id) => recur(root, id, l.trigger.attempt, actorId, `new lesson ${l.id}`));
   return { lesson: l, file, recurred: flagged };
