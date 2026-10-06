@@ -177,3 +177,29 @@ test('one canonical path answer: `..` after a link, prefix collisions, case, Uni
   assert.ok(check({ cwd: base, tool_input: { file_path: path.join(proj, '.wf-evidence-x.csv') } }));
   assert.equal(touchesEvidence(path.join(proj, '.wf-evidence-x.csv')), false);
 });
+
+test('identity checks: a folder another process writes into is not "replaced"; a recreated file is, even with its inode reused', () => {
+  const dir = tmp('hl-ident');
+  const sub = path.join(dir, 'shared');
+  fs.mkdirSync(sub);
+  try {
+    // Another wf process changing the shared folder's mode in between (named failure, 0.3.2 CI: concurrent gates).
+    linkSeams.beforeOpen = (p) => fs.chmodSync(p, 0o750);
+    chmodNoFollow(sub, 0o755, { dir: true });
+    // A file whose mode changes in between is refused (its change time moved).
+    const f = path.join(dir, 'f');
+    fs.writeFileSync(f, 'x');
+    assert.throws(() => chmodNoFollow(f, 0o444), /replaced between its check and its use/);
+    // A file removed and recreated in between is refused even when the inode number comes back (birth time differs).
+    const g = path.join(dir, 'g');
+    fs.writeFileSync(g, 'x');
+    linkSeams.beforeOpen = (p) => {
+      fs.rmSync(p);
+      fs.writeFileSync(p, 'y');
+    };
+    assert.throws(() => chmodNoFollow(g, 0o444), /replaced between its check and its use/);
+  } finally {
+    linkSeams.beforeOpen = null;
+  }
+  assert.equal(fs.statSync(sub).mode & 0o777, 0o755);
+});
