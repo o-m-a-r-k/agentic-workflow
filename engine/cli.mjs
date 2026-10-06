@@ -8,6 +8,7 @@ import { findRoot, loadConfig, requireRoot } from './config.mjs';
 import { exportAttempt, exportFile } from './export.mjs';
 import { liveGate, runGate, runWithLease, stopGate } from './gate.mjs';
 import { append, listAttempts, loadState, openEvidence } from './ledger.mjs';
+import { canonical, touchesEvidence } from './paths.mjs';
 import { LinkRefused, changesOf, rebaseline, releaseAttempt, seal, setVerifyLevel, verifyAttempt } from './evidence.mjs';
 import { acceptReview, amendCriteria, designWarning, batchCreate, batchEject, closeAfterHandoff, deliver, deliveredFiles, exportScreenshots, freezeCriteria, handoff, narrowDelivery, needsShown, nextAction, outsideWarning, recordReview, recordShown, reopen, screenshotsExportDir, shownDraftFile, uncovered, withAttempt } from './lifecycle.mjs';
 import { detect, doctor, register, registry, setEnabled, sync, writeDraft } from './onboard.mjs';
@@ -191,23 +192,8 @@ const FULL_VERIFY = new Set(['accept', 'deliver', 'verify', 'review', 'tracker',
 const WRITE_OPTIONS = ['out', 'csv', 'handoffs-csv', 'html', 'dir', 'to', 'root'];
 const READ_OPTIONS = ['file', 'capture', 'summary-file', 'closure', 'issue-file', 'from'];
 
-// Lexically or where it really points (the nearest existing ancestor resolved), case-insensitively.
-function pathInEvidence(p) {
-  const hit = (x) => x.split(/[\\/]+/).some((seg) => seg.toLowerCase() === '.wf-evidence');
-  if (hit(p)) return true;
-  const rest = [];
-  let cur = p;
-  for (;;) {
-    try {
-      return hit(path.join(fs.realpathSync(cur), ...rest));
-    } catch {
-      const parent = path.dirname(cur);
-      if (parent === cur) return false;
-      rest.unshift(path.basename(cur));
-      cur = parent;
-    }
-  }
-}
+// Lexically or where the OS resolves it, case and Unicode forms folded (engine/paths.mjs, shared with every caller).
+const pathInEvidence = (p) => touchesEvidence(p);
 
 const isOpen = (s) => !['done', 'abandoned'].includes(s.phase);
 
@@ -234,13 +220,14 @@ async function dispatch(cmd, sub, positional, options) {
   // file is read only when it is a regular file outside the evidence (another attempt's evidence is not an input).
   for (const k of WRITE_OPTIONS) {
     const v = options[k];
-    if (typeof v === 'string' && pathInEvidence(path.resolve(v))) throw new WfError(`--${k} ${v} is inside .wf-evidence/ (checked where it really points); write outside it (the evidence is written only by wf itself)`);
+    // The raw value, resolved as the OS will resolve it (path.resolve would fold `..` before following a link).
+    if (typeof v === 'string' && pathInEvidence(v)) throw new WfError(`--${k} ${v} is inside .wf-evidence/ (checked where it really points); write outside it (the evidence is written only by wf itself)`);
   }
   for (const k of READ_OPTIONS) {
     const v = options[k];
     if (typeof v !== 'string') continue;
-    const p = path.resolve(v);
-    if (pathInEvidence(p)) throw new WfError(`--${k} ${v} is inside .wf-evidence/ (checked where it really points); pass a file outside it`);
+    const p = canonical(v);
+    if (pathInEvidence(v)) throw new WfError(`--${k} ${v} is inside .wf-evidence/ (checked where it really points); pass a file outside it`);
     const st = fs.statSync(p, { throwIfNoEntry: false });
     if (st && !(k === 'from' ? st.isDirectory() : st.isFile())) throw new WfError(`--${k} ${v} is not a regular ${k === 'from' ? 'folder' : 'file'}`);
   }

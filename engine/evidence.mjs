@@ -24,6 +24,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import { canonical } from './util.mjs';
+import { isInside, touchesEvidence } from './paths.mjs';
 
 const hashBuf = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
 
@@ -32,44 +33,83 @@ const hashBuf = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
 const { O_RDONLY, O_WRONLY, O_CREAT, O_TRUNC, O_APPEND, O_EXCL, O_NOFOLLOW } = fs.constants;
 const O_DIRECTORY = fs.constants.O_DIRECTORY ?? 0;
 export class LinkRefused extends Error {}
+// Test seams: called between the check of an entry and the operation on it (to swap something in).
+export const linkSeams = { beforeOpen: null, beforeFlag: null };
+const sameEntry = (a, b) => a && b && a.dev === b.dev && a.ino === b.ino;
 
-// chmod of exactly this entry: opened without following a link, changed through its descriptor.
+// chmod of exactly this entry: lstat, open without following a link, fstat compared with the lstat (same device and
+// inode; a file not hard-linked elsewhere), changed through the descriptor.
 export function chmodNoFollow(p, mode, { dir = false } = {}) {
+  const before = fs.lstatSync(p, { throwIfNoEntry: false });
+  if (!before || (dir ? !before.isDirectory() : !before.isFile())) throw new LinkRefused(`${p} is ${before?.isSymbolicLink() ? 'a symlink' : before ? `not a ${dir ? 'folder' : 'regular file'}` : 'missing'}; not changed`);
+  if (!dir && before.nlink > 1) throw new LinkRefused(`${p} is a hard link (${before.nlink} names share its data); not changed`);
+  linkSeams.beforeOpen?.(p);
   let fd;
   try {
     fd = fs.openSync(p, O_RDONLY | O_NOFOLLOW | (dir ? O_DIRECTORY : 0));
   } catch (error) {
-    if (error.code === 'ELOOP' || error.code === 'ENOTDIR') throw new LinkRefused(`${p} is a symlink or not a ${dir ? 'folder' : 'file'}; not changed`);
+    if (error.code === 'ELOOP' || error.code === 'ENOTDIR') throw new LinkRefused(`${p} became a symlink or not a ${dir ? 'folder' : 'file'}; not changed`);
     throw error;
   }
   try {
     const st = fs.fstatSync(fd);
     if (dir ? !st.isDirectory() : !st.isFile()) throw new LinkRefused(`${p} is not a regular ${dir ? 'folder' : 'file'}; not changed`);
+    if (!sameEntry(st, before)) throw new LinkRefused(`${p} was replaced between its check and its use; not changed`);
+    if (!dir && st.nlink > 1) throw new LinkRefused(`${p} is a hard link (${st.nlink} names share its data); not changed`);
     fs.fchmodSync(fd, mode);
   } finally {
     fs.closeSync(fd);
   }
 }
 
-// A write to exactly this path: never through a link at it (O_NOFOLLOW), only to a regular file.
+// A write to exactly this path, never through a link: a new file is created exclusively; an existing one is never
+// written in place (a hard link would share the change with a file elsewhere): the content goes into a fresh exclusive
+// file in the same folder, which is renamed over it (the name is replaced, not the shared data). An append (the ledger,
+// a step log) opens with O_NOFOLLOW and refuses a file with more than one name.
 export function writeNoFollow(file, data, { append = false, exclusive = false, mode = 0o644 } = {}) {
-  let fd;
+  const bytes = typeof data === 'string' ? data : Buffer.from(data);
+  const put = (target, flags) => {
+    let fd;
+    try {
+      fd = fs.openSync(target, O_WRONLY | O_NOFOLLOW | flags, mode);
+    } catch (error) {
+      if (error.code === 'ELOOP') throw new LinkRefused(`${file} is a symlink; not written through`);
+      throw error;
+    }
+    try {
+      const st = fs.fstatSync(fd);
+      if (!st.isFile()) throw new LinkRefused(`${file} is not a regular file; not written`);
+      if (st.nlink > 1) throw new LinkRefused(`${file} is a hard link (${st.nlink} names share its data); not written`);
+      fs.writeSync(fd, bytes);
+    } finally {
+      fs.closeSync(fd);
+    }
+  };
+  if (append) return put(file, O_CREAT | O_APPEND);
+  if (exclusive) return put(file, O_CREAT | O_EXCL);
+  const st = fs.lstatSync(file, { throwIfNoEntry: false });
+  if (st && !st.isFile()) throw new LinkRefused(`${file} is ${st.isSymbolicLink() ? 'a symlink' : 'not a regular file'}; not written through`);
+  const tmp = path.join(path.dirname(file), `.${path.basename(file)}.wf-${process.pid}-${crypto.randomBytes(4).toString('hex')}`);
+  put(tmp, O_CREAT | O_EXCL);
   try {
-    fd = fs.openSync(file, O_WRONLY | O_CREAT | O_NOFOLLOW | (append ? O_APPEND : O_TRUNC) | (exclusive ? O_EXCL : 0), mode);
+    fs.renameSync(tmp, file);
   } catch (error) {
-    if (error.code === 'ELOOP') throw new LinkRefused(`${file} is a symlink; not written through`);
+    fs.rmSync(tmp, { force: true });
     throw error;
-  }
-  try {
-    if (!fs.fstatSync(fd).isFile()) throw new LinkRefused(`${file} is not a regular file; not written`);
-    fs.writeSync(fd, typeof data === 'string' ? data : Buffer.from(data));
-  } finally {
-    fs.closeSync(fd);
   }
 }
 
-// An append stream on exactly this file (a gate step's log).
-export const appendStreamNoFollow = (file) => fs.createWriteStream(null, { fd: fs.openSync(file, O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW, 0o644) });
+// An append stream on exactly this file (a gate step's log); refuses a link or a file with more than one name.
+export function appendStreamNoFollow(file) {
+  const fd = fs.openSync(file, O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW, 0o644);
+  const st = fs.fstatSync(fd);
+  if (!st.isFile() || st.nlink > 1) {
+    fs.closeSync(fd);
+    throw new LinkRefused(`${file} is not a regular file with one name; not written`);
+  }
+  return fs.createWriteStream(null, { fd });
+}
+
 
 // The nearest existing ancestor and the rest; every existing component from `from` down must be a real folder.
 function assertRealFolders(dir, from) {
@@ -109,12 +149,28 @@ export const ownGateRun = (root, id, runId) => gateRuns.add(`${root}\0${id}\0${r
 
 // ---- protection ----
 // Only regular files, checked with lstat; `chflags -h` acts on a link itself, never its target (chattr refuses links).
+// Path-based (chflags/chattr take paths): every entry is lstat'ed before (a regular file with one name) and after; an
+// entry replaced in between had the flag changed on whatever was swapped in, so that change is undone on it and the
+// call refuses, naming it.
 function setImmutable(files, on) {
   if (!flagsOn() || !files.length) return;
-  const tool = process.platform === 'darwin' ? ['chflags', '-h', on ? 'uchg' : 'nouchg'] : process.platform === 'linux' && process.getuid?.() === 0 ? ['chattr', on ? '+i' : '-i'] : null;
+  const flag = (x) => (process.platform === 'darwin' ? ['chflags', '-h', x ? 'uchg' : 'nouchg'] : process.platform === 'linux' && process.getuid?.() === 0 ? ['chattr', x ? '+i' : '-i'] : null);
+  const tool = flag(on);
   if (!tool) return;
-  const real = files.filter((f) => fs.lstatSync(f, { throwIfNoEntry: false })?.isFile());
+  const before = new Map();
+  for (const f of files) {
+    const st = fs.lstatSync(f, { throwIfNoEntry: false });
+    if (st?.isFile() && st.nlink === 1) before.set(f, st);
+  }
+  const real = [...before.keys()];
+  linkSeams.beforeFlag?.(real);
   for (let i = 0; i < real.length; i += 200) spawnSync(tool[0], [...tool.slice(1), ...real.slice(i, i + 200)], { stdio: 'ignore' });
+  const swapped = real.filter((f) => !sameEntry(fs.lstatSync(f, { throwIfNoEntry: false }), before.get(f)));
+  if (swapped.length) {
+    const undo = flag(!on);
+    spawnSync(undo[0], [...undo.slice(1), ...swapped], { stdio: 'ignore' });
+    throw new LinkRefused(`replaced while its flag was changed (the change was undone on what was swapped in): ${swapped.join(', ')}`);
+  }
 }
 
 // What this machine can do, for `wf doctor`: probed on a scratch file next to the evidence.
@@ -204,7 +260,8 @@ export function readRegular(file) {
   }
   try {
     const st = fs.fstatSync(fd);
-    if (!st.isFile()) return null;
+    // A file with another name elsewhere is not evidence (its data can be changed through that name).
+    if (!st.isFile() || st.nlink > 1) return null;
     return { bytes: fs.readFileSync(fd), st };
   } finally {
     fs.closeSync(fd);
@@ -244,7 +301,8 @@ function lockDirs(root, id) {
 export function prepareWrite(file) {
   const abs = path.resolve(file);
   const parts = abs.split(path.sep);
-  const at = parts.lastIndexOf('.wf-evidence');
+  if (!touchesEvidence(abs)) return abs;
+  const at = parts.map((x) => x.normalize('NFKC').toLowerCase()).lastIndexOf('.wf-evidence');
   if (at < 0) return abs;
   const evRoot = parts.slice(0, at + 1).join(path.sep);
   assertRealFolders(path.dirname(abs), evRoot);
@@ -254,6 +312,7 @@ export function prepareWrite(file) {
   }
   const st = fs.lstatSync(abs, { throwIfNoEntry: false });
   if (st && !st.isFile()) throw new LinkRefused(`${abs} is ${st.isSymbolicLink() ? 'a symlink' : 'not a regular file'}; not unprotected or written`);
+  if (st && st.nlink > 1) throw new LinkRefused(`${abs} is a hard link (${st.nlink} names share its data); not unprotected or written`);
   if (st) {
     setImmutable([abs], false);
     chmodNoFollow(abs, 0o644);
@@ -416,7 +475,8 @@ function verifyInner(root, id, full, sigs) {
     const p = path.join(dir, rel);
     const st = fs.lstatSync(p);
     const sig = sigOf(st);
-    if (st.size !== m.size) problems.push(`${rel}: size ${st.size}, recorded ${m.size}`);
+    if (st.nlink > 1) problems.push(`${rel}: hard link (${st.nlink} names share its data)`);
+    else if (st.size !== m.size) problems.push(`${rel}: size ${st.size}, recorded ${m.size}`);
     else if ((st.mode & 0o777) !== m.mode && !rewritten.has(p)) problems.push(`${rel}: mode ${(st.mode & 0o777).toString(8)}, recorded ${m.mode.toString(8)}`);
     else if (full || cache.get(rel) !== `${sig}:${m.sha256}`) {
       const r = readRegular(p);
@@ -554,6 +614,10 @@ export function changesOf(root, id) {
   const blocking = verifyAttempt(root, id).filter((p) => /^ledger|anchor|released|does not start|unreadable folder|verification failed/.test(p));
   const { files, odd, errors } = walk(dir);
   blocking.push(...errors, ...odd.map((o) => `${o.rel}: ${o.kind} (replace it with a regular file or remove it first)`));
+  for (const rel of files) {
+    const st = fs.lstatSync(path.join(dir, rel), { throwIfNoEntry: false });
+    if (st?.nlink > 1) blocking.push(`${rel}: hard link (${st.nlink} names share its data); replace it with a copy first`);
+  }
   const changes = [];
   const pending = (rel) => lite.openRuns.some((r) => rel.startsWith(`gate/${r}/`));
   for (const [rel, m] of lite.manifest) {

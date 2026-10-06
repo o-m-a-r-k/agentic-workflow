@@ -7,6 +7,7 @@ import { ADAPTER_DIR, adapterFileAtCommit, agentTypeFor, declared, loadConfig, l
 import { focusedSkips, gatePassedForCurrentTree, screenshots } from './gate.mjs';
 import { append, attemptDir, evidenceRoot, keptFiles, listAttempts, loadState, openEvidence } from './ledger.mjs';
 import { assertUnchanged } from './evidence.mjs';
+import { canonical as canonicalPath, isInside, touchesEvidence } from './paths.mjs';
 import { changedForStep, deliveryOrder, impact, inside, packageOf } from './topology.mjs';
 import { findSkill } from './skills.mjs';
 import { lastFencedYaml, lastModel, readTranscript, sessionModel, subagentModel, subagentTranscripts } from './telemetry.mjs';
@@ -879,26 +880,9 @@ export function deliveredFiles(state) {
   return (attach?.files ?? []).map((f) => ({ ...f, title: f.title ?? path.basename(f.path) }));
 }
 
-// The real location of a path whose ancestors may be symlinks (the nearest existing ancestor is resolved).
-function realPath(p) {
-  const rest = [];
-  let cur = p;
-  for (;;) {
-    try {
-      return path.join(fs.realpathSync(cur), ...rest);
-    } catch {
-      const parent = path.dirname(cur);
-      if (parent === cur) return p;
-      rest.unshift(path.basename(cur));
-      cur = parent;
-    }
-  }
-}
-const underEvidence = (root, p) => {
-  const ev = realPath(evidenceRoot(root));
-  const r = realPath(p);
-  return p.split(/[\\/]+/).includes('.wf-evidence') || r.split(/[\\/]+/).includes('.wf-evidence') || r === ev || r.startsWith(ev + path.sep);
-};
+// One answer for every caller (engine/paths.mjs): any project's evidence, as written or as the OS resolves it, or below
+// this project's evidence root.
+const underEvidence = (root, p) => touchesEvidence(p) || isInside(p, evidenceRoot(root));
 
 // An attachment title as a plain file name: never a path, never `.`/`..`, no control characters.
 export function safeFileName(title) {
@@ -929,7 +913,7 @@ export const exportSeams = { beforeSourceOpen: null, beforeDestOpen: null };
 export function exportScreenshots(root, state, to = null, { gate = false } = {}) {
   const files = gate ? gateFiles(state) : deliveredFiles(state);
   if (!files.length) throw refuse(gate ? `the last gate of ${state.id} collected no screenshots` : `no delivered screenshots for ${state.item}${state.delivery.screenshots?.none ? `: ${state.delivery.screenshots.none}` : state.delivery.completedAt ? '' : ' (not delivered yet)'}`);
-  const parent = path.resolve(String(to ?? screenshotsExportDir(root, state.id)));
+  const parent = canonicalPath(String(to ?? screenshotsExportDir(root, state.id)));
   const outside = 'export outside .wf-evidence/ (checked where the folder really points): the evidence is written only by `wf`';
   if (underEvidence(root, parent)) throw refuse(outside);
   const names = new Map();
@@ -943,9 +927,8 @@ export function exportScreenshots(root, state, to = null, { gate = false } = {})
   if (problems.length) throw refuse(`screenshots not exported:\n  - ${problems.join('\n  - ')}`);
   fs.mkdirSync(parent, { recursive: true });
   const dir = fs.mkdtempSync(path.join(parent, `${gate ? 'gate' : 'screenshots'}-`));
-  const dirReal = fs.realpathSync(dir);
-  const ledgerDir = realPath(attemptDir(root, state.id));
-  if (underEvidence(root, dirReal) || dirReal === ledgerDir || dirReal.startsWith(ledgerDir + path.sep)) {
+  const dirReal = fs.realpathSync.native(dir);
+  if (underEvidence(root, dir) || underEvidence(root, dirReal) || isInside(dir, attemptDir(root, state.id))) {
     fs.rmdirSync(dir);
     throw refuse(outside);
   }

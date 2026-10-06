@@ -16,6 +16,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { touchesEvidence } from '../engine/paths.mjs';
 
 const REFUSAL = 'agentic-workflow: this touches workflow evidence. Evidence under .wf-evidence/ is written only by `wf` commands: read it with the Read tool, get screenshots out with `wf export screenshots`, and run every other `wf` command as one plain invocation.';
 
@@ -106,7 +107,7 @@ export function check(data) {
   if (!data || typeof data !== 'object') return mentionsEvidence(JSON.stringify(data ?? '')) ? 'unreadable input' : null;
   const t = data.tool_input;
   const cwd = typeof data.cwd === 'string' && data.cwd ? data.cwd : process.cwd();
-  const cwdInEvidence = inEvidence(cwd) || inEvidence(real(path.resolve(cwd)));
+  const cwdInEvidence = inEvidence(cwd) || touchesEvidence(cwd);
   if (!t || typeof t !== 'object') return mentionsEvidence(JSON.stringify(data)) || cwdInEvidence ? 'unknown tool input' : null;
   // Every file target is checked whatever else the input carries (a `command` next to a `file_path` whitelists nothing).
   const files = [t.file_path, t.notebook_path, t.path, ...(Array.isArray(t.edits) ? t.edits.map((e) => e?.file_path) : [])];
@@ -114,7 +115,7 @@ export function check(data) {
     if (file === undefined || file === null) continue;
     if (typeof file !== 'string') return mentionsEvidence(JSON.stringify(file)) || cwdInEvidence ? 'unknown file target' : null;
     const abs = path.resolve(cwd, file.replace(/^~(?=\/|$)/, process.env.HOME ?? '~'));
-    if (mentionsEvidence(file) || inEvidence(abs) || inEvidence(real(abs))) return `${file} is workflow evidence`;
+    if (mentionsEvidence(file) || inEvidence(abs) || inEvidence(real(abs)) || touchesEvidence(file.replace(/^~(?=\/|$)/, process.env.HOME ?? '~'), cwd)) return `${file} is workflow evidence`;
   }
   const bashTool = data.tool_name === undefined || data.tool_name === 'Bash';
   if (typeof t.command === 'string') {
