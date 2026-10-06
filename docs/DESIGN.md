@@ -52,7 +52,7 @@ agentic-workflow/
 
 - Enabled = `.workflow/project.yaml` exists with `enabled: true`. The plugin is always installed and never activates itself.
 - `wf enable` / `wf disable` flip the flag and add/remove the generated block in every file listed in `instructionFiles` (default: each repo's root `AGENTS.md`).
-- Skills check `wf status --quiet` first; not enabled ⇒ "not enabled here, run onboarding". The guard hook acts only on paths under `.wf-evidence/`, which exist only in onboarded projects.
+- Skills check `wf status --quiet` first; not enabled ⇒ "not enabled here, run onboarding". The guard hook acts only on commands and paths that name `.wf-evidence/` (or run inside it), which exists only in onboarded projects; it decides on the raw text, never by parsing shell, and lets through only one plain `wf` invocation.
 - No tiers. A small project is just a small config: `tracker: none`, `lanes: [quick]`, `roles: { reviewer }`.
 
 ## Core model
@@ -384,7 +384,7 @@ Not built: automatic classification, path globs for critical code, and any gate 
 
 What the evidence proves, and what it does not:
 
-- **It catches mistakes.** The ledger is hash-chained, writes are serialised, gate results are bound to the exact tree and to the adapter committed at base, only a gate that ran every step the tree needs (not a `--focused` one) opens acceptance and delivery, acceptance needs a clean closure written for the exact tree after a passing gate on it, a step that reads another repo (`alsoInputs`) is reused only while that repo's tree is unchanged, and the guard hook blocks careless edits of `.wf-evidence/` from Edit/Write and common shell writes. An agent that misremembers, skips a step or edits the wrong file is stopped.
+- **It catches mistakes.** The ledger is hash-chained, writes are serialised, gate results are bound to the exact tree and to the adapter committed at base, only a gate that ran every step the tree needs (not a `--focused` one) opens acceptance and delivery, acceptance needs a clean closure written for the exact tree after a passing gate on it, a step that reads another repo (`alsoInputs`) is reused only while that repo's tree is unchanged, and the guard hook blocks careless edits of `.wf-evidence/` from Edit/Write and every shell command that names it except one plain `wf` invocation (copies out go through `wf export screenshots`). An agent that misremembers, skips a step or edits the wrong file is stopped.
 - **It does not stop a determined forger on the same machine.** The chain is unkeyed and agent identities (`--agent`, `--owner`) are names the owner supplies. An agent with shell access that sets out to fake a passing gate or a reviewer can. Independence and evidence are only as strong as the agents and the person running them.
 - **Fresh reviewer per round is checked; blind is a rule.** The engine refuses a reviewer id that reviewed an earlier round, but the id is a name the owner supplies: resuming an old agent under a new id defeats it.
 - **The blind reviewer is a rule, not a check.** The engine hands the reviewer only the bundle and prints a one-line start prompt, but it cannot see the prompt a runtime actually gives an agent, so it does not verify or record it. An owner who steers the reviewer (hints, focus areas, summaries of the work, other agents' findings) weakens the review without any refusal; the skills and the reviewer role forbid it, and the reviewer reports a prompt that carried more.

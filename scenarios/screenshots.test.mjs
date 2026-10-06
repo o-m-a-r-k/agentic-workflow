@@ -43,7 +43,7 @@ test('quick lane with screenshots: the SHOW block is printed and the attempt sta
   assert.match(d.out, /attach as: shots-eng-72-b-home\.png/);
   let s = state(root, e.id);
   assert.equal(s.phase, 'handoff-pending', 'not closed before the owner saw the screenshots');
-  assert.ok(fs.existsSync(path.join(root, '.wf-evidence', 'attempts', e.id, 'delivery', 'shown-draft.json')));
+  assert.ok(fs.existsSync(path.join(root, '.wf-worktrees', '_exports', e.id, 'shown-draft.json')));
   const r = wf(root, ['shown', '--file', shownFile(base, [{ sha256: shas[0], caption: 'Home, first variant' }, { sha256: 'f'.repeat(64), caption: 'stray' }]), '--attempt', e.id]);
   assert.equal(r.code, 75);
   assert.match(r.err, /home\.png .*not acknowledged/);
@@ -165,7 +165,7 @@ test('delivery narrow: the owner keeps the ticket\'s files of an over-broad set,
   assert.deepEqual(s.tracker.pending.find((a) => a.op === 'attach').files.map((f) => f.sha256).sort(), [...mine].sort(), 'the pending attach action is narrowed the same way');
   assert.deepEqual({ from: s.delivery.narrowed.from, to: s.delivery.narrowed.to, dropped: s.delivery.narrowed.dropped, reason: s.delivery.narrowed.reason }, { from: 5, to: 2, dropped: 3, reason });
   assert.match(fs.readFileSync(s.delivery.narrowed.raw.path, 'utf8'), /keep/, 'the keep file is kept raw');
-  const draft = JSON.parse(fs.readFileSync(path.join(root, '.wf-evidence', 'attempts', e.id, 'delivery', 'shown-draft.json'), 'utf8'));
+  const draft = JSON.parse(fs.readFileSync(path.join(root, '.wf-worktrees', '_exports', e.id, 'shown-draft.json'), 'utf8'));
   assert.equal(draft.screenshots.length, 2, 'the draft lists only the kept files');
   assert.match(ok(wf(root, ['status', '--attempt', e.id])).out, /narrowed from 5 to 2: the glob/);
   assert.match(ok(wf(root, ['resume', '--attempt', e.id])).out, /each of the 2 delivered screenshot/);

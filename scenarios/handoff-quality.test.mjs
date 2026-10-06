@@ -4,7 +4,6 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { closureFile, commitIn, criteriaFile, goodClosure, ok, postedComment, rawReadback, singleRepoProject, state, summaryFile, wf } from './helpers.mjs';
 import { knownLimits, uatScope } from '../engine/tracker.mjs';
-import { check } from '../hooks/guard-evidence.mjs';
 
 // 0.1.16: field failures from delivering one UI ticket. The delivered comment was a verbatim dump of every criterion;
 // screenshots were attachments only ("added N links", zero images visible); a hand-built readback was accepted; the
@@ -56,7 +55,8 @@ test('delivered handoff: summary required, screenshots embedded inline, raw read
   assert.match(wf(root, ['deliver', '--attempt', e.id, '--summary-file', summaryFile(base, '- list shows active workspaces')]).err, /repeats criteria text verbatim \(C1\)/);
   const d = ok(wf(root, ['deliver', '--attempt', e.id, '--summary-file', summaryFile(base, 'The workspace list now shows how many workspaces are active.')]));
   assert.match(d.out, /delivered comment to post .*delivered-comment\.md/);
-  assert.match(d.out, /to view them again \(also after close\): `wf export screenshots --attempt ENG-160\.1 --to .*_exports\/ENG-160\.1\/screenshots`/);
+  assert.match(d.out, /to view them again \(also after close\): `wf export screenshots --attempt ENG-160\.1 --to .*_exports\/ENG-160\.1`/);
+  assert.match(d.out, /1\. .*_exports\/ENG-160\.1\/screenshots-\w+\/list-\w+\.png\n/, 'the SHOW block lists the viewable copies, exported at delivery');
   const s0 = state(root, e.id);
   assert.deepEqual(s0.tracker.pending.filter((a) => a.event === 'delivered').map((a) => a.op), ['attach', 'comment', 'setStatus', 'readback'], 'uploads come before the comment that embeds them');
 
@@ -125,45 +125,25 @@ test('delivered handoff: summary required, screenshots embedded inline, raw read
   const s = state(root, e.id);
   assert.equal(s.phase, 'done');
 
-  // Viewable after close: the delivered set was copied out at close, named by title, and resume says where.
-  const dir = path.join(root, '.wf-worktrees', '_exports', e.id, 'screenshots');
-  assert.equal(s.delivery.exported.dir, dir);
+  // Viewable after close: the delivered set was copied out (at delivery), named by title, and resume says where.
+  const dir = s.delivery.exported.dir;
+  assert.match(dir, new RegExp(`${path.join(root, '.wf-worktrees', '_exports', e.id).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/screenshots-\\w+$`));
   assert.deepEqual(fs.readdirSync(dir).sort(), ['list-ar.png', 'list-en.png']);
   assert.equal(fs.readFileSync(path.join(dir, 'list-ar.png'), 'utf8'), 'ar');
   assert.ok(!fs.existsSync(e.repos.app.worktree), 'the worktree is gone');
   assert.match(ok(wf(root, ['resume', '--attempt', e.id])).out, new RegExp(`delivered screenshots \\(2\\): viewable copies in ${dir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
   const to = path.join(base, 'shots-out');
   const ex = ok(wf(root, ['export', 'screenshots', '--attempt', e.id, '--to', to]));
-  assert.match(ex.out, /copied 2 delivered screenshot\(s\) of ENG-160\.1 to .*shots-out \(each sha256-checked\)/);
-  assert.deepEqual(fs.readdirSync(to).sort(), ['list-ar.png', 'list-en.png']);
-  assert.match(wf(root, ['export', 'screenshots', '--attempt', e.id, '--to', path.join(root, '.wf-evidence', 'x')]).err, /outside \.wf-evidence/);
+  assert.match(ex.out, /copied 2 delivered screenshot\(s\) of ENG-160\.1 to .*shots-out\/screenshots-\w+ \(each sha256-checked/);
+  const fresh = ok(wf(root, ['resume', '--attempt', e.id, '--json'])).json().delivery.exported.dir;
+  assert.equal(path.dirname(fresh), to, 'each export is a fresh folder under --to');
+  assert.deepEqual(fs.readdirSync(fresh).sort(), ['list-ar.png', 'list-en.png']);
+  assert.match(wf(root, ['export', 'screenshots', '--attempt', e.id, '--to', path.join(root, '.wf-evidence', 'x')]).err, /inside \.wf-evidence/);
   const j = ok(wf(root, ['export', '--attempt', e.id, '--json'])).json();
   assert.equal(j.delivered.anomalies[0].followUp, 'isolate test data between capture runs');
-  assert.equal(j.delivered.exportedTo, to);
+  assert.equal(j.delivered.exportedTo, fresh);
   ok(wf(root, ['export', '--attempt', e.id]));
   assert.match(fs.readFileSync(path.join(root, '.wf-evidence', 'attempts', e.id, 'export', 'attempt.html'), 'utf8'), /Anomalies seen/);
-});
-
-test('evidence guard: copying out of .wf-evidence is a read; copying or writing into it is refused', () => {
-  const cwd = '/p';
-  const c = (command) => check({ cwd, tool_input: { command } });
-  for (const read of [
-    'cp .wf-evidence/attempts/X/gate/artifacts/a.png /tmp/out/',
-    'cp -t /tmp/out .wf-evidence/attempts/X/a.png',
-    'install -m 644 .wf-evidence/a.png /tmp/x.png',
-    'rsync -a .wf-evidence/a/ /tmp/s/',
-    "python3 -c \"import shutil; shutil.copy('.wf-evidence/a.png', '/tmp/x.png')\"",
-    "node -e \"require('fs').copyFileSync('.wf-evidence/a.png', '/tmp/x.png')\"",
-  ]) assert.equal(c(read), null, read);
-  for (const write of [
-    'cp /tmp/x.png .wf-evidence/a.png',
-    'cp -t .wf-evidence/attempts/X /tmp/x.png',
-    'install -m 644 /tmp/x.png .wf-evidence/a.png',
-    'install -d .wf-evidence/new',
-    "python3 -c \"import shutil; shutil.copy('/tmp/x.png', '.wf-evidence/a.png')\"",
-    "python3 -c \"import shutil; shutil.copy('.wf-evidence/a.png', '/tmp/x.png'); shutil.rmtree('.wf-evidence')\"",
-    "node -e \"require('fs').copyFileSync('.wf-evidence/a.png', dest)\"",
-  ]) assert.ok(c(write), write);
 });
 
 test('design system: bans and companions run over added lines; every hit needs the reviewer\'s verdict', () => {

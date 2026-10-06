@@ -13,7 +13,7 @@ import { outsidePlan, outsideVerdicts } from './scope.mjs';
 import { commentFile, emitTrackerEvent, needsSummary, recordSummary, writeDeliveredComment } from './tracker.mjs';
 import { designChecks, designVerdicts, requiredSkills, reviewRules, ruleVerdicts, skillFiles, unreadDocs } from './rules.mjs';
 import { home, startPromptFor, verifyAgent } from './provenance.mjs';
-import { WfError, YAML, canonical, git, hashFile, hashValue, matchesAny, readJson, refuse, run, sessionIdentity, writeImmutable, writeJson } from './util.mjs';
+import { WfError, YAML, canonical, git, hashFile, hashValue, matchesAny, readJson, refuse, run, sessionIdentity, sha256, writeImmutable, writeJson } from './util.mjs';
 
 const readStructured = (file) => {
   let text = fs.readFileSync(path.resolve(String(file)), 'utf8');
@@ -499,7 +499,7 @@ export function recordReview(root, options) {
   let reveal = null;
   if (toVerify.length) {
     reveal = path.join(root, '.wf-worktrees', state.id, '_review', `prior-findings-${tag}.json`);
-    writeJson(reveal, { note: 'Findings earlier review rounds left open. Check each against the current code; add priorFindings to your closure.', findings: toVerify });
+    safeWriteJson(root, reveal, { note: 'Findings earlier review rounds left open. Check each against the current code; add priorFindings to your closure.', findings: toVerify });
   }
   return { state: after, reveal, toVerify };
 }
@@ -782,11 +782,57 @@ export function noScreenshotsReason(root, state) {
   }).join('; ');
 }
 
-export const shownDraftFile = (root, id) => path.join(attemptDir(root, id), 'delivery', 'shown-draft.json');
+// Outside the evidence: the owner edits it (captions, anomalies) and passes it to `wf shown`.
+export const shownDraftFile = (root, id) => path.join(root, '.wf-worktrees', '_exports', id, 'shown-draft.json');
 
 // The owner still has to show the delivered screenshots and record it (`wf shown`). An attempt delivered before
 // 0.1.11 has no recorded set and owes nothing.
 export const needsShown = (state) => Boolean(state.delivery.screenshots?.screenshots?.length) && !state.delivery.shown;
+
+// The draft `wf shown` starts from, with viewable copies: the delivered set is exported when it is recorded.
+function writeDraft(root, state, draft) {
+  let copies = [];
+  try {
+    copies = exportScreenshots(root, state).files;
+  } catch (error) {
+    process.stderr.write(`wf: delivered screenshots not exported: ${error.message}\n`);
+  }
+  try {
+    safeWriteJson(root, shownDraftFile(root, state.id), { ...draft, screenshots: draft.screenshots.map((x) => ({ ...x, file: copies.find((c) => c.sha256 === x.sha256)?.file ?? null })) });
+  } catch (error) {
+    process.stderr.write(`wf: the \`wf shown\` draft was not written: ${error.message}\n`);
+  }
+}
+
+// Every file the engine writes outside the evidence where an agent could have planted a link (the shown draft, the
+// prior-findings reveal). Named finding (0.1.18 review): the draft was written with a plain write that follows
+// symlinks, so a symlinked `_exports/<id>` folder or draft file sent it into the evidence. The parent is checked where
+// it really points before and after it is created; an existing entry is replaced only when it is a regular file; the
+// file is created exclusively without following a link and written through its descriptor.
+export function safeWrite(root, file, content) {
+  const parent = path.dirname(path.resolve(file));
+  const refused = `${file}: not written; its folder really lies in .wf-evidence/ (a symlink?)`;
+  if (underEvidence(root, parent)) throw refuse(refused);
+  fs.mkdirSync(parent, { recursive: true });
+  const parentReal = fs.realpathSync(parent);
+  if (underEvidence(root, parentReal)) throw refuse(refused);
+  const there = fs.lstatSync(file, { throwIfNoEntry: false });
+  if (there && !there.isFile()) throw refuse(`${file}: exists and is ${there.isSymbolicLink() ? 'a symlink' : 'not a regular file'}; not followed or replaced`);
+  if (there) fs.unlinkSync(file);
+  const { O_WRONLY, O_CREAT, O_EXCL, O_NOFOLLOW } = fs.constants;
+  const fd = fs.openSync(file, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o644);
+  try {
+    fs.writeSync(fd, content);
+  } finally {
+    fs.closeSync(fd);
+  }
+  if (fs.realpathSync(parent) !== parentReal) {
+    fs.rmSync(path.join(parentReal, path.basename(file)), { force: true });
+    throw refuse(`${file}: its folder moved while it was written; removed`);
+  }
+  return file;
+}
+export const safeWriteJson = (root, file, value) => safeWrite(root, file, `${JSON.stringify(value, null, 2)}\n`);
 
 function finishDelivered(root, cfg, state) {
   if (state.lane !== 'batch') {
@@ -795,7 +841,7 @@ function finishDelivered(root, cfg, state) {
     append(root, state.id, 'delivery.screenshots', { screenshots: set, none }, null);
     // Nothing to show: the statement of why is the record, no acknowledgement of images is owed.
     if (!set.length) append(root, state.id, 'delivery.shown', { screenshots: [], none, auto: true }, null);
-    else writeJson(shownDraftFile(root, state.id), { attempt: state.id, item: state.item, note: 'Copy this file outside .wf-evidence, view each image, replace each caption with what the image shows (which screen, which state), then `wf shown --file <copy>`. Set `anomalies`: "none seen", or each value that differs between captures of the same state or contradicts a criterion, with its investigated cause or a follow-up.', anomalies: null, screenshots: set.map((f) => ({ sha256: f.sha256, title: f.title, path: f.path, proposed: f.proposed, caption: f.proposed })) });
+    else writeDraft(root, loadState(root, state.id), { attempt: state.id, item: state.item, note: 'Edit this file in place (it is outside the evidence): view each image (the `file` copy, with the Read tool), replace each caption with what the image shows (which screen, which state), set `anomalies` ("none seen", or each value that differs between captures of the same state or contradicts a criterion, with its investigated cause or a follow-up), then `wf shown --file <this file>`.', anomalies: null, screenshots: set.map((f) => ({ sha256: f.sha256, title: f.title, path: f.path, proposed: f.proposed, caption: f.proposed })) });
     state = loadState(root, state.id);
   }
   const set = state.delivery.screenshots?.screenshots ?? [];
@@ -813,7 +859,7 @@ function finishDelivered(root, cfg, state) {
 // .wf-evidence, so the delivered screenshots could not be shown again. `wf export screenshots` copies the delivered
 // (kept) set, each named by its attachment title and checked against its sha256, to a folder outside the evidence;
 // closing an attempt does it once to the default folder.
-export const screenshotsExportDir = (root, id) => path.join(root, '.wf-worktrees', '_exports', id, 'screenshots');
+export const screenshotsExportDir = (root, id) => path.join(root, '.wf-worktrees', '_exports', id);
 
 export function deliveredFiles(state) {
   if (state.delivery.screenshots) return state.delivery.screenshots.screenshots;
@@ -848,16 +894,32 @@ export function safeFileName(title) {
   return !name || /^\.+$/.test(name) ? null : name;
 }
 
-// Named failure (0.1.16 security review): the destination was checked as text only, so a `--to` symlink into
-// .wf-evidence/, or a symlink planted under the export folder's file name, made the copy write into the evidence.
-// The folder is checked where it really points, before and after it is created; each destination must be absent or a
-// regular file (replaced, never followed), and is written exclusively.
-export function exportScreenshots(root, state, to = null) {
-  const files = deliveredFiles(state);
-  if (!files.length) throw refuse(`no delivered screenshots for ${state.item}${state.delivery.screenshots?.none ? `: ${state.delivery.screenshots.none}` : state.delivery.completedAt ? '' : ' (not delivered yet)'}`);
-  const dir = path.resolve(String(to ?? screenshotsExportDir(root, state.id)));
+// What the gate collected for the reviewer (one file per sha256), titled as the delivered set is titled.
+export function gateFiles(state) {
+  const seen = new Set();
+  const files = screenshots(state).filter((a) => !seen.has(a.sha256) && seen.add(a.sha256));
+  const base = (a) => path.posix.basename(a.source ?? a.path);
+  const count = {};
+  for (const a of files) count[base(a)] = (count[base(a)] ?? 0) + 1;
+  return files.map((a) => ({ path: a.path, sha256: a.sha256, title: count[base(a)] > 1 ? String(a.source ?? a.path).replace(/^\/+/, '').replace(/\//g, '-') : base(a) }));
+}
+
+// Test seams: called just before a source is opened and just before a destination is created.
+export const exportSeams = { beforeSourceOpen: null, beforeDestOpen: null };
+
+// Copies out of the evidence are made by this process, never by a shell. Named failures (0.1.16/0.1.17 security
+// reviews): the destination was checked as text only, then checked and written in separate steps, so a `--to` symlink
+// into .wf-evidence/, a symlink planted or swapped in under a file name, or a swapped source could make the copy
+// write into the evidence. Now: a fresh directory is created exclusively (mkdtemp) under the export root, and its real
+// location is checked after creation; each source is opened without following a symlink, read once, and its sha256
+// checked on the bytes that are written; each destination is created exclusively without following a symlink and
+// written through its descriptor; the directory's identity is checked before every file and at the end.
+export function exportScreenshots(root, state, to = null, { gate = false } = {}) {
+  const files = gate ? gateFiles(state) : deliveredFiles(state);
+  if (!files.length) throw refuse(gate ? `the last gate of ${state.id} collected no screenshots` : `no delivered screenshots for ${state.item}${state.delivery.screenshots?.none ? `: ${state.delivery.screenshots.none}` : state.delivery.completedAt ? '' : ' (not delivered yet)'}`);
+  const parent = path.resolve(String(to ?? screenshotsExportDir(root, state.id)));
   const outside = 'export outside .wf-evidence/ (checked where the folder really points): the evidence is written only by `wf`';
-  if (underEvidence(root, dir)) throw refuse(outside);
+  if (underEvidence(root, parent)) throw refuse(outside);
   const names = new Map();
   const problems = [];
   for (const f of files) {
@@ -867,36 +929,72 @@ export function exportScreenshots(root, state, to = null) {
     else names.set(name, f);
   }
   if (problems.length) throw refuse(`screenshots not exported:\n  - ${problems.join('\n  - ')}`);
-  fs.mkdirSync(dir, { recursive: true });
-  if (underEvidence(root, fs.realpathSync(dir))) throw refuse(outside);
+  fs.mkdirSync(parent, { recursive: true });
+  const dir = fs.mkdtempSync(path.join(parent, `${gate ? 'gate' : 'screenshots'}-`));
+  const dirReal = fs.realpathSync(dir);
+  const ledgerDir = realPath(attemptDir(root, state.id));
+  if (underEvidence(root, dirReal) || dirReal === ledgerDir || dirReal.startsWith(ledgerDir + path.sep)) {
+    fs.rmdirSync(dir);
+    throw refuse(outside);
+  }
+  const ident = fs.lstatSync(dir);
+  const same = () => {
+    const now = fs.lstatSync(dir, { throwIfNoEntry: false });
+    return Boolean(now && now.isDirectory() && !now.isSymbolicLink() && now.dev === ident.dev && now.ino === ident.ino && fs.realpathSync(dir) === dirReal);
+  };
+  const { O_RDONLY, O_WRONLY, O_CREAT, O_EXCL, O_NOFOLLOW } = fs.constants;
   const out = [];
   for (const [name, f] of names) {
-    if (!fs.existsSync(f.path)) {
-      problems.push(`${f.title}: missing (${f.path})`);
+    exportSeams.beforeSourceOpen?.(f.path);
+    let bytes;
+    try {
+      const fd = fs.openSync(f.path, O_RDONLY | O_NOFOLLOW);
+      try {
+        if (!fs.fstatSync(fd).isFile()) throw new Error('not a regular file');
+        bytes = fs.readFileSync(fd);
+      } finally {
+        fs.closeSync(fd);
+      }
+    } catch (error) {
+      problems.push(`${f.title}: source not readable as a regular file (${error.code ?? error.message}): ${f.path}`);
       continue;
     }
-    if (hashFile(f.path) !== f.sha256) {
+    if (sha256(bytes) !== f.sha256) {
       problems.push(`${f.title}: bytes differ from the recorded sha256 (${f.path})`);
       continue;
     }
     const dest = path.join(dir, name);
-    const there = fs.lstatSync(dest, { throwIfNoEntry: false });
-    if (there && !there.isFile()) {
-      problems.push(`${dest}: exists and is ${there.isSymbolicLink() ? 'a symlink' : 'not a regular file'}; not followed or replaced`);
+    exportSeams.beforeDestOpen?.(dest, dir);
+    if (!same()) {
+      problems.push(`${dir}: the export folder was replaced or moved during the export; nothing more written`);
+      break;
+    }
+    let fd;
+    try {
+      fd = fs.openSync(dest, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o644);
+    } catch (error) {
+      problems.push(`${dest}: not created (${error.code ?? error.message}); an existing file or link is never followed or replaced`);
       continue;
     }
-    if (there) fs.unlinkSync(dest);
-    fs.copyFileSync(f.path, dest, fs.constants.COPYFILE_EXCL);
-    if (!fs.lstatSync(dest).isFile() || hashFile(dest) !== f.sha256) problems.push(`${f.title}: the copy does not match its sha256`);
-    else out.push({ title: f.title, sha256: f.sha256, file: dest });
+    try {
+      fs.writeSync(fd, bytes);
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+    out.push({ title: f.title, sha256: f.sha256, file: dest });
   }
+  if (!same()) problems.push(`${dir}: the export folder was replaced or moved during the export`);
   if (problems.length) throw refuse(`screenshots not exported:\n  - ${problems.join('\n  - ')}`);
-  append(root, state.id, 'screenshots.exported', { dir, files: out }, null);
+  if (!gate) append(root, state.id, 'screenshots.exported', { dir, files: out }, null);
   return { dir, files: out };
 }
 
 function closeExport(root, state) {
-  if (!deliveredFiles(state).length) return;
+  const files = deliveredFiles(state);
+  if (!files.length) return;
+  const have = new Set((state.delivery.exported?.files ?? []).filter((f) => fs.existsSync(f.file)).map((f) => f.sha256));
+  if (files.every((f) => have.has(f.sha256))) return;
   try {
     exportScreenshots(root, state);
   } catch (error) {
@@ -1043,7 +1141,7 @@ export function narrowDelivery(root, options) {
   append(root, state.id, 'delivery.narrowed', { keep, from, to: kept.length, dropped: from - kept.length, reason, legacy: source.legacy, raw: raw ? { path: raw.file, sha256: raw.sha256 } : null }, actor(options));
   const after = loadState(root, state.id);
   // A legacy attempt has no draft and owes no `wf shown`: its kept uploads are checked by title only, as before.
-  if (!source.legacy) writeJson(shownDraftFile(root, state.id), { attempt: state.id, item: state.item, note: 'Copy this file outside .wf-evidence, view each image, replace each caption with what the image shows (which screen, which state), then `wf shown --file <copy>`. Set `anomalies`: "none seen", or each value that differs between captures of the same state or contradicts a criterion, with its investigated cause or a follow-up.', anomalies: null, screenshots: after.delivery.screenshots.screenshots.map((f) => ({ sha256: f.sha256, title: f.title, path: f.path, proposed: f.proposed, caption: f.proposed })) });
+  if (!source.legacy) writeDraft(root, after, { attempt: state.id, item: state.item, note: 'Edit this file in place (it is outside the evidence): view each image (the `file` copy, with the Read tool), replace each caption with what the image shows (which screen, which state), set `anomalies` ("none seen", or each value that differs between captures of the same state or contradicts a criterion, with its investigated cause or a follow-up), then `wf shown --file <this file>`.', anomalies: null, screenshots: after.delivery.screenshots.screenshots.map((f) => ({ sha256: f.sha256, title: f.title, path: f.path, proposed: f.proposed, caption: f.proposed })) });
   return { state: after, dryRun: null };
 }
 

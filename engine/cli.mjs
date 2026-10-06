@@ -58,7 +58,8 @@ Status
   wf status [--all] [--json]
   wf report [--all] [--csv FILE] [--handoffs-csv FILE] [--html FILE]
   wf export [--out FILE] [--json]   one self-contained page for the attempt (a view of the evidence)
-  wf export screenshots [--to DIR]  copy the delivered screenshots out of the evidence, named by title, sha256-checked
+  wf export screenshots [--gate] [--to DIR]
+                                    copy the delivered (or, --gate, the last gate's) screenshots out of the evidence
 
 Common options: --attempt ID, --json, --owner ID`;
 
@@ -115,10 +116,11 @@ function showBlock(root, s) {
   const narrowed = n ? `\n  narrowed from ${n.from} to ${n.to}: ${n.reason} (${n.by}, ${n.at})` : '';
   const rows = set.screenshots.map((f, i) => {
     const cap = shown.find((x) => x.sha256 === f.sha256)?.caption;
-    return `  ${i + 1}. ${f.path}\n     attach as: ${f.title}   sha256 ${f.sha256.slice(0, 12)}\n     ${cap ? `caption: ${cap}` : `proposed caption: ${f.proposed}  (refine it after viewing: which screen, which state)`}`;
+    const copy = s.delivery.exported?.files?.find((x) => x.sha256 === f.sha256)?.file;
+    return `  ${i + 1}. ${copy ?? f.path}${copy ? '' : '  (evidence path: export a copy to view or upload it)'}\n     attach as: ${f.title}   sha256 ${f.sha256.slice(0, 12)}\n     ${cap ? `caption: ${cap}` : `proposed caption: ${f.proposed}  (refine it after viewing: which screen, which state)`}`;
   });
   const head = needsShown(s)
-    ? `SHOW TO OWNER (${set.screenshots.length} delivered screenshot(s) for ${s.item}): display each image in the chat with its caption, then record it with \`wf shown --file <f>\` (start from a copy of ${shownDraftFile(root, s.id)}). Each is also uploaded to the ticket as a file: title = "attach as", subtitle = its caption.`
+    ? `SHOW TO OWNER (${set.screenshots.length} delivered screenshot(s) for ${s.item}): display each image in the chat with its caption, then record it with \`wf shown --file <f>\` (edit ${shownDraftFile(root, s.id)}; view and upload the copies listed below, never the evidence files). Each is also uploaded to the ticket as a file: title = "attach as", subtitle = its caption.`
     : `delivered screenshots for ${s.item} (shown to the owner ${s.delivery.shown.at}):`;
   const an = s.delivery.shown && !s.delivery.shown.auto ? s.delivery.shown.anomalies : null;
   const anomalies = an ? `\n  anomalies: ${an.length ? an.map((a) => `${a.observation} [${a.screenshots.join(', ')}] → ${a.cause ? `cause: ${a.cause}` : `follow-up: ${a.followUp}`}`).join('; ') : 'none seen'}` : '';
@@ -165,6 +167,24 @@ export async function main(argv) {
   }
 }
 
+// Lexically or where it really points (the nearest existing ancestor resolved), case-insensitively.
+function pathInEvidence(p) {
+  const hit = (x) => x.split(/[\\/]+/).some((seg) => seg.toLowerCase() === '.wf-evidence');
+  if (hit(p)) return true;
+  const rest = [];
+  let cur = p;
+  for (;;) {
+    try {
+      return hit(path.join(fs.realpathSync(cur), ...rest));
+    } catch {
+      const parent = path.dirname(cur);
+      if (parent === cur) return false;
+      rest.unshift(path.basename(cur));
+      cur = parent;
+    }
+  }
+}
+
 const isOpen = (s) => !['done', 'abandoned'].includes(s.phase);
 
 // With `tracker.via: api` the engine performs what a command queued and records its readback; otherwise a no-op.
@@ -186,6 +206,11 @@ function safeBase(root, s) {
 }
 
 async function dispatch(cmd, sub, positional, options) {
+  // `wf` is the one command the evidence guard lets name .wf-evidence/; no option of it may write there.
+  for (const k of ['out', 'csv', 'handoffs-csv', 'html', 'dir', 'to']) {
+    const v = options[k];
+    if (typeof v === 'string' && pathInEvidence(path.resolve(v))) throw new WfError(`--${k} ${v} is inside .wf-evidence/; write outside it (the evidence is written only by wf itself)`);
+  }
   if (cmd === 'status' && options.quiet) {
     const root = findRoot();
     if (!root) return 3;
@@ -402,11 +427,11 @@ async function dispatch(cmd, sub, positional, options) {
     case 'export': {
       const s = openState(root, options);
       if (sub === 'screenshots') {
-        const r = exportScreenshots(root, s, options.to && options.to !== true ? options.to : null);
-        print(options, `copied ${r.files.length} delivered screenshot(s) of ${s.id} to ${r.dir} (each sha256-checked):\n${r.files.map((f) => `  ${f.file}`).join('\n')}`, r);
+        const r = exportScreenshots(root, s, options.to && options.to !== true ? options.to : null, { gate: options.gate === true });
+        print(options, `copied ${r.files.length} ${options.gate ? 'gate' : 'delivered'} screenshot(s) of ${s.id} to ${r.dir} (each sha256-checked; view them with the Read tool):\n${r.files.map((f) => `  ${f.file}`).join('\n')}`, r);
         return 0;
       }
-      if (sub) throw new WfError('usage: wf export [--out FILE] [--json] | wf export screenshots [--to DIR]');
+      if (sub) throw new WfError('usage: wf export [--out FILE] [--json] | wf export screenshots [--gate] [--to DIR]');
       const r = exportAttempt(root, s, { out: options.out ?? null, json: options.json === true });
       append(root, s.id, 'exported', { file: r.file, json: options.json === true }, null);
       if (options.json) {

@@ -173,40 +173,20 @@ test('narrow inputs fail closed: a change outside them reruns the step instead o
   assert.match(g.steps[0].reason ?? '', /outside (this|every) step's inputs/);
 });
 
-test('the guard hook resolves relative write targets after cd', async () => {
+// 0.1.18: the guard decides on the raw text, without parsing shell. Any Bash command that names the evidence, or runs
+// inside it, is blocked unless it is one plain `wf` invocation; reads go through the Read tool, which it does not see.
+test('the guard hook blocks every Bash command that names or runs inside the evidence, reads included', async () => {
   const { check } = await import('../hooks/guard-evidence.mjs');
   const blocked = (command, cwd = '/p') => Boolean(check({ cwd, tool_input: { command } }));
   assert.equal(blocked('cd /p/.wf-evidence && echo x > ledger.jsonl'), true);
   assert.equal(blocked('cd .wf-evidence/attempts && rm -f A/ledger.jsonl'), true);
   assert.equal(blocked('echo x >> ledger.jsonl', '/p/.wf-evidence/attempts/A'), true);
-  assert.equal(blocked('cd .wf-evidence && cp /tmp/x ./a'), true);
-  assert.equal(blocked("cd .wf-evidence && node -e \"require('fs').writeFileSync('x','1')\""), true);
-  assert.equal(blocked('cd /p/.wf-evidence && cat a && grep -r FAIL . 2>/dev/null'), false);
-  assert.equal(blocked('cp .wf-evidence/a /tmp/x'), false);
-  assert.equal(blocked('echo "a > .wf-evidence/x"'), false);
-});
-
-test('the guard hook lets interpreters read evidence and still blocks their writes', async () => {
-  const { check } = await import('../hooks/guard-evidence.mjs');
-  const gateDir = '/p/.wf-evidence/attempts/A/gate';
-  const blocked = (command, cwd = gateDir) => Boolean(check({ cwd, tool_input: { command } }));
-  // The read-only command the hook refused on a real ticket.
-  assert.equal(blocked(`python3 -c "import json,glob; p=sorted(glob.glob('*/progress.json'))[-1]; d=json.load(open(p)); print([s['id'] for s in d['steps']])"`), false);
-  assert.equal(blocked(`python3 -c "print(open('/p/.wf-evidence/x.json', 'r', encoding='utf8').read())"`, '/p'), false);
-  assert.equal(blocked(`node -e "const d=JSON.parse(require('fs').readFileSync('progress.json','utf8')); console.log(d.steps.length)"`), false);
-  assert.equal(blocked(`perl -ne 'print if /FAIL/' output.log`), false);
-  assert.equal(blocked(`python3 -c "open('progress.json','w').write('{}')"`), true);
-  assert.equal(blocked(`python3 -c "from pathlib import Path; Path('x').open('a')"`), true);
-  assert.equal(blocked(`python3 -c "import json; json.dump({}, open('/p/.wf-evidence/x', mode='w'))"`, '/p'), true);
-  assert.equal(blocked(`python3 -c "import shutil; shutil.rmtree('A')"`), true);
-  assert.equal(blocked(`python3 -c "import os; os.remove('ledger.jsonl')"`), true);
-  assert.equal(blocked(`python3 -c "import subprocess; subprocess.run(['rm','x'])"`), true);
-  assert.equal(blocked(`python3 -c "m='w'; open('x', m)"`), true, 'a mode that is not a literal counts as a write');
-  assert.equal(blocked(`node -e "require('fs').openSync('x','w')"`), true);
-  assert.equal(blocked(`node -e "require('fs').rmSync('x')"`), true);
-  assert.equal(blocked(`perl -pi -e 's/failed/passed/' output.log`), true);
-  assert.equal(blocked(`ruby -e "File.write('x', '1')"`), true);
+  assert.equal(blocked('cd /p/.wf-evidence && cat a && grep -r FAIL . 2>/dev/null'), true, 'reads are the Read tool\'s');
+  assert.equal(blocked('cp .wf-evidence/a /tmp/x'), true, 'copies out are `wf export screenshots`');
+  assert.equal(blocked(`python3 -c "print(open('/p/.wf-evidence/x.json').read())"`), true);
+  assert.equal(blocked('ls', '/p/.wf-evidence/attempts/A/gate'), true);
   assert.equal(blocked(`python3 -c "open('x','w')"`, '/p'), false, 'outside evidence nothing is checked');
+  assert.equal(blocked('wf status --attempt ENG-1.1'), false);
 });
 
 test('one step with narrow inputs is not reused just because another step covers the changed file', () => {

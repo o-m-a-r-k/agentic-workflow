@@ -149,7 +149,7 @@ test('a commit pushed by hand after acceptance is not recorded as delivered', ()
   assert.equal(state(root, id).delivery.repos.app, undefined);
 });
 
-test('the reviewer can write its closure and read evidence under the guard hook', async () => {
+test('the reviewer can write its closure under the guard hook; evidence is read with the Read tool', async () => {
   const { spawnSync } = await import('node:child_process');
   const hook = path.join(path.dirname(WF), '..', 'hooks', 'guard-evidence.mjs');
   const run = (command) => spawnSync(process.execPath, [hook], { input: JSON.stringify({ tool_input: { command } }), encoding: 'utf8' }).status;
@@ -161,7 +161,7 @@ test('the reviewer can write its closure and read evidence under the guard hook'
   const closurePath = JSON.parse(fs.readFileSync(h.bundle, 'utf8')).reviewClosureFile;
   assert.doesNotMatch(closurePath, /\.wf-evidence/);
   assert.equal(run(`cat > ${closurePath} <<'X'\n{}\nX`), 0);
-  assert.equal(run(`grep -r FAIL ${root}/.wf-evidence 2>/dev/null`), 0);
+  assert.equal(run(`grep -r FAIL ${root}/.wf-evidence 2>/dev/null`), 2, 'a shell read of evidence is refused: the Read tool reads it');
   assert.equal(run(`echo x >> ${root}/.wf-evidence/attempts/${e.id}/ledger.jsonl`), 2);
   fs.writeFileSync(closurePath, JSON.stringify(goodClosure('r')));
   ok(wf(root, ['review', '--closure', closurePath, '--attempt', e.id]));

@@ -159,7 +159,7 @@ test('tracker: status, comment and screenshots are verified from the readback', 
   assert.match(d.out, /SHOW TO OWNER \(1 delivered screenshot\(s\) for ENG-50\)/);
   assert.match(d.out, /attach as: home\.png/);
   assert.match(d.out, /proposed caption: Home/);
-  assert.match(d.out, new RegExp(shot.path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.match(d.out, /1\. .*\.wf-worktrees\/_exports\/ENG-50\.1\/screenshots-\w+\/home\.png\n/, 'the owner views and uploads the exported copy, never the evidence file');
   assert.match(ok(wf(root, ['resume', '--attempt', e.id])).out, /next: show the owner, in the chat, each of the 1 delivered screenshot/);
   const after = new Date(Date.now() + 1000).toISOString();
   const asset = 'https://uploads.linear.app/x/y/home';
