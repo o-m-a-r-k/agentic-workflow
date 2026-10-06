@@ -7,10 +7,12 @@
 // (`tracker.releaseTag`, default `wf-attachments`; created on first use, which creates that git tag in the repo), named
 // `<item>--<title>` with the caption as its label, and the delivered comment embeds each by its download url. Release
 // assets of a public repo are public. The readback checks the asset's name, label and size (GitHub reports no hash).
-import fs from 'node:fs';
+// Security: the engine hands over each screenshot's bytes (read once by its safe reader) and endpoints from the
+// adapter committed at the base; this file never opens a local path. Requests with a token never follow a redirect;
+// `gh` gets no token from wf (it uses its own login) and every value reaches it as one argv element or on stdin, never
+// through a shell.
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { readRegular } from '../../engine/evidence.mjs';
 
 const TYPES = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif' };
 const numberOf = (item) => {
@@ -24,7 +26,7 @@ const repoOf = (cfg) => {
   return r;
 };
 
-// One REST call. `body` is JSON or { file, type } (binary upload).
+// One REST call. `body` is JSON or { bytes, type } (binary upload).
 function transport(via, { token, url, cfg }) {
   const apiBase = String(url ?? cfg.tracker.apiUrl ?? 'https://api.github.com').replace(/\/$/, '');
   const uploadBase = String(cfg.tracker.uploadUrl ?? (apiBase === 'https://api.github.com' ? 'https://uploads.github.com' : apiBase)).replace(/\/$/, '');
@@ -33,12 +35,14 @@ function transport(via, { token, url, cfg }) {
       const target = upload ? `${uploadBase}${p}` : p;
       const args = ['api', '-X', method, target, '-H', 'Accept: application/vnd.github+json'];
       let input;
-      if (body?.file) args.push('-H', `Content-Type: ${body.type}`, '--input', body.file);
-      else if (body !== undefined) {
+      if (body?.bytes) {
+        args.push('-H', `Content-Type: ${body.type}`, '--input', '-');
+        input = body.bytes;
+      } else if (body !== undefined) {
         args.push('--input', '-');
         input = JSON.stringify(body);
       }
-      const r = spawnSync('gh', args, { input, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+      const r = spawnSync('gh', args, { input, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, shell: false });
       if (r.error) throw new Error('the GitHub CLI `gh` is not on PATH');
       if (r.status !== 0) {
         if (/HTTP 404/.test(r.stderr)) return { status: 404, data: null };
@@ -50,15 +54,15 @@ function transport(via, { token, url, cfg }) {
   return async (method, p, body, { upload = false } = {}) => {
     const headers = { accept: 'application/vnd.github+json', authorization: `Bearer ${token}`, 'x-github-api-version': '2022-11-28' };
     let payload;
-    if (body?.file) {
+    if (body?.bytes) {
       headers['content-type'] = body.type;
-      payload = readRegular(body.file)?.bytes;
-      if (!payload) throw new Error(`${body.file} is not a regular file`);
+      payload = body.bytes;
     } else if (body !== undefined) {
       headers['content-type'] = 'application/json';
       payload = JSON.stringify(body);
     }
-    const res = await fetch(`${upload ? uploadBase : apiBase}${p}`, { method, headers, body: payload });
+    const res = await fetch(`${upload ? uploadBase : apiBase}${p}`, { method, headers, body: payload, redirect: 'manual' });
+    if (res.status >= 300 && res.status < 400) throw new Error(`GitHub API ${method} ${p}: redirected (${res.status}); a request with the token never follows a redirect`);
     if (res.status === 404) return { status: 404, data: null };
     const data = await res.json().catch(() => null);
     if (!res.ok) throw new Error(`GitHub API ${method} ${p}: ${res.status} ${data?.message ?? res.statusText}`);
@@ -105,16 +109,16 @@ async function perform(via, { token, url, item, actions, cfg }) {
     } else if (a.op === 'attach') {
       const rel = await getRelease(true);
       for (const f of a.files) {
-        const title = path.basename(String(f.title ?? path.basename(f.path)));
+        const title = f.name;
         const name = `${prefix}${title}`.replace(/[^A-Za-z0-9._-]/g, '_');
         const have = cur.assets.find((x) => x.name === name);
-        const size = fs.statSync(f.path).size;
+        const size = f.size;
         if (have && have.label === (f.caption ?? '') && have.size === size) {
           assetUrls[title] = have.browser_download_url;
           continue;
         }
         if (have) await call('DELETE', `/repos/${repo}/releases/assets/${have.id}`);
-        const up = await call('POST', `/repos/${repo}/releases/${rel.id}/assets?name=${encodeURIComponent(name)}&label=${encodeURIComponent(f.caption ?? '')}`, { file: f.path, type: TYPES[path.extname(title).toLowerCase()] ?? 'application/octet-stream' }, { upload: true });
+        const up = await call('POST', `/repos/${repo}/releases/${rel.id}/assets?name=${encodeURIComponent(name)}&label=${encodeURIComponent(f.caption ?? '')}`, { bytes: f.bytes, type: TYPES[path.extname(title).toLowerCase()] ?? 'application/octet-stream' }, { upload: true });
         assetUrls[title] = up.data.browser_download_url;
       }
     } else if (a.op === 'comment') {

@@ -97,11 +97,10 @@ export default {
           const listed = readRegular(listFile);
           const list = listed ? JSON.parse(listed.bytes.toString('utf8')) : [];
           for (const f of a.files) {
-            const title = path.basename(String(f.title ?? path.basename(f.path)));
-            const src = readRegular(f.path);
-            if (!src) throw new Error(`${f.path} is not a regular file`);
-            writeNoFollow(path.join(dir, title), src.bytes);
-            const entry = { title, subtitle: f.caption ?? null, sha256: sha256(src.bytes) };
+            // The bytes the engine read once with its safe reader; this adapter never opens the screenshot's path.
+            const title = f.name;
+            writeNoFollow(path.join(dir, title), f.bytes);
+            const entry = { title, subtitle: f.caption ?? null, sha256: f.sha256 };
             const i = list.findIndex((x) => x.title === title);
             if (i >= 0) list[i] = entry;
             else list.push(entry);

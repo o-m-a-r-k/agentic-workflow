@@ -259,10 +259,56 @@ function walk(dir, out = { files: [], dirs: [], odd: [], errors: [] }, base = di
 }
 
 // One read of a regular file, never through a link; null when it is not one.
+// One safe read for every local file a tracker action or an export sends anywhere (the files tracker's copy, the
+// Linear and GitHub uploads, `wf export screenshots`, the export page). Named finding (0.4.0 review: symlink-following
+// upload): an adapter read the attachment by its path, so a link planted there could upload any local file. Now the
+// file must lie inside this project's attempt evidence (a reused gate step's screenshot lives in the attempt that ran
+// it) after resolving every folder on its path, the last name is opened
+// without following a link (and without blocking on a FIFO), the descriptor must be a regular file with one name, and
+// its bytes, read once, must hash to the sha256 the gate recorded; size and hash come from those bytes. The name sent
+// is the title as a plain file name. Returns { bytes, size, sha256, name } or throws with the reason.
+export const deliveredSeams = { beforeOpen: null };
+const refusedRead = (code, message) => Object.assign(new Error(message), { code });
+export function readEvidenceFile(root, attemptId, f) {
+  const label = f.title ?? path.basename(String(f.path));
+  void attemptId;
+  const dir = fs.realpathSync.native(path.join(evidenceRootOf(root), 'attempts'));
+  const abs = path.resolve(String(f.path));
+  let parent;
+  try {
+    parent = fs.realpathSync.native(path.dirname(abs));
+  } catch {
+    throw refusedRead('ENOENT', `${label}: ${abs} is missing`);
+  }
+  // The folders are resolved; the last name is not (a link there is refused by the no-follow open below).
+  if (!isInside(parent, dir) || parent === dir) throw refusedRead('EOUTSIDE', `${label}: ${abs} is outside the project's attempt evidence; only the delivered set is read`);
+  deliveredSeams.beforeOpen?.(abs);
+  let fd;
+  try {
+    fd = fs.openSync(path.join(parent, path.basename(abs)), fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | (fs.constants.O_NONBLOCK ?? 0));
+  } catch (error) {
+    throw refusedRead(error.code ?? 'EOPEN', `${label}: ${abs} not opened (${error.code === 'ELOOP' ? 'a symlink is never followed' : error.code ?? error.message})`);
+  }
+  let bytes;
+  try {
+    const st = fs.fstatSync(fd);
+    if (!st.isFile()) throw refusedRead('ENOTREG', `${label}: ${abs} is not a regular file`);
+    if (st.nlink > 1) throw refusedRead('ENLINK', `${label}: ${abs} has another name (hard link); not read`);
+    bytes = fs.readFileSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+  const sha = hashBuf(bytes);
+  if (f.sha256 && sha !== f.sha256) throw refusedRead('ESHA', `${label}: bytes differ from the recorded sha256 (${abs})`);
+  const name = String(path.basename(String(label).replace(/\\/g, '/'))).replace(/[\u0000-\u001f\u007f]/g, '').trim();
+  if (!name || /^\.+$/.test(name)) throw refusedRead('ENAME', `${JSON.stringify(label)}: not a usable file name`);
+  return { bytes, size: bytes.length, sha256: sha, name };
+}
+
 export function readRegular(file) {
   let fd;
   try {
-    fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | (fs.constants.O_NONBLOCK ?? 0));
   } catch {
     return null;
   }

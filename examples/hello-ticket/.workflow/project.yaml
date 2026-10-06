@@ -1,0 +1,26 @@
+# agentic-workflow adapter for the hello-ticket demo: tickets are files in tickets/, the gate is `node --test`.
+version: 1
+enabled: true
+name: hello-ticket
+repos:
+  - name: hello-ticket
+    path: .
+    base: main
+lanes: [quick, standard]
+tracker:
+  kind: files
+  via: files
+  folder: tickets
+  statuses:
+    started: In Progress
+    delivered: Ready for UAT
+    done: Done
+  deliveredComment: uat.md
+delivery:
+  kind: push-main
+gate:
+  steps:
+    - id: unit
+      repo: hello-ticket
+      run: node --test
+invariants: AGENTS.invariants.md

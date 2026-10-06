@@ -1,0 +1,115 @@
+
+# The ticket, as a file in the repo
+$ cat tickets/HT-1.md
+---
+id: HT-1
+title: Greet people by name
+status: Todo
+labels:
+  - feature
+---
+`greet('Ada')` returns `Hello, Ada!`. `greet()` with no name still returns `Hello!`.
+
+# Admit it: wf opens an attempt with its own worktree and moves the ticket to In Progress
+$ wf entry --item HT-1 --owner you
+HT-1.1  HT-1  lane=standard  intent=implementation  phase=admitted
+  owner: you
+  hello-ticket: ~/demo/hello-ticket/.wf-worktrees/HT-1.1/hello-ticket (base b1f821a3ed)
+  next: start the planner: `wf handoff planner --agent <id>`
+tracker: admitted performed on the ticket files and read back
+
+# The planner freezes the acceptance criteria before any code exists
+$ wf handoff planner --agent planner-1 --attempt HT-1.1
+lessons injected: none
+planner bundle: ~/demo/hello-ticket/.wf-evidence/attempts/HT-1.1/handoffs/01-planner.json
+class full, effort high
+Start agent type wf-planner (name it planner-1; do not pass a model) with: "Read ~/demo/hello-ticket/.wf-evidence/attempts/HT-1.1/handoffs/01-planner.json and follow its instructions."
+$ wf plan --file ~/demo/work/criteria.json --attempt HT-1.1
+criteria frozen (2): C1, C2
+plan sections: summary
+next: start the implementer: `wf handoff implementer --agent <id>` [wf-implementer]
+
+# The implementer's first try forgets the comma
+$ wf handoff implementer --agent implementer-1 --attempt HT-1.1
+tracker: implementing performed on the ticket files and read back
+lessons injected: none
+implementer bundle: ~/demo/hello-ticket/.wf-evidence/attempts/HT-1.1/handoffs/02-implementer.json
+class full, effort high
+Start agent type wf-implementer (name it implementer-1; do not pass a model) with: "Read ~/demo/hello-ticket/.wf-evidence/attempts/HT-1.1/handoffs/02-implementer.json and follow its instructions."
+$ wf gate --attempt HT-1.1
+wf gate: run 2026-10-06T10-53-38-974Z-8917: 1 to run, 0 reused, 0 skipped or deferred
+wf gate: start    unit
+wf gate: failed   unit  0.1s
+wf gate:   unit |     actual: 'Hello Ada!',
+wf gate:   unit |     expected: 'Hello, Ada!',
+wf gate:   unit |     operator: 'strictEqual',
+wf gate:   unit |     diff: 'simple'
+wf gate:   unit |   }
+wf gate: failed (2026-10-06T10-53-38-974Z-8917)
+gate failed (2026-10-06T10-53-38-974Z-8917)
+  failed      unit  no `inputs` declared: always runs
+(exit 1: refused)
+
+# Fixed and committed: the gate runs again on the new tree
+$ wf gate --attempt HT-1.1
+wf gate: run 2026-10-06T10-53-39-249Z-9037: 1 to run, 0 reused, 0 skipped or deferred
+wf gate: start    unit
+wf gate: passed   unit  0.1s
+wf gate: passed (2026-10-06T10-53-39-249Z-9037)
+gate passed (2026-10-06T10-53-39-249Z-9037)
+  passed      unit  no `inputs` declared: always runs
+
+# The implementer cannot review its own work
+$ wf handoff reviewer --agent implementer-1 --attempt HT-1.1
+wf handoff: implementer-1 planned, wrote or owns this change and cannot review it
+(exit 75: refused)
+
+# A fresh reviewer checks each criterion against the gate evidence
+$ wf handoff reviewer --agent reviewer-1 --attempt HT-1.1
+lessons injected: none
+Read ~/demo/hello-ticket/.wf-evidence/attempts/HT-1.1/handoffs/03-reviewer.json and follow its instructions.
+$ wf review --closure ~/demo/work/closure.json --attempt HT-1.1
+review recorded (0 finding(s)).
+$ wf accept --attempt HT-1.1
+review accepted. next: deliver: `wf deliver`
+
+# Delivery: merged to main, pushed, and the ticket handed off
+$ wf deliver --attempt HT-1.1 --summary-file ~/demo/work/summary.md
+delivered HT-1.1: hello-ticket@b966b91c31
+tracker: delivered performed on the ticket files and read back; attempt closed
+SHOW TO OWNER: no screenshots for HT-1: no gate step declares `artifacts`, so the gate collected no screenshots
+  (recorded; tell the owner this in the delivery report)
+next: nothing: this attempt is closed
+
+# Readback: the ticket file as the engine left it, and main as pushed
+$ cat tickets/HT-1.md
+---
+id: HT-1
+title: Greet people by name
+status: Ready for UAT
+labels:
+  - feature
+---
+`greet('Ada')` returns `Hello, Ada!`. `greet()` with no name still returns `Hello!`.
+
+## Comments
+
+<!-- wf:comment id=c-1 at=2026-10-06T10:53:40.231Z -->
+HT-1 is ready for UAT.
+
+greet() now takes an optional name: greet("Ada") returns "Hello, Ada!".
+
+UAT scope:
+- greet('Ada') prints Hello, Ada!
+- greet() prints Hello!
+<!-- /wf:comment -->
+$ git --no-pager -C ~/demo/origin.git log --oneline -3 main
+b966b91 greet: add the comma
+2c6762c greet by name
+b1f821a hello-ticket
+$ wf status --attempt HT-1.1
+HT-1.1  HT-1  lane=standard  intent=implementation  phase=done
+  owner: you
+  hello-ticket: ~/demo/hello-ticket/.wf-worktrees/HT-1.1/hello-ticket (base b1f821a3ed)
+  last gate: passed (2026-10-06T10-53-39-249Z-9037)
+  next: nothing: this attempt is closed

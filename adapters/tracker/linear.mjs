@@ -1,8 +1,25 @@
 // Linear, two ways. `via: connector` (default): the agent performs each operation through its MCP connector and saves the
 // raw response as the capture; the engine holds no credentials. `via: api`: the engine performs the pending actions
 // itself with a personal API key from `wf secrets` and stores its own readback as the capture.
-import fs from 'node:fs';
 import path from 'node:path';
+
+// Where a screenshot may be PUT: Linear's own upload storage over https, or the same loopback host as a local test
+// endpoint. Anything else is refused before a byte is sent.
+const UPLOAD_HOSTS = [/(^|\.)linear\.app$/, /^storage\.googleapis\.com$/];
+function uploadUrlProblem(uploadUrl, apiUrl) {
+  let u;
+  try {
+    u = new URL(String(uploadUrl));
+  } catch {
+    return 'the upload url is not a URL';
+  }
+  const api = new URL(String(apiUrl));
+  const loop = ['127.0.0.1', 'localhost', '[::1]'];
+  if (loop.includes(api.hostname) && u.hostname === api.hostname && ['http:', 'https:'].includes(u.protocol)) return null;
+  if (u.protocol !== 'https:') return `upload url ${u.protocol}//${u.host} is not https`;
+  if (u.username || u.password) return 'the upload url carries credentials';
+  return UPLOAD_HOSTS.some((re) => re.test(u.hostname)) ? null : `upload host ${u.host} is not Linear's upload storage`;
+}
 
 const ISSUE = `query Issue($id: String!) { issue(id: $id) { id identifier title description url updatedAt state { name }
   team { states { nodes { id name } } }
@@ -99,7 +116,8 @@ export default {
     // Performs one event's actions, then reads the issue back. The token never appears in an error message.
     async perform({ token, url, item, actions }) {
       const gql = async (query, variables) => {
-        const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', authorization: token }, body: JSON.stringify({ query, variables }) });
+        const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', authorization: token }, body: JSON.stringify({ query, variables }), redirect: 'manual' });
+        if (r.status >= 300 && r.status < 400) throw new Error(`Linear API: redirected (${r.status}); a request with the key never follows a redirect`);
         const j = await r.json().catch(() => ({}));
         if (!r.ok || j.errors?.length) throw new Error(`Linear API ${r.status}: ${(j.errors ?? []).map((e) => e.message).join('; ') || r.statusText}`);
         return j.data;
@@ -130,16 +148,21 @@ export default {
           await gql(COMMENT, { issueId: issue.id, body });
         } else if (a.op === 'attach') {
           for (const f of a.files) {
-            const name = f.title ?? path.basename(f.path);
+            const name = f.name;
             const existing = (issue.attachments?.nodes ?? []).find((x) => x.title === name && UPLOAD_HOST.test(x.url ?? '') && (x.subtitle ?? '') === (f.caption ?? ''));
             if (existing) {
               assets[name] = String(existing.url).split('?')[0];
               continue;
             }
-            const body = fs.readFileSync(f.path);
+            // The bytes the engine read once with its safe reader; this adapter never opens the screenshot's path.
+            const body = f.bytes;
             const contentType = TYPES[path.extname(name).toLowerCase()] ?? 'application/octet-stream';
             const up = (await gql(UPLOAD, { contentType, filename: name, size: body.length })).fileUpload.uploadFile;
-            const put = await fetch(up.uploadUrl, { method: 'PUT', headers: { 'content-type': contentType, 'cache-control': 'public, max-age=31536000', ...Object.fromEntries((up.headers ?? []).map((h) => [h.key, h.value])) }, body });
+            const problem = uploadUrlProblem(up.uploadUrl, url);
+            if (problem) throw new Error(`Linear upload of ${name}: ${problem}; not sent`);
+            // The signed upload url needs no key: only the headers Linear returned (never an authorization header).
+            const signed = Object.fromEntries((up.headers ?? []).filter((h) => !/^(authorization|cookie|proxy-authorization)$/i.test(String(h.key))).map((h) => [h.key, h.value]));
+            const put = await fetch(up.uploadUrl, { method: 'PUT', headers: { 'content-type': contentType, 'cache-control': 'public, max-age=31536000', ...signed }, body, redirect: 'manual' });
             if (!put.ok) throw new Error(`Linear upload of ${name} failed: ${put.status}`);
             await gql(ATTACH, { issueId: issue.id, title: name, subtitle: f.caption ?? null, url: up.assetUrl });
             assets[name] = up.assetUrl;

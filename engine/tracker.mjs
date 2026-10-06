@@ -2,11 +2,11 @@ import fs from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { adapterFileAtCommit } from './config.mjs';
+import { adapterFileAtCommit, loadConfigAtCommit } from './config.mjs';
 import { append, attemptDir, listAttempts, loadState } from './ledger.mjs';
 import { loadCatalog, readSecret } from './secrets.mjs';
 import { WfError, canonical, hashFile, now, readJson, refuse, sha256, writeImmutable } from './util.mjs';
-import { prepareWrite, writeNoFollow } from './evidence.mjs';
+import { prepareWrite, readEvidenceFile, readRegular, writeNoFollow } from './evidence.mjs';
 
 const BUILTIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'adapters', 'tracker');
 
@@ -31,8 +31,12 @@ const DEFAULT_EVENTS = {
 function renderTemplate(root, cfg, key, vars) {
   const ref = cfg.tracker[key];
   if (!ref) return null;
+  // A template file is read only inside .workflow/, without following a link (its text is posted to the tracker).
   const file = path.resolve(root, '.workflow', ref);
-  const text = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : String(ref);
+  const inside = file.startsWith(path.resolve(root, '.workflow') + path.sep);
+  const read = inside && fs.existsSync(file) ? readRegular(file) : null;
+  if (inside && fs.existsSync(file) && !read) throw new WfError(`${file} is a link or not a regular file with one name; the comment template is not read through it`);
+  const text = read ? read.bytes.toString('utf8') : String(ref);
   return { template: text, body: text.replace(/\{(\w+)\}/g, (m, k) => (vars[k] ?? m)) };
 }
 
@@ -135,7 +139,10 @@ export function recordSummary(root, cfg, state, options) {
   if (!file || file === true) throw new WfError('--file <summary.md> is required: a few plain-language lines on what changed, for the person who tests it');
   if (!needsSummary(cfg, state)) throw refuse(`${state.id} posts no delivered comment (${cfg.tracker.kind === 'none' ? 'no tracker' : `lane ${state.lane}, or no delivered comment template`}); no summary is needed`);
   if (state.tracker.done.some((d) => d.event === 'delivered')) throw refuse('the delivered comment is already verified on the ticket; the summary can no longer change');
-  const text = fs.readFileSync(path.resolve(String(file)), 'utf8').replace(/\r/g, '').trim();
+  // Posted to the tracker: read without following a link, a regular file with one name.
+  const read = readRegular(path.resolve(String(file)));
+  if (!read) throw refuse(`${file} is missing, a link or not a regular file with one name; the summary is not read through it`);
+  const text = read.bytes.toString('utf8').replace(/\r/g, '').trim();
   const problems = [];
   if (!text) problems.push('the summary is empty');
   if (/not user[- ]?visible/i.test(text)) problems.push('it contains "not user visible": write what changed for the person who tests it, and leave internal-only criteria out');
@@ -336,7 +343,7 @@ export async function recordTracker(root, cfg, state, options) {
           else if (!exact.length) missing.push(`${title} (${f.path}): uploaded, but no attachment of it has the subtitle "${caption}" (an earlier attempt's file with the same name does not count)`);
           // A tracker that reports the stored bytes' sha256 (files) or size (GitHub release assets): they must match.
           else if (exact[0].sha256 && exact[0].sha256 !== f.sha256) missing.push(`${title}: the stored file's sha256 differs from the delivered screenshot`);
-          else if (exact[0].size !== undefined && exact[0].size !== null && fs.existsSync(f.path) && Number(exact[0].size) !== fs.statSync(f.path).size) missing.push(`${title}: the stored file's size (${exact[0].size}) differs from the delivered screenshot (${fs.statSync(f.path).size})`);
+          else if (exact[0].size !== undefined && exact[0].size !== null && Number(exact[0].size) !== (readRegular(f.path)?.bytes.length ?? -1)) missing.push(`${title}: the stored file's size (${exact[0].size}) differs from the delivered screenshot (${readRegular(f.path)?.bytes.length ?? 'unreadable'})`);
           else {
             verified.push({ title, sha256: f.sha256, attachment: exact[0].id ?? null, caption });
             verifiedAttachments.set(f.sha256, exact[0]);
@@ -365,6 +372,40 @@ export const VERIFIABLE = {
   'files/files': 'the engine does every action on the ticket files in the repo and reads them back: status, comment, attachments (each by sha256); anyone who can edit the repo can edit a ticket, and git history is the audit trail',
 };
 
+// Where a tracker token may go. Named finding (0.4.0 review: credential exfiltration): the GitHub adapter sent its
+// token to whatever `tracker.apiUrl` / `tracker.uploadUrl` said, including a value edited in the working tree, and
+// fetch followed redirects. Now an endpoint is https (plain http only on this machine's loopback), carries no
+// credentials, and is the tracker's own host unless the owner committed another one in the adapter at the base commit
+// (then `wf doctor` names it loudly); the engine reads every endpoint from that committed adapter, never the working
+// copy, and authenticated requests never follow a redirect.
+export const DEFAULT_HOSTS = { linear: ['api.linear.app'], github: ['api.github.com', 'uploads.github.com'] };
+const LOOPBACK = new Set(['127.0.0.1', 'localhost', '[::1]']);
+export const isLoopback = (u) => LOOPBACK.has(new URL(u).hostname);
+export function endpointProblem(url) {
+  let u;
+  try {
+    u = new URL(String(url));
+  } catch {
+    return `\`${url}\` is not a URL`;
+  }
+  if (u.username || u.password) return `${u.host}: an endpoint never carries credentials in its URL`;
+  if (u.protocol === 'https:') return null;
+  if (u.protocol === 'http:' && LOOPBACK.has(u.hostname)) return null;
+  return `${u.protocol}//${u.host}: a tracker token goes only over https (plain http only to this machine's loopback)`;
+}
+const ENDPOINT_KEYS = ['apiUrl', 'uploadUrl'];
+function endpointNotices(cfg) {
+  const out = [];
+  for (const k of ENDPOINT_KEYS) {
+    const v = cfg.tracker[k];
+    if (v === undefined || v === null) continue;
+    const problem = endpointProblem(v);
+    if (problem) out.push({ fail: true, key: `tracker.${k}`, problem, fix: 'use the tracker\'s https endpoint, or remove the key for the default' });
+    else if (!isLoopback(v) && !(DEFAULT_HOSTS[cfg.tracker.kind] ?? []).includes(new URL(v).hostname)) out.push({ check: 'tracker endpoint', problem: `NOTICE: the ${cfg.tracker.kind} token is sent to ${new URL(v).host} (tracker.${k}), not ${(DEFAULT_HOSTS[cfg.tracker.kind] ?? ['the default host']).join(' / ')}`, fix: 'keep it only if that host is your own tracker (for example GitHub Enterprise); it is honoured only as committed in the adapter on the base branch' });
+  }
+  return out;
+}
+
 export async function trackerModeChecks(root, cfg, { loadCatalog: catalog, readSecret: secret }) {
   if (cfg.tracker.kind === 'none') return [];
   const out = [];
@@ -374,6 +415,7 @@ export async function trackerModeChecks(root, cfg, { loadCatalog: catalog, readS
   } catch {}
   const combo = `${cfg.tracker.kind}/${cfg.tracker.via}`;
   if (VERIFIABLE[combo]) out.push({ info: true, check: `tracker ${combo}`, problem: VERIFIABLE[combo] });
+  out.push(...endpointNotices(cfg));
   const keyName = cfg.tracker.apiKey ?? adapter?.apiKey ?? 'LINEAR_API_KEY';
   if (cfg.tracker.via === 'cli') {
     const gh = spawnSync('gh', ['auth', 'status'], { encoding: 'utf8' });
@@ -416,6 +458,22 @@ export async function performTracker(root, cfg, state) {
   const adapter = await loadTrackerAdapter(root, cfg, state.adapterBase);
   const impl = adapter?.[via];
   if (!impl?.perform) return { performed: [], note: `the \`${cfg.tracker.kind}\` tracker adapter has no \`${via}\` mode; perform the actions through the connector` };
+  // Endpoints, repository and folder as committed at the attempt's base, never the working copy.
+  let trusted;
+  try {
+    trusted = loadConfigAtCommit(root, cfg, state.adapterBase);
+  } catch (error) {
+    return { performed: [], note: `the adapter at the base commit is unreadable (${error.message}); the actions stay pending` };
+  }
+  for (const k of [...ENDPOINT_KEYS, 'repo', 'folder', 'apiKey', 'kind', 'via']) {
+    if (JSON.stringify(cfg.tracker[k] ?? null) !== JSON.stringify(trusted.tracker[k] ?? null)) return { performed: [], note: `tracker.${k} in the working copy differs from the adapter at the base commit; commit it on the base branch first (the engine uses only the committed value); the actions stay pending` };
+  }
+  const endpoint = trusted.tracker.apiUrl ?? impl.url ?? null;
+  for (const e of [endpoint, trusted.tracker.uploadUrl].filter(Boolean)) {
+    const problem = endpointProblem(e);
+    if (problem) return { performed: [], note: `${problem}; nothing sent, the actions stay pending` };
+  }
+  cfg = { ...cfg, tracker: trusted.tracker };
   let token = null;
   if (via === 'api') {
     const keyName = cfg.tracker.apiKey ?? adapter.apiKey ?? 'LINEAR_API_KEY';
@@ -431,11 +489,17 @@ export async function performTracker(root, cfg, state) {
     const shownBy = s.delivery.shown && !s.delivery.shown.none ? s.delivery.shown.screenshots : null;
     const attaching = s.tracker.pending.some((a) => a.event === event && a.op === 'attach');
     if (attaching && !shownBy && s.delivery.screenshots) return { performed, note: `${event} waits for the owner: show the delivered screenshots with their captions and run \`wf shown --file <f>\`; the API then uploads them with those captions`, state: s };
-    const actions = s.tracker.pending.filter((a) => a.event === event).map((a) => (a.op === 'attach' ? { ...a, files: a.files.map((f) => ({ ...f, caption: shownBy?.find((x) => x.sha256 === f.sha256)?.caption ?? null })) } : a.rendered === 'delivered' ? { ...a, body: deliveredComment(root, cfg, s)?.body ?? null } : a));
+    let actions;
+    try {
+      // Each attachment is read once here, by the one safe reader; adapters get its bytes and never open a path.
+      actions = s.tracker.pending.filter((a) => a.event === event).map((a) => (a.op === 'attach' ? { ...a, files: a.files.map((f) => ({ ...f, ...readEvidenceFile(root, s.id, f), caption: shownBy?.find((x) => x.sha256 === f.sha256)?.caption ?? null })) } : a.rendered === 'delivered' ? { ...a, body: deliveredComment(root, cfg, s)?.body ?? null } : a));
+    } catch (error) {
+      return { performed, note: `tracker ${via} (${event}) not performed: ${error.message}; nothing was sent, the actions stay pending`, state: s };
+    }
     if (actions.some((a) => a.rendered === 'delivered' && !s.delivery.summary)) return { performed, note: `${event} waits for the owner's summary: \`wf summary --file <summary.md>\``, state: s };
     let raw;
     try {
-      raw = await impl.perform({ token, url: cfg.tracker.apiUrl ?? impl.url, item: s.item, actions, root, cfg, state: s });
+      raw = await impl.perform({ token, url: endpoint, item: s.item, actions, root, cfg, state: s });
     } catch (error) {
       return { performed, note: `tracker ${via} (${event}) failed: ${token ? String(error.message).split(token).join('[secret]') : error.message}; the actions stay pending` };
     }

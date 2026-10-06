@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640">
+<style>
+  svg { --fg: #d6dde4; --cmd: #ffffff; --note: #7f8b96; --good: #6fcf97; --bad: #ff7b72; }
+  .t { font: 600 64px ui-sans-serif, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; fill: #ffffff; }
+  .s { font: 28px ui-sans-serif, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; fill: #b8c2cc; }
+  .m { font: 20px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre; }
+</style>
+<rect width="1280" height="640" fill="#0f1419"/>
+<text class="t" x="80" y="150">agentic-workflow</text>
+<text class="s" x="80" y="205">Ticket work for coding agents: frozen criteria, a gate, an independent</text>
+<text class="s" x="80" y="245">review and a tracker handoff the engine checks itself.</text>
+<rect x="80" y="300" width="1120" height="244" rx="10" fill="#1c232b"/>
+<text class="m" x="108" y="345" fill="var(--cmd)">$ wf gate --attempt HT-1.1</text>
+<text class="m" x="108" y="379" fill="var(--fg)">wf gate:   unit |     actual: 'Hello Ada!',</text>
+<text class="m" x="108" y="413" fill="var(--bad)">(exit 1: refused)</text>
+<text class="m" x="108" y="447" fill="var(--fg)">wf handoff: implementer-1 planned, wrote or owns this change and cannot review it</text>
+<text class="m" x="108" y="481" fill="var(--good)">delivered HT-1.1: hello-ticket@b966b91c31</text>
+<text class="m" x="108" y="515" fill="var(--good)">tracker: delivered performed on the ticket files and read back; attempt closed</text>
+</svg>

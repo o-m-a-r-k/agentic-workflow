@@ -33,7 +33,7 @@ test('files tracker: admission reads the ticket, status and the delivered commen
   const shown = path.join(base, 'shown.json');
   fs.writeFileSync(shown, JSON.stringify({ screenshots: [{ sha256: g.steps[0].artifacts[0].sha256, caption: 'Home screen with the new text' }], anomalies: 'none seen' }));
   const r = ok(wf(root, ['shown', '--file', shown, '--attempt', e.id]));
-  assert.match(r.out, /tracker: delivered performed through the API and read back; attempt closed/);
+  assert.match(r.out, /tracker: delivered performed on the ticket files and read back; attempt closed/);
   s = state(root, e.id);
   assert.equal(s.phase, 'done');
   const text = fs.readFileSync(file, 'utf8');

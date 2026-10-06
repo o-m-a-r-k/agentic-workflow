@@ -240,6 +240,16 @@ function resolvePathOption(k, v) {
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) bad('looks like a URL; give a file path');
   if (/^~/.test(raw)) bad('starts with `~`, which only a shell expands; give the full path');
   if (touchesEvidence(raw)) bad(`is inside .wf-evidence/ (checked where it really points); ${WRITE_OPTIONS.includes(k) ? 'write outside it (the evidence is written only by wf itself)' : 'pass a file outside it'}`);
+  // An input file may be posted to the tracker (a summary, a comment): a link at its name could point at any local
+  // file (a key, an .env), so the file itself is required (0.4.0 review finding).
+  const lst = (() => {
+    try {
+      return fs.lstatSync(raw.replace(/[\\/]+$/, ''));
+    } catch {
+      return null;
+    }
+  })();
+  if (READ_OPTIONS.includes(k) && !FOLDER_OPTIONS.has(k) && lst?.isSymbolicLink() && !touchesEvidence(canonical(raw))) bad('is a symlink; give the file itself (an input is never read through a link)');
   const resolved = canonical(raw);
   if (touchesEvidence(resolved)) bad('resolves into .wf-evidence/');
   const st = fs.statSync(resolved, { throwIfNoEntry: false });
@@ -262,7 +272,7 @@ async function trackerApi(root, id) {
   const r = await performTracker(root, cfg, loadState(root, id));
   let s = loadState(root, id);
   if (r.performed.length) s = closeAfterHandoff(root, s);
-  return `${r.performed.length ? `\ntracker: ${r.performed.join(', ')} performed through the API and read back${s.phase === 'done' ? '; attempt closed' : ''}` : ''}${r.note ? `\ntracker: ${r.note}` : ''}`;
+  return `${r.performed.length ? `\ntracker: ${r.performed.join(', ')} performed ${{ api: 'through the API', cli: 'through `gh`', files: 'on the ticket files' }[cfg.tracker.via]} and read back${s.phase === 'done' ? '; attempt closed' : ''}` : ''}${r.note ? `\ntracker: ${r.note}` : ''}`;
 }
 // Base status is information: a failure to read it never fails the command.
 function safeBase(root, s) {

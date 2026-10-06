@@ -6,7 +6,7 @@ import { actor, branchName, changedFiles, cleanupWorktrees, entry, openState, tr
 import { ADAPTER_DIR, adapterFileAtCommit, agentTypeFor, declared, loadConfig, loadConfigAtCommit, repoDir, roleClass } from './config.mjs';
 import { focusedSkips, gatePassedForCurrentTree, screenshots } from './gate.mjs';
 import { append, attemptDir, evidenceRoot, keptFiles, listAttempts, loadState, openEvidence } from './ledger.mjs';
-import { assertUnchanged } from './evidence.mjs';
+import { assertUnchanged, readEvidenceFile } from './evidence.mjs';
 import { implementerAcks, lessonPrompts, lessonVerdicts, owesLesson, recur, relevantLessons } from './lessons.mjs';
 import { canonical as canonicalPath, isInside, touchesEvidence } from './paths.mjs';
 import { changedForStep, deliveryOrder, impact, inside, packageOf } from './topology.mjs';
@@ -980,19 +980,9 @@ export function exportScreenshots(root, state, to = null, { gate = false } = {})
     exportSeams.beforeSourceOpen?.(f.path);
     let bytes;
     try {
-      const fd = fs.openSync(f.path, O_RDONLY | O_NOFOLLOW);
-      try {
-        if (!fs.fstatSync(fd).isFile()) throw new Error('not a regular file');
-        bytes = fs.readFileSync(fd);
-      } finally {
-        fs.closeSync(fd);
-      }
+      bytes = readEvidenceFile(root, state.id, f).bytes;
     } catch (error) {
-      problems.push(`${f.title}: source not readable as a regular file (${error.code ?? error.message}): ${f.path}`);
-      continue;
-    }
-    if (sha256(bytes) !== f.sha256) {
-      problems.push(`${f.title}: bytes differ from the recorded sha256 (${f.path})`);
+      problems.push(error.code === 'ESHA' ? `${f.title}: bytes differ from the recorded sha256 (${f.path})` : `${f.title}: source not readable as a regular file (${error.code ?? error.message}): ${error.message}`);
       continue;
     }
     const dest = path.join(dir, name);

@@ -80,9 +80,25 @@ export function apply(file, method, target, body) {
   return r;
 }
 
+// `sink <log>`: an attacker's host. It records every request it receives (method, url, whether a credential came).
+if (process.argv[2] === 'sink') {
+  const [file] = process.argv.slice(3);
+  const server = http.createServer((req, res) => {
+    fs.appendFileSync(file, `${JSON.stringify({ method: req.method, url: req.url, authorization: req.headers.authorization ?? null })}\n`);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end('{}');
+  });
+  server.listen(0, '127.0.0.1', () => fs.writeFileSync(`${file}.port`, String(server.address().port)));
+}
+
 if (process.argv[2] === 'serve') {
   const [file, token] = process.argv.slice(3);
   const server = http.createServer((req, res) => {
+    const redirect = load(file).redirectTo;
+    if (redirect) {
+      res.writeHead(302, { location: `${redirect}${req.url}` });
+      return res.end();
+    }
     const chunks = [];
     req.on('data', (c) => chunks.push(c));
     req.on('end', () => {

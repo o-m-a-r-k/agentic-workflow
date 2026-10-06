@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { closureFile, commitIn, criteriaFile, goodClosure, ok, singleRepoProject, state, summaryFile, wf, yaml } from './helpers.mjs';
+import { closureFile, commitIn, criteriaFile, goodClosure, ok, singleRepoProject, state, summaryFile, tmp, wf, yaml } from './helpers.mjs';
 import { seed } from './fixtures/fake-github.mjs';
 
 // 0.4.0: GitHub Issues through `gh` (the owner's login) or the REST API (a token from `wf secrets`), against a fake
@@ -65,7 +65,7 @@ test('github via cli: the engine labels, uploads, comments and reads back throug
   assert.deepEqual(state(root, e.id).tracker.done.map((t) => [t.event, t.provenance]), [['admitted', 'engine (tracker API)']]);
   assert.deepEqual(JSON.parse(fs.readFileSync(db, 'utf8')).issue.labels.map((l) => l.name), ['bug', 'In Progress'], 'other labels are kept');
   const { shown } = deliver(base, root, e.id, env);
-  assert.match(shown.out, /tracker: delivered performed through the API and read back; attempt closed/);
+  assert.match(shown.out, /tracker: delivered performed through `gh` and read back; attempt closed/);
   assert.equal(state(root, e.id).phase, 'done');
   const after = JSON.parse(fs.readFileSync(db, 'utf8'));
   after.issue.labels = after.issue.labels.filter((l) => l.name !== 'bug');
@@ -73,32 +73,94 @@ test('github via cli: the engine labels, uploads, comments and reads back throug
   assert.ok(fs.readFileSync(`${db}.argv`, 'utf8').split('\n').filter(Boolean).every((l) => !/gho_|authorization/i.test(l)), 'wf passes no token to gh');
 });
 
+async function serve(mode, file, ...args) {
+  const child = spawn(process.execPath, [path.join(FIX, 'fake-github.mjs'), mode, file, ...args], { stdio: 'ignore' });
+  for (let i = 0; i < 100 && !fs.existsSync(`${file}.port`); i++) await new Promise((r) => setTimeout(r, 50));
+  return { url: `http://127.0.0.1:${fs.readFileSync(`${file}.port`, 'utf8')}`, stop: () => child.kill() };
+}
+const keys = { '.workflow/secrets.yaml': yaml({ keys: [{ key: 'GITHUB_TOKEN', kind: 'provided', required: true }] }) };
+const TOKEN = 'ghp_fakeApiTokenForTests123';
+
 test('github via api: a token from wf secrets drives the same flow; without it the actions stay pending; the token never appears', async () => {
-  const { base, root } = project('gh-api', { via: 'api', apiUrl: 'http://placeholder.invalid' }, { '.workflow/secrets.yaml': yaml({ keys: [{ key: 'GITHUB_TOKEN', kind: 'provided', required: true }] }) });
-  const db = path.join(base, 'github.json');
+  const db = path.join(tmp('gh-api-db'), 'github.json');
   seed(db);
-  const token = 'ghp_fakeApiTokenForTests123';
-  const child = spawn(process.execPath, [path.join(FIX, 'fake-github.mjs'), 'serve', db, token], { stdio: 'ignore' });
+  const server = await serve('serve', db, TOKEN);
   try {
-    for (let i = 0; i < 100 && !fs.existsSync(`${db}.port`); i++) await new Promise((r) => setTimeout(r, 50));
-    const cfgFile = path.join(root, '.workflow', 'project.yaml');
-    fs.writeFileSync(cfgFile, fs.readFileSync(cfgFile, 'utf8').replace('http://placeholder.invalid', `http://127.0.0.1:${fs.readFileSync(`${db}.port`, 'utf8')}`));
+    const { base, root } = project('gh-api', { via: 'api', apiUrl: server.url }, keys);
     const noKey = ok(wf(root, ['entry', '--item', 'GH-12', '--owner', 'o', '--json']));
     const id = noKey.json().id;
     assert.ok(state(root, id).tracker.pending.length, 'without the token the actions stay pending');
     ok(wf(root, ['secrets', 'set', 'GITHUB_TOKEN'], { input: 'ghp_wrongToken999' }));
     const bad = ok(wf(root, ['tracker', 'sync', '--attempt', id]));
     assert.match(bad.out, /tracker api \(admitted\) failed: GitHub API GET \/repos\/acme\/app\/issues\/12: 401 Bad credentials; the actions stay pending/);
-    ok(wf(root, ['secrets', 'set', 'GITHUB_TOKEN'], { input: token }));
+    ok(wf(root, ['secrets', 'set', 'GITHUB_TOKEN'], { input: TOKEN }));
     assert.match(ok(wf(root, ['tracker', 'sync', '--attempt', id])).out, /tracker: admitted performed through the API and read back/);
     const { shown } = deliver(base, root, id, {});
     assert.match(shown.out, /tracker: delivered performed through the API and read back; attempt closed/);
     assertDelivered(JSON.parse(fs.readFileSync(db, 'utf8')));
-    const captures = fs.readdirSync(path.join(root, '.wf-evidence', 'attempts', id, 'tracker')).map((f) => fs.readFileSync(path.join(root, '.wf-evidence', 'attempts', id, 'tracker', f), 'utf8'));
-    assert.ok(captures.every((c) => !c.includes(token)), 'the token is not in any capture');
+    const dir = path.join(root, '.wf-evidence', 'attempts', id);
+    const all = [];
+    const walk = (d) => fs.readdirSync(d, { withFileTypes: true }).forEach((e) => (e.isDirectory() ? walk(path.join(d, e.name)) : all.push(fs.readFileSync(path.join(d, e.name)))));
+    walk(dir);
+    assert.ok(all.every((b) => !b.includes(TOKEN)), 'the token is in no capture, ledger entry or bundle');
+    assert.ok(!ok(wf(root, ['export', '--attempt', id])).out.includes(TOKEN));
   } finally {
-    child.kill();
+    server.stop();
   }
+});
+
+test('github attack: an endpoint edited in the working copy, a plain-http host, or a redirect never receives the token', async () => {
+  const sinkLog = path.join(tmp('gh-sink'), 'sink.log');
+  const sink = await serve('sink', sinkLog);
+  const db = path.join(tmp('gh-redirect-db'), 'github.json');
+  seed(db);
+  const server = await serve('serve', db, TOKEN);
+  try {
+    // 1. apiUrl pointed at the attacker in the working copy only (an agent's edit): the committed adapter rules.
+    const a = project('gh-attack-edit', { via: 'api', apiUrl: server.url }, keys);
+    ok(wf(a.root, ['secrets', 'set', 'GITHUB_TOKEN'], { input: TOKEN }));
+    const cfgFile = path.join(a.root, '.workflow', 'project.yaml');
+    fs.writeFileSync(cfgFile, fs.readFileSync(cfgFile, 'utf8').replace(server.url, sink.url));
+    const r1 = ok(wf(a.root, ['entry', '--item', 'GH-12', '--owner', 'o']));
+    assert.match(r1.out, /tracker\.apiUrl in the working copy differs from the adapter at the base commit; commit it on the base branch first/);
+    // 2. A committed plain-http host that is not this machine: refused before any request; doctor fails.
+    const b = project('gh-attack-http', { via: 'api', apiUrl: 'http://tracker.example.test' }, keys);
+    ok(wf(b.root, ['secrets', 'set', 'GITHUB_TOKEN'], { input: TOKEN }));
+    assert.match(ok(wf(b.root, ['entry', '--item', 'GH-12', '--owner', 'o'])).out, /http:\/\/tracker\.example\.test: a tracker token goes only over https .*; nothing sent, the actions stay pending/);
+    assert.match(wf(b.root, ['doctor', '--no-steps']).out, /✗ .*tracker\.apiUrl — http:\/\/tracker\.example\.test: a tracker token goes only over https/);
+    // A committed https host other than GitHub's is honoured, and doctor says so loudly.
+    const c = project('gh-attack-ghe', { via: 'api', apiUrl: 'https://ghe.example.test/api/v3' }, keys);
+    assert.match(wf(c.root, ['doctor', '--no-steps']).out, /NOTICE: the github token is sent to ghe\.example\.test \(tracker\.apiUrl\), not api\.github\.com \/ uploads\.github\.com/);
+    // 3. The tracker answers with a redirect to another host: not followed.
+    const d = project('gh-attack-redirect', { via: 'api', apiUrl: server.url }, keys);
+    ok(wf(d.root, ['secrets', 'set', 'GITHUB_TOKEN'], { input: TOKEN }));
+    fs.writeFileSync(db, JSON.stringify({ ...JSON.parse(fs.readFileSync(db, 'utf8')), redirectTo: sink.url }));
+    const r3 = ok(wf(d.root, ['entry', '--item', 'GH-12', '--owner', 'o']));
+    assert.match(r3.out, /redirected \(302\); a request with the token never follows a redirect/);
+    for (const r of [r1, r3]) assert.ok(!`${r.out}${r.err}`.includes(TOKEN));
+    assert.equal(fs.existsSync(sinkLog) ? fs.readFileSync(sinkLog, 'utf8') : '', '', 'the attacker host received no request at all');
+  } finally {
+    sink.stop();
+    server.stop();
+  }
+});
+
+test('github attack: an issue title with shell syntax and a label that looks like a flag are data, never arguments', () => {
+  const { base, root } = project('gh-attack-data', { via: 'cli' });
+  const db = path.join(base, 'github.json');
+  const pwned = path.join(base, 'pwned');
+  seed(db, { title: `$(touch ${pwned})\n\`touch ${pwned}\`; touch ${pwned}`, labels: ['--hostname=evil.example.test', `In Progress\n-X DELETE`] });
+  const env = { PATH: ghOnPath(base), FAKE_GH_STATE: db };
+  const e = ok(wf(root, ['entry', '--item', 'GH-12', '--owner', 'o', '--json'], { env })).json();
+  assert.equal(state(root, e.id).tracker.done.length, 1, 'admitted and read back');
+  assert.equal(fs.existsSync(pwned), false, 'nothing from the issue ran');
+  const argv = fs.readFileSync(`${db}.argv`, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  for (const args of argv) {
+    assert.equal(args[0], 'api');
+    assert.ok(args.every((x) => !/hostname|evil|DELETE/.test(x)), `issue data never becomes an argument: ${JSON.stringify(args)}`);
+    assert.match(args[3], /^(\/repos\/acme\/app\/|https:\/\/uploads\.github\.com\/)/, 'the request target is always the configured repository');
+  }
+  assert.deepEqual(JSON.parse(fs.readFileSync(db, 'utf8')).issue.labels.map((l) => l.name), ['--hostname=evil.example.test', 'In Progress\n-X DELETE', 'In Progress'], 'only the configured status label was added; the others are untouched');
 });
 
 test('github: an item that is not an issue number is refused before any call', () => {

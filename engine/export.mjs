@@ -5,7 +5,7 @@ import { attemptDir } from './ledger.mjs';
 import { evidenceSteps, noEvidenceVerdicts, readBundle } from './lifecycle.mjs';
 import { redactor } from './secrets.mjs';
 import { hashFile, now } from './util.mjs';
-import { prepareWrite, writeNoFollow } from './evidence.mjs';
+import { prepareWrite, readEvidenceFile, writeNoFollow } from './evidence.mjs';
 
 // One readable view of an attempt, built from the ledger and evidence. It is a VIEW: the ledger and the evidence
 // files stay the source of truth. Works for a half-finished attempt. Every catalogued secret value is masked.
@@ -102,12 +102,20 @@ function deliveredView(s) {
 const MIME = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif' };
 // Only the delivered set is embedded, as data URIs (no external requests), and only a file whose bytes still match
 // the recorded sha256; any other is listed as changed or missing.
-export function embedDelivered(d) {
+// Read with the one safe reader (no link followed, inside the attempt's evidence, bytes hashed as read).
+export function embedDelivered(root, id, d) {
   const images = {};
   for (const f of d.delivered?.screenshots ?? []) {
-    if (!f.path || !fs.existsSync(f.path)) images[f.sha256] = { problem: 'file missing' };
-    else if (hashFile(f.path) !== f.sha256) images[f.sha256] = { problem: 'file changed since the gate collected it' };
-    else images[f.sha256] = { uri: `data:${MIME[path.extname(f.path).toLowerCase()] ?? 'application/octet-stream'};base64,${fs.readFileSync(f.path).toString('base64')}` };
+    if (!f.path || !fs.existsSync(f.path)) {
+      images[f.sha256] = { problem: 'file missing' };
+      continue;
+    }
+    try {
+      const r = readEvidenceFile(root, id, f);
+      images[f.sha256] = { uri: `data:${MIME[path.extname(f.path).toLowerCase()] ?? 'application/octet-stream'};base64,${r.bytes.toString('base64')}` };
+    } catch (error) {
+      images[f.sha256] = { problem: /sha256/.test(error.message) ? 'file changed since the gate collected it' : `not read: ${error.message}` };
+    }
   }
   return images;
 }
@@ -178,8 +186,8 @@ ${body}
 }
 
 // Secrets are masked in the page text; the embedded images are added after masking, so base64 is never rewritten.
-function redactHtml(redact, data) {
-  const images = embedDelivered(data);
+function redactHtml(root, id, redact, data) {
+  const images = embedDelivered(root, id, data);
   const marks = {};
   for (const [sha, img] of Object.entries(images)) if (img.uri) marks[sha] = { uri: `wf-image:${sha}` };
   let html = redact(exportHtml(data, marks));
@@ -194,7 +202,7 @@ export function exportAttempt(root, state, { out = null, json = false } = {}) {
     redact = redactor(root, loadConfig(root));
   } catch {}
   const file = out ? path.resolve(String(out)) : exportFile(root, state.id, json);
-  const text = json ? redact(`${JSON.stringify(data, null, 2)}\n`) : redactHtml(redact, data);
+  const text = json ? redact(`${JSON.stringify(data, null, 2)}\n`) : redactHtml(root, state.id, redact, data);
   prepareWrite(file);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   writeNoFollow(file, text);

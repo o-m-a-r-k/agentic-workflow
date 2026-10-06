@@ -1,6 +1,21 @@
 # Behaviour scenarios
 
-Each scenario runs the real `wf` CLI against temporary git repositories with bare remotes. `npm test` runs them all.
+Each scenario runs the real `wf` CLI against temporary git repositories with bare remotes. `npm test` runs them all; `npm run verify` runs them on this machine and in a Linux container as a normal user and as root (the pre-push hook after `npm run setup`).
+
+## Try it: one ticket end to end
+
+```sh
+bash examples/hello-ticket/demo.sh
+```
+
+A tiny library (`examples/hello-ticket/`) with two tickets as files and `node --test` as the gate. The script admits HT-1, freezes the criteria, makes a first implementation that the gate refuses, fixes it, shows the implementer being refused as its own reviewer, records a fresh review, delivers to a local origin and prints the ticket as the engine left it. It needs only Node and git, uses a temporary folder (`KEEP=1` keeps it) and touches nothing else. Try HT-2 yourself afterwards.
+
+![A real run of the demo](assets/demo.svg)
+
+`node scripts/record-demo.mjs` re-records `docs/assets/` from a fresh run: `demo.txt` (the output, with the temporary folder shown as `~/demo`), `demo.svg` (that text animated; only the pacing is chosen) and the 1280x640 `social-preview` (SVG, and PNG when a local Chrome or Chromium exists).
+
+## Scenarios
+
 
 | Area | Scenario | File |
 | --- | --- | --- |
@@ -63,6 +78,8 @@ Each scenario runs the real `wf` CLI against temporary git repositories with bar
 | Tracker API | `tracker.via: api` performs and reads back admitted, implementing and delivered against a fake Linear server; falls back without the key | durable |
 | Files tracker | tickets as files: the engine sets status, comments, copies captioned screenshots and reads them back; links, bad ids and tickets without frontmatter refused; `wf init` drafts it from a `tickets/` folder | tracker-files |
 | GitHub tracker | `via: cli` through a fake `gh` and `via: api` against a fake server: status labels, release-asset screenshots, comment, engine readback; no token printed or captured | tracker-github |
+| Tracker credentials | an endpoint edited in the working copy, a plain-http host and a redirect never receive the token (an attacker sink records nothing); a non-default https host is named loudly by doctor; issue titles and flag-like labels never become arguments | tracker-github |
+| Safe reads | one reader for every upload and export: a symlink, hard link, `..` escape, linked folder, FIFO, swap at open and changed bytes are refused; a linked summary file is refused; Linear uploads only to its storage, without an authorization header, never following a redirect | tracker-safe-read |
 | Per-ticket evidence | `{item}`/`{itemLower}`/`{attempt}` in `artifacts` collect only the ticket's files, listed per glob in the bundle; a matched file not inspected blocks accept; a step that matched nothing while its package changed needs a `noEvidence` reason or a finding naming it (empty reason refused; verdict ledgered and exported); a step whose package did not change needs nothing; a screenshot criterion ref the gate did not collect is refused; steps get `WF_ITEM`/`WF_ITEMS` for one attempt and for a batch; `wf init` drafts `<testDir>/.evidence/{itemLower}/**/*.png` for Playwright and Cypress, nothing for other runners; unknown placeholders refused; doctor warns statically on a placeholder-less glob, prints per-glob counts and warns on one matching files the ticket did not touch | evidence |
 | Engine pin | `>=x.y.z` refused at `wf entry` and `wf gate` on an older engine, accepted when equal or newer, `N.x` kept; other forms fail validation; the ledger records the released version | evidence |
 | Delivered screenshots | `wf deliver` prints SHOW TO OWNER (path, attachment title, sha256, proposed caption) and writes a draft; the attempt stays open (quick lane too) until `wf shown` records a caption per delivered file (missing, unchanged proposal or stray file refused; raw kept); `wf tracker record --event delivered` refuses before `wf shown`, then names each file not attached, attached as a link, or uploaded without its caption (an earlier same-name upload); duplicate names get distinct titles; a delivery without screenshots prints and records the reason, owes no acknowledgement; batch members deliver only their own files; captions proposed from file name and criteria; `wf export` embeds the delivered set as data URIs with captions, no external requests, no bytes in JSON; API mode uploads only after `wf shown` with the caption as subtitle | screenshots, delivery, durable |
