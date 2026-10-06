@@ -266,8 +266,9 @@ export default {
   assert.equal(state(root, id).phase, 'handoff-pending');
 });
 
-// Named failure (0.4.5, delta review of 40da633): an adapter reporting `rejected` or `ci-failed` took the same path as a
-// pending merge, so `wf deliver` exited 0 and a rejected delivery read as success. Both now refuse; waiting stays exit 0.
+// Named failure (0.4.5, delta reviews of 40da633 and b28681a): every adapter state but `integrated` took the path of a
+// pending merge, so `wf deliver` exited 0 and a rejected delivery, a failed CI, a typo or no state at all read as
+// success. Only `awaiting-merge` and `ci-running` wait (exit 0); `rejected`, `ci-failed` and any other value refuse.
 test('a delivery adapter that reports rejected, ci-failed or an unknown state refuses; awaiting-merge and ci-running wait with exit 0', () => {
   const adapter = `
 import fs from 'node:fs';
@@ -308,6 +309,46 @@ export default {
     assert.match(r.err, st === 'rejected' ? /the change was rejected/ : /its CI failed/);
     assert.equal(state(root, id).delivery.completedAt, null, `${st}: nothing delivered`);
   }
+});
+
+// Delta review of 3338382: the adapter is read at the attempt's base, pinned at admission, so committing a fixed adapter
+// on the base branch does not reach the running attempt. The refusal says so and names the recovery this test follows
+// step by step: commit and push the fixed adapter, abandon, start a new attempt, bring the change over, then gate,
+// review and deliver it.
+test('a broken delivery adapter: the refusal names the recovery that works, and following it delivers', () => {
+  const broken = `export default { integrate(ctx) { return { url: 'https://git.example.test/mr/3' }; }, observe() { return { state: 'merged' }; }, readback() { return { ok: true }; } };`;
+  const fixed = `import { execFileSync } from 'node:child_process';
+export default {
+  integrate(ctx) { return { url: 'https://git.example.test/mr/3' }; },
+  observe(ctx) { execFileSync('git', ['push', '-q', 'origin', 'HEAD:refs/heads/main'], { cwd: ctx.worktree }); return { state: 'integrated' }; },
+  readback() { return { ok: true }; },
+};`;
+  const { base, root, remote } = singleRepoProject('mr-broken', { delivery: { kind: './delivery/mr.mjs' }, gate: { steps } }, { '.workflow/delivery/mr.mjs': broken });
+  const { id, wt } = toAccepted(root, base, { item: 'ENG-72' });
+  const r = wf(root, ['deliver', '--attempt', id]);
+  assert.notEqual(r.code, 0);
+  assert.match(r.err, /the delivery adapter reported an unknown state "merged"/);
+  assert.match(r.err, /read at this attempt's base, so a fix reaches only a new attempt: commit and push the fixed adapter on the base branch, `wf abandon --reason "\.\.\." --attempt ENG-72\.1` \(its branch wf\/ENG-72\.1 is kept\), `wf entry --item ENG-72`, bring the change over \(`git cherry-pick [0-9a-f]{10}\.\.wf\/ENG-72\.1` in the new worktree\), then gate, review and deliver it/);
+  // A fix committed on the base branch alone does not reach this attempt: the same refusal.
+  fs.writeFileSync(path.join(root, '.workflow', 'delivery', 'mr.mjs'), fixed);
+  sh(root, 'git add -A && git commit -qm "fix the delivery adapter" && git push -q origin main');
+  assert.match(wf(root, ['deliver', '--attempt', id]).err, /reported an unknown state "merged"/);
+  // The hint, step by step.
+  const pick = r.err.match(/git cherry-pick ([0-9a-f]{10})\.\.wf\/ENG-72\.1/)[1];
+  ok(wf(root, ['abandon', '--reason', 'the delivery adapter was broken', '--attempt', id]));
+  const e2 = ok(wf(root, ['entry', '--item', 'ENG-72', '--owner', 'owner-1', '--json'])).json();
+  sh(e2.repos.app.worktree, `git cherry-pick ${pick}..wf/${id}`);
+  ok(wf(root, ['handoff', 'planner', '--agent', 'plan-2', '--attempt', e2.id, '--owner', 'owner-1']));
+  ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e2.id, '--owner', 'owner-1']));
+  ok(wf(root, ['handoff', 'implementer', '--agent', 'impl-2', '--attempt', e2.id, '--owner', 'owner-1']));
+  ok(wf(root, ['gate', '--attempt', e2.id]));
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-2', '--attempt', e2.id, '--owner', 'owner-1']));
+  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('rev-2')), '--attempt', e2.id]));
+  ok(wf(root, ['accept', '--attempt', e2.id, '--owner', 'owner-1']));
+  ok(wf(root, ['deliver', '--attempt', e2.id]));
+  assert.ok(state(root, e2.id).delivery.completedAt, 'delivered');
+  assert.equal(sh(base, `git --git-dir=${remote} show main:src/a.txt`), 'b');
+  void wt;
 });
 
 test('a step that reads another repo (alsoInputs) reruns when that repo changes, and always runs when its tree cannot be read', () => {
