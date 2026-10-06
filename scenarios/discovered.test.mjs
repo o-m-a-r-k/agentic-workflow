@@ -163,6 +163,8 @@ test('0.4.5: a transcript deferral needs the exact phrase at the start of exactl
   ownerLine(root, { type: 'user', isCompactSummary: true, message: { role: 'user', content: 'defer ENG-730.1:D1: summary' } });
   ownerLine(root, { type: 'user', origin: { kind: 'peer' }, turnOrigin: 'peer', message: { role: 'user', content: 'defer ENG-730.1:D1: relayed' } });
   ownerLine(root, { type: 'user', turnOrigin: 'scheduled', message: { role: 'user', content: 'defer ENG-730.1:D1: scheduled' } });
+  // A message with an image (any non-text block) never counts, even when its text starts with the phrase: fails safe.
+  ownerLine(root, { type: 'user', origin: { kind: 'human' }, turnOrigin: 'human', message: { role: 'user', content: [{ type: 'text', text: 'defer ENG-730.1:D1: see the screenshot' }, { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AA==' } }] } });
   assert.match(close().err, /no owner message after D1 was recorded starts with `defer ENG-730\.1:D1`/);
   // The transcript changed before the anchor: refused.
   ownerSays(root, 'DEFER  eng-730.1:d1 : the label waits for the copy review');
@@ -475,4 +477,59 @@ test('0.4.5: a delivery refused after the acknowledgement is retried with the sa
   assert.notEqual(retry.code, 0);
   assert.doesNotMatch(retry.err, /not a deferred issue|awaiting acknowledgement/, 'the same command is accepted again; only the conflict refuses');
   assert.equal(retry.err.split('\n')[0], first.err.split('\n')[0], 'the retry fails for the same reason as the first try');
+});
+
+// Review of b5b2183: the same command also works after an adapter that is still waiting for merge and after a failed
+// adapter readback, both of which come after the acknowledgement is recorded.
+test('0.4.5: the same --acknowledge-deferrals command is retried after an adapter waits and after its readback fails', () => {
+  const adapter = `
+import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
+const flag = (root, n) => root + '/../' + n;
+export default {
+  integrate(ctx) {
+    execFileSync('git', ['push', '-q', '-f', 'origin', 'HEAD:refs/heads/' + ctx.branch], { cwd: ctx.worktree });
+    return { url: 'https://git.example.test/mr/1', branch: ctx.branch };
+  },
+  observe(ctx) {
+    if (!fs.existsSync(flag(ctx.root, 'merged.flag'))) return { state: 'awaiting-merge' };
+    execFileSync('git', ['push', '-q', 'origin', 'HEAD:refs/heads/main'], { cwd: ctx.worktree });
+    return { state: 'integrated' };
+  },
+  readback(ctx) {
+    if (fs.existsSync(flag(ctx.root, 'readback-fails.flag'))) return { ok: false, reason: 'the merge is not visible yet' };
+    return { ok: true };
+  },
+};`;
+  const { base, root } = singleRepoProject('discovered-adapter', { delivery: { kind: './delivery/mr.mjs' }, gate: { steps: [{ id: 'unit', repo: 'app', run: 'true' }] } }, { '.workflow/delivery/mr.mjs': adapter });
+  ownerSays(root, 'Implement ENG-810.');
+  const e = ok(wf(root, ['entry', '--item', 'ENG-810', '--owner', OWNER, '--json'])).json();
+  const id = e.id;
+  ok(wf(root, ['handoff', 'planner', '--agent', 'plan-1', '--attempt', id, '--owner', OWNER, '--runtime', 'codex']));
+  ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', id, '--owner', OWNER]));
+  ok(wf(root, ['handoff', 'implementer', '--agent', 'impl-1', '--attempt', id, '--owner', OWNER, '--runtime', 'codex']));
+  commitIn(e.repos.app.worktree, { 'src/a.txt': 'b\n' }, 'change');
+  ok(disc(root, ['add', '--attempt', id, '--summary', 'x', '--found-by', 'impl-1']));
+  ownerSays(root, `defer ${id}:D1: later`);
+  ok(disc(root, ['close', 'D1', '--deferred', '--attempt', id]));
+  ok(wf(root, ['gate', '--attempt', id]));
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-1', '--attempt', id, '--owner', OWNER, '--runtime', 'codex']));
+  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('rev-1', { discovered: [{ id: 'D1', verdict: 'deferred', evidence: 'r' }] })), '--attempt', id]));
+  ok(wf(root, ['accept', '--attempt', id, '--owner', OWNER]));
+  const deliver = () => wf(root, ['deliver', '--attempt', id, '--owner', OWNER, '--acknowledge-deferrals', 'D1']);
+  // The adapter waits for merge: the acknowledgement is recorded, and the same command waits again.
+  assert.match(ok(deliver()).out, /awaiting-merge/);
+  assert.ok(state(root, id).discovered[0].deferred.acknowledged);
+  assert.match(ok(deliver()).out, /awaiting-merge/, 'the same command after the wait');
+  // Merged, but the readback fails: refused; the same command is accepted again and refused for the same reason.
+  fs.writeFileSync(path.join(root, '..', 'merged.flag'), '');
+  fs.writeFileSync(path.join(root, '..', 'readback-fails.flag'), '');
+  assert.match(deliver().err, /readback failed: the merge is not visible yet/);
+  // The same command again is accepted: the accepted commit is already on the remote, so the engine records the
+  // delivery as recovered from the remote (its rule for a push that landed before a failure).
+  const again = deliver();
+  assert.equal(again.code, 0, again.err);
+  const s = state(root, id);
+  assert.ok(s.delivery.completedAt, 'delivered (no tracker: the attempt then closes)');
+  assert.equal(s.delivery.repos.app.recovered, true);
 });

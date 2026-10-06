@@ -109,6 +109,31 @@ test('I-16: `wf evidence list` lists an attempt\'s evidence by kind; `wf evidenc
   assert.ok(!fs.existsSync(path.join(root, 'nope.txt')));
 });
 
+// Review of b5b2183: `show` refuses a file that is a link, and reads at most 4 MiB of a large file.
+test('I-16: `wf evidence show` refuses a link and cuts a large file at 4 MiB', () => {
+  const steps = [{ id: 'big', repo: 'app', run: "head -c 5000000 /dev/zero | tr '\\000' a; echo" }];
+  const { base, root } = singleRepoProject('evidence-show-limits', { gate: { steps } });
+  const e = ok(wf(root, ['entry', '--item', 'ENG-770', '--lane', 'quick', '--owner', 'o', '--json'])).json();
+  ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id]));
+  ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
+  commitIn(e.repos.app.worktree, { 'src/a.txt': 'q\n' });
+  ok(wf(root, ['gate', '--attempt', e.id]));
+  const log = ok(wf(root, ['evidence', 'list', '--attempt', e.id, '--json'])).json().files.find((f) => f.kind === 'gate log' && f.size > 4 * 1024 * 1024);
+  assert.ok(log, 'the step log is over 4 MiB');
+  const r = ok(wf(root, ['evidence', 'show', log.path, '--attempt', e.id]));
+  assert.match(r.out, /… \(\d+ B; the first part only: read the rest with the Read tool on /);
+  assert.ok(r.out.length < 4 * 1024 * 1024 + 4096 && r.out.length >= 4 * 1024 * 1024, `printed ${r.out.length} characters`);
+  // A link planted in the attempt's evidence: never read through (the open-time verification may refuse first).
+  const secret = path.join(base, 'secret.txt');
+  fs.writeFileSync(secret, 'SECRET-OUTSIDE\n');
+  const linkDir = path.join(root, '.wf-evidence', 'attempts', e.id);
+  fs.chmodSync(linkDir, 0o755);
+  fs.symlinkSync(secret, path.join(linkDir, 'link.txt'));
+  const shown = wf(root, ['evidence', 'show', 'link.txt', '--attempt', e.id]);
+  assert.notEqual(shown.code, 0);
+  assert.doesNotMatch(shown.out, /SECRET-OUTSIDE/);
+});
+
 test('I-16: role texts and skills read evidence with `wf evidence` and say how to avoid the guard', () => {
   const read = (p) => fs.readFileSync(path.resolve(import.meta.dirname, '..', p), 'utf8');
   for (const p of ['templates/agents/reviewer.md', 'templates/agents/implementer.md', 'skills/work/SKILL.md']) {
