@@ -6,6 +6,10 @@
   "license": "MIT",
   "bin": { "wf": "bin/wf" },
   "engines": { "node": ">=20" },
-  "scripts": { "test": "node --test scenarios/" },
+  "scripts": {
+    "test": "node --test scenarios/",
+    "verify": "node scripts/verify.mjs",
+    "setup": "git config core.hooksPath .githooks"
+  },
   "repository": { "type": "git", "url": "https://github.com/o-m-a-r-k/agentic-workflow.git" }
 }

@@ -361,7 +361,7 @@ Review-first suits changes where findings are likely (money, authorization, migr
 
 Claude Code sets effort only in an agent file's frontmatter, not per spawn, so effort is chosen by choosing which generated agent to start. A class is `{ use, claude: { effort, model? }, codex: { effort, model? } }`:
 
-- `full` (default: Claude effort `high`): money, payments, audit, authorization, tenant isolation, migrations, external protocols, and anything the project's invariants file calls a critical boundary.
+- `full` (default: Claude effort `high`): money, payments, audit, authorization, data isolation between customers, migrations, external protocols, and anything the project's invariants file calls a critical boundary.
 - `light` (default: Claude effort `low`): UI wired to a frozen contract, translations, generated docs or OpenAPI output, test fixtures.
 
 The adapter's `classes` merge over these by name and may add more. `roles.<role>.class` sets a role's class; planner, reviewer, implementer and tester default to `full`. Codex effort and every model are unset by default (inherited). The default effort values are unmeasured starting points. Effort values are checked against the sets each runtime documents today (Claude `low|medium|high|xhigh|max`, Codex `minimal|low|medium|high|xhigh`) so a typo fails at load instead of silently running at the inherited effort; a runtime that adds a value needs a plugin update. Per-role `model`/`effort` from 0.1.4 are refused with a pointer to `classes`.

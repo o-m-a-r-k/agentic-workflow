@@ -83,7 +83,7 @@ test('files a step writes into the tree do not block the next gate; abandon remo
   assert.equal(fs.existsSync(e.repos.app.worktree), false);
 });
 
-test('init on a workspace monorepo keeps the root package and links dependent packages', () => {
+test('init on a package-manager monorepo (npm workspaces) keeps the root package and links dependent packages', () => {
   const base = tmp('mono');
   const root = path.join(base, 'mono');
   makeRepo(root, {

@@ -1,0 +1,4 @@
+#!/bin/sh
+# Never push without a green verify: the scenario suite on this machine and in a Linux container.
+# Installed by `npm run setup` (git config core.hooksPath .githooks).
+exec npm run --silent verify

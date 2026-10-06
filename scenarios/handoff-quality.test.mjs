@@ -34,14 +34,14 @@ test('UAT scope keeps user-visible criteria only; known limits come from finalHa
 });
 
 test('delivered handoff: summary required, screenshots embedded inline, raw readback only, anomalies recorded, screenshots viewable after close', () => {
-  const visual = [{ id: 'ui', repo: 'app', run: 'mkdir -p shots && printf en > shots/list-en.png && printf ar > shots/list-ar.png', artifacts: ['shots/*.png'] }];
+  const visual = [{ id: 'ui', repo: 'app', run: 'mkdir -p shots && printf en > shots/list-en.png && printf fr > shots/list-fr.png', artifacts: ['shots/*.png'] }];
   const { base, root } = singleRepoProject('handoff', { tracker, gate: { steps: visual } }, { ...ignore, '.workflow/uat.md': '{id} is ready for UAT.\n\nUAT scope:\n{uatScope}\n' });
   const item = 'ENG-160';
   const issue = { identifier: item, description: 'd', state: { name: 'In Progress' } };
   const e = ok(wf(root, ['entry', '--item', item, '--owner', 'o', '--json'])).json();
   ok(wf(root, ['tracker', 'record', '--event', 'admitted', '--capture', cap(base, { issue }), '--attempt', e.id]));
   ok(wf(root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id]));
-  const criteria = [{ id: 'C1', text: 'list shows active workspaces', uat: 'The list shows the number of active workspaces' }, { id: 'C2', text: 'query refactor', uat: 'Not user visible' }];
+  const criteria = [{ id: 'C1', text: 'list shows active accounts', uat: 'The list shows the number of active accounts' }, { id: 'C2', text: 'query refactor', uat: 'Not user visible' }];
   ok(wf(root, ['plan', '--file', criteriaFile(base, criteria), '--attempt', e.id]));
   ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
   ok(wf(root, ['tracker', 'record', '--event', 'implementing', '--capture', cap(base, { issue }), '--attempt', e.id]));
@@ -52,8 +52,8 @@ test('delivered handoff: summary required, screenshots embedded inline, raw read
   ok(wf(root, ['accept', '--attempt', e.id]));
 
   // The summary is the owner's; a verbatim criterion is refused.
-  assert.match(wf(root, ['deliver', '--attempt', e.id, '--summary-file', summaryFile(base, '- list shows active workspaces')]).err, /repeats criteria text verbatim \(C1\)/);
-  const d = ok(wf(root, ['deliver', '--attempt', e.id, '--summary-file', summaryFile(base, 'The workspace list now shows how many workspaces are active.')]));
+  assert.match(wf(root, ['deliver', '--attempt', e.id, '--summary-file', summaryFile(base, '- list shows active accounts')]).err, /repeats criteria text verbatim \(C1\)/);
+  const d = ok(wf(root, ['deliver', '--attempt', e.id, '--summary-file', summaryFile(base, 'The account list now shows how many accounts are active.')]));
   assert.match(d.out, /delivered comment to post .*delivered-comment\.md/);
   assert.match(d.out, /to view them again \(also after close\): `wf export screenshots --attempt ENG-160\.1 --to .*_exports\/ENG-160\.1`/);
   assert.match(d.out, /1\. .*_exports\/ENG-160\.1\/screenshots-\w+\/list-\w+\.png\n/, 'the SHOW block lists the viewable copies, exported at delivery');
@@ -64,52 +64,52 @@ test('delivered handoff: summary required, screenshots embedded inline, raw read
   const byTitle = Object.fromEntries(s0.delivery.screenshots.screenshots.map((f) => [f.title, f]));
   const shownWith = (anomalies) => {
     const f = path.join(base, `shown-${Math.random().toString(36).slice(2)}.json`);
-    fs.writeFileSync(f, JSON.stringify({ screenshots: [{ sha256: byTitle['list-en.png'].sha256, caption: 'Workspace list, English, 1 active' }, { sha256: byTitle['list-ar.png'].sha256, caption: 'Workspace list, Arabic, 3 active' }], ...(anomalies === undefined ? {} : { anomalies }) }));
+    fs.writeFileSync(f, JSON.stringify({ screenshots: [{ sha256: byTitle['list-en.png'].sha256, caption: 'Account list, English, 1 active' }, { sha256: byTitle['list-fr.png'].sha256, caption: 'Account list, French, 3 active' }], ...(anomalies === undefined ? {} : { anomalies }) }));
     return f;
   };
   const shown = (a) => wf(root, ['shown', '--file', shownWith(a), '--attempt', e.id]);
   assert.match(shown(undefined).err, /no `anomalies` key: while viewing the screenshots, compare values between captures of the same state/);
-  assert.match(shown([{ screenshots: ['list-en.png', 'list-ar.png'], observation: '1 active in English, 3 in Arabic', cause: 'cosmetic' }]).err, /"cosmetic" needs `evidence`/);
+  assert.match(shown([{ screenshots: ['list-en.png', 'list-fr.png'], observation: '1 active in English, 3 in French', cause: 'cosmetic' }]).err, /"cosmetic" needs `evidence`/);
   assert.match(shown([{ screenshots: ['list-en.png'], observation: 'count differs' }]).err, /investigate it to a `cause`, or record a `followUp`/);
   assert.match(shown([{ screenshots: ['nope.png'], observation: 'x', cause: 'y' }]).err, /nope\.png not in the delivered set/);
-  const anomaly = { screenshots: ['list-en.png', 'list-ar.png'], observation: '1 active workspace in English, 3 in Arabic for the same state', followUp: 'isolate test data between capture runs' };
+  const anomaly = { screenshots: ['list-en.png', 'list-fr.png'], observation: '1 active account in English, 3 in French for the same state', followUp: 'isolate test data between capture runs' };
   ok(shown([anomaly]));
   const st = ok(wf(root, ['status', '--attempt', e.id])).out;
-  assert.match(st, /anomalies: 1 active workspace in English, 3 in Arabic for the same state \[list-en\.png, list-ar\.png\] → follow-up: isolate test data/);
+  assert.match(st, /anomalies: 1 active account in English, 3 in French for the same state \[list-en\.png, list-fr\.png\] → follow-up: isolate test data/);
 
-  const assets = { 'list-en.png': 'https://uploads.linear.app/org/asset-en/file', 'list-ar.png': 'https://uploads.linear.app/org/asset-ar/file' };
+  const assets = { 'list-en.png': 'https://uploads.linear.app/org/asset-en/file', 'list-fr.png': 'https://uploads.linear.app/org/asset-fr/file' };
   const body = postedComment(root, e.id, assets);
   assert.equal(body, [
     'ENG-160 is ready for UAT.',
     '',
-    'The workspace list now shows how many workspaces are active.',
+    'The account list now shows how many accounts are active.',
     '',
     'UAT scope:',
-    '- The list shows the number of active workspaces',
+    '- The list shows the number of active accounts',
     '',
     'Screenshots:',
     '',
-    '**1. Workspace list, Arabic, 3 active**',
-    `![list-ar.png](${assets['list-ar.png']})`,
-    '',
-    '**2. Workspace list, English, 1 active**',
+    '**1. Account list, English, 1 active**',
     `![list-en.png](${assets['list-en.png']})`,
     '',
+    '**2. Account list, French, 3 active**',
+    `![list-fr.png](${assets['list-fr.png']})`,
+    '',
     'Known limits and follow-ups:',
-    '- Follow-up: 1 active workspace in English, 3 in Arabic for the same state (isolate test data between capture runs)',
+    '- Follow-up: 1 active account in English, 3 in French for the same state (isolate test data between capture runs)',
     '',
   ].join('\n'), 'no "Not user visible" line; each screenshot inline under its caption; the follow-up is a known limit');
 
   const after = new Date(Date.now() + 1000).toISOString();
-  const attachments = [{ id: 'a-en', title: 'list-en.png', subtitle: 'Workspace list, English, 1 active', url: assets['list-en.png'] }, { id: 'a-ar', title: 'list-ar.png', subtitle: 'Workspace list, Arabic, 3 active', url: assets['list-ar.png'] }];
+  const attachments = [{ id: 'a-en', title: 'list-en.png', subtitle: 'Account list, English, 1 active', url: assets['list-en.png'] }, { id: 'a-fr', title: 'list-fr.png', subtitle: 'Account list, French, 3 active', url: assets['list-fr.png'] }];
   const record = (obj) => wf(root, ['tracker', 'record', '--event', 'delivered', '--capture', cap(base, obj), '--attempt', e.id]);
 
   // Attachments alone: the ticket shows "added 2 links" and no image.
   const noImages = record(rawReadback(item, 'Ready for UAT', { attachments, comments: [{ body: body.replace(/!\[[^\]]*\]\([^)]*\)\n?/g, ''), createdAt: after }] }));
   assert.match(noImages.err, /the comment does not embed 2 delivered screenshot\(s\) as an inline image[\s\S]*added N links[\s\S]*list-en\.png \(attachment a-en, asset https:\/\/uploads\.linear\.app\/org\/asset-en\/file\)/);
   // An image of another asset does not count.
-  const wrong = record(rawReadback(item, 'Ready for UAT', { attachments, comments: [{ body: body.replace(assets['list-ar.png'], 'https://uploads.linear.app/org/other/file'), createdAt: after }] }));
-  assert.match(wrong.err, /does not embed 1 delivered screenshot[\s\S]*list-ar\.png/);
+  const wrong = record(rawReadback(item, 'Ready for UAT', { attachments, comments: [{ body: body.replace(assets['list-fr.png'], 'https://uploads.linear.app/org/other/file'), createdAt: after }] }));
+  assert.match(wrong.err, /does not embed 1 delivered screenshot[\s\S]*list-fr\.png/);
   // A rebuilt readback: signatures stripped, fields missing.
   const stripped = rawReadback(item, 'Ready for UAT', { attachments, comments: [{ body, createdAt: after }] });
   stripped.issue.attachments[0].url = assets['list-en.png'];
@@ -119,7 +119,7 @@ test('delivered handoff: summary required, screenshots embedded inline, raw read
   assert.match(rebuilt, /not the unmodified tracker output \(get_issue fields missing: stateHistory; attachment list-en\.png: its uploads\.linear\.app url has no signature[^;]*; comment c0 lacks author\)/);
   assert.match(rebuilt, /Prefer `tracker\.via: api`/);
   // An abridged comment.
-  assert.match(record(rawReadback(item, 'Ready for UAT', { attachments, comments: [{ body: body.replace('The workspace list now shows how many workspaces are active.\n\n', ''), createdAt: after }] })).err, /the posted comment is not the one `wf` rendered \(summary sha256 [0-9a-f]{12}\); first difference at line 2/);
+  assert.match(record(rawReadback(item, 'Ready for UAT', { attachments, comments: [{ body: body.replace('The account list now shows how many accounts are active.\n\n', ''), createdAt: after }] })).err, /the posted comment is not the one `wf` rendered \(summary sha256 [0-9a-f]{12}\); first difference at line 2/);
 
   ok(record(rawReadback(item, 'Ready for UAT', { attachments, comments: [{ body, createdAt: after }] })));
   const s = state(root, e.id);
@@ -128,8 +128,8 @@ test('delivered handoff: summary required, screenshots embedded inline, raw read
   // Viewable after close: the delivered set was copied out (at delivery), named by title, and resume says where.
   const dir = s.delivery.exported.dir;
   assert.match(dir, new RegExp(`${path.join(root, '.wf-worktrees', '_exports', e.id).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/screenshots-\\w+$`));
-  assert.deepEqual(fs.readdirSync(dir).sort(), ['list-ar.png', 'list-en.png']);
-  assert.equal(fs.readFileSync(path.join(dir, 'list-ar.png'), 'utf8'), 'ar');
+  assert.deepEqual(fs.readdirSync(dir).sort(), ['list-en.png', 'list-fr.png']);
+  assert.equal(fs.readFileSync(path.join(dir, 'list-fr.png'), 'utf8'), 'fr');
   assert.ok(!fs.existsSync(e.repos.app.worktree), 'the worktree is gone');
   assert.match(ok(wf(root, ['resume', '--attempt', e.id])).out, new RegExp(`delivered screenshots \\(2\\): viewable copies in ${dir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
   const to = path.join(base, 'shots-out');
@@ -137,7 +137,7 @@ test('delivered handoff: summary required, screenshots embedded inline, raw read
   assert.match(ex.out, /copied 2 delivered screenshot\(s\) of ENG-160\.1 to .*shots-out\/screenshots-\w+ \(each sha256-checked/);
   const fresh = ok(wf(root, ['resume', '--attempt', e.id, '--json'])).json().delivery.exported.dir;
   assert.equal(path.dirname(fresh), to, 'each export is a fresh folder under --to');
-  assert.deepEqual(fs.readdirSync(fresh).sort(), ['list-ar.png', 'list-en.png']);
+  assert.deepEqual(fs.readdirSync(fresh).sort(), ['list-en.png', 'list-fr.png']);
   assert.match(wf(root, ['export', 'screenshots', '--attempt', e.id, '--to', path.join(root, '.wf-evidence', 'x')]).err, /inside \.wf-evidence/);
   const j = ok(wf(root, ['export', '--attempt', e.id, '--json'])).json();
   assert.equal(j.delivered.anomalies[0].followUp, 'isolate test data between capture runs');

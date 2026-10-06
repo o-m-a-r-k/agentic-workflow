@@ -390,7 +390,7 @@ test('cleanup at close never deletes through a link and leaves anything uncertai
 
 test('false positives fixed in 0.3.0 stay allowed: none of these names the evidence folder in any spelling', () => {
   for (const cmd of [
-    'cd ~/Documents/Development/agentic-workflow && grep -n -i -E "glossary|terms|workspace" README.md',
+    'cd ~/Documents/Development/agentic-workflow && grep -n -i -E "glossary|terms|component" README.md',
     'cat ~/Documents/Development/agentic-workflow/.workflow/project.yaml',
     'cat api/.workflow/project.yaml | grep -E "tracker|via"',
     'sed -n 1,5p .workflow/lessons/L-1.yaml',

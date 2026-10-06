@@ -14,13 +14,16 @@ Never use "workspace" for any of these.
 ## Running the tests
 
 ```bash
+npm run setup                  # once: installs the pre-push hook (git config core.hooksPath .githooks)
+npm run verify                 # before every push: the suite here and in a Linux container (non-root and root)
 npm test                       # the scenario suite: node --test scenarios/
 node --test scenarios/<file>.test.mjs --test-name-pattern "<name>"   # one test while iterating
 node bench/evidence.mjs        # the evidence benchmark (writes about 3 GB to the temporary folder)
 ```
 
 The scenarios run the real `wf` CLI against temporary git repositories with bare remotes. CI runs them on Linux and
-macOS.
+macOS, on every push and pull request and weekly. A red CI is fixed first, from its root cause; a Linux-only failure
+is real (see [AGENTS.md](AGENTS.md)).
 
 ## Every fix names its failure and ships its test
 
@@ -39,7 +42,8 @@ macOS.
   generic words ("a report page", "the api repo", `ENG-1`).
 - No real ticket ids, URLs, emails, paths from your machine, tokens or screenshots from a real project.
 - Before pushing, check the diff, for example: `git diff origin/main | grep -iE '<your company>|<your name>|<product>'`
-  must print nothing.
+  must print nothing. Better: list those names, one per line, in `.privacy-denylist` at the repo root (gitignored, never
+  committed); `scenarios/privacy.test.mjs` then fails on any tracked file that contains one.
 - Commit with an identity that is fine to publish (a GitHub noreply address is a good choice:
   `git config user.email <id>+<user>@users.noreply.github.com`).
 

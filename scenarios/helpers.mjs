@@ -22,7 +22,7 @@ const baseEnv = () => {
 };
 
 export function wf(cwd, args, { env = {}, input, home } = {}) {
-  const r = spawnSync(process.execPath, [WF, ...args], { cwd, encoding: 'utf8', input, maxBuffer: 512 * 1024 * 1024, env: { ...baseEnv(), WF_CONFIG_HOME: home ?? path.join(cwd, '..', '.wfhome'), WF_HOME: path.join(cwd, '..', '.home'), ...env } });
+  const r = spawnSync(process.execPath, [WF, ...args], { cwd, encoding: 'utf8', input, maxBuffer: 512 * 1024 * 1024, env: { ...baseEnv(), WF_CONFIG_HOME: home ?? path.join(cwd, '..', '.wfhome'), WF_HOME: path.join(cwd, '..', '.home'), WF_IMPROVEMENTS_DIR: path.join(cwd, '..', '.improvements'), ...env } });
   return { code: r.status, out: r.stdout, err: r.stderr, json: () => JSON.parse(r.stdout) };
 }
 

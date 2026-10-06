@@ -4,6 +4,15 @@ on:
   pull_request:
   push:
     branches: [main]
+  # Weekly, so drift in the runners or Node is caught without a push.
+  schedule:
+    - cron: '17 5 * * 1'
+  workflow_dispatch:
+
+# A newer push to the same branch cancels the run it supersedes.
+concurrency:
+  group: scenarios-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read

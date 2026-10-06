@@ -208,7 +208,7 @@ test('prior decisions are inputs: a criterion kept only on precedent needs a pur
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r', { criteria: crit({}) })), '--attempt', e.id]));
   assert.match(wf(root, ['accept', '--attempt', e.id]).err, /criterion C1: kept only on precedent; give a purpose-based `rationale` \(who uses this surface and what they need\) or raise a `precedent-only` finding/);
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'r2', '--attempt', e.id]));
-  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r2', { criteria: crit({ rationale: 'the platform operator compares all workspaces, so the cross-workspace total stays' }) })), '--attempt', e.id]));
+  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r2', { criteria: crit({ rationale: 'an administrator compares all accounts, so the total across accounts stays' }) })), '--attempt', e.id]));
   ok(wf(root, ['accept', '--attempt', e.id]));
   ok(wf(root, ['sync']));
   const reviewer = fs.readdirSync(path.join(root, '.claude', 'agents')).find((f) => f.startsWith('wf-reviewer'));

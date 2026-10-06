@@ -5,7 +5,7 @@ import path from 'node:path';
 import { makeRepo, ok, sh, tmp, toAccepted, singleRepoProject, wf, write } from './helpers.mjs';
 import { YAML } from '../engine/util.mjs';
 
-function sampleWorkspace() {
+function sampleProject() {
   const base = tmp('onboard');
   const root = path.join(base, 'ws');
   fs.mkdirSync(root);
@@ -27,7 +27,7 @@ function sampleWorkspace() {
 }
 
 test('wf init detects repos, packages, components, steps and secrets, and drafts a disabled adapter', () => {
-  const { root } = sampleWorkspace();
+  const { root } = sampleProject();
   const r = ok(wf(root, ['init', '--json'])).json();
   const d = r.detected;
   assert.deepEqual(d.repos.map((x) => x.name).sort(), ['backend', 'platform']);

@@ -1079,7 +1079,7 @@ export function recordShown(root, options) {
 }
 
 // Anomalies seen while viewing the delivered screenshots. Named failure: an owner called "3 active accounts in the
-// Arabic capture vs 1 in English" cosmetic without checking; test data had leaked between runs. Any value that differs
+// French capture vs 1 in English" cosmetic without checking; test data had leaked between runs. Any value that differs
 // between captures of the same state (counts, dates, names), or contradicts a criterion, is recorded with its cause
 // (investigated; "cosmetic" needs evidence) or a follow-up. The key is required: `"anomalies": "none seen"` (or []) says
 // the owner looked and saw none.

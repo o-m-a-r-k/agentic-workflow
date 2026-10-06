@@ -46,7 +46,7 @@ const LANES = new Set(['quick', 'standard', 'batch']);
 // Defaults are unmeasured starting points; guarantees (gate, blind review, frozen criteria) never depend on a class.
 export const DEFAULT_CLASSES = {
   full: {
-    use: "Money, payments, audit, authorization, tenant isolation, migrations, external protocols, and anything the project's invariants file calls a critical boundary.",
+    use: "Money, payments, audit, authorization, data isolation between customers, migrations, external protocols, and anything the project's invariants file calls a critical boundary.",
     claude: { effort: 'high' },
     codex: {},
   },
