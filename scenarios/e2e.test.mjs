@@ -133,9 +133,16 @@ test('leases are machine-wide: two gates from different attempts never share a d
   const home = path.join(root, '..', '.wfhome');
   const env = { ...process.env, WF_CONFIG_HOME: home };
   delete env.CLAUDE_CODE_SESSION_ID;
-  const run = (id) => new Promise((resolve) => spawn(process.execPath, [WF, 'gate', '--attempt', id], { cwd: root, env, stdio: 'ignore' }).on('exit', resolve));
-  const codes = await Promise.all(ids.map(run));
-  assert.deepEqual(codes, [0, 0]);
+  // Each gate's output is kept: a refusal says why (the run that hid it with stdio 'ignore' failed only as [0, 75]).
+  const run = (id) => new Promise((resolve) => {
+    const c = spawn(process.execPath, [WF, 'gate', '--attempt', id], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    c.stdout.on('data', (d) => (out += d));
+    c.stderr.on('data', (d) => (out += d));
+    c.on('exit', (code) => resolve({ id, code, out }));
+  });
+  const results = await Promise.all(ids.map(run));
+  assert.deepEqual(results.map((r) => r.code), [0, 0], results.filter((r) => r.code).map((r) => `${r.id} exited ${r.code}:\n${r.out}`).join('\n'));
   const t = {};
   for (const [a, ts, kind] of fs.readFileSync(path.join(home, '..', 'times.txt'), 'utf8').trim().split('\n').map((l) => l.split(' '))) (t[a] ??= {})[kind] = Number(ts);
   const [x, y] = ids;

@@ -60,7 +60,9 @@ export function chmodNoFollow(p, mode, { dir = false } = {}) {
   try {
     const st = fs.fstatSync(fd);
     if (dir ? !st.isDirectory() : !st.isFile()) throw new LinkRefused(`${p} is not a regular ${dir ? 'folder' : 'file'}; not changed`);
-    if (!sameEntry(fs.fstatSync(fd, { bigint: true }), beforeId, { ctime: true })) throw new LinkRefused(`${p} was replaced between its check and its use; not changed`);
+    // A file's change time too (nothing else should touch it in between); not a folder's: another wf process writing
+    // into it changes its ctime legitimately.
+    if (!sameEntry(fs.fstatSync(fd, { bigint: true }), beforeId, { ctime: !dir })) throw new LinkRefused(`${p} was replaced between its check and its use; not changed`);
     if (!dir && st.nlink > 1) throw new LinkRefused(`${p} is a hard link (${st.nlink} names share its data); not changed`);
     fs.fchmodSync(fd, mode);
   } finally {
@@ -312,7 +314,8 @@ export function prepareWrite(file) {
   if (at < 0) return abs;
   const evRoot = parts.slice(0, at + 1).join(path.sep);
   assertRealFolders(path.dirname(abs), evRoot);
-  for (let i = at + 2; i < parts.length; i++) {
+  // From the attempt's own folder down: `attempts/` is shared by every attempt (and concurrent gates) and never locked.
+  for (let i = at + 3; i < parts.length; i++) {
     const d = parts.slice(0, i).join(path.sep);
     if (fs.lstatSync(d, { throwIfNoEntry: false })?.isDirectory()) chmodNoFollow(d, 0o755, { dir: true });
   }
