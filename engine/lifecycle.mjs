@@ -747,15 +747,16 @@ export async function deliver(root, options) {
     if (open.length) throw refuse(`not delivered: ${open.length} discovered issue(s) are open${x.id !== state.id ? ` in ${x.id}` : ''}: ${open.map((d) => `${d.id} ${d.summary}`).join('; ')}`, `fix it in this ticket and close it with the fix commit (\`wf discovered close <id> --fixed <commit>\`; a fix after acceptance needs the gate and a fresh review), or, only on the owner's decision, \`wf discovered close <id> --deferred\` once the owner's message starts with \`defer ${x.id}:<id>\``);
   }
   // Every deferral counts only once the owner has seen it here and acknowledged it: no channel proves a person. It is
-  // checked here and recorded after every check before the push; an acknowledgement recorded by a try that a later step
-  // refused is accepted again, so a refused delivery is retried with the same command.
+  // checked here and recorded after the pre-push checks; an acknowledgement recorded by an earlier try (one a later step
+  // refused, or one that is still waiting for a merge, which is not a refusal) is accepted again, so the same command
+  // is run again.
   let ackOwed = [];
   {
     const owed = unacknowledged(root, state, (m) => loadState(root, m));
     const given = typeof options['acknowledge-deferrals'] === 'string' ? options['acknowledge-deferrals'].split(',').map((x) => x.trim()).filter(Boolean) : [];
     const keys = new Set(owed.map((o) => o.key));
-    // An id acknowledged by an earlier try that a later check refused (a push conflict, an adapter readback, a merge
-    // still pending) is accepted again: a refused delivery is retried with the same command (review of 76ad8d8).
+    // An id acknowledged by an earlier try is accepted again: after a later refusal (a push conflict, a failed adapter
+    // readback) or a pending merge (exit 0, not a refusal), the same command is run again (review of 76ad8d8).
     const done = new Set(unacknowledged(root, state, (m) => loadState(root, m), { acknowledged: true }).map((o) => o.key));
     const stray = given.filter((g) => !keys.has(g) && !done.has(g));
     if (stray.length) throw refuse(`${stray.join(', ')} ${stray.length > 1 ? 'are' : 'is'} not a deferred issue of ${state.id} awaiting acknowledgement${owed.length ? ` (awaiting: ${[...keys].join(', ')})` : ''}`);
@@ -848,6 +849,9 @@ export async function deliver(root, options) {
       const observed = await adapter.observe({ ...ctx, ...integrated });
       if (observed.state !== 'integrated') {
         append(root, state.id, 'repo.integrating', { repo: name, ...integrated, observed }, actor(options));
+        // Named failure (0.4.5, delta review of 40da633): `rejected` and `ci-failed` took the waiting path, so a rejected
+        // delivery exited 0 and read as success. Only a pending state waits; these refuse.
+        if (observed.state === 'rejected' || observed.state === 'ci-failed') throw refuse(`not delivered: ${name}: the delivery adapter reports ${observed.state}${integrated.url ? ` (${integrated.url})` : ''}${observed.evidence ? `: ${observed.evidence}` : ''}`, observed.state === 'rejected' ? 'the change was rejected where it is integrated: find out why, fix it through the implementer (a new gate and review follow), or abandon the attempt; then `wf deliver` again' : 'its CI failed where it is integrated: read that CI run, fix the cause through the implementer, gate it, then `wf deliver` again');
         if (!state.tracker.done.some((d) => d.event === 'integrating')) emitTrackerEvent(root, cfg, state.id, 'integrating', { url: integrated.url ?? '' });
         return { state: loadState(root, state.id), waiting: { repo: name, ...observed, url: integrated.url } };
       }

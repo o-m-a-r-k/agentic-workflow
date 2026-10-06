@@ -16,7 +16,7 @@ stateDiagram-v2
 
 - **Delivery adapters** do the git side, in three parts:
   - `integrate`: push to main, or open a PR/MR.
-  - `observe`: report states like awaiting merge or CI running.
+  - `observe`: report the state: `integrated`, `awaiting-merge` or `ci-running` (`wf deliver` exits 0 and says to run it again once merged), or `rejected` or `ci-failed` (`wf deliver` refuses with the state and what to do).
   - `readback`: prove the change is on the target branch.
 
   `push-main` is built in; anything else is one file in your project.

@@ -266,6 +266,39 @@ export default {
   assert.equal(state(root, id).phase, 'handoff-pending');
 });
 
+// Named failure (0.4.5, delta review of 40da633): an adapter reporting `rejected` or `ci-failed` took the same path as a
+// pending merge, so `wf deliver` exited 0 and a rejected delivery read as success. Both now refuse; waiting stays exit 0.
+test('a delivery adapter that reports rejected or ci-failed refuses; awaiting-merge waits with exit 0', () => {
+  const adapter = `
+import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
+export default {
+  integrate(ctx) {
+    execFileSync('git', ['push', '-q', '-f', 'origin', 'HEAD:refs/heads/' + ctx.branch], { cwd: ctx.worktree });
+    return { url: 'https://git.example.test/mr/2', branch: ctx.branch };
+  },
+  observe(ctx) {
+    return { state: fs.readFileSync(ctx.root + '/../observe.state', 'utf8').trim(), evidence: 'pipeline 7' };
+  },
+  readback() { return { ok: true }; },
+};`;
+  const { base, root } = singleRepoProject('mr-states', { delivery: { kind: './delivery/mr.mjs' }, gate: { steps } }, { '.workflow/delivery/mr.mjs': adapter });
+  const { id } = toAccepted(root, base, { item: 'ENG-71' });
+  const say = (st) => fs.writeFileSync(path.join(root, '..', 'observe.state'), st);
+  say('awaiting-merge');
+  const w = wf(root, ['deliver', '--attempt', id]);
+  assert.equal(w.code, 0, w.err);
+  assert.match(w.out, /awaiting-merge \(https:\/\/git\.example\.test\/mr\/2\)\. Run `wf deliver` again once it is merged\./);
+  for (const st of ['rejected', 'ci-failed']) {
+    say(st);
+    const r = wf(root, ['deliver', '--attempt', id]);
+    assert.notEqual(r.code, 0, st);
+    assert.match(r.err, new RegExp(`not delivered: app: the delivery adapter reports ${st} \\(https://git\\.example\\.test/mr/2\\)`), st);
+    assert.match(r.err, st === 'rejected' ? /the change was rejected/ : /its CI failed/);
+    assert.equal(state(root, id).delivery.completedAt, null, `${st}: nothing delivered`);
+  }
+});
+
 test('a step that reads another repo (alsoInputs) reruns when that repo changes, and always runs when its tree cannot be read', () => {
   const e2e = 'cat "$WF_ROOT/.wf-worktrees/$WF_ATTEMPT/web/src/w.txt" && ! grep -q bad "$WF_ROOT/.wf-worktrees/$WF_ATTEMPT/web/src/w.txt"';
   const gate = {
