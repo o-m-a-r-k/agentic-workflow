@@ -8,12 +8,12 @@ import { findRoot, loadConfig, requireRoot } from './config.mjs';
 import { exportAttempt, exportFile } from './export.mjs';
 import { liveGate, runGate, runWithLease, stopGate } from './gate.mjs';
 import { append, listAttempts, loadState } from './ledger.mjs';
-import { acceptReview, amendCriteria, batchCreate, batchEject, closeAfterHandoff, deliver, freezeCriteria, handoff, narrowDelivery, needsShown, nextAction, outsideWarning, recordReview, recordShown, reopen, shownDraftFile, uncovered, withAttempt } from './lifecycle.mjs';
+import { acceptReview, amendCriteria, designWarning, batchCreate, batchEject, closeAfterHandoff, deliver, deliveredFiles, exportScreenshots, freezeCriteria, handoff, narrowDelivery, needsShown, nextAction, outsideWarning, recordReview, recordShown, reopen, screenshotsExportDir, shownDraftFile, uncovered, withAttempt } from './lifecycle.mjs';
 import { detect, doctor, register, registry, setEnabled, sync, writeDraft } from './onboard.mjs';
 import * as secrets from './secrets.mjs';
 import { report, toCsv, toHandoffCsv, toHtml } from './telemetry.mjs';
 import { impact } from './topology.mjs';
-import { performTracker, recordTracker } from './tracker.mjs';
+import { commentFile, performTracker, recordSummary, recordTracker } from './tracker.mjs';
 import { ENGINE_VERSION, WfError, parseArgs } from './util.mjs';
 
 const HELP = `wf ${ENGINE_VERSION} — agentic-workflow
@@ -41,8 +41,9 @@ Work
   wf stop --reason "why"            pause a running gate; finished steps are kept
   wf review --closure file.json     record the reviewer's closure
   wf accept                         accept the review
-  wf deliver                        integrate every repo, then start the tracker handoff
-  wf shown --file shown.json        record that every delivered screenshot was shown in the chat, with its caption
+  wf summary --file summary.md      the owner's plain-language summary for the delivered comment
+  wf deliver [--summary-file F]     integrate every repo, then start the tracker handoff
+  wf shown --file shown.json        record that every delivered screenshot was shown in the chat, with its caption and anomalies
   wf delivery narrow --keep SHA,... | --file keep.json --reason "why" [--dry-run]
                                     once, before \`wf shown\`: keep only this ticket's files of a delivered set an over-broad glob filled
   wf tracker record --event E --capture file.json | wf tracker sync (tracker.via: api)
@@ -57,6 +58,7 @@ Status
   wf status [--all] [--json]
   wf report [--all] [--csv FILE] [--handoffs-csv FILE] [--html FILE]
   wf export [--out FILE] [--json]   one self-contained page for the attempt (a view of the evidence)
+  wf export screenshots [--to DIR]  copy the delivered screenshots out of the evidence, named by title, sha256-checked
 
 Common options: --attempt ID, --json, --owner ID`;
 
@@ -87,6 +89,9 @@ function summary(root, s, { base = null, resume = false } = {}) {
   }
   if (s.delivery.narrowed && !s.delivery.screenshots) lines.push(`  delivered files narrowed from ${s.delivery.narrowed.from} to ${s.delivery.narrowed.to}: ${s.delivery.narrowed.reason} (${s.delivery.narrowed.by}, ${s.delivery.narrowed.at})`);
   if (s.phase === 'handoff-pending' && s.delivery.screenshots) lines.push(showBlock(root, s).trim().replace(/^/gm, '  ').replace(/^ {2}SHOW TO OWNER/, '  delivered screenshots — SHOW TO OWNER'));
+  const delivered = s.delivery.completedAt ? deliveredFiles(s) : [];
+  if (delivered.length) lines.push(`  delivered screenshots (${delivered.length}): ${s.delivery.exported ? `viewable copies in ${s.delivery.exported.dir}` : `copy them out to view: ${exportCommand(root, s)}`}`);
+  if (s.phase === 'handoff-pending' && s.tracker.pending.some((a) => a.rendered === 'delivered')) lines.push(`  delivered comment: ${s.delivery.summary ? commentFile(root, s.id) : 'needs the owner\'s summary: `wf summary --file <summary.md>`'}`);
   if (resume) {
     const last = s.exports?.filter((x) => !x.json).at(-1)?.file ?? (fs.existsSync(exportFile(root, s.id)) ? exportFile(root, s.id) : null);
     lines.push(`  export: ${last ?? 'none yet'}${last ? '' : ' (`wf export` writes one page for this attempt)'}`);
@@ -99,6 +104,8 @@ function summary(root, s, { base = null, resume = false } = {}) {
 }
 
 // What the owner must show in the chat and attach to the ticket, per delivered file; or why there is nothing.
+const exportCommand = (root, s) => `\`wf export screenshots --attempt ${s.id} --to ${screenshotsExportDir(root, s.id)}\``;
+
 function showBlock(root, s) {
   const set = s.delivery.screenshots;
   if (!set) return '';
@@ -113,7 +120,10 @@ function showBlock(root, s) {
   const head = needsShown(s)
     ? `SHOW TO OWNER (${set.screenshots.length} delivered screenshot(s) for ${s.item}): display each image in the chat with its caption, then record it with \`wf shown --file <f>\` (start from a copy of ${shownDraftFile(root, s.id)}). Each is also uploaded to the ticket as a file: title = "attach as", subtitle = its caption.`
     : `delivered screenshots for ${s.item} (shown to the owner ${s.delivery.shown.at}):`;
-  return `\n${head}${narrowed}\n${rows.join('\n')}`;
+  const an = s.delivery.shown && !s.delivery.shown.auto ? s.delivery.shown.anomalies : null;
+  const anomalies = an ? `\n  anomalies: ${an.length ? an.map((a) => `${a.observation} [${a.screenshots.join(', ')}] → ${a.cause ? `cause: ${a.cause}` : `follow-up: ${a.followUp}`}`).join('; ') : 'none seen'}` : '';
+  const view = `\n  to view them again (also after close): ${exportCommand(root, s)}`;
+  return `\n${head}${narrowed}\n${rows.join('\n')}${anomalies}${view}`;
 }
 
 function gateText(result) {
@@ -367,6 +377,8 @@ async function dispatch(cmd, sub, positional, options) {
       try {
         const w = s.accepted ? null : outsideWarning(root, s);
         if (w) (options.json ? process.stderr : process.stdout).write(`wf ${cmd}: warning: ${w}\n`);
+        const dw = s.accepted ? null : designWarning(root, s);
+        if (dw) (options.json ? process.stderr : process.stdout).write(`wf ${cmd}: warning: ${dw}\n`);
       } catch {}
       // Live progress goes to stdout, or to stderr with --json so stdout stays one JSON document.
       const r = await runGate(root, s, { prepareOnly: options['prepare-only'] === true, full: !check && options.full === true, focused: !check && options.focused === true, rerunFailed: !check && options['rerun-failed'] === true ? true : undefined, check, repos, live: options.json ? process.stderr : process.stdout });
@@ -380,8 +392,21 @@ async function dispatch(cmd, sub, positional, options) {
       const cfg = loadConfig(root);
       return await runWithLease(cfg, String(options.lease), options._);
     }
+    case 'summary': {
+      const cfg = loadConfig(root);
+      const { actor } = await import('./attempt.mjs');
+      const s = recordSummary(root, cfg, openState(root, options), { ...options, actorId: actor(options) });
+      print(options, `summary recorded for ${s.id} (${s.delivery.summary.text.split('\n').length} line(s)).${s.delivery.completedAt ? ` Delivered comment: ${commentFile(root, s.id)}` : ''}\nnext: ${nextAction(root, s)}`, s);
+      return 0;
+    }
     case 'export': {
       const s = openState(root, options);
+      if (sub === 'screenshots') {
+        const r = exportScreenshots(root, s, options.to && options.to !== true ? options.to : null);
+        print(options, `copied ${r.files.length} delivered screenshot(s) of ${s.id} to ${r.dir} (each sha256-checked):\n${r.files.map((f) => `  ${f.file}`).join('\n')}`, r);
+        return 0;
+      }
+      if (sub) throw new WfError('usage: wf export [--out FILE] [--json] | wf export screenshots [--to DIR]');
       const r = exportAttempt(root, s, { out: options.out ?? null, json: options.json === true });
       append(root, s.id, 'exported', { file: r.file, json: options.json === true }, null);
       if (options.json) {
@@ -421,7 +446,8 @@ async function dispatch(cmd, sub, positional, options) {
       const api = await trackerApi(root, r.state.id);
       const after = loadState(root, r.state.id);
       const members = (after.batch?.members ?? []).map((m) => showBlock(root, loadState(root, m))).join('');
-      print(options, `delivered ${after.id}: ${Object.values(after.delivery.repos).map((d) => `${d.repo}${d.commit ? `@${d.commit.slice(0, 10)}` : ' (no changes)'}`).join(', ')}${api}${showBlock(root, after)}${members}\nnext: ${nextAction(root, after)}`, after);
+      const comment = after.tracker.pending.some((a) => a.rendered === 'delivered') ? `\ndelivered comment to post (rendered from your summary, the user-visible UAT scope, the screenshots and known limits): ${commentFile(root, after.id)}\n  replace each {assetUrl:<title>} with the assetUrl its upload returned, so every screenshot shows inline; post it unchanged otherwise` : '';
+      print(options, `delivered ${after.id}: ${Object.values(after.delivery.repos).map((d) => `${d.repo}${d.commit ? `@${d.commit.slice(0, 10)}` : ' (no changes)'}`).join(', ')}${api}${showBlock(root, after)}${members}${comment}\nnext: ${nextAction(root, after)}`, after);
       return 0;
     }
     case 'tracker': {
@@ -433,7 +459,7 @@ async function dispatch(cmd, sub, positional, options) {
       }
       if (sub !== 'record') throw new WfError('usage: wf tracker record --event E --capture file.json | wf tracker sync');
       const cfg = loadConfig(root);
-      let s = await recordTracker(root, cfg, openState(root, options), options);
+      let s = await recordTracker(root, cfg, openState(root, options), { ...options, engineCapture: undefined });
       s = closeAfterHandoff(root, s);
       print(options, `tracker ${options.event} verified. ${s.phase === 'done' ? 'Attempt closed and worktrees removed.' : `next: ${nextAction(root, s)}`}`, s);
       return 0;

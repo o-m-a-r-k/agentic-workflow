@@ -12,7 +12,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { closureFile, commitIn, makeRepo, ok, sh, tmp, wf, write, yaml } from './helpers.mjs';
+import { closureFile, commitIn, makeRepo, ok, postedComment, rawReadback, sh, summaryFile, tmp, wf, write, yaml } from './helpers.mjs';
 
 const ID = 'GD-1.1';
 
@@ -214,10 +214,19 @@ test('game day: one ticket through every fault seen on real tickets', () => {
   ok(w(['accept', '--attempt', ID]));
 
   // Delivery and the tracker readback.
-  const d = ok(w(['deliver', '--attempt', ID]));
+  const d = ok(w(['deliver', '--attempt', ID, '--summary-file', summaryFile(base, 'Checkout now shows the order total, in the order\'s currency.')]));
   assert.match(d.out, /delivered GD-1\.1: backend@\w+, frontend@\w+/);
   const after = new Date(Date.now() + 1000).toISOString();
-  const readback = file('delivered.json', issue('Ready for UAT', { comments: [{ id: 'c1', body: 'GD-1 is ready for UAT.\n\nUAT scope:\n- The total shows on checkout\n- A EUR order shows €', createdAt: after }] }));
+  const posted = postedComment(root, ID);
+  assert.match(posted, /^GD-1 is ready for UAT\.\n\nCheckout now shows the order total, in the order's currency\.\n\nUAT scope:\n- The total shows on checkout\n- A EUR order shows €\n\nKnown limits and follow-ups:\n- Not delivered: caching moved to a follow-up\n$/, 'a criterion dropped by an amendment is a known limit');
+  // Fault: a hand-built readback (the issue rebuilt from memory, the comment abridged) is refused.
+  const hand = file('hand-delivered.json', issue('Ready for UAT', { comments: [{ id: 'c1', body: 'GD-1 is ready for UAT.\n\nUAT scope:\n- The total shows on checkout', createdAt: after }] }));
+  const refused = w(['tracker', 'record', '--event', 'delivered', '--capture', hand, '--attempt', ID]).err;
+  assert.match(refused, /not the unmodified tracker output \(get_issue fields missing: [^)]*stateHistory[\s\S]*no list_comments result/);
+  assert.match(refused, /cp <saved path> issue\.json/);
+  const abridged = file('abridged.json', rawReadback('GD-1', 'Ready for UAT', { comments: [{ id: 'c1', body: posted.replace(/\n- A EUR order shows €/, ''), createdAt: after }] }));
+  assert.match(w(['tracker', 'record', '--event', 'delivered', '--capture', abridged, '--attempt', ID]).err, /the posted comment is not the one `wf` rendered[\s\S]*first difference at line 5: expected "- A EUR order shows €"/);
+  const readback = file('delivered.json', rawReadback('GD-1', 'Ready for UAT', { comments: [{ id: 'c1', body: posted, createdAt: after }] }));
   const closed = ok(w(['tracker', 'record', '--event', 'delivered', '--capture', readback, '--attempt', ID]));
   assert.match(closed.out, /Attempt closed and worktrees removed/);
   const final = exported('done');

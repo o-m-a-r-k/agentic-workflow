@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { closureFile, commitIn, criteriaFile, goodClosure, makeRepo, ok, sh, singleRepoProject, state, tmp, toAccepted, wf, write, yaml } from './helpers.mjs';
+import { closureFile, commitIn, criteriaFile, goodClosure, makeRepo, ok, postedComment, rawReadback, sh, singleRepoProject, state, summaryFile, tmp, toAccepted, wf, write, yaml } from './helpers.mjs';
 
 const steps = [{ id: 'unit', repo: 'app', run: 'true', inputs: ['src/**'] }];
 
@@ -152,7 +152,9 @@ test('tracker: status, comment and screenshots are verified from the readback', 
   assert.match(wf(root, ['accept', '--attempt', e.id]).err, /not inspected/, 'reviewer must inspect every screenshot');
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r', { screenshotsInspected: [shot.sha256] })), '--attempt', e.id]));
   ok(wf(root, ['accept', '--attempt', e.id]));
-  const d = ok(wf(root, ['deliver', '--attempt', e.id]));
+  assert.match(wf(root, ['deliver', '--attempt', e.id]).err, /needs the owner's summary first[\s\S]*--summary-file/, 'the delivered comment needs a summary before anything is pushed');
+  assert.match(wf(root, ['deliver', '--attempt', e.id, '--summary-file', summaryFile(base, '- Not user visible: refactor')]).err, /summary refused[\s\S]*not user visible/);
+  const d = ok(wf(root, ['deliver', '--attempt', e.id, '--summary-file', summaryFile(base)]));
   // The owner is told exactly which files to show and attach, with a proposed caption for each.
   assert.match(d.out, /SHOW TO OWNER \(1 delivered screenshot\(s\) for ENG-50\)/);
   assert.match(d.out, /attach as: home\.png/);
@@ -160,13 +162,13 @@ test('tracker: status, comment and screenshots are verified from the readback', 
   assert.match(d.out, new RegExp(shot.path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   assert.match(ok(wf(root, ['resume', '--attempt', e.id])).out, /next: show the owner, in the chat, each of the 1 delivered screenshot/);
   const after = new Date(Date.now() + 1000).toISOString();
-  const comment = [{ id: 'c1', body: `${item} is ready for UAT.\n\nUAT scope:\n- a shows the new text`, createdAt: after }];
-  const upload = (subtitle) => ({ id: 'a1', title: 'home.png', subtitle, url: 'https://uploads.linear.app/x/y/home?signature=s' });
-  const good = cap({ issue: { identifier: item, state: { name: 'Ready for UAT' } }, comments: comment, attachments: [upload('Home screen showing the new text')] });
-  assert.match(wf(root, ['tracker', 'record', '--event', 'delivered', '--capture', good, '--attempt', e.id]).err, /not shown to the owner yet/, 'the handoff waits for the owner to see the screenshots');
+  const asset = 'https://uploads.linear.app/x/y/home';
+  const upload = (subtitle) => ({ id: 'a1', title: 'home.png', subtitle, url: asset });
+  const readback = (comments, attachments = [upload('Home screen showing the new text')]) => cap(rawReadback(item, 'Ready for UAT', { attachments, comments }));
+  assert.match(wf(root, ['tracker', 'record', '--event', 'delivered', '--capture', readback([{ id: 'c1', body: postedComment(root, e.id, { 'home.png': asset }), createdAt: after }]), '--attempt', e.id]).err, /not shown to the owner yet/, 'the handoff waits for the owner to see the screenshots');
   const shown = (caption) => {
     const f = path.join(base, `shown-${Math.random().toString(36).slice(2)}.json`);
-    fs.writeFileSync(f, JSON.stringify({ screenshots: [{ sha256: shot.sha256, caption }] }));
+    fs.writeFileSync(f, JSON.stringify({ screenshots: [{ sha256: shot.sha256, caption }], anomalies: 'none seen' }));
     return f;
   };
   assert.match(wf(root, ['shown', '--file', shown('Home'), '--attempt', e.id]).err, /the engine's proposal unchanged/);
@@ -174,15 +176,19 @@ test('tracker: status, comment and screenshots are verified from the readback', 
   fs.writeFileSync(path.join(base, 'empty.json'), JSON.stringify({ screenshots: [] }));
   assert.match(wf(root, ['shown', '--file', path.join(base, 'empty.json'), '--attempt', e.id]).err, /home\.png .*not acknowledged/);
   ok(wf(root, ['shown', '--file', shown('Home screen showing the new text'), '--attempt', e.id]));
+  const body = postedComment(root, e.id, { 'home.png': asset });
+  assert.match(body, /^ENG-50 is ready for UAT\.\n\nThe home screen now shows the new text\.\n\nUAT scope:\n- a shows the new text\n\nScreenshots:\n\n\*\*1\. Home screen showing the new text\*\*\n!\[home\.png\]\(https:\/\/uploads\.linear\.app\/x\/y\/home\)\n$/, 'header, summary, user-visible UAT scope, each screenshot inline under its caption');
+  const comment = [{ id: 'c1', body, createdAt: after }];
+  const good = readback(comment);
   assert.match(wf(root, ['delivery', 'narrow', '--keep', shot.sha256, '--reason', 'r', '--attempt', e.id]).err, /already acknowledged with `wf shown`/, 'the set is fixed once acknowledged');
-  assert.match(wf(root, ['tracker', 'record', '--event', 'delivered', '--capture', cap({ issue: { state: { name: 'Ready for UAT' } }, comments: comment }), '--attempt', e.id]).err, /the capture names no issue/);
-  const leaky = cap({ issue: { identifier: item, state: { name: 'Ready for UAT' } }, comments: [{ ...comment[0], body: `${comment[0].body}\nchanged src/app/home.tsx` }], attachments: [upload('Home screen showing the new text')] });
+  assert.match(wf(root, ['tracker', 'record', '--event', 'delivered', '--capture', cap({ issue: { state: { name: 'Ready for UAT' } }, comments: { comments: comment, hasNextPage: false } }), '--attempt', e.id]).err, /the capture names no issue/);
+  const leaky = readback([{ ...comment[0], body: `${comment[0].body}\nchanged src/app/home.tsx` }]);
   assert.match(wf(root, ['tracker', 'record', '--event', 'delivered', '--capture', leaky, '--attempt', e.id]).err, /internals: source file path/);
-  const noShot = cap({ issue: { identifier: item, state: { name: 'Ready for UAT' } }, comments: comment, attachments: [] });
+  const noShot = readback(comment, []);
   assert.match(wf(root, ['tracker', 'record', '--event', 'delivered', '--capture', noShot, '--attempt', e.id]).err, /1 of 1 delivered screenshot\(s\) not attached[\s\S]*home\.png .*no attachment with this title/);
-  const link = cap({ issue: { identifier: item, state: { name: 'Ready for UAT' } }, comments: comment, attachments: [{ id: 'a1', title: 'home.png', url: 'https://example.test/home.png' }] });
+  const link = readback(comment, [{ id: 'a1', title: 'home.png', url: 'https://example.test/home.png' }]);
   assert.match(wf(root, ['tracker', 'record', '--event', 'delivered', '--capture', link, '--attempt', e.id]).err, /home\.png .*attached as a link, not an uploaded file/);
-  const earlier = cap({ issue: { identifier: item, state: { name: 'Ready for UAT' } }, comments: comment, attachments: [upload(null)] });
+  const earlier = readback(comment, [upload(null)]);
   assert.match(wf(root, ['tracker', 'record', '--event', 'delivered', '--capture', earlier, '--attempt', e.id]).err, /uploaded, but no attachment of it has the subtitle "Home screen showing the new text"/, 'an earlier upload with the same name does not count');
   ok(wf(root, ['tracker', 'record', '--event', 'delivered', '--capture', good, '--attempt', e.id]));
   const s = state(root, e.id);

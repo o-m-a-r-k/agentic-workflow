@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Blocks writes to agentic-workflow evidence (.wf-evidence/). Every write target is resolved against the
 // session's working directory and any `cd`/`pushd` earlier in the same command, so relative paths are caught.
-// Reads (cat, grep, ls, cp out of evidence, `python3 -c`/`node -e` code that only reads) and redirections elsewhere
+// Reads (cat, grep, ls, cp/install/rsync out of evidence, copies whose literal destination is outside it, `python3 -c`/`node -e` code that only reads) and redirections elsewhere
 // (2>/dev/null) are allowed. Interpreter code that writes, deletes, opens for writing or runs a shell is blocked.
 // Inert outside projects that have `.wf-evidence/`.
 import path from 'node:path';
@@ -80,7 +80,21 @@ export function segments(command) {
   return out;
 }
 
-const WRITERS = new Set(['tee', 'rm', 'mv', 'truncate', 'dd', 'install', 'touch', 'ln', 'chmod', 'rmdir', 'mkdir', 'shred', 'unlink']);
+const WRITERS = new Set(['tee', 'rm', 'mv', 'truncate', 'dd', 'touch', 'ln', 'chmod', 'rmdir', 'mkdir', 'shred', 'unlink']);
+
+// The destination of a copy: `-t DIR` / `--target-directory=DIR` (cp, install), else the last operand. Copying FROM
+// evidence is a read; only a destination inside it is a write. Named failure: copying delivered screenshots out of
+// .wf-evidence/ to show them was refused (`install` and `cp -t` were judged by their source).
+function copyTarget(verb, args, plain) {
+  if (verb !== 'rsync') {
+    for (let i = 0; i < args.length; i++) {
+      const a = args[i];
+      if (a === '-t' || a === '--target-directory' || /^-[a-zA-Z]*t$/.test(a)) return args[i + 1] ?? null;
+      if (a.startsWith('--target-directory=')) return a.slice('--target-directory='.length);
+    }
+  }
+  return plain.length >= 2 ? plain.at(-1) : null;
+}
 
 const INTERPRETER = /^(node|python3?|ruby|perl|deno|bun)$/;
 
@@ -145,7 +159,20 @@ function openWrites(args) {
   return !lits.some((v) => v !== undefined && READ_MODE.test(v));
 }
 
-export function interpreterWrites(code) {
+// A copy whose destination is a literal outside evidence reads the evidence; it is not a write.
+const COPY_CALL = /\b(?:shutil\.(?:copy2?|copyfile|copytree)|(?:fs\.(?:promises\.)?)?(?:copyFileSync|copyFile|cpSync))\s*\(/g;
+function withoutReadCopies(code, cwd) {
+  let out = code;
+  for (const m of [...code.matchAll(COPY_CALL)]) {
+    const dest = literal(callArgs(code, m.index + m[0].length)[1] ?? '');
+    if (dest !== undefined && !inEvidence(path.resolve(cwd ?? process.cwd(), dest))) out = out.replace(m[0], '__read_copy(');
+  }
+  if (!/\bshutil\./.test(out)) out = out.replace(/\bimport\s+shutil\b/g, '');
+  return out;
+}
+
+export function interpreterWrites(rawCode, cwd) {
+  const code = withoutReadCopies(rawCode, cwd);
   if (MUTATORS.test(code)) return true;
   const re = /\bopen(?:Sync)?\s*\(/g;
   for (let m = re.exec(code); m; m = re.exec(code)) if (openWrites(callArgs(code, m.index + m[0].length))) return true;
@@ -176,12 +203,16 @@ export function check(data) {
     if (WRITERS.has(verb) && plain.some((a) => inEvidence(resolve(a.replace(/^of=/, ''))))) return 'this command writes to workflow evidence';
     if (verb === 'dd' && args.some((a) => a.startsWith('of=') && inEvidence(resolve(a.slice(3))))) return 'this command writes to workflow evidence';
     if (verb === 'sed' && args.some((a) => /^(-[a-zA-Z]*i|--in-place)/.test(a)) && plain.some((a) => inEvidence(resolve(a)))) return 'this command edits workflow evidence';
-    if ((verb === 'cp' || verb === 'rsync') && plain.length >= 2 && inEvidence(resolve(plain.at(-1)))) return 'this command copies into workflow evidence';
+    if (verb === 'install' && args.includes('-d') && plain.some((a) => inEvidence(resolve(a)))) return 'this command writes to workflow evidence';
+    if (['cp', 'rsync', 'install', 'ditto'].includes(verb)) {
+      const target = copyTarget(verb, args, plain);
+      if (target && inEvidence(resolve(target))) return 'this command copies into workflow evidence';
+    }
     if (INTERPRETER.test(verb)) {
       if (/^(ruby|perl)$/.test(verb) && args.some((a) => /^-[a-zA-Z]*i/.test(a)) && (inEvidence(cwd) || plain.some((a) => inEvidence(resolve(a))))) return 'this command edits workflow evidence';
       if (args.some((a) => /^-[a-zA-Z]*[ec]$/.test(a) || a === '-p' || a === '--eval')) {
         const code = args.join(' ');
-        if ((code.includes('.wf-evidence') || inEvidence(cwd)) && interpreterWrites(code)) return 'this command writes to workflow evidence';
+        if ((code.includes('.wf-evidence') || inEvidence(cwd)) && interpreterWrites(code, cwd)) return 'this command writes to workflow evidence';
       }
     }
   }

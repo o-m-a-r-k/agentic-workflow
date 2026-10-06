@@ -164,3 +164,90 @@ export function ruleWarnings(root, cfg, commit) {
   }
   return out;
 }
+
+// ---- Design system checks over the attempt's added lines ----
+// Named failure: a UI ticket shipped a hand-rolled <table> instead of the project's shared table component, and data
+// tables without the shared pagination, after a blind review whose prompt only implied "follow the design system".
+// The adapter's `designSystem.rules` are run over the lines this attempt added (adapter at base): a `forbidPattern`
+// hit is an added line that matches it; a `pattern` + `requireWith` hit is the first added line matching `pattern` in a
+// file whose committed text lacks one of the `requireWith` patterns. Each hit is put in the reviewer's bundle and
+// needs a verdict in the closure (`designHits`): `justified` with evidence, or `finding` naming a finding.
+
+// Added lines per changed file, from the committed diff against the attempt's base: { file: [{ line, text }] }.
+export function addedLines(worktree, base) {
+  const diff = git(worktree, ['diff', '-U0', '--no-color', '--no-ext-diff', base, 'HEAD'], { allowFail: true });
+  const out = {};
+  let file = null;
+  let n = 0;
+  for (const l of String(diff ?? '').split('\n')) {
+    if (l.startsWith('+++ ')) {
+      file = l === '+++ /dev/null' ? null : l.slice(4).replace(/^b\//, '');
+      continue;
+    }
+    const h = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(l);
+    if (h) {
+      n = Number(h[1]);
+      continue;
+    }
+    if (!file || l.startsWith('---')) continue;
+    if (l.startsWith('+')) {
+      (out[file] ??= []).push({ line: n, text: l.slice(1) });
+      n += 1;
+    }
+  }
+  return out;
+}
+
+const asList = (v) => (v === undefined || v === null ? [] : Array.isArray(v) ? v : [v]);
+
+export function designChecks(root, trusted, state) {
+  const ds = trusted.designSystem;
+  if (!ds) return null;
+  const rules = (ds.rules ?? []).map((r) => ({ id: r.id, description: r.description, read: asList(r.read), kind: r.forbidPattern !== undefined ? 'forbid' : 'requireWith', paths: r.paths ?? null, except: r.except ?? null }));
+  const multi = Object.keys(state.repos).length > 1;
+  const hits = [];
+  for (const [repo, r] of Object.entries(state.repos)) {
+    if (!r.worktree || !fs.existsSync(r.worktree)) continue;
+    const base = git(r.worktree, ['merge-base', r.baseRef ?? r.base, 'HEAD'], { allowFail: true }) || r.base;
+    const added = addedLines(r.worktree, base);
+    for (const rule of ds.rules ?? []) {
+      if (rule.repo && rule.repo !== repo) continue;
+      const trigger = new RegExp(rule.forbidPattern ?? rule.pattern);
+      for (const [file, lines] of Object.entries(added)) {
+        if (rule.paths && !matchesAny(file, rule.paths)) continue;
+        if (rule.except && matchesAny(file, rule.except)) continue;
+        let missing = [];
+        if (rule.requireWith) {
+          const text = git(r.worktree, ['show', `HEAD:${file}`], { allowFail: true }) ?? '';
+          missing = rule.requireWith.filter((x) => !new RegExp(x).test(text));
+          if (!missing.length) continue;
+        }
+        for (const l of lines) {
+          if (!trigger.test(l.text)) continue;
+          const where = `${multi ? `${repo}/` : ''}${file}:${l.line}`;
+          hits.push({ id: `${rule.id}@${where}`, rule: rule.id, description: rule.description, repo, file, line: l.line, text: l.text.trim().slice(0, 200), ...(missing.length ? { missing } : {}) });
+          if (rule.requireWith) break; // one hit per file: the file lacks the required companion
+        }
+      }
+    }
+  }
+  return { components: ds.components ?? [], rules, hits };
+}
+
+// A verdict per hit: `{ id, verdict: justified|finding, evidence, finding }`.
+export function designVerdicts(hits, closure) {
+  const entries = Array.isArray(closure?.designHits) ? closure.designHits : [];
+  const findings = new Set((closure?.findings ?? []).map((f) => f.id));
+  const problems = [];
+  const verdicts = [];
+  for (const h of hits ?? []) {
+    const e = entries.find((x) => x?.id === h.id);
+    const label = `${h.id} (${h.description}: \`${h.text}\`${h.missing ? `; the file has no ${h.missing.join(', ')}` : ''})`;
+    if (!e) problems.push(`design check ${label}: no verdict`);
+    else if (!['justified', 'finding'].includes(e.verdict)) problems.push(`design check ${h.id}: verdict must be justified or finding, not \`${e.verdict}\``);
+    else if (!String(e.evidence ?? '').trim()) problems.push(`design check ${h.id}: ${e.verdict} needs evidence (why the exception holds, or what is wrong)`);
+    else if (e.verdict === 'finding' && !findings.has(e.finding)) problems.push(`design check ${h.id}: a finding verdict names a finding id of this closure in \`finding\` (known: ${[...findings].join(', ') || 'none'})`);
+    else verdicts.push({ id: h.id, rule: h.rule, verdict: e.verdict, evidence: String(e.evidence), finding: e.verdict === 'finding' ? e.finding : null });
+  }
+  return { problems, verdicts };
+}

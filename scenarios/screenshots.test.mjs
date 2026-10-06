@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { closureFile, commitIn, criteriaFile, goodClosure, ok, singleRepoProject, state, toAccepted, wf } from './helpers.mjs';
+import { closureFile, commitIn, criteriaFile, goodClosure, ok, postedComment, rawReadback, singleRepoProject, state, summaryFile, toAccepted, wf } from './helpers.mjs';
 import { proposeCaption } from '../engine/lifecycle.mjs';
 
 // The owner must see every delivered screenshot in the chat, captioned with the state it shows, and the ticket must
@@ -10,9 +10,9 @@ import { proposeCaption } from '../engine/lifecycle.mjs';
 // attempt open until it is recorded.
 
 const ignore = { '.gitignore': '.wf-evidence/\n.wf-worktrees/\nshots/\n' };
-const shownFile = (dir, entries) => {
+const shownFile = (dir, entries, anomalies = 'none seen') => {
   const f = path.join(dir, `shown-${Math.random().toString(36).slice(2)}.json`);
-  fs.writeFileSync(f, JSON.stringify({ screenshots: entries }));
+  fs.writeFileSync(f, JSON.stringify({ screenshots: entries, anomalies }));
   return f;
 };
 
@@ -85,7 +85,7 @@ test('delivery without screenshots: the statement why is printed and recorded; n
   assert.match(wf(root, ['shown', '--file', shownFile(base, []), '--attempt', id]).err, /no screenshots were delivered for ENG-73; the statement is already recorded/);
   assert.doesNotMatch(ok(wf(root, ['resume', '--attempt', id])).out, /show the owner/);
   const back = path.join(base, 'back.json');
-  fs.writeFileSync(back, JSON.stringify({ issue: { identifier: 'ENG-73', state: { name: 'Ready for UAT' } }, attachments: [] }));
+  fs.writeFileSync(back, JSON.stringify(rawReadback('ENG-73', 'Ready for UAT')));
   ok(wf(root, ['tracker', 'record', '--event', 'delivered', '--capture', back, '--attempt', id]));
   assert.equal(state(root, id).phase, 'done');
   ok(wf(root, ['export', '--attempt', id]));
@@ -143,7 +143,7 @@ test('delivery narrow: the owner keeps the ticket\'s files of an over-broad set,
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', e.id]));
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r', { screenshotsInspected: all.map((a) => a.sha256) })), '--attempt', e.id]));
   ok(wf(root, ['accept', '--attempt', e.id]));
-  assert.match(ok(wf(root, ['deliver', '--attempt', e.id])).out, /SHOW TO OWNER \(5 delivered screenshot\(s\) for ENG-76\)/);
+  assert.match(ok(wf(root, ['deliver', '--attempt', e.id, '--summary-file', summaryFile(base)])).out, /SHOW TO OWNER \(5 delivered screenshot\(s\) for ENG-76\)/);
   assert.equal(state(root, e.id).tracker.pending.find((a) => a.op === 'attach').files.length, 5);
 
   const narrow = (args) => wf(root, ['delivery', 'narrow', ...args, '--attempt', e.id]);
@@ -179,11 +179,10 @@ test('delivery narrow: the owner keeps the ticket\'s files of an over-broad set,
 
   const titles = s.delivery.screenshots.screenshots.map((f) => f.title);
   const after = new Date(Date.now() + 1000).toISOString();
-  // The raw get_issue JSON as the Linear connector returns it (identifier in `id`, status a string, attachments a
-  // list) and the list_comments response, saved together unchanged.
-  const getIssue = { id: item, uuid: '00000000-0000-0000-0000-000000000000', title: 't', description: 'd', status: 'Ready for UAT', statusType: 'started', attachments: titles.map((t, i) => ({ id: `a${i}`, title: t, subtitle: `Home, variant ${i + 1}`, url: `https://uploads.linear.app/x/${i}?signature=s` })) };
-  const listComments = { comments: [{ id: 'c1', body: `${item} is ready for UAT.\n\nUAT scope:\n- a shows the new text`, createdAt: after, updatedAt: after }], hasNextPage: false };
-  ok(wf(root, ['tracker', 'record', '--event', 'delivered', '--capture', cap({ issue: getIssue, comments: listComments }), '--attempt', e.id]));
+  // The raw get_issue and list_comments results, saved together unchanged; the comment is the one `wf` rendered.
+  const assets = Object.fromEntries(titles.map((t, i) => [t, `https://uploads.linear.app/x/${i}`]));
+  const attachments = titles.map((t, i) => ({ id: `a${i}`, title: t, subtitle: `Home, variant ${i + 1}`, url: assets[t] }));
+  ok(wf(root, ['tracker', 'record', '--event', 'delivered', '--capture', cap(rawReadback(item, 'Ready for UAT', { attachments, comments: [{ id: 'c1', body: postedComment(root, e.id, assets), createdAt: after }] })), '--attempt', e.id]));
   s = state(root, e.id);
   assert.equal(s.phase, 'done');
   assert.equal(s.tracker.done.at(-1).attachments.length, 2, 'only the kept files were required on the ticket');
@@ -263,9 +262,9 @@ test('delivery narrow on an attempt delivered before 0.1.11: the pending attach 
   assert.match(wf(root, ['shown', '--file', shownFile(base, []), '--attempt', e.id]).err, /delivered before screenshots were recorded/);
 
   const upload = (t) => ({ id: t, title: t, url: `https://uploads.linear.app/x/${t}` });
-  const missing = wf(root, ['tracker', 'record', '--event', 'delivered', '--capture', cap({ id: item, status: 'Ready for UAT', attachments: [upload('mine-a.png')] }), '--attempt', e.id]);
+  const missing = wf(root, ['tracker', 'record', '--event', 'delivered', '--capture', cap(rawReadback(item, 'Ready for UAT', { attachments: [upload('mine-a.png')] }).issue), '--attempt', e.id]);
   assert.match(missing.err, /1 of 2 delivered screenshot\(s\) not attached[\s\S]*mine-b\.png/);
-  ok(wf(root, ['tracker', 'record', '--event', 'delivered', '--capture', cap({ id: item, status: 'Ready for UAT', attachments: [upload('mine-a.png'), upload('mine-b.png')] }), '--attempt', e.id]));
+  ok(wf(root, ['tracker', 'record', '--event', 'delivered', '--capture', cap(rawReadback(item, 'Ready for UAT', { attachments: [upload('mine-a.png'), upload('mine-b.png')] }).issue), '--attempt', e.id]));
   s = state(root, e.id);
   assert.equal(s.phase, 'done');
   assert.deepEqual(s.tracker.done.at(-1).attachments.map((a) => a.title).sort(), ['mine-a.png', 'mine-b.png']);

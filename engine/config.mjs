@@ -134,6 +134,7 @@ function normalize(raw, source) {
     gate: { maxParallelSteps: 1, leases: {}, steps: [], ...(raw.gate ?? {}) },
     components: raw.components ?? [],
     review: { rules: raw.review?.rules ?? [] },
+    designSystem: raw.designSystem ?? null,
     repos: [],
   };
   cfg.classes = mergeClasses(raw.classes, fail);
@@ -217,6 +218,47 @@ function normalize(raw, source) {
       if (!Array.isArray(r.read) || !r.read.length || r.read.some((d) => typeof d !== 'string' || !d)) fail(`review rule \`${r.id}\`: \`read\` must list at least one document path`);
       if (r.paths !== undefined && (!Array.isArray(r.paths) || !r.paths.length || r.paths.some((g) => typeof g !== 'string' || !g))) fail(`review rule \`${r.id}\`: \`paths\` must be a list of globs (omit it to use the first document's \`paths:\` frontmatter)`);
       if (r.repo !== undefined && !repoNames.has(r.repo)) fail(`review rule \`${r.id}\`: unknown repo \`${r.repo}\``);
+    }
+  }
+  // Design system: the shared components and machine-checkable bans run over the attempt's added lines (engine/rules.mjs).
+  if (cfg.designSystem !== null) {
+    const ds = cfg.designSystem;
+    const regex = (where, v) => {
+      try {
+        new RegExp(v);
+        return true;
+      } catch (error) {
+        fail(`${where}: invalid regex \`${v}\` (${error.message})`);
+        return false;
+      }
+    };
+    const globs = (v) => v === undefined || (Array.isArray(v) && v.length && v.every((g) => typeof g === 'string' && g));
+    if (typeof ds !== 'object' || Array.isArray(ds)) fail('`designSystem` must be a mapping { components: [{ name, path, use }], rules: [{ id, description, forbidPattern | pattern + requireWith, paths, except, read }] }');
+    else {
+      if (ds.components !== undefined && (!Array.isArray(ds.components) || ds.components.some((c) => !c?.name))) fail('`designSystem.components` must be a list of { name, path?, use? }');
+      if (!Array.isArray(ds.rules ?? [])) fail('`designSystem.rules` must be a list');
+      const ids = new Set();
+      for (const r of ds.rules ?? []) {
+        const where = `designSystem rule \`${r?.id ?? '?'}\``;
+        if (!r?.id || typeof r.id !== 'string') {
+          fail('each designSystem rule needs a string `id`');
+          continue;
+        }
+        if (ids.has(r.id)) fail(`duplicate designSystem rule \`${r.id}\``);
+        ids.add(r.id);
+        if (!String(r.description ?? '').trim()) fail(`${where}: \`description\` says what the rule requires, in words the reviewer answers`);
+        const trigger = r.forbidPattern ?? r.pattern;
+        if (typeof trigger !== 'string' || !trigger) fail(`${where}: needs \`forbidPattern\` (a regex an added line must not match) or \`pattern\` with \`requireWith\``);
+        else regex(where, trigger);
+        if (r.forbidPattern !== undefined && r.pattern !== undefined) fail(`${where}: give \`forbidPattern\` or \`pattern\`, not both`);
+        if (r.requireWith !== undefined) {
+          if (!Array.isArray(r.requireWith) || !r.requireWith.length || r.requireWith.some((x) => typeof x !== 'string' || !x)) fail(`${where}: \`requireWith\` must be a list of regexes the changed file must also match`);
+          else r.requireWith.forEach((x) => regex(where, x));
+        } else if (r.pattern !== undefined) fail(`${where}: \`pattern\` needs \`requireWith\` (use \`forbidPattern\` for a ban)`);
+        if (!globs(r.paths) || !globs(r.except)) fail(`${where}: \`paths\` and \`except\` must be lists of globs`);
+        if (r.repo !== undefined && !repoNames.has(r.repo)) fail(`${where}: unknown repo \`${r.repo}\``);
+        if (r.read !== undefined && typeof r.read !== 'string' && !(Array.isArray(r.read) && r.read.every((x) => typeof x === 'string'))) fail(`${where}: \`read\` is a document path (or a list of them)`);
+      }
     }
   }
   for (const sk of cfg.requires.skills) {

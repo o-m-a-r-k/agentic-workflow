@@ -26,6 +26,12 @@ Each scenario runs the real `wf` CLI against temporary git repositories with bar
 | Partial delivery | One repo delivered, the next fails; rerunning delivers only the rest | delivery |
 | Batch | Members defer heavy steps and cannot deliver alone; the batch runs heavy steps once and delivers every member | delivery |
 | Tracker | Status, comment (template lines, UAT bullets, no internals) and screenshot attachments verified from the readback; reviewer must inspect every screenshot | delivery |
+| Delivered comment | Owner summary required before delivery (verbatim criteria and "not user visible" refused); UAT scope from user-visible criteria only; screenshots inline under captions; known limits from `finalHandoff`, dropped criteria and anomaly follow-ups | handoff-quality, gameday |
+| Visible screenshots | The readback refuses a comment that does not embed every delivered screenshot by its uploaded asset; the API mode uploads first and embeds | handoff-quality, durable |
+| Raw readback | A hand-built, abridged or signature-stripped `delivered` capture is refused with how to save the raw output; the posted body must match the rendered one | handoff-quality, gameday |
+| Viewable after close | Closing exports the delivered set by title, sha256-checked; `wf export screenshots --to`; resume names the folder; the guard allows copies out of evidence and refuses writes into it | handoff-quality |
+| Anomalies | `wf shown` needs `anomalies` ("none seen" or entries with a cause or follow-up; "cosmetic" needs evidence); shown in status and export | handoff-quality |
+| Design system | Bans and required companions run over added lines only; hits in the reviewer bundle; a closure without a verdict per hit is refused; planner sees the components; config validated | handoff-quality |
 | Merge requests | A project delivery adapter waits for merge (ticket moves to In Review), then reads back | delivery |
 | Work classes | `wf sync` writes one implementer per class with its effort (Claude frontmatter, Codex TOML) and removes stale generated agents; unknown classes, undocumented efforts and old per-role fields are refused | classes |
 | Work items | Duplicate ids, unknown criteria and unknown classes are refused; uncovered criteria are shown; `--work` handoffs name the agent type and record class and effort; `wf resume` lists open work items | classes |

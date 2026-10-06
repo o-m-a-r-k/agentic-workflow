@@ -99,3 +99,28 @@ export function toAccepted(root, base, { item = 'ENG-1', repo = 'app', change = 
 }
 
 export const state = (root, id) => ok(wf(root, ['resume', '--attempt', id, '--json'])).json();
+
+// Raw Linear readbacks, shaped as the Linear MCP tools return them (get_issue, list_comments): every field the engine
+// requires of a delivered capture, uploads.linear.app urls signed as Linear signs them on read.
+const sign = (url) => (/^https:\/\/uploads\.linear\.app\//.test(url) && !/[?&]signature=/.test(url) ? `${url}?signature=s` : url);
+export const signBody = (body) => String(body).replace(/(https:\/\/uploads\.linear\.app\/[^)\s]+)/g, (u) => sign(u));
+export function rawIssue(item, status, { attachments = [], description = 'd' } = {}) {
+  const at = '2026-01-01T00:00:00.000Z';
+  return { id: item, uuid: '00000000-0000-0000-0000-000000000000', title: 't', description, priority: { value: 0, name: 'No priority' }, url: `https://linear.example.test/${item}`, createdAt: at, updatedAt: at, status, statusType: 'started', labels: [], attachments: attachments.map((a, i) => ({ id: a.id ?? `a${i}`, title: a.title, subtitle: a.subtitle ?? null, url: sign(a.url) })), documents: [], stateHistory: [{ state: { id: 's', name: status, type: 'started' }, startedAt: at, endedAt: null }], createdBy: 'o', team: 't' };
+}
+export function rawComments(comments = []) {
+  return { comments: comments.map((c, i) => ({ id: c.id ?? `c${i}`, body: signBody(c.body), attachments: [], createdAt: c.createdAt, updatedAt: c.updatedAt ?? c.createdAt, parentId: null, resolvedAt: null, quotedText: null, author: { id: 'u', name: 'Owner' }, onBehalfOf: null })), hasNextPage: false };
+}
+export const rawReadback = (item, status, { attachments = [], comments = [] } = {}) => ({ issue: rawIssue(item, status, { attachments }), comments: rawComments(comments) });
+
+// The delivered comment `wf` rendered, as posted: each {assetUrl:<title>} replaced by that upload's asset url.
+export function postedComment(root, id, assets = {}) {
+  const body = fs.readFileSync(path.join(root, '.wf-evidence', 'attempts', id, 'delivery', 'delivered-comment.md'), 'utf8');
+  return body.replace(/\{assetUrl:([^}]+)\}/g, (m, t) => assets[t] ?? m);
+}
+
+export function summaryFile(dir, text = 'The home screen now shows the new text.') {
+  const f = path.join(dir, `summary-${Date.now()}-${Math.random().toString(36).slice(2)}.md`);
+  fs.writeFileSync(f, `${text}\n`);
+  return f;
+}

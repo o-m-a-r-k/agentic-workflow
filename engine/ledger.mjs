@@ -221,8 +221,17 @@ export function reduce(entries) {
         break;
       }
       case 'delivery.shown':
-        s.delivery.shown = { screenshots: d.screenshots ?? [], none: d.none ?? null, auto: d.auto === true, raw: d.raw ?? null, at: e.at, by: e.actor };
+        s.delivery.shown = { screenshots: d.screenshots ?? [], none: d.none ?? null, auto: d.auto === true, anomalies: d.anomalies ?? null, raw: d.raw ?? null, at: e.at, by: e.actor };
         if (!d.auto) s.delivery.shownRecords = (s.delivery.shownRecords ?? 0) + 1;
+        break;
+      // The owner's plain-language summary for the delivered comment (the latest one counts).
+      case 'delivery.summary':
+        s.delivery.summary = { text: d.text, sha256: d.sha256, raw: d.raw ?? null, at: e.at, by: e.actor };
+        s.delivery.summaries = (s.delivery.summaries ?? 0) + 1;
+        break;
+      // `wf export screenshots` (and closing): viewable copies of the delivered set outside the evidence.
+      case 'screenshots.exported':
+        s.delivery.exported = { dir: d.dir, files: d.files ?? [], at: e.at };
         break;
       case 'batch.member.delivered':
         s.delivery.completedAt = e.at;

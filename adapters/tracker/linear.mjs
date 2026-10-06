@@ -16,6 +16,7 @@ const ATTACH = 'mutation Attach($issueId: String!, $title: String!, $subtitle: S
 const UPLOAD_HOST = /^https:\/\/uploads\.linear\.app\//;
 const TYPES = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif' };
 
+const imageUrls = (body) => [...String(body ?? '').matchAll(/!\[[^\]]*\]\(([^)\s]+)\)/g)].map((m) => m[1]);
 const first = (...values) => values.find((v) => v !== undefined && v !== null);
 // A connection (`{ nodes }`), a list_comments response (`{ comments, hasNextPage }`), or a plain list.
 const list = (v, key) => (Array.isArray(v) ? v : Array.isArray(v?.nodes) ? v.nodes : Array.isArray(v?.[key]) ? v[key] : []);
@@ -32,6 +33,13 @@ const unwrap = (v) => {
   }).filter(Boolean);
   return parsed.length === 1 ? parsed[0] : parsed.length ? parsed : v;
 };
+// The fields the Linear MCP tools always return. A capture missing any of them was rebuilt by hand, not saved.
+const ISSUE_FIELDS = ['id', 'uuid', 'title', 'status', 'statusType', 'createdAt', 'updatedAt', 'stateHistory', 'attachments'];
+const ATTACHMENT_FIELDS = ['id', 'title', 'subtitle', 'url'];
+const COMMENT_FIELDS = ['id', 'body', 'createdAt', 'updatedAt', 'author'];
+const missingKeys = (o, keys) => (o && typeof o === 'object' && !Array.isArray(o) ? keys.filter((k) => !(k in o)) : keys);
+// Linear signs every uploads.linear.app url it returns on read; an unsigned one was edited.
+const unsigned = (url) => UPLOAD_HOST.test(String(url ?? '')) && !/[?&]signature=/.test(String(url));
 const isIssue = (v) => v && typeof v === 'object' && !Array.isArray(v) && (v.identifier || v.id) && ('title' in v || 'status' in v || 'state' in v);
 
 export default {
@@ -39,9 +47,47 @@ export default {
   operations: {
     readIssue: 'Linear get_issue (include comments and attachments) or list_comments',
     setStatus: 'Linear save_issue with the status name',
-    comment: 'Linear save_comment; reuse an existing comment with the same body instead of posting a duplicate',
-    attach: 'Upload each file as a real attachment, one file at a time (a signed upload url expires in 60 s): Linear prepare_attachment_upload { issue, filename: <title>, contentType: image/png (or the file\'s type), size: <exact bytes, e.g. wc -c < path>, title: <title>, subtitle: <caption> }; then PUT the raw bytes to uploadRequest.url with every uploadRequest.headers entry sent verbatim (curl -X PUT --data-binary @<path> -H ...; never base64); then create_attachment_from_upload { issue, assetUrl, title: <title>, subtitle: <caption> }. Title is the file name `wf` lists, subtitle the caption recorded with `wf shown`. Never create a link attachment or paste the image into a comment: the readback must show an uploads.linear.app attachment with that title and subtitle',
+    comment: 'Linear save_comment with the body `wf` rendered (delivery/delivered-comment.md), each {assetUrl:<title>} replaced by the assetUrl that upload returned, so every screenshot shows inline; reuse an existing comment with the same body instead of posting a duplicate',
+    attach: 'Upload each file as a real attachment, one file at a time (a signed upload url expires in 60 s): Linear prepare_attachment_upload { issue, filename: <title>, contentType: image/png (or the file\'s type), size: <exact bytes, e.g. wc -c < path>, title: <title>, subtitle: <caption> }; then PUT the raw bytes to uploadRequest.url with every uploadRequest.headers entry sent verbatim (curl -X PUT --data-binary @<path> -H ...; never base64); then create_attachment_from_upload { issue, assetUrl, title: <title>, subtitle: <caption> }. Title is the file name `wf` lists, subtitle the caption recorded with `wf shown`. Never create a link attachment: the readback must show an uploads.linear.app attachment with that title and subtitle. Keep each assetUrl: the delivered comment embeds it as `![<title>](<assetUrl>)` (an attachment alone shows only as "added N links")',
     readBack: 'Linear get_issue (its response carries the attachments with title, subtitle and url) + list_comments, saved together as JSON',
+  },
+  saveRaw: 'run Linear get_issue (id) and list_comments (issueId) and keep each result as returned. In Claude Code a long tool result is saved to a file and the output names its path: copy that file (`cp <saved path> issue.json`); otherwise write the whole JSON text the tool printed to the file unchanged. Then combine them without editing: `jq -s \'{issue: .[0], comments: .[1]}\' issue.json comments.json > capture.json` (or pass the list [get_issue, list_comments] as saved)',
+  // What a raw get_issue + list_comments capture always carries; problems name what is missing.
+  rawProblems(input, { comments = false } = {}) {
+    let raw = unwrap(input);
+    let issue = null;
+    let list = null;
+    if (Array.isArray(raw)) {
+      const parts = raw.map(unwrap);
+      issue = parts.find((p) => isIssue(p)) ?? null;
+      list = parts.find((p) => p && Array.isArray(p.comments) && !isIssue(p)) ?? null;
+    } else if (raw && typeof raw === 'object' && 'issue' in raw) {
+      issue = unwrap(raw.issue);
+      list = 'comments' in raw ? unwrap(raw.comments) : null;
+    } else issue = raw;
+    const out = [];
+    if (!issue || typeof issue !== 'object' || Array.isArray(issue)) return ['no get_issue result'];
+    if (issue.via === 'linear-api' || raw?.via === 'linear-api') out.push('it claims to be the engine\'s API readback, which only `wf` itself records');
+    const mi = missingKeys(issue, ISSUE_FIELDS);
+    if (mi.length) out.push(`get_issue fields missing: ${mi.join(', ')}`);
+    for (const a of Array.isArray(issue.attachments) ? issue.attachments : []) {
+      const ma = missingKeys(a, ATTACHMENT_FIELDS);
+      if (ma.length) out.push(`attachment ${a?.title ?? a?.id ?? '?'} lacks ${ma.join(', ')}`);
+      else if (unsigned(a.url)) out.push(`attachment ${a.title}: its uploads.linear.app url has no signature (Linear signs every url it returns)`);
+    }
+    if (comments) {
+      if (!list || Array.isArray(list) || !Array.isArray(list.comments)) out.push('no list_comments result (`{ comments, hasNextPage }` as the tool returns it)');
+      else {
+        if (!('hasNextPage' in list)) out.push('list_comments result lacks hasNextPage');
+        else if (list.hasNextPage === true) out.push('list_comments has more pages; read until hasNextPage is false and save every page');
+        for (const c of list.comments) {
+          const mc = missingKeys(c, COMMENT_FIELDS);
+          if (mc.length) out.push(`comment ${c?.id ?? '?'} lacks ${mc.join(', ')}`);
+          else if (imageUrls(c.body).some(unsigned)) out.push(`comment ${c.id}: an embedded uploads.linear.app image url has no signature (Linear signs on read)`);
+        }
+      }
+    }
+    return out;
   },
   captureShape: '{ "issue": <get_issue response, unchanged>, "comments": <list_comments response, unchanged> } (get_issue alone is enough when no comment is checked)',
   // An uploaded file, not a link: what `wf tracker record` requires of every delivered screenshot.
@@ -63,25 +109,39 @@ export default {
         return issue;
       };
       let issue = await read();
-      for (const a of actions) {
+      // Uploads first: the comment embeds each one by its asset url.
+      const assets = {};
+      for (const x of issue.attachments?.nodes ?? []) if (UPLOAD_HOST.test(x.url ?? '')) assets[x.title] = String(x.url).split('?')[0];
+      const ordered = [...actions].sort((x, y) => (x.op === 'attach' ? -1 : 0) - (y.op === 'attach' ? -1 : 0));
+      for (const a of ordered) {
         if (a.op === 'setStatus') {
           if (issue.state?.name === a.status || (a.unless ?? []).includes(issue.state?.name)) continue;
           const state = issue.team?.states?.nodes?.find((x) => x.name === a.status);
           if (!state) throw new Error(`Linear API: no workflow state named "${a.status}" in the issue's team`);
           await gql(UPDATE, { id: issue.id, stateId: state.id });
         } else if (a.op === 'comment') {
-          if (a.reuseExisting && (issue.comments?.nodes ?? []).some((c) => c.body === a.body)) continue;
-          await gql(COMMENT, { issueId: issue.id, body: a.body });
+          if (!a.body) continue;
+          const body = a.body.replace(/\{assetUrl:([^}]+)\}/g, (m, t) => assets[t] ?? m);
+          const left = body.match(/\{assetUrl:[^}]+\}/g);
+          if (left) throw new Error(`Linear API: no uploaded asset for ${left.join(', ')}`);
+          const same = (x) => x.replace(/(https:\/\/uploads\.linear\.app\/[^)\s?]+)\?[^)\s]*/g, '$1');
+          if (a.reuseExisting && (issue.comments?.nodes ?? []).some((c) => same(c.body) === same(body))) continue;
+          await gql(COMMENT, { issueId: issue.id, body });
         } else if (a.op === 'attach') {
           for (const f of a.files) {
             const name = f.title ?? path.basename(f.path);
-            if ((issue.attachments?.nodes ?? []).some((x) => x.title === name && UPLOAD_HOST.test(x.url ?? '') && (x.subtitle ?? '') === (f.caption ?? ''))) continue;
+            const existing = (issue.attachments?.nodes ?? []).find((x) => x.title === name && UPLOAD_HOST.test(x.url ?? '') && (x.subtitle ?? '') === (f.caption ?? ''));
+            if (existing) {
+              assets[name] = String(existing.url).split('?')[0];
+              continue;
+            }
             const body = fs.readFileSync(f.path);
             const contentType = TYPES[path.extname(name).toLowerCase()] ?? 'application/octet-stream';
             const up = (await gql(UPLOAD, { contentType, filename: name, size: body.length })).fileUpload.uploadFile;
             const put = await fetch(up.uploadUrl, { method: 'PUT', headers: { 'content-type': contentType, 'cache-control': 'public, max-age=31536000', ...Object.fromEntries((up.headers ?? []).map((h) => [h.key, h.value])) }, body });
             if (!put.ok) throw new Error(`Linear upload of ${name} failed: ${put.status}`);
             await gql(ATTACH, { issueId: issue.id, title: name, subtitle: f.caption ?? null, url: up.assetUrl });
+            assets[name] = up.assetUrl;
           }
         }
       }

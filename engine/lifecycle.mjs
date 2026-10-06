@@ -10,8 +10,8 @@ import { changedForStep, deliveryOrder, impact, inside, packageOf } from './topo
 import { findSkill } from './skills.mjs';
 import { lastFencedYaml, lastModel, readTranscript, sessionModel, subagentModel, subagentTranscripts } from './telemetry.mjs';
 import { outsidePlan, outsideVerdicts } from './scope.mjs';
-import { emitTrackerEvent } from './tracker.mjs';
-import { requiredSkills, reviewRules, ruleVerdicts, skillFiles, unreadDocs } from './rules.mjs';
+import { commentFile, emitTrackerEvent, needsSummary, recordSummary, writeDeliveredComment } from './tracker.mjs';
+import { designChecks, designVerdicts, requiredSkills, reviewRules, ruleVerdicts, skillFiles, unreadDocs } from './rules.mjs';
 import { home, startPromptFor, verifyAgent } from './provenance.mjs';
 import { WfError, YAML, canonical, git, hashFile, hashValue, matchesAny, readJson, refuse, run, sessionIdentity, writeImmutable, writeJson } from './util.mjs';
 
@@ -44,6 +44,20 @@ export function outsideWarning(root, state) {
   const files = outsideFiles(root, state);
   if (!files?.length) return null;
   return withAttempt(root, state, `${files.length} changed file(s) outside the plan: ${files.join(', ')} — amend the criteria (\`wf criteria amend --file <f> --reason "why"\`) for an intended change, or fix it, before the review; the reviewer must give each a verdict (covered by a criterion, or a finding)`);
+}
+
+// Design-system hits on the lines this attempt added, for the owner (gate, check, status). Never a refusal here: the
+// reviewer answers each one, and its closure is refused without.
+export function designWarning(root, state) {
+  let trusted;
+  try {
+    trusted = loadConfigAtCommit(root, loadConfig(root), state.adapterBase);
+  } catch {
+    return null;
+  }
+  const d = designChecks(root, trusted, state);
+  if (!d?.hits.length) return null;
+  return `${d.hits.length} design-system hit(s) on added lines; the reviewer must give each a verdict (justified with evidence, or a finding), so fix any that are not deliberate before the review:\n${d.hits.slice(0, 10).map((h) => `    - ${h.id}: ${h.description}${h.missing ? ` (file lacks ${h.missing.join(', ')})` : ''}`).join('\n')}${d.hits.length > 10 ? `\n    … ${d.hits.length - 10} more` : ''}`;
 }
 
 // A handoff bundle as written (a missing or unreadable one reads as empty: nothing listed, nothing required).
@@ -334,6 +348,9 @@ export function handoff(root, role, options) {
     // Project rule documents this change falls under, and the skills this round needs: a pure function of the adapter
     // at base and the changed files, the same for every reviewer. Each rule needs a verdict in the closure.
     rules: role === 'reviewer' ? reviewRules(root, trusted, state, changed) : undefined,
+    // The project's shared components and design-system rules (adapter at base). For the reviewer, every rule hit on
+    // the lines this attempt added: each needs a verdict in `designHits` (justified with evidence, or a finding).
+    designSystem: ['planner', 'reviewer', 'implementer'].includes(role) ? (role === 'reviewer' ? designChecks(root, trusted, state) : trusted.designSystem ? { components: trusted.designSystem.components ?? [], rules: (trusted.designSystem.rules ?? []).map((r) => ({ id: r.id, description: r.description, read: r.read ?? null })) } : null) : undefined,
     skills: role === 'reviewer' ? skillFiles(root, requiredSkills(trusted, role, state, changed), runtime) : undefined,
     // Changed files no plan anchor or test path names (docs-only, ignored and evidence files left out). Each needs the
     // reviewer's verdict: covered by a criterion id, or a finding.
@@ -345,9 +362,9 @@ export function handoff(root, role, options) {
     // Outside .wf-evidence/: the reviewer writes it, `wf review` copies it into the evidence.
     reviewClosureFile: role === 'reviewer' ? path.join(root, '.wf-worktrees', state.id, '_review', `closure-${n}.json`) : null,
     instructions: {
-      planner: 'Read the issue and the code. Do not change any file. Return your plan as one ```yaml fenced block, last in your reply: { plan: { summary, contract, anchors, tests: { changed, run }, doNotRun, externalServices, agentSplit }, criteria: [{ id: C1, text, uat }], work: [{ id: W1, criteria: [C1], repos, class, why }] } (work is optional; classes: see your role file). The owner freezes it from your transcript unchanged. Leave no background command, monitor or sleep loop running when you report.',
+      planner: 'Read the issue and the code. Do not change any file. When the bundle has `designSystem` and the ticket changes a UI surface, add a criterion "uses the shared components: <the ones from designSystem.components this surface needs>" with a uat a person can check. Return your plan as one ```yaml fenced block, last in your reply: { plan: { summary, contract, anchors, tests: { changed, run }, doNotRun, externalServices, agentSplit }, criteria: [{ id: C1, text, uat }], work: [{ id: W1, criteria: [C1], repos, class, why }] } (work is optional; classes: see your role file). The owner freezes it from your transcript unchanged. Leave no background command, monitor or sleep loop running when you report.',
       implementer: "Done means `check.command` passes for your repos (it runs the light steps listed under `check`; it never counts as the gate). Implement against the frozen criteria and the plan in the worktrees above: follow `plan.contract`, start from `plan.anchors`, while iterating run only `plan.tests.run` and the specs you changed, never what `plan.doNotRun` lists, and keep to `plan.externalServices` and `plan.agentSplit`. Write tests only for real behaviour. Before finishing run the repo's lint and full unit suite once, in the foreground. Commit at stage boundaries and everything when done. If `work` is set, do that work item only; if it turns out to touch something a stronger class covers, stop and tell the owner. Before you report, stop every background command, monitor or sleep loop you started: a waiter left running keeps notifying the owner after you are done.",
-      reviewer: 'Review the whole change against the frozen criteria, and the gate evidence when `gate.passedOnThisTree` is true (then open every screenshot listed under `gate.screenshots`, which are exactly the files `gate.artifacts` lists per glob, and record the sha256 of each one you viewed; a file no glob lists is never required; a step whose package did not change needs nothing; a step marked `uncovered` matched nothing although this ticket changed its package: judge whether the ticket needed a capture there and add `noEvidence: [{ step, reason }]` saying why none is needed, or raise a finding). When it is false, no gate has passed on this tree yet: judge the diff and list no screenshots. You did not write this change. Everything you need is in this bundle; judge the whole change yourself. Read every document under `rules` (each `read` path) and every skill under `skills` (the Skill tool, or its file) in this bundle: they add to the whole review and never narrow it. Give each rule a verdict with one line of evidence (file:line or the document section): `rules: [{ rule, verdict: complies|finding|not-applicable, evidence, finding }]` (`finding` names your finding id when the verdict is finding); a rule marked `docChangedByTicket` had its document changed by this ticket: judge against the copy under `read`, which is the base version. Write the closure file: { reviewer, findings: [{ id, severity, summary, status: open|fixed|verified-nonissue, evidence, work }], criteria: [{ id, evidence: { kind: test|screenshot|output|not-applicable|dropped-with-reason, ref, reason } }] (a screenshot ref is the sha256 or source of a file in `gate.artifacts`), screenshotsInspected: [sha256], noEvidence: [{ step, reason }], rules: [{ rule, verdict, evidence, finding }], outsidePlan: [{ file, verdict: covered|finding, by, evidence }] } (one outsidePlan entry per file the bundle lists under `outsidePlan`: `covered` when a criterion covers that change, with its id in `by`; otherwise `finding` with your finding id in `by`). Then run `wf review --closure <file>`. Only after your closure is recorded, `wf review` may list findings from earlier rounds for you to verify against the code: then add `priorFindings: [{ round, id, status: fixed|verified-nonissue|open, evidence }]` to the same file, change nothing else, and run `wf review --closure <file>` again.',
+      reviewer: 'Review the whole change against the frozen criteria, and the gate evidence when `gate.passedOnThisTree` is true (then open every screenshot listed under `gate.screenshots`, which are exactly the files `gate.artifacts` lists per glob, and record the sha256 of each one you viewed; a file no glob lists is never required; a step whose package did not change needs nothing; a step marked `uncovered` matched nothing although this ticket changed its package: judge whether the ticket needed a capture there and add `noEvidence: [{ step, reason }]` saying why none is needed, or raise a finding). When it is false, no gate has passed on this tree yet: judge the diff and list no screenshots. You did not write this change. Everything you need is in this bundle; judge the whole change yourself. Read every document under `rules` (each `read` path) and every skill under `skills` (the Skill tool, or its file) in this bundle: they add to the whole review and never narrow it. Give each rule a verdict with one line of evidence (file:line or the document section): `rules: [{ rule, verdict: complies|finding|not-applicable, evidence, finding }]` (`finding` names your finding id when the verdict is finding); a rule marked `docChangedByTicket` had its document changed by this ticket: judge against the copy under `read`, which is the base version. Write the closure file: { reviewer, findings: [{ id, severity, summary, status: open|fixed|verified-nonissue, evidence, work }], criteria: [{ id, evidence: { kind: test|screenshot|output|not-applicable|dropped-with-reason, ref, reason } }] (a screenshot ref is the sha256 or source of a file in `gate.artifacts`), screenshotsInspected: [sha256], noEvidence: [{ step, reason }], rules: [{ rule, verdict, evidence, finding }], outsidePlan: [{ file, verdict: covered|finding, by, evidence }] } (one outsidePlan entry per file the bundle lists under `outsidePlan`: `covered` when a criterion covers that change, with its id in `by`; otherwise `finding` with your finding id in `by`). When the bundle has \`designSystem\`: for every changed UI file list each table, list, form and dialog it renders and name the shared component used (from \`designSystem.components\`) or the justified exception, and give every \`designSystem.hits\` entry a verdict: \`designHits: [{ id, verdict: justified|finding, evidence, finding }]\` (a closure missing one is refused). Then run `wf review --closure <file>`. Only after your closure is recorded, `wf review` may list findings from earlier rounds for you to verify against the code: then add `priorFindings: [{ round, id, status: fixed|verified-nonissue|open, evidence }]` to the same file, change nothing else, and run `wf review --closure <file>` again.',
       tester: 'Write requirement expectations from the issue before reading the implementation, then map each to gate tests.',
     }[role],
   };
@@ -457,6 +474,9 @@ export function recordReview(root, options) {
     if (missing.length) throw refuse(`the reviewer's transcript shows no successful read of ${missing.length} document(s) its bundle lists:\n  - ${missing.join('\n  - ')}`, 'start a fresh reviewer round: `wf handoff reviewer --agent <new id>` with only the printed line; it reads every document under `rules` and `skills`');
     reads = { status: 'verified', reason: null };
   } else if (provenance.status === 'verified') reads = { status: 'verified', reason: 'nothing to read' };
+  // Every design-system hit in the reviewer's bundle needs a verdict before the closure is recorded.
+  const dv = designVerdicts(handed.designSystem?.hits ?? [], closure);
+  if (dv.problems.length) throw refuse(`closure refused: ${dv.problems.length} design-system hit(s) on lines this attempt added have no valid verdict:\n  - ${dv.problems.join('\n  - ')}`, 'add `designHits: [{ "id": "<hit id>", "verdict": "justified|finding", "evidence": "...", "finding": "<finding id when a finding>" }]` to the closure and run `wf review --closure <file>` again');
   // Commit, then reveal: the first closure of a round is blind. Earlier rounds' findings are shown only after it is
   // recorded, and a later closure of the same round may only add their verification.
   const round = reviewerHandoff.bundle;
@@ -529,6 +549,8 @@ export function acceptReview(root, options) {
   // Every rule the reviewer's bundle listed needs a verdict with evidence (a finding verdict names a finding).
   const rv = ruleVerdicts(readBundle(r.handoff)?.rules ?? [], r.closure);
   for (const p of rv.problems) problems.push(`${p}; the reviewer adds \`rules: [{ "rule", "verdict": "complies|finding|not-applicable", "evidence", "finding" }]\` to its closure: hand the tree to a fresh reviewer (\`wf handoff reviewer --agent <new id>\`)`);
+  const dv = designVerdicts(readBundle(r.handoff)?.designSystem?.hits ?? [], r.closure);
+  for (const p of dv.problems) problems.push(`${p}; hand the tree to a fresh reviewer (\`wf handoff reviewer --agent <new id>\`)`);
   const shots = collected.map((s) => s.sha256);
   const inspected = new Set(r.closure.screenshotsInspected ?? []);
   const unseen = shots.filter((h) => !inspected.has(h));
@@ -544,7 +566,7 @@ export function acceptReview(root, options) {
   if (canonical(treeHashes(state)) !== canonical(reviewedTree)) problems.push(`no closure for the current tree: the code changed after the last review; ${fresh}`);
   else if (g.ok && !reviewedAfterGate(r)) problems.push(`the closure was written before a passing gate on this tree, so no reviewer has inspected the gate evidence; for the evidence pass ${fresh}`);
   if (problems.length) throw refuse(`review not accepted:\n  - ${problems.join('\n  - ')}`);
-  append(root, state.id, 'review.accepted', { reviewer: r.closure.reviewer, patch: patchIds(state), heads: treeHashes(state), gate: state.lastGate.runId, ...(verdicts.length ? { noEvidence: verdicts } : {}), ...(rv.verdicts.length ? { rules: rv.verdicts } : {}), ...(ov.verdicts.length ? { outsidePlan: ov.verdicts } : {}) }, actor(options));
+  append(root, state.id, 'review.accepted', { reviewer: r.closure.reviewer, patch: patchIds(state), heads: treeHashes(state), gate: state.lastGate.runId, ...(verdicts.length ? { noEvidence: verdicts } : {}), ...(rv.verdicts.length ? { rules: rv.verdicts } : {}), ...(ov.verdicts.length ? { outsidePlan: ov.verdicts } : {}), ...(dv.verdicts.length ? { designHits: dv.verdicts } : {}) }, actor(options));
   return loadState(root, state.id);
 }
 
@@ -631,6 +653,13 @@ export async function deliver(root, options) {
   }
   if (state.deferHeavy && !state.batch) throw refuse(`${state.id} deferred its heavy steps to a batch; deliver it through \`wf batch create\``);
   if (state.phase === 'handoff-pending' || state.phase === 'done') throw refuse(`${state.id} is already delivered`);
+  // The delivered comment carries the owner's plain-language summary; it is recorded before anything is pushed.
+  if (options['summary-file'] && options['summary-file'] !== true) {
+    if (state.batch) throw new WfError('a batch delivers no comment of its own: record each member\'s summary with `wf summary --file <f> --attempt <member>`');
+    state = recordSummary(root, cfg, state, { ...options, actorId: actor(options) });
+  }
+  const unsummarised = (state.batch ? state.batch.members.map((m) => loadState(root, m)) : [state]).filter((x) => needsSummary(cfg, x) && !x.delivery.summary);
+  if (unsummarised.length) throw refuse(`the delivered comment needs the owner's summary first: a few plain-language lines on what changed, for the person who tests it (the UAT scope, screenshots and known limits are added by \`wf\`)`, unsummarised.map((x) => (state.batch ? `\`wf summary --file <summary.md> --attempt ${x.id}\`` : `\`wf deliver --summary-file <summary.md>\` (or \`wf summary --file <summary.md>\` first)`)).join('; '));
   // A push that landed before the process died is recognised from the remote, not redone or refused.
   for (const [name, r] of Object.entries(state.repos)) {
     if (state.delivery.repos[name] || !git(r.worktree, ['diff', '--name-only', r.base, 'HEAD'])) continue;
@@ -766,14 +795,65 @@ function finishDelivered(root, cfg, state) {
     append(root, state.id, 'delivery.screenshots', { screenshots: set, none }, null);
     // Nothing to show: the statement of why is the record, no acknowledgement of images is owed.
     if (!set.length) append(root, state.id, 'delivery.shown', { screenshots: [], none, auto: true }, null);
-    else writeJson(shownDraftFile(root, state.id), { attempt: state.id, item: state.item, note: 'Copy this file outside .wf-evidence, view each image, replace each caption with what the image shows (which screen, which state), then `wf shown --file <copy>`.', screenshots: set.map((f) => ({ sha256: f.sha256, title: f.title, path: f.path, proposed: f.proposed, caption: f.proposed })) });
+    else writeJson(shownDraftFile(root, state.id), { attempt: state.id, item: state.item, note: 'Copy this file outside .wf-evidence, view each image, replace each caption with what the image shows (which screen, which state), then `wf shown --file <copy>`. Set `anomalies`: "none seen", or each value that differs between captures of the same state or contradicts a criterion, with its investigated cause or a follow-up.', anomalies: null, screenshots: set.map((f) => ({ sha256: f.sha256, title: f.title, path: f.path, proposed: f.proposed, caption: f.proposed })) });
     state = loadState(root, state.id);
   }
   const set = state.delivery.screenshots?.screenshots ?? [];
   const actions = state.lane === 'quick' || state.lane === 'batch' ? [] : emitTrackerEvent(root, cfg, state.id, 'delivered', { screenshots: set });
+  if (actions.some((a) => a.rendered === 'delivered')) writeDeliveredComment(root, cfg, loadState(root, state.id));
   if (!actions.length && !needsShown(state)) {
     append(root, state.id, 'closed', { reason: cfg.tracker.kind === 'none' || state.lane !== 'standard' ? 'no tracker handoff for this lane' : 'no tracker actions configured' }, null);
+    closeExport(root, loadState(root, state.id));
     cleanupWorktrees(root, loadState(root, state.id));
+  }
+}
+
+// ---- Delivered screenshots stay viewable after close ----
+// Named failure: at close the worktree was removed and the evidence guard refused the owner's copy out of
+// .wf-evidence, so the delivered screenshots could not be shown again. `wf export screenshots` copies the delivered
+// (kept) set, each named by its attachment title and checked against its sha256, to a folder outside the evidence;
+// closing an attempt does it once to the default folder.
+export const screenshotsExportDir = (root, id) => path.join(root, '.wf-worktrees', '_exports', id, 'screenshots');
+
+export function deliveredFiles(state) {
+  if (state.delivery.screenshots) return state.delivery.screenshots.screenshots;
+  const attach = state.tracker.pending.find((a) => a.event === 'delivered' && a.op === 'attach') ?? null;
+  return (attach?.files ?? []).map((f) => ({ ...f, title: f.title ?? path.basename(f.path) }));
+}
+
+export function exportScreenshots(root, state, to = null) {
+  const files = deliveredFiles(state);
+  if (!files.length) throw refuse(`no delivered screenshots for ${state.item}${state.delivery.screenshots?.none ? `: ${state.delivery.screenshots.none}` : state.delivery.completedAt ? '' : ' (not delivered yet)'}`);
+  const dir = path.resolve(String(to ?? screenshotsExportDir(root, state.id)));
+  if (dir.split(/[\\/]+/).includes('.wf-evidence')) throw refuse('export outside .wf-evidence/: the evidence is written only by `wf`');
+  fs.mkdirSync(dir, { recursive: true });
+  const out = [];
+  const problems = [];
+  for (const f of files) {
+    if (!fs.existsSync(f.path)) {
+      problems.push(`${f.title}: missing (${f.path})`);
+      continue;
+    }
+    if (hashFile(f.path) !== f.sha256) {
+      problems.push(`${f.title}: bytes differ from the recorded sha256 (${f.path})`);
+      continue;
+    }
+    const dest = path.join(dir, path.basename(f.title));
+    fs.copyFileSync(f.path, dest);
+    if (hashFile(dest) !== f.sha256) problems.push(`${f.title}: the copy does not match its sha256`);
+    else out.push({ title: f.title, sha256: f.sha256, file: dest });
+  }
+  if (problems.length) throw refuse(`screenshots not exported:\n  - ${problems.join('\n  - ')}`);
+  append(root, state.id, 'screenshots.exported', { dir, files: out }, null);
+  return { dir, files: out };
+}
+
+function closeExport(root, state) {
+  if (!deliveredFiles(state).length) return;
+  try {
+    exportScreenshots(root, state);
+  } catch (error) {
+    process.stderr.write(`wf: delivered screenshots not exported at close: ${error.message}\n`);
   }
 }
 
@@ -809,11 +889,55 @@ export function recordShown(root, options) {
     else shown.push({ sha256: f.sha256, title: f.title, source: f.source, caption, proposed: f.proposed });
   }
   for (const e of entries) if (!set.screenshots.some((f) => match(e, f))) problems.push(`${e?.sha256 ?? e?.title ?? JSON.stringify(e)}: not in the delivered set`);
+  const anomalies = shownAnomalies(raw, set.screenshots, problems);
   if (problems.length) throw refuse(`screenshots not acknowledged:\n  - ${problems.join('\n  - ')}`);
   const n = (state.delivery.shownRecords ?? 0) + 1;
   const kept = keepRaw(root, state.id, `delivery/shown-${n}.raw.json`, text);
-  append(root, state.id, 'delivery.shown', { screenshots: shown, none: null, raw: { path: kept.file, sha256: kept.sha256 } }, actor(options));
-  return loadState(root, state.id);
+  append(root, state.id, 'delivery.shown', { screenshots: shown, none: null, anomalies, raw: { path: kept.file, sha256: kept.sha256 } }, actor(options));
+  const after = loadState(root, state.id);
+  try {
+    writeDeliveredComment(root, loadConfig(root), after);
+  } catch {}
+  return after;
+}
+
+// Anomalies seen while viewing the delivered screenshots. Named failure: an owner called "3 active workspaces in the
+// Arabic capture vs 1 in English" cosmetic without checking; test data had leaked between runs. Any value that differs
+// between captures of the same state (counts, dates, names), or contradicts a criterion, is recorded with its cause
+// (investigated; "cosmetic" needs evidence) or a follow-up. The key is required: `"anomalies": "none seen"` (or []) says
+// the owner looked and saw none.
+export function shownAnomalies(raw, set, problems) {
+  const v = Array.isArray(raw) ? undefined : raw?.anomalies;
+  const hint = 'add `"anomalies": "none seen"`, or `[{ "screenshots": [<title or sha256>], "observation": "<what differs>", "cause": "<investigated cause, with evidence>" | "followUp": "<follow-up filed>" }]`';
+  if (v === undefined || v === null) {
+    problems.push(`no \`anomalies\` key: while viewing the screenshots, compare values between captures of the same state (counts, dates, names) and against the criteria; ${hint}`);
+    return [];
+  }
+  if (typeof v === 'string') {
+    if (/^\s*none seen\s*\.?\s*$/i.test(v)) return [];
+    problems.push(`\`anomalies\` must be "none seen" or a list; ${hint}`);
+    return [];
+  }
+  if (!Array.isArray(v)) {
+    problems.push(`\`anomalies\` must be "none seen" or a list; ${hint}`);
+    return [];
+  }
+  const out = [];
+  for (const [i, a] of v.entries()) {
+    const label = `anomaly ${i + 1}`;
+    const shots = Array.isArray(a?.screenshots) ? a.screenshots.map(String) : a?.screenshots ? [String(a.screenshots)] : [];
+    const unknown = shots.filter((x) => !set.some((f) => f.sha256 === x || f.title === x));
+    const observation = String(a?.observation ?? '').trim();
+    const cause = String(a?.cause ?? '').trim();
+    const followUp = String(a?.followUp ?? '').trim();
+    if (!shots.length) problems.push(`${label}: name the screenshot(s) it was seen in (\`screenshots\`: titles or sha256)`);
+    else if (unknown.length) problems.push(`${label}: ${unknown.join(', ')} not in the delivered set`);
+    if (!observation) problems.push(`${label}: \`observation\` says what differs or contradicts a criterion`);
+    if (!cause && !followUp) problems.push(`${label}: investigate it to a \`cause\`, or record a \`followUp\`; an anomaly is never left unexplained`);
+    if (cause && /cosmetic/i.test(cause) && !String(a?.evidence ?? '').trim()) problems.push(`${label}: "cosmetic" needs \`evidence\` (what you checked that shows the values are right)`);
+    out.push({ screenshots: shots, observation, cause: cause || null, followUp: followUp || null, evidence: a?.evidence ? String(a.evidence) : null });
+  }
+  return out;
 }
 
 // `wf delivery narrow --keep <sha256,...> | --file keep.json --reason "why"`: an over-broad `artifacts` glob put
@@ -872,13 +996,14 @@ export function narrowDelivery(root, options) {
   append(root, state.id, 'delivery.narrowed', { keep, from, to: kept.length, dropped: from - kept.length, reason, legacy: source.legacy, raw: raw ? { path: raw.file, sha256: raw.sha256 } : null }, actor(options));
   const after = loadState(root, state.id);
   // A legacy attempt has no draft and owes no `wf shown`: its kept uploads are checked by title only, as before.
-  if (!source.legacy) writeJson(shownDraftFile(root, state.id), { attempt: state.id, item: state.item, note: 'Copy this file outside .wf-evidence, view each image, replace each caption with what the image shows (which screen, which state), then `wf shown --file <copy>`.', screenshots: after.delivery.screenshots.screenshots.map((f) => ({ sha256: f.sha256, title: f.title, path: f.path, proposed: f.proposed, caption: f.proposed })) });
+  if (!source.legacy) writeJson(shownDraftFile(root, state.id), { attempt: state.id, item: state.item, note: 'Copy this file outside .wf-evidence, view each image, replace each caption with what the image shows (which screen, which state), then `wf shown --file <copy>`. Set `anomalies`: "none seen", or each value that differs between captures of the same state or contradicts a criterion, with its investigated cause or a follow-up.', anomalies: null, screenshots: after.delivery.screenshots.screenshots.map((f) => ({ sha256: f.sha256, title: f.title, path: f.path, proposed: f.proposed, caption: f.proposed })) });
   return { state: after, dryRun: null };
 }
 
 export function closeAfterHandoff(root, state) {
   if (state.phase === 'handoff-pending' && !state.tracker.pending.length && !needsShown(state)) {
     append(root, state.id, 'closed', { reason: state.tracker.done.some((d) => d.event === 'delivered') ? 'tracker handoff verified' : 'delivered screenshots shown' }, null);
+    closeExport(root, loadState(root, state.id));
     cleanupWorktrees(root, loadState(root, state.id));
   }
   return loadState(root, state.id);
@@ -979,8 +1104,10 @@ function nextStep(root, state) {
   }
   if (state.tracker.pending.length) {
     const ev = state.tracker.pending[0].event;
-    const ops = state.tracker.pending.filter((a) => a.event === ev).map((a) => (a.op === 'setStatus' ? `set status to "${a.status}"` : a.op === 'comment' ? 'post the comment (body in `wf status --json`)' : a.op === 'attach' ? `upload and attach ${a.files.length} screenshot(s) as files (title = the name, subtitle = its caption; listed under "delivered screenshots")` : a.op)).join(', ');
-    const tracker = `tracker (${ev}): ${ops}; save the readback and run \`wf tracker record --event ${ev} --capture <file>\``;
+    const comment = (a) => (a.rendered !== 'delivered' ? 'post the comment (body in `wf status --json`)' : state.delivery.summary ? `post the comment in ${commentFile(root, state.id)} unchanged, each {assetUrl:<title>} replaced by that upload's assetUrl` : 'record the owner\'s summary (`wf summary --file <summary.md>`), then post the comment it renders');
+    const ops = state.tracker.pending.filter((a) => a.event === ev).map((a) => (a.op === 'setStatus' ? `set status to "${a.status}"` : a.op === 'comment' ? comment(a) : a.op === 'attach' ? `upload and attach ${a.files.length} screenshot(s) as files (title = the name, subtitle = its caption; listed under "delivered screenshots"), keeping each assetUrl` : a.op)).join(', ');
+    const raw = ev === 'delivered' ? 'save the RAW get_issue and list_comments results unchanged (never rebuilt or abridged)' : 'save the readback';
+    const tracker = `tracker (${ev}): ${ops}; ${raw} and run \`wf tracker record --event ${ev} --capture <file>\``;
     if (state.phase === 'handoff-pending') return tracker;
     return `${phaseAction(cfg, state)}${holdNote}. Pending ${tracker}`;
   }
