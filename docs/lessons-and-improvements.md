@@ -4,6 +4,14 @@
 
 The design of the lessons harness: [LESSONS.md](LESSONS.md).
 
+## Discovered issues, lessons and improvements
+
+Three different things, kept apart:
+
+- A **discovered issue** is a defect found during a ticket. It is fixed in that ticket, or deferred only by the owner in their own words: `wf discovered` ([lifecycle](lifecycle.md#every-issue-found-is-fixed-in-the-ticket)). Calling it a follow-up does not close it.
+- A **lesson** is what the project learns so a kind of mistake does not recur (below).
+- A **plugin improvement** is a finding about the workflow itself (below).
+
 ## Lessons: the learning path
 
 When something was not done right or did not go as the user wanted, the project records what it learns so it does not recur ([design](LESSONS.md)). The content is the project's; the plugin provides the harness.

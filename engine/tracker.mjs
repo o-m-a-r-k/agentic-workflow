@@ -53,12 +53,14 @@ export function uatScope(state) {
 }
 
 // Known limits and follow-ups: a criterion's `finalHandoff` note, a criterion dropped by an amendment (with its
-// reason), and every anomaly the owner recorded with `wf shown` as a follow-up.
+// reason), every anomaly the owner recorded with `wf shown` as a follow-up, and every discovered issue the owner deferred.
 export function knownLimits(state) {
   const out = [];
   for (const c of state.criteria ?? []) if (typeof c.finalHandoff === 'string' && c.finalHandoff.trim()) out.push(c.finalHandoff.trim());
   for (const a of state.criteriaAmendments ?? []) for (const d of a.changes?.dropped ?? []) out.push(`Not delivered: ${d.reason}`);
   for (const a of state.delivery?.shown?.anomalies ?? []) if (a.followUp) out.push(`Follow-up: ${a.observation} (${a.followUp})`);
+  // An issue found during the ticket that the owner deferred (I-18): the tester sees it with the owner's words.
+  for (const d of state.discovered ?? []) if (d.status === 'deferred') out.push(`Deferred by the owner: ${d.summary} ("${d.deferred.decision}")`);
   return out.map((l) => `- ${l.replace(/\s*\n\s*/g, ' ')}`).join('\n');
 }
 

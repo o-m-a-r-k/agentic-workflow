@@ -205,6 +205,29 @@ export function entry(root, options) {
   return loadState(root, id);
 }
 
+// I-19: a repo the running attempt needs for a fix, given its worktree on the attempt's branch from the current base,
+// provisioned as at admission. Returns the repos entry; the caller records it (`repo.added`). Nothing is left behind on
+// failure.
+export function addRepoWorktree(root, cfg, state, name) {
+  const repo = cfg.repos.find((r) => r.name === name);
+  if (!repo) throw new WfError(`unknown repo \`${name}\` (repos: ${cfg.repos.map((r) => r.name).join(', ')})`);
+  if (state.repos[name]) throw refuse(`${name} is already in ${state.id}`);
+  const dir = repoDir(root, repo);
+  const ref = baseRef(dir, repo);
+  const commit = git(dir, ['rev-parse', ref]);
+  const wt = worktreeDir(root, state.id, name);
+  if (git(dir, ['branch', '--list', branchName(state.id)])) throw refuse(`branch ${branchName(state.id)} already exists in ${name}`, `inspect it, then delete it: git -C ${dir} branch -D ${branchName(state.id)}`);
+  run('git', ['worktree', 'add', '--quiet', '-b', branchName(state.id), wt, commit], { cwd: dir });
+  try {
+    const provisioned = provision(root, cfg, repo, wt);
+    return { base: commit, baseRef: ref, branch: branchName(state.id), worktree: wt, provisioned, provisionedUntracked: untrackedSnapshot(wt) };
+  } catch (error) {
+    run('git', ['worktree', 'remove', '--force', wt], { cwd: dir, allowFail: true });
+    run('git', ['branch', '-D', branchName(state.id)], { cwd: dir, allowFail: true });
+    throw error;
+  }
+}
+
 export function adopt(root, options) {
   const state = openState(root, options);
   const by = actor(options);

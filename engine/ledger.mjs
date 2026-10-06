@@ -114,6 +114,8 @@ export function reduce(entries) {
     owners: [],
     phase: 'admitted',
     repos: {},
+    addedRepos: [],
+    discovered: [],
     adapterBase: null,
     criteria: null,
     criteriaAmendments: [],
@@ -265,6 +267,23 @@ export function reduce(entries) {
         break;
       case 'lesson.recurred':
         (s.lessons ??= { recorded: [], waived: null, recurred: [] }).recurred.push({ id: d.id, recurrence: d.recurrence, why: d.why ?? null, at: e.at });
+        break;
+      // The discovered-issue ledger (I-18): every issue found during the ticket, fixed or deferred in the owner's words.
+      case 'discovered.added':
+        s.discovered.push({ id: d.id, summary: d.summary, where: d.where ?? null, foundBy: d.foundBy ?? null, blockedBy: d.blockedBy ?? null, at: e.at, by: e.actor, status: 'open', fixed: null, deferred: null });
+        break;
+      case 'discovered.closed': {
+        const x = s.discovered.find((y) => y.id === d.id);
+        if (!x) break;
+        x.status = d.outcome;
+        if (d.outcome === 'fixed') x.fixed = { repo: d.repo, commit: d.commit, evidence: d.evidence ?? null, at: e.at, by: e.actor };
+        else x.deferred = { decision: d.decision, at: e.at, by: e.actor };
+        break;
+      }
+      // A repo added to the running attempt by an owner amendment (I-19): it is part of the change from then on.
+      case 'repo.added':
+        s.repos[d.repo] = d.entry;
+        s.addedRepos.push({ repo: d.repo, reason: d.reason, base: d.entry.base, at: e.at, by: e.actor });
         break;
       case 'reopen.reason':
         s.reopenReason = d.reason;

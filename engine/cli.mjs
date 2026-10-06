@@ -13,6 +13,7 @@ import { openCount } from './improve.mjs';
 import { LESSON_FILE, addLesson, applySnippet, exportPluginLessons, lessonPrompts, lessonWarnings, loadLessons, moveLesson, recur, relevantLessons, reviewLessons, setLesson } from './lessons.mjs';
 import { LinkRefused, changesOf, rebaseline, releaseAttempt, seal, setVerifyLevel, verifyAttempt } from './evidence.mjs';
 import { acceptReview, amendCriteria, designWarning, batchCreate, batchEject, closeAfterHandoff, deliver, deliveredFiles, exportScreenshots, freezeCriteria, handoff, narrowDelivery, needsShown, nextAction, outsideWarning, recordReview, recordShown, reopen, screenshotsExportDir, shownDraftFile, uncovered, withAttempt } from './lifecycle.mjs';
+import { addDiscovered, closeDiscovered, discoveredLine, openDiscovered } from './discovered.mjs';
 import { detect, doctor, register, registry, setEnabled, sync, writeDraft } from './onboard.mjs';
 import * as secrets from './secrets.mjs';
 import { report, toCsv, toHandoffCsv, toHtml } from './telemetry.mjs';
@@ -36,7 +37,11 @@ Work
   wf entry [--item ID] [--lane quick|standard] [--intent implementation|analysis] [--repos a,b] [--defer-heavy] [--issue-file F]
   wf plan --file plan.yaml | --from-agent PLANNER_ID
                                     freeze acceptance criteria and the plan (--from-agent: the planner's last YAML block)
-  wf criteria amend --file f --reason "why"
+  wf criteria amend --file f --reason "why" [--add-repo R]
+                                    --add-repo: a fix needs another repo; its worktree joins the attempt with the work items
+  wf discovered add --summary "..." [--where file:line] [--found-by ID] [--blocked-by W] | list
+  wf discovered close D1 --fixed SHA | --deferred --decision "<the owner's words>"
+                                    every issue found during the ticket: fixed in it, or deferred only by the owner
   wf handoff planner|implementer|reviewer|tester --agent ID [--work W1] [--session SID] [--runtime claude|codex]
   wf check [--repo R]               light steps only, for the implementer; reused by the gate, never counts as one
   wf gate [--prepare-only] [--full] [--focused] [--rerun-failed]
@@ -114,6 +119,11 @@ function summary(root, s, { base = null, resume = false } = {}) {
     lines.push(`    running: ${live.running.map((r) => `${r.id} (${r.seconds}s)`).join(', ') || 'none (waiting for a lease)'}`);
     lines.push(`    finished: ${live.finished.map((r) => `${r.id} ${r.status}${r.seconds !== null ? ` ${r.seconds}s` : ''}`).join(', ') || 'none yet'}`);
   }
+  if (s.discovered?.length) {
+    const open = openDiscovered(s);
+    lines.push(`  discovered: ${open.length} open${open.length ? ` (${open.map((d) => d.id).join(', ')})` : ''} of ${s.discovered.length} (\`wf discovered list\`)`);
+  }
+  for (const a of s.addedRepos ?? []) lines.push(`  repo added: ${a.repo} (${a.reason})`);
   if (s.lastGate) lines.push(`  last gate: ${s.lastGate.status} (${s.lastGate.runId})`);
   for (const t of s.tracker.done) if (t.provenance === 'host-recorded') lines.push(`  tracker ${t.event}: readback host-recorded (the tracker's answer as the ${t.host?.runtime === 'codex' ? 'Codex' : 'Claude Code'} host wrote it in the owner's transcript, not the agent; a process running as the same user could edit that file)`);
   for (const t of s.tracker.done) if (t.provenance === 'agent-reported, unverified') lines.push(`  tracker ${t.event}: readback agent-reported, unverified (an engine route verifies it: \`wf tracker mode api|cli|files\`)`);
@@ -502,10 +512,31 @@ async function dispatch(cmd, sub, positional, options) {
     }
     case 'criteria': {
       if (sub !== 'amend') throw new WfError('usage: wf criteria amend --file f --reason "why"');
-      const { state: s, changes } = amendCriteria(root, options);
+      const { state: s, changes, added } = amendCriteria(root, options);
       const list = (ids) => ids.join(', ') || 'none';
-      print(options, `criteria amended (${s.criteriaAmendments.length} amendment(s)); the reviewer will see the reason\n  criteria now (${s.criteria.length}): ${list(s.criteria.map((c) => c.id))}\n  changed: ${list(changes.changed)}; added: ${list(changes.added)}; dropped: ${list(changes.dropped.map((d) => `${d.id} (${d.reason})`))}`, { ...s, changes });
+      const addedLines = added.map((a) => `\n  repo added: ${a.repo} (worktree ${a.worktree}, base ${a.base.slice(0, 10)}); hand its work item to an implementer, and the reviewer judges the seam on both sides`).join('');
+      print(options, `criteria amended (${s.criteriaAmendments.length} amendment(s)); the reviewer will see the reason${addedLines}\n  criteria now (${s.criteria.length}): ${list(s.criteria.map((c) => c.id))}\n  changed: ${list(changes.changed)}; added: ${list(changes.added)}; dropped: ${list(changes.dropped.map((d) => `${d.id} (${d.reason})`))}`, { ...s, changes });
       return 0;
+    }
+    case 'discovered': {
+      // I-18: the discovered-issue ledger. Any role records what it finds; only the owner defers, in their own words.
+      if (sub === 'add') {
+        const r = addDiscovered(root, options);
+        print(options, `discovered ${r.id} recorded on ${r.state.id}; fix it in this ticket and close it with the fix commit: \`wf discovered close ${r.id} --fixed <commit>\` (only the owner defers: \`--deferred --decision "<their words>"\`)`, r.state.discovered.at(-1));
+        return 0;
+      }
+      if (sub === 'close') {
+        const r = closeDiscovered(root, positional[0], options);
+        const d = r.state.discovered.find((x) => x.id === positional[0]);
+        print(options, r.outcome === 'fixed' ? `${d.id} fixed in ${r.repo}@${r.commit.slice(0, 10)}` : `${d.id} deferred on the owner's decision: "${d.deferred.decision}"`, d);
+        return 0;
+      }
+      if (sub === 'list' || !sub) {
+        const s = openState(root, options);
+        print(options, s.discovered.length ? s.discovered.map(discoveredLine).join('\n') : `no discovered issues on ${s.id}`, s.discovered);
+        return 0;
+      }
+      throw new WfError('usage: wf discovered add --summary "..." [--where file:line] [--found-by ID] | list | close D1 --fixed SHA | --deferred --decision "<the owner\'s words>"');
     }
     case 'handoff': {
       const r = handoff(root, sub, options);
