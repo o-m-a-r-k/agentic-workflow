@@ -5,7 +5,7 @@ import { pathToFileURL } from 'node:url';
 import { actor, branchName, changedFiles, cleanupWorktrees, entry, openState, treeHashes, worktreeDir } from './attempt.mjs';
 import { ADAPTER_DIR, adapterFileAtCommit, agentTypeFor, declared, loadConfig, loadConfigAtCommit, repoDir, roleClass } from './config.mjs';
 import { focusedSkips, gatePassedForCurrentTree, screenshots } from './gate.mjs';
-import { append, attemptDir, keptFiles, listAttempts, loadState } from './ledger.mjs';
+import { append, attemptDir, evidenceRoot, keptFiles, listAttempts, loadState } from './ledger.mjs';
 import { changedForStep, deliveryOrder, impact, inside, packageOf } from './topology.mjs';
 import { findSkill } from './skills.mjs';
 import { lastFencedYaml, lastModel, readTranscript, sessionModel, subagentModel, subagentTranscripts } from './telemetry.mjs';
@@ -821,15 +821,56 @@ export function deliveredFiles(state) {
   return (attach?.files ?? []).map((f) => ({ ...f, title: f.title ?? path.basename(f.path) }));
 }
 
+// The real location of a path whose ancestors may be symlinks (the nearest existing ancestor is resolved).
+function realPath(p) {
+  const rest = [];
+  let cur = p;
+  for (;;) {
+    try {
+      return path.join(fs.realpathSync(cur), ...rest);
+    } catch {
+      const parent = path.dirname(cur);
+      if (parent === cur) return p;
+      rest.unshift(path.basename(cur));
+      cur = parent;
+    }
+  }
+}
+const underEvidence = (root, p) => {
+  const ev = realPath(evidenceRoot(root));
+  const r = realPath(p);
+  return p.split(/[\\/]+/).includes('.wf-evidence') || r.split(/[\\/]+/).includes('.wf-evidence') || r === ev || r.startsWith(ev + path.sep);
+};
+
+// An attachment title as a plain file name: never a path, never `.`/`..`, no control characters.
+export function safeFileName(title) {
+  const name = String(title ?? '').replace(/[\\/]/g, '-').replace(/[\u0000-\u001f\u007f]/g, '').trim();
+  return !name || /^\.+$/.test(name) ? null : name;
+}
+
+// Named failure (0.1.16 security review): the destination was checked as text only, so a `--to` symlink into
+// .wf-evidence/, or a symlink planted under the export folder's file name, made the copy write into the evidence.
+// The folder is checked where it really points, before and after it is created; each destination must be absent or a
+// regular file (replaced, never followed), and is written exclusively.
 export function exportScreenshots(root, state, to = null) {
   const files = deliveredFiles(state);
   if (!files.length) throw refuse(`no delivered screenshots for ${state.item}${state.delivery.screenshots?.none ? `: ${state.delivery.screenshots.none}` : state.delivery.completedAt ? '' : ' (not delivered yet)'}`);
   const dir = path.resolve(String(to ?? screenshotsExportDir(root, state.id)));
-  if (dir.split(/[\\/]+/).includes('.wf-evidence')) throw refuse('export outside .wf-evidence/: the evidence is written only by `wf`');
-  fs.mkdirSync(dir, { recursive: true });
-  const out = [];
+  const outside = 'export outside .wf-evidence/ (checked where the folder really points): the evidence is written only by `wf`';
+  if (underEvidence(root, dir)) throw refuse(outside);
+  const names = new Map();
   const problems = [];
   for (const f of files) {
+    const name = safeFileName(path.basename(String(f.title ?? '').replace(/\\/g, '/')) || f.title);
+    if (!name) problems.push(`${JSON.stringify(f.title)}: not a usable file name`);
+    else if (names.has(name)) problems.push(`${f.title} and ${names.get(name).title} would both be written as ${name}`);
+    else names.set(name, f);
+  }
+  if (problems.length) throw refuse(`screenshots not exported:\n  - ${problems.join('\n  - ')}`);
+  fs.mkdirSync(dir, { recursive: true });
+  if (underEvidence(root, fs.realpathSync(dir))) throw refuse(outside);
+  const out = [];
+  for (const [name, f] of names) {
     if (!fs.existsSync(f.path)) {
       problems.push(`${f.title}: missing (${f.path})`);
       continue;
@@ -838,9 +879,15 @@ export function exportScreenshots(root, state, to = null) {
       problems.push(`${f.title}: bytes differ from the recorded sha256 (${f.path})`);
       continue;
     }
-    const dest = path.join(dir, path.basename(f.title));
-    fs.copyFileSync(f.path, dest);
-    if (hashFile(dest) !== f.sha256) problems.push(`${f.title}: the copy does not match its sha256`);
+    const dest = path.join(dir, name);
+    const there = fs.lstatSync(dest, { throwIfNoEntry: false });
+    if (there && !there.isFile()) {
+      problems.push(`${dest}: exists and is ${there.isSymbolicLink() ? 'a symlink' : 'not a regular file'}; not followed or replaced`);
+      continue;
+    }
+    if (there) fs.unlinkSync(dest);
+    fs.copyFileSync(f.path, dest, fs.constants.COPYFILE_EXCL);
+    if (!fs.lstatSync(dest).isFile() || hashFile(dest) !== f.sha256) problems.push(`${f.title}: the copy does not match its sha256`);
     else out.push({ title: f.title, sha256: f.sha256, file: dest });
   }
   if (problems.length) throw refuse(`screenshots not exported:\n  - ${problems.join('\n  - ')}`);
