@@ -387,3 +387,20 @@ test('cleanup at close never deletes through a link and leaves anything uncertai
   assert.equal(err.filter((m) => /left .* in place/.test(m)).length, 4, err.join(''));
   assert.throws(() => removeReviewScratch(root, '../x'), /invalid attempt id/);
 });
+
+test('false positives fixed in 0.3.0 stay allowed: none of these names the evidence folder in any spelling', () => {
+  for (const cmd of [
+    'cd ~/Documents/Development/agentic-workflow && grep -n -i -E "glossary|terms|workspace" README.md',
+    'cat ~/Documents/Development/agentic-workflow/.workflow/project.yaml',
+    'cat api/.workflow/project.yaml | grep -E "tracker|via"',
+    'sed -n 1,5p .workflow/lessons/L-1.yaml',
+    'grep -rn "evidence" docs/',
+    'grep -E "evidence|proof" README.md',
+    'git commit -m "keep evidence, ledger and anchor in step"',
+    'grep -c evidence README.md && echo $?',
+    "node -e \"const a=['L-1','L-2']; console.log(a.map((x) => `Lesson ${x}`))\"",
+    "python3 - <<'X'\ns = \"...['a', 'b']\"\nX",
+    'grep -E "^\\.[a-z]+" notes.txt',
+    'ls .github/ .workflow/ docs/',
+  ]) assert.equal(check({ cwd: '/p', tool_input: { command: cmd } }), null, cmd);
+});

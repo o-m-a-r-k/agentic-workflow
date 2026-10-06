@@ -1,0 +1,10 @@
+# The maintainer reviews the guard, evidence protection, path handling, the lifecycle and CLI, the tests and CI.
+/hooks/ @o-m-a-r-k
+/engine/evidence.mjs @o-m-a-r-k
+/engine/paths.mjs @o-m-a-r-k
+/engine/gate.mjs @o-m-a-r-k
+/engine/lifecycle.mjs @o-m-a-r-k
+/engine/cli.mjs @o-m-a-r-k
+/engine/attempt.mjs @o-m-a-r-k
+/scenarios/ @o-m-a-r-k
+/.github/ @o-m-a-r-k

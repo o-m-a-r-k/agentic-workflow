@@ -260,6 +260,9 @@ export function reduce(entries) {
       case 'lesson.waived':
         (s.lessons ??= { recorded: [], waived: null, recurred: [] }).waived = { reason: d.reason, at: e.at, by: e.actor };
         break;
+      case 'lesson.acknowledged':
+        ((s.lessons ??= { recorded: [], waived: null, recurred: [] }).acknowledged ??= []).push({ lesson: d.lesson, ack: d.ack, line: d.line, repo: d.repo, commit: d.commit, at: e.at });
+        break;
       case 'lesson.recurred':
         (s.lessons ??= { recorded: [], waived: null, recurred: [] }).recurred.push({ id: d.id, recurrence: d.recurrence, why: d.why ?? null, at: e.at });
         break;
@@ -302,7 +305,7 @@ export function reduce(entries) {
         break;
       case 'tracker.recorded':
         s.tracker.pending = s.tracker.pending.filter((a) => a.event !== d.event);
-        s.tracker.done.push({ event: d.event, at: e.at, capture: d.capture, ...(d.attachments ? { attachments: d.attachments } : {}) });
+        s.tracker.done.push({ event: d.event, at: e.at, capture: d.capture, provenance: d.provenance ?? null, ...(d.attachments ? { attachments: d.attachments } : {}) });
         break;
       case 'closed':
         s.closedAt = e.at;

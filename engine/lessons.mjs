@@ -1,69 +1,90 @@
-// Lessons: the project's learning path (docs/LESSONS.md). Capture, apply, inject, feedback, export. The engine never
-// edits the adapter or an instruction file to enforce a lesson: it prints what to add, and the owner commits it.
+// Lessons: each project's learning path (docs/LESSONS.md). Capture, apply, inject, acknowledge, feedback, export. The
+// engine never edits the adapter or an instruction file to enforce a lesson: it prints what to add, and the owner
+// commits it.
+//
+// Where lessons live (named correction, 0.2.x): a lesson belongs to the repository it concerns and is committed and
+// delivered with the ticket that taught it: `<repo>/.workflow/lessons/<id>.yaml`, in the attempt's worktree of that repo
+// while the attempt is open and not yet accepted (committed there, so it is in the reviewed diff), in that repo's main
+// checkout otherwise. A cross-repo (`project`) lesson lives the same way in the adapter repo. A finding about the
+// workflow itself is a plugin improvement (`wf improve`), never written into a project.
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { ADAPTER_DIR, adapterLocation, loadConfig, repoDir } from './config.mjs';
 import { readRegular, writeNoFollow } from './evidence.mjs';
 import { canonical, isInside, touchesEvidence } from './paths.mjs';
 import { append, listAttempts, loadState, readLedger } from './ledger.mjs';
-import { WfError, YAML, matchesAny, now, refuse } from './util.mjs';
+import { WfError, YAML, git, matchesAny, now, refuse } from './util.mjs';
 
 export const CAUSES = ['process', 'tooling', 'criteria', 'review', 'test', 'design-system', 'other'];
 export const MECHANISMS = ['review-rule', 'designSystem-rule', 'planner-criterion-template', 'reviewer-checklist', 'gate-check', 'engine-change', 'doc'];
 const STATUSES = ['proposed', 'enforced', 'retired'];
-const SCOPES = ['project', 'plugin'];
+// Terms: PROJECT = the whole onboarded system (one adapter, one tracker); REPO = one Git repository in it. A `repo`
+// lesson is about one repo and lives in its tree; a `project` lesson spans repos and lives in the adapter repo's tree.
+// A finding about the workflow itself is a plugin improvement (`wf improve`), never a lesson.
+const SCOPES = ['repo', 'project'];
 // Finding categories that mean "the way we work let this through": each prompts a lesson.
 export const LESSON_CATEGORIES = new Set(['process', 'tooling', 'criteria', 'review', 'test', 'design-system', 'precedent-only']);
+// At most this many advisory lessons per bundle; enforced and recurring lessons are never dropped by the cap.
 export const CAP = 5;
 
-export const lessonsDir = (root) => path.join(root, ADAPTER_DIR, 'lessons');
-// Named finding (0.2.0 review): a lesson id became a path. Ids are a strict allowlist; the file is named by its id (and
-// an id is only ever taken from a file's name, never from its content); the folder must be a real folder that really
-// lies in the adapter repo and outside the evidence; files are read and written without following links, never through
-// a hard link.
+const LESSONS_REL = path.join(ADAPTER_DIR, 'lessons');
+const LESSONS_POSIX = LESSONS_REL.split(path.sep).join('/');
+export const lessonsDir = (repoRoot) => path.join(repoRoot, LESSONS_REL);
+// A changed file that is a lesson: covered by the lesson harness, never an unplanned change.
+export const LESSON_FILE = /(^|\/)\.workflow\/lessons\/[^/]+\.ya?ml$/;
+// Named finding (0.2.0 review): a lesson id became a path. Ids are a strict allowlist; the file is named by its id (an
+// id is only ever taken from a file's name, never from its content); the folder must be a real folder that really lies
+// in its repo and outside the evidence; files are read and written without following links, never through a hard link.
 export const LESSON_ID = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
-const fileOf = (root, id) => {
+const fileIn = (repoRoot, id) => {
   if (!LESSON_ID.test(String(id))) throw refuse(`invalid lesson id \`${String(id).slice(0, 80)}\`: letters, digits and dashes, starting with a letter or digit, at most 64 characters`);
-  return path.join(lessonsDir(root), `${id}.yaml`);
+  return path.join(lessonsDir(repoRoot), `${id}.yaml`);
 };
 
-// The lessons folder, checked: problems (empty when it is fine or absent).
-function dirProblems(root) {
-  const dir = lessonsDir(root);
+function dirProblems(repoRoot) {
+  const dir = lessonsDir(repoRoot);
   const st = fs.lstatSync(dir, { throwIfNoEntry: false });
   if (!st) return [];
   if (!st.isDirectory()) return [`${dir} is ${st.isSymbolicLink() ? 'a symlink' : 'not a folder'}; lessons are not read or written through it`];
   const out = [];
-  if (touchesEvidence(dir)) out.push(`${dir} resolves into .wf-evidence/`);
-  let repo = null;
-  try {
-    const cfg = loadConfig(root);
-    repo = repoDir(root, adapterLocation(root, cfg).repo);
-  } catch {}
-  if (repo && !isInside(canonical(dir), canonical(repo))) out.push(`${dir} really lies outside the adapter repo (${canonical(dir)})`);
+  if (touchesEvidence(dir)) out.push(`${dir} resolves into the evidence`);
+  if (!isInside(canonical(dir), canonical(repoRoot))) out.push(`${dir} really lies outside its repo (${canonical(dir)})`);
   return out;
 }
 const lessonProblems = new Map();
 export const lessonWarnings = (root) => lessonProblems.get(root) ?? [];
 const asList = (v) => (v === undefined || v === null || v === '' ? [] : Array.isArray(v) ? v.map(String) : String(v).split(',').map((x) => x.trim()).filter(Boolean));
 
-// Lessons the plugin ships (scope plugin, enforced through its own templates): listed with the project's, never
-// injected (`inject: false`: the mechanism is already in every role file), never written by a project.
-const BUILTIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'lessons');
-// Each `<id>.yaml` whose name is a valid id, read without following a link (a regular file with one name), whose
-// content's `id` (if any) matches its name. Anything else is skipped and reported.
-function readDir(dir, extra = {}, problems = []) {
+
+function parseLesson(name, text, where, problems) {
+  if (!/\.ya?ml$/.test(name)) return null;
+  const id = name.replace(/\.ya?ml$/, '');
+  if (!LESSON_ID.test(id)) {
+    problems.push(`${where}: not a valid lesson file name (skipped)`);
+    return null;
+  }
+  let l;
+  try {
+    l = YAML.parse(text) ?? {};
+  } catch (error) {
+    problems.push(`${where}: not YAML (${error.message.split('\n')[0]}) (skipped)`);
+    return null;
+  }
+  if (l.id !== undefined && String(l.id) !== id) {
+    problems.push(`${where}: its id \`${String(l.id).slice(0, 80)}\` differs from its file name (skipped)`);
+    return null;
+  }
+  // Older files: `scope: project` with a `repo` meant one repo (now `repo`); without one it spans the project.
+  const scope = l.scope === 'plugin' ? 'plugin' : l.repo !== undefined && l.scope !== 'project-wide' ? (l.scope === 'project' && l.repo === null ? 'project' : 'repo') : 'project';
+  return { ...l, id, scope, declaredRepo: l.repo, recurrence: Number(l.recurrence ?? 0), tags: asList(l.tags), paths: asList(l.paths) };
+}
+
+function readDir(dir, extra, problems) {
   if (!fs.existsSync(dir)) return [];
   const out = [];
   for (const e of fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
     if (!/\.ya?ml$/.test(e.name)) continue;
-    const id = e.name.replace(/\.ya?ml$/, '');
     const p = path.join(dir, e.name);
-    if (!LESSON_ID.test(id)) {
-      problems.push(`${p}: not a valid lesson file name (skipped)`);
-      continue;
-    }
     if (!e.isFile()) {
       problems.push(`${p}: ${e.isSymbolicLink() ? 'a symlink' : 'not a regular file'} (skipped)`);
       continue;
@@ -73,72 +94,136 @@ function readDir(dir, extra = {}, problems = []) {
       problems.push(`${p}: not a regular file with one name (a hard link?) (skipped)`);
       continue;
     }
-    let l;
-    try {
-      l = YAML.parse(r.bytes.toString('utf8')) ?? {};
-    } catch (error) {
-      problems.push(`${p}: not YAML (${error.message.split('\n')[0]}) (skipped)`);
-      continue;
-    }
-    if (l.id !== undefined && String(l.id) !== id) {
-      problems.push(`${p}: its id \`${String(l.id).slice(0, 80)}\` differs from its file name (skipped)`);
-      continue;
-    }
-    out.push({ ...l, ...extra, id, recurrence: Number(l.recurrence ?? 0), tags: asList(l.tags), paths: asList(l.paths), file: p });
+    const l = parseLesson(e.name, r.bytes.toString('utf8'), p, problems);
+    if (l) out.push({ ...l, ...extra, file: p });
   }
   return out;
 }
 
-export function loadLessons(root, { builtin = true } = {}) {
-  const problems = dirProblems(root);
-  const own = problems.length ? [] : readDir(lessonsDir(root), {}, problems);
-  lessonProblems.set(root, problems);
-  const shipped = builtin ? readDir(BUILTIN, { builtin: true }).filter((b) => !own.some((l) => l.id === b.id)) : [];
-  return [...own, ...shipped];
+// The lessons a repo holds at a commit (git objects: no link is followed there).
+function readAtCommit(repoRoot, commit, extra, problems) {
+  const names = git(repoRoot, ['ls-tree', '--name-only', `${commit}:${LESSONS_POSIX}`], { allowFail: true });
+  if (!names) return [];
+  const out = [];
+  for (const name of names.split('\n').filter(Boolean)) {
+    const text = git(repoRoot, ['show', `${commit}:${LESSONS_POSIX}/${name}`], { allowFail: true });
+    const l = parseLesson(name, text ?? '', `${extra.repo}@${String(commit).slice(0, 10)}:${LESSONS_POSIX}/${name}`, problems);
+    if (l) out.push({ ...l, ...extra, file: null });
+  }
+  return out;
 }
 
-function validate(l) {
+// Every declared repo's lessons: at the attempt's base, in the main checkout, and in the attempt's worktree. A lesson
+// at the base or in the main checkout is never replaced by a weaker worktree copy (a ticket cannot drop or soften one);
+// the worktree adds new lessons and carries this attempt's own updates (a recurrence) for delivery.
+export function loadLessons(root, { state = null } = {}) {
+  let cfg = null;
+  let adapterRepo = null;
+  try {
+    cfg = loadConfig(root);
+    adapterRepo = adapterLocation(root, cfg).repo.name;
+  } catch {}
+  const problems = [];
+  const byKey = new Map();
+  for (const repo of cfg?.repos ?? []) {
+    const main = repoDir(root, repo);
+    const r = state?.repos?.[repo.name];
+    const extra = (where) => ({ repo: repo.name, where });
+    if (r?.base) for (const l of readAtCommit(main, r.base, extra('base'), problems)) if (!byKey.has(l.id.toLowerCase())) byKey.set(l.id.toLowerCase(), l);
+    const mp = dirProblems(main);
+    problems.push(...mp);
+    if (!mp.length) for (const l of readDir(lessonsDir(main), extra('main'), problems)) if (!byKey.has(l.id.toLowerCase())) byKey.set(l.id.toLowerCase(), l);
+    if (r?.worktree && fs.existsSync(r.worktree)) {
+      const wp = dirProblems(r.worktree);
+      problems.push(...wp);
+      if (!wp.length) for (const l of readDir(lessonsDir(r.worktree), extra('attempt'), problems)) {
+        const k = l.id.toLowerCase();
+        const had = byKey.get(k);
+        if (!had) byKey.set(k, l);
+        else if (had.repo === l.repo && l.status === had.status && l.recurrence >= had.recurrence) byKey.set(k, l);
+      }
+    }
+  }
+  const own = [...byKey.values()];
+  // Lessons in the wrong place: no `repo`, a `repo` other than the one holding the file, or a plugin lesson in a project.
+  for (const l of own) {
+    if (l.scope === 'plugin') problems.push(`${l.repo}: lesson ${l.id} is about the workflow itself: it is a plugin improvement, not a lesson; move it to your inbox with \`wf lesson move ${l.id} --improvement\``);
+    else if (l.scope === 'project') {
+      if (adapterRepo && l.repo !== adapterRepo) problems.push(`${l.repo}: lesson ${l.id} spans the project and belongs in the adapter repo (${adapterRepo}): \`wf lesson move ${l.id} --project\` (or \`--repo <name>\` if it is about one repo)`);
+    } else if (l.declaredRepo !== l.repo) problems.push(`${l.repo}: lesson ${l.id} says it concerns ${l.declaredRepo}; move it there: \`wf lesson move ${l.id} --repo ${l.declaredRepo}\``);
+  }
+  lessonProblems.set(root, problems);
+  return own.map((l) => (l.scope === 'project' ? { ...l, repo: null, home: l.repo } : { ...l, home: l.repo }));
+}
+
+function validate(l, cfg = null) {
   const p = [];
   if (!LESSON_ID.test(String(l.id ?? ''))) p.push('`id` must be letters, digits and dashes, starting with a letter or digit, at most 64 characters');
   if (!String(l.title ?? '').trim()) p.push('`title` says in one line what the project learned');
   if (!String(l.trigger?.what ?? '').trim()) p.push('`trigger.what` says what happened and where it was seen');
   if (!CAUSES.includes(l.cause)) p.push(`\`cause\` is one of ${CAUSES.join(', ')}`);
   if (!MECHANISMS.includes(l.mechanism?.kind)) p.push(`\`mechanism.kind\` is one of ${MECHANISMS.join(', ')}`);
-  if (!SCOPES.includes(l.scope)) p.push(`\`scope\` is project or plugin`);
+  if (!SCOPES.includes(l.scope)) p.push('`scope` is repo (about one repository: `--repo <name>`) or project (spans repos: `--project`); a finding about the workflow itself is a plugin improvement: `wf improve add`');
   if (!STATUSES.includes(l.status)) p.push(`\`status\` is one of ${STATUSES.join(', ')}`);
   if (l.status === 'enforced' && !String(l.mechanism?.ref ?? '').trim()) p.push('an enforced lesson names its mechanism: `mechanism.ref` (the rule id, step id or document that enforces it; `wf lesson apply <id>` prints what to add)');
+  if (l.scope === 'repo' && cfg && !cfg.repos.some((r) => r.name === l.repo)) p.push(`\`repo\` names the repository the lesson concerns: one of ${cfg.repos.map((r) => r.name).join(', ')}`);
   return p;
 }
 
-function writeLesson(root, l, { create = false } = {}) {
-  const { file, builtin, ...rest } = l;
-  const target = fileOf(root, l.id);
-  const before = dirProblems(root);
+// Where a lesson of `repoName` is written now.
+function targetFor(root, cfg, repoName, state) {
+  const repo = cfg.repos.find((r) => r.name === repoName);
+  if (!repo) throw refuse(`no repo \`${repoName}\` (repos: ${cfg.repos.map((r) => r.name).join(', ')})`);
+  const wt = state?.repos?.[repoName]?.worktree;
+  if (wt && fs.existsSync(wt) && !state.accepted && !['done', 'abandoned', 'handoff-pending'].includes(state.phase)) return { dir: wt, attempt: state.id, commit: true };
+  return { dir: repoDir(root, repo), attempt: null, commit: false };
+}
+
+function writeLesson(target, l, { create = false, message } = {}) {
+  const { file, builtin, where, declaredRepo, home, ...rest } = l;
+  if (rest.scope === 'project') rest.repo = null;
+  const out = fileIn(target.dir, l.id);
+  const before = dirProblems(target.dir);
   if (before.length) throw refuse(`lessons not written: ${before.join('; ')}`);
-  fs.mkdirSync(lessonsDir(root), { recursive: true });
-  const after = dirProblems(root);
+  fs.mkdirSync(lessonsDir(target.dir), { recursive: true });
+  const after = dirProblems(target.dir);
   if (after.length) throw refuse(`lessons not written: ${after.join('; ')}`);
-  // Case and Unicode variants of an id name the same file on a case-insensitive volume: one id per folded name.
   const folded = `${String(l.id).normalize('NFC').toLowerCase()}.yaml`;
-  const clash = fs.readdirSync(lessonsDir(root)).find((f) => f.normalize('NFC').toLowerCase() === folded && f !== `${l.id}.yaml`);
+  const clash = fs.readdirSync(lessonsDir(target.dir)).find((f) => f.normalize('NFC').toLowerCase() === folded && f !== `${l.id}.yaml`);
   if (clash) throw refuse(`lesson ${l.id} would collide with ${clash}`);
-  const st = fs.lstatSync(target, { throwIfNoEntry: false });
-  if (create && st) throw refuse(`lesson ${l.id} already exists (${target})`);
-  if (st && (!st.isFile() || st.nlink > 1)) throw refuse(`${target} is ${st.isSymbolicLink() ? 'a symlink' : st.isFile() ? 'a hard link' : 'not a regular file'}; not written through`);
-  writeNoFollow(target, YAML.stringify(rest), { exclusive: create });
-  return target;
+  const st = fs.lstatSync(out, { throwIfNoEntry: false });
+  if (create && st) throw refuse(`lesson ${l.id} already exists (${out})`);
+  if (st && (!st.isFile() || st.nlink > 1)) throw refuse(`${out} is ${st.isSymbolicLink() ? 'a symlink' : st.isFile() ? 'a hard link' : 'not a regular file'}; not written through`);
+  writeNoFollow(out, YAML.stringify(rest), { exclusive: create });
+  if (target.commit) {
+    const rel = path.relative(target.dir, out).split(path.sep).join('/');
+    git(target.dir, ['add', '--', rel]);
+    git(target.dir, ['commit', '-q', '-m', message ?? `Lesson ${l.id}: ${l.title}`, '--', rel]);
+  }
+  return out;
 }
 
 const nextId = (lessons) => `L-${Math.max(0, ...lessons.map((l) => Number(/^L-(\d+)$/.exec(l.id)?.[1] ?? 0))) + 1}`;
 
 // Same mechanism kind and a shared tag: the earlier lesson's mechanism did not prevent this.
-export const recurrenceOf = (lessons, l) => lessons.filter((x) => x.id !== l.id && x.status !== 'retired' && x.mechanism?.kind === l.mechanism?.kind && x.tags.some((t) => l.tags.includes(t)));
+export const recurrenceOf = (lessons, l) => lessons.filter((x) => x.id !== l.id && !x.builtin && x.status !== 'retired' && x.mechanism?.kind === l.mechanism?.kind && x.tags.some((t) => l.tags.includes(t)));
+
+// The repo a lesson of this attempt concerns, when not given: the only repo, else the attempt's repo with the most
+// changed files (a tie, or none changed, is asked).
+function defaultRepo(cfg, state) {
+  if (cfg.repos.length === 1) return cfg.repos[0].name;
+  if (!state) return null;
+  const counts = Object.entries(state.repos).map(([name, r]) => [name, git(r.worktree, ['diff', '--name-only', `${r.base}...HEAD`], { allowFail: true }).split('\n').filter(Boolean).length]);
+  counts.sort((a, b) => b[1] - a[1]);
+  return counts.length && counts[0][1] > 0 && (counts.length === 1 || counts[0][1] > counts[1][1]) ? counts[0][0] : null;
+}
 
 // `wf lesson add --file l.yaml` or flags. Records `lesson.recorded` on the attempt it came from (when given).
 export function addLesson(root, options, actorId) {
-  const lessons = loadLessons(root);
+  const cfg = loadConfig(root);
+  const state = options.attempt ? loadState(root, String(options.attempt)) : null;
+  const lessons = loadLessons(root, { state });
   let doc = {};
-  if (lessons.some((x) => x.builtin && x.id === (options.id ?? null))) throw refuse(`${options.id} is a lesson the plugin ships; record a recurrence instead`);
   if (typeof options.file === 'string') doc = YAML.parse(fs.readFileSync(options.file, 'utf8')) ?? {};
   const l = {
     id: doc.id ?? options.id ?? nextId(lessons),
@@ -146,7 +231,7 @@ export function addLesson(root, options, actorId) {
     trigger: { what: doc.trigger?.what ?? options.what, attempt: doc.trigger?.attempt ?? options.attempt ?? null, finding: doc.trigger?.finding ?? options.finding ?? null, quote: doc.trigger?.quote ?? options.quote ?? null },
     cause: doc.cause ?? options.cause,
     mechanism: { kind: doc.mechanism?.kind ?? options.mechanism, ref: doc.mechanism?.ref ?? options.ref ?? null, text: doc.mechanism?.text ?? options.text ?? null },
-    scope: doc.scope ?? options.scope ?? 'project',
+    scope: options.project ? 'project' : doc.scope === 'plugin' || options.scope === 'plugin' ? 'plugin' : doc.scope ?? (options.scope === 'project' ? 'project' : 'repo'),
     status: doc.status ?? options.status ?? 'proposed',
     tags: asList(doc.tags ?? options.tags),
     paths: asList(doc.paths ?? options.paths),
@@ -154,37 +239,67 @@ export function addLesson(root, options, actorId) {
     recurrence: 0,
     created: now(),
   };
-  if (lessons.some((x) => String(x.id).toLowerCase() === String(l.id).toLowerCase())) throw refuse(`lesson ${l.id} already exists (${fileOf(root, l.id)}); a recurrence of it is recorded with \`wf lesson recur ${l.id} --attempt <id>\``);
-  const problems = validate(l);
+  // A finding about the workflow itself is a plugin improvement, never a lesson.
+  if (l.scope === 'plugin') return { plugin: true, lesson: l };
+  if (l.scope === 'project') l.repo = null;
+  else {
+    l.repo = doc.repo ?? options.repo ?? defaultRepo(cfg, state);
+    if (!l.repo) throw refuse(`which repository does this lesson concern? pass \`--repo <name>\` (${cfg.repos.map((r) => r.name).join(', ')}), or \`--project\` when it spans repos (stored in the adapter repo); it is committed and delivered there`);
+  }
+  const dup = lessons.find((x) => x.id.toLowerCase() === String(l.id).toLowerCase());
+  if (dup) throw refuse(`lesson ${l.id} already exists (in ${dup.repo ?? 'the plugin'}); a recurrence of it is recorded with \`wf lesson recur ${l.id} --attempt <id>\``);
+  const problems = validate(l, cfg);
   if (problems.length) throw new WfError(`lesson not recorded:\n  - ${problems.join('\n  - ')}`);
   const recurs = [...new Set([...recurrenceOf(lessons, l).map((x) => x.id), ...asList(options.recurs)])];
-  const file = writeLesson(root, l, { create: true });
-  if (l.trigger.attempt) append(root, String(l.trigger.attempt), 'lesson.recorded', { id: l.id, for: options.for ?? (loadState(root, String(l.trigger.attempt)).reopenedFrom ? 'reopen' : 'finding'), file }, actorId);
+  const target = targetFor(root, cfg, l.repo ?? adapterLocation(root, cfg).repo.name, state);
+  const file = writeLesson(target, l, { create: true });
+  if (l.trigger.attempt) append(root, String(l.trigger.attempt), 'lesson.recorded', { id: l.id, repo: l.repo, for: options.for ?? (state?.reopenedFrom ? 'reopen' : 'finding'), file, inAttempt: Boolean(target.attempt) }, actorId);
   const flagged = recurs.map((id) => recur(root, id, l.trigger.attempt, actorId, `new lesson ${l.id}`));
-  return { lesson: l, file, recurred: flagged };
+  return { lesson: l, file, recurred: flagged, inAttempt: Boolean(target.attempt), repo: l.repo ?? adapterLocation(root, cfg).repo.name, scope: l.scope };
 }
 
-// The lesson's mechanism failed: it happened again. Recorded on the lesson (its counter) and on the attempt.
+// The lesson's mechanism failed: it happened again.
 export function recur(root, id, attempt, actorId, why) {
-  const l = loadLessons(root).find((x) => x.id === id);
+  const state = attempt ? loadState(root, String(attempt)) : null;
+  const l = loadLessons(root, { state }).find((x) => x.id === id);
   if (!l) throw refuse(`no lesson ${id}`);
   l.recurrence = (l.recurrence ?? 0) + 1;
-  // A shipped lesson's counter lives in the project: a copy is written there on its first recurrence.
-  writeLesson(root, { ...l, builtin: undefined });
+  // A shipped lesson's recurrence is recorded on the attempt only: it is never copied into a project.
+  writeLesson(targetFor(root, loadConfig(root), l.home, state), l, { message: `Lesson ${l.id} recurred (${l.recurrence})` });
   if (attempt) append(root, String(attempt), 'lesson.recurred', { id, recurrence: l.recurrence, why }, actorId);
   return { id, recurrence: l.recurrence, promote: l.recurrence >= 2 && l.mechanism?.kind !== 'gate-check' };
 }
 
-export function setLesson(root, id, options) {
-  const l = loadLessons(root).find((x) => x.id === id);
+// `wf lesson move <id> --repo R`: a lesson stored in the wrong repository goes to the one it concerns.
+export function moveLesson(root, id, options) {
+  const cfg = loadConfig(root);
+  const state = options.attempt ? loadState(root, String(options.attempt)) : null;
+  const l = loadLessons(root, { state }).find((x) => x.id === id);
   if (!l) throw refuse(`no lesson ${id}`);
-  if (l.builtin) throw refuse(`${id} is a lesson the plugin ships; it is changed in the plugin, not here`);
+  if (!l.file) throw refuse(`${id} exists only in a commit; check out a branch that has it first`);
+  const project = options.project === true;
+  const to = project ? adapterLocation(root, cfg).repo.name : String(options.repo ?? '');
+  if (!cfg.repos.some((r) => r.name === to)) throw refuse(`--repo names one of ${cfg.repos.map((r) => r.name).join(', ')} (or --project for a lesson that spans repos)`);
+  const target = targetFor(root, cfg, to, state);
+  const out = writeLesson(target, { ...l, scope: project ? 'project' : 'repo', repo: project ? null : to }, { message: `Lesson ${l.id} moved to ${to}` });
+  if (path.resolve(out) !== path.resolve(l.file)) {
+    const st = fs.lstatSync(l.file, { throwIfNoEntry: false });
+    if (st?.isFile() && st.nlink === 1) fs.unlinkSync(l.file);
+  }
+  return { id, from: l.file, to: out, inAttempt: Boolean(target.attempt) };
+}
+
+export function setLesson(root, id, options) {
+  const cfg = loadConfig(root);
+  const state = options.attempt ? loadState(root, String(options.attempt)) : null;
+  const l = loadLessons(root, { state }).find((x) => x.id === id);
+  if (!l) throw refuse(`no lesson ${id}`);
   if (options.status) l.status = String(options.status);
   if (options.ref) l.mechanism = { ...l.mechanism, ref: String(options.ref) };
   if (options.mechanism) l.mechanism = { ...l.mechanism, kind: String(options.mechanism) };
-  const problems = validate(l);
+  const problems = validate(l, cfg);
   if (problems.length) throw new WfError(`lesson ${id} not changed:\n  - ${problems.join('\n  - ')}`);
-  return { lesson: l, file: writeLesson(root, l) };
+  return { lesson: l, file: writeLesson(targetFor(root, cfg, l.home, state), l, { message: `Lesson ${l.id}: ${l.status}` }) };
 }
 
 // The adapter snippet or template text for a lesson's mechanism. Printed only: the owner adds and commits it.
@@ -194,35 +309,78 @@ export function applySnippet(l) {
   const text = l.mechanism?.text ?? l.title;
   switch (l.mechanism?.kind) {
     case 'review-rule':
-      return { where: '.workflow/project.yaml (review.rules) and a rule document', snippet: `review:\n  rules:\n    - { id: ${id}, paths: ${JSON.stringify(paths)}, read: [docs/lessons/${l.id}.md] }\n\n# docs/lessons/${l.id}.md\n# ${l.title}\n${text}\n`, ref: id };
+      return { where: `${l.repo ?? 'the adapter'}: .workflow/project.yaml (review.rules) and a rule document`, snippet: `review:\n  rules:\n    - { id: ${id}, ${l.repo ? `repo: ${l.repo}, ` : ''}paths: ${JSON.stringify(paths)}, read: [docs/lessons/${l.id}.md] }\n\n# docs/lessons/${l.id}.md\n# ${l.title}\n${text}\n`, ref: id };
     case 'designSystem-rule':
-      return { where: '.workflow/project.yaml (designSystem.rules)', snippet: `designSystem:\n  rules:\n    - { id: ${id}, description: ${JSON.stringify(l.title)}, forbidPattern: "<regex an added line must not match>", paths: ${JSON.stringify(paths)} }\n`, ref: id };
+      return { where: '.workflow/project.yaml (designSystem.rules)', snippet: `designSystem:\n  rules:\n    - { id: ${id}, ${l.repo ? `repo: ${l.repo}, ` : ''}description: ${JSON.stringify(l.title)}, forbidPattern: "<regex an added line must not match>", paths: ${JSON.stringify(paths)} }\n`, ref: id };
     case 'planner-criterion-template':
-      return { where: 'the planner appendix (roles.planner.appendix in .workflow/project.yaml)', snippet: `- When a change touches ${paths.join(', ')}: add a criterion "${text}" with a uat a person can check.\n`, ref: 'roles.planner.appendix' };
+      return { where: 'the planner appendix (roles.planner.appendix in .workflow/project.yaml)', snippet: `- When a change touches ${paths.join(', ')}${l.repo ? ` in ${l.repo}` : ''}: add a criterion "${text}" with a uat a person can check.\n`, ref: 'roles.planner.appendix' };
     case 'reviewer-checklist':
       return { where: 'the reviewer appendix (roles.reviewer.appendix in .workflow/project.yaml)', snippet: `- ${text} (lesson ${l.id})\n`, ref: 'roles.reviewer.appendix' };
     case 'gate-check':
-      return { where: '.workflow/project.yaml (gate.steps)', snippet: `gate:\n  steps:\n    - { id: ${id}, repo: <repo>, run: "<command that fails when this recurs>", inputs: ${JSON.stringify(paths)} }\n`, ref: id };
-    case 'engine-change':
-    case 'doc':
+      return { where: '.workflow/project.yaml (gate.steps)', snippet: `gate:\n  steps:\n    - { id: ${id}, repo: ${l.repo ?? '<repo>'}, run: "<command that fails when this recurs>", inputs: ${JSON.stringify(paths)} }\n`, ref: id };
     default:
-      return { where: l.scope === 'plugin' ? 'an issue for the plugin (`wf lesson export --plugin`)' : 'a change or a document in the project', snippet: `${l.title}\n\n${text}\n`, ref: null };
+      return { where: 'a change or a document in the project', snippet: `${l.title}\n\n${text}\n`, ref: null };
   }
 }
 
-// Lessons for this change: not retired; with paths, only when a changed file matches; with classes, only for those.
+// ---- Selection: which lessons each role receives, and why ----
+
+// The ticket's own words: the issue file given at entry and the admitted tracker capture (title, description, labels).
+function ticketText(state) {
+  const parts = [state.item ?? ''];
+  for (const f of [state.issue?.file, ...(state.tracker?.done ?? []).filter((d) => d.event === 'admitted').map((d) => d.capture?.path)]) {
+    if (!f) continue;
+    const r = readRegular(f);
+    if (r) parts.push(r.bytes.toString('utf8').slice(0, 200000));
+  }
+  return parts.join('\n').toLowerCase();
+}
+
+const label = (l) => (l.status === 'enforced' ? `enforced by ${l.mechanism?.kind}${l.mechanism?.ref ? ` (${l.mechanism.ref})` : ''}` : 'advisory (proposed: no mechanism enforces it yet)');
+
+// Lessons for a role: every non-retired project lesson (proposed and enforced), each with the reasons it matched.
+// Planner (nothing changed yet): a lesson whose repo is in this attempt, or whose tags the ticket mentions, or whose
+// paths the plan predicts. Implementer and reviewer: a changed file in the lesson's repo matching its paths, a lesson
+// without paths for a repo in scope, or a tag the ticket mentions. Enforced and recurring lessons are always kept; the
+// rest are capped at CAP, the omitted ones listed by id.
 export function relevantLessons(root, role, state, changed) {
-  const files = Object.values(changed ?? {}).flat();
+  const scope = new Set(Object.keys(state.repos ?? {}));
   const classes = new Set((state.work ?? []).map((w) => w.class));
-  const all = loadLessons(root).filter((l) => l.status !== 'retired' && l.inject !== false).filter((l) => {
-    if (l.classes?.length && classes.size && !l.classes.some((c) => classes.has(c))) return false;
-    if (!l.paths.length) return true;
-    if (role === 'planner') return true; // nothing is changed yet: the planner sees every lesson with paths too
-    return files.some((f) => matchesAny(f, l.paths));
-  }).sort((a, b) => b.recurrence - a.recurrence || String(a.id).localeCompare(String(b.id), undefined, { numeric: true }));
+  const text = ticketText(state);
+  const predicted = role === 'planner' ? [] : [];
+  const planned = [...(state.plan?.anchors ?? []), ...(state.plan?.tests?.changed ?? [])].map((a) => String(a).split(/[:\s]/)[0]);
+  const matches = [];
+  for (const l of loadLessons(root, { state })) {
+    if (l.status === 'retired' || l.scope === 'plugin') continue;
+    if (l.classes?.length && classes.size && !l.classes.some((c) => classes.has(c))) continue;
+    const why = [];
+    for (const t of l.tags) if (new RegExp(`(^|[^a-z0-9])${t.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([^a-z0-9]|$)`).test(text)) why.push(`the ticket mentions "${t}"`);
+    const inScope = !l.repo || scope.has(l.repo);
+    // Before the change exists (planner, implementer): by repo in scope, the ticket and the plan; the implementer also by
+    // anything already changed. The reviewer: by what changed.
+    if (role !== 'reviewer') {
+      if (inScope && l.repo) why.push(`its repo ${l.repo} is in this attempt`);
+      if (!l.repo && !l.paths.length) why.push('it applies to every change');
+      for (const p of [...planned, ...predicted]) if (l.paths.length && matchesAny(p, l.paths)) why.push(`the plan names ${p}`);
+    }
+    if (role !== 'planner') {
+      const files = Object.entries(changed ?? {}).filter(([r]) => !l.repo || r === l.repo).flatMap(([r, fs]) => fs.map((f) => [r, f]));
+      const hit = l.paths.length ? files.find(([, f]) => matchesAny(f, l.paths)) : null;
+      if (hit) why.push(`${hit[0]}:${hit[1]} matches ${l.paths.join(', ')}`);
+      if (!l.paths.length && inScope) why.push(l.repo ? `it applies to every change in ${l.repo}` : 'it applies to every change');
+    }
+    if (why.length) matches.push({ l, why: [...new Set(why)] });
+  }
+  const must = (m) => m.l.status === 'enforced' || m.l.recurrence >= 1;
+  const order = (a, b) => b.l.recurrence - a.l.recurrence || String(a.l.id).localeCompare(String(b.l.id), undefined, { numeric: true });
+  const kept = matches.filter(must).sort(order);
+  const rest = matches.filter((m) => !must(m)).sort(order);
+  const chosen = [...kept, ...rest.slice(0, CAP)];
+  const omitted = rest.slice(CAP).map((m) => m.l.id);
   return {
-    apply: all.slice(0, CAP).map((l) => ({ id: l.id, title: l.title, cause: l.cause, mechanism: l.mechanism, status: l.status, recurrence: l.recurrence, why: l.trigger?.what ?? null })),
-    more: Math.max(0, all.length - CAP),
+    apply: chosen.map(({ l, why }) => ({ id: l.id, title: l.title, repo: l.repo ?? null, cause: l.cause, mechanism: l.mechanism, status: l.status, label: label(l), recurrence: l.recurrence, matched: why, what: l.trigger?.what ?? null })),
+    omitted,
+    more: omitted.length,
   };
 }
 
@@ -243,20 +401,39 @@ export function lessonVerdicts(injected, closure) {
   return { problems, verdicts };
 }
 
-// A reopened attempt owes a lesson (or an explicit, ledgered reason why not) before its delivery handoff closes.
+// The implementer's acknowledgement of each lesson its bundle listed: a commit trailer in the attempt's commits,
+// `Lesson <id>: applied - <one line>` or `Lesson <id>: not-applicable - <one line>`.
+const ACK = /^Lesson ([A-Za-z0-9][A-Za-z0-9-]{0,63}): (applied|not-applicable)\s*[-:—]\s*(\S.*)$/;
+export function implementerAcks(state) {
+  const listed = [...new Set(state.handoffs.filter((h) => h.role === 'implementer').flatMap((h) => h.lessons ?? []))];
+  const found = new Map();
+  for (const [name, r] of Object.entries(state.repos)) {
+    if (!r.worktree || !fs.existsSync(r.worktree)) continue;
+    const log = git(r.worktree, ['log', '--format=%H%n%B%n--wf-end--', `${r.base}..HEAD`], { allowFail: true }) ?? '';
+    for (const chunk of log.split('--wf-end--')) {
+      const lines = chunk.trim().split('\n');
+      const commit = lines[0];
+      for (const line of lines.slice(1)) {
+        const m = ACK.exec(line.trim());
+        if (m && !found.has(m[1])) found.set(m[1], { lesson: m[1], ack: m[2], line: m[3].trim(), repo: name, commit });
+      }
+    }
+  }
+  return { listed, acks: listed.map((id) => found.get(id)).filter(Boolean), missing: listed.filter((id) => !found.has(id)) };
+}
+
+// A reopened attempt owes a lesson (or an explicit, ledgered reason why not), recorded before its review so the lesson
+// is reviewed and delivered with the change.
 export const owesLesson = (state) => Boolean(state.reopenedFrom) && !(state.lessons?.recorded?.length || state.lessons?.waived);
 
-// What the owner is prompted to record (never required except for a reopen).
 export function lessonPrompts(state) {
   const out = [];
-  if (owesLesson(state)) out.push(`this attempt reopens ${state.reopenedFrom} ("${state.reopenReason ?? ''}"): record what the project learns (\`wf lesson add --attempt ${state.id} --title "..." --what "..." --cause <class> --mechanism <kind> --quote "<the user's words>"\`) or why there is none (\`wf lesson waive --attempt ${state.id} --reason "..."\`); its delivery does not close until then`);
+  if (owesLesson(state)) out.push(`this attempt reopens ${state.reopenedFrom} ("${state.reopenReason ?? ''}"): record what the project learns before the review (\`wf lesson add --attempt ${state.id} --repo <repo it concerns> --title "..." --what "..." --cause <class> --mechanism <kind> --quote "<the user's words>"\`; it is committed in this attempt and delivered with it) or why there is none (\`wf lesson waive --attempt ${state.id} --reason "..."\`)`);
   for (const f of state.review?.closure?.findings ?? []) if (LESSON_CATEGORIES.has(f.category)) out.push(`finding ${f.id} is a ${f.category} problem: record a lesson (\`wf lesson add --attempt ${state.id} --finding ${f.id} --cause ${f.category} ...\`)`);
   for (const a of state.delivery?.shown?.anomalies ?? []) if (a.followUp) out.push(`anomaly "${a.observation}" has a follow-up: record a lesson if the way we work let it through (\`wf lesson add --attempt ${state.id} ...\`)`);
   return out;
 }
 
-// For `wf lesson review`: promote (recurred twice), apply (proposed, no mechanism ref), retire (injected into none of
-// the last N attempts that had any lessons injected at all).
 export function reviewLessons(root, { after = 10 } = {}) {
   const lessons = loadLessons(root);
   const injected = new Map();
@@ -271,15 +448,14 @@ export function reviewLessons(root, { after = 10 } = {}) {
   };
 }
 
-// Plugin-scope lessons as generic issue text. Stripped: the project and repo names, the owner and agent ids, ticket and
-// attempt ids, email addresses, URLs, absolute paths and repository paths, and the project's own forbidden patterns.
-export function exportPluginLessons(root, cfg) {
+// Generic issue text for the plugin: the project and repo names, ticket and attempt ids, emails, URLs, absolute paths
+// and the project's own forbidden patterns stripped.
+function scrubber(root, cfg) {
   const names = [cfg.name, ...cfg.repos.map((r) => r.name), ...cfg.repos.map((r) => path.basename(path.resolve(root, r.path))), path.basename(root)].filter((x) => x && x.length > 2);
   const forbid = [...(cfg.tracker?.commentRules?.forbid ?? []), ...(cfg.lessons?.forbid ?? [])];
-  // One pass per kind, the project's own patterns first, names as whole words (a placeholder is never rescanned).
   const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const nameRe = names.length ? new RegExp(`\\b(?:${[...new Set(names)].sort((a, b) => b.length - a.length).map(esc).join('|')})\\b`, 'gi') : null;
-  const scrub = (text) => {
+  return (text) => {
     let t = String(text ?? '');
     for (const pattern of forbid) {
       try {
@@ -293,8 +469,27 @@ export function exportPluginLessons(root, cfg) {
     if (nameRe) t = t.replace(nameRe, '<project>');
     return t;
   };
-  return loadLessons(root, { builtin: false }).filter((l) => l.scope === 'plugin' && l.status !== 'retired').map((l) => ({
-    id: l.id,
-    text: `## ${scrub(l.title)}\n\n**What happened:** ${scrub(l.trigger?.what)}\n\n**Cause class:** ${l.cause}\n\n**Proposed mechanism:** ${l.mechanism?.kind}${l.mechanism?.text ? ` — ${scrub(l.mechanism.text)}` : ''}\n\n**Recurrences so far:** ${l.recurrence}\n`,
-  }));
+}
+export function pluginIssueText(root, cfg, l) {
+  const scrub = scrubber(root, cfg);
+  return `## ${scrub(l.title)}\n\n**What happened:** ${scrub(l.trigger?.what)}\n\n**Cause class:** ${l.cause}\n\n**Proposed mechanism:** ${l.mechanism?.kind}${l.mechanism?.text ? ` — ${scrub(l.mechanism.text)}` : ''}\n\n**Recurrences so far:** ${l.recurrence ?? 0}\n`;
+}
+// Plugin-scope lessons still stored in a project (from before 0.3.0), as issue text.
+export function exportPluginLessons(root, cfg) {
+  return loadLessons(root).filter((l) => l.scope === 'plugin' && l.status !== 'retired').map((l) => ({ id: l.id, text: pluginIssueText(root, cfg, l) }));
+}
+
+// `wf lesson move <id> --improvement`: a lesson about the workflow itself goes to the user's improvements inbox (its
+// text sanitised) and leaves the project.
+export async function lessonToImprovement(root, id, options) {
+  const cfg = loadConfig(root);
+  const l = loadLessons(root, { state: options.attempt ? loadState(root, String(options.attempt)) : null }).find((x) => x.id === id);
+  if (!l) throw refuse(`no lesson ${id}`);
+  if (!l.file) throw refuse(`${id} exists only in a commit; check out a branch that has it first`);
+  const { addImprovement } = await import('./improve.mjs');
+  const names = [cfg.name, ...cfg.repos.map((r) => r.name), ...cfg.repos.map((r) => path.basename(path.resolve(root, r.path))), path.basename(root)];
+  const r = addImprovement({ title: l.title, what: l.trigger?.what ?? l.title, class: String(options.class ?? 'other'), 'observed-in': l.trigger?.attempt ?? null, quote: l.trigger?.quote ?? null }, names);
+  const st = fs.lstatSync(l.file, { throwIfNoEntry: false });
+  if (st?.isFile() && st.nlink === 1) fs.unlinkSync(l.file);
+  return { id, improvement: r.item.id, file: r.file, removed: l.file };
 }

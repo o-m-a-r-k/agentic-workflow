@@ -46,15 +46,33 @@ const segmentsOf = (p) => String(p).split(/[\\/]+/);
 const inEvidence = (p) => segmentsOf(p).some((s) => s.normalize('NFKC').replace(/[\p{Cf}\u00ad]/gu, '').toLowerCase() === '.wf-evidence');
 
 // A path segment written as a glob (`.wf-*`, `.[w]f-evidence`, `.*`) that the shell could expand to `.wf-evidence`.
+// Translated as the shell matches a glob: `*` and `?` as wildcards, a closed `[...]` as a class, an unclosed `[`
+// as a literal (named false positive, 0.3.0: an unclosed `[` made an invalid regex, and the error counted as a match).
+function globSegmentMatches(seg, target) {
+  let re = '^';
+  for (let i = 0; i < seg.length; i++) {
+    const c = seg[i];
+    if (c === '*') re += '.*';
+    else if (c === '?') re += '.';
+    else if (c === '[') {
+      const end = seg.indexOf(']', i + 2);
+      if (end < 0) re += '\\[';
+      else {
+        let body = seg.slice(i + 1, end).replace(/\\/g, '\\\\');
+        if (body.startsWith('!')) body = `^${body.slice(1)}`;
+        re += `[${body}]`;
+        i = end;
+      }
+    } else re += c.replace(/[.+^${}()|\\\]]/g, '\\$&');
+  }
+  try {
+    return new RegExp(`${re}$`, 'i').test(target);
+  } catch {
+    return false;
+  }
+}
 function globMatchesEvidence(token) {
-  return token.split('/').some((seg) => {
-    if (!seg.startsWith('.') || !/[*?[]/.test(seg)) return false;
-    try {
-      return new RegExp(`^${seg.replace(/[.+^${}()|\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')}$`, 'i').test('.wf-evidence');
-    } catch {
-      return true;
-    }
-  });
+  return token.split('/').some((seg) => seg.startsWith('.') && /[*?[]/.test(seg) && globSegmentMatches(seg, '.wf-evidence'));
 }
 
 // Whether text refers to the evidence in any form the shell could turn into its path.
@@ -73,11 +91,16 @@ const unescape = (text) => text.replace(/\\x([0-9a-f]{1,2})|\\u([0-9a-f]{4})|\\U
 export function mentionsEvidence(text) {
   const raw = fold(text);
   if (raw.includes('wf-evidence') || fold(unescape(raw)).includes('wf-evidence')) return true;
-  // A path assembled at run time: any expansion or substitution together with a part of the name.
-  if (/[$`]/.test(raw) && /wf-|evidence|\.wf\b/.test(raw)) return true;
-  const squeezed = raw.replace(/\$'|\$\{|[\s'"`\\{}]/g, '');
+  // A path assembled at run time: an expansion or substitution together with a part of the name (`wf-` or `.wf`, or
+  // `evidence` assigned to a variable or touching an expansion). The word evidence alone in prose next to a `$` does not
+  // count (named false positive, 0.3.0).
+  if (/[$`]/.test(raw) && (/wf-|\.wf\b/.test(raw) || /=\s*['"]?evidence|[$`})]evidence|evidence[$`{(]/.test(raw))) return true;
+  // Brace alternatives reassemble when braces and commas are dropped.
+  const squeezed = raw.replace(/\$'|\$\{|[\s'"`\\{},]/g, '');
   if (squeezed.includes('wf-evidence') || squeezed.includes('wf-ev')) return true;
-  if (/[*?[\]{},$]\s*evidence|evidence\s*[*?[\]{},$]/.test(raw.replace(/['"\\]/g, ''))) return true;
+  // `evidence` glued to a glob or expansion character (`*evidence`, `.wf-{evidence,x}` is caught above): not a comma, a
+  // brace or a bracket in prose or code (named false positive, 0.3.0: "keep evidence, ledger" was refused).
+  if (/(^|[^a-z0-9])[*?$]+evidence\b|\bevidence[*?]/.test(raw.replace(/['"\\]/g, ''))) return true;
   return raw.split(/[\s;&|()<>'"`=]+/).some((t) => t && globMatchesEvidence(t));
 }
 

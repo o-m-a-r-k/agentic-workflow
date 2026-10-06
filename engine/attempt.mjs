@@ -193,6 +193,9 @@ export function entry(root, options) {
     const src = path.resolve(String(options['issue-file']));
     if (!fs.existsSync(src)) throw new WfError(`--issue-file not found: ${src}`);
     const dest = path.join(root, '.wf-evidence', 'attempts', id, 'issue', path.basename(src));
+    // Opened first: the copy is then a file this process wrote, recorded in the manifest when it ends (copied before,
+    // it was in the opening snapshot unrecorded and refused as an extra file).
+    openEvidence(root, id);
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     fs.copyFileSync(src, dest);
     issue = { file: dest, sha256: hashFile(dest) };

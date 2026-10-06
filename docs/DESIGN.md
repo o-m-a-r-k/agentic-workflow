@@ -60,7 +60,7 @@ agentic-workflow/
 | Concept | Engine owns | Adapter supplies |
 | --- | --- | --- |
 | Work item | id, lane, intent (implementation / analysis), owner, attempt | tracker kind, id prefix, status names |
-| Workspace | repo = git root; one task worktree per repo per attempt; per-repo base branch | repos, each with `packages` (path, `sharedInfra`, `docsOnly`), base branch, provisioning |
+| Repos | repo = git root; one task worktree per repo per attempt; per-repo base branch | repos, each with `packages` (path, `sharedInfra`, `docsOnly`), base branch, provisioning |
 | Components | impact across components, delivery order, briefs | components, kinds, `provides` / `dependsOn` contracts |
 | Provisioning | prepares each worktree before any role starts | `clone` paths (copy-on-write), `fingerprint` lockfiles, `install`, `copyIgnored`, `onWorktreeCreate` |
 | Adapter trust | gate plan reads the adapter at the adapter repo's base commit recorded at admission, never the ticket worktree; touching `.workflow/**` forces the full gate | which repo holds `.workflow/` |

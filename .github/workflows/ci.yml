@@ -1,0 +1,30 @@
+name: scenarios
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  scenarios:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: git identity for the scenario repositories
+        run: |
+          git config --global user.name ci
+          git config --global user.email ci@example.test
+          git config --global init.defaultBranch main
+      - run: node --test --test-reporter=spec scenarios/*.test.mjs

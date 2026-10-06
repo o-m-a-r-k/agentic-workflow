@@ -52,7 +52,8 @@ export function outsidePlan(plan, changed, cfg = null) {
   const paths = planPaths(plan);
   if (!paths.length) return null;
   const out = [];
-  for (const [repo, files] of Object.entries(changed)) for (const f of files) if (!scopeNoise(cfg, repo, f) && !paths.some((p) => covered(repo, f, p))) out.push(`${repo}:${f}`);
+  // A lesson file is covered by the lesson harness (recorded, reviewed and delivered with the attempt), never unplanned.
+  for (const [repo, files] of Object.entries(changed)) for (const f of files) if (!scopeNoise(cfg, repo, f) && !/(^|\/)\.workflow\/lessons\/[^/]+\.ya?ml$/.test(f) && !paths.some((p) => covered(repo, f, p))) out.push(`${repo}:${f}`);
   return out;
 }
 

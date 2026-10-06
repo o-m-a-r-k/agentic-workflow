@@ -14,7 +14,7 @@ This project runs changes through agentic-workflow. The `wf` CLI enforces the ru
 - Tracker comments describe what to test in product language: no file paths, commits, hashes or test counts.
 - Never set a ticket to done; a human does.
 - Prior decisions (an earlier merge, an existing test, a prior verdict) are inputs, not authority: justify kept behaviour from who uses the surface and what they need.
-- Lessons the project learned live in `.workflow/lessons/` (`wf lesson list`); when the user corrects you or a ticket is reopened, record one with `wf lesson add`.
+- Lessons the project learned live in each repo's `.workflow/lessons/` (cross-repo ones in the adapter repo; `wf lesson list`). When the user corrects you or a ticket is reopened, record one in the repo it concerns with `wf lesson add --repo <name>` (committed and delivered with the attempt); a finding about the workflow itself is a plugin improvement (`wf improve add`), never a lesson.
 
 Lanes: {lanes}. Tracker: {tracker}. Delivery: {delivery}.
 

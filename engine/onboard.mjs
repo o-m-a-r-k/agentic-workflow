@@ -9,7 +9,9 @@ import { listAttempts, loadState } from './ledger.mjs';
 import { provision, untrackedFiles } from './attempt.mjs';
 import { projectEnv } from './env.mjs';
 import { chooseWorkers } from './host.mjs';
-import { missingFor, redactor, status as secretsStatus, stepEnv } from './secrets.mjs';
+import { loadCatalog, missingFor, readSecret, redactor, status as secretsStatus, stepEnv } from './secrets.mjs';
+import { openCount } from './improve.mjs';
+import { trackerModeChecks } from './tracker.mjs';
 import { findSkill } from './skills.mjs';
 import { report } from './telemetry.mjs';
 import { packageOfStep } from './topology.mjs';
@@ -210,8 +212,8 @@ export function detect(root) {
     const rp = path.join(root, r.path);
     r.base = defaultBranch(rp);
     const pkgs = findPackages(rp);
-    const workspace = isWorkspaceRoot(rp);
-    r.sharedInfra = workspace ? ['package.json', 'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'tsconfig*.json', '.eslintrc*', 'eslint.config.*'].filter((f) => f.includes('*') || exists(rp, f)) : [];
+    const monorepo = isWorkspaceRoot(rp);
+    r.sharedInfra = monorepo ? ['package.json', 'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'tsconfig*.json', '.eslintrc*', 'eslint.config.*'].filter((f) => f.includes('*') || exists(rp, f)) : [];
     r.packages = pkgs.map((p) => {
       const dir = path.join(rp, p);
       const lock = ['yarn.lock', 'pnpm-lock.yaml', 'package-lock.json', 'composer.lock', 'Gemfile.lock', 'poetry.lock', 'go.sum'].filter((l) => exists(dir, l)).map((l) => (p === '.' ? l : `${p}/${l}`));
@@ -229,8 +231,8 @@ export function detect(root) {
         const lock = { yarn: 'yarn.lock', pnpm: 'pnpm-lock.yaml', npm: 'package-lock.json', bun: 'bun.lock' }[pm];
         const locked = exists(dir, lock);
         if (locked) fingerprint.push(`${pre}${lock}`);
-        // In a workspace monorepo the root install covers every package.
-        if (!(workspace && p !== '.')) {
+        // In a package-manager monorepo (npm/pnpm/yarn workspaces) the root install covers every package.
+        if (!(monorepo && p !== '.')) {
           const cmd = locked ? { yarn: 'yarn install --immutable', pnpm: 'pnpm install --frozen-lockfile', npm: 'npm ci', bun: 'bun install --frozen-lockfile' }[pm] : { yarn: 'yarn install', pnpm: 'pnpm install', npm: 'npm install', bun: 'bun install' }[pm];
           installs.push(p === '.' ? cmd : `(cd ${shellQuote(p)} && ${cmd})`);
         }
@@ -246,7 +248,7 @@ export function detect(root) {
         installs.push(`(cd ${shellQuote(p)} && pod install)`);
       }
       steps.push(...stepsFor(r.name, rp, p, sources));
-      if (!(workspace && p === '.')) components.push(componentsFor(r.name, rp, p));
+      if (!(monorepo && p === '.')) components.push(componentsFor(r.name, rp, p));
       for (const f of ['docker-compose.yml', 'docker-compose.yaml', 'compose.yaml']) if (exists(dir, f)) compose.push(`${r.name}/${pre}${f}`);
     }
     const ignored = ['.env.local', '.env'].filter((f) => exists(rp, f));
@@ -254,7 +256,7 @@ export function detect(root) {
     secrets.push(...secretsFor(r.name, rp));
   }
   if (new Set(components.map((c) => c.id)).size !== components.length) components.forEach((c) => (c.id = `${c.repo}-${c.id}`));
-  // Workspace packages that depend on each other: a change in the provider re-runs the consumer's steps.
+  // Monorepo packages that depend on each other: a change in the provider re-runs the consumer's steps.
   for (const c of components) {
     const repo = repos.find((r) => r.name === c.repo);
     const pkg = readJsonSafe(path.join(root, repo.path, c.package ?? '.', 'package.json'));
@@ -277,8 +279,8 @@ export function writeDraft(root, detected, { force = false } = {}) {
   const file = path.join(dir, CONFIG_FILE);
   if (fs.existsSync(file) && !force) throw refuse(`${file} already exists`, 'pass --force to overwrite, or edit it directly');
   const multi = detected.repos.length > 1 || detected.repos[0].path !== '.';
-  // Multi-repo workspace: the adapter lives in the first repo (so the gate can read it at a base commit) and the
-  // workspace root links to it.
+  // Multi-repo project: the adapter lives in the first repo (so the gate can read it at a base commit) and the
+  // project root links to it.
   const adapterHome = multi ? path.join(root, detected.repos[0].path, ADAPTER_DIR) : dir;
   if (multi) {
     if (fs.existsSync(path.join(adapterHome, CONFIG_FILE)) && !force) throw refuse(`${path.join(adapterHome, CONFIG_FILE)} already exists`, 'pass --force to overwrite, or edit it directly');
@@ -312,7 +314,7 @@ export function writeDraft(root, detected, { force = false } = {}) {
   if (!fs.existsSync(path.join(dir, 'AGENTS.invariants.md'))) {
     fs.writeFileSync(path.join(dir, 'AGENTS.invariants.md'), '# Project invariants\n\nRules every agent must keep in this project (security, data, contracts, product stage).\n\n- Product stage: pre-launch | live (choose one and say what it means for compatibility)\n');
   }
-  if (multi) return file; // evidence and worktrees live at the workspace root, outside every repo
+  if (multi) return file; // evidence and worktrees live at the project root, outside every repo
   const ignoreTarget = path.join(root, '.gitignore');
   const ignore = fs.existsSync(ignoreTarget) ? fs.readFileSync(ignoreTarget, 'utf8') : '';
   const add = ['.wf-evidence/', '.wf-worktrees/'].filter((l) => !ignore.split('\n').includes(l));
@@ -626,6 +628,13 @@ export async function doctor(root, { runSteps = true } = {}) {
     if (new Set(Object.values(hashes)).size > 1) report.skills.push({ ok: true, skill: s.name, note: `copies differ between runtimes (${Object.entries(hashes).map(([r, h]) => `${r} ${h.slice(0, 12)}`).join(', ')}); vendor it into .workflow/skills/ for one version everywhere` });
   }
   for (const c of cfg.requires.connectors ?? []) report.connectors.push({ ok: true, connector: c.name, note: `not checkable from the CLI: the agent confirms ${c.name} with one read-only call` });
+  // How wf talks to the tracker: api (verifiable readback) or the agent's connector (agent-reported readback).
+  for (const t of await trackerModeChecks(root, cfg, { loadCatalog, readSecret })) {
+    if (t.fail) bad('secrets', { key: t.key, problem: t.problem, fix: t.fix });
+    else report.warnings.push({ ok: true, warn: true, check: t.check, problem: t.problem, fix: t.fix });
+  }
+  const inbox = openCount();
+  if (inbox) report.warnings.push({ ok: true, warn: true, check: 'plugin improvements', problem: `${inbox} open plugin improvement(s) in your inbox`, fix: '`wf improve next` in a plugin maintainer session' });
   // Warnings never fail doctor: each names a setup that let a stale or confounded result through.
   for (const w of siblingWarnings(root, cfg)) report.warnings.push({ ok: true, warn: true, check: w.check, problem: w.problem, fix: w.fix });
   for (const w of modelWarnings(root, cfg)) report.warnings.push({ ok: true, warn: true, check: w.check, problem: w.problem, fix: w.fix });

@@ -230,8 +230,11 @@ export async function recordTracker(root, cfg, state, options) {
   if (!options.capture) throw new WfError('--capture <file> is required: the raw tracker response the agent saved');
   const adapter = await loadTrackerAdapter(root, cfg, state.adapterBase);
   const capturePath = path.resolve(String(options.capture));
-  // Read once: the bytes checked are the bytes kept (and the ones hashed for the recycled-capture check).
-  const captureText = fs.readFileSync(capturePath, 'utf8');
+  // Read once: the bytes checked are the bytes kept (and the ones hashed for the recycled-capture check). With
+  // --comments, the two saved tool results (get_issue, list_comments) are kept together, unchanged, as one list.
+  const commentsPath = typeof options.comments === 'string' ? path.resolve(options.comments) : null;
+  const captureText = commentsPath ? `[${fs.readFileSync(capturePath, 'utf8').trim()},\n${fs.readFileSync(commentsPath, 'utf8').trim()}]\n` : fs.readFileSync(capturePath, 'utf8');
+  const provenance = options.engineCapture ? 'engine (tracker API)' : captureProvenance([capturePath, ...(commentsPath ? [commentsPath] : [])]);
   let raw;
   try {
     raw = JSON.parse(captureText);
@@ -342,8 +345,39 @@ export async function recordTracker(root, cfg, state, options) {
   if (problems.length) throw refuse(`tracker readback for \`${event}\` failed:\n  - ${problems.join('\n  - ')}`);
   const dest = path.join(attemptDir(root, state.id), 'tracker', `${event}-capture.json`);
   writeImmutable(dest, captureText);
-  append(root, state.id, 'tracker.recorded', { event, capture: { path: dest, sha256: hashFile(dest) }, status: issue.status, ...(verified.length ? { attachments: verified } : {}) }, null);
+  append(root, state.id, 'tracker.recorded', { event, provenance, capture: { path: dest, sha256: hashFile(dest) }, status: issue.status, ...(verified.length ? { attachments: verified } : {}) }, null);
   return loadState(root, state.id);
+}
+
+// Doctor: the tracker mode and what it costs. api: the key must be there. agent (connector): the readback is only what
+// the agent saved, so the engine cannot prove it is the tracker's raw answer; say so and how to switch.
+export async function trackerModeChecks(root, cfg, { loadCatalog: catalog, readSecret: secret }) {
+  if (cfg.tracker.kind === 'none') return [];
+  const out = [];
+  let adapter = null;
+  try {
+    adapter = await loadTrackerAdapter(root, cfg, null);
+  } catch {}
+  const keyName = cfg.tracker.apiKey ?? 'LINEAR_API_KEY';
+  if (cfg.tracker.via === 'api') {
+    const entry = catalog(root).find((k) => k.key === keyName);
+    if (!entry) out.push({ fail: true, key: keyName, problem: `tracker.via is api but ${keyName} is not catalogued in .workflow/secrets.yaml`, fix: `add { key: ${keyName}, kind: provided, required: true, purpose: "${cfg.tracker.kind} API key" } to .workflow/secrets.yaml, then the owner runs \`wf secrets guide ${keyName}\` in their own terminal` });
+    else if (!secret(root, cfg, entry)) out.push({ fail: true, key: keyName, problem: `tracker.via is api but ${keyName} is not set`, fix: `the owner runs \`wf secrets guide ${keyName}\` in their own terminal` });
+  } else if (adapter?.api) {
+    out.push({ check: 'tracker mode', problem: `the ${cfg.tracker.kind} tracker is driven by the agent's connector: the readback is what the agent saved, so wf cannot prove the status, the comment or the attachments it checks are the tracker's own answer (it records the readback as "agent-reported, unverified" unless it is the host's saved tool-result file)`, fix: `switch to the engine's API: \`wf tracker mode api\` (then the owner runs \`wf secrets guide ${keyName}\`)` });
+  }
+  return out;
+}
+
+// Where a connector readback came from: the host's own saved tool-result file (Claude Code keeps long tool results in
+// ~/.claude/projects/<project>/<session>/tool-results/), or anything else, which is only what the agent reports.
+export function captureProvenance(files) {
+  const home = process.env.HOME ?? '';
+  const host = (f) => {
+    const c = String(f);
+    return Boolean(home) && c.startsWith(path.join(home, '.claude', 'projects') + path.sep) && c.split(path.sep).includes('tool-results');
+  };
+  return files.length && files.every(host) ? 'host tool-result file' : 'agent-reported, unverified';
 }
 
 // `tracker.via: api`: the engine performs the pending actions itself and records its own readback as the capture,

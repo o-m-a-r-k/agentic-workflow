@@ -9,7 +9,8 @@ import { exportAttempt, exportFile } from './export.mjs';
 import { liveGate, runGate, runWithLease, stopGate } from './gate.mjs';
 import { append, listAttempts, loadState, openEvidence } from './ledger.mjs';
 import { canonical, touchesEvidence } from './paths.mjs';
-import { addLesson, applySnippet, exportPluginLessons, lessonPrompts, lessonWarnings, loadLessons, recur, reviewLessons, setLesson } from './lessons.mjs';
+import { openCount } from './improve.mjs';
+import { LESSON_FILE, addLesson, applySnippet, exportPluginLessons, lessonPrompts, lessonWarnings, loadLessons, moveLesson, recur, relevantLessons, reviewLessons, setLesson } from './lessons.mjs';
 import { LinkRefused, changesOf, rebaseline, releaseAttempt, seal, setVerifyLevel, verifyAttempt } from './evidence.mjs';
 import { acceptReview, amendCriteria, designWarning, batchCreate, batchEject, closeAfterHandoff, deliver, deliveredFiles, exportScreenshots, freezeCriteria, handoff, narrowDelivery, needsShown, nextAction, outsideWarning, recordReview, recordShown, reopen, screenshotsExportDir, shownDraftFile, uncovered, withAttempt } from './lifecycle.mjs';
 import { detect, doctor, register, registry, setEnabled, sync, writeDraft } from './onboard.mjs';
@@ -49,7 +50,9 @@ Work
   wf shown --file shown.json        record that every delivered screenshot was shown in the chat, with its caption and anomalies
   wf delivery narrow --keep SHA,... | --file keep.json --reason "why" [--dry-run]
                                     once, before \`wf shown\`: keep only this ticket's files of a delivered set an over-broad glob filled
-  wf tracker record --event E --capture file.json | wf tracker sync (tracker.via: api)
+  wf tracker record --event E --capture file.json [--comments file.json] | wf tracker sync (tracker.via: api)
+  wf tracker mode api|agent [--write]  how wf talks to the tracker (api: the engine records its own readback)
+  wf improve add|list|show|next|close  plugin improvements: workflow findings, kept in your inbox outside every repo
   wf hold --reason "why" | wf release
   wf lesson add|waive|recur|set|apply|show|list|review|export
                                     the project's lessons (.workflow/lessons/): capture, enforce, recurrence
@@ -83,13 +86,23 @@ function summary(root, s, { base = null, resume = false } = {}) {
   if (base) lines.push(...baseLines(base));
   if (s.activeHold) lines.push(`  HOLD: ${s.activeHold.reason}`);
   try {
-    const all = loadLessons(root);
+    const all = loadLessons(root, { state: s });
+    const lessonFiles = Object.keys(s.repos).flatMap((r) => {
+      try {
+        return changedFiles(s, r).filter((f) => LESSON_FILE.test(f)).map((f) => `${r}:${f}`);
+      } catch {
+        return [];
+      }
+    });
+    if (lessonFiles.length) lines.push(`  lesson (covered): ${lessonFiles.join(', ')} (delivered with this attempt)`);
     if (all.length || s.lessons) {
       const by = (st) => all.filter((l) => l.status === st).length;
       lines.push(`  lessons: ${all.length} in the project (${by('enforced')} enforced, ${by('proposed')} proposed); this attempt: ${s.lessons?.recorded?.length ?? 0} recorded${s.lessons?.waived ? `, none needed ("${s.lessons.waived.reason}")` : ''}`);
     }
     for (const r of s.lessons?.recurred ?? []) lines.push(`  LESSON ${r.id} RECURRED (recurrence ${r.recurrence}): its mechanism failed${r.recurrence >= 2 ? '; `wf lesson review` proposes promoting it to a gate check' : ''}`);
-    if (!['done', 'abandoned'].includes(s.phase)) for (const p of lessonPrompts(s)) lines.push(`  lesson: ${p}`);
+    if (!['done', 'abandoned'].includes(s.phase)) for (const p of lessonPrompts(s)) lines.push(`  lesson: ${p}${/reopens/.test(p) ? '; a finding about the workflow itself is a plugin improvement instead: `wf improve add ...`' : ''}`);
+    const inbox = openCount();
+    if (inbox) lines.push(`  ${inbox} open plugin improvement(s) in the inbox (\`wf improve list\`)`);
   } catch {}
   for (const r of s.rebaselines ?? []) lines.push(`  EVIDENCE RE-BASELINED ${r.at} by ${r.by}: ${r.changes.length} file(s) changed outside wf were accepted ("${r.reason}"): ${r.changes.slice(0, 5).map((c) => `${c.kind} ${c.path}`).join(', ')}${r.changes.length > 5 ? ' …' : ''}`);
   const live = ['done', 'abandoned'].includes(s.phase) ? null : liveGate(root, s);
@@ -99,6 +112,7 @@ function summary(root, s, { base = null, resume = false } = {}) {
     lines.push(`    finished: ${live.finished.map((r) => `${r.id} ${r.status}${r.seconds !== null ? ` ${r.seconds}s` : ''}`).join(', ') || 'none yet'}`);
   }
   if (s.lastGate) lines.push(`  last gate: ${s.lastGate.status} (${s.lastGate.runId})`);
+  for (const t of s.tracker.done) if (t.provenance === 'agent-reported, unverified') lines.push(`  tracker ${t.event}: readback agent-reported, unverified (switch with \`wf tracker mode api\`)`);
   if (s.checks?.length) lines.push(`  last check: ${s.checks.at(-1).status} (${s.checks.at(-1).runId}; light steps only, never counts as the gate)`);
   if (s.flaky?.length) lines.push(`  flaky: ${[...new Set(s.flaky.map((f) => `${f.step}${f.suites?.length ? ` (${f.suites.join(', ')})` : ''}`))].join(', ')} failed and then passed with the same inputs`);
   if (s.criteria && isOpen(s) && !s.accepted) {
@@ -207,7 +221,7 @@ export async function main(argv) {
 const FULL_VERIFY = new Set(['accept', 'deliver', 'verify', 'review', 'tracker', 'export', 'shown', 'delivery', 'summary', 'handoff', 'gate', 'check', 'evidence']);
 
 const WRITE_OPTIONS = ['out', 'csv', 'handoffs-csv', 'html', 'dir', 'to', 'root'];
-const READ_OPTIONS = ['file', 'capture', 'summary-file', 'closure', 'issue-file', 'from'];
+const READ_OPTIONS = ['file', 'capture', 'comments', 'summary-file', 'closure', 'issue-file', 'from'];
 const PATH_OPTIONS = [...WRITE_OPTIONS, ...READ_OPTIONS];
 const FOLDER_OPTIONS = new Set(['dir', 'to', 'root', 'from']);
 
@@ -258,6 +272,48 @@ function safeBase(root, s) {
   }
 }
 
+// `wf improve`: the user-level inbox of plugin improvements (engine/improve.mjs). Works anywhere; inside a project, its
+// names are stripped from what is stored.
+async function improveCommand(sub, positional, options) {
+  const { addImprovement, closeImprovement, loadImprovements, nextImprovements } = await import('./improve.mjs');
+  const show = (x) => `${x.id}  [${x.status}, ${x.class}${x.recurrence ? `, recurrence ${x.recurrence}` : ''}${x.version ? `, fixed in ${x.version}` : ''}]  ${x.title}${x.regressionOf ? `  (regression of ${x.regressionOf.id}${x.regressionOf.fixedIn ? ` fixed in ${x.regressionOf.fixedIn}` : ''})` : ''}`;
+  if (sub === 'add') {
+    let names = [];
+    const root = findRoot();
+    if (root) {
+      try {
+        const cfg = loadConfig(root);
+        names = [cfg.name, ...cfg.repos.map((r) => r.name), ...cfg.repos.map((r) => path.basename(path.resolve(root, r.path))), path.basename(root)];
+      } catch {}
+    }
+    const { item, file } = addImprovement(options, names);
+    print(options, `improvement ${item.id} recorded in your inbox (outside every repo): ${file}${item.regressionOf ? `\nregression of ${item.regressionOf.id}${item.regressionOf.fixedIn ? ` fixed in ${item.regressionOf.fixedIn}` : ''}: it goes to the top of \`wf improve next\`` : ''}\n  fix it in the plugin repo with a scenario test that reproduces it, then \`wf improve close ${item.id} --version X --test scenarios/<file>.test.mjs --fix "..."\``, item);
+    return 0;
+  }
+  if (sub === 'list' || !sub) {
+    const all = loadImprovements();
+    print(options, all.length ? all.map(show).join('\n') : 'no plugin improvements in your inbox', all);
+    return 0;
+  }
+  if (sub === 'next') {
+    const [x] = nextImprovements();
+    print(options, x ? `${show(x)}\n  what happened: ${x.what}${x.observedIn ? `\n  observed in: ${x.observedIn}` : ''}${x.quote ? `\n  in their words: "${x.quote}"` : ''}\n  fix it with a scenario test that fails without the fix, then \`wf improve close ${x.id} --version X --test scenarios/<file>.test.mjs --fix "..."\`` : 'nothing open', x ?? null);
+    return 0;
+  }
+  if (sub === 'show') {
+    const x = loadImprovements().find((i) => i.id === positional[0]);
+    if (!x) throw new WfError(`no improvement ${positional[0] ?? ''}`);
+    print(options, `${show(x)}\n  what happened: ${x.what}${x.observedIn ? `\n  observed in: ${x.observedIn}` : ''}${x.quote ? `\n  in their words: "${x.quote}"` : ''}${x.test ? `\n  test: ${x.test}` : ''}`, x);
+    return 0;
+  }
+  if (sub === 'close') {
+    const r = closeImprovement(positional[0], options);
+    print(options, `${r.id} closed; history written to ${r.history} (commit it with the fix)`, r);
+    return 0;
+  }
+  throw new WfError('usage: wf improve add|list|show|next|close');
+}
+
 async function dispatch(cmd, sub, positional, options) {
   // `wf` is the one command the evidence guard lets name .wf-evidence/. No option of it may write there, and an input
   // file is read only when it is a regular file outside the evidence (another attempt's evidence is not an input).
@@ -293,7 +349,7 @@ async function dispatch(cmd, sub, positional, options) {
     const detected = detect(root);
     const file = writeDraft(root, detected, { force: options.force === true });
     register(root, false);
-    print(options, `drafted ${file} (disabled)${detected.compose.length ? `\n  docker compose: ${detected.compose.join(', ')} (steps using it should hold the \`docker\` lease)` : ''}\n  repos: ${detected.repos.map((r) => `${r.name}@${r.base} [${r.packages.map((p) => p.path).join(', ')}]`).join('; ')}\n  steps: ${detected.steps.map((s) => s.id).join(', ') || 'none detected'}\n  components: ${detected.components.map((c) => `${c.id} (${c.kind})`).join(', ')}\n  secrets: ${detected.secrets.filter((s) => s.usedBy.length).map((s) => `${s.key} (${s.kind}, used by ${s.usedBy.join(', ')})`).join(', ') || 'none a detected step uses'}${detected.secrets.some((s) => !s.usedBy.length) ? ` (not catalogued: ${detected.secrets.filter((s) => !s.usedBy.length).map((s) => s.key).join(', ')})` : ''}${detected.notes.map((n) => `\n  note: ${n}`).join('')}\nnext: review the draft with the user, commit .workflow/ on the base branch and push it, then \`wf doctor\` and \`wf enable\``, { file, detected });
+    print(options, `drafted ${file} (disabled)${detected.compose.length ? `\n  docker compose: ${detected.compose.join(', ')} (steps using it should hold the \`docker\` lease)` : ''}\n  repos: ${detected.repos.map((r) => `${r.name}@${r.base} [${r.packages.map((p) => p.path).join(', ')}]`).join('; ')}\n  steps: ${detected.steps.map((s) => s.id).join(', ') || 'none detected'}\n  components: ${detected.components.map((c) => `${c.id} (${c.kind})`).join(', ')}\n  secrets: ${detected.secrets.filter((s) => s.usedBy.length).map((s) => `${s.key} (${s.kind}, used by ${s.usedBy.join(', ')})`).join(', ') || 'none a detected step uses'}${detected.secrets.some((s) => !s.usedBy.length) ? ` (not catalogued: ${detected.secrets.filter((s) => !s.usedBy.length).map((s) => s.key).join(', ')})` : ''}${detected.notes.map((n) => `\n  note: ${n}`).join('')}\nnext: review the draft with the user (a tracker: choose how wf talks to it; \`tracker.via: api\` is recommended, see the onboard skill), commit .workflow/ on the base branch and push it, then \`wf doctor\` and \`wf enable\``, { file, detected });
     return 0;
   }
   if (cmd === 'report') {
@@ -320,6 +376,7 @@ async function dispatch(cmd, sub, positional, options) {
     return 0;
   }
 
+  if (cmd === 'improve') return improveCommand(sub, positional, options);
   const root = requireRoot(options.root);
   switch (cmd) {
     case 'skills': {
@@ -445,9 +502,10 @@ async function dispatch(cmd, sub, positional, options) {
         // To the owner on stderr, never into the reviewer's one-line prompt on stdout.
         const w = outsideWarning(root, r.state);
         if (w) process.stderr.write(`warning: ${w}\n`);
+        if (r.lessons) process.stderr.write(`lessons injected: ${r.lessons.apply.map((l) => l.id).join(', ') || 'none'}${r.lessons.omitted?.length ? ` (omitted by the cap: ${r.lessons.omitted.join(', ')})` : ''}\n`);
         print(options, startPrompt, { ...r, startPrompt });
       }
-      else print(options, `${sub} bundle: ${r.bundle}${r.work ? `\nwork item ${r.work}, class ${r.class}` : `\nclass ${r.class}`}${r.effort ? `, effort ${r.effort}` : ''}${r.model ? `, model ${r.model}` : ''}\nStart agent type ${r.agentType} (name it ${options.agent}; do not pass a model) with: "${startPrompt}"`, { ...r, startPrompt });
+      else print(options, `${r.lessons ? `lessons injected: ${r.lessons.apply.map((l) => l.id).join(', ') || 'none'}${r.lessons.omitted?.length ? ` (omitted by the cap: ${r.lessons.omitted.join(', ')})` : ''}\n` : ''}${sub} bundle: ${r.bundle}${r.work ? `\nwork item ${r.work}, class ${r.class}` : `\nclass ${r.class}`}${r.effort ? `, effort ${r.effort}` : ''}${r.model ? `, model ${r.model}` : ''}\nStart agent type ${r.agentType} (name it ${options.agent}; do not pass a model) with: "${startPrompt}"`, { ...r, startPrompt });
       return 0;
     }
     case 'gate':
@@ -540,7 +598,25 @@ async function dispatch(cmd, sub, positional, options) {
         print(options, `${api.trim() || 'tracker: nothing to perform (no pending actions, or `tracker.via` is not `api`)'}\nnext: ${nextAction(root, loadState(root, s.id))}`);
         return 0;
       }
-      if (sub !== 'record') throw new WfError('usage: wf tracker record --event E --capture file.json | wf tracker sync');
+      if (sub === 'mode') {
+        // The adapter edit that switches how wf talks to the tracker; with --write it is made (comments kept).
+        const mode = positional[0];
+        if (!['api', 'agent'].includes(mode)) throw new WfError('usage: wf tracker mode api|agent [--write]');
+        const cfg = loadConfig(root);
+        const key = cfg.tracker.apiKey ?? 'LINEAR_API_KEY';
+        const file = path.join(root, '.workflow', 'project.yaml');
+        const { YAML } = await import('./util.mjs');
+        const doc = YAML.parseDocument(fs.readFileSync(file, 'utf8'));
+        doc.setIn(['tracker', 'via'], mode);
+        if (mode === 'api' && !cfg.tracker.apiKey) doc.setIn(['tracker', 'apiKey'], key);
+        const next = mode === 'api' ? `\nthen catalogue ${key} in .workflow/secrets.yaml ({ key: ${key}, kind: provided, required: true }) if it is not, and the owner runs \`wf secrets guide ${key}\` in their own terminal; \`wf doctor\` checks it` : '';
+        if (options.write) {
+          fs.writeFileSync(file, doc.toString());
+          print(options, `tracker.via set to ${mode} in ${file}; commit it on the base branch${next}`);
+        } else print(options, `set in .workflow/project.yaml:\n  tracker:\n    via: ${mode}${mode === 'api' ? `\n    apiKey: ${key}` : ''}\n(or run \`wf tracker mode ${mode} --write\`)${next}`);
+        return 0;
+      }
+      if (sub !== 'record') throw new WfError('usage: wf tracker record --event E --capture file.json [--comments file.json] | wf tracker sync | wf tracker mode api|agent');
       const cfg = loadConfig(root);
       let s = await recordTracker(root, cfg, openState(root, options), { ...options, engineCapture: undefined });
       s = closeAfterHandoff(root, s);
@@ -636,20 +712,22 @@ async function dispatch(cmd, sub, positional, options) {
       print(options, bad.length ? bad.map((b) => `${b.id}: ${b.problems.length} problem(s): the evidence does not match what wf recorded\n  - ${b.problems.slice(0, 20).join('\n  - ')}`).join('\n') : `verified ${ids.length} attempt(s): ledger chain, anchor and every recorded evidence file (sha256, size, mode) match; no extra file`, bad);
       return bad.length ? 1 : 0;
     }
-    case 'lesson': {
+    case 'lesson':
+    case 'lessons': {
       const { actor } = await import('./attempt.mjs');
       const cfg = loadConfig(root);
-      const show = (l) => `${l.id}  [${l.status}, ${l.scope}, ${l.cause}, ${l.mechanism?.kind}${l.mechanism?.ref ? ` ${l.mechanism.ref}` : ''}] recurrence ${l.recurrence}  ${l.title}`;
+      const show = (l) => `${l.id}  ${l.scope === 'project' ? `project, in ${l.home}` : l.repo} (${l.where})  [${l.status}, ${l.cause}, ${l.mechanism?.kind}${l.mechanism?.ref ? ` ${l.mechanism.ref}` : ''}] recurrence ${l.recurrence}  ${l.title}`;
       if (sub === 'add') {
         if (options.attempt) openState(root, options);
         const r = addLesson(root, options, actor(options));
+        if (r.plugin) throw new WfError('a finding about the workflow itself is not a lesson: it is an improvement to the plugin. Record it in your inbox (outside every repo) with `wf improve add --title "..." --what "..." --observed-in <attempt or step> --quote "<their words>" --class <engine|template|skill|guard|tracker|onboarding|docs|other>`; the plugin\'s maintainer fixes it there with a scenario test.');
         const flags = r.recurred.map((x) => `\nlesson ${x.id} recurred (recurrence ${x.recurrence}): its mechanism failed${x.promote ? `; promote it to a gate check (\`wf lesson apply ${x.id}\` after setting \`mechanism.kind: gate-check\`)` : ''}`).join('');
         let closed = '';
         if (options.attempt) {
           const s = closeAfterHandoff(root, loadState(root, String(options.attempt)));
           if (s.phase === 'done') closed = `\n${s.id} closed.`;
         }
-        print(options, `lesson ${r.lesson.id} recorded: ${r.file}\n  commit it with the adapter; to enforce it: \`wf lesson apply ${r.lesson.id}\`${flags}${closed}`, r);
+        print(options, `${r.scope === 'project' ? 'project ' : ''}lesson ${r.lesson.id} recorded in ${r.repo}${r.scope === 'project' ? ' (the adapter repo: it spans the project)' : ''}: ${r.file}\n  ${r.inAttempt ? `committed in ${options.attempt}'s worktree: it is reviewed and delivered with this attempt` : `in ${r.repo}'s main checkout: commit it there`}; to enforce it: \`wf lesson apply ${r.lesson.id}\`${flags}${closed}`, r);
         return 0;
       }
       if (sub === 'waive') {
@@ -667,6 +745,27 @@ async function dispatch(cmd, sub, positional, options) {
         const s = options.attempt ? openState(root, options) : null;
         const r = recur(root, id, s?.id ?? null, actor(options), options.reason ?? null);
         print(options, `lesson ${id} recurred (recurrence ${r.recurrence}): its mechanism failed${r.promote ? '; promote it to a gate check' : ''}`, r);
+        return 0;
+      }
+      if (sub === 'move') {
+        if (options.improvement) {
+          const { lessonToImprovement } = await import('./lessons.mjs');
+          const r = await lessonToImprovement(root, positional[0], options);
+          print(options, `lesson ${r.id} is a plugin improvement: ${r.improvement} in your inbox (${r.file}); ${r.removed} removed from the project (commit that)`, r);
+          return 0;
+        }
+        const r = moveLesson(root, positional[0], options);
+        print(options, `lesson ${r.id} moved: ${r.from} -> ${r.to}${r.inAttempt ? ' (committed in the attempt)' : '; commit both repos'}`, r);
+        return 0;
+      }
+      if (sub === 'preview') {
+        const s = openState(root, options);
+        const role = String(options.role ?? '');
+        if (!['planner', 'implementer', 'reviewer'].includes(role)) throw new WfError('--role planner|implementer|reviewer');
+        const changed = Object.fromEntries(Object.keys(s.repos).map((r) => [r, changedFiles(s, r)]));
+        const sel = relevantLessons(root, role, s, role === 'planner' ? {} : changed);
+        const rows = sel.apply.map((l) => `  ${l.id} [${l.label}] ${l.repo ? `${l.repo}: ` : ''}${l.title}\n     matched: ${l.matched.join('; ')}`);
+        print(options, `the ${role} of ${s.id} would receive ${sel.apply.length} lesson(s)${sel.omitted.length ? `; ${sel.omitted.length} advisory omitted by the cap: ${sel.omitted.join(', ')}` : ''}\n${rows.join('\n') || '  none'}`, sel);
         return 0;
       }
       if (sub === 'set') {
@@ -707,7 +806,7 @@ async function dispatch(cmd, sub, positional, options) {
         print(options, `${all.length ? all.map(show).join('\n') : `no lessons yet (${path.join('.workflow', 'lessons')})`}${warn}`, all);
         return 0;
       }
-      throw new WfError('usage: wf lesson add|waive|recur|set|apply|show|list|review|export');
+      throw new WfError('usage: wf lesson add|waive|recur|move|set|apply|show|list|preview|review|export');
     }
     case 'evidence': {
       if (sub !== 'release') throw new WfError('usage: wf evidence release [--attempt ID | --closed | --older-than DAYS] [--reason "why"] [--dry-run]');

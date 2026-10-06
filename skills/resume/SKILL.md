@@ -11,3 +11,5 @@ description: Resume agentic-workflow work after an interruption, a compaction or
 4. Never start a duplicate gate: `wf` refuses while one is running.
 
 If a command refuses because the evidence does not match what wf recorded, run `wf verify --attempt <id>` and report the listed files to the user; never repair evidence yourself.
+
+If `wf status` lists open plugin improvements and this is a session in the plugin's own repo, `wf improve next` names the one to fix.

@@ -7,7 +7,7 @@ import { ADAPTER_DIR, adapterFileAtCommit, agentTypeFor, declared, loadConfig, l
 import { focusedSkips, gatePassedForCurrentTree, screenshots } from './gate.mjs';
 import { append, attemptDir, evidenceRoot, keptFiles, listAttempts, loadState, openEvidence } from './ledger.mjs';
 import { assertUnchanged } from './evidence.mjs';
-import { lessonPrompts, lessonVerdicts, owesLesson, recur, relevantLessons } from './lessons.mjs';
+import { implementerAcks, lessonPrompts, lessonVerdicts, owesLesson, recur, relevantLessons } from './lessons.mjs';
 import { canonical as canonicalPath, isInside, touchesEvidence } from './paths.mjs';
 import { changedForStep, deliveryOrder, impact, inside, packageOf } from './topology.mjs';
 import { findSkill } from './skills.mjs';
@@ -296,6 +296,13 @@ export function handoff(root, role, options) {
     if (authorsOf(root, state).has(agent)) throw refuse(`${agent} planned, wrote or owns this change and cannot review it`);
     // A resumed reviewer is anchored on its earlier findings; each round is judged by an agent that has seen none of them.
     if (state.roles.reviewer.includes(agent)) throw refuse(`${agent} already reviewed a round of this attempt; start a fresh reviewer agent with a new id; each review round uses a new agent`);
+    // A reopened attempt records what the project learns before it is reviewed: the lesson is then in the reviewed diff.
+    if (owesLesson(state)) throw refuse(lessonPrompts(state)[0]);
+    // Every lesson the implementers were handed is acknowledged in a commit trailer: `Lesson <id>: applied - <why>` or
+    // `Lesson <id>: not-applicable - <why>`. The reviewer sees these and still gives its own verdict.
+    const ack = implementerAcks(state);
+    if (ack.missing.length) throw refuse(`the implementer did not acknowledge ${ack.missing.length} lesson(s) it was handed: ${ack.missing.join(', ')}`, `add a trailer per lesson to a commit in the worktree, one line each: \`Lesson <id>: applied - <how>\` or \`Lesson <id>: not-applicable - <why>\` (for example \`git commit --allow-empty -m "Lessons" -m "Lesson ${ack.missing[0]}: applied - ..."\`)`);
+    for (const a of ack.acks) if (!(state.lessons?.acknowledged ?? []).some((x) => x.lesson === a.lesson && x.commit === a.commit)) append(root, state.id, 'lesson.acknowledged', a, null);
     gateNow = gatePassedForCurrentTree(state);
   }
   if (role === 'implementer' && state.roles.reviewer.includes(agent)) throw refuse(`${agent} reviewed this attempt and cannot implement it`);
@@ -344,7 +351,7 @@ export function handoff(root, role, options) {
     criteriaAmendments: state.criteriaAmendments,
     // Project lessons that apply to this change (by paths and work class), most recurring first, capped. The reviewer
     // gives each a verdict in `lessons`; they are project rules, not other agents' findings.
-    lessons: ['planner', 'implementer', 'reviewer'].includes(role) ? relevantLessons(root, role, state, changed) : undefined,
+    lessons: ['planner', 'implementer', 'reviewer'].includes(role) ? { ...relevantLessons(root, role, state, changed), ...(role === 'reviewer' ? { acknowledged: implementerAcks(loadState(root, state.id)).acks } : {}) } : undefined,
     // Evidence files the owner accepted after they changed outside wf (`wf verify --accept-changes`): judge with that in mind.
     rebaselined: state.rebaselines ?? [],
     changed,
@@ -376,7 +383,7 @@ export function handoff(root, role, options) {
     reviewClosureFile: role === 'reviewer' ? path.join(root, '.wf-worktrees', state.id, '_review', `closure-${n}.json`) : null,
     instructions: {
       planner: 'Read the issue and the code. Do not change any file. When the bundle has `designSystem` and the ticket changes a UI surface, add a criterion "uses the shared components: <the ones from designSystem.components this surface needs>" with a uat a person can check. Return your plan as one ```yaml fenced block, last in your reply: { plan: { summary, contract, anchors, tests: { changed, run }, doNotRun, externalServices, agentSplit }, criteria: [{ id: C1, text, uat }], work: [{ id: W1, criteria: [C1], repos, class, why }] } (work is optional; classes: see your role file). The owner freezes it from your transcript unchanged. Leave no background command, monitor or sleep loop running when you report.',
-      implementer: "Done means `check.command` passes for your repos (it runs the light steps listed under `check`; it never counts as the gate). Implement against the frozen criteria and the plan in the worktrees above: follow `plan.contract`, start from `plan.anchors`, while iterating run only `plan.tests.run` and the specs you changed, never what `plan.doNotRun` lists, and keep to `plan.externalServices` and `plan.agentSplit`. Write tests only for real behaviour. Before finishing run the repo's lint and full unit suite once, in the foreground. Commit at stage boundaries and everything when done. If `work` is set, do that work item only; if it turns out to touch something a stronger class covers, stop and tell the owner. Before you report, stop every background command, monitor or sleep loop you started: a waiter left running keeps notifying the owner after you are done.",
+      implementer: "Done means `check.command` passes for your repos (it runs the light steps listed under `check`; it never counts as the gate). Implement against the frozen criteria and the plan in the worktrees above: follow `plan.contract`, start from `plan.anchors`, while iterating run only `plan.tests.run` and the specs you changed, never what `plan.doNotRun` lists, and keep to `plan.externalServices` and `plan.agentSplit`. Write tests only for real behaviour. Before finishing run the repo's lint and full unit suite once, in the foreground. Commit at stage boundaries and everything when done. If `work` is set, do that work item only; if it turns out to touch something a stronger class covers, stop and tell the owner. For every lesson under `lessons.apply` (this project's lessons for the change, labelled enforced or advisory, with why each matched), follow it and acknowledge it in a commit message trailer, one line each: `Lesson <id>: applied - <how>` or `Lesson <id>: not-applicable - <why>`; the review does not start without them. Before you report, stop every background command, monitor or sleep loop you started: a waiter left running keeps notifying the owner after you are done.",
       reviewer: 'Review the whole change against the frozen criteria, and the gate evidence when `gate.passedOnThisTree` is true (then open every screenshot listed under `gate.screenshots`, which are exactly the files `gate.artifacts` lists per glob, and record the sha256 of each one you viewed; a file no glob lists is never required; a step whose package did not change needs nothing; a step marked `uncovered` matched nothing although this ticket changed its package: judge whether the ticket needed a capture there and add `noEvidence: [{ step, reason }]` saying why none is needed, or raise a finding). When it is false, no gate has passed on this tree yet: judge the diff and list no screenshots. You did not write this change. Everything you need is in this bundle; judge the whole change yourself. Read every document under `rules` (each `read` path) and every skill under `skills` (the Skill tool, or its file) in this bundle: they add to the whole review and never narrow it. Give each rule a verdict with one line of evidence (file:line or the document section): `rules: [{ rule, verdict: complies|finding|not-applicable, evidence, finding }]` (`finding` names your finding id when the verdict is finding); a rule marked `docChangedByTicket` had its document changed by this ticket: judge against the copy under `read`, which is the base version. Write the closure file: { reviewer, findings: [{ id, severity, summary, status: open|fixed|verified-nonissue, evidence, work }], criteria: [{ id, evidence: { kind: test|screenshot|output|not-applicable|dropped-with-reason, ref, reason } }] (a screenshot ref is the sha256 or source of a file in `gate.artifacts`), screenshotsInspected: [sha256], noEvidence: [{ step, reason }], rules: [{ rule, verdict, evidence, finding }], outsidePlan: [{ file, verdict: covered|finding, by, evidence }] } (one outsidePlan entry per file the bundle lists under `outsidePlan`: `covered` when a criterion covers that change, with its id in `by`; otherwise `finding` with your finding id in `by`). When the bundle has \`designSystem\`: for every changed UI file list each table, list, form and dialog it renders and name the shared component used (from \`designSystem.components\`) or the justified exception, and give every \`designSystem.hits\` entry a verdict: \`designHits: [{ id, verdict: justified|finding, evidence, finding }]\` (a closure missing one is refused). Then run `wf review --closure <file>`. Only after your closure is recorded, `wf review` may list findings from earlier rounds for you to verify against the code: then add `priorFindings: [{ round, id, status: fixed|verified-nonissue|open, evidence }]` to the same file, change nothing else, and run `wf review --closure <file>` again.',
       tester: 'Write requirement expectations from the issue before reading the implementation, then map each to gate tests.',
     }[role],
@@ -395,7 +402,7 @@ export function handoff(root, role, options) {
   // Once per attempt: with parallel work items every implementer handoff queued another identical tracker read.
   const firstImplementer = role === 'implementer' && !state.handoffs.some((h) => h.role === 'implementer');
   if (firstImplementer && state.lane !== 'quick' && state.intent === 'implementation') emitTrackerEvent(root, cfg, state.id, 'implementing');
-  return { bundle: file, startPrompt: startPromptFor(file), agentType, class: cls, effort, model, work: work?.id ?? null, state: loadState(root, state.id) };
+  return { bundle: file, startPrompt: startPromptFor(file), agentType, class: cls, effort, model, work: work?.id ?? null, lessons: bundle.lessons ?? null, state: loadState(root, state.id) };
 }
 
 // Per step with `artifacts`: each glob as declared and as expanded for this attempt, and the files it matched, and the
@@ -1071,7 +1078,7 @@ export function recordShown(root, options) {
   return after;
 }
 
-// Anomalies seen while viewing the delivered screenshots. Named failure: an owner called "3 active workspaces in the
+// Anomalies seen while viewing the delivered screenshots. Named failure: an owner called "3 active accounts in the
 // Arabic capture vs 1 in English" cosmetic without checking; test data had leaked between runs. Any value that differs
 // between captures of the same state (counts, dates, names), or contradicts a criterion, is recorded with its cause
 // (investigated; "cosmetic" needs evidence) or a follow-up. The key is required: `"anomalies": "none seen"` (or []) says
