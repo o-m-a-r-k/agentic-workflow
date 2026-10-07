@@ -166,7 +166,7 @@ An adversarial pass over every change to `engine/attempt.mjs` and `engine/lifecy
 | [I-25](improvements/I-25.md) | Fix handoffs carry a pattern-sweep list; doctor fails without a reviewer model; flag doNotRun that excludes a repo the ticket now touches | 0.5.0 | `scenarios/impact.test.mjs` |
 | [I-24](improvements/I-24.md) | Telemetry gaps: wf report undercounts findings and rounds, no cost, no sub-agents, no review-round or gate-stop events, no failing test names | 0.5.0 | `scenarios/telemetry.test.mjs` |
 | [I-23](improvements/I-23.md) | Review handoff must require a green gate on the tree and no open implementer handoff; record why a gate is stopped | 0.5.0 | `scenarios/review-order.test.mjs` |
-| [I-22](improvements/I-22.md) | Adapter-fault recovery is tested only for a single-repo standard-lane attempt with nothing recorded as delivered | 0.5.0 | `scenarios/adapter-fault.test.mjs` |
+| [I-22](improvements/I-22.md) | Adapter-fault recovery is tested only for a single-repo standard-lane attempt with nothing recorded as delivered | 0.5.0 | `scenarios/adapter-fault.test.mjs`, `scenarios/adapter-fault-shapes.test.mjs` |
 | [I-21](improvements/I-21.md) | No recovery when a delivery adapter fault hits a partly delivered multi-repo attempt | 0.5.0 | `scenarios/adapter-fault.test.mjs` |
 | [I-20](improvements/I-20.md) | A delivery whose adapter observe reports a non-integrated state still counts as delivered on retry when the commit is on the target branch | 0.5.0 | `scenarios/adapter-fault.test.mjs` |
 | [I-19](improvements/I-19.md) | Scope fences must never block a fix: a fix that needs another component or repo extends the attempt | 0.4.4 | `scenarios/discovered.test.mjs` |
