@@ -11,12 +11,16 @@ Thanks for helping. Issues and pull requests are welcome; nothing is merged auto
 
 Never use "workspace" for any of these.
 
-## Running the tests
+## Running the suite
 
 ```bash
 npm run setup                  # once: installs the pre-push hook (git config core.hooksPath .githooks)
-npm run verify                 # before every push: the suite here and in a Linux container (non-root and root)
+npm run verify                 # before every push: the suite here and in a Linux container (non-root and root), in parallel
+npm run verify -- --host-only  # this machine only, every core (not enough before a push)
+npm run verify -- --linux-only # the two container legs only
+npm run verify -- --serial     # one leg after the other, each with the whole machine
 npm test                       # the scenario suite: node --test scenarios/
+node --test scenarios/<file>.test.mjs                                # one file
 node --test scenarios/<file>.test.mjs --test-name-pattern "<name>"   # one test while iterating
 node bench/evidence.mjs        # the evidence benchmark (writes about 3 GB to the temporary folder)
 ```
@@ -24,6 +28,23 @@ node bench/evidence.mjs        # the evidence benchmark (writes about 3 GB to th
 The scenarios run the real `wf` CLI against temporary git repositories with bare remotes. CI runs them on Linux and
 macOS, on every push and pull request and weekly. A red CI is fixed first, from its root cause; a Linux-only failure
 is real (see [AGENTS.md](AGENTS.md)).
+
+Expected times on a 16-core laptop with nothing else running: about 45 seconds for the host leg alone, about two
+minutes for `npm run verify` (each leg prints its own time and how many test files it ran at a time), from a few
+seconds to about 40 seconds for one file. Another heavy job on the machine (a gate, a model, a build) stretches all of
+them: the suite is bound by CPU (about 500 CPU seconds a leg on macOS, 360 in Linux), mostly the `git` processes the
+engine starts.
+
+- Each file runs its tests one after the other, and files run side by side, so the longest file sets the floor for a
+  leg. Keep a file under about 40 seconds: split a long one over a shared fixtures module (as
+  `adapter-fault-fixtures.mjs` does) rather than letting it grow.
+- `WF_VERIFY_JOBS=<n>` sets the test files at a time for every leg (default: the machine's cores shared by each leg's
+  measured cost, see `scripts/verify.mjs`).
+- `WF_SCENARIO_CHECK_OWNER=1` makes the scripted owner in `scenarios/helpers.mjs` look up each attempt both in-process
+  and through `wf resume`, and fail on any difference. Run the suite once with it after changing how `wf resume`,
+  the ledger or evidence verification work.
+- Some tests wait on purpose (a gate step that sleeps until it is stopped, a lease another gate holds, a terminal
+  that types after two seconds): the property they prove takes that time. Do not shorten them to win time.
 
 ## Every fix names its failure and ships its test
 

@@ -103,6 +103,7 @@ test('wf stop records the reason class, the step in flight, discarded minutes an
   const exited = new Promise((resolve) => child.on('exit', resolve));
   for (let i = 0; i < 200 && !/start\s+slow/.test(out); i++) await new Promise((r) => setTimeout(r, 100));
   assert.match(out, /start\s+slow/);
+  // Slow by design (CONTRIBUTING.md, "Running the suite"): the step must have run for a measurable time before the stop.
   await new Promise((r) => setTimeout(r, 1200));
   const bad = wf(root, ['stop', '--reason', 'x', '--class', 'bored', '--attempt', e.id]);
   assert.notEqual(bad.code, 0);

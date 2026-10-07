@@ -42,6 +42,8 @@ function atTerminal(root, args, typed) {
   const env = { ...process.env, WF_EVIDENCE_FLAGS: '0', WF_CONFIG_HOME: path.join(root, '..', '.wfhome'), WF_HOME: path.join(root, '..', '.home'), WF_IMPROVEMENTS_DIR: path.join(root, '..', '.improvements'), TYPED: typed };
   for (const k of ['CLAUDE_CODE_SESSION_ID', 'CLAUDECODE', 'CODEX_THREAD_ID', 'CODEX_SANDBOX', 'AI_AGENT', 'GROK_SESSION_ID']) delete env[k];
   const inner = process.platform === 'darwin' ? `${SCRIPT.join(' ')} sh ${JSON.stringify(runner)}` : `${SCRIPT.join(' ')} ${JSON.stringify(`sh ${runner}`)} /dev/null`;
+  // Slow by design (CONTRIBUTING.md, "Running the suite"): the owner types two seconds after the prompt can appear and the
+  // terminal stays open two more, as a person at a terminal would; the property is that wf waits for that typed line.
   const r = spawnSync('sh', ['-c', `(sleep 2; printf '%s\\n' "$TYPED"; sleep 2) | ${inner}`], { cwd: root, encoding: 'utf8', env });
   return { code: r.status, out: `${r.stdout}${r.stderr}` };
 }
@@ -224,6 +226,8 @@ test('terminal confirmation under a process named like an agent runtime is refus
   for (const k of ['CLAUDE_CODE_SESSION_ID', 'CLAUDECODE', 'CODEX_THREAD_ID', 'CODEX_SANDBOX', 'AI_AGENT', 'GROK_SESSION_ID']) delete env[k];
   const cmd = `${JSON.stringify(fake)} ${JSON.stringify(runner)}`;
   const inner = process.platform === 'darwin' ? `script -q /dev/null sh -c ${JSON.stringify(cmd)}` : `script -qec ${JSON.stringify(cmd)} /dev/null`;
+  // Slow by design (CONTRIBUTING.md, "Running the suite"): the owner types two seconds after the prompt can appear and the
+  // terminal stays open two more, as a person at a terminal would; the property is that wf waits for that typed line.
   const r = spawnSync('sh', ['-c', `(sleep 2; printf '%s\\n' "$TYPED"; sleep 2) | ${inner}`], { cwd: a.root, encoding: 'utf8', env });
   assert.notEqual(r.status, 0, `${r.stdout}${r.stderr}`);
   assert.match(`${r.stdout}${r.stderr}`, /is an agent runtime \(Claude Code\)/);
