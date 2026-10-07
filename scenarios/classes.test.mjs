@@ -58,14 +58,55 @@ test('wf sync writes one implementer per class with the class effort, Codex agen
   assert.ok(fs.existsSync(path.join(root, '.codex/agents/wf-mine.md')), 'files without the generated marker are left alone');
 });
 
-test('the adapter refuses unknown classes, undocumented efforts and the old per-role model/effort fields', () => {
+test('wf sync preserves current and future runtime model and effort strings without a plugin update', () => {
+  // Named failure I-29: a static effort allow-list refused settings already supported by the host.
+  for (const effort of ['none', 'max', 'ultra', 'future-effort']) {
+    const classes = {
+      full: { codex: { model: 'future-coding-model', effort } },
+      review: { codex: { model: 'future-review-model', effort } },
+      light: { claude: { model: 'future-light-model', effort: 'future-effort' } },
+    };
+    const { root } = singleRepoProject('open-runtime-settings', { classes, gate: { steps: [] } });
+    ok(wf(root, ['sync']));
+    for (const role of ['implementer', 'planner', 'reviewer']) {
+      const file = path.join(root, '.codex/agents', 'wf-' + role + '.toml');
+      const agent = parseToml(fs.readFileSync(file, 'utf8'));
+      assert.equal(agent.model, role === 'implementer' ? 'future-coding-model' : 'future-review-model');
+      assert.equal(agent.model_reasoning_effort, effort);
+    }
+    const claude = frontmatter(path.join(root, '.claude/agents/wf-implementer-light.md'));
+    assert.equal(claude.model, 'future-light-model');
+    assert.equal(claude.effort, 'future-effort');
+  }
+  const { root } = singleRepoProject('inherited-runtime-settings', {
+    classes: { full: { claude: { model: null, effort: null }, codex: { model: null, effort: null } } },
+    gate: { steps: [] },
+  });
+  ok(wf(root, ['sync']));
+  const codex = parseToml(fs.readFileSync(path.join(root, '.codex/agents/wf-implementer.toml'), 'utf8'));
+  const claude = frontmatter(path.join(root, '.claude/agents/wf-implementer.md'));
+  assert.equal(codex.model, undefined);
+  assert.equal(codex.model_reasoning_effort, undefined);
+  assert.equal(claude.model, undefined);
+  assert.equal(claude.effort, undefined);
+});
+
+test('the adapter refuses unknown classes, malformed model settings and the old per-role model/effort fields', () => {
   const cases = [
     [{ roles: { implementer: { class: 'heavy' } } }, /roles\.implementer\.class `heavy` is not a known class \(known: full, light, review\)/],
-    [{ classes: { light: { claude: { effort: 'extreme' } } } }, /claude effort `extreme` is not one of low, medium, high, xhigh, max/],
-    [{ classes: { light: { codex: { effort: 'max' } } } }, /codex effort `max` is not one of minimal, low, medium, high, xhigh/],
     [{ roles: { reviewer: { effort: 'high' } } }, /roles\.reviewer: effort moved to `classes`/],
     [{ classes: { docs: { claude: { effort: 'low' } } } }, /class `docs` needs `use`/],
   ];
+  for (const runtime of ['claude', 'codex']) {
+    for (const field of ['model', 'effort']) {
+      for (const value of ['', '  ', 42, false, [], {}, 'value\nextra-field: injected', 'value\u0000']) {
+        cases.push([
+          { classes: { light: { [runtime]: { [field]: value } } } },
+          new RegExp(runtime + ' ' + field + ' must be a non-empty string'),
+        ]);
+      }
+    }
+  }
   for (const [config, err] of cases) {
     const { root } = singleRepoProject('badclass', { ...config, gate: { steps: [] } });
     const r = wf(root, ['sync']);

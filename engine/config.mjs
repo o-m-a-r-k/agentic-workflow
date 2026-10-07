@@ -65,9 +65,6 @@ export const DEFAULT_CLASSES = {
     codex: {},
   },
 };
-// The effort values each runtime documents today. Checked so a typo fails at load instead of silently running at the
-// inherited effort; a runtime that adds a value needs it added here.
-export const EFFORTS = { claude: ['low', 'medium', 'high', 'xhigh', 'max'], codex: ['minimal', 'low', 'medium', 'high', 'xhigh'] };
 export const ROLE_DEFAULT_CLASS = { planner: 'review', reviewer: 'review', implementer: 'full', tester: 'full' };
 
 function mergeClasses(raw, fail) {
@@ -85,9 +82,15 @@ function mergeClasses(raw, fail) {
   }
   for (const [name, c] of Object.entries(out)) {
     if (typeof c.use !== 'string' || !c.use.trim()) fail(`class \`${name}\` needs \`use\`: what work belongs in it (the planner assigns classes from this text)`);
-    for (const runtime of Object.keys(EFFORTS)) {
-      const e = c[runtime]?.effort;
-      if (e !== undefined && e !== null && !EFFORTS[runtime].includes(e)) fail(`class \`${name}\`: ${runtime} effort \`${e}\` is not one of ${EFFORTS[runtime].join(', ')}`);
+    // Named failure I-29: a static effort allow-list rejected new host-supported settings until a plugin release.
+    // Hosts own model/effort support. Validate only the shape here, keeping agent metadata on a single line.
+    for (const runtime of ['claude', 'codex']) {
+      for (const field of ['model', 'effort']) {
+        const value = c[runtime]?.[field];
+        if (value !== undefined && value !== null && (typeof value !== 'string' || !value.trim() || /[\u0000-\u001f\u007f]/.test(value))) {
+          fail(`class \`${name}\`: ${runtime} ${field} must be a non-empty string without control characters`);
+        }
+      }
     }
   }
   return out;
