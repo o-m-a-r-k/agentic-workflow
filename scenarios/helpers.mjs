@@ -3,8 +3,32 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { findRoot } from '../engine/config.mjs';
+import { verifyAttempt } from '../engine/evidence.mjs';
+import { assertSchema, loadState } from '../engine/ledger.mjs';
+import { ENGINE_VERSION } from '../engine/util.mjs';
 
 export const WF = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'wf');
+
+// Named cost: on macOS without another git first on PATH, `git` is /usr/bin/git, the developer-tools shim that asks
+// xcrun where the real binary is on every call (9.4ms against 3.8ms for `git --version` here). The engine runs git
+// about ten times per command: some 35,000 calls a suite run. Scenarios put the folder the shim resolves to on PATH,
+// for this process and every process it starts: the same binary and the same git-core (checked below), without
+// the lookup. The folder goes right before /usr/bin, so anything found earlier on PATH still wins and anything else in
+// it is what the /usr/bin shims resolve to anyway. CI's macOS runners already have another git first on PATH.
+(function realGitFirst() {
+  if (process.platform !== 'darwin') return;
+  const which = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
+  if (which !== '/usr/bin/git') return;
+  const real = spawnSync('xcrun', ['-f', 'git'], { encoding: 'utf8' }).stdout?.trim();
+  if (!real || !path.isAbsolute(real) || real === which) return;
+  const execPath = (g) => spawnSync(g, ['--exec-path'], { encoding: 'utf8' }).stdout?.trim();
+  if (!execPath(which) || execPath(real) !== execPath(which)) return;
+  const dirs = process.env.PATH.split(path.delimiter);
+  if (!dirs.includes('/usr/bin')) return;
+  dirs.splice(dirs.indexOf('/usr/bin'), 0, path.dirname(real));
+  process.env.PATH = dirs.join(path.delimiter);
+})();
 
 export function sh(cwd, cmd) {
   const r = spawnSync('sh', ['-c', cmd], { cwd, encoding: 'utf8' });
@@ -12,9 +36,23 @@ export function sh(cwd, cmd) {
   return r.stdout.trim();
 }
 
+// Node's on-disk compile cache for the `wf` processes this test file starts (keyed by source hash, so an edited engine
+// file is compiled afresh). Named cost: a scenario run starts some 3,000 of them, each compiling the whole engine
+// (about 8ms). The cache is code the engine runs, so it is never at a path anyone else can predict or pre-create: a
+// fresh `mkdtemp` folder (mode 0700, this user's) per test-file process, checked after creation, removed at exit.
+let compileCache = null;
+export function compileCacheDir() {
+  if (compileCache) return compileCache;
+  const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'wf-node-cache-'));
+  const st = fs.lstatSync(dir);
+  if (!st.isDirectory() || (process.getuid && st.uid !== process.getuid()) || st.mode & 0o077) throw new Error(`compile cache folder ${dir} is not a private folder of this user`);
+  process.once('exit', () => fs.rmSync(dir, { recursive: true, force: true }));
+  return (compileCache = dir);
+}
+
 const baseEnv = () => {
   // The immutable flag stays off in tests (temporary folders must stay removable); modes and the manifest still apply.
-  const env = { ...process.env, WF_EVIDENCE_FLAGS: '0', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.test', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.test' };
+  const env = { NODE_COMPILE_CACHE: compileCacheDir(), ...process.env, WF_EVIDENCE_FLAGS: '0', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.test', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.test' };
   for (const k of ['CLAUDE_CODE_SESSION_ID', 'CLAUDECODE', 'CODEX_THREAD_ID', 'CODEX_SANDBOX', 'AI_AGENT', 'GROK_SESSION_ID']) delete env[k]; // no agent runtime: the scenario is the owner at a terminal (engine/owner.mjs)
   delete env.CODEX_THREAD_ID;
   delete env.GROK_SESSION_ID;
@@ -83,10 +121,48 @@ function ownerSpeaksFor(cwd, args, opts) {
 export const ownerSpeaks = (cwd, args) => ownerSpeaksFor(cwd, args, { env: {} });
 export const spawnHome = (cwd) => ({ WF_HOME: path.join(cwd, '..', '.home') });
 
+// What the scripted owner knows of the attempt a command names: its id, owner and implementers. Named cost: each lookup
+// was a `wf resume` process (about 14 git calls, 0.3s), 595 of the suite's 3,750 `wf` processes, none of them the
+// subject of a scenario. When the command names its attempt, this process reads it as `wf resume` would: the evidence
+// verified (`verifyAttempt`, the check every `wf` process runs when it opens an attempt; any problem and resume refuses,
+// so the owner says and closes nothing), then the ledger folded (`loadState`, hash chain checked). Anything else (no
+// `--attempt`, `--root`, an attempt another engine version created and the engine adopts on first open) runs
+// `wf resume`. The commands themselves still run as real processes. `WF_SCENARIO_CHECK_OWNER=1` does both and fails
+// on any difference (CONTRIBUTING.md, "Running the suite").
 function attemptOf(cwd, args, opts) {
   const id = optionOf(args, '--attempt');
-  const r = wf(cwd, ['resume', '--json', ...(id ? ['--attempt', id] : [])], { ...opts, ownerSilent: true });
-  return r.code === 0 ? JSON.parse(r.out) : null;
+  const viaResume = () => {
+    const r = wf(cwd, ['resume', '--json', ...(id ? ['--attempt', id] : [])], { ...opts, ownerSilent: true });
+    return r.code === 0 ? JSON.parse(r.out) : null;
+  };
+  const known = id && !args.includes('--root') ? ledgerState(cwd, id) : undefined;
+  if (known === undefined) return viaResume();
+  if (process.env.WF_SCENARIO_CHECK_OWNER) {
+    const slow = viaResume();
+    const pick = (s) => (s ? JSON.stringify({ id: s.id, owner: s.owner, implementers: s.implementers ?? [] }) : 'null');
+    if (pick(slow) !== pick(known)) throw new Error(`scenario owner lookup differs from \`wf resume\` for ${id}:\n  ledger: ${pick(known)}\n  resume: ${pick(slow)}`);
+  }
+  return known;
+}
+
+// undefined: only `wf resume` can tell; null: `wf resume` refuses (unknown attempt, changed evidence, broken chain,
+// newer schema).
+function ledgerState(cwd, id) {
+  const root = findRoot(cwd);
+  if (!root) return undefined;
+  let s;
+  try {
+    s = loadState(root, id);
+  } catch {
+    return verifyAttempt(root, id).length ? null : undefined;
+  }
+  if (s.engineVersion !== ENGINE_VERSION) return undefined;
+  try {
+    assertSchema(s);
+  } catch {
+    return null;
+  }
+  return verifyAttempt(root, id).length ? null : s;
 }
 
 // A genuine owner turn in a synthetic owner session's transcript (Codex rollout, or Claude Code when the scenario made

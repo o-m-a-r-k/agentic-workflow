@@ -74,6 +74,7 @@ A second adversarial pass over the integrated 0.5.0 branch, with scenarios in `s
 ### Maintenance
 
 - `npm run verify` works from a linked git worktree: the Linux legs mount and relink the worktree's git directories.
+- `npm run verify` runs its three legs in parallel and prints each leg's time; `--host-only`, `--linux-only` and `--serial` run part of it or the old order. The suite needs about a third less CPU (CONTRIBUTING.md, "Running the suite").
 
 ## v0.4.5
 
@@ -173,12 +174,13 @@ A second adversarial pass over the integrated 0.5.0 branch, with scenarios in `s
 
 | Item | Failure fixed | Fixed in | Scenario test |
 | --- | --- | --- | --- |
+| [I-28](improvements/I-28.md) | npm run verify is slow: three legs in series, helper-only wf processes, the macOS git shim | 0.5.0 | `scenarios/compile-cache.test.mjs` |
 | [I-27](improvements/I-27.md) | Order of work: code review rounds run to clean first, then ONE gate, then the evidence review; engine refuses a gate while a review round has open findings, and refuses reviewer handoffs while a gate runs (supersedes the ordering in I-23) | 0.5.0 | `scenarios/review-order.test.mjs` |
 | [I-26](improvements/I-26.md) | Mandatory impact analysis before planning: query-backed inventory of affected components, flows, contracts and tests; plan refused without it | 0.5.0 | `scenarios/impact.test.mjs` |
 | [I-25](improvements/I-25.md) | Fix handoffs carry a pattern-sweep list; doctor fails without a reviewer model; flag doNotRun that excludes a repo the ticket now touches | 0.5.0 | `scenarios/impact.test.mjs` |
 | [I-24](improvements/I-24.md) | Telemetry gaps: wf report undercounts findings and rounds, no cost, no sub-agents, no review-round or gate-stop events, no failing test names | 0.5.0 | `scenarios/telemetry.test.mjs` |
 | [I-23](improvements/I-23.md) | Review handoff must require a green gate on the tree and no open implementer handoff; record why a gate is stopped | 0.5.0 | `scenarios/review-order.test.mjs` |
-| [I-22](improvements/I-22.md) | Adapter-fault recovery is tested only for a single-repo standard-lane attempt with nothing recorded as delivered | 0.5.0 | `scenarios/adapter-fault.test.mjs` |
+| [I-22](improvements/I-22.md) | Adapter-fault recovery is tested only for a single-repo standard-lane attempt with nothing recorded as delivered | 0.5.0 | `scenarios/adapter-fault.test.mjs`, `scenarios/adapter-fault-shapes.test.mjs` |
 | [I-21](improvements/I-21.md) | No recovery when a delivery adapter fault hits a partly delivered multi-repo attempt | 0.5.0 | `scenarios/adapter-fault.test.mjs` |
 | [I-20](improvements/I-20.md) | A delivery whose adapter observe reports a non-integrated state still counts as delivered on retry when the commit is on the target branch | 0.5.0 | `scenarios/adapter-fault.test.mjs` |
 | [I-19](improvements/I-19.md) | Scope fences must never block a fix: a fix that needs another component or repo extends the attempt | 0.4.4 | `scenarios/discovered.test.mjs` |
