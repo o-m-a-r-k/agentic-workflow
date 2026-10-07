@@ -189,7 +189,9 @@ export function ownerTurns({ runtime, file }, bytes = readCapped(file)) {
       if (p.content.every((b) => b?.type === 'input_text')) t = p.content.map((b) => b.text ?? '').join('\n');
     }
     if (!t || !t.trim() || !TYPED.test(t.trim()) || INJECTED.test(t.trim())) return;
-    out.push({ text: t.trim(), at: e.timestamp ?? null, line: i + 1, offset: start, origin });
+    // What a spend is keyed on (engine/owner.mjs): the host's own id for the line (Claude Code `uuid`), else the line's
+    // sha256; never where the file is or where the line sits in it.
+    out.push({ text: t.trim(), at: e.timestamp ?? null, line: i + 1, offset: start, origin, id: typeof e.uuid === 'string' && e.uuid ? `uuid:${e.uuid}` : `sha256:${sha(Buffer.from(raw))}` });
   });
   return out;
 }

@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { makeRepo, ok, sh, singleRepoProject, tmp, WF, wf } from './helpers.mjs';
+import { commitIn, criteriaFile, makeRepo, ok, OUT_OF_ORDER, ownerSays, sh, singleRepoProject, state, tmp, toAccepted, WF, wf } from './helpers.mjs';
 
 const steps = [{ id: 'unit', repo: 'app', run: 'true', inputs: ['src/**'] }];
 const engine = path.resolve(import.meta.dirname, '..');
@@ -240,4 +240,63 @@ test('owner turns: only plain typed shapes count; injected review results and ma
     line({ timestamp: 't', type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'override X.1:gate' }] } }),
   ].join(''));
   assert.deepEqual(ownerTurns({ runtime: 'codex', file: 'x' }, bytes).map((m) => m.text), ['override X.1:gate']);
+});
+
+// F3: a spend was keyed on the transcript's path and byte offset, so a copy of the owner's transcript in another project
+// folder (newer, so it was the one read) made every spent message fresh again.
+test('owner messages: a copied or moved transcript never makes a spent message fresh; deleting a spend marker is detected; a reopen waiver is spent on the delivered attempt too', async () => {
+  const sid = 'claude-owner-session-77';
+  const p = singleRepoProject('replay', { gate: { steps } });
+  const e = ok(wf(p.root, ['entry', '--item', 'RP-1', '--owner', `claude:${sid}`, '--json'])).json();
+  ok(wf(p.root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id]));
+  ok(wf(p.root, ['plan', '--file', criteriaFile(p.base), '--attempt', e.id]));
+  ok(wf(p.root, ['handoff', 'implementer', '--agent', 'impl-1', '--attempt', e.id]));
+  commitIn(e.repos.app.worktree, { 'src/a.txt': 'b\n' });
+  const home = path.join(p.base, '.home');
+  ownerSays(home, `claude:${sid}`, `override ${e.id}:gate`);
+  const silent = { ownerSilent: true };
+  const gate = () => wf(p.root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id], silent);
+  ok(gate());
+  commitIn(e.repos.app.worktree, { 'src/a.txt': 'c\n' });
+  assert.equal(gate().code, 75, 'spent');
+  const orig = path.join(home, '.claude', 'projects', '-proj', `${sid}.jsonl`);
+  // A copy, newer, in another project folder: two transcripts for one session id are refused.
+  const copy = path.join(home, '.claude', 'projects', '-elsewhere', `${sid}.jsonl`);
+  fs.mkdirSync(path.dirname(copy), { recursive: true });
+  fs.copyFileSync(orig, copy);
+  const later = new Date(Date.now() + 5000);
+  fs.utimesSync(copy, later, later);
+  const r3 = gate();
+  assert.equal(r3.code, 75, r3.out);
+  assert.match(r3.err, /2 transcripts for the owner session/);
+  // Moved instead (one file, another path): the message is still spent.
+  fs.rmSync(orig);
+  const r4 = gate();
+  assert.equal(r4.code, 75, r4.out);
+  assert.match(r4.err, /no unspent owner message/);
+  const overrides = ok(wf(p.root, ['resume', '--attempt', e.id, '--json'], silent)).json().gateOverrides;
+  assert.equal(overrides.length, 1, 'one message, one override');
+  assert.match(overrides[0].authority.spent, new RegExp(`^claude:${sid}:`));
+  // Deleting the spend markers is detected: the ledgers say which messages were spent, and their markers must exist.
+  const markers = path.join(p.root, '.wf-evidence', 'authorities');
+  for (const f of fs.readdirSync(markers)) {
+    fs.chmodSync(path.join(markers, f), 0o644);
+    fs.rmSync(path.join(markers, f));
+  }
+  ownerSays(home, `claude:${sid}`, `override ${e.id}:gate: once more`);
+  const r5 = gate();
+  assert.equal(r5.code, 75, r5.out);
+  assert.match(r5.err, /marker .* is missing/);
+
+  // A reopen's waiver is read on the delivered attempt: its spend is recorded there too.
+  const q = singleRepoProject('waiver', { gate: { steps } });
+  const first = toAccepted(q.root, q.base, { item: 'RW-1' });
+  ok(wf(q.root, ['deliver', '--attempt', first.id]));
+  const owner = state(q.root, first.id).owner;
+  ownerSays(path.join(q.base, '.home'), owner, `waive-lesson ${first.id}: a typo`);
+  const reopened = ok(wf(q.root, ['reopen', '--item', 'RW-1', '--reason', 'typo', '--no-lesson', 'nothing to learn', '--json'], silent)).json();
+  const ledgerOf = (id) => fs.readFileSync(path.join(q.root, '.wf-evidence', 'attempts', id, 'ledger.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  const spent = ledgerOf(reopened.id).find((x) => x.type === 'lesson.waived').data.authority.spent;
+  assert.match(spent, /^codex:/);
+  assert.ok(state(q.root, first.id).authoritiesUsed.includes(spent), 'the delivered attempt records the waiver it gave');
 });

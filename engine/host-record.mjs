@@ -63,14 +63,18 @@ export function ownerTranscript(owner) {
   }
   const found = candidates.filter((p) => fs.lstatSync(p, { throwIfNoEntry: false }));
   if (!found.length) return { problem: `no transcript for the owner session \`${id}\` under ${base}` };
-  const file = found.sort((a, b) => fs.lstatSync(b).mtimeMs - fs.lstatSync(a).mtimeMs)[0];
+  // Named failure (0.5.0 adversarial review): the newest of several files for one session id was read, so a copy of the
+  // owner's transcript in another project folder was read instead of the original. A session has one transcript; two
+  // are refused, never chosen between.
+  if (found.length > 1) return { problem: `${found.length} transcripts for the owner session \`${id}\` (${found.join(', ')}); a session has one, so none is read` };
+  const file = found[0];
   const st = fs.lstatSync(file);
   if (st.isSymbolicLink()) return { problem: `${file} is a symlink; a transcript is never read through a link` };
   if (!st.isFile() || st.nlink > 1) return { problem: `${file} is not a regular file with one name` };
   const real = fs.realpathSync.native(file);
   if (!real.startsWith(baseReal + path.sep)) return { problem: `${file} resolves outside ${base}` };
   if (st.size > maxTranscriptBytes()) return { problem: `${file} is ${st.size} bytes, over the ${maxTranscriptBytes()}-byte cap (WF_TRANSCRIPT_MAX_BYTES)` };
-  return { runtime, file: real, size: st.size };
+  return { runtime, session: id, file: real, size: st.size };
 }
 
 const toolOf = (full) => /^mcp__.+?__([A-Za-z0-9_]+)$/.exec(full)?.[1] ?? null;

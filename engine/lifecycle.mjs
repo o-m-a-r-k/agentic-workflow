@@ -1765,7 +1765,12 @@ export function reopen(root, options) {
   const waiver = typeof options['no-lesson'] === 'string' && options['no-lesson'].trim() ? ownerAuthority(root, delivered, `waive-lesson ${delivered.id}`, { what: `reopening ${options.item} without a lesson` }) : null;
   const s = entry(root, { ...options, lane: delivered.lane === 'quick' ? 'quick' : 'standard', repos: Object.keys(delivered.repos).join(','), reopenedFrom: delivered.id });
   append(root, s.id, 'reopen.reason', { reason: String(options.reason), from: delivered.id }, actor(options));
-  if (waiver) append(root, s.id, 'lesson.waived', { reason: options['no-lesson'].trim(), on: 'reopen', authority: waiver }, actor(options));
+  if (waiver) {
+    append(root, s.id, 'lesson.waived', { reason: options['no-lesson'].trim(), on: 'reopen', authority: waiver }, actor(options));
+    // The waiver was read on the delivered attempt: its spend is recorded there too, so that attempt's own ledger shows
+    // the message is spent (0.5.0 adversarial review).
+    append(root, delivered.id, 'authority.spent', { decision: 'waive-lesson:reopen', for: s.id, authority: waiver }, actor(options));
+  }
   const cfg = loadConfig(root);
   if (s.lane !== 'quick') emitTrackerEvent(root, cfg, s.id, 'reopened');
   return loadState(root, s.id);

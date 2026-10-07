@@ -37,6 +37,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import { readRegular, writeNoFollow } from './evidence.mjs';
+import { listAttempts, readLedger } from './ledger.mjs';
 import { refuse } from './util.mjs';
 
 // Environment variables an agent runtime sets for the commands its agents run.
@@ -59,11 +60,12 @@ function afterAdmission(state, m) {
 // commands racing for one message spend it once. A decision that is retried as the same decision (the same `decision`
 // key: one deferral, one adapter state, one re-pin) is accepted again from its own marker; repeatable decisions (gate
 // and review overrides) and a reopen's waiver pass none, so a spent message never counts twice.
+const markerFile = (root, key) => path.join(root, '.wf-evidence', 'authorities', `${crypto.createHash('sha256').update(key).digest('hex')}.json`);
 function claim(root, key, record) {
   const dir = path.join(root, '.wf-evidence', 'authorities');
   fs.mkdirSync(dir, { recursive: true });
   if (fs.realpathSync(dir) !== path.join(fs.realpathSync(root), '.wf-evidence', 'authorities')) throw refuse(`${dir} is not a real folder inside the project (a link on its path); no owner decision is recorded through it`);
-  const file = path.join(dir, `${crypto.createHash('sha256').update(key).digest('hex')}.json`);
+  const file = markerFile(root, key);
   try {
     writeNoFollow(file, `${JSON.stringify({ key, ...record, at: new Date().toISOString() })}\n`, { exclusive: true, mode: 0o444 });
     return true;
@@ -78,6 +80,35 @@ function claim(root, key, record) {
   } catch {}
   return prior?.key === key && prior?.decision === record.decision;
 }
+
+// Every owner message (or owner-session command) spent anywhere in the project, read from the attempts' hash-chained
+// ledgers: { key: attempt }. Named failure (0.5.0 adversarial review): a spend was keyed on the transcript's path and
+// byte offset (`<file>:<offset>`), so a copy of the owner's transcript in another project folder made every spent message
+// fresh again, and the only project-wide record was the marker folder, which nothing checked: deleting a marker freed
+// its message. A spend is now keyed on the runtime, the session id and the line's own id (Claude Code `uuid`, else the
+// line's sha256), never on where the file is; the ledgers are the record (every authority carries `spent`), and every
+// spend they record must still have its marker, so a deleted marker refuses instead of freeing the message.
+function projectSpends(root) {
+  const out = new Map();
+  for (const id of listAttempts(root)) {
+    for (const entry of readLedger(root, id)) {
+      const d = entry.data;
+      for (const a of [d?.authority, ...(Array.isArray(d?.authorities) ? d.authorities : [])]) {
+        if (typeof a?.spent === 'string') {
+          if (!out.has(a.spent)) out.set(a.spent, id);
+        }
+        // Recorded before spends carried `spent`: keyed on the file and offset, as its marker is.
+        else if (a?.file && Number.isInteger(a.offset) && !out.has(`${a.file}:${a.offset}`)) out.set(`${a.file}:${a.offset}`, id);
+      }
+    }
+  }
+  return out;
+}
+function assertMarkers(root, spends) {
+  const missing = [...spends].filter(([key]) => !fs.existsSync(markerFile(root, key)));
+  if (missing.length) throw refuse(`the spend marker of ${missing.length} owner message(s) is missing from the evidence folder's authorities/ (${missing.slice(0, 3).map(([k, id]) => `${k.slice(0, 80)} spent on ${id}`).join('; ')}); it was deleted outside wf, so no owner decision is taken until it is restored`, 'restore the evidence folder\'s authorities/ (from a backup or version control of the evidence); `wf verify` lists what else changed');
+}
+const spendKey = (t, m) => `${t.runtime}:${t.session}:${m.id}`;
 
 // A person's interactive session (`interactive`, for `wf adopt`'s new owner). Named failure (0.5.0 adversarial review): the
 // new owner's confirmation was any user line of the session it named, so an agent made itself the owner from its own
@@ -124,12 +155,14 @@ export function ownerAuthority(root, state, phrase, { what, command = null, owne
     return terminalAuthority(owner, phrase, what, terminal);
   }
   const bytes = readCapped(t.file);
-  const used = new Set(state.authoritiesUsed ?? []);
+  const spends = projectSpends(root);
+  assertMarkers(root, spends);
+  const used = new Set([...(state.authoritiesUsed ?? []), ...spends.keys()]);
   // Every session, the owner's or the one adopting, speaks after admission (0.5.0 adversarial review: the bound was
   // dropped for the adopting session).
   const stateFor = state;
   const start = new RegExp(`^${esc(fold(phrase))}(?![a-z0-9_-]|\\.[a-z0-9])`);
-  let turns = ownerTurns(t, bytes).filter((m) => afterAdmission(stateFor, m) && !used.has(`${t.file}:${m.offset}`) && start.test(fold(m.text)));
+  let turns = ownerTurns(t, bytes).filter((m) => afterAdmission(stateFor, m) && !used.has(spendKey(t, m)) && !used.has(`${t.file}:${m.offset}`) && start.test(fold(m.text)));
   let notInteractive = '';
   if (interactive) {
     turns = turns.filter((m) => {
@@ -139,13 +172,13 @@ export function ownerAuthority(root, state, phrase, { what, command = null, owne
     });
   }
   for (const m of turns) {
-    if (!claim(root, `${t.file}:${m.offset}`, { phrase, attempt: state.id, decision })) continue;
-    return { provenance: 'host-recorded', runtime: t.runtime, file: t.file, line: m.line, offset: m.offset, at: m.at, phrase, text: m.text.slice(0, 2000) };
+    if (!claim(root, spendKey(t, m), { phrase, attempt: state.id, decision })) continue;
+    return { provenance: 'host-recorded', runtime: t.runtime, file: t.file, line: m.line, offset: m.offset, at: m.at, phrase, text: m.text.slice(0, 2000), spent: spendKey(t, m) };
   }
   let why = '';
   if (command && t.runtime === 'claude') {
     const ran = lastOwnerCommand(bytes);
-    const spent = ran ? `${t.file}:cmd:${ran.line}` : null;
+    const spent = ran ? `${t.runtime}:${t.session}:cmd:${ran.id}` : null;
     why = !ran ? 'the owner session ran no command' : used.has(spent) ? 'its last command was already counted for a decision' : commandProblem(ran, command, stateFor);
     if (!why && !claim(root, spent, { phrase, attempt: state.id, decision })) why = 'its last command was already counted for a decision';
     if (!why) return { provenance: 'owner-session command', runtime: t.runtime, file: t.file, line: ran.line, at: ran.at, spent, command: ran.command.slice(0, 500) };
@@ -273,7 +306,8 @@ function lastOwnerCommand(bytes) {
     if (e?.type !== 'assistant' || e.isSidechain || !Array.isArray(e.message?.content)) continue;
     const call = e.message.content.filter((b) => b?.type === 'tool_use').at(-1);
     if (!call) continue;
-    return call.name === 'Bash' && typeof call.input?.command === 'string' ? { command: call.input.command, line: i + 1, at: e.timestamp ?? null } : null;
+    const id = typeof e.uuid === 'string' && e.uuid ? `uuid:${e.uuid}` : `sha256:${crypto.createHash('sha256').update(lines[i]).digest('hex')}`;
+    return call.name === 'Bash' && typeof call.input?.command === 'string' ? { command: call.input.command, line: i + 1, at: e.timestamp ?? null, id } : null;
   }
   return null;
 }
