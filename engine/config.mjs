@@ -151,10 +151,10 @@ function normalize(raw, source) {
   // Impact analysis (engine/impact.mjs): which work classes need the planner's survey and impact map, and read caps.
   if (cfg.impact !== null) {
     const im = cfg.impact;
-    if (typeof im !== 'object' || Array.isArray(im)) fail('`impact` must be a mapping { requiredFor: [classes], maxFileBytes, maxScanBytes }');
+    if (typeof im !== 'object' || Array.isArray(im)) fail('`impact` must be a mapping { requiredFor: [classes], maxFileBytes, maxScanBytes, regexTimeoutMs }');
     else {
       if (im.requiredFor !== undefined && (!Array.isArray(im.requiredFor) || im.requiredFor.some((c) => !cfg.classes[c]))) fail(`\`impact.requiredFor\` must list known classes (known: ${Object.keys(cfg.classes).join(', ')})`);
-      for (const k of ['maxFileBytes', 'maxScanBytes']) if (im[k] !== undefined && (!Number.isInteger(im[k]) || im[k] < 1)) fail(`\`impact.${k}\` must be a positive integer`);
+      for (const k of ['maxFileBytes', 'maxScanBytes', 'regexTimeoutMs']) if (im[k] !== undefined && (!Number.isInteger(im[k]) || im[k] < 1)) fail(`\`impact.${k}\` must be a positive integer`);
     }
   }
   if (cfg.engine !== null && !ENGINE_PIN.test(String(cfg.engine).trim())) fail(`\`engine\` must be \`N.x\` (same major) or \`>=x.y.z\` (at least that release), not \`${cfg.engine}\``);
@@ -334,14 +334,35 @@ export function loadConfigAtCommit(root, cfg, commit) {
 
 // Materialises an adapter file (step plugin, delivery or tracker adapter) exactly as committed at `commit`,
 // so a ticket cannot change the code that judges it. Single-file modules only.
+//
+// Named failure (0.5.0 integration review): the delivery adapter re-pin made this the path that loads code from a new
+// commit, and the materialised copy was written with a plain write: a link planted at that path (or at the folder) was
+// followed, so the engine wrote, then imported, a file somewhere else. The commit names a folder, so it must be a
+// commit id; `rel` stays inside the adapter folder; the folder is a real folder inside the project; the copy is
+// written to a fresh name without following links, then renamed over the old copy (a rename replaces a link, never
+// follows it).
+const COMMIT_ID = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
 export function adapterFileAtCommit(root, cfg, commit, rel) {
+  if (!COMMIT_ID.test(String(commit))) throw new WfError(`not a commit id: \`${String(commit).slice(0, 80)}\``);
   const { repo, relative } = adapterLocation(root, cfg);
-  const file = path.posix.normalize(path.posix.join(relative.split(path.sep).join('/'), rel));
+  const base = relative.split(path.sep).join('/');
+  const file = path.posix.normalize(path.posix.join(base, String(rel)));
+  if (path.posix.isAbsolute(file) || file === '..' || file.startsWith('../') || (base && file !== base && !file.startsWith(`${base}/`))) throw new WfError(`adapter file \`${rel}\` is outside the adapter folder`);
   const text = git(repoDir(root, repo), ['show', `${commit}:${file}`], { allowFail: true });
   if (!text) throw new WfError(`${rel} is not committed in ${repo.name}@${commit.slice(0, 10)}`, { hint: 'commit adapter code to the base branch; the engine only runs the committed copy' });
   // Rewritten on every load, so a modified copy is never run.
-  const dest = path.join(root, '.wf-evidence', 'adapters', commit, `${hashValue(file).slice(0, 12)}-${path.basename(rel)}`);
-  fs.mkdirSync(path.dirname(dest), { recursive: true });
-  fs.writeFileSync(dest, text);
+  const dir = path.join(root, '.wf-evidence', 'adapters', commit);
+  fs.mkdirSync(dir, { recursive: true });
+  const realRoot = fs.realpathSync(root);
+  if (fs.realpathSync(dir) !== path.join(realRoot, '.wf-evidence', 'adapters', commit)) throw new WfError(`${dir} is not a real folder inside the project (a link on its path); adapter code is not written through it`);
+  const dest = path.join(dir, `${hashValue(file).slice(0, 12)}-${path.basename(file)}`);
+  const tmp = `${dest}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+  const fd = fs.openSync(tmp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW ?? 0), 0o644);
+  try {
+    fs.writeSync(fd, text);
+  } finally {
+    fs.closeSync(fd);
+  }
+  fs.renameSync(tmp, dest);
   return dest;
 }

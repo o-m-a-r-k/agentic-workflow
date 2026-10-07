@@ -3,7 +3,7 @@
 // `wf handoff close`; `wf handoff reviewer` refuses while one is, unless the owner records why with `--reason`.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { closureFile, commitIn, criteriaFile, goodClosure, ok, singleRepoProject, state, wf } from './helpers.mjs';
+import { closureFile, commitIn, criteriaFile, goodClosure, ok, singleRepoProject, state, wf, write } from './helpers.mjs';
 
 const steps = [{ id: 'unit', repo: 'app', run: 'true', inputs: ['src/**'] }];
 const open = { implementersOpen: true };
@@ -20,6 +20,9 @@ test('I-23: the reviewer handoff refuses while an implementer handoff is open; w
   const { base, root, e } = planned('impl-open');
   const h = ok(wf(root, ['handoff', 'implementer', '--agent', 'impl-1', '--attempt', e.id]));
   assert.match(h.out, /When it reports done \(and its work is committed\), close it: `wf handoff close --agent impl-1 --attempt IO-1\.1` \(`--outcome stopped` if you stop it\); `wf handoff reviewer` refuses while it is open\./);
+  // Closing it `done` says the tree is settled: uncommitted work refuses (a stopped implementer may leave some).
+  write(e.repos.app.worktree, 'src/a.txt', 'b\n');
+  assert.match(wf(root, ['handoff', 'close', '--agent', 'impl-1', '--attempt', e.id]).err, /impl-1 is not done: uncommitted changes in app[\s\S]*--outcome stopped/);
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'b\n' });
   // Committed, but never closed: the implementer may still be working.
   const refused = wf(root, ['handoff', 'reviewer', '--agent', 'rev-1', '--attempt', e.id], open);

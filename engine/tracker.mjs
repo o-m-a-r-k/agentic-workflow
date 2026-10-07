@@ -312,6 +312,14 @@ async function recordFromTranscript(root, cfg, state, options, event, pending, a
 // attachment titles and captions, and a read time after delivery that no earlier readback used. Additions the owner
 // made to the comment are allowed and listed. It is recorded as agent-reported, unverified: the engine never saw the
 // tracker's answer.
+// Named failure (0.5.0 integration review): the agent-reported attachment urls were written to the ledger as reported,
+// signed query strings included, so a tracker's upload signature (a credential for the file) was kept in the evidence
+// that `wf export` renders. Only an https url without its query or fragment is recorded.
+function reportedAssetUrl(x) {
+  const u = String(x?.assetUrl ?? x?.url ?? '').split(/[?#]/)[0];
+  return /^https:\/\/[^\s@]+$/.test(u) ? u.slice(0, 2048) : null;
+}
+
 async function recordAgentReported(root, cfg, state, options, event, pending) {
   if (cfg.tracker.via !== 'connector') throw refuse(`\`--agent-reported\` is for \`tracker.via: connector\`; with \`${cfg.tracker.via}\` the engine performs and verifies the handoff itself (\`wf tracker sync\`)`);
   if (typeof options.file !== 'string') throw new WfError('--file <reported.json> is required: { issue, status, comment: { id, bodySha256, createdAt }, attachments: [{ title, subtitle, assetUrl }], readAt }');
@@ -415,7 +423,7 @@ async function recordAgentReported(root, cfg, state, options, event, pending) {
     writeImmutable(cdest, comment.text);
     commentRec = { path: cdest, sha256: comment.sha256, id: r.comment?.id ?? null };
   }
-  append(root, state.id, 'tracker.recorded', { event, provenance: AGENT_REPORTED, verified: false, mode: 'agent-reported', capture: { path: dest, sha256: hashFile(dest) }, readAt: r.readAt, status: r.status ?? null, ...(commentRec ? { comment: commentRec } : {}), ...(extra.length ? { extraLines: extra.slice(0, 50).map((l) => scrub(l)) } : {}), attachments: (r.attachments ?? []).map((x) => ({ title: x.title, caption: x.subtitle ?? null, assetUrl: x.assetUrl ?? x.url ?? null })) }, null);
+  append(root, state.id, 'tracker.recorded', { event, provenance: AGENT_REPORTED, verified: false, mode: 'agent-reported', capture: { path: dest, sha256: hashFile(dest) }, readAt: r.readAt, status: r.status ?? null, ...(commentRec ? { comment: commentRec } : {}), ...(extra.length ? { extraLines: extra.slice(0, 50).map((l) => scrub(l)) } : {}), attachments: (Array.isArray(r.attachments) ? r.attachments : []).slice(0, 200).map((x) => ({ title: x?.title ?? null, caption: x?.subtitle ?? null, assetUrl: reportedAssetUrl(x) })) }, null);
   return loadState(root, state.id);
 }
 

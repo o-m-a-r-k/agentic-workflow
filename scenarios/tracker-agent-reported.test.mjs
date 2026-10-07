@@ -90,16 +90,20 @@ test('connector, agent-reported: the engine checks status, comment text, screens
   assert.match(rec('delivered', { ...good, readAt: later() }).err, /--comment-file <posted\.md> is required/);
   // The good report: recorded, unverified, the owner's addition listed; status and export say so.
   const readAt = later();
-  const r = ok(rec('delivered', { ...good, readAt }, ['--comment-file', postedFile]));
+  // The upload url as a tracker signs it on read: the signature is a credential and never reaches the evidence.
+  const signed = [{ ...good.attachments[0], assetUrl: 'https://uploads.linear.app/x/home.png?signature=sig-not-for-the-ledger' }];
+  const r = ok(rec('delivered', { ...good, readAt, attachments: signed }, ['--comment-file', postedFile]));
   assert.match(r.out, /tracker delivered recorded as agent-reported, unverified \(the engine checked what the agent reported, not the tracker's answer; 1 line\(s\) added to the comment beyond the rendered one\)\. Attempt closed/);
   const s = state(root, id);
   assert.equal(s.phase, 'done');
   const d = s.tracker.done.find((t) => t.event === 'delivered');
   assert.deepEqual([d.provenance, d.verified, d.mode, d.readAt, d.extraLines], ['agent-reported, unverified', false, 'agent-reported', readAt, ['Owner note: also check the dark theme.']]);
   assert.equal(d.comment.sha256, sha(posted));
+  assert.deepEqual(d.attachments.map((x) => x.assetUrl), ['https://uploads.linear.app/x/home.png'], 'recorded without its signed query');
   assert.match(ok(wf(root, ['status', '--attempt', id])).out, /tracker delivered: readback agent-reported, unverified/);
   const page = fs.readFileSync(ok(wf(root, ['export', '--attempt', id])).out.match(/(\/\S+\.html)/)[1], 'utf8');
   assert.match(page, /agent-reported, unverified/);
+  assert.doesNotMatch(JSON.stringify(s.tracker.done), /sig-not-for-the-ledger/);
 });
 
 test('agent-reported is refused outside connector mode, and a recycled read time is refused', () => {

@@ -235,6 +235,15 @@ export function adopt(root, options) {
   return loadState(root, state.id);
 }
 
+// Whether the worktree's HEAD is on the repo's target branch (fetched now).
+export function onTarget(r, repo) {
+  if (!git(r.worktree, ['remote']).split('\n').includes(repo.remote)) return null;
+  run('git', ['fetch', '--quiet', repo.remote, repo.base], { cwd: r.worktree, allowFail: true });
+  const head = git(r.worktree, ['rev-parse', 'HEAD']);
+  const landed = head !== r.base && run('git', ['merge-base', '--is-ancestor', head, `${repo.remote}/${repo.base}`], { cwd: r.worktree, allowFail: true }).status === 0;
+  return landed ? { head, target: `${repo.remote}/${repo.base}` } : null;
+}
+
 export function abandon(root, options) {
   const state = openState(root, options);
   if (!options.reason) throw new WfError('--reason is required');
@@ -242,12 +251,35 @@ export function abandon(root, options) {
   // an attempt whose recorded repos are all skipped is abandoned like one with nothing recorded. A repo recorded as
   // delivered is on its target branch: the attempt is finished, never abandoned.
   const recorded = Object.values(state.delivery.repos);
-  const landed = recorded.filter((d) => !d.skipped);
+  // Only the engine's own record of a repo with no changes is a skip (it carries no commit).
+  const landed = recorded.filter((d) => !(d.skipped && !d.commit));
   if (landed.length) {
     const list = recorded.map((d) => (d.skipped ? `${d.repo} skipped (${d.skipped}; nothing pushed)` : `${d.repo} delivered (${String(d.commit ?? '').slice(0, 10)} on ${d.target ?? 'its target'})`)).join('; ');
     throw refuse(`${state.id} is partly delivered: ${list}; a delivered repo cannot be taken back, so the attempt is finished, not abandoned`, `\`wf deliver\` delivers the remaining repos; after a delivery adapter fault, commit the fixed adapter on the base branch and re-pin this attempt to it: \`wf deliver --repin-adapter --reason "<why>"\` (docs/lifecycle.md, "Recovering from an adapter fault")`);
   }
-  append(root, state.id, 'abandoned', { reason: String(options.reason), ...(recorded.length ? { skipped: recorded.map((d) => d.repo) } : {}) }, actor(options));
+  // Named failure (0.5.0 integration review): abandon looked only at `repo.delivered`. A delivery adapter that had already
+  // merged the change (a post-merge state the owner had not acknowledged) or left it awaiting merge records only
+  // `repo.integrating`, so the attempt was abandoned and its worktrees removed while its change was on, or could still
+  // land on, the target branch, with nothing in the ledger saying so. A change on its target branch always refuses; an
+  // integration the adapter last reported as anything but `rejected` refuses until the owner, having closed it where it
+  // is integrated, acknowledges that repo and state (`--acknowledge-integration <repo>:<state>`, recorded).
+  const cfg = loadConfig(root);
+  const onTargets = [];
+  const open = [];
+  for (const [name, r] of Object.entries(state.repos)) {
+    if (state.delivery.repos[name]) continue;
+    const repo = cfg.repos.find((x) => x.name === name);
+    const on = repo && r.worktree && fs.existsSync(r.worktree) ? onTarget(r, repo) : null;
+    if (on) onTargets.push(`${name}: ${on.head.slice(0, 10)} is already on ${on.target}`);
+    const i = state.delivery.integrating?.[name];
+    const st = i ? (i.observed?.state === undefined || i.observed?.state === null || i.observed?.state === '' ? 'none' : String(i.observed.state)) : null;
+    if (i && st !== 'rejected' && !on) open.push({ repo: name, state: st, url: typeof i.url === 'string' ? i.url : null });
+  }
+  if (onTargets.length) throw refuse(`${state.id} is not abandoned: its change is on the target branch (${onTargets.join('; ')}); a change that landed is delivered or reverted in a new attempt, never abandoned`, '`wf deliver` records it (the adapter is asked again); to take it back, revert it in a new attempt (`wf reopen`)');
+  const given = typeof options['acknowledge-integration'] === 'string' ? options['acknowledge-integration'].split(',').map((x) => x.trim()).filter(Boolean) : [];
+  const unacked = open.filter((o) => !given.includes(`${o.repo}:${o.state}`));
+  if (unacked.length) throw refuse(`${state.id} is not abandoned: the delivery adapter last reported ${unacked.map((o) => `${o.repo} ${o.state}${o.url ? ` (${o.url})` : ''}`).join('; ')}; that integration can still land on the target branch`, `close it where it is integrated, or let \`wf deliver\` finish it; once the owner has closed it, \`wf abandon --acknowledge-integration ${unacked.map((o) => `${o.repo}:${o.state}`).join(',')} --reason "<why>"\` records that`);
+  append(root, state.id, 'abandoned', { reason: String(options.reason), ...(recorded.length ? { skipped: recorded.map((d) => d.repo) } : {}), ...(open.length ? { integrationsClosed: open.map((o) => `${o.repo}:${o.state}`) } : {}) }, actor(options));
   cleanupWorktrees(root, loadState(root, state.id));
   return loadState(root, state.id);
 }

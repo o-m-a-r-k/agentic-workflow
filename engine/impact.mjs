@@ -15,10 +15,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { repoDir } from './config.mjs';
+import { loadConfigAtCommit, repoDir } from './config.mjs';
 import { WfError, YAML, git, matchesAny, refuse } from './util.mjs';
 
-export const IMPACT_DEFAULTS = { requiredFor: ['full'], maxFileBytes: 2 * 1024 * 1024, maxScanBytes: 512 * 1024 * 1024 };
+export const IMPACT_DEFAULTS = { requiredFor: ['full'], maxFileBytes: 2 * 1024 * 1024, maxScanBytes: 512 * 1024 * 1024, regexTimeoutMs: 20000 };
 // One row per affected component: each column is a behaviour the change can break. A value may be `none` or `n/a`, but
 // it must be stated: a column left out is a behaviour nobody looked at.
 export const COMPONENT_COLUMNS = ['endpoint', 'limit', 'writePaths', 'paging', 'empty', 'loading', 'error', 'permission', 'mobile', 'rtl', 'publicApi', 'sorting', 'reorder', 'clientTotals', 'rawEnums', 'tests'];
@@ -73,6 +73,25 @@ export function validateQueryShape(q, cfg) {
   return problems;
 }
 
+// Named failure (0.5.0 integration review): queries took their repos (and so the folders they read) and their read
+// limits from the working tree's `.workflow/project.yaml`, which any agent can edit: a repo path pointed at another
+// checkout was read and its file names printed, and the limits could be lifted. Both come from the adapter as committed
+// at the attempt's base, like every other rule that judges the ticket.
+const trustedCache = new Map();
+function trustedConfig(root, cfg, state) {
+  if (!state?.adapterBase) return cfg;
+  const key = `${root}\0${state.adapterBase}`;
+  if (!trustedCache.has(key)) {
+    let t = cfg;
+    try {
+      t = loadConfigAtCommit(root, cfg, state.adapterBase);
+    } catch {}
+    trustedCache.set(key, t);
+  }
+  return trustedCache.get(key);
+}
+const trustedLimits = (t, settings) => ({ ...settings, maxFileBytes: impactSettings(t).maxFileBytes, maxScanBytes: settings.maxScanBytes === Infinity ? Infinity : impactSettings(t).maxScanBytes });
+
 // The committed tree a query reads in one repo: the attempt's worktree HEAD for a repo in the attempt, else the base
 // branch of the repo's main checkout (the remote's when fetched). Uncommitted edits are never read.
 function treeOf(root, cfg, state, name) {
@@ -103,7 +122,9 @@ function blobs(dir, ids) {
 
 // Reads every text file of the committed trees of `names` that the globs select, once, and hands each to `onFile` as
 // (`repo:path`, lines). Returns { skipped, refs }.
-function scanTrees(root, cfg, state, { names, paths, exclude, settings, what }, onFile) {
+function scanTrees(root, working, state, { names, paths, exclude, settings: asked, what }, onFile) {
+  const cfg = trustedConfig(root, working, state);
+  const settings = trustedLimits(cfg, asked);
   const skipped = [];
   const refs = {};
   let scanned = 0;
@@ -136,22 +157,45 @@ function scanTrees(root, cfg, state, { names, paths, exclude, settings, what }, 
   return { skipped, refs };
 }
 
+// Named failure (0.5.0 integration review): a regex query (written by the planner, a sweep file or `wf impact run
+// --query`) ran in the engine's own process, so a pattern with catastrophic backtracking hung `wf plan`, `wf review` and
+// the reviewer handoff with no way out. A regex runs in a child process that is killed after `impact.regexTimeoutMs`
+// (default 20 s); a literal query never backtracks and runs here.
+const REGEX_CHILD = `let s='';process.stdin.setEncoding('utf8');process.stdin.on('data',(d)=>{s+=d});process.stdin.on('end',()=>{const {pattern,flags,texts}=JSON.parse(s);const re=new RegExp(pattern,flags);const out=[];for(const [f,lines] of texts){let n=0;for(const l of lines)if(re.test(l))n++;if(n)out.push([f,n]);}process.stdout.write(JSON.stringify(out));});`;
+function regexCounts(q, texts, timeoutMs) {
+  if (!texts.length) return [];
+  const r = spawnSync(process.execPath, ['-e', REGEX_CHILD], { input: JSON.stringify({ pattern: q.pattern, flags: q.ignoreCase ? 'i' : '', texts }), timeout: timeoutMs, maxBuffer: 256 * 1024 * 1024, encoding: 'utf8', killSignal: 'SIGKILL' });
+  if (r.error?.code === 'ETIMEDOUT' || r.signal) throw refuse(`query \`${q.id}\`: the regex ran longer than ${Math.round(timeoutMs / 1000)} s and was stopped (a pattern that backtracks without end, or too many files)`, 'simplify the pattern (no nested quantifiers such as `(a+)+`), use `kind: literal`, or narrow its `paths`');
+  if (r.status !== 0) throw new WfError(`query \`${q.id}\`: the regex could not run: ${String(r.stderr).split('\n').find((l) => /Error/.test(l)) ?? r.stderr}`);
+  return JSON.parse(r.stdout);
+}
+
 const queryRepos = (cfg, state, q) => (q.repo ? [q.repo] : Object.keys(state.repos ?? {}).length ? Object.keys(state.repos) : cfg.repos.map((r) => r.name));
 
 // Runs one query and returns { id, hits, files, lines, skipped, refs }. Files are named `repo:path`.
-export function runQuery(root, cfg, state, q, settings = impactSettings(cfg)) {
-  const re = (q.kind ?? 'literal') === 'regex' ? new RegExp(q.pattern, q.ignoreCase ? 'i' : '') : null;
+export function runQuery(root, working, state, q, settings = impactSettings(working)) {
+  const cfg = trustedConfig(root, working, state);
+  if (q.repo !== undefined && !cfg.repos.some((r) => r.name === q.repo)) throw refuse(`query \`${q.id}\`: unknown repo \`${q.repo}\` in the adapter at the attempt's base`);
+  const regex = (q.kind ?? 'literal') === 'regex';
   const needle = q.ignoreCase ? String(q.pattern).toLowerCase() : String(q.pattern);
-  const match = re ? (line) => re.test(line) : q.ignoreCase ? (line) => line.toLowerCase().includes(needle) : (line) => line.includes(needle);
+  const match = q.ignoreCase ? (line) => line.toLowerCase().includes(needle) : (line) => line.includes(needle);
   const files = [];
   let lines = 0;
+  const texts = [];
   const { skipped, refs } = scanTrees(root, cfg, state, { names: queryRepos(cfg, state, q), paths: q.paths, exclude: q.exclude, settings, what: `query \`${q.id}\`` }, (file, text) => {
+    if (regex) return void texts.push([file, text]);
     const n = text.filter(match).length;
     if (n) {
       files.push(file);
       lines += n;
     }
   });
+  if (regex) {
+    for (const [file, n] of regexCounts(q, texts, impactSettings(cfg).regexTimeoutMs)) {
+      files.push(file);
+      lines += n;
+    }
+  }
   return { id: q.id, hits: q.unit === 'lines' ? lines : files.length, unit: q.unit ?? 'files', files, lines, skipped, refs };
 }
 

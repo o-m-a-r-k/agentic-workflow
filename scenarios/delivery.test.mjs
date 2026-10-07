@@ -352,7 +352,8 @@ function recoverFromBrokenAdapter(name, { baseMerge }) {
   assert.match(wf(root, ['deliver', '--attempt', id]).err, /reported an unknown state "merged"/);
   // The documented recipe. First the delivery record: `wf abandon` accepts the attempt only while no repo is recorded.
   assert.deepEqual(ok(wf(root, ['status', '--attempt', id, '--json'])).json()[0].delivery.repos, {});
-  ok(wf(root, ['abandon', '--reason', 'the delivery adapter was broken', '--attempt', id]));
+  assert.match(wf(root, ['abandon', '--reason', 'the delivery adapter was broken', '--attempt', id]).err, /--acknowledge-integration app:merged/);
+  ok(wf(root, ['abandon', '--reason', 'the delivery adapter was broken', '--acknowledge-integration', 'app:merged', '--attempt', id]));
   const e2 = ok(wf(root, ['entry', '--item', 'ENG-72', '--owner', 'owner-1', '--json'])).json();
   sh(e2.repos.app.worktree, `git merge --squash wf/${id} && git commit -qm "ENG-72: the change from ${id}"`);
   ok(wf(root, ['handoff', 'planner', '--agent', 'plan-2', '--attempt', e2.id, '--owner', 'owner-1']));

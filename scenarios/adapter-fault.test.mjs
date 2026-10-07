@@ -257,9 +257,15 @@ test('I-22: several repos, the unchanged one recorded as skipped before the faul
   const e2 = ok(wf(p2.root, ['entry', '--item', 'ENG-96', '--owner', 'o', '--json'])).json();
   accepted(p2.root, p2.base, e2.id, [[e2.repos.web.worktree, { 'src/w.txt': 'web\n' }]]);
   assert.notEqual(wf(p2.root, ['deliver', '--attempt', e2.id]).code, 0);
-  ok(wf(p2.root, ['abandon', '--reason', 'broken adapter', '--attempt', e2.id]));
+  // The adapter reported an integration it may still land: the owner closes it there and acknowledges that state.
+  const open = wf(p2.root, ['abandon', '--reason', 'broken adapter', '--attempt', e2.id]);
+  assert.equal(open.code, 75);
+  assert.match(open.err, /not abandoned: the delivery adapter last reported web merged \(https:\/\/git\.example\.test\/mr\/x\); that integration can still land[\s\S]*--acknowledge-integration web:merged/);
+  assert.equal(wf(p2.root, ['abandon', '--reason', 'broken adapter', '--acknowledge-integration', 'web:awaiting-merge', '--attempt', e2.id]).code, 75, 'another state is not acknowledged');
+  ok(wf(p2.root, ['abandon', '--reason', 'broken adapter', '--acknowledge-integration', 'web:merged', '--attempt', e2.id]));
   assert.equal(state(p2.root, e2.id).phase, 'abandoned');
   assert.deepEqual(ledger(p2.root, e2.id).find((x) => x.type === 'abandoned').data.skipped, ['api']);
+  assert.deepEqual(ledger(p2.root, e2.id).find((x) => x.type === 'abandoned').data.integrationsClosed, ['web:merged']);
 });
 
 test('I-22: quick lane: a broken adapter refuses; the re-pin delivers', () => {

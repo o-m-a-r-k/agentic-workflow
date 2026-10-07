@@ -42,6 +42,7 @@ impact:                      # the planner's two-stage impact analysis (lifecycl
   requiredFor: [full]        # classes whose work needs a survey and an impact map; [] turns the requirement off
   maxFileBytes: 2097152      # a larger file is skipped by every query (and listed)
   maxScanBytes: 536870912    # a query that reads more is refused: narrow its paths
+  regexTimeoutMs: 20000      # a regex query that runs longer is stopped and refused
 gate:
   maxParallelSteps: 2
   leases: { docker: 1, browser: 1 }

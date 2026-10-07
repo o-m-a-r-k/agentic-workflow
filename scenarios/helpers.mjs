@@ -35,7 +35,8 @@ function closeOpenImplementers(cwd, args, opts) {
   const r = wf(cwd, ['resume', '--json', ...(i >= 0 ? ['--attempt', args[i + 1]] : [])], opts);
   if (r.code !== 0) return; // the reviewer handoff reports the problem itself
   const s = JSON.parse(r.out);
-  for (const impl of (s.implementers ?? []).filter((y) => !y.closedAt)) ok(wf(cwd, ['handoff', 'close', '--agent', impl.agent, '--attempt', s.id], opts));
+  // A close the engine refuses (uncommitted work) leaves the implementer open; the reviewer handoff then says why.
+  for (const impl of (s.implementers ?? []).filter((y) => !y.closedAt)) wf(cwd, ['handoff', 'close', '--agent', impl.agent, '--attempt', s.id], opts);
 }
 
 export function ok(r) {

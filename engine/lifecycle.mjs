@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { actor, addRepoWorktree, baseRef, branchName, changedFiles, cleanupWorktrees, entry, openState, treeHashes, worktreeDir } from './attempt.mjs';
+import { actor, addRepoWorktree, baseRef, branchName, onTarget, changedFiles, cleanupWorktrees, entry, openState, treeHashes, worktreeDir } from './attempt.mjs';
 import { channelOf, discoveredVerdicts, openDiscovered, seamVerdicts, unacknowledged, unrecordedInReports } from './discovered.mjs';
 import { ADAPTER_DIR, adapterFileAtCommit, adapterLocation, agentTypeFor, declared, loadConfig, loadConfigAtCommit, repoDir, roleClass } from './config.mjs';
 import { focusedSkips, gateBusy, gatePassedForCurrentTree, gateRunningRefusal, screenshots, withReviewLock } from './gate.mjs';
@@ -379,6 +379,9 @@ export function handoff(root, role, options) {
     const sw = sweepAnswers(state);
     if (sw.missing.length) throw refuse(`the fix implementer did not answer ${sw.missing.length} pattern sweep(s) it was handed: ${sw.missing.join(', ')}`, `add a commit trailer per sweep, one line each: \`Sweep <id>: fixed - <the other instances fixed>\` or \`Sweep <id>: clean - <why no hit is another instance>\` (for example \`git commit --allow-empty -m "Sweeps" -m "Sweep ${sw.missing[0]}: fixed - ..."\`)`);
     if (state.lane !== 'batch' && !state.handoffs.some((h) => h.role === 'implementer')) throw refuse('nothing to review yet: hand the work to an implementer first (`wf handoff implementer --agent <id>`)');
+    // Tracked changes only: a finished gate leaves untracked reports, and those are never the change.
+    const dirty = Object.entries(treeHashes(state)).filter(([, t]) => t.includes('+dirty')).map(([n]) => n);
+    if (dirty.length) throw refuse(`commit the change before the review (the reviewer reads the committed diff): uncommitted changes in ${dirty.join(', ')}`);
     // Named failure (I-23): two review rounds were refused because implementers were still editing the tree the reviewer
     // had been handed. An implementer handoff stays open until `wf handoff close`; while one is open the tree may still
     // move, so no review round starts. `--reason` hands the tree anyway and records the override.
@@ -388,9 +391,6 @@ export function handoff(root, role, options) {
       if (!reason) throw refuse(`implementer handoff(s) still open on ${state.id}: ${openImpl.map(implementerLabel).join(', ')}: the tree may still move under the reviewer`, `when each implementer has reported done and its work is committed, close it: ${openImpl.map((x) => `\`wf handoff close --agent ${x.agent}\``).join(', ')} (\`--outcome stopped\` for one you stopped); then hand the tree to the reviewer. Or run it anyway with \`wf handoff reviewer --agent <id> --reason "<why>"\`, which records the override`);
       reviewOverride = { reason, openImplementers: openImpl.map(implementerLabel) };
     }
-    // Tracked changes only: a finished gate leaves untracked reports, and those are never the change.
-    const dirty = Object.entries(treeHashes(state)).filter(([, t]) => t.includes('+dirty')).map(([n]) => n);
-    if (dirty.length) throw refuse(`commit the change before the review (the reviewer reads the committed diff): uncommitted changes in ${dirty.join(', ')}`);
     if (authorsOf(root, state).has(agent)) throw refuse(`${agent} planned, wrote or owns this change and cannot review it`);
     // A resumed reviewer is anchored on its earlier findings; each round is judged by an agent that has seen none of them.
     if (state.roles.reviewer.includes(agent)) throw refuse(`${agent} already reviewed a round of this attempt; start a fresh reviewer agent with a new id; each review round uses a new agent`);
@@ -727,6 +727,9 @@ export function closeImplementer(root, options) {
   const outcome = options.outcome && options.outcome !== true ? String(options.outcome) : 'done';
   if (!['done', 'stopped', 'failed'].includes(outcome)) throw new WfError('--outcome must be done, stopped or failed');
   const heads = treeHashes(state);
+  // A `done` close says the tree is settled for a review (I-23): uncommitted work means the implementer is not done.
+  const dirty = Object.entries(heads).filter(([, t]) => String(t).includes('+dirty')).map(([n]) => n);
+  if (outcome === 'done' && dirty.length) throw refuse(`${agent} is not done: uncommitted changes in ${dirty.join(', ')}`, `have the implementer commit its work, then close it; for an implementer you stopped, \`wf handoff close --agent ${agent} --outcome stopped\``);
   const commits = {};
   for (const [name, r] of Object.entries(state.repos)) {
     const from = String(open.heads?.[name] ?? '').split('+')[0];
@@ -740,6 +743,9 @@ export function closeImplementer(root, options) {
       children = childAgents(home(), agent, h.agentType, h.at);
     } catch {}
   }
+  // Sub-agent metadata comes from files any agent can write: bounded before it enters the ledger.
+  const clip = (v, n) => (v === null || v === undefined ? null : String(v).slice(0, n));
+  children = children.slice(0, 200).map((c) => ({ agentId: clip(c.agentId, 200), name: clip(c.name, 200), agentType: clip(c.agentType, 200), parentAgentId: clip(c.parentAgentId, 200), depth: Number.isInteger(c.depth) ? c.depth : null, description: clip(c.description, 500) }));
   if (children.length) append(root, state.id, 'subagents.attributed', { handoff: open.handoff, children }, actor(options));
   append(root, state.id, 'implementer.closed', { handoff: open.handoff, agent, outcome, heads, commits }, actor(options));
   return { state: loadState(root, state.id), handoff: open.handoff, outcome, commits, children };
@@ -1029,14 +1035,13 @@ async function loadDeliveryAdapter(root, cfg, state) {
 const stateLabel = (observed) => (observed?.state === undefined || observed?.state === null || observed?.state === '' ? 'none' : String(observed.state));
 const describeState = (observed) => (stateLabel(observed) === 'none' ? 'no state' : ADAPTER_STATES.includes(observed.state) ? observed.state : `an unknown state ${JSON.stringify(String(observed.state))}`);
 
-// Whether the worktree's HEAD is on the repo's target branch (fetched now).
-function onTarget(r, repo) {
-  if (!git(r.worktree, ['remote']).split('\n').includes(repo.remote)) return null;
-  run('git', ['fetch', '--quiet', repo.remote, repo.base], { cwd: r.worktree, allowFail: true });
-  const head = git(r.worktree, ['rev-parse', 'HEAD']);
-  const landed = head !== r.base && run('git', ['merge-base', '--is-ancestor', head, `${repo.remote}/${repo.base}`], { cwd: r.worktree, allowFail: true }).status === 0;
-  return landed ? { head, target: `${repo.remote}/${repo.base}` } : null;
-}
+// Named failure (0.5.0 integration review): a delivery adapter's integrate and readback results were spread into the
+// `repo.delivered` record over the engine's own fields, so a result carrying `repo`, `commit`, `target` or `skipped`
+// rewrote what the ledger says was delivered (a `skipped` record then let `wf abandon` take a delivered attempt back),
+// and a recorded result could replace the worktree or attempt an adapter is called with. An adapter result keeps its own
+// fields; these are the engine's, set by it alone.
+const ENGINE_DELIVERY_KEYS = new Set(['repo', 'commit', 'target', 'skipped', 'recovered', 'adapterState', 'observed', 'acknowledged', 'onTarget', 'at', 'root', 'worktree', 'attempt', 'item']);
+const adapterResult = (x) => (x && typeof x === 'object' && !Array.isArray(x) ? Object.fromEntries(Object.entries(x).filter(([k]) => !ENGINE_DELIVERY_KEYS.has(k))) : {});
 
 // I-20. Named failure: an adapter whose integrate pushes straight to the target branch and whose observe then reports
 // anything but `integrated` (CI that fails after the merge, a missing state) was counted as delivered on the next
@@ -1046,7 +1051,7 @@ function onTarget(r, repo) {
 function postMerge(options, name, landed, observed, integrated) {
   const label = `${name}:${stateLabel(observed)}`;
   const given = typeof options['acknowledge-adapter-state'] === 'string' ? options['acknowledge-adapter-state'].split(',').map((x) => x.trim()).filter(Boolean) : [];
-  if (given.includes(label)) return { repo: name, commit: landed.head, target: landed.target, ...(integrated ?? {}), adapterState: stateLabel(observed), observed: observed ?? null, acknowledged: label };
+  if (given.includes(label)) return { ...adapterResult(integrated), repo: name, commit: landed.head, target: landed.target, adapterState: stateLabel(observed), observed: observed ?? null, acknowledged: label };
   const url = integrated?.url ? ` (${integrated.url})` : '';
   throw refuse(`not delivered: ${name}: ${landed.head.slice(0, 10)} is already on ${landed.target}, but the delivery adapter reports ${describeState(observed)} after the merge${url}${observed?.evidence ? `: ${observed.evidence}` : ''}; being on the target branch alone does not count as a clean delivery`, `show this to the owner: the change is on ${landed.target} and the adapter says ${stateLabel(observed)}. ${stateLabel(observed) === 'ci-failed' ? 'Read that CI run. ' : ''}Once the owner has seen it and decides the delivery stands (anything to fix goes into a new attempt, \`wf reopen\`), run \`wf deliver --acknowledge-adapter-state ${label}\`; it is recorded and shown with the delivery. An adapter that reports a wrong state is fixed on the base branch, then \`wf deliver --repin-adapter --reason "<why>"\``);
 }
@@ -1062,21 +1067,33 @@ function postMerge(options, name, landed, observed, integrated) {
 function repinAdapter(root, cfg, state, options) {
   const want = typeof options['repin-adapter'] === 'string' ? options['repin-adapter'].trim() : '';
   const reason = typeof options.reason === 'string' ? options.reason.trim() : '';
-  const { repo, relative } = adapterLocation(root, cfg);
+  const pinned = deliveryPin(state);
+  // Named failure (0.5.0 integration review): where the new adapter is read from (the repo, its folder, base branch and
+  // remote) came from the working tree's `.workflow/project.yaml`, which any agent can edit, so a re-pin could be pointed
+  // at another repo's branch. It comes from the adapter as committed at the current pin; the confirmation shows the
+  // remote it was fetched from.
+  let pinnedCfg;
+  try {
+    pinnedCfg = loadConfigAtCommit(root, cfg, pinned);
+  } catch (error) {
+    throw refuse(`not re-pinned: the adapter at the current pin ${String(pinned).slice(0, 10)} cannot be read: ${error.message.split('\n')[0]}`);
+  }
+  const { repo, relative } = adapterLocation(root, pinnedCfg);
   const dir = repoDir(root, repo);
   const ref = baseRef(dir, repo);
   const tip = git(dir, ['rev-parse', ref]);
-  const pinned = deliveryPin(state);
+  // Shown without any user or token a remote url may carry.
+  const remoteUrl = (git(dir, ['remote', 'get-url', repo.remote], { allowFail: true }) || 'no remote (the local branch)').replace(/\/\/[^/@\s]*@/, '//');
   // Run again after a later step refused: the re-pin an earlier try recorded is accepted again.
   if (want.length >= 7 && tip.startsWith(want) && pinned === tip && state.adapterRepins.some((x) => x.to === tip)) return state;
   if (tip === pinned) throw refuse(`not re-pinned: the delivery adapter of ${state.id} is already read at the tip of ${ref} (${tip.slice(0, 10)})`, `commit and push the fixed adapter on ${repo.base} in ${repo.name} first`);
   if (run('git', ['merge-base', '--is-ancestor', pinned, tip], { cwd: dir, allowFail: true }).status !== 0) throw refuse(`not re-pinned: ${ref} (${tip.slice(0, 10)}) does not contain the current pin ${pinned.slice(0, 10)}; the adapter is re-pinned only forward along the base branch`);
   let kinds;
   try {
-    const now = loadConfigAtCommit(root, cfg, tip);
-    if (now.delivery.kind !== 'push-main') adapterFileAtCommit(root, cfg, tip, now.delivery.kind);
+    const now = loadConfigAtCommit(root, pinnedCfg, tip);
+    if (now.delivery.kind !== 'push-main') adapterFileAtCommit(root, pinnedCfg, tip, now.delivery.kind);
     assertEngine(now);
-    kinds = { from: loadConfigAtCommit(root, cfg, pinned).delivery.kind, to: now.delivery.kind };
+    kinds = { from: pinnedCfg.delivery.kind, to: now.delivery.kind };
   } catch (error) {
     throw refuse(`not re-pinned: the adapter at ${repo.name}@${tip.slice(0, 10)} cannot be used: ${error.message.split('\n')[0]}`);
   }
@@ -1086,7 +1103,7 @@ function repinAdapter(root, cfg, state, options) {
   if (want.length < 7 || !tip.startsWith(want) || !reason) {
     const done = Object.entries(delivered).map(([n, v]) => `${n} ${v}`).join('; ') || 'nothing yet';
     const left = Object.keys(state.repos).filter((n) => !delivered[n]).join(', ');
-    throw refuse(`not re-pinned${want && !tip.startsWith(want) ? `: ${want} is not the tip of ${ref} (${tip.slice(0, 10)})` : ''}${!reason ? ': --reason is required' : ''}. Re-pinning ${state.id}'s delivery adapter:\n  from: ${repo.name}@${pinned.slice(0, 10)} (delivery kind ${kinds.from})\n  to:   ${repo.name}@${tip.slice(0, 10)}, the tip of ${ref} (delivery kind ${kinds.to})\n  adapter files that differ: ${changed.join(', ') || 'none'}\n  recorded so far: ${done}\n  still to deliver: ${left}\n  the gate, the review and the tracker stay on the admission pin ${state.adapterBase.slice(0, 10)}`, `show this to the owner; once they confirm, \`wf deliver --repin-adapter ${tip.slice(0, 12)} --reason "<why>"\``);
+    throw refuse(`not re-pinned${want && !tip.startsWith(want) ? `: ${want} is not the tip of ${ref} (${tip.slice(0, 10)})` : ''}${!reason ? ': --reason is required' : ''}. Re-pinning ${state.id}'s delivery adapter:\n  from: ${repo.name}@${pinned.slice(0, 10)} (delivery kind ${kinds.from})\n  to:   ${repo.name}@${tip.slice(0, 10)}, the tip of ${ref}, fetched from ${remoteUrl} (delivery kind ${kinds.to})\n  adapter files that differ: ${changed.join(', ') || 'none'}\n  recorded so far: ${done}\n  still to deliver: ${left}\n  the gate, the review and the tracker stay on the admission pin ${state.adapterBase.slice(0, 10)}`, `show this to the owner; once they confirm, \`wf deliver --repin-adapter ${tip.slice(0, 12)} --reason "<why>"\``);
   }
   append(root, state.id, 'adapter.repinned', { from: pinned, to: tip, ref, repo: repo.name, reason, changed, delivered, kinds }, actor(options));
   return loadState(root, state.id);
@@ -1225,7 +1242,7 @@ export async function deliver(root, options) {
       continue;
     }
     const last = state.delivery.integrating[name] ?? null;
-    const integrated = last ? Object.fromEntries(Object.entries(last).filter(([k]) => !['repo', 'observed', 'at'].includes(k))) : {};
+    const integrated = adapterResult(last);
     const ctx = { root, repo, worktree: r.worktree, attempt: state.id, item: state.item, branch: branchName(state.id) };
     let observed;
     try {
@@ -1236,10 +1253,10 @@ export async function deliver(root, options) {
     if (observed?.state === 'integrated') {
       const rb = await adapter.readback({ ...ctx, ...integrated });
       if (!rb.ok) throw refuse(`${name}: readback failed: ${rb.reason ?? 'change not on the target branch'}`);
-      append(root, state.id, 'repo.delivered', { repo: name, commit: head, target: landed.target, ...integrated, ...rb, recovered: true, adapterState: 'integrated' }, actor(options));
+      append(root, state.id, 'repo.delivered', { ...integrated, ...adapterResult(rb), repo: name, commit: head, target: landed.target, recovered: true, adapterState: 'integrated' }, actor(options));
       continue;
     }
-    append(root, state.id, 'repo.integrating', { repo: name, ...integrated, observed, onTarget: landed.target }, actor(options));
+    append(root, state.id, 'repo.integrating', { ...integrated, repo: name, observed, onTarget: landed.target }, actor(options));
     if (PENDING.includes(observed?.state)) return { state: loadState(root, state.id), waiting: { repo: name, ...observed, url: integrated.url, onTarget: landed.target } };
     append(root, state.id, 'repo.delivered', { ...postMerge(options, name, landed, observed, integrated), recovered: true }, actor(options));
   }
@@ -1281,10 +1298,10 @@ export async function deliver(root, options) {
       }
     } else {
       const ctx = { root, repo, worktree: state.repos[name].worktree, attempt: state.id, item: state.item, branch: branchName(state.id) };
-      const integrated = await adapter.integrate(ctx);
+      const integrated = adapterResult(await adapter.integrate(ctx));
       const observed = await adapter.observe({ ...ctx, ...integrated });
       if (observed?.state !== 'integrated') {
-        append(root, state.id, 'repo.integrating', { repo: name, ...integrated, observed }, actor(options));
+        append(root, state.id, 'repo.integrating', { ...integrated, repo: name, observed }, actor(options));
         // I-20: an adapter that pushed straight to the target branch and then reports anything but a pending state is a
         // post-merge state: shown, and counted only with the owner's acknowledgement.
         const landed = PENDING.includes(observed?.state) ? null : onTarget(state.repos[name], repo);
@@ -1303,7 +1320,7 @@ export async function deliver(root, options) {
       } else {
         const rb = await adapter.readback({ ...ctx, ...integrated });
         if (!rb.ok) throw refuse(`${name}: readback failed: ${rb.reason ?? 'change not on the target branch'}`);
-        result = { repo: name, commit: git(state.repos[name].worktree, ['rev-parse', 'HEAD']), target: `${repo.remote}/${repo.base}`, ...integrated, ...rb, adapterState: 'integrated' };
+        result = { ...integrated, ...adapterResult(rb), repo: name, commit: git(state.repos[name].worktree, ['rev-parse', 'HEAD']), target: `${repo.remote}/${repo.base}`, adapterState: 'integrated' };
       }
     }
     append(root, state.id, 'repo.delivered', result, actor(options));

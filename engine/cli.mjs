@@ -82,7 +82,7 @@ Work
                                     the project's lessons (.workflow/lessons/): capture, enforce, recurrence
   wf reopen --item ID --reason "feedback" [--no-lesson "why"]
   wf adopt [--attempt ID]           take over a live attempt from a new session
-  wf abandon --reason "why"
+  wf abandon --reason "why" [--acknowledge-integration REPO:STATE]
   wf batch create --members A,B | wf batch eject --batch B --member A
 
 Status
