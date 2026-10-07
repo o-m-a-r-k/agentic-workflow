@@ -2,9 +2,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { actor, addRepoWorktree, branchName, changedFiles, cleanupWorktrees, entry, openState, treeHashes, worktreeDir } from './attempt.mjs';
+import { actor, addRepoWorktree, baseRef, branchName, changedFiles, cleanupWorktrees, entry, openState, treeHashes, worktreeDir } from './attempt.mjs';
 import { channelOf, discoveredVerdicts, openDiscovered, seamVerdicts, unacknowledged, unrecordedInReports } from './discovered.mjs';
-import { ADAPTER_DIR, adapterFileAtCommit, agentTypeFor, declared, loadConfig, loadConfigAtCommit, repoDir, roleClass } from './config.mjs';
+import { ADAPTER_DIR, adapterFileAtCommit, adapterLocation, agentTypeFor, declared, loadConfig, loadConfigAtCommit, repoDir, roleClass } from './config.mjs';
 import { focusedSkips, gateBusy, gatePassedForCurrentTree, gateRunningRefusal, screenshots, withReviewLock } from './gate.mjs';
 import { append, attemptDir, evidenceRoot, keptFiles, listAttempts, loadState, openEvidence } from './ledger.mjs';
 import { assertUnchanged, readEvidenceFile } from './evidence.mjs';
@@ -18,7 +18,7 @@ import { commentFile, emitTrackerEvent, needsSummary, recordSummary, writeDelive
 import { designChecks, designVerdicts, requiredSkills, reviewRules, ruleVerdicts, skillFiles, unreadDocs } from './rules.mjs';
 import { home, howToStart, roleChangedSinceSessionStart, startPromptFor, verifyAgent } from './provenance.mjs';
 import { allRecordedQueries, buildSweeps, deriveFromDiff, impactCheckProblems, impactRequired, inventory, readSweepFile, rerun, staleRestrictionLines, staleRestrictions, sweepAnswers, validateAmendImpact, validatePlanImpact } from './impact.mjs';
-import { WfError, YAML, assertSafeId, canonical, git, hashFile, hashValue, matchesAny, readJson, refuse, run, sessionIdentity, sha256, writeImmutable, writeJson } from './util.mjs';
+import { WfError, YAML, assertEngine, assertSafeId, canonical, git, hashFile, hashValue, matchesAny, readJson, refuse, run, sessionIdentity, sha256, writeImmutable, writeJson } from './util.mjs';
 
 // An input file is read once: the text parsed is the text kept raw (a file rewritten between two reads could otherwise
 // be judged on one content and recorded with another).
@@ -508,7 +508,7 @@ export function handoff(root, role, options) {
     instructions: {
       planner: 'Read the issue and the code, in every repo the issue can reach. Do not change any file. First write the `survey` (stage 1, before any design): what exists around the issue: the components and consumers it touches (one row per affected component: endpoint and limit, write paths, paging kind, empty, loading, error, permission, mobile, RTL and public-API behaviour, sorting, reorder, client-side totals, raw enums, existing tests), the end-to-end flows including failure paths, and the defect patterns to sweep; every list entry names the query it came from (`survey.queries`: { id, pattern, kind: literal|regex, repo, paths, exclude, hits }) and its hit count; `wf impact run --attempt <id> --query <one query as JSON>` runs one as the engine will. Then the design (`plan`, `criteria`, `work`), then `impact` (stage 2, from the chosen design): every changed symbol, endpoint, DTO, error code and migration with `cites` (criteria, work items or anchor text), consumers, flows with failure paths, contracts crossed and suites that must run, and which survey entries it `covers`; every other survey entry goes under `impact.excluded` with a reason. `wf plan` re-runs every query and refuses a count that does not match. Every issue the survey finds is fixed in this ticket: give it a criterion and a work item; never defer it or note it as a follow-up. When the bundle has `designSystem` and the ticket changes a UI surface, add a criterion "uses the shared components: <the ones from designSystem.components this surface needs>" with a uat a person can check. Return your plan as one ```yaml fenced block, last in your reply, keys in this order: { survey: { queries, components, consumers, flows, patterns }, plan: { summary, contract, anchors, tests: { changed, run }, doNotRun, externalServices, agentSplit }, criteria: [{ id: C1, text, uat }], work: [{ id: W1, criteria: [C1], repos, class, why }], impact: { queries, changes, excluded } } (work is optional; classes: see your role file). The owner freezes it from your transcript unchanged. Never write a blanket "no change in <repo or component>" criterion: state the invariant instead (the contract seam stays matched; existing fields, permissions and tenant isolation are unchanged), so a fix that needs another repo is not fenced off. Leave no background command, monitor or sleep loop running when you report.',
       implementer: "When the bundle has `sweep` (a fix round), each entry is a pattern sweep for one open review finding: its `files` are the other places the defect pattern appears. Fix every real instance, not only the one the finding names, and answer each sweep in a commit trailer, one line each: `Sweep <id>: fixed - <the instances fixed>` or `Sweep <id>: clean - <why no other hit is an instance>`; the next review does not start without them. When the bundle has `impactMap`, keep the change inside it: a consumer, flow, contract or suite it does not list is scope the owner records with an impact update (`wf criteria amend` with `impact`) before you build it. Done means `check.command` passes for your repos (it runs the light steps listed under `check`; it never counts as the gate). Implement against the frozen criteria and the plan in the worktrees above: follow `plan.contract`, start from `plan.anchors`, while iterating run only `plan.tests.run` and the specs you changed, never what `plan.doNotRun` lists, and keep to `plan.externalServices` and `plan.agentSplit`. Write tests only for real behaviour. Before finishing run the repo's lint and full unit suite once, in the foreground. Commit at stage boundaries and everything when done. If `work` is set, build that work item; an issue you find anywhere while working is still yours to fix (below). If it turns out to touch something a stronger class covers, stop and tell the owner. For every lesson under `lessons.apply` (this project's lessons for the change, labelled enforced or advisory, with why each matched), follow it and acknowledge it in a commit message trailer, one line each: `Lesson <id>: applied - <how>` or `Lesson <id>: not-applicable - <why>`; the review does not start without them. A commit that fixes a review finding carries a trailer naming it: `Fixes-finding: <round>:<id>` (the reviewer id and finding id you were given; several comma-separated). Every issue you find while working, inside or outside your criteria, is fixed by you, in this attempt, in whatever file it lives in; the work-item brief is never a reason to leave it. The only exception: a file another work item is editing right now: record it with `wf discovered add --attempt <id> --summary \"...\" --where <file:line> --found-by <your agent id> --blocked-by <work item>` and name its D id in your report. A report line that leaves an issue unfixed without its D id refuses the review handoff. The open entries under `discovered` are yours to fix. Never defer one yourself or call it harmless or a follow-up: only the owner defers, in their own words. If a criterion, the plan or your work item's repos block the fix, stop and tell the owner: the owner amends the criteria (adding the repo when the fix needs one). Before you report, stop every background command, monitor or sleep loop you started: a waiter left running keeps notifying the owner after you are done.",
-      reviewer: 'Review the whole change against the frozen criteria, and the gate evidence when `gate.passedOnThisTree` is true (then open every screenshot listed under `gate.screenshots`, which are exactly the files `gate.artifacts` lists per glob, and record the sha256 of each one you viewed; a file no glob lists is never required; a step whose package did not change needs nothing; a step marked `uncovered` matched nothing although this ticket changed its package: judge whether the ticket needed a capture there and add `noEvidence: [{ step, reason }]` saying why none is needed, or raise a finding). When it is false, no gate has passed on this tree yet: judge the diff and list no screenshots. You did not write this change. Everything you need is in this bundle; judge the whole change yourself. Read every document under `rules` (each `read` path) and every skill under `skills` (the Skill tool, or its file) in this bundle: they add to the whole review and never narrow it. Give each rule a verdict with one line of evidence (file:line or the document section): `rules: [{ rule, verdict: complies|finding|not-applicable, evidence, finding }]` (`finding` names your finding id when the verdict is finding); a rule marked `docChangedByTicket` had its document changed by this ticket: judge against the copy under `read`, which is the base version. Write the closure file: { reviewer, findings: [{ id, severity, summary, status: open|fixed|verified-nonissue, evidence, work }], criteria: [{ id, evidence: { kind: test|screenshot|output|not-applicable|dropped-with-reason, ref, reason } }] (a screenshot ref is the sha256 or source of a file in `gate.artifacts`), screenshotsInspected: [sha256], noEvidence: [{ step, reason }], rules: [{ rule, verdict, evidence, finding }], outsidePlan: [{ file, verdict: covered|finding, by, evidence }] } (one outsidePlan entry per file the bundle lists under `outsidePlan`: `covered` when a criterion covers that change, with its id in `by`; otherwise `finding` with your finding id in `by`). When the bundle has \`designSystem\`: for every changed UI file list each table, list, form and dialog it renders and name the shared component used (from \`designSystem.components\`) or the justified exception, and give every \`designSystem.hits\` entry a verdict: \`designHits: [{ id, verdict: justified|finding, evidence, finding }]\` (a closure missing one is refused). Give every entry under \`discovered\` (issues found during the ticket) a verdict: \`discovered: [{ id, verdict: fixed|deferred|open, evidence }]\` (\`fixed\` with the file:line of the fix you checked; \`deferred\` only for an entry the owner deferred; \`open\` when it is not fixed). For every repo under \`addedRepos\`, judge the contract seam on both sides: \`seams: [{ repo, verdict: matched|finding, evidence, finding }]\` (\`matched\` cites the producer file:line and the consumer file:line). Every issue you find is a finding, inside or outside the criteria: never out of scope, a follow-up or harmless on your own judgement. A criterion or scope fence that blocks a fix is a criteria defect (a finding with category \`criteria\`), never a reason to defer or to ship a cosmetic workaround. When the bundle has `impactMap`: run `wf impact run --attempt <id>` (it re-runs every recorded query on this tree) and list each in `impactChecked.queries: [{ query, hits, note }]`, judging every hit that is new or gone since the plan; sample at least `impactMap.sampleSize` inventory entries (`impactMap.inventory`) and check each against the code: `impactChecked.sampled: [{ entry, verdict: matches|finding, evidence, finding }]`; give every entry under `impactMap.derived.outside` (a caller of a symbol the final diff declares or edits, in a file the map lists nowhere) a verdict: `impactChecked.derived: [{ symbol, file, verdict: in-map|impact-gap, evidence, finding }]`. A finding about anything the impact map does not list carries `category: impact-gap`. When the bundle has `sweeps`, check each fix round sweep: its hits now and the answer the implementer gave. Then run `wf review --closure <file>`. Only after your closure is recorded, `wf review` may list findings from earlier rounds for you to verify against the code: then add `priorFindings: [{ round, id, status: fixed|verified-nonissue|open, evidence }]` to the same file, change nothing else, and run `wf review --closure <file>` again.',
+      reviewer: 'Review the whole change against the frozen criteria, and the gate evidence when `gate.passedOnThisTree` is true (then open every screenshot listed under `gate.screenshots`, which are exactly the files `gate.artifacts` lists per glob, and record the sha256 of each one you viewed; a file no glob lists is never required; a step whose package did not change needs nothing; a step marked `uncovered` matched nothing although this ticket changed its package: judge whether the ticket needed a capture there and add `noEvidence: [{ step, reason }]` saying why none is needed, or raise a finding). When it is false, no gate has passed on this tree yet: judge the diff and list no screenshots. You did not write this change. Everything you need is in this bundle; judge the whole change yourself. Read every document under `rules` (each `read` path) and every skill under `skills` (the Skill tool, or its file) in this bundle: they add to the whole review and never narrow it. Give each rule a verdict with one line of evidence (file:line or the document section): `rules: [{ rule, verdict: complies|finding|not-applicable, evidence, finding }]` (`finding` names your finding id when the verdict is finding); a rule marked `docChangedByTicket` had its document changed by this ticket: judge against the copy under `read`, which is the base version. Write the closure file: { reviewer, findings: [{ id, severity, summary, status: open|fixed|verified-nonissue, evidence, work }], criteria: [{ id, evidence: { kind: test|screenshot|output|not-applicable|dropped-with-reason, ref, reason } }] (a screenshot ref is the sha256 or source of a file in `gate.artifacts`), screenshotsInspected: [sha256], anomalies: "none seen" | [{ screenshots: [sha256], observation, cause, evidence, assertions, finding }], noEvidence: [{ step, reason }], rules: [{ rule, verdict, evidence, finding }], outsidePlan: [{ file, verdict: covered|finding, by, evidence }] } (one outsidePlan entry per file the bundle lists under `outsidePlan`: `covered` when a criterion covers that change, with its id in `by`; otherwise `finding` with your finding id in `by`). When you were handed screenshots, compare captures of the same state with each other and with the criteria (counts, dates, names, totals) and fill `anomalies`: "none seen", or per anomaly the screenshots, what differs, and either your `finding` id, or the `cause` you found with its `evidence` (file:line or the data you checked) and the `assertions` (test file:line) that pin the value and would fail if it were wrong; a value no test pins is a finding. Never call one cosmetic without that investigation. When the bundle has \`designSystem\`: for every changed UI file list each table, list, form and dialog it renders and name the shared component used (from \`designSystem.components\`) or the justified exception, and give every \`designSystem.hits\` entry a verdict: \`designHits: [{ id, verdict: justified|finding, evidence, finding }]\` (a closure missing one is refused). Give every entry under \`discovered\` (issues found during the ticket) a verdict: \`discovered: [{ id, verdict: fixed|deferred|open, evidence }]\` (\`fixed\` with the file:line of the fix you checked; \`deferred\` only for an entry the owner deferred; \`open\` when it is not fixed). For every repo under \`addedRepos\`, judge the contract seam on both sides: \`seams: [{ repo, verdict: matched|finding, evidence, finding }]\` (\`matched\` cites the producer file:line and the consumer file:line). Every issue you find is a finding, inside or outside the criteria: never out of scope, a follow-up or harmless on your own judgement. A criterion or scope fence that blocks a fix is a criteria defect (a finding with category \`criteria\`), never a reason to defer or to ship a cosmetic workaround. When the bundle has `impactMap`: run `wf impact run --attempt <id>` (it re-runs every recorded query on this tree) and list each in `impactChecked.queries: [{ query, hits, note }]`, judging every hit that is new or gone since the plan; sample at least `impactMap.sampleSize` inventory entries (`impactMap.inventory`) and check each against the code: `impactChecked.sampled: [{ entry, verdict: matches|finding, evidence, finding }]`; give every entry under `impactMap.derived.outside` (a caller of a symbol the final diff declares or edits, in a file the map lists nowhere) a verdict: `impactChecked.derived: [{ symbol, file, verdict: in-map|impact-gap, evidence, finding }]`. A finding about anything the impact map does not list carries `category: impact-gap`. When the bundle has `sweeps`, check each fix round sweep: its hits now and the answer the implementer gave. Then run `wf review --closure <file>`. Only after your closure is recorded, `wf review` may list findings from earlier rounds for you to verify against the code: then add `priorFindings: [{ round, id, status: fixed|verified-nonissue|open, evidence }]` to the same file, change nothing else, and run `wf review --closure <file>` again.',
       tester: 'Write requirement expectations from the issue before reading the implementation, then map each to gate tests.',
     }[role],
   };
@@ -780,6 +780,8 @@ export function recordReview(root, options) {
     const ip = impactCheckProblems(handed.impactMap, closure, rerun(root, loadConfig(root), state));
     if (ip.length) throw refuse(`closure refused: the impact check is incomplete:\n  - ${ip.join('\n  - ')}`, 'add `impactChecked: { "queries": [{ "query": "<id>", "hits": <n>, "note": "..." }], "sampled": [{ "entry": "<survey or impact id>", "verdict": "matches|finding", "evidence": "file:line", "finding": "<id>" }], "derived": [{ "symbol", "file", "verdict": "in-map|impact-gap", "evidence", "finding" }] }` (hits from `wf impact run --attempt <id>`), and run `wf review --closure <file>` again');
   }
+  const av = reviewAnomalies(handed.gate, closure);
+  if (av.length) throw refuse(`closure refused: the anomalies seen in the screenshots are not accounted for:\n  - ${av.join('\n  - ')}`, `add \`anomalies\` to the closure: "none seen" after comparing the captures, or [{ "screenshots": ["<sha256>"], "observation": "<what differs>", "cause": "<the cause you found>", "evidence": "<file:line or data you checked>", "assertions": "<test file:line that pins this value and fails when it is wrong>" }] or, when it is a defect or no test pins it, { ..., "finding": "<your finding id>" }; then \`wf review --closure <file>\` again`);
   // Commit, then reveal: the first closure of a round is blind. Earlier rounds' findings are shown only after it is
   // recorded, and a later closure of the same round may only add their verification.
   const round = reviewerHandoff.bundle;
@@ -863,6 +865,40 @@ export function gateOrderCheck(root, options) {
     if (!reason) throw refuse(`the gate runs after a clean code review, never beside or before it:\n  - ${problems.join('\n  - ')}`, 'follow the order (`wf resume` names the next step), or run it anyway with `wf gate --reason "<why>"`, which records the override in the ledger');
     append(root, state.id, 'gate.override', { reason, problems, tree: treeHashes(state) }, actor(options));
   };
+}
+
+// I-12. Named failure: a cross-locale difference in screenshot numbers was dismissed as cosmetic without checking; it
+// came from shared test data and hid vacuous assertions (tests that passed whatever the value was). A reviewer handed
+// screenshots now accounts for what it saw: `anomalies` is "none seen" after comparing the captures (counts, dates,
+// names, totals, between captures of the same state and against the criteria), or each anomaly with the screenshots it
+// was seen in and either a finding, or the investigated cause with its evidence and the test assertion that pins the
+// value (a value no test pins is a test gap, so a finding). No wording is judged: the fields are required.
+export function reviewAnomalies(gate, closure) {
+  const shots = gate?.passedOnThisTree ? gate.screenshots ?? [] : [];
+  if (!shots.length) return [];
+  const v = closure.anomalies;
+  if (v === undefined || v === null) return ['no `anomalies` key: compare the captures of the same state with each other and with the criteria (counts, dates, names, totals) and say what you saw'];
+  if (typeof v === 'string') return /^\s*none seen\s*\.?\s*$/i.test(v) ? [] : ['`anomalies` must be "none seen" or a list'];
+  if (!Array.isArray(v)) return ['`anomalies` must be "none seen" or a list'];
+  const problems = [];
+  const known = new Set(shots.flatMap((a) => [a.sha256, a.source, a.path].filter(Boolean)));
+  const findings = new Set((closure.findings ?? []).map((f) => f.id));
+  const text = (x) => String(x ?? '').trim();
+  for (const [i, a] of v.entries()) {
+    const label = `anomaly ${i + 1}`;
+    const seen = Array.isArray(a?.screenshots) ? a.screenshots.map(String) : a?.screenshots ? [String(a.screenshots)] : [];
+    if (!seen.length) problems.push(`${label}: name the screenshot(s) it was seen in (\`screenshots\`: sha256)`);
+    else if (seen.some((x) => !known.has(x))) problems.push(`${label}: ${seen.filter((x) => !known.has(x)).join(', ')} is not a screenshot of this gate`);
+    if (!text(a?.observation)) problems.push(`${label}: \`observation\` says what differs or contradicts a criterion`);
+    if (text(a?.finding)) {
+      if (!findings.has(text(a.finding))) problems.push(`${label}: finding ${text(a.finding)} is not among your findings`);
+      continue;
+    }
+    if (!text(a?.cause)) problems.push(`${label}: investigate it to a \`cause\`, or raise it as a \`finding\`; an anomaly is never left unexplained or called cosmetic unchecked`);
+    if (!text(a?.evidence)) problems.push(`${label}: \`evidence\` says what you checked (file:line, the test data, the query) that shows the cause`);
+    if (!text(a?.assertions)) problems.push(`${label}: \`assertions\` names the test assertion (file:line) that pins this value and would fail if it were wrong; when none does, the value is unchecked: raise a \`finding\``);
+  }
+  return problems;
 }
 
 // 0.1.5 and earlier recorded no flag: their reviewers were handed the attempt only after a passing gate on that tree.
@@ -959,18 +995,80 @@ export function acceptReview(root, options) {
 // The states an adapter's `observe` reports (docs/DESIGN.md). Only the pending ones wait.
 const ADAPTER_STATES = ['integrated', 'awaiting-merge', 'ci-running', 'ci-failed', 'rejected'];
 const PENDING = ['awaiting-merge', 'ci-running'];
-const trustedAdapterKind = (root, cfg, state) => {
-  try {
-    return loadConfigAtCommit(root, cfg, state.adapterBase).delivery.kind;
-  } catch {
-    return 'the adapter file';
-  }
-};
+// The commit the delivery adapter is read at: the admission pin, or the owner's re-pin (I-21). Only delivery reads it.
+export const deliveryPin = (state) => state.deliveryAdapterBase ?? state.adapterBase;
 
 async function loadDeliveryAdapter(root, cfg, state) {
-  const trusted = loadConfigAtCommit(root, cfg, state.adapterBase);
+  const trusted = loadConfigAtCommit(root, cfg, deliveryPin(state));
   if (trusted.delivery.kind === 'push-main') return null;
-  return (await import(pathToFileURL(adapterFileAtCommit(root, cfg, state.adapterBase, trusted.delivery.kind)).href)).default;
+  return (await import(pathToFileURL(adapterFileAtCommit(root, cfg, deliveryPin(state), trusted.delivery.kind)).href)).default;
+}
+
+// The state an adapter reported, as the owner acknowledges it: `none` when it reported none.
+const stateLabel = (observed) => (observed?.state === undefined || observed?.state === null || observed?.state === '' ? 'none' : String(observed.state));
+const describeState = (observed) => (stateLabel(observed) === 'none' ? 'no state' : ADAPTER_STATES.includes(observed.state) ? observed.state : `an unknown state ${JSON.stringify(String(observed.state))}`);
+
+// Whether the worktree's HEAD is on the repo's target branch (fetched now).
+function onTarget(r, repo) {
+  if (!git(r.worktree, ['remote']).split('\n').includes(repo.remote)) return null;
+  run('git', ['fetch', '--quiet', repo.remote, repo.base], { cwd: r.worktree, allowFail: true });
+  const head = git(r.worktree, ['rev-parse', 'HEAD']);
+  const landed = head !== r.base && run('git', ['merge-base', '--is-ancestor', head, `${repo.remote}/${repo.base}`], { cwd: r.worktree, allowFail: true }).status === 0;
+  return landed ? { head, target: `${repo.remote}/${repo.base}` } : null;
+}
+
+// I-20. Named failure: an adapter whose integrate pushes straight to the target branch and whose observe then reports
+// anything but `integrated` (CI that fails after the merge, a missing state) was counted as delivered on the next
+// `wf deliver` from git ancestry alone, and the adapter was never asked again. Now the adapter is asked again; a
+// pending state waits; any other state after the merge is shown and counts only once the owner acknowledges that repo
+// and that state (`--acknowledge-adapter-state <repo>:<state>`), recorded with the delivery like a deferral.
+function postMerge(options, name, landed, observed, integrated) {
+  const label = `${name}:${stateLabel(observed)}`;
+  const given = typeof options['acknowledge-adapter-state'] === 'string' ? options['acknowledge-adapter-state'].split(',').map((x) => x.trim()).filter(Boolean) : [];
+  if (given.includes(label)) return { repo: name, commit: landed.head, target: landed.target, ...(integrated ?? {}), adapterState: stateLabel(observed), observed: observed ?? null, acknowledged: label };
+  const url = integrated?.url ? ` (${integrated.url})` : '';
+  throw refuse(`not delivered: ${name}: ${landed.head.slice(0, 10)} is already on ${landed.target}, but the delivery adapter reports ${describeState(observed)} after the merge${url}${observed?.evidence ? `: ${observed.evidence}` : ''}; being on the target branch alone does not count as a clean delivery`, `show this to the owner: the change is on ${landed.target} and the adapter says ${stateLabel(observed)}. ${stateLabel(observed) === 'ci-failed' ? 'Read that CI run. ' : ''}Once the owner has seen it and decides the delivery stands (anything to fix goes into a new attempt, \`wf reopen\`), run \`wf deliver --acknowledge-adapter-state ${label}\`; it is recorded and shown with the delivery. An adapter that reports a wrong state is fixed on the base branch, then \`wf deliver --repin-adapter --reason "<why>"\``);
+}
+
+// I-21. Named failure: an attempt is pinned to the adapter as committed at its admission; when the delivery adapter
+// faulted after another repo of the same attempt was delivered, every `wf deliver` refused, `wf abandon` refused because
+// the attempt was partly delivered, and the fixed adapter on the base branch never reached it. `wf deliver
+// --repin-adapter <commit> --reason "..."` re-reads the delivery adapter from the current tip of the base branch the
+// adapter lives on (never the working tree), only forward along that branch, only while something is still to deliver.
+// Without the commit it refuses and shows the owner what changes (old and new pin, the adapter files that differ, what is
+// already delivered); the owner's confirmation is that commit typed back. Recorded in the ledger (`adapter.repinned`)
+// with both pins and the reason. The gate, the review and the tracker stay on the admission pin.
+function repinAdapter(root, cfg, state, options) {
+  const want = typeof options['repin-adapter'] === 'string' ? options['repin-adapter'].trim() : '';
+  const reason = typeof options.reason === 'string' ? options.reason.trim() : '';
+  const { repo, relative } = adapterLocation(root, cfg);
+  const dir = repoDir(root, repo);
+  const ref = baseRef(dir, repo);
+  const tip = git(dir, ['rev-parse', ref]);
+  const pinned = deliveryPin(state);
+  // Run again after a later step refused: the re-pin an earlier try recorded is accepted again.
+  if (want.length >= 7 && tip.startsWith(want) && pinned === tip && state.adapterRepins.some((x) => x.to === tip)) return state;
+  if (tip === pinned) throw refuse(`not re-pinned: the delivery adapter of ${state.id} is already read at the tip of ${ref} (${tip.slice(0, 10)})`, `commit and push the fixed adapter on ${repo.base} in ${repo.name} first`);
+  if (run('git', ['merge-base', '--is-ancestor', pinned, tip], { cwd: dir, allowFail: true }).status !== 0) throw refuse(`not re-pinned: ${ref} (${tip.slice(0, 10)}) does not contain the current pin ${pinned.slice(0, 10)}; the adapter is re-pinned only forward along the base branch`);
+  let kinds;
+  try {
+    const now = loadConfigAtCommit(root, cfg, tip);
+    if (now.delivery.kind !== 'push-main') adapterFileAtCommit(root, cfg, tip, now.delivery.kind);
+    assertEngine(now);
+    kinds = { from: loadConfigAtCommit(root, cfg, pinned).delivery.kind, to: now.delivery.kind };
+  } catch (error) {
+    throw refuse(`not re-pinned: the adapter at ${repo.name}@${tip.slice(0, 10)} cannot be used: ${error.message.split('\n')[0]}`);
+  }
+  const changed = git(dir, ['diff', '--name-only', pinned, tip, '--', relative || '.']).split('\n').filter(Boolean);
+  if (!changed.length) throw refuse(`not re-pinned: the adapter files at the tip of ${ref} (${tip.slice(0, 10)}) are the same as at the current pin ${pinned.slice(0, 10)}; nothing would change`, `commit and push the fixed adapter on ${repo.base} in ${repo.name} first (a fix only in the working tree, or committed but not pushed, is never read)`);
+  const delivered = Object.fromEntries(Object.values(state.delivery.repos).map((d) => [d.repo, d.skipped ? `skipped (${d.skipped})` : `delivered ${String(d.commit ?? '').slice(0, 10)}`]));
+  if (want.length < 7 || !tip.startsWith(want) || !reason) {
+    const done = Object.entries(delivered).map(([n, v]) => `${n} ${v}`).join('; ') || 'nothing yet';
+    const left = Object.keys(state.repos).filter((n) => !delivered[n]).join(', ');
+    throw refuse(`not re-pinned${want && !tip.startsWith(want) ? `: ${want} is not the tip of ${ref} (${tip.slice(0, 10)})` : ''}${!reason ? ': --reason is required' : ''}. Re-pinning ${state.id}'s delivery adapter:\n  from: ${repo.name}@${pinned.slice(0, 10)} (delivery kind ${kinds.from})\n  to:   ${repo.name}@${tip.slice(0, 10)}, the tip of ${ref} (delivery kind ${kinds.to})\n  adapter files that differ: ${changed.join(', ') || 'none'}\n  recorded so far: ${done}\n  still to deliver: ${left}\n  the gate, the review and the tracker stay on the admission pin ${state.adapterBase.slice(0, 10)}`, `show this to the owner; once they confirm, \`wf deliver --repin-adapter ${tip.slice(0, 12)} --reason "<why>"\``);
+  }
+  append(root, state.id, 'adapter.repinned', { from: pinned, to: tip, ref, repo: repo.name, reason, changed, delivered, kinds }, actor(options));
+  return loadState(root, state.id);
 }
 
 function sharedInfraTouched(repo, files) {
@@ -1076,6 +1174,7 @@ export async function deliver(root, options) {
   }
   if (state.deferHeavy && !state.batch) throw refuse(`${state.id} deferred its heavy steps to a batch; deliver it through \`wf batch create\``);
   if (state.phase === 'handoff-pending' || state.phase === 'done') throw refuse(`${state.id} is already delivered`);
+  if (options['repin-adapter'] !== undefined) state = repinAdapter(root, cfg, state, options);
   if (typeof options['no-lesson'] === 'string' && options['no-lesson'].trim() && owesLesson(state)) {
     append(root, state.id, 'lesson.waived', { reason: options['no-lesson'].trim(), on: 'deliver' }, actor(options));
     state = loadState(root, state.id);
@@ -1087,20 +1186,41 @@ export async function deliver(root, options) {
   }
   const unsummarised = (state.batch ? state.batch.members.map((m) => loadState(root, m)) : [state]).filter((x) => needsSummary(cfg, x) && !x.delivery.summary);
   if (unsummarised.length) throw refuse(`the delivered comment needs the owner's summary first: a few plain-language lines on what changed, for the person who tests it (the UAT scope, screenshots and known limits are added by \`wf\`)`, unsummarised.map((x) => (state.batch ? `\`wf summary --file <summary.md> --attempt ${x.id}\`` : `\`wf deliver --summary-file <summary.md>\` (or \`wf summary --file <summary.md>\` first)`)).join('; '));
-  // A push that landed before the process died is recognised from the remote, not redone or refused.
+  // A push that landed before the process died is recognised from the remote, not redone or refused. With a delivery
+  // adapter, the adapter is asked again (I-20): ancestry alone is not its whole proof.
+  const adapter = await loadDeliveryAdapter(root, cfg, state);
   for (const [name, r] of Object.entries(state.repos)) {
     if (state.delivery.repos[name] || !git(r.worktree, ['diff', '--name-only', r.base, 'HEAD'])) continue;
     const repo = cfg.repos.find((x) => x.name === name);
-    if (!git(r.worktree, ['remote']).split('\n').includes(repo.remote)) continue;
-    run('git', ['fetch', '--quiet', repo.remote, repo.base], { cwd: r.worktree, allowFail: true });
-    const head = git(r.worktree, ['rev-parse', 'HEAD']);
-    const landed = head !== r.base && run('git', ['merge-base', '--is-ancestor', head, `${repo.remote}/${repo.base}`], { cwd: r.worktree, allowFail: true }).status === 0;
+    const landed = onTarget(r, repo);
     if (!landed) continue;
+    const head = landed.head;
     // Only the exact commit that was accepted and gated counts as a recovered delivery.
     if (head !== state.accepted.heads?.[name] || head !== state.lastGate?.tree?.[name]) {
       throw refuse(`${name}: ${head.slice(0, 10)} is already on ${repo.remote}/${repo.base} but is not the accepted, gated commit; it was pushed outside wf`, 'review and gate the pushed change in a new attempt (`wf reopen`)');
     }
-    append(root, state.id, 'repo.delivered', { repo: name, commit: head, target: `${repo.remote}/${repo.base}`, recovered: true }, actor(options));
+    if (!adapter) {
+      append(root, state.id, 'repo.delivered', { repo: name, commit: head, target: landed.target, recovered: true }, actor(options));
+      continue;
+    }
+    const last = state.delivery.integrating[name] ?? null;
+    const integrated = last ? Object.fromEntries(Object.entries(last).filter(([k]) => !['repo', 'observed', 'at'].includes(k))) : {};
+    const ctx = { root, repo, worktree: r.worktree, attempt: state.id, item: state.item, branch: branchName(state.id) };
+    let observed;
+    try {
+      observed = await adapter.observe({ ...ctx, ...integrated });
+    } catch (error) {
+      observed = { state: null, evidence: `observe failed: ${String(error?.message ?? error).split('\n')[0]}` };
+    }
+    if (observed?.state === 'integrated') {
+      const rb = await adapter.readback({ ...ctx, ...integrated });
+      if (!rb.ok) throw refuse(`${name}: readback failed: ${rb.reason ?? 'change not on the target branch'}`);
+      append(root, state.id, 'repo.delivered', { repo: name, commit: head, target: landed.target, ...integrated, ...rb, recovered: true, adapterState: 'integrated' }, actor(options));
+      continue;
+    }
+    append(root, state.id, 'repo.integrating', { repo: name, ...integrated, observed, onTarget: landed.target }, actor(options));
+    if (PENDING.includes(observed?.state)) return { state: loadState(root, state.id), waiting: { repo: name, ...observed, url: integrated.url, onTarget: landed.target } };
+    append(root, state.id, 'repo.delivered', { ...postMerge(options, name, landed, observed, integrated), recovered: true }, actor(options));
   }
   state = loadState(root, state.id);
   // Repos already delivered are on the target branch; compare only what is still to deliver.
@@ -1121,7 +1241,6 @@ export async function deliver(root, options) {
     for (const [aid, ids] of byAttempt) append(root, aid, 'discovered.acknowledged', { ids }, actor(options));
     state = loadState(root, state.id);
   }
-  const adapter = await loadDeliveryAdapter(root, cfg, state);
   const order = deliveryOrder(cfg, Object.keys(state.repos));
   for (const name of order) {
     if (state.delivery.repos[name]) continue;
@@ -1145,18 +1264,26 @@ export async function deliver(root, options) {
       const observed = await adapter.observe({ ...ctx, ...integrated });
       if (observed?.state !== 'integrated') {
         append(root, state.id, 'repo.integrating', { repo: name, ...integrated, observed }, actor(options));
-        // Named failure (0.4.5, delta reviews of 40da633 and b28681a): every state but `integrated` took the waiting path,
-        // so a rejected delivery, a failed CI, a typo or no state at all exited 0 and read as success. Only a pending state
-        // (`awaiting-merge`, `ci-running`) waits; `rejected` and `ci-failed` refuse with what to do; anything else refuses
-        // as an adapter that does not report a documented state (docs/DESIGN.md).
-        if (!PENDING.includes(observed?.state) && !['rejected', 'ci-failed'].includes(observed?.state)) throw refuse(`not delivered: ${name}: the delivery adapter reported ${observed?.state === undefined || observed?.state === null || observed?.state === '' ? 'no state' : `an unknown state ${JSON.stringify(String(observed.state))}`}; it must report one of ${ADAPTER_STATES.join(', ')}`, `this attempt is pinned to the delivery adapter as of its admission, so fixing the adapter on the base branch does not change this attempt; the adapter must report one of the documented states, and the owner decides the recovery: see docs/lifecycle.md, "Recovering from an adapter fault"`);
-        if (observed.state === 'rejected' || observed.state === 'ci-failed') throw refuse(`not delivered: ${name}: the delivery adapter reports ${observed.state}${integrated.url ? ` (${integrated.url})` : ''}${observed.evidence ? `: ${observed.evidence}` : ''}`, observed.state === 'rejected' ? 'the change was rejected where it is integrated: find out why, fix it through the implementer (a new gate and review follow), or abandon the attempt; then `wf deliver` again' : 'its CI failed where it is integrated: read that CI run, fix the cause through the implementer, gate it, then `wf deliver` again');
-        if (!state.tracker.done.some((d) => d.event === 'integrating')) emitTrackerEvent(root, cfg, state.id, 'integrating', { url: integrated.url ?? '' });
-        return { state: loadState(root, state.id), waiting: { repo: name, ...observed, url: integrated.url } };
+        // I-20: an adapter that pushed straight to the target branch and then reports anything but a pending state is a
+        // post-merge state: shown, and counted only with the owner's acknowledgement.
+        const landed = PENDING.includes(observed?.state) ? null : onTarget(state.repos[name], repo);
+        if (landed && (landed.head !== state.accepted.heads?.[name] || landed.head !== state.lastGate?.tree?.[name])) throw refuse(`${name}: ${landed.head.slice(0, 10)} is on ${landed.target} but is not the accepted, gated commit`);
+        if (landed) result = postMerge(options, name, landed, observed, integrated);
+        else {
+          // Named failure (0.4.5, delta reviews of 40da633 and b28681a): every state but `integrated` took the waiting path,
+          // so a rejected delivery, a failed CI, a typo or no state at all exited 0 and read as success. Only a pending state
+          // (`awaiting-merge`, `ci-running`) waits; `rejected` and `ci-failed` refuse with what to do; anything else refuses
+          // as an adapter that does not report a documented state (docs/DESIGN.md).
+          if (!PENDING.includes(observed?.state) && !['rejected', 'ci-failed'].includes(observed?.state)) throw refuse(`not delivered: ${name}: the delivery adapter reported ${describeState(observed)}; it must report one of ${ADAPTER_STATES.join(', ')}`, `this attempt reads its delivery adapter as committed at ${deliveryPin(state).slice(0, 10)}, so a fix committed on the base branch does not reach it by itself. Once the fixed adapter is committed and pushed on the base branch, the owner re-pins this attempt's delivery adapter to it: \`wf deliver --repin-adapter --reason "<why>"\` shows what changes and asks for the owner's confirmation (docs/lifecycle.md, "Recovering from an adapter fault")`);
+          if (observed.state === 'rejected' || observed.state === 'ci-failed') throw refuse(`not delivered: ${name}: the delivery adapter reports ${observed.state}${integrated.url ? ` (${integrated.url})` : ''}${observed.evidence ? `: ${observed.evidence}` : ''}`, observed.state === 'rejected' ? 'the change was rejected where it is integrated: find out why, fix it through the implementer (a new gate and review follow), or abandon the attempt; then `wf deliver` again' : 'its CI failed where it is integrated: read that CI run, fix the cause through the implementer, gate it, then `wf deliver` again');
+          if (!state.tracker.done.some((d) => d.event === 'integrating')) emitTrackerEvent(root, cfg, state.id, 'integrating', { url: integrated.url ?? '' });
+          return { state: loadState(root, state.id), waiting: { repo: name, ...observed, url: integrated.url } };
+        }
+      } else {
+        const rb = await adapter.readback({ ...ctx, ...integrated });
+        if (!rb.ok) throw refuse(`${name}: readback failed: ${rb.reason ?? 'change not on the target branch'}`);
+        result = { repo: name, commit: git(state.repos[name].worktree, ['rev-parse', 'HEAD']), target: `${repo.remote}/${repo.base}`, ...integrated, ...rb, adapterState: 'integrated' };
       }
-      const rb = await adapter.readback({ ...ctx, ...integrated });
-      if (!rb.ok) throw refuse(`${name}: readback failed: ${rb.reason ?? 'change not on the target branch'}`);
-      result = { repo: name, ...integrated, ...rb };
     }
     append(root, state.id, 'repo.delivered', result, actor(options));
     state = loadState(root, state.id);
@@ -1668,11 +1795,11 @@ function nextStep(root, state) {
   }
   if (state.tracker.pending.length) {
     const ev = state.tracker.pending[0].event;
-    const comment = (a) => (a.rendered !== 'delivered' ? 'post the comment (body in `wf status --json`)' : state.delivery.summary ? `post the comment in ${commentFile(root, state.id)} unchanged, each {assetUrl:<title>} replaced by that upload's assetUrl` : 'record the owner\'s summary (`wf summary --file <summary.md>`), then post the comment it renders');
+    const comment = (a) => (a.rendered !== 'delivered' ? 'post the comment (body in `wf status --json`)' : state.delivery.summary ? `post the comment in ${commentFile(root, state.id)} unchanged, each {assetUrl:<title>} replaced by that upload's assetUrl, so every screenshot shows as an image on the ticket (an attachment alone is only a link row)` : 'record the owner\'s summary (`wf summary --file <summary.md>`), then post the comment it renders');
     const ops = state.tracker.pending.filter((a) => a.event === ev).map((a) => (a.op === 'setStatus' ? `set status to "${a.status}"` : a.op === 'comment' ? comment(a) : a.op === 'attach' ? `upload and attach ${a.files.length} screenshot(s) as files (title = the name, subtitle = its caption; listed under "delivered screenshots"), keeping each assetUrl` : a.op)).join(', ');
     const raw = ev === 'delivered' ? 'save the RAW get_issue and list_comments results unchanged (never rebuilt or abridged)' : 'save the readback';
     if (cfg?.tracker?.via === 'connector') return `${state.phase === 'handoff-pending' ? '' : `${phaseAction(cfg, state)}${holdNote}. Pending `}tracker (${ev}): through the connector: ${ops}; then read the issue${state.tracker.pending.some((a) => a.event === ev && a.op === 'comment') ? ' and its comments' : ''} back with the connector and run \`wf tracker record --event ${ev} --from-transcript\` (the readback as the host recorded it). Without a host transcript: \`--capture <saved tool result>\`, or \`--agent-reported --file reported.json${state.tracker.pending.some((a) => a.event === ev && a.op === 'comment') ? ' --comment-file <posted text>' : ''}\``;
-    const reported = cfg?.tracker?.via === 'connector' ? `; or, when the tool results are only in the chat, write what the tracker showed to reported.json ({ issue, status, comment: { id, bodySha256, createdAt }, attachments: [{ title, subtitle }], readAt }) and run \`wf tracker record --event ${ev} --agent-reported --file reported.json${state.tracker.pending.some((a) => a.event === ev && a.op === 'comment') ? ' --comment-file <the posted comment text>' : ''}\` (recorded agent-reported, unverified)` : '';
+    const reported = cfg?.tracker?.via === 'connector' ? `; or, when the tool results are only in the chat, write what the tracker showed to reported.json ({ issue, status, comment: { id, bodySha256, createdAt }, attachments: [{ title, subtitle, assetUrl }], readAt }) and run \`wf tracker record --event ${ev} --agent-reported --file reported.json${state.tracker.pending.some((a) => a.event === ev && a.op === 'comment') ? ' --comment-file <the posted comment text>' : ''}\` (recorded agent-reported, unverified)` : '';
     const tracker = `tracker (${ev}): ${ops}; ${raw} and run \`wf tracker record --event ${ev} --capture <file>\`${reported}`;
     if (state.phase === 'handoff-pending') return tracker;
     return `${phaseAction(cfg, state)}${holdNote}. Pending ${tracker}`;

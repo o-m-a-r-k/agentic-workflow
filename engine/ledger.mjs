@@ -117,6 +117,8 @@ export function reduce(entries) {
     addedRepos: [],
     discovered: [],
     adapterBase: null,
+    deliveryAdapterBase: null,
+    adapterRepins: [],
     criteria: null,
     criteriaAmendments: [],
     plan: null,
@@ -134,7 +136,7 @@ export function reduce(entries) {
     baseMerges: [],
     accepted: null,
     holds: [],
-    delivery: { repos: {}, completedAt: null },
+    delivery: { repos: {}, integrating: {}, completedAt: null },
     tracker: { pending: [], done: [] },
     batch: null,
     batchOf: null,
@@ -268,6 +270,17 @@ export function reduce(entries) {
         break;
       case 'repo.delivered':
         s.delivery.repos[d.repo] = d;
+        break;
+      // What the delivery adapter last reported for a repo it has not delivered yet (I-20): the integrate result and the
+      // observed state. A later `wf deliver` asks the adapter again with it, and the delivery output shows it.
+      case 'repo.integrating':
+        s.delivery.integrating[d.repo] = { ...d, at: e.at };
+        break;
+      // I-21: the owner re-pinned the delivery adapter of an attempt that has not delivered everything to the adapter now
+      // committed on the base branch. Only delivery reads it; the gate, review and tracker stay on the admission pin.
+      case 'adapter.repinned':
+        s.deliveryAdapterBase = d.to;
+        s.adapterRepins.push({ from: d.from, to: d.to, reason: d.reason, changed: d.changed ?? [], delivered: d.delivered ?? {}, at: e.at, by: e.actor });
         break;
       case 'delivered':
         s.delivery.completedAt = e.at;

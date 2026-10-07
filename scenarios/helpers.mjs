@@ -121,7 +121,7 @@ export function closureFile(dir, closure) {
   return f;
 }
 
-export const goodClosure = (reviewer = 'rev-1', extra = {}) => ({ reviewer, findings: [], criteria: [{ id: 'C1', evidence: { kind: 'output', ref: 'gate log line 1' } }], screenshotsInspected: [], impactChecked: fixtureImpactChecked(), ...extra });
+export const goodClosure = (reviewer = 'rev-1', extra = {}) => ({ reviewer, findings: [], criteria: [{ id: 'C1', evidence: { kind: 'output', ref: 'gate log line 1' } }], screenshotsInspected: [], impactChecked: fixtureImpactChecked(), anomalies: 'none seen', ...extra });
 
 // Runs an attempt up to an accepted review. Returns the worktree path of `repo`.
 export function toAccepted(root, base, { item = 'ENG-1', repo = 'app', change = { 'src/a.txt': 'b\n' }, owner = 'owner-1', extraEntry = [] } = {}) {
