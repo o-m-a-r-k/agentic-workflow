@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { loadConfig, loadConfigAtCommit, adapterLocation, repoDir } from './config.mjs';
+import { loadConfig, loadConfigAtCommit, adapterLocation, adapterRecord, repoDir, trustedAdapter } from './config.mjs';
 import { append, assertSchema, createAttempt, listAttempts, loadState, openEvidence } from './ledger.mjs';
 import { projectEnv } from './env.mjs';
 import { emitTrackerEvent } from './tracker.mjs';
@@ -159,6 +159,8 @@ export function entry(root, options) {
     bases[name] = { ref, commit: git(repoDir(root, repo), ['rev-parse', ref]) };
   }
   const adapterBase = bases[adapterRepo.name].commit;
+  // Where the adapter lives, recorded now: every later read of the adapter at base is located from this record only.
+  const adapter = adapterRecord(root, cfg);
   let trusted;
   try {
     trusted = loadConfigAtCommit(root, cfg, adapterBase);
@@ -202,7 +204,7 @@ export function entry(root, options) {
     fs.copyFileSync(src, dest);
     issue = { file: dest, sha256: hashFile(dest) };
   }
-  createAttempt(root, id, { id, item, lane, intent, repos, adapterBase, issue, reopenedFrom: options.reopenedFrom ?? null, deferHeavy: options.deferHeavy === true || options.deferHeavy === 'true' }, owner);
+  createAttempt(root, id, { id, item, lane, intent, repos, adapterBase, adapter, issue, reopenedFrom: options.reopenedFrom ?? null, deferHeavy: options.deferHeavy === true || options.deferHeavy === 'true' }, owner);
   if (lane === 'standard' && intent === 'implementation') emitTrackerEvent(root, cfg, id, 'admitted');
   return loadState(root, id);
 }
@@ -268,8 +270,9 @@ export function abandon(root, options) {
   // `repo.integrating`, so the attempt was abandoned and its worktrees removed while its change was on, or could still
   // land on, the target branch, with nothing in the ledger saying so. A change on its target branch always refuses; an
   // integration the adapter last reported as anything but `rejected` refuses until the owner, having closed it where it
-  // is integrated, acknowledges that repo and state (`--acknowledge-integration <repo>:<state>`, recorded).
-  const cfg = loadConfig(root);
+  // is integrated, acknowledges that repo and state (`--acknowledge-integration <repo>:<state>`, recorded). Each repo's
+  // target branch is the adapter at base's, never the working copy's (0.5.0 adversarial review).
+  const cfg = trustedAdapter(root, state);
   const onTargets = [];
   const open = [];
   for (const [name, r] of Object.entries(state.repos)) {

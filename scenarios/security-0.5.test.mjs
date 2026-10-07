@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { commitIn, makeRepo, ok, sh, singleRepoProject, state, toAccepted, tmp, wf, write, yaml } from './helpers.mjs';
-import { adapterFileAtCommit, loadConfig } from '../engine/config.mjs';
+import { adapterFileAtCommit, adapterRecord, loadConfig } from '../engine/config.mjs';
 
 const steps = [{ id: 'unit', repo: 'app', run: 'true', inputs: ['src/**'] }];
 const ledger = (root, id) => fs.readFileSync(path.join(root, '.wf-evidence', 'attempts', id, 'ledger.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
@@ -61,8 +61,9 @@ export default {
 
 test('adapter code is materialised without following a link: a planted link is replaced, never written through', () => {
   const { root } = singleRepoProject('adapter-link', { gate: { steps } }, { '.workflow/plugins/p.mjs': 'export default {};\n' });
-  const cfg = loadConfig(root);
   const commit = sh(root, 'git rev-parse HEAD');
+  // An attempt's adapter is located from its admission record.
+  const cfg = { id: 'SEC-0.1', adapterBase: commit, adapter: adapterRecord(root, loadConfig(root)) };
   const first = adapterFileAtCommit(root, cfg, commit, './plugins/p.mjs');
   const victim = path.join(path.dirname(root), 'victim.txt');
   fs.writeFileSync(victim, 'untouched\n');

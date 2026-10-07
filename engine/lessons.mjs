@@ -9,7 +9,7 @@
 // workflow itself is a plugin improvement (`wf improve`), never written into a project.
 import fs from 'node:fs';
 import path from 'node:path';
-import { ADAPTER_DIR, adapterLocation, loadConfig, repoDir } from './config.mjs';
+import { ADAPTER_DIR, adapterLocation, attemptAdapter, loadConfig, repoDir, trustedAdapter } from './config.mjs';
 import { readRegular, writeNoFollow } from './evidence.mjs';
 import { canonical, isInside, touchesEvidence } from './paths.mjs';
 import { append, listAttempts, loadState, readLedger } from './ledger.mjs';
@@ -120,10 +120,17 @@ function readAtCommit(repoRoot, commit, extra, problems) {
 export function loadLessons(root, { state = null } = {}) {
   let cfg = null;
   let adapterRepo = null;
-  try {
-    cfg = loadConfig(root);
-    adapterRepo = adapterLocation(root, cfg).repo.name;
-  } catch {}
+  if (state) {
+    // For an attempt, the repos whose lessons apply are the base adapter's: a repo dropped from the working copy keeps
+    // its lessons (0.5.0 adversarial review).
+    cfg = trustedAdapter(root, state);
+    adapterRepo = attemptAdapter(root, state).repo.name;
+  } else {
+    try {
+      cfg = loadConfig(root);
+      adapterRepo = adapterLocation(root, cfg).repo.name;
+    } catch {}
+  }
   const problems = [];
   const byKey = new Map();
   for (const repo of cfg?.repos ?? []) {

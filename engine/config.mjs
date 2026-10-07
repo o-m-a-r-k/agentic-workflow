@@ -312,25 +312,89 @@ function normalize(raw, source) {
 
 export const repoDir = (root, repo) => path.resolve(root, repo.path);
 
-// Where `.workflow/` lives in git: the repo that contains it, and its path inside that repo.
+// Where `.workflow/` lives in git: the repo that contains it (`repo`, its real folder `dir`) and its path inside that
+// repo (`relative`), read from the working tree. Used before an attempt exists (admission, doctor); an attempt's adapter
+// is found from what its admission recorded (`attemptAdapter`).
 export function adapterLocation(root, cfg) {
-  const real = fs.realpathSync(path.join(root, ADAPTER_DIR));
+  const link = path.join(root, ADAPTER_DIR);
+  const st = fs.lstatSync(link, { throwIfNoEntry: false });
+  if (!st) throw new WfError(`${link} does not exist`);
+  const real = fs.realpathSync(link);
   const candidates = cfg.adapterRepo ? cfg.repos.filter((r) => r.name === cfg.adapterRepo) : cfg.repos;
   for (const repo of candidates) {
-    const dir = fs.realpathSync(repoDir(root, repo));
-    if (real === dir || real.startsWith(dir + path.sep)) return { repo, relative: path.relative(dir, real) };
+    let dir;
+    try {
+      dir = fs.realpathSync(repoDir(root, repo));
+    } catch {
+      continue;
+    }
+    if (!(real === dir || real.startsWith(dir + path.sep))) continue;
+    return { repo, dir, relative: path.relative(dir, real) };
   }
   throw new WfError('`.workflow/` is not inside any listed repo, so it cannot be read at a base commit', { hint: 'set `adapterRepo` and keep `.workflow/` committed in that repo' });
 }
 
-// The gate trusts the adapter as committed at the recorded base, never the ticket's copy.
+// What admission records about the adapter: the repo's name, its real folder and the adapter folder inside it.
+export function adapterRecord(root, cfg) {
+  const { repo, dir, relative } = adapterLocation(root, cfg);
+  return { repo: repo.name, dir, relative: relative.split(path.sep).join('/') };
+}
+
+const asLocation = (rec) => ({ repo: { name: rec.repo, path: rec.dir }, dir: rec.dir, relative: rec.relative });
+
+// The adapter of an attempt, found from its admission record only.
+//
+// Named failure (0.5.0 adversarial review): every read of "the adapter at base" located it through the working tree's
+// `.workflow/project.yaml` (`adapterRepo`, the repos' paths), and several callers caught the error and went on with the
+// working copy. An uncommitted `adapterRepo` edit made the read throw, and then impact queries read any checkout the
+// working copy named and the impact analysis could be switched off. The location is now recorded at admission and read
+// back from the ledger; a missing record or a missing base refuses.
+// Attempts admitted before the record existed are located from the working tree under the same strict rules and
+// cross-checked against the adapter they read (`checkAdapter`).
+export function attemptAdapter(root, state) {
+  if (!state?.adapterBase) throw refuse(`${state?.id ?? 'this attempt'} has no recorded adapter base, so the adapter that judges it cannot be read`, 'abandon the attempt and admit the work again');
+  const rec = state.adapter;
+  if (!rec) {
+    const live = adapterLocation(root, loadConfig(root));
+    return { ...live, legacy: true };
+  }
+  if (typeof rec.repo !== 'string' || typeof rec.dir !== 'string' || typeof rec.relative !== 'string' || !path.isAbsolute(rec.dir) || rec.relative.split('/').includes('..')) throw refuse(`${state.id}'s recorded adapter location is malformed`);
+  return asLocation(rec);
+}
+
+// The committed adapter must name the repo and folder it was read from: `adapterRepo` (when set) is that repo, and that
+// repo's path resolves to the folder it was read in.
+function checkAdapter(root, t, loc, where) {
+  if (t.adapterRepo && t.adapterRepo !== loc.repo.name) throw refuse(`${where} names \`${t.adapterRepo}\` as the adapter repo, but it was read from \`${loc.repo.name}\``);
+  const own = t.repos.find((r) => r.name === loc.repo.name);
+  let dir = null;
+  try {
+    dir = own ? fs.realpathSync(repoDir(root, own)) : null;
+  } catch {}
+  if (dir !== loc.dir) throw refuse(`${where} does not list \`${loc.repo.name}\` at ${loc.dir}, the folder it was read from (it says ${own ? own.path : 'nothing'})`);
+  return t;
+}
+
+function readAdapter(root, loc, commit) {
+  assertPlainGit(loc.dir);
+  const file = path.posix.join(loc.relative.split(path.sep).join('/'), CONFIG_FILE);
+  const text = git(loc.dir, ['show', `${commit}:${file}`], { allowFail: true });
+  if (!text) throw refuse(`adapter not found at ${loc.repo.name}@${String(commit).slice(0, 10)}:${file}`, 'commit .workflow/ to the base branch before admitting work');
+  const where = `${loc.repo.name}@${String(commit).slice(0, 10)}:${file}`;
+  return checkAdapter(root, parseConfig(text, where), loc, where);
+}
+
+// Before admission (entry, doctor): the adapter committed at `commit`, located from the working tree.
 export function loadConfigAtCommit(root, cfg, commit) {
-  const { repo, relative } = adapterLocation(root, cfg);
-  assertPlainGit(repoDir(root, repo));
-  const file = path.posix.join(relative.split(path.sep).join('/'), CONFIG_FILE);
-  const text = git(repoDir(root, repo), ['show', `${commit}:${file}`], { allowFail: true });
-  if (!text) throw new WfError(`adapter not found at ${repo.name}@${commit.slice(0, 10)}:${file}`, { hint: 'commit .workflow/ to the base branch before admitting work' });
-  return parseConfig(text, `${repo.name}@${commit.slice(0, 10)}:${file}`);
+  return readAdapter(root, adapterLocation(root, cfg), commit);
+}
+
+// The adapter that judges an attempt: committed at its admission base (or `commit`, a later pin of the same repo),
+// located from its admission record. Never falls back to the working copy.
+export function trustedAdapter(root, state, commit = state?.adapterBase) {
+  const loc = attemptAdapter(root, state);
+  if (!commit) throw refuse(`${state.id} has no adapter commit to read`);
+  return readAdapter(root, loc, commit);
 }
 
 // Materialises an adapter file (step plugin, delivery or tracker adapter) exactly as committed at `commit`,
@@ -343,9 +407,9 @@ export function loadConfigAtCommit(root, cfg, commit) {
 // written to a fresh name without following links, then renamed over the old copy (a rename replaces a link, never
 // follows it).
 const COMMIT_ID = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
-export function adapterFileAtCommit(root, cfg, commit, rel) {
+export function adapterFileAtCommit(root, state, commit, rel) {
   if (!COMMIT_ID.test(String(commit))) throw new WfError(`not a commit id: \`${String(commit).slice(0, 80)}\``);
-  const { repo, relative } = adapterLocation(root, cfg);
+  const { repo, relative } = attemptAdapter(root, state);
   assertPlainGit(repoDir(root, repo));
   const base = relative.split(path.sep).join('/');
   const file = path.posix.normalize(path.posix.join(base, String(rel)));

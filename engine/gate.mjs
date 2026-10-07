@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
-import { adapterFileAtCommit, adapterLocation, expandArtifactGlob, loadConfig, loadConfigAtCommit, repoDir } from './config.mjs';
+import { adapterFileAtCommit, attemptAdapter, expandArtifactGlob, loadConfig, repoDir, trustedAdapter } from './config.mjs';
 import { changedFiles, treeHash, treeHashes, uncommitted, untrackedSnapshot } from './attempt.mjs';
 import { chooseShards, chooseWorkers } from './host.mjs';
 import { readJUnitFiles } from './junit.mjs';
@@ -48,7 +48,7 @@ function stepInputs(state, step, repo, pkg) {
 // Identity of what runs the step: its definition (minus worker counts) and the committed plugin code.
 function runnerIdentity(root, live, state, step) {
   const { workers, shards, ...definition } = step;
-  const pluginHash = step.plugin ? hashFile(adapterFileAtCommit(root, live, state.adapterBase, step.plugin)) : null;
+  const pluginHash = step.plugin ? hashFile(adapterFileAtCommit(root, state, state.adapterBase, step.plugin)) : null;
   return hashValue({ definition, pluginHash });
 }
 
@@ -80,10 +80,10 @@ function findReuse(state, stepId, key) {
 // Selection is computed from the adapter committed at the attempt's base, never the worktree copy.
 export async function planGate(root, state, options = {}) {
   const live = loadConfig(root);
-  const cfg = loadConfigAtCommit(root, live, state.adapterBase);
+  const cfg = trustedAdapter(root, state);
   const changed = {};
   for (const name of Object.keys(state.repos)) changed[name] = changedFiles(state, name);
-  const { repo: adapterRepo, relative } = adapterLocation(root, live);
+  const { repo: adapterRepo, relative } = attemptAdapter(root, state);
   const adapterRel = relative.split(path.sep).join('/');
   const adapterTouched = (changed[adapterRepo.name] ?? []).some((f) => inside(f, adapterRel));
   const full = adapterTouched || options.full === true;
@@ -391,7 +391,7 @@ async function executeStep(root, cfg, state, planned, ctx) {
   vars.select = rerun ? substitute(step.select, { suites: rerun.map(shellQuote).join(' ') }) : '';
   let result;
   if (step.plugin) {
-    const mod = (await import(pathToFileURL(adapterFileAtCommit(root, ctx.live, state.adapterBase, step.plugin)).href)).default;
+    const mod = (await import(pathToFileURL(adapterFileAtCommit(root, state, state.adapterBase, step.plugin)).href)).default;
     const pctx = { root, attempt: state.id, step, dir: planned.dir, worktrees: Object.fromEntries(Object.entries(state.repos).map(([k, v]) => [k, v.worktree])), changed: ctx.changedSinceBase, evidenceDir: scratch, workers: workers.n, env, log: (s) => writeNoFollow(logFile, ctx.redact(`${s}\n`), { append: true }) };
     const decision = mod.plan ? await mod.plan(pctx) : null;
     if (decision && decision.run === false) {
@@ -539,13 +539,12 @@ async function harvest(root, state, lock) {
     } catch {}
   }
   if (lock.plugins?.length) {
-    const live = loadConfig(root);
-    const cfg = loadConfigAtCommit(root, live, state.adapterBase);
+    const cfg = trustedAdapter(root, state);
     for (const id of lock.plugins) {
       const step = cfg.gate.steps.find((s) => s.id === id);
       if (!step?.plugin) continue;
       try {
-        const mod = (await import(pathToFileURL(adapterFileAtCommit(root, live, state.adapterBase, step.plugin)).href)).default;
+        const mod = (await import(pathToFileURL(adapterFileAtCommit(root, state, state.adapterBase, step.plugin)).href)).default;
         await mod.cleanup?.({ root, attempt: state.id, step, harvest: true });
       } catch {}
     }
@@ -594,7 +593,7 @@ export async function runGate(root, state, options = {}) {
   // An engine older than the adapter's pin would judge the ticket by rules the project does not run on.
   const live = loadConfig(root);
   assertEngine(live);
-  assertEngine(loadConfigAtCommit(root, live, state.adapterBase));
+  assertEngine(trustedAdapter(root, state));
   // `wf check` needs only the repos it checks to be committed; a gate needs every repo.
   const dirty = Object.fromEntries(Object.entries(uncommitted(state)).filter(([r]) => !options.check || !options.repos || options.repos.includes(r)));
   if (Object.keys(dirty).length) throw refuse(`commit changes before the ${options.check ? 'check' : 'gate'}: ${Object.entries(dirty).map(([r, l]) => `${r} (${l.slice(0, 5).join('; ')}${l.length > 5 ? `; +${l.length - 5} more` : ''})`).join(', ')}`);

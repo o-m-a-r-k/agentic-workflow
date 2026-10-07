@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { ok, sh, singleRepoProject, WF, wf } from './helpers.mjs';
+import { makeRepo, ok, sh, singleRepoProject, tmp, WF, wf } from './helpers.mjs';
 
 const steps = [{ id: 'unit', repo: 'app', run: 'true', inputs: ['src/**'] }];
 const engine = path.resolve(import.meta.dirname, '..');
@@ -84,4 +84,73 @@ test('git replace: the engine reads the objects a commit really holds, and refus
   const g = wf(p.root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id]);
   assert.equal(g.code, 75, g.out);
   assert.match(g.err, /info\/grafts/);
+});
+
+// F1: when the adapter at base could not be read (an uncommitted `adapterRepo` edit made it throw), trust decisions fell
+// back to the working tree's copy.
+const cfgOf = (root) => JSON.parse(fs.readFileSync(path.join(root, '.workflow', 'project.yaml'), 'utf8'));
+const setCfg = (root, cfg) => fs.writeFileSync(path.join(root, '.workflow', 'project.yaml'), JSON.stringify(cfg, null, 2));
+const planFile = (dir, doc = { plan: 'change src/a.txt', criteria: [{ id: 'C1', text: 'a.txt says b', uat: 'n/a' }] }) => {
+  const f = path.join(dir, `plan-${Math.random().toString(36).slice(2)}.json`);
+  fs.writeFileSync(f, JSON.stringify(doc));
+  return f;
+};
+
+test('adapter at base: an unreadable adapter refuses impact queries; the working copy never names the repos they read', () => {
+  const p = singleRepoProject('impfb', { gate: { steps } });
+  const e = ok(wf(p.root, ['entry', '--item', 'IF-1', '--json'])).json();
+  const secret = makeRepo(path.join(tmp('secret'), 'vault'), { 'keys/prod.env': 'TOKEN=sk_test_ABC123\n' });
+  const orig = cfgOf(p.root);
+  const q = JSON.stringify({ id: 'x', pattern: 'sk_test_', repo: 'other' });
+  setCfg(p.root, { ...orig, repos: [...orig.repos, { name: 'other', path: secret.dir, base: 'main' }] });
+  const a = wf(p.root, ['impact', 'run', '--query', q, '--attempt', e.id]);
+  assert.equal(a.code, 75, a.out);
+  assert.doesNotMatch(a.out, /prod\.env/);
+  // The working copy also names `other` as the adapter repo, so the adapter at base can no longer be found through it.
+  setCfg(p.root, { ...orig, adapterRepo: 'other', repos: [...orig.repos, { name: 'other', path: secret.dir, base: 'main' }] });
+  const b = wf(p.root, ['impact', 'run', '--query', q, '--attempt', e.id]);
+  assert.notEqual(b.code, 0, b.out);
+  assert.doesNotMatch(b.out, /prod\.env/);
+  // The attempt's adapter is found from what admission recorded, so a query on a repo of the base adapter still runs.
+  const c = wf(p.root, ['impact', 'run', '--query', JSON.stringify({ id: 'y', pattern: 'a', repo: 'app' }), '--attempt', e.id]);
+  assert.equal(c.code, 0, c.err);
+  assert.equal(ok(wf(p.root, ['resume', '--attempt', e.id, '--json'])).json().adapter.repo, 'app');
+});
+
+test('adapter at base: an uncommitted adapter edit cannot drop the impact analysis, the planner or a class', () => {
+  const p = singleRepoProject('impskip', { gate: { steps } });
+  const e = ok(wf(p.root, ['entry', '--item', 'IS-1', '--json'])).json();
+  ok(wf(p.root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id]));
+  const orig = cfgOf(p.root);
+  // Names a repo that does not hold `.workflow/` as the adapter repo, and turns the impact analysis off.
+  setCfg(p.root, { ...orig, adapterRepo: 'decoy', repos: [...orig.repos, { name: 'decoy', path: p.base, base: 'main' }], impact: { requiredFor: [] } });
+  const r = wf(p.root, ['plan', '--file', planFile(p.base), '--attempt', e.id]);
+  assert.equal(r.code, 75, r.out);
+  assert.match(r.err, /impact analysis is incomplete|no `survey`/);
+  // A class the base adapter does not know, invented in the working copy so no work item is `full`.
+  setCfg(p.root, { ...orig, classes: { cheap: { use: 'anything' } } });
+  const w = wf(p.root, ['plan', '--file', planFile(p.base, { plan: 'x', criteria: [{ id: 'C1', text: 't', uat: 'n/a' }], work: [{ id: 'W1', criteria: ['C1'], class: 'cheap', why: 'x' }] }), '--attempt', e.id]);
+  assert.notEqual(w.code, 0, w.out);
+  assert.match(w.err, /class `cheap` is not a known class/);
+  // The planner switched off in the working copy: a fresh attempt still needs its planner.
+  const e2 = ok(wf(p.root, ['entry', '--item', 'IS-2', '--json'])).json();
+  setCfg(p.root, { ...orig, roles: { planner: false }, impact: { requiredFor: [] } });
+  const n = wf(p.root, ['plan', '--file', planFile(p.base), '--attempt', e2.id]);
+  assert.equal(n.code, 75, n.out);
+  assert.match(n.err, /needs a planner/);
+});
+
+test('adapter at base: an amendment adds only a repo of the base adapter', () => {
+  const p = singleRepoProject('addrepo', { gate: { steps }, impact: { requiredFor: [] } });
+  const e = ok(wf(p.root, ['entry', '--item', 'AR-1', '--json'])).json();
+  ok(wf(p.root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id]));
+  ok(wf(p.root, ['plan', '--file', planFile(p.base), '--attempt', e.id]));
+  const secret = makeRepo(path.join(tmp('secret2'), 'vault'), { 'keys/prod.env': 'TOKEN=x\n' });
+  const orig = cfgOf(p.root);
+  setCfg(p.root, { ...orig, repos: [...orig.repos, { name: 'other', path: secret.dir, base: 'main' }] });
+  const amend = planFile(p.base, { criteria: [{ id: 'C2', text: 'other changes', uat: 'n/a' }] });
+  const r = wf(p.root, ['criteria', 'amend', '--file', amend, '--reason', 'needs other', '--add-repo', 'other', '--attempt', e.id]);
+  assert.notEqual(r.code, 0, r.out);
+  assert.match(r.err, /unknown repo `other`/);
+  assert.equal(ok(wf(p.root, ['resume', '--attempt', e.id, '--json'])).json().repos.other, undefined);
 });

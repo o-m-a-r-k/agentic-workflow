@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { adapterLocation, repoDir } from './config.mjs';
+import { adapterLocation, attemptAdapter, repoDir } from './config.mjs';
 import { screenshots } from './gate.mjs';
 import { attemptDir } from './ledger.mjs';
 import { findSkill } from './skills.mjs';
@@ -29,9 +29,12 @@ export function frontmatterPaths(text) {
 
 // The repo a rule's documents live in (and whose changed files it governs when it names one), and the commit to read
 // them at: the attempt's adapter base for the adapter repo, the repo's admission base otherwise.
-function ruleRepo(root, cfg, rule) {
+// For an attempt, the adapter repo is the one its admission recorded (never located through the working tree).
+const adapterRepoName = (root, cfg, state) => (state ? attemptAdapter(root, state).repo.name : adapterLocation(root, cfg).repo.name);
+function ruleRepo(root, cfg, rule, state = null) {
   if (rule.repo) return cfg.repos.find((r) => r.name === rule.repo) ?? null;
-  return adapterLocation(root, cfg).repo;
+  const name = adapterRepoName(root, cfg, state);
+  return cfg.repos.find((r) => r.name === name) ?? null;
 }
 
 export function docAt(root, repo, commit, doc) {
@@ -42,7 +45,7 @@ export function docAt(root, repo, commit, doc) {
 
 const commitFor = (root, cfg, state, repo) => {
   if (!repo) return null;
-  if (repo.name === adapterLocation(root, cfg).repo.name) return state.adapterBase;
+  if (repo.name === adapterRepoName(root, cfg, state)) return state.adapterBase;
   return state.repos[repo.name]?.base ?? null;
 };
 
@@ -53,7 +56,7 @@ export function reviewRules(root, trusted, state, changed) {
   const multi = Object.keys(changed).length > 1;
   const out = [];
   for (const rule of trusted.review?.rules ?? []) {
-    const repo = ruleRepo(root, trusted, rule);
+    const repo = ruleRepo(root, trusted, rule, state);
     const commit = commitFor(root, trusted, state, repo);
     const docs = rule.read.map((doc) => ({ doc, text: docAt(root, repo, commit, doc) }));
     const paths = rule.paths ?? frontmatterPaths(docs.find((d) => d.text)?.text) ?? null;

@@ -4,7 +4,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { actor, addRepoWorktree, baseRef, branchName, onTarget, changedFiles, cleanupWorktrees, entry, openState, treeHashes, worktreeDir } from './attempt.mjs';
 import { channelOf, discoveredVerdicts, openDiscovered, seamVerdicts, unacknowledged, unrecordedInReports } from './discovered.mjs';
-import { ADAPTER_DIR, adapterFileAtCommit, adapterLocation, agentTypeFor, declared, loadConfig, loadConfigAtCommit, repoDir, roleClass } from './config.mjs';
+import { ADAPTER_DIR, adapterFileAtCommit, agentTypeFor, attemptAdapter, declared, loadConfig, repoDir, roleClass, trustedAdapter } from './config.mjs';
 import { focusedSkips, gateBusy, gatePassedForCurrentTree, gateRunningRefusal, screenshots, withReviewLock } from './gate.mjs';
 import { append, attemptDir, evidenceRoot, keptFiles, listAttempts, loadState, openEvidence } from './ledger.mjs';
 import { assertUnchanged, readEvidenceFile } from './evidence.mjs';
@@ -36,7 +36,7 @@ export function outsideFiles(root, state) {
   if (!state.criteria) return null;
   let trusted = null;
   try {
-    trusted = loadConfigAtCommit(root, loadConfig(root), state.adapterBase);
+    trusted = trustedAdapter(root, state);
   } catch {}
   const changed = Object.fromEntries(Object.keys(state.repos).map((r) => {
     try {
@@ -60,7 +60,7 @@ export function outsideWarning(root, state) {
 export function designWarning(root, state) {
   let trusted;
   try {
-    trusted = loadConfigAtCommit(root, loadConfig(root), state.adapterBase);
+    trusted = trustedAdapter(root, state);
   } catch {
     return null;
   }
@@ -137,14 +137,10 @@ function planFromAgent(root, state, agent) {
 
 const plannerLanes = (cfg) => cfg.roles?.planner?.lanes ?? ['standard'];
 const needsPlanner = (cfg, state) => plannerLanes(cfg).includes(state.lane) && cfg.roles?.planner !== false;
-// The adapter as committed at the attempt's base decides whether the impact analysis is required (a ticket cannot drop it).
-const trustedOr = (root, cfg, state) => {
-  try {
-    return loadConfigAtCommit(root, cfg, state.adapterBase);
-  } catch {
-    return cfg;
-  }
-};
+// The adapter as committed at the attempt's base decides whether a planner and the impact analysis are required and which
+// classes exist (a ticket cannot drop them). Named failure (0.5.0 adversarial review): this fell back to the working copy
+// when the adapter at base could not be read, so an uncommitted `adapterRepo` edit plus `impact.requiredFor: []` (or
+// `roles.planner: false`, or a class of its own) skipped the impact analysis or the planner. Nothing falls back now.
 const impactNeeded = (cfg, state, work) => impactRequired(cfg, { plannerNeeded: needsPlanner(cfg, state), work, implementerClass: roleClass(cfg, 'implementer') });
 
 // The ticket's own change, independent of where the base branch is: survives merging an advanced base.
@@ -195,7 +191,7 @@ export const uncovered = (state) => (state.work ? (state.criteria ?? []).map((c)
 
 export function freezeCriteria(root, options) {
   const state = openState(root, options);
-  const cfg = loadConfig(root);
+  const cfg = trustedAdapter(root, state);
   if (state.criteria) throw refuse('criteria are already frozen', 'change them with `wf criteria amend --file <f> --reason <why>`');
   if (typeof options.file !== 'string' && typeof options['from-agent'] !== 'string') throw new WfError('--file <plan.yaml|json> or --from-agent <planner agent id> is required');
   if (typeof options.file === 'string' && typeof options['from-agent'] === 'string') throw new WfError('pass --file or --from-agent, not both');
@@ -211,8 +207,7 @@ export function freezeCriteria(root, options) {
     if (canonical(treeHashes(state)) !== canonical(planner.tree)) throw refuse('the planner changed the worktree; planning must be read-only');
   }
   if (state.handoffs.some((h) => h.role === 'implementer')) throw refuse('implementation already started; criteria must be frozen before implementation');
-  const trusted = trustedOr(root, cfg, state);
-  const impactRecord = validatePlanImpact(root, cfg, state, doc, { plan, criteria: doc.criteria, work, required: impactNeeded(trusted, state, work) });
+  const impactRecord = validatePlanImpact(root, cfg, state, doc, { plan, criteria: doc.criteria, work, required: impactNeeded(cfg, state, work) });
   let source = null;
   if (fromAgent) {
     source = { ...fromAgent.source, ...keepRaw(root, state.id, 'plans/plan-1.raw.yaml', fromAgent.text) };
@@ -286,7 +281,8 @@ export function amendCriteria(root, options) {
   const { criteria, changes } = doc?.criteria === undefined && doc?.impact !== undefined ? { criteria: state.criteria, changes: { changed: [], added: [], dropped: [] } } : mergeAmendment(state.criteria, doc.criteria);
   const scope = scopeOf(doc.scope);
   // Work items survive an amendment unless the file replaces them; either way they must name criteria that still exist.
-  const cfg = loadConfig(root);
+  // Classes and repos are the base adapter's: a repo the working copy adds is unknown here.
+  const cfg = trustedAdapter(root, state);
   const work = validateWork(cfg, doc.work ?? state.work, criteria);
   // I-19, named failure: a frozen "no change in repo X" criterion blocked a fix that needed an additive change there.
   // A fix that spans repos is ordinary work: the owner adds the repo and its work items in this one step.
@@ -302,7 +298,7 @@ export function amendCriteria(root, options) {
   // analysis; six findings over five review rounds were consumers, contracts and tests of the added items. An amendment
   // that adds or changes criteria, work items or repos owes an impact update (`impact` in the amendment file, or
   // `impact: { unchanged: "<why>" }`) before the next implementer handoff.
-  const trusted = trustedOr(root, cfg, state);
+  const trusted = cfg;
   const impactApplies = Boolean(state.impact) || impactNeeded(trusted, state, work);
   let impactAddendum = null;
   if (doc?.impact !== undefined) impactAddendum = validateAmendImpact(root, cfg, state, doc.impact, { plan: state.plan, criteria, work });
@@ -358,7 +354,10 @@ function skillProblems(root, cfg, role, runtime, state, changed) {
 
 export function handoff(root, role, options) {
   const state = openState(root, options);
-  const cfg = loadConfig(root);
+  // Rules, skills, roles, classes and agent types come from the adapter at the attempt's base, so a ticket cannot drop
+  // its own rules or pick its own class.
+  const trusted = trustedAdapter(root, state);
+  const cfg = trusted;
   const roles = ['planner', 'implementer', 'reviewer', 'tester'];
   if (!roles.includes(role)) throw new WfError(`role must be one of ${roles.join(', ')}`);
   if (!options.agent) throw new WfError('--agent <identity of the agent you are starting> is required');
@@ -411,8 +410,6 @@ export function handoff(root, role, options) {
   if (role === 'implementer' && state.roles.reviewer.includes(agent)) throw refuse(`${agent} reviewed this attempt and cannot implement it`);
   if (role === 'implementer' && state.impact?.owed) throw refuse(`amendment ${state.impact.owed.amendment} ("${state.impact.owed.reason}") added scope (${describeScope(state.impact.owed.scope)}) without an impact update; no implementer starts on it until the impact map covers it`, 'run `wf criteria amend --file <f> --reason "impact of the added scope"` with an `impact` addendum: its new queries and survey entries, and `changes` (each citing the added criteria or work items) with consumers, flows, contracts and suites; or `impact: { unchanged: "<why the amendment adds no new element>" }`');
   if (options.sweep !== undefined && role !== 'implementer') throw new WfError('--sweep applies to implementer handoffs only');
-  // Rules and skills come from the adapter at the attempt's base, so a ticket cannot drop its own rules.
-  const trusted = loadConfigAtCommit(root, cfg, state.adapterBase);
   const changed = Object.fromEntries(Object.keys(state.repos).map((r) => [r, changedFiles(state, r)]));
   const skillIssues = skillProblems(root, trusted, role, runtime, state, changed);
   if (skillIssues.length) throw refuse(skillIssues.join('\n'));
@@ -549,7 +546,7 @@ export function handoff(root, role, options) {
   else record();
   // Once per attempt: with parallel work items every implementer handoff queued another identical tracker read.
   const firstImplementer = role === 'implementer' && !state.handoffs.some((h) => h.role === 'implementer');
-  if (firstImplementer && state.lane !== 'quick' && state.intent === 'implementation') emitTrackerEvent(root, cfg, state.id, 'implementing');
+  if (firstImplementer && state.lane !== 'quick' && state.intent === 'implementation') emitTrackerEvent(root, loadConfig(root), state.id, 'implementing');
   // The agent type's role file changed after the owner's session loaded it (I-15): the agent would run the old role.
   let roleStale = null;
   try {
@@ -598,13 +595,10 @@ export function artifactsByStep(state, cfg) {
   });
 }
 
-// The same, with the adapter the gate ran with (committed at the attempt's base). Without it nothing is uncovered.
+// The same, with the adapter the gate ran with (committed at the attempt's base). Acceptance and delivery decide from it,
+// so an unreadable adapter refuses (0.5.0 adversarial review: it read as "nothing uncovered").
 export function evidenceSteps(root, state) {
-  let cfg = null;
-  try {
-    cfg = loadConfigAtCommit(root, loadConfig(root), state.adapterBase);
-  } catch {}
-  return artifactsByStep(state, cfg);
+  return artifactsByStep(state, trustedAdapter(root, state));
 }
 
 const escapeRe = (x) => String(x).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -815,7 +809,7 @@ export function recordReview(root, options) {
   // I-26: the reviewer re-ran every recorded query on this tree, sampled the inventory and judged every caller of a
   // changed symbol outside the map; findings outside the map are tagged impact-gap.
   if (state.impact) {
-    const ip = impactCheckProblems(handed.impactMap, closure, rerun(root, loadConfig(root), state));
+    const ip = impactCheckProblems(handed.impactMap, closure, rerun(root, trustedAdapter(root, state), state));
     if (ip.length) throw refuse(`closure refused: the impact check is incomplete:\n  - ${ip.join('\n  - ')}`, 'add `impactChecked: { "queries": [{ "query": "<id>", "hits": <n>, "note": "..." }], "sampled": [{ "entry": "<survey or impact id>", "verdict": "matches|finding", "evidence": "file:line", "finding": "<id>" }], "derived": [{ "symbol", "file", "verdict": "in-map|impact-gap", "evidence", "finding" }] }` (hits from `wf impact run --attempt <id>`), and run `wf review --closure <file>` again');
   }
   const av = reviewAnomalies(handed.gate, closure);
@@ -1038,9 +1032,9 @@ const PENDING = ['awaiting-merge', 'ci-running'];
 export const deliveryPin = (state) => state.deliveryAdapterBase ?? state.adapterBase;
 
 async function loadDeliveryAdapter(root, cfg, state) {
-  const trusted = loadConfigAtCommit(root, cfg, deliveryPin(state));
+  const trusted = trustedAdapter(root, state, deliveryPin(state));
   if (trusted.delivery.kind === 'push-main') return null;
-  return (await import(pathToFileURL(adapterFileAtCommit(root, cfg, deliveryPin(state), trusted.delivery.kind)).href)).default;
+  return (await import(pathToFileURL(adapterFileAtCommit(root, state, deliveryPin(state), trusted.delivery.kind)).href)).default;
 }
 
 // The state an adapter reported, as the owner acknowledges it: `none` when it reported none.
@@ -1088,13 +1082,15 @@ function repinAdapter(root, cfg, state, options) {
   // at another repo's branch. It comes from the adapter as committed at the current pin; the confirmation shows the
   // remote it was fetched from.
   let pinnedCfg;
+  let loc;
   try {
-    pinnedCfg = loadConfigAtCommit(root, cfg, pinned);
+    loc = attemptAdapter(root, state);
+    pinnedCfg = trustedAdapter(root, state, pinned);
   } catch (error) {
     throw refuse(`not re-pinned: the adapter at the current pin ${String(pinned).slice(0, 10)} cannot be read: ${error.message.split('\n')[0]}`);
   }
-  const { repo, relative } = adapterLocation(root, pinnedCfg);
-  const dir = repoDir(root, repo);
+  const repo = pinnedCfg.repos.find((r) => r.name === loc.repo.name);
+  const { relative, dir } = loc;
   const ref = baseRef(dir, repo);
   const tip = git(dir, ['rev-parse', ref]);
   // Shown without any user or token a remote url may carry.
@@ -1105,8 +1101,8 @@ function repinAdapter(root, cfg, state, options) {
   if (run('git', ['merge-base', '--is-ancestor', pinned, tip], { cwd: dir, allowFail: true }).status !== 0) throw refuse(`not re-pinned: ${ref} (${tip.slice(0, 10)}) does not contain the current pin ${pinned.slice(0, 10)}; the adapter is re-pinned only forward along the base branch`);
   let kinds;
   try {
-    const now = loadConfigAtCommit(root, pinnedCfg, tip);
-    if (now.delivery.kind !== 'push-main') adapterFileAtCommit(root, pinnedCfg, tip, now.delivery.kind);
+    const now = trustedAdapter(root, state, tip);
+    if (now.delivery.kind !== 'push-main') adapterFileAtCommit(root, state, tip, now.delivery.kind);
     assertEngine(now);
     kinds = { from: pinnedCfg.delivery.kind, to: now.delivery.kind };
   } catch (error) {
@@ -1245,9 +1241,12 @@ export async function deliver(root, options) {
   // A push that landed before the process died is recognised from the remote, not redone or refused. With a delivery
   // adapter, the adapter is asked again (I-20): ancestry alone is not its whole proof.
   const adapter = await loadDeliveryAdapter(root, cfg, state);
+  // Where each repo's change lands (remote, base branch) and in what order: the adapter at the attempt's base, never the
+  // working copy (0.5.0 adversarial review: an uncommitted edit could point a push at another branch or remote).
+  const targets = trustedAdapter(root, state);
   for (const [name, r] of Object.entries(state.repos)) {
     if (state.delivery.repos[name] || !git(r.worktree, ['diff', '--name-only', r.base, 'HEAD'])) continue;
-    const repo = cfg.repos.find((x) => x.name === name);
+    const repo = targets.repos.find((x) => x.name === name);
     const landed = onTarget(r, repo);
     if (!landed) continue;
     const head = landed.head;
@@ -1297,14 +1296,14 @@ export async function deliver(root, options) {
     for (const [aid, ids] of byAttempt) append(root, aid, 'discovered.acknowledged', { ids, authorities: ackOwed.filter((o) => o.attempt === aid).map((o) => o.authority) }, actor(options));
     state = loadState(root, state.id);
   }
-  const order = deliveryOrder(cfg, Object.keys(state.repos));
+  const order = deliveryOrder(targets, Object.keys(state.repos));
   for (const name of order) {
     if (state.delivery.repos[name]) continue;
     if (changedFiles(state, name).length === 0) {
       append(root, state.id, 'repo.delivered', { repo: name, commit: null, skipped: 'no changes' }, actor(options));
       continue;
     }
-    const repo = cfg.repos.find((r) => r.name === name);
+    const repo = targets.repos.find((r) => r.name === name);
     let result;
     if (!adapter) {
       const before = treeHashes(state);

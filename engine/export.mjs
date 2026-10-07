@@ -17,7 +17,12 @@ const PLAN_KEYS = ['summary', 'contract', 'anchors', 'tests', 'doNotRun', 'exter
 
 export function exportData(root, s) {
   // Steps whose globs matched nothing although the ticket changed their package, with the latest review's verdict.
-  const noEvidence = noEvidenceVerdicts(evidenceSteps(root, s), s.review?.closure);
+  // A view: when the adapter at base cannot be read the page shows no verdicts (acceptance and delivery refuse instead).
+  let steps0 = [];
+  try {
+    steps0 = evidenceSteps(root, s);
+  } catch {}
+  const noEvidence = noEvidenceVerdicts(steps0, s.review?.closure);
   const steps = (g) => (g.steps ?? []).map((x) => ({ id: x.id, status: x.status, seconds: x.durationMs !== undefined && x.status !== 'reused' ? Math.round(x.durationMs / 100) / 10 : null, reusedFrom: x.reusedFrom ?? null, reason: x.reason ?? null }));
   return {
     exportedAt: now(),

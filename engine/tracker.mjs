@@ -3,7 +3,7 @@ import { channelOf } from './channels.mjs';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { adapterFileAtCommit, loadConfigAtCommit } from './config.mjs';
+import { adapterFileAtCommit, loadConfigAtCommit, trustedAdapter } from './config.mjs';
 import { append, attemptDir, listAttempts, loadState } from './ledger.mjs';
 import { loadCatalog, readSecret } from './secrets.mjs';
 import { WfError, canonical, hashFile, now, readJson, refuse, sessionIdentity, sha256, writeImmutable } from './util.mjs';
@@ -16,10 +16,11 @@ import { cliEnv, scrub } from './scrub.mjs';
 const BUILTIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'adapters', 'tracker');
 
 // Project adapters are loaded as committed at the attempt's base, so a ticket cannot change how it is checked.
-export async function loadTrackerAdapter(root, cfg, baseCommit) {
+// `state` null: no attempt (doctor, a public-assets check), the working copy's file.
+export async function loadTrackerAdapter(root, cfg, state) {
   const kind = cfg.tracker.kind;
   if (kind === 'none') return null;
-  const file = kind.startsWith('.') ? (baseCommit ? adapterFileAtCommit(root, cfg, baseCommit, kind) : path.resolve(root, '.workflow', kind)) : path.join(BUILTIN, `${kind}.mjs`);
+  const file = kind.startsWith('.') ? (state ? adapterFileAtCommit(root, state, state.adapterBase, kind) : path.resolve(root, '.workflow', kind)) : path.join(BUILTIN, `${kind}.mjs`);
   if (!fs.existsSync(file)) throw new WfError(`tracker adapter \`${kind}\` not found at ${file}`);
   return (await import(pathToFileURL(file).href)).default;
 }
@@ -434,9 +435,9 @@ export async function recordTracker(root, cfg, state, options) {
   const pending = state.tracker.pending.filter((a) => a.event === event);
   if (!pending.length) throw refuse(`no pending tracker actions for event \`${event}\``);
   if (options['agent-reported']) return recordAgentReported(root, cfg, state, options, event, pending);
-  if (options['from-transcript']) return recordFromTranscript(root, cfg, state, options, event, pending, await loadTrackerAdapter(root, cfg, state.adapterBase));
+  if (options['from-transcript']) return recordFromTranscript(root, cfg, state, options, event, pending, await loadTrackerAdapter(root, cfg, state));
   if (!options.capture) throw new WfError(`--capture <file> is required: the raw tracker response the agent saved${cfg.tracker.via === 'connector' ? ' (or, when the tool results are only in the chat, `--agent-reported --file <reported.json> --comment-file <posted.md>`)' : ''}`);
-  const adapter = await loadTrackerAdapter(root, cfg, state.adapterBase);
+  const adapter = await loadTrackerAdapter(root, cfg, state);
   const capturePath = path.resolve(String(options.capture));
   // Read once: the bytes checked are the bytes kept (and the ones hashed for the recycled-capture check). With
   // --comments, the two saved tool results (get_issue, list_comments) are kept together, unchanged, as one list.
@@ -711,13 +712,13 @@ export async function publicAssetsProblem(root, cfg, { screenshots = true } = {}
 export async function performTracker(root, cfg, state) {
   const via = cfg.tracker.via;
   if (cfg.tracker.kind === 'none' || !ENGINE_VIAS.includes(via) || !state.tracker.pending.length) return { performed: [], note: null };
-  const adapter = await loadTrackerAdapter(root, cfg, state.adapterBase);
+  const adapter = await loadTrackerAdapter(root, cfg, state);
   const impl = adapter?.[via];
   if (!impl?.perform) return { performed: [], note: `the \`${cfg.tracker.kind}\` tracker adapter has no \`${via}\` mode; perform the actions through the connector` };
   // Endpoints, repository and folder as committed at the attempt's base, never the working copy.
   let trusted;
   try {
-    trusted = loadConfigAtCommit(root, cfg, state.adapterBase);
+    trusted = trustedAdapter(root, state);
   } catch (error) {
     return { performed: [], note: `the adapter at the base commit is unreadable (${error.message}); the actions stay pending` };
   }

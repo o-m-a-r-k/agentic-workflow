@@ -15,7 +15,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { loadConfigAtCommit, repoDir } from './config.mjs';
+import { repoDir, trustedAdapter } from './config.mjs';
 import { WfError, YAML, assertPlainGit, git, gitEnv, globProblem, matchesAny, refuse } from './util.mjs';
 
 export const IMPACT_DEFAULTS = { requiredFor: ['full'], maxFileBytes: 2 * 1024 * 1024, maxScanBytes: 512 * 1024 * 1024, regexTimeoutMs: 20000 };
@@ -81,17 +81,14 @@ export function validateQueryShape(q, cfg) {
 // limits from the working tree's `.workflow/project.yaml`, which any agent can edit: a repo path pointed at another
 // checkout was read and its file names printed, and the limits could be lifted. Both come from the adapter as committed
 // at the attempt's base, like every other rule that judges the ticket.
+// Named failure (0.5.0 adversarial review): this fell back to the working copy when the adapter at base could not be read
+// (an uncommitted `adapterRepo` edit made the read throw) or when no base was recorded, and the queries then read any
+// checkout the working copy named. Nothing falls back: an attempt without a readable adapter at base runs no query.
 const trustedCache = new Map();
 function trustedConfig(root, cfg, state) {
-  if (!state?.adapterBase) return cfg;
-  const key = `${root}\0${state.adapterBase}`;
-  if (!trustedCache.has(key)) {
-    let t = cfg;
-    try {
-      t = loadConfigAtCommit(root, cfg, state.adapterBase);
-    } catch {}
-    trustedCache.set(key, t);
-  }
+  if (!state?.id) throw refuse('impact queries run only for an attempt (`--attempt <id>`), with the adapter at its base');
+  const key = `${root}\0${state.id}\0${state.adapterBase}`;
+  if (!trustedCache.has(key)) trustedCache.set(key, trustedAdapter(root, state));
   return trustedCache.get(key);
 }
 const trustedLimits = (t, settings) => ({ ...settings, maxFileBytes: settings.maxFileBytes === Infinity ? Infinity : impactSettings(t).maxFileBytes, maxScanBytes: settings.maxScanBytes === Infinity ? Infinity : impactSettings(t).maxScanBytes });
