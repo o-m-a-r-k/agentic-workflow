@@ -339,6 +339,8 @@ export function attemptReport(root, id, table = prices(), { home = os.homedir(),
     gateTimeMs: ran.reduce((n, x) => n + (x.durationMs ?? 0), 0),
     slowestSteps: [...ran].sort((a, b) => (b.durationMs ?? 0) - (a.durationMs ?? 0)).slice(0, 5).map((x) => ({ id: x.id, durationMs: x.durationMs, workers: x.workers })),
     findings: s.review?.closure.findings.length ?? 0,
+    // I-26: review findings about something the planner's impact map did not list (a direct measure of planning quality).
+    impactGaps: (s.reviews ?? []).reduce((n, r) => n + (r.closure?.findings ?? []).filter((f) => f?.category === 'impact-gap').length, 0),
     criteria: s.criteria?.length ?? 0,
     criteriaAmendments: s.criteriaAmendments.length,
     holds: s.holds.length,
@@ -369,7 +371,7 @@ export function toHandoffCsv(rows) {
 }
 
 export function toCsv(rows) {
-  const cols = ['project', 'id', 'item', 'lane', 'phase', 'admittedAt', 'timeToGateMs', 'timeToDeliverMs', 'timeToCloseMs', 'gateRuns', 'repairRounds', 'stepRuns', 'stepReused', 'reuseRate', 'gateTimeMs', 'findings', 'criteria', 'criteriaAmendments', 'holds', 'observedModels', 'tokens', 'cost'];
+  const cols = ['project', 'id', 'item', 'lane', 'phase', 'admittedAt', 'timeToGateMs', 'timeToDeliverMs', 'timeToCloseMs', 'gateRuns', 'repairRounds', 'stepRuns', 'stepReused', 'reuseRate', 'gateTimeMs', 'findings', 'impactGaps', 'criteria', 'criteriaAmendments', 'holds', 'observedModels', 'tokens', 'cost'];
   return [cols.join(','), ...rows.map((r) => cols.map((c) => esc(Array.isArray(r[c]) ? r[c].join(' ') : r[c])).join(','))].join('\n') + '\n';
 }
 

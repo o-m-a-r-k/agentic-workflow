@@ -591,7 +591,9 @@ export function siblingWarnings(root, cfg) {
 // Agents whose class pins no model inherit the owner session's: an effort comparison was confounded when the session
 // model changed mid-attempt. Warned only when an attempt actually shows more than one model.
 export function modelWarnings(root, cfg) {
-  const pinned = Object.values(cfg.classes).some((c) => c.claude?.model || c.codex?.model);
+  // Every class a role runs at pins a model (a pinned review class alone does not stop implementers inheriting).
+  const used = ['planner', 'reviewer', 'implementer', ...(cfg.roles?.tester ? ['tester'] : [])].map((r) => cfg.classes[roleClass(cfg, r)]);
+  const pinned = used.every((c) => c?.claude?.model || c?.codex?.model);
   if (pinned) return [];
   let rows = [];
   try {
@@ -601,7 +603,7 @@ export function modelWarnings(root, cfg) {
   }
   return rows
     .filter((r) => r.observedModels.length > 1)
-    .map((r) => ({ check: `models in ${r.id}`, problem: `agents ran on ${r.observedModels.join(', ')} and no class pins a model, so each agent inherits the owner session's model`, fix: 'pin `classes.<name>.claude.model` (and `codex.model`) in .workflow/project.yaml' }));
+    .map((r) => ({ check: `models in ${r.id}`, problem: `agents ran on ${r.observedModels.join(', ')} and a class a role runs at pins no model, so its agents inherit the owner session's model`, fix: 'pin `classes.<name>.claude.model` (and `codex.model`) in .workflow/project.yaml' }));
 }
 
 export async function doctor(root, { runSteps = true } = {}) {
@@ -634,6 +636,16 @@ export async function doctor(root, { runSteps = true } = {}) {
   } catch (error) {
     bad('config', { check: 'adapter at base', problem: error.message.split('\n')[0], fix: 'commit .workflow/ on the base branch of the adapter repo and push it; the gate trusts only the adapter on the base it starts from' });
     adapterBase = null;
+  }
+  // I-25, named failure: the reviewer role resolved to no model, so five review rounds ran on the owner session's weaker
+  // model and passed defects a stronger model found later; the planner did the same. A planner or reviewer whose class
+  // pins no Claude model fails doctor.
+  for (const role of ['planner', 'reviewer']) {
+    if (role === 'planner' && cfg.roles?.planner === false) continue;
+    const cls = roleClass(cfg, role);
+    const { model } = declared(cfg, cls, 'claude');
+    if (model) report.config.push({ ok: true, check: `${role} model: ${model} (class ${cls})` });
+    else bad('config', { check: `${role} model`, problem: `the ${role} role runs at class \`${cls}\`, which pins no Claude model, so its agent inherits whatever model the owner's session runs`, fix: `set \`classes.${cls}.claude.model\` (the strongest model you use), or \`roles.${role}.class: review\` (the plugin's planning and review class), in .workflow/project.yaml; then \`wf sync\`` });
   }
   const pin = enginePinProblem(cfg.engine);
   if (pin) bad('config', { check: 'engine version', problem: pin, fix: `upgrade agentic-workflow to ${cfg.engine} or change the pin (\`wf entry\` and \`wf gate\` refuse until then)` });

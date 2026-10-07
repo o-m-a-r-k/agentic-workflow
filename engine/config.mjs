@@ -55,11 +55,20 @@ export const DEFAULT_CLASSES = {
     claude: { effort: 'low' },
     codex: {},
   },
+  // Named failure (I-25, I-26): the planner and reviewer roles had no model, so they inherited the owner session's
+  // weaker one; a cross-cutting plan was written in minutes and five review rounds passed defects a stronger model found
+  // later. Planning and review default to this class, which pins the strongest Claude model (`wf doctor` fails when
+  // either role resolves to no model on the claude runtime).
+  review: {
+    use: 'Planning and independent review: the whole change judged against the frozen criteria.',
+    claude: { model: 'opus', effort: 'high' },
+    codex: {},
+  },
 };
 // The effort values each runtime documents today. Checked so a typo fails at load instead of silently running at the
 // inherited effort; a runtime that adds a value needs it added here.
 export const EFFORTS = { claude: ['low', 'medium', 'high', 'xhigh', 'max'], codex: ['minimal', 'low', 'medium', 'high', 'xhigh'] };
-export const ROLE_DEFAULT_CLASS = { planner: 'full', reviewer: 'full', implementer: 'full', tester: 'full' };
+export const ROLE_DEFAULT_CLASS = { planner: 'review', reviewer: 'review', implementer: 'full', tester: 'full' };
 
 function mergeClasses(raw, fail) {
   const out = {};
@@ -135,9 +144,19 @@ function normalize(raw, source) {
     components: raw.components ?? [],
     review: { rules: raw.review?.rules ?? [] },
     designSystem: raw.designSystem ?? null,
+    impact: raw.impact ?? null,
     repos: [],
   };
   cfg.classes = mergeClasses(raw.classes, fail);
+  // Impact analysis (engine/impact.mjs): which work classes need the planner's survey and impact map, and read caps.
+  if (cfg.impact !== null) {
+    const im = cfg.impact;
+    if (typeof im !== 'object' || Array.isArray(im)) fail('`impact` must be a mapping { requiredFor: [classes], maxFileBytes, maxScanBytes }');
+    else {
+      if (im.requiredFor !== undefined && (!Array.isArray(im.requiredFor) || im.requiredFor.some((c) => !cfg.classes[c]))) fail(`\`impact.requiredFor\` must list known classes (known: ${Object.keys(cfg.classes).join(', ')})`);
+      for (const k of ['maxFileBytes', 'maxScanBytes']) if (im[k] !== undefined && (!Number.isInteger(im[k]) || im[k] < 1)) fail(`\`impact.${k}\` must be a positive integer`);
+    }
+  }
   if (cfg.engine !== null && !ENGINE_PIN.test(String(cfg.engine).trim())) fail(`\`engine\` must be \`N.x\` (same major) or \`>=x.y.z\` (at least that release), not \`${cfg.engine}\``);
   for (const [role, rc] of Object.entries(cfg.roles)) {
     if (!rc || typeof rc !== 'object') continue;

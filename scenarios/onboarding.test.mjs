@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { makeRepo, ok, sh, tmp, toAccepted, singleRepoProject, wf, write } from './helpers.mjs';
+import { makeRepo, ok, planDoc, sh, tmp, toAccepted, singleRepoProject, wf, write } from './helpers.mjs';
 import { YAML } from '../engine/util.mjs';
 
 function sampleProject() {
@@ -111,7 +111,7 @@ function toAcceptedUntilGate(root, base) {
   const e = ok(wf(root, ['entry', '--item', 'S-1', '--owner', 'o', '--json'])).json();
   ok(wf(root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id]));
   const crit = path.join(base, 'c.json');
-  fs.writeFileSync(crit, JSON.stringify({ criteria: [{ id: 'C1', text: 't' }] }));
+  fs.writeFileSync(crit, JSON.stringify(planDoc({ criteria: [{ id: 'C1', text: 't' }] })));
   ok(wf(root, ['plan', '--file', crit, '--attempt', e.id]));
   ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
   write(e.repos.app.worktree, 'src/a.txt', 'z\n');

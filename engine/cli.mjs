@@ -39,11 +39,15 @@ Work
                                     freeze acceptance criteria and the plan (--from-agent: the planner's last YAML block)
   wf criteria amend --file f --reason "why" [--add-repo R]
                                     --add-repo: a fix needs another repo; its worktree joins the attempt with the work items
+                                    added scope needs \`impact\` in the file before the next implementer handoff
   wf discovered add --summary "..." [--where file:line] [--found-by ID] [--blocked-by W] | list
   wf discovered close D1 --fixed SHA | --deferred   (after the owner wrote: defer <attempt>:D1: <reason>)
   wf discovered defer D1 --reason "why"   the owner, in their own terminal: types the id to confirm
                                     every issue found during the ticket: fixed in it, or deferred only by the owner
-  wf handoff planner|implementer|reviewer|tester --agent ID [--work W1] [--session SID] [--runtime claude|codex]
+  wf handoff planner|implementer|reviewer|tester --agent ID [--work W1] [--sweep F] [--session SID] [--runtime claude|codex]
+                                    --sweep: a fix handoff names a pattern sweep per open review finding
+  wf impact run [--file plan.yaml | --query JSON]
+                                    run the attempt's recorded impact queries (or a plan file's, or one) on the current tree
   wf check [--repo R]               light steps only, for the implementer; reused by the gate, never counts as one
   wf gate [--prepare-only] [--full] [--focused] [--rerun-failed]
   wf run --lease NAME -- CMD...     run a command holding a machine-wide lease (docker, browser...)
@@ -239,7 +243,7 @@ export async function main(argv) {
 const FULL_VERIFY = new Set(['accept', 'deliver', 'verify', 'review', 'tracker', 'export', 'shown', 'delivery', 'summary', 'handoff', 'gate', 'check', 'evidence']);
 
 const WRITE_OPTIONS = ['out', 'csv', 'handoffs-csv', 'html', 'dir', 'to', 'root'];
-const READ_OPTIONS = ['file', 'capture', 'comments', 'summary-file', 'closure', 'issue-file', 'from', 'comment-file'];
+const READ_OPTIONS = ['file', 'sweep', 'capture', 'comments', 'summary-file', 'closure', 'issue-file', 'from', 'comment-file'];
 const PATH_OPTIONS = [...WRITE_OPTIONS, ...READ_OPTIONS];
 const FOLDER_OPTIONS = new Set(['dir', 'to', 'root', 'from']);
 
@@ -514,12 +518,54 @@ async function dispatch(cmd, sub, positional, options) {
       print(options, `criteria frozen (${s.criteria.length}): ${s.criteria.map((c) => c.id).join(', ')}\nplan sections: ${sections.join(', ') || 'none'}${s.planSource?.transcript ? ` (from ${s.planSource.agent}'s transcript)` : ''}${s.work ? `\nwork items (${s.work.length}): ${s.work.map((w) => `${w.id} [${w.class}] ${w.criteria.join(',')}`).join('; ')}` : ''}${loose.length ? `\nnote: no work item covers ${loose.join(', ')}` : ''}\nnext: ${nextAction(root, s)}`, s);
       return 0;
     }
+    case 'impact': {
+      if (sub !== 'run') throw new WfError('usage: wf impact run [--attempt ID] [--file plan.yaml | --query JSON]');
+      const { allRecordedQueries, runQuery } = await import('./impact.mjs');
+      const s = openState(root, options);
+      const cfg = loadConfig(root);
+      let queries = allRecordedQueries(s);
+      let recordedHits = {};
+      if (typeof options.query === 'string') {
+        // One query as JSON, for a planner (read-only, so it writes no draft file) checking a count before recording it.
+        let q;
+        try {
+          q = JSON.parse(options.query);
+        } catch (error) {
+          throw new WfError(`--query must be one query as JSON ({ "pattern", "kind", "repo", "paths", "exclude" }): ${error.message}`);
+        }
+        const { validateQueryShape } = await import('./impact.mjs');
+        const problems = validateQueryShape({ id: 'query', ...q }, cfg);
+        if (problems.length) throw new WfError(problems.join('; '));
+        queries = { [q.id ?? 'query']: { id: 'query', ...q } };
+        recordedHits = {};
+      } else if (options.file) {
+        const text = fs.readFileSync(String(options.file), 'utf8');
+        const { YAML } = await import('./util.mjs');
+        const fenced = text.match(/```(?:ya?ml|json)?\s*\n([\s\S]*?)\n```/);
+        const doc = String(options.file).endsWith('.json') ? JSON.parse(fenced ? fenced[1] : text) : YAML.parse(fenced ? fenced[1] : text);
+        queries = Object.fromEntries([...(doc?.survey?.queries ?? []), ...(doc?.impact?.queries ?? [])].filter((q) => q?.id).map((q) => [q.id, q]));
+        recordedHits = Object.fromEntries(Object.values(queries).map((q) => [q.id, q.hits]));
+      } else {
+        for (const [id, r] of Object.entries(s.impact?.results ?? {})) recordedHits[id] = r.hits;
+        for (const a of s.impact?.addenda ?? []) for (const [id, r] of Object.entries(a.results ?? {})) recordedHits[id] = r.hits;
+      }
+      if (!Object.keys(queries).length) throw refuse(`${s.id} has no recorded impact queries${options.file ? ' in that file' : ''}`);
+      const out = [];
+      for (const [id, q] of Object.entries(queries)) {
+        const r = runQuery(root, cfg, s, q);
+        out.push({ id, recorded: recordedHits[id] ?? null, hits: r.hits, unit: r.unit, files: r.files, skipped: r.skipped, refs: r.refs });
+      }
+      print(options, out.map((x) => `${x.id}: ${x.hits} ${x.unit}${x.recorded === null || x.recorded === undefined ? '' : x.recorded === x.hits ? ' (as recorded)' : ` (recorded ${x.recorded})`} at ${Object.entries(x.refs).map(([n, ref]) => `${n}@${ref.slice(0, 10)}`).join(', ')}${x.files.length ? `\n    ${x.files.join('\n    ')}` : ''}${x.skipped.length ? `\n    skipped (over the size cap): ${x.skipped.join(', ')}` : ''}`).join('\n'), out);
+      return 0;
+    }
     case 'criteria': {
       if (sub !== 'amend') throw new WfError('usage: wf criteria amend --file f --reason "why"');
-      const { state: s, changes, added } = amendCriteria(root, options);
+      const { state: s, changes, added, impactOwed, restrictions } = amendCriteria(root, options);
       const list = (ids) => ids.join(', ') || 'none';
+      for (const w of restrictions ?? []) process.stderr.write(`warning: ${w}\n`);
+      const owedLine = impactOwed ? `\n  impact owed: this amendment adds scope; record its impact (\`wf criteria amend --file <f> --reason "..."\` with an \`impact\` addendum) before the next implementer handoff` : s.impact?.addenda?.length && s.criteriaAmendments.at(-1)?.impact === true ? '\n  impact addendum recorded' : '';
       const addedLines = added.map((a) => `\n  repo added: ${a.repo} (worktree ${a.worktree}, base ${a.base.slice(0, 10)}); hand its work item to an implementer, and the reviewer judges the seam on both sides`).join('');
-      print(options, `criteria amended (${s.criteriaAmendments.length} amendment(s)); the reviewer will see the reason${addedLines}\n  criteria now (${s.criteria.length}): ${list(s.criteria.map((c) => c.id))}\n  changed: ${list(changes.changed)}; added: ${list(changes.added)}; dropped: ${list(changes.dropped.map((d) => `${d.id} (${d.reason})`))}`, { ...s, changes });
+      print(options, `criteria amended (${s.criteriaAmendments.length} amendment(s)); the reviewer will see the reason${addedLines}\n  criteria now (${s.criteria.length}): ${list(s.criteria.map((c) => c.id))}\n  changed: ${list(changes.changed)}; added: ${list(changes.added)}; dropped: ${list(changes.dropped.map((d) => `${d.id} (${d.reason})`))}${owedLine}`, { ...s, changes });
       return 0;
     }
     case 'discovered': {
@@ -552,6 +598,9 @@ async function dispatch(cmd, sub, positional, options) {
     case 'handoff': {
       const r = handoff(root, sub, options);
       const startPrompt = r.startPrompt;
+      // I-25: plan restrictions the diff has outgrown, to the owner (stderr: never into a reviewer's prompt).
+      for (const w of r.restrictions ?? []) process.stderr.write(`warning: ${w}\n`);
+      const sweepLines = r.sweeps?.length ? `pattern sweep (answer each in a commit trailer \`Sweep <id>: fixed - ...\` or \`Sweep <id>: clean - ...\`):\n${r.sweeps.map((x) => `  ${x.id} for ${x.finding}: ${x.hits} hit(s)${x.files.length ? `\n    ${x.files.slice(0, 20).join('\n    ')}${x.files.length > 20 ? `\n    … ${x.files.length - 20} more (in the bundle)` : ''}` : ''}`).join('\n')}\n` : '';
       // Never printed for a reviewer: its console carries only the start line.
       const api = await trackerApi(root, r.state.id);
       if (api && sub !== 'reviewer') process.stderr.write(`${api.trim()}\n`);
@@ -570,7 +619,7 @@ async function dispatch(cmd, sub, positional, options) {
         print(options, startPrompt, { ...r, startPrompt });
       } else {
         if (stale) process.stderr.write(stale);
-        print(options, `${lessonsLine}${sub} bundle: ${r.bundle}${r.work ? `\nwork item ${r.work}, class ${r.class}` : `\nclass ${r.class}`}${r.effort ? `, effort ${r.effort}` : ''}${r.model ? `, model ${r.model}` : ''}\n${how} with: "${startPrompt}"`, { ...r, startPrompt });
+        print(options, `${lessonsLine}${sweepLines}${sub} bundle: ${r.bundle}${r.work ? `\nwork item ${r.work}, class ${r.class}` : `\nclass ${r.class}`}${r.effort ? `, effort ${r.effort}` : ''}${r.model ? `, model ${r.model}` : ''}\n${how} with: "${startPrompt}"`, { ...r, startPrompt });
       }
       return 0;
     }

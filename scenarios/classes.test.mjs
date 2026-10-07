@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { criteriaFile, ok, singleRepoProject, state, tmp, wf, write } from './helpers.mjs';
+import { amendFile, ok, planDoc, singleRepoProject, state, tmp, wf, write } from './helpers.mjs';
 import { report, toHandoffCsv } from '../engine/telemetry.mjs';
 
 // Enough TOML for generated agent files: top-level `key = "basic"` and `key = """multi-line basic"""` strings.
@@ -60,7 +60,7 @@ test('wf sync writes one implementer per class with the class effort, Codex agen
 
 test('the adapter refuses unknown classes, undocumented efforts and the old per-role model/effort fields', () => {
   const cases = [
-    [{ roles: { implementer: { class: 'heavy' } } }, /roles\.implementer\.class `heavy` is not a known class \(known: full, light\)/],
+    [{ roles: { implementer: { class: 'heavy' } } }, /roles\.implementer\.class `heavy` is not a known class \(known: full, light, review\)/],
     [{ classes: { light: { claude: { effort: 'extreme' } } } }, /claude effort `extreme` is not one of low, medium, high, xhigh, max/],
     [{ classes: { light: { codex: { effort: 'max' } } } }, /codex effort `max` is not one of minimal, low, medium, high, xhigh/],
     [{ roles: { reviewer: { effort: 'high' } } }, /roles\.reviewer: effort moved to `classes`/],
@@ -79,14 +79,14 @@ function planned(name, work, criteria = [{ id: 'C1', text: 'api' }, { id: 'C2', 
   const e = ok(wf(root, ['entry', '--item', 'W-1', '--owner', 'o', '--json'])).json();
   ok(wf(root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id]));
   const f = path.join(base, `plan-${Math.random().toString(36).slice(2)}.json`);
-  fs.writeFileSync(f, JSON.stringify({ plan: { summary: 's' }, criteria, work }));
+  fs.writeFileSync(f, JSON.stringify(planDoc({ plan: { summary: 's' }, criteria, work })));
   return { base, root, id: e.id, plan: wf(root, ['plan', '--file', f, '--attempt', e.id]) };
 }
 
 test('planner work items: unknown classes, unknown criteria and duplicate ids are refused', () => {
   const unknownClass = planned('w-class', [{ id: 'W1', criteria: ['C1'], class: 'medium' }]).plan;
   assert.notEqual(unknownClass.code, 0);
-  assert.match(unknownClass.err, /class `medium` is not a known class \(known: full, light\)/);
+  assert.match(unknownClass.err, /class `medium` is not a known class \(known: full, light, review\)/);
   assert.match(planned('w-crit', [{ id: 'W1', criteria: ['C9'], class: 'light' }]).plan.err, /unknown criteria C9/);
   assert.match(planned('w-dup', [{ id: 'W1', criteria: ['C1'] }, { id: 'W1', criteria: ['C2'] }]).plan.err, /duplicate work item id W1/);
   const loose = planned('w-loose', [{ id: 'W1', criteria: ['C1'], class: 'light' }]).plan;
@@ -121,7 +121,7 @@ test('criteria amendments merge by id; dropping one needs an explicit marker wit
   const three = [{ id: 'C1', text: 'one' }, { id: 'C2', text: 'two' }, { id: 'C3', text: 'three' }];
   const { base, root, id, plan } = planned('amend', undefined, three);
   ok(plan);
-  const amend = (criteria) => wf(root, ['criteria', 'amend', '--file', criteriaFile(base, criteria), '--reason', 'narrowed', '--attempt', id]);
+  const amend = (criteria) => wf(root, ['criteria', 'amend', '--file', amendFile(base, criteria), '--reason', 'narrowed', '--attempt', id]);
   const r = ok(amend([{ id: 'C2', text: 'two, narrowed' }]));
   assert.match(r.out, /criteria now \(3\): C1, C2, C3\n {2}changed: C2; added: none; dropped: none/);
   assert.deepEqual(state(root, id).criteria.map((c) => c.text), ['one', 'two, narrowed', 'three']);

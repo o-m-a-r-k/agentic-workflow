@@ -31,12 +31,17 @@ components: [...]
 delivery: { kind: push-main }
 tracker: { kind: linear, idPrefix: ENG, statuses: { started: In Progress, delivered: Ready for UAT, done: Done } }
 lanes: [quick, standard, batch]
-classes:                     # merged over the plugin's full/light defaults by name; open list
+classes:                     # merged over the plugin's full/light/review defaults by name; open list
   light: { use: "Screens on a frozen API contract, translations, fixtures.", claude: { effort: low }, codex: { effort: low } }
+  review: { claude: { model: opus, effort: high } }   # the default: planning and review on the strongest model
 roles:
-  planner:     { lanes: [standard], class: full, appendix: .workflow/roles/planner.md }
+  planner:     { lanes: [standard], class: review, appendix: .workflow/roles/planner.md }
   implementer: { class: full, appendix: .workflow/roles/implementer.md }
-  reviewer:    { class: full, appendix: .workflow/roles/reviewer.md }
+  reviewer:    { class: review, appendix: .workflow/roles/reviewer.md }
+impact:                      # the planner's two-stage impact analysis (lifecycle.md, "Impact analysis")
+  requiredFor: [full]        # classes whose work needs a survey and an impact map; [] turns the requirement off
+  maxFileBytes: 2097152      # a larger file is skipped by every query (and listed)
+  maxScanBytes: 536870912    # a query that reads more is refused: narrow its paths
 gate:
   maxParallelSteps: 2
   leases: { docker: 1, browser: 1 }
@@ -55,6 +60,10 @@ gate:
 invariants: .workflow/AGENTS.invariants.md
 requires: { skills: [], connectors: [linear], tools: [{ name: docker, check: "docker info" }] }
 ```
+
+**Planning and review classes.** The planner and the reviewer default to the `review` class, which pins the Claude model `opus` with high effort. `wf doctor` fails when either role resolves to a class with no `claude.model` (the planner is skipped when `roles.planner: false`): set the model on that class, or point the role back at `review`. Override `classes.review.claude.model` with an exact model id to pin a version.
+
+**`impact`.** `requiredFor` lists the work classes whose plans must carry the survey and impact map (default `[full]`: a plan with any `full` work item, or with no work items while the implementer role is `full`); only lanes with a planner are checked. The byte caps bound what the engine's own query runner reads; queries never run through a shell. Details: [lifecycle.md](lifecycle.md#impact-analysis).
 
 `wf gate --focused` (allowed only when every changed file matches `focused`) skips heavy steps and records `focused: true` and each skipped step's `skippedBy: focused`. It is repair proof only: accept and delivery need a passing gate on the current tree that skipped no step because of `--focused`. Steps skipped by `when.paths`, docs-only changes, a plugin's own `plan`, or deferred to a batch do not make a gate partial.
 

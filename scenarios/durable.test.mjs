@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { WF, closureFile, commitIn, criteriaFile, goodClosure, makeRepo, ok, sh, singleRepoProject, state, summaryFile, tmp, wf, write, yaml } from './helpers.mjs';
+import { WF, closureFile, commitIn, criteriaFile, goodClosure, makeRepo, ok, planDoc, sh, singleRepoProject, state, summaryFile, tmp, wf, write, yaml } from './helpers.mjs';
 
 const steps = [{ id: 'unit', repo: 'app', run: 'true', inputs: ['src/**'] }];
 const homeOf = (root) => path.join(root, '..', '.home');
@@ -18,7 +18,7 @@ function implemented(name, config = {}, files = {}, { item = 'ENG-1', plan, chan
   const p = singleRepoProject(name, { gate: { steps }, ...config }, files);
   const e = ok(wf(p.root, ['entry', '--item', item, '--owner', 'o', '--json'])).json();
   ok(wf(p.root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id]));
-  ok(wf(p.root, ['plan', '--file', plan ? jsonFile(p.base, plan) : criteriaFile(p.base), '--attempt', e.id]));
+  ok(wf(p.root, ['plan', '--file', plan ? jsonFile(p.base, planDoc(plan)) : criteriaFile(p.base), '--attempt', e.id]));
   const impl = ok(wf(p.root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id, '--json'])).json();
   const wt = e.repos.app.worktree;
   if (change) commitIn(wt, change);
@@ -35,7 +35,7 @@ test('raw plan, amendment and closure files are kept verbatim; wf export renders
   assert.match(early.out, /exported ENG-9\.1 to \S+attempt\.html\n {2}a view of the ledger and evidence/);
   assert.match(fs.readFileSync(path.join(p.root, '.wf-evidence/attempts/ENG-9.1/export/attempt.html'), 'utf8'), /not frozen yet/, 'a half-finished attempt exports');
   ok(wf(p.root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id]));
-  const planText = `${JSON.stringify({ plan: { summary: 'Change a.' }, criteria: [{ id: 'C1', text: 'a changes' }] }, null, 1)}\n`;
+  const planText = `${JSON.stringify(planDoc({ plan: { summary: 'Change a.' }, criteria: [{ id: 'C1', text: 'a changes' }] }), null, 1)}\n`;
   const planPath = path.join(p.base, 'plan.json');
   fs.writeFileSync(planPath, planText);
   ok(wf(p.root, ['plan', '--file', planPath, '--attempt', e.id]));
@@ -43,7 +43,7 @@ test('raw plan, amendment and closure files are kept verbatim; wf export renders
   assert.equal(fs.readFileSync(s1.planSource.file, 'utf8'), planText, 'the raw plan file is kept byte for byte');
   assert.match(s1.planSource.file, /plans\/plan-1\.raw\.json$/);
   assert.match(ok(wf(p.root, ['resume', '--attempt', e.id])).out, /warning: the frozen plan has no contract or anchors section/);
-  const amendPath = jsonFile(p.base, { criteria: [{ id: 'C2', text: 'b also changes' }] });
+  const amendPath = jsonFile(p.base, { criteria: [{ id: 'C2', text: 'b also changes' }], impact: { unchanged: 'C2 changes the same file; no new symbol, endpoint or contract' } });
   ok(wf(p.root, ['criteria', 'amend', '--file', amendPath, '--reason', 'the token tok_verysecret_123 leaked into a note', '--attempt', e.id]));
   assert.equal(fs.readFileSync(path.join(p.root, '.wf-evidence/attempts/ENG-9.1/plans/amend-1.raw.json'), 'utf8'), fs.readFileSync(amendPath, 'utf8'));
   ok(wf(p.root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));

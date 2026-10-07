@@ -32,9 +32,9 @@ flowchart TD
 | --- | --- | --- |
 | Admit | `wf entry` | Intent is `implementation` or `analysis`. Analysis can never deliver. |
 | Worktrees | automatic | One worktree per repo; dependencies cloned or installed; ignored files like `.env.local` copied in. |
-| Criteria | `wf plan --from-agent <planner id>` | Criteria and every plan section are frozen before implementation, taken from the planner's transcript unchanged; unknown top-level keys are refused. Later changes go through `wf criteria amend --reason`. |
+| Criteria | `wf plan --from-agent <planner id>` | Criteria and every plan section are frozen before implementation, taken from the planner's transcript unchanged; unknown top-level keys are refused. For cross-cutting work the plan carries the two-stage [impact analysis](#impact-analysis), whose queries the engine re-runs. Later changes go through `wf criteria amend --reason`; one that adds scope owes an impact update before the next implementer. |
 | Plan | `wf handoff planner` | The planner leaves the tree unchanged. |
-| Implement | `wf handoff implementer` | Changes are committed before review and the gate. |
+| Implement | `wf handoff implementer` | Changes are committed before review and the gate. No implementer starts while an amendment owes its impact update. A fix handoff (review findings open) names a [pattern sweep](#fix-rounds-sweep-the-pattern) per finding, and the next review waits for the implementer's answers. |
 | Review | `wf handoff reviewer`, `wf review` | Allowed once the work is committed, before or during the gate. The reviewer isn't the owner, planner, an implementer or a reviewer of an earlier round. Where transcripts exist, its transcript must show the agent type handed and exactly the printed start line. The closure is bound to the tree it was handed; earlier rounds' open findings are revealed only after it, for verification. |
 | Gate | `wf gate` | Each step's evidence is hashed. A newer failure beats an older pass. |
 | Discovered issues | `wf discovered add\|list\|close` | Every issue found during the ticket is recorded and ends fixed by a commit of this ticket or deferred in the owner's words; the reviewer gives each a verdict. |
@@ -48,6 +48,30 @@ A stopped or interrupted attempt resumes with `wf resume`, which says exactly wh
 ### The plan file
 
 `wf plan --from-agent <planner id>` reads the planner's last ```` ```yaml ```` block from its Claude Code subagent transcript (found by the name it was started with), so the owner never retypes it. `wf plan --file <file>` takes the same YAML from a file. The plan sections (`summary`, `contract`, `anchors`, `tests`, `doNotRun`, `externalServices`, `agentSplit`) may sit under `plan:` or at the top level beside `criteria` and `work`; `plan:` may also be plain text (the summary). Any other top-level key is refused with the list of known ones, because a section the engine does not read never reaches the implementers. Every section is stored in the frozen plan and handed to the implementers and reviewers in their bundles.
+
+### Impact analysis
+
+Named failure (I-26): a cross-cutting ticket was planned in a few minutes from a count of where one shared component appeared. The planner never characterised how each consumer behaved (data source and limit, write paths, empty, error, phone layout, sorting, totals) and never opened the other repo; its bundle's `impact` was empty because the engine derives impact from a diff, and none exists before planning. Most of the work added later, and most review findings, were one search away on the base commits.
+
+The planner writes two stages in its plan, in this order, and `wf plan` checks both:
+
+1. **`survey`, before the design**: what exists around the issue. `queries` (below), then `components` (one row per affected component: `file`, the `query` that found it, and every column: `endpoint`, `limit`, `writePaths`, `paging`, `empty`, `loading`, `error`, `permission`, `mobile`, `rtl`, `publicApi`, `sorting`, `reorder`, `clientTotals`, `rawEnums`, `tests`; `none` or `n/a` is an answer, a missing column is refused), `consumers` (`symbol`), `flows` (`flow` and its `failure` path) and `patterns` (defects that may recur). Every entry has an `id`, its `query` and that query's `hits`; a component row's `file` must be a hit of its query.
+2. **The design**: `plan`, `criteria`, `work`.
+3. **`impact`, after the design**, derived from it: `changes`, one per changed symbol, endpoint, DTO, error code and migration, each with `element`, `kind`, `cites` (a criterion id, a work item id, or text from an anchor or the contract: an entry that cites nothing in the design is refused), `covers` (survey ids), `consumers: { query, hits }`, `flows` (each with `failure`), `contracts` crossed and `suites` that must run (each with `query` and `hits`), and `work` when the plan has work items. Every survey entry is covered by a change or listed under `excluded` with a `reason`. A suite a change says must run may not appear in `doNotRun`. `impact.queries` holds queries the design adds (callers of a new symbol, tests asserting an old schema).
+
+**Queries are data, run by the engine.** `{ id, pattern, kind: literal | regex, repo?, paths?: [globs], exclude?: [globs], unit?: files | lines, ignoreCase?, hits }`. The engine lists the committed tree (the attempt's worktree HEAD for a repo in the attempt, else that repo's base branch), reads each blob itself, matches the pattern per line in its own process (a JavaScript regular expression for `regex`), and counts files (or lines). No shell runs; a pattern is never a command. Files over `impact.maxFileBytes` (2 MiB) are skipped and listed; a query that reads more than `impact.maxScanBytes` (512 MiB) is refused. `wf plan` re-runs every query and refuses a recorded `hits` that differs from what it finds, so a count cannot be invented. `wf impact run --attempt <id>` runs the recorded queries on the current tree, `--file <plan>` a plan file's, and `--query '<json>'` one query (for a read-only planner checking a count).
+
+**When it is required.** For a lane that has a planner, when any work item (or, without work items, the implementer role) runs at a class the adapter lists under `impact.requiredFor` (default `[full]`). A plan with a design and no survey, or no impact map, is then refused. A plan that is not required to carry the stages may still carry them; they are then checked the same way. The quick lane has no planner and needs none.
+
+**Amendments.** An amendment that adds or changes criteria, replaces the work items or adds a repo owes an impact update when the attempt carries an impact map (or its classes require one). Put `impact` in the amendment file: new `queries` and `survey` entries for the added scope, `changes` citing the new criteria or work items, `excluded`; or `impact: { unchanged: "<why the amendment adds no element>" }`. It is checked like the plan (new query ids, counts re-run, every new survey entry covered or excluded). An amendment file may carry only `impact`. Until it is recorded, `wf handoff implementer` and `wf accept` refuse.
+
+**The reviewer re-derives it.** The reviewer bundle carries `impactMap`: the survey, the impact map, every addendum, the recorded queries and counts, the `inventory` of survey and impact ids and `sampleSize` (10, or all when fewer), and `derived`: symbols the final diff declares or edits (declarations on changed lines and the enclosing function git names in each hunk) and, for each, the files that use it outside every file the map lists (`outside`; the adapter folder is left out). The closure needs `impactChecked`: `queries` (each recorded query with the count `wf impact run` shows on the reviewed tree; `wf review` re-runs them and refuses a mismatch), `sampled` (at least `sampleSize` distinct inventory entries, each `matches` or `finding` with evidence) and `derived` (each outside caller `in-map` with evidence, or `impact-gap` naming a finding with `"category": "impact-gap"`). `wf report` counts `impactGaps` per attempt: findings outside the map, a direct measure of the plan.
+
+### Fix rounds sweep the pattern
+
+Named failure (I-25): fix briefs targeted single findings, so the same defect pattern recurred over many review rounds (an empty later page losing its pager, a failed Next stranding the user, raw enum codes on screen). An implementer handoff while review findings are open is a fix handoff: `wf handoff implementer --sweep <file>` with `sweeps: [{ finding: "<reviewer>:<id>", why, query: { pattern, kind, repo, paths, exclude } }]`, one per open finding the handoff covers (all of them, or those tagged with its `--work`). Without it the handoff is refused. The engine runs each query (ids `S1`, `S2`, ...), prints the hits and puts them in the bundle's `sweep`. The implementer fixes every real instance and answers each sweep in a commit trailer, `Sweep <id>: fixed - <what>` or `Sweep <id>: clean - <why no other hit is an instance>`; `wf handoff reviewer` refuses while one is unanswered. The next reviewer bundle lists `sweeps` with the query, the hits at the handoff and now, and the answer. A second implementer handoff in the same fix round owes no new sweep for a finding already swept.
+
+**Restrictions the diff has outgrown.** Named failure: a plan's `doNotRun` banned one repo's suites ("no source changes there"); the ticket later changed that repo, the ban stayed, and a stale public-API test reached review that the banned suite would have caught. `wf handoff` and `wf criteria amend` warn (on stderr, never in a reviewer's prompt) when a `doNotRun` entry or `externalServices` names a repo the attempt's diff now touches, or a gate step of such a repo.
 
 ### Every issue found is fixed in the ticket
 
@@ -156,11 +180,13 @@ A work class says how hard an agent thinks on a kind of work. The planner groups
 | --- | --- | --- | --- |
 | `full` | Money, payments, audit, authorization, data isolation between customers, migrations, external protocols, and anything the project's invariants file calls a critical boundary. | high | inherited |
 | `light` | UI wired to a frozen contract, translations, generated docs or OpenAPI output, test fixtures. | low | inherited |
+| `review` | Planning and independent review: the whole change judged against the frozen criteria. | high, model `opus` | inherited |
 
-- Any work item that touches something `full` covers is `full`. The planner and the reviewer run at `full` unless the project changes their role's class; the implementer role's own class (default `full`) is used when a handoff names no work item.
-- Model is unset by default, so the agent inherits the session's model. **Pin it** with `classes.<name>.claude.model` (and `codex.model`) when you compare classes or efforts: one effort comparison was confounded because the owner's session switched model and every unpinned agent followed. `wf doctor` warns when no class pins a model and an attempt shows more than one observed model; `wf report` shows the session model recorded at each handoff.
+- Any work item that touches something `full` covers is `full`. The planner and the reviewer run at `review` unless the project changes their role's class; the implementer role's own class (default `full`) is used when a handoff names no work item.
+- **The planner and reviewer pin a model.** Named failure (I-25): the reviewer role resolved to no model, so five review rounds ran on the owner session's weaker model and passed defects a stronger model found later; the planner did the same on a cross-cutting ticket. The `review` class pins `opus` (the strongest Claude model alias) for both roles, and `wf doctor` fails when the planner (unless `roles.planner: false`) or the reviewer resolves to a class with no `claude.model`.
+- Model is unset by default for `full` and `light`, so their agents inherit the session's model. **Pin it** with `classes.<name>.claude.model` (and `codex.model`) when you compare classes or efforts: one effort comparison was confounded because the owner's session switched model and every unpinned agent followed. `wf doctor` warns when a class a role runs at pins no model and an attempt shows more than one observed model; `wf report` shows the session model recorded at each handoff.
 - The default effort values are starting points, not measurements. `wf report` shows the declared effort next to the effort observed in each agent's transcript; a difference is shown, never enforced.
-- **Classes change effort only.** The gate, the blind independent review, frozen criteria, evidence integrity and the hash-chained ledger are identical for every class. A light work item gets the same gate and the same full-class reviewer as a full one.
+- **Classes change effort only.** The gate, the blind independent review, frozen criteria, evidence integrity and the hash-chained ledger are identical for every class. A light work item gets the same gate and the same reviewer (at the reviewer role's class) as a full one.
 - An implementer whose work turns out to touch something a stronger class covers stops and tells the owner.
 - The list is open: add classes or override the defaults in the adapter (entries merge with the defaults by name). Claude effort is one of `low`, `medium`, `high`, `xhigh`, `max`; Codex effort is one of `minimal`, `low`, `medium`, `high`, `xhigh`. Those are the values each runtime documents today, checked so a typo fails at load; a new runtime value needs a plugin update. An unknown class anywhere (a role, a work item) is refused with the list of known classes.
 
@@ -177,8 +203,8 @@ classes:
     claude: { effort: low }
     codex: { effort: minimal }
 roles:
-  planner: { class: full }
-  reviewer: { class: full }
+  planner: { class: review }    # the default; it pins a model
+  reviewer: { class: review }
   implementer: { class: full }
 ```
 

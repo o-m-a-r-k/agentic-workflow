@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { knownLimits } from '../engine/tracker.mjs';
-import { WF, closureFile, commitIn, toAccepted, criteriaFile, goodClosure, makeRepo, ok, sh, singleRepoProject, state, tmp, wf, yaml } from './helpers.mjs';
+import { WF, closureFile, commitIn, toAccepted, criteriaFile, goodClosure, impactAddendum, impactCheckedFrom, makeRepo, ok, planDoc, sh, singleRepoProject, state, tmp, wf, yaml } from './helpers.mjs';
 
 // I-18, named failure: implementers, reviewers and the owner agent noted real defects found during a ticket and parked
 // them as follow-ups or "harmless today" without the owner deciding. Every issue found during a ticket is now in the
@@ -304,7 +304,9 @@ test('I-19: a discovered fix adds a repo and its work items to the running attem
   ok(disc(root, ['add', '--attempt', id, '--summary', 'the total shown under the pager sums only the current page; the api must return the full total', '--found-by', 'impl-1']));
 
   const amend = path.join(base, 'amend.json');
-  fs.writeFileSync(amend, JSON.stringify({ criteria: [{ id: 'C2', text: 'the list response carries the total over every page; existing fields, permissions and tenant isolation unchanged', uat: 'the total matches the sum of all pages' }], work: [{ id: 'W1', criteria: ['C1'], repos: ['web'], class: 'light', why: 'ui' }, { id: 'W2', criteria: ['C2'], repos: ['api'], class: 'full', why: 'the api contract' }] }));
+  const amendWork = [{ id: 'W1', criteria: ['C1'], repos: ['web'], class: 'light', why: 'ui' }, { id: 'W2', criteria: ['C2'], repos: ['api'], class: 'full', why: 'the api contract' }];
+  const amendCriteria = [{ id: 'C2', text: 'the list response carries the total over every page; existing fields, permissions and tenant isolation unchanged', uat: 'the total matches the sum of all pages' }];
+  fs.writeFileSync(amend, JSON.stringify({ criteria: amendCriteria, work: amendWork, impact: impactAddendum(amendCriteria, amendWork) }));
   assert.match(wf(root, ['criteria', 'amend', '--file', amend, '--reason', 'D1 needs the api total', '--add-repo', 'nope', '--attempt', id]).err, /unknown repo `nope`/);
   assert.match(wf(root, ['criteria', 'amend', '--file', amend, '--reason', 'x', '--add-repo', 'web', '--attempt', id]).err, /web is already in ENG-710\.1/);
   const noWork = path.join(base, 'amend-nowork.json');
@@ -327,7 +329,7 @@ test('I-19: a discovered fix adds a repo and its work items to the running attem
   const bundle = bundleOf(h);
   assert.deepEqual(bundle.addedRepos.map((x) => x.repo), ['api']);
   assert.match(bundle.instructions, /seams: \[\{ repo, verdict: matched\|finding, evidence, finding \}\]/);
-  const closure = (extra) => closureFile(base, goodClosure('rev-1', { criteria: [{ id: 'C1', evidence: { kind: 'output', ref: 'l' } }, { id: 'C2', evidence: { kind: 'output', ref: 'l' } }], discovered: [{ id: 'D1', verdict: 'fixed', evidence: 'api/src/totals.txt:2' }], ...extra }));
+  const closure = (extra) => closureFile(base, goodClosure('rev-1', { criteria: [{ id: 'C1', evidence: { kind: 'output', ref: 'l' } }, { id: 'C2', evidence: { kind: 'output', ref: 'l' } }], discovered: [{ id: 'D1', verdict: 'fixed', evidence: 'api/src/totals.txt:2' }], impactChecked: impactCheckedFrom(bundle), ...extra }));
   assert.match(wf(root, ['review', '--closure', closure({}), '--attempt', id]).err, /1 repo\(s\) added during the attempt have no valid seam verdict[\s\S]*api: no verdict/);
   assert.match(wf(root, ['review', '--closure', closure({ seams: [{ repo: 'api', verdict: 'matched', evidence: 'api/src/totals.txt:2' }] }), '--attempt', id]).err, /api: `matched` needs evidence from both sides/);
   ok(wf(root, ['review', '--closure', closure({ seams: [{ repo: 'api', verdict: 'matched', evidence: 'producer api/src/totals.txt:2; consumer web/src/pager.txt:1' }] }), '--attempt', id]));
@@ -380,7 +382,7 @@ test('I-18: an implementer report that leaves an issue unfixed without a ledger 
   const id = e.id;
   ok(wf(root, ['handoff', 'planner', '--agent', 'plan-1', '--attempt', id, '--owner', 'o']));
   const plan = path.join(base, 'plan.json');
-  fs.writeFileSync(plan, JSON.stringify({ plan: 'p', criteria: [{ id: 'C1', text: 'a', uat: 'a' }, { id: 'C2', text: 'b', uat: 'b' }], work: [{ id: 'W1', criteria: ['C1'], repos: ['app'], class: 'light', why: 'ui' }, { id: 'W2', criteria: ['C2'], repos: ['app'], class: 'full', why: 'api' }] }));
+  fs.writeFileSync(plan, JSON.stringify(planDoc({ plan: 'p', criteria: [{ id: 'C1', text: 'a', uat: 'a' }, { id: 'C2', text: 'b', uat: 'b' }], work: [{ id: 'W1', criteria: ['C1'], repos: ['app'], class: 'light', why: 'ui' }, { id: 'W2', criteria: ['C2'], repos: ['app'], class: 'full', why: 'api' }] })));
   ok(wf(root, ['plan', '--file', plan, '--attempt', id, '--owner', 'o']));
   const h1 = ok(wf(root, ['handoff', 'implementer', '--work', 'W1', '--agent', 'impl-1', '--attempt', id, '--owner', 'o']));
   ok(wf(root, ['handoff', 'implementer', '--work', 'W2', '--agent', 'impl-2', '--attempt', id, '--owner', 'o']));

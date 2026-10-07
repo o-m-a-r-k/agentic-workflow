@@ -69,11 +69,51 @@ export function commitIn(dir, files, msg = 'change') {
   sh(dir, `git add -A && git commit -q -m ${JSON.stringify(msg)}`);
 }
 
+// The two impact stages (I-26) for scenarios about other things: one zero-hit query, one survey pattern the one change
+// covers. A plan uses the fixed `fixture` ids (goodClosure's impactChecked names them); an amendment's addendum needs
+// new ids (amendFile).
+export function stages(criteria = [{ id: 'C1' }], work = null, n = 'fixture') {
+  const q = `Q-${n}`;
+  const cites = criteria.filter((c) => !c.dropped).map((c) => c.id);
+  return {
+    survey: { queries: [{ id: q, pattern: 'scenario-fixture-matches-nothing', kind: 'literal', hits: 0 }], patterns: [{ id: `P-${n}`, description: 'scenario fixture', query: q, hits: 0 }] },
+    impact: { changes: [{ id: `I-${n}`, element: 'the scenario change', kind: 'symbol', cites, covers: [`P-${n}`], consumers: { query: q, hits: 0 }, flows: [{ flow: 'use it', failure: 'shows an error', query: q, hits: 0 }], contracts: [], suites: [{ suite: 'scenario-suite', query: q, hits: 0 }], ...(work?.length ? { work: work.map((w) => w.id) } : {}) }] },
+  };
+}
+
+// A plan file in stage order: survey, the design, impact.
+export function planDoc(design, { criteria = design.criteria, work = design.work } = {}) {
+  const { survey, impact } = stages(criteria, work);
+  return { survey, ...design, impact };
+}
+
 export const criteriaFile = (dir, criteria = [{ id: 'C1', text: 'a changes', uat: 'a shows the new text' }]) => {
   const f = path.join(dir, `criteria-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
-  fs.writeFileSync(f, JSON.stringify({ plan: 'change a', criteria }));
+  fs.writeFileSync(f, JSON.stringify(planDoc({ plan: 'change a', criteria })));
   return f;
 };
+
+// An amendment file with its impact addendum (I-26): an amendment that adds or changes criteria owes one.
+export function impactAddendum(criteria, work = null) {
+  const { survey, impact } = stages(criteria, work, Math.random().toString(36).slice(2, 8));
+  return { survey, changes: impact.changes };
+}
+export const amendFile = (dir, criteria, extra = {}) => {
+  const f = path.join(dir, `amend-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
+  fs.writeFileSync(f, JSON.stringify({ criteria, impact: impactAddendum(criteria, extra.work), ...extra }));
+  return f;
+};
+
+// The impact check from a reviewer bundle whose recorded queries did not change (zero-hit fixtures): every query at its
+// recorded count, every inventory entry sampled, every derived caller judged in-map.
+export const impactCheckedFrom = (bundle) => ({
+  queries: Object.entries(bundle.impactMap?.queries ?? {}).map(([query, q]) => ({ query, hits: q.hits })),
+  sampled: (bundle.impactMap?.inventory ?? []).map((entry) => ({ entry, verdict: 'matches', evidence: 'checked' })),
+  derived: (bundle.impactMap?.derived?.outside ?? []).map((o) => ({ symbol: o.symbol, file: o.file, verdict: 'in-map', evidence: 'checked' })),
+});
+
+// The impact check a reviewer of a criteriaFile plan writes: the fixture query re-run, both inventory entries sampled.
+export const fixtureImpactChecked = () => ({ queries: [{ query: 'Q-fixture', hits: 0 }], sampled: [{ entry: 'P-fixture', verdict: 'matches', evidence: 'no hit' }, { entry: 'I-fixture', verdict: 'matches', evidence: 'no hit' }], derived: [] });
 
 export function closureFile(dir, closure) {
   const f = path.join(dir, `closure-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
@@ -81,7 +121,7 @@ export function closureFile(dir, closure) {
   return f;
 }
 
-export const goodClosure = (reviewer = 'rev-1', extra = {}) => ({ reviewer, findings: [], criteria: [{ id: 'C1', evidence: { kind: 'output', ref: 'gate log line 1' } }], screenshotsInspected: [], ...extra });
+export const goodClosure = (reviewer = 'rev-1', extra = {}) => ({ reviewer, findings: [], criteria: [{ id: 'C1', evidence: { kind: 'output', ref: 'gate log line 1' } }], screenshotsInspected: [], impactChecked: fixtureImpactChecked(), ...extra });
 
 // Runs an attempt up to an accepted review. Returns the worktree path of `repo`.
 export function toAccepted(root, base, { item = 'ENG-1', repo = 'app', change = { 'src/a.txt': 'b\n' }, owner = 'owner-1', extraEntry = [] } = {}) {
