@@ -4,14 +4,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { closureFile, commitIn, criteriaFile, goodClosure, ok, OUT_OF_ORDER, sh, singleRepoProject, state, toAccepted, WF, wf, ownerSays, ownerSpeaks, spawnHome, ownerSession } from './helpers.mjs';
+import { closureFile, commitIn, criteriaFile, goodClosure, ok, OUT_OF_ORDER, sh, singleRepoProject, state, toAccepted, WF, wf, ownerSpeaks, spawnHome, ownerSession } from './helpers.mjs';
 
-// `wf adopt` (engine/attempt.mjs): the current owner hands the attempt to the new owner's session, and that session is a
-// plain interactive one (a Codex rollout whose session_meta says so). The new owner's own `adopt <id>` line is written by
-// the scenario's `wf` wrapper.
-function handOver(root, id, from, to) {
+// Adoption uses the receiving interactive session's human request, supplied by the scenario wrapper.
+// Prepare its interactive session metadata; no previous-session release is required.
+function prepareAdopter(root, to) {
   const home = path.join(root, '..', '.home');
-  ownerSays(home, ownerSession(from), `adopt ${id}:${ownerSession(to)}`);
   const sid = ownerSession(to).replace(/^codex:/, '');
   const f = path.join(home, '.codex', 'sessions', `rollout-scenario-${sid}.jsonl`);
   fs.mkdirSync(path.dirname(f), { recursive: true });
@@ -93,7 +91,7 @@ test('a previous owner cannot review after someone adopts the attempt', () => {
   const e = admitted(root, base, 'RF-5');
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'x\n' });
   ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]));
-  handOver(root, e.id, 'o', 'new-owner');
+  prepareAdopter(root, 'new-owner');
   ok(wf(root, ['adopt', '--attempt', e.id, '--owner', 'new-owner']));
   assert.equal(wf(root, ['handoff', 'reviewer', '--agent', ownerSession('o'), '--attempt', e.id]).code, 75);
 });

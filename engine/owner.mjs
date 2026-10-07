@@ -147,7 +147,7 @@ function interactiveProblem(t, bytes, m) {
   return '';
 }
 
-export function ownerAuthority(root, state, phrase, { what, command = null, owner = state.owner, terminal = defaultTerminal, decision = null, interactive = false } = {}) {
+export function ownerAuthority(root, state, phrase, { what, command = null, owner = state.owner, terminal = defaultTerminal, decision = null, interactive = false, requestPhrases = null } = {}) {
   const shown = command ? `wf ${[...command.sub, ...Object.entries(command.flags).flat()].join(' ')}` : null;
   const how = `only the owner decides ${what}: the owner starts a message in the owner session with \`${phrase}\`${shown ? `, or the owner session runs exactly \`${shown}\`` : ''}`;
   const t = ownerTranscript(owner);
@@ -162,12 +162,16 @@ export function ownerAuthority(root, state, phrase, { what, command = null, owne
   // Every session, the owner's or the one adopting, speaks after admission (0.5.0 adversarial review: the bound was
   // dropped for the adopting session).
   const stateFor = state;
-  const start = new RegExp(`^${esc(fold(phrase))}(?![a-z0-9_-]|\\.[a-z0-9])`);
+  // I-31: adoption accepts a direct human request for the ticket or attempt, including ordinary polite prefixes.
+  // Other owner decisions keep their exact phrases. A destination suffix or a longer ticket never matches adoption.
+  const start = requestPhrases
+    ? new RegExp(`^(?:please\\s+)?(?:(?:can|could|would) you\\s+|i (?:want|need) you to\\s+)?(?:${requestPhrases.map((p) => esc(fold(p))).join('|')})(?![a-z0-9_:-]|\\.[a-z0-9])`)
+    : new RegExp(`^${esc(fold(phrase))}(?![a-z0-9_-]|\\.[a-z0-9])`);
   let turns = ownerTurns(t, bytes).filter((m) => afterAdmission(stateFor, m) && !used.has(spendKey(t, m)) && !used.has(`${t.file}:${m.offset}`) && start.test(fold(m.text)));
   let notInteractive = '';
   if (interactive) {
     turns = turns.filter((m) => {
-      const p = interactiveProblem(t, bytes, m);
+      const p = interactiveProblem(t, bytes, m) || (requestPhrases && (!m.at || !Number.isFinite(Date.parse(m.at))) ? 'its adoption request records no valid timestamp' : '');
       if (p) notInteractive = p;
       return !p;
     });

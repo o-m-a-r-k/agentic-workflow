@@ -12,6 +12,10 @@ Regression scenarios prove the old restriction fails, current and future values 
 
 Pre-push verification now clears repository-local Git environment variables before starting the scenario suite (I-30). A linked-worktree push previously redirected disposable test repositories into the source Git directory, failing verification and changing source Git metadata. The regression exercises the real push hook and proves both isolation and refusal when verification fails.
 
+Adoption now accepts the human request in the receiving interactive chat (I-31). Ask to adopt a ticket or attempt, then run the adoption command with its item or attempt selector; the previous session need not be reopened or release ownership. The ledger records the transfer and the one-use human receipt. Holds and existing work stay in place, repeated calls by the current owner are harmless, and closed attempts, stale requests, headless prompts and agent-generated authorization are refused.
+
+Failed verifier legs retain their complete assertion and stack output (I-32), instead of only names and counters, so a failure remains diagnosable after its container exits. Passing legs keep their concise summaries.
+
 ## v0.5.0
 
 0.5.0 changes the order of work, adds impact analysis before planning, measures every review round and gate stop, and closes the delivery-adapter fault cases. Several commands that used to pass now refuse; read **Breaking behaviour** before upgrading a project with open attempts.
@@ -184,6 +188,8 @@ A second adversarial pass over the integrated 0.5.0 branch, with scenarios in `s
 
 | Item | Failure fixed | Fixed in | Scenario test |
 | --- | --- | --- | --- |
+| [I-32](improvements/I-32.md) | Verifier failures must retain assertion diagnostics | 0.5.1 | `scenarios/verify-output.test.mjs` |
+| [I-31](improvements/I-31.md) | Adoption should accept the current chat human request | 0.5.1 | `scenarios/adoption.test.mjs` |
 | [I-30](improvements/I-30.md) | Pre-push verification must clear repository-local Git environment | 0.5.1 | `scenarios/pre-push.test.mjs` |
 | [I-29](improvements/I-29.md) | Runtime model settings must not require a plugin release | 0.5.1 | `scenarios/classes.test.mjs` |
 | [I-28](improvements/I-28.md) | npm run verify is slow: three legs in series, helper-only wf processes, the macOS git shim | 0.5.0 | `scenarios/compile-cache.test.mjs` |

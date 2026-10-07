@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { loadConfig, loadConfigAtCommit, adapterLocation, adapterRecord, repoDir, trustedAdapter } from './config.mjs';
-import { append, assertSchema, createAttempt, listAttempts, loadState, openEvidence } from './ledger.mjs';
+import { append, assertSchema, createAttempt, listAttempts, loadState, openEvidence, readLedger } from './ledger.mjs';
 import { projectEnv } from './env.mjs';
 import { emitTrackerEvent } from './tracker.mjs';
 import { ownerAuthority } from './owner.mjs';
@@ -233,18 +233,29 @@ export function addRepoWorktree(root, cfg, state, name) {
 }
 
 export function adopt(root, options) {
-  const state = openState(root, options);
+  const item = options.item === undefined ? null : assertSafeId(options.item, 'ticket id');
+  let selected = options;
+  if (item && !options.attempt) {
+    const matches = listAttempts(root).filter((id) => {
+      const s = loadState(root, id);
+      return s.item === item && OPEN(s);
+    });
+    if (matches.length !== 1) throw new WfError(matches.length ? `several open attempts for ${item} (${matches.join(', ')}); pass --attempt <id>` : `no open attempt for ${item}`);
+    selected = { ...options, attempt: matches[0] };
+  }
+  const state = openState(root, selected);
+  if (item && state.item !== item) throw refuse(`${state.id} belongs to ${state.item}, not ${item}`);
+  if (!OPEN(state)) throw refuse(`${state.id} is closed (${state.phase}); only open attempts can be adopted`);
   const by = actor(options);
-  // Named failure (0.5.0 third review): adoption took the caller's word for who the new owner is, so an agent could make
-  // itself (or a name it controls) the owner and then give the owner's authority. The new owner confirms it: in the new
-  // owner session's transcript (a message starting with `adopt <attempt>`), or typed at their own terminal.
-  // Named failure (0.5.0 adversarial review): only the new owner was asked, and any session counted, so an agent's own
-  // `codex exec "adopt <id>"` run made it the owner without the owner saying a word. Two authorities now: the CURRENT
-  // owner hands the attempt to the named session (`adopt <attempt>:<new owner>`, in the owner session, or typed at the
-  // owner's terminal for a person-named owner), and the new owner confirms from a plain interactive session.
-  const handedOver = ownerAuthority(root, state, `adopt ${state.id}:${by}`, { what: `handing ${state.id} to \`${by}\``, decision: `adopt-from:${state.id}:${by}` });
-  const authority = ownerAuthority(root, state, `adopt ${state.id}`, { what: `adopting ${state.id} as \`${by}\``, owner: by, decision: `adopt:${state.id}:${by}`, interactive: true });
-  append(root, state.id, 'owner.adopted', { from: state.owner, reason: options.reason ?? null, authority, authorities: [handedOver] }, by);
+  if (state.owner === by) return state;
+  // Named failure I-31: recovery required a release from an unavailable previous session, despite a current human request.
+  // Keep the interactive human proof and one-use receipt; the previous session is no longer an authority dependency.
+  const lastTransfer = readLedger(root, state.id).filter((e) => e.type === 'owner.adopted').at(-1);
+  const requestPhrases = [...new Set([state.id, state.item].filter(Boolean))].flatMap((id) => [`adopt ${id}`, `adopt ticket ${id}`, `adopt attempt ${id}`]);
+  const authority = ownerAuthority(root, { ...state, admittedAt: lastTransfer?.at ?? state.admittedAt }, `adopt ${state.id}`, {
+    what: `adopting ${state.id} as \`${by}\``, owner: by, decision: `adopt:${state.id}:${by}`, interactive: true, requestPhrases,
+  });
+  append(root, state.id, 'owner.adopted', { from: state.owner, reason: options.reason ?? null, authority }, by);
   return loadState(root, state.id);
 }
 

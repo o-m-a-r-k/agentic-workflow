@@ -78,7 +78,8 @@ function run(leg) {
       const out = Buffer.concat(chunks).toString('utf8');
       const summary = out.split('\n').filter((l) => /^(ℹ (tests|pass|fail|skipped)|✖ )/.test(l.trim())).join('\n');
       const seconds = Math.round((Date.now() - t) / 1000);
-      process.stdout.write(`${parallel ? `\n=== ${leg.name} (${seconds}s, ${jobs} files at a time)\n` : ''}${summary || out.slice(-4000)}\n`);
+      // Named failure I-32: a failed leg's summary hid its assertion and stack, leaving no diagnostic evidence.
+      process.stdout.write(`${parallel ? `\n=== ${leg.name} (${seconds}s, ${jobs} files at a time)\n` : ''}${code === 0 ? (summary || out.slice(-4000)) : out}\n`);
       results.push({ name: leg.name, ok: code === 0, seconds, jobs });
       resolve();
     };

@@ -62,7 +62,7 @@ test('a non-session owner, no terminal, environment scrubbed: every owner-only d
   assert.match(wf(a.root, ['release', '--attempt', a.id], silent).err, NO_TTY);
   assert.ok(state(a.root, a.id).activeHold, 'the hold stays');
   // wf adopt (the new owner confirms)
-  assert.match(wf(a.root, ['adopt', '--owner', 'plain:alex', '--attempt', a.id], silent).err, /needs the owner's authority; the attempt's owner `alex` has no host transcript, and this is not an interactive terminal/);
+  assert.match(wf(a.root, ['adopt', '--owner', 'plain:new-owner', '--attempt', a.id], silent).err, /needs the owner's authority; the attempt's owner `new-owner` has no host transcript, and this is not an interactive terminal/);
   // An agent runtime refuses before any prompt, whatever the terminal.
   assert.match(wf(a.root, ['release', '--attempt', a.id], { ...silent, env: { CLAUDECODE: '1' } }).err, /this runs under an agent runtime \(CLAUDECODE\)/);
 });

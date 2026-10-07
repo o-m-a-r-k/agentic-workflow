@@ -180,7 +180,7 @@ test('adapter location: a .workflow link to another committed folder is refused,
   assert.match(r.err, /recorded at admission/);
 });
 
-// F2: `wf adopt` asked only the new owner's transcript, and any Codex rollout (an agent's own `codex exec`) counted.
+// F2 / I-31: the current human request authorizes adoption, but an agent's own headless prompt never does.
 const line = (o) => `${JSON.stringify(o)}\n`;
 const codexRollout = (home, tid, { meta, texts }) => {
   const f = path.join(home, '.codex', 'sessions', '2026', '10', '07', `rollout-2026-10-07T00-00-00-${tid}.jsonl`);
@@ -195,7 +195,7 @@ const claudeTurn = (home, sid, text, fields = {}) => {
 };
 const HUMAN = { entrypoint: 'cli', promptSource: 'typed', origin: { kind: 'human' }, turnOrigin: 'human' };
 
-test('adopt: the current owner hands the attempt over, and the new owner confirms from a plain interactive session', () => {
+test('adopt: the current interactive human authorizes recovery; headless and unrecorded origins still refuse', () => {
   const p = singleRepoProject('adopt', { gate: { steps } });
   const home = path.join(p.base, '.home');
   const owner = 'claude:real-owner-session-1';
@@ -208,7 +208,7 @@ test('adopt: the current owner hands the attempt over, and the new owner confirm
   codexRollout(home, exec, { meta: { originator: 'codex_exec', source: 'exec' }, texts: [`adopt ${e.id}`] });
   const r1 = adopt(`codex:${exec}`);
   assert.equal(r1.code, 75, r1.out);
-  assert.match(r1.err, new RegExp(`adopt ${e.id.replace('.', '\\.')}:codex:${exec}`));
+  assert.match(r1.err, /codex_exec|not a plain interactive session/);
   // The real owner hands it to that session: still refused, a `codex exec` rollout is not a person's session.
   claudeTurn(home, 'real-owner-session-1', `adopt ${e.id}:codex:${exec}`, HUMAN);
   const r2 = adopt(`codex:${exec}`);
@@ -222,10 +222,9 @@ test('adopt: the current owner hands the attempt over, and the new owner confirm
     assert.equal(r.code, 75, `${sid}: ${r.out}`);
   }
   assert.equal(ok(wf(p.root, ['resume', '--attempt', e.id, '--json'], silent)).json().owner, owner, 'nothing adopted');
-  // An interactive Codex session the owner names, which confirms: adopted, with both authorities recorded.
+  // A genuine request in the receiving interactive session suffices; no previous-session release is required.
   const tui = '019cbeef-cafe-7000-8000-000000000002';
   codexRollout(home, tui, { meta: { originator: 'codex_cli_rs', source: 'cli' }, texts: [`adopt ${e.id}`] });
-  claudeTurn(home, 'real-owner-session-1', `adopt ${e.id}:codex:${tui}`, HUMAN);
   ok(adopt(`codex:${tui}`));
   const s = ok(wf(p.root, ['resume', '--attempt', e.id, '--json'], silent)).json();
   assert.equal(s.owner, `codex:${tui}`);

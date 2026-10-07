@@ -2,14 +2,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { closureFile, commitIn, criteriaFile, goodClosure, ok, OUT_OF_ORDER, sh, singleRepoProject, state, toAccepted, wf, write, ownerSays, ownerSession } from './helpers.mjs';
+import { closureFile, commitIn, criteriaFile, goodClosure, ok, OUT_OF_ORDER, sh, singleRepoProject, state, toAccepted, wf, write, ownerSession } from './helpers.mjs';
 
-// `wf adopt` (engine/attempt.mjs): the current owner hands the attempt to the new owner's session, and that session is a
-// plain interactive one (a Codex rollout whose session_meta says so). The new owner's own `adopt <id>` line is written by
-// the scenario's `wf` wrapper.
-function handOver(root, id, from, to) {
+// Adoption uses the receiving interactive session's human request, supplied by the scenario wrapper.
+// Prepare its interactive session metadata; no previous-session release is required.
+function prepareAdopter(root, to) {
   const home = path.join(root, '..', '.home');
-  ownerSays(home, ownerSession(from), `adopt ${id}:${ownerSession(to)}`);
   const sid = ownerSession(to).replace(/^codex:/, '');
   const f = path.join(home, '.codex', 'sessions', `rollout-scenario-${sid}.jsonl`);
   fs.mkdirSync(path.dirname(f), { recursive: true });
@@ -133,7 +131,7 @@ test('uncommitted changes are refused at the gate; one open attempt per item; ad
   assert.equal(wf(root, ['entry', '--item', 'ENG-8', '--owner', 'o2']).code, 75);
   write(e.repos.app.worktree, 'src/a.txt', 'dirty\n');
   assert.match(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]).err, /commit changes before the gate/);
-  handOver(root, e.id, 'o', 'o2');
+  prepareAdopter(root, 'o2');
   ok(wf(root, ['adopt', '--attempt', e.id, '--owner', 'o2']));
   assert.equal(state(root, e.id).owner, ownerSession('o2'));
 });
