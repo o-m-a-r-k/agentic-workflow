@@ -102,7 +102,7 @@ test('batch: each member delivers only its own screenshots from the shared gate'
   const shas = g.steps.flatMap((x) => x.artifacts ?? []).map((a) => a.sha256);
   assert.equal(shas.length, 3, 'the batch gate collects every unit\'s files (the batch\'s own folder too)');
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'rb', '--attempt', b.id]));
-  ok(wf(root, ['review', '--closure', closureFile(base, { reviewer: 'rb', findings: [], criteria: [{ id: 'B1', evidence: { kind: 'output', ref: 'batch gate' } }], screenshotsInspected: shas }), '--attempt', b.id]));
+  ok(wf(root, ['review', '--closure', closureFile(base, { reviewer: 'rb', findings: [], criteria: [{ id: 'B1', evidence: { kind: 'output', ref: 'batch gate' } }], screenshotsInspected: shas, anomalies: 'none seen' }), '--attempt', b.id]));
   ok(wf(root, ['accept', '--attempt', b.id]));
   const d = ok(wf(root, ['deliver', '--attempt', b.id]));
   assert.match(d.out, /SHOW TO OWNER \(1 delivered screenshot\(s\) for ENG-74\)/);

@@ -10,6 +10,7 @@ import { WfError, canonical, hashFile, now, readJson, refuse, sessionIdentity, s
 import { home } from './provenance.mjs';
 import { prepareWrite, readEvidenceFile, readRegular, writeNoFollow } from './evidence.mjs';
 import { connectorCalls, ownerTranscript } from './host-record.mjs';
+import { screenshots } from './gate.mjs';
 import { cliEnv, scrub } from './scrub.mjs';
 
 const BUILTIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'adapters', 'tracker');
@@ -32,8 +33,17 @@ const DEFAULT_EVENTS = {
   reopened: [{ setStatus: 'started' }],
 };
 
-function renderTemplate(root, cfg, key, vars) {
-  const ref = cfg.tracker[key];
+// I-11. Named failure: the owner saw zero images on the ticket. With no delivered comment template (or an events list
+// that attaches screenshots without a comment) the screenshots went to the ticket only as attachments, which a tracker
+// shows as link rows, and nothing checked that they were visible. A delivery with screenshots always posts the delivered
+// comment that embeds them, from this built-in template when the project names none. A delivery without screenshots
+// and without a template posts no comment, as before.
+export const DEFAULT_DELIVERED_TEMPLATE = '{id} is ready for UAT.\n\nUAT scope:\n{uatScope}\n';
+const hasShots = (state) => (state.delivery?.screenshots ? state.delivery.screenshots.screenshots.length : screenshots(state).length) > 0;
+const templateRef = (cfg, key, state = null) => cfg.tracker[key] ?? (state && key === deliveredKey(cfg) && hasShots(state) ? DEFAULT_DELIVERED_TEMPLATE : null);
+
+function renderTemplate(root, cfg, key, vars, state = null) {
+  const ref = templateRef(cfg, key, state);
   if (!ref) return null;
   // A template file is read only inside .workflow/, without following a link (its text is posted to the tracker).
   const file = path.resolve(root, '.workflow', ref);
@@ -80,16 +90,22 @@ function screenshotSection(state, assets = {}) {
   return `Screenshots:\n\n${rows.join('\n\n')}`;
 }
 
-const deliveredKey = (cfg) => {
+// The delivered event's steps: one that attaches screenshots always has the delivered comment after the uploads.
+function deliveredSpec(cfg) {
   const spec = cfg.tracker.events?.delivered ?? DEFAULT_EVENTS.delivered;
-  return spec.find((s) => s?.comment)?.comment ?? null;
-};
+  if (spec.some((x) => x?.comment) || !spec.some((x) => x?.attach === 'screenshots')) return spec;
+  const at = spec.findIndex((x) => x?.attach === 'screenshots');
+  return [...spec.slice(0, at + 1), { comment: 'deliveredComment' }, ...spec.slice(at + 1)];
+}
+function deliveredKey(cfg) {
+  return deliveredSpec(cfg).find((s) => s?.comment)?.comment ?? null;
+}
 
 // Whether delivering this attempt posts a delivered comment (and so needs the owner's summary).
 export function needsSummary(cfg, state) {
   if (cfg.tracker.kind === 'none' || ['quick', 'batch'].includes(state.lane)) return false;
   const key = deliveredKey(cfg);
-  return Boolean(key && cfg.tracker[key]);
+  return Boolean(key && templateRef(cfg, key, state));
 }
 
 // The delivered comment: the template (its fixed lines are the header), the owner's plain-language summary, the UAT
@@ -98,10 +114,10 @@ export function needsSummary(cfg, state) {
 // first paragraph, the others at the end.
 export function deliveredComment(root, cfg, state, assets = {}) {
   const key = deliveredKey(cfg);
-  if (!key || !cfg.tracker[key]) return null;
+  if (!key || !templateRef(cfg, key, state)) return null;
   const summary = state.delivery?.summary?.text ?? null;
   const vars = { id: state.item, url: '', uatScope: uatScope(state) || '- No user-visible change to check in the product.', summary: summary ?? '', screenshots: screenshotSection(state, assets), limits: knownLimits(state) ? `Known limits and follow-ups:\n${knownLimits(state)}` : '' };
-  const rendered = renderTemplate(root, cfg, key, vars);
+  const rendered = renderTemplate(root, cfg, key, vars, state);
   const tpl = rendered.template;
   let body = rendered.body.replace(/\s+$/, '');
   if (summary && !/\{summary\}/.test(tpl)) {
@@ -170,7 +186,7 @@ export function recordSummary(root, cfg, state, options) {
 // Turns an engine event into the concrete actions the agent (or adapter) must perform.
 export function trackerActions(root, cfg, state, event, extra = {}) {
   if (cfg.tracker.kind === 'none') return [];
-  const spec = cfg.tracker.events?.[event] ?? DEFAULT_EVENTS[event] ?? [];
+  const spec = event === 'delivered' ? deliveredSpec(cfg) : cfg.tracker.events?.[event] ?? DEFAULT_EVENTS[event] ?? [];
   const statuses = cfg.tracker.statuses ?? {};
   const vars = { id: state.item, uatScope: uatScope(state), url: extra.url ?? '', ...extra };
   const actions = [];
@@ -184,7 +200,7 @@ export function trackerActions(root, cfg, state, event, extra = {}) {
       actions.push({ op: 'setStatus', key: step.setStatus, status: name, unless: startEvent ? [statuses.done].filter(Boolean) : [] });
     } else if (step.comment) {
       // The delivered comment is rendered from the ledger when it is shown or posted (summary, captions, asset urls).
-      if (event === 'delivered' && cfg.tracker[step.comment]) {
+      if (event === 'delivered' && templateRef(cfg, step.comment, state)) {
         actions.push({ op: 'comment', templateKey: step.comment, rendered: 'delivered', body: null, reuseExisting: true });
         continue;
       }
@@ -298,7 +314,7 @@ async function recordFromTranscript(root, cfg, state, options, event, pending, a
 // tracker's answer.
 async function recordAgentReported(root, cfg, state, options, event, pending) {
   if (cfg.tracker.via !== 'connector') throw refuse(`\`--agent-reported\` is for \`tracker.via: connector\`; with \`${cfg.tracker.via}\` the engine performs and verifies the handoff itself (\`wf tracker sync\`)`);
-  if (typeof options.file !== 'string') throw new WfError('--file <reported.json> is required: { issue, status, comment: { id, bodySha256, createdAt }, attachments: [{ title, subtitle }], readAt }');
+  if (typeof options.file !== 'string') throw new WfError('--file <reported.json> is required: { issue, status, comment: { id, bodySha256, createdAt }, attachments: [{ title, subtitle, assetUrl }], readAt }');
   const reportRead = readRegular(path.resolve(options.file));
   if (!reportRead) throw refuse(`${options.file} is missing, a link or not a regular file`);
   const reportText = reportRead.bytes.toString('utf8');
@@ -345,7 +361,7 @@ async function recordAgentReported(root, cfg, state, options, event, pending) {
       comment = { text: body, sha256: sha256(body) };
       if (r.comment?.bodySha256 !== comment.sha256) problems.push(`the posted comment's sha256 is ${comment.sha256.slice(0, 12)}…, the report declares ${String(r.comment?.bodySha256 ?? 'none').slice(0, 12)}…: report the hash of the text in --comment-file`);
       if (since && r.comment?.createdAt && Date.parse(r.comment.createdAt) < Date.parse(since)) problems.push(`the comment was written at ${r.comment.createdAt}, before ${event === 'delivered' ? 'delivery' : 'the event'}`);
-      const tpl = renderTemplate(root, cfg, a.templateKey, {});
+      const tpl = renderTemplate(root, cfg, a.templateKey, {}, state);
       const missingLines = fixedLines(tpl?.template ?? a.body ?? '').filter((l) => !body.includes(l));
       if (missingLines.length) problems.push(`the comment lacks the template's fixed line(s): ${missingLines.map((l) => JSON.stringify(l)).join(', ')}`);
       const hits = forbidden(cfg, body);
@@ -358,9 +374,20 @@ async function recordAgentReported(root, cfg, state, options, event, pending) {
           const missing = canonicalComment(expected.summary).filter((l) => !got.includes(l));
           if (missing.length) problems.push(`the comment lacks the owner's summary (first missing line: ${JSON.stringify(missing[0])})`);
         }
+        // I-11: an image counts only by the url of the upload the agent reports for that screenshot. Named failure: an
+        // image matched by its alt text alone passed, so a comment still holding `{assetUrl:<title>}` (no image on the
+        // ticket) was recorded as delivered.
         const refs = imageRefs(body);
-        const noImage = (state.delivery.screenshots?.screenshots ?? []).filter((f) => !refs.some((x) => x.alt === f.title || x.path.endsWith(`/${f.title}`) || x.path === f.title)).map((f) => f.title);
-        if (noImage.length) problems.push(`the comment has no inline image for ${noImage.length} delivered screenshot(s): ${noImage.join(', ')} (\`![<title>](<url>)\` under each caption)`);
+        const listed = Array.isArray(r.attachments) ? r.attachments : [];
+        const noImage = [];
+        for (const f of state.delivery.screenshots?.screenshots ?? []) {
+          const asset = listed.filter((x) => x.title === f.title || x.filename === f.title).map((x) => String(x.assetUrl ?? x.url ?? '').split('?')[0]).find((u) => /^https:\/\/\S+$/.test(u));
+          if (!asset) noImage.push(`${f.title}: the report gives no \`assetUrl\` (https) for its upload`);
+          else if (!refs.some((x) => x.path === asset)) noImage.push(`${f.title}: no \`![${f.title}](${asset})\` in the comment`);
+        }
+        const left = body.match(/\{assetUrl:[^}]*\}/g);
+        if (left) problems.push(`the comment still holds ${left.length} placeholder(s) (${[...new Set(left)].join(', ')}): the ticket shows no image there; replace each with the assetUrl its upload returned`);
+        if (noImage.length) problems.push(`the comment shows no image for ${noImage.length} delivered screenshot(s); an attachment alone shows on the ticket only as a link row, so each screenshot is embedded as \`![<title>](<assetUrl>)\` under its caption, by the assetUrl of its upload:\n    - ${noImage.join('\n    - ')}`);
         // Owner additions beyond the rendered comment are allowed; they are listed in the record.
         const want = new Set(expected ? canonicalComment(expected.body) : []);
         extra.push(...got.filter((l) => !want.has(l)));
@@ -388,7 +415,7 @@ async function recordAgentReported(root, cfg, state, options, event, pending) {
     writeImmutable(cdest, comment.text);
     commentRec = { path: cdest, sha256: comment.sha256, id: r.comment?.id ?? null };
   }
-  append(root, state.id, 'tracker.recorded', { event, provenance: AGENT_REPORTED, verified: false, mode: 'agent-reported', capture: { path: dest, sha256: hashFile(dest) }, readAt: r.readAt, status: r.status ?? null, ...(commentRec ? { comment: commentRec } : {}), ...(extra.length ? { extraLines: extra.slice(0, 50).map((l) => scrub(l)) } : {}), attachments: (r.attachments ?? []).map((x) => ({ title: x.title, caption: x.subtitle ?? null })) }, null);
+  append(root, state.id, 'tracker.recorded', { event, provenance: AGENT_REPORTED, verified: false, mode: 'agent-reported', capture: { path: dest, sha256: hashFile(dest) }, readAt: r.readAt, status: r.status ?? null, ...(commentRec ? { comment: commentRec } : {}), ...(extra.length ? { extraLines: extra.slice(0, 50).map((l) => scrub(l)) } : {}), attachments: (r.attachments ?? []).map((x) => ({ title: x.title, caption: x.subtitle ?? null, assetUrl: x.assetUrl ?? x.url ?? null })) }, null);
   return loadState(root, state.id);
 }
 
@@ -454,7 +481,7 @@ export async function recordTracker(root, cfg, state, options) {
     }
     if (a.op === 'comment') {
       const since = event === 'delivered' ? state.delivery.completedAt : null;
-      const tpl = renderTemplate(root, cfg, a.templateKey, {});
+      const tpl = renderTemplate(root, cfg, a.templateKey, {}, state);
       const lines = fixedLines(tpl?.template ?? a.body ?? '');
       const fresh = issue.comments.filter((c) => !since || (c.updatedAt ?? c.createdAt) >= since);
       const expected = a.rendered === 'delivered' ? deliveredComment(root, cfg, state) : null;

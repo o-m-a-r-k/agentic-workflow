@@ -54,6 +54,10 @@ Work
   wf summary --file summary.md      the owner's plain-language summary for the delivered comment
   wf deliver [--summary-file F] [--acknowledge-deferrals D2,D3]
                                     integrate every repo, then start the tracker handoff (every deferral acknowledged first)
+  wf deliver --acknowledge-adapter-state REPO:STATE
+                                    the change is on the target branch but the delivery adapter reports another state: the owner accepts it
+  wf deliver --repin-adapter [COMMIT] --reason "why"
+                                    after a delivery adapter fault: read the delivery adapter from the base branch tip (shows, then the owner confirms)
   wf shown --file shown.json        record that every delivered screenshot was shown in the chat, with its caption and anomalies
   wf delivery narrow --keep SHA,... | --file keep.json --reason "why" [--dry-run]
                                     once, before \`wf shown\`: keep only this ticket's files of a delivered set an over-broad glob filled
@@ -655,7 +659,7 @@ async function dispatch(cmd, sub, positional, options) {
       }
       const r = await deliver(root, options);
       if (r.waiting) {
-        print(options, `${r.waiting.repo}: ${r.waiting.state}${r.waiting.url ? ` (${r.waiting.url})` : ''}. Run \`wf deliver\` again once it is merged.`, r);
+        print(options, `${r.waiting.repo}: ${r.waiting.state}${r.waiting.url ? ` (${r.waiting.url})` : ''}${r.waiting.onTarget ? `; the change is already on ${r.waiting.onTarget}` : ''}. Run \`wf deliver\` again once it is merged.`, r);
         return 0;
       }
       const api = await trackerApi(root, r.state.id);
@@ -663,7 +667,10 @@ async function dispatch(cmd, sub, positional, options) {
       const members = (after.batch?.members ?? []).map((m) => showBlock(root, loadState(root, m))).join('');
       const comment = after.tracker.pending.some((a) => a.rendered === 'delivered') ? `\ndelivered comment to post (rendered from your summary, the user-visible UAT scope, the screenshots and known limits): ${commentFile(root, after.id)}\n  replace each {assetUrl:<title>} with the assetUrl its upload returned, so every screenshot shows inline; post it unchanged otherwise` : '';
       const deferrals = [after, ...(after.batch?.members ?? []).map((m) => loadState(root, m))].flatMap((st) => (st.discovered ?? []).filter((x) => x.status === 'deferred').map((x) => ({ ...x, id: st.id === after.id ? x.id : `${st.id}:${x.id}` }))).map((x) => `\n  ${x.id} deferred (${x.deferred.source?.provenance ?? 'recorded'}${x.deferred.source?.file ? `, ${x.deferred.source.file}:${x.deferred.source.line}` : ''}): ${x.summary}\n    taken as the owner's decision: "${x.deferred.decision}"\n    channel: ${channelOf(x)}`).join('');
-      print(options, `delivered ${after.id}: ${Object.values(after.delivery.repos).map((d) => `${d.repo}${d.commit ? `@${d.commit.slice(0, 10)}` : ' (no changes)'}`).join(', ')}${api}${deferrals ? `\ndeferred issues (show these to the owner: this is what was taken as their decision):${deferrals}` : ''}${showBlock(root, after)}${members}${comment}\nnext: ${nextAction(root, after)}`, after);
+      // I-20: a repo delivered while its adapter reported another state after the merge, as the owner acknowledged it.
+      const postMerge = Object.values(after.delivery.repos).filter((d) => d.acknowledged).map((d) => `\n  ${d.repo}: on ${d.target} while the delivery adapter reported ${d.adapterState}${d.observed?.evidence ? ` (${d.observed.evidence})` : ''}; acknowledged by the owner as ${d.acknowledged}`).join('');
+      const repins = (after.adapterRepins ?? []).map((x) => `\n  delivery adapter re-pinned from ${x.from.slice(0, 10)} to ${x.to.slice(0, 10)}: ${x.reason}`).join('');
+      print(options, `delivered ${after.id}: ${Object.values(after.delivery.repos).map((d) => `${d.repo}${d.commit ? `@${d.commit.slice(0, 10)}` : ' (no changes)'}${d.adapterState && d.adapterState !== 'integrated' ? ` [adapter: ${d.adapterState}]` : ''}`).join(', ')}${postMerge ? `\nnot a clean adapter delivery (show this to the owner):${postMerge}` : ''}${repins}${api}${deferrals ? `\ndeferred issues (show these to the owner: this is what was taken as their decision):${deferrals}` : ''}${showBlock(root, after)}${members}${comment}\nnext: ${nextAction(root, after)}`, after);
       return 0;
     }
     case 'tracker': {

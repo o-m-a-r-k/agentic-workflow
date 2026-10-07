@@ -55,7 +55,7 @@ export function nextAttemptId(root, item) {
 }
 
 // The remote base when there is one (fetched; offline falls back to the last fetched copy), else the local branch.
-function baseRef(dir, repo) {
+export function baseRef(dir, repo) {
   const remotes = git(dir, ['remote']).split('\n').filter(Boolean);
   if (remotes.includes(repo.remote)) {
     const fetched = run('git', ['fetch', '--quiet', repo.remote, repo.base], { cwd: dir, allowFail: true });
@@ -238,8 +238,16 @@ export function adopt(root, options) {
 export function abandon(root, options) {
   const state = openState(root, options);
   if (!options.reason) throw new WfError('--reason is required');
-  if (Object.keys(state.delivery.repos).length) throw refuse(`${state.id} is partly delivered; finish delivery instead of abandoning it`);
-  append(root, state.id, 'abandoned', { reason: String(options.reason) }, actor(options));
+  // I-22: the refusal names the case. A repo recorded as skipped had no changes, so nothing of it reached a target branch;
+  // an attempt whose recorded repos are all skipped is abandoned like one with nothing recorded. A repo recorded as
+  // delivered is on its target branch: the attempt is finished, never abandoned.
+  const recorded = Object.values(state.delivery.repos);
+  const landed = recorded.filter((d) => !d.skipped);
+  if (landed.length) {
+    const list = recorded.map((d) => (d.skipped ? `${d.repo} skipped (${d.skipped}; nothing pushed)` : `${d.repo} delivered (${String(d.commit ?? '').slice(0, 10)} on ${d.target ?? 'its target'})`)).join('; ');
+    throw refuse(`${state.id} is partly delivered: ${list}; a delivered repo cannot be taken back, so the attempt is finished, not abandoned`, `\`wf deliver\` delivers the remaining repos; after a delivery adapter fault, commit the fixed adapter on the base branch and re-pin this attempt to it: \`wf deliver --repin-adapter --reason "<why>"\` (docs/lifecycle.md, "Recovering from an adapter fault")`);
+  }
+  append(root, state.id, 'abandoned', { reason: String(options.reason), ...(recorded.length ? { skipped: recorded.map((d) => d.repo) } : {}) }, actor(options));
   cleanupWorktrees(root, loadState(root, state.id));
   return loadState(root, state.id);
 }

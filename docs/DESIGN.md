@@ -187,7 +187,7 @@ export default {
 }
 ```
 
-The engine owns authorization, repo ordering, partial-delivery resume and base advance. Built in: `push-main`. `kind` also takes a path to a project adapter.
+The engine owns authorization, repo ordering, partial-delivery resume and base advance. Built in: `push-main`. `kind` also takes a path to a project adapter. `observe` and `readback` are called again on every retry, also when the change is already on the target branch, with the fields `integrate` returned last time (recorded as `repo.integrating`); so both must be safe to call more than once. A non-integrated state after the merge counts only with the owner's `--acknowledge-adapter-state`, and a faulty adapter is replaced for a running attempt with `wf deliver --repin-adapter` ([lifecycle](lifecycle.md#recovering-from-an-adapter-fault)).
 
 ## Ticket lifecycle
 

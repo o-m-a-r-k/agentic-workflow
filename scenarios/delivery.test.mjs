@@ -344,7 +344,7 @@ function recoverFromBrokenAdapter(name, { baseMerge }) {
   const r = wf(root, ['deliver', '--attempt', id]);
   assert.notEqual(r.code, 0);
   assert.match(r.err, /the delivery adapter reported an unknown state "merged"/);
-  assert.match(r.err, /this attempt is pinned to the delivery adapter as of its admission, so fixing the adapter on the base branch does not change this attempt; the adapter must report one of the documented states, and the owner decides the recovery: see docs\/lifecycle\.md, "Recovering from an adapter fault"/);
+  assert.match(r.err, /this attempt reads its delivery adapter as committed at [0-9a-f]{10}, so a fix committed on the base branch does not reach it by itself\. Once the fixed adapter is committed and pushed on the base branch, the owner re-pins this attempt's delivery adapter to it: `wf deliver --repin-adapter --reason "<why>"` shows what changes and asks for the owner's confirmation \(docs\/lifecycle\.md, "Recovering from an adapter fault"\)/);
   assert.doesNotMatch(r.err, /cherry-pick|abandon|wf\/ENG-72|[0-9a-f]{10}\.\./, 'no recipe, branch name or hash range in the refusal');
   // A fix committed on the base branch alone does not reach this attempt: the same refusal.
   fs.writeFileSync(path.join(root, '.workflow', 'delivery', 'mr.mjs'), fixedAdapter);

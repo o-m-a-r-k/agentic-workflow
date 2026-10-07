@@ -52,11 +52,11 @@ test('connector, agent-reported: the engine checks status, comment text, screens
   const posted = `${rendered.replace(/\{assetUrl:home\.png\}/g, 'https://uploads.linear.app/x/home.png')}\nOwner note: also check the dark theme.\n`;
   const postedFile = path.join(base, 'posted.md');
   write(base, 'posted.md', posted);
-  const good = { issue: 'ENG-50', status: 'Ready for UAT', comment: { id: 'c1', bodySha256: sha(posted), createdAt: later() }, attachments: [{ title: 'home.png', subtitle: 'Home screen with the new text' }] };
+  const good = { issue: 'ENG-50', status: 'Ready for UAT', comment: { id: 'c1', bodySha256: sha(posted), createdAt: later() }, attachments: [{ title: 'home.png', subtitle: 'Home screen with the new text', assetUrl: 'https://uploads.linear.app/x/home.png' }] };
   const refusals = [
     [{ ...good, readAt: later(), status: 'In Progress' }, /status is `In Progress`, expected `Ready for UAT`/],
     [{ ...good, readAt: later(), comment: { ...good.comment, bodySha256: sha('other') } }, /the posted comment's sha256 is .* the report declares/],
-    [{ ...good, readAt: later(), attachments: [{ title: 'home.png', subtitle: 'wrong caption' }] }, /home\.png: reported without the subtitle "Home screen with the new text"/],
+    [{ ...good, readAt: later(), attachments: [{ ...good.attachments[0], subtitle: 'wrong caption' }] }, /home\.png: reported without the subtitle "Home screen with the new text"/],
     [{ ...good, readAt: later(), attachments: [] }, /home\.png: not among the reported attachments/],
     [{ ...good, readAt: '2020-01-01T00:00:00.000Z' }, /`readAt` 2020-01-01T00:00:00.000Z is before delivery/],
     [{ ...good, readAt: later(), issue: 'ENG-51' }, /the report is for `ENG-51`, not ENG-50/],
@@ -70,7 +70,23 @@ test('connector, agent-reported: the engine checks status, comment text, screens
   const bare = 'Something else entirely.\n';
   write(base, 'bare.md', bare);
   const b = rec('delivered', { ...good, readAt: later(), comment: { ...good.comment, bodySha256: sha(bare) } }, ['--comment-file', path.join(base, 'bare.md')]);
-  assert.match(b.err, /lacks the template's fixed line\(s\): "UAT scope:"[\s\S]*lacks the owner's summary[\s\S]*no inline image for 1 delivered screenshot\(s\): home\.png/);
+  assert.match(b.err, /lacks the template's fixed line\(s\): "UAT scope:"[\s\S]*lacks the owner's summary[\s\S]*the comment shows no image for 1 delivered screenshot\(s\)[\s\S]*home\.png: no `!\[home\.png\]\(https:\/\/uploads\.linear\.app\/x\/home\.png\)` in the comment/);
+  // I-11: an image counts only by the url of the reported upload. Named failure: an image matched by its alt text alone
+  // passed, so a comment that still held the placeholder (no image on the ticket) was recorded as delivered.
+  const unrendered = (body) => {
+    write(base, 'p.md', body);
+    return rec('delivered', { ...good, readAt: later(), comment: { ...good.comment, bodySha256: sha(body) } }, ['--comment-file', path.join(base, 'p.md')]);
+  };
+  const ph = unrendered(rendered);
+  assert.equal(ph.code, 75);
+  assert.match(ph.err, /the comment still holds 1 placeholder\(s\) \(\{assetUrl:home\.png\}\): the ticket shows no image there/);
+  assert.match(ph.err, /home\.png: no `!\[home\.png\]\(https:\/\/uploads\.linear\.app\/x\/home\.png\)` in the comment/);
+  const other = unrendered(rendered.replace(/\{assetUrl:home\.png\}/g, 'https://uploads.linear.app/x/another.png'));
+  assert.match(other.err, /home\.png: no `!\[home\.png\]\(https:\/\/uploads\.linear\.app\/x\/home\.png\)` in the comment/, 'an image of another upload does not count');
+  const link = unrendered(rendered.replace(/!\[home\.png\]\(\{assetUrl:home\.png\}\)/g, '[home.png](https://uploads.linear.app/x/home.png)'));
+  assert.match(link.err, /home\.png: no `!\[home\.png\]/, 'a link to the upload is not an image');
+  const noUrl = rec('delivered', { ...good, readAt: later(), attachments: [{ title: 'home.png', subtitle: 'Home screen with the new text' }] }, ['--comment-file', postedFile]);
+  assert.match(noUrl.err, /home\.png: the report gives no `assetUrl` \(https\) for its upload/);
   assert.match(rec('delivered', { ...good, readAt: later() }).err, /--comment-file <posted\.md> is required/);
   // The good report: recorded, unverified, the owner's addition listed; status and export say so.
   const readAt = later();

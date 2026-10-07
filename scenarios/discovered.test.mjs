@@ -522,16 +522,17 @@ export default {
   assert.ok(state(root, id).discovered[0].deferred.acknowledged);
   assert.match(ok(deliver()).out, /awaiting-merge/, 'the same command after the wait');
   // Merged, but the readback fails: refused. The same command is accepted again (the acknowledgement is not refused as
-  // stray) and, because the accepted commit is now on the target branch, records the delivery as recovered without
-  // calling the adapter's readback again.
+  // stray). The accepted commit is now on the target branch, but I-20: ancestry alone is not the adapter's proof, so the
+  // retry asks the adapter again (observe, then readback) and refuses while its readback still fails.
   fs.writeFileSync(path.join(root, '..', 'merged.flag'), '');
   fs.writeFileSync(path.join(root, '..', 'readback-fails.flag'), '');
   assert.match(deliver().err, /readback failed: the merge is not visible yet/);
-  // The same command again is accepted: the accepted commit is already on the remote, so the engine records the
-  // delivery as recovered from the remote (its rule for a push that landed before a failure).
+  assert.match(deliver().err, /readback failed: the merge is not visible yet/, 'the retry asks the adapter again, not only git');
+  fs.rmSync(path.join(root, '..', 'readback-fails.flag'));
   const again = deliver();
   assert.equal(again.code, 0, again.err);
   const s = state(root, id);
   assert.ok(s.delivery.completedAt, 'delivered (no tracker: the attempt then closes)');
+  assert.equal(s.delivery.repos.app.adapterState, 'integrated');
   assert.equal(s.delivery.repos.app.recovered, true);
 });
