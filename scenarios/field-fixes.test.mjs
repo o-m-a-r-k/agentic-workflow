@@ -290,7 +290,7 @@ test('wf report shows active minutes and rounds; doctor warns when unpinned agen
   });
   ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', id]));
   assert.equal(state(root, id).planSource.model, 'model-b');
-  const rows = JSON.parse(ok(wf(root, ['report', '--json'])).out);
+  const rows = JSON.parse(ok(wf(root, ['report', '--json'])).out).attempts;
   const p = rows[0].roles.find((r) => r.role === 'planner');
   assert.deepEqual([p.wallMinutes, p.activeMinutes, p.rounds], [21, 4, 2], 'the 17-minute gap is idle; the second prompt is a resume');
   assert.deepEqual(p.roundDetail.map((r) => r.activeMinutes), [3, 1]);

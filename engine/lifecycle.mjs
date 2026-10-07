@@ -12,7 +12,7 @@ import { implementerAcks, lessonPrompts, lessonVerdicts, owesLesson, recur, rele
 import { canonical as canonicalPath, isInside, touchesEvidence } from './paths.mjs';
 import { changedForStep, deliveryOrder, impact, inside, packageOf } from './topology.mjs';
 import { findSkill } from './skills.mjs';
-import { lastFencedYaml, lastModel, readTranscript, sessionModel, subagentModel, subagentTranscripts } from './telemetry.mjs';
+import { childAgents, lastFencedYaml, lastModel, readTranscript, sessionModel, subagentModel, subagentTranscripts } from './telemetry.mjs';
 import { outsidePlan, outsideVerdicts } from './scope.mjs';
 import { commentFile, emitTrackerEvent, needsSummary, recordSummary, writeDeliveredComment } from './tracker.mjs';
 import { designChecks, designVerdicts, requiredSkills, reviewRules, ruleVerdicts, skillFiles, unreadDocs } from './rules.mjs';
@@ -241,6 +241,25 @@ export function mergeAmendment(frozen, entries) {
   return { criteria, changes };
 }
 
+// The optional `scope: { endpoints, errorCodes, repos }` block of an amendment file: each a count or a list of names.
+export function scopeOf(scope) {
+  if (scope === undefined || scope === null) return { endpoints: null, errorCodes: null, repos: null, stated: null };
+  if (typeof scope !== 'object' || Array.isArray(scope)) throw new WfError('`scope` in the amendment file is { endpoints, errorCodes, repos }: each a count or a list of names');
+  const unknown = Object.keys(scope).filter((k) => !['endpoints', 'errorCodes', 'repos'].includes(k));
+  if (unknown.length) throw new WfError(`\`scope\` takes endpoints, errorCodes and repos only (not ${unknown.join(', ')})`);
+  const out = { stated: {} };
+  for (const k of ['endpoints', 'errorCodes', 'repos']) {
+    const v = scope[k];
+    if (v === undefined || v === null) out[k] = null;
+    else if (Array.isArray(v) && v.every((x) => typeof x === 'string' && x.trim())) {
+      out[k] = v.length;
+      out.stated[k] = v;
+    } else if (Number.isInteger(v) && v >= 0) out[k] = v;
+    else throw new WfError(`\`scope.${k}\` must be a count (a whole number) or a list of names`);
+  }
+  return out;
+}
+
 export function amendCriteria(root, options) {
   const state = openState(root, options);
   if (!state.criteria) throw refuse('criteria are not frozen yet; use `wf plan`');
@@ -248,6 +267,7 @@ export function amendCriteria(root, options) {
   const amendText = readOnce(options.file);
   const doc = parseStructured(options.file, amendText);
   const { criteria, changes } = mergeAmendment(state.criteria, doc.criteria);
+  const scope = scopeOf(doc.scope);
   // Work items survive an amendment unless the file replaces them; either way they must name criteria that still exist.
   const cfg = loadConfig(root);
   const work = validateWork(cfg, doc.work ?? state.work, criteria);
@@ -270,6 +290,9 @@ export function amendCriteria(root, options) {
   }
   const raw = keepRaw(root, state.id, `plans/amend-${state.criteriaAmendments.length + 1}.raw.${extOf(from)}`, amendText);
   append(root, state.id, 'criteria.amended', { criteria, changes, reason: String(options.reason), previous: state.criteria, raw, ...(doc.work ? { work } : {}), ...(added.length ? { addedRepos: added.map((a) => a.repo) } : {}) }, actor(options));
+  // Telemetry: how much the ticket grew with this amendment (criteria counts always; endpoints, error codes and repos
+  // when the amendment file states them under `scope`).
+  append(root, state.id, 'scope.changed', { amendment: state.criteriaAmendments.length + 1, reason: String(options.reason), criteria: { before: state.criteria.length, after: criteria.length, added: changes.added.length, changed: changes.changed.length, dropped: changes.dropped.length }, ...scope, addedRepos: added.map((a) => a.repo) }, actor(options));
   return { state: loadState(root, state.id), changes, added };
 }
 
@@ -420,7 +443,7 @@ export function handoff(root, role, options) {
     reviewClosureFile: role === 'reviewer' ? path.join(root, '.wf-worktrees', state.id, '_review', `closure-${n}.json`) : null,
     instructions: {
       planner: 'Read the issue and the code. Do not change any file. When the bundle has `designSystem` and the ticket changes a UI surface, add a criterion "uses the shared components: <the ones from designSystem.components this surface needs>" with a uat a person can check. Return your plan as one ```yaml fenced block, last in your reply: { plan: { summary, contract, anchors, tests: { changed, run }, doNotRun, externalServices, agentSplit }, criteria: [{ id: C1, text, uat }], work: [{ id: W1, criteria: [C1], repos, class, why }] } (work is optional; classes: see your role file). The owner freezes it from your transcript unchanged. Never write a blanket "no change in <repo or component>" criterion: state the invariant instead (the contract seam stays matched; existing fields, permissions and tenant isolation are unchanged), so a fix that needs another repo is not fenced off. Leave no background command, monitor or sleep loop running when you report.',
-      implementer: "Done means `check.command` passes for your repos (it runs the light steps listed under `check`; it never counts as the gate). Implement against the frozen criteria and the plan in the worktrees above: follow `plan.contract`, start from `plan.anchors`, while iterating run only `plan.tests.run` and the specs you changed, never what `plan.doNotRun` lists, and keep to `plan.externalServices` and `plan.agentSplit`. Write tests only for real behaviour. Before finishing run the repo's lint and full unit suite once, in the foreground. Commit at stage boundaries and everything when done. If `work` is set, build that work item; an issue you find anywhere while working is still yours to fix (below). If it turns out to touch something a stronger class covers, stop and tell the owner. For every lesson under `lessons.apply` (this project's lessons for the change, labelled enforced or advisory, with why each matched), follow it and acknowledge it in a commit message trailer, one line each: `Lesson <id>: applied - <how>` or `Lesson <id>: not-applicable - <why>`; the review does not start without them. Every issue you find while working, inside or outside your criteria, is fixed by you, in this attempt, in whatever file it lives in; the work-item brief is never a reason to leave it. The only exception: a file another work item is editing right now: record it with `wf discovered add --attempt <id> --summary \"...\" --where <file:line> --found-by <your agent id> --blocked-by <work item>` and name its D id in your report. A report line that leaves an issue unfixed without its D id refuses the review handoff. The open entries under `discovered` are yours to fix. Never defer one yourself or call it harmless or a follow-up: only the owner defers, in their own words. If a criterion, the plan or your work item's repos block the fix, stop and tell the owner: the owner amends the criteria (adding the repo when the fix needs one). Before you report, stop every background command, monitor or sleep loop you started: a waiter left running keeps notifying the owner after you are done.",
+      implementer: "Done means `check.command` passes for your repos (it runs the light steps listed under `check`; it never counts as the gate). Implement against the frozen criteria and the plan in the worktrees above: follow `plan.contract`, start from `plan.anchors`, while iterating run only `plan.tests.run` and the specs you changed, never what `plan.doNotRun` lists, and keep to `plan.externalServices` and `plan.agentSplit`. Write tests only for real behaviour. Before finishing run the repo's lint and full unit suite once, in the foreground. Commit at stage boundaries and everything when done. If `work` is set, build that work item; an issue you find anywhere while working is still yours to fix (below). If it turns out to touch something a stronger class covers, stop and tell the owner. For every lesson under `lessons.apply` (this project's lessons for the change, labelled enforced or advisory, with why each matched), follow it and acknowledge it in a commit message trailer, one line each: `Lesson <id>: applied - <how>` or `Lesson <id>: not-applicable - <why>`; the review does not start without them. A commit that fixes a review finding carries a trailer naming it: `Fixes-finding: <round>:<id>` (the reviewer id and finding id you were given; several comma-separated). Every issue you find while working, inside or outside your criteria, is fixed by you, in this attempt, in whatever file it lives in; the work-item brief is never a reason to leave it. The only exception: a file another work item is editing right now: record it with `wf discovered add --attempt <id> --summary \"...\" --where <file:line> --found-by <your agent id> --blocked-by <work item>` and name its D id in your report. A report line that leaves an issue unfixed without its D id refuses the review handoff. The open entries under `discovered` are yours to fix. Never defer one yourself or call it harmless or a follow-up: only the owner defers, in their own words. If a criterion, the plan or your work item's repos block the fix, stop and tell the owner: the owner amends the criteria (adding the repo when the fix needs one). Before you report, stop every background command, monitor or sleep loop you started: a waiter left running keeps notifying the owner after you are done.",
       reviewer: 'Review the whole change against the frozen criteria, and the gate evidence when `gate.passedOnThisTree` is true (then open every screenshot listed under `gate.screenshots`, which are exactly the files `gate.artifacts` lists per glob, and record the sha256 of each one you viewed; a file no glob lists is never required; a step whose package did not change needs nothing; a step marked `uncovered` matched nothing although this ticket changed its package: judge whether the ticket needed a capture there and add `noEvidence: [{ step, reason }]` saying why none is needed, or raise a finding). When it is false, no gate has passed on this tree yet: judge the diff and list no screenshots. You did not write this change. Everything you need is in this bundle; judge the whole change yourself. Read every document under `rules` (each `read` path) and every skill under `skills` (the Skill tool, or its file) in this bundle: they add to the whole review and never narrow it. Give each rule a verdict with one line of evidence (file:line or the document section): `rules: [{ rule, verdict: complies|finding|not-applicable, evidence, finding }]` (`finding` names your finding id when the verdict is finding); a rule marked `docChangedByTicket` had its document changed by this ticket: judge against the copy under `read`, which is the base version. Write the closure file: { reviewer, findings: [{ id, severity, summary, status: open|fixed|verified-nonissue, evidence, work }], criteria: [{ id, evidence: { kind: test|screenshot|output|not-applicable|dropped-with-reason, ref, reason } }] (a screenshot ref is the sha256 or source of a file in `gate.artifacts`), screenshotsInspected: [sha256], noEvidence: [{ step, reason }], rules: [{ rule, verdict, evidence, finding }], outsidePlan: [{ file, verdict: covered|finding, by, evidence }] } (one outsidePlan entry per file the bundle lists under `outsidePlan`: `covered` when a criterion covers that change, with its id in `by`; otherwise `finding` with your finding id in `by`). When the bundle has \`designSystem\`: for every changed UI file list each table, list, form and dialog it renders and name the shared component used (from \`designSystem.components\`) or the justified exception, and give every \`designSystem.hits\` entry a verdict: \`designHits: [{ id, verdict: justified|finding, evidence, finding }]\` (a closure missing one is refused). Give every entry under \`discovered\` (issues found during the ticket) a verdict: \`discovered: [{ id, verdict: fixed|deferred|open, evidence }]\` (\`fixed\` with the file:line of the fix you checked; \`deferred\` only for an entry the owner deferred; \`open\` when it is not fixed). For every repo under \`addedRepos\`, judge the contract seam on both sides: \`seams: [{ repo, verdict: matched|finding, evidence, finding }]\` (\`matched\` cites the producer file:line and the consumer file:line). Every issue you find is a finding, inside or outside the criteria: never out of scope, a follow-up or harmless on your own judgement. A criterion or scope fence that blocks a fix is a criteria defect (a finding with category \`criteria\`), never a reason to defer or to ship a cosmetic workaround. Then run `wf review --closure <file>`. Only after your closure is recorded, `wf review` may list findings from earlier rounds for you to verify against the code: then add `priorFindings: [{ round, id, status: fixed|verified-nonissue|open, evidence }]` to the same file, change nothing else, and run `wf review --closure <file>` again.',
       tester: 'Write requirement expectations from the issue before reading the implementation, then map each to gate tests.',
     }[role],
@@ -428,7 +451,11 @@ export function handoff(root, role, options) {
   const record = () => {
     writeJson(file, bundle);
     if (bundle.reviewClosureFile) fs.mkdirSync(path.dirname(bundle.reviewClosureFile), { recursive: true });
-    append(root, state.id, 'handoff', { lessons: (bundle.lessons?.apply ?? []).map((l) => l.id), lessonsFiltered: (selected?.filtered ?? []).map((l) => l.id), role, agent, runtime, session: options.session ?? null, agentType, class: cls, effort, model, sessionModel: sessionModelNow, startPrompt: startPromptFor(file), work: work?.id ?? null, bundle: file, tree: treeHashes(state), patch: patchIds(state), ...(role === 'reviewer' ? { gate: gateNow.ok ? state.lastGate.runId : null, round: bundle.round } : {}) }, actor(options));
+    const tree = treeHashes(state);
+    // Telemetry: implementers handed work and not closed (`wf handoff close`) while this reviewer starts: the tree may still move.
+    const openImplementers = role === 'reviewer' ? state.implementers.filter((x) => !x.closedAt).map((x) => x.agent) : undefined;
+    append(root, state.id, 'handoff', { lessons: (bundle.lessons?.apply ?? []).map((l) => l.id), lessonsFiltered: (selected?.filtered ?? []).map((l) => l.id), role, agent, runtime, session: options.session ?? null, agentType, class: cls, effort, model, sessionModel: sessionModelNow, startPrompt: startPromptFor(file), work: work?.id ?? null, bundle: file, tree, patch: patchIds(state), ...(role === 'reviewer' ? { gate: gateNow.ok ? state.lastGate.runId : null, round: bundle.round, openImplementers } : {}) }, actor(options));
+    if (role === 'implementer') append(root, state.id, 'implementer.opened', { handoff: handoffId(file), agent, work: work?.id ?? null, class: cls, heads: tree }, actor(options));
   };
   // The model the owner's session runs on now: an agent whose class pins no model inherits it (`wf report` shows it).
   let sessionModelNow = null;
@@ -520,6 +547,97 @@ function unverifiedPrior(state, review) {
   });
 }
 
+// The handoff id used by telemetry events: the bundle's file name (`05-implementer`).
+export const handoffId = (bundle) => (bundle ? path.basename(String(bundle), '.json') : null);
+
+// `Fixes-finding: <round>:<id>` trailers (several per line, comma-separated) in the attempt's commits: the commit a
+// review finding was fixed in. <round> is the reviewer agent id that raised it, as `priorFindings` names it.
+const FIXES = /^Fixes-finding:\s*(.+)$/i;
+export function findingFixes(state) {
+  const out = [];
+  for (const [repo, r] of Object.entries(state.repos)) {
+    if (!r.worktree || !fs.existsSync(r.worktree)) continue;
+    const log = git(r.worktree, ['log', '--reverse', '--format=%H%n%B%n--wf-end--', `${r.base}..HEAD`], { allowFail: true }) ?? '';
+    for (const chunk of log.split('--wf-end--')) {
+      const lines = chunk.trim().split('\n');
+      for (const line of lines.slice(1)) {
+        const m = FIXES.exec(line.trim());
+        if (!m) continue;
+        for (const ref of m[1].split(',').map((x) => x.trim()).filter(Boolean)) {
+          const i = ref.lastIndexOf(':');
+          if (i > 0 && !out.some((x) => x.round === ref.slice(0, i) && x.id === ref.slice(i + 1))) out.push({ round: ref.slice(0, i), id: ref.slice(i + 1), repo, commit: lines[0] });
+        }
+      }
+    }
+  }
+  return out;
+}
+
+// One `review.round` event (telemetry): the tree the reviewer judged, whether a gate had passed on it, who reviewed
+// on which model, the outcome, each finding with its severity, and the commits earlier findings were fixed in.
+function roundData(state, h, closure, { outcome, reason = null, reasonClass = null, model = null, revealed = false }) {
+  const prior = Array.isArray(closure?.priorFindings) ? closure.priorFindings : [];
+  let fixes = [];
+  try {
+    fixes = findingFixes(state);
+  } catch {}
+  return {
+    handoff: handoffId(h.bundle),
+    bundle: h.bundle,
+    agent: h.agent,
+    agentType: h.agentType ?? null,
+    model: model ?? h.model ?? null,
+    tree: h.tree ?? null,
+    gatePassedOnTree: Boolean(h.gate),
+    gateRun: h.gate ?? null,
+    openImplementers: h.openImplementers ?? null,
+    outcome,
+    reasonClass,
+    reason,
+    revealed,
+    findings: (Array.isArray(closure?.findings) ? closure.findings : []).map((f) => ({ id: f?.id ?? null, severity: f?.severity ?? null, status: f?.status ?? null, category: f?.category ?? null })),
+    priorFindings: prior.map((p) => ({ round: p?.round ?? null, id: p?.id ?? null, status: p?.status ?? null, fixedIn: p?.fixedIn ?? fixes.find((x) => x.round === p?.round && x.id === p?.id)?.commit ?? null })),
+    fixes,
+  };
+}
+
+// A closure refused in a way that ends the round (a fresh reviewer is needed): recorded once per round and cause.
+function refusedRound(root, state, h, closure, reasonClass, reason) {
+  if ((state.reviewRounds ?? []).some((r) => r.bundle === h.bundle && r.outcome === 'refused' && r.reasonClass === reasonClass)) return;
+  try {
+    append(root, state.id, 'review.round', roundData(state, h, closure, { outcome: 'refused', reason, reasonClass }), null);
+  } catch {}
+}
+
+// `wf handoff close --agent ID`: the implementer finished (or was stopped). Telemetry: the tree is settled once every
+// implementer is closed, and its sub-agents (Claude Code transcripts whose parent is its transcript) are attributed.
+export function closeImplementer(root, options) {
+  const state = openState(root, options);
+  if (!options.agent || options.agent === true) throw new WfError('--agent <implementer id> is required');
+  const agent = String(options.agent);
+  const open = state.implementers.filter((x) => x.agent === agent && !x.closedAt).at(-1);
+  if (!open) throw refuse(`no open implementer \`${agent}\` on ${state.id}${state.implementers.length ? ` (open: ${state.implementers.filter((x) => !x.closedAt).map((x) => x.agent).join(', ') || 'none'})` : ''}`);
+  const outcome = options.outcome && options.outcome !== true ? String(options.outcome) : 'done';
+  if (!['done', 'stopped', 'failed'].includes(outcome)) throw new WfError('--outcome must be done, stopped or failed');
+  const heads = treeHashes(state);
+  const commits = {};
+  for (const [name, r] of Object.entries(state.repos)) {
+    const from = String(open.heads?.[name] ?? '').split('+')[0];
+    const n = from ? git(r.worktree, ['rev-list', '--count', `${from}..HEAD`], { allowFail: true }) : null;
+    commits[name] = n === null || n === undefined || n === '' ? null : Number(n);
+  }
+  const h = state.handoffs.filter((x) => x.role === 'implementer' && x.agent === agent).at(-1);
+  let children = [];
+  if (h?.runtime === 'claude') {
+    try {
+      children = childAgents(home(), agent, h.agentType, h.at);
+    } catch {}
+  }
+  if (children.length) append(root, state.id, 'subagents.attributed', { handoff: open.handoff, children }, actor(options));
+  append(root, state.id, 'implementer.closed', { handoff: open.handoff, agent, outcome, heads, commits }, actor(options));
+  return { state: loadState(root, state.id), handoff: open.handoff, outcome, commits, children };
+}
+
 export function recordReview(root, options) {
   const state = openState(root, options);
   if (typeof options.closure !== 'string') throw new WfError('--closure <file> is required');
@@ -541,11 +659,13 @@ export function recordReview(root, options) {
     // Named failure (I-23): two review rounds were refused because implementers were still editing, and nothing in the
     // ledger showed it. The refused round is recorded; it is over, and the next round starts on the committed tree.
     append(root, state.id, 'review.refused', { handoff: reviewerHandoff.bundle, reviewer: reviewerHandoff.agent, reason: 'tree-changed', moved, handedTree: reviewerHandoff.tree, tree: treeHashes(state) }, String(closure.reviewer ?? reviewerHandoff.agent));
+    refusedRound(root, state, reviewerHandoff, closure, 'tree-changed', `the worktree changed during the review round (${moved.join(', ')})`);
     throw refuse(`the worktree changed during the review round (${moved.join(', ')}): the closure no longer describes the tree under review; a reviewer writes only the file in \`reviewClosureFile\``, 'restore or commit the change through the implementer, then start a fresh reviewer: `wf handoff reviewer --agent <new id>`');
   }
   // Provenance: where transcripts exist, the closure must come from the agent handed this round, started with exactly
   // the printed line after its handoff. A steered reviewer, or a round run outside the engine, is refused.
   const provenance = verifyAgent(reviewerHandoff);
+  if (provenance.status === 'mismatch') refusedRound(root, state, reviewerHandoff, closure, 'provenance', provenance.reason);
   if (provenance.status === 'mismatch') throw refuse(`review provenance: ${provenance.reason}`, `start a fresh reviewer: \`wf handoff reviewer --agent <new id>\`, then start it as the agent type that command prints, named <new id> (the Agent tool's name), with only the printed line as its prompt`);
   // Where the transcript exists, it must show a successful read of every rule document and skill in the bundle. It
   // proves the content reached the reviewer, not that it was understood. Without a transcript: recorded unverified.
@@ -553,6 +673,7 @@ export function recordReview(root, options) {
   let reads = { status: 'unverified', reason: provenance.reason ?? null };
   if (provenance.status === 'verified' && (handed.rules?.length || handed.skills?.length)) {
     const missing = unreadDocs(readTranscript(provenance.transcript), handed.rules, handed.skills);
+    if (missing.length) refusedRound(root, state, reviewerHandoff, closure, 'unread-documents', `${missing.length} document(s) in the bundle not read`);
     if (missing.length) throw refuse(`the reviewer's transcript shows no successful read of ${missing.length} document(s) its bundle lists:\n  - ${missing.join('\n  - ')}`, 'start a fresh reviewer round: `wf handoff reviewer --agent <new id>` with only the printed line; it reads every document under `rules` and `skills`');
     reads = { status: 'verified', reason: null };
   } else if (provenance.status === 'verified') reads = { status: 'verified', reason: 'nothing to read' };
@@ -585,6 +706,7 @@ export function recordReview(root, options) {
   let reviewerModel = reviewerHandoff.runtime === 'claude' ? subagentModel(home(), reviewerHandoff.agent, reviewerHandoff.agentType, reviewerHandoff.at) : null;
   if (!reviewerModel && provenance.identity === 'unnamed') reviewerModel = lastModel(readTranscript(provenance.transcript));
   append(root, state.id, 'review.recorded', { closure, file: dest, raw, handoff: round, revealed: Boolean(revealed) || revealNow, provenance: provenance.status, provenanceReason: provenance.reason ?? null, identity: provenance.identity ?? null, transcript: provenance.transcript ?? null, reads, tree: reviewerHandoff.tree, gateRun: reviewerHandoff.gate ?? null, gateEvidenceInspected, handoffTree: reviewerHandoff.tree, handoffPatch: reviewerHandoff.patch, reviewerModel }, closure.reviewer);
+  append(root, state.id, 'review.round', roundData(state, reviewerHandoff, closure, { outcome: 'recorded', model: reviewerModel, revealed: Boolean(revealed) }), null);
   const after = loadState(root, state.id);
   const toVerify = unverifiedPrior(after, after.review);
   let reveal = null;

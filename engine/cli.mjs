@@ -12,11 +12,11 @@ import { canonical, touchesEvidence } from './paths.mjs';
 import { openCount } from './improve.mjs';
 import { LESSON_FILE, addLesson, applySnippet, exportPluginLessons, lessonPrompts, lessonWarnings, loadLessons, moveLesson, recur, relevantLessons, reviewLessons, setLesson } from './lessons.mjs';
 import { LinkRefused, changesOf, rebaseline, releaseAttempt, seal, setVerifyLevel, verifyAttempt } from './evidence.mjs';
-import { acceptReview, amendCriteria, designWarning, gateOrderCheck, batchCreate, batchEject, closeAfterHandoff, deliver, deliveredFiles, exportScreenshots, freezeCriteria, handoff, narrowDelivery, needsShown, nextAction, outsideWarning, recordReview, recordShown, reopen, screenshotsExportDir, shownDraftFile, uncovered, withAttempt } from './lifecycle.mjs';
+import { acceptReview, amendCriteria, closeImplementer, designWarning, gateOrderCheck, batchCreate, batchEject, closeAfterHandoff, deliver, deliveredFiles, exportScreenshots, freezeCriteria, handoff, narrowDelivery, needsShown, nextAction, outsideWarning, recordReview, recordShown, reopen, screenshotsExportDir, shownDraftFile, uncovered, withAttempt } from './lifecycle.mjs';
 import { addDiscovered, channelOf, closeDiscovered, discoveredLine, openDiscovered } from './discovered.mjs';
 import { detect, doctor, register, registry, setEnabled, sync, writeDraft } from './onboard.mjs';
 import * as secrets from './secrets.mjs';
-import { report, toCsv, toHandoffCsv, toHtml } from './telemetry.mjs';
+import { report, toCsv, toHandoffCsv, toHtml, toJson, toText } from './telemetry.mjs';
 import { impact } from './topology.mjs';
 import { commentFile, performTracker, publicAssetsProblem, recordSummary, recordTracker } from './tracker.mjs';
 import { ENGINE_VERSION, WfError, parseArgs, refuse } from './util.mjs';
@@ -44,6 +44,8 @@ Work
   wf discovered defer D1 --reason "why"   the owner, in their own terminal: types the id to confirm
                                     every issue found during the ticket: fixed in it, or deferred only by the owner
   wf handoff planner|implementer|reviewer|tester --agent ID [--work W1] [--session SID] [--runtime claude|codex]
+  wf handoff close --agent ID [--outcome done|stopped|failed]
+                                    an implementer finished: recorded with its commits and sub-agents (telemetry)
   wf check [--repo R]               light steps only, for the implementer; reused by the gate, never counts as one
   wf gate [--prepare-only] [--full] [--focused] [--rerun-failed] [--reason "why"]
                                     after a clean code review only; --reason runs it out of order and records why
@@ -76,7 +78,8 @@ Work
 Status
   wf resume                         what to do next
   wf status [--all] [--json]
-  wf report [--all] [--csv FILE] [--handoffs-csv FILE] [--html FILE]
+  wf report [--all] [--json] [--idle-minutes N] [--csv FILE] [--handoffs-csv FILE] [--html FILE]
+                                    phases, gates, review rounds, findings, tokens and cost per attempt
   wf verify [--attempt ID | --all]  re-hash every recorded evidence file, check the chain and its anchor
   wf verify --accept-changes --reason "why"   show changed evidence files and accept them (recorded, shown everywhere)
   wf evidence list [--kind K] | wf evidence show PATH
@@ -384,12 +387,18 @@ async function dispatch(cmd, sub, positional, options) {
   }
   if (cmd === 'report') {
     const roots = options.all ? registry().projects.map((p) => p.root).filter((r) => fs.existsSync(r)) : [requireRoot()];
-    const rows = report(roots, { home: process.env.WF_HOME ?? os.homedir() });
+    const idle = options['idle-minutes'] === undefined ? undefined : Number(options['idle-minutes']);
+    if (idle !== undefined && !(idle > 0)) throw new WfError('--idle-minutes must be a positive number');
+    const rows = report(roots, { home: process.env.WF_HOME ?? os.homedir(), ...(idle ? { idleMinutes: idle } : {}) });
     if (options.csv) fs.writeFileSync(String(options.csv), toCsv(rows));
     if (options['handoffs-csv']) fs.writeFileSync(String(options['handoffs-csv']), toHandoffCsv(rows));
     if (options.html) fs.writeFileSync(String(options.html), toHtml(rows));
     const files = [options.csv, options['handoffs-csv'], options.html].filter(Boolean);
-    print(options, files.length ? `wrote ${files.join(' and ')} (${rows.length} attempt(s))` : `${toCsv(rows)}\n${toHandoffCsv(rows)}`, rows);
+    if (options.json) {
+      process.stdout.write(`${JSON.stringify(toJson(rows), null, 2)}\n`);
+      return 0;
+    }
+    print(options, files.length ? `wrote ${files.join(' and ')} (${rows.length} attempt(s))` : toText(rows));
     return 0;
   }
   if (cmd === 'status' && options.all) {
@@ -552,6 +561,11 @@ async function dispatch(cmd, sub, positional, options) {
       throw new WfError('usage: wf discovered add --summary "..." [--where file:line] [--found-by ID] | list | close D1 --fixed SHA | --deferred (once the owner\'s message starts with: defer <attempt>:<id>)');
     }
     case 'handoff': {
+      if (sub === 'close') {
+        const c = closeImplementer(root, options);
+        print(options, `implementer ${options.agent} closed (${c.outcome}) on ${c.state.id}; commits since its handoff: ${Object.entries(c.commits).map(([k, v]) => `${k} ${v ?? '?'}`).join(', ')}${c.children.length ? `; ${c.children.length} sub-agent(s) attributed to ${c.handoff}` : ''}${c.state.implementers.some((x) => !x.closedAt) ? `\n  still open: ${c.state.implementers.filter((x) => !x.closedAt).map((x) => x.agent).join(', ')}` : '\n  every implementer is closed: the tree is settled for a review'}`, { handoff: c.handoff, outcome: c.outcome, commits: c.commits, children: c.children });
+        return 0;
+      }
       const r = handoff(root, sub, options);
       const startPrompt = r.startPrompt;
       // Never printed for a reviewer: its console carries only the start line.

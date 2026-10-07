@@ -142,6 +142,11 @@ export function reduce(entries) {
     stops: [],
     reviewsRefused: [],
     gateOverrides: [],
+    // Telemetry events (measurement only; nothing is decided from them).
+    reviewRounds: [],
+    implementers: [],
+    scopeChanges: [],
+    subagents: [],
     closedAt: null,
     abandoned: null,
     schemaVersion: null,
@@ -204,7 +209,7 @@ export function reduce(entries) {
         s.exports.push({ ...d, at: e.at });
         break;
       case 'gate.stopped':
-        s.stops.push({ at: e.at, reason: d.reason, class: d.class ?? null, runId: d.runId ?? null, discardedMinutes: d.discardedMinutes ?? null });
+        s.stops.push({ ...d, at: e.at, reason: d.reason, class: d.class ?? null, runId: d.runId ?? null, discardedMinutes: d.discardedMinutes ?? null });
         break;
       // A review round whose closure was refused because the tree changed during it (I-23): the round is over.
       case 'review.refused':
@@ -213,6 +218,24 @@ export function reduce(entries) {
       // A gate the owner started out of the order of work (I-27), with the reason it was recorded under.
       case 'gate.override':
         s.gateOverrides.push({ ...d, at: e.at, by: e.actor });
+        break;
+      // One per `wf review` outcome on a reviewer handoff: recorded (blind or with prior findings) or refused.
+      case 'review.round':
+        s.reviewRounds.push({ ...d, at: e.at });
+        break;
+      case 'implementer.opened':
+        s.implementers.push({ handoff: d.handoff, agent: d.agent, work: d.work ?? null, heads: d.heads ?? null, openedAt: e.at, closedAt: null, outcome: null });
+        break;
+      case 'implementer.closed': {
+        const x = s.implementers.filter((y) => y.agent === d.agent && !y.closedAt).at(-1);
+        if (x) Object.assign(x, { closedAt: e.at, outcome: d.outcome ?? 'done', closedHeads: d.heads ?? null, commits: d.commits ?? null });
+        break;
+      }
+      case 'scope.changed':
+        s.scopeChanges.push({ ...d, at: e.at });
+        break;
+      case 'subagents.attributed':
+        for (const c of d.children ?? []) if (!s.subagents.some((y) => y.agentId === c.agentId)) s.subagents.push({ ...c, parentHandoff: d.handoff, at: e.at });
         break;
       case 'review.recorded':
         s.review = { ...d, at: e.at };

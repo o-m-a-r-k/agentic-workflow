@@ -6,6 +6,7 @@ import { adapterFileAtCommit, adapterLocation, expandArtifactGlob, loadConfig, l
 import { changedFiles, treeHash, treeHashes, uncommitted, untrackedSnapshot } from './attempt.mjs';
 import { chooseShards, chooseWorkers } from './host.mjs';
 import { readJUnitFiles } from './junit.mjs';
+import { stepFailures } from './failures.mjs';
 import { append, attemptDir, loadState } from './ledger.mjs';
 import { projectEnv } from './env.mjs';
 import { missingFor, redactor, stepEnv } from './secrets.mjs';
@@ -429,7 +430,13 @@ async function executeStep(root, cfg, state, planned, ctx) {
     const interrupted = codes.some((c) => c.signal);
     const failed = codes.some((c) => c.code !== 0) || suites.some((s) => s.status === 'failed');
     result = { status: interrupted ? 'interrupted' : failed ? 'failed' : 'passed', suites, exitCodes: codes.map((c) => c.code), artifacts: [] };
+    // Which tests failed, recorded on the step (telemetry): read from the reports and output this run wrote.
+    if (result.status === 'failed') {
+      const playwrightFiles = (step.report?.playwright ? [step.report.playwright].flat() : []).flatMap((p) => globFiles(planned.dir, substitute(p, vars)));
+      result.failures = stepFailures({ junitFiles: files, playwrightFiles, log: logFile, exitCodes: result.exitCodes, suites, redact: ctx.redact });
+    }
   }
+  if (step.plugin && result.status === 'failed') result.failures = stepFailures({ log: logFile, suites: result.suites, redact: ctx.redact });
   copyScratch(scratch, evidenceDir);
   const collected = collectArtifacts(step, planned.dir, path.join(evidenceDir, 'artifacts'), started, units);
   result.artifacts.push(...collected.artifacts);
@@ -847,8 +854,9 @@ export const gateRunningRefusal = (state, busy) => busy.kind === 'check'
 export const STOP_CLASSES = ['major-finding', 'tree-change', 'owner-decision'];
 
 // Named failure (I-23): 15 of 16 gates on one ticket were stopped with nothing recorded but free text, so the cost
-// (about 175 of 271 gate minutes) was invisible. A stop names its class and records the wall-clock minutes the run had
-// spent; steps a later gate reuses by their inputs are not subtracted.
+// (about 175 of 271 gate minutes) was invisible. A stop names its class (required) and records what it threw away: the
+// steps still running (interrupted, their time lost: `discardedMinutes`) and the wall-clock minutes the run had spent
+// (`wallMinutes`; finished passing steps are kept for reuse by their inputs).
 export function stopGate(root, state, reason, cls) {
   if (!STOP_CLASSES.includes(cls)) throw new WfError(`--class is required: one of ${STOP_CLASSES.join(', ')} (why the gate's work is being thrown away)`);
   const file = lockFile(root, state.id);
@@ -856,10 +864,29 @@ export function stopGate(root, state, reason, cls) {
   const lock = JSON.parse(fs.readFileSync(file, 'utf8'));
   if (lock.kind === REVIEW_HANDOFF) throw refuse(`no gate is running for ${state.id} (a reviewer handoff is being recorded)`);
   if (!isWfRunner(lock.pid)) throw refuse(`the gate runner for ${state.id} is gone (pid ${lock.pid}); \`wf gate\` will recover its finished steps`);
-  const started = Date.parse(lock.startedAt);
-  const discardedMinutes = Number.isFinite(started) ? Math.round((Date.now() - started) / 6000) / 10 : null;
   const steps = loadState(root, state.id).gateRuns?.[lock.runId]?.steps ?? [];
-  append(root, state.id, 'gate.stopped', { runId: lock.runId, reason, class: cls, discardedMinutes, stepsFinished: steps.filter((s) => !['skipped', 'deferred', 'reused'].includes(s.status)).length }, null);
+  // Discarded work: the steps still running are interrupted and their time is lost; finished passing steps are kept
+  // for reuse. A reviewer handed the attempt and not yet recorded means the gate was given up during a review.
+  const live = liveGate(root, state);
+  const inFlight = (live?.running ?? []).map((r) => ({ id: r.id, seconds: r.seconds }));
+  const discardedSeconds = inFlight.reduce((n, r) => n + r.seconds, 0);
+  const discardedMinutes = Math.round(discardedSeconds / 6) / 10;
+  const started = Date.parse(lock.startedAt);
+  const lastReviewer = state.handoffs.filter((h) => h.role === 'reviewer').at(-1);
+  const reviewerOpen = Boolean(lastReviewer && !(state.reviews ?? []).some((r) => r.handoff === lastReviewer.bundle) && !(state.reviewRounds ?? []).some((r) => r.bundle === lastReviewer.bundle));
+  append(root, state.id, 'gate.stopped', {
+    runId: lock.runId,
+    kind: lock.kind ?? 'gate',
+    reason,
+    class: cls,
+    stepsFinished: steps.filter((s) => !['skipped', 'deferred', 'reused'].includes(s.status)).length,
+    stepsInFlight: inFlight,
+    discardedSeconds,
+    discardedMinutes,
+    wallSeconds: Number.isFinite(started) ? Math.round((Date.now() - started) / 1000) : null,
+    wallMinutes: Number.isFinite(started) ? Math.round((Date.now() - started) / 6000) / 10 : null,
+    reviewerOpen,
+  }, null);
   process.kill(lock.pid, 'SIGTERM');
   return { ...lock, discardedMinutes };
 }
