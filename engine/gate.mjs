@@ -6,6 +6,7 @@ import { adapterFileAtCommit, adapterLocation, expandArtifactGlob, loadConfig, l
 import { changedFiles, treeHash, treeHashes, uncommitted, untrackedSnapshot } from './attempt.mjs';
 import { chooseShards, chooseWorkers } from './host.mjs';
 import { readJUnitFiles } from './junit.mjs';
+import { stepFailures } from './failures.mjs';
 import { append, attemptDir, loadState } from './ledger.mjs';
 import { projectEnv } from './env.mjs';
 import { missingFor, redactor, stepEnv } from './secrets.mjs';
@@ -429,7 +430,13 @@ async function executeStep(root, cfg, state, planned, ctx) {
     const interrupted = codes.some((c) => c.signal);
     const failed = codes.some((c) => c.code !== 0) || suites.some((s) => s.status === 'failed');
     result = { status: interrupted ? 'interrupted' : failed ? 'failed' : 'passed', suites, exitCodes: codes.map((c) => c.code), artifacts: [] };
+    // Which tests failed, recorded on the step (telemetry): read from the reports and output this run wrote.
+    if (result.status === 'failed') {
+      const playwrightFiles = (step.report?.playwright ? [step.report.playwright].flat() : []).flatMap((p) => globFiles(planned.dir, substitute(p, vars)));
+      result.failures = stepFailures({ junitFiles: files, playwrightFiles, log: logFile, exitCodes: result.exitCodes, suites, redact: ctx.redact });
+    }
   }
+  if (step.plugin && result.status === 'failed') result.failures = stepFailures({ log: logFile, suites: result.suites, redact: ctx.redact });
   copyScratch(scratch, evidenceDir);
   const collected = collectArtifacts(step, planned.dir, path.join(evidenceDir, 'artifacts'), started, units);
   result.artifacts.push(...collected.artifacts);
@@ -787,12 +794,33 @@ export function liveGate(root, state) {
   };
 }
 
-export function stopGate(root, state, reason) {
+// Why a gate is stopped, as a class the report can count (telemetry only; the text is kept as written).
+export const STOP_CLASSES = ['review-findings', 'tree-changing', 'scope-change', 'flake', 'superseded', 'owner', 'other'];
+
+export function stopGate(root, state, reason, reasonClass = 'other') {
   const file = lockFile(root, state.id);
   if (!fs.existsSync(file)) throw refuse(`no gate is running for ${state.id}`);
+  if (!STOP_CLASSES.includes(reasonClass)) throw new WfError(`--reason-class must be one of ${STOP_CLASSES.join(', ')}`);
   const lock = JSON.parse(fs.readFileSync(file, 'utf8'));
   if (!isWfRunner(lock.pid)) throw refuse(`the gate runner for ${state.id} is gone (pid ${lock.pid}); \`wf gate\` will recover its finished steps`);
-  append(root, state.id, 'gate.stopped', { runId: lock.runId, reason }, null);
+  // Discarded work: the steps still running are interrupted and their time is lost; finished passing steps are kept
+  // for reuse. A reviewer handed the attempt and not yet recorded means the gate was given up during a review.
+  const live = liveGate(root, state);
+  const inFlight = (live?.running ?? []).map((r) => ({ id: r.id, seconds: r.seconds }));
+  const lastReviewer = state.handoffs.filter((h) => h.role === 'reviewer').at(-1);
+  const reviewerOpen = Boolean(lastReviewer && !(state.reviews ?? []).some((r) => r.handoff === lastReviewer.bundle) && !(state.reviewRounds ?? []).some((r) => r.bundle === lastReviewer.bundle));
+  append(root, state.id, 'gate.stopped', {
+    runId: lock.runId,
+    kind: lock.kind ?? 'gate',
+    reason,
+    reasonClass,
+    stepsInFlight: inFlight,
+    discardedSeconds: inFlight.reduce((n, r) => n + r.seconds, 0),
+    discardedMinutes: Math.round(inFlight.reduce((n, r) => n + r.seconds, 0) / 6) / 10,
+    wallSeconds: lock.startedAt ? Math.round((Date.now() - Date.parse(lock.startedAt)) / 1000) : null,
+    wallMinutes: lock.startedAt ? Math.round((Date.now() - Date.parse(lock.startedAt)) / 6000) / 10 : null,
+    reviewerOpen,
+  }, null);
   process.kill(lock.pid, 'SIGTERM');
   return lock;
 }
