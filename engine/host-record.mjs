@@ -18,6 +18,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
 import { home } from './provenance.mjs';
+import { indexedCodexTranscript } from './codex-transcript.mjs';
 
 const SESSION = /^[A-Za-z0-9][A-Za-z0-9-]{7,63}$/;
 export const maxTranscriptBytes = () => Number(process.env.WF_TRANSCRIPT_MAX_BYTES ?? 512 * 1024 * 1024);
@@ -42,6 +43,10 @@ export function ownerTranscript(owner) {
     baseReal = fs.realpathSync.native(base);
   } catch {
     return { problem: `no ${runtime === 'claude' ? 'Claude Code' : 'Codex'} transcript store on this machine (${base})` };
+  }
+  if (runtime === 'codex') {
+    const indexed = indexedCodexTranscript(base, baseReal, id, maxTranscriptBytes());
+    if (indexed) return indexed;
   }
   const candidates = [];
   if (runtime === 'claude') for (const d of realDirs(base)) candidates.push(path.join(d, `${id}.jsonl`));

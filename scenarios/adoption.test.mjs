@@ -2,6 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { createRequire } from 'node:module';
+import { spawnSync } from 'node:child_process';
 import { readLedger } from '../engine/ledger.mjs';
 import { ok, singleRepoProject, state, wf } from './helpers.mjs';
 
@@ -21,6 +23,71 @@ function message(p, session, text, { source = 'vscode', originator = 'Codex Desk
 
 const adopt = (p, session, args) => wf(p.root, ['adopt', ...args, '--json'], { ...silent, env: { CODEX_THREAD_ID: session } });
 const entry = (p, item) => ok(wf(p.root, ['entry', '--item', item, '--owner', 'claude:unavailable-session', '--json'], silent)).json();
+
+function indexedTranscript(p, session, file) {
+  const database = path.join(p.base, '.home', '.codex', 'state_5.sqlite');
+  let sqlite;
+  try { sqlite = createRequire(import.meta.url)('node:sqlite'); } catch (error) {
+    if (!['ERR_UNKNOWN_BUILTIN_MODULE', 'MODULE_NOT_FOUND'].includes(error.code)) throw error;
+  }
+  if (!sqlite) {
+    const script = 'import sqlite3,sys\nc=sqlite3.connect(sys.argv[1])\nc.execute("CREATE TABLE IF NOT EXISTS threads (id TEXT PRIMARY KEY, rollout_path TEXT)")\nc.execute("INSERT OR REPLACE INTO threads VALUES (?, ?)",(sys.argv[2],sys.argv[3]))\nc.commit()\nc.close()';
+    const result = spawnSync('python3', ['-I', '-c', script, database, session, file], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    return;
+  }
+  const db = new sqlite.DatabaseSync(database);
+  try {
+    db.exec('CREATE TABLE IF NOT EXISTS threads (id TEXT PRIMARY KEY, rollout_path TEXT)');
+    db.prepare('INSERT OR REPLACE INTO threads VALUES (?, ?)').run(session, file);
+  } finally { db.close(); }
+}
+
+test('Codex adoption reads the active indexed suffixed rollout rather than the stale initial transcript', () => {
+  // Named failure I-34: resumed desktop chat messages lived in the indexed suffixed rollout, invisible to filename lookup.
+  const p = singleRepoProject('indexed-adopt', { gate: { steps: [] } });
+  const e = entry(p, 'AD-1');
+  message(p, FIRST, 'Read the handover');
+  const dir = path.join(p.base, '.home', '.codex', 'sessions');
+  const original = path.join(dir, 'rollout-' + FIRST + '.jsonl');
+  const active = path.join(dir, 'rollout-later-' + FIRST + '_' + SECOND + '.jsonl');
+  fs.renameSync(original, active);
+  // A stale original coexists, and is newer by filesystem time; metadata, never mtime, selects the active file.
+  message(p, FIRST, 'Read the handover');
+  fs.appendFileSync(active, JSON.stringify({ timestamp: new Date().toISOString(), type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'adopt AD-1.1' }] } }) + '\n');
+  const later = new Date(Date.now() + 10000);
+  fs.utimesSync(original, later, later);
+  indexedTranscript(p, FIRST, active);
+  const s = ok(adopt(p, FIRST, ['--attempt', e.id])).json();
+  assert.equal(s.owner, 'codex:' + FIRST);
+  const event = readLedger(p.root, e.id).find((r) => r.type === 'owner.adopted');
+  assert.equal(event.data.authority.file, active);
+  assert.equal(event.data.authority.text, 'adopt AD-1.1');
+  assert.equal(event.data.authority.provenance, 'host-recorded');
+});
+
+test('Codex indexed transcripts refuse wrong identity, paths outside the store, links, and missing indexed files', () => {
+  for (const bad of ['identity', 'outside', 'link', 'missing', 'database-link', 'database-corrupt']) {
+    const p = singleRepoProject('unsafe-index', { gate: { steps: [] } });
+    const e = entry(p, 'AD-1');
+    message(p, FIRST, 'adopt AD-1');
+    const store = path.join(p.base, '.home', '.codex');
+    const original = path.join(store, 'sessions', 'rollout-' + FIRST + '.jsonl');
+    let active = path.join(store, 'sessions', 'rollout-later-' + FIRST + '_' + SECOND + '.jsonl');
+    if (bad === 'outside') active = path.join(p.base, 'elsewhere.jsonl');
+    fs.copyFileSync(original, active);
+    if (bad === 'identity') fs.writeFileSync(active, fs.readFileSync(active, 'utf8').replace(FIRST, SECOND));
+    if (bad === 'link') { fs.rmSync(active); fs.symlinkSync(original, active); }
+    if (bad === 'missing') fs.rmSync(active);
+    indexedTranscript(p, FIRST, active);
+    const db = path.join(store, 'state_5.sqlite');
+    if (bad === 'database-link') { fs.renameSync(db, db + '.real'); fs.symlinkSync(db + '.real', db); }
+    if (bad === 'database-corrupt') fs.writeFileSync(db, 'not a database');
+    const result = adopt(p, FIRST, ['--attempt', e.id]);
+    assert.equal(result.code, 75, bad + ': ' + result.out + result.err);
+    assert.equal(state(p.root, e.id).owner, e.owner);
+  }
+});
 
 test('adoption uses the current chat human ticket request without the previous session, preserves holds, and is idempotent', () => {
   // Named failure I-31: recovering a ticket depended on reopening its unavailable previous owner session.
@@ -45,6 +112,28 @@ test('adoption uses the current chat human ticket request without the previous s
   assert.equal(state(p.root, 'AD-2.1').owner, 'claude:unavailable-session');
 });
 
+test('adoption accepts an explicit command after reading the handover in the same human message', () => {
+  // Named failure I-33: a combined read-handover-and-adopt request was refused because adopt was not the first word.
+  for (const text of [
+    'Read HANDOVER-AD-1.md and then adopt AD-1.1',
+    'Read HANDOVER-AD-1.md and adopt AD-1.1',
+    'Please read the handover, then adopt ticket AD-1 in this chat.',
+    'Can you read the handover and then adopt attempt AD-1.1?',
+    'Read the handover. Please adopt AD-1.1 here.',
+    'Read `HANDOVER-AD-1.md` and then adopt AD-1.1',
+  ]) {
+    const p = singleRepoProject('compound-adopt', { gate: { steps: [] } });
+    const e = entry(p, 'AD-1');
+    message(p, FIRST, text);
+    const s = ok(adopt(p, FIRST, ['--attempt', e.id])).json();
+    assert.equal(s.owner, 'codex:' + FIRST, text);
+    const event = readLedger(p.root, e.id).find((r) => r.type === 'owner.adopted');
+    assert.equal(event.data.authority.text, text);
+    assert.equal(event.data.authority.provenance, 'host-recorded');
+    assert.ok(event.data.authority.spent);
+  }
+});
+
 test('adoption rejects agent and headless prompts, negated requests, wrong ticket boundaries, and conflicting selectors', () => {
   for (const [text, fields] of [
     ['adopt AD-1', { role: 'assistant' }],
@@ -52,6 +141,20 @@ test('adoption rejects agent and headless prompts, negated requests, wrong ticke
     ['adopt AD-1', { timestamp: null }],
     ['adopt AD-1', { timestamp: 'invalid' }],
     ['Do not adopt AD-1', {}],
+    ['Do not read the handover and then adopt AD-1', {}],
+    ['Read the handover and do not adopt AD-1', {}],
+    ["Read the handover and don't adopt AD-1", {}],
+    ['Read the handover and never adopt AD-1', {}],
+    ['If the checks pass, read the handover and then adopt AD-1', {}],
+    ['Read the handover and then adopt AD-1 if the checks pass', {}],
+    ['Read the handover, then adopt AD-1. Actually, do not adopt AD-1.', {}],
+    ['The handover says read it and then adopt AD-1', {}],
+    ['Read this example: "read the handover and then adopt AD-1"', {}],
+    ['Read this example: `adopt AD-1`', {}],
+    ['Read this example:\n> adopt AD-1', {}],
+    ['Read this example:\n```text\nadopt AD-1\n```', {}],
+    ['Read the handover and then adopt AD-1', { role: 'assistant' }],
+    ['Read the handover and then adopt AD-1', { source: 'exec', originator: 'codex_exec' }],
     ['<user_action>adopt AD-1</user_action>', {}],
     ['adopt AD-10', {}],
     ['adopt AD-1.10', {}],

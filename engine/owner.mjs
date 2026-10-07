@@ -147,9 +147,31 @@ function interactiveProblem(t, bytes, m) {
   return '';
 }
 
+function adoptionRequest(text, phrases) {
+  // Named failure I-33: an explicit "read the handover and then adopt" command was refused by a message-start anchor.
+  // Match affirmative command clauses, not arbitrary mentions in examples, reports, negations or conditional plans.
+  const plain = String(text).normalize('NFKC')
+    .replace(/```[\s\S]*?(?:```|$)|~~~[\s\S]*?(?:~~~|$)/g, ' ')
+    .replace(/^\s*>.*$/gm, ' ')
+    .replace(/`[^`]*`|"[^"\n]*"|“[^”]*”|‘[^’]*’|(?<![\p{L}\p{N}])'[^'\n]*'/gu, ' ');
+  const words = fold(plain);
+  if (/\b(?:if|unless|until|whether|when)\b/.test(words) || /\b(?:do not|don't|don’t|never|not to|avoid|cancel|stop)\b[^.!?;]*\badopt\b/.test(words)) return false;
+  const prefix = '(?:please\\s+)?(?:(?:can|could|would) you\\s+(?:please\\s+)?|i (?:want|need) you to\\s+)?';
+  const request = new RegExp(`^${prefix}(?:${phrases.map((p) => esc(fold(p))).join('|')})(?![a-z0-9_:-]|\\.[a-z0-9])`);
+  const preceding = new RegExp(`^${prefix}(?:read|review|check|open|inspect)\\b`);
+  const clauses = words.replace(/,\s*(?=(?:and|then)\s)/g, ' ').split(/\s+(?:and(?:\s+then)?|then)\s+|[.!?;]\s+/);
+  for (const clause of clauses) {
+    if (request.test(clause)) return true;
+    if (!preceding.test(clause)) return false;
+  }
+  return false;
+}
+
 export function ownerAuthority(root, state, phrase, { what, command = null, owner = state.owner, terminal = defaultTerminal, decision = null, interactive = false, requestPhrases = null } = {}) {
   const shown = command ? `wf ${[...command.sub, ...Object.entries(command.flags).flat()].join(' ')}` : null;
-  const how = `only the owner decides ${what}: the owner starts a message in the owner session with \`${phrase}\`${shown ? `, or the owner session runs exactly \`${shown}\`` : ''}`;
+  const how = requestPhrases
+    ? `only the owner decides ${what}: ask this interactive chat to \`${phrase}\`, directly or after reading the handover; wf reads the host-recorded human request`
+    : `only the owner decides ${what}: the owner starts a message in the owner session with \`${phrase}\`${shown ? `, or the owner session runs exactly \`${shown}\`` : ''}`;
   const t = ownerTranscript(owner);
   if (t.problem) {
     if (isSession(owner)) throw refuse(`not done: ${what} needs the owner's authority, and the owner session's transcript cannot be read: ${t.problem}`, how);
@@ -162,12 +184,9 @@ export function ownerAuthority(root, state, phrase, { what, command = null, owne
   // Every session, the owner's or the one adopting, speaks after admission (0.5.0 adversarial review: the bound was
   // dropped for the adopting session).
   const stateFor = state;
-  // I-31: adoption accepts a direct human request for the ticket or attempt, including ordinary polite prefixes.
   // Other owner decisions keep their exact phrases. A destination suffix or a longer ticket never matches adoption.
-  const start = requestPhrases
-    ? new RegExp(`^(?:please\\s+)?(?:(?:can|could|would) you\\s+|i (?:want|need) you to\\s+)?(?:${requestPhrases.map((p) => esc(fold(p))).join('|')})(?![a-z0-9_:-]|\\.[a-z0-9])`)
-    : new RegExp(`^${esc(fold(phrase))}(?![a-z0-9_-]|\\.[a-z0-9])`);
-  let turns = ownerTurns(t, bytes).filter((m) => afterAdmission(stateFor, m) && !used.has(spendKey(t, m)) && !used.has(`${t.file}:${m.offset}`) && start.test(fold(m.text)));
+  const start = new RegExp(`^${esc(fold(phrase))}(?![a-z0-9_-]|\\.[a-z0-9])`);
+  let turns = ownerTurns(t, bytes).filter((m) => afterAdmission(stateFor, m) && !used.has(spendKey(t, m)) && !used.has(`${t.file}:${m.offset}`) && (requestPhrases ? adoptionRequest(m.text, requestPhrases) : start.test(fold(m.text))));
   let notInteractive = '';
   if (interactive) {
     turns = turns.filter((m) => {
@@ -189,7 +208,8 @@ export function ownerAuthority(root, state, phrase, { what, command = null, owne
     if (!why) return { provenance: 'owner-session command', runtime: t.runtime, file: t.file, line: ran.line, at: ran.at, spent, command: ran.command.slice(0, 500) };
   }
   if (notInteractive) throw refuse(`not done: ${what} needs a message from ${owner}, a plain interactive session, and ${t.file} is not one: ${notInteractive}`, how);
-  throw refuse(`not done: ${what} needs the owner's authority, and no unspent owner message in the owner session (${t.file}) starts with \`${phrase}\`${shown && t.runtime === 'claude' ? `, nor did the owner session itself run exactly \`${shown}\` (${why})` : ''}; an agent's word, a tool result or a sub-agent's call never counts`, how);
+  const missing = requestPhrases ? `contains an affirmative, unconditional request to adopt this ticket or attempt` : `starts with \`${phrase}\``;
+  throw refuse(`not done: ${what} needs the owner's authority, and no unspent owner message in the owner session (${t.file}) ${missing}${shown && t.runtime === 'claude' ? `, nor did the owner session itself run exactly \`${shown}\` (${why})` : ''}; an agent's word, a tool result or a sub-agent's call never counts`, how);
 }
 
 // The person at the owner's own terminal types the phrase back. Refused without an interactive terminal, and under an
