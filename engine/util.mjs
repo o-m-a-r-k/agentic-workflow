@@ -121,29 +121,106 @@ export function run(cmd, args, { cwd, env, allowFail = false, input, sensitive =
 
 export const git = (cwd, args, opts = {}) => run('git', args, { cwd, ...opts }).stdout.trim();
 
-// Glob matching: `**` any depth, `*` within a segment, `?` one char, `{a,b}` alternatives.
-const globCache = new Map();
-export function globToRegExp(glob) {
-  if (globCache.has(glob)) return globCache.get(glob);
-  let re = '';
+// Glob matching: `**` any depth (`**/` zero or more folders), `*` within a segment, `?` one char, `{a,b}` alternatives.
+//
+// Named failure (0.5.0 adversarial review): globs compiled to a regular expression. An unclosed `{` made the compiler
+// loop for ever (`indexOf` returned -1 and the index went back to 0), and stacked `**` (`**a**a…b`) backtracked
+// exponentially in the engine's own process, so one impact query hung `wf plan` and the reviewer handoff. A glob is now
+// matched by a state-set simulation (each character advances a set of positions in the glob: time is the glob's length
+// times the path's, never more), an unclosed `{` is a literal, and brace alternatives are expanded up front, refused
+// past `GLOB_MAX_ALTERNATIVES`.
+export const GLOB_MAX_ALTERNATIVES = 256;
+function expandBraces(glob) {
+  let out = [''];
   for (let i = 0; i < glob.length; i++) {
     const c = glob[i];
-    if (c === '*') {
-      if (glob[i + 1] === '*') {
-        const slash = glob[i + 2] === '/';
-        re += slash ? '(?:.*/)?' : '.*';
-        i += slash ? 2 : 1;
-      } else re += '[^/]*';
-    } else if (c === '?') re += '[^/]';
-    else if (c === '{') {
-      const end = glob.indexOf('}', i);
-      re += `(?:${glob.slice(i + 1, end).split(',').map((p) => p.replace(/[.+^$()|[\]\\]/g, '\\$&').replace(/\*/g, '[^/]*')).join('|')})`;
-      i = end;
-    } else re += c.replace(/[.+^$()|[\]\\]/g, '\\$&');
+    const end = c === '{' ? glob.indexOf('}', i + 1) : -1;
+    if (end < 0) {
+      out = out.map((p) => p + c);
+      continue;
+    }
+    const alts = glob.slice(i + 1, end).split(',');
+    out = out.flatMap((p) => alts.map((a) => p + a));
+    if (out.length > GLOB_MAX_ALTERNATIVES) throw new WfError(`glob \`${glob.slice(0, 200)}\` expands to more than ${GLOB_MAX_ALTERNATIVES} alternatives`);
+    i = end;
   }
-  const compiled = new RegExp(`^${re}$`);
+  return out;
+}
+// Tokens: a literal character, `?`, `*` (within a segment), `**` (anything) and `**/` (empty, or anything ending in `/`).
+function tokenize(glob) {
+  const t = [];
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i];
+    if (c === '*' && glob[i + 1] === '*') {
+      const slash = glob[i + 2] === '/';
+      t.push({ k: slash ? 'dirs' : 'all' });
+      i += slash ? 2 : 1;
+    } else if (c === '*') t.push({ k: 'star' });
+    else if (c === '?') t.push({ k: 'one' });
+    else t.push({ k: 'lit', c });
+  }
+  return t;
+}
+function simulate(t, s) {
+  const n = t.length;
+  // States 0..n: at token i. State n+1+i: inside the `**/` at i (consumed something, owes a `/` before moving on).
+  const close = (set) => {
+    const stack = [...set];
+    while (stack.length) {
+      const i = stack.pop();
+      if (i < n && ['star', 'all', 'dirs'].includes(t[i].k) && !set.has(i + 1)) {
+        set.add(i + 1);
+        stack.push(i + 1);
+      }
+    }
+    return set;
+  };
+  let cur = close(new Set([0]));
+  for (const ch of s) {
+    const next = new Set();
+    for (const st of cur) {
+      if (st > n) {
+        const i = st - n - 1;
+        next.add(st);
+        if (ch === '/') next.add(i + 1);
+        continue;
+      }
+      if (st === n) continue;
+      const tok = t[st];
+      if (tok.k === 'lit') {
+        if (tok.c === ch) next.add(st + 1);
+      } else if (tok.k === 'one') {
+        if (ch !== '/') next.add(st + 1);
+      } else if (tok.k === 'star') {
+        if (ch !== '/') next.add(st);
+      } else if (tok.k === 'all') next.add(st);
+      else if (tok.k === 'dirs') {
+        next.add(n + 1 + st);
+        if (ch === '/') next.add(st + 1);
+      }
+    }
+    if (!next.size) return false;
+    cur = close(next);
+  }
+  return cur.has(n);
+}
+const globCache = new Map();
+// A matcher with `test(path)`, the shape the callers used when this returned a RegExp.
+export function globToRegExp(glob) {
+  if (globCache.has(glob)) return globCache.get(glob);
+  const alternatives = expandBraces(String(glob)).map(tokenize);
+  const compiled = { source: String(glob), test: (s) => alternatives.some((t) => simulate(t, String(s))) };
   globCache.set(glob, compiled);
   return compiled;
+}
+// Why a glob cannot be used (it expands into too many alternatives), or null.
+export function globProblem(glob) {
+  try {
+    expandBraces(String(glob));
+    return null;
+  } catch (error) {
+    return error.message;
+  }
 }
 export const matchesAny = (file, globs = []) => globs.some((g) => globToRegExp(g).test(file));
 

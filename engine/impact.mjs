@@ -16,7 +16,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { loadConfigAtCommit, repoDir } from './config.mjs';
-import { WfError, YAML, git, matchesAny, refuse } from './util.mjs';
+import { WfError, YAML, git, globProblem, matchesAny, refuse } from './util.mjs';
 
 export const IMPACT_DEFAULTS = { requiredFor: ['full'], maxFileBytes: 2 * 1024 * 1024, maxScanBytes: 512 * 1024 * 1024, regexTimeoutMs: 20000 };
 // One row per affected component: each column is a behaviour the change can break. A value may be `none` or `n/a`, but
@@ -62,7 +62,11 @@ function validateQuery(q, cfg, problems) {
     }
   }
   if (q.repo !== undefined && !cfg.repos.some((r) => r.name === q.repo)) problems.push(`${where}: unknown repo \`${q.repo}\` (repos: ${cfg.repos.map((r) => r.name).join(', ')})`);
-  for (const k of ['paths', 'exclude']) if (q[k] !== undefined && (!Array.isArray(q[k]) || q[k].some((g) => typeof g !== 'string' || !g))) problems.push(`${where}: \`${k}\` must be a list of globs`);
+  for (const k of ['paths', 'exclude']) {
+    if (q[k] !== undefined && (!Array.isArray(q[k]) || q[k].some((g) => typeof g !== 'string' || !g))) problems.push(`${where}: \`${k}\` must be a list of globs`);
+    // A glob that expands into too many alternatives is refused here, before any tree is read (0.5.0 adversarial review).
+    else for (const g of q[k] ?? []) if (globProblem(g)) problems.push(`${where}: \`${k}\`: ${globProblem(g)}`);
+  }
   if (q.unit !== undefined && !['files', 'lines'].includes(q.unit)) problems.push(`${where}: \`unit\` is files or lines`);
   return true;
 }
