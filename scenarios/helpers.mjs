@@ -10,6 +10,26 @@ import { ENGINE_VERSION } from '../engine/util.mjs';
 
 export const WF = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'wf');
 
+// Named cost: on macOS without another git first on PATH, `git` is /usr/bin/git, the developer-tools shim that asks
+// xcrun where the real binary is on every call (9.4ms against 3.8ms for `git --version` here). The engine runs git
+// about ten times per command: some 35,000 calls a suite run. Scenarios put the folder the shim resolves to on PATH,
+// for this process and every process it starts: the same binary and the same git-core (checked below), without
+// the lookup. The folder goes right before /usr/bin, so anything found earlier on PATH still wins and anything else in
+// it is what the /usr/bin shims resolve to anyway. CI's macOS runners already have another git first on PATH.
+(function realGitFirst() {
+  if (process.platform !== 'darwin') return;
+  const which = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
+  if (which !== '/usr/bin/git') return;
+  const real = spawnSync('xcrun', ['-f', 'git'], { encoding: 'utf8' }).stdout?.trim();
+  if (!real || !path.isAbsolute(real) || real === which) return;
+  const execPath = (g) => spawnSync(g, ['--exec-path'], { encoding: 'utf8' }).stdout?.trim();
+  if (!execPath(which) || execPath(real) !== execPath(which)) return;
+  const dirs = process.env.PATH.split(path.delimiter);
+  if (!dirs.includes('/usr/bin')) return;
+  dirs.splice(dirs.indexOf('/usr/bin'), 0, path.dirname(real));
+  process.env.PATH = dirs.join(path.delimiter);
+})();
+
 export function sh(cwd, cmd) {
   const r = spawnSync('sh', ['-c', cmd], { cwd, encoding: 'utf8' });
   if (r.status !== 0) throw new Error(`${cmd} failed in ${cwd}: ${r.stderr || r.stdout}`);
