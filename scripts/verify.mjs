@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { verifyLayout } from './verify-layout.mjs';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const image = process.env.WF_VERIFY_IMAGE ?? 'node:22-bookworm';
@@ -31,10 +32,14 @@ if (docker.status !== 0) {
   process.stdout.write('\n!!! docker is not available: the Linux run is SKIPPED. CI will run it; a Linux-only failure there is real.\n');
   results.push({ name: 'linux (skipped: no docker)', ok: true, skipped: true });
 } else {
-  // A read-only mount, copied inside the container: the suite writes into its own copy, never into this checkout.
-  const script = 'set -e; rm -rf /tmp/w && cp -r /w /tmp/w && cd /tmp/w && mkdir -p /tmp/h && git config --global --add safe.directory "*" && git config --global user.email ci@example.test && git config --global user.name ci && git config --global init.defaultBranch main && node --test --test-reporter=spec scenarios/*.test.mjs';
+  // Read-only mounts, copied inside the container: the suite writes into its own copy, never into this checkout or its
+  // git directories (a linked worktree's are mounted and relinked too: scripts/verify-layout.mjs).
+  const layout = verifyLayout(repo);
+  const script = `set -e; ${layout.script} && cd ${layout.checkout} && mkdir -p /tmp/h && git config --global --add safe.directory "*" && git config --global user.email ci@example.test && git config --global user.name ci && git config --global init.defaultBranch main && git rev-parse --verify HEAD >/dev/null && node --test --test-reporter=spec scenarios/*.test.mjs`;
+  const mounts = layout.binds.flatMap((b) => ['-v', `${b.host}:${b.at}:ro`]);
+  const env = Object.entries(layout.env).flatMap(([k, v]) => ['-e', `${k}=${v}`]);
   for (const user of ['node', 'root']) {
-    run(`linux ${image} as ${user}`, 'docker', ['run', '--rm', '--label', label, '--user', user, '-e', 'HOME=/tmp/h', '-v', `${repo}:/w:ro`, image, 'sh', '-c', script]);
+    run(`linux ${image} as ${user}`, 'docker', ['run', '--rm', '--label', label, '--user', user, '-e', 'HOME=/tmp/h', ...env, ...mounts, image, 'sh', '-c', script]);
   }
   // Anything left behind by an interrupted run of this script.
   const left = spawnSync('docker', ['ps', '-aq', '--filter', `label=${label}`], { encoding: 'utf8' }).stdout.trim();
