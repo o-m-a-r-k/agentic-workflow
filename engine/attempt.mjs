@@ -6,7 +6,7 @@ import { append, assertSchema, createAttempt, listAttempts, loadState, openEvide
 import { projectEnv } from './env.mjs';
 import { emitTrackerEvent } from './tracker.mjs';
 import { ownerAuthority } from './owner.mjs';
-import { WfError, assertEngine, assertSafeId, git, hashFile, refuse, run, sessionIdentity, sha256 } from './util.mjs';
+import { WfError, assertEngine, assertPlainGit, assertSafeId, git, hashFile, refuse, run, sessionIdentity, sha256 } from './util.mjs';
 
 export const worktreesRoot = (root) => path.join(root, '.wf-worktrees');
 export const worktreeDir = (root, id, repoName) => path.join(worktreesRoot(root), id, repoName);
@@ -154,6 +154,7 @@ export function entry(root, options) {
   const bases = {};
   for (const name of new Set([...wanted, adapterRepo.name])) {
     const repo = cfg.repos.find((r) => r.name === name);
+    assertPlainGit(repoDir(root, repo));
     const ref = baseRef(repoDir(root, repo), repo);
     bases[name] = { ref, commit: git(repoDir(root, repo), ['rev-parse', ref]) };
   }

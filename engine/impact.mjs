@@ -16,7 +16,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { loadConfigAtCommit, repoDir } from './config.mjs';
-import { WfError, YAML, git, globProblem, matchesAny, refuse } from './util.mjs';
+import { WfError, YAML, assertPlainGit, git, gitEnv, globProblem, matchesAny, refuse } from './util.mjs';
 
 export const IMPACT_DEFAULTS = { requiredFor: ['full'], maxFileBytes: 2 * 1024 * 1024, maxScanBytes: 512 * 1024 * 1024, regexTimeoutMs: 20000 };
 // One row per affected component: each column is a behaviour the change can break. A value may be `none` or `n/a`, but
@@ -100,20 +100,24 @@ const trustedLimits = (t, settings) => ({ ...settings, maxFileBytes: settings.ma
 // branch of the repo's main checkout (the remote's when fetched). Uncommitted edits are never read.
 function treeOf(root, cfg, state, name) {
   const r = state.repos?.[name];
-  if (r?.worktree && fs.existsSync(r.worktree)) return { dir: r.worktree, ref: git(r.worktree, ['rev-parse', 'HEAD']) };
+  if (r?.worktree && fs.existsSync(r.worktree)) {
+    assertPlainGit(r.worktree);
+    return { dir: r.worktree, ref: git(r.worktree, ['rev-parse', 'HEAD']) };
+  }
   // Named failure (0.5.0 second review, fail-open): a repo of the attempt whose worktree was gone was read at its base
   // branch instead, so a query counted the code before the change and the count still matched. Refused.
   if (r) throw refuse(`the worktree of ${name} (${r.worktree ?? 'none recorded'}) is missing, so the attempt's committed tree cannot be read`, '`wf verify` the attempt; restore the worktree or abandon the attempt');
   const repo = cfg.repos.find((x) => x.name === name);
   if (!repo) throw refuse(`repo \`${name}\` is not in the adapter at the attempt's base`);
   const dir = repoDir(root, repo);
+  assertPlainGit(dir);
   const remote = git(dir, ['rev-parse', '--verify', '--quiet', `${repo.remote}/${repo.base}^{commit}`], { allowFail: true });
   return { dir, ref: remote || git(dir, ['rev-parse', `${repo.base}^{commit}`]) };
 }
 
 function blobs(dir, ids) {
   if (!ids.length) return new Map();
-  const r = spawnSync('git', ['cat-file', '--batch'], { cwd: dir, input: `${ids.join('\n')}\n`, maxBuffer: 1024 * 1024 * 1024 });
+  const r = spawnSync('git', ['cat-file', '--batch'], { cwd: dir, env: gitEnv(), input: `${ids.join('\n')}\n`, maxBuffer: 1024 * 1024 * 1024 });
   if (r.status !== 0) throw new WfError(`git cat-file failed in ${dir}: ${String(r.stderr)}`);
   // Named failure (0.5.0 second review, fail-open): a `missing` answer or a short read ended the parse early, and every
   // file after it was silently left out of the count. Any answer that is not a whole blob is an error.
@@ -158,7 +162,7 @@ function scanTrees(root, working, state, { names, paths, exclude, settings: aske
         // Named failure (0.5.0 second review, fail-open): a text file over the size cap was skipped and the query's
         // count went on without it, as if it had no hit. A binary file (a NUL in its first 8000 bytes, as git decides)
         // holds no line to match and is listed; a text file the engine cannot read refuses the query.
-        const head = spawnSync('git', ['cat-file', 'blob', e.sha], { cwd: dir, maxBuffer: 8000 });
+        const head = spawnSync('git', ['cat-file', 'blob', e.sha], { cwd: dir, env: gitEnv(), maxBuffer: 8000 });
         if (head.stdout?.subarray(0, 8000).includes(0)) skipped.push(`${name}:${e.file}`);
         else tooLarge.push(`${name}:${e.file} (${e.size} bytes)`);
         continue;

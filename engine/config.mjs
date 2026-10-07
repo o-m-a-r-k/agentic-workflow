@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { ENGINE_PIN, WfError, YAML, git, hashValue } from './util.mjs';
+import { ENGINE_PIN, WfError, YAML, assertPlainGit, git, hashValue, refuse } from './util.mjs';
 
 export const ADAPTER_DIR = '.workflow';
 export const CONFIG_FILE = 'project.yaml';
@@ -326,6 +326,7 @@ export function adapterLocation(root, cfg) {
 // The gate trusts the adapter as committed at the recorded base, never the ticket's copy.
 export function loadConfigAtCommit(root, cfg, commit) {
   const { repo, relative } = adapterLocation(root, cfg);
+  assertPlainGit(repoDir(root, repo));
   const file = path.posix.join(relative.split(path.sep).join('/'), CONFIG_FILE);
   const text = git(repoDir(root, repo), ['show', `${commit}:${file}`], { allowFail: true });
   if (!text) throw new WfError(`adapter not found at ${repo.name}@${commit.slice(0, 10)}:${file}`, { hint: 'commit .workflow/ to the base branch before admitting work' });
@@ -345,6 +346,7 @@ const COMMIT_ID = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
 export function adapterFileAtCommit(root, cfg, commit, rel) {
   if (!COMMIT_ID.test(String(commit))) throw new WfError(`not a commit id: \`${String(commit).slice(0, 80)}\``);
   const { repo, relative } = adapterLocation(root, cfg);
+  assertPlainGit(repoDir(root, repo));
   const base = relative.split(path.sep).join('/');
   const file = path.posix.normalize(path.posix.join(base, String(rel)));
   if (path.posix.isAbsolute(file) || file === '..' || file.startsWith('../') || (base && file !== base && !file.startsWith(`${base}/`))) throw new WfError(`adapter file \`${rel}\` is outside the adapter folder`);

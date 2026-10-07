@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { ok, singleRepoProject, WF, wf } from './helpers.mjs';
+import { ok, sh, singleRepoProject, WF, wf } from './helpers.mjs';
 
 const steps = [{ id: 'unit', repo: 'app', run: 'true', inputs: ['src/**'] }];
 const engine = path.resolve(import.meta.dirname, '..');
@@ -58,4 +58,30 @@ test('glob: an unclosed brace is a literal and stacked ** cannot backtrack; impa
   const wide = query(['{a,b}'.repeat(12)]);
   assert.equal(wide.status, 1, wide.stderr);
   assert.match(wide.stderr, /`paths`: .*expands to more than \d+ alternatives/);
+});
+
+// F5: `git replace` (or a grafts file) rewrote what the base commit contains for every engine git call.
+test('git replace: the engine reads the objects a commit really holds, and refuses a repo with replace refs or grafts', () => {
+  const p = singleRepoProject('replace', { gate: { steps } });
+  const e = ok(wf(p.root, ['entry', '--item', 'RP-1', '--json'])).json();
+  // The agent writes a weaker adapter blob and replaces the committed adapter with it: impact analysis is no longer required.
+  const cfgFile = path.join(p.root, '.workflow', 'project.yaml');
+  const weak = { ...JSON.parse(fs.readFileSync(cfgFile, 'utf8')), impact: { requiredFor: [] } };
+  const weakFile = path.join(p.base, 'weak.yaml');
+  fs.writeFileSync(weakFile, JSON.stringify(weak, null, 2));
+  const orig = sh(p.root, 'git rev-parse HEAD:.workflow/project.yaml');
+  const blob = sh(p.root, `git hash-object -w ${JSON.stringify(weakFile)}`);
+  sh(p.root, `git replace ${orig} ${blob}`);
+  const r = wf(p.root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id]);
+  assert.equal(r.code, 75, r.out);
+  assert.match(r.err, /refs\/replace/);
+  // Engine git calls never apply replacements, whatever the environment says.
+  const shown = spawnSync(process.execPath, ['--input-type=module', '-e', `import('${engine}/engine/util.mjs').then((u) => console.log(u.git(${JSON.stringify(p.root)}, ['show', 'HEAD:.workflow/project.yaml'])))`], { encoding: 'utf8', env: Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'GIT_NO_REPLACE_OBJECTS')) });
+  assert.doesNotMatch(shown.stdout, /requiredFor/);
+  // A grafts file is refused the same way.
+  sh(p.root, `git replace -d ${orig}`);
+  fs.writeFileSync(path.join(p.root, '.git', 'info', 'grafts'), `${sh(p.root, 'git rev-parse HEAD')}\n`);
+  const g = wf(p.root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id]);
+  assert.equal(g.code, 75, g.out);
+  assert.match(g.err, /info\/grafts/);
 });

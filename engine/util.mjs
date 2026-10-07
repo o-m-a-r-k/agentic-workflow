@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { prepareWrite, writeNoFollow } from './evidence.mjs';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
@@ -108,9 +109,37 @@ export function writeImmutable(file, content) {
   return file;
 }
 
+// Named failure (0.5.0 adversarial review): engine git calls inherited the environment and the repo's settings, so
+// `git replace <committed adapter blob> <weaker blob>` (or a grafts file) changed what "the adapter committed at base"
+// and every tree the engine reads contain, with no commit and nothing in the diff. Every git call the engine makes
+// ignores replace refs and grafts; `gitObjectsProblem` refuses a repo that has either, so the change is not hidden.
+export const gitEnv = (env = process.env) => ({ ...env, GIT_NO_REPLACE_OBJECTS: '1', GIT_GRAFT_FILE: os.devNull });
+const plainChecked = new Map();
+export function gitObjectsProblem(dir) {
+  const key = path.resolve(dir);
+  if (plainChecked.has(key)) return plainChecked.get(key);
+  let problem = null;
+  const refs = spawnSync('git', ['for-each-ref', '--count=1', '--format=%(refname)', 'refs/replace/'], { cwd: dir, env: gitEnv(), encoding: 'utf8' });
+  if (refs.status !== 0) problem = `git cannot list the refs of ${dir}: ${String(refs.stderr).trim()}`;
+  else if (refs.stdout.trim()) problem = `${dir} has git replace refs (${refs.stdout.trim()}, refs/replace/*): they change what a commit contains without a commit; remove them (\`git replace -d\`) before running wf`;
+  else {
+    const common = spawnSync('git', ['rev-parse', '--git-common-dir'], { cwd: dir, env: gitEnv(), encoding: 'utf8' });
+    const grafts = common.status === 0 ? path.join(path.resolve(dir, common.stdout.trim()), 'info', 'grafts') : null;
+    if (!grafts) problem = `git cannot read the repository at ${dir}`;
+    else if (fs.existsSync(grafts)) problem = `${dir} has a grafts file (${grafts}, info/grafts): it changes a commit's history without a commit; remove it before running wf`;
+  }
+  plainChecked.set(key, problem);
+  return problem;
+}
+export function assertPlainGit(dir) {
+  const problem = gitObjectsProblem(dir);
+  if (problem) throw refuse(problem);
+}
+
 // `sensitive` keeps arguments and output out of error messages (used for anything carrying a secret).
 export function run(cmd, args, { cwd, env, allowFail = false, input, sensitive = false } = {}) {
-  const result = spawnSync(cmd, args, { cwd, env: env ?? process.env, encoding: 'utf8', input, maxBuffer: 256 * 1024 * 1024 });
+  const base = env ?? process.env;
+  const result = spawnSync(cmd, args, { cwd, env: cmd === 'git' ? gitEnv(base) : base, encoding: 'utf8', input, maxBuffer: 256 * 1024 * 1024 });
   if (result.error) throw new WfError(`${cmd} failed to start: ${result.error.message}`);
   if (result.status !== 0 && !allowFail) {
     if (sensitive) throw new WfError(`${cmd} failed (exit ${result.status})`);

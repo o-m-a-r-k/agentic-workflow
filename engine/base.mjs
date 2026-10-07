@@ -5,7 +5,7 @@ import { loadConfig } from './config.mjs';
 import { liveGate } from './gate.mjs';
 import { append, loadState } from './ledger.mjs';
 import { packageOf } from './topology.mjs';
-import { git, matchesAny, refuse, run } from './util.mjs';
+import { git, gitEnv, matchesAny, refuse, run } from './util.mjs';
 
 // Base movement used to surface only at delivery, after the gate and the review were spent on a stale base.
 // `wf status` / `wf resume` now fetch each repo's base and say how far it moved and whether it touches the ticket.
@@ -13,7 +13,7 @@ import { git, matchesAny, refuse, run } from './util.mjs';
 const FETCH_TIMEOUT_MS = 15000;
 
 function fetchBase(dir, repo) {
-  const r = spawnSync('git', ['fetch', '--quiet', repo.remote, repo.base], { cwd: dir, encoding: 'utf8', timeout: FETCH_TIMEOUT_MS, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
+  const r = spawnSync('git', ['fetch', '--quiet', repo.remote, repo.base], { cwd: dir, encoding: 'utf8', timeout: FETCH_TIMEOUT_MS, env: gitEnv({ ...process.env, GIT_TERMINAL_PROMPT: '0' }) });
   return r.status === 0;
 }
 

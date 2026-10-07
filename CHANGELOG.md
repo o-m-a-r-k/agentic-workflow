@@ -64,6 +64,7 @@ An adversarial pass over every change to `engine/attempt.mjs` and `engine/lifecy
 A second adversarial pass over the integrated 0.5.0 branch, with scenarios in `scenarios/security-adversarial.test.mjs`:
 
 - **Globs cannot hang the engine (low-medium).** An unclosed `{` in a glob made the matcher loop for ever, and stacked `**` (`**a**a…b`) backtracked exponentially in the engine's own process, so one `wf impact run --query` hung the engine. Globs are now matched by a state-set simulation (no backtracking), an unclosed `{` is a literal, and a query glob whose alternatives expand past 256 is refused before any tree is read.
+- **`git replace` cannot rewrite the base (medium).** Engine git calls inherited the environment and the repo's replace refs, so `git replace <committed adapter blob> <weaker blob>` changed what the adapter at base said with no commit. Every engine git call now sets `GIT_NO_REPLACE_OBJECTS` and an empty graft file, and the engine refuses a repo with `refs/replace/*` or `info/grafts`.
 
 ### Maintenance
 
