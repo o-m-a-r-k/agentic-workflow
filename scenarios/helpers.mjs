@@ -3,6 +3,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { findRoot } from '../engine/config.mjs';
+import { verifyAttempt } from '../engine/evidence.mjs';
+import { assertSchema, loadState } from '../engine/ledger.mjs';
+import { ENGINE_VERSION } from '../engine/util.mjs';
 
 export const WF = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'wf');
 
@@ -83,10 +87,48 @@ function ownerSpeaksFor(cwd, args, opts) {
 export const ownerSpeaks = (cwd, args) => ownerSpeaksFor(cwd, args, { env: {} });
 export const spawnHome = (cwd) => ({ WF_HOME: path.join(cwd, '..', '.home') });
 
+// What the scripted owner knows of the attempt a command names: its id, owner and implementers. Named cost: each lookup
+// was a `wf resume` process (about 14 git calls, 0.3s), 595 of the suite's 3,750 `wf` processes, none of them the
+// subject of a scenario. When the command names its attempt, this process reads it as `wf resume` would: the evidence
+// verified (`verifyAttempt`, the check every `wf` process runs when it opens an attempt; any problem and resume refuses,
+// so the owner says and closes nothing), then the ledger folded (`loadState`, hash chain checked). Anything else (no
+// `--attempt`, `--root`, an attempt another engine version created and the engine adopts on first open) runs
+// `wf resume`. The commands themselves still run as real processes. `WF_SCENARIO_CHECK_OWNER=1` does both and fails
+// on any difference (CONTRIBUTING.md, "Running the suite").
 function attemptOf(cwd, args, opts) {
   const id = optionOf(args, '--attempt');
-  const r = wf(cwd, ['resume', '--json', ...(id ? ['--attempt', id] : [])], { ...opts, ownerSilent: true });
-  return r.code === 0 ? JSON.parse(r.out) : null;
+  const viaResume = () => {
+    const r = wf(cwd, ['resume', '--json', ...(id ? ['--attempt', id] : [])], { ...opts, ownerSilent: true });
+    return r.code === 0 ? JSON.parse(r.out) : null;
+  };
+  const known = id && !args.includes('--root') ? ledgerState(cwd, id) : undefined;
+  if (known === undefined) return viaResume();
+  if (process.env.WF_SCENARIO_CHECK_OWNER) {
+    const slow = viaResume();
+    const pick = (s) => (s ? JSON.stringify({ id: s.id, owner: s.owner, implementers: s.implementers ?? [] }) : 'null');
+    if (pick(slow) !== pick(known)) throw new Error(`scenario owner lookup differs from \`wf resume\` for ${id}:\n  ledger: ${pick(known)}\n  resume: ${pick(slow)}`);
+  }
+  return known;
+}
+
+// undefined: only `wf resume` can tell; null: `wf resume` refuses (unknown attempt, changed evidence, broken chain,
+// newer schema).
+function ledgerState(cwd, id) {
+  const root = findRoot(cwd);
+  if (!root) return undefined;
+  let s;
+  try {
+    s = loadState(root, id);
+  } catch {
+    return verifyAttempt(root, id).length ? null : undefined;
+  }
+  if (s.engineVersion !== ENGINE_VERSION) return undefined;
+  try {
+    assertSchema(s);
+  } catch {
+    return null;
+  }
+  return verifyAttempt(root, id).length ? null : s;
 }
 
 // A genuine owner turn in a synthetic owner session's transcript (Codex rollout, or Claude Code when the scenario made
