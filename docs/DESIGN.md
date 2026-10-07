@@ -3,7 +3,7 @@
 Status: v0.1 implemented. Scenario tests in `scenarios/` are the executable form of this design; where they differ, the tests win and this file is fixed.
 
 agentic-workflow runs software changes through a fixed lifecycle with AI coding agents:
-admit a ticket → isolated worktree → plan → implement (committed) → independent review → fix → gate → evidence pass → accept → deliver → tracker handoff.
+admit a ticket → isolated worktree → plan → implement (committed) → code review rounds until clean → one gate → evidence review → accept → deliver → tracker handoff.
 It ships as one user-level plugin for Claude Code and Codex. Each project opts in with an adapter
 (`.workflow/`) that describes its repos, components, commands, tracker and delivery.
 
@@ -294,15 +294,15 @@ review:
 
 ### Review order
 
-A finding found after a full gate costs another full gate (about 40 minutes on the first real ticket), so review comes first:
+Code-review rounds run to clean first, with no gate; then ONE gate on the tree that passed review; then the evidence review of the gated tree. Review and gate never run side by side. Named failure: on one ticket that ran them side by side, 16 gates were started and 15 stopped (about 175 of 271 gate minutes discarded), because every finding made the running gate obsolete; no closure ever saw a passed gate or a screenshot, and a stale test a finished gate would have caught reached round 15.
 
-1. **Review the committed change.** `wf handoff reviewer` is allowed once an implementer has committed work (no uncommitted tracked changes), with or without a passing gate. The bundle's `gate.passedOnThisTree` says whether gate evidence exists for this tree and lists the logs and screenshots only when it does. `wf review --closure` records the tree the reviewer was handed and whether its bundle carried a passing gate on that tree (`gateEvidenceInspected`).
-2. **Fix** every open finding through the implementer of that work item, commit.
-3. **Gate** the fixed tree. The owner may start it in parallel with the review; nobody edits the worktrees while it runs.
-4. **Fresh reviewer** on the fixed tree. Once a passing gate exists on it, that round is also the evidence pass: it inspects the step logs and records the sha256 of every screenshot the bundle's `gate.artifacts` lists (in labelled contact-sheet batches when there are many), and of none it did not view.
-5. **`wf accept`** needs all three on the current tree, and names whichever is missing with the next command: a passing gate that skipped nothing for `--focused`; a clean closure written for this tree (any change after the review needs a new round); and that closure written after the gate passed on this tree (otherwise an evidence pass).
+1. **Code review.** `wf handoff reviewer` is allowed once an implementer has committed work (no uncommitted tracked changes) and no gate is running or starting on the attempt; it records the round holding the gate lock, so a gate starting at that moment is refused. The bundle says `round: code-review` and carries no gate evidence (`gate.passedOnThisTree: false`); a code-review round never requires a gate. `wf review --closure` records the tree the reviewer was handed and whether its bundle carried a passing gate on that tree (`gateEvidenceInspected`). A closure refused because the worktree changed during the round leaves a `review.refused` event; that round is over.
+2. **Fix** every open finding through the implementer of that work item, commit, and hand the fixed tree to a fresh reviewer. Repeat until a round comes back with no open findings and every earlier finding verified.
+3. **One gate.** `wf gate` refuses while the latest round has open findings or unverified earlier findings, while no review round covers the current tree (the same tree, or the same change after a base merged in without touching it), and while a reviewer handed this tree has recorded no closure. `wf gate --reason "<why>"` runs it anyway and records a `gate.override` event (reason, the refusals overridden, the tree) before the run starts. `wf stop` needs `--class major-finding|tree-change|owner-decision` and `--reason`; the `gate.stopped` event records them with `discardedMinutes` (the run's wall-clock minutes so far; steps a later gate reuses by their inputs are not subtracted) and `stepsFinished`.
+4. **Evidence review.** The handoff after a gate passed on the tree has `round: evidence-review` and bundles the gate's logs, screenshots and artifacts: the reviewer inspects the step logs and records the sha256 of every screenshot the bundle's `gate.artifacts` lists (in labelled contact-sheet batches when there are many), and of none it did not view.
+5. **`wf accept`** needs all three on the current tree, and names whichever is missing with the next command: a passing gate that skipped nothing for `--focused`; a clean closure written for this tree (any change after the review needs a new round); and that closure written after the gate passed on this tree (otherwise the evidence review).
 
-Review-first suits changes where findings are likely (money, authorization, migrations): each finding costs a fix and a light rerun instead of a full gate. Starting the review and the gate together suits changes where findings are rare: when the review comes back clean and the gate passes, only the short evidence pass remains. Attempts recorded by 0.1.5 or earlier, whose reviewers were handed the attempt only after a passing gate, count as evidence-inspected.
+Attempts recorded by 0.1.5 or earlier, whose reviewers were handed the attempt only after a passing gate, count as evidence-inspected.
 - Role agents registered by a runtime at session start may not include ones `wf sync` wrote later; the skills then ask for a session restart. They never substitute a general-purpose agent or pass a model on the spawn, since either overrides the agent file's effort and model.
 - **Files:** Claude Code agents are Markdown with frontmatter (`name`, `description`, `effort`, `model`, `tools`) in `.claude/agents/`. Codex agents are TOML in `.codex/agents/<name>.toml` (`name`, `description`, `developer_instructions`, `model`, `model_reasoning_effort`). `wf sync` removes generated `wf-*` files it no longer produces (a removed class, the old Codex `.md` files); files without its generated marker are left alone.
 

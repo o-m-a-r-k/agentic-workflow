@@ -6,13 +6,13 @@ import { abandon, adopt, changedFiles, entry, hold, openState, release, resolveA
 import { baseLines, baseMerge, baseStatus } from './base.mjs';
 import { findRoot, loadConfig, requireRoot } from './config.mjs';
 import { exportAttempt, exportFile } from './export.mjs';
-import { liveGate, runGate, runWithLease, stopGate } from './gate.mjs';
+import { STOP_CLASSES, liveGate, runGate, runWithLease, stopGate } from './gate.mjs';
 import { append, listAttempts, loadState, openEvidence } from './ledger.mjs';
 import { canonical, touchesEvidence } from './paths.mjs';
 import { openCount } from './improve.mjs';
 import { LESSON_FILE, addLesson, applySnippet, exportPluginLessons, lessonPrompts, lessonWarnings, loadLessons, moveLesson, recur, relevantLessons, reviewLessons, setLesson } from './lessons.mjs';
 import { LinkRefused, changesOf, rebaseline, releaseAttempt, seal, setVerifyLevel, verifyAttempt } from './evidence.mjs';
-import { acceptReview, amendCriteria, designWarning, batchCreate, batchEject, closeAfterHandoff, deliver, deliveredFiles, exportScreenshots, freezeCriteria, handoff, narrowDelivery, needsShown, nextAction, outsideWarning, recordReview, recordShown, reopen, screenshotsExportDir, shownDraftFile, uncovered, withAttempt } from './lifecycle.mjs';
+import { acceptReview, amendCriteria, designWarning, gateOrderCheck, batchCreate, batchEject, closeAfterHandoff, deliver, deliveredFiles, exportScreenshots, freezeCriteria, handoff, narrowDelivery, needsShown, nextAction, outsideWarning, recordReview, recordShown, reopen, screenshotsExportDir, shownDraftFile, uncovered, withAttempt } from './lifecycle.mjs';
 import { addDiscovered, channelOf, closeDiscovered, discoveredLine, openDiscovered } from './discovered.mjs';
 import { detect, doctor, register, registry, setEnabled, sync, writeDraft } from './onboard.mjs';
 import * as secrets from './secrets.mjs';
@@ -45,10 +45,12 @@ Work
                                     every issue found during the ticket: fixed in it, or deferred only by the owner
   wf handoff planner|implementer|reviewer|tester --agent ID [--work W1] [--session SID] [--runtime claude|codex]
   wf check [--repo R]               light steps only, for the implementer; reused by the gate, never counts as one
-  wf gate [--prepare-only] [--full] [--focused] [--rerun-failed]
+  wf gate [--prepare-only] [--full] [--focused] [--rerun-failed] [--reason "why"]
+                                    after a clean code review only; --reason runs it out of order and records why
   wf run --lease NAME -- CMD...     run a command holding a machine-wide lease (docker, browser...)
   wf base [merge] [--repo R]        how far each base moved; merge merges it into the worktrees
-  wf stop --reason "why"            pause a running gate; finished steps are kept
+  wf stop --class major-finding|tree-change|owner-decision --reason "why"
+                                    stop a running gate; records the class and the minutes discarded
   wf review --closure file.json     record the reviewer's closure
   wf accept                         accept the review
   wf summary --file summary.md      the owner's plain-language summary for the delivered comment
@@ -151,7 +153,7 @@ function summary(root, s, { base = null, resume = false } = {}) {
     const missing = p ? ['contract', 'anchors'].filter((k) => p[k] === undefined) : [];
     if (missing.length) lines.push(`  warning: the frozen plan has no ${missing.join(' or ')} section, so implementers have none to follow`);
   }
-  lines.push(`  next: ${live ? withAttempt(root, s, 'a gate is running: wait for it to finish (or `wf stop --reason "why"`); do not edit the worktrees meanwhile') : nextAction(root, s)}`);
+  lines.push(`  next: ${live ? withAttempt(root, s, 'a gate is running: wait for it to finish (or `wf stop --class major-finding|tree-change|owner-decision --reason "why"`); do not edit the worktrees or hand a reviewer the tree meanwhile; once it passes, the evidence review') : nextAction(root, s)}`);
   return lines.join('\n');
 }
 
@@ -587,7 +589,9 @@ async function dispatch(cmd, sub, positional, options) {
         if (dw) (options.json ? process.stderr : process.stdout).write(`wf ${cmd}: warning: ${dw}\n`);
       } catch {}
       // Live progress goes to stdout, or to stderr with --json so stdout stays one JSON document.
-      const r = await runGate(root, s, { prepareOnly: options['prepare-only'] === true, full: !check && options.full === true, focused: !check && options.focused === true, rerunFailed: !check && options['rerun-failed'] === true ? true : undefined, check, repos, live: options.json ? process.stderr : process.stdout });
+      // The order of work (I-27): a gate runs only after a clean code-review round on this tree, never beside a round.
+      const afterLock = check || options['prepare-only'] === true ? undefined : gateOrderCheck(root, options);
+      const r = await runGate(root, s, { afterLock, prepareOnly: options['prepare-only'] === true, full: !check && options.full === true, focused: !check && options.focused === true, rerunFailed: !check && options['rerun-failed'] === true ? true : undefined, check, repos, live: options.json ? process.stderr : process.stdout });
       const note = check ? '\n  (a check runs light steps only; it is reused by the gate but never counts as one)' : r.record?.rerunFailed ? '\n  (--rerun-failed: proof while repairing; acceptance and delivery need a full `wf gate`)' : '';
       const flaky = r.record?.flaky?.length ? `\n  flaky: ${r.record.flaky.map((f) => f.step).join(', ')} failed earlier and passed now with the same inputs` : '';
       print(options, `${gateText(r).replace(/^gate /, check ? 'check ' : 'gate ')}${note}${flaky}`, r.record ?? r.plan);
@@ -624,9 +628,10 @@ async function dispatch(cmd, sub, positional, options) {
     }
     case 'stop': {
       const s = openState(root, options);
-      if (!options.reason) throw new WfError('--reason is required');
-      const lock = stopGate(root, s, String(options.reason));
-      print(options, `stopping gate ${lock.runId}; finished steps are kept. Resume with \`wf gate\`.`);
+      if (!options.reason || options.reason === true || !String(options.reason).trim()) throw new WfError(`--reason "why" is required, with --class ${STOP_CLASSES.join('|')}`);
+      const lock = stopGate(root, s, String(options.reason), options.class);
+      const after = options.class === 'owner-decision' ? 'Resume with `wf gate`.' : 'Fix and commit through the implementer; the new tree gets a code-review round before the next `wf gate`.';
+      print(options, `stopping gate ${lock.runId} (${options.class}; ${lock.discardedMinutes ?? '?'} minute(s) of gate work recorded as discarded); finished steps are kept. ${after}`);
       return 0;
     }
     case 'review': {

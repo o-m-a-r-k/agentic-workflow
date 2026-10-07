@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { append } from '../engine/ledger.mjs';
-import { closureFile, commitIn, criteriaFile, goodClosure, makeRepo, ok, sh, singleRepoProject, state, tmp, wf, write, yaml } from './helpers.mjs';
+import { closureFile, commitIn, criteriaFile, goodClosure, makeRepo, ok, OUT_OF_ORDER, sh, singleRepoProject, state, tmp, wf, write, yaml } from './helpers.mjs';
 
 const steps = [{ id: 'unit', repo: 'app', run: 'true', inputs: ['src/**'] }];
 const line = (o) => JSON.stringify(o);
@@ -151,7 +151,7 @@ test('with two open attempts every printed command names --attempt, and wf statu
   assert.doesNotMatch(one, new RegExp(second.id.replace('.', '\\.')), 'only the named attempt is shown');
   const next = state(root, id).next;
   const commands = [...next.matchAll(/`(wf [^`]*)`/g)].map((m) => m[1]);
-  assert.ok(commands.length >= 3, next);
+  assert.ok(commands.length >= 2, next);
   for (const c of commands) assert.match(c, new RegExp(`--attempt ${id.replace('.', '\\.')}$`), c);
   assert.match(state(root, second.id).next, new RegExp(`wf handoff planner --agent <id> --attempt ${second.id.replace('.', '\\.')}`));
   ok(wf(root, ['abandon', '--reason', 'done with it', '--attempt', second.id]));
@@ -210,7 +210,7 @@ test('wf base merge records the merge, notes overlapping files and says the gate
   ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', id]));
   ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', id]));
   commitIn(wt, { 'src/m.txt': 'one\n2\n3\n4\n5\n' });
-  ok(wf(root, ['gate', '--attempt', id]));
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', id]));
   pushToRemote(base, remote, { 'src/m.txt': '1\n2\n3\n4\nfive\n', 'src/n.txt': 'n\n' }, 'theirs');
   const m = ok(wf(root, ['base', 'merge', '--attempt', id]));
   assert.match(m.out, /app: merged origin\/main \(1 commit\(s\), 2 file\(s\)\); HEAD \w{10} -> \w{10}/);
@@ -221,7 +221,7 @@ test('wf base merge records the merge, notes overlapping files and says the gate
   assert.equal(s.baseMerges.length, 1);
   assert.deepEqual(s.baseMerges[0].overlap, ['src/m.txt']);
   assert.doesNotMatch(ok(wf(root, ['status'])).out, /base app/, 'the base is current again');
-  assert.match(s.next, /run `wf gate`/, 'the gate on the old tree no longer counts');
+  assert.match(s.next, /^code review: hand to a fresh reviewer/, 'the merged tree needs its code review, then a gate');
   const rev = ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', id, '--json'])).json();
   assert.equal(JSON.parse(fs.readFileSync(rev.bundle, 'utf8')).bases.app, sh(wt, 'git rev-parse origin/main'), 'the reviewer diffs against the merged base');
   assert.match(ok(wf(root, ['base', 'merge', '--attempt', id])).out, /app: already on its base/);
@@ -259,7 +259,7 @@ test('gate steps get an allowlisted environment: no session tokens, adapter pass
   ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', id]));
   commitIn(wt, { 'src/a.txt': 'b\n' });
   const env = { SECRET_CANARY: 'canary-value', CLAUDE_CODE_OAUTH_TOKEN: 'session-token', ANTHROPIC_API_KEY: 'sk-x', ANTHROPIC_BASE_URL: 'http://proxy.test', MY_PROJECT_FLAG: 'on', CLOUDSDK_X: 'c' };
-  const g = JSON.parse(ok(wf(root, ['gate', '--attempt', id, '--json'], { env })).out);
+  const g = JSON.parse(ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', id, '--json'], { env })).out);
   const seen = fs.readFileSync(path.join(path.dirname(g.steps[0].log), 'out', 'env.txt'), 'utf8');
   for (const leak of ['SECRET_CANARY', 'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']) assert.doesNotMatch(seen, new RegExp(`^${leak}=`, 'm'), `${leak} reached the step`);
   for (const passed of ['MY_PROJECT_FLAG=on', 'ANTHROPIC_BASE_URL=http://proxy.test', 'CLOUDSDK_X=c', `WF_STEP=env`]) assert.match(seen, new RegExp(`^${passed.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}$`, 'm'));

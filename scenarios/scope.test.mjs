@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { closureFile, commitIn, goodClosure, ok, singleRepoProject, state, wf } from './helpers.mjs';
+import { closureFile, commitIn, goodClosure, ok, OUT_OF_ORDER, singleRepoProject, state, wf } from './helpers.mjs';
 
 const plan = { plan: { summary: 's', anchors: ['src/a.txt:1 the text'], tests: { changed: ['test/a.test.js'] } }, criteria: [{ id: 'C1', text: 'a changes', uat: 'a shows the new text' }, { id: 'C2', text: 'audit read is logged', uat: false }] };
 const repos = [{ name: 'app', path: '.', base: 'main', packages: [{ path: '.', docsOnly: ['docs/**'] }] }];
@@ -31,7 +31,7 @@ test('outside the plan: the owner is warned before the review; accept needs a ve
   assert.match(ok(wf(root, ['status'])).out, warn);
   assert.match(ok(wf(root, ['resume', '--attempt', id])).out, warn);
   assert.match(ok(wf(root, ['check', '--attempt', id])).out, /wf check: warning: 2 changed file\(s\) outside the plan/);
-  const g = ok(wf(root, ['gate', '--attempt', id]));
+  const g = ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', id]));
   assert.ok(g.out.indexOf('wf gate: warning: 2 changed file(s) outside the plan') < g.out.indexOf('wf gate: run'), 'warned before the gate starts');
   const h = ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', id]));
   assert.match(h.err, /warning: 2 changed file\(s\) outside the plan/, 'the owner is told at the handoff');
@@ -68,7 +68,7 @@ test('outside the plan: the owner is warned before the review; accept needs a ve
 test('outside the plan: a plan that names no paths requires nothing', () => {
   const { base, root, id } = project('scope-none', { 'src/a.txt': 'b\n', 'src/audit.txt': 'x\n' }, { plan: 'change a', criteria: [{ id: 'C1', text: 'a', uat: 'a' }] });
   assert.doesNotMatch(ok(wf(root, ['status'])).out, /outside the plan/);
-  ok(wf(root, ['gate', '--attempt', id]));
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', id]));
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', id]));
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r')), '--attempt', id]));
   ok(wf(root, ['accept', '--attempt', id]));

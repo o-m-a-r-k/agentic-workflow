@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { closureFile, commitIn, criteriaFile, goodClosure, ok, singleRepoProject, state, summaryFile, wf, write } from './helpers.mjs';
+import { closureFile, commitIn, criteriaFile, goodClosure, ok, OUT_OF_ORDER, singleRepoProject, state, summaryFile, wf, write } from './helpers.mjs';
 
 // 0.4.2: connector mode is a first-class choice. In Claude Code the connector's tool results arrive inline in the chat,
 // so the raw-capture path could only be met by retyping them (named failure: ~35 KB of signed URLs retyped). The agent
@@ -33,7 +33,7 @@ function toDelivered(base, root) {
   ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', id]));
   ok(rec('implementing', { issue: 'ENG-50', title: 'Show a', description: 'Show the new text.', status: 'In Progress', readAt: later() }));
   commitIn(state(root, id).repos.app.worktree, { 'src/a.txt': 'ui\n' });
-  const g = ok(wf(root, ['gate', '--attempt', id, '--json'])).json();
+  const g = ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', id, '--json'])).json();
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', id]));
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r', { screenshotsInspected: [g.steps[0].artifacts[0].sha256] })), '--attempt', id]));
   ok(wf(root, ['accept', '--attempt', id]));

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { WF, closureFile, commitIn, criteriaFile, goodClosure, ok, sh, singleRepoProject, state, toAccepted, wf } from './helpers.mjs';
+import { closureFile, commitIn, criteriaFile, goodClosure, ok, OUT_OF_ORDER, sh, singleRepoProject, state, toAccepted, WF, wf } from './helpers.mjs';
 
 function admitted(root, base, item, extra = []) {
   const e = ok(wf(root, ['entry', '--item', item, '--owner', 'o', '--json', ...extra])).json();
@@ -25,9 +25,9 @@ process.exit(run.every(res)?0:1);`;
   const { base, root } = singleRepoProject('stale-suite', { gate: { steps } }, { 'runner.cjs': runner, 'tests/a.test': 'a\n', 'tests/b.test': 'b\n', 'src/lib.txt': 'good\n' });
   const e = admitted(root, base, 'RF-1');
   commitIn(e.repos.app.worktree, { 'tests/b.test': 'bad\n' });
-  assert.equal(wf(root, ['gate', '--attempt', e.id]).code, 1);
+  assert.equal(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]).code, 1);
   commitIn(e.repos.app.worktree, { 'tests/b.test': 'b fixed\n', 'src/lib.txt': 'broken\n' });
-  const g = JSON.parse(wf(root, ['gate', '--attempt', e.id, '--json']).out);
+  const g = JSON.parse(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id, '--json']).out);
   assert.equal(g.status, 'failed', 'a.test must rerun because src/lib.txt changed');
   assert.equal(g.steps[0].rerunSuites, null, 'non-suite input changed: whole step reran');
 });
@@ -40,7 +40,7 @@ test('two concurrent gates: exactly one runs and the ledger stays intact', async
   const env = { ...process.env, WF_CONFIG_HOME: path.join(root, '..', '.wfhome') };
   delete env.CLAUDE_CODE_SESSION_ID;
   const runOne = () => new Promise((resolve) => {
-    const c = spawn(process.execPath, [WF, 'gate', '--attempt', e.id], { cwd: root, env });
+    const c = spawn(process.execPath, [WF, 'gate', ...OUT_OF_ORDER, '--attempt', e.id], { cwd: root, env });
     let err = '';
     c.stderr.on('data', (d) => (err += d));
     c.on('exit', (code) => resolve({ code, err }));
@@ -59,7 +59,7 @@ test('batch: a member hold blocks the batch; a member author cannot review it; a
   const m1 = toAccepted(root, base, { item: 'RF-3', change: { 'src/a.txt': 'one\n' }, extraEntry: ['--defer-heavy'] });
   const m2 = toAccepted(root, base, { item: 'RF-4', change: { 'src/b.txt': 'two\n' }, extraEntry: ['--defer-heavy'] });
   const b = ok(wf(root, ['batch', 'create', '--members', `${m1.id},${m2.id}`, '--owner', 'ob', '--json'])).json();
-  ok(wf(root, ['gate', '--attempt', b.id]));
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', b.id]));
   const byAuthor = wf(root, ['handoff', 'reviewer', '--agent', 'impl-1', '--attempt', b.id]);
   assert.equal(byAuthor.code, 75, 'a member implementer cannot review the batch');
   assert.equal(wf(root, ['handoff', 'reviewer', '--agent', 'owner-1', '--attempt', b.id]).code, 75, 'nor a member owner');
@@ -79,7 +79,7 @@ test('a previous owner cannot review after someone adopts the attempt', () => {
   const { base, root } = singleRepoProject('adopt-review', { gate: { steps: [{ id: 'u', repo: 'app', run: 'true' }] } });
   const e = admitted(root, base, 'RF-5');
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'x\n' });
-  ok(wf(root, ['gate', '--attempt', e.id]));
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]));
   ok(wf(root, ['adopt', '--attempt', e.id, '--owner', 'new-owner']));
   assert.equal(wf(root, ['handoff', 'reviewer', '--agent', 'o', '--attempt', e.id]).code, 75);
 });
@@ -105,7 +105,7 @@ test('JUnit reports can be absolute globs under the evidence folder', () => {
   const { base, root } = singleRepoProject('abs-glob', { gate: { steps } });
   const e = admitted(root, base, 'RF-7');
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'g\n' });
-  const g = JSON.parse(ok(wf(root, ['gate', '--attempt', e.id, '--json'])).out);
+  const g = JSON.parse(ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id, '--json'])).out);
   assert.deepEqual(g.steps[0].suites.map((s) => s.id), ['x.test']);
 });
 
@@ -116,7 +116,7 @@ test('a secret split across output chunks is still masked', () => {
   ok(wf(root, ['secrets', 'set', 'API_TOKEN'], { input: secret }));
   const e = admitted(root, base, 'RF-8');
   commitIn(e.repos.app.worktree, { 'src/a.txt': 's\n' });
-  const g = JSON.parse(ok(wf(root, ['gate', '--attempt', e.id, '--json'])).out);
+  const g = JSON.parse(ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id, '--json'])).out);
   const log = fs.readFileSync(g.steps[0].log, 'utf8');
   assert.doesNotMatch(log, /ABCDEFGHIJ/);
   assert.match(log, /\[secret\]/);
@@ -144,7 +144,7 @@ test('a commit pushed by hand after acceptance is not recorded as delivered', ()
   const d = wf(root, ['deliver', '--attempt', id]);
   assert.equal(d.code, 75);
   assert.match(d.err, /pushed outside wf/);
-  ok(wf(root, ['gate', '--attempt', id]));
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', id]));
   assert.equal(wf(root, ['deliver', '--attempt', id]).code, 75, 'still refused after a fresh gate');
   assert.equal(state(root, id).delivery.repos.app, undefined);
 });
@@ -156,7 +156,7 @@ test('the reviewer can write its closure under the guard hook; evidence is read 
   const { base, root } = singleRepoProject('closure-path', { gate: { steps: [{ id: 'u', repo: 'app', run: 'true' }] } });
   const e = admitted(root, base, 'RF-10');
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'r\n' });
-  ok(wf(root, ['gate', '--attempt', e.id]));
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]));
   const h = JSON.parse(ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', e.id, '--json'])).out);
   const closurePath = JSON.parse(fs.readFileSync(h.bundle, 'utf8')).reviewClosureFile;
   assert.doesNotMatch(closurePath, /\.wf-evidence/);

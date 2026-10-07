@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { closureFile, commitIn, criteriaFile, goodClosure, ok, postedComment, rawReadback, singleRepoProject, state, summaryFile, wf } from './helpers.mjs';
+import { closureFile, commitIn, criteriaFile, goodClosure, ok, OUT_OF_ORDER, postedComment, rawReadback, singleRepoProject, state, summaryFile, wf } from './helpers.mjs';
 import { knownLimits, uatScope } from '../engine/tracker.mjs';
 
 // 0.1.16: field failures from delivering one UI ticket. The delivered comment was a verbatim dump of every criterion;
@@ -46,7 +46,7 @@ test('delivered handoff: summary required, screenshots embedded inline, raw read
   ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
   ok(wf(root, ['tracker', 'record', '--event', 'implementing', '--capture', cap(base, { issue }), '--attempt', e.id]));
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'ui\n' });
-  const shots = ok(wf(root, ['gate', '--attempt', e.id, '--json'])).json().steps[0].artifacts;
+  const shots = ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id, '--json'])).json().steps[0].artifacts;
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', e.id]));
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r', { criteria: criteria.map((c) => ({ id: c.id, evidence: { kind: 'output', ref: 'gate log' } })), screenshotsInspected: shots.map((a) => a.sha256) })), '--attempt', e.id]));
   ok(wf(root, ['accept', '--attempt', e.id]));
@@ -169,7 +169,7 @@ test('design system: bans and companions run over added lines; every hit needs t
     'web/components/DataTable.tsx': 'export const DataTable = () => <table><thead /></table>;\n',
     'web/old.tsx': 'export const Old = () => <table />;\nexport const x = 1;\n',
   });
-  const g = ok(wf(root, ['gate', '--attempt', e.id]));
+  const g = ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]));
   assert.match(g.out, /warning: 3 design-system hit\(s\) on added lines/);
   const start = ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', e.id])).out.trim();
   const bundle = JSON.parse(fs.readFileSync(start.match(/^Read (\S+)/)[1], 'utf8'));

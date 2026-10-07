@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { closureFile, commitIn, criteriaFile, goodClosure, ok, rawComments, rawIssue, singleRepoProject, state, summaryFile, wf } from './helpers.mjs';
+import { closureFile, commitIn, criteriaFile, goodClosure, ok, OUT_OF_ORDER, rawComments, rawIssue, singleRepoProject, state, summaryFile, wf } from './helpers.mjs';
 
 // 0.4.2: connector mode reaches verified evidence where the host keeps a transcript. The host (Claude Code, Codex)
 // writes every connector call and its unchanged result; `wf tracker record --from-transcript` reads the owner's
@@ -57,7 +57,7 @@ function toShown(root, base, id) {
 
 function deliverAndShow(root, base, id) {
   commitIn(state(root, id).repos.app.worktree, { 'src/a.txt': 'ui\n' });
-  const g = ok(wf(root, ['gate', '--attempt', id, '--json'])).json();
+  const g = ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', id, '--json'])).json();
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', id]));
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r', { screenshotsInspected: [g.steps[0].artifacts[0].sha256] })), '--attempt', id]));
   ok(wf(root, ['accept', '--attempt', id]));

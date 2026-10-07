@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { makeRepo, ok, sh, tmp, toAccepted, singleRepoProject, wf, write } from './helpers.mjs';
+import { makeRepo, ok, OUT_OF_ORDER, sh, singleRepoProject, tmp, toAccepted, wf, write } from './helpers.mjs';
 import { YAML } from '../engine/util.mjs';
 
 function sampleProject() {
@@ -116,7 +116,7 @@ function toAcceptedUntilGate(root, base) {
   ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
   write(e.repos.app.worktree, 'src/a.txt', 'z\n');
   sh(e.repos.app.worktree, 'git add -A && git commit -q -m z');
-  ok(wf(root, ['gate', '--attempt', e.id]));
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]));
   return e;
 }
 

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { closureFile, commitIn, criteriaFile, goodClosure, makeRepo, ok, singleRepoProject, state, tmp, toAccepted, wf } from './helpers.mjs';
+import { closureFile, commitIn, criteriaFile, goodClosure, makeRepo, ok, OUT_OF_ORDER, singleRepoProject, state, tmp, toAccepted, wf } from './helpers.mjs';
 import { ENGINE_VERSION } from '../engine/util.mjs';
 
 // A real ticket was refused at `wf accept` with 1,300 screenshots from other tickets' specs: the step's artifacts globs
@@ -15,7 +15,7 @@ function toReview(root, base, item) {
   ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id]));
   ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
   commitIn(e.repos.app.worktree, { 'src/a.txt': `${item}\n` });
-  const g = ok(wf(root, ['gate', '--attempt', e.id, '--json'])).json();
+  const g = ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id, '--json'])).json();
   const h = ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', e.id, '--json'])).json();
   return { id: e.id, gate: g, bundle: JSON.parse(fs.readFileSync(h.bundle, 'utf8')) };
 }
@@ -88,7 +88,7 @@ test('no evidence: nothing is required from a step whose package did not change'
   ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id]));
   ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
   commitIn(e.repos.app.worktree, { 'api/a.txt': 'changed\n' });
-  ok(wf(root, ['gate', '--attempt', e.id]));
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]));
   const h = ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', e.id, '--json'])).json();
   const ui = JSON.parse(fs.readFileSync(h.bundle, 'utf8')).gate.artifacts[0];
   assert.equal(ui.uncovered, false);
@@ -127,7 +127,7 @@ test('steps receive WF_ITEM and WF_ITEMS, for one attempt and for a batch', () =
   const m1 = toAccepted(root, base, { item: 'ENG-81', change: { 'src/a.txt': 'one\n' }, extraEntry: ['--defer-heavy'] });
   const m2 = toAccepted(root, base, { item: 'ENG-82', change: { 'src/b.txt': 'two\n' }, extraEntry: ['--defer-heavy'] });
   const b = ok(wf(root, ['batch', 'create', '--members', `${m1.id},${m2.id}`, '--owner', 'o', '--json'])).json();
-  ok(wf(root, ['gate', '--attempt', b.id]));
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', b.id]));
   assert.equal(fs.readFileSync(`${root}/../env.log`, 'utf8').trim(), `item=${b.item} items=${b.item} ENG-81 ENG-82`);
 });
 
@@ -196,7 +196,7 @@ test('engine pin: >=x.y.z is enforced at entry and gate, naming installed and re
   const e = ok(wf(p.root, ['entry', '--item', 'ENG-92', '--owner', 'o', '--json'])).json();
   const cfgFile = `${p.root}/.workflow/project.yaml`;
   fs.writeFileSync(cfgFile, JSON.stringify({ ...JSON.parse(fs.readFileSync(cfgFile, 'utf8')), engine: newer }));
-  const g = wf(p.root, ['gate', '--attempt', e.id]);
+  const g = wf(p.root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]);
   assert.equal(g.code, 75);
   assert.match(g.err, /needs engine/);
   const bad = singleRepoProject('pin-bad', { engine: '0.1', gate: { steps: [] } });

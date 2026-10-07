@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { closureFile, commitIn, criteriaFile, goodClosure, makeRepo, ok, sh, singleRepoProject, state, tmp, toAccepted, wf, yaml } from './helpers.mjs';
+import { closureFile, commitIn, criteriaFile, goodClosure, makeRepo, ok, OUT_OF_ORDER, sh, singleRepoProject, state, tmp, toAccepted, wf, yaml } from './helpers.mjs';
 
 // 0.2.0/0.3.0: the lessons harness (docs/LESSONS.md). A lesson lives in the repository it concerns and is committed and
 // delivered with the attempt that taught it; every role gets the lessons that apply (proposed ones as advisory), the
@@ -79,12 +79,12 @@ test('a reopened attempt records its lesson before the review; it is then delive
   ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', id]));
   ok(wf(root, ['handoff', 'implementer', '--agent', 'i2', '--attempt', id]));
   commitIn(state(root, id).repos.app.worktree, { 'src/a.txt': 'again\n' });
-  ok(wf(root, ['gate', '--attempt', id]));
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', id]));
   const refused = wf(root, ['handoff', 'reviewer', '--agent', 'r2', '--attempt', id]);
   assert.equal(refused.code, 75);
   assert.match(refused.err, /reopens ENG-301\.1 \("the screenshots are attached but I cannot see them in the ticket"\): record what the project learns before the review/);
   ok(add(root, ['--attempt', id, '--title', 'Delivered screenshots are visible in the ticket', '--what', 'attachments showed only as links', '--cause', 'tooling', '--mechanism', 'engine-change', '--quote', 'I cannot see them']));
-  ok(wf(root, ['gate', '--attempt', id]));
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', id]));
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'r3', '--attempt', id]));
   // The lesson this attempt recorded applies to its own review too.
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r3', { lessons: [{ lesson: 'L-1', verdict: 'complied', evidence: 'the comment embeds each image' }] })), '--attempt', id]));
@@ -124,12 +124,12 @@ test('every role gets the lessons that apply, with why; proposed ones are adviso
     sh(e.repos.app.worktree, `git add -A && git commit -q ${paras.map((p) => `-m ${JSON.stringify(p)}`).join(' ')}`);
   };
   commitWith({ 'src/a.txt': 'changed\n' }, 'change', 'Lesson L-6: applied - checklist followed', 'Lesson L-7: not-applicable - no review surface touched');
-  ok(wf(root, ['gate', '--attempt', e.id]));
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]));
   const missing = wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', e.id]);
   assert.equal(missing.code, 75);
   assert.match(missing.err, /the implementer did not acknowledge 5 lesson\(s\) it was handed: L-1, L-2, L-3, L-4, L-5/);
   commitWith({ 'src/b.txt': 'acks\n' }, 'acks', ...['L-1', 'L-2', 'L-3', 'L-4', 'L-5'].map((x) => `Lesson ${x}: applied - done`));
-  ok(wf(root, ['gate', '--attempt', e.id]));
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]));
   const rv = wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', e.id]);
   assert.equal(rv.code, 0, rv.err);
   assert.match(rv.err, /lessons injected: L-6, L-7, /);
@@ -202,7 +202,7 @@ test('prior decisions are inputs: a criterion kept only on precedent needs a pur
   ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id]));
   ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'p\n' });
-  ok(wf(root, ['gate', '--attempt', e.id]));
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]));
   const crit = (extra) => [{ id: 'C1', evidence: { kind: 'output', ref: 'gate log' }, precedentOnly: true, ...extra }];
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', e.id]));
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r', { criteria: crit({}) })), '--attempt', e.id]));
@@ -247,7 +247,7 @@ test('lessons are matched by their declared scope: a scripts-only fix in one rep
   assert.deepEqual(bundleOf(impl.out).lessons.apply.map((l) => l.id), ['L-7'], 'two repos, nothing planned or changed yet: only the every-change lesson');
   assert.match(impl.out, /lessons filtered out \(outside this change's scope\): L-1, L-2, L-3, L-4, L-5, L-6; `wf lesson preview --attempt QF-1\.1 --role implementer` says why/);
   commitIn(e.repos.api.worktree, { 'scripts/janitor.sh': 'set -e\necho b\n' }, 'Lesson L-7: applied - rollback is reverting the script');
-  ok(wf(root, ['gate', '--attempt', e.id]));
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]));
   const rv = ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', e.id]));
   assert.match(rv.err, /^lessons injected: L-4, L-7$/m);
   assert.match(rv.err, /lessons filtered out \(outside this change's scope\): L-1, L-2, L-3, L-5, L-6/);

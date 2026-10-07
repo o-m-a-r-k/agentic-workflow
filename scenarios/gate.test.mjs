@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { WF, closureFile, commitIn, criteriaFile, goodClosure, ok, sh, singleRepoProject, state, wf, write, yaml } from './helpers.mjs';
+import { closureFile, commitIn, criteriaFile, goodClosure, ok, OUT_OF_ORDER, sh, singleRepoProject, state, WF, wf, write, yaml } from './helpers.mjs';
 
 function admitted(root, base, item) {
   const e = ok(wf(root, ['entry', '--item', item, '--owner', 'o', '--json'])).json();
@@ -14,7 +14,7 @@ function admitted(root, base, item) {
 }
 
 const gateJson = (root, id, extra = []) => {
-  const r = wf(root, ['gate', '--attempt', id, '--json', ...extra]);
+  const r = wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', id, '--json', ...extra]);
   return { code: r.code, data: r.out ? JSON.parse(r.out) : null, err: r.err };
 };
 const byId = (steps) => Object.fromEntries(steps.map((s) => [s.id, s]));
@@ -46,10 +46,10 @@ test('worker overrides: auto sizing is recorded, invalid override exits 2', () =
   assert.ok(g.workers.n >= 2 && g.workers.n <= 4, `workers ${g.workers.n}`);
   assert.ok(['auto', 'probe-failed'].includes(g.workers.source));
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'w2\n' });
-  const forced = wf(root, ['gate', '--attempt', e.id, '--json'], { env: { WF_WORKERS_UNIT: '3' } });
+  const forced = wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id, '--json'], { env: { WF_WORKERS_UNIT: '3' } });
   assert.equal(JSON.parse(forced.out).steps[0].workers.n, 3);
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'w3\n' });
-  const bad = wf(root, ['gate', '--attempt', e.id], { env: { WF_WORKERS_UNIT: 'lots' } });
+  const bad = wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id], { env: { WF_WORKERS_UNIT: 'lots' } });
   assert.equal(bad.code, 2);
   assert.match(bad.err, /WF_WORKERS_UNIT must be an integer/);
 });
@@ -125,7 +125,7 @@ test('a runner killed mid-gate is recovered: finished steps carried, the rest re
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'h\n' });
   const env = { ...process.env, WF_CONFIG_HOME: path.join(root, '..', '.wfhome') };
   delete env.CLAUDE_CODE_SESSION_ID;
-  const child = spawn(process.execPath, [WF, 'gate', '--attempt', e.id], { cwd: root, env, stdio: 'ignore' });
+  const child = spawn(process.execPath, [WF, 'gate', ...OUT_OF_ORDER, '--attempt', e.id], { cwd: root, env, stdio: 'ignore' });
   const lock = path.join(root, '.wf-evidence', 'attempts', e.id, 'gate', 'gate.lock');
   const deadline = Date.now() + 30000;
   let progress = null;
@@ -144,11 +144,11 @@ test('a runner killed mid-gate is recovered: finished steps carried, the rest re
     }
   }
   assert.ok(progress, 'fast step finished before the kill');
-  assert.equal(wf(root, ['gate', '--attempt', e.id]).code, 75, 'a live runner is never duplicated');
+  assert.equal(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]).code, 75, 'a live runner is never duplicated');
   child.kill('SIGKILL');
   await new Promise((r) => child.on('exit', r));
   fs.rmSync(path.join(root, '..', 'slow.marker'));
-  const g = wf(root, ['gate', '--attempt', e.id]);
+  const g = wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]);
   assert.match(g.out, /recovered 1 finished step/);
   let alive = 'alive';
   for (let i = 0; i < 100 && alive === 'alive'; i++) {
@@ -166,7 +166,7 @@ test('missing secrets refuse the gate; values are masked in logs', () => {
   const { base, root } = singleRepoProject('secrets', { gate: { steps } }, { '.workflow/secrets.yaml': yaml({ keys: [{ key: 'API_TOKEN', kind: 'provided', usedBy: ['api'], format: { prefix: 'tok_' } }] }) });
   const e = admitted(root, base, 'ENG-26');
   commitIn(e.repos.app.worktree, { 'src/a.txt': 's\n' });
-  const g = wf(root, ['gate', '--attempt', e.id]);
+  const g = wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]);
   assert.equal(g.code, 75);
   assert.match(g.err, /api needs API_TOKEN/);
   assert.equal(wf(root, ['secrets', 'set', 'API_TOKEN'], { input: 'wrong_123456' }).code, 75, 'format checked');
@@ -232,10 +232,10 @@ test('a focused gate is repair proof only: review, accept and delivery need a ga
   assert.equal(g1.code, 0);
   assert.equal(g1.data.focused, true, 'the run records that it was focused');
   assert.equal(byId(g1.data.steps).e2e.skippedBy, 'focused');
-  assert.match(state(root, e.id).next, /without --focused/);
   const h = JSON.parse(ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', e.id, '--json'])).out);
   assert.equal(JSON.parse(fs.readFileSync(h.bundle, 'utf8')).gate.passedOnThisTree, false, 'a focused gate is not gate evidence for the reviewer');
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r')), '--attempt', e.id]));
+  assert.match(state(root, e.id).next, /^clean code review on this tree: the last gate was focused \(skipped e2e\): run one `wf gate` without --focused/);
   const early = wf(root, ['accept', '--attempt', e.id]);
   assert.equal(early.code, 75);
   assert.match(early.err, /focused and skipped e2e/);
@@ -263,7 +263,7 @@ test('a running gate shows progress: wf gate prints each step as it starts and f
   const fd = fs.openSync(outFile, 'w');
   const env = { ...process.env, WF_CONFIG_HOME: path.join(root, '..', '.wfhome') };
   delete env.CLAUDE_CODE_SESSION_ID;
-  const child = spawn(process.execPath, [WF, 'gate', '--attempt', e.id], { cwd: root, env, stdio: ['ignore', fd, fd] });
+  const child = spawn(process.execPath, [WF, 'gate', ...OUT_OF_ORDER, '--attempt', e.id], { cwd: root, env, stdio: ['ignore', fd, fd] });
   const exited = new Promise((r) => child.on('exit', r));
   const read = () => fs.readFileSync(outFile, 'utf8');
   const deadline = Date.now() + 30000;

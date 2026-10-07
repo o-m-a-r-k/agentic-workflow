@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { closureFile, commitIn, criteriaFile, goodClosure, ok, singleRepoProject, state, summaryFile, tmp, wf, yaml } from './helpers.mjs';
+import { closureFile, commitIn, criteriaFile, goodClosure, ok, OUT_OF_ORDER, singleRepoProject, state, summaryFile, tmp, wf, yaml } from './helpers.mjs';
 import { deliveredSeams, readEvidenceFile } from '../engine/evidence.mjs';
 
 // 0.4.0 review finding: an adapter read a delivered screenshot by its path, so a link planted there could upload any
@@ -72,7 +72,7 @@ test('safe read end to end: a delivered screenshot replaced by a link to a secre
   ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id]));
   ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'ui\n' });
-  const g = ok(wf(root, ['gate', '--attempt', e.id, '--json'])).json();
+  const g = ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id, '--json'])).json();
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', e.id]));
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r', { screenshotsInspected: [g.steps[0].artifacts[0].sha256] })), '--attempt', e.id]));
   ok(wf(root, ['accept', '--attempt', e.id]));

@@ -140,6 +140,8 @@ export function reduce(entries) {
     deferHeavy: false,
     reopenedFrom: null,
     stops: [],
+    reviewsRefused: [],
+    gateOverrides: [],
     closedAt: null,
     abandoned: null,
     schemaVersion: null,
@@ -202,7 +204,15 @@ export function reduce(entries) {
         s.exports.push({ ...d, at: e.at });
         break;
       case 'gate.stopped':
-        s.stops.push({ at: e.at, reason: d.reason });
+        s.stops.push({ at: e.at, reason: d.reason, class: d.class ?? null, runId: d.runId ?? null, discardedMinutes: d.discardedMinutes ?? null });
+        break;
+      // A review round whose closure was refused because the tree changed during it (I-23): the round is over.
+      case 'review.refused':
+        s.reviewsRefused.push({ ...d, at: e.at });
+        break;
+      // A gate the owner started out of the order of work (I-27), with the reason it was recorded under.
+      case 'gate.override':
+        s.gateOverrides.push({ ...d, at: e.at, by: e.actor });
         break;
       case 'review.recorded':
         s.review = { ...d, at: e.at };

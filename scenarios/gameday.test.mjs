@@ -12,7 +12,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { closureFile, commitIn, makeRepo, ok, postedComment, rawReadback, sh, summaryFile, tmp, wf, write, yaml } from './helpers.mjs';
+import { closureFile, commitIn, makeRepo, ok, OUT_OF_ORDER, postedComment, rawReadback, sh, summaryFile, tmp, wf, write, yaml } from './helpers.mjs';
 
 const ID = 'GD-1.1';
 
@@ -186,10 +186,10 @@ test('game day: one ticket through every fault seen on real tickets', () => {
 
   // The gate. Faults: a flaky suite, a cache directory, and a canary that must not reach any step.
   const env = { GAMEDAY_CANARY: 'canary-1', CLAUDE_CODE_OAUTH_TOKEN: 'session-secret' };
-  const g1 = w(['gate', '--attempt', ID], { env });
+  const g1 = w(['gate', ...OUT_OF_ORDER, '--attempt', ID], { env });
   assert.equal(g1.code, 1);
   assert.match(g1.out, /api-unit \| first failure: test\/checkout\.test\.js/);
-  const g2 = JSON.parse(ok(w(['gate', '--attempt', ID, '--json'], { env })).out);
+  const g2 = JSON.parse(ok(w(['gate', ...OUT_OF_ORDER, '--attempt', ID, '--json'], { env })).out);
   const byId = Object.fromEntries(g2.steps.map((s) => [s.id, s]));
   assert.deepEqual(byId['api-unit'].rerunSuites, ['test/checkout.test.js'], 'only the failed suite reran');
   assert.deepEqual(g2.flaky.map((f) => [f.step, f.suites]), [['api-unit', ['test/checkout.test.js']]]);

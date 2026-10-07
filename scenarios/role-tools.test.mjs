@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { closureFile, commitIn, criteriaFile, goodClosure, ok, singleRepoProject, state, wf, write } from './helpers.mjs';
+import { closureFile, commitIn, criteriaFile, goodClosure, ok, OUT_OF_ORDER, singleRepoProject, state, wf, write } from './helpers.mjs';
 
 // Named failure (0.3.3, a live round): the generated reviewer was told to write its closure with the Write tool, but
 // its `tools` list lacked Write, so the closure could not be recorded and the round was lost.
@@ -35,7 +35,7 @@ test('wf review refuses a closure when the worktree changed during the review ro
   ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id]));
   ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'b\n' });
-  ok(wf(root, ['gate', '--attempt', e.id]));
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]));
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', e.id]));
   write(e.repos.app.worktree, 'src/a.txt', 'the reviewer edited this\n');
   const r = wf(root, ['review', '--closure', closureFile(base, goodClosure('r')), '--attempt', e.id]);

@@ -574,6 +574,7 @@ async function acquireGateLock(root, state) {
         if (Date.now() - fs.statSync(file).mtimeMs < 5000) throw refuse(`a gate is already starting for ${state.id}; wait for it or run \`wf stop\``);
         lock = { pid: 0 };
       }
+      if (lock.kind === REVIEW_HANDOFF && isWfRunner(lock.pid)) throw refuse(`a reviewer handoff is being recorded for ${state.id} (pid ${lock.pid}); review and gate never run side by side: the gate runs after that review round`);
       if (isWfRunner(lock.pid)) throw refuse(`a gate is already running for ${state.id} (pid ${lock.pid}${lock.runId ? `, run ${lock.runId}` : ''}); wait for it or run \`wf stop\``);
       if (lock.runId) recovered = await harvest(root, state, lock);
       fs.rmSync(file, { force: true });
@@ -603,6 +604,9 @@ export async function runGate(root, state, options = {}) {
   const release = () => fs.rmSync(lockFile(root, state.id), { force: true });
   try {
     if (recovered) state = loadState(root, state.id);
+    // The order of work (I-27) is checked under the lock a reviewer handoff also takes, so a gate and a review round
+    // never start side by side: whichever takes the lock first is seen by the other.
+    if (options.afterLock) options.afterLock(loadState(root, state.id));
     const plan = await planGate(root, state, options);
     if (options.check && options.repos) for (const r of options.repos) if (!state.repos[r]) throw refuse(`repo \`${r}\` is not part of ${state.id}`);
     const missing = plan.steps.filter((s) => s.decision === 'run' && s.missingSecrets?.length);
@@ -787,14 +791,77 @@ export function liveGate(root, state) {
   };
 }
 
-export function stopGate(root, state, reason) {
+// Named failure (I-27): reviewers were handed the tree while a gate ran on it, so every finding made that gate obsolete
+// (15 of 16 gates stopped on one ticket). The reviewer handoff and the gate share the gate lock: the handoff refuses
+// while a live `wf` process holds it (a gate running or starting), and holds it itself while it records the round.
+const REVIEW_HANDOFF = 'review-handoff';
+
+// The live `wf` process holding this attempt's gate lock, or null. Unlike `liveGate` it includes a gate that is still
+// starting (no run id yet) and a lock being written right now.
+export function gateBusy(root, state) {
+  const file = lockFile(root, state.id);
+  let lock;
+  try {
+    lock = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    return Date.now() - fs.statSync(file).mtimeMs < 5000 ? { pid: null, runId: null, kind: 'gate' } : null;
+  }
+  if (lock.kind === REVIEW_HANDOFF || !isWfRunner(lock.pid)) return null;
+  return { pid: lock.pid, runId: lock.runId ?? null, kind: lock.kind ?? 'gate' };
+}
+
+// Runs `fn` (recording a reviewer handoff) holding the gate lock, so no gate starts between the check and the record.
+// A lock a dead runner left stays for the next gate to harvest (its finished steps are recovered from it); the handoff
+// then records without the lock.
+export function withReviewLock(root, state, fn) {
+  const file = lockFile(root, state.id);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  let fd;
+  try {
+    fd = fs.openSync(file, 'wx');
+  } catch (error) {
+    if (error.code !== 'EEXIST') throw error;
+    const busy = gateBusy(root, state);
+    if (busy) throw gateRunningRefusal(state, busy);
+    let holder = null;
+    try {
+      holder = JSON.parse(fs.readFileSync(file, 'utf8'));
+    } catch {}
+    if (holder?.kind === REVIEW_HANDOFF && isWfRunner(holder.pid)) throw refuse(`another reviewer handoff is being recorded for ${state.id}; one review round at a time`);
+    return fn();
+  }
+  try {
+    fs.writeSync(fd, JSON.stringify({ pid: process.pid, runId: null, kind: REVIEW_HANDOFF, startedAt: now(), children: [], plugins: [] }));
+    fs.closeSync(fd);
+    return fn();
+  } finally {
+    fs.rmSync(file, { force: true });
+  }
+}
+
+export const gateRunningRefusal = (state, busy) => busy.kind === 'check'
+  ? refuse(`a \`wf check\` is running on ${state.id}${busy.pid ? ` (pid ${busy.pid})` : ''}: the implementer is still proving its work`, 'wait for the check to finish, then hand the committed tree to the reviewer')
+  : refuse(`a gate is ${busy.runId ? `running on ${state.id} (run ${busy.runId}${busy.pid ? `, pid ${busy.pid}` : ''})` : `starting on ${state.id}`}: review and gate never run side by side, since any finding makes the running gate obsolete`, 'wait for the gate to finish and hand the evidence review to a fresh reviewer then; or, when the tree must change, `wf stop --class tree-change|major-finding|owner-decision --reason "why"`');
+
+export const STOP_CLASSES = ['major-finding', 'tree-change', 'owner-decision'];
+
+// Named failure (I-23): 15 of 16 gates on one ticket were stopped with nothing recorded but free text, so the cost
+// (about 175 of 271 gate minutes) was invisible. A stop names its class and records the wall-clock minutes the run had
+// spent; steps a later gate reuses by their inputs are not subtracted.
+export function stopGate(root, state, reason, cls) {
+  if (!STOP_CLASSES.includes(cls)) throw new WfError(`--class is required: one of ${STOP_CLASSES.join(', ')} (why the gate's work is being thrown away)`);
   const file = lockFile(root, state.id);
   if (!fs.existsSync(file)) throw refuse(`no gate is running for ${state.id}`);
   const lock = JSON.parse(fs.readFileSync(file, 'utf8'));
+  if (lock.kind === REVIEW_HANDOFF) throw refuse(`no gate is running for ${state.id} (a reviewer handoff is being recorded)`);
   if (!isWfRunner(lock.pid)) throw refuse(`the gate runner for ${state.id} is gone (pid ${lock.pid}); \`wf gate\` will recover its finished steps`);
-  append(root, state.id, 'gate.stopped', { runId: lock.runId, reason }, null);
+  const started = Date.parse(lock.startedAt);
+  const discardedMinutes = Number.isFinite(started) ? Math.round((Date.now() - started) / 6000) / 10 : null;
+  const steps = loadState(root, state.id).gateRuns?.[lock.runId]?.steps ?? [];
+  append(root, state.id, 'gate.stopped', { runId: lock.runId, reason, class: cls, discardedMinutes, stepsFinished: steps.filter((s) => !['skipped', 'deferred', 'reused'].includes(s.status)).length }, null);
   process.kill(lock.pid, 'SIGTERM');
-  return lock;
+  return { ...lock, discardedMinutes };
 }
 
 // A step (or suite) that failed and then passed with the same inputs and runner: the code did not change, so the
