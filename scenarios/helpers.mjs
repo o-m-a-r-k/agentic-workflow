@@ -36,11 +36,23 @@ export function sh(cwd, cmd) {
   return r.stdout.trim();
 }
 
+// Node's on-disk compile cache for the `wf` processes this test file starts (keyed by source hash, so an edited engine
+// file is compiled afresh). Named cost: a scenario run starts some 3,000 of them, each compiling the whole engine
+// (about 8ms). The cache is code the engine runs, so it is never at a path anyone else can predict or pre-create: a
+// fresh `mkdtemp` folder (mode 0700, this user's) per test-file process, checked after creation, removed at exit.
+let compileCache = null;
+export function compileCacheDir() {
+  if (compileCache) return compileCache;
+  const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'wf-node-cache-'));
+  const st = fs.lstatSync(dir);
+  if (!st.isDirectory() || (process.getuid && st.uid !== process.getuid()) || st.mode & 0o077) throw new Error(`compile cache folder ${dir} is not a private folder of this user`);
+  process.once('exit', () => fs.rmSync(dir, { recursive: true, force: true }));
+  return (compileCache = dir);
+}
+
 const baseEnv = () => {
   // The immutable flag stays off in tests (temporary folders must stay removable); modes and the manifest still apply.
-  // Node's on-disk compile cache for the `wf` processes (keyed by source hash, so an edited engine file is compiled
-  // afresh). Named cost: a scenario run starts some 3,000 of them, each compiling the whole engine (about 8ms).
-  const env = { NODE_COMPILE_CACHE: path.join(os.tmpdir(), 'wf-scenarios-node-cache'), ...process.env, WF_EVIDENCE_FLAGS: '0', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.test', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.test' };
+  const env = { NODE_COMPILE_CACHE: compileCacheDir(), ...process.env, WF_EVIDENCE_FLAGS: '0', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.test', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.test' };
   for (const k of ['CLAUDE_CODE_SESSION_ID', 'CLAUDECODE', 'CODEX_THREAD_ID', 'CODEX_SANDBOX', 'AI_AGENT', 'GROK_SESSION_ID']) delete env[k]; // no agent runtime: the scenario is the owner at a terminal (engine/owner.mjs)
   delete env.CODEX_THREAD_ID;
   delete env.GROK_SESSION_ID;
