@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { append } from '../engine/ledger.mjs';
-import { closureFile, commitIn, criteriaFile, goodClosure, makeRepo, ok, OUT_OF_ORDER, sh, singleRepoProject, state, tmp, wf, write, yaml } from './helpers.mjs';
+import { closureFile, commitIn, criteriaFile, goodClosure, makeRepo, ok, OUT_OF_ORDER, planDoc, sh, singleRepoProject, stages, state, tmp, wf, write, yaml } from './helpers.mjs';
 
 const steps = [{ id: 'unit', repo: 'app', run: 'true', inputs: ['src/**'] }];
 const line = (o) => JSON.stringify(o);
@@ -37,7 +37,9 @@ function subagent(root, { name, agentType, entries, file = `agent-${Math.random(
   write(dir, `${file}.jsonl`, entries.map(line).join('\n'));
 }
 
+const FIXTURE_STAGES = stages();
 const PLANNER_YAML = [
+  `survey: ${JSON.stringify(FIXTURE_STAGES.survey)}`,
   'plan:',
   '  summary: Change a.',
   'contract: |',
@@ -53,6 +55,7 @@ const PLANNER_YAML = [
   'criteria:',
   '  - id: C1',
   '    text: a changes',
+  `impact: ${JSON.stringify(FIXTURE_STAGES.impact)}`,
 ].join('\n');
 
 test('wf plan keeps the planner\'s top-level sections, refuses unknown keys, and the bundles carry the plan', () => {
@@ -62,10 +65,10 @@ test('wf plan keeps the planner\'s top-level sections, refuses unknown keys, and
   ok(wf(root, ['handoff', 'planner', '--agent', 'p', '--attempt', id]));
   const unknown = wf(root, ['plan', '--file', planFile(base, { plan: 's', contracts: 'typo', criteria: [{ id: 'C1', text: 'a' }] }), '--attempt', id]);
   assert.equal(unknown.code, 1);
-  assert.match(unknown.err, /unknown top-level key\(s\) in the plan file: contracts; known keys: plan, criteria, work, summary, contract, anchors, tests, doNotRun, externalServices, agentSplit/);
+  assert.match(unknown.err, /unknown top-level key\(s\) in the plan file: contracts; known keys: survey, plan, criteria, work, summary, contract, anchors, tests, doNotRun, externalServices, agentSplit, impact/);
   assert.match(wf(root, ['plan', '--file', planFile(base, { plan: { contract: 'x' }, contract: 'y', criteria: [{ id: 'C1', text: 'a' }] }), '--attempt', id]).err, /`contract` is given both at the top level and under `plan`/);
   const doc = { plan: { summary: 'Change a.', tests: { run: ['jest a'] } }, contract: 'GET /a', anchors: ['src/a.txt:1'], doNotRun: ['e2e'], externalServices: 'none', agentSplit: 'one', criteria: [{ id: 'C1', text: 'a changes' }] };
-  const r = ok(wf(root, ['plan', '--file', planFile(base, doc), '--attempt', id]));
+  const r = ok(wf(root, ['plan', '--file', planFile(base, planDoc(doc)), '--attempt', id]));
   assert.match(r.out, /plan sections: summary, tests, contract, anchors, doNotRun, externalServices, agentSplit/);
   const want = { summary: 'Change a.', tests: { run: ['jest a'] }, contract: 'GET /a', anchors: ['src/a.txt:1'], doNotRun: ['e2e'], externalServices: 'none', agentSplit: 'one' };
   assert.deepEqual(state(root, id).plan, want);
@@ -130,7 +133,7 @@ test('tracker captures: the admitted capture needs the description, a recycled c
 
   // Failure: parallel work items queued one identical `implementing` read per implementer handoff.
   ok(wf(root, ['handoff', 'planner', '--agent', 'p', '--attempt', id]));
-  ok(wf(root, ['plan', '--file', planFile(base, { criteria: [{ id: 'C1', text: 'a' }, { id: 'C2', text: 'b' }], work: [{ id: 'W1', criteria: ['C1'] }, { id: 'W2', criteria: ['C2'] }] }), '--attempt', id]));
+  ok(wf(root, ['plan', '--file', planFile(base, planDoc({ criteria: [{ id: 'C1', text: 'a' }, { id: 'C2', text: 'b' }], work: [{ id: 'W1', criteria: ['C1'] }, { id: 'W2', criteria: ['C2'] }] })), '--attempt', id]));
   ok(wf(root, ['handoff', 'implementer', '--work', 'W1', '--agent', 'i1', '--attempt', id]));
   ok(wf(root, ['handoff', 'implementer', '--work', 'W2', '--agent', 'i2', '--attempt', id]));
   const pending = state(root, id).tracker.pending.filter((a) => a.event === 'implementing');
@@ -271,7 +274,8 @@ test('gate steps get an allowlisted environment: no session tokens, adapter pass
 test('wf report shows active minutes and rounds; doctor warns when unpinned agents ran on several models', () => {
   // Failure: wall minutes counted idle time (185 wall vs ~21 active), and an effort comparison was confounded because
   // unpinned agents followed the owner session onto another model.
-  const { base, root, id } = admitted('models');
+  // The planner runs at an unpinned class here, so it inherits the session's model (and doctor fails on it, I-25).
+  const { base, root, id } = admitted('models', { roles: { planner: { class: 'full' } } });
   const t = (min) => new Date(Date.now() + 1000 + min * 60000).toISOString();
   write(path.join(homeOf(root), '.claude', 'projects', '-proj'), 'sess-1.jsonl', [line({ type: 'assistant', timestamp: t(0), message: { model: 'model-a', content: [] } })].join('\n'));
   ok(wf(root, ['handoff', 'planner', '--agent', 'p', '--attempt', id, '--owner', 'o'], { env: { CLAUDE_CODE_SESSION_ID: 'sess-1' } }));
@@ -295,8 +299,9 @@ test('wf report shows active minutes and rounds; doctor warns when unpinned agen
   assert.deepEqual([p.wallMinutes, p.activeMinutes, p.rounds], [21, 4, 2], 'the 17-minute gap is idle; the second prompt is a resume');
   assert.deepEqual(p.roundDetail.map((r) => r.activeMinutes), [3, 1]);
   assert.deepEqual(rows[0].observedModels.sort(), ['model-a', 'model-b']);
-  const d = ok(wf(root, ['doctor', '--no-steps']));
-  assert.match(d.out, /! warning: models in ENG-1\.1 — agents ran on model-a, model-b and no class pins a model/);
+  const d = wf(root, ['doctor', '--no-steps']);
+  assert.match(d.out, /! warning: models in ENG-1\.1 — agents ran on model-a, model-b and a class a role runs at pins no model/);
+  assert.match(d.out, /✗ config: planner model — the planner role runs at class `full`, which pins no Claude model/);
   const pinned = path.join(root, '.workflow', 'project.yaml');
   const cfg = JSON.parse(fs.readFileSync(pinned, 'utf8'));
   fs.writeFileSync(pinned, JSON.stringify({ ...cfg, classes: { full: { claude: { model: 'model-b' } } } }));

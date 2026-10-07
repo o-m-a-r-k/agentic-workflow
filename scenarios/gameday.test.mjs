@@ -12,7 +12,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { closureFile, commitIn, makeRepo, ok, OUT_OF_ORDER, postedComment, rawReadback, sh, summaryFile, tmp, wf, write, yaml } from './helpers.mjs';
+import { closureFile, commitIn, impactAddendum, impactCheckedFrom, makeRepo, ok, OUT_OF_ORDER, postedComment, rawReadback, sh, stages, summaryFile, tmp, wf, write, yaml } from './helpers.mjs';
 
 const ID = 'GD-1.1';
 
@@ -70,7 +70,10 @@ function agent(root, { name, type, prompt, replies = [] }) {
 }
 
 const fence = (y) => `Here is the plan.\n\n\`\`\`yaml\n${y}\n\`\`\``;
+const PLAN_WORK = [{ id: 'W1' }, { id: 'W2' }];
+const PLAN_STAGES = stages([{ id: 'C1' }, { id: 'C2' }], PLAN_WORK);
 const PLAN = (contractKey) => [
+  `survey: ${JSON.stringify(PLAN_STAGES.survey)}`,
   'plan:',
   '  summary: Show the order total on the checkout page.',
   `${contractKey}: |`,
@@ -88,6 +91,7 @@ const PLAN = (contractKey) => [
   'work:',
   '  - { id: W1, criteria: [C1, C2], repos: [backend], class: full, why: money }',
   '  - { id: W2, criteria: [C1], repos: [frontend], class: light, why: UI on the frozen contract }',
+  `impact: ${JSON.stringify(PLAN_STAGES.impact)}`,
 ].join('\n');
 
 test('game day: one ticket through every fault seen on real tickets', () => {
@@ -137,7 +141,7 @@ test('game day: one ticket through every fault seen on real tickets', () => {
   assert.equal(exported('planned').plan.contract, 'GET /orders/{id} returns { total }\n');
 
   // Fault: an amendment that adds and drops criteria. Nothing unmentioned is lost.
-  const amend = ok(w(['criteria', 'amend', '--file', file('amend.json', { criteria: [{ id: 'C2', dropped: true, reason: 'caching moved to a follow-up' }, { id: 'C3', text: 'Totals use the order currency', uat: 'A EUR order shows €' }], work: [{ id: 'W1', criteria: ['C1', 'C3'], repos: ['backend'], class: 'full', why: 'money' }, { id: 'W2', criteria: ['C1'], repos: ['frontend'], class: 'light', why: 'UI on the frozen contract' }] }), '--reason', 'scope agreed with the product owner', '--attempt', ID]));
+  const amend = ok(w(['criteria', 'amend', '--file', file('amend.json', { criteria: [{ id: 'C2', dropped: true, reason: 'caching moved to a follow-up' }, { id: 'C3', text: 'Totals use the order currency', uat: 'A EUR order shows €' }], work: [{ id: 'W1', criteria: ['C1', 'C3'], repos: ['backend'], class: 'full', why: 'money' }, { id: 'W2', criteria: ['C1'], repos: ['frontend'], class: 'light', why: 'UI on the frozen contract' }], impact: impactAddendum([{ id: 'C3' }], PLAN_WORK) }), '--reason', 'scope agreed with the product owner', '--attempt', ID]));
   assert.match(amend.out, /criteria now \(2\): C1, C3\n {2}changed: none; added: C3; dropped: C2 \(caching moved to a follow-up\)/);
 
   // Parallel work items. `implementing` is queued once, and an unchanged re-read is accepted.
@@ -163,7 +167,8 @@ test('game day: one ticket through every fault seen on real tickets', () => {
   assert.match(w(['review', '--closure', closureFile(base, { reviewer: 'rev-2', findings: [], criteria }), '--attempt', ID]).err, /review provenance: rev-2: its start prompt was not exactly the printed line/);
   const start3 = ok(w(['handoff', 'reviewer', '--agent', 'rev-3', '--attempt', ID])).out.trim();
   agent(root, { name: 'rev-3', type: 'wf-reviewer', prompt: start3 });
-  ok(w(['review', '--closure', closureFile(base, { reviewer: 'rev-3', findings: [{ id: 'F1', severity: 'major', summary: 'total ignores currency', status: 'open', evidence: 'backend/src/api.txt:1', work: 'W1' }], criteria }), '--attempt', ID]));
+  const impactChecked3 = impactCheckedFrom(JSON.parse(fs.readFileSync(start3.match(/^Read (\S+)/)[1], 'utf8')));
+  ok(w(['review', '--closure', closureFile(base, { reviewer: 'rev-3', findings: [{ id: 'F1', severity: 'major', summary: 'total ignores currency', status: 'open', evidence: 'backend/src/api.txt:1', work: 'W1' }], criteria, impactChecked: impactChecked3 }), '--attempt', ID]));
   assert.match(state().next, /fix the open findings \(F1 in W1\)/);
   assert.equal(exported('reviewed').reviews.at(-1).findings[0].status, 'open');
   commitIn(wt.backend.worktree, { 'src/api.txt': 'total in order currency\ntwo\nthree\nfour\nfive\n' }, 'F1');
@@ -206,7 +211,7 @@ test('game day: one ticket through every fault seen on real tickets', () => {
   assert.equal(bundle4.flaky[0].step, 'api-unit');
   assert.doesNotMatch(JSON.stringify(bundle4), /total ignores currency/, 'the bundle carries no earlier finding');
   agent(root, { name: 'rev-4', type: 'wf-reviewer', prompt: start4 });
-  const clean = { reviewer: 'rev-4', findings: [], criteria };
+  const clean = { reviewer: 'rev-4', findings: [], criteria, impactChecked: impactCheckedFrom(bundle4) };
   const blind = ok(w(['review', '--closure', closureFile(base, clean), '--attempt', ID])).out;
   assert.match(blind, /1 finding\(s\) from earlier rounds to verify/);
   assert.match(w(['accept', '--attempt', ID]).err, /earlier-round finding\(s\) not verified: rev-3:F1/);

@@ -344,7 +344,7 @@ function reviewRounds(entries, s) {
     const outcome = recorded ? 'recorded' : refused.length ? 'refused' : later || s.accepted ? 'abandoned' : 'open';
     const endedAt = firstRecorded ?? refused[0]?.at ?? (outcome === 'abandoned' ? later ?? s.accepted?.at : null);
     const closure = rec[0]?.closure ?? null;
-    const findings = (closure?.findings ?? []).map((f) => ({ id: f.id, severity: f.severity ?? null, status: f.status ?? null }));
+    const findings = (closure?.findings ?? []).map((f) => ({ id: f.id, severity: f.severity ?? null, status: f.status ?? null, category: f.category ?? null }));
     const lastEvent = events.at(-1) ?? null;
     return {
       handoff: hid(h.bundle),
@@ -638,6 +638,9 @@ export function attemptReport(root, id, table = prices(root), { home = os.homedi
     findingsBySeverity: severity,
     findingsOpen: findingRows.filter((f) => !f.settled).length,
     findingList: findingRows,
+    // I-26: review findings about something the planner's impact map did not list (a direct measure of planning quality).
+    // Counted once per finding per round, like `findings` (a round recorded blind and again with prior findings is one).
+    impactGaps: findingRows.filter((f) => f.category === 'impact-gap').length,
     criteria: s.criteria?.length ?? 0,
     criteriaAtFreeze: frozenCount,
     criteriaAmendments: s.criteriaAmendments.length,
@@ -676,7 +679,7 @@ export function toHandoffCsv(rows) {
   return [HANDOFF_COLS.join(','), ...handoffRows(rows).map((h) => HANDOFF_COLS.map((c) => esc(h[c])).join(','))].join('\n') + '\n';
 }
 
-const ATTEMPT_COLS = ['project', 'id', 'item', 'lane', 'phase', 'admittedAt', 'timeToGateMs', 'timeToDeliverMs', 'timeToCloseMs', 'wallMinutes', ...PHASES.map((p) => `${p}Minutes`), 'gateRuns', 'gatesPassed', 'gatesFailed', 'gatesStopped', 'repairRounds', 'reviewRounds', 'refusedRounds', 'wastedReviewerRounds', 'roundsWithGreenGate', 'stepRuns', 'stepReused', 'reuseRate', 'gateTimeMs', 'findings', 'findingsOpen', 'criteria', 'criteriaAmendments', 'holds', 'observedModels', 'tokens', 'subagentTokens', 'cost'];
+const ATTEMPT_COLS = ['project', 'id', 'item', 'lane', 'phase', 'admittedAt', 'timeToGateMs', 'timeToDeliverMs', 'timeToCloseMs', 'wallMinutes', ...PHASES.map((p) => `${p}Minutes`), 'gateRuns', 'gatesPassed', 'gatesFailed', 'gatesStopped', 'repairRounds', 'reviewRounds', 'refusedRounds', 'wastedReviewerRounds', 'roundsWithGreenGate', 'stepRuns', 'stepReused', 'reuseRate', 'gateTimeMs', 'findings', 'findingsOpen', 'impactGaps', 'criteria', 'criteriaAmendments', 'holds', 'observedModels', 'tokens', 'subagentTokens', 'cost'];
 export function toCsv(rows) {
   const flat = (r) => ({ ...r, ...Object.fromEntries(PHASES.map((p) => [`${p}Minutes`, r.phases?.[p] ?? null])), gatesPassed: r.gates?.passed, gatesFailed: r.gates?.failed, gatesStopped: r.gates?.stopped });
   return [ATTEMPT_COLS.join(','), ...rows.map(flat).map((r) => ATTEMPT_COLS.map((c) => esc(Array.isArray(r[c]) ? r[c].join(' ') : r[c])).join(','))].join('\n') + '\n';

@@ -133,6 +133,7 @@ Shape: `models: { <model id prefix>: { input, output, cacheRead, cacheWrite } }`
 - **Gates:** runs started, passed, failed, stopped and recovered; stops by class; stops while a reviewer was open; minutes discarded by stops; steps run, reused, passed, failed, interrupted and not started; reuse rate; gate step time; slowest steps; failing tests per failed step. `wf check` runs are counted separately.
 - **Review rounds:** every reviewer handoff is a round: `recorded`, `refused`, `abandoned` (no outcome and a later reviewer was handed the attempt, or the review was accepted) or `open`. `wastedReviewerRounds` counts refused and abandoned rounds, with their minutes. Also: rounds on a tree with a passing gate, and rounds started while an implementer was open.
 - **Findings:** one per finding id per recorded round, by severity; `findingsOpen` counts those neither settled in their own round nor verified `fixed` or `verified-nonissue` by a later one; each with `fixedIn` when known. `repairRounds` counts recorded rounds that raised at least one finding other than a verified non-issue. `gateFailures` counts failed gates (before 0.5.0 this was reported as repair rounds, and `findings` counted only the last closure).
+- **Impact gaps:** `impactGaps` counts review findings tagged `impact-gap` (one per finding per round), about something the planner's impact map did not list: a direct measure of the plan (see [lifecycle.md](lifecycle.md#impact-analysis)).
 - **Scope:** criteria at freeze and now; amendments; criteria added, changed and dropped; endpoints, error codes and repos added as stated.
 - **Tokens:** per model (input, output, cache read, cache write, total, cost), the attempt total, and the part spent by sub-agents.
 
@@ -160,9 +161,9 @@ The schema name changes only when a field is renamed or removed; new fields can 
 | `stepRuns`, `stepReused`, `reuseRate`, `gateTimeMs`, `slowestSteps[]` | gate step totals |
 | `reviewRounds`, `recordedRounds`, `refusedRounds`, `abandonedRounds`, `wastedReviewerRounds`, `wastedReviewerMinutes`, `roundsWithGreenGate`, `roundsOnUnsettledTree` | numbers |
 | `rounds[]` | `{ handoff, agent, agentType, model, startedAt, endedAt, minutes, outcome, refusedFor, tree, gatePassedOnTree, openImplementers, findings[], priorFindings[] }` |
-| `findings`, `findingsOpen` | numbers |
+| `findings`, `findingsOpen`, `impactGaps` | numbers |
 | `findingsBySeverity` | `{ <severity or "unrated">: count }` |
-| `findingList[]` | `{ round, id, severity, status, settled, fixedIn }` |
+| `findingList[]` | `{ round, id, severity, status, category, settled, fixedIn }` |
 | `criteria`, `criteriaAtFreeze`, `criteriaAmendments` | numbers |
 | `scope` | `{ amendments, criteriaAdded, criteriaChanged, criteriaDropped, endpoints, errorCodes, repos }` |
 | `implementers` | `{ opened, closed, open: [agent ids] }` |

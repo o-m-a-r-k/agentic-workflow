@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { closureFile, commitIn, goodClosure, ok, OUT_OF_ORDER, singleRepoProject, state, wf } from './helpers.mjs';
+import { closureFile, commitIn, goodClosure, ok, OUT_OF_ORDER, planDoc, singleRepoProject, state, wf } from './helpers.mjs';
 
 const plan = { plan: { summary: 's', anchors: ['src/a.txt:1 the text'], tests: { changed: ['test/a.test.js'] } }, criteria: [{ id: 'C1', text: 'a changes', uat: 'a shows the new text' }, { id: 'C2', text: 'audit read is logged', uat: false }] };
 const repos = [{ name: 'app', path: '.', base: 'main', packages: [{ path: '.', docsOnly: ['docs/**'] }] }];
@@ -16,7 +16,7 @@ function project(name, change, p = plan) {
   const e = ok(wf(proj.root, ['entry', '--item', 'ENG-90', '--owner', 'o', '--json'])).json();
   ok(wf(proj.root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id]));
   const f = path.join(proj.base, 'plan.json');
-  fs.writeFileSync(f, JSON.stringify(p));
+  fs.writeFileSync(f, JSON.stringify(planDoc(p)));
   ok(wf(proj.root, ['plan', '--file', f, '--attempt', e.id]));
   ok(wf(proj.root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
   commitIn(e.repos.app.worktree, change);

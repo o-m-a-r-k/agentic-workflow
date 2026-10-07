@@ -66,12 +66,25 @@ wf entry --item HT-1 --owner you
 ATTEMPT=HT-1.1
 WT="$PROJ/.wf-worktrees/$ATTEMPT/hello-ticket"
 
-say "The planner freezes the acceptance criteria before any code exists"
+say "The planner surveys what exists, designs, maps the impact; wf re-runs every query and freezes the criteria"
 cat > "$WORK/criteria.json" <<'EOF'
-{ "plan": "greet takes an optional name",
+{ "survey": {
+    "queries": [
+      { "id": "Q1", "pattern": "greet(", "kind": "literal", "paths": ["lib/**", "test/**"], "hits": 2 },
+      { "id": "Q2", "pattern": "greet(", "kind": "literal", "paths": ["tickets/**", ".workflow/**"], "hits": 3 } ],
+    "consumers": [ { "id": "S1", "symbol": "greet", "query": "Q1", "hits": 2 } ],
+    "flows": [ { "id": "S2", "flow": "a caller asks for a greeting", "failure": "no name given: the greeting must stay 'Hello!'", "query": "Q1", "hits": 2 } ],
+    "patterns": [ { "id": "S3", "description": "tickets and docs that quote greet()", "query": "Q2", "hits": 3 } ] },
+  "plan": "greet takes an optional name",
   "criteria": [
     { "id": "C1", "text": "greet('Ada') returns 'Hello, Ada!'", "uat": "greet('Ada') prints Hello, Ada!" },
-    { "id": "C2", "text": "greet() still returns 'Hello!'", "uat": "greet() prints Hello!" } ] }
+    { "id": "C2", "text": "greet() still returns 'Hello!'", "uat": "greet() prints Hello!" } ],
+  "impact": {
+    "changes": [ { "id": "I1", "element": "greet(name)", "kind": "symbol", "cites": ["C1", "C2"], "covers": ["S1", "S2"],
+      "consumers": { "query": "Q1", "hits": 2 },
+      "flows": [ { "flow": "greet('Ada')", "failure": "greet() without a name keeps 'Hello!'", "query": "Q1", "hits": 2 } ],
+      "contracts": [], "suites": [ { "suite": "unit", "query": "Q1", "hits": 2 } ] } ],
+    "excluded": [ { "survey": "S3", "reason": "tickets and the invariants describe greet(); none calls it" } ] } }
 EOF
 wf handoff planner --agent planner-1 --attempt "$ATTEMPT"
 wf plan --file "$WORK/criteria.json" --attempt "$ATTEMPT"
@@ -114,7 +127,15 @@ cat > "$WORK/closure-1.json" <<'EOF'
   "criteria": [
     { "id": "C1", "evidence": { "kind": "test", "ref": "test/greet.test.mjs: greet(name) greets by name" } },
     { "id": "C2", "evidence": { "kind": "test", "ref": "test/greet.test.mjs: greet() says hello" } } ],
-  "screenshotsInspected": [] }
+  "screenshotsInspected": [],
+  "impactChecked": {
+    "queries": [ { "query": "Q1", "hits": 2 }, { "query": "Q2", "hits": 3 } ],
+    "sampled": [
+      { "entry": "S1", "verdict": "matches", "evidence": "test/greet.test.mjs calls greet() and greet('Ada')" },
+      { "entry": "S2", "verdict": "matches", "evidence": "lib/greet.mjs:3 falls back to 'Hello!'" },
+      { "entry": "S3", "verdict": "matches", "evidence": "tickets/HT-1.md quotes greet(); no code" },
+      { "entry": "I1", "verdict": "matches", "evidence": "lib/greet.mjs:2 greet(name)" } ],
+    "derived": [] } }
 EOF
 wf review --closure "$WORK/closure-1.json" --attempt "$ATTEMPT"
 
@@ -129,7 +150,15 @@ cat > "$WORK/closure-2.json" <<'EOF'
   "criteria": [
     { "id": "C1", "evidence": { "kind": "test", "ref": "test/greet.test.mjs: greet(name) greets by name" } },
     { "id": "C2", "evidence": { "kind": "test", "ref": "test/greet.test.mjs: greet() says hello" } } ],
-  "screenshotsInspected": [] }
+  "screenshotsInspected": [],
+  "impactChecked": {
+    "queries": [ { "query": "Q1", "hits": 2 }, { "query": "Q2", "hits": 3 } ],
+    "sampled": [
+      { "entry": "S1", "verdict": "matches", "evidence": "test/greet.test.mjs calls greet() and greet('Ada')" },
+      { "entry": "S2", "verdict": "matches", "evidence": "lib/greet.mjs:3 falls back to 'Hello!'" },
+      { "entry": "S3", "verdict": "matches", "evidence": "tickets/HT-1.md quotes greet(); no code" },
+      { "entry": "I1", "verdict": "matches", "evidence": "lib/greet.mjs:2 greet(name)" } ],
+    "derived": [] } }
 EOF
 wf review --closure "$WORK/closure-2.json" --attempt "$ATTEMPT"
 node -e 'const f=process.argv[1];const c=JSON.parse(require("fs").readFileSync(f,"utf8"));c.priorFindings=[{round:"reviewer-1",id:"F1",status:"fixed",evidence:"lib/greet.mjs:3 now returns Hello, ${name}!"}];require("fs").writeFileSync(f,JSON.stringify(c))' "$WORK/closure-2.json"
@@ -145,7 +174,15 @@ cat > "$WORK/closure-3.json" <<'EOF'
   "criteria": [
     { "id": "C1", "evidence": { "kind": "output", "ref": "unit: greet(name) greets by name, ok" } },
     { "id": "C2", "evidence": { "kind": "output", "ref": "unit: greet() says hello, ok" } } ],
-  "screenshotsInspected": [] }
+  "screenshotsInspected": [],
+  "impactChecked": {
+    "queries": [ { "query": "Q1", "hits": 2 }, { "query": "Q2", "hits": 3 } ],
+    "sampled": [
+      { "entry": "S1", "verdict": "matches", "evidence": "test/greet.test.mjs calls greet() and greet('Ada')" },
+      { "entry": "S2", "verdict": "matches", "evidence": "lib/greet.mjs:3 falls back to 'Hello!'" },
+      { "entry": "S3", "verdict": "matches", "evidence": "tickets/HT-1.md quotes greet(); no code" },
+      { "entry": "I1", "verdict": "matches", "evidence": "lib/greet.mjs:2 greet(name)" } ],
+    "derived": [] } }
 EOF
 wf review --closure "$WORK/closure-3.json" --attempt "$ATTEMPT"
 wf accept --attempt "$ATTEMPT"

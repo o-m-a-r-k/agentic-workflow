@@ -121,6 +121,7 @@ export function reduce(entries) {
     criteriaAmendments: [],
     plan: null,
     planSource: null,
+    impact: null,
     work: null,
     roles: { planner: [], implementer: [], reviewer: [], tester: [] },
     handoffs: [],
@@ -182,12 +183,23 @@ export function reduce(entries) {
         s.plan = d.plan ?? null;
         s.planSource = d.source ?? null;
         s.work = d.work ?? null;
+        // I-26: the planner's survey and impact map, with what each query returned when the plan was frozen.
+        s.impact = d.impact ? { ...d.impact, addenda: [], owed: null } : null;
         if (s.phase === 'admitted') s.phase = 'planned';
         break;
       case 'criteria.amended':
         s.criteria = d.criteria;
         if (d.work) s.work = d.work;
-        s.criteriaAmendments.push({ at: e.at, reason: d.reason, by: e.actor, changes: d.changes ?? null });
+        s.criteriaAmendments.push({ at: e.at, reason: d.reason, by: e.actor, changes: d.changes ?? null, impact: d.impact ? true : d.impactOwed ? 'owed' : null });
+        // I-26: an amendment that adds scope owes an impact update before the next implementer handoff.
+        if (d.impact) {
+          s.impact ??= { survey: null, impact: null, results: {}, addenda: [], owed: null };
+          s.impact.addenda.push({ ...d.impact, at: e.at, amendment: s.criteriaAmendments.length });
+          s.impact.owed = null;
+        } else if (d.impactOwed) {
+          s.impact ??= { survey: null, impact: null, results: {}, addenda: [], owed: null };
+          s.impact.owed = { amendment: s.criteriaAmendments.length, reason: d.reason, scope: d.impactOwed };
+        }
         break;
       case 'handoff':
         s.handoffs.push({ ...d, at: e.at, by: e.actor });
