@@ -79,7 +79,43 @@ function claim(root, key, record) {
   return prior?.key === key && prior?.decision === record.decision;
 }
 
-export function ownerAuthority(root, state, phrase, { what, command = null, owner = state.owner, terminal = defaultTerminal, decision = null } = {}) {
+// A person's interactive session (`interactive`, for `wf adopt`'s new owner). Named failure (0.5.0 adversarial review): the
+// new owner's confirmation was any user line of the session it named, so an agent made itself the owner from its own
+// `codex exec "adopt <id>"` run (a Codex rollout records the exec prompt as a user message) or a headless Claude Code SDK
+// run. A Codex rollout counts only when its `session_meta` records an interactive session (originator not `codex_exec`,
+// source `cli` or `vscode`, never a sub-agent); a Claude Code turn only when it records a person as its origin and an
+// interactive entry point (`cli` or `claude-desktop`, never `sdk-*`) with a typed prompt (the desktop app submits a typed
+// prompt as `sdk`, observed). A turn without origin fields (older or headless transcripts) is not the owner here: fail
+// closed.
+const INTERACTIVE_ENTRYPOINTS = ['cli', 'claude-desktop'];
+const INTERACTIVE_CODEX_SOURCES = ['cli', 'vscode'];
+function codexMeta(bytes) {
+  for (const raw of bytes.toString('utf8').split('\n')) {
+    if (!raw.includes('session_meta')) continue;
+    try {
+      const e = JSON.parse(raw);
+      if (e?.type === 'session_meta') return e.payload ?? {};
+    } catch {}
+  }
+  return null;
+}
+function interactiveProblem(t, bytes, m) {
+  if (t.runtime === 'codex') {
+    const meta = codexMeta(bytes);
+    if (!meta) return 'its rollout records no session_meta, so it is not shown to be a person\'s interactive session';
+    if (meta.originator === 'codex_exec') return 'it is a `codex exec` run (originator codex_exec), not a plain interactive session';
+    if (typeof meta.source !== 'string' || !INTERACTIVE_CODEX_SOURCES.includes(meta.source)) return `its source is ${JSON.stringify(meta.source ?? null).slice(0, 120)}, not a plain interactive session`;
+    return '';
+  }
+  const o = m.origin ?? {};
+  if (!o.recorded) return 'the turn carries no origin fields (an older or headless transcript), so it is not shown to come from a person';
+  if (o.kind !== 'human' || (o.turnOrigin !== null && o.turnOrigin !== 'human')) return 'the turn does not come from a person';
+  if (!INTERACTIVE_ENTRYPOINTS.includes(o.entrypoint)) return `the session runs from \`${o.entrypoint ?? 'an unrecorded entry point'}\` (an SDK or headless run), not a plain interactive session`;
+  if (!['typed', 'queued'].includes(o.promptSource) && !(o.promptSource === 'sdk' && o.entrypoint === 'claude-desktop')) return `the prompt came from \`${o.promptSource ?? 'an unrecorded source'}\`, not typed`;
+  return '';
+}
+
+export function ownerAuthority(root, state, phrase, { what, command = null, owner = state.owner, terminal = defaultTerminal, decision = null, interactive = false } = {}) {
   const shown = command ? `wf ${[...command.sub, ...Object.entries(command.flags).flat()].join(' ')}` : null;
   const how = `only the owner decides ${what}: the owner starts a message in the owner session with \`${phrase}\`${shown ? `, or the owner session runs exactly \`${shown}\`` : ''}`;
   const t = ownerTranscript(owner);
@@ -89,9 +125,19 @@ export function ownerAuthority(root, state, phrase, { what, command = null, owne
   }
   const bytes = readCapped(t.file);
   const used = new Set(state.authoritiesUsed ?? []);
-  const stateFor = owner === state.owner ? state : { ...state, admittedAt: null };
+  // Every session, the owner's or the one adopting, speaks after admission (0.5.0 adversarial review: the bound was
+  // dropped for the adopting session).
+  const stateFor = state;
   const start = new RegExp(`^${esc(fold(phrase))}(?![a-z0-9_-]|\\.[a-z0-9])`);
-  const turns = ownerTurns(t, bytes).filter((m) => afterAdmission(stateFor, m) && !used.has(`${t.file}:${m.offset}`) && start.test(fold(m.text)));
+  let turns = ownerTurns(t, bytes).filter((m) => afterAdmission(stateFor, m) && !used.has(`${t.file}:${m.offset}`) && start.test(fold(m.text)));
+  let notInteractive = '';
+  if (interactive) {
+    turns = turns.filter((m) => {
+      const p = interactiveProblem(t, bytes, m);
+      if (p) notInteractive = p;
+      return !p;
+    });
+  }
   for (const m of turns) {
     if (!claim(root, `${t.file}:${m.offset}`, { phrase, attempt: state.id, decision })) continue;
     return { provenance: 'host-recorded', runtime: t.runtime, file: t.file, line: m.line, offset: m.offset, at: m.at, phrase, text: m.text.slice(0, 2000) };
@@ -104,6 +150,7 @@ export function ownerAuthority(root, state, phrase, { what, command = null, owne
     if (!why && !claim(root, spent, { phrase, attempt: state.id, decision })) why = 'its last command was already counted for a decision';
     if (!why) return { provenance: 'owner-session command', runtime: t.runtime, file: t.file, line: ran.line, at: ran.at, spent, command: ran.command.slice(0, 500) };
   }
+  if (notInteractive) throw refuse(`not done: ${what} needs a message from ${owner}, a plain interactive session, and ${t.file} is not one: ${notInteractive}`, how);
   throw refuse(`not done: ${what} needs the owner's authority, and no unspent owner message in the owner session (${t.file}) starts with \`${phrase}\`${shown && t.runtime === 'claude' ? `, nor did the owner session itself run exactly \`${shown}\` (${why})` : ''}; an agent's word, a tool result or a sub-agent's call never counts`, how);
 }
 

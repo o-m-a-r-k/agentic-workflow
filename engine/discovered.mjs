@@ -144,8 +144,20 @@ function transcriptAnchor(owner) {
   }
 }
 
-// Every genuine owner turn: { text, at, line }. Claude Code: a `user` line that is not meta, not a sidechain, not a tool
-// result, whose content is the owner's text. Codex: a `response_item` message with role user. Injected lines excluded.
+// The shape of words a person typed: the turn opens with a letter or a digit. Named failure (0.5.0 adversarial review):
+// owner turns were every user line minus a deny-list of injected tags, so a shape the list did not name (Codex
+// `<user_action>` review results, `<recommended_plugins>`, `[12] tool exec call` lines) counted as the owner speaking.
+// Now only the known shapes count (below) and their text must open as typed words: anything that opens with markup, a
+// bracket or other punctuation is never an owner turn, whatever its tag. The deny-list stays for injected lines that
+// open with a word.
+const TYPED = /^[\p{L}\p{N}]/u;
+
+// Every genuine owner turn: { text, at, line, offset, origin }. Only these shapes count. Claude Code: a `user` line that
+// is not meta, not a sidechain, not a compact summary, not a tool result, whose `message.role` is user and whose content
+// is a string or text blocks only, and, where the host records who produced it (`origin`, `turnOrigin`), a person.
+// Codex: a `response_item` message with role user and `input_text` blocks only. In both the text opens as typed words
+// and is no injected line. `origin` keeps the host's fields for the turn (decisions that need a plain interactive
+// session read them: engine/owner.mjs).
 export function ownerTurns({ runtime, file }, bytes = readCapped(file)) {
   const out = [];
   let offset = 0;
@@ -160,7 +172,9 @@ export function ownerTurns({ runtime, file }, bytes = readCapped(file)) {
       return;
     }
     let t = null;
+    let origin = null;
     if (runtime === 'claude') {
+      origin = { entrypoint: e?.entrypoint ?? null, promptSource: e?.promptSource ?? null, kind: e?.origin?.kind ?? null, turnOrigin: e?.turnOrigin ?? null, recorded: e?.origin !== undefined || e?.turnOrigin !== undefined };
       if (e?.type !== 'user' || e.isMeta || e.isSidechain || e.isCompactSummary || e.toolUseResult !== undefined || e.message?.role !== 'user') return;
       // Where the host records who produced the turn, it must be the person (0.4.5 review: relayed agent messages,
       // task notifications and scheduled prompts are user lines too). Older transcripts carry no such fields.
@@ -174,8 +188,8 @@ export function ownerTurns({ runtime, file }, bytes = readCapped(file)) {
       if (e?.type !== 'response_item' || p?.type !== 'message' || p.role !== 'user' || !Array.isArray(p.content)) return;
       if (p.content.every((b) => b?.type === 'input_text')) t = p.content.map((b) => b.text ?? '').join('\n');
     }
-    if (!t || !t.trim() || INJECTED.test(t.trim())) return;
-    out.push({ text: t.trim(), at: e.timestamp ?? null, line: i + 1, offset: start });
+    if (!t || !t.trim() || !TYPED.test(t.trim()) || INJECTED.test(t.trim())) return;
+    out.push({ text: t.trim(), at: e.timestamp ?? null, line: i + 1, offset: start, origin });
   });
   return out;
 }

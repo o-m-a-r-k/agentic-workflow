@@ -81,7 +81,8 @@ Work
   wf lesson add|waive|recur|set|apply|show|list|review|export
                                     the project's lessons (.workflow/lessons/): capture, enforce, recurrence
   wf reopen --item ID --reason "feedback" [--no-lesson "why"]
-  wf adopt [--attempt ID]           take over a live attempt from a new session
+  wf adopt [--attempt ID]           take over a live attempt from a new session (the current owner says
+                                    \`adopt <attempt>:<new owner>\`, the new session says \`adopt <attempt>\`)
   wf abandon --reason "why" [--acknowledge-integration REPO:STATE]
   wf batch create --members A,B | wf batch eject --batch B --member A
 

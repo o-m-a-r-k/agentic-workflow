@@ -238,8 +238,13 @@ export function adopt(root, options) {
   // Named failure (0.5.0 third review): adoption took the caller's word for who the new owner is, so an agent could make
   // itself (or a name it controls) the owner and then give the owner's authority. The new owner confirms it: in the new
   // owner session's transcript (a message starting with `adopt <attempt>`), or typed at their own terminal.
-  const authority = ownerAuthority(root, state, `adopt ${state.id}`, { what: `adopting ${state.id} as \`${by}\``, owner: by, decision: `adopt:${state.id}:${by}` });
-  append(root, state.id, 'owner.adopted', { from: state.owner, reason: options.reason ?? null, authority }, by);
+  // Named failure (0.5.0 adversarial review): only the new owner was asked, and any session counted, so an agent's own
+  // `codex exec "adopt <id>"` run made it the owner without the owner saying a word. Two authorities now: the CURRENT
+  // owner hands the attempt to the named session (`adopt <attempt>:<new owner>`, in the owner session, or typed at the
+  // owner's terminal for a person-named owner), and the new owner confirms from a plain interactive session.
+  const handedOver = ownerAuthority(root, state, `adopt ${state.id}:${by}`, { what: `handing ${state.id} to \`${by}\``, decision: `adopt-from:${state.id}:${by}` });
+  const authority = ownerAuthority(root, state, `adopt ${state.id}`, { what: `adopting ${state.id} as \`${by}\``, owner: by, decision: `adopt:${state.id}:${by}`, interactive: true });
+  append(root, state.id, 'owner.adopted', { from: state.owner, reason: options.reason ?? null, authority, authorities: [handedOver] }, by);
   return loadState(root, state.id);
 }
 
