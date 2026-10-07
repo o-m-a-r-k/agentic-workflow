@@ -62,6 +62,7 @@ An adversarial pass over every change to `engine/attempt.mjs` and `engine/lifecy
 ### Maintenance
 
 - `npm run verify` works from a linked git worktree: the Linux legs mount and relink the worktree's git directories.
+- `npm run verify` runs its three legs in parallel and prints each leg's time; `--host-only`, `--linux-only` and `--serial` run part of it or the old order. The suite needs about a third less CPU (CONTRIBUTING.md, "Running the suite").
 
 ## v0.4.5
 
@@ -161,6 +162,7 @@ An adversarial pass over every change to `engine/attempt.mjs` and `engine/lifecy
 
 | Item | Failure fixed | Fixed in | Scenario test |
 | --- | --- | --- | --- |
+| [I-28](improvements/I-28.md) | npm run verify is slow: three legs in series, helper-only wf processes, the macOS git shim | 0.5.0 | `scenarios/compile-cache.test.mjs` |
 | [I-27](improvements/I-27.md) | Order of work: code review rounds run to clean first, then ONE gate, then the evidence review; engine refuses a gate while a review round has open findings, and refuses reviewer handoffs while a gate runs (supersedes the ordering in I-23) | 0.5.0 | `scenarios/review-order.test.mjs` |
 | [I-26](improvements/I-26.md) | Mandatory impact analysis before planning: query-backed inventory of affected components, flows, contracts and tests; plan refused without it | 0.5.0 | `scenarios/impact.test.mjs` |
 | [I-25](improvements/I-25.md) | Fix handoffs carry a pattern-sweep list; doctor fails without a reviewer model; flag doNotRun that excludes a repo the ticket now touches | 0.5.0 | `scenarios/impact.test.mjs` |

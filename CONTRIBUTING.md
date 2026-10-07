@@ -29,8 +29,8 @@ The scenarios run the real `wf` CLI against temporary git repositories with bare
 macOS, on every push and pull request and weekly. A red CI is fixed first, from its root cause; a Linux-only failure
 is real (see [AGENTS.md](AGENTS.md)).
 
-Expected times on a 16-core laptop with nothing else running: about 45 seconds for the host leg alone, about two
-minutes for `npm run verify` (each leg prints its own time and how many test files it ran at a time), from a few
+Expected times on a 16-core laptop that is mostly idle: about 50 seconds for the host leg alone (it was 80), about two
+minutes for `npm run verify` (it was over three; each leg prints its own time and how many test files it ran at a time), from a few
 seconds to about 40 seconds for one file. Another heavy job on the machine (a gate, a model, a build) stretches all of
 them: the suite is bound by CPU (about 500 CPU seconds a leg on macOS, 360 in Linux), mostly the `git` processes the
 engine starts.
