@@ -1,4 +1,10 @@
 #!/bin/sh
 # Never push without a green verify: the scenario suite on this machine and in a Linux container.
 # Installed by `npm run setup` (git config core.hooksPath .githooks).
+# Named failure I-30: a linked-worktree push exported Git variables that redirected verifier fixtures into this repo.
+# Git documents clearing these variables before a hook runs commands in foreign repositories.
+wf_git_local_env=$(git rev-parse --local-env-vars) || exit 1
+for wf_git_env_name in $wf_git_local_env; do
+  unset "$wf_git_env_name"
+done
 exec npm run --silent verify
