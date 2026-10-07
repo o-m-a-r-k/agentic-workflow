@@ -315,6 +315,11 @@ export const repoDir = (root, repo) => path.resolve(root, repo.path);
 // Where `.workflow/` lives in git: the repo that contains it (`repo`, its real folder `dir`) and its path inside that
 // repo (`relative`), read from the working tree. Used before an attempt exists (admission, doctor); an attempt's adapter
 // is found from what its admission recorded (`attemptAdapter`).
+//
+// Named failure (0.5.0 adversarial review): the location was the real path of `<root>/.workflow`, so replacing it with a
+// link to another folder committed at the same base (an example adapter with a weaker gate) made "the adapter committed
+// at base" that folder. A real `.workflow/` folder is where it is; a link is followed only to the top-level `.workflow/`
+// of a listed repo (a workspace root linking to the adapter repo's folder), and refused anywhere else.
 export function adapterLocation(root, cfg) {
   const link = path.join(root, ADAPTER_DIR);
   const st = fs.lstatSync(link, { throwIfNoEntry: false });
@@ -328,9 +333,10 @@ export function adapterLocation(root, cfg) {
     } catch {
       continue;
     }
-    if (!(real === dir || real.startsWith(dir + path.sep))) continue;
+    if (st.isSymbolicLink() ? real !== path.join(dir, ADAPTER_DIR) : !(real === dir || real.startsWith(dir + path.sep))) continue;
     return { repo, dir, relative: path.relative(dir, real) };
   }
+  if (st.isSymbolicLink()) throw refuse(`${link} is a link to ${real}, which is not the top-level ${ADAPTER_DIR}/ of ${cfg.adapterRepo ? `the adapter repo \`${cfg.adapterRepo}\`` : 'a listed repo'}; the adapter at base is never read through it`, `make ${ADAPTER_DIR} a real folder, or a link to <adapter repo>/${ADAPTER_DIR}`);
   throw new WfError('`.workflow/` is not inside any listed repo, so it cannot be read at a base commit', { hint: 'set `adapterRepo` and keep `.workflow/` committed in that repo' });
 }
 
@@ -348,7 +354,7 @@ const asLocation = (rec) => ({ repo: { name: rec.repo, path: rec.dir }, dir: rec
 // `.workflow/project.yaml` (`adapterRepo`, the repos' paths), and several callers caught the error and went on with the
 // working copy. An uncommitted `adapterRepo` edit made the read throw, and then impact queries read any checkout the
 // working copy named and the impact analysis could be switched off. The location is now recorded at admission and read
-// back from the ledger; a missing record or a missing base refuses.
+// back from the ledger; a missing record, a missing base or a `.workflow` that now resolves elsewhere refuses.
 // Attempts admitted before the record existed are located from the working tree under the same strict rules and
 // cross-checked against the adapter they read (`checkAdapter`).
 export function attemptAdapter(root, state) {
@@ -359,6 +365,12 @@ export function attemptAdapter(root, state) {
     return { ...live, legacy: true };
   }
   if (typeof rec.repo !== 'string' || typeof rec.dir !== 'string' || typeof rec.relative !== 'string' || !path.isAbsolute(rec.dir) || rec.relative.split('/').includes('..')) throw refuse(`${state.id}'s recorded adapter location is malformed`);
+  let live = null;
+  try {
+    live = fs.realpathSync(path.join(root, ADAPTER_DIR));
+  } catch {}
+  const recorded = path.join(rec.dir, ...rec.relative.split('/').filter(Boolean));
+  if (live !== recorded) throw refuse(`${path.join(root, ADAPTER_DIR)} now resolves to ${live ?? 'nothing'}; the adapter of ${state.id} was recorded at admission in ${rec.repo} at ${recorded}`, `restore ${ADAPTER_DIR} (a real folder, or a link to <adapter repo>/${ADAPTER_DIR}) as it was when ${state.id} was admitted`);
   return asLocation(rec);
 }
 

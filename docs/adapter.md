@@ -25,7 +25,7 @@ repos:                       # git roots
     packages:
       - { path: ., sharedInfra: [package.json, yarn.lock], docsOnly: ["**/*.md"] }
     provision: { clone: [node_modules], fingerprint: [yarn.lock], install: yarn install --immutable }
-adapterRepo: backend
+adapterRepo: backend           # the repo whose committed .workflow/ judges each attempt; a root .workflow may only link to <that repo>/.workflow
 instructionFiles: [backend/AGENTS.md, frontend/AGENTS.md]
 components: [...]
 delivery: { kind: push-main }

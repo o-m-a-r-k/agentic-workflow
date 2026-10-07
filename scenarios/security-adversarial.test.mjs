@@ -154,3 +154,28 @@ test('adapter at base: an amendment adds only a repo of the base adapter', () =>
   assert.match(r.err, /unknown repo `other`/);
   assert.equal(ok(wf(p.root, ['resume', '--attempt', e.id, '--json'])).json().repos.other, undefined);
 });
+
+// F4: a linked `.workflow/` pointed "the adapter committed at base" at another committed folder.
+test('adapter location: a .workflow link to another committed folder is refused, and a link retargeted after admission is refused', () => {
+  const weak = { version: 1, enabled: true, name: 'weak-example', repos: [{ name: 'app', path: '.', base: 'main' }], lanes: ['quick', 'standard'], gate: { steps: [{ id: 'unit', repo: 'app', run: 'true' }] }, impact: { requiredFor: [] } };
+  const p = singleRepoProject('adloc', { gate: { steps } }, { 'examples/demo/.workflow/project.yaml': JSON.stringify(weak, null, 2) });
+  const swap = () => {
+    fs.renameSync(path.join(p.root, '.workflow'), path.join(p.base, 'saved-workflow'));
+    fs.symlinkSync(path.join(p.root, 'examples', 'demo', '.workflow'), path.join(p.root, '.workflow'));
+  };
+  const restore = () => {
+    fs.rmSync(path.join(p.root, '.workflow'));
+    fs.renameSync(path.join(p.base, 'saved-workflow'), path.join(p.root, '.workflow'));
+  };
+  swap();
+  const before = wf(p.root, ['entry', '--item', 'AL-1', '--json']);
+  assert.equal(before.code, 75, before.out);
+  assert.match(before.err, /is a link to .*examples\/demo\/\.workflow/);
+  restore();
+  const e = ok(wf(p.root, ['entry', '--item', 'AL-2', '--json'])).json();
+  ok(wf(p.root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id]));
+  swap();
+  const r = wf(p.root, ['plan', '--file', planFile(p.base), '--attempt', e.id]);
+  assert.equal(r.code, 75, r.out);
+  assert.match(r.err, /recorded at admission/);
+});
