@@ -145,6 +145,7 @@ export function reduce(entries) {
     stops: [],
     reviewsRefused: [],
     gateOverrides: [],
+    reviewOverrides: [],
     // Telemetry events (measurement only; nothing is decided from them).
     reviewRounds: [],
     implementers: [],
@@ -232,6 +233,10 @@ export function reduce(entries) {
       // A gate the owner started out of the order of work (I-27), with the reason it was recorded under.
       case 'gate.override':
         s.gateOverrides.push({ ...d, at: e.at, by: e.actor });
+        break;
+      // A reviewer handed the tree while an implementer handoff was open (I-23), with the reason it was recorded under.
+      case 'review.override':
+        s.reviewOverrides.push({ ...d, at: e.at, by: e.actor });
         break;
       // One per `wf review` outcome on a reviewer handoff: recorded (blind or with prior findings) or refused.
       case 'review.round':

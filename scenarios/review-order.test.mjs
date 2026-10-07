@@ -50,7 +50,8 @@ const waiting = [{ id: 'slow', repo: 'app', run: 'echo report > out.txt; while [
 test('happy path: code review to clean with no gate, then one gate, then the evidence review, then delivery', () => {
   const { base, root, remote } = singleRepoProject('order-happy', { gate: { steps } });
   const e = implemented(root, base, 'RO-1');
-  assert.match(state(root, e.id).next, /^code review: hand to a fresh reviewer[\s\S]*no gate until a code-review round on this tree comes back clean/);
+  // I-23: the implementer is still open; the next step closes it before the code review.
+  assert.match(state(root, e.id).next, /^close the implementer\(s\) still open, once each has reported done and committed: `wf handoff close --agent i`; then code review: hand to a fresh reviewer[\s\S]*no gate until a code-review round on this tree comes back clean/);
   ok(wf(root, ['gate', '--prepare-only', '--attempt', e.id]), 'a gate plan runs nothing and is never refused');
   const early = wf(root, ['gate', '--attempt', e.id]);
   assert.equal(early.code, 75, 'no gate before the code review');

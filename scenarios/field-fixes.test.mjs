@@ -224,7 +224,7 @@ test('wf base merge records the merge, notes overlapping files and says the gate
   assert.equal(s.baseMerges.length, 1);
   assert.deepEqual(s.baseMerges[0].overlap, ['src/m.txt']);
   assert.doesNotMatch(ok(wf(root, ['status'])).out, /base app/, 'the base is current again');
-  assert.match(s.next, /^code review: hand to a fresh reviewer/, 'the merged tree needs its code review, then a gate');
+  assert.match(s.next, /^close the implementer\(s\) still open[^;]*; then code review: hand to a fresh reviewer/, 'the merged tree needs its code review, then a gate');
   const rev = ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', id, '--json'])).json();
   assert.equal(JSON.parse(fs.readFileSync(rev.bundle, 'utf8')).bases.app, sh(wt, 'git rev-parse origin/main'), 'the reviewer diffs against the merged base');
   assert.match(ok(wf(root, ['base', 'merge', '--attempt', id])).out, /app: already on its base/);

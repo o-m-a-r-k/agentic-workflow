@@ -18,7 +18,7 @@ Telemetry is measurement only: nothing here allows or blocks a command, and miss
 | `wf report --csv F` / `--handoffs-csv F` / `--html F` | One row per attempt / one row per handoff / one HTML page with both and the phase table |
 | `wf report --idle-minutes N` | The idle-gap threshold (default 30) |
 | `wf report --all` | Every enabled project |
-| `wf handoff close --agent ID [--outcome done\|stopped\|failed]` | The implementer finished: its commits since the handoff and its sub-agents |
+| `wf handoff close --agent ID [--outcome done\|stopped\|failed]` | The implementer finished: its commits since the handoff and its sub-agents. `wf handoff reviewer` refuses while an implementer handoff is open (`--reason` overrides, recorded as `review.override`) |
 | `wf stop --class C --reason "..."` | Why a gate was stopped, as a class (required) and as text |
 | `Fixes-finding: <round>:<id>` (commit trailer) | The commit a review finding was fixed in |
 | `scope:` in an amendment file | What a criteria amendment adds: endpoints, error codes, repos |
@@ -64,7 +64,7 @@ Entries written before 0.5.0 carry `runId` and `reason` only.
 
 `implementer.opened` is written with every implementer `handoff`: `{ handoff, agent, work, class, heads }`, where `heads` is the tree per repo at the handoff.
 
-`implementer.closed` is written by `wf handoff close --agent ID`: `{ handoff, agent, outcome, heads, commits }`. `outcome` is `done` (default), `stopped` or `failed`; `commits` is, per repo, the number of commits since the implementer's handoff. The engine cannot see an agent finish, so an implementer nobody closes stays open in the report and in every later reviewer's `openImplementers`.
+`implementer.closed` is written by `wf handoff close --agent ID`: `{ handoff, agent, outcome, heads, commits }`. `outcome` is `done` (default), `stopped` or `failed`; `commits` is, per repo, the number of commits since the implementer's handoff. The engine cannot see an agent finish, so an implementer nobody closes stays open in the report and in every later reviewer's `openImplementers`, and no reviewer is handed the tree until it is closed or the owner records `wf handoff reviewer --reason` (`review.override`: `{ reason, openImplementers, agent }`).
 
 ### `subagents.attributed`
 
@@ -181,7 +181,7 @@ Each `children[]` entry: `{ agentId, name, agentType, depth, model, outputTokens
 
 - **Why a finding happened.** Whether it was a reviewer miss, a regression from an earlier fix or a defect in added scope is a judgement. The ledger links a finding to the commit that fixed it (when a trailer or the closure names it), never to the commit that introduced it.
 - **Fixes nobody names.** A fix commit without a `Fixes-finding` trailer, and a verification without `fixedIn`, leave `fixedIn` empty.
-- **When an agent really finished.** Implementers are closed only by `wf handoff close`; an unclosed implementer looks open forever. Who edited the tree during a review is not recorded, only that it changed.
+- **When an agent really finished.** Implementers are closed only by `wf handoff close`, which the owner runs when the agent reports; an unclosed implementer looks open forever and blocks the next reviewer handoff. Nothing proves the agent stopped editing when it was closed; the review is still bound to the tree it was handed. Who edited the tree during a review is not recorded, only that it changed.
 - **The owner's decisions.** Scope rulings survive only as amendment reasons and stated `scope`; a stop reason is as good as its text and class. Nothing records a decision made in conversation.
 - **Scope the amendment does not state.** Endpoints, error codes and repos are counted only when the amendment's `scope` block names them; nothing checks them against the code.
 - **Agents outside the attempt.** Sub-agents are attributed only through Claude Code's `parentAgentId` chain from an implementer's transcript. Agents the owner starts without a handoff, sub-agents of reviewers or planners (not recorded in the ledger, though the report still finds them for any Claude handoff it can read) and other runtimes' child agents are not.

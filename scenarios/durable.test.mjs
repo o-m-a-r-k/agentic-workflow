@@ -104,7 +104,7 @@ test('wf check runs light steps only, never counts as a gate, and the gate reuse
   const s = state(root, id);
   assert.equal(s.gates.length, 0);
   assert.equal(s.checks.length, 1);
-  assert.match(s.next, /^code review: hand to a fresh reviewer[\s\S]*no gate until a code-review round on this tree comes back clean/, 'a check opens nothing and is no gate');
+  assert.match(s.next, /^close the implementer\(s\) still open[^;]*`wf handoff close --agent i`; then code review: hand to a fresh reviewer[\s\S]*no gate until a code-review round on this tree comes back clean/, 'a check opens nothing and is no gate');
   const g = JSON.parse(ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', id, '--json'])).out);
   assert.deepEqual(g.steps.map((x) => [x.id, x.status]).sort(), [['e2e', 'passed'], ['lint', 'reused']]);
   write(wt, 'src/a.txt', 'dirty\n');

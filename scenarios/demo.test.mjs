@@ -14,6 +14,7 @@ test('examples/hello-ticket/demo.sh runs end to end and cleans up after itself',
   const out = r.stdout;
   assert.match(out, /tracker: admitted performed on the ticket files and read back/);
   assert.match(out, /the gate runs after a clean code review[\s\S]*no review round covers the current tree[\s\S]*\(exit 75: refused\)/);
+  assert.match(out, /implementer handoff\(s\) still open on HT-1\.1: implementer-1[^\n]*\n[\s\S]*?\(exit 75: refused\)\n[\s\S]*?implementer implementer-1 closed \(done\)/);
   assert.match(out, /implementer-1 planned, wrote or owns this change and cannot review it\n\(exit 75: refused\)/);
   assert.match(out, /review recorded \(1 finding\(s\)\)\.\n[\s\S]*1 finding\(s\) from earlier rounds to verify against the code/);
   assert.match(out, /\$ wf gate --attempt HT-1\.1\n[\s\S]*gate passed \(/);

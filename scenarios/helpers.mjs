@@ -21,9 +21,21 @@ const baseEnv = () => {
   return env;
 };
 
-export function wf(cwd, args, { env = {}, input, home } = {}) {
+export function wf(cwd, args, { env = {}, input, home, implementersOpen = false } = {}) {
+  // The owner closes each implementer once it reports done (`wf handoff close`), and `wf handoff reviewer` refuses while
+  // one is open (I-23). Scenarios about something else take that step here, before each reviewer handoff; the ones
+  // about the refusal itself pass `implementersOpen: true` (or `--reason`) and see the engine as it is.
+  if (args[0] === 'handoff' && args[1] === 'reviewer' && !implementersOpen && !args.includes('--reason')) closeOpenImplementers(cwd, args, { env, home });
   const r = spawnSync(process.execPath, [WF, ...args], { cwd, encoding: 'utf8', input, maxBuffer: 512 * 1024 * 1024, env: { ...baseEnv(), WF_CONFIG_HOME: home ?? path.join(cwd, '..', '.wfhome'), WF_HOME: path.join(cwd, '..', '.home'), WF_IMPROVEMENTS_DIR: path.join(cwd, '..', '.improvements'), ...env } });
   return { code: r.status, out: r.stdout, err: r.stderr, json: () => JSON.parse(r.stdout) };
+}
+
+function closeOpenImplementers(cwd, args, opts) {
+  const i = args.indexOf('--attempt');
+  const r = wf(cwd, ['resume', '--json', ...(i >= 0 ? ['--attempt', args[i + 1]] : [])], opts);
+  if (r.code !== 0) return; // the reviewer handoff reports the problem itself
+  const s = JSON.parse(r.out);
+  for (const impl of (s.implementers ?? []).filter((y) => !y.closedAt)) ok(wf(cwd, ['handoff', 'close', '--agent', impl.agent, '--attempt', s.id], opts));
 }
 
 export function ok(r) {

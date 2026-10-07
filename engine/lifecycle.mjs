@@ -370,6 +370,8 @@ export function handoff(root, role, options) {
   // Order of work (I-27): code-review rounds run to clean with no gate, then one gate on that tree, then the evidence
   // review of the gated tree. A finding made while a gate runs makes that gate obsolete, so the two never overlap.
   let gateNow = null;
+  let reviewOverride = null;
+  if (options.reason !== undefined && role !== 'reviewer') throw new WfError('--reason applies to reviewer handoffs only (to hand the tree while an implementer is still open)');
   if (role === 'reviewer') {
     const busy = gateBusy(root, state);
     if (busy) throw gateRunningRefusal(state, busy);
@@ -377,6 +379,15 @@ export function handoff(root, role, options) {
     const sw = sweepAnswers(state);
     if (sw.missing.length) throw refuse(`the fix implementer did not answer ${sw.missing.length} pattern sweep(s) it was handed: ${sw.missing.join(', ')}`, `add a commit trailer per sweep, one line each: \`Sweep <id>: fixed - <the other instances fixed>\` or \`Sweep <id>: clean - <why no hit is another instance>\` (for example \`git commit --allow-empty -m "Sweeps" -m "Sweep ${sw.missing[0]}: fixed - ..."\`)`);
     if (state.lane !== 'batch' && !state.handoffs.some((h) => h.role === 'implementer')) throw refuse('nothing to review yet: hand the work to an implementer first (`wf handoff implementer --agent <id>`)');
+    // Named failure (I-23): two review rounds were refused because implementers were still editing the tree the reviewer
+    // had been handed. An implementer handoff stays open until `wf handoff close`; while one is open the tree may still
+    // move, so no review round starts. `--reason` hands the tree anyway and records the override.
+    const openImpl = openImplementersOf(root, state);
+    if (openImpl.length) {
+      const reason = typeof options.reason === 'string' ? options.reason.trim() : '';
+      if (!reason) throw refuse(`implementer handoff(s) still open on ${state.id}: ${openImpl.map(implementerLabel).join(', ')}: the tree may still move under the reviewer`, `when each implementer has reported done and its work is committed, close it: ${openImpl.map((x) => `\`wf handoff close --agent ${x.agent}\``).join(', ')} (\`--outcome stopped\` for one you stopped); then hand the tree to the reviewer. Or run it anyway with \`wf handoff reviewer --agent <id> --reason "<why>"\`, which records the override`);
+      reviewOverride = { reason, openImplementers: openImpl.map(implementerLabel) };
+    }
     // Tracked changes only: a finished gate leaves untracked reports, and those are never the change.
     const dirty = Object.entries(treeHashes(state)).filter(([, t]) => t.includes('+dirty')).map(([n]) => n);
     if (dirty.length) throw refuse(`commit the change before the review (the reviewer reads the committed diff): uncommitted changes in ${dirty.join(', ')}`);
@@ -518,6 +529,8 @@ export function handoff(root, role, options) {
     const tree = treeHashes(state);
     // Telemetry: implementers handed work and not closed (`wf handoff close`) while this reviewer starts: the tree may still move.
     const openImplementers = role === 'reviewer' ? state.implementers.filter((x) => !x.closedAt).map((x) => x.agent) : undefined;
+    // The owner handed the tree while an implementer was open (I-23): recorded before the round it opens.
+    if (reviewOverride) append(root, state.id, 'review.override', { ...reviewOverride, agent }, actor(options));
     append(root, state.id, 'handoff', { ...(sweeps ? { sweeps } : {}), lessons: (bundle.lessons?.apply ?? []).map((l) => l.id), lessonsFiltered: (selected?.filtered ?? []).map((l) => l.id), role, agent, runtime, session: options.session ?? null, agentType, class: cls, effort, model, sessionModel: sessionModelNow, startPrompt: startPromptFor(file), work: work?.id ?? null, bundle: file, tree, patch: patchIds(state), ...(role === 'reviewer' ? { gate: gateNow.ok ? state.lastGate.runId : null, round: bundle.round, openImplementers } : {}) }, actor(options));
     if (role === 'implementer') append(root, state.id, 'implementer.opened', { handoff: handoffId(file), agent, work: work?.id ?? null, class: cls, heads: tree }, actor(options));
   };
@@ -697,6 +710,14 @@ function refusedRound(root, state, h, closure, reasonClass, reason) {
 
 // `wf handoff close --agent ID`: the implementer finished (or was stopped). Telemetry: the tree is settled once every
 // implementer is closed, and its sub-agents (Claude Code transcripts whose parent is its transcript) are attributed.
+// Implementer handoffs of this attempt not yet closed with `wf handoff close`. Ledgers from before 0.5.0 have no
+// implementer events, so nothing of theirs is open. A batch has no implementers of its own: each member was reviewed
+// before batching, its implementers closed or the override recorded in its ledger.
+export function openImplementersOf(root, state) {
+  return (state.implementers ?? []).filter((x) => !x.closedAt).map((x) => ({ attempt: state.id, agent: x.agent, work: x.work ?? null }));
+}
+const implementerLabel = (x) => `${x.agent}${x.work ? ` (${x.work})` : ''}`;
+
 export function closeImplementer(root, options) {
   const state = openState(root, options);
   if (!options.agent || options.agent === true) throw new WfError('--agent <implementer id> is required');
@@ -1779,7 +1800,11 @@ export function withAttempt(root, state, text) {
 }
 
 export function nextAction(root, state) {
-  return withAttempt(root, state, nextStep(root, state));
+  const step = nextStep(root, state);
+  // I-23: the reviewer handoff refuses while an implementer handoff is open; a step that hands a reviewer says so first.
+  const openImpl = step.includes('wf handoff reviewer') ? openImplementersOf(root, state) : [];
+  const close = openImpl.length ? `close the implementer(s) still open, once each has reported done and committed: ${openImpl.map((x) => `\`wf handoff close --agent ${x.agent}\``).join(', ')}; then ` : '';
+  return withAttempt(root, state, `${close}${step}`);
 }
 
 function nextStep(root, state) {
@@ -1798,16 +1823,16 @@ function nextStep(root, state) {
     const comment = (a) => (a.rendered !== 'delivered' ? 'post the comment (body in `wf status --json`)' : state.delivery.summary ? `post the comment in ${commentFile(root, state.id)} unchanged, each {assetUrl:<title>} replaced by that upload's assetUrl, so every screenshot shows as an image on the ticket (an attachment alone is only a link row)` : 'record the owner\'s summary (`wf summary --file <summary.md>`), then post the comment it renders');
     const ops = state.tracker.pending.filter((a) => a.event === ev).map((a) => (a.op === 'setStatus' ? `set status to "${a.status}"` : a.op === 'comment' ? comment(a) : a.op === 'attach' ? `upload and attach ${a.files.length} screenshot(s) as files (title = the name, subtitle = its caption; listed under "delivered screenshots"), keeping each assetUrl` : a.op)).join(', ');
     const raw = ev === 'delivered' ? 'save the RAW get_issue and list_comments results unchanged (never rebuilt or abridged)' : 'save the readback';
-    if (cfg?.tracker?.via === 'connector') return `${state.phase === 'handoff-pending' ? '' : `${phaseAction(cfg, state)}${holdNote}. Pending `}tracker (${ev}): through the connector: ${ops}; then read the issue${state.tracker.pending.some((a) => a.event === ev && a.op === 'comment') ? ' and its comments' : ''} back with the connector and run \`wf tracker record --event ${ev} --from-transcript\` (the readback as the host recorded it). Without a host transcript: \`--capture <saved tool result>\`, or \`--agent-reported --file reported.json${state.tracker.pending.some((a) => a.event === ev && a.op === 'comment') ? ' --comment-file <posted text>' : ''}\``;
+    if (cfg?.tracker?.via === 'connector') return `${state.phase === 'handoff-pending' ? '' : `${phaseAction(root, cfg, state)}${holdNote}. Pending `}tracker (${ev}): through the connector: ${ops}; then read the issue${state.tracker.pending.some((a) => a.event === ev && a.op === 'comment') ? ' and its comments' : ''} back with the connector and run \`wf tracker record --event ${ev} --from-transcript\` (the readback as the host recorded it). Without a host transcript: \`--capture <saved tool result>\`, or \`--agent-reported --file reported.json${state.tracker.pending.some((a) => a.event === ev && a.op === 'comment') ? ' --comment-file <posted text>' : ''}\``;
     const reported = cfg?.tracker?.via === 'connector' ? `; or, when the tool results are only in the chat, write what the tracker showed to reported.json ({ issue, status, comment: { id, bodySha256, createdAt }, attachments: [{ title, subtitle, assetUrl }], readAt }) and run \`wf tracker record --event ${ev} --agent-reported --file reported.json${state.tracker.pending.some((a) => a.event === ev && a.op === 'comment') ? ' --comment-file <the posted comment text>' : ''}\` (recorded agent-reported, unverified)` : '';
     const tracker = `tracker (${ev}): ${ops}; ${raw} and run \`wf tracker record --event ${ev} --capture <file>\`${reported}`;
     if (state.phase === 'handoff-pending') return tracker;
-    return `${phaseAction(cfg, state)}${holdNote}. Pending ${tracker}`;
+    return `${phaseAction(root, cfg, state)}${holdNote}. Pending ${tracker}`;
   }
-  return `${phaseAction(cfg, state)}${holdNote}`;
+  return `${phaseAction(root, cfg, state)}${holdNote}`;
 }
 
-function phaseAction(cfg, state) {
+function phaseAction(root, cfg, state) {
   // The stop reason is the owner's note about the tree it stopped on; once the code changed it is stale and, shown to a
   // later reviewer, it carried an earlier round's findings into a blind review.
   if (state.stops.length && state.lastGate?.status === 'stopped' && canonical(state.lastGate.tree) === canonical(treeHashes(state))) {

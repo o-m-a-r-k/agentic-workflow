@@ -116,6 +116,10 @@ git -C "$WT" commit -q -m 'greet by name'
 say "No gate yet: the gate runs once a code-review round on this tree comes back clean"
 refused gate --attempt "$ATTEMPT"
 
+say "The implementer is still open: no review starts until it is closed, so the tree cannot move under the reviewer"
+refused handoff reviewer --agent reviewer-1 --attempt "$ATTEMPT"
+wf handoff close --agent implementer-1 --attempt "$ATTEMPT"
+
 say "The implementer cannot review its own work"
 refused handoff reviewer --agent implementer-1 --attempt "$ATTEMPT"
 

@@ -47,7 +47,9 @@ Work
   wf handoff planner|implementer|reviewer|tester --agent ID [--work W1] [--sweep F] [--session SID] [--runtime claude|codex]
                                     --sweep: a fix handoff names a pattern sweep per open review finding
   wf handoff close --agent ID [--outcome done|stopped|failed]
-                                    an implementer finished: recorded with its commits and sub-agents (telemetry)
+                                    an implementer finished: no review round starts while one is open
+  wf handoff reviewer --agent ID --reason "why"
+                                    hand the tree while an implementer is open; records the override
   wf impact run [--file plan.yaml | --query JSON]
                                     run the attempt's recorded impact queries (or a plan file's, or one) on the current tree
   wf check [--repo R]               light steps only, for the implementer; reused by the gate, never counts as one
@@ -639,7 +641,9 @@ async function dispatch(cmd, sub, positional, options) {
         print(options, startPrompt, { ...r, startPrompt });
       } else {
         if (stale) process.stderr.write(stale);
-        print(options, `${lessonsLine}${sweepLines}${sub} bundle: ${r.bundle}${r.work ? `\nwork item ${r.work}, class ${r.class}` : `\nclass ${r.class}`}${r.effort ? `, effort ${r.effort}` : ''}${r.model ? `, model ${r.model}` : ''}\n${how} with: "${startPrompt}"`, { ...r, startPrompt });
+        // I-23: the implementer handoff stays open until it is closed, and no review round starts while it is open.
+        const closeLine = sub === 'implementer' ? `\nWhen it reports done (and its work is committed), close it: \`wf handoff close --agent ${r.agent} --attempt ${r.state.id}\` (\`--outcome stopped\` if you stop it); \`wf handoff reviewer\` refuses while it is open.` : '';
+        print(options, `${lessonsLine}${sweepLines}${sub} bundle: ${r.bundle}${r.work ? `\nwork item ${r.work}, class ${r.class}` : `\nclass ${r.class}`}${r.effort ? `, effort ${r.effort}` : ''}${r.model ? `, model ${r.model}` : ''}\n${how} with: "${startPrompt}"${closeLine}`, { ...r, startPrompt });
       }
       return 0;
     }
