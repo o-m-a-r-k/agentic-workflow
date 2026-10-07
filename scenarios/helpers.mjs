@@ -38,7 +38,9 @@ export function sh(cwd, cmd) {
 
 const baseEnv = () => {
   // The immutable flag stays off in tests (temporary folders must stay removable); modes and the manifest still apply.
-  const env = { ...process.env, WF_EVIDENCE_FLAGS: '0', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.test', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.test' };
+  // Node's on-disk compile cache for the `wf` processes (keyed by source hash, so an edited engine file is compiled
+  // afresh). Named cost: a scenario run starts some 3,000 of them, each compiling the whole engine (about 8ms).
+  const env = { NODE_COMPILE_CACHE: path.join(os.tmpdir(), 'wf-scenarios-node-cache'), ...process.env, WF_EVIDENCE_FLAGS: '0', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.test', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.test' };
   for (const k of ['CLAUDE_CODE_SESSION_ID', 'CLAUDECODE', 'CODEX_THREAD_ID', 'CODEX_SANDBOX', 'AI_AGENT', 'GROK_SESSION_ID']) delete env[k]; // no agent runtime: the scenario is the owner at a terminal (engine/owner.mjs)
   delete env.CODEX_THREAD_ID;
   delete env.GROK_SESSION_ID;
