@@ -92,7 +92,8 @@ test('a reopened attempt records its lesson before the review; it is then delive
   ok(wf(root, ['deliver', '--attempt', id]));
   assert.equal(state(root, id).phase, 'done');
   assert.match(sh(root, `git --git-dir=${root}.origin.git show main:.workflow/lessons/L-1.yaml`), /title: Delivered screenshots are visible in the ticket/, 'delivered with the change');
-  // A reopen with nothing to learn says why, in the ledger.
+  // A reopen with nothing to learn says why, in the ledger; waiving the lesson is the owner's word, never the flag alone.
+  assert.match(wf(root, ['reopen', '--item', 'ENG-301', '--reason', 'r', '--owner', 'o', '--no-lesson', 'nothing to learn'], { ownerSilent: true }).err, /reopening ENG-301 without a lesson needs the owner's authority[\s\S]*`waive-lesson ENG-301\.\d+`/);
   const id3 = ok(wf(root, ['reopen', '--item', 'ENG-301', '--reason', 'r', '--owner', 'o', '--no-lesson', 'a typo in a label, nothing to learn', '--json'])).json().id;
   assert.equal(state(root, id3).lessons.waived.reason, 'a typo in a label, nothing to learn');
 });

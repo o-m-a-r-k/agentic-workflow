@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { closureFile, commitIn, criteriaFile, goodClosure, ok, OUT_OF_ORDER, sh, singleRepoProject, state, WF, wf, write, yaml } from './helpers.mjs';
+import { closureFile, commitIn, criteriaFile, goodClosure, ok, OUT_OF_ORDER, sh, singleRepoProject, state, WF, wf, write, yaml, ownerSpeaks, spawnHome } from './helpers.mjs';
 
 function admitted(root, base, item) {
   const e = ok(wf(root, ['entry', '--item', item, '--owner', 'o', '--json'])).json();
@@ -123,8 +123,9 @@ test('a runner killed mid-gate is recovered: finished steps carried, the rest re
   fs.writeFileSync(path.join(root, '..', 'slow.marker'), '');
   const e = admitted(root, base, 'ENG-25');
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'h\n' });
-  const env = { ...process.env, WF_CONFIG_HOME: path.join(root, '..', '.wfhome') };
-  delete env.CLAUDE_CODE_SESSION_ID;
+  const env = { ...process.env, WF_CONFIG_HOME: path.join(root, '..', '.wfhome'), ...spawnHome(root) };
+  for (const k of ['CLAUDE_CODE_SESSION_ID', 'CLAUDECODE', 'CODEX_THREAD_ID', 'CODEX_SANDBOX', 'AI_AGENT', 'GROK_SESSION_ID']) delete env[k]; // no agent runtime: the scenario is the owner at a terminal (engine/owner.mjs)
+  ownerSpeaks(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]);
   const child = spawn(process.execPath, [WF, 'gate', ...OUT_OF_ORDER, '--attempt', e.id], { cwd: root, env, stdio: 'ignore' });
   const lock = path.join(root, '.wf-evidence', 'attempts', e.id, 'gate', 'gate.lock');
   const deadline = Date.now() + 30000;
@@ -261,8 +262,9 @@ test('a running gate shows progress: wf gate prints each step as it starts and f
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'l\n' });
   const outFile = path.join(base, 'gate.out');
   const fd = fs.openSync(outFile, 'w');
-  const env = { ...process.env, WF_CONFIG_HOME: path.join(root, '..', '.wfhome') };
-  delete env.CLAUDE_CODE_SESSION_ID;
+  const env = { ...process.env, WF_CONFIG_HOME: path.join(root, '..', '.wfhome'), ...spawnHome(root) };
+  for (const k of ['CLAUDE_CODE_SESSION_ID', 'CLAUDECODE', 'CODEX_THREAD_ID', 'CODEX_SANDBOX', 'AI_AGENT', 'GROK_SESSION_ID']) delete env[k]; // no agent runtime: the scenario is the owner at a terminal (engine/owner.mjs)
+  ownerSpeaks(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]);
   const child = spawn(process.execPath, [WF, 'gate', ...OUT_OF_ORDER, '--attempt', e.id], { cwd: root, env, stdio: ['ignore', fd, fd] });
   const exited = new Promise((r) => child.on('exit', r));
   const read = () => fs.readFileSync(outFile, 'utf8');

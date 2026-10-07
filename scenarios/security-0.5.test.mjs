@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { makeRepo, ok, sh, singleRepoProject, state, toAccepted, tmp, wf, write, yaml } from './helpers.mjs';
+import { commitIn, makeRepo, ok, sh, singleRepoProject, state, toAccepted, tmp, wf, write, yaml } from './helpers.mjs';
 import { adapterFileAtCommit, loadConfig } from '../engine/config.mjs';
 
 const steps = [{ id: 'unit', repo: 'app', run: 'true', inputs: ['src/**'] }];
@@ -113,4 +113,32 @@ test('a regex query that backtracks without end is stopped and refused, never a 
   assert.ok(Date.now() - t < 30000, 'refused within the limit, not after the pattern finished');
   // An ordinary regex still counts.
   assert.match(ok(wf(root, ['impact', 'run', '--attempt', e.id, '--query', JSON.stringify({ pattern: '^a+!$', kind: 'regex', paths: ['src/**'] })])).out, /1 file/);
+});
+
+// Second review (fail-open in engine/impact.mjs): every error path refuses; nothing is counted as zero or skipped.
+test('impact queries fail closed: a missing worktree, an unreadable blob and a truncated caller list refuse, never count as no hit', async () => {
+  const { impactCheckProblems } = await import('../engine/impact.mjs');
+  // A missing worktree: the base branch is never read in its place.
+  const a = attemptWithPlan('impact-noworktree');
+  const q = JSON.stringify({ pattern: 'a', kind: 'literal' });
+  fs.renameSync(a.e.repos.app.worktree, `${a.e.repos.app.worktree}.gone`);
+  const gone = wf(a.root, ['impact', 'run', '--attempt', a.e.id, '--query', q]);
+  fs.renameSync(`${a.e.repos.app.worktree}.gone`, a.e.repos.app.worktree);
+  assert.notEqual(gone.code, 0);
+  assert.doesNotMatch(gone.out, /: \d+ files? at/);
+  // An object git cannot read: refused, not left out of the count.
+  const b = attemptWithPlan('impact-noblob');
+  commitIn(b.e.repos.app.worktree, { 'src/hidden.txt': 'needle-in-a-lost-object\n' });
+  const blob = sh(b.e.repos.app.worktree, 'git rev-parse HEAD:src/hidden.txt');
+  const common = sh(b.e.repos.app.worktree, 'git rev-parse --git-common-dir');
+  const obj = path.resolve(b.e.repos.app.worktree, common, 'objects', blob.slice(0, 2), blob.slice(2));
+  fs.chmodSync(obj, 0o644);
+  fs.rmSync(obj);
+  const lost = wf(b.root, ['impact', 'run', '--attempt', b.e.id, '--query', JSON.stringify({ pattern: 'needle-in-a-lost-object', paths: ['src/**'] })]);
+  assert.notEqual(lost.code, 0, lost.out);
+  assert.doesNotMatch(lost.out, /query: 0 files/);
+  // The bundle lists at most 100 callers outside the map; the rest need the reviewer's account.
+  const map = { inventory: [], derived: { outside: [], total: 140, truncated: true } };
+  assert.match(impactCheckProblems(map, { impactChecked: { queries: [], sampled: [], derived: [] } }, {}).join('\n'), /impactChecked\.unlisted: the bundle lists 0 of 140 callers/);
+  assert.deepEqual(impactCheckProblems(map, { impactChecked: { queries: [], sampled: [], derived: [], unlisted: 'every caller of renderTable checked; all in tests' } }, {}), []);
 });

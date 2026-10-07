@@ -15,28 +15,105 @@ export function sh(cwd, cmd) {
 const baseEnv = () => {
   // The immutable flag stays off in tests (temporary folders must stay removable); modes and the manifest still apply.
   const env = { ...process.env, WF_EVIDENCE_FLAGS: '0', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.test', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.test' };
-  delete env.CLAUDE_CODE_SESSION_ID;
+  for (const k of ['CLAUDE_CODE_SESSION_ID', 'CLAUDECODE', 'CODEX_THREAD_ID', 'CODEX_SANDBOX', 'AI_AGENT', 'GROK_SESSION_ID']) delete env[k]; // no agent runtime: the scenario is the owner at a terminal (engine/owner.mjs)
   delete env.CODEX_THREAD_ID;
   delete env.GROK_SESSION_ID;
   return env;
 };
 
-export function wf(cwd, args, { env = {}, input, home, implementersOpen = false } = {}) {
+// Owner-only decisions (engine/owner.mjs) take the owner's authority from the host's record of the owner session. A
+// scenario plays that session: a person's name given to `--owner` (or none, at entry) becomes a synthetic Codex session
+// whose rollout transcript lives under the scenario's WF_HOME, and the owner "says" the decision's phrase there right
+// before the command that needs it, as a person would type it. Codex, so that reviewer rounds stay unverified as they
+// were (no Claude Code transcripts exist for them). Scenarios about the authority rules pass `ownerSilent: true`.
+// `plain:<name>` keeps a person's name as the owner (scenarios about owners with no session).
+export const ownerSession = (name) => (/^(claude|codex):/.test(String(name)) ? String(name) : /^plain:/.test(String(name)) ? String(name).slice(6) : `codex:owner-${Buffer.from(String(name)).toString('hex').slice(0, 40)}`);
+const homeOf = (cwd, env) => env.WF_HOME ?? path.join(cwd, '..', '.home');
+
+export function wf(cwd, args, { env = {}, input, home, implementersOpen = false, ownerSilent = false } = {}) {
+  args = [...args];
+  const at = args.indexOf('--owner');
+  if (at >= 0 && typeof args[at + 1] === 'string') args[at + 1] = ownerSession(args[at + 1]);
+  else if (args[0] === 'entry' && !args.includes('--help')) args.push('--owner', ownerSession('owner'));
+  const opts = { env, home };
   // The owner closes each implementer once it reports done (`wf handoff close`), and `wf handoff reviewer` refuses while
   // one is open (I-23). Scenarios about something else take that step here, before each reviewer handoff; the ones
   // about the refusal itself pass `implementersOpen: true` (or `--reason`) and see the engine as it is.
-  if (args[0] === 'handoff' && args[1] === 'reviewer' && !implementersOpen && !args.includes('--reason')) closeOpenImplementers(cwd, args, { env, home });
+  if (args[0] === 'handoff' && args[1] === 'reviewer' && !implementersOpen && !args.includes('--reason')) closeOpenImplementers(cwd, args, opts, ownerSilent);
+  if (!ownerSilent) ownerSpeaksFor(cwd, args, opts);
   const r = spawnSync(process.execPath, [WF, ...args], { cwd, encoding: 'utf8', input, maxBuffer: 512 * 1024 * 1024, env: { ...baseEnv(), WF_CONFIG_HOME: home ?? path.join(cwd, '..', '.wfhome'), WF_HOME: path.join(cwd, '..', '.home'), WF_IMPROVEMENTS_DIR: path.join(cwd, '..', '.improvements'), ...env } });
   return { code: r.status, out: r.stdout, err: r.stderr, json: () => JSON.parse(r.stdout) };
 }
 
-function closeOpenImplementers(cwd, args, opts) {
-  const i = args.indexOf('--attempt');
-  const r = wf(cwd, ['resume', '--json', ...(i >= 0 ? ['--attempt', args[i + 1]] : [])], opts);
-  if (r.code !== 0) return; // the reviewer handoff reports the problem itself
-  const s = JSON.parse(r.out);
+const optionOf = (args, k) => {
+  const i = args.indexOf(k);
+  return i >= 0 && typeof args[i + 1] === 'string' && !args[i + 1].startsWith('--') ? args[i + 1] : null;
+};
+
+// The phrases the owner says before an owner-only command (engine/owner.mjs), for the attempt the command names.
+function ownerSpeaksFor(cwd, args, opts) {
+  const [cmd, sub] = args;
+  const lines = (id) => {
+    const out = [];
+    if (cmd === 'gate' && args.includes('--reason')) out.push(`override ${id}:gate`);
+    if (cmd === 'handoff' && sub === 'reviewer' && args.includes('--reason')) out.push(`override ${id}:review`);
+    if (cmd === 'handoff' && sub === 'close' && optionOf(args, '--agent')) out.push(`close ${id}:${optionOf(args, '--agent')}`);
+    if (cmd === 'deliver' && optionOf(args, '--acknowledge-adapter-state')) for (const l of optionOf(args, '--acknowledge-adapter-state').split(',')) out.push(`acknowledge ${id}:${l.trim()}`);
+    if (cmd === 'deliver' && optionOf(args, '--repin-adapter')) out.push(`repin ${id}:${optionOf(args, '--repin-adapter').slice(0, 12)}`);
+    if (cmd === 'abandon' && optionOf(args, '--acknowledge-integration')) for (const l of optionOf(args, '--acknowledge-integration').split(',')) out.push(`abandon ${id}:${l.trim()}`);
+    if (cmd === 'release') out.push(`release ${id}`);
+    if (cmd === 'adopt') out.push(`adopt ${id}`);
+    if (cmd === 'deliver' && optionOf(args, '--acknowledge-deferrals')) for (const k of optionOf(args, '--acknowledge-deferrals').split(',')) out.push(`acknowledge-deferral ${id}:${k.trim()}`);
+    if (['deliver', 'reopen'].includes(cmd) && optionOf(args, '--no-lesson')) out.push(`waive-lesson ${id}`);
+    if (cmd === 'shown') out.push(`shown ${id}`);
+    return out;
+  };
+  if (!lines('x').length) return;
+  // `wf reopen` names an item: the waiver is the owner's word on its last delivered attempt.
+  const item = cmd === 'reopen' ? optionOf(args, '--item') : null;
+  const last = item ? fs.readdirSync(path.join(cwd, '.wf-evidence', 'attempts')).filter((d) => d.startsWith(`${item}.`)).sort((x, y) => Number(x.slice(item.length + 1)) - Number(y.slice(item.length + 1))).at(-1) : null;
+  const s = attemptOf(cwd, last ? ['--attempt', last] : args, opts);
+  if (!s) return;
+  const owner = cmd === 'adopt' ? optionOf(args, '--owner') : s.owner;
+  for (const l of lines(s.id)) ownerSays(homeOf(cwd, opts.env), owner, l);
+}
+
+// For a `wf` process a scenario spawns itself: the owner says what the command needs first (see `wf` above). Its env
+// must carry the scenario's WF_HOME (`spawnHome`).
+export const ownerSpeaks = (cwd, args) => ownerSpeaksFor(cwd, args, { env: {} });
+export const spawnHome = (cwd) => ({ WF_HOME: path.join(cwd, '..', '.home') });
+
+function attemptOf(cwd, args, opts) {
+  const id = optionOf(args, '--attempt');
+  const r = wf(cwd, ['resume', '--json', ...(id ? ['--attempt', id] : [])], { ...opts, ownerSilent: true });
+  return r.code === 0 ? JSON.parse(r.out) : null;
+}
+
+// A genuine owner turn in a synthetic owner session's transcript (Codex rollout, or Claude Code when the scenario made
+// the owner a Claude session itself).
+export function ownerSays(homeDir, owner, text) {
+  const m = /^(claude|codex):(.+)$/.exec(String(owner ?? ''));
+  if (!m) return;
+  const [, runtime, sid] = m;
+  const at = new Date().toISOString();
+  if (runtime === 'codex') {
+    const file = path.join(homeDir, '.codex', 'sessions', `rollout-scenario-${sid}.jsonl`);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.appendFileSync(file, `${JSON.stringify({ timestamp: at, type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text }] } })}\n`);
+    return;
+  }
+  const projects = path.join(homeDir, '.claude', 'projects');
+  const existing = fs.existsSync(projects) ? fs.readdirSync(projects).map((d) => path.join(projects, d, `${sid}.jsonl`)).find((f) => fs.existsSync(f)) : null;
+  const file = existing ?? path.join(projects, '-proj', `${sid}.jsonl`);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.appendFileSync(file, `${JSON.stringify({ type: 'user', userType: 'external', timestamp: at, sessionId: sid, message: { role: 'user', content: text } })}\n`);
+}
+
+function closeOpenImplementers(cwd, args, opts, ownerSilent) {
+  const s = attemptOf(cwd, args, opts);
+  if (!s) return; // the reviewer handoff reports the problem itself
   // A close the engine refuses (uncommitted work) leaves the implementer open; the reviewer handoff then says why.
-  for (const impl of (s.implementers ?? []).filter((y) => !y.closedAt)) wf(cwd, ['handoff', 'close', '--agent', impl.agent, '--attempt', s.id], opts);
+  for (const impl of (s.implementers ?? []).filter((y) => !y.closedAt)) wf(cwd, ['handoff', 'close', '--agent', impl.agent, '--attempt', s.id], { ...opts, ownerSilent });
 }
 
 export function ok(r) {
@@ -146,10 +223,11 @@ export function toAccepted(root, base, { item = 'ENG-1', repo = 'app', change = 
   const wt = e.repos[repo].worktree;
   commitIn(wt, change);
   // The order of work: a clean code review, one gate on that tree, then the evidence review.
-  ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-0', '--attempt', id, '--owner', owner]));
+  const rt = /^claude:/.test(owner) ? ['--runtime', 'codex'] : [];
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-0', '--attempt', id, '--owner', owner, ...rt]));
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('rev-0')), '--attempt', id]));
   ok(wf(root, ['gate', '--attempt', id]));
-  ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-1', '--attempt', id, '--owner', owner]));
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-1', '--attempt', id, '--owner', owner, ...rt]));
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure()), '--attempt', id]));
   ok(wf(root, ['accept', '--attempt', id, '--owner', owner]));
   return { id, wt, entry: e };

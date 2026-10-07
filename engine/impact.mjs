@@ -90,14 +90,18 @@ function trustedConfig(root, cfg, state) {
   }
   return trustedCache.get(key);
 }
-const trustedLimits = (t, settings) => ({ ...settings, maxFileBytes: impactSettings(t).maxFileBytes, maxScanBytes: settings.maxScanBytes === Infinity ? Infinity : impactSettings(t).maxScanBytes });
+const trustedLimits = (t, settings) => ({ ...settings, maxFileBytes: settings.maxFileBytes === Infinity ? Infinity : impactSettings(t).maxFileBytes, maxScanBytes: settings.maxScanBytes === Infinity ? Infinity : impactSettings(t).maxScanBytes });
 
 // The committed tree a query reads in one repo: the attempt's worktree HEAD for a repo in the attempt, else the base
 // branch of the repo's main checkout (the remote's when fetched). Uncommitted edits are never read.
 function treeOf(root, cfg, state, name) {
   const r = state.repos?.[name];
   if (r?.worktree && fs.existsSync(r.worktree)) return { dir: r.worktree, ref: git(r.worktree, ['rev-parse', 'HEAD']) };
+  // Named failure (0.5.0 second review, fail-open): a repo of the attempt whose worktree was gone was read at its base
+  // branch instead, so a query counted the code before the change and the count still matched. Refused.
+  if (r) throw refuse(`the worktree of ${name} (${r.worktree ?? 'none recorded'}) is missing, so the attempt's committed tree cannot be read`, '`wf verify` the attempt; restore the worktree or abandon the attempt');
   const repo = cfg.repos.find((x) => x.name === name);
+  if (!repo) throw refuse(`repo \`${name}\` is not in the adapter at the attempt's base`);
   const dir = repoDir(root, repo);
   const remote = git(dir, ['rev-parse', '--verify', '--quiet', `${repo.remote}/${repo.base}^{commit}`], { allowFail: true });
   return { dir, ref: remote || git(dir, ['rev-parse', `${repo.base}^{commit}`]) };
@@ -107,16 +111,21 @@ function blobs(dir, ids) {
   if (!ids.length) return new Map();
   const r = spawnSync('git', ['cat-file', '--batch'], { cwd: dir, input: `${ids.join('\n')}\n`, maxBuffer: 1024 * 1024 * 1024 });
   if (r.status !== 0) throw new WfError(`git cat-file failed in ${dir}: ${String(r.stderr)}`);
+  // Named failure (0.5.0 second review, fail-open): a `missing` answer or a short read ended the parse early, and every
+  // file after it was silently left out of the count. Any answer that is not a whole blob is an error.
   const out = new Map();
   const buf = r.stdout;
   let i = 0;
   while (i < buf.length) {
     const nl = buf.indexOf(10, i);
-    const [sha, , size] = buf.subarray(i, nl).toString().split(' ');
+    if (nl < 0) throw new WfError(`git cat-file in ${dir}: truncated answer`);
+    const [sha, type, size] = buf.subarray(i, nl).toString().split(' ');
     const n = Number(size);
+    if (type !== 'blob' || !Number.isInteger(n) || n < 0 || nl + 1 + n > buf.length) throw new WfError(`git cat-file in ${dir} could not read ${sha}: ${buf.subarray(i, nl).toString()}`);
     out.set(sha, buf.subarray(nl + 1, nl + 1 + n));
     i = nl + 1 + n + 1;
   }
+  for (const id of ids) if (!out.has(id)) throw new WfError(`git cat-file in ${dir} returned no content for ${id}`);
   return out;
 }
 
@@ -138,19 +147,31 @@ function scanTrees(root, working, state, { names, paths, exclude, settings: aske
     });
     const wanted = entries.filter((e) => e.type === 'blob' && e.mode !== '120000' && (!paths?.length || matchesAny(e.file, paths)) && !matchesAny(e.file, exclude ?? []));
     const read = [];
+    const tooLarge = [];
     for (const e of wanted) {
+      if (!Number.isInteger(e.size)) throw new WfError(`git ls-tree in ${dir}: no size for ${e.file}`);
       if (e.size > settings.maxFileBytes) {
-        skipped.push(`${name}:${e.file}`);
+        // Named failure (0.5.0 second review, fail-open): a text file over the size cap was skipped and the query's
+        // count went on without it, as if it had no hit. A binary file (a NUL in its first 8000 bytes, as git decides)
+        // holds no line to match and is listed; a text file the engine cannot read refuses the query.
+        const head = spawnSync('git', ['cat-file', 'blob', e.sha], { cwd: dir, maxBuffer: 8000 });
+        if (head.stdout?.subarray(0, 8000).includes(0)) skipped.push(`${name}:${e.file}`);
+        else tooLarge.push(`${name}:${e.file} (${e.size} bytes)`);
         continue;
       }
       scanned += e.size;
       if (scanned > settings.maxScanBytes) throw refuse(`${what} reads more than ${settings.maxScanBytes} bytes; narrow its \`paths\``);
       read.push(e);
     }
+    if (tooLarge.length) throw refuse(`${what} cannot read ${tooLarge.length} text file(s) over impact.maxFileBytes (${settings.maxFileBytes} bytes), so its count would leave them out: ${tooLarge.slice(0, 10).join(', ')}${tooLarge.length > 10 ? ', ...' : ''}`, 'exclude them (`exclude: [globs]`), narrow its `paths`, or raise `impact.maxFileBytes` in the adapter on the base branch');
     const content = blobs(dir, [...new Set(read.map((e) => e.sha))]);
     for (const e of read) {
       const b = content.get(e.sha);
-      if (!b || b.subarray(0, 8000).includes(0)) continue;
+      if (!b) throw new WfError(`${name}:${e.file} could not be read from ${ref.slice(0, 10)}`);
+      if (b.subarray(0, 8000).includes(0)) {
+        skipped.push(`${name}:${e.file}`);
+        continue;
+      }
       onFile(`${name}:${e.file}`, b.toString('utf8').split('\n'));
     }
   }
@@ -493,7 +514,7 @@ export function deriveFromDiff(root, cfg, state, { limit = 100 } = {}) {
     const any = new RegExp(`(?<![\\w$])(${found.map(([x]) => x.replace(/\$/g, '\\$')).join('|')})(?![\\w$])`, 'g');
     const from = new Map(found);
     const uses = new Map();
-    scanTrees(root, cfg, state, { names: Object.keys(state.repos ?? {}), settings: { ...impactSettings(cfg), maxScanBytes: Infinity }, what: 'the derived callers' }, (file, text) => {
+    scanTrees(root, cfg, state, { names: Object.keys(state.repos ?? {}), settings: { ...impactSettings(cfg), maxFileBytes: Infinity, maxScanBytes: Infinity }, what: 'the derived callers' }, (file, text) => {
       for (const line of text) for (const m of line.matchAll(any)) uses.set(`${m[1]}\0${file}`, [m[1], file]);
     });
     for (const [symbol, f] of uses.values()) {
@@ -526,6 +547,8 @@ export function impactCheckProblems(map, closure, currentResults) {
   if (distinct.size < need) problems.push(`impactChecked.sampled: ${distinct.size} valid inventory entr${distinct.size === 1 ? 'y' : 'ies'}; sample at least ${need} ({ entry, verdict: matches|finding, evidence, finding })`);
   const findings = new Map(list(closure.findings).map((f) => [String(f?.id), f]));
   const d = new Map(list(c.derived).map((x) => [`${x?.symbol}@${x?.file}`, x]));
+  // The bundle lists at most 100 outside callers; the rest are not silently passed (0.5.0 second review, fail-open).
+  if (map.derived?.truncated && !text(c.unlisted)) problems.push(`impactChecked.unlisted: the bundle lists ${map.derived.outside?.length ?? 0} of ${map.derived.total} callers outside the map; say how you checked the rest (\`unlisted\`), or raise each one as a finding`);
   for (const o of map.derived?.outside ?? []) {
     const x = d.get(`${o.symbol}@${o.file}`);
     if (!x) problems.push(`impactChecked.derived: no verdict for ${o.symbol} used in ${o.file}`);

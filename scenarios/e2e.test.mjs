@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { closureFile, commitIn, criteriaFile, goodClosure, makeRepo, ok, OUT_OF_ORDER, sh, singleRepoProject, state, tmp, WF, wf, write } from './helpers.mjs';
+import { closureFile, commitIn, criteriaFile, goodClosure, makeRepo, ok, OUT_OF_ORDER, sh, singleRepoProject, state, tmp, WF, wf, write, ownerSpeaks, spawnHome } from './helpers.mjs';
 import { YAML } from '../engine/util.mjs';
 
 const testRunner = "const ok=require('../index.js').add(1,2)===3;console.log(ok?'pass':'FAIL');process.exit(ok?0:1)";
@@ -131,10 +131,11 @@ test('leases are machine-wide: two gates from different attempts never share a d
     ids.push(e.id);
   }
   const home = path.join(root, '..', '.wfhome');
-  const env = { ...process.env, WF_CONFIG_HOME: home };
-  delete env.CLAUDE_CODE_SESSION_ID;
+  const env = { ...process.env, WF_CONFIG_HOME: home , ...spawnHome(root) };
+  for (const k of ['CLAUDE_CODE_SESSION_ID', 'CLAUDECODE', 'CODEX_THREAD_ID', 'CODEX_SANDBOX', 'AI_AGENT', 'GROK_SESSION_ID']) delete env[k]; // no agent runtime: the scenario is the owner at a terminal (engine/owner.mjs)
   // Each gate's output is kept: a refusal says why (the run that hid it with stdio 'ignore' failed only as [0, 75]).
   const run = (id) => new Promise((resolve) => {
+    ownerSpeaks(root, ['gate', ...OUT_OF_ORDER, '--attempt', id]);
     const c = spawn(process.execPath, [WF, 'gate', ...OUT_OF_ORDER, '--attempt', id], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '';
     c.stdout.on('data', (d) => (out += d));

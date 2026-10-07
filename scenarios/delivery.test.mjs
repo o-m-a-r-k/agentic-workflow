@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { closureFile, commitIn, criteriaFile, goodClosure, makeRepo, ok, OUT_OF_ORDER, postedComment, rawReadback, sh, singleRepoProject, state, summaryFile, tmp, toAccepted, wf, write, yaml } from './helpers.mjs';
+import { closureFile, commitIn, criteriaFile, goodClosure, makeRepo, ok, OUT_OF_ORDER, postedComment, rawReadback, sh, singleRepoProject, state, summaryFile, tmp, toAccepted, wf, write, yaml, ownerSpeaks, spawnHome } from './helpers.mjs';
 
 const steps = [{ id: 'unit', repo: 'app', run: 'true', inputs: ['src/**'] }];
 
@@ -207,8 +207,9 @@ test('wf stop pauses a running gate and finished steps are kept', async () => {
   commitIn(e.repos.app.worktree, { 'src/a.txt': 's\n' });
   const { spawn } = await import('node:child_process');
   const { WF } = await import('./helpers.mjs');
-  const env = { ...process.env, WF_CONFIG_HOME: path.join(root, '..', '.wfhome') };
-  delete env.CLAUDE_CODE_SESSION_ID;
+  const env = { ...process.env, WF_CONFIG_HOME: path.join(root, '..', '.wfhome') , ...spawnHome(root) };
+  for (const k of ['CLAUDE_CODE_SESSION_ID', 'CLAUDECODE', 'CODEX_THREAD_ID', 'CODEX_SANDBOX', 'AI_AGENT', 'GROK_SESSION_ID']) delete env[k]; // no agent runtime: the scenario is the owner at a terminal (engine/owner.mjs)
+  ownerSpeaks(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]);
   const child = spawn(process.execPath, [WF, 'gate', ...OUT_OF_ORDER, '--attempt', e.id], { cwd: root, env, stdio: 'ignore' });
   const lock = path.join(root, '.wf-evidence', 'attempts', e.id, 'gate', 'gate.lock');
   // Named failure (0.4.5, Linux as root under full-suite load): the gate creates its lock with O_EXCL and writes the JSON

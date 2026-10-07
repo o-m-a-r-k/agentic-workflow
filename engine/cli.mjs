@@ -572,7 +572,7 @@ async function dispatch(cmd, sub, positional, options) {
         const r = runQuery(root, cfg, s, q);
         out.push({ id, recorded: recordedHits[id] ?? null, hits: r.hits, unit: r.unit, files: r.files, skipped: r.skipped, refs: r.refs });
       }
-      print(options, out.map((x) => `${x.id}: ${x.hits} ${x.unit}${x.recorded === null || x.recorded === undefined ? '' : x.recorded === x.hits ? ' (as recorded)' : ` (recorded ${x.recorded})`} at ${Object.entries(x.refs).map(([n, ref]) => `${n}@${ref.slice(0, 10)}`).join(', ')}${x.files.length ? `\n    ${x.files.join('\n    ')}` : ''}${x.skipped.length ? `\n    skipped (over the size cap): ${x.skipped.join(', ')}` : ''}`).join('\n'), out);
+      print(options, out.map((x) => `${x.id}: ${x.hits} ${x.unit}${x.recorded === null || x.recorded === undefined ? '' : x.recorded === x.hits ? ' (as recorded)' : ` (recorded ${x.recorded})`} at ${Object.entries(x.refs).map(([n, ref]) => `${n}@${ref.slice(0, 10)}`).join(', ')}${x.files.length ? `\n    ${x.files.join('\n    ')}` : ''}${x.skipped.length ? `\n    skipped (binary): ${x.skipped.join(', ')}` : ''}`).join('\n'), out);
       return 0;
     }
     case 'criteria': {

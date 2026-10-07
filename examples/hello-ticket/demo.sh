@@ -44,6 +44,14 @@ show() {
   printf '$ %s\n' "$*"
   "$@"
 }
+# The owner is an agent session (Codex here); owner-only decisions are read from the owner's own messages in that
+# session's transcript, never from a command-line flag. The demo writes the line the session would record.
+OWNER=codex:demo-owner-session
+owner_says() {
+  printf '(the owner, in their session) %s\n' "$*"
+  mkdir -p "$WF_HOME/.codex/sessions"
+  printf '{"timestamp":"%s","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"%s"}]}}\n' "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$*" >> "$WF_HOME/.codex/sessions/rollout-demo-demo-owner-session.jsonl"
+}
 
 # A git repository with an origin, as a real project has.
 mkdir -p "$PROJ" "$WORK"
@@ -62,7 +70,7 @@ say "The ticket, as a file in the repo"
 show cat tickets/HT-1.md
 
 say "Admit it: wf opens an attempt with its own worktree and moves the ticket to In Progress"
-wf entry --item HT-1 --owner you
+wf entry --item HT-1 --owner "$OWNER"
 ATTEMPT=HT-1.1
 WT="$PROJ/.wf-worktrees/$ATTEMPT/hello-ticket"
 
@@ -118,6 +126,9 @@ refused gate --attempt "$ATTEMPT"
 
 say "The implementer is still open: no review starts until it is closed, so the tree cannot move under the reviewer"
 refused handoff reviewer --agent reviewer-1 --attempt "$ATTEMPT"
+say "Only the owner closes it: an agent cannot close it on the owner's behalf"
+refused handoff close --agent implementer-1 --attempt "$ATTEMPT"
+owner_says "close $ATTEMPT:implementer-1"
 wf handoff close --agent implementer-1 --attempt "$ATTEMPT"
 
 say "The implementer cannot review its own work"

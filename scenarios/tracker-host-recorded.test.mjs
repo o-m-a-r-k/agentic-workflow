@@ -58,7 +58,7 @@ function toShown(root, base, id) {
 function deliverAndShow(root, base, id) {
   commitIn(state(root, id).repos.app.worktree, { 'src/a.txt': 'ui\n' });
   const g = ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', id, '--json'])).json();
-  ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', id]));
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', id, '--runtime', 'codex']));
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r', { screenshotsInspected: [g.steps[0].artifacts[0].sha256] })), '--attempt', id]));
   ok(wf(root, ['accept', '--attempt', id]));
   const d = ok(wf(root, ['deliver', '--attempt', id, '--summary-file', summaryFile(base)]));

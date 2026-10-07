@@ -6,10 +6,10 @@ This project runs changes through agentic-workflow. The `wf` CLI enforces the ru
 
 **Rules**
 - Work only in the attempt's worktrees under `.wf-worktrees/`, never in the main checkouts.
-- Review and gate never run side by side: no gate until a code-review round on the tree comes back clean, and no reviewer handoff while a gate runs (`wf` refuses both; only the user skips the order, with `wf gate --reason "<their words>"`, recorded). Never edit the worktrees while a gate runs (`wf status` shows it); a stop needs its class (`wf stop --class major-finding|tree-change|owner-decision --reason "<why>"`). A `--focused` gate is repair proof only; acceptance and delivery need a gate without it.
+- Review and gate never run side by side: no gate until a code-review round on the tree comes back clean, and no reviewer handoff while a gate runs (`wf` refuses both; only the user skips the order: they start a message with `override <attempt>:gate`, then `wf gate --reason "<their words>"` records it). Never edit the worktrees while a gate runs (`wf status` shows it); a stop needs its class (`wf stop --class major-finding|tree-change|owner-decision --reason "<why>"`). A `--focused` gate is repair proof only; acceptance and delivery need a gate without it.
 - Report a step as done only after `wf` accepted it. Gate results, reviews and deliveries are proven by files under `.wf-evidence/`, which no one edits by hand.
 - The reviewer never planned, wrote or owns the change.
-- A user's "hold", "local only" or "don't push" is recorded at once with `wf hold --reason "<their words>"`; only they lift it (`wf release`).
+- A user's "hold", "local only" or "don't push" is recorded at once with `wf hold --reason "<their words>"`; only they lift it: they start a message with `release <attempt>`, then `wf release`. Every owner-only decision is taken from the user's own message, never from a flag an agent passes (docs/trust-model.md).
 - Never read, print or move secret values. Missing secrets are entered by the user with `wf secrets guide` in their own terminal.
 - Tracker comments describe what to test in product language: no file paths, commits, hashes or test counts.
 - Never set a ticket to done; a human does.

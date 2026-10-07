@@ -146,6 +146,8 @@ export function reduce(entries) {
     reviewsRefused: [],
     gateOverrides: [],
     reviewOverrides: [],
+    authoritiesUsed: [],
+    admittedAt: null,
     // Telemetry events (measurement only; nothing is decided from them).
     reviewRounds: [],
     implementers: [],
@@ -158,6 +160,12 @@ export function reduce(entries) {
   };
   for (const e of entries) {
     const d = e.data;
+    // An owner message spent on one owner-only decision (engine/owner.mjs) is never spent again.
+    for (const a of [d?.authority, ...(Array.isArray(d?.authorities) ? d.authorities : [])]) {
+      if (a?.file && Number.isInteger(a.offset)) s.authoritiesUsed.push(`${a.file}:${a.offset}`);
+      if (typeof a?.spent === 'string') s.authoritiesUsed.push(a.spent);
+    }
+    if (e.type === 'admitted' && !s.admittedAt) s.admittedAt = e.at;
     switch (e.type) {
       case 'admitted':
         Object.assign(s, {

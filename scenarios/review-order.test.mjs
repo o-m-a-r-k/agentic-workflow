@@ -32,7 +32,7 @@ const review = (root, base, id, reviewer, extra) => {
 const ledger = (root, id) => fs.readFileSync(path.join(root, '.wf-evidence', 'attempts', id, 'ledger.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
 const spawnEnv = (root) => {
   const env = { ...process.env, WF_CONFIG_HOME: path.join(root, '..', '.wfhome'), WF_HOME: path.join(root, '..', '.home') };
-  delete env.CLAUDE_CODE_SESSION_ID;
+  for (const k of ['CLAUDE_CODE_SESSION_ID', 'CLAUDECODE', 'CODEX_THREAD_ID', 'CODEX_SANDBOX', 'AI_AGENT', 'GROK_SESSION_ID']) delete env[k]; // no agent runtime: the scenario is the owner at a terminal (engine/owner.mjs)
   return env;
 };
 const until = async (cond) => {

@@ -16,6 +16,7 @@ import { childAgents, lastFencedYaml, lastModel, readTranscript, sessionModel, s
 import { outsidePlan, outsideVerdicts } from './scope.mjs';
 import { commentFile, emitTrackerEvent, needsSummary, recordSummary, writeDeliveredComment } from './tracker.mjs';
 import { designChecks, designVerdicts, requiredSkills, reviewRules, ruleVerdicts, skillFiles, unreadDocs } from './rules.mjs';
+import { ownerAuthority } from './owner.mjs';
 import { home, howToStart, roleChangedSinceSessionStart, startPromptFor, verifyAgent } from './provenance.mjs';
 import { allRecordedQueries, buildSweeps, deriveFromDiff, impactCheckProblems, impactRequired, inventory, readSweepFile, rerun, staleRestrictionLines, staleRestrictions, sweepAnswers, validateAmendImpact, validatePlanImpact } from './impact.mjs';
 import { WfError, YAML, assertEngine, assertSafeId, canonical, git, hashFile, hashValue, matchesAny, readJson, refuse, run, sessionIdentity, sha256, writeImmutable, writeJson } from './util.mjs';
@@ -388,8 +389,9 @@ export function handoff(root, role, options) {
     const openImpl = openImplementersOf(root, state);
     if (openImpl.length) {
       const reason = typeof options.reason === 'string' ? options.reason.trim() : '';
-      if (!reason) throw refuse(`implementer handoff(s) still open on ${state.id}: ${openImpl.map(implementerLabel).join(', ')}: the tree may still move under the reviewer`, `when each implementer has reported done and its work is committed, close it: ${openImpl.map((x) => `\`wf handoff close --agent ${x.agent}\``).join(', ')} (\`--outcome stopped\` for one you stopped); then hand the tree to the reviewer. Or run it anyway with \`wf handoff reviewer --agent <id> --reason "<why>"\`, which records the override`);
-      reviewOverride = { reason, openImplementers: openImpl.map(implementerLabel) };
+      if (!reason) throw refuse(`implementer handoff(s) still open on ${state.id}: ${openImpl.map(implementerLabel).join(', ')}: the tree may still move under the reviewer`, `when each implementer has reported done and its work is committed, close it: ${openImpl.map((x) => `\`wf handoff close --agent ${x.agent}\``).join(', ')} (\`--outcome stopped\` for one you stopped); then hand the tree to the reviewer. Only the owner hands it anyway: the owner starts a message with \`override ${state.id}:review\`, then \`wf handoff reviewer --agent <id> --reason "<why>"\` records the override`);
+      const authority = ownerAuthority(root, state, `override ${state.id}:review`, { what: 'handing the tree to a reviewer while an implementer is open' });
+      reviewOverride = { reason, openImplementers: openImpl.map(implementerLabel), authority };
     }
     if (authorsOf(root, state).has(agent)) throw refuse(`${agent} planned, wrote or owns this change and cannot review it`);
     // A resumed reviewer is anchored on its earlier findings; each round is judged by an agent that has seen none of them.
@@ -570,10 +572,8 @@ function sweepsForReviewer(root, cfg, state) {
   const { answers } = sweepAnswers(state);
   if (!answers.length) return undefined;
   return answers.map((s) => {
-    let now = null;
-    try {
-      now = rerun(root, cfg, state, { [s.id]: s.query })[s.id];
-    } catch {}
+    // A sweep that cannot be re-run refuses the handoff (0.5.0 second review, fail-open: it was shown as no hits now).
+    const now = rerun(root, cfg, state, { [s.id]: s.query })[s.id];
     return { id: s.id, finding: s.finding, why: s.why, query: s.query, hitsAtHandoff: s.hits, filesAtHandoff: s.files, hitsNow: now?.hits ?? null, filesNow: now?.files ?? null, answer: s.answer };
   });
 }
@@ -729,6 +729,9 @@ export function closeImplementer(root, options) {
   const heads = treeHashes(state);
   // A `done` close says the tree is settled for a review (I-23): uncommitted work means the implementer is not done.
   const dirty = Object.entries(heads).filter(([, t]) => String(t).includes('+dirty')).map(([n]) => n);
+  // The owner closes an implementer, never the implementer itself (engine/owner.mjs): the owner session ran this command,
+  // or the owner said so.
+  const authority = ownerAuthority(root, state, `close ${state.id}:${agent}`, { what: `closing implementer ${agent}`, decision: `close:${state.id}:${open.handoff}`, command: { sub: ['handoff', 'close'], flags: { '--agent': agent, '--attempt': state.id, ...(options.outcome !== undefined ? { '--outcome': String(options.outcome) } : {}) } } });
   if (outcome === 'done' && dirty.length) throw refuse(`${agent} is not done: uncommitted changes in ${dirty.join(', ')}`, `have the implementer commit its work, then close it; for an implementer you stopped, \`wf handoff close --agent ${agent} --outcome stopped\``);
   const commits = {};
   for (const [name, r] of Object.entries(state.repos)) {
@@ -747,7 +750,7 @@ export function closeImplementer(root, options) {
   const clip = (v, n) => (v === null || v === undefined ? null : String(v).slice(0, n));
   children = children.slice(0, 200).map((c) => ({ agentId: clip(c.agentId, 200), name: clip(c.name, 200), agentType: clip(c.agentType, 200), parentAgentId: clip(c.parentAgentId, 200), depth: Number.isInteger(c.depth) ? c.depth : null, description: clip(c.description, 500) }));
   if (children.length) append(root, state.id, 'subagents.attributed', { handoff: open.handoff, children }, actor(options));
-  append(root, state.id, 'implementer.closed', { handoff: open.handoff, agent, outcome, heads, commits }, actor(options));
+  append(root, state.id, 'implementer.closed', { handoff: open.handoff, agent, outcome, heads, commits, authority }, actor(options));
   return { state: loadState(root, state.id), handoff: open.handoff, outcome, commits, children };
 }
 
@@ -782,7 +785,15 @@ export function recordReview(root, options) {
   if (provenance.status === 'mismatch') throw refuse(`review provenance: ${provenance.reason}`, `start a fresh reviewer: \`wf handoff reviewer --agent <new id>\`, then start it as the agent type that command prints, named <new id> (the Agent tool's name), with only the printed line as its prompt`);
   // Where the transcript exists, it must show a successful read of every rule document and skill in the bundle. It
   // proves the content reached the reviewer, not that it was understood. Without a transcript: recorded unverified.
-  const handed = readBundle(reviewerHandoff.bundle);
+  // Named failure (0.5.0 second review, fail-open): an unreadable bundle read as {}, so every check that depends on
+  // what the reviewer was handed (impact map, screenshots, discovered issues, rules) was skipped. It refuses instead.
+  let handed;
+  try {
+    handed = JSON.parse(fs.readFileSync(reviewerHandoff.bundle, 'utf8'));
+  } catch (error) {
+    throw refuse(`the reviewer's bundle ${reviewerHandoff.bundle} cannot be read (${error.code ?? error.message}); no closure is judged without it`, `\`wf verify --attempt ${state.id}\`; hand a fresh reviewer the tree`);
+  }
+  if (state.impact && !handed.impactMap) throw refuse(`the reviewer's bundle has no impact map although ${state.id} recorded one; no closure is judged without it`, 'hand a fresh reviewer the tree: `wf handoff reviewer --agent <new id>`');
   let reads = { status: 'unverified', reason: provenance.reason ?? null };
   if (provenance.status === 'verified' && (handed.rules?.length || handed.skills?.length)) {
     const missing = unreadDocs(readTranscript(provenance.transcript), handed.rules, handed.skills);
@@ -803,7 +814,7 @@ export function recordReview(root, options) {
   if (sv.problems.length) throw refuse(`closure refused: ${sv.problems.length} repo(s) added during the attempt have no valid seam verdict:\n  - ${sv.problems.join('\n  - ')}`, 'add `seams: [{ "repo": "<added repo>", "verdict": "matched|finding", "evidence": "<producer file:line>; <consumer file:line>", "finding": "<finding id when a finding>" }]` to the closure and run `wf review --closure <file>` again');
   // I-26: the reviewer re-ran every recorded query on this tree, sampled the inventory and judged every caller of a
   // changed symbol outside the map; findings outside the map are tagged impact-gap.
-  if (handed.impactMap) {
+  if (state.impact) {
     const ip = impactCheckProblems(handed.impactMap, closure, rerun(root, loadConfig(root), state));
     if (ip.length) throw refuse(`closure refused: the impact check is incomplete:\n  - ${ip.join('\n  - ')}`, 'add `impactChecked: { "queries": [{ "query": "<id>", "hits": <n>, "note": "..." }], "sampled": [{ "entry": "<survey or impact id>", "verdict": "matches|finding", "evidence": "file:line", "finding": "<id>" }], "derived": [{ "symbol", "file", "verdict": "in-map|impact-gap", "evidence", "finding" }] }` (hits from `wf impact run --attempt <id>`), and run `wf review --closure <file>` again');
   }
@@ -889,8 +900,9 @@ export function gateOrderCheck(root, options) {
     const problems = gateOrderProblems(state);
     if (!problems.length) return;
     const reason = typeof options.reason === 'string' ? options.reason.trim() : '';
-    if (!reason) throw refuse(`the gate runs after a clean code review, never beside or before it:\n  - ${problems.join('\n  - ')}`, 'follow the order (`wf resume` names the next step), or run it anyway with `wf gate --reason "<why>"`, which records the override in the ledger');
-    append(root, state.id, 'gate.override', { reason, problems, tree: treeHashes(state) }, actor(options));
+    if (!reason) throw refuse(`the gate runs after a clean code review, never beside or before it:\n  - ${problems.join('\n  - ')}`, `follow the order (\`wf resume\` names the next step); only the owner skips it: the owner starts a message with \`override ${state.id}:gate\`, then \`wf gate --reason "<why>"\` records the override in the ledger`);
+    const authority = ownerAuthority(root, state, `override ${state.id}:gate`, { what: 'running the gate out of the order of work' });
+    append(root, state.id, 'gate.override', { reason, problems, tree: treeHashes(state), authority }, actor(options));
   };
 }
 
@@ -1048,12 +1060,15 @@ const adapterResult = (x) => (x && typeof x === 'object' && !Array.isArray(x) ? 
 // `wf deliver` from git ancestry alone, and the adapter was never asked again. Now the adapter is asked again; a
 // pending state waits; any other state after the merge is shown and counts only once the owner acknowledges that repo
 // and that state (`--acknowledge-adapter-state <repo>:<state>`), recorded with the delivery like a deferral.
-function postMerge(options, name, landed, observed, integrated) {
+function postMerge(root, state, options, name, landed, observed, integrated) {
   const label = `${name}:${stateLabel(observed)}`;
   const given = typeof options['acknowledge-adapter-state'] === 'string' ? options['acknowledge-adapter-state'].split(',').map((x) => x.trim()).filter(Boolean) : [];
-  if (given.includes(label)) return { ...adapterResult(integrated), repo: name, commit: landed.head, target: landed.target, adapterState: stateLabel(observed), observed: observed ?? null, acknowledged: label };
+  if (given.includes(label)) {
+    const authority = ownerAuthority(root, state, `acknowledge ${state.id}:${label}`, { decision: `acknowledge:${state.id}:${label}`, what: `accepting ${name} as delivered while its adapter reports ${stateLabel(observed)}` });
+    return { ...adapterResult(integrated), repo: name, commit: landed.head, target: landed.target, adapterState: stateLabel(observed), observed: observed ?? null, acknowledged: label, authority };
+  }
   const url = integrated?.url ? ` (${integrated.url})` : '';
-  throw refuse(`not delivered: ${name}: ${landed.head.slice(0, 10)} is already on ${landed.target}, but the delivery adapter reports ${describeState(observed)} after the merge${url}${observed?.evidence ? `: ${observed.evidence}` : ''}; being on the target branch alone does not count as a clean delivery`, `show this to the owner: the change is on ${landed.target} and the adapter says ${stateLabel(observed)}. ${stateLabel(observed) === 'ci-failed' ? 'Read that CI run. ' : ''}Once the owner has seen it and decides the delivery stands (anything to fix goes into a new attempt, \`wf reopen\`), run \`wf deliver --acknowledge-adapter-state ${label}\`; it is recorded and shown with the delivery. An adapter that reports a wrong state is fixed on the base branch, then \`wf deliver --repin-adapter --reason "<why>"\``);
+  throw refuse(`not delivered: ${name}: ${landed.head.slice(0, 10)} is already on ${landed.target}, but the delivery adapter reports ${describeState(observed)} after the merge${url}${observed?.evidence ? `: ${observed.evidence}` : ''}; being on the target branch alone does not count as a clean delivery`, `show this to the owner: the change is on ${landed.target} and the adapter says ${stateLabel(observed)}. ${stateLabel(observed) === 'ci-failed' ? 'Read that CI run. ' : ''}Once the owner has seen it and decides the delivery stands (anything to fix goes into a new attempt, \`wf reopen\`), the owner starts a message with \`acknowledge ${state.id}:${label}\`; then \`wf deliver --acknowledge-adapter-state ${label}\`; it is recorded and shown with the delivery. An adapter that reports a wrong state is fixed on the base branch, then \`wf deliver --repin-adapter --reason "<why>"\``);
 }
 
 // I-21. Named failure: an attempt is pinned to the adapter as committed at its admission; when the delivery adapter
@@ -1103,9 +1118,10 @@ function repinAdapter(root, cfg, state, options) {
   if (want.length < 7 || !tip.startsWith(want) || !reason) {
     const done = Object.entries(delivered).map(([n, v]) => `${n} ${v}`).join('; ') || 'nothing yet';
     const left = Object.keys(state.repos).filter((n) => !delivered[n]).join(', ');
-    throw refuse(`not re-pinned${want && !tip.startsWith(want) ? `: ${want} is not the tip of ${ref} (${tip.slice(0, 10)})` : ''}${!reason ? ': --reason is required' : ''}. Re-pinning ${state.id}'s delivery adapter:\n  from: ${repo.name}@${pinned.slice(0, 10)} (delivery kind ${kinds.from})\n  to:   ${repo.name}@${tip.slice(0, 10)}, the tip of ${ref}, fetched from ${remoteUrl} (delivery kind ${kinds.to})\n  adapter files that differ: ${changed.join(', ') || 'none'}\n  recorded so far: ${done}\n  still to deliver: ${left}\n  the gate, the review and the tracker stay on the admission pin ${state.adapterBase.slice(0, 10)}`, `show this to the owner; once they confirm, \`wf deliver --repin-adapter ${tip.slice(0, 12)} --reason "<why>"\``);
+    throw refuse(`not re-pinned${want && !tip.startsWith(want) ? `: ${want} is not the tip of ${ref} (${tip.slice(0, 10)})` : ''}${!reason ? ': --reason is required' : ''}. Re-pinning ${state.id}'s delivery adapter:\n  from: ${repo.name}@${pinned.slice(0, 10)} (delivery kind ${kinds.from})\n  to:   ${repo.name}@${tip.slice(0, 10)}, the tip of ${ref}, fetched from ${remoteUrl} (delivery kind ${kinds.to})\n  adapter files that differ: ${changed.join(', ') || 'none'}\n  recorded so far: ${done}\n  still to deliver: ${left}\n  the gate, the review and the tracker stay on the admission pin ${state.adapterBase.slice(0, 10)}`, `show this to the owner; the owner confirms by starting a message with \`repin ${state.id}:${tip.slice(0, 12)}\`, then \`wf deliver --repin-adapter ${tip.slice(0, 12)} --reason "<why>"\``);
   }
-  append(root, state.id, 'adapter.repinned', { from: pinned, to: tip, ref, repo: repo.name, reason, changed, delivered, kinds }, actor(options));
+  const authority = ownerAuthority(root, state, `repin ${state.id}:${tip.slice(0, 12)}`, { decision: `repin:${state.id}:${tip}`, what: `re-pinning the delivery adapter of ${state.id} to ${tip.slice(0, 12)}` });
+  append(root, state.id, 'adapter.repinned', { from: pinned, to: tip, ref, repo: repo.name, reason, changed, delivered, kinds, authority }, actor(options));
   return loadState(root, state.id);
 }
 
@@ -1197,7 +1213,8 @@ export async function deliver(root, options) {
       const list = owed.map((o) => `  - ${o.key}: ${o.d.summary}\n      owner's words: "${o.d.deferred.decision}"\n      channel: ${channelOf(o.d)}`).join('\n');
       throw refuse(`not delivered: ${owed.length} deferral(s) not acknowledged by the owner at delivery:\n${list}${given.length ? `\n  not acknowledged: ${missing.map((o) => o.key).join(', ')}` : ''}`, `show this list to the owner; once they confirm each is theirs, \`wf deliver --acknowledge-deferrals ${[...keys].join(',')}\` (anything they did not decide: reopen it with the fix instead)`);
     }
-    ackOwed = owed;
+    // Each acknowledgement is the owner's (engine/owner.mjs), never the flag alone (0.5.0 third review).
+    ackOwed = owed.map((o) => ({ ...o, authority: ownerAuthority(root, state, `acknowledge-deferral ${state.id}:${o.key}`, { decision: `acknowledge-deferral:${state.id}:${o.key}`, what: `acknowledging the deferral ${o.key}` }) }));
   }
   if (state.batch) {
     for (const m of state.batch.members) {
@@ -1214,7 +1231,8 @@ export async function deliver(root, options) {
   if (state.phase === 'handoff-pending' || state.phase === 'done') throw refuse(`${state.id} is already delivered`);
   if (options['repin-adapter'] !== undefined) state = repinAdapter(root, cfg, state, options);
   if (typeof options['no-lesson'] === 'string' && options['no-lesson'].trim() && owesLesson(state)) {
-    append(root, state.id, 'lesson.waived', { reason: options['no-lesson'].trim(), on: 'deliver' }, actor(options));
+    const authority = ownerAuthority(root, state, `waive-lesson ${state.id}`, { decision: `waive-lesson:deliver:${state.id}`, what: `delivering ${state.id} without its lesson` });
+    append(root, state.id, 'lesson.waived', { reason: options['no-lesson'].trim(), on: 'deliver', authority }, actor(options));
     state = loadState(root, state.id);
   }
   // The delivered comment carries the owner's plain-language summary; it is recorded before anything is pushed.
@@ -1258,7 +1276,7 @@ export async function deliver(root, options) {
     }
     append(root, state.id, 'repo.integrating', { ...integrated, repo: name, observed, onTarget: landed.target }, actor(options));
     if (PENDING.includes(observed?.state)) return { state: loadState(root, state.id), waiting: { repo: name, ...observed, url: integrated.url, onTarget: landed.target } };
-    append(root, state.id, 'repo.delivered', { ...postMerge(options, name, landed, observed, integrated), recovered: true }, actor(options));
+    append(root, state.id, 'repo.delivered', { ...postMerge(root, state, options, name, landed, observed, integrated), recovered: true }, actor(options));
   }
   state = loadState(root, state.id);
   // Repos already delivered are on the target branch; compare only what is still to deliver.
@@ -1276,7 +1294,7 @@ export async function deliver(root, options) {
   if (ackOwed.length) {
     const byAttempt = new Map();
     for (const o of ackOwed) byAttempt.set(o.attempt, [...(byAttempt.get(o.attempt) ?? []), o.d.id]);
-    for (const [aid, ids] of byAttempt) append(root, aid, 'discovered.acknowledged', { ids }, actor(options));
+    for (const [aid, ids] of byAttempt) append(root, aid, 'discovered.acknowledged', { ids, authorities: ackOwed.filter((o) => o.attempt === aid).map((o) => o.authority) }, actor(options));
     state = loadState(root, state.id);
   }
   const order = deliveryOrder(cfg, Object.keys(state.repos));
@@ -1306,7 +1324,7 @@ export async function deliver(root, options) {
         // post-merge state: shown, and counted only with the owner's acknowledgement.
         const landed = PENDING.includes(observed?.state) ? null : onTarget(state.repos[name], repo);
         if (landed && (landed.head !== state.accepted.heads?.[name] || landed.head !== state.lastGate?.tree?.[name])) throw refuse(`${name}: ${landed.head.slice(0, 10)} is on ${landed.target} but is not the accepted, gated commit`);
-        if (landed) result = postMerge(options, name, landed, observed, integrated);
+        if (landed) result = postMerge(root, state, options, name, landed, observed, integrated);
         else {
           // Named failure (0.4.5, delta reviews of 40da633 and b28681a): every state but `integrated` took the waiting path,
           // so a rejected delivery, a failed CI, a typo or no state at all exited 0 and read as success. Only a pending state
@@ -1596,6 +1614,8 @@ export function recordShown(root, options) {
   if (!set.screenshots.length) throw refuse(`no screenshots were delivered for ${state.item}; the statement is already recorded: ${set.none}`);
   if (state.tracker.done.some((d) => d.event === 'delivered')) throw refuse('the delivered handoff is already verified with the recorded captions');
   if (!options.file || options.file === true) throw new WfError('--file <shown.json> is required: { "screenshots": [{ "sha256", "caption" }] } (the draft `wf deliver` wrote is a starting point)');
+  // The owner saw the screenshots: the owner's word, never an agent's (0.5.0 third review).
+  const shownAuthority = ownerAuthority(root, state, `shown ${state.id}`, { decision: `shown:${state.id}`, what: `recording that the owner saw the screenshots of ${state.id}` });
   const text = fs.readFileSync(path.resolve(String(options.file)), 'utf8');
   let raw;
   try {
@@ -1620,7 +1640,7 @@ export function recordShown(root, options) {
   if (problems.length) throw refuse(`screenshots not acknowledged:\n  - ${problems.join('\n  - ')}`);
   const n = (state.delivery.shownRecords ?? 0) + 1;
   const kept = keepRaw(root, state.id, `delivery/shown-${n}.raw.json`, text);
-  append(root, state.id, 'delivery.shown', { screenshots: shown, none: null, anomalies, raw: { path: kept.file, sha256: kept.sha256 } }, actor(options));
+  append(root, state.id, 'delivery.shown', { screenshots: shown, none: null, anomalies, raw: { path: kept.file, sha256: kept.sha256 }, authority: shownAuthority }, actor(options));
   const after = loadState(root, state.id);
   try {
     writeDeliveredComment(root, loadConfig(root), after);
@@ -1743,9 +1763,10 @@ export function reopen(root, options) {
     .filter((s) => s.item === String(options.item) && s.delivery.completedAt)
     .at(-1);
   if (!delivered) throw refuse(`${options.item} has no delivered attempt to reopen`);
+  const waiver = typeof options['no-lesson'] === 'string' && options['no-lesson'].trim() ? ownerAuthority(root, delivered, `waive-lesson ${delivered.id}`, { what: `reopening ${options.item} without a lesson` }) : null;
   const s = entry(root, { ...options, lane: delivered.lane === 'quick' ? 'quick' : 'standard', repos: Object.keys(delivered.repos).join(','), reopenedFrom: delivered.id });
   append(root, s.id, 'reopen.reason', { reason: String(options.reason), from: delivered.id }, actor(options));
-  if (typeof options['no-lesson'] === 'string' && options['no-lesson'].trim()) append(root, s.id, 'lesson.waived', { reason: options['no-lesson'].trim(), on: 'reopen' }, actor(options));
+  if (waiver) append(root, s.id, 'lesson.waived', { reason: options['no-lesson'].trim(), on: 'reopen', authority: waiver }, actor(options));
   const cfg = loadConfig(root);
   if (s.lane !== 'quick') emitTrackerEvent(root, cfg, s.id, 'reopened');
   return loadState(root, s.id);

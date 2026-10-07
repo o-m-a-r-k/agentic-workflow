@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { closureFile, commitIn, criteriaFile, goodClosure, ok, OUT_OF_ORDER, sh, singleRepoProject, state, toAccepted, WF, wf } from './helpers.mjs';
+import { closureFile, commitIn, criteriaFile, goodClosure, ok, OUT_OF_ORDER, sh, singleRepoProject, state, toAccepted, WF, wf, ownerSpeaks, spawnHome, ownerSession } from './helpers.mjs';
 
 function admitted(root, base, item, extra = []) {
   const e = ok(wf(root, ['entry', '--item', item, '--owner', 'o', '--json', ...extra])).json();
@@ -37,9 +37,10 @@ test('two concurrent gates: exactly one runs and the ledger stays intact', async
   const { base, root } = singleRepoProject('concurrent', { gate: { steps } });
   const e = admitted(root, base, 'RF-2');
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'c\n' });
-  const env = { ...process.env, WF_CONFIG_HOME: path.join(root, '..', '.wfhome') };
-  delete env.CLAUDE_CODE_SESSION_ID;
+  const env = { ...process.env, WF_CONFIG_HOME: path.join(root, '..', '.wfhome') , ...spawnHome(root) };
+  for (const k of ['CLAUDE_CODE_SESSION_ID', 'CLAUDECODE', 'CODEX_THREAD_ID', 'CODEX_SANDBOX', 'AI_AGENT', 'GROK_SESSION_ID']) delete env[k]; // no agent runtime: the scenario is the owner at a terminal (engine/owner.mjs)
   const runOne = () => new Promise((resolve) => {
+    ownerSpeaks(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]);
     const c = spawn(process.execPath, [WF, 'gate', ...OUT_OF_ORDER, '--attempt', e.id], { cwd: root, env });
     let err = '';
     c.stderr.on('data', (d) => (err += d));
@@ -62,7 +63,7 @@ test('batch: a member hold blocks the batch; a member author cannot review it; a
   ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', b.id]));
   const byAuthor = wf(root, ['handoff', 'reviewer', '--agent', 'impl-1', '--attempt', b.id]);
   assert.equal(byAuthor.code, 75, 'a member implementer cannot review the batch');
-  assert.equal(wf(root, ['handoff', 'reviewer', '--agent', 'owner-1', '--attempt', b.id]).code, 75, 'nor a member owner');
+  assert.equal(wf(root, ['handoff', 'reviewer', '--agent', ownerSession('owner-1'), '--attempt', b.id]).code, 75, 'nor a member owner');
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'rb', '--attempt', b.id]));
   ok(wf(root, ['review', '--closure', closureFile(base, { reviewer: 'rb', findings: [], criteria: [{ id: 'B1', evidence: { kind: 'output', ref: 'batch gate' } }], screenshotsInspected: [] }), '--attempt', b.id]));
   ok(wf(root, ['accept', '--attempt', b.id]));
@@ -81,7 +82,7 @@ test('a previous owner cannot review after someone adopts the attempt', () => {
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'x\n' });
   ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]));
   ok(wf(root, ['adopt', '--attempt', e.id, '--owner', 'new-owner']));
-  assert.equal(wf(root, ['handoff', 'reviewer', '--agent', 'o', '--attempt', e.id]).code, 75);
+  assert.equal(wf(root, ['handoff', 'reviewer', '--agent', ownerSession('o'), '--attempt', e.id]).code, 75);
 });
 
 test('a push that landed before the process died is recognised, not refused', () => {

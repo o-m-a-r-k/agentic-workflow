@@ -124,6 +124,10 @@ test('I-18: discovered issues are recorded, end fixed by a ticket commit or defe
   ok(disc(root, ['close', 'D4', '--deferred', '--attempt', id]));
   // A refused delivery records no acknowledgement: the same command works once the cause is gone (independent review).
   commitIn(wt, { 'src/late.txt': 'x\n' }, 'late change');
+  // The acknowledgement is the owner's own message, one per deferral (engine/owner.mjs): the flag alone is refused.
+  const flagOnly = wf(root, ['deliver', '--attempt', id, '--owner', OWNER, '--acknowledge-deferrals', 'D2,D3,D4'], { ownerSilent: true });
+  assert.equal(flagOnly.code, 75);
+  assert.match(flagOnly.err, /acknowledging the deferral D2 needs the owner's authority[\s\S]*starts with `acknowledge-deferral ENG-700\.1:D2`/);
   assert.match(wf(root, ['deliver', '--attempt', id, '--owner', OWNER, '--acknowledge-deferrals', 'D2,D3,D4']).err, /modified after acceptance/);
   assert.ok(state(root, id).discovered.every((x) => !x.deferred?.acknowledged), 'nothing acknowledged by a refused delivery');
   sh(wt, 'git reset -q --hard HEAD~1');
@@ -271,9 +275,9 @@ test('0.4.5: owner turns from a Codex rollout: user messages count; injected env
 
 test('0.4.5: a deferral needs an owner session: an attempt owned by a plain id cannot defer', () => {
   const { base, root } = singleRepoProject('discovered-noowner', {});
-  const e = ok(wf(root, ['entry', '--item', 'ENG-702', '--owner', 'o', '--json'])).json();
-  ok(wf(root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id, '--owner', 'o']));
-  ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id, '--owner', 'o']));
+  const e = ok(wf(root, ['entry', '--item', 'ENG-702', '--owner', 'plain:o', '--json'])).json();
+  ok(wf(root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id, '--owner', 'plain:o']));
+  ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id, '--owner', 'plain:o']));
   // The add says at once that there is no anchor, so only the terminal channel can defer it.
   assert.match(ok(disc(root, ['add', '--attempt', e.id, '--summary', 's'])).out, /no transcript anchor: .*not a Claude Code or Codex session.*only `wf discovered defer D1` at the owner's terminal can defer it/);
   assert.match(disc(root, ['close', 'D1', '--deferred', '--attempt', e.id]).err, /not a Claude Code or Codex session[\s\S]*fix it in this ticket/);

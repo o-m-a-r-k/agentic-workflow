@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { closureFile, commitIn, criteriaFile, goodClosure, ok, OUT_OF_ORDER, sh, singleRepoProject, state, toAccepted, wf, write } from './helpers.mjs';
+import { closureFile, commitIn, criteriaFile, goodClosure, ok, OUT_OF_ORDER, sh, singleRepoProject, state, toAccepted, wf, write, ownerSession } from './helpers.mjs';
 
 const steps = [{ id: 'unit', repo: 'app', run: 'grep -q . src/a.txt', inputs: ['src/**'], tier: 'light' }];
 
@@ -30,7 +30,7 @@ test('reviewer must be independent and planner must not change the tree', () => 
   ok(wf(root, ['handoff', 'implementer', '--agent', 'impl-1', '--attempt', e.id]));
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'c\n' });
   ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]));
-  for (const who of ['impl-1', 'plan-1', 'owner-1']) {
+  for (const who of ['impl-1', 'plan-1', ownerSession('owner-1')]) {
     const r = wf(root, ['handoff', 'reviewer', '--agent', who, '--attempt', e.id]);
     assert.equal(r.code, 75, `${who} must not review`);
   }
@@ -122,7 +122,7 @@ test('uncommitted changes are refused at the gate; one open attempt per item; ad
   write(e.repos.app.worktree, 'src/a.txt', 'dirty\n');
   assert.match(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]).err, /commit changes before the gate/);
   ok(wf(root, ['adopt', '--attempt', e.id, '--owner', 'o2']));
-  assert.equal(state(root, e.id).owner, 'o2');
+  assert.equal(state(root, e.id).owner, ownerSession('o2'));
 });
 
 test('a hand-edited ledger is detected', () => {

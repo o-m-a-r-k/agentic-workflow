@@ -81,10 +81,14 @@ test('I-26: wf plan re-runs every query itself and refuses a count that does not
   const one = ok(wf(a.root, ['impact', 'run', '--attempt', a.id, '--query', JSON.stringify({ pattern: 'renderTable(', paths: ['src/pages/**'] })]));
   assert.match(one.out, /^query: 2 files at app@[0-9a-f]{10}\n {4}app:src\/pages\/a\.js\n {4}app:src\/pages\/b\.js/);
   assert.match(wf(a.root, ['impact', 'run', '--attempt', a.id, '--query', '{"pattern": "x", "kind": "glob"}']).err, /`kind` is literal or regex/);
-  // The engine caps what a query reads: larger files are skipped and listed, a query reading too much is refused.
+  // The engine caps what a query reads: a text file over the cap refuses the query (its count would leave the file out,
+  // 0.5.0 second review: fail closed), excluded it counts again; a query reading too much is refused.
   const capped = admitted('impact-caps', { impact: { maxFileBytes: 40 } });
-  const c = ok(wf(capped.root, ['impact', 'run', '--attempt', capped.id, '--query', JSON.stringify({ pattern: 'isError', paths: ['src/**'] })]));
-  assert.match(c.out, /^query: 1 files at [^\n]+\n {4}app:src\/pages\/c\.js\n {4}skipped \(over the size cap\): app:src\/pages\/a\.js, app:src\/pages\/b\.js, app:src\/table\.js/);
+  const big = wf(capped.root, ['impact', 'run', '--attempt', capped.id, '--query', JSON.stringify({ pattern: 'isError', paths: ['src/**'] })]);
+  assert.equal(big.code, 75);
+  assert.match(big.err, /query `query` cannot read 3 text file\(s\) over impact\.maxFileBytes \(40 bytes\), so its count would leave them out: app:src\/pages\/a\.js \(\d+ bytes\), app:src\/pages\/b\.js \(\d+ bytes\), app:src\/table\.js/);
+  const c = ok(wf(capped.root, ['impact', 'run', '--attempt', capped.id, '--query', JSON.stringify({ pattern: 'isError', paths: ['src/**'], exclude: ['src/pages/a.js', 'src/pages/b.js', 'src/table.js'] })]));
+  assert.match(c.out, /^query: 1 files at [^\n]+\n {4}app:src\/pages\/c\.js$/m);
   const tight = admitted('impact-scan', { impact: { maxScanBytes: 10 } });
   assert.match(wf(tight.root, ['impact', 'run', '--attempt', tight.id, '--query', JSON.stringify({ pattern: 'isError' })]).err, /query `query` reads more than 10 bytes; narrow its `paths`/);
   const wrong = goodPlan();

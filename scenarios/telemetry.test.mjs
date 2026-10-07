@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { WF, closureFile, commitIn, criteriaFile, goodClosure, ok, OUT_OF_ORDER, sh, singleRepoProject, state, wf, write } from './helpers.mjs';
+import { WF, closureFile, commitIn, criteriaFile, goodClosure, ok, OUT_OF_ORDER, sh, singleRepoProject, state, wf, write, ownerSpeaks, spawnHome } from './helpers.mjs';
 import { logFailures, playwrightJsonFailures, junitFailures } from '../engine/failures.mjs';
 import { REPORT_SCHEMA, priceOf, prices, timeline } from '../engine/telemetry.mjs';
 
@@ -95,7 +95,8 @@ test('wf stop records the reason class, the step in flight, discarded minutes an
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'x\n' });
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-1', '--attempt', e.id]));
   const env = { ...process.env, WF_CONFIG_HOME: path.join(root, '..', '.wfhome'), WF_HOME: path.join(root, '..', '.home'), WF_EVIDENCE_FLAGS: '0' };
-  delete env.CLAUDE_CODE_SESSION_ID;
+  for (const k of ['CLAUDE_CODE_SESSION_ID', 'CLAUDECODE', 'CODEX_THREAD_ID', 'CODEX_SANDBOX', 'AI_AGENT', 'GROK_SESSION_ID']) delete env[k]; // no agent runtime: the scenario is the owner at a terminal (engine/owner.mjs)
+  ownerSpeaks(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]);
   const child = spawn(process.execPath, [WF, 'gate', ...OUT_OF_ORDER, '--attempt', e.id], { cwd: root, env });
   let out = '';
   child.stdout.on('data', (d) => (out += d));
