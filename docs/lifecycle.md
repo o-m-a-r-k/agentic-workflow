@@ -12,11 +12,11 @@ flowchart TD
   PL -- yes --> PLAN["Planner<br/>read-only, tree unchanged"]
   PL -- no --> IMP
   PLAN --> IMP["Implementer<br/>code + tests, committed"]
-  IMP --> RV["Independent review, fresh reviewer<br/>findings + criteria mapping"]
+  IMP --> RV["Code review, fresh reviewer each round<br/>no gate meanwhile"]
   RV -- findings --> IMP
-  RV -- clean --> GR["Gate run<br/>reuse, stop/resume"]
+  RV -- clean --> GR["ONE gate on the reviewed tree<br/>no reviewer meanwhile"]
   GR -- fails --> IMP
-  GR -- passes --> EV["Evidence pass, fresh reviewer<br/>gate logs + screenshots"]
+  GR -- passes --> EV["Evidence review, fresh reviewer<br/>gate logs + screenshots"]
   EV -- findings --> IMP
   EV -- clean --> AC["wf accept<br/>gate + clean closure on this tree"]
   AC --> H{"Hold<br/>recorded?"}
@@ -35,10 +35,10 @@ flowchart TD
 | Criteria | `wf plan --from-agent <planner id>` | Criteria and every plan section are frozen before implementation, taken from the planner's transcript unchanged; unknown top-level keys are refused. Later changes go through `wf criteria amend --reason`. |
 | Plan | `wf handoff planner` | The planner leaves the tree unchanged. |
 | Implement | `wf handoff implementer` | Changes are committed before review and the gate. |
-| Review | `wf handoff reviewer`, `wf review` | Allowed once the work is committed, before or during the gate. The reviewer isn't the owner, planner, an implementer or a reviewer of an earlier round. Where transcripts exist, its transcript must show the agent type handed and exactly the printed start line. The closure is bound to the tree it was handed; earlier rounds' open findings are revealed only after it, for verification. |
-| Gate | `wf gate` | Each step's evidence is hashed. A newer failure beats an older pass. |
+| Review | `wf handoff reviewer`, `wf review` | Allowed once the work is committed, never while a gate runs on the attempt. The reviewer isn't the owner, planner, an implementer or a reviewer of an earlier round. Where transcripts exist, its transcript must show the agent type handed and exactly the printed start line. The closure is bound to the tree it was handed (a round refused because the tree changed leaves a `review.refused` ledger event); earlier rounds' open findings are revealed only after it, for verification. |
+| Gate | `wf gate` | Only after a clean code review on this tree: refused while the latest round has open or unverified findings, no round covers the current tree, or a reviewer is at work (`--reason` overrides, recorded as `gate.override`). Each step's evidence is hashed. A newer failure beats an older pass. |
 | Discovered issues | `wf discovered add\|list\|close` | Every issue found during the ticket is recorded and ends fixed by a commit of this ticket or deferred in the owner's words; the reviewer gives each a verdict. |
-| Accept | `wf accept` | On the current tree: a passing full gate, a closure with every finding fixed or shown to be a non-issue, written after that gate passed (an evidence pass when the review came first). Every criterion maps to evidence or a justified n/a. |
+| Accept | `wf accept` | On the current tree: a passing full gate, a closure with every finding fixed or shown to be a non-issue, written after that gate passed (the evidence review). Every criterion maps to evidence or a justified n/a. |
 | Deliver | `wf deliver [--summary-file F]` | Implementation intent, no hold, review accepted, no discovered issue open; the owner's summary recorded when a delivered comment is posted. |
 | Shown | `wf shown` | Every delivered screenshot shown to the owner with a caption the owner wrote, and the anomalies seen (or "none seen"); nothing owed when none were delivered. |
 | Handoff | `wf tracker record` | From the raw tracker output: the status, the comment `wf` rendered (with every screenshot inline) and every delivered screenshot as an uploaded file with its caption. |
@@ -125,13 +125,15 @@ sequenceDiagram
   O->>WF: wf handoff implementer
   WF->>IM: bundle (plan, criteria, affected components)
   IM-->>WF: commits
-  O->>WF: wf handoff reviewer (gate may run in parallel)
-  WF->>RV: bundle (diff, criteria; no gate evidence yet)
-  RV-->>WF: findings + criteria → evidence mapping
-  O->>IM: fix findings (same implementer), commit
-  O->>WF: wf gate
+  loop code review until a round comes back clean (no gate)
+    O->>WF: wf handoff reviewer (new agent: code review)
+    WF->>RV: bundle (diff, criteria; round: code-review)
+    RV-->>WF: findings + criteria → evidence mapping
+    O->>IM: fix findings (same implementer), commit
+  end
+  O->>WF: wf gate (one, on the reviewed tree; no reviewer meanwhile)
   WF-->>O: evidence (suites, screenshots, logs)
-  O->>WF: wf handoff reviewer (new agent: evidence pass)
+  O->>WF: wf handoff reviewer (new agent: evidence review)
   WF->>RV: bundle (diff, criteria, gate evidence)
   RV-->>WF: closure, screenshots inspected
   O->>WF: wf accept, then wf deliver
@@ -143,7 +145,12 @@ sequenceDiagram
 - **Planner** returns the plan as a short checklist: summary, the cross-repo contract (routes, DTO fields, error codes, permission subjects), anchors (file:line of each function to change), tests to write and the targeted selectors to run, suites not to run, the external-services policy (default runs need no provider keys or internet) and the agent split (what can proceed in parallel once the contract is committed).
 - **Implementers** can run in parallel, one per work item (or per repo or area), after the contract is committed (`wf handoff implementer` accepts several; `--work W1` hands over one work item and prints the agent type to start). They run only the specs they changed while iterating, then the repo's lint and full unit suite once before finishing; the gate runs the rest.
 - **Reviewer** is started blind and fresh: `wf handoff reviewer` prints one line on stdout (the bundle path), and that line is its whole prompt, with no hints, summaries, focus areas or earlier findings. On stderr, for the owner only, it prints the agent type and the name to start it under (`Start agent type wf-reviewer (name it <id>; ...)`), as every other handoff does. `wf review` identifies the round's agent by that name in its transcript. An agent started without a name is accepted when exactly one unnamed transcript of the handed type began with this handoff's line after it (recorded `identity: unnamed`); none, several, or another type is refused with how to start it. Every round is a new agent with a new id; the engine refuses an id that reviewed an earlier round of the attempt, because a resumed reviewer is anchored on what it found before. Each round reviews the whole attempt against the frozen criteria. The bundle holds the criteria, amendments with reasons, the plan, the diff's worktrees and bases, and says whether a gate passed on this tree (with its logs and screenshots when one did). It is never the planner or an implementer.
-- **Review order:** review comes before the gate, because each finding found after a full gate costs another full gate. Hand the committed change to a reviewer, fix its findings, gate the fixed tree, then a fresh reviewer does the evidence pass (gate logs and screenshots) and `wf accept`. The owner may start the review and the gate together (never editing the worktrees while the gate runs). Review first when findings are likely (money, authorization, migrations); both together when findings are rare, so a clean review and a passing gate leave only the evidence pass.
+- **Order of work:** code-review rounds run to clean first, with no gate; then ONE gate on the tree that passed review; then the evidence review (gate logs and screenshots) of the gated tree, and `wf accept`. Review and gate never run side by side. Why: any finding made after a gate starts makes that gate obsolete (on one ticket that ran them side by side, 15 of 16 gates were stopped and about 175 of 271 gate minutes discarded), and a gate on an unreviewed tree proves nothing about review. The engine holds the order:
+  - `wf gate` refuses while the latest review round has open findings or has not verified earlier rounds' open findings, while no review round covers the current tree (the same tree, or the same change of the ticket after a base merged in without touching it), and while a reviewer handed this tree has recorded no closure. `wf gate --reason "<why>"` runs it anyway and records a `gate.override` event (reason, the refusals it overrode, the tree). `wf gate --prepare-only` and `wf check` are never refused.
+  - `wf handoff reviewer` refuses while a gate runs on the attempt (or is starting). The handoff records its round holding the gate lock, so a gate starting at that moment is refused too. A code-review round never needs a gate: its bundle says `round: code-review` and carries no gate evidence. The handoff after a gate passed on the tree is the evidence review (`round: evidence-review`): its bundle carries the gate's logs, screenshots and artifacts.
+  - `wf stop` needs `--class major-finding|tree-change|owner-decision` and `--reason`; the `gate.stopped` event records the class, the reason, the wall-clock minutes the run had spent (`discardedMinutes`; steps a later gate reuses by their inputs are not subtracted) and how many steps had finished. `wf resume` continues a gate stopped by the owner's decision; one stopped for a finding or a tree change goes back to the implementer and a code-review round first.
+  - A review round whose closure is refused because the worktree changed during it (an implementer still editing) leaves a `review.refused` event and is over: the next round is a fresh reviewer on the committed tree.
+  - `wf resume` names the step for each state: the code review (no gate yet), waiting for the reviewer at work, fixing open findings then the next code-review round, the one gate after a clean round, waiting for the running gate, the evidence review, then `wf accept`.
 - **Role appendices:** `roles.<role>.appendix` in the adapter names a file under `.workflow/` whose text `wf sync` appends to that role's generated agent under "Project additions". Role agents generated or changed while a session runs reach it only after it restarts: `wf sync` lists every role file whose content changed (it rewrites only those), and `wf handoff` warns when the agent type's role file changed after the owning Claude Code session started (the later of its transcript's first entry and its process start); start the agent type `wf handoff` names, never a general-purpose agent, and never pass a model on the spawn (both override the agent file's effort and model).
 - **Amending criteria:** `wf criteria amend --file f --reason "why" [--add-repo R]` merges by criterion id (`--add-repo`: see [Every issue found is fixed in the ticket](#every-issue-found-is-fixed-in-the-ticket)). Criteria in the file replace the frozen ones with the same id, a new id is added, and every id the file does not mention stays as it was. Removing one takes an explicit `{ id: C3, dropped: true, reason: "..." }` entry. The command prints the full list after the change and what changed, added or dropped. Adding by listing a new id is safe because nothing is lost: a mistyped id adds a criterion the reviewer must map rather than removing one.
 - A separate tester role is available but off by default. Frozen criteria plus review of the gate's evidence cover the same failure with one fewer handoff.

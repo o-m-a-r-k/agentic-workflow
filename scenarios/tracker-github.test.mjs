@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { closureFile, commitIn, criteriaFile, goodClosure, ok, singleRepoProject, state, sh, summaryFile, tmp, wf, yaml } from './helpers.mjs';
+import { closureFile, commitIn, criteriaFile, goodClosure, ok, OUT_OF_ORDER, sh, singleRepoProject, state, summaryFile, tmp, wf, yaml } from './helpers.mjs';
 import { seed } from './fixtures/fake-github.mjs';
 
 // 0.4.0: GitHub Issues through `gh` (the owner's login) or the REST API (a token from `wf secrets`), against a fake
@@ -30,7 +30,7 @@ function deliver(base, root, id, env) {
   ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', id], { env }));
   ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', id], { env }));
   commitIn(state(root, id).repos.app.worktree, { 'src/a.txt': 'ui\n' });
-  const g = ok(wf(root, ['gate', '--attempt', id, '--json'], { env })).json();
+  const g = ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', id, '--json'], { env })).json();
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', id], { env }));
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r', { screenshotsInspected: [g.steps[0].artifacts[0].sha256] })), '--attempt', id], { env }));
   ok(wf(root, ['accept', '--attempt', id], { env }));
@@ -189,7 +189,7 @@ test('github public repo: doctor warns screenshots will be public; deliver refus
   ok(wf(p.root, ['plan', '--file', criteriaFile(p.base), '--attempt', id], { env: p.env }));
   ok(wf(p.root, ['handoff', 'implementer', '--agent', 'i', '--attempt', id], { env: p.env }));
   commitIn(state(p.root, id).repos.app.worktree, { 'src/a.txt': 'ui\n' });
-  const g = ok(wf(p.root, ['gate', '--attempt', id, '--json'], { env: p.env })).json();
+  const g = ok(wf(p.root, ['gate', ...OUT_OF_ORDER, '--attempt', id, '--json'], { env: p.env })).json();
   ok(wf(p.root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', id], { env: p.env }));
   ok(wf(p.root, ['review', '--closure', closureFile(p.base, goodClosure('r', { screenshotsInspected: [g.steps[0].artifacts[0].sha256] })), '--attempt', id], { env: p.env }));
   ok(wf(p.root, ['accept', '--attempt', id], { env: p.env }));

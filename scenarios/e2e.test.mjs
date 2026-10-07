@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { WF, closureFile, commitIn, criteriaFile, goodClosure, makeRepo, ok, sh, singleRepoProject, state, tmp, wf, write } from './helpers.mjs';
+import { closureFile, commitIn, criteriaFile, goodClosure, makeRepo, ok, OUT_OF_ORDER, sh, singleRepoProject, state, tmp, WF, wf, write } from './helpers.mjs';
 import { YAML } from '../engine/util.mjs';
 
 const testRunner = "const ok=require('../index.js').add(1,2)===3;console.log(ok?'pass':'FAIL');process.exit(ok?0:1)";
@@ -34,9 +34,9 @@ test('a drafted adapter fails the gate when code outside any test folder breaks'
   ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id]));
   ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
   commitIn(e.repos.app.worktree, { 'README.md': '# app\nmore docs\n' });
-  ok(wf(root, ['gate', '--attempt', e.id]));
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]));
   commitIn(e.repos.app.worktree, { 'index.js': 'exports.add=(a,b)=>a-b\n' });
-  const g = wf(root, ['gate', '--attempt', e.id, '--json']);
+  const g = wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id, '--json']);
   assert.equal(g.code, 1, 'broken code must fail the gate');
   assert.equal(JSON.parse(g.out).steps.find((s) => s.id === 'app-unit').status, 'failed');
 });
@@ -74,11 +74,11 @@ test('files a step writes into the tree do not block the next gate; abandon remo
   ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id]));
   ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
   commitIn(e.repos.app.worktree, { 'src/a.txt': '1\n' });
-  ok(wf(root, ['gate', '--attempt', e.id]));
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]));
   commitIn(e.repos.app.worktree, { 'src/a.txt': '2\n' });
-  ok(wf(root, ['gate', '--attempt', e.id]));
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]));
   write(e.repos.app.worktree, 'src/forgot.txt', 'not added\n');
-  assert.match(wf(root, ['gate', '--attempt', e.id]).err, /commit changes before the gate/, 'a new untracked file still blocks');
+  assert.match(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]).err, /commit changes before the gate/, 'a new untracked file still blocks');
   ok(wf(root, ['abandon', '--reason', 'superseded', '--attempt', e.id]));
   assert.equal(fs.existsSync(e.repos.app.worktree), false);
 });
@@ -135,7 +135,7 @@ test('leases are machine-wide: two gates from different attempts never share a d
   delete env.CLAUDE_CODE_SESSION_ID;
   // Each gate's output is kept: a refusal says why (the run that hid it with stdio 'ignore' failed only as [0, 75]).
   const run = (id) => new Promise((resolve) => {
-    const c = spawn(process.execPath, [WF, 'gate', '--attempt', id], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const c = spawn(process.execPath, [WF, 'gate', ...OUT_OF_ORDER, '--attempt', id], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '';
     c.stdout.on('data', (d) => (out += d));
     c.stderr.on('data', (d) => (out += d));
@@ -156,7 +156,7 @@ test('the reviewer hint says what to do with open findings', () => {
   ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id]));
   ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'h\n' });
-  ok(wf(root, ['gate', '--attempt', e.id]));
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]));
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', e.id]));
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r', { findings: [{ id: 'F1', severity: 'major', summary: 's', status: 'open', evidence: 'x' }] })), '--attempt', e.id]));
   assert.match(ok(wf(root, ['resume', '--attempt', e.id])).out, /fix the open findings \(F1\)/);
@@ -173,9 +173,9 @@ test('narrow inputs fail closed: a change outside them reruns the step instead o
   ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id]));
   ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
   commitIn(e.repos.app.worktree, { 'test/add.test.js': `${testRunner}\n` });
-  ok(wf(root, ['gate', '--attempt', e.id]));
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]));
   commitIn(e.repos.app.worktree, { 'index.js': 'exports.add=(a,b)=>a-b\n' });
-  const g = JSON.parse(wf(root, ['gate', '--attempt', e.id, '--json']).out);
+  const g = JSON.parse(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id, '--json']).out);
   assert.equal(g.status, 'failed');
   assert.match(g.steps[0].reason ?? '', /outside (this|every) step's inputs/);
 });
@@ -207,9 +207,9 @@ test('one step with narrow inputs is not reused just because another step covers
   ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id]));
   ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
   commitIn(e.repos.app.worktree, { 'test/add.test.js': `${testRunner}\n` });
-  ok(wf(root, ['gate', '--attempt', e.id]));
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]));
   commitIn(e.repos.app.worktree, { 'index.js': 'exports.add=(a,b)=>a-b\n' });
-  const g = JSON.parse(wf(root, ['gate', '--attempt', e.id, '--json']).out);
+  const g = JSON.parse(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id, '--json']).out);
   assert.equal(g.status, 'failed', 'unit must rerun and fail');
   const unit = g.steps.find((s) => s.id === 'unit');
   assert.equal(unit.status, 'failed');
@@ -226,8 +226,8 @@ test('files an install creates in a worktree (node_modules, a new lockfile) do n
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'x\n' }); // commitIn adds everything: keep provisioning output untracked instead
   sh(e.repos.app.worktree, 'git rm -q --cached -r node_modules package-lock.json && git commit -q -m "keep install output untracked"');
   assert.ok(fs.existsSync(path.join(e.repos.app.worktree, 'node_modules/x/i.js')));
-  ok(wf(root, ['gate', '--attempt', e.id]));
-  ok(wf(root, ['gate', '--attempt', e.id]));
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]));
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]));
 });
 
 test('a copied node_modules missing a declared dependency is reinstalled, even when lockfiles match', () => {

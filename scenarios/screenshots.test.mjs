@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { closureFile, commitIn, criteriaFile, goodClosure, ok, postedComment, rawReadback, singleRepoProject, state, summaryFile, toAccepted, wf } from './helpers.mjs';
+import { closureFile, commitIn, criteriaFile, goodClosure, ok, OUT_OF_ORDER, postedComment, rawReadback, singleRepoProject, state, summaryFile, toAccepted, wf } from './helpers.mjs';
 import { proposeCaption } from '../engine/lifecycle.mjs';
 
 // The owner must see every delivered screenshot in the chat, captioned with the state it shows, and the ticket must
@@ -31,7 +31,7 @@ test('quick lane with screenshots: the SHOW block is printed and the attempt sta
   ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id]));
   ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'q\n' });
-  const g = ok(wf(root, ['gate', '--attempt', e.id, '--json'])).json();
+  const g = ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id, '--json'])).json();
   const shas = g.steps[0].artifacts.map((a) => a.sha256);
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', e.id]));
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r', { screenshotsInspected: shas })), '--attempt', e.id]));
@@ -98,7 +98,7 @@ test('batch: each member delivers only its own screenshots from the shared gate'
   const m1 = toAccepted(root, base, { item: 'ENG-74', change: { 'src/a.txt': 'one\n' }, extraEntry: ['--defer-heavy'] });
   const m2 = toAccepted(root, base, { item: 'ENG-75', change: { 'src/b.txt': 'two\n' }, extraEntry: ['--defer-heavy'] });
   const b = ok(wf(root, ['batch', 'create', '--members', `${m1.id},${m2.id}`, '--owner', 'o', '--json'])).json();
-  const g = ok(wf(root, ['gate', '--attempt', b.id, '--json'])).json();
+  const g = ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', b.id, '--json'])).json();
   const shas = g.steps.flatMap((x) => x.artifacts ?? []).map((a) => a.sha256);
   assert.equal(shas.length, 3, 'the batch gate collects every unit\'s files (the batch\'s own folder too)');
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'rb', '--attempt', b.id]));
@@ -134,7 +134,7 @@ test('delivery narrow: the owner keeps the ticket\'s files of an over-broad set,
   ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
   ok(wf(root, ['tracker', 'record', '--event', 'implementing', '--capture', cap({ issue: { identifier: item, description: 'd', state: { name: 'In Progress' } } }), '--attempt', e.id]));
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'ui\n' });
-  const g = ok(wf(root, ['gate', '--attempt', e.id, '--json'])).json();
+  const g = ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id, '--json'])).json();
   const all = g.steps[0].artifacts;
   assert.equal(all.length, 5);
   const mine = all.filter((a) => /mine-/.test(a.source ?? a.path)).map((a) => a.sha256);
@@ -228,7 +228,7 @@ test('delivery narrow on an attempt delivered before 0.1.11: the pending attach 
   ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
   ok(wf(root, ['tracker', 'record', '--event', 'implementing', '--capture', cap({ issue: { identifier: item, description: 'd', state: { name: 'In Progress' } } }), '--attempt', e.id]));
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'ui\n' });
-  const all = ok(wf(root, ['gate', '--attempt', e.id, '--json'])).json().steps[0].artifacts;
+  const all = ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id, '--json'])).json().steps[0].artifacts;
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', e.id]));
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r', { screenshotsInspected: all.map((a) => a.sha256) })), '--attempt', e.id]));
   ok(wf(root, ['accept', '--attempt', e.id]));

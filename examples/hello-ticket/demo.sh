@@ -99,26 +99,55 @@ test('greet(name) greets by name', () => {
 EOF
 git -C "$WT" add -A
 git -C "$WT" commit -q -m 'greet by name'
-refused gate --attempt "$ATTEMPT"
 
-say "Fixed and committed: the gate runs again on the new tree"
-sed -i.bak 's/`Hello ${name}!`/`Hello, ${name}!`/' "$WT/lib/greet.mjs" && rm "$WT/lib/greet.mjs.bak"
-git -C "$WT" commit -q -am 'greet: add the comma'
-wf gate --attempt "$ATTEMPT"
+say "No gate yet: the gate runs once a code-review round on this tree comes back clean"
+refused gate --attempt "$ATTEMPT"
 
 say "The implementer cannot review its own work"
 refused handoff reviewer --agent implementer-1 --attempt "$ATTEMPT"
 
-say "A fresh reviewer checks each criterion against the gate evidence"
+say "Code review, round 1: a fresh reviewer reads the diff against the criteria and finds the missing comma"
 wf handoff reviewer --agent reviewer-1 --attempt "$ATTEMPT"
-cat > "$WORK/closure.json" <<'EOF'
-{ "reviewer": "reviewer-1", "findings": [],
+cat > "$WORK/closure-1.json" <<'EOF'
+{ "reviewer": "reviewer-1",
+  "findings": [ { "id": "F1", "severity": "major", "status": "open", "summary": "greet('Ada') returns 'Hello Ada!': the comma is missing (C1)", "evidence": "lib/greet.mjs:3" } ],
+  "criteria": [
+    { "id": "C1", "evidence": { "kind": "test", "ref": "test/greet.test.mjs: greet(name) greets by name" } },
+    { "id": "C2", "evidence": { "kind": "test", "ref": "test/greet.test.mjs: greet() says hello" } } ],
+  "screenshotsInspected": [] }
+EOF
+wf review --closure "$WORK/closure-1.json" --attempt "$ATTEMPT"
+
+say "The implementer fixes the finding and commits"
+sed -i.bak 's/`Hello ${name}!`/`Hello, ${name}!`/' "$WT/lib/greet.mjs" && rm "$WT/lib/greet.mjs.bak"
+git -C "$WT" commit -q -am 'greet: add the comma'
+
+say "Code review, round 2: a new reviewer judges the fixed tree blind, then verifies round 1's finding"
+wf handoff reviewer --agent reviewer-2 --attempt "$ATTEMPT"
+cat > "$WORK/closure-2.json" <<'EOF'
+{ "reviewer": "reviewer-2", "findings": [],
+  "criteria": [
+    { "id": "C1", "evidence": { "kind": "test", "ref": "test/greet.test.mjs: greet(name) greets by name" } },
+    { "id": "C2", "evidence": { "kind": "test", "ref": "test/greet.test.mjs: greet() says hello" } } ],
+  "screenshotsInspected": [] }
+EOF
+wf review --closure "$WORK/closure-2.json" --attempt "$ATTEMPT"
+node -e 'const f=process.argv[1];const c=JSON.parse(require("fs").readFileSync(f,"utf8"));c.priorFindings=[{round:"reviewer-1",id:"F1",status:"fixed",evidence:"lib/greet.mjs:3 now returns Hello, ${name}!"}];require("fs").writeFileSync(f,JSON.stringify(c))' "$WORK/closure-2.json"
+wf review --closure "$WORK/closure-2.json" --attempt "$ATTEMPT"
+
+say "The review is clean: one gate on the reviewed tree"
+wf gate --attempt "$ATTEMPT"
+
+say "Evidence review: a fresh reviewer checks each criterion against the gate evidence"
+wf handoff reviewer --agent reviewer-3 --attempt "$ATTEMPT"
+cat > "$WORK/closure-3.json" <<'EOF'
+{ "reviewer": "reviewer-3", "findings": [],
   "criteria": [
     { "id": "C1", "evidence": { "kind": "output", "ref": "unit: greet(name) greets by name, ok" } },
     { "id": "C2", "evidence": { "kind": "output", "ref": "unit: greet() says hello, ok" } } ],
   "screenshotsInspected": [] }
 EOF
-wf review --closure "$WORK/closure.json" --attempt "$ATTEMPT"
+wf review --closure "$WORK/closure-3.json" --attempt "$ATTEMPT"
 wf accept --attempt "$ATTEMPT"
 
 say "Delivery: merged to main, pushed, and the ticket handed off"

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { commitIn, criteriaFile, ok, singleRepoProject, tmp, wf } from './helpers.mjs';
+import { commitIn, criteriaFile, ok, OUT_OF_ORDER, singleRepoProject, tmp, wf } from './helpers.mjs';
 
 // 0.1.22: named finding (0.1.21 review): chmod, chflags and writes followed a symlink planted at an evidence path, so
 // the engine could chmod, unflag or overwrite an arbitrary file outside the evidence. Every case below plants a link to
@@ -49,7 +49,7 @@ function gated(name, item) {
   ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id], env));
   ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id], env));
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'q\n' });
-  const g = JSON.parse(ok(wf(root, ['gate', '--attempt', e.id, '--json'], env)).out);
+  const g = JSON.parse(ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id, '--json'], env)).out);
   return { base, root, id: e.id, dir: path.join(root, '.wf-evidence', 'attempts', e.id), log: g.steps[0].log };
 }
 const refused = (r, re) => {
@@ -63,7 +63,7 @@ test('a symlink at a recorded file: verification names it; nothing is chmodded, 
   try {
     const before = snap(v.file);
     swapForLink(log, v.file);
-    for (const args of [['status'], ['verify'], ['export'], ['gate'], ['verify', '--accept-changes', '--reason', 'x'], ['handoff', 'reviewer', '--agent', 'r']]) {
+    for (const args of [['status'], ['verify'], ['export'], ['gate', ...OUT_OF_ORDER], ['verify', '--accept-changes', '--reason', 'x'], ['handoff', 'reviewer', '--agent', 'r']]) {
       refused(wf(root, [...args, '--attempt', id], env), /output\.log: symlink/);
       assert.deepEqual(snap(v.file), before, args.join(' '));
     }
@@ -95,7 +95,7 @@ test('a symlinked attempt folder, a symlinked manifest-listed folder, a symlinke
     const stepDir = path.dirname(log);
     const beforeFolder = snap(v.folder);
     swapForLink(stepDir, v.folder);
-    for (const args of [['status'], ['verify'], ['gate'], ['export']]) {
+    for (const args of [['status'], ['verify'], ['gate', ...OUT_OF_ORDER], ['export']]) {
       refused(wf(root, [...args, '--attempt', id], env), /ui: symlink|ui is a symlink/);
       assert.deepEqual(snap(v.folder), beforeFolder, args.join(' '));
     }

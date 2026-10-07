@@ -98,7 +98,7 @@ const pick = (re) => {
   if (!l) throw new Error(`the demo output has no line matching ${re}`);
   return l;
 };
-const quote = [pick(/^\$ wf gate --attempt/), pick(/^wf gate: failed {3}unit/), pick(/^\(exit 1: refused\)$/), pick(/^\$ wf handoff reviewer --agent implementer-1/), pick(/cannot review it$/), pick(/^delivered HT-1\.1: /), pick(/^tracker: delivered performed .* read back; attempt closed$/)];
+const quote = [pick(/^\$ wf gate --attempt/), pick(/^wf gate: the gate runs after a clean code review/), pick(/^\(exit 75: refused\)$/), pick(/^\$ wf handoff reviewer --agent implementer-1/), pick(/cannot review it$/), pick(/^gate passed \(/), pick(/^delivered HT-1\.1: /)];
 const PANEL = Math.floor((1120 - 2 * 28) / (20 * 0.6));
 for (const l of quote) if (l.length > PANEL) throw new Error(`social preview line is ${l.length} characters, over ${PANEL}: ${l}`);
 const social = `<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640">

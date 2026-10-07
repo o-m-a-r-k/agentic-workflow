@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { check } from '../hooks/guard-evidence.mjs';
-import { commitIn, criteriaFile, ok, singleRepoProject, wf } from './helpers.mjs';
+import { commitIn, criteriaFile, ok, OUT_OF_ORDER, singleRepoProject, wf } from './helpers.mjs';
 
 // I-16, named failure: harmless Bash commands were refused because their text (a commit message, an improvement
 // description, a search pattern) named the evidence folder, and the refusal neither said what matched nor how to avoid
@@ -74,7 +74,7 @@ test('I-16: `wf evidence list` lists an attempt\'s evidence by kind; `wf evidenc
   ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id]));
   ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'q\n' });
-  ok(wf(root, ['gate', '--attempt', e.id]));
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]));
 
   const list = ok(wf(root, ['evidence', 'list', '--attempt', e.id, '--json'])).json();
   const kinds = new Set(list.files.map((f) => f.kind));
@@ -117,7 +117,7 @@ test('I-16: `wf evidence show` refuses a link and cuts a large file at 4 MiB', a
   ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id]));
   ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'q\n' });
-  ok(wf(root, ['gate', '--attempt', e.id]));
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]));
   const log = ok(wf(root, ['evidence', 'list', '--attempt', e.id, '--json'])).json().files.find((f) => f.kind === 'gate log' && f.size > 4 * 1024 * 1024);
   assert.ok(log, 'the step log is over 4 MiB');
   const r = ok(wf(root, ['evidence', 'show', log.path, '--attempt', e.id]));

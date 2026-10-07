@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { closureFile, commitIn, criteriaFile, goodClosure, ok, singleRepoProject, state, wf, write } from './helpers.mjs';
+import { closureFile, commitIn, criteriaFile, goodClosure, ok, OUT_OF_ORDER, singleRepoProject, state, wf, write } from './helpers.mjs';
 
 const steps = [{ id: 'unit', repo: 'app', run: 'true', inputs: ['**'] }];
 const review = { rules: [{ id: 'ui', read: ['docs/ui.md'] }, { id: 'api', paths: ['api/**'], read: ['docs/api.md', 'docs/errors.md'] }, { id: 'cli', paths: ['cli/**'], read: ['docs/cli.md'] }] };
@@ -49,7 +49,7 @@ test('rules: matched by paths and by frontmatter; a review before the gate needs
   assert.equal(early.rules[1].docChangedByTicket, false);
   assert.match(early.instructions, /Read every document under `rules`/);
 
-  ok(wf(root, ['gate', '--attempt', id]));
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', id]));
   const b = bundleOf(root, id, 'r1');
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r1')), '--attempt', id]));
   const missing = wf(root, ['accept', '--attempt', id]);
@@ -114,7 +114,7 @@ function transcript(root, name, prompt, calls) {
 test('reads: where a transcript exists every rule document and skill must have been read; Bash cat counts, another file or a failed read does not', () => {
   const { base, root, id } = project('rules-reads');
   fs.mkdirSync(path.join(homeOf(root), '.claude', 'projects'), { recursive: true });
-  ok(wf(root, ['gate', '--attempt', id]));
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', id]));
   const start = (agent) => ok(wf(root, ['handoff', 'reviewer', '--agent', agent, '--attempt', id])).out.trim();
   const b = (agent) => {
     const s = state(root, id);
@@ -145,7 +145,7 @@ test('reads: where a transcript exists every rule document and skill must have b
 
   // No transcript store on the machine: recorded unverified, not refused.
   const other = project('rules-noreads');
-  ok(wf(other.root, ['gate', '--attempt', other.id]));
+  ok(wf(other.root, ['gate', ...OUT_OF_ORDER, '--attempt', other.id]));
   const ob = bundleOf(other.root, other.id, 'r');
   ok(wf(other.root, ['review', '--closure', closureFile(other.base, goodClosure('r', { rules: verdicts(ob) })), '--attempt', other.id]));
   assert.equal(state(other.root, other.id).reviews.at(-1).reads.status, 'unverified');

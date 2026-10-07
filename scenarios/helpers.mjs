@@ -92,12 +92,19 @@ export function toAccepted(root, base, { item = 'ENG-1', repo = 'app', change = 
   ok(wf(root, ['handoff', 'implementer', '--agent', 'impl-1', '--attempt', id, '--owner', owner]));
   const wt = e.repos[repo].worktree;
   commitIn(wt, change);
+  // The order of work: a clean code review, one gate on that tree, then the evidence review.
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-0', '--attempt', id, '--owner', owner]));
+  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('rev-0')), '--attempt', id]));
   ok(wf(root, ['gate', '--attempt', id]));
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-1', '--attempt', id, '--owner', owner]));
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure()), '--attempt', id]));
   ok(wf(root, ['accept', '--attempt', id, '--owner', owner]));
   return { id, wt, entry: e };
 }
+
+// A gate run outside the order of work (no clean code review on the tree first), for scenarios about the gate itself
+// or about what follows it: `--reason` runs it and records the override in the ledger.
+export const OUT_OF_ORDER = ['--reason', 'scenario: gate mechanics, outside the order of work'];
 
 export const state = (root, id) => ok(wf(root, ['resume', '--attempt', id, '--json'])).json();
 

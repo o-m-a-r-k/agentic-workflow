@@ -4,6 +4,8 @@
 
 ```mermaid
 flowchart TD
+  ORD{"Clean code review on this tree,<br/>no reviewer at work?"} -- no --> REF["Refused<br/>(or --reason, recorded)"]
+  ORD -- yes --> CH
   CH["Changed files"] --> MAP["Map to repos, packages, components"]
   MAP --> IMPACT["Add dependents when a contract changed"]
   IMPACT --> SEL["Select steps<br/>light or heavy, deferrable"]
@@ -16,6 +18,8 @@ flowchart TD
   CARRY --> EV
 ```
 
+- **When it runs:** once per reviewed tree, after a code-review round on it came back clean, and never beside a review round. `wf gate` refuses while the latest round has open or unverified findings, no round covers the current tree, or a reviewer handed this tree has recorded no closure; `wf gate --reason "<why>"` runs it anyway and records a `gate.override` ledger event. While it runs, `wf handoff reviewer` is refused; the handoff after it passes is the evidence review, whose bundle carries the logs and screenshots. See [the order of work](lifecycle.md#roles-and-handoffs).
+- **Stopping:** `wf stop --class major-finding|tree-change|owner-decision --reason "<why>"`. The `gate.stopped` event records the class, the reason, the wall-clock minutes the run had spent (`discardedMinutes`) and how many steps had finished. A gate stopped by the owner's decision resumes with `wf gate` (finished steps carried); one stopped for a finding or a tree change is followed by the fix and a code-review round, then the gate.
 - **Steps are your commands,** in any language: `yarn jest`, `vendor/bin/phpunit`, `pytest`, `go test`, `gradle test`, `xcodebuild test`.
 - **Per-suite results come from JUnit XML.** A plugin is only needed for what JUnit can't carry, such as screenshots or container teardown.
 - **Reuse:** a suite reruns only when its inputs or its runner change. Worker counts never invalidate a pass.

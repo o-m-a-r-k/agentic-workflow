@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { closureFile, commitIn, criteriaFile, goodClosure, ok, singleRepoProject, state, wf } from './helpers.mjs';
+import { closureFile, commitIn, criteriaFile, goodClosure, ok, OUT_OF_ORDER, singleRepoProject, state, wf } from './helpers.mjs';
 
 // 0.1.21: integrity bypasses found in 0.1.20 (each named below), and repair, release and doctor.
 
@@ -14,7 +14,7 @@ function gated(name, item, steps) {
   ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id]));
   ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'q\n' });
-  const g = ok(wf(root, ['gate', '--attempt', e.id, '--json']));
+  const g = ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id, '--json']));
   const dir = path.join(root, '.wf-evidence', 'attempts', e.id);
   return { base, root, id: e.id, gate: JSON.parse(g.out), dir, wt: e.repos.app.worktree };
 }
@@ -65,7 +65,7 @@ test('a dead runner is recovered from the ledger, never from its progress file',
   const run = path.join(dir, 'gate', 'forged');
   plant(path.join(run, 'progress.json'), JSON.stringify({ runId: 'forged', steps: [{ id: 'fast', status: 'passed', key: 'k', runId: 'forged' }] }));
   plant(path.join(dir, 'gate', 'gate.lock'), JSON.stringify({ pid: 999999, runId: 'forged', kind: 'gate', tree: {}, children: [], plugins: [] }));
-  const g = wf(root, ['gate', '--attempt', id]);
+  const g = wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', id]);
   assert.doesNotMatch(g.out, /recovered [1-9]\d* finished step/, `${g.out}${g.err}`);
   const s = state(root, id);
   const recovered = s.gates.find((x) => x.runId === 'forged');
@@ -93,7 +93,7 @@ test('copy-in and collection never follow links; a step\'s own files never repla
   const bytes = fs.readFileSync(log);
   fs.writeFileSync(log, Buffer.alloc(bytes.length, 0x41));
   fs.chmodSync(log, 0o444);
-  refused(wf(root, ['gate', '--attempt', id]), /output\.log: content differs/);
+  refused(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', id]), /output\.log: content differs/);
   assert.ok(fs.existsSync(dir));
 });
 

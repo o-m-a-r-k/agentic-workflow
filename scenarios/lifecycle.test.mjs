@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { closureFile, commitIn, criteriaFile, goodClosure, ok, sh, singleRepoProject, state, toAccepted, wf, write } from './helpers.mjs';
+import { closureFile, commitIn, criteriaFile, goodClosure, ok, OUT_OF_ORDER, sh, singleRepoProject, state, toAccepted, wf, write } from './helpers.mjs';
 
 const steps = [{ id: 'unit', repo: 'app', run: 'grep -q . src/a.txt', inputs: ['src/**'], tier: 'light' }];
 
@@ -29,7 +29,7 @@ test('reviewer must be independent and planner must not change the tree', () => 
   ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id]));
   ok(wf(root, ['handoff', 'implementer', '--agent', 'impl-1', '--attempt', e.id]));
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'c\n' });
-  ok(wf(root, ['gate', '--attempt', e.id]));
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]));
   for (const who of ['impl-1', 'plan-1', 'owner-1']) {
     const r = wf(root, ['handoff', 'reviewer', '--agent', who, '--attempt', e.id]);
     assert.equal(r.code, 75, `${who} must not review`);
@@ -49,7 +49,7 @@ test('criteria: frozen before code, every criterion mapped, n/a needs a reason, 
   ok(wf(root, ['criteria', 'amend', '--file', criteriaFile(base, [{ id: 'C1', text: 'one' }, { id: 'C2', text: 'two, narrowed' }]), '--reason', 'C2 scope narrowed with the user', '--attempt', e.id]));
   ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'z\n' });
-  ok(wf(root, ['gate', '--attempt', e.id]));
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]));
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', e.id]));
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r')), '--attempt', e.id]));
   const unmapped = wf(root, ['accept', '--attempt', e.id]);
@@ -66,7 +66,7 @@ test('open findings block acceptance; changes after review need a new review', (
   const { base, root } = singleRepoProject('find', { gate: { steps } });
   const { id, wt } = toAccepted(root, base, { item: 'ENG-4' });
   commitIn(wt, { 'src/a.txt': 'changed after accept\n' });
-  ok(wf(root, ['gate', '--attempt', id]));
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', id]));
   const d = wf(root, ['deliver', '--attempt', id]);
   assert.equal(d.code, 75);
   assert.match(d.err, /modified after acceptance/);
@@ -104,9 +104,9 @@ test('a newer gate failure supersedes an older pass', () => {
   ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id]));
   ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'fine\n' });
-  ok(wf(root, ['gate', '--attempt', e.id]));
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]));
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'broken\n' });
-  assert.equal(wf(root, ['gate', '--attempt', e.id]).code, 1);
+  assert.equal(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]).code, 1);
   assert.match(state(root, e.id).next, /gate failed: fix and commit/);
   const h = JSON.parse(ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', e.id, '--json'])).out);
   const bundle = JSON.parse(fs.readFileSync(h.bundle, 'utf8'));
@@ -120,7 +120,7 @@ test('uncommitted changes are refused at the gate; one open attempt per item; ad
   const e = ok(wf(root, ['entry', '--item', 'ENG-8', '--owner', 'o', '--json'])).json();
   assert.equal(wf(root, ['entry', '--item', 'ENG-8', '--owner', 'o2']).code, 75);
   write(e.repos.app.worktree, 'src/a.txt', 'dirty\n');
-  assert.match(wf(root, ['gate', '--attempt', e.id]).err, /commit changes before the gate/);
+  assert.match(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]).err, /commit changes before the gate/);
   ok(wf(root, ['adopt', '--attempt', e.id, '--owner', 'o2']));
   assert.equal(state(root, e.id).owner, 'o2');
 });
@@ -152,7 +152,7 @@ test('quick fixes get the next QF number and close on delivery', () => {
   ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id]));
   ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'qf\n' });
-  ok(wf(root, ['gate', '--attempt', e.id]));
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]));
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', e.id]));
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r')), '--attempt', e.id]));
   ok(wf(root, ['accept', '--attempt', e.id]));
@@ -168,7 +168,7 @@ test('the reviewer handoff prints only the one-line start prompt, and the bundle
   ok(wf(root, ['criteria', 'amend', '--file', criteriaFile(base), '--reason', 'scope clarified', '--attempt', e.id]));
   ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'blind\n' });
-  ok(wf(root, ['gate', '--attempt', e.id]));
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]));
   const out = ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', e.id])).out;
   const lines = out.trim().split('\n');
   assert.equal(lines.length, 1, out);

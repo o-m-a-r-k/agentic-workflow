@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { closureFile, commitIn, criteriaFile, goodClosure, makeRepo, ok, postedComment, rawReadback, sh, singleRepoProject, state, summaryFile, tmp, toAccepted, wf, write, yaml } from './helpers.mjs';
+import { closureFile, commitIn, criteriaFile, goodClosure, makeRepo, ok, OUT_OF_ORDER, postedComment, rawReadback, sh, singleRepoProject, state, summaryFile, tmp, toAccepted, wf, write, yaml } from './helpers.mjs';
 
 const steps = [{ id: 'unit', repo: 'app', run: 'true', inputs: ['src/**'] }];
 
@@ -38,7 +38,7 @@ test('base moved and touches the change: gate reopens, rerun, then delivers', ()
   const d2 = wf(p2.root, ['deliver', '--attempt', a2.id]);
   assert.equal(d2.code, 75);
   assert.match(d2.err, /touches package\.json/);
-  ok(wf(p2.root, ['gate', '--attempt', a2.id]));
+  ok(wf(p2.root, ['gate', ...OUT_OF_ORDER, '--attempt', a2.id]));
   ok(wf(p2.root, ['deliver', '--attempt', a2.id]));
   assert.equal(sh(p2.base, `git --git-dir=${p2.remote} show main:package.json`), '{"name":"x"}');
 });
@@ -80,7 +80,7 @@ test('a changed contract pulls dependents into the gate; delivery goes providers
   ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
   commitIn(e.repos.api.worktree, { 'openapi.json': '{"paths":{}}\n' });
   commitIn(e.repos.web.worktree, { 'README.md': 'docs only\n' });
-  const g = JSON.parse(wf(root, ['gate', '--attempt', e.id, '--json']).out);
+  const g = JSON.parse(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id, '--json']).out);
   assert.deepEqual(g.impact.dependents, ['web']);
   assert.equal(g.steps.find((s) => s.id === 'web-contract').status, 'passed', 'dependent step ran although no web src changed');
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', e.id]));
@@ -112,7 +112,7 @@ test('batch: members defer heavy steps; the batch runs them once and delivers ev
   assert.match(wf(root, ['deliver', '--attempt', m1.id]).err, /deferred its heavy steps/);
   const b = ok(wf(root, ['batch', 'create', '--members', `${m1.id},${m2.id}`, '--owner', 'o', '--json'])).json();
   assert.equal(wf(root, ['deliver', '--attempt', m1.id]).code, 75, 'a member cannot deliver alone');
-  ok(wf(root, ['gate', '--attempt', b.id]));
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', b.id]));
   assert.equal(fs.readFileSync(path.join(root, '..', 'heavy.log'), 'utf8').trim(), 'heavy', 'heavy step ran once, in the batch');
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'rb', '--attempt', b.id]));
   ok(wf(root, ['review', '--closure', closureFile(base, { reviewer: 'rb', findings: [], criteria: [{ id: 'B1', evidence: { kind: 'output', ref: 'batch gate' } }], screenshotsInspected: [] }), '--attempt', b.id]));
@@ -145,7 +145,7 @@ test('tracker: status, comment and screenshots are verified from the readback', 
   // Re-reading an unchanged issue gives the same bytes as the admission read: accepted for `implementing`.
   ok(wf(root, ['tracker', 'record', '--event', 'implementing', '--capture', cap({ issue: { identifier: item, description: 'Show the new text on the home screen.', state: { name: 'In Progress' } } }), '--attempt', e.id]));
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'ui\n' });
-  const g = JSON.parse(ok(wf(root, ['gate', '--attempt', e.id, '--json'])).out);
+  const g = JSON.parse(ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id, '--json'])).out);
   const shot = g.steps[0].artifacts[0];
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', e.id]));
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r')), '--attempt', e.id]));
@@ -209,7 +209,7 @@ test('wf stop pauses a running gate and finished steps are kept', async () => {
   const { WF } = await import('./helpers.mjs');
   const env = { ...process.env, WF_CONFIG_HOME: path.join(root, '..', '.wfhome') };
   delete env.CLAUDE_CODE_SESSION_ID;
-  const child = spawn(process.execPath, [WF, 'gate', '--attempt', e.id], { cwd: root, env, stdio: 'ignore' });
+  const child = spawn(process.execPath, [WF, 'gate', ...OUT_OF_ORDER, '--attempt', e.id], { cwd: root, env, stdio: 'ignore' });
   const lock = path.join(root, '.wf-evidence', 'attempts', e.id, 'gate', 'gate.lock');
   // Named failure (0.4.5, Linux as root under full-suite load): the gate creates its lock with O_EXCL and writes the JSON
   // in a second call, so the lock can be read empty; JSON.parse threw and failed the test. An unreadable lock is "not
@@ -222,13 +222,13 @@ test('wf stop pauses a running gate and finished steps are kept', async () => {
     }
   };
   for (let i = 0; i < 100 && !ready(); i++) await new Promise((r) => setTimeout(r, 100));
-  ok(wf(root, ['stop', '--reason', 'need the machine', '--attempt', e.id]));
+  ok(wf(root, ['stop', '--class', 'owner-decision', '--reason', 'need the machine', '--attempt', e.id]));
   const code = await new Promise((r) => child.on('exit', r));
   assert.equal(code, 1);
   const s = state(root, e.id);
   assert.equal(s.lastGate.status, 'stopped');
   assert.equal(s.lastGate.steps.find((x) => x.id === 'fast').status, 'passed');
-  assert.match(ok(wf(root, ['resume', '--attempt', e.id])).out, /gate stopped \(need the machine\)/);
+  assert.match(ok(wf(root, ['resume', '--attempt', e.id])).out, /gate stopped \(owner-decision: need the machine\); run `wf gate` to continue/);
 });
 
 test('a project delivery adapter (merge requests) waits for merge, then reads back', () => {
@@ -337,7 +337,7 @@ function recoverFromBrokenAdapter(name, { baseMerge }) {
     sh(root, "printf 'o2\\n' > src/other.txt && git commit -qam 'unrelated base change' && git push -q origin main");
     ok(wf(root, ['base', 'merge', '--attempt', id]));
   }
-  ok(wf(root, ['gate', '--attempt', id]));
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', id]));
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-1', '--attempt', id, '--owner', 'owner-1']));
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('rev-1')), '--attempt', id]));
   ok(wf(root, ['accept', '--attempt', id, '--owner', 'owner-1']));
@@ -358,7 +358,7 @@ function recoverFromBrokenAdapter(name, { baseMerge }) {
   ok(wf(root, ['handoff', 'planner', '--agent', 'plan-2', '--attempt', e2.id, '--owner', 'owner-1']));
   ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e2.id, '--owner', 'owner-1']));
   ok(wf(root, ['handoff', 'implementer', '--agent', 'impl-2', '--attempt', e2.id, '--owner', 'owner-1']));
-  ok(wf(root, ['gate', '--attempt', e2.id]));
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e2.id]));
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-2', '--attempt', e2.id, '--owner', 'owner-1']));
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('rev-2')), '--attempt', e2.id]));
   ok(wf(root, ['accept', '--attempt', e2.id, '--owner', 'owner-1']));
@@ -390,9 +390,9 @@ test('a step that reads another repo (alsoInputs) reruns when that repo changes,
   ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id]));
   ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
   commitIn(e.repos.api.worktree, { 'src/a.txt': 'api change\n' });
-  ok(wf(root, ['gate', '--attempt', e.id]));
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]));
   commitIn(e.repos.web.worktree, { 'src/w.txt': 'bad\n' });
-  const g = JSON.parse(wf(root, ['gate', '--attempt', e.id, '--json']).out);
+  const g = JSON.parse(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id, '--json']).out);
   const step = Object.fromEntries(g.steps.map((s) => [s.id, s]));
   assert.equal(step['api-unit'].status, 'reused', 'a step that reads only its own repo is still reused');
   assert.equal(step['api-e2e'].status, 'failed', 'the cross-repo step reran against the changed sibling instead of reusing a stale pass');
@@ -406,8 +406,8 @@ test('a step that reads another repo (alsoInputs) reruns when that repo changes,
   ok(wf(p2.root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e2.id]));
   commitIn(e2.repos.api.worktree, { 'src/a.txt': 'api change\n' });
   fs.renameSync(path.join(p2.root, 'web', '.git'), path.join(p2.root, 'web', '.git-away'));
-  const first = JSON.parse(wf(p2.root, ['gate', '--attempt', e2.id, '--json']).out).steps.find((s) => s.id === 'api-e2e');
-  const second = JSON.parse(wf(p2.root, ['gate', '--attempt', e2.id, '--json']).out).steps.find((s) => s.id === 'api-e2e');
+  const first = JSON.parse(wf(p2.root, ['gate', ...OUT_OF_ORDER, '--attempt', e2.id, '--json']).out).steps.find((s) => s.id === 'api-e2e');
+  const second = JSON.parse(wf(p2.root, ['gate', ...OUT_OF_ORDER, '--attempt', e2.id, '--json']).out).steps.find((s) => s.id === 'api-e2e');
   assert.equal(first.status, 'passed');
   assert.equal(second.status, 'passed', 'a passing step whose sibling tree is unreadable is rerun, not reused');
   assert.match(second.reason, /cannot read the tree of web/);

@@ -5,7 +5,7 @@ import { pathToFileURL } from 'node:url';
 import { actor, addRepoWorktree, branchName, changedFiles, cleanupWorktrees, entry, openState, treeHashes, worktreeDir } from './attempt.mjs';
 import { channelOf, discoveredVerdicts, openDiscovered, seamVerdicts, unacknowledged, unrecordedInReports } from './discovered.mjs';
 import { ADAPTER_DIR, adapterFileAtCommit, agentTypeFor, declared, loadConfig, loadConfigAtCommit, repoDir, roleClass } from './config.mjs';
-import { focusedSkips, gatePassedForCurrentTree, screenshots } from './gate.mjs';
+import { focusedSkips, gateBusy, gatePassedForCurrentTree, gateRunningRefusal, screenshots, withReviewLock } from './gate.mjs';
 import { append, attemptDir, evidenceRoot, keptFiles, listAttempts, loadState, openEvidence } from './ledger.mjs';
 import { assertUnchanged, readEvidenceFile } from './evidence.mjs';
 import { implementerAcks, lessonPrompts, lessonVerdicts, owesLesson, recur, relevantLessons } from './lessons.mjs';
@@ -306,11 +306,14 @@ export function handoff(root, role, options) {
   if (state.intent === 'analysis' && role !== 'planner') throw refuse('analysis attempts are read-only; only a planner handoff is allowed');
   if (role === 'implementer' && !state.criteria) throw refuse('freeze criteria first: `wf plan --file <criteria>`');
   if (role === 'tester' && !cfg.roles?.tester) throw refuse('this project has no tester role configured');
-  // Review runs before the gate: every finding found after a gate costs another full gate. The gate may run in parallel.
+  // Order of work (I-27): code-review rounds run to clean with no gate, then one gate on that tree, then the evidence
+  // review of the gated tree. A finding made while a gate runs makes that gate obsolete, so the two never overlap.
   let gateNow = null;
   if (role === 'reviewer') {
+    const busy = gateBusy(root, state);
+    if (busy) throw gateRunningRefusal(state, busy);
     if (state.lane !== 'batch' && !state.handoffs.some((h) => h.role === 'implementer')) throw refuse('nothing to review yet: hand the work to an implementer first (`wf handoff implementer --agent <id>`)');
-    // Tracked changes only: a gate running in parallel writes untracked reports, and those are never the change.
+    // Tracked changes only: a finished gate leaves untracked reports, and those are never the change.
     const dirty = Object.entries(treeHashes(state)).filter(([, t]) => t.includes('+dirty')).map(([n]) => n);
     if (dirty.length) throw refuse(`commit the change before the review (the reviewer reads the committed diff): uncommitted changes in ${dirty.join(', ')}`);
     if (authorsOf(root, state).has(agent)) throw refuse(`${agent} planned, wrote or owns this change and cannot review it`);
@@ -390,8 +393,10 @@ export function handoff(root, role, options) {
     impact: impact(trusted, changed),
     invariants: cfg.invariants ? path.resolve(root, ADAPTER_DIR, cfg.invariants) : null,
     roleAppendix: appendix && fs.existsSync(appendix) ? appendix : null,
-    // Whether gate evidence exists for the tree under review. Without it the reviewer judges the diff; acceptance then
-    // needs a later round written after a passing gate on this tree, which inspects the evidence.
+    // Which round this is: a code review (no passing gate on this tree; the reviewer judges the diff and no gate runs
+    // until a round comes back clean) or the evidence review (a gate passed on this tree after a clean code review; the
+    // reviewer inspects its logs and screenshots). Acceptance needs the evidence review.
+    round: role === 'reviewer' ? (gateNow.ok ? 'evidence-review' : 'code-review') : undefined,
     gate: role === 'reviewer'
       ? gateNow.ok
         ? { passedOnThisTree: true, runId: state.lastGate.runId, evidence: state.lastGate.evidence, screenshots: screenshots(state), artifacts: artifactsByStep(state, trusted), logs: state.lastGate.steps.filter((s) => s.log).map((s) => ({ step: s.id, log: s.log, status: s.status })) }
@@ -420,8 +425,11 @@ export function handoff(root, role, options) {
       tester: 'Write requirement expectations from the issue before reading the implementation, then map each to gate tests.',
     }[role],
   };
-  writeJson(file, bundle);
-  if (bundle.reviewClosureFile) fs.mkdirSync(path.dirname(bundle.reviewClosureFile), { recursive: true });
+  const record = () => {
+    writeJson(file, bundle);
+    if (bundle.reviewClosureFile) fs.mkdirSync(path.dirname(bundle.reviewClosureFile), { recursive: true });
+    append(root, state.id, 'handoff', { lessons: (bundle.lessons?.apply ?? []).map((l) => l.id), lessonsFiltered: (selected?.filtered ?? []).map((l) => l.id), role, agent, runtime, session: options.session ?? null, agentType, class: cls, effort, model, sessionModel: sessionModelNow, startPrompt: startPromptFor(file), work: work?.id ?? null, bundle: file, tree: treeHashes(state), patch: patchIds(state), ...(role === 'reviewer' ? { gate: gateNow.ok ? state.lastGate.runId : null, round: bundle.round } : {}) }, actor(options));
+  };
   // The model the owner's session runs on now: an agent whose class pins no model inherits it (`wf report` shows it).
   let sessionModelNow = null;
   const owning = sessionIdentity();
@@ -430,7 +438,9 @@ export function handoff(root, role, options) {
       sessionModelNow = sessionModel(home(), owning.session);
     } catch {}
   }
-  append(root, state.id, 'handoff', { lessons: (bundle.lessons?.apply ?? []).map((l) => l.id), lessonsFiltered: (selected?.filtered ?? []).map((l) => l.id), role, agent, runtime, session: options.session ?? null, agentType, class: cls, effort, model, sessionModel: sessionModelNow, startPrompt: startPromptFor(file), work: work?.id ?? null, bundle: file, tree: treeHashes(state), patch: patchIds(state), ...(role === 'reviewer' ? { gate: gateNow.ok ? state.lastGate.runId : null } : {}) }, actor(options));
+  // A reviewer round is recorded holding the gate lock: no gate can start between the check above and this record.
+  if (role === 'reviewer') withReviewLock(root, state, record);
+  else record();
   // Once per attempt: with parallel work items every implementer handoff queued another identical tracker read.
   const firstImplementer = role === 'implementer' && !state.handoffs.some((h) => h.role === 'implementer');
   if (firstImplementer && state.lane !== 'quick' && state.intent === 'implementation') emitTrackerEvent(root, cfg, state.id, 'implementing');
@@ -528,6 +538,9 @@ export function recordReview(root, options) {
   // (the reviewer may write only its closure file, outside them) invalidates it.
   if (reviewerHandoff.tree && canonical(treeHashes(state)) !== canonical(reviewerHandoff.tree)) {
     const moved = Object.keys({ ...treeHashes(state), ...reviewerHandoff.tree }).filter((k) => treeHashes(state)[k] !== reviewerHandoff.tree[k]);
+    // Named failure (I-23): two review rounds were refused because implementers were still editing, and nothing in the
+    // ledger showed it. The refused round is recorded; it is over, and the next round starts on the committed tree.
+    append(root, state.id, 'review.refused', { handoff: reviewerHandoff.bundle, reviewer: reviewerHandoff.agent, reason: 'tree-changed', moved, handedTree: reviewerHandoff.tree, tree: treeHashes(state) }, String(closure.reviewer ?? reviewerHandoff.agent));
     throw refuse(`the worktree changed during the review round (${moved.join(', ')}): the closure no longer describes the tree under review; a reviewer writes only the file in \`reviewClosureFile\``, 'restore or commit the change through the implementer, then start a fresh reviewer: `wf handoff reviewer --agent <new id>`');
   }
   // Provenance: where transcripts exist, the closure must come from the agent handed this round, started with exactly
@@ -580,6 +593,62 @@ export function recordReview(root, options) {
     safeWriteJson(root, reveal, { note: 'Findings earlier review rounds left open. Check each against the current code; add priorFindings to your closure.', findings: toVerify });
   }
   return { state: after, reveal, toVerify };
+}
+
+// The review round handed last when no closure has been recorded for it, it was not refused, and the tree is still the
+// one it was handed: that reviewer is still at work. Null otherwise.
+export function reviewInFlight(state) {
+  const last = state.handoffs.filter((h) => h.role === 'reviewer').at(-1);
+  if (!last) return null;
+  const ended = (x) => (x.handoff ? x.handoff === last.bundle : x.reviewer === last.agent);
+  if ((state.reviews ?? []).some(ended) || (state.reviewsRefused ?? []).some(ended)) return null;
+  if (last.tree && canonical(last.tree) !== canonical(treeHashes(state))) return null;
+  return last;
+}
+
+// Whether a recorded review round covers the tree as it is now: the same tree, or the same change of the ticket (a base
+// merged in without touching it keeps the reviewed change).
+function reviewCovers(state, r) {
+  const t = r.tree ?? r.handoffTree;
+  if (t && canonical(t) === canonical(treeHashes(state))) return true;
+  const reviewed = r.handoffPatch ?? null;
+  if (!reviewed) return false;
+  try {
+    return canonical(patchIds(state)) === canonical(reviewed);
+  } catch {
+    return false;
+  }
+}
+
+// Named failure (I-27): gates ran beside review rounds and on unreviewed trees, and each finding made the gate obsolete
+// (15 of 16 gates stopped on one ticket, about 175 of 271 gate minutes discarded). The order is: code-review rounds
+// until one comes back clean, then one gate on that tree, then the evidence review. What stands between this tree and
+// its gate, as lines; empty when the gate may run.
+export function gateOrderProblems(state) {
+  const problems = [];
+  const busy = reviewInFlight(state);
+  if (busy) problems.push(`reviewer ${busy.agent} was handed this tree and has recorded no closure: review and gate never run side by side; wait for its closure`);
+  const r = state.review;
+  if (!r || !reviewCovers(state, r)) {
+    if (!busy) problems.push(`no review round covers the current tree: run the code review first (\`wf handoff reviewer --agent <new id>\`); the gate runs once a round on this tree comes back clean`);
+    return problems;
+  }
+  const open = openFindings(r);
+  if (open.length) problems.push(`the latest review round (${r.closure.reviewer}) has open findings (${open.map((f) => f.id).join(', ')}): fix them through the implementer, commit, and run the next code-review round until one comes back clean`);
+  const toVerify = unverifiedPrior(state, r);
+  if (toVerify.length) problems.push(`the latest review round (${r.closure.reviewer}) has not verified ${toVerify.length} earlier-round finding(s) (${toVerify.map((f) => `${f.round}:${f.id}`).join(', ')})`);
+  return problems;
+}
+
+// `wf gate` checks the order under the gate lock; `--reason` runs it anyway and records the override in the ledger.
+export function gateOrderCheck(root, options) {
+  return (state) => {
+    const problems = gateOrderProblems(state);
+    if (!problems.length) return;
+    const reason = typeof options.reason === 'string' ? options.reason.trim() : '';
+    if (!reason) throw refuse(`the gate runs after a clean code review, never beside or before it:\n  - ${problems.join('\n  - ')}`, 'follow the order (`wf resume` names the next step), or run it anyway with `wf gate --reason "<why>"`, which records the override in the ledger');
+    append(root, state.id, 'gate.override', { reason, problems, tree: treeHashes(state) }, actor(options));
+  };
 }
 
 // 0.1.5 and earlier recorded no flag: their reviewers were handed the attempt only after a passing gate on that tree.
@@ -719,7 +788,7 @@ function pushMain(root, state, repo) {
     mainAdvance = { from: ownBase, to: remoteHead, delta: delta.length, overlap, infra };
     if (overlap.length || infra.length) {
       append(root, state.id, 'gate.reopened', { repo: repo.name, mainAdvance }, null);
-      throw refuse(`${repo.base} moved and touches ${[...overlap, ...infra].slice(0, 5).join(', ')}${overlap.length + infra.length > 5 ? '…' : ''}; merged into the worktree. Rerun \`wf gate\`; ${overlap.length ? 'the change itself moved, so hand it to a reviewer again before `wf deliver`' : 'then `wf deliver`'}`);
+      throw refuse(`${repo.base} moved and touches ${[...overlap, ...infra].slice(0, 5).join(', ')}${overlap.length + infra.length > 5 ? '…' : ''}; merged into the worktree. ${overlap.length ? 'The change itself moved: hand it to a fresh reviewer for the code review first, then `wf gate`, then the evidence review, before `wf deliver`' : 'Rerun `wf gate`, then `wf deliver`'}`);
     }
   }
   run('git', ['push', '--quiet', repo.remote, `HEAD:refs/heads/${repo.base}`], { cwd: wt });
@@ -1398,7 +1467,13 @@ function nextStep(root, state) {
 function phaseAction(cfg, state) {
   // The stop reason is the owner's note about the tree it stopped on; once the code changed it is stale and, shown to a
   // later reviewer, it carried an earlier round's findings into a blind review.
-  if (state.stops.length && state.lastGate?.status === 'stopped' && canonical(state.lastGate.tree) === canonical(treeHashes(state))) return `gate stopped (${state.stops.at(-1).reason}); run \`wf gate\` to continue with finished steps carried`;
+  if (state.stops.length && state.lastGate?.status === 'stopped' && canonical(state.lastGate.tree) === canonical(treeHashes(state))) {
+    const stop = state.stops.at(-1);
+    // A gate stopped for a finding or a tree change is not resumed: the tree changes first, and a code review comes
+    // before the next gate (I-27). An owner's decision (or a stop recorded before classes existed) resumes it.
+    if (['major-finding', 'tree-change'].includes(stop.class)) return `gate stopped (${stop.class}: ${stop.reason}); fix and commit through the implementer that did that work, then the code review of the new tree: hand it to a fresh reviewer (\`wf handoff reviewer --agent <new id>\`); the gate runs once a round comes back clean`;
+    return `gate stopped (${stop.class ? `${stop.class}: ` : ''}${stop.reason}); run \`wf gate\` to continue with finished steps carried`;
+  }
   if (!state.criteria) {
     if (needsPlanner(cfg, state) && !state.handoffs.some((h) => h.role === 'planner')) return 'start the planner: `wf handoff planner --agent <id>`';
     return 'freeze the criteria: `wf plan --file <criteria.yaml>`';
@@ -1412,27 +1487,28 @@ function phaseAction(cfg, state) {
   const openIssues = openDiscovered(state);
   if (openIssues.length) return `${openIssues.filter((d) => d.blockedBy).map((d) => `route ${d.id} to the implementer of ${d.blockedBy} (continue it with SendMessage); `).join('')}fix the discovered issue(s) ${openIssues.map((d) => d.id).join(', ')} in this ticket through the implementer that found each (never yourself) (\`wf discovered list\`), commit, then \`wf discovered close <id> --fixed <commit>\`; a criterion or scope that blocks the fix is amended (\`wf criteria amend --file <f> --reason "why"\`, \`--add-repo <repo>\` when the fix needs another repo); defer only on the owner's own decision (\`--deferred\` once the owner's message starts with \`defer ${state.id}:<id>\`)`;
   if (state.accepted) return state.batchOf ? `waiting for batch ${state.batchOf}` : 'deliver: `wf deliver`';
-  // Order: review the committed change (the gate may run in parallel), fix findings, gate, then an evidence pass.
+  // Order of work (I-27): code-review rounds until one comes back clean (no gate meanwhile), then one gate on that tree,
+  // then the evidence review of the gated tree. Review and gate never run side by side.
   const g = state.lastGate;
   const tree = treeHashes(state);
   const onTree = (t) => t && canonical(t) === canonical(tree);
   const pass = gatePassedForCurrentTree(state);
   const fresh = `a fresh reviewer (new id, never one from an earlier round; start it with only the printed line): \`wf handoff reviewer --agent <new id>\` [${agentTypeFor(cfg, 'reviewer')}]`;
   const focused = g?.status === 'passed' && onTree(g.tree) ? focusedSkips(g) : [];
-  const gateRun = focused.length ? `the last gate was focused (skipped ${focused.join(', ')}): run \`wf gate\` without --focused` : 'run `wf gate`';
-  const gateHint = pass.ok ? '' : `; the gate can run in parallel (${gateRun}; never edit the worktrees while it runs)`;
+  const gateRun = focused.length ? `the last gate was focused (skipped ${focused.join(', ')}): run one \`wf gate\` without --focused` : 'run one `wf gate` (never edit the worktrees or hand a reviewer the tree while it runs)';
+  const noGate = 'no gate until a code-review round on this tree comes back clean';
   const uncommittedWork = Object.values(tree).some((t) => t.includes('+dirty')) || Object.keys(state.repos).every((n) => !changedFiles(state, n).length);
-  if (uncommittedWork) return `commit the change, then hand to ${fresh}${gateHint}`;
-  if (g?.status === 'failed' && onTree(g.tree)) return 'gate failed: fix and commit through the implementer that did that work, then `wf gate`';
+  if (uncommittedWork) return `commit the change, then the code review: hand to ${fresh}; ${noGate}`;
+  const inFlight = reviewInFlight(state);
+  if (inFlight) return `waiting for reviewer ${inFlight.agent}: \`wf review --closure <its file>\`; ${inFlight.round === 'evidence-review' || (!inFlight.round && inFlight.gate) ? 'evidence review of the gated tree' : 'code review'}, no gate while it runs`;
+  if (g?.status === 'failed' && onTree(g.tree)) return 'gate failed: fix and commit through the implementer that did that work; the fixed tree then gets a code-review round by a fresh reviewer before the next `wf gate` (a failure that needed no code change: `wf gate` again)';
   const r = state.review;
-  const lastReviewer = state.handoffs.filter((h) => h.role === 'reviewer').at(-1);
-  if (lastReviewer && onTree(lastReviewer.tree) && r?.closure.reviewer !== lastReviewer.agent) return `waiting for reviewer ${lastReviewer.agent}: \`wf review --closure <its file>\`${gateHint}`;
-  if (!r || !onTree(r.tree ?? r.handoffTree)) return `hand to ${fresh}${gateHint}`;
+  if (!r || !onTree(r.tree ?? r.handoffTree)) return `code review: hand to ${fresh}; ${noGate}`;
   const open = openFindings(r);
-  if (open.length) return `fix the open findings (${open.map((f) => (f.work ? `${f.id} in ${f.work}` : f.id)).join(', ')}) through the implementer that did that work (continue it; do not start a new one), commit, then hand to ${fresh}; \`wf gate\` on the fixed tree`;
+  if (open.length) return `fix the open findings (${open.map((f) => (f.work ? `${f.id} in ${f.work}` : f.id)).join(', ')}) through the implementer that did that work (continue it; do not start a new one), commit, then the next code-review round: hand to ${fresh}; ${noGate}`;
   const toVerify = unverifiedPrior(state, r);
-  if (toVerify.length) return `reviewer ${r.closure.reviewer} must verify ${toVerify.length} earlier-round finding(s) (${toVerify.map((f) => `${f.round}:${f.id}`).join(', ')}): it adds \`priorFindings\` to its closure and runs \`wf review --closure <its file>\` again; if it is gone, hand to ${fresh}`;
-  if (!pass.ok) return `clean review on this tree: ${gateRun}`;
-  if (!reviewedAfterGate(r)) return `evidence pass: the gate passed after the review, so hand to ${fresh} to inspect the gate evidence and screenshots`;
+  if (toVerify.length) return `reviewer ${r.closure.reviewer} must verify ${toVerify.length} earlier-round finding(s) (${toVerify.map((f) => `${f.round}:${f.id}`).join(', ')}): it adds \`priorFindings\` to its closure and runs \`wf review --closure <its file>\` again; if it is gone, hand to ${fresh}; ${noGate}`;
+  if (!pass.ok) return `clean code review on this tree: ${gateRun}; then the evidence review`;
+  if (!reviewedAfterGate(r)) return `evidence review: the gate passed on the reviewed tree, so hand to ${fresh} to inspect the gate evidence (logs and screenshots)`;
   return 'accept the review: `wf accept`';
 }

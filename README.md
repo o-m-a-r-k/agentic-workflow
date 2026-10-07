@@ -12,7 +12,7 @@ Coding agents are fast; checking what they report is the slow part. agentic-work
 
 ## See it
 
-![A real wf run: the gate refuses a broken first try, the implementer is refused as its own reviewer, then a fresh review, delivery and the ticket readback](docs/assets/demo.svg)
+![A real wf run: no gate before a clean code review, the implementer refused as its own reviewer, a review finding fixed, one gate, the evidence review, delivery and the ticket readback](docs/assets/demo.svg)
 
 The recording is real `wf` output from [`examples/hello-ticket`](examples/hello-ticket/) ([plain text](docs/assets/demo.txt)); run it yourself with the command under [Try it](#try-it-in-5-minutes).
 

@@ -8,7 +8,7 @@ Each scenario runs the real `wf` CLI against temporary git repositories with bar
 bash examples/hello-ticket/demo.sh
 ```
 
-A tiny library (`examples/hello-ticket/`) with two tickets as files and `node --test` as the gate. The script admits HT-1, freezes the criteria, makes a first implementation that the gate refuses, fixes it, shows the implementer being refused as its own reviewer, records a fresh review, delivers to a local origin and prints the ticket as the engine left it. It needs only Node and git, uses a temporary folder (`KEEP=1` keeps it) and touches nothing else. Try HT-2 yourself afterwards.
+A tiny library (`examples/hello-ticket/`) with two tickets as files and `node --test` as the gate. The script admits HT-1, freezes the criteria, makes a first implementation, shows the gate refused before a clean code review and the implementer refused as its own reviewer, records a code-review round that finds the bug, fixes it, records a clean round that verifies the fix, runs one gate and the evidence review, delivers to a local origin and prints the ticket as the engine left it. It needs only Node and git, uses a temporary folder (`KEEP=1` keeps it) and touches nothing else. Try HT-2 yourself afterwards.
 
 ![A real run of the demo](assets/demo.svg)
 
@@ -27,6 +27,7 @@ A tiny library (`examples/hello-ticket/`) with two tickets as files and `node --
 | Independence | Owner, planner and implementer cannot review; planner must leave the tree unchanged; closure must come from the handed reviewer | lifecycle |
 | Criteria | Frozen before implementation; every criterion mapped; n/a needs a reason; amendments recorded | lifecycle |
 | Review | Open findings block acceptance; a change after acceptance needs a new review | lifecycle |
+| Order of work 0.5.0 | Happy path: code review to clean with no gate (`round: code-review`, no gate evidence), one gate, then the evidence review (`round: evidence-review`, logs bundled), accept and deliver; `wf gate` refused before any review round, while a round has open or unverified findings, after the tree moved past the reviewed one and while a reviewer is at work (also the evidence reviewer); `--reason` runs it and records `gate.override` before `gate.started`; `wf handoff reviewer` refused while a gate runs (nothing recorded) and while another handoff holds the gate lock; `wf stop` refused without `--class` or `--reason` and records class, reason, `discardedMinutes` and `stepsFinished`, and a stop for a finding is not resumed on the same tree; a closure refused because the tree changed leaves `review.refused` and ends the round; the batch tree is reviewed before its gate | review-order, demo |
 | Authority | Analysis intent never implements or delivers; a hold vetoes delivery until released | lifecycle |
 | Gate truth | A newer failure supersedes an older pass; uncommitted changes refuse the gate | lifecycle |
 | Ownership | One open attempt per item; `adopt` transfers ownership | lifecycle |
@@ -38,7 +39,7 @@ A tiny library (`examples/hello-ticket/`) with two tickets as files and `node --
 | Suites | JUnit suites recorded; `select` reruns only failed or changed suites | gate |
 | Scheduling | Parallel up to the limit; steps holding the same lease never overlap | gate |
 | Recovery | A killed runner is recovered: finished steps carried, its processes stopped, no duplicate gate while alive | gate |
-| Stop | `wf stop` pauses a gate and keeps finished steps | delivery |
+| Stop | `wf stop --class owner-decision` pauses a gate and keeps finished steps; `wf resume` continues it | delivery, review-order |
 | Secrets | Missing secrets refuse the gate; format checked; values masked in logs and status; `.env.local` is 0600; generated and test keys filled by `secrets init` | gate, onboarding |
 | Base advance | Unrelated base movement is merged and the gate carried; movement touching the change or shared infra reopens the gate | delivery |
 | Topology | A changed contract pulls dependents into the gate; the reviewer is told which contract is crossed; providers deliver first | delivery |

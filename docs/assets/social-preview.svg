@@ -11,10 +11,10 @@
 <text class="s" x="80" y="245">Frozen criteria, a gate on the exact tree, an independent review, a verified handoff.</text>
 <rect x="80" y="290" width="1120" height="274" rx="10" fill="#1c232b"/>
 <text class="m" x="108" y="330" fill="var(--cmd)">$ wf gate --attempt HT-1.1</text>
-<text class="m" x="108" y="364" fill="var(--bad)">wf gate: failed   unit  0.1s</text>
-<text class="m" x="108" y="398" fill="var(--bad)">(exit 1: refused)</text>
+<text class="m" x="108" y="364" fill="var(--fg)">wf gate: the gate runs after a clean code review, never beside or before it:</text>
+<text class="m" x="108" y="398" fill="var(--bad)">(exit 75: refused)</text>
 <text class="m" x="108" y="432" fill="var(--cmd)">$ wf handoff reviewer --agent implementer-1 --attempt HT-1.1</text>
 <text class="m" x="108" y="466" fill="var(--bad)">wf handoff: implementer-1 planned, wrote or owns this change and cannot review it</text>
-<text class="m" x="108" y="500" fill="var(--good)">delivered HT-1.1: hello-ticket@1a648857d2</text>
-<text class="m" x="108" y="534" fill="var(--good)">tracker: delivered performed on the ticket files and read back; attempt closed</text>
+<text class="m" x="108" y="500" fill="var(--good)">gate passed (2026-10-07T10-46-53-741Z-43765)</text>
+<text class="m" x="108" y="534" fill="var(--good)">delivered HT-1.1: hello-ticket@0d86b0ebcc</text>
 </svg>

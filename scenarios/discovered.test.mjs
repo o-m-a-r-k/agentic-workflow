@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { knownLimits } from '../engine/tracker.mjs';
-import { WF, closureFile, commitIn, toAccepted, criteriaFile, goodClosure, makeRepo, ok, sh, singleRepoProject, state, tmp, wf, yaml } from './helpers.mjs';
+import { closureFile, commitIn, criteriaFile, goodClosure, makeRepo, ok, OUT_OF_ORDER, sh, singleRepoProject, state, tmp, toAccepted, WF, wf, yaml } from './helpers.mjs';
 
 // I-18, named failure: implementers, reviewers and the owner agent noted real defects found during a ticket and parked
 // them as follow-ups or "harmless today" without the owner deciding. Every issue found during a ticket is now in the
@@ -90,7 +90,7 @@ test('I-18: discovered issues are recorded, end fixed by a ticket commit or defe
   assert.ok(closed.deferred.source.line > 0);
 
   // The reviewer's bundle lists every entry; a closure without a verdict per entry is refused.
-  ok(wf(root, ['gate', '--attempt', id]));
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', id]));
   const h = ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-1', '--attempt', id, '--owner', OWNER, '--runtime', 'codex']));
   const bundle = bundleOf(h);
   assert.deepEqual(bundle.discovered.map((d) => [d.id, d.status]), [['D1', 'fixed'], ['D2', 'deferred']]);
@@ -322,7 +322,7 @@ test('I-19: a discovered fix adds a repo and its work items to the running attem
   commitIn(s.repos.api.worktree, { 'src/totals.txt': 'page\ntotal\n' }, 'list response carries the full total');
   const fix = sh(s.repos.api.worktree, 'git rev-parse HEAD');
   ok(disc(root, ['close', 'D1', '--fixed', fix, '--attempt', id, '--owner', 'o']));
-  ok(wf(root, ['gate', '--attempt', id]));
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', id]));
   const h = ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-1', '--attempt', id, '--owner', 'o']));
   const bundle = bundleOf(h);
   assert.deepEqual(bundle.addedRepos.map((x) => x.repo), ['api']);
@@ -433,7 +433,7 @@ test('0.4.5: a batch delivery needs each member deferral acknowledged as <member
     ok(disc(root, ['close', 'D1', '--deferred', '--attempt', m]));
   }
   const b = ok(wf(root, ['batch', 'create', '--members', `${m1.id},${m2.id}`, '--owner', OWNER, '--json'])).json();
-  ok(wf(root, ['gate', '--attempt', b.id]));
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', b.id]));
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'rb', '--attempt', b.id, '--owner', OWNER, '--runtime', 'codex']));
   ok(wf(root, ['review', '--closure', closureFile(base, { reviewer: 'rb', findings: [], criteria: [{ id: 'B1', evidence: { kind: 'output', ref: 'batch gate' } }], screenshotsInspected: [] }), '--attempt', b.id]));
   ok(wf(root, ['accept', '--attempt', b.id, '--owner', OWNER]));
@@ -462,7 +462,7 @@ test('0.4.5: a delivery refused after the acknowledgement is retried with the sa
   ok(disc(root, ['add', '--attempt', id, '--summary', 'x', '--found-by', 'impl-1']));
   ownerSays(root, `defer ${id}:D1: later`);
   ok(disc(root, ['close', 'D1', '--deferred', '--attempt', id]));
-  ok(wf(root, ['gate', '--attempt', id]));
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', id]));
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-1', '--attempt', id, '--owner', OWNER, '--runtime', 'codex']));
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('rev-1', { discovered: [{ id: 'D1', verdict: 'deferred', evidence: 'r' }] })), '--attempt', id]));
   ok(wf(root, ['accept', '--attempt', id, '--owner', OWNER]));
@@ -512,7 +512,7 @@ export default {
   ok(disc(root, ['add', '--attempt', id, '--summary', 'x', '--found-by', 'impl-1']));
   ownerSays(root, `defer ${id}:D1: later`);
   ok(disc(root, ['close', 'D1', '--deferred', '--attempt', id]));
-  ok(wf(root, ['gate', '--attempt', id]));
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', id]));
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-1', '--attempt', id, '--owner', OWNER, '--runtime', 'codex']));
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('rev-1', { discovered: [{ id: 'D1', verdict: 'deferred', evidence: 'r' }] })), '--attempt', id]));
   ok(wf(root, ['accept', '--attempt', id, '--owner', OWNER]));

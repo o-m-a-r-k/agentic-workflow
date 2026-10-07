@@ -6,7 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { canonical, isInside, touchesEvidence } from '../engine/paths.mjs';
 import { LinkRefused, chmodNoFollow, linkSeams, writeNoFollow } from '../engine/evidence.mjs';
 import { check } from '../hooks/guard-evidence.mjs';
-import { commitIn, criteriaFile, ok, singleRepoProject, tmp, wf } from './helpers.mjs';
+import { commitIn, criteriaFile, ok, OUT_OF_ORDER, singleRepoProject, tmp, wf } from './helpers.mjs';
 
 // 0.1.23: named findings (0.1.22 review): a hard link at an evidence path shared its data with a file outside; a link
 // swapped in between a check and its use; path checks that disagreed with how the OS resolves a path.
@@ -34,7 +34,7 @@ function gated(name, item, steps) {
   ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id], env));
   ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id], env));
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'q\n' });
-  const g = JSON.parse(ok(wf(root, ['gate', '--attempt', e.id, '--json'], env)).out);
+  const g = JSON.parse(ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id, '--json'], env)).out);
   return { base, root, id: e.id, dir: path.join(root, '.wf-evidence', 'attempts', e.id), g };
 }
 const refused = (r, re) => {
@@ -54,7 +54,7 @@ test('a hard link at a recorded path is refused everywhere; the outside file kee
     fs.rmSync(log);
     fs.linkSync(v, log);
     const before = snap(v);
-    for (const args of [['status'], ['verify'], ['export'], ['gate'], ['handoff', 'reviewer', '--agent', 'r'], ['verify', '--accept-changes', '--reason', 'x']]) {
+    for (const args of [['status'], ['verify'], ['export'], ['gate', ...OUT_OF_ORDER], ['handoff', 'reviewer', '--agent', 'r'], ['verify', '--accept-changes', '--reason', 'x']]) {
       refused(wf(root, [...args, '--attempt', id], env), /output\.log: hard link/);
       assert.deepEqual(snap(v), before, args.join(' '));
     }

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { WF, closureFile, commitIn, criteriaFile, goodClosure, makeRepo, ok, sh, singleRepoProject, state, summaryFile, tmp, wf, write, yaml } from './helpers.mjs';
+import { closureFile, commitIn, criteriaFile, goodClosure, makeRepo, ok, OUT_OF_ORDER, sh, singleRepoProject, state, summaryFile, tmp, WF, wf, write, yaml } from './helpers.mjs';
 
 const steps = [{ id: 'unit', repo: 'app', run: 'true', inputs: ['src/**'] }];
 const homeOf = (root) => path.join(root, '..', '.home');
@@ -48,7 +48,7 @@ test('raw plan, amendment and closure files are kept verbatim; wf export renders
   assert.equal(fs.readFileSync(path.join(p.root, '.wf-evidence/attempts/ENG-9.1/plans/amend-1.raw.json'), 'utf8'), fs.readFileSync(amendPath, 'utf8'));
   ok(wf(p.root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'b\n' });
-  ok(wf(p.root, ['gate', '--attempt', e.id]));
+  ok(wf(p.root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]));
   ok(wf(p.root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', e.id]));
   const closure = closureFile(p.base, goodClosure('r', { findings: [{ id: 'F1', severity: 'minor', summary: 'naming', status: 'verified-nonissue', evidence: 'src/a.txt:1' }], criteria: [{ id: 'C1', evidence: { kind: 'output', ref: 'log' } }, { id: 'C2', evidence: { kind: 'output', ref: 'log' } }] }));
   ok(wf(p.root, ['review', '--closure', closure, '--attempt', e.id]));
@@ -104,8 +104,8 @@ test('wf check runs light steps only, never counts as a gate, and the gate reuse
   const s = state(root, id);
   assert.equal(s.gates.length, 0);
   assert.equal(s.checks.length, 1);
-  assert.match(s.next, /run `wf gate`/, 'a check opens nothing');
-  const g = JSON.parse(ok(wf(root, ['gate', '--attempt', id, '--json'])).out);
+  assert.match(s.next, /^code review: hand to a fresh reviewer[\s\S]*no gate until a code-review round on this tree comes back clean/, 'a check opens nothing and is no gate');
+  const g = JSON.parse(ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', id, '--json'])).out);
   assert.deepEqual(g.steps.map((x) => [x.id, x.status]).sort(), [['e2e', 'passed'], ['lint', 'reused']]);
   write(wt, 'src/a.txt', 'dirty\n');
   assert.match(wf(root, ['check', '--attempt', id]).err, /commit changes before the check/);
@@ -115,8 +115,8 @@ test('a step that fails and then passes on the same inputs is recorded as flaky;
   const flakyStep = { id: 'flaky', repo: 'app', run: 'if [ -f "$WF_ROOT/../flag" ]; then exit 0; fi; touch "$WF_ROOT/../flag"; exit 1', inputs: ['src/**'] };
   const always = { id: 'always', repo: 'app', run: 'true' };
   const { base, root, id } = implemented('flaky', { gate: { steps: [flakyStep, always] } });
-  assert.equal(wf(root, ['gate', '--attempt', id]).code, 1);
-  const r = ok(wf(root, ['gate', '--attempt', id, '--rerun-failed']));
+  assert.equal(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', id]).code, 1);
+  const r = ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', id, '--rerun-failed']));
   assert.match(r.out, /skipped {5}always {2}--rerun-failed reruns only the steps that failed last time/);
   assert.match(r.out, /flaky: flaky failed earlier and passed now with the same inputs/);
   assert.match(r.out, /--rerun-failed: proof while repairing/);
@@ -139,8 +139,8 @@ test('the gate starts light steps first and the longest heavy step first', () =>
   ];
   const { root, id } = implemented('schedule', { gate: { steps: order, maxParallelSteps: 1 } });
   const starts = (out) => [...out.matchAll(/wf gate: start {4}(\S+)/g)].map((m) => m[1]);
-  assert.deepEqual(starts(ok(wf(root, ['gate', '--attempt', id])).out), ['light', 'h-short', 'h-long'], 'no durations known yet: light first, then adapter order');
-  assert.deepEqual(starts(ok(wf(root, ['gate', '--attempt', id])).out), ['light', 'h-long', 'h-short'], 'then the longest heavy step first');
+  assert.deepEqual(starts(ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', id])).out), ['light', 'h-short', 'h-long'], 'no durations known yet: light first, then adapter order');
+  assert.deepEqual(starts(ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', id])).out), ['light', 'h-long', 'h-short'], 'then the longest heavy step first');
 });
 
 test('changed files outside the plan are listed for the reviewer and warned about in wf status', () => {
@@ -239,7 +239,7 @@ test('tracker.via api: the engine performs and reads back admitted, implementing
     const h = ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', id]));
     assert.match(h.err, /tracker: implementing performed through the API/);
     commitIn(state(root, id).repos.app.worktree, { 'src/a.txt': 'ui\n' });
-    const g = JSON.parse(ok(wf(root, ['gate', '--attempt', id, '--json'])).out);
+    const g = JSON.parse(ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', id, '--json'])).out);
     ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', id]));
     ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r', { screenshotsInspected: [g.steps[0].artifacts[0].sha256] })), '--attempt', id]));
     ok(wf(root, ['accept', '--attempt', id]));

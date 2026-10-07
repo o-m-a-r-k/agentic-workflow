@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { closureFile, commitIn, criteriaFile, goodClosure, ok, singleRepoProject, wf } from './helpers.mjs';
+import { closureFile, commitIn, criteriaFile, goodClosure, ok, OUT_OF_ORDER, singleRepoProject, wf } from './helpers.mjs';
 
 // 0.1.20: evidence is tamper-evident and write-protected, and verified at use. Named gaps (0.1.19): writes through MCP
 // tools, Codex (no hook), gate steps and tests, run-time-decoded paths, symlinks made earlier, races and people are
@@ -19,7 +19,7 @@ function gated(name, item, steps = visual) {
   ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id]));
   ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'q\n' });
-  const g = wf(root, ['gate', '--attempt', e.id, '--json']);
+  const g = wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id, '--json']);
   const dir = path.join(root, '.wf-evidence', 'attempts', e.id);
   return { base, root, id: e.id, g, dir, ledger: path.join(dir, 'ledger.jsonl') };
 }

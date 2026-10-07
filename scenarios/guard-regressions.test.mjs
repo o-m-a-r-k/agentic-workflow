@@ -5,7 +5,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { check, decide, isPlainWf } from '../hooks/guard-evidence.mjs';
 import { check as check015 } from './fixtures/guard-0.1.15.mjs';
-import { closureFile, commitIn, criteriaFile, goodClosure, ok, singleRepoProject, state, tmp, wf } from './helpers.mjs';
+import { closureFile, commitIn, criteriaFile, goodClosure, ok, OUT_OF_ORDER, singleRepoProject, state, tmp, wf } from './helpers.mjs';
 
 // 0.1.18: the evidence guard decides on the raw text and never parses shell. Named failures: 0.1.16 and 0.1.17 parsed
 // commands to let copies OUT of evidence through, and six automated reviews found a new differential after each fix.
@@ -139,7 +139,7 @@ function delivered(name, item) {
   ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id]));
   ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'q\n' });
-  const shots = ok(wf(root, ['gate', '--attempt', e.id, '--json'])).json().steps[0].artifacts;
+  const shots = ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id, '--json'])).json().steps[0].artifacts;
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', e.id]));
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r', { screenshotsInspected: shots.map((a) => a.sha256) })), '--attempt', e.id]));
   ok(wf(root, ['accept', '--attempt', e.id]));
@@ -245,7 +245,7 @@ test('the shown draft and every other engine write outside the evidence never fo
     ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id]));
     ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
     commitIn(e.repos.app.worktree, { 'src/a.txt': 'q\n' });
-    const shots = ok(wf(root, ['gate', '--attempt', e.id, '--json'])).json().steps[0].artifacts;
+    const shots = ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id, '--json'])).json().steps[0].artifacts;
     ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', e.id]));
     ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r', { screenshotsInspected: shots.map((a) => a.sha256) })), '--attempt', e.id]));
     ok(wf(root, ['accept', '--attempt', e.id]));

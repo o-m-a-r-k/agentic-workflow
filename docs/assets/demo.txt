@@ -14,7 +14,7 @@ labels:
 $ wf entry --item HT-1 --owner you
 HT-1.1  HT-1  lane=standard  intent=implementation  phase=admitted
   owner: you
-  hello-ticket: ~/demo/hello-ticket/.wf-worktrees/HT-1.1/hello-ticket (base 8fdd42bdaa)
+  hello-ticket: ~/demo/hello-ticket/.wf-worktrees/HT-1.1/hello-ticket (base 3d45f8d898)
   next: start the planner: `wf handoff planner --agent <id>`
 tracker: admitted performed on the ticket files and read back
 
@@ -36,46 +36,63 @@ lessons injected: none
 implementer bundle: ~/demo/hello-ticket/.wf-evidence/attempts/HT-1.1/handoffs/02-implementer.json
 class full, effort high
 Start agent type wf-implementer (name it implementer-1; do not pass a model) with: "Read ~/demo/hello-ticket/.wf-evidence/attempts/HT-1.1/handoffs/02-implementer.json and follow its instructions."
-$ wf gate --attempt HT-1.1
-wf gate: run 2026-10-06T12-41-18-760Z-3038: 1 to run, 0 reused, 0 skipped or deferred
-wf gate: start    unit
-wf gate: failed   unit  0.1s
-wf gate:   unit |     actual: 'Hello Ada!',
-wf gate:   unit |     expected: 'Hello, Ada!',
-wf gate:   unit |     operator: 'strictEqual',
-wf gate:   unit |     diff: 'simple'
-wf gate:   unit |   }
-wf gate: failed (2026-10-06T12-41-18-760Z-3038)
-gate failed (2026-10-06T12-41-18-760Z-3038)
-  failed      unit  no `inputs` declared: always runs
-(exit 1: refused)
 
-# Fixed and committed: the gate runs again on the new tree
+# No gate yet: the gate runs once a code-review round on this tree comes back clean
 $ wf gate --attempt HT-1.1
-wf gate: run 2026-10-06T12-41-19-002Z-3158: 1 to run, 0 reused, 0 skipped or deferred
-wf gate: start    unit
-wf gate: passed   unit  0.1s
-wf gate: passed (2026-10-06T12-41-19-002Z-3158)
-gate passed (2026-10-06T12-41-19-002Z-3158)
-  passed      unit  no `inputs` declared: always runs
+wf gate: the gate runs after a clean code review, never beside or before it:
+  - no review round covers the current tree: run the code review first (`wf handoff reviewer --agent <new id>`); the gate runs once a round on this tree comes back clean
+  → follow the order (`wf resume` names the next step), or run it anyway with `wf gate --reason "<why>"`, which records the override in the ledger
+(exit 75: refused)
 
 # The implementer cannot review its own work
 $ wf handoff reviewer --agent implementer-1 --attempt HT-1.1
 wf handoff: implementer-1 planned, wrote or owns this change and cannot review it
 (exit 75: refused)
 
-# A fresh reviewer checks each criterion against the gate evidence
+# Code review, round 1: a fresh reviewer reads the diff against the criteria and finds the missing comma
 $ wf handoff reviewer --agent reviewer-1 --attempt HT-1.1
 lessons injected: none
+Start agent type wf-reviewer (name it reviewer-1; do not pass a model) with only the line on stdout as its prompt:
 Read ~/demo/hello-ticket/.wf-evidence/attempts/HT-1.1/handoffs/03-reviewer.json and follow its instructions.
-$ wf review --closure ~/demo/work/closure.json --attempt HT-1.1
+$ wf review --closure ~/demo/work/closure-1.json --attempt HT-1.1
+review recorded (1 finding(s)).
+
+# The implementer fixes the finding and commits
+
+# Code review, round 2: a new reviewer judges the fixed tree blind, then verifies round 1's finding
+$ wf handoff reviewer --agent reviewer-2 --attempt HT-1.1
+lessons injected: none
+Start agent type wf-reviewer (name it reviewer-2; do not pass a model) with only the line on stdout as its prompt:
+Read ~/demo/hello-ticket/.wf-evidence/attempts/HT-1.1/handoffs/04-reviewer.json and follow its instructions.
+$ wf review --closure ~/demo/work/closure-2.json --attempt HT-1.1
+review recorded (0 finding(s)).
+1 finding(s) from earlier rounds to verify against the code: ~/demo/hello-ticket/.wf-worktrees/HT-1.1/_review/prior-findings-04-1.json
+Add `priorFindings: [{ round, id, status, evidence }]` to your closure (change nothing else) and run `wf review --closure <file>` again.
+$ wf review --closure ~/demo/work/closure-2.json --attempt HT-1.1
+review recorded (0 finding(s)).
+
+# The review is clean: one gate on the reviewed tree
+$ wf gate --attempt HT-1.1
+wf gate: run 2026-10-07T10-46-53-741Z-43765: 1 to run, 0 reused, 0 skipped or deferred
+wf gate: start    unit
+wf gate: passed   unit  0.1s
+wf gate: passed (2026-10-07T10-46-53-741Z-43765)
+gate passed (2026-10-07T10-46-53-741Z-43765)
+  passed      unit  no `inputs` declared: always runs
+
+# Evidence review: a fresh reviewer checks each criterion against the gate evidence
+$ wf handoff reviewer --agent reviewer-3 --attempt HT-1.1
+lessons injected: none
+Start agent type wf-reviewer (name it reviewer-3; do not pass a model) with only the line on stdout as its prompt:
+Read ~/demo/hello-ticket/.wf-evidence/attempts/HT-1.1/handoffs/05-reviewer.json and follow its instructions.
+$ wf review --closure ~/demo/work/closure-3.json --attempt HT-1.1
 review recorded (0 finding(s)).
 $ wf accept --attempt HT-1.1
 review accepted. next: deliver: `wf deliver`
 
 # Delivery: merged to main, pushed, and the ticket handed off
 $ wf deliver --attempt HT-1.1 --summary-file ~/demo/work/summary.md
-delivered HT-1.1: hello-ticket@1a648857d2
+delivered HT-1.1: hello-ticket@0d86b0ebcc
 tracker: delivered performed on the ticket files and read back; attempt closed
 SHOW TO OWNER: no screenshots for HT-1: no gate step declares `artifacts`, so the gate collected no screenshots
   (recorded; tell the owner this in the delivery report)
@@ -94,7 +111,7 @@ labels:
 
 ## Comments
 
-<!-- wf:comment id=c-1 at=2026-10-06T12:41:19.903Z -->
+<!-- wf:comment id=c-1 at=2026-10-07T10:46:55.486Z -->
 HT-1 is ready for UAT.
 
 greet() now takes an optional name: greet("Ada") returns "Hello, Ada!".
@@ -104,12 +121,12 @@ UAT scope:
 - greet() prints Hello!
 <!-- /wf:comment -->
 $ git --no-pager -C ~/demo/origin.git log --oneline -3 main
-1a64885 greet: add the comma
-94faa2e greet by name
-8fdd42b hello-ticket
+0d86b0e greet: add the comma
+1607af2 greet by name
+3d45f8d hello-ticket
 $ wf status --attempt HT-1.1
 HT-1.1  HT-1  lane=standard  intent=implementation  phase=done
   owner: you
-  hello-ticket: ~/demo/hello-ticket/.wf-worktrees/HT-1.1/hello-ticket (base 8fdd42bdaa)
-  last gate: passed (2026-10-06T12-41-19-002Z-3158)
+  hello-ticket: ~/demo/hello-ticket/.wf-worktrees/HT-1.1/hello-ticket (base 3d45f8d898)
+  last gate: passed (2026-10-07T10-46-53-741Z-43765)
   next: nothing: this attempt is closed
