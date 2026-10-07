@@ -36,6 +36,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import { readRegular, writeNoFollow } from './evidence.mjs';
 import { listAttempts, readLedger } from './ledger.mjs';
 import { refuse } from './util.mjs';
@@ -267,6 +268,14 @@ function readLine(fd) {
 // redirect: anything a shell would reinterpret refuses), the subcommand, every expected flag with its value and nothing
 // else, run after admission and within the last 10 minutes. Not a shell parser: plain words or a refusal.
 const RUN_WINDOW_MS = 10 * 60 * 1000;
+const ENGINE_BIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'wf');
+const realOr = (p) => {
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return null;
+  }
+};
 function commandProblem(ran, spec, state) {
   if (/[;&|`$<>()\n\r'"\\*?~{}[\]#!]/.test(ran.command)) return 'its last command is not one plain wf invocation';
   const at = Date.parse(ran.at ?? '');
@@ -275,9 +284,13 @@ function commandProblem(ran, spec, state) {
   if (state.admittedAt && at < Date.parse(state.admittedAt)) return 'its last command ran before the attempt was admitted';
   const words = ran.command.trim().split(/[ \t]+/);
   let i = 0;
-  if (path.basename(words[0]) === 'node') i = 1;
-  if (!words[i] || path.basename(words[i]) !== 'wf') return 'its last command is not a wf invocation';
-  i += 1;
+  // `wf` (by name or a path to it), or `node` running this engine's own `bin/wf` (0.5.0 adversarial review: `node` with
+  // any script named `wf` was accepted, so a look-alike script's run counted as the owner's command).
+  if (path.basename(words[0]) === 'node') {
+    if (!words[1] || !path.isAbsolute(words[1]) || realOr(words[1]) !== realOr(ENGINE_BIN)) return `its last command runs \`${(words[1] ?? '').slice(0, 200)}\` with node, not this engine's own ${ENGINE_BIN}`;
+    i = 2;
+  } else if (path.basename(words[0]) !== 'wf') return 'its last command is not a wf invocation';
+  else i = 1;
   for (const w of spec.sub) if (words[i++] !== w) return `its last command is not \`wf ${spec.sub.join(' ')}\``;
   const want = new Map(Object.entries(spec.flags));
   const seen = new Set();

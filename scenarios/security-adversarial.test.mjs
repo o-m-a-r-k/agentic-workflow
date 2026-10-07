@@ -300,3 +300,33 @@ test('owner messages: a copied or moved transcript never makes a spent message f
   assert.match(spent, /^codex:/);
   assert.ok(state(q.root, first.id).authoritiesUsed.includes(spent), 'the delivered attempt records the waiver it gave');
 });
+
+// Docs mismatch: the owner session's own `wf handoff close` matched `node <any path ending in wf>`.
+test('handoff close by the owner session\'s command: `wf` by name, or node running this engine\'s own bin/wf, nothing else', () => {
+  const sid = 'claude-owner-session-cmd1';
+  const p = singleRepoProject('closecmd', { gate: { steps } });
+  const e = ok(wf(p.root, ['entry', '--item', 'CC-1', '--owner', `claude:${sid}`, '--json'])).json();
+  ok(wf(p.root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id]));
+  ok(wf(p.root, ['plan', '--file', criteriaFile(p.base), '--attempt', e.id]));
+  const file = path.join(p.base, '.home', '.claude', 'projects', '-proj', `${sid}.jsonl`);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const call = (command) => fs.appendFileSync(file, line({ type: 'assistant', uuid: `a-${Math.random()}`, timestamp: new Date().toISOString(), sessionId: sid, message: { role: 'assistant', content: [{ type: 'tool_use', id: `t${Math.random()}`, name: 'Bash', input: { command } }] } }));
+  const silent = { ownerSilent: true };
+  const flags = `handoff close --agent impl-1 --attempt ${e.id}`;
+  const fake = path.join(p.base, 'elsewhere', 'wf');
+  for (const command of [`node ${fake} ${flags}`, `wfx ${flags}`, `node ./bin/wf ${flags}`]) {
+    ok(wf(p.root, ['handoff', 'implementer', '--agent', 'impl-1', '--attempt', e.id], silent));
+    call(command);
+    const r = wf(p.root, ['handoff', 'close', '--agent', 'impl-1', '--attempt', e.id], silent);
+    assert.equal(r.code, 75, command);
+    assert.match(r.err, /not a wf invocation|not this engine's own/, command);
+    // Closed by the owner's word instead, for the next case.
+    ownerSays(path.join(p.base, '.home'), `claude:${sid}`, `close ${e.id}:impl-1`);
+    ok(wf(p.root, ['handoff', 'close', '--agent', 'impl-1', '--attempt', e.id], silent));
+  }
+  for (const command of [`wf ${flags}`, `node ${WF} ${flags}`]) {
+    ok(wf(p.root, ['handoff', 'implementer', '--agent', 'impl-1', '--attempt', e.id], silent));
+    call(command);
+    ok(wf(p.root, ['handoff', 'close', '--agent', 'impl-1', '--attempt', e.id], silent));
+  }
+});
