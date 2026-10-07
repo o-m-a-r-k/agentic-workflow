@@ -50,7 +50,7 @@ OWNER=codex:demo-owner-session
 owner_says() {
   printf '(the owner, in their session) %s\n' "$*"
   mkdir -p "$WF_HOME/.codex/sessions"
-  printf '{"timestamp":"%s","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"%s"}]}}\n' "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$*" >> "$WF_HOME/.codex/sessions/rollout-demo-demo-owner-session.jsonl"
+  printf '{"timestamp":"%s","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"%s"}]}}\n' "$(node -e 'process.stdout.write(new Date().toISOString())')" "$*" >> "$WF_HOME/.codex/sessions/rollout-demo-demo-owner-session.jsonl"
 }
 
 # A git repository with an origin, as a real project has.

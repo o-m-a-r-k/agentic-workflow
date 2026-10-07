@@ -104,7 +104,7 @@ export function ownerAuthority(root, state, phrase, { what, command = null, owne
     if (!why && !claim(root, spent, { phrase, attempt: state.id, decision })) why = 'its last command was already counted for a decision';
     if (!why) return { provenance: 'owner-session command', runtime: t.runtime, file: t.file, line: ran.line, at: ran.at, spent, command: ran.command.slice(0, 500) };
   }
-  throw refuse(`not done: ${what} needs the owner's authority, and no unspent owner message in the owner session (${t.file}) starts with \`${phrase}\`${shown ? `, nor did the owner session itself run exactly \`${shown}\` (${why})` : ''}; an agent's word, a tool result or a sub-agent's call never counts`, how);
+  throw refuse(`not done: ${what} needs the owner's authority, and no unspent owner message in the owner session (${t.file}) starts with \`${phrase}\`${shown && t.runtime === 'claude' ? `, nor did the owner session itself run exactly \`${shown}\` (${why})` : ''}; an agent's word, a tool result or a sub-agent's call never counts`, how);
 }
 
 // The person at the owner's own terminal types the phrase back. Refused without an interactive terminal, and under an
