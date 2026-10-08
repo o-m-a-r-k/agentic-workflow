@@ -92,6 +92,27 @@ export function reviewRules(root, trusted, state, changed) {
   return out;
 }
 
+// Named failure I-58: reviewers treated a multi-megabyte JSON handoff as a required full-output document,
+// stopped on truncation and requested reduced review scope instead of inspecting the structured input.
+export const CODEX_BUNDLE_READ_INSTRUCTIONS = [
+  'The handoff JSON is structured review input, not a complete-output document receipt. Parse it into memory, enumerate its sections and collection sizes, then inspect every section in bounded batches. This inventory is navigation, not completed inspection. Enumerate object keys and array indices, including nested collections; split oversized entries and strings into consecutive chunks. After truncation, resume from the last complete item with smaller batches. Do not request a smaller handoff, discard evidence or narrow review scope. Existing impact sampling and screenshot obligations still apply. Parsing or inspecting the handoff earns no document-read credit.',
+  'For the Node reader, replace the path below with the handoff path from your initial prompt:',
+  '```js',
+  'var fs = await import("node:fs/promises");',
+  'var bundle = JSON.parse(await fs.readFile("/exact/handed/handoff.json", "utf8"));',
+  'nodeRepl.write(Object.keys(bundle).map(section => ({section, kind: Array.isArray(bundle[section]) ? "array" : typeof bundle[section], items: bundle[section] !== null && typeof bundle[section] === "object" ? Object.keys(bundle[section]).length : typeof bundle[section] === "string" ? bundle[section].length : 1})));',
+  '```',
+  'Use bounded views for inspection; change the value and range for every required section, nested collection or long string. Inspect all required items, not only the first example page:',
+  '```js',
+  'function view(value, from, to) {',
+  '  var items = Array.isArray(value) || typeof value === "string" ? value : value !== null && typeof value === "object" ? Object.entries(value) : [value];',
+  '  return {from, to: Math.min(to, items.length), total: items.length, items: items.slice(from, to)};',
+  '}',
+  'nodeRepl.write(view(bundle.criteria, 0, 10));',
+  '```',
+  'The full-file protocol below applies to the separate rule, skill, invariant and appendix document files named by the bundle. It does not require printing the JSON handoff in one output.',
+].join('\n');
+
 // Named failure I-53: a blind native reviewer used looped/partial reads because its frozen instructions omitted
 // the supported receipt format. Share exactly the protocol the existing completedNodeReads recognizer accepts.
 export const CODEX_DOCUMENT_READ_INSTRUCTIONS = 'Codex document-read receipts: before reviewing, read each required rule document and skill in full. When using the Node reader, use one literal absolute path from the bundle per call, with this exact straight-line form (replace the example path):\n```js\nvar fs = await import("node:fs/promises");\nnodeRepl.write(await fs.readFile("/exact/handed/document.md", "utf8"));\n```\nCall the Node tool directly or through a literal text(await tools.mcp__node_repl__js({...})); wrapper, and keep its successful output unchanged. Use sufficient output capacity for the entire file. Loops, object-wrapped output, aliases, partial reads and truncated output do not earn required-read credit. Do not use bundle.rules expressions or shell scripts for these reads. A supported full-file Read tool is also acceptable. If a full read fails or is truncated, correct the read before spending time on the review; do not claim it succeeded.';

@@ -4,6 +4,10 @@ description: Independent review role for an agentic-workflow attempt. Reviews th
 
 You are the independent reviewer for one agentic-workflow attempt. You did not plan or write this change. Read the bundle path the owner gives you first.
 
+The handoff JSON is structured review input. Parse it into memory, enumerate section names and collection sizes, then inspect every section in bounded batches, including nested object keys and array indices. The inventory is navigation, not completed inspection. Split oversized entries or strings into consecutive chunks and resume from the last complete item after truncation. Do not request a smaller handoff, discard evidence or narrow review scope. Existing impact sampling and screenshot obligations still apply. Parsing or inspecting the JSON earns no document-read credit.
+
+The complete-output protocol below applies to the separate rule, skill, invariant and appendix document files named by the bundle, not to printing the JSON handoff in one output.
+
 For Codex Node document reads, use one literal absolute path from the bundle per call:
 
 ```js
