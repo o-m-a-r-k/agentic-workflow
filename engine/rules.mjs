@@ -4,8 +4,8 @@ import { adapterLocation, attemptAdapter, repoDir } from './config.mjs';
 import { screenshots } from './gate.mjs';
 import { attemptDir } from './ledger.mjs';
 import { findSkill } from './skills.mjs';
-import { YAML, git, matchesAny, sha256 } from './util.mjs';
-import { prepareWrite, writeNoFollow } from './evidence.mjs';
+import { YAML, git, matchesAny, refuse, sha256 } from './util.mjs';
+import { prepareWrite, readRegular, writeNoFollow } from './evidence.mjs';
 
 // Review rules: project documents (design system, coding rules) a reviewer must read when the change touches the paths
 // they govern. Named failure: in eleven review rounds no reviewer read any of the project's rule documents, and the
@@ -51,10 +51,13 @@ const commitFor = (root, cfg, state, repo) => {
 
 // Rules that apply to this change: each with the trusted copies of its documents (written from the base commit into
 // the attempt's evidence), the changed files it matched, and whether the ticket itself changed one of its documents.
-// A document absent at the base is listed under `missing` (doctor warns), never required.
+// Named failure: applicable documents missing at the frozen base silently removed review obligations.
+// Refuse before a reviewer is created; an unrelated missing rule remains only a doctor warning.
 export function reviewRules(root, trusted, state, changed) {
   const multi = Object.keys(changed).length > 1;
   const out = [];
+  const applicable = [];
+  const problems = [];
   for (const rule of trusted.review?.rules ?? []) {
     const repo = ruleRepo(root, trusted, rule, state);
     const commit = commitFor(root, trusted, state, repo);
@@ -63,6 +66,12 @@ export function reviewRules(root, trusted, state, changed) {
     const scope = rule.repo ? { [rule.repo]: changed[rule.repo] ?? [] } : changed;
     const matched = Object.entries(scope).flatMap(([r, files]) => files.filter((f) => !paths || matchesAny(f, paths)).map((f) => (multi ? `${r}/${f}` : f)));
     if (!matched.length) continue;
+    const missing = docs.filter((d) => !d.text).map((d) => d.doc);
+    if (missing.length) problems.push(`review rule ${rule.id}: required document(s) unavailable at the frozen base: ${missing.join(', ')}`);
+    applicable.push({ rule, repo, docs, paths, matched });
+  }
+  if (problems.length) throw refuse(`review readiness refused:\n  - ${problems.join('\n  - ')}`, 'restore the required documents in the project base; a ticket worktree copy cannot replace the frozen policy');
+  for (const { rule, repo, docs, paths, matched } of applicable) {
     const read = [];
     const worktreeCopies = {};
     for (const d of docs.filter((x) => x.text)) {
@@ -77,12 +86,37 @@ export function reviewRules(root, trusted, state, changed) {
       const wt = repo && state.repos[repo.name]?.worktree;
       if (wt && !(changed[repo.name] ?? []).includes(d.doc)) worktreeCopies[file] = path.join(wt, d.doc);
     }
-    // Nothing readable at the base: the rule is skipped (doctor warns), never required.
-    if (!read.length) continue;
     const docChangedByTicket = Boolean(repo && rule.read.some((doc) => (changed[repo.name] ?? []).includes(path.posix.normalize(doc))));
     out.push({ id: rule.id, read, docs: rule.read, matched, paths, docChangedByTicket, missing: docs.filter((x) => !x.text).map((x) => x.doc), worktreeCopies });
   }
   return out;
+}
+
+// Named failure I-53: a blind native reviewer used looped/partial reads because its frozen instructions omitted
+// the supported receipt format. Share exactly the protocol the existing completedNodeReads recognizer accepts.
+export const CODEX_DOCUMENT_READ_INSTRUCTIONS = 'Codex document-read receipts: before reviewing, read each required rule document and skill in full. When using the Node reader, use one literal absolute path from the bundle per call, with this exact straight-line form (replace the example path):\n```js\nvar fs = await import("node:fs/promises");\nnodeRepl.write(await fs.readFile("/exact/handed/document.md", "utf8"));\n```\nCall the Node tool directly or through a literal text(await tools.mcp__node_repl__js({...})); wrapper, and keep its successful output unchanged. Use sufficient output capacity for the entire file. Loops, object-wrapped output, aliases, partial reads and truncated output do not earn required-read credit. Do not use bundle.rules expressions or shell scripts for these reads. A supported full-file Read tool is also acceptable. If a full read fails or is truncated, correct the read before spending time on the review; do not claim it succeeded.';
+
+// Named failure: unavailable handed documents were discovered only after an expensive review.
+// Check the exact handed files, never substitute a ticket's edited copy for a frozen rule document.
+export function reviewDocumentProblems(bundle) {
+  const documents = [
+    ...(bundle.rules ?? []).flatMap((r) => r.read.map((file) => ({ label: `rule ${r.id}`, file }))),
+    ...(bundle.skills ?? []).map((s) => ({ label: `skill ${s.name}`, file: s.file })),
+    ...(bundle.invariants ? [{ label: 'invariants', file: bundle.invariants }] : []),
+    ...(bundle.roleAppendix ? [{ label: 'role appendix', file: bundle.roleAppendix }] : []),
+  ];
+  const problems = [];
+  for (const { label, file } of documents) {
+    try {
+      if (typeof file !== 'string' || !path.isAbsolute(file)) throw new Error('no absolute handed path');
+      const data = readRegular(file);
+      if (!data || !data.bytes.length || data.bytes.length > 4 * 1024 * 1024) throw new Error('missing, unreadable, linked, empty or larger than 4 MiB');
+      new TextDecoder('utf-8', { fatal: true }).decode(data.bytes);
+    } catch (error) {
+      problems.push(`${label}: required document unavailable: ${file ?? '(no file)'} (${error.message})`);
+    }
+  }
+  return problems;
 }
 
 // Skills this role needs for this round: always without `when`; `visual` when the gate collected screenshots;

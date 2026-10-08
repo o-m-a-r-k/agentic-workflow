@@ -9,7 +9,8 @@ import { executionSettings, rejectModelOverrides } from './models.mjs';
 import { actor, openState, treeHashes } from './attempt.mjs';
 import { adapterFileAtCommit, trustedAdapter } from './config.mjs';
 import { append, loadState } from './ledger.mjs';
-import { seal } from './evidence.mjs';
+import { readRegular, seal } from './evidence.mjs';
+import { reviewDocumentProblems } from './rules.mjs';
 import { roleInstructions } from './onboard.mjs';
 import { roleProgress, ROLE_HEARTBEAT_MS } from './role-progress.mjs';
 import { assertPlainGit, canonical, git, refuse, sha256, withFileLock, writeJson } from './util.mjs';
@@ -25,6 +26,13 @@ export async function runCodexRole(root, options) {
   if (['planner', 'reviewer'].includes(h.role) && !h.model) throw refuse('this handoff pins no Codex model; run `wf models refresh --attempt <id>`, then create a fresh handoff');
   const expected = executionSettings(root, state, h.role, h.class, 'codex', h.runtimeAdapterBase ?? state.adapterBase);
   if (h.model !== expected.model || h.effort !== expected.effort) throw refuse('handoff execution settings differ from their committed pin; create a fresh handoff');
+  if (h.role === 'reviewer') {
+    const handed = readRegular(h.bundle);
+    if (!handed) throw refuse('the frozen reviewer bundle is unavailable before native launch');
+    const bundle = JSON.parse(handed.bytes.toString('utf8'));
+    const problems = reviewDocumentProblems(bundle);
+    if (problems.length) throw refuse(`review readiness refused before native launch:\n  - ${problems.join('\n  - ')}`);
+  }
   const cfg = trustedAdapter(root, state);
   const appendix = cfg.roles?.[h.role]?.appendix;
   const extra = appendix ? fs.readFileSync(adapterFileAtCommit(root, state, state.adapterBase, appendix), 'utf8') : '';

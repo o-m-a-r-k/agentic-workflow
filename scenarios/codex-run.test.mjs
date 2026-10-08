@@ -11,8 +11,8 @@ import { ENGINE_VERSION } from '../engine/util.mjs';
 import { readLedger } from '../engine/ledger.mjs';
 
 const SID = '01a110b4-1637-7a42-b353-d0ad25e60000';
-function prepared(mode = '', { nonGitRoot = false } = {}) {
-  const p = singleRepoProject('codex-run', { classes: { review: { codex: { model: 'future-model', effort: 'max' } } }, gate: { steps: [{ id: 'unit', repo: 'app', run: 'true' }] } });
+function prepared(mode = '', { nonGitRoot = false, config = {}, files = {} } = {}) {
+  const p = singleRepoProject('codex-run', { classes: { review: { codex: { model: 'future-model', effort: 'max' } } }, gate: { steps: [{ id: 'unit', repo: 'app', run: 'true' }] }, ...config }, files);
   if (nonGitRoot) {
     const cfg = JSON.parse(fs.readFileSync(path.join(p.root, '.workflow/project.yaml'), 'utf8'));
     cfg.repos[0].path = 'proj';
@@ -118,6 +118,24 @@ test('start is visible before a quiet child finishes and cancellation records fa
     assert.equal(state(root, id).handoffs.at(-1).launch.status, 'failed');
     assert.equal(wf(root, ['handoff', 'run', '--agent', 'p', '--attempt', id], { env }).code, 75);
   } finally { if (child.exitCode === null) child.kill('SIGTERM'); }
+});
+
+test('review readiness: disappearing handed document refuses before native child spawn or launch receipt', () => {
+  const { base, root, id, env } = prepared('', { config: { invariants: 'invariants.md' }, files: { '.workflow/invariants.md': '# Required invariants\n' } });
+  ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', id]));
+  ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', id]));
+  commitIn(state(root, id).repos.app.worktree, { 'src/a.txt': 'changed\n' });
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--runtime', 'codex', '--attempt', id]));
+  const required = path.join(root, '.workflow/invariants.md');
+  fs.unlinkSync(required);
+  const refused = wf(root, ['handoff', 'run', '--agent', 'r', '--attempt', id], { env });
+  assert.equal(refused.code, 75);
+  assert.match(refused.err, /review readiness refused before native launch[\s\S]*invariants: required document unavailable/);
+  assert.equal(fs.existsSync(path.join(base, 'spawn.json')), false);
+  assert.equal(state(root, id).handoffs.at(-1).launch, undefined);
+  fs.writeFileSync(required, '# Required invariants\n');
+  ok(wf(root, ['handoff', 'run', '--agent', 'r', '--attempt', id], { env }));
+  assert.equal(state(root, id).handoffs.at(-1).launch.status, 'completed');
 });
 
 test('engine-launched Codex provenance refuses a steered prompt and a failed planner run', () => {

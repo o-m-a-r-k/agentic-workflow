@@ -496,16 +496,30 @@ function symbolsIn(line) {
 
 export function deriveFromDiff(root, cfg, state, { limit = 100 } = {}) {
   const symbols = new Map();
+  // Named failure: equal symbol names hid declaration origins and the 200-symbol cap was silently reported complete.
+  // This remains textual discovery, not an import graph or proof that a matching file is a real consumer.
+  const addSymbol = (symbol, origin) => {
+    if (!symbols.has(symbol)) symbols.set(symbol, new Set());
+    symbols.get(symbol).add(origin);
+  };
   const changed = new Set();
   for (const [name, r] of Object.entries(state.repos ?? {})) {
     const base = git(r.worktree, ['merge-base', r.baseRef ?? r.base, 'HEAD'], { allowFail: true }) || r.base;
     for (const f of git(r.worktree, ['diff', '--name-only', base, 'HEAD']).split('\n').filter(Boolean)) changed.add(`${name}:${f}`);
     const diff = git(r.worktree, ['diff', '-U0', '--no-color', base, 'HEAD'], { allowFail: true }) ?? '';
-    let file = null;
+    let oldFile = null, newFile = null;
     for (const line of diff.split('\n')) {
-      if (line.startsWith('+++ ')) file = line.slice(4).replace(/^b\//, '');
-      else if (line.startsWith('@@')) for (const s of symbolsIn(line.replace(/^@@[^@]*@@/, ''))) symbols.set(s, symbols.get(s) ?? `${name}:${file}`);
-      else if ((line.startsWith('+') || line.startsWith('-')) && !line.startsWith('---')) for (const s of symbolsIn(line.slice(1))) symbols.set(s, symbols.get(s) ?? `${name}:${file}`);
+      // Named failure: deleted declarations were attributed to /dev/null; renames lost the removed-side origin.
+      if (line.startsWith('diff --git ')) { oldFile = null; newFile = null; }
+      else if (line.startsWith('--- ')) oldFile = line.slice(4) === '/dev/null' ? null : line.slice(4).replace(/^a\//, '');
+      else if (line.startsWith('+++ ')) newFile = line.slice(4) === '/dev/null' ? null : line.slice(4).replace(/^b\//, '');
+      else if (line.startsWith('@@')) {
+        const file = newFile ?? oldFile;
+        if (file) for (const s of symbolsIn(line.replace(/^@@[^@]*@@/, ''))) addSymbol(s, `${name}:${file}`);
+      } else if (line.startsWith('+') || line.startsWith('-')) {
+        const file = line.startsWith('+') ? newFile : oldFile;
+        if (file) for (const s of symbolsIn(line.slice(1))) addSymbol(s, `${name}:${file}`);
+      }
     }
   }
   const mapped = new Set();
@@ -517,7 +531,7 @@ export function deriveFromDiff(root, cfg, state, { limit = 100 } = {}) {
   if (found.length) {
     // One read of every repo for all symbols (the scan cap does not apply: this is the engine's own derivation).
     const any = new RegExp(`(?<![\\w$])(${found.map(([x]) => x.replace(/\$/g, '\\$')).join('|')})(?![\\w$])`, 'g');
-    const from = new Map(found);
+    const from = new Map(found.map(([symbol, origins]) => [symbol, [...origins]]));
     const uses = new Map();
     scanTrees(root, cfg, state, { names: Object.keys(state.repos ?? {}), settings: { ...impactSettings(cfg), maxFileBytes: Infinity, maxScanBytes: Infinity }, what: 'the derived callers' }, (file, text) => {
       for (const line of text) for (const m of line.matchAll(any)) uses.set(`${m[1]}\0${file}`, [m[1], file]);
@@ -527,10 +541,17 @@ export function deriveFromDiff(root, cfg, state, { limit = 100 } = {}) {
       // The adapter folder names components and patterns; it is workflow configuration, not a caller.
       if (/(^|\/)\.workflow\//.test(f.slice(f.indexOf(':') + 1))) continue;
       total += 1;
-      if (outside.length < limit) outside.push({ symbol, declaredIn: from.get(symbol), file: f });
+      if (outside.length < limit) outside.push({ symbol, declaredIn: from.get(symbol)[0], declarationOrigins: from.get(symbol), originAmbiguous: from.get(symbol).length > 1, matchKind: 'textual', file: f });
     }
   }
-  return { symbols: [...symbols.keys()].slice(0, 200), outside, total, truncated: total > outside.length };
+  const symbolsTruncated = symbols.size > found.length;
+  return { mode: 'textual', extraction: 'regex-diff-and-hunk', resolvedReferences: false,
+    structuralCoverage: 'unsupported',
+    limitations: ['Only regex-recognized declarations and hunk names are extracted; this is not a count of all changed declarations.', 'Comments, strings and unrelated equal names can match; imports, aliases, members, dynamic registration and generated relationships are not structurally resolved.'],
+    totalSymbols: symbols.size, analyzedSymbols: found.length, symbolsTruncated,
+    incomplete: symbolsTruncated || total > outside.length,
+    declarationOrigins: Object.fromEntries(found.map(([symbol, origins]) => [symbol, [...origins]])),
+    symbols: found.map(([symbol]) => symbol), outside, total, truncated: total > outside.length };
 }
 
 // ---- The reviewer's closure ----

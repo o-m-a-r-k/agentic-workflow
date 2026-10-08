@@ -94,14 +94,16 @@ const unescape = (text) => text.replace(/\\x([0-9a-f]{1,2})|\\u([0-9a-f]{4})|\\U
 
 // The same decision as always (whether text refers to the evidence), returning what matched for the refusal (I-16):
 // the whitespace-separated token of the input that triggers the check, or the input itself when the match spans tokens.
-// Null when nothing does. Only the report is new; every predicate is unchanged.
+// Null when nothing does. Report the triggering token without claiming an identifier suffix is a folder fragment.
 const shown = (t) => (t.length > 80 ? `${t.slice(0, 77)}...` : t);
 // Never empty: a match always refuses, whatever is shown (review of 76ad8d8).
 const tokenOf = (text, pred) => {
   const t = String(text ?? '').split(/\s+/).find((x) => x && pred(x));
   return shown(t ?? String(text ?? '').trim()) || '(the whole input)';
 };
-const assembled = (raw) => /[$`]/.test(raw) && (/wf-|\.wf\b/.test(raw) || /=\s*['"]?evidence|[$`})]evidence|evidence[$`{(]/.test(raw));
+// Named failure: Markdown `resultEvidence` was rejected as the standalone fragment `evidence` plus substitution.
+// Match a whole trailing fragment, consistent with glued(); all other name/assembly/glob checks stay intact.
+const assembled = (raw) => /[$`]/.test(raw) && (/wf-|\.wf\b/.test(raw) || /=\s*['"]?evidence|[$`})]evidence|\bevidence[$`{(]/.test(raw));
 const squeeze = (raw) => raw.replace(/\$'|\$\{|[\s'"`\\{},]/g, '');
 const glued = (raw) => /(^|[^a-z0-9])[*?$]+evidence\b|\bevidence[*?]/.test(raw.replace(/['"\\]/g, ''));
 

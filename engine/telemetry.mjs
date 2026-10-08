@@ -339,7 +339,7 @@ export const PHASES = ['planning', 'implementing', 'gating', 'reviewing', 'fixin
 // Review rounds from the ledger: one per reviewer handoff, with its outcome. `review.round` events (0.5.0 on) carry
 // refusals; older ledgers have `review.recorded` only. A round with no outcome is `abandoned` when a later reviewer was
 // handed the attempt or the review was accepted, otherwise `open`.
-function reviewRounds(entries, s) {
+export function reviewRounds(entries, s) {
   const reviewers = s.handoffs.filter((h) => h.role === 'reviewer');
   return reviewers.map((h, i) => {
     const rec = s.reviews.filter((r) => r.handoff === h.bundle);
@@ -349,7 +349,11 @@ function reviewRounds(entries, s) {
     const firstRecorded = rec[0]?.at ?? null;
     const later = reviewers[i + 1]?.at ?? null;
     const outcome = recorded ? 'recorded' : refused.length ? 'refused' : later || s.accepted ? 'abandoned' : 'open';
-    const endedAt = firstRecorded ?? refused[0]?.at ?? (outcome === 'abandoned' ? later ?? s.accepted?.at : null);
+    // Named failure: an eventual closure hid refusal history, and missing early outcomes were called wasted work.
+    // Keep legacy outcome/count fields for report@1 consumers; add observed results without inventing history.
+    const launchFailed = h.launch?.status === 'failed';
+    const result = recorded ? 'recorded' : refused.length ? 'refused' : launchFailed ? (h.session ? 'failed-run' : 'failed-start') : outcome === 'abandoned' ? 'unknown' : 'open';
+    const endedAt = firstRecorded ?? refused[0]?.at ?? (launchFailed ? h.launch.finishedAt : null) ?? (outcome === 'abandoned' ? later ?? s.accepted?.at : null);
     const closure = rec[0]?.closure ?? null;
     const findings = (closure?.findings ?? []).map((f) => ({ id: f.id, severity: f.severity ?? null, status: f.status ?? null, category: f.category ?? null }));
     const lastEvent = events.at(-1) ?? null;
@@ -362,6 +366,10 @@ function reviewRounds(entries, s) {
       endedAt,
       minutes: mins(ms(h.at, endedAt)),
       outcome,
+      result,
+      resultEvidence: ['recorded', 'refused', 'failed-run', 'failed-start'].includes(result) ? 'recorded-event' : 'no-recorded-outcome',
+      launchStatus: h.launch?.status ?? 'unrecorded',
+      failedBeforeSession: launchFailed && !h.session,
       refusedFor: refused.map((r) => r.reasonClass),
       tree: h.tree ?? null,
       gatePassedOnTree: Boolean(h.gate),
@@ -370,6 +378,16 @@ function reviewRounds(entries, s) {
       priorFindings: (lastEvent?.priorFindings ?? rec.at(-1)?.closure?.priorFindings ?? []).map((p) => ({ round: p.round ?? null, id: p.id ?? null, status: p.status ?? null, fixedIn: p.fixedIn ?? null })),
     };
   });
+}
+
+export function reviewDiagnostics(rounds) {
+  return {
+    roundsWithRefusal: rounds.filter((r) => r.refusedFor.length > 0).length,
+    failedLaunchRounds: rounds.filter((r) => r.launchStatus === 'failed').length,
+    failedStartRounds: rounds.filter((r) => r.failedBeforeSession).length,
+    unknownOutcomeRounds: rounds.filter((r) => r.result === 'unknown').length,
+    refusalReasons: rounds.reduce((counts, r) => { for (const reason of new Set(r.refusedFor)) counts[reason] = (counts[reason] ?? 0) + 1; return counts; }, {}),
+  };
 }
 
 // Wall-clock time per phase. Each instant gets one phase, by priority: a reviewer round open → reviewing; a gate
@@ -634,6 +652,7 @@ export function attemptReport(root, id, table = prices(root), { home = os.homedi
     reviewRounds: rounds.length,
     recordedRounds: recordedRounds.length,
     refusedRounds: rounds.filter((r) => r.outcome === 'refused').length,
+    ...reviewDiagnostics(rounds),
     abandonedRounds: rounds.filter((r) => r.outcome === 'abandoned').length,
     // Rounds whose review left no recorded closure: refused (the tree moved, provenance, unread documents) or abandoned.
     wastedReviewerRounds: rounds.filter((r) => ['refused', 'abandoned'].includes(r.outcome)).length,
@@ -686,7 +705,7 @@ export function toHandoffCsv(rows) {
   return [HANDOFF_COLS.join(','), ...handoffRows(rows).map((h) => HANDOFF_COLS.map((c) => esc(h[c])).join(','))].join('\n') + '\n';
 }
 
-const ATTEMPT_COLS = ['project', 'id', 'item', 'lane', 'phase', 'admittedAt', 'timeToGateMs', 'timeToDeliverMs', 'timeToCloseMs', 'wallMinutes', ...PHASES.map((p) => `${p}Minutes`), 'gateRuns', 'gatesPassed', 'gatesFailed', 'gatesStopped', 'repairRounds', 'reviewRounds', 'refusedRounds', 'wastedReviewerRounds', 'roundsWithGreenGate', 'stepRuns', 'stepReused', 'reuseRate', 'gateTimeMs', 'findings', 'findingsOpen', 'impactGaps', 'criteria', 'criteriaAmendments', 'holds', 'observedModels', 'tokens', 'subagentTokens', 'cost'];
+const ATTEMPT_COLS = ['project', 'id', 'item', 'lane', 'phase', 'admittedAt', 'timeToGateMs', 'timeToDeliverMs', 'timeToCloseMs', 'wallMinutes', ...PHASES.map((p) => `${p}Minutes`), 'gateRuns', 'gatesPassed', 'gatesFailed', 'gatesStopped', 'repairRounds', 'reviewRounds', 'refusedRounds', 'roundsWithRefusal', 'failedLaunchRounds', 'failedStartRounds', 'unknownOutcomeRounds', 'wastedReviewerRounds', 'roundsWithGreenGate', 'stepRuns', 'stepReused', 'reuseRate', 'gateTimeMs', 'findings', 'findingsOpen', 'impactGaps', 'criteria', 'criteriaAmendments', 'holds', 'observedModels', 'tokens', 'subagentTokens', 'cost'];
 export function toCsv(rows) {
   const flat = (r) => ({ ...r, ...Object.fromEntries(PHASES.map((p) => [`${p}Minutes`, r.phases?.[p] ?? null])), gatesPassed: r.gates?.passed, gatesFailed: r.gates?.failed, gatesStopped: r.gates?.stopped });
   return [ATTEMPT_COLS.join(','), ...rows.map(flat).map((r) => ATTEMPT_COLS.map((c) => esc(Array.isArray(r[c]) ? r[c].join(' ') : r[c])).join(','))].join('\n') + '\n';
@@ -716,7 +735,8 @@ export function toText(rows) {
     out.push(`  phases (min): ${PHASES.map((p) => `${p} ${num(r.phases[p])}`).join(', ')}`);
     const g = r.gates;
     out.push(`  gates: ${g.started} started, ${g.passed} passed, ${g.failed} failed, ${g.stopped} stopped${g.recovered ? `, ${g.recovered} recovered` : ''}; steps ${g.stepsRun} run, ${g.stepsReused} reused, ${g.stepsInterrupted} interrupted; ${num(g.discardedMinutes)} min discarded by stops${g.stoppedDuringReview ? ` (${g.stoppedDuringReview} stopped while a reviewer was open)` : ''}${Object.keys(g.stopClasses).length ? `; stop reasons: ${Object.entries(g.stopClasses).map(([k, v]) => `${k} ${v}`).join(', ')}` : ''}`);
-    out.push(`  review: ${r.reviewRounds} round(s), ${r.recordedRounds} recorded, ${r.refusedRounds} refused, ${r.abandonedRounds} abandoned (${r.wastedReviewerRounds} wasted, ${num(r.wastedReviewerMinutes)} min); ${r.roundsWithGreenGate} on a tree with a passing gate; ${r.repairRounds} repair round(s)`);
+    out.push(`  review: ${r.reviewRounds} handoff(s), ${r.recordedRounds} recorded, ${r.roundsWithRefusal} experienced refusal, ${r.failedLaunchRounds} failed launch(es) (${r.failedStartRounds} before session start), ${r.unknownOutcomeRounds} unknown outcome(s); ${r.roundsWithGreenGate} on a tree with a passing gate; ${r.repairRounds} repair round(s)`);
+    if (Object.keys(r.refusalReasons).length) out.push(`  review refusal reasons: ${Object.entries(r.refusalReasons).map(([reason, count]) => `${reason} ${count}`).join(', ')}`);
     out.push(`  findings: ${r.findings}${Object.keys(r.findingsBySeverity).length ? ` (${Object.entries(r.findingsBySeverity).map(([k, v]) => `${k} ${v}`).join(', ')})` : ''}, ${r.findingsOpen} not yet verified fixed`);
     if (r.scope.amendments) out.push(`  scope: ${r.scope.amendments} amendment(s): criteria ${r.criteriaAtFreeze ?? '?'} -> ${r.criteria} (+${r.scope.criteriaAdded}, ${r.scope.criteriaChanged} changed, -${r.scope.criteriaDropped}); endpoints +${r.scope.endpoints}, error codes +${r.scope.errorCodes}, repos +${r.scope.repos}`);
     const models = Object.entries(r.tokensByModel);
@@ -740,8 +760,8 @@ function handoffTable(rows) {
 
 export function toHtml(rows) {
   const fmt = (v) => (v === null || v === undefined ? '—' : typeof v === 'number' ? (v > 1000 && Number.isInteger(v) ? `${(v / 60000).toFixed(1)} min` : v.toFixed?.(2) ?? v) : v);
-  const head = ['Project', 'Attempt', 'Lane', 'Phase', 'To gate', 'To deliver', 'Gate runs', 'Stopped', 'Review rounds', 'Wasted rounds', 'Repairs', 'Reuse', 'Gate time', 'Findings', 'Tokens', 'Cost'];
-  const body = rows.map((r) => `<tr><td>${html(r.project)}</td><td>${html(r.id)}</td><td>${html(r.lane)}</td><td>${html(r.phase)}</td><td>${fmt(r.timeToGateMs)}</td><td>${fmt(r.timeToDeliverMs)}</td><td>${r.gateRuns}</td><td>${r.gates.stopped}</td><td>${r.reviewRounds}</td><td>${r.wastedReviewerRounds}</td><td>${r.repairRounds}</td><td>${r.reuseRate === null ? '—' : `${Math.round(r.reuseRate * 100)}%`}</td><td>${fmt(r.gateTimeMs)}</td><td>${r.findings}</td><td>${r.tokens || '—'}</td><td>${r.cost === null ? '—' : `$${r.cost.toFixed(2)}`}</td></tr>`).join('\n');
+  const head = ['Project', 'Attempt', 'Lane', 'Phase', 'To gate', 'To deliver', 'Gate runs', 'Stopped', 'Review handoffs', 'Refusal handoffs', 'Failed launches', 'Unknown outcomes', 'Repairs', 'Reuse', 'Gate time', 'Findings', 'Tokens', 'Cost'];
+  const body = rows.map((r) => `<tr><td>${html(r.project)}</td><td>${html(r.id)}</td><td>${html(r.lane)}</td><td>${html(r.phase)}</td><td>${fmt(r.timeToGateMs)}</td><td>${fmt(r.timeToDeliverMs)}</td><td>${r.gateRuns}</td><td>${r.gates.stopped}</td><td>${r.reviewRounds}</td><td>${r.roundsWithRefusal}</td><td>${r.failedLaunchRounds}</td><td>${r.unknownOutcomeRounds}</td><td>${r.repairRounds}</td><td>${r.reuseRate === null ? '—' : `${Math.round(r.reuseRate * 100)}%`}</td><td>${fmt(r.gateTimeMs)}</td><td>${r.findings}</td><td>${r.tokens || '—'}</td><td>${r.cost === null ? '—' : `$${r.cost.toFixed(2)}`}</td></tr>`).join('\n');
   const phaseHead = ['Attempt', ...PHASES];
   const phaseBody = rows.map((r) => `<tr><td>${html(r.id)}</td>${PHASES.map((p) => `<td>${html(r.phases[p])}</td>`).join('')}</tr>`).join('\n');
   return `<!doctype html><meta charset="utf-8"><title>agentic-workflow report</title><style>body{font:14px system-ui;margin:24px;color:#1b2228;background:#fff}table{border-collapse:collapse}td,th{padding:6px 10px;border-bottom:1px solid #ddd;text-align:left;font-variant-numeric:tabular-nums}th{font-size:12px;text-transform:uppercase;color:#5b6770}@media(prefers-color-scheme:dark){body{background:#12171b;color:#e3e8eb}td,th{border-color:#2a343b}}</style><h1>agentic-workflow report</h1><p>${rows.length} attempt(s), generated ${new Date().toISOString()}</p><table><tr>${head.map((h) => `<th>${h}</th>`).join('')}</tr>${body}</table><h2>Minutes per phase</h2><table><tr>${phaseHead.map((h) => `<th>${h}</th>`).join('')}</tr>${phaseBody}</table>${handoffTable(rows)}`;

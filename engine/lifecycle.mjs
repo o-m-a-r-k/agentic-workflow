@@ -16,7 +16,7 @@ import { findSkill } from './skills.mjs';
 import { childAgents, lastFencedYaml, lastModel, readTranscript, sessionModel, subagentModel, subagentTranscripts } from './telemetry.mjs';
 import { outsidePlan, outsideVerdicts } from './scope.mjs';
 import { commentFile, emitTrackerEvent, needsSummary, recordSummary, writeDeliveredComment } from './tracker.mjs';
-import { designChecks, designVerdicts, requiredSkills, reviewRules, ruleVerdicts, skillFiles, unreadDocs } from './rules.mjs';
+import { CODEX_DOCUMENT_READ_INSTRUCTIONS, designChecks, designVerdicts, requiredSkills, reviewDocumentProblems, reviewRules, ruleVerdicts, skillFiles, unreadDocs } from './rules.mjs';
 import { ownerAuthority } from './owner.mjs';
 import { home, howToStart, roleChangedSinceSessionStart, startPromptFor, verifyAgent } from './provenance.mjs';
 import { allRecordedQueries, buildSweeps, deriveFromDiff, impactCheckProblems, impactRequired, inventory, readSweepFile, rerun, staleRestrictionLines, staleRestrictions, sweepAnswers, validateAmendImpact, validatePlanImpact } from './impact.mjs';
@@ -542,6 +542,12 @@ export function handoff(root, role, options) {
     }[role],
   };
   if (role === 'reviewer' && historicalReports.length) bundle.instructions += ' Historical reports are observations from earlier implementations, not proof of current unresolved work. Judge each historicalReports entry on the current tree and add reportedIssues: [{ id, verdict: fixed|verified-nonissue|open, evidence, fixedIn, repo, rationale, finding }]. A fixed verdict names a fix commit of this attempt; verified-nonissue gives a purpose-based rationale; open names an open finding. Missing verdicts refuse the closure, and open findings block the full gate and delivery.';
+  if (role === 'reviewer' && runtime === 'codex') bundle.instructions += '\n' + CODEX_DOCUMENT_READ_INSTRUCTIONS;
+  if (role === 'reviewer' && bundle.impactMap) bundle.instructions += ' Impact discovery under impactMap.derived is textual, not structurally resolved consumer analysis. Judge comments, strings and unrelated equal names against actual imports and behavior before raising findings. Check declarationOrigins when originAmbiguous is true. Read totalSymbols, analyzedSymbols, symbolsTruncated and incomplete: a bounded scan is not proof of complete coverage. Use the existing impact queries to investigate omitted symbols and unsupported relationships; preserve the existing impactChecked verdicts and unlisted requirement.';
+  if (role === 'reviewer') {
+    const problems = reviewDocumentProblems(bundle);
+    if (problems.length) throw refuse(`review readiness refused:\n  - ${problems.join('\n  - ')}`);
+  }
   const record = () => {
     writeJson(file, bundle);
     if (bundle.reviewClosureFile) fs.mkdirSync(path.dirname(bundle.reviewClosureFile), { recursive: true });

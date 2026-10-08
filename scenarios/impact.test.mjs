@@ -189,7 +189,7 @@ test('I-26: the reviewer bundle carries the impact map and the callers the final
   assert.equal(bundle.impactMap.sampleSize, 4);
   assert.deepEqual(bundle.impactMap.queries['Q-consumers'].hits, 2);
   assert.ok(bundle.impactMap.derived.symbols.includes('renderTable'));
-  assert.deepEqual(bundle.impactMap.derived.outside, [{ symbol: 'renderTable', declaredIn: 'app:src/table.js', file: 'app:docs/notes.md' }]);
+  assert.deepEqual(bundle.impactMap.derived.outside, [{ symbol: 'renderTable', declaredIn: 'app:src/table.js', declarationOrigins: ['app:src/table.js'], originAmbiguous: false, matchKind: 'textual', file: 'app:docs/notes.md' }]);
   assert.match(bundle.instructions, /wf impact run --attempt <id>[\s\S]*impactChecked\.sampled[\s\S]*category: impact-gap/);
   const run = ok(wf(a.root, ['impact', 'run', '--attempt', a.id]));
   assert.match(run.out, /Q-consumers: 2 files \(as recorded\) at app@[0-9a-f]{10}\n {4}app:src\/pages\/a\.js\n {4}app:src\/pages\/b\.js/);

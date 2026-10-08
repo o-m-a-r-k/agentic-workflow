@@ -127,7 +127,7 @@ test('wf report counts every finding and repair round over several review rounds
   assert.equal(r.gates.passed, 1);
 
   const text = ok(wf(root, ['report'])).out;
-  assert.match(text, /review: 4 round\(s\), 3 recorded, 1 refused, 0 abandoned \(1 wasted/);
+  assert.match(text, /review: 4 handoff\(s\), 3 recorded, 1 experienced refusal, 0 failed launch\(es\) \(0 before session start\), 0 unknown outcome\(s\)/);
   assert.match(text, /findings: 3 \(major 1, minor 2\), 0 not yet verified fixed/);
   assert.match(text, /phases \(min\): planning [\d.]+, implementing/);
   const csv = path.join(base, 'r.csv');
