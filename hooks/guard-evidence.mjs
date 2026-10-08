@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Keeps agents' shell and file-editing tools out of agentic-workflow evidence (.wf-evidence/). It does not try to
-// understand shell: it decides on the raw text. Named failures: 0.1.16 and 0.1.17 parsed commands to tell a copy OUT of
+// understand general shell: it decides on the raw text. Named failures: 0.1.16 and 0.1.17 parsed commands to tell a copy OUT of
 // evidence (a read) from a write INTO it, and every rule added for that opened a new parser differential.
 //
 // - A Bash command that mentions the evidence in any form (case-insensitive; also after removing quotes, backslashes,
@@ -8,6 +8,8 @@
 //   variable character) is blocked, unless the whole trimmed command is exactly one `wf <subcommand> [args]` with none
 //   of ; & | ` $ ( ) < > newline, backslash or quote characters. A command run with its working directory inside the
 //   evidence is blocked the same way.
+// - Outside project/evidence/worktree scope, a whole literal rg/grep search of existing regular files may contain
+//   a quoted regex like `.*`: only that pattern's broad-glob match is ignored. All explicit evidence-name checks stay.
 // - An Edit/Write/NotebookEdit target that mentions the evidence, or really lies inside it (symlinks resolved), is
 //   blocked. The content written is not inspected (a closure may cite evidence paths).
 // - Anything it cannot read (unparsable input, an unknown tool shape, an exception) is blocked when the input mentions
@@ -16,7 +18,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { touchesEvidence } from '../engine/paths.mjs';
+import { touchesEvidence, canonical } from '../engine/paths.mjs';
 
 // I-16, named failure: the refusal said neither what matched nor how to avoid it, so agents split commands or switched
 // tools by trial. It names the matched token (in `verdict`) and the ways around it that need no exception here.
@@ -103,7 +105,7 @@ const assembled = (raw) => /[$`]/.test(raw) && (/wf-|\.wf\b/.test(raw) || /=\s*[
 const squeeze = (raw) => raw.replace(/\$'|\$\{|[\s'"`\\{},]/g, '');
 const glued = (raw) => /(^|[^a-z0-9])[*?$]+evidence\b|\bevidence[*?]/.test(raw.replace(/['"\\]/g, ''));
 
-export function evidenceMatch(text) {
+export function evidenceMatch(text, globText = text) {
   const raw = fold(text);
   if (raw.includes('wf-evidence')) return tokenOf(text, (t) => fold(t).includes('wf-evidence'));
   if (fold(unescape(raw)).includes('wf-evidence')) return tokenOf(text, (t) => fold(unescape(fold(t))).includes('wf-evidence'));
@@ -117,7 +119,7 @@ export function evidenceMatch(text) {
   // `evidence` glued to a glob or expansion character (`*evidence`, `.wf-{evidence,x}` is caught above): not a comma, a
   // brace or a bracket in prose or code (named false positive, 0.3.0: "keep evidence, ledger" was refused).
   if (glued(raw)) return tokenOf(text, (t) => glued(fold(t)));
-  const glob = raw.split(/[\s;&|()<>'"`=]+/).find((t) => t && globMatchesEvidence(t));
+  const glob = fold(globText).split(/[\s;&|()<>'"`=]+/).find((t) => t && globMatchesEvidence(t));
   return glob ? shown(glob) || '(the whole input)' : null;
 }
 
@@ -145,6 +147,43 @@ function real(p) {
       cur = parent;
     }
   }
+}
+
+// Named failure I-51: a quoted search regex such as `.*` was treated as a shell glob in unrelated projects.
+// This is one whole literal search grammar, not a shell parser or a cwd-based bypass. Only its pattern span is
+// exempt from the broad-glob predicate; explicit/obfuscated evidence names still inspect the original command.
+function literalSearchGlobText(command, cwd) {
+  try {
+    const resolved = fs.realpathSync(cwd);
+    if (!fs.statSync(resolved).isDirectory()) return command;
+    for (const start of [path.resolve(cwd), resolved]) {
+      if (start.split(path.sep).some((part) => part === '.wf-worktrees')) return command;
+      let dir = start;
+      for (;;) {
+        for (const marker of ['.workflow', '.wf-evidence', '.wf-worktrees']) {
+          try { fs.lstatSync(path.join(dir, marker)); return command; }
+          catch (e) { if (e.code !== 'ENOENT') return command; }
+        }
+        const parent = path.dirname(dir);
+        if (parent === dir) break;
+        dir = parent;
+      }
+    }
+    const c = command.trim();
+    const m = /^(?:rg|grep)(?:[ \t]+(?:-n|-i|-l|-c|-q|--line-number|--ignore-case|--files-with-matches|--count|--quiet))*[ \t]+(?:(?:-e|--regexp)[ \t]+)?('[^'\r\n]*'|"[^"\\$`\r\n]*")([ \t]+(?:--[ \t]+)?[A-Za-z0-9_./:@+-]+(?:[ \t]+[A-Za-z0-9_./:@+-]+)*)$/.exec(c);
+    if (!m) return command;
+    const patternAt = c.length - m[2].length - m[1].length;
+    // Quoting does not stop option parsing: e.g. an rg --pre option must never be mistaken for a regex.
+    if (m[1].slice(1, -1).startsWith('-') && !/(?:^|[ \t])(?:-e|--regexp)[ \t]+$/.test(c.slice(0, patternAt))) return command;
+    const operands = m[2].trim().split(/[ \t]+/);
+    if (operands[0] === '--') operands.shift();
+    for (const operand of operands) {
+      if (operand.startsWith('-') || touchesEvidence(operand, cwd)) return command;
+      const stat = fs.statSync(canonical(operand, cwd));
+      if (!stat.isFile() || stat.nlink !== 1) return command;
+    }
+    return c.slice(0, patternAt) + ' '.repeat(m[1].length) + c.slice(patternAt + m[1].length);
+  } catch { return command; }
 }
 
 // Named failure I-43: Codex sends native file patches in tool_input.command, with tool_name apply_patch.
@@ -198,7 +237,8 @@ export function check(data) {
   if (typeof t.command === 'string') {
     // A Bash command; an unexpected `command` on another tool is judged the same way, never as a whitelist.
     if (bashTool && isPlainWf(t.command)) return null;
-    const matched = evidenceMatch(t.command);
+    let matched = evidenceMatch(t.command);
+    if (matched !== null && bashTool && !cwdInEvidence) matched = evidenceMatch(t.command, literalSearchGlobText(t.command, cwd));
     if (matched !== null) return `matched ${JSON.stringify(matched)}`;
     if (cwdInEvidence) return `the command runs inside the evidence folder (working directory ${cwd})`;
     return null;

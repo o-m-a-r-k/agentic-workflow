@@ -2,11 +2,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { closureFile, commitIn, criteriaFile, goodClosure, ok, planDoc, sh, singleRepoProject, state, wf, write, yaml } from './helpers.mjs';
+import { spawn } from 'node:child_process';
+import { closureFile, commitIn, criteriaFile, goodClosure, ok, planDoc, sh, singleRepoProject, state, wf, write, yaml, WF } from './helpers.mjs';
 import { verifyAgent } from '../engine/provenance.mjs';
 import { codexEntries } from '../engine/codex-agent.mjs';
 import { unreadDocs } from '../engine/rules.mjs';
 import { ENGINE_VERSION } from '../engine/util.mjs';
+import { readLedger } from '../engine/ledger.mjs';
 
 const SID = '01a110b4-1637-7a42-b353-d0ad25e60000';
 function prepared(mode = '', { nonGitRoot = false } = {}) {
@@ -38,7 +40,9 @@ const at = new Date().toISOString(), line=(x)=>JSON.stringify({timestamp:at,...x
 const actual = prompt + ${JSON.stringify(mode === 'steered' ? ' Focus only on one file.' : '')};
 fs.writeFileSync(file,[line({type:'session_meta',payload:{id:sid,timestamp:at,originator:'codex_exec',source:'exec',cwd:${JSON.stringify(root)}}}),line({type:'response_item',payload:{type:'message',role:'user',internal_chat_message_metadata_passthrough:{content_item_kinds:['agents_md.instructions','environments.environment_context']},content:[{type:'input_text',text:'# AGENTS.md instructions fixture'},{type:'input_text',text:'<environment_context>fixture</environment_context>'}]}}),line({type:'response_item',payload:{type:'message',role:'user',internal_chat_message_metadata_passthrough:{content_item_kinds:['user.text']},content:[{type:'input_text',text:actual}]}}),line({type:'response_item',payload:{type:'message',role:'assistant',content:[{type:'output_text',text:${JSON.stringify('```yaml\n' + yaml(planDoc({ plan: 'Change a.', criteria: [{ id: 'C1', text: 'a changes' }] })) + '\n```')}}]}})].join('\\n')+'\\n');
 console.log(JSON.stringify({type:'thread.started',thread_id:sid}));
-console.log(JSON.stringify({type:'turn.completed'}));
+if (${JSON.stringify(mode === 'held')}) await new Promise(() => setInterval(() => {}, 1000));
+if (${JSON.stringify(mode === 'runtime-error')}) console.log(JSON.stringify({type:'error'}));
+if (${JSON.stringify(mode !== 'no-completion')}) console.log(JSON.stringify({type:'turn.completed'}));
 process.exit(${mode === 'failed' ? 1 : 0});
 `);
   fs.chmodSync(path.join(dir, 'codex'), 0o755);
@@ -68,6 +72,52 @@ test('engine-launched Codex planner records the exact fresh prompt and imports i
   ok(wf(root, ['plan', '--from-agent', 'p', '--attempt', id], { env }));
   assert.equal(state(root, id).planSource.provenance, 'verified');
   assert.equal(wf(root, ['handoff', 'run', '--agent', 'p', '--attempt', id], { env }).code, 75, 'a handoff launches once');
+});
+
+test('native role progress goes to stderr while JSON remains one terminal result', () => {
+  const { root, id, env } = prepared();
+  const result = ok(wf(root, ['handoff', 'run', '--agent', 'p', '--attempt', id, '--json'], { env }));
+  assert.match(result.err, /Codex planner p: session .* started; configured future-model\/max/);
+  assert.equal(result.json().status, 'completed');
+  assert.equal(result.json().session, SID);
+  assert.doesNotMatch(result.out, /process running|configured/);
+  assert.deepEqual(readLedger(root, id).filter((e) => e.type.startsWith('agent.launch.')).map((e) => e.type), ['agent.launch.requested', 'agent.launch.started', 'agent.launch.finished']);
+});
+
+test('runtime errors and a zero-exit process without completion remain failed launches', () => {
+  for (const mode of ['runtime-error', 'no-completion']) {
+    const { root, id, env } = prepared(mode);
+    const result = wf(root, ['handoff', 'run', '--agent', 'p', '--attempt', id, '--json'], { env });
+    assert.equal(result.code, 1);
+    assert.equal(result.json().status, 'failed');
+    assert.match(result.err, /session .* started/);
+    assert.equal(state(root, id).handoffs.at(-1).launch.status, 'failed');
+    assert.equal(wf(root, ['plan', '--from-agent', 'p', '--attempt', id], { env }).code, 75);
+  }
+});
+
+test('start is visible before a quiet child finishes and cancellation records failure', { timeout: 15_000 }, async () => {
+  const { root, id, env } = prepared('held');
+  const runtimeEnv = { ...process.env, ...env, WF_CONFIG_HOME: path.join(root, '..', '.wfhome'), WF_EVIDENCE_FLAGS: '0' };
+  for (const key of ['CODEX_THREAD_ID', 'CLAUDE_CODE_SESSION_ID', 'CLAUDECODE', 'AI_AGENT', 'GROK_SESSION_ID']) delete runtimeEnv[key];
+  const child = spawn(process.execPath, [WF, 'handoff', 'run', '--agent', 'p', '--attempt', id, '--json'], { cwd: root, env: runtimeEnv });
+  let stderr = '', stdout = '';
+  const exited = new Promise((resolve) => child.once('close', resolve));
+  child.stdout.on('data', (bytes) => { stdout += bytes; });
+  const started = new Promise((resolve, reject) => {
+    child.stderr.on('data', (bytes) => { stderr += bytes; if (/session .* started/.test(stderr)) resolve(); });
+    child.once('close', () => reject(new Error('role closed before start: ' + stderr)));
+  });
+  try {
+    await started;
+    assert.equal(child.exitCode, null, 'start is shown while the execution handle is still live');
+    child.kill('SIGTERM');
+    assert.equal(await exited, 1);
+    assert.equal(JSON.parse(stdout).status, 'failed');
+    assert.match(stderr, /interrupted/);
+    assert.equal(state(root, id).handoffs.at(-1).launch.status, 'failed');
+    assert.equal(wf(root, ['handoff', 'run', '--agent', 'p', '--attempt', id], { env }).code, 75);
+  } finally { if (child.exitCode === null) child.kill('SIGTERM'); }
 });
 
 test('engine-launched Codex provenance refuses a steered prompt and a failed planner run', () => {

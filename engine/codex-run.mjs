@@ -11,6 +11,7 @@ import { adapterFileAtCommit, trustedAdapter } from './config.mjs';
 import { append, loadState } from './ledger.mjs';
 import { seal } from './evidence.mjs';
 import { roleInstructions } from './onboard.mjs';
+import { roleProgress, ROLE_HEARTBEAT_MS } from './role-progress.mjs';
 import { assertPlainGit, canonical, git, refuse, sha256, withFileLock, writeJson } from './util.mjs';
 
 export async function runCodexRole(root, options) {
@@ -58,6 +59,13 @@ export async function runCodexRole(root, options) {
   if (h.effort) args.push('-c', `model_reasoning_effort=${JSON.stringify(h.effort)}`);
   args.push('-');
   const child = spawn('codex', args, { cwd: root, env, stdio: ['pipe', 'pipe', 'pipe'] });
+  // Named failure I-52: quiet launches caused repeated owner transcript scans and duplicated interim review analysis.
+  // Observe only this live child handle; a historical launch receipt never establishes current liveness.
+  const progress = roleProgress(h);
+  const heartbeat = setInterval(() => {
+    if (child.exitCode === null && child.signalCode === null && !child.killed) progress.heartbeat();
+  }, ROLE_HEARTBEAT_MS);
+  heartbeat.unref();
   let session = null, completed = false, problem = null, stderr = '';
   const interrupted = () => { problem = 'the role launch was interrupted'; child.kill('SIGTERM'); };
   process.on('SIGINT', interrupted);
@@ -71,18 +79,22 @@ export async function runCodexRole(root, options) {
     for await (const line of lines) {
       if (line.length > 8 * 1024 * 1024) throw new Error('Codex event exceeds the read cap');
       let e; try { e = JSON.parse(line); } catch { continue; }
+      progress.event();
       if (e.type === 'thread.started') {
         if (session || typeof e.thread_id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9-]{7,63}$/.test(e.thread_id)) throw new Error('Codex supplied an invalid or repeated session id');
         if (loadState(root, state.id).handoffs.some((other) => other.bundle !== h.bundle && other.session === e.thread_id)) throw new Error('Codex reused another handoff session id');
         session = e.thread_id;
         append(root, state.id, 'agent.launch.started', { handoff: h.bundle, session }, 'engine:codex');
         seal(append);
+        progress.start(session);
       }
       if (e.type === 'turn.completed') completed = true;
       if (e.type === 'turn.failed' || e.type === 'error') problem = 'Codex reported a failed turn';
     }
   } catch (e) { problem = e.message; child.kill('SIGTERM'); }
   const exitCode = await ended;
+  clearInterval(heartbeat);
+  progress.finish();
   process.removeListener('SIGINT', interrupted);
   process.removeListener('SIGTERM', interrupted);
   const success = exitCode === 0 && session && completed && !problem;
