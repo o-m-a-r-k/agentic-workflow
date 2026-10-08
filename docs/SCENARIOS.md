@@ -121,3 +121,14 @@ A tiny library (`examples/hello-ticket/`) with two tickets as files and `node --
 | Pattern sweeps and models 0.5.0 (I-25) | A fix handoff with open findings and no `--sweep` refused; a sweep naming a finding that is not open, missing one, or carrying an invalid query refused; the engine runs each sweep and prints its hits; the next reviewer handoff refused until each sweep has a `Sweep <id>: fixed|clean - ...` trailer; the reviewer bundle lists the hits then and now and the answer; a second handoff in the same round owes none; `wf doctor` fails when the planner or reviewer resolves to no Claude model and passes on the default `review` class (`opus`, written by `wf sync`), a pinned class, or no planner; a `doNotRun` or `externalServices` entry naming a repo or step the diff now touches is warned about at the implementer handoff and amendment (stderr), never in the reviewer prompt; role texts and skills say survey first, sweep the pattern and check the impact map | impact |
 | Game day | One ticket across a backend/frontend pair through every fault seen on real tickets | gameday |
 | End to end | From `wf init`: drafted adapter fails the gate when source breaks; narrow inputs fail closed per step; `wf` works inside worktrees; failed entry rolls back; gate and install output do not block gates; monorepo and multi-repo init; machine-wide leases across gates; review hints; guard hook resolves relative paths after `cd` | e2e |
+
+## Codex integration 0.5.3
+
+| Boundary | Observed scenarios | File |
+| --- | --- | --- |
+| Owner closure | Direct and literal wrapped shell calls; child, forged result, stale/future, replayed, wrong command and cwd refusal | owner-authority |
+| Runtime configuration | Selected-runtime model checks; enabled installed plugin skill version, disabled/cache-only refusal | onboarding |
+| Usage | Active indexed rollout and native snapshots; cached/reasoning subsets counted once | telemetry |
+| Planner import | No same-name Claude fallback for a Codex handoff | field-fixes |
+| Connector receipts | Native Linear aliases and single literal wrappers; modified, multiple, ambiguous/error/mismatched outputs refuse | tracker-host-recorded |
+| Fresh role provenance | Engine-owned prompt, role/model/effort, returned session id, unchanged planner YAML; steered/failed launch refusal and reviewer tree binding | codex-run |

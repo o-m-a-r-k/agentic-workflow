@@ -243,7 +243,7 @@ test('I-25: a fix handoff names a pattern sweep per open finding; the implemente
 test('I-25: doctor fails when the planner or reviewer resolves to no model; the default review class pins one and wf sync writes it', () => {
   const ok1 = singleRepoProject('doctor-models', { gate: { steps } });
   const d = ok(wf(ok1.root, ['doctor', '--no-steps']));
-  assert.match(d.out, /✓ config: planner model: opus \(class review\)\n✓ config: reviewer model: opus \(class review\)/);
+  assert.match(d.out, /✓ config: planner model: opus \(class review\) \(claude\)\n✓ config: reviewer model: opus \(class review\) \(claude\)/);
   ok(wf(ok1.root, ['sync']));
   const front = fs.readFileSync(path.join(ok1.root, '.claude/agents/wf-reviewer.md'), 'utf8');
   assert.match(front, /^model: opus$/m);
@@ -251,7 +251,7 @@ test('I-25: doctor fails when the planner or reviewer resolves to no model; the 
   const bad = singleRepoProject('doctor-nomodel', { gate: { steps }, roles: { reviewer: { class: 'full' } } });
   const r = wf(bad.root, ['doctor', '--no-steps']);
   assert.equal(r.code, 1);
-  assert.match(r.out, /✗ config: reviewer model — the reviewer role runs at class `full`, which pins no Claude model[\s\S]*fix: set `classes\.full\.claude\.model`/);
+  assert.match(r.out, /✗ config: reviewer model \(claude\) — the reviewer role runs at class `full`, which pins no Claude model[\s\S]*fix: set `classes\.full\.claude\.model`/);
   const pinned = singleRepoProject('doctor-pinned', { gate: { steps }, roles: { reviewer: { class: 'full' } }, classes: { full: { claude: { model: 'some-model' } } } });
   ok(wf(pinned.root, ['doctor', '--no-steps']));
   const noPlanner = singleRepoProject('doctor-noplanner', { gate: { steps }, roles: { planner: false } });

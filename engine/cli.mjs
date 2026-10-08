@@ -26,7 +26,8 @@ const HELP = `wf ${ENGINE_VERSION} — agentic-workflow
 Onboarding
   wf install [--dir DIR]            link wf into ~/.local/bin
   wf init [--force]                 detect the project and draft .workflow/ (disabled)
-  wf doctor [--no-steps]            check config, tools, secrets, skills; run light steps on a clean base
+  wf doctor [--no-steps] [--runtime claude|codex]
+                                    check config, tools, secrets, skills; run light steps on a clean base
   wf enable | wf disable            turn the workflow on/off for this project
   wf sync                           regenerate the AGENTS.md block, role agents, vendored skills
   wf topology [--check]             show components and what the change touches; --check compares with the code
@@ -48,6 +49,7 @@ Work
                                     --sweep: a fix handoff names a pattern sweep per open review finding
   wf handoff close --agent ID [--outcome done|stopped|failed]
                                     an implementer finished: no review round starts while one is open
+  wf handoff run --agent ID         launch the existing Codex handoff fresh, with engine-recorded prompt provenance
   wf handoff reviewer --agent ID --reason "why"
                                     hand the tree while an implementer is open; records the override
   wf impact run [--file plan.yaml | --query JSON]
@@ -440,7 +442,7 @@ async function dispatch(cmd, sub, positional, options) {
       return 0;
     }
     case 'doctor': {
-      const r = await doctor(root, { runSteps: options['no-steps'] !== true });
+      const r = await doctor(root, { runSteps: options['no-steps'] !== true, ...(options.runtime ? { runtime: options.runtime } : {}) });
       const lines = [];
       for (const section of ['config', 'tools', 'secrets', 'skills', 'connectors', 'steps', 'protection', 'warnings']) {
         for (const item of r[section]) lines.push(`${item.warn ? '!' : item.ok ? '✓' : '✗'} ${section === 'warnings' ? 'warning' : section}: ${item.check ?? item.tool ?? item.key ?? item.skill ?? item.step ?? item.connector}${item.runtime ? ` (${item.runtime})` : ''}${item.problem ? ` — ${item.problem}` : ''}${item.kind ? ` [${item.kind}]` : ''}${item.fix ? `\n    fix: ${item.fix}` : ''}${item.log ? `\n    log: ${item.log}` : ''}${item.note ? `\n    ${item.note}` : ''}`);
@@ -614,6 +616,12 @@ async function dispatch(cmd, sub, positional, options) {
       throw new WfError('usage: wf discovered add --summary "..." [--where file:line] [--found-by ID] | list | close D1 --fixed SHA | --deferred (once the owner\'s message starts with: defer <attempt>:<id>)');
     }
     case 'handoff': {
+      if (sub === 'run') {
+        const { runCodexRole } = await import('./codex-run.mjs');
+        const result = await runCodexRole(root, options);
+        print(options, `Codex ${result.agent}: ${result.status}${result.session ? ` (${result.session})` : ''}`, result);
+        return result.exitCode;
+      }
       if (sub === 'close') {
         const c = closeImplementer(root, options);
         print(options, `implementer ${options.agent} closed (${c.outcome}) on ${c.state.id}; commits since its handoff: ${Object.entries(c.commits).map(([k, v]) => `${k} ${v ?? '?'}`).join(', ')}${c.children.length ? `; ${c.children.length} sub-agent(s) attributed to ${c.handoff}` : ''}${c.state.implementers.some((x) => !x.closedAt) ? `\n  still open: ${c.state.implementers.filter((x) => !x.closedAt).map((x) => x.agent).join(', ')}` : '\n  every implementer is closed: the tree is settled for a review'}`, { handoff: c.handoff, outcome: c.outcome, commits: c.commits, children: c.children });

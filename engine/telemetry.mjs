@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { listAttempts, readLedger, reduce } from './ledger.mjs';
 import { YAML } from './util.mjs';
+import { ownerTranscript } from './host-record.mjs';
 
 // The ledger is the event log: every `wf` command appends to it with a timestamp.
 // Agent usage is read afterwards from each runtime's own session logs. Measurement only.
@@ -194,11 +195,13 @@ export function subagentModel(home, name, agentType = null, since = null) {
 }
 
 function codexUsage(session, home) {
-  const files = walk(path.join(home, '.codex', 'sessions')).filter((f) => f.includes(session));
-  if (!files.length) return null;
+  // Named failure I-38: summing retained rollouts doubled cumulative totals and substring-matched other sessions.
+  const selected = ownerTranscript(`codex:${session}`, home);
+  if (selected.problem) return null;
+  const files = [selected.file];
   const u = { runtime: 'codex', models: {}, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, toolCalls: 0, first: null, last: null };
   for (const f of files) {
-    let last = null;
+    let last = null, native = null;
     for (const line of fs.readFileSync(f, 'utf8').split('\n')) {
       if (!line) continue;
       let e;
@@ -213,19 +216,23 @@ function codexUsage(session, home) {
       }
       const p = e.payload ?? e;
       if (p.type === 'token_count' && p.info?.total_token_usage) last = p.info.total_token_usage;
+      if (e.type === 'token_usage_record' && (!p.thread_id || p.thread_id === session) && p.thread_token_usage) native = p.thread_token_usage;
       if (p.type === 'function_call' || p.type === 'custom_tool_call') u.toolCalls += 1;
       if (p.model) u.models[p.model] = (u.models[p.model] ?? 0) + 1;
     }
-    if (last) {
-      u.input += last.input_tokens ?? 0;
-      u.cacheRead += last.cached_input_tokens ?? 0;
-      u.output += last.output_tokens ?? 0;
-      u.reasoning += last.reasoning_output_tokens ?? 0;
+    const total = native ?? last;
+    if (total) {
+      u.cacheRead = total.cached_input_tokens ?? 0;
+      u.cacheWrite = total.cache_write_input_tokens ?? 0;
+      // Cached input and reasoning output are subsets of the host's input/output totals, not additional tokens.
+      u.input = Math.max(0, (total.input_tokens ?? 0) - u.cacheRead - u.cacheWrite);
+      u.output = total.output_tokens ?? 0;
+      u.reasoning = total.reasoning_output_tokens ?? 0;
     }
   }
   // Codex reports one running total per session: all of it is attributed to the session's main model.
   const model = top(u.models)[0] ?? 'unknown';
-  u.byModel = { [model]: { input: u.input, output: u.output + u.reasoning, cacheRead: u.cacheRead, cacheWrite: u.cacheWrite, requests: null } };
+  u.byModel = { [model]: { input: u.input, output: u.output, cacheRead: u.cacheRead, cacheWrite: u.cacheWrite, requests: null } };
   u.transcripts = files;
   return u;
 }

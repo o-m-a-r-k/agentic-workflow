@@ -80,6 +80,20 @@ test('wf plan keeps the planner\'s top-level sections, refuses unknown keys, and
   assert.deepEqual(JSON.parse(fs.readFileSync(rev.bundle, 'utf8')).plan, want, 'the reviewer bundle carries every section');
 });
 
+test('Codex planner import never borrows a same-named Claude transcript', () => {
+  const { root, id } = admitted('codex-plan-runtime');
+  const handoff = ok(wf(root, ['handoff', 'planner', '--agent', 'planner-7', '--runtime', 'codex', '--attempt', id, '--json'])).json();
+  const t = new Date(Date.now() + 1000).toISOString();
+  subagent(root, { name: 'planner-7', agentType: handoff.agentType, entries: [
+    { type: 'user', timestamp: t, message: { role: 'user', content: handoff.startPrompt } },
+    { type: 'assistant', timestamp: t, message: { content: [{ type: 'text', text: '```yaml\n' + PLANNER_YAML + '\n```' }] } },
+  ] });
+  const r = wf(root, ['plan', '--from-agent', 'planner-7', '--attempt', id]);
+  assert.equal(r.code, 75, r.err || r.out);
+  assert.match(r.err, /Codex planner output.*wf plan --file/);
+  assert.equal(state(root, id).planSource, null);
+});
+
 test('wf plan --from-agent freezes the planner\'s last YAML block from its transcript, and refuses when none is found', () => {
   // Failure: the owner retyped the planner's output and dropped sections on the way.
   const { root, id } = admitted('plan-agent');
@@ -300,8 +314,8 @@ test('wf report shows active minutes and rounds; doctor warns when unpinned agen
   assert.deepEqual(p.roundDetail.map((r) => r.activeMinutes), [3, 1]);
   assert.deepEqual(rows[0].observedModels.sort(), ['model-a', 'model-b']);
   const d = wf(root, ['doctor', '--no-steps']);
-  assert.match(d.out, /! warning: models in ENG-1\.1 — agents ran on model-a, model-b and a class a role runs at pins no model/);
-  assert.match(d.out, /✗ config: planner model — the planner role runs at class `full`, which pins no Claude model/);
+  assert.match(d.out, /! warning: models in ENG-1\.1 — agents ran on model-a, model-b and a class a role runs at pins no claude model/);
+  assert.match(d.out, /✗ config: planner model \(claude\) — the planner role runs at class `full`, which pins no Claude model/);
   const pinned = path.join(root, '.workflow', 'project.yaml');
   const cfg = JSON.parse(fs.readFileSync(pinned, 'utf8'));
   fs.writeFileSync(pinned, JSON.stringify({ ...cfg, classes: { full: { claude: { model: 'model-b' } } } }));

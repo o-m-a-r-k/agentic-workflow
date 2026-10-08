@@ -32,6 +32,7 @@
 // decision records where its authority came from.
 import { fold, ownerTurns, readCapped } from './discovered.mjs';
 import { ownerTranscript } from './host-record.mjs';
+import { lastCodexOwnerCommand } from './codex-command.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -200,16 +201,20 @@ export function ownerAuthority(root, state, phrase, { what, command = null, owne
     return { provenance: 'host-recorded', runtime: t.runtime, file: t.file, line: m.line, offset: m.offset, at: m.at, phrase, text: m.text.slice(0, 2000), spent: spendKey(t, m) };
   }
   let why = '';
-  if (command && t.runtime === 'claude') {
-    const ran = lastOwnerCommand(bytes);
+  if (command) {
+    const ran = t.runtime === 'codex' ? lastCodexOwnerCommand(bytes, t.session) : lastOwnerCommand(bytes);
     const spent = ran ? `${t.runtime}:${t.session}:cmd:${ran.id}` : null;
     why = !ran ? 'the owner session ran no command' : used.has(spent) ? 'its last command was already counted for a decision' : commandProblem(ran, command, stateFor);
+    if (!why && t.runtime === 'codex') {
+      const cwd = realOr(ran.cwd), project = realOr(root);
+      if (!cwd || !project || !(cwd === project || cwd.startsWith(project + path.sep))) why = 'its last command was run outside this project';
+    }
     if (!why && !claim(root, spent, { phrase, attempt: state.id, decision })) why = 'its last command was already counted for a decision';
     if (!why) return { provenance: 'owner-session command', runtime: t.runtime, file: t.file, line: ran.line, at: ran.at, spent, command: ran.command.slice(0, 500) };
   }
   if (notInteractive) throw refuse(`not done: ${what} needs a message from ${owner}, a plain interactive session, and ${t.file} is not one: ${notInteractive}`, how);
   const missing = requestPhrases ? `contains an affirmative, unconditional request to adopt this ticket or attempt` : `starts with \`${phrase}\``;
-  throw refuse(`not done: ${what} needs the owner's authority, and no unspent owner message in the owner session (${t.file}) ${missing}${shown && t.runtime === 'claude' ? `, nor did the owner session itself run exactly \`${shown}\` (${why})` : ''}; an agent's word, a tool result or a sub-agent's call never counts`, how);
+  throw refuse(`not done: ${what} needs the owner's authority, and no unspent owner message in the owner session (${t.file}) ${missing}${shown ? `, nor did the owner session itself run exactly \`${shown}\` (${why})` : ''}; an agent's word, a tool result or a sub-agent's call never counts`, how);
 }
 
 // The person at the owner's own terminal types the phrase back. Refused without an interactive terminal, and under an
@@ -304,6 +309,7 @@ function commandProblem(ran, spec, state) {
   if (/[;&|`$<>()\n\r'"\\*?~{}[\]#!]/.test(ran.command)) return 'its last command is not one plain wf invocation';
   const at = Date.parse(ran.at ?? '');
   if (!Number.isFinite(at)) return 'its last command carries no time';
+  if (at > Date.now() + 1000) return 'its last command records a future time';
   if (Date.now() - at > RUN_WINDOW_MS) return 'its last command ran more than 10 minutes ago';
   if (state.admittedAt && at < Date.parse(state.admittedAt)) return 'its last command ran before the attempt was admitted';
   const words = ran.command.trim().split(/[ \t]+/);

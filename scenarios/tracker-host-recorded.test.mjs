@@ -136,6 +136,55 @@ test('host-recorded (Codex, a uuid-named connector): the rollout file is found b
   assert.equal(state(root, id).tracker.done[0].host.runtime, 'codex');
 });
 
+test('Codex connector readbacks accept a single literal functions-exec call and native Linear aliases', () => {
+  for (const wrapped of [false, true]) {
+    const { base, root } = project(`codex-connector-${wrapped}`);
+    const t = transcript(base, 'codex', 'mcp__codex_apps__');
+    const id = attempt(root, base, 'ENG-71', `codex:${TID}`);
+    const issue = rawIssue('ENG-71', 'In Progress', { description: 'Show it unchanged.' });
+    if (!wrapped) t.call('linear_get_issue', { id: 'ENG-71' }, issue);
+    else {
+      t.raw(JSON.stringify({ timestamp: tick(), type: 'response_item', payload: { type: 'custom_tool_call', name: 'exec', call_id: 'call_wrapped', input: 'text(await tools.mcp__codex_apps__linear_get_issue({id:"ENG-71"}));' } }) + '\n');
+      t.raw(JSON.stringify({ timestamp: tick(), type: 'response_item', payload: { type: 'custom_tool_call_output', call_id: 'call_wrapped', output: [
+        { type: 'input_text', text: 'Script completed\nWall time 0.1 seconds\nOutput:\n' },
+        { type: 'input_text', text: JSON.stringify({ content: [{ type: 'text', text: JSON.stringify(issue) }] }) },
+      ] } }) + '\n');
+    }
+    ok(record(root, id, 'admitted'));
+    const receipt = state(root, id).tracker.done[0];
+    assert.equal(receipt.provenance, 'host-recorded');
+    assert.match(fs.readFileSync(receipt.capture.path, 'utf8'), /Show it unchanged\./);
+  }
+});
+
+test('Codex connector wrappers refuse transformed results, multiple calls, ambiguous code, and mismatched outputs', () => {
+  const { base, root } = project('codex-connector-refuse');
+  const t = transcript(base, 'codex');
+  const id = attempt(root, base, 'ENG-71', `codex:${TID}`);
+  const issue = rawIssue('ENG-71', 'In Progress', { description: 'Show it.' });
+  const good = 'text(await tools.mcp__codex_apps__linear_get_issue({id:"ENG-71"}));';
+  const result = [
+    { type: 'input_text', text: 'Script completed\nWall time 0.1 seconds\nOutput:\n' },
+    { type: 'input_text', text: JSON.stringify({ content: [{ type: 'text', text: JSON.stringify(issue) }] }) },
+  ];
+  for (const [input, output, resultId] of [
+    ['if (false) { ' + good + ' }', result],
+    [good + good, result],
+    ['const r = await tools.mcp__codex_apps__linear_get_issue({id:"ENG-71"}); text(r);', result],
+    ['text({...await tools.mcp__codex_apps__linear_get_issue({id:"ENG-71"}), isError:false});', result],
+    ['text(await tools.mcp__codex_apps__linear_get_issue({id: ticket}));', result],
+    [good, result, 'call_other'],
+    [good, [{ type: 'input_text', text: JSON.stringify(issue) }]],
+    [good, [...result, result[1]]],
+    [good, [result[0], { type: 'input_text', text: JSON.stringify({ isError: true, content: [{ type: 'text', text: JSON.stringify(issue) }] }) }]],
+  ]) {
+    fs.writeFileSync(t.file, '');
+    t.raw(JSON.stringify({ timestamp: tick(), type: 'response_item', payload: { type: 'custom_tool_call', name: 'exec', call_id: 'call_wrapped', input } }) + '\n');
+    t.raw(JSON.stringify({ timestamp: tick(), type: 'response_item', payload: { type: 'custom_tool_call_output', call_id: resultId ?? 'call_wrapped', output } }) + '\n');
+    assert.equal(record(root, id, 'admitted').code, 75, input);
+  }
+});
+
 test('host-recorded refusals: no transcript, another item only, a recycled result, over the size cap, a symlinked transcript, an engine mode', () => {
   const { base, root } = project('host-refuse');
   const id = attempt(root, base, 'ENG-72', `claude:${SID}`);

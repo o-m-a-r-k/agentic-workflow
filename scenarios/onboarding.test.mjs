@@ -163,6 +163,33 @@ test('installed skills are found per runtime, and a plugin whose marketplace is 
   assert.equal(findSkill('/nowhere', 'missing', 'codex', home), null);
 });
 
+test('doctor validates planner and reviewer models for the selected Codex runtime', () => {
+  // Named failure I-36: Claude pins made Codex look configured, and Codex-only pins failed Claude-only checks.
+  const missing = singleRepoProject('codex-model-missing', { classes: { review: { claude: { model: 'opus' }, codex: { model: null } } } });
+  const bad = wf(missing.root, ['doctor', '--runtime', 'codex', '--no-steps', '--json']);
+  assert.equal(bad.code, 1);
+  assert.equal(bad.json().config.filter((c) => !c.ok && /planner model|reviewer model/.test(c.check)).length, 2);
+  assert.match(JSON.stringify(bad.json().config), /codex\.model/);
+  const pinned = singleRepoProject('codex-model-pinned', { classes: { review: { claude: { model: null }, codex: { model: 'future-codex-model', effort: 'max' } } } });
+  const good = ok(wf(pinned.root, ['doctor', '--runtime', 'codex', '--no-steps', '--json'])).json();
+  assert.equal(good.config.filter((c) => c.ok && c.runtime === 'codex' && /model: future-codex-model/.test(c.check)).length, 2);
+});
+
+test('Codex plugin skills follow the enabled installed version, not the newest cached version', async () => {
+  // Named failure I-37: native Codex plugins were invisible to skill lookup and doctor.
+  const { findSkill } = await import('../engine/skills.mjs');
+  const home = tmp('codex-plugin-home');
+  write(home, '.codex/plugins/cache/ux-market/ux/1.0.0/skills/ux-check/SKILL.md', '# installed\n');
+  write(home, '.codex/plugins/cache/ux-market/ux/2.0.0/skills/ux-check/SKILL.md', '# cached only\n');
+  const provider = { codexPlugins: () => ({ installed: [{ name: 'ux', pluginId: 'ux@ux-market', version: '1.0.0', installed: true, enabled: true }] }) };
+  const skill = findSkill('/nowhere', 'ux:ux-check', 'codex', home, provider);
+  assert.ok(skill);
+  assert.match(skill.path, /ux\/1\.0\.0\/skills\/ux-check\/SKILL\.md$/);
+  assert.equal(skill.source, 'plugin ux@ux-market');
+  assert.equal(findSkill('/nowhere', 'ux-check', 'codex', home, { codexPlugins: () => ({ installed: [{ name: 'ux', version: '1.0.0', installed: true, enabled: false }] }) }), null);
+  assert.equal(findSkill('/nowhere', 'ux-check', 'codex', home, { codexPlugins: () => ({ installed: [] }) }), null);
+});
+
 test('wf --version reports the released plugin version, which package.json matches', () => {
   const plugin = JSON.parse(fs.readFileSync(new URL('../.claude-plugin/plugin.json', import.meta.url), 'utf8')).version;
   const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;

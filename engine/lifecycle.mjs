@@ -117,8 +117,18 @@ export function planFromDoc(doc) {
 function planFromAgent(root, state, agent) {
   const handoff = state.handoffs.filter((h) => h.role === 'planner' && h.agent === agent).at(-1);
   if (!handoff) throw refuse(`\`${agent}\` was not handed this attempt as its planner${state.roles.planner.length ? ` (planners: ${state.roles.planner.join(', ')})` : ''}`, 'run `wf handoff planner --agent <id>` and start that agent with the printed line');
+  // Named failure I-39: a Codex handoff imported the last YAML from an unrelated, same-named Claude agent.
   const check = verifyAgent(handoff);
   if (check.status === 'mismatch') throw refuse(`the planner transcript does not match its handoff: ${check.reason}`);
+  if (handoff.runtime === 'codex') {
+    if (check.status !== 'verified' || handoff.launch?.status !== 'completed') throw refuse('Codex planner output needs an engine-launched completed handoff; run `wf handoff run --agent <id>`, or use `wf plan --file <file>` with the unchanged reply', check.reason);
+    const text = lastFencedYaml(check.entries);
+    if (text === null) throw refuse('the Codex planner transcript has no fenced YAML block');
+    let doc;
+    try { doc = YAML.parse(text); } catch (e) { throw refuse(`the Codex planner YAML does not parse: ${e.message.split('\n')[0]}`); }
+    return { doc, text, source: { agent, transcript: check.transcript, agentType: handoff.agentType, model: handoff.model, provenance: check.status } };
+  }
+  if (handoff.runtime !== 'claude') throw refuse('planner output cannot be imported from another runtime; use `wf plan --file <file>`');
   let found = subagentTranscripts(home(), agent, handoff?.agentType ?? null, handoff?.at ?? null);
   // A planner started without a name, identified by its start line (verifyAgent, I-14).
   if (!found.length && check.status === 'verified' && check.identity === 'unnamed') found = [{ file: check.transcript, agentType: handoff.agentType ?? null }];
@@ -790,7 +800,7 @@ export function recordReview(root, options) {
   if (state.impact && !handed.impactMap) throw refuse(`the reviewer's bundle has no impact map although ${state.id} recorded one; no closure is judged without it`, 'hand a fresh reviewer the tree: `wf handoff reviewer --agent <new id>`');
   let reads = { status: 'unverified', reason: provenance.reason ?? null };
   if (provenance.status === 'verified' && (handed.rules?.length || handed.skills?.length)) {
-    const missing = unreadDocs(readTranscript(provenance.transcript), handed.rules, handed.skills);
+    const missing = unreadDocs(provenance.entries ?? readTranscript(provenance.transcript), handed.rules, handed.skills);
     if (missing.length) refusedRound(root, state, reviewerHandoff, closure, 'unread-documents', `${missing.length} document(s) in the bundle not read`);
     if (missing.length) throw refuse(`the reviewer's transcript shows no successful read of ${missing.length} document(s) its bundle lists:\n  - ${missing.join('\n  - ')}`, 'start a fresh reviewer round: `wf handoff reviewer --agent <new id>` with only the printed line; it reads every document under `rules` and `skills`');
     reads = { status: 'verified', reason: null };

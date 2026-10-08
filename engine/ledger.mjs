@@ -219,6 +219,21 @@ export function reduce(entries) {
         if (!s.roles[d.role].includes(d.agent)) s.roles[d.role].push(d.agent);
         if (d.role === 'implementer' && ['admitted', 'planned'].includes(s.phase)) s.phase = 'implementing';
         break;
+      case 'agent.launch.requested': {
+        const h = s.handoffs.find((h) => h.bundle === d.handoff);
+        if (h) h.launch = { ...d, requestedAt: e.at, status: 'starting' };
+        break;
+      }
+      case 'agent.launch.started': {
+        const h = s.handoffs.find((h) => h.bundle === d.handoff);
+        if (h?.launch) { h.session = d.session; h.launch = { ...h.launch, session: d.session, status: 'running', startedAt: e.at }; }
+        break;
+      }
+      case 'agent.launch.finished': {
+        const h = s.handoffs.find((h) => h.bundle === d.handoff);
+        if (h?.launch) h.launch = { ...h.launch, status: d.status, exitCode: d.exitCode, finishedAt: e.at };
+        break;
+      }
       case 'gate.finished':
         s.gates.push({ ...d, at: e.at });
         s.phase = d.status === 'passed' ? 'gated' : 'implementing';

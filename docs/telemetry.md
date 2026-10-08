@@ -7,6 +7,8 @@ Telemetry is measurement only: nothing here allows or blocks a command, and miss
 - **Engine events:** every `wf` command appends to the attempt's hash-chained ledger. The events below are what the engine records for measurement.
 - **Agent usage:** the model, tokens, time and tool calls of each agent are read after the fact from the runtime's own session logs (Claude Code transcripts under `~/.claude/projects`, Codex sessions under `~/.codex/sessions`).
 
+Codex usage reads the single active rollout selected by its host index, including native `token_usage_record.thread_token_usage` snapshots. Cached input is a subset of input, and reasoning is a subset of output: each is counted once. Retained rollout copies are never summed. Cumulative Codex usage is attributed to the main observed session model; cost across model switches is an estimate. A handoff launched with `wf handoff run` records its session id for usage lookup; desktop spawns without a recorded session id still have no per-handoff usage.
+
 `wf report` joins the two. `wf status --all` shows open work across every enabled project.
 
 ## Commands

@@ -3,10 +3,60 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { WF, closureFile, commitIn, criteriaFile, goodClosure, ok, OUT_OF_ORDER, sh, singleRepoProject, state, wf, write, ownerSpeaks, spawnHome } from './helpers.mjs';
 import { logFailures, playwrightJsonFailures, junitFailures } from '../engine/failures.mjs';
-import { REPORT_SCHEMA, priceOf, prices, timeline } from '../engine/telemetry.mjs';
+import { REPORT_SCHEMA, agentUsage, costOf, priceOf, prices, timeline } from '../engine/telemetry.mjs';
+
+test('Codex usage treats cached input and reasoning as subsets rather than billing them twice', () => {
+  // Named failure I-38: cached input and reasoning were added to totals that already included them.
+  const p = singleRepoProject('codex-usage-subsets');
+  const home = path.join(p.base, '.home');
+  const sid = 'codex-usage-session';
+  write(home, `.codex/sessions/rollout-${sid}.jsonl`, [
+    { type: 'session_meta', payload: { id: sid, source: 'cli' } },
+    { type: 'turn_context', payload: { model: 'audit-model' } },
+    { type: 'event_msg', payload: { type: 'token_count', info: { total_token_usage: { input_tokens: 1000000, cached_input_tokens: 800000, output_tokens: 200000, reasoning_output_tokens: 50000 } } } },
+  ].map(JSON.stringify).join('\n'));
+  const u = agentUsage('codex', sid, home);
+  assert.equal(u.input, 200000);
+  assert.equal(u.cacheRead, 800000);
+  assert.equal(u.output, 200000);
+  assert.equal(u.reasoning, 50000);
+  assert.equal(u.byModel['audit-model'].output, 200000);
+  assert.equal(costOf(u, { 'audit-model': { input: 10, output: 20, cacheRead: 1 } }).cost, 6.8);
+});
+
+test('Codex usage reads the active indexed rollout and native thread snapshots without retained-rollout duplication', () => {
+  // Named failure I-38: retained rollouts were summed, while native token_usage_record snapshots were ignored.
+  const p = singleRepoProject('codex-usage-index');
+  const home = path.join(p.base, '.home');
+  const sid = 'codex-usage-indexed-session';
+  const old = `.codex/sessions/rollout-${sid}.jsonl`;
+  const current = `.codex/sessions/rollout-${sid}_new-segment.jsonl`;
+  const meta = { type: 'session_meta', payload: { id: sid, source: 'cli' } };
+  write(home, old, [meta, { type: 'event_msg', payload: { type: 'token_count', info: { total_token_usage: { input_tokens: 9999999 } } } }].map(JSON.stringify).join('\n'));
+  write(home, current, [meta, { type: 'turn_context', payload: { model: 'audit-model' } }, { type: 'token_usage_record', payload: { thread_id: sid, thread_token_usage: { input_tokens: 1000, cached_input_tokens: 800, output_tokens: 200, reasoning_output_tokens: 50 } } }].map(JSON.stringify).join('\n'));
+  const database = path.join(home, '.codex/state_5.sqlite');
+  const active = path.join(home, current);
+  let sqlite;
+  try { sqlite = createRequire(import.meta.url)('node:sqlite'); } catch {}
+  if (sqlite) {
+    const db = new sqlite.DatabaseSync(database);
+    db.exec('CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT)');
+    db.prepare('INSERT INTO threads VALUES (?, ?)').run(sid, active); db.close();
+  } else {
+    const r = spawnSync('python3', ['-I', '-c', 'import sqlite3,sys\nc=sqlite3.connect(sys.argv[1])\nc.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT)")\nc.execute("INSERT INTO threads VALUES (?, ?)",(sys.argv[2],sys.argv[3]))\nc.commit()\nc.close()', database, sid, active]);
+    assert.equal(r.status, 0);
+  }
+  const u = agentUsage('codex', sid, home);
+  assert.deepEqual(u.transcripts, [active]);
+  assert.equal(u.input, 200);
+  assert.equal(u.cacheRead, 800);
+  assert.equal(u.output, 200);
+  assert.equal(u.reasoning, 50);
+});
 
 function admitted(root, base, item) {
   const e = ok(wf(root, ['entry', '--item', item, '--owner', 'o', '--json'])).json();

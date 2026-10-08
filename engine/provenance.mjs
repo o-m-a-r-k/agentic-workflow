@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { readTranscript, subagentIndex } from './telemetry.mjs';
+import { verifyCodexAgent } from './codex-agent.mjs';
 
 // Where a runtime's transcripts are available, a review round (or a plan taken with --from-agent) must come from the
 // agent the engine handed the work to, started with exactly the line `wf handoff` printed. Named failures: a steered
@@ -24,6 +25,7 @@ export const howToStart = (h) => `start it as agent type \`${h.agentType ?? 'the
 
 // → { status: 'verified', transcript, identity } | { status: 'unverified', reason } | { status: 'mismatch', reason }
 export function verifyAgent(handoff) {
+  if (handoff.runtime === 'codex') return verifyCodexAgent(handoff, home());
   if (handoff.runtime !== 'claude') return { status: 'unverified', reason: `no transcripts are read for runtime ${handoff.runtime}` };
   if (!fs.existsSync(path.join(home(), '.claude', 'projects'))) return { status: 'unverified', reason: 'no Claude Code transcript store on this machine' };
   const expected = handoff.startPrompt ?? startPromptFor(handoff.bundle);

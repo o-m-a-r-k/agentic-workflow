@@ -15,7 +15,7 @@ import { trackerModeChecks } from './tracker.mjs';
 import { findSkill } from './skills.mjs';
 import { report } from './telemetry.mjs';
 import { packageOfStep } from './topology.mjs';
-import { ENGINE_VERSION, WfError, YAML, enginePinProblem, git, refuse, run, shellQuote } from './util.mjs';
+import { ENGINE_VERSION, WfError, YAML, enginePinProblem, git, refuse, run, sessionIdentity, shellQuote } from './util.mjs';
 
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const exists = (...p) => fs.existsSync(path.join(...p));
@@ -412,6 +412,14 @@ export function roleAgents(cfg) {
   return out;
 }
 
+// The fresh Codex launch uses the same role template and class instructions as generated agents.
+export function roleInstructions(cfg, role, cls, appendixText = '') {
+  const tpl = fs.readFileSync(path.join(PLUGIN_ROOT, 'templates', 'agents', `${role}.md`), 'utf8');
+  const appendix = appendixText ? `\n\n## Project additions\n\n${appendixText.trim()}\n` : '';
+  const classList = role === 'planner' ? `\n\n## Work classes in this project\n\n${Object.entries(cfg.classes).map(([n, c]) => `- \`${n}\` (agent ${agentTypeFor(cfg, 'implementer', n)}): ${c.use.trim()}`).join('\n')}` : '';
+  return `${tpl.replace(/^---[\s\S]*?---\n/, '').trim()}${classList}\n\nYou run as work class \`${cls}\`: ${cfg.classes[cls].use.trim()}${appendix ? '' : '\n'}${appendix}`;
+}
+
 // Named failure (I-15): a role file `wf sync` changed does not reach agents started from a session that was already
 // running (Claude Code and Codex read agent files when a session starts). Role files are written only when their content
 // changes, so a file's mtime says when the role last changed, and each changed one is reported (`sync.changedRoles`).
@@ -448,8 +456,7 @@ export function sync(root) {
       const { effort, model } = declared(cfg, cls, runtime);
       const appendix = rc.appendix && fs.existsSync(path.join(root, ADAPTER_DIR, rc.appendix)) ? `\n\n## Project additions\n\n${fs.readFileSync(path.join(root, ADAPTER_DIR, rc.appendix), 'utf8').trim()}\n` : '';
       const description = `${tpl.match(/^description: (.*)$/m)?.[1] ?? role} Class ${cls}: ${cfg.classes[cls].use}`.replace(/\s+/g, ' ').trim();
-      const classList = role === 'planner' ? `\n\n## Work classes in this project\n\n${Object.entries(cfg.classes).map(([n, c]) => `- \`${n}\` (agent ${agentTypeFor(cfg, 'implementer', n)}): ${c.use.trim()}`).join('\n')}` : '';
-      const body = `${tpl.replace(/^---[\s\S]*?---\n/, '').trim()}${classList}\n\nYou run as work class \`${cls}\`: ${cfg.classes[cls].use.trim()}${appendix ? '' : '\n'}${appendix}`;
+      const body = roleInstructions(cfg, role, cls, appendix ? fs.readFileSync(path.join(root, ADAPTER_DIR, rc.appendix), 'utf8') : '');
       let file;
       if (runtime === 'codex') {
         // Codex loads custom agents from TOML files in .codex/agents/.
@@ -590,10 +597,10 @@ export function siblingWarnings(root, cfg) {
 
 // Agents whose class pins no model inherit the owner session's: an effort comparison was confounded when the session
 // model changed mid-attempt. Warned only when an attempt actually shows more than one model.
-export function modelWarnings(root, cfg) {
+export function modelWarnings(root, cfg, runtime = sessionIdentity()?.runtime ?? 'claude') {
   // Every class a role runs at pins a model (a pinned review class alone does not stop implementers inheriting).
   const used = ['planner', 'reviewer', 'implementer', ...(cfg.roles?.tester ? ['tester'] : [])].map((r) => cfg.classes[roleClass(cfg, r)]);
-  const pinned = used.every((c) => c?.claude?.model || c?.codex?.model);
+  const pinned = used.every((c) => c?.[runtime]?.model);
   if (pinned) return [];
   let rows = [];
   try {
@@ -603,10 +610,11 @@ export function modelWarnings(root, cfg) {
   }
   return rows
     .filter((r) => r.observedModels.length > 1)
-    .map((r) => ({ check: `models in ${r.id}`, problem: `agents ran on ${r.observedModels.join(', ')} and a class a role runs at pins no model, so its agents inherit the owner session's model`, fix: 'pin `classes.<name>.claude.model` (and `codex.model`) in .workflow/project.yaml' }));
+    .map((r) => ({ check: `models in ${r.id}`, problem: `agents ran on ${r.observedModels.join(', ')} and a class a role runs at pins no ${runtime} model, so its agents inherit the owner session's model`, fix: `pin \`classes.<name>.${runtime}.model\` in .workflow/project.yaml` }));
 }
 
-export async function doctor(root, { runSteps = true } = {}) {
+export async function doctor(root, { runSteps = true, runtime = sessionIdentity()?.runtime ?? 'claude' } = {}) {
+  if (!['claude', 'codex'].includes(runtime)) throw new WfError('--runtime must be claude or codex');
   // Which evidence protection layers this machine provides (informational; a missing flag never fails doctor).
   const report = { config: [], tools: [], secrets: [], skills: [], connectors: [], steps: [], warnings: [], protection: protectionLayers(root).map((l) => ({ ok: true, warn: !l.active, check: l.layer, note: l.detail ?? (l.active ? 'on' : 'off') })), ok: true };
   const bad = (section, item) => {
@@ -637,15 +645,13 @@ export async function doctor(root, { runSteps = true } = {}) {
     bad('config', { check: 'adapter at base', problem: error.message.split('\n')[0], fix: 'commit .workflow/ on the base branch of the adapter repo and push it; the gate trusts only the adapter on the base it starts from' });
     adapterBase = null;
   }
-  // I-25, named failure: the reviewer role resolved to no model, so five review rounds ran on the owner session's weaker
-  // model and passed defects a stronger model found later; the planner did the same. A planner or reviewer whose class
-  // pins no Claude model fails doctor.
+  // Named failure I-36: Claude model pins concealed Codex inheritance; check the selected/owning runtime instead.
   for (const role of ['planner', 'reviewer']) {
     if (role === 'planner' && cfg.roles?.planner === false) continue;
     const cls = roleClass(cfg, role);
-    const { model } = declared(cfg, cls, 'claude');
-    if (model) report.config.push({ ok: true, check: `${role} model: ${model} (class ${cls})` });
-    else bad('config', { check: `${role} model`, problem: `the ${role} role runs at class \`${cls}\`, which pins no Claude model, so its agent inherits whatever model the owner's session runs`, fix: `set \`classes.${cls}.claude.model\` (the strongest model you use), or \`roles.${role}.class: review\` (the plugin's planning and review class), in .workflow/project.yaml; then \`wf sync\`` });
+    const { model } = declared(cfg, cls, runtime);
+    if (model) report.config.push({ ok: true, runtime, check: `${role} model: ${model} (class ${cls})` });
+    else bad('config', { check: `${role} model`, runtime, problem: `the ${role} role runs at class \`${cls}\`, which pins no ${runtime === 'claude' ? 'Claude' : 'Codex'} model, so its agent inherits whatever model the owner's session runs`, fix: `set \`classes.${cls}.${runtime}.model\` (the strongest model you use), or \`roles.${role}.class: review\` (the plugin's planning and review class), in .workflow/project.yaml; then \`wf sync\`` });
   }
   const pin = enginePinProblem(cfg.engine);
   if (pin) bad('config', { check: 'engine version', problem: pin, fix: `upgrade agentic-workflow to ${cfg.engine} or change the pin (\`wf entry\` and \`wf gate\` refuse until then)` });
@@ -689,7 +695,7 @@ export async function doctor(root, { runSteps = true } = {}) {
   if (inbox) report.warnings.push({ ok: true, warn: true, check: 'plugin improvements', problem: `${inbox} open plugin improvement(s) in your inbox`, fix: '`wf improve next` in a plugin maintainer session' });
   // Warnings never fail doctor: each names a setup that let a stale or confounded result through.
   for (const w of siblingWarnings(root, cfg)) report.warnings.push({ ok: true, warn: true, check: w.check, problem: w.problem, fix: w.fix });
-  for (const w of modelWarnings(root, cfg)) report.warnings.push({ ok: true, warn: true, check: w.check, problem: w.problem, fix: w.fix });
+  for (const w of modelWarnings(root, cfg, runtime)) report.warnings.push({ ok: true, warn: true, check: w.check, problem: w.problem, fix: w.fix });
   for (const w of staticArtifactWarnings(cfg)) report.warnings.push({ ok: true, warn: true, ...w });
   if (adapterBase) {
     try {

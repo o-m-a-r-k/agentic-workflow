@@ -19,6 +19,7 @@ import path from 'node:path';
 import readline from 'node:readline';
 import { home } from './provenance.mjs';
 import { indexedCodexTranscript } from './codex-transcript.mjs';
+import { wrappedConnectorCall, wrappedConnectorResult } from './codex-tool.mjs';
 
 const SESSION = /^[A-Za-z0-9][A-Za-z0-9-]{7,63}$/;
 export const maxTranscriptBytes = () => Number(process.env.WF_TRANSCRIPT_MAX_BYTES ?? 512 * 1024 * 1024);
@@ -32,12 +33,12 @@ function realDirs(dir) {
 }
 
 // The owner's transcript: { runtime, file } or { problem }.
-export function ownerTranscript(owner) {
+export function ownerTranscript(owner, hostHome = home()) {
   const m = /^(claude|codex):(.+)$/.exec(String(owner ?? ''));
   if (!m) return { problem: `the attempt's owner \`${owner}\` is not a Claude Code or Codex session, so no host transcript can be read; record with \`--capture\` (a saved tool result) or \`--agent-reported\`` };
   const [, runtime, id] = m;
   if (!SESSION.test(id)) return { problem: `the owner's session id is not a plain id; no transcript is read` };
-  const base = runtime === 'claude' ? path.join(home(), '.claude', 'projects') : path.join(home(), '.codex');
+  const base = runtime === 'claude' ? path.join(hostHome, '.claude', 'projects') : path.join(hostHome, '.codex');
   let baseReal;
   try {
     baseReal = fs.realpathSync.native(base);
@@ -83,6 +84,11 @@ export function ownerTranscript(owner) {
 }
 
 const toolOf = (full) => /^mcp__.+?__([A-Za-z0-9_]+)$/.exec(full)?.[1] ?? null;
+// Named failure I-40: the native Codex connector adds linear_ to tools the adapter registers without that prefix.
+const registeredTool = (full, tools) => {
+  const tool = toolOf(full);
+  return tools.includes(tool) ? tool : tool?.startsWith('linear_') && tools.includes(tool.slice(7)) ? tool.slice(7) : null;
+};
 const textOf = (content) => (typeof content === 'string' ? content : Array.isArray(content) ? content.filter((p) => p?.type === 'text' || p?.type === 'output_text' || p?.type === 'input_text').map((p) => p.text ?? '').join('') : null);
 const parseArgs = (a) => {
   if (a && typeof a === 'object') return a;
@@ -111,7 +117,7 @@ export async function connectorCalls({ runtime, file }, tools) {
   let n = 0;
   for await (const line of rl) {
     n++;
-    if (!line.includes('mcp__') && !line.includes('tool_result') && !line.includes('function_call_output')) continue;
+    if (!line.includes('mcp__') && !line.includes('tool_result') && !line.includes('function_call_output') && !line.includes('custom_tool_call_output')) continue;
     let e;
     try {
       e = JSON.parse(line);
@@ -131,8 +137,17 @@ export async function connectorCalls({ runtime, file }, tools) {
       if (p.type === 'function_call') {
         const ns = String(p.namespace ?? '');
         const full = ns ? (ns.endsWith('__') ? `${ns}${p.name}` : `${ns}__${p.name}`) : String(p.name ?? '');
-        if (tools.includes(toolOf(full))) calls.set(p.call_id, { tool: toolOf(full), name: full, input: parseArgs(p.arguments), calledAt: e.timestamp ?? null, line: n });
+        const tool = registeredTool(full, tools);
+        if (tool) calls.set(p.call_id, { tool, name: full, input: parseArgs(p.arguments), calledAt: e.timestamp ?? null, line: n });
       } else if (p.type === 'function_call_output' && calls.has(p.call_id)) Object.assign(calls.get(p.call_id), { result: textOf(p.output), error: false, at: e.timestamp ?? null, resultLine: n });
+      else if (p.type === 'custom_tool_call') {
+        const call = wrappedConnectorCall(p);
+        const tool = call && registeredTool(call.name, tools);
+        if (tool) calls.set(p.call_id, { ...call, tool, wrapped: true, calledAt: e.timestamp ?? null, line: n });
+      } else if (p.type === 'custom_tool_call_output' && calls.get(p.call_id)?.wrapped) {
+        const result = wrappedConnectorResult(p.output);
+        if (result) Object.assign(calls.get(p.call_id), { ...result, at: e.timestamp ?? null, resultLine: n });
+      }
     }
   }
   return [...calls.values()];
