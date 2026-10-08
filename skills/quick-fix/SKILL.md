@@ -7,6 +7,8 @@ description: Make a small fix without a ticket through agentic-workflow's quick 
 
 With more than one open attempt, pass `--attempt <id>` to every `wf` command.
 
+While a role runs, wait on its original execution-session handle. Keep unchanged checks silent; after ten unchanged checks, one short liveness heartbeat is enough. Report starts, meaningful progress, terminal results, failures and required actions promptly. Do not repeat unchanged worktrees, models, verdict status or next steps. Higher-priority host update requirements remain authoritative; provide only the minimum factual liveness update when one is required. Never treat silence as failure or process completion as an accepted closure.
+
 1. `wf entry` (no `--item`: the lane is `quick` and the id is the next `QF-<n>`).
 2. Write the criteria yourself from the user's request: `wf plan --file <yaml>`. The quick lane has no planner, so no impact analysis is required; when the fix turns out to cross components (a shared component, an endpoint, a contract), stop and tell the user it needs a ticket. Any amendment that adds scope later still owes an `impact` addendum (`wf criteria amend`) when the attempt carries one.
 3. `wf handoff implementer --agent <id>`, implement, commit. While iterating run only the specs you changed; before the gate run the repo's lint and full unit suite once.
