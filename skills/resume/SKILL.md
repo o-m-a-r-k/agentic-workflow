@@ -13,3 +13,5 @@ description: Resume agentic-workflow work after an interruption, a compaction or
 If a command refuses because the evidence does not match what wf recorded, run `wf verify --attempt <id>` and report the listed files to the user; never repair evidence yourself.
 
 If `wf status` lists open plugin improvements and this is a session in the plugin's own repo, `wf improve next` names the one to fix.
+
+For an existing Codex attempt with missing execution models despite current setup, use `wf doctor --runtime codex --attempt <id>`. The owning chat runs exactly `wf models refresh --attempt <id>` to pin committed base model/effort settings, then creates a fresh handoff. This preserves admission rules and existing handoffs. Resume distinguishes an unlaunched or failed reviewer from a running process.

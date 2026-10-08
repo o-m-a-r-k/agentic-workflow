@@ -214,6 +214,10 @@ export function reduce(entries) {
           s.impact.owed = { amendment: s.criteriaAmendments.length, reason: d.reason, scope: d.impactOwed };
         }
         break;
+      case 'models.refreshed':
+        s.runtimeAdapterBase = d.to;
+        (s.modelRefreshes ??= []).push({ ...d, at: e.at, by: e.actor });
+        break;
       case 'handoff':
         s.handoffs.push({ ...d, at: e.at, by: e.actor });
         if (!s.roles[d.role].includes(d.agent)) s.roles[d.role].push(d.agent);

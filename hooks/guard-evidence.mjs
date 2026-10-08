@@ -147,6 +147,34 @@ function real(p) {
   }
 }
 
+// Named failure I-43: Codex sends native file patches in tool_input.command, with tool_name apply_patch.
+// Parse only that file-edit protocol; Bash keeps the frozen raw-text decision, even if its text looks like a patch.
+function patchTargets(text) {
+  if (typeof text !== 'string' || text.includes('\0')) throw new Error('invalid patch text');
+  const lines = text.trim().split(/\r?\n/);
+  if (lines[0] !== '*** Begin Patch' || lines.at(-1) !== '*** End Patch') throw new Error('invalid patch boundary');
+  const targets = [];
+  let operation = null, body = false, moveAllowed = false;
+  for (const line of lines.slice(1, -1)) {
+    const header = /^\*\*\* (Add|Update|Delete) File: (.+)$/.exec(line);
+    if (header) {
+      if (operation === 'Add' && !body) throw new Error('empty add');
+      operation = header[1]; body = false; moveAllowed = operation === 'Update';
+      targets.push(header[2]); continue;
+    }
+    if (operation === 'Update' && moveAllowed && line.startsWith('*** Move to: ')) {
+      if (!line.slice(13).trim()) throw new Error('empty move');
+      targets.push(line.slice(13)); moveAllowed = false; continue;
+    }
+    moveAllowed = false;
+    if (operation === 'Add' && line.startsWith('+')) { body = true; continue; }
+    if (operation === 'Update' && (/^[ +\-]/.test(line) || line === '@@' || line.startsWith('@@ ') || line === '*** End of File')) { body = true; continue; }
+    throw new Error('unknown patch line');
+  }
+  if (!targets.length || (operation === 'Add' && !body)) throw new Error('empty patch');
+  return targets;
+}
+
 export function check(data) {
   if (!data || typeof data !== 'object') return mentionsEvidence(JSON.stringify(data ?? '')) ? 'unreadable input' : null;
   const t = data.tool_input;
@@ -154,13 +182,18 @@ export function check(data) {
   const cwdInEvidence = inEvidence(cwd) || touchesEvidence(cwd);
   if (!t || typeof t !== 'object') return mentionsEvidence(JSON.stringify(data)) || cwdInEvidence ? 'unknown tool input' : null;
   // Every file target is checked whatever else the input carries (a `command` next to a `file_path` whitelists nothing).
-  const files = [t.file_path, t.notebook_path, t.path, ...(Array.isArray(t.edits) ? t.edits.map((e) => e?.file_path) : [])];
+  let patches = null;
+  if (data.tool_name === 'apply_patch') {
+    try { patches = patchTargets(t.command); } catch { return 'malformed native file-edit payload'; }
+  }
+  const files = [...(patches ?? []), t.file_path, t.notebook_path, t.path, ...(Array.isArray(t.edits) ? t.edits.map((e) => e?.file_path) : [])];
   for (const file of files) {
     if (file === undefined || file === null) continue;
-    if (typeof file !== 'string') return mentionsEvidence(JSON.stringify(file)) || cwdInEvidence ? 'unknown file target' : null;
+    if (typeof file !== 'string') return 'unknown file target';
     const abs = path.resolve(cwd, file.replace(/^~(?=\/|$)/, process.env.HOME ?? '~'));
     if (mentionsEvidence(file) || inEvidence(abs) || inEvidence(real(abs)) || touchesEvidence(file.replace(/^~(?=\/|$)/, process.env.HOME ?? '~'), cwd)) return `${file} is workflow evidence`;
   }
+  if (patches) return null;
   const bashTool = data.tool_name === undefined || data.tool_name === 'Bash';
   if (typeof t.command === 'string') {
     // A Bash command; an unexpected `command` on another tool is judged the same way, never as a whitelist.

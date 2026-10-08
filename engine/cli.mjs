@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
+import { refreshModels } from './models.mjs';
 import { abandon, adopt, changedFiles, entry, hold, openState, release, resolveAttempt } from './attempt.mjs';
 import { baseLines, baseMerge, baseStatus } from './base.mjs';
 import { findRoot, loadConfig, requireRoot } from './config.mjs';
@@ -49,6 +50,7 @@ Work
                                     --sweep: a fix handoff names a pattern sweep per open review finding
   wf handoff close --agent ID [--outcome done|stopped|failed]
                                     an implementer finished: no review round starts while one is open
+  wf models refresh --attempt ID    pin execution model/effort settings from the committed adapter base
   wf handoff run --agent ID         launch the existing Codex handoff fresh, with engine-recorded prompt provenance
   wf handoff reviewer --agent ID --reason "why"
                                     hand the tree while an implementer is open; records the override
@@ -254,7 +256,7 @@ export async function main(argv) {
   }
 }
 
-const FULL_VERIFY = new Set(['accept', 'deliver', 'verify', 'review', 'tracker', 'export', 'shown', 'delivery', 'summary', 'handoff', 'gate', 'check', 'evidence']);
+const FULL_VERIFY = new Set(['accept', 'deliver', 'verify', 'review', 'tracker', 'export', 'shown', 'delivery', 'summary', 'handoff', 'models', 'gate', 'check', 'evidence']);
 
 const WRITE_OPTIONS = ['out', 'csv', 'handoffs-csv', 'html', 'dir', 'to', 'root'];
 const READ_OPTIONS = ['file', 'sweep', 'capture', 'comments', 'summary-file', 'closure', 'issue-file', 'from', 'comment-file'];
@@ -441,8 +443,14 @@ async function dispatch(cmd, sub, positional, options) {
       print(options, `copied ${src} to ${path.relative(root, dest)}; review the diff, commit it, then \`wf sync\``);
       return 0;
     }
+    case 'models': {
+      if (sub !== 'refresh') throw new WfError('usage: wf models refresh --attempt ID');
+      const r = refreshModels(root, options);
+      print(options, 'execution settings ' + (r.changed ? 'refreshed' : 'unchanged') + ': ' + r.from.slice(0, 12) + ' -> ' + r.to.slice(0, 12) + '; admission rules unchanged; create fresh handoffs', { from: r.from, to: r.to, changed: r.changed });
+      return 0;
+    }
     case 'doctor': {
-      const r = await doctor(root, { runSteps: options['no-steps'] !== true, ...(options.runtime ? { runtime: options.runtime } : {}) });
+      const r = await doctor(root, { runSteps: options['no-steps'] !== true, ...(options.runtime ? { runtime: options.runtime } : {}), ...(options.attempt ? { attempt: options.attempt } : {}) });
       const lines = [];
       for (const section of ['config', 'tools', 'secrets', 'skills', 'connectors', 'steps', 'protection', 'warnings']) {
         for (const item of r[section]) lines.push(`${item.warn ? '!' : item.ok ? '✓' : '✗'} ${section === 'warnings' ? 'warning' : section}: ${item.check ?? item.tool ?? item.key ?? item.skill ?? item.step ?? item.connector}${item.runtime ? ` (${item.runtime})` : ''}${item.problem ? ` — ${item.problem}` : ''}${item.kind ? ` [${item.kind}]` : ''}${item.fix ? `\n    fix: ${item.fix}` : ''}${item.log ? `\n    log: ${item.log}` : ''}${item.note ? `\n    ${item.note}` : ''}`);
@@ -629,6 +637,7 @@ async function dispatch(cmd, sub, positional, options) {
       }
       const r = handoff(root, sub, options);
       const startPrompt = r.startPrompt;
+      if (options.runtime === 'codex' && ['planner', 'reviewer'].includes(sub) && !r.model) process.stderr.write('warning: this handoff pins no Codex model and cannot launch; run `wf models refresh --attempt ' + r.state.id + '`, then create a fresh handoff\n');
       // I-25: plan restrictions the diff has outgrown, to the owner (stderr: never into a reviewer's prompt).
       for (const w of r.restrictions ?? []) process.stderr.write(`warning: ${w}\n`);
       const sweepLines = r.sweeps?.length ? `pattern sweep (answer each in a commit trailer \`Sweep <id>: fixed - ...\` or \`Sweep <id>: clean - ...\`):\n${r.sweeps.map((x) => `  ${x.id} for ${x.finding}: ${x.hits} hit(s)${x.files.length ? `\n    ${x.files.slice(0, 20).join('\n    ')}${x.files.length > 20 ? `\n    … ${x.files.length - 20} more (in the bundle)` : ''}` : ''}`).join('\n')}\n` : '';

@@ -2,21 +2,30 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { closureFile, commitIn, goodClosure, ok, planDoc, singleRepoProject, state, wf, write, yaml } from './helpers.mjs';
+import { closureFile, commitIn, criteriaFile, goodClosure, ok, planDoc, sh, singleRepoProject, state, wf, write, yaml } from './helpers.mjs';
 import { verifyAgent } from '../engine/provenance.mjs';
 import { codexEntries } from '../engine/codex-agent.mjs';
 import { unreadDocs } from '../engine/rules.mjs';
 import { ENGINE_VERSION } from '../engine/util.mjs';
 
 const SID = '01a110b4-1637-7a42-b353-d0ad25e60000';
-function prepared(mode = '') {
+function prepared(mode = '', { nonGitRoot = false } = {}) {
   const p = singleRepoProject('codex-run', { classes: { review: { codex: { model: 'future-model', effort: 'max' } } }, gate: { steps: [{ id: 'unit', repo: 'app', run: 'true' }] } });
+  if (nonGitRoot) {
+    const cfg = JSON.parse(fs.readFileSync(path.join(p.root, '.workflow/project.yaml'), 'utf8'));
+    cfg.repos[0].path = 'proj';
+    commitIn(p.root, { '.workflow/project.yaml': yaml(cfg) });
+    sh(p.root, 'git push -q origin main');
+    fs.symlinkSync(path.join(p.root, '.workflow'), path.join(p.base, '.workflow'));
+    p.root = p.base;
+  }
   const { base, root } = p;
   const dir = path.join(base, 'bin');
   const host = path.join(base, '.home');
   write(dir, 'codex', `#!/usr/bin/env node
 import fs from 'node:fs'; import path from 'node:path'; import { spawnSync } from 'node:child_process';
 const args = process.argv.slice(2), prompt = fs.readFileSync(0,'utf8');
+if (${JSON.stringify(nonGitRoot)} && !args.includes('--skip-git-repo-check')) { console.error('Not inside a Git repository.'); process.exit(1); }
 const counter = ${JSON.stringify(path.join(base, 'counter'))};
 const n = fs.existsSync(counter) ? Number(fs.readFileSync(counter,'utf8')) + 1 : 0;
 fs.writeFileSync(counter,String(n));
@@ -80,7 +89,9 @@ test('engine-launched Codex reviewer has verified provenance while the existing 
   commitIn(state(root, id).repos.app.worktree, { 'src/a.txt': 'changed by implementer' });
   ok(wf(root, ['handoff', 'close', '--agent', 'i', '--attempt', id]));
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--runtime', 'codex', '--attempt', id]));
+  assert.match(ok(wf(root, ['resume', '--attempt', id])).out, /ready but has not launched/);
   ok(wf(root, ['handoff', 'run', '--agent', 'r', '--attempt', id], { env }));
+  assert.match(ok(wf(root, ['resume', '--attempt', id])).out, /completed; record its closure/);
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r')), '--attempt', id], { env }));
   assert.equal(state(root, id).reviews.at(-1).provenance, 'verified');
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'r2', '--runtime', 'codex', '--attempt', id]));
@@ -103,4 +114,28 @@ test('Codex reviewer document checks use completed successful host commands and 
   assert.deepEqual(unreadDocs(codexEntries(file).entries, rules, []), []);
   fs.writeFileSync(file, raw({ ...item, command: ['/bin/zsh', '-lc', 'wf evidence show ' + doc + ' --attempt ENG-80.1'] }));
   assert.deepEqual(unreadDocs(codexEntries(file).entries, rules, []), [], 'the permitted wf reader counts too');
+});
+
+test('I-44: resume reports failed native reviewer launches without claiming a reviewer is running', () => {
+  const { base, root, id, env } = prepared('failed');
+  ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', id]));
+  ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', id]));
+  commitIn(state(root, id).repos.app.worktree, { 'src/a.txt': 'changed' });
+  ok(wf(root, ['handoff', 'close', '--agent', 'i', '--attempt', id]));
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--runtime', 'codex', '--attempt', id]));
+  assert.equal(wf(root, ['handoff', 'run', '--agent', 'r', '--attempt', id], { env }).code, 1);
+  assert.match(ok(wf(root, ['resume', '--attempt', id])).out, /launch failed; create a fresh reviewer handoff/);
+  assert.doesNotMatch(ok(wf(root, ['resume', '--attempt', id])).out, /waiting for reviewer/);
+  assert.equal(wf(root, ['review', '--closure', closureFile(base, goodClosure('r')), '--attempt', id], { env }).code, 75);
+});
+
+test('I-46: a configured project root outside Git launches roles against its verified Git worktrees', () => {
+  const { base, root, id, env } = prepared('', { nonGitRoot: true });
+  assert.equal(fs.existsSync(path.join(root, '.git')), false);
+  ok(wf(root, ['handoff', 'run', '--agent', 'p', '--attempt', id], { env }));
+  const launched = JSON.parse(fs.readFileSync(path.join(base, 'spawn.json')));
+  assert.ok(launched.args.includes('--skip-git-repo-check'));
+  assert.ok(launched.args.includes('workspace-write'));
+  ok(wf(root, ['plan', '--from-agent', 'p', '--attempt', id], { env }));
+  assert.equal(state(root, id).planSource.provenance, 'verified');
 });

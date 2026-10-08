@@ -1,12 +1,13 @@
+import { executionSettings } from './models.mjs';
 import { ruleWarnings } from './rules.mjs';
 import { protectionLayers } from './evidence.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ADAPTER_DIR, ARTIFACT_PLACEHOLDERS, CONFIG_FILE, adapterLocation, agentTypeFor, declared, findRoot, loadConfig, loadConfigAtCommit, placeholdersIn, repoDir, roleClass } from './config.mjs';
+import { ADAPTER_DIR, ARTIFACT_PLACEHOLDERS, CONFIG_FILE, adapterLocation, agentTypeFor, declared, findRoot, loadConfig, loadConfigAtCommit, placeholdersIn, repoDir, roleClass, trustedAdapter } from './config.mjs';
 import { listAttempts, loadState } from './ledger.mjs';
-import { provision, untrackedFiles } from './attempt.mjs';
+import { openState, provision, untrackedFiles } from './attempt.mjs';
 import { projectEnv } from './env.mjs';
 import { chooseWorkers } from './host.mjs';
 import { loadCatalog, missingFor, readSecret, redactor, status as secretsStatus, stepEnv } from './secrets.mjs';
@@ -613,7 +614,7 @@ export function modelWarnings(root, cfg, runtime = sessionIdentity()?.runtime ??
     .map((r) => ({ check: `models in ${r.id}`, problem: `agents ran on ${r.observedModels.join(', ')} and a class a role runs at pins no ${runtime} model, so its agents inherit the owner session's model`, fix: `pin \`classes.<name>.${runtime}.model\` in .workflow/project.yaml` }));
 }
 
-export async function doctor(root, { runSteps = true, runtime = sessionIdentity()?.runtime ?? 'claude' } = {}) {
+export async function doctor(root, { runSteps = true, runtime = sessionIdentity()?.runtime ?? 'claude', attempt = null } = {}) {
   if (!['claude', 'codex'].includes(runtime)) throw new WfError('--runtime must be claude or codex');
   // Which evidence protection layers this machine provides (informational; a missing flag never fails doctor).
   const report = { config: [], tools: [], secrets: [], skills: [], connectors: [], steps: [], warnings: [], protection: protectionLayers(root).map((l) => ({ ok: true, warn: !l.active, check: l.layer, note: l.detail ?? (l.active ? 'on' : 'off') })), ok: true };
@@ -652,6 +653,26 @@ export async function doctor(root, { runSteps = true, runtime = sessionIdentity(
     const { model } = declared(cfg, cls, runtime);
     if (model) report.config.push({ ok: true, runtime, check: `${role} model: ${model} (class ${cls})` });
     else bad('config', { check: `${role} model`, runtime, problem: `the ${role} role runs at class \`${cls}\`, which pins no ${runtime === 'claude' ? 'Claude' : 'Codex'} model, so its agent inherits whatever model the owner's session runs`, fix: `set \`classes.${cls}.${runtime}.model\` (the strongest model you use), or \`roles.${role}.class: review\` (the plugin's planning and review class), in .workflow/project.yaml; then \`wf sync\`` });
+  }
+  // I-44: current setup checks never conceal the actual execution pin of an open attempt.
+  const ids = attempt ? [attempt] : listAttempts(root);
+  for (const id of ids) {
+    try {
+      const st = openState(root, { attempt: id });
+      if (['done', 'abandoned'].includes(st.phase)) continue;
+      for (const role of ['planner', 'reviewer']) {
+        const trusted = trustedAdapter(root, st);
+        if (role === 'planner' && trusted.roles?.planner === false) continue;
+        const settings = executionSettings(root, st, role, roleClass(trusted, role), runtime);
+        const check = id + ' ' + role + ' execution model (pin ' + settings.runtimeAdapterBase.slice(0, 12) + ')';
+        if (settings.model) report.config.push({ ok: true, runtime, check, note: settings.model + (settings.effort ? ' / ' + settings.effort : '') });
+        else {
+          const issue = { runtime, check, problem: 'the attempt has no pinned model for this role, even if the current adapter does', fix: '`wf models refresh --attempt ' + id + '`, then create a fresh handoff' };
+          if (runtime === 'codex') bad('config', issue); // Native Codex launch requires a model.
+          else report.warnings.push({ ...issue, ok: true, warn: true }); // Claude permits host inheritance.
+        }
+      }
+    } catch (error) { bad('config', { check: id + ' execution settings', problem: error.message }); }
   }
   const pin = enginePinProblem(cfg.engine);
   if (pin) bad('config', { check: 'engine version', problem: pin, fix: `upgrade agentic-workflow to ${cfg.engine} or change the pin (\`wf entry\` and \`wf gate\` refuse until then)` });

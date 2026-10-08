@@ -146,3 +146,15 @@ test('I-16: role texts and skills read evidence with `wf evidence` and say how t
     assert.match(read(p), /the evidence folder/, p);
   }
 });
+
+test('I-45: native roles can read an absolute handed path only inside their selected attempt', () => {
+  const { root } = singleRepoProject('native-evidence-path');
+  const a = ok(wf(root, ['entry', '--item', 'ENG-84', '--json'])).json().id;
+  const h = ok(wf(root, ['handoff', 'planner', '--agent', 'p', '--attempt', a, '--json'])).json();
+  const read = ok(wf(root, ['evidence', 'show', h.bundle, '--attempt', a]));
+  assert.equal(JSON.parse(read.out).agent, 'p');
+  const b = ok(wf(root, ['entry', '--item', 'ENG-85', '--json'])).json().id;
+  assert.equal(wf(root, ['evidence', 'show', h.bundle, '--attempt', b]).code, 75);
+  assert.equal(wf(root, ['evidence', 'show', '/etc/hosts', '--attempt', a]).code, 75);
+  assert.equal(wf(root, ['evidence', 'show', h.bundle + '/../01-planner.json', '--attempt', a]).code, 75);
+});

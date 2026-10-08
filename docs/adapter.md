@@ -84,3 +84,9 @@ export default {
 ```
 
 The engine owns suite merging, reuse eligibility (same `runnerIdentity` + same suite `inputsHash`) and harvest. Worker counts are not part of the reuse fingerprint.
+
+## Execution settings on existing attempts
+
+`wf models refresh --attempt <id>` records the current committed tip of the admission adapter repo's configured base. Only the owner may refresh (a host-recorded exact owning-session command or a human terminal confirmation). A ticket config, uncommitted edit, arbitrary model/effort flag, unrelated commit or moved adapter location cannot provide execution settings.
+
+Future handoffs resolve model and effort from this separate execution pin: implementers keep their frozen work class, and other roles use their class mapping at the execution pin solely to select model/effort. The admission class, its use text, role instructions and appendices, criteria, gate, tracker, review rules and skills stay frozen. Existing handoffs retain their own execution pin; refresh requires a fresh handoff for new settings. `wf doctor --runtime codex --attempt <id>` reports the attempt pin as well as the current setup. Resume distinguishes unlaunched, running, failed and completed native reviewers.

@@ -61,8 +61,10 @@ export function listEvidence(root, state, { kind = null } = {}) {
 export function showEvidence(root, state, rel) {
   if (typeof rel !== 'string' || !rel.trim()) throw new WfError(`usage: wf evidence show <path> --attempt ${state.id} (a path from \`wf evidence list\`)`);
   const dir = fs.realpathSync.native(attemptFolder(root, state));
-  if (path.isAbsolute(rel) || rel.split(/[\\/]/).includes('..')) throw refuse(`${rel}: give a path inside this attempt's evidence, relative to it, as \`wf evidence list --attempt ${state.id}\` prints it`);
-  const abs = path.join(dir, rel);
+  // Named failure I-45: native roles receive absolute bundle/rule paths, but the sanctioned reader rejected them.
+  if (rel.split(/[\\/]/).includes('..')) throw refuse(`${rel}: give a path inside this attempt's evidence, relative to it, as \`wf evidence list --attempt ${state.id}\` prints it`);
+  const abs = path.isAbsolute(rel) ? path.resolve(rel) : path.join(dir, rel);
+  if (!abs.startsWith(dir + path.sep)) throw refuse('give an evidence file inside the selected attempt; cross-attempt and outside reads are refused');
   let parent;
   try {
     parent = fs.realpathSync.native(path.dirname(abs));

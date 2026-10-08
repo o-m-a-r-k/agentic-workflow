@@ -4,6 +4,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { actor, addRepoWorktree, baseRef, branchName, onTarget, changedFiles, cleanupWorktrees, entry, openState, treeHashes, worktreeDir } from './attempt.mjs';
 import { channelOf, discoveredVerdicts, openDiscovered, seamVerdicts, unacknowledged, reportsForReview, reportedIssueVerdicts } from './discovered.mjs';
+import { executionSettings, rejectModelOverrides } from './models.mjs';
 import { ADAPTER_DIR, adapterFileAtCommit, agentTypeFor, attemptAdapter, declared, loadConfig, repoDir, roleClass, trustedAdapter } from './config.mjs';
 import { focusedSkips, gateBusy, gatePassedForCurrentTree, gateRunningRefusal, screenshots, withReviewLock } from './gate.mjs';
 import { append, attemptDir, evidenceRoot, keptFiles, listAttempts, loadState, openEvidence } from './ledger.mjs';
@@ -363,6 +364,7 @@ function skillProblems(root, cfg, role, runtime, state, changed) {
 }
 
 export function handoff(root, role, options) {
+  rejectModelOverrides(options);
   const state = openState(root, options);
   // Rules, skills, roles, classes and agent types come from the adapter at the attempt's base, so a ticket cannot drop
   // its own rules or pick its own class.
@@ -449,7 +451,7 @@ export function handoff(root, role, options) {
   }
   const cls = work?.class ?? roleClass(cfg, role);
   const agentType = agentTypeFor(cfg, role, cls);
-  const { effort, model } = declared(cfg, cls, runtime);
+  const { effort, model, sourceClass, runtimeAdapterBase } = executionSettings(root, state, role, cls, runtime);
 
   const selected = ['planner', 'implementer', 'reviewer'].includes(role) ? relevantLessons(root, role, state, changed, { work }) : null;
   const n = state.handoffs.length + 1;
@@ -466,6 +468,8 @@ export function handoff(root, role, options) {
     class: cls,
     effort,
     model,
+    sourceClass,
+    runtimeAdapterBase,
     work,
     worktrees: Object.fromEntries(Object.entries(state.repos).map(([k, v]) => [k, v.worktree])),
     // Where the ticket's own change starts: after `wf base merge` this is the merged base, not the admission commit,
@@ -546,7 +550,7 @@ export function handoff(root, role, options) {
     const openImplementers = role === 'reviewer' ? state.implementers.filter((x) => !x.closedAt).map((x) => x.agent) : undefined;
     // The owner handed the tree while an implementer was open (I-23): recorded before the round it opens.
     if (reviewOverride) append(root, state.id, 'review.override', { ...reviewOverride, agent }, actor(options));
-    append(root, state.id, 'handoff', { ...(sweeps ? { sweeps } : {}), lessons: (bundle.lessons?.apply ?? []).map((l) => l.id), lessonsFiltered: (selected?.filtered ?? []).map((l) => l.id), role, agent, runtime, session: options.session ?? null, agentType, class: cls, effort, model, sessionModel: sessionModelNow, startPrompt: startPromptFor(file), work: work?.id ?? null, bundle: file, tree, patch: patchIds(state), ...(role === 'reviewer' ? { gate: gateNow.ok ? state.lastGate.runId : null, round: bundle.round, openImplementers } : {}) }, actor(options));
+    append(root, state.id, 'handoff', { ...(sweeps ? { sweeps } : {}), lessons: (bundle.lessons?.apply ?? []).map((l) => l.id), lessonsFiltered: (selected?.filtered ?? []).map((l) => l.id), role, agent, runtime, session: options.session ?? null, agentType, class: cls, effort, model, sourceClass, runtimeAdapterBase, sessionModel: sessionModelNow, startPrompt: startPromptFor(file), work: work?.id ?? null, bundle: file, tree, patch: patchIds(state), ...(role === 'reviewer' ? { gate: gateNow.ok ? state.lastGate.runId : null, round: bundle.round, openImplementers } : {}) }, actor(options));
     if (role === 'implementer') append(root, state.id, 'implementer.opened', { handoff: handoffId(file), agent, work: work?.id ?? null, class: cls, heads: tree }, actor(options));
   };
   // The model the owner's session runs on now: an agent whose class pins no model inherits it (`wf report` shows it).
@@ -1941,6 +1945,15 @@ function phaseAction(root, cfg, state) {
   const uncommittedWork = Object.values(tree).some((t) => t.includes('+dirty')) || Object.keys(state.repos).every((n) => !changedFiles(state, n).length);
   if (uncommittedWork) return `commit the change, then the code review: hand to ${fresh}; ${noGate}`;
   const inFlight = reviewInFlight(state);
+  // Named failure I-44: a handoff without a process was presented as a running reviewer.
+  if (inFlight?.runtime === 'codex') {
+    if (!inFlight.launch) {
+      if (!inFlight.model) return 'reviewer ' + inFlight.agent + ' has not launched: its attempt execution pin has no Codex model; run \x60wf models refresh --attempt ' + state.id + '\x60, then create a fresh reviewer handoff';
+      return 'reviewer ' + inFlight.agent + ' is ready but has not launched: \x60wf handoff run --agent ' + inFlight.agent + ' --attempt ' + state.id + '\x60';
+    }
+    if (inFlight.launch.status === 'failed') return 'reviewer ' + inFlight.agent + ' launch failed; create a fresh reviewer handoff and run it; no review is running';
+    if (inFlight.launch.status === 'completed') return 'reviewer ' + inFlight.agent + ' completed; record its closure with \x60wf review --closure <its file> --attempt ' + state.id + '\x60';
+  }
   if (inFlight) return `waiting for reviewer ${inFlight.agent}: \`wf review --closure <its file>\`; ${inFlight.round === 'evidence-review' || (!inFlight.round && inFlight.gate) ? 'evidence review of the gated tree' : 'code review'}, no gate while it runs`;
   if (g?.status === 'failed' && onTree(g.tree)) return 'gate failed: fix and commit through the implementer that did that work; the fixed tree then gets a code-review round by a fresh reviewer before the next `wf gate` (a failure that needed no code change: `wf gate` again)';
   const r = state.review;

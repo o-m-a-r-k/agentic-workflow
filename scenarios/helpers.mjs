@@ -100,6 +100,7 @@ function ownerSpeaksFor(cwd, args, opts) {
     if (cmd === 'deliver' && optionOf(args, '--repin-adapter')) out.push(`repin ${id}:${optionOf(args, '--repin-adapter').slice(0, 12)}`);
     if (cmd === 'abandon' && optionOf(args, '--acknowledge-integration')) for (const l of optionOf(args, '--acknowledge-integration').split(',')) out.push(`abandon ${id}:${l.trim()}`);
     if (cmd === 'release') out.push(`release ${id}`);
+    if (cmd === 'models' && sub === 'refresh') out.push('models ' + id);
     if (cmd === 'adopt') out.push(`adopt ${id}`);
     if (cmd === 'deliver' && optionOf(args, '--acknowledge-deferrals')) for (const k of optionOf(args, '--acknowledge-deferrals').split(',')) out.push(`acknowledge-deferral ${id}:${k.trim()}`);
     if (['deliver', 'reopen'].includes(cmd) && optionOf(args, '--no-lesson')) out.push(`waive-lesson ${id}`);

@@ -5,27 +5,43 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import readline from 'node:readline';
+import { executionSettings, rejectModelOverrides } from './models.mjs';
 import { actor, openState, treeHashes } from './attempt.mjs';
 import { adapterFileAtCommit, trustedAdapter } from './config.mjs';
 import { append, loadState } from './ledger.mjs';
 import { seal } from './evidence.mjs';
 import { roleInstructions } from './onboard.mjs';
-import { canonical, refuse, sha256, withFileLock, writeJson } from './util.mjs';
+import { assertPlainGit, canonical, git, refuse, sha256, withFileLock, writeJson } from './util.mjs';
 
 export async function runCodexRole(root, options) {
+  rejectModelOverrides(options);
   const state = openState(root, options);
   const h = state.handoffs.filter((h) => h.agent === options.agent).at(-1);
   if (!h || h.runtime !== 'codex') throw refuse('name an existing Codex handoff with `--agent <id>`');
   if (state.activeHold) throw refuse(`this attempt is on hold: ${state.activeHold.reason}`);
   if (h.role === 'reviewer' && state.handoffs.filter((h) => h.role === 'reviewer').at(-1)?.bundle !== h.bundle) throw refuse('only the current reviewer handoff can be launched');
   if (h.tree && canonical(treeHashes(state)) !== canonical(h.tree)) throw refuse('the handed tree changed before launch; create a fresh handoff');
-  if (['planner', 'reviewer'].includes(h.role) && !h.model) throw refuse('pin the Codex planning/review model in the adapter before launch; run `wf doctor --runtime codex`');
+  if (['planner', 'reviewer'].includes(h.role) && !h.model) throw refuse('this handoff pins no Codex model; run `wf models refresh --attempt <id>`, then create a fresh handoff');
+  const expected = executionSettings(root, state, h.role, h.class, 'codex', h.runtimeAdapterBase ?? state.adapterBase);
+  if (h.model !== expected.model || h.effort !== expected.effort) throw refuse('handoff execution settings differ from their committed pin; create a fresh handoff');
   const cfg = trustedAdapter(root, state);
   const appendix = cfg.roles?.[h.role]?.appendix;
   const extra = appendix ? fs.readFileSync(adapterFileAtCommit(root, state, state.adapterBase, appendix), 'utf8') : '';
   const body = roleInstructions(cfg, h.role, h.class, extra);
+  // Named failure I-46: registered multi-repo projects intentionally have no parent Git repo.
+  // Bypass only Codex's Git-root prerequisite, after checking every recorded worktree; keep the sandbox.
+  const nonGitRoot = git(root, ['rev-parse', '--is-inside-work-tree'], { allowFail: true }) !== 'true';
+  if (nonGitRoot) {
+    const repos = Object.values(state.repos);
+    if (!repos.length) throw refuse('a native role needs at least one recorded Git worktree');
+    for (const repo of repos) {
+      assertPlainGit(repo.worktree);
+      const top = git(repo.worktree, ['rev-parse', '--show-toplevel']);
+      if (fs.realpathSync(top) !== fs.realpathSync(repo.worktree)) throw refuse('a recorded role worktree is not a Git repository root');
+    }
+  }
   const file = h.bundle.replace(/\.json$/, '.launch.json');
-  const receipt = { handoff: h.bundle, agentType: h.agentType, prompt: h.startPrompt, model: h.model, effort: h.effort, developerInstructions: body };
+  const receipt = { handoff: h.bundle, agentType: h.agentType, prompt: h.startPrompt, model: h.model, effort: h.effort, runtimeAdapterBase: expected.runtimeAdapterBase, sourceClass: expected.sourceClass, developerInstructions: body, cwd: root, sandbox: 'workspace-write', skipGitRepoCheck: nonGitRoot };
   withFileLock(h.bundle + '.launch.lock', () => {
     if (loadState(root, state.id).handoffs.find((x) => x.bundle === h.bundle)?.launch) throw refuse('this handoff was already launched; create a fresh handoff, never reuse a review round');
     writeJson(file, receipt);
@@ -37,6 +53,7 @@ export async function runCodexRole(root, options) {
   env.PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin') + path.delimiter + (env.PATH ?? '');
   for (const name of ['CODEX_THREAD_ID', 'CLAUDE_CODE_SESSION_ID', 'CLAUDECODE', 'GROK_SESSION_ID', 'AI_AGENT']) delete env[name];
   const args = ['exec', '--json', '--cd', root, '--sandbox', 'workspace-write', '-c', `developer_instructions=${JSON.stringify(body)}`];
+  if (nonGitRoot) args.push('--skip-git-repo-check');
   if (h.model) args.push('--model', h.model);
   if (h.effort) args.push('-c', `model_reasoning_effort=${JSON.stringify(h.effort)}`);
   args.push('-');

@@ -133,3 +133,8 @@ A tiny library (`examples/hello-ticket/`) with two tickets as files and `node --
 | Planner import | No same-name Claude fallback for a Codex handoff | field-fixes |
 | Connector receipts | Native Linear aliases and single literal wrappers; modified, multiple, ambiguous/error/mismatched outputs refuse | tracker-host-recorded |
 | Fresh role provenance | Engine-owned prompt, role/model/effort, returned session id, unchanged planner YAML; steered/failed launch refusal and reviewer tree binding | codex-run |
+
+| Native execution settings 0.5.5 (I-44) | Admission pin plus later committed models; doctor mismatch; owner-only refresh; unchanged frozen rules and old handoffs; exact model/effort launch pin; arbitrary override refusal; launch-state next actions | runtime-models, codex-run |
+| Native file targets 0.5.5 (I-43) | Native source regex/citations pass; protected and symlink/move/delete targets, mixed patches and malformed inputs refuse; frozen Bash guard retained | codex-file-guard, guard-regressions |
+| Native evidence reads 0.5.5 (I-45) | Absolute handed paths within selected attempt pass; cross-attempt, outside and traversal refuse; no-follow and size limits retained | evidence-read |
+| Native project roots 0.5.5 (I-46) | Non-Git parent projects launch against checked Git worktrees with the sandbox retained; exact prompt provenance still verifies | codex-run |
