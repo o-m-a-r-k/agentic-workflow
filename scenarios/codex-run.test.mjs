@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { closureFile, commitIn, criteriaFile, goodClosure, ok, planDoc, sh, singleRepoProject, state, wf, write, yaml, WF } from './helpers.mjs';
 import { verifyAgent } from '../engine/provenance.mjs';
 import { codexEntries } from '../engine/codex-agent.mjs';
@@ -168,6 +168,49 @@ test('engine-launched Codex reviewer has verified provenance while the existing 
   ok(wf(root, ['handoff', 'run', '--agent', 'r2', '--attempt', id], { env }));
   fs.writeFileSync(path.join(state(root, id).repos.app.worktree, 'src/a.txt'), 'changed during review');
   assert.match(wf(root, ['review', '--closure', closureFile(base, goodClosure('r2')), '--attempt', id], { env }).err, /worktree changed during the review/);
+});
+
+// Named failure I-60: appending --check retained an alias's --write and invalidated an evidence review.
+test('I-60: reviewer command safety reaches generated roles and native launch; check-only alias preserves tracked bytes', () => {
+  const scripts = { format: 'node formatter.mjs --write src/a.txt', 'format:check': 'node formatter.mjs --check src/a.txt' };
+  const { base, root, id, env } = prepared('', { files: {
+    'package.json': JSON.stringify({ private: true, scripts }),
+    'formatter.mjs': "import fs from 'node:fs'; const args=process.argv.slice(2); if(args.includes('--write')) fs.writeFileSync('src/a.txt','formatted\\n'); console.log(JSON.stringify(args));\n",
+  } });
+  ok(wf(root, ['sync']));
+  ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', id]));
+  ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', id]));
+  const tree = state(root, id).repos.app.worktree;
+  commitIn(tree, { 'src/a.txt': 'changed\n' });
+  const target = path.join(tree, 'src/a.txt'), original = fs.readFileSync(target);
+  const actualScripts = JSON.parse(fs.readFileSync(path.join(tree, 'package.json'), 'utf8')).scripts;
+  // Model package-script forwarding, not a claim that guidance constrains arbitrary commands.
+  const runAlias = (name, extra = []) => spawnSync(process.execPath, [...actualScripts[name].split(' ').slice(1), ...extra], { cwd: tree, encoding: 'utf8' });
+  const unsafe = runAlias('format', ['--check']);
+  assert.equal(unsafe.status, 0, unsafe.stderr);
+  assert.deepEqual(JSON.parse(unsafe.stdout), ['--write', 'src/a.txt', '--check']);
+  assert.notDeepEqual(fs.readFileSync(target), original, '--check did not remove the embedded write');
+  fs.writeFileSync(target, original);
+  const safe = runAlias('format:check');
+  assert.equal(safe.status, 0, safe.stderr);
+  assert.deepEqual(JSON.parse(safe.stdout), ['--check', 'src/a.txt']);
+  assert.deepEqual(fs.readFileSync(target), original);
+  assert.equal(sh(tree, 'git status --porcelain'), '');
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--runtime', 'codex', '--attempt', id]));
+  ok(wf(root, ['handoff', 'run', '--agent', 'r', '--attempt', id], { env }));
+  const launched = JSON.parse(fs.readFileSync(path.join(base, 'spawn.json'), 'utf8'));
+  const body = JSON.parse(launched.args.find((a) => a.startsWith('developer_instructions=')).slice('developer_instructions='.length));
+  const receipt = JSON.parse(fs.readFileSync(state(root, id).handoffs.at(-1).launch.file, 'utf8'));
+  const guidance = /Before running a repository validation command, inspect its actual package script and relevant wrappers or lifecycle hooks/;
+  assert.ok(guidance.test(body), 'native bootstrap must teach package-script and wrapper inspection');
+  assert.match(body, /appended .*--check.* does not cancel embedded write, fix, update or generation options/);
+  assert.match(body, /Prefer the repository's explicit check-only command/);
+  assert.match(body, /Reuse supplied gate evidence when sufficient/);
+  assert.match(body, /Never repair or restore files yourself/);
+  assert.equal(receipt.developerInstructions, body);
+  for (const file of ['.claude/agents/wf-reviewer.md', '.codex/agents/wf-reviewer.toml']) {
+    assert.ok(guidance.test(fs.readFileSync(path.join(root, file), 'utf8')), file + ' must teach validation-command safety');
+  }
 });
 
 test('Codex reviewer document checks use completed successful host commands and refuse absent or failed reads', () => {
