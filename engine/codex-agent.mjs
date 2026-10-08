@@ -5,8 +5,9 @@ import { readCapped } from './discovered.mjs';
 import { readRegular } from './evidence.mjs';
 import { sha256 } from './util.mjs';
 import path from 'node:path';
+import { completedNodeReads } from './codex-reads.mjs';
 
-export function codexEntries(file) {
+export function codexEntries(file, { bundle } = {}) {
   const raw = readCapped(file).toString('utf8').split('\n').flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } });
   const entries = [];
   for (const e of raw) {
@@ -22,6 +23,7 @@ export function codexEntries(file) {
       if (parts.length === 6 && parts.slice(0, 3).join(' ') === 'wf evidence show' && path.isAbsolute(parts[3]) && /^[A-Za-z0-9_./-]+$/.test(parts[3]) && parts[4] === '--attempt' && /^[A-Za-z0-9_.-]+$/.test(parts[5])) entries.push({ type: 'assistant', message: { content: [{ type: 'tool_use', id: item.id + ':document', name: 'Read', input: { file_path: parts[3] } }] } });
     }
   }
+  entries.push(...completedNodeReads(raw, bundle));
   return { raw, entries };
 }
 
@@ -37,7 +39,9 @@ export function verifyCodexAgent(handoff, hostHome) {
   if (receipt.handoff !== handoff.bundle || receipt.prompt !== handoff.startPrompt || receipt.agentType !== handoff.agentType || receipt.model !== handoff.model || receipt.effort !== handoff.effort) return mismatch('the engine launch receipt does not match the handed role, model, effort or start prompt');
   const transcript = ownerTranscript(`codex:${handoff.session}`, hostHome);
   if (transcript.problem) return mismatch(transcript.problem);
-  const { raw, entries } = codexEntries(transcript.file);
+  const bundleRecord = readRegular(handoff.bundle);
+  let bundle; try { bundle = bundleRecord && JSON.parse(bundleRecord.bytes); } catch {}
+  const { raw, entries } = codexEntries(transcript.file, { bundle });
   const meta = raw.find((e) => e.type === 'session_meta')?.payload;
   if (meta?.id !== handoff.session || meta.originator !== 'codex_exec' || !['exec', 'cli'].includes(meta.source) || meta.forked_from_id || meta.parent_thread_id) return mismatch('the Codex role transcript is not the recorded fresh engine-launched session');
   const prompts = raw.flatMap((e) => {

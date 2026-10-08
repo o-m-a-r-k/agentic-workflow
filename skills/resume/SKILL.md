@@ -15,3 +15,5 @@ If a command refuses because the evidence does not match what wf recorded, run `
 If `wf status` lists open plugin improvements and this is a session in the plugin's own repo, `wf improve next` names the one to fix.
 
 For an existing Codex attempt with missing execution models despite current setup, use `wf doctor --runtime codex --attempt <id>`. The owning chat runs exactly `wf models refresh --attempt <id>` to pin committed base model/effort settings, then creates a fresh handoff. This preserves admission rules and existing handoffs. Resume distinguishes an unlaunched or failed reviewer from a running process.
+
+Native app-server initialization denied before a session starts requires a fresh handoff and approved host execution with native runtime/session-store access. Retain the child workspace-write sandbox; never bypass a rejected approval. Required skills/documents read through Node count only for literal leading full-file read/write calls with complete matching content in successful host output. A refused reviewer round still needs a fresh reviewer; never resubmit its closure from the owning chat.

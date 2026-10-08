@@ -86,7 +86,12 @@ export async function runCodexRole(root, options) {
   process.removeListener('SIGINT', interrupted);
   process.removeListener('SIGTERM', interrupted);
   const success = exitCode === 0 && session && completed && !problem;
-  append(root, state.id, 'agent.launch.finished', { handoff: h.bundle, status: success ? 'completed' : 'failed', exitCode }, 'engine:codex');
+  // Named failure I-47: a parent sandbox can block host initialization before any native session starts.
+  // Diagnose only the observed permission signature; never change or retry the child's sandbox here.
+  const permission = !session && !success && !problem && /failed to initialize in-process app-server client:\s*(Operation not permitted|Permission denied)(?: \(os error \d+\))?/.exec(stderr);
+  const failure = permission ? { kind: 'host-initialization-permission', detail: permission[0] } : null;
+  append(root, state.id, 'agent.launch.finished', { handoff: h.bundle, status: success ? 'completed' : 'failed', exitCode, ...(failure ? { failure } : {}) }, 'engine:codex');
   if (!success) process.stderr.write(`Codex role failed: ${problem ?? (stderr.trim() || 'no completed turn')}\n`);
+  if (failure) process.stderr.write('Native Codex host initialization was denied before a session started. Create a fresh handoff, then use approved host execution with access to the native runtime and session store. Retain the child sandbox (workspace-write); do not bypass a rejected approval or reuse this failed handoff.\n');
   return { agent: h.agent, session, status: success ? 'completed' : 'failed', exitCode: success ? 0 : exitCode || 1 };
 }

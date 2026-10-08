@@ -26,6 +26,7 @@ function prepared(mode = '', { nonGitRoot = false } = {}) {
 import fs from 'node:fs'; import path from 'node:path'; import { spawnSync } from 'node:child_process';
 const args = process.argv.slice(2), prompt = fs.readFileSync(0,'utf8');
 if (${JSON.stringify(nonGitRoot)} && !args.includes('--skip-git-repo-check')) { console.error('Not inside a Git repository.'); process.exit(1); }
+if (${JSON.stringify(mode === 'host-init')}) { console.error('Error: failed to initialize in-process app-server client: Operation not permitted (os error 1)'); process.exit(1); }
 const counter = ${JSON.stringify(path.join(base, 'counter'))};
 const n = fs.existsSync(counter) ? Number(fs.readFileSync(counter,'utf8')) + 1 : 0;
 fs.writeFileSync(counter,String(n));
@@ -78,6 +79,7 @@ test('engine-launched Codex provenance refuses a steered prompt and a failed pla
     assert.equal(imported.code, 75, imported.out);
     assert.match(imported.err, mode === 'failed' ? /not completed successfully/ : /start prompt/);
     assert.equal(state(root, id).criteria, null);
+    assert.equal(state(root, id).handoffs.at(-1).launch.failure, undefined, 'a started failed turn is not a host initialization failure');
   }
 });
 
@@ -138,4 +140,19 @@ test('I-46: a configured project root outside Git launches roles against its ver
   assert.ok(launched.args.includes('workspace-write'));
   ok(wf(root, ['plan', '--from-agent', 'p', '--attempt', id], { env }));
   assert.equal(state(root, id).planSource.provenance, 'verified');
+});
+
+test('I-47: host initialization permission failures name approved recovery, preserve failed receipts and refuse reuse', () => {
+  const { root, id, env } = prepared('host-init');
+  const r = wf(root, ['handoff', 'run', '--agent', 'p', '--attempt', id], { env });
+  assert.equal(r.code, 1);
+  assert.match(r.err, /approved host execution/);
+  assert.match(r.err, /fresh handoff/);
+  assert.match(r.err, /child sandbox/);
+  const h = state(root, id).handoffs.at(-1);
+  assert.equal(h.launch.status, 'failed');
+  assert.equal(h.launch.failure.kind, 'host-initialization-permission');
+  assert.equal(h.session, null);
+  assert.ok(h.launch.file);
+  assert.equal(wf(root, ['handoff', 'run', '--agent', 'p', '--attempt', id], { env }).code, 75);
 });

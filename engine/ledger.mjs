@@ -235,7 +235,7 @@ export function reduce(entries) {
       }
       case 'agent.launch.finished': {
         const h = s.handoffs.find((h) => h.bundle === d.handoff);
-        if (h?.launch) h.launch = { ...h.launch, status: d.status, exitCode: d.exitCode, finishedAt: e.at };
+        if (h?.launch) h.launch = { ...h.launch, status: d.status, exitCode: d.exitCode, finishedAt: e.at, ...(d.failure ? { failure: d.failure } : {}) };
         break;
       }
       case 'gate.finished':
