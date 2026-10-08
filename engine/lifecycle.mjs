@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { actor, addRepoWorktree, baseRef, branchName, onTarget, changedFiles, cleanupWorktrees, entry, openState, treeHashes, worktreeDir } from './attempt.mjs';
-import { channelOf, discoveredVerdicts, openDiscovered, seamVerdicts, unacknowledged, unrecordedInReports } from './discovered.mjs';
+import { channelOf, discoveredVerdicts, openDiscovered, seamVerdicts, unacknowledged, reportsForReview, reportedIssueVerdicts } from './discovered.mjs';
 import { ADAPTER_DIR, adapterFileAtCommit, agentTypeFor, attemptAdapter, declared, loadConfig, repoDir, roleClass, trustedAdapter } from './config.mjs';
 import { focusedSkips, gateBusy, gatePassedForCurrentTree, gateRunningRefusal, screenshots, withReviewLock } from './gate.mjs';
 import { append, attemptDir, evidenceRoot, keptFiles, listAttempts, loadState, openEvidence } from './ledger.mjs';
@@ -381,6 +381,7 @@ export function handoff(root, role, options) {
   // review of the gated tree. A finding made while a gate runs makes that gate obsolete, so the two never overlap.
   let gateNow = null;
   let reviewOverride = null;
+  let historicalReports = [];
   if (options.reason !== undefined && role !== 'reviewer') throw new WfError('--reason applies to reviewer handoffs only (to hand the tree while an implementer is still open)');
   if (role === 'reviewer') {
     const busy = gateBusy(root, state);
@@ -413,7 +414,9 @@ export function handoff(root, role, options) {
     if (ack.missing.length) throw refuse(`the implementer did not acknowledge ${ack.missing.length} lesson(s) it was handed: ${ack.missing.join(', ')}`, `add a trailer per lesson to a commit in the worktree, one line each: \`Lesson <id>: applied - <how>\` or \`Lesson <id>: not-applicable - <why>\` (for example \`git commit --allow-empty -m "Lessons" -m "Lesson ${ack.missing[0]}: applied - ..."\`)`);
     for (const a of ack.acks) if (!(state.lessons?.acknowledged ?? []).some((x) => x.lesson === a.lesson && x.commit === a.commit)) append(root, state.id, 'lesson.acknowledged', a, null);
     // I-18 (extended): an implementer's report never leaves an issue unfixed without its discovered entry.
-    const unrecorded = unrecordedInReports(state);
+    const reports = reportsForReview(state);
+    const unrecorded = reports.current;
+    historicalReports = reports.historical;
     if (unrecorded.length) throw refuse(unrecorded.map((u) => `${u.agent}'s report leaves ${u.lines.length} issue(s) unfixed without a discovered entry:\n${u.lines.map((l) => `  - ${l}`).join('\n')}`).join('\n'), `the implementer that found it fixes it, in this attempt, in whatever file it lives in (continue it with SendMessage; the work-item brief is no reason to leave it, and the owner never fixes it); only when another work item is editing that file right now, the implementer records it: \`wf discovered add --summary "..." --where <file:line> --found-by ${unrecorded[0].agent} --blocked-by <work item>\` and names the D id in its report`);
     gateNow = gatePassedForCurrentTree(state);
   }
@@ -487,6 +490,8 @@ export function handoff(root, role, options) {
     // Every issue found during the ticket (I-18): fixed by a commit of this ticket or deferred in the owner's words. The
     // implementer fixes the open ones; the reviewer gives each a verdict.
     discovered: ['implementer', 'reviewer'].includes(role) ? state.discovered : undefined,
+    // I-42: unresolved historical observations require a current-tree reviewer verdict.
+    historicalReports: role === 'reviewer' ? historicalReports : undefined,
     // Repos added to the attempt by an owner amendment for a fix (I-19): the reviewer judges each seam on both sides.
     addedRepos: ['implementer', 'reviewer'].includes(role) ? state.addedRepos : undefined,
     changed,
@@ -532,6 +537,7 @@ export function handoff(root, role, options) {
       tester: 'Write requirement expectations from the issue before reading the implementation, then map each to gate tests.',
     }[role],
   };
+  if (role === 'reviewer' && historicalReports.length) bundle.instructions += ' Historical reports are observations from earlier implementations, not proof of current unresolved work. Judge each historicalReports entry on the current tree and add reportedIssues: [{ id, verdict: fixed|verified-nonissue|open, evidence, fixedIn, repo, rationale, finding }]. A fixed verdict names a fix commit of this attempt; verified-nonissue gives a purpose-based rationale; open names an open finding. Missing verdicts refuse the closure, and open findings block the full gate and delivery.';
   const record = () => {
     writeJson(file, bundle);
     if (bundle.reviewClosureFile) fs.mkdirSync(path.dirname(bundle.reviewClosureFile), { recursive: true });
@@ -814,6 +820,8 @@ export function recordReview(root, options) {
   // Every issue found during the ticket (I-18) and every seam to a repo added for a fix (I-19) needs a verdict.
   const xv = discoveredVerdicts(handed.discovered ?? [], closure);
   if (xv.problems.length) throw refuse(`closure refused: ${xv.problems.length} discovered issue(s) in your bundle have no valid verdict:\n  - ${xv.problems.join('\n  - ')}`, 'add `discovered: [{ "id": "D1", "verdict": "fixed|deferred|open", "evidence": "<file:line of the fix, or what is still wrong>" }]` to the closure and run `wf review --closure <file>` again');
+  const hv = reportedIssueVerdicts(handed.historicalReports ?? [], closure, state);
+  if (hv.problems.length) throw refuse('closure refused: historical report observations have no valid verdict:\n  - ' + hv.problems.join('\n  - '), 'add reportedIssues: [{ id, verdict: fixed|verified-nonissue|open, evidence, fixedIn, repo, rationale, finding }]; judge the current code, never edit the old transcript');
   const sv = seamVerdicts(handed.addedRepos ?? [], closure);
   if (sv.problems.length) throw refuse(`closure refused: ${sv.problems.length} repo(s) added during the attempt have no valid seam verdict:\n  - ${sv.problems.join('\n  - ')}`, 'add `seams: [{ "repo": "<added repo>", "verdict": "matched|finding", "evidence": "<producer file:line>; <consumer file:line>", "finding": "<finding id when a finding>" }]` to the closure and run `wf review --closure <file>` again');
   // I-26: the reviewer re-ran every recorded query on this tree, sampled the inventory and judged every caller of a
@@ -830,6 +838,7 @@ export function recordReview(root, options) {
   const revealed = (state.reviews ?? []).find((r) => r.handoff === round && r.revealed);
   if (!revealed && closure.priorFindings?.length) throw refuse('`priorFindings` are listed only after your own blind closure is recorded; record the closure without them first');
   if (revealed && canonical(revealed.closure.findings) !== canonical(closure.findings)) throw refuse('your own findings were recorded blind and cannot change after earlier rounds were revealed; only add `priorFindings`');
+  if (revealed && canonical(revealed.closure.reportedIssues ?? []) !== canonical(closure.reportedIssues ?? [])) throw refuse('historical report verdicts were recorded blind and cannot change after earlier rounds were revealed; only add priorFindings');
   const revealNow = !revealed && earlierOpenFindings(state, round).length > 0;
   const n = state.reviews.filter((r) => r.handoff === round).length + 1;
   const tag = `${String(state.handoffs.indexOf(reviewerHandoff) + 1).padStart(2, '0')}-${n}`;
@@ -998,6 +1007,13 @@ export function acceptReview(root, options) {
   for (const p of dv.problems) problems.push(`${p}; hand the tree to a fresh reviewer (\`wf handoff reviewer --agent <new id>\`)`);
   // I-18: every issue found during the ticket was judged by this round, and none was found open.
   const reviewedBundle = readBundle(r.handoff);
+  const reportedNow = reportsForReview(state);
+  const reportedIds = new Set((reviewedBundle?.historicalReports ?? []).map((r) => r.id));
+  for (const r of reportedNow.historical) if (!reportedIds.has(r.id)) problems.push('historical report ' + r.id + ' was not handed to this reviewer; hand the tree to a fresh reviewer');
+  for (const r of reportedNow.current) problems.push(r.agent + ': current report leaves unrecorded unresolved work; record and fix it before review');
+  const hv = reportedIssueVerdicts(reviewedBundle?.historicalReports ?? [], r.closure, state);
+  problems.push(...hv.problems);
+  for (const v of hv.verdicts) if (v.verdict === 'open') problems.push('historical report ' + v.id + ': reviewer found it open; fix its finding through an implementer, then start a fresh review');
   const handedIds = new Set((reviewedBundle?.discovered ?? []).map((d) => d.id));
   for (const d of state.discovered ?? []) if (!handedIds.has(d.id)) problems.push(`discovered ${d.id} was recorded after this review round was handed (${d.summary}); hand the tree to a fresh reviewer (\`wf handoff reviewer --agent <new id>\`)`);
   const xv = discoveredVerdicts(reviewedBundle?.discovered ?? [], r.closure);
@@ -1028,7 +1044,7 @@ export function acceptReview(root, options) {
   // Nothing verified when this command opened the attempt may have changed while it decided.
   const moved = assertUnchanged(root, state.id);
   if (moved.length) throw refuse(`review not accepted: the evidence changed while it was checked:\n  - ${moved.slice(0, 10).join('\n  - ')}`);
-  append(root, state.id, 'review.accepted', { reviewer: r.closure.reviewer, patch: patchIds(state), heads: treeHashes(state), gate: state.lastGate.runId, ...(verdicts.length ? { noEvidence: verdicts } : {}), ...(rv.verdicts.length ? { rules: rv.verdicts } : {}), ...(ov.verdicts.length ? { outsidePlan: ov.verdicts } : {}), ...(dv.verdicts.length ? { designHits: dv.verdicts } : {}), ...(lv.verdicts.length ? { lessons: lv.verdicts } : {}), ...(xv.verdicts.length ? { discovered: xv.verdicts } : {}), ...(sv.verdicts.length ? { seams: sv.verdicts } : {}) }, actor(options));
+  append(root, state.id, 'review.accepted', { reviewer: r.closure.reviewer, patch: patchIds(state), heads: treeHashes(state), gate: state.lastGate.runId, ...(verdicts.length ? { noEvidence: verdicts } : {}), ...(rv.verdicts.length ? { rules: rv.verdicts } : {}), ...(ov.verdicts.length ? { outsidePlan: ov.verdicts } : {}), ...(dv.verdicts.length ? { designHits: dv.verdicts } : {}), ...(lv.verdicts.length ? { lessons: lv.verdicts } : {}), ...(xv.verdicts.length ? { discovered: xv.verdicts } : {}), ...(sv.verdicts.length ? { seams: sv.verdicts } : {}), ...(hv.verdicts.length ? { reportedIssues: hv.verdicts } : {}) }, actor(options));
   // A lesson the change did not comply with recurred: its mechanism failed (once per lesson per attempt).
   const already = new Set((state.lessons?.recurred ?? []).map((x) => x.id));
   for (const v of lv.verdicts) if (v.verdict === 'finding' && !already.has(v.lesson)) recur(root, v.lesson, state.id, actor(options), `review finding ${v.finding}`);
@@ -1197,6 +1213,11 @@ export async function deliver(root, options) {
   if (!state.accepted) throw refuse('review not accepted: `wf accept`');
   // I-18: an issue found during the ticket ends fixed in it or deferred by the owner, never open at delivery.
   for (const x of [state, ...(state.batch?.members ?? []).map((m) => loadState(root, m))]) {
+    const reports = reportsForReview(x);
+    const bundle = readBundle(x.review?.handoff);
+    const handed = new Set((bundle?.historicalReports ?? []).map((r) => r.id));
+    const hv = reportedIssueVerdicts(bundle?.historicalReports ?? [], x.review?.closure ?? {}, x);
+    if (reports.current.length || reports.historical.some((r) => !handed.has(r.id)) || hv.problems.length || hv.verdicts.some((v) => v.verdict === 'open')) throw refuse('not delivered: current or historical implementation reports need resolution and a fresh review on ' + x.id);
     const open = openDiscovered(x);
     if (open.length) throw refuse(`not delivered: ${open.length} discovered issue(s) are open${x.id !== state.id ? ` in ${x.id}` : ''}: ${open.map((d) => `${d.id} ${d.summary}`).join('; ')}`, `fix it in this ticket and close it with the fix commit (\`wf discovered close <id> --fixed <commit>\`; a fix after acceptance needs the gate and a fresh review), or, only on the owner's decision, \`wf discovered close <id> --deferred\` once the owner's message starts with \`defer ${x.id}:<id>\``);
   }

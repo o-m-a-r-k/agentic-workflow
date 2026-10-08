@@ -275,7 +275,17 @@ export const discoveredLine = (d, attemptId) => `${d.id}  ${d.status}  ${d.summa
 // discovered entry (D<n>); otherwise the next reviewer handoff is refused. It reads the report from the implementer's
 // Claude Code transcript (by the name it was started under, after its handoff); without a transcript nothing is checked.
 const UNFIXED = /\bnot (?:yet )?(?:fixed|addressed|handled|done)\b|\b(?:outside|beyond) (?:the|my|this) (?:brief|scope|work item|task)\b|\bout of (?:the )?scope\b|\bleft (?:it |them |this )?(?:as is|as-is|unchanged|for later|alone)\b|\bfollow-?ups?\b|\bdefer(?:red|ring)?\b|\bharmless\b|\bnot in (?:the )?scope\b|\bnot (?:my|our) (?:work item|brief|change)\b/i;
-const NEGATED = /\b(?:no|nothing|none|zero|without)\b(?:\s+\S+){0,3}\s+(?:follow-?ups?|defer|left|unfixed|out of scope|outside)/i;
+const NEGATED = /\b(?:no|nothing|none|zero|without)\b(?:\s+(?!(?:but|however|except|and)\b)[\w-]+){0,3}?\s+(?:follow-?ups?|deferred|deferring|defer|left|unfixed|out of scope|outside)\b/gi;
+
+// Named failure I-42: completed follow-ups and coordination in immutable older
+// reports were treated as current defects. Recognise only whole completion/ownership
+// clauses; a completion, negation or closed handoff never hides an unresolved clause.
+const COMPLETED = /^(?:(?:both|all|the|these|those|two)\s+)?follow-?ups?\s+(?:are|is|were|was|have been|has been)\s+(?:now\s+|already\s+)?(?:done|complete|completed|fixed|addressed|resolved)(?:\s+and\s+committed)?[.!]?$/i;
+const OWNERSHIP = /^left (?:alone|unchanged):?\s+([a-z0-9-]+)['\u2019]s files,\s+owned by (?:another|the other) (?:active )?implementer[.!]?$/i;
+const COORDINATION = /^(?:I |we )?left (?:it|them|this) (?:alone|unchanged) because (?:another|the other) (?:active )?implementer (?:is|was) (?:editing|working on) (?:it|them|this|the files)[.!]?$/i;
+const plainClause = (s) => s.replace(/^[\s>*-]+/, '').replace(/[*`]/g, '').trim();
+const clausesOf = (s) => s.split(/;\s*|(?<=[.!?])\s+(?=[A-Z])|,\s*(?:but|however)\s+/).map(plainClause).filter(Boolean);
+const summaryText = (s) => fold(s).replace(/[.!]$/, '').trim();
 
 function finalReport(file) {
   const entries = readTranscript(file);
@@ -284,14 +294,44 @@ function finalReport(file) {
     if (e.type !== 'assistant') continue;
     const c = e.message?.content;
     const t = typeof c === 'string' ? c : Array.isArray(c) ? c.filter((x) => x.type === 'text').map((x) => x.text ?? '').join('\n') : '';
-    if (t.trim()) return t;
+    if (t.trim()) return { text: t, at: e.timestamp ?? null };
   }
-  return '';
+  return { text: '', at: null };
 }
 
-export function unrecordedInReports(state) {
+// Reconcile an exact historical statement with a later ledger resolution. Mere
+// "done", a later successful check, an unrelated commit or a similar summary proves
+// no particular defect fixed. The ledger already validates a fix's ticket commit
+// and a deferral's owner authority; a fix must still be present on the current HEAD.
+function resolvedReportClause(state, clause, reportAt) {
+  const when = Date.parse(reportAt);
+  if (!Number.isFinite(when)) return false;
+  const body = summaryText(clause.replace(/^(?:not (?:yet )?(?:fixed|addressed|handled|done)|follow-?up)(?:,\s*(?:outside|beyond) (?:the|my|this) (?:brief|scope|work item|task))?\s*:\s*/i, ''));
+  return (state.discovered ?? []).some((d) => {
+    const resolution = d.status === 'fixed' ? d.fixed : d.status === 'deferred' ? d.deferred : null;
+    if (!resolution || Date.parse(resolution.at) < when || !Number.isFinite(Date.parse(resolution.at))) return false;
+    if (body !== summaryText(d.summary)) return false;
+    if (d.status === 'deferred') return Boolean(resolution.source);
+    const wt = state.repos[d.fixed.repo]?.worktree;
+    return Boolean(wt && run('git', ['merge-base', '--is-ancestor', d.fixed.commit, 'HEAD'], { cwd: wt, allowFail: true }).status === 0);
+  });
+}
+
+function unrecordedClause(state, handoff, clause, reportAt, known) {
+  if (!UNFIXED.test(clause)) return false;
+  if ((clause.match(/\bD\d+\b/g) ?? []).some((x) => known.has(x))) return false;
+  if (COMPLETED.test(clause)) return false;
+  const coordination = OWNERSHIP.exec(clause);
+  if (coordination && state.handoffs.some((h) => h.role === 'implementer' && h.work === coordination[1])) return false;
+  if (COORDINATION.test(clause) && state.handoffs.some((h) => h.role === 'implementer' && h.agent !== handoff.agent && h.work)) return false;
+  // Remove only the negated marker, so 'no follow-ups, but not fixed' still blocks.
+  if (!UNFIXED.test(clause.replace(NEGATED, ''))) return false;
+  return !resolvedReportClause(state, clause, reportAt);
+}
+
+export function reportsForReview(state) {
   const known = new Set((state.discovered ?? []).map((d) => d.id));
-  const out = [];
+  const current = [], historical = [];
   const seen = new Set();
   for (const h of [...state.handoffs].reverse()) {
     if (h.role !== 'implementer' || h.runtime !== 'claude' || seen.has(h.agent)) continue;
@@ -301,9 +341,54 @@ export function unrecordedInReports(state) {
       found = subagentTranscripts(home(), h.agent, h.agentType ?? null, h.at);
     } catch {}
     if (!found.length) continue;
-    const lines = finalReport(found[0].file).split('\n').map((l) => l.trim()).filter(Boolean);
-    const bad = lines.filter((l) => UNFIXED.test(l) && !NEGATED.test(l) && !(l.match(/\bD\d+\b/g) ?? []).some((x) => known.has(x)));
-    if (bad.length) out.push({ agent: h.agent, work: h.work ?? null, lines: bad });
+    const report = finalReport(found[0].file);
+    const lines = report.text.split('\n').map((l) => l.trim()).filter(Boolean);
+    const bad = lines.filter((l) => clausesOf(l).some((c) => unrecordedClause(state, h, c, report.at, known)));
+    if (!bad.length) continue;
+    const when = Date.parse(report.at);
+    const replacement = Number.isFinite(when) ? state.handoffs.filter((later) => {
+      if (later.role !== 'implementer' || !Number.isFinite(Date.parse(later.at)) || Date.parse(later.at) <= when || (later.work && later.work !== h.work)) return false;
+      const key = String(later.bundle).split(/[\\/]/).at(-1).replace(/\.json$/, '');
+      return (state.implementers ?? []).some((i) => i.handoff === key && i.closedAt && i.outcome === 'done' && Date.parse(i.closedAt) >= when);
+    }).at(-1) : null;
+    if (!replacement) current.push({ agent: h.agent, work: h.work ?? null, lines: bad });
+    else for (const statement of bad) historical.push({
+      id: 'R' + crypto.createHash('sha256').update(JSON.stringify([h.agent, h.at, report.at, statement])).digest('hex').slice(0, 16),
+      agent: h.agent, work: h.work ?? null, reportedAt: report.at, statement, supersededBy: replacement.agent,
+    });
   }
-  return out;
+  return { current, historical };
+}
+
+export const unrecordedInReports = (state) => reportsForReview(state).current;
+
+// Named failure I-42: retirement is not proof of resolution. Old observations are
+// judged afresh on the current tree, never waived by a later "done" or old verdict.
+// Every fixed verdict names a commit of this attempt; open verdicts name an open
+// finding, so the full gate, acceptance and delivery retain their existing guards.
+export function reportedIssueVerdicts(reports, closure, state) {
+  const entries = Array.isArray(closure.reportedIssues) ? closure.reportedIssues : [];
+  const problems = [], verdicts = [];
+  const expected = new Set(reports.map((r) => r.id));
+  for (const v of entries) if (!expected.has(v?.id)) problems.push('unknown historical report ' + String(v?.id ?? ''));
+  for (const r of reports) {
+    const matches = entries.filter((v) => v?.id === r.id);
+    if (matches.length !== 1) { problems.push(r.id + ': give exactly one verdict'); continue; }
+    const v = matches[0];
+    if (!['fixed', 'verified-nonissue', 'open'].includes(v.verdict) || !text(v.evidence)) {
+      problems.push(r.id + ': verdict must be fixed|verified-nonissue|open with current-tree evidence'); continue;
+    }
+    if (v.verdict === 'fixed') {
+      try {
+        if (!text(v.fixedIn)) throw new Error('name the fix commit in fixedIn');
+        ticketCommit(state, v.fixedIn, v.repo ?? null);
+      } catch (error) { problems.push(r.id + ': ' + error.message); continue; }
+    }
+    if (v.verdict === 'verified-nonissue' && !text(v.rationale)) { problems.push(r.id + ': verified-nonissue needs a purpose-based rationale'); continue; }
+    if (v.verdict === 'open' && !(closure.findings ?? []).some((f) => f.id === v.finding && !['fixed', 'verified-nonissue'].includes(f.status) && text(f.evidence))) {
+      problems.push(r.id + ': open needs a corresponding open finding with evidence'); continue;
+    }
+    verdicts.push(v);
+  }
+  return { problems, verdicts };
 }
