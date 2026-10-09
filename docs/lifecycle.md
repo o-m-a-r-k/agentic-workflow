@@ -47,7 +47,7 @@ A stopped or interrupted attempt resumes with `wf resume`, which says exactly wh
 
 ### The plan file
 
-`wf plan --from-agent <planner id>` reads the planner's last ```` ```yaml ```` block from its Claude Code subagent transcript (found by the name it was started with), so the owner never retypes it. `wf plan --file <file>` takes the same YAML from a file. For Codex, run the handed planner with `wf handoff run --agent <id> --attempt <id>` first: wf launches a fresh native Codex process with the frozen start line and role settings, records the returned session id, and verifies the actual host prompt before importing its YAML. An encrypted desktop spawn cannot use this route retroactively; it needs the unchanged reply file and remains unverified. A Codex handoff never searches a Claude transcript. The plan sections (`summary`, `contract`, `anchors`, `tests`, `doNotRun`, `externalServices`, `agentSplit`) may sit under `plan:` or at the top level beside `criteria` and `work`; `plan:` may also be plain text (the summary). Any other top-level key is refused with the list of known ones, because a section the engine does not read never reaches the implementers. Every section is stored in the frozen plan and handed to the implementers and reviewers in their bundles.
+`wf plan --from-agent <planner id>` reads the planner's last ```` ```yaml ```` block from its Claude Code subagent transcript (found by the name it was started with), so the owner never retypes it. `wf plan --file <file>` takes the same YAML from a file. For native Claude Code or Codex, run the handed planner with `wf handoff run --agent <id> --attempt <id>` first: wf launches a fresh native process for the handed runtime with the frozen start line and role settings, records the returned session id, and verifies the actual host prompt before importing its YAML. An encrypted desktop spawn cannot use this route retroactively; it needs the unchanged reply file and remains unverified. A Codex handoff never searches a Claude transcript. The plan sections (`summary`, `contract`, `anchors`, `tests`, `doNotRun`, `externalServices`, `agentSplit`) may sit under `plan:` or at the top level beside `criteria` and `work`; `plan:` may also be plain text (the summary). Any other top-level key is refused with the list of known ones, because a section the engine does not read never reaches the implementers. Every section is stored in the frozen plan and handed to the implementers and reviewers in their bundles.
 
 ### Impact analysis
 
@@ -242,3 +242,11 @@ classes:
 roles:
   implementer: { class: standard }
 ```
+
+## Optional foreground advancement
+
+`wf resume --json` includes a structured `decision` with kind, status, actor, blockers and the observed tree. Human next-step guidance and `wf advance` share the decision. Command-level validation remains authoritative when each action executes.
+
+After the owner closes committed implementation, use `wf advance --once --runtime codex --attempt <id>` (or `claude`). Use `--until-owner` to perform the normal code-review, gate, evidence-review and acceptance sequence, stopping whenever judgment is needed. Output milestones go to stderr; `--json` stdout is one terminal result with process outcomes, recorded workflow outcomes and the next decision. Required code-review coverage and gate-step reuse remain unchanged. Delivery and presentation stay with the owner.
+
+The runner is a foreground command, with an exclusive attempt control lock that never expires merely by age. It retains its child execution handle and never launches the same handoff twice. After a crash, a pending launch record means unknown liveness, not an automatic retry. SIGINT/SIGTERM stop the current operation and prevent further advancement. A hold blocks subsequent operations; recording a hold does not itself cancel an already-running process. Claude and Codex both receive fresh frozen roles and explicit committed models/efforts. Native Claude launch keeps permissions enabled; unsupported/denied tool operations require owner diagnosis.

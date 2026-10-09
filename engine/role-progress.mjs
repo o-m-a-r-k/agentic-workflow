@@ -7,14 +7,14 @@ export const ROLE_HEARTBEAT_CHECKS = 10;
 
 const duration = (ms) => ms >= 60_000 ? `${Math.floor(ms / 60_000)}m` : `${Math.floor(ms / 1000)}s`;
 
-export function roleProgress(handoff, { now = () => performance.now(), write = (line) => process.stderr.write(line) } = {}) {
+export function roleProgress(handoff, { now = () => performance.now(), runtime = 'Codex', write = (line) => process.stderr.write(line) } = {}) {
   let started = null, lastEvent = null, lastCheck = null, checks = 0, finished = false;
   const role = `${handoff.role} ${handoff.agent}`;
   return {
     start(session) {
       started = lastEvent = lastCheck = now();
       checks = 0;
-      write(`Codex ${role}: session ${session} started; configured ${handoff.model ?? 'inherited model'}/${handoff.effort ?? 'inherited effort'}\n`);
+      write(`${runtime} ${role}: session ${session} started; configured ${handoff.model ?? 'inherited model'}/${handoff.effort ?? 'inherited effort'}\n`);
     },
     event() { if (started !== null && !finished) lastEvent = now(); },
     heartbeat() {
@@ -23,7 +23,7 @@ export function roleProgress(handoff, { now = () => performance.now(), write = (
       lastCheck = at;
       if (++checks < ROLE_HEARTBEAT_CHECKS) return;
       checks = 0;
-      write(`Codex ${role}: process running; elapsed ${duration(at - started)}; last runtime event ${duration(at - lastEvent)} ago\n`);
+      write(`${runtime} ${role}: process running; elapsed ${duration(at - started)}; last runtime event ${duration(at - lastEvent)} ago\n`);
     },
     finish() { finished = true; },
   };

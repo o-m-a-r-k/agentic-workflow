@@ -121,12 +121,13 @@ function planFromAgent(root, state, agent) {
   // Named failure I-39: a Codex handoff imported the last YAML from an unrelated, same-named Claude agent.
   const check = verifyAgent(handoff);
   if (check.status === 'mismatch') throw refuse(`the planner transcript does not match its handoff: ${check.reason}`);
-  if (handoff.runtime === 'codex') {
-    if (check.status !== 'verified' || handoff.launch?.status !== 'completed') throw refuse('Codex planner output needs an engine-launched completed handoff; run `wf handoff run --agent <id>`, or use `wf plan --file <file>` with the unchanged reply', check.reason);
+  if (handoff.runtime === 'codex' || (handoff.runtime === 'claude' && handoff.launch)) {
+    const runtimeName = handoff.runtime === 'codex' ? 'Codex' : 'Claude';
+    if (check.status !== 'verified' || handoff.launch?.status !== 'completed') throw refuse(`${runtimeName} planner output needs an engine-launched completed handoff; run wf handoff run --agent <id>, or use wf plan --file <file> with the unchanged reply`, check.reason);
     const text = lastFencedYaml(check.entries);
-    if (text === null) throw refuse('the Codex planner transcript has no fenced YAML block');
+    if (text === null) throw refuse(`the ${runtimeName} planner transcript has no fenced YAML block`);
     let doc;
-    try { doc = YAML.parse(text); } catch (e) { throw refuse(`the Codex planner YAML does not parse: ${e.message.split('\n')[0]}`); }
+    try { doc = YAML.parse(text); } catch (e) { throw refuse(`the ${runtimeName} planner YAML does not parse: ${e.message.split('\n')[0]}`); }
     return { doc, text, source: { agent, transcript: check.transcript, agentType: handoff.agentType, model: handoff.model, provenance: check.status } };
   }
   if (handoff.runtime !== 'claude') throw refuse('planner output cannot be imported from another runtime; use `wf plan --file <file>`');
@@ -1882,7 +1883,55 @@ export function withAttempt(root, state, text) {
   return text.replace(/`wf ([^`]*)`/g, (m, cmd) => (/(^|\s)--attempt(\s|=|$)/.test(cmd) ? m : `\`wf ${cmd} --attempt ${state.id}\``));
 }
 
-export function nextAction(root, state) {
+// Named failure: prose-only next steps could not safely drive runtime-independent execution.
+export function nextDecision(root, state) {
+  const guidance = legacyNextAction(root, state);
+  const tree = ['done', 'abandoned'].includes(state.phase) ? null : treeHashes(state);
+  const result = (kind, status, reason, extra = {}) => ({ kind, status, actor: status === 'ready' ? 'engine' : 'owner', attempt: state.id, owner: state.owner, tree, guidance: status === 'blocked' ? `blocked: ${reason}` : guidance, blockers: reason ? [reason] : [], ...extra });
+  if (['done', 'abandoned'].includes(state.phase)) return result('complete', 'complete');
+  if (state.activeHold) return result('hold', 'blocked', state.activeHold.reason, { guidance: `on hold: ${state.activeHold.reason}; only the owner lifts it. Pending sequence after release: ${guidance}` });
+  if (state.intent !== 'implementation' || state.lane === 'batch' || state.batchOf) return result('owner', 'owner', 'this trial advances standalone implementation attempts only');
+  if (!state.criteria) return result('plan', 'owner', 'criteria must be frozen by the owner');
+  if (state.accepted) return result('delivery', 'owner', 'accepted; delivery and presentation remain with the owning chat');
+  if (state.tracker.pending.length) return result('tracker', 'owner', 'tracker actions require the owning chat');
+  const unstarted = (state.work ?? []).filter((w) => !state.handoffs.some((h) => h.role === 'implementer' && h.work === w.id));
+  if (unstarted.length) return result('implementation', 'owner', 'work items have not started', { guidance: guidance });
+  if (openImplementersOf(root, state).length) return result('implementation', 'owner', 'the owner must close settled implementer handoffs');
+  if (!state.handoffs.some((h) => h.role === 'implementer')) return result('implementation', 'owner', 'implementation has not started');
+  if (openDiscovered(state).length || state.impact?.owed) return result('repair', 'owner', 'discovered issues or scope obligations remain open');
+  if (Object.values(tree).some((t) => t.includes('+dirty')) || Object.keys(state.repos).every((n) => !changedFiles(state, n).length)) return result('implementation', 'owner', 'a committed change is required');
+  if (gateBusy(root, state)) return result('gate', 'blocked', 'a gate is already running');
+  const h = state.handoffs.filter((h) => h.role === 'reviewer').at(-1);
+  // A blind closure can be recorded before same-round prior-finding verification finishes.
+  if (h?.launch && ['starting', 'running'].includes(h.launch.status)) return result('review', 'blocked', 'runtime outcome is pending or liveness is unknown; recover the original handle, never duplicate it', { handoff: h.bundle, runtime: h.runtime });
+  if (h?.launch?.status === 'failed') return result('review', 'owner', 'role launch failed; diagnose before a fresh handoff', { handoff: h.bundle, guidance: `reviewer ${h.agent} launch failed; create a fresh reviewer handoff after diagnosis; no review is running` });
+  const recorded = h && (state.reviews ?? []).filter((r) => r.handoff === h.bundle).at(-1);
+  const refused = h && (state.reviewsRefused ?? []).some((r) => r.handoff === h.bundle);
+  if (h && !recorded) {
+    if (refused) return result('review', 'owner', 'the review was refused');
+    if (canonical(h.tree) !== canonical(tree)) return result('review', 'owner', 'the handed tree changed');
+    if (!h.launch) return result('review', 'owner', 'existing handoff has no native receipt; it may already be running externally', { handoff: h.bundle, runtime: h.runtime, guidance: guidance });
+    return result('review', 'owner', 'process completed but a valid closure is missing', { handoff: h.bundle, guidance: `reviewer ${h.agent} completed; record its closure through the handed reviewer; process completion does not prove a valid review` });
+  }
+  const r = state.review;
+  if (state.lastGate?.status === 'stopped' && ['major-finding', 'tree-change'].includes(state.stops.at(-1)?.class) && canonical(state.lastGate.tree) === canonical(tree)) return result('repair', 'owner', 'gate stopped for a defect or tree change; repair and fresh review are required', { guidance: guidance });
+  if (state.lastGate?.status === 'failed' && canonical(state.lastGate.tree) === canonical(tree)) return result('repair', 'owner', 'the normal gate failed; diagnose before continuing');
+  if (!r || !reviewCovers(state, r)) return result('review', 'ready', null, { round: 'code-review' });
+  if (r && (openFindings(r).length || unverifiedPrior(state, r).length)) return result('repair', 'owner', 'review findings or earlier-finding verification remain open');
+  const passed = gatePassedForCurrentTree(state);
+  if (!passed.ok) {
+    const blockers = gateOrderProblems(state);
+    return blockers.length ? result('gate', 'owner', blockers.join('; ')) : result('gate', 'ready', null, { guidance: canonical(r.tree ?? r.handoffTree) === canonical(tree) ? guidance : withAttempt(root, state, 'clean code review covers this change: run one `wf gate`; then the evidence review') });
+  }
+  if (!reviewedAfterGate(r)) return result('review', 'ready', null, { round: 'evidence-review' });
+  return result('accept', 'ready');
+}
+
+export function nextAction(root, state) { return nextDecision(root, state).guidance; }
+
+export const outstandingReviewFindings = (state) => state.review ? unverifiedPrior(state, state.review) : [];
+
+function legacyNextAction(root, state) {
   const step = nextStep(root, state);
   // I-23: the reviewer handoff refuses while an implementer handoff is open; a step that hands a reviewer says so first.
   const openImpl = step.includes('wf handoff reviewer') ? openImplementersOf(root, state) : [];

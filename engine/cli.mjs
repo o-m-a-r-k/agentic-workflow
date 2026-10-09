@@ -13,7 +13,7 @@ import { canonical, touchesEvidence } from './paths.mjs';
 import { openCount } from './improve.mjs';
 import { LESSON_FILE, addLesson, applySnippet, exportPluginLessons, lessonPrompts, lessonWarnings, loadLessons, moveLesson, recur, relevantLessons, reviewLessons, setLesson } from './lessons.mjs';
 import { LinkRefused, changesOf, rebaseline, releaseAttempt, seal, setVerifyLevel, verifyAttempt } from './evidence.mjs';
-import { acceptReview, amendCriteria, closeImplementer, designWarning, gateOrderCheck, batchCreate, batchEject, closeAfterHandoff, deliver, deliveredFiles, exportScreenshots, freezeCriteria, handoff, narrowDelivery, needsShown, nextAction, outsideWarning, recordReview, recordShown, reopen, screenshotsExportDir, shownDraftFile, uncovered, withAttempt } from './lifecycle.mjs';
+import { acceptReview, amendCriteria, closeImplementer, designWarning, gateOrderCheck, batchCreate, batchEject, closeAfterHandoff, deliver, deliveredFiles, exportScreenshots, freezeCriteria, handoff, narrowDelivery, needsShown, nextAction, nextDecision, outsideWarning, recordReview, recordShown, reopen, screenshotsExportDir, shownDraftFile, uncovered, withAttempt } from './lifecycle.mjs';
 import { addDiscovered, channelOf, closeDiscovered, discoveredLine, openDiscovered } from './discovered.mjs';
 import { detect, doctor, register, registry, setEnabled, sync, writeDraft } from './onboard.mjs';
 import * as secrets from './secrets.mjs';
@@ -51,7 +51,9 @@ Work
   wf handoff close --agent ID [--outcome done|stopped|failed]
                                     an implementer finished: no review round starts while one is open
   wf models refresh --attempt ID    pin execution model/effort settings from the committed adapter base
-  wf handoff run --agent ID         launch the existing Codex handoff fresh, with engine-recorded prompt provenance
+  wf advance --once|--until-owner [--runtime claude|codex] [--max-steps N]
+                                    optional foreground review/gate runner; stops for owner decisions
+  wf handoff run --agent ID         launch the existing Claude or Codex handoff fresh, with engine-recorded prompt provenance
   wf handoff reviewer --agent ID --reason "why"
                                     hand the tree while an implementer is open; records the override
   wf impact run [--file plan.yaml | --query JSON]
@@ -256,7 +258,7 @@ export async function main(argv) {
   }
 }
 
-const FULL_VERIFY = new Set(['accept', 'deliver', 'verify', 'review', 'tracker', 'export', 'shown', 'delivery', 'summary', 'handoff', 'models', 'gate', 'check', 'evidence']);
+const FULL_VERIFY = new Set(['advance', 'accept', 'deliver', 'verify', 'review', 'tracker', 'export', 'shown', 'delivery', 'summary', 'handoff', 'models', 'gate', 'check', 'evidence']);
 
 const WRITE_OPTIONS = ['out', 'csv', 'handoffs-csv', 'html', 'dir', 'to', 'root'];
 const READ_OPTIONS = ['file', 'sweep', 'capture', 'comments', 'summary-file', 'closure', 'issue-file', 'from', 'comment-file'];
@@ -625,9 +627,9 @@ async function dispatch(cmd, sub, positional, options) {
     }
     case 'handoff': {
       if (sub === 'run') {
-        const { runCodexRole } = await import('./codex-run.mjs');
-        const result = await runCodexRole(root, options);
-        print(options, `Codex ${result.agent}: ${result.status}${result.session ? ` (${result.session})` : ''}`, result);
+        const { runRole } = await import('./codex-run.mjs');
+        const result = await runRole(root, options);
+        print(options, `Native ${result.agent}: ${result.status}${result.session ? ` (${result.session})` : ''}`, result);
         return result.exitCode;
       }
       if (sub === 'close') {
@@ -664,6 +666,12 @@ async function dispatch(cmd, sub, positional, options) {
         print(options, `${lessonsLine}${sweepLines}${sub} bundle: ${r.bundle}${r.work ? `\nwork item ${r.work}, class ${r.class}` : `\nclass ${r.class}`}${r.effort ? `, effort ${r.effort}` : ''}${r.model ? `, model ${r.model}` : ''}\n${how} with: "${startPrompt}"${closeLine}`, { ...r, startPrompt });
       }
       return 0;
+    }
+    case 'advance': {
+      const { advance } = await import('./advance.mjs');
+      const result = await advance(root, options);
+      print(options, `${result.status}: ${result.decision?.blockers?.join('; ') || result.decision?.guidance || result.error}`, result);
+      return result.exitCode;
     }
     case 'gate':
     case 'check': {
@@ -1043,7 +1051,7 @@ async function dispatch(cmd, sub, positional, options) {
     case 'resume': {
       const s = openState(root, options);
       const base = isOpen(s) ? safeBase(root, s) : null;
-      print(options, summary(root, s, { base, resume: true }), { ...s, next: nextAction(root, s), liveGate: liveGate(root, s), base });
+      print(options, summary(root, s, { base, resume: true }), { ...s, next: nextAction(root, s), decision: nextDecision(root, s), liveGate: liveGate(root, s), base });
       return 0;
     }
     case 'status': {
