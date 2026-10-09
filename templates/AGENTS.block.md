@@ -5,6 +5,7 @@ This project runs changes through agentic-workflow. The `wf` CLI enforces the ru
 **Lifecycle.** `wf entry` → `wf plan` (criteria frozen before code) → `wf handoff implementer` → commit → code review (`wf handoff reviewer`, a different agent each round, `wf review`) until a round comes back clean → ONE `wf gate` on that tree → evidence review by a new reviewer → `wf accept` → `wf deliver` → show every delivered screenshot to the user in the chat with its caption and `wf shown` → tracker handoff (screenshots uploaded as files) with `wf tracker record`. `wf resume` always says what is next.
 
 **Rules**
+
 - Work only in the attempt's worktrees under `.wf-worktrees/`, never in the main checkouts.
 - Review and gate never run side by side: no gate until a code-review round on the tree comes back clean, and no reviewer handoff while a gate runs (`wf` refuses both; only the user skips the order: they start a message with `override <attempt>:gate`, then `wf gate --reason "<their words>"` records it). Never edit the worktrees while a gate runs (`wf status` shows it); a stop needs its class (`wf stop --class major-finding|tree-change|owner-decision --reason "<why>"`). A `--focused` gate is repair proof only; acceptance and delivery need a gate without it.
 - Report a step as done only after `wf` accepted it. Gate results, reviews and deliveries are proven by files under `.wf-evidence/`, which no one edits by hand.

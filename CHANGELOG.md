@@ -7,6 +7,7 @@ Release notes, newest first, then every fix that came from a failure in the work
 - I-59: native roles emit their session/model/effort at launch, keep nine eligible minute checks silent, and emit one compact liveness heartbeat on the tenth. Runtime activity alone is not reported as review progress. Rapid duplicate checks cannot advance the count, and a finished or unstarted role emits no heartbeat.
 - Work, resume and quick-fix guidance keep unchanged checks silent and avoid repeated worktree, model, verdict and next-step summaries. Starts, meaningful progress, terminal results, failures and required actions remain prompt. Higher-priority host notification requirements still apply; use only the minimum factual liveness update when a host requires one.
 - I-60: reviewers inspect validation package scripts, wrappers and relevant lifecycle hooks before invocation, prefer an explicit check-only command, and reuse sufficient gate evidence. Appending `--check` does not cancel an embedded write option. Unclear write behavior is reported to the owner rather than executed; reviewers never repair or restore files themselves. The scenario exercises generated Claude/Codex roles, the actual native launch instructions and receipt, and a disposable write-capable alias versus its check-only alternative.
+- I-61: generated AGENTS blocks retain the formatter-compatible blank line after the opening marker and before the Rules list. Repeated sync preserves these separators and surrounding authored text rather than reintroducing formatting errors. Workflow policy and block identity remain unchanged.
 
 The standard CLI cadence produces about one heartbeat per ten minutes, plus the immediate launch and existing terminal output. This changes display only: no transcript polling, ledger, review, authorization, evidence or acceptance behavior changes. The regression simulates a quiet hour (seven lines including launch), repeated rapid checks, runtime activity and post-completion silence.
 
@@ -266,6 +267,7 @@ A second adversarial pass over the integrated 0.5.0 branch, with scenarios in `s
 
 | Item | Failure fixed | Fixed in | Scenario test |
 | --- | --- | --- | --- |
+| [I-61](improvements/I-61.md) | Generated AGENTS Markdown reintroduces formatter errors on sync | 0.5.10 | `scenarios/onboarding.test.mjs` |
 | [I-60](improvements/I-60.md) | Reviewer formatter alias mutates the settled source tree | 0.5.10 | `scenarios/codex-run.test.mjs` |
 | [I-59](improvements/I-59.md) | Unchanged role waits produce repetitive liveness messages | 0.5.10 | `scenarios/role-progress.test.mjs` |
 | [I-58](improvements/I-58.md) | Native reviewer applies full-file document receipts to the large JSON handoff | 0.5.9 | `scenarios/review-efficiency.test.mjs` |

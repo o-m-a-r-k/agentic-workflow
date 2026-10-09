@@ -369,7 +369,8 @@ function agentsBlock(root, cfg) {
 
 export function writeBlock(file, block) {
   const text = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
-  const wrapped = `${BEGIN}\n${block}\n${END}`;
+  // Named failure I-61: sync must preserve the formatter's blank line after the opening HTML marker.
+  const wrapped = `${BEGIN}\n\n${block}\n${END}`;
   let next;
   if (text.includes(BEGIN) && text.includes(END) && text.indexOf(END) > text.indexOf(BEGIN)) next = text.slice(0, text.indexOf(BEGIN)) + wrapped + text.slice(text.indexOf(END) + END.length);
   else next = `${text}${text && !text.endsWith('\n') ? '\n' : ''}${text ? '\n' : ''}${wrapped}\n`;

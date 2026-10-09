@@ -92,6 +92,32 @@ test('enable writes the AGENTS.md block and role agents; disable removes the blo
   assert.equal(wf(root, ['entry', '--item', 'X-1']).code, 75, 'disabled projects refuse work');
 });
 
+// Named failure I-61: sync removed the two Markdown separators restored by the formatter.
+test('I-61: generated Markdown separators survive repeated sync without altering authored text', () => {
+  const { root } = onboarded([{ id: 'ok', repo: 'app', run: 'true' }]);
+  const prefix = '# Existing rules\n\nKeep the authored prefix.\n';
+  const suffix = '\n## Authored appendix\n\nKeep the authored suffix.\n';
+  write(root, 'AGENTS.md', prefix);
+  ok(wf(root, ['enable']));
+  const file = path.join(root, 'AGENTS.md');
+  fs.appendFileSync(file, suffix);
+  const generated = fs.readFileSync(file, 'utf8');
+  // Freeze only the two independently observed formatter repairs, not a formatter implementation.
+  const formatted = generated
+    .replace('<!-- agentic-workflow:begin -->\n##', '<!-- agentic-workflow:begin -->\n\n##')
+    .replace('**Rules**\n- ', '**Rules**\n\n- ');
+  assert.ok(generated === formatted, 'enable must generate formatter-compatible separators');
+  fs.writeFileSync(file, formatted);
+  for (let i = 0; i < 2; i++) {
+    ok(wf(root, ['sync']));
+    const after = fs.readFileSync(file, 'utf8');
+    assert.equal(after, formatted, 'sync must preserve the formatter-clean document');
+    assert.ok(after.startsWith(prefix));
+    assert.ok(after.endsWith(suffix));
+    assert.equal((after.match(/<!-- agentic-workflow:begin -->/g) ?? []).length, 1);
+  }
+});
+
 test('sync vendors required skills for every runtime; a reviewer handoff needs them', () => {
   const { base, root } = singleRepoProject('skills', {
     requires: { skills: [{ name: 'ui-review', roles: ['reviewer'], vendor: 'skills/ui-review' }] },
