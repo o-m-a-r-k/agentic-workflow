@@ -5,6 +5,7 @@ import path from 'node:path';
 import { canonical as canonicalPath } from './paths.mjs';
 import { randomUUID } from 'node:crypto';
 import { openState } from './attempt.mjs';
+import { blockingFindings } from './scope-decisions.mjs';
 import { nextDecision, handoff, acceptReview, gateOrderCheck, outstandingReviewFindings, outsideWarning } from './lifecycle.mjs';
 import { runGate } from './gate.mjs';
 import { runRole } from './codex-run.mjs';
@@ -72,7 +73,7 @@ export async function advance(root, options) {
         operations.push(operation);
         const after = verifiedState();
         const review = after.reviews.filter((r) => r.handoff === h.bundle).at(-1);
-        const workflow = review && outstandingReviewFindings(after).length ? 'verification-incomplete' : !review ? 'closure-missing-or-refused' : review.closure.findings.some((f) => !['fixed', 'verified-nonissue'].includes(f.status)) ? 'findings' : 'recorded-clean';
+        const workflow = review && outstandingReviewFindings(after).length ? 'verification-incomplete' : !review ? 'closure-missing-or-refused' : blockingFindings(after, review).length ? 'findings' : 'recorded-clean';
         Object.assign(operation, { workflow, closure: review?.raw ?? null });
         say(`${h.runtime} process ${processResult.status}; workflow ${workflow}`);
         if (after.owner !== owner || after.handoffs.filter((h) => h.role === 'reviewer').at(-1)?.bundle !== h.bundle) return result('owner-required', { ...nextDecision(root, after), status: 'blocked', blockers: ['owner or reviewer handoff changed during execution'] });

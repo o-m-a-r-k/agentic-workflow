@@ -116,6 +116,8 @@ export function reduce(entries) {
     repos: {},
     addedRepos: [],
     discovered: [],
+    scopeDecisions: [],
+    scopePrompt: null,
     adapterBase: null,
     adapter: null,
     deliveryAdapterBase: null,
@@ -200,10 +202,17 @@ export function reduce(entries) {
         s.impact = d.impact ? { ...d.impact, addenda: [], owed: null } : null;
         if (s.phase === 'admitted') s.phase = 'planned';
         break;
+      case 'scope.asked':
+        s.scopePrompt = { ...d, at: e.at };
+        break;
+      case 'scope.decided':
+      case 'scope.ticketed':
+        s.scopeDecisions.push({ ...d, at: e.at });
+        break;
       case 'criteria.amended':
         s.criteria = d.criteria;
         if (d.work) s.work = d.work;
-        s.criteriaAmendments.push({ at: e.at, reason: d.reason, by: e.actor, changes: d.changes ?? null, impact: d.impact ? true : d.impactOwed ? 'owed' : null });
+        s.criteriaAmendments.push({ at: e.at, reason: d.reason, by: e.actor, changes: d.changes ?? null, scopeKeys: d.scopeKeys ?? [], impact: d.impact ? true : d.impactOwed ? 'owed' : null });
         // I-26: an amendment that adds scope owes an impact update before the next implementer handoff.
         if (d.impact) {
           s.impact ??= { survey: null, impact: null, results: {}, addenda: [], owed: null };
@@ -362,7 +371,7 @@ export function reduce(entries) {
         break;
       // The discovered-issue ledger (I-18): every issue found during the ticket, fixed or deferred in the owner's words.
       case 'discovered.added':
-        s.discovered.push({ id: d.id, summary: d.summary, where: d.where ?? null, foundBy: d.foundBy ?? null, blockedBy: d.blockedBy ?? null, anchor: d.anchor ?? null, at: e.at, by: e.actor, status: 'open', fixed: null, deferred: null });
+        s.discovered.push({ id: d.id, summary: d.summary, scope: d.scope ?? null, where: d.where ?? null, foundBy: d.foundBy ?? null, blockedBy: d.blockedBy ?? null, anchor: d.anchor ?? null, at: e.at, by: e.actor, status: 'open', fixed: null, deferred: null });
         break;
       case 'discovered.closed': {
         const x = s.discovered.find((y) => y.id === d.id);

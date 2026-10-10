@@ -1,3 +1,4 @@
+import { askScope, decideScope, completeScopeTicket, scopeFindings } from './scope-decisions.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -45,7 +46,7 @@ Work
   wf discovered add --summary "..." [--where file:line] [--found-by ID] [--blocked-by W] | list
   wf discovered close D1 --fixed SHA | --deferred   (after the owner wrote: defer <attempt>:D1: <reason>)
   wf discovered defer D1 --reason "why"   the owner, in their own terminal: types the id to confirm
-                                    every issue found during the ticket: fixed in it, or deferred only by the owner
+                                    related defects are repaired; extra scope waits for the owner choice
   wf handoff planner|implementer|reviewer|tester --agent ID [--work W1] [--sweep F] [--session SID] [--runtime claude|codex]
                                     --sweep: a fix handoff names a pattern sweep per open review finding
   wf handoff close --agent ID [--outcome done|stopped|failed]
@@ -65,6 +66,11 @@ Work
   wf base [merge] [--repo R]        how far each base moved; merge merges it into the worktrees
   wf stop --class major-finding|tree-change|owner-decision --reason "why"
                                     stop a running gate; records the class and the minutes discarded
+  wf scope list|ask                explain unrelated existing findings and request the owner choice
+  wf scope decide --choice expand|expand-all|ticket|ignore
+                                    records the direct human reply after scope ask; in-scope defects still block
+  wf scope ticket --finding REVIEWER:F1 --capture RAW.json
+                                    raw tracker readback after owner-authorized ticket creation
   wf review --closure file.json     record the reviewer's closure
   wf accept                         accept the review
   wf summary --file summary.md      the owner's plain-language summary for the delivered comment
@@ -597,6 +603,14 @@ async function dispatch(cmd, sub, positional, options) {
       const addedLines = added.map((a) => `\n  repo added: ${a.repo} (worktree ${a.worktree}, base ${a.base.slice(0, 10)}); hand its work item to an implementer, and the reviewer judges the seam on both sides`).join('');
       print(options, `criteria amended (${s.criteriaAmendments.length} amendment(s)); the reviewer will see the reason${addedLines}\n  criteria now (${s.criteria.length}): ${list(s.criteria.map((c) => c.id))}\n  changed: ${list(changes.changed)}; added: ${list(changes.added)}; dropped: ${list(changes.dropped.map((d) => `${d.id} (${d.reason})`))}${owedLine}`, { ...s, changes });
       return 0;
+    }
+    case 'scope': {
+      const s = openState(root, options);
+      if (!sub || sub === 'list') { print(options, scopeFindings(s), scopeFindings(s)); return 0; }
+      if (sub === 'ask') { const r = askScope(root, options); print(options, `${r.prompt}\n${JSON.stringify(r.findings, null, 2)}`, r); return 0; }
+      if (sub === 'decide') { const r = decideScope(root, options); print(options, 'owner scope decision recorded; run wf resume', r); return 0; }
+      if (sub === 'ticket') { const r = completeScopeTicket(root, options); print(options, 'follow-up ticket readback recorded; run wf resume', r); return 0; }
+      throw new WfError('usage: wf scope list|ask|decide|ticket');
     }
     case 'discovered': {
       // I-18: the discovered-issue ledger. Any role records what it finds; only the owner defers, in their own words.

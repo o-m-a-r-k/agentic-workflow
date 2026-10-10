@@ -168,9 +168,24 @@ function adoptionRequest(text, phrases) {
   return false;
 }
 
-export function ownerAuthority(root, state, phrase, { what, command = null, owner = state.owner, terminal = defaultTerminal, decision = null, interactive = false, requestPhrases = null } = {}) {
+// Named failure: scope expansion followed agent text rather than the owner's reply to a scoped question.
+function scopeReply(message, choice, phrase) {
+  const plain = fold(message).trim();
+  if (plain === fold(phrase)) return true;
+  const replies = {
+    expand: /^(?:(?:please|just) )?(?:increase|expand) scope(?: and (?:continue )?fix(?:ing)?(?: (?:these|them|these findings))?)?[.!]?$/,
+    'expand-all': /^(?:(?:please|just) )?(?:continue fixing all|(?:increase|expand) scope and (?:continue )?fix(?:ing)? all)[.!]?$/,
+    ticket: /^(?:(?:please|just) )?create (?:a ticket|tickets)(?: for later)?[.!]?$/,
+    ignore: /^(?:(?:please|just) )?ignore(?: (?:these|them|these findings))?(?: for (?:now|this attempt))?[.!]?$/,
+  };
+  return replies[choice]?.test(plain) ?? false;
+}
+
+export function ownerAuthority(root, state, phrase, { what, command = null, owner = state.owner, terminal = defaultTerminal, decision = null, interactive = false, requestPhrases = null, scopeChoice = null, scopeAnchor = null } = {}) {
   const shown = command ? `wf ${[...command.sub, ...Object.entries(command.flags).flat()].join(' ')}` : null;
-  const how = requestPhrases
+  const how = scopeChoice
+    ? `only the owner decides ${what}: ask the displayed scope question and wait for their direct reply (increase scope, create tickets for later, or ignore); wf reads that reply from the anchored owner transcript`
+    : requestPhrases
     ? `only the owner decides ${what}: ask this interactive chat to \`${phrase}\`, directly or after reading the handover; wf reads the host-recorded human request`
     : `only the owner decides ${what}: the owner starts a message in the owner session with \`${phrase}\`${shown ? `, or the owner session runs exactly \`${shown}\`` : ''}`;
   const t = ownerTranscript(owner);
@@ -179,6 +194,7 @@ export function ownerAuthority(root, state, phrase, { what, command = null, owne
     return terminalAuthority(owner, phrase, what, terminal);
   }
   const bytes = readCapped(t.file);
+  if (scopeChoice && (!scopeAnchor || scopeAnchor.file !== t.file || bytes.length < scopeAnchor.size || crypto.createHash('sha256').update(bytes.subarray(0, scopeAnchor.size)).digest('hex') !== scopeAnchor.sha256)) throw refuse('scope question transcript anchor changed or is missing; ask the current scope question again');
   const spends = projectSpends(root);
   assertMarkers(root, spends);
   const used = new Set([...(state.authoritiesUsed ?? []), ...spends.keys()]);
@@ -187,7 +203,9 @@ export function ownerAuthority(root, state, phrase, { what, command = null, owne
   const stateFor = state;
   // Other owner decisions keep their exact phrases. A destination suffix or a longer ticket never matches adoption.
   const start = new RegExp(`^${esc(fold(phrase))}(?![a-z0-9_-]|\\.[a-z0-9])`);
-  let turns = ownerTurns(t, bytes).filter((m) => afterAdmission(stateFor, m) && !used.has(spendKey(t, m)) && !used.has(`${t.file}:${m.offset}`) && (requestPhrases ? adoptionRequest(m.text, requestPhrases) : start.test(fold(m.text))));
+  const humans = ownerTurns(t, bytes).filter((m) => afterAdmission(stateFor, m) && (!scopeChoice || m.offset >= scopeAnchor.size));
+  const candidates = scopeChoice ? humans.slice(-1) : humans;
+  let turns = candidates.filter((m) => !used.has(spendKey(t, m)) && !used.has(`${t.file}:${m.offset}`) && (scopeChoice ? scopeReply(m.text, scopeChoice, phrase) : requestPhrases ? adoptionRequest(m.text, requestPhrases) : start.test(fold(m.text))));
   let notInteractive = '';
   if (interactive) {
     turns = turns.filter((m) => {

@@ -3,6 +3,7 @@
 // that strands the user) and parked them as follow-ups or "harmless today" without the owner deciding. Every issue found
 // during a ticket is recorded here by whoever finds it; it ends fixed by a commit of this ticket or deferred with the
 // owner's own words; delivery refuses an open one and the reviewer gives each a verdict.
+import { waivedFinding, effectiveDiscoveries, scopeProblems } from './scope-decisions.mjs';
 import { actor, openState } from './attempt.mjs';
 import { append, loadState } from './ledger.mjs';
 import fs from 'node:fs';
@@ -17,7 +18,7 @@ import { codexOwnerReplies } from './codex-owner-reply.mjs';
 const text = (v) => (typeof v === 'string' ? v.trim() : '');
 const OPEN = (s) => !['done', 'abandoned'].includes(s.phase);
 
-export const openDiscovered = (state) => (state.discovered ?? []).filter((d) => d.status === 'open');
+export const openDiscovered = (state) => (state.discovered ?? []).filter((d) => d.status === 'open' && !waivedFinding(state, d));
 
 export function addDiscovered(root, options) {
   const state = openState(root, options);
@@ -28,10 +29,16 @@ export function addDiscovered(root, options) {
   // names that work item, and the owner routes it to its implementer.
   const blockedBy = text(options['blocked-by']) || null;
   if (blockedBy && !(state.work ?? []).some((w) => w.id === blockedBy)) throw new WfError(`--blocked-by: no work item ${blockedBy} in the frozen plan${state.work?.length ? ` (work items: ${state.work.map((w) => w.id).join(', ')})` : ''}`);
+  let scope;
+  if (typeof options['scope-file'] === 'string') {
+    scope = JSON.parse(fs.readFileSync(options['scope-file'], 'utf8'));
+    const problems = scopeProblems([{ id: 'discovered', scope }]);
+    if (problems.length) throw refuse(problems.join('; '));
+  }
   const id = `D${(state.discovered?.length ?? 0) + 1}`;
   // The engine's anchor on the owner session's transcript (0.4.5): its size and the sha256 of its bytes now. A deferral
   // taken from the transcript must come from an owner turn after this offset, with these bytes unchanged.
-  append(root, state.id, 'discovered.added', { id, summary, where: text(options.where) || null, foundBy: text(options['found-by']) || null, blockedBy, anchor: transcriptAnchor(state.owner) }, actor(options));
+  append(root, state.id, 'discovered.added', { id, summary, ...(scope ? { scope } : {}), where: text(options.where) || null, foundBy: text(options['found-by']) || null, blockedBy, anchor: transcriptAnchor(state.owner) }, actor(options));
   const after = loadState(root, state.id);
   const anchored = Boolean(after.discovered.find((d) => d.id === id)?.anchor);
   return { state: after, id, anchored, anchorProblem: anchored ? null : ownerTranscript(state.owner).problem ?? 'the owner session\'s transcript could not be read' };
@@ -312,7 +319,7 @@ function resolvedReportClause(state, clause, reportAt) {
   const when = Date.parse(reportAt);
   if (!Number.isFinite(when)) return false;
   const body = summaryText(clause.replace(/^(?:not (?:yet )?(?:fixed|addressed|handled|done)|follow-?up)(?:,\s*(?:outside|beyond) (?:the|my|this) (?:brief|scope|work item|task))?\s*:\s*/i, ''));
-  return (state.discovered ?? []).some((d) => {
+  return effectiveDiscoveries(state).some((d) => {
     const resolution = d.status === 'fixed' ? d.fixed : d.status === 'deferred' ? d.deferred : null;
     if (!resolution || Date.parse(resolution.at) < when || !Number.isFinite(Date.parse(resolution.at))) return false;
     if (body !== summaryText(d.summary)) return false;
