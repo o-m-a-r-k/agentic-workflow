@@ -343,26 +343,20 @@ test('I-19: a discovered fix adds a repo and its work items to the running attem
   assert.equal(sh(path.join(root, 'api'), 'git fetch -q origin && git show origin/main:src/totals.txt'), 'page\ntotal');
 });
 
-test('I-18/I-19: role texts, the work and quick-fix skills say every issue is fixed in the ticket and fences are amended, not used to defer', () => {
-  const planner = fs.readFileSync(path.join(TEMPLATES, 'planner.md'), 'utf8');
-  const implementer = fs.readFileSync(path.join(TEMPLATES, 'implementer.md'), 'utf8');
-  const reviewer = fs.readFileSync(path.join(TEMPLATES, 'reviewer.md'), 'utf8');
-  const work = fs.readFileSync(path.join(SKILLS, 'work', 'SKILL.md'), 'utf8');
-  const quick = fs.readFileSync(path.join(SKILLS, 'quick-fix', 'SKILL.md'), 'utf8');
-  assert.doesNotMatch(planner, /Note follow-ups separately/);
-  assert.match(planner, /Never write a blanket "no change in X" criterion/);
-  assert.match(planner, /the contract seam stays matched; existing fields, permissions and tenant isolation are unchanged/);
-  assert.match(implementer, /`wf discovered add/);
-  assert.match(implementer, /Never defer one yourself/);
-  assert.match(reviewer, /never a reason to defer or to ship a cosmetic workaround/);
-  assert.match(reviewer, /"discovered": \[/);
-  assert.match(reviewer, /"seams": \[/);
-  for (const skill of [work, quick]) {
-    assert.match(skill, /wf discovered close/);
-    assert.match(skill, /amend the criteria/);
-    assert.match(skill, /never .*defer/i);
+test('scope decisions: role texts keep related repairs mandatory and require owner approval for unrelated expansion', () => {
+  const files = [path.join(TEMPLATES, 'planner.md'), path.join(TEMPLATES, 'implementer.md'), path.join(TEMPLATES, 'reviewer.md'), path.join(SKILLS, 'work', 'SKILL.md'), path.join(SKILLS, 'quick-fix', 'SKILL.md')];
+  for (const file of files) {
+    const doc = fs.readFileSync(file, 'utf8');
+    assert.match(doc, /In-scope defects, introduced regressions and consumers missed by the plan remain mandatory repair findings/);
+    assert.match(doc, /Uncertain causality remains blocking/);
+    assert.match(doc, /base and current behavior/);
+    assert.match(doc, /wf scope ask/);
+    assert.match(doc, /increase scope and fix/);
+    assert.match(doc, /create tickets for later/);
+    assert.match(doc, /ignore for this attempt/);
+    assert.match(doc, /silence and agent text do not count/);
+    assert.doesNotMatch(doc, /Every issue.*(?:is fixed|fixed by you).*whatever|outside the brief.*never a reason to leave it/);
   }
-  assert.match(work, /--add-repo/);
 });
 
 // I-18 (extended), named failure: an implementer reported "Not fixed, outside the brief: the status field shows the
@@ -408,20 +402,11 @@ test('I-18: an implementer report that leaves an issue unfixed without a ledger 
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-1', '--attempt', id, '--owner', 'o']));
 });
 
-test('I-18 (extended): role texts and skills say the role that found an issue fixes it, whatever the brief; the owner routes, never fixes', () => {
-  const implementer = fs.readFileSync(path.join(TEMPLATES, 'implementer.md'), 'utf8');
-  const reviewer = fs.readFileSync(path.join(TEMPLATES, 'reviewer.md'), 'utf8');
-  const work = fs.readFileSync(path.join(SKILLS, 'work', 'SKILL.md'), 'utf8');
-  const quick = fs.readFileSync(path.join(SKILLS, 'quick-fix', 'SKILL.md'), 'utf8');
-  assert.match(implementer, /fixed by you, in this attempt, in whatever file it lives in/);
-  assert.match(implementer, /The work-item brief is never a reason to leave it/);
-  assert.match(implementer, /--blocked-by <work item>/);
-  assert.doesNotMatch(implementer, /build that item only/);
-  assert.match(reviewer, /the owner routes it to the implementer, never fixes it/);
-  for (const skill of [work, quick]) {
-    assert.match(skill, /by the role that found it/);
-    assert.match(skill, /never fix it yourself/);
-    assert.match(skill, /outside the brief/);
+test('related repair ownership remains with implementers; owner routes and never writes the product repair', () => {
+  for (const file of [path.join(TEMPLATES, 'implementer.md'), path.join(TEMPLATES, 'reviewer.md'), path.join(SKILLS, 'work', 'SKILL.md'), path.join(SKILLS, 'quick-fix', 'SKILL.md')]) {
+    const doc = fs.readFileSync(file, 'utf8');
+    assert.match(doc, /The owning chat routes in-scope repair findings to their implementer; never fix them yourself/);
+    assert.match(doc, /scope choice never authorizes leaving an in-scope defect/);
   }
 });
 

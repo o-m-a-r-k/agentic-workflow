@@ -1,3 +1,4 @@
+import { scopeFindings } from './scope-decisions.mjs';
 import fs from 'node:fs';
 import { channelOf } from './channels.mjs';
 import { spawnSync } from 'node:child_process';
@@ -73,6 +74,7 @@ export function knownLimits(state) {
   for (const a of state.delivery?.shown?.anomalies ?? []) if (a.followUp) out.push(`Follow-up: ${a.observation} (${a.followUp})`);
   // An issue found during the ticket that the owner deferred (I-18): the tester sees it with the owner's words.
   for (const d of state.discovered ?? []) if (d.status === 'deferred') out.push(`Deferred ${state.id}:${d.id}: ${d.summary}. The owner's words: "${d.deferred.decision}". Channel: ${channelOf(d)}. ${d.deferred.acknowledged ? 'Acknowledged by the owner at delivery.' : 'Not acknowledged.'}`);
+  for (const r of scopeFindings(state)) if (['ignore', 'ticketed'].includes(r.decision?.choice)) out.push(`Extra scope ${r.decision.choice === 'ignore' ? 'ignored by owner for this attempt' : 'ticketed for later'}: ${r.summary}. ${r.decision.ticket?.url ?? ''} Owner decision: ${r.decision.authority?.text ?? ''}`);
   return out.map((l) => `- ${l.replace(/\s*\n\s*/g, ' ')}`).join('\n');
 }
 

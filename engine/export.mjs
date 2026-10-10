@@ -41,6 +41,7 @@ export function exportData(root, s) {
     work: (s.work ?? []).map((w) => ({ ...w, agents: s.handoffs.filter((h) => h.role === 'implementer' && h.work === w.id).map((h) => h.agent) })),
     handoffs: s.handoffs.map((h) => ({ at: h.at, role: h.role, agent: h.agent, agentType: h.agentType ?? null, class: h.class ?? null, effort: h.effort ?? null, work: h.work ?? null })),
     reviews: (s.reviews ?? []).map((r) => ({ at: r.at, reviewer: r.reviewer, provenance: r.provenance, findings: (r.closure?.findings ?? []).map((f) => ({ id: f.id, severity: f.severity ?? null, status: f.status ?? 'open', summary: f.summary ?? '', work: f.work ?? null })), priorFindings: r.closure?.priorFindings ?? [], noEvidence: Array.isArray(r.closure?.noEvidence) ? r.closure.noEvidence : [] })),
+    scopeDecisions: s.scopeDecisions ?? [],
     accepted: s.accepted ? { at: s.accepted.at, reviewer: s.accepted.reviewer } : null,
     gates: s.gates.map((g) => ({ at: g.at, runId: g.runId, status: g.status, focused: Boolean(g.focused), carried: Boolean(g.carriedFrom), steps: steps(g) })),
     checks: (s.checks ?? []).map((g) => ({ at: g.at, runId: g.runId, status: g.status, steps: steps(g) })),
