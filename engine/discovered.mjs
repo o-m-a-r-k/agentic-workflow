@@ -12,6 +12,7 @@ import { maxTranscriptBytes, ownerTranscript } from './host-record.mjs';
 import { home } from './provenance.mjs';
 import { readTranscript, subagentTranscripts } from './telemetry.mjs';
 import { WfError, git, refuse, run } from './util.mjs';
+import { codexOwnerReplies } from './codex-owner-reply.mjs';
 
 const text = (v) => (typeof v === 'string' ? v.trim() : '');
 const OPEN = (s) => !['done', 'abandoned'].includes(s.phase);
@@ -147,9 +148,8 @@ function transcriptAnchor(owner) {
 // The shape of words a person typed: the turn opens with a letter or a digit. Named failure (0.5.0 adversarial review):
 // owner turns were every user line minus a deny-list of injected tags, so a shape the list did not name (Codex
 // `<user_action>` review results, `<recommended_plugins>`, `[12] tool exec call` lines) counted as the owner speaking.
-// Now only the known shapes count (below) and their text must open as typed words: anything that opens with markup, a
-// bracket or other punctuation is never an owner turn, whatever its tag. The deny-list stays for injected lines that
-// open with a word.
+// Only the known shapes count (below). Typed text must open as words; the sole markup exception is a bound human
+// desktop question reply, decoded by codex-owner-reply.mjs. Other markup never grants authority.
 const TYPED = /^[\p{L}\p{N}]/u;
 
 // Every genuine owner turn: { text, at, line, offset, origin }. Only these shapes count. Claude Code: a `user` line that
@@ -160,6 +160,7 @@ const TYPED = /^[\p{L}\p{N}]/u;
 // session read them: engine/owner.mjs).
 export function ownerTurns({ runtime, file }, bytes = readCapped(file)) {
   const out = [];
+  const replies = runtime === 'codex' ? codexOwnerReplies() : null;
   let offset = 0;
   bytes.toString('utf8').split('\n').forEach((raw, i) => {
     const start = offset;
@@ -171,6 +172,7 @@ export function ownerTurns({ runtime, file }, bytes = readCapped(file)) {
     } catch {
       return;
     }
+    replies?.observe(e);
     let t = null;
     let origin = null;
     if (runtime === 'claude') {
@@ -188,10 +190,13 @@ export function ownerTurns({ runtime, file }, bytes = readCapped(file)) {
       if (e?.type !== 'response_item' || p?.type !== 'message' || p.role !== 'user' || !Array.isArray(p.content)) return;
       if (p.content.every((b) => b?.type === 'input_text')) t = p.content.map((b) => b.text ?? '').join('\n');
     }
-    if (!t || !t.trim() || !TYPED.test(t.trim()) || INJECTED.test(t.trim())) return;
-    // What a spend is keyed on (engine/owner.mjs): the host's own id for the line (Claude Code `uuid`), else the line's
-    // sha256; never where the file is or where the line sits in it.
-    out.push({ text: t.trim(), at: e.timestamp ?? null, line: i + 1, offset: start, origin, id: typeof e.uuid === 'string' && e.uuid ? `uuid:${e.uuid}` : `sha256:${sha(Buffer.from(raw))}` });
+    const words = replies?.answers(t, e.timestamp) ?? [{ text: t }];
+    for (const word of words) {
+      const text = word.text;
+      if (!text || !text.trim() || !TYPED.test(text.trim()) || INJECTED.test(text.trim())) continue;
+      // All answers in one envelope share the original line's spend identity: one owner message, one decision.
+      out.push({ text: text.trim(), at: e.timestamp ?? null, line: i + 1, offset: start, origin, id: typeof e.uuid === 'string' && e.uuid ? `uuid:${e.uuid}` : `sha256:${sha(Buffer.from(raw))}`, ...(word.questionReply ? { questionReply: word.questionReply } : {}) });
+    }
   });
   return out;
 }

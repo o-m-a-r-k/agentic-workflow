@@ -198,7 +198,7 @@ export function ownerAuthority(root, state, phrase, { what, command = null, owne
   }
   for (const m of turns) {
     if (!claim(root, spendKey(t, m), { phrase, attempt: state.id, decision })) continue;
-    return { provenance: 'host-recorded', runtime: t.runtime, file: t.file, line: m.line, offset: m.offset, at: m.at, phrase, text: m.text.slice(0, 2000), spent: spendKey(t, m) };
+    return { provenance: 'host-recorded', runtime: t.runtime, file: t.file, line: m.line, offset: m.offset, at: m.at, phrase, text: m.text.slice(0, 2000), spent: spendKey(t, m), ...(m.questionReply ? { questionReply: m.questionReply } : {}) };
   }
   let why = '';
   if (command) {
