@@ -15,7 +15,7 @@ import { append, loadState } from './ledger.mjs';
 import { readRegular, seal } from './evidence.mjs';
 import { reviewDocumentProblems } from './rules.mjs';
 import { roleInstructions, ROLE_TOOLS } from './onboard.mjs';
-import { roleProgress, ROLE_HEARTBEAT_MS } from './role-progress.mjs';
+import { roleProgress, roleReport, ROLE_HEARTBEAT_MS } from './role-progress.mjs';
 import { assertPlainGit, canonical, git, refuse, sha256, withFileLock, writeJson } from './util.mjs';
 
 export async function runRole(root, options) {
@@ -108,6 +108,7 @@ export async function runRole(root, options) {
         seal(append);
         progress.start(session);
       }
+      progress.report(roleReport(e, runtime));
       if (runtime === 'codex' && e.type === 'turn.completed') completed = true;
       if (runtime === 'claude' && e.type === 'result') {
         if (completed || e.session_id !== session) throw new Error('Claude supplied an invalid terminal result');

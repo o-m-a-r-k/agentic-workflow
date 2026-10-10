@@ -40,6 +40,11 @@ const at = new Date().toISOString(), line=(x)=>JSON.stringify({timestamp:at,...x
 const actual = prompt + ${JSON.stringify(mode === 'steered' ? ' Focus only on one file.' : '')};
 fs.writeFileSync(file,[line({type:'session_meta',payload:{id:sid,timestamp:at,originator:'codex_exec',source:'exec',cwd:${JSON.stringify(root)}}}),line({type:'response_item',payload:{type:'message',role:'user',internal_chat_message_metadata_passthrough:{content_item_kinds:['agents_md.instructions','environments.environment_context']},content:[{type:'input_text',text:'# AGENTS.md instructions fixture'},{type:'input_text',text:'<environment_context>fixture</environment_context>'}]}}),line({type:'response_item',payload:{type:'message',role:'user',internal_chat_message_metadata_passthrough:{content_item_kinds:['user.text']},content:[{type:'input_text',text:actual}]}}),line({type:'response_item',payload:{type:'message',role:'assistant',content:[{type:'output_text',text:${JSON.stringify('```yaml\n' + yaml(planDoc({ plan: 'Change a.', criteria: [{ id: 'C1', text: 'a changes' }] })) + '\n```')}}]}})].join('\\n')+'\\n');
 console.log(JSON.stringify({type:'thread.started',thread_id:sid}));
+if (${JSON.stringify(mode === 'progress')}) {
+  console.log(JSON.stringify({type:'item.completed',item:{type:'reasoning',text:'private reasoning'}}));
+  console.log(JSON.stringify({type:'item.completed',item:{type:'command_execution',aggregated_output:'private tool output'}}));
+  console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'Inspecting invoice permissions; loading-state defects are preliminary.'}}));
+}
 if (${JSON.stringify(mode === 'held')}) await new Promise(() => setInterval(() => {}, 1000));
 if (${JSON.stringify(mode === 'runtime-error')}) console.log(JSON.stringify({type:'error'}));
 if (${JSON.stringify(mode !== 'no-completion')}) console.log(JSON.stringify({type:'turn.completed'}));
@@ -81,6 +86,17 @@ test('native role progress goes to stderr while JSON remains one terminal result
   assert.equal(result.json().status, 'completed');
   assert.equal(result.json().session, SID);
   assert.doesNotMatch(result.out, /process running|configured/);
+  assert.deepEqual(readLedger(root, id).filter((e) => e.type.startsWith('agent.launch.')).map((e) => e.type), ['agent.launch.requested', 'agent.launch.started', 'agent.launch.finished']);
+});
+
+// Named failure: native reviewer commentary was discarded, leaving only liveness while real review progressed.
+test('native role relays agent-reported progress without leaking reasoning or changing its terminal receipt', () => {
+  const { root, id, env } = prepared('progress');
+  const result = ok(wf(root, ['handoff', 'run', '--agent', 'p', '--attempt', id, '--json'], { env }));
+  assert.match(result.err, /agent report \(unverified\): Inspecting invoice permissions; loading-state defects are preliminary/);
+  assert.doesNotMatch(result.err, /private reasoning|private tool output/);
+  assert.equal(result.json().status, 'completed');
+  assert.doesNotMatch(result.out, /Inspecting invoice permissions/);
   assert.deepEqual(readLedger(root, id).filter((e) => e.type.startsWith('agent.launch.')).map((e) => e.type), ['agent.launch.requested', 'agent.launch.started', 'agent.launch.finished']);
 });
 
