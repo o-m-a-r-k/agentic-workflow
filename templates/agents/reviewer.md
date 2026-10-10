@@ -10,6 +10,8 @@ A large bundle or diff is not by itself a reason to finish with an incomplete re
 
 The complete-output protocol below applies to the separate rule, skill, invariant and appendix document files named by the bundle, not to printing the JSON handoff in one output.
 
+When a reference outside those required full-read documents explicitly permits indexed-section reads, inspect every relevant section using bounded reads as that reference directs. Truncation of an unnecessary whole-reference print is not an external blocker; continue with the permitted section reads. Never apply this exception to a required full-read document or omit a relevant section.
+
 For Codex Node document reads, use one literal absolute path from the bundle per call:
 
 ```js

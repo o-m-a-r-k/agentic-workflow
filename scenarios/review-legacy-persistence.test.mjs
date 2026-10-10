@@ -34,6 +34,17 @@ test('legacy discovery compatibility preserves fix evidence and cannot waive ope
   assert.doesNotMatch(prompt, /Missing scope metadata remains blocking\./);
 });
 
+// Named failure: a reference permitting indexed-section reads was mistaken for a required
+// full-read document, so an unnecessary oversized print ended the review as blocked.
+test('indexed reference instructions do not weaken required full-document receipts', () => {
+  const prompt = reviewer();
+  assert.match(prompt, /reference outside those required full-read documents/);
+  assert.match(prompt, /explicitly permits indexed-section reads, inspect every relevant section/);
+  assert.match(prompt, /unnecessary whole-reference print is not an external blocker/);
+  assert.match(prompt, /Never apply this exception to a required full-read document/);
+  assert.match(prompt, /partial reads, truncated output.*do not establish a read receipt/);
+});
+
 test('native reviewer persists across large inputs without narrowing its blind review', () => {
   const prompt = reviewer();
   assert.match(prompt, /large bundle or diff is not by itself a reason to finish with an incomplete review/);
