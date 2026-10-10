@@ -32,3 +32,14 @@ Future handoffs resolve model and effort from this separate execution pin: imple
 ## Extra-scope decisions
 
 Unrelated existing defects require base/current evidence and four explicit false causal checks. In-scope or uncertain findings cannot be waived by `wf scope`. After `wf scope ask`, only the direct human reply in the owning interactive session authorizes expand, ticket or ignore. The reply is spent once and the question binds the displayed finding set. Expand-all is limited to that attempt, and criteria/impact amendments still precede every added implementation. Ticket disposition stays pending until a captured raw readback exists (labelled agent-reported, not host-verified). Owner dispositions and risks remain in exports and the delivered handoff. No choice rewrites closures or bypasses required failed gates.
+
+## Owning runtime and provider selection
+
+Fresh handoffs inherit the current recorded owner's host. Adoption into Codex or Claude selects that host without
+consuming a provider-switch receipt; the admission runtime stays in the ledger as audit history. A child process's
+environment cannot replace this default. Owners without a host retain the admission fallback.
+
+An explicit switch to another provider requires host-recorded owner authority once. New handoffs record that
+selection and later handoffs and recovery inherit it for the same ownership period. Switching again needs a new
+receipt. Adoption clears the selection. Historical per-handoff switch receipts do not become persistent grants.
+Native launch still checks each handoff against the current default or its own valid provider-switch receipt.

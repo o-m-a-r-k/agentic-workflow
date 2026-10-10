@@ -6,7 +6,7 @@ import { pathToFileURL, fileURLToPath } from 'node:url';
 import { actor, addRepoWorktree, baseRef, branchName, onTarget, changedFiles, cleanupWorktrees, entry, openState, treeHashes, worktreeDir } from './attempt.mjs';
 import { channelOf, discoveredVerdicts, openDiscovered, seamVerdicts, unacknowledged, reportsForReview, reportedIssueVerdicts } from './discovered.mjs';
 import { executionSettings, rejectModelOverrides } from './models.mjs';
-import { originRuntime } from './runtime-policy.mjs';
+import { defaultRuntime } from './runtime-policy.mjs';
 import { ADAPTER_DIR, adapterFileAtCommit, agentTypeFor, attemptAdapter, declared, loadConfig, repoDir, roleClass, trustedAdapter } from './config.mjs';
 import { focusedSkips, gateBusy, gatePassedForCurrentTree, gateRunningRefusal, screenshots, withReviewLock } from './gate.mjs';
 import { append, attemptDir, evidenceRoot, keptFiles, listAttempts, loadState, openEvidence } from './ledger.mjs';
@@ -381,9 +381,9 @@ export function handoff(root, role, options) {
   if (!options.agent) throw new WfError('--agent <identity of the agent you are starting> is required');
   const agent = String(options.agent);
   const owner = state.owner;
-  const origin = originRuntime(state);
-  const runtime = options.runtime ?? origin ?? sessionIdentity()?.runtime;
-  if (!['codex', 'claude'].includes(runtime)) throw refuse('choose --runtime codex or claude: this attempt has no recorded origin runtime');
+  const preferred = defaultRuntime(state);
+  const runtime = options.runtime ?? preferred ?? sessionIdentity()?.runtime;
+  if (!['codex', 'claude'].includes(runtime)) throw refuse('choose --runtime codex or claude: this attempt has no recorded owning runtime');
   if (state.intent === 'analysis' && role !== 'planner') throw refuse('analysis attempts are read-only; only a planner handoff is allowed');
   if (role === 'implementer' && !state.criteria) throw refuse('freeze criteria first: `wf plan --file <criteria>`');
   if (role === 'tester' && !cfg.roles?.tester) throw refuse('this project has no tester role configured');
@@ -462,8 +462,8 @@ export function handoff(root, role, options) {
   const cls = work?.class ?? roleClass(cfg, role);
   const agentType = agentTypeFor(cfg, role, cls);
   const { effort, model, sourceClass, runtimeAdapterBase } = executionSettings(root, state, role, cls, runtime);
-  const runtimeAuthority = origin && runtime !== origin
-    ? ownerAuthority(root, state, `runtime ${state.id}:${runtime}`, { what: `changing the origin runtime ${origin} to ${runtime} for this handoff` })
+  const runtimeAuthority = preferred && runtime !== preferred
+    ? ownerAuthority(root, state, `runtime ${state.id}:${runtime}`, { what: `selecting runtime ${runtime} instead of ${preferred} for this ownership period` })
     : null;
 
   const selected = ['planner', 'implementer', 'reviewer'].includes(role) ? relevantLessons(root, role, state, changed, { work }) : null;
@@ -571,7 +571,7 @@ export function handoff(root, role, options) {
     const openImplementers = role === 'reviewer' ? state.implementers.filter((x) => !x.closedAt).map((x) => x.agent) : undefined;
     // The owner handed the tree while an implementer was open (I-23): recorded before the round it opens.
     if (reviewOverride) append(root, state.id, 'review.override', { ...reviewOverride, agent }, actor(options));
-    append(root, state.id, 'handoff', { ...(runtimeAuthority ? { runtimeAuthority, authority: runtimeAuthority } : {}), ...(sweeps ? { sweeps } : {}), lessons: (bundle.lessons?.apply ?? []).map((l) => l.id), lessonsFiltered: (selected?.filtered ?? []).map((l) => l.id), role, agent, runtime, session: options.session ?? null, agentType, class: cls, effort, model, sourceClass, runtimeAdapterBase, sessionModel: sessionModelNow, startPrompt: startPromptFor(file), work: work?.id ?? null, bundle: file, tree, patch: patchIds(state), ...(role === 'reviewer' ? { gate: gateNow.ok ? state.lastGate.runId : null, round: bundle.round, openImplementers } : {}) }, actor(options));
+    append(root, state.id, 'handoff', { ...(runtimeAuthority ? { runtimeAuthority, runtimeSelected: true, runtimeSelectionOwner: owner, authority: runtimeAuthority } : {}), ...(sweeps ? { sweeps } : {}), lessons: (bundle.lessons?.apply ?? []).map((l) => l.id), lessonsFiltered: (selected?.filtered ?? []).map((l) => l.id), role, agent, runtime, session: options.session ?? null, agentType, class: cls, effort, model, sourceClass, runtimeAdapterBase, sessionModel: sessionModelNow, startPrompt: startPromptFor(file), work: work?.id ?? null, bundle: file, tree, patch: patchIds(state), ...(role === 'reviewer' ? { gate: gateNow.ok ? state.lastGate.runId : null, round: bundle.round, openImplementers } : {}) }, actor(options));
     if (role === 'implementer') append(root, state.id, 'implementer.opened', { handoff: handoffId(file), agent, work: work?.id ?? null, class: cls, heads: tree }, actor(options));
   };
   // The model the owner's session runs on now: an agent whose class pins no model inherits it (`wf report` shows it).

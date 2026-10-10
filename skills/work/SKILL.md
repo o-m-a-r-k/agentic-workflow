@@ -68,10 +68,12 @@ Keep the owning chat as the user's interface: show starts, meaningful phase resu
 
 The owning chat routes in-scope repair findings to their implementer; never fix them yourself. A scope choice never authorizes leaving an in-scope defect. If another work item owns the file, record the discovered issue with `--blocked-by <work item>` and route it to that implementer. Existing owner-only `wf discovered close --deferred` decisions remain supported; Never defer one yourself. Amend the criteria when a related consumer is missing; do not ship a cosmetic workaround.
 
-### Preserve the originating runtime
+### Inherit the owning runtime
 
-Use the attempt's recorded origin runtime for every role and after recovery: Codex stays Codex, Claude stays Claude.
-Omit `--runtime` to inherit it. Adoption changes ownership, not the runtime. Never switch providers because a review
-is large, incomplete, interrupted or failed. An explicit user request for another provider is required; the engine
-records authority from `runtime <attempt>:<runtime>` before a fresh handoff with that explicit `--runtime`.
-That authorization applies only to the selected handoff. Old mismatched handoffs without authority cannot launch.
+Use the current owning thread's runtime for every role and after recovery: a Codex owner uses Codex and a Claude
+owner uses Claude. Omit `--runtime` to inherit it. Adoption defaults to the new owning host without asking for a
+runtime receipt; admission runtime remains audit history. Never switch providers because a review is large,
+incomplete, interrupted or failed. An explicit user request for another provider is required; the engine records
+authority from `runtime <attempt>:<runtime>` once before a fresh explicit `--runtime` handoff, then inherits that
+selection for later handoffs and recovery under the same owner. Another provider change needs a new approval.
+Adoption resets the selection to the new owning host. Old mismatched handoffs without authority cannot launch.

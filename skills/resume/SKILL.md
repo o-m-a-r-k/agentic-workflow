@@ -26,10 +26,12 @@ After implementation is committed, the owning chat closes every implementer thro
 
 Keep the owning chat as the user's interface: show starts, meaningful phase results, failures and required decisions; retain host-mandated commentary rules. Process completion is separate from workflow validity. The terminal result contains both plus the next decision. Route repairs through the existing implementer; the runner never retries, amends criteria, closes implementers, lifts holds, adopts, changes models, overrides checks or delivers. A lost handle is not proof of a dead reviewer. Diagnose or recover it before manually creating a fresh handoff. Claude native launch uses the runtime's normal permission checks and uses the frozen role tool set and permits plain `wf` commands; commands needing additional permissions remain refused. No background daemon, wake-up guarantee or silent-chat claim is provided.
 
-### Preserve the originating runtime
+### Inherit the owning runtime
 
-Use the attempt's recorded origin runtime for every role and after recovery: Codex stays Codex, Claude stays Claude.
-Omit `--runtime` to inherit it. Adoption changes ownership, not the runtime. Never switch providers because a review
-is large, incomplete, interrupted or failed. An explicit user request for another provider is required; the engine
-records authority from `runtime <attempt>:<runtime>` before a fresh handoff with that explicit `--runtime`.
-That authorization applies only to the selected handoff. Old mismatched handoffs without authority cannot launch.
+Use the current owning thread's runtime for every role and after recovery: a Codex owner uses Codex and a Claude
+owner uses Claude. Omit `--runtime` to inherit it. Adoption defaults to the new owning host without asking for a
+runtime receipt; admission runtime remains audit history. Never switch providers because a review is large,
+incomplete, interrupted or failed. An explicit user request for another provider is required; the engine records
+authority from `runtime <attempt>:<runtime>` once before a fresh explicit `--runtime` handoff, then inherits that
+selection for later handoffs and recovery under the same owner. Another provider change needs a new approval.
+Adoption resets the selection to the new owning host. Old mismatched handoffs without authority cannot launch.

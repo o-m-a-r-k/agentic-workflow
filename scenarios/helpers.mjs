@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { findRoot } from '../engine/config.mjs';
 import { verifyAttempt } from '../engine/evidence.mjs';
 import { assertSchema, loadState } from '../engine/ledger.mjs';
+import { defaultRuntime } from '../engine/runtime-policy.mjs';
 import { ENGINE_VERSION } from '../engine/util.mjs';
 
 export const WF = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'wf');
@@ -121,7 +122,7 @@ function ownerSpeaksFor(cwd, args, opts) {
   if (!s) return;
   const owner = cmd === 'adopt' ? optionOf(args, '--owner') : s.owner;
   for (const l of lines(s.id)) {
-    if (l.startsWith('runtime ') && (!s.originRuntime || optionOf(args, '--runtime') === s.originRuntime)) continue;
+    if (l.startsWith('runtime ') && (!defaultRuntime(s) || optionOf(args, '--runtime') === defaultRuntime(s))) continue;
     ownerSays(homeOf(cwd, opts.env), owner, l);
   }
 }

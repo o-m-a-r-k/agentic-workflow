@@ -112,6 +112,7 @@ export function reduce(entries) {
     intent: null,
     owner: null,
     originRuntime: null,
+    runtimePreference: null,
     owners: [],
     phase: 'admitted',
     repos: {},
@@ -192,6 +193,7 @@ export function reduce(entries) {
         });
         break;
       case 'owner.adopted':
+        s.runtimePreference = null;
         s.owner = e.actor;
         if (!s.owners.includes(e.actor)) s.owners.push(e.actor);
         break;
@@ -230,6 +232,7 @@ export function reduce(entries) {
         (s.modelRefreshes ??= []).push({ ...d, at: e.at, by: e.actor });
         break;
       case 'handoff':
+        if (d.runtimeSelected === true && typeof d.runtimeSelectionOwner === 'string' && d.runtimeAuthority) s.runtimePreference = { runtime: d.runtime, owner: d.runtimeSelectionOwner, authority: d.runtimeAuthority };
         s.handoffs.push({ ...d, at: e.at, by: e.actor });
         if (!s.roles[d.role].includes(d.agent)) s.roles[d.role].push(d.agent);
         if (d.role === 'implementer' && ['admitted', 'planned'].includes(s.phase)) s.phase = 'implementing';
