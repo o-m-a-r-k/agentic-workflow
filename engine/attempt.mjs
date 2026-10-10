@@ -6,6 +6,7 @@ import { append, assertSchema, createAttempt, listAttempts, loadState, openEvide
 import { projectEnv } from './env.mjs';
 import { emitTrackerEvent } from './tracker.mjs';
 import { ownerAuthority } from './owner.mjs';
+import { runtimeOfOwner } from './runtime-policy.mjs';
 import { WfError, assertEngine, assertPlainGit, assertSafeId, git, hashFile, refuse, run, sessionIdentity, sha256 } from './util.mjs';
 
 export const worktreesRoot = (root) => path.join(root, '.wf-worktrees');
@@ -204,7 +205,8 @@ export function entry(root, options) {
     fs.copyFileSync(src, dest);
     issue = { file: dest, sha256: hashFile(dest) };
   }
-  createAttempt(root, id, { id, item, lane, intent, repos, adapterBase, adapter, issue, reopenedFrom: options.reopenedFrom ?? null, deferHeavy: options.deferHeavy === true || options.deferHeavy === 'true' }, owner);
+  const originRuntime = sessionIdentity()?.runtime ?? runtimeOfOwner(owner);
+  createAttempt(root, id, { id, item, lane, intent, repos, adapterBase, adapter, issue, originRuntime, reopenedFrom: options.reopenedFrom ?? null, deferHeavy: options.deferHeavy === true || options.deferHeavy === 'true' }, owner);
   if (lane === 'standard' && intent === 'implementation') emitTrackerEvent(root, cfg, id, 'admitted');
   return loadState(root, id);
 }

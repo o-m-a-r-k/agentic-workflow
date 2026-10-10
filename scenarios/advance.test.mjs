@@ -7,11 +7,11 @@ import { singleRepoProject, ok, wf, state, criteriaFile, commitIn, goodClosure, 
 
 function prepared(runtime, mode = 'clean', { gate = 'true', planned = true } = {}) {
   const p = singleRepoProject('runner-scenario', { classes: { review: { [runtime]: { model: 'future-model', effort: 'high' } } }, gate: { steps: [{ id: 'unit', repo: 'app', run: gate }] } });
-  const id = ok(wf(p.root, ['entry', '--item', 'ENG-90', '--json'])).json().id;
-  ok(wf(p.root, ['handoff', 'planner', '--agent', 'p', '--attempt', id]));
+  const id = ok(wf(p.root, ['entry', '--item', 'ENG-90', '--owner', `${runtime}:runner-owner`, '--json'])).json().id;
+  ok(wf(p.root, ['handoff', 'planner', '--agent', 'p', '--attempt', id, '--runtime', runtime]));
   if (planned) {
   ok(wf(p.root, ['plan', '--file', criteriaFile(p.base), '--attempt', id]));
-  ok(wf(p.root, ['handoff', 'implementer', '--agent', 'i', '--attempt', id]));
+  ok(wf(p.root, ['handoff', 'implementer', '--agent', 'i', '--attempt', id, '--runtime', runtime]));
   commitIn(state(p.root, id).repos.app.worktree, { 'src/a.txt': 'changed\n' });
   ok(wf(p.root, ['handoff', 'close', '--agent', 'i', '--attempt', id]));
   }
@@ -53,13 +53,13 @@ if(mode==='held')await new Promise(()=>setInterval(()=>{},1000));
 console.log(JSON.stringify(runtime==='claude'?{type:'result',subtype:'success',is_error:false,session_id:sid}:{type:'turn.completed'}));
 `;
   write(bin, runtime, script); fs.chmodSync(path.join(bin, runtime), 0o755);
-  return { ...p, id, env: { CODEX_THREAD_ID: state(p.root,id).owner.slice(6), WF_HOME: host, PATH: bin + path.delimiter + process.env.PATH } };
+  return { ...p, id, env: { [runtime === 'codex' ? 'CODEX_THREAD_ID' : 'CLAUDE_CODE_SESSION_ID']: state(p.root,id).owner.split(':').slice(1).join(':'), WF_HOME: host, PATH: bin + path.delimiter + process.env.PATH } };
 }
 
 for (const runtime of ['codex', 'claude']) {
   test(`${runtime}: foreground runner performs exactly code review, normal gate, evidence review and acceptance`, () => {
     const p = prepared(runtime);
-    const r = ok(wf(p.root, ['advance', '--until-owner', '--runtime', runtime, '--attempt', p.id, '--json'], { env: p.env }));
+    const r = ok(wf(p.root, ['advance', '--until-owner', '--attempt', p.id, '--json'], { env: p.env }));
     const output = r.json();
     assert.deepEqual(output.operations.map((o) => o.kind), ['code-review', 'gate', 'evidence-review', 'accept'], r.out + r.err);
     assert.equal(output.decision.kind, 'delivery');
@@ -100,7 +100,7 @@ for (const runtime of ['codex', 'claude']) {
     const p = prepared(runtime, 'held');
     const env = { ...process.env, ...p.env, WF_EVIDENCE_FLAGS: '0', WF_CONFIG_HOME: path.join(p.base, '.wfhome') };
     for (const key of ['CODEX_THREAD_ID','CLAUDE_CODE_SESSION_ID','CLAUDECODE','AI_AGENT','GROK_SESSION_ID']) delete env[key];
-    env.CODEX_THREAD_ID = state(p.root,p.id).owner.slice(6);
+    env[runtime === 'codex' ? 'CODEX_THREAD_ID' : 'CLAUDE_CODE_SESSION_ID'] = state(p.root,p.id).owner.split(':').slice(1).join(':');
     const child = spawn(process.execPath, [WF, 'advance', '--until-owner', '--runtime', runtime, '--attempt', p.id, '--json'], { cwd: p.root, env });
     let stderr = '', stdout = '';
     child.stderr.on('data', (b) => { stderr += b; }); child.stdout.on('data', (b) => { stdout += b; });
@@ -152,7 +152,7 @@ for (const runtime of ['codex', 'claude']) {
     assert.equal(r.json().operations.length, 0);
     assert.match(r.json().decision.blockers[0], /existing handoff/);
     assert.equal(state(p.root, p.id).handoffs.filter((h) => h.role === 'reviewer').length, 1);
-    const noOwner = wf(p.root, ['advance', '--once', '--runtime', runtime, '--attempt', p.id], { env: { ...p.env, CODEX_THREAD_ID: '' } });
+    const noOwner = wf(p.root, ['advance', '--once', '--runtime', runtime, '--attempt', p.id], { env: { ...p.env, CODEX_THREAD_ID: '', CLAUDE_CODE_SESSION_ID: '' } });
     assert.equal(noOwner.code, 75); assert.match(noOwner.err, /owning chat/);
   });
 }
@@ -226,3 +226,13 @@ for(const runtime of ['codex','claude']) {
     ok(wf(p.root,['verify','--attempt',p.id]));
   });
 }
+
+// Named failure: an explicit runtime flag was treated as permission to switch the provider.
+test('foreground runner refuses an unapproved provider switch before recording a reviewer', () => {
+  const p = prepared('codex');
+  const before = state(p.root, p.id).handoffs.length;
+  const r = wf(p.root, ['advance', '--once', '--runtime', 'claude', '--attempt', p.id], { env: p.env, ownerSilent: true });
+  assert.equal(r.code, 75);
+  assert.equal(state(p.root, p.id).handoffs.length, before);
+  assert.equal(state(p.root, p.id).originRuntime, 'codex');
+});

@@ -20,9 +20,10 @@ const NO_TTY = /not done: [\s\S]*needs the owner's authority; the attempt's owne
 function implemented(name, owner, config = {}, files = {}) {
   const p = singleRepoProject(name, { gate: { steps }, ...config }, files);
   const e = ok(wf(p.root, ['entry', '--item', 'OA-1', '--owner', owner, '--json'])).json();
-  ok(wf(p.root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id]));
+  const runtime = /^codex:/.test(owner) ? 'codex' : 'claude';
+  ok(wf(p.root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id, '--runtime', runtime]));
   ok(wf(p.root, ['plan', '--file', criteriaFile(p.base), '--attempt', e.id]));
-  ok(wf(p.root, ['handoff', 'implementer', '--agent', 'impl-1', '--attempt', e.id]));
+  ok(wf(p.root, ['handoff', 'implementer', '--agent', 'impl-1', '--attempt', e.id, '--runtime', runtime]));
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'b\n' });
   return { ...p, e, id: e.id };
 }
@@ -220,7 +221,7 @@ test('Codex owner-session command closes an implementer through direct and funct
     assert.equal(authority.provenance, 'owner-session command');
     assert.equal(authority.command, exact);
     assert.match(authority.spent, /cmd:call:call_close_1$/);
-    ok(wf(a.root, ['handoff', 'implementer', '--agent', 'impl-1', '--attempt', a.id], silent));
+    ok(wf(a.root, ['handoff', 'implementer', '--agent', 'impl-1', '--attempt', a.id, '--runtime', 'codex'], silent));
     assert.match(close().err, /already counted for a decision/);
   }
 });

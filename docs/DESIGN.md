@@ -281,6 +281,13 @@ review:
 
 ## Agents per project
 
+**Runtime preservation:** admission records the originating session's runtime. Role handoffs and `wf advance`
+default to that runtime, including after adoption or recovery. Older attempts derive it from the admission owner,
+never from an existing handoff. A terminal-owned attempt without a recorded runtime must select `--runtime`.
+An explicit different provider requires a fresh owner message `runtime <attempt>:<runtime>` before the handoff;
+the authority is recorded with that handoff and checked before native launch. It authorizes that handoff only,
+so subsequent defaults still preserve the origin. A failed or incomplete review never selects another provider.
+
 `wf sync` generates each project's agent files for every runtime from the plugin template + the adapter's `roles` entry + appendix. Generated files carry a header and are never hand-edited.
 
 - **Planner** returns `{ plan, criteria }` as the last ```` ```yaml ```` block of its reply; `wf plan --from-agent <id>` reads it from the subagent transcript (meta.json name, agent type, written after the handoff) and keeps the extracted block in the evidence with its sha256 and the planner's model. The file schema is closed at the top level (`plan`, `criteria`, `work`, and the plan sections, which may sit at the top level or under `plan:`; `plan:` may be text), because keys the engine did not read were silently dropped; the sections themselves are open; `plan` holds `summary`, `contract` (what repos share: routes, DTO fields, error codes, permission subjects), `anchors` (file:line of each function to change), `tests` (`changed` specs, targeted `run` selectors), `doNotRun`, `externalServices` (default test runs need no provider keys or internet; provider/sandbox tests are opt-in) and `agentSplit`. The engine stores it with the frozen criteria and passes it to every later role; it does not police its size.

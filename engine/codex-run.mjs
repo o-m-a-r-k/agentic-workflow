@@ -9,6 +9,7 @@ import { randomUUID } from 'node:crypto';
 import { canonical as canonicalPath } from './paths.mjs';
 import { executionSettings, rejectModelOverrides } from './models.mjs';
 import { actor, openState, treeHashes } from './attempt.mjs';
+import { assertRuntimeLaunch } from './runtime-policy.mjs';
 import { adapterFileAtCommit, trustedAdapter } from './config.mjs';
 import { append, loadState } from './ledger.mjs';
 import { readRegular, seal } from './evidence.mjs';
@@ -22,6 +23,7 @@ export async function runRole(root, options) {
   const state = openState(root, options);
   const h = state.handoffs.filter((h) => h.agent === options.agent).at(-1);
   if (!h || !['codex', 'claude'].includes(h.runtime)) throw refuse('name an existing Claude or Codex handoff with `--agent <id>`');
+  assertRuntimeLaunch(state, h);
   const runtime = h.runtime, label = runtime === 'codex' ? 'Codex' : 'Claude';
   if (state.activeHold) throw refuse(`this attempt is on hold: ${state.activeHold.reason}`);
   if (h.role === 'reviewer' && state.handoffs.filter((h) => h.role === 'reviewer').at(-1)?.bundle !== h.bundle) throw refuse('only the current reviewer handoff can be launched');

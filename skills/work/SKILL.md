@@ -67,3 +67,11 @@ After implementation is committed, the owning chat closes every implementer thro
 Keep the owning chat as the user's interface: show starts, meaningful phase results, failures and required decisions; retain host-mandated commentary rules. Process completion is separate from workflow validity. The terminal result contains both plus the next decision. Route repairs through the existing implementer; the runner never retries, amends criteria, closes implementers, lifts holds, adopts, changes models, overrides checks or delivers. A lost handle is not proof of a dead reviewer. Diagnose or recover it before manually creating a fresh handoff. Claude native launch uses the runtime's normal permission checks and uses the frozen role tool set and permits plain `wf` commands; commands needing additional permissions remain refused. No background daemon, wake-up guarantee or silent-chat claim is provided.
 
 The owning chat routes in-scope repair findings to their implementer; never fix them yourself. A scope choice never authorizes leaving an in-scope defect. If another work item owns the file, record the discovered issue with `--blocked-by <work item>` and route it to that implementer. Existing owner-only `wf discovered close --deferred` decisions remain supported; Never defer one yourself. Amend the criteria when a related consumer is missing; do not ship a cosmetic workaround.
+
+### Preserve the originating runtime
+
+Use the attempt's recorded origin runtime for every role and after recovery: Codex stays Codex, Claude stays Claude.
+Omit `--runtime` to inherit it. Adoption changes ownership, not the runtime. Never switch providers because a review
+is large, incomplete, interrupted or failed. An explicit user request for another provider is required; the engine
+records authority from `runtime <attempt>:<runtime>` before a fresh handoff with that explicit `--runtime`.
+That authorization applies only to the selected handoff. Old mismatched handoffs without authority cannot launch.

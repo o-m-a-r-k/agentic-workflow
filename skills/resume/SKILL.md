@@ -25,3 +25,11 @@ For an ongoing role launch, retain and wait on its original execution-session ha
 After implementation is committed, the owning chat closes every implementer through the existing owner-authorized command. It may then run `wf advance --once --runtime claude|codex --attempt <id>` for one permitted operation, or `wf advance --until-owner --runtime claude|codex --attempt <id>` for up to four operations (at most eight with `--max-steps`). This is opt-in and keeps the original host execution handle. It launches fresh native reviewers with frozen role/model/effort settings, runs the normal gate only after valid code review, obtains fresh evidence review, and accepts only through the existing checks. It stops for findings, failures, missing closures, holds, scope/authority needs, or uncertain runtime liveness. Do not create a second runner or reviewer while that handle is pending.
 
 Keep the owning chat as the user's interface: show starts, meaningful phase results, failures and required decisions; retain host-mandated commentary rules. Process completion is separate from workflow validity. The terminal result contains both plus the next decision. Route repairs through the existing implementer; the runner never retries, amends criteria, closes implementers, lifts holds, adopts, changes models, overrides checks or delivers. A lost handle is not proof of a dead reviewer. Diagnose or recover it before manually creating a fresh handoff. Claude native launch uses the runtime's normal permission checks and uses the frozen role tool set and permits plain `wf` commands; commands needing additional permissions remain refused. No background daemon, wake-up guarantee or silent-chat claim is provided.
+
+### Preserve the originating runtime
+
+Use the attempt's recorded origin runtime for every role and after recovery: Codex stays Codex, Claude stays Claude.
+Omit `--runtime` to inherit it. Adoption changes ownership, not the runtime. Never switch providers because a review
+is large, incomplete, interrupted or failed. An explicit user request for another provider is required; the engine
+records authority from `runtime <attempt>:<runtime>` before a fresh handoff with that explicit `--runtime`.
+That authorization applies only to the selected handoff. Old mismatched handoffs without authority cannot launch.

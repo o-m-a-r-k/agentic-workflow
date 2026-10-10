@@ -68,8 +68,13 @@ const baseEnv = () => {
 export const ownerSession = (name) => (/^(claude|codex):/.test(String(name)) ? String(name) : /^plain:/.test(String(name)) ? String(name).slice(6) : `codex:owner-${Buffer.from(String(name)).toString('hex').slice(0, 40)}`);
 const homeOf = (cwd, env) => env.WF_HOME ?? path.join(cwd, '..', '.home');
 
-export function wf(cwd, args, { env = {}, input, home, implementersOpen = false, ownerSilent = false } = {}) {
+export function wf(cwd, args, { env = {}, input, home, implementersOpen = false, ownerSilent = false, preserveRuntime = false } = {}) {
   args = [...args];
+  // Historical role fixtures model Claude unless a runtime was explicit. State that choice, and let the synthetic
+  // owner authorize it below; production defaults are covered with preserveRuntime by the runtime regressions.
+  if (!preserveRuntime && args[0] === 'handoff' && ['planner', 'implementer', 'reviewer', 'tester'].includes(args[1]) && !args.includes('--runtime')) {
+    args.push('--runtime', env.CLAUDE_CODE_SESSION_ID ? 'claude' : env.CODEX_THREAD_ID ? 'codex' : 'claude');
+  }
   const at = args.indexOf('--owner');
   if (at >= 0 && typeof args[at + 1] === 'string') args[at + 1] = ownerSession(args[at + 1]);
   else if (args[0] === 'entry' && !args.includes('--help')) args.push('--owner', ownerSession('owner'));
@@ -93,6 +98,7 @@ function ownerSpeaksFor(cwd, args, opts) {
   const [cmd, sub] = args;
   const lines = (id) => {
     const out = [];
+    if (cmd === 'handoff' && ['planner', 'implementer', 'reviewer', 'tester'].includes(sub) && optionOf(args, '--runtime')) out.push(`runtime ${id}:${optionOf(args, '--runtime')}`);
     if (cmd === 'gate' && args.includes('--reason')) out.push(`override ${id}:gate`);
     if (cmd === 'handoff' && sub === 'reviewer' && args.includes('--reason')) out.push(`override ${id}:review`);
     if (cmd === 'handoff' && sub === 'close' && optionOf(args, '--agent')) out.push(`close ${id}:${optionOf(args, '--agent')}`);
@@ -114,7 +120,10 @@ function ownerSpeaksFor(cwd, args, opts) {
   const s = attemptOf(cwd, last ? ['--attempt', last] : args, opts);
   if (!s) return;
   const owner = cmd === 'adopt' ? optionOf(args, '--owner') : s.owner;
-  for (const l of lines(s.id)) ownerSays(homeOf(cwd, opts.env), owner, l);
+  for (const l of lines(s.id)) {
+    if (l.startsWith('runtime ') && (!s.originRuntime || optionOf(args, '--runtime') === s.originRuntime)) continue;
+    ownerSays(homeOf(cwd, opts.env), owner, l);
+  }
 }
 
 // For a `wf` process a scenario spawns itself: the owner says what the command needs first (see `wf` above). Its env

@@ -5,6 +5,7 @@ import path from 'node:path';
 import { canonical as canonicalPath } from './paths.mjs';
 import { randomUUID } from 'node:crypto';
 import { openState } from './attempt.mjs';
+import { originRuntime } from './runtime-policy.mjs';
 import { blockingFindings } from './scope-decisions.mjs';
 import { nextDecision, handoff, acceptReview, gateOrderCheck, outstandingReviewFindings, outsideWarning } from './lifecycle.mjs';
 import { runGate } from './gate.mjs';
@@ -59,7 +60,7 @@ export async function advance(root, options) {
         let h;
         if (decision.handoff) h = state.handoffs.find((h) => h.bundle === decision.handoff);
         else {
-          const runtime = options.runtime ?? identity?.runtime;
+          const runtime = options.runtime ?? originRuntime(state) ?? identity?.runtime;
           if (!runtime) return result('owner-required', { ...decision, status: 'owner', blockers: ['choose --runtime claude or codex for the fresh reviewer'] });
           const warning = outsideWarning(root, state);
           if (warning) say(warning);
