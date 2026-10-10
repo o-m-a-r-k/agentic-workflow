@@ -65,7 +65,7 @@ test('launch authority must name this attempt and the selected provider', () => 
   assert.doesNotThrow(() => assertRuntimeLaunch(s, h));
 });
 
-// Named failure: an adopted host repeatedly asks for runtime receipts against the historical admission provider.
+// Named failure I-74: an adopted host repeatedly asks for runtime receipts against the historical admission provider.
 for (const runtime of ['codex', 'claude']) test(`adoption inherits current ${runtime} owner for repeated handoffs and recovery`, () => {
   const other = runtime === 'codex' ? 'claude' : 'codex';
   const { root } = singleRepoProject(`adopt-runtime-${runtime}`, {

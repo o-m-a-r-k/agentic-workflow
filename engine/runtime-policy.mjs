@@ -9,7 +9,7 @@ const authorized = (state, runtime, authority) => authority?.phrase === `runtime
   && ((authority.provenance === 'host-recorded' && authority.spent)
     || authority.provenance === 'interactive-terminal (unverified)');
 
-// Named failure: adoption kept the old provider and required the same runtime approval for every repair.
+// Named failure I-74: adoption kept the old provider and required the same runtime approval for every repair.
 // The recorded owning host supplies the default, never a child process's environment. A deliberate provider
 // selection persists for this ownership period; adoption resets it. Old per-handoff receipts remain per-handoff.
 export function defaultRuntime(state) {
