@@ -8,6 +8,8 @@ Release notes, newest first, then every fix that came from a failure in the work
 - Only the submitted answer grants authority. Question wording and defaults, unmatched or malformed envelopes, headless or sub-agent sessions, duplicate replies and out-of-order records remain refused.
 - The original host message retains its audit identity and one-use spend protection, including envelopes containing several answers. Ordinary typed messages and Claude authority behavior are unchanged.
 
+- Gate-recovery regression checks track the gate's recorded process groups while preserving an unrelated sleeper. Parallel scenarios can no longer be mistaken for leftover gate processes.
+
 Regression scenarios cover both question tools, rejected inputs and a real held attempt that accepts a bound release once and refuses decline or replay.
 
 ## 0.5.12 - Owner decisions for unrelated findings

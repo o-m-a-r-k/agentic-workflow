@@ -114,19 +114,40 @@ test('steps run in parallel up to the limit and leases keep heavy steps apart', 
   assert.ok(maxConcurrent <= 2, `at most 2 at once, saw ${maxConcurrent}`);
 });
 
-test('a runner killed mid-gate is recovered: finished steps carried, the rest rerun', async () => {
+// Named failure: a machine-wide sleep probe blamed an unrelated parallel scenario for a surviving gate child.
+// Inspect the recorded gate process groups, and keep an unrelated sleeper alive as the regression witness.
+test('a runner killed mid-gate is recovered: finished steps carried, the rest rerun', async (t) => {
   const steps = [
     { id: 'fast', repo: 'app', run: 'cat src/a.txt >/dev/null', inputs: ['src/**'] },
-    { id: 'slow', repo: 'app', run: 'if [ -f "$WF_ROOT/../slow.marker" ]; then sleep 30; fi', inputs: ['src/**'] },
+    { id: 'slow', repo: 'app', run: 'if [ -f "$WF_ROOT/../slow.marker" ]; then sleep 30 & fixture_sleep_pid=$!; echo "$fixture_sleep_pid" > "$WF_ROOT/../slow.pid"; wait "$fixture_sleep_pid"; fi', inputs: ['src/**'] },
   ];
   const { base, root } = singleRepoProject('harvest', { gate: { steps } });
+  let gateChild = null, gateEnded = null, attemptId = null;
+  const unrelated = spawn('sleep', ['30'], { stdio: 'ignore' });
+  const unrelatedEnded = new Promise((resolve) => unrelated.once('close', resolve));
+  t.after(async () => {
+    if (gateChild) {
+      if (gateChild.exitCode === null && gateChild.signalCode === null) gateChild.kill('SIGTERM');
+      await gateEnded;
+    }
+    if (unrelated.exitCode === null && unrelated.signalCode === null) unrelated.kill('SIGTERM');
+    await unrelatedEnded;
+    if (attemptId) {
+      ok(wf(root, ['abandon', '--attempt', attemptId, '--reason', 'scenario cleanup']));
+      ok(wf(root, ['evidence', 'release', '--attempt', attemptId, '--reason', 'scenario cleanup']));
+    }
+    fs.rmSync(base, { recursive: true, force: true });
+  });
   fs.writeFileSync(path.join(root, '..', 'slow.marker'), '');
   const e = admitted(root, base, 'ENG-25');
+  attemptId = e.id;
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'h\n' });
-  const env = { ...process.env, WF_CONFIG_HOME: path.join(root, '..', '.wfhome'), ...spawnHome(root) };
+  const env = { ...process.env, WF_EVIDENCE_FLAGS: '0', WF_CONFIG_HOME: path.join(root, '..', '.wfhome'), ...spawnHome(root) };
   for (const k of ['CLAUDE_CODE_SESSION_ID', 'CLAUDECODE', 'CODEX_THREAD_ID', 'CODEX_SANDBOX', 'AI_AGENT', 'GROK_SESSION_ID']) delete env[k]; // no agent runtime: the scenario is the owner at a terminal (engine/owner.mjs)
   ownerSpeaks(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]);
   const child = spawn(process.execPath, [WF, 'gate', ...OUT_OF_ORDER, '--attempt', e.id], { cwd: root, env, stdio: 'ignore' });
+  gateChild = child;
+  gateEnded = new Promise((resolve) => child.once('close', resolve));
   const lock = path.join(root, '.wf-evidence', 'attempts', e.id, 'gate', 'gate.lock');
   const deadline = Date.now() + 30000;
   let progress = null;
@@ -139,24 +160,35 @@ test('a runner killed mid-gate is recovered: finished steps carried, the rest re
     } catch {}
     if (!runId) continue;
     const pf = path.join(root, '.wf-evidence', 'attempts', e.id, 'gate', runId, 'progress.json');
-    if (fs.existsSync(pf) && JSON.parse(fs.readFileSync(pf, 'utf8')).steps.some((s) => s.id === 'fast')) {
+    if (fs.existsSync(pf) && JSON.parse(fs.readFileSync(pf, 'utf8')).steps.some((s) => s.id === 'fast') && fs.existsSync(path.join(base, 'slow.pid'))) {
       progress = pf;
       break;
     }
   }
   assert.ok(progress, 'fast step finished before the kill');
   assert.equal(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]).code, 75, 'a live runner is never duplicated');
+  const groups = new Set(JSON.parse(fs.readFileSync(lock, 'utf8')).children);
+  const slowPid = Number(fs.readFileSync(path.join(base, 'slow.pid'), 'utf8'));
+  assert.ok(Number.isSafeInteger(slowPid) && slowPid > 0);
+  const slowGroup = Number(sh(root, `ps -o pgid= -p ${slowPid}`).trim());
+  assert.ok(groups.has(slowGroup), 'the live sleeper belongs to a recorded gate process group');
   child.kill('SIGKILL');
-  await new Promise((r) => child.on('exit', r));
+  await gateEnded;
   fs.rmSync(path.join(root, '..', 'slow.marker'));
   const g = wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]);
   assert.match(g.out, /recovered 1 finished step/);
-  let alive = 'alive';
-  for (let i = 0; i < 100 && alive === 'alive'; i++) {
+  let running = true;
+  for (let i = 0; i < 100 && running; i++) {
     await new Promise((r) => setTimeout(r, 100));
-    alive = sh(root, "pgrep -f 'slee[p] 30' >/dev/null && echo alive || echo gone");
+    running = sh(root, 'ps -axo pgid=,stat=').trim().split('\n').some((line) => {
+      const [group, status] = line.trim().split(/\s+/);
+      // A zombie is stopped; it cannot execute while waiting for the platform's reaper.
+      return groups.has(Number(group)) && status && !status.startsWith('Z');
+    });
   }
-  assert.equal(alive, 'gone', 'the dead runner\'s step process was stopped');
+  assert.equal(running, false, 'the dead runner\'s entire step process group was stopped');
+  assert.equal(unrelated.exitCode, null, 'an unrelated sleeper remains running');
+  assert.equal(unrelated.signalCode, null, 'recovery never signals an unrelated process');
   const s = state(root, e.id);
   assert.equal(s.gates.at(-2).status, 'recovered');
   assert.equal(byId(s.lastGate.steps).fast.status, 'reused');
