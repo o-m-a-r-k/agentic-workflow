@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { changedInventory, divideReview, impactCatalog, isCurrentReviewer, validateDivision } from '../engine/review-groups.mjs';
 import { transactionSeams, withEvidenceTransaction } from '../engine/evidence.mjs';
-import { closureFile, commitIn, goodClosure, impactCheckedFrom, ok, singleRepoProject, state, wf, WF, write } from './helpers.mjs';
+import { closureFile, commitIn, criteriaFile, goodClosure, impactCheckedFrom, ok, sh, singleRepoProject, state, wf, WF, write } from './helpers.mjs';
 
 function flowInput() {
   const files = { 'shared.ts': 'alpha beta\n', 'unmapped.ts': 'common\n' };
@@ -77,6 +77,34 @@ test('impact compaction retains every entry ID with its current value while pres
   const original = JSON.stringify(map), catalog = impactCatalog(map);
   assert.equal(catalog.flows.length, 2); assert.equal(catalog.flows[0].flow, 'new');
   assert.equal(catalog.changes[0].element, 'new'); assert.equal(JSON.stringify(map), original);
+});
+
+test('automatic single-review fallback never runs an unnecessary Git cost scan', () => {
+  const p = singleRepoProject('review-cost', { gate: { steps: [] } });
+  const e = ok(wf(p.root, ['entry', '--lane', 'quick', '--json'])).json();
+  ok(wf(p.root, ['plan', '--file', criteriaFile(p.base), '--attempt', e.id]));
+  ok(wf(p.root, ['handoff', 'implementer', '--agent', 'impl', '--attempt', e.id]));
+  commitIn(e.repos.app.worktree, { 'src/a.txt': 'changed\n' });
+  const realGit = sh(p.root, 'command -v git'), bin = path.join(p.base, 'bin');
+  write(bin, 'git', `#!/usr/bin/env node
+import { spawnSync } from 'node:child_process';
+const args=process.argv.slice(2);
+if(args.includes('--numstat')) { console.error('single-review fallback performed an unnecessary cost scan'); process.exit(90); }
+const result=spawnSync(${JSON.stringify(realGit)},args,{stdio:'inherit'});process.exit(result.status??1);
+`);
+  fs.chmodSync(path.join(bin, 'git'), 0o755);
+  const h = ok(wf(p.root, ['handoff', 'reviewer', '--agent', 'single', '--attempt', e.id, '--json'], { env: { PATH: bin + path.delimiter + process.env.PATH } })).json();
+  assert.equal(h.division.mode, 'single');
+  assert.equal(h.members, undefined);
+});
+
+test('parallel division estimates cost lazily once and preserves expensive-flow fallback', () => {
+  const { bundle, results } = flowInput();
+  let reads = 0;
+  const weights = Object.fromEntries(changedInventory(bundle).map(file => [file, file === 'app:alpha/0.ts' ? 10000 : 1]));
+  const plan = divideReview(bundle, results, { weights: () => { reads++; return weights; } });
+  assert.equal(reads, 1);
+  assert.equal(plan.mode, 'single');
 });
 
 function ready({ reviewOptions = [], handoffReviewer = true, runtime = null } = {}) {

@@ -574,7 +574,7 @@ export function handoff(root, role, options) {
   let division = null, groupMembers = null;
   if (role === 'reviewer' && divisionOptions.enabled) {
     const proposed = options.division === undefined ? null : JSON.parse(readOnce(options.division));
-    division = divideReview(bundle, reviewQueries ?? {}, { reviewers: divisionOptions.reviewers, division: proposed, weights: changedWeights(state, bundle) });
+    division = divideReview(bundle, reviewQueries ?? {}, { reviewers: divisionOptions.reviewers, division: proposed, weights: () => changedWeights(state, bundle) });
     if (division.mode === 'parallel') {
       const id = `review-${n}`, snapshot = reviewSnapshot(state), members = [...division.slices.map(s => `${agent}-${s.id}`), agent];
       const planFile = path.join(attemptDir(root, state.id), 'review', `division-${n}.json`);

@@ -29,6 +29,10 @@ The scenarios run the real `wf` CLI against temporary git repositories with bare
 macOS, on every push and pull request and weekly. A red CI is fixed first, from its root cause; a Linux-only failure
 is real (see [AGENTS.md](AGENTS.md)).
 
+GitHub's macOS job runs one scenario file at a time so competing Git-heavy fixture setup cannot consume the strict
+stop-process deadline. Scenarios still run their own concurrent gate and review processes. Linux uses Node's default
+file concurrency, and the local verifier retains its three platform/user legs.
+
 Expected times on a 16-core laptop that is mostly idle: about 50 seconds for the host leg alone (it was 80), about two
 minutes for `npm run verify` (it was over three; each leg prints its own time and how many test files it ran at a time), from a few
 seconds to about 40 seconds for one file. Another heavy job on the machine (a gate, a model, a build) stretches all of
