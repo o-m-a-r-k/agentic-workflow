@@ -3,6 +3,7 @@
 // actual full UTF-8 bytes in successful host output. Never evaluate transcript JavaScript or trust claimed reads.
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { literalArguments } from './codex-command.mjs';
 
 function literalCalls(source) {
@@ -93,8 +94,40 @@ function commandRead(input, value) {
   return fullContentReached(file, value.output) ? [file] : [];
 }
 
+// Named failure I-80: bounded successful pages were not recognized as a complete document read.
+// Bind each literal invocation to exact actual bytes, then require contiguous pages and a stable whole-file hash.
+function commandPage(input, value) {
+  if (typeof input?.cmd !== 'string' || input.cmd.length > 16384) return null;
+  if (input.shell !== undefined && (typeof input.shell !== 'string' || !['sh','bash','zsh'].includes(path.basename(input.shell)))) return null;
+  const match = /^wf evidence show (\/[^\s"'$`;|&<>]+) --attempt ([A-Za-z0-9_.-]+) --offset ([0-9]+) --length ([0-9]+) --json$/.exec(input.cmd);
+  if (!match) return null;
+  if (Array.isArray(value)) { if (value.length !== 1 || value[0]?.type !== 'input_text') return null; value = value[0].text; }
+  try { if (typeof value === 'string') value = JSON.parse(value); } catch { return null; }
+  if (!value || value.exit_code !== 0 || value.session_id != null || typeof value.output !== 'string') return null;
+  let page;
+  try { page = JSON.parse(value.output); } catch { return null; }
+  const [ , file, attempt, offset, length ] = match;
+  if (file.split(path.sep).includes('..') || !file.split(path.sep).includes('.wf-evidence') || !file.includes(path.sep+'attempts'+path.sep+attempt+path.sep) || page.file !== file || page.offset !== Number(offset) || !Number.isSafeInteger(page.size) || page.size < 1 || page.size > 64*1024*1024 || !Number.isSafeInteger(page.bytes) || page.bytes < 1 || page.bytes > Number(length) || Number(length) > 4*1024*1024 || typeof page.text !== 'string') return null;
+  const bytes = Buffer.from(page.text,'utf8');
+  if (bytes.length !== page.bytes || page.nextOffset !== page.offset + page.bytes || page.remaining !== page.size - page.nextOffset || page.remaining < 0 || page.truncated !== (page.remaining > 0)) return null;
+  let fd;
+  try {
+    fd=fs.openSync(file,fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW|(fs.constants.O_NONBLOCK??0));
+    const st=fs.fstatSync(fd);
+    if (!st.isFile() || st.nlink !== 1 || st.size !== page.size) return null;
+    const hash=crypto.createHash('sha256'), scratch=Buffer.alloc(65536), actual=Buffer.alloc(page.bytes);
+    let at=0;
+    while(at<st.size) { const n=fs.readSync(fd,scratch,0,Math.min(scratch.length,st.size-at),at); if(!n)return null; hash.update(scratch.subarray(0,n)); at+=n; }
+    let n=0;
+    while(n<actual.length) { const k=fs.readSync(fd,actual,n,actual.length-n,page.offset+n); if(!k)return null; n+=k; }
+    const after=fs.fstatSync(fd);
+    if(after.size!==st.size || after.mtimeMs!==st.mtimeMs || after.ctimeMs!==st.ctimeMs || hash.digest('hex')!==page.sha256 || !actual.equals(bytes)) return null;
+    return page;
+  } catch { return null; } finally { if(fd!==undefined)fs.closeSync(fd); }
+}
+
 export function completedNodeReads(raw, bundle) {
-  const calls = new Map(), duplicate = new Set(), reads = [];
+  const calls = new Map(), duplicate = new Set(), reads = [], pages = new Map();
   const counts = new Map();
   for (const e of raw) {
     const p = e.type === 'response_item' ? e.payload : null;
@@ -128,6 +161,15 @@ export function completedNodeReads(raw, bundle) {
       for (let i = 0; i < call.literal.length; i++) {
         const invocation = call.literal[i];
         if (invocation.name === 'exec_command') {
+          const page=commandPage(invocation.input,outputs[i]);
+          if(page) {
+            const previous=pages.get(page.file);
+            const contiguous=page.offset===0 || (previous && previous.sha256===page.sha256 && previous.size===page.size && previous.nextOffset===page.offset);
+            if(contiguous) {
+              pages.set(page.file,page);
+              if(page.remaining===0) reads.push({type:'assistant',message:{content:[{type:'tool_use',id:p.call_id+':'+i+':'+page.file,name:'Read',input:{file_path:page.file}}]}});
+            } else pages.delete(page.file);
+          }
           for (const file of commandRead(invocation.input, outputs[i])) reads.push({type:'assistant',message:{content:[{type:'tool_use',id:p.call_id+':'+i+':'+file,name:'Read',input:{file_path:file}}]}});
           continue;
         }

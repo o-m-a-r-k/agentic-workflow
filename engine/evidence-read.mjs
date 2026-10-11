@@ -6,6 +6,7 @@
 // inside this attempt's evidence are read, and at most MAX_SHOW_BYTES are read. Images are not printed: `wf export screenshots` copies them out, sha256-checked.
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { attemptDir } from './ledger.mjs';
 import { isInside } from './paths.mjs';
 import { WfError, refuse } from './util.mjs';
@@ -58,7 +59,15 @@ export function listEvidence(root, state, { kind = null } = {}) {
   return { attempt: state.id, dir, files: kind ? files.filter((f) => f.kind === kind) : files };
 }
 
-export function showEvidence(root, state, rel) {
+// Named failure I-80: shell-only roles could never read beyond the first 4 MiB of a handed bundle.
+// Bounded pages retain every no-follow check and report a whole-file hash; no evidence is rewritten.
+export function showEvidence(root, state, rel, { offset, length } = {}) {
+  const paged = offset !== undefined || length !== undefined;
+  for (const value of [offset,length]) if (value !== undefined && !((typeof value === 'number' && Number.isSafeInteger(value)) || (typeof value === 'string' && /^[0-9]+$/.test(value)))) throw new WfError('evidence page offset and length must be decimal integers');
+  const start = offset === undefined ? 0 : Number(offset);
+  const limit = length === undefined ? MAX_SHOW_BYTES : Number(length);
+  if (!Number.isSafeInteger(start) || start < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > MAX_SHOW_BYTES)
+    throw new WfError('evidence page requires nonnegative integer --offset and --length between 1 and 4194304');
   if (typeof rel !== 'string' || !rel.trim()) throw new WfError(`usage: wf evidence show <path> --attempt ${state.id} (a path from \`wf evidence list\`)`);
   const dir = fs.realpathSync.native(attemptFolder(root, state));
   // Named failure I-45: native roles receive absolute bundle/rule paths, but the sanctioned reader rejected them.
@@ -85,16 +94,42 @@ export function showEvidence(root, state, rel) {
   try {
     const fst = fs.fstatSync(fd);
     if (!fst.isFile() || fst.nlink > 1) throw refuse(`${rel} is not a regular file with one name; nothing is read through it`);
-    const buf = Buffer.alloc(Math.min(fst.size, MAX_SHOW_BYTES));
+    if (start > fst.size) throw new WfError('evidence page offset is past end of file');
+    const buf = Buffer.alloc(Math.min(fst.size - start, limit));
     let n = 0;
     while (n < buf.length) {
-      const k = fs.readSync(fd, buf, n, buf.length - n, n);
+      const k = fs.readSync(fd, buf, n, buf.length - n, start + n);
       if (!k) break;
       n += k;
     }
-    const bytes = buf.subarray(0, n);
+    let bytes = buf.subarray(0, n);
     if (bytes.includes(0)) throw refuse(`${rel} is binary; it is not printed`);
-    return { path: rel, file: abs, size: fst.size, truncated: fst.size > MAX_SHOW_BYTES, text: bytes.toString('utf8') };
+    if (!paged) return { path: rel, file: abs, size: fst.size, truncated: fst.size > MAX_SHOW_BYTES, text: bytes.toString('utf8') };
+    // A page starts on a UTF-8 scalar boundary. Trim only an incomplete final scalar, never an invalid byte.
+    if (bytes.length && (bytes[0] & 0xc0) === 0x80) throw new WfError('evidence page offset must be a UTF-8 boundary');
+    if (start + n < fst.size && n) {
+      let lead = n - 1;
+      while (lead > 0 && (bytes[lead] & 0xc0) === 0x80) lead--;
+      const value = bytes[lead], needed = value >= 0xc2 && value <= 0xdf ? 2 : value >= 0xe0 && value <= 0xef ? 3 : value >= 0xf0 && value <= 0xf4 ? 4 : 1;
+      if (needed > n - lead) bytes = bytes.subarray(0,lead);
+    }
+    if (n && !bytes.length) throw new WfError('evidence page length cannot contain the next UTF-8 scalar');
+    let text;
+    try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
+    catch { throw refuse(`${rel} is not valid UTF-8`); }
+    const hash = crypto.createHash('sha256'), scratch = Buffer.alloc(65536);
+    let at = 0;
+    while (at < fst.size) {
+      const k = fs.readSync(fd, scratch, 0, Math.min(scratch.length, fst.size - at), at);
+      if (!k) throw refuse('evidence file changed during page read');
+      if (scratch.subarray(0,k).includes(0)) throw refuse(`${rel} is binary; it is not printed`);
+      hash.update(scratch.subarray(0,k)); at += k;
+    }
+    const after = fs.fstatSync(fd);
+    if (after.size !== fst.size || after.mtimeMs !== fst.mtimeMs || after.ctimeMs !== fst.ctimeMs) throw refuse('evidence file changed during page read');
+    const nextOffset = start + bytes.length;
+    return { path: rel, file: abs, size: fst.size, offset: start, bytes: bytes.length, nextOffset,
+      remaining: fst.size - nextOffset, sha256: hash.digest('hex'), truncated: nextOffset < fst.size, text };
   } finally {
     fs.closeSync(fd);
   }

@@ -79,3 +79,6 @@ incomplete, interrupted or failed. An explicit user request for another provider
 authority from `runtime <attempt>:<runtime>` once before a fresh explicit `--runtime` handoff, then inherits that
 selection for later handoffs and recovery under the same owner. Another provider change needs a new approval.
 Adoption resets the selection to the new owning host. Old mismatched handoffs without authority cannot launch.
+
+
+**Complete bounded evidence reads (I-80).** On shell-only hosts, read large handoffs and required documents with one plain `wf evidence show <absolute path> --attempt <id> --offset 0 --length 16384 --json` command per page. Repeat with the exact returned `nextOffset` until `remaining` is0. Keep the same `file`, `size` and `sha256` throughout. Every successful page must reach host output in full; truncated tool output, a gap, a changed hash or an unobserved final page is not a complete read. Reduce the requested length when host output truncates. Never redirect, pipe, rewrite or copy protected evidence to bypass the reader.

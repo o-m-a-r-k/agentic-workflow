@@ -1052,8 +1052,8 @@ async function dispatch(cmd, sub, positional, options) {
       if (sub === 'show') {
         const { showEvidence } = await import('./evidence-read.mjs');
         const s = openState(root, options);
-        const r = showEvidence(root, s, positional[0]);
-        if (options.json) print(options, '', r);
+        const r = showEvidence(root, s, positional[0], { offset: options.offset, length: options.length });
+        if (options.json || r.offset !== undefined) print({ ...options, json: true }, '', r);
         else process.stdout.write(`${r.text}${r.text.endsWith('\n') ? '' : '\n'}${r.truncated ? `… (${r.size} B; the first part only: read the rest with the Read tool on ${r.file})\n` : ''}`);
         return 0;
       }
