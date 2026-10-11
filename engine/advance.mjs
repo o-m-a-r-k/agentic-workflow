@@ -13,14 +13,15 @@ import { runGate } from './gate.mjs';
 import { runRole } from './codex-run.mjs';
 import { readRegular, prepareWrite, writeNoFollow, forget, setVerifyLevel } from './evidence.mjs';
 import { isPidAlive, refuse, sessionIdentity } from './util.mjs';
-import { currentReviewGroup, isCurrentReviewer, reviewSnapshot } from './review-groups.mjs';
+import { currentReviewGroup, isCurrentReviewer, reviewSnapshot, reviewDivisionOptions } from './review-groups.mjs';
 
 export async function advance(root, options, { groupAgent = null } = {}) {
-  const allowed = ['_', 'attempt', 'root', 'runtime', 'json', 'once', 'until-owner', 'max-steps', 'parallel', 'reviewers', 'division'];
+  const allowed = ['_', 'attempt', 'root', 'runtime', 'json', 'once', 'until-owner', 'max-steps', 'parallel', 'single', 'reviewers', 'division'];
   for (const key of Object.keys(options)) if (!allowed.includes(key)) throw refuse(`advance does not accept --${key}; it never overrides workflow decisions`);
   if (options._?.length > 1) throw refuse('advance takes no positional action or override');
   if (Boolean(options.once) === Boolean(options['until-owner'])) throw refuse('choose --once or --until-owner');
   if (options.runtime && !['claude', 'codex'].includes(options.runtime)) throw refuse('--runtime must be claude or codex');
+  reviewDivisionOptions(options);
   const limit = options.once ? 1 : Number(options['max-steps'] ?? 4);
   if (!Number.isInteger(limit) || limit < 1 || limit > 8) throw refuse('--max-steps must be between 1 and 8');
   setVerifyLevel('full');
@@ -77,7 +78,8 @@ export async function advance(root, options, { groupAgent = null } = {}) {
           const warning = outsideWarning(root, state);
           if (warning) say(warning);
           const created = handoff(root, 'reviewer', { attempt: id, agent: `runner-${randomUUID()}`, runtime,
-            ...(options.parallel ? { parallel: true } : {}), ...(options.reviewers !== undefined ? { reviewers: options.reviewers } : {}), ...(options.division ? { division: options.division } : {}) });
+            ...(options.parallel ? { parallel: true } : {}), ...(options.single ? { single: true } : {}),
+            ...(options.reviewers !== undefined ? { reviewers: options.reviewers } : {}), ...(options.division ? { division: options.division } : {}) });
           h = created.state.handoffs.at(-1);
         }
         if (options.runtime && h.runtime !== options.runtime) return result('owner-required', { ...decision, status: 'owner', blockers: ['existing handoff belongs to a different runtime'] });
