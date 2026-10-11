@@ -5,6 +5,15 @@ import { canonical, git, hashValue, refuse } from './util.mjs';
 const list = v => Array.isArray(v) ? v : [];
 export const changedInventory = bundle => Object.entries(bundle.changed ?? {}).flatMap(([repo, files]) => files.map(file => `${repo}:${file}`)).sort();
 
+// Named failure: ordinary handoffs serialized large separable reviews unless the owner remembered an opt-in flag.
+export function reviewDivisionOptions(options) {
+  for (const flag of ['parallel', 'single']) if (options[flag] !== undefined && options[flag] !== true) throw refuse(`--${flag} is a flag`);
+  if (options.single && ['parallel', 'reviewers', 'division'].some(key => options[key] !== undefined)) throw refuse('--single cannot be combined with --parallel, --reviewers or --division');
+  const reviewers = Number(options.reviewers ?? 2);
+  if (!Number.isInteger(reviewers) || reviewers < 2 || reviewers > 3) throw refuse('parallel review uses two or three scoped reviewers plus one integration reviewer');
+  return { enabled: options.single !== true, reviewers };
+}
+
 export function changedWeights(state, bundle) {
   const weights = {};
   for (const [repo, record] of Object.entries(state.repos)) {
