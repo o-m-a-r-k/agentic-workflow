@@ -164,12 +164,14 @@ export function inspectEvidence(root, state, rel, { pointer = '', from = 0, coun
   const total=kind==='string'?value.length:keys?keys.length:1;
   if(start>total) throw new WfError('inspection range starts past the selected value');
   const result={file,size,sha256,pointer,kind,total,from:start,nextFrom:start,remaining:total-start,documentReadCredit:false};
+  // Named failure I-80: final cursor digits and pretty-printing exceeded the budget checked against stale metadata.
+  const fits = page => Buffer.byteLength(JSON.stringify(page,null,2)+'\n') <= 16384;
   if(kind==='string') {
     if(start && start<total && /[\uDC00-\uDFFF]/.test(value[start]) && /[\uD800-\uDBFF]/.test(value[start-1])) throw new WfError('string range must start at a scalar boundary');
     let end=Math.min(total,start+Math.min(take,4096));
     if(end<total && end>start && /[\uD800-\uDBFF]/.test(value[end-1]) && /[\uDC00-\uDFFF]/.test(value[end])) end--;
     if(end===start && start<total) throw new WfError('string range is too short for the next scalar');
-    while (Buffer.byteLength(JSON.stringify({...result,text:value.slice(start,end)})) > 16384) {
+    while (!fits({...result,text:value.slice(start,end),nextFrom:end,remaining:total-end})) {
       end--;
       if(end>start && /[\uD800-\uDBFF]/.test(value[end-1]) && /[\uDC00-\uDFFF]/.test(value[end]))end--;
       if(end<=start)throw refuse('selected string cannot fit a bounded inspection response');
@@ -186,10 +188,11 @@ export function inspectEvidence(root, state, rel, { pointer = '', from = 0, coun
     if(child!==null && typeof child==='object')item.total=Object.keys(child).length;
     else if(typeof child==='string')item.total=child.length;
     const bounded={...item,value:child};
-    if(Buffer.byteLength(JSON.stringify({...result,items:[...result.items,bounded]}))<=16384)result.items.push(bounded);
+    const withItem = row => ({...result,items:[...result.items,row],nextFrom:at+1,remaining:total-at-1});
+    if(fits(withItem(bounded)))result.items.push(bounded);
     else {
       item.oversized=true;
-      if(Buffer.byteLength(JSON.stringify({...result,items:[...result.items,item]}))>16384) {
+      if(!fits(withItem(item))) {
         if(!result.items.length)throw refuse('selected key cannot fit a bounded inspection response');
         break;
       }
@@ -197,5 +200,6 @@ export function inspectEvidence(root, state, rel, { pointer = '', from = 0, coun
     }
     result.nextFrom=at+1;result.remaining=total-result.nextFrom;
   }
+  if(!fits(result))throw refuse('selected value cannot fit a bounded inspection response');
   return result;
 }

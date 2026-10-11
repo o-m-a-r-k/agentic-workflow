@@ -5,6 +5,15 @@ import { canonical, git, hashValue, refuse } from './util.mjs';
 const list = v => Array.isArray(v) ? v : [];
 export const changedInventory = bundle => Object.entries(bundle.changed ?? {}).flatMap(([repo, files]) => files.map(file => `${repo}:${file}`)).sort();
 
+// Named failure: ordinary handoffs serialized large separable reviews unless the owner remembered an opt-in flag.
+export function reviewDivisionOptions(options) {
+  for (const flag of ['parallel', 'single']) if (options[flag] !== undefined && options[flag] !== true) throw refuse(`--${flag} is a flag`);
+  if (options.single && ['parallel', 'reviewers', 'division'].some(key => options[key] !== undefined)) throw refuse('--single cannot be combined with --parallel, --reviewers or --division');
+  const reviewers = Number(options.reviewers ?? 2);
+  if (!Number.isInteger(reviewers) || reviewers < 2 || reviewers > 3) throw refuse('parallel review uses two or three scoped reviewers plus one integration reviewer');
+  return { enabled: options.single !== true, reviewers };
+}
+
 export function changedWeights(state, bundle) {
   const weights = {};
   for (const [repo, record] of Object.entries(state.repos)) {
@@ -75,7 +84,13 @@ export function divideReview(bundle, results, { reviewers = 2, minimumFiles = 40
   // Equal/overlapping flow descriptions can overestimate hubs; that causes a conservative single-review fallback.
   const shared = new Set([...incidence].filter(([, ids]) => ids.length > 1).map(([file]) => file));
   const atomic = [...byFiles.values()].map(flow => ({ ...flow, primary: flow.files.filter(f => !shared.has(f)) })).filter(f => f.primary.length);
-  const cost = files => files.reduce((total, file) => total + Math.max(1, Number(weights[file]) || 1), 0);
+  // Named failure: automatic single-review fallback paid for Git cost scans it never used.
+  let measuredWeights;
+  const cost = files => {
+    if (!files.length) return 0;
+    measuredWeights ??= typeof weights === 'function' ? weights() : weights;
+    return files.reduce((total, file) => total + Math.max(1, Number(measuredWeights[file]) || 1), 0);
+  };
   const single = reason => ({ version: 1, mode: 'single', reason, files: changed, flows, slices: [], integration: { files: changed, interfaces: [] } });
   if (!division && changed.length < minimumFiles) return single(`only ${changed.length} changed files; retain one reviewer below ${minimumFiles}`);
   if (atomic.length < 2) {

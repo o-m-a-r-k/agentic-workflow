@@ -241,8 +241,9 @@ roles:
 
 ## Optional foreground advancement
 
-Large changes can opt into [flow-based parallel review](parallel-review.md) with `--parallel` on reviewer handoffs
-or the foreground runner. The engine retains one reviewer when recorded flow boundaries are insufficient. Scoped
+Fresh reviewer handoffs and the foreground runner automatically select [flow-based parallel review](parallel-review.md)
+for large, separable changes. Small changes and insufficient flow boundaries retain one reviewer; `--single` explicitly
+keeps one reviewer for fresh rounds. Scoped
 parts cannot authorize the gate; one integration reviewer checks shared code, crossing interfaces and global evidence,
 and the engine validates the combined complete review. Existing single-review rounds are unchanged.
 

@@ -53,7 +53,7 @@ Work
   wf handoff close --agent ID [--outcome done|stopped|failed]
                                     an implementer finished: no review round starts while one is open
   wf models refresh --attempt ID    pin execution model/effort settings from the committed adapter base
-  wf advance --once|--until-owner [--runtime claude|codex] [--max-steps N]
+  wf advance --once|--until-owner [--runtime claude|codex] [--max-steps N] [--single] [--reviewers 2|3]
                                     optional foreground review/gate runner; stops for owner decisions
   wf handoff run --agent ID         launch the existing Claude or Codex handoff fresh, with engine-recorded prompt provenance
   wf handoff reviewer --agent ID --reason "why"
@@ -73,8 +73,8 @@ Work
   wf scope ticket --finding REVIEWER:F1 --capture RAW.json
                                     raw tracker readback after owner-authorized ticket creation
   wf review --closure file.json     record the reviewer's closure
-  wf handoff reviewer --agent ID --parallel [--reviewers 2|3] [--division FILE]
-                                    divide recorded flows when separable; shared/unmapped code belongs to integration
+  wf handoff reviewer --agent ID [--single] [--reviewers 2|3] [--division FILE]
+                                    automatically divide large separable flows; --single keeps one reviewer
   wf review parts                   inspect immutable current-group scoped reports before integration
   wf accept                         accept the review
   wf summary --file summary.md      the owner's plain-language summary for the delivered comment
@@ -381,6 +381,8 @@ async function dispatch(cmd, sub, positional, options) {
   // what is checked is what every later open or write uses (never re-derived from the raw argument).
   for (const k of PATH_OPTIONS) {
     if (!(k in options)) continue;
+    // Named failure I-82: inspect pagination shares --from with the guarded skills source path.
+    if (k === 'from' && cmd === 'evidence' && sub === 'inspect') continue;
     options[k] = resolvePathOption(k, options[k]);
   }
   if (cmd === 'skills' && positional[0] !== undefined && (!/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(positional[0]) || positional[0].includes('..'))) throw new WfError(`invalid skill name \`${positional[0]}\`: letters, digits, dot, dash, underscore and colon only`);
@@ -677,14 +679,14 @@ async function dispatch(cmd, sub, positional, options) {
       const stale = r.roleStale ? `warning: ${path.relative(root, r.roleStale.file)} changed at ${r.roleStale.changedAt}, after this Claude Code session started (${r.roleStale.sessionStartedAt}). Claude Code reads agent files when a session starts, so an agent of type ${r.agentType} started from this session runs the old role (its tools and instructions). Restart Claude Code (\`claude --resume\` keeps this conversation) before starting it.\n` : '';
       // Named failure (I-14): the reviewer handoff printed no agent name, the reviewer was started unnamed, and its
       // closure was refused after the whole review. The owner is told the agent type and name on stderr.
-      const how = `Start agent type ${r.agentType} (name it ${r.agent}; do not pass a model)`;
+      const how = r.members ? `Run wf handoff run --agent ${r.agent} --attempt ${r.state.id}; retain that foreground handle for scopes and integration` : `Start agent type ${r.agentType} (name it ${r.agent}; do not pass a model)`;
       // The reviewer is started blind: this one line is its whole prompt, so nothing else is printed to pass along.
       if (sub === 'reviewer') {
         // To the owner on stderr, never into the reviewer's one-line prompt on stdout.
         const w = outsideWarning(root, r.state);
         if (w) process.stderr.write(`warning: ${w}\n`);
         if (r.division) process.stderr.write(`review division: ${r.division.mode}; ${r.division.reason}\n`);
-        for (const member of r.members ?? []) process.stderr.write(`group ${member.slot}: ${member.agent}; run wf handoff run --agent ${member.agent} --attempt ${r.state.id}; frozen prompt: ${member.startPrompt}\n`);
+        for (const member of r.members ?? []) process.stderr.write(`group ${member.slot}: ${member.agent}; frozen prompt: ${member.startPrompt}\n`);
         process.stderr.write(`${lessonsLine}${stale}${how} with only the line on stdout as its prompt:\n`);
         print(options, startPrompt, { ...r, startPrompt });
       } else {
@@ -1004,13 +1006,6 @@ async function dispatch(cmd, sub, positional, options) {
         if (!l) throw new WfError(`no lesson ${positional[0] ?? ''}`);
         const a = applySnippet(l);
         print(options, `to enforce ${l.id} (${l.mechanism?.kind}), add to ${a.where}:\n\n${a.snippet}\nwf changes nothing itself: add it, commit it with the owner's approval, then \`wf lesson set ${l.id} --status enforced${a.ref ? ` --ref ${a.ref}` : ' --ref <what enforces it>'}\``, a);
-        return 0;
-      }
-      if (sub === 'inspect') {
-        const { inspectEvidence } = await import('./evidence-read.mjs');
-        const s = openState(root, options);
-        const r = inspectEvidence(root,s,positional[0],{pointer:options.pointer,from:options.from,count:options.count});
-        print({...options,json:true},'',r);
         return 0;
       }
       if (sub === 'show') {

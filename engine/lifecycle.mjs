@@ -1,6 +1,6 @@
 import { mkdirStateDirectory } from './state-folders.mjs';
 import { blockingFindings, waivedFinding, pendingScope, scopeProblems, scopeHandoffProblems, scopeGuidance, scopeFindings, disposition, effectiveDiscoveries } from './scope-decisions.mjs';
-import { GROUP_INSTRUCTIONS, assignedVerdicts, changedWeights, currentReviewGroup, divideReview, fileCoverage, findingIds, impactCatalog, isCurrentReviewer, mergeParts, reviewSnapshot } from './review-groups.mjs';
+import { GROUP_INSTRUCTIONS, assignedVerdicts, changedWeights, currentReviewGroup, divideReview, fileCoverage, findingIds, impactCatalog, isCurrentReviewer, mergeParts, reviewSnapshot, reviewDivisionOptions } from './review-groups.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -373,9 +373,8 @@ function skillProblems(root, cfg, role, runtime, state, changed) {
 
 export function handoff(root, role, options) {
   rejectModelOverrides(options);
-  if (options.parallel !== undefined && options.parallel !== true) throw refuse('--parallel is a flag');
-  if (options.reviewers !== undefined && options.parallel !== true && options.division === undefined) throw refuse('--reviewers needs --parallel or --division');
-  if ((options.parallel !== undefined || options.division !== undefined || options.reviewers !== undefined) && role !== 'reviewer') throw refuse('review division options apply only to reviewer handoffs');
+  if (['parallel', 'single', 'division', 'reviewers'].some(key => options[key] !== undefined) && role !== 'reviewer') throw refuse('review division options apply only to reviewer handoffs');
+  const divisionOptions = reviewDivisionOptions(options);
   const state = openState(root, options);
   // Rules, skills, roles, classes and agent types come from the adapter at the attempt's base, so a ticket cannot drop
   // its own rules or pick its own class.
@@ -573,9 +572,9 @@ export function handoff(root, role, options) {
   }
   // Named failure: independent flows waited behind one reviewer, or file-count splits omitted shared dependencies.
   let division = null, groupMembers = null;
-  if (role === 'reviewer' && (options.parallel === true || options.division !== undefined)) {
+  if (role === 'reviewer' && divisionOptions.enabled) {
     const proposed = options.division === undefined ? null : JSON.parse(readOnce(options.division));
-    division = divideReview(bundle, reviewQueries ?? {}, { reviewers: Number(options.reviewers ?? 2), division: proposed, weights: changedWeights(state, bundle) });
+    division = divideReview(bundle, reviewQueries ?? {}, { reviewers: divisionOptions.reviewers, division: proposed, weights: () => changedWeights(state, bundle) });
     if (division.mode === 'parallel') {
       const id = `review-${n}`, snapshot = reviewSnapshot(state), members = [...division.slices.map(s => `${agent}-${s.id}`), agent];
       const planFile = path.join(attemptDir(root, state.id), 'review', `division-${n}.json`);

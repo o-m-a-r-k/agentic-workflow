@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { changedInventory, divideReview, impactCatalog, isCurrentReviewer, validateDivision } from '../engine/review-groups.mjs';
 import { transactionSeams, withEvidenceTransaction } from '../engine/evidence.mjs';
-import { closureFile, commitIn, goodClosure, impactCheckedFrom, ok, singleRepoProject, state, wf, WF, write } from './helpers.mjs';
+import { closureFile, commitIn, criteriaFile, goodClosure, impactCheckedFrom, ok, sh, singleRepoProject, state, wf, WF, write } from './helpers.mjs';
 
 function flowInput() {
   const files = { 'shared.ts': 'alpha beta\n', 'unmapped.ts': 'common\n' };
@@ -79,7 +79,35 @@ test('impact compaction retains every entry ID with its current value while pres
   assert.equal(catalog.changes[0].element, 'new'); assert.equal(JSON.stringify(map), original);
 });
 
-function ready() {
+test('automatic single-review fallback never runs an unnecessary Git cost scan', () => {
+  const p = singleRepoProject('review-cost', { gate: { steps: [] } });
+  const e = ok(wf(p.root, ['entry', '--lane', 'quick', '--json'])).json();
+  ok(wf(p.root, ['plan', '--file', criteriaFile(p.base), '--attempt', e.id]));
+  ok(wf(p.root, ['handoff', 'implementer', '--agent', 'impl', '--attempt', e.id]));
+  commitIn(e.repos.app.worktree, { 'src/a.txt': 'changed\n' });
+  const realGit = sh(p.root, 'command -v git'), bin = path.join(p.base, 'bin');
+  write(bin, 'git', `#!/usr/bin/env node
+import { spawnSync } from 'node:child_process';
+const args=process.argv.slice(2);
+if(args.includes('--numstat')) { console.error('single-review fallback performed an unnecessary cost scan'); process.exit(90); }
+const result=spawnSync(${JSON.stringify(realGit)},args,{stdio:'inherit'});process.exit(result.status??1);
+`);
+  fs.chmodSync(path.join(bin, 'git'), 0o755);
+  const h = ok(wf(p.root, ['handoff', 'reviewer', '--agent', 'single', '--attempt', e.id, '--json'], { env: { PATH: bin + path.delimiter + process.env.PATH } })).json();
+  assert.equal(h.division.mode, 'single');
+  assert.equal(h.members, undefined);
+});
+
+test('parallel division estimates cost lazily once and preserves expensive-flow fallback', () => {
+  const { bundle, results } = flowInput();
+  let reads = 0;
+  const weights = Object.fromEntries(changedInventory(bundle).map(file => [file, file === 'app:alpha/0.ts' ? 10000 : 1]));
+  const plan = divideReview(bundle, results, { weights: () => { reads++; return weights; } });
+  assert.equal(reads, 1);
+  assert.equal(plan.mode, 'single');
+});
+
+function ready({ reviewOptions = [], handoffReviewer = true, runtime = null } = {}) {
   const { files } = flowInput();
   const p = singleRepoProject('parallel-review', { classes: { review: { codex: { model: 'future-model', effort: 'high' } } }, gate: { steps: [] } }, files);
   const e = ok(wf(p.root, ['entry', '--lane', 'quick', '--json'])).json();
@@ -89,12 +117,42 @@ function ready() {
       consumers: { query: q.id, hits: 25 }, flows: [{ flow: `use ${q.id}`, failure: 'retry', query: q.id, hits: 25 }], contracts: [], suites: [{ suite: 'flow-test', query: q.id, hits: 25 }] })) } };
   const planFile = closureFile(p.base, doc);
   ok(wf(p.root, ['plan', '--file', planFile, '--attempt', e.id]));
-  ok(wf(p.root, ['handoff', 'implementer', '--agent', 'impl', '--attempt', e.id]));
+  const runtimeArgs = runtime ? ['--runtime', runtime] : [];
+  ok(wf(p.root, ['handoff', 'implementer', '--agent', 'impl', '--attempt', e.id, ...runtimeArgs]));
   commitIn(e.repos.app.worktree, Object.fromEntries(Object.entries(files).map(([file, text]) => [file, text + 'changed\n'])));
-  const h = ok(wf(p.root, ['handoff', 'reviewer', '--agent', 'integration', '--parallel', '--attempt', e.id, '--json'])).json();
-  assert.equal(h.members?.length, 3, 'separable large change must create two scopes and integration');
+  const h = handoffReviewer ? ok(wf(p.root, ['handoff', 'reviewer', '--agent', 'integration', ...reviewOptions, '--attempt', e.id, '--json', ...runtimeArgs])).json() : null;
+  if (h && !reviewOptions.includes('--single')) assert.equal(h.members?.length, 3, 'separable large change must automatically create two scopes and integration');
   return { ...p, id: e.id, wt: e.repos.app.worktree, h };
 }
+
+test('ordinary reviewer handoffs automatically divide large separable changes; single is an explicit override', () => {
+  const automatic = ready();
+  assert.equal(automatic.h.division.mode, 'parallel');
+  const single = ready({ reviewOptions: ['--single'] });
+  assert.equal(single.h.members, undefined);
+  assert.equal(JSON.parse(fs.readFileSync(single.h.bundle)).reviewGroup, undefined);
+  const env = { CODEX_THREAD_ID: state(single.root, single.id).owner.slice('codex:'.length) };
+  const existing = ok(wf(single.root, ['advance', '--once', '--attempt', single.id, '--json'], { env })).json();
+  assert.equal(existing.operations.length, 0, 'advancement must not replace an existing single handoff');
+  assert.equal(state(single.root, single.id).handoffs.filter(h => h.role === 'reviewer').length, 1);
+  const compatible = ready({ reviewOptions: ['--parallel'] });
+  assert.equal(compatible.h.division.mode, 'parallel', 'existing explicit parallel commands remain valid');
+});
+
+test('review selection refuses conflicting flags and invalid values before handing or advancing roles', () => {
+  const p = ready({ handoffReviewer: false });
+  ok(wf(p.root, ['handoff', 'close', '--agent', 'impl', '--attempt', p.id]));
+  const env = { CODEX_THREAD_ID: state(p.root, p.id).owner.slice('codex:'.length) };
+  const division = closureFile(p.base, { slices: [] });
+  for (const args of [['--single=false'], ['--parallel=false'], ['--single', '--parallel'], ['--single', '--reviewers', '2'], ['--single', '--division', division], ['--reviewers', '4']]) {
+    assert.equal(wf(p.root, ['handoff', 'reviewer', '--agent', 'invalid', ...args, '--attempt', p.id]).code, 75, args.join(' '));
+    assert.equal(wf(p.root, ['advance', '--once', ...args, '--attempt', p.id], { env }).code, 75, args.join(' '));
+  }
+  assert.equal(wf(p.root, ['handoff', 'implementer', '--agent', 'invalid', '--single', '--attempt', p.id]).code, 75);
+  assert.equal(state(p.root, p.id).handoffs.filter(h => h.role === 'reviewer').length, 0);
+  const selected = ok(wf(p.root, ['handoff', 'reviewer', '--agent', 'three', '--reviewers', '3', '--attempt', p.id, '--json'])).json();
+  assert.equal(selected.division.mode, 'parallel', '--reviewers no longer requires an activation flag');
+});
 
 const evidenceRows = files => files.map(file => ({ file, evidence: `${file}:1 behavior and failure path inspected` }));
 function partClosure(p, member, findings = []) {
@@ -130,7 +188,7 @@ test('parallel parts never complete review; missing evidence/reports/interfaces 
   assert.equal(state(p.root, p.id).review.closure.filesReviewed.length, 50);
   ok(wf(p.root, ['gate', '--attempt', p.id]));
   assert.equal(wf(p.root, ['accept', '--attempt', p.id]).code, 75, 'a fresh evidence review is still required');
-  p.h = ok(wf(p.root, ['handoff', 'reviewer', '--agent', 'evidence', '--parallel', '--attempt', p.id, '--json'])).json();
+  p.h = ok(wf(p.root, ['handoff', 'reviewer', '--agent', 'evidence', '--attempt', p.id, '--json'])).json();
   assert.equal(JSON.parse(fs.readFileSync(p.h.bundle)).round, 'evidence-review');
   for (const member of p.h.members.slice(0, 2)) ok(wf(p.root, ['review', '--closure', closureFile(p.base, partClosure(p, member)), '--attempt', p.id]));
   ok(wf(p.root, ['review', '--closure', closureFile(p.base, integrationClosure(p)), '--attempt', p.id]));
@@ -195,8 +253,9 @@ test('group launch eligibility rejects partial, superseded and mismatched groups
   assert.equal(isCurrentReviewer({ handoffs: mixed }, mixed[0]), false);
 });
 
-test('native foreground group runs scopes concurrently, verifies every transcript and then runs integration', () => {
-  const p = ready(), bin = path.join(p.base, 'bin'), host = path.join(p.base, '.home');
+for (const launch of ['handoff', 'advance', 'single']) test(`native ${launch} selects automatic scopes or the single override and verifies every transcript`, () => {
+  const p = ready({ handoffReviewer: false, runtime: 'codex' }), bin = path.join(p.base, 'bin'), host = path.join(p.base, '.home');
+  ok(wf(p.root, ['handoff', 'close', '--agent', 'impl', '--attempt', p.id]));
   const script = `#!/usr/bin/env node
 import fs from 'node:fs'; import path from 'node:path'; import {randomUUID} from 'node:crypto'; import {spawnSync} from 'node:child_process';
 const prompt=fs.readFileSync(0,'utf8'),bundle=JSON.parse(fs.readFileSync(prompt.slice(5,-29),'utf8')),sid=randomUUID(),at=new Date().toISOString();
@@ -206,32 +265,39 @@ fs.writeFileSync(transcript,[{timestamp:at,type:'session_meta',payload:{id:sid,o
 console.log(JSON.stringify({type:'thread.started',thread_id:sid}));
 const trace=path.join(${JSON.stringify(p.base)},'trace-'+bundle.agent+'.json'),start=Date.now();
 await new Promise(r=>setTimeout(r,350));
-const owned=new Set(bundle.primaryFiles),closure={reviewer:bundle.agent,findings:[],criteria:[],filesReviewed:bundle.primaryFiles.map(file=>({file,evidence:file+':1 checked'})),outsidePlan:(bundle.outsidePlan??[]).filter(file=>owned.has(file)).map(file=>({file,verdict:'covered',by:'C1',evidence:file+':1 checked'})),designHits:[],rules:[]};
+const files=bundle.primaryFiles??Object.entries(bundle.changed).flatMap(([repo,files])=>files.map(file=>repo+':'+file)),owned=new Set(files),closure={reviewer:bundle.agent,findings:[],criteria:[],filesReviewed:files.map(file=>({file,evidence:file+':1 checked'})),outsidePlan:(bundle.outsidePlan??[]).filter(file=>owned.has(file)).map(file=>({file,verdict:'covered',by:'C1',evidence:file+':1 checked'})),designHits:[],rules:[]};
 const command=args=>spawnSync(process.execPath,[${JSON.stringify(WF)},...args,'--attempt',${JSON.stringify(p.id)},'--json'],{cwd:${JSON.stringify(p.root)},env:process.env,encoding:'utf8'});
-if(bundle.reviewGroup.mode==='integration'){
+if(bundle.reviewGroup?.mode==='integration'){
  const reports=command(['review','parts']);if(reports.status!==0){console.error(reports.stderr);process.exit(1);}
  closure.partReviews=JSON.parse(reports.stdout).map(r=>({agent:r.agent,sha256:r.sha256,evidence:'producer and consumer independently checked'}));
  closure.interfacesReviewed=bundle.division.integration.interfaces.map(i=>({id:i.id,evidence:i.files.join('; ')+':1 checked'}));
+}
+if(bundle.reviewGroup?.mode!=='scoped'){
  closure.criteria=[{id:'C1',evidence:{kind:'output',ref:'fixture output'}}];
  closure.impactChecked={queries:Object.entries(bundle.impactMap.queries).map(([query,q])=>({query,hits:q.hits})),sampled:bundle.impactMap.inventory.map(entry=>({entry,verdict:'matches',evidence:'source checked'})),derived:[]};
 }
 fs.writeFileSync(bundle.reviewClosureFile,JSON.stringify(closure));
 const result=command(['review','--closure',bundle.reviewClosureFile]);if(result.status!==0){console.error(result.stderr);process.exit(1);}
-fs.writeFileSync(trace,JSON.stringify({start,end:Date.now(),mode:bundle.reviewGroup.mode}));
+fs.writeFileSync(trace,JSON.stringify({start,end:Date.now(),mode:bundle.reviewGroup?.mode??'single'}));
 console.log(JSON.stringify({type:'turn.completed'}));
 `;
   write(bin, 'codex', script); fs.chmodSync(path.join(bin, 'codex'), 0o755);
-  // The scenario handoff selected Claude; the native fixture replaces the group with fresh Codex reviewers.
-  const h = ok(wf(p.root, ['handoff', 'reviewer', '--agent', 'native', '--parallel', '--runtime', 'codex', '--attempt', p.id, '--json'])).json();
+  if (launch === 'handoff') ok(wf(p.root, ['handoff', 'reviewer', '--agent', 'native', '--attempt', p.id, '--json'], { env: { CODEX_THREAD_ID: state(p.root, p.id).owner.slice('codex:'.length) } }));
   const env = { CODEX_THREAD_ID: state(p.root, p.id).owner.split(':').slice(1).join(':'), WF_HOME: host, PATH: bin + path.delimiter + process.env.PATH };
-  const result = ok(wf(p.root, ['handoff', 'run', '--agent', 'native', '--attempt', p.id, '--json'], { env })).json();
-  assert.deepEqual(result.operations.map(o => o.kind), ['scoped-review', 'scoped-review', 'code-review']);
-  const traces = h.members.map(m => JSON.parse(fs.readFileSync(path.join(p.base, `trace-${m.agent}.json`))));
-  assert.ok(Math.max(traces[0].start, traces[1].start) < Math.min(traces[0].end, traces[1].end), 'scoped runtime lifetimes must overlap');
-  assert.ok(traces[2].start >= Math.max(traces[0].end, traces[1].end), 'integration follows completed scoped reports');
+  const args = launch === 'handoff' ? ['handoff', 'run', '--agent', 'native'] : ['advance', '--once', ...(launch === 'single' ? ['--single'] : [])];
+  const result = ok(wf(p.root, [...args, '--attempt', p.id, '--json'], { env })).json();
+  assert.deepEqual(result.operations.map(o => o.kind), launch === 'single' ? ['code-review'] : ['scoped-review', 'scoped-review', 'code-review']);
   const s = state(p.root, p.id);
+  const reviewers = s.handoffs.filter(h => h.role === 'reviewer');
+  assert.equal(reviewers.length, launch === 'single' ? 1 : 3);
+  const traces = reviewers.map(m => JSON.parse(fs.readFileSync(path.join(p.base, `trace-${m.agent}.json`))));
+  if (launch === 'single') assert.equal(traces[0].mode, 'single');
+  else {
+    assert.ok(Math.max(traces[0].start, traces[1].start) < Math.min(traces[0].end, traces[1].end), 'scoped runtime lifetimes must overlap');
+    assert.ok(traces[2].start >= Math.max(traces[0].end, traces[1].end), 'integration follows completed scoped reports');
+  }
   assert.equal(s.review.provenance, 'verified');
-  assert.equal(s.reviewParts.length, 2); assert.ok(s.reviewParts.every(part => part.provenance === 'verified'));
+  assert.equal(s.reviewParts.length, launch === 'single' ? 0 : 2); assert.ok(s.reviewParts.every(part => part.provenance === 'verified'));
   assert.equal(s.gates.length, 0); assert.equal(s.next.includes('gate'), true);
   ok(wf(p.root, ['verify', '--attempt', p.id]));
 });

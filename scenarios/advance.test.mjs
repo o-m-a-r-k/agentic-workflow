@@ -168,24 +168,40 @@ test('a second unstarted work item remains owner work after the first implemente
   assert.equal(r.json().operations.length,0);assert.match(r.json().decision.blockers[0],/work items have not started/);
 });
 
-test('defect and tree-change stops never automatically restart the normal gate', {timeout:20000}, async () => {
+test('defect and tree-change stops never automatically restart the normal gate', {timeout:20000}, async t => {
+  // Named failure: a whole-scenario timeout hid whether preparation, stopping or advancement consumed its budget.
+  const started = Date.now(), phases = [];
+  let finished = false;
+  const mark = phase => phases.push({ phase, ms: Date.now() - started });
+  t.signal.addEventListener('abort', () => {
+    if (!finished) console.error('stop-process timeout phases:', JSON.stringify(phases));
+  }, { once: true });
+  try {
   for(const cls of ['major-finding','tree-change']) {
+    mark(`${cls}: preparing`);
     const p=prepared('codex','clean',{gate:'node -e "setTimeout(()=>{},10000)"'});
+    mark(`${cls}: prepared`);
     ok(wf(p.root,['advance','--once','--runtime','codex','--attempt',p.id,'--json'],{env:p.env}));
+    mark(`${cls}: reviewed`);
     const child=spawn(process.execPath,[WF,'gate','--attempt',p.id],{cwd:p.root,env:{...process.env,...p.env,WF_EVIDENCE_FLAGS:'0',WF_CONFIG_HOME:path.join(p.base,'.wfhome')}});
     let output='';child.stdout.on('data',b=>{output+=b;});child.stderr.on('data',b=>{output+=b;});
     const ended=new Promise(r=>child.once('close',r));
     try {
       for(let n=0;n<100&&!/start\s+unit/.test(output)&&child.exitCode===null;n++)await new Promise(r=>setTimeout(r,30));
       assert.match(output,/start\s+unit/);
+      mark(`${cls}: gate started`);
       ok(wf(p.root,['stop','--class',cls,'--reason','fixture stop','--attempt',p.id]));
+      mark(`${cls}: stop recorded`);
       assert.equal(await ended,1);
+      mark(`${cls}: gate exited`);
       const before=state(p.root,p.id).gates.length;
       const r=ok(wf(p.root,['advance','--once','--runtime','codex','--attempt',p.id,'--json'],{env:p.env}));
       assert.equal(r.json().operations.length,0);assert.equal(r.json().decision.kind,'repair');
       assert.equal(state(p.root,p.id).gates.length,before);
+      mark(`${cls}: repair required`);
     } finally {if(child.exitCode===null)child.kill('SIGTERM');}
   }
+  } finally { finished = true; }
 });
 
 test('native Claude planner imports its own verified unchanged YAML', () => {

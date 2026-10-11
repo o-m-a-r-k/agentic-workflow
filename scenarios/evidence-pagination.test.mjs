@@ -6,6 +6,9 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { showEvidence, MAX_SHOW_BYTES } from '../engine/evidence-read.mjs';
 import { completedNodeReads } from '../engine/codex-reads.mjs';
+import { check } from '../hooks/guard-evidence.mjs';
+import { check as check015 } from './fixtures/guard-0.1.15.mjs';
+import { ok, singleRepoProject, wf } from './helpers.mjs';
 
 function fixture(text) {
   const root=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'reader-pages-')));
@@ -117,6 +120,77 @@ test('I-80: actual fresh native role bootstrap separates structured input from r
     assert.match(body,/wf evidence inspect <handed absolute path>/);
     assert.match(body,/follow every required item marked `oversized`/);
     assert.match(body,/Separate rule\/skill\/invariant\/appendix documents require complete observed output/);
+    assert.match(body,/Use the literal `wf` command, unquoted paths and pointers/);
     assert.doesNotMatch(body,/read large handoffs and required documents with one plain/);
+  }
+});
+
+// Named failure I-80: budgeting before final pagination metadata could overflow on Linux fixture paths.
+test('I-80: final pretty-printed inspection pages stay bounded across filename lengths',async()=>{
+  const {inspectEvidence}=await import('../engine/evidence-read.mjs');
+  const rows=Array.from({length:12},(_,id)=>({id,text:'\u0001'.repeat(500)}));
+  const f=fixture(JSON.stringify({controls:'\u0001'.repeat(5000),rows}));
+  try {
+    for(let n=0;n<6;n++) {
+      let from=0, recovered='';
+      do {
+        const page=inspectEvidence(f.root,f.state,f.file,{pointer:'/controls',from,count:4096});
+        assert.ok(Buffer.byteLength(JSON.stringify(page,null,2)+'\n')<=16384,`filename variant ${n}, offset ${from}`);
+        assert.ok(page.nextFrom>from);
+        recovered+=page.text;from=page.nextFrom;
+      } while(from<5000);
+      assert.equal(recovered,'\u0001'.repeat(5000));
+      from=0;const recoveredRows=[];
+      do {
+        const page=inspectEvidence(f.root,f.state,f.file,{pointer:'/rows',from,count:4096});
+        assert.ok(Buffer.byteLength(JSON.stringify(page,null,2)+'\n')<=16384);
+        assert.ok(page.nextFrom>from);
+        for(const item of page.items) {
+          if(!item.oversized) recoveredRows.push(item.value);
+          else {
+            const section=inspectEvidence(f.root,f.state,f.file,{pointer:item.pointer,count:4096});
+            assert.ok(Buffer.byteLength(JSON.stringify(section,null,2)+'\n')<=16384);
+            assert.ok(section.items.every(child=>!child.oversized));
+            recoveredRows.push(Object.fromEntries(section.items.map(child=>[child.key,child.value])));
+          }
+        }
+        from=page.nextFrom;
+      } while(from<rows.length);
+      assert.deepEqual(recoveredRows,rows);
+      const next=f.file+'x';fs.renameSync(f.file,next);f.file=next;
+    }
+  } finally {fs.rmSync(f.root,{recursive:true,force:true});}
+});
+
+test('I-80: empty sections with oversized escaped pointer metadata fail within the response bound',async()=>{
+  const {inspectEvidence}=await import('../engine/evidence-read.mjs');
+  const key='\u0001'.repeat(3000),f=fixture(JSON.stringify({[key]:{}}));
+  try {assert.throws(()=>inspectEvidence(f.root,f.state,f.file,{pointer:'/'+key}),/cannot fit a bounded inspection response/);}
+  finally {fs.rmSync(f.root,{recursive:true,force:true});}
+});
+
+// Named failure I-82: the CLI treated numeric --from as the skills-update source directory.
+test('I-82: real CLI inspect paginates zero and nonzero offsets while skills source stays a guarded path',()=>{
+  const {base,root}=singleRepoProject('inspect-cli-offset');
+  const id=ok(wf(root,['entry','--item','ENG-882','--json'])).json().id;
+  const handoff=ok(wf(root,['handoff','planner','--agent','reader_i82','--attempt',id,'--json'])).json();
+  for(const [from,expected] of [['0','read'],['4','er_i'],['8','82']]) {
+    const command=`wf evidence inspect ${handoff.bundle} --attempt ${id} --pointer /agent --from ${from} --count 4`;
+    const input={cwd:root,tool_input:{command}};
+    assert.equal(check015(input),null);assert.equal(check(input),null);
+    const output=ok(wf(root,['evidence','inspect',handoff.bundle,'--attempt',id,'--pointer','/agent','--from',from,'--count','4']));
+    assert.ok(Buffer.byteLength(output.out)<=16384);
+    const page=output.json();assert.equal(page.from,Number(from));assert.equal(page.text,expected);
+    assert.equal(page.documentReadCredit,false);
+  }
+  for(const from of ['-1','1e2','true',root]) assert.notEqual(wf(root,['evidence','inspect',handoff.bundle,'--attempt',id,'--pointer','/agent','--from',from]).code,0);
+  assert.match(wf(root,['skills','update','sample','--from',handoff.bundle]).err,/inside/);
+  const source=path.join(base,'source');fs.mkdirSync(source);fs.writeFileSync(path.join(source,'SKILL.md'),'# Sample\n');
+  ok(wf(root,['skills','update','sample','--from',source]));
+  assert.equal(fs.readFileSync(path.join(root,'.workflow','skills','sample','SKILL.md'),'utf8'),'# Sample\n');
+  assert.match(wf(root,['skills','update','sample','--from',path.join(source,'SKILL.md')]).err,/not a regular folder/);
+  assert.notEqual(wf(root,['lesson','inspect',handoff.bundle,'--attempt',id]).code,0,'inspection belongs to evidence, not lesson dispatch');
+  for(const command of [`wf evidence inspect ${handoff.bundle} --attempt ${id} --pointer '/agent'`,`/usr/local/bin/wf evidence inspect ${handoff.bundle} --attempt ${id}`,`wf evidence inspect ${handoff.bundle} --attempt ${id} > /tmp/out`]) {
+    const input={cwd:root,tool_input:{command}};assert.ok(check(input));
   }
 });
