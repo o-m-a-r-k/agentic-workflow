@@ -1,7 +1,8 @@
+import { mkdirStateDirectory } from './state-folders.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { ENGINE_VERSION, SCHEMA_VERSION, WfError, canonical, now, refuse, sha256, withFileLock } from './util.mjs';
-import { prepareWrite, touch, writeAnchor, writeNoFollow } from './evidence.mjs';
+import { prepareWrite, touch, withEvidenceTransaction, writeAnchor, writeNoFollow } from './evidence.mjs';
 
 // Opens an attempt for this process: verifies its evidence (chain, anchor, every recorded file) once, refusing on any
 // difference. Every command that reads or writes an attempt goes through here (`openState`, the first `append`).
@@ -42,6 +43,9 @@ function lastEntry(root, id) {
 }
 
 export function readLedger(root, id) {
+  return withEvidenceTransaction(root, id, () => readLedgerLocked(root, id));
+}
+function readLedgerLocked(root, id) {
   const file = ledgerFile(root, id);
   if (!fs.existsSync(file)) throw new WfError(`unknown attempt ${id}`);
   const lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean);
@@ -66,12 +70,15 @@ export function readLedger(root, id) {
 
 // Appends are serialised per attempt, so concurrent commands never interleave or fork the chain.
 export function append(root, id, type, data = {}, actor = null) {
+  return withEvidenceTransaction(root, id, () => appendLocked(root, id, type, data, actor));
+}
+function appendLocked(root, id, type, data, actor) {
   const file = ledgerFile(root, id);
   // A re-baseline is the one entry appended to an attempt that does not verify: `wf verify --accept-changes` has just
   // checked its chain and anchor and shown the owner every difference.
   if (type !== 'evidence.rebaselined') openEvidence(root, id);
   prepareWrite(file);
-  fs.mkdirSync(path.dirname(file), { recursive: true });
+  mkdirStateDirectory(path.dirname(file), { recursive: true });
   return withFileLock(`${file}.lock`, () => {
     const last = fs.existsSync(file) ? lastEntry(root, id) : null;
     const entry = { seq: (last?.seq ?? 0) + 1, at: now(), type, actor, data, prev: last?.hash ?? null };
@@ -138,6 +145,7 @@ export function reduce(entries) {
     exports: [],
     review: null,
     reviews: [],
+    reviewParts: [],
     baseMerges: [],
     accepted: null,
     holds: [],
@@ -298,6 +306,9 @@ export function reduce(entries) {
         break;
       case 'subagents.attributed':
         for (const c of d.children ?? []) if (!s.subagents.some((y) => y.agentId === c.agentId)) s.subagents.push({ ...c, parentHandoff: d.handoff, at: e.at });
+        break;
+      case 'review.part.recorded':
+        s.reviewParts.push({ ...d, at: e.at });
         break;
       case 'review.recorded':
         s.review = { ...d, at: e.at };

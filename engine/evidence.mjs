@@ -1,3 +1,4 @@
+import { mkdirStateDirectory } from './state-folders.mjs';
 // Evidence integrity: a manifest of every evidence file in the hash-chained ledger, write protection, verification at
 // every use, a chain-head anchor outside the evidence tree, repair (re-baseline) and release (prune) through the engine.
 //
@@ -23,10 +24,46 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
-import { canonical } from './util.mjs';
-import { isInside, touchesEvidence } from './paths.mjs';
+import { assertSafeId, canonical, refuse } from './util.mjs';
+import { canonical as canonicalPath, isInside, touchesEvidence } from './paths.mjs';
 
 const hashBuf = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
+
+// Named failure: concurrent review closures exposed raw files before their manifest entries existed.
+// Serialize short evidence transactions and readers; this lock never expires a live or uncertain owner by age.
+const evidenceTransactions = new Set();
+export const transactionSeams = { afterCollision: null };
+export function withEvidenceTransaction(root, id, fn) {
+  assertSafeId(id, 'attempt');
+  // Named failure: a linked runner directory prevented even read-only diagnosis of a refused launch.
+  // Evidence transactions have their own control directory, independent of the runner's control paths.
+  const realRoot = fs.realpathSync(root), file = path.join(realRoot, '.wf-worktrees', '_transactions', `${id}.lock`);
+  if (canonicalPath(file) !== file) throw refuse('evidence transaction control path resolves outside its recorded location');
+  if (evidenceTransactions.has(file)) return fn();
+  mkdirStateDirectory(path.dirname(file), { recursive: true });
+  const token = crypto.randomUUID(), deadline = Date.now() + 10000, sleeper = new Int32Array(new SharedArrayBuffer(4));
+  for (;;) {
+    try { writeNoFollow(file, JSON.stringify({ pid: process.pid, token }), { exclusive: true }); break; }
+    catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      transactionSeams.afterCollision?.(file);
+      const current = readRegular(file);
+      // Named failure: the owner can release its lock between EEXIST and our no-follow read.
+      // Retry a missing entry only; links, unreadable entries and uncertain owners still fail closed.
+      if (!current && fs.lstatSync(file, { throwIfNoEntry: false })) throw refuse('evidence transaction lock is unreadable; reconcile its owner before cleanup');
+      if (Date.now() > deadline) throw refuse('evidence transaction is still locked; reconcile its owner before cleanup, never expire it by age');
+      Atomics.wait(sleeper, 0, 0, 20);
+    }
+  }
+  evidenceTransactions.add(file);
+  try { return fn(); }
+  finally {
+    evidenceTransactions.delete(file);
+    const current = readRegular(file);
+    if (!current || JSON.parse(current.bytes).token !== token) throw refuse('evidence transaction ownership changed; retain the lock for diagnosis');
+    fs.unlinkSync(file);
+  }
+}
 
 // ---- no-follow primitives (named finding, 0.1.21 review: chmod, chflags and writes followed a symlink planted at an
 // evidence path, so the engine could chmod, unflag or overwrite an arbitrary file outside the evidence) ----
@@ -187,7 +224,7 @@ export function protectionLayers(root) {
   const file = path.join(dir, `probe-${process.pid}`);
   const out = [];
   try {
-    fs.mkdirSync(dir, { recursive: true });
+    mkdirStateDirectory(dir, { recursive: true });
     assertRealFolders(dir, root);
     writeNoFollow(file, 'x', { exclusive: true });
     chmodNoFollow(file, 0o444);
@@ -441,7 +478,7 @@ export function writeAnchor(root, id, entry, extra = {}) {
   // verification refuses the attempt (anchor not a regular file, or head mismatch).
   try {
     assertRealFolders(path.dirname(file), root);
-    fs.mkdirSync(path.dirname(file), { recursive: true });
+    mkdirStateDirectory(path.dirname(file), { recursive: true });
     assertRealFolders(path.dirname(file), root);
     const st = fs.lstatSync(file, { throwIfNoEntry: false });
     if (st && !st.isFile()) return;
@@ -474,7 +511,7 @@ function writeCache(root, id, cache) {
   try {
     const f = statCacheFile(root, id);
     assertRealFolders(path.dirname(f), root);
-    fs.mkdirSync(path.dirname(f), { recursive: true });
+    mkdirStateDirectory(path.dirname(f), { recursive: true });
     writeNoFollow(f, JSON.stringify({ files: Object.fromEntries(cache) }));
   } catch {}
 }
@@ -612,6 +649,9 @@ export function recordFiles(root, id, rels, appendFn, type = 'evidence.recorded'
 
 // The first open of an attempt in this process: verify, adopt a pre-manifest attempt once, snapshot, unlock folders.
 export function touch(root, id, appendFn) {
+  return withEvidenceTransaction(root, id, () => touchLocked(root, id, appendFn));
+}
+function touchLocked(root, id, appendFn) {
   const key = `${root}\0${id}`;
   const prev = touched.get(key);
   if (prev && (prev.verified === 'full' || level === 'quick')) return [];
@@ -640,8 +680,9 @@ export function touch(root, id, appendFn) {
 export function seal(appendFn, only = null) {
   for (const t of touched.values()) {
     if (only && (t.root !== only.root || t.id !== only.id)) continue;
+    withEvidenceTransaction(t.root, t.id, () => {
     const dir = attemptDirOf(t.root, t.id);
-    if (!fs.existsSync(dir)) continue;
+    if (!fs.existsSync(dir)) return;
     const lite = loadLedgerLite(t.root, t.id);
     const mine = (rel) => {
       const run = /^gate\/([^/]+)\//.exec(rel)?.[1];
@@ -657,6 +698,7 @@ export function seal(appendFn, only = null) {
       rewritten.delete(path.join(dir, rel));
     }
     if (!only) lockDirs(t.root, t.id);
+    });
   }
 }
 
@@ -728,7 +770,7 @@ export function releaseAttempt(root, id, reason) {
   if (!st?.isDirectory()) throw new LinkRefused(`${dir} is ${st ? 'a symlink or not a folder' : 'missing'}; nothing released`);
   const dest = path.join(evidenceRootOf(root), 'released', `${id}-${Date.now()}`);
   assertRealFolders(path.dirname(dest), evidenceRootOf(root));
-  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  mkdirStateDirectory(path.dirname(dest), { recursive: true });
   chmodNoFollow(dir, 0o755, { dir: true });
   fs.renameSync(dir, dest);
   writeAnchor(root, id, head, { released: true, at: new Date().toISOString(), reason });

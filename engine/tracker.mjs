@@ -1,3 +1,4 @@
+import { mkdirStateDirectory } from './state-folders.mjs';
 import { scopeFindings } from './scope-decisions.mjs';
 import fs from 'node:fs';
 import { channelOf } from './channels.mjs';
@@ -138,7 +139,7 @@ export function writeDeliveredComment(root, cfg, state) {
   const c = deliveredComment(root, cfg, state);
   if (!c) return null;
   prepareWrite(commentFile(root, state.id));
-  fs.mkdirSync(path.dirname(commentFile(root, state.id)), { recursive: true });
+  mkdirStateDirectory(path.dirname(commentFile(root, state.id)), { recursive: true });
   writeNoFollow(commentFile(root, state.id), c.body);
   return commentFile(root, state.id);
 }
@@ -283,7 +284,7 @@ async function recordFromTranscript(root, cfg, state, options, event, pending, a
   const uuid = parseJson(read.result)?.uuid ?? null;
   const ids = [state.item, ...(uuid ? [uuid] : [])];
   const dir = path.join(root, '.wf-worktrees', state.id, '_host');
-  fs.mkdirSync(dir, { recursive: true });
+  mkdirStateDirectory(dir, { recursive: true });
   const capture = path.join(dir, `${event}-${tools.read}-${read.resultLine}.json`);
   writeNoFollow(capture, read.result);
   let comments = null;
@@ -765,7 +766,7 @@ export async function performTracker(root, cfg, state) {
     }
     const file = path.join(attemptDir(root, s.id), 'tracker', `${event}-${via}-${now().replace(/[:.]/g, '-')}.json`);
     prepareWrite(file);
-    fs.mkdirSync(path.dirname(file), { recursive: true });
+    mkdirStateDirectory(path.dirname(file), { recursive: true });
     writeNoFollow(file, `${JSON.stringify(raw, null, 2)}\n`);
     s = await recordTracker(root, cfg, s, { event, capture: file, engineCapture: true });
     performed.push(event);

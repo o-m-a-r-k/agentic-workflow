@@ -1,3 +1,4 @@
+import { mkdirStateDirectory } from './state-folders.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { adapterLocation, attemptAdapter, repoDir } from './config.mjs';
@@ -78,7 +79,7 @@ export function reviewRules(root, trusted, state, changed) {
       const file = path.join(attemptDir(root, state.id), 'rules', `${sha256(d.text).slice(0, 12)}-${path.posix.basename(d.doc)}`);
       if (!fs.existsSync(file)) {
         prepareWrite(file);
-        fs.mkdirSync(path.dirname(file), { recursive: true });
+        mkdirStateDirectory(path.dirname(file), { recursive: true });
         writeNoFollow(file, d.text);
       }
       read.push(file);

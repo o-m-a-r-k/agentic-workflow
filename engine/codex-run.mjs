@@ -12,8 +12,9 @@ import { actor, openState, treeHashes } from './attempt.mjs';
 import { assertRuntimeLaunch } from './runtime-policy.mjs';
 import { adapterFileAtCommit, trustedAdapter } from './config.mjs';
 import { append, loadState } from './ledger.mjs';
-import { readRegular, seal } from './evidence.mjs';
+import { readRegular, seal, withEvidenceTransaction } from './evidence.mjs';
 import { reviewDocumentProblems } from './rules.mjs';
+import { isCurrentReviewer, reviewSnapshot } from './review-groups.mjs';
 import { roleInstructions, ROLE_TOOLS } from './onboard.mjs';
 import { roleProgress, roleReport, ROLE_HEARTBEAT_MS } from './role-progress.mjs';
 import { assertPlainGit, canonical, git, refuse, sha256, withFileLock, writeJson } from './util.mjs';
@@ -26,7 +27,8 @@ export async function runRole(root, options) {
   assertRuntimeLaunch(state, h);
   const runtime = h.runtime, label = runtime === 'codex' ? 'Codex' : 'Claude';
   if (state.activeHold) throw refuse(`this attempt is on hold: ${state.activeHold.reason}`);
-  if (h.role === 'reviewer' && state.handoffs.filter((h) => h.role === 'reviewer').at(-1)?.bundle !== h.bundle) throw refuse('only the current reviewer handoff can be launched');
+  if (h.role === 'reviewer' && !isCurrentReviewer(state, h)) throw refuse('only the current reviewer handoff or its frozen group members can be launched');
+  if (h.reviewGroup && h.reviewGroup.snapshot !== reviewSnapshot(state)) throw refuse('review group obligations changed before launch; create a fresh group');
   if (h.tree && canonical(treeHashes(state)) !== canonical(h.tree)) throw refuse('the handed tree changed before launch; create a fresh handoff');
   // Named failure: the shared launcher accidentally prohibited inherited implementer/tester models.
   if (['planner', 'reviewer'].includes(h.role) && !h.model) throw refuse('this handoff pins no runtime model; run `wf models refresh --attempt <id>`, then create a fresh handoff');
@@ -36,6 +38,7 @@ export async function runRole(root, options) {
     const handed = readRegular(h.bundle);
     if (!handed) throw refuse('the frozen reviewer bundle is unavailable before native launch');
     const bundle = JSON.parse(handed.bytes.toString('utf8'));
+    if (h.reviewGroup && sha256(handed.bytes) !== h.reviewGroup.bundleSha256) throw refuse('review group bundle changed from its frozen hash before launch');
     const problems = reviewDocumentProblems(bundle);
     if (problems.length) throw refuse(`review readiness refused before native launch:\n  - ${problems.join('\n  - ')}`);
   }
@@ -62,9 +65,12 @@ export async function runRole(root, options) {
   const launchLock = path.join(root, '.wf-worktrees', state.id, '_runner', path.basename(h.bundle) + '.launch.lock');
   if (canonicalPath(launchLock) !== path.join(fs.realpathSync(root), '.wf-worktrees', state.id, '_runner', path.basename(h.bundle) + '.launch.lock')) throw refuse('native launch control path resolves outside its recorded location');
   withFileLock(launchLock, () => {
+    withEvidenceTransaction(root, state.id, () => {
     if (loadState(root, state.id).handoffs.find((x) => x.bundle === h.bundle)?.launch) throw refuse('this handoff was already launched; create a fresh handoff, never reuse a review round');
     writeJson(file, receipt);
     append(root, state.id, 'agent.launch.requested', { handoff: h.bundle, file, sha256: sha256(JSON.stringify(receipt, null, 2) + '\n') }, actor(options));
+    seal(append, { root, id: state.id });
+    });
   });
   seal(append);
   const env = { ...process.env };

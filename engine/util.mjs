@@ -1,3 +1,4 @@
+import { mkdirStateDirectory } from './state-folders.mjs';
 import crypto from 'node:crypto';
 import { prepareWrite, writeNoFollow } from './evidence.mjs';
 import fs from 'node:fs';
@@ -84,7 +85,7 @@ export function readJson(file) {
 
 export function writeJson(file, value) {
   prepareWrite(file);
-  fs.mkdirSync(path.dirname(file), { recursive: true });
+  mkdirStateDirectory(path.dirname(file), { recursive: true });
   writeNoFollow(file, `${JSON.stringify(value, null, 2)}\n`);
 }
 
@@ -104,7 +105,7 @@ export function writeImmutable(file, content) {
     return file;
   }
   prepareWrite(file);
-  fs.mkdirSync(path.dirname(file), { recursive: true });
+  mkdirStateDirectory(path.dirname(file), { recursive: true });
   writeNoFollow(file, content, { mode: 0o444, exclusive: true });
   return file;
 }
@@ -307,7 +308,7 @@ export function assertSafeId(value, what = 'id') {
 
 // Exclusive file lock: O_EXCL create, stale when the holder pid is gone. Synchronous wait with a deadline.
 export function withFileLock(file, fn, { timeoutMs = 10000 } = {}) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
+  mkdirStateDirectory(path.dirname(file), { recursive: true });
   const deadline = Date.now() + timeoutMs;
   const sleeper = new Int32Array(new SharedArrayBuffer(4));
   for (;;) {

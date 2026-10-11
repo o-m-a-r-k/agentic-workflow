@@ -1,3 +1,4 @@
+import { mkdirStateDirectory } from './state-folders.mjs';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -71,7 +72,7 @@ export function writeSecret(root, cfg, entry, value) {
     if (lines.length && lines.at(-1) === '') lines.pop();
     lines.push(`${entry.key}=${quoted}`, '');
   }
-  fs.mkdirSync(path.dirname(file), { recursive: true });
+  mkdirStateDirectory(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, lines.join('\n'), { mode: 0o600 });
   fs.chmodSync(file, 0o600);
 }

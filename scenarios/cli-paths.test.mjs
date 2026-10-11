@@ -22,10 +22,11 @@ const OPTIONS = {
   capture: (v, id) => ['tracker', 'record', '--event', 'admitted', '--attempt', id, ...v('capture')],
   'summary-file': (v, id) => ['deliver', '--attempt', id, ...v('summary-file')],
   closure: (v, id) => ['review', '--attempt', id, ...v('closure')],
+  division: (v, id) => ['handoff', 'reviewer', '--agent', 'divided', '--attempt', id, ...v('division')],
   'issue-file': (v) => ['entry', '--item', 'ENG-299', ...v('issue-file')],
   from: (v) => ['skills', 'update', 'x', ...v('from')],
 };
-const FILE_INPUTS = new Set(['file', 'capture', 'summary-file', 'closure', 'issue-file']);
+const FILE_INPUTS = new Set(['file', 'capture', 'summary-file', 'closure', 'division', 'issue-file']);
 
 function fixture() {
   const { base, root } = singleRepoProject('cli-paths', { gate: { steps: [] } });

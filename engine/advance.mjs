@@ -1,3 +1,4 @@
+import { mkdirStateDirectory } from './state-folders.mjs';
 // Named failure: owner chats manually coordinated every review/gate transition and ambiguous terminal result.
 // Foreground only: the owning host retains this execution handle. No adoption, override, retry or delivery.
 import fs from 'node:fs';
@@ -12,9 +13,10 @@ import { runGate } from './gate.mjs';
 import { runRole } from './codex-run.mjs';
 import { readRegular, prepareWrite, writeNoFollow, forget, setVerifyLevel } from './evidence.mjs';
 import { isPidAlive, refuse, sessionIdentity } from './util.mjs';
+import { currentReviewGroup, isCurrentReviewer, reviewSnapshot } from './review-groups.mjs';
 
-export async function advance(root, options) {
-  const allowed = ['_', 'attempt', 'root', 'runtime', 'json', 'once', 'until-owner', 'max-steps'];
+export async function advance(root, options, { groupAgent = null } = {}) {
+  const allowed = ['_', 'attempt', 'root', 'runtime', 'json', 'once', 'until-owner', 'max-steps', 'parallel', 'reviewers', 'division'];
   for (const key of Object.keys(options)) if (!allowed.includes(key)) throw refuse(`advance does not accept --${key}; it never overrides workflow decisions`);
   if (options._?.length > 1) throw refuse('advance takes no positional action or override');
   if (Boolean(options.once) === Boolean(options['until-owner'])) throw refuse('choose --once or --until-owner');
@@ -30,7 +32,7 @@ export async function advance(root, options) {
   const lock = path.join(root, '.wf-worktrees', id, '_runner', 'advance.lock');
   if (canonicalPath(lock) !== path.join(fs.realpathSync(root), '.wf-worktrees', id, '_runner', 'advance.lock')) throw refuse('runner control path resolves outside its recorded location');
   prepareWrite(lock);
-  fs.mkdirSync(path.dirname(lock), { recursive: true });
+  mkdirStateDirectory(path.dirname(lock), { recursive: true });
   const token = randomUUID(), record = { pid: process.pid, token, owner };
   // A control lock never expires by age; stale locks require explicit reconciliation and cleanup.
   for (;;) {
@@ -52,7 +54,17 @@ export async function advance(root, options) {
   try {
     for (let n = 0; n < limit; n++) {
       const state = verifiedState();
-      const decision = nextDecision(root, state);
+      let decision = nextDecision(root, state);
+      // Explicit `handoff run` of a group is its launch authorization; ordinary advance never adopts an unknown run.
+      if (groupAgent && decision.kind === 'review' && decision.status === 'owner' && decision.handoff) {
+        const group = currentReviewGroup(state), integration = group?.integration;
+        if (integration?.agent === groupAgent && !integration.launch && isCurrentReviewer(state, integration) &&
+            integration.reviewGroup.snapshot === reviewSnapshot(state) &&
+            decision.blockers.length === 1 && decision.blockers[0] === 'existing handoff has no native receipt; it may already be running externally' &&
+            group.members.every(member => !member.launch || (member.launch.status === 'completed' && state.reviewParts.some(p => p.handoff === member.bundle)))) {
+          decision = { ...decision, status: 'ready', blockers: [] };
+        }
+      }
       if (cancelled) return result('stopped', decision, 1);
       if (state.owner !== owner) return result('owner-required', { ...decision, status: 'blocked', blockers: ['attempt ownership changed'] });
       if (decision.status !== 'ready') { say(decision.blockers.join('; ') || decision.guidance); return result(operations.length ? 'advanced' : 'owner-required', decision); }
@@ -64,10 +76,26 @@ export async function advance(root, options) {
           if (!runtime) return result('owner-required', { ...decision, status: 'owner', blockers: ['choose --runtime claude or codex for the fresh reviewer'] });
           const warning = outsideWarning(root, state);
           if (warning) say(warning);
-          const created = handoff(root, 'reviewer', { attempt: id, agent: `runner-${randomUUID()}`, runtime });
+          const created = handoff(root, 'reviewer', { attempt: id, agent: `runner-${randomUUID()}`, runtime,
+            ...(options.parallel ? { parallel: true } : {}), ...(options.reviewers !== undefined ? { reviewers: options.reviewers } : {}), ...(options.division ? { division: options.division } : {}) });
           h = created.state.handoffs.at(-1);
         }
         if (options.runtime && h.runtime !== options.runtime) return result('owner-required', { ...decision, status: 'owner', blockers: ['existing handoff belongs to a different runtime'] });
+        if (h.reviewGroup) {
+          const group = currentReviewGroup(verifiedState());
+          const workers = group.members.filter(member => member.reviewGroup.slot !== 'integration');
+          say(`starting ${workers.length} scoped reviewers in parallel; integration follows their immutable reports`);
+          const processes = await Promise.allSettled(workers.map(async member => {
+            const before = verifiedState();
+            if ((before.reviewParts ?? []).some(p => p.handoff === member.bundle)) return { member, reused: true, status: 'recorded-part' };
+            const process = await runRole(root, { attempt: id, agent: member.agent });
+            const part = verifiedState().reviewParts.find(p => p.handoff === member.bundle);
+            return { member, process, status: process.status === 'completed' && part ? 'recorded-part' : 'incomplete' };
+          }));
+          for (const [index, process] of processes.entries()) operations.push({ kind: 'scoped-review', agent: workers[index].agent,
+            ...(process.status === 'fulfilled' ? process.value : { status: 'refused', error: process.reason.message }) });
+          if (cancelled || processes.some(p => p.status !== 'fulfilled' || p.value.status !== 'recorded-part')) return result('owner-required', { ...nextDecision(root, verifiedState()), status: 'owner', blockers: ['parallel review is incomplete; completed reports are retained, and no gate or integration is authorized'] }, 1);
+        }
         say(`starting ${h.round} with ${h.runtime}; retain this execution handle`);
         const processResult = await runRole(root, { attempt: id, agent: h.agent });
         const operation = { kind: h.round, runtime: h.runtime, handoff: h.bundle, process: processResult, workflow: 'verification-pending', closure: null };

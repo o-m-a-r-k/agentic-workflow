@@ -1,4 +1,6 @@
+import { mkdirStateDirectory } from './state-folders.mjs';
 import { blockingFindings, waivedFinding, pendingScope, scopeProblems, scopeHandoffProblems, scopeGuidance, scopeFindings, disposition, effectiveDiscoveries } from './scope-decisions.mjs';
+import { GROUP_INSTRUCTIONS, assignedVerdicts, changedWeights, currentReviewGroup, divideReview, fileCoverage, findingIds, impactCatalog, isCurrentReviewer, mergeParts, reviewSnapshot } from './review-groups.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -10,7 +12,7 @@ import { defaultRuntime } from './runtime-policy.mjs';
 import { ADAPTER_DIR, adapterFileAtCommit, agentTypeFor, attemptAdapter, declared, loadConfig, repoDir, roleClass, trustedAdapter } from './config.mjs';
 import { focusedSkips, gateBusy, gatePassedForCurrentTree, gateRunningRefusal, screenshots, withReviewLock } from './gate.mjs';
 import { append, attemptDir, evidenceRoot, keptFiles, listAttempts, loadState, openEvidence } from './ledger.mjs';
-import { assertUnchanged, readEvidenceFile } from './evidence.mjs';
+import { assertUnchanged, readEvidenceFile, seal, withEvidenceTransaction } from './evidence.mjs';
 import { implementerAcks, lessonPrompts, lessonVerdicts, owesLesson, recur, relevantLessons } from './lessons.mjs';
 import { canonical as canonicalPath, isInside, touchesEvidence } from './paths.mjs';
 import { changedForStep, deliveryOrder, impact, inside, packageOf } from './topology.mjs';
@@ -371,6 +373,9 @@ function skillProblems(root, cfg, role, runtime, state, changed) {
 
 export function handoff(root, role, options) {
   rejectModelOverrides(options);
+  if (options.parallel !== undefined && options.parallel !== true) throw refuse('--parallel is a flag');
+  if (options.reviewers !== undefined && options.parallel !== true && options.division === undefined) throw refuse('--reviewers needs --parallel or --division');
+  if ((options.parallel !== undefined || options.division !== undefined || options.reviewers !== undefined) && role !== 'reviewer') throw refuse('review division options apply only to reviewer handoffs');
   const state = openState(root, options);
   // Rules, skills, roles, classes and agent types come from the adapter at the attempt's base, so a ticket cannot drop
   // its own rules or pick its own class.
@@ -434,6 +439,9 @@ export function handoff(root, role, options) {
   if (role === 'implementer' && state.impact?.owed) throw refuse(`amendment ${state.impact.owed.amendment} ("${state.impact.owed.reason}") added scope (${describeScope(state.impact.owed.scope)}) without an impact update; no implementer starts on it until the impact map covers it`, 'run `wf criteria amend --file <f> --reason "impact of the added scope"` with an `impact` addendum: its new queries and survey entries, and `changes` (each citing the added criteria or work items) with consumers, flows, contracts and suites; or `impact: { unchanged: "<why the amendment adds no new element>" }`');
   if (options.sweep !== undefined && role !== 'implementer') throw new WfError('--sweep applies to implementer handoffs only');
   const changed = Object.fromEntries(Object.keys(state.repos).map((r) => [r, changedFiles(state, r)]));
+  const preparedTree = role === 'reviewer' ? treeHashes(state) : null;
+  // Named failure: division and symbol derivation repeated every impact query within one frozen handoff.
+  const reviewQueries = role === 'reviewer' && state.impact ? rerun(root, cfg, state) : null;
   const skillIssues = skillProblems(root, trusted, role, runtime, state, changed);
   if (skillIssues.length) throw refuse(skillIssues.join('\n'));
   let work = null;
@@ -468,7 +476,7 @@ export function handoff(root, role, options) {
 
   const selected = ['planner', 'implementer', 'reviewer'].includes(role) ? relevantLessons(root, role, state, changed, { work }) : null;
   const n = state.handoffs.length + 1;
-  const file = path.join(attemptDir(root, state.id), 'handoffs', `${String(n).padStart(2, '0')}-${role}.json`);
+  let file = path.join(attemptDir(root, state.id), 'handoffs', `${String(n).padStart(2, '0')}-${role}.json`);
   const appendix = cfg.roles?.[role]?.appendix ? path.resolve(root, ADAPTER_DIR, cfg.roles[role].appendix) : null;
   const bundle = {
     attempt: state.id,
@@ -515,7 +523,7 @@ export function handoff(root, role, options) {
     impact: impact(trusted, changed),
     // I-26: the planner's survey and impact map with every addendum. For the reviewer, the inventory to sample and the
     // callers of symbols the final diff declares or edits that no listed file covers: each needs a verdict.
-    impactMap: state.impact && ['implementer', 'reviewer'].includes(role) ? impactMapFor(root, cfg, state, role) : undefined,
+    impactMap: state.impact && ['implementer', 'reviewer'].includes(role) ? impactMapFor(root, cfg, state, role, reviewQueries) : undefined,
     // I-25: the fix round's pattern sweeps (implementer: answer each in a commit trailer; reviewer: the answers, and the
     // hits then and now).
     sweep: role === 'implementer' && sweeps ? sweeps : undefined,
@@ -563,9 +571,69 @@ export function handoff(root, role, options) {
     const problems = reviewDocumentProblems(bundle);
     if (problems.length) throw refuse(`review readiness refused:\n  - ${problems.join('\n  - ')}`);
   }
+  // Named failure: independent flows waited behind one reviewer, or file-count splits omitted shared dependencies.
+  let division = null, groupMembers = null;
+  if (role === 'reviewer' && (options.parallel === true || options.division !== undefined)) {
+    const proposed = options.division === undefined ? null : JSON.parse(readOnce(options.division));
+    division = divideReview(bundle, reviewQueries ?? {}, { reviewers: Number(options.reviewers ?? 2), division: proposed, weights: changedWeights(state, bundle) });
+    if (division.mode === 'parallel') {
+      const id = `review-${n}`, snapshot = reviewSnapshot(state), members = [...division.slices.map(s => `${agent}-${s.id}`), agent];
+      const planFile = path.join(attemptDir(root, state.id), 'review', `division-${n}.json`);
+      const historyFile = path.join(attemptDir(root, state.id), 'review', `impact-history-${n}.json`);
+      const planText = JSON.stringify(division, null, 2) + '\n';
+      const historyText = JSON.stringify(bundle.impactMap, null, 2) + '\n';
+      const compact = { ...bundle.impactMap, survey: undefined, impact: undefined, addenda: undefined,
+        catalog: impactCatalog(bundle.impactMap), history: { file: historyFile, sha256: sha256(historyText) } };
+      groupMembers = division.slices.map((slice, index) => {
+        const memberAgent = `${agent}-${slice.id}`;
+        assertSafeId(memberAgent, 'reviewer');
+        if (authorsOf(root, state).has(memberAgent) || state.roles.reviewer.includes(memberAgent)) throw refuse(`reviewer ${memberAgent} is not fresh and independent`);
+        const memberFile = path.join(attemptDir(root, state.id), 'handoffs', `${String(n + index).padStart(2, '0')}-reviewer.json`);
+        const owned = new Set(slice.files);
+        return { file: memberFile, bundle: { ...bundle, agent: memberAgent,
+          criteria: [], criteriaContext: bundle.criteria, primaryFiles: slice.files,
+          changed: Object.fromEntries(Object.entries(bundle.changed).map(([repo, paths]) => [repo, paths.filter(p => owned.has(`${repo}:${p}`))])),
+          outsidePlan: bundle.outsidePlan?.filter(f => owned.has(f)) ?? null,
+          designSystem: bundle.designSystem ? { ...bundle.designSystem, hits: (bundle.designSystem.hits ?? []).filter(h => owned.has(h.file) || [...owned].some(f => f.endsWith(`:${h.file}`))) } : null,
+          impactMap: null, discovered: [], historicalReports: [], addedRepos: [], lessons: { ...bundle.lessons, apply: [] }, sweeps: [],
+          gate: { passedOnThisTree: false, screenshots: [], logs: [], reason: 'integration owns gate evidence' },
+          reviewGroup: { id, slot: slice.id, mode: 'scoped', snapshot, members, plan: { file: planFile, sha256: sha256(planText) } }, division,
+          reviewClosureFile: path.join(root, '.wf-worktrees', state.id, '_review', `closure-${n + index}.json`),
+          instructions: GROUP_INSTRUCTIONS + '\n\nApplicable documents and closure fields below are restricted to the handed assignment.\n' + bundle.instructions } };
+      });
+      file = path.join(attemptDir(root, state.id), 'handoffs', `${String(n + division.slices.length).padStart(2, '0')}-reviewer.json`);
+      Object.assign(bundle, { primaryFiles: division.integration.files, impactMap: compact, division,
+        reviewGroup: { id, slot: 'integration', mode: 'integration', snapshot, members, plan: { file: planFile, sha256: sha256(planText) } },
+        reviewClosureFile: path.join(root, '.wf-worktrees', state.id, '_review', `closure-${n + division.slices.length}.json`),
+        instructions: GROUP_INSTRUCTIONS + '\n\n' + bundle.instructions });
+      groupMembers.push({ file, bundle });
+      // Written inside the same gate lock as every group handoff; no partially prepared group can authorize a gate.
+      division = { ...division, evidence: { planFile, planText, historyFile, historyText } };
+    }
+  }
   const record = () => {
+    if (preparedTree && canonical(treeHashes(state)) !== canonical(preparedTree)) throw refuse('the tree changed while preparing the review handoff; prepare a fresh handoff');
+    if (groupMembers) {
+      return withEvidenceTransaction(root, state.id, () => {
+      if (reviewSnapshot(loadState(root, state.id)) !== reviewSnapshot(state)) throw refuse('review obligations changed while preparing the group; prepare a fresh handoff');
+      const { planFile, planText, historyFile, historyText } = division.evidence;
+      writeImmutable(planFile, planText); writeImmutable(historyFile, historyText);
+      const tree = treeHashes(state), patch = patchIds(state);
+      if (reviewOverride) append(root, state.id, 'review.override', { ...reviewOverride, agent }, actor(options));
+      for (const member of groupMembers) {
+        writeJson(member.file, member.bundle);
+        mkdirStateDirectory(path.dirname(member.bundle.reviewClosureFile), { recursive: true });
+        append(root, state.id, 'handoff', { ...(runtimeAuthority ? { runtimeAuthority, runtimeSelected: true, runtimeSelectionOwner: owner, authority: runtimeAuthority } : {}),
+          role, agent: member.bundle.agent, runtime, session: null, agentType, class: cls, effort, model, sourceClass, runtimeAdapterBase,
+          sessionModel: sessionModelNow, startPrompt: startPromptFor(member.file), work: null, bundle: member.file, tree, patch,
+          gate: gateNow.ok ? state.lastGate.runId : null, round: bundle.round,
+          reviewGroup: { ...member.bundle.reviewGroup, bundleSha256: sha256(JSON.stringify(member.bundle, null, 2) + '\n') } }, actor(options));
+      }
+      seal(append, { root, id: state.id });
+      });
+    }
     writeJson(file, bundle);
-    if (bundle.reviewClosureFile) fs.mkdirSync(path.dirname(bundle.reviewClosureFile), { recursive: true });
+    if (bundle.reviewClosureFile) mkdirStateDirectory(path.dirname(bundle.reviewClosureFile), { recursive: true });
     const tree = treeHashes(state);
     // Telemetry: implementers handed work and not closed (`wf handoff close`) while this reviewer starts: the tree may still move.
     const openImplementers = role === 'reviewer' ? state.implementers.filter((x) => !x.closedAt).map((x) => x.agent) : undefined;
@@ -593,17 +661,19 @@ export function handoff(root, role, options) {
   try {
     roleStale = runtime === 'claude' ? roleChangedSinceSessionStart(root, agentType, owning) : null;
   } catch {}
-  return { bundle: file, startPrompt: startPromptFor(file), agentType, agent, roleStale, sweeps, restrictions: restrictionWarnings(trusted, state), class: cls, effort, model, work: work?.id ?? null, lessons: bundle.lessons ? { ...bundle.lessons, filtered: selected.filtered } : null, state: loadState(root, state.id) };
+  return { bundle: file, startPrompt: startPromptFor(file), agentType, agent, roleStale, sweeps, division: division ? { ...division, evidence: undefined } : undefined,
+    members: groupMembers?.map(m => ({ agent: m.bundle.agent, slot: m.bundle.reviewGroup.slot, bundle: m.file, startPrompt: startPromptFor(m.file) })),
+    restrictions: restrictionWarnings(trusted, state), class: cls, effort, model, work: work?.id ?? null, lessons: bundle.lessons ? { ...bundle.lessons, filtered: selected.filtered } : null, state: loadState(root, state.id) };
 }
 
 const describeScope = (s) => [s.addedCriteria?.length ? `criteria added: ${s.addedCriteria.join(', ')}` : null, s.changedCriteria?.length ? `criteria changed: ${s.changedCriteria.join(', ')}` : null, s.addedRepos?.length ? `repos added: ${s.addedRepos.join(', ')}` : null, s.work ? 'work items replaced' : null].filter(Boolean).join('; ');
 
-function impactMapFor(root, cfg, state, role) {
+function impactMapFor(root, cfg, state, role, queryResults = null) {
   const recorded = Object.fromEntries(Object.entries(allRecordedQueries(state)).map(([id, q]) => [id, { query: q, hits: [state.impact.results?.[id], ...state.impact.addenda.map((a) => a.results?.[id])].find(Boolean)?.hits ?? null }]));
   const map = { survey: state.impact.survey, impact: state.impact.impact, addenda: state.impact.addenda, queries: recorded, rerun: `wf impact run --attempt ${state.id}` };
   if (role !== 'reviewer') return map;
   const inv = inventory(state);
-  return { ...map, inventory: inv, sampleSize: Math.min(10, inv.length), derived: deriveFromDiff(root, cfg, state) };
+  return { ...map, inventory: inv, sampleSize: Math.min(10, inv.length), derived: deriveFromDiff(root, cfg, state, { queryResults }) };
 }
 
 function sweepsForReviewer(root, cfg, state) {
@@ -799,7 +869,8 @@ export function recordReview(root, options) {
   } catch (error) {
     throw new WfError(`invalid JSON in ${options.closure}: ${error.message}`);
   }
-  const reviewerHandoff = state.handoffs.filter((h) => h.role === 'reviewer').at(-1);
+  const latestReviewer = state.handoffs.filter((h) => h.role === 'reviewer').at(-1);
+  const reviewerHandoff = latestReviewer?.reviewGroup ? state.handoffs.find(h => h.role === 'reviewer' && h.agent === closure.reviewer && isCurrentReviewer(state, h)) : latestReviewer;
   if (!reviewerHandoff) throw refuse('no reviewer handoff: run `wf handoff reviewer --agent <id>`');
   if (closure.reviewer !== reviewerHandoff.agent) throw refuse(`closure reviewer \`${closure.reviewer}\` is not the reviewer handed this attempt (\`${reviewerHandoff.agent}\`)`);
   if (!Array.isArray(closure.findings) || !Array.isArray(closure.criteria)) throw new WfError('closure needs `findings` and `criteria` lists');
@@ -830,7 +901,9 @@ export function recordReview(root, options) {
   } catch (error) {
     throw refuse(`the reviewer's bundle ${reviewerHandoff.bundle} cannot be read (${error.code ?? error.message}); no closure is judged without it`, `\`wf verify --attempt ${state.id}\`; hand a fresh reviewer the tree`);
   }
-  if (state.impact && !handed.impactMap) throw refuse(`the reviewer's bundle has no impact map although ${state.id} recorded one; no closure is judged without it`, 'hand a fresh reviewer the tree: `wf handoff reviewer --agent <new id>`');
+  if (reviewerHandoff.reviewGroup && hashFile(reviewerHandoff.bundle) !== reviewerHandoff.reviewGroup.bundleSha256) throw refuse('review group bundle changed from its frozen hash; create a fresh group');
+  if (reviewerHandoff.reviewGroup && reviewSnapshot(state) !== reviewerHandoff.reviewGroup.snapshot) throw refuse('review group obligations changed; create a fresh group on the new snapshot');
+  if (state.impact && !handed.impactMap && reviewerHandoff.reviewGroup?.mode !== 'scoped') throw refuse(`the reviewer's bundle has no impact map although ${state.id} recorded one; no closure is judged without it`, 'hand a fresh reviewer the tree: `wf handoff reviewer --agent <new id>`');
   let reads = { status: 'unverified', reason: provenance.reason ?? null };
   if (provenance.status === 'verified' && (handed.rules?.length || handed.skills?.length)) {
     const missing = unreadDocs(provenance.entries ?? readTranscript(provenance.transcript), handed.rules, handed.skills);
@@ -838,6 +911,47 @@ export function recordReview(root, options) {
     if (missing.length) throw refuse(`the reviewer's transcript shows no successful read of ${missing.length} document(s) its bundle lists:\n  - ${missing.join('\n  - ')}`, 'start a fresh reviewer round: `wf handoff reviewer --agent <new id>` with only the printed line; it reads every document under `rules` and `skills`');
     reads = { status: 'verified', reason: null };
   } else if (provenance.status === 'verified') reads = { status: 'verified', reason: 'nothing to read' };
+  if (reviewerHandoff.reviewGroup) {
+    findingIds(closure);
+    fileCoverage(handed.primaryFiles, closure.filesReviewed, reviewerHandoff.agent);
+    const primary = new Set(handed.primaryFiles);
+    assignedVerdicts((handed.outsidePlan ?? []).filter(f => primary.has(f)), closure.outsidePlan, 'file', 'outsidePlan');
+    assignedVerdicts((handed.designSystem?.hits ?? []).filter(h => primary.has(h.file) || [...primary].some(f => f.endsWith(`:${h.file}`))).map(h => h.id), closure.designHits, 'id', 'designHits');
+    if (reviewerHandoff.reviewGroup.mode === 'scoped') {
+      if (closure.criteria.length || closure.priorFindings?.length) throw refuse('scoped reviewers record only their assignment, never global criteria or prior-round findings');
+      if ((state.reviewParts ?? []).some(p => p.handoff === reviewerHandoff.bundle)) throw refuse('this scoped closure is already recorded; parts are immutable');
+      const issues = [...outsideVerdicts(handed.outsidePlan, closure, state.criteria).problems,
+        ...designVerdicts(handed.designSystem?.hits ?? [], closure).problems, ...ruleVerdicts(handed.rules ?? [], closure).problems];
+      if (issues.length) throw refuse('scoped closure refused: ' + issues.join('; '));
+      return withEvidenceTransaction(root, state.id, () => {
+      const current = loadState(root, state.id);
+      if (!isCurrentReviewer(current, reviewerHandoff) || reviewSnapshot(current) !== reviewerHandoff.reviewGroup.snapshot || canonical(treeHashes(current)) !== canonical(reviewerHandoff.tree)) throw refuse('review group changed before recording the scoped closure');
+      if (current.reviewParts.some(p => p.handoff === reviewerHandoff.bundle)) throw refuse('this scoped closure is already recorded; parts are immutable');
+      const raw = keepRaw(root, state.id, `review/part-${state.handoffs.indexOf(reviewerHandoff) + 1}.raw.json`, closureText);
+      append(root, state.id, 'review.part.recorded', { handoff: reviewerHandoff.bundle, group: reviewerHandoff.reviewGroup.id, closure, raw,
+        provenance: provenance.status, transcript: provenance.transcript ?? null, reads, tree: reviewerHandoff.tree }, closure.reviewer);
+      seal(append, { root, id: state.id });
+      return { state: loadState(root, state.id), part: true, reveal: null, toVerify: [] };
+      });
+    }
+    const interfaces = handed.division.integration.interfaces;
+    const inspected = Array.isArray(closure.interfacesReviewed) ? closure.interfacesReviewed : [];
+    if (inspected.length !== interfaces.length || new Set(inspected.map(i => i.id)).size !== interfaces.length || interfaces.some(i => !inspected.some(v => v.id === i.id && String(v.evidence ?? '').trim()))) throw refuse('integration closure needs direct evidence for every crossing interface exactly once');
+    const group = currentReviewGroup(state), parts = (state.reviewParts ?? []).filter(p => p.group === group.id);
+    for (const part of parts) readEvidenceFile(root, state.id, { path: part.raw.file, sha256: part.raw.sha256 });
+    closure = mergeParts(group, parts, closure);
+    fileCoverage(handed.division.files, closure.filesReviewed, 'combined review');
+    if (parts.some(p => p.provenance !== 'verified')) {
+      provenance.status = 'unverified'; provenance.reason = 'one or more scoped reviewers have unverified provenance';
+      reads = { status: 'unverified', reason: 'one or more scoped reviews are unverified' };
+    }
+    assignedVerdicts(state.criteria.map(c => c.id), closure.criteria, 'id', 'criteria');
+    const incomplete = closure.criteria.filter(c => !EVIDENCE_KINDS.has(c.evidence?.kind) ||
+      (['not-applicable', 'dropped-with-reason'].includes(c.evidence?.kind) ? !String(c.evidence.reason ?? '').trim() : !String(c.evidence?.ref ?? '').trim()));
+    if (incomplete.length) throw refuse('group criterion evidence is incomplete: ' + incomplete.map(c => c.id).join(', '));
+    const rules = ruleVerdicts(handed.rules ?? [], closure);
+    if (rules.problems.length) throw refuse('integration rule verdicts are incomplete: ' + rules.problems.join('; '));
+  }
   // Every lesson injected into the reviewer's bundle needs a verdict before the closure is recorded.
   const lv = lessonVerdicts(handed.lessons?.apply ?? [], closure);
   if (lv.problems.length) throw refuse(`closure refused: ${lv.problems.length} lesson(s) in your bundle have no valid verdict:\n  - ${lv.problems.join('\n  - ')}`, 'add `lessons: [{ "lesson": "<id>", "verdict": "complied|not-applicable|finding", "evidence": "...", "finding": "<finding id when a finding>" }]` and run `wf review --closure <file>` again');
@@ -867,6 +981,10 @@ export function recordReview(root, options) {
   if (revealed && canonical(revealed.closure.findings) !== canonical(closure.findings)) throw refuse('your own findings were recorded blind and cannot change after earlier rounds were revealed; only add `priorFindings`');
   if (revealed && canonical(revealed.closure.reportedIssues ?? []) !== canonical(closure.reportedIssues ?? [])) throw refuse('historical report verdicts were recorded blind and cannot change after earlier rounds were revealed; only add priorFindings');
   const revealNow = !revealed && earlierOpenFindings(state, round).length > 0;
+  return withEvidenceTransaction(root, state.id, () => {
+  const current = loadState(root, state.id);
+  if (canonical(treeHashes(current)) !== canonical(reviewerHandoff.tree)) throw refuse('the worktree changed before recording the review closure');
+  if (reviewerHandoff.reviewGroup && (!isCurrentReviewer(current, reviewerHandoff) || reviewSnapshot(current) !== reviewerHandoff.reviewGroup.snapshot)) throw refuse('review group changed before recording the integration closure');
   const n = state.reviews.filter((r) => r.handoff === round).length + 1;
   const tag = `${String(state.handoffs.indexOf(reviewerHandoff) + 1).padStart(2, '0')}-${n}`;
   const raw = keepRaw(root, state.id, `review/closure-${tag}.raw.json`, closureText);
@@ -886,7 +1004,9 @@ export function recordReview(root, options) {
     reveal = path.join(root, '.wf-worktrees', state.id, '_review', `prior-findings-${tag}.json`);
     safeWriteJson(root, reveal, { note: 'Findings earlier review rounds left open. Check each against the current code; add priorFindings to your closure.', findings: toVerify });
   }
+  seal(append, { root, id: state.id });
   return { state: after, reveal, toVerify };
+  });
 }
 
 // The review round handed last when no closure has been recorded for it, it was not refused, and the tree is still the
@@ -1499,7 +1619,7 @@ export function safeWrite(root, file, content) {
   const parent = path.dirname(path.resolve(file));
   const refused = `${file}: not written; its folder really lies in .wf-evidence/ (a symlink?)`;
   if (underEvidence(root, parent)) throw refuse(refused);
-  fs.mkdirSync(parent, { recursive: true });
+  mkdirStateDirectory(parent, { recursive: true });
   const parentReal = fs.realpathSync(parent);
   if (underEvidence(root, parentReal)) throw refuse(refused);
   const there = fs.lstatSync(file, { throwIfNoEntry: false });
@@ -1598,7 +1718,7 @@ export function exportScreenshots(root, state, to = null, { gate = false } = {})
     else names.set(name, f);
   }
   if (problems.length) throw refuse(`screenshots not exported:\n  - ${problems.join('\n  - ')}`);
-  fs.mkdirSync(parent, { recursive: true });
+  mkdirStateDirectory(parent, { recursive: true });
   const dir = fs.mkdtempSync(path.join(parent, `${gate ? 'gate' : 'screenshots'}-`));
   const dirReal = fs.realpathSync.native(dir);
   if (underEvidence(root, dir) || underEvidence(root, dirReal) || isInside(dir, attemptDir(root, state.id))) {
@@ -1920,6 +2040,13 @@ export function nextDecision(root, state) {
   if (Object.values(tree).some((t) => t.includes('+dirty')) || Object.keys(state.repos).every((n) => !changedFiles(state, n).length)) return result('implementation', 'owner', 'a committed change is required');
   if (gateBusy(root, state)) return result('gate', 'blocked', 'a gate is already running');
   const h = state.handoffs.filter((h) => h.role === 'reviewer').at(-1);
+  const group = currentReviewGroup(state);
+  if (group && !(state.reviews ?? []).some(r => r.handoff === group.integration.bundle)) {
+    const members = group.members.map(m => ({ agent: m.agent, slot: m.reviewGroup.slot, runtime: m.runtime,
+      status: m.launch?.status ?? 'unlaunched', recorded: (state.reviewParts ?? []).some(p => p.handoff === m.bundle) }));
+    if (members.some(m => ['starting', 'running'].includes(m.status))) return result('review', 'blocked', 'review group runtime outcome is pending or liveness is unknown; retain the original handle', { group: group.id, members });
+    if (members.some(m => m.status === 'failed' || (m.slot !== 'integration' && m.status === 'completed' && !m.recorded))) return result('review', 'owner', 'review group has a failed or incomplete member; diagnose before a fresh group', { group: group.id, members });
+  }
   // A blind closure can be recorded before same-round prior-finding verification finishes.
   if (h?.launch && ['starting', 'running'].includes(h.launch.status)) return result('review', 'blocked', 'runtime outcome is pending or liveness is unknown; recover the original handle, never duplicate it', { handoff: h.bundle, runtime: h.runtime });
   if (h?.launch?.status === 'failed') return result('review', 'owner', 'role launch failed; diagnose before a fresh handoff', { handoff: h.bundle, guidance: `reviewer ${h.agent} launch failed; create a fresh reviewer handoff after diagnosis; no review is running` });
@@ -2019,6 +2146,11 @@ function phaseAction(root, cfg, state) {
   const uncommittedWork = Object.values(tree).some((t) => t.includes('+dirty')) || Object.keys(state.repos).every((n) => !changedFiles(state, n).length);
   if (uncommittedWork) return `commit the change, then the code review: hand to ${fresh}; ${noGate}`;
   const inFlight = reviewInFlight(state);
+  const group = currentReviewGroup(state);
+  if (inFlight && group) {
+    const members = group.members.map(m => `${m.agent}: ${m.launch?.status ?? 'unlaunched'}${state.reviewParts.some(p => p.handoff === m.bundle) ? ', part recorded' : ''}`);
+    return `review group ${group.id}: ${members.join('; ')}; retain its original execution handle; if none launched, run \`wf handoff run --agent ${group.integration.agent}\`; no gate until integration records the complete review`;
+  }
   // Named failure I-44: a handoff without a process was presented as a running reviewer.
   if (inFlight?.runtime === 'codex') {
     if (!inFlight.launch) {

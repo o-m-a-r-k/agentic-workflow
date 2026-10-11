@@ -1,3 +1,4 @@
+import { mkdirStateDirectory } from './state-folders.mjs';
 import { askScope, decideScope, completeScopeTicket, scopeFindings } from './scope-decisions.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -72,6 +73,9 @@ Work
   wf scope ticket --finding REVIEWER:F1 --capture RAW.json
                                     raw tracker readback after owner-authorized ticket creation
   wf review --closure file.json     record the reviewer's closure
+  wf handoff reviewer --agent ID --parallel [--reviewers 2|3] [--division FILE]
+                                    divide recorded flows when separable; shared/unmapped code belongs to integration
+  wf review parts                   inspect immutable current-group scoped reports before integration
   wf accept                         accept the review
   wf summary --file summary.md      the owner's plain-language summary for the delivered comment
   wf deliver [--summary-file F] [--acknowledge-deferrals D2,D3]
@@ -267,7 +271,7 @@ export async function main(argv) {
 const FULL_VERIFY = new Set(['advance', 'accept', 'deliver', 'verify', 'review', 'tracker', 'export', 'shown', 'delivery', 'summary', 'handoff', 'models', 'gate', 'check', 'evidence']);
 
 const WRITE_OPTIONS = ['out', 'csv', 'handoffs-csv', 'html', 'dir', 'to', 'root'];
-const READ_OPTIONS = ['file', 'sweep', 'capture', 'comments', 'summary-file', 'closure', 'issue-file', 'from', 'comment-file'];
+const READ_OPTIONS = ['file', 'sweep', 'division', 'capture', 'comments', 'summary-file', 'closure', 'issue-file', 'from', 'comment-file'];
 const PATH_OPTIONS = [...WRITE_OPTIONS, ...READ_OPTIONS];
 const FOLDER_OPTIONS = new Set(['dir', 'to', 'root', 'from']);
 
@@ -392,7 +396,7 @@ async function dispatch(cmd, sub, positional, options) {
   if (cmd === 'install') {
     const bin = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'wf');
     const dir = path.resolve(String(options.dir ?? path.join(process.env.HOME, '.local', 'bin')));
-    fs.mkdirSync(dir, { recursive: true });
+    mkdirStateDirectory(dir, { recursive: true });
     const link = path.join(dir, 'wf');
     if (fs.existsSync(link) || fs.lstatSync(link, { throwIfNoEntry: false })) fs.rmSync(link);
     fs.symlinkSync(bin, link);
@@ -641,6 +645,14 @@ async function dispatch(cmd, sub, positional, options) {
     }
     case 'handoff': {
       if (sub === 'run') {
+        const state = openState(root, options);
+        const member = state.handoffs.filter(h => h.agent === options.agent).at(-1);
+        if (member?.reviewGroup?.slot === 'integration') {
+          const { advance } = await import('./advance.mjs');
+          const result = await advance(root, { _: ['advance'], attempt: state.id, once: true, json: options.json, runtime: member.runtime }, { groupAgent: member.agent });
+          print(options, `${result.status}: ${result.decision?.blockers?.join('; ') || result.decision?.guidance || result.error}`, result);
+          return result.exitCode;
+        }
         const { runRole } = await import('./codex-run.mjs');
         const result = await runRole(root, options);
         print(options, `Native ${result.agent}: ${result.status}${result.session ? ` (${result.session})` : ''}`, result);
@@ -671,6 +683,8 @@ async function dispatch(cmd, sub, positional, options) {
         // To the owner on stderr, never into the reviewer's one-line prompt on stdout.
         const w = outsideWarning(root, r.state);
         if (w) process.stderr.write(`warning: ${w}\n`);
+        if (r.division) process.stderr.write(`review division: ${r.division.mode}; ${r.division.reason}\n`);
+        for (const member of r.members ?? []) process.stderr.write(`group ${member.slot}: ${member.agent}; run wf handoff run --agent ${member.agent} --attempt ${r.state.id}; frozen prompt: ${member.startPrompt}\n`);
         process.stderr.write(`${lessonsLine}${stale}${how} with only the line on stdout as its prompt:\n`);
         print(options, startPrompt, { ...r, startPrompt });
       } else {
@@ -746,9 +760,24 @@ async function dispatch(cmd, sub, positional, options) {
       return 0;
     }
     case 'review': {
+      if (sub === 'parts') {
+        const { currentReviewGroup } = await import('./review-groups.mjs');
+        const s = openState(root, options), group = currentReviewGroup(s);
+        if (!group) throw refuse('no current parallel review group');
+        const required = group.members.filter(h => h.reviewGroup.slot !== 'integration');
+        const parts = required.map(h => (s.reviewParts ?? []).find(p => p.handoff === h.bundle));
+        if (parts.some(p => !p)) throw refuse('scoped reports are incomplete; integration can inspect its own code while waiting');
+        print({ ...options, json: true }, null, parts.map(p => ({ agent: p.closure.reviewer, sha256: p.raw.sha256, file: p.raw.path ?? p.raw.file, closure: p.closure, provenance: p.provenance })));
+        return 0;
+      }
       // The reviewer runs this. Its console shows nothing but the receipt: no owner next steps, tracker actions or
       // state, which carried earlier rounds' findings and the owner's notes into a blind review.
-      const { state: s, reveal, toVerify } = recordReview(root, options);
+      const { state: s, reveal, toVerify, part } = recordReview(root, options);
+      if (part) {
+        const recorded = s.reviewParts.at(-1);
+        print(options, `scoped review recorded (${recorded.closure.findings.length} finding(s)); integration is still required`, { recorded: true, part: true, attempt: s.id, findings: recorded.closure.findings.length, sha256: recorded.raw.sha256 });
+        return 0;
+      }
       // Revealed only now, after this round's own closure is recorded blind.
       const verify = reveal ? `\n${toVerify.length} finding(s) from earlier rounds to verify against the code: ${reveal}\nAdd \`priorFindings: [{ round, id, status, evidence }]\` to your closure (change nothing else) and run \`wf review --closure <file>\` again.` : '';
       print(options, `review recorded (${s.review.closure.findings.length} finding(s)).${verify}`, { recorded: true, attempt: s.id, findings: s.review.closure.findings.length, file: s.review.file, provenance: s.review.provenance, verify: reveal ? { file: reveal, count: toVerify.length } : null });

@@ -1,3 +1,4 @@
+import { mkdirStateDirectory, stateFolderWarnings } from './state-folders.mjs';
 import { executionSettings } from './models.mjs';
 import { ruleWarnings } from './rules.mjs';
 import { protectionLayers } from './evidence.mjs';
@@ -37,7 +38,7 @@ export function register(root, enabled) {
   const r = registry();
   r.projects = r.projects.filter((p) => p.root !== root);
   if (enabled) r.projects.push({ root, registeredAt: new Date().toISOString() });
-  fs.mkdirSync(path.dirname(registryFile()), { recursive: true });
+  mkdirStateDirectory(path.dirname(registryFile()), { recursive: true });
   fs.writeFileSync(registryFile(), `${JSON.stringify(r, null, 2)}\n`);
 }
 
@@ -302,7 +303,7 @@ export function writeDraft(root, detected, { force = false } = {}) {
   const adapterHome = multi ? path.join(root, detected.repos[0].path, ADAPTER_DIR) : dir;
   if (multi) {
     if (fs.existsSync(path.join(adapterHome, CONFIG_FILE)) && !force) throw refuse(`${path.join(adapterHome, CONFIG_FILE)} already exists`, 'pass --force to overwrite, or edit it directly');
-    fs.mkdirSync(adapterHome, { recursive: true });
+    mkdirStateDirectory(adapterHome, { recursive: true });
     if (!fs.existsSync(dir)) fs.symlinkSync(path.relative(root, adapterHome), dir);
   }
   const draft = {
@@ -319,7 +320,7 @@ export function writeDraft(root, detected, { force = false } = {}) {
     gate: { maxParallelSteps: 2, leases: { docker: 1, browser: 1, simulator: 1 }, steps: detected.steps },
     invariants: 'AGENTS.invariants.md',
   };
-  fs.mkdirSync(dir, { recursive: true });
+  mkdirStateDirectory(dir, { recursive: true });
   const header = `# agentic-workflow adapter, drafted by \`wf init\` on ${new Date().toISOString().slice(0, 10)}.\n# Review every value, then run \`wf doctor\` and \`wf enable\`.\n`;
   fs.writeFileSync(file, header + YAML.stringify(draft, { lineWidth: 0, aliasDuplicateObjects: false }));
   // Only keys a detected step references are drafted: cataloguing every .env.example key as `provided` made
@@ -374,7 +375,7 @@ export function writeBlock(file, block) {
   let next;
   if (text.includes(BEGIN) && text.includes(END) && text.indexOf(END) > text.indexOf(BEGIN)) next = text.slice(0, text.indexOf(BEGIN)) + wrapped + text.slice(text.indexOf(END) + END.length);
   else next = `${text}${text && !text.endsWith('\n') ? '\n' : ''}${text ? '\n' : ''}${wrapped}\n`;
-  fs.mkdirSync(path.dirname(file), { recursive: true });
+  mkdirStateDirectory(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, next);
 }
 
@@ -433,7 +434,7 @@ function writeIfChanged(file, content, changed) {
     before = fs.readFileSync(file, 'utf8');
   } catch {}
   if (before === content) return;
-  fs.mkdirSync(path.dirname(file), { recursive: true });
+  mkdirStateDirectory(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, content);
   changed.push({ file, created: before === null });
 }
@@ -621,6 +622,7 @@ export async function doctor(root, { runSteps = true, runtime = sessionIdentity(
   if (!['claude', 'codex'].includes(runtime)) throw new WfError('--runtime must be claude or codex');
   // Which evidence protection layers this machine provides (informational; a missing flag never fails doctor).
   const report = { config: [], tools: [], secrets: [], skills: [], connectors: [], steps: [], warnings: [], protection: protectionLayers(root).map((l) => ({ ok: true, warn: !l.active, check: l.layer, note: l.detail ?? (l.active ? 'on' : 'off') })), ok: true };
+  report.warnings.push(...stateFolderWarnings(root).map(w => ({ ok: true, warn: true, ...w })));
   const bad = (section, item) => {
     report[section].push({ ...item, ok: false });
     report.ok = false;
@@ -737,6 +739,7 @@ export async function doctor(root, { runSteps = true, runtime = sessionIdentity(
       for (const repo of trusted.repos) {
         const dir = repoDir(root, repo);
         const wt = path.join(root, '.wf-worktrees', id, repo.name);
+        mkdirStateDirectory(path.dirname(wt), { recursive: true });
         const rref = git(dir, ['rev-parse', '--verify', '--quiet', `${repo.remote}/${repo.base}`], { allowFail: true }) ? `${repo.remote}/${repo.base}` : repo.base;
         run('git', ['worktree', 'add', '--quiet', '--detach', wt, rref], { cwd: dir });
         made.push({ dir, wt, repo: repo.name });
@@ -757,7 +760,7 @@ export async function doctor(root, { runSteps = true, runtime = sessionIdentity(
         const pkg = step.package ? repo.packages.find((p) => p.path === step.package || p.name === step.package) : repo.packages[0];
         const cwd = path.join(root, '.wf-worktrees', id, repo.name, pkg?.path ?? '.');
         const evidence = path.join(root, '.wf-evidence', 'doctor', id, step.id);
-        fs.mkdirSync(evidence, { recursive: true });
+        mkdirStateDirectory(evidence, { recursive: true });
         const command = step.run.replace(/\{workers\}/g, String(chooseWorkers(step).n)).replace(/\{evidence\}/g, shellQuote(evidence)).replace(/\{(select|suites)\}/g, '').replace(/\{shards?\}/g, '1');
         if (!fs.existsSync(cwd)) {
           bad('steps', { step: step.id, kind: 'config', problem: `directory ${path.relative(root, cwd)} does not exist at ${repo.base}` });

@@ -494,7 +494,7 @@ function symbolsIn(line) {
   return out;
 }
 
-export function deriveFromDiff(root, cfg, state, { limit = 100 } = {}) {
+export function deriveFromDiff(root, cfg, state, { limit = 100, queryResults = null } = {}) {
   const symbols = new Map();
   // Named failure: equal symbol names hid declaration origins and the 200-symbol cap was silently reported complete.
   // This remains textual discovery, not an import graph or proof that a matching file is a real consumer.
@@ -523,7 +523,8 @@ export function deriveFromDiff(root, cfg, state, { limit = 100 } = {}) {
     }
   }
   const mapped = new Set();
-  for (const r of Object.values(rerun(root, cfg, state))) for (const f of r.files) mapped.add(f);
+  // A handoff already computed these results on its prepared tree; closure recording still performs a fresh rerun.
+  for (const r of Object.values(queryResults ?? rerun(root, cfg, state))) for (const f of r.files) mapped.add(f);
   for (const k of SURVEY_LISTS) for (const e of [...list(state.impact?.survey?.[k]), ...(state.impact?.addenda ?? []).flatMap((a) => list(a.survey?.[k]))]) if (e?.file) mapped.add(String(e.file));
   const outside = [];
   let total = 0;

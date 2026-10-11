@@ -1,3 +1,4 @@
+import { mkdirStateDirectory } from './state-folders.mjs';
 // Lessons: each project's learning path (docs/LESSONS.md). Capture, apply, inject, acknowledge, feedback, export. The
 // engine never edits the adapter or an instruction file to enforce a lesson: it prints what to add, and the owner
 // commits it.
@@ -198,7 +199,7 @@ function writeLesson(target, l, { create = false, message } = {}) {
   const out = fileIn(target.dir, l.id);
   const before = dirProblems(target.dir);
   if (before.length) throw refuse(`lessons not written: ${before.join('; ')}`);
-  fs.mkdirSync(lessonsDir(target.dir), { recursive: true });
+  mkdirStateDirectory(lessonsDir(target.dir), { recursive: true });
   const after = dirProblems(target.dir);
   if (after.length) throw refuse(`lessons not written: ${after.join('; ')}`);
   const folded = `${String(l.id).normalize('NFC').toLowerCase()}.yaml`;

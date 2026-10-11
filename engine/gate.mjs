@@ -1,3 +1,4 @@
+import { mkdirStateDirectory } from './state-folders.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
@@ -309,7 +310,7 @@ function collectArtifacts(step, dir, destDir, since, units) {
     if (fs.statSync(file).mtimeMs < since - 1000) continue; // only what this run produced
     const dest = path.join(destDir, r);
     prepareWrite(dest);
-    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    mkdirStateDirectory(path.dirname(dest), { recursive: true });
     // Read once, never through a link: the file recorded is the bytes hashed (a capture rewritten, or swapped for a link
     // to a file outside the worktree, meanwhile cannot slip in another).
     const read = readRegular(file);
@@ -362,7 +363,7 @@ function copyScratch(scratch, dest) {
     if (relPath.startsWith('..') || path.isAbsolute(relPath)) continue;
     const to = path.join(dest, 'out', relPath);
     prepareWrite(to);
-    fs.mkdirSync(path.dirname(to), { recursive: true });
+    mkdirStateDirectory(path.dirname(to), { recursive: true });
     writeNoFollow(to, r.bytes, { exclusive: true });
   }
 }
@@ -371,12 +372,12 @@ async function executeStep(root, cfg, state, planned, ctx) {
   const step = cfg.gate.steps.find((s) => s.id === planned.id);
   const evidenceDir = path.join(ctx.runDir, step.id);
   prepareWrite(path.join(evidenceDir, 'x'));
-  fs.mkdirSync(evidenceDir, { recursive: true });
+  mkdirStateDirectory(evidenceDir, { recursive: true });
   const logFile = path.join(evidenceDir, 'output.log');
   // Steps and plugins write their reports into a scratch folder outside the evidence; the engine copies it in after
   // the step (WF_EVIDENCE and {evidence} name the scratch folder). Their processes are never handed an evidence path.
   const scratch = path.join(root, '.wf-worktrees', '_gate', state.id, ctx.runId, step.id);
-  fs.mkdirSync(scratch, { recursive: true });
+  mkdirStateDirectory(scratch, { recursive: true });
   const workers = chooseWorkers(step);
   const shards = chooseShards(step);
   // An allowlisted environment, never the owner's whole one (session tokens included): see engine/env.mjs.
@@ -473,7 +474,7 @@ const leasesDir = () => path.join(process.env.WF_CONFIG_HOME ?? path.join(proces
 // One file per slot (`docker.1`, `docker.2`…), created exclusively; a slot whose holder process is gone is free.
 function takeMachineLease(name, capacity) {
   const dir = leasesDir();
-  fs.mkdirSync(dir, { recursive: true });
+  mkdirStateDirectory(dir, { recursive: true });
   for (let i = 1; i <= capacity; i++) {
     const file = path.join(dir, `${name.replace(/[^\w.-]/g, '_')}.${i}`);
     try {
@@ -562,7 +563,7 @@ async function harvest(root, state, lock) {
 // Takes the gate lock atomically. A live runner is never duplicated; a dead one is harvested first.
 async function acquireGateLock(root, state) {
   const file = lockFile(root, state.id);
-  fs.mkdirSync(path.dirname(file), { recursive: true });
+  mkdirStateDirectory(path.dirname(file), { recursive: true });
   let recovered = null;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
@@ -639,7 +640,7 @@ async function execute(root, state, plan, live = null) {
   const runDir = path.join(gateDir(root, state.id), runId);
   ownGateRun(root, state.id, runId);
   prepareWrite(path.join(runDir, 'x'));
-  fs.mkdirSync(runDir, { recursive: true });
+  mkdirStateDirectory(runDir, { recursive: true });
   append(root, state.id, 'gate.started', { runId, kind: plan.check ? 'check' : 'gate' }, null);
   const lockData = { pid: process.pid, runId, kind: plan.check ? 'check' : 'gate', startedAt: now(), tree: plan.tree, children: [], plugins: [] };
   const persistLock = () => writeJson(lockFile(root, state.id), lockData);
@@ -822,7 +823,7 @@ export function gateBusy(root, state) {
 // then records without the lock.
 export function withReviewLock(root, state, fn) {
   const file = lockFile(root, state.id);
-  fs.mkdirSync(path.dirname(file), { recursive: true });
+  mkdirStateDirectory(path.dirname(file), { recursive: true });
   let fd;
   try {
     fd = fs.openSync(file, 'wx');

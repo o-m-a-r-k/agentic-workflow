@@ -1,3 +1,4 @@
+import { mkdirStateDirectory } from './state-folders.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -70,7 +71,7 @@ export function baseRef(dir, repo) {
 
 // Copy-on-write clone where the filesystem supports it (APFS clonefile, btrfs/xfs reflink).
 function cloneTree(src, dest) {
-  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  mkdirStateDirectory(path.dirname(dest), { recursive: true });
   const tries = process.platform === 'darwin' ? [['-c', '-R'], ['-R']] : [['--reflink=auto', '-R'], ['-R']];
   for (const flags of tries) {
     if (run('cp', [...flags, src, dest], { allowFail: true }).status === 0) return;
@@ -103,7 +104,7 @@ export function provision(root, cfg, repo, dir) {
   for (const rel of p.copyIgnored) {
     const src = path.join(source, rel);
     if (fs.existsSync(src) && !fs.existsSync(path.join(dir, rel))) {
-      fs.mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true });
+      mkdirStateDirectory(path.dirname(path.join(dir, rel)), { recursive: true });
       fs.copyFileSync(src, path.join(dir, rel));
       fs.chmodSync(path.join(dir, rel), fs.statSync(src).mode);
       report.copied.push(rel);
@@ -178,6 +179,7 @@ export function entry(root, options) {
       const repo = cfg.repos.find((r) => r.name === name);
       const dir = repoDir(root, repo);
       const wt = worktreeDir(root, id, name);
+      mkdirStateDirectory(path.dirname(wt), { recursive: true });
       if (git(dir, ['branch', '--list', branchName(id)])) throw refuse(`branch ${branchName(id)} already exists in ${name} from an earlier attempt`, `inspect it, then delete it: git -C ${dir} branch -D ${branchName(id)}`);
       run('git', ['worktree', 'add', '--quiet', '-b', branchName(id), wt, bases[name].commit], { cwd: dir });
       made.push({ dir, wt });
@@ -201,7 +203,7 @@ export function entry(root, options) {
     // Opened first: the copy is then a file this process wrote, recorded in the manifest when it ends (copied before,
     // it was in the opening snapshot unrecorded and refused as an extra file).
     openEvidence(root, id);
-    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    mkdirStateDirectory(path.dirname(dest), { recursive: true });
     fs.copyFileSync(src, dest);
     issue = { file: dest, sha256: hashFile(dest) };
   }
@@ -223,6 +225,7 @@ export function addRepoWorktree(root, cfg, state, name) {
   const commit = git(dir, ['rev-parse', ref]);
   const wt = worktreeDir(root, state.id, name);
   if (git(dir, ['branch', '--list', branchName(state.id)])) throw refuse(`branch ${branchName(state.id)} already exists in ${name}`, `inspect it, then delete it: git -C ${dir} branch -D ${branchName(state.id)}`);
+  mkdirStateDirectory(path.dirname(wt), { recursive: true });
   run('git', ['worktree', 'add', '--quiet', '-b', branchName(state.id), wt, commit], { cwd: dir });
   try {
     const provisioned = provision(root, cfg, repo, wt);

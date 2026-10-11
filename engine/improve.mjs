@@ -1,3 +1,4 @@
+import { mkdirStateDirectory } from './state-folders.mjs';
 // Plugin improvements: findings about the workflow itself (named correction: a "plugin lesson" is not a project lesson,
 // it is a change the plugin's maintainer makes in the plugin repo). They are kept in a user-level inbox outside every
 // repo (`~/.agentic-workflow/improvements/<id>.yaml`, or WF_IMPROVEMENTS_DIR), sanitised of project names, ticket ids,
@@ -25,7 +26,7 @@ function checkedInbox({ create = false } = {}) {
   if (touchesEvidence(dir)) throw refuse(`${dir} is inside a project's evidence; the inbox lives outside every repo`);
   const st = fs.lstatSync(dir, { throwIfNoEntry: false });
   if (st && !st.isDirectory()) throw refuse(`${dir} is ${st.isSymbolicLink() ? 'a symlink' : 'not a folder'}; the inbox is not read or written through it`);
-  if (!st && create) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if (!st && create) mkdirStateDirectory(dir, { recursive: true, mode: 0o700 });
   return dir;
 }
 
@@ -148,7 +149,7 @@ export function closeImprovement(id, options) {
   const scrub = sanitizer();
   const entry = `# ${id}: ${scrub(item.title)}\n\n- **Class:** ${item.class}\n- **Fixed in:** ${version}\n- **Test:** \`${test}\`${options.name ? ` (${scrub(options.name)})` : ''}\n${options.commit ? `- **Commit:** ${String(options.commit).slice(0, 40)}\n` : ''}${item.regressionOf ? `- **Regression of:** ${item.regressionOf.id}${item.regressionOf.fixedIn ? ` (fixed in ${item.regressionOf.fixedIn})` : ''}\n` : ''}\n## Failure\n\n${scrub(item.what)}\n\n## Fix\n\n${scrub(fix)}\n`;
   const histDir = path.join(repo, 'improvements');
-  fs.mkdirSync(histDir, { recursive: true });
+  mkdirStateDirectory(histDir, { recursive: true });
   const hist = path.join(histDir, `${id}.md`);
   writeNoFollow(hist, entry, { exclusive: true });
   save({ ...item, status: 'closed', version, test, fix: scrub(fix), commit: options.commit ?? null, closed: now() });

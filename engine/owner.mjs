@@ -1,3 +1,4 @@
+import { mkdirStateDirectory } from './state-folders.mjs';
 // Owner-only decisions, and how the engine tells the owner from an agent.
 //
 // Named failure (0.5.0 second security review, authorization bypass): the 0.5.0 decisions that skip or settle a check
@@ -65,7 +66,7 @@ function afterAdmission(state, m) {
 const markerFile = (root, key) => path.join(root, '.wf-evidence', 'authorities', `${crypto.createHash('sha256').update(key).digest('hex')}.json`);
 function claim(root, key, record) {
   const dir = path.join(root, '.wf-evidence', 'authorities');
-  fs.mkdirSync(dir, { recursive: true });
+  mkdirStateDirectory(dir, { recursive: true });
   if (fs.realpathSync(dir) !== path.join(fs.realpathSync(root), '.wf-evidence', 'authorities')) throw refuse(`${dir} is not a real folder inside the project (a link on its path); no owner decision is recorded through it`);
   const file = markerFile(root, key);
   try {

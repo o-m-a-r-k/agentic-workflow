@@ -241,6 +241,11 @@ roles:
 
 ## Optional foreground advancement
 
+Large changes can opt into [flow-based parallel review](parallel-review.md) with `--parallel` on reviewer handoffs
+or the foreground runner. The engine retains one reviewer when recorded flow boundaries are insufficient. Scoped
+parts cannot authorize the gate; one integration reviewer checks shared code, crossing interfaces and global evidence,
+and the engine validates the combined complete review. Existing single-review rounds are unchanged.
+
 `wf resume --json` includes a structured `decision` with kind, status, actor, blockers and the observed tree. Human next-step guidance and `wf advance` share the decision. Command-level validation remains authoritative when each action executes.
 
 After the owner closes committed implementation, use `wf advance --once --runtime codex --attempt <id>` (or `claude`). Use `--until-owner` to perform the normal code-review, gate, evidence-review and acceptance sequence, stopping whenever judgment is needed. Output milestones go to stderr; `--json` stdout is one terminal result with process outcomes, recorded workflow outcomes and the next decision. Required code-review coverage and gate-step reuse remain unchanged. Delivery and presentation stay with the owner.

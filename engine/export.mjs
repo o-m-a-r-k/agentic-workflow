@@ -1,3 +1,4 @@
+import { mkdirStateDirectory } from './state-folders.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { loadConfig } from './config.mjs';
@@ -219,7 +220,7 @@ export function exportAttempt(root, state, { out = null, json = false } = {}) {
   const file = out ? path.resolve(String(out)) : exportFile(root, state.id, json);
   const text = json ? redact(`${JSON.stringify(data, null, 2)}\n`) : redactHtml(root, state.id, redact, data);
   prepareWrite(file);
-  fs.mkdirSync(path.dirname(file), { recursive: true });
+  mkdirStateDirectory(path.dirname(file), { recursive: true });
   writeNoFollow(file, text);
   return { file, data, text };
 }

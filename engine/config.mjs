@@ -1,3 +1,4 @@
+import { mkdirStateDirectory } from './state-folders.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { ENGINE_PIN, WfError, YAML, assertPlainGit, git, hashValue, refuse } from './util.mjs';
@@ -433,7 +434,7 @@ export function adapterFileAtCommit(root, state, commit, rel) {
   if (!text) throw new WfError(`${rel} is not committed in ${repo.name}@${commit.slice(0, 10)}`, { hint: 'commit adapter code to the base branch; the engine only runs the committed copy' });
   // Rewritten on every load, so a modified copy is never run.
   const dir = path.join(root, '.wf-evidence', 'adapters', commit);
-  fs.mkdirSync(dir, { recursive: true });
+  mkdirStateDirectory(dir, { recursive: true });
   const realRoot = fs.realpathSync(root);
   if (fs.realpathSync(dir) !== path.join(realRoot, '.wf-evidence', 'adapters', commit)) throw new WfError(`${dir} is not a real folder inside the project (a link on its path); adapter code is not written through it`);
   const dest = path.join(dir, `${hashValue(file).slice(0, 12)}-${path.basename(file)}`);
