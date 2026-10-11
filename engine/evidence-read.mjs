@@ -61,7 +61,7 @@ export function listEvidence(root, state, { kind = null } = {}) {
 
 // Named failure I-80: shell-only roles could never read beyond the first 4 MiB of a handed bundle.
 // Bounded pages retain every no-follow check and report a whole-file hash; no evidence is rewritten.
-export function showEvidence(root, state, rel, { offset, length } = {}) {
+export function showEvidence(root, state, rel, { offset, length, maxSize } = {}) {
   const paged = offset !== undefined || length !== undefined;
   for (const value of [offset,length]) if (value !== undefined && !((typeof value === 'number' && Number.isSafeInteger(value)) || (typeof value === 'string' && /^[0-9]+$/.test(value)))) throw new WfError('evidence page offset and length must be decimal integers');
   const start = offset === undefined ? 0 : Number(offset);
@@ -94,6 +94,7 @@ export function showEvidence(root, state, rel, { offset, length } = {}) {
   try {
     const fst = fs.fstatSync(fd);
     if (!fst.isFile() || fst.nlink > 1) throw refuse(`${rel} is not a regular file with one name; nothing is read through it`);
+    if (maxSize !== undefined && fst.size > maxSize) throw refuse('structured evidence exceeds the 64 MiB inspection limit');
     if (start > fst.size) throw new WfError('evidence page offset is past end of file');
     const buf = Buffer.alloc(Math.min(fst.size - start, limit));
     let n = 0;
@@ -133,4 +134,68 @@ export function showEvidence(root, state, rel, { offset, length } = {}) {
   } finally {
     fs.closeSync(fd);
   }
+}
+
+// Named failure I-80: handing a structured JSON bundle to a shell-only role required a full-output dump.
+// Inspect original immutable JSON through bounded sections, without awarding complete-document read credit.
+export function inspectEvidence(root, state, rel, { pointer = '', from = 0, count = 8 } = {}) {
+  const integer = value => (typeof value === 'number' && Number.isSafeInteger(value)) || (typeof value === 'string' && /^[0-9]+$/.test(value));
+  if (typeof pointer !== 'string' || Buffer.byteLength(pointer) > 4096 || (pointer && !pointer.startsWith('/')) || !integer(from) || !integer(count) || Number(from) < 0 || Number(count) < 1 || Number(count) > 4096)
+    throw new WfError('inspect needs a JSON pointer, nonnegative integer --from and --count between 1 and 4096');
+  let page=showEvidence(root,state,rel,{offset:0,length:MAX_SHOW_BYTES,maxSize:64*1024*1024});
+  const file=page.file, size=page.size, sha256=page.sha256;
+  let text=page.text;
+  while(page.remaining) {
+    page=showEvidence(root,state,rel,{offset:page.nextOffset,length:MAX_SHOW_BYTES,maxSize:64*1024*1024});
+    if(page.file!==file || page.size!==size || page.sha256!==sha256) throw refuse('structured evidence changed during inspection');
+    text+=page.text;
+  }
+  let value;
+  try { value=JSON.parse(text); } catch { throw refuse('structured inspection requires valid JSON'); }
+  if(pointer) for(const raw of pointer.slice(1).split('/')) {
+    if(/~(?![01])/.test(raw)) throw new WfError('invalid JSON pointer escape');
+    const key=raw.replace(/~1/g,'/').replace(/~0/g,'~');
+    if(value===null || typeof value!=='object' || !Object.prototype.hasOwnProperty.call(value,key)) throw refuse('JSON pointer is not an own property of the handed input');
+    value=value[key];
+  }
+  const kind=value===null?'null':Array.isArray(value)?'array':typeof value;
+  const start=Number(from), take=Number(count), escape=key=>String(key).replace(/~/g,'~0').replace(/\//g,'~1');
+  const keys=kind==='array'?Object.keys(value):kind==='object'?Object.keys(value):null;
+  const total=kind==='string'?value.length:keys?keys.length:1;
+  if(start>total) throw new WfError('inspection range starts past the selected value');
+  const result={file,size,sha256,pointer,kind,total,from:start,nextFrom:start,remaining:total-start,documentReadCredit:false};
+  if(kind==='string') {
+    if(start && start<total && /[\uDC00-\uDFFF]/.test(value[start]) && /[\uD800-\uDBFF]/.test(value[start-1])) throw new WfError('string range must start at a scalar boundary');
+    let end=Math.min(total,start+Math.min(take,4096));
+    if(end<total && end>start && /[\uD800-\uDBFF]/.test(value[end-1]) && /[\uDC00-\uDFFF]/.test(value[end])) end--;
+    if(end===start && start<total) throw new WfError('string range is too short for the next scalar');
+    while (Buffer.byteLength(JSON.stringify({...result,text:value.slice(start,end)})) > 16384) {
+      end--;
+      if(end>start && /[\uD800-\uDBFF]/.test(value[end-1]) && /[\uDC00-\uDFFF]/.test(value[end]))end--;
+      if(end<=start)throw refuse('selected string cannot fit a bounded inspection response');
+    }
+    result.text=value.slice(start,end);result.nextFrom=end;result.remaining=total-end;
+    return result;
+  }
+  result.items=[];
+  for(let at=start;at<Math.min(total,start+take);at++) {
+    const key=keys?keys[at]:null, child=keys?value[key]:value;
+    const childKind=child===null?'null':Array.isArray(child)?'array':typeof child;
+    const item={index:at,pointer:keys?pointer+'/'+escape(key):pointer,kind:childKind};
+    if(key!==null)item.key=key;
+    if(child!==null && typeof child==='object')item.total=Object.keys(child).length;
+    else if(typeof child==='string')item.total=child.length;
+    const bounded={...item,value:child};
+    if(Buffer.byteLength(JSON.stringify({...result,items:[...result.items,bounded]}))<=16384)result.items.push(bounded);
+    else {
+      item.oversized=true;
+      if(Buffer.byteLength(JSON.stringify({...result,items:[...result.items,item]}))>16384) {
+        if(!result.items.length)throw refuse('selected key cannot fit a bounded inspection response');
+        break;
+      }
+      result.items.push(item);
+    }
+    result.nextFrom=at+1;result.remaining=total-result.nextFrom;
+  }
+  return result;
 }

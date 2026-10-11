@@ -1006,6 +1006,13 @@ async function dispatch(cmd, sub, positional, options) {
         print(options, `to enforce ${l.id} (${l.mechanism?.kind}), add to ${a.where}:\n\n${a.snippet}\nwf changes nothing itself: add it, commit it with the owner's approval, then \`wf lesson set ${l.id} --status enforced${a.ref ? ` --ref ${a.ref}` : ' --ref <what enforces it>'}\``, a);
         return 0;
       }
+      if (sub === 'inspect') {
+        const { inspectEvidence } = await import('./evidence-read.mjs');
+        const s = openState(root, options);
+        const r = inspectEvidence(root,s,positional[0],{pointer:options.pointer,from:options.from,count:options.count});
+        print({...options,json:true},'',r);
+        return 0;
+      }
       if (sub === 'show') {
         const l = loadLessons(root).find((x) => x.id === positional[0]);
         if (!l) throw new WfError(`no lesson ${positional[0] ?? ''}`);
@@ -1049,6 +1056,13 @@ async function dispatch(cmd, sub, positional, options) {
         print(options, `${r.files.length ? text : `no evidence files${options.kind ? ` of kind ${options.kind}` : ''} in ${s.id}`}${shots}\nread a text file: \`wf evidence show <path> --attempt ${s.id}\`, or the Read tool on the full path`, r);
         return 0;
       }
+      if (sub === 'inspect') {
+        const { inspectEvidence } = await import('./evidence-read.mjs');
+        const s = openState(root, options);
+        const r = inspectEvidence(root,s,positional[0],{pointer:options.pointer,from:options.from,count:options.count});
+        print({...options,json:true},'',r);
+        return 0;
+      }
       if (sub === 'show') {
         const { showEvidence } = await import('./evidence-read.mjs');
         const s = openState(root, options);
@@ -1057,7 +1071,7 @@ async function dispatch(cmd, sub, positional, options) {
         else process.stdout.write(`${r.text}${r.text.endsWith('\n') ? '' : '\n'}${r.truncated ? `… (${r.size} B; the first part only: read the rest with the Read tool on ${r.file})\n` : ''}`);
         return 0;
       }
-      if (sub !== 'release') throw new WfError('usage: wf evidence list [--kind K] | show <path> | release [--attempt ID | --closed | --older-than DAYS] [--reason "why"] [--dry-run]');
+      if (sub !== 'release') throw new WfError('usage: wf evidence list [--kind K] | show <path> | inspect <path> [--pointer P --from N --count N] | release [--attempt ID | --closed | --older-than DAYS] [--reason "why"] [--dry-run]');
       // The sanctioned way to delete evidence: closed attempts only, protection lifted by the engine, a tombstone left.
       const pick = options.attempt ? [resolveAttempt(root, options)] : listAttempts(root);
       const cutoff = options['older-than'] !== undefined ? Date.now() - Number(options['older-than']) * 86400000 : null;

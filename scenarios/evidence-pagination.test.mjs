@@ -78,3 +78,45 @@ test('I-80: failed, pending, forged and out-of-order page receipts never prove a
   assert.equal(completedNodeReads(receipt(f,tail,'tail'),{}).length,0);
   fs.rmSync(f.root,{recursive:true,force:true});
 });
+
+test('I-80: structured handoffs beyond4 MiB inspect bounded original sections without document read credit',async()=>{
+  const {inspectEvidence}=await import('../engine/evidence-read.mjs');
+  const f=fixture(JSON.stringify({instructions:'x'.repeat(MAX_SHOW_BYTES+100),work:{id:'W1',criteria:['C1']},impactMap:{queries:[{id:'q1',files:['a.ts']},{id:'q2',files:['b.ts']}]},'a/b~':{value:'kept'},unicode:'a🙂b',controls:'\u0001'.repeat(5000)}));
+  const inventory=inspectEvidence(f.root,f.state,f.file,{count:10});
+  assert.ok(Buffer.byteLength(JSON.stringify(inventory))<16384);
+  assert.equal(inventory.documentReadCredit,false);
+  assert.equal(inventory.items.find(x=>x.key==='instructions').oversized,true);
+  assert.deepEqual(inspectEvidence(f.root,f.state,f.file,{pointer:'/work'}).items.find(x=>x.key==='id').value,'W1');
+  assert.equal(inspectEvidence(f.root,f.state,f.file,{pointer:'/impactMap/queries',count:1}).nextFrom,1);
+  assert.equal(inspectEvidence(f.root,f.state,f.file,{pointer:'/impactMap/queries',from:1,count:1}).items[0].value.id,'q2');
+  assert.equal(inspectEvidence(f.root,f.state,f.file,{pointer:'/instructions',count:20}).text,'x'.repeat(20));
+  assert.equal(inspectEvidence(f.root,f.state,f.file,{pointer:'/a~1b~0/value'}).text,'kept');
+  const controls=inspectEvidence(f.root,f.state,f.file,{pointer:'/controls',count:4096});
+  assert.ok(Buffer.byteLength(JSON.stringify(controls))<=16384);
+  assert.ok(controls.nextFrom>0 && controls.remaining>0);
+  assert.equal(controls.text,'\u0001'.repeat(controls.nextFrom));
+  const unicode=inspectEvidence(f.root,f.state,f.file,{pointer:'/unicode',count:2});
+  assert.equal(unicode.text,'a');assert.equal(unicode.nextFrom,1);
+  assert.throws(()=>inspectEvidence(f.root,f.state,f.file,{pointer:'/unicode',from:2,count:2}),/scalar boundary/);
+  for(const options of [{pointer:'/__proto__'},{pointer:'/work/constructor'},{pointer:'/bad~2'},{pointer:true},{from:true},{count:0},{count:5000},{from:100}]) assert.throws(()=>inspectEvidence(f.root,f.state,f.file,options));
+  const raw=[{type:'response_item',payload:{type:'function_call',namespace:'functions',name:'exec_command',call_id:'inspect',arguments:JSON.stringify({cmd:`wf evidence inspect ${f.file} --attempt ${f.id}`})}},{type:'response_item',payload:{type:'function_call_output',call_id:'inspect',output:JSON.stringify({exit_code:0,output:JSON.stringify(inventory)})}}];
+  assert.equal(completedNodeReads(raw,{}).length,0,'structured inspection is not complete rule-document read credit');
+  fs.symlinkSync(f.file,path.join(f.dir,'linked.json'));
+  assert.throws(()=>inspectEvidence(f.root,f.state,'linked.json'),/not a regular file/);
+  fs.linkSync(f.file,path.join(f.dir,'hard.json'));
+  assert.throws(()=>inspectEvidence(f.root,f.state,'hard.json'),/one name/);
+  fs.rmSync(f.root,{recursive:true,force:true});
+});
+
+test('I-80: actual fresh native role bootstrap separates structured input from required document receipts',async()=>{
+  const {roleInstructions}=await import('../engine/onboard.mjs');
+  const cfg={classes:{full:{use:'Critical boundaries'}}};
+  for(const role of ['implementer','reviewer','planner']) {
+    const body=roleInstructions(cfg,role,'full');
+    assert.match(body,/Handoff JSON is structured input, not a complete-output document receipt/);
+    assert.match(body,/wf evidence inspect <handed absolute path>/);
+    assert.match(body,/follow every required item marked `oversized`/);
+    assert.match(body,/Separate rule\/skill\/invariant\/appendix documents require complete observed output/);
+    assert.doesNotMatch(body,/read large handoffs and required documents with one plain/);
+  }
+});

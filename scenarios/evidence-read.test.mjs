@@ -157,6 +157,10 @@ test('I-45: native roles can read an absolute handed path only inside their sele
   assert.equal(page.offset,0); assert.equal(page.bytes,64); assert.equal(page.nextOffset,64);
   assert.equal(page.text,read.out.slice(0,64)); assert.equal(page.remaining,page.size-64);
   assert.match(page.sha256,/^[a-f0-9]{64}$/);
+  const structured=ok(wf(root,['evidence','inspect',h.bundle,'--attempt',a,'--pointer','/agent'])).json();
+  assert.equal(structured.text,'p');assert.equal(structured.documentReadCredit,false);
+  assert.equal(structured.sha256,page.sha256);
+  assert.equal(wf(root,['evidence','inspect',h.bundle,'--attempt',a,'--pointer','/constructor']).code,75);
   const b = ok(wf(root, ['entry', '--item', 'ENG-85', '--json'])).json().id;
   assert.equal(wf(root, ['evidence', 'show', h.bundle, '--attempt', b]).code, 75);
   assert.equal(wf(root, ['evidence', 'show', '/etc/hosts', '--attempt', a]).code, 75);
