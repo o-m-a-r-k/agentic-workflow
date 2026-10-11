@@ -217,9 +217,12 @@ test('Codex plugin skills follow the enabled installed version, not the newest c
 });
 
 test('wf --version reports the released plugin version, which package.json matches', () => {
+  // Named failure I-76: the Codex manifest retained an older version, so installation reused a stale cache.
   const plugin = JSON.parse(fs.readFileSync(new URL('../.claude-plugin/plugin.json', import.meta.url), 'utf8')).version;
+  const codex = JSON.parse(fs.readFileSync(new URL('../.codex-plugin/plugin.json', import.meta.url), 'utf8')).version;
   const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
   const r = ok(wf(tmp('version'), ['--version']));
   assert.equal(r.out.trim(), plugin);
   assert.equal(pkg, plugin, 'package.json and plugin.json carry the same release version');
+  assert.equal(codex, plugin, 'Codex and Claude manifests carry the same release version');
 });
