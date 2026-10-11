@@ -419,7 +419,9 @@ export function roleInstructions(cfg, role, cls, appendixText = '') {
   const tpl = fs.readFileSync(path.join(PLUGIN_ROOT, 'templates', 'agents', `${role}.md`), 'utf8');
   const appendix = appendixText ? `\n\n## Project additions\n\n${appendixText.trim()}\n` : '';
   const classList = role === 'planner' ? `\n\n## Work classes in this project\n\n${Object.entries(cfg.classes).map(([n, c]) => `- \`${n}\` (agent ${agentTypeFor(cfg, 'implementer', n)}): ${c.use.trim()}`).join('\n')}` : '';
-  return `${tpl.replace(/^---[\s\S]*?---\n/, '').trim()}${classList}\n\nYou run as work class \`${cls}\`: ${cfg.classes[cls].use.trim()}${appendix ? '' : '\n'}${appendix}`;
+  // Named failure I-75: shared role instructions demanded Claude-only tools in native Codex sessions.
+  const tools = '\n\n## Host tool compatibility\n\nNever assume a Claude tool name exists in Codex. Use the tools actually exposed by your host. Claude Code uses Read for text/images, Skill for skills and Write for permitted files. Codex uses its supported full-file Node reader (when available), `wf evidence show <path> --attempt <id>` for text inside the selected attempt, and `view_image` for exported image copies. Read a required skill through its exact handed file when Skill is unavailable. Required document reads must follow the reviewer receipt protocol and deliver the complete output; a tool name or a claim of reading earns no receipt. Export screenshots with `wf export screenshots --gate --attempt <id> --to <folder outside the repo>` before viewing copies. Preserve all role restrictions on writes, commands, evidence paths and review scope. Report a concrete missing capability only after checking these supported alternatives.';
+  return `${tpl.replace(/^---[\s\S]*?---\n/, '').trim()}${tools}${classList}\n\nYou run as work class \`${cls}\`: ${cfg.classes[cls].use.trim()}${appendix ? '' : '\n'}${appendix}`;
 }
 
 // Named failure (I-15): a role file `wf sync` changed does not reach agents started from a session that was already

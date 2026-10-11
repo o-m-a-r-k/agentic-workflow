@@ -71,6 +71,28 @@ function fullContentReached(file, text) {
   } catch { return false; } finally { if (fd !== undefined) fs.closeSync(fd); }
 }
 
+// Named failure I-75: shell-only Codex hosts returned complete permitted document reads through
+// exec_command rather than the legacy CommandExecution event or a Node tool. Bind a single literal
+// command to its completed output and the actual full bytes; never infer a read from a claimed path.
+function commandRead(input, value) {
+  if (typeof input?.cmd !== 'string' || input.cmd.length > 16384) return [];
+  if (input.shell !== undefined && (typeof input.shell !== 'string' || !['sh', 'bash', 'zsh'].includes(path.basename(input.shell)))) return [];
+  if (Array.isArray(value)) {
+    if (value.length !== 1 || value[0]?.type !== 'input_text') return [];
+    value = value[0].text;
+  }
+  if (typeof value === 'string') { try { value = JSON.parse(value); } catch { return []; } }
+  if (!value || value.exit_code !== 0 || value.session_id != null || typeof value.output !== 'string') return [];
+  const token = '(?:[A-Za-z0-9_./-]+|"[^"\\\\$`\\r\\n]+"|\'[^\'\\r\\n]+\')';
+  const show = new RegExp('^wf evidence show (' + token + ') --attempt [A-Za-z0-9_.-]+$').exec(input.cmd);
+  const cat = new RegExp('^cat (' + token + ')$').exec(input.cmd);
+  const match = show ?? cat;
+  if (!match) return [];
+  const file = match[1].replace(/^(['"])(.*)\1$/, '$2');
+  if (!path.isAbsolute(file) || (!show && file.split(path.sep).includes('.wf-evidence'))) return [];
+  return fullContentReached(file, value.output) ? [file] : [];
+}
+
 export function completedNodeReads(raw, bundle) {
   const calls = new Map(), duplicate = new Set(), reads = [];
   const counts = new Map();
@@ -89,6 +111,8 @@ export function completedNodeReads(raw, bundle) {
       let literal = null;
       if (p.type === 'function_call' && ((p.namespace === 'mcp__node_repl' && p.name === 'js') || (!p.namespace && p.name === 'mcp__node_repl__js'))) {
         try { literal = [{name:'mcp__node_repl__js',input:JSON.parse(p.arguments)}]; } catch {}
+      } else if (p.type === 'function_call' && ['exec_command','functions.exec_command'].includes(p.name) && (!p.namespace || p.namespace === 'functions')) {
+        try { literal = [{name:'exec_command',input:JSON.parse(p.arguments)}]; } catch {}
       } else if (p.type === 'custom_tool_call' && ['exec','functions.exec'].includes(p.name) && (!p.namespace || p.namespace === 'functions') && typeof p.input === 'string' && p.input.length <= 65536) literal = literalCalls(p.input.replace(/^\s*\/\/ @exec:[^\n]*\n/, ''));
       calls.set(p.call_id, {literal,wrapped:p.type === 'custom_tool_call'});
     } else if (['function_call_output','custom_tool_call_output'].includes(p.type)) {
@@ -103,6 +127,10 @@ export function completedNodeReads(raw, bundle) {
       else continue;
       for (let i = 0; i < call.literal.length; i++) {
         const invocation = call.literal[i];
+        if (invocation.name === 'exec_command') {
+          for (const file of commandRead(invocation.input, outputs[i])) reads.push({type:'assistant',message:{content:[{type:'tool_use',id:p.call_id+':'+i+':'+file,name:'Read',input:{file_path:file}}]}});
+          continue;
+        }
         if (invocation.name !== 'mcp__node_repl__js') continue;
         const text = toolResult(outputs[i]);
         if (text === null) continue;

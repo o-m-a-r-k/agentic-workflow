@@ -50,3 +50,29 @@ test('I-48: missing, failed, truncated, wrong-path and ambiguous Node reads stil
   fs.writeFileSync(f.doc,'changed after the recorded read');
   assert.equal(f.check().length,1);
 });
+
+// Named failure I-75: successful native exec_command reads were not visible to document receipt checks.
+test('I-75: direct and wrapped permitted command reads require complete successful output', () => {
+  const f = fixture();
+  const check = (call, result) => {
+    const output = call.type === 'function_call'
+      ? { type: 'function_call_output', call_id: 'read-1', output: JSON.stringify(result) }
+      : { type: 'custom_tool_call_output', call_id: 'read-1', output: [f.output[0], { type: 'input_text', text: JSON.stringify(result) }] };
+    fs.writeFileSync(f.file, [call, output].map(payload => JSON.stringify({ type: 'response_item', payload })).join('\n'));
+    return unreadDocs(codexEntries(f.file).entries, [], [{ name: 'required', file: f.doc }]);
+  };
+  for (const cmd of ['cat ' + f.doc, 'wf evidence show ' + f.doc + ' --attempt ENG-80.1', 'cat "' + f.doc + '"']) {
+    const args = { cmd };
+    const direct = { type: 'function_call', namespace: 'functions', name: 'exec_command', call_id: 'read-1', arguments: JSON.stringify(args) };
+    const wrapped = { type: 'custom_tool_call', name: 'exec', call_id: 'read-1', input: `text(await tools.exec_command(${JSON.stringify(args)}));` };
+    const result = { exit_code: 0, output: fs.readFileSync(f.doc, 'utf8') };
+    for (const call of [direct, wrapped]) {
+      assert.deepEqual(check(call, result), []);
+      for (const bad of [{ ...result, exit_code: 1 }, { ...result, session_id: 123 }, { ...result, output: '# Required skill' }]) assert.equal(check(call, bad).length, 1);
+    }
+    assert.equal(check({ ...wrapped, input: 'if(false){' + wrapped.input + '}' }, result).length, 1);
+    assert.equal(check({ ...direct, arguments: JSON.stringify({ cmd: cmd + '; true' }) }, result).length, 1);
+    assert.equal(check({ ...direct, arguments: JSON.stringify({ cmd: 'cat /wrong/SKILL.md' }) }, result).length, 1);
+    for (const shell of [123, null, {}, '/bin/unsupported']) assert.equal(check({ ...direct, arguments: JSON.stringify({ cmd, shell }) }, result).length, 1);
+  }
+});

@@ -39,6 +39,14 @@ fs.mkdirSync(path.dirname(file),{recursive:true});
 const at = new Date().toISOString(), line=(x)=>JSON.stringify({timestamp:at,...x});
 const actual = prompt + ${JSON.stringify(mode === 'steered' ? ' Focus only on one file.' : '')};
 fs.writeFileSync(file,[line({type:'session_meta',payload:{id:sid,timestamp:at,originator:'codex_exec',source:'exec',cwd:${JSON.stringify(root)}}}),line({type:'response_item',payload:{type:'message',role:'user',internal_chat_message_metadata_passthrough:{content_item_kinds:['agents_md.instructions','environments.environment_context']},content:[{type:'input_text',text:'# AGENTS.md instructions fixture'},{type:'input_text',text:'<environment_context>fixture</environment_context>'}]}}),line({type:'response_item',payload:{type:'message',role:'user',internal_chat_message_metadata_passthrough:{content_item_kinds:['user.text']},content:[{type:'input_text',text:actual}]}}),line({type:'response_item',payload:{type:'message',role:'assistant',content:[{type:'output_text',text:${JSON.stringify('```yaml\n' + yaml(planDoc({ plan: 'Change a.', criteria: [{ id: 'C1', text: 'a changes' }] })) + '\n```')}}]}})].join('\\n')+'\\n');
+if (${JSON.stringify(mode === 'closure-writer')}) {
+  const body = JSON.parse(args.find(a => a.startsWith('developer_instructions=')).slice('developer_instructions='.length));
+  if (!body.includes('fs.writeFile') || !body.includes('apply_patch') || body.includes('with the Write tool, not a Bash heredoc')) {
+    console.error('no supported Codex closure writer'); process.exit(1);
+  }
+  const bundle = JSON.parse(fs.readFileSync(prompt.slice(5).replace(/ and follow its instructions\\.$/, ''), 'utf8'));
+  fs.writeFileSync(bundle.reviewClosureFile, ${JSON.stringify(JSON.stringify(goodClosure('r'), null, 2) + '\n')});
+}
 console.log(JSON.stringify({type:'thread.started',thread_id:sid}));
 if (${JSON.stringify(mode === 'progress')}) {
   console.log(JSON.stringify({type:'item.completed',item:{type:'reasoning',text:'private reasoning'}}));
@@ -184,6 +192,26 @@ test('engine-launched Codex reviewer has verified provenance while the existing 
   ok(wf(root, ['handoff', 'run', '--agent', 'r2', '--attempt', id], { env }));
   fs.writeFileSync(path.join(state(root, id).repos.app.worktree, 'src/a.txt'), 'changed during review');
   assert.match(wf(root, ['review', '--closure', closureFile(base, goodClosure('r2')), '--attempt', id], { env }).err, /worktree changed during the review/);
+});
+
+// Named failure I-75: the native bootstrap required an unavailable Claude writer after inspecting the tree.
+test('I-75: native Codex writes and records its own closure without a Claude Write tool', () => {
+  const { root, id, env } = prepared('closure-writer');
+  ok(wf(root, ['plan', '--file', criteriaFile(path.dirname(root)), '--attempt', id]));
+  ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', id]));
+  const tree = state(root, id).repos.app.worktree;
+  commitIn(tree, { 'src/a.txt': 'implemented\n' });
+  ok(wf(root, ['handoff', 'close', '--agent', 'i', '--attempt', id]));
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--runtime', 'codex', '--attempt', id]));
+  const before = sh(tree, 'git rev-parse HEAD');
+  ok(wf(root, ['handoff', 'run', '--agent', 'r', '--attempt', id], { env }));
+  const h = state(root, id).handoffs.at(-1);
+  const bundle = JSON.parse(fs.readFileSync(h.bundle, 'utf8'));
+  assert.equal(JSON.parse(fs.readFileSync(bundle.reviewClosureFile, 'utf8')).reviewer, 'r');
+  ok(wf(root, ['review', '--closure', bundle.reviewClosureFile, '--attempt', id], { env }));
+  assert.equal(state(root, id).reviews.at(-1).provenance, 'verified');
+  assert.equal(sh(tree, 'git rev-parse HEAD'), before);
+  assert.equal(sh(tree, 'git status --porcelain'), '');
 });
 
 // Named failure I-60: appending --check retained an alias's --write and invalidated an evidence review.
