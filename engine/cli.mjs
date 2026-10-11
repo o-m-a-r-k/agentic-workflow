@@ -381,6 +381,8 @@ async function dispatch(cmd, sub, positional, options) {
   // what is checked is what every later open or write uses (never re-derived from the raw argument).
   for (const k of PATH_OPTIONS) {
     if (!(k in options)) continue;
+    // Named failure I-82: inspect pagination shares --from with the guarded skills source path.
+    if (k === 'from' && cmd === 'evidence' && sub === 'inspect') continue;
     options[k] = resolvePathOption(k, options[k]);
   }
   if (cmd === 'skills' && positional[0] !== undefined && (!/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(positional[0]) || positional[0].includes('..'))) throw new WfError(`invalid skill name \`${positional[0]}\`: letters, digits, dot, dash, underscore and colon only`);
@@ -1049,15 +1051,22 @@ async function dispatch(cmd, sub, positional, options) {
         print(options, `${r.files.length ? text : `no evidence files${options.kind ? ` of kind ${options.kind}` : ''} in ${s.id}`}${shots}\nread a text file: \`wf evidence show <path> --attempt ${s.id}\`, or the Read tool on the full path`, r);
         return 0;
       }
+      if (sub === 'inspect') {
+        const { inspectEvidence } = await import('./evidence-read.mjs');
+        const s = openState(root, options);
+        const r = inspectEvidence(root,s,positional[0],{pointer:options.pointer,from:options.from,count:options.count});
+        print({...options,json:true},'',r);
+        return 0;
+      }
       if (sub === 'show') {
         const { showEvidence } = await import('./evidence-read.mjs');
         const s = openState(root, options);
-        const r = showEvidence(root, s, positional[0]);
-        if (options.json) print(options, '', r);
+        const r = showEvidence(root, s, positional[0], { offset: options.offset, length: options.length });
+        if (options.json || r.offset !== undefined) print({ ...options, json: true }, '', r);
         else process.stdout.write(`${r.text}${r.text.endsWith('\n') ? '' : '\n'}${r.truncated ? `… (${r.size} B; the first part only: read the rest with the Read tool on ${r.file})\n` : ''}`);
         return 0;
       }
-      if (sub !== 'release') throw new WfError('usage: wf evidence list [--kind K] | show <path> | release [--attempt ID | --closed | --older-than DAYS] [--reason "why"] [--dry-run]');
+      if (sub !== 'release') throw new WfError('usage: wf evidence list [--kind K] | show <path> | inspect <path> [--pointer P --from N --count N] | release [--attempt ID | --closed | --older-than DAYS] [--reason "why"] [--dry-run]');
       // The sanctioned way to delete evidence: closed attempts only, protection lifted by the engine, a tombstone left.
       const pick = options.attempt ? [resolveAttempt(root, options)] : listAttempts(root);
       const cutoff = options['older-than'] !== undefined ? Date.now() - Number(options['older-than']) * 86400000 : null;
