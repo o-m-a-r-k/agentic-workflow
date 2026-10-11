@@ -84,7 +84,13 @@ export function divideReview(bundle, results, { reviewers = 2, minimumFiles = 40
   // Equal/overlapping flow descriptions can overestimate hubs; that causes a conservative single-review fallback.
   const shared = new Set([...incidence].filter(([, ids]) => ids.length > 1).map(([file]) => file));
   const atomic = [...byFiles.values()].map(flow => ({ ...flow, primary: flow.files.filter(f => !shared.has(f)) })).filter(f => f.primary.length);
-  const cost = files => files.reduce((total, file) => total + Math.max(1, Number(weights[file]) || 1), 0);
+  // Named failure: automatic single-review fallback paid for Git cost scans it never used.
+  let measuredWeights;
+  const cost = files => {
+    if (!files.length) return 0;
+    measuredWeights ??= typeof weights === 'function' ? weights() : weights;
+    return files.reduce((total, file) => total + Math.max(1, Number(measuredWeights[file]) || 1), 0);
+  };
   const single = reason => ({ version: 1, mode: 'single', reason, files: changed, flows, slices: [], integration: { files: changed, interfaces: [] } });
   if (!division && changed.length < minimumFiles) return single(`only ${changed.length} changed files; retain one reviewer below ${minimumFiles}`);
   if (atomic.length < 2) {

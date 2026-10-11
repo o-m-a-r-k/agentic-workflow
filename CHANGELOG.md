@@ -13,6 +13,11 @@ Release notes, newest first, then every fix that came from a failure in the work
 - Work, quick-fix and resume instructions use automatic selection and launch a returned group through its one
   integration handoff. Scoped reports, all findings, frozen runtime settings and integration coverage retain the
   existing enforcement and review/gate order.
+- Single-review fallback skips unnecessary Git cost scans. Parallel candidates calculate changed-line weights once
+  when needed, preserving cost balancing and expensive-flow fallback without adding that work to small reviews.
+- GitHub's macOS job isolates scenario files to reduce fixture contention around the existing strict stop-process
+  deadline. Timeout diagnostics identify the stage consuming the budget. Every scenario and its original assertions
+  and deadline remain; concurrent runner/reviewer checks still execute their own parallel processes.
 
 Scenarios reproduce the former default, check both handoff and foreground automatic selection, the explicit single
 override, existing-round preservation and concurrent scope execution before integration. Runtime fixtures prove
