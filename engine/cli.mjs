@@ -1,3 +1,4 @@
+import { addValidation } from './validation.mjs';
 import { mkdirStateDirectory } from './state-folders.mjs';
 import { askScope, decideScope, completeScopeTicket, scopeFindings } from './scope-decisions.mjs';
 import fs from 'node:fs';
@@ -61,6 +62,8 @@ Work
                                     hand the tree while an implementer is open; records the override
   wf impact run [--file plan.yaml | --query JSON]
                                     run the attempt's recorded impact queries (or a plan file's, or one) on the current tree
+  wf validation add --steps IDs --criteria IDs --reason "why"
+                                    add required committed checks without replacing admission checks
   wf check [--repo R]               light steps only, for the implementer; reused by the gate, never counts as one
   wf gate [--prepare-only] [--full] [--focused] [--rerun-failed] [--reason "why"]
                                     after a clean code review only; --reason runs it out of order and records why
@@ -269,7 +272,7 @@ export async function main(argv) {
   }
 }
 
-const FULL_VERIFY = new Set(['advance', 'accept', 'deliver', 'verify', 'review', 'tracker', 'export', 'shown', 'delivery', 'summary', 'handoff', 'models', 'gate', 'check', 'evidence']);
+const FULL_VERIFY = new Set(['advance', 'accept', 'deliver', 'verify', 'review', 'tracker', 'export', 'shown', 'delivery', 'summary', 'handoff', 'models', 'validation', 'gate', 'check', 'evidence']);
 
 const WRITE_OPTIONS = ['out', 'csv', 'handoffs-csv', 'html', 'dir', 'to', 'root'];
 const READ_OPTIONS = ['file', 'sweep', 'division', 'capture', 'comments', 'summary-file', 'closure', 'issue-file', 'from', 'comment-file'];
@@ -599,6 +602,12 @@ async function dispatch(cmd, sub, positional, options) {
         out.push({ id, recorded: recordedHits[id] ?? null, hits: r.hits, unit: r.unit, files: r.files, skipped: r.skipped, refs: r.refs });
       }
       print(options, out.map((x) => `${x.id}: ${x.hits} ${x.unit}${x.recorded === null || x.recorded === undefined ? '' : x.recorded === x.hits ? ' (as recorded)' : ` (recorded ${x.recorded})`} at ${Object.entries(x.refs).map(([n, ref]) => `${n}@${ref.slice(0, 10)}`).join(', ')}${x.files.length ? `\n    ${x.files.join('\n    ')}` : ''}${x.skipped.length ? `\n    skipped (binary): ${x.skipped.join(', ')}` : ''}`).join('\n'), out);
+      return 0;
+    }
+    case 'validation': {
+      if (sub !== 'add') throw new WfError('usage: wf validation add --steps IDs --criteria IDs --reason why');
+      const s = await addValidation(root, options);
+      print(options, 'required supplemental validation registered; admission checks unchanged; fresh code review and full gate required', s.validations.at(-1));
       return 0;
     }
     case 'criteria': {
