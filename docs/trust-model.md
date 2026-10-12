@@ -31,6 +31,8 @@ Future handoffs resolve model and effort from this separate execution pin: imple
 
 ## Extra-scope decisions
 
+`wf scope ask` returns canonical option labels for native question pickers. Put the finding description in the question rather than inventing new approval labels. A submitted answer such as "Increase scope and include the responsive fix" also counts as a narrow expansion when it is explicit and unconditional; descriptions cannot grant future repairs, combine decisions or authorize delivery actions. A valid desktop choice does not require a second message containing a command phrase. Invalid scope replies report the missing decision rather than instructing the owner to repeat magic words.
+
 Unrelated existing defects require base/current evidence and four explicit false causal checks. In-scope or uncertain findings cannot be waived by `wf scope`. After `wf scope ask`, only the direct human reply in the owning interactive session authorizes expand, ticket or ignore. The reply is spent once and the question binds the displayed finding set. Expand-all is limited to that attempt, and criteria/impact amendments still precede every added implementation. Ticket disposition stays pending until a captured raw readback exists (labelled agent-reported, not host-verified). Owner dispositions and risks remain in exports and the delivered handoff. No choice rewrites closures or bypasses required failed gates.
 
 ## Owning runtime and provider selection

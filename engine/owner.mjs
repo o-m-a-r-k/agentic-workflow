@@ -171,7 +171,7 @@ function adoptionRequest(text, phrases) {
 
 // Named failure: scope expansion followed agent text rather than the owner's reply to a scoped question.
 function scopeReply(message, choice, phrase) {
-  const plain = fold(message).trim();
+  const plain = fold(message).trim().replace(/ \(recommended\)$/, '');
   if (plain === fold(phrase)) return true;
   const replies = {
     expand: /^(?:(?:please|just) )?(?:increase|expand) scope(?: and (?:continue )?fix(?:ing)?(?: (?:these|them|these findings))?)?[.!]?$/,
@@ -179,7 +179,17 @@ function scopeReply(message, choice, phrase) {
     ticket: /^(?:(?:please|just) )?create (?:a ticket|tickets)(?: for later)?[.!]?$/,
     ignore: /^(?:(?:please|just) )?ignore(?: (?:these|them|these findings))?(?: for (?:now|this attempt))?[.!]?$/,
   };
-  return replies[choice]?.test(plain) ?? false;
+  if (replies[choice]?.test(plain)) return true;
+  // Named failure: a bound desktop option such as "Increase scope and include
+  // the responsive fix" passed host verification but failed the canonical phrase
+  // matcher. Accept an explicit narrow expansion with a bounded fix description,
+  // never a conditional, conflicting decision or blanket expansion. The caller
+  // still binds authority to the latest human reply after the anchored scope ask.
+  if (choice !== 'expand') return false;
+  const describedExpansion = /^(?:(?:please|just) )?(?:increase|expand) scope and (?:include|fix|repair) ([\p{L}\p{N}][\p{L}\p{N} _-]{0,160})[.!]?$/u.exec(plain);
+  if (!describedExpansion) return false;
+  const description = describedExpansion[1];
+  return !/^(?:all|every)\b|\b(?:if|unless|until|when|whether|only|not|never|but|except|provided|assuming|after|before|once|maybe|perhaps|future|everything|and|or|ignore|tickets?|push|merge|deploy|delete|override|release)\b/.test(description);
 }
 
 export function ownerAuthority(root, state, phrase, { what, command = null, owner = state.owner, terminal = defaultTerminal, decision = null, interactive = false, requestPhrases = null, scopeChoice = null, scopeAnchor = null } = {}) {
@@ -232,7 +242,8 @@ export function ownerAuthority(root, state, phrase, { what, command = null, owne
     if (!why) return { provenance: 'owner-session command', runtime: t.runtime, file: t.file, line: ran.line, at: ran.at, spent, command: ran.command.slice(0, 500) };
   }
   if (notInteractive) throw refuse(`not done: ${what} needs a message from ${owner}, a plain interactive session, and ${t.file} is not one: ${notInteractive}`, how);
-  const missing = requestPhrases ? `contains an affirmative, unconditional request to adopt this ticket or attempt` : `starts with \`${phrase}\``;
+  const missing = scopeChoice ? `contains an explicit, unconditional ${scopeChoice} decision after the current scope question`
+    : requestPhrases ? `contains an affirmative, unconditional request to adopt this ticket or attempt` : `starts with \`${phrase}\``;
   throw refuse(`not done: ${what} needs the owner's authority, and no unspent owner message in the owner session (${t.file}) ${missing}${shown ? `, nor did the owner session itself run exactly \`${shown}\` (${why})` : ''}; an agent's word, a tool result or a sub-agent's call never counts`, how);
 }
 
