@@ -78,7 +78,9 @@ export function askScope(root, options) {
     const anchor = captured ? { file: host.file, size: captured.bytes.length, sha256: sha256(captured.bytes) } : null;
     append(root, state.id, 'scope.asked', { keys, signature: signature(rows), anchor, owner: state.owner }, actor(options));
   }
-  return { state: loadState(root, state.id), findings: rows, prompt: 'These existing defects are unrelated to this change. Fixing them increases scope. Choose: increase scope and fix; create tickets for later; or ignore for this attempt. You can also say continue fixing all to authorize future extra-scope repairs in this attempt.' };
+  return { state: loadState(root, state.id), findings: rows,
+    options: ['Increase scope and fix', 'Create tickets for later', 'Ignore for this attempt'],
+    prompt: 'These existing defects are unrelated to this change. Fixing them increases scope. Choose: increase scope and fix; create tickets for later; or ignore for this attempt. Use the returned option labels in a native question picker; describe the findings in the question. You can also say continue fixing all to authorize future extra-scope repairs in this attempt.' };
 }
 export function decideScope(root, options) {
   const state = openState(root, options);

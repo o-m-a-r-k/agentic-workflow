@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { blockingFindings, scopeProblems, scopeKey, scopeHandoffProblems } from '../engine/scope-decisions.mjs';
+import { readLedger } from '../engine/ledger.mjs';
 import { closureFile, commitIn, criteriaFile, goodClosure, ok, singleRepoProject, state, wf, ownerSays, sh, stages } from './helpers.mjs';
 
 const resources = [];
@@ -37,10 +38,93 @@ function review(p, reviewer, findings = [finding()]) {
   return wf(p.root, ['review', '--closure', closureFile(p.base, goodClosure(reviewer, { findings })), '--attempt', p.id]);
 }
 function choose(p, choice, words) {
-  ok(wf(p.root, ['scope', 'ask', '--attempt', p.id]));
+  const asked = ok(wf(p.root, ['scope', 'ask', '--attempt', p.id, '--json'])).json();
+  assert.deepEqual(asked.options, ['Increase scope and fix', 'Create tickets for later', 'Ignore for this attempt']);
   ownerSays(p.home, p.owner, words);
   return wf(p.root, ['scope', 'decide', '--choice', choice, '--attempt', p.id], { ownerSilent: true });
 }
+
+function scopeQuestion(p, answer, call = 'call_scope', extra = {}) {
+  const sid = p.owner.split(':').slice(1).join(':');
+  const file = path.join(p.home, '.codex', 'sessions', `rollout-scenario-${sid}.jsonl`);
+  const title = 'Include the prepared responsive layout fix with this ticket?';
+  const row = { questionItemId: JSON.stringify(['request_user_input_async', call, 0]), question: title, answer, ...extra };
+  const records = [
+    { type: 'response_item', payload: { type: 'function_call', name: 'functions.request_user_input_async', call_id: call,
+      arguments: JSON.stringify({ questions: [{ title, options: ['Increase scope and include the responsive fix', 'Create tickets for later', 'Ignore for this attempt'] }] }) } },
+    { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: `<send_user_message_question_reply>\n${JSON.stringify([row])}\n</send_user_message_question_reply>` }] } },
+  ];
+  fs.appendFileSync(file, records.map(r => JSON.stringify({ ...r, timestamp: new Date().toISOString() })).join('\n') + '\n');
+  return file;
+}
+
+// Named failure: a genuine selected scope option with a fix description was decoded,
+// then rejected by the phrase matcher and the owner was asked to repeat magic words.
+test('a descriptive desktop scope choice expands once without a repeated owner approval', () => {
+  const p = project('scope-described-option');
+  ok(review(p, 'r1'));
+  ok(wf(p.root, ['scope', 'ask', '--attempt', p.id]));
+  const answer = 'Increase scope and include the responsive fix';
+  scopeQuestion(p, answer);
+  ok(wf(p.root, ['scope', 'decide', '--choice', 'expand', '--attempt', p.id], { ownerSilent: true }));
+  const decision = state(p.root, p.id).scopeDecisions.at(-1);
+  assert.equal(decision.choice, 'expand');
+  assert.equal(decision.all, false);
+  assert.equal(decision.authority.text, answer);
+  assert.deepEqual(decision.authority.questionReply, { tool: 'request_user_input_async', callId: 'call_scope', index: 0 });
+  assert.equal(readLedger(p.root, p.id).filter(e => e.type === 'scope.decided').length, 1);
+  assert.equal(wf(p.root, ['scope', 'decide', '--choice', 'expand', '--attempt', p.id], { ownerSilent: true }).code, 75);
+  const later = { ...state(p.root, p.id), reviews: [{ reviewer: 'r2', closure: { findings: [finding({ scope: scope('new-independent-defect') })] } }] };
+  assert.match(scopeHandoffProblems(later).join(' '), /await the owner decision/);
+});
+
+test('descriptive scope choices reject conditions, negation, other decisions and forged bindings', () => {
+  const p = project('scope-described-refusal');
+  ok(review(p, 'r1'));
+  ok(wf(p.root, ['scope', 'ask', '--attempt', p.id]));
+  const answers = [
+    'Increase scope and include the responsive fix if necessary',
+    'Increase scope and include the responsive fix only after approval',
+    'Increase scope and include the responsive fix but do not apply it',
+    'Increase scope and include all future fixes',
+    'Increase scope and include the responsive fix and ignore another defect',
+    'Increase scope and include the responsive fix and push',
+    'The reviewer said increase scope and include the responsive fix',
+    'No',
+  ];
+  for (const [i, answer] of answers.entries()) {
+    scopeQuestion(p, answer, `call_decline_${i}`);
+    assert.equal(wf(p.root, ['scope', 'decide', '--choice', 'expand', '--attempt', p.id], { ownerSilent: true }).code, 75, answer);
+  }
+  scopeQuestion(p, 'Increase scope and include the responsive fix', 'call_forged', { question: 'A different question' });
+  assert.equal(wf(p.root, ['scope', 'decide', '--choice', 'expand', '--attempt', p.id], { ownerSilent: true }).code, 75);
+  assert.equal(state(p.root, p.id).scopeDecisions.length, 0);
+});
+
+test('descriptive desktop approval must follow the scope ask and remains revocable', () => {
+  const p = project('scope-question-bounds');
+  ok(review(p, 'r1'));
+  const answer = 'Increase scope and include the responsive fix';
+  scopeQuestion(p, answer, 'call_before_scope');
+  ok(wf(p.root, ['scope', 'ask', '--attempt', p.id]));
+  assert.equal(wf(p.root, ['scope', 'decide', '--choice', 'expand', '--attempt', p.id], { ownerSilent: true }).code, 75);
+  scopeQuestion(p, answer, 'call_then_revoked');
+  ownerSays(p.home, p.owner, 'wait, do not increase scope');
+  assert.equal(wf(p.root, ['scope', 'decide', '--choice', 'expand', '--attempt', p.id], { ownerSilent: true }).code, 75);
+  scopeQuestion(p, answer + ' (Recommended)', 'call_confirmed');
+  assert.equal(wf(p.root, ['scope', 'decide', '--choice', 'ignore', '--attempt', p.id], { ownerSilent: true }).code, 75);
+  ok(wf(p.root, ['scope', 'decide', '--choice', 'expand', '--attempt', p.id], { ownerSilent: true }));
+  const scopeFile = path.join(p.base, 'additional-scope.json');
+  fs.writeFileSync(scopeFile, JSON.stringify(scope('later-independent-defect')));
+  ok(wf(p.root, ['discovered', 'add', '--summary', 'Another independent warning', '--scope-file', scopeFile, '--attempt', p.id]));
+  ok(wf(p.root, ['scope', 'ask', '--attempt', p.id]));
+  scopeQuestion(p, answer + ' (Recommended)', 'call_confirmed');
+  const rejected = wf(p.root, ['scope', 'decide', '--choice', 'expand', '--attempt', p.id], { ownerSilent: true });
+  assert.equal(rejected.code, 75);
+  assert.match(rejected.out + rejected.err, /explicit, unconditional expand decision/);
+  assert.doesNotMatch(rejected.out + rejected.err, /starts with `scope/);
+  assert.equal(state(p.root, p.id).scopeDecisions.length, 1);
+});
 
 test('scope is causal: missing, uncertain and change-related consumer findings always block', () => {
   const f = finding();
