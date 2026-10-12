@@ -1,3 +1,4 @@
+import { gateAdapter, validationCommit, validationDigest, validationIds, validationCatalog } from './validation.mjs';
 import { mkdirStateDirectory } from './state-folders.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -49,7 +50,7 @@ function stepInputs(state, step, repo, pkg) {
 // Identity of what runs the step: its definition (minus worker counts) and the committed plugin code.
 function runnerIdentity(root, live, state, step) {
   const { workers, shards, ...definition } = step;
-  const pluginHash = step.plugin ? hashFile(adapterFileAtCommit(root, state, state.adapterBase, step.plugin)) : null;
+  const pluginHash = step.plugin ? hashFile(adapterFileAtCommit(root, state, validationCommit(state, step.id), step.plugin)) : null;
   return hashValue({ definition, pluginHash });
 }
 
@@ -81,7 +82,7 @@ function findReuse(state, stepId, key) {
 // Selection is computed from the adapter committed at the attempt's base, never the worktree copy.
 export async function planGate(root, state, options = {}) {
   const live = loadConfig(root);
-  const cfg = trustedAdapter(root, state);
+  const cfg = gateAdapter(root, state);
   const changed = {};
   for (const name of Object.keys(state.repos)) changed[name] = changedFiles(state, name);
   const { repo: adapterRepo, relative } = attemptAdapter(root, state);
@@ -132,7 +133,7 @@ export async function planGate(root, state, options = {}) {
     const notCovered = uncovered[`${repo.name}|${pkg.path}`] ?? [];
     const component = cfg.components.find((c) => c.repo === repo.name && (c.package ?? '.') === pkg.path) ?? (step.component ? cfg.components.find((c) => c.id === step.component) : null);
     const isDependent = Boolean(component && imp.dependents.includes(component.id));
-    const mustRun = full || infraChanged || isDependent || notCovered.length > 0;
+    const mustRun = validationIds(state).includes(step.id) || full || infraChanged || isDependent || notCovered.length > 0;
     // A change in a repo the step also reads keeps it from being skipped; reuse then depends on that repo's tree.
     const alsoChanged = (step.alsoInputs ?? []).flatMap((name) => {
       const other = cfg.repos.find((r) => r.name === name);
@@ -199,7 +200,7 @@ export async function planGate(root, state, options = {}) {
       decision: prior ? 'reuse' : 'run',
       reason: prior ? `same inputs and runner as ${prior.runId}` : outside.length ? `changed file(s) outside this step's inputs since its last pass: ${outside.slice(0, 3).join(', ')}${outside.length > 3 ? '…' : ''}` : notCovered.length ? `changed file(s) outside every step's inputs: ${notCovered.slice(0, 3).join(', ')}${notCovered.length > 3 ? '…' : ''}` : also.unreadable.length ? `cannot read the tree of ${also.unreadable.join(', ')} (alsoInputs): always runs` : key ? (isDependent ? 'dependent of a changed contract' : infraChanged ? 'shared infrastructure changed' : also.trees ? 'inputs or a repo in alsoInputs changed, or never passed' : 'inputs changed or never passed') : 'no `inputs` declared: always runs',
       reusedFrom: prior?.runId ?? null,
-      missingSecrets: missingFor(root, cfg, step.id),
+      missingSecrets: missingFor(root, cfg, step.id, validationCatalog(root, state, step.id)),
     });
   }
   return { cfg, live, changed, impact: imp, full, adapterTouched, focused, check: Boolean(options.check), rerunFailed: options.rerunFailed ?? null, steps, unchecked, tree: treeHashes(state) };
@@ -384,7 +385,7 @@ async function executeStep(root, cfg, state, planned, ctx) {
   // WF_ITEM / WF_ITEMS say WHICH tickets' captures the run is for (a batch runs its members' heavy steps); where the
   // tests write them is the project's convention, matched by the step's `artifacts` globs.
   const units = artifactUnits(root, state);
-  const env = projectEnv(cfg, { ...stepEnv(root, cfg, step.id), WF_ROOT: root, WF_ATTEMPT: state.id, WF_ITEM: String(state.item ?? state.id), WF_ITEMS: [...new Set(units.map((u) => String(u.item)))].join(' '), WF_STEP: step.id, WF_EVIDENCE: scratch, WF_WORKERS: String(workers.n) });
+  const env = projectEnv(cfg, { ...stepEnv(root, cfg, step.id, validationCatalog(root, state, step.id)), WF_ROOT: root, WF_ATTEMPT: state.id, WF_ITEM: String(state.item ?? state.id), WF_ITEMS: [...new Set(units.map((u) => String(u.item)))].join(' '), WF_STEP: step.id, WF_EVIDENCE: scratch, WF_WORKERS: String(workers.n) });
   const started = Date.now();
   const prior = allGateSteps(state).filter((s) => s.id === step.id && s.status !== 'reused' && s.suites).at(-1);
   const rerun = step.select ? suitesToRerun(prior, planned) : null;
@@ -392,7 +393,7 @@ async function executeStep(root, cfg, state, planned, ctx) {
   vars.select = rerun ? substitute(step.select, { suites: rerun.map(shellQuote).join(' ') }) : '';
   let result;
   if (step.plugin) {
-    const mod = (await import(pathToFileURL(adapterFileAtCommit(root, state, state.adapterBase, step.plugin)).href)).default;
+    const mod = (await import(pathToFileURL(adapterFileAtCommit(root, state, validationCommit(state, step.id), step.plugin)).href)).default;
     const pctx = { root, attempt: state.id, step, dir: planned.dir, worktrees: Object.fromEntries(Object.entries(state.repos).map(([k, v]) => [k, v.worktree])), changed: ctx.changedSinceBase, evidenceDir: scratch, workers: workers.n, env, log: (s) => writeNoFollow(logFile, ctx.redact(`${s}\n`), { append: true }) };
     const decision = mod.plan ? await mod.plan(pctx) : null;
     if (decision && decision.run === false) {
@@ -540,12 +541,12 @@ async function harvest(root, state, lock) {
     } catch {}
   }
   if (lock.plugins?.length) {
-    const cfg = trustedAdapter(root, state);
+    const cfg = gateAdapter(root, state);
     for (const id of lock.plugins) {
       const step = cfg.gate.steps.find((s) => s.id === id);
       if (!step?.plugin) continue;
       try {
-        const mod = (await import(pathToFileURL(adapterFileAtCommit(root, state, state.adapterBase, step.plugin)).href)).default;
+        const mod = (await import(pathToFileURL(adapterFileAtCommit(root, state, validationCommit(state, step.id), step.plugin)).href)).default;
         await mod.cleanup?.({ root, attempt: state.id, step, harvest: true });
       } catch {}
     }
@@ -757,13 +758,13 @@ async function execute(root, state, plan, live = null) {
   process.off('SIGINT', onSignal);
   for (const p of queue) results.push({ id: p.id, repo: p.repo, tier: p.tier, status: 'not-started', runId });
 
-  const bad = results.filter((r) => ['failed', 'interrupted', 'not-started'].includes(r.status));
+  const bad = results.filter((r) => ['failed', 'interrupted', 'not-started'].includes(r.status) || (!plan.check && validationIds(state).includes(r.id) && !['passed', 'reused'].includes(r.status)));
   const status = stopping ? 'stopped' : bad.length ? 'failed' : 'passed';
   // Untracked files the steps produced (reports, screenshots) are recorded so they do not block the next gate.
   const producedUntracked = {};
   for (const [name, r] of Object.entries(state.repos)) producedUntracked[name] = untrackedSnapshot(r.worktree);
   say(`${status} (${runId})`);
-  const record = { runId, status, producedUntracked, changed: plan.changed, full: plan.full, focused: plan.focused, check: plan.check || undefined, rerunFailed: plan.rerunFailed ?? undefined, adapterBase: state.adapterBase, tree: plan.tree, impact: plan.impact, unchecked: plan.unchecked, steps: results, finishedAt: now() };
+  const record = { runId, status, producedUntracked, changed: plan.changed, full: plan.full, focused: plan.focused, check: plan.check || undefined, rerunFailed: plan.rerunFailed ?? undefined, adapterBase: state.adapterBase, validationDigest: validationDigest(state), tree: plan.tree, impact: plan.impact, unchecked: plan.unchecked, steps: results, finishedAt: now() };
   writeImmutable(path.join(runDir, 'result.json'), `${JSON.stringify(record, null, 2)}\n`);
   // Recorded before the run is: once it is finished, an unrecorded file in its folder is an extra file.
   seal(append, { root, id: state.id, runId });
@@ -912,6 +913,9 @@ export const focusedSkips = (g) => (g?.steps ?? []).filter((s) => s.status === '
 export function gatePassedForCurrentTree(state) {
   const g = state.lastGate;
   if (!g || g.status !== 'passed') return { ok: false, reason: g ? `last gate ${g.status}` : 'no gate has run' };
+  if ((g.validationDigest ?? null) !== validationDigest(state)) return { ok: false, reason: 'required supplemental validation changed after the last passing gate' };
+  const missing = validationIds(state).filter((id) => !g.steps.some((s) => s.id === id && ['passed', 'reused'].includes(s.status)));
+  if (missing.length) return { ok: false, reason: `required supplemental validation did not pass: ${missing.join(', ')}` };
   const skipped = focusedSkips(g);
   if (skipped.length) return { ok: false, reason: `the last gate was focused and skipped ${skipped.join(', ')}; run \`wf gate\` without --focused` };
   if (canonical(treeHashes(state)) !== canonical(g.tree)) return { ok: false, reason: 'the code changed after the last passing gate' };
