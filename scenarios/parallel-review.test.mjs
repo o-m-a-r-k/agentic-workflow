@@ -139,6 +139,16 @@ test('ordinary reviewer handoffs automatically divide large separable changes; s
   assert.equal(compatible.h.division.mode, 'parallel', 'existing explicit parallel commands remain valid');
 });
 
+test('I-83 owner division diagnostics never enter the blind reviewer start prompt', () => {
+  const p = ready({ handoffReviewer: false });
+  const h = ok(wf(p.root, ['handoff', 'reviewer', '--agent', 'diagnostic', '--attempt', p.id]));
+  assert.match(h.err, /division reason: parallel/);
+  assert.match(h.err, /workload estimate: S1 24 files\/24 changed-line cost; S2 24 files\/24 changed-line cost; integration 2 files\/2 cost/);
+  assert.match(h.err, /integration causes: unmapped 1, unassigned 0, cross-scope shared 1/);
+  assert.equal(h.out.trim().split('\n').length, 1);
+  assert.match(h.out, /^Read .* and follow its instructions\.\n$/);
+});
+
 test('review selection refuses conflicting flags and invalid values before handing or advancing roles', () => {
   const p = ready({ handoffReviewer: false });
   ok(wf(p.root, ['handoff', 'close', '--agent', 'impl', '--attempt', p.id]));

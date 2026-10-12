@@ -26,15 +26,26 @@ snapshot and one frozen obligation snapshot. No author summaries or earlier-roun
 The engine derives flow ownership from the planner's recorded end-to-end flows and current committed query results.
 Repeated actions using the same flow query, and areas with identical changed-file sets, are coalesced before division.
 Impact flows include consumer, contract and suite queries, so their producers, consumers and tests stay together
-across repositories. A file mentioned by several flows goes to integration. Unmapped files also go to integration.
+across repositories. Complete flows are grouped before files are assigned: a file mentioned by several flows within
+one scope remains with that reviewer. Files crossing scopes, files referenced by an unassigned flow, and unmapped
+files go to integration. An area with no individually exclusive files is not discarded before grouping.
 Each changed file has exactly one primary owner. Crossing flows and textual outside callers require explicit
 integration evidence on both sides. These are recorded relationships, not a resolved language import graph;
 integration must investigate ambiguous names, omissions and scan caps.
 
 Automatic division retains single review below 40 changed files, with fewer than two separable flow areas, when more
 than half the files belong to integration, or when one indivisible scope would retain at least 80% of estimated review
-cost. Whole areas are balanced by changed line counts, with a conservative cost for binary files; shared code dominating
-that cost also retains single review. These are initial heuristics, not measured optimal thresholds. It never falls back
+cost. Whole areas are balanced by changed line counts, with a conservative cost for binary files. When overlap would
+leave work in integration, an additional candidate groups areas by weighted overlap, retaining the eligible candidate
+with the smaller integration-plus-largest-scope estimate (the original candidate wins ties). A ubiquitous helper
+does not merge the entire connected graph. Shared code dominating that cost still retains single review.
+The optional overlap search has deterministic limits: 1,000,000 initial pair contributions, 250,000 distinct
+pairs, 500,000 lifetime queued pairs, and 1,000,000 merge-neighbor visits. Initial contributions are estimated
+before constructing the pair map. Exhaustion discards the search and retains the fully evaluated balanced
+candidate; it does not relax efficiency checks. Owner diagnostics identify `optimization-budget-exceeded`.
+Manual divisions do not invoke this optimization.
+
+These are initial heuristics, not measured optimal thresholds. It never falls back
 to arbitrary directory, repository, equal-size or
 implementer-work splits when flow information is insufficient.
 
@@ -48,8 +59,16 @@ A proposed `--division file.json` may group recorded atomic flow IDs:
 ```
 
 It cannot assign a flow twice, invent a flow, omit source files or remove crossing checks. Unassigned flows remain
-with integration. The JSON handoff result contains the division and each member's exact frozen prompt; stderr
+with integration, including their dependencies that also occur in assigned flows. A proposed scope with no primary
+files is refused. A manual proposal may retain an inefficient split, but prints a warning and never bypasses coverage
+or interface checks. The JSON handoff result contains the division and each member's exact frozen prompt; stderr
 contains owner launch instructions. The integration ID is the supplied `--agent`; scope IDs append `-S1`, `-S2`, etc.
+
+Owner diagnostics distinguish unmapped files, dependencies of unassigned areas, and cross-scope shared files. They
+retain the proposed workload and exact efficiency thresholds even when automatic selection falls back to single
+review. Bounded query-origin examples distinguish flow, consumer, contract and suite queries in the JSON result.
+Diagnostics never enter the blind one-line launch prompt. New divisions validate group-based ownership and every
+required interface; already frozen version-one handoffs retain their recorded assignments and original checks.
 
 ## Evidence and completion
 

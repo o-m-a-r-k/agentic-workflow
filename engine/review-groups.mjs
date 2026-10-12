@@ -44,24 +44,9 @@ export function impactCatalog(map) {
   return Object.fromEntries(Object.entries(catalog).map(([k, values]) => [k, [...values.values()]]));
 }
 
-export function divideReview(bundle, results, { reviewers = 2, minimumFiles = 40, division = null, weights = {} } = {}) {
-  if (!Number.isInteger(reviewers) || reviewers < 2 || reviewers > 3) throw refuse('parallel review uses two or three scoped reviewers plus one integration reviewer');
-  const changed = changedInventory(bundle), changedSet = new Set(changed), catalog = impactCatalog(bundle.impactMap);
-  const flows = [];
-  const addFlow = (id, row, extraQueries = []) => {
-    if (!row?.flow || !row?.failure) return;
-    const queries = [...new Set([row.query, ...extraQueries].filter(Boolean))];
-    const context = [...new Set(queries.flatMap(q => results[q]?.files ?? []))].sort();
-    const files = context.filter(f => changedSet.has(f));
-    if (files.length) flows.push({ id, flow: row.flow, failure: row.failure, query: row.query, queries, files, context });
-  };
-  for (const row of catalog.flows) addFlow(`survey:${row.id}`, row);
-  for (const row of catalog.changes) for (const [i, flow] of list(row.flows).entries()) addFlow(`change:${row.id}:${i}`, flow,
-    [row.consumers?.query, ...list(row.contracts).map(c => c.query), ...list(row.suites).map(s => s.query)]);
-  // Several actions of one feature commonly reuse its flow query. Merge their full contract/test context first,
-  // then coalesce identical changed-file sets. Duplicate annotations must not turn an entire feature into a hub.
+function normalizedAreas(flows) {
   const byQuery = new Map();
-  for (const flow of flows) {
+  for (const flow of [...flows].sort((a, b) => a.id.localeCompare(b.id))) {
     const key = flow.query ?? canonical(flow.files);
     if (!byQuery.has(key)) byQuery.set(key, { id: flow.id, flowIds: [], files: [], context: [] });
     const area = byQuery.get(key);
@@ -75,59 +60,218 @@ export function divideReview(bundle, results, { reviewers = 2, minimumFiles = 40
     const combined = byFiles.get(key); combined.flowIds.push(...area.flowIds); combined.context.push(...area.context);
     combined.context = [...new Set(combined.context)].sort();
   }
+  return [...byFiles.values()].map(area => ({ ...area, flowIds: area.flowIds.sort() })).sort((a, b) => a.id.localeCompare(b.id));
+}
+
+// Named failure I-83: overlap inside a reviewer group was incorrectly assigned to integration before grouping.
+// Unassigned areas are integration owners too: grouping must never reclaim their dependencies.
+function divisionOwnership(areas, bins, changed) {
+  const assigned = new Map(bins.flatMap(bin => bin.areas.map(area => [area.id, bin.id])));
   const incidence = new Map();
-  for (const flow of byFiles.values()) for (const file of flow.files) {
+  for (const area of areas) for (const file of area.files) {
     if (!incidence.has(file)) incidence.set(file, []);
-    incidence.get(file).push(flow.id);
+    incidence.get(file).push(area);
   }
-  // A file shared by several independently named flows is a hub. Integration owns it and every crossing flow.
-  // Equal/overlapping flow descriptions can overestimate hubs; that causes a conservative single-review fallback.
-  const shared = new Set([...incidence].filter(([, ids]) => ids.length > 1).map(([file]) => file));
-  const atomic = [...byFiles.values()].map(flow => ({ ...flow, primary: flow.files.filter(f => !shared.has(f)) })).filter(f => f.primary.length);
-  // Named failure: automatic single-review fallback paid for Git cost scans it never used.
-  let measuredWeights;
-  const cost = files => {
-    if (!files.length) return 0;
-    measuredWeights ??= typeof weights === 'function' ? weights() : weights;
-    return files.reduce((total, file) => total + Math.max(1, Number(measuredWeights[file]) || 1), 0);
+  const owners = new Map(), causes = new Map(), retained = [];
+  for (const file of changed) {
+    const mentions = incidence.get(file) ?? [], groups = new Set(mentions.map(area => assigned.get(area.id) ?? 'integration'));
+    const owner = groups.size === 1 && !groups.has('integration') ? [...groups][0] : 'integration';
+    owners.set(file, owner);
+    if (!mentions.length) causes.set(file, 'unmapped');
+    else if (owner === 'integration') causes.set(file, groups.has('integration') ? 'unassigned' : 'crossScope');
+    else if (mentions.length > 1) retained.push(file);
+  }
+  return { owners, causes, retained, incidence,
+    bins: bins.map(bin => ({ ...bin, files: changed.filter(file => owners.get(file) === bin.id) })),
+    integration: changed.filter(file => owners.get(file) === 'integration') };
+}
+
+function balancedBins(clusters, reviewers, cost) {
+  const bins = Array.from({ length: Math.min(reviewers, clusters.length) }, (_, i) => ({ id: `S${i + 1}`, areas: [], files: [] }));
+  for (const cluster of [...clusters].sort((a, b) => cost(b.files) - cost(a.files) || a.id.localeCompare(b.id))) {
+      bins.sort((a, b) => cost(a.files) - cost(b.files) || a.id.localeCompare(b.id));
+      bins[0].areas.push(...cluster.areas);
+      bins[0].files = [...new Set([...bins[0].files, ...cluster.files])].sort();
+  }
+  return bins.sort((a, b) => a.id.localeCompare(b.id));
+}
+
+// Cache weighted intersections and queue only overlapping pairs. Merges update affected neighbors instead of
+// repeatedly scanning all area pairs. A ubiquitous helper does not force one connected component.
+function overlapClusters(areas, reviewers, cost, weight) {
+  const active = new Map(), incidence = new Map(), heap = [];
+  // Named failure I-83: dense valid maps made an optional optimization allocate unbounded pairs and queues.
+  // Exhaustion discards the entire search; the fully evaluated balanced division remains authoritative.
+  const limits = { pairContributions: 1_000_000, distinctPairs: 250_000, queuedPairs: 500_000, neighborVisits: 1_000_000 };
+  const counts = { pairContributions: 0, distinctPairs: 0, queuedPairs: 0, neighborVisits: 0 };
+  const exhausted = metric => ({ clusters: null, diagnostics: { status: 'budget-exceeded', code: 'optimization-budget-exceeded', metric, value: counts[metric], limit: limits[metric] } });
+  let sequence = 0;
+  const better = (a, b) => a.score > b.score || (a.score === b.score && a.key.localeCompare(b.key) < 0);
+  const push = value => {
+    heap.push(value); let i = heap.length - 1;
+    while (i) { const parent = (i - 1) >> 1; if (!better(heap[i], heap[parent])) break; [heap[i], heap[parent]] = [heap[parent], heap[i]]; i = parent; }
   };
-  const single = reason => ({ version: 1, mode: 'single', reason, files: changed, flows, slices: [], integration: { files: changed, interfaces: [] } });
-  if (!division && changed.length < minimumFiles) return single(`only ${changed.length} changed files; retain one reviewer below ${minimumFiles}`);
-  if (atomic.length < 2) {
-    if (division) throw refuse('recorded flows do not provide two separable review areas; retain a single reviewer');
-    return single('recorded flows are missing, overlap too broadly, or form fewer than two separable areas');
+  const pop = () => {
+    const first = heap[0], last = heap.pop();
+    if (heap.length) {
+      heap[0] = last; let i = 0;
+      for (;;) { const left = i * 2 + 1, right = left + 1; let next = i;
+        if (left < heap.length && better(heap[left], heap[next])) next = left;
+        if (right < heap.length && better(heap[right], heap[next])) next = right;
+        if (next === i) break; [heap[i], heap[next]] = [heap[next], heap[i]]; i = next;
+      }
+    }
+    return first;
+  };
+  const cluster = rows => {
+    const files = [...new Set(rows.flatMap(area => area.files))].sort(), id = sequence++;
+    const entry = { number: id, id: rows.map(area => area.id).sort().join('\0'), areas: rows, files, cost: cost(files) };
+    active.set(id, entry);
+    for (const file of files) { if (!incidence.has(file)) incidence.set(file, new Set()); incidence.get(file).add(id); }
+    return entry;
+  };
+  for (const area of areas) cluster([area]);
+  const pair = (a, b, intersection) => {
+    if (++counts.queuedPairs > limits.queuedPairs) return false;
+    push({ a: a.number, b: b.number, score: intersection / (a.cost + b.cost - intersection), key: canonical([a.id, b.id].sort()) });
+    return true;
+  };
+  // Estimate the quadratic contribution count before constructing any pair map.
+  for (const ids of incidence.values()) {
+    counts.pairContributions += ids.size * (ids.size - 1) / 2;
+    if (counts.pairContributions > limits.pairContributions) return exhausted('pairContributions');
   }
-  let bins;
+  const intersections = new Map();
+  for (const [file, ids] of incidence) {
+    const rows = [...ids];
+    for (let i = 0; i < rows.length; i++) for (let j = i + 1; j < rows.length; j++) {
+      const key = `${rows[i]},${rows[j]}`;
+      if (!intersections.has(key) && ++counts.distinctPairs > limits.distinctPairs) return exhausted('distinctPairs');
+      const entry = intersections.get(key) ?? { a: rows[i], b: rows[j], cost: 0 };
+      entry.cost += weight(file); intersections.set(key, entry);
+    }
+  }
+  for (const entry of intersections.values()) if (!pair(active.get(entry.a), active.get(entry.b), entry.cost)) return exhausted('queuedPairs');
+  while (active.size > reviewers && heap.length) {
+    const next = pop(), a = active.get(next.a), b = active.get(next.b);
+    if (!a || !b) continue;
+    active.delete(a.number); active.delete(b.number);
+    for (const file of new Set([...a.files, ...b.files])) { incidence.get(file).delete(a.number); incidence.get(file).delete(b.number); }
+    const merged = cluster([...a.areas, ...b.areas].sort((x, y) => x.id.localeCompare(y.id))), neighbors = new Map();
+    for (const file of merged.files) for (const id of incidence.get(file)) {
+      if (++counts.neighborVisits > limits.neighborVisits) return exhausted('neighborVisits');
+      if (id !== merged.number) neighbors.set(id, (neighbors.get(id) ?? 0) + weight(file));
+    }
+    for (const [id, intersection] of neighbors) if (!pair(merged, active.get(id), intersection)) return exhausted('queuedPairs');
+  }
+  return { clusters: [...active.values()], diagnostics: { status: 'complete', ...counts } };
+}
+
+function integrationInterfaces(flows, changed, owners, bundle) {
+  const changedSet = new Set(changed);
+  const interfaces = flows.flatMap(flow => {
+    const groups = [...new Set(flow.files.map(file => owners.get(file) ?? 'integration'))].sort();
+    return groups.length > 1 || groups.includes('integration') || flow.context.some(file => !changedSet.has(file))
+      ? [{ id: flow.id, flow: flow.flow, failure: flow.failure, files: flow.context, owners: groups }] : [];
+  });
+  for (const outside of bundle.impactMap?.derived?.outside ?? []) interfaces.push({ id: `derived:${outside.symbol}@${outside.file}`, files: [...new Set([outside.file, ...(outside.declarationOrigins ?? [outside.declaredIn]).filter(Boolean)])], textual: true, originAmbiguous: outside.originAmbiguous ?? false });
+  return interfaces;
+}
+
+export function divideReview(bundle, results, { reviewers = 2, minimumFiles = 40, division = null, weights = {} } = {}) {
+  if (!Number.isInteger(reviewers) || reviewers < 2 || reviewers > 3) throw refuse('parallel review uses two or three scoped reviewers plus one integration reviewer');
+  const changed = changedInventory(bundle), changedSet = new Set(changed), catalog = impactCatalog(bundle.impactMap), flows = [];
+  const addFlow = (id, row, extras = []) => {
+    if (!row?.flow || !row?.failure) return;
+    const queryOrigins = [{ id: row.query, kind: 'flow' }, ...extras].filter(q => q.id).sort((a, b) => a.kind.localeCompare(b.kind) || a.id.localeCompare(b.id));
+    const queries = [...new Set(queryOrigins.map(q => q.id))].sort(), context = [...new Set(queries.flatMap(q => results[q]?.files ?? []))].sort();
+    const files = context.filter(file => changedSet.has(file));
+    if (files.length) flows.push({ id, flow: row.flow, failure: row.failure, query: row.query, queries, queryOrigins, files, context });
+  };
+  for (const row of catalog.flows) addFlow(`survey:${row.id}`, row);
+  for (const row of catalog.changes) for (const [i, flow] of list(row.flows).entries()) addFlow(`change:${row.id}:${i}`, flow,
+    [{ id: row.consumers?.query, kind: 'consumer' }, ...list(row.contracts).map(c => ({ id: c.query, kind: 'contract' })), ...list(row.suites).map(s => ({ id: s.query, kind: 'suite' }))]);
+  flows.sort((a, b) => a.id.localeCompare(b.id));
+  const areas = normalizedAreas(flows);
+  let measuredWeights;
+  const cachedWeights = new Map();
+  const weight = file => {
+    measuredWeights ??= typeof weights === 'function' ? weights() : weights;
+    if (!cachedWeights.has(file)) { const value = Number(measuredWeights[file]); cachedWeights.set(file, Number.isFinite(value) ? Math.max(1, value || 1) : 1); }
+    return cachedWeights.get(file);
+  };
+  const cost = files => { let total = 0; for (const file of files) total += weight(file); return total; };
+  const thresholds = { minimumFiles, integrationShare: 0.5, dominantScopeShare: 0.8 };
+  const single = (reason, diagnostics) => ({ version: 2, mode: 'single', reason, files: changed, flows, slices: [], integration: { files: changed, interfaces: [] }, diagnostics });
+  const early = (reasonCode, reason) => single(reason, { reasonCode, changedFiles: changed.length, areas: areas.length, thresholds, scopes: [], integration: null, blockers: [] });
+  // Preserve the lazy scan: small or indivisible changes never pay for Git weight discovery.
+  if (!division && changed.length < minimumFiles) return early('below-minimum-files', `only ${changed.length} changed files; retain one reviewer below ${minimumFiles}`);
+  if (areas.length < 2) {
+    if (division) throw refuse('recorded flows do not provide two separable review areas; retain a single reviewer');
+    return early('insufficient-flow-areas', 'recorded flows are missing or form fewer than two distinct areas');
+  }
+  const evaluate = (bins, strategy) => {
+    let ownership = divisionOwnership(areas, bins, changed);
+    if (!division && ownership.bins.some(bin => !bin.files.length)) {
+      bins = ownership.bins.filter(bin => bin.files.length).map((bin, i) => ({ ...bin, id: `S${i + 1}` }));
+      ownership = divisionOwnership(areas, bins, changed);
+    }
+    if (division && ownership.bins.some(bin => !bin.files.length)) throw refuse(`manual review scope ${ownership.bins.find(bin => !bin.files.length).id} has no primary files (empty scope); regroup complete flows`);
+    const scopes = ownership.bins.map(bin => ({ id: bin.id, files: bin.files.length, cost: cost(bin.files) }));
+    const total = cost(changed), integrationCost = cost(ownership.integration), largest = Math.max(0, ...scopes.map(scope => scope.cost));
+    const blockers = [];
+    if (scopes.length < 2) blockers.push({ code: 'insufficient-nonempty-scopes', value: scopes.length, limit: 2 });
+    if (ownership.integration.length > changed.length / 2) blockers.push({ code: 'integration-file-majority', value: ownership.integration.length, limit: changed.length / 2 });
+    if (integrationCost > total / 2) blockers.push({ code: 'integration-cost-majority', value: integrationCost, limit: total / 2 });
+    if (largest >= total * 0.8) blockers.push({ code: 'dominant-scope', value: largest, limit: total * 0.8 });
+    const integration = { files: ownership.integration.length, cost: integrationCost };
+    for (const cause of ['unmapped', 'unassigned', 'crossScope']) {
+      const files = ownership.integration.filter(file => ownership.causes.get(file) === cause);
+      integration[cause] = { files: files.length, cost: cost(files) };
+    }
+    const overlapExamples = [...ownership.incidence].filter(([, rows]) => rows.length > 1).slice(0, 5).map(([file, rows]) => ({ file,
+      owner: ownership.owners.get(file), areas: rows.slice(0, 8).map(area => ({ id: area.id, queries: flows.filter(flow => area.flowIds.includes(flow.id)).flatMap(flow => flow.queryOrigins).slice(0, 6) })) }));
+    return { ownership, score: integrationCost + largest, diagnostics: { reasonCode: blockers[0]?.code ?? 'parallel', strategy,
+      changedFiles: changed.length, totalCost: total, areas: areas.length, thresholds, scopes, integration, blockers,
+      retainedOverlap: { files: ownership.retained.length, cost: cost(ownership.retained) }, overlapExamples,
+      manualEfficiencyWarning: Boolean(division && blockers.length) } };
+  };
+  let candidate, overlapOptimization = { status: division ? 'manual' : 'not-needed' };
   if (division) {
     if (!Array.isArray(division.slices) || division.slices.length < 2 || division.slices.length > 3) throw refuse('division needs two or three slices, each naming recorded flowIds');
-    const assigned = new Map();
-    bins = division.slices.map((slice, index) => {
+    const assigned = new Map(), byId = new Map(areas.flatMap(area => area.flowIds.map(id => [id, area])));
+    const bins = division.slices.map((slice, index) => {
       if (!Array.isArray(slice.flowIds) || !slice.flowIds.length) throw refuse('each slice needs non-empty flowIds; arbitrary file lists cannot divide a review');
       if (new Set(slice.flowIds).size !== slice.flowIds.length) throw refuse('a slice lists a flow more than once');
       const selected = [...new Set(slice.flowIds.map(id => {
-        const flow = atomic.find(f => f.flowIds.includes(id));
-        if (!flow || (assigned.has(flow.id) && assigned.get(flow.id) !== index)) throw refuse(`unknown, inseparable or multiply assigned flow ${id}`);
-        assigned.set(flow.id, index); return flow;
+        const area = byId.get(id);
+        if (!area) throw refuse(`unknown recorded flow ${id}`);
+        if (assigned.has(area.id) && assigned.get(area.id) !== index) throw refuse(`multiply assigned normalized flow ${id}`);
+        assigned.set(area.id, index); return area;
       }))];
-      return { id: `S${index + 1}`, flows: selected, files: selected.flatMap(f => f.primary) };
+      return { id: `S${index + 1}`, areas: selected };
     });
-    // Unassigned flows are explicitly retained by integration; a manual proposal cannot exclude any source file.
+    candidate = evaluate(bins, 'manual');
   } else {
-    bins = Array.from({ length: Math.min(reviewers, atomic.length) }, (_, i) => ({ id: `S${i + 1}`, files: [], flows: [] }));
-    for (const flow of atomic.sort((a, b) => cost(b.primary) - cost(a.primary) || a.id.localeCompare(b.id))) {
-      bins.sort((a, b) => cost(a.files) - cost(b.files) || a.id.localeCompare(b.id));
-      bins[0].flows.push(flow); bins[0].files.push(...flow.primary);
+    candidate = evaluate(balancedBins(areas.map(area => ({ ...area, areas: [area] })), reviewers, cost), 'balanced');
+    if (candidate.diagnostics.blockers.length || (areas.length > reviewers && candidate.diagnostics.integration.crossScope.files)) {
+      const search = overlapClusters(areas, reviewers, cost, weight);
+      overlapOptimization = search.diagnostics;
+      if (search.clusters) {
+        const overlap = evaluate(balancedBins(search.clusters, reviewers, cost), 'overlap-aware');
+        const eligible = !candidate.diagnostics.blockers.length, overlapEligible = !overlap.diagnostics.blockers.length;
+        if ((overlapEligible && !eligible) || (overlapEligible === eligible && overlap.score < candidate.score)) candidate = overlap;
+      }
     }
-    bins.sort((a, b) => a.id.localeCompare(b.id));
+    candidate.diagnostics.overlapOptimization = overlapOptimization;
+    if (candidate.diagnostics.blockers.length) return single(`parallel efficiency checks refused: ${candidate.diagnostics.blockers.map(b => `${b.code} (${b.value}, threshold ${b.limit})`).join('; ')}`, candidate.diagnostics);
   }
-  const assignedFiles = new Set(bins.flatMap(b => b.files));
-  const integrationFiles = changed.filter(f => !assignedFiles.has(f));
-  if (!division && (integrationFiles.length > changed.length / 2 || cost(integrationFiles) > cost(changed) / 2 || Math.max(...bins.map(b => cost(b.files))) >= cost(changed) * 0.8)) return single('shared, unmapped or one indivisible flow dominates the change; parallel review would leave most work serialized');
-  const interfaces = flows.filter(f => f.files.some(file => shared.has(file)) || f.context.some(file => !changedSet.has(file))).map(f => ({ id: f.id, flow: f.flow, failure: f.failure, files: f.context, owners: [...new Set(f.files.map(file => bins.find(b => b.files.includes(file))?.id ?? 'integration'))] }));
-  for (const outside of bundle.impactMap?.derived?.outside ?? []) interfaces.push({ id: `derived:${outside.symbol}@${outside.file}`, files: [...new Set([outside.file, ...(outside.declarationOrigins ?? [outside.declaredIn]).filter(Boolean)])], textual: true, originAmbiguous: outside.originAmbiguous ?? false });
-  const plan = { version: 1, mode: 'parallel', reason: 'recorded end-to-end flows have disjoint primary code; shared and unmapped code belongs to integration', files: changed,
-    costBasis: 'changed lines (binary: 100); estimate, not measured review time',
-    slices: bins.map(b => ({ id: b.id, files: [...new Set(b.files)].sort(), estimatedCost: cost(b.files), flowIds: b.flows.flatMap(f => f.flowIds), context: [...new Set(b.flows.flatMap(f => f.context))].sort() })), flows, integration: { files: integrationFiles, estimatedCost: cost(integrationFiles), interfaces } };
+  const { ownership, diagnostics } = candidate;
+  diagnostics.overlapOptimization = overlapOptimization;
+  const plan = { version: 2, mode: 'parallel', reason: 'complete flows are grouped before ownership; cross-scope, unassigned and unmapped code belongs to integration', files: changed,
+    costBasis: 'changed lines (binary: 100); estimate, not measured review time', diagnostics,
+    slices: ownership.bins.map(bin => ({ id: bin.id, files: bin.files, estimatedCost: cost(bin.files), flowIds: bin.areas.flatMap(area => area.flowIds).sort(), context: [...new Set(bin.areas.flatMap(area => area.context))].sort() })),
+    flows, integration: { files: ownership.integration, estimatedCost: cost(ownership.integration), interfaces: integrationInterfaces(flows, changed, ownership.owners, bundle) } };
   validateDivision(plan, bundle);
   return plan;
 }
@@ -135,11 +279,51 @@ export function divideReview(bundle, results, { reviewers = 2, minimumFiles = 40
 export function validateDivision(plan, bundle) {
   const expected = changedInventory(bundle), owned = [...plan.slices.flatMap(s => s.files), ...plan.integration.files].sort();
   if (canonical(expected) !== canonical(owned)) throw refuse('review division must own every changed file exactly once');
+  // Frozen version-one assignments retain their original checks. New handoffs cannot opt out of version two.
+  if (plan.version === 2) {
+    if (plan.slices.length < 2 || plan.slices.length > 3 || new Set(plan.slices.map(s => s.id)).size !== plan.slices.length || plan.slices.some(s => !/^S[1-3]$/.test(s.id) || !s.files.length)) throw refuse('review division needs two or three unique nonempty scopes');
+    if (new Set(plan.flows.map(f => f.id)).size !== plan.flows.length || plan.flows.some(f => f.files.some(file => !expected.includes(file)))) throw refuse('review flow inventory contains duplicate IDs or unknown changed files');
+    const areas = normalizedAreas(plan.flows), byId = new Map(areas.flatMap(area => area.flowIds.map(id => [id, area]))), assignments = new Map(), seen = new Set();
+    const bins = plan.slices.map(scope => ({ id: scope.id, areas: [...new Set(scope.flowIds.map(id => {
+      if (!byId.has(id) || seen.has(id)) throw refuse(`unknown or duplicate assigned flow ${id}`);
+      seen.add(id); const area = byId.get(id);
+      if (assignments.has(area.id) && assignments.get(area.id) !== scope.id) throw refuse(`normalized flow aliases are multiply assigned: ${id}`);
+      assignments.set(area.id, scope.id); return area;
+    }))] }));
+    for (const area of areas) if (assignments.has(area.id) && area.flowIds.some(id => !seen.has(id))) throw refuse(`normalized flow aliases must be assigned together: ${area.id}`);
+    const ownership = divisionOwnership(areas, bins, expected);
+    for (const scope of plan.slices) if (canonical([...scope.files].sort()) !== canonical(ownership.bins.find(bin => bin.id === scope.id).files)) throw refuse(`scope ${scope.id} violates group-based file ownership; cross-scope and unassigned dependencies are integration-owned`);
+    if (canonical([...plan.integration.files].sort()) !== canonical(ownership.integration)) throw refuse('integration file ownership does not match recorded flow assignments');
+    const required = integrationInterfaces(plan.flows, expected, ownership.owners, bundle), actual = new Map();
+    for (const entry of plan.integration.interfaces) { if (actual.has(entry.id)) throw refuse(`duplicate integration check ${entry.id}`); actual.set(entry.id, entry); }
+    for (const entry of required) {
+      const check = actual.get(entry.id);
+      if (!check) throw refuse(`flow ${entry.id} has no integration check`);
+      if (canonical([...check.files].sort()) !== canonical([...entry.files].sort()) || (entry.owners && canonical(check.owners) !== canonical(entry.owners))) throw refuse(`integration check ${entry.id} must retain every side of the interface`);
+    }
+    if (actual.size !== required.length) throw refuse('review division has an unknown or unnecessary integration check');
+    return plan;
+  }
+  if (plan.version !== 1) throw refuse('unknown review division version');
   for (const flow of plan.flows) {
     const owners = new Set(flow.files.map(file => plan.slices.find(s => s.files.includes(file))?.id ?? 'integration'));
     if (owners.size > 1 && !plan.integration.interfaces.some(i => i.id === flow.id)) throw refuse(`crossing flow ${flow.id} has no integration check`);
   }
   return plan;
+}
+
+export function reviewDivisionSummary(plan) {
+  const d = plan.diagnostics;
+  if (!d) return '';
+  const lines = [`  division reason: ${d.reasonCode}; ${d.changedFiles} changed files, ${d.areas} normalized areas`];
+  if (d.overlapOptimization?.status === 'budget-exceeded') lines.push(`  optimization-budget-exceeded: ${d.overlapOptimization.metric}, observed ${d.overlapOptimization.value}, limit ${d.overlapOptimization.limit}; balanced candidate retained`);
+  if (d.integration) {
+    lines.push(`  workload estimate: ${d.scopes.map(s => `${s.id} ${s.files} files/${s.cost} changed-line cost`).join('; ')}; integration ${d.integration.files} files/${d.integration.cost} cost`);
+    lines.push(`  integration causes: unmapped ${d.integration.unmapped.files}, unassigned ${d.integration.unassigned.files}, cross-scope shared ${d.integration.crossScope.files}; retained within scopes ${d.retainedOverlap.files}`);
+    for (const blocker of d.blockers) lines.push(`  efficiency threshold: ${blocker.code}, observed ${blocker.value}, limit ${blocker.limit}`);
+    if (d.manualEfficiencyWarning) lines.push('  warning: manual division retains an inefficient split; coverage and interface checks remain mandatory');
+  }
+  return lines.join('\n') + '\n';
 }
 
 export function isCurrentReviewer(state, h) {

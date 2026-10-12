@@ -13,6 +13,7 @@ import { STOP_CLASSES, liveGate, runGate, runWithLease, stopGate } from './gate.
 import { append, listAttempts, loadState, openEvidence } from './ledger.mjs';
 import { canonical, touchesEvidence } from './paths.mjs';
 import { openCount } from './improve.mjs';
+import { reviewDivisionSummary } from './review-groups.mjs';
 import { LESSON_FILE, addLesson, applySnippet, exportPluginLessons, lessonPrompts, lessonWarnings, loadLessons, moveLesson, recur, relevantLessons, reviewLessons, setLesson } from './lessons.mjs';
 import { LinkRefused, changesOf, rebaseline, releaseAttempt, seal, setVerifyLevel, verifyAttempt } from './evidence.mjs';
 import { acceptReview, amendCriteria, closeImplementer, designWarning, gateOrderCheck, batchCreate, batchEject, closeAfterHandoff, deliver, deliveredFiles, exportScreenshots, freezeCriteria, handoff, narrowDelivery, needsShown, nextAction, nextDecision, outsideWarning, recordReview, recordShown, reopen, screenshotsExportDir, shownDraftFile, uncovered, withAttempt } from './lifecycle.mjs';
@@ -685,7 +686,7 @@ async function dispatch(cmd, sub, positional, options) {
         // To the owner on stderr, never into the reviewer's one-line prompt on stdout.
         const w = outsideWarning(root, r.state);
         if (w) process.stderr.write(`warning: ${w}\n`);
-        if (r.division) process.stderr.write(`review division: ${r.division.mode}; ${r.division.reason}\n`);
+        if (r.division) process.stderr.write(`review division: ${r.division.mode}; ${r.division.reason}\n${reviewDivisionSummary(r.division)}`);
         for (const member of r.members ?? []) process.stderr.write(`group ${member.slot}: ${member.agent}; frozen prompt: ${member.startPrompt}\n`);
         process.stderr.write(`${lessonsLine}${stale}${how} with only the line on stdout as its prompt:\n`);
         print(options, startPrompt, { ...r, startPrompt });
