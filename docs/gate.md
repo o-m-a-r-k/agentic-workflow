@@ -177,3 +177,25 @@ The hook (matcher `Edit|Write|MultiEdit|NotebookEdit|Bash`) is registered global
 - **`wf` itself** checks its own paths, once: every path option (`--out`, `--csv`, `--handoffs-csv`, `--html`, `--dir`, `--to`, `--root`; `--file`, `--capture`, `--summary-file`, `--closure`, `--issue-file`, `--from`) is resolved by `engine/paths.mjs` as the OS will resolve it, validated, and replaced by that resolved path, which is what is then opened or written; each input file is read once (the bytes checked are the bytes kept). Refused: anything in the evidence (written or read), an empty value or a missing one, a URL (`file://`), a `~` the shell did not expand, a trailing slash on a file input, a folder where a file belongs (and the reverse), and a path option given twice. Attempt ids and skill names must be plain names. Cleanup at close deletes nothing through a link and leaves anything uncertain in place.
 - It sees only the tools its matcher names in Claude Code; everything else is covered by layers 2 and 3.
 - **Known false positives** (refused although nothing names the evidence folder): any command containing `wf-ev` in any spelling (a file called `notes-wf-evidence.md`), `evidence` glued to `*`, `?` or `$` (`grep -E '*evidence'`), a dot-glob that can match the folder (`ls .*`), and `$` or backticks together with `wf-` or `.wf`. Allowed since 0.3.0: a grep pattern with `|` or a bracket, a path through `.workflow/`, the plugin's own folder name, and `evidence` in prose next to a comma or alongside a `$`.
+
+## Required validation discovered after admission
+
+Commit the added step definitions and single-file plugins in the attempt's adapter repo, then register only new IDs:
+
+```sh
+wf validation add --steps http-proof,browser-proof --criteria C2,C3 --reason "Required real execution and captures" --attempt ENG-1.1
+```
+
+Registration requires a clean committed product tree, frozen criteria, an admitted adapter repo and no active role
+or gate. It records the adapter commit, exact selected definitions, criterion references, reason and permitted
+existing secret-key bindings in the ledger. Existing IDs cannot be replaced; the admission adapter pin never moves.
+All admission checks, rules, roles, environment allowlists, secret stores, concurrency limits and delivery targets
+remain frozen. Only existing catalogued keys may acquire a new binding through the committed secret catalog.
+
+Registration clears prior acceptance and invalidates the old gate. Obtain a fresh code-review round before the
+next full gate. Review each added definition and its single-file plugin at the recorded commit, not a later edited
+copy. Each closure supplies `validationChecked: [{ id, commit, verdict: complies|finding, evidence, finding }]`
+with one entry per registered step. Then run the normal full gate and a fresh evidence review. Missing, skipped,
+deferred or failed supplemental execution is not passing proof. Reports and captures use the ordinary sealed
+evidence, no-follow, reuse, redaction, cleanup and screenshot-inspection paths. Direct diagnostic reports cannot
+be imported as prior execution. Registration is additive and has no remove, overwrite or re-pin operation.

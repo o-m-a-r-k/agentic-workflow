@@ -131,9 +131,9 @@ export function init(root, cfg) {
 // A step receives only the secrets that list it in `usedBy`. An empty `usedBy` means no step uses the key
 // (doctor reports it that way): the tools read their own files, and injecting a developer's real local
 // values into every step would override the project's test configuration.
-export function stepEnv(root, cfg, stepId) {
+export function stepEnv(root, cfg, stepId, catalog = loadCatalog(root)) {
   const env = {};
-  for (const e of loadCatalog(root)) {
+  for (const e of catalog) {
     if (!e.usedBy.includes(stepId)) continue;
     const v = readSecret(root, cfg, e);
     if (v !== null) env[e.key] = v;
@@ -141,8 +141,8 @@ export function stepEnv(root, cfg, stepId) {
   return env;
 }
 
-export function missingFor(root, cfg, stepId) {
-  return loadCatalog(root)
+export function missingFor(root, cfg, stepId, catalog = loadCatalog(root)) {
+  return catalog
     .filter((e) => e.required !== false && e.usedBy.includes(stepId))
     .filter((e) => readSecret(root, cfg, e) === null)
     .map((e) => e.key);

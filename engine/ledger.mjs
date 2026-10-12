@@ -133,6 +133,7 @@ export function reduce(entries) {
     adapterRepins: [],
     criteria: null,
     criteriaAmendments: [],
+    validations: [],
     plan: null,
     planSource: null,
     impact: null,
@@ -234,6 +235,11 @@ export function reduce(entries) {
           s.impact ??= { survey: null, impact: null, results: {}, addenda: [], owed: null };
           s.impact.owed = { amendment: s.criteriaAmendments.length, reason: d.reason, scope: d.impactOwed };
         }
+        break;
+      case 'validation.added':
+        s.validations.push({ ...d, at: e.at });
+        s.accepted = null;
+        s.phase = 'implementing';
         break;
       case 'models.refreshed':
         s.runtimeAdapterBase = d.to;

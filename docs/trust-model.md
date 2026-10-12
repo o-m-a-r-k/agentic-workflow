@@ -43,3 +43,13 @@ An explicit switch to another provider requires host-recorded owner authority on
 selection and later handoffs and recovery inherit it for the same ownership period. Switching again needs a new
 receipt. Adoption clears the selection. Historical per-handoff switch receipts do not become persistent grants.
 Native launch still checks each handoff against the current default or its own valid provider-switch receipt.
+
+## Additive required validation
+
+`wf validation add` is an auditable addition to proof obligations, not an admission adapter re-pin. New IDs are
+selected from the committed adapter in the attempt's own adapter repo, descending from admission. Existing IDs,
+plugin pins, repos, rules, roles, environment policy, secret stores and delivery/tracker targets stay frozen. The
+registration records exact definitions and existing catalogued key bindings; no secret values enter it. Prior
+acceptance and gate proof are invalidated. Fresh independent code review must acknowledge each pinned definition
+and plugin before a full gate can run; fresh evidence review and screenshot inspection still precede acceptance.
+The ordinary evidence protection and review/gate lock paths also govern registration and execution.
