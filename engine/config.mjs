@@ -1,6 +1,7 @@
 import { mkdirStateDirectory } from './state-folders.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
+import { hostChoice, hostFor, hostIds } from './hosts/index.mjs';
 import { ENGINE_PIN, WfError, YAML, assertPlainGit, git, hashValue, refuse } from './util.mjs';
 
 export const ADAPTER_DIR = '.workflow';
@@ -43,49 +44,59 @@ export function loadConfig(root) {
 
 const LANES = new Set(['quick', 'standard', 'batch']);
 
-// Work classes: how hard a role's agent thinks, per runtime. The adapter's `classes` merge over these by name.
+// Work classes: how hard a role's agent thinks, per runtime. The adapter's `classes` merge over these by name. What a
+// class sets for each harness comes from that harness's adapter (`classDefaults`, engine/hosts/).
 // Defaults are unmeasured starting points; guarantees (gate, blind review, frozen criteria) never depend on a class.
-export const DEFAULT_CLASSES = {
-  full: {
-    use: "Money, payments, audit, authorization, data isolation between customers, migrations, external protocols, and anything the project's invariants file calls a critical boundary.",
-    claude: { effort: 'high' },
-    codex: {},
-  },
-  light: {
-    use: 'UI wired to a frozen contract, translations, generated docs or OpenAPI output, test fixtures.',
-    claude: { effort: 'low' },
-    codex: {},
-  },
+const CLASS_USES = {
+  full: "Money, payments, audit, authorization, data isolation between customers, migrations, external protocols, and anything the project's invariants file calls a critical boundary.",
+  light: 'UI wired to a frozen contract, translations, generated docs or OpenAPI output, test fixtures.',
   // Named failure (I-25, I-26): the planner and reviewer roles had no model, so they inherited the owner session's
   // weaker one; a cross-cutting plan was written in minutes and five review rounds passed defects a stronger model found
-  // later. Planning and review default to this class, which pins the strongest Claude model (`wf doctor` fails when
-  // either role resolves to no model on the claude runtime).
-  review: {
-    use: 'Planning and independent review: the whole change judged against the frozen criteria.',
-    claude: { model: 'opus', effort: 'high' },
-    codex: {},
-  },
+  // later. Planning and review default to this class, which pins the strongest model (`wf doctor` fails when either role
+  // resolves to no model on the runtime it runs on).
+  review: 'Planning and independent review: the whole change judged against the frozen criteria.',
 };
-export const ROLE_DEFAULT_CLASS = { planner: 'review', reviewer: 'review', implementer: 'full', tester: 'full' };
+export function defaultClasses() {
+  const out = {};
+  for (const [name, use] of Object.entries(CLASS_USES)) {
+    out[name] = { use };
+    for (const id of hostIds()) out[name][id] = { ...(hostFor(id).classDefaults?.[name] ?? {}) };
+  }
+  return out;
+}
+export const ROLE_DEFAULT_CLASS = { planner: 'review', reviewer: 'review', implementer: 'full', tester: 'full', strategist: 'review' };
+
+// What the engine stops for on its own, from the adapter's `strategy:` block (engine/strategy.mjs). Only the owner's
+// escalation is a number: the engine judges no work against a threshold it picked, so the amendment, file, bundle-size,
+// wall-time and idle-session tripwires are gone (agents state their own expectations; the owner agent compares them with
+// what happened). `enabled: false` turns the escalation off for a project.
+export const STRATEGY_DEFAULTS = {
+  enabled: true,
+  // Recorded review rounds before the owner (not the strategist) decides how to continue; again every as many rounds.
+  // The person's own number, not an agent-facing limit: one ticket ran 47 rounds before anyone stepped back.
+  reviewRoundsEscalate: 10,
+};
 
 function mergeClasses(raw, fail) {
   const out = {};
-  for (const [name, c] of Object.entries(DEFAULT_CLASSES)) out[name] = { ...c, claude: { ...c.claude }, codex: { ...c.codex } };
+  const ids = hostIds();
+  for (const [name, c] of Object.entries(defaultClasses())) out[name] = c;
   if (raw !== undefined && (raw === null || typeof raw !== 'object' || Array.isArray(raw))) {
-    fail('`classes` must map class names to { use, claude, codex }');
+    fail(`\`classes\` must map class names to { use, ${ids.join(', ')} }`);
     return out;
   }
   for (const [name, c] of Object.entries(raw ?? {})) {
     // The name becomes an agent file name (wf-implementer-<class>).
     if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) fail(`class \`${name}\`: use lowercase letters, digits and dashes`);
-    const prev = out[name] ?? { claude: {}, codex: {} };
-    out[name] = { ...prev, ...(c ?? {}), claude: { ...prev.claude, ...(c?.claude ?? {}) }, codex: { ...prev.codex, ...(c?.codex ?? {}) } };
+    const prev = out[name] ?? Object.fromEntries(ids.map((id) => [id, {}]));
+    out[name] = { ...prev, ...(c ?? {}) };
+    for (const id of ids) out[name][id] = { ...prev[id], ...(c?.[id] ?? {}) };
   }
   for (const [name, c] of Object.entries(out)) {
     if (typeof c.use !== 'string' || !c.use.trim()) fail(`class \`${name}\` needs \`use\`: what work belongs in it (the planner assigns classes from this text)`);
     // Named failure I-29: a static effort allow-list rejected new host-supported settings until a plugin release.
     // Hosts own model/effort support. Validate only the shape here, keeping agent metadata on a single line.
-    for (const runtime of ['claude', 'codex']) {
+    for (const runtime of ids) {
       for (const field of ['model', 'effort']) {
         const value = c[runtime]?.[field];
         if (value !== undefined && value !== null && (typeof value !== 'string' || !value.trim() || /[\u0000-\u001f\u007f]/.test(value))) {
@@ -146,11 +157,26 @@ function normalize(raw, source) {
     secrets: { store: 'env-file', ...(raw.secrets ?? {}) },
     gate: { maxParallelSteps: 1, leases: {}, steps: [], ...(raw.gate ?? {}) },
     components: raw.components ?? [],
-    review: { rules: raw.review?.rules ?? [] },
+    // `integrationCheck` (default true): with several work items the combined tree passes `wf check` before a review.
+    review: { rules: raw.review?.rules ?? [], integrationCheck: raw.review?.integrationCheck ?? true },
+    // The project's quality bar (0.7.0): standing goals the planner turns into targets for each ticket and every role reads.
+    quality: raw.quality === undefined || raw.quality === null ? [] : raw.quality,
     designSystem: raw.designSystem ?? null,
     impact: raw.impact ?? null,
+    strategy: { ...STRATEGY_DEFAULTS },
     repos: [],
   };
+  // The owner escalation: an unknown key or a non-positive number would silently leave the 10-round stop unwatched.
+  if (raw.strategy !== undefined && raw.strategy !== null) {
+    if (typeof raw.strategy !== 'object' || Array.isArray(raw.strategy)) fail(`\`strategy\` must be a mapping of strategy values (known: ${Object.keys(STRATEGY_DEFAULTS).join(', ')})`);
+    else {
+      for (const [k, v] of Object.entries(raw.strategy)) {
+        if (!(k in STRATEGY_DEFAULTS)) fail(`strategy.${k}: unknown (known: ${Object.keys(STRATEGY_DEFAULTS).join(', ')})`);
+        else if (k === 'enabled' ? typeof v !== 'boolean' : typeof v !== 'number' || !(v > 0)) fail(`strategy.${k} must be ${k === 'enabled' ? 'true or false' : 'a positive number'}`);
+        else cfg.strategy[k] = v;
+      }
+    }
+  }
   cfg.classes = mergeClasses(raw.classes, fail);
   // Impact analysis (engine/impact.mjs): which work classes need the planner's survey and impact map, and read caps.
   if (cfg.impact !== null) {
@@ -165,9 +191,10 @@ function normalize(raw, source) {
   for (const [role, rc] of Object.entries(cfg.roles)) {
     if (!rc || typeof rc !== 'object') continue;
     // Pre-launch replacement: per-role model/effort moved to classes; refusing them keeps a stale setting from being silently ignored.
-    const moved = ['model', 'effort', 'claude', 'codex'].filter((k) => k in rc);
-    if (moved.length) fail(`roles.${role}: ${moved.join(', ')} moved to \`classes\`; set \`roles.${role}.class\` and the class's claude/codex effort and model`);
+    const moved = ['model', 'effort', ...hostIds()].filter((k) => k in rc);
+    if (moved.length) fail(`roles.${role}: ${moved.join(', ')} moved to \`classes\`; set \`roles.${role}.class\` and the class's ${hostChoice('/')} effort and model`);
     if (rc.class !== undefined && !cfg.classes[rc.class]) fail(`roles.${role}.class \`${rc.class}\` is not a known class (known: ${Object.keys(cfg.classes).join(', ')})`);
+    if (rc.runtime !== undefined && !hostIds().includes(rc.runtime)) fail(`roles.${role}.runtime must be ${hostChoice(' or ')}`);
   }
   for (const lane of cfg.lanes) if (!LANES.has(lane)) fail(`unknown lane \`${lane}\``);
   // A tracker is a kind (where the tasks live) and a via (how wf reaches it). A misspelt mode would silently fall back to
@@ -178,6 +205,17 @@ function normalize(raw, source) {
   if (VIAS[cfg.tracker.kind] && cfg.tracker.kind !== 'none' && !VIAS[cfg.tracker.kind].includes(cfg.tracker.via)) fail(`\`tracker.via\` for ${cfg.tracker.kind} is one of ${VIAS[cfg.tracker.kind].join(', ')}, not \`${cfg.tracker.via}\``);
   if (!VIAS[cfg.tracker.kind] && !String(cfg.tracker.kind).startsWith('.')) fail(`\`tracker.kind\` is one of linear, github, files, none (or a project adapter \`./file.mjs\`), not \`${cfg.tracker.kind}\``);
   if (cfg.tracker.kind === 'github' && !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(String(cfg.tracker.repo ?? ''))) fail('`tracker.repo` names the GitHub repository holding the issues: `owner/name`');
+  if (cfg.tracker.itemPattern !== undefined) {
+    let bad = typeof cfg.tracker.itemPattern !== 'string' || !cfg.tracker.itemPattern;
+    if (!bad) {
+      try {
+        new RegExp(cfg.tracker.itemPattern);
+      } catch {
+        bad = true;
+      }
+    }
+    if (bad) fail('`tracker.itemPattern` must be a regular expression (a string) that every ticket id of this tracker matches, for example `^ENG-\\d+$`');
+  }
   if (!Array.isArray(raw.repos) || raw.repos.length === 0) fail('`repos` must list at least one git root');
   const names = new Set();
   for (const r of raw.repos ?? []) {
@@ -218,6 +256,7 @@ function normalize(raw, source) {
     if (stepIds.has(s.id)) fail(`duplicate gate step \`${s.id}\``);
     stepIds.add(s.id);
     if (!s.component && !repoNames.has(s.repo)) fail(`step \`${s.id}\`: unknown repo \`${s.repo}\``);
+    if (s.prepare !== undefined && (typeof s.prepare !== 'string' || !s.prepare.trim())) fail(`step \`${s.id}\`: \`prepare\` is a non-empty shell command`);
     if (!s.run && !s.plugin) fail(`step \`${s.id}\` needs \`run\` or \`plugin\``);
     if (s.tier && !['light', 'heavy'].includes(s.tier)) fail(`step \`${s.id}\`: tier must be light or heavy`);
     if (s.ignores && !Array.isArray(s.ignores)) fail(`step \`${s.id}\`: ignores must be a list of globs`);
@@ -233,6 +272,8 @@ function normalize(raw, source) {
       else for (const r of s.alsoInputs) if (!repoNames.has(r)) fail(`step \`${s.id}\`: alsoInputs names unknown repo \`${r}\``);
     }
   }
+  if (typeof cfg.review.integrationCheck !== 'boolean') fail('`review.integrationCheck` must be true or false');
+  if (!Array.isArray(cfg.quality) || cfg.quality.some((q) => typeof q !== 'string' || !q.trim())) fail('`quality` is a list of standing goals, each a non-empty sentence');
   // Review rules: documents a reviewer reads when the change touches the paths they govern (engine/rules.mjs).
   if (!Array.isArray(cfg.review.rules)) fail('`review.rules` must be a list of { id, repo?, paths?, read: [documents] }');
   else {

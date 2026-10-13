@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { ENGINE_VERSION, semverLt } from '../engine/util.mjs';
 import { closureFile, commitIn, criteriaFile, goodClosure, ok, OUT_OF_ORDER, sh, singleRepoProject, state, WF, wf, write, yaml, ownerSpeaks, spawnHome } from './helpers.mjs';
 
 function admitted(root, base, item) {
@@ -176,7 +177,10 @@ test('a runner killed mid-gate is recovered: finished steps carried, the rest re
   await gateEnded;
   fs.rmSync(path.join(root, '..', 'slow.marker'));
   const g = wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]);
-  assert.match(g.out, /recovered 1 finished step/);
+  // The first command to take the lock recovers the dead runner's finished step. The out-of-order run is a new run, and an
+  // approval is used once (the dead one's was spent), so that command asks again and the scripted owner re-runs it: the
+  // recovery line is printed by the refused attempt, and the ledger below is what proves it.
+  assert.equal(g.code, 0, g.err);
   let running = true;
   for (let i = 0; i < 100 && running; i++) {
     await new Promise((r) => setTimeout(r, 100));
@@ -320,4 +324,103 @@ test('a running gate shows progress: wf gate prints each step as it starts and f
   assert.match(read(), /passed\s+slow/, 'a failing step does not stop the others');
   assert.equal(byId(state(root, e.id).lastGate.steps).slow.status, 'passed');
   assert.doesNotMatch(ok(wf(root, ['status'])).out, /gate running/);
+});
+
+// Named failure (I-88): lease capacity was pinned with the admission adapter, so raising `gate.leases` in the project could not
+// unblock a check queued behind another stack; the attempt had to be superseded. Capacity is read from the project's
+// current config while the step waits, and the capacity used is recorded when it differs from the pinned one.
+test('a check queued on a full lease starts when the project raises the lease capacity', async () => {
+  const steps = [{ id: 'stack', repo: 'app', run: 'true', lease: 'docker', inputs: ['src/**'] }];
+  const { base, root } = singleRepoProject('lease-raise', { gate: { leases: { docker: 1 }, steps } });
+  const e = admitted(root, base, 'ENG-26');
+  commitIn(e.repos.app.worktree, { 'src/a.txt': 'l\n' });
+  const home = path.join(root, '..', '.wfhome');
+  const leases = path.join(home, 'leases');
+  fs.mkdirSync(leases, { recursive: true });
+  fs.writeFileSync(path.join(leases, 'docker.1'), String(process.pid));
+  const env = { ...process.env, WF_CONFIG_HOME: home, ...spawnHome(root) };
+  for (const k of ['CLAUDE_CODE_SESSION_ID', 'CLAUDECODE', 'CODEX_THREAD_ID', 'CODEX_SANDBOX', 'AI_AGENT', 'GROK_SESSION_ID']) delete env[k];
+  const child = spawn(process.execPath, [WF, 'check', '--attempt', e.id], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] });
+  let out = '';
+  child.stdout.on('data', (d) => (out += d));
+  child.stderr.on('data', (d) => (out += d));
+  const ended = new Promise((resolve) => child.once('close', resolve));
+  await new Promise((r) => setTimeout(r, 1500));
+  assert.equal(child.exitCode, null, 'the check waits while the only docker slot is held');
+  const file = path.join(root, '.workflow', 'project.yaml');
+  const cfg = JSON.parse(fs.readFileSync(file, 'utf8'));
+  fs.writeFileSync(file, yaml({ ...cfg, gate: { ...cfg.gate, leases: { docker: 2 } } }));
+  const code = await Promise.race([ended, new Promise((r) => setTimeout(() => r('timeout'), 20000))]);
+  if (code === 'timeout') child.kill('SIGKILL');
+  fs.rmSync(path.join(leases, 'docker.1'), { force: true });
+  assert.equal(code, 0, out);
+  assert.match(out, /lease docker: capacity 2 from the project config \(the admission adapter pinned 1\)/);
+  assert.deepEqual(state(root, e.id).checks.at(-1).leaseCapacity, { docker: { capacity: 2, pinned: 1 } });
+});
+
+// Named failure (I-73): a step's dependencies needed a registry token only the gate injects, while `wf check` refuses a dirty
+// worktree and the project asks for lint and tests before the first commit. `wf run --step` runs a preparation command with
+// that step's secrets, masked, and leaves no gate evidence.
+test('wf run --step runs a command in the step\'s package with only that step\'s secrets, masked, and records no gate', () => {
+  const prepare = 'echo "token=$REGISTRY_TOKEN other=$OTHER_KEY dir=$(pwd)"; echo "err $REGISTRY_TOKEN" >&2';
+  const steps = [{ id: 'api', repo: 'app', run: 'true', inputs: ['src/**'], prepare }, { id: 'other', repo: 'app', run: 'true', inputs: ['src/**'] }];
+  const { base, root } = singleRepoProject('prepare-step', { gate: { steps } }, { '.workflow/secrets.yaml': yaml({ keys: [{ key: 'REGISTRY_TOKEN', kind: 'provided', usedBy: ['api'] }, { key: 'OTHER_KEY', kind: 'provided', usedBy: ['other'] }] }) });
+  const e = admitted(root, base, 'ENG-27b');
+  // Security review of 0.7.0: a command typed here never receives the step's secrets; only the declared `prepare` runs.
+  const typed = wf(root, ['run', '--step', 'api', '--attempt', e.id, '--', 'sh', '-c', 'printenv']);
+  assert.equal(typed.code, 75);
+  assert.match(typed.err, /runs only the step's declared `prepare` command/);
+  assert.match(wf(root, ['run', '--step', 'other', '--attempt', e.id]).err, /declares no `prepare` command/);
+  const missing = wf(root, ['run', '--step', 'api', '--attempt', e.id]);
+  assert.equal(missing.code, 75);
+  assert.match(missing.err, /secrets missing for step api: REGISTRY_TOKEN/);
+  ok(wf(root, ['secrets', 'set', 'REGISTRY_TOKEN'], { input: 'registry-value-123456' }));
+  ok(wf(root, ['secrets', 'set', 'OTHER_KEY'], { input: 'other-value-123456' }));
+  write(e.repos.app.worktree, 'src/dirty.txt', 'uncommitted\n');
+  const r = ok(wf(root, ['run', '--step', 'api', '--attempt', e.id]));
+  assert.match(r.out, /token=\[secret\] other= dir=/, 'only the step\'s own key, masked');
+  assert.match(r.out, new RegExp(`dir=${fs.realpathSync(e.repos.app.worktree).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`), 'in the step\'s package directory of the worktree');
+  assert.match(r.err, /err \[secret\]/);
+  assert.doesNotMatch(`${r.out}${r.err}`, /registry-value/);
+  const s = state(root, e.id);
+  assert.deepEqual([s.gates.length, s.checks.length], [0, 0], 'preparation is never gate or check evidence');
+  assert.match(wf(root, ['run', '--step', 'nope', '--attempt', e.id]).err, /no gate step `nope`/);
+});
+
+// Named failure (I-92): a check stopped by the owner because the tree is about to change ended as `stopped` with no reason, and
+// the implementer ran the same check again on the unchanged tree, queued behind an unrelated stack. The stop class and
+// reason now appear in the check's own output; from 0.7.0 a retry waits for a new commit.
+test('a check stopped for a tree change says why, and is not retried on the unchanged tree', async () => {
+  const steps = [{ id: 'slow', repo: 'app', run: 'if [ -f "$WF_ROOT/../slow.marker" ]; then sleep 30; fi', inputs: ['src/**'] }];
+  const { base, root } = singleRepoProject('stopped-check', { gate: { steps } });
+  const e = admitted(root, base, 'ENG-28');
+  commitIn(e.repos.app.worktree, { 'src/a.txt': 'c1\n' });
+  fs.writeFileSync(path.join(root, '..', 'slow.marker'), '');
+  const env = { ...process.env, WF_CONFIG_HOME: path.join(root, '..', '.wfhome'), ...spawnHome(root) };
+  for (const k of ['CLAUDE_CODE_SESSION_ID', 'CLAUDECODE', 'CODEX_THREAD_ID', 'CODEX_SANDBOX', 'AI_AGENT', 'GROK_SESSION_ID']) delete env[k];
+  const child = spawn(process.execPath, [WF, 'check', '--attempt', e.id], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] });
+  let out = '';
+  child.stdout.on('data', (d) => (out += d));
+  child.stderr.on('data', (d) => (out += d));
+  const ended = new Promise((resolve) => child.once('close', resolve));
+  const lock = path.join(root, '.wf-evidence', 'attempts', e.id, 'gate', 'gate.lock');
+  for (let i = 0; i < 100; i++) {
+    try {
+      if (JSON.parse(fs.readFileSync(lock, 'utf8')).children.length >= 1) break;
+    } catch {}
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  ok(wf(root, ['stop', '--class', 'tree-change', '--reason', 'D61 still to fix', '--attempt', e.id]));
+  assert.equal(await ended, 1);
+  assert.match(out, /check stopped — stopped by the owner \(tree-change: D61 still to fix\)/);
+  assert.deepEqual(state(root, e.id).checks.at(-1).stop, { class: 'tree-change', reason: 'D61 still to fix' });
+  fs.rmSync(path.join(root, '..', 'slow.marker'));
+  const retry = wf(root, ['check', '--attempt', e.id]);
+  if (semverLt(ENGINE_VERSION, '0.7.0')) assert.equal(retry.code, 0, 'before 0.7.0 the retry runs');
+  else {
+    assert.equal(retry.code, 75);
+    assert.match(retry.err, /the last check was stopped by the owner \(tree-change: D61 still to fix\) and the tree has not changed since/);
+    commitIn(e.repos.app.worktree, { 'src/a.txt': 'c2\n' });
+    assert.equal(wf(root, ['check', '--attempt', e.id]).code, 0, 'a new commit lifts it');
+  }
 });

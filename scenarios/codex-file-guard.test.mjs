@@ -13,7 +13,7 @@ test('I-43: native Codex patches check file targets without classifying source a
   const root = tmp('native-file-target');
   const content = 'regex .*; role wf-implementer; expansion $value; citation ' + protectedDir;
   assert.equal(judge(add('src/guard.test.mjs', content), root), null);
-  assert.ok(judge(add('src/guard.test.mjs', content), root, 'Bash'), 'shell never takes the patch allowance');
+  assert.equal(judge(add('src/guard.test.mjs', content), root, 'Bash'), null, 'a Bash command is never read as a patch (0.7.0: shell text is not judged)');
   for (const target of [protectedDir + '/ledger', 'src/../' + protectedDir + '/ledger']) assert.ok(judge(add(target, 'tamper'), root));
   fs.mkdirSync(path.join(root, protectedDir));
   fs.symlinkSync(path.join(root, protectedDir), path.join(root, 'linked'));

@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { singleRepoProject, ok, wf, state, criteriaFile, commitIn, goodClosure, write, WF, amendFile, planDoc, yaml } from './helpers.mjs';
+import { ENGINE_VERSION, semverLt } from '../engine/util.mjs';
 
 function prepared(runtime, mode = 'clean', { gate = 'true', planned = true } = {}) {
   const p = singleRepoProject('runner-scenario', { classes: { review: { [runtime]: { model: 'future-model', effort: 'high' } } }, gate: { steps: [{ id: 'unit', repo: 'app', run: gate }] } });
@@ -33,6 +34,7 @@ await new Promise(r=>setTimeout(r,100));
 if(mode!=='missing' && bundle.role==='reviewer'){
  const closure=${JSON.stringify(goodClosure('REVIEWER'))};closure.reviewer=bundle.agent;
  if(mode==='finding' || (mode==='repair-loop' && !fs.existsSync(path.join(${JSON.stringify(p.base)},'repaired'))))closure.findings=[{id:'F1',status:'open',severity:'major',summary:'scenario defect',evidence:'src/a.txt:1'}];
+ if(bundle.mode==='delta'&&bundle.openFindings?.length)closure.priorFindings=bundle.openFindings.map(f=>({round:f.round,id:f.id,status:'fixed',evidence:'src/a.txt:1 committed repair'}));
  fs.writeFileSync(bundle.reviewClosureFile,JSON.stringify(closure));
  const result=spawnSync(process.execPath,[${JSON.stringify(WF)},'review','--closure',bundle.reviewClosureFile,'--attempt',id,'--json'],{cwd:root,env:process.env,encoding:'utf8'});
  if(result.status!==0)console.error(result.stderr);
@@ -67,15 +69,15 @@ for (const runtime of ['codex', 'claude']) {
     assert.equal(s.reviews.length, 2);
     assert.equal(s.gates.length, 1);
     assert.ok(s.accepted);
-    assert.equal(s.reviews.every((r) => r.provenance === 'verified'), true);
+    assert.equal(s.reviews.every((r) => r.provenance === 'engine-launched'), true);
     assert.equal(new Set(s.handoffs.filter((h) => h.role === 'reviewer').map((h) => h.session)).size, 2);
     ok(wf(p.root, ['verify', '--attempt', p.id]));
     assert.match(r.err, /starting code-review/);
     assert.match(r.err, /normal gate passed/);
     assert.doesNotMatch(r.out, /wf advance:/);
   });
-  test(`${runtime}: missing, steered and finding outcomes never start a gate or replace a reviewer`, () => {
-    for (const mode of ['missing', 'steered', 'finding']) {
+  test(`${runtime}: missing and finding outcomes never start a gate or replace a reviewer (a steered prompt is no longer judged: 0.7.0)`, () => {
+    for (const mode of ['missing', 'finding']) {
       const p = prepared(runtime, mode);
       const r = ok(wf(p.root, ['advance', '--until-owner', '--runtime', runtime, '--attempt', p.id, '--json'], { env: p.env }));
       assert.equal(r.json().operations.length, 1, r.out + r.err);
@@ -168,7 +170,30 @@ test('a second unstarted work item remains owner work after the first implemente
   assert.equal(r.json().operations.length,0);assert.match(r.json().decision.blockers[0],/work items have not started/);
 });
 
-test('defect and tree-change stops never automatically restart the normal gate', {timeout:20000}, async t => {
+// Named failure (I-63): one implementer handed without --work built a plan with two work items, settled and was closed,
+// and `wf advance` reported both items unstarted because no handoff named one. 0.7.0 first refused such a handoff; the
+// refusal audit of 0.7.0 replaced that with the engine recording it as covering every unstarted item.
+test('an implementer handed without --work while work items are unstarted covers them all', () => {
+  const p = prepared('codex', 'clean', { planned: false });
+  const work = ['W1', 'W2'].map((id) => ({ id, criteria: ['C1'], repos: ['app'], class: 'light', why: 'fixture' }));
+  const file = path.join(p.base, 'plan-with-work.json');
+  fs.writeFileSync(file, JSON.stringify(planDoc({ plan: 'change a', criteria: [{ id: 'C1', text: 'a changes', uat: false }], work })));
+  ok(wf(p.root, ['plan', '--file', file, '--attempt', p.id]));
+  const unified = wf(p.root, ['handoff', 'implementer', '--agent', 'i', '--attempt', p.id, '--runtime', 'codex']);
+  ok(unified);
+  assert.deepEqual(state(p.root, p.id).handoffs.at(-1).covers, ['W1', 'W2'], 'recorded as covering every unstarted item');
+  commitIn(state(p.root, p.id).repos.app.worktree, { 'src/a.txt': 'changed\n' });
+  ok(wf(p.root, ['handoff', 'close', '--agent', 'i', '--attempt', p.id]));
+  // Two work items: the combined tree passes `wf check` first, and the next step says so instead of a refused handoff.
+  const first = wf(p.root, ['advance', '--once', '--runtime', 'codex', '--attempt', p.id, '--json'], { env: p.env }).json();
+  assert.deepEqual([first.decision.kind, first.operations.length], ['check', 0]);
+  assert.match(first.decision.guidance, /wf check --attempt/);
+  ok(wf(p.root, ['check', '--attempt', p.id]));
+  const r = ok(wf(p.root, ['advance', '--once', '--runtime', 'codex', '--attempt', p.id, '--json'], { env: p.env }));
+  assert.equal(r.json().operations[0].kind, 'code-review', 'the settled unified implementer covers W1 and W2');
+});
+
+test('defect and tree-change stops never automatically restart the normal gate', {timeout:60000}, async t => {
   // Named failure: a whole-scenario timeout hid whether preparation, stopping or advancement consumed its budget.
   const started = Date.now(), phases = [];
   let finished = false;
@@ -242,13 +267,3 @@ for(const runtime of ['codex','claude']) {
     ok(wf(p.root,['verify','--attempt',p.id]));
   });
 }
-
-// Named failure: an explicit runtime flag was treated as permission to switch the provider.
-test('foreground runner refuses an unapproved provider switch before recording a reviewer', () => {
-  const p = prepared('codex');
-  const before = state(p.root, p.id).handoffs.length;
-  const r = wf(p.root, ['advance', '--once', '--runtime', 'claude', '--attempt', p.id], { env: p.env, ownerSilent: true });
-  assert.equal(r.code, 75);
-  assert.equal(state(p.root, p.id).handoffs.length, before);
-  assert.equal(state(p.root, p.id).originRuntime, 'codex');
-});

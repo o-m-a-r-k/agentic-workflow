@@ -1,8 +1,9 @@
-// Named failures: legacy fixed discoveries were mistaken for unclassified open defects;
-// large native reviews ended without completing or recording their required judgments.
+// Named failures: legacy fixed discoveries were mistaken for unclassified open defects; large native reviews ended
+// without completing or recording their required judgments; an unbounded review (0.5.14 forced every round to run to
+// completion) took 1,183 tool calls.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { scopeProblems, extraScope, blockingFindings } from '../engine/scope-decisions.mjs';
+import { blockingFindings } from '../engine/scope-decisions.mjs';
 import { discoveredVerdicts } from '../engine/discovered.mjs';
 import { roleInstructions } from '../engine/onboard.mjs';
 import { loadConfig } from '../engine/config.mjs';
@@ -13,48 +14,47 @@ function reviewer() {
   return roleInstructions(loadConfig(project.root), 'reviewer', 'review');
 }
 
-test('legacy discovery compatibility preserves fix evidence and cannot waive open findings', () => {
+test('legacy discovery compatibility preserves fix evidence; a finding blocks only for a reason the engine can check', () => {
   const legacy = { id: 'D1', status: 'fixed', summary: 'Legacy discovery', scope: null };
-  assert.deepEqual(scopeProblems([legacy]), []);
-  assert.equal(extraScope(legacy), false);
-  assert.equal(blockingFindings({ scopeDecisions: [] }, {
-    closure: { findings: [{ id: 'F1', status: 'open', scope: null }] },
-  }).length, 1);
-  assert.equal(discoveredVerdicts([legacy], {
-    discovered: [{ id: 'D1', verdict: 'fixed' }],
-  }).problems.length, 1);
-  assert.deepEqual(discoveredVerdicts([legacy], {
-    discovered: [{ id: 'D1', verdict: 'fixed', evidence: 'src/list.ts:20 verified repair' }],
-  }).problems, []);
+  assert.equal(discoveredVerdicts([legacy], { discovered: [{ id: 'D1', verdict: 'fixed' }] }).problems.length, 1);
+  assert.deepEqual(discoveredVerdicts([legacy], { discovered: [{ id: 'D1', verdict: 'fixed', evidence: 'src/list.ts:20 verified repair' }] }).problems, []);
+  const state = { scopeDecisions: [], repos: {}, criteria: [{ id: 'C1' }] };
+  const closure = (f) => ({ reviewer: 'r', closure: { reviewer: 'r', findings: [{ id: 'F1', status: 'open', ...f }] } });
+  // 0.7.0: severity alone never blocks; a finding that cites nothing checkable (no location, no plan criterion, no
+  // invariant) blocks until a later round locates or verifies it (security review: unlocated findings must not fail open).
+  assert.equal(blockingFindings(state, closure({ severity: 'critical', evidence: 'src/untouched.ts:3' })).length, 0, 'a located finding on code the attempt did not change is an observation');
+  assert.equal(blockingFindings(state, closure({ severity: 'critical' })).length, 1, 'unlocated: blocks until located');
+  assert.equal(blockingFindings(state, closure({ criterion: 'C1' })).length, 1);
+  assert.equal(blockingFindings(state, closure({ criterion: 'C9', evidence: 'src/untouched.ts:3' })).length, 0, 'a criterion the plan does not have is no criterion');
+  assert.equal(blockingFindings(state, closure({ invariant: 'tenant isolation' })).length, 1);
+  assert.equal(blockingFindings(state, closure({ criterion: 'C1', status: 'fixed' })).length, 0);
   const prompt = reviewer();
-  assert.match(prompt, /historical discovered entries without structured scope/);
-  assert.match(prompt, /absent metadata supplies no extra-scope waiver and no approval/);
-  assert.match(prompt, /missing fix evidence remains blocking/);
-  assert.match(prompt, /newly identified extra scope still requires explicit causal metadata and the owner decision/);
-  assert.doesNotMatch(prompt, /Missing scope metadata remains blocking\./);
+  assert.doesNotMatch(prompt, /Uncertain causality remains blocking/);
+  assert.doesNotMatch(prompt, /requiredByRequest|affectsChangedContract|wf scope ask/);
 });
 
-// Named failure: a reference permitting indexed-section reads was mistaken for a required
-// full-read document, so an unnecessary oversized print ended the review as blocked.
-test('indexed reference instructions do not weaken required full-document receipts', () => {
+test('the reviewer is told what blocks, to state its plan early and to name what it did not reach', () => {
   const prompt = reviewer();
-  assert.match(prompt, /reference outside those required full-read documents/);
-  assert.match(prompt, /explicitly permits indexed-section reads, inspect every relevant section/);
-  assert.match(prompt, /unnecessary whole-reference print is not an external blocker/);
-  assert.match(prompt, /Never apply this exception to a required full-read document/);
-  assert.match(prompt, /partial reads, truncated output.*do not establish a read receipt/);
+  assert.match(prompt, /cites a frozen criterion the change fails/);
+  assert.match(prompt, /regression on a line this attempt changed/);
+  assert.match(prompt, /breaks a critical invariant/);
+  assert.match(prompt, /Every other finding is an observation/);
+  assert.match(prompt, /Your plan stated early in your closure file \(`scope`: what you will cover; `expect: \{ minutes \}`: how long you expect it to take\), with `findings` and `criteria` added only when you have them/);
+  assert.doesNotMatch(prompt, /budget/);
+  assert.match(prompt, /notReached/);
+  assert.match(prompt, /delta/);
+  assert.doesNotMatch(prompt, /report every finding now/i);
+  assert.doesNotMatch(prompt, /until every required judgment is complete and the closure is recorded/, 'a delta review is complete when its changed lines and open findings are judged');
 });
 
-test('native reviewer persists across large inputs without narrowing its blind review', () => {
+test('native reviewer inspects large inputs in bounded batches without narrowing its blind review', () => {
   const prompt = reviewer();
-  assert.match(prompt, /large bundle or diff is not by itself a reason to finish with an incomplete review/);
-  assert.match(prompt, /preserve your position across context compaction/);
-  assert.match(prompt, /until every required judgment is complete and the closure is recorded/);
-  assert.match(prompt, /concrete external blocker/);
-  assert.match(prompt, /Never fabricate verdicts or reduce scope/);
-  assert.match(prompt, /You review blind/);
-  assert.match(prompt, /fresh agent for this round/);
-  assert.match(prompt, /every section in bounded batches/);
-  assert.match(prompt, /inventory is navigation, not completed inspection/);
+  // Blind: the whole change, no earlier finding until the closure is recorded, and nothing the owner adds narrows it.
+  assert.match(prompt, /the whole change, blind/);
+  assert.match(prompt, /shown only after your closure is recorded/);
+  assert.match(prompt, /let it narrow nothing/);
+  // A large handoff is inspected in bounded sections, none skipped, and the evidence review keeps every screenshot.
+  assert.match(prompt, /inspected in bounded sections with `wf evidence inspect <handed path> --attempt <id>`, never as one full dump, and no section is skipped/);
   assert.match(prompt, /every screenshot/);
+  assert.match(prompt, /Never fabricate verdicts or reduce scope to finish/);
 });

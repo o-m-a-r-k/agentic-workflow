@@ -10,9 +10,10 @@ import { defaultRuntime } from './runtime-policy.mjs';
 import { blockingFindings } from './scope-decisions.mjs';
 import { nextDecision, handoff, acceptReview, gateOrderCheck, outstandingReviewFindings, outsideWarning } from './lifecycle.mjs';
 import { runGate } from './gate.mjs';
-import { runRole } from './codex-run.mjs';
+import { runRole } from './launch.mjs';
 import { readRegular, prepareWrite, writeNoFollow, forget, setVerifyLevel } from './evidence.mjs';
-import { isPidAlive, refuse, sessionIdentity } from './util.mjs';
+import { detectOwner, hostChoice, isHost, ownerRuntime, ownerString } from './hosts/index.mjs';
+import { isPidAlive, refuse } from './util.mjs';
 import { currentReviewGroup, isCurrentReviewer, reviewSnapshot, reviewDivisionOptions } from './review-groups.mjs';
 
 export async function advance(root, options, { groupAgent = null } = {}) {
@@ -20,16 +21,16 @@ export async function advance(root, options, { groupAgent = null } = {}) {
   for (const key of Object.keys(options)) if (!allowed.includes(key)) throw refuse(`advance does not accept --${key}; it never overrides workflow decisions`);
   if (options._?.length > 1) throw refuse('advance takes no positional action or override');
   if (Boolean(options.once) === Boolean(options['until-owner'])) throw refuse('choose --once or --until-owner');
-  if (options.runtime && !['claude', 'codex'].includes(options.runtime)) throw refuse('--runtime must be claude or codex');
+  if (options.runtime && !isHost(options.runtime)) throw refuse(`--runtime must be ${hostChoice(' or ')}`);
   reviewDivisionOptions(options);
   const limit = options.once ? 1 : Number(options['max-steps'] ?? 4);
   if (!Number.isInteger(limit) || limit < 1 || limit > 8) throw refuse('--max-steps must be between 1 and 8');
   setVerifyLevel('full');
   const verifiedState = () => { forget(); return openState(root, { attempt: id }); };
   const initial = openState(root, options), id = initial.id, owner = initial.owner;
-  const identity = sessionIdentity();
-  if (/^(claude|codex):/.test(owner) && !identity) throw refuse('this session-owned attempt must be advanced from its owning chat');
-  if (identity && owner !== `${identity.runtime}:${identity.session}`) throw refuse('only the owning chat advances this attempt; adopt through an interactive human request first');
+  const identity = detectOwner();
+  if (ownerRuntime(owner) && !identity) throw refuse('this session-owned attempt must be advanced from its owning chat');
+  if (identity && owner !== ownerString(identity.runtime, identity.session)) throw refuse('only the owning chat advances this attempt; take it over with `wf adopt` first');
   const lock = path.join(root, '.wf-worktrees', id, '_runner', 'advance.lock');
   if (canonicalPath(lock) !== path.join(fs.realpathSync(root), '.wf-worktrees', id, '_runner', 'advance.lock')) throw refuse('runner control path resolves outside its recorded location');
   prepareWrite(lock);
@@ -74,7 +75,7 @@ export async function advance(root, options, { groupAgent = null } = {}) {
         if (decision.handoff) h = state.handoffs.find((h) => h.bundle === decision.handoff);
         else {
           const runtime = options.runtime ?? defaultRuntime(state) ?? identity?.runtime;
-          if (!runtime) return result('owner-required', { ...decision, status: 'owner', blockers: ['choose --runtime claude or codex for the fresh reviewer'] });
+          if (!runtime) return result('owner-required', { ...decision, status: 'owner', blockers: [`choose --runtime ${hostChoice(' or ')} for the fresh reviewer`] });
           const warning = outsideWarning(root, state);
           if (warning) say(warning);
           const created = handoff(root, 'reviewer', { attempt: id, agent: `runner-${randomUUID()}`, runtime,

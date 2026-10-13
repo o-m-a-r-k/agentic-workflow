@@ -1,14 +1,14 @@
 import { mkdirStateDirectory } from './state-folders.mjs';
-import { scopeFindings } from './scope-decisions.mjs';
 import fs from 'node:fs';
 import { channelOf } from './channels.mjs';
+import { detectOwner, findHost, hostIds, hostLabels, optional } from './hosts/index.mjs';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { adapterFileAtCommit, loadConfigAtCommit, trustedAdapter } from './config.mjs';
 import { append, attemptDir, listAttempts, loadState } from './ledger.mjs';
 import { loadCatalog, readSecret } from './secrets.mjs';
-import { WfError, canonical, hashFile, now, readJson, refuse, sessionIdentity, sha256, writeImmutable } from './util.mjs';
+import { WfError, canonical, hashFile, now, readJson, refuse, sha256, writeImmutable } from './util.mjs';
 import { home } from './provenance.mjs';
 import { prepareWrite, readEvidenceFile, readRegular, writeNoFollow } from './evidence.mjs';
 import { connectorCalls, ownerTranscript } from './host-record.mjs';
@@ -25,6 +25,17 @@ export async function loadTrackerAdapter(root, cfg, state) {
   const file = kind.startsWith('.') ? (state ? adapterFileAtCommit(root, state, state.adapterBase, kind) : path.resolve(root, '.workflow', kind)) : path.join(BUILTIN, `${kind}.mjs`);
   if (!fs.existsSync(file)) throw new WfError(`tracker adapter \`${kind}\` not found at ${file}`);
   return (await import(pathToFileURL(file).href)).default;
+}
+
+// Named failure: a chat page id (a 32-character UUID) was admitted as the ticket item, worktrees were provisioned and a
+// planner ran, and only the admission readback then refused it because the tracker named the ticket by its own
+// identity. A ticket id is the tracker's identity: checked at entry, before anything is created. `tracker.itemPattern`
+// (a regular expression) states it for a project adapter; the built-in trackers know theirs.
+const ITEM_PATTERNS = { linear: '^[A-Za-z][A-Za-z0-9]*-\\d+$', github: '^(?:[A-Za-z][A-Za-z0-9]*-)?\\d{1,9}$' };
+export function itemProblem(cfg, item) {
+  const pattern = cfg.tracker.itemPattern ?? ITEM_PATTERNS[cfg.tracker.kind];
+  if (!pattern || new RegExp(pattern).test(String(item))) return null;
+  return `\`${item}\` is not a ticket id of the \`${cfg.tracker.kind}\` tracker (it must match ${pattern}); the tracker names a ticket by its own identity, so pass that id, not a page or database id`;
 }
 
 // Screenshots are uploaded before the comment, so the comment can embed each one by its asset url.
@@ -74,8 +85,13 @@ export function knownLimits(state) {
   for (const a of state.criteriaAmendments ?? []) for (const d of a.changes?.dropped ?? []) out.push(`Not delivered: ${d.reason}`);
   for (const a of state.delivery?.shown?.anomalies ?? []) if (a.followUp) out.push(`Follow-up: ${a.observation} (${a.followUp})`);
   // An issue found during the ticket that the owner deferred (I-18): the tester sees it with the owner's words.
-  for (const d of state.discovered ?? []) if (d.status === 'deferred') out.push(`Deferred ${state.id}:${d.id}: ${d.summary}. The owner's words: "${d.deferred.decision}". Channel: ${channelOf(d)}. ${d.deferred.acknowledged ? 'Acknowledged by the owner at delivery.' : 'Not acknowledged.'}`);
-  for (const r of scopeFindings(state)) if (['ignore', 'ticketed'].includes(r.decision?.choice)) out.push(`Extra scope ${r.decision.choice === 'ignore' ? 'ignored by owner for this attempt' : 'ticketed for later'}: ${r.summary}. ${r.decision.ticket?.url ?? ''} Owner decision: ${r.decision.authority?.text ?? ''}`);
+  for (const d of state.discovered ?? []) if (d.status === 'deferred') out.push(`Deferred ${state.id}:${d.id}${d.severity ? ` (${d.severity})` : ''}: ${d.summary}.${(d.rated ?? []).length ? ` Rated ${d.rated.map((r) => `from ${r.from ?? 'unrated'} to ${r.to}${r.reason ? ` ("${r.reason}")` : ''}`).join(', then ')}.` : ''} Why it waits: "${d.deferred.decision}". Decided by: ${channelOf(d)}.`);
+  // A review finding that is not fixed here (0.7.0): ticketed for later, or moved to a sibling attempt of the batch.
+  for (const d of state.scopeDecisions ?? []) {
+    if (d.choice === 'ticketed') out.push(`Follow-up ticketed for ${d.keys?.join(', ')}: ${d.ticket?.title ?? ''} ${d.ticket?.url ?? ''}`);
+    if (d.choice === 'deferred') for (const k of d.keys ?? []) out.push(`Known issue left for later (${d.placement?.[k] ?? 'unrated'}): ${d.summaries?.[k] ?? k}${d.reason ? `. Why it waits: "${d.reason}"` : ''}.`);
+    else if (d.choice === 'moved') out.push(`Follow-up moved to ${d.sibling} for ${d.keys?.join(', ')}${d.reason ? `: ${d.reason}` : ''}`);
+  }
   return out.map((l) => `- ${l.replace(/\s*\n\s*/g, ' ')}`).join('\n');
 }
 
@@ -308,8 +324,8 @@ async function recordFromTranscript(root, cfg, state, options, event, pending, a
   }
 }
 
-// `wf tracker record --agent-reported --file reported.json [--comment-file posted.md]`, connector mode only. In Claude
-// Code the connector's tool results arrive inline in the chat, not as saved files, so the raw-capture path could only
+// `wf tracker record --agent-reported --file reported.json [--comment-file posted.md]`, connector mode only. In some
+// harnesses the connector's tool results arrive inline in the chat, not as saved files, so the raw-capture path could only
 // be met by retyping them (named failure: ~35 KB of signed URLs retyped, which proves nothing). Here the agent reports
 // what the tracker showed it, and the engine checks what it can: the item, the status, the posted comment's text (its
 // sha256, the template's fixed lines, the owner's summary, an image for every delivered screenshot, no internals), the
@@ -580,7 +596,7 @@ export async function recordTracker(root, cfg, state, options) {
 // What wf can verify for each kind x via, said by `wf doctor` and the docs.
 export const VERIFIABLE = {
   'linear/api': 'the engine posts, uploads and reads back itself through the API: status, comment body, every attachment (title, caption) and its embedding are checked on the tracker\'s own answer; uploaded bytes are trusted (no hash from the tracker)',
-  'linear/connector': 'the agent acts through its connector; the readback is host-recorded where the host keeps a transcript (`wf tracker record --from-transcript`: the tracker\'s answer as Claude Code or Codex recorded it, checked like an API readback), else a saved tool-result file, else agent-reported (`--agent-reported`: checked as reported, recorded unverified)',
+  'linear/connector': 'the agent acts through its connector; the readback is host-recorded where the host keeps a transcript (`wf tracker record --from-transcript`: the tracker\'s answer as ' + hostLabels() + ' recorded it, checked like an API readback), else a saved tool-result file, else agent-reported (`--agent-reported`: checked as reported, recorded unverified)',
   'github/cli': 'the engine calls the GitHub REST API through your `gh` login: labels (status), the comment body and release assets (name, caption label, size) are read back from GitHub itself; asset bytes are checked by size, not hash',
   'github/api': 'as github/cli, with a token from `wf secrets` instead of your `gh` login',
   'github/connector': 'agent-reported: no host-recorded readback for GitHub connectors yet; for a verified handoff use `cli` (your `gh` login) or `api`',
@@ -631,9 +647,10 @@ export async function trackerModeChecks(root, cfg, { loadCatalog: catalog, readS
   const combo = `${cfg.tracker.kind}/${cfg.tracker.via}`;
   if (VERIFIABLE[combo]) out.push({ info: true, check: `tracker ${combo}`, problem: VERIFIABLE[combo] });
   if (cfg.tracker.via === 'connector') {
-    const s = sessionIdentity();
-    const store = s?.runtime === 'claude' ? path.join(home(), '.claude', 'projects') : s?.runtime === 'codex' ? path.join(home(), '.codex') : null;
-    const level = !adapter?.connectorTools ? 'agent-reported (this adapter names no connector tools)' : store && fs.existsSync(store) ? `host-recorded (${s.runtime === 'claude' ? 'Claude Code' : 'Codex'} transcripts at ${store}; run the connector actions, then \`wf tracker record --event <e> --from-transcript\`)` : 'agent-reported in this shell (no Claude Code or Codex session); host-recorded when the owner runs wf from Claude Code or Codex';
+    const s = detectOwner();
+    const owning = findHost(s?.runtime);
+    const store = optional(owning, 'storeDir')?.(home()) ?? null;
+    const level = !adapter?.connectorTools ? 'agent-reported (this adapter names no connector tools)' : store && fs.existsSync(store) ? `host-recorded (${owning.label} transcripts at ${store}; run the connector actions, then \`wf tracker record --event <e> --from-transcript\`)` : `agent-reported in this shell (no ${hostLabels()} session); host-recorded when the owner runs wf from ${hostLabels()}`;
     out.push({ info: true, check: 'tracker readback level', problem: level });
   }
   out.push(...endpointNotices(cfg));
@@ -663,15 +680,12 @@ export async function trackerModeChecks(root, cfg, { loadCatalog: catalog, readS
   return out;
 }
 
-// Where a connector readback came from: the host's own saved tool-result file (Claude Code keeps long tool results in
-// ~/.claude/projects/<project>/<session>/tool-results/), or anything else, which is only what the agent reports.
+// Where a connector readback came from: a tool-result file a harness saved itself (its adapter says which files those
+// are), or anything else, which is only what the agent reports.
 export function captureProvenance(files) {
   const home = process.env.HOME ?? '';
-  const host = (f) => {
-    const c = String(f);
-    return Boolean(home) && c.startsWith(path.join(home, '.claude', 'projects') + path.sep) && c.split(path.sep).includes('tool-results');
-  };
-  return files.length && files.every(host) ? 'host tool-result file' : 'agent-reported, unverified';
+  const saved = (f) => hostIds().some((id) => optional(findHost(id), 'isSavedToolResult')?.(String(f), { home }));
+  return files.length && files.every(saved) ? 'host tool-result file' : 'agent-reported, unverified';
 }
 
 // `tracker.via: api`: the engine performs the pending actions itself and records its own readback as the capture,

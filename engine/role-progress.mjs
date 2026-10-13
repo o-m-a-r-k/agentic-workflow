@@ -1,3 +1,5 @@
+import { findHost, optional } from './hosts/index.mjs';
+
 // Named failure I-52: owners repeatedly loaded an in-flight role transcript to prove that a quiet process was alive.
 // Ephemeral display only: no transcript reads, ledger writes, ETA or engine verdict claims.
 export const ROLE_HEARTBEAT_MS = 60_000;
@@ -10,11 +12,7 @@ const duration = (ms) => ms >= 60_000 ? `${Math.floor(ms / 60_000)}m` : `${Math.
 // Named failure: the native stream carried useful role commentary but the launcher discarded it.
 // Relay only completed assistant text, never reasoning, tools or terminal result payloads.
 export function roleReport(event, runtime) {
-  if (runtime === 'codex' && event.type === 'item.completed' && event.item?.type === 'agent_message') return event.item.text;
-  if (runtime === 'claude' && event.type === 'assistant' && Array.isArray(event.message?.content)) {
-    return event.message.content.filter((block) => block.type === 'text' && typeof block.text === 'string').map((block) => block.text).join(' ');
-  }
-  return null;
+  return optional(findHost(runtime), 'roleReport')?.(event) ?? null;
 }
 
 function displayText(text) {
@@ -25,7 +23,7 @@ function displayText(text) {
   return clean.length > 600 ? clean.slice(0, 600) + '…' : clean;
 }
 
-export function roleProgress(handoff, { now = () => performance.now(), runtime = 'Codex', write = (line) => process.stderr.write(line) } = {}) {
+export function roleProgress(handoff, { now = () => performance.now(), runtime = 'Agent', write = (line) => process.stderr.write(line) } = {}) {
   let started = null, lastEvent = null, lastCheck = null, checks = 0, finished = false;
   let pending = '', lastReport = '', reportedAt = null;
   const role = `${handoff.role} ${handoff.agent}`;

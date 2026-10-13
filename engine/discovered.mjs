@@ -1,52 +1,50 @@
 // The discovered-issue ledger (I-18). Named failure: implementers, reviewers and the owner agent noted real defects found
 // during a ticket (a pager summing only the current page, a table with no phone view, an implicit default, a failed step
 // that strands the user) and parked them as follow-ups or "harmless today" without the owner deciding. Every issue found
-// during a ticket is recorded here by whoever finds it; it ends fixed by a commit of this ticket or deferred with the
-// owner's own words; delivery refuses an open one and the reviewer gives each a verdict.
-import { waivedFinding, effectiveDiscoveries, scopeProblems } from './scope-decisions.mjs';
+// during a ticket is recorded here by whoever finds it; it ends fixed by a commit of this ticket or deferred by the
+// person's severity rule (engine/review-policy.mjs placementOf: high only with `wf approve`, medium with a recorded
+// reason, low freely); delivery refuses an open one and the reviewer gives each a verdict.
+import { isBookkeeping, legacyWaived, severityLevel } from './review-policy.mjs';
 import { actor, openState } from './attempt.mjs';
 import { append, loadState } from './ledger.mjs';
-import fs from 'node:fs';
 import crypto from 'node:crypto';
-import readline from 'node:readline';
-import { maxTranscriptBytes, ownerTranscript } from './host-record.mjs';
 import { home } from './provenance.mjs';
-import { readTranscript, subagentTranscripts } from './telemetry.mjs';
+import { findHost, optional } from './hosts/index.mjs';
 import { WfError, git, refuse, run } from './util.mjs';
-import { codexOwnerReplies } from './codex-owner-reply.mjs';
+import { deliverCoreDecision, requireYes } from './approve.mjs';
 
 const text = (v) => (typeof v === 'string' ? v.trim() : '');
 const OPEN = (s) => !['done', 'abandoned'].includes(s.phase);
 
-export const openDiscovered = (state) => (state.discovered ?? []).filter((d) => d.status === 'open' && !waivedFinding(state, d));
+// (An entry the owner waived under the old extra-scope flow, before 0.7.0, stays settled.)
+export const openDiscovered = (state) => (state.discovered ?? []).filter((d) => d.status === 'open' && !legacyWaived(state, d));
 
 export function addDiscovered(root, options) {
   const state = openState(root, options);
   if (!OPEN(state) || state.delivery.completedAt) throw refuse(`${state.id} is ${state.delivery.completedAt && OPEN(state) ? 'delivered' : state.phase}; record the issue on a new attempt (\`wf reopen\` or \`wf entry\`)`);
   const summary = text(options.summary);
-  if (!summary) throw new WfError('usage: wf discovered add --summary "<what is wrong, in one line>" [--where <file:line>] [--found-by <agent id>]');
+  if (!summary) throw new WfError('usage: wf discovered add --summary "<what is wrong, in one line>" [--severity high|medium|low] [--kind defect|bookkeeping] [--where <file:line>] [--found-by <agent id>]');
+  const severity = text(options.severity) || null;
+  if (severity && !severityLevel(severity)) throw new WfError('--severity is high, medium or low (critical, major, minor and nit are read as their level)');
+  // A tenant-isolation, authorization or money defect names the invariant it breaks: it is high whatever it is rated.
+  const invariant = text(options.invariant) || null;
   // The one exception to "the role that found it fixes it": the file is another work item's at that moment. The entry
   // names that work item, and the owner routes it to its implementer.
   const blockedBy = text(options['blocked-by']) || null;
   if (blockedBy && !(state.work ?? []).some((w) => w.id === blockedBy)) throw new WfError(`--blocked-by: no work item ${blockedBy} in the frozen plan${state.work?.length ? ` (work items: ${state.work.map((w) => w.id).join(', ')})` : ''}`);
-  let scope;
-  if (typeof options['scope-file'] === 'string') {
-    scope = JSON.parse(fs.readFileSync(options['scope-file'], 'utf8'));
-    const problems = scopeProblems([{ id: 'discovered', scope }]);
-    if (problems.length) throw refuse(problems.join('; '));
-  }
+  // Named failure (0.7.0): 512 of 595 discovered items were an implementer's own lint or fixture fixes, closed within
+  // minutes; each became a verdict item for the next reviewer and grew the bundle. `bookkeeping` marks one: it still has
+  // to be closed, but no reviewer is handed it.
+  const kind = options.kind === undefined ? 'defect' : text(options.kind);
+  if (!['defect', 'bookkeeping'].includes(kind)) throw new WfError('--kind is defect (default) or bookkeeping');
   const id = `D${(state.discovered?.length ?? 0) + 1}`;
-  // The engine's anchor on the owner session's transcript (0.4.5): its size and the sha256 of its bytes now. A deferral
-  // taken from the transcript must come from an owner turn after this offset, with these bytes unchanged.
-  append(root, state.id, 'discovered.added', { id, summary, ...(scope ? { scope } : {}), where: text(options.where) || null, foundBy: text(options['found-by']) || null, blockedBy, anchor: transcriptAnchor(state.owner) }, actor(options));
-  const after = loadState(root, state.id);
-  const anchored = Boolean(after.discovered.find((d) => d.id === id)?.anchor);
-  return { state: after, id, anchored, anchorProblem: anchored ? null : ownerTranscript(state.owner).problem ?? 'the owner session\'s transcript could not be read' };
+  append(root, state.id, 'discovered.added', { id, summary, kind, severity, ...(invariant ? { invariant } : {}), where: text(options.where) || null, foundBy: text(options['found-by']) || null, blockedBy }, actor(options));
+  return { state: loadState(root, state.id), id };
 }
 
 // The commit is part of this ticket's change in one of its repos: reachable from the worktree's HEAD and not from the
 // base the change starts at.
-function ticketCommit(state, sha, repo) {
+export function ticketCommit(state, sha, repo) {
   const names = repo ? [repo] : Object.keys(state.repos);
   if (repo && !state.repos[repo]) throw new WfError(`--repo ${repo} is not in ${state.id} (repos: ${Object.keys(state.repos).join(', ')})`);
   const found = [];
@@ -64,174 +62,74 @@ function ticketCommit(state, sha, repo) {
   return found[0];
 }
 
-export function closeDiscovered(root, id, options) {
+// Where a discovered issue may go (the person's severity rule, D10): one that breaks a critical invariant (tenant
+// isolation, authorization, money; `invariant`) is high whatever it is rated; unrated is high.
+// Named failure (second final review of 0.7.0): a tenant defect an implementer rated medium was deferred on the agent's
+// reason alone, against D1.
+export const discoveredLevel = (d) => (text(d?.invariant) ? 'high' : severityLevel(d?.severity) ?? 'high');
+
+// `wf discovered close D1[,D2] --fixed <commit> | --deferred --reason "..."`: several issues under one command, and the
+// high ones under one decision of the person (second final review of 0.7.0: one approval per id).
+export function closeDiscovered(root, idArg, options) {
   const state = openState(root, options);
-  const entry = (state.discovered ?? []).find((d) => d.id === id);
-  if (!entry) throw new WfError(`no discovered issue ${id ?? ''} on ${state.id}${state.discovered?.length ? ` (${state.discovered.map((d) => d.id).join(', ')})` : ''}`);
-  if (entry.status !== 'open') throw refuse(`${id} is already ${entry.status}`);
+  const ids = [...new Set(String(idArg ?? '').split(',').map((x) => x.trim()).filter(Boolean))];
+  const entries = ids.map((id) => {
+    const entry = (state.discovered ?? []).find((d) => d.id === id);
+    if (!entry) throw new WfError(`no discovered issue ${id} on ${state.id}${state.discovered?.length ? ` (${state.discovered.map((d) => d.id).join(', ')})` : ''}`);
+    if (entry.status !== 'open') throw refuse(`${id} is already ${entry.status}`);
+    return entry;
+  });
+  if (!entries.length) throw new WfError('name the discovered issue(s): `wf discovered close D1[,D2] --fixed <commit> | --deferred --reason "..."`');
   const fixed = typeof options.fixed === 'string' ? options.fixed.trim() : '';
   const deferred = options.deferred === true;
-  if (Boolean(fixed) === deferred) throw new WfError(`close ${id} with either --fixed <commit> or --deferred (after the owner started a message with \`${deferPhrase(state.id, id)}\`); the owner can also run \`wf discovered defer ${id} --reason "..."\` in their own terminal`);
+  if (Boolean(fixed) === deferred) throw new WfError(`close ${ids.join(',')} with either --fixed <commit> or --deferred --reason "<why it waits>" (a high-severity, unrated or invariant issue waits only with the person's \`wf approve\`)`);
   if (fixed) {
     const c = ticketCommit(state, fixed, typeof options.repo === 'string' ? options.repo : null);
-    append(root, state.id, 'discovered.closed', { id, outcome: 'fixed', repo: c.repo, commit: c.commit, evidence: text(options.evidence) || null }, actor(options));
-    return { state: loadState(root, state.id), outcome: 'fixed', ...c };
+    for (const e of entries) append(root, state.id, 'discovered.closed', { id: e.id, outcome: 'fixed', repo: c.repo, commit: c.commit, evidence: text(options.evidence) || null }, actor(options));
+    return { state: loadState(root, state.id), outcome: 'fixed', ids, ...c };
   }
-  // Deferral is the owner's decision. Named failure (0.4.5, security review of 0.4.4): it was refused only when the
-  // caller-typed `--by` named a role agent, so an agent that left `--by` out deferred with words it invented. The words
-  // now come from the host's record: a real user turn in the transcript of the session that owns the attempt, written
-  // after the entry was recorded. `--decision` (free text) is refused; `--by` is attribution only.
-  if (options.decision !== undefined || options.quote !== undefined) throw refuse(`--${options.decision !== undefined ? 'decision' : 'quote'} is not accepted: a deferral is taken from the owner's own message, which starts with \`${deferPhrase(state.id, id)}\`, never from text passed on the command line`, `ask the owner; once they have written \`${deferPhrase(state.id, id)}: <reason>\` in the owner session, run \`wf discovered close ${id} --deferred --attempt ${state.id}\`; otherwise fix it in this ticket`);
-  const found = ownerDecision(state, entry);
-  append(root, state.id, 'discovered.closed', { id, outcome: 'deferred', decision: found.text, source: found.source, attributedTo: text(options.by) || null }, actor(options));
-  return { state: loadState(root, state.id), outcome: 'deferred' };
+  // Deferral moves a defect out of this delivery. The person's severity rule (2026-10-13): high (or unrated, or an
+  // invariant) waits only with `wf approve`; medium is the owner agent's judgement with its reason recorded; low may wait.
+  // Named failure (0.7.0): the owner-phrase grammar refused real deferrals after the person had said yes.
+  const reason = text(options.reason);
+  const medium = entries.filter((e) => discoveredLevel(e) === 'medium');
+  if (medium.length && !reason) throw refuse(`${medium.map((e) => e.id).join(', ')} ${medium.length > 1 ? 'are' : 'is'} medium severity: fixing it here or deferring it is your judgement; say why it waits`, `\`wf discovered close ${ids.join(',')} --deferred --reason "<why it can wait>"\``, { id: 'discovered:medium-reason' });
+  const high = entries.filter((e) => discoveredLevel(e) === 'high');
+  let decision = null;
+  if (high.length) {
+    const latest = high.map((e) => e.at).filter(Boolean).sort().at(-1) ?? null;
+    const core = deliverCoreDecision(state, latest);
+    decision = core ? core.id : requireYes(root, state, { kind: 'move-out-of-batch', key: `${state.id}:${high.map((e) => e.id).join(',')}`, summary: `defer out of this delivery: ${high.map((e) => `${state.id}:${e.id} (${e.invariant ? `invariant: ${e.invariant}` : e.severity ?? 'unrated'}) ${e.summary}`).join('; ')}${reason ? ` (${reason})` : ''}`, what: `deferring ${high.map((e) => e.id).join(', ')}`, options }).decision;
+  }
+  for (const e of entries) {
+    const level = discoveredLevel(e);
+    const source = level === 'high' ? { provenance: 'approved-decision', decision } : { provenance: 'severity-rule', severity: e.severity };
+    append(root, state.id, 'discovered.closed', { id: e.id, outcome: 'deferred', decision: reason || (level === 'high' ? `confirmed with wf approve (${decision})` : `${level} severity: deferred`), source, attributedTo: text(options.by) || null }, actor(options));
+  }
+  return { state: loadState(root, state.id), outcome: 'deferred', ids };
 }
 
-// The owner's own terminal (0.4.5): `wf discovered defer <id> --reason "..."` asks the person at an interactive terminal
-// to type the id. The Bash tool of an agent runtime has no terminal, so a plain agent call is refused. Limit, plainly: a
-// process that allocates a pseudo-terminal (`script`, `expect`) can answer it; this proves an interactive terminal, not
-// a person.
-export async function deferInTerminal(root, id, options, { input = process.stdin, output = process.stdout } = {}) {
+// `wf discovered rate D1 --severity <s> --reason "..."`: a discovered issue re-rated; raising needs no reason, lowering
+// records one; an invariant issue stays high (second final review of 0.7.0: an implementer's rating could not be corrected).
+export function rateDiscovered(root, id, options) {
   const state = openState(root, options);
   const entry = (state.discovered ?? []).find((d) => d.id === id);
   if (!entry) throw new WfError(`no discovered issue ${id ?? ''} on ${state.id}`);
   if (entry.status !== 'open') throw refuse(`${id} is already ${entry.status}`);
-  const reason = text(options.reason);
-  if (!reason) throw new WfError(`usage: wf discovered defer ${id} --reason "<why it waits>" (run by the owner in their own terminal)`);
-  if (!input.isTTY || !output.isTTY) throw refuse(`not an interactive terminal: \`wf discovered defer\` is run by the owner in their own terminal, where it asks them to type ${id}`, `ask the owner to run \`wf discovered defer ${id} --reason "..." --attempt ${state.id}\` themselves, or to start a message in this session with \`${deferPhrase(state.id, id)}: <reason>\` (then \`wf discovered close ${id} --deferred --attempt ${state.id}\`); otherwise fix it in this ticket`);
-  output.write(`${state.id} ${id}: ${entry.summary}\nDefer it with the reason "${reason}"? Type ${id} to confirm: `);
-  const rl = readline.createInterface({ input, output, terminal: true });
-  // End of input (Ctrl-D) or a closed terminal is no answer: refused, never a silent success (review of 6ca2338).
-  const answer = await new Promise((resolve) => {
-    rl.once('line', (l) => resolve(l));
-    rl.once('close', () => resolve(null));
-  });
-  rl.close();
-  if (answer === null) throw refuse(`not confirmed (the input ended before ${id} was typed); nothing recorded`);
-  if (String(answer).trim() !== id) throw refuse(`not confirmed (typed ${JSON.stringify(String(answer).trim())}, not ${id}); nothing recorded`);
-  append(root, state.id, 'discovered.closed', { id, outcome: 'deferred', decision: reason, source: { provenance: 'interactive-terminal (unverified)', confirmed: id } }, actor(options));
-  return { state: loadState(root, state.id), outcome: 'deferred' };
+  const severity = text(options.severity);
+  if (!severityLevel(severity)) throw new WfError('--severity is high, medium or low');
+  const rank = { low: 0, medium: 1, high: 2 };
+  const fromLevel = discoveredLevel(entry);
+  const lowering = rank[severityLevel(severity)] < rank[fromLevel];
+  if (lowering && !text(options.reason)) throw refuse(`lowering ${id} from ${entry.severity ?? 'unrated'} to ${severity} is a judgement: say why`, 'pass `--reason "..."`', { id: 'discovered:rate-reason' });
+  // Out of high (or unrated) it is the person's decision: otherwise the agent that wants to deliver could rate a defect
+  // down and defer it alone (verification of the second final review). An invariant issue stays high whatever it is rated.
+  const decision = lowering && fromLevel === 'high' ? requireYes(root, state, { kind: 'move-out-of-batch', key: `rate:${state.id}:${id}:${severity}`, summary: `rate ${state.id}:${id} down from ${entry.severity ?? 'unrated'} to ${severity}: ${entry.summary} (${text(options.reason)})`, what: `rating ${id} down`, options }).decision : null;
+  append(root, state.id, 'discovered.rated', { id, severity, from: entry.severity ?? null, reason: text(options.reason) || null, ...(decision ? { decision } : {}) }, actor(options));
+  return loadState(root, state.id);
 }
 
-// ---- The owner's words, from the host's record ----
-// Lines the host or the runtime injects into the owner's conversation as user turns: notifications from background
-// tasks and other agents, hook and command output, environment blocks. None of them is the owner speaking.
-const INJECTED = /^\s*(?:<(?:task-notification|system-reminder|cross-session-message|teammate-message|relay|local-command-stdout|local-command-stderr|local-command-caveat|command-name|command-message|command-args|bash-input|bash-stdout|bash-stderr|user-prompt-submit-hook|environment_context|user_instructions|turn_aborted|subagent_notification|heartbeat|user_shell_command|wake|scheduled-task|external_[a-z_]+)\b|# AGENTS\.md instructions|Caveat: The messages below were generated by the user while running local commands|\[Request interrupted|\[\d+\] tool exec call)|<(?:task-notification|system-reminder|scheduled-task|cross-session-message|teammate-message|subagent_notification)\b/;
 export const fold = (t) => String(t ?? '').normalize('NFKC').replace(/\s+/g, ' ').trim().toLowerCase();
-
-export function readCapped(file) {
-  const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
-  try {
-    const st = fs.fstatSync(fd);
-    if (!st.isFile() || st.nlink > 1) throw refuse(`${file} is not a regular file with one name; the owner's transcript is not read`);
-    if (st.size > Math.min(maxTranscriptBytes(), 256 * 1024 * 1024)) throw refuse(`${file} is ${st.size} bytes, over the ${Math.min(maxTranscriptBytes(), 256 * 1024 * 1024)}-byte cap for owner turns (WF_TRANSCRIPT_MAX_BYTES)`);
-    const buf = Buffer.alloc(st.size);
-    let n = 0;
-    while (n < buf.length) {
-      const r = fs.readSync(fd, buf, n, buf.length - n, n);
-      if (!r) break;
-      n += r;
-    }
-    return buf.subarray(0, n);
-  } finally {
-    fs.closeSync(fd);
-  }
-}
-
-const sha = (b) => crypto.createHash('sha256').update(b).digest('hex');
-
-// The transcript's size and prefix hash now, or null when the owner has no readable host transcript.
-function transcriptAnchor(owner) {
-  const t = ownerTranscript(owner);
-  if (t.problem) return null;
-  try {
-    const b = readCapped(t.file);
-    return { file: t.file, size: b.length, sha256: sha(b) };
-  } catch {
-    return null;
-  }
-}
-
-// The shape of words a person typed: the turn opens with a letter or a digit. Named failure (0.5.0 adversarial review):
-// owner turns were every user line minus a deny-list of injected tags, so a shape the list did not name (Codex
-// `<user_action>` review results, `<recommended_plugins>`, `[12] tool exec call` lines) counted as the owner speaking.
-// Only the known shapes count (below). Typed text must open as words; the sole markup exception is a bound human
-// desktop question reply, decoded by codex-owner-reply.mjs. Other markup never grants authority.
-const TYPED = /^[\p{L}\p{N}]/u;
-
-// Every genuine owner turn: { text, at, line, offset, origin }. Only these shapes count. Claude Code: a `user` line that
-// is not meta, not a sidechain, not a compact summary, not a tool result, whose `message.role` is user and whose content
-// is a string or text blocks only, and, where the host records who produced it (`origin`, `turnOrigin`), a person.
-// Codex: a `response_item` message with role user and `input_text` blocks only. In both the text opens as typed words
-// and is no injected line. `origin` keeps the host's fields for the turn (decisions that need a plain interactive
-// session read them: engine/owner.mjs).
-export function ownerTurns({ runtime, file }, bytes = readCapped(file)) {
-  const out = [];
-  const replies = runtime === 'codex' ? codexOwnerReplies() : null;
-  let offset = 0;
-  bytes.toString('utf8').split('\n').forEach((raw, i) => {
-    const start = offset;
-    offset += Buffer.byteLength(raw) + 1;
-    if (!raw) return;
-    let e;
-    try {
-      e = JSON.parse(raw);
-    } catch {
-      return;
-    }
-    replies?.observe(e);
-    let t = null;
-    let origin = null;
-    if (runtime === 'claude') {
-      origin = { entrypoint: e?.entrypoint ?? null, promptSource: e?.promptSource ?? null, kind: e?.origin?.kind ?? null, turnOrigin: e?.turnOrigin ?? null, recorded: e?.origin !== undefined || e?.turnOrigin !== undefined };
-      if (e?.type !== 'user' || e.isMeta || e.isSidechain || e.isCompactSummary || e.toolUseResult !== undefined || e.message?.role !== 'user') return;
-      // Where the host records who produced the turn, it must be the person (0.4.5 review: relayed agent messages,
-      // task notifications and scheduled prompts are user lines too). Older transcripts carry no such fields.
-      if (e.origin !== undefined && e.origin?.kind !== 'human') return;
-      if (e.turnOrigin !== undefined && e.turnOrigin !== 'human') return;
-      const c = e.message.content;
-      if (typeof c === 'string') t = c;
-      else if (Array.isArray(c) && c.length && c.every((b) => b?.type === 'text')) t = c.map((b) => b.text ?? '').join('\n');
-    } else {
-      const p = e?.payload;
-      if (e?.type !== 'response_item' || p?.type !== 'message' || p.role !== 'user' || !Array.isArray(p.content)) return;
-      if (p.content.every((b) => b?.type === 'input_text')) t = p.content.map((b) => b.text ?? '').join('\n');
-    }
-    const words = replies?.answers(t, e.timestamp) ?? [{ text: t }];
-    for (const word of words) {
-      const text = word.text;
-      if (!text || !text.trim() || !TYPED.test(text.trim()) || INJECTED.test(text.trim())) continue;
-      // All answers in one envelope share the original line's spend identity: one owner message, one decision.
-      out.push({ text: text.trim(), at: e.timestamp ?? null, line: i + 1, offset: start, origin, id: typeof e.uuid === 'string' && e.uuid ? `uuid:${e.uuid}` : `sha256:${sha(Buffer.from(raw))}`, ...(word.questionReply ? { questionReply: word.questionReply } : {}) });
-    }
-  });
-  return out;
-}
-
-// The phrase the owner types to defer an entry (independent review of 0.4.5): a regex cannot judge intent ("D3 can't
-// wait", "won't defer D3" both passed a word list), so the owner states it in a fixed form at the start of a message:
-// `defer <attempt id>:<issue id>`, optionally followed by `: <reason>`. The attempt id keeps two attempts (batch members)
-// with the same issue id apart. Matched case-folded, anchored at the start, in exactly one owner turn after the anchor.
-export const deferPhrase = (attemptId, issueId) => `defer ${attemptId}:${issueId}`;
-const esc = (x) => String(x).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
-function ownerDecision(state, entry) {
-  const phrase = deferPhrase(state.id, entry.id);
-  const fix = `fix it in this ticket (amend the criteria when they block the fix); to defer it, the owner starts a message in this session with \`${phrase}\` (optionally \`: <reason>\`), or runs \`wf discovered defer ${entry.id} --reason "..." --attempt ${state.id}\` in their own terminal`;
-  const t = ownerTranscript(state.owner);
-  if (t.problem) throw refuse(`no deferral without the owner's own message: ${t.problem}`, fix);
-  const a = entry.anchor;
-  if (!a) throw refuse(`${entry.id} has no transcript anchor (the owner session had no readable transcript when it was recorded), so no message can be bound to it`, fix);
-  if (a.file !== t.file) throw refuse(`the owner session's transcript is now ${t.file}, not ${a.file} as when ${entry.id} was recorded`, fix);
-  const bytes = readCapped(t.file);
-  if (bytes.length < a.size || sha(bytes.subarray(0, a.size)) !== a.sha256) throw refuse(`the owner session's transcript changed before the point where ${entry.id} was recorded (its first ${a.size} bytes no longer match the anchor); no deferral is taken from it`, fix);
-  const start = new RegExp(`^${esc(phrase)}(?![a-z0-9_-]|\\.[a-z0-9])`, 'i');
-  const found = ownerTurns(t, bytes).filter((m) => m.offset >= a.size && start.test(fold(m.text)));
-  if (found.length > 1) throw refuse(`${found.length} owner messages after ${entry.id} was recorded start with \`${phrase}\` (lines ${found.map((m) => m.line).join(', ')}); a deferral is taken only from exactly one`, fix);
-  if (!found.length) throw refuse(`no owner message after ${entry.id} was recorded starts with \`${phrase}\` in the owner session's transcript (${t.file}); tool results, notifications, scheduled tasks, injected lines and subagent transcripts never count`, fix);
-  const m = found[0];
-  return { text: m.text, source: { provenance: 'host-recorded', runtime: t.runtime, file: t.file, line: m.line, offset: m.offset, at: m.at, phrase, anchor: { size: a.size, sha256: a.sha256 } } };
-}
 
 // The reviewer's verdict per entry its bundle listed: `fixed` (with evidence in the code), `deferred` (only for an entry
 // the owner deferred) or `open` (recorded honestly; acceptance then refuses).
@@ -239,7 +137,8 @@ export function discoveredVerdicts(entries, closure) {
   const given = Array.isArray(closure?.discovered) ? closure.discovered : [];
   const problems = [];
   const verdicts = [];
-  for (const d of entries ?? []) {
+  // An implementer's own lint or fixture fix (`--kind bookkeeping`) is never a reviewer's verdict item.
+  for (const d of (entries ?? []).filter((x) => !isBookkeeping(x))) {
     const v = given.find((x) => x?.id === d.id);
     if (!v) problems.push(`${d.id}: no verdict (${d.summary})`);
     else if (!['fixed', 'deferred', 'open'].includes(v.verdict)) problems.push(`${d.id}: verdict must be fixed, deferred or open, not \`${v.verdict}\``);
@@ -280,12 +179,12 @@ export function unacknowledged(root, state, loadMember, { acknowledged = false }
   return out;
 }
 
-export const discoveredLine = (d, attemptId) => `${d.id}  ${d.status}  ${d.summary}${d.where || d.foundBy ? `  (${[d.where, d.foundBy ? `found by ${d.foundBy}` : null].filter(Boolean).join('; ')})` : ''}${d.blockedBy && d.status === 'open' ? `  blocked by ${d.blockedBy}: route it to that work item's implementer` : ''}${d.status === 'fixed' ? `  fixed in ${d.fixed.repo}@${d.fixed.commit.slice(0, 10)}` : d.status === 'deferred' ? `  deferred (${channelOf(d)}): "${d.deferred.decision}"` : attemptId ? `\n    to defer it, the owner starts a message with: ${deferPhrase(attemptId, d.id)}: <reason>` : ''}`;
+export const discoveredLine = (d, attemptId) => `${d.id}  ${d.status}${d.kind === 'bookkeeping' ? ' (bookkeeping)' : ''}${d.severity ? `  ${d.severity}` : ''}  ${d.summary}${d.where || d.foundBy ? `  (${[d.where, d.foundBy ? `found by ${d.foundBy}` : null].filter(Boolean).join('; ')})` : ''}${d.blockedBy && d.status === 'open' ? `  blocked by ${d.blockedBy}: route it to that work item's implementer` : ''}${d.status === 'fixed' ? `  fixed in ${d.fixed.repo}@${d.fixed.commit.slice(0, 10)}` : d.status === 'deferred' ? `  deferred (${channelOf(d)}): "${d.deferred.decision}"` : attemptId ? `\n    to defer it: wf discovered close ${d.id} --deferred --reason "<why>" (${discoveredLevel(d) === 'high' ? 'high, unrated or an invariant: the person confirms it with wf approve' : `${discoveredLevel(d)} severity: your judgement`})` : ''}`;
 
 // I-18 (extended), named failure: an implementer reported "Not fixed, outside the brief: <a defect>" and handed the issue
 // back to the owner agent to relay. A line of an implementer's final report that leaves an issue unfixed must name its
 // discovered entry (D<n>); otherwise the next reviewer handoff is refused. It reads the report from the implementer's
-// Claude Code transcript (by the name it was started under, after its handoff); without a transcript nothing is checked.
+// transcript (the harness adapter finds it by the name the role was started under); without a transcript nothing is checked.
 const UNFIXED = /\bnot (?:yet )?(?:fixed|addressed|handled|done)\b|\b(?:outside|beyond) (?:the|my|this) (?:brief|scope|work item|task)\b|\bout of (?:the )?scope\b|\bleft (?:it |them |this )?(?:as is|as-is|unchanged|for later|alone)\b|\bfollow-?ups?\b|\bdefer(?:red|ring)?\b|\bharmless\b|\bnot in (?:the )?scope\b|\bnot (?:my|our) (?:work item|brief|change)\b/i;
 const NEGATED = /\b(?:no|nothing|none|zero|without)\b(?:\s+(?!(?:but|however|except|and)\b)[\w-]+){0,3}?\s+(?:follow-?ups?|deferred|deferring|defer|left|unfixed|out of scope|outside)\b/gi;
 
@@ -299,18 +198,6 @@ const plainClause = (s) => s.replace(/^[\s>*-]+/, '').replace(/[*`]/g, '').trim(
 const clausesOf = (s) => s.split(/;\s*|(?<=[.!?])\s+(?=[A-Z])|,\s*(?:but|however)\s+/).map(plainClause).filter(Boolean);
 const summaryText = (s) => fold(s).replace(/[.!]$/, '').trim();
 
-function finalReport(file) {
-  const entries = readTranscript(file);
-  for (let i = entries.length - 1; i >= 0; i--) {
-    const e = entries[i];
-    if (e.type !== 'assistant') continue;
-    const c = e.message?.content;
-    const t = typeof c === 'string' ? c : Array.isArray(c) ? c.filter((x) => x.type === 'text').map((x) => x.text ?? '').join('\n') : '';
-    if (t.trim()) return { text: t, at: e.timestamp ?? null };
-  }
-  return { text: '', at: null };
-}
-
 // Reconcile an exact historical statement with a later ledger resolution. Mere
 // "done", a later successful check, an unrelated commit or a similar summary proves
 // no particular defect fixed. The ledger already validates a fix's ticket commit
@@ -319,7 +206,7 @@ function resolvedReportClause(state, clause, reportAt) {
   const when = Date.parse(reportAt);
   if (!Number.isFinite(when)) return false;
   const body = summaryText(clause.replace(/^(?:not (?:yet )?(?:fixed|addressed|handled|done)|follow-?up)(?:,\s*(?:outside|beyond) (?:the|my|this) (?:brief|scope|work item|task))?\s*:\s*/i, ''));
-  return effectiveDiscoveries(state).some((d) => {
+  return (state.discovered ?? []).some((d) => {
     const resolution = d.status === 'fixed' ? d.fixed : d.status === 'deferred' ? d.deferred : null;
     if (!resolution || Date.parse(resolution.at) < when || !Number.isFinite(Date.parse(resolution.at))) return false;
     if (body !== summaryText(d.summary)) return false;
@@ -346,14 +233,11 @@ export function reportsForReview(state) {
   const current = [], historical = [];
   const seen = new Set();
   for (const h of [...state.handoffs].reverse()) {
-    if (h.role !== 'implementer' || h.runtime !== 'claude' || seen.has(h.agent)) continue;
+    const read = h.role === 'implementer' && !seen.has(h.agent) ? optional(findHost(h.runtime), 'finalReport') : null;
+    if (!read) continue;
     seen.add(h.agent);
-    let found = [];
-    try {
-      found = subagentTranscripts(home(), h.agent, h.agentType ?? null, h.at);
-    } catch {}
-    if (!found.length) continue;
-    const report = finalReport(found[0].file);
+    const report = read(h, { home: home() });
+    if (!report) continue;
     const lines = report.text.split('\n').map((l) => l.trim()).filter(Boolean);
     const bad = lines.filter((l) => clausesOf(l).some((c) => unrecordedClause(state, h, c, report.at, known)));
     if (!bad.length) continue;
@@ -397,7 +281,7 @@ export function reportedIssueVerdicts(reports, closure, state) {
       } catch (error) { problems.push(r.id + ': ' + error.message); continue; }
     }
     if (v.verdict === 'verified-nonissue' && !text(v.rationale)) { problems.push(r.id + ': verified-nonissue needs a purpose-based rationale'); continue; }
-    if (v.verdict === 'open' && !(closure.findings ?? []).some((f) => f.id === v.finding && !['fixed', 'verified-nonissue'].includes(f.status) && text(f.evidence))) {
+    if (v.verdict === 'open' && !(closure.findings ?? []).some((f) => f.id === v.finding && !['fixed', 'verified-nonissue', 'moved'].includes(f.status) && text(f.evidence))) {
       problems.push(r.id + ': open needs a corresponding open finding with evidence'); continue;
     }
     verdicts.push(v);

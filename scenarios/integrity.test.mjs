@@ -134,10 +134,14 @@ test('attacks after the gate are refused at the next use: changed log, replaced 
   for (const f of edited.data.files) if (f.path.endsWith('home.png')) f.sha256 = 'f'.repeat(64);
   lines[at] = JSON.stringify(edited);
   fs.writeFileSync(ledger, `${lines.join('\n')}\n`);
-  const r = status();
-  assert.notEqual(r.code, 0);
-  assert.match(r.err, /hash chain broken at entry \d+; the ledger was edited by hand/);
-  assert.doesNotMatch(r.err, /content differs/, 'nothing is checked against a broken chain');
+  // 0.7.0: a read walks the links between entries and the last entry's own hash, not every hash; the manifest it then trusts
+  // already disagrees with the file here, so it refuses too. `wf verify` and the other full-check commands (accept, deliver,
+  // doctor, export) walk the whole chain and name the edit, and check nothing else against a broken chain.
+  assert.notEqual(status().code, 0);
+  const r = verify();
+  assert.equal(r.code, 1);
+  assert.match(r.out, /hash chain broken at entry \d+; the ledger was edited by hand/);
+  assert.doesNotMatch(r.out, /content differs/, 'nothing is checked against a broken chain');
   fs.writeFileSync(ledger, ledgerText);
 
   // The anchor removed.

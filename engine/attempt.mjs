@@ -3,12 +3,14 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { loadConfig, loadConfigAtCommit, adapterLocation, adapterRecord, repoDir, trustedAdapter } from './config.mjs';
-import { append, assertSchema, createAttempt, listAttempts, loadState, openEvidence, readLedger } from './ledger.mjs';
+import { append, assertSchema, createAttempt, listAttempts, loadState, openEvidence } from './ledger.mjs';
 import { projectEnv } from './env.mjs';
-import { emitTrackerEvent } from './tracker.mjs';
-import { ownerAuthority } from './owner.mjs';
-import { runtimeOfOwner } from './runtime-policy.mjs';
-import { WfError, assertEngine, assertPlainGit, assertSafeId, git, hashFile, refuse, run, sessionIdentity, sha256 } from './util.mjs';
+import { emitTrackerEvent, itemProblem } from './tracker.mjs';
+import { adoptNeedsApproval } from './owner.mjs';
+import { requireYes } from './approve.mjs';
+import { detectOwner, ownerRuntime, ownerString } from './hosts/index.mjs';
+import { noteAttempt } from './refusals.mjs';
+import { WfError, assertEngine, assertPlainGit, assertSafeId, git, hashFile, refuse, run, sha256 } from './util.mjs';
 
 export const worktreesRoot = (root) => path.join(root, '.wf-worktrees');
 export const worktreeDir = (root, id, repoName) => path.join(worktreesRoot(root), id, repoName);
@@ -16,15 +18,27 @@ export const branchName = (id) => `wf/${id}`;
 
 export function actor(options = {}) {
   if (options.owner) return String(options.owner);
-  const s = sessionIdentity();
-  if (s) return `${s.runtime}:${s.session}`;
+  const s = detectOwner();
+  if (s) return ownerString(s.runtime, s.session);
   return `human:${os.userInfo().username}`;
 }
 
 const OPEN = (s) => !['done', 'abandoned'].includes(s.phase);
 
-// --attempt wins; otherwise the attempt whose worktree contains cwd; otherwise the only open attempt.
+// Named failure: an attempt whose worktree folder was deleted (a cleanup, a moved checkout) crashed `wf status`, `wf status
+// --all` and `wf resume` with "git failed to start: spawnSync git ENOENT" for every attempt, because the first git call
+// ran with the missing folder as its working directory. A folder without its `.git` entry counts as missing too: git
+// would walk up to the project's own repository from inside it and answer for the wrong tree. Decided before any git call.
+export const missingWorktrees = (state) => Object.entries(state.repos ?? {}).filter(([, r]) => r.worktree && !fs.existsSync(path.join(r.worktree, '.git'))).map(([repo, r]) => ({ repo, worktree: r.worktree, branch: r.branch ?? branchName(state.id) }));
+
+// --attempt wins; otherwise the attempt whose worktree contains cwd; otherwise the only open attempt. The answer is noted
+// for the refusal log (engine/refusals.mjs), so a refusal is counted against the attempt even when none was typed.
 export function resolveAttempt(root, options = {}) {
+  const id = resolveAttemptId(root, options);
+  noteAttempt(root, id);
+  return id;
+}
+function resolveAttemptId(root, options) {
   if (options.attempt) return assertSafeId(options.attempt, 'attempt id');
   const wt = worktreesRoot(root) + path.sep;
   const cwd = fs.realpathSync(process.cwd()) + path.sep;
@@ -140,12 +154,19 @@ export function entry(root, options) {
   if (!cfg.lanes.includes(lane)) throw refuse(`lane \`${lane}\` is not enabled for this project (lanes: ${cfg.lanes.join(', ')})`);
   let item = options.item ? assertSafeId(options.item, 'item') : null;
   if (lane === 'standard' && !item) throw new WfError('standard lane needs --item <ticket id>');
+  if (lane === 'standard') {
+    const wrong = itemProblem(cfg, item);
+    if (wrong) throw refuse(wrong, 'run `wf entry --item <the tracker\'s ticket id>`');
+  }
   if (lane === 'quick' && !item) item = `QF-${nextNumber(root, 'QF')}`;
   const owner = actor(options);
 
-  for (const id of listAttempts(root)) {
-    const s = loadState(root, id);
-    if (s.item === item && OPEN(s)) throw refuse(`${item} already has an open attempt ${id} owned by ${s.owner}`, `continue it, or take it over with \`wf adopt --attempt ${id}\``);
+  // A sibling attempt (`wf split`) works part of the same item beside its parent.
+  if (!options.sibling) {
+    for (const id of listAttempts(root)) {
+      const s = loadState(root, id);
+      if (s.item === item && OPEN(s)) throw refuse(`${item} already has an open attempt ${id} owned by ${s.owner}`, `continue it, or take it over with \`wf adopt --attempt ${id}\``);
+    }
   }
 
   const wanted = options.repos ? String(options.repos).split(',') : cfg.repos.map((r) => r.name);
@@ -207,9 +228,9 @@ export function entry(root, options) {
     fs.copyFileSync(src, dest);
     issue = { file: dest, sha256: hashFile(dest) };
   }
-  const originRuntime = sessionIdentity()?.runtime ?? runtimeOfOwner(owner);
+  const originRuntime = detectOwner()?.runtime ?? ownerRuntime(owner);
   createAttempt(root, id, { id, item, lane, intent, repos, adapterBase, adapter, issue, originRuntime, reopenedFrom: options.reopenedFrom ?? null, deferHeavy: options.deferHeavy === true || options.deferHeavy === 'true' }, owner);
-  if (lane === 'standard' && intent === 'implementation') emitTrackerEvent(root, cfg, id, 'admitted');
+  if (lane === 'standard' && intent === 'implementation' && !options.sibling) emitTrackerEvent(root, cfg, id, 'admitted');
   return loadState(root, id);
 }
 
@@ -254,13 +275,13 @@ export function adopt(root, options) {
   const by = actor(options);
   if (state.owner === by) return state;
   // Named failure I-31: recovery required a release from an unavailable previous session, despite a current human request.
-  // Keep the interactive human proof and one-use receipt; the previous session is no longer an authority dependency.
-  const lastTransfer = readLedger(root, state.id).filter((e) => e.type === 'owner.adopted').at(-1);
-  const requestPhrases = [...new Set([state.id, state.item].filter(Boolean))].flatMap((id) => [`adopt ${id}`, `adopt ticket ${id}`, `adopt attempt ${id}`]);
-  const authority = ownerAuthority(root, { ...state, admittedAt: lastTransfer?.at ?? state.admittedAt }, `adopt ${state.id}`, {
-    what: `adopting ${state.id} as \`${by}\``, owner: by, decision: `adopt:${state.id}:${by}`, interactive: true, requestPhrases,
-  });
-  append(root, state.id, 'owner.adopted', { from: state.owner, reason: options.reason ?? null, authority }, by);
+  // 0.7.0, named failure: the human-request grammar refused real adoptions (the request was in the chat already). Taking
+  // over an attempt whose owner session wrote to its transcript in the last 30 minutes, whose owner is a person's name
+  // (no session to measure) or whose transcript cannot be read is the person's decision (`wf approve`, kind adopt-live);
+  // taking over a session owner whose transcript is gone or idle is bookkeeping, recorded with the caller as actor. The
+  // key carries the number of earlier transfers, so an owner changing back and forth needs a new decision each time.
+  const approval = adoptNeedsApproval(state.owner) ? requireYes(root, state, { kind: 'adopt-live', key: `adopt:${state.id}:${state.owner}:${by}:${state.ownerTransfers}`, summary: `adopt ${state.id} as ${by} from ${state.owner}, whose session is active, unreadable or not a session`, what: `adopting ${state.id} from ${state.owner}`, options }) : null;
+  append(root, state.id, 'owner.adopted', { from: state.owner, reason: options.reason ?? null, ...(approval ? { decision: approval.decision } : {}) }, by);
   return loadState(root, state.id);
 }
 
@@ -276,6 +297,9 @@ export function onTarget(r, repo) {
 export function abandon(root, options) {
   const state = openState(root, options);
   if (!options.reason) throw new WfError('--reason is required');
+  // Independent review of 0.7.0 (HIGH): abandoning a split member dropped what the split moved into it. It is the person's
+  // one-use decision.
+  const splitDecision = (state.splitFrom || state.splits?.length) && !['done', 'abandoned'].includes(state.phase) ? requireYes(root, state, { kind: 'move-out-of-batch', key: `abandon-split:${state.id}`, summary: `abandon ${state.id}, which carries or handed work in a split batch`, what: `abandoning ${state.id}`, options }).decision : null;
   // I-22: the refusal names the case. A repo recorded as skipped had no changes, so nothing of it reached a target branch;
   // an attempt whose recorded repos are all skipped is abandoned like one with nothing recorded. A repo recorded as
   // delivered is on its target branch: the attempt is finished, never abandoned.
@@ -294,12 +318,14 @@ export function abandon(root, options) {
   // is integrated, acknowledges that repo and state (`--acknowledge-integration <repo>:<state>`, recorded). Each repo's
   // target branch is the adapter at base's, never the working copy's (0.5.0 adversarial review).
   const cfg = trustedAdapter(root, state);
+  // An orphaned attempt (its worktree folder is gone) is abandoned without a git call into the missing folder; the branch stays.
+  const gone = new Set(missingWorktrees(state).map((m) => m.repo));
   const onTargets = [];
   const open = [];
   for (const [name, r] of Object.entries(state.repos)) {
     if (state.delivery.repos[name]) continue;
     const repo = cfg.repos.find((x) => x.name === name);
-    const on = repo && r.worktree && fs.existsSync(r.worktree) ? onTarget(r, repo) : null;
+    const on = repo && r.worktree && !gone.has(name) ? onTarget(r, repo) : null;
     if (on) onTargets.push(`${name}: ${on.head.slice(0, 10)} is already on ${on.target}`);
     const i = state.delivery.integrating?.[name];
     const st = i ? (i.observed?.state === undefined || i.observed?.state === null || i.observed?.state === '' ? 'none' : String(i.observed.state)) : null;
@@ -308,11 +334,29 @@ export function abandon(root, options) {
   if (onTargets.length) throw refuse(`${state.id} is not abandoned: its change is on the target branch (${onTargets.join('; ')}); a change that landed is delivered or reverted in a new attempt, never abandoned`, '`wf deliver` records it (the adapter is asked again); to take it back, revert it in a new attempt (`wf reopen`)');
   const given = typeof options['acknowledge-integration'] === 'string' ? options['acknowledge-integration'].split(',').map((x) => x.trim()).filter(Boolean) : [];
   const unacked = open.filter((o) => !given.includes(`${o.repo}:${o.state}`));
-  const authorities = unacked.length ? [] : open.map((o) => ownerAuthority(root, state, `abandon ${state.id}:${o.repo}:${o.state}`, { decision: `abandon:${state.id}:${o.repo}:${o.state}`, what: `abandoning ${state.id} with ${o.repo}'s integration (${o.state}) closed` }));
-  if (unacked.length) throw refuse(`${state.id} is not abandoned: the delivery adapter last reported ${unacked.map((o) => `${o.repo} ${o.state}${o.url ? ` (${o.url})` : ''}`).join('; ')}; that integration can still land on the target branch`, `close it where it is integrated, or let \`wf deliver\` finish it; once the owner has closed it, the owner starts a message with ${unacked.map((o) => `\`abandon ${state.id}:${o.repo}:${o.state}\``).join(' and ')}; then \`wf abandon --acknowledge-integration ${unacked.map((o) => `${o.repo}:${o.state}`).join(',')} --reason "<why>"\` records it`);
-  append(root, state.id, 'abandoned', { reason: String(options.reason), ...(recorded.length ? { skipped: recorded.map((d) => d.repo) } : {}), ...(open.length ? { integrationsClosed: open.map((o) => `${o.repo}:${o.state}`), authorities } : {}) }, actor(options));
+  // 0.7.0: abandoning past an integration the adapter still reports is overriding a check; the person confirms it.
+  const decisions = unacked.length ? [] : open.map((o) => requireYes(root, state, { kind: 'override-gate', key: `abandon:${state.id}:${o.repo}:${o.state}`, summary: `abandon ${state.id} with ${o.repo}'s integration (${o.state}) closed where it is integrated`, what: `abandoning ${state.id} with ${o.repo}'s integration (${o.state}) closed`, options }).decision);
+  if (unacked.length) throw refuse(`${state.id} is not abandoned: the delivery adapter last reported ${unacked.map((o) => `${o.repo} ${o.state}${o.url ? ` (${o.url})` : ''}`).join('; ')}; that integration can still land on the target branch`, `close it where it is integrated, or let \`wf deliver\` finish it; once it is closed, \`wf abandon --acknowledge-integration ${unacked.map((o) => `${o.repo}:${o.state}`).join(',')} --reason "<why>"\` asks the owner to confirm it with \`wf approve\`, then records it`);
+  append(root, state.id, 'abandoned', { reason: String(options.reason), ...(splitDecision ? { decision: splitDecision } : {}), ...(recorded.length ? { skipped: recorded.map((d) => d.repo) } : {}), ...(open.length ? { integrationsClosed: open.map((o) => `${o.repo}:${o.state}`), decisions } : {}) }, actor(options));
   cleanupWorktrees(root, loadState(root, state.id));
   return loadState(root, state.id);
+}
+
+// Named failure: an analysis attempt is read-only (only a planner handoff is allowed) and its intent could not change, so
+// "the investigation is done, now implement it" meant abandoning the attempt and admitting a new one: 8 of 16 abandoned
+// attempts were exactly that, and each threw away the plan, the criteria and the tracker state. The intent is upgraded in
+// place and recorded (`intent.changed`); the tracker's admission step, which an analysis attempt skips, is queued as an
+// implementation attempt's is. An implementation attempt never goes back to analysis.
+export function setIntent(root, options, to) {
+  if (to !== 'implementation') throw new WfError('usage: wf intent implementation --attempt ID --reason "why"', { hint: 'only an analysis attempt is upgraded, to implementation; an implementation attempt does not go back' });
+  const state = openState(root, options);
+  const reason = typeof options.reason === 'string' ? options.reason.trim() : '';
+  if (!OPEN(state)) throw refuse(`${state.id} is ${state.phase}; its intent is final`, 'admit a new attempt with `wf entry` (or `wf reopen` for a delivered item)', { id: 'intent:closed' });
+  if (state.intent === 'implementation') return { state, changed: false };
+  if (!reason) throw new WfError('--reason "why this analysis is now to be implemented" is required');
+  append(root, state.id, 'intent.changed', { from: state.intent, to, reason }, actor(options));
+  if (state.lane === 'standard') emitTrackerEvent(root, loadConfig(root), state.id, 'admitted');
+  return { state: loadState(root, state.id), changed: true };
 }
 
 export function hold(root, options) {
@@ -325,9 +369,10 @@ export function hold(root, options) {
 export function release(root, options) {
   const state = openState(root, options);
   if (!state.activeHold) throw refuse(`${state.id} has no active hold`);
-  // A hold is the owner's veto; only the owner lifts it (0.5.0 second review: any agent could release it).
-  const authority = ownerAuthority(root, state, `release ${state.id}`, { what: `lifting the hold on ${state.id}`, decision: `release:${state.id}:${state.activeHold.at ?? ''}` });
-  append(root, state.id, 'release', { authority }, actor(options));
+  // A hold is the owner's veto; only the person lifts it (0.5.0 second review: any agent could release it). 0.7.0: with
+  // `wf approve` (kind lift-hold) instead of the owner's words read from a transcript.
+  const approval = requireYes(root, state, { kind: 'lift-hold', key: `release:${state.id}:${state.activeHold.at ?? ''}`, summary: `lift the hold on ${state.id}: ${state.activeHold.reason}`, what: `lifting the hold on ${state.id}`, options });
+  append(root, state.id, 'release', { decision: approval.decision }, actor(options));
   return loadState(root, state.id);
 }
 
@@ -341,6 +386,10 @@ export function cleanupWorktrees(root, state) {
     if (fs.existsSync(r.worktree)) {
       const rm = run('git', ['worktree', 'remove', '--force', r.worktree], { cwd: dir, allowFail: true });
       if (rm.status !== 0) problems.push(`${name}: ${rm.stderr.trim()}`);
+    } else {
+      // The folder is gone (an orphaned attempt): drop git's registration of it from the repo's own checkout so the branch
+      // can be reused or deleted later; the branch itself is kept.
+      run('git', ['worktree', 'prune'], { cwd: dir, allowFail: true });
     }
     // Delivered work is on the target branch; an abandoned attempt keeps its branch so nothing is lost.
     if (state.delivery?.completedAt) run('git', ['branch', '-D', r.branch ?? branchName(state.id)], { cwd: dir, allowFail: true });

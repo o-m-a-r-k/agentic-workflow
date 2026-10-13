@@ -138,8 +138,8 @@ test('impact queries fail closed: a missing worktree, an unreadable blob and a t
   const lost = wf(b.root, ['impact', 'run', '--attempt', b.e.id, '--query', JSON.stringify({ pattern: 'needle-in-a-lost-object', paths: ['src/**'] })]);
   assert.notEqual(lost.code, 0, lost.out);
   assert.doesNotMatch(lost.out, /query: 0 files/);
-  // The bundle lists at most 100 callers outside the map; the rest need the reviewer's account.
+  // The bundle lists at most 100 callers outside the map and says so (`total`, `truncated`); since 0.7.0 the reviewer-side
+  // check refuses nothing on shape, so no account of the unlisted rest is demanded.
   const map = { inventory: [], derived: { outside: [], total: 140, truncated: true } };
-  assert.match(impactCheckProblems(map, { impactChecked: { queries: [], sampled: [], derived: [] } }, {}).join('\n'), /impactChecked\.unlisted: the bundle lists 0 of 140 callers/);
-  assert.deepEqual(impactCheckProblems(map, { impactChecked: { queries: [], sampled: [], derived: [], unlisted: 'every caller of renderTable checked; all in tests' } }, {}), []);
+  assert.deepEqual(impactCheckProblems(map, { impactChecked: { queries: [], sampled: [], derived: [] } }, {}), []);
 });

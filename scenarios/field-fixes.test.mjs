@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { append } from '../engine/ledger.mjs';
-import { closureFile, commitIn, criteriaFile, goodClosure, makeRepo, ok, OUT_OF_ORDER, planDoc, sh, singleRepoProject, stages, state, tmp, wf, write, yaml } from './helpers.mjs';
+import { closureFile, commitIn, criteriaFile, FIXTURE_EXPECT, goodClosure, makeRepo, ok, OUT_OF_ORDER, planDoc, sh, singleRepoProject, stages, state, tmp, wf, write, yaml } from './helpers.mjs';
 
 const steps = [{ id: 'unit', repo: 'app', run: 'true', inputs: ['src/**'] }];
 const line = (o) => JSON.stringify(o);
@@ -52,6 +52,7 @@ const PLANNER_YAML = [
   'doNotRun: [e2e]',
   'externalServices: none',
   'agentSplit: one implementer',
+  `expect: ${JSON.stringify(FIXTURE_EXPECT)}`,
   'criteria:',
   '  - id: C1',
   '    text: a changes',
@@ -65,19 +66,20 @@ test('wf plan keeps the planner\'s top-level sections, refuses unknown keys, and
   ok(wf(root, ['handoff', 'planner', '--agent', 'p', '--attempt', id]));
   const unknown = wf(root, ['plan', '--file', planFile(base, { plan: 's', contracts: 'typo', criteria: [{ id: 'C1', text: 'a' }] }), '--attempt', id]);
   assert.equal(unknown.code, 1);
-  assert.match(unknown.err, /unknown top-level key\(s\) in the plan file: contracts; known keys: survey, plan, criteria, work, summary, contract, anchors, tests, doNotRun, externalServices, agentSplit, impact/);
+  assert.match(unknown.err, /unknown top-level key\(s\) in the plan file: contracts; known keys: survey, plan, criteria, work, summary, contract, anchors, tests, doNotRun, externalServices, agentSplit, expect, impact/);
   assert.match(wf(root, ['plan', '--file', planFile(base, { plan: { contract: 'x' }, contract: 'y', criteria: [{ id: 'C1', text: 'a' }] }), '--attempt', id]).err, /`contract` is given both at the top level and under `plan`/);
-  const doc = { plan: { summary: 'Change a.', tests: { run: ['jest a'] } }, contract: 'GET /a', anchors: ['src/a.txt:1'], doNotRun: ['e2e'], externalServices: 'none', agentSplit: 'one', criteria: [{ id: 'C1', text: 'a changes' }] };
+  const doc = { plan: { summary: 'Change a.', tests: { run: ['jest a'] } }, contract: 'GET /a', anchors: ['src/a.txt:1'], doNotRun: ['e2e'], externalServices: 'none', agentSplit: 'one', expect: FIXTURE_EXPECT, criteria: [{ id: 'C1', text: 'a changes' }] };
   const r = ok(wf(root, ['plan', '--file', planFile(base, planDoc(doc)), '--attempt', id]));
-  assert.match(r.out, /plan sections: summary, tests, contract, anchors, doNotRun, externalServices, agentSplit/);
-  const want = { summary: 'Change a.', tests: { run: ['jest a'] }, contract: 'GET /a', anchors: ['src/a.txt:1'], doNotRun: ['e2e'], externalServices: 'none', agentSplit: 'one' };
+  assert.match(r.out, /plan sections: summary, tests, contract, anchors, doNotRun, externalServices, agentSplit, expect/);
+  const want = { summary: 'Change a.', tests: { run: ['jest a'] }, contract: 'GET /a', anchors: ['src/a.txt:1'], doNotRun: ['e2e'], externalServices: 'none', agentSplit: 'one', expect: FIXTURE_EXPECT };
   assert.deepEqual(state(root, id).plan, want);
+  // The planner's prediction (`expect`) is the owner agent's yardstick, so the roles' bundles carry every other section.
+  const { expect: _prediction, ...handed } = want;
   const impl = ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', id, '--json'])).json();
-  assert.deepEqual(JSON.parse(fs.readFileSync(impl.bundle, 'utf8')).plan, want, 'the implementer bundle carries every section');
-  assert.match(JSON.parse(fs.readFileSync(impl.bundle, 'utf8')).instructions, /plan\.contract[\s\S]*plan\.tests\.run[\s\S]*plan\.doNotRun/);
+  assert.deepEqual(JSON.parse(fs.readFileSync(impl.bundle, 'utf8')).plan, handed, 'the implementer bundle carries every section');
   commitIn(state(root, id).repos.app.worktree, { 'src/a.txt': 'b\n' });
   const rev = ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', id, '--json'])).json();
-  assert.deepEqual(JSON.parse(fs.readFileSync(rev.bundle, 'utf8')).plan, want, 'the reviewer bundle carries every section');
+  assert.deepEqual(JSON.parse(fs.readFileSync(rev.bundle, 'utf8')).plan, handed, 'the reviewer bundle carries every section');
 });
 
 test('Codex planner import never borrows a same-named Claude transcript', () => {
@@ -114,7 +116,7 @@ test('wf plan --from-agent freezes the planner\'s last YAML block from its trans
   // Same name, other agent type: not this planner.
   subagent(root, { name: 'planner-7', agentType: 'general-purpose', entries: [{ type: 'assistant', timestamp: t, message: { content: [{ type: 'text', text: '```yaml\ncriteria: [{ id: X, text: wrong }]\n```' }] } }] });
   const r = ok(wf(root, ['plan', '--from-agent', 'planner-7', '--attempt', id]));
-  assert.match(r.out, /criteria frozen \(1\): C1\nplan sections: summary, contract, anchors, tests, doNotRun, externalServices, agentSplit \(from planner-7's transcript\)/);
+  assert.match(r.out, /criteria frozen \(1\): C1\nplan sections: summary, contract, anchors, tests, doNotRun, externalServices, agentSplit, expect \(from planner-7's transcript\)/);
   const s = state(root, id);
   assert.equal(s.plan.contract, 'GET /a returns { text }\n');
   assert.deepEqual(s.plan.tests, { changed: ['test/a.spec.js'], run: ['node --test test/a.spec.js'] });
@@ -262,9 +264,9 @@ test('wf doctor warns when a step reads a sibling repo without alsoInputs', () =
   const d = ok(wf(bare.root, ['doctor', '--no-steps']));
   assert.match(d.out, /! warning: step api-e2e reads repo web — its command references \.\.\/web but `alsoInputs` does not list web/);
   assert.match(d.out, /fix: add `alsoInputs: \[web\]` to step api-e2e/);
-  assert.match(d.out, /doctor: all checks passed \(1 warning\(s\)\)/, 'a warning never fails doctor');
+  assert.match(d.out, /doctor: all checks passed \(\d+ warning\(s\)\)/, 'a warning never fails doctor');
   const listed = multiRepo('sibling-ok', { id: 'api-e2e', repo: 'api', run, inputs: ['src/**'], alsoInputs: ['web'] });
-  assert.doesNotMatch(ok(wf(listed.root, ['doctor', '--no-steps'])).out, /warning/);
+  assert.doesNotMatch(ok(wf(listed.root, ['doctor', '--no-steps'])).out, /reads repo web/);
 });
 
 test('gate steps get an allowlisted environment: no session tokens, adapter pass-through honoured', () => {

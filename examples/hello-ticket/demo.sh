@@ -44,14 +44,10 @@ show() {
   printf '$ %s\n' "$*"
   "$@"
 }
-# The owner is an agent session (Codex here); owner-only decisions are read from the owner's own messages in that
-# session's transcript, never from a command-line flag. The demo writes the line the session would record.
+# The owner is an agent session (Codex here). Bookkeeping (closing an implementer, a runtime choice) is recorded as the
+# caller; the few reserved decisions (lifting a hold, skipping a check, deferring a defect) wait for `wf approve`, which the
+# person runs in their own terminal and this demo never needs.
 OWNER=codex:demo-owner-session
-owner_says() {
-  printf '(the owner, in their session) %s\n' "$*"
-  mkdir -p "$WF_HOME/.codex/sessions"
-  printf '{"timestamp":"%s","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"%s"}]}}\n' "$(node -e 'process.stdout.write(new Date().toISOString())')" "$*" >> "$WF_HOME/.codex/sessions/rollout-demo-demo-owner-session.jsonl"
-}
 
 # A git repository with an origin, as a real project has.
 mkdir -p "$PROJ" "$WORK"
@@ -84,6 +80,7 @@ cat > "$WORK/criteria.json" <<'EOF'
     "flows": [ { "id": "S2", "flow": "a caller asks for a greeting", "failure": "no name given: the greeting must stay 'Hello!'", "query": "Q1", "hits": 2 } ],
     "patterns": [ { "id": "S3", "description": "tickets and docs that quote greet()", "query": "Q2", "hits": 3 } ] },
   "plan": "greet takes an optional name",
+  "expect": { "files": 2, "rounds": 3, "minutes": 30 },
   "criteria": [
     { "id": "C1", "text": "greet('Ada') returns 'Hello, Ada!'", "uat": "greet('Ada') prints Hello, Ada!" },
     { "id": "C2", "text": "greet() still returns 'Hello!'", "uat": "greet() prints Hello!" } ],
@@ -98,7 +95,8 @@ wf handoff planner --agent planner-1 --attempt "$ATTEMPT"
 wf plan --file "$WORK/criteria.json" --attempt "$ATTEMPT"
 
 say "The implementer's first try forgets the comma"
-wf handoff implementer --agent implementer-1 --attempt "$ATTEMPT"
+wf handoff implementer --agent implementer-1 --attempt "$ATTEMPT" | tee "$WORK/implementer-handoff.txt"
+IMPLEMENTER_BUNDLE=$(sed -n 's/^implementer bundle: //p' "$WORK/implementer-handoff.txt")
 cat > "$WT/lib/greet.mjs" <<'EOF'
 // The whole library: a greeting.
 export function greet(name) {
@@ -121,14 +119,25 @@ EOF
 git -C "$WT" add -A
 git -C "$WT" commit -q -m 'greet by name'
 
+say "The implementer reports in the file its bundle names: what it changed and why, what it ran, what it left (the engine records it when the owner closes it)"
+IMPLEMENTER_REPORT=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).implementerReportFile' "$IMPLEMENTER_BUNDLE")
+mkdir -p "$(dirname "$IMPLEMENTER_REPORT")"
+cat > "$IMPLEMENTER_REPORT" <<'EOF'
+{ "implementer": "implementer-1",
+  "summary": "greet takes an optional name; tests for both criteria added",
+  "approach": "a name, when given, goes into the greeting; without one the greeting is unchanged",
+  "expect": { "minutes": 10 },
+  "ran": [],
+  "proofs": [],
+  "left": [] }
+EOF
+
 say "No gate yet: the gate runs once a code-review round on this tree comes back clean"
 refused gate --attempt "$ATTEMPT"
 
 say "The implementer is still open: no review starts until it is closed, so the tree cannot move under the reviewer"
 refused handoff reviewer --agent reviewer-1 --attempt "$ATTEMPT"
-say "Only the owner closes it: an agent cannot close it on the owner's behalf"
-refused handoff close --agent implementer-1 --attempt "$ATTEMPT"
-owner_says "close $ATTEMPT:implementer-1"
+say "The owner agent closes it once the implementer reports done and its work is committed (bookkeeping: recorded as the caller)"
 wf handoff close --agent implementer-1 --attempt "$ATTEMPT"
 
 say "The implementer cannot review its own work"
@@ -154,29 +163,29 @@ cat > "$WORK/closure-1.json" <<'EOF'
 EOF
 wf review --closure "$WORK/closure-1.json" --attempt "$ATTEMPT"
 
-say "The implementer fixes the finding and commits"
+say "A fix round: the owner hands the finding back to the implementer that did the work, which fixes it, commits and reports"
+wf handoff implementer --agent implementer-1 --attempt "$ATTEMPT" | tee "$WORK/fix-handoff.txt"
+FIX_BUNDLE=$(sed -n 's/^implementer bundle: //p' "$WORK/fix-handoff.txt")
 sed -i.bak 's/`Hello ${name}!`/`Hello, ${name}!`/' "$WT/lib/greet.mjs" && rm "$WT/lib/greet.mjs.bak"
 git -C "$WT" commit -q -am 'greet: add the comma'
+FIX_REPORT=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).implementerReportFile' "$FIX_BUNDLE")
+cat > "$FIX_REPORT" <<'EOF'
+{ "implementer": "implementer-1",
+  "summary": "the greeting with a name has its comma",
+  "approach": "the template literal missed the comma the criterion names",
+  "expect": { "minutes": 5 },
+  "ran": [{ "command": "node --test", "result": "passed" }],
+  "proofs": [],
+  "left": [] }
+EOF
+wf handoff close --agent implementer-1 --attempt "$ATTEMPT"
 
-say "Code review, round 2: a new reviewer judges the fixed tree blind, then verifies round 1's finding"
+say "Code review, round 2 (a delta review): a new reviewer judges only what changed since round 1 and verifies round 1's finding, which came with its bundle"
 wf handoff reviewer --agent reviewer-2 --attempt "$ATTEMPT"
 cat > "$WORK/closure-2.json" <<'EOF'
-{ "reviewer": "reviewer-2", "findings": [],
-  "criteria": [
-    { "id": "C1", "evidence": { "kind": "test", "ref": "test/greet.test.mjs: greet(name) greets by name" } },
-    { "id": "C2", "evidence": { "kind": "test", "ref": "test/greet.test.mjs: greet() says hello" } } ],
-  "screenshotsInspected": [],
-  "impactChecked": {
-    "queries": [ { "query": "Q1", "hits": 2 }, { "query": "Q2", "hits": 3 } ],
-    "sampled": [
-      { "entry": "S1", "verdict": "matches", "evidence": "test/greet.test.mjs calls greet() and greet('Ada')" },
-      { "entry": "S2", "verdict": "matches", "evidence": "lib/greet.mjs:3 falls back to 'Hello!'" },
-      { "entry": "S3", "verdict": "matches", "evidence": "tickets/HT-1.md quotes greet(); no code" },
-      { "entry": "I1", "verdict": "matches", "evidence": "lib/greet.mjs:2 greet(name)" } ],
-    "derived": [] } }
+{ "reviewer": "reviewer-2", "findings": [], "criteria": [],
+  "priorFindings": [ { "round": "reviewer-1", "id": "F1", "status": "fixed", "evidence": "lib/greet.mjs:3 now returns Hello, ${name}!" } ] }
 EOF
-wf review --closure "$WORK/closure-2.json" --attempt "$ATTEMPT"
-node -e 'const f=process.argv[1];const c=JSON.parse(require("fs").readFileSync(f,"utf8"));c.priorFindings=[{round:"reviewer-1",id:"F1",status:"fixed",evidence:"lib/greet.mjs:3 now returns Hello, ${name}!"}];require("fs").writeFileSync(f,JSON.stringify(c))' "$WORK/closure-2.json"
 wf review --closure "$WORK/closure-2.json" --attempt "$ATTEMPT"
 
 say "The review is clean: one gate on the reviewed tree"

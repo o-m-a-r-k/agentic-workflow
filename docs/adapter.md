@@ -29,7 +29,7 @@ adapterRepo: backend           # the repo whose committed .workflow/ judges each
 instructionFiles: [backend/AGENTS.md, frontend/AGENTS.md]
 components: [...]
 delivery: { kind: push-main }
-tracker: { kind: linear, idPrefix: ENG, statuses: { started: In Progress, delivered: Ready for UAT, done: Done } }
+tracker: { kind: linear, itemPattern: '^ENG-\d+$', statuses: { started: In Progress, delivered: Ready for UAT, done: Done } }
 lanes: [quick, standard, batch]
 classes:                     # merged over the plugin's full/light/review defaults by name; open list
   light: { use: "Screens on a frozen API contract, translations, fixtures.", claude: { effort: low }, codex: { effort: low } }
@@ -38,6 +38,8 @@ roles:
   planner:     { lanes: [standard], class: review, appendix: .workflow/roles/planner.md }
   implementer: { class: full, appendix: .workflow/roles/implementer.md }
   reviewer:    { class: review, appendix: .workflow/roles/reviewer.md }
+strategy:
+  reviewRoundsEscalate: 10   # review rounds handed (recorded or not) before the person decides how to continue (the default); the one number the engine stops for
 impact:                      # the planner's two-stage impact analysis (lifecycle.md, "Impact analysis")
   requiredFor: [full]        # classes whose work needs a survey and an impact map; [] turns the requirement off
   maxFileBytes: 2097152      # a larger file is skipped by every query (and listed)
@@ -85,8 +87,12 @@ export default {
 
 The engine owns suite merging, reuse eligibility (same `runnerIdentity` + same suite `inputsHash`) and harvest. Worker counts are not part of the reuse fingerprint.
 
+Artifacts (0.7.0, I-100): a plugin writes captures into its scratch folder (`ctx.evidenceDir`) or its own package folder and returns them as `artifacts: [{ path, kind: 'screenshot' }]`. The engine copies each into the run's managed evidence and records the sealed copy, so `wf export screenshots --gate`, the evidence review and delivery read it. A returned path anywhere else, a symlink or a missing file fails the step. A plugin is never handed, and never writes to, the evidence folder itself.
+
+A project whose adapter has no step with `artifacts` or a plugin cannot collect captures at all (0.7.0, I-94): the planner is told in `captureRoutes`, `wf plan` warns when a criterion needs screenshots, and the owner brings in captures made by hand on the committed tree with `wf captures import` ([the gate's captures](gate.md#captures-the-gate-cannot-collect-070-i-94)).
+
 ## Execution settings on existing attempts
 
-`wf models refresh --attempt <id>` records the current committed tip of the admission adapter repo's configured base. Only the owner may refresh (a host-recorded exact owning-session command or a human terminal confirmation). A ticket config, uncommitted edit, arbitrary model/effort flag, unrelated commit or moved adapter location cannot provide execution settings.
+`wf models refresh --attempt <id>` records the current committed tip of the admission adapter repo's configured base. Refreshing is bookkeeping: the owner agent records it as itself (0.7.0). A ticket config, uncommitted edit, arbitrary model/effort flag, unrelated commit or moved adapter location cannot provide execution settings.
 
 Future handoffs resolve model and effort from this separate execution pin: implementers keep their frozen work class, and other roles use their class mapping at the execution pin solely to select model/effort. The admission class, its use text, role instructions and appendices, criteria, gate, tracker, review rules and skills stay frozen. Existing handoffs retain their own execution pin; refresh requires a fresh handoff for new settings. `wf doctor --runtime codex --attempt <id>` reports the attempt pin as well as the current setup. Resume distinguishes unlaunched, running, failed and completed native reviewers.

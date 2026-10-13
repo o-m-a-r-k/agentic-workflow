@@ -69,14 +69,106 @@ test('a symlinked inbox, or one inside the evidence, is refused', () => {
   assert.deepEqual(fs.readdirSync(path.join(base, 'elsewhere')), []);
 });
 
-test('the plugin repo carries the history of closed improvements, each naming its test', () => {
+test('the plugin repo carries the history of closed improvements, each naming its test, or the version that retired its check', () => {
   const dir = path.join(import.meta.dirname, '..', 'improvements');
   const entries = fs.readdirSync(dir).filter((f) => /^I-\d+\.md$/.test(f));
   assert.ok(entries.length >= 10);
   for (const f of entries) {
     const text = fs.readFileSync(path.join(dir, f), 'utf8');
+    if (/^- \*\*Retired in:\*\* \d+\.\d+\.\d+$/m.test(text)) {
+      assert.match(text, /^- \*\*Refusals recorded:\*\* .+$/m, `${f} records the refusals`);
+      assert.match(text, /## Why it was retired\n\n\S/, `${f} gives its reason`);
+      continue;
+    }
     const test = /\*\*Test:\*\* `([^`]+)`/.exec(text)?.[1];
     assert.ok(test, `${f} names its test`);
     assert.ok(fs.existsSync(path.join(import.meta.dirname, '..', test)), `${f}: ${test} exists`);
   }
+});
+
+// 0.7.0 (stream D): a check that caught nothing is retired, not "fixed", and the refusal log says which checks nobody judged.
+const refusalRows = (file, rows) => fs.writeFileSync(file, rows.map(([id, attempt], i) => JSON.stringify({ at: new Date(Date.UTC(2026, 9, 13, 8, i)).toISOString(), id, version: '0.7.0', cmd: 'x', sub: null, attempt, message: `${id} refused` })).join('\n') + '\n');
+
+test('retire: a check that caught nothing is closed without a scenario test; the reason and the refusal counts are recorded', () => {
+  // Named failure: closing needed a new scenario test, so a check that only ever refused wrongly could never leave the engine.
+  const inbox = path.join(tmp('inbox-retire'), 'improvements');
+  const log = path.join(path.dirname(inbox), 'refusals.jsonl');
+  const plugin = pluginRepo();
+  const cwd = tmp('anywhere-retire');
+  refusalRows(log, [['guard:bash-scan', 'A.1'], ['guard:bash-scan', 'A.1'], ['guard:bash-scan', 'A.2'], ['guard:bash-scan', 'A.3'], ['guard:bash-scan', 'A.3'], ['other:check', 'A.1']]);
+  const env = inboxEnv(inbox, plugin);
+  const add = (title, extra = []) => ok(wf(cwd, ['improve', 'add', '--title', title, '--what', 'it refused harmless commands', '--class', 'guard', ...extra], env));
+  add('The command scanner refuses harmless reads', ['--refusal', 'guard:bash-scan']);
+  add('Second check, never fired');
+  add('Third check');
+  const close = (args) => wf(cwd, ['improve', 'close', ...args], env);
+  assert.match(close(['I-1', '--retire', '--version', '0.7.0']).err, /--reason says why the check caught nothing/);
+  assert.match(close(['I-1', '--retire', '--reason', 'r']).err, /--version is the plugin release that removes the check/);
+  assert.match(close(['I-1', '--retire', '--version', '0.7.0', '--reason', 'r', '--test', 'scenarios/fix.test.mjs']).err, /--retire records no scenario test or fix/);
+  assert.match(close(['I-1', '--retire', '--version', '0.7.0', '--reason', 'r', '--refusal', 'bad id!']).err, /a refusal id is letters, digits/);
+  assert.equal(add('Fourth check').code, 0);
+  // The item's own refusal id supplies the count when none is named at close.
+  const r = ok(close(['I-1', '--retire', '--version', '0.7.0', '--reason', 'every refusal was a retry of a harmless command', '--commit', 'abc1234']));
+  assert.match(r.out, /I-1 retired; history written to .*improvements\/I-1\.md/);
+  assert.match(r.out, /refusals recorded: guard:bash-scan 5/);
+  const hist = fs.readFileSync(path.join(plugin, 'improvements', 'I-1.md'), 'utf8');
+  assert.match(hist, /# I-1: The command scanner refuses harmless reads/);
+  assert.match(hist, /- \*\*Retired in:\*\* 0\.7\.0\n- \*\*Refusals recorded:\*\* `guard:bash-scan` 5 refusal\(s\) in 3 attempt\(s\)\n- \*\*Commit:\*\* abc1234/);
+  assert.match(hist, /## Why it was retired\n\nevery refusal was a retry of a harmless command/);
+  assert.ok(!/\*\*Test:\*\*|## Fix/.test(hist), 'no scenario test and no fix');
+  const item = fs.readFileSync(path.join(inbox, 'I-1.yaml'), 'utf8');
+  assert.match(item, /status: retired/);
+  assert.match(item, /retiredReason: every refusal was a retry of a harmless command/);
+  assert.match(item, /id: guard:bash-scan\n {4}count: 5\n {4}attempts: 3/);
+  // Retired items are neither open nor fixed.
+  assert.match(ok(wf(cwd, ['improve', 'list'], env)).out, /I-1 {2}\[retired, guard, retired in 0\.7\.0\]/);
+  assert.match(ok(wf(cwd, ['improve', 'next'], env)).out, /^I-2 /);
+  assert.match(ok(wf(cwd, ['improve', 'show', 'I-1'], env)).out, /retired because: every refusal was a retry of a harmless command\n {2}refusals: guard:bash-scan 5/);
+  assert.match(close(['I-1', '--retire', '--version', '0.7.0', '--reason', 'again']).err, /I-1 is already retired \(0\.7\.0\)/);
+  // Ids named at close: an id with no refusal counts zero. `--retire` ahead of the id parses as the flag's value.
+  const two = ok(close(['--retire', 'I-2', '--version', '0.7.0', '--reason', 'it never fired', '--refusal', 'never:fired,other:check']));
+  assert.match(two.out, /refusals recorded: never:fired 0, other:check 1/);
+  assert.match(fs.readFileSync(path.join(plugin, 'improvements', 'I-2.md'), 'utf8'), /\*\*Refusals recorded:\*\* `never:fired` 0 refusal\(s\) in 0 attempt\(s\); `other:check` 1 refusal\(s\) in 1 attempt\(s\)/);
+  // Nothing named: said so, in the entry and in the output.
+  const three = ok(close(['I-3', '--retire', '--version', '0.7.0', '--reason', 'the check was removed with its feature']));
+  assert.match(three.out, /refusals recorded: none named/);
+  assert.match(fs.readFileSync(path.join(plugin, 'improvements', 'I-3.md'), 'utf8'), /\*\*Refusals recorded:\*\* none named/);
+  // A fixed close still needs its test.
+  assert.match(close(['I-4', '--version', '0.9.0', '--fix', 'f']).err, /--test names the scenario test/);
+});
+
+test('review: refusal ids by count, each with the improvements and closures that cite it', () => {
+  // Named failure: nothing counted refusals, so nobody could say which checks refuse often and have never been judged.
+  const inbox = path.join(tmp('inbox-review'), 'improvements');
+  const log = path.join(path.dirname(inbox), 'refusals.jsonl');
+  const plugin = pluginRepo();
+  const cwd = tmp('anywhere-review');
+  const env = inboxEnv(inbox, plugin);
+  assert.equal(ok(wf(cwd, ['improve', 'review'], env)).out.trim(), 'no refusals recorded');
+  refusalRows(log, [
+    ['plain:noise', 'A.1'], ['review:unread', 'A.1'], ['guard:bash-scan', 'A.1'], ['guard:bash-scan', 'A.2'], ['guard:bash-scan', 'A.2'], ['guard:bash-scan', 'A.3'], ['guard:bash-scan', 'A.3'],
+    ['review:unread', 'A.2'], ['attempt.mjs:77', 'A.2'], ['guard:bash', 'A.3'],
+  ]);
+  // Cited three ways: the item's own refusals field, its text, and a history entry in the plugin repo.
+  ok(wf(cwd, ['improve', 'add', '--title', 'The scanner refuses harmless reads', '--what', 'it refuses reads', '--class', 'guard', '--refusal', 'guard:bash-scan'], env));
+  ok(wf(cwd, ['improve', 'add', '--title', 'Unread document refusals', '--what', 'the check review:unread refuses reviewers who read the document', '--class', 'engine'], env));
+  fs.mkdirSync(path.join(plugin, 'improvements'), { recursive: true });
+  fs.writeFileSync(path.join(plugin, 'improvements', 'I-9.md'), '# I-9: A guard rewrite\n\n- **Class:** guard\n- **Fixed in:** 0.6.0\n- **Test:** `scenarios/fix.test.mjs`\n\n## Failure\n\nIt refused at attempt.mjs:77 when it should not.\n');
+  const rows = ok(wf(cwd, ['improve', 'review', '--json'], env)).json();
+  assert.deepEqual(rows.map((c) => [c.id, c.count, c.attempts.length, c.citedBy.map((x) => `${x.id}:${x.status}`)]), [
+    ['guard:bash-scan', 5, 3, ['I-1:open']],
+    ['review:unread', 2, 2, ['I-2:open']],
+    ['plain:noise', 1, 1, []],
+    ['attempt.mjs:77', 1, 1, ['I-9:closed']],
+    ['guard:bash', 1, 1, []],
+  ], 'sorted by count; an id is not cited by a longer id that starts with it');
+  const text = ok(wf(cwd, ['improve', 'review'], env)).out;
+  assert.match(text, /^5 refusal id\(s\), most refusals first; 2 not cited by any improvement or closure/);
+  assert.match(text, /\n {4}5 {2}guard:bash-scan {2}\(3 attempt\(s\); last [^)]+\) {2}cited by I-1 \(open\)\n {7}e\.g\. guard:bash-scan refused/);
+  assert.match(text, /plain:noise [^\n]*NOT cited by any improvement or closure/);
+  assert.deepEqual(ok(wf(cwd, ['improve', 'review', '--uncited', '--json'], env)).json().map((c) => c.id), ['plain:noise', 'guard:bash']);
+  assert.equal(ok(wf(cwd, ['improve', 'review', '--since', '2030-01-01'], env)).out.trim(), 'no refusals recorded');
+  // Retiring the item records its closure against the ids it names.
+  ok(wf(cwd, ['improve', 'close', 'I-1', '--retire', '--version', '0.7.0', '--reason', 'it caught nothing'], env));
+  assert.deepEqual(ok(wf(cwd, ['improve', 'review', '--json'], env)).json().find((c) => c.id === 'guard:bash-scan').citedBy, [{ id: 'I-1', status: 'retired' }]);
 });

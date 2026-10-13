@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { closureFile, commitIn, criteriaFile, goodClosure, makeRepo, ok, OUT_OF_ORDER, sh, singleRepoProject, state, tmp, toAccepted, wf, yaml } from './helpers.mjs';
+import { amendFile, closureFile, commitIn, criteriaFile, goodClosure, makeRepo, ok, OUT_OF_ORDER, sh, singleRepoProject, state, tmp, toAccepted, wf, yaml } from './helpers.mjs';
 
 // 0.2.0/0.3.0: the lessons harness (docs/LESSONS.md). A lesson lives in the repository it concerns and is committed and
 // delivered with the attempt that taught it; every role gets the lessons that apply (proposed ones as advisory), the
@@ -70,6 +70,70 @@ test('per repo: a lesson recorded in an open attempt is committed in that repo\'
   assert.match(add(root, ['--attempt', e2.id, '--repo', 'nope', '--title', 't', '--what', 'w', '--cause', 'test', '--mechanism', 'doc']).err, /`repo` names the repository the lesson concerns: one of api, web/);
 });
 
+// Named failure (I-98, I-99): an accepted attempt adopted for repairs (criteria amended, an implementer handed again) still
+// carried its old acceptance, so `wf lesson add` wrote the implementer's lesson untracked into the pull-only main checkout.
+test('an accepted attempt reopened for repairs records its lesson in the worktree while an implementer is open', () => {
+  const { base, root } = singleRepoProject('lessons-repair', { gate: { steps } });
+  const { id, wt } = toAccepted(root, base, { item: 'ENG-310' });
+  ok(wf(root, ['criteria', 'amend', '--file', amendFile(base, [{ id: 'C1', text: 'a changes', uat: 'a shows the new text' }, { id: 'C2', text: 'cleanup', uat: false }]), '--reason', 'cleanup after acceptance', '--attempt', id]));
+  ok(wf(root, ['handoff', 'implementer', '--agent', 'repair', '--attempt', id]));
+  const r = ok(add(root, ['--attempt', id, '--title', 'Cleanup', '--what', 'cleanup was missed', '--cause', 'test', '--mechanism', 'doc']));
+  assert.match(r.out, /committed in ENG-310\.1's worktree/);
+  assert.ok(fs.existsSync(lessonFile(wt, 'L-1')), 'in the attempt worktree');
+  assert.ok(!fs.existsSync(lessonFile(root, 'L-1')), 'not in the main checkout');
+  ok(wf(root, ['handoff', 'close', '--agent', 'repair', '--attempt', id]));
+  assert.match(add(root, ['--attempt', id, '--title', 'Again', '--what', 'w', '--cause', 'test', '--mechanism', 'doc']).out, /in app's main checkout: commit it there/, 'with no implementer open the accepted tree stays frozen');
+});
+
+// Named failure (I-64): a project lesson recorded with no tags, paths, components or kinds could match nothing, so it never
+// reached a role bundle; tags stay a selector when given.
+test('a project lesson that declares no narrower scope applies project-wide; one with only tags still needs the ticket to mention one', () => {
+  const { base, root } = singleRepoProject('lessons-project-wide', { gate: { steps } });
+  ok(add(root, ['--project', '--title', 'Name the rollback', '--what', 'a change shipped without one', '--cause', 'review', '--mechanism', 'doc']));
+  ok(add(root, ['--project', '--tags', 'analytics', '--title', 'One clock', '--what', 'w', '--cause', 'review', '--mechanism', 'doc']));
+  const e = ok(wf(root, ['entry', '--item', 'ENG-311', '--owner', 'o', '--json'])).json();
+  ok(wf(root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id]));
+  ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id]));
+  const impl = ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
+  assert.deepEqual(bundleOf(impl.out).lessons.apply.map((l) => [l.id, l.matched]), [['L-1', ['it is a project-wide lesson (no narrower scope declared)']]]);
+  assert.doesNotMatch(ok(wf(root, ['lesson', 'list'])).out, /lesson L-1 declares no scope/);
+  assert.match(ok(wf(root, ['lesson', 'list'])).out, /lesson L-2 declares no scope/);
+});
+
+// Named failure (I-95): two repositories each held a different lesson with the same id (ids are allocated per repository);
+// the second was dropped silently and its lesson never reached a bundle.
+test('two different lessons with one id in two repositories are reported, never dropped silently', () => {
+  const { root } = multiRepoProject('lessons-collide');
+  const put = (repo, title) => {
+    fs.mkdirSync(path.join(root, repo, '.workflow', 'lessons'), { recursive: true });
+    fs.writeFileSync(lessonFile(path.join(root, repo), 'L-1'), yaml({ id: 'L-1', title, repo, trigger: { what: title }, cause: 'test', mechanism: { kind: 'doc' }, status: 'proposed', tags: [], created: '2026-01-01T00:00:00.000Z' }));
+  };
+  put('api', 'API lesson');
+  put('web', 'Web lesson');
+  const listed = ok(wf(root, ['lesson', 'list'])).out;
+  assert.match(listed, /warning: lesson L-1 is 2 different lessons, held by api, web; each keeps its own identity \(L-1@api, L-1@web\), so none is hidden/);
+  assert.match(listed, /^L-1@api {2}api \(main\) .*API lesson$/m);
+  assert.match(listed, /^L-1@web {2}web \(main\) .*Web lesson$/m);
+  put('web', 'API lesson');
+  const again = ok(wf(root, ['lesson', 'list'])).out;
+  assert.doesNotMatch(again, /different lessons, held by/, 'the same lesson in two places is not a collision');
+  assert.match(again, /^L-1 {2}api \(main\)/m, 'and it keeps its plain id');
+});
+
+// Named failure (I-49): a generated lesson was double-quoted in a repository whose Prettier config asks for single quotes,
+// so it failed that repository's own format check.
+test('a lesson is written with the single quotes the repository\'s Prettier config asks for', () => {
+  const what = 'a raw table shipped: no reviewer caught it';
+  const lesson = (root) => {
+    ok(add(root, ['--title', 'Tables use the shared component', '--what', what, '--cause', 'test', '--mechanism', 'doc']));
+    return fs.readFileSync(lessonFile(root, 'L-1'), 'utf8');
+  };
+  assert.match(lesson(singleRepoProject('lessons-plain', { gate: { steps } }).root), /what: "a raw table shipped: no reviewer caught it"/);
+  assert.match(lesson(singleRepoProject('lessons-single', { gate: { steps } }, { '.prettierrc': '{"singleQuote": true}\n' }).root), /what: 'a raw table shipped: no reviewer caught it'/);
+  assert.match(lesson(singleRepoProject('lessons-pkg', { gate: { steps } }, { 'package.json': JSON.stringify({ name: 'x', prettier: { singleQuote: true } }) }).root), /what: 'a raw table shipped: no reviewer caught it'/);
+  assert.match(lesson(singleRepoProject('lessons-override', { gate: { steps } }, { '.prettierrc.json': JSON.stringify({ singleQuote: true, overrides: [{ files: '*.yaml', options: { singleQuote: false } }] }) }).root), /what: "a raw table shipped: no reviewer caught it"/);
+});
+
 test('a reopened attempt records its lesson before the review; it is then delivered with the change', () => {
   const { base, root } = singleRepoProject('lessons-reopen', { gate: { steps } });
   const first = toAccepted(root, base, { item: 'ENG-301' });
@@ -92,13 +156,12 @@ test('a reopened attempt records its lesson before the review; it is then delive
   ok(wf(root, ['deliver', '--attempt', id]));
   assert.equal(state(root, id).phase, 'done');
   assert.match(sh(root, `git --git-dir=${root}.origin.git show main:.workflow/lessons/L-1.yaml`), /title: Delivered screenshots are visible in the ticket/, 'delivered with the change');
-  // A reopen with nothing to learn says why, in the ledger; waiving the lesson is the owner's word, never the flag alone.
-  assert.match(wf(root, ['reopen', '--item', 'ENG-301', '--reason', 'r', '--owner', 'o', '--no-lesson', 'nothing to learn'], { ownerSilent: true }).err, /reopening ENG-301 without a lesson needs the owner's authority[\s\S]*`waive-lesson ENG-301\.\d+`/);
+  // A reopen with nothing to learn says why, in the ledger (bookkeeping since 0.7.0: no owner phrase).
   const id3 = ok(wf(root, ['reopen', '--item', 'ENG-301', '--reason', 'r', '--owner', 'o', '--no-lesson', 'a typo in a label, nothing to learn', '--json'])).json().id;
   assert.equal(state(root, id3).lessons.waived.reason, 'a typo in a label, nothing to learn');
 });
 
-test('every role gets the lessons that apply, with why; proposed ones are advisory; enforced and recurring are never capped; the implementer acknowledges each and the reviewer judges each', () => {
+test('every role gets the lessons that apply, with why; proposed ones are advisory; enforced and recurring are never capped; the implementer may acknowledge each in a commit trailer and the reviewer may judge each (neither is required; a finding verdict counts as a recurrence)', () => {
   const { base, root } = singleRepoProject('lessons-inject', { gate: { steps } });
   for (let i = 1; i <= 8; i++) ok(add(root, ['--title', `lesson ${i}`, '--what', 'w', '--cause', 'review', '--mechanism', 'reviewer-checklist', '--tags', `t${i}`, '--paths', i === 8 ? 'docs/**' : 'src/**']));
   ok(wf(root, ['lesson', 'set', 'L-7', '--status', 'enforced', '--ref', 'roles.reviewer.appendix']));
@@ -118,7 +181,7 @@ test('every role gets the lessons that apply, with why; proposed ones are adviso
   assert.deepEqual(ib.lessons.apply.slice(0, 2).map((l) => l.id), ['L-6', 'L-7'], 'recurring and enforced first, never capped');
   assert.equal(ib.lessons.apply.length, 7);
   assert.deepEqual(ib.lessons.omitted, ['L-8']);
-  assert.match(ib.instructions, /Lesson <id>: applied - <how>/);
+  assert.match(fs.readFileSync(path.join(import.meta.dirname, '..', 'templates', 'agents', 'implementer.md'), 'utf8'), /lessons and design-system components as context/, 'the lessons are the implementer\'s context; a trailer is optional and recorded when written (below)');
   // Trailers: one -m per paragraph, so each is a line of the message as an implementer would write it.
   const commitWith = (files, ...paras) => {
     for (const [rel, content] of Object.entries(files)) fs.writeFileSync(path.join(e.repos.app.worktree, rel), content);
@@ -126,25 +189,26 @@ test('every role gets the lessons that apply, with why; proposed ones are adviso
   };
   commitWith({ 'src/a.txt': 'changed\n' }, 'change', 'Lesson L-6: applied - checklist followed', 'Lesson L-7: not-applicable - no review surface touched');
   ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]));
-  const missing = wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', e.id]);
-  assert.equal(missing.code, 75);
-  assert.match(missing.err, /the implementer did not acknowledge 5 lesson\(s\) it was handed: L-1, L-2, L-3, L-4, L-5/);
-  commitWith({ 'src/b.txt': 'acks\n' }, 'acks', ...['L-1', 'L-2', 'L-3', 'L-4', 'L-5'].map((x) => `Lesson ${x}: applied - done`));
-  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]));
+  // 0.7.0, named failure: the handoff refused until every lesson had a trailer, and caught nothing in the field. Trailers
+  // that exist are recorded and shown; five lessons with none do not stop the reviewer handoff.
   const rv = wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', e.id]);
   assert.equal(rv.code, 0, rv.err);
   assert.match(rv.err, /lessons injected: L-6, L-7, /);
   const rb = bundleOf(rv.out);
-  assert.deepEqual(rb.lessons.acknowledged.map((a) => `${a.lesson}:${a.ack}`).sort(), ['L-1:applied', 'L-2:applied', 'L-3:applied', 'L-4:applied', 'L-5:applied', 'L-6:applied', 'L-7:not-applicable']);
-  assert.equal(state(root, e.id).lessons.acknowledged.length, 7, 'acknowledgements are in the ledger');
+  assert.deepEqual(rb.lessons.acknowledged.map((a) => `${a.lesson}:${a.ack}`).sort(), ['L-6:applied', 'L-7:not-applicable']);
+  assert.equal(state(root, e.id).lessons.acknowledged.length, 2, 'acknowledgements are in the ledger');
   const verdicts = (skip) => rb.lessons.apply.filter((l) => l.id !== skip).map((l) => ({ lesson: l.id, verdict: l.id === 'L-6' ? 'finding' : 'complied', evidence: 'checked', ...(l.id === 'L-6' ? { finding: 'F1' } : {}) }));
   const findings = [{ id: 'F1', severity: 'minor', summary: 'the checklist item was missed again', status: 'fixed', evidence: 'src/a.txt:1', category: 'review' }];
-  assert.match(wf(root, ['review', '--closure', closureFile(base, goodClosure('r', { lessons: verdicts('L-1'), findings })), '--attempt', e.id]).err, /lesson L-1 \("lesson 1"\): no verdict/);
-  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r', { lessons: verdicts(null), findings })), '--attempt', e.id]));
+  // 0.7.0 (goals, not forms): the bundle lists the lessons as context and the reviewer owes no verdict per lesson, so a
+  // closure that judges six of the seven is recorded and accepted. The verdicts it gives are recorded, and a `finding`
+  // verdict still counts as a recurrence of that lesson.
+  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r', { lessons: verdicts('L-1'), findings })), '--attempt', e.id]));
   assert.match(ok(wf(root, ['accept', '--attempt', e.id])).out, /lesson: finding F1 is a review problem: record a lesson/);
   assert.match(ok(wf(root, ['status', '--attempt', e.id])).out, /LESSON L-6 RECURRED \(recurrence 2\): its mechanism failed; `wf lesson review` proposes promoting it to a gate check/);
   const j = ok(wf(root, ['export', '--attempt', e.id, '--json'])).json();
   assert.equal(j.lessons.verdicts.find((v) => v.lesson === 'L-6').verdict, 'finding');
+  assert.equal(j.lessons.verdicts.length, rb.lessons.apply.length - 1, 'every verdict given is recorded');
+  assert.equal(j.lessons.verdicts.find((v) => v.lesson === 'L-1'), undefined, 'the lesson the reviewer did not judge has none');
 });
 
 test('planner-time matching uses the ticket: a lesson whose tag the ticket mentions applies even in a repo the attempt does not touch', () => {
@@ -212,17 +276,15 @@ test('prior decisions are inputs: a criterion kept only on precedent needs a pur
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r2', { criteria: crit({ rationale: 'an administrator compares all accounts, so the total across accounts stays' }) })), '--attempt', e.id]));
   ok(wf(root, ['accept', '--attempt', e.id]));
   ok(wf(root, ['sync']));
-  const reviewer = fs.readdirSync(path.join(root, '.claude', 'agents')).find((f) => f.startsWith('wf-reviewer'));
-  const text = fs.readFileSync(path.join(root, '.claude', 'agents', reviewer), 'utf8');
-  assert.match(text, /Prior decisions are inputs, not authority/);
-  assert.match(text, /precedent-only/);
-  assert.match(text, /Invariant scope check/);
+  // The role a planner starts from: a behaviour it keeps needs a purpose-based rationale, not a prior decision.
+  const planner = fs.readFileSync(path.join(root, '.claude', 'agents', 'wf-planner.md'), 'utf8');
+  assert.match(planner, /A kept behaviour gets a `rationale` naming who uses the surface and what they need \(prior decisions are inputs, not authority\)/);
 });
 
 test('lessons are matched by their declared scope: a scripts-only fix in one repo gets no UI lessons of another repo, and what was filtered is shown', () => {
   // Named failure: a quick fix that changed only scripts in the api repo was handed the web repo's UI lessons (no paths,
   // so "every change in web", because web was admitted) and a project lesson about another subject (no paths, so "every
-  // change"); the reviewer had to give each a verdict.
+  // change"); the reviewer was handed each to judge (and, before 0.7.0, had to give each a verdict).
   const base = tmp('lessons-scope');
   const root = path.join(base, 'ws');
   fs.mkdirSync(root);

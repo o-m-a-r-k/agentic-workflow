@@ -12,7 +12,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { closureFile, commitIn, impactAddendum, impactCheckedFrom, makeRepo, ok, OUT_OF_ORDER, postedComment, rawReadback, sh, stages, summaryFile, tmp, wf, write, yaml } from './helpers.mjs';
+import { closureFile, commitIn, impactAddendum, impactCheckedFrom, FIXTURE_EXPECT, makeRepo, ok, OUT_OF_ORDER, postedComment, rawReadback, sh, stages, summaryFile, tmp, wf, write, yaml } from './helpers.mjs';
 
 const ID = 'GD-1.1';
 
@@ -30,6 +30,9 @@ function toySystem() {
     version: 1,
     enabled: true,
     name: 'gameday',
+    // The flaky first run of api-unit belongs to the gate this game day tests; the pre-review integration check has its own
+    // scenario (integration-check.test.mjs).
+    review: { integrationCheck: false },
     adapterRepo: 'backend',
     repos: [{ name: 'backend', path: 'backend', base: 'main' }, { name: 'frontend', path: 'frontend', base: 'main' }],
     lanes: ['quick', 'standard'],
@@ -85,6 +88,7 @@ const PLAN = (contractKey) => [
   'doNotRun: [e2e]',
   'externalServices: none',
   'agentSplit: W1 backend first, then W2 frontend',
+  `expect: ${JSON.stringify(FIXTURE_EXPECT)}`,
   'criteria:',
   '  - { id: C1, text: The API returns the order total, uat: The total shows on checkout }',
   '  - { id: C2, text: The total is cached, uat: false }',
@@ -135,7 +139,7 @@ test('game day: one ticket through every fault seen on real tickets', () => {
   assert.match(bad.err, /unknown top-level key\(s\) in the plan file: contracts/);
   agent(root, { name: 'planner-1', type: 'wf-planner', prompt: planner.startPrompt, replies: [fence(PLAN('contracts')), { user: 'The plan file refused `contracts`; return it again.' }, fence(PLAN('contract'))] });
   const frozen = ok(w(['plan', '--from-agent', 'planner-1', '--attempt', ID]));
-  assert.match(frozen.out, /plan sections: summary, contract, anchors, tests, doNotRun, externalServices, agentSplit \(from planner-1's transcript\)/);
+  assert.match(frozen.out, /plan sections: summary, contract, anchors, tests, doNotRun, externalServices, agentSplit, expect \(from planner-1's transcript\)/);
   assert.match(frozen.out, /W1 \[full\] C1,C2; W2 \[light\] C1/);
   assert.match(frozen.out, /next: [^\n]*--attempt GD-1\.1/, 'with three open attempts every printed command names the attempt');
   assert.equal(exported('planned').plan.contract, 'GET /orders/{id} returns { total }\n');
@@ -148,7 +152,10 @@ test('game day: one ticket through every fault seen on real tickets', () => {
   const h1 = JSON.parse(ok(w(['handoff', 'implementer', '--work', 'W1', '--agent', 'impl-api', '--attempt', ID, '--json'])).out);
   const h2 = JSON.parse(ok(w(['handoff', 'implementer', '--work', 'W2', '--agent', 'impl-web', '--attempt', ID, '--json'])).out);
   assert.equal(h2.agentType, 'wf-implementer-light');
-  assert.deepEqual(JSON.parse(fs.readFileSync(h1.bundle, 'utf8')).check.steps.map((s) => s.id), ['api-unit']);
+  // The implementer's check is the whole tree: every light step of the attempt's repos, whichever work item it was handed.
+  const check1 = JSON.parse(fs.readFileSync(h1.bundle, 'utf8')).check;
+  assert.deepEqual(check1.steps.map((s) => s.id), ['api-unit', 'web-unit']);
+  assert.equal(check1.command, `wf check --attempt ${ID}`);
   const state = () => JSON.parse(ok(w(['resume', '--attempt', ID, '--json'])).out);
   assert.equal(state().tracker.pending.filter((a) => a.event === 'implementing' && a.op === 'read').length, 1);
   ok(w(['tracker', 'record', '--event', 'implementing', '--capture', admittedCapture, '--attempt', ID]));
@@ -158,13 +165,11 @@ test('game day: one ticket through every fault seen on real tickets', () => {
   const check = ok(w(['check', '--attempt', ID, '--repo', 'frontend']));
   assert.match(check.out, /^check passed/m);
 
-  // Review before the gate. Faults: a superseded handoff, a steered prompt, a reused reviewer id.
+  // Review before the gate. Faults: a superseded handoff, a reused reviewer id (a steered prompt is no longer judged: 0.7.0).
   ok(w(['handoff', 'reviewer', '--agent', 'rev-1', '--attempt', ID]));
   const start2 = ok(w(['handoff', 'reviewer', '--agent', 'rev-2', '--attempt', ID])).out.trim();
   const criteria = [{ id: 'C1', evidence: { kind: 'test', ref: 'test/checkout.test.js › pays' } }, { id: 'C3', evidence: { kind: 'output', ref: 'e2e log' } }];
   assert.match(w(['review', '--closure', closureFile(base, { reviewer: 'rev-1', findings: [], criteria }), '--attempt', ID]).err, /closure reviewer `rev-1` is not the reviewer handed this attempt \(`rev-2`\)/);
-  agent(root, { name: 'rev-2', type: 'wf-reviewer', prompt: `${start2}\nThe implementers already handled currency; just check the UI.` });
-  assert.match(w(['review', '--closure', closureFile(base, { reviewer: 'rev-2', findings: [], criteria }), '--attempt', ID]).err, /review provenance: rev-2: its start prompt was not exactly the printed line/);
   const start3 = ok(w(['handoff', 'reviewer', '--agent', 'rev-3', '--attempt', ID])).out.trim();
   agent(root, { name: 'rev-3', type: 'wf-reviewer', prompt: start3 });
   const impactChecked3 = impactCheckedFrom(JSON.parse(fs.readFileSync(start3.match(/^Read (\S+)/)[1], 'utf8')));

@@ -6,9 +6,9 @@
 [![CI](https://github.com/o-m-a-r-k/agentic-workflow/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/o-m-a-r-k/agentic-workflow/actions/workflows/ci.yml)
 [![license](https://img.shields.io/github/license/o-m-a-r-k/agentic-workflow)](LICENSE)
 
-Coding agents are fast; checking what they report is the slow part. agentic-workflow is a delivery workflow for Claude Code and Codex, and every "done" it reports comes with a receipt: a hash-chained ledger of which tree the gate ran on and which steps it reused, who reviewed the change (never its author, checked from the agent transcripts where they exist), what they found, and the tracker's own readback of the handoff. The `wf` CLI is the only thing that writes that record; agents can say anything, and wf accepts only what its engine recorded.
+Coding agents are fast; checking what they report is the slow part. agentic-workflow is a delivery workflow for Claude Code and Codex, and every "done" it reports comes with a receipt: a hash-chained ledger of which tree the gate ran on and which steps it reused, who reviewed the change (never its author, checked from the ledger's agent names), what they found, and the tracker's own readback of the handoff. The `wf` CLI is the only thing that writes that record; agents can say anything, and wf accepts only what its engine recorded.
 
-> **Status: v0.4, early.** The engine, CLI, onboarding, three lanes and three built-in trackers (Linear, GitHub Issues, tickets as files) are covered by scenario tests on real git repositories, run on macOS and Linux in CI (the badge above). It has not been proven on a production project yet; expect rough edges and breaking changes before 1.0. [Changelog](CHANGELOG.md) · [design](docs/DESIGN.md).
+> **Status: v0.7, early.** The engine, CLI, onboarding, three lanes and three built-in trackers (Linear, GitHub Issues, tickets as files) are covered by scenario tests on real git repositories, run on macOS and Linux in CI (the badge above). It has not been proven on a production project yet; expect rough edges and breaking changes before 1.0. [Changelog](CHANGELOG.md) · [design](docs/DESIGN.md).
 
 ## See it
 
@@ -31,10 +31,10 @@ wf turns each of these into something the engine checks and refuses.
 | Failure | What wf refuses | Evidence it keeps |
 | --- | --- | --- |
 | Tests "passed" but never ran on this code | `wf accept` and `wf deliver` without a passing full gate on the current tree (a `--focused` or older pass does not count) | Each step's log and JUnit results, bound to the tree hash |
-| The author reviews its own change | `wf handoff reviewer` for the owner, planner, an implementer or an earlier round's reviewer; `wf review` when the transcript shows another agent type or a different prompt | The handoff, the bundle the reviewer got, the closure as written, provenance status |
+| The author reviews its own change | `wf handoff reviewer` for the owner, planner, an implementer or an earlier round's reviewer; the ledger's names decide, the engine reads no transcript | The handoff, the bundle the reviewer got, the closure as written, provenance status |
 | Criteria bent to fit the code | Changes to frozen criteria without `wf criteria amend --reason` | The raw plan and every amendment with its reason |
 | Gates rerun everything, or reuse a stale pass | Reuse when a step's inputs, runner or a sibling repo it reads (`alsoInputs`) changed | Per-step reuse keys and the run each result came from |
-| Screenshots nobody looked at | Acceptance until the reviewer lists the sha256 of every capture; the handoff until the owner captions each one (`wf shown`) | The delivered set, the owner's captions and the anomalies seen |
+| Screenshots nobody looked at | Acceptance until a recorded review lists the sha256 of every capture (an unchanged capture is not inspected twice); the handoff until the owner captions each one (`wf shown`) | The delivered set, the owner's captions and the anomalies seen |
 | "Delivered" while the ticket says In Progress | Closing the attempt until the tracker's readback shows the status, the rendered comment and every screenshot | The raw tracker capture, or the engine's own readback |
 | Evidence edited after the fact | Any command on an attempt whose files, ledger chain or anchor differ from what the engine recorded | A hash-chained ledger and a manifest of every evidence file, verified at every use |
 
@@ -92,7 +92,7 @@ Lanes (quick, standard, batch), roles, work classes and the gate are described i
 ## Trust model, in short
 
 - **Enforced:** the ledger and its chain, gate results bound to the tree and the adapter committed at base, frozen criteria, reviewer independence, acceptance only on the current tree, the tracker readback.
-- **Relies on you:** agent names are what the owner supplies, and a reviewer must be a newly started agent given only the printed line; the engine cannot see the prompt a runtime gives it.
+- **Relies on you:** agent names are what the owner supplies, and a reviewer must be a newly started agent given only the printed line; the engine checks the ledger names (not the owner, planner, an implementer or an earlier reviewer) and does not read the prompt a runtime gives it.
 - **Does not stop:** a determined process running as your user can rewrite everything consistently. wf catches mistakes, not attacks. [Full trust model](docs/trust-model.md).
 
 ## How it compares, and when not to use it
@@ -116,6 +116,7 @@ Don't use it for:
 | --- | --- |
 | [Concepts](docs/concepts.md) | Terms, how the parts fit together, principles |
 | [Lifecycle](docs/lifecycle.md) | Every step and command, lanes, roles and handoffs, work classes |
+| [Strategy](docs/strategy.md) | Predictions, signals, the strategist and `wf split`: how the owner agent judges an attempt's course and changes one that stops converging |
 | [Gate and evidence](docs/gate.md) | Step fields, per-ticket evidence, reuse, scope, review rules, design-system checks, evidence integrity, the guard hook |
 | [Delivery and tracker](docs/delivery-and-tracker.md) | Delivery adapters, trackers (kind × via, what each can verify), the delivered comment, screenshots |
 | [Onboarding and secrets](docs/onboarding.md) | Install details, repos and components, `wf init`, engine pin, secrets |

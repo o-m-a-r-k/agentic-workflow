@@ -106,29 +106,31 @@ test('a review round with open findings refuses the gate; --reason runs it and r
   assert.ok(ledger(root, e.id).findIndex((x) => x.type === 'gate.override') < ledger(root, e.id).findIndex((x) => x.type === 'gate.started'), 'recorded before the gate starts');
 });
 
-test('each review round is a fresh reviewer; the gate waits until the earlier findings are verified', () => {
+test('each review round is a fresh reviewer; a delta round is handed the open findings and the gate waits until it has verified them', () => {
   const { base, root } = singleRepoProject('fresh-reviewer', { gate: { steps } });
   const e = implemented(root, base, 'RO-3');
-  review(root, base, e.id, 'r1', { findings: [{ id: 'F1', severity: 'major', summary: 's', status: 'open', evidence: 'src/a.txt:1' }] });
+  review(root, base, e.id, 'r1', { findings: [{ id: 'F1', severity: 'major', summary: 's', status: 'open', criterion: 'C1', evidence: 'src/a.txt:1' }] });
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'fixed\n' });
   const again = wf(root, ['handoff', 'reviewer', '--agent', 'r1', '--attempt', e.id]);
   assert.equal(again.code, 75);
   assert.match(again.err, /start a fresh reviewer agent with a new id; each review round uses a new agent/);
-  // r2's blind closure may not carry earlier findings; they are revealed only once it is recorded.
-  handReviewer(root, e.id, 'r2');
-  const peek = wf(root, ['review', '--closure', closureFile(base, goodClosure('r2', { priorFindings: [{ round: 'r1', id: 'F1', status: 'fixed', evidence: 'x' }] })), '--attempt', e.id]);
-  assert.match(peek.err, /`priorFindings` are listed only after your own blind closure is recorded/);
-  const blind = ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r2')), '--attempt', e.id])).out;
-  assert.match(blind, /1 finding\(s\) from earlier rounds to verify against the code: \S+prior-findings-\S+\.json/);
-  const revealed = JSON.parse(fs.readFileSync(blind.match(/code: (\S+)/)[1], 'utf8')).findings;
-  assert.deepEqual(revealed.map((f) => `${f.round}:${f.id}`), ['r1:F1']);
-  assert.match(state(root, e.id).next, /reviewer r2 must verify 1 earlier-round finding[\s\S]*no gate until/);
+  // r2 is a delta round (D2): the finding that blocks comes with the bundle, so its closure answers it at once.
+  const handed = handReviewer(root, e.id, 'r2');
+  assert.equal(handed.mode, 'delta');
+  assert.deepEqual(handed.openFindings.map((f) => [`${f.round}:${f.id}`, f.blocks]), [['r1:F1', true]]);
+  assert.deepEqual(handed.delta.changed.app, ['src/a.txt'], 'the diff since the tree r1 judged');
+  const silent = wf(root, ['review', '--closure', closureFile(base, goodClosure('r2')), '--attempt', e.id]);
+  assert.equal(silent.code, 75);
+  assert.match(silent.err, /1 open finding\(s\) the bundle handed you have no verdict: r1:F1/);
+  assert.equal(state(root, e.id).reviews.length, 1, 'a closure that ignores a handed finding records nothing');
+  const still = ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r2', { priorFindings: [{ round: 'r1', id: 'F1', status: 'open', evidence: 'src/a.txt:1 still wrong' }] })), '--attempt', e.id])).out;
+  assert.doesNotMatch(still, /to verify against the code/, 'a delta round has no second submission');
   assert.match(wf(root, ['gate', '--attempt', e.id]).err, /the latest review round \(r2\) has not verified 1 earlier-round finding\(s\) \(r1:F1\)/);
-  assert.match(wf(root, ['review', '--closure', closureFile(base, goodClosure('r2', { findings: [{ id: 'N1', status: 'fixed', evidence: 'y' }], priorFindings: [] })), '--attempt', e.id]).err, /recorded blind and cannot change/);
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r2', { priorFindings: [{ round: 'r1', id: 'F1', status: 'fixed', evidence: 'src/a.txt:1 now fixed' }] })), '--attempt', e.id]));
   ok(wf(root, ['gate', '--attempt', e.id]), 'a clean round that verified F1 lets the gate run');
   assert.match(wf(root, ['accept', '--attempt', e.id]).err, /written before a passing gate on this tree/);
-  review(root, base, e.id, 'r3');
+  const evidence = review(root, base, e.id, 'r3');
+  assert.equal(evidence.mode, 'full', 'the evidence review is a full audit');
   ok(wf(root, ['accept', '--attempt', e.id]), 'the evidence review needs no earlier finding verified again');
 });
 

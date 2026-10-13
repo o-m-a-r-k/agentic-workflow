@@ -8,7 +8,7 @@ again. There are two kinds of learning, kept apart:
   delivered with the ticket that taught it.
 - A **plugin improvement** is about the workflow itself (the engine, a template, a skill, the guard, the tracker
   handling, onboarding, the docs). It is not a lesson: the plugin's maintainer fixes it in the plugin repo, with a
-  scenario test that reproduces the failure.
+  scenario test that reproduces the failure, or, when the finding is that a check caught nothing, retires the check.
 
 Terms (README, "Terms"): a **project** is the whole onboarded system (one adapter, one tracker); a **repo** is one Git
 repository in it; a **component** is a logical part mapped to a repo or a package; the **plugin** is agentic-workflow.
@@ -52,7 +52,17 @@ the owner relays), the question is: **project or workflow?**
   record recurrences, never drop or soften one.
 - `wf lesson list` flags lessons in the wrong place (a `repo` other than the one holding it, a project lesson outside
   the adapter repo, a workflow finding stored as a lesson); `wf lesson move <id> --repo R` (or `--project`, or
-  `--improvement` to send it to the inbox) moves it.
+  `--improvement` to send it to the inbox) moves it. A move never overwrites a different lesson of the same id in the
+  repository it moves to.
+- **Identity** (0.7.0, I-95). Ids are allocated per repository, so two repositories can each hold a different `L-4` (after
+  integrating bases, or two attempts each adding one). Neither is hidden. A lesson's identity is its id while no other
+  repository holds a different lesson of that id, and `<id>@<repository>` (`L-4@api`, `L-4@web`; the repository whose
+  folder holds the file) while one does; bundles, acknowledgement trailers (`Lesson L-4@api: applied - ...`), verdicts
+  and every `wf lesson` command use it. The qualified form names the same lesson whether or not the collision still
+  exists, so a reference recorded during it stays valid when one is renamed; a bare `L-4` that is two lessons is refused
+  with the identities to choose from. The file keeps its own id. The same lesson held twice (a copy left after a move)
+  is one lesson. `wf lesson add` allocates the next number counting the lessons in every repository and in the
+  worktrees of every open attempt, so parallel attempts do not take the same one.
 
 ### The file
 
@@ -91,9 +101,10 @@ recurrence: 0
   capped; the rest at most 5, omitted ids listed. Handoffs print `lessons injected: ...` and the filtered ids; filtered
   lessons stay out of the bundle (no verdict owed). `wf lesson preview --attempt ID --role ...` shows both, with why
   each was filtered.
-- **Acknowledge**: the implementer adds a commit trailer per lesson (`Lesson <id>: applied - <how>` or
-  `Lesson <id>: not-applicable - <why>`); `wf handoff reviewer` refuses until each is there and records them.
-- **Judge**: the reviewer gives each a verdict (`complied | not-applicable | finding`); a `finding` is a recurrence.
+- **Acknowledge** (optional): an implementer may add a commit trailer per lesson (`Lesson <id>: applied - <how>` or
+  `Lesson <id>: not-applicable - <why>`); `wf handoff reviewer` records the ones that exist and shows them to the
+  reviewer, and never refuses for a missing one (0.7.0: the refusal caught nothing).
+- **Judge**: the reviewer may give each a verdict (`complied | not-applicable | finding`; none is required, one given is recorded with the acceptance); a `finding` is a recurrence.
 - **Apply**: `wf lesson apply <id>` prints the snippet; the owner commits it and sets `status: enforced`.
 - **Review**: `wf lesson review` lists lessons to promote (recurred twice), apply (proposed) and retire.
 
@@ -103,11 +114,19 @@ recurrence: 0
   continue after the plugin repo's history. Title, description and where it was observed are stripped of project and
   repo names, ticket ids, paths, emails and URLs; the owner's quote is kept verbatim in this user-level file only.
 - **Work**: `wf improve list|show|next` (next: regressions first, then the oldest) in a plugin maintainer session.
+- **States**: `open`, `closed` (fixed) or `retired` (a check removed because it caught nothing).
 - **Close**: `wf improve close <id> --version X --test scenarios/<file>.test.mjs --fix "..."` only when the test exists in
   the plugin repo (and contains `--name`, when given); writes `improvements/<id>.md` there, generic, to commit with the
   fix.
+- **Retire**: `wf improve close <id> --retire --version X --reason "..." [--refusal id,id]` needs no scenario test (no
+  behaviour is left to reproduce) but records the reason and the refusal count of each named id from the refusal log
+  (`wf refusals`); the history entry says "Retired in" instead of "Test". Named failure: closing needed a new scenario,
+  so a check that only ever refused wrongly could never leave the engine, and every path from an incident to code added
+  and none removed.
+- **Review**: `wf improve review` lists the refusal ids by count, each with the improvements and closures that cite it,
+  and which are cited by none: the checks nobody has judged (design principle 13 made measurable).
 - **Regression**: a new item with the same class and a similar title as a closed one, or `--regression-of I-n`, is
-  flagged "regression of I-n fixed in X" and goes first.
+  flagged "regression of I-n fixed in X" and goes first. A retired item never makes a regression.
 - **Visibility**: counts in `wf status` and `wf doctor`.
 
 ## Deliberately left out

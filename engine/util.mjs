@@ -38,9 +38,12 @@ export function enginePinProblem(pin, installed = ENGINE_VERSION) {
   if (min && parseVersion(min)) return compareVersions(installed, min) >= 0 ? null : `the project needs engine ${p}; installed is ${installed}`;
   return `the engine pin \`${p}\` is not \`N.x\` or \`>=x.y.z\``;
 }
+// The commands that update the plugin through a harness's own plugin manager; the host layer registers them.
+let upgradeCommands = () => [];
+export const setUpgradeCommands = (fn) => { upgradeCommands = fn; };
 export function assertEngine(cfg, installed = ENGINE_VERSION) {
   const problem = enginePinProblem(cfg?.engine, installed);
-  if (problem) throw refuse(problem, 'upgrade the plugin (`claude plugin update agentic-workflow@agentic-workflow`, or `git pull` in a clone and `node bin/wf install`), or change `engine:` in .workflow/project.yaml');
+  if (problem) throw refuse(problem, `upgrade the plugin (${upgradeCommands().map((c) => `\`${c}\`, `).join('')}or \`git pull\` in a clone and \`node bin/wf install\`), or change \`engine:\` in .workflow/project.yaml`);
 }
 export const SCHEMA_VERSION = 1;
 
@@ -52,7 +55,28 @@ export class WfError extends Error {
     this.hint = hint;
   }
 }
-export const refuse = (message, hint) => new WfError(message, { code: 75, hint });
+// Every refusal carries a stable id so it can be counted (engine/refusals.mjs, `wf refusals`): principle 13 asks for a
+// measured false-positive rate per check, and refusals left no record before 0.7.0. An explicit id names the check;
+// otherwise the call site (file:line) does, which is stable within a release.
+export const refuse = (message, hint, { id = null } = {}) => {
+  const error = new WfError(message, { code: 75, hint });
+  error.refusalId = id ?? callSiteId();
+  return error;
+};
+function callSiteId() {
+  const frames = String(new Error().stack ?? '').split('\n').slice(1).map((l) => l.trim());
+  const caller = frames.find((l) => !/\b(callSiteId|refuse)\b/.test(l) && /\.m?js:\d+/.test(l)) ?? '';
+  const m = /([^\s()/\\]+\.m?js):(\d+):\d+\)?$/.exec(caller);
+  return m ? `${m[1]}:${m[2]}` : 'unknown';
+}
+
+// a < b for dotted versions (prerelease suffixes ignored).
+export function semverLt(a, b) {
+  const pa = String(a).split(/[.-]/).slice(0, 3).map(Number);
+  const pb = String(b).split(/[.-]/).slice(0, 3).map(Number);
+  for (let i = 0; i < 3; i++) if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) < (pb[i] || 0);
+  return false;
+}
 
 export function canonical(value) {
   // As JSON writes it: an undefined array element is stored as null, so it must hash as null, or the entry no longer
@@ -141,6 +165,9 @@ export function assertPlainGit(dir) {
 export function run(cmd, args, { cwd, env, allowFail = false, input, sensitive = false } = {}) {
   const base = env ?? process.env;
   const result = spawnSync(cmd, args, { cwd, env: cmd === 'git' ? gitEnv(base) : base, encoding: 'utf8', input, maxBuffer: 256 * 1024 * 1024 });
+  // Named failure: a missing working directory made spawn report ENOENT for the command ("git failed to start"), which sent
+  // people looking for git. The folder is the problem; say so.
+  if (result.error?.code === 'ENOENT' && cwd && !fs.existsSync(cwd)) throw new WfError(`worktree missing: ${cwd} (${cmd} was not run there)`);
   if (result.error) throw new WfError(`${cmd} failed to start: ${result.error.message}`);
   if (result.status !== 0 && !allowFail) {
     if (sensitive) throw new WfError(`${cmd} failed (exit ${result.status})`);
@@ -274,17 +301,6 @@ export function parseArgs(argv) {
     } else positional.push(a);
   }
   return { positional, options, repeated: [...repeated] };
-}
-
-export function sessionIdentity(env = process.env) {
-  for (const [name, runtime] of [
-    ['CLAUDE_CODE_SESSION_ID', 'claude'],
-    ['CODEX_THREAD_ID', 'codex'],
-    ['GROK_SESSION_ID', 'grok'],
-  ]) {
-    if (env[name]) return { runtime, session: env[name] };
-  }
-  return null;
 }
 
 export function isPidAlive(pid) {

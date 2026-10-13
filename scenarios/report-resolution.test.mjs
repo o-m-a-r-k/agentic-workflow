@@ -2,10 +2,19 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { closureFile, goodClosure, commitIn, ok, ownerSays, planDoc, sh, singleRepoProject, state, wf } from './helpers.mjs';
+import { closureFile, goodClosure, commitIn, ok, planDoc, sh, singleRepoProject } from './helpers.mjs';
+import { runner } from './strategist-fixtures.mjs';
 
 // Named failure I-42: immutable reports of completed repair rounds and concurrency
 // ownership were mistaken for current, unrecorded defects at the next review.
+//
+// 0.7.0 (D7, old attempts keep their obligations): the engine reads an implementer's transcript for prose about unfixed
+// issues only for attempts admitted before 0.7.0; from 0.7.0 the implementer's structured report does that (the 0.7.0
+// scenarios in discovered.test.mjs). Every attempt here is admitted under an engine stamped 0.6.9.
+const legacy = runner('0.6.9');
+const wf = legacy.run;
+const state = legacy.state;
+
 function project(name) {
   const { base, root } = singleRepoProject(name, { gate: { steps: [] } });
   const entry = ok(wf(root, ['entry', '--item', 'ENG-842', '--owner', 'owner', '--json'])).json();
@@ -100,13 +109,9 @@ test('I-42: an exact historical issue deferred by the owner is reconciled withou
   const p = project('deferred-ledger-report');
   const file = report(p, 'impl-old', 'Follow-up: the total is wrong.');
   const before = fs.readFileSync(file);
-  const owner = state(p.root, p.id).owner;
-  const home = path.join(p.root, '..', '.home');
-  ownerSays(home, owner, 'Continue the repair.');
   ok(wf(p.root, ['discovered', 'add', '--summary', 'the total is wrong', '--found-by', 'impl-old', '--attempt', p.id]));
-  assert.match(wf(p.root, ['discovered', 'close', 'D1', '--deferred', '--attempt', p.id]).err, /no owner message/);
-  ownerSays(home, owner, 'defer ' + p.id + ':D1: complete the total repair in the next ticket');
-  ok(wf(p.root, ['discovered', 'close', 'D1', '--deferred', '--attempt', p.id]));
+  assert.match(wf(p.root, ['discovered', 'close', 'D1', '--deferred', '--attempt', p.id], { ownerSilent: true }).err, /deferring D1 is the owner's decision/);
+  ok(wf(p.root, ['discovered', 'close', 'D1', '--deferred', '--reason', 'complete the total repair in the next ticket', '--attempt', p.id]));
   commitIn(p.wt, { 'src/a.txt': 'other repair\n' });
   ok(review(p));
   assert.deepEqual(fs.readFileSync(file), before);

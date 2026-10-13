@@ -5,8 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { findRoot } from '../engine/config.mjs';
 import { verifyAttempt } from '../engine/evidence.mjs';
-import { assertSchema, loadState } from '../engine/ledger.mjs';
-import { defaultRuntime } from '../engine/runtime-policy.mjs';
+import { assertSchema, listAttempts, loadState } from '../engine/ledger.mjs';
 import { ENGINE_VERSION } from '../engine/util.mjs';
 
 export const WF = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'wf');
@@ -60,32 +59,34 @@ const baseEnv = () => {
   return env;
 };
 
-// Owner-only decisions (engine/owner.mjs) take the owner's authority from the host's record of the owner session. A
-// scenario plays that session: a person's name given to `--owner` (or none, at entry) becomes a synthetic Codex session
-// whose rollout transcript lives under the scenario's WF_HOME, and the owner "says" the decision's phrase there right
-// before the command that needs it, as a person would type it. Codex, so that reviewer rounds stay unverified as they
-// were (no Claude Code transcripts exist for them). Scenarios about the authority rules pass `ownerSilent: true`.
-// `plain:<name>` keeps a person's name as the owner (scenarios about owners with no session).
+// Owner decisions (engine/owner.mjs, engine/approve.mjs). Bookkeeping needs nothing. A reserved decision (lifting a hold,
+// overriding the gate order, deferring a discovered issue, adopting a live owner's attempt, ...) is created by the refused
+// command and confirmed by the person with `wf approve`. A scenario plays that person: a command refused with a pending
+// decision is confirmed (scenarios/approve-as-owner.mjs, the shape `wf approve` accepts) and run once more. Scenarios about
+// the refusal itself pass `ownerSilent: true`. A person's name given to `--owner` (or none, at entry) becomes a synthetic
+// Codex session id, so that role handoffs default to Codex as they always did here; `plain:<name>` keeps the name as is.
 export const ownerSession = (name) => (/^(claude|codex):/.test(String(name)) ? String(name) : /^plain:/.test(String(name)) ? String(name).slice(6) : `codex:owner-${Buffer.from(String(name)).toString('hex').slice(0, 40)}`);
 const homeOf = (cwd, env) => env.WF_HOME ?? path.join(cwd, '..', '.home');
+const APPROVE = path.join(path.dirname(fileURLToPath(import.meta.url)), 'approve-as-owner.mjs');
 
-export function wf(cwd, args, { env = {}, input, home, implementersOpen = false, ownerSilent = false, preserveRuntime = false } = {}) {
+export function wf(cwd, args, { env = {}, input, home, implementersOpen = false, ownerSilent = false, preserveRuntime = false, bin = WF } = {}) {
   args = [...args];
-  // Historical role fixtures model Claude unless a runtime was explicit. State that choice, and let the synthetic
-  // owner authorize it below; production defaults are covered with preserveRuntime by the runtime regressions.
+  // Historical role fixtures model Claude unless a runtime was explicit.
   if (!preserveRuntime && args[0] === 'handoff' && ['planner', 'implementer', 'reviewer', 'tester'].includes(args[1]) && !args.includes('--runtime')) {
     args.push('--runtime', env.CLAUDE_CODE_SESSION_ID ? 'claude' : env.CODEX_THREAD_ID ? 'codex' : 'claude');
   }
   const at = args.indexOf('--owner');
   if (at >= 0 && typeof args[at + 1] === 'string') args[at + 1] = ownerSession(args[at + 1]);
   else if (args[0] === 'entry' && !args.includes('--help')) args.push('--owner', ownerSession('owner'));
-  const opts = { env, home };
+  const opts = { env, home, bin };
   // The owner closes each implementer once it reports done (`wf handoff close`), and `wf handoff reviewer` refuses while
   // one is open (I-23). Scenarios about something else take that step here, before each reviewer handoff; the ones
   // about the refusal itself pass `implementersOpen: true` (or `--reason`) and see the engine as it is.
   if (args[0] === 'handoff' && args[1] === 'reviewer' && !implementersOpen && !args.includes('--reason')) closeOpenImplementers(cwd, args, opts, ownerSilent);
-  if (!ownerSilent) ownerSpeaksFor(cwd, args, opts);
-  const r = spawnSync(process.execPath, [WF, ...args], { cwd, encoding: 'utf8', input, maxBuffer: 512 * 1024 * 1024, env: { ...baseEnv(), WF_CONFIG_HOME: home ?? path.join(cwd, '..', '.wfhome'), WF_HOME: path.join(cwd, '..', '.home'), WF_IMPROVEMENTS_DIR: path.join(cwd, '..', '.improvements'), ...env } });
+  const run = () => spawnSync(process.execPath, [bin, ...args], { cwd, encoding: 'utf8', input, maxBuffer: 512 * 1024 * 1024, env: { ...baseEnv(), WF_CONFIG_HOME: home ?? path.join(cwd, '..', '.wfhome'), WF_HOME: path.join(cwd, '..', '.home'), WF_IMPROVEMENTS_DIR: path.join(cwd, '..', '.improvements'), ...env } });
+  if (!ownerSilent) scriptedReport(cwd, args);
+  let r = run();
+  if (!ownerSilent && r.status === 75 && approvePending(cwd, args, r.stderr, opts)) r = run();
   return { code: r.status, out: r.stdout, err: r.stderr, json: () => JSON.parse(r.stdout) };
 }
 
@@ -94,42 +95,74 @@ const optionOf = (args, k) => {
   return i >= 0 && typeof args[i + 1] === 'string' && !args[i + 1].startsWith('--') ? args[i + 1] : null;
 };
 
-// The phrases the owner says before an owner-only command (engine/owner.mjs), for the attempt the command names.
-function ownerSpeaksFor(cwd, args, opts) {
-  const [cmd, sub] = args;
-  const lines = (id) => {
-    const out = [];
-    if (cmd === 'handoff' && ['planner', 'implementer', 'reviewer', 'tester'].includes(sub) && optionOf(args, '--runtime')) out.push(`runtime ${id}:${optionOf(args, '--runtime')}`);
-    if (cmd === 'gate' && args.includes('--reason')) out.push(`override ${id}:gate`);
-    if (cmd === 'handoff' && sub === 'reviewer' && args.includes('--reason')) out.push(`override ${id}:review`);
-    if (cmd === 'handoff' && sub === 'close' && optionOf(args, '--agent')) out.push(`close ${id}:${optionOf(args, '--agent')}`);
-    if (cmd === 'deliver' && optionOf(args, '--acknowledge-adapter-state')) for (const l of optionOf(args, '--acknowledge-adapter-state').split(',')) out.push(`acknowledge ${id}:${l.trim()}`);
-    if (cmd === 'deliver' && optionOf(args, '--repin-adapter')) out.push(`repin ${id}:${optionOf(args, '--repin-adapter').slice(0, 12)}`);
-    if (cmd === 'abandon' && optionOf(args, '--acknowledge-integration')) for (const l of optionOf(args, '--acknowledge-integration').split(',')) out.push(`abandon ${id}:${l.trim()}`);
-    if (cmd === 'release') out.push(`release ${id}`);
-    if (cmd === 'models' && sub === 'refresh') out.push('models ' + id);
-    if (cmd === 'adopt') out.push(`adopt ${id}`);
-    if (cmd === 'deliver' && optionOf(args, '--acknowledge-deferrals')) for (const k of optionOf(args, '--acknowledge-deferrals').split(',')) out.push(`acknowledge-deferral ${id}:${k.trim()}`);
-    if (['deliver', 'reopen'].includes(cmd) && optionOf(args, '--no-lesson')) out.push(`waive-lesson ${id}`);
-    if (cmd === 'shown') out.push(`shown ${id}`);
-    return out;
-  };
-  if (!lines('x').length) return;
-  // `wf reopen` names an item: the waiver is the owner's word on its last delivered attempt.
-  const item = cmd === 'reopen' ? optionOf(args, '--item') : null;
-  const last = item ? fs.readdirSync(path.join(cwd, '.wf-evidence', 'attempts')).filter((d) => d.startsWith(`${item}.`)).sort((x, y) => Number(x.slice(item.length + 1)) - Number(y.slice(item.length + 1))).at(-1) : null;
-  const s = attemptOf(cwd, last ? ['--attempt', last] : args, opts);
-  if (!s) return;
-  const owner = cmd === 'adopt' ? optionOf(args, '--owner') : s.owner;
-  for (const l of lines(s.id)) {
-    if (l.startsWith('runtime ') && (!defaultRuntime(s) || optionOf(args, '--runtime') === defaultRuntime(s))) continue;
-    ownerSays(homeOf(cwd, opts.env), owner, l);
+// 0.7.0: an implementer closed as done has written its report (`implementerReportFile` in its bundle); the scenarios'
+// implementers are scripted, so the scripted owner writes a minimal one for them unless a scenario wrote its own (or
+// passes ownerSilent).
+export function reportFileOf(root, id, agent) {
+  const h = loadState(root, id).handoffs.filter((x) => x.role === 'implementer' && x.agent === agent).at(-1);
+  if (!h?.reportFile) throw new Error(`${id} handed ${agent} no report file`);
+  return h.reportFile;
+}
+
+// The report an implementer writes: the fields it must carry, with `extra` (summary, approach, ran, proofs, left) over them.
+export function writeReport(root, id, agent, extra = {}) {
+  const file = reportFileOf(root, id, agent);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({ implementer: agent, summary: 'scenario implementer: the work item is built and committed', ran: [], proofs: [], left: [], ...extra }));
+  return file;
+}
+
+function scriptedReport(cwd, args) {
+  if (args[0] !== 'handoff' || args[1] !== 'close') return;
+  const i = args.indexOf('--agent');
+  const o = args.indexOf('--outcome');
+  if (i < 0 || (o >= 0 && args[o + 1] !== 'done')) return;
+  let root;
+  try {
+    root = findRoot(cwd);
+  } catch {
+    return;
+  }
+  const agent = args[i + 1];
+  const a = args.indexOf('--attempt');
+  for (const id of a >= 0 ? [args[a + 1]] : listAttempts(root)) {
+    let s;
+    try {
+      s = loadState(root, id);
+    } catch {
+      continue;
+    }
+    const h = s.handoffs.filter((x) => x.role === 'implementer' && x.agent === agent).at(-1);
+    if (!h?.reportFile || fs.existsSync(h.reportFile)) continue;
+    writeReport(root, id, agent);
   }
 }
 
-// For a `wf` process a scenario spawns itself: the owner says what the command needs first (see `wf` above). Its env
-// must carry the scenario's WF_HOME (`spawnHome`).
-export const ownerSpeaks = (cwd, args) => ownerSpeaksFor(cwd, args, { env: {} });
+// The person confirms the decision a refusal named (`wf approve A1 --attempt X`, choices a | b): `--choice` when the
+// command carries one the decision offers, else yes.
+function approvePending(cwd, args, stderr, opts) {
+  const m = /`wf approve (A\d+) --attempt (\S+)` in their own terminal \(choices: ([^)]*)\)/.exec(stderr);
+  if (!m) return false;
+  const choices = m[3].split(' | ');
+  const want = optionOf(args, '--choice');
+  const choice = want && choices.includes(want) ? want : choices.includes('yes') ? 'yes' : choices[0];
+  approveAsOwner(cwd, m[2], m[1], choice, opts);
+  return true;
+}
+
+// The scripted person types the choice for decision `id` of `attempt` (`wf approve` at a terminal).
+export function approveAsOwner(cwd, attempt, id, choice, { env = {}, home } = {}) {
+  const r = spawnSync(process.execPath, [APPROVE, findRoot(cwd), attempt, id, choice], { cwd, encoding: 'utf8', env: { ...baseEnv(), WF_CONFIG_HOME: home ?? path.join(cwd, '..', '.wfhome'), WF_HOME: homeOf(cwd, env), WF_IMPROVEMENTS_DIR: path.join(cwd, '..', '.improvements'), ...env } });
+  if (r.status !== 0) throw new Error(`the scenario owner could not confirm ${id} on ${attempt}: ${r.stderr || r.stdout}`);
+}
+
+// For a `wf` process a scenario spawns itself (a gate it watches or stops): run the command once so that it is refused
+// with its pending decision, and confirm that decision; the scenario then spawns the same command. Its env must carry the
+// scenario's WF_HOME (`spawnHome`).
+export function ownerSpeaks(cwd, args) {
+  const r = spawnSync(process.execPath, [WF, ...args], { cwd, encoding: 'utf8', env: { ...baseEnv(), WF_CONFIG_HOME: path.join(cwd, '..', '.wfhome'), WF_HOME: path.join(cwd, '..', '.home'), WF_IMPROVEMENTS_DIR: path.join(cwd, '..', '.improvements') } });
+  if (r.status === 75) approvePending(cwd, args, r.stderr, { env: {} });
+}
 export const spawnHome = (cwd) => ({ WF_HOME: path.join(cwd, '..', '.home') });
 
 // What the scripted owner knows of the attempt a command names: its id, owner and implementers. Named cost: each lookup
@@ -176,8 +209,9 @@ function ledgerState(cwd, id) {
   return verifyAttempt(root, id).length ? null : s;
 }
 
-// A genuine owner turn in a synthetic owner session's transcript (Codex rollout, or Claude Code when the scenario made
-// the owner a Claude session itself).
+// A line in a synthetic owner session's transcript (Codex rollout, or Claude Code when the scenario made the owner a
+// Claude session itself). Writing it also makes the session "alive" for `wf adopt` (engine/owner.mjs: a transcript
+// written in the last 30 minutes).
 export function ownerSays(homeDir, owner, text) {
   const m = /^(claude|codex):(.+)$/.exec(String(owner ?? ''));
   if (!m) return;
@@ -259,9 +293,12 @@ export function stages(criteria = [{ id: 'C1' }], work = null, n = 'fixture') {
 }
 
 // A plan file in stage order: survey, the design, impact.
+// 0.7.0: a plan states its own prediction (D9); scenarios that are not about it carry a neutral one.
+export const FIXTURE_EXPECT = { files: 2, rounds: 2, minutes: 60 };
 export function planDoc(design, { criteria = design.criteria, work = design.work } = {}) {
   const { survey, impact } = stages(criteria, work);
-  return { survey, ...design, impact };
+  const stated = design.expect !== undefined || (design.plan && typeof design.plan === 'object' && design.plan.expect !== undefined);
+  return { survey, ...(stated ? {} : { expect: FIXTURE_EXPECT }), ...design, impact };
 }
 
 export const criteriaFile = (dir, criteria = [{ id: 'C1', text: 'a changes', uat: 'a shows the new text' }]) => {

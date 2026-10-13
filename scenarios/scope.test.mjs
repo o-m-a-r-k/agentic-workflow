@@ -25,7 +25,12 @@ function project(name, change, p = plan) {
 
 const change = { 'src/a.txt': 'b\n', 'test/a.test.js': 't\n', 'src/audit.txt': 'x\n', '.gitignore': '.wf-evidence/\n.wf-worktrees/\ne2e-out/\n', 'docs/notes.md': 'n\n', 'gen/client.ts': 'g\n' };
 
-test('outside the plan: the owner is warned before the review; accept needs a verdict per file; docs-only and ignored files are not listed', () => {
+const criteria = [{ id: 'C1', evidence: { kind: 'output', ref: 'gate log line 1' } }, { id: 'C2', evidence: { kind: 'test', ref: 'test/a.test.js audit' } }];
+
+// 0.7.0 (goals, not forms): the files outside the plan are told to the owner before the review and listed in the reviewer's
+// bundle as context, but the reviewer owes no verdict per file (named failure: the form measured compliance with the form,
+// not defects; a change no criterion covers is a finding when the reviewer sees it hurt, or the owner amends the criteria).
+test('outside the plan: the owner is warned before the review and the bundle lists the files; acceptance asks for no verdict per file; docs-only and ignored files are not listed', () => {
   const { base, root, id } = project('scope-verdicts', change);
   const warn = /warning: 2 changed file\(s\) outside the plan: app:\.gitignore, app:src\/audit\.txt — amend the criteria/;
   assert.match(ok(wf(root, ['status'])).out, warn);
@@ -39,26 +44,20 @@ test('outside the plan: the owner is warned before the review; accept needs a ve
   const bundle = JSON.parse(fs.readFileSync(state(root, id).handoffs.at(-1).bundle, 'utf8'));
   assert.deepEqual(bundle.outsidePlan, ['app:.gitignore', 'app:src/audit.txt'], 'docsOnly and ignored (generated) files are not scope');
 
-  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r')), '--attempt', id]));
-  const none = wf(root, ['accept', '--attempt', id]);
-  assert.equal(none.code, 75);
-  assert.match(none.err, /2 changed file\(s\) outside the plan without a valid verdict/);
-  assert.match(none.err, /app:\.gitignore: no verdict/);
-  assert.match(none.err, /app:src\/audit\.txt: no verdict/);
-  assert.match(none.err, /wf criteria amend/);
+  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r', { criteria })), '--attempt', id]));
+  ok(wf(root, ['accept', '--attempt', id]));
+  assert.equal(state(root, id).accepted.outsidePlan, undefined, 'no verdict was given, so none is recorded');
+  assert.doesNotMatch(ok(wf(root, ['status', '--attempt', id])).out, /outside the plan/, 'no warning once accepted');
+});
 
-  // `covered` must name a real criterion; anything else is a finding.
-  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r', { outsidePlan: [{ file: 'app:src/audit.txt', verdict: 'covered', by: 'C9', evidence: 'audit' }, { file: 'app:.gitignore', verdict: 'finding', by: 'F1', evidence: 'unplanned' }] })), '--attempt', id]));
-  const bad = wf(root, ['accept', '--attempt', id]).err;
-  assert.match(bad, /app:src\/audit\.txt: covered by `C9`, which is not a criterion/);
-  assert.match(bad, /app:\.gitignore: a finding verdict names a finding id/);
-
+test('outside the plan: the verdicts a reviewer gives are recorded with the acceptance and shown in the export', () => {
+  const { base, root, id } = project('scope-given', change);
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', id]));
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', id]));
   const findings = [{ id: 'F1', severity: 'minor', summary: 'e2e output ignored without a criterion', status: 'fixed', evidence: '.gitignore:3' }];
-  const criteria = [{ id: 'C1', evidence: { kind: 'output', ref: 'gate log line 1' } }, { id: 'C2', evidence: { kind: 'test', ref: 'test/a.test.js audit' } }];
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r', { findings, criteria, outsidePlan: [{ file: 'app:src/audit.txt', verdict: 'covered', by: 'C2', evidence: 'C2 logs the audit read' }, { file: '.gitignore', verdict: 'finding', by: 'F1', evidence: '.gitignore:3' }] })), '--attempt', id]));
   ok(wf(root, ['accept', '--attempt', id]));
   assert.deepEqual(state(root, id).accepted.outsidePlan.map((v) => [v.file, v.verdict, v.by]), [['app:.gitignore', 'finding', 'F1'], ['app:src/audit.txt', 'covered', 'C2']]);
-  assert.doesNotMatch(ok(wf(root, ['status', '--attempt', id])).out, /outside the plan/, 'no warning once accepted');
   ok(wf(root, ['export', '--attempt', id]));
   const html = fs.readFileSync(path.join(root, '.wf-evidence', 'attempts', id, 'export', 'attempt.html'), 'utf8');
   assert.match(html, /<h2>Outside the plan<\/h2>/);

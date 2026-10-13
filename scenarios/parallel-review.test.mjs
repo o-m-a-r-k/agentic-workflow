@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { changedInventory, divideReview, impactCatalog, isCurrentReviewer, validateDivision } from '../engine/review-groups.mjs';
 import { transactionSeams, withEvidenceTransaction } from '../engine/evidence.mjs';
-import { closureFile, commitIn, criteriaFile, goodClosure, impactCheckedFrom, ok, sh, singleRepoProject, state, wf, WF, write } from './helpers.mjs';
+import { closureFile, commitIn, criteriaFile, FIXTURE_EXPECT, goodClosure, impactCheckedFrom, ok, sh, singleRepoProject, state, wf, WF, write } from './helpers.mjs';
 
 function flowInput() {
   const files = { 'shared.ts': 'alpha beta\n', 'unmapped.ts': 'common\n' };
@@ -109,10 +109,10 @@ test('parallel division estimates cost lazily once and preserves expensive-flow 
 
 function ready({ reviewOptions = [], handoffReviewer = true, runtime = null } = {}) {
   const { files } = flowInput();
-  const p = singleRepoProject('parallel-review', { classes: { review: { codex: { model: 'future-model', effort: 'high' } } }, gate: { steps: [] } }, files);
+  const p = singleRepoProject('parallel-review', { strategy: { enabled: false }, classes: { review: { codex: { model: 'future-model', effort: 'high' } } }, gate: { steps: [] } }, files);
   const e = ok(wf(p.root, ['entry', '--lane', 'quick', '--json'])).json();
   const queries = ['alpha', 'beta'].map(id => ({ id, pattern: id, kind: 'literal', paths: ['alpha/**', 'beta/**', 'shared.ts'], hits: 25 }));
-  const doc = { survey: { queries, patterns: [{ id: 'P', query: 'alpha', hits: 25 }] },
+  const doc = { survey: { queries, patterns: [{ id: 'P', query: 'alpha', hits: 25 }] }, expect: FIXTURE_EXPECT,
     criteria: [{ id: 'C1', text: 'flows remain coherent' }], plan: { anchors: ['src/a.txt'], tests: { run: ['flow-test'] } }, impact: { changes: queries.map(q => ({ id: q.id, element: q.id, kind: 'symbol', cites: ['C1'], covers: ['P'],
       consumers: { query: q.id, hits: 25 }, flows: [{ flow: `use ${q.id}`, failure: 'retry', query: q.id, hits: 25 }], contracts: [], suites: [{ suite: 'flow-test', query: q.id, hits: 25 }] })) } };
   const planFile = closureFile(p.base, doc);
@@ -165,37 +165,36 @@ test('review selection refuses conflicting flags and invalid values before handi
 });
 
 const evidenceRows = files => files.map(file => ({ file, evidence: `${file}:1 behavior and failure path inspected` }));
+// 0.7.0 (goals, not forms): a scoped part and the integration closure carry no outsidePlan, designHits or rules verdicts; the
+// bundles still list those as context (the native scenarios below still give them, and they are recorded).
 function partClosure(p, member, findings = []) {
   const b = JSON.parse(fs.readFileSync(member.bundle));
-  return { reviewer: member.agent, findings, criteria: [], filesReviewed: evidenceRows(b.primaryFiles),
-    outsidePlan: (b.outsidePlan ?? []).map(file => ({ file, verdict: 'covered', by: 'C1', evidence: `${file}:1 flow requirement` })), designHits: [], rules: [] };
+  return { reviewer: member.agent, findings, criteria: [], filesReviewed: evidenceRows(b.primaryFiles) };
 }
 function integrationClosure(p) {
   const b = JSON.parse(fs.readFileSync(p.h.bundle)), reports = ok(wf(p.root, ['review', 'parts', '--attempt', p.id, '--json'])).json();
   return goodClosure(p.h.agent, { filesReviewed: evidenceRows(b.primaryFiles),
     interfacesReviewed: b.division.integration.interfaces.map(i => ({ id: i.id, evidence: i.files.join('; ') + ':1 checked producer/consumer behavior' })),
     partReviews: reports.map(r => ({ agent: r.agent, sha256: r.sha256, evidence: 'source/test boundaries independently verified' })),
-    outsidePlan: (b.outsidePlan ?? []).filter(f => b.primaryFiles.includes(f)).map(file => ({ file, verdict: 'covered', by: 'C1', evidence: `${file}:1` })),
-    impactChecked: impactCheckedFrom(b), designHits: [], rules: [] });
+    impactChecked: impactCheckedFrom(b) });
 }
 
-test('parallel parts never complete review; missing evidence/reports/interfaces refuse and the combined round unlocks one gate', () => {
+// 0.7.0 (goals, not forms; final review): a part needs no per-file coverage list and the integration closure no
+// per-interface list or per-part hash citations. What holds: parts are immutable, nothing completes or gates until the
+// integration closure is recorded after every part, and the integration owns the criteria evidence.
+test('parallel parts never complete review; no coverage form is owed, and the combined round unlocks one gate', () => {
   const p = ready();
   const [first, second] = p.h.members;
-  const closure = partClosure(p, first), incomplete = { ...closure, filesReviewed: closure.filesReviewed.slice(1) };
-  assert.match(wf(p.root, ['review', '--closure', closureFile(p.base, incomplete), '--attempt', p.id]).err, /missing direct/);
-  ok(wf(p.root, ['review', '--closure', closureFile(p.base, closure), '--attempt', p.id]));
+  const bare = { reviewer: first.agent, findings: [], criteria: [] };
+  ok(wf(p.root, ['review', '--closure', closureFile(p.base, bare), '--attempt', p.id]));
   assert.equal(state(p.root, p.id).review, null);
   assert.equal(wf(p.root, ['gate', '--attempt', p.id]).code, 75);
   assert.equal(wf(p.root, ['review', 'parts', '--attempt', p.id]).code, 75);
-  assert.equal(wf(p.root, ['review', '--closure', closureFile(p.base, closure), '--attempt', p.id]).code, 75, 'parts cannot be rewritten');
+  assert.equal(wf(p.root, ['review', '--closure', closureFile(p.base, bare), '--attempt', p.id]).code, 75, 'parts cannot be rewritten');
   ok(wf(p.root, ['review', '--closure', closureFile(p.base, partClosure(p, second)), '--attempt', p.id]));
-  const integrated = integrationClosure(p);
-  assert.match(wf(p.root, ['review', '--closure', closureFile(p.base, { ...integrated, interfacesReviewed: [] }), '--attempt', p.id]).err, /every crossing interface/);
-  const badHash = structuredClone(integrated); badHash.partReviews[0].sha256 = 'bad';
-  assert.match(wf(p.root, ['review', '--closure', closureFile(p.base, badHash), '--attempt', p.id]).err, /exact recorded closure hash/);
+  const { interfacesReviewed: _interfaces, partReviews: _parts, ...integrated } = integrationClosure(p);
   ok(wf(p.root, ['review', '--closure', closureFile(p.base, integrated), '--attempt', p.id]));
-  assert.equal(state(p.root, p.id).review.closure.filesReviewed.length, 50);
+  assert.ok(Array.isArray(state(p.root, p.id).review.closure.filesReviewed), 'coverage given as context is kept');
   ok(wf(p.root, ['gate', '--attempt', p.id]));
   assert.equal(wf(p.root, ['accept', '--attempt', p.id]).code, 75, 'a fresh evidence review is still required');
   p.h = ok(wf(p.root, ['handoff', 'reviewer', '--agent', 'evidence', '--attempt', p.id, '--json'])).json();
@@ -209,7 +208,7 @@ test('parallel parts never complete review; missing evidence/reports/interfaces 
 test('integration cannot omit a scoped finding; stale trees invalidate all scoped reports', () => {
   const p = ready();
   for (const [index, member] of p.h.members.slice(0, 2).entries()) {
-    const findings = index ? [] : [{ id: 'F1', severity: 'major', summary: 'failure path loses data', status: 'open', evidence: 'alpha/0.ts:1' }];
+    const findings = index ? [] : [{ id: 'F1', severity: 'major', summary: 'failure path loses data', status: 'open', evidence: 'alpha/0.ts:1', invariant: 'no data is lost on a failure path' }];
     ok(wf(p.root, ['review', '--closure', closureFile(p.base, partClosure(p, member, findings)), '--attempt', p.id]));
   }
   const integrated = integrationClosure(p);
@@ -220,12 +219,20 @@ test('integration cannot omit a scoped finding; stale trees invalidate all scope
   assert.match(wf(p.root, ['review', '--closure', closureFile(p.base, integrated), '--attempt', p.id]).err, /worktree changed/);
 });
 
-test('scoped reviewers cannot submit another assignment verdict or duplicate finding IDs', () => {
+// Named failure (0.7.0): a scoped part was refused for a missing or foreign `outsidePlan`/`designHits`/`rules` verdict, and
+// (final review) for criteria the integration reviewer owns: forms that measured compliance, not defects. A part is its
+// findings, with IDs unique enough to merge; criteria or prior-finding verdicts in it are ignored, not refused.
+test('scoped reviewers record their findings; global criteria in a part are ignored; duplicate finding IDs are refused; no verdict form is owed', () => {
   const p = ready(), member = p.h.members[0], closure = partClosure(p, member);
-  const other = partClosure(p, p.h.members[1]).outsidePlan[0];
-  assert.match(wf(p.root, ['review', '--closure', closureFile(p.base, { ...closure, outsidePlan: [...closure.outsidePlan, other] }), '--attempt', p.id]).err, /another assignment/);
   const finding = { id: 'F1', evidence: 'alpha/0.ts:1', status: 'open' };
   assert.match(wf(p.root, ['review', '--closure', closureFile(p.base, { ...closure, findings: [finding, finding] }), '--attempt', p.id]).err, /unique non-empty IDs/);
+  // The bundle still lists the member's files outside the plan; a part that judges none of them is recorded.
+  assert.ok(JSON.parse(fs.readFileSync(member.bundle)).outsidePlan.length > 0, 'the member has files outside the plan to judge');
+  const global = [{ id: 'C1', evidence: { kind: 'output', ref: 'gate log' } }];
+  ok(wf(p.root, ['review', '--closure', closureFile(p.base, { ...closure, criteria: global }), '--attempt', p.id]));
+  const parts = state(p.root, p.id).reviewParts;
+  assert.equal(parts.length, 1, 'the part was recorded');
+  assert.deepEqual(parts[0].closure.criteria, [], 'the integration reviewer owns the criteria');
 });
 
 test('evidence transaction rejects unsafe identities and control-path aliases before creating anything', () => {
@@ -263,7 +270,7 @@ test('group launch eligibility rejects partial, superseded and mismatched groups
   assert.equal(isCurrentReviewer({ handoffs: mixed }, mixed[0]), false);
 });
 
-for (const launch of ['handoff', 'advance', 'single']) test(`native ${launch} selects automatic scopes or the single override and verifies every transcript`, () => {
+for (const launch of ['handoff', 'advance', 'single']) test(`native ${launch} selects automatic scopes or the single override and records every engine launch`, () => {
   const p = ready({ handoffReviewer: false, runtime: 'codex' }), bin = path.join(p.base, 'bin'), host = path.join(p.base, '.home');
   ok(wf(p.root, ['handoff', 'close', '--agent', 'impl', '--attempt', p.id]));
   const script = `#!/usr/bin/env node
@@ -306,8 +313,8 @@ console.log(JSON.stringify({type:'turn.completed'}));
     assert.ok(Math.max(traces[0].start, traces[1].start) < Math.min(traces[0].end, traces[1].end), 'scoped runtime lifetimes must overlap');
     assert.ok(traces[2].start >= Math.max(traces[0].end, traces[1].end), 'integration follows completed scoped reports');
   }
-  assert.equal(s.review.provenance, 'verified');
-  assert.equal(s.reviewParts.length, launch === 'single' ? 0 : 2); assert.ok(s.reviewParts.every(part => part.provenance === 'verified'));
+  assert.equal(s.review.provenance, 'engine-launched');
+  assert.equal(s.reviewParts.length, launch === 'single' ? 0 : 2); assert.ok(s.reviewParts.every(part => part.provenance === 'engine-launched' && part.session));
   assert.equal(s.gates.length, 0); assert.equal(s.next.includes('gate'), true);
   ok(wf(p.root, ['verify', '--attempt', p.id]));
 });

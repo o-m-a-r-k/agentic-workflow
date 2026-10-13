@@ -5,8 +5,6 @@ import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { closureFile, commitIn, criteriaFile, goodClosure, ok, planDoc, sh, singleRepoProject, state, wf, write, yaml, WF } from './helpers.mjs';
 import { verifyAgent } from '../engine/provenance.mjs';
-import { codexEntries } from '../engine/codex-agent.mjs';
-import { unreadDocs } from '../engine/rules.mjs';
 import { ENGINE_VERSION } from '../engine/util.mjs';
 import { readLedger } from '../engine/ledger.mjs';
 
@@ -94,7 +92,7 @@ test('native role progress goes to stderr while JSON remains one terminal result
   assert.equal(result.json().status, 'completed');
   assert.equal(result.json().session, SID);
   assert.doesNotMatch(result.out, /process running|configured/);
-  assert.deepEqual(readLedger(root, id).filter((e) => e.type.startsWith('agent.launch.')).map((e) => e.type), ['agent.launch.requested', 'agent.launch.started', 'agent.launch.finished']);
+  assert.deepEqual(readLedger(root, id).filter((e) => e.type.startsWith('agent.launch.')).map((e) => e.type), ['agent.launch.requested', 'agent.launch.spawned', 'agent.launch.started', 'agent.launch.finished']);
 });
 
 // Named failure: native reviewer commentary was discarded, leaving only liveness while real review progressed.
@@ -105,7 +103,7 @@ test('native role relays agent-reported progress without leaking reasoning or ch
   assert.doesNotMatch(result.err, /private reasoning|private tool output/);
   assert.equal(result.json().status, 'completed');
   assert.doesNotMatch(result.out, /Inspecting invoice permissions/);
-  assert.deepEqual(readLedger(root, id).filter((e) => e.type.startsWith('agent.launch.')).map((e) => e.type), ['agent.launch.requested', 'agent.launch.started', 'agent.launch.finished']);
+  assert.deepEqual(readLedger(root, id).filter((e) => e.type.startsWith('agent.launch.')).map((e) => e.type), ['agent.launch.requested', 'agent.launch.spawned', 'agent.launch.started', 'agent.launch.finished']);
 });
 
 test('runtime errors and a zero-exit process without completion remain failed launches', () => {
@@ -175,7 +173,7 @@ test('engine-launched Codex provenance refuses a steered prompt and a failed pla
   }
 });
 
-test('engine-launched Codex reviewer has verified provenance while the existing tree binding still refuses writes', () => {
+test('an engine-launched Codex reviewer is recorded as launched by the engine while the existing tree binding still refuses writes', () => {
   const { base, root, id, env } = prepared();
   ok(wf(root, ['handoff', 'run', '--agent', 'p', '--attempt', id], { env }));
   ok(wf(root, ['plan', '--from-agent', 'p', '--attempt', id], { env }));
@@ -187,7 +185,7 @@ test('engine-launched Codex reviewer has verified provenance while the existing 
   ok(wf(root, ['handoff', 'run', '--agent', 'r', '--attempt', id], { env }));
   assert.match(ok(wf(root, ['resume', '--attempt', id])).out, /completed; record its closure/);
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r')), '--attempt', id], { env }));
-  assert.equal(state(root, id).reviews.at(-1).provenance, 'verified');
+  assert.equal(state(root, id).reviews.at(-1).provenance, 'engine-launched');
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'r2', '--runtime', 'codex', '--attempt', id]));
   ok(wf(root, ['handoff', 'run', '--agent', 'r2', '--attempt', id], { env }));
   fs.writeFileSync(path.join(state(root, id).repos.app.worktree, 'src/a.txt'), 'changed during review');
@@ -209,7 +207,7 @@ test('I-75: native Codex writes and records its own closure without a Claude Wri
   const bundle = JSON.parse(fs.readFileSync(h.bundle, 'utf8'));
   assert.equal(JSON.parse(fs.readFileSync(bundle.reviewClosureFile, 'utf8')).reviewer, 'r');
   ok(wf(root, ['review', '--closure', bundle.reviewClosureFile, '--attempt', id], { env }));
-  assert.equal(state(root, id).reviews.at(-1).provenance, 'verified');
+  assert.equal(state(root, id).reviews.at(-1).provenance, 'engine-launched');
   assert.equal(sh(tree, 'git rev-parse HEAD'), before);
   assert.equal(sh(tree, 'git status --porcelain'), '');
 });
@@ -245,32 +243,18 @@ test('I-60: reviewer command safety reaches generated roles and native launch; c
   const launched = JSON.parse(fs.readFileSync(path.join(base, 'spawn.json'), 'utf8'));
   const body = JSON.parse(launched.args.find((a) => a.startsWith('developer_instructions=')).slice('developer_instructions='.length));
   const receipt = JSON.parse(fs.readFileSync(state(root, id).handoffs.at(-1).launch.file, 'utf8'));
-  const guidance = /Before running a repository validation command, inspect its actual package script and relevant wrappers or lifecycle hooks/;
-  assert.ok(guidance.test(body), 'native bootstrap must teach package-script and wrapper inspection');
-  assert.match(body, /appended .*--check.* does not cancel embedded write, fix, update or generation options/);
-  assert.match(body, /Prefer the repository's explicit check-only command/);
-  assert.match(body, /Reuse supplied gate evidence when sufficient/);
-  assert.match(body, /Never repair or restore files yourself/);
+  // The reviewer's guardrail (0.7.0 role text): it verifies and never fixes, and checks that a repository command does not
+  // write before running it, because an appended `--check` does not cancel an embedded write (the alias modelled above).
+  const guidance = /Before running a repository command, check it does not write \(a `--check` flag does not cancel an embedded fix or update\)/;
+  assert.ok(guidance.test(body), 'native bootstrap must teach the write check of a repository command');
+  assert.match(body, /Verify, do not fix/);
+  assert.match(body, /Write only to the path in `reviewClosureFile`[^;]*; any other write changes the tree under review and `wf review` refuses it/);
   assert.equal(receipt.developerInstructions, body);
   for (const file of ['.claude/agents/wf-reviewer.md', '.codex/agents/wf-reviewer.toml']) {
-    assert.ok(guidance.test(fs.readFileSync(path.join(root, file), 'utf8')), file + ' must teach validation-command safety');
+    const text = fs.readFileSync(path.join(root, file), 'utf8');
+    assert.ok(guidance.test(text), file + ' must teach the write check of a repository command');
+    assert.match(text, /Verify, do not fix/, file);
   }
-});
-
-test('Codex reviewer document checks use completed successful host commands and refuse absent or failed reads', () => {
-  const { base } = singleRepoProject('codex-reads');
-  const file = path.join(base, 'reads.jsonl'), doc = path.join(base, 'rule.md');
-  const rules = [{ id: 'R1', read: [doc] }];
-  const item = { type: 'CommandExecution', id: 'exec-read', command: ['/bin/zsh', '-lc', 'cat ' + doc], status: 'completed', exit_code: 0 };
-  const raw = (item) => JSON.stringify({ type: 'event_msg', payload: { type: 'item_completed', item } }) + '\n';
-  for (const variant of [{ ...item, exit_code: 1 }, { ...item, status: 'failed' }, { ...item, type: 'AgentMessage' }]) {
-    fs.writeFileSync(file, raw(variant));
-    assert.equal(unreadDocs(codexEntries(file).entries, rules, []).length, 1);
-  }
-  fs.writeFileSync(file, raw(item));
-  assert.deepEqual(unreadDocs(codexEntries(file).entries, rules, []), []);
-  fs.writeFileSync(file, raw({ ...item, command: ['/bin/zsh', '-lc', 'wf evidence show ' + doc + ' --attempt ENG-80.1'] }));
-  assert.deepEqual(unreadDocs(codexEntries(file).entries, rules, []), [], 'the permitted wf reader counts too');
 });
 
 test('I-44: resume reports failed native reviewer launches without claiming a reviewer is running', () => {
@@ -310,4 +294,50 @@ test('I-47: host initialization permission failures name approved recovery, pres
   assert.equal(h.session, null);
   assert.ok(h.launch.file);
   assert.equal(wf(root, ['handoff', 'run', '--agent', 'p', '--attempt', id], { env }).code, 75);
+});
+
+// 0.7.0, named failure (final review): a hung role run in the foreground blocked the owner with no way back. The launcher
+// returns once the role passes the estimate it stated itself, leaving it running; the owner follows it again (`wf handoff
+// wait`, with its own new expectation) or ends it (`wf handoff stop`) and hands a fresh one. No number is the engine's.
+test('a launched role past its own estimate hands control back while it keeps running; wait follows it again and stop ends it', { timeout: 30_000 }, async () => {
+  const { base, root, id, env } = prepared('held');
+  ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', id], { env }));
+  const handed = ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--runtime', 'codex', '--attempt', id, '--json'], { env })).json();
+  const h = state(root, id).handoffs.at(-1);
+  fs.mkdirSync(path.dirname(h.reportFile), { recursive: true });
+  fs.writeFileSync(h.reportFile, JSON.stringify({ implementer: 'i', approach: 'edit a', expect: { minutes: 0.02 } }));
+  const run = wf(root, ['handoff', 'run', '--agent', 'i', '--attempt', id, '--json'], { env });
+  assert.equal(run.code, 0, run.err);
+  assert.equal(run.json().status, 'running');
+  assert.match(run.err, /is still running \(pid \d+, \d+ min since launch, past its own estimate of 0\.02 min\)/);
+  assert.match(run.err, /wf handoff wait --agent i/);
+  const launch = state(root, id).handoffs.at(-1).launch;
+  assert.equal(launch.status, 'running');
+  assert.ok(launch.pid > 0);
+  assert.doesNotThrow(() => process.kill(launch.pid, 0), 'the role is still running');
+  const waited = wf(root, ['handoff', 'wait', '--agent', 'i', '--minutes', '0.03', '--attempt', id, '--json'], { env });
+  assert.equal(waited.json().status, 'running');
+  assert.match(waited.err, /the 0\.03 min you chose to wait/);
+  ok(wf(root, ['handoff', 'stop', '--agent', 'i', '--reason', 'silent past its estimate', '--attempt', id], { env }));
+  const after = state(root, id).handoffs.at(-1).launch;
+  assert.deepEqual([after.status, after.failure.kind], ['failed', 'stopped']);
+  for (let n = 0; n < 40; n++) {
+    try { process.kill(launch.pid, 0); } catch { break; }
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  assert.throws(() => process.kill(launch.pid, 0), 'the role process group ended');
+  assert.equal(wf(root, ['handoff', 'wait', '--agent', 'i', '--attempt', id, '--json'], { env }).json().status, 'failed');
+  void handed;
+});
+
+// Second final review of 0.7.0 (O9): a role that states no estimate (a planner, a strategist) still trapped the owner. The
+// owner's own expectation (`--minutes`) is the return point for such a role; the engine picks no number.
+test('a launched role that states no estimate returns at the owner\'s own expectation and keeps running', { timeout: 30_000 }, async () => {
+  const { root, id, env } = prepared('held');
+  const run = wf(root, ['handoff', 'run', '--agent', 'p', '--minutes', '0.02', '--attempt', id, '--json'], { env });
+  assert.equal(run.code, 0, run.err);
+  assert.equal(run.json().status, 'running');
+  assert.match(run.err, /past your expectation of 0\.02 min \(it stated none\)/);
+  ok(wf(root, ['handoff', 'stop', '--agent', 'p', '--attempt', id], { env }));
+  assert.match(wf(root, ['handoff', 'run', '--agent', 'p', '--minutes', 'soon', '--attempt', id], { env }).err, /--minutes is a positive number|already launched/);
 });

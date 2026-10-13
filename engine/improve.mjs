@@ -5,6 +5,11 @@ import { mkdirStateDirectory } from './state-folders.mjs';
 // paths, emails and URLs (the owner's quote is kept verbatim in that user-level file only), worked from a plugin
 // maintainer session, and closed only with the scenario test that reproduces the failure; closing writes a generic
 // history entry into the plugin repo (`improvements/<id>.md`). Nothing is posted anywhere.
+//
+// An item is `open`, `closed` (fixed, with its scenario test) or `retired` (0.7.0: a check removed because its refusals
+// show it caught nothing; no scenario test, but the reason and the refusal counts are recorded). Named failure: closing
+// needed a new scenario, so a check that only ever refused wrongly could not leave the engine without an incident to
+// reproduce; every path from an incident to code added and none removed.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -15,6 +20,8 @@ import { WfError, YAML, now, refuse } from './util.mjs';
 
 export const CLASSES = ['engine', 'template', 'skill', 'guard', 'tracker', 'onboarding', 'docs', 'other'];
 export const IMPROVEMENT_ID = /^I-\d{1,6}$/;
+export const REFUSAL_ID = /^[A-Za-z0-9._:-]{1,80}$/;
+export const isOpen = (x) => !['closed', 'retired'].includes(x.status);
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 export const inboxDir = () => path.resolve(process.env.WF_IMPROVEMENTS_DIR ?? path.join(os.homedir(), '.agentic-workflow', 'improvements'));
@@ -62,6 +69,16 @@ export function loadImprovements() {
   return out.sort((a, b) => Number(a.id.slice(2)) - Number(b.id.slice(2)));
 }
 
+// `--refusal a,b`: ids of the checks an item is about (see `wf refusals`), so `wf improve review` can tell which refusals
+// an improvement or closure accounts for.
+function refusalIds(value, item = null) {
+  if (value === true) throw new WfError('--refusal names refusal ids, comma separated; `wf refusals` lists them');
+  const ids = [...new Set(String(value ?? '').split(',').map((x) => x.trim()).filter(Boolean))];
+  const bad = ids.find((x) => !REFUSAL_ID.test(x));
+  if (bad) throw new WfError(`--refusal ${bad}: a refusal id is letters, digits and . : - (at most 80); \`wf refusals\` lists them`);
+  return ids.length || !item ? ids : (item.refusals ?? []).map((r) => (typeof r === 'string' ? r : r.id)).filter(Boolean);
+}
+
 const words = (t) => new Set(String(t ?? '').toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 2));
 const similar = (a, b) => {
   const x = words(a);
@@ -91,6 +108,7 @@ export function addImprovement(options, names = []) {
   if (!title) problems.push('--title says in one line what should change in the workflow');
   if (!what) problems.push('--what says what happened');
   if (!CLASSES.includes(cls)) problems.push(`--class is one of ${CLASSES.join(', ')}`);
+  const refusals = refusalIds(options.refusal);
   if (problems.length) throw new WfError(`improvement not recorded:\n  - ${problems.join('\n  - ')}`);
   const all = loadImprovements();
   const history = pluginHistoryIds();
@@ -105,6 +123,7 @@ export function addImprovement(options, names = []) {
     class: cls,
     observedIn: options['observed-in'] ? scrub(String(options['observed-in'])) : null,
     quote: options.quote ? String(options.quote) : null,
+    ...(refusals.length ? { refusals } : {}),
     status: 'open',
     recurrence: of ? Number(of.recurrence ?? 0) + 1 : 0,
     regressionOf: of ? { id: of.id, fixedIn: of.version ?? null } : null,
@@ -115,7 +134,7 @@ export function addImprovement(options, names = []) {
 }
 
 // Open items, highest priority first: recurrence (regressions), then age.
-export const nextImprovements = () => loadImprovements().filter((x) => x.status !== 'closed').sort((a, b) => b.recurrence - a.recurrence || String(a.created).localeCompare(String(b.created)));
+export const nextImprovements = () => loadImprovements().filter(isOpen).sort((a, b) => b.recurrence - a.recurrence || String(a.created).localeCompare(String(b.created)));
 
 function pluginHistoryIds() {
   const dir = path.join(pluginRepo(), 'improvements');
@@ -128,13 +147,20 @@ function pluginHistoryIds() {
 
 // `wf improve close <id> --version X --test scenarios/<file>.test.mjs [--name "<test name>"] --fix "..."`: only with
 // the scenario test, which must exist in the plugin repo (and contain the named test). Writes the generic history entry.
-export function closeImprovement(id, options) {
-  if (!IMPROVEMENT_ID.test(String(id ?? ''))) throw new WfError('usage: wf improve close I-<n> --version X --test scenarios/<file>.test.mjs --fix "what changed" [--name "<test name>"] [--commit SHA]');
+//
+// `wf improve close <id> --retire --version X --reason "..." [--refusal a,b]` retires it instead: the check it is about
+// was removed because its refusals show it caught nothing. There is no scenario test (no behaviour is left to
+// reproduce), but the reason and the refusal count of each named id (counted from `refusals`, the refusal log's rows)
+// are recorded in the inbox and in the history entry.
+export function closeImprovement(id, options, { refusals = [] } = {}) {
+  if (!IMPROVEMENT_ID.test(String(id ?? ''))) throw new WfError('usage: wf improve close I-<n> --version X --test scenarios/<file>.test.mjs --fix "what changed" [--name "<test name>"] [--commit SHA]\n       wf improve close I-<n> --retire --version X --reason "why the check caught nothing" [--refusal id,id] [--commit SHA]');
   const item = loadImprovements().find((x) => x.id === id);
   if (!item) throw refuse(`no improvement ${id} in the inbox`);
   if (item.status === 'closed') throw refuse(`${id} is already closed (${item.version})`);
+  if (item.status === 'retired') throw refuse(`${id} is already retired (${item.version})`);
   const repo = pluginRepo();
   if (!fs.existsSync(path.join(repo, '.git'))) throw refuse(`${repo} is not the plugin repo checkout; run this from it (or set WF_PLUGIN_REPO)`);
+  if (options.retire) return retireImprovement(id, item, options, refusals, repo);
   const version = String(options.version ?? '').trim();
   const test = String(options.test ?? '').trim();
   const fix = String(options.fix ?? '').trim();
@@ -156,9 +182,52 @@ export function closeImprovement(id, options) {
   return { id, history: hist };
 }
 
+function retireImprovement(id, item, options, refusals, repo) {
+  const version = String(options.version ?? '').trim();
+  const reason = String(options.reason ?? '').trim();
+  if (!reason) throw new WfError('--reason says why the check caught nothing (for example: every refusal was a retry or a false positive, or it never fired)');
+  if (!/^\d+\.\d+\.\d+$/.test(version)) throw new WfError('--version is the plugin release that removes the check (x.y.z)');
+  if (options.test || options.fix) throw new WfError('--retire records no scenario test or fix: drop --test and --fix (to close the item as fixed, drop --retire)');
+  const counted = refusalIds(options.refusal, item).map((rid) => {
+    const mine = refusals.filter((r) => r.id === rid);
+    return { id: rid, count: mine.length, attempts: new Set(mine.map((r) => r.attempt).filter(Boolean)).size };
+  });
+  const scrub = sanitizer();
+  const seen = counted.length ? counted.map((c) => `\`${c.id}\` ${c.count} refusal(s) in ${c.attempts} attempt(s)`).join('; ') : 'none named';
+  const entry = `# ${id}: ${scrub(item.title)}\n\n- **Class:** ${item.class}\n- **Retired in:** ${version}\n- **Refusals recorded:** ${seen}\n${options.commit ? `- **Commit:** ${String(options.commit).slice(0, 40)}\n` : ''}\n## Failure\n\n${scrub(item.what)}\n\n## Why it was retired\n\n${scrub(reason)}\n`;
+  const histDir = path.join(repo, 'improvements');
+  mkdirStateDirectory(histDir, { recursive: true });
+  const hist = path.join(histDir, `${id}.md`);
+  writeNoFollow(hist, entry, { exclusive: true });
+  save({ ...item, status: 'retired', version, retiredReason: scrub(reason), refusals: counted, commit: options.commit ?? null, retired: now() });
+  return { id, retired: true, history: hist, refusals: counted };
+}
+
+// `wf improve review`: the refusal ids the log holds (`counts`, from refusalCounts, most refusals first), each with the
+// improvements and closures that cite it: by the `refusals` field, or by naming the id in an item's text or in a history
+// entry of the plugin repo. A check with many refusals and no citation is one nobody has judged: fix it, or retire it.
+export function reviewRefusals(counts) {
+  const cites = (text, rid) => new RegExp(`(?<![\\w.:-])${rid.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w-])`).test(text);
+  const by = new Map();
+  for (const x of loadImprovements()) {
+    const ids = (x.refusals ?? []).map((r) => (typeof r === 'string' ? r : r?.id)).filter(Boolean);
+    by.set(x.id, { id: x.id, status: x.status ?? 'open', text: [x.title, x.what, x.observedIn, x.fix, x.retiredReason, ...ids].filter(Boolean).join('\n') });
+  }
+  const histDir = path.join(pluginRepo(), 'improvements');
+  try {
+    for (const f of fs.readdirSync(histDir).filter((n) => /^I-\d+\.md$/.test(n))) {
+      const hid = f.replace(/\.md$/, '');
+      const text = fs.readFileSync(path.join(histDir, f), 'utf8');
+      const known = by.get(hid);
+      by.set(hid, { id: hid, status: known?.status ?? (/\*\*Retired in:\*\*/.test(text) ? 'retired' : 'closed'), text: `${known?.text ?? ''}\n${text}` });
+    }
+  } catch {}
+  return counts.map((c) => ({ ...c, citedBy: [...by.values()].filter((x) => cites(x.text, c.id)).map((x) => ({ id: x.id, status: x.status })) }));
+}
+
 export const openCount = () => {
   try {
-    return loadImprovements().filter((x) => x.status !== 'closed').length;
+    return loadImprovements().filter(isOpen).length;
   } catch {
     return 0;
   }

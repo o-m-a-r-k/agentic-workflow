@@ -1,37 +1,45 @@
-import { addValidation } from './validation.mjs';
+import { addValidation, correctValidation } from './validation.mjs';
+import { captureWarning } from './captures.mjs';
+import { findHost, fragment, hostChoice, hostIds, hostLabels, hostNames } from './hosts/index.mjs';
 import { mkdirStateDirectory } from './state-folders.mjs';
-import { askScope, decideScope, completeScopeTicket, scopeFindings } from './scope-decisions.mjs';
+import { completeScopeTicket, deferFindings, moveOut, recordFixed, scopeRows, waiveFinding } from './scope-decisions.mjs';
+import { observations } from './review-policy.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 import { refreshModels } from './models.mjs';
-import { abandon, adopt, changedFiles, entry, hold, openState, release, resolveAttempt } from './attempt.mjs';
+import { abandon, adopt, changedFiles, entry, hold, missingWorktrees, openState, release, resolveAttempt, setIntent } from './attempt.mjs';
 import { baseLines, baseMerge, baseStatus } from './base.mjs';
-import { findRoot, loadConfig, requireRoot } from './config.mjs';
+import { findRoot, loadConfig, repoDir, requireRoot } from './config.mjs';
 import { exportAttempt, exportFile } from './export.mjs';
-import { STOP_CLASSES, liveGate, runGate, runWithLease, stopGate } from './gate.mjs';
+import { STOP_CLASSES, liveGate, runGate, runPrepared, runWithLease, stopGate } from './gate.mjs';
 import { append, listAttempts, loadState, openEvidence } from './ledger.mjs';
 import { canonical, touchesEvidence } from './paths.mjs';
 import { openCount } from './improve.mjs';
 import { reviewDivisionSummary } from './review-groups.mjs';
-import { LESSON_FILE, addLesson, applySnippet, exportPluginLessons, lessonPrompts, lessonWarnings, loadLessons, moveLesson, recur, relevantLessons, reviewLessons, setLesson } from './lessons.mjs';
-import { LinkRefused, changesOf, rebaseline, releaseAttempt, seal, setVerifyLevel, verifyAttempt } from './evidence.mjs';
+import { LESSON_FILE, addLesson, applySnippet, exportPluginLessons, findLesson, lessonPrompts, lessonWarnings, loadLessons, moveLesson, recur, relevantLessons, reviewLessons, setLesson } from './lessons.mjs';
+import { LinkRefused, changesOf, rebaseline, releaseAttempt, seal, setVerifyLevel, unlockEvidence, verifyAttempt } from './evidence.mjs';
 import { acceptReview, amendCriteria, closeImplementer, designWarning, gateOrderCheck, batchCreate, batchEject, closeAfterHandoff, deliver, deliveredFiles, exportScreenshots, freezeCriteria, handoff, narrowDelivery, needsShown, nextAction, nextDecision, outsideWarning, recordReview, recordShown, reopen, screenshotsExportDir, shownDraftFile, uncovered, withAttempt } from './lifecycle.mjs';
-import { addDiscovered, channelOf, closeDiscovered, discoveredLine, openDiscovered } from './discovered.mjs';
+import { addDiscovered, channelOf, closeDiscovered, discoveredLine, openDiscovered, rateDiscovered } from './discovered.mjs';
 import { detect, doctor, register, registry, setEnabled, sync, writeDraft } from './onboard.mjs';
 import * as secrets from './secrets.mjs';
 import { report, toCsv, toHandoffCsv, toHtml, toJson, toText } from './telemetry.mjs';
 import { impact } from './topology.mjs';
 import { commentFile, performTracker, publicAssetsProblem, recordSummary, recordTracker } from './tracker.mjs';
 import { ENGINE_VERSION, WfError, parseArgs, refuse } from './util.mjs';
+import { approveInTerminal, decisionLine, pendingDecisions } from './approve.mjs';
+import { logRefusal, readRefusals, refusalCounts } from './refusals.mjs';
+import { recordStrategy, signalsReport, signalsText } from './strategy.mjs';
+import { courseLines, pastEstimates } from './signals.mjs';
+import { splitCommand } from './split.mjs';
 
-const HELP = `wf ${ENGINE_VERSION} — agentic-workflow
+const help = () => `wf ${ENGINE_VERSION} — agentic-workflow
 
 Onboarding
   wf install [--dir DIR]            link wf into ~/.local/bin
   wf init [--force]                 detect the project and draft .workflow/ (disabled)
-  wf doctor [--no-steps] [--runtime claude|codex]
+  wf doctor [--no-steps] [--runtime ${hostChoice()}]
                                     check config, tools, secrets, skills; run light steps on a clean base
   wf enable | wf disable            turn the workflow on/off for this project
   wf sync                           regenerate the AGENTS.md block, role agents, vendored skills
@@ -45,49 +53,82 @@ Work
                                     freeze acceptance criteria and the plan (--from-agent: the planner's last YAML block)
   wf criteria amend --file f --reason "why" [--add-repo R]
                                     --add-repo: a fix needs another repo; its worktree joins the attempt with the work items
-                                    added scope needs \`impact\` in the file before the next implementer handoff
-  wf discovered add --summary "..." [--where file:line] [--found-by ID] [--blocked-by W] | list
-  wf discovered close D1 --fixed SHA | --deferred   (after the owner wrote: defer <attempt>:D1: <reason>)
-  wf discovered defer D1 --reason "why"   the owner, in their own terminal: types the id to confirm
-                                    related defects are repaired; extra scope waits for the owner choice
-  wf handoff planner|implementer|reviewer|tester --agent ID [--work W1] [--sweep F] [--session SID] [--runtime claude|codex]
-                                    --sweep: a fix handoff names a pattern sweep per open review finding
+                                    added scope without \`impact\` is shown to the next implementer as consumers to find
+  wf discovered add --summary "..." [--severity high|medium|low] [--invariant "<which>"] [--kind defect|bookkeeping] [--where file:line] [--found-by ID] [--blocked-by W] | list
+  wf discovered rate D1 --severity high|medium|low [--reason "why"]
+                                    correct a rating (lowering records its reason; an invariant issue stays high)
+  wf discovered close D1[,D2] --fixed SHA | --deferred --reason "why"
+                                    high or unrated waits only when the owner confirms it with \`wf approve\`;
+                                    medium needs --reason; low may wait
+  wf handoff planner|implementer|reviewer|tester --agent ID [--work W1] [--sweep F] [--session SID] [--runtime ${hostChoice()}]
+                                    --sweep (optional): a fix handoff names a pattern sweep per family of open findings
+  wf handoff wait --agent ID [--minutes N]
+                                    follow a launched role again; N: return after that many minutes since its launch
+  wf handoff stop --agent ID [--reason "why"]
+                                    end a launched role's process; a fresh handoff takes over
   wf handoff close --agent ID [--outcome done|stopped|failed]
                                     an implementer finished: no review round starts while one is open
+  wf handoff strategist --agent ID [--reason "what diverged"]
+                                    the course diverged from what was predicted: the strategist reads the expectations beside
+                                    what happened, the signals, findings by family and earlier decisions
+  wf strategy record --closure F    the strategist's decision (action, rationale, a prediction); the engine applies split,
+                                    delta-review and escalate; two missed predictions in a row make the next one an escalate
+  wf split --items IDS --reason "why"
+                                    move unstarted work items, criteria, observations (reviewer:F1) or discovered issues to a
+                                    sibling attempt in the same batch (delivered together; \`wf batch create\` assembles it)
+  wf signals [--json]               what the plan, the implementers and the reviewers expected beside what happened (files,
+                                    rounds, minutes, each running role's elapsed time and last activity), rounds, findings,
+                                    amendments, bundle size and the owner's round escalation (adapter \`strategy:\` block)
   wf models refresh --attempt ID    pin execution model/effort settings from the committed adapter base
-  wf advance --once|--until-owner [--runtime claude|codex] [--max-steps N] [--single] [--reviewers 2|3]
+  wf advance --once|--until-owner [--runtime ${hostChoice()}] [--max-steps N] [--single] [--reviewers 2|3]
                                     optional foreground review/gate runner; stops for owner decisions
-  wf handoff run --agent ID         launch the existing Claude or Codex handoff fresh, with engine-recorded prompt provenance
+  wf handoff run --agent ID         launch the existing ${hostNames()} handoff fresh, with engine-recorded prompt provenance
+                                    returns when the role ends, or once it passes its own estimate (it keeps running);
+                                    --minutes N: your own expectation, for a role that states none
   wf handoff reviewer --agent ID --reason "why"
                                     hand the tree while an implementer is open; records the override
   wf impact run [--file plan.yaml | --query JSON]
                                     run the attempt's recorded impact queries (or a plan file's, or one) on the current tree
   wf validation add --steps IDs --criteria IDs --reason "why"
                                     add required committed checks without replacing admission checks
+  wf validation correct --steps IDs --reason "why" [--criteria IDs]
+                                    re-pin registered checks at the adapter repo's committed HEAD after a defect found in one
+  wf captures import --from DIR | --file IMAGE [--criteria IDS] [--note "how they were made"]
+                                    bring in screenshots made by hand on the committed tree (no gate step collects any); they
+                                    join the gate's screenshots for that tree, recorded and protected by wf like a gate's
   wf check [--repo R]               light steps only, for the implementer; reused by the gate, never counts as one
   wf gate [--prepare-only] [--full] [--focused] [--rerun-failed] [--reason "why"]
-                                    after a clean code review only; --reason runs it out of order and records why
+                                    after a clean code review only (or after an evidence review's fixes by the implementers
+                                    handed after it); --reason out of that order asks the person's \`wf approve\`
   wf run --lease NAME -- CMD...     run a command holding a machine-wide lease (docker, browser...)
+  wf run --step ID                  run that gate step's declared \`prepare\` command with the secrets the step uses
   wf base [merge] [--repo R]        how far each base moved; merge merges it into the worktrees
   wf stop --class major-finding|tree-change|owner-decision --reason "why"
                                     stop a running gate; records the class and the minutes discarded
-  wf scope list|ask                explain unrelated existing findings and request the owner choice
-  wf scope decide --choice expand|expand-all|ticket|ignore
-                                    records the direct human reply after scope ask; in-scope defects still block
-  wf scope ticket --finding REVIEWER:F1 --capture RAW.json
-                                    raw tracker readback after owner-authorized ticket creation
+  wf scope list                     every open review finding: blocks or observation, its family, where it went
+  wf scope ticket --finding REVIEWER:F1[,REVIEWER:F2] --capture RAW.json [--reason "why it waits"]
+                                    raw tracker readback of the follow-up ticket; high severity, or a finding that blocks,
+                                    needs wf approve, medium needs --reason, low neither
+  wf scope fixed --finding REVIEWER:F1 --commit SHA
+                                    an observation this attempt fixed; the next reviewer verifies it
+  wf scope defer --finding REVIEWER:F1[,REVIEWER:F2] [--reason "why it waits"]
+                                    observations left for later, listed in the delivered comment (same severity rule)
+  wf scope waive --finding REVIEWER:F1 [--reason "why"]
+                                    a blocking finding set aside: the person's decision (\`wf approve\`)
+  wf scope move --finding REVIEWER:F1 --sibling ATTEMPT
+                                    hand a finding on code this attempt did not change to a sibling attempt of the batch
   wf review --closure file.json     record the reviewer's closure
   wf handoff reviewer --agent ID [--single] [--reviewers 2|3] [--division FILE]
                                     automatically divide large separable flows; --single keeps one reviewer
   wf review parts                   inspect immutable current-group scoped reports before integration
   wf accept                         accept the review
   wf summary --file summary.md      the owner's plain-language summary for the delivered comment
-  wf deliver [--summary-file F] [--acknowledge-deferrals D2,D3]
-                                    integrate every repo, then start the tracker handoff (every deferral acknowledged first)
+  wf deliver [--summary-file F]
+                                    integrate every repo, then start the tracker handoff (every deferral listed first)
   wf deliver --acknowledge-adapter-state REPO:STATE
-                                    the change is on the target branch but the delivery adapter reports another state: the owner accepts it
+                                    the change is on the target branch but the delivery adapter reports another state (a failed check needs \`wf approve\`)
   wf deliver --repin-adapter [COMMIT] --reason "why"
-                                    after a delivery adapter fault: read the delivery adapter from the base branch tip (shows, then the owner confirms)
+                                    after a delivery adapter fault: read the delivery adapter from the base branch tip (shows, then the owner confirms with \`wf approve\`)
   wf shown --file shown.json        record that every delivered screenshot was shown in the chat, with its caption and anomalies
   wf delivery narrow --keep SHA,... | --file keep.json --reason "why" [--dry-run]
                                     once, before \`wf shown\`: keep only this ticket's files of a delivered set an over-broad glob filled
@@ -96,13 +137,19 @@ Work
   wf tracker record --event E --agent-reported --file reported.json [--comment-file posted.md]   (connector, no host record)
   wf tracker mode api|cli|files|connector [--write]
                                     how wf reaches the tracker (all but connector: the engine records its own readback)
-  wf improve add|list|show|next|close  plugin improvements: workflow findings, kept in your inbox outside every repo
-  wf hold --reason "why" | wf release
+  wf improve add|list|show|next|close|review  plugin improvements: workflow findings, kept in your inbox outside every repo
+                                    close --retire --reason "..." retires a check that caught nothing; review lists refusal ids and who cites them
+  wf intent implementation --attempt ID --reason "why"
+                                    upgrade an analysis attempt in place once the owner asks for the implementation
+  wf unlock --attempt ID            remove the evidence lock of an attempt whose owner process is gone (a live owner is refused)
+  wf hold --reason "why" | wf release   (release asks the owner to confirm with \`wf approve\`)
+  wf decisions [--all]              the owner's reserved decisions on the attempt, pending first
+  wf approve ID [--choice C]        the owner confirms a reserved decision in their own terminal
   wf lesson add|waive|recur|set|apply|show|list|review|export
                                     the project's lessons (.workflow/lessons/): capture, enforce, recurrence
   wf reopen --item ID --reason "feedback" [--no-lesson "why"]
-  wf adopt [--attempt ID | --item ID] take over an open attempt on the current chat's human request
-                                    (\`adopt <ticket or attempt>\`; no previous-session release needed)
+  wf adopt [--attempt ID | --item ID] take over an open attempt as the current chat (an owner session active in the last
+                                    30 minutes needs the owner's \`wf approve\`)
   wf abandon --reason "why" [--acknowledge-integration REPO:STATE]
   wf batch create --members A,B | wf batch eject --batch B --member A
 
@@ -111,6 +158,7 @@ Status
   wf status [--all] [--json]
   wf report [--all] [--json] [--idle-minutes N] [--csv FILE] [--handoffs-csv FILE] [--html FILE]
                                     phases, gates, review rounds, findings, tokens and cost per attempt
+  wf refusals [--since ISO] [--json] refusals counted by the check that made them (measurement only)
   wf verify [--attempt ID | --all]  re-hash every recorded evidence file, check the chain and its anchor
   wf verify --accept-changes --reason "why"   show changed evidence files and accept them (recorded, shown everywhere)
   wf evidence list [--kind K] | wf evidence show PATH
@@ -128,7 +176,37 @@ const print = (options, human, data) => {
   else process.stdout.write(`${typeof human === 'string' ? human : JSON.stringify(human, null, 2)}\n`);
 };
 
+// An open attempt whose worktree folder is gone (see missingWorktrees in attempt.mjs): decided before any git call, shown
+// as orphaned with its missing paths, and left for `wf abandon` (or a restored folder). Named failure: one such attempt
+// made `wf status`, `wf status --all` and `wf resume` fail with "git failed to start: spawnSync git ENOENT" for all of them.
+const orphansOf = (s) => (['done', 'abandoned'].includes(s.phase) ? [] : missingWorktrees(s));
+function orphanNext(root, s, gone) {
+  let cfg = null;
+  try {
+    cfg = loadConfig(root);
+  } catch {}
+  const restore = gone.map((m) => {
+    const repo = cfg?.repos.find((r) => r.name === m.repo);
+    return repo ? `git -C ${repoDir(root, repo)} worktree prune && git -C ${repoDir(root, repo)} worktree add ${m.worktree} ${m.branch}` : null;
+  }).filter(Boolean);
+  return `ORPHANED, worktree missing: ${gone.map((m) => m.worktree).join(', ')}. Nothing runs in a missing folder. If it was removed by mistake, put it back from the branch (committed work only): ${restore.join(' ; ') || 'git worktree add <path> <branch> from the repo checkout'}. Otherwise \`wf abandon --attempt ${s.id} --reason "<why>"\` (its branch is kept)`;
+}
+const nextOf = (root, s) => {
+  const gone = orphansOf(s);
+  return gone.length ? orphanNext(root, s, gone) : nextAction(root, s);
+};
+function orphanedSummary(root, s, gone) {
+  const lines = [`${s.id}  ${s.item}  lane=${s.lane}  intent=${s.intent}  phase=${s.phase}  ORPHANED`, `  owner: ${s.owner}`];
+  for (const [name, r] of Object.entries(s.repos)) lines.push(`  ${name}: ${r.worktree}${gone.some((m) => m.repo === name) ? '  (MISSING)' : ''} (base ${r.base.slice(0, 10)})`);
+  if (s.activeHold) lines.push(`  HOLD: ${s.activeHold.reason}`);
+  lines.push(`  ORPHANED: worktree missing: ${gone.map((m) => m.worktree).join(', ')}; the evidence and the branch are intact`);
+  lines.push(`  next: ${orphanNext(root, s, gone)}`);
+  return lines.join('\n');
+}
+
 function summary(root, s, { base = null, resume = false } = {}) {
+  const gone = orphansOf(s);
+  if (gone.length) return orphanedSummary(root, s, gone);
   const lines = [`${s.id}  ${s.item}  lane=${s.lane}  intent=${s.intent}  phase=${s.phase}`, `  owner: ${s.owner}`];
   for (const [name, r] of Object.entries(s.repos)) lines.push(`  ${name}: ${r.worktree} (base ${r.base.slice(0, 10)})`);
   if (base) lines.push(...baseLines(base));
@@ -163,9 +241,11 @@ function summary(root, s, { base = null, resume = false } = {}) {
     const open = openDiscovered(s);
     lines.push(`  discovered: ${open.length} open${open.length ? ` (${open.map((d) => d.id).join(', ')})` : ''} of ${s.discovered.length} (\`wf discovered list\`)`);
   }
+  const watching = ['done', 'abandoned'].includes(s.phase) ? [] : observations(s);
+  if (watching.length) lines.push(`  observations: ${watching.length} unresolved, delivery waits for them (${watching.slice(0, 6).map((f) => f.ref).join(', ')}${watching.length > 6 ? ', …' : ''}; \`wf scope list\`)`);
   for (const a of s.addedRepos ?? []) lines.push(`  repo added: ${a.repo} (${a.reason})`);
   if (s.lastGate) lines.push(`  last gate: ${s.lastGate.status} (${s.lastGate.runId})`);
-  for (const t of s.tracker.done) if (t.provenance === 'host-recorded') lines.push(`  tracker ${t.event}: readback host-recorded (the tracker's answer as the ${t.host?.runtime === 'codex' ? 'Codex' : 'Claude Code'} host wrote it in the owner's transcript, not the agent; a process running as the same user could edit that file)`);
+  for (const t of s.tracker.done) if (t.provenance === 'host-recorded') lines.push(`  tracker ${t.event}: readback host-recorded (the tracker's answer as the ${findHost(t.host?.runtime)?.label ?? 'harness'} host wrote it in the owner's transcript, not the agent; a process running as the same user could edit that file)`);
   for (const t of s.tracker.done) if (t.provenance === 'agent-reported, unverified') lines.push(`  tracker ${t.event}: readback agent-reported, unverified (an engine route verifies it: \`wf tracker mode api|cli|files\`)`);
   if (s.checks?.length) lines.push(`  last check: ${s.checks.at(-1).status} (${s.checks.at(-1).runId}; light steps only, never counts as the gate)`);
   if (s.flaky?.length) lines.push(`  flaky: ${[...new Set(s.flaky.map((f) => `${f.step}${f.suites?.length ? ` (${f.suites.join(', ')})` : ''}`))].join(', ')} failed and then passed with the same inputs`);
@@ -174,6 +254,8 @@ function summary(root, s, { base = null, resume = false } = {}) {
       const w = outsideWarning(root, s);
       if (w) lines.push(`  warning: ${w}`);
     } catch {}
+    const route = captureWarning(root, s); // I-94: criteria that need screenshots and no way to get them
+    if (route) lines.push(`  warning: ${route}`);
   }
   if (s.delivery.narrowed && !s.delivery.screenshots) lines.push(`  delivered files narrowed from ${s.delivery.narrowed.from} to ${s.delivery.narrowed.to}: ${s.delivery.narrowed.reason} (${s.delivery.narrowed.by}, ${s.delivery.narrowed.at})`);
   if (s.phase === 'handoff-pending' && s.delivery.screenshots) lines.push(showBlock(root, s).trim().replace(/^/gm, '  ').replace(/^ {2}SHOW TO OWNER/, '  delivered screenshots — SHOW TO OWNER'));
@@ -187,7 +269,17 @@ function summary(root, s, { base = null, resume = false } = {}) {
     const missing = p ? ['contract', 'anchors'].filter((k) => p[k] === undefined) : [];
     if (missing.length) lines.push(`  warning: the frozen plan has no ${missing.join(' or ')} section, so implementers have none to follow`);
   }
-  lines.push(`  next: ${live ? withAttempt(root, s, 'a gate is running: wait for it to finish (or `wf stop --class major-finding|tree-change|owner-decision --reason "why"`); do not edit the worktrees or hand a reviewer the tree meanwhile; once it passes, the evidence review') : nextAction(root, s)}`);
+  let past = [];
+  if (s.criteria && s.intent === 'implementation' && s.lane !== 'batch' && !['done', 'abandoned'].includes(s.phase)) {
+    try {
+      const sig = signalsReport(root, s);
+      lines.push('  course (expected against actual; no limit applies, the owner agent judges it at each round boundary):', ...courseLines(sig, { predictions: sig.strategy.decisions }).map((l) => `    ${l}`));
+      past = pastEstimates(sig);
+    } catch {}
+  }
+  // D9: the comparison reaches the line the owner agent acts on (final review of 0.7.0: it sat above it as a passive block).
+  const judge = past.length && !live ? `past its own estimate: ${past.join('; ')}. Judge the course before the next step: continue, re-plan with a new expectation (\`wf criteria amend\` with \`expect\`), or hand the strategist what diverged (\`wf handoff strategist --agent <id> --reason "..."\`). Then: ` : '';
+  lines.push(`  next: ${judge}${live ? withAttempt(root, s, 'a gate is running: wait for it to finish (or `wf stop --class major-finding|tree-change|owner-decision --reason "why"`); do not edit the worktrees or hand a reviewer the tree meanwhile; once it passes, the evidence review') : nextAction(root, s)}`);
   return lines.join('\n');
 }
 
@@ -222,7 +314,8 @@ function gateText(result) {
     return `  ${d.padEnd(11)} ${s.id}${extra}`;
   });
   const focused = (result.record ?? result.plan)?.focused ? ' (focused: proof while repairing; acceptance and delivery need a gate without --focused)' : '';
-  const head = result.record ? `gate ${result.record.status} (${result.record.runId})${focused}` : `gate plan${result.plan.full ? ' (full: the adapter changed)' : ''}${focused}`;
+  const stopped = result.record?.stop ? ` — stopped by the owner (${result.record.stop.class}: ${result.record.stop.reason})` : '';
+  const head = result.record ? `gate ${result.record.status}${stopped} (${result.record.runId})${focused}` : `gate plan${result.plan.full ? ' (full: the adapter changed)' : ''}${focused}`;
   const imp = result.plan?.impact ?? result.record?.impact;
   const impLine = imp && (imp.contractsChanged.length || imp.dependents.length) ? `\n  contracts changed: ${imp.contractsChanged.map((c) => c.contract).join(', ') || 'none'}; dependents pulled in: ${imp.dependents.join(', ') || 'none'}` : '';
   return `${head}${result.recovered ? `\n  recovered ${result.recovered.carried} finished step(s) from run ${result.recovered.runId} (runner died)` : ''}${impLine}\n${rows.join('\n')}`;
@@ -241,15 +334,18 @@ export async function main(argv) {
     return 2;
   }
   if (!cmd || cmd === 'help' || options.help) {
-    process.stdout.write(`${HELP}\n`);
+    process.stdout.write(`${help()}\n`);
     return 0;
   }
   if (cmd === 'version' || cmd === '--version') {
     process.stdout.write(`${ENGINE_VERSION}\n`);
     return 0;
   }
-  // Commands that rely on evidence content re-hash every recorded file first; the others check presence, type, size
-  // and mode. Whatever this process wrote into an attempt's evidence is recorded and protected when it ends.
+  // The commands that decide something final re-hash every recorded file and every ledger entry first (accept, deliver,
+  // verify, doctor, export); the others check presence, type, size and mode, re-hash a file whose stat signature changed,
+  // and check the ledger's links and its last entry, and a file a command reads is checked against its recorded sha256 as it
+  // is read (0.7.0, named failure: a read took 9 seconds on a 96 MB ledger). Whatever this process wrote into an attempt's
+  // evidence is recorded and protected when it ends.
   setVerifyLevel(FULL_VERIFY.has(cmd) ? 'full' : 'quick');
   try {
     return await dispatch(cmd, sub && !sub.startsWith('--') ? sub : null, positional, { ...options, _: passthrough });
@@ -260,6 +356,7 @@ export async function main(argv) {
     }
     if (error instanceof WfError) {
       process.stderr.write(`wf ${cmd}: ${error.message}\n${error.hint ? `  → ${error.hint}\n` : ''}`);
+      if (error.code === 75) logRefusal({ id: error.refusalId, cmd, sub: sub && !sub.startsWith('--') ? sub : null, attempt: options.attempt ?? null, message: error.message });
       return error.code;
     }
     throw error;
@@ -272,7 +369,7 @@ export async function main(argv) {
   }
 }
 
-const FULL_VERIFY = new Set(['advance', 'accept', 'deliver', 'verify', 'review', 'tracker', 'export', 'shown', 'delivery', 'summary', 'handoff', 'models', 'validation', 'gate', 'check', 'evidence']);
+const FULL_VERIFY = new Set(['accept', 'deliver', 'verify', 'doctor', 'export']);
 
 const WRITE_OPTIONS = ['out', 'csv', 'handoffs-csv', 'html', 'dir', 'to', 'root'];
 const READ_OPTIONS = ['file', 'sweep', 'division', 'capture', 'comments', 'summary-file', 'closure', 'issue-file', 'from', 'comment-file'];
@@ -339,8 +436,8 @@ function safeBase(root, s) {
 // `wf improve`: the user-level inbox of plugin improvements (engine/improve.mjs). Works anywhere; inside a project, its
 // names are stripped from what is stored.
 async function improveCommand(sub, positional, options) {
-  const { addImprovement, closeImprovement, loadImprovements, nextImprovements } = await import('./improve.mjs');
-  const show = (x) => `${x.id}  [${x.status}, ${x.class}${x.recurrence ? `, recurrence ${x.recurrence}` : ''}${x.version ? `, fixed in ${x.version}` : ''}]  ${x.title}${x.regressionOf ? `  (regression of ${x.regressionOf.id}${x.regressionOf.fixedIn ? ` fixed in ${x.regressionOf.fixedIn}` : ''})` : ''}`;
+  const { addImprovement, closeImprovement, loadImprovements, nextImprovements, reviewRefusals } = await import('./improve.mjs');
+  const show = (x) => `${x.id}  [${x.status}, ${x.class}${x.recurrence ? `, recurrence ${x.recurrence}` : ''}${x.version ? `, ${x.status === 'retired' ? 'retired' : 'fixed'} in ${x.version}` : ''}]  ${x.title}${x.regressionOf ? `  (regression of ${x.regressionOf.id}${x.regressionOf.fixedIn ? ` fixed in ${x.regressionOf.fixedIn}` : ''})` : ''}`;
   if (sub === 'add') {
     let names = [];
     const root = findRoot();
@@ -367,15 +464,23 @@ async function improveCommand(sub, positional, options) {
   if (sub === 'show') {
     const x = loadImprovements().find((i) => i.id === positional[0]);
     if (!x) throw new WfError(`no improvement ${positional[0] ?? ''}`);
-    print(options, `${show(x)}\n  what happened: ${x.what}${x.observedIn ? `\n  observed in: ${x.observedIn}` : ''}${x.quote ? `\n  in their words: "${x.quote}"` : ''}${x.test ? `\n  test: ${x.test}` : ''}`, x);
+    print(options, `${show(x)}\n  what happened: ${x.what}${x.observedIn ? `\n  observed in: ${x.observedIn}` : ''}${x.quote ? `\n  in their words: "${x.quote}"` : ''}${x.test ? `\n  test: ${x.test}` : ''}${x.retiredReason ? `\n  retired because: ${x.retiredReason}` : ''}${x.refusals?.length ? `\n  refusals: ${x.refusals.map((r) => (typeof r === 'string' ? r : `${r.id} ${r.count}`)).join(', ')}` : ''}`, x);
     return 0;
   }
   if (sub === 'close') {
-    const r = closeImprovement(positional[0], options);
-    print(options, `${r.id} closed; history written to ${r.history} (commit it with the fix)`, r);
+    // `--retire I-3` parses as the flag's value; `--retire` before another option leaves the id positional.
+    const id = positional[0] ?? (typeof options.retire === 'string' ? options.retire : undefined);
+    const r = closeImprovement(id, options, { refusals: options.retire ? readRefusals() : [] });
+    print(options, r.retired ? `${r.id} retired; history written to ${r.history} (commit it with the removal)\n  refusals recorded: ${r.refusals.length ? r.refusals.map((c) => `${c.id} ${c.count}`).join(', ') : 'none named (--refusal id,id would record their counts)'}` : `${r.id} closed; history written to ${r.history} (commit it with the fix)`, r);
     return 0;
   }
-  throw new WfError('usage: wf improve add|list|show|next|close');
+  if (sub === 'review') {
+    const rows = reviewRefusals(refusalCounts(readRefusals({ since: options.since ?? null }))).filter((c) => options.uncited !== true || !c.citedBy.length);
+    const cited = (c) => (c.citedBy.length ? `cited by ${c.citedBy.map((x) => `${x.id} (${x.status})`).join(', ')}` : 'NOT cited by any improvement or closure');
+    print(options, rows.length ? `${rows.length} refusal id(s), most refusals first; ${rows.filter((c) => !c.citedBy.length).length} not cited by any improvement or closure (judge it: fix the check, or retire it with \`wf improve close <id> --retire --reason ...\`)\n${rows.map((c) => `${String(c.count).padStart(5)}  ${c.id}  (${c.attempts.length} attempt(s); last ${c.last})  ${cited(c)}\n       e.g. ${c.example}`).join('\n')}` : 'no refusals recorded', rows);
+    return 0;
+  }
+  throw new WfError('usage: wf improve add|list|show|next|close|review');
 }
 
 async function dispatch(cmd, sub, positional, options) {
@@ -441,14 +546,21 @@ async function dispatch(cmd, sub, positional, options) {
       for (const id of listAttempts(p.root)) {
         const s = loadState(p.root, id);
         if (['done', 'abandoned'].includes(s.phase)) continue;
-        out.push({ project: path.basename(p.root), root: p.root, id, item: s.item, phase: s.phase, hold: s.activeHold?.reason ?? null, next: nextAction(p.root, s) });
+        const gone = orphansOf(s);
+        out.push({ project: path.basename(p.root), root: p.root, id, item: s.item, phase: s.phase, hold: s.activeHold?.reason ?? null, ...(gone.length ? { orphaned: gone } : {}), next: nextOf(p.root, s) });
       }
     }
-    print(options, out.length ? out.map((o) => `${o.project}  ${o.id}  ${o.phase}${o.hold ? `  HOLD: ${o.hold}` : ''}\n  next: ${o.next}`).join('\n') : 'no open attempts in any enabled project', out);
+    print(options, out.length ? out.map((o) => `${o.project}  ${o.id}  ${o.phase}${o.orphaned ? '  ORPHANED' : ''}${o.hold ? `  HOLD: ${o.hold}` : ''}\n  next: ${o.next}`).join('\n') : 'no open attempts in any enabled project', out);
     return 0;
   }
 
   if (cmd === 'improve') return improveCommand(sub, positional, options);
+  if (cmd === 'refusals') {
+    const counts = refusalCounts(readRefusals({ since: options.since ?? null }));
+    if (options.json) return print(options, counts, counts), 0;
+    print(options, counts.length ? counts.map((c) => `${String(c.count).padStart(5)}  ${c.id}  (${c.attempts.length} attempt(s); last ${c.last})\n       e.g. ${c.example}`).join('\n') : 'no refusals recorded');
+    return 0;
+  }
   const root = requireRoot(options.root);
   switch (cmd) {
     case 'skills': {
@@ -490,7 +602,8 @@ async function dispatch(cmd, sub, positional, options) {
     case 'sync': {
       const files = sync(root);
       const roles = files.changedRoles ?? [];
-      const note = roles.length ? `\nrole file(s) changed: ${roles.map((c) => `${path.relative(root, c.file)}${c.removed ? ' (removed)' : c.created ? ' (new)' : ''}`).join(', ')}\n  Claude Code and Codex read agent files when a session starts: a session that was already running keeps the old roles, and agents it starts run them. Restart each running session (\`claude --resume\` keeps the conversation) before its next handoff.` : '\nno role file changed';
+      const restartHints = hostIds().map((id) => findHost(id).fragments?.restartHint).filter(Boolean);
+      const note = roles.length ? `\nrole file(s) changed: ${roles.map((c) => `${path.relative(root, c.file)}${c.removed ? ' (removed)' : c.created ? ' (new)' : ''}`).join(', ')}\n  ${hostLabels(' and ')} read agent files when a session starts: a session that was already running keeps the old roles, and agents it starts run them. Restart each running session${restartHints.length ? ` (${restartHints.join('; ')})` : ''} before its next handoff.` : '\nno role file changed';
       print(options, `wrote ${files.length} file(s):\n${files.map((f) => `  ${path.relative(root, f)}`).join('\n')}${note}`, files);
       return 0;
     }
@@ -605,9 +718,17 @@ async function dispatch(cmd, sub, positional, options) {
       return 0;
     }
     case 'validation': {
-      if (sub !== 'add') throw new WfError('usage: wf validation add --steps IDs --criteria IDs --reason why');
-      const s = await addValidation(root, options);
-      print(options, 'required supplemental validation registered; admission checks unchanged; fresh code review and full gate required', s.validations.at(-1));
+      if (sub !== 'add' && sub !== 'correct') throw new WfError('usage: wf validation add --steps IDs --criteria IDs --reason why | wf validation correct --steps IDs --reason why [--criteria IDs]');
+      const s = await (sub === 'correct' ? correctValidation : addValidation)(root, options);
+      print(options, `required supplemental validation ${sub === 'correct' ? 'corrected' : 'registered'}; admission checks unchanged; fresh code review and full gate required`, s.validations.at(-1));
+      return 0;
+    }
+    case 'captures': {
+      // I-94: screenshots the owner made by hand on the committed tree, for a project whose gate collects none.
+      if (sub !== 'import') throw new WfError('usage: wf captures import --from <folder of images> | --file <image> [--criteria C5,C6] [--note "how they were made"]');
+      const { importCaptures } = await import('./captures.mjs');
+      const r = importCaptures(root, options);
+      print(options, r.text, r.record);
       return 0;
     }
     case 'criteria': {
@@ -615,37 +736,50 @@ async function dispatch(cmd, sub, positional, options) {
       const { state: s, changes, added, impactOwed, restrictions } = amendCriteria(root, options);
       const list = (ids) => ids.join(', ') || 'none';
       for (const w of restrictions ?? []) process.stderr.write(`warning: ${w}\n`);
-      const owedLine = impactOwed ? `\n  impact owed: this amendment adds scope; record its impact (\`wf criteria amend --file <f> --reason "..."\` with an \`impact\` addendum) before the next implementer handoff` : s.impact?.addenda?.length && s.criteriaAmendments.at(-1)?.impact === true ? '\n  impact addendum recorded' : '';
+      const owedLine = impactOwed ? `\n  impact owed: this amendment adds scope without an impact map; the next implementer is told to find and report its consumers (or record it: \`wf criteria amend --file <f> --reason "..."\` with an \`impact\` addendum)` : s.impact?.addenda?.length && s.criteriaAmendments.at(-1)?.impact === true ? '\n  impact addendum recorded' : '';
       const addedLines = added.map((a) => `\n  repo added: ${a.repo} (worktree ${a.worktree}, base ${a.base.slice(0, 10)}); hand its work item to an implementer, and the reviewer judges the seam on both sides`).join('');
       print(options, `criteria amended (${s.criteriaAmendments.length} amendment(s)); the reviewer will see the reason${addedLines}\n  criteria now (${s.criteria.length}): ${list(s.criteria.map((c) => c.id))}\n  changed: ${list(changes.changed)}; added: ${list(changes.added)}; dropped: ${list(changes.dropped.map((d) => `${d.id} (${d.reason})`))}${owedLine}`, { ...s, changes });
       return 0;
     }
     case 'scope': {
+      // 0.7.0: where an open review finding goes when it is not fixed here: `list` shows every open finding with whether it
+      // blocks, `ticket` records a follow-up ticket's raw readback, `move` hands it to a sibling attempt. A finding that
+      // blocks leaves only with the owner's `wf approve` (kind move-out-of-batch).
       const s = openState(root, options);
-      if (!sub || sub === 'list') { print(options, scopeFindings(s), scopeFindings(s)); return 0; }
-      if (sub === 'ask') { const r = askScope(root, options); print(options, `${r.prompt}\n${JSON.stringify(r.findings, null, 2)}`, r); return 0; }
-      if (sub === 'decide') { const r = decideScope(root, options); print(options, 'owner scope decision recorded; run wf resume', r); return 0; }
+      if (!sub || sub === 'list') {
+        const rows = scopeRows(s);
+        print(options, rows.length ? rows.map((r) => `${r.ref}  ${r.blocks ? 'blocks' : 'observation'}  ${r.placement}${r.family ? `  [${r.family}]` : ''}${r.disposition ? `  ${r.disposition.choice}${r.disposition.ticket ? ` ${r.disposition.ticket}` : ''}${r.disposition.sibling ? ` -> ${r.disposition.sibling}` : ''}` : ''}  ${r.summary}`).join('\n') : `no open review findings on ${s.id}`, rows);
+        return 0;
+      }
       if (sub === 'ticket') { const r = completeScopeTicket(root, options); print(options, 'follow-up ticket readback recorded; run wf resume', r); return 0; }
-      throw new WfError('usage: wf scope list|ask|decide|ticket');
+      if (sub === 'fixed') { const r = recordFixed(root, options); const note = r.scopeDecisions.at(-1)?.notInCitedFile; print(options, `${options.finding} recorded fixed${note ? ` (the commit does not change the file ${note.join(', ')} cites${note.length > 1 ? '' : 's'}; the next reviewer verifies it)` : ''}; the next reviewer is handed it to verify; run wf resume`, r); return 0; }
+      if (sub === 'waive') { const r = waiveFinding(root, options); print(options, `${options.finding} waived by the person's decision; run wf resume`, r); return 0; }
+      if (sub === 'defer') { const r = deferFindings(root, options); print(options, `${options.finding} deferred; the delivered comment lists it as a known issue; run wf resume`, r); return 0; }
+      if (sub === 'move') {
+        const refs = String(options.finding ?? '').split(',').map((x) => x.trim()).filter(Boolean);
+        if (!refs.length) throw new WfError('usage: wf scope move --finding <round:id>[,<round:id>] --sibling <sibling attempt> [--reason "..."]');
+        const r = moveOut(root, options, refs, { to: options.sibling, reason: options.reason });
+        print(options, `${refs.join(', ')} moved to ${options.sibling}; run wf resume`, r);
+        return 0;
+      }
+      throw new WfError('usage: wf scope list|ticket|move|fixed|defer|waive');
     }
     case 'discovered': {
-      // I-18: the discovered-issue ledger. Any role records what it finds; only the owner defers, in their own words.
+      // I-18: the discovered-issue ledger. Any role records what it finds; only the owner defers (a confirmed decision).
       if (sub === 'add') {
         const r = addDiscovered(root, options);
-        print(options, `discovered ${r.id} recorded on ${r.state.id}${r.anchored ? '' : ` (no transcript anchor: ${r.anchorProblem}; only \`wf discovered defer ${r.id}\` at the owner's terminal can defer it)`}; fix it in this ticket and close it with the fix commit: \`wf discovered close ${r.id} --fixed <commit>\` (only the owner defers: \`--deferred\` once the owner's message starts with \`defer ${r.state.id}:${r.id}\`)`, r.state.discovered.at(-1));
+        print(options, `discovered ${r.id} recorded on ${r.state.id}; fix it here and close it with the fix commit (\`wf discovered close ${r.id} --fixed <commit>\`), or, by the severity rule, let it wait (\`wf discovered close ${r.id} --deferred --reason "<why>"\`: low freely, medium with your reason, high, unrated or an invariant only with the person's \`wf approve\`)`, r.state.discovered.at(-1));
         return 0;
       }
       if (sub === 'close') {
         const r = closeDiscovered(root, positional[0], options);
-        const d = r.state.discovered.find((x) => x.id === positional[0]);
-        print(options, r.outcome === 'fixed' ? `${d.id} fixed in ${r.repo}@${r.commit.slice(0, 10)}` : `${d.id} deferred on the owner's decision: "${d.deferred.decision}"`, d);
+        const ds = r.ids.map((id) => r.state.discovered.find((x) => x.id === id));
+        print(options, ds.map((d) => (r.outcome === 'fixed' ? `${d.id} fixed in ${r.repo}@${r.commit.slice(0, 10)}` : `${d.id} deferred (${channelOf(d)}): "${d.deferred.decision}"`)).join('\n'), ds.length === 1 ? ds[0] : ds);
         return 0;
       }
-      if (sub === 'defer') {
-        const { deferInTerminal } = await import('./discovered.mjs');
-        const r = await deferInTerminal(root, positional[0], options);
-        const d = r.state.discovered.find((x) => x.id === positional[0]);
-        print(options, `${d.id} deferred by the owner at the terminal: "${d.deferred.decision}"`, d);
+      if (sub === 'rate') {
+        const s2 = rateDiscovered(root, positional[0], options);
+        print(options, `${positional[0]} rated ${options.severity}`, s2.discovered.find((x) => x.id === positional[0]));
         return 0;
       }
       if (sub === 'list' || !sub) {
@@ -653,9 +787,21 @@ async function dispatch(cmd, sub, positional, options) {
         print(options, s.discovered.length ? s.discovered.map((d) => discoveredLine(d, s.id)).join('\n') : `no discovered issues on ${s.id}`, s.discovered);
         return 0;
       }
-      throw new WfError('usage: wf discovered add --summary "..." [--where file:line] [--found-by ID] | list | close D1 --fixed SHA | --deferred (once the owner\'s message starts with: defer <attempt>:<id>)');
+      throw new WfError('usage: wf discovered add --summary "..." [--severity high|medium|low] [--invariant "<which>"] [--kind defect|bookkeeping] [--where file:line] [--found-by ID] | list | rate D1 --severity S [--reason "..."] | close D1[,D2] --fixed SHA | --deferred --reason "..." (high, unrated or an invariant: the owner confirms with wf approve)');
     }
     case 'handoff': {
+      if (sub === 'wait') {
+        const { waitRole } = await import('./launch.mjs');
+        const result = await waitRole(root, options);
+        print(options, `${result.agent}: ${result.status}${result.session ? ` (${result.session})` : ''}`, result);
+        return result.exitCode;
+      }
+      if (sub === 'stop') {
+        const { stopRole } = await import('./launch.mjs');
+        const result = stopRole(root, options);
+        print(options, `${result.agent} stopped; hand a fresh one to continue (\`wf resume\`)`, result);
+        return 0;
+      }
       if (sub === 'run') {
         const state = openState(root, options);
         const member = state.handoffs.filter(h => h.agent === options.agent).at(-1);
@@ -665,7 +811,7 @@ async function dispatch(cmd, sub, positional, options) {
           print(options, `${result.status}: ${result.decision?.blockers?.join('; ') || result.decision?.guidance || result.error}`, result);
           return result.exitCode;
         }
-        const { runRole } = await import('./codex-run.mjs');
+        const { runRole } = await import('./launch.mjs');
         const result = await runRole(root, options);
         print(options, `Native ${result.agent}: ${result.status}${result.session ? ` (${result.session})` : ''}`, result);
         return result.exitCode;
@@ -677,16 +823,18 @@ async function dispatch(cmd, sub, positional, options) {
       }
       const r = handoff(root, sub, options);
       const startPrompt = r.startPrompt;
-      if (options.runtime === 'codex' && ['planner', 'reviewer'].includes(sub) && !r.model) process.stderr.write('warning: this handoff pins no Codex model and cannot launch; run `wf models refresh --attempt ' + r.state.id + '`, then create a fresh handoff\n');
+      const launchHost = findHost(options.runtime);
+      if (launchHost?.spawnMode === 'engine-only' && ['planner', 'reviewer'].includes(sub) && !r.model) process.stderr.write(`warning: this handoff pins no ${launchHost.name} model and cannot launch; run \`wf models refresh --attempt ${r.state.id}\`, then create a fresh handoff\n`);
       // I-25: plan restrictions the diff has outgrown, to the owner (stderr: never into a reviewer's prompt).
       for (const w of r.restrictions ?? []) process.stderr.write(`warning: ${w}\n`);
-      const sweepLines = r.sweeps?.length ? `pattern sweep (answer each in a commit trailer \`Sweep <id>: fixed - ...\` or \`Sweep <id>: clean - ...\`):\n${r.sweeps.map((x) => `  ${x.id} for ${x.finding}: ${x.hits} hit(s)${x.files.length ? `\n    ${x.files.slice(0, 20).join('\n    ')}${x.files.length > 20 ? `\n    … ${x.files.length - 20} more (in the bundle)` : ''}` : ''}`).join('\n')}\n` : '';
+      const sweepLines = r.sweeps?.length ? `pattern sweep (answer each family in a commit trailer with one proof: \`Sweep <id>: proof - <command> => <expected result>\`):\n${r.sweeps.map((x) => `  ${x.id} for ${x.family ? `family ${x.family} (${x.findings.join(', ')})` : x.finding}: ${x.hits} hit(s)${x.files.length ? `\n    ${x.files.slice(0, 20).join('\n    ')}${x.files.length > 20 ? `\n    … ${x.files.length - 20} more (in the bundle)` : ''}` : ''}`).join('\n')}\n` : '';
       // Never printed for a reviewer: its console carries only the start line.
       const api = await trackerApi(root, r.state.id);
       if (api && sub !== 'reviewer') process.stderr.write(`${api.trim()}\n`);
       const lessonsLine = r.lessons ? `lessons injected: ${r.lessons.apply.map((l) => l.id).join(', ') || 'none'}${r.lessons.omitted?.length ? ` (omitted by the cap: ${r.lessons.omitted.join(', ')})` : ''}${r.lessons.filtered?.length ? `\nlessons filtered out (outside this change's scope): ${r.lessons.filtered.map((l) => l.id).join(', ')}; \`wf lesson preview --attempt ${r.state.id} --role ${sub}\` says why` : ''}\n` : '';
       // Named failure (I-15): a role file `wf sync` changed after this session started is not what the agent loads.
-      const stale = r.roleStale ? `warning: ${path.relative(root, r.roleStale.file)} changed at ${r.roleStale.changedAt}, after this Claude Code session started (${r.roleStale.sessionStartedAt}). Claude Code reads agent files when a session starts, so an agent of type ${r.agentType} started from this session runs the old role (its tools and instructions). Restart Claude Code (\`claude --resume\` keeps this conversation) before starting it.\n` : '';
+      const staleHost = findHost(r.state.handoffs.find((x) => x.bundle === r.bundle)?.runtime);
+      const stale = r.roleStale ? `warning: ${path.relative(root, r.roleStale.file)} changed at ${r.roleStale.changedAt}, after this ${staleHost.label} session started (${r.roleStale.sessionStartedAt}). ${fragment(staleHost, 'staleRole', r.agentType)}\n` : '';
       // Named failure (I-14): the reviewer handoff printed no agent name, the reviewer was started unnamed, and its
       // closure was refused after the whole review. The owner is told the agent type and name on stderr.
       const how = r.members ? `Run wf handoff run --agent ${r.agent} --attempt ${r.state.id}; retain that foreground handle for scopes and integration` : `Start agent type ${r.agentType} (name it ${r.agent}; do not pass a model)`;
@@ -702,7 +850,8 @@ async function dispatch(cmd, sub, positional, options) {
       } else {
         if (stale) process.stderr.write(stale);
         // I-23: the implementer handoff stays open until it is closed, and no review round starts while it is open.
-        const closeLine = sub === 'implementer' ? `\nWhen it reports done (and its work is committed), close it: \`wf handoff close --agent ${r.agent} --attempt ${r.state.id}\` (\`--outcome stopped\` if you stop it); \`wf handoff reviewer\` refuses while it is open.` : '';
+        const closeLine = sub === 'implementer' ? `\nWhen it reports done (and its work is committed), close it: \`wf handoff close --agent ${r.agent} --attempt ${r.state.id}\` (\`--outcome stopped\` if you stop it); \`wf handoff reviewer\` refuses while it is open.`
+          : sub === 'strategist' ? `\nIt records its own decision (\`wf strategy record --closure ${r.closureFile}\`). Wait for its completion notification, or run it in the foreground: \`wf handoff run --agent ${r.agent} --attempt ${r.state.id}\`; never poll. Apply its decision before the next handoff.` : '';
         print(options, `${lessonsLine}${sweepLines}${sub} bundle: ${r.bundle}${r.work ? `\nwork item ${r.work}, class ${r.class}` : `\nclass ${r.class}`}${r.effort ? `, effort ${r.effort}` : ''}${r.model ? `, model ${r.model}` : ''}\n${how} with: "${startPrompt}"${closeLine}`, { ...r, startPrompt });
       }
       return 0;
@@ -735,7 +884,9 @@ async function dispatch(cmd, sub, positional, options) {
       return r.record && r.record.status !== 'passed' ? 1 : 0;
     }
     case 'run': {
-      if (!options.lease || options.lease === true || !options._.length) throw new WfError('usage: wf run --lease <name> -- <command...>');
+      const step = typeof options.step === 'string' ? options.step : null;
+      if ((options.step !== undefined && !step) || (!step && (!options.lease || options.lease === true)) || (options.lease === true) || (!step && !options._.length)) throw new WfError('usage: wf run --lease <name> -- <command...>   or   wf run --step <gate step id> [--lease <name>] (runs the step\'s declared `prepare`)');
+      if (step) return await runPrepared(root, openState(root, options), step, options._, { lease: options.lease ? String(options.lease) : null });
       const cfg = loadConfig(root);
       return await runWithLease(cfg, String(options.lease), options._);
     }
@@ -856,7 +1007,7 @@ async function dispatch(cmd, sub, positional, options) {
       let s = await recordTracker(root, cfg, openState(root, options), { ...options, engineCapture: undefined });
       s = closeAfterHandoff(root, s);
       const rec = s.tracker.done.filter((d) => d.event === options.event).at(-1);
-      const how = rec?.verified === 'host-recorded' ? `verified from the host's record (host-recorded: the ${rec.host?.runtime === 'codex' ? 'Codex' : 'Claude Code'} transcript holds the tracker's answer; a same-user process could edit that file)${rec.extraLines?.length ? `; ${rec.extraLines.length} line(s) added to the comment beyond the rendered one` : ''}` : rec?.mode === 'agent-reported' ? `recorded as agent-reported, unverified (the engine checked what the agent reported, not the tracker's answer${rec.extraLines?.length ? `; ${rec.extraLines.length} line(s) added to the comment beyond the rendered one` : ''})` : 'verified';
+      const how = rec?.verified === 'host-recorded' ? `verified from the host's record (host-recorded: the ${findHost(rec.host?.runtime)?.label ?? 'harness'} transcript holds the tracker's answer; a same-user process could edit that file)${rec.extraLines?.length ? `; ${rec.extraLines.length} line(s) added to the comment beyond the rendered one` : ''}` : rec?.mode === 'agent-reported' ? `recorded as agent-reported, unverified (the engine checked what the agent reported, not the tracker's answer${rec.extraLines?.length ? `; ${rec.extraLines.length} line(s) added to the comment beyond the rendered one` : ''})` : 'verified';
       print(options, `tracker ${options.event} ${how}. ${s.phase === 'done' ? 'Attempt closed and worktrees removed.' : `next: ${nextAction(root, s)}`}`, s);
       return 0;
     }
@@ -877,6 +1028,54 @@ async function dispatch(cmd, sub, positional, options) {
       s = closeAfterHandoff(root, loadState(root, s.id));
       const lp = lessonPrompts(s).filter((p) => p.startsWith('anomaly'));
       print(options, `shown recorded for ${s.id}: ${s.delivery.shown.screenshots.length} screenshot(s) with the owner's captions.${lp.map((p) => `\nlesson: ${p}`).join('')}${api}${s.phase === 'done' ? ' Attempt closed and worktrees removed.' : `\nnext: ${nextAction(root, s)}`}`, s);
+      return 0;
+    }
+    case 'decisions': {
+      const s = openState(root, options);
+      const list = options.all ? s.decisions : [...pendingDecisions(s), ...s.decisions.filter((d) => d.approved)];
+      print(options, list.length ? list.map(decisionLine).join('\n') : `no reserved decisions on ${s.id}`, list);
+      return 0;
+    }
+    case 'approve': {
+      const id = sub ?? positional[0];
+      if (!id) throw new WfError('usage: wf approve ID [--choice C] --attempt ATTEMPT (in the owner\'s own terminal)');
+      const r = await approveInTerminal(root, id, options);
+      print(options, `${r.decision} decided: ${r.choice}. next: ${nextAction(root, r.state)}`, { decision: r.decision, choice: r.choice });
+      return 0;
+    }
+    case 'intent': {
+      const r = setIntent(root, options, sub);
+      print(options, r.changed ? `${r.state.id} is now an implementation attempt (was analysis; recorded with the reason).\n${summary(root, r.state)}` : `${r.state.id} is already an implementation attempt`, r.state);
+      return 0;
+    }
+    case 'unlock': {
+      if (!options.attempt || options.attempt === true) throw new WfError('usage: wf unlock --attempt ID (removes the evidence lock of an attempt whose owner process is gone)');
+      const r = unlockEvidence(root, String(options.attempt));
+      print(options, r.note, r);
+      return 0;
+    }
+    case 'signals': {
+      const report = signalsReport(root, openState(root, options));
+      print(options, signalsText(report), report);
+      return 0;
+    }
+    case 'strategy': {
+      if (sub !== 'record') throw new WfError('usage: wf strategy record --closure <file> [--attempt ID]');
+      const r = recordStrategy(root, options);
+      const d = r.decision;
+      const parts = [`strategy decision ${d.id} recorded on ${r.state.id}: ${d.action}`, `prediction: ${d.prediction.signal} by ${typeof d.prediction.by === 'number' ? `round ${d.prediction.by}` : d.prediction.by}`];
+      if (r.split) parts.push(`split ${r.split.id}: ${r.split.siblings.map((x) => x.id).join(', ')} joined ${r.split.batch} with ${r.state.id}`);
+      if (r.escalation) parts.push(`the owner decides ${r.escalation.id} (${r.escalation.choices.join(' | ')}) in their own terminal: \`wf approve ${r.escalation.id}\``);
+      if (d.action === 'delta-review') parts.push('the next reviewer round is a delta round');
+      if (d.action === 'ticket') parts.push(`follow-up tickets owed for ${d.items.join(', ')}: file them in the tracker (the engine records no ticket); they are not part of this delivery`);
+      print(options, `${parts.join('\n  ')}\nnext: ${nextAction(root, r.state)}`, { decision: d, split: r.split ? { id: r.split.id, batch: r.split.batch, siblings: r.split.siblings.map((x) => x.id), moved: r.split.moved } : null, escalation: r.escalation?.id ?? null });
+      return 0;
+    }
+    case 'split': {
+      const s = openState(root, options);
+      if (!options.items || options.items === true) throw new WfError('usage: wf split --items <ids> --reason "why" [--attempt ID] (ids: work items, criteria, observations as reviewer:F1, discovered issues)');
+      const r = splitCommand(root, s, options);
+      print(options, `${r.id}: ${r.siblings.map((x) => x.id).join(', ')} created beside ${s.id} in ${r.batch} (delivered together)\n  moved: ${Object.entries(r.moved).filter(([, v]) => v.length).map(([k, v]) => `${k} ${v.join(', ')}`).join('; ') || 'nothing'}\n  each sibling carries its criteria from the plan; start its implementer: \`wf handoff implementer --attempt ${r.siblings[0].id} --agent <id>\`\n  once every member is accepted: \`wf batch create --members ${[s.id, ...r.siblings.map((x) => x.id)].join(',')}\`\nnext: ${nextAction(root, r.state)}`, { split: r.id, batch: r.batch, siblings: r.siblings.map((x) => x.id), moved: r.moved });
       return 0;
     }
     case 'hold': {
@@ -915,7 +1114,7 @@ async function dispatch(cmd, sub, positional, options) {
       }
       if (sub === 'eject') {
         const s = batchEject(root, options);
-        print(options, `ejected ${options.member} from ${s.id}`, s);
+        print(options, `ejected ${options.member} from ${options.batch}`, s);
         return 0;
       }
       throw new WfError('usage: wf batch create --members A,B | wf batch eject --batch B --member A');
@@ -944,6 +1143,10 @@ async function dispatch(cmd, sub, positional, options) {
       const bad = [];
       for (const id of ids) {
         const p = verifyAttempt(root, id, { full: true });
+        // Named failure (I-78): with the evidence folder renamed, `wf verify --attempt X` printed "verified 1 attempt(s)" for an
+        // attempt that has no ledger at all (an empty ledger reads as a pre-manifest attempt). The attempt asked for must exist;
+        // a folder that is a link, or any other problem verification names, is still reported as such.
+        if (!p.length && !options.all && !listAttempts(root).includes(id)) throw refuse(`${id} has no ledger here, so nothing was verified; it is not an attempt of this project (or its evidence folder was renamed or moved)`, '`wf status --all` lists the attempts; restore the folder if it was moved', { id: 'verify:no-attempt' });
         if (p.length) bad.push({ id, problems: p });
       }
       print(options, bad.length ? bad.map((b) => `${b.id}: ${b.problems.length} problem(s): the evidence does not match what wf recorded\n  - ${b.problems.slice(0, 20).join('\n  - ')}`).join('\n') : `verified ${ids.length} attempt(s): ledger chain, anchor and every recorded evidence file (sha256, size, mode) match; no extra file`, bad);
@@ -1012,14 +1215,14 @@ async function dispatch(cmd, sub, positional, options) {
         return 0;
       }
       if (sub === 'apply') {
-        const l = loadLessons(root).find((x) => x.id === positional[0]);
+        const l = findLesson(loadLessons(root), positional[0]);
         if (!l) throw new WfError(`no lesson ${positional[0] ?? ''}`);
         const a = applySnippet(l);
         print(options, `to enforce ${l.id} (${l.mechanism?.kind}), add to ${a.where}:\n\n${a.snippet}\nwf changes nothing itself: add it, commit it with the owner's approval, then \`wf lesson set ${l.id} --status enforced${a.ref ? ` --ref ${a.ref}` : ' --ref <what enforces it>'}\``, a);
         return 0;
       }
       if (sub === 'show') {
-        const l = loadLessons(root).find((x) => x.id === positional[0]);
+        const l = findLesson(loadLessons(root), positional[0]);
         if (!l) throw new WfError(`no lesson ${positional[0] ?? ''}`);
         print(options, `${show(l)}\n  what happened: ${l.trigger?.what ?? ''}${l.trigger?.quote ? `\n  in their words: "${l.trigger.quote}"` : ''}${l.trigger?.attempt ? `\n  seen in: ${l.trigger.attempt}${l.trigger.finding ? ` (finding ${l.trigger.finding})` : ''}` : ''}\n  tags: ${l.tags.join(', ') || 'none'}; scope: ${[l.repo ? `repo ${l.repo}` : null, l.components?.length ? `components ${l.components.join(', ')}` : null, l.paths.length ? `paths ${l.paths.join(', ')}` : null, l.kinds?.length ? `kinds ${l.kinds.join(', ')}` : null].filter(Boolean).join('; ') || 'none declared (matched only by its tags in the ticket)'}\n  ${l.file}`, l);
         return 0;
@@ -1027,7 +1230,7 @@ async function dispatch(cmd, sub, positional, options) {
       if (sub === 'review') {
         const r = reviewLessons(root, { after: options.after ? Number(options.after) : 10 });
         const part = (title, list, hint) => `${title} (${list.length})${list.length ? `:\n${list.map((l) => `  ${show(l)}`).join('\n')}\n  → ${hint}` : ''}`;
-        print(options, [part('recurring: promote the mechanism to a gate check', r.promote, '`wf lesson apply <id>` with mechanism gate-check'), part('proposed: apply the mechanism', r.apply, '`wf lesson apply <id>`, then `wf lesson set <id> --status enforced --ref ...`'), part(`not injected into any of the last ${r.attempts} attempts: retire?`, r.retire, '`wf lesson set <id> --status retired`')].join('\n'), r);
+        print(options, [part('recurring: promote the mechanism to a gate check, or (a standing rule for every ticket) the sentence to the quality bar', r.promote, '`wf lesson apply <id>` with mechanism gate-check; a rule every change is held to also goes under `quality:` in the adapter, with the user\'s go'), part('proposed: apply the mechanism', r.apply, '`wf lesson apply <id>`, then `wf lesson set <id> --status enforced --ref ...`'), part(`not injected into any of the last ${r.attempts} attempts: retire?`, r.retire, '`wf lesson set <id> --status retired`')].join('\n'), r);
         return 0;
       }
       if (sub === 'export') {
@@ -1041,7 +1244,7 @@ async function dispatch(cmd, sub, positional, options) {
       if (sub === 'list' || !sub) {
         const all = loadLessons(root);
         // A lesson declaring no scope is injected only when the ticket mentions one of its tags.
-        const unscoped = all.filter((l) => l.status !== 'retired' && l.scope !== 'plugin' && !l.repo && !l.paths.length && !l.components?.length && !l.kinds?.length).map((l) => `lesson ${l.id} declares no scope (repo, components, paths or kinds): it is injected only when the ticket mentions one of its tags (${l.tags.join(', ') || 'it has none'}); add \`components\`, \`paths\` or \`kinds\` to its file, or \`paths: ["**"]\` for every change`);
+        const unscoped = all.filter((l) => l.status !== 'retired' && l.scope !== 'plugin' && !l.repo && !l.paths.length && !l.components?.length && !l.kinds?.length && l.tags.length).map((l) => `lesson ${l.id} declares no scope (repo, components, paths or kinds): it is injected only when the ticket mentions one of its tags (${l.tags.join(', ') || 'it has none'}); add \`components\`, \`paths\` or \`kinds\` to its file, or \`paths: ["**"]\` for every change`);
         const warn = [...lessonWarnings(root), ...unscoped].map((w) => `\nwarning: ${w}`).join('');
         print(options, `${all.length ? all.map(show).join('\n') : `no lessons yet (${path.join('.workflow', 'lessons')})`}${warn}`, all);
         return 0;
@@ -1112,15 +1315,16 @@ async function dispatch(cmd, sub, positional, options) {
     }
     case 'resume': {
       const s = openState(root, options);
-      const base = isOpen(s) ? safeBase(root, s) : null;
-      print(options, summary(root, s, { base, resume: true }), { ...s, next: nextAction(root, s), decision: nextDecision(root, s), liveGate: liveGate(root, s), base });
+      const gone = orphansOf(s);
+      const base = isOpen(s) && !gone.length ? safeBase(root, s) : null;
+      print(options, summary(root, s, { base, resume: true }), { ...s, next: nextOf(root, s), decision: gone.length ? null : nextDecision(root, s), liveGate: liveGate(root, s), base, ...(gone.length ? { orphaned: gone } : {}) });
       return 0;
     }
     case 'status': {
       // --attempt narrows the listing to that attempt; without it every open attempt is shown.
       const states = options.attempt ? [openState(root, options)] : listAttempts(root).map((id) => loadState(root, id)).filter(isOpen).map((s) => (openEvidence(root, s.id), s));
-      const rows = states.map((s) => ({ s, base: isOpen(s) ? safeBase(root, s) : null }));
-      print(options, rows.length ? rows.map(({ s, base }) => summary(root, s, { base })).join('\n\n') : 'no open attempts', options.json ? rows.map(({ s, base }) => ({ ...s, next: nextAction(root, s), base })) : undefined);
+      const rows = states.map((s) => ({ s, base: isOpen(s) && !orphansOf(s).length ? safeBase(root, s) : null }));
+      print(options, rows.length ? rows.map(({ s, base }) => summary(root, s, { base })).join('\n\n') : 'no open attempts', options.json ? rows.map(({ s, base }) => ({ ...s, next: nextOf(root, s), base, ...(orphansOf(s).length ? { orphaned: orphansOf(s) } : {}) })) : undefined);
       return 0;
     }
     case 'base': {
