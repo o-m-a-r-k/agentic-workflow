@@ -590,7 +590,7 @@ function takeMachineLease(name, capacity, who = null) {
 }
 
 // The live processes holding a lease's slots right now, with what they say they run (a gate step: the attempt and the step; a
-// `wf run`: that) or, for a holder from an older version, the command line `ps` shows.
+// `wf run`: its program name); a holder that recorded nothing is only a pid.
 export function leaseHolders(name) {
   const dir = leasesDir();
   let names = [];
@@ -953,10 +953,12 @@ async function executeRun(root, state, plan, live, run) {
     }
   };
   const abort = (error) => {
-    fatal ??= error;
-    try {
-      say(`aborting: ${ctx.redact(String(error?.message ?? error))}`);
-    } catch {}
+    if (!fatal) {
+      fatal = error;
+      try {
+        say(`aborting: ${ctx.redact(String(error?.message ?? error))}`);
+      } catch {}
+    }
     onSignal();
     wake();
   };
