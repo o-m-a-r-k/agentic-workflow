@@ -8,7 +8,7 @@
 // one on a critical boundary leaves the delivery batch only with the owner's `wf approve` (kind move-out-of-batch).
 import path from 'node:path';
 import { actor, openState } from './attempt.mjs';
-import { append, attemptDir, loadState } from './ledger.mjs';
+import { append, attemptDir, loadState, recordedTogether } from './ledger.mjs';
 import { deliverCoreDecision, requireYes } from './approve.mjs';
 import { readRegular, withEvidenceTransaction } from './evidence.mjs';
 import { blockingIn, dispositionOf, locationsOf, observations, openAcrossRounds, placementLevel } from './review-policy.mjs';
@@ -87,7 +87,9 @@ export function moveOut(root, options, refs, { to, reason }) {
 // the ticket), a medium one needs `--reason` (the agent's recorded judgement), a low one needs neither.
 export function completeScopeTicket(root, options) {
   const opened = openState(root, options);
-  return withEvidenceTransaction(root, opened.id, () => ticketLocked(root, options, loadState(root, opened.id)));
+  // Named failure (I-109): the follow-up ticket's readback was written inside the transaction but recorded in the manifest only when
+  // the process ended (a reader in between saw an extra file); it is recorded with the decision that cites it.
+  return recordedTogether(root, opened.id, () => ticketLocked(root, options, loadState(root, opened.id)));
 }
 function ticketLocked(root, options, state) {
   const refs = [...new Set(String(options.finding ?? '').split(',').map((x) => x.trim()).filter(Boolean))];

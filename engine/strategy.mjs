@@ -18,8 +18,7 @@ import path from 'node:path';
 import { acceptedTreeStands, actor, openState } from './attempt.mjs';
 import { approveHint, createDecision, questionFor } from './approve.mjs';
 import { STRATEGY_DEFAULTS, ADAPTER_DIR, agentTypeFor, roleClass, trustedAdapter } from './config.mjs';
-import { seal, withEvidenceTransaction } from './evidence.mjs';
-import { append, attemptDir, loadState } from './ledger.mjs';
+import { append, attemptDir, loadState, recordedTogether } from './ledger.mjs';
 import { executionSettings } from './models.mjs';
 import { startPromptFor } from './provenance.mjs';
 import { defaultRuntime } from './runtime-policy.mjs';
@@ -335,10 +334,9 @@ export function strategistHandoff(root, state, options) {
   // and the file was recorded in the manifest only when the process ended, so a `wf` command another session ran in between
   // found a file nobody had recorded and refused with "extra file (not written by wf)". Written, entered in the ledger and
   // recorded in one transaction, as a reviewer handoff is (`publish` in lifecycle.mjs): a reader sees none of it or all.
-  withEvidenceTransaction(root, state.id, () => {
+  recordedTogether(root, state.id, () => {
     writeJson(file, bundle);
     append(root, state.id, 'handoff', { role: 'strategist', agent, runtime, session: options.session ?? null, agentType, class: cls, effort, model, sourceClass, runtimeAdapterBase, startPrompt, work: null, bundle: file, reason: handedBecause }, actor(options));
-    seal(append, { root, id: state.id });
   });
   return { bundle: file, startPrompt, agentType, agent, roleStale: null, restrictions: [], sweeps: null, class: cls, effort, model, work: null, lessons: null, closureFile, state: loadState(root, state.id) };
 }

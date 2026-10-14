@@ -16,8 +16,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { actor, openState, treeHashes } from './attempt.mjs';
-import { append, attemptDir, loadState } from './ledger.mjs';
-import { prepareWrite, readRegular, withEvidenceTransaction, writeNoFollow } from './evidence.mjs';
+import { append, attemptDir, loadState, recordedTogether } from './ledger.mjs';
+import { prepareWrite, readRegular, writeNoFollow } from './evidence.mjs';
 import { mkdirStateDirectory } from './state-folders.mjs';
 import { gateAdapter } from './validation.mjs';
 import { WfError, canonical, git, refuse, sha256 } from './util.mjs';
@@ -78,7 +78,9 @@ function listImages(dir, rel = '', out = []) {
 // `wf captures import --from <folder> | --file <image> [--criteria C5,C6] [--note "how they were made"] [--for <member>]`.
 export function importCaptures(root, options) {
   const opened = openState(root, options);
-  return withEvidenceTransaction(root, opened.id, () => importLocked(root, options, loadState(root, opened.id)));
+  // Named failure (I-109): the imported images were written and entered in the ledger inside the evidence transaction but recorded in
+  // the manifest only when the process ended, so a `wf status` run in between refused with "extra file (not written by wf)".
+  return recordedTogether(root, opened.id, () => importLocked(root, options, loadState(root, opened.id)));
 }
 
 function importLocked(root, options, state) {

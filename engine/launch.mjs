@@ -12,8 +12,8 @@ import { executionSettings, rejectModelOverrides } from './models.mjs';
 import { actor, openState, treeHashes } from './attempt.mjs';
 import { assertRuntimeLaunch } from './runtime-policy.mjs';
 import { adapterFileAtCommit, trustedAdapter } from './config.mjs';
-import { append, loadState } from './ledger.mjs';
-import { readRegular, seal, withEvidenceTransaction } from './evidence.mjs';
+import { append, loadState, recordedTogether } from './ledger.mjs';
+import { readRegular, seal } from './evidence.mjs';
 import { reviewDocumentProblems } from './rules.mjs';
 import { isCurrentReviewer, reviewSnapshot } from './review-groups.mjs';
 import { closureMissingGuidance, roundMode, unreachedOf } from './review-policy.mjs';
@@ -72,12 +72,11 @@ export async function runRole(root, options) {
   const launchLock = path.join(root, '.wf-worktrees', state.id, '_runner', path.basename(h.bundle) + '.launch.lock');
   if (canonicalPath(launchLock) !== path.join(fs.realpathSync(root), '.wf-worktrees', state.id, '_runner', path.basename(h.bundle) + '.launch.lock')) throw refuse('native launch control path resolves outside its recorded location');
   withFileLock(launchLock, () => {
-    withEvidenceTransaction(root, state.id, () => {
+    recordedTogether(root, state.id, () => {
     // Named failure (I-69): the refusal named no way on for an owner whose launched reviewer ended without a closure.
     if (loadState(root, state.id).handoffs.find((x) => x.bundle === h.bundle)?.launch) throw refuse('this handoff was already launched; create a fresh handoff, never reuse a review round', `\`wf handoff ${h.role} --agent <new id> --attempt ${state.id}\` hands a fresh ${h.role}, then \`wf handoff run --agent <new id> --attempt ${state.id}\` launches it${h.role === 'reviewer' ? '; a round with no recorded closure is not an audit and counts toward nothing' : ''}`);
     writeJson(file, receipt);
     append(root, state.id, 'agent.launch.requested', { handoff: h.bundle, file, sha256: sha256(JSON.stringify(receipt, null, 2) + '\n') }, actor(options));
-    seal(append, { root, id: state.id });
     });
   });
   seal(append);

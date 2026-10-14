@@ -6,7 +6,7 @@ import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { adapterFileAtCommit, loadConfigAtCommit, trustedAdapter } from './config.mjs';
-import { append, attemptDir, listAttempts, loadState } from './ledger.mjs';
+import { append, attemptDir, listAttempts, loadState, recordedTogether } from './ledger.mjs';
 import { loadCatalog, readSecret } from './secrets.mjs';
 import { WfError, canonical, hashFile, now, readJson, refuse, sha256, writeImmutable } from './util.mjs';
 import { home } from './provenance.mjs';
@@ -156,13 +156,19 @@ export function deliveredComment(root, cfg, state, assets = {}) {
 export const commentFile = (root, id) => path.join(attemptDir(root, id), 'delivery', 'delivered-comment.md');
 
 // The comment to post, refreshed whenever what it shows changes (summary, captions). Engine-written; read it, never edit it.
+// Named failure (I-109): the file was written (and, on a refresh, rewritten in place) with no transaction and recorded in the
+// manifest only when the process ended, so a `wf status` run in between was refused with "extra file (not written by wf)" or a
+// size mismatch. It is written and recorded in one transaction.
 export function writeDeliveredComment(root, cfg, state) {
   const c = deliveredComment(root, cfg, state);
   if (!c) return null;
-  prepareWrite(commentFile(root, state.id));
-  mkdirStateDirectory(path.dirname(commentFile(root, state.id)), { recursive: true });
-  writeNoFollow(commentFile(root, state.id), c.body);
-  return commentFile(root, state.id);
+  const file = commentFile(root, state.id);
+  recordedTogether(root, state.id, () => {
+    prepareWrite(file);
+    mkdirStateDirectory(path.dirname(file), { recursive: true });
+    writeNoFollow(file, c.body);
+  });
+  return file;
 }
 
 // Normalised for comparison with what the tracker returns: placeholders and signed urls become one token per image,
@@ -201,11 +207,16 @@ export function recordSummary(root, cfg, state, options) {
   if (problems.length) throw refuse(`summary refused:\n  - ${problems.join('\n  - ')}`);
   const n = (state.delivery.summaries ?? 0) + 1;
   const raw = path.join(attemptDir(root, state.id), 'delivery', `summary-${n}.raw.md`);
-  writeImmutable(raw, `${text}\n`);
-  append(root, state.id, 'delivery.summary', { text, sha256: sha256(text), raw: { path: raw, sha256: hashFile(raw) } }, options.actorId ?? null);
-  const after = loadState(root, state.id);
-  if (after.delivery.completedAt) writeDeliveredComment(root, cfg, after);
-  return after;
+  // Named failure (I-109): the raw summary was written, and the comment refreshed from it, outside any transaction and recorded
+  // only when the process ended (`wf deliver --summary-file` goes on to push for minutes). One transaction holds the summary, its
+  // ledger entry and the refreshed comment.
+  return recordedTogether(root, state.id, () => {
+    writeImmutable(raw, `${text}\n`);
+    append(root, state.id, 'delivery.summary', { text, sha256: sha256(text), raw: { path: raw, sha256: hashFile(raw) } }, options.actorId ?? null);
+    const after = loadState(root, state.id);
+    if (after.delivery.completedAt) writeDeliveredComment(root, cfg, after);
+    return after;
+  });
 }
 
 // Turns an engine event into the concrete actions the agent (or adapter) must perform.
@@ -441,15 +452,26 @@ async function recordAgentReported(root, cfg, state, options, event, pending) {
   }
   if (problems.length) throw refuse(`agent-reported readback for \`${event}\` refused:\n  - ${problems.join('\n  - ')}`);
   const dest = path.join(attemptDir(root, state.id), 'tracker', `${event}-reported.json`);
-  writeImmutable(dest, reportText);
-  let commentRec = null;
-  if (comment) {
-    const cdest = path.join(attemptDir(root, state.id), 'tracker', `${event}-posted-comment.md`);
-    writeImmutable(cdest, comment.text);
-    commentRec = { path: cdest, sha256: comment.sha256, id: r.comment?.id ?? null };
-  }
-  append(root, state.id, 'tracker.recorded', { event, provenance: AGENT_REPORTED, verified: false, mode: 'agent-reported', capture: { path: dest, sha256: hashFile(dest) }, readAt: r.readAt, status: r.status ?? null, ...(commentRec ? { comment: commentRec } : {}), ...(extra.length ? { extraLines: extra.slice(0, 50).map((l) => scrub(l)) } : {}), attachments: (Array.isArray(r.attachments) ? r.attachments : []).slice(0, 200).map((x) => ({ title: x?.title ?? null, caption: x?.subtitle ?? null, assetUrl: reportedAssetUrl(x) })) }, null);
+  // Named failure (I-109): the report and the posted comment were written outside any transaction and recorded in the manifest only
+  // when the process ended. The files, their entry in the ledger and their record in the manifest are one transaction now.
+  recordedTogether(root, state.id, () => {
+    writeImmutable(dest, reportText);
+    let commentRec = null;
+    if (comment) {
+      const cdest = path.join(attemptDir(root, state.id), 'tracker', `${event}-posted-comment.md`);
+      writeImmutable(cdest, comment.text);
+      commentRec = { path: cdest, sha256: comment.sha256, id: r.comment?.id ?? null };
+    }
+    append(root, state.id, 'tracker.recorded', { event, provenance: AGENT_REPORTED, verified: false, mode: 'agent-reported', capture: { path: dest, sha256: hashFile(dest) }, readAt: r.readAt, status: r.status ?? null, ...(commentRec ? { comment: commentRec } : {}), ...(extra.length ? { extraLines: extra.slice(0, 50).map((l) => scrub(l)) } : {}), attachments: (Array.isArray(r.attachments) ? r.attachments : []).slice(0, 200).map((x) => ({ title: x?.title ?? null, caption: x?.subtitle ?? null, assetUrl: reportedAssetUrl(x) })) }, null);
+  });
   return loadState(root, state.id);
+}
+
+// The engine's own readback as the tracker answered it, kept beside the capture that cites it (inside a recorded transaction).
+function writeEngineAnswer(engine) {
+  prepareWrite(engine.file);
+  mkdirStateDirectory(path.dirname(engine.file), { recursive: true });
+  writeNoFollow(engine.file, engine.text);
 }
 
 export async function recordTracker(root, cfg, state, options) {
@@ -460,13 +482,16 @@ export async function recordTracker(root, cfg, state, options) {
   if (!pending.length) throw refuse(`no pending tracker actions for event \`${event}\``);
   if (options['agent-reported']) return recordAgentReported(root, cfg, state, options, event, pending);
   if (options['from-transcript']) return recordFromTranscript(root, cfg, state, options, event, pending, await loadTrackerAdapter(root, cfg, state));
-  if (!options.capture) throw new WfError(`--capture <file> is required: the raw tracker response the agent saved${cfg.tracker.via === 'connector' ? ' (or, when the tool results are only in the chat, `--agent-reported --file <reported.json> --comment-file <posted.md>`)' : ''}`);
+  // The engine's own readback (`performTracker`) arrives as { file, text }: its bytes are in hand, and the file they are kept in is
+  // written with the rest of the record, not before (below).
+  const engine = options.engineCapture && typeof options.engineCapture === 'object' ? options.engineCapture : null;
+  if (!options.capture && !engine) throw new WfError(`--capture <file> is required: the raw tracker response the agent saved${cfg.tracker.via === 'connector' ? ' (or, when the tool results are only in the chat, `--agent-reported --file <reported.json> --comment-file <posted.md>`)' : ''}`);
   const adapter = await loadTrackerAdapter(root, cfg, state);
-  const capturePath = path.resolve(String(options.capture));
+  const capturePath = engine ? engine.file : path.resolve(String(options.capture));
   // Read once: the bytes checked are the bytes kept (and the ones hashed for the recycled-capture check). With
   // --comments, the two saved tool results (get_issue, list_comments) are kept together, unchanged, as one list.
   const commentsPath = typeof options.comments === 'string' ? path.resolve(options.comments) : null;
-  const captureText = commentsPath ? `[${fs.readFileSync(capturePath, 'utf8').trim()},\n${fs.readFileSync(commentsPath, 'utf8').trim()}]\n` : fs.readFileSync(capturePath, 'utf8');
+  const captureText = engine ? engine.text : commentsPath ? `[${fs.readFileSync(capturePath, 'utf8').trim()},\n${fs.readFileSync(commentsPath, 'utf8').trim()}]\n` : fs.readFileSync(capturePath, 'utf8');
   const provenance = options.engineCapture ? 'engine (tracker API)' : options.hostRecorded ? HOST_RECORDED : captureProvenance([capturePath, ...(commentsPath ? [commentsPath] : [])]);
   const extraLines = [];
   let raw;
@@ -587,12 +612,24 @@ export async function recordTracker(root, cfg, state, options) {
       }
     }
   }
-  if (problems.length) throw refuse(`tracker readback for \`${event}\` failed:\n  - ${problems.join('\n  - ')}`);
+  if (problems.length) {
+    // The engine had already acted on the tracker when it read this answer back: the answer is kept though it failed the checks, so
+    // the failure can be read against what the tracker holds (as it always was), written and recorded in one transaction.
+    if (engine) recordedTogether(root, state.id, () => writeEngineAnswer(engine));
+    throw refuse(`tracker readback for \`${event}\` failed:\n  - ${problems.join('\n  - ')}`);
+  }
   const dest = path.join(attemptDir(root, state.id), 'tracker', `${event}-capture.json`);
-  writeImmutable(dest, captureText);
   const level = options.engineCapture ? 'engine-read' : options.hostRecorded ? 'host-recorded' : provenance === 'host tool-result file' ? 'host-saved' : false;
   const host = options.hostRecorded ? { runtime: options.hostRecorded.runtime, transcript: options.hostRecorded.transcript, lines: options.hostRecorded.lines, posted: { comments: options.hostRecorded.posted.comments.map((b) => sha256(b)), statuses: options.hostRecorded.posted.statuses, attachments: options.hostRecorded.posted.attachments } } : null;
-  append(root, state.id, 'tracker.recorded', { event, provenance, verified: level, capture: { path: dest, sha256: hashFile(dest) }, status: issue.status, ...(host ? { host } : {}), ...(extraLines.length ? { extraLines: extraLines.slice(0, 50).map((l) => scrub(l)) } : {}), ...(verified.length ? { attachments: verified } : {}) }, null);
+  // Named failure (I-109): the capture was written (and, for the engine's own readback, the raw answer beside it) with no
+  // transaction and recorded in the manifest only when the process ended; the engine's tracker loop made the next network call
+  // with the previous event's files still unrecorded, so a `wf status` run meanwhile was refused with "extra file (not written
+  // by wf)". The readback is awaited first and the files, the ledger entry and their record follow in one transaction.
+  recordedTogether(root, state.id, () => {
+    if (engine) writeEngineAnswer(engine);
+    writeImmutable(dest, captureText);
+    append(root, state.id, 'tracker.recorded', { event, provenance, verified: level, capture: { path: dest, sha256: hashFile(dest) }, status: issue.status, ...(host ? { host } : {}), ...(extraLines.length ? { extraLines: extraLines.slice(0, 50).map((l) => scrub(l)) } : {}), ...(verified.length ? { attachments: verified } : {}) }, null);
+  });
   return loadState(root, state.id);
 }
 
@@ -783,11 +820,10 @@ export async function performTracker(root, cfg, state) {
       // Only the message, never the error object (a fetch error's cause can carry the request), scrubbed of the key.
       return { performed, note: `tracker ${via} (${event}) failed: ${scrub(String(error?.message ?? error), [token])}; the actions stay pending` };
     }
+    // The network answer is in hand; nothing is written into the evidence until `recordTracker` writes it with the record that
+    // cites it, in one transaction (I-109). The lock is never held across the call above.
     const file = path.join(attemptDir(root, s.id), 'tracker', `${event}-${via}-${now().replace(/[:.]/g, '-')}.json`);
-    prepareWrite(file);
-    mkdirStateDirectory(path.dirname(file), { recursive: true });
-    writeNoFollow(file, `${JSON.stringify(raw, null, 2)}\n`);
-    s = await recordTracker(root, cfg, s, { event, capture: file, engineCapture: true });
+    s = await recordTracker(root, cfg, s, { event, engineCapture: { file, text: `${JSON.stringify(raw, null, 2)}\n` } });
     performed.push(event);
   }
   return { performed, note: null, state: s };

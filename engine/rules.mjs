@@ -54,7 +54,7 @@ const commitFor = (root, cfg, state, repo) => {
 // the attempt's evidence), the changed files it matched, and whether the ticket itself changed one of its documents.
 // Named failure: applicable documents missing at the frozen base silently removed review obligations.
 // Refuse before a reviewer is created; an unrelated missing rule remains only a doctor warning.
-export function reviewRules(root, trusted, state, changed, pending = null) {
+export function reviewRules(root, trusted, state, changed, pending) {
   const multi = Object.keys(changed).length > 1;
   const out = [];
   const applicable = [];
@@ -79,11 +79,9 @@ export function reviewRules(root, trusted, state, changed, pending = null) {
       const file = path.join(attemptDir(root, state.id), 'rules', `${sha256(d.text).slice(0, 12)}-${path.posix.basename(d.doc)}`);
       // Named failure (I-109): the copy was written here, while the bundle was still being built and before the handoff was
       // recorded, so a `wf status` run at that moment was refused with "extra file (not written by wf)", and a handoff
-      // refused afterwards left the copy behind. With `pending` the caller writes it (`writeRuleDocuments`) inside the
-      // transaction that records the handoff; without it (no caller does that now) it is written at once.
-      if (pending) {
-        if (!pending.some((p) => p.file === file)) pending.push({ file, text: d.text });
-      } else writeRuleDocument({ file, text: d.text });
+      // refused afterwards left the copy behind. The caller writes `pending` (`writeRuleDocuments`) inside the transaction that
+      // records the handoff; there is no write here (a write at once, for a caller with no `pending`, was reachable by none).
+      if (!pending.some((p) => p.file === file)) pending.push({ file, text: d.text });
       read.push(file);
       // The worktree copy counts as read only when the ticket did not change it (then it is the same document).
       const wt = repo && state.repos[repo.name]?.worktree;

@@ -15,8 +15,8 @@ import { detectOwner, findHost, fragment, hostChoice, isHost, lastFencedYaml, op
 import { defaultRuntime } from './runtime-policy.mjs';
 import { ADAPTER_DIR, adapterFileAtCommit, agentTypeFor, attemptAdapter, declared, loadConfig, repoDir, roleClass, trustedAdapter } from './config.mjs';
 import { focusedSkips, gateBusy, gatePassedForCurrentTree, gateRunningRefusal, screenshots, withReviewLock } from './gate.mjs';
-import { append, attemptDir, evidenceRoot, keptFiles, listAttempts, loadState, openEvidence } from './ledger.mjs';
-import { assertUnchanged, readEvidenceFile, seal, withEvidenceTransaction } from './evidence.mjs';
+import { append, attemptDir, evidenceRoot, keptFiles, listAttempts, loadState, openEvidence, recordedTogether } from './ledger.mjs';
+import { assertUnchanged, readEvidenceFile, seal } from './evidence.mjs';
 import { implementerAcks, lessonPrompts, lessonVerdicts, owesLesson, recur, relevantLessons } from './lessons.mjs';
 import { canonical as canonicalPath, isInside, touchesEvidence } from './paths.mjs';
 import { changedForStep, deliveryOrder, impact, inside, packageOf } from './topology.mjs';
@@ -98,17 +98,8 @@ function keepRaw(root, id, rel, content) {
 }
 const extOf = (file) => (String(file).endsWith('.json') ? 'json' : 'yaml');
 
-// Evidence a command writes and the ledger entry that records it are one transaction, sealed before it ends. Named failure
-// (I-109): the files were written first, outside any transaction, and entered in the manifest when the process ended, so a
-// `wf status` run in between was refused with "extra file (not written by wf)"; a handoff that failed after its write left
-// the file behind. A reader now sees none of it or all.
-export function recordedTogether(root, id, fn) {
-  return withEvidenceTransaction(root, id, () => {
-    const out = fn();
-    seal(append, { root, id });
-    return out;
-  });
-}
+// `recordedTogether` (engine/ledger.mjs): evidence a command writes and the ledger entry that records it are one transaction.
+export { recordedTogether };
 
 // The plan file's schema. `wf plan` once read only `plan`, so a contract, anchors or test selectors written as
 // top-level keys were dropped from the frozen plan and never reached the implementers. Plan sections may sit under
@@ -797,7 +788,7 @@ export function handoff(root, role, options) {
   const record = () => {
     if (preparedTree && canonical(treeHashes(state)) !== canonical(preparedTree)) throw refuse('the tree changed while preparing the review handoff; prepare a fresh handoff');
     if (groupMembers) {
-      return withEvidenceTransaction(root, state.id, () => {
+      return recordedTogether(root, state.id, () => {
       if (reviewSnapshot(loadState(root, state.id)) !== reviewSnapshot(state)) throw refuse('review obligations changed while preparing the group; prepare a fresh handoff');
       const { planFile, planText, historyFile, historyText } = division.evidence;
       writeRuleDocuments(ruleDocs);
@@ -813,7 +804,6 @@ export function handoff(root, role, options) {
           gate: gateNow.ok ? state.lastGate.runId : null, round: bundle.round, mode,
           reviewGroup: { ...member.bundle.reviewGroup, bundleSha256: sha256(JSON.stringify(member.bundle, null, 2) + '\n') } }, actor(options));
       }
-      seal(append, { root, id: state.id });
       });
     }
     writeRuleDocuments(ruleDocs);
@@ -841,10 +831,7 @@ export function handoff(root, role, options) {
   // Named failure (I-50): the bundle was written, and only later (when this process ended) recorded in the manifest, so a
   // `wf` command another session ran in between found an unrecorded handoff file and refused with "evidence does not
   // match what wf recorded". Written, entered in the ledger and recorded in one transaction: a reader sees none of it or all.
-  const publish = () => withEvidenceTransaction(root, state.id, () => {
-    record();
-    seal(append, { root, id: state.id });
-  });
+  const publish = () => recordedTogether(root, state.id, record);
   if (role === 'reviewer') withReviewLock(root, state, publish);
   else publish();
   // Once per attempt: with parallel work items every implementer handoff queued another identical tracker read.
@@ -1211,7 +1198,7 @@ export function recordReview(root, options) {
       // A part is the scoped reviewer's findings; the integration reviewer owns the criteria and the earlier rounds.
       closure = { ...closure, criteria: [], priorFindings: undefined };
       if ((state.reviewParts ?? []).some(p => p.handoff === reviewerHandoff.bundle)) throw refuse('this scoped closure is already recorded; parts are immutable');
-      return withEvidenceTransaction(root, state.id, () => {
+      return recordedTogether(root, state.id, () => {
       const current = loadState(root, state.id);
       if (!isCurrentReviewer(current, reviewerHandoff) || reviewSnapshot(current) !== reviewerHandoff.reviewGroup.snapshot || canonical(treeHashes(current)) !== canonical(reviewerHandoff.tree)) throw refuse('review group changed before recording the scoped closure');
       if (current.reviewParts.some(p => p.handoff === reviewerHandoff.bundle)) throw refuse('this scoped closure is already recorded; parts are immutable');
@@ -1259,7 +1246,7 @@ export function recordReview(root, options) {
   if (revealed && canonical(revealed.closure.reportedIssues ?? []) !== canonical(closure.reportedIssues ?? [])) throw refuse('historical report verdicts were recorded blind and cannot change after earlier rounds were revealed; only add priorFindings');
   // Only findings that block are revealed (and must be verified); observations wait for a ticket, a move or a fix.
   const revealNow = !revealed && !delta && earlierBlocking(state, round).length > 0;
-  return withEvidenceTransaction(root, state.id, () => {
+  return recordedTogether(root, state.id, () => {
   const current = loadState(root, state.id);
   if (canonical(treeHashes(current)) !== canonical(reviewerHandoff.tree)) throw refuse('the worktree changed before recording the review closure');
   if (reviewerHandoff.reviewGroup && (!isCurrentReviewer(current, reviewerHandoff) || reviewSnapshot(current) !== reviewerHandoff.reviewGroup.snapshot)) throw refuse('review group changed before recording the integration closure');

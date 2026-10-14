@@ -4,7 +4,7 @@ import path from 'node:path';
 import { ENGINE_VERSION, SCHEMA_VERSION, WfError, canonical, now, refuse, sha256, withFileLock } from './util.mjs';
 import { expectOf } from './expectations.mjs';
 import { ownerRuntime } from './hosts/index.mjs';
-import { prepareWrite, touch, verifyLevel, withEvidenceTransaction, writeAnchor, writeNoFollow } from './evidence.mjs';
+import { prepareWrite, recordingTransaction, touch, verifyLevel, withEvidenceTransaction, writeAnchor, writeNoFollow } from './evidence.mjs';
 
 // Opens an attempt for this process: verifies its evidence (chain, anchor, every recorded file) once, refusing on any
 // difference. Every command that reads or writes an attempt goes through here (`openState`, the first `append`).
@@ -95,6 +95,19 @@ function appendLocked(root, id, type, data, actor) {
     return entry;
   });
 }
+
+// Evidence a command writes and the ledger entry that records it are one transaction, sealed before it ends. Named failure
+// (I-109): the files were written first, outside any transaction, and entered in the manifest when the process ended, so a
+// `wf status` run in between was refused with "extra file (not written by wf)"; a handoff that failed after its write left
+// the file behind. A reader now sees none of it or all. Every write of a file into an attempt's evidence goes through here
+// (`prepareWrite` refuses one made elsewhere; engine/evidence.mjs, `recordingTransaction`). `fn` is synchronous: do any waiting
+// (a connector, a network answer) first and pass the result in, so the lock is held only for the writes. The attempt is opened
+// first (verified, its files noted: `openEvidence`), so a file this process writes is one it created and records, never one that
+// was already there unrecorded.
+export const recordedTogether = (root, id, fn) => recordingTransaction(root, id, append, () => {
+  openEvidence(root, id);
+  return fn();
+});
 
 export function createAttempt(root, id, data, actor) {
   if (fs.existsSync(ledgerFile(root, id))) throw refuse(`attempt ${id} already exists`);
