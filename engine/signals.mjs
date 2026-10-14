@@ -12,7 +12,7 @@ import path from 'node:path';
 import { changedFiles, treeHashes } from './attempt.mjs';
 import { ownerTranscript } from './host-record.mjs';
 import { home as hostHome } from './provenance.mjs';
-import { blockingOpen, observations, placementLevel } from './review-policy.mjs';
+import { blockingOpen, observations, placementLevel, unreachedOf } from './review-policy.mjs';
 import { expectOf, readStatement } from './expectations.mjs';
 import { planPaths, scopeNoise } from './scope.mjs';
 import { findHost, optional, ownerString } from './hosts/index.mjs';
@@ -51,7 +51,10 @@ function roundCounts(state, r, home = null) {
   const handed = (state.handoffs ?? []).find((h) => h.bundle === r.handoff);
   const spent = handed && r.at ? (Date.parse(r.at) - Date.parse(handed.at)) / 60000 : NaN;
   const scope = typeof r.closure?.scope === 'string' && r.closure.scope.trim() ? r.closure.scope.trim().slice(0, 600) : null;
-  return { n: 0, handoff: idOf(r.handoff), reviewer: r.reviewer ?? null, at: r.at ?? null, findings: findings.length, blocking: blocking.length, observations: observed.length, families, minutes: Number.isFinite(spent) ? round1(spent) : null, activeUntilMinute: activeUntil(handed, home, Date.parse(r.at) || Date.now()), expectMinutes: expectOf(r.closure?.expect)?.minutes ?? null, scope };
+  // Named failure (I-69): `notReached` was written by every reviewer and read by nothing, so a round that stopped early
+  // looked like one that finished. Shown beside `scope`; such a round does not count as the full audit (review-policy.mjs).
+  const notReached = unreachedOf(r.closure).map((x) => x.slice(0, 300)).slice(0, 20);
+  return { n: 0, handoff: idOf(r.handoff), reviewer: r.reviewer ?? null, at: r.at ?? null, findings: findings.length, blocking: blocking.length, observations: observed.length, families, minutes: Number.isFinite(spent) ? round1(spent) : null, activeUntilMinute: activeUntil(handed, home, Date.parse(r.at) || Date.now()), expectMinutes: expectOf(r.closure?.expect)?.minutes ?? null, scope, notReached };
 }
 
 // The round-derived numbers, from the list of rounds alone (so a prediction about "round N" is judged on the rounds up to N).
@@ -259,7 +262,7 @@ export function courseLines(sig, { predictions = [] } = {}) {
     `${line('minutes since admission', sig.wallMinutes === null ? 'n/a' : Math.round(sig.wallMinutes), e.minutes, '', 'minutes')}${typeof sig.longestQuietMinutes === 'number' && sig.longestQuietMinutes >= 1 ? `; the longest stretch with nothing recorded was ${Math.round(sig.longestQuietMinutes)} min` : ''}`,
   ];
   for (const x of sig.implementers.filter((i) => !i.open).slice(-3)) out.push(`implementer ${x.agent}${x.work ? ` (${x.work})` : ''} ${x.outcome ?? 'closed'}: took ${mins(x.minutes)}${lastActive(x)}; it ${x.expectMinutes ? `expected ${x.expectMinutes} min${past(x.minutes, x.expectMinutes)}` : 'stated no expectation'}${x.approach ? `; approach: ${x.approach.slice(0, 200)}` : ''}`);
-  for (const r of sig.rounds.slice(-3)) out.push(`review round ${r.n} (${r.reviewer ?? r.handoff}): took ${mins(r.minutes)}${lastActive(r)}; it ${r.expectMinutes ? `expected ${r.expectMinutes} min${past(r.minutes, r.expectMinutes)}` : 'stated no expectation'}${r.scope ? `; scope: ${r.scope.slice(0, 200)}` : ''}`);
+  for (const r of sig.rounds.slice(-3)) out.push(`review round ${r.n} (${r.reviewer ?? r.handoff}): took ${mins(r.minutes)}${lastActive(r)}; it ${r.expectMinutes ? `expected ${r.expectMinutes} min${past(r.minutes, r.expectMinutes)}` : 'stated no expectation'}${r.scope ? `; scope: ${r.scope.slice(0, 200)}` : ''}${r.notReached?.length ? `; did not reach: ${r.notReached.slice(0, 5).map((x) => x.slice(0, 150)).join('; ')}${r.notReached.length > 5 ? ` and ${r.notReached.length - 5} more` : ''}` : ''}`);
   for (const s of sig.sessions) out.push(`${s.role} ${s.agent}${s.work ? ` (${s.work})` : ''} is working: ${mins(s.minutes)} since handed, ${s.expectMinutes ? `it expects ${s.expectMinutes} min${past(s.minutes, s.expectMinutes)}` : 'it stated no expectation'}; last activity ${s.located ? ago(s.idleMinutes) : 'unknown (transcript not found)'}${s.said ? `; ${s.role === 'reviewer' ? 'scope' : 'approach'}: ${s.said.slice(0, 200)}` : ''}`);
   for (const d of predictions) out.push(`strategist ${d.id} (${d.action}) predicted ${d.prediction ? `${d.prediction.signal} by ${typeof d.prediction.by === 'number' ? `round ${d.prediction.by}` : d.prediction.by}` : 'nothing'}: ${d.prediction_status.status}${d.prediction_status.observed !== null && d.prediction_status.observed !== undefined ? ` (observed ${d.prediction_status.observed})` : ''}`);
   return out;

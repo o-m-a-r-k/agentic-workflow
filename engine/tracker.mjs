@@ -13,6 +13,7 @@ import { home } from './provenance.mjs';
 import { prepareWrite, readEvidenceFile, readRegular, writeNoFollow } from './evidence.mjs';
 import { connectorCalls, ownerTranscript } from './host-record.mjs';
 import { screenshots } from './gate.mjs';
+import { unreachedOf } from './review-policy.mjs';
 import { cliEnv, scrub } from './scrub.mjs';
 
 const BUILTIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'adapters', 'tracker');
@@ -83,6 +84,10 @@ export function knownLimits(state) {
   const out = [];
   for (const c of state.criteria ?? []) if (typeof c.finalHandoff === 'string' && c.finalHandoff.trim()) out.push(c.finalHandoff.trim());
   for (const a of state.criteriaAmendments ?? []) for (const d of a.changes?.dropped ?? []) out.push(`Not delivered: ${d.reason}`);
+  // Named failure (I-69): the accepted review named scope it did not reach (`notReached`) and nothing the tester reads said so.
+  const acceptedRound = state.accepted ? [...(state.reviews ?? [])].reverse().find((r) => (r.closure?.reviewer ?? r.reviewer) === state.accepted.reviewer) : null;
+  const unreached = unreachedOf(acceptedRound?.closure);
+  if (unreached.length) out.push(`Not reached by the review that was accepted: ${unreached.join('; ')}`);
   for (const a of state.delivery?.shown?.anomalies ?? []) if (a.followUp) out.push(`Follow-up: ${a.observation} (${a.followUp})`);
   // An issue found during the ticket that the owner deferred (I-18): the tester sees it with the owner's words.
   for (const d of state.discovered ?? []) if (d.status === 'deferred') out.push(`Deferred ${state.id}:${d.id}${d.severity ? ` (${d.severity})` : ''}: ${d.summary}.${(d.rated ?? []).length ? ` Rated ${d.rated.map((r) => `from ${r.from ?? 'unrated'} to ${r.to}${r.reason ? ` ("${r.reason}")` : ''}`).join(', then ')}.` : ''} Why it waits: "${d.deferred.decision}". Decided by: ${channelOf(d)}.`);

@@ -16,6 +16,7 @@ import { append, loadState } from './ledger.mjs';
 import { readRegular, seal, withEvidenceTransaction } from './evidence.mjs';
 import { reviewDocumentProblems } from './rules.mjs';
 import { isCurrentReviewer, reviewSnapshot } from './review-groups.mjs';
+import { closureMissingGuidance, roundMode, unreachedOf } from './review-policy.mjs';
 import { roleInstructions } from './onboard.mjs';
 import { roleProgress, ROLE_HEARTBEAT_MS } from './role-progress.mjs';
 import { findHost, hostNames, launchEnvDeletes } from './hosts/index.mjs';
@@ -72,7 +73,8 @@ export async function runRole(root, options) {
   if (canonicalPath(launchLock) !== path.join(fs.realpathSync(root), '.wf-worktrees', state.id, '_runner', path.basename(h.bundle) + '.launch.lock')) throw refuse('native launch control path resolves outside its recorded location');
   withFileLock(launchLock, () => {
     withEvidenceTransaction(root, state.id, () => {
-    if (loadState(root, state.id).handoffs.find((x) => x.bundle === h.bundle)?.launch) throw refuse('this handoff was already launched; create a fresh handoff, never reuse a review round');
+    // Named failure (I-69): the refusal named no way on for an owner whose launched reviewer ended without a closure.
+    if (loadState(root, state.id).handoffs.find((x) => x.bundle === h.bundle)?.launch) throw refuse('this handoff was already launched; create a fresh handoff, never reuse a review round', `\`wf handoff ${h.role} --agent <new id> --attempt ${state.id}\` hands a fresh ${h.role}, then \`wf handoff run --agent <new id> --attempt ${state.id}\` launches it${h.role === 'reviewer' ? '; a round with no recorded closure is not an audit and counts toward nothing' : ''}`);
     writeJson(file, receipt);
     append(root, state.id, 'agent.launch.requested', { handoff: h.bundle, file, sha256: sha256(JSON.stringify(receipt, null, 2) + '\n') }, actor(options));
     seal(append, { root, id: state.id });
@@ -243,7 +245,25 @@ async function follow(root, id, h, { host, runtime, label, requestedSession, chi
   }
   if (!success) process.stderr.write(`${label} role failed: ${problem ?? (stderr.trim() || 'no completed turn')}\n`);
   if (diagnosis) process.stderr.write(`${diagnosis.advice}\n`);
+  if (success && h.role === 'reviewer' && !h.reviewGroup) reviewerEnded(root, id, h, label);
   return { agent: h.agent, session, status: success ? 'completed' : 'failed', exitCode: success ? 0 : code || 1 };
+}
+
+// A launched reviewer's process ended cleanly. Named failure (I-69): two launched reviewers ended with no closure and the
+// owner was told only that the process had completed; one that recorded a closure naming scope it did not reach was counted
+// as the full audit. Said once, on stderr, at the moment the owner learns the process ended.
+function reviewerEnded(root, id, h, label) {
+  const now = loadState(root, id);
+  const handed = now.handoffs.find((x) => x.bundle === h.bundle);
+  if (!handed) return;
+  const recorded = (now.reviews ?? []).filter((r) => r.handoff === h.bundle).at(-1);
+  if (recorded) {
+    const unreached = unreachedOf(recorded.closure);
+    if (unreached.length) process.stderr.write(`${label} reviewer ${h.agent} recorded a closure that names scope it did not reach: ${unreached.slice(0, 5).join('; ')}${unreached.length > 5 ? ` and ${unreached.length - 5} more` : ''}. That round does not count as the full audit (the next reviewer is handed a ${roundMode(now)} round and sees this list).\n`);
+    return;
+  }
+  if ((now.reviewsRefused ?? []).some((r) => r.handoff === h.bundle)) return;
+  process.stderr.write(`${label} ${closureMissingGuidance(now, handed)}\n`);
 }
 
 // The launched role of `--agent`, with its host, for `wf handoff wait|stop`.

@@ -286,3 +286,76 @@ test('I-109: the files a reviewer handoff, a plan and an amendment write into th
   assert.deepEqual(handed.filter((w) => !w.locked), [], 'the rule copy is written while the transaction is held');
   assert.deepEqual(verifyAttempt(p.root, e.id), []);
 });
+// ---- I-69 ----
+
+// Named failure (I-69): two engine-launched reviewers completed (exit 0) before whole-change review and wrote no closure. The
+// owner read "record its closure through the handed reviewer", could not run `wf handoff run` again (a handoff launches once),
+// and nothing said that a round with no recorded closure is not an audit.
+test('I-69: a launched reviewer that ends with no closure leaves the owner the real routes, and the round is not an audit', () => {
+  const p = singleRepoProject('i69-guidance', { gate: { steps }, ...codexConfig });
+  const env = fakeCodex(p.base);
+  const run = (args, opts = {}) => wf(p.root, args, { env, ...opts });
+  const id = ok(run(['entry', '--item', 'ENG-1', '--owner', 'o', '--json'])).json().id;
+  ok(run(['handoff', 'planner', '--agent', 'p', '--runtime', 'codex', '--attempt', id]));
+  ok(run(['plan', '--file', criteriaFile(p.base), '--attempt', id]));
+  ok(run(['handoff', 'implementer', '--agent', 'i', '--attempt', id]));
+  commitIn(loadState(p.root, id).repos.app.worktree, { 'src/a.txt': 'changed\n' });
+  ok(run(['handoff', 'close', '--agent', 'i', '--attempt', id]));
+  ok(run(['handoff', 'reviewer', '--agent', 'r', '--runtime', 'codex', '--attempt', id]));
+  const launched = ok(run(['handoff', 'run', '--agent', 'r', '--attempt', id]));
+  assert.match(launched.err, /reviewer r completed with no closure recorded[\s\S]*not an audit and counts toward nothing, so the next reviewer is handed a full round/);
+  assert.match(launched.err, /wf handoff reviewer --agent <new id> --attempt .*wf handoff run --agent <new id> --attempt /);
+  const resume = ok(run(['resume', '--attempt', id])).out;
+  assert.match(resume, /reviewer r completed with no closure recorded[\s\S]*It wrote no closure file\. Otherwise hand a fresh reviewer with a new id: `wf handoff reviewer --agent <new id>/);
+  assert.doesNotMatch(resume, /record its closure through the handed reviewer/);
+  // A handoff launches once; the refusal names the way on.
+  const again = run(['handoff', 'run', '--agent', 'r', '--attempt', id]);
+  assert.equal(again.code, 75);
+  assert.match(again.err, /already launched[\s\S]*`wf handoff reviewer --agent <new id> --attempt .*` hands a fresh reviewer, then `wf handoff run --agent <new id>/);
+  // The way on: the unrecorded round did not count, so the fresh reviewer is the attempt's full audit.
+  const fresh = ok(run(['handoff', 'reviewer', '--agent', 'r2', '--runtime', 'codex', '--attempt', id]));
+  assert.equal(JSON.parse(fs.readFileSync(fresh.out.match(/^Read (\S+)/m)[1], 'utf8')).mode, 'full');
+});
+
+// Named failure (I-69): a closure that names scope the reviewer did not reach (`notReached`) was recorded as the attempt's one
+// full audit, so every later round was a delta, and no owner, reviewer or delivered comment ever saw what was not looked at.
+test('I-69: a closure with unreached scope is not the full audit, and the scope is shown to the owner, the next reviewer, the export and the delivered comment', () => {
+  const run = runner('0.7.4');
+  const a = started(run, 'i69-partial');
+  const partial = goodClosure('rev-0', { notReached: ['the export module', 'tests under src/legacy'] });
+  round(a, 'rev-0', partial);
+  // The next round is a full audit again, handed what the last one did not reach.
+  const again = round(a, 'rev-1', goodClosure('rev-1'));
+  assert.equal(again.mode, 'full', 'a closure with unreached scope was not the full audit');
+  const sig = ok(run(a.root, ['signals', '--attempt', a.id, '--json'])).json();
+  assert.deepEqual(sig.rounds[0].notReached, ['the export module', 'tests under src/legacy']);
+  assert.match(ok(run(a.root, ['resume', '--attempt', a.id])).out, /review round 1 \(rev-0\):.*did not reach: the export module; tests under src\/legacy/);
+  assert.deepEqual(again.unreachedBefore.rounds.map((r) => [r.reviewer, r.notReached]), [['rev-0', ['the export module', 'tests under src/legacy']]]);
+  assert.match(again.unreachedBefore.note, /none of these rounds counted as an audit[\s\S]*narrows nothing/);
+  // A complete full audit covers the change: the next round is a delta and carries no list.
+  commitIn(a.wt, { 'src/a.txt': 'c\n' });
+  const third = ok(run(a.root, ['handoff', 'reviewer', '--agent', 'rev-2', '--attempt', a.id]));
+  const bundle = JSON.parse(fs.readFileSync(third.out.match(/^Read (\S+)/m)[1], 'utf8'));
+  assert.equal(bundle.mode, 'delta');
+  assert.equal(bundle.unreachedBefore, undefined);
+  ok(run(a.root, ['review', '--closure', closureFile(a.base, goodClosure('rev-2', { criteria: [] })), '--attempt', a.id]));
+  // The evidence review that is accepted names what it did not reach: accepted as it is, and the delivered comment says so.
+  ok(run(a.root, ['gate', '--attempt', a.id]));
+  round(a, 'rev-3', goodClosure('rev-3', { notReached: ['the dark theme'] }));
+  ok(run(a.root, ['accept', '--attempt', a.id]));
+  assert.match(knownLimits(loadState(a.root, a.id)), /- Not reached by the review that was accepted: the dark theme/);
+  ok(run(a.root, ['export', '--attempt', a.id]));
+  assert.match(fs.readFileSync(path.join(a.root, '.wf-evidence', 'attempts', a.id, 'export', 'attempt.html'), 'utf8'), /not reached by this round: the dark theme/);
+});
+
+// D7: counting such a round as the audit changes what the next handoff of an attempt already past it owes; the list is shown
+// for every attempt, the round count follows the admission version.
+test('I-69 (D7): an attempt admitted before 0.7.4 still counts the partial round, and is shown what it did not reach', () => {
+  const old = runner('0.7.3');
+  const a = started(old, 'i69-old');
+  round(a, 'rev-0', goodClosure('rev-0', { notReached: ['the export module'] }));
+  const second = round(a, 'rev-1');
+  assert.equal(second.mode, 'delta', 'the earlier count is kept for an attempt admitted earlier');
+  assert.deepEqual(second.unreachedBefore.rounds.map((r) => r.notReached), [['the export module']]);
+});
+
