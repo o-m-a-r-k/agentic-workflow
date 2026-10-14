@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { WF, closureFile, commitIn, criteriaFile, goodClosure, ok, sh, singleRepoProject, spawnHome, state, tmp, wf } from './helpers.mjs';
-import { handoff } from '../engine/lifecycle.mjs';
+import { handoff, nextAction, nextDecision } from '../engine/lifecycle.mjs';
 import { listEvidence } from '../engine/evidence-read.mjs';
 import { loadState } from '../engine/ledger.mjs';
 
@@ -80,6 +80,29 @@ test('an attempt whose worktree is gone is shown as orphaned by status, status -
   assert.doesNotMatch(sh(f.root, 'git worktree list'), /ENG-1\.1/);
   assert.doesNotMatch(ok(wf(f.root, ['status'])).out, /ENG-1\.1/);
   assert.equal(state(f.root, lost.id).phase, 'abandoned');
+});
+
+// Named failure (0.7.0, field): the person confirmed a reserved decision on an orphaned attempt (`wf approve` for its
+// abandon) and was told "worktree missing: ... (git was not run there)": the decision was recorded, but the line naming
+// what comes next ran git in the missing folder. `wf release` did the same after lifting a hold. Every next line is decided
+// by nextDecision, so the orphan check is there, before any git call.
+test('a decision taken on an orphaned attempt is reported done and points at abandon, not at the missing folder', () => {
+  const f = singleRepoProject('orphan-next', { gate: { steps } });
+  const lost = planned(f, 'ENG-5');
+  ok(wf(f.root, ['hold', '--reason', 'wait for the owner', '--attempt', lost.id]));
+  fs.rmSync(lost.repos.app.worktree, { recursive: true, force: true });
+
+  const released = ok(wf(f.root, ['release', '--attempt', lost.id]));
+  assert.match(released.out, /hold released on ENG-5\.1\. next: ORPHANED, worktree missing: /);
+  assert.match(released.out, /wf abandon --attempt ENG-5\.1/);
+  assert.doesNotMatch(released.out + released.err, /git was not run there|ENOENT/);
+  assert.equal(state(f.root, lost.id).activeHold, null);
+
+  // `wf approve` prints nextAction after recording the person's choice (the scenario owner confirms through
+  // approveInTerminal, which prints nothing, so the line is checked here).
+  const decision = nextDecision(f.root, loadState(f.root, lost.id));
+  assert.deepEqual([decision.kind, decision.status], ['orphaned', 'blocked']);
+  assert.match(nextAction(f.root, loadState(f.root, lost.id)), /^ORPHANED, worktree missing: /);
 });
 
 // Named failure: under a sandbox that forbids `ps` (49 calls under the Codex sandbox), `wf status`, `wf resume` and

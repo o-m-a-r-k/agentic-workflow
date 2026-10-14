@@ -10,6 +10,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { closureFile, commitIn, criteriaFile, goodClosure, makeRepo, ok, sh, singleRepoProject, state, tmp, wf } from './helpers.mjs';
 import { stampClosure } from '../engine/review-policy.mjs';
+import { ENGINE_VERSION } from '../engine/util.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const steps = [{ id: 'unit', repo: 'app', run: 'true' }];
@@ -251,7 +252,8 @@ test('wf doctor says when the harness has another version of the plugin installe
   fs.mkdirSync(path.join(home, '.claude', 'plugins'), { recursive: true });
   fs.writeFileSync(path.join(home, '.claude', 'plugins', 'installed_plugins.json'), JSON.stringify({ version: 2, plugins: { 'agentic-workflow@agentic-workflow': [{ scope: 'user', version: '0.6.3' }] } }));
   const out = wf(p.root, ['doctor', '--no-steps', '--runtime', 'claude'], { env: { WF_HOME: home } });
-  assert.match(out.out + out.err, /has agentic-workflow 0\.6\.3 installed while wf is 0\.7\.0/);
+  // The engine's own version, not a literal: a patch release must not fail its own suite (0.7.1).
+  assert.ok((out.out + out.err).includes(`has agentic-workflow 0.6.3 installed while wf is ${ENGINE_VERSION}`), out.out + out.err);
 });
 
 test('a strategist model decision runs the role\'s next handoffs at the work class it names, with that class\'s pinned settings (Opus gap 5)', async () => {

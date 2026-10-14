@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
-import { actor, addRepoWorktree, baseRef, branchName, onTarget, changedFiles, cleanupWorktrees, entry, openState, treeHashes, worktreeDir } from './attempt.mjs';
+import { actor, addRepoWorktree, baseRef, branchName, onTarget, changedFiles, cleanupWorktrees, entry, missingWorktrees, openState, treeHashes, worktreeDir } from './attempt.mjs';
 import { channelOf, discoveredVerdicts, openDiscovered, seamVerdicts, unacknowledged, reportsForReview, reportedIssueVerdicts } from './discovered.mjs';
 import { executionSettings, rejectModelOverrides } from './models.mjs';
 import { detectOwner, findHost, fragment, hostChoice, isHost, lastFencedYaml, optional } from './hosts/index.mjs';
@@ -2276,7 +2276,28 @@ export function unstartedWork(state) {
 }
 
 // Named failure: prose-only next steps could not safely drive runtime-independent execution.
+// An open attempt whose worktree folder is gone (missingWorktrees in attempt.mjs): decided before any git call, shown as
+// orphaned with its missing paths, and left for `wf abandon` (or a restored folder). Named failures: one such attempt made
+// `wf status`, `wf status --all` and `wf resume` fail with "git failed to start: spawnSync git ENOENT" for all of them; and,
+// with that guard kept in the CLI's status lines only, `wf approve` and `wf release` recorded the person's decision on an
+// orphan and then failed with "worktree missing" while printing what comes next (0.7.0, an orphan with an open
+// integration), which reads as the decision not taken. The guard is here, the one place every next line is decided.
+export const orphansOf = (s) => (['done', 'abandoned'].includes(s.phase) ? [] : missingWorktrees(s));
+export function orphanNext(root, s, gone) {
+  let cfg = null;
+  try {
+    cfg = loadConfig(root);
+  } catch {}
+  const restore = gone.map((m) => {
+    const repo = cfg?.repos.find((r) => r.name === m.repo);
+    return repo ? `git -C ${repoDir(root, repo)} worktree prune && git -C ${repoDir(root, repo)} worktree add ${m.worktree} ${m.branch}` : null;
+  }).filter(Boolean);
+  return `ORPHANED, worktree missing: ${gone.map((m) => m.worktree).join(', ')}. Nothing runs in a missing folder. If it was removed by mistake, put it back from the branch (committed work only): ${restore.join(' ; ') || 'git worktree add <path> <branch> from the repo checkout'}. Otherwise \`wf abandon --attempt ${s.id} --reason "<why>"\` (its branch is kept)`;
+}
+
 export function nextDecision(root, state) {
+  const gone = orphansOf(state);
+  if (gone.length) return { kind: 'orphaned', status: 'blocked', actor: 'owner', attempt: state.id, owner: state.owner, tree: null, guidance: orphanNext(root, state, gone), blockers: [`worktree missing: ${gone.map((m) => m.worktree).join(', ')}`], orphaned: gone };
   const guidance = legacyNextAction(root, state);
   const tree = ['done', 'abandoned'].includes(state.phase) ? null : treeHashes(state);
   const result = (kind, status, reason, extra = {}) => ({ kind, status, actor: status === 'ready' ? 'engine' : 'owner', attempt: state.id, owner: state.owner, tree, guidance: status === 'blocked' ? `blocked: ${reason}` : guidance, blockers: reason ? [reason] : [], ...extra });

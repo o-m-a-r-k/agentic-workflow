@@ -9,7 +9,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 import { refreshModels } from './models.mjs';
-import { abandon, adopt, changedFiles, entry, hold, missingWorktrees, openState, release, resolveAttempt, setIntent } from './attempt.mjs';
+import { abandon, adopt, changedFiles, entry, hold, openState, release, resolveAttempt, setIntent } from './attempt.mjs';
 import { baseLines, baseMerge, baseStatus } from './base.mjs';
 import { findRoot, loadConfig, repoDir, requireRoot } from './config.mjs';
 import { exportAttempt, exportFile } from './export.mjs';
@@ -20,7 +20,7 @@ import { openCount } from './improve.mjs';
 import { reviewDivisionSummary } from './review-groups.mjs';
 import { LESSON_FILE, addLesson, applySnippet, exportPluginLessons, findLesson, lessonPrompts, lessonWarnings, loadLessons, moveLesson, recur, relevantLessons, reviewLessons, setLesson } from './lessons.mjs';
 import { LinkRefused, changesOf, rebaseline, releaseAttempt, seal, setVerifyLevel, unlockEvidence, verifyAttempt } from './evidence.mjs';
-import { acceptReview, amendCriteria, closeImplementer, designWarning, gateOrderCheck, batchCreate, batchEject, closeAfterHandoff, deliver, deliveredFiles, exportScreenshots, freezeCriteria, handoff, narrowDelivery, needsShown, nextAction, nextDecision, outsideWarning, recordReview, recordShown, reopen, screenshotsExportDir, shownDraftFile, uncovered, withAttempt } from './lifecycle.mjs';
+import { acceptReview, amendCriteria, closeImplementer, designWarning, gateOrderCheck, batchCreate, batchEject, closeAfterHandoff, deliver, deliveredFiles, exportScreenshots, freezeCriteria, handoff, narrowDelivery, needsShown, nextAction, nextDecision, orphanNext, orphansOf, outsideWarning, recordReview, recordShown, reopen, screenshotsExportDir, shownDraftFile, uncovered, withAttempt } from './lifecycle.mjs';
 import { addDiscovered, channelOf, closeDiscovered, discoveredLine, openDiscovered, rateDiscovered } from './discovered.mjs';
 import { detect, doctor, register, registry, setEnabled, sync, writeDraft } from './onboard.mjs';
 import * as secrets from './secrets.mjs';
@@ -176,25 +176,8 @@ const print = (options, human, data) => {
   else process.stdout.write(`${typeof human === 'string' ? human : JSON.stringify(human, null, 2)}\n`);
 };
 
-// An open attempt whose worktree folder is gone (see missingWorktrees in attempt.mjs): decided before any git call, shown
-// as orphaned with its missing paths, and left for `wf abandon` (or a restored folder). Named failure: one such attempt
-// made `wf status`, `wf status --all` and `wf resume` fail with "git failed to start: spawnSync git ENOENT" for all of them.
-const orphansOf = (s) => (['done', 'abandoned'].includes(s.phase) ? [] : missingWorktrees(s));
-function orphanNext(root, s, gone) {
-  let cfg = null;
-  try {
-    cfg = loadConfig(root);
-  } catch {}
-  const restore = gone.map((m) => {
-    const repo = cfg?.repos.find((r) => r.name === m.repo);
-    return repo ? `git -C ${repoDir(root, repo)} worktree prune && git -C ${repoDir(root, repo)} worktree add ${m.worktree} ${m.branch}` : null;
-  }).filter(Boolean);
-  return `ORPHANED, worktree missing: ${gone.map((m) => m.worktree).join(', ')}. Nothing runs in a missing folder. If it was removed by mistake, put it back from the branch (committed work only): ${restore.join(' ; ') || 'git worktree add <path> <branch> from the repo checkout'}. Otherwise \`wf abandon --attempt ${s.id} --reason "<why>"\` (its branch is kept)`;
-}
-const nextOf = (root, s) => {
-  const gone = orphansOf(s);
-  return gone.length ? orphanNext(root, s, gone) : nextAction(root, s);
-};
+// An open attempt whose worktree folder is gone is shown as orphaned with its missing paths (orphansOf, orphanNext in
+// lifecycle.mjs, where every next line is decided).
 function orphanedSummary(root, s, gone) {
   const lines = [`${s.id}  ${s.item}  lane=${s.lane}  intent=${s.intent}  phase=${s.phase}  ORPHANED`, `  owner: ${s.owner}`];
   for (const [name, r] of Object.entries(s.repos)) lines.push(`  ${name}: ${r.worktree}${gone.some((m) => m.repo === name) ? '  (MISSING)' : ''} (base ${r.base.slice(0, 10)})`);
@@ -547,7 +530,7 @@ async function dispatch(cmd, sub, positional, options) {
         const s = loadState(p.root, id);
         if (['done', 'abandoned'].includes(s.phase)) continue;
         const gone = orphansOf(s);
-        out.push({ project: path.basename(p.root), root: p.root, id, item: s.item, phase: s.phase, hold: s.activeHold?.reason ?? null, ...(gone.length ? { orphaned: gone } : {}), next: nextOf(p.root, s) });
+        out.push({ project: path.basename(p.root), root: p.root, id, item: s.item, phase: s.phase, hold: s.activeHold?.reason ?? null, ...(gone.length ? { orphaned: gone } : {}), next: nextAction(p.root, s) });
       }
     }
     print(options, out.length ? out.map((o) => `${o.project}  ${o.id}  ${o.phase}${o.orphaned ? '  ORPHANED' : ''}${o.hold ? `  HOLD: ${o.hold}` : ''}\n  next: ${o.next}`).join('\n') : 'no open attempts in any enabled project', out);
@@ -1317,14 +1300,14 @@ async function dispatch(cmd, sub, positional, options) {
       const s = openState(root, options);
       const gone = orphansOf(s);
       const base = isOpen(s) && !gone.length ? safeBase(root, s) : null;
-      print(options, summary(root, s, { base, resume: true }), { ...s, next: nextOf(root, s), decision: gone.length ? null : nextDecision(root, s), liveGate: liveGate(root, s), base, ...(gone.length ? { orphaned: gone } : {}) });
+      print(options, summary(root, s, { base, resume: true }), { ...s, next: nextAction(root, s), decision: gone.length ? null : nextDecision(root, s), liveGate: liveGate(root, s), base, ...(gone.length ? { orphaned: gone } : {}) });
       return 0;
     }
     case 'status': {
       // --attempt narrows the listing to that attempt; without it every open attempt is shown.
       const states = options.attempt ? [openState(root, options)] : listAttempts(root).map((id) => loadState(root, id)).filter(isOpen).map((s) => (openEvidence(root, s.id), s));
       const rows = states.map((s) => ({ s, base: isOpen(s) && !orphansOf(s).length ? safeBase(root, s) : null }));
-      print(options, rows.length ? rows.map(({ s, base }) => summary(root, s, { base })).join('\n\n') : 'no open attempts', options.json ? rows.map(({ s, base }) => ({ ...s, next: nextOf(root, s), base, ...(orphansOf(s).length ? { orphaned: orphansOf(s) } : {}) })) : undefined);
+      print(options, rows.length ? rows.map(({ s, base }) => summary(root, s, { base })).join('\n\n') : 'no open attempts', options.json ? rows.map(({ s, base }) => ({ ...s, next: nextAction(root, s), base, ...(orphansOf(s).length ? { orphaned: orphansOf(s) } : {}) })) : undefined);
       return 0;
     }
     case 'base': {
