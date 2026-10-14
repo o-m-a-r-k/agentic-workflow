@@ -339,6 +339,8 @@ export function onTarget(r, repo) {
 export function abandon(root, options) {
   const state = openState(root, options);
   if (!options.reason) throw new WfError('--reason is required');
+  // Independent review of 0.7.5: an attempt closed (delivered, or closed as shipped) was abandoned on top, its record flipped.
+  if (['done', 'abandoned'].includes(state.phase)) throw refuse(`${state.id} is already ${state.phase}${state.shipped ? ' (closed as shipped)' : ''}; a closed attempt is not abandoned`);
   // Independent review of 0.7.0 (HIGH): abandoning a split member dropped what the split moved into it. It is the person's
   // one-use decision.
   const splitDecision = (state.splitFrom || state.splits?.length) && !['done', 'abandoned'].includes(state.phase) ? requireYes(root, state, { kind: 'move-out-of-batch', key: `abandon-split:${state.id}`, summary: `abandon ${state.id}, which carries or handed work in a split batch`, what: `abandoning ${state.id}`, options }).decision : null;
@@ -432,24 +434,46 @@ export function release(root, options) {
 // does not matter). Closing without the acceptance is the person's (override-gate), one decision that also covers a hold;
 // what was still open (discovered issues, the last review's findings) is recorded with it. The tracker is not touched.
 // Each repo's change and whether it is on its remote target branch, asked of the repo's own checkout (a missing worktree does
-// not matter): { repo, commit, target, unchanged, landed, known } or { repo, problem }. The change is the delivered commit,
-// else the head the last gate ran on, else the accepted head, else the worktree's HEAD (I-116).
+// not matter). The change is the attempt's own tip: its worktree's HEAD (refused while the worktree holds uncommitted work),
+// else its branch's tip in the repo's checkout, and only when the branch is gone too the commit the workflow last recorded
+// (the delivered commit, else the head of the last gate that passed, else the accepted head), named as such (`source`).
+// Independent review of 0.7.5 (high): the last gate's head stood for the change, so commits made after the gate, and
+// uncommitted work, were closed as shipped (and the work removed with the worktree).
+// Returns { repo, commit, target, source, unchanged, landed, known, fetched } or { repo, problem }.
 export function changesOnTarget(root, state, cfg = trustedAdapter(root, state)) {
-  const lastGate = (state.gates ?? []).filter((g) => g.tree).at(-1);
+  const lastPassed = (state.gates ?? []).filter((g) => g.tree && g.status === 'passed').at(-1);
   return Object.entries(state.repos).map(([name, r]) => {
     const repo = cfg.repos.find((x) => x.name === name);
     if (!repo) return { repo: name, problem: 'not a repo of the adapter this attempt was admitted under' };
-    const worktreeHead = () => (r.worktree && fs.existsSync(path.join(r.worktree, '.git')) ? git(r.worktree, ['rev-parse', 'HEAD']) : null);
-    const candidate = state.delivery.repos[name]?.commit ?? lastGate?.tree?.[name] ?? state.accepted?.heads?.[name] ?? worktreeHead();
-    const head = typeof candidate === 'string' ? candidate.replace(/\+dirty$/, '') : null;
-    if (!head || !/^[0-9a-f]{40}$/.test(head)) return { repo: name, problem: 'no recorded change to check (no delivery, gate, acceptance or worktree head)' };
-    const target = `${repo.remote ?? 'origin'}/${repo.base}`;
-    if (head === r.base) return { repo: name, commit: head, target, unchanged: true, landed: false, known: true };
     const dir = repoDir(root, repo);
-    run('git', ['fetch', '--quiet', repo.remote ?? 'origin', repo.base], { cwd: dir, allowFail: true });
+    const branch = r.branch ?? branchName(state.id);
+    let head = null;
+    let source = null;
+    if (r.worktree && fs.existsSync(path.join(r.worktree, '.git'))) {
+      if (git(r.worktree, ['status', '--porcelain'])) return { repo: name, problem: `its worktree has uncommitted work (${r.worktree}); commit or discard it first` };
+      head = git(r.worktree, ['rev-parse', 'HEAD']);
+      source = 'worktree';
+    } else {
+      const tip = run('git', ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}^{commit}`], { cwd: dir, allowFail: true });
+      if (tip.status === 0 && tip.stdout.trim()) {
+        head = tip.stdout.trim();
+        source = `branch ${branch}`;
+      } else {
+        const recorded = [[state.delivery.repos[name]?.commit, 'its delivered commit'], [lastPassed?.tree?.[name], 'the head of its last passed gate'], [state.accepted?.heads?.[name], 'its accepted head']].find(([c]) => typeof c === 'string' && c);
+        if (recorded && /\+dirty/.test(recorded[0])) return { repo: name, problem: `${recorded[1]} was recorded with uncommitted changes, so no commit stands for the change` };
+        if (recorded) {
+          head = recorded[0];
+          source = `${recorded[1]} (its worktree and branch are gone)`;
+        }
+      }
+    }
+    if (!head || !/^[0-9a-f]{40}$/.test(head)) return { repo: name, problem: 'no change to check: no worktree, no branch and nothing recorded' };
+    const target = `${repo.remote ?? 'origin'}/${repo.base}`;
+    if (head === r.base) return { repo: name, commit: head, target, source, unchanged: true, landed: false, known: true, fetched: true };
+    const fetch = run('git', ['fetch', '--quiet', repo.remote ?? 'origin', repo.base], { cwd: dir, allowFail: true });
     const known = run('git', ['cat-file', '-e', `${head}^{commit}`], { cwd: dir, allowFail: true }).status === 0;
     const landed = known && run('git', ['merge-base', '--is-ancestor', head, target], { cwd: dir, allowFail: true }).status === 0;
-    return { repo: name, commit: head, target, unchanged: false, landed, known };
+    return { repo: name, commit: head, target, source, unchanged: false, landed, known, fetched: fetch.status === 0, fetchError: fetch.status === 0 ? null : String(fetch.stderr ?? '').trim().split('\n')[0] };
   });
 }
 
@@ -461,12 +485,15 @@ export function closeShipped(root, options) {
   const problems = [];
   for (const c of changesOnTarget(root, state)) {
     if (c.problem) problems.push(`${c.repo}: ${c.problem}`);
-    else if (c.unchanged) heads[c.repo] = { commit: c.commit, target: c.target, unchanged: true };
-    else if (!c.landed) problems.push(`${c.repo}: ${c.commit.slice(0, 10)} is ${c.known ? 'not' : 'not known, so not shown to be'} on ${c.target}`);
-    else heads[c.repo] = { commit: c.commit, target: c.target };
+    else if (c.unchanged) heads[c.repo] = { commit: c.commit, target: c.target, source: c.source, unchanged: true };
+    // A positive "it shipped" is never asserted from a remote ref that could not be refreshed (independent review of 0.7.5).
+    else if (!c.fetched) problems.push(`${c.repo}: ${c.target} could not be fetched (${c.fetchError || 'no answer'}), so whether ${c.commit.slice(0, 10)} is on it is not known now`);
+    else if (!c.landed) problems.push(`${c.repo}: ${c.commit.slice(0, 10)} (${c.source}) is ${c.known ? 'not' : 'not known, so not shown to be'} on ${c.target}`);
+    else heads[c.repo] = { commit: c.commit, target: c.target, source: c.source };
   }
+  if (!problems.length && !Object.values(heads).some((h) => !h.unchanged)) problems.push('no repo of it changed anything, so nothing shipped: abandon it instead (`wf abandon --reason "<why>"`)');
   if (problems.length) throw refuse(`${state.id} is not closed as shipped: ${problems.join('; ')}`, 'a change that is not on its target branch is delivered (`wf deliver`) or abandoned; only an attempt whose every change has landed is closed as shipped', { id: 'close:not-shipped' });
-  const list = Object.entries(heads).map(([n, h]) => (h.unchanged ? `${n} unchanged` : `${n} ${h.commit.slice(0, 10)} on ${h.target}`)).join('; ');
+  const list = Object.entries(heads).map(([n, h]) => (h.unchanged ? `${n} unchanged` : `${n} ${h.commit.slice(0, 10)} (${h.source}) on ${h.target}`)).join('; ');
   const decision = requireYes(root, state, { kind: 'override-gate', key: `close-shipped:${state.id}:${sha256(JSON.stringify(heads)).slice(0, 16)}`, summary: `close ${state.id} as shipped without its acceptance (${list})${state.activeHold ? `, over its hold "${state.activeHold.reason}"` : ''}`, what: `closing ${state.id} as shipped`, options }).decision;
   const lastReview = (state.reviews ?? []).at(-1);
   const open = {

@@ -27,6 +27,7 @@ export function exportData(root, s) {
   const noEvidence = noEvidenceVerdicts(steps0, s.review?.closure);
   const steps = (g) => (g.steps ?? []).map((x) => ({ id: x.id, status: x.status, seconds: x.durationMs !== undefined && x.status !== 'reused' ? Math.round(x.durationMs / 100) / 10 : null, reusedFrom: x.reusedFrom ?? null, reason: x.reason ?? null }));
   return {
+    shipped: s.shipped ?? null,
     exportedAt: now(),
     attempt: s.id,
     item: s.item,
@@ -176,6 +177,7 @@ export function exportHtml(d, images = {}) {
     d.rebaselined?.length ? sec('Evidence re-baselined', `<p class="warn">Evidence files changed outside wf and the owner accepted them (\`wf verify --accept-changes\`). The originals are not available.</p>${table(['At', 'By', 'Reason', 'Changes'], d.rebaselined.map((r) => [esc(r.at), esc(r.by), esc(r.reason), r.changes.map((c) => `${esc(c.kind)} ${esc(c.path)} <small>${esc((c.old ?? '').slice(0, 12))} → ${esc((c.new ?? 'removed').slice(0, 12))}</small>`).join('<br>')]))}`) : '',
     d.lessons && (d.lessons.injected.length || d.lessons.recorded.length || d.lessons.waived || d.lessons.recurred.length) ? sec('Lessons', `<p class="muted">Project lessons that applied to this change, the reviewer's verdicts, and what this attempt taught.</p>${table(['Lesson', 'Verdict', 'Evidence'], d.lessons.injected.map((id) => { const v = d.lessons.verdicts.find((x) => x.lesson === id); return [esc(id), v ? badge(v.verdict) : '<span class="muted">not yet judged</span>', esc(v?.evidence ?? '')]; }))}${d.lessons.recorded.length ? `<p>Recorded here: ${d.lessons.recorded.map((r) => esc(r.id)).join(', ')}</p>` : ''}${d.lessons.waived ? `<p class="muted">No lesson needed: ${esc(d.lessons.waived.reason)}</p>` : ''}${d.lessons.recurred.map((r) => `<p class="warn">Lesson ${esc(r.id)} recurred (recurrence ${esc(r.recurrence)}): its mechanism failed.</p>`).join('')}`) : '',
     deliveredSection(d, images),
+    d.shipped ? sec('Closed as shipped', `<p class="warn">Closed as shipped outside the workflow, without its acceptance (${esc(d.shipped.at)}, decision ${esc(d.shipped.decision ?? 'none')}): ${esc(d.shipped.reason)}</p>${table(['Repo', 'Commit', 'Target', 'From'], Object.entries(d.shipped.repos ?? {}).map(([n, h]) => [esc(n), esc(h.unchanged ? 'unchanged' : String(h.commit).slice(0, 12)), esc(h.target ?? ''), esc(h.source ?? '')]))}${[...(d.shipped.open?.discovered ?? []), ...(d.shipped.open?.lastReview ?? [])].length ? `<p>Still open when it was closed: ${[...(d.shipped.open?.discovered ?? []), ...(d.shipped.open?.lastReview ?? [])].map((x) => esc(`${x.id} ${x.severity ?? ''} ${x.summary}`)).join('; ')}</p>` : ''}`) : '',
     sec('Delivery', d.delivery.completedAt ? `<p>${badge('delivered')} ${esc(d.delivery.completedAt)}</p>${d.delivery.narrowed ? `<p class="warn">Delivered files narrowed from ${esc(d.delivery.narrowed.from)} to ${esc(d.delivery.narrowed.to)}: ${esc(d.delivery.narrowed.reason)}</p>` : ''}${table(['Repo', 'Commit'], d.delivery.repos.map((r) => [esc(r.repo), esc(r.commit ? r.commit.slice(0, 12) : r.skipped ?? '')]))}` : '<p class="muted">not delivered yet</p>'),
   ].join('\n');
   return `<!doctype html>

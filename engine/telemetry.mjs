@@ -420,6 +420,7 @@ export function attemptReport(root, id, table = prices(root), { home = os.homedi
     item: s.item,
     lane: s.lane,
     phase: s.phase,
+    shipped: s.shipped ? true : undefined,
     admittedAt: first,
     endedAt: end,
     timeToGateMs: ms(first, gates[0]?.at),

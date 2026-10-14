@@ -1681,6 +1681,7 @@ export async function deliver(root, options) {
   if (state.intent !== 'implementation') throw refuse(`${state.id} was admitted with intent \`${state.intent}\`; only implementation attempts deliver`);
   if (state.activeHold) throw refuse(`delivery is on hold: "${state.activeHold.reason}"`, 'lift it with `wf release` when the hold no longer applies');
   if (state.batchOf) throw refuse(`${state.id} is a member of ${state.batchOf}; deliver the batch instead`);
+  if (state.shipped) throw refuse(`${state.id} was closed as shipped outside the workflow (${state.shipped.at}); there is nothing to deliver`);
   if (!state.accepted) throw refuse('review not accepted: `wf accept`');
   // I-18: an issue found during the ticket ends fixed in it or deferred by the owner, never open at delivery.
   for (const x of [state, ...(state.batch?.members ?? []).map((m) => loadState(root, m))]) {
@@ -1723,7 +1724,7 @@ export async function deliver(root, options) {
     }
   }
   if (state.deferHeavy && !state.batch) throw refuse(`${state.id} deferred its heavy steps to a batch; deliver it through \`wf batch create\``);
-  if (state.phase === 'handoff-pending' || state.phase === 'done') throw refuse(`${state.id} is already delivered`);
+  if (state.phase === 'handoff-pending' || state.phase === 'done') throw refuse(state.shipped ? `${state.id} was closed as shipped outside the workflow (${state.shipped.at}); there is nothing to deliver` : `${state.id} is already delivered`);
   if (options['repin-adapter'] !== undefined) state = repinAdapter(root, cfg, state, options);
   if (typeof options['no-lesson'] === 'string' && options['no-lesson'].trim() && owesLesson(state)) {
     append(root, state.id, 'lesson.waived', { reason: options['no-lesson'].trim(), on: 'deliver' }, actor(options));
@@ -2259,9 +2260,9 @@ export function reopen(root, options) {
   if (!options.item || !options.reason) throw new WfError('--item and --reason are required');
   const delivered = listAttempts(root)
     .map((id) => loadState(root, id))
-    .filter((s) => s.item === String(options.item) && s.delivery.completedAt)
+    .filter((s) => s.item === String(options.item) && (s.delivery.completedAt || s.shipped))
     .at(-1);
-  if (!delivered) throw refuse(`${options.item} has no delivered attempt to reopen`);
+  if (!delivered) throw refuse(`${options.item} has no delivered (or shipped) attempt to reopen`);
   const waiver = typeof options['no-lesson'] === 'string' && options['no-lesson'].trim() ? options['no-lesson'].trim() : null;
   const s = entry(root, { ...options, lane: delivered.lane === 'quick' ? 'quick' : 'standard', repos: Object.keys(delivered.repos).join(','), reopenedFrom: delivered.id });
   append(root, s.id, 'reopen.reason', { reason: String(options.reason), from: delivered.id }, actor(options));
@@ -2504,7 +2505,7 @@ function legacyNextAction(root, state) {
 
 function nextStep(root, state) {
   const cfg = loadConfig(root);
-  if (state.phase === 'done') return 'nothing: this attempt is closed';
+  if (state.phase === 'done') return state.shipped ? `nothing: closed as shipped outside the workflow (${state.shipped.at}, decision ${state.shipped.decision ?? 'none'}), without its acceptance` : 'nothing: this attempt is closed';
   if (state.phase === 'handoff-pending' && owesLesson(state) && !state.tracker.pending.length && !needsShown(state)) return lessonPrompts(state)[0];
   if (state.phase === 'abandoned') return 'nothing: this attempt was abandoned';
   const holdNote = state.activeHold ? ` (on hold: "${state.activeHold.reason}"; \`wf release\` lifts it)` : '';
