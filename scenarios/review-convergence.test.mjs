@@ -176,8 +176,9 @@ test('bookkeeping and fixed discoveries are in no reviewer bundle; an open defec
   const s = state(p.root, p.id);
   assert.deepEqual(s.discovered.map((x) => [x.id, x.kind, x.status]), [['D1', 'bookkeeping', 'fixed'], ['D2', 'defect', 'open'], ['D3', 'defect', 'fixed']]);
   const bundle = hand(p, 'r1');
-  assert.deepEqual(bundle.discovered.map((x) => x.id), ['D2'], 'only the defect still open: bookkeeping and fixed ones are history');
+  assert.deepEqual(bundle.discovered.map((x) => [x.id, x.fixedSinceReview ?? false]), [['D2', false], ['D3', true]], 'the defect still open, and the one fixed since the last round for the reviewer to verify; bookkeeping is history');
   ok(record(p, goodClosure('r1')));
+  assert.deepEqual(hand(p, 'r2').discovered.map((x) => x.id), ['D2'], 'once a round has seen the fix, it is history');
   assert.equal(state(p.root, p.id).review.closure.discovered, undefined, 'the closure was recorded as given, with no verdict for D2');
 });
 
@@ -239,6 +240,11 @@ test('deliver refuses while a review observation is unresolved, and accepts it t
   assert.equal(refused.code, 75);
   assert.match(refused.err, /not delivered: 1 review observation\(s\) are unresolved: r1:F1 \[old-empty-state\] old\.txt has no empty state/);
   assert.match(refused.err, /wf scope move[\s\S]*medium and high are fixed in this delivery[\s\S]*a low one leaves only with the person's yes[\s\S]*wf scope defer --finding <ref>/);
+  // The person is asked before the follow-up ticket exists (0.7.7); with their yes, the command says to create it.
+  const asked = wf(p.root, ['scope', 'ticket', '--finding', 'r1:F1', '--attempt', p.id], { ownerSilent: true });
+  assert.equal(asked.code, 75, 'the person is asked before a low observation leaves, and before any ticket is created');
+  assert.deepEqual(observations(loadState(p.root, p.id)).map((f) => f.ref), ['r1:F1']);
+  assert.match(wf(p.root, ['scope', 'ticket', '--finding', 'r1:F1', '--attempt', p.id]).err, /create it in the tracker now, save its raw readback/);
   // A creation that left no ticket (no url) leaves the observation unresolved.
   const bad = path.join(p.base, 'bad.json');
   fs.writeFileSync(bad, JSON.stringify({ issue: { identifier: 'ENG-9', title: 'follow-up' } }));
@@ -246,9 +252,6 @@ test('deliver refuses while a review observation is unresolved, and accepts it t
   assert.match(wf(p.root, ['deliver', '--attempt', p.id]).err, /1 review observation\(s\) are unresolved/);
   const good = path.join(p.base, 'good.json');
   fs.writeFileSync(good, JSON.stringify({ issue: { identifier: 'ENG-9', title: 'old.txt empty state', url: 'https://tracker.example.test/ENG-9' } }));
-  const asked = wf(p.root, ['scope', 'ticket', '--finding', 'r1:F1', '--capture', good, '--attempt', p.id], { ownerSilent: true });
-  assert.equal(asked.code, 75, 'the person is asked before a low observation leaves');
-  assert.deepEqual(observations(loadState(p.root, p.id)).map((f) => f.ref), ['r1:F1']);
   ok(wf(p.root, ['scope', 'ticket', '--finding', 'r1:F1', '--capture', good, '--attempt', p.id]));
   assert.deepEqual(observations(loadState(p.root, p.id)), []);
   assert.deepEqual(state(p.root, p.id).decisions.filter((d) => d.kind === 'move-out-of-batch').map((d) => [d.key, d.approved?.choice]), [['ticketed:r1:F1', 'yes']]);

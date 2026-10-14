@@ -64,7 +64,7 @@ test('I-18: discovered issues are recorded, end fixed by a ticket commit or defe
   // An agent's call alone is refused and leaves the pending decision; nothing is deferred.
   const asked = disc(root, ['close', 'D2', '--deferred', '--reason', 'park it for the mobile pass next sprint', '--attempt', id], silent);
   assert.equal(asked.code, 75);
-  assert.match(asked.err, /not done: letting D2 leave is the owner's decision \(A1: let 1 low item\(s\) leave this delivery \(deferred\): D2 \(low\): tables have no phone card view \(park it for the mobile pass next sprint\)\)/);
+  assert.match(asked.err, /not done: letting D2 leave is the owner's decision \(A1: let 1 low item\(s\) leave this delivery \(deferred\): D2 \(low, rated by impl-1\): tables have no phone card view \(park it for the mobile pass next sprint\)\)/);
   assert.match(asked.err, /ask the owner to run `wf approve A1 --attempt ENG-700\.1` in their own terminal \(choices: yes \| no\)/);
   assert.equal(state(root, id).discovered[1].status, 'open');
   assert.deepEqual(state(root, id).decisions.map((d) => [d.id, d.kind, d.key, d.approved]), [['A1', 'move-out-of-batch', 'deferred:D2', null]]);
@@ -80,8 +80,9 @@ test('I-18: discovered issues are recorded, end fixed by a ticket commit or defe
   ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', id]));
   const h = ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-1', '--attempt', id, '--owner', OWNER, '--runtime', 'codex']));
   const bundle = bundleOf(h);
-  assert.deepEqual(bundle.discovered.map((d) => [d.id, d.status]), [['D2', 'deferred']], 'a defect already fixed is history, not context for the reviewer');
-  assert.equal(bundle.discovered[0].deferred.decision, 'park it for the mobile pass next sprint');
+  // A defect fixed since the last round is handed to verify (0.7.7); the deferred one is context.
+  assert.deepEqual(bundle.discovered.map((d) => [d.id, d.status, d.fixedSinceReview ?? false]), [['D1', 'fixed', true], ['D2', 'deferred', false]]);
+  assert.equal(bundle.discovered.find((d) => d.id === 'D2').deferred.decision, 'park it for the mobile pass next sprint');
   assert.match(bundle.instructions, /discovered issues[^:]*are context for your judgement: cite them in findings; no verdict form is owed/);
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('rev-1', { discovered: [{ id: 'D2', verdict: 'deferred', evidence: 'owner decision recorded' }] })), '--attempt', id]));
 
@@ -96,7 +97,7 @@ test('I-18: discovered issues are recorded, end fixed by a ticket commit or defe
   // (A2 is the gate-order override above.)
   const lowAsked = disc(root, ['close', 'D3', '--deferred', '--reason', 'the default is the documented one', '--attempt', id], silent);
   assert.equal(lowAsked.code, 75);
-  assert.match(lowAsked.err, /not done: letting D3 leave is the owner's decision \(A3: let 1 low item\(s\) leave this delivery \(deferred\): D3 \(low\): an implicit page-size default/);
+  assert.match(lowAsked.err, /not done: letting D3 leave is the owner's decision \(A3: let 1 low item\(s\) leave this delivery \(deferred\): D3 \(low, rated by o\): an implicit page-size default/);
   assert.equal(state(root, id).discovered[2].status, 'open');
   ok(disc(root, ['close', 'D3', '--deferred', '--reason', 'the default is the documented one', '--attempt', id]));
   assert.deepEqual([state(root, id).discovered[2].deferred.source.provenance, state(root, id).discovered[2].deferred.source.decision], ['approved-decision', 'A3'], 'a deferral is always the person\'s decision now');
@@ -108,7 +109,7 @@ test('I-18: discovered issues are recorded, end fixed by a ticket commit or defe
   assert.match(d.err, /not delivered: 1 discovered issue\(s\) are open: D4 a failed Next strands the user[\s\S]*fix it in this ticket[\s\S]*medium and high are fixed in this delivery[\s\S]*a low one leaves only with the person's yes/);
   // An approval is used once and belongs to its entry: D2's and D3's do not defer D4.
   const d4 = disc(root, ['close', 'D4', '--deferred', '--reason', 'separate ticket ENG-701, agreed', '--attempt', id], silent);
-  assert.match(d4.err, /\(A4: let 1 low item\(s\) leave this delivery \(deferred\): D4 \(low\): a failed Next strands the user/);
+  assert.match(d4.err, /\(A4: let 1 low item\(s\) leave this delivery \(deferred\): D4 \(low, rated by [^)]+\): a failed Next strands the user/);
   assert.equal(state(root, id).discovered[3].status, 'open');
   ok(disc(root, ['close', 'D4', '--deferred', '--reason', 'separate ticket ENG-701, agreed', '--attempt', id]));
   // A refused delivery records no listing: nothing is marked as shown, and the same command works once the cause is gone.
@@ -163,14 +164,14 @@ test('0.7.0: a deferral is the owner\'s confirmed decision: per entry, used once
   }
   const declined = close(1, [], silent);
   assert.equal(declined.code, 75);
-  assert.match(declined.err, /\(A2: let 1 low item\(s\) leave this delivery \(deferred\): D1 \(low\).*\) \(the earlier answer, A1, was no\)/);
+  assert.match(declined.err, /\(A2: let 1 low item\(s\) leave this delivery \(deferred\): D1 \(low, rated by [^)]+\).*\) \(the earlier answer, A1, was no\)/);
   assert.equal(state(root, id).discovered[0].status, 'open');
   // A yes for D1 does not defer D2: the key names the entry.
   ok(close(1));
   assert.equal(state(root, id).discovered[0].status, 'deferred');
   const second = close(2, [], silent);
   assert.equal(second.code, 75);
-  assert.match(second.err, /\(A3: let 1 low item\(s\) leave this delivery \(deferred\): D2 \(low\)/);
+  assert.match(second.err, /\(A3: let 1 low item\(s\) leave this delivery \(deferred\): D2 \(low, rated by [^)]+\)/);
   assert.equal(state(root, id).discovered[1].status, 'open');
   // Free text on the command line is not the owner's decision: `--decision` is ignored, the reason is recorded as given.
   const r = ok(close(2, ['--decision', 'harmless today', '--json'])).json();
@@ -386,12 +387,13 @@ test('0.7.0: an implementer closes with its report; each item it left becomes an
   assert.deepEqual(closed.discovered.map((d) => d.severity), ['major', null]);
   assert.match(ok(wf(root, ['resume', '--attempt', id])).out, /discovered: 2 open \(D1, D2\)[\s\S]*next: fix the discovered issue\(s\) D1 \(major\), D2 through the implementer that found each/);
 
-  // D1 is fixed in this ticket and D2 stays open. The reviewer is handed the report and the open entry as context.
+  // D1 is fixed in this ticket and D2 stays open. The reviewer is handed the report, the open entry as context, and D1 marked
+  // fixed since the last round, to verify the claim (0.7.7).
   commitIn(wt, { 'src/export.txt': 'every page\n' }, 'the export sums every page');
   ok(disc(root, ['close', 'D1', '--fixed', sh(wt, 'git rev-parse HEAD'), '--attempt', id]));
   const rev0 = bundleOf(ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-0', '--attempt', id, '--owner', 'o'])));
   assert.deepEqual(rev0.implementerReports.map((x) => [x.agent, x.left.map((l) => l.what)]), [['impl-2', ['the export page sums one page only', 'the footer shows no total']]]);
-  assert.deepEqual(rev0.discovered.map((d) => [d.id, d.status]), [['D2', 'open']]);
+  assert.deepEqual(rev0.discovered.map((d) => [d.id, d.status, d.fixedSinceReview ?? false]), [['D1', 'fixed', true], ['D2', 'open', false]]);
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('rev-0')), '--attempt', id]));
   ok(wf(root, ['gate', '--attempt', id]));
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-1', '--attempt', id, '--owner', 'o']));

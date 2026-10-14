@@ -377,12 +377,13 @@ export const blockingOpen = (state) => blockingIn(state, state.review);
 
 // Open findings that do not block, from every round, not yet fixed, ticketed or moved: the strategist schedules them
 // (a batch fix pass, a sibling attempt, or a ticket) and delivery waits for them.
-// A high observation the owner recorded fixed (`wf scope fixed`) still waits for a reviewer's `fixed`: a claim is not
-// evidence for what must be fixed in this delivery (second final review of 0.7.0). Low and medium ones are settled by it.
+// A medium or high observation the owner recorded fixed (`wf scope fixed`) still waits for a reviewer's `fixed`: a claim
+// is not evidence for what must be fixed in this delivery (second final review of 0.7.0, for high; independent review of
+// 0.7.7, for medium, which D17 also keeps in the delivery). A low one is settled by it.
 export const observations = (state) => openAcrossRounds(state).filter((f) => {
   if (f.classified.blocks) return false;
   const d = dispositionOf(state, f.ref);
-  return !d || (d.choice === 'fixed' && placementLevel(state, f) === 'high');
+  return !d || (d.choice === 'fixed' && placementLevel(state, f) !== 'low');
 });
 
 // Earlier rounds' blocking findings: what a later round must verify before the gate or acceptance.
@@ -392,6 +393,11 @@ export const earlierBlocking = (state, exceptRound) => openAcrossRounds(state, e
 
 // An implementer's own lint or fixture fix is bookkeeping: closed in the handoff that made it, never a verdict item.
 export const isBookkeeping = (d) => d?.kind === 'bookkeeping';
-// What a reviewer's bundle lists: defects still open or deferred. Fixed defects and bookkeeping are the attempt's history.
+// What a reviewer's bundle lists: defects still open or deferred, and those closed fixed since the last recorded review
+// round (`fixedSinceReview`), so a reviewer sees the claimed fix and raises a finding if it does not hold (independent
+// review of 0.7.7: a fixed claim never reached a reviewer). Older fixed defects and bookkeeping are the attempt's history.
 // An entry the owner waived under the old extra-scope flow (before 0.7.0) stays settled.
-export const reviewerDiscovered = (entries, state = null) => (entries ?? []).filter((d) => !isBookkeeping(d) && d.status !== 'fixed' && !(state && legacyWaived(state, d)));
+export const reviewerDiscovered = (entries, state = null) => {
+  const lastReview = (state?.reviews ?? []).map((r) => r.at).filter(Boolean).sort().at(-1) ?? null;
+  return (entries ?? []).filter((d) => !isBookkeeping(d) && !(state && legacyWaived(state, d)) && (d.status !== 'fixed' || (state && (!lastReview || (d.fixed?.at && d.fixed.at > lastReview))))).map((d) => (d.status === 'fixed' ? { ...d, fixedSinceReview: true } : d));
+};

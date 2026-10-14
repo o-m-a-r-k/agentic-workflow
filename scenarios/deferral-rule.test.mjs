@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { approveAsOwner, closureFile, commitIn, criteriaFile, goodClosure, ok, singleRepoProject, state, wf } from './helpers.mjs';
+import { approveAsOwner, closureFile, commitIn, criteriaFile, goodClosure, ok, sh, singleRepoProject, state, toAccepted, wf } from './helpers.mjs';
 
 // 0.7.7, D17, named failure (field): under D10 a medium finding was the owner agent's call and a low one left freely, so
 // an owner deferred 14 of 15 findings on its own judgement, among them a behaviour the person had asked for (called "a
@@ -58,17 +58,22 @@ test('medium and high stay in the delivery: no command defers or tickets them, w
   assert.deepEqual(s.decisions ?? [], [], 'no decision was put to the person');
 });
 
-test('low items leave only with the person\'s yes, review findings and discovered issues in one question that shows a down-rating', () => {
+test('low items leave only with the person\'s yes, review findings and discovered issues in one question that shows who rated each and every re-rating', () => {
   const p = project('d17-low');
   const [, d2] = state(p.root, p.id).discovered.map((d) => d.id);
+  // Lowering into low is the person's decision too (D17): the agent cannot rate an item down to put it in the question.
+  const rating = run(p, ['discovered', 'rate', d2, '--severity', 'low', '--reason', 'an ignored folder']);
+  assert.equal(rating.code, 75);
+  assert.match(rating.err, /rate DR-1\.1:D2 down from medium to low/);
+  approveAsOwner(p.root, p.id, rating.err.match(/wf approve (A\d+)/)[1], 'yes');
   ok(run(p, ['discovered', 'rate', d2, '--severity', 'low', '--reason', 'an ignored folder']));
   const asked = run(p, ['scope', 'defer', '--finding', `r1:F2,${d2}`, '--reason', 'polish']);
   assert.equal(asked.code, 75);
   const id = asked.err.match(/wf approve (A\d+)/)[1];
   const d = state(p.root, p.id).decisions.find((x) => x.id === id);
-  assert.match(d.summary, /r1:F2 \(low\): F2: src\/old\.txt:3 a tooltip typo/);
-  assert.match(d.summary, new RegExp(`${d2} \\(low, rated down from medium\\): a stale screenshot`));
-  assert.equal(state(p.root, p.id).decisions.length, 1, 'one question for both kinds');
+  assert.match(d.summary, /r1:F2 \(low, rated by reviewer r1; at src\/old\.txt:3\): F2: src\/old\.txt:3 a tooltip typo/);
+  assert.match(d.summary, new RegExp(`${d2} \\(low, rated by [^;]+; re-rated medium to low by [^ ]+ because an ignored folder\\): a stale screenshot`));
+  assert.equal(state(p.root, p.id).decisions.filter((x) => x.key.startsWith('deferred:')).length, 1, 'one question for both kinds');
   approveAsOwner(p.root, p.id, id, 'no');
   assert.notEqual(run(p, ['scope', 'defer', '--finding', `r1:F2,${d2}`]).code, 0, 'a no lets nothing leave');
   assert.equal(state(p.root, p.id).discovered.find((x) => x.id === d2).status, 'open');
@@ -82,3 +87,65 @@ test('low items leave only with the person\'s yes, review findings and discovere
   assert.equal(s.scopeDecisions.at(-1).decision, again);
   assert.deepEqual(s.scopeDecisions.at(-1).keys, ['r1:F2']);
 });
+
+test('the question names every other open low item, so the owner puts them in one question', () => {
+  const p = project('d17-others');
+  ok(run(p, ['discovered', 'add', '--summary', 'a label wraps on a phone', '--severity', 'low']));
+  const asked = run(p, ['scope', 'defer', '--finding', 'r1:F2']);
+  assert.equal(asked.code, 75);
+  assert.match(asked.err, /other open low items not in this question: D4/);
+});
+
+test('a discovered issue is closed fixed only by a commit made after it was recorded', () => {
+  const p = project('d17-fixed-after');
+  const wt = state(p.root, p.id).repos.app.worktree;
+  const before = sh(wt, 'git rev-parse HEAD');
+  const [d1] = state(p.root, p.id).discovered.map((d) => d.id);
+  const r = run(p, ['discovered', 'close', d1, '--fixed', before]);
+  assert.notEqual(r.code, 0);
+  assert.match(r.err, /was already in the tree D1 was recorded on: it cannot be the fix/);
+  commitIn(wt, { 'src/old.txt': 'o1\no2 fixed\no3\n' }, 'fix D1');
+  ok(run(p, ['discovered', 'close', d1, '--fixed', sh(wt, 'git rev-parse HEAD')]));
+});
+
+test('the strategist cannot queue a medium or high item for a ticket', async () => {
+  const { strategistClosure } = await import('./strategist-fixtures.mjs');
+  const p = project('d17-strategist');
+  const [d1] = state(p.root, p.id).discovered.map((d) => d.id);
+  const h = ok(wf(p.root, ['handoff', 'strategist', '--agent', 'strat-1', '--attempt', p.id, '--reason', 'observations pile up', '--json'])).json();
+  const closure = (items) => ({ strategist: 'strat-1', action: 'ticket', items, rationale: 'they can wait', prediction: { signal: 'observationsOpen <= 1', by: 3 } });
+  for (const items of [['r1:F1'], [d1], ['r1:F2', 'r1:F1']]) {
+    const r = wf(p.root, ['strategy', 'record', '--closure', strategistClosure(p.base, h.bundle, closure(items)).file, '--attempt', p.id], silent);
+    assert.notEqual(r.code, 0, items.join(','));
+    assert.match(r.err, /medium or high: medium and high are fixed in this delivery/);
+  }
+  ok(wf(p.root, ['strategy', 'record', '--closure', strategistClosure(p.base, h.bundle, closure(['r1:F2'])).file, '--attempt', p.id]));
+});
+
+test('a finding moved to a sibling leaves the batch only by the person: ejecting or abandoning the sibling asks', () => {
+  const steps2 = [{ id: 'unit', repo: 'app', run: 'true', inputs: ['src/**'] }, { id: 'e2e', repo: 'app', run: 'true', tier: 'heavy' }];
+  const { base, root } = singleRepoProject('d17-move-eject', { gate: { steps: steps2 } }, { 'src/b.txt': 'b\n', 'src/old.txt': 'o1\no2\no3\n' });
+  const e = ok(wf(root, ['entry', '--item', 'PR-1', '--owner', 'o', '--json', '--defer-heavy'])).json();
+  ok(wf(root, ['handoff', 'planner', '--agent', 'plan-1', '--attempt', e.id, '--owner', 'o']));
+  ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id, '--owner', 'o']));
+  ok(wf(root, ['handoff', 'implementer', '--agent', 'impl-1', '--attempt', e.id, '--owner', 'o']));
+  commitIn(e.repos.app.worktree, { 'src/a.txt': 'one\n' });
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-0', '--attempt', e.id, '--owner', 'o']));
+  const obs = { id: 'F1', severity: 'medium', summary: 'customer invoice reads carry admin-only fields', status: 'open', evidence: 'src/old.txt:2 the DTO exposes them' };
+  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('rev-0', { findings: [obs] })), '--attempt', e.id]));
+  ok(wf(root, ['gate', '--attempt', e.id]));
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-1', '--attempt', e.id, '--owner', 'o']));
+  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('rev-1')), '--attempt', e.id]));
+  ok(wf(root, ['accept', '--attempt', e.id, '--owner', 'o']));
+  const m2 = toAccepted(root, base, { item: 'PR-2', owner: 'o', change: { 'src/b.txt': 'two\n' }, extraEntry: ['--defer-heavy'] }).id;
+  const b = ok(wf(root, ['batch', 'create', '--members', `${e.id},${m2}`, '--owner', 'o', '--json'])).json();
+  ok(wf(root, ['scope', 'move', '--finding', 'rev-0:F1', '--sibling', m2, '--reason', 'belongs with PR-2', '--attempt', e.id]));
+  const moved = state(root, m2).discovered.at(-1);
+  assert.deepEqual(moved.movedFrom, { attempt: e.id, ref: 'rev-0:F1' }, 'the sibling keeps where the item came from');
+  const eject = wf(root, ['batch', 'eject', '--batch', b.id, '--member', m2, '--reason', 'ship PR-1 alone', '--owner', 'o'], silent);
+  assert.equal(eject.code, 75, 'ejecting the holder of moved work is the person\'s decision');
+  const abandon = wf(root, ['abandon', '--attempt', m2, '--reason', 'not now', '--owner', 'o'], silent);
+  assert.equal(abandon.code, 75, 'abandoning it too');
+  assert.equal(state(root, m2).phase !== 'abandoned', true);
+});
+

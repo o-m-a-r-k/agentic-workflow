@@ -115,10 +115,10 @@ test('`wf scope fixed` needs a commit made after the finding; a reviewer\'s "ope
   fixRound(p, { 'src/old.txt': 'o1 fixed\no2\no3 fixed\n' });
   const fix = sh(p.wt, 'git rev-parse HEAD');
   ok(wf(p.root, ['scope', 'fixed', '--finding', 'r1:F1,r1:F2', '--commit', fix, '--attempt', p.id]));
-  // The medium claim settles it; the high one still waits for a reviewer.
+  // Neither claim settles it: medium and high stay in the delivery, so each waits for a reviewer's `fixed` (0.7.7, D17).
   const watching = () => ok(wf(p.root, ['scope', 'list', '--attempt', p.id, '--json'])).json().filter((r) => !r.blocks);
   const open = () => ok(wf(p.root, ['signals', '--attempt', p.id, '--json'])).json().observationsOpen.map((o) => o.ref);
-  assert.deepEqual(open(), ['r1:F1']);
+  assert.deepEqual(open(), ['r1:F1', 'r1:F2']);
   // A delta reviewer finds F1 still open: the claim is undone.
   const b = hand(p, 'r2');
   assert.ok(b.openFindings.find((f) => f.id === 'F1').claimedFixed);
@@ -204,7 +204,7 @@ test('a discovered issue on a critical invariant is high whatever its rating; ra
   assert.match(stays.err, new RegExp(`${slow.id} \\(medium\\) stays in this delivery`));
   assert.equal(refusals(p).at(-1).id, 'leave:medium-high');
   assert.deepEqual(state(p.root, p.id).discovered.filter((d) => [typo.id, slow.id].includes(d.id)).map((d) => d.status), ['open', 'open'], 'the command is refused as a whole');
-  // Lowered once more (from medium a reason is all it takes), both are low and leave under one question for the two.
+  // Lowered once more (into low it is the person's decision, D17), both are low and leave under one question for the two.
   ok(wf(p.root, ['discovered', 'rate', slow.id, '--severity', 'low', '--reason', 'cosmetic on the admin list', '--attempt', p.id]));
   const both = `${typo.id},${slow.id}`;
   const asked = wf(p.root, ['discovered', 'close', both, '--deferred', '--reason', 'next sprint', '--attempt', p.id], { ownerSilent: true });
@@ -212,7 +212,7 @@ test('a discovered issue on a critical invariant is high whatever its rating; ra
   assert.match(asked.err, /let 2 low item\(s\) leave this delivery \(deferred\)/);
   ok(wf(p.root, ['discovered', 'close', both, '--deferred', '--reason', 'next sprint', '--attempt', p.id]));
   assert.deepEqual(state(p.root, p.id).discovered.filter((d) => [typo.id, slow.id].includes(d.id)).map((d) => d.status), ['deferred', 'deferred']);
-  assert.equal((state(p.root, p.id).decisions ?? []).filter((d) => d.approved).length, 3, 'the person decided the two ratings out of high and, once, the two deferrals');
+  assert.equal((state(p.root, p.id).decisions ?? []).filter((d) => d.approved).length, 4, 'the person decided the two ratings out of high, the rating into low and, once, the two deferrals');
   assert.equal((state(p.root, p.id).decisions ?? []).filter((d) => d.key === `deferred:${[typo.id, slow.id].sort().join(',')}` && d.approved?.choice === 'yes').length, 1, 'one decision covers both ids');
 });
 

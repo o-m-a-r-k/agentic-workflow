@@ -12,9 +12,9 @@ import { actor, openState } from './attempt.mjs';
 import { append, attemptDir, loadState, recordedTogether } from './ledger.mjs';
 import { requireYes } from './approve.mjs';
 import { readRegular, withEvidenceTransaction } from './evidence.mjs';
-import { blockingIn, dispositionOf, locationsOf, observations, openAcrossRounds, placementLevel, severityLevel } from './review-policy.mjs';
-import { discoveredLevel, ticketCommit } from './discovered.mjs';
-import { leavingDecision } from './leaving.mjs';
+import { blockingIn, dispositionOf, locationsOf, observations, openAcrossRounds, placementLevel } from './review-policy.mjs';
+import { discoveredLevel, headsNow, ticketCommit } from './discovered.mjs';
+import { discoveredRating, leavingDecision } from './leaving.mjs';
 import { git, run } from './util.mjs';
 import { hashFile, refuse, WfError, writeImmutable } from './util.mjs';
 
@@ -52,21 +52,18 @@ function movable(f) {
 
 // The items a placement names: review findings (`reviewer:F1`) and discovered issues (`D3`) together, so every low item
 // that leaves is put to the person in one question (D17).
-const lowerThan = { high: 2, medium: 1, low: 0 };
 function leavingItems(state, refs) {
   return refs.map((ref) => {
     if (/^D\d+$/.test(ref)) {
       const d = (state.discovered ?? []).find((x) => x.id === ref);
       if (!d) throw new WfError(`no discovered issue ${ref} on ${state.id}${state.discovered?.length ? ` (${state.discovered.map((x) => x.id).join(', ')})` : ''}`);
       if (d.status !== 'open') throw refuse(`${ref} is already ${d.status}`);
-      const level = discoveredLevel(d);
-      const first = (d.rated ?? [])[0];
-      const was = first ? severityLevel(first.from) ?? 'high' : null;
-      return { kind: 'discovered', ref, entry: d, level, blocks: false, severity: d.severity ?? null, summary: d.summary ?? '', ratedFrom: was && lowerThan[was] > lowerThan[level] ? first.from ?? 'unrated' : null, raisedAt: d.at ?? null };
+      return { kind: 'discovered', ref, entry: d, level: discoveredLevel(d), blocks: false, severity: d.severity ?? null, summary: d.summary ?? '', raisedAt: d.at ?? null, ...discoveredRating(d) };
     }
     const f = find(state, ref);
     if (dispositionOf(state, f.ref)) throw refuse(`${f.ref} already went elsewhere`);
-    return { kind: 'finding', ref: f.ref, entry: f, level: placementLevel(state, f), blocks: f.classified.blocks, severity: f.severity ?? null, summary: f.summary ?? '', ratedFrom: null, raisedAt: raisedAt(state, [f]) };
+    const where = f.file && f.line !== undefined ? `${f.file}:${f.line}` : (typeof f.evidence === 'string' ? (f.evidence.match(/[\w./@~+-]+\.[A-Za-z0-9]+:\d+/)?.[0] ?? null) : null);
+    return { kind: 'finding', ref: f.ref, entry: f, level: placementLevel(state, f), blocks: f.classified.blocks, severity: f.severity ?? null, summary: f.summary ?? '', raisedAt: raisedAt(state, [f]), ratedBy: `reviewer ${f.round}`, ratings: [], where };
   });
 }
 
@@ -105,7 +102,7 @@ export function moveOut(root, options, refs, { to, reason }) {
     const sib = loadState(root, sibling);
     const where = f.file && f.line !== undefined ? `${f.file}:${f.line}` : (typeof f.evidence === 'string' ? (f.evidence.match(/[\w./@~+-]+\.[A-Za-z0-9]+:\d+/)?.[0] ?? null) : null);
     const movedId = `D${(sib.discovered?.length ?? 0) + 1}`;
-    withEvidenceTransaction(root, sibling, () => append(root, sibling, 'discovered.added', { id: movedId, summary: `moved from ${state.id} ${ref}: ${f.summary ?? ''}`.trim(), kind: 'defect', severity: f.severity ?? null, where, foundBy: f.round ?? null, blockedBy: null, movedFrom: { attempt: state.id, ref } }, actor(options)));
+    withEvidenceTransaction(root, sibling, () => append(root, sibling, 'discovered.added', { id: movedId, summary: `moved from ${state.id} ${ref}: ${f.summary ?? ''}`.trim(), kind: 'defect', severity: f.severity ?? null, where, foundBy: f.round ?? null, blockedBy: null, movedFrom: { attempt: state.id, ref }, raisedOn: headsNow(sib) }, actor(options)));
     append(root, state.id, 'scope.moved', { keys: [ref], choice: 'moved', sibling, siblingIssue: movedId, reason: text(reason) || null, blocked: f.classified.blocks }, actor(options));
   });
   return loadState(root, state.id);
@@ -121,10 +118,14 @@ export function completeScopeTicket(root, options) {
 }
 function ticketLocked(root, options, state) {
   const refs = [...new Set(String(options.finding ?? '').split(',').map((x) => x.trim()).filter(Boolean))];
-  if (!refs.length) throw new WfError('usage: wf scope ticket --finding <round:id|D-id>[,...] --capture <raw readback> [--reason "..."]');
+  if (!refs.length) throw new WfError('usage: wf scope ticket --finding <round:id|D-id>[,...] [--capture <raw readback>] [--reason "..."] (without --capture it asks the person first)');
   const items = leavingItems(state, refs);
   const found = items.filter((x) => x.kind === 'finding').map((x) => x.entry);
-  if (typeof options.capture !== 'string') throw new WfError('--capture is the tracker raw readback saved after creating the follow-up');
+  // The person is asked before the follow-up ticket exists (independent review of 0.7.7: the readback was required first,
+  // so a `no` left an orphaned tracker issue and the question a formality). With their yes, create it and record it.
+  const reason = text(options.reason);
+  const decision = leavingDecision(root, state, items, { verb: 'ticketed', reason, options });
+  if (typeof options.capture !== 'string') throw refuse(`the person let ${items.map((x) => x.ref).join(', ')} leave as a follow-up ticket (${decision}): create it in the tracker now, save its raw readback, and run this command again with \`--capture <raw.json>\``, null, { id: 'scope:ticket-capture' });
   const raw = readRegular(path.resolve(options.capture));
   if (!raw || raw.bytes.length > 1024 * 1024) throw refuse('ticket readback must be a regular file at most 1 MiB');
   let data;
@@ -137,8 +138,6 @@ function ticketLocked(root, options, state) {
   const id = text(issue.identifier) || text(issue.id);
   const url = text(issue.url) || text(issue.web_url);
   if (!id || !text(issue.title) || !/^https:\/\//.test(url)) throw refuse('raw ticket readback must contain issue id/identifier, title and HTTPS url; failed creation leaves the finding unresolved');
-  const reason = text(options.reason);
-  const decision = leavingDecision(root, state, items, { verb: 'ticketed', reason, options });
   const file = path.join(attemptDir(root, state.id), 'scope', `${items[0].ref.replace(/[^\w.-]+/g, '_')}${items.length > 1 ? `+${items.length - 1}` : ''}.ticket.json`);
   writeImmutable(file, raw.bytes.toString('utf8'));
   if (found.length) append(root, state.id, 'scope.ticketed', { keys: found.map((f) => f.ref), choice: 'ticketed', raw: { file, sha256: hashFile(file) }, ticket: { id, url, title: issue.title, capture: file, provenance: 'agent-reported-raw-readback' }, reason: reason || null, placement: Object.fromEntries(found.map((f) => [f.ref, placementLevel(state, f)])), decision, blocked: false }, actor(options));

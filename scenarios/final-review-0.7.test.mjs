@@ -108,7 +108,7 @@ test('what leaves the delivery follows the person\'s rule (D17): a major defect 
   // A minor one is the person's yes, asked once; the reason travels with the ticket.
   const low = ticket('r2:F3', 5, ['--reason', 'the export page is redesigned next sprint']);
   assert.equal(low.code, 75);
-  assert.match(low.err, /letting r2:F3 leave is the owner's decision \(A1: let 1 low item\(s\) leave this delivery \(ticketed\): r2:F3 \(nit\)/);
+  assert.match(low.err, /letting r2:F3 leave is the owner's decision \(A1: let 1 low item\(s\) leave this delivery \(ticketed\): r2:F3 \(nit, rated by reviewer r2; at src\/old\.txt:2\)/);
   ok(wf(p.root, ['scope', 'ticket', '--finding', 'r2:F3', '--capture', capture(p, 5), '--reason', 'the export page is redesigned next sprint', '--attempt', p.id]));
   const t = state(p.root, p.id).scopeDecisions.at(-1);
   assert.deepEqual([t.keys, t.reason, t.placement, t.decision], [['r2:F3'], 'the export page is redesigned next sprint', { 'r2:F3': 'low' }, 'A1']);

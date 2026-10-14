@@ -12,7 +12,7 @@ import { home } from './provenance.mjs';
 import { findHost, optional } from './hosts/index.mjs';
 import { WfError, git, refuse, run } from './util.mjs';
 import { requireYes } from './approve.mjs';
-import { leavingDecision } from './leaving.mjs';
+import { discoveredRating, leavingDecision } from './leaving.mjs';
 
 const text = (v) => (typeof v === 'string' ? v.trim() : '');
 const OPEN = (s) => !['done', 'abandoned'].includes(s.phase);
@@ -39,9 +39,13 @@ export function addDiscovered(root, options) {
   const kind = options.kind === undefined ? 'defect' : text(options.kind);
   if (!['defect', 'bookkeeping'].includes(kind)) throw new WfError('--kind is defect (default) or bookkeeping');
   const id = `D${(state.discovered?.length ?? 0) + 1}`;
-  append(root, state.id, 'discovered.added', { id, summary, kind, severity, ...(invariant ? { invariant } : {}), where: text(options.where) || null, foundBy: text(options['found-by']) || null, blockedBy }, actor(options));
+  append(root, state.id, 'discovered.added', { id, summary, kind, severity, ...(invariant ? { invariant } : {}), where: text(options.where) || null, foundBy: text(options['found-by']) || null, blockedBy, raisedOn: headsNow(state) }, actor(options));
   return { state: loadState(root, state.id), id };
 }
+
+// Each repo's HEAD when an issue is recorded: a commit already in that tree cannot be the issue's fix (independent review
+// of 0.7.7: `wf discovered close --fixed` took the first implementation commit, older than the issue).
+export const headsNow = (state) => Object.fromEntries(Object.entries(state.repos ?? {}).map(([name, r]) => [name, (r.worktree && git(r.worktree, ['rev-parse', 'HEAD'], { allowFail: true })) || null]));
 
 // The commit is part of this ticket's change in one of its repos: reachable from the worktree's HEAD and not from the
 // base the change starts at.
@@ -86,6 +90,10 @@ export function closeDiscovered(root, idArg, options) {
   if (Boolean(fixed) === deferred) throw new WfError(`close ${ids.join(',')} with either --fixed <commit> or --deferred [--reason "<why it waits>"] (only a low issue may wait, with the person's yes; medium and high are fixed here)`);
   if (fixed) {
     const c = ticketCommit(state, fixed, typeof options.repo === 'string' ? options.repo : null);
+    for (const e of entries) {
+      const head = e.raisedOn?.[c.repo];
+      if (head && run('git', ['merge-base', '--is-ancestor', c.commit, head], { cwd: state.repos[c.repo].worktree, allowFail: true }).status === 0) throw refuse(`${c.commit.slice(0, 10)} was already in the tree ${e.id} was recorded on: it cannot be the fix`, 'name the commit that fixed it, made after the issue was recorded', { id: 'discovered:fixed-before-issue' });
+    }
     for (const e of entries) append(root, state.id, 'discovered.closed', { id: e.id, outcome: 'fixed', repo: c.repo, commit: c.commit, evidence: text(options.evidence) || null }, actor(options));
     return { state: loadState(root, state.id), outcome: 'fixed', ids, ...c };
   }
@@ -93,12 +101,7 @@ export function closeDiscovered(root, idArg, options) {
   // and earlier let a medium one wait on the owner agent's reason and a low one freely). Named failure (0.7.0): the
   // owner-phrase grammar refused real deferrals after the person had said yes.
   const reason = text(options.reason);
-  const ratedFrom = (e) => {
-    const first = (e.rated ?? [])[0];
-    const was = first ? severityLevel(first.from) ?? 'high' : null;
-    return was && { high: 2, medium: 1, low: 0 }[was] > { high: 2, medium: 1, low: 0 }[discoveredLevel(e)] ? first.from ?? 'unrated' : null;
-  };
-  const decision = leavingDecision(root, state, entries.map((e) => ({ ref: e.id, level: discoveredLevel(e), blocks: false, severity: e.severity ?? null, summary: e.summary, ratedFrom: ratedFrom(e), raisedAt: e.at ?? null })), { verb: 'deferred', reason, options });
+  const decision = leavingDecision(root, state, entries.map((e) => ({ ref: e.id, level: discoveredLevel(e), blocks: false, severity: e.severity ?? null, summary: e.summary, raisedAt: e.at ?? null, ...discoveredRating(e) })), { verb: 'deferred', reason, options });
   // The channel the person used (their terminal or the question panel) travels with the deferral (0.7.3).
   const via = (state.decisions ?? []).find((x) => x.id === decision)?.approved?.via ?? null;
   for (const e of entries) {
@@ -120,9 +123,10 @@ export function rateDiscovered(root, id, options) {
   const fromLevel = discoveredLevel(entry);
   const lowering = rank[severityLevel(severity)] < rank[fromLevel];
   if (lowering && !text(options.reason)) throw refuse(`lowering ${id} from ${entry.severity ?? 'unrated'} to ${severity} is a judgement: say why`, 'pass `--reason "..."`', { id: 'discovered:rate-reason' });
-  // Out of high (or unrated) it is the person's decision: otherwise the agent that wants to deliver could rate a defect
-  // down and defer it alone (verification of the second final review). An invariant issue stays high whatever it is rated.
-  const decision = lowering && fromLevel === 'high' ? requireYes(root, state, { kind: 'move-out-of-batch', key: `rate:${state.id}:${id}:${severity}`, summary: `rate ${state.id}:${id} down from ${entry.severity ?? 'unrated'} to ${severity}: ${entry.summary} (${text(options.reason)})`, what: `rating ${id} down`, options }).decision : null;
+  // Out of high (or unrated), or into low, it is the person's decision: otherwise the agent that wants to deliver could rate
+  // a defect down and defer it alone (verification of the second final review; into low since D17, where low is the only
+  // level that may leave: independent review of 0.7.7). An invariant issue stays high whatever it is rated.
+  const decision = lowering && (fromLevel === 'high' || severityLevel(severity) === 'low') ? requireYes(root, state, { kind: 'move-out-of-batch', key: `rate:${state.id}:${id}:${severity}`, summary: `rate ${state.id}:${id} down from ${entry.severity ?? 'unrated'} to ${severity}: ${entry.summary} (${text(options.reason)})`, what: `rating ${id} down`, options }).decision : null;
   append(root, state.id, 'discovered.rated', { id, severity, from: entry.severity ?? null, reason: text(options.reason) || null, ...(decision ? { decision } : {}) }, actor(options));
   return loadState(root, state.id);
 }

@@ -9,7 +9,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 import { refreshModels } from './models.mjs';
-import { RULE } from './leaving.mjs';
+import { RULE_SHORT } from './leaving.mjs';
 import { abandon, adopt, attemptForName, changedFiles, closeShipped, entry, hold, openState, release, resolveAttempt, setIntent } from './attempt.mjs';
 import { baseLines, baseMerge, baseStatus } from './base.mjs';
 import { findRoot, loadConfig, repoDir, requireRoot } from './config.mjs';
@@ -106,8 +106,9 @@ Work
   wf stop --class major-finding|tree-change|owner-decision --reason "why"
                                     stop a running gate; records the class and the minutes discarded
   wf scope list                     every open review finding: blocks or observation, its family, where it went
-  wf scope ticket --finding REVIEWER:F1[,D3] --capture RAW.json [--reason "why it waits"]
-                                    raw tracker readback of the follow-up ticket; low items only, with the person's yes
+  wf scope ticket --finding REVIEWER:F1[,D3] [--capture RAW.json] [--reason "why it waits"]
+                                    low items only: asks the person first; with their yes, create the ticket and record
+                                    its raw tracker readback with --capture
   wf scope fixed --finding REVIEWER:F1 --commit SHA
                                     an observation this attempt fixed; the next reviewer verifies it
   wf scope defer --finding REVIEWER:F1[,D3] [--reason "why it waits"]
@@ -778,7 +779,7 @@ async function dispatch(cmd, sub, positional, options) {
       // I-18: the discovered-issue ledger. Any role records what it finds; only the owner defers (a confirmed decision).
       if (sub === 'add') {
         const r = addDiscovered(root, options);
-        print(options, `discovered ${r.id} recorded on ${r.state.id}; fix it here and close it with the fix commit (\`wf discovered close ${r.id} --fixed <commit>\`); ${RULE}`, r.state.discovered.at(-1));
+        print(options, `discovered ${r.id} recorded on ${r.state.id}; fix it here and close it with the fix commit (\`wf discovered close ${r.id} --fixed <commit>\`); ${RULE_SHORT}`, r.state.discovered.at(-1));
         return 0;
       }
       if (sub === 'close') {

@@ -1,4 +1,5 @@
 import { ledgerEmpty, writeNoFollow } from './evidence.mjs';
+import { carriesMovedWork } from './leaving.mjs';
 import { mkdirStateDirectory } from './state-folders.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -373,7 +374,7 @@ export function abandon(root, options) {
   if (['done', 'abandoned'].includes(state.phase)) throw refuse(`${state.id} is already ${state.phase}${state.shipped ? ' (closed as shipped)' : ''}; a closed attempt is not abandoned`);
   // Independent review of 0.7.0 (HIGH): abandoning a split member dropped what the split moved into it. It is the person's
   // one-use decision.
-  const splitDecision = (state.splitFrom || state.splits?.length) && !['done', 'abandoned'].includes(state.phase) ? requireYes(root, state, { kind: 'move-out-of-batch', key: `abandon-split:${state.id}`, summary: `abandon ${state.id}, which carries or handed work in a split batch`, what: `abandoning ${state.id}`, options }).decision : null;
+  const splitDecision = (state.splitFrom || state.splits?.length || carriesMovedWork(state)) && !['done', 'abandoned'].includes(state.phase) ? requireYes(root, state, { kind: 'move-out-of-batch', key: `abandon-split:${state.id}`, summary: `abandon ${state.id}, which carries or handed work in a split batch`, what: `abandoning ${state.id}`, options }).decision : null;
   // I-22: the refusal names the case. A repo recorded as skipped had no changes, so nothing of it reached a target branch;
   // an attempt whose recorded repos are all skipped is abandoned like one with nothing recorded. A repo recorded as
   // delivered is on its target branch: the attempt is finished, never abandoned.
