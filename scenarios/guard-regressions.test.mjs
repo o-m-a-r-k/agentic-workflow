@@ -49,6 +49,16 @@ test('a shell started inside the evidence is refused; any other shell text is no
   assert.equal(check({ cwd: '/p', tool_name: 'Bash', tool_input: { command: 'echo "$HOME" > /tmp/wf-notes.txt # .wf-evidence' } }), null);
 });
 
+// Named failure (0.7.3, field): a shell left standing in the evidence folder could run nothing, `cd` out included (18
+// refusals; the session was dead and its ticket stopped). The way out is a bare `cd` to a folder outside the evidence;
+// every other command there is still refused, and the refusal says how to leave.
+test('a shell standing inside the evidence can leave it with a bare cd, and nothing else runs there', () => {
+  const inside = '/p/.wf-evidence/attempts/A';
+  for (const command of ['cd /p', 'cd', 'cd ~', 'cd "/p/src"', 'cd ../../..']) assert.equal(check({ cwd: inside, tool_name: 'Bash', tool_input: { command } }), null, command);
+  for (const command of ['ls', 'cd /p && rm x', 'cd /p; ls', 'cd /p\nls', 'cd ..', 'cd -', 'cd /p/.wf-evidence', 'cd $(pwd)', 'cd "/tmp/$(touch x)"', 'cd "/tmp/`touch x`"', 'cd "$HOME"', 'cd "/tmp/\\$x"', 'echo cd /p']) assert.ok(check({ cwd: inside, tool_name: 'Bash', tool_input: { command } }), command);
+  assert.match(check({ cwd: inside, tool_name: 'Bash', tool_input: { command: 'ls' } }), /leave it first with a bare `cd <a folder outside it>`/);
+});
+
 test('the hook passes input it cannot read; file targets are still judged through the process', () => {
   assert.equal(decide('{"tool_input": {"command": "rm .wf-evidence/a"'), null, 'truncated JSON');
   assert.equal(decide('not json at all .wf-evidence'), null);

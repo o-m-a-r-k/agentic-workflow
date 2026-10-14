@@ -16,7 +16,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { actor, openState, treeHashes } from './attempt.mjs';
-import { approveHint, createDecision } from './approve.mjs';
+import { approveHint, createDecision, questionFor } from './approve.mjs';
 import { STRATEGY_DEFAULTS, ADAPTER_DIR, agentTypeFor, roleClass, trustedAdapter } from './config.mjs';
 import { append, attemptDir, loadState } from './ledger.mjs';
 import { executionSettings } from './models.mjs';
@@ -168,10 +168,10 @@ export function strategyHold(root, state) {
   if (!owner && !escalation) return null;
   if (owner) {
     const pending = ownerDecision(state, owner);
-    const guidance = `${owner.summary}. This is the person's decision: bring them the brief from \`wf signals --attempt ${state.id}\` (rounds, blocking findings per round, the families that keep coming back, changed files against what the plan expected, amendments) with 2-3 options and your recommendation. ${pending ? `They answer ${pending.id} in their own terminal: \`wf approve ${pending.id} --attempt ${state.id}\`` : 'The next implementer or reviewer handoff opens the decision they answer with `wf approve`'} (continue: another ${(cfg?.strategy ?? STRATEGY_DEFAULTS).reviewRoundsEscalate} rounds before asking again | split: unstarted work, observations and discovered issues move to a sibling attempt of the batch (\`wf split\`); code already built stays | deliver-core: what the criteria need and what blocks stays, every other finding and discovered issue may be ticketed under this decision | stop: a hold). No implementer or reviewer starts until they decide.`;
+    const guidance = `${owner.summary}. This is the person's decision: bring them the brief from \`wf signals --attempt ${state.id}\` (rounds, blocking findings per round, the families that keep coming back, changed files against what the plan expected, amendments) with 2-3 options and your recommendation. ${pending ? `They answer ${pending.id} in their own terminal (\`wf approve ${pending.id} --attempt ${state.id}\`) or in your question panel, with the question "${questionFor(state, pending)}" and exactly the options ${pending.choices.join(' | ')}, then \`wf approve ${pending.id} --from-question --attempt ${state.id}\`` : 'The next implementer or reviewer handoff opens the decision they answer with `wf approve`'} (continue: another ${(cfg?.strategy ?? STRATEGY_DEFAULTS).reviewRoundsEscalate} rounds before asking again | split: unstarted work, observations and discovered issues move to a sibling attempt of the batch (\`wf split\`); code already built stays | deliver-core: what the criteria need and what blocks stays, every other finding and discovered issue may be ticketed under this decision | stop: a hold). No implementer or reviewer starts until they decide.`;
     return { owner, ownerPending: pending, escalation, guidance };
   }
-  return { owner: null, ownerPending: null, escalation, guidance: `the strategist escalated (${escalation.id}: ${escalation.summary}); the owner decides in their own terminal: \`wf approve ${escalation.id}\` (choices: ${escalation.choices.join(' | ')}); no implementer or reviewer starts until then` };
+  return { owner: null, ownerPending: null, escalation, guidance: `the strategist escalated (${escalation.id}: ${escalation.summary}); the owner decides in their own terminal: \`wf approve ${escalation.id}\` (choices: ${escalation.choices.join(' | ')}), or in your question panel (the question "${questionFor(state, escalation)}", exactly those options), then \`wf approve ${escalation.id} --from-question\`; no implementer or reviewer starts until then` };
 }
 
 // Recorded when the engine refuses because of the escalation: the report counts them. At most once per firing.

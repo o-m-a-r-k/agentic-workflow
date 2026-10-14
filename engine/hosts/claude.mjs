@@ -8,6 +8,7 @@ import { findSkill } from './claude-skills.mjs';
 import { roleChangedSinceSessionStart } from './claude-stale.mjs';
 import { markdownRole } from './role-files.mjs';
 import { readLines } from './safe-file.mjs';
+import { claudeQuestionAnswers } from './questions.mjs';
 import { genericFileTargets, textOf, toolOf } from './tool-calls.mjs';
 import { lastModel } from './turns.mjs';
 
@@ -102,6 +103,8 @@ export default {
   storeDir: (home) => path.join(home, '.claude', 'projects'),
   transcriptFile,
   connectorCalls,
+  // The person's answers to the session's question panel (AskUserQuestion), as Claude Code recorded them.
+  questionAnswers: claudeQuestionAnswers,
   // Long tool results Claude Code keeps beside the session: ~/.claude/projects/<project>/<session>/tool-results/.
   isSavedToolResult: (file, { home }) => Boolean(home) && String(file).startsWith(path.join(home, '.claude', 'projects') + path.sep) && String(file).split(path.sep).includes('tool-results'),
 

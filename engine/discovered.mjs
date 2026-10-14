@@ -103,7 +103,9 @@ export function closeDiscovered(root, idArg, options) {
   }
   for (const e of entries) {
     const level = discoveredLevel(e);
-    const source = level === 'high' ? { provenance: 'approved-decision', decision } : { provenance: 'severity-rule', severity: e.severity };
+    // The channel the person used (their terminal or the question panel) travels with the deferral (0.7.3).
+    const via = (state.decisions ?? []).find((x) => x.id === decision)?.approved?.via ?? null;
+    const source = level === 'high' ? { provenance: 'approved-decision', decision, ...(via ? { via } : {}) } : { provenance: 'severity-rule', severity: e.severity };
     append(root, state.id, 'discovered.closed', { id: e.id, outcome: 'deferred', decision: reason || (level === 'high' ? `confirmed with wf approve (${decision})` : `${level} severity: deferred`), source, attributedTo: text(options.by) || null }, actor(options));
   }
   return { state: loadState(root, state.id), outcome: 'deferred', ids };

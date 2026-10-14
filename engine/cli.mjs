@@ -28,7 +28,7 @@ import { report, toCsv, toHandoffCsv, toHtml, toJson, toText } from './telemetry
 import { impact } from './topology.mjs';
 import { commentFile, performTracker, publicAssetsProblem, recordSummary, recordTracker } from './tracker.mjs';
 import { ENGINE_VERSION, WfError, parseArgs, refuse } from './util.mjs';
-import { approveInTerminal, decisionLine, pendingDecisions } from './approve.mjs';
+import { approveFromQuestion, approveInTerminal, decisionLine, pendingDecisions } from './approve.mjs';
 import { logRefusal, readRefusals, refusalCounts } from './refusals.mjs';
 import { recordStrategy, signalsReport, signalsText } from './strategy.mjs';
 import { courseLines, pastEstimates } from './signals.mjs';
@@ -145,6 +145,7 @@ Work
   wf hold --reason "why" | wf release   (release asks the owner to confirm with \`wf approve\`)
   wf decisions [--all]              the owner's reserved decisions on the attempt, pending first
   wf approve ID [--choice C]        the owner confirms a reserved decision in their own terminal
+  wf approve ID --from-question     or the agent records the owner's answer from its question panel (as the harness recorded it)
   wf lesson add|waive|recur|set|apply|show|list|review|export
                                     the project's lessons (.workflow/lessons/): capture, enforce, recurrence
   wf reopen --item ID --reason "feedback" [--no-lesson "why"]
@@ -1021,8 +1022,8 @@ async function dispatch(cmd, sub, positional, options) {
     }
     case 'approve': {
       const id = sub ?? positional[0];
-      if (!id) throw new WfError('usage: wf approve ID [--choice C] --attempt ATTEMPT (in the owner\'s own terminal)');
-      const r = await approveInTerminal(root, id, options);
+      if (!id) throw new WfError('usage: wf approve ID [--choice C] --attempt ATTEMPT (in the owner\'s own terminal) | wf approve ID --from-question --attempt ATTEMPT (the owner\'s answer in the question panel)');
+      const r = options['from-question'] ? await approveFromQuestion(root, id, options) : await approveInTerminal(root, id, options);
       print(options, `${r.decision} decided: ${r.choice}. next: ${nextAction(root, r.state)}`, { decision: r.decision, choice: r.choice });
       return 0;
     }
@@ -1048,7 +1049,7 @@ async function dispatch(cmd, sub, positional, options) {
       const d = r.decision;
       const parts = [`strategy decision ${d.id} recorded on ${r.state.id}: ${d.action}`, `prediction: ${d.prediction.signal} by ${typeof d.prediction.by === 'number' ? `round ${d.prediction.by}` : d.prediction.by}`];
       if (r.split) parts.push(`split ${r.split.id}: ${r.split.siblings.map((x) => x.id).join(', ')} joined ${r.split.batch} with ${r.state.id}`);
-      if (r.escalation) parts.push(`the owner decides ${r.escalation.id} (${r.escalation.choices.join(' | ')}) in their own terminal: \`wf approve ${r.escalation.id}\``);
+      if (r.escalation) parts.push(`the owner decides ${r.escalation.id} (${r.escalation.choices.join(' | ')}): in their own terminal, \`wf approve ${r.escalation.id}\`, or in your question panel, then \`wf approve ${r.escalation.id} --from-question\``);
       if (d.action === 'delta-review') parts.push('the next reviewer round is a delta round');
       if (d.action === 'ticket') parts.push(`follow-up tickets owed for ${d.items.join(', ')}: file them in the tracker (the engine records no ticket); they are not part of this delivery`);
       print(options, `${parts.join('\n  ')}\nnext: ${nextAction(root, r.state)}`, { decision: d, split: r.split ? { id: r.split.id, batch: r.split.batch, siblings: r.split.siblings.map((x) => x.id), moved: r.split.moved } : null, escalation: r.escalation?.id ?? null });

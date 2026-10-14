@@ -9,7 +9,8 @@
 // - An Edit/Write/MultiEdit/NotebookEdit target, or a native patch target (a rename included), that has a
 //   `.wf-evidence` path component, as written or as the OS resolves it (symlinks followed, case and Unicode forms folded),
 //   is blocked. The content written is not inspected (a closure may cite evidence paths).
-// - A command run with its working directory inside the evidence is blocked.
+// - A command run with its working directory inside the evidence is blocked, except a bare `cd` to a folder outside it
+//   (0.7.3), so a shell that stands there can always leave.
 // - Everything else, a Bash command included, passes. Input the hook cannot read passes too.
 // Reading evidence is the Read tool's job (this hook does not see it); copies out are made by `wf export screenshots`.
 import fs from 'node:fs';
@@ -63,6 +64,20 @@ function real(p) {
 
 const expandHome = (file) => file.replace(/^~(?=\/|$)/, process.env.HOME ?? '~');
 
+// Named failure (0.7.3, field): an agent ran `cd .wf-evidence/attempts/<id> && ls` from the project (shell text is not
+// scanned, so it passed) and its shell stayed in the evidence folder. From then on every command was refused, `cd` out
+// included: 18 refusals, the session could run nothing, and its ticket stopped. A bare `cd` whose destination is outside
+// the evidence is the way out; nothing else runs from inside.
+// The target is a literal path: double quotes may not carry an expansion (`cd "/x/$(cmd)"` would run cmd from inside the
+// evidence; independent review of 0.7.3), single quotes expand nothing, and an unquoted target has no shell syntax.
+const BARE_CD = /^\s*cd(?:\s+(?:"([^"$`\\]*)"|'([^']*)'|([^\s;&|<>()`$\\'"]+)))?\s*$/;
+function leavesEvidence(command, cwd) {
+  const m = BARE_CD.exec(command);
+  if (!m) return false;
+  const target = path.resolve(cwd, expandHome(m[1] ?? m[2] ?? m[3] ?? '~'));
+  return !inEvidence(target) && !inEvidence(real(target)) && !touchesEvidence(target, cwd);
+}
+
 export function check(data) {
   if (!data || typeof data !== 'object') return null;
   const t = data.tool_input;
@@ -87,7 +102,8 @@ export function check(data) {
     if (inEvidence(file) || inEvidence(abs) || inEvidence(real(abs)) || touchesEvidence(expandHome(file), cwd)) return `${file} is workflow evidence`;
   }
   if (fileEdit) return null;
-  if (cwdInEvidence && (t.command !== undefined || !files.some((f) => typeof f === 'string'))) return `the command runs inside the evidence folder (working directory ${cwd})`;
+  if (cwdInEvidence && typeof t.command === 'string' && leavesEvidence(t.command, cwd)) return null;
+  if (cwdInEvidence && (t.command !== undefined || !files.some((f) => typeof f === 'string'))) return `the command runs inside the evidence folder (working directory ${cwd}); leave it first with a bare \`cd <a folder outside it>\` on its own, then run the command`;
   return null;
 }
 

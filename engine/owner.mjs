@@ -14,7 +14,8 @@
 //   the statement that screenshots were shown). The ledger entry carries the caller as actor and no authority claim.
 // - Reserved (engine/approve.mjs RESERVED): waiving a blocking finding, overriding a failed or skipped check, moving a
 //   defect out of the delivery batch, lifting a hold, adopting an attempt whose owner session is alive. The engine
-//   creates a decision; the person confirms it with `wf approve` in their own terminal; the command is then run again.
+//   creates a decision; the person confirms it with `wf approve`, in their own terminal or through the question panel
+//   (0.7.3, D12); the command is then run again.
 //
 // Threat model (docs/trust-model.md): agents are fallible, not adversarial. A shell without a terminal cannot confirm a
 // decision by mistake; an agent that fakes a pseudo-terminal can, and that is the stated limit.

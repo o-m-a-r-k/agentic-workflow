@@ -7,6 +7,7 @@ import { codexTranscript } from './codex-transcript.mjs';
 import { codexUsage } from './codex-usage.mjs';
 import { tomlRole } from './role-files.mjs';
 import { readLines } from './safe-file.mjs';
+import { codexQuestionAnswers } from './questions.mjs';
 import { parseArgs, textOf, toolOf } from './tool-calls.mjs';
 
 const LABEL = 'Codex';
@@ -118,6 +119,8 @@ export default {
   storeDir: (home) => path.join(home, '.codex'),
   transcriptFile: (session, options) => codexTranscript(session, { ...options, label: LABEL }),
   connectorCalls,
+  // The person's answers to the session's question panel (request_user_input), bound to the call each names.
+  questionAnswers: codexQuestionAnswers,
 
   // ---- Roles ----
   verifyRole,
