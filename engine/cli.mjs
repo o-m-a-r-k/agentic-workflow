@@ -19,7 +19,7 @@ import { canonical, touchesEvidence } from './paths.mjs';
 import { openCount } from './improve.mjs';
 import { reviewDivisionSummary } from './review-groups.mjs';
 import { LESSON_FILE, addLesson, applySnippet, exportPluginLessons, findLesson, lessonPrompts, lessonWarnings, loadLessons, moveLesson, recur, relevantLessons, reviewLessons, setLesson } from './lessons.mjs';
-import { LinkRefused, changesOf, rebaseline, releaseAttempt, seal, setVerifyLevel, unlockEvidence, verifyAttempt } from './evidence.mjs';
+import { LinkRefused, changesOf, ledgerEmpty, lostLedgers, rebaseline, releaseAttempt, seal, setVerifyLevel, unlockEvidence, verifyAttempt } from './evidence.mjs';
 import { acceptReview, amendCriteria, closeImplementer, designWarning, gateOrderCheck, batchCreate, batchEject, closeAfterHandoff, deliver, deliveredFiles, exportScreenshots, freezeCriteria, handoff, narrowDelivery, needsShown, nextAction, nextDecision, orphanNext, orphansOf, outsideWarning, recordReview, recordShown, reopen, screenshotsExportDir, shownDraftFile, uncovered, withAttempt } from './lifecycle.mjs';
 import { addDiscovered, channelOf, closeDiscovered, discoveredLine, openDiscovered, rateDiscovered } from './discovered.mjs';
 import { detect, doctor, register, registry, setEnabled, sync, writeDraft } from './onboard.mjs';
@@ -528,13 +528,18 @@ async function dispatch(cmd, sub, positional, options) {
     for (const p of registry().projects) {
       if (!fs.existsSync(p.root)) continue;
       for (const id of listAttempts(p.root)) {
+        // Named failure (I-78): an attempt whose ledger holds no entry has no state to list; it is shown as damaged, with the command that names why.
+        if (ledgerEmpty(p.root, id)) {
+          out.push({ project: path.basename(p.root), root: p.root, id, item: null, phase: 'ledger empty', hold: null, damaged: true, next: `\`wf verify --attempt ${id}\` names what happened to its ledger` });
+          continue;
+        }
         const s = loadState(p.root, id);
         if (['done', 'abandoned'].includes(s.phase)) continue;
         const gone = orphansOf(s);
         out.push({ project: path.basename(p.root), root: p.root, id, item: s.item, phase: s.phase, hold: s.activeHold?.reason ?? null, ...(gone.length ? { orphaned: gone } : {}), next: nextAction(p.root, s) });
       }
     }
-    print(options, out.length ? out.map((o) => `${o.project}  ${o.id}  ${o.phase}${o.orphaned ? '  ORPHANED' : ''}${o.hold ? `  HOLD: ${o.hold}` : ''}\n  next: ${o.next}`).join('\n') : 'no open attempts in any enabled project', out);
+    print(options, out.length ? out.map((o) => `${o.project}  ${o.id}  ${o.damaged ? 'DAMAGED: ledger empty' : o.phase}${o.orphaned ? '  ORPHANED' : ''}${o.hold ? `  HOLD: ${o.hold}` : ''}\n  next: ${o.next}`).join('\n') : 'no open attempts in any enabled project', out);
     return 0;
   }
 
@@ -1125,12 +1130,16 @@ async function dispatch(cmd, sub, positional, options) {
       // Reports, never refuses on open: the point is to list every problem.
       const ids = options.all ? listAttempts(root) : [resolveAttempt(root, options)];
       const bad = [];
+      // Named failure (I-78): with the evidence folder renamed, `--all` verified the attempts left and printed success, never
+      // mentioning the ones whose ledger is gone but whose anchor still records them.
+      const lost = options.all ? lostLedgers(root).filter((l) => !ids.includes(l.id)) : [];
+      for (const l of lost) bad.push({ id: l.id, problems: [`ledger.jsonl is missing, but its anchor records entry ${l.seq}: the attempt's evidence folder was renamed, moved or deleted`] });
       for (const id of ids) {
         const p = verifyAttempt(root, id, { full: true });
         // Named failure (I-78): with the evidence folder renamed, `wf verify --attempt X` printed "verified 1 attempt(s)" for an
         // attempt that has no ledger at all (an empty ledger reads as a pre-manifest attempt). The attempt asked for must exist;
         // a folder that is a link, or any other problem verification names, is still reported as such.
-        if (!p.length && !options.all && !listAttempts(root).includes(id)) throw refuse(`${id} has no ledger here, so nothing was verified; it is not an attempt of this project (or its evidence folder was renamed or moved)`, '`wf status --all` lists the attempts; restore the folder if it was moved', { id: 'verify:no-attempt' });
+        if (!p.length && !options.all && !listAttempts(root).includes(id)) throw refuse(`${id} has no ledger here, so nothing was verified; ${lostLedgers(root).some((l) => l.id === id) ? 'its anchor records it, so its evidence folder was renamed, moved or deleted' : 'it is not an attempt of this project (or its evidence folder was renamed or moved)'}`, '`wf status --all` lists the attempts; restore the folder if it was moved', { id: 'verify:no-attempt' });
         if (p.length) bad.push({ id, problems: p });
       }
       print(options, bad.length ? bad.map((b) => `${b.id}: ${b.problems.length} problem(s): the evidence does not match what wf recorded\n  - ${b.problems.slice(0, 20).join('\n  - ')}`).join('\n') : `verified ${ids.length} attempt(s): ledger chain, anchor and every recorded evidence file (sha256, size, mode) match; no extra file`, bad);
@@ -1306,7 +1315,9 @@ async function dispatch(cmd, sub, positional, options) {
     }
     case 'status': {
       // --attempt narrows the listing to that attempt; without it every open attempt is shown.
-      const states = options.attempt ? [openState(root, options)] : listAttempts(root).map((id) => loadState(root, id)).filter(isOpen).map((s) => (openEvidence(root, s.id), s));
+      // Named failure (I-78): the evidence was opened by the id the ledger's admission entry names, which an emptied ledger does not
+      // have, so `wf status` crashed on it. The attempt's folder name is the id; opening it reports what is wrong with the ledger.
+      const states = options.attempt ? [openState(root, options)] : listAttempts(root).map((id) => [id, loadState(root, id)]).filter(([, s]) => isOpen(s)).map(([id, s]) => (openEvidence(root, id), s));
       const rows = states.map((s) => ({ s, base: isOpen(s) && !orphansOf(s).length ? safeBase(root, s) : null }));
       print(options, rows.length ? rows.map(({ s, base }) => summary(root, s, { base })).join('\n\n') : 'no open attempts', options.json ? rows.map(({ s, base }) => ({ ...s, next: nextAction(root, s), base, ...(orphansOf(s).length ? { orphaned: orphansOf(s) } : {}) })) : undefined);
       return 0;
