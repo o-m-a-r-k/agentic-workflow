@@ -206,7 +206,7 @@ test('no merge turns a suite that did not run into a passed one, and a test that
 // a crash marker it dies before writing any report.
 const JUNIT_RUNNER = `
 const fs=require('fs');const sel=process.argv.slice(2);
-const all=['test/a.e2e-spec.ts','test/b.e2e-spec.ts','test/c.e2e-spec.ts'];const run=sel.length?sel:all;
+const all=['test/a.e2e-spec.ts','test/b.e2e-spec.ts','test/c.service.e2e-spec.ts'];const run=sel.length?sel:all;
 fs.appendFileSync(process.env.WF_EVIDENCE+'/../ran.txt',run.join(',')+'\\n');
 if(fs.existsSync('crash')||run.some(f=>fs.readFileSync(f,'utf8').includes('crash'))){process.exit(1);}
 const bad=(f)=>fs.readFileSync(f,'utf8').includes('bad');const ran=[];
@@ -214,13 +214,14 @@ for(const f of run){ran.push(f);if(bad(f))break;}
 fs.mkdirSync('reports',{recursive:true});
 fs.writeFileSync('reports/junit.xml','<testsuites>'+ran.map(f=>'<testsuite name="'+f+'" file="'+f+'" tests="1"><testcase name="works" file="'+f+'">'+(bad(f)?'<failure>no</failure>':'')+'</testcase></testsuite>').join('')+'</testsuites>');
 if(ran.some(bad))process.exit(1);`;
-const junitFiles = { 'runner.cjs': JUNIT_RUNNER, 'test/a.e2e-spec.ts': 'a\n', 'test/b.e2e-spec.ts': 'b\n', 'test/c.e2e-spec.ts': 'c\n', 'src/app.txt': 'app\n' };
+const junitFiles = { 'runner.cjs': JUNIT_RUNNER, 'test/a.e2e-spec.ts': 'a\n', 'test/b.e2e-spec.ts': 'b\n', 'test/c.service.e2e-spec.ts': 'c\n', 'src/app.txt': 'app\n' };
 const junitStep = { id: 'e2e', repo: 'app', run: 'node runner.cjs {select}', select: '{suites}', report: { junit: 'reports/junit.xml' }, inputs: ['test/**', 'src/**', 'runner.cjs'], tier: 'heavy' };
 
 test('a suite a run that stopped early never reported is rerun with the failed ones (JUnit names only what ran)', () => {
   const { base, root } = singleRepoProject('junit-bail', { gate: { steps: [junitStep] } }, junitFiles);
   const e = admitted(root, base, 'ENG-66');
-  commitIn(e.repos.app.worktree, { 'test/a.e2e-spec.ts': 'bad\n', 'test/c.e2e-spec.ts': 'bad\n' });
+  // c is named with one more part (`c.service.e2e-spec.ts`) than the suite reported: still named like a suite.
+  commitIn(e.repos.app.worktree, { 'test/a.e2e-spec.ts': 'bad\n', 'test/c.service.e2e-spec.ts': 'bad\n' });
   const g1 = gateJson(root, e.id);
   assert.equal(g1.code, 1);
   assert.deepEqual(g1.data.steps[0].suites.map((s) => s.id), ['test/a.e2e-spec.ts'], 'the run stopped at a');
@@ -228,7 +229,7 @@ test('a suite a run that stopped early never reported is rerun with the failed o
   const g2 = gateJson(root, e.id);
   assert.equal(g2.code, 1, 'c, never reached, runs now and fails');
   const ran = fs.readFileSync(path.join(root, '.wf-worktrees', '_gate', e.id, g2.data.runId, 'ran.txt'), 'utf8').trim();
-  assert.deepEqual(ran.split(',').sort(), ['test/a.e2e-spec.ts', 'test/b.e2e-spec.ts', 'test/c.e2e-spec.ts']);
+  assert.deepEqual(ran.split(',').sort(), ['test/a.e2e-spec.ts', 'test/b.e2e-spec.ts', 'test/c.service.e2e-spec.ts']);
 });
 
 test('a report an earlier run left at a fixed path is not read as this run\'s', () => {
@@ -261,7 +262,8 @@ test('a suite the gate asked to rerun that the run never reported stays not-run,
 });
 
 test('suite files named by their extension alone rerun whole (JUnit cannot say which other inputs are suites)', () => {
-  const plain = JUNIT_RUNNER.replace("const all=['test/a.e2e-spec.ts','test/b.e2e-spec.ts','test/c.e2e-spec.ts']", "const all=['test/a.ts','test/b.ts','test/c.ts']");
+  assert.ok(JUNIT_RUNNER.includes("const all=['test/a.e2e-spec.ts'"), 'the runner this test rewrites');
+  const plain = JUNIT_RUNNER.replace("const all=['test/a.e2e-spec.ts','test/b.e2e-spec.ts','test/c.service.e2e-spec.ts']", "const all=['test/a.ts','test/b.ts','test/c.ts']");
   const { base, root } = singleRepoProject('junit-plain', { gate: { steps: [junitStep] } }, { 'runner.cjs': plain, 'test/a.ts': 'a\n', 'test/b.ts': 'b\n', 'test/c.ts': 'c\n', 'src/app.txt': 'app\n' });
   const e = admitted(root, base, 'ENG-69');
   commitIn(e.repos.app.worktree, { 'test/b.ts': 'bad\n' });

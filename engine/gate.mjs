@@ -360,17 +360,17 @@ function suitesToRerun(prior, planned, { listsEverySuite = false } = {}) {
     if (!f || s.status !== 'passed' || prior.fileHashes[f] !== planned.fileHashes[f]) rerun.push(s.file ?? s.id);
   }
   // A report that names only the suites that ran (JUnit) leaves out the ones a run that stopped early never reached (Jest
-  // --bail): every input named like a suite (the suffix of a reported suite's file, `.e2e-spec.ts`) that the prior run did
-  // not report is rerun too, so a suite that never ran is never passed over (independent review of 0.7.6).
+  // --bail): every input named like a suite (the last two parts of a reported suite's file name, `.e2e-spec.ts`, so
+  // `invoice.service.e2e-spec.ts` and `auth.e2e-spec.ts` are named alike) that the prior run did not report is rerun too,
+  // so a suite that never ran is never passed over (independent review of 0.7.6).
   if (!listsEverySuite) {
     const suffix = (f) => {
-      const b = path.basename(f);
-      const i = b.indexOf('.');
-      return i > 0 ? b.slice(i) : null;
+      const parts = path.basename(f).split('.');
+      return parts.length >= 3 && parts[0] ? `.${parts.slice(-2).join('.')}` : null;
     };
-    const suffixes = new Set([...suiteFiles].map(suffix).filter(Boolean));
     // A suite file named with its extension alone (`login.ts`) does not say which other inputs are suites: rerun whole.
-    if ([...suiteFiles].some((f) => (suffix(f)?.split('.').length ?? 0) < 3)) return null;
+    if ([...suiteFiles].some((f) => !suffix(f))) return null;
+    const suffixes = new Set([...suiteFiles].map(suffix));
     for (const f of files) if (!suiteFiles.has(f) && suffixes.has(suffix(f)) && planned.fileHashes[f] !== 'deleted') rerun.push(f);
   }
   return rerun.length ? [...new Set(rerun)] : null;
