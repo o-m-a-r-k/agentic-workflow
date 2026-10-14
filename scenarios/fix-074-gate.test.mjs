@@ -53,7 +53,16 @@ test('I-78: an emptied ledger is reported by verify, resume, status and every ot
     assert.match(v.out, new RegExp(`${e.id}: 1 problem\\(s\\)[\\s\\S]*ledger\\.jsonl holds no entry \\(no admission entry\\), but its anchor records entry 1`));
   }
   // Every command that opens the attempt refuses with the same problem list and names the command that lists it.
-  for (const args of [['resume', '--attempt', e.id], ['resume'], ['status'], ['status', '--attempt', e.id], ['status', '--json'], ['evidence', 'list', '--attempt', e.id], ['export', '--attempt', e.id], ['gate', '--attempt', e.id], ['abandon', '--attempt', e.id, '--reason', 'x'], ['signals', '--attempt', e.id]]) {
+  // A bare `wf status` lists it as damaged, with the check to run, and exits 0 (independent review of 0.7.4: it refused, and so
+  // hid every healthy attempt beside it).
+  for (const args of [['status'], ['status', '--json']]) {
+    const r = wf(f.root, args);
+    noCrash(r, args.join(' '));
+    assert.equal(r.code, 0, `wf ${args.join(' ')}: ${r.err}`);
+    assert.match(r.out, /ledger\.jsonl holds no entry \(no admission entry\), but its anchor records entry 1/);
+    if (!args.includes('--json')) assert.match(r.out, new RegExp(`wf verify --attempt ${e.id.replace('.', '\\.')}`));
+  }
+  for (const args of [['resume', '--attempt', e.id], ['resume'], ['status', '--attempt', e.id], ['evidence', 'list', '--attempt', e.id], ['export', '--attempt', e.id], ['gate', '--attempt', e.id], ['abandon', '--attempt', e.id, '--reason', 'x'], ['signals', '--attempt', e.id]]) {
     const r = wf(f.root, args);
     noCrash(r, args.join(' '));
     assert.equal(r.code, 75, `wf ${args.join(' ')}: ${r.err}`);
@@ -536,4 +545,29 @@ test('I-110: wf lesson show says a bare project lesson applies to every change i
   const impl = ok(wf(f.root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
   const bundle = JSON.parse(fs.readFileSync(impl.out.match(/bundle: (\S+)/)[1], 'utf8'));
   assert.deepEqual(bundle.lessons.apply.map((l) => l.id).filter((id) => ['L-1', 'L-2'].includes(id)), ['L-1']);
+});
+
+// Independent review of 0.7.4: with one attempt's ledger emptied or cut inside its first line, a bare `wf status` refused for
+// every attempt (the healthy ones disappeared) and `wf resume` died with a raw path. The damaged one is listed as damaged, with
+// the check to run; the others as always.
+test('I-78: one damaged ledger does not hide the other attempts from wf status, and wf resume names it', () => {
+  for (const damage of ['', '{"seq":1,"at":"20']) {
+    const p = singleRepoProject(`i78-others-${damage ? 'cut' : 'empty'}`, {});
+    const a = ok(wf(p.root, ['entry', '--item', 'ENG-1', '--json'], { ownerSilent: true })).json();
+    ok(wf(p.root, ['entry', '--item', 'ENG-2', '--json'], { ownerSilent: true }));
+    const led = path.join(p.root, '.wf-evidence', 'attempts', a.id, 'ledger.jsonl');
+    fs.chmodSync(path.dirname(led), 0o755);
+    fs.chmodSync(led, 0o644);
+    fs.writeFileSync(led, damage);
+    const status = wf(p.root, ['status'], { ownerSilent: true, env: { WF_EVIDENCE_FLAGS: '0' } });
+    assert.equal(status.code, 0, status.err);
+    assert.match(status.out, /ENG-2\.1 {2}ENG-2 /, 'the healthy attempt is listed');
+    assert.match(status.out, /ENG-1\.1 {2}DAMAGED: [\s\S]*`wf verify --attempt ENG-1\.1`/);
+    const json = ok(wf(p.root, ['status', '--json'], { ownerSilent: true, env: { WF_EVIDENCE_FLAGS: '0' } })).json();
+    assert.deepEqual(json.map((x) => x.id).sort(), ['ENG-1.1', 'ENG-2.1']);
+    assert.ok(json.find((x) => x.id === 'ENG-1.1').damaged);
+    const resume = wf(p.root, ['resume'], { ownerSilent: true, env: { WF_EVIDENCE_FLAGS: '0' } });
+    assert.match(resume.err, /several open attempts \(.*ENG-1\.1.*\); pass --attempt <id>/);
+    assert.doesNotMatch(resume.err, /is not JSON/, 'no raw ledger error for a command about another attempt');
+  }
 });

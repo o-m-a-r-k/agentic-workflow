@@ -1339,9 +1339,28 @@ async function dispatch(cmd, sub, positional, options) {
       // --attempt narrows the listing to that attempt; without it every open attempt is shown.
       // Named failure (I-78): the evidence was opened by the id the ledger's admission entry names, which an emptied ledger does not
       // have, so `wf status` crashed on it. The attempt's folder name is the id; opening it reports what is wrong with the ledger.
-      const states = options.attempt ? [openState(root, options)] : listAttempts(root).map((id) => [id, loadState(root, id)]).filter(([, s]) => isOpen(s)).map(([id, s]) => (openEvidence(root, id), s));
+      // Independent review of 0.7.4: one attempt with a damaged ledger made `wf status` refuse for every attempt, so the healthy
+      // ones disappeared from it. A damaged one is listed as such, with the check to run, and the others as always.
+      const damaged = [];
+      const states = options.attempt ? [openState(root, options)] : listAttempts(root).flatMap((id) => {
+        try {
+          const s = loadState(root, id);
+          if (!isOpen(s)) return [];
+          openEvidence(root, id);
+          return [s];
+        } catch (error) {
+          damaged.push({ id, damaged: String(error.message ?? error).split('\n').filter(Boolean).slice(0, 2).join(' ') });
+          return [];
+        }
+      });
       const rows = states.map((s) => ({ s, base: isOpen(s) && !orphansOf(s).length ? safeBase(root, s) : null }));
-      print(options, rows.length ? rows.map(({ s, base }) => summary(root, s, { base })).join('\n\n') : 'no open attempts', options.json ? rows.map(({ s, base }) => ({ ...s, next: nextAction(root, s), base, ...(orphansOf(s).length ? { orphaned: orphansOf(s) } : {}) })) : undefined);
+      const damagedText = damaged.map((d) => `${d.id}  DAMAGED: ${d.damaged}\n  next: \`wf verify --attempt ${d.id}\` says what changed; the evidence is never repaired by hand`);
+      const text = [...rows.map(({ s, base }) => summary(root, s, { base })), ...damagedText].join('\n\n');
+      if (options.json && damaged.length) {
+        print(options, '', [...rows.map(({ s, base }) => ({ ...s, next: nextAction(root, s), base, ...(orphansOf(s).length ? { orphaned: orphansOf(s) } : {}) })), ...damaged]);
+        return 0;
+      }
+      print(options, text || 'no open attempts', options.json ? rows.map(({ s, base }) => ({ ...s, next: nextAction(root, s), base, ...(orphansOf(s).length ? { orphaned: orphansOf(s) } : {}) })) : undefined);
       return 0;
     }
     case 'base': {

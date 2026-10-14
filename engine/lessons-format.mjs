@@ -15,7 +15,7 @@
 //                of ours could do the way Prettier does, so a text that would not fit is written as a literal block (`|-`),
 //                the one scalar style Prettier never reflows (its parsed value is the same).
 //
-// The configuration is found as Prettier finds it (a Prettier 3 CLI, checked against 3.9 on some 3,700 generated lesson files): from the lesson's folder up, the
+// The configuration is found as Prettier finds it (Prettier 3's resolution; checked against Prettier 3.9 during development, and by the opt-in scenario that runs `prettier --check` when WF_TEST_PRETTIER or a `prettier` on PATH is present): from the lesson's folder up, the
 // first folder with one of the config files wins, the files tried in Prettier's order (package.json with a `prettier` key
 // first, then .prettierrc, .prettierrc.json, .prettierrc.yml, .prettierrc.yaml, the JavaScript and TypeScript forms, TOML
 // last), no merging across folders; `overrides` are applied to the lesson file's path. The search stops at the repository's

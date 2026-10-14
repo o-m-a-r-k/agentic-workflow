@@ -59,10 +59,21 @@ function resolveAttemptId(root, options) {
   const cwd = fs.realpathSync(process.cwd()) + path.sep;
   const realWt = fs.existsSync(worktreesRoot(root)) ? fs.realpathSync(worktreesRoot(root)) + path.sep : wt;
   if (cwd.startsWith(realWt)) return cwd.slice(realWt.length).split(path.sep)[0];
-  const open = listAttempts(root).filter((id) => OPEN(loadState(root, id)));
-  if (open.length === 1) return open[0];
-  if (open.length === 0) throw new WfError('no open attempt', { hint: 'start one with `wf entry`' });
-  throw new WfError(`several open attempts (${open.join(', ')}); pass --attempt <id>`);
+  // A ledger that cannot be read (emptied, cut, edited) cannot say whether its attempt is open, so it is counted and named
+  // (independent review of 0.7.4: one damaged ledger made `wf resume` fail with a raw path for every attempt).
+  const open = [];
+  const damaged = [];
+  for (const id of listAttempts(root)) {
+    try {
+      if (OPEN(loadState(root, id))) open.push(id);
+    } catch {
+      damaged.push(id);
+    }
+  }
+  if (open.length === 1 && !damaged.length) return open[0];
+  if (!open.length && damaged.length === 1) return damaged[0];
+  if (!open.length && !damaged.length) throw new WfError('no open attempt', { hint: 'start one with `wf entry`' });
+  throw new WfError(`several open attempts (${[...open, ...damaged.map((id) => `${id} [ledger damaged: \`wf verify --attempt ${id}\`]`)].join(', ')}); pass --attempt <id>`);
 }
 
 export function openState(root, options) {

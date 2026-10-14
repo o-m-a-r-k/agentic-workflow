@@ -275,6 +275,8 @@ function normalize(raw, source) {
   for (const s of cfg.gate.steps) {
     if (!s.id) fail('each gate step needs an `id`');
     if (stepIds.has(s.id)) fail(`duplicate gate step \`${s.id}\``);
+    // `provision:<repo>` in a secret's `usedBy` names a repo's provisioning (D14); a step of that id would receive its keys.
+    if (String(s.id).startsWith('provision:')) fail(`step \`${s.id}\`: an id starting with \`provision:\` names a repo's provisioning in \`usedBy\` (D14); choose another id`);
     stepIds.add(s.id);
     if (!s.component && !repoNames.has(s.repo)) fail(`step \`${s.id}\`: unknown repo \`${s.repo}\``);
     if (s.prepare !== undefined && (typeof s.prepare !== 'string' || !s.prepare.trim())) fail(`step \`${s.id}\`: \`prepare\` is a non-empty shell command`);

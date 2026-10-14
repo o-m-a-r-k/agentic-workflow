@@ -29,16 +29,18 @@ Evidence and gate
   an "extra file".
 - I-88, I-113: `wf run --lease` re-reads lease capacity while it waits; a waiting step names the lease, its holders and
   how capacity is raised; `wf status` and `wf resume` show why a check or gate was stopped.
-- I-91: any error that escapes the runner signals every step it started, frees its lease slots and records the run failed.
-- I-111 (D14): a catalogued key whose `usedBy` names `provision:<repo>` reaches that repo's provisioning install at
-  `wf entry`, masked, and nothing else does.
+- I-91: an error inside the runner's scheduler records the run failed and stops every step it started (SIGTERM to each
+  step's process group, waiting for it to end), frees its lease slots and removes the lock; an error while the final record
+  is written still stops the steps and frees the slots, and the next gate harvests the run.
+- I-111 (D14): a catalogued key whose `usedBy` names `provision:<repo>` reaches that repo's provisioning install
+  wherever it runs (`wf entry`, `wf criteria amend --add-repo`, `wf doctor`), masked, and nothing else does.
 
 Lessons, review division, Codex
 - I-49: lessons are written for the repository's own Prettier config (found as Prettier finds it: printWidth and prose
   wrap made irrelevant, tab width, quotes and line endings honoured), and `recur`, `set` and `move` keep that layout.
 - I-99, I-112: a lesson goes to the attempt's worktree while its accepted tree no longer stands, and to the main checkout
   only while it does; a lesson for a repository the attempt did not admit is refused with the route.
-- I-96: documentation files (prose, docs folders, licences, an adapter's `docsOnly`) no longer weigh on the review
+- I-96: documentation files (prose and licence files by type, and an adapter's `docsOnly`) no longer weigh on the review
   division or the symbol scan; the integration reviewer is still handed them.
 - I-108: every patch Codex applies is parsed (an empty context line no longer reads as an evidence write); a malformed
   payload says it is malformed, and why.

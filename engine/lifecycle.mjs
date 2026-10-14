@@ -2368,7 +2368,13 @@ export const batchMembers = (root, batchId) => loadState(root, batchId).batch?.m
 export function withAttempt(root, state, text) {
   let open = 0;
   for (const id of listAttempts(root)) {
-    if (!['done', 'abandoned'].includes(loadState(root, id).phase)) open += 1;
+    // A ledger that cannot be read counts as open: it cannot say otherwise, and it must not stop this attempt's next line
+    // (independent review of 0.7.4).
+    let phase = null;
+    try {
+      phase = loadState(root, id).phase;
+    } catch {}
+    if (!['done', 'abandoned'].includes(phase)) open += 1;
     if (open > 1) break;
   }
   if (open < 2) return text;
