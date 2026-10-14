@@ -9,8 +9,9 @@ Security tab). Include steps to reproduce and the affected version. You will get
 
 In scope, most of all:
 
-- the evidence guard hook (`hooks/guard-evidence.mjs`): a command or tool input that writes to a project's evidence
-  without being refused;
+- the evidence guard hook (`hooks/guard-evidence.mjs`): a file-tool input (Edit, Write, MultiEdit, NotebookEdit, a native
+  `apply_patch`) that writes to a project's evidence without being refused. Shell text is not judged (agents are fallible,
+  not adversarial); a write made through a shell is caught afterwards by the evidence checks below;
 - evidence protection and verification (`engine/evidence.mjs`): a change to evidence that the next `wf` command does
   not refuse, or an engine write that follows a link out of the evidence;
 - path handling (`engine/paths.mjs`, every path option of the CLI, lessons, improvements): a path that resolves

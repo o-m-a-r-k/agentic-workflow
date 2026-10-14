@@ -1,5 +1,6 @@
 // Named failure: large blind reviews serialized unrelated flows, while naive file splits lost shared contracts.
 // This module proposes divisions from recorded end-to-end flows, never from filenames or implementer work items.
+import { reviewerDiscovered } from './review-policy.mjs';
 import { canonical, git, hashValue, refuse } from './util.mjs';
 
 const list = v => Array.isArray(v) ? v : [];
@@ -28,7 +29,7 @@ export function changedWeights(state, bundle) {
 
 export function reviewSnapshot(state) {
   return hashValue({ criteria: state.criteria, amendments: state.criteriaAmendments, plan: state.plan, work: state.work,
-    impact: state.impact, discovered: state.discovered, addedRepos: state.addedRepos, scope: state.scopeDecisions,
+    impact: state.impact, discovered: reviewerDiscovered(state.discovered, state), addedRepos: state.addedRepos,
     adapterBase: state.adapterBase, runtimeAdapterBase: state.runtimeAdapterBase, gate: state.lastGate?.runId ?? null });
 }
 
@@ -342,16 +343,6 @@ export function currentReviewGroup(state) {
   return { id: latest.reviewGroup.id, integration: latest, members: state.handoffs.filter(h => h.reviewGroup?.id === latest.reviewGroup.id) };
 }
 
-export function fileCoverage(files, rows, label) {
-  const expected = new Set(files), seen = new Set();
-  for (const row of list(rows)) {
-    if (!expected.has(row?.file) || seen.has(row.file) || !String(row.evidence ?? '').trim()) throw refuse(`${label}: unknown, duplicate or unsupported file coverage ${row?.file}`);
-    seen.add(row.file);
-  }
-  const missing = files.filter(f => !seen.has(f));
-  if (missing.length) throw refuse(`${label}: missing direct code/test evidence for ${missing.length} owned file(s): ${missing.slice(0, 8).join(', ')}`);
-}
-
 export function assignedVerdicts(expected, rows, key, label) {
   const ids = new Set(expected), seen = new Set();
   for (const row of list(rows)) {
@@ -368,13 +359,11 @@ export function findingIds(closure) {
 
 export function mergeParts(group, parts, input) {
   const required = group.members.filter(h => h.reviewGroup.slot !== 'integration');
-  const refs = list(input.partReviews), result = structuredClone(input);
+  const result = structuredClone(input);
   const merged = [], outside = [], hits = [], files = [];
   for (const h of required) {
     const part = parts.filter(p => p.handoff === h.bundle).at(-1);
     if (!part) throw refuse(`review group is incomplete: ${h.agent} has no recorded scoped closure`);
-    const ref = refs.find(r => r.agent === h.agent);
-    if (!ref || ref.sha256 !== part.raw.sha256 || !String(ref.evidence ?? '').trim()) throw refuse(`integration must inspect and cite ${h.agent}'s exact recorded closure hash with direct verification evidence`);
     const names = new Map(part.closure.findings.map(f => [f.id, `${h.reviewGroup.slot}-${f.id}`]));
     const rename = value => {
       if (Array.isArray(value)) return value.map(rename);
@@ -384,16 +373,18 @@ export function mergeParts(group, parts, input) {
     merged.push(...part.closure.findings.map(f => ({ ...rename(f), id: names.get(f.id), sourceReviewer: h.agent })));
     outside.push(...rename(part.closure.outsidePlan ?? []));
     hits.push(...rename(part.closure.designHits ?? []));
-    files.push(...part.closure.filesReviewed);
+    files.push(...list(part.closure.filesReviewed));
   }
-  if (refs.length !== required.length || new Set(refs.map(r => r.agent)).size !== required.length) throw refuse('integration partReviews must cite each scoped reviewer exactly once');
   const ownIds = new Set(result.findings.map(f => f.id));
   if (merged.some(f => ownIds.has(f.id))) throw refuse('integration finding ID collides with a scoped finding');
   result.findings.push(...merged);
   result.outsidePlan = [...(result.outsidePlan ?? []), ...outside];
   result.designHits = [...(result.designHits ?? []), ...hits];
-  result.filesReviewed = [...(result.filesReviewed ?? []), ...files];
+  if (files.length || result.filesReviewed) result.filesReviewed = [...list(result.filesReviewed), ...files];
   return result;
 }
 
-export const GROUP_INSTRUCTIONS = `This is a coverage-enforced review group. Its explicit ownership replaces the single-reviewer instruction to inspect every file yourself. reviewGroup.mode controls the assignment. All reviewers use the frozen reviewer class, read the shared rules and skills, and may inspect any source and report any defect. Global criteriaContext and division are context, not author verdicts. Never split a producer from its consumer without the recorded integration interface. List filesReviewed: [{file, evidence: 'source/test file:line and behavior checked'}] for every primaryFiles entry exactly once. Scoped mode: independently inspect the complete assigned flows and their unchanged consumers/failure paths; criteria are context, not a second full-change review. Supply findings, criteria: [], filesReviewed, rules for the assigned flows, outsidePlan and designHits for your assigned files. Do not supply global criteria/discovery/impact verdicts or priorFindings. Run wf review --closure <reviewClosureFile>; this records a part and cannot authorize a gate or acceptance. Integration mode: directly inspect primaryFiles, every division.integration.interfaces entry on both sides, shared invariants, interactions and uncovered areas. Supply interfacesReviewed: [{id, evidence}] for every interface. Obtain current-group reports with wf review parts --attempt <attempt>. Cite each exact report with partReviews: [{agent, sha256, evidence: 'independent source/test verification'}]. Do not re-review every scoped file, rubber-stamp reports, omit findings, or resolve disagreements by voting. Supply all global criteria, discovered, historical report, lesson, rule, skill, impact, seam and gate-evidence verdicts; outsidePlan/designHits need only your primary files. The engine unions scoped findings and file verdicts and validates the complete review against the full frozen obligations. Unresolved scoped findings remain blockers. Earlier-round findings remain hidden until the combined blind closure is recorded. Impact history is retained by hash in impactMap.history; catalog holds the latest value of every recorded entry ID. Read catalog as current context, investigate historical versions when needed, and never discard an obligation because its history is externalized.`;
+export const GROUP_INSTRUCTIONS = `This review is divided by the change's recorded flows so it finishes sooner; reviewGroup.mode says your part. Every reviewer uses the frozen reviewer class, reads the shared rules and skills, and may inspect any source and report any defect it finds.
+Scoped reviewer. Your goal: the truth about your assigned flows, the files in primaryFiles with their unchanged consumers and failure paths. Never judge a producer without its consumer: follow a seam into division.integration.interfaces when it crosses. Record your findings (criteria: [] — the integration reviewer owns the criteria) with wf review --closure <reviewClosureFile>; your closure is a part and never authorizes a gate or acceptance.
+Integration reviewer. Your goal: the combined result is right. The crossing interfaces in division.integration.interfaces hold on both sides, the shared invariants hold, and the scoped reports are right: read them (wf review parts --attempt <attempt>) critically, verify what they claim, add what they missed, and never resolve a disagreement by voting. You give the criteria evidence and the gate-evidence checks (screenshots inspected, anomalies). The engine merges the parts' findings into your closure and decides what blocks; earlier rounds' findings are shown after the combined closure is recorded.
+impactMap.catalog holds the latest value of every recorded entry; its history is in impactMap.history.`;

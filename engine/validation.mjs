@@ -47,21 +47,36 @@ export function validationCatalog(root, state, id) {
   return catalog.filter((e) => keys.has(e.key)).map((e) => ({ ...e, usedBy: [id] }));
 }
 
-export async function addValidation(root, options) {
+export const addValidation = (root, options) => registerValidation(root, options, false);
+
+// Named failure (I-102): review found a defect in a supplemental validation's plugin, and registration had no remove,
+// overwrite or repin: fixing and committing the plugin left the gate running the defective plugin pinned at registration,
+// for ever. A correction re-pins steps that are already registered, at a later commit, and keeps every obligation
+// registration carries (closed roles, a committed tree, a commit that descends from the admission commit and now from the
+// previous pin, a recorded reason, existing catalogued secret keys, admitted repos); the ledger keeps both pins, and the
+// changed digest and the later date make the gate wait for a fresh code review and run every step again.
+export const correctValidation = (root, options) => registerValidation(root, options, true);
+
+async function registerValidation(root, options, correcting) {
   const { withReviewLock } = await import('./gate.mjs');
   const { reviewInFlight, openImplementersOf } = await import('./lifecycle.mjs');
   const initial = openState(root, options);
+  const verb = correcting ? 'correcting' : 'registering';
   return withReviewLock(root, initial, () => {
     const state = loadState(root, initial.id);
     if (!state.criteria || ['handoff-pending', 'done', 'abandoned'].includes(state.phase)) throw refuse('supplemental validation requires an open attempt with frozen criteria');
-    if (reviewInFlight(state) || openImplementersOf(root, state).length) throw refuse('finish and close active roles before registering supplemental validation');
+    if (reviewInFlight(state) || openImplementersOf(root, state).length) throw refuse(`finish and close active roles before ${verb} supplemental validation`);
     if (!options.reason || options.reason === true) throw refuse('supplemental validation needs --reason');
     const ids = typeof options.steps === 'string' ? options.steps.split(',').map((s) => s.trim()) : [];
-    const criteria = typeof options.criteria === 'string' ? options.criteria.split(',').map((s) => s.trim()) : [];
+    const registered = (state.validations ?? []).flatMap((v) => v.steps.map((s) => ({ id: s.id, commit: v.commit, criteria: v.criteria ?? [], secretKeys: s.secretKeys })));
     if (!ids.length || ids.some((id) => !/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(id)) || new Set(ids).size !== ids.length) throw refuse('--steps must name distinct supplemental step ids');
+    const unknown = correcting ? ids.filter((id) => !registered.some((r) => r.id === id)) : [];
+    if (unknown.length) throw refuse(`${unknown.join(', ')} ${unknown.length > 1 ? 'are' : 'is'} not a registered supplemental validation step (registered: ${registered.map((r) => r.id).join(', ') || 'none'}); an admission step is never corrected, and a new one is registered with \`wf validation add\``, undefined, { id: 'validation:correct-unregistered' });
+    // A correction keeps the criteria its steps were registered for unless it names others.
+    const criteria = typeof options.criteria === 'string' ? options.criteria.split(',').map((s) => s.trim()) : correcting ? [...new Set(ids.flatMap((id) => registered.find((r) => r.id === id).criteria))] : [];
     if (!criteria.length || criteria.some((id) => !state.criteria.some((c) => c.id === id)) || new Set(criteria).size !== criteria.length) throw refuse('--criteria must name distinct frozen acceptance criteria');
     const frozen = gateAdapter(root, state);
-    if (ids.some((id) => frozen.gate.steps.some((s) => s.id === id))) throw refuse('supplemental validation cannot replace an existing step');
+    if (!correcting && ids.some((id) => frozen.gate.steps.some((s) => s.id === id))) throw refuse('supplemental validation cannot replace an existing step');
     const trees = treeHashes(state);
     if (Object.values(trees).some((t) => t.includes('+dirty'))) throw refuse('commit the product tree and validation adapter before registering validation');
     const adapter = attemptAdapter(root, state);
@@ -69,6 +84,10 @@ export async function addValidation(root, options) {
     if (!own?.worktree) throw refuse('the admission adapter repo must belong to this attempt');
     const commit = git(own.worktree, ['rev-parse', 'HEAD']);
     if (git(own.worktree, ['merge-base', state.adapterBase, commit]) !== state.adapterBase) throw refuse('supplemental adapter must descend from the admission commit');
+    if (correcting) for (const pin of new Set(ids.map((id) => registered.find((r) => r.id === id).commit))) {
+      if (pin === commit) throw refuse(`the adapter repo is still at ${pin.slice(0, 10)}, where ${ids.filter((id) => registered.find((r) => r.id === id).commit === pin).join(', ')} is already pinned: commit the corrected definition or plugin first`, undefined, { id: 'validation:correct-unchanged' });
+      if (git(own.worktree, ['merge-base', pin, commit], { allowFail: true }) !== pin) throw refuse(`the corrected definition must descend from the commit it is pinned at (${pin.slice(0, 10)}); a correction moves a pin forward, never sideways or back`, undefined, { id: 'validation:correct-not-descendant' });
+    }
     const candidate = trustedAdapter(root, state, commit);
     let catalog = [];
     const catalogText = git(own.worktree, ['show', `${commit}:${adapter.relative}/secrets.yaml`], { allowFail: true });
@@ -85,7 +104,11 @@ export async function addValidation(root, options) {
       if (secretKeys.some((key) => !existing.some((e) => e.key === key))) throw refuse('supplemental steps may bind only existing catalogued keys');
       return { id, definition: step, secretKeys };
     });
-    append(root, state.id, 'validation.added', { commit, steps, criteria, reason: String(options.reason), tree: trees }, actor(options));
+    if (correcting) {
+      // Both pins stay in the ledger: what the step was, and what it is now.
+      const from = ids.map((id) => ({ id, commit: registered.find((r) => r.id === id).commit, definition: state.validations.flatMap((v) => v.steps).find((s) => s.id === id).definition }));
+      append(root, state.id, 'validation.corrected', { commit, steps, criteria, reason: String(options.reason), tree: trees, from }, actor(options));
+    } else append(root, state.id, 'validation.added', { commit, steps, criteria, reason: String(options.reason), tree: trees }, actor(options));
     return loadState(root, state.id);
   });
 }

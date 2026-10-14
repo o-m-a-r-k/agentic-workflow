@@ -3,7 +3,7 @@
 // `wf handoff close`; `wf handoff reviewer` refuses while one is, unless the owner records why with `--reason`.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { closureFile, commitIn, criteriaFile, goodClosure, ok, singleRepoProject, state, wf, write } from './helpers.mjs';
+import { closureFile, commitIn, criteriaFile, FIXTURE_EXPECT, goodClosure, ok, singleRepoProject, state, wf, write } from './helpers.mjs';
 
 const steps = [{ id: 'unit', repo: 'app', run: 'true', inputs: ['src/**'] }];
 const open = { implementersOpen: true };
@@ -12,7 +12,7 @@ function planned(name, plan) {
   const { base, root } = singleRepoProject(name, { gate: { steps } });
   const e = ok(wf(root, ['entry', '--item', 'IO-1', '--owner', 'o', '--json'])).json();
   ok(wf(root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id]));
-  ok(wf(root, ['plan', '--file', plan ? closureFile(base, plan) : criteriaFile(base), '--attempt', e.id]));
+  ok(wf(root, ['plan', '--file', plan ? closureFile(base, { expect: FIXTURE_EXPECT, ...plan }) : criteriaFile(base), '--attempt', e.id]));
   return { base, root, e };
 }
 
@@ -58,6 +58,8 @@ test('I-23: every implementer handed work blocks until it is closed, stopped one
   ok(wf(root, ['handoff', 'implementer', '--work', 'W1', '--agent', 'impl-c', '--attempt', e.id]));
   assert.match(wf(root, ['handoff', 'reviewer', '--agent', 'rev-1', '--attempt', e.id], open).err, /still open on IO-1\.1: impl-c \(W1\)/);
   ok(wf(root, ['handoff', 'close', '--agent', 'impl-c', '--attempt', e.id]));
+  // 0.7.0: with more than one work item the combined tree passes `wf check` before a review.
+  ok(wf(root, ['check', '--attempt', e.id]));
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-1', '--attempt', e.id], open));
   assert.deepEqual(state(root, e.id).implementers.map((x) => [x.agent, x.outcome]), [['impl-a', 'done'], ['impl-b', 'stopped'], ['impl-c', 'done']]);
 });

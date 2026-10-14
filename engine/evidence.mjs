@@ -2,7 +2,7 @@ import { mkdirStateDirectory } from './state-folders.mjs';
 // Evidence integrity: a manifest of every evidence file in the hash-chained ledger, write protection, verification at
 // every use, a chain-head anchor outside the evidence tree, repair (re-baseline) and release (prune) through the engine.
 //
-// Named gaps (0.1.19): a command/path guard cannot see writes made through MCP tools, Codex (no hook), gate steps and
+// Named gaps (0.1.19): a command/path guard cannot see writes made through MCP tools, harnesses without a hook, gate steps and
 // tests, paths decoded at run time, symlinks made earlier, races, or a person. So the engine records what it wrote and
 // refuses to use anything that differs.
 //
@@ -21,10 +21,11 @@ import { mkdirStateDirectory } from './state-folders.mjs';
 //   whose head differs (truncated, rewritten, restored from a copy) is refused. Same user can rewrite both: the anchor is
 //   not a signature.
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
-import { assertSafeId, canonical, refuse } from './util.mjs';
+import { assertSafeId, canonical, isPidAlive, refuse } from './util.mjs';
 import { canonical as canonicalPath, isInside, touchesEvidence } from './paths.mjs';
 
 const hashBuf = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
@@ -33,6 +34,59 @@ const hashBuf = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
 // Serialize short evidence transactions and readers; this lock never expires a live or uncertain owner by age.
 const evidenceTransactions = new Set();
 export const transactionSeams = { afterCollision: null };
+const transactionLockFile = (root, id) => path.join(fs.realpathSync(root), '.wf-worktrees', '_transactions', `${id}.lock`);
+
+// Named failure: a `wf` process killed while it held an attempt's lock (a stopped gate step, a sandbox timeout, a closed
+// terminal) left the lock behind, and every later command refused with "evidence transaction is still locked; reconcile
+// its owner before cleanup" (144-188 refusals); the guard then blocked the manual cleanup it asked for. The lock's owner
+// is the pid it records: when that process is gone on this host (kill 0 says ESRCH), nobody can be inside the
+// transaction and the lock is reclaimed. A live owner, an owner on another host and a lock whose owner cannot be read
+// are never reclaimed, and age alone never is.
+function deadOwner(lock) {
+  return Number.isInteger(lock?.pid) && lock.pid > 0 && lock.pid !== process.pid && (!lock.host || lock.host === os.hostname()) && !isPidAlive(lock.pid);
+}
+const parseLock = (read) => {
+  try { return read ? JSON.parse(read.bytes) : null; } catch { return null; }
+};
+// Removes the lock `file` only while it still holds `token` and its owner is gone. Reclaiming is itself exclusive (a
+// `.reclaim` file made with O_EXCL), so two processes that both saw the dead owner cannot remove each other's fresh lock.
+function reclaimDeadLock(file, token) {
+  const gate = `${file}.reclaim`;
+  try { writeNoFollow(gate, JSON.stringify({ pid: process.pid, host: os.hostname() }), { exclusive: true }); }
+  catch (error) {
+    if (error.code !== 'EEXIST') throw error;
+    // A reclaimer that died mid-way leaves its gate: the same rule applies to it.
+    if (deadOwner(parseLock(readRegular(gate)))) fs.rmSync(gate, { force: true });
+    return false;
+  }
+  try {
+    const lock = parseLock(readRegular(file));
+    if (!lock || lock.token !== token || !deadOwner(lock)) return false;
+    fs.unlinkSync(file);
+    process.stderr.write(`wf: reclaimed an evidence lock left by a process that is gone (pid ${lock.pid})\n`);
+    return true;
+  } finally { fs.rmSync(gate, { force: true }); }
+}
+
+// `wf unlock --attempt ID`: remove the evidence lock of an attempt whose owner is gone (it is also reclaimed on its own at
+// the next command; this is for looking at it and for a lock that nothing waits on). A live owner is refused.
+export function unlockEvidence(root, id) {
+  assertSafeId(id, 'attempt');
+  const file = transactionLockFile(root, id);
+  if (canonicalPath(file) !== file) throw refuse('evidence transaction control path resolves outside its recorded location', undefined, { id: 'lock:path' });
+  const st = fs.lstatSync(file, { throwIfNoEntry: false });
+  if (!st) return { id, removed: false, note: `${id} has no evidence lock` };
+  const read = readRegular(file);
+  const lock = parseLock(read);
+  if (!read || !lock) throw refuse(`the evidence lock of ${id} cannot be read, so its owner is unknown; it is not removed`, `inspect ${file} by hand: if no wf command runs, delete that file yourself`, { id: 'lock:unreadable' });
+  if (!deadOwner(lock)) {
+    const why = lock.pid === process.pid ? 'this process' : lock.host && lock.host !== os.hostname() ? `a process on another host (${lock.host})` : `pid ${lock.pid}, which is still running`;
+    throw refuse(`the evidence lock of ${id} is held by ${why}`, 'wait for that command to finish, or stop it (`wf stop`, or end the process), then run `wf unlock` again', { id: 'lock:owner-alive' });
+  }
+  if (!reclaimDeadLock(file, lock.token)) throw refuse(`the evidence lock of ${id} changed while it was being removed; look again`, undefined, { id: 'lock:changed' });
+  return { id, removed: true, pid: lock.pid, note: `removed the evidence lock of ${id} (its owner, pid ${lock.pid}, is gone)` };
+}
+
 export function withEvidenceTransaction(root, id, fn) {
   assertSafeId(id, 'attempt');
   // Named failure: a linked runner directory prevented even read-only diagnosis of a refused launch.
@@ -43,15 +97,17 @@ export function withEvidenceTransaction(root, id, fn) {
   mkdirStateDirectory(path.dirname(file), { recursive: true });
   const token = crypto.randomUUID(), deadline = Date.now() + 10000, sleeper = new Int32Array(new SharedArrayBuffer(4));
   for (;;) {
-    try { writeNoFollow(file, JSON.stringify({ pid: process.pid, token }), { exclusive: true }); break; }
+    try { writeNoFollow(file, JSON.stringify({ pid: process.pid, host: os.hostname(), token }), { exclusive: true }); break; }
     catch (error) {
       if (error.code !== 'EEXIST') throw error;
       transactionSeams.afterCollision?.(file);
       const current = readRegular(file);
       // Named failure: the owner can release its lock between EEXIST and our no-follow read.
       // Retry a missing entry only; links, unreadable entries and uncertain owners still fail closed.
-      if (!current && fs.lstatSync(file, { throwIfNoEntry: false })) throw refuse('evidence transaction lock is unreadable; reconcile its owner before cleanup');
-      if (Date.now() > deadline) throw refuse('evidence transaction is still locked; reconcile its owner before cleanup, never expire it by age');
+      if (!current && fs.lstatSync(file, { throwIfNoEntry: false })) throw refuse('evidence transaction lock is unreadable; reconcile its owner before cleanup', undefined, { id: 'lock:unreadable' });
+      const held = parseLock(current);
+      if (held && deadOwner(held) && reclaimDeadLock(file, held.token)) continue;
+      if (Date.now() > deadline) throw refuse('evidence transaction is still locked; reconcile its owner before cleanup, never expire it by age', `its owner is pid ${held?.pid ?? 'unknown'}${held?.pid ? ' (still running)' : ''}: wait for it, or stop it and run \`wf unlock --attempt ${id}\``, { id: 'lock:held' });
       Atomics.wait(sleeper, 0, 0, 20);
     }
   }
@@ -190,6 +246,7 @@ const rewritten = new Set(); // absolute paths the engine rewrote in this proces
 const gateRuns = new Set(); // `${root}\0${id}\0${runId}` gate runs this process owns
 let level = 'quick';
 export const setVerifyLevel = (l) => (level = l);
+export const verifyLevel = () => level;
 export const ownGateRun = (root, id, runId) => gateRuns.add(`${root}\0${id}\0${runId}`);
 
 // ---- protection ----
@@ -306,11 +363,27 @@ function walk(dir, out = { files: [], dirs: [], odd: [], errors: [] }, base = di
 // is the title as a plain file name. Returns { bytes, size, sha256, name } or throws with the reason.
 export const deliveredSeams = { beforeOpen: null };
 const refusedRead = (code, message) => Object.assign(new Error(message), { code });
+// Named failure (I-100): a step plugin's artifact was recorded at the scratch path it was written to (the gate's scratch
+// folder: <attempt>/<run>/<step>/<file> below the project's gate scratch root), though the gate had already sealed a copy of
+// it at <attempt>/gate/<run>/<step>/out/<file> in the evidence. An attempt gated that way keeps the scratch path in its
+// ledger, and every export of it was refused as outside the evidence. A reader given such a path and the recorded sha256
+// reads the sealed copy instead (the sha256 is checked on its bytes, so a copy that differs is refused as any other); the
+// scratch file is never opened and any other path outside the evidence is still refused.
+export function sealedCopyOfScratch(root, scratchPath, sha256) {
+  if (!sha256) return null;
+  const gateScratch = path.join(root, '.wf-worktrees', '_gate');
+  if (!isInside(scratchPath, gateScratch)) return null;
+  const parts = path.relative(canonicalPath(gateScratch), canonicalPath(scratchPath)).split(path.sep);
+  const [attempt, run, step, ...file] = parts;
+  if (!attempt || !run || !step || !file.length || parts.some((x) => !x || x === '..')) return null;
+  return path.join(evidenceRootOf(root), 'attempts', attempt, 'gate', run, step, 'out', ...file);
+}
+
 export function readEvidenceFile(root, attemptId, f) {
   const label = f.title ?? path.basename(String(f.path));
   void attemptId;
   const dir = fs.realpathSync.native(path.join(evidenceRootOf(root), 'attempts'));
-  const abs = path.resolve(String(f.path));
+  const abs = sealedCopyOfScratch(root, path.resolve(String(f.path)), f.sha256) ?? path.resolve(String(f.path));
   let parent;
   try {
     parent = fs.realpathSync.native(path.dirname(abs));
@@ -340,6 +413,17 @@ export function readEvidenceFile(root, attemptId, f) {
   const name = String(path.basename(String(label).replace(/\\/g, '/'))).replace(/[\u0000-\u001f\u007f]/g, '').trim();
   if (!name || /^\.+$/.test(name)) throw refusedRead('ENAME', `${JSON.stringify(label)}: not a usable file name`);
   return { bytes, size: bytes.length, sha256: sha, name };
+}
+
+// A file a command is about to read, against its recorded sha256 (0.7.0: the commands that no longer re-hash everything
+// check the files they read). null for a file that is not in the manifest (the ledger); otherwise a problem line or null.
+export function recordedFileProblem(root, id, abs) {
+  const rel = path.relative(attemptDirOf(root, id), abs).split(path.sep).join('/');
+  const m = loadLedgerLite(root, id).manifest.get(rel);
+  if (!m) return null;
+  const r = readRegular(abs);
+  if (!r) return `${rel}: not readable as a regular file`;
+  return hashBuf(r.bytes) === m.sha256 ? null : `${rel}: content differs from its recorded sha256`;
 }
 
 export function readRegular(file) {
@@ -413,13 +497,54 @@ export function prepareWrite(file) {
   return abs;
 }
 
+// Which of an attempt's files a reader may list. Named failure (I-50): a file a `wf` command had written but not yet
+// recorded was listed (and offered to `wf evidence show`) as if it were evidence. Recorded files, the ledger and the
+// files that are never recorded (a gate's lock and live progress) are; an attempt from before the manifest has nothing to
+// filter by.
+export function listableOf(root, id) {
+  const lite = loadLedgerLite(root, id);
+  if (!lite.baselined) return () => true;
+  return (rel) => lite.manifest.has(rel) || MUTABLE(rel, lite.openRuns, isV020(lite));
+}
+
 // ---- the ledger, read without the engine's reducer (no import cycle) ----
 const SEMVER = /^\d+\.\d+\.\d+$/;
-function loadLedgerLite(root, id) {
+// Named failure (0.7.0): on a 96 MB ledger a read took 9 seconds, because every command parsed the ledger several times and
+// hashed every entry each time. The result is kept for as long as the ledger file is unchanged (size, mtime, inode), and the
+// hash chain is walked in full only by the commands that must (`full`: accept, deliver, verify, doctor, export); every other
+// command checks the links between entries and the last entry's own hash, which is what the anchor binds.
+const liteCache = new Map(); // ledger file -> { sig, chained, out }
+function loadLedgerLite(root, id, { chain = false } = {}) {
   const file = path.join(attemptDirOf(root, id), 'ledger.jsonl');
+  const st = fs.statSync(file, { throwIfNoEntry: false });
+  if (!st) return { entries: [], manifest: new Map(), openRuns: [], finishedRuns: new Set(), startedRuns: new Set(), engineVersion: null, admitted: false, baselined: false, collected: [], unreadable: [], chainBreak: null, rebaselined: new Set() };
+  const sig = `${st.size}:${st.mtimeMs}:${st.ino}`;
+  let hit = liteCache.get(file);
+  if (!hit || hit.sig !== sig) {
+    hit = { sig, chained: false, out: parseLedgerLite(file) };
+    liteCache.set(file, hit);
+  }
+  if (hit.out.chainBreak === null) {
+    const { entries } = hit.out;
+    const hashOk = (e) => { const { hash, ...rest } = e; return hash === hashBuf(canonical(rest)); };
+    if (chain && !hit.chained) {
+      let prevHash = null;
+      for (const [i, e] of entries.entries()) {
+        if (e.prev !== prevHash || !hashOk(e)) { hit.out.chainBreak = e.seq ?? i + 1; break; }
+        prevHash = e.hash;
+      }
+      hit.chained = true;
+    } else if (!hit.chained && !hit.tail) {
+      const last = entries.at(-1);
+      if (last && (last.prev !== (entries.at(-2)?.hash ?? null) || !hashOk(last))) hit.out.chainBreak = last.seq ?? entries.length;
+      hit.tail = true;
+    }
+  }
+  return hit.out;
+}
+
+function parseLedgerLite(file) {
   const out = { entries: [], manifest: new Map(), openRuns: [], finishedRuns: new Set(), startedRuns: new Set(), engineVersion: null, admitted: false, baselined: false, collected: [], unreadable: [], chainBreak: null, rebaselined: new Set() };
-  let prevHash = null;
-  if (!fs.existsSync(file)) return out;
   const lines = fs.readFileSync(file, 'utf8').split('\n');
   for (const [i, line] of lines.entries()) {
     if (!line) continue;
@@ -431,12 +556,6 @@ function loadLedgerLite(root, id) {
       continue;
     }
     out.entries.push(e);
-    // The chain, checked here too: a manifest is trusted only from an unbroken ledger.
-    if (out.chainBreak === null) {
-      const { hash, ...rest } = e;
-      if (e.prev !== prevHash || hash !== hashBuf(canonical(rest))) out.chainBreak = e.seq ?? out.entries.length;
-      prevHash = hash;
-    }
     const d = e.data ?? {};
     if (e.type === 'admitted' && out.entries.length === 1) {
       out.admitted = true;
@@ -456,6 +575,8 @@ function loadLedgerLite(root, id) {
     // What the gate hashed when it collected each artifact (from the bytes it read), independent of the manifest.
     if (e.type === 'gate.finished' && !d.carriedFrom) for (const st of d.steps ?? []) for (const x of st.artifacts ?? []) if (x?.path && x.sha256) out.collected.push({ path: x.path, sha256: x.sha256 });
     if (e.type === 'gate.step' && d.step) for (const x of d.step.artifacts ?? []) if (x?.path && x.sha256) out.collected.push({ path: x.path, sha256: x.sha256 });
+    // I-94: an imported capture is judged the same way, against the bytes `wf captures import` read.
+    if (e.type === 'captures.imported') for (const x of d.files ?? []) if (x?.path && x.sha256) out.collected.push({ path: x.path, sha256: x.sha256 });
   }
   // A run is open only when the ledger says it started and has not finished: a folder alone opens nothing.
   out.openRuns = [...out.startedRuns].filter((r) => !out.finishedRuns.has(r));
@@ -529,7 +650,7 @@ export function verifyAttempt(root, id, { full = false, sigs = null } = {}) {
 
 function verifyInner(root, id, full, sigs) {
   const dir = attemptDirOf(root, id);
-  const lite = loadLedgerLite(root, id);
+  const lite = loadLedgerLite(root, id, { chain: full });
   const problems = lite.unreadable.map((n) => `ledger line ${n} is not JSON`);
   if (lite.chainBreak !== null) return [...problems, `ledger hash chain broken at entry ${lite.chainBreak}; the ledger was edited by hand (nothing else is checked against a broken chain)`];
   const head = lite.entries.at(-1);
@@ -708,7 +829,7 @@ export function seal(appendFn, only = null) {
 export function changesOf(root, id) {
   const dir = attemptDirOf(root, id);
   const lite = loadLedgerLite(root, id);
-  const blocking = verifyAttempt(root, id).filter((p) => /^ledger|anchor|released|does not start|unreadable folder|verification failed/.test(p));
+  const blocking = verifyAttempt(root, id, { full: true }).filter((p) => /^ledger|anchor|released|does not start|unreadable folder|verification failed/.test(p));
   const { files, odd, errors } = walk(dir);
   blocking.push(...errors, ...odd.map((o) => `${o.rel}: ${o.kind} (replace it with a regular file or remove it first)`));
   for (const rel of files) {

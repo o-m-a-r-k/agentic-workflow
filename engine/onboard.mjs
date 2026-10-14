@@ -1,5 +1,7 @@
 import { mkdirStateDirectory, stateFolderWarnings } from './state-folders.mjs';
 import { executionSettings } from './models.mjs';
+import { defaultHostId, detectOwner, findHost, fragment, hostChoice, hostFor, hostIds, hostLabels, isHost, optional } from './hosts/index.mjs';
+import { isGeneratedRoleFile } from './hosts/role-files.mjs';
 import { ruleWarnings } from './rules.mjs';
 import { protectionLayers } from './evidence.mjs';
 import fs from 'node:fs';
@@ -10,14 +12,14 @@ import { ADAPTER_DIR, ARTIFACT_PLACEHOLDERS, CONFIG_FILE, adapterLocation, agent
 import { listAttempts, loadState } from './ledger.mjs';
 import { openState, provision, untrackedFiles } from './attempt.mjs';
 import { projectEnv } from './env.mjs';
-import { chooseWorkers } from './host.mjs';
+import { chooseWorkers } from './machine.mjs';
 import { loadCatalog, missingFor, readSecret, redactor, status as secretsStatus, stepEnv } from './secrets.mjs';
 import { openCount } from './improve.mjs';
 import { trackerModeChecks } from './tracker.mjs';
 import { findSkill } from './skills.mjs';
 import { report } from './telemetry.mjs';
 import { packageOfStep } from './topology.mjs';
-import { ENGINE_VERSION, WfError, YAML, enginePinProblem, git, refuse, run, sessionIdentity, shellQuote } from './util.mjs';
+import { ENGINE_VERSION, WfError, YAML, enginePinProblem, git, refuse, run, shellQuote } from './util.mjs';
 
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const exists = (...p) => fs.existsSync(path.join(...p));
@@ -290,7 +292,21 @@ export function detect(root) {
   const notes = steps.some((st) => st.artifacts?.length) ? [`${steps.filter((st) => st.artifacts?.length).map((st) => `${st.id}: ${st.artifacts.join(', ')}`).join('; ')}. UI tests must write each ticket's captures there; WF_ITEMS lists the tickets of the run.`] : [];
   const tracked = trackerFor(root, repos);
   if (tracked.note) notes.push(tracked.note);
-  return { root, repos, steps, components, secrets, compose, sources, notes, tracker: tracked.tracker, agentsMd: repos.map((r) => ({ repo: r.name, exists: exists(root, r.path, 'AGENTS.md') })) };
+  return { root, repos, steps, components, secrets, compose, sources, notes, tracker: tracked.tracker, agentsMd: repos.map((r) => ({ repo: r.name, exists: exists(root, r.path, 'AGENTS.md') })), quality: qualityDraft(root, repos) };
+}
+
+// A first quality bar drawn from what the project already documents: its design system, its repos' contract, its
+// invariants. The person confirms or rewrites it when onboarding (the onboard skill asks), and later corrections add to
+// it. Named failure (final review of 0.7.0): a project had no `quality:`, so the quality bar reached no role and defects that
+// pre-dated a ticket arrived as late review findings instead of planned targets.
+const DESIGN_DOCS = ['DESIGN_SYSTEM.md', 'DESIGN-SYSTEM.md', 'design-system.md', 'docs/DESIGN_SYSTEM.md', 'docs/design-system.md'];
+function qualityDraft(root, repos) {
+  const out = [];
+  const docs = repos.flatMap((r) => DESIGN_DOCS.filter((d) => fs.existsSync(path.join(root, r.path, d))).map((d) => path.posix.join(r.path === '.' ? '' : r.path, d)));
+  if (docs.length) out.push(`Every screen this change ships or screenshots is correct at phone, tablet and desktop widths, follows ${docs.join(' and ')} and uses its components; a visible defect on such a screen is a finding even when it pre-dates the ticket.`);
+  if (repos.length > 1) out.push(`The ${repos.map((r) => r.name).join(', ')} repositories stay one matched contract: routes, data shapes, permissions, errors and their semantics change together on every side.`);
+  out.push('The invariants in AGENTS.invariants.md hold; a change that touches one proves it with a test.');
+  return out;
 }
 
 export function writeDraft(root, detected, { force = false } = {}) {
@@ -319,6 +335,8 @@ export function writeDraft(root, detected, { force = false } = {}) {
     delivery: { kind: 'push-main' },
     gate: { maxParallelSteps: 2, leases: { docker: 1, browser: 1, simulator: 1 }, steps: detected.steps },
     invariants: 'AGENTS.invariants.md',
+    // The project's quality bar: standing goals every planner turns into targets and every reviewer judges against.
+    quality: detected.quality ?? [],
   };
   mkdirStateDirectory(dir, { recursive: true });
   const header = `# agentic-workflow adapter, drafted by \`wf init\` on ${new Date().toISOString().slice(0, 10)}.\n# Review every value, then run \`wf doctor\` and \`wf enable\`.\n`;
@@ -342,11 +360,6 @@ export function writeDraft(root, detected, { force = false } = {}) {
 }
 
 // ---------- sync: AGENTS.md block, role agents, vendored skills ----------
-// Tools each generated Claude role may use (the implementer gets every tool). Every tool a role's instructions name
-// must be here. Named failure (0.3.3, a live round): the reviewer was told to write its closure with the Write tool,
-// which its list lacked, so it could not record the closure and the round was lost. The reviewer's Write is for its
-// closure file only: `wf review` refuses a closure when the worktree changed during the round.
-export const ROLE_TOOLS = { planner: ['Read', 'Grep', 'Glob', 'Bash'], reviewer: ['Read', 'Grep', 'Glob', 'Bash', 'Write', 'Skill'], tester: ['Read', 'Grep', 'Glob', 'Bash'] };
 const BEGIN = '<!-- agentic-workflow:begin -->';
 const END = '<!-- agentic-workflow:end -->';
 
@@ -388,23 +401,10 @@ export function removeBlock(file) {
   else fs.rmSync(file);
 }
 
-const RUNTIMES = {
-  claude: { agents: '.claude/agents', skills: '.claude/skills' },
-  codex: { agents: '.codex/agents', skills: '.agents/skills' },
-};
-
-const GENERATED_MD = '<!-- generated by `wf sync` from agentic-workflow; edit .workflow/ instead -->';
-const GENERATED_TOML = '# generated by `wf sync` from agentic-workflow; edit .workflow/ instead';
-
-// TOML basic strings: escape backslash, quote and control characters.
-const tomlEscape = (s, keepNewlines) => s.replace(/[\\"\u0000-\u001f\u007f]/g, (ch) => (ch === '\\' ? '\\\\' : ch === '"' ? '\\"' : keepNewlines && ch === '\n' ? '\n' : ch === '\n' ? '\\n' : ch === '\t' ? '\\t' : `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`));
-export const tomlString = (s) => `"${tomlEscape(String(s), false)}"`;
-const tomlMultiline = (s) => `"""\n${tomlEscape(String(s), true)}"""`;
-
 // One agent per role, and one implementer per class (`wf-implementer` is the implementer role's class).
 export function roleAgents(cfg) {
   const out = [];
-  for (const role of ['planner', 'implementer', 'reviewer', ...(cfg.roles?.tester ? ['tester'] : [])]) {
+  for (const role of ['planner', 'implementer', 'reviewer', ...(cfg.roles?.strategist === false ? [] : ['strategist']), ...(cfg.roles?.tester ? ['tester'] : [])]) {
     if (role !== 'implementer') {
       out.push({ role, cls: roleClass(cfg, role), name: agentTypeFor(cfg, role) });
       continue;
@@ -415,18 +415,22 @@ export function roleAgents(cfg) {
   return out;
 }
 
-// The fresh Codex launch uses the same role template and class instructions as generated agents.
-export function roleInstructions(cfg, role, cls, appendixText = '') {
-  const tpl = fs.readFileSync(path.join(PLUGIN_ROOT, 'templates', 'agents', `${role}.md`), 'utf8');
+// The role template, the class instructions and the project's additions: what a generated role file and a freshly launched
+// role both carry. `host` (an adapter id or adapter) fills the harness-specific sentences: the tools it has for writing
+// the closure and for reading, so a role file names only tools its own harness exposes.
+export function roleInstructions(cfg, role, cls, appendixText = '', host = null) {
+  const adapter = typeof host === 'string' ? findHost(host) : host;
+  let tpl = fs.readFileSync(path.join(PLUGIN_ROOT, 'templates', 'agents', `${role}.md`), 'utf8');
+  tpl = tpl.replace(/\{host\.(\w+)\}/g, (_, name) => fragment(adapter, name));
   const appendix = appendixText ? `\n\n## Project additions\n\n${appendixText.trim()}\n` : '';
   const classList = role === 'planner' ? `\n\n## Work classes in this project\n\n${Object.entries(cfg.classes).map(([n, c]) => `- \`${n}\` (agent ${agentTypeFor(cfg, 'implementer', n)}): ${c.use.trim()}`).join('\n')}` : '';
-  // Named failure I-75: shared role instructions demanded Claude-only tools in native Codex sessions.
-  const tools = '\n\n## Host tool compatibility\n\nNever assume a Claude tool name exists in Codex. Use the tools actually exposed by your host. Claude Code uses Read for text/images, Skill for skills and Write for permitted files. Codex uses `wf evidence inspect` for structured handoff JSON (never a complete-output document receipt), its supported full-file Node reader (when available), `wf evidence show <path> --attempt <id>` for text inside the selected attempt, and `view_image` for exported image copies. Read a required skill through its exact handed file when Skill is unavailable. Required document reads must follow the reviewer receipt protocol and deliver the complete output; a tool name or a claim of reading earns no receipt. Export screenshots with `wf export screenshots --gate --attempt <id> --to <folder outside the repo>` before viewing copies. Preserve all role restrictions on writes, commands, evidence paths and review scope. Report a concrete missing capability only after checking these supported alternatives.';
+  // Named failure I-75: shared role instructions demanded one harness's tools in another's native sessions.
+  const tools = `\n\n## Host tool compatibility\n\nUse the tools actually exposed by your host; never assume a tool from another harness exists. ${fragment(adapter, 'toolCompatibility')} Read the required documents far enough to apply every rule that bears on your work, and deliver the complete output; never claim a read that was truncated. Export screenshots with \`wf export screenshots --gate --attempt <id> --to <folder outside the repo>\` before viewing copies. Preserve all role restrictions on writes, commands, evidence paths and review scope. Report a concrete missing capability only after checking these supported alternatives.`;
   return `${tpl.replace(/^---[\s\S]*?---\n/, '').trim()}${tools}${classList}\n\nYou run as work class \`${cls}\`: ${cfg.classes[cls].use.trim()}${appendix ? '' : '\n'}${appendix}`;
 }
 
 // Named failure (I-15): a role file `wf sync` changed does not reach agents started from a session that was already
-// running (Claude Code and Codex read agent files when a session starts). Role files are written only when their content
+// running (a harness reads agent files when a session starts). Role files are written only when their content
 // changes, so a file's mtime says when the role last changed, and each changed one is reported (`sync.changedRoles`).
 function writeIfChanged(file, content, changed) {
   let before = null;
@@ -452,39 +456,31 @@ export function sync(root) {
     }
   }
   const agents = roleAgents(cfg);
-  for (const [runtime, dirs] of Object.entries(RUNTIMES)) {
+  for (const runtime of hostIds()) {
+    const host = hostFor(runtime);
+    // A harness whose roles are only ever launched by the engine has no role files: the receipt carries the instructions.
+    if (!host.roleFile) continue;
     const ours = new Set();
     for (const { role, cls, name } of agents) {
       // Role templates live under templates/ so the plugin does not register them as agents in every project.
       const tpl = fs.readFileSync(path.join(PLUGIN_ROOT, 'templates', 'agents', `${role}.md`), 'utf8');
       const rc = cfg.roles?.[role] ?? {};
       const { effort, model } = declared(cfg, cls, runtime);
-      const appendix = rc.appendix && fs.existsSync(path.join(root, ADAPTER_DIR, rc.appendix)) ? `\n\n## Project additions\n\n${fs.readFileSync(path.join(root, ADAPTER_DIR, rc.appendix), 'utf8').trim()}\n` : '';
       const description = `${tpl.match(/^description: (.*)$/m)?.[1] ?? role} Class ${cls}: ${cfg.classes[cls].use}`.replace(/\s+/g, ' ').trim();
-      const body = roleInstructions(cfg, role, cls, appendix ? fs.readFileSync(path.join(root, ADAPTER_DIR, rc.appendix), 'utf8') : '');
-      let file;
-      if (runtime === 'codex') {
-        // Codex loads custom agents from TOML files in .codex/agents/.
-        file = path.join(root, dirs.agents, `${name}.toml`);
-        const lines = [GENERATED_TOML, `name = ${tomlString(name)}`, `description = ${tomlString(description)}`, model ? `model = ${tomlString(model)}` : null, effort ? `model_reasoning_effort = ${tomlString(effort)}` : null, `developer_instructions = ${tomlMultiline(body)}`];
-        writeIfChanged(file, `${lines.filter(Boolean).join('\n')}\n`, changedRoles);
-      } else {
-        file = path.join(root, dirs.agents, `${name}.md`);
-        // JSON strings are valid YAML scalars, so a `use` text with colons cannot break the frontmatter.
-        const front = ['---', `name: ${name}`, `description: ${JSON.stringify(description)}`, model ? `model: ${model}` : null, effort ? `effort: ${effort}` : null, ROLE_TOOLS[role] ? `tools: ${ROLE_TOOLS[role].join(', ')}` : null, '---'].filter(Boolean).join('\n');
-        writeIfChanged(file, `${front}\n${GENERATED_MD}\n${body.trimEnd()}\n`, changedRoles);
-      }
+      const body = roleInstructions(cfg, role, cls, rc.appendix && fs.existsSync(path.join(root, ADAPTER_DIR, rc.appendix)) ? fs.readFileSync(path.join(root, ADAPTER_DIR, rc.appendix), 'utf8') : '', host);
+      const { file, content } = host.roleFile({ root, role, name, description, model, effort, body });
+      writeIfChanged(file, content, changedRoles);
       ours.add(file);
       written.push(file);
     }
-    // Generated agents this sync no longer produces (a removed class, Codex's old .md files) would still be offered
+    // Generated agents this sync no longer produces (a removed class, a harness's older file format) would still be offered
     // to the owner with stale settings; only files carrying the generated marker are removed.
-    const dir = path.join(root, dirs.agents);
+    const dir = path.join(root, host.agentsDir);
     for (const f of fs.existsSync(dir) ? fs.readdirSync(dir) : []) {
       const p = path.join(dir, f);
       if (!/^wf-.*\.(md|toml)$/.test(f) || ours.has(p)) continue;
       const text = fs.readFileSync(p, 'utf8');
-      if (text.includes(GENERATED_MD) || text.includes(GENERATED_TOML)) {
+      if (isGeneratedRoleFile(text)) {
         fs.rmSync(p);
         changedRoles.push({ file: p, removed: true });
       }
@@ -493,7 +489,7 @@ export function sync(root) {
       if (!s.vendor) continue;
       const src = path.resolve(root, ADAPTER_DIR, s.vendor.replace(/^\.workflow\//, ''));
       if (!fs.existsSync(src)) continue;
-      const dest = path.join(root, dirs.skills, s.name);
+      const dest = path.join(root, host.skillsDir, s.name);
       // Replace only copies this command made; a same-named skill someone else installed is left alone.
       if (fs.existsSync(dest) && !fs.existsSync(path.join(dest, '.wf-vendored'))) throw refuse(`${dest} exists and was not installed by \`wf sync\`; rename the skill or remove that folder yourself`);
       fs.rmSync(dest, { recursive: true, force: true });
@@ -602,7 +598,7 @@ export function siblingWarnings(root, cfg) {
 
 // Agents whose class pins no model inherit the owner session's: an effort comparison was confounded when the session
 // model changed mid-attempt. Warned only when an attempt actually shows more than one model.
-export function modelWarnings(root, cfg, runtime = sessionIdentity()?.runtime ?? 'claude') {
+export function modelWarnings(root, cfg, runtime = detectOwner()?.runtime ?? defaultHostId()) {
   // Every class a role runs at pins a model (a pinned review class alone does not stop implementers inheriting).
   const used = ['planner', 'reviewer', 'implementer', ...(cfg.roles?.tester ? ['tester'] : [])].map((r) => cfg.classes[roleClass(cfg, r)]);
   const pinned = used.every((c) => c?.[runtime]?.model);
@@ -618,11 +614,16 @@ export function modelWarnings(root, cfg, runtime = sessionIdentity()?.runtime ??
     .map((r) => ({ check: `models in ${r.id}`, problem: `agents ran on ${r.observedModels.join(', ')} and a class a role runs at pins no ${runtime} model, so its agents inherit the owner session's model`, fix: `pin \`classes.<name>.${runtime}.model\` in .workflow/project.yaml` }));
 }
 
-export async function doctor(root, { runSteps = true, runtime = sessionIdentity()?.runtime ?? 'claude', attempt = null } = {}) {
-  if (!['claude', 'codex'].includes(runtime)) throw new WfError('--runtime must be claude or codex');
+export async function doctor(root, { runSteps = true, runtime = detectOwner()?.runtime ?? defaultHostId(), attempt = null } = {}) {
+  if (!isHost(runtime)) throw new WfError(`--runtime must be ${hostChoice(' or ')}`);
   // Which evidence protection layers this machine provides (informational; a missing flag never fails doctor).
   const report = { config: [], tools: [], secrets: [], skills: [], connectors: [], steps: [], warnings: [], protection: protectionLayers(root).map((l) => ({ ok: true, warn: !l.active, check: l.layer, note: l.detail ?? (l.active ? 'on' : 'off') })), ok: true };
   report.warnings.push(...stateFolderWarnings(root).map(w => ({ ok: true, warn: true, ...w })));
+  // No quality bar: the roles get no standing quality goals (final review of 0.7.0). Information, never a failure.
+  try {
+    const q = loadConfig(root).quality ?? [];
+    if (!q.length) report.warnings.push({ ok: true, warn: true, check: 'quality bar', problem: 'the adapter states no `quality:` goals, so planners, implementers and reviewers get no standing quality bar', fix: 'add a few sentences under `quality:` in .workflow/project.yaml (what done means in this project beyond each ticket: design system, contracts, invariants), commit them on the adapter base branch, then `wf sync`' });
+  } catch {}
   const bad = (section, item) => {
     report[section].push({ ...item, ok: false });
     report.ok = false;
@@ -651,13 +652,18 @@ export async function doctor(root, { runSteps = true, runtime = sessionIdentity(
     bad('config', { check: 'adapter at base', problem: error.message.split('\n')[0], fix: 'commit .workflow/ on the base branch of the adapter repo and push it; the gate trusts only the adapter on the base it starts from' });
     adapterBase = null;
   }
-  // Named failure I-36: Claude model pins concealed Codex inheritance; check the selected/owning runtime instead.
+  // The harness's installed copy of this plugin (hooks, skills) against this engine (final review of 0.7.0).
+  {
+    const installed = optional(hostFor(runtime), 'installedPluginVersion')?.(process.env.WF_HOME ?? os.homedir()) ?? null;
+    if (installed && installed !== ENGINE_VERSION) report.warnings.push({ ok: true, warn: true, check: `${hostFor(runtime).name} plugin version`, note: `${hostFor(runtime).name} has agentic-workflow ${installed} installed while wf is ${ENGINE_VERSION}: its hooks and skills are older or newer than this engine; update the plugin in ${hostFor(runtime).name} and restart its sessions` });
+  }
+  // Named failure I-36: one harness's model pins concealed another's inheritance; check the selected/owning runtime instead.
   for (const role of ['planner', 'reviewer']) {
     if (role === 'planner' && cfg.roles?.planner === false) continue;
     const cls = roleClass(cfg, role);
     const { model } = declared(cfg, cls, runtime);
     if (model) report.config.push({ ok: true, runtime, check: `${role} model: ${model} (class ${cls})` });
-    else bad('config', { check: `${role} model`, runtime, problem: `the ${role} role runs at class \`${cls}\`, which pins no ${runtime === 'claude' ? 'Claude' : 'Codex'} model, so its agent inherits whatever model the owner's session runs`, fix: `set \`classes.${cls}.${runtime}.model\` (the strongest model you use), or \`roles.${role}.class: review\` (the plugin's planning and review class), in .workflow/project.yaml; then \`wf sync\`` });
+    else bad('config', { check: `${role} model`, runtime, problem: `the ${role} role runs at class \`${cls}\`, which pins no ${hostFor(runtime).name} model, so its agent inherits whatever model the owner's session runs`, fix: `set \`classes.${cls}.${runtime}.model\` (the strongest model you use), or \`roles.${role}.class: review\` (the plugin's planning and review class), in .workflow/project.yaml; then \`wf sync\`` });
   }
   // I-44: current setup checks never conceal the actual execution pin of an open attempt.
   const ids = attempt ? [attempt] : listAttempts(root);
@@ -673,8 +679,8 @@ export async function doctor(root, { runSteps = true, runtime = sessionIdentity(
         if (settings.model) report.config.push({ ok: true, runtime, check, note: settings.model + (settings.effort ? ' / ' + settings.effort : '') });
         else {
           const issue = { runtime, check, problem: 'the attempt has no pinned model for this role, even if the current adapter does', fix: '`wf models refresh --attempt ' + id + '`, then create a fresh handoff' };
-          if (runtime === 'codex') bad('config', issue); // Native Codex launch requires a model.
-          else report.warnings.push({ ...issue, ok: true, warn: true }); // Claude permits host inheritance.
+          if (hostFor(runtime).spawnMode === 'engine-only') bad('config', issue); // A launch by the engine requires a model.
+          else report.warnings.push({ ...issue, ok: true, warn: true }); // An owner-started role may inherit the host's model.
         }
       }
     } catch (error) { bad('config', { check: id + ' execution settings', problem: error.message }); }
@@ -698,7 +704,7 @@ export async function doctor(root, { runSteps = true, runtime = sessionIdentity(
   }
   for (const s of cfg.requires.skills ?? []) {
     const hashes = {};
-    for (const runtime of s.runtimes ?? Object.keys(RUNTIMES)) {
+    for (const runtime of s.runtimes ?? hostIds().filter((id) => hostFor(id).findSkill)) {
       const found = findSkill(root, s.name, runtime);
       if (!found) bad('skills', { skill: s.name, runtime, problem: 'not available to this runtime', fix: s.vendor ? 'run `wf sync`' : `install ${s.name} for ${runtime}` });
       else if (found.broken) bad('skills', { skill: s.name, runtime, problem: `installed but does not load: ${found.broken}`, fix: found.broken });

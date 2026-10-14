@@ -13,7 +13,7 @@ import { prepareWrite, readRegular, writeNoFollow } from './evidence.mjs';
 // required skill was only checked as installed. The list is a pure function of the adapter at the attempt's base and
 // the changed files, the same for every reviewer, so it steers no one: it adds to the review and never narrows it.
 
-// Claude-style rule files declare the paths they govern in frontmatter: `paths: [globs]` (a list, or one string).
+// Rule files with frontmatter declare the paths they govern in frontmatter: `paths: [globs]` (a list, or one string).
 export function frontmatterPaths(text) {
   const m = String(text ?? '').match(/^---\r?\n([\s\S]*?)\r?\n---/);
   if (!m) return null;
@@ -93,31 +93,6 @@ export function reviewRules(root, trusted, state, changed) {
   return out;
 }
 
-// Named failure I-58: reviewers treated a multi-megabyte JSON handoff as a required full-output document,
-// stopped on truncation and requested reduced review scope instead of inspecting the structured input.
-export const CODEX_BUNDLE_READ_INSTRUCTIONS = [
-  'The handoff JSON is structured review input, not a complete-output document receipt. Parse it into memory, enumerate its sections and collection sizes, then inspect every section in bounded batches. This inventory is navigation, not completed inspection. Enumerate object keys and array indices, including nested collections; split oversized entries and strings into consecutive chunks. After truncation, resume from the last complete item with smaller batches. Do not request a smaller handoff, discard evidence or narrow review scope. Existing impact sampling and screenshot obligations still apply. Parsing or inspecting the handoff earns no document-read credit.',
-  'For the Node reader, replace the path below with the handoff path from your initial prompt:',
-  '```js',
-  'var fs = await import("node:fs/promises");',
-  'var bundle = JSON.parse(await fs.readFile("/exact/handed/handoff.json", "utf8"));',
-  'nodeRepl.write(Object.keys(bundle).map(section => ({section, kind: Array.isArray(bundle[section]) ? "array" : typeof bundle[section], items: bundle[section] !== null && typeof bundle[section] === "object" ? Object.keys(bundle[section]).length : typeof bundle[section] === "string" ? bundle[section].length : 1})));',
-  '```',
-  'Use bounded views for inspection; change the value and range for every required section, nested collection or long string. Inspect all required items, not only the first example page:',
-  '```js',
-  'function view(value, from, to) {',
-  '  var items = Array.isArray(value) || typeof value === "string" ? value : value !== null && typeof value === "object" ? Object.entries(value) : [value];',
-  '  return {from, to: Math.min(to, items.length), total: items.length, items: items.slice(from, to)};',
-  '}',
-  'nodeRepl.write(view(bundle.criteria, 0, 10));',
-  '```',
-  'The full-file protocol below applies to the separate rule, skill, invariant and appendix document files named by the bundle. It does not require printing the JSON handoff in one output.',
-].join('\n');
-
-// Named failure I-53: a blind native reviewer used looped/partial reads because its frozen instructions omitted
-// the supported receipt format. Share exactly the protocol the existing completedNodeReads recognizer accepts.
-export const CODEX_DOCUMENT_READ_INSTRUCTIONS = 'Codex document-read receipts: before reviewing, read each required rule document and skill in full. When using the Node reader, use one literal absolute path from the bundle per call, with this exact straight-line form (replace the example path):\n```js\nvar fs = await import("node:fs/promises");\nnodeRepl.write(await fs.readFile("/exact/handed/document.md", "utf8"));\n```\nCall the Node tool directly or through a literal text(await tools.mcp__node_repl__js({...})); wrapper, and keep its successful output unchanged. Use sufficient output capacity for the entire file. Loops, object-wrapped output, aliases, partial reads and truncated output do not earn required-read credit. Do not use bundle.rules expressions or shell scripts for these reads. A supported full-file Read tool is also acceptable. Without a Node reader, use one plain `wf evidence show <absolute handed path> --attempt <id>` for text inside the selected attempt, with complete successful native command output. For required files outside evidence, use a supported full-file reader or a successful native shell read of the exact path, with complete output. Never use other shell commands on evidence paths. If a full read fails or is truncated, correct the read before spending time on the review; do not claim it succeeded.';
-
 // Named failure: unavailable handed documents were discovered only after an expensive review.
 // Check the exact handed files, never substitute a ticket's edited copy for a frozen rule document.
 export function reviewDocumentProblems(bundle) {
@@ -175,41 +150,6 @@ export function ruleVerdicts(rules, closure) {
     else verdicts.push({ rule: r.id, verdict: e.verdict, evidence: String(e.evidence), finding: e.verdict === 'finding' ? e.finding ?? e.evidence : null, docChangedByTicket: r.docChangedByTicket });
   }
   return { problems, verdicts };
-}
-
-// What the reviewer's transcript shows it read: a Read tool call of the file, or a Bash read (cat, sed, head, tail,
-// grep, less, more, nl, awk, bat) naming it, whose result is not an error; a skill counts when a Skill tool call names
-// it or its SKILL.md was read. Proves the content reached the reviewer, not that it was understood.
-const BASH_READ = /(^|[\s;&|(])(cat|sed|head|tail|grep|egrep|rg|less|more|nl|awk|bat|wc)\b/;
-export function transcriptReads(entries) {
-  const calls = new Map();
-  const failed = new Set();
-  for (const e of entries) {
-    const content = Array.isArray(e.message?.content) ? e.message.content : [];
-    for (const b of content) {
-      if (b.type === 'tool_use') calls.set(b.id, { name: b.name, input: b.input ?? {} });
-      if (b.type === 'tool_result' && (b.is_error === true || e.toolUseResult?.is_error === true)) failed.add(b.tool_use_id);
-    }
-  }
-  return [...calls.entries()].filter(([id]) => !failed.has(id)).map(([, c]) => c);
-}
-
-const readsFile = (calls, files) => calls.some((c) => (c.name === 'Read' && files.includes(path.resolve(String(c.input.file_path ?? '')))) || (c.name === 'Bash' && BASH_READ.test(String(c.input.command ?? '')) && files.some((f) => String(c.input.command).includes(f))));
-
-export function unreadDocs(entries, rules, skills) {
-  const calls = transcriptReads(entries);
-  const missing = [];
-  for (const r of rules ?? []) {
-    for (const f of r.read) {
-      const ok = [f, r.worktreeCopies?.[f]].filter(Boolean);
-      if (!readsFile(calls, ok)) missing.push(`rule ${r.id}: ${f}`);
-    }
-  }
-  for (const s of skills ?? []) {
-    const byTool = calls.some((c) => c.name === 'Skill' && [s.name, String(s.name).split(':').at(-1)].includes(String(c.input.skill ?? c.input.name ?? '').split(':').at(-1)));
-    if (!byTool && !(s.file && readsFile(calls, [s.file]))) missing.push(`skill ${s.name}${s.file ? ` (${s.file})` : ''}`);
-  }
-  return missing;
 }
 
 // Doctor: rule documents absent at the adapter base, and rules that govern every change (no paths, no frontmatter).

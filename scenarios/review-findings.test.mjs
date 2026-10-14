@@ -49,8 +49,9 @@ test('two concurrent gates: exactly one runs and the ledger stays intact', async
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'c\n' });
   const env = { ...process.env, WF_CONFIG_HOME: path.join(root, '..', '.wfhome') , ...spawnHome(root) };
   for (const k of ['CLAUDE_CODE_SESSION_ID', 'CLAUDECODE', 'CODEX_THREAD_ID', 'CODEX_SANDBOX', 'AI_AGENT', 'GROK_SESSION_ID']) delete env[k]; // no agent runtime: the scenario is the owner at a terminal (engine/owner.mjs)
+  // One approval for this tree (used by the gate that takes the lock); the other is refused for the running gate.
+  ownerSpeaks(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]);
   const runOne = () => new Promise((resolve) => {
-    ownerSpeaks(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]);
     const c = spawn(process.execPath, [WF, 'gate', ...OUT_OF_ORDER, '--attempt', e.id], { cwd: root, env });
     let err = '';
     c.stderr.on('data', (d) => (err += d));
@@ -173,8 +174,9 @@ test('the reviewer can write its closure under the guard hook; evidence is read 
   const closurePath = JSON.parse(fs.readFileSync(h.bundle, 'utf8')).reviewClosureFile;
   assert.doesNotMatch(closurePath, /\.wf-evidence/);
   assert.equal(run(`cat > ${closurePath} <<'X'\n{}\nX`), 0);
-  assert.equal(run(`grep -r FAIL ${root}/.wf-evidence 2>/dev/null`), 2, 'a shell read of evidence is refused: the Read tool reads it');
-  assert.equal(run(`echo x >> ${root}/.wf-evidence/attempts/${e.id}/ledger.jsonl`), 2);
+  const edit = (file_path) => spawnSync(process.execPath, [hook], { input: JSON.stringify({ tool_name: 'Edit', tool_input: { file_path } }), encoding: 'utf8' }).status;
+  assert.equal(edit(`${root}/.wf-evidence/attempts/${e.id}/ledger.jsonl`), 2, 'a file edit of evidence is refused');
+  assert.equal(edit(closurePath), 0);
   fs.writeFileSync(closurePath, JSON.stringify(goodClosure('r')));
   ok(wf(root, ['review', '--closure', closurePath, '--attempt', e.id]));
   ok(wf(root, ['accept', '--attempt', e.id]));

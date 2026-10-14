@@ -1,7 +1,9 @@
 # Automatic review division
 
-Every fresh reviewer handoff automatically selects parallel or single review from the committed change and recorded
-flows. It keeps the existing code-review → gate → fresh evidence-review → acceptance order. Existing handoffs keep
+Every fresh full-mode reviewer handoff (the first code review of an attempt, and the evidence review) automatically selects
+parallel or single review from the committed change and recorded flows. A `delta` round (the code reviews in between:
+the diff since the last reviewed tree and the findings still open) is always a single
+reviewer; see [review rounds](lifecycle.md#review-rounds-blocking-findings-and-observations). It keeps the existing code-review → gate → fresh evidence-review → acceptance order. Existing handoffs keep
 their recorded assignments; installing an update or advancing them never changes an active round.
 
 ```sh
@@ -72,15 +74,16 @@ required interface; already frozen version-one handoffs retain their recorded as
 
 ## Evidence and completion
 
-Scopes record `filesReviewed` with direct source/test evidence for every owned file, applicable rule verdicts, and
-their owned outside-plan and design-system verdicts. Scoped closures are immutable parts, not accepted reviews.
-They never release the gate, reveal earlier rounds or authorize delivery.
+A scope records its findings for its assigned flows. Scoped closures are immutable parts, not accepted reviews: the
+integration reviewer owns the criteria and the earlier rounds, so criteria or prior-finding verdicts in a part are
+ignored. Parts never release the gate, reveal earlier rounds or authorize delivery. (0.7.0: the per-file
+`filesReviewed` coverage list, the per-interface `interfacesReviewed` list and the `partReviews` hash citations are no
+longer required; they measured compliance with a form, not defects. Given, they are kept as context.)
 
 The foreground handle runs scopes concurrently, observes their terminal results, and launches integration only after
 each has recorded a valid report. Integration independently checks shared code, crossing flows, global criteria,
 discovered/historical issues, impact queries, lessons, contract seams and gate evidence. `wf review parts` provides
-only completed reports of the current group. Integration cites every exact report hash and its independent
-verification evidence in `partReviews`, and every crossing interface in `interfacesReviewed`.
+only completed reports of the current group; the integration reviewer reads them critically and adds what they missed.
 
 The engine unions all scoped findings and file/design verdicts, namespaces finding IDs by scope, and checks the
 combined closure against the original full obligations. Integration cannot discard or vote away scoped findings.

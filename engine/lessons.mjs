@@ -133,27 +133,46 @@ export function loadLessons(root, { state = null } = {}) {
     } catch {}
   }
   const problems = [];
-  const byKey = new Map();
+  // Named failure (I-95): ids are allocated per repository, so two repositories could each hold a different lesson `L-4`
+  // (after integrating bases, or two attempts adding one each); the second was dropped without a word and its lesson never
+  // reached a bundle. A lesson is now held per repository and id; two different lessons that share an id keep both, each
+  // under the identity `<id>@<repository>` (a lesson's repository is the repository whose folder holds its file), and the
+  // collision is reported. The same lesson held twice (a copy left after a move) is still one.
+  const held = new Map();
+  const put = (l, { replaces = false } = {}) => {
+    const k = `${l.id.toLowerCase()}\n${l.repo}`;
+    const had = held.get(k);
+    if (!had) held.set(k, l);
+    else if (replaces && l.status === had.status && l.recurrence >= had.recurrence) held.set(k, l);
+  };
   for (const repo of cfg?.repos ?? []) {
     const main = repoDir(root, repo);
     const r = state?.repos?.[repo.name];
     const extra = (where) => ({ repo: repo.name, where });
-    if (r?.base) for (const l of readAtCommit(main, r.base, extra('base'), problems)) if (!byKey.has(l.id.toLowerCase())) byKey.set(l.id.toLowerCase(), l);
+    if (r?.base) for (const l of readAtCommit(main, r.base, extra('base'), problems)) put(l);
     const mp = dirProblems(main);
     problems.push(...mp);
-    if (!mp.length) for (const l of readDir(lessonsDir(main), extra('main'), problems)) if (!byKey.has(l.id.toLowerCase())) byKey.set(l.id.toLowerCase(), l);
+    if (!mp.length) for (const l of readDir(lessonsDir(main), extra('main'), problems)) put(l);
     if (r?.worktree && fs.existsSync(r.worktree)) {
       const wp = dirProblems(r.worktree);
       problems.push(...wp);
-      if (!wp.length) for (const l of readDir(lessonsDir(r.worktree), extra('attempt'), problems)) {
-        const k = l.id.toLowerCase();
-        const had = byKey.get(k);
-        if (!had) byKey.set(k, l);
-        else if (had.repo === l.repo && l.status === had.status && l.recurrence >= had.recurrence) byKey.set(k, l);
-      }
+      if (!wp.length) for (const l of readDir(lessonsDir(r.worktree), extra('attempt'), problems)) put(l, { replaces: true });
     }
   }
-  const own = [...byKey.values()];
+  const sameId = new Map();
+  for (const l of held.values()) sameId.set(l.id.toLowerCase(), [...(sameId.get(l.id.toLowerCase()) ?? []), l]);
+  const found = [];
+  for (const group of sameId.values()) {
+    const distinct = [];
+    for (const l of group) if (!distinct.some((d) => d.title === l.title && d.trigger?.what === l.trigger?.what)) distinct.push(l);
+    if (distinct.length < 2) {
+      found.push({ ...distinct[0], fileId: distinct[0].id });
+      continue;
+    }
+    for (const l of distinct) found.push({ ...l, fileId: l.id, id: `${l.id}@${l.repo}` });
+    problems.push(`lesson ${distinct[0].id} is ${distinct.length} different lessons, held by ${distinct.map((l) => l.repo).join(', ')}; each keeps its own identity (${distinct.map((l) => `${l.id}@${l.repo}`).join(', ')}), so none is hidden; rename one when convenient (its file name and \`id\`, committed in its repo)`);
+  }
+  const own = found;
   // Lessons in the wrong place: no `repo`, a `repo` other than the one holding the file, or a plugin lesson in a project.
   for (const l of own) {
     if (l.scope === 'plugin') problems.push(`${l.repo}: lesson ${l.id} is about the workflow itself: it is a plugin improvement, not a lesson; move it to your inbox with \`wf lesson move ${l.id} --improvement\``);
@@ -165,9 +184,22 @@ export function loadLessons(root, { state = null } = {}) {
   return own.map((l) => (l.scope === 'project' ? { ...l, repo: null, home: l.repo } : { ...l, home: l.repo }));
 }
 
+// A lesson by the identity the roles are given: its id, or `<id>@<repository>` when two repositories hold different lessons
+// of one id (I-95). The qualified form names the same lesson whether or not another repository still holds that id, so a
+// reference recorded while they collided stays valid after one is renamed. A bare id that is now two lessons is refused
+// with the identities to choose from.
+export function findLesson(lessons, ref) {
+  const want = String(ref ?? '');
+  const exact = lessons.find((l) => l.id === want) ?? lessons.find((l) => `${l.fileId}@${l.home}` === want);
+  if (exact) return exact;
+  const several = lessons.filter((l) => l.fileId === want);
+  if (several.length > 1) throw refuse(`lesson ${want} is ${several.length} different lessons: name one of ${several.map((l) => l.id).join(', ')}`);
+  return undefined;
+}
+
 function validate(l, cfg = null) {
   const p = [];
-  if (!LESSON_ID.test(String(l.id ?? ''))) p.push('`id` must be letters, digits and dashes, starting with a letter or digit, at most 64 characters');
+  if (!LESSON_ID.test(String(l.fileId ?? l.id ?? ''))) p.push('`id` must be letters, digits and dashes, starting with a letter or digit, at most 64 characters');
   if (!String(l.title ?? '').trim()) p.push('`title` says in one line what the project learned');
   if (!String(l.trigger?.what ?? '').trim()) p.push('`trigger.what` says what happened and where it was seen');
   if (!CAUSES.includes(l.cause)) p.push(`\`cause\` is one of ${CAUSES.join(', ')}`);
@@ -189,26 +221,55 @@ function targetFor(root, cfg, repoName, state) {
   const repo = cfg.repos.find((r) => r.name === repoName);
   if (!repo) throw refuse(`no repo \`${repoName}\` (repos: ${cfg.repos.map((r) => r.name).join(', ')})`);
   const wt = state?.repos?.[repoName]?.worktree;
-  if (wt && fs.existsSync(wt) && !state.accepted && !['done', 'abandoned', 'handoff-pending'].includes(state.phase)) return { dir: wt, attempt: state.id, commit: true };
+  // Named failure (I-98, I-99): an accepted attempt adopted for repairs (its criteria amended, an implementer handed again)
+  // still carries its old acceptance, so a lesson recorded by that implementer was written untracked into the pull-only
+  // main checkout and moved by hand each time. An open implementer handoff means the worktree is where work happens.
+  const repairing = state?.accepted && (state.implementers ?? []).some((x) => !x.closedAt);
+  if (wt && fs.existsSync(wt) && (!state.accepted || repairing) && !['done', 'abandoned', 'handoff-pending'].includes(state.phase)) return { dir: wt, attempt: state.id, commit: true };
   return { dir: repoDir(root, repo), attempt: null, commit: false };
 }
 
+// Named failure (I-49): a generated lesson file failed the repository's own `prettier --check` because the repository asks
+// for single quotes and the generator wrote double-quoted text, so every lesson needed a formatting commit. The setting
+// is read from the repository's static Prettier config (never by running a command or a JS config); null when it names none.
+export function prettierSingleQuote(repoRoot) {
+  for (const name of ['.prettierrc', '.prettierrc.json', '.prettierrc.yaml', '.prettierrc.yml', 'package.json']) {
+    const r = readRegular(path.join(repoRoot, name));
+    if (!r) continue;
+    let cfg;
+    try {
+      const text = r.bytes.toString('utf8');
+      cfg = name === 'package.json' ? JSON.parse(text).prettier : YAML.parse(text);
+    } catch {
+      continue;
+    }
+    if (!cfg || typeof cfg !== 'object') continue;
+    const forYaml = (cfg.overrides ?? []).filter((o) => [o?.files].flat().some((f) => /y(a)?ml/i.test(String(f))) && typeof o?.options?.singleQuote === 'boolean');
+    if (forYaml.length) return forYaml.at(-1).options.singleQuote;
+    if (typeof cfg.singleQuote === 'boolean') return cfg.singleQuote;
+  }
+  return null;
+}
+
 function writeLesson(target, l, { create = false, message } = {}) {
-  const { file, builtin, where, declaredRepo, home, ...rest } = l;
+  const { file, builtin, where, declaredRepo, home, fileId, ...rest } = l;
   if (rest.scope === 'project') rest.repo = null;
-  const out = fileIn(target.dir, l.id);
+  // I-95: a lesson read as `L-4@api` is written under its own id, never the qualified one.
+  if (fileId) rest.id = fileId;
+  const out = fileIn(target.dir, rest.id);
   const before = dirProblems(target.dir);
   if (before.length) throw refuse(`lessons not written: ${before.join('; ')}`);
   mkdirStateDirectory(lessonsDir(target.dir), { recursive: true });
   const after = dirProblems(target.dir);
   if (after.length) throw refuse(`lessons not written: ${after.join('; ')}`);
-  const folded = `${String(l.id).normalize('NFC').toLowerCase()}.yaml`;
-  const clash = fs.readdirSync(lessonsDir(target.dir)).find((f) => f.normalize('NFC').toLowerCase() === folded && f !== `${l.id}.yaml`);
-  if (clash) throw refuse(`lesson ${l.id} would collide with ${clash}`);
+  const folded = `${String(rest.id).normalize('NFC').toLowerCase()}.yaml`;
+  const clash = fs.readdirSync(lessonsDir(target.dir)).find((f) => f.normalize('NFC').toLowerCase() === folded && f !== `${rest.id}.yaml`);
+  if (clash) throw refuse(`lesson ${rest.id} would collide with ${clash}`);
   const st = fs.lstatSync(out, { throwIfNoEntry: false });
-  if (create && st) throw refuse(`lesson ${l.id} already exists (${out})`);
+  if (create && st) throw refuse(`lesson ${rest.id} already exists (${out})`);
   if (st && (!st.isFile() || st.nlink > 1)) throw refuse(`${out} is ${st.isSymbolicLink() ? 'a symlink' : st.isFile() ? 'a hard link' : 'not a regular file'}; not written through`);
-  writeNoFollow(out, YAML.stringify(rest), { exclusive: create });
+  const singleQuote = prettierSingleQuote(target.dir);
+  writeNoFollow(out, YAML.stringify(rest, singleQuote === true ? { singleQuote } : undefined), { exclusive: create });
   if (target.commit) {
     const rel = path.relative(target.dir, out).split(path.sep).join('/');
     git(target.dir, ['add', '--', rel]);
@@ -217,7 +278,29 @@ function writeLesson(target, l, { create = false, message } = {}) {
   return out;
 }
 
-const nextId = (lessons) => `L-${Math.max(0, ...lessons.map((l) => Number(/^L-(\d+)$/.exec(l.id)?.[1] ?? 0))) + 1}`;
+// Named failure (I-95): two open attempts each allocated the next id from the lessons they could see, so each added an `L-4`,
+// in different repositories. The names of the lesson files in every attempt worktree (.wf-worktrees/<attempt>/<repo>) count as
+// taken. Folder names only: no ledger is read, so this costs nothing on a project with long ledgers.
+function takenByOpenAttempts(root) {
+  const base = path.join(root, '.wf-worktrees');
+  const names = [];
+  const folders = (dir) => {
+    try {
+      return fs.readdirSync(dir, { withFileTypes: true }).filter((e) => e.isDirectory() && !e.name.startsWith('_')).map((e) => path.join(dir, e.name));
+    } catch {
+      return [];
+    }
+  };
+  for (const attempt of folders(base)) {
+    for (const repo of folders(attempt)) {
+      try {
+        names.push(...fs.readdirSync(lessonsDir(repo)).map((f) => f.replace(/\.ya?ml$/, '')));
+      } catch {}
+    }
+  }
+  return names;
+}
+const nextId = (lessons, taken = []) => `L-${Math.max(0, ...[...lessons.map((l) => l.fileId ?? l.id), ...taken].map((id) => Number(/^L-(\d+)$/.exec(id)?.[1] ?? 0))) + 1}`;
 
 // Same mechanism kind and a shared tag: the earlier lesson's mechanism did not prevent this.
 export const recurrenceOf = (lessons, l) => lessons.filter((x) => x.id !== l.id && !x.builtin && x.status !== 'retired' && x.mechanism?.kind === l.mechanism?.kind && x.tags.some((t) => l.tags.includes(t)));
@@ -240,7 +323,7 @@ export function addLesson(root, options, actorId) {
   let doc = {};
   if (typeof options.file === 'string') doc = YAML.parse(fs.readFileSync(options.file, 'utf8')) ?? {};
   const l = {
-    id: doc.id ?? options.id ?? nextId(lessons),
+    id: doc.id ?? options.id ?? nextId(lessons, takenByOpenAttempts(root)),
     title: doc.title ?? options.title,
     trigger: { what: doc.trigger?.what ?? options.what, attempt: doc.trigger?.attempt ?? options.attempt ?? null, finding: doc.trigger?.finding ?? options.finding ?? null, quote: doc.trigger?.quote ?? options.quote ?? null },
     cause: doc.cause ?? options.cause,
@@ -262,7 +345,7 @@ export function addLesson(root, options, actorId) {
     l.repo = doc.repo ?? options.repo ?? defaultRepo(cfg, state);
     if (!l.repo) throw refuse(`which repository does this lesson concern? pass \`--repo <name>\` (${cfg.repos.map((r) => r.name).join(', ')}), or \`--project\` when it spans repos (stored in the adapter repo); it is committed and delivered there`);
   }
-  const dup = lessons.find((x) => x.id.toLowerCase() === String(l.id).toLowerCase());
+  const dup = lessons.find((x) => (x.fileId ?? x.id).toLowerCase() === String(l.id).toLowerCase());
   if (dup) throw refuse(`lesson ${l.id} already exists (in ${dup.repo ?? 'the plugin'}); a recurrence of it is recorded with \`wf lesson recur ${l.id} --attempt <id>\``);
   const problems = validate(l, cfg);
   if (problems.length) throw new WfError(`lesson not recorded:\n  - ${problems.join('\n  - ')}`);
@@ -277,7 +360,7 @@ export function addLesson(root, options, actorId) {
 // The lesson's mechanism failed: it happened again.
 export function recur(root, id, attempt, actorId, why) {
   const state = attempt ? loadState(root, String(attempt)) : null;
-  const l = loadLessons(root, { state }).find((x) => x.id === id);
+  const l = findLesson(loadLessons(root, { state }), id);
   if (!l) throw refuse(`no lesson ${id}`);
   l.recurrence = (l.recurrence ?? 0) + 1;
   // A shipped lesson's recurrence is recorded on the attempt only: it is never copied into a project.
@@ -290,13 +373,20 @@ export function recur(root, id, attempt, actorId, why) {
 export function moveLesson(root, id, options) {
   const cfg = loadConfig(root);
   const state = options.attempt ? loadState(root, String(options.attempt)) : null;
-  const l = loadLessons(root, { state }).find((x) => x.id === id);
+  const l = findLesson(loadLessons(root, { state }), id);
   if (!l) throw refuse(`no lesson ${id}`);
   if (!l.file) throw refuse(`${id} exists only in a commit; check out a branch that has it first`);
   const project = options.project === true;
   const to = project ? adapterLocation(root, cfg).repo.name : String(options.repo ?? '');
   if (!cfg.repos.some((r) => r.name === to)) throw refuse(`--repo names one of ${cfg.repos.map((r) => r.name).join(', ')} (or --project for a lesson that spans repos)`);
   const target = targetFor(root, cfg, to, state);
+  // Named failure (I-95): a move wrote over a file of the same id in the target repository, hiding the lesson it held.
+  const there = fileIn(target.dir, l.fileId);
+  const held = path.resolve(there) === path.resolve(l.file) ? null : readRegular(there);
+  if (held) {
+    const other = YAML.parse(held.bytes.toString('utf8')) ?? {};
+    if (other.title !== l.title || other.trigger?.what !== l.trigger?.what) throw refuse(`${to} already holds a different lesson ${l.fileId} (${there}); moving ${l.id} there would overwrite it`, 'rename one of them first (its file name and `id`)');
+  }
   const out = writeLesson(target, { ...l, scope: project ? 'project' : 'repo', repo: project ? null : to }, { message: `Lesson ${l.id} moved to ${to}` });
   if (path.resolve(out) !== path.resolve(l.file)) {
     const st = fs.lstatSync(l.file, { throwIfNoEntry: false });
@@ -308,7 +398,7 @@ export function moveLesson(root, id, options) {
 export function setLesson(root, id, options) {
   const cfg = loadConfig(root);
   const state = options.attempt ? loadState(root, String(options.attempt)) : null;
-  const l = loadLessons(root, { state }).find((x) => x.id === id);
+  const l = findLesson(loadLessons(root, { state }), id);
   if (!l) throw refuse(`no lesson ${id}`);
   if (options.status) l.status = String(options.status);
   if (options.ref) l.mechanism = { ...l.mechanism, ref: String(options.ref) };
@@ -424,7 +514,12 @@ export function relevantLessons(root, role, state, changed, { work = null } = {}
     const why = [];
     // `paths: ["**"]` and nothing else: the lesson says it applies to every change.
     const everyChange = !l.repo && !l.components.length && !l.kinds.length && l.paths.length > 0 && l.paths.every((p) => p === '**');
+    // Named failure (I-64): `wf lesson add --project` with no tags and no paths, components or kinds could match nothing, ever
+    // (the tags were its only selector and it had none), so the project lesson never reached a bundle. A project lesson that
+    // narrows itself by nothing applies project-wide.
+    const projectWide = l.scope === 'project' && !l.repo && !l.components.length && !l.kinds.length && !l.paths.length && !l.tags.length;
     if (everyChange) why.push('it applies to every change (paths **)');
+    else if (projectWide) why.push('it is a project-wide lesson (no narrower scope declared)');
     for (const t of l.tags) if (new RegExp(`(^|[^a-z0-9])${t.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([^a-z0-9]|$)`).test(text)) why.push(`the ticket mentions "${t}"`);
     if (declared.length && !everyChange && role !== 'reviewer') {
       // A planned file has no repo: judged by the lesson's paths and kinds (a lesson declaring only a repo or components
@@ -475,7 +570,7 @@ export function lessonVerdicts(injected, closure) {
 
 // The implementer's acknowledgement of each lesson its bundle listed: a commit trailer in the attempt's commits,
 // `Lesson <id>: applied - <one line>` or `Lesson <id>: not-applicable - <one line>`.
-const ACK = /^Lesson ([A-Za-z0-9][A-Za-z0-9-]{0,63}): (applied|not-applicable)\s*[-:—]\s*(\S.*)$/;
+const ACK = /^Lesson ([A-Za-z0-9][A-Za-z0-9@._-]{0,127}): (applied|not-applicable)\s*[-:—]\s*(\S.*)$/;
 export function implementerAcks(state) {
   const listed = [...new Set(state.handoffs.filter((h) => h.role === 'implementer').flatMap((h) => h.lessons ?? []))];
   const found = new Map();
@@ -515,7 +610,7 @@ export function reviewLessons(root, { after = 10 } = {}) {
   return {
     promote: lessons.filter((l) => l.status !== 'retired' && l.recurrence >= 2 && l.mechanism?.kind !== 'gate-check'),
     apply: lessons.filter((l) => l.status === 'proposed'),
-    retire: recent.length >= after ? lessons.filter((l) => l.status !== 'retired' && !injected.has(l.id) && Date.parse(l.created ?? 0) < Date.parse(recent[0]?.entries[0]?.at ?? 0)) : [],
+    retire: recent.length >= after ? lessons.filter((l) => l.status !== 'retired' && !injected.has(l.id) && !injected.has(`${l.fileId}@${l.home}`) && Date.parse(l.created ?? 0) < Date.parse(recent[0]?.entries[0]?.at ?? 0)) : [],
     attempts: recent.length,
   };
 }
@@ -555,7 +650,7 @@ export function exportPluginLessons(root, cfg) {
 // text sanitised) and leaves the project.
 export async function lessonToImprovement(root, id, options) {
   const cfg = loadConfig(root);
-  const l = loadLessons(root, { state: options.attempt ? loadState(root, String(options.attempt)) : null }).find((x) => x.id === id);
+  const l = findLesson(loadLessons(root, { state: options.attempt ? loadState(root, String(options.attempt)) : null }), id);
   if (!l) throw refuse(`no lesson ${id}`);
   if (!l.file) throw refuse(`${id} exists only in a commit; check out a branch that has it first`);
   const { addImprovement } = await import('./improve.mjs');

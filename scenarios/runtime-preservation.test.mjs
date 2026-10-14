@@ -3,9 +3,12 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { append, reduce } from '../engine/ledger.mjs';
 import { assertRuntimeLaunch, defaultRuntime } from '../engine/runtime-policy.mjs';
-import { ok, ownerSays, singleRepoProject, state, wf } from './helpers.mjs';
+import { ok, singleRepoProject, state, wf } from './helpers.mjs';
 
-for (const runtime of ['codex', 'claude']) test(`${runtime} owner defaults locally and an approved switch persists across handoffs and recovery`, () => {
+// 0.7.0 (D4): choosing the other provider for a handoff is bookkeeping, recorded with the caller as actor. It used to wait
+// for the owner's phrase `runtime <attempt>:<provider>` read from the owner session's transcript.
+
+for (const runtime of ['codex', 'claude']) test(`${runtime} owner defaults locally and a recorded switch persists across handoffs and recovery`, () => {
   const other = runtime === 'codex' ? 'claude' : 'codex';
   const { root, base } = singleRepoProject(`origin-${runtime}`, {
     classes: { review: { codex: { model: 'test-model', effort: 'high' }, claude: { model: 'test-model', effort: 'high' } } },
@@ -15,26 +18,22 @@ for (const runtime of ['codex', 'claude']) test(`${runtime} owner defaults local
   assert.equal(state(root, id).originRuntime, runtime);
   ok(wf(root, ['handoff', 'planner', '--attempt', id, '--agent', 'same'], { preserveRuntime: true }));
   assert.equal(state(root, id).handoffs.at(-1).runtime, runtime);
-  const refused = wf(root, ['handoff', 'planner', '--attempt', id, '--agent', 'wrong', '--runtime', other], { ownerSilent: true });
-  assert.equal(refused.code, 75);
-  assert.equal(state(root, id).handoffs.length, 1);
-  // An old wrong-provider handoff cannot bypass the pin through the native launcher.
+  // An old wrong-provider handoff with no recorded choice cannot bypass the pin through the native launcher.
   append(root, id, 'handoff', { role: 'planner', agent: 'legacy-wrong', runtime: other }, owner);
   const launch = wf(root, ['handoff', 'run', '--attempt', id, '--agent', 'legacy-wrong']);
   assert.equal(launch.code, 75);
   assert.match(launch.err, /owning runtime/);
   assert.equal(state(root, id).handoffs.at(-1).launch, undefined);
-  ownerSays(path.join(base, '.home'), owner, `runtime ${id}:${other}`);
-  ok(wf(root, ['handoff', 'planner', '--attempt', id, '--agent', 'authorized', '--runtime', other], { ownerSilent: true }));
-  assert.ok(state(root, id).handoffs.at(-1).runtimeAuthority?.spent);
+  // An explicit --runtime for the other provider is a recorded choice: accepted, with who chose it and from what.
+  ok(wf(root, ['handoff', 'planner', '--attempt', id, '--agent', 'chosen', '--runtime', other], { ownerSilent: true }));
+  const chosen = state(root, id).handoffs.at(-1);
+  assert.deepEqual([chosen.runtime, chosen.runtimeAuthority.runtime, chosen.runtimeAuthority.from], [other, other, runtime]);
+  assert.equal(chosen.runtimeAuthority.phrase, undefined, 'no owner phrase is claimed');
   assert.equal(state(root, id).originRuntime, runtime);
   ok(wf(root, ['handoff', 'planner', '--attempt', id, '--agent', 'default-again'], { preserveRuntime: true, ownerSilent: true }));
   assert.equal(state(root, id).handoffs.at(-1).runtime, other);
   assert.equal(state(root, id).handoffs.at(-1).runtimeAuthority, undefined);
-  const switchBack = wf(root, ['handoff', 'planner', '--attempt', id, '--agent', 'switch-back', '--runtime', runtime], { ownerSilent: true });
-  assert.equal(switchBack.code, 75);
-  ownerSays(path.join(base, '.home'), owner, `runtime ${id}:${runtime}`);
-  ok(wf(root, ['handoff', 'planner', '--attempt', id, '--agent', 'authorized-back', '--runtime', runtime], { ownerSilent: true }));
+  ok(wf(root, ['handoff', 'planner', '--attempt', id, '--agent', 'switch-back', '--runtime', runtime], { ownerSilent: true }));
   ok(wf(root, ['handoff', 'planner', '--attempt', id, '--agent', 'after-back'], { preserveRuntime: true, ownerSilent: true }));
   assert.equal(state(root, id).handoffs.at(-1).runtime, runtime);
 });
@@ -57,11 +56,11 @@ for (const runtime of ['codex', 'claude']) test(`admission records the actual ${
 
 test('launch authority must name this attempt and the selected provider', () => {
   const s = { id: 'ENG-94.1', originRuntime: 'codex' };
-  const h = { runtime: 'claude', runtimeAuthority: { provenance: 'host-recorded', spent: 'some-message', phrase: 'runtime ENG-95.1:claude' } };
-  assert.throws(() => assertRuntimeLaunch(s, h), /owning runtime/);
-  h.runtimeAuthority.phrase = 'runtime ENG-94.1:codex';
-  assert.throws(() => assertRuntimeLaunch(s, h), /owning runtime/);
-  h.runtimeAuthority = { provenance: 'interactive-terminal (unverified)', phrase: 'runtime ENG-94.1:claude' };
+  const h = { runtime: 'claude' };
+  assert.throws(() => assertRuntimeLaunch(s, h), /owning runtime/, 'no recorded choice');
+  h.runtimeAuthority = { runtime: 'codex', from: 'codex', by: 'codex:x' };
+  assert.throws(() => assertRuntimeLaunch(s, h), /owning runtime/, 'a choice of another provider');
+  h.runtimeAuthority = { runtime: 'claude', from: 'codex', by: 'codex:x' };
   assert.doesNotThrow(() => assertRuntimeLaunch(s, h));
 });
 
@@ -73,7 +72,7 @@ for (const runtime of ['codex', 'claude']) test(`adoption inherits current ${run
   });
   const id = ok(wf(root, ['entry', '--item', 'ENG-96', '--owner', `${other}:original-owner`, '--json'])).json().id;
   append(root, id, 'handoff', { role: 'planner', agent: 'old-provider', runtime: other }, `${other}:original-owner`);
-  // Replay an authorized adoption; adoption authority itself is covered by adoption.test.mjs.
+  // Replay an adoption; what adoption needs is covered by adoption.test.mjs.
   append(root, id, 'owner.adopted', {}, `${runtime}:current-owner`);
   for (const agent of ['first-repair', 'second-repair', 'recovered']) {
     ok(wf(root, ['handoff', 'planner', '--attempt', id, '--agent', agent, ...(agent === 'first-repair' ? ['--runtime', runtime] : [])], { preserveRuntime: true, ownerSilent: true, env: agent === 'recovered' ? { [other === 'codex' ? 'CODEX_THREAD_ID' : 'CLAUDE_CODE_SESSION_ID']: 'unrelated-caller' } : {} }));
@@ -85,8 +84,8 @@ for (const runtime of ['codex', 'claude']) test(`adoption inherits current ${run
   }
   const s = state(root, id);
   assert.throws(() => assertRuntimeLaunch(s, s.handoffs[0]), /owning runtime/);
-  const denied = wf(root, ['handoff', 'planner', '--attempt', id, '--agent', 'switch-back', '--runtime', other], { ownerSilent: true });
-  assert.equal(denied.code, 75);
+  ok(wf(root, ['handoff', 'planner', '--attempt', id, '--agent', 'switch-back', '--runtime', other], { ownerSilent: true }));
+  assert.equal(state(root, id).handoffs.at(-1).runtimeAuthority.runtime, other, 'a deliberate switch is recorded, not inherited from the history');
 });
 
 test('current owner wins over historical runtime and unrelated caller environment', () => {
@@ -97,11 +96,11 @@ test('current owner wins over historical runtime and unrelated caller environmen
 
 test('persistent selection is owner-bound, validated, and not inferred from old handoffs', () => {
   const s = { id: 'ENG-98.1', owner: 'codex:current-owner', originRuntime: 'claude' };
-  const authority = { phrase: 'runtime ENG-98.1:claude', provenance: 'host-recorded', spent: 'owner-message' };
+  const authority = { runtime: 'claude', from: 'codex', by: 'codex:current-owner' };
   for (const preference of [
     { owner: 'codex:previous-owner', runtime: 'claude', authority },
-    { owner: s.owner, runtime: 'claude', authority: { ...authority, spent: null } },
-    { owner: s.owner, runtime: 'claude', authority: { ...authority, phrase: 'runtime ENG-99.1:claude' } },
+    { owner: s.owner, runtime: 'claude', authority: null },
+    { owner: s.owner, runtime: 'claude', authority: { ...authority, runtime: 'codex' } },
   ]) assert.equal(defaultRuntime({ ...s, runtimePreference: preference }), 'codex');
   const admitted = { type: 'admitted', actor: s.owner, data: { id: s.id, originRuntime: 'claude' } };
   const handoff = { type: 'handoff', actor: s.owner, data: { role: 'planner', agent: 'p', runtime: 'claude', runtimeAuthority: authority } };

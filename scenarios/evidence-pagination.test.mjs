@@ -5,9 +5,6 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { showEvidence, MAX_SHOW_BYTES } from '../engine/evidence-read.mjs';
-import { completedNodeReads } from '../engine/codex-reads.mjs';
-import { check } from '../hooks/guard-evidence.mjs';
-import { check as check015 } from './fixtures/guard-0.1.15.mjs';
 import { ok, singleRepoProject, wf } from './helpers.mjs';
 
 function fixture(text) {
@@ -18,35 +15,19 @@ function fixture(text) {
   fs.writeFileSync(file,text);
   return {root,id,file,state:{id},dir};
 }
-function receipt(f,page,id) {
-  const input={cmd:`wf evidence show ${f.file} --attempt ${f.id} --offset ${page.offset} --length 32768 --json`};
-  return [
-    {type:'response_item',payload:{type:'function_call',namespace:'functions',name:'exec_command',call_id:id,arguments:JSON.stringify(input)}},
-    {type:'response_item',payload:{type:'function_call_output',call_id:id,output:JSON.stringify({exit_code:0,output:JSON.stringify(page)})}}
-  ];
-}
-
 // Named failure I-80: a shell-only role could not finish reading its immutable19 MB handoff.
-test('I-80: bounded pages cover a file beyond4 MiB, preserve Unicode and earn complete read provenance',()=>{
+test('I-80: bounded pages cover a file beyond4 MiB and preserve Unicode',()=>{
   const text='a'.repeat(MAX_SHOW_BYTES+7)+'🙂العربية\n';
-  const f=fixture(text), raw=[];
+  const f=fixture(text);
   let offset=0, all='';
   do {
     const page=showEvidence(f.root,f.state,f.file,{offset,length:32768});
     assert.equal(page.sha256,crypto.createHash('sha256').update(text).digest('hex'));
     assert.equal(page.offset,offset);
     assert.ok(page.bytes<=32768);
-    all+=page.text; raw.push(...receipt(f,page,'page-'+offset)); offset=page.nextOffset;
+    all+=page.text; offset=page.nextOffset;
   } while(offset<Buffer.byteLength(text));
   assert.equal(all,text);
-  assert.equal(completedNodeReads(raw,{}).length,1);
-  const omitted=raw.slice(0,4).concat(raw.slice(6));
-  assert.equal(completedNodeReads(omitted,{}).length,0,'a gap cannot earn read credit');
-  const bad=structuredClone(raw);
-  const result=JSON.parse(bad[5].payload.output); result.output=result.output.slice(0,-1); bad[5].payload.output=JSON.stringify(result);
-  assert.equal(completedNodeReads(bad,{}).length,0,'truncated output cannot earn read credit');
-  fs.appendFileSync(f.file,'changed');
-  assert.equal(completedNodeReads(raw,{}).length,0,'changed source invalidates receipts');
   fs.rmSync(f.root,{recursive:true,force:true});
 });
 
@@ -70,19 +51,7 @@ test('I-80: UTF8 scalar boundaries and invalid ranges fail closed; links and bin
   fs.rmSync(f.root,{recursive:true,force:true});
 });
 
-test('I-80: failed, pending, forged and out-of-order page receipts never prove a read',()=>{
-  const f=fixture('abcdefgh');
-  const page=showEvidence(f.root,f.state,f.file,{offset:0,length:32768});
-  const raw=receipt(f,page,'one'); assert.equal(completedNodeReads(raw,{}).length,1);
-  for(const change of [r=>r.exit_code=1,r=>r.session_id=1,r=>{const p=JSON.parse(r.output);p.sha256='0'.repeat(64);r.output=JSON.stringify(p);},r=>{const p=JSON.parse(r.output);p.text='fakefake';r.output=JSON.stringify(p);}]) {
-    const bad=structuredClone(raw), r=JSON.parse(bad[1].payload.output); change(r);bad[1].payload.output=JSON.stringify(r);assert.equal(completedNodeReads(bad,{}).length,0);
-  }
-  const tail=showEvidence(f.root,f.state,f.file,{offset:4,length:32768});
-  assert.equal(completedNodeReads(receipt(f,tail,'tail'),{}).length,0);
-  fs.rmSync(f.root,{recursive:true,force:true});
-});
-
-test('I-80: structured handoffs beyond4 MiB inspect bounded original sections without document read credit',async()=>{
+test('I-80: structured handoffs beyond4 MiB inspect bounded original sections',async()=>{
   const {inspectEvidence}=await import('../engine/evidence-read.mjs');
   const f=fixture(JSON.stringify({instructions:'x'.repeat(MAX_SHOW_BYTES+100),work:{id:'W1',criteria:['C1']},impactMap:{queries:[{id:'q1',files:['a.ts']},{id:'q2',files:['b.ts']}]},'a/b~':{value:'kept'},unicode:'a🙂b',controls:'\u0001'.repeat(5000)}));
   const inventory=inspectEvidence(f.root,f.state,f.file,{count:10});
@@ -102,8 +71,6 @@ test('I-80: structured handoffs beyond4 MiB inspect bounded original sections wi
   assert.equal(unicode.text,'a');assert.equal(unicode.nextFrom,1);
   assert.throws(()=>inspectEvidence(f.root,f.state,f.file,{pointer:'/unicode',from:2,count:2}),/scalar boundary/);
   for(const options of [{pointer:'/__proto__'},{pointer:'/work/constructor'},{pointer:'/bad~2'},{pointer:true},{from:true},{count:0},{count:5000},{from:100}]) assert.throws(()=>inspectEvidence(f.root,f.state,f.file,options));
-  const raw=[{type:'response_item',payload:{type:'function_call',namespace:'functions',name:'exec_command',call_id:'inspect',arguments:JSON.stringify({cmd:`wf evidence inspect ${f.file} --attempt ${f.id}`})}},{type:'response_item',payload:{type:'function_call_output',call_id:'inspect',output:JSON.stringify({exit_code:0,output:JSON.stringify(inventory)})}}];
-  assert.equal(completedNodeReads(raw,{}).length,0,'structured inspection is not complete rule-document read credit');
   fs.symlinkSync(f.file,path.join(f.dir,'linked.json'));
   assert.throws(()=>inspectEvidence(f.root,f.state,'linked.json'),/not a regular file/);
   fs.linkSync(f.file,path.join(f.dir,'hard.json'));
@@ -111,16 +78,17 @@ test('I-80: structured handoffs beyond4 MiB inspect bounded original sections wi
   fs.rmSync(f.root,{recursive:true,force:true});
 });
 
-test('I-80: actual fresh native role bootstrap separates structured input from required document receipts',async()=>{
+test('I-80: actual fresh native role bootstrap separates structured input from the documents read far enough to apply every rule',async()=>{
   const {roleInstructions}=await import('../engine/onboard.mjs');
   const cfg={classes:{full:{use:'Critical boundaries'}}};
-  for(const role of ['implementer','reviewer','planner']) {
-    const body=roleInstructions(cfg,role,'full');
-    assert.match(body,/Handoff JSON is structured input, not a complete-output document receipt/);
-    assert.match(body,/wf evidence inspect <handed absolute path>/);
-    assert.match(body,/follow every required item marked `oversized`/);
-    assert.match(body,/Separate rule\/skill\/invariant\/appendix documents require complete observed output/);
-    assert.match(body,/Use the literal `wf` command, unquoted paths and pointers/);
+  const inspect={claude:'structured handoff JSON is inspected with `wf evidence inspect` (never one full-output dump)',codex:'inspects structured handoff JSON with `wf evidence inspect` (never one full-output dump)'};
+  for(const [role,host] of ['implementer','reviewer','planner'].flatMap((r)=>['claude','codex'].map((h)=>[r,h]))) {
+    const body=roleInstructions(cfg,role,'full','',host);
+    // Structured handoff JSON goes through `wf evidence inspect` and is never printed whole; the documents a bundle names
+    // are separate files, each read far enough to apply every rule that bears on the work (the page mechanics are the reviewer bundle's, tested with it).
+    assert.ok(body.includes(inspect[host]),host+' '+role);
+    assert.match(body,/Read the required documents far enough to apply every rule that bears on your work, and deliver the complete output; never claim a read that was truncated/);
+    assert.doesNotMatch(body,/read receipt|document receipt|document-read/i);
     assert.doesNotMatch(body,/read large handoffs and required documents with one plain/);
   }
 });
@@ -175,9 +143,6 @@ test('I-82: real CLI inspect paginates zero and nonzero offsets while skills sou
   const id=ok(wf(root,['entry','--item','ENG-882','--json'])).json().id;
   const handoff=ok(wf(root,['handoff','planner','--agent','reader_i82','--attempt',id,'--json'])).json();
   for(const [from,expected] of [['0','read'],['4','er_i'],['8','82']]) {
-    const command=`wf evidence inspect ${handoff.bundle} --attempt ${id} --pointer /agent --from ${from} --count 4`;
-    const input={cwd:root,tool_input:{command}};
-    assert.equal(check015(input),null);assert.equal(check(input),null);
     const output=ok(wf(root,['evidence','inspect',handoff.bundle,'--attempt',id,'--pointer','/agent','--from',from,'--count','4']));
     assert.ok(Buffer.byteLength(output.out)<=16384);
     const page=output.json();assert.equal(page.from,Number(from));assert.equal(page.text,expected);
@@ -190,7 +155,4 @@ test('I-82: real CLI inspect paginates zero and nonzero offsets while skills sou
   assert.equal(fs.readFileSync(path.join(root,'.workflow','skills','sample','SKILL.md'),'utf8'),'# Sample\n');
   assert.match(wf(root,['skills','update','sample','--from',path.join(source,'SKILL.md')]).err,/not a regular folder/);
   assert.notEqual(wf(root,['lesson','inspect',handoff.bundle,'--attempt',id]).code,0,'inspection belongs to evidence, not lesson dispatch');
-  for(const command of [`wf evidence inspect ${handoff.bundle} --attempt ${id} --pointer '/agent'`,`/usr/local/bin/wf evidence inspect ${handoff.bundle} --attempt ${id}`,`wf evidence inspect ${handoff.bundle} --attempt ${id} > /tmp/out`]) {
-    const input={cwd:root,tool_input:{command}};assert.ok(check(input));
-  }
 });

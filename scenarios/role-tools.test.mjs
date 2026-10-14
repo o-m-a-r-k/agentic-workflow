@@ -19,12 +19,13 @@ test('every generated role names only tools its own tools list grants', () => {
     const listed = /^tools: (.*)$/m.exec(text.match(/^---\n[\s\S]*?\n---\n/)[0])?.[1];
     if (!listed) continue; // no list: every tool (the implementer)
     const granted = new Set(listed.split(',').map((t) => t.trim()));
-    const named = new Set([...text.matchAll(new RegExp(`\\b(${TOOLS.join('|')}) tool\\b`, 'g'))].map((m) => m[1]));
+    // A tool is named as "the Write tool" or as "Claude's Write".
+    const named = new Set([...text.matchAll(new RegExp(`\\b(?:(${TOOLS.join('|')}) tool|Claude's (${TOOLS.join('|')}))\\b`, 'g'))].map((m) => m[1] ?? m[2]));
     for (const t of named) assert.ok(granted.has(t), `${f} tells the agent to use the ${t} tool but its tools are: ${listed}`);
   }
   const reviewer = fs.readFileSync(path.join(dir, files.find((f) => f.startsWith('wf-reviewer'))), 'utf8');
   assert.match(reviewer, /^tools: .*\bWrite\b/m);
-  assert.match(reviewer, /Write only to the path in `reviewClosureFile`; any other write changes the tree under review and invalidates your review/);
+  assert.match(reviewer, /Write only to the path in `reviewClosureFile` \(the Write tool on that file\); any other write changes the tree under review and `wf review` refuses it/);
 });
 
 test('wf review refuses a closure when the worktree changed during the review round', () => {
@@ -74,41 +75,6 @@ test('every handoff names the agent type and the name to start it under, the rev
   const rv = ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-1', '--attempt', e.id]));
   assert.match(rv.out, /^Read \S+ and follow its instructions\.\n$/, 'stdout stays the one line the reviewer is started with');
   assert.match(rv.err, /^Start agent type wf-reviewer \(name it rev-1; do not pass a model\) with only the line on stdout as its prompt:$/m);
-});
-
-test('review provenance: an unnamed reviewer is accepted when exactly one transcript began with its handoff line; none or several are refused with how to start it', () => {
-  const { base, root, e } = admitted('handoff-unnamed');
-  fs.mkdirSync(path.join(homeOf(root), '.claude', 'projects'), { recursive: true });
-  ok(wf(root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id]));
-  ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id]));
-  ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
-  commitIn(e.repos.app.worktree, { 'src/a.txt': 'b\n' });
-  const line = ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-a', '--attempt', e.id])).out.trim();
-  const review = (who) => wf(root, ['review', '--closure', closureFile(base, goodClosure(who)), '--attempt', e.id]);
-  const none = review('rev-a');
-  assert.equal(none.code, 75);
-  assert.match(none.err, /no Claude Code subagent transcript named `rev-a`: start it as agent type `wf-reviewer`, named `rev-a` \(the Agent tool's name\), with only the printed line as its prompt/);
-  assert.match(none.err, /start it as the agent type that command prints, named <new id>/);
-  subagent(root, { agentType: 'general-purpose', prompt: line });
-  assert.match(review('rev-a').err, /an unnamed agent began with this handoff's line, but as agent type `general-purpose`, not `wf-reviewer`/);
-  subagent(root, { agentType: 'wf-reviewer', prompt: `${line}\nFocus on the null check.` });
-  assert.equal(review('rev-a').code, 75, 'a steered unnamed agent is not this round');
-  subagent(root, { agentType: 'wf-reviewer', prompt: line });
-  ok(review('rev-a'));
-  const r = state(root, e.id).reviews.at(-1);
-  assert.equal(r.provenance, 'verified');
-  assert.equal(r.identity, 'unnamed');
-  assert.equal(r.reviewerModel, 'm-unnamed');
-  // Two unnamed agents started with the same line: which one wrote the closure is unknown.
-  const line2 = ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-b', '--attempt', e.id])).out.trim();
-  subagent(root, { agentType: 'wf-reviewer', prompt: line2 });
-  subagent(root, { agentType: 'wf-reviewer', prompt: line2 });
-  assert.match(review('rev-b').err, /and 2 unnamed ones began with this handoff's line, so which one wrote the closure is ambiguous/);
-  // Named as told: verified as before.
-  const line3 = ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-c', '--attempt', e.id])).out.trim();
-  subagent(root, { name: 'rev-c', agentType: 'wf-reviewer', prompt: line3 });
-  ok(review('rev-c'));
-  assert.equal(state(root, e.id).reviews.at(-1).identity, 'named');
 });
 
 // ---- I-15: role files are read when a session starts ----

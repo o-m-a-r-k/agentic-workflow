@@ -71,34 +71,13 @@ function claudeSubagent(root, name, agentType, prompt, at = new Date(Date.now() 
   write(dir, `${f}.jsonl`, [{ type: 'user', timestamp: at, message: { role: 'user', content: prompt } }, { type: 'assistant', timestamp: at, message: { model: 'm', content: [{ type: 'text', text: 'done' }] } }].map((x) => JSON.stringify(x)).join('\n'));
 }
 
-test('review provenance: a steered or unknown reviewer is refused where transcripts exist; elsewhere it is unverified', () => {
-  // Named failures: a reviewer started with extra steering text, and a review round run outside the engine.
-  const { base, root, id } = implemented('provenance');
-  fs.mkdirSync(path.join(homeOf(root), '.claude', 'projects'), { recursive: true });
-  const start = ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-a', '--attempt', id])).out.trim();
-  const none = wf(root, ['review', '--closure', closureFile(base, goodClosure('rev-a')), '--attempt', id]);
-  assert.equal(none.code, 75);
-  assert.match(none.err, /review provenance: no Claude Code subagent transcript named `rev-a`/);
-  claudeSubagent(root, 'rev-a', 'wf-reviewer', `${start}\nFocus on the null check; the implementer already fixed F1.`);
-  const steered = wf(root, ['review', '--closure', closureFile(base, goodClosure('rev-a')), '--attempt', id]);
-  assert.match(steered.err, /its start prompt was not exactly the printed line/);
-  claudeSubagent(root, 'rev-a', 'general-purpose', start);
-  assert.match(wf(root, ['review', '--closure', closureFile(base, goodClosure('rev-a')), '--attempt', id]).err, /ran as agent type `general-purpose`, not `wf-reviewer`/);
-  claudeSubagent(root, 'rev-a', 'wf-reviewer', start);
-  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('rev-a')), '--attempt', id]));
-  assert.equal(state(root, id).reviews.at(-1).provenance, 'verified');
-  const other = implemented('provenance-none');
-  ok(wf(other.root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', other.id]));
-  ok(wf(other.root, ['review', '--closure', closureFile(other.base, goodClosure('r')), '--attempt', other.id]));
-  assert.equal(state(other.root, other.id).reviews.at(-1).provenance, 'unverified', 'no transcript store: recorded, not refused');
-});
-
 test('wf check runs light steps only, never counts as a gate, and the gate reuses what it proved', () => {
   const two = [{ id: 'lint', repo: 'app', run: 'true', inputs: ['src/**'], tier: 'light' }, { id: 'e2e', repo: 'app', run: 'true', inputs: ['src/**'], tier: 'heavy' }];
   const { root, id, wt, implBundle } = implemented('check', { gate: { steps: two } });
   assert.deepEqual(implBundle.check.steps.map((s) => s.id), ['lint'], 'the implementer bundle names the light steps');
   assert.match(implBundle.check.command, /^wf check --attempt ENG-1\.1/);
-  assert.match(implBundle.instructions, /Done means `check\.command` passes/);
+  // The implementer's goal includes a passing `wf check` on the whole tree; its bundle carries the command.
+  assert.match(fs.readFileSync(path.join(import.meta.dirname, '..', 'templates', 'agents', 'implementer.md'), 'utf8'), /`wf check` passes on the tree you report[^.]*`check\.command`/);
   const c = ok(wf(root, ['check', '--attempt', id]));
   assert.match(c.out, /^wf check: run[\s\S]*^check passed[\s\S]*skipped {5}e2e {2}`wf check` runs light steps only[\s\S]*never counts as one/m);
   const s = state(root, id);

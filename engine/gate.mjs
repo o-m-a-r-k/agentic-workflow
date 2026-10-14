@@ -2,17 +2,19 @@ import { gateAdapter, validationCommit, validationDigest, validationIds, validat
 import { mkdirStateDirectory } from './state-folders.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { adapterFileAtCommit, attemptAdapter, expandArtifactGlob, loadConfig, repoDir, trustedAdapter } from './config.mjs';
 import { changedFiles, treeHash, treeHashes, uncommitted, untrackedSnapshot } from './attempt.mjs';
-import { chooseShards, chooseWorkers } from './host.mjs';
+import { chooseShards, chooseWorkers } from './machine.mjs';
 import { readJUnitFiles } from './junit.mjs';
 import { stepFailures } from './failures.mjs';
 import { append, attemptDir, loadState } from './ledger.mjs';
 import { projectEnv } from './env.mjs';
+import { obligationSince } from './versions.mjs';
 import { missingFor, redactor, stepEnv } from './secrets.mjs';
 import { impact, inside, rel } from './topology.mjs';
+import { canonical as canonicalPath } from './paths.mjs';
 import { WfError, assertEngine, canonical, git, globToRegExp, hashFile, hashValue, isPidAlive, matchesAny, now, refuse, run, sha256, shellQuote, writeImmutable, writeJson } from './util.mjs';
 import { appendStreamNoFollow, ownGateRun, prepareWrite, readRegular, seal, writeNoFollow } from './evidence.mjs';
 
@@ -203,7 +205,7 @@ export async function planGate(root, state, options = {}) {
       missingSecrets: missingFor(root, cfg, step.id, validationCatalog(root, state, step.id)),
     });
   }
-  return { cfg, live, changed, impact: imp, full, adapterTouched, focused, check: Boolean(options.check), rerunFailed: options.rerunFailed ?? null, steps, unchecked, tree: treeHashes(state) };
+  return { cfg, live, changed, impact: imp, full, adapterTouched, focused, check: Boolean(options.check), repos: options.check && options.repos ? [...options.repos] : null, rerunFailed: options.rerunFailed ?? null, steps, unchecked, tree: treeHashes(state) };
 }
 
 function substitute(text, vars, quote = false) {
@@ -369,6 +371,63 @@ function copyScratch(scratch, dest) {
   }
 }
 
+// The artifacts a step plugin names, recorded at their sealed copies in the evidence.
+// Named failure (I-100): the plugin is handed only a scratch folder (never an evidence path), and returned the files it
+// wrote there. The gate hashed those paths and copied the scratch bytes into the step's `out/` folder, but recorded the
+// scratch paths, so `wf export screenshots --gate` refused every image as outside the project's attempt evidence even
+// though the gate passed. Now each returned path is read through the copy the engine already sealed (a file in the
+// step's own scratch folder is `out/<same relative path>`) or, for a file the plugin left in the step's package folder,
+// copied under `artifacts/` the way a globbed capture is; the record carries the managed path and the sha256 of those
+// bytes. A path in neither folder, or one that is not a regular file, is refused and fails the step: the outside-path
+// guard of the readers is untouched and the plugin is never handed an evidence path.
+function harvestPluginArtifacts(returned, { scratch, dir, evidenceDir, taken }) {
+  const artifacts = [];
+  const problems = [];
+  const seen = new Set();
+  const within = (file, base) => {
+    const r = path.relative(base, file);
+    return r && r !== '..' && !r.startsWith(`..${path.sep}`) && !path.isAbsolute(r) ? r.split(path.sep).join('/') : null;
+  };
+  for (const a of returned) {
+    if (typeof a?.path !== 'string' || !a.path) {
+      problems.push(`${JSON.stringify(a?.path ?? null)}: an artifact needs the path of a file the plugin wrote`);
+      continue;
+    }
+    // The folders on the way are resolved (a link in the middle cannot lead out), the last name never.
+    const given = path.resolve(a.path);
+    const resolved = path.join(canonicalPath(path.dirname(given)), path.basename(given));
+    const inScratch = within(resolved, canonicalPath(scratch));
+    const inPackage = inScratch ? null : within(resolved, canonicalPath(dir));
+    let managed;
+    let source;
+    let bytes;
+    if (inScratch) {
+      managed = path.join(evidenceDir, 'out', ...inScratch.split('/'));
+      source = inScratch;
+      bytes = readRegular(managed)?.bytes;
+      if (!bytes) problems.push(`${a.path}: not a regular file in the step's output folder (a link, a folder or a missing file is not harvested)`);
+    } else if (inPackage) {
+      managed = path.join(evidenceDir, 'artifacts', ...inPackage.split('/'));
+      source = inPackage;
+      if (taken.has(managed) || seen.has(managed)) continue; // already collected through the step's `artifacts` globs
+      bytes = readRegular(resolved)?.bytes;
+      if (!bytes) problems.push(`${a.path}: not a regular file (a link, a folder or a missing file is not harvested)`);
+      else {
+        prepareWrite(managed);
+        mkdirStateDirectory(path.dirname(managed), { recursive: true });
+        writeNoFollow(managed, bytes);
+      }
+    } else {
+      problems.push(`${a.path}: outside the step's output folder (the plugin's \`evidenceDir\`) and its package folder; write the file there`);
+      continue;
+    }
+    if (!bytes || seen.has(managed)) continue;
+    seen.add(managed);
+    artifacts.push({ ...a, path: managed, sha256: sha256(bytes), source });
+  }
+  return { artifacts, problems };
+}
+
 async function executeStep(root, cfg, state, planned, ctx) {
   const step = cfg.gate.steps.find((s) => s.id === planned.id);
   const evidenceDir = path.join(ctx.runDir, step.id);
@@ -392,6 +451,7 @@ async function executeStep(root, cfg, state, planned, ctx) {
   const vars = { workers: workers.n, shards: shards.n, evidence: scratch };
   vars.select = rerun ? substitute(step.select, { suites: rerun.map(shellQuote).join(' ') }) : '';
   let result;
+  let returned = [];
   if (step.plugin) {
     const mod = (await import(pathToFileURL(adapterFileAtCommit(root, state, validationCommit(state, step.id), step.plugin)).href)).default;
     const pctx = { root, attempt: state.id, step, dir: planned.dir, worktrees: Object.fromEntries(Object.entries(state.repos).map(([k, v]) => [k, v.worktree])), changed: ctx.changedSinceBase, evidenceDir: scratch, workers: workers.n, env, log: (s) => writeNoFollow(logFile, ctx.redact(`${s}\n`), { append: true }) };
@@ -403,7 +463,9 @@ async function executeStep(root, cfg, state, planned, ctx) {
     ctx.onPlugin(step.id, true);
     try {
       const r = await mod.run(pctx);
-      result = { status: r.status, suites: r.suites ?? [], artifacts: (r.artifacts ?? []).map((a) => ({ ...a, sha256: a.sha256 ?? hashFile(a.path) })) };
+      // The artifacts the plugin names are harvested below, once its scratch folder has been copied into the evidence.
+      result = { status: r.status, suites: r.suites ?? [], artifacts: [] };
+      returned = Array.isArray(r.artifacts) ? r.artifacts : [];
     } catch (error) {
       writeNoFollow(logFile, ctx.redact(`step plugin threw: ${error.stack ?? error.message}\n`), { append: true });
       result = { status: 'failed', suites: [], artifacts: [] };
@@ -438,9 +500,15 @@ async function executeStep(root, cfg, state, planned, ctx) {
       result.failures = stepFailures({ junitFiles: files, playwrightFiles, log: logFile, exitCodes: result.exitCodes, suites, redact: ctx.redact });
     }
   }
-  if (step.plugin && result.status === 'failed') result.failures = stepFailures({ log: logFile, suites: result.suites, redact: ctx.redact });
   copyScratch(scratch, evidenceDir);
   const collected = collectArtifacts(step, planned.dir, path.join(evidenceDir, 'artifacts'), started, units);
+  if (returned.length) {
+    const harvest = harvestPluginArtifacts(returned, { scratch, dir: planned.dir, evidenceDir, taken: new Set(collected.artifacts.map((a) => a.path)) });
+    for (const problem of harvest.problems) writeNoFollow(logFile, ctx.redact(`step plugin artifact refused: ${problem}\n`), { append: true });
+    if (harvest.problems.length && result.status === 'passed') result.status = 'failed';
+    result.artifacts.push(...harvest.artifacts);
+  }
+  if (step.plugin && result.status === 'failed') result.failures = stepFailures({ log: logFile, suites: result.suites, redact: ctx.redact });
   result.artifacts.push(...collected.artifacts);
   result.artifactGlobs = collected.artifactGlobs;
   let fileHashesRef = null;
@@ -498,40 +566,95 @@ function takeMachineLease(name, capacity) {
 // `wf run --lease <name> -- <cmd>`: an implementer's docker or end-to-end stack takes the same machine-wide slot a gate
 // step would, so concurrent attempts cannot start more stacks than `gate.leases` allows. Named failure: stacks started
 // outside the `docker: 1` lease overloaded the machine. The slot is held by this process and freed when it exits.
-export async function runWithLease(cfg, name, command, { log = process.stderr } = {}) {
-  const capacity = cfg.gate.leases?.[name] ?? 1;
-  let slot = takeMachineLease(name, capacity);
-  if (!slot) log.write(`wf run: waiting for a \`${name}\` lease (${capacity} slot(s), all held)\n`);
-  while (!slot) {
+export async function runWithLease(cfg, name, command, { log = process.stderr, cwd, env, redact } = {}) {
+  const capacity = name ? cfg.gate.leases?.[name] ?? 1 : 0;
+  let slot = name ? takeMachineLease(name, capacity) : null;
+  if (name && !slot) log.write(`wf run: waiting for a \`${name}\` lease (${capacity} slot(s), all held)\n`);
+  while (name && !slot) {
     await new Promise((r) => setTimeout(r, 1000));
     slot = takeMachineLease(name, capacity);
   }
   try {
     return await new Promise((resolve) => {
-      const child = spawn(command[0], command.slice(1), { stdio: 'inherit' });
+      const child = spawn(command[0], command.slice(1), { cwd, env, stdio: redact ? ['inherit', 'pipe', 'pipe'] : 'inherit' });
       const forward = (sig) => child.kill(sig);
       process.on('SIGINT', forward);
       process.on('SIGTERM', forward);
+      // A secret reaches a command only through the engine, so what the command prints is masked on its way out; a value
+      // split across two chunks is held back until it can be matched.
+      if (redact) {
+        const keep = Math.max(0, (redact.maxLen ?? 0) - 1);
+        for (const [from, to] of [[child.stdout, process.stdout], [child.stderr, process.stderr]]) {
+          let pending = '';
+          from.on('data', (b) => {
+            pending = redact(pending + b.toString('utf8'));
+            if (pending.length > keep) {
+              to.write(pending.slice(0, pending.length - keep));
+              pending = pending.slice(pending.length - keep);
+            }
+          });
+          from.on('end', () => to.write(redact(pending)));
+        }
+      }
       child.on('error', (error) => {
         log.write(`wf run: ${error.message}\n`);
         resolve(127);
       });
-      child.on('exit', (code, signal) => {
+      child.on(redact ? 'close' : 'exit', (code, signal) => {
         process.off('SIGINT', forward);
         process.off('SIGTERM', forward);
         resolve(code ?? (signal ? 128 : 1));
       });
     });
   } finally {
-    fs.rmSync(slot, { force: true });
+    if (slot) fs.rmSync(slot, { force: true });
   }
 }
 
-// A pid in the lock belongs to us only if it is still a `wf` process (pids are reused after a crash).
+// The command line of a live process, or null when this host does not let us read it.
+// Named failure: `wf status`, `wf resume` and `wf stop` ran `ps` through a helper that throws when `ps` cannot start, so
+// under a sandbox that forbids `ps` (49 calls under one harness's sandbox) every one of them failed with "ps failed to start:
+// spawnSync ps EPERM" while a gate lock existed. Linux reads /proc; elsewhere `ps` is asked and a failure of any kind
+// (cannot start, refused, no output for a process known to be alive) means "unknown", never an error.
+function processCommand(pid) {
+  try {
+    const raw = fs.readFileSync(`/proc/${pid}/cmdline`, 'latin1').replace(/\0/g, ' ').trim();
+    if (raw) return raw;
+  } catch {}
+  const r = spawnSync('ps', ['-o', 'command=', '-p', String(pid)], { encoding: 'utf8' });
+  const out = r.error || r.status !== 0 ? '' : String(r.stdout ?? '').trim();
+  return out || null;
+}
+
+// `wf run --step <id> [--lease <name>] -- <cmd>` (I-73). Named failure: a frozen step's dependencies needed a registry token
+// that only the gate injects, while `wf check` refuses a dirty worktree and the project's rules ask for lint and tests
+// before the first commit: a fresh worktree could not install its dependencies at all. This runs a command in the
+// step's package directory with exactly the secrets that list the step in `usedBy` (masked in its output), under the
+// step's lease unless one is named. It writes nothing to the ledger and is never gate evidence.
+// Security review of 0.7.0: an arbitrary command typed by an agent received the step's secrets (masking the output is not
+// a confidentiality boundary, and DESIGN.md principle 14 says agents never handle secret values). Only the step's own
+// `prepare` command, declared in the adapter at the attempt's base, runs with them.
+export async function runPrepared(root, state, stepId, command, { lease = null } = {}) {
+  const cfg = gateAdapter(root, state);
+  const step = cfg.gate.steps.find((x) => x.id === stepId);
+  if (!step) throw refuse(`no gate step \`${stepId}\` in the adapter this attempt was admitted under (steps: ${cfg.gate.steps.map((x) => x.id).join(', ')})`, 'name the step whose `usedBy` secrets the command needs');
+  if (command?.length) throw refuse('`wf run --step` runs only the step\'s declared `prepare` command; a command given here never receives the step\'s secrets', 'declare it as `prepare:` on the step in .workflow/project.yaml (committed), then run `wf run --step <id>`', { id: 'run:arbitrary-command' });
+  if (typeof step.prepare !== 'string' || !step.prepare.trim()) throw refuse(`step \`${step.id}\` declares no \`prepare\` command`, 'add `prepare: "<install command>"` to the step in the committed adapter', { id: 'run:no-prepare' });
+  command = ['sh', '-c', step.prepare];
+  const missing = missingFor(root, cfg, step.id, validationCatalog(root, state, step.id));
+  if (missing.length) throw refuse(`secrets missing for step ${step.id}: ${missing.join(', ')}`, 'run `wf secrets guide` in your terminal');
+  const { dir } = stepPackage(cfg, state, step);
+  const env = projectEnv(cfg, { ...stepEnv(root, cfg, step.id, validationCatalog(root, state, step.id)), WF_ROOT: root, WF_ATTEMPT: state.id, WF_ITEM: String(state.item ?? state.id) });
+  return runWithLease(loadConfig(root), lease ?? step.lease ?? null, command, { cwd: dir, env, redact: redactor(root, cfg) });
+}
+
+// A pid in the lock belongs to us only if it is still a `wf` process (pids are reused after a crash). When the host
+// hides the command line, a live pid that holds this attempt's lock is taken to be its runner: declaring a live gate
+// dead would let a second one run on the same attempt.
 function isWfRunner(pid) {
   if (!isPidAlive(pid)) return false;
-  const cmd = run('ps', ['-o', 'command=', '-p', String(pid)], { allowFail: true }).stdout;
-  return /(^|[\s/])wf(\s|$)/.test(cmd);
+  const cmd = processCommand(pid);
+  return cmd === null || /(^|[\s/])wf(\s|$)/.test(cmd);
 }
 
 async function harvest(root, state, lock) {
@@ -599,6 +722,14 @@ export async function runGate(root, state, options = {}) {
   // `wf check` needs only the repos it checks to be committed; a gate needs every repo.
   const dirty = Object.fromEntries(Object.entries(uncommitted(state)).filter(([r]) => !options.check || !options.repos || options.repos.includes(r)));
   if (Object.keys(dirty).length) throw refuse(`commit changes before the ${options.check ? 'check' : 'gate'}: ${Object.entries(dirty).map(([r, l]) => `${r} (${l.slice(0, 5).join('; ')}${l.length > 5 ? `; +${l.length - 5} more` : ''})`).join(', ')}`);
+  // Named failure (I-92): after the owner stopped a check because the tree is about to change (remaining admitted fixes), the same
+  // check was started again on the unchanged tree, queued behind an unrelated stack and ran for nothing. From 0.7.0 it waits for
+  // a new commit.
+  const lastCheck = options.check ? state.checks.at(-1) : null;
+  const lastStop = lastCheck?.status === 'stopped' ? state.stops.filter((x) => x.runId === lastCheck.runId).at(-1) : null;
+  if (lastStop && ['tree-change', 'major-finding'].includes(lastStop.class) && obligationSince(state, '0.7.0') && canonical(lastCheck.tree) === canonical(treeHashes(state))) {
+    throw refuse(`the last check was stopped by the owner (${lastStop.class}: ${lastStop.reason}) and the tree has not changed since`, 'finish and commit the remaining fixes, then run `wf check`; it runs on the new tree', { id: 'check:stopped-tree-unchanged' });
+  }
   if (options.rerunFailed === true) {
     const failed = (state.lastGate?.steps ?? []).filter((s) => ['failed', 'interrupted', 'not-started'].includes(s.status)).map((s) => s.id);
     if (!failed.length) throw refuse('--rerun-failed: the last gate has no failed step', 'run `wf gate`');
@@ -623,6 +754,19 @@ export async function runGate(root, state, options = {}) {
     return { record, recovered };
   } finally {
     release();
+  }
+}
+
+// Runs `fn` again while it is refused only because another command holds the attempt's evidence lock (a live owner:
+// a dead one is reclaimed by the lock itself). The lock waits ten seconds per try; this waits for up to five minutes more.
+async function retryWhileLocked(fn, { tries = 30, waitMs = 2000 } = {}) {
+  for (let i = 1; ; i++) {
+    try {
+      return fn();
+    } catch (error) {
+      if (error?.refusalId !== 'lock:held' || i >= tries) throw error;
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+    }
   }
 }
 
@@ -702,7 +846,29 @@ async function execute(root, state, plan, live = null) {
   say(`run ${runId}: ${queue.length} to run, ${results.filter((r) => r.status === 'reused').length} reused, ${results.length - results.filter((r) => r.status === 'reused').length} skipped or deferred`);
   for (const r of results) say(`${r.status.padEnd(8)} ${r.id}  ${r.reason ?? ''}`.trimEnd());
 
-  const leases = plan.cfg.gate.leases ?? {};
+  // Named failure (I-88): lease capacity was pinned with the admission adapter, so a project raising `gate.leases` could not
+  // unblock a check queued behind another attempt's stack; the only way on was to supersede the attempt. Capacity is an
+  // operational fact of this machine, not part of the frozen test definition: it is read from the project's current
+  // config (the owner's checkout; a ticket cannot change it) every few seconds, and the pinned value is the fallback.
+  // A capacity that differs from the pinned one is said once and recorded in the run's result.
+  const pinnedLeases = plan.cfg.gate.leases ?? {};
+  const leaseCapacity = {};
+  let leasesRead = { at: Date.now(), value: plan.live?.gate?.leases ?? {} };
+  const capacityOf = (lease) => {
+    if (Date.now() - leasesRead.at > 2000) {
+      try {
+        leasesRead = { at: Date.now(), value: loadConfig(root).gate.leases ?? {} };
+      } catch {
+        leasesRead = { ...leasesRead, at: Date.now() };
+      }
+    }
+    const capacity = leasesRead.value[lease] ?? pinnedLeases[lease] ?? 1;
+    if (capacity !== (pinnedLeases[lease] ?? 1) && leaseCapacity[lease]?.capacity !== capacity) {
+      leaseCapacity[lease] = { capacity, pinned: pinnedLeases[lease] ?? 1 };
+      say(`lease ${lease}: capacity ${capacity} from the project config (the admission adapter pinned ${pinnedLeases[lease] ?? 1})`);
+    }
+    return capacity;
+  };
   const held = {};
   const machine = new Map(); // step id -> machine-wide lease slot file
   const max = Math.max(1, plan.cfg.gate.maxParallelSteps ?? 1);
@@ -712,8 +878,9 @@ async function execute(root, state, plan, live = null) {
   const canStart = (p) => {
     const lease = leaseOf(p);
     if (!lease) return true;
-    if ((held[lease] ?? 0) >= (leases[lease] ?? 1)) return false;
-    const slot = takeMachineLease(lease, leases[lease] ?? 1);
+    const capacity = capacityOf(lease);
+    if ((held[lease] ?? 0) >= capacity) return false;
+    const slot = takeMachineLease(lease, capacity);
     if (!slot) return false;
     machine.set(p.id, slot);
     return true;
@@ -729,21 +896,35 @@ async function execute(root, state, plan, live = null) {
         runningNow.set(p.id, Date.now());
         saveProgress();
         say(`start    ${p.id}`);
+        // Named failure (I-91): this completion handler threw when the evidence lock stayed held for ten seconds (a long read
+        // by another command): the rejection was unhandled, so the runner died with exit 1 before its leases, its signal
+        // handlers and its final record were dealt with, and the run had no result. Recording the step now waits for the
+        // lock; whatever else goes wrong in here is the step's own failure, and the job is always finished.
         const job = executeStep(root, plan.cfg, state, p, ctx)
           .catch((error) => ({ id: p.id, repo: p.repo, tier: p.tier, key: p.key, status: 'failed', error: error.message, runId }))
-          .then((r) => {
-            if (lease) held[lease] -= 1;
-            if (machine.has(p.id)) fs.rmSync(machine.get(p.id), { force: true });
-            const final = stopping && r.status !== 'passed' ? { ...r, status: 'interrupted' } : r;
-            const secs = ((Date.now() - runningNow.get(p.id)) / 1000).toFixed(1);
-            runningNow.delete(p.id);
-            results.push(final);
-            append(root, state.id, 'gate.step', { runId, step: final }, null);
-            saveProgress();
-            say(`${final.status.padEnd(8)} ${p.id}  ${secs}s`);
-            if (final.status === 'failed') for (const line of failureExcerpt(final, ctx.redact)) say(`  ${p.id} | ${line}`);
-            active.delete(job);
-            pump();
+          .then(async (r) => {
+            try {
+              if (lease) held[lease] -= 1;
+              if (machine.has(p.id)) fs.rmSync(machine.get(p.id), { force: true });
+              let final = stopping && r.status !== 'passed' ? { ...r, status: 'interrupted' } : r;
+              const secs = ((Date.now() - runningNow.get(p.id)) / 1000).toFixed(1);
+              runningNow.delete(p.id);
+              try {
+                await retryWhileLocked(() => append(root, state.id, 'gate.step', { runId, step: final }, null));
+              } catch (error) {
+                final = { ...final, status: 'failed', error: `the step finished ${r.status} but recording it failed: ${error.message}` };
+              }
+              results.push(final);
+              saveProgress();
+              say(`${final.status.padEnd(8)} ${p.id}  ${secs}s`);
+              if (final.status === 'failed') for (const line of failureExcerpt(final, ctx.redact)) say(`  ${p.id} | ${line}`);
+            } catch (error) {
+              results.push({ id: p.id, repo: p.repo, tier: p.tier, key: p.key, status: 'failed', error: `finishing the step failed: ${error.message}`, runId });
+            } finally {
+              runningNow.delete(p.id);
+              active.delete(job);
+              pump();
+            }
           });
         active.add(job);
       }
@@ -760,17 +941,22 @@ async function execute(root, state, plan, live = null) {
 
   const bad = results.filter((r) => ['failed', 'interrupted', 'not-started'].includes(r.status) || (!plan.check && validationIds(state).includes(r.id) && !['passed', 'reused'].includes(r.status)));
   const status = stopping ? 'stopped' : bad.length ? 'failed' : 'passed';
+  // Named failure (I-92): a check stopped by the owner ended as `stopped` with nothing said about why, so the implementer that ran it
+  // retried the check on an unfinished tree. The stop `wf stop` recorded for this run (class and reason) travels with the result.
+  const ownerStop = stopping ? loadState(root, state.id).stops.filter((x) => x.runId === runId).at(-1) : null;
   // Untracked files the steps produced (reports, screenshots) are recorded so they do not block the next gate.
   const producedUntracked = {};
   for (const [name, r] of Object.entries(state.repos)) producedUntracked[name] = untrackedSnapshot(r.worktree);
   say(`${status} (${runId})`);
-  const record = { runId, status, producedUntracked, changed: plan.changed, full: plan.full, focused: plan.focused, check: plan.check || undefined, rerunFailed: plan.rerunFailed ?? undefined, adapterBase: state.adapterBase, validationDigest: validationDigest(state), tree: plan.tree, impact: plan.impact, unchecked: plan.unchecked, steps: results, finishedAt: now() };
+  const record = { runId, status, producedUntracked, changed: plan.changed, full: plan.full, focused: plan.focused, check: plan.check || undefined, repos: plan.repos ?? undefined, rerunFailed: plan.rerunFailed ?? undefined, adapterBase: state.adapterBase, validationDigest: validationDigest(state), tree: plan.tree, impact: plan.impact, unchecked: plan.unchecked, ...(Object.keys(leaseCapacity).length ? { leaseCapacity } : {}), ...(ownerStop ? { stop: { class: ownerStop.class, reason: ownerStop.reason } } : {}), steps: results, finishedAt: now() };
   writeImmutable(path.join(runDir, 'result.json'), `${JSON.stringify(record, null, 2)}\n`);
   // Recorded before the run is: once it is finished, an unrecorded file in its folder is an extra file.
-  seal(append, { root, id: state.id, runId });
-  append(root, state.id, plan.check ? 'check.finished' : 'gate.finished', { ...record, evidence: path.join(runDir, 'result.json') }, null);
+  await retryWhileLocked(() => {
+    seal(append, { root, id: state.id, runId });
+    append(root, state.id, plan.check ? 'check.finished' : 'gate.finished', { ...record, evidence: path.join(runDir, 'result.json') }, null);
+  });
   const flaky = flakesIn(state, results);
-  if (flaky.length) append(root, state.id, 'gate.flaky', { runId, flaky }, null);
+  if (flaky.length) await retryWhileLocked(() => append(root, state.id, 'gate.flaky', { runId, flaky }, null));
   record.flaky = flaky;
   return record;
 }
@@ -922,7 +1108,21 @@ export function gatePassedForCurrentTree(state) {
   return { ok: true, gate: g };
 }
 
+// Named failure (I-94): a project whose adapter has no capture step could not bring in the captures a criterion required, and
+// acceptance found the gap only at the end. The captures the owner imported (`wf captures import`, engine/captures.mjs) are
+// part of the gate's screenshots for the tree they were made on: the tree of the last gate, or of the run it was carried from
+// when a base merge moved the tree without touching the change. A later change to the tree leaves them behind, as it does a
+// gate's own.
+export function importedCaptures(state) {
+  const trees = [];
+  for (const g of [...(state.gates ?? [])].reverse()) {
+    trees.push(canonical(g.tree));
+    if (!g.carriedFrom) break;
+  }
+  return (state.captureImports ?? []).filter((i) => trees.includes(canonical(i.tree))).flatMap((i) => i.files);
+}
+
 export function screenshots(state) {
-  return (state.lastGate?.steps ?? []).flatMap((s) => s.artifacts ?? []).filter((a) => a.kind === 'screenshot');
+  return [...(state.lastGate?.steps ?? []).flatMap((s) => s.artifacts ?? []), ...importedCaptures(state)].filter((a) => a.kind === 'screenshot');
 }
 

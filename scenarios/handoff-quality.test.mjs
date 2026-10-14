@@ -146,7 +146,7 @@ test('delivered handoff: summary required, screenshots embedded inline, raw read
   assert.match(fs.readFileSync(path.join(root, '.wf-evidence', 'attempts', e.id, 'export', 'attempt.html'), 'utf8'), /Anomalies seen/);
 });
 
-test('design system: bans and companions run over added lines; every hit needs the reviewer\'s verdict', () => {
+test('design system: bans and companions run over added lines; the hits are context for the reviewer and the verdicts it gives are recorded', () => {
   const designSystem = {
     components: [{ name: 'DataTable', path: 'web/components/DataTable.tsx', use: 'every data table' }, { name: 'Pagination', path: 'web/components/Pagination.tsx', use: 'every paged list' }],
     rules: [
@@ -159,7 +159,9 @@ test('design system: bans and companions run over added lines; every hit needs t
   const planner = ok(wf(root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id])).out;
   const pb = JSON.parse(fs.readFileSync(planner.match(/bundle: (\S+)/)[1], 'utf8'));
   assert.deepEqual(pb.designSystem.components.map((c) => c.name), ['DataTable', 'Pagination'], 'the planner sees the shared components');
-  assert.match(pb.instructions, /uses the shared components/);
+  // The planner is asked for targets that name the shared components a surface uses (the quality bar and the design system).
+  assert.match(pb.instructions, /the quality bar \(`qualityBar`\) turned into targets for this ticket/);
+  assert.match(fs.readFileSync(path.join(import.meta.dirname, '..', 'templates', 'agents', 'planner.md'), 'utf8'), /which surfaces ship, which shared components they use, which contract stays matched/);
   ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id]));
   ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
   commitIn(e.repos.app.worktree, {
@@ -169,20 +171,32 @@ test('design system: bans and companions run over added lines; every hit needs t
     'web/components/DataTable.tsx': 'export const DataTable = () => <table><thead /></table>;\n',
     'web/old.tsx': 'export const Old = () => <table />;\nexport const x = 1;\n',
   });
-  const g = ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]));
-  assert.match(g.out, /warning: 3 design-system hit\(s\) on added lines/);
   const start = ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', e.id])).out.trim();
   const bundle = JSON.parse(fs.readFileSync(start.match(/^Read (\S+)/)[1], 'utf8'));
   const ids = bundle.designSystem.hits.map((h) => h.id).sort();
   // Added lines only: old.tsx's existing <table> is not this ticket's; the shared component itself is excepted.
   assert.deepEqual(ids, ['no-raw-table@web/report.tsx:3', 'no-raw-table@web/report.tsx:4', 'table-has-pagination@web/list.tsx:1']);
   assert.deepEqual(bundle.designSystem.hits.find((h) => h.rule === 'table-has-pagination').missing, ['<Pagination\\b']);
-  assert.match(bundle.instructions, /for every changed UI file list each table, list, form and dialog/);
-  const refused = wf(root, ['review', '--closure', closureFile(base, goodClosure('r')), '--attempt', e.id]);
-  assert.equal(refused.code, 75);
-  assert.match(refused.err, /3 design-system hit\(s\) on lines this attempt added have no valid verdict[\s\S]*no-raw-table@web\/report\.tsx:3 \(no raw <table>/);
-  const partial = { designHits: [{ id: 'no-raw-table@web/report.tsx:3', verdict: 'justified' }] };
-  assert.match(wf(root, ['review', '--closure', closureFile(base, goodClosure('r', partial)), '--attempt', e.id]).err, /justified needs evidence/);
+  assert.match(bundle.instructions, /design-system hits[^:]*are context for your judgement: cite them in findings; no verdict form is owed/);
+  // 0.7.0 (goals, not forms): the hits stay in the bundle as context, and a verdict per hit is no longer required (named
+  // failure: the form measured compliance with the form, not defects). A closure with none is recorded; a later round that
+  // judges the hits has its verdicts recorded with the acceptance.
+  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r')), '--attempt', e.id]));
+  // A delta round (0.7.0: every round between the two full audits) is handed the hits on the files changed since the last
+  // reviewed tree, and only those: the three above were judged by the first round.
+  commitIn(e.repos.app.worktree, { 'web/extra.tsx': 'export const Extra = () => <table />;\n' });
+  const deltaStart = ok(wf(root, ['handoff', 'reviewer', '--agent', 'r-delta', '--attempt', e.id])).out.trim();
+  const deltaBundle = JSON.parse(fs.readFileSync(deltaStart.match(/^Read (\S+)/)[1], 'utf8'));
+  assert.equal(deltaBundle.mode, 'delta');
+  assert.deepEqual(deltaBundle.designSystem.hits.map((h) => h.id), ['no-raw-table@web/extra.tsx:1']);
+  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r-delta', { criteria: [] })), '--attempt', e.id]));
+  // The gate runs on the clean review's tree and warns of every hit; the evidence review (the attempt's second full audit)
+  // carries them all again.
+  const g = ok(wf(root, ['gate', '--attempt', e.id]));
+  assert.match(g.out, /warning: 4 design-system hit\(s\) on added lines/);
+  const second = ok(wf(root, ['handoff', 'reviewer', '--agent', 'r2', '--attempt', e.id])).out.trim();
+  const everyHit = [...ids, 'no-raw-table@web/extra.tsx:1'].sort();
+  assert.deepEqual(JSON.parse(fs.readFileSync(second.match(/^Read (\S+)/)[1], 'utf8')).designSystem.hits.map((h) => h.id).sort(), everyHit, 'both full audits carry every hit');
   const verdicts = {
     findings: [{ id: 'F1', severity: 'major', summary: 'report uses a raw table', status: 'fixed', evidence: 'web/report.tsx:3' }],
     designHits: [
@@ -191,9 +205,23 @@ test('design system: bans and companions run over added lines; every hit needs t
       { id: 'table-has-pagination@web/list.tsx:1', verdict: 'justified', evidence: 'the list is capped at 5 rows by the API (C1)' },
     ],
   };
-  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r', verdicts)), '--attempt', e.id]));
+  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r2', verdicts)), '--attempt', e.id]));
   const s = ok(wf(root, ['accept', '--attempt', e.id, '--json'])).json();
   assert.equal(s.accepted.designHits.length, 3);
+});
+
+// Named failure (I-94): criteria requiring screenshots were frozen against an adapter with no step that collects any;
+// the planner bundle now lists the steps that can produce captures.
+test('the planner bundle lists the gate steps that can produce captures', () => {
+  const plain = singleRepoProject('routes-none', { gate: { steps: [{ id: 'unit', repo: 'app', run: 'true' }] } });
+  const withShots = singleRepoProject('routes-some', { gate: { steps: [{ id: 'unit', repo: 'app', run: 'true' }, { id: 'e2e', repo: 'app', run: 'true', artifacts: ['shots/{itemLower}/*.png'] }] } });
+  const routes = (p, item) => {
+    const e = ok(wf(p.root, ['entry', '--item', item, '--owner', 'o', '--json'])).json();
+    const out = ok(wf(p.root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id])).out;
+    return JSON.parse(fs.readFileSync(out.match(/bundle: (\S+)/)[1], 'utf8')).captureRoutes;
+  };
+  assert.deepEqual(routes(plain, 'ENG-171'), { steps: [] });
+  assert.deepEqual(routes(withShots, 'ENG-172'), { steps: [{ id: 'e2e', repo: 'app', artifacts: ['shots/{itemLower}/*.png'] }] });
 });
 
 test('design system config is validated', () => {

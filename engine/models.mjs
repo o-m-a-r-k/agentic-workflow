@@ -3,12 +3,13 @@
 import { actor, baseRef, openState } from './attempt.mjs';
 import { attemptAdapter, declared, roleClass, trustedAdapter } from './config.mjs';
 import { append, loadState } from './ledger.mjs';
-import { ownerAuthority } from './owner.mjs';
 import { git, refuse } from './util.mjs';
 
 export function executionSettings(root, state, role, cls, runtime, commit = state.runtimeAdapterBase ?? state.adapterBase) {
   const source = trustedAdapter(root, state, commit);
-  const sourceClass = role === 'implementer' ? cls : roleClass(source, role);
+  // A strategist's model decision names a work class for the role's next handoffs (0.7.0); the class still pins the models.
+  const chosen = state.strategy?.classFor?.[role];
+  const sourceClass = chosen && source.classes?.[chosen] ? chosen : role === 'implementer' ? cls : roleClass(source, role);
   return { ...declared(source, sourceClass, runtime), sourceClass, runtimeAdapterBase: commit };
 }
 
@@ -31,10 +32,7 @@ export function refreshModels(root, options) {
   if (git(dir, ['merge-base', state.adapterBase, tip]) !== state.adapterBase) throw refuse('execution settings must come from a descendant of the admission adapter on its base branch');
   trustedAdapter(root, state, tip);
   if (tip === (state.runtimeAdapterBase ?? state.adapterBase)) return { state, from: tip, to: tip, changed: false };
-  const authority = ownerAuthority(root, state, 'models ' + state.id, {
-    what: 'refreshing execution settings from the committed adapter base',
-    command: { sub: ['models', 'refresh'], flags: { '--attempt': state.id } },
-  });
-  append(root, state.id, 'models.refreshed', { from: state.runtimeAdapterBase ?? state.adapterBase, to: tip, ref, authority }, actor(options));
+  // Bookkeeping since 0.7.0 (engine/owner.mjs): the settings come from the committed adapter base, the caller is the actor.
+  append(root, state.id, 'models.refreshed', { from: state.runtimeAdapterBase ?? state.adapterBase, to: tip, ref }, actor(options));
   return { state: loadState(root, state.id), from: state.runtimeAdapterBase ?? state.adapterBase, to: tip, changed: true };
 }

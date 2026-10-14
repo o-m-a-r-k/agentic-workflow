@@ -1,33 +1,21 @@
 // Named failure I-41: desktop subagent prompts are encrypted and cannot prove an exact, blind start prompt.
 // Engine-launched roles record fixed parameters; the actual Codex host transcript must agree with them.
-import { ownerTranscript } from './host-record.mjs';
-import { readCapped } from './discovered.mjs';
-import { readRegular } from './evidence.mjs';
-import { sha256 } from './util.mjs';
-import path from 'node:path';
-import { completedNodeReads } from './codex-reads.mjs';
+import { readRegular } from '../evidence.mjs';
+import { sha256 } from '../util.mjs';
+import { codexTranscript } from './codex-transcript.mjs';
+import { readCapped } from './safe-file.mjs';
 
-export function codexEntries(file, { bundle } = {}) {
+export function codexEntries(file) {
   const raw = readCapped(file).toString('utf8').split('\n').flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } });
   const entries = [];
   for (const e of raw) {
     const p = e.payload;
-    if (e.type === 'response_item' && p?.type === 'message' && p.role === 'assistant') entries.push({ type: 'assistant', timestamp: e.timestamp, message: { content: (p.content ?? []).filter((b) => b.type === 'output_text').map((b) => ({ type: 'text', text: b.text })) } });
-    // Successful shell reads in Codex's own execution event, not a tool's claimed prose/result.
-    const item = e.type === 'event_msg' && p?.type === 'item_completed' ? p.item : null;
-    if (item?.type === 'CommandExecution' && item.exit_code === 0 && item.status === 'completed' && Array.isArray(item.command) && item.command.length === 3 && ['-c', '-lc'].includes(item.command[1])) {
-      const command = item.command[2];
-      entries.push({ type: 'assistant', message: { content: [{ type: 'tool_use', id: item.id, name: 'Bash', input: { command } }] } });
-      // wf's own show command is the permitted way for Codex shell tools to read a frozen rule document.
-      const parts = typeof command === 'string' ? command.split(' ') : [];
-      if (parts.length === 6 && parts.slice(0, 3).join(' ') === 'wf evidence show' && path.isAbsolute(parts[3]) && /^[A-Za-z0-9_./-]+$/.test(parts[3]) && parts[4] === '--attempt' && /^[A-Za-z0-9_.-]+$/.test(parts[5])) entries.push({ type: 'assistant', message: { content: [{ type: 'tool_use', id: item.id + ':document', name: 'Read', input: { file_path: parts[3] } }] } });
-    }
+    if (e.type === 'response_item' && p?.type === 'message' && p.role === 'assistant') entries.push({ role: 'assistant', at: e.timestamp ?? null, texts: (p.content ?? []).filter((b) => b.type === 'output_text').map((b) => b.text ?? ''), model: null });
   }
-  entries.push(...completedNodeReads(raw, bundle));
   return { raw, entries };
 }
 
-export function verifyCodexAgent(handoff, hostHome) {
+export function verifyRole(handoff, { home }) {
   if (!handoff.launch) return { status: 'unverified', reason: 'Codex desktop subagent prompts are encrypted; use `wf handoff run --agent <id>` for an engine-recorded fresh launch' };
   const mismatch = (reason) => ({ status: 'mismatch', reason });
   const launch = handoff.launch;
@@ -37,11 +25,9 @@ export function verifyCodexAgent(handoff, hostHome) {
   let receipt;
   try { receipt = JSON.parse(record.bytes); } catch { return mismatch('the engine launch receipt is invalid'); }
   if (receipt.handoff !== handoff.bundle || receipt.prompt !== handoff.startPrompt || receipt.agentType !== handoff.agentType || receipt.model !== handoff.model || receipt.effort !== handoff.effort) return mismatch('the engine launch receipt does not match the handed role, model, effort or start prompt');
-  const transcript = ownerTranscript(`codex:${handoff.session}`, hostHome);
+  const transcript = codexTranscript(handoff.session, { home });
   if (transcript.problem) return mismatch(transcript.problem);
-  const bundleRecord = readRegular(handoff.bundle);
-  let bundle; try { bundle = bundleRecord && JSON.parse(bundleRecord.bytes); } catch {}
-  const { raw, entries } = codexEntries(transcript.file, { bundle });
+  const { raw, entries } = codexEntries(transcript.file);
   const meta = raw.find((e) => e.type === 'session_meta')?.payload;
   if (meta?.id !== handoff.session || meta.originator !== 'codex_exec' || !['exec', 'cli'].includes(meta.source) || meta.forked_from_id || meta.parent_thread_id) return mismatch('the Codex role transcript is not the recorded fresh engine-launched session');
   const prompts = raw.flatMap((e) => {

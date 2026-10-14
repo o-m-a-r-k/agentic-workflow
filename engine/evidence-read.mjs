@@ -8,6 +8,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { attemptDir } from './ledger.mjs';
+import { listableOf } from './evidence.mjs';
+import { recordedFileProblem } from './evidence.mjs';
 import { isInside } from './paths.mjs';
 import { WfError, refuse } from './util.mjs';
 
@@ -56,7 +58,9 @@ export function listEvidence(root, state, { kind = null } = {}) {
   const dir = attemptFolder(root, state);
   const files = [];
   walk(dir, '', files);
-  return { attempt: state.id, dir, files: kind ? files.filter((f) => f.kind === kind) : files };
+  const listable = listableOf(root, state.id);
+  const shown = files.filter((f) => listable(f.path));
+  return { attempt: state.id, dir, files: kind ? shown.filter((f) => f.kind === kind) : shown };
 }
 
 // Named failure I-80: shell-only roles could never read beyond the first 4 MiB of a handed bundle.
@@ -85,6 +89,10 @@ export function showEvidence(root, state, rel, { offset, length, maxSize } = {})
   const st = fs.lstatSync(abs, { throwIfNoEntry: false });
   if (!st) throw refuse(`${rel}: no such evidence file in ${state.id}`);
   if (st.isSymbolicLink() || !st.isFile()) throw refuse(`${rel} is not a regular file; nothing is read through it`);
+  // Named failure (I-50): a file a `wf` command is still writing (not yet recorded) was shown like recorded evidence.
+  if (!listableOf(root, state.id)(path.relative(dir, abs).split(path.sep).join('/'))) throw refuse(`${rel}: not recorded yet; a wf command may still be writing it`, 'try again in a moment', { id: 'evidence:unrecorded' });
+  const changed = recordedFileProblem(root, state.id, abs);
+  if (changed) throw refuse(`${changed}; nothing is read from it`, `\`wf verify --attempt ${state.id}\` lists every difference`);
   let fd;
   try {
     fd = fs.openSync(abs, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | (fs.constants.O_NONBLOCK ?? 0));

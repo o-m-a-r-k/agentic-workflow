@@ -2,6 +2,7 @@
 // Steps used to receive the owner's whole environment, session tokens included. They now get an open list of
 // toolchain variables, the adapter's `gate.env.pass`, the engine's WF_* variables and the catalogued secrets a
 // step lists. Agent-runtime variables are never passed unless the adapter names them itself.
+import { credentialPrefixes } from './hosts/index.mjs';
 
 // Exact names, or prefixes ending in `*`. Open list: a project adds what it needs with `gate.env.pass`.
 export const BASE_ENV = [
@@ -20,10 +21,6 @@ export const BASE_ENV = [
   'WF_*',
 ];
 
-// Agent-runtime credentials and session ids. Passed only when the adapter lists the name or a prefix starting with
-// one of these, so a broad entry such as `C*` never leaks them.
-export const NEVER_UNLESS_LISTED = ['CLAUDE_CODE_', 'CLAUDECODE', 'ANTHROPIC_', 'CODEX_', 'OPENAI_', 'GROK_', 'XAI_'];
-
 const matches = (name, entry) => (entry.endsWith('*') ? name.startsWith(entry.slice(0, -1)) : name === entry);
 
 export function passList(cfg) {
@@ -34,10 +31,13 @@ export function passList(cfg) {
 // `extra` (engine variables, secrets) is added after filtering, so it always reaches the command.
 export function projectEnv(cfg, extra = {}, source = process.env) {
   const pass = passList(cfg);
+  // Agent-runtime credentials and session ids (the prefixes each host adapter declares). Passed only when the adapter
+  // lists the name or a prefix starting with one of these, so a broad entry such as `C*` never leaks them.
+  const guardedPrefixes = credentialPrefixes();
   const out = {};
   for (const [name, value] of Object.entries(source)) {
     if (value === undefined) continue;
-    const guarded = NEVER_UNLESS_LISTED.find((p) => name.startsWith(p));
+    const guarded = guardedPrefixes.find((p) => name.startsWith(p));
     const listed = pass.filter((e) => matches(name, e));
     if (guarded) {
       // Only an entry that itself names the guarded family counts as explicit.

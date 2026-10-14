@@ -3,98 +3,16 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { check, decide, isPlainWf } from '../hooks/guard-evidence.mjs';
-import { check as check015 } from './fixtures/guard-0.1.15.mjs';
+import { check, decide } from '../hooks/guard-evidence.mjs';
 import { closureFile, commitIn, criteriaFile, goodClosure, ok, OUT_OF_ORDER, singleRepoProject, state, tmp, wf } from './helpers.mjs';
 
-// 0.1.18: the evidence guard decides on the raw text and never parses shell. Named failures: 0.1.16 and 0.1.17 parsed
-// commands to let copies OUT of evidence through, and six automated reviews found a new differential after each fix.
-// It must never be more permissive than the 0.1.15 hook (frozen in fixtures/), and `wf export screenshots` (the engine,
-// never a shell) is the only way files leave the evidence besides the Read tool.
+// 0.7.0: the evidence guard judges file targets, never shell text (named failure: its Bash branch made 334 refusals, none
+// a write attempt, 229 naming no evidence folder). `wf export screenshots` (the engine, never a shell) is the only way
+// files leave the evidence besides the Read tool; the ledger chain, anchor, manifest and immutability flags catch a write
+// that gets around the hook (scenarios/integrity*.test.mjs).
 
 const HOOK = path.resolve(import.meta.dirname, '..', 'hooks', 'guard-evidence.mjs');
-const bash = (command, cwd = '/p') => check({ cwd, tool_input: { command } });
 const file = (tool_input, cwd = '/p') => check({ cwd, tool_input });
-
-// The corpus: writes 0.1.15 refused, writes it missed, the 0.1.16 bypasses, and the reads the 0.1.16/0.1.17 allowance
-// let through (now refused: reads are the Read tool's).
-const WRITES_015 = [
-  'echo x > .wf-evidence/a', 'echo x >> .wf-evidence/a', 'ls &> .wf-evidence/a', 'tee .wf-evidence/a', 'rm -rf .wf-evidence',
-  'mv /tmp/x .wf-evidence/a', 'truncate -s 0 .wf-evidence/a', 'dd if=/tmp/x of=.wf-evidence/a', 'touch .wf-evidence/a',
-  'ln -s /tmp/x .wf-evidence/a', 'ln .wf-evidence/a /tmp/hard', 'chmod 644 .wf-evidence/a', 'rmdir .wf-evidence/x', 'mkdir -p .wf-evidence/x',
-  'shred .wf-evidence/a', 'unlink .wf-evidence/a', "sed -i '' s/a/b/ .wf-evidence/a", 'sed --in-place s/a/b/ .wf-evidence/a',
-  'cp /tmp/x .wf-evidence/a', 'cp -R /tmp/x .wf-evidence/', 'rsync -a /tmp/x .wf-evidence/', 'install /tmp/x .wf-evidence/a',
-  'install -m 644 /tmp/x .wf-evidence/a', "perl -pi -e 's/a/b/' .wf-evidence/a", "ruby -i -pe 'x' .wf-evidence/a",
-  "python3 -c \"open('.wf-evidence/a', 'w').write('x')\"", "node -e \"require('fs').writeFileSync('.wf-evidence/a', 'x')\"",
-  "node -e \"require('fs').rmSync('.wf-evidence', { recursive: true })\"", "python3 -c \"import shutil; shutil.rmtree('.wf-evidence')\"",
-  "python3 -c \"import subprocess; subprocess.run(['rm', '.wf-evidence/a'])\"", "node -e \"require('fs').copyFileSync('/tmp/x', '.wf-evidence/a')\"",
-  'cd .wf-evidence && rm a', 'cd .wf-evidence/a && cp x ../b', 'pushd .wf-evidence && touch a', 'cd /p/.wf-evidence && echo x > ledger.jsonl',
-  "cd .wf-evidence && node -e \"require('fs').writeFileSync('x','1')\"", "python3 -c \"import json; json.dump({}, open('/p/.wf-evidence/x', mode='w'))\"",
-];
-const MISSED_015 = [
-  'cp -t.wf-evidence /tmp/x', 'cp --target-directory=.wf-evidence /tmp/x', 'rsync --log-file .wf-evidence/log /tmp/a /tmp/b', 'rsync -a /tmp/a .wf-evidence/ --exclude foo',
-  'cp /tmp/x .wf-ev*/a', 'cp /tmp/x .[w]f-evidence/a', 'cp /tmp/x $(echo .wf-evidence)/a', 'cp /tmp/x `echo .wf-evidence`/a', 'D=.wf-evidence; cp /tmp/x $D/a',
-  "bash -c 'cp /tmp/x .wf-evidence/a'", "eval 'touch .wf-evidence/a'", 'for f in /tmp/*; do cp $f .wf-evidence/; done', 'find /tmp -exec rm -rf .wf-evidence +',
-  'sudo cp /tmp/x .wf-evidence/a', 'FOO=1 cp /tmp/x .wf-evidence/a', 'xargs -I{} cp {} .wf-evidence/ < list', '(cd .wf-evidence && rm a)',
-  "python3 -c \"import shutil as s; s.rmtree('.wf-evidence')\"", "node -e \"process.chdir('.wf-evidence'); require('fs').copyFileSync('/tmp/x', 'a')\"",
-  'install --directory .wf-evidence/x', 'install -dm755 .wf-evidence/x', 'cp /tmp/x .WF-EVIDENCE/a',
-];
-const READS = [
-  'cat .wf-evidence/attempts/X/ledger.jsonl', 'ls -la .wf-evidence/attempts', 'grep -r foo .wf-evidence', 'cp .wf-evidence/a.png /tmp/out/',
-  'cp -t /tmp/out .wf-evidence/a.png', 'install -m 644 .wf-evidence/a.png /tmp/x.png', 'rsync -a .wf-evidence/a/ /tmp/s/', 'ditto .wf-evidence/a /tmp/s',
-  "python3 -c \"import shutil; shutil.copy('.wf-evidence/a.png', '/tmp/x.png')\"", "python3 -c \"print(open('/p/.wf-evidence/x.json', 'r').read())\"",
-  'find .wf-evidence -name "*.png" -exec cp {} /tmp/s/ \\;', 'cd .wf-evidence/attempts/X && cp a.png /tmp/',
-];
-const CWDS = ['/p', '/p/.wf-evidence/attempts/A', '/p/src'];
-const variants = (c) => [c, `cd /p && ${c}`, `${c} 2>&1`, `true; ${c}`, `${c}\necho done`, `(${c})`, `wf status; ${c}`, `wf status && ${c}`];
-const corpus = [...WRITES_015, ...MISSED_015, ...READS, 'ls', 'git status', 'echo x > /tmp/y', `python3 -c "open('x','w')"`, 'cat a', 'rm a'].flatMap(variants);
-
-test('guard is never more permissive than the 0.1.15 hook, on Bash and on file tools', () => {
-  let compared = 0;
-  for (const cwd of CWDS) {
-    for (const command of corpus) {
-      const input = { cwd, tool_input: { command } };
-      if (check015(input)) assert.ok(check(input), `0.1.15 refused, now allowed: [${cwd}] ${command}`);
-      compared += 1;
-    }
-    for (const fp of ['.wf-evidence/a', '/p/.wf-evidence/a', '/p/src/../.wf-evidence/a', 'ledger.jsonl', '/tmp/x', 'src/a.ts']) {
-      for (const tool_input of [{ file_path: fp }, { file_path: fp, edits: [] }, { notebook_path: fp }]) {
-        const input = { cwd, tool_input };
-        if (check015(input)) assert.ok(check(input), `0.1.15 refused, now allowed: [${cwd}] ${JSON.stringify(tool_input)}`);
-        compared += 1;
-      }
-    }
-  }
-  assert.ok(compared > 1000, `corpus too small: ${compared}`);
-  for (const c of [...WRITES_015, ...MISSED_015, ...READS]) assert.ok(bash(c), `refused: ${c}`);
-});
-
-test('only one plain `wf` invocation may name the evidence: no chaining, substitution, redirection, quoting or other path', () => {
-  for (const ok of ['wf status', 'wf status --attempt ENG-1.1', 'wf export screenshots --gate --to /tmp/shots', 'wf shown --file /p/.wf-worktrees/_exports/A/shown-draft.json', 'wf tracker record --event delivered --capture /tmp/cap.json', '  wf resume  ']) {
-    assert.equal(bash(ok), null, ok);
-    assert.equal(bash(ok, '/p/.wf-evidence/attempts/A'), null, `${ok} (inside the evidence)`);
-  }
-  for (const bad of [
-    'echo wf .wf-evidence/a', 'x=wf; cat .wf-evidence/a', 'wf status; cat .wf-evidence/x', 'wf status\ncat .wf-evidence/x', 'wf status\r\ncat .wf-evidence/x',
-    'wf status && rm -rf .wf-evidence', 'wf status || rm -rf .wf-evidence', 'wf status | tee .wf-evidence/x', 'wf status & rm .wf-evidence/a',
-    'wf export $(rm -rf .wf-evidence)', 'wf export `touch .wf-evidence/a`', 'wf export <(cat .wf-evidence/a)', 'wf status > .wf-evidence/a', 'wf status < .wf-evidence/a',
-    './wf export --to .wf-evidence', '/usr/local/bin/wf status .wf-evidence', 'WF=wf; $WF export .wf-evidence', 'WF=wf $WF status .wf-evidence', 'wfx status .wf-evidence',
-    'wf "status" .wf-evidence', "wf 'status' .wf-evidence", 'wf sta\\tus .wf-evidence', 'wf\tstatus .wf-evidence', 'command wf status .wf-evidence', 'sudo wf status .wf-evidence',
-    'wf .wf-evidence', 'wf Status .wf-evidence', 'wf ${X} .wf-evidence',
-  ]) assert.ok(bash(bad), JSON.stringify(bad));
-  assert.equal(isPlainWf('wf status; rm x'), false);
-  assert.equal(isPlainWf('wf status'), true);
-});
-
-test('obfuscated, split, glob, brace, variable, case and unicode spellings of the evidence are refused', () => {
-  for (const bad of [
-    "cat .wf-evid''ence/a", 'cat .wf-evid""ence/a', 'cat .wf-evid\\ence/a', "cat $'.wf-evidence'/a", 'cat .wf-e"v"idence/a', 'cat .WF-EVIDENCE/a', 'cat .Wf-Evidence/a',
-    'cat .wf-*/a', 'cat .w?-evidence/a', 'cat .[w]f-evidence/a', 'cat .*/attempts/a', 'cat {.wf-,}evidence/a', 'cat .wf-{evidence,x}/a', 'cat .wf-ev${X}idence/a',
-    'cat .wf-ev$(echo)idence/a', 'cat *evidence/a', 'cat .wf-​evidence/a', 'cat .wf­-evidence/a', 'cat ．ｗｆ－ｅｖｉｄｅｎｃｅ/a',
-    'cat ~/p/.wf-evidence/a', 'cat $HOME/p/.wf-evidence/a', 'cd ~/p && cat .wf-evidence/a', 'cat /p/src/../.wf-evidence/a',
-  ]) assert.ok(bash(bad), JSON.stringify(bad));
-  for (const fine of ['git commit -m "gate evidence for the review"', 'grep -r evidence docs/', 'ls .wf-worktrees/_exports', 'echo "the evidence pass"']) assert.equal(bash(fine), null, fine);
-});
 
 test('file tools: evidence targets by any spelling, relative inside it, `..`, symlink aliases; content is not inspected', () => {
   const base = tmp('guard-files');
@@ -113,21 +31,34 @@ test('file tools: evidence targets by any spelling, relative inside it, `..`, sy
   assert.equal(file({ file_path: '/tmp/x' }), null);
 });
 
-test('the hook fails closed on input it cannot read, when that input mentions the evidence', () => {
-  assert.ok(decide('{"tool_input": {"command": "rm .wf-evidence/a"'), 'truncated JSON');
-  assert.equal(decide('{"tool_input": '), null, 'unreadable input that names no evidence passes');
-  assert.ok(decide('not json at all .wf-evidence'));
-  assert.ok(decide('null') === null && decide('"rm .wf-evidence"'), 'a bare string');
-  assert.ok(check({ tool_input: null, other: '.wf-evidence/a' }), 'missing tool_input');
-  assert.ok(check({ tool_input: { edits: [{ file_path: '/p/.wf-evidence/a' }] } }), 'an unknown shape');
-  assert.ok(check({ tool_input: { command: ['rm', '.wf-evidence/a'] } }), 'a command that is not a string');
-  assert.ok(check({ cwd: '/p/.wf-evidence', tool_input: { unknown: true } }), 'an unknown shape inside the evidence');
-  assert.equal(check({ tool_input: { unknown: true } }), null);
+test('file-tool shapes: every target in the input is checked, whatever else it carries', () => {
+  const shapes = [
+    { tool_name: 'Edit', tool_input: { command: 'wf status', file_path: '/p/.wf-evidence/a' } },
+    { tool_name: 'Write', tool_input: { file_path: ['/p/.wf-evidence/a'] } },
+    { tool_name: 'MultiEdit', tool_input: { file_path: '/tmp/x', edits: [{ file_path: '/p/.wf-evidence/a', old_string: 'a', new_string: 'b' }] } },
+    { tool_name: 'Write', tool_input: { command: 'wf status', file_path: '~/p/.wf-evidence/a' } },
+    { tool_name: 'NotebookEdit', tool_input: { notebook_path: '/p/.wf-evidence/n.ipynb', new_source: 'x' } },
+  ];
+  for (const d of shapes) assert.ok(check({ cwd: '/p', ...d }), JSON.stringify(d));
+});
+
+test('a shell started inside the evidence is refused; any other shell text is not judged', () => {
+  assert.ok(check({ cwd: '/p/.wf-evidence/attempts/A', tool_name: 'Bash', tool_input: { command: 'ls' } }));
+  assert.ok(check({ cwd: '/p/.WF-EVIDENCE', tool_input: { unknown: true } }), 'an unknown shape inside the evidence');
+  assert.equal(check({ cwd: '/p/src', tool_name: 'Bash', tool_input: { command: 'cat .wf-evidence/attempts/A/ledger.jsonl' } }), null, 'shell text is not scanned');
+  assert.equal(check({ cwd: '/p', tool_name: 'Bash', tool_input: { command: 'echo "$HOME" > /tmp/wf-notes.txt # .wf-evidence' } }), null);
+});
+
+test('the hook passes input it cannot read; file targets are still judged through the process', () => {
+  assert.equal(decide('{"tool_input": {"command": "rm .wf-evidence/a"'), null, 'truncated JSON');
+  assert.equal(decide('not json at all .wf-evidence'), null);
+  assert.equal(decide('null'), null);
+  assert.equal(check({ tool_input: null, other: '.wf-evidence/a' }), null, 'missing tool_input');
   const run = (input) => spawnSync(process.execPath, [HOOK], { input, encoding: 'utf8' }).status;
-  assert.equal(run('{garbage .wf-evidence'), 2);
-  assert.equal(run('{garbage'), 0);
-  assert.equal(run(JSON.stringify({ cwd: '/p', tool_input: { command: 'wf status; cat .wf-evidence/a' } })), 2);
-  assert.equal(run(JSON.stringify({ cwd: '/p', tool_input: { command: 'wf status --attempt A' } })), 0);
+  assert.equal(run('{garbage .wf-evidence'), 0);
+  assert.equal(run(JSON.stringify({ cwd: '/p', tool_name: 'Bash', tool_input: { command: 'wf status; cat .wf-evidence/a' } })), 0);
+  assert.equal(run(JSON.stringify({ cwd: '/p', tool_name: 'Edit', tool_input: { file_path: '/p/.wf-evidence/attempts/A/ledger.jsonl' } })), 2);
+  assert.equal(run(JSON.stringify({ cwd: '/p', tool_name: 'Write', tool_input: { file_path: '/p/src/a.ts' } })), 0);
 });
 
 // ---- `wf export screenshots`: the engine's copy out, race-free where Node allows ----
@@ -293,36 +224,6 @@ test('the shown draft and every other engine write outside the evidence never fo
   assert.ok(!fs.existsSync(path.join(a.evidence, 'new')), 'no folder created inside the evidence');
 });
 
-// ---- 0.1.19: the last adversarial pass ----
-
-test('guard: 30 attack inputs of new kinds are refused', () => {
-  const bashCases = [
-    'a=.wf-; b=evidence; rm -rf $a$b', 'a=.wf; rm -rf ${a}-evidence', 'p=evidence; cat .wf-$p/a', 'cat${IFS}.wf-evidence/a', 'IFS=/; x=".wf-evidence"; cat $x',
-    "cat $'\\x2ewf-evidence/a'", "cat $'\\056wf-evidence/a'", "cat \"$(printf '\\x2ewf-evidence')\"/a", 'cat $(echo .wf-ev)idence/a', 'rm -rf "$(ls -a | grep wf-e)"',
-    'cat .wf-\u0000evidence/a', 'cat .wf-\u0007evidence/a', 'cat .wf-ev"$x"idence/a', 'cat .wf-ev\u200didence/a',
-    'wf export screenshots --to /p/.wf-evidence/x; true', 'env -i cat .wf-evidence/a', `cat ${'x'.repeat(200000)} .wf-evidence/a`,
-    'cd ../p/.wf-evidence', 'pushd /p/.WF-EVIDENCE', 'command -p cat .wf-evidence/a',
-  ];
-  for (const c of bashCases) assert.ok(check({ cwd: '/p', tool_input: { command: c } }), JSON.stringify(c.slice(0, 80)));
-  const shapes = [
-    { tool_name: 'Edit', tool_input: { command: 'wf status', file_path: '/p/.wf-evidence/a' } },
-    { tool_name: 'Write', tool_input: { file_path: ['/p/.wf-evidence/a'] } },
-    { tool_name: 'MultiEdit', tool_input: { file_path: '/tmp/x', edits: [{ file_path: '/p/.wf-evidence/a', old_string: 'a', new_string: 'b' }] } },
-    { tool_name: 'Write', tool_input: { command: 'wf status', file_path: '~/p/.wf-evidence/a' } },
-    { tool_name: 'Edit', tool_input: { command: 'wf status' }, cwd: '/p/.wf-evidence' },
-    { tool_name: 'Bash', tool_input: { command: { toString: 'rm .wf-evidence' } } },
-    { tool_name: 'Bash', tool_input: { command: 'wf status', file_path: '/p/.wf-evidence/a' } },
-    { tool_name: 'NotebookEdit', tool_input: { notebook_path: '/p/.wf-evidence/n.ipynb', new_source: 'x' } },
-  ];
-  for (const d of shapes) assert.ok(check(d), JSON.stringify(d));
-  const run = (input) => spawnSync(process.execPath, [HOOK], { input, encoding: 'buffer' }).status;
-  assert.equal(run(Buffer.concat([Buffer.from('{"tool_input":{"command":"cat .wf-evid'), Buffer.from([0xff, 0xfe]), Buffer.from('ence/a"}}')])), 2, 'invalid UTF-8');
-  assert.equal(run(Buffer.from(JSON.stringify({ tool_input: { command: `echo ${'é'.repeat(100000)} > .wf-evidence/a` } }))), 2, 'large multi-byte input');
-  assert.equal(check({ cwd: '/p', tool_input: { command: 'echo $HOME/notes.txt' } }), null, 'an expansion alone is fine');
-  // One plain `wf` invocation passes the hook; the engine then refuses a path option into the evidence.
-  assert.equal(check({ cwd: '/p', tool_input: { command: 'wf status --attempt ../../.wf-evidence' } }), null);
-});
-
 test('wf input files: regular files outside the evidence only; attempt ids and skill names are not paths', () => {
   const { base, root } = singleRepoProject('cli-paths', {});
   const e = ok(wf(root, ['entry', '--item', 'ENG-190', '--owner', 'o', '--json'])).json();
@@ -386,21 +287,4 @@ test('cleanup at close never deletes through a link and leaves anything uncertai
   }
   assert.equal(err.filter((m) => /left .* in place/.test(m)).length, 4, err.join(''));
   assert.throws(() => removeReviewScratch(root, '../x'), /invalid attempt id/);
-});
-
-test('false positives fixed in 0.3.0 stay allowed: none of these names the evidence folder in any spelling', () => {
-  for (const cmd of [
-    'cd ~/Documents/Development/agentic-workflow && grep -n -i -E "glossary|terms|component" README.md',
-    'cat ~/Documents/Development/agentic-workflow/.workflow/project.yaml',
-    'cat api/.workflow/project.yaml | grep -E "tracker|via"',
-    'sed -n 1,5p .workflow/lessons/L-1.yaml',
-    'grep -rn "evidence" docs/',
-    'grep -E "evidence|proof" README.md',
-    'git commit -m "keep evidence, ledger and anchor in step"',
-    'grep -c evidence README.md && echo $?',
-    "node -e \"const a=['L-1','L-2']; console.log(a.map((x) => `Lesson ${x}`))\"",
-    "python3 - <<'X'\ns = \"...['a', 'b']\"\nX",
-    'grep -E "^\\.[a-z]+" notes.txt',
-    'ls .github/ .workflow/ docs/',
-  ]) assert.equal(check({ cwd: '/p', tool_input: { command: cmd } }), null, cmd);
 });

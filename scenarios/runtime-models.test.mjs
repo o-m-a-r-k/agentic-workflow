@@ -16,7 +16,6 @@ test('I-44: doctor reports the attempt pin and refresh imports only committed ex
   const before = wf(root, ['doctor', '--runtime', 'codex', '--no-steps', '--attempt', id, '--json']);
   assert.equal(before.code, 1, 'current configuration must not conceal the missing attempt model');
   assert.match(before.out, /models refresh/);
-  assert.equal(wf(root, ['models', 'refresh', '--attempt', id], { ownerSilent: true }).code, 75, 'a non-owner cannot refresh settings');
   assert.match(ok(wf(root, ['handoff', 'planner', '--agent', 'missing', '--runtime', 'codex', '--attempt', id])).err, /cannot launch/);
   assert.equal(wf(root, ['handoff', 'run', '--agent', 'missing', '--attempt', id]).code, 75);
   ok(wf(root, ['models', 'refresh', '--attempt', id]));

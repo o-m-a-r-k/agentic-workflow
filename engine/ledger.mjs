@@ -2,7 +2,9 @@ import { mkdirStateDirectory } from './state-folders.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { ENGINE_VERSION, SCHEMA_VERSION, WfError, canonical, now, refuse, sha256, withFileLock } from './util.mjs';
-import { prepareWrite, touch, withEvidenceTransaction, writeAnchor, writeNoFollow } from './evidence.mjs';
+import { expectOf } from './expectations.mjs';
+import { ownerRuntime } from './hosts/index.mjs';
+import { prepareWrite, touch, verifyLevel, withEvidenceTransaction, writeAnchor, writeNoFollow } from './evidence.mjs';
 
 // Opens an attempt for this process: verifies its evidence (chain, anchor, every recorded file) once, refusing on any
 // difference. Every command that reads or writes an attempt goes through here (`openState`, the first `append`).
@@ -51,6 +53,10 @@ function readLedgerLocked(root, id) {
   const lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean);
   const entries = [];
   let prev = null;
+  // Named failure (0.7.0): every read hashed every entry (9 seconds on a 96 MB ledger). Every entry's link to the one before
+  // it is checked always, and its own hash in full by the commands that verify everything (accept, deliver, verify, doctor,
+  // export) and for the last entry, which the anchor binds; `wf verify` finds an edited middle entry.
+  const everyHash = verifyLevel() === 'full';
   for (const [i, line] of lines.entries()) {
     let entry;
     try {
@@ -58,7 +64,7 @@ function readLedgerLocked(root, id) {
     } catch {
       throw new WfError(`${file}: line ${i + 1} is not JSON; the ledger was edited by hand`);
     }
-    if (entry.prev !== prev || entry.hash !== entryHash(entry)) {
+    if (entry.prev !== prev || ((everyHash || i === lines.length - 1) && entry.hash !== entryHash(entry))) {
       throw new WfError(`${file}: hash chain broken at entry ${entry.seq ?? i + 1}; the ledger was edited by hand`);
     }
     prev = entry.hash;
@@ -110,6 +116,14 @@ export const keptFiles = (files, keep) => {
 };
 const narrowAttach = (a, narrowed) => (narrowed && a.event === 'delivered' && a.op === 'attach' ? { ...a, files: keptFiles(a.files, narrowed.keep) } : a);
 
+// A split moves findings (`<reviewer>:<id>`) to a sibling attempt: in this attempt's closures they read as `moved`, which
+// every open-finding check treats as settled. The ledger's closure is never changed, only the derived view.
+function withMoved(s, closure) {
+  const moved = s.strategy?.moved?.findings;
+  if (!moved?.length || !Array.isArray(closure?.findings)) return closure;
+  return { ...closure, findings: closure.findings.map((f) => (moved.includes(`${closure.reviewer}:${f?.id}`) ? { ...f, status: 'moved' } : f)) };
+}
+
 // Derived state. Everything a command decides is computed from the ledger, never stored separately.
 export function reduce(entries) {
   const s = {
@@ -117,28 +131,37 @@ export function reduce(entries) {
     item: null,
     lane: null,
     intent: null,
+    // `wf intent implementation`: an analysis attempt upgraded in place (from, to, reason).
+    intentChanges: [],
     owner: null,
     originRuntime: null,
     runtimePreference: null,
     owners: [],
+    ownerTransfers: 0,
     phase: 'admitted',
     repos: {},
     addedRepos: [],
     discovered: [],
+    implementerReports: [],
     scopeDecisions: [],
-    scopePrompt: null,
     adapterBase: null,
     adapter: null,
     deliveryAdapterBase: null,
     adapterRepins: [],
     criteria: null,
+    // How many criteria the plan froze with: `wf signals` shows the amendments against it.
+    criteriaAtFreeze: null,
+    // What the plan expects (files, review rounds, minutes to delivery; engine/expectations.mjs) and every statement of it:
+    // the plan's, then each re-plan's (`wf criteria amend`). Shown against what happened; never a limit.
+    expect: null,
+    expectations: [],
     criteriaAmendments: [],
     validations: [],
     plan: null,
     planSource: null,
     impact: null,
     work: null,
-    roles: { planner: [], implementer: [], reviewer: [], tester: [] },
+    roles: { planner: [], implementer: [], reviewer: [], tester: [], strategist: [] },
     handoffs: [],
     gates: [],
     checks: [],
@@ -154,13 +177,24 @@ export function reduce(entries) {
     tracker: { pending: [], done: [] },
     batch: null,
     batchOf: null,
+    // True while batchOf names a batch a `wf split` reserved: the batch attempt itself is created by `wf batch create`.
+    batchPending: false,
     deferHeavy: false,
     reopenedFrom: null,
     stops: [],
     reviewsRefused: [],
+    planRefusals: [],
     gateOverrides: [],
     reviewOverrides: [],
-    authoritiesUsed: [],
+    // Reserved owner decisions confirmed with `wf approve` (engine/approve.mjs).
+    decisions: [],
+    // The strategist's decisions and what they left behind (engine/strategy.mjs, engine/split.mjs). `nextRound` is
+    // 'delta' after a delta-review decision until the next reviewer handoff consumes it (engine/review-policy.mjs
+    // roundMode reads it); `tripwires` the owner escalations the engine refused on; `moved` lists what a split took out
+    // of this attempt's open set; `toTicket` the observations a ticket decision queued.
+    strategy: { decisions: [], tripwires: [], nextRound: null, toTicket: [], outcomes: {}, moved: { work: [], criteria: [], findings: [], discovered: [] } },
+    splits: [],
+    splitFrom: null,
     admittedAt: null,
     // Telemetry events (measurement only; nothing is decided from them).
     reviewRounds: [],
@@ -174,12 +208,16 @@ export function reduce(entries) {
   };
   for (const e of entries) {
     const d = e.data;
-    // An owner message spent on one owner-only decision (engine/owner.mjs) is never spent again.
-    for (const a of [d?.authority, ...(Array.isArray(d?.authorities) ? d.authorities : [])]) {
-      if (a?.file && Number.isInteger(a.offset)) s.authoritiesUsed.push(`${a.file}:${a.offset}`);
-      if (typeof a?.spent === 'string') s.authoritiesUsed.push(a.spent);
-    }
     if (e.type === 'admitted' && !s.admittedAt) s.admittedAt = e.at;
+    // A reserved decision (engine/approve.mjs) is spent by the action event that records it (`decision: <id>`, `decisions:
+    // [<id>]`, `source.decision`, `authority.decision`): one approval, one action. Named failure (0.7.0 review): a key that
+    // repeats (a second hold, an owner changing back) reused the first approval.
+    if (!e.type.startsWith('decision.')) {
+      for (const ref of [d?.decision, ...(Array.isArray(d?.decisions) ? d.decisions : []), d?.source?.decision, d?.authority?.decision]) {
+        const spent = typeof ref === 'string' ? s.decisions.find((y) => y.id === ref && y.approved && !y.spent) : null;
+        if (spent) spent.spent = { at: e.at, by: e.type };
+      }
+    }
     switch (e.type) {
       case 'admitted':
         Object.assign(s, {
@@ -188,7 +226,7 @@ export function reduce(entries) {
           lane: d.lane,
           intent: d.intent,
           owner: e.actor,
-          originRuntime: d.originRuntime ?? /^(codex|claude):/.exec(String(e.actor))?.[1] ?? null,
+          originRuntime: d.originRuntime ?? ownerRuntime(e.actor),
           owners: [e.actor],
           repos: d.repos,
           adapterBase: d.adapterBase,
@@ -201,31 +239,47 @@ export function reduce(entries) {
           engineVersion: d.engineVersion,
         });
         break;
+      case 'intent.changed':
+        s.intent = d.to;
+        s.intentChanges.push({ from: d.from, to: d.to, reason: d.reason, at: e.at, by: e.actor });
+        break;
       case 'owner.adopted':
         s.runtimePreference = null;
         s.owner = e.actor;
+        s.ownerTransfers += 1;
         if (!s.owners.includes(e.actor)) s.owners.push(e.actor);
         break;
       case 'criteria.frozen':
         s.criteria = d.criteria;
+        s.criteriaAtFreeze = d.criteria?.length ?? null;
         s.plan = d.plan ?? null;
         s.planSource = d.source ?? null;
+        s.expect = expectOf(d.plan?.expect);
+        s.expectations = s.expect ? [{ at: e.at, source: 'plan', amendment: null, reason: null, expect: s.expect }] : [];
         s.work = d.work ?? null;
-        // I-26: the planner's survey and impact map, with what each query returned when the plan was frozen.
-        s.impact = d.impact ? { ...d.impact, addenda: [], owed: null } : null;
+        // I-26: the planner's survey and impact map, with what each query returned when the plan was frozen. A sibling
+        // attempt a split created carries its parent's addenda (`wf split`).
+        s.impact = d.impact ? { ...d.impact, addenda: d.impact.addenda ?? [], owed: null } : null;
         if (s.phase === 'admitted') s.phase = 'planned';
         break;
-      case 'scope.asked':
-        s.scopePrompt = { ...d, at: e.at };
-        break;
-      case 'scope.decided':
+      // A review observation fixed elsewhere: ticketed (a raw tracker readback) or moved to a sibling attempt (0.7.0).
+      case 'scope.decided': // an owner choice recorded before 0.7.0 (the extra-scope flow); only ignore and ticket still settle a finding
       case 'scope.ticketed':
+      case 'scope.moved':
+      case 'scope.fixed':
+      case 'scope.waived':
+      case 'scope.deferred':
         s.scopeDecisions.push({ ...d, at: e.at });
         break;
       case 'criteria.amended':
         s.criteria = d.criteria;
         if (d.work) s.work = d.work;
-        s.criteriaAmendments.push({ at: e.at, reason: d.reason, by: e.actor, changes: d.changes ?? null, scopeKeys: d.scopeKeys ?? [], impact: d.impact ? true : d.impactOwed ? 'owed' : null });
+        s.criteriaAmendments.push({ at: e.at, reason: d.reason, by: e.actor, changes: d.changes ?? null, impact: d.impact ? true : d.impactOwed ? 'owed' : null });
+        // A re-plan states its own expectation; the earlier ones stay in `expectations`.
+        if (expectOf(d.expect)) {
+          s.expect = expectOf(d.expect);
+          s.expectations.push({ at: e.at, source: 'amendment', amendment: s.criteriaAmendments.length, reason: d.reason, expect: s.expect });
+        }
         // I-26: an amendment that adds scope owes an impact update before the next implementer handoff.
         if (d.impact) {
           s.impact ??= { survey: null, impact: null, results: {}, addenda: [], owed: null };
@@ -241,6 +295,23 @@ export function reduce(entries) {
         s.accepted = null;
         s.phase = 'implementing';
         break;
+      // I-102: supplemental steps re-pinned at a later commit. They leave the record they were registered in (a record left
+      // with no step goes) and form a new one at the new commit, so the pin, the digest and the gate order read exactly as
+      // after a registration; `validationCorrections` keeps both pins, the reason and who corrected.
+      case 'validation.corrected': {
+        const fixed = new Set(d.steps.map((x) => x.id));
+        s.validations = s.validations.map((v) => ({ ...v, steps: v.steps.filter((x) => !fixed.has(x.id)) })).filter((v) => v.steps.length);
+        s.validations.push({ commit: d.commit, steps: d.steps, criteria: d.criteria, reason: d.reason, tree: d.tree, correctedFrom: d.from, at: e.at });
+        (s.validationCorrections ??= []).push({ ...d, at: e.at, by: e.actor });
+        s.accepted = null;
+        s.phase = 'implementing';
+        break;
+      }
+      // I-94: captures the owner brought in with `wf captures import`, bound to the tree they were made on; the gate's
+      // `screenshots` reads them as its own for that tree (engine/captures.mjs).
+      case 'captures.imported':
+        (s.captureImports ??= []).push({ ...d, at: e.at, by: e.actor });
+        break;
       case 'models.refreshed':
         s.runtimeAdapterBase = d.to;
         (s.modelRefreshes ??= []).push({ ...d, at: e.at, by: e.actor });
@@ -248,12 +319,19 @@ export function reduce(entries) {
       case 'handoff':
         if (d.runtimeSelected === true && typeof d.runtimeSelectionOwner === 'string' && d.runtimeAuthority) s.runtimePreference = { runtime: d.runtime, owner: d.runtimeSelectionOwner, authority: d.runtimeAuthority };
         s.handoffs.push({ ...d, at: e.at, by: e.actor });
-        if (!s.roles[d.role].includes(d.agent)) s.roles[d.role].push(d.agent);
+        if (!(s.roles[d.role] ??= []).includes(d.agent)) s.roles[d.role].push(d.agent);
+        // A delta-review decision applies to the next reviewer round only.
+        if (d.role === 'reviewer') s.strategy.nextRound = null;
         if (d.role === 'implementer' && ['admitted', 'planned'].includes(s.phase)) s.phase = 'implementing';
         break;
       case 'agent.launch.requested': {
         const h = s.handoffs.find((h) => h.bundle === d.handoff);
         if (h) h.launch = { ...d, requestedAt: e.at, status: 'starting' };
+        break;
+      }
+      case 'agent.launch.spawned': {
+        const h = s.handoffs.find((h) => h.bundle === d.handoff);
+        if (h?.launch) h.launch = { ...h.launch, pid: d.pid, out: d.out, err: d.err };
         break;
       }
       case 'agent.launch.started': {
@@ -287,6 +365,10 @@ export function reduce(entries) {
       case 'review.refused':
         s.reviewsRefused.push({ ...d, at: e.at });
         break;
+      // A plan `wf plan` refused (I-84, I-87): its kept report and the validator's message, handed to the next planner.
+      case 'plan.refused':
+        s.planRefusals.push({ ...d, at: e.at });
+        break;
       // A gate the owner started out of the order of work (I-27), with the reason it was recorded under.
       case 'gate.override':
         s.gateOverrides.push({ ...d, at: e.at, by: e.actor });
@@ -301,6 +383,9 @@ export function reduce(entries) {
         break;
       case 'implementer.opened':
         s.implementers.push({ handoff: d.handoff, agent: d.agent, work: d.work ?? null, heads: d.heads ?? null, openedAt: e.at, closedAt: null, outcome: null });
+        break;
+      case 'implementer.report':
+        (s.implementerReports ??= []).push({ handoff: d.handoff, agent: d.agent, at: e.at, summary: d.summary, approach: d.approach, expect: expectOf(d.expect), ran: d.ran, proofs: d.proofs, left: d.left });
         break;
       case 'implementer.closed': {
         const x = s.implementers.filter((y) => y.agent === d.agent && !y.closedAt).at(-1);
@@ -317,8 +402,8 @@ export function reduce(entries) {
         s.reviewParts.push({ ...d, at: e.at });
         break;
       case 'review.recorded':
-        s.review = { ...d, at: e.at };
-        s.reviews.push({ reviewer: d.closure?.reviewer ?? null, at: e.at, reviewerModel: d.reviewerModel ?? null, handoff: d.handoff ?? null, revealed: d.revealed ?? false, closure: d.closure, provenance: d.provenance ?? null, identity: d.identity ?? null, reads: d.reads ?? null, raw: d.raw ?? null, tree: d.tree });
+        s.review = { ...d, at: e.at, closure: withMoved(s, d.closure) };
+        s.reviews.push({ reviewer: d.closure?.reviewer ?? null, mode: d.mode ?? null, at: e.at, reviewerModel: d.reviewerModel ?? null, handoff: d.handoff ?? null, revealed: d.revealed ?? false, closure: withMoved(s, d.closure), provenance: d.provenance ?? null, identity: d.identity ?? null, reads: d.reads ?? null, raw: d.raw ?? null, tree: d.tree });
         break;
       case 'base.merged':
         s.baseMerges.push({ ...d, at: e.at });
@@ -328,7 +413,7 @@ export function reduce(entries) {
         s.phase = 'accepted';
         break;
       case 'hold':
-        s.holds.push({ reason: d.reason, at: e.at, by: e.actor, released: null });
+        s.holds.push({ reason: d.reason, at: e.at, by: e.actor, released: null, decision: d.decision ?? null });
         break;
       case 'release':
         for (const h of s.holds) if (!h.released) h.released = e.at;
@@ -393,8 +478,16 @@ export function reduce(entries) {
         break;
       // The discovered-issue ledger (I-18): every issue found during the ticket, fixed or deferred in the owner's words.
       case 'discovered.added':
-        s.discovered.push({ id: d.id, summary: d.summary, scope: d.scope ?? null, where: d.where ?? null, foundBy: d.foundBy ?? null, blockedBy: d.blockedBy ?? null, anchor: d.anchor ?? null, at: e.at, by: e.actor, status: 'open', fixed: null, deferred: null });
+        s.discovered.push({ id: d.id, summary: d.summary, kind: d.kind ?? 'defect', severity: d.severity ?? null, invariant: d.invariant ?? null, scope: d.scope ?? null, where: d.where ?? null, foundBy: d.foundBy ?? null, blockedBy: d.blockedBy ?? null, anchor: d.anchor ?? null, at: e.at, by: e.actor, status: 'open', fixed: null, deferred: null });
         break;
+      case 'discovered.rated': {
+        const x = s.discovered.find((y) => y.id === d.id);
+        if (x) {
+          x.rated = [...(x.rated ?? []), { from: d.from ?? null, to: d.severity, by: e.actor, at: e.at, reason: d.reason ?? null, decision: d.decision ?? null }];
+          x.severity = d.severity;
+        }
+        break;
+      }
       case 'discovered.closed': {
         const x = s.discovered.find((y) => y.id === d.id);
         if (!x) break;
@@ -445,9 +538,45 @@ export function reduce(entries) {
         break;
       case 'batch.joined':
         s.batchOf = d.batch;
+        s.batchPending = d.pending === true;
         break;
       case 'batch.ejected':
         s.batchOf = null;
+        s.batchPending = false;
+        break;
+      // The strategist's recorded decision (engine/strategy.mjs): the action, its prediction and why it was handed.
+      case 'strategy.decided': {
+        const id = d.id ?? `S${s.strategy.decisions.length + 1}`;
+        s.strategy.decisions.push({ id, at: e.at, by: e.actor, action: d.action, rationale: d.rationale, prediction: d.prediction ?? null, items: d.items ?? [], split: d.split ?? null, model: d.model ?? null, strategist: d.strategist ?? null, handoff: d.handoff ?? null, handedBecause: d.handedBecause ?? null, escalation: d.escalation ?? null, roundsAtDecision: d.roundsAtDecision ?? null, signals: d.signals ?? null });
+        for (const o of d.outcomes ?? []) s.strategy.outcomes[o.decision] = { status: o.status, observed: o.observed ?? null, at: e.at };
+        if (d.action === 'delta-review') s.strategy.nextRound = 'delta';
+        // A model decision: the next handoffs of that role run at the class it names (engine/models.mjs).
+        if (d.action === 'model' && d.model?.role && d.model?.class) s.strategy.classFor = { ...(s.strategy.classFor ?? {}), [d.model.role]: d.model.class };
+        if (d.action === 'ticket') s.strategy.toTicket.push({ decision: id, items: d.items ?? [], at: e.at });
+        break;
+      }
+      // The owner escalation the engine saw fire and refused on (measurement for the report).
+      case 'strategy.tripwire':
+        if (!s.strategy.tripwires.some((t) => t.id === d.tripwire && t.key === d.key)) s.strategy.tripwires.push({ id: d.tripwire, key: d.key, summary: d.summary ?? null, at: e.at });
+        break;
+      // `wf split` on the parent: what moved to which sibling attempts. Moved obligations leave this attempt's open set.
+      case 'split.performed': {
+        const m = d.moved ?? {};
+        s.splits.push({ id: d.id, at: e.at, by: e.actor, reason: d.reason, siblings: d.siblings ?? [], moved: m, batch: d.batch ?? null });
+        const gone = (key) => new Set(m[key] ?? []);
+        if (gone('criteria').size) s.criteria = (s.criteria ?? []).filter((c) => !gone('criteria').has(c.id));
+        if (gone('work').size && s.work) s.work = s.work.filter((w) => !gone('work').has(w.id));
+        if (gone('discovered').size) s.discovered = s.discovered.filter((x) => !gone('discovered').has(x.id));
+        for (const key of Object.keys(s.strategy.moved)) s.strategy.moved[key].push(...(m[key] ?? []));
+        if (m.findings?.length) {
+          if (s.review) s.review = { ...s.review, closure: withMoved(s, s.review.closure) };
+          s.reviews = s.reviews.map((r) => ({ ...r, closure: withMoved(s, r.closure) }));
+        }
+        break;
+      }
+      // `wf split` on a sibling attempt: where its obligations came from.
+      case 'split.created':
+        s.splitFrom = { attempt: d.from, split: d.split, items: d.items ?? [], reason: d.reason, at: e.at };
         break;
       case 'tracker.pending':
         s.tracker.pending.push(...d.actions.map((a) => narrowAttach({ ...a, event: d.event }, s.delivery.narrowed)));
@@ -457,6 +586,14 @@ export function reduce(entries) {
         s.tracker.pending = s.tracker.pending.filter((a) => a.event !== d.event);
         s.tracker.done.push({ event: d.event, at: e.at, capture: d.capture, provenance: d.provenance ?? null, verified: d.verified ?? null, ...(d.mode ? { mode: d.mode, readAt: d.readAt ?? null, comment: d.comment ?? null } : {}), ...(d.host ? { host: d.host } : {}), extraLines: d.extraLines ?? [], ...(d.attachments ? { attachments: d.attachments } : {}) });
         break;
+      case 'decision.created':
+        s.decisions.push({ id: d.id, kind: d.kind, key: d.key, summary: d.summary, choices: d.choices, createdAt: e.at, by: e.actor, approved: null });
+        break;
+      case 'decision.approved': {
+        const x = s.decisions.find((y) => y.id === d.id);
+        if (x) x.approved = { choice: d.choice, at: e.at, via: d.via };
+        break;
+      }
       case 'closed':
         s.closedAt = e.at;
         s.phase = 'done';

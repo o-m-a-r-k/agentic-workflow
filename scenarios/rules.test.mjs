@@ -31,9 +31,8 @@ function project(name, change = { 'web/a.txt': 'w2\n', 'api/a.txt': 'a2\n' }) {
 }
 
 const bundleOf = (root, id, agent) => JSON.parse(fs.readFileSync(ok(wf(root, ['handoff', 'reviewer', '--agent', agent, '--attempt', id, '--json'])).json().bundle, 'utf8'));
-const verdicts = (b) => b.rules.map((r) => ({ rule: r.id, verdict: 'complies', evidence: `${r.docs[0]} section 1` }));
 
-test('rules: matched by paths and by frontmatter; a review before the gate needs the paths-triggered skill; accept needs a verdict per rule', () => {
+test('rules: matched by paths and by frontmatter; a review before the gate needs the paths-triggered skill; the verdicts a reviewer gives are recorded with the acceptance', () => {
   const { base, root, id } = project('rules', { 'web/a.txt': 'w2\n', 'api/a.txt': 'a2\n', 'docs/ui.md': '---\npaths: ["web/**"]\n---\n# UI rules, edited by the ticket\n' });
   // Before any gate: the skill is required by changed paths, not by screenshots.
   const early = bundleOf(root, id, 'r0');
@@ -47,21 +46,13 @@ test('rules: matched by paths and by frontmatter; a review before the gate needs
   assert.match(fs.readFileSync(ui.read[0], 'utf8'), /# UI rules\nUse the design tokens/, 'the trusted copy is the base version');
   assert.equal(early.rules[1].read.length, 2);
   assert.equal(early.rules[1].docChangedByTicket, false);
-  assert.match(early.instructions, /Read every document under `rules`/);
+  assert.match(early.instructions, /Rules, skills[^:]*are context for your judgement: cite them in findings; no verdict form is owed/);
 
   ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', id]));
   const b = bundleOf(root, id, 'r1');
-  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r1')), '--attempt', id]));
-  const missing = wf(root, ['accept', '--attempt', id]);
-  assert.equal(missing.code, 75);
-  assert.match(missing.err, /rule ui: no verdict/);
-  assert.match(missing.err, /rule api: no verdict/);
-  assert.match(missing.err, /hand the tree to a fresh reviewer/);
-  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r1', { rules: [{ rule: 'ui', verdict: 'complies', evidence: ' ' }, { rule: 'api', verdict: 'finding', evidence: 'errors untyped' }] })), '--attempt', id]));
-  const bad = wf(root, ['accept', '--attempt', id]).err;
-  assert.match(bad, /rule ui: complies needs evidence/);
-  assert.match(bad, /rule api: a finding verdict names a finding id/);
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r1', { findings: [{ id: 'F1', severity: 'minor', summary: 'error code naming', status: 'fixed', evidence: 'api/a.txt:1' }], rules: [{ rule: 'ui', verdict: 'complies', evidence: 'docs/ui.md tokens' }, { rule: 'api', verdict: 'finding', finding: 'F1', evidence: 'api/a.txt:1' }] })), '--attempt', id]));
+  // 0.7.0 (goals, not forms): the rules are context in the bundle and no verdict per rule is required (the next scenario
+  // accepts without any); the ones given are recorded, and shown in the export.
   ok(wf(root, ['accept', '--attempt', id]));
   assert.deepEqual(state(root, id).accepted.rules.map((r) => [r.rule, r.verdict]), [['ui', 'complies'], ['api', 'finding']]);
   assert.ok(b.rules.length === 2);
@@ -97,57 +88,19 @@ test('config: duplicate rule ids, a rule without documents and an unknown `when`
   assert.match(d, /applies to every change/);
 });
 
-// The reviewer's transcript must show it read each document and skill the bundle lists.
-function transcript(root, name, prompt, calls) {
-  const dir = path.join(homeOf(root), '.claude', 'projects', '-proj', 'sess', 'subagents');
-  const f = `agent-${Math.random().toString(36).slice(2)}`;
-  const at = new Date(Date.now() + 1000).toISOString();
-  const entries = [{ type: 'user', timestamp: at, message: { role: 'user', content: prompt } }];
-  calls.forEach((c, i) => {
-    entries.push({ type: 'assistant', timestamp: at, message: { model: 'm', content: [{ type: 'tool_use', id: `t${i}`, name: c.name, input: c.input }] } });
-    entries.push({ type: 'user', timestamp: at, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: `t${i}`, content: 'ok', ...(c.error ? { is_error: true } : {}) }] } });
-  });
-  write(dir, `${f}.meta.json`, JSON.stringify({ name, agentType: 'wf-reviewer' }));
-  write(dir, `${f}.jsonl`, entries.map((x) => JSON.stringify(x)).join('\n'));
-}
-
-test('reads: where a transcript exists every rule document and skill must have been read; Bash cat counts, another file or a failed read does not', () => {
+// Named failure (0.7.0): a transcript read receipt refused reviewers whose reads were real and proved only that a tool call
+// ran, not that the document was understood. The bundle names the documents and the closure is recorded whatever the
+// transcript shows. A verdict per rule is no longer a form either (it measured compliance with the form, not defects):
+// acceptance records the ones given and asks for none.
+test('no read receipts: a closure is recorded whether or not the reviewer transcript shows the rule documents read, and no verdict per rule is required', () => {
   const { base, root, id } = project('rules-reads');
-  fs.mkdirSync(path.join(homeOf(root), '.claude', 'projects'), { recursive: true });
   ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', id]));
-  const start = (agent) => ok(wf(root, ['handoff', 'reviewer', '--agent', agent, '--attempt', id])).out.trim();
-  const b = (agent) => {
-    const s = state(root, id);
-    return JSON.parse(fs.readFileSync(s.handoffs.filter((h) => h.role === 'reviewer' && h.agent === agent).at(-1).bundle, 'utf8'));
-  };
-  const closure = (agent, bundle) => closureFile(base, goodClosure(agent, { rules: verdicts(bundle) }));
-
-  const s1 = start('ra');
-  const b1 = b('ra');
-  const [uiDoc] = b1.rules[0].read;
-  const [apiDoc, errDoc] = b1.rules[1].read;
-  // One document never read, one read through a failed call, one other file read: all three are missing.
-  transcript(root, 'ra', s1, [{ name: 'Read', input: { file_path: uiDoc } }, { name: 'Read', input: { file_path: apiDoc }, error: true }, { name: 'Read', input: { file_path: path.join(root, 'docs/cli.md') } }, { name: 'Skill', input: { skill: 'design-review' } }]);
-  const r1 = wf(root, ['review', '--closure', closure('ra', b1), '--attempt', id]);
-  assert.equal(r1.code, 75);
-  assert.match(r1.err, /no successful read of 2 document\(s\)/);
-  assert.match(r1.err, new RegExp(`rule api: ${apiDoc.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
-  assert.match(r1.err, /rule api: .*errors\.md/);
-  assert.doesNotMatch(r1.err, /rule ui:/);
-  assert.match(r1.err, /start a fresh reviewer round/);
-
-  const s2 = start('rb');
-  const b2 = b('rb');
-  transcript(root, 'rb', s2, [{ name: 'Read', input: { file_path: b2.rules[0].read[0] } }, { name: 'Bash', input: { command: `cat ${b2.rules[1].read[0]} ${b2.rules[1].read[1]}` } }, { name: 'Read', input: { file_path: b2.skills[0].file } }]);
-  ok(wf(root, ['review', '--closure', closure('rb', b2), '--attempt', id]));
-  assert.equal(state(root, id).reviews.at(-1).reads.status, 'verified');
+  const bundle = bundleOf(root, id, 'ra');
+  assert.ok(bundle.rules.length && bundle.skills.length, 'the bundle still names the documents to read');
+  // The reviewer's transcript shows nothing read, and the closure is recorded: no receipt is asked for. It judges no
+  // rule, and acceptance goes through and records none.
+  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('ra')), '--attempt', id]));
+  assert.equal(state(root, id).reviews.at(-1).reads ?? null, null, 'no read receipt is recorded');
   ok(wf(root, ['accept', '--attempt', id]));
-
-  // No transcript store on the machine: recorded unverified, not refused.
-  const other = project('rules-noreads');
-  ok(wf(other.root, ['gate', ...OUT_OF_ORDER, '--attempt', other.id]));
-  const ob = bundleOf(other.root, other.id, 'r');
-  ok(wf(other.root, ['review', '--closure', closureFile(other.base, goodClosure('r', { rules: verdicts(ob) })), '--attempt', other.id]));
-  assert.equal(state(other.root, other.id).reviews.at(-1).reads.status, 'unverified');
-  ok(wf(other.root, ['accept', '--attempt', other.id]));
+  assert.equal(state(root, id).accepted.rules, undefined, 'no verdict was given, so none is recorded');
 });

@@ -1,42 +1,38 @@
 #!/usr/bin/env node
-// Keeps agents' shell and file-editing tools out of agentic-workflow evidence (.wf-evidence/). It does not try to
-// understand general shell: it decides on the raw text. Named failures: 0.1.16 and 0.1.17 parsed commands to tell a copy OUT of
-// evidence (a read) from a write INTO it, and every rule added for that opened a new parser differential.
+// Keeps agents' file-editing tools (and a shell started inside the evidence folder) out of agentic-workflow evidence
+// (.wf-evidence/). Threat model: agents are fallible, not adversarial (docs/trust-model.md). It judges file targets, never
+// shell text. Named failure (0.7.0): the Bash text-scanning branch made 334 refusals in the field, none of them a write
+// attempt and 229 naming no evidence folder at all (any `$` or backtick next to "wf-"), and it blocked the engine's own
+// recovery advice. Writing evidence through a shell is not a mistake an agent makes by accident; the ledger's hash chain,
+// its anchor, the manifest and the OS immutability flags detect and refuse it afterwards (`wf verify`).
 //
-// - A Bash command that mentions the evidence in any form (case-insensitive; also after removing quotes, backslashes,
-//   `$'`, `${`, braces and whitespace; a glob that can match `.wf-evidence`; `evidence` next to a glob, brace or
-//   variable character) is blocked, unless the whole trimmed command is exactly one `wf <subcommand> [args]` with none
-//   of ; & | ` $ ( ) < > newline, backslash or quote characters. A command run with its working directory inside the
-//   evidence is blocked the same way.
-// - Outside project/evidence/worktree scope, a whole literal rg/grep search of existing regular files may contain
-//   a quoted regex like `.*`: only that pattern's broad-glob match is ignored. All explicit evidence-name checks stay.
-// - An Edit/Write/NotebookEdit target that mentions the evidence, or really lies inside it (symlinks resolved), is
-//   blocked. The content written is not inspected (a closure may cite evidence paths).
-// - Anything it cannot read (unparsable input, an unknown tool shape, an exception) is blocked when the input mentions
-//   the evidence, and passes otherwise.
+// - An Edit/Write/MultiEdit/NotebookEdit target, or a native patch target (a rename included), that has a
+//   `.wf-evidence` path component, as written or as the OS resolves it (symlinks followed, case and Unicode forms folded),
+//   is blocked. The content written is not inspected (a closure may cite evidence paths).
+// - A command run with its working directory inside the evidence is blocked.
+// - Everything else, a Bash command included, passes. Input the hook cannot read passes too.
 // Reading evidence is the Read tool's job (this hook does not see it); copies out are made by `wf export screenshots`.
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { touchesEvidence, canonical } from '../engine/paths.mjs';
+import { findHost, hostIds, optional } from '../engine/hosts/index.mjs';
+import { touchesEvidence } from '../engine/paths.mjs';
 
 // I-16, named failure: the refusal said neither what matched nor how to avoid it, so agents split commands or switched
-// tools by trial. It names the matched token (in `verdict`) and the ways around it that need no exception here.
-const REFUSAL = 'agentic-workflow: refused: this names or targets the workflow evidence folder, which only `wf` writes. To avoid this: say "the evidence folder" instead of its name in commit messages, echo text and grep patterns; read evidence with the Read tool or `wf evidence list` / `wf evidence show <path>`; copy screenshots out with `wf export screenshots`; run each `wf` command as one plain invocation (no ; && | $( ) redirections or quotes).';
+// tools by trial. It names the matched target and the supported routes.
+const REFUSAL = 'agentic-workflow: refused: this targets the workflow evidence folder, which only `wf` writes. Read evidence with the Read tool or `wf evidence list` / `wf evidence show <path>`; copy screenshots out with `wf export screenshots`; change recorded state through a `wf` command.';
 
 // Run as a hook only when executed directly; importing (tests) has no side effects.
 if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
   const chunks = [];
   process.stdin.on('data', (c) => chunks.push(c));
   process.stdin.on('end', () => {
-    let verdict;
-    let input = '';
+    let verdict = null;
     try {
       // Decoded once: a multi-byte character split across chunks must not turn into replacement characters.
-      input = Buffer.concat(chunks).toString('utf8');
-      verdict = decide(input);
+      verdict = decide(Buffer.concat(chunks).toString('utf8'));
     } catch {
-      verdict = mentionsEvidence(input) ? 'the hook could not judge this input' : null;
+      verdict = null;
     }
     if (verdict) {
       process.stderr.write(`${REFUSAL} (${verdict})\n`);
@@ -47,93 +43,7 @@ if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === imp
 }
 
 const segmentsOf = (p) => String(p).split(/[\\/]+/);
-const inEvidence = (p) => segmentsOf(p).some((s) => s.normalize('NFKC').replace(/[\p{Cf}\u00ad]/gu, '').toLowerCase() === '.wf-evidence');
-
-// A path segment written as a glob (`.wf-*`, `.[w]f-evidence`, `.*`) that the shell could expand to `.wf-evidence`.
-// Translated as the shell matches a glob: `*` and `?` as wildcards, a closed `[...]` as a class, an unclosed `[`
-// as a literal (named false positive, 0.3.0: an unclosed `[` made an invalid regex, and the error counted as a match).
-function globSegmentMatches(seg, target) {
-  let re = '^';
-  for (let i = 0; i < seg.length; i++) {
-    const c = seg[i];
-    if (c === '*') re += '.*';
-    else if (c === '?') re += '.';
-    else if (c === '[') {
-      const end = seg.indexOf(']', i + 2);
-      if (end < 0) re += '\\[';
-      else {
-        let body = seg.slice(i + 1, end).replace(/\\/g, '\\\\');
-        if (body.startsWith('!')) body = `^${body.slice(1)}`;
-        re += `[${body}]`;
-        i = end;
-      }
-    } else re += c.replace(/[.+^${}()|\\\]]/g, '\\$&');
-  }
-  try {
-    return new RegExp(`${re}$`, 'i').test(target);
-  } catch {
-    return false;
-  }
-}
-function globMatchesEvidence(token) {
-  return token.split('/').some((seg) => seg.startsWith('.') && /[*?[]/.test(seg) && globSegmentMatches(seg, '.wf-evidence'));
-}
-
-// Whether text refers to the evidence in any form the shell could turn into its path.
-// Unicode is folded first (NFKC: full-width and compatibility forms; zero-width and other invisible format characters
-// removed), so a look-alike spelling counts too.
-const fold = (text) => String(text ?? '').normalize('NFKC').replace(/[\p{Cf}\u00ad]|[\p{Cc}](?<![\n\t\r])/gu, '').toLowerCase();
-// Escapes a shell or printf turns into characters: \xHH, \NNN (octal), \uHHHH, \UHHHHHHHH.
-const unescape = (text) => text.replace(/\\x([0-9a-f]{1,2})|\\u([0-9a-f]{4})|\\U([0-9a-f]{8})|\\0?([0-7]{1,3})/gi, (m, x, u, U, o) => {
-  try {
-    return String.fromCodePoint(parseInt(x ?? u ?? U ?? o, x || u || U ? 16 : 8));
-  } catch {
-    return m;
-  }
-});
-
-// The same decision as always (whether text refers to the evidence), returning what matched for the refusal (I-16):
-// the whitespace-separated token of the input that triggers the check, or the input itself when the match spans tokens.
-// Null when nothing does. Report the triggering token without claiming an identifier suffix is a folder fragment.
-const shown = (t) => (t.length > 80 ? `${t.slice(0, 77)}...` : t);
-// Never empty: a match always refuses, whatever is shown (review of 76ad8d8).
-const tokenOf = (text, pred) => {
-  const t = String(text ?? '').split(/\s+/).find((x) => x && pred(x));
-  return shown(t ?? String(text ?? '').trim()) || '(the whole input)';
-};
-// Named failure: Markdown `resultEvidence` was rejected as the standalone fragment `evidence` plus substitution.
-// Match a whole trailing fragment, consistent with glued(); all other name/assembly/glob checks stay intact.
-const assembled = (raw) => /[$`]/.test(raw) && (/wf-|\.wf\b/.test(raw) || /=\s*['"]?evidence|[$`})]evidence|\bevidence[$`{(]/.test(raw));
-const squeeze = (raw) => raw.replace(/\$'|\$\{|[\s'"`\\{},]/g, '');
-const glued = (raw) => /(^|[^a-z0-9])[*?$]+evidence\b|\bevidence[*?]/.test(raw.replace(/['"\\]/g, ''));
-
-export function evidenceMatch(text, globText = text) {
-  const raw = fold(text);
-  if (raw.includes('wf-evidence')) return tokenOf(text, (t) => fold(t).includes('wf-evidence'));
-  if (fold(unescape(raw)).includes('wf-evidence')) return tokenOf(text, (t) => fold(unescape(fold(t))).includes('wf-evidence'));
-  // A path assembled at run time: an expansion or substitution together with a part of the name (`wf-` or `.wf`, or
-  // `evidence` assigned to a variable or touching an expansion). The word evidence alone in prose next to a `$` does not
-  // count (named false positive, 0.3.0).
-  if (assembled(raw)) return tokenOf(text, (t) => /wf-|\.wf\b|evidence/.test(fold(t)));
-  // Brace alternatives reassemble when braces and commas are dropped.
-  const squeezed = squeeze(raw);
-  if (squeezed.includes('wf-evidence') || squeezed.includes('wf-ev')) return tokenOf(text, (t) => squeeze(fold(t)).includes('wf-ev'));
-  // `evidence` glued to a glob or expansion character (`*evidence`, `.wf-{evidence,x}` is caught above): not a comma, a
-  // brace or a bracket in prose or code (named false positive, 0.3.0: "keep evidence, ledger" was refused).
-  if (glued(raw)) return tokenOf(text, (t) => glued(fold(t)));
-  const glob = fold(globText).split(/[\s;&|()<>'"`=]+/).find((t) => t && globMatchesEvidence(t));
-  return glob ? shown(glob) || '(the whole input)' : null;
-}
-
-export const mentionsEvidence = (text) => evidenceMatch(text) !== null;
-
-// Exactly one plain `wf` invocation: nothing that chains, substitutes, redirects, quotes or escapes. `wf run` is not
-// one (named failure, 0.4.5: `wf run --lease X -- <command>` executes its command, so a command on the evidence passed
-// as a plain `wf` invocation); it is judged like any other command.
-export const isPlainWf = (command) => {
-  const c = String(command).trim();
-  return /^wf [a-z][a-z-]*( [^\s].*)?$/.test(c) && !/[;&|`$()<>\n\r\\'"]/.test(c) && !/^wf run(\s|$)/.test(c);
-};
+const inEvidence = (p) => segmentsOf(p).some((s) => s.normalize('NFKC').replace(/[\p{Cf}­]/gu, '').toLowerCase() === '.wf-evidence');
 
 // The real location of a path whose ancestors may be symlinks (the nearest existing ancestor is resolved).
 function real(p) {
@@ -151,104 +61,34 @@ function real(p) {
   }
 }
 
-// Named failure I-51: a quoted search regex such as `.*` was treated as a shell glob in unrelated projects.
-// This is one whole literal search grammar, not a shell parser or a cwd-based bypass. Only its pattern span is
-// exempt from the broad-glob predicate; explicit/obfuscated evidence names still inspect the original command.
-function literalSearchGlobText(command, cwd) {
-  try {
-    const resolved = fs.realpathSync(cwd);
-    if (!fs.statSync(resolved).isDirectory()) return command;
-    for (const start of [path.resolve(cwd), resolved]) {
-      if (start.split(path.sep).some((part) => part === '.wf-worktrees')) return command;
-      let dir = start;
-      for (;;) {
-        for (const marker of ['.workflow', '.wf-evidence', '.wf-worktrees']) {
-          try { fs.lstatSync(path.join(dir, marker)); return command; }
-          catch (e) { if (e.code !== 'ENOENT') return command; }
-        }
-        const parent = path.dirname(dir);
-        if (parent === dir) break;
-        dir = parent;
-      }
-    }
-    const c = command.trim();
-    const m = /^(?:rg|grep)(?:[ \t]+(?:-n|-i|-l|-c|-q|--line-number|--ignore-case|--files-with-matches|--count|--quiet))*[ \t]+(?:(?:-e|--regexp)[ \t]+)?('[^'\r\n]*'|"[^"\\$`\r\n]*")([ \t]+(?:--[ \t]+)?[A-Za-z0-9_./:@+-]+(?:[ \t]+[A-Za-z0-9_./:@+-]+)*)$/.exec(c);
-    if (!m) return command;
-    const patternAt = c.length - m[2].length - m[1].length;
-    // Quoting does not stop option parsing: e.g. an rg --pre option must never be mistaken for a regex.
-    if (m[1].slice(1, -1).startsWith('-') && !/(?:^|[ \t])(?:-e|--regexp)[ \t]+$/.test(c.slice(0, patternAt))) return command;
-    const operands = m[2].trim().split(/[ \t]+/);
-    if (operands[0] === '--') operands.shift();
-    for (const operand of operands) {
-      if (operand.startsWith('-') || touchesEvidence(operand, cwd)) return command;
-      const stat = fs.statSync(canonical(operand, cwd));
-      if (!stat.isFile() || stat.nlink !== 1) return command;
-    }
-    return c.slice(0, patternAt) + ' '.repeat(m[1].length) + c.slice(patternAt + m[1].length);
-  } catch { return command; }
-}
-
-// Named failure I-43: Codex sends native file patches in tool_input.command, with tool_name apply_patch.
-// Parse only that file-edit protocol; Bash keeps the frozen raw-text decision, even if its text looks like a patch.
-function patchTargets(text) {
-  if (typeof text !== 'string' || text.includes('\0')) throw new Error('invalid patch text');
-  const lines = text.trim().split(/\r?\n/);
-  if (lines[0] !== '*** Begin Patch' || lines.at(-1) !== '*** End Patch') throw new Error('invalid patch boundary');
-  const targets = [];
-  let operation = null, body = false, moveAllowed = false;
-  for (const line of lines.slice(1, -1)) {
-    const header = /^\*\*\* (Add|Update|Delete) File: (.+)$/.exec(line);
-    if (header) {
-      if (operation === 'Add' && !body) throw new Error('empty add');
-      operation = header[1]; body = false; moveAllowed = operation === 'Update';
-      targets.push(header[2]); continue;
-    }
-    if (operation === 'Update' && moveAllowed && line.startsWith('*** Move to: ')) {
-      if (!line.slice(13).trim()) throw new Error('empty move');
-      targets.push(line.slice(13)); moveAllowed = false; continue;
-    }
-    moveAllowed = false;
-    if (operation === 'Add' && line.startsWith('+')) { body = true; continue; }
-    if (operation === 'Update' && (/^[ +\-]/.test(line) || line === '@@' || line.startsWith('@@ ') || line === '*** End of File')) { body = true; continue; }
-    throw new Error('unknown patch line');
-  }
-  if (!targets.length || (operation === 'Add' && !body)) throw new Error('empty patch');
-  return targets;
-}
+const expandHome = (file) => file.replace(/^~(?=\/|$)/, process.env.HOME ?? '~');
 
 export function check(data) {
-  if (!data || typeof data !== 'object') return mentionsEvidence(JSON.stringify(data ?? '')) ? 'unreadable input' : null;
+  if (!data || typeof data !== 'object') return null;
   const t = data.tool_input;
   const cwd = typeof data.cwd === 'string' && data.cwd ? data.cwd : process.cwd();
   const cwdInEvidence = inEvidence(cwd) || touchesEvidence(cwd);
-  if (!t || typeof t !== 'object') return mentionsEvidence(JSON.stringify(data)) || cwdInEvidence ? 'unknown tool input' : null;
-  // Every file target is checked whatever else the input carries (a `command` next to a `file_path` whitelists nothing).
-  let patches = null;
-  if (data.tool_name === 'apply_patch') {
-    try { patches = patchTargets(t.command); } catch { return 'malformed native file-edit payload'; }
+  if (!t || typeof t !== 'object') return cwdInEvidence ? 'unknown tool input' : null;
+  // Every file target is checked whatever else the input carries; each harness adapter reads the payload shape its own
+  // file tools send (engine/hosts/).
+  const files = [];
+  let fileEdit = false;
+  for (const id of hostIds()) {
+    const found = optional(findHost(id), 'fileTargets')?.(data);
+    if (!found) continue;
+    if (found.malformed) return 'malformed native file-edit payload';
+    files.push(...found.targets);
+    fileEdit ||= found.fileEdit === true;
   }
-  const files = [...(patches ?? []), t.file_path, t.notebook_path, t.path, ...(Array.isArray(t.edits) ? t.edits.map((e) => e?.file_path) : [])];
   for (const file of files) {
     if (file === undefined || file === null) continue;
     if (typeof file !== 'string') return 'unknown file target';
-    const abs = path.resolve(cwd, file.replace(/^~(?=\/|$)/, process.env.HOME ?? '~'));
-    if (mentionsEvidence(file) || inEvidence(abs) || inEvidence(real(abs)) || touchesEvidence(file.replace(/^~(?=\/|$)/, process.env.HOME ?? '~'), cwd)) return `${file} is workflow evidence`;
+    const abs = path.resolve(cwd, expandHome(file));
+    if (inEvidence(file) || inEvidence(abs) || inEvidence(real(abs)) || touchesEvidence(expandHome(file), cwd)) return `${file} is workflow evidence`;
   }
-  if (patches) return null;
-  const bashTool = data.tool_name === undefined || data.tool_name === 'Bash';
-  if (typeof t.command === 'string') {
-    // A Bash command; an unexpected `command` on another tool is judged the same way, never as a whitelist.
-    if (bashTool && isPlainWf(t.command)) return null;
-    let matched = evidenceMatch(t.command);
-    if (matched !== null && bashTool && !cwdInEvidence) matched = evidenceMatch(t.command, literalSearchGlobText(t.command, cwd));
-    if (matched !== null) return `matched ${JSON.stringify(matched)}`;
-    if (cwdInEvidence) return `the command runs inside the evidence folder (working directory ${cwd})`;
-    return null;
-  }
-  if (t.command !== undefined) return mentionsEvidence(JSON.stringify(t.command)) || cwdInEvidence ? 'a command that is not text' : null;
-  if (files.some((f) => typeof f === 'string')) return null;
-  // Neither a command nor a file target: judged on everything it carries.
-  return mentionsEvidence(JSON.stringify(t)) || cwdInEvidence ? 'unknown tool input' : null;
+  if (fileEdit) return null;
+  if (cwdInEvidence && (t.command !== undefined || !files.some((f) => typeof f === 'string'))) return `the command runs inside the evidence folder (working directory ${cwd})`;
+  return null;
 }
 
 export function decide(input) {
@@ -256,7 +96,7 @@ export function decide(input) {
   try {
     data = JSON.parse(input);
   } catch {
-    return mentionsEvidence(input) ? 'unparsable input' : null;
+    return null;
   }
   return check(data);
 }

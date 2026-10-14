@@ -172,9 +172,8 @@ test('one canonical path answer: `..` after a link, prefix collisions, case, Uni
   assert.match(wf(proj, ['report', '--csv', `${base}/to-attempts/../x.csv`]).err, /is inside \.wf-evidence/);
   ok(wf(proj, ['report', '--csv', path.join(proj, '.wf-evidence-x.csv')]));
   assert.ok(check({ cwd: base, tool_input: { file_path: `${base}/to-attempts/../ledger.jsonl` } }), 'the hook resolves `..` after a link the same way');
-  // The hook's raw-text rule stays stricter than the path answer (by design since 0.1.18): a name that mentions the
-  // evidence is refused even where the OS would put it outside. Stricter, never looser.
-  assert.ok(check({ cwd: base, tool_input: { file_path: path.join(proj, '.wf-evidence-x.csv') } }));
+  // A name that only starts like the evidence folder is outside it, for the hook and for the path answer alike (0.7.0).
+  assert.equal(check({ cwd: base, tool_input: { file_path: path.join(proj, '.wf-evidence-x.csv') } }), null);
   assert.equal(touchesEvidence(path.join(proj, '.wf-evidence-x.csv')), false);
 });
 

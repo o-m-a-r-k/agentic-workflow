@@ -131,15 +131,20 @@ test('registering another requirement invalidates prior acceptance and the passi
   assert.equal(bundle.round,'code-review');assert.equal(bundle.gate.passedOnThisTree,false);
 });
 
-test('review refuses missing, wrong-pin and duplicate supplemental verdicts', () => {
+// Named failure (0.7.0): a closure was refused for a missing, wrong-pin or duplicate `validationChecked` entry, a form per
+// registered step that measured compliance with the form, not defects. The registered validation and its pinned commit stay
+// in the reviewer's bundle as context, and the review is recorded whatever verdicts the closure carries.
+test('review records supplemental verdicts or none: the bundle carries the pinned validation and a missing, wrong-pin or duplicate verdict refuses nothing', () => {
   const f=fixture('supplemental-review');candidate(f,{id:'http',repo:'app',run:'true'});ok(add(f));
-  ok(wf(f.root,['handoff','reviewer','--agent','code','--attempt',f.e.id]));
-  for (const validationChecked of [[],[{id:'http',commit:'0'.repeat(40),verdict:'complies',evidence:'checked'}]]) {
-    const r=wf(f.root,['review','--closure',closureFile(f.base,goodClosure('code',{validationChecked})),'--attempt',f.e.id]);
-    assert.match(r.err,/pinned-definition review verdict/);
+  const pin=state(f.root,f.e.id).validations[0].commit;
+  const verdict={id:'http',commit:pin,verdict:'complies',evidence:'Pinned runner inspected'};
+  const rounds=[['code',[]],['code-pin',[{id:'http',commit:'0'.repeat(40),verdict:'complies',evidence:'checked'}]],['code-dup',[verdict,verdict]],['code-ok',[verdict]]];
+  for (const [agent,validationChecked] of rounds) {
+    const hand=ok(wf(f.root,['handoff','reviewer','--agent',agent,'--attempt',f.e.id,'--json'])).json();
+    const bundle=JSON.parse(fs.readFileSync(hand.bundle??hand.file,'utf8'));
+    // The first round is a full review and carries the registered validation; the later ones are deltas and carry none.
+    assert.deepEqual(bundle.supplementalValidation.map((v)=>[v.commit,v.steps.map((s)=>s.id)]),agent==='code'?[[pin,['http']]]:[],'the registered validation is context in the full round');
+    ok(wf(f.root,['review','--closure',closureFile(f.base,goodClosure(agent,{validationChecked})),'--attempt',f.e.id]));
   }
-  const verdict={id:'http',commit:state(f.root,f.e.id).validations[0].commit,verdict:'complies',evidence:'Pinned runner inspected'};
-  const duplicate=wf(f.root,['review','--closure',closureFile(f.base,goodClosure('code',{validationChecked:[verdict,verdict]})),'--attempt',f.e.id]);
-  assert.match(duplicate.err,/pinned-definition review verdict/);
-  ok(wf(f.root,['review','--closure',closureFile(f.base,goodClosure('code',{validationChecked:[verdict]})),'--attempt',f.e.id]));
+  assert.deepEqual(state(f.root,f.e.id).reviews.map((r)=>r.closure.reviewer),rounds.map(([agent])=>agent),'every closure was recorded');
 });

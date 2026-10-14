@@ -296,8 +296,8 @@ function validateSurvey(survey, results, known, problems) {
       else ids.add(e.id);
       if (k === 'components') {
         if (!text(e?.file)) problems.push(`${where}: needs \`file\` (one row per affected component)`);
-        const missing = COMPONENT_COLUMNS.filter((c) => !present(e?.[c]));
-        if (missing.length) problems.push(`${where}: state ${missing.join(', ')} (write \`none\` or \`n/a\` where it does not apply)`);
+        // 0.7.0 (goals, not forms): the component columns are what to look at, not a form to fill; a planner states the
+        // ones that matter for this change (named cost: planners needed two or three runs on form alone).
         const r = entryQuery(where, e, results, problems, known);
         if (r && text(e?.file) && !hasFile(r, e.file)) problems.push(`${where}: ${e.file} is not a hit of query \`${e.query}\``);
       } else {
@@ -351,8 +351,7 @@ function validateChanges(changes, ctx, problems, { allowEmpty = false } = {}) {
     list(c?.suites).forEach((x, k) => {
       entryHits(`${where}.suites[${k}]`, x, results, problems, known);
       if (!text(x?.suite)) problems.push(`${where}.suites[${k}]: needs \`suite\``);
-      const banned = design.doNotRun.find((d) => text(x?.suite) && d.toLowerCase().includes(text(x.suite).toLowerCase()));
-      if (banned) problems.push(`${where}: suite \`${x.suite}\` must run for this change, but the plan's doNotRun bans it ("${banned}")`);
+      // 0.7.0: `doNotRun` is no longer a restriction (named failure: it banned suites a change needed); nothing to check.
     });
     if (design.work.size) {
       const w = Array.isArray(c?.work) ? c.work : c?.work ? [c.work] : [];
@@ -557,36 +556,13 @@ export function deriveFromDiff(root, cfg, state, { limit = 100, queryResults = n
 
 // ---- The reviewer's closure ----
 
-export function impactCheckProblems(map, closure, currentResults) {
-  const problems = [];
-  const c = closure?.impactChecked;
-  if (!c || typeof c !== 'object') return ['the closure has no `impactChecked`: re-run every recorded query on the final tree (`wf impact run --attempt <id>`), sample inventory entries and give a verdict on every caller under `impactMap.derived.outside`'];
-  const q = new Map(list(c.queries).map((x) => [String(x?.query), x]));
-  for (const [id, r] of Object.entries(currentResults ?? {})) {
-    const x = q.get(id);
-    if (!x) problems.push(`impactChecked.queries: no entry for query \`${id}\``);
-    else if (x.hits !== r.hits) problems.push(`impactChecked.queries: \`${id}\` states ${x.hits} hit(s); on the reviewed tree it returns ${r.hits}`);
-  }
-  const inv = new Set(map.inventory ?? []);
-  const sampled = list(c.sampled).filter((s) => inv.has(String(s?.entry)) && ['matches', 'finding'].includes(s?.verdict) && text(s?.evidence) && (s.verdict !== 'finding' || text(s?.finding)));
-  const distinct = new Set(sampled.map((s) => String(s.entry)));
-  const need = Math.min(10, inv.size);
-  if (distinct.size < need) problems.push(`impactChecked.sampled: ${distinct.size} valid inventory entr${distinct.size === 1 ? 'y' : 'ies'}; sample at least ${need} ({ entry, verdict: matches|finding, evidence, finding })`);
-  const findings = new Map(list(closure.findings).map((f) => [String(f?.id), f]));
-  const d = new Map(list(c.derived).map((x) => [`${x?.symbol}@${x?.file}`, x]));
-  // The bundle lists at most 100 outside callers; the rest are not silently passed (0.5.0 second review, fail-open).
-  if (map.derived?.truncated && !text(c.unlisted)) problems.push(`impactChecked.unlisted: the bundle lists ${map.derived.outside?.length ?? 0} of ${map.derived.total} callers outside the map; say how you checked the rest (\`unlisted\`), or raise each one as a finding`);
-  for (const o of map.derived?.outside ?? []) {
-    const x = d.get(`${o.symbol}@${o.file}`);
-    if (!x) problems.push(`impactChecked.derived: no verdict for ${o.symbol} used in ${o.file}`);
-    else if (x.verdict === 'in-map') {
-      if (!text(x.evidence)) problems.push(`impactChecked.derived: ${o.symbol}@${o.file} in-map needs evidence`);
-    } else if (x.verdict === 'impact-gap') {
-      const f = findings.get(String(x.finding));
-      if (!f || f.category !== 'impact-gap') problems.push(`impactChecked.derived: ${o.symbol}@${o.file} is an impact-gap; name a finding with \`"category": "impact-gap"\``);
-    } else problems.push(`impactChecked.derived: ${o.symbol}@${o.file}: verdict is in-map or impact-gap`);
-  }
-  return problems;
+// Named failure (0.7.0): the reviewer-side checks refused closures on shape, not substance: a sample of at least ten
+// inventory entries, a verdict per derived caller, a hit count restated for every query. Reviewers filled the shapes and
+// the real misses (a consumer the map did not list) were still found by reading. Impact completeness stays a planner-side
+// fact (`wf plan` re-runs every query and refuses a count that does not match); the reviewer reports what the map missed
+// as a finding with `category: impact-gap` and may record what it checked, in any shape, under `impactChecked`.
+export function impactCheckProblems() {
+  return [];
 }
 
 // ---- Fix rounds: pattern sweeps (I-25) ----
@@ -596,7 +572,14 @@ export function impactCheckProblems(map, closure, currentResults) {
 // query for other instances, run by the engine; the implementer answers each in a commit trailer and the next reviewer
 // sees the sweep, its hits then and now, and the answer.
 
-const SWEEP_ACK = /^Sweep (S\d+): (fixed|clean)\s*[-:—]\s*(\S.*)$/;
+// Named failure (0.7.0): a sweep was answered hit by hit. Eleven findings produced 1,059 sweep hits and 431 changed
+// files, because every hit read as an instance to edit and the reviewer sampled them again. Findings that share a
+// `family` now share one sweep, and the sweep is answered by one mechanical proof: a command (a query, a lint rule, a
+// test) and the result it must give, which the reviewer re-runs. `fixed` and `clean` answers remain for a finding that
+// has no family.
+const SWEEP_ACK = /^Sweep (S\d+): (fixed|clean|proof)\s*[-:\u2014]\s*(\S.*)$/;
+const PROOF = /^(\S.*?)\s*=>\s*(\S.*)$/;
+const familyKey = (f) => (text(f.family) || `${f.round}:${f.id}`);
 
 export function readSweepFile(file) {
   const raw = fs.readFileSync(path.resolve(String(file)), 'utf8');
@@ -605,32 +588,38 @@ export function readSweepFile(file) {
 
 export function buildSweeps(root, cfg, state, doc, { owed, startAt }) {
   const entries = Array.isArray(doc?.sweeps) ? doc.sweeps : Array.isArray(doc) ? doc : null;
-  if (!entries?.length) throw refuse('the sweep file needs `sweeps: [{ finding: "<round>:<id>", query: { pattern, kind, repo, paths, exclude } }]`');
+  if (!entries?.length) throw refuse('the sweep file needs `sweeps: [{ finding: "<round>:<id>" or family: "<family>", query: { pattern, kind, repo, paths, exclude } }]`', 'one sweep per family; a finding with no family is its own', { id: 'sweep:empty' });
   const problems = [];
   const out = [];
+  const ref = (f) => `${f.round}:${f.id}`;
   entries.forEach((s, n) => {
     const where = `sweeps[${n}]`;
-    if (!text(s?.finding)) problems.push(`${where}: names no \`finding\` (\`<reviewer>:<id>\`)`);
-    else if (!owed.some((f) => `${f.round}:${f.id}` === s.finding)) problems.push(`${where}: \`${s.finding}\` is not an open finding (open: ${owed.map((f) => `${f.round}:${f.id}`).join(', ') || 'none'})`);
+    const named = text(s?.finding), fam = text(s?.family);
+    const member = named ? owed.find((f) => ref(f) === named) : null;
+    const group = fam ? owed.filter((f) => text(f.family) === fam) : member ? owed.filter((f) => familyKey(f) === familyKey(member)) : [];
+    if (!named && !fam) problems.push(`${where}: names no \`finding\` (\`<reviewer>:<id>\`) or \`family\``);
+    else if (!group.length) problems.push(`${where}: \`${named || fam}\` is not an open finding or family (open: ${owed.map(ref).join(', ') || 'none'})`);
     const q = { ...(s?.query ?? {}), id: `S${startAt + out.length}` };
     const qp = [];
     validateQuery(q, cfg, qp);
     problems.push(...qp.map((p) => `${where}: ${p}`));
-    if (!qp.length && text(s?.finding)) {
+    if (!qp.length && group.length) {
       const r = runQuery(root, cfg, state, q);
-      out.push({ id: q.id, finding: s.finding, why: text(s?.why) || null, query: { ...s.query }, hits: r.hits, files: r.files });
+      out.push({ id: q.id, finding: ref(group[0]), findings: group.map(ref), family: text(group[0].family) || null, why: text(s?.why) || null, query: { ...s.query }, hits: r.hits, files: r.files });
     }
   });
-  const named = new Set(out.map((s) => s.finding));
-  const missing = owed.filter((f) => !named.has(`${f.round}:${f.id}`));
-  if (missing.length) problems.push(`no sweep for open finding(s) ${missing.map((f) => `${f.round}:${f.id}`).join(', ')}: every finding this fix covers names the pattern to sweep for other instances`);
-  if (problems.length) throw refuse(`fix handoff refused: the pattern sweep is incomplete:\n  - ${problems.join('\n  - ')}`);
+  // A sweep is optional (0.7.0): a file that names some families is accepted; the others are answered by the implementer's
+  // proof in its report (refusal audit of 0.7.0).
+  if (problems.length) throw refuse(`fix handoff refused: the pattern sweep is incomplete:\n  - ${problems.join('\n  - ')}`, null, { id: 'sweep:incomplete' });
   return out;
 }
 
-// Each handed sweep's commit-trailer answer, or its absence.
-export function sweepAnswers(state) {
-  const handed = state.handoffs.filter((h) => h.role === 'implementer').flatMap((h) => h.sweeps ?? []);
+// Each handed sweep's commit-trailer answer, or its absence. A sweep with a family is answered by a proof
+// (`Sweep S1: proof - <command> => <expected result>`); `sinceReview` leaves out the sweeps of fix passes the last review
+// has already judged (the reviewer is handed this fix pass, not the attempt's history).
+export function sweepAnswers(state, { sinceReview = false } = {}) {
+  const lastReview = sinceReview ? state.reviews?.at(-1)?.at ?? null : null;
+  const handed = state.handoffs.filter((h) => h.role === 'implementer' && (!lastReview || h.at > lastReview)).flatMap((h) => h.sweeps ?? []);
   const found = new Map();
   for (const [name, r] of Object.entries(state.repos)) {
     if (!r.worktree || !fs.existsSync(r.worktree)) continue;
@@ -639,11 +628,15 @@ export function sweepAnswers(state) {
       const lines = chunk.trim().split('\n');
       for (const line of lines.slice(1)) {
         const m = SWEEP_ACK.exec(line.trim());
-        if (m && !found.has(m[1])) found.set(m[1], { answer: m[2], line: m[3].trim(), repo: name, commit: lines[0] });
+        if (!m || found.has(m[1])) continue;
+        const proof = m[2] === 'proof' ? PROOF.exec(m[3].trim()) : null;
+        if (m[2] === 'proof' && !proof) continue;
+        found.set(m[1], { answer: m[2], line: m[3].trim(), repo: name, commit: lines[0], ...(proof ? { command: proof[1].trim(), expected: proof[2].trim() } : {}) });
       }
     }
   }
-  return { handed, answers: handed.map((s) => ({ ...s, answer: found.get(s.id) ?? null })), missing: handed.filter((s) => !found.has(s.id)).map((s) => s.id) };
+  const accepted = (s) => { const a = found.get(s.id); return Boolean(a) && (!s.family || a.answer === 'proof'); };
+  return { handed, answers: handed.map((s) => ({ ...s, answer: found.get(s.id) ?? null })), missing: handed.filter((s) => !accepted(s)).map((s) => s.id) };
 }
 
 // ---- Restrictions the diff has outgrown (I-25) ----
@@ -653,7 +646,6 @@ export function sweepAnswers(state) {
 export function staleRestrictions(cfg, state, changed) {
   const plan = state.plan ?? {};
   const restrictions = [
-    ...(Array.isArray(plan.doNotRun) ? plan.doNotRun : plan.doNotRun ? [plan.doNotRun] : []).map((t) => ({ kind: 'doNotRun', text: String(t) })),
     ...(plan.externalServices ? [{ kind: 'externalServices', text: typeof plan.externalServices === 'string' ? plan.externalServices : JSON.stringify(plan.externalServices) }] : []),
   ];
   const touched = Object.entries(changed).filter(([, files]) => files.length).map(([r]) => r);

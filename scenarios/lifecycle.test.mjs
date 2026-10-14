@@ -136,6 +136,24 @@ test('uncommitted changes are refused at the gate; one open attempt per item; ad
   assert.equal(state(root, e.id).owner, ownerSession('o2'));
 });
 
+// Named failure (I-85): a notes-page UUID was admitted as the ticket item, worktrees were provisioned and roles ran, and
+// only the admission readback refused it because the tracker names a ticket by its own identity.
+test('entry refuses an item that is not the tracker\'s ticket id before creating anything', () => {
+  const uuid = '3f770c4920db80638ac5ce5bde7f4687';
+  const { root } = singleRepoProject('item-id', { gate: { steps }, tracker: { kind: 'linear', via: 'connector' } });
+  const refused = wf(root, ['entry', '--item', uuid, '--owner', 'o']);
+  assert.equal(refused.code, 75);
+  assert.match(refused.err, /not a ticket id of the `linear` tracker/);
+  assert.equal(fs.existsSync(path.join(root, '.wf-worktrees')), false, 'nothing was provisioned');
+  assert.equal(wf(root, ['status', '--all']).out.includes(uuid), false, 'no attempt was recorded');
+  ok(wf(root, ['entry', '--item', 'ENG-7', '--owner', 'o']));
+  const own = singleRepoProject('item-pattern', { gate: { steps }, tracker: { kind: 'none', itemPattern: '^PRJ-\\d+$' } });
+  assert.equal(wf(own.root, ['entry', '--item', uuid, '--owner', 'o']).code, 75, 'a project states its own ticket identity');
+  ok(wf(own.root, ['entry', '--item', 'PRJ-3', '--owner', 'o']));
+  const bad = singleRepoProject('item-bad', { gate: { steps }, tracker: { kind: 'none', itemPattern: '(' } });
+  assert.match(wf(bad.root, ['entry', '--item', 'PRJ-3', '--owner', 'o']).err, /tracker\.itemPattern/);
+});
+
 test('a hand-edited ledger is detected', () => {
   const { root } = singleRepoProject('tamper', { gate: { steps } });
   const e = ok(wf(root, ['entry', '--item', 'ENG-9', '--owner', 'o', '--json'])).json();
@@ -185,6 +203,7 @@ test('the reviewer handoff prints only the one-line start prompt, and the bundle
   assert.equal(lines.length, 1, out);
   const [, bundlePath] = lines[0].match(/^Read (\S+) and follow its instructions\.$/);
   const bundle = JSON.parse(fs.readFileSync(bundlePath, 'utf8'));
-  assert.ok(bundle.criteria.length && bundle.criteriaAmendments[0].reason === 'scope clarified');
+  // 0.7.0: a reviewer is handed the current (amended) criteria, never the attempt's amendment history.
+  assert.ok(bundle.criteria.length && bundle.criteriaAmendments === undefined && bundle.mode === 'full' && !('budget' in bundle));
   assert.ok(bundle.gate.evidence && bundle.worktrees.app && bundle.bases.app && bundle.changed.app.includes('src/a.txt'));
 });

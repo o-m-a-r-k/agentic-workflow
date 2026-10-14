@@ -57,9 +57,41 @@ engine starts.
 - It ships a **scenario test** that reproduces that failure and fails without the fix. Prefer extending an existing
   scenario file.
 - A new refusal, limit or check must name the concrete failure it catches. "It might be safer" is not enough.
+- A change to what the engine does changes every text that states it in the same commit (role templates, skills, the
+  AGENTS block, `wf resume` lines, refusal hints, docs, release notes); `scenarios/text-payloads.test.mjs` runs every
+  example payload through the engine.
 - Workflow findings from using the plugin are recorded with `wf improve add` and closed with
   `wf improve close <id> --version X --test scenarios/<file>.test.mjs --fix "..."`, which writes the history entry in
-  `improvements/`.
+  `improvements/`. A check that caught nothing is retired instead (below).
+
+## Checks, obligations and decisions
+
+- **A new refusal names its incident and gets an id.** Every new check passes an explicit id to `refuse(message, hint,
+  { id: 'area:check' })` (for example `review:delta-outside`) and carries a comment naming the incident it catches
+  ("Named failure: ..."). The id is how the check is counted: `wf refusals` groups by it, `wf report` shows it per
+  attempt and `wf improve review` asks who accounts for it. Without an id a refusal is counted under its call site
+  (`file.mjs:line`), which moves whenever the file is edited.
+- **A release that adds an obligation gates it by admission version.** An obligation is anything a live attempt owes now
+  that it did not owe when it was admitted: a verdict, a field, a trailer, a round. Gate it with
+  `obligationSince(state, '<version>')` from `engine/versions.mjs`, naming the release that adds it, so attempts
+  admitted earlier are unaffected. A relaxation applies to every attempt at once and needs no gate. Named failure: one
+  ticket lived through 32 releases, and four of them changed what its next handoff owed.
+- **Deleting a check whose refusals show no catch needs no incident.** Read `wf refusals` and `wf improve review`, remove
+  the check, delete the scenarios that asserted it, and record why with
+  `wf improve close <id> --retire --version X --reason "..." [--refusal id,id]` (add the item first with
+  `wf improve add ... --refusal <id>` if there is none). A retired check needs no scenario test: there is no behaviour
+  left to reproduce.
+- **Automated review findings are triaged against the threat model before any code.** A finding from a
+  security-review hook, a model scan or an audit that assumes an adversarial agent (a forged transcript, a
+  pseudo-terminal, a scrubbed environment, a rewritten ledger) is closed as out of model, with the reason written down,
+  unless an incident shows an agent doing it: agents are fallible, not adversarial ([threat
+  model](docs/trust-model.md#threat-model)). Named failure: an automated security-review hook drove nine releases in 95
+  minutes with no incident behind any of them.
+- **Design decisions live in the decision register,** [docs/DESIGN.md](docs/DESIGN.md#decision-register), not in any
+  agent's memory, a session's notes or a private plan. A change that decides something, or reverses an earlier
+  decision, adds its entry (date, decision, the failure behind it) in the same commit. Read the register before
+  reversing anything: the decision that the engine never launches agents lived in one runtime's memory only, and an
+  agent on the other runtime reversed it without knowing.
 
 ## Privacy: this repository is public
 
@@ -78,10 +110,13 @@ Changes to `hooks/`, `engine/evidence.mjs`, `engine/paths.mjs`, `engine/gate.mjs
 `engine/cli.mjs`, `engine/attempt.mjs`, `scenarios/` and `.github/` are reviewed by the maintainer (see
 `.github/CODEOWNERS`). For these:
 
-- the guard must never become more permissive than the frozen 0.1.15 hook (`scenarios/guard-regressions.test.mjs`);
+- the guard hook checks writes made through the file tools (Edit, Write, NotebookEdit) and the working directory; it
+  does not scan Bash command text (removed in 0.7.0: 334 refusals, 69% of them naming no evidence folder). Adding
+  command scanning back needs an incident, not a finding that assumes an adversarial agent (see the threat model
+  above). `scenarios/guard-regressions.test.mjs` keeps the file-tool cases; add the false positive a change fixes to its
+  allowed list;
 - path handling goes through `engine/paths.mjs`; writes into the evidence through the no-follow helpers in
-  `engine/evidence.mjs`;
-- add the attack your change is about to the regression corpus, and the false positive it fixes to the allowed list.
+  `engine/evidence.mjs`.
 
 Report vulnerabilities privately: see [SECURITY.md](SECURITY.md).
 

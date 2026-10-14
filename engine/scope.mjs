@@ -6,7 +6,7 @@ import { matchesAny } from './util.mjs';
 // `wf check`, `wf handoff reviewer`), and `wf accept` needs the reviewer's verdict per file (`outsideVerdicts`).
 
 // A plan entry names a file as `path`, `path:line ...`, `repo/path`, a directory ending in `/`, or a glob.
-function planPaths(plan) {
+export function planPaths(plan) {
   if (!plan || typeof plan !== 'object') return [];
   const out = [];
   const take = (v) => {

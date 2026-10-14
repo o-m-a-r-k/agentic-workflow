@@ -3,68 +3,24 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { check } from '../hooks/guard-evidence.mjs';
 import { commitIn, criteriaFile, ok, OUT_OF_ORDER, singleRepoProject, wf } from './helpers.mjs';
 
-// I-16, named failure: harmless Bash commands were refused because their text (a commit message, an improvement
-// description, a search pattern) named the evidence folder, and the refusal neither said what matched nor how to avoid
-// it; agents split commands or switched tools by trial. The guard still decides on the raw text and never parses shell
-// (0.1.16 and 0.1.17 did, and opened parser differentials). The refusal now names the matched token and says how to
-// avoid it, and `wf evidence list|show` reads the evidence without the folder name in any shell command.
+// I-16, named failure: a refused evidence edit neither said what matched nor how to avoid it; agents switched tools by
+// trial. 0.7.0: the guard judges file targets and the working directory only (shell text is not scanned), and the refusal
+// names the target and the supported routes: `wf evidence list|show` reads the evidence without the folder name.
 
 const HOOK = path.resolve(import.meta.dirname, '..', 'hooks', 'guard-evidence.mjs');
-const run = (command, cwd = '/p') => spawnSync(process.execPath, [HOOK], { input: JSON.stringify({ cwd, tool_input: { command } }), encoding: 'utf8' });
+const run = (tool_input, cwd = '/p', tool_name = 'Bash') => spawnSync(process.execPath, [HOOK], { input: JSON.stringify({ cwd, tool_name, tool_input }), encoding: 'utf8' });
 
-test('I-16: the refusal names the matched token and says how to avoid it; nothing new passes', () => {
-  const r = run('git commit -m "docs: reads of .wf-evidence/ go through the Read tool"');
+test('I-16: the refusal names the target and says how to read or change evidence; a shell mention is not refused', () => {
+  const r = run({ file_path: '/p/.wf-evidence/attempts/A/ledger.jsonl' }, '/p', 'Edit');
   assert.equal(r.status, 2);
-  assert.match(r.stderr, /matched "\.wf-evidence\/"/);
-  assert.match(r.stderr, /say "the evidence folder" instead of its name in commit messages, echo text and grep patterns/);
-  assert.match(r.stderr, /read evidence with the Read tool or `wf evidence list` \/ `wf evidence show <path>`/);
-  assert.match(r.stderr, /run each `wf` command as one plain invocation/);
-  assert.match(run('cat /p/.wf-evidence/attempts/A/ledger.jsonl').stderr, /matched "\/p\/\.wf-evidence\/attempts\/A\/ledger\.jsonl"/);
-  assert.match(run('cp /tmp/x .wf-ev*/a').stderr, /matched "\.wf-ev\*\/a"/);
-  assert.match(run('cat {.wf-,}evidence/a').stderr, /matched "\{\.wf-,\}evidence\/a"/);
-  assert.match(run('ls', '/p/.wf-evidence/attempts/A').stderr, /runs inside the evidence folder \(working directory \/p\/\.wf-evidence\/attempts\/A\)/);
-  // Prose still refuses: no text argument is exempt.
-  for (const c of ['git commit -m "mention .wf-evidence"', "echo '.wf-evidence'", "grep -rn 'wf-evidence' engine", "wf improve add --title 'x .wf-evidence'"]) assert.ok(check({ cwd: '/p', tool_input: { command: c } }), c);
-  // Named failure (0.4.5, found while redoing I-16): `wf run --lease X -- <command>` executes its command but passed as
-  // one plain `wf` invocation, so a command on the evidence went through. It is judged like any other command now.
-  for (const c of ['wf run --lease docker -- rm -rf .wf-evidence', 'wf run --lease x -- cp /tmp/a .wf-evidence/a']) assert.ok(check({ cwd: '/p', tool_input: { command: c } }), c);
-  assert.equal(check({ cwd: '/p', tool_input: { command: 'wf run --lease docker -- docker compose up --wait' } }), null);
-  assert.equal(check({ cwd: '/p', tool_input: { command: 'wf evidence show gate/run-1/unit/output.log --attempt ENG-1.1' } }), null);
-});
-
-// Review of 76ad8d8: the refusal now carries the matched token, so check() must refuse on every branch even when the
-// token is long, the whole input, or built from parts. Every predicate branch returns a non-empty string, and the same
-// inputs are refused exactly as the 0.4.4 predicate (mentionsEvidence) refused them.
-test('I-16: every evidenceMatch branch returns a non-empty token and refuses; wf run is judged like any command', async () => {
-  const { evidenceMatch, mentionsEvidence } = await import('../hooks/guard-evidence.mjs');
-  const branches = {
-    raw: 'cat EV/a',
-    unescaped: "cat $'\\x2ewf-evidence'/a",
-    assembled: 'a=.wf-; b=evidence; rm -rf $a$b',
-    squeezed: 'cat {.wf-,}evidence/a',
-    spans: 'cat .wf- evidence/a'.replace(' ', '\u3000'),
-    glued: 'cat *evidence/a',
-    glob: 'cat .w?-evidence/a',
-    long: `cat ${'x'.repeat(300)}EV/a`,
-    whitespaceAround: `  \t cat EV/a \n `,
-  };
-  for (const [name, raw] of Object.entries(branches)) {
-    const c = raw.replace(/EV/g, '.wf-' + 'evidence');
-    const m = evidenceMatch(c);
-    assert.equal(typeof m, 'string', name);
-    assert.ok(m.trim().length > 0 && m.length <= 80, `${name}: ${JSON.stringify(m)}`);
-    assert.ok(mentionsEvidence(c), name);
-    const r = check({ cwd: '/p', tool_input: { command: c } });
-    assert.ok(r && r.startsWith('matched "'), `${name}: ${r}`);
-  }
-  assert.equal(evidenceMatch('ls -la src'), null);
-  assert.equal(evidenceMatch('   '), null);
-  // `wf run` executes its command, so it is never the plain-wf exception.
-  for (const c of ['wf run --lease docker -- rm -rf EV', 'wf run --lease x -- cat EV/a', 'wf run -- ls EV']) assert.ok(check({ cwd: '/p', tool_input: { command: c.replace(/EV/g, '.wf-' + 'evidence') } }), c);
-  for (const c of ['wf run --lease docker -- docker compose up --wait', 'wf run --lease browser -- npx playwright test']) assert.equal(check({ cwd: '/p', tool_input: { command: c } }), null, c);
+  assert.match(r.stderr, /\(\/p\/\.wf-evidence\/attempts\/A\/ledger\.jsonl is workflow evidence\)/);
+  assert.match(r.stderr, /Read evidence with the Read tool or `wf evidence list` \/ `wf evidence show <path>`/);
+  assert.match(r.stderr, /change recorded state through a `wf` command/);
+  assert.match(run({ command: 'ls' }, '/p/.wf-evidence/attempts/A').stderr, /runs inside the evidence folder \(working directory \/p\/\.wf-evidence\/attempts\/A\)/);
+  // Prose, glob and `wf run` text pass: only a file target and a working directory are judged.
+  for (const c of ['git commit -m "mention .wf-evidence"', "echo '.wf-evidence'", "grep -rn 'wf-evidence' engine", "wf improve add --title 'x .wf-evidence'", 'wf run --lease docker -- rm -rf .wf-evidence', 'wf evidence show gate/run-1/unit/output.log --attempt ENG-1.1']) assert.equal(run({ command: c }).status, 0, c);
 });
 
 test('I-16: `wf evidence list` lists an attempt\'s evidence by kind; `wf evidence show` prints a text file, never an image or a path outside it', () => {

@@ -168,9 +168,12 @@ test('github: an item that is not an issue number is refused before any call', (
   const db = path.join(base, 'github.json');
   seed(db);
   const env = { PATH: ghOnPath(base), WF_TEST_GH_STATE: db };
-  const e = ok(wf(root, ['entry', '--item', 'ENG-abc', '--owner', 'o', '--json'], { env })).json();
-  assert.match(ok(wf(root, ['tracker', 'sync', '--attempt', e.id], { env })).out, /a GitHub issue item is its number \(`123` or `GH-123`\), not `ENG-abc`/);
+  // Since 0.7.0 the item is checked at entry (I-85), before a worktree or any call exists.
+  const refused = wf(root, ['entry', '--item', 'ENG-abc', '--owner', 'o', '--json'], { env });
+  assert.equal(refused.code, 75);
+  assert.match(refused.err, /`ENG-abc` is not a ticket id of the `github` tracker/);
   assert.equal(fs.existsSync(`${db}.argv`), false, 'gh was not called');
+  ok(wf(root, ['entry', '--item', 'GH-123', '--owner', 'o', '--json'], { env }));
 });
 
 test('github public repo: doctor warns screenshots will be public; deliver refuses until the owner acknowledges on the base branch', () => {

@@ -4,255 +4,38 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { listAttempts, readLedger, reduce } from './ledger.mjs';
 import { YAML } from './util.mjs';
-import { ownerTranscript } from './host-record.mjs';
+import { descendants, findHost, optional } from './hosts/index.mjs';
+import { readRefusals } from './refusals.mjs';
+import { observations, severityLevel } from './review-policy.mjs';
+import { introducedFindings } from './introduced.mjs';
+import { changedFiles } from './attempt.mjs';
 
 // The ledger is the event log: every `wf` command appends to it with a timestamp.
 // Agent usage is read afterwards from each runtime's own session logs. Measurement only.
 
-function walk(dir, depth = 0, out = []) {
-  if (depth > 4 || !fs.existsSync(dir)) return out;
-  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-    const p = path.join(dir, e.name);
-    if (e.isDirectory()) walk(p, depth + 1, out);
-    else if (e.name.endsWith('.jsonl')) out.push(p);
-  }
-  return out;
-}
+const minutes = (msValue) => Math.round(msValue / 6000) / 10;
+// Real model names only: a harness writes a placeholder such as `<synthetic>` for messages it generated itself.
+const realModel = (m) => (m && !String(m).startsWith('<') ? m : null);
 
 function top(counts) {
   return Object.entries(counts ?? {}).sort((a, b) => b[1] - a[1]).map(([k]) => k);
 }
 
-// Wall time counts an agent that sat idle (waiting on a monitor, or finished and later resumed) as working: one agent
-// measured 185 wall minutes for about 21 active. Active time sums the gaps between consecutive transcript entries,
-// leaving out gaps of IDLE_GAP_MS or more.
-export const IDLE_GAP_MS = 5 * 60000;
-export function activeMs(timestamps) {
-  const t = timestamps.map((x) => Date.parse(x)).filter((x) => !Number.isNaN(x)).sort((a, b) => a - b);
-  let n = 0;
-  for (let i = 1; i < t.length; i++) if (t[i] - t[i - 1] < IDLE_GAP_MS) n += t[i] - t[i - 1];
-  return n;
-}
-const minutes = (msValue) => Math.round(msValue / 6000) / 10;
-
-// A fresh prompt (not a tool result) after the first one is a resume of the same agent: a new round.
-const isPrompt = (e) => e.type === 'user' && !e.isMeta && (typeof e.message?.content === 'string' || (Array.isArray(e.message?.content) && e.message.content.some((c) => c.type === 'text') && !e.message.content.some((c) => c.type === 'tool_result')));
-
-export function readTranscript(file) {
-  const out = [];
-  for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
-    if (!line) continue;
-    try {
-      out.push(JSON.parse(line));
-    } catch {}
-  }
-  return out;
-}
-
-// Real model names only: Claude Code writes `<synthetic>` for messages it generated itself.
-const realModel = (m) => (m && !String(m).startsWith('<') ? m : null);
-
-// The model of the last assistant message in a transcript, or null.
-export function lastModel(entries) {
-  for (let i = entries.length - 1; i >= 0; i--) {
-    const m = realModel(entries[i].message?.model);
-    if (entries[i].type === 'assistant' && m) return m;
-  }
-  return null;
-}
-
-// The last fenced YAML block (```yaml, ```yml or an untagged fence) the agent wrote, or null.
-export function lastFencedYaml(entries) {
-  let found = null;
-  for (const e of entries) {
-    if (e.type !== 'assistant') continue;
-    const content = e.message?.content;
-    const texts = typeof content === 'string' ? [content] : Array.isArray(content) ? content.filter((c) => c.type === 'text').map((c) => c.text ?? '') : [];
-    for (const t of texts) for (const m of t.matchAll(/```(?:ya?ml)?[ \t]*\n([\s\S]*?)\n[ \t]*```/g)) found = m[1];
-  }
-  return found;
-}
-
-// Reads Claude Code transcript files. A response split over several lines (one per content block) repeats its usage
-// with a growing output count, so each request counts once, at its largest.
-function claudeUsageOf(files) {
-  const u = { runtime: 'claude', models: {}, byModel: {}, efforts: {}, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, toolCalls: 0, first: null, last: null, activeMs: 0, rounds: [], transcripts: files };
-  const requests = new Map();
-  for (const f of files) {
-    const stamps = [];
-    let round = null;
-    const closeRound = () => {
-      if (round?.stamps.length) u.rounds.push({ startedAt: round.stamps[0], wallMinutes: minutes(Date.parse(round.stamps.at(-1)) - Date.parse(round.stamps[0])), activeMinutes: minutes(activeMs(round.stamps)) });
-    };
-    for (const e of readTranscript(f)) {
-      if (isPrompt(e) && round?.stamps.length) {
-        closeRound();
-        round = null;
-      }
-      if (e.timestamp) {
-        u.first = u.first && u.first < e.timestamp ? u.first : e.timestamp;
-        u.last = u.last && u.last > e.timestamp ? u.last : e.timestamp;
-        stamps.push(e.timestamp);
-        (round ??= { stamps: [] }).stamps.push(e.timestamp);
-      }
-      const m = e.message;
-      if (m?.usage) {
-        const key = e.requestId ?? `${f}:${e.uuid ?? requests.size}`;
-        const prev = requests.get(key);
-        if (!prev || (m.usage.output_tokens ?? 0) >= (prev.usage.output_tokens ?? 0)) requests.set(key, { usage: m.usage, model: m.model, effort: e.effort ?? null });
-      }
-      if (Array.isArray(m?.content)) u.toolCalls += m.content.filter((c) => c.type === 'tool_use').length;
-    }
-    closeRound();
-    u.activeMs += activeMs(stamps);
-  }
-  for (const r of requests.values()) {
-    if (realModel(r.model)) u.models[r.model] = (u.models[r.model] ?? 0) + 1;
-    if (r.effort) u.efforts[r.effort] = (u.efforts[r.effort] ?? 0) + 1;
-    u.input += r.usage.input_tokens ?? 0;
-    u.output += r.usage.output_tokens ?? 0;
-    u.cacheRead += r.usage.cache_read_input_tokens ?? 0;
-    u.cacheWrite += r.usage.cache_creation_input_tokens ?? 0;
-    // Per model, so a transcript that switched model is priced per request at the right rate.
-    const b = (u.byModel[realModel(r.model) ?? 'unknown'] ??= { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, requests: 0 });
-    b.input += r.usage.input_tokens ?? 0;
-    b.output += r.usage.output_tokens ?? 0;
-    b.cacheRead += r.usage.cache_read_input_tokens ?? 0;
-    b.cacheWrite += r.usage.cache_creation_input_tokens ?? 0;
-    b.requests += 1;
-  }
-  return u;
-}
-
-function claudeUsage(session, home) {
-  const files = walk(path.join(home, '.claude', 'projects')).filter((f) => path.basename(f, '.jsonl') === session || path.basename(f, '.jsonl') === `agent-${session}`);
-  return files.length ? claudeUsageOf(files) : null;
-}
-
-// Subagents started by the owner have no session id of their own. Claude Code writes each one as
-// <session>/subagents/agent-<id>.jsonl beside a .meta.json holding the name it was started with (the --agent id)
-// and its agent type. Read once per report.
-export function subagentIndex(home) {
-  const out = [];
-  for (const f of walk(path.join(home, '.claude', 'projects'))) {
-    if (path.basename(path.dirname(f)) !== 'subagents') continue;
-    const meta = f.replace(/\.jsonl$/, '.meta.json');
-    try {
-      const m = JSON.parse(fs.readFileSync(meta, 'utf8'));
-      // An agent started without a name is listed with `name: null` (review provenance can still identify it by its
-      // start line); every lookup by name skips it.
-      // agentId is the file's own id; parentAgentId names the agent that started it (absent for the owner's own).
-      if (m && typeof m === 'object') out.push({ file: f, agentId: path.basename(f, '.jsonl').replace(/^agent-/, ''), name: typeof m.name === 'string' && m.name ? m.name : null, agentType: m.agentType ?? null, parentAgentId: typeof m.parentAgentId === 'string' ? m.parentAgentId : null, spawnDepth: Number.isInteger(m.spawnDepth) ? m.spawnDepth : null, description: typeof m.description === 'string' ? m.description : null });
-    } catch {}
-  }
-  return out;
-}
-
-// Transcripts of the Claude Code subagent started under this name (and agent type, when known), newest first.
-export function subagentTranscripts(home, name, agentType = null, since = null) {
-  return subagentIndex(home)
-    .filter((x) => x.name === name && (!agentType || x.agentType === agentType))
-    .map((x) => ({ ...x, mtime: fs.statSync(x.file).mtimeMs }))
-    .filter((x) => !since || x.mtime >= Date.parse(since))
-    .sort((a, b) => b.mtime - a.mtime);
-}
-
-// The model the owner's own session runs on right now: what an agent whose class pins no model inherits.
-// Session transcripts sit at ~/.claude/projects/<project>/<session>.jsonl; only the tail is read.
-export function sessionModel(home, session) {
-  if (!session) return null;
-  const dir = path.join(home, '.claude', 'projects');
-  if (!fs.existsSync(dir)) return null;
-  for (const p of fs.readdirSync(dir)) {
-    const f = path.join(dir, p, `${session}.jsonl`);
-    if (!fs.existsSync(f)) continue;
-    const size = fs.statSync(f).size;
-    const fd = fs.openSync(f, 'r');
-    const len = Math.min(size, 512 * 1024);
-    const buf = Buffer.alloc(len);
-    fs.readSync(fd, buf, 0, len, size - len);
-    fs.closeSync(fd);
-    const entries = buf.toString('utf8').split('\n').slice(size > len ? 1 : 0).flatMap((l) => {
-      try {
-        return [JSON.parse(l)];
-      } catch {
-        return [];
-      }
-    });
-    return lastModel(entries);
-  }
-  return null;
-}
-
-// Best effort: the model a Claude subagent ran on, from its transcript. Never throws.
-export function subagentModel(home, name, agentType = null, since = null) {
-  try {
-    const t = subagentTranscripts(home, name, agentType, since)[0];
-    return t ? lastModel(readTranscript(t.file)) : null;
-  } catch {
-    return null;
-  }
-}
-
-function codexUsage(session, home) {
-  // Named failure I-38: summing retained rollouts doubled cumulative totals and substring-matched other sessions.
-  const selected = ownerTranscript(`codex:${session}`, home);
-  if (selected.problem) return null;
-  const files = [selected.file];
-  const u = { runtime: 'codex', models: {}, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, toolCalls: 0, first: null, last: null };
-  for (const f of files) {
-    let last = null, native = null;
-    for (const line of fs.readFileSync(f, 'utf8').split('\n')) {
-      if (!line) continue;
-      let e;
-      try {
-        e = JSON.parse(line);
-      } catch {
-        continue;
-      }
-      if (e.timestamp) {
-        u.first = u.first && u.first < e.timestamp ? u.first : e.timestamp;
-        u.last = u.last && u.last > e.timestamp ? u.last : e.timestamp;
-      }
-      const p = e.payload ?? e;
-      if (p.type === 'token_count' && p.info?.total_token_usage) last = p.info.total_token_usage;
-      if (e.type === 'token_usage_record' && (!p.thread_id || p.thread_id === session) && p.thread_token_usage) native = p.thread_token_usage;
-      if (p.type === 'function_call' || p.type === 'custom_tool_call') u.toolCalls += 1;
-      if (p.model) u.models[p.model] = (u.models[p.model] ?? 0) + 1;
-    }
-    const total = native ?? last;
-    if (total) {
-      u.cacheRead = total.cached_input_tokens ?? 0;
-      u.cacheWrite = total.cache_write_input_tokens ?? 0;
-      // Cached input and reasoning output are subsets of the host's input/output totals, not additional tokens.
-      u.input = Math.max(0, (total.input_tokens ?? 0) - u.cacheRead - u.cacheWrite);
-      u.output = total.output_tokens ?? 0;
-      u.reasoning = total.reasoning_output_tokens ?? 0;
-    }
-  }
-  // Codex reports one running total per session: all of it is attributed to the session's main model.
-  const model = top(u.models)[0] ?? 'unknown';
-  u.byModel = { [model]: { input: u.input, output: u.output, cacheRead: u.cacheRead, cacheWrite: u.cacheWrite, requests: null } };
-  u.transcripts = files;
-  return u;
-}
-
 export function agentUsage(runtime, session, home = os.homedir()) {
   if (!session) return null;
   try {
-    if (runtime === 'claude') return claudeUsage(session, home);
-    if (runtime === 'codex') return codexUsage(session, home);
+    return optional(findHost(runtime), 'usage')?.(session, home) ?? null;
   } catch {
     return null;
   }
-  return null;
 }
-
 
 // Prices: the table shipped with the plugin (engine/prices.yaml), then the user's, then the project's
 // (.workflow/prices.yaml): later files replace a model's entry. A file is `models: { <id prefix>: {...} }`, or (older
 // user files) the same map at the top level.
 const DEFAULT_PRICES = path.join(path.dirname(fileURLToPath(import.meta.url)), 'prices.yaml');
+export const userPricesFile = () => path.join(process.env.WF_CONFIG_HOME ?? path.join(os.homedir(), '.config', 'agentic-workflow'), 'prices.yaml');
+export const defaultPricesFile = () => DEFAULT_PRICES;
 function priceFile(file) {
   try {
     if (!fs.existsSync(file)) return {};
@@ -264,8 +47,7 @@ function priceFile(file) {
   }
 }
 export function prices(root = null) {
-  const user = path.join(process.env.WF_CONFIG_HOME ?? path.join(os.homedir(), '.config', 'agentic-workflow'), 'prices.yaml');
-  return { ...priceFile(DEFAULT_PRICES), ...priceFile(user), ...(root ? priceFile(path.join(root, '.workflow', 'prices.yaml')) : {}) };
+  return { ...priceFile(DEFAULT_PRICES), ...priceFile(userPricesFile()), ...(root ? priceFile(path.join(root, '.workflow', 'prices.yaml')) : {}) };
 }
 
 // The longest key the model id starts with.
@@ -295,42 +77,30 @@ export function costOf(usage, table) {
   return { cost: total === null ? null : Math.round(total * 10000) / 10000, unpriced };
 }
 
-// Sub-agents a handoff's agent started (Claude Code writes `parentAgentId` in each sub-agent's meta file), at any depth.
-export function descendants(index, roots) {
-  const out = [];
-  const seen = new Set(roots);
-  let frontier = [...roots];
-  while (frontier.length) {
-    const next = index.filter((x) => x.parentAgentId && frontier.includes(x.parentAgentId) && !seen.has(x.agentId));
-    for (const x of next) {
-      seen.add(x.agentId);
-      out.push(x);
-    }
-    frontier = next.map((x) => x.agentId);
-  }
-  return out;
-}
-
-const handoffFiles = (h, index, since) => index
-  .filter((x) => x.name === h.agent && (h.agentType ? x.agentType === h.agentType : /^wf-/.test(x.agentType ?? '')))
-  .filter((x) => {
-    try {
-      return !since || fs.statSync(x.file).mtime >= new Date(since);
-    } catch {
-      return false;
-    }
-  });
-
-// The sub-agents of the Claude Code agent started under this name: what `wf handoff close` records in the ledger.
-export function childAgents(home, name, agentType = null, since = null) {
-  const index = subagentIndex(home);
-  const mine = handoffFiles({ agent: name, agentType }, index, since).map((x) => x.agentId);
-  return descendants(index, mine).map((x) => ({ agentId: x.agentId, name: x.name, agentType: x.agentType, parentAgentId: x.parentAgentId, depth: x.spawnDepth, description: x.description }));
-}
-
 const ms = (a, b) => (a && b ? new Date(b) - new Date(a) : null);
 const mins = (v) => (v === null || v === undefined ? null : Math.round(v / 6000) / 10);
 const hid = (bundle) => (bundle ? path.basename(String(bundle), '.json') : null);
+// The size of a handoff's bundle file, or null when the file is gone (an attempt released, or a ledger copied from another machine).
+const bundleBytes = (bundle) => {
+  try {
+    return bundle ? fs.statSync(String(bundle)).size : null;
+  } catch {
+    return null;
+  }
+};
+
+// Ledger entries that keep the books and say nothing about when the attempt was worked on. Named failure: `wf report`
+// ended an attempt that was never closed at its last ledger entry, and the entry written last is often bookkeeping from
+// a later command: adopting an old attempt's files into the manifest made a 6-minute abandoned attempt report 4,403
+// minutes. Manifest upkeep (`evidence.*`), lessons and waivers a later attempt files on an earlier one
+// (`lesson.recorded`, `lesson.recurred`, `lesson.acknowledged`, `authority.spent`, `discovered.acknowledged`), a models
+// refresh and exports of the attempt's pages or screenshots can all be written days after the work.
+export const BOOKKEEPING_EVENTS = new Set([
+  'evidence.baseline', 'evidence.recorded', 'evidence.rebaselined',
+  'lesson.recorded', 'lesson.recurred', 'lesson.acknowledged', 'authority.spent', 'discovered.acknowledged',
+  'models.refreshed', 'exported', 'screenshots.exported',
+]);
+export const isActivity = (entry) => !BOOKKEEPING_EVENTS.has(entry.type);
 const settledStatus = (st) => ['fixed', 'verified-nonissue'].includes(st);
 
 export const IDLE_REPORT_MINUTES = 30;
@@ -365,6 +135,7 @@ export function reviewRounds(entries, s) {
       startedAt: h.at,
       endedAt,
       minutes: mins(ms(h.at, endedAt)),
+      bundleBytes: bundleBytes(h.bundle),
       outcome,
       result,
       resultEvidence: ['recorded', 'refused', 'failed-run', 'failed-start'].includes(result) ? 'recorded-event' : 'no-recorded-outcome',
@@ -442,18 +213,43 @@ export function timeline(entries, { idleMinutes = IDLE_REPORT_MINUTES, state = n
   const started = entries.filter((e) => e.type === 'gate.started');
   const finished = new Map(entries.filter((e) => e.type === 'gate.finished' || e.type === 'check.finished').map((e) => [e.data.runId, e]));
   const gateWindows = started.filter((e) => (e.data.kind ?? 'gate') === 'gate').map((e) => ({ runId: e.data.runId, startedAt: e.at, endedAt: finished.get(e.data.runId)?.at ?? null }));
-  const end = s.closedAt ?? entries.at(-1)?.at ?? null;
+  // The attempt ends when it closed or was abandoned, else at its last entry that records work (BOOKKEEPING_EVENTS).
+  const over = s.closedAt ?? s.abandoned?.at ?? null;
+  const work = entries.filter((e) => isActivity(e) && (!over || e.at <= over));
+  const end = over ?? work.at(-1)?.at ?? entries.at(-1)?.at ?? null;
   const ph = phases(entries, s, rs, gateWindows, end);
   const idleGaps = [];
-  for (let i = 1; i < entries.length; i++) {
-    const gap = ms(entries[i - 1].at, entries[i].at);
-    if (gap >= idleMinutes * 60000) idleGaps.push({ from: entries[i - 1].at, to: entries[i].at, minutes: mins(gap), after: entries[i - 1].type, before: entries[i].type, phase: phaseAt(entries, s, rs, gateWindows, entries[i - 1].at) });
+  for (let i = 1; i < work.length; i++) {
+    const gap = ms(work[i - 1].at, work[i].at);
+    if (gap >= idleMinutes * 60000) idleGaps.push({ from: work[i - 1].at, to: work[i].at, minutes: mins(gap), after: work[i - 1].type, before: work[i].type, phase: phaseAt(entries, s, rs, gateWindows, work[i - 1].at) });
   }
   idleGaps.sort((a, b) => b.minutes - a.minutes);
   return { end, phases: ph, idleGaps, gateWindows, rounds: rs };
 }
 
-export function attemptReport(root, id, table = prices(root), { home = os.homedir(), index, idleMinutes = IDLE_REPORT_MINUTES } = {}) {
+// Refusals the engine logged against this attempt (engine/refusals.mjs), counted by check id.
+export function refusalsOf(rows, project, id) {
+  const byId = {};
+  let total = 0;
+  for (const r of rows) {
+    if (r.attempt !== id || (r.project && r.project !== project)) continue;
+    byId[r.id] = (byId[r.id] ?? 0) + 1;
+    total += 1;
+  }
+  return { total, byId: Object.fromEntries(Object.entries(byId).sort((a, b) => b[1] - a[1])) };
+}
+
+// Strategist events (stream A2 adds `strategy.decided` and `strategy.tripwire`), read from the raw entries so an older
+// ledger, or an engine that does not write them yet, counts zero. The tripwire's name is read from whichever field the
+// entry carries it in.
+export function strategyEvents(entries) {
+  const decided = entries.filter((e) => e.type === 'strategy.decided');
+  const tripwires = entries.filter((e) => e.type === 'strategy.tripwire');
+  const name = (e) => e.data?.tripwire ?? e.data?.name ?? e.data?.id ?? e.data?.signal ?? e.data?.kind ?? null;
+  return { decisions: decided.length, tripwires: tripwires.length, fired: [...new Set(tripwires.map(name).filter(Boolean).map(String))] };
+}
+
+export function attemptReport(root, id, table = prices(root), { home = os.homedir(), indexes = new Map(), idleMinutes = IDLE_REPORT_MINUTES, refusals = null } = {}) {
   const entries = readLedger(root, id);
   const s = reduce(entries);
   const first = entries[0]?.at;
@@ -461,14 +257,16 @@ export function attemptReport(root, id, table = prices(root), { home = os.homedi
   const steps = gates.flatMap((g) => g.steps ?? []);
   const ran = steps.filter((x) => ['passed', 'failed', 'interrupted'].includes(x.status));
   const reused = steps.filter((x) => x.status === 'reused');
-  let subagents = index;
-  const indexNow = () => {
-    try {
-      subagents ??= subagentIndex(home);
-    } catch {
-      subagents = [];
+  // The agents a harness recorded as started under a role (its adapter's index), read once per harness.
+  const indexNow = (runtime) => {
+    if (!indexes.has(runtime)) {
+      try {
+        indexes.set(runtime, optional(findHost(runtime), 'agentIndex')?.(home) ?? []);
+      } catch {
+        indexes.set(runtime, []);
+      }
     }
-    return subagents;
+    return indexes.get(runtime);
   };
   const counted = new Set();
   const byModel = {};
@@ -480,15 +278,14 @@ export function attemptReport(root, id, table = prices(root), { home = os.homedi
   };
   const childSeen = new Set();
   const roles = s.handoffs.map((h) => {
+    const host = findHost(h.runtime);
     let usage = agentUsage(h.runtime, h.session, home);
-    let files = [];
-    if (!usage && h.runtime === 'claude') {
+    let agentIds = [];
+    const byName = !usage ? optional(host, 'usageByName') : null;
+    if (byName) {
       try {
-        files = handoffFiles(h, indexNow(), first);
-        if (files.length) {
-          usage = claudeUsageOf(files.map((x) => x.file));
-          usage.agentType = files[0].agentType;
-        }
+        const found = byName(h, { index: indexNow(h.runtime), since: first });
+        if (found) ({ usage, agentIds } = found);
       } catch {
         usage = null;
       }
@@ -497,15 +294,15 @@ export function attemptReport(root, id, table = prices(root), { home = os.homedi
     const recorded = s.subagents.filter((c) => c.parentHandoff === hid(h.bundle)).map((c) => c.agentId);
     let children = [];
     try {
-      const idx = files.length || recorded.length ? indexNow() : [];
-      const found = descendants(idx, files.map((x) => x.agentId));
+      const idx = agentIds.length || recorded.length ? indexNow(h.runtime) : [];
+      const found = descendants(idx, agentIds);
       children = [...found, ...idx.filter((x) => recorded.includes(x.agentId) && !found.some((y) => y.agentId === x.agentId))].filter((x) => !childSeen.has(x.agentId));
     } catch {}
     for (const c of children) childSeen.add(c.agentId);
     const childRows = children.map((c) => {
       let u = null;
       try {
-        u = claudeUsageOf([c.file]);
+        u = optional(host, 'agentUsage')?.(c) ?? null;
       } catch {}
       const key = c.file;
       if (u && !counted.has(key)) {
@@ -548,6 +345,7 @@ export function attemptReport(root, id, table = prices(root), { home = os.homedi
       roundDetail: usage?.rounds ?? [],
       // The owner session's model when the handoff was made (what an unpinned agent inherits), from the ledger.
       sessionModel: h.sessionModel ?? null,
+      bundleBytes: bundleBytes(h.bundle),
       outputTokens: usage ? usage.output : null,
       tokens: usage ? usage.input + usage.output + usage.cacheRead + usage.cacheWrite : null,
       // A transcript shared with an earlier handoff (the same agent resumed) is counted there, not again here.
@@ -566,6 +364,8 @@ export function attemptReport(root, id, table = prices(root), { home = os.homedi
   const tokens = Object.values(tokensByModel).reduce((n, b) => n + b.total, 0);
   const priced = Object.values(tokensByModel).filter((b) => b.cost !== null);
   const unpricedModels = Object.entries(tokensByModel).filter(([, b]) => b.cost === null && b.total > 0).map(([m]) => m);
+  // Named failure: 58.6% of one project's tokens were from models with no price and the cost line did not say so.
+  const unpricedTokens = Object.values(tokensByModel).filter((b) => b.cost === null).reduce((n, b) => n + b.total, 0);
   // Every model seen for this attempt: in agent transcripts and recorded in the ledger at plan, handoff and review.
   const observedModels = [...new Set([
     ...roles.flatMap((r) => Object.keys(r.usage?.models ?? {})),
@@ -607,6 +407,13 @@ export function attemptReport(root, id, table = prices(root), { home = os.homedi
     repos: acc.repos + (x.repos ?? x.addedRepos?.length ?? 0),
   }), { amendments: 0, criteriaAdded: 0, criteriaChanged: 0, criteriaDropped: 0, endpoints: 0, errorCodes: 0, repos: 0 });
   const frozenCount = entries.find((e) => e.type === 'criteria.frozen')?.data?.criteria?.length ?? null;
+  const refused = refusalsOf(refusals ?? readRefusals(), path.basename(root), id);
+  const strategy = strategyEvents(entries);
+  const reviewerBundles = rounds.map((r) => r.bundleBytes).filter((n) => n !== null);
+  let openObservations = 0;
+  try {
+    openObservations = observations(s).length;
+  } catch {}
 
   return {
     id,
@@ -662,6 +469,33 @@ export function attemptReport(root, id, table = prices(root), { home = os.homedi
     rounds,
     findings: findingRows.length,
     findingsBySeverity: severity,
+    // How each reviewer model rates (high, medium, low, unrated) and how often a later reviewer re-rated a finding: what is
+    // owed depends on ratings, and models rate differently (second final review of 0.7.0). Measurement only.
+    severityByModel: (() => {
+      const out = {};
+      for (const r of s.reviews ?? []) {
+        const model = r.reviewerModel ?? 'unknown';
+        for (const f of r.closure?.findings ?? []) {
+          const level = severityLevel(f.severity) ?? 'unrated';
+          out[model] ??= { high: 0, medium: 0, low: 0, unrated: 0 };
+          out[model][level] += 1;
+        }
+      }
+      return out;
+    })(),
+    rerated: (() => {
+      const rank = { low: 0, medium: 1, high: 2 };
+      const original = new Map((s.reviews ?? []).flatMap((r) => (r.closure?.findings ?? []).map((f) => [`${r.closure?.reviewer ?? r.reviewer}:${f.id}`, severityLevel(f.severity)])));
+      let down = 0, up = 0;
+      for (const r of s.reviews ?? []) for (const p of r.closure?.priorFindings ?? []) {
+        const to = severityLevel(p.severity);
+        const from = original.get(`${p.round}:${p.id}`);
+        if (!to || !from || to === from) continue;
+        if (rank[to] < rank[from]) down += 1;
+        else up += 1;
+      }
+      return { down, up };
+    })(),
     findingsOpen: findingRows.filter((f) => !f.settled).length,
     findingList: findingRows,
     // I-26: review findings about something the planner's impact map did not list (a direct measure of planning quality).
@@ -680,23 +514,64 @@ export function attemptReport(root, id, table = prices(root), { home = os.homedi
     subagentTokens: roles.reduce((n, r) => n + r.children.reduce((m, c) => m + (c.tokens ?? 0), 0), 0),
     cost: priced.length ? Math.round(priced.reduce((n, b) => n + b.cost, 0) * 10000) / 10000 : null,
     unpricedModels,
+    unpricedTokens,
+    // Share of this attempt's tokens that the cost does not cover (no price for their model); null when there are no tokens.
+    unpricedShare: tokens ? Math.round((unpricedTokens / tokens) * 1000) / 1000 : null,
+    // 0.7.0: refusals the engine logged against this attempt, by check id (`wf refusals` counts all of them).
+    refusalCount: refused.total,
+    refusalsById: refused.byId,
+    // Size of the largest reviewer bundle handed (each round also carries `bundleBytes`).
+    maxReviewerBundleBytes: reviewerBundles.length ? Math.max(...reviewerBundles) : null,
+    // Findings the review policy keeps open without blocking (observations the strategist schedules).
+    openObservations,
+    // 0.7.0: where defects came from, not only where they were found. Each located review finding is traced (git blame on
+    // the reviewed tree) to the implementer handoff whose commits contain the cited line; measurement only.
+    introduced: (() => {
+      try {
+        return introducedFindings(s);
+      } catch {
+        return null;
+      }
+    })(),
+    // 0.7.0: what the plan and the implementers predicted against what happened, so predictions can be calibrated.
+    course: {
+      expected: s.expect ?? null,
+      replans: (s.expectations ?? []).filter((x) => x.source === 'amendment').length,
+      actual: {
+        rounds: new Set((s.reviews ?? []).map((r) => r.handoff ?? r.reviewer)).size,
+        minutes: ph.totalMinutes ?? null,
+        files: (() => {
+          try {
+            return Object.keys(s.repos ?? {}).reduce((n, repo) => n + changedFiles(s, repo).length, 0);
+          } catch {
+            return null;
+          }
+        })(),
+      },
+      implementers: (s.implementerReports ?? []).map((r) => {
+        const x = s.implementers.find((i) => i.handoff === r.handoff);
+        const took = x?.openedAt && x?.closedAt ? Math.round((Date.parse(x.closedAt) - Date.parse(x.openedAt)) / 60000) : null;
+        return { agent: r.agent, expectMinutes: r.expect?.minutes ?? null, tookMinutes: took };
+      }),
+    },
+    strategyDecisions: strategy.decisions,
+    strategyTripwires: strategy.tripwires,
+    tripwiresFired: strategy.fired,
   };
 }
 
 export function report(roots, { home = os.homedir(), idleMinutes = IDLE_REPORT_MINUTES } = {}) {
   const rows = [];
-  let index = null;
-  try {
-    index = subagentIndex(home);
-  } catch {}
+  const indexes = new Map();
+  const refusals = readRefusals();
   for (const root of roots) {
     const table = prices(root);
-    for (const id of listAttempts(root)) rows.push({ project: path.basename(root), ...attemptReport(root, id, table, { home, index: index ?? [], idleMinutes }) });
+    for (const id of listAttempts(root)) rows.push({ project: path.basename(root), ...attemptReport(root, id, table, { home, indexes, idleMinutes, refusals }) });
   }
   return rows;
 }
 
-const HANDOFF_COLS = ['project', 'id', 'handoff', 'role', 'agent', 'runtime', 'work', 'class', 'declaredEffort', 'observedEffort', 'effortMismatch', 'agentType', 'model', 'sessionModel', 'wallMinutes', 'activeMinutes', 'rounds', 'outputTokens', 'cost', 'subagents', 'subagentCost'];
+const HANDOFF_COLS = ['project', 'id', 'handoff', 'role', 'agent', 'runtime', 'work', 'class', 'declaredEffort', 'observedEffort', 'effortMismatch', 'agentType', 'model', 'sessionModel', 'wallMinutes', 'activeMinutes', 'rounds', 'outputTokens', 'cost', 'subagents', 'subagentCost', 'bundleBytes'];
 export const handoffRows = (rows) => rows.flatMap((r) => r.roles.map((h) => ({ project: r.project, id: r.id, ...h, subagents: h.children.length, subagentCost: h.childCost })));
 
 const esc = (v) => (v === null || v === undefined ? '' : /[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : String(v));
@@ -705,7 +580,7 @@ export function toHandoffCsv(rows) {
   return [HANDOFF_COLS.join(','), ...handoffRows(rows).map((h) => HANDOFF_COLS.map((c) => esc(h[c])).join(','))].join('\n') + '\n';
 }
 
-const ATTEMPT_COLS = ['project', 'id', 'item', 'lane', 'phase', 'admittedAt', 'timeToGateMs', 'timeToDeliverMs', 'timeToCloseMs', 'wallMinutes', ...PHASES.map((p) => `${p}Minutes`), 'gateRuns', 'gatesPassed', 'gatesFailed', 'gatesStopped', 'repairRounds', 'reviewRounds', 'refusedRounds', 'roundsWithRefusal', 'failedLaunchRounds', 'failedStartRounds', 'unknownOutcomeRounds', 'wastedReviewerRounds', 'roundsWithGreenGate', 'stepRuns', 'stepReused', 'reuseRate', 'gateTimeMs', 'findings', 'findingsOpen', 'impactGaps', 'criteria', 'criteriaAmendments', 'holds', 'observedModels', 'tokens', 'subagentTokens', 'cost'];
+const ATTEMPT_COLS = ['project', 'id', 'item', 'lane', 'phase', 'admittedAt', 'timeToGateMs', 'timeToDeliverMs', 'timeToCloseMs', 'wallMinutes', ...PHASES.map((p) => `${p}Minutes`), 'gateRuns', 'gatesPassed', 'gatesFailed', 'gatesStopped', 'repairRounds', 'reviewRounds', 'refusedRounds', 'roundsWithRefusal', 'failedLaunchRounds', 'failedStartRounds', 'unknownOutcomeRounds', 'wastedReviewerRounds', 'roundsWithGreenGate', 'stepRuns', 'stepReused', 'reuseRate', 'gateTimeMs', 'findings', 'findingsOpen', 'impactGaps', 'criteria', 'criteriaAmendments', 'holds', 'observedModels', 'tokens', 'subagentTokens', 'cost', 'unpricedTokens', 'refusalCount', 'maxReviewerBundleBytes', 'openObservations', 'strategyDecisions', 'strategyTripwires'];
 export function toCsv(rows) {
   const flat = (r) => ({ ...r, ...Object.fromEntries(PHASES.map((p) => [`${p}Minutes`, r.phases?.[p] ?? null])), gatesPassed: r.gates?.passed, gatesFailed: r.gates?.failed, gatesStopped: r.gates?.stopped });
   return [ATTEMPT_COLS.join(','), ...rows.map(flat).map((r) => ATTEMPT_COLS.map((c) => esc(Array.isArray(r[c]) ? r[c].join(' ') : r[c])).join(','))].join('\n') + '\n';
@@ -718,6 +593,8 @@ export function toJson(rows) {
   return {
     schema: REPORT_SCHEMA,
     generatedAt: new Date().toISOString(),
+    unpriced: unpricedSummary(rows),
+    calibration: calibrationSummary(rows),
     attempts: rows.map(({ roles, ...r }) => ({
       ...r,
       roles: roles.map(({ usage, ...h }) => ({ ...h, tokensByModel: usage?.byModel ?? {}, toolCalls: usage?.toolCalls ?? null })),
@@ -725,7 +602,50 @@ export function toJson(rows) {
   };
 }
 
+// How good the predictions were, across attempts: for each predicted quantity, the median of actual / predicted over the
+// attempts that predicted it (1 is exact; 2 took twice as long), and the same for implementers' own minutes. Measurement
+// for the people and agents who predict; nothing is decided from it (D9). Named failure: predictions were shown per
+// ticket and nobody could tell whether they were any good.
+export function calibrationSummary(rows) {
+  const median = (xs) => {
+    const v = xs.filter(Number.isFinite).sort((a, b) => a - b);
+    if (!v.length) return null;
+    const m = Math.floor(v.length / 2);
+    return Math.round((v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2) * 100) / 100;
+  };
+  const out = {};
+  for (const k of ['files', 'rounds', 'minutes']) {
+    const ratios = rows.filter((r) => typeof r.course?.expected?.[k] === 'number' && typeof r.course?.actual?.[k] === 'number').map((r) => r.course.actual[k] / r.course.expected[k]);
+    out[k] = { attempts: ratios.length, medianActualOverPredicted: median(ratios) };
+  }
+  const impl = rows.flatMap((r) => (r.course?.implementers ?? []).filter((x) => typeof x.expectMinutes === 'number' && typeof x.tookMinutes === 'number').map((x) => x.tookMinutes / x.expectMinutes));
+  out.implementerMinutes = { handoffs: impl.length, medianActualOverPredicted: median(impl) };
+  return out;
+}
+
+// Models that used tokens and have no price, across the rows, most tokens first. Their tokens are in no cost figure.
+export function unpricedSummary(rows) {
+  const by = new Map();
+  for (const r of rows) {
+    for (const [model, b] of Object.entries(r.tokensByModel ?? {})) {
+      if (b.cost !== null || !(b.total > 0)) continue;
+      const x = by.get(model) ?? { model, tokens: 0, attempts: 0 };
+      x.tokens += b.total;
+      x.attempts += 1;
+      by.set(model, x);
+    }
+  }
+  const all = rows.reduce((n, r) => n + (r.tokens ?? 0), 0);
+  return [...by.values()].sort((a, b) => b.tokens - a.tokens).map((x) => ({ ...x, share: all ? Math.round((x.tokens / all) * 1000) / 1000 : null }));
+}
+
+// Where a price is added: the shipped table, the user's file, and the project's file.
+const priceFileLines = () => [`${userPricesFile()} (yours, every project)`, '<project>/.workflow/prices.yaml (one project)', `${defaultPricesFile()} (the plugin's shipped table)`];
+const PRICE_SHAPE = 'models:\n  <model id prefix>: { input: <USD per million tokens>, output: <...>, cacheRead: <...>, cacheWrite: <...> }';
+
 const num = (v, d = 1) => (v === null || v === undefined ? '-' : Number(v).toFixed(d).replace(/\.0+$/, ''));
+const bytes = (n) => (n === null || n === undefined ? '-' : n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : n >= 1024 ? `${Math.round(n / 1024)} KB` : `${n} B`);
+const pct = (share) => `${Math.round(share * 1000) / 10}%`;
 // The human summary `wf report` prints: per attempt, where the time went and what the rounds and gates did.
 export function toText(rows) {
   if (!rows.length) return 'no attempts';
@@ -738,12 +658,33 @@ export function toText(rows) {
     out.push(`  review: ${r.reviewRounds} handoff(s), ${r.recordedRounds} recorded, ${r.roundsWithRefusal} experienced refusal, ${r.failedLaunchRounds} failed launch(es) (${r.failedStartRounds} before session start), ${r.unknownOutcomeRounds} unknown outcome(s); ${r.roundsWithGreenGate} on a tree with a passing gate; ${r.repairRounds} repair round(s)`);
     if (Object.keys(r.refusalReasons).length) out.push(`  review refusal reasons: ${Object.entries(r.refusalReasons).map(([reason, count]) => `${reason} ${count}`).join(', ')}`);
     out.push(`  findings: ${r.findings}${Object.keys(r.findingsBySeverity).length ? ` (${Object.entries(r.findingsBySeverity).map(([k, v]) => `${k} ${v}`).join(', ')})` : ''}, ${r.findingsOpen} not yet verified fixed`);
+    const byModel = Object.entries(r.severityByModel ?? {});
+    if (byModel.length) out.push(`  severity by reviewer model: ${byModel.map(([m, c]) => `${m} high ${c.high}, medium ${c.medium}, low ${c.low}${c.unrated ? `, unrated ${c.unrated}` : ''}`).join('; ')}${r.rerated?.down || r.rerated?.up ? `; re-rated by a later reviewer: ${r.rerated.down} down, ${r.rerated.up} up` : ''}`);
     if (r.scope.amendments) out.push(`  scope: ${r.scope.amendments} amendment(s): criteria ${r.criteriaAtFreeze ?? '?'} -> ${r.criteria} (+${r.scope.criteriaAdded}, ${r.scope.criteriaChanged} changed, -${r.scope.criteriaDropped}); endpoints +${r.scope.endpoints}, error codes +${r.scope.errorCodes}, repos +${r.scope.repos}`);
     const models = Object.entries(r.tokensByModel);
     if (models.length) out.push(`  tokens by model: ${models.map(([m, b]) => `${m} ${b.total} (out ${b.output}${b.cost !== null ? `, $${b.cost.toFixed(2)}` : ''})`).join('; ')}`);
-    out.push(`  cost: ${r.cost === null ? 'unknown' : `$${r.cost.toFixed(2)}`}${r.unpricedModels.length ? ` (no price for ${r.unpricedModels.join(', ')})` : ''}; sub-agent tokens ${r.subagentTokens}`);
+    out.push(`  cost: ${r.cost === null ? 'unknown' : `$${r.cost.toFixed(2)}`}${r.unpricedModels.length ? ` (priced models only: ${r.unpricedShare === null ? '' : `${pct(r.unpricedShare)} of the tokens have `}no price for ${r.unpricedModels.join(', ')})` : ''}; sub-agent tokens ${r.subagentTokens}`);
+    const intro = Object.entries(r.introduced?.byAgent ?? {});
+    if (intro.length) out.push(`  introduced by implementer (located findings traced to its commits): ${intro.map(([a, x]) => `${a} ${x.blocking} blocking, ${x.observations} observation(s)`).join('; ')}${r.introduced.unattributed ? `; ${r.introduced.unattributed} not attributable` : ''}`);
+    if (r.course?.expected) out.push(`  predicted: ${Object.entries(r.course.expected).map(([k, v]) => `${k} ${v}`).join(', ')}${r.course.replans ? ` (${r.course.replans} re-plan(s))` : ''}; actual: ${['files', 'rounds', 'minutes'].filter((k) => r.course.actual[k] !== null && r.course.actual[k] !== undefined).map((k) => `${k} ${num(r.course.actual[k], 0)}`).join(', ')}`);
+    for (const x of r.course?.implementers ?? []) if (x.expectMinutes !== null) out.push(`  ${x.agent}: expected ${x.expectMinutes} min, took ${x.tookMinutes ?? '?'} min`);
+    if (r.refusalCount) out.push(`  refusals: ${r.refusalCount} (${Object.entries(r.refusalsById).slice(0, 8).map(([k, v]) => `${k} ${v}`).join(', ')}${Object.keys(r.refusalsById).length > 8 ? ', …' : ''})`);
+    const sized = r.rounds.map((x) => x.bundleBytes).filter((n) => n !== null && n !== undefined);
+    if (sized.length) out.push(`  reviewer bundles: ${sized.length} handoff(s), largest ${bytes(Math.max(...sized))}, total ${bytes(sized.reduce((n, x) => n + x, 0))}`);
+    if (r.openObservations) out.push(`  observations: ${r.openObservations} open (not blocking; the strategist schedules them)`);
+    if (r.strategyDecisions || r.strategyTripwires) out.push(`  strategy: ${r.strategyDecisions} decision(s), ${r.strategyTripwires} tripwire(s) fired${r.tripwiresFired.length ? ` (${r.tripwiresFired.join(', ')})` : ''}`);
     if (r.failingTests.length) for (const f of r.failingTests.slice(0, 10)) out.push(`  failed ${f.step} (${f.runId}): ${f.tests.length ? `${f.tests.slice(0, 5).join(' | ')}${f.total > 5 ? ` … ${f.total - 5} more` : ''}` : `exit ${(f.exitCodes ?? []).join(',') || '?'}${f.tail?.length ? `: ${f.tail.at(-1)}` : ''}`}`);
     for (const x of r.idleGaps.slice(0, 5)) out.push(`  idle ${num(x.minutes)} min (${x.phase}): ${x.from} -> ${x.to} (after ${x.after})`);
+  }
+  const cal = calibrationSummary(rows);
+  const calLines = [...['files', 'rounds', 'minutes'].map((k) => [k, cal[k].attempts, cal[k].medianActualOverPredicted]), ['implementer minutes', cal.implementerMinutes.handoffs, cal.implementerMinutes.medianActualOverPredicted]].filter(([, n]) => n);
+  if (calLines.length) out.push('', 'predictions (median of actual / predicted; 1 is exact):', ...calLines.map(([k, n, m]) => `  ${k}: ${m} over ${n} ${k === 'implementer minutes' ? 'handoff(s)' : 'attempt(s)'}`));
+  const unpriced = unpricedSummary(rows);
+  if (unpriced.length) {
+    const share = unpriced.reduce((n, x) => n + (x.share ?? 0), 0);
+    out.push('', `unpriced models: ${unpriced.length} model(s), ${pct(share)} of all tokens, are in no cost figure above`);
+    for (const x of unpriced) out.push(`  ${x.model}  ${x.tokens} tokens in ${x.attempts} attempt(s)`);
+    out.push('  add a price for each (the longest model id prefix wins; a later file replaces an earlier entry), in one of:', ...priceFileLines().map((l) => `    ${l}`), `  shape:\n${PRICE_SHAPE.split('\n').map((l) => `    ${l}`).join('\n')}`);
   }
   return out.join('\n');
 }
@@ -753,16 +694,18 @@ const html = (v) => String(v ?? '—').replace(/[&<>"]/g, (c) => ({ '&': '&amp;'
 function handoffTable(rows) {
   const hs = handoffRows(rows);
   if (!hs.length) return '';
-  const head = ['Attempt', 'Role', 'Agent', 'Work', 'Class', 'Effort declared', 'Effort observed', 'Agent type', 'Model', 'Session model', 'Wall min', 'Active min', 'Rounds', 'Output tokens', 'Cost', 'Sub-agents'];
-  const body = hs.map((h) => `<tr><td>${html(h.id)}</td><td>${html(h.role)}</td><td>${html(h.agent)}</td><td>${html(h.work)}</td><td>${html(h.class)}</td><td>${html(h.declaredEffort)}</td><td>${html(h.observedEffort)}${h.effortMismatch ? ' <strong>(differs)</strong>' : ''}</td><td>${html(h.agentType)}</td><td>${html(h.model)}</td><td>${html(h.sessionModel)}</td><td>${html(h.wallMinutes)}</td><td>${html(h.activeMinutes)}</td><td>${html(h.rounds)}</td><td>${html(h.outputTokens)}</td><td>${h.cost === null ? '—' : `$${h.cost.toFixed(2)}`}</td><td>${html(h.subagents)}</td></tr>`).join('\n');
+  const head = ['Attempt', 'Role', 'Agent', 'Work', 'Class', 'Effort declared', 'Effort observed', 'Agent type', 'Model', 'Session model', 'Wall min', 'Active min', 'Rounds', 'Output tokens', 'Cost', 'Sub-agents', 'Bundle'];
+  const body = hs.map((h) => `<tr><td>${html(h.id)}</td><td>${html(h.role)}</td><td>${html(h.agent)}</td><td>${html(h.work)}</td><td>${html(h.class)}</td><td>${html(h.declaredEffort)}</td><td>${html(h.observedEffort)}${h.effortMismatch ? ' <strong>(differs)</strong>' : ''}</td><td>${html(h.agentType)}</td><td>${html(h.model)}</td><td>${html(h.sessionModel)}</td><td>${html(h.wallMinutes)}</td><td>${html(h.activeMinutes)}</td><td>${html(h.rounds)}</td><td>${html(h.outputTokens)}</td><td>${h.cost === null ? '—' : `$${h.cost.toFixed(2)}`}</td><td>${html(h.subagents)}</td><td>${bytes(h.bundleBytes)}</td></tr>`).join('\n');
   return `<h2>Agents</h2><table><tr>${head.map((x) => `<th>${x}</th>`).join('')}</tr>${body}</table>`;
 }
 
 export function toHtml(rows) {
   const fmt = (v) => (v === null || v === undefined ? '—' : typeof v === 'number' ? (v > 1000 && Number.isInteger(v) ? `${(v / 60000).toFixed(1)} min` : v.toFixed?.(2) ?? v) : v);
-  const head = ['Project', 'Attempt', 'Lane', 'Phase', 'To gate', 'To deliver', 'Gate runs', 'Stopped', 'Review handoffs', 'Refusal handoffs', 'Failed launches', 'Unknown outcomes', 'Repairs', 'Reuse', 'Gate time', 'Findings', 'Tokens', 'Cost'];
-  const body = rows.map((r) => `<tr><td>${html(r.project)}</td><td>${html(r.id)}</td><td>${html(r.lane)}</td><td>${html(r.phase)}</td><td>${fmt(r.timeToGateMs)}</td><td>${fmt(r.timeToDeliverMs)}</td><td>${r.gateRuns}</td><td>${r.gates.stopped}</td><td>${r.reviewRounds}</td><td>${r.roundsWithRefusal}</td><td>${r.failedLaunchRounds}</td><td>${r.unknownOutcomeRounds}</td><td>${r.repairRounds}</td><td>${r.reuseRate === null ? '—' : `${Math.round(r.reuseRate * 100)}%`}</td><td>${fmt(r.gateTimeMs)}</td><td>${r.findings}</td><td>${r.tokens || '—'}</td><td>${r.cost === null ? '—' : `$${r.cost.toFixed(2)}`}</td></tr>`).join('\n');
+  const head = ['Project', 'Attempt', 'Lane', 'Phase', 'To gate', 'To deliver', 'Gate runs', 'Stopped', 'Review handoffs', 'Refusal handoffs', 'Failed launches', 'Unknown outcomes', 'Repairs', 'Reuse', 'Gate time', 'Findings', 'Observations', 'Engine refusals', 'Largest bundle', 'Tripwires', 'Tokens', 'Cost'];
+  const body = rows.map((r) => `<tr><td>${html(r.project)}</td><td>${html(r.id)}</td><td>${html(r.lane)}</td><td>${html(r.phase)}</td><td>${fmt(r.timeToGateMs)}</td><td>${fmt(r.timeToDeliverMs)}</td><td>${r.gateRuns}</td><td>${r.gates.stopped}</td><td>${r.reviewRounds}</td><td>${r.roundsWithRefusal}</td><td>${r.failedLaunchRounds}</td><td>${r.unknownOutcomeRounds}</td><td>${r.repairRounds}</td><td>${r.reuseRate === null ? '—' : `${Math.round(r.reuseRate * 100)}%`}</td><td>${fmt(r.gateTimeMs)}</td><td>${r.findings}</td><td>${r.openObservations}</td><td>${r.refusalCount}</td><td>${bytes(r.maxReviewerBundleBytes)}</td><td>${r.strategyTripwires}</td><td>${r.tokens || '—'}</td><td>${r.cost === null ? '—' : `$${r.cost.toFixed(2)}${r.unpricedModels.length ? ' (partial)' : ''}`}</td></tr>`).join('\n');
+  const unpriced = unpricedSummary(rows);
+  const unpricedHtml = unpriced.length ? `<h2>Unpriced models</h2><p>These models used tokens and have no price, so their tokens are in no cost above. Add each to one of:</p><ul>${priceFileLines().map((l) => `<li><code>${html(l)}</code></li>`).join('')}</ul><pre>${html(PRICE_SHAPE)}</pre><table><tr><th>Model</th><th>Tokens</th><th>Attempts</th><th>Share of all tokens</th></tr>${unpriced.map((x) => `<tr><td>${html(x.model)}</td><td>${x.tokens}</td><td>${x.attempts}</td><td>${x.share === null ? '—' : pct(x.share)}</td></tr>`).join('')}</table>` : '';
   const phaseHead = ['Attempt', ...PHASES];
   const phaseBody = rows.map((r) => `<tr><td>${html(r.id)}</td>${PHASES.map((p) => `<td>${html(r.phases[p])}</td>`).join('')}</tr>`).join('\n');
-  return `<!doctype html><meta charset="utf-8"><title>agentic-workflow report</title><style>body{font:14px system-ui;margin:24px;color:#1b2228;background:#fff}table{border-collapse:collapse}td,th{padding:6px 10px;border-bottom:1px solid #ddd;text-align:left;font-variant-numeric:tabular-nums}th{font-size:12px;text-transform:uppercase;color:#5b6770}@media(prefers-color-scheme:dark){body{background:#12171b;color:#e3e8eb}td,th{border-color:#2a343b}}</style><h1>agentic-workflow report</h1><p>${rows.length} attempt(s), generated ${new Date().toISOString()}</p><table><tr>${head.map((h) => `<th>${h}</th>`).join('')}</tr>${body}</table><h2>Minutes per phase</h2><table><tr>${phaseHead.map((h) => `<th>${h}</th>`).join('')}</tr>${phaseBody}</table>${handoffTable(rows)}`;
+  return `<!doctype html><meta charset="utf-8"><title>agentic-workflow report</title><style>body{font:14px system-ui;margin:24px;color:#1b2228;background:#fff}table{border-collapse:collapse}td,th{padding:6px 10px;border-bottom:1px solid #ddd;text-align:left;font-variant-numeric:tabular-nums}th{font-size:12px;text-transform:uppercase;color:#5b6770}@media(prefers-color-scheme:dark){body{background:#12171b;color:#e3e8eb}td,th{border-color:#2a343b}}</style><h1>agentic-workflow report</h1><p>${rows.length} attempt(s), generated ${new Date().toISOString()}</p><table><tr>${head.map((h) => `<th>${h}</th>`).join('')}</tr>${body}</table><h2>Minutes per phase</h2><table><tr>${phaseHead.map((h) => `<th>${h}</th>`).join('')}</tr>${phaseBody}</table>${handoffTable(rows)}${unpricedHtml}`;
 }
