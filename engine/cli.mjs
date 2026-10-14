@@ -19,7 +19,7 @@ import { canonical, touchesEvidence } from './paths.mjs';
 import { openCount } from './improve.mjs';
 import { reviewDivisionSummary } from './review-groups.mjs';
 import { LESSON_FILE, addLesson, applySnippet, exportPluginLessons, findLesson, lessonPrompts, lessonWarnings, loadLessons, moveLesson, recur, relevantLessons, reviewLessons, setLesson } from './lessons.mjs';
-import { LinkRefused, changesOf, rebaseline, releaseAttempt, seal, setVerifyLevel, unlockEvidence, verifyAttempt } from './evidence.mjs';
+import { LinkRefused, changesOf, ledgerEmpty, lostLedgers, rebaseline, releaseAttempt, seal, setVerifyLevel, unlockEvidence, verifyAttempt } from './evidence.mjs';
 import { acceptReview, amendCriteria, closeImplementer, designWarning, gateOrderCheck, batchCreate, batchEject, closeAfterHandoff, deliver, deliveredFiles, exportScreenshots, freezeCriteria, handoff, narrowDelivery, needsShown, nextAction, nextDecision, orphanNext, orphansOf, outsideWarning, recordReview, recordShown, reopen, screenshotsExportDir, shownDraftFile, uncovered, withAttempt } from './lifecycle.mjs';
 import { addDiscovered, channelOf, closeDiscovered, discoveredLine, openDiscovered, rateDiscovered } from './discovered.mjs';
 import { detect, doctor, register, registry, setEnabled, sync, writeDraft } from './onboard.mjs';
@@ -218,7 +218,9 @@ function summary(root, s, { base = null, resume = false } = {}) {
   const live = ['done', 'abandoned'].includes(s.phase) ? null : liveGate(root, s);
   if (live) {
     lines.push(`  gate running: ${live.runId} (pid ${live.pid})`);
-    lines.push(`    running: ${live.running.map((r) => `${r.id} (${r.seconds}s)`).join(', ') || 'none (waiting for a lease)'}`);
+    lines.push(`    running: ${live.running.map((r) => `${r.id} (${r.seconds}s)`).join(', ') || `none${live.waiting.length ? '' : ' (waiting for a lease)'}`}`);
+    // Named failure (I-113): the line said only "waiting for a lease". It names the lease, its holders and how capacity is raised.
+    for (const w of live.waiting) lines.push(`    waiting: ${w.id} for lease ${w.lease} (${w.capacity} slot(s), all held) for ${w.seconds}s: ${w.text}`);
     lines.push(`    finished: ${live.finished.map((r) => `${r.id} ${r.status}${r.seconds !== null ? ` ${r.seconds}s` : ''}`).join(', ') || 'none yet'}`);
   }
   if (s.discovered?.length) {
@@ -228,10 +230,19 @@ function summary(root, s, { base = null, resume = false } = {}) {
   const watching = ['done', 'abandoned'].includes(s.phase) ? [] : observations(s);
   if (watching.length) lines.push(`  observations: ${watching.length} unresolved, delivery waits for them (${watching.slice(0, 6).map((f) => f.ref).join(', ')}${watching.length > 6 ? ', …' : ''}; \`wf scope list\`)`);
   for (const a of s.addedRepos ?? []) lines.push(`  repo added: ${a.repo} (${a.reason})`);
-  if (s.lastGate) lines.push(`  last gate: ${s.lastGate.status} (${s.lastGate.runId})`);
+  // Named failure (I-113): a stopped run showed only "stopped"; the class and reason `wf stop` recorded were in the ledger and
+  // the result, and nobody reading `wf status` or `wf resume` could tell a tree change from an owner decision.
+  const ended = (r) => {
+    if (r.status === 'stopped') {
+      const stop = r.stop ?? s.stops?.filter((x) => x.runId === r.runId).at(-1);
+      return stop ? `stopped (${stop.class ?? 'no class'}: ${stop.reason ?? 'no reason'})` : 'stopped (no reason recorded: not stopped with `wf stop`)';
+    }
+    return r.error ? `${r.status} (${r.error})` : r.status;
+  };
+  if (s.lastGate) lines.push(`  last gate: ${ended(s.lastGate)} (${s.lastGate.runId})`);
   for (const t of s.tracker.done) if (t.provenance === 'host-recorded') lines.push(`  tracker ${t.event}: readback host-recorded (the tracker's answer as the ${findHost(t.host?.runtime)?.label ?? 'harness'} host wrote it in the owner's transcript, not the agent; a process running as the same user could edit that file)`);
   for (const t of s.tracker.done) if (t.provenance === 'agent-reported, unverified') lines.push(`  tracker ${t.event}: readback agent-reported, unverified (an engine route verifies it: \`wf tracker mode api|cli|files\`)`);
-  if (s.checks?.length) lines.push(`  last check: ${s.checks.at(-1).status} (${s.checks.at(-1).runId}; light steps only, never counts as the gate)`);
+  if (s.checks?.length) lines.push(`  last check: ${ended(s.checks.at(-1))} (${s.checks.at(-1).runId}; light steps only, never counts as the gate)`);
   if (s.flaky?.length) lines.push(`  flaky: ${[...new Set(s.flaky.map((f) => `${f.step}${f.suites?.length ? ` (${f.suites.join(', ')})` : ''}`))].join(', ')} failed and then passed with the same inputs`);
   if (s.criteria && isOpen(s) && !s.accepted) {
     try {
@@ -528,13 +539,18 @@ async function dispatch(cmd, sub, positional, options) {
     for (const p of registry().projects) {
       if (!fs.existsSync(p.root)) continue;
       for (const id of listAttempts(p.root)) {
+        // Named failure (I-78): an attempt whose ledger holds no entry has no state to list; it is shown as damaged, with the command that names why.
+        if (ledgerEmpty(p.root, id)) {
+          out.push({ project: path.basename(p.root), root: p.root, id, item: null, phase: 'ledger empty', hold: null, damaged: true, next: `\`wf verify --attempt ${id}\` names what happened to its ledger` });
+          continue;
+        }
         const s = loadState(p.root, id);
         if (['done', 'abandoned'].includes(s.phase)) continue;
         const gone = orphansOf(s);
         out.push({ project: path.basename(p.root), root: p.root, id, item: s.item, phase: s.phase, hold: s.activeHold?.reason ?? null, ...(gone.length ? { orphaned: gone } : {}), next: nextAction(p.root, s) });
       }
     }
-    print(options, out.length ? out.map((o) => `${o.project}  ${o.id}  ${o.phase}${o.orphaned ? '  ORPHANED' : ''}${o.hold ? `  HOLD: ${o.hold}` : ''}\n  next: ${o.next}`).join('\n') : 'no open attempts in any enabled project', out);
+    print(options, out.length ? out.map((o) => `${o.project}  ${o.id}  ${o.damaged ? 'DAMAGED: ledger empty' : o.phase}${o.orphaned ? '  ORPHANED' : ''}${o.hold ? `  HOLD: ${o.hold}` : ''}\n  next: ${o.next}`).join('\n') : 'no open attempts in any enabled project', out);
     return 0;
   }
 
@@ -872,7 +888,7 @@ async function dispatch(cmd, sub, positional, options) {
       if ((options.step !== undefined && !step) || (!step && (!options.lease || options.lease === true)) || (options.lease === true) || (!step && !options._.length)) throw new WfError('usage: wf run --lease <name> -- <command...>   or   wf run --step <gate step id> [--lease <name>] (runs the step\'s declared `prepare`)');
       if (step) return await runPrepared(root, openState(root, options), step, options._, { lease: options.lease ? String(options.lease) : null });
       const cfg = loadConfig(root);
-      return await runWithLease(cfg, String(options.lease), options._);
+      return await runWithLease(cfg, String(options.lease), options._, { root });
     }
     case 'summary': {
       const cfg = loadConfig(root);
@@ -1125,12 +1141,16 @@ async function dispatch(cmd, sub, positional, options) {
       // Reports, never refuses on open: the point is to list every problem.
       const ids = options.all ? listAttempts(root) : [resolveAttempt(root, options)];
       const bad = [];
+      // Named failure (I-78): with the evidence folder renamed, `--all` verified the attempts left and printed success, never
+      // mentioning the ones whose ledger is gone but whose anchor still records them.
+      const lost = options.all ? lostLedgers(root).filter((l) => !ids.includes(l.id)) : [];
+      for (const l of lost) bad.push({ id: l.id, problems: [`ledger.jsonl is missing, but its anchor records entry ${l.seq}: the attempt's evidence folder was renamed, moved or deleted`] });
       for (const id of ids) {
         const p = verifyAttempt(root, id, { full: true });
         // Named failure (I-78): with the evidence folder renamed, `wf verify --attempt X` printed "verified 1 attempt(s)" for an
         // attempt that has no ledger at all (an empty ledger reads as a pre-manifest attempt). The attempt asked for must exist;
         // a folder that is a link, or any other problem verification names, is still reported as such.
-        if (!p.length && !options.all && !listAttempts(root).includes(id)) throw refuse(`${id} has no ledger here, so nothing was verified; it is not an attempt of this project (or its evidence folder was renamed or moved)`, '`wf status --all` lists the attempts; restore the folder if it was moved', { id: 'verify:no-attempt' });
+        if (!p.length && !options.all && !listAttempts(root).includes(id)) throw refuse(`${id} has no ledger here, so nothing was verified; ${lostLedgers(root).some((l) => l.id === id) ? 'its anchor records it, so its evidence folder was renamed, moved or deleted' : 'it is not an attempt of this project (or its evidence folder was renamed or moved)'}`, '`wf status --all` lists the attempts; restore the folder if it was moved', { id: 'verify:no-attempt' });
         if (p.length) bad.push({ id, problems: p });
       }
       print(options, bad.length ? bad.map((b) => `${b.id}: ${b.problems.length} problem(s): the evidence does not match what wf recorded\n  - ${b.problems.slice(0, 20).join('\n  - ')}`).join('\n') : `verified ${ids.length} attempt(s): ledger chain, anchor and every recorded evidence file (sha256, size, mode) match; no extra file`, bad);
@@ -1208,7 +1228,14 @@ async function dispatch(cmd, sub, positional, options) {
       if (sub === 'show') {
         const l = findLesson(loadLessons(root), positional[0]);
         if (!l) throw new WfError(`no lesson ${positional[0] ?? ''}`);
-        print(options, `${show(l)}\n  what happened: ${l.trigger?.what ?? ''}${l.trigger?.quote ? `\n  in their words: "${l.trigger.quote}"` : ''}${l.trigger?.attempt ? `\n  seen in: ${l.trigger.attempt}${l.trigger.finding ? ` (finding ${l.trigger.finding})` : ''}` : ''}\n  tags: ${l.tags.join(', ') || 'none'}; scope: ${[l.repo ? `repo ${l.repo}` : null, l.components?.length ? `components ${l.components.join(', ')}` : null, l.paths.length ? `paths ${l.paths.join(', ')}` : null, l.kinds?.length ? `kinds ${l.kinds.join(', ')}` : null].filter(Boolean).join('; ') || 'none declared (matched only by its tags in the ticket)'}\n  ${l.file}`, l);
+        // Named failure (I-110): a project lesson that declares no repo, components, paths, kinds or tags was shown as "matched only by its
+        // tags in the ticket", but since I-64 it applies to every change in the project (`projectWide` in relevantLessons, engine/lessons.mjs).
+        const declared = [l.repo ? `repo ${l.repo}` : null, l.components?.length ? `components ${l.components.join(', ')}` : null, l.paths.length ? `paths ${l.paths.join(', ')}` : null, l.kinds?.length ? `kinds ${l.kinds.join(', ')}` : null].filter(Boolean);
+        const reach = declared.length ? declared.join('; ')
+          : l.scope === 'project' && !l.tags.length ? 'none declared, so it applies to every change in the project (a project lesson that narrows itself by nothing is project-wide)'
+            : l.tags.length ? 'none declared (matched only by its tags in the ticket)'
+              : 'none declared, and no tags: it matches no change (add `paths: ["**"]` to apply it to every change)';
+        print(options, `${show(l)}\n  what happened: ${l.trigger?.what ?? ''}${l.trigger?.quote ? `\n  in their words: "${l.trigger.quote}"` : ''}${l.trigger?.attempt ? `\n  seen in: ${l.trigger.attempt}${l.trigger.finding ? ` (finding ${l.trigger.finding})` : ''}` : ''}\n  tags: ${l.tags.join(', ') || 'none'}; scope: ${reach}\n  ${l.file}`, l);
         return 0;
       }
       if (sub === 'review') {
@@ -1306,7 +1333,9 @@ async function dispatch(cmd, sub, positional, options) {
     }
     case 'status': {
       // --attempt narrows the listing to that attempt; without it every open attempt is shown.
-      const states = options.attempt ? [openState(root, options)] : listAttempts(root).map((id) => loadState(root, id)).filter(isOpen).map((s) => (openEvidence(root, s.id), s));
+      // Named failure (I-78): the evidence was opened by the id the ledger's admission entry names, which an emptied ledger does not
+      // have, so `wf status` crashed on it. The attempt's folder name is the id; opening it reports what is wrong with the ledger.
+      const states = options.attempt ? [openState(root, options)] : listAttempts(root).map((id) => [id, loadState(root, id)]).filter(([, s]) => isOpen(s)).map(([id, s]) => (openEvidence(root, id), s));
       const rows = states.map((s) => ({ s, base: isOpen(s) && !orphansOf(s).length ? safeBase(root, s) : null }));
       print(options, rows.length ? rows.map(({ s, base }) => summary(root, s, { base })).join('\n\n') : 'no open attempts', options.json ? rows.map(({ s, base }) => ({ ...s, next: nextAction(root, s), base, ...(orphansOf(s).length ? { orphaned: orphansOf(s) } : {}) })) : undefined);
       return 0;

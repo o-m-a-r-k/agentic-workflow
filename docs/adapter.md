@@ -64,6 +64,16 @@ invariants: .workflow/AGENTS.invariants.md
 requires: { skills: [], connectors: [linear], tools: [{ name: docker, check: "docker info" }] }
 ```
 
+**Provisioning and secrets.** `provision` prepares each new worktree before any role starts: `clone` paths (copy-on-write), `copyIgnored` files, `fingerprint` lockfiles, `install` (run when a fingerprint file differs or a cloned path is missing) and `onWorktreeCreate`. The install runs with the project environment ([the step environment](gate.md#step-environment)) and **no secrets by default**. An install that needs one, such as a private registry's token, receives exactly the catalogued keys that list `provision:<repo>` in `usedBy`, the way a gate step lists its id:
+
+```yaml
+# .workflow/secrets.yaml (names only)
+keys:
+  - { key: REGISTRY_TOKEN, kind: provided, usedBy: ["provision:backend"], purpose: "private package registry" }
+```
+
+Only that repo's `install` gets the key (not another repo's, not `onWorktreeCreate`, not a step), the key counts as needed, so `wf secrets guide` asks for it, and `wf entry` refuses before the install runs when it is not filled (`secrets missing for provisioning of backend: REGISTRY_TOKEN`; the worktree it made is rolled back). A failing install prints its output with every catalogued value masked. A key with an empty `usedBy` still reaches nothing. (I-111; chosen as the narrowest form mirroring `usedBy`: a per-repo name, no blanket "all provisioning" and no way to receive every secret.)
+
 **Planning and review classes.** The planner and the reviewer default to the `review` class, which pins the Claude model `opus` with high effort. `wf doctor` fails when either role resolves to a class with no model for the selected runtime (`claude.model` or `codex.model`) (the planner is skipped when `roles.planner: false`): set the model on that class, or point the role back at `review`. Override `classes.review.claude.model` or `classes.review.codex.model` with an exact model id to pin a version. Doctor detects the current agent runtime; outside one it defaults to Claude. Select explicitly with `wf doctor --runtime codex` or `--runtime claude`. Codex has no default model pin: choose the strongest model available to your account.
 
 **`impact`.** `requiredFor` lists the work classes whose plans must carry the survey and impact map (default `[full]`: a plan with any `full` work item, or with no work items while the implementer role is `full`); only lanes with a planner are checked. The byte caps bound what the engine's own query runner reads; queries never run through a shell. Details: [lifecycle.md](lifecycle.md#impact-analysis).

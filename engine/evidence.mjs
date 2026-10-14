@@ -497,6 +497,36 @@ export function prepareWrite(file) {
   return abs;
 }
 
+// Attempts the anchors know of whose ledger is gone (the evidence folder renamed, moved or deleted), with the entry each
+// anchor last recorded. Named failure (I-78): `wf verify --all` verified the attempts that still have a ledger and printed
+// success, so an attempt whose whole evidence folder had been renamed was not mentioned at all. A released attempt's
+// tombstone and the stat cache files are not attempts.
+export function lostLedgers(root) {
+  let names;
+  try {
+    names = fs.readdirSync(path.dirname(anchorFile(root, 'x')));
+  } catch {
+    return [];
+  }
+  const lost = [];
+  for (const n of names.sort()) {
+    if (!n.endsWith('.json') || n.endsWith('.stat.json')) continue;
+    const id = n.slice(0, -'.json'.length);
+    const a = readAnchor(root, id);
+    if (a.released || !Number.isInteger(a.seq)) continue;
+    if (fs.lstatSync(path.join(attemptDirOf(root, id), 'ledger.jsonl'), { throwIfNoEntry: false })) continue;
+    lost.push({ id, seq: a.seq });
+  }
+  return lost;
+}
+
+// Whether an attempt's ledger file exists and holds no entry at all (no admission entry, so no state to read): listings use it
+// to show such an attempt as damaged instead of reading a state that has no id.
+export const ledgerEmpty = (root, id) => {
+  const lite = loadLedgerLite(root, id);
+  return !lite.missing && lite.entries.length === 0;
+};
+
 // Which of an attempt's files a reader may list. Named failure (I-50): a file a `wf` command had written but not yet
 // recorded was listed (and offered to `wf evidence show`) as if it were evidence. Recorded files, the ledger and the
 // files that are never recorded (a gate's lock and live progress) are; an attempt from before the manifest has nothing to
@@ -517,7 +547,7 @@ const liteCache = new Map(); // ledger file -> { sig, chained, out }
 function loadLedgerLite(root, id, { chain = false } = {}) {
   const file = path.join(attemptDirOf(root, id), 'ledger.jsonl');
   const st = fs.statSync(file, { throwIfNoEntry: false });
-  if (!st) return { entries: [], manifest: new Map(), openRuns: [], finishedRuns: new Set(), startedRuns: new Set(), engineVersion: null, admitted: false, baselined: false, collected: [], unreadable: [], chainBreak: null, rebaselined: new Set() };
+  if (!st) return { missing: true, entries: [], manifest: new Map(), openRuns: [], finishedRuns: new Set(), startedRuns: new Set(), engineVersion: null, admitted: false, baselined: false, collected: [], unreadable: [], chainBreak: null, rebaselined: new Set() };
   const sig = `${st.size}:${st.mtimeMs}:${st.ino}`;
   let hit = liteCache.get(file);
   if (!hit || hit.sig !== sig) {
@@ -656,6 +686,15 @@ function verifyInner(root, id, full, sigs) {
   const head = lite.entries.at(-1);
   const a = readAnchor(root, id);
   if (a.released) problems.push(`${id} was released ${a.at ?? ''}; its evidence must not reappear`);
+  // Named failure (I-78): `wf verify` printed "verified 1 attempt(s)" for a ledger.jsonl of 0 bytes whose anchor recorded an
+  // entry, and `wf resume` / `wf status` crashed on it. Every anchor check below was written `head && ...`, so a ledger
+  // with no entry at all (emptied, or truncated to nothing) read as "nothing to check" instead of as the loss it is. A
+  // ledger file that exists and holds no admission entry is a problem whatever its anchor says; nothing else is checked
+  // against it (every file would read as extra).
+  if (!head && !lite.missing) {
+    const anchored = Number.isInteger(a.seq) ? `but its anchor records entry ${a.seq}: the ledger was emptied or truncated outside wf` : `and ${id} has ${a.missing ? 'no anchor' : 'an unreadable anchor'} either`;
+    return [...problems, `ledger.jsonl holds no entry (no admission entry), ${anchored}, so nothing recorded for ${id} can be checked`];
+  }
   if (head && a.odd) problems.push(`anchor ${a.file} is not a regular file`);
   else if (head && a.unreadable) problems.push(`anchor ${a.file} is unreadable`);
   else if (head && a.missing) {

@@ -106,7 +106,7 @@ sequenceDiagram
 ```
 
 - **Agents never see a secret value.** They see key names only.
-- **Only needed keys are asked for.** A key is needed when a gate step lists it in `usedBy` or the catalog marks it `required: true`; `wf secrets status` and `wf secrets guide` list every other missing key once as "not needed by any step" and print `nothing to enter` when nothing is needed. `wf init` catalogues only keys a detected step's command names and lists the rest in a comment.
+- **Only needed keys are asked for.** A key is needed when a gate step (or a repo's provisioning, as `provision:<repo>`) lists it in `usedBy` or the catalog marks it `required: true`; `wf secrets status` and `wf secrets guide` list every other missing key once as "not needed by any step" and print `nothing to enter` when nothing is needed. `wf init` catalogues only keys a detected step's command names and lists the rest in a comment.
 - **Generated keys** (signing secrets, local database passwords) are created for you.
 - **Test values** come from the project's example files.
 - **Masking:** every catalogued value is masked in logs, evidence and telemetry.

@@ -113,6 +113,10 @@ scope:
   repos: 1
 ```
 
+### Gate and check results that ended on the runner's own error
+
+A `gate.finished` or `check.finished` entry whose run was ended by an error the runner itself hit (not by a step failing or by `wf stop`) has `status: failed` and `error`, the message; the steps that were running are `interrupted` and the ones never started `not-started`. A run stopped with `wf stop` carries `stop: { class, reason }`; `wf status` and `wf resume` print both.
+
 ### Failing tests on a gate step
 
 A failed step in `gate.step` and `gate.finished` carries `failures`:

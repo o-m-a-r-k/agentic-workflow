@@ -540,39 +540,138 @@ async function executeStep(root, cfg, state, planned, ctx) {
 }
 
 const leasesDir = () => path.join(process.env.WF_CONFIG_HOME ?? path.join(process.env.HOME ?? '/tmp', '.config', 'agentic-workflow'), 'leases');
+const leaseBase = (name) => name.replace(/[^\w.-]/g, '_');
+// Who holds a slot, beside the slot file (`docker.1.holder`): a slot file holds only its pid, because every `wf` version on the
+// machine reads and writes the same folder, so what names the holder goes in a file an older version never opens.
+const holderFileOf = (slot) => `${slot}.holder`;
+function noteHolder(slot, who) {
+  try {
+    fs.writeFileSync(holderFileOf(slot), JSON.stringify({ pid: process.pid, since: now(), ...who }));
+  } catch {}
+}
+export function releaseMachineLease(slot) {
+  fs.rmSync(slot, { force: true });
+  fs.rmSync(holderFileOf(slot), { force: true });
+}
 // One file per slot (`docker.1`, `docker.2`…), created exclusively; a slot whose holder process is gone is free.
-function takeMachineLease(name, capacity) {
+// Named failure (I-91): the holder's pid was read with no guard, so a slot released between our failed create and this read
+// ("ENOENT") threw out of the gate's scheduler and killed the runner with its step still running. A slot that vanished is
+// tried again (a few times: a dangling link stays "vanished"); one that cannot be read at all is held by someone we cannot
+// judge, and waited for like any other.
+function takeMachineLease(name, capacity, who = null) {
   const dir = leasesDir();
   mkdirStateDirectory(dir, { recursive: true });
   for (let i = 1; i <= capacity; i++) {
-    const file = path.join(dir, `${name.replace(/[^\w.-]/g, '_')}.${i}`);
-    try {
-      const fd = fs.openSync(file, 'wx');
-      fs.writeSync(fd, String(process.pid));
-      fs.closeSync(fd);
-      return file;
-    } catch (error) {
-      if (error.code !== 'EEXIST') throw error;
-      const holder = Number(fs.readFileSync(file, 'utf8') || 0);
-      if (holder && holder !== process.pid && !isPidAlive(holder)) {
-        fs.rmSync(file, { force: true });
-        i--;
+    const file = path.join(dir, `${leaseBase(name)}.${i}`);
+    for (let tries = 0; tries < 3; tries++) {
+      try {
+        const fd = fs.openSync(file, 'wx');
+        fs.writeSync(fd, String(process.pid));
+        fs.closeSync(fd);
+        if (who) noteHolder(file, who);
+        return file;
+      } catch (error) {
+        if (error.code !== 'EEXIST') throw error;
+        let holder = 0;
+        try {
+          holder = Number(fs.readFileSync(file, 'utf8').trim() || 0);
+        } catch (readError) {
+          if (readError.code === 'ENOENT') continue;
+        }
+        if (Number.isInteger(holder) && holder > 0 && holder !== process.pid && !isPidAlive(holder)) {
+          releaseMachineLease(file);
+          continue;
+        }
+        break;
       }
     }
   }
   return null;
 }
 
+// The live processes holding a lease's slots right now, with what they say they run (a gate step: the attempt and the step; a
+// `wf run`: its program name); a holder that recorded nothing is only a pid.
+export function leaseHolders(name) {
+  const dir = leasesDir();
+  let names = [];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return [];
+  }
+  const base = leaseBase(name);
+  const holders = [];
+  for (const n of names.sort()) {
+    const m = new RegExp(`^${base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.(\\d+)$`).exec(n);
+    if (!m) continue;
+    const slot = path.join(dir, n);
+    let pid = 0;
+    try {
+      pid = Number(fs.readFileSync(slot, 'utf8').trim() || 0);
+    } catch {
+      continue;
+    }
+    if (!Number.isInteger(pid) || pid <= 0 || !isPidAlive(pid)) continue;
+    let who = {};
+    try {
+      const noted = JSON.parse(fs.readFileSync(holderFileOf(slot), 'utf8'));
+      if (noted?.pid === pid) who = noted;
+    } catch {}
+    holders.push({ slot: Number(m[1]), pid, attempt: who.attempt ?? null, step: who.step ?? null, run: who.run ?? null, since: who.since ?? null, command: who.command ?? null });
+  }
+  return holders;
+}
+// A holder that recorded nothing (a `wf` of an older version, another tool) is named by its pid only: its command line can carry
+// anything, and `wf status` is read by agents.
+const describeHolder = (h) => {
+  const what = h.attempt ? `${h.attempt}${h.step ? ` step ${h.step}` : ''}` : h.command ? `wf run ${h.command}` : null;
+  return `pid ${h.pid}${what ? ` (${what})` : ' (no details recorded)'}${h.since ? ` since ${h.since.slice(11, 19)}Z` : ''}`;
+};
+const LEASE_REREAD_MS = 2000;
+// What a lease wait says after the lease's name: who holds the slots, and how capacity is raised (the project's current config,
+// read again while waiting).
+export function leaseWaitText(name, holders = leaseHolders(name)) {
+  const by = holders.length ? `held by ${holders.map(describeHolder).join(', ')}` : 'held by a process that has just let go';
+  return `${by}. To allow more at once, raise \`gate.leases.${name}\` in the project's .workflow/project.yaml (a waiting run reads it again every ${LEASE_REREAD_MS / 1000} seconds)`;
+}
+// Named failure (I-88): lease capacity is an operational fact of this machine, not part of a frozen test definition: it is read
+// from the project's current config (the owner's checkout; a ticket cannot change it), again every few seconds, and `first` is
+// the fallback when the file cannot be read.
+function leaseConfigReader(root, first) {
+  let read = { at: Date.now(), value: first ?? {} };
+  return () => {
+    if (Date.now() - read.at > LEASE_REREAD_MS) {
+      try {
+        read = { at: Date.now(), value: loadConfig(root).gate.leases ?? {} };
+      } catch {
+        read = { ...read, at: Date.now() };
+      }
+    }
+    return read.value;
+  };
+}
+
 // `wf run --lease <name> -- <cmd>`: an implementer's docker or end-to-end stack takes the same machine-wide slot a gate
 // step would, so concurrent attempts cannot start more stacks than `gate.leases` allows. Named failure: stacks started
 // outside the `docker: 1` lease overloaded the machine. The slot is held by this process and freed when it exits.
-export async function runWithLease(cfg, name, command, { log = process.stderr, cwd, env, redact } = {}) {
-  const capacity = name ? cfg.gate.leases?.[name] ?? 1 : 0;
-  let slot = name ? takeMachineLease(name, capacity) : null;
-  if (name && !slot) log.write(`wf run: waiting for a \`${name}\` lease (${capacity} slot(s), all held)\n`);
+export async function runWithLease(cfg, name, command, { log = process.stderr, cwd, env, redact, root = null } = {}) {
+  // Named failure (I-88, residual): capacity was read once, so a lease raised in the project's config while this command waited
+  // never reached it (docker.1 held, `gate.leases.docker` raised to 2, and `wf run --lease docker` kept waiting). The waiting
+  // loop reads the project's current config again, as a waiting gate step does.
+  const configured = root ? leaseConfigReader(root, cfg.gate.leases) : () => cfg.gate.leases ?? {};
+  const capacityNow = () => configured()[name] ?? 1;
+  const who = { command: path.basename(String(command?.[0] ?? '')) };
+  let capacity = name ? capacityNow() : 0;
+  let slot = name ? takeMachineLease(name, capacity, who) : null;
+  if (name && !slot) log.write(`wf run: waiting for a \`${name}\` lease (${capacity} slot(s), all held): ${leaseWaitText(name)}\n`);
   while (name && !slot) {
     await new Promise((r) => setTimeout(r, 1000));
-    slot = takeMachineLease(name, capacity);
+    const now = capacityNow();
+    if (now !== capacity) {
+      log.write(`wf run: lease \`${name}\` now allows ${now} slot(s) (it was ${capacity}), from the project config\n`);
+      capacity = now;
+    }
+    slot = takeMachineLease(name, capacity, who);
   }
   try {
     return await new Promise((resolve) => {
@@ -607,7 +706,7 @@ export async function runWithLease(cfg, name, command, { log = process.stderr, c
       });
     });
   } finally {
-    if (slot) fs.rmSync(slot, { force: true });
+    if (slot) releaseMachineLease(slot);
   }
 }
 
@@ -645,7 +744,7 @@ export async function runPrepared(root, state, stepId, command, { lease = null }
   if (missing.length) throw refuse(`secrets missing for step ${step.id}: ${missing.join(', ')}`, 'run `wf secrets guide` in your terminal');
   const { dir } = stepPackage(cfg, state, step);
   const env = projectEnv(cfg, { ...stepEnv(root, cfg, step.id, validationCatalog(root, state, step.id)), WF_ROOT: root, WF_ATTEMPT: state.id, WF_ITEM: String(state.item ?? state.id) });
-  return runWithLease(loadConfig(root), lease ?? step.lease ?? null, command, { cwd: dir, env, redact: redactor(root, cfg) });
+  return runWithLease(loadConfig(root), lease ?? step.lease ?? null, command, { cwd: dir, env, redact: redactor(root, cfg), root });
 }
 
 // A pid in the lock belongs to us only if it is still a `wf` process (pids are reused after a crash). When the host
@@ -780,7 +879,33 @@ function failureExcerpt(result, redact) {
   return lines.slice(-5).map((l) => redact(l));
 }
 
+const killGroups = (pids) => {
+  for (const pid of pids) {
+    try {
+      process.kill(-pid, 'SIGTERM'); // the step's process group; members survive their shell leader
+    } catch {}
+  }
+};
+
+// Named failure (I-91): the runner's scheduler could be left by an error nothing handled (a progress file that refused to be
+// written, a lease slot that could not be read): the process died with exit 1, a step's process still running and the gate
+// lock behind. Whatever leaves the run, an error or its end, signals every process the run started, frees the machine-wide
+// lease slots it took and drops its signal handlers. The next gate still harvests what a killed runner left (`harvest`), but a
+// stray process no longer outlives the runner that started it.
 async function execute(root, state, plan, live = null) {
+  const run = { children: new Set(), machine: new Map(), handlers: [] };
+  try {
+    return await executeRun(root, state, plan, live, run);
+  } catch (error) {
+    killGroups(run.children);
+    throw error;
+  } finally {
+    for (const slot of run.machine.values()) releaseMachineLease(slot);
+    for (const [signal, handler] of run.handlers) process.off(signal, handler);
+  }
+}
+
+async function executeRun(root, state, plan, live, run) {
   const runId = `${now().replace(/[:.]/g, '-')}-${process.pid}`;
   const runDir = path.join(gateDir(root, state.id), runId);
   ownGateRun(root, state.id, runId);
@@ -790,7 +915,7 @@ async function execute(root, state, plan, live = null) {
   const lockData = { pid: process.pid, runId, kind: plan.check ? 'check' : 'gate', startedAt: now(), tree: plan.tree, children: [], plugins: [] };
   const persistLock = () => writeJson(lockFile(root, state.id), lockData);
   persistLock();
-  const children = new Set();
+  const children = run.children;
   const ctx = {
     runId,
     runDir,
@@ -798,37 +923,64 @@ async function execute(root, state, plan, live = null) {
     redact: redactor(root, plan.cfg),
     running: new Map(),
     changedSinceBase: plan.changed,
+    // The lock is how a dead runner's children are found; one that cannot be written ends the run (the child is already known).
     addChild: (pid) => {
       children.add(pid);
       lockData.children.push(pid);
-      persistLock();
+      guarded(persistLock);
     },
     onPlugin: (id, on) => {
       lockData.plugins = on ? [...lockData.plugins, id] : lockData.plugins.filter((x) => x !== id);
-      persistLock();
+      guarded(persistLock);
     },
   };
   const results = [];
   const runningNow = new Map(); // step id -> start time
-  const saveProgress = () => writeJson(progressFile(root, state.id, runId), { runId, pid: process.pid, steps: results, running: [...runningNow].map(([id, at]) => ({ id, startedAt: new Date(at).toISOString() })) });
+  const waiting = new Map(); // step id -> { lease, capacity, since }: queued behind a full lease (shown by `wf status`)
+  const saveProgress = () => writeJson(progressFile(root, state.id, runId), { runId, pid: process.pid, steps: results, running: [...runningNow].map(([id, at]) => ({ id, startedAt: new Date(at).toISOString() })), waiting: [...waiting].map(([id, w]) => ({ id, lease: w.lease, capacity: w.capacity, since: new Date(w.since).toISOString() })) });
   const say = (line) => live?.write(`wf ${plan.check ? 'check' : 'gate'}: ${line}\n`);
   let stopping = false;
+  let fatal = null; // the first error that escaped the scheduler (I-91); the run ends as failed, nothing it started keeps running
+  let wake = () => {};
   const onSignal = async () => {
     if (stopping) return;
     stopping = true;
-    for (const pid of children) {
-      try {
-        process.kill(-pid, 'SIGTERM');
-      } catch {}
-    }
+    killGroups(children);
     for (const { plugin, ctx: pctx } of ctx.running.values()) {
       try {
         await plugin.cleanup?.(pctx);
       } catch {}
     }
   };
-  process.on('SIGTERM', onSignal);
-  process.on('SIGINT', onSignal);
+  const abort = (error) => {
+    if (!fatal) {
+      fatal = error;
+      try {
+        say(`aborting: ${ctx.redact(String(error?.message ?? error))}`);
+      } catch {}
+    }
+    onSignal();
+    wake();
+  };
+  const guarded = (fn) => {
+    try {
+      return fn();
+    } catch (error) {
+      abort(error);
+      return undefined;
+    }
+  };
+  for (const signal of ['SIGTERM', 'SIGINT']) {
+    process.on(signal, onSignal);
+    run.handlers.push([signal, onSignal]);
+  }
+  // Whatever else throws while the run goes on (a step plugin's timer, a stream callback) is the run's failure, not the
+  // process's: it ends the run the same way, instead of killing the runner with its steps' processes still running.
+  const onFatal = (error) => abort(error instanceof Error ? error : new Error(String(error)));
+  for (const event of ['uncaughtException', 'unhandledRejection']) {
+    process.on(event, onFatal);
+    run.handlers.push([event, onFatal]);
+  }
 
   // Light steps first (their failures are cheap to learn early), then heavy steps longest first, so the gate's wall
   // time is not the serial chain of heavy steps started in adapter order. Unknown durations count as longest.
@@ -853,16 +1005,9 @@ async function execute(root, state, plan, live = null) {
   // A capacity that differs from the pinned one is said once and recorded in the run's result.
   const pinnedLeases = plan.cfg.gate.leases ?? {};
   const leaseCapacity = {};
-  let leasesRead = { at: Date.now(), value: plan.live?.gate?.leases ?? {} };
+  const leasesNow = leaseConfigReader(root, plan.live?.gate?.leases);
   const capacityOf = (lease) => {
-    if (Date.now() - leasesRead.at > 2000) {
-      try {
-        leasesRead = { at: Date.now(), value: loadConfig(root).gate.leases ?? {} };
-      } catch {
-        leasesRead = { ...leasesRead, at: Date.now() };
-      }
-    }
-    const capacity = leasesRead.value[lease] ?? pinnedLeases[lease] ?? 1;
+    const capacity = leasesNow()[lease] ?? pinnedLeases[lease] ?? 1;
     if (capacity !== (pinnedLeases[lease] ?? 1) && leaseCapacity[lease]?.capacity !== capacity) {
       leaseCapacity[lease] = { capacity, pinned: pinnedLeases[lease] ?? 1 };
       say(`lease ${lease}: capacity ${capacity} from the project config (the admission adapter pinned ${pinnedLeases[lease] ?? 1})`);
@@ -870,85 +1015,131 @@ async function execute(root, state, plan, live = null) {
     return capacity;
   };
   const held = {};
-  const machine = new Map(); // step id -> machine-wide lease slot file
+  const machine = run.machine; // step id -> machine-wide lease slot file
   const max = Math.max(1, plan.cfg.gate.maxParallelSteps ?? 1);
   const active = new Set();
   const leaseOf = (p) => plan.cfg.gate.steps.find((x) => x.id === p.id).lease;
+  // Named failure (I-113): a check waiting for a full lease printed nothing after "N to run", and `wf status` said only "waiting
+  // for a lease". The wait names the lease, who holds its slots and how capacity is raised, once when it begins (again when
+  // the capacity it waits on changes), and `progress.json` carries it for `wf status` and `wf resume`.
+  let waitingChanged = false;
+  const noteWaiting = (p, lease, capacity) => {
+    const was = waiting.get(p.id);
+    if (was && was.lease === lease && was.capacity === capacity) return;
+    waiting.set(p.id, { lease, capacity, since: was?.since ?? Date.now() });
+    waitingChanged = true;
+    say(`waiting  ${p.id}  for lease ${lease} (${capacity} slot(s), all held): ${leaseWaitText(lease)}`);
+  };
   // Leases are machine-wide: two gates on one machine (other attempts or projects) never share a docker slot.
   const canStart = (p) => {
     const lease = leaseOf(p);
     if (!lease) return true;
     const capacity = capacityOf(lease);
-    if ((held[lease] ?? 0) >= capacity) return false;
-    const slot = takeMachineLease(lease, capacity);
-    if (!slot) return false;
+    const slot = (held[lease] ?? 0) >= capacity ? null : takeMachineLease(lease, capacity, { attempt: state.id, step: p.id, run: runId });
+    if (!slot) {
+      noteWaiting(p, lease, capacity);
+      return false;
+    }
     machine.set(p.id, slot);
     return true;
   };
   await new Promise((resolve) => {
+    wake = resolve;
+    // The step taken off the queue and not yet handed to a job: if the scheduler fails right there, it goes back, not-started.
+    let starting = null;
     const pump = () => {
-      while (!stopping && active.size < max) {
-        const idx = queue.findIndex(canStart);
-        if (idx < 0) break;
-        const p = queue.splice(idx, 1)[0];
-        const lease = leaseOf(p);
-        if (lease) held[lease] = (held[lease] ?? 0) + 1;
-        runningNow.set(p.id, Date.now());
-        saveProgress();
-        say(`start    ${p.id}`);
-        // Named failure (I-91): this completion handler threw when the evidence lock stayed held for ten seconds (a long read
-        // by another command): the rejection was unhandled, so the runner died with exit 1 before its leases, its signal
-        // handlers and its final record were dealt with, and the run had no result. Recording the step now waits for the
-        // lock; whatever else goes wrong in here is the step's own failure, and the job is always finished.
-        const job = executeStep(root, plan.cfg, state, p, ctx)
-          .catch((error) => ({ id: p.id, repo: p.repo, tier: p.tier, key: p.key, status: 'failed', error: error.message, runId }))
-          .then(async (r) => {
-            try {
-              if (lease) held[lease] -= 1;
-              if (machine.has(p.id)) fs.rmSync(machine.get(p.id), { force: true });
-              let final = stopping && r.status !== 'passed' ? { ...r, status: 'interrupted' } : r;
-              const secs = ((Date.now() - runningNow.get(p.id)) / 1000).toFixed(1);
-              runningNow.delete(p.id);
+      try {
+        while (!stopping && active.size < max) {
+          const idx = queue.findIndex(canStart);
+          if (idx < 0) break;
+          const p = queue.splice(idx, 1)[0];
+          starting = p;
+          const lease = leaseOf(p);
+          if (lease) held[lease] = (held[lease] ?? 0) + 1;
+          waiting.delete(p.id);
+          runningNow.set(p.id, Date.now());
+          saveProgress();
+          say(`start    ${p.id}`);
+          // Named failure (I-91): this completion handler threw when the evidence lock stayed held for ten seconds (a long read
+          // by another command): the rejection was unhandled, so the runner died with exit 1 before its leases, its signal
+          // handlers and its final record were dealt with, and the run had no result. Recording the step now waits for the
+          // lock; whatever else goes wrong in here is the step's own failure, and the job is always finished.
+          const job = executeStep(root, plan.cfg, state, p, ctx)
+            .catch((error) => ({ id: p.id, repo: p.repo, tier: p.tier, key: p.key, status: 'failed', error: error.message, runId }))
+            .then(async (r) => {
+              let pushed = false;
               try {
-                await retryWhileLocked(() => append(root, state.id, 'gate.step', { runId, step: final }, null));
+                if (lease) held[lease] -= 1;
+                if (machine.has(p.id)) releaseMachineLease(machine.get(p.id));
+                machine.delete(p.id);
+                // A run ended by its own error certifies nothing that was still running when it ended, whatever the step returns after it was signalled.
+                let final = fatal || (stopping && r.status !== 'passed') ? { ...r, status: 'interrupted' } : r;
+                const secs = ((Date.now() - runningNow.get(p.id)) / 1000).toFixed(1);
+                runningNow.delete(p.id);
+                try {
+                  await retryWhileLocked(() => append(root, state.id, 'gate.step', { runId, step: final }, null));
+                } catch (error) {
+                  final = { ...final, status: 'failed', error: `the step finished ${r.status} but recording it failed: ${error.message}` };
+                }
+                results.push(final);
+                pushed = true;
+                // The live view is not the step's result: a progress file that cannot be written ends the run, not this step.
+                guarded(saveProgress);
+                say(`${final.status.padEnd(8)} ${p.id}  ${secs}s`);
+                if (final.status === 'failed') for (const line of failureExcerpt(final, ctx.redact)) say(`  ${p.id} | ${line}`);
               } catch (error) {
-                final = { ...final, status: 'failed', error: `the step finished ${r.status} but recording it failed: ${error.message}` };
+                if (!pushed) results.push({ id: p.id, repo: p.repo, tier: p.tier, key: p.key, status: 'failed', error: `finishing the step failed: ${error.message}`, runId });
+              } finally {
+                runningNow.delete(p.id);
+                active.delete(job);
+                pump();
               }
-              results.push(final);
-              saveProgress();
-              say(`${final.status.padEnd(8)} ${p.id}  ${secs}s`);
-              if (final.status === 'failed') for (const line of failureExcerpt(final, ctx.redact)) say(`  ${p.id} | ${line}`);
-            } catch (error) {
-              results.push({ id: p.id, repo: p.repo, tier: p.tier, key: p.key, status: 'failed', error: `finishing the step failed: ${error.message}`, runId });
-            } finally {
-              runningNow.delete(p.id);
-              active.delete(job);
-              pump();
-            }
-          });
-        active.add(job);
+            });
+          active.add(job);
+          starting = null;
+        }
+        if (waitingChanged) {
+          waitingChanged = false;
+          saveProgress();
+        }
+        if (active.size === 0 && (queue.length === 0 || stopping)) return resolve();
+        // A step waiting for a lease another gate holds: look again shortly.
+        if (queue.length && !stopping) setTimeout(pump, 500);
+      } catch (error) {
+        // Named failure (I-91): an error here (the progress file, a lease slot) left the callback of a timer or of a finished
+        // step, so nothing caught it and the runner died with its steps' processes still running. It ends the run instead:
+        // every child is signalled, the step being started goes back to the queue, and the run is recorded failed.
+        if (starting) {
+          const p = starting;
+          starting = null;
+          queue.unshift(p);
+          if (leaseOf(p)) held[leaseOf(p)] -= 1;
+          if (machine.has(p.id)) releaseMachineLease(machine.get(p.id));
+          machine.delete(p.id);
+          runningNow.delete(p.id);
+        }
+        abort(error);
       }
-      if (active.size === 0 && (queue.length === 0 || stopping)) return resolve();
-      // A step waiting for a lease another gate holds: look again shortly.
-      if (queue.length && !stopping) setTimeout(pump, 500);
     };
     pump();
   });
-  for (const slot of machine.values()) fs.rmSync(slot, { force: true });
-  process.off('SIGTERM', onSignal);
-  process.off('SIGINT', onSignal);
+  // An aborted run waits for the steps it signalled to end, so their results are in the record.
+  if (fatal) await Promise.allSettled([...active]);
+  for (const slot of machine.values()) releaseMachineLease(slot);
+  machine.clear();
+  for (const [signal, handler] of run.handlers) process.off(signal, handler);
   for (const p of queue) results.push({ id: p.id, repo: p.repo, tier: p.tier, status: 'not-started', runId });
 
   const bad = results.filter((r) => ['failed', 'interrupted', 'not-started'].includes(r.status) || (!plan.check && validationIds(state).includes(r.id) && !['passed', 'reused'].includes(r.status)));
-  const status = stopping ? 'stopped' : bad.length ? 'failed' : 'passed';
+  const status = fatal ? 'failed' : stopping ? 'stopped' : bad.length ? 'failed' : 'passed';
   // Named failure (I-92): a check stopped by the owner ended as `stopped` with nothing said about why, so the implementer that ran it
   // retried the check on an unfinished tree. The stop `wf stop` recorded for this run (class and reason) travels with the result.
-  const ownerStop = stopping ? loadState(root, state.id).stops.filter((x) => x.runId === runId).at(-1) : null;
+  const ownerStop = stopping && !fatal ? loadState(root, state.id).stops.filter((x) => x.runId === runId).at(-1) : null;
   // Untracked files the steps produced (reports, screenshots) are recorded so they do not block the next gate.
   const producedUntracked = {};
   for (const [name, r] of Object.entries(state.repos)) producedUntracked[name] = untrackedSnapshot(r.worktree);
   say(`${status} (${runId})`);
-  const record = { runId, status, producedUntracked, changed: plan.changed, full: plan.full, focused: plan.focused, check: plan.check || undefined, repos: plan.repos ?? undefined, rerunFailed: plan.rerunFailed ?? undefined, adapterBase: state.adapterBase, validationDigest: validationDigest(state), tree: plan.tree, impact: plan.impact, unchecked: plan.unchecked, ...(Object.keys(leaseCapacity).length ? { leaseCapacity } : {}), ...(ownerStop ? { stop: { class: ownerStop.class, reason: ownerStop.reason } } : {}), steps: results, finishedAt: now() };
+  const record = { runId, status, producedUntracked, changed: plan.changed, full: plan.full, focused: plan.focused, check: plan.check || undefined, repos: plan.repos ?? undefined, rerunFailed: plan.rerunFailed ?? undefined, adapterBase: state.adapterBase, validationDigest: validationDigest(state), tree: plan.tree, impact: plan.impact, unchecked: plan.unchecked, ...(Object.keys(leaseCapacity).length ? { leaseCapacity } : {}), ...(ownerStop ? { stop: { class: ownerStop.class, reason: ownerStop.reason } } : {}), ...(fatal ? { error: ctx.redact(String(fatal.message ?? fatal)) } : {}), steps: results, finishedAt: now() };
   writeImmutable(path.join(runDir, 'result.json'), `${JSON.stringify(record, null, 2)}\n`);
   // Recorded before the run is: once it is finished, an unrecorded file in its folder is an extra file.
   await retryWhileLocked(() => {
@@ -981,6 +1172,8 @@ export function liveGate(root, state) {
     pid: lock.pid,
     startedAt: lock.startedAt,
     running: (progress.running ?? []).map((r) => ({ id: r.id, seconds: Math.round((at - Date.parse(r.startedAt)) / 1000) })),
+    // Steps queued behind a full lease (I-113), with the lease's current holders read now.
+    waiting: (progress.waiting ?? []).map((w) => ({ id: w.id, lease: w.lease, capacity: w.capacity, seconds: Math.round((at - Date.parse(w.since)) / 1000), text: leaseWaitText(w.lease) })),
     finished: (progress.steps ?? []).map((r) => ({ id: r.id, status: r.status, seconds: r.durationMs !== undefined && r.status !== 'reused' ? Math.round(r.durationMs / 1000) : null })),
   };
 }
