@@ -88,6 +88,40 @@ kinds: [ui]                  # scope: ui | test | migration | docs | script | co
 recurrence: 0
 ```
 
+### The layout of the file (0.7.4, I-49)
+
+A lesson file is written to pass the repository's own `prettier --check`, without running Prettier or any code of the
+repository. The configuration is found the way Prettier 3 finds it: from the lesson's folder up to the repository's root,
+the first folder that holds a config wins whole (nothing merges across folders), and inside one folder the first of these
+that exists is the one, in this order: `package.json` (only with a `prettier` key), `package.yaml`, `.prettierrc`,
+`.prettierrc.json`, `.prettierrc.yml`, `.prettierrc.yaml`, `.prettierrc.json5`, the JavaScript and TypeScript forms
+(`.prettierrc.js`, `prettier.config.js`, ... `.cts`), and `.prettierrc.toml`. Its `overrides` are applied by the lesson
+file's path (`files` and `excludeFiles` as Prettier reads them). A config above the repository is not read.
+
+- `singleQuote`: the quote Prettier would choose: yours unless the text needs the other; a text holding both kinds of quote
+  is single-quoted.
+- `tabWidth`: the indentation, also of lists and block texts.
+- `endOfLine`: `lf`, `crlf` or `cr`; `auto` keeps the line ending the file already has.
+- `printWidth`, and `proseWrap` `preserve` or `never`: no effect. Prettier keeps a one-line text on one line, and so does the
+  file (it is never folded at 80 columns).
+- `proseWrap: always`: a text that does not fit within `printWidth` is written as a literal block (`|-`), which Prettier
+  never reflows.
+
+The text of every field is the same whatever the layout (the parsed file is checked against the lesson before it is
+written). `recur`, `set` and `move` rewrite the file in the same layout, so a lesson that passed stays passing.
+
+What is not read: `.prettierrc.json5`, the JavaScript and TypeScript configs and `.prettierrc.toml` (they need code, or a
+parser, the engine does not run), a shared-config name in package.json, and `.editorconfig` (Prettier merges it under the
+config). A config reached through a link is read, as Prettier reads it, and a package.json (or package.yaml) with no
+`prettier` key, an empty one, or one that cannot be read is skipped, as Prettier skips it. When the config Prettier would use is one of these, the search
+stops there (a lower file Prettier would never reach is not consulted), a new lesson is written in Prettier's defaults (LF,
+two spaces, double quotes), and a lesson file that exists keeps its own line endings, indentation and quote style when a
+command rewrites it, so a manual `prettier --write` sticks. The same holds where there is no configuration at all, and, for
+the options a readable config does not set, where an `.editorconfig` lies between the file and the repository's root. Left to
+`prettier --write`: a text that needs escapes (a control character, say) or has white space at the end of a line, when
+`proseWrap` is `always` or `never` and it does not fit on one line, because Prettier wraps inside the quotes and no layout
+here can match it.
+
 ### Flows
 
 - **Capture**: `wf lesson add` (flags or `--file`), recorded in the attempt's ledger. A reopened attempt records its

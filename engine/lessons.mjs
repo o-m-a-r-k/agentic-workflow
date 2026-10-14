@@ -14,6 +14,7 @@ import { ADAPTER_DIR, adapterLocation, attemptAdapter, loadConfig, repoDir, trus
 import { readRegular, writeNoFollow } from './evidence.mjs';
 import { canonical, isInside, touchesEvidence } from './paths.mjs';
 import { append, listAttempts, loadState, readLedger } from './ledger.mjs';
+import { formatLesson, lessonStyle } from './lessons-format.mjs';
 import { componentsOf } from './topology.mjs';
 import { WfError, YAML, git, matchesAny, now, refuse } from './util.mjs';
 
@@ -67,7 +68,8 @@ function parseLesson(name, text, where, problems) {
   }
   let l;
   try {
-    l = YAML.parse(text) ?? {};
+    // A lone CR (`endOfLine: cr` in a project's Prettier config) is a line break; the YAML library reads only LF and CRLF.
+    l = YAML.parse(text.replace(/\r\n?/g, '\n')) ?? {};
   } catch (error) {
     problems.push(`${where}: not YAML (${error.message.split('\n')[0]}) (skipped)`);
     return null;
@@ -229,28 +231,6 @@ function targetFor(root, cfg, repoName, state) {
   return { dir: repoDir(root, repo), attempt: null, commit: false };
 }
 
-// Named failure (I-49): a generated lesson file failed the repository's own `prettier --check` because the repository asks
-// for single quotes and the generator wrote double-quoted text, so every lesson needed a formatting commit. The setting
-// is read from the repository's static Prettier config (never by running a command or a JS config); null when it names none.
-export function prettierSingleQuote(repoRoot) {
-  for (const name of ['.prettierrc', '.prettierrc.json', '.prettierrc.yaml', '.prettierrc.yml', 'package.json']) {
-    const r = readRegular(path.join(repoRoot, name));
-    if (!r) continue;
-    let cfg;
-    try {
-      const text = r.bytes.toString('utf8');
-      cfg = name === 'package.json' ? JSON.parse(text).prettier : YAML.parse(text);
-    } catch {
-      continue;
-    }
-    if (!cfg || typeof cfg !== 'object') continue;
-    const forYaml = (cfg.overrides ?? []).filter((o) => [o?.files].flat().some((f) => /y(a)?ml/i.test(String(f))) && typeof o?.options?.singleQuote === 'boolean');
-    if (forYaml.length) return forYaml.at(-1).options.singleQuote;
-    if (typeof cfg.singleQuote === 'boolean') return cfg.singleQuote;
-  }
-  return null;
-}
-
 function writeLesson(target, l, { create = false, message } = {}) {
   const { file, builtin, where, declaredRepo, home, fileId, ...rest } = l;
   if (rest.scope === 'project') rest.repo = null;
@@ -268,8 +248,10 @@ function writeLesson(target, l, { create = false, message } = {}) {
   const st = fs.lstatSync(out, { throwIfNoEntry: false });
   if (create && st) throw refuse(`lesson ${rest.id} already exists (${out})`);
   if (st && (!st.isFile() || st.nlink > 1)) throw refuse(`${out} is ${st.isSymbolicLink() ? 'a symlink' : st.isFile() ? 'a hard link' : 'not a regular file'}; not written through`);
-  const singleQuote = prettierSingleQuote(target.dir);
-  writeNoFollow(out, YAML.stringify(rest, singleQuote === true ? { singleQuote } : undefined), { exclusive: create });
+  // Named failure (I-49): the layout is the repository's Prettier contract (engine/lessons-format.mjs).
+  const existing = create ? null : readRegular(out);
+  const { text } = formatLesson(rest, lessonStyle(target.dir, out, existing?.bytes.toString('utf8') ?? null));
+  writeNoFollow(out, text, { exclusive: create });
   if (target.commit) {
     const rel = path.relative(target.dir, out).split(path.sep).join('/');
     git(target.dir, ['add', '--', rel]);

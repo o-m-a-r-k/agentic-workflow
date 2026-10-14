@@ -49,6 +49,245 @@ function multiRepoProject(name, { api = {}, web = {} } = {}) {
 const lessonArgs = (title, what = 'a thing went wrong', extra = []) => ['--title', title, '--what', what, '--cause', 'test', '--mechanism', 'doc', ...extra];
 
 // ======================================================================================================================
+// I-49: a generated lesson passes the repository's own Prettier check
+// ======================================================================================================================
+
+// The texts of real lessons are long: most fold at 80 columns, and some need quotes.
+const WORDS = {
+  title: 'Data tables use the shared table and pagination components, never a raw table element',
+  what: 'A report page rendered a raw table without pagination; the review did not catch it, and the owner found it while checking the page on a phone: the list ran to 400 rows and the page took six seconds to open.',
+  quote: "why isn't this using our table? it's the third time I have asked",
+  text: 'Ask for the shared table and its pager in every plan that touches a list, and have the reviewer open the page with more rows than one page holds before judging it complete.',
+  ref: 'table-has-pagination',
+};
+const BOTH = { title: 'Owner\'s "quoted" words stay in the lesson', what: 'The owner said "use the table" and it\'s still not done: a long tail follows to push the text well past the print width of eighty characters.' };
+
+const addLong = (root, id, extra = []) => ok(add(root, ['--title', WORDS.title, '--what', WORDS.what, '--quote', WORDS.quote, '--cause', 'design-system', '--mechanism', 'designSystem-rule', '--ref', WORDS.ref, '--text', WORDS.text, '--tags', 'ui,tables', '--paths', 'src/**/*.tsx', ...extra]));
+
+// What Prettier's YAML printer requires of the shapes a lesson has (checked against Prettier 3.9 on some 3,700 generated lesson files):
+// every line is a `key: value` line, a `- item` line, or inside a block scalar (no continuation line: a one-line scalar stays on
+// one line whatever its width unless `proseWrap` is `always`), indentation in whole `tabWidth`s, one line ending throughout, and
+// the preferred quote unless the text needs the other. Returns the problems found.
+function layoutProblems(text, { tabWidth = 2, singleQuote = false, endOfLine = 'lf', printWidth = 80, proseWrap = 'preserve' } = {}) {
+  const problems = [];
+  const eol = { lf: '\n', crlf: '\r\n', cr: '\r' }[endOfLine];
+  const lines = text.split(eol);
+  if (lines.at(-1) !== '') problems.push('no final line ending');
+  if (lines.some((l) => (endOfLine === 'lf' ? /\r/.test(l) : /[\r\n]/.test(l)))) problems.push(`not every line ends with ${endOfLine}`);
+  let blockIndent = null;
+  for (const line of lines.slice(0, -1)) {
+    const indent = line.match(/^ */)[0].length;
+    if (blockIndent !== null && (indent > blockIndent || line === '')) continue;
+    blockIndent = null;
+    if (indent % tabWidth) problems.push(`indent ${indent} is not a multiple of ${tabWidth}: ${line}`);
+    if (!/^ *(- )?[A-Za-z]+:( .*)?$/.test(line) && !/^ *- .*$/.test(line)) problems.push(`continuation line: ${line.slice(0, 60)}`);
+    if (/(:|-) [|>][-+0-9]*$/.test(line)) blockIndent = indent;
+    const value = /^ *(?:- |[A-Za-z]+: )(["'].*)$/.exec(line)?.[1];
+    if (value) {
+      const quote = value[0], body = value.slice(1, -1);
+      if (quote === '"' && singleQuote && !/['\\]/.test(body)) problems.push(`double quotes where the config asks for single: ${line.slice(0, 60)}`);
+      if (quote === "'" && !singleQuote && !/"/.test(body)) problems.push(`single quotes where double is preferred: ${line.slice(0, 60)}`);
+    }
+    if (proseWrap === 'always' && blockIndent === null && line.length > printWidth && /\s/.test(line.replace(/^ *(- )?[A-Za-z]*:? */, ''))) problems.push(`a line over ${printWidth} columns that proseWrap always would wrap: ${line.slice(0, 60)}`);
+  }
+  return problems;
+}
+
+// A lone CR is a line break (`endOfLine: cr`); the YAML library reads only LF and CRLF, so the engine reads a lesson the same way.
+const readBack = (text) => YAML.parse(text.replace(/\r\n?/g, '\n'));
+
+const PRETTIER_CONFIGS = {
+  'defaults (no config)': {},
+  'singleQuote': { files: { '.prettierrc': '{"singleQuote": true}\n' }, style: { singleQuote: true } },
+  'printWidth 40 and 120': { files: { '.prettierrc.json': '{"printWidth": 40}\n' }, style: { printWidth: 40 } },
+  'tabWidth 4': { files: { '.prettierrc.yaml': 'tabWidth: 4\n' }, style: { tabWidth: 4 } },
+  'endOfLine crlf': { files: { '.prettierrc': 'endOfLine: crlf\n' }, style: { endOfLine: 'crlf' } },
+  'proseWrap always, printWidth 100': { files: { 'package.json': JSON.stringify({ name: 'x', prettier: { proseWrap: 'always', printWidth: 100 } }) }, style: { proseWrap: 'always', printWidth: 100 } },
+  'proseWrap never': { files: { '.prettierrc': '{"proseWrap": "never"}\n' }, style: { proseWrap: 'never' } },
+  'endOfLine cr': { files: { '.prettierrc': '{"endOfLine": "cr"}\n' }, style: { endOfLine: 'cr' } },
+  'all of them, from an override': { files: { '.prettierrc': JSON.stringify({ tabWidth: 8, overrides: [{ files: '*.yaml', options: { singleQuote: true, tabWidth: 3, endOfLine: 'crlf', proseWrap: 'always', printWidth: 60 } }] }) }, style: { singleQuote: true, tabWidth: 3, endOfLine: 'crlf', proseWrap: 'always', printWidth: 60 } },
+};
+
+// Prettier itself, when the machine has it (a dependency is not added for it): WF_TEST_PRETTIER names its bin script, else a
+// `prettier` on PATH. Without it the layout rules above stand in for it.
+const PRETTIER = (() => {
+  if (process.env.WF_TEST_PRETTIER) return { cmd: process.execPath, args: [process.env.WF_TEST_PRETTIER] };
+  const found = spawnSync('sh', ['-c', 'command -v prettier'], { encoding: 'utf8' }).stdout.trim();
+  return found ? { cmd: found, args: [] } : null;
+})();
+const prettierCheck = (cwd) => {
+  const r = spawnSync(PRETTIER.cmd, [...PRETTIER.args, '--check', '.workflow/lessons'], { cwd, encoding: 'utf8' });
+  return { ok: r.status === 0, out: `${r.stdout}${r.stderr}` };
+};
+
+for (const [name, cfg] of Object.entries(PRETTIER_CONFIGS)) {
+  // Named failure (I-49): the 0.7.0 fix read `singleQuote` only. The library folded text at 80 columns whatever `printWidth` said
+  // (Prettier keeps a one-line scalar on one line), indented by two spaces whatever `tabWidth` said, ended lines with `\n`
+  // whatever `endOfLine` said and wrapped nothing the way `proseWrap: always` does: 29 of 70 real lesson texts failed
+  // `prettier --check` with the default config, all of them with `tabWidth: 4`, `endOfLine: crlf` or `proseWrap: always`.
+  test(`I-49: a generated lesson is laid out for the repository's Prettier config: ${name}`, () => {
+    const { root } = singleRepoProject('fix074-prettier', { gate: { steps } }, cfg.files ?? {});
+    addLong(root, 'L-1');
+    ok(add(root, [...lessonArgs(BOTH.title, BOTH.what), '--tags', 'quotes']));
+    ok(add(root, lessonArgs('Short', 'short and sweet: with a colon')));
+    const style = cfg.style ?? {};
+    for (const id of ['L-1', 'L-2', 'L-3']) {
+      const text = fs.readFileSync(lessonFile(root, id), 'utf8');
+      assert.deepEqual(layoutProblems(text, style), [], `${id}:\n${text}`);
+      const parsed = readBack(text);
+      assert.equal(parsed.id, id);
+    }
+    const first = readBack(fs.readFileSync(lessonFile(root, 'L-1'), 'utf8'));
+    assert.equal(first.title, WORDS.title);
+    assert.equal(first.trigger.what, WORDS.what, 'the text is the same whatever its layout');
+    assert.equal(first.trigger.quote, WORDS.quote);
+    assert.equal(first.mechanism.text, WORDS.text);
+    const both = fs.readFileSync(lessonFile(root, 'L-2'), 'utf8');
+    assert.equal(readBack(both).title, BOTH.title);
+    assert.equal(readBack(both).trigger.what, BOTH.what);
+    if (style.proseWrap !== 'always') {
+      // Prettier writes a text holding both kinds of quote in single quotes, whatever the preference (under proseWrap always
+      // this long text is a literal block instead).
+      assert.match(both.replace(/\r\n?/g, '\n'), /^ *what: 'The owner said "use the table" and it''s still not done: a long tail/m);
+    }
+  });
+}
+
+test('I-49: the lessons pass Prettier\'s own check under every config above (skipped where Prettier is not installed; WF_TEST_PRETTIER names its bin script)', { skip: PRETTIER ? false : 'prettier is not installed here' }, () => {
+  for (const [name, cfg] of Object.entries(PRETTIER_CONFIGS)) {
+    const { root } = singleRepoProject('fix074-prettier-real', { gate: { steps } }, cfg.files ?? {});
+    addLong(root, 'L-1');
+    ok(add(root, [...lessonArgs(BOTH.title, BOTH.what), '--tags', 'quotes']));
+    ok(add(root, lessonArgs('Short', 'short and sweet: with a colon')));
+    ok(wf(root, ['lesson', 'recur', 'L-1']));
+    ok(wf(root, ['lesson', 'set', 'L-2', '--status', 'retired']));
+    const r = prettierCheck(root);
+    assert.ok(r.ok, `${name}: ${r.out}`);
+  }
+});
+
+// Named failure (I-49, found in review): `endOfLine: cr` wrote a lesson the YAML library cannot read (it knows LF and CRLF
+// only), so `recur`, `set` and `move` answered "no lesson" for a file that was there.
+test('I-49: a lesson written with bare CR line endings is read back by the commands', () => {
+  const { root } = singleRepoProject('fix074-cr', { gate: { steps } }, { '.prettierrc': '{"endOfLine": "cr"}\n' });
+  addLong(root, 'L-1');
+  const text = fs.readFileSync(lessonFile(root, 'L-1'), 'utf8');
+  assert.ok(text.includes('\r') && !text.includes('\n'), 'bare CR throughout');
+  assert.match(ok(wf(root, ['lesson', 'list'])).out, /^L-1 {2}app \(main\) /m);
+  ok(wf(root, ['lesson', 'recur', 'L-1']));
+  ok(wf(root, ['lesson', 'set', 'L-1', '--status', 'enforced', '--ref', 'table-has-pagination']));
+  const after = fs.readFileSync(lessonFile(root, 'L-1'), 'utf8');
+  assert.ok(!after.includes('\n'));
+  assert.equal(readBack(after).recurrence, 1);
+  assert.equal(readBack(after).status, 'enforced');
+});
+
+// Named failure (I-49): the 0.7.0 reader tried `.prettierrc` before `package.json`, and `.prettierrc.yaml` before `.yml`; Prettier
+// takes a package.json that has a `prettier` key first and `.yml` before `.yaml` (checked with `prettier --find-config-path`
+// on 3.9), uses the first folder that has a config (the lesson's own folder and `.workflow` count), applies `overrides` by the
+// lesson file's path, and never reads on past a config it uses even when this module cannot read that one.
+test('I-49: the config is found as Prettier finds it: package.json before .prettierrc, .yml before .yaml, the nearest folder, overrides by path', () => {
+  const lessonWith = (files) => {
+    const { root } = singleRepoProject('fix074-precedence', { gate: { steps } }, files);
+    ok(add(root, lessonArgs('Precedence', 'a raw table shipped: no reviewer caught it')));
+    return fs.readFileSync(lessonFile(root, 'L-1'), 'utf8');
+  };
+  const quoted = /^ {2,}what: '/m;
+  // package.json with a prettier key beats .prettierrc; without the key it is skipped.
+  const pkg = lessonWith({ 'package.json': JSON.stringify({ name: 'x', prettier: { singleQuote: true, tabWidth: 4 } }), '.prettierrc': '{"singleQuote": false, "tabWidth": 2}' });
+  assert.match(pkg, quoted);
+  assert.match(pkg, /^ {4}what: /m);
+  assert.match(lessonWith({ 'package.json': JSON.stringify({ name: 'x' }), '.prettierrc': '{"singleQuote": true}' }), quoted, 'a package.json without a prettier key is skipped');
+  // Prettier skips a package.json whose key is empty or null, or that it cannot read (checked on 3.9).
+  assert.match(lessonWith({ 'package.json': JSON.stringify({ name: 'x', prettier: null }), '.prettierrc': '{"singleQuote": true}' }), quoted);
+  assert.match(lessonWith({ 'package.json': JSON.stringify({ name: 'x', prettier: '' }), '.prettierrc': '{"singleQuote": true}' }), quoted);
+  assert.match(lessonWith({ 'package.json': '{ not json', '.prettierrc': '{"singleQuote": true}' }), quoted);
+  // A config that is a link is read through it.
+  const linked = singleRepoProject('fix074-linked-config', { gate: { steps } }, { 'shared/prettier.json': '{"singleQuote": true}\n' });
+  fs.symlinkSync(path.join('shared', 'prettier.json'), path.join(linked.root, '.prettierrc'));
+  ok(add(linked.root, lessonArgs('Linked', 'a raw table shipped: no reviewer caught it')));
+  assert.match(fs.readFileSync(lessonFile(linked.root, 'L-1'), 'utf8'), quoted);
+  // .prettierrc.yml comes before .prettierrc.yaml; .prettierrc.json before both.
+  assert.match(lessonWith({ '.prettierrc.yml': 'singleQuote: true\n', '.prettierrc.yaml': 'singleQuote: false\n' }), quoted);
+  assert.match(lessonWith({ '.prettierrc.json': '{"singleQuote": true}', '.prettierrc.yml': 'singleQuote: false\n' }), quoted);
+  // The nearest folder that has a config wins whole: .workflow/ before the root, no merging across folders.
+  const near = lessonWith({ '.workflow/.prettierrc': '{"tabWidth": 4}', '.prettierrc': '{"singleQuote": true}' });
+  assert.match(near, /^ {4}what: "/m, 'tabWidth from .workflow/.prettierrc, and no single quote from the root config');
+  // Overrides apply by the lesson file's path: a name pattern, a path pattern, an exclusion, later ones over earlier.
+  assert.match(lessonWith({ '.prettierrc': JSON.stringify({ overrides: [{ files: '*.yaml', options: { singleQuote: true } }] }) }), quoted);
+  assert.match(lessonWith({ '.prettierrc': JSON.stringify({ overrides: [{ files: '.workflow/**', options: { singleQuote: true } }] }) }), quoted);
+  assert.match(lessonWith({ '.prettierrc': JSON.stringify({ overrides: [{ files: '*.{yml,yaml}', options: { singleQuote: true } }] }) }), quoted);
+  assert.doesNotMatch(lessonWith({ '.prettierrc': JSON.stringify({ overrides: [{ files: '*.md', options: { singleQuote: true } }, { files: 'src/**', options: { singleQuote: true } }, { files: '*.yml', options: { singleQuote: true } }] }) }), quoted);
+  assert.doesNotMatch(lessonWith({ '.prettierrc': JSON.stringify({ singleQuote: true, overrides: [{ files: '**/*.yaml', excludeFiles: '**/L-1.yaml', options: { singleQuote: false } }, { files: '*.yaml', options: { singleQuote: false } }] }) }), quoted);
+  assert.match(lessonWith({ '.prettierrc': JSON.stringify({ overrides: [{ files: '*.yaml', options: { singleQuote: false } }, { files: '.workflow/lessons/*.yaml', options: { singleQuote: true } }] }) }), quoted, 'a later override wins');
+});
+
+// A config this module does not read (JavaScript, TOML, a shared-config name) is the one Prettier uses; the search stops there
+// rather than falling through to a lower config Prettier would never reach, and the lesson is written in Prettier's defaults.
+test('I-49: a config form that cannot be read statically stops the search; a new lesson is then written in Prettier\'s defaults', () => {
+  const lessonWith = (files) => {
+    const { root } = singleRepoProject('fix074-unreadable', { gate: { steps } }, files);
+    ok(add(root, lessonArgs('Unreadable', 'a raw table shipped: no reviewer caught it')));
+    return fs.readFileSync(lessonFile(root, 'L-1'), 'utf8');
+  };
+  const quoted = /^ {2,}what: '/m;
+  assert.doesNotMatch(lessonWith({ '.prettierrc.js': 'module.exports = { singleQuote: true, tabWidth: 4 };\n', '.prettierrc.toml': 'singleQuote = true\n' }), quoted);
+  assert.doesNotMatch(lessonWith({ 'prettier.config.mjs': 'export default { singleQuote: true };\n', '.prettierrc.toml': 'singleQuote = true\n' }), quoted);
+  assert.doesNotMatch(lessonWith({ 'package.json': JSON.stringify({ name: 'x', prettier: '@scope/prettier-config' }), '.prettierrc': '{"singleQuote": true}' }), quoted, 'a shared-config name is the config Prettier uses; it is not resolved');
+  // ... but a readable config that comes first in Prettier's order is used (.prettierrc.json before .prettierrc.js).
+  assert.match(lessonWith({ '.prettierrc.json': '{"singleQuote": true}', '.prettierrc.js': 'module.exports = {};\n' }), quoted);
+  const text = lessonWith({ '.prettierrc.js': 'module.exports = { tabWidth: 8 };\n' });
+  assert.match(text, /^ {2}what: /m);
+  assert.deepEqual(layoutProblems(text), []);
+});
+
+// Named failure (I-49): `recur`, `set` and `move` re-serialise the whole file, so a manual `prettier --write` was undone by the
+// next command. The file is laid out for the config again; where the config is not readable, the file keeps its own layout.
+test('I-49: recur, set and move write the layout the config asks for; where the config is unreadable the file keeps its own', () => {
+  const { root } = singleRepoProject('fix074-rewrite', { gate: { steps } }, { '.prettierrc': '{"tabWidth": 4, "singleQuote": true, "endOfLine": "crlf"}\n' });
+  addLong(root, 'L-1');
+  ok(wf(root, ['lesson', 'recur', 'L-1']));
+  ok(wf(root, ['lesson', 'set', 'L-1', '--status', 'enforced', '--ref', 'table-has-pagination']));
+  const text = fs.readFileSync(lessonFile(root, 'L-1'), 'utf8');
+  assert.deepEqual(layoutProblems(text, { tabWidth: 4, singleQuote: true, endOfLine: 'crlf' }), []);
+  const parsed = YAML.parse(text);
+  assert.equal(parsed.recurrence, 1);
+  assert.equal(parsed.status, 'enforced');
+  assert.equal(parsed.trigger.what, WORDS.what);
+
+  // Each repository has its own config: a moved lesson takes the layout of the repository it moves to.
+  const { root: ws } = multiRepoProject('fix074-move', { api: { '.prettierrc': '{"tabWidth": 4}\n' }, web: { '.prettierrc': '{"singleQuote": true, "endOfLine": "crlf"}\n' } });
+  ok(add(ws, ['--repo', 'api', ...lessonArgs('Moves to the web repo', 'a raw table shipped: no reviewer caught it')]));
+  assert.deepEqual(layoutProblems(fs.readFileSync(lessonFile(path.join(ws, 'api'), 'L-1'), 'utf8'), { tabWidth: 4 }), []);
+  ok(wf(ws, ['lesson', 'move', 'L-1', '--repo', 'web']));
+  assert.deepEqual(layoutProblems(fs.readFileSync(lessonFile(path.join(ws, 'web'), 'L-1'), 'utf8'), { singleQuote: true, endOfLine: 'crlf' }), []);
+  assert.ok(!fs.existsSync(lessonFile(path.join(ws, 'api'), 'L-1')));
+
+  // A JavaScript config cannot be read: a file Prettier has formatted (four spaces, CRLF, single quotes) keeps that layout when
+  // a command rewrites it, and a new lesson in the same repository is written in the defaults.
+  const own = singleRepoProject('fix074-own-layout', { gate: { steps } }, { '.prettierrc.js': 'module.exports = { tabWidth: 4, singleQuote: true, endOfLine: "crlf" };\n' });
+  const seed = { id: 'L-1', title: 'Formatted by the project', trigger: { what: 'a raw table shipped: no reviewer caught it', attempt: null, finding: null, quote: null }, cause: 'test', mechanism: { kind: 'doc', ref: null, text: null }, scope: 'repo', status: 'proposed', tags: [], paths: [], components: [], kinds: [], classes: [], recurrence: 0, created: '2026-10-14T00:00:00.000Z', repo: 'app' };
+  fs.mkdirSync(path.dirname(lessonFile(own.root, 'L-1')), { recursive: true });
+  fs.writeFileSync(lessonFile(own.root, 'L-1'), YAML.stringify(seed, { indent: 4, singleQuote: true, lineWidth: 0 }).replace(/\n/g, '\r\n'));
+  sh(own.root, 'git add -A && git commit -q -m "lesson formatted by the project"');
+  ok(wf(own.root, ['lesson', 'recur', 'L-1']));
+  const kept = fs.readFileSync(lessonFile(own.root, 'L-1'), 'utf8');
+  assert.deepEqual(layoutProblems(kept, { tabWidth: 4, singleQuote: true, endOfLine: 'crlf' }), []);
+  assert.match(kept, /^ {4}what: 'a raw table shipped: no reviewer caught it'\r$/m);
+  assert.equal(YAML.parse(kept).recurrence, 1);
+  ok(add(own.root, lessonArgs('A new lesson', 'a raw table shipped: no reviewer caught it')));
+  assert.deepEqual(layoutProblems(fs.readFileSync(lessonFile(own.root, 'L-2'), 'utf8')), [], 'a new lesson in the defaults');
+
+  // An .editorconfig is not read either; beside a readable config, what the config does not set stays as the file has it.
+  const editor = singleRepoProject('fix074-editorconfig', { gate: { steps } }, { '.prettierrc': '{"singleQuote": true}\n', '.editorconfig': 'root = true\n[*]\nend_of_line = crlf\nindent_size = 4\n' });
+  fs.mkdirSync(path.dirname(lessonFile(editor.root, 'L-1')), { recursive: true });
+  fs.writeFileSync(lessonFile(editor.root, 'L-1'), YAML.stringify(seed, { indent: 4, singleQuote: true, lineWidth: 0 }).replace(/\n/g, '\r\n'));
+  sh(editor.root, 'git add -A && git commit -q -m "lesson formatted by the project"');
+  ok(wf(editor.root, ['lesson', 'recur', 'L-1']));
+  assert.deepEqual(layoutProblems(fs.readFileSync(lessonFile(editor.root, 'L-1'), 'utf8'), { tabWidth: 4, singleQuote: true, endOfLine: 'crlf' }), []);
+});
+
+// ======================================================================================================================
 // I-96: documentation and provenance files do not decide the review division
 // ======================================================================================================================
 
