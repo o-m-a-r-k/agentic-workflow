@@ -386,7 +386,10 @@ export function recur(root, id, attempt, actorId, why) {
   // second, untracked copy into the main checkout, which the delivered file then collided with. The ledger records the
   // recurrence (`lesson.recurred`); the file in the delivered tree is the one the attempt reviewed.
   const target = targetFor(root, loadConfig(root), l.home, state);
-  if (!(target.why === 'accepted' && l.where === 'attempt')) writeLesson(target, l, { message: `Lesson ${l.id} recurred (${l.recurrence})` });
+  // A recurrence for a lesson of a repo the attempt did not admit is recorded on the attempt only, too: writing it would change a
+  // tracked file of that repo's pull-only main checkout (independent review of 0.7.4).
+  const ledgerOnly = (target.why === 'accepted' && l.where === 'attempt') || (target.why === 'not-admitted' && obligationSince(state, '0.7.4'));
+  if (!ledgerOnly) writeLesson(target, l, { message: `Lesson ${l.id} recurred (${l.recurrence})` });
   if (attempt) append(root, String(attempt), 'lesson.recurred', { id, recurrence: l.recurrence, why }, actorId);
   return { id, recurrence: l.recurrence, promote: l.recurrence >= 2 && l.mechanism?.kind !== 'gate-check' };
 }
@@ -401,10 +404,10 @@ function frozenSource(state, file) {
 // file from the worktree (an uncommitted deletion: the tree no longer matched its acceptance, gate or review) while the copy went
 // untracked into the other repo's main checkout, and the lesson was then delivered twice. A change to the accepted tree is not
 // made behind its back.
-function refuseAcceptedSource(state, l) {
+function refuseAcceptedSource(state, l, doing = 'moving', verb = 'move') {
   const held = frozenSource(state, l.file);
   if (held && obligationSince(state, '0.7.4')) {
-    throw refuse(`lesson ${l.id} is part of ${state.id}'s accepted tree (${path.relative(held.worktree, l.file)}), and moving it would change that tree: \`wf deliver\` refuses a change made after the acceptance`, 'move it after the delivery (without `--attempt`), or while the work is reopened (an implementer handed for a repair)', { id: 'lesson:accepted-tree' });
+    throw refuse(`lesson ${l.id} is part of ${state.id}'s accepted tree (${path.relative(held.worktree, l.file)}), and ${doing} it would change that tree: \`wf deliver\` refuses a change made after the acceptance`, `${verb} it after the delivery (without \`--attempt\`), or while the work is reopened (an implementer handed for a repair)`, { id: 'lesson:accepted-tree' });
   }
 }
 
@@ -458,7 +461,13 @@ export function setLesson(root, id, options) {
   if (options.mechanism) l.mechanism = { ...l.mechanism, kind: String(options.mechanism) };
   const problems = validate(l, cfg);
   if (problems.length) throw new WfError(`lesson ${id} not changed:\n  - ${problems.join('\n  - ')}`);
-  return { lesson: l, file: writeLesson(targetFor(root, cfg, l.home, state), l, { message: `Lesson ${l.id}: ${l.status}` }) };
+  // Independent review of 0.7.4 (I-99 class): `set` on a lesson of the accepted tree wrote a second, untracked copy into the
+  // main checkout, and on a lesson of a repo the attempt did not admit it changed a tracked file of that repo's main
+  // checkout. Both are refused, as `move` is.
+  const target = targetFor(root, cfg, l.home, state);
+  if (state) refuseAcceptedSource(state, l, 'changing', 'change');
+  if (target.why === 'not-admitted' && obligationSince(state, '0.7.4')) throw notAdmitted(state, l.home, l.scope === 'project', 'changed');
+  return { lesson: l, file: writeLesson(target, l, { message: `Lesson ${l.id}: ${l.status}` }) };
 }
 
 // The adapter snippet or template text for a lesson's mechanism. Printed only: the owner adds and commits it.

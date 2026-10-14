@@ -71,6 +71,32 @@ test('I-99: a lesson recorded after the accepted tree moved (a repair committed,
   assert.equal(sh(root, 'git status --porcelain'), '');
 });
 
+// Independent review of 0.7.4 (I-99 class): `wf lesson set --attempt` on the attempt's own lesson, with the accepted tree
+// standing, wrote a second, untracked copy (with the new status) into the main checkout; the delivered file kept the old one.
+test('I-99 class: wf lesson set on a lesson of the standing accepted tree is refused, and nothing is written into the main checkout', () => {
+  const { base, root } = singleRepoProject('fix074-set-accepted', { gate: { steps } });
+  const owner = 'owner-1';
+  const e = ok(wf(root, ['entry', '--item', 'ENG-405', '--owner', owner, '--json'])).json();
+  const id = e.id;
+  const wt = e.repos.app.worktree;
+  ok(wf(root, ['handoff', 'planner', '--agent', 'plan-1', '--attempt', id, '--owner', owner]));
+  ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', id, '--owner', owner]));
+  ok(wf(root, ['handoff', 'implementer', '--agent', 'impl-1', '--attempt', id, '--owner', owner]));
+  commitIn(wt, { 'src/a.txt': 'b\n' });
+  ok(add(root, ['--attempt', id, ...lessonArgs('Own lesson of the attempt')]));
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-0', '--attempt', id, '--owner', owner]));
+  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('rev-0')), '--attempt', id]));
+  ok(wf(root, ['gate', '--attempt', id]));
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-1', '--attempt', id, '--owner', owner]));
+  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure()), '--attempt', id]));
+  ok(wf(root, ['accept', '--attempt', id, '--owner', owner]));
+  const refused = wf(root, ['lesson', 'set', 'L-1', '--status', 'retired', '--attempt', id], { ownerSilent: true });
+  assert.equal(refused.code, 75);
+  assert.match(refused.err, /lesson L-1 is part of ENG-405\.1's accepted tree .* and changing it would change that tree/);
+  assert.equal(sh(root, 'git status --porcelain'), '', 'no untracked copy in the main checkout');
+  assert.equal(sh(wt, 'git status --porcelain'), '', 'the accepted tree is untouched');
+});
+
 // Named failure (I-99, fix-induced edge): an implementer left open when the review was accepted counted as "repairing", so a
 // later `wf lesson add` committed into the worktree, HEAD moved past the accepted tree, and `wf deliver` refused "modified
 // after acceptance". An open implementer opened before the acceptance says nothing about the tree.
@@ -562,11 +588,12 @@ test('I-96: the 40-file threshold counts product files; a flow\'s query that ret
   assert.deepEqual(plan.integration.interfaces, [], 'and a changed documentation file in a query\'s results is no outside consumer');
 });
 
-test('I-96: what counts as documentation: prose and docs folders by name, and the adapter\'s docsOnly files through its matcher', async () => {
+test('I-96: what counts as documentation: prose and licence files by type, and the adapter\'s docsOnly files through its matcher; a folder name is not enough', async () => {
   const { divideReview } = await import('../engine/review-groups.mjs');
   const { documentationMatcher, isDocumentationFile } = await import('../engine/impact.mjs');
-  for (const file of ['README.md', 'docs/a.json', 'packages/x/docs/img/capture.png', 'guide.mdx', 'notes.rst', 'manual.adoc', 'Doc/a.txt', 'LICENSE', 'sub/NOTICE']) assert.ok(isDocumentationFile(file), file);
-  for (const file of ['src/a.ts', 'src/docs.ts', 'src/documents/a.ts', 'requirements.txt', 'robots.txt', 'app/evidence/log.ts', 'src/readme.ts', 'a.md.ts']) assert.ok(!isDocumentationFile(file), file);
+  for (const file of ['README.md', 'docs/guide.md', 'guide.mdx', 'notes.rst', 'manual.adoc', 'LICENSE', 'sub/NOTICE', 'LICENSE.md']) assert.ok(isDocumentationFile(file), file);
+  // Independent review of 0.7.4: a folder name made product code documentation (it then left the division and the symbol scan).
+  for (const file of ['src/a.ts', 'src/docs.ts', 'src/documents/a.ts', 'requirements.txt', 'robots.txt', 'app/evidence/log.ts', 'src/readme.ts', 'a.md.ts', 'docs/a.json', 'src/modules/doc/doc.service.ts', 'apps/docs/app/page.tsx', 'src/docs/renderer.ts', 'packages/api/documentation/openapi.controller.ts', 'app/Docs/layout.tsx']) assert.ok(!isDocumentationFile(file), file);
   const matcher = documentationMatcher({ repos: [{ name: 'app', packages: [{ path: '.', docsOnly: ['evidence/**'] }] }, { name: 'api', packages: [{ path: 'services/billing', docsOnly: ['fixtures/**/*.json'] }] }] });
   assert.ok(matcher('app', 'evidence/run-1.json') && matcher('app', 'README.md'));
   assert.ok(!matcher('app', 'src/evidence.ts'));
@@ -625,8 +652,9 @@ test('I-96: declarations in documentation files are not symbols of the final dif
   const start = ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-1', '--attempt', e.id])).out;
   const bundle = JSON.parse(fs.readFileSync(start.match(/^Read (\S+)/m)[1], 'utf8'));
   assert.ok(bundle.impactMap.derived.symbols.includes('renderTable'), 'product declarations are still scanned');
-  for (const symbol of ['renderGuide', 'GuideHelper', 'renderManifest']) assert.ok(!bundle.impactMap.derived.symbols.includes(symbol), `${symbol} is documentation`);
-  assert.deepEqual(Object.keys(bundle.impactMap.derived.declarationOrigins), ['renderTable']);
+  for (const symbol of ['renderGuide', 'GuideHelper']) assert.ok(!bundle.impactMap.derived.symbols.includes(symbol), `${symbol} is documentation`);
+  // A file is documentation by its type (or the adapter's docsOnly), not by its folder: docs/manifest.json is scanned.
+  assert.ok(bundle.impactMap.derived.symbols.includes('renderManifest'), 'a non-prose file under docs/ is product unless docsOnly names it');
 });
 
 // ======================================================================================================================

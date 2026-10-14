@@ -48,12 +48,13 @@ candidate; it does not relax efficiency checks. Owner diagnostics identify `opti
 Manual divisions do not invoke this optimization.
 
 Documentation and provenance files (0.7.4, I-96) are not product code and do not decide any of that. A changed file is
-documentation when it is prose by its extension (`.md`, `.mdx`, `.rst`, `.adoc`), lies in a `docs`, `doc` or
-`documentation` folder whatever it is (a manifest, a capture), or is a `LICENSE` or `NOTICE`. Such files are left out of
+documentation when it is prose by its type (`.md`, `.mdx`, `.rst`, `.adoc`) or a `LICENSE`, `NOTICE` or `COPYING`
+file; a folder name alone makes nothing documentation (`src/docs/renderer.ts` is product code), so a folder of
+documentation assets is named with the adapter's `docsOnly`, which the review handoff applies. Such files are left out of
 the 40-file count, the cost, the unmapped count and the flows; they stay with the integration reviewer, who is handed every
 changed file (`integration.files`, `primaryFiles`), and the plan lists them under `documentation`. `divideReview` also
-takes a `documentation(repo, file)` predicate for a caller that knows more (`documentationMatcher(adapter)`, from
-`engine/impact.mjs`, builds one from the packages' `docsOnly` globs). Named failure: twelve 500-line documentation files
+takes a `documentation(repo, file)` predicate (`documentationMatcher(adapter)`, from `engine/impact.mjs`, builds one from
+the packages' `docsOnly` globs; the review handoff passes it). Named failure: twelve 500-line documentation files
 in a 48-file change of two separable flows, read as unmapped integration work, turned a parallel division into one reviewer.
 
 These are initial heuristics, not measured optimal thresholds. It never falls back

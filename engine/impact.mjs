@@ -486,10 +486,12 @@ export function inventory(state) {
 // lies in a docs folder (whatever it is: a manifest, a capture), or when the adapter lists it under its package's
 // `docsOnly` (the notion the gate and the scope checks already use). Documentation is still reviewed (the integration
 // reviewer is handed every such file); it is not product code, so it neither weighs on a division nor yields symbols.
+// The built-in notion is the file type alone: prose formats and licence files. A folder name is not used (independent review
+// of 0.7.4: `docs/` at any depth also matched `src/docs/renderer.ts` and `apps/docs/app/page.tsx`, so product code dropped
+// out of the division and the symbol scan); a project names a folder of documentation assets with `docsOnly`.
 const PROSE = /\.(md|mdx|markdown|rst|adoc|asciidoc)$/i;
-const DOCS_FOLDER = /(^|\/)(docs?|documentation)\//i;
-const LEGAL = /(^|\/)(LICENSE|LICENCE|NOTICE|COPYING)$/;
-export const isDocumentationFile = (file) => PROSE.test(file) || DOCS_FOLDER.test(file) || LEGAL.test(file);
+const LEGAL = /(^|\/)(LICENSE|LICENCE|NOTICE|COPYING)(\.(md|txt))?$/;
+export const isDocumentationFile = (file) => PROSE.test(file) || LEGAL.test(file);
 
 const insidePackage = (file, dir) => dir === '.' || dir === '' || file === dir || file.startsWith(`${dir.replace(/\/$/, '')}/`);
 const relativeToPackage = (file, dir) => (dir === '.' || dir === '' ? file : file.slice(dir.replace(/\/$/, '').length + 1));

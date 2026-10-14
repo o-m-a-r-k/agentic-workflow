@@ -37,9 +37,31 @@ function checkedInbox({ create = false } = {}) {
   return dir;
 }
 
-// The same stripper as the plugin repo's privacy rules: project and repo names (when a project is known), ticket ids,
-// emails, URLs, absolute and home paths.
-export function sanitizer(names = []) {
+// The maintainer's private names (0.7.4): the file `scenarios/privacy.test.mjs` reads (WF_PRIVACY_DENYLIST, else
+// `.privacy-denylist` in the plugin repo), and `privacy-denylist` in the folder that holds the inbox
+// (`~/.agentic-workflow/privacy-denylist` by default). One per line: a
+// case-insensitive word, or /a regular expression/. Named failure (independent review of 0.7.4): `wf improve close` wrote
+// an item's text into the public repo with a project name, a tracker key and review ids in it, because the stripper knew
+// only ticket-id shapes and, outside a project, no names at all.
+export function privacyPatterns() {
+  const files = [process.env.WF_PRIVACY_DENYLIST, path.join(pluginRepo(), '.privacy-denylist'), path.join(path.dirname(inboxDir()), 'privacy-denylist')].filter(Boolean);
+  const out = [];
+  for (const f of files) {
+    const r = readRegular(f);
+    if (!r) continue;
+    for (const line of r.bytes.toString('utf8').split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#'))) {
+      const m = /^\/(.+)\/$/.exec(line);
+      try {
+        out.push(m ? new RegExp(m[1], 'gi') : new RegExp(`\\b${line.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi'));
+      } catch {}
+    }
+  }
+  return out;
+}
+
+// The same stripper as the plugin repo's privacy rules: project and repo names (when a project is known), the maintainer's
+// private names (privacyPatterns), ticket ids, emails, URLs, absolute and home paths.
+export function sanitizer(names = [], patterns = privacyPatterns()) {
   const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const list = [...new Set(names.filter((x) => x && x.length > 2))].sort((a, b) => b.length - a.length);
   const nameRe = list.length ? new RegExp(`\\b(?:${list.map(esc).join('|')})\\b`, 'gi') : null;
@@ -48,6 +70,7 @@ export function sanitizer(names = []) {
     t = t.replace(/\bhttps?:\/\/\S+/g, '<url>').replace(/[\w.+-]+@[\w-]+\.[\w.-]+/g, '<email>').replace(/(?:~|\/(?:Users|home|private|var|tmp|opt|mnt|srv))\/\S*/g, '<path>');
     t = t.replace(/\b[A-Z][A-Z0-9]+-\d+(?:\.\d+)?\b/g, '<ticket>');
     if (nameRe) t = t.replace(nameRe, '<project>');
+    for (const re of patterns) t = t.replace(re, '<name>');
     return t;
   };
 }

@@ -741,7 +741,7 @@ A second adversarial pass over the integrated 0.5.0 branch, with scenarios in `s
 | [I-88](improvements/I-88.md) | Refresh operational lease capacity without repinning test requirements | 0.7.4 | `scenarios/fix-074-gate.test.mjs` |
 | [I-87](improvements/I-87.md) | Native planner retry loses validation refusal | 0.7.0 | `scenarios/impact.test.mjs` |
 | [I-86](improvements/I-86.md) | Resolve production prerequisites before asking the owner in investigations | 0.7.4 | `scenarios/fix-074-texts.test.mjs` |
-| [I-85](improvements/I-85.md) | Reject page UUID admission for a tracker with STY ticket identity | 0.7.0 | `scenarios/lifecycle.test.mjs` |
+| [I-85](improvements/I-85.md) | Reject admitting a page id as the ticket of a tracker with its own ticket identity | 0.7.0 | `scenarios/lifecycle.test.mjs` |
 | [I-84](improvements/I-84.md) | Native planner replacements need immutable validation feedback | 0.7.0 | `scenarios/impact.test.mjs` |
 | [I-83](improvements/I-83.md) | Review ownership is classified before related flows are grouped | 0.6.4 | `scenarios/review-division-ownership.test.mjs` |
 | [I-82](improvements/I-82.md) | Evidence inspect pagination resolves numeric from as a filesystem path | 0.6.3 | `scenarios/evidence-pagination.test.mjs` |
