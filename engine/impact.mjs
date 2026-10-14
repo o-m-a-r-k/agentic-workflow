@@ -477,6 +477,28 @@ export function inventory(state) {
   return [...new Set(ids)];
 }
 
+// ---- Documentation and provenance files ----
+
+// Named failure (I-96): a ticket that committed a package of documentation (verification records, manifests and captures kept
+// beside the change) had 12 such files of 500 lines counted as product code by the review division, which read them as
+// unmapped integration work and turned a division into two separable flows into a single reviewer; and the symbol scan of
+// the final diff took declarations out of the same files. A file is documentation when it is prose by its extension, when it
+// lies in a docs folder (whatever it is: a manifest, a capture), or when the adapter lists it under its package's
+// `docsOnly` (the notion the gate and the scope checks already use). Documentation is still reviewed (the integration
+// reviewer is handed every such file); it is not product code, so it neither weighs on a division nor yields symbols.
+const PROSE = /\.(md|mdx|markdown|rst|adoc|asciidoc)$/i;
+const DOCS_FOLDER = /(^|\/)(docs?|documentation)\//i;
+const LEGAL = /(^|\/)(LICENSE|LICENCE|NOTICE|COPYING)$/;
+export const isDocumentationFile = (file) => PROSE.test(file) || DOCS_FOLDER.test(file) || LEGAL.test(file);
+
+const insidePackage = (file, dir) => dir === '.' || dir === '' || file === dir || file.startsWith(`${dir.replace(/\/$/, '')}/`);
+const relativeToPackage = (file, dir) => (dir === '.' || dir === '' ? file : file.slice(dir.replace(/\/$/, '').length + 1));
+// `(repo, file) => boolean` for the files an adapter's packages declare documentation-only, besides the built-in notion.
+export function documentationMatcher(cfg) {
+  const packages = new Map((cfg?.repos ?? []).map((r) => [r.name, (r.packages ?? []).filter((p) => p.docsOnly?.length)]));
+  return (repo, file) => isDocumentationFile(file) || (packages.get(repo) ?? []).some((p) => insidePackage(file, p.path) && matchesAny(relativeToPackage(file, p.path), p.docsOnly));
+}
+
 // ---- The final diff, re-derived ----
 
 // Symbols the final diff declares or edits inside: declarations on changed lines and the enclosing function git names
@@ -502,6 +524,15 @@ export function deriveFromDiff(root, cfg, state, { limit = 100, queryResults = n
     symbols.get(symbol).add(origin);
   };
   const changed = new Set();
+  // Named failure (I-96): declarations in documentation files are not product declarations (see isDocumentationFile).
+  // (The adapter at the base is read for its `docsOnly`; where it cannot be read here the scan below says so itself, so only the
+  // built-in notion applies until then.)
+  let documentation;
+  try {
+    documentation = documentationMatcher(trustedConfig(root, cfg, state));
+  } catch {
+    documentation = documentationMatcher(null);
+  }
   for (const [name, r] of Object.entries(state.repos ?? {})) {
     const base = git(r.worktree, ['merge-base', r.baseRef ?? r.base, 'HEAD'], { allowFail: true }) || r.base;
     for (const f of git(r.worktree, ['diff', '--name-only', base, 'HEAD']).split('\n').filter(Boolean)) changed.add(`${name}:${f}`);
@@ -514,10 +545,10 @@ export function deriveFromDiff(root, cfg, state, { limit = 100, queryResults = n
       else if (line.startsWith('+++ ')) newFile = line.slice(4) === '/dev/null' ? null : line.slice(4).replace(/^b\//, '');
       else if (line.startsWith('@@')) {
         const file = newFile ?? oldFile;
-        if (file) for (const s of symbolsIn(line.replace(/^@@[^@]*@@/, ''))) addSymbol(s, `${name}:${file}`);
+        if (file && !documentation(name, file)) for (const s of symbolsIn(line.replace(/^@@[^@]*@@/, ''))) addSymbol(s, `${name}:${file}`);
       } else if (line.startsWith('+') || line.startsWith('-')) {
         const file = line.startsWith('+') ? newFile : oldFile;
-        if (file) for (const s of symbolsIn(line.slice(1))) addSymbol(s, `${name}:${file}`);
+        if (file && !documentation(name, file)) for (const s of symbolsIn(line.slice(1))) addSymbol(s, `${name}:${file}`);
       }
     }
   }

@@ -1,5 +1,6 @@
 // Named failure: large blind reviews serialized unrelated flows, while naive file splits lost shared contracts.
 // This module proposes divisions from recorded end-to-end flows, never from filenames or implementer work items.
+import { isDocumentationFile } from './impact.mjs';
 import { reviewerDiscovered } from './review-policy.mjs';
 import { canonical, git, hashValue, refuse } from './util.mjs';
 
@@ -179,14 +180,30 @@ function integrationInterfaces(flows, changed, owners, bundle) {
   return interfaces;
 }
 
-export function divideReview(bundle, results, { reviewers = 2, minimumFiles = 40, division = null, weights = {} } = {}) {
+// Named failure (I-96): 12 documentation files of 500 lines in a 48-file change of two separable flows were read as product
+// code: they were unmapped by every flow, so they became integration work (cost 6000 of 12000, over the 3048 threshold) and
+// the division fell back to one reviewer; ten such files already did, and 49 also tripped the file-count threshold.
+// Documentation and provenance files (`isDocumentationFile`, and the adapter's package `docsOnly` files when the caller
+// passes `documentation: (repo, file) => boolean`) stay with the integration reviewer, who is handed every changed file, but
+// they are not product code: the 40-file threshold, the cost, the unmapped count and the flows leave them out, and the
+// plan lists them under `documentation`.
+const splitDocumentation = (inventory, documentation) => {
+  const isDoc = qualified => {
+    const at = qualified.indexOf(':');
+    return isDocumentationFile(qualified.slice(at + 1)) || Boolean(documentation?.(qualified.slice(0, at), qualified.slice(at + 1)));
+  };
+  return { documentation: inventory.filter(isDoc), product: inventory.filter(file => !isDoc(file)) };
+};
+
+export function divideReview(bundle, results, { reviewers = 2, minimumFiles = 40, division = null, weights = {}, documentation: isDocumentation = null } = {}) {
   if (!Number.isInteger(reviewers) || reviewers < 2 || reviewers > 3) throw refuse('parallel review uses two or three scoped reviewers plus one integration reviewer');
-  const changed = changedInventory(bundle), changedSet = new Set(changed), catalog = impactCatalog(bundle.impactMap), flows = [];
+  const everyFile = changedInventory(bundle), changedSet = new Set(everyFile), catalog = impactCatalog(bundle.impactMap), flows = [];
+  const { documentation, product: changed } = splitDocumentation(everyFile, isDocumentation), documentationSet = new Set(documentation);
   const addFlow = (id, row, extras = []) => {
     if (!row?.flow || !row?.failure) return;
     const queryOrigins = [{ id: row.query, kind: 'flow' }, ...extras].filter(q => q.id).sort((a, b) => a.kind.localeCompare(b.kind) || a.id.localeCompare(b.id));
     const queries = [...new Set(queryOrigins.map(q => q.id))].sort(), context = [...new Set(queries.flatMap(q => results[q]?.files ?? []))].sort();
-    const files = context.filter(file => changedSet.has(file));
+    const files = context.filter(file => changedSet.has(file) && !documentationSet.has(file));
     if (files.length) flows.push({ id, flow: row.flow, failure: row.failure, query: row.query, queries, queryOrigins, files, context });
   };
   for (const row of catalog.flows) addFlow(`survey:${row.id}`, row);
@@ -203,10 +220,10 @@ export function divideReview(bundle, results, { reviewers = 2, minimumFiles = 40
   };
   const cost = files => { let total = 0; for (const file of files) total += weight(file); return total; };
   const thresholds = { minimumFiles, integrationShare: 0.5, dominantScopeShare: 0.8 };
-  const single = (reason, diagnostics) => ({ version: 2, mode: 'single', reason, files: changed, flows, slices: [], integration: { files: changed, interfaces: [] }, diagnostics });
-  const early = (reasonCode, reason) => single(reason, { reasonCode, changedFiles: changed.length, areas: areas.length, thresholds, scopes: [], integration: null, blockers: [] });
+  const single = (reason, diagnostics) => ({ version: 2, mode: 'single', reason, files: everyFile, documentation, flows, slices: [], integration: { files: everyFile, interfaces: [] }, diagnostics });
+  const early = (reasonCode, reason) => single(reason, { reasonCode, changedFiles: changed.length, documentationFiles: documentation.length, areas: areas.length, thresholds, scopes: [], integration: null, blockers: [] });
   // Preserve the lazy scan: small or indivisible changes never pay for Git weight discovery.
-  if (!division && changed.length < minimumFiles) return early('below-minimum-files', `only ${changed.length} changed files; retain one reviewer below ${minimumFiles}`);
+  if (!division && changed.length < minimumFiles) return early('below-minimum-files', `only ${changed.length} changed ${documentation.length ? 'product ' : ''}files; retain one reviewer below ${minimumFiles}`);
   if (areas.length < 2) {
     if (division) throw refuse('recorded flows do not provide two separable review areas; retain a single reviewer');
     return early('insufficient-flow-areas', 'recorded flows are missing or form fewer than two distinct areas');
@@ -233,7 +250,7 @@ export function divideReview(bundle, results, { reviewers = 2, minimumFiles = 40
     const overlapExamples = [...ownership.incidence].filter(([, rows]) => rows.length > 1).slice(0, 5).map(([file, rows]) => ({ file,
       owner: ownership.owners.get(file), areas: rows.slice(0, 8).map(area => ({ id: area.id, queries: flows.filter(flow => area.flowIds.includes(flow.id)).flatMap(flow => flow.queryOrigins).slice(0, 6) })) }));
     return { ownership, score: integrationCost + largest, diagnostics: { reasonCode: blockers[0]?.code ?? 'parallel', strategy,
-      changedFiles: changed.length, totalCost: total, areas: areas.length, thresholds, scopes, integration, blockers,
+      changedFiles: changed.length, documentationFiles: documentation.length, totalCost: total, areas: areas.length, thresholds, scopes, integration, blockers,
       retainedOverlap: { files: ownership.retained.length, cost: cost(ownership.retained) }, overlapExamples,
       manualEfficiencyWarning: Boolean(division && blockers.length) } };
   };
@@ -269,10 +286,10 @@ export function divideReview(bundle, results, { reviewers = 2, minimumFiles = 40
   }
   const { ownership, diagnostics } = candidate;
   diagnostics.overlapOptimization = overlapOptimization;
-  const plan = { version: 2, mode: 'parallel', reason: 'complete flows are grouped before ownership; cross-scope, unassigned and unmapped code belongs to integration', files: changed,
-    costBasis: 'changed lines (binary: 100); estimate, not measured review time', diagnostics,
+  const plan = { version: 2, mode: 'parallel', reason: 'complete flows are grouped before ownership; cross-scope, unassigned and unmapped code belongs to integration', files: everyFile, documentation,
+    costBasis: 'changed lines (binary: 100); estimate, not measured review time; documentation files are handed to integration and not counted', diagnostics,
     slices: ownership.bins.map(bin => ({ id: bin.id, files: bin.files, estimatedCost: cost(bin.files), flowIds: bin.areas.flatMap(area => area.flowIds).sort(), context: [...new Set(bin.areas.flatMap(area => area.context))].sort() })),
-    flows, integration: { files: ownership.integration, estimatedCost: cost(ownership.integration), interfaces: integrationInterfaces(flows, changed, ownership.owners, bundle) } };
+    flows, integration: { files: [...ownership.integration, ...documentation].sort(), estimatedCost: cost(ownership.integration), interfaces: integrationInterfaces(flows, everyFile, ownership.owners, bundle) } };
   validateDivision(plan, bundle);
   return plan;
 }
@@ -284,6 +301,11 @@ export function validateDivision(plan, bundle) {
   if (plan.version === 2) {
     if (plan.slices.length < 2 || plan.slices.length > 3 || new Set(plan.slices.map(s => s.id)).size !== plan.slices.length || plan.slices.some(s => !/^S[1-3]$/.test(s.id) || !s.files.length)) throw refuse('review division needs two or three unique nonempty scopes');
     if (new Set(plan.flows.map(f => f.id)).size !== plan.flows.length || plan.flows.some(f => f.files.some(file => !expected.includes(file)))) throw refuse('review flow inventory contains duplicate IDs or unknown changed files');
+    // Documentation files (I-96) belong to the integration reviewer, outside the ownership the flows decide; a plan from before
+    // 0.7.4 lists none.
+    const documentation = new Set(plan.documentation ?? []);
+    if ([...documentation].some(file => !expected.includes(file) || !plan.integration.files.includes(file))) throw refuse('review division lists a documentation file that is not a changed file owned by integration');
+    const product = expected.filter(file => !documentation.has(file));
     const areas = normalizedAreas(plan.flows), byId = new Map(areas.flatMap(area => area.flowIds.map(id => [id, area]))), assignments = new Map(), seen = new Set();
     const bins = plan.slices.map(scope => ({ id: scope.id, areas: [...new Set(scope.flowIds.map(id => {
       if (!byId.has(id) || seen.has(id)) throw refuse(`unknown or duplicate assigned flow ${id}`);
@@ -292,9 +314,9 @@ export function validateDivision(plan, bundle) {
       assignments.set(area.id, scope.id); return area;
     }))] }));
     for (const area of areas) if (assignments.has(area.id) && area.flowIds.some(id => !seen.has(id))) throw refuse(`normalized flow aliases must be assigned together: ${area.id}`);
-    const ownership = divisionOwnership(areas, bins, expected);
+    const ownership = divisionOwnership(areas, bins, product);
     for (const scope of plan.slices) if (canonical([...scope.files].sort()) !== canonical(ownership.bins.find(bin => bin.id === scope.id).files)) throw refuse(`scope ${scope.id} violates group-based file ownership; cross-scope and unassigned dependencies are integration-owned`);
-    if (canonical([...plan.integration.files].sort()) !== canonical(ownership.integration)) throw refuse('integration file ownership does not match recorded flow assignments');
+    if (canonical([...plan.integration.files].sort()) !== canonical([...ownership.integration, ...documentation].sort())) throw refuse('integration file ownership does not match recorded flow assignments');
     const required = integrationInterfaces(plan.flows, expected, ownership.owners, bundle), actual = new Map();
     for (const entry of plan.integration.interfaces) { if (actual.has(entry.id)) throw refuse(`duplicate integration check ${entry.id}`); actual.set(entry.id, entry); }
     for (const entry of required) {
@@ -316,7 +338,7 @@ export function validateDivision(plan, bundle) {
 export function reviewDivisionSummary(plan) {
   const d = plan.diagnostics;
   if (!d) return '';
-  const lines = [`  division reason: ${d.reasonCode}; ${d.changedFiles} changed files, ${d.areas} normalized areas`];
+  const lines = [`  division reason: ${d.reasonCode}; ${d.changedFiles} changed files${d.documentationFiles ? ` (${d.documentationFiles} documentation files more, handed to integration and outside the estimate)` : ''}, ${d.areas} normalized areas`];
   if (d.overlapOptimization?.status === 'budget-exceeded') lines.push(`  optimization-budget-exceeded: ${d.overlapOptimization.metric}, observed ${d.overlapOptimization.value}, limit ${d.overlapOptimization.limit}; balanced candidate retained`);
   if (d.integration) {
     lines.push(`  workload estimate: ${d.scopes.map(s => `${s.id} ${s.files} files/${s.cost} changed-line cost`).join('; ')}; integration ${d.integration.files} files/${d.integration.cost} cost`);

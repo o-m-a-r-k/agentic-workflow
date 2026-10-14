@@ -35,7 +35,7 @@ Each changed file has exactly one primary owner. Crossing flows and textual outs
 integration evidence on both sides. These are recorded relationships, not a resolved language import graph;
 integration must investigate ambiguous names, omissions and scan caps.
 
-Automatic division retains single review below 40 changed files, with fewer than two separable flow areas, when more
+Automatic division retains single review below 40 changed product files, with fewer than two separable flow areas, when more
 than half the files belong to integration, or when one indivisible scope would retain at least 80% of estimated review
 cost. Whole areas are balanced by changed line counts, with a conservative cost for binary files. When overlap would
 leave work in integration, an additional candidate groups areas by weighted overlap, retaining the eligible candidate
@@ -46,6 +46,15 @@ pairs, 500,000 lifetime queued pairs, and 1,000,000 merge-neighbor visits. Initi
 before constructing the pair map. Exhaustion discards the search and retains the fully evaluated balanced
 candidate; it does not relax efficiency checks. Owner diagnostics identify `optimization-budget-exceeded`.
 Manual divisions do not invoke this optimization.
+
+Documentation and provenance files (0.7.4, I-96) are not product code and do not decide any of that. A changed file is
+documentation when it is prose by its extension (`.md`, `.mdx`, `.rst`, `.adoc`), lies in a `docs`, `doc` or
+`documentation` folder whatever it is (a manifest, a capture), or is a `LICENSE` or `NOTICE`. Such files are left out of
+the 40-file count, the cost, the unmapped count and the flows; they stay with the integration reviewer, who is handed every
+changed file (`integration.files`, `primaryFiles`), and the plan lists them under `documentation`. `divideReview` also
+takes a `documentation(repo, file)` predicate for a caller that knows more (`documentationMatcher(adapter)`, from
+`engine/impact.mjs`, builds one from the packages' `docsOnly` globs). Named failure: twelve 500-line documentation files
+in a 48-file change of two separable flows, read as unmapped integration work, turned a parallel division into one reviewer.
 
 These are initial heuristics, not measured optimal thresholds. It never falls back
 to arbitrary directory, repository, equal-size or
