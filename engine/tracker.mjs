@@ -486,7 +486,13 @@ export async function recordTracker(root, cfg, state, options) {
   // written with the rest of the record, not before (below).
   const engine = options.engineCapture && typeof options.engineCapture === 'object' ? options.engineCapture : null;
   if (!options.capture && !engine) throw new WfError(`--capture <file> is required: the raw tracker response the agent saved${cfg.tracker.via === 'connector' ? ' (or, when the tool results are only in the chat, `--agent-reported --file <reported.json> --comment-file <posted.md>`)' : ''}`);
-  const adapter = await loadTrackerAdapter(root, cfg, state);
+  // The engine's own answer is kept whatever stops its reading (final review of 0.7.4: an adapter that failed to load or to
+  // read the answer lost it, though the engine had already acted on the tracker).
+  const keepingAnswer = (error) => {
+    if (engine) recordedTogether(root, state.id, () => writeEngineAnswer(engine));
+    throw error;
+  };
+  const adapter = await loadTrackerAdapter(root, cfg, state).catch(keepingAnswer);
   const capturePath = engine ? engine.file : path.resolve(String(options.capture));
   // Read once: the bytes checked are the bytes kept (and the ones hashed for the recycled-capture check). With
   // --comments, the two saved tool results (get_issue, list_comments) are kept together, unchanged, as one list.
@@ -498,9 +504,14 @@ export async function recordTracker(root, cfg, state, options) {
   try {
     raw = JSON.parse(captureText);
   } catch (error) {
-    throw new WfError(`invalid JSON in ${capturePath}: ${error.message}`);
+    keepingAnswer(new WfError(`invalid JSON in ${capturePath}: ${error.message}`));
   }
-  const issue = adapter.normalize(raw);
+  let issue;
+  try {
+    issue = adapter.normalize(raw);
+  } catch (error) {
+    keepingAnswer(error);
+  }
   const problems = [];
   const verified = [];
   if (issue.id === undefined || issue.id === null || issue.id === '') problems.push(`the capture names no issue (no \`identifier\` or \`id\` found); save the raw tracker responses unchanged${adapter.captureShape ? `, shaped ${adapter.captureShape}` : ''}`);

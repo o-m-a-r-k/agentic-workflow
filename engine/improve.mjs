@@ -75,6 +75,14 @@ export function sanitizer(names = [], patterns = privacyPatterns()) {
   };
 }
 
+// What a public history entry is stripped with. Without the maintainer's denylist only ticket ids, emails, URLs and paths are
+// stripped, and the command says so (final review of 0.7.4: a missing denylist was silently ignored).
+function publicSanitizer() {
+  const patterns = privacyPatterns();
+  if (!patterns.length) process.stderr.write('wf improve: warning: no privacy denylist found (WF_PRIVACY_DENYLIST, .privacy-denylist in the plugin repo, or privacy-denylist beside the inbox), so only ticket ids, emails, URLs and paths are stripped from the public history entry; read it before committing\n');
+  return sanitizer([], patterns);
+}
+
 export function loadImprovements() {
   const dir = checkedInbox();
   if (!fs.existsSync(dir)) return [];
@@ -195,7 +203,7 @@ export function closeImprovement(id, options, { refusals = [] } = {}) {
   const r = readRegular(testFile);
   if (!r) throw refuse(`${test} does not exist in the plugin repo (${repo}); a fix closes with the scenario test that reproduces the failure`);
   if (options.name && !r.bytes.toString('utf8').includes(String(options.name))) throw refuse(`${test} has no test named "${options.name}"`);
-  const scrub = sanitizer();
+  const scrub = publicSanitizer();
   const entry = `# ${id}: ${scrub(item.title)}\n\n- **Class:** ${item.class}\n- **Fixed in:** ${version}\n- **Test:** \`${test}\`${options.name ? ` (${scrub(options.name)})` : ''}\n${options.commit ? `- **Commit:** ${String(options.commit).slice(0, 40)}\n` : ''}${item.regressionOf ? `- **Regression of:** ${item.regressionOf.id}${item.regressionOf.fixedIn ? ` (fixed in ${item.regressionOf.fixedIn})` : ''}\n` : ''}\n## Failure\n\n${scrub(item.what)}\n\n## Fix\n\n${scrub(fix)}\n`;
   const histDir = path.join(repo, 'improvements');
   mkdirStateDirectory(histDir, { recursive: true });
@@ -215,7 +223,7 @@ function retireImprovement(id, item, options, refusals, repo) {
     const mine = refusals.filter((r) => r.id === rid);
     return { id: rid, count: mine.length, attempts: new Set(mine.map((r) => r.attempt).filter(Boolean)).size };
   });
-  const scrub = sanitizer();
+  const scrub = publicSanitizer();
   const seen = counted.length ? counted.map((c) => `\`${c.id}\` ${c.count} refusal(s) in ${c.attempts} attempt(s)`).join('; ') : 'none named';
   const entry = `# ${id}: ${scrub(item.title)}\n\n- **Class:** ${item.class}\n- **Retired in:** ${version}\n- **Refusals recorded:** ${seen}\n${options.commit ? `- **Commit:** ${String(options.commit).slice(0, 40)}\n` : ''}\n## Failure\n\n${scrub(item.what)}\n\n## Why it was retired\n\n${scrub(reason)}\n`;
   const histDir = path.join(repo, 'improvements');

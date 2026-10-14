@@ -523,7 +523,8 @@ export function prepareWrite(file) {
   // Named failure (I-109): see `recordingTransaction`. Only files of an attempt are judged; its ledger (protected by its own hash
   // chain and anchor) and its gate folder (a run records its own files, and a file of a run still open is exempt from the
   // manifest until the run is recorded finished) are written under the rules above them.
-  if (parts[at + 1] === 'attempts' && parts[at + 2] && parts.length > at + 3 && parts[at + 3] !== 'gate' && !(parts.length === at + 4 && parts[at + 3].startsWith('ledger.jsonl'))) {
+  const fold = (x) => String(x ?? '').normalize('NFKC').toLowerCase(); // as `.wf-evidence` is found (final review of 0.7.4)
+  if (fold(parts[at + 1]) === 'attempts' && parts[at + 2] && parts.length > at + 3 && fold(parts[at + 3]) !== 'gate' && !(parts.length === at + 4 && fold(parts[at + 3]).startsWith('ledger.jsonl'))) {
     if (!recording.has(transactionLockFile(parts.slice(0, at).join(path.sep), parts[at + 2]))) throw new Error(`internal error: ${abs} is written outside a recorded transaction (recordedTogether in engine/ledger.mjs): a command running meanwhile would see it as an extra file`);
   }
   // From the attempt's own folder down: `attempts/` is shared by every attempt (and concurrent gates) and never locked.

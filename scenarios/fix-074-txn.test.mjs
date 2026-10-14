@@ -314,6 +314,30 @@ test('I-109: the engine\'s own readback is kept when it fails its checks, and re
   }
 });
 
+// Final review of 0.7.4: an answer the engine could not read (not JSON, or one its tracker adapter failed to load or normalise)
+// was not kept, though the engine had already acted on the tracker; it is kept and recorded like an answer that fails its checks.
+test('I-109: the engine\'s own readback is kept when it cannot be read at all', async () => {
+  const f = singleRepoProject('txn-unreadable-readback', { tracker: { kind: 'files', statuses }, gate: { steps } });
+  const e = ok(wf(f.root, ['entry', '--item', 'ENG-9', '--owner', 'o', '--json'])).json();
+  const keep = process.env.WF_EVIDENCE_FLAGS;
+  process.env.WF_EVIDENCE_FLAGS = '0';
+  const { forget } = await import('../engine/evidence.mjs');
+  const { loadConfig } = await import('../engine/config.mjs');
+  const { loadState } = await import('../engine/ledger.mjs');
+  const { recordTracker } = await import('../engine/tracker.mjs');
+  try {
+    const file = path.join(f.root, '.wf-evidence', 'attempts', e.id, 'tracker', 'admitted-files-unreadable.json');
+    const text = 'the tracker answered with an HTML error page\n';
+    await assert.rejects(recordTracker(f.root, loadConfig(f.root), loadState(f.root, e.id), { event: 'admitted', engineCapture: { file, text } }), /invalid JSON/);
+    assert.equal(fs.readFileSync(file, 'utf8'), text, 'the answer is kept');
+    assert.deepEqual(verifyAttempt(f.root, e.id), [], 'and recorded');
+  } finally {
+    forget();
+    if (keep === undefined) delete process.env.WF_EVIDENCE_FLAGS;
+    else process.env.WF_EVIDENCE_FLAGS = keep;
+  }
+});
+
 // ---- the rule itself -------------------------------------------------------------------------------------------------------------------
 
 test('I-109: an evidence file is written only inside a recorded transaction: elsewhere the engine refuses to write it, and what a failed transaction wrote is recorded before the lock is let go', async () => {
