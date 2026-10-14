@@ -62,28 +62,102 @@ export function wrappedConnectorResult(output) {
 
 // Named failure I-43: Codex sends native file patches in tool_input.command, with tool_name apply_patch.
 // Parse only that file-edit protocol; a Bash command is never read as a patch.
+//
+// Named failure (I-108): the parser here accepted an update-hunk line only when it began with a space, `+` or `-`, so a patch
+// with a bare empty context line threw, and the guard refused a patch that touches no evidence (as "targets the workflow
+// evidence folder") although Codex applies it. This is a port of the grammar Codex's own `apply_patch` reads, taken from its
+// behaviour (codex-cli 0.162.1 run on each rule with `--codex-run-as-apply-patch`; scenarios/fix-074-lessons.test.mjs pins
+// them and, with WF_TEST_CODEX set, runs the same patches through the installed binary and compares), not from the
+// published summary of it, which is narrower than what Codex accepts:
+//   - The patch is trimmed; its first and last lines, trimmed, are `*** Begin Patch` and `*** End Patch`, or it is a heredoc
+//     (`<<EOF`, `<<'EOF'`, `<<"EOF"` ... a last line ending in `EOF`) around such a patch.
+//   - A hunk starts at a line that, trimmed, begins `*** Add File: `, `*** Delete File: ` or `*** Update File: `; the path is
+//     the rest of the trimmed line.
+//   - Add: following lines that begin `+`. A bare empty line ends it (and is not a hunk header). No line at all is fine.
+//   - Delete: that line only.
+//   - Update: an optional `*** Move to: <path>` line (right-trimmed, the very next line), then chunks. A chunk is an
+//     optional `@@` or `@@ <text>` line (required from the second chunk on), then lines that begin with a space, `+`, `-`, or
+//     are EMPTY (an empty context line), up to an optional `*** End of File` (blank lines after it are skipped; one before the
+//     first chunk is skipped by itself). A chunk needs one such line. A line that begins
+//     any other way ends the chunk; what follows must be another chunk's `@@` or the next hunk's header (a raw line starting
+//     with one of the three prefixes), or the patch is refused.
+//   - A `*** End Patch` line (trimmed) where a hunk or chunk could start closes the list; only blank lines may follow it
+//     before the final one. A hunk that applies no change (context lines only) is still a hunk.
+// A patch Codex refuses to parse is refused here too (the caller reports it as malformed); the target list is every path
+// Codex would write, delete or move to.
+const BEGIN = '*** Begin Patch';
+const END = '*** End Patch';
+const ADD = '*** Add File: ';
+const DELETE = '*** Delete File: ';
+const UPDATE = '*** Update File: ';
+const MOVE = '*** Move to: ';
+const END_OF_FILE = '*** End of File';
+const HEREDOC = ['<<EOF', "<<'EOF'", '<<"EOF"'];
+const isHeader = (line) => line.startsWith(ADD) || line.startsWith(DELETE) || line.startsWith(UPDATE);
+const bounded = (lines) => lines.length >= 2 && lines[0].trim() === BEGIN && lines.at(-1).trim() === END;
+
 export function patchTargets(text) {
   if (typeof text !== 'string' || text.includes('\0')) throw new Error('invalid patch text');
-  const lines = text.trim().split(/\r?\n/);
-  if (lines[0] !== '*** Begin Patch' || lines.at(-1) !== '*** End Patch') throw new Error('invalid patch boundary');
-  const targets = [];
-  let operation = null, body = false, moveAllowed = false;
-  for (const line of lines.slice(1, -1)) {
-    const header = /^\*\*\* (Add|Update|Delete) File: (.+)$/.exec(line);
-    if (header) {
-      if (operation === 'Add' && !body) throw new Error('empty add');
-      operation = header[1]; body = false; moveAllowed = operation === 'Update';
-      targets.push(header[2]); continue;
-    }
-    if (operation === 'Update' && moveAllowed && line.startsWith('*** Move to: ')) {
-      if (!line.slice(13).trim()) throw new Error('empty move');
-      targets.push(line.slice(13)); moveAllowed = false; continue;
-    }
-    moveAllowed = false;
-    if (operation === 'Add' && line.startsWith('+')) { body = true; continue; }
-    if (operation === 'Update' && (/^[ +\-]/.test(line) || line === '@@' || line.startsWith('@@ ') || line === '*** End of File')) { body = true; continue; }
-    throw new Error('unknown patch line');
+  let lines = text.trim().split(/\r?\n/);
+  if (!bounded(lines)) {
+    if (lines.length >= 4 && HEREDOC.includes(lines[0]) && lines.at(-1).endsWith('EOF')) lines = lines.slice(1, -1);
+    if (!bounded(lines)) throw new Error('invalid patch boundary');
   }
-  if (!targets.length || (operation === 'Add' && !body)) throw new Error('empty patch');
+  const body = lines.slice(1, -1);
+  const targets = [];
+  let i = 0;
+  while (i < body.length) {
+    const top = body[i].trim();
+    if (top === END) {
+      if (body.slice(i + 1).some((line) => line.trim() !== '')) throw new Error('text after the end of the patch');
+      break;
+    }
+    if (top.startsWith(ADD)) {
+      targets.push(top.slice(ADD.length));
+      i += 1;
+      while (i < body.length && body[i].startsWith('+')) i += 1;
+    } else if (top.startsWith(DELETE)) {
+      targets.push(top.slice(DELETE.length));
+      i += 1;
+    } else if (top.startsWith(UPDATE)) {
+      targets.push(top.slice(UPDATE.length));
+      i += 1;
+      const move = i < body.length ? body[i].trimEnd() : '';
+      if (move.startsWith(MOVE)) {
+        targets.push(move.slice(MOVE.length));
+        i += 1;
+      }
+      let chunks = 0;
+      const skipBlank = () => { while (i < body.length && body[i].trim() === '') i += 1; };
+      while (i < body.length) {
+        const line = body[i];
+        if (isHeader(line) || (!/^[ +-]/.test(line) && line.trim() === END)) break;
+        if (!chunks && line.trimEnd() === END_OF_FILE) { // a marker before the first chunk is skipped
+          i += 1;
+          continue;
+        }
+        if (line === '@@' || line.startsWith('@@ ')) i += 1;
+        else if (chunks) throw new Error('expected a chunk marker');
+        let lined = 0;
+        for (; i < body.length; i += 1) {
+          if (body[i].trimEnd() === END_OF_FILE) {
+            if (!lined) throw new Error('empty update chunk');
+            i += 1;
+            lined += 1;
+            skipBlank();
+            break;
+          }
+          const first = body[i][0];
+          if (first === undefined || first === ' ' || first === '+' || first === '-') lined += 1;
+          else if (!lined) throw new Error('unknown patch line');
+          else break;
+        }
+        if (!lined) throw new Error('empty update chunk');
+        chunks += 1;
+      }
+      if (!chunks) throw new Error('empty update');
+    } else throw new Error('unknown patch hunk');
+  }
+  if (!targets.length) throw new Error('empty patch');
   return targets;
 }

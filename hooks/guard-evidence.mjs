@@ -22,6 +22,11 @@ import { touchesEvidence } from '../engine/paths.mjs';
 // I-16, named failure: the refusal said neither what matched nor how to avoid it, so agents split commands or switched
 // tools by trial. It names the matched target and the supported routes.
 const REFUSAL = 'agentic-workflow: refused: this targets the workflow evidence folder, which only `wf` writes. Read evidence with the Read tool or `wf evidence list` / `wf evidence show <path>`; copy screenshots out with `wf export screenshots`; change recorded state through a `wf` command.';
+// Named failure (I-108): a native file-edit payload the guard could not read was refused with the evidence message above,
+// although it named no evidence at all, so the agent went looking for an evidence path in a patch that had none. The verdict
+// for an unreadable payload is its own, and so is the text: it says the payload is malformed and what a well-formed one is.
+const MALFORMED = 'malformed native file-edit payload';
+const MALFORMED_REFUSAL = 'agentic-workflow: refused: this file-edit payload is malformed, so its file targets cannot be read; it is refused rather than guessed, and it is not about the workflow evidence. Send it again as a whole patch: `*** Begin Patch`, then one or more hunks (`*** Add File: <path>` with `+` lines, `*** Delete File: <path>`, or `*** Update File: <path>` with an optional `*** Move to: <path>` and chunks of lines that start with a space, `+` or `-`, or are empty), then `*** End Patch` as the last line.';
 
 // Run as a hook only when executed directly; importing (tests) has no side effects.
 if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
@@ -36,7 +41,7 @@ if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === imp
       verdict = null;
     }
     if (verdict) {
-      process.stderr.write(`${REFUSAL} (${verdict})\n`);
+      process.stderr.write(`${verdict === MALFORMED ? MALFORMED_REFUSAL : REFUSAL} (${verdict})\n`);
       process.exit(2);
     }
     process.exit(0);
@@ -91,7 +96,7 @@ export function check(data) {
   for (const id of hostIds()) {
     const found = optional(findHost(id), 'fileTargets')?.(data);
     if (!found) continue;
-    if (found.malformed) return 'malformed native file-edit payload';
+    if (found.malformed) return MALFORMED;
     files.push(...found.targets);
     fileEdit ||= found.fileEdit === true;
   }
