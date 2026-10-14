@@ -16,7 +16,8 @@ Release notes, newest first, then every fix that came from a failure in the work
   - A Playwright step's JSON report is a suite list (`report: { playwright: <file> }`, one suite per spec file; a spec that
     failed to load is a failed suite), so with `select` the gate reruns only the failed spec files, as it already did from a
     JUnit report. A step with both reports keeps one suite per id. A suite file that matches more than one input by suffix
-    names none, so the step reruns whole rather than reuse another file's result.
+    names none, so the step reruns whole rather than reuse another file's result. A suite with a test that did not run (the
+    run stopped first) is `not-run`: rerun, never carried as passed.
   - A failing Playwright test is counted once per project, in the log and in the JSON report (612 failures read as 448).
   - `wf doctor` names each heavy, non-plugin step that cannot rerun only its failed suites, and what it lacks (`select`, a
     suite report, `{select}` in `run`, `inputs`).
@@ -26,7 +27,8 @@ Release notes, newest first, then every fix that came from a failure in the work
 
 Regression scenarios: `scenarios/focused-repair.test.mjs` (Playwright suites rerun only the failed spec files; the
 `failedGate` facts, with no prescribed method; the doctor notice; a spec that failed to load reruns; an ambiguous suite file
-reruns whole; one suite per id; `wf resume <item>` and `wf report --attempt`) and `scenarios/telemetry.test.mjs` (a test
+reruns whole; one suite per id; a spec that did not run is rerun; `wf resume <item>` (and a damaged ledger of that item) and `wf report
+--attempt`) and `scenarios/telemetry.test.mjs` (a test
 failing in two projects is two failures); each fails on 0.7.5.
 
 ## 0.7.5 - Close an attempt that shipped outside the workflow

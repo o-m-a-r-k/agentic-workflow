@@ -276,6 +276,7 @@ test('failure parsers read node:test, Playwright list output and JUnit names', (
   const twice = { suites: [{ file: 'a.spec.ts', specs: [{ title: 't', file: 'a.spec.ts', line: 3, ok: false, tests: [{ projectName: 'en', status: 'unexpected' }, { projectName: 'ar', status: 'unexpected' }, { projectName: 'mobile', status: 'expected' }] }] }] };
   assert.deepEqual(playwrightJsonFailures(twice), ['[en] › a.spec.ts:3 › t', '[ar] › a.spec.ts:3 › t']);
   assert.equal(playwrightJsonSuites(twice)[0].failures, 2);
+  assert.deepEqual(playwrightJsonFailures({ suites: [null], errors: [{ message: 'SyntaxError: x\n at', location: { file: 'b.spec.ts', line: 4 } }] }), ['b.spec.ts:4 › SyntaxError: x'], 'a spec that failed to load is a failure');
   assert.equal(logFailures('all good\n'), null);
   assert.deepEqual(junitFailures('<testcase name="x &amp; y" file="t.js"><error/></testcase><testcase name="z"/>'), ['t.js › x & y']);
   assert.deepEqual(playwrightJsonFailures({ suites: [] }), []);

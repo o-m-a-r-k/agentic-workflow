@@ -56,7 +56,8 @@ export function readJUnitFiles(files) {
 // Playwright's JSON reporter as a suite list, one suite per spec file, so a Playwright step reruns only its failed spec
 // files with `select` (0.7.6, I-118). Named failure: the suite list came from JUnit only, so a Playwright step that wrote
 // its usual JSON report reran the whole suite (18 minutes) to prove each repair. A spec counts as failed when it ended
-// not ok (a flaky spec that passed on retry ends ok); a spec whose every test was skipped counts as skipped.
+// not ok (a flaky spec that passed on retry ends ok); a spec whose every test was skipped counts as skipped; a suite with a
+// test that did not run is `not-run`.
 export function playwrightJsonSuites(doc) {
   const files = new Map();
   const walk = (suite) => {
@@ -69,6 +70,10 @@ export function playwrightJsonSuites(doc) {
         const results = t.results ?? [];
         s.durationMs += results.reduce((n, r) => n + (Number(r.duration) || 0), 0);
         if (t.status === 'skipped' || (results.length && results.every((r) => r.status === 'skipped'))) s.skipped += 1;
+        // Skipped with no result is a test that did not run (the run stopped first: maxFailures, globalTimeout, a failed
+        // dependency project); a skip the spec declares has a result. Independent review of 0.7.6 (high): such a suite was
+        // passed, so it was carried, and a later gate went green without running it.
+        if (t?.status === 'skipped' && !results.length) s.notRun = (s.notRun ?? 0) + 1;
       }
       // One failure per failing test, a test being a spec in one project (0.7.6: a spec failing in four projects is four).
       const unexpected = (spec.tests ?? []).filter((t) => t?.status === 'unexpected').length;
@@ -87,7 +92,8 @@ export function playwrightJsonSuites(doc) {
     s.failures += 1;
     files.set(file, s);
   }
-  return [...files.values()].map((s) => ({ ...s, status: s.failures > 0 ? 'failed' : 'passed' }));
+  // A suite with a test that did not run is not passed (`not-run`), so it is rerun, never carried.
+  return [...files.values()].map((s) => ({ ...s, status: s.failures > 0 ? 'failed' : s.notRun ? 'not-run' : 'passed' }));
 }
 
 export function readPlaywrightSuites(files) {

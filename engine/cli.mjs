@@ -525,9 +525,11 @@ async function dispatch(cmd, sub, positional, options) {
     const idle = options['idle-minutes'] === undefined ? undefined : Number(options['idle-minutes']);
     if (idle !== undefined && !(idle > 0)) throw new WfError('--idle-minutes must be a positive number');
     let rows = report(roots, { home: process.env.WF_HOME ?? os.homedir(), ...(idle ? { idleMinutes: idle } : {}) });
-    // --attempt narrows the report to that attempt (0.7.6: it was ignored, so every attempt was printed and the first read as it).
+    // --attempt narrows the report to that attempt, or to the attempts of an item, named in any case as `wf resume` takes it
+    // (0.7.6: it was ignored, so every attempt was printed and the first read as the one asked for).
     if (options.attempt) {
-      rows = rows.filter((r) => r.id === String(options.attempt));
+      const want = String(options.attempt).toLowerCase();
+      rows = rows.filter((r) => r.id.toLowerCase() === want || String(r.item ?? '').toLowerCase() === want);
       if (!rows.length) throw new WfError(`no attempt ${options.attempt} to report`, { hint: 'see `wf status --all`' });
     }
     if (options.csv) fs.writeFileSync(String(options.csv), toCsv(rows));

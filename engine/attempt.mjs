@@ -1,4 +1,4 @@
-import { writeNoFollow } from './evidence.mjs';
+import { ledgerEmpty, writeNoFollow } from './evidence.mjs';
 import { mkdirStateDirectory } from './state-folders.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -83,13 +83,21 @@ export function attemptForName(root, name) {
   const key = String(name).toLowerCase();
   const exact = all.find((id) => id.toLowerCase() === key);
   if (exact) return exact;
+  const damaged = [];
   const states = all.flatMap((id) => {
     try {
+      // An emptied ledger reads as a state with no admission (I-78), so it is damaged too.
+      if (ledgerEmpty(root, id)) throw new Error('ledger empty');
       return [[id, loadState(root, id)]];
     } catch {
+      damaged.push(id);
       return [];
     }
   });
+  // A damaged ledger cannot say its item; one named like the item's attempts is named, never passed over for an older one
+  // (independent review of 0.7.6).
+  const unreadable = damaged.filter((id) => id.toLowerCase().startsWith(`${key}.`));
+  if (unreadable.length) throw new WfError(`the ledger of ${unreadable.join(', ')} cannot be read, so which attempt of ${name} is current is not known`, { hint: `\`wf verify --attempt ${unreadable[0]}\` names what happened to it` });
   const mine = states.filter(([, s]) => String(s.item ?? '').toLowerCase() === key);
   if (!mine.length) throw new WfError(`no attempt for ${name}`, { hint: all.length ? `attempts here: ${all.join(', ')}` : 'start one with `wf entry`' });
   const open = mine.filter(([, s]) => OPEN(s)).map(([id]) => id);

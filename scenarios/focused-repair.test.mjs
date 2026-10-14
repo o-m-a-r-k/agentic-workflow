@@ -27,12 +27,13 @@ const gateJson = (root, id, extra = []) => {
 
 // A Playwright-like runner: takes spec files (or runs all), writes Playwright's JSON report, fails the spec marked bad; a
 // spec marked broken fails to load, so Playwright names it only in the report's top-level errors.
-const runner = (all) => `
+const runner = (all, { stopAtFirstFailure = false } = {}) => `
 const fs=require('fs');const sel=process.argv.slice(2);
 const all=${JSON.stringify(all)};const run=sel.length?sel:all;
 fs.appendFileSync(process.env.WF_EVIDENCE+'/../ran.txt',run.join(',')+'\\n');
 const has=(f,w)=>fs.readFileSync(f,'utf8').includes(w);const bad=(f)=>has(f,'bad');const broken=(f)=>has(f,'broken');
-const suites=run.filter(f=>!broken(f)).map(f=>({title:f,file:f,specs:[{title:'works',file:f,line:1,ok:!bad(f),tests:[{status:bad(f)?'unexpected':'expected',results:[{status:bad(f)?'failed':'passed',duration:1200}]}]}],suites:[]}));
+let stopped=false;const notRun=(f)=>{const r=stopped;if(bad(f)&&${stopAtFirstFailure})stopped=true;return r;};
+const suites=run.filter(f=>!broken(f)).map(f=>notRun(f)?{title:f,file:f,specs:[{title:'works',file:f,line:1,ok:true,tests:[{status:'skipped',results:[]}]}],suites:[]}:({title:f,file:f,specs:[{title:'works',file:f,line:1,ok:!bad(f),tests:[{status:bad(f)?'unexpected':'expected',results:[{status:bad(f)?'failed':'passed',duration:1200}]}]}],suites:[]}));
 const errors=run.filter(broken).map(f=>({message:'SyntaxError',location:{file:f,line:1,column:1}}));
 fs.writeFileSync(process.env.WF_EVIDENCE+'/results.json',JSON.stringify({suites,errors}));
 run.filter(bad).forEach((f,i)=>console.log('  '+(i+1)+') '+f+':1:1 › works'));
@@ -151,5 +152,34 @@ test('`wf resume <item>` shows that item\'s attempt and `wf report --attempt` on
   assert.match(unknown.err, /no attempt for ENG-99/);
   const rows = ok(wf(root, ['report', '--attempt', first.id, '--json'])).json().attempts;
   assert.deepEqual(rows.map((r) => r.id), [first.id]);
+});
+
+test('a spec that did not run (the run stopped first) is rerun, never carried as passed', () => {
+  const { base, root } = singleRepoProject('pw-notrun', { gate: { steps: [playwrightStep] } }, { ...files, 'runner.cjs': runner(['specs/a.spec.ts', 'specs/b.spec.ts', 'specs/c.spec.ts'], { stopAtFirstFailure: true }) });
+  const e = admitted(root, base, 'ENG-65');
+  commitIn(e.repos.app.worktree, { 'specs/a.spec.ts': 'bad\n', 'specs/c.spec.ts': 'bad\n' });
+  const g1 = gateJson(root, e.id);
+  assert.equal(g1.code, 1);
+  assert.deepEqual(g1.data.steps[0].suites.map((s) => `${s.id}:${s.status}`).sort(), ['specs/a.spec.ts:failed', 'specs/b.spec.ts:not-run', 'specs/c.spec.ts:not-run']);
+  commitIn(e.repos.app.worktree, { 'specs/a.spec.ts': 'good\n' });
+  const g2 = gateJson(root, e.id);
+  assert.equal(g2.code, 1, 'c, which never ran, runs now and fails');
+  const ran = fs.readFileSync(path.join(root, '.wf-worktrees', '_gate', e.id, g2.data.runId, 'ran.txt'), 'utf8').trim();
+  assert.deepEqual(ran.split(',').sort(), ['specs/a.spec.ts', 'specs/b.spec.ts', 'specs/c.spec.ts']);
+});
+
+test('`wf resume <item>` names a damaged ledger of that item instead of showing an older attempt', () => {
+  const { base, root } = singleRepoProject('names-damaged', { gate: { steps: [playwrightStep] } }, files);
+  const first = admitted(root, base, 'ENG-72');
+  ok(wf(root, ['abandon', '--attempt', first.id, '--reason', 'superseded']));
+  const second = admitted(root, base, 'ENG-72');
+  const dir = path.join(root, '.wf-evidence', 'attempts', second.id);
+  fs.chmodSync(dir, 0o755);
+  fs.chmodSync(path.join(dir, 'ledger.jsonl'), 0o644);
+  fs.writeFileSync(path.join(dir, 'ledger.jsonl'), '');
+  const r = wf(root, ['resume', 'ENG-72']);
+  assert.notEqual(r.code, 0);
+  assert.match(r.err, new RegExp(`ledger of ${second.id.replace('.', '\\.')} cannot be read`));
+  assert.deepEqual(ok(wf(root, ['report', '--attempt', 'eng-72', '--json'])).json().attempts.map((x) => x.id), [first.id], 'an item names its attempts in any case');
 });
 

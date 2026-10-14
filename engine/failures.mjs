@@ -41,7 +41,14 @@ export function playwrightJsonFailures(doc) {
     }
     for (const s of suite.suites ?? []) walk(s, here);
   };
-  for (const s of doc?.suites ?? []) walk({ ...s, title: null }, []);
+  for (const s of doc?.suites ?? []) if (s && typeof s === 'object') walk({ ...s, title: null }, []);
+  // A spec file that failed to load is named only in the top-level `errors` (independent review of 0.7.6: it was missing
+  // from the failure names and the count).
+  for (const e of Array.isArray(doc?.errors) ? doc.errors : []) {
+    const loc = e?.location;
+    if (typeof loc?.file !== 'string' || !loc.file) continue;
+    out.push(`${loc.file}${loc.line ? `:${loc.line}` : ''} › ${String(e.message ?? 'failed to load').split('\n')[0].trim() || 'failed to load'}`);
+  }
   return out;
 }
 
