@@ -205,8 +205,10 @@ test('when the person lets the holder of a moved finding leave, the rest of the 
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'rb', '--attempt', b.id, '--owner', 'o']));
   ok(wf(root, ['review', '--closure', closureFile(base, { reviewer: 'rb', findings: [], criteria: [{ id: 'B1', evidence: { kind: 'output', ref: 'batch gate' } }], screenshotsInspected: [] }), '--attempt', b.id]));
   ok(wf(root, ['accept', '--attempt', b.id, '--owner', 'o']));
-  const del = wf(root, ['deliver', '--attempt', b.id, '--owner', 'o'], silent);
-  assert.doesNotMatch(del.err, /moved to .* which is not in this delivery/, 'the person let it leave: the check passes');
+  // The person let it leave: the batch delivers (the sibling, standalone, still owes the moved item).
+  ok(wf(root, ['deliver', '--attempt', b.id, '--owner', 'o'], silent));
+  assert.equal(state(root, b.id).phase, 'done');
+  assert.equal(state(root, m2).discovered.at(-1).status, 'open');
 });
 
 test('a low item closed fixed after the last review is a known limit: no reviewer verified it', () => {
