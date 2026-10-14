@@ -128,6 +128,9 @@ export function init(root, cfg) {
   return done;
 }
 
+// What a repo's provisioning (`provision.install`) lists in `usedBy`, the way a gate step lists its id (I-111).
+export const provisionUse = (repoName) => `provision:${repoName}`;
+
 // A step receives only the secrets that list it in `usedBy`. An empty `usedBy` means no step uses the key
 // (doctor reports it that way): the tools read their own files, and injecting a developer's real local
 // values into every step would override the project's test configuration.

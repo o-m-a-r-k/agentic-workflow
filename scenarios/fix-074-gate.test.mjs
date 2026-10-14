@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { WF, closureFile, commitIn, criteriaFile, goodClosure, ok, singleRepoProject, spawnHome, state, wf } from './helpers.mjs';
+import { WF, closureFile, commitIn, criteriaFile, goodClosure, ok, singleRepoProject, spawnHome, state, wf, yaml } from './helpers.mjs';
 
 // 0.7.4 stream 2 (gate, evidence reads, provisioning). Each test names the failure it reproduces and fails on 0.7.3.
 
@@ -470,4 +470,45 @@ main(process.argv.slice(2)).then((code) => process.exit(code ?? 0), (error) => {
   assert.equal(missing.code, 1);
   assert.match(missing.err, /--issue-file not found/);
   assert.equal(fs.existsSync(path.join(f.root, '.wf-worktrees', 'ENG-2.1')), false, 'no worktree left behind');
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// I-111. Named failure: `provision.install` at `wf entry` ran with the project environment only, so an install that needs a
+// private registry's token failed at entry and rolled back, every time, while a gate step's `prepare` gets its secrets.
+test('I-111: a catalogued key that lists provision:<repo> in usedBy reaches that repo\'s install at wf entry, and no other key does', () => {
+  // The install runs at every entry (`deps` is declared as a clone and does not exist in the main checkout), in the new worktree.
+  const install = `env | cut -d= -f1 | grep -E '^(REGISTRY_TOKEN|STEP_KEY|UNLISTED_KEY)$' | sort > ../install-saw; [ "$REGISTRY_TOKEN" = "registry-value-123456" ]`;
+  const f = singleRepoProject('provision-secrets', { repos: [{ name: 'app', path: '.', base: 'main', provision: { clone: ['deps'], install } }], gate: { steps } }, {
+    '.workflow/secrets.yaml': yaml({ keys: [
+      { key: 'REGISTRY_TOKEN', kind: 'provided', usedBy: ['provision:app'] },
+      { key: 'STEP_KEY', kind: 'provided', usedBy: ['unit'] },
+      { key: 'UNLISTED_KEY', kind: 'provided' },
+    ] }),
+  });
+  const marker = path.join(f.root, '.wf-worktrees', 'ENG-1.1', 'install-saw');
+
+  // Without the value: refused, naming the key and the way to enter it; the worktree is rolled back and the install never ran.
+  const refused = wf(f.root, ['entry', '--item', 'ENG-1']);
+  assert.equal(refused.code, 75, refused.err);
+  assert.match(refused.err, /secrets missing for provisioning of app: REGISTRY_TOKEN/);
+  assert.match(refused.err, /wf secrets guide/);
+  assert.equal(fs.existsSync(path.join(f.root, '.wf-worktrees', 'ENG-1.1')), false, 'rolled back: no worktree left');
+
+  for (const [key, value] of [['REGISTRY_TOKEN', 'registry-value-123456'], ['STEP_KEY', 'step-value-123456'], ['UNLISTED_KEY', 'unlisted-value-123456']]) ok(wf(f.root, ['secrets', 'set', key], { input: value }));
+  const e = ok(wf(f.root, ['entry', '--item', 'ENG-1', '--json'])).json();
+  assert.equal(e.id, 'ENG-1.1');
+  assert.equal(fs.readFileSync(marker, 'utf8').trim(), 'REGISTRY_TOKEN', 'the install saw the key that lists provisioning, and neither a step\'s key nor an unlisted one');
+});
+
+test('I-111: a failing install that echoes its token is masked in the refusal', () => {
+  const f = singleRepoProject('provision-masked', { repos: [{ name: 'app', path: '.', base: 'main', provision: { clone: ['deps'], install: 'echo "registry says no to $REGISTRY_TOKEN" >&2; exit 3' } }], gate: { steps } }, {
+    '.workflow/secrets.yaml': yaml({ keys: [{ key: 'REGISTRY_TOKEN', kind: 'provided', usedBy: ['provision:app'] }] }),
+  });
+  ok(wf(f.root, ['secrets', 'set', 'REGISTRY_TOKEN'], { input: 'registry-value-123456' }));
+  const failed = wf(f.root, ['entry', '--item', 'ENG-1']);
+  assert.equal(failed.code, 1, failed.err);
+  assert.match(failed.err, /failed \(exit 3\)/);
+  assert.match(failed.err, /registry says no to \[secret\]/);
+  assert.doesNotMatch(`${failed.out}${failed.err}`, /registry-value-123456/);
+  assert.equal(fs.existsSync(path.join(f.root, '.wf-worktrees', 'ENG-1.1')), false, 'rolled back cleanly');
 });

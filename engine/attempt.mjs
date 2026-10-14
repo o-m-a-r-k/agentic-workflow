@@ -6,6 +6,7 @@ import { loadConfig, loadConfigAtCommit, adapterLocation, adapterRecord, repoDir
 import { seal, withEvidenceTransaction } from './evidence.mjs';
 import { append, assertSchema, createAttempt, listAttempts, loadState, openEvidence } from './ledger.mjs';
 import { projectEnv } from './env.mjs';
+import { loadCatalog, missingFor, provisionUse, redactor, stepEnv } from './secrets.mjs';
 import { emitTrackerEvent, itemProblem } from './tracker.mjs';
 import { adoptNeedsApproval } from './owner.mjs';
 import { requireYes } from './approve.mjs';
@@ -136,7 +137,16 @@ export function provision(root, cfg, repo, dir) {
   const stale = p.clone.filter((rel) => path.basename(rel) === 'node_modules').some((rel) => missingNodeDependencies(path.join(dir, path.dirname(rel))).length > 0);
   report.stale = stale;
   if (p.install && (drift || missingClone || stale)) {
-    run('sh', ['-c', p.install], { cwd: dir, env: projectEnv(cfg) });
+    // Named failure (I-111): the install ran with the project environment only, so one that needs a private registry's token could
+    // never succeed at `wf entry` (it failed and rolled back, every time), while a gate step's `prepare` gets its secrets. A
+    // catalogued key that lists `provision:<repo>` in `usedBy` (the way a step lists its id) reaches this repo's install, and
+    // nothing else: not another repo's install, not `onWorktreeCreate`, not a key that lists no provisioning. Its output is masked.
+    const use = provisionUse(repo.name);
+    const catalog = loadCatalog(root);
+    const missing = missingFor(root, cfg, use, catalog);
+    if (missing.length) throw refuse(`secrets missing for provisioning of ${repo.name}: ${missing.join(', ')}`, 'run `wf secrets guide` in your terminal, then `wf entry` again', { id: 'provision:secrets-missing' });
+    const result = run('sh', ['-c', p.install], { cwd: dir, env: projectEnv(cfg, stepEnv(root, cfg, use, catalog)), allowFail: true });
+    if (result.status !== 0) throw new WfError(redactor(root, cfg)(`sh -c ${p.install} failed (exit ${result.status}) in ${dir}:\n${(result.stderr || result.stdout).trim()}`));
     report.installed = true;
   }
   if (p.onWorktreeCreate) {
