@@ -70,7 +70,9 @@ export function playwrightJsonSuites(doc) {
         s.durationMs += results.reduce((n, r) => n + (Number(r.duration) || 0), 0);
         if (t.status === 'skipped' || (results.length && results.every((r) => r.status === 'skipped'))) s.skipped += 1;
       }
-      if (spec.ok === false) s.failures += 1;
+      // One failure per failing test, a test being a spec in one project (0.7.6: a spec failing in four projects is four).
+      const unexpected = (spec.tests ?? []).filter((t) => t?.status === 'unexpected').length;
+      s.failures += unexpected || (spec.ok === false ? 1 : 0);
       files.set(file, s);
     }
     for (const child of suite.suites ?? []) walk(child);

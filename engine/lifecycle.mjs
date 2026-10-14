@@ -2010,8 +2010,9 @@ export function failedGateFor(state, cfg) {
     const def = (cfg?.gate?.steps ?? []).find((x) => x.id === s.id);
     const suites = [...new Set((s.suites ?? []).filter((x) => x.status === 'failed').map((x) => x.file ?? x.id))];
     const tests = s.failures?.tests ?? [];
-    // A test named by its file and line (`path/to/x.spec.ts:12:3 › title`) gives its file; a name without one gives none.
-    const testFiles = tests.map((t) => /^([^\s:›]+\.[A-Za-z]+):\d+/.exec(String(t))?.[1]).filter(Boolean);
+    // A test named by its file and line (`[project] › path/to/x.spec.ts:12:3 › title`) gives its file; a name without one
+    // gives none.
+    const testFiles = tests.map((t) => /^(?:\[[^\]]+\] › )?([^\s:›]+\.[A-Za-z]+):\d+/.exec(String(t))?.[1]).filter(Boolean);
     const files = [...new Set([...(s.suites ?? []).filter((x) => x.status === 'failed' && x.file).map((x) => x.file), ...testFiles])];
     return {
       id: s.id,

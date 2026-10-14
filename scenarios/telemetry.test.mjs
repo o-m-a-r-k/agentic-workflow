@@ -7,6 +7,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { WF, closureFile, commitIn, criteriaFile, goodClosure, ok, OUT_OF_ORDER, planDoc, sh, singleRepoProject, state, wf, write, writeReport, ownerSpeaks, spawnHome } from './helpers.mjs';
 import { logFailures, playwrightJsonFailures, junitFailures } from '../engine/failures.mjs';
+import { playwrightJsonSuites } from '../engine/junit.mjs';
 import { BOOKKEEPING_EVENTS, REPORT_SCHEMA, agentUsage, costOf, priceOf, prices, strategyEvents, timeline } from '../engine/telemetry.mjs';
 
 test('Codex usage treats cached input and reasoning as subsets rather than billing them twice', () => {
@@ -269,7 +270,12 @@ test('a failed gate step records its failing test names (Jest, JUnit, Playwright
 test('failure parsers read node:test, Playwright list output and JUnit names', () => {
   assert.deepEqual(logFailures('▶ totals\n  ✔ adds (1ms)\n  ✖ keeps the pager (2.5ms)\n✖ failing tests:\n\ntest at a.test.mjs:3:1\n✖ keeps the pager (2.5ms)\n'), { source: 'node-test', names: ['keeps the pager'] });
   assert.deepEqual(logFailures('TAP version 13\nok 1 - a\nnot ok 2 - b fails # time=3ms\n'), { source: 'node-test', names: ['b fails'] });
-  assert.deepEqual(logFailures('  1) [chromium] › tests/a.spec.ts:3:5 › list › pager stays ───────────\n'), { source: 'playwright', names: ['tests/a.spec.ts:3:5 › list › pager stays'] });
+  assert.deepEqual(logFailures('  1) [chromium] › tests/a.spec.ts:3:5 › list › pager stays ───────────\n'), { source: 'playwright', names: ['[chromium] › tests/a.spec.ts:3:5 › list › pager stays'] });
+  // One test failing in two projects is two failures, in the log and in the JSON report (0.7.6, I-118: 612 read as 448).
+  assert.equal(logFailures('  1) [en] › a.spec.ts:3:5 › t ───\n  2) [ar] › a.spec.ts:3:5 › t ───\n').names.length, 2);
+  const twice = { suites: [{ file: 'a.spec.ts', specs: [{ title: 't', file: 'a.spec.ts', line: 3, ok: false, tests: [{ projectName: 'en', status: 'unexpected' }, { projectName: 'ar', status: 'unexpected' }, { projectName: 'mobile', status: 'expected' }] }] }] };
+  assert.deepEqual(playwrightJsonFailures(twice), ['[en] › a.spec.ts:3 › t', '[ar] › a.spec.ts:3 › t']);
+  assert.equal(playwrightJsonSuites(twice)[0].failures, 2);
   assert.equal(logFailures('all good\n'), null);
   assert.deepEqual(junitFailures('<testcase name="x &amp; y" file="t.js"><error/></testcase><testcase name="z"/>'), ['t.js › x & y']);
   assert.deepEqual(playwrightJsonFailures({ suites: [] }), []);

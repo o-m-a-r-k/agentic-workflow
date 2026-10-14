@@ -76,6 +76,28 @@ function resolveAttemptId(root, options) {
   throw new WfError(`several open attempts (${[...open, ...damaged.map((id) => `${id} [ledger damaged: \`wf verify --attempt ${id}\`]`)].join(', ')}); pass --attempt <id>`);
 }
 
+// The attempt a name stands for: an attempt id, or an item (any case), whose open attempt is meant, else its latest one.
+// 0.7.6: `wf resume <item>` ignored the name and showed the one open attempt, of another item, as if it were the one asked for.
+export function attemptForName(root, name) {
+  const all = listAttempts(root);
+  const key = String(name).toLowerCase();
+  const exact = all.find((id) => id.toLowerCase() === key);
+  if (exact) return exact;
+  const states = all.flatMap((id) => {
+    try {
+      return [[id, loadState(root, id)]];
+    } catch {
+      return [];
+    }
+  });
+  const mine = states.filter(([, s]) => String(s.item ?? '').toLowerCase() === key);
+  if (!mine.length) throw new WfError(`no attempt for ${name}`, { hint: all.length ? `attempts here: ${all.join(', ')}` : 'start one with `wf entry`' });
+  const open = mine.filter(([, s]) => OPEN(s)).map(([id]) => id);
+  if (open.length > 1) throw new WfError(`several open attempts for ${name} (${open.join(', ')}); pass --attempt <id>`);
+  const n = (id) => Number(id.split('.').at(-1)) || 0;
+  return open[0] ?? mine.map(([id]) => id).sort((a, b) => n(a) - n(b)).at(-1);
+}
+
 export function openState(root, options) {
   const id = resolveAttempt(root, options);
   openEvidence(root, id);

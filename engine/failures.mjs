@@ -32,7 +32,12 @@ export function playwrightJsonFailures(doc) {
     for (const spec of suite.specs ?? []) {
       if (spec.ok !== false) continue;
       const file = spec.file ?? suite.file ?? null;
-      out.push([file ? `${file}${spec.line ? `:${spec.line}` : ''}` : null, ...here, spec.title].filter(Boolean).join(' › '));
+      const name = [file ? `${file}${spec.line ? `:${spec.line}` : ''}` : null, ...here, spec.title].filter(Boolean).join(' › ');
+      // A failing test is a spec in one project, named with it as Playwright prints it (0.7.6, I-118: a spec that failed in
+      // four projects was counted once, so 612 failures read as 448).
+      const projects = (spec.tests ?? []).filter((t) => t?.status === 'unexpected').map((t) => t.projectName ?? '');
+      if (!projects.length) out.push(name);
+      for (const p of projects) out.push(p ? `[${p}] › ${name}` : name);
     }
     for (const s of suite.suites ?? []) walk(s, here);
   };
@@ -53,8 +58,9 @@ export function logFailures(text) {
     if (m && !/^Test suite failed to run/.test(m[1]) && !/^Console$/.test(m[1])) found.jest.push(m[1].trim());
     m = /^\s*FAIL\s+(\S+)/.exec(l);
     if (m) found.jest.push(`FAIL ${m[1]}`);
-    // Playwright list and line reporters: "  1) [chromium] › tests/a.spec.ts:3:5 › suite › title ───".
-    m = /^\s*\d+\) (?:\[[^\]]+\] › )?(\S+:\d+:\d+ › .+?)(?:\s+[─-]{3,}.*)?$/.exec(l);
+    // Playwright list and line reporters: "  1) [chromium] › tests/a.spec.ts:3:5 › suite › title ───". The project stays in
+    // the name: one test failing in several projects is several failures (0.7.6, I-118: 612 read as 448).
+    m = /^\s*\d+\) ((?:\[[^\]]+\] › )?\S+:\d+:\d+ › .+?)(?:\s+[─-]{3,}.*)?$/.exec(l);
     if (m) found.playwright.push(m[1].trim());
     // node:test TAP ("not ok 3 - name") and spec ("✖ name (1.2ms)", not the "failing tests:" heading).
     m = /^\s*not ok \d+ - (.+?)(?:\s+#.*)?$/.exec(l);

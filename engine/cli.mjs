@@ -9,7 +9,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 import { refreshModels } from './models.mjs';
-import { abandon, adopt, changedFiles, closeShipped, entry, hold, openState, release, resolveAttempt, setIntent } from './attempt.mjs';
+import { abandon, adopt, attemptForName, changedFiles, closeShipped, entry, hold, openState, release, resolveAttempt, setIntent } from './attempt.mjs';
 import { baseLines, baseMerge, baseStatus } from './base.mjs';
 import { findRoot, loadConfig, repoDir, requireRoot } from './config.mjs';
 import { exportAttempt, exportFile } from './export.mjs';
@@ -156,7 +156,7 @@ Work
   wf batch create --members A,B | wf batch eject --batch B --member A
 
 Status
-  wf resume                         what to do next
+  wf resume [ITEM|ATTEMPT]          what to do next (the attempt of that item, else the one open here)
   wf status [--all] [--json]
   wf report [--all] [--json] [--idle-minutes N] [--csv FILE] [--handoffs-csv FILE] [--html FILE]
                                     phases, gates, review rounds, findings, tokens and cost per attempt
@@ -524,7 +524,12 @@ async function dispatch(cmd, sub, positional, options) {
     const roots = options.all ? registry().projects.map((p) => p.root).filter((r) => fs.existsSync(r)) : [requireRoot()];
     const idle = options['idle-minutes'] === undefined ? undefined : Number(options['idle-minutes']);
     if (idle !== undefined && !(idle > 0)) throw new WfError('--idle-minutes must be a positive number');
-    const rows = report(roots, { home: process.env.WF_HOME ?? os.homedir(), ...(idle ? { idleMinutes: idle } : {}) });
+    let rows = report(roots, { home: process.env.WF_HOME ?? os.homedir(), ...(idle ? { idleMinutes: idle } : {}) });
+    // --attempt narrows the report to that attempt (0.7.6: it was ignored, so every attempt was printed and the first read as it).
+    if (options.attempt) {
+      rows = rows.filter((r) => r.id === String(options.attempt));
+      if (!rows.length) throw new WfError(`no attempt ${options.attempt} to report`, { hint: 'see `wf status --all`' });
+    }
     if (options.csv) fs.writeFileSync(String(options.csv), toCsv(rows));
     if (options['handoffs-csv']) fs.writeFileSync(String(options['handoffs-csv']), toHandoffCsv(rows));
     if (options.html) fs.writeFileSync(String(options.html), toHtml(rows));
@@ -1339,7 +1344,9 @@ async function dispatch(cmd, sub, positional, options) {
       return left.length ? 1 : 0;
     }
     case 'resume': {
-      const s = openState(root, options);
+      // `wf resume <item or attempt id>`: the name picks the attempt (0.7.6: it was ignored, and another item's attempt shown).
+      const named = options.attempt ? null : sub ?? positional[0] ?? null;
+      const s = openState(root, named ? { ...options, attempt: attemptForName(root, named) } : options);
       const gone = orphansOf(s);
       const base = isOpen(s) && !gone.length ? safeBase(root, s) : null;
       print(options, summary(root, s, { base, resume: true }), { ...s, next: nextAction(root, s), decision: gone.length ? null : nextDecision(root, s), liveGate: liveGate(root, s), base, ...(gone.length ? { orphaned: gone } : {}) });

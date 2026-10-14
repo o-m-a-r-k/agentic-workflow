@@ -138,3 +138,18 @@ fs.writeFileSync(process.env.WF_EVIDENCE+'/junit.xml','<testsuites>'+junit+'</te
   const ran = fs.readFileSync(path.join(root, '.wf-worktrees', '_gate', e.id, g2.data.runId, 'ran.txt'), 'utf8').trim();
   assert.equal(ran, 'specs/b.spec.ts');
 });
+
+test('`wf resume <item>` shows that item\'s attempt and `wf report --attempt` only that attempt', () => {
+  const { base, root } = singleRepoProject('names', { gate: { steps: [playwrightStep] } }, files);
+  const first = admitted(root, base, 'ENG-70');
+  ok(wf(root, ['abandon', '--attempt', first.id, '--reason', 'superseded']));
+  const second = admitted(root, base, 'ENG-71');
+  assert.match(ok(wf(root, ['resume', 'eng-70'])).out, new RegExp(`^${first.id.replace('.', '\\.')}\\s+ENG-70\\b`), 'the named item, not the one open attempt');
+  assert.match(ok(wf(root, ['resume', second.id])).out, /ENG-71/);
+  const unknown = wf(root, ['resume', 'ENG-99']);
+  assert.notEqual(unknown.code, 0);
+  assert.match(unknown.err, /no attempt for ENG-99/);
+  const rows = ok(wf(root, ['report', '--attempt', first.id, '--json'])).json().attempts;
+  assert.deepEqual(rows.map((r) => r.id), [first.id]);
+});
+
