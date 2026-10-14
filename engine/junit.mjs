@@ -52,3 +52,47 @@ export function readJUnitFiles(files) {
   }
   return [...merged.values()];
 }
+
+// Playwright's JSON reporter as a suite list, one suite per spec file, so a Playwright step reruns only its failed spec
+// files with `select` (0.7.6, I-118). Named failure: the suite list came from JUnit only, so a Playwright step that wrote
+// its usual JSON report reran the whole suite (18 minutes) to prove each repair. A spec counts as failed when it ended
+// not ok (a flaky spec that passed on retry ends ok); a spec whose every test was skipped counts as skipped.
+export function playwrightJsonSuites(doc) {
+  const files = new Map();
+  const walk = (suite) => {
+    for (const spec of suite.specs ?? []) {
+      const file = spec.file ?? suite.file ?? null;
+      if (!file) continue;
+      const s = files.get(file) ?? { id: file, file, tests: 0, failures: 0, skipped: 0, durationMs: 0 };
+      for (const t of spec.tests ?? []) {
+        s.tests += 1;
+        const results = t.results ?? [];
+        s.durationMs += results.reduce((n, r) => n + (Number(r.duration) || 0), 0);
+        if (t.status === 'skipped' || (results.length && results.every((r) => r.status === 'skipped'))) s.skipped += 1;
+      }
+      if (spec.ok === false) s.failures += 1;
+      files.set(file, s);
+    }
+    for (const child of suite.suites ?? []) walk(child);
+  };
+  for (const s of doc?.suites ?? []) walk(s);
+  return [...files.values()].map((s) => ({ ...s, status: s.failures > 0 ? 'failed' : 'passed' }));
+}
+
+export function readPlaywrightSuites(files) {
+  const all = new Map();
+  for (const f of files) {
+    if (!fs.existsSync(f)) continue;
+    let doc = null;
+    try {
+      doc = JSON.parse(fs.readFileSync(f, 'utf8'));
+    } catch {
+      continue;
+    }
+    for (const s of playwrightJsonSuites(doc)) {
+      const prev = all.get(s.id);
+      all.set(s.id, prev ? { ...prev, tests: prev.tests + s.tests, failures: prev.failures + s.failures, skipped: prev.skipped + s.skipped, durationMs: prev.durationMs + s.durationMs, status: prev.failures + s.failures > 0 ? 'failed' : 'passed' } : s);
+    }
+  }
+  return [...all.values()];
+}

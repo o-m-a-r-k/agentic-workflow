@@ -675,6 +675,8 @@ export function handoff(root, role, options) {
     mode: role === 'reviewer' ? mode : undefined,
     // A repair handoff: the open findings that block, grouped by family.
     repair: role === 'implementer' ? repair ?? undefined : undefined,
+    // I-118: a repair after a failed gate is handed what failed and the fastest proof of a fix.
+    failedGate: role === 'implementer' && state.lastGate?.status === 'failed' ? failedGateFor(state, trusted) : undefined,
     impact: impact(trusted, changed),
     // I-26: the planner's survey and impact map with every addendum. For the reviewer, the inventory to sample and the
     // callers of symbols the final diff declares or edits that no listed file covers: each needs a verdict.
@@ -1993,6 +1995,34 @@ export function deliveredFiles(state) {
   return (attach?.files ?? []).map((f) => ({ ...f, title: f.title ?? path.basename(f.path) }));
 }
 
+// The facts of the last, failed gate, for the implementer that repairs it (0.7.6, I-118): what failed, how long each failing
+// step runs, whether it can rerun only what failed, and how many failing test files the change did not touch. Facts, not a
+// method: the implementer decides how to find each cause and prove each fix (D9). Named failure: an implementer handed "fix
+// each failing e2e" after a gate with 55 failures knew none of this; it proved every fix by rerunning whole suites (15 and
+// 18 minutes each, eight times: 68 of its 113 minutes were waits), and 50 of the failures, in files the change never
+// touched, came from the test environment's state. Every failure is fixed in the attempt (the person's rule).
+export function failedGateFor(state, cfg) {
+  const g = state.lastGate;
+  const changed = new Set(Object.values(g.changed ?? {}).flat());
+  const steps = (g.steps ?? []).filter((s) => s.status === 'failed').map((s) => {
+    const def = (cfg?.gate?.steps ?? []).find((x) => x.id === s.id);
+    const suites = (s.suites ?? []).filter((x) => x.status === 'failed').map((x) => x.file ?? x.id);
+    const tests = s.failures?.tests ?? [];
+    const rerunsSuites = Boolean(def?.select && (def.report?.junit || def.report?.playwright));
+    const files = [...new Set([...suites, ...tests.map((t) => String(t).split(/[ :›]/)[0]).filter((f) => /\.[a-z]+$/.test(f))])];
+    return {
+      id: s.id,
+      minutes: s.durationMs ? Math.round(s.durationMs / 60000) : null,
+      failedTests: tests.slice(0, 100),
+      ...(tests.length > 100 ? { moreFailedTests: tests.length - 100 } : {}),
+      failedSuites: suites.slice(0, 100),
+      rerunsOnlyFailed: rerunsSuites,
+      failingFilesNotChanged: files.filter((f) => ![...changed].some((c) => c === f || c.endsWith(`/${f}`) || f.endsWith(`/${c}`))).length,
+    };
+  });
+  return { runId: g.runId, steps };
+}
+
 // One answer for every caller (engine/paths.mjs): any project's evidence, as written or as the OS resolves it, or below
 // this project's evidence root.
 const underEvidence = (root, p) => touchesEvidence(p) || isInside(p, evidenceRoot(root));
@@ -2589,7 +2619,7 @@ function phaseAction(root, cfg, state) {
     }
   }
   if (inFlight) return `waiting for reviewer ${inFlight.agent}: \`wf review --closure <its file>\`; ${inFlight.round === 'evidence-review' || (!inFlight.round && inFlight.gate) ? 'evidence review of the gated tree' : 'code review'}, no gate while it runs`;
-  if (g?.status === 'failed' && onTree(g.tree)) return 'gate failed: fix and commit through the implementer that did that work; the fixed tree then gets a code-review round by a fresh reviewer before the next `wf gate` (a failure that needed no code change: `wf gate` again)';
+  if (g?.status === 'failed' && onTree(g.tree)) return 'gate failed: fix and commit through the implementer that did that work (its bundle carries `failedGate`, the facts of what failed); the fixed tree then gets a code-review round by a fresh reviewer before the next `wf gate` (a failure that needed no code change: `wf gate` again)';
   const r = state.review;
   if (!r || !onTree(r.tree ?? r.handoffTree)) {
     if (evidenceFixReady(state) && !pass.ok) return `the evidence review's findings are fixed by the implementers handed after it: ${gateRun}; the evidence review after it verifies the fixes and the new evidence`;

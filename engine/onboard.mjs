@@ -567,6 +567,18 @@ export function staticArtifactWarnings(cfg) {
   return out;
 }
 
+// A heavy step that cannot rerun only its failed suites: a repair proven on it reruns all of it (0.7.6, I-118: an 18-minute
+// suite rerun whole eight times to prove small fixes). A fact for the project's owner, never a refusal: the gate reruns
+// only failed suites when a step declares a suite report (`report.junit`, or `report.playwright` for Playwright's JSON
+// reporter) and how its runner takes files (`select`, with `{select}` in `run`).
+export function suiteRerunWarnings(cfg) {
+  return cfg.gate.steps.filter((s) => s.tier === 'heavy' && !(s.select && (s.report?.junit || s.report?.playwright))).map((s) => ({
+    check: `suite reruns of step ${s.id}`,
+    problem: `step ${s.id} reruns whole after a failure: it declares ${s.select ? 'no suite report' : s.report?.junit || s.report?.playwright ? 'no `select`' : 'neither a suite report nor `select`'}, so the gate cannot rerun only the suites that failed`,
+    fix: 'declare `report: { junit: <file> }` or `report: { playwright: <JSON report file> }` and `select: "<how the runner takes files, e.g. {suites}>"`, with `{select}` in the step\'s `run` (docs/gate.md)',
+  }));
+}
+
 // A step whose command reads a sibling repo (`../web`, `$WF_ROOT/web`, the attempt's `web` worktree) but does not list
 // it in `alsoInputs` is reused after that repo changes: a passing end-to-end run was reused against old API code.
 export function siblingWarnings(root, cfg) {
@@ -729,6 +741,7 @@ export async function doctor(root, { runSteps = true, runtime = detectOwner()?.r
   for (const w of siblingWarnings(root, cfg)) report.warnings.push({ ok: true, warn: true, check: w.check, problem: w.problem, fix: w.fix });
   for (const w of modelWarnings(root, cfg, runtime)) report.warnings.push({ ok: true, warn: true, check: w.check, problem: w.problem, fix: w.fix });
   for (const w of staticArtifactWarnings(cfg)) report.warnings.push({ ok: true, warn: true, ...w });
+  for (const w of suiteRerunWarnings(cfg)) report.warnings.push({ ok: true, warn: true, ...w });
   if (adapterBase) {
     try {
       for (const w of ruleWarnings(root, loadConfigAtCommit(root, cfg, adapterBase), adapterBase)) report.warnings.push({ ok: true, warn: true, ...w });

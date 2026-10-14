@@ -7,7 +7,7 @@ import { pathToFileURL } from 'node:url';
 import { adapterFileAtCommit, attemptAdapter, expandArtifactGlob, loadConfig, repoDir, trustedAdapter } from './config.mjs';
 import { changedFiles, treeHash, treeHashes, uncommitted, untrackedSnapshot } from './attempt.mjs';
 import { chooseShards, chooseWorkers } from './machine.mjs';
-import { readJUnitFiles } from './junit.mjs';
+import { readJUnitFiles, readPlaywrightSuites } from './junit.mjs';
 import { stepFailures } from './failures.mjs';
 import { append, attemptDir, loadState } from './ledger.mjs';
 import { projectEnv } from './env.mjs';
@@ -481,11 +481,18 @@ async function executeStep(root, cfg, state, planned, ctx) {
       codes.push(await spawnStep(command, { cwd: planned.dir, env: { ...env, WF_SHARD: String(shard), WF_SHARDS: String(shards.n) }, logFile, redact: ctx.redact, onSpawn: (pid) => ctx.addChild(pid) }));
     }
     const files = (step.report?.junit ? [step.report.junit].flat() : []).flatMap((p) => globFiles(planned.dir, substitute(p, vars)));
-    let suites = readJUnitFiles(files);
+    // The suites come from a JUnit report, or from Playwright's JSON report (0.7.6, I-118), so `select` reruns only what failed.
+    const playwrightFiles = (step.report?.playwright ? [step.report.playwright].flat() : []).flatMap((p) => globFiles(planned.dir, substitute(p, vars)));
+    let suites = [...readJUnitFiles(files), ...readPlaywrightSuites(playwrightFiles)];
     for (const f of files) {
       prepareWrite(path.join(evidenceDir, `junit-${path.basename(f)}`));
       const junit = readRegular(f);
       if (junit) writeNoFollow(path.join(evidenceDir, `junit-${path.basename(f)}`), junit.bytes);
+    }
+    for (const f of playwrightFiles) {
+      prepareWrite(path.join(evidenceDir, `playwright-${path.basename(f)}`));
+      const report = readRegular(f);
+      if (report) writeNoFollow(path.join(evidenceDir, `playwright-${path.basename(f)}`), report.bytes);
     }
     if (rerun && prior?.suites) {
       const fresh = new Map(suites.map((s) => [s.id, s]));
@@ -496,7 +503,6 @@ async function executeStep(root, cfg, state, planned, ctx) {
     result = { status: interrupted ? 'interrupted' : failed ? 'failed' : 'passed', suites, exitCodes: codes.map((c) => c.code), artifacts: [] };
     // Which tests failed, recorded on the step (telemetry): read from the reports and output this run wrote.
     if (result.status === 'failed') {
-      const playwrightFiles = (step.report?.playwright ? [step.report.playwright].flat() : []).flatMap((p) => globFiles(planned.dir, substitute(p, vars)));
       result.failures = stepFailures({ junitFiles: files, playwrightFiles, log: logFile, exitCodes: result.exitCodes, suites, redact: ctx.redact });
     }
   }
