@@ -18,6 +18,7 @@ import path from 'node:path';
 import { actor, openState, treeHashes } from './attempt.mjs';
 import { approveHint, createDecision, questionFor } from './approve.mjs';
 import { STRATEGY_DEFAULTS, ADAPTER_DIR, agentTypeFor, roleClass, trustedAdapter } from './config.mjs';
+import { seal, withEvidenceTransaction } from './evidence.mjs';
 import { append, attemptDir, loadState } from './ledger.mjs';
 import { executionSettings } from './models.mjs';
 import { startPromptFor } from './provenance.mjs';
@@ -336,10 +337,17 @@ export function strategistHandoff(root, state, options) {
     },
     instructions: `You are the strategist. The owner agent handed you because the course diverged from what was predicted (\`handedBecause\` says what it saw). Read \`course\` (the expectations beside what happened), the signals and the earlier decisions; choose one action; give a prediction the engine can check. Contraction is allowed and expected when work keeps growing. A finding that blocks is never waived here (that is the owner's \`wf approve\`), and nothing the change caused leaves the delivery batch without the owner's approval. Write the closure file named in \`strategyClosureFile\`, then run \`wf strategy record --closure <that file> --attempt ${state.id}\`.${streak >= 2 ? ' Two of your earlier predictions were missed: the only action the engine accepts now is `escalate`.' : ''}`,
   };
-  writeJson(file, bundle);
   mkdirStateDirectory(path.dirname(closureFile), { recursive: true });
   const startPrompt = startPromptFor(file);
-  append(root, state.id, 'handoff', { role: 'strategist', agent, runtime, session: options.session ?? null, agentType, class: cls, effort, model, sourceClass, runtimeAdapterBase, startPrompt, work: null, bundle: file, reason: handedBecause }, actor(options));
+  // Named failure (I-109): the bundle was written into the evidence and the handoff appended to the ledger with no transaction,
+  // and the file was recorded in the manifest only when the process ended, so a `wf` command another session ran in between
+  // found a file nobody had recorded and refused with "extra file (not written by wf)". Written, entered in the ledger and
+  // recorded in one transaction, as a reviewer handoff is (`publish` in lifecycle.mjs): a reader sees none of it or all.
+  withEvidenceTransaction(root, state.id, () => {
+    writeJson(file, bundle);
+    append(root, state.id, 'handoff', { role: 'strategist', agent, runtime, session: options.session ?? null, agentType, class: cls, effort, model, sourceClass, runtimeAdapterBase, startPrompt, work: null, bundle: file, reason: handedBecause }, actor(options));
+    seal(append, { root, id: state.id });
+  });
   return { bundle: file, startPrompt, agentType, agent, roleStale: null, restrictions: [], sweeps: null, class: cls, effort, model, work: null, lessons: null, closureFile, state: loadState(root, state.id) };
 }
 

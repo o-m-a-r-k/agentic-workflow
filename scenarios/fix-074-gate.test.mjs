@@ -387,3 +387,87 @@ export default {
     fs.rmSync(holdFile(f), { force: true });
   }
 });
+
+// ---------------------------------------------------------------------------------------------------------------------
+// I-109 (part 2). Named failure: the strategist's bundle was written into the evidence and the handoff appended to the ledger
+// with no transaction, and the file was recorded only when the process ended: a `wf` command another session ran in between
+// refused with "extra file (not written by wf)". The writer here stops for a moment right after the bundle is on disk (the
+// rename that publishes it); a `wf status` started then must neither see the bundle as an extra file nor be refused.
+test('I-109: a strategist handoff is written, entered in the ledger and recorded in one transaction: a command running meanwhile never sees an extra file', async () => {
+  const f = singleRepoProject('strategist-transaction', { gate: { steps } });
+  const e = planned(f, 'ENG-1');
+  const engine = path.resolve(path.dirname(WF), '..', 'engine');
+  const probe = path.join(f.base, 'probe.out');
+  const runner = path.join(f.base, 'strategist-runner.mjs');
+  fs.writeFileSync(runner, `import fs from 'node:fs';
+import { spawn } from 'node:child_process';
+import { main } from ${JSON.stringify(path.join(engine, 'cli.mjs'))};
+let fired = false;
+const rename = fs.renameSync;
+fs.renameSync = function (from, to) {
+  const result = rename.apply(this, arguments);
+  if (!fired && String(to).endsWith('-strategist.json')) {
+    fired = true; // the bundle is on disk; the ledger entry and the manifest record are not written yet
+    const command = ${JSON.stringify(`${JSON.stringify(process.execPath)} ${JSON.stringify(WF)} status --attempt ${e.id} > ${JSON.stringify(probe)} 2>&1; echo $? > ${JSON.stringify(`${probe}.code`)}`)};
+    spawn('sh', ['-c', command], { detached: true, stdio: 'ignore' }).unref();
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2000);
+  }
+  return result;
+};
+main(process.argv.slice(2)).then((code) => process.exit(code ?? 0), (error) => { process.stderr.write(String(error.stack ?? error)); process.exit(1); });
+`);
+  ok(wf(f.root, ['handoff', 'strategist', '--agent', 'strat-1', '--attempt', e.id, '--reason', 'the course diverged'], { bin: runner }));
+  await until('the concurrent status to finish', () => fs.existsSync(`${probe}.code`));
+  const seen = fs.readFileSync(probe, 'utf8');
+  assert.doesNotMatch(seen, /extra file \(not written by wf\)/, seen);
+  assert.equal(fs.readFileSync(`${probe}.code`, 'utf8').trim(), '0', seen);
+  assert.match(seen, /strategist|ENG-1\.1/);
+  assert.match(ok(wf(f.root, ['verify', '--attempt', e.id])).out, /verified 1 attempt\(s\)/, 'and the bundle is recorded when the handoff returns');
+});
+
+// Same class in `wf entry --issue-file`: the copy of the issue file was written into the evidence and the attempt admitted with
+// no transaction around them, and the copy was recorded only when the process ended (after the tracker's admission read). The
+// writer here stops for a moment right after the admission entry is written and the transaction lock is let go.
+test('I-109: an issue file copied in at wf entry is recorded with the admission: a command running meanwhile never sees it as an extra file', async () => {
+  const f = singleRepoProject('entry-transaction', { gate: { steps } });
+  const engine = path.resolve(path.dirname(WF), '..', 'engine');
+  const probe = path.join(f.base, 'probe.out');
+  const issue = path.join(f.base, 'issue.md');
+  fs.writeFileSync(issue, '# the request\n');
+  const runner = path.join(f.base, 'entry-runner.mjs');
+  fs.writeFileSync(runner, `import fs from 'node:fs';
+import path from 'node:path';
+import { spawn } from 'node:child_process';
+import { main } from ${JSON.stringify(path.join(engine, 'cli.mjs'))};
+let fired = false;
+const unlink = fs.unlinkSync;
+fs.unlinkSync = function (file) {
+  const result = unlink.apply(this, arguments);
+  const lock = /([^/]+)\\.lock$/.exec(String(file));
+  if (!fired && lock && String(file).includes('_transactions')) {
+    const ledger = path.join(path.dirname(String(file)), '..', '..', '.wf-evidence', 'attempts', lock[1], 'ledger.jsonl');
+    if (fs.existsSync(ledger) && fs.statSync(ledger).size > 0) {
+      fired = true; // the attempt is admitted and the lock is free; the issue copy is not recorded yet in 0.7.3
+      const command = ${JSON.stringify(`${JSON.stringify(process.execPath)} ${JSON.stringify(WF)} status > ${JSON.stringify(probe)} 2>&1; echo $? > ${JSON.stringify(`${probe}.code`)}`)};
+      spawn('sh', ['-c', command], { detached: true, stdio: 'ignore' }).unref();
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2000);
+    }
+  }
+  return result;
+};
+main(process.argv.slice(2)).then((code) => process.exit(code ?? 0), (error) => { process.stderr.write(String(error.stack ?? error)); process.exit(1); });
+`);
+  const e = ok(wf(f.root, ['entry', '--item', 'ENG-1', '--issue-file', issue, '--json'], { bin: runner })).json();
+  await until('the concurrent status to finish', () => fs.existsSync(`${probe}.code`));
+  const seen = fs.readFileSync(probe, 'utf8');
+  assert.doesNotMatch(seen, /extra file \(not written by wf\)/, seen);
+  assert.equal(fs.readFileSync(`${probe}.code`, 'utf8').trim(), '0', seen);
+  assert.match(seen, new RegExp(e.id.replace('.', '\\.')));
+  assert.match(ok(wf(f.root, ['verify', '--attempt', e.id])).out, /verified 1 attempt\(s\)/);
+  assert.equal(fs.readFileSync(path.join(evidenceDir(f, e.id), 'issue', 'issue.md'), 'utf8'), '# the request\n');
+  // The file was checked before anything was created: a missing one leaves no worktree behind.
+  const missing = wf(f.root, ['entry', '--item', 'ENG-2', '--issue-file', path.join(f.base, 'nope.md')]);
+  assert.equal(missing.code, 1);
+  assert.match(missing.err, /--issue-file not found/);
+  assert.equal(fs.existsSync(path.join(f.root, '.wf-worktrees', 'ENG-2.1')), false, 'no worktree left behind');
+});

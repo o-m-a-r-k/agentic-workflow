@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { loadConfig, loadConfigAtCommit, adapterLocation, adapterRecord, repoDir, trustedAdapter } from './config.mjs';
+import { seal, withEvidenceTransaction } from './evidence.mjs';
 import { append, assertSchema, createAttempt, listAttempts, loadState, openEvidence } from './ledger.mjs';
 import { projectEnv } from './env.mjs';
 import { emitTrackerEvent, itemProblem } from './tracker.mjs';
@@ -192,6 +193,9 @@ export function entry(root, options) {
   }
   // The gate judges with the committed adapter, so its pin counts too.
   assertEngine(trusted);
+  // Validated with the rest, before anything is created: a missing file left the worktrees behind.
+  const src = options['issue-file'] ? path.resolve(String(options['issue-file'])) : null;
+  if (src && !fs.existsSync(src)) throw new WfError(`--issue-file not found: ${src}`);
   // Create worktrees; if any step fails, remove what was made so a retry starts clean.
   const repos = {};
   const made = [];
@@ -216,20 +220,25 @@ export function entry(root, options) {
     throw error;
   }
 
-  let issue = null;
-  if (options['issue-file']) {
-    const src = path.resolve(String(options['issue-file']));
-    if (!fs.existsSync(src)) throw new WfError(`--issue-file not found: ${src}`);
-    const dest = path.join(root, '.wf-evidence', 'attempts', id, 'issue', path.basename(src));
-    // Opened first: the copy is then a file this process wrote, recorded in the manifest when it ends (copied before,
-    // it was in the opening snapshot unrecorded and refused as an extra file).
-    openEvidence(root, id);
-    mkdirStateDirectory(path.dirname(dest), { recursive: true });
-    fs.copyFileSync(src, dest);
-    issue = { file: dest, sha256: hashFile(dest) };
-  }
   const originRuntime = detectOwner()?.runtime ?? ownerRuntime(owner);
-  createAttempt(root, id, { id, item, lane, intent, repos, adapterBase, adapter, issue, originRuntime, reopenedFrom: options.reopenedFrom ?? null, deferHeavy: options.deferHeavy === true || options.deferHeavy === 'true' }, owner);
+  // Named failure (I-109): the copy of the issue file was written into the evidence, and the attempt entered in the ledger, with no
+  // transaction around them, and the copy was recorded in the manifest only when the process ended (after the tracker's admission
+  // read, which can take a while): a `wf` command another session ran in between listed the attempt and refused it with "extra
+  // file (not written by wf)". Copied, admitted and recorded in one transaction: a reader sees none of it or all.
+  withEvidenceTransaction(root, id, () => {
+    let issue = null;
+    if (src) {
+      const dest = path.join(root, '.wf-evidence', 'attempts', id, 'issue', path.basename(src));
+      // Opened first: the copy is then a file this process wrote, recorded in the manifest when it ends (copied before,
+      // it was in the opening snapshot unrecorded and refused as an extra file).
+      openEvidence(root, id);
+      mkdirStateDirectory(path.dirname(dest), { recursive: true });
+      fs.copyFileSync(src, dest);
+      issue = { file: dest, sha256: hashFile(dest) };
+    }
+    createAttempt(root, id, { id, item, lane, intent, repos, adapterBase, adapter, issue, originRuntime, reopenedFrom: options.reopenedFrom ?? null, deferHeavy: options.deferHeavy === true || options.deferHeavy === 'true' }, owner);
+    seal(append, { root, id });
+  });
   if (lane === 'standard' && intent === 'implementation' && !options.sibling) emitTrackerEvent(root, cfg, id, 'admitted');
   return loadState(root, id);
 }
