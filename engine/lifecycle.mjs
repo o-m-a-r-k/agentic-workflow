@@ -1,7 +1,7 @@
 import { gateAdapter, validationReviewProblems } from './validation.mjs';
 import { captureWarning } from './captures.mjs';
 import { mkdirStateDirectory } from './state-folders.mjs';
-import { blockingIn, classifyFinding, deltaLines, dispositionOf, earlierBlocking, observations, openAcrossRounds, placementLevel, reviewerDiscovered, roundMode, severityLevel, sinceOf, stampClosure, stripStamp } from './review-policy.mjs';
+import { blockingIn, classifyFinding, closureMissingGuidance, deltaLines, dispositionOf, earlierBlocking, observations, openAcrossRounds, placementLevel, reviewerDiscovered, roundMode, severityLevel, sinceOf, stampClosure, stripStamp, unreachedSince } from './review-policy.mjs';
 import { observationLines } from './scope-decisions.mjs';
 import { GROUP_INSTRUCTIONS, assignedVerdicts, changedWeights, currentReviewGroup, divideReview, findingIds, impactCatalog, isCurrentReviewer, mergeParts, reviewSnapshot, reviewDivisionOptions } from './review-groups.mjs';
 import fs from 'node:fs';
@@ -23,7 +23,7 @@ import { changedForStep, deliveryOrder, impact, inside, packageOf } from './topo
 import { findSkill } from './skills.mjs';
 import { outsidePlan, outsideVerdicts } from './scope.mjs';
 import { commentFile, emitTrackerEvent, needsSummary, recordSummary, writeDeliveredComment } from './tracker.mjs';
-import { designChecks, designVerdicts, requiredSkills, reviewDocumentProblems, reviewRules, ruleVerdicts, skillFiles } from './rules.mjs';
+import { designChecks, designVerdicts, requiredSkills, reviewDocumentProblems, reviewRules, ruleVerdicts, skillFiles, writeRuleDocuments } from './rules.mjs';
 import { expectOf, expectProblems, PLAN_EXPECT, ROLE_EXPECT } from './expectations.mjs';
 import { obligationSince } from './versions.mjs';
 import { requireOwnerDecision, strategistHandoff, strategistWaiting, strategyHold } from './strategy.mjs';
@@ -98,6 +98,18 @@ function keepRaw(root, id, rel, content) {
 }
 const extOf = (file) => (String(file).endsWith('.json') ? 'json' : 'yaml');
 
+// Evidence a command writes and the ledger entry that records it are one transaction, sealed before it ends. Named failure
+// (I-109): the files were written first, outside any transaction, and entered in the manifest when the process ended, so a
+// `wf status` run in between was refused with "extra file (not written by wf)"; a handoff that failed after its write left
+// the file behind. A reader now sees none of it or all.
+export function recordedTogether(root, id, fn) {
+  return withEvidenceTransaction(root, id, () => {
+    const out = fn();
+    seal(append, { root, id });
+    return out;
+  });
+}
+
 // The plan file's schema. `wf plan` once read only `plan`, so a contract, anchors or test selectors written as
 // top-level keys were dropped from the frozen plan and never reached the implementers. Plan sections may sit under
 // `plan:` (a mapping, or plain text for the summary) or at the top level beside `criteria` and `work`, as the planner
@@ -126,6 +138,11 @@ export function planFromDoc(doc) {
   return Object.keys(plan).length ? plan : null;
 }
 
+// A refusal that is the planner's own output being unreadable as a plan (no fenced block, YAML that does not parse), as
+// against the owner's mistakes (an agent that was never handed the planning, a transcript from another harness). It carries
+// the text that was read, so `wf plan` keeps it with the refusal (I-114).
+const plannerOutputDefect = (error, text, where = null) => Object.assign(error, { plannerOutput: { text, where } });
+
 // The planner's own output, so the owner never retypes it: the last fenced YAML block in the transcript of the planner the
 // handoff names. A role the engine launched is checked against its launch receipt; one the owner started by agent type
 // is found by the name it was started under (the harness adapter reads its own records, as `wf report` does).
@@ -140,9 +157,9 @@ function planFromAgent(root, state, agent) {
     const runtimeName = host.name;
     if (check.status !== 'verified' || handoff.launch?.status !== 'completed') throw refuse(`${runtimeName} planner output needs an engine-launched completed handoff; run wf handoff run --agent <id>, or use wf plan --file <file> with the unchanged reply`, check.reason);
     const text = lastFencedYaml(check.entries);
-    if (text === null) throw refuse(`the ${runtimeName} planner transcript has no fenced YAML block`);
+    if (text === null) throw plannerOutputDefect(refuse(`the ${runtimeName} planner transcript has no fenced YAML block`), null, check.transcript);
     let doc;
-    try { doc = YAML.parse(text); } catch (e) { throw refuse(`the ${runtimeName} planner YAML does not parse: ${e.message.split('\n')[0]}`); }
+    try { doc = YAML.parse(text); } catch (e) { throw plannerOutputDefect(refuse(`the ${runtimeName} planner YAML does not parse: ${e.message.split('\n')[0]}`), text); }
     return { doc, text, source: { agent, transcript: check.transcript, agentType: handoff.agentType, model: handoff.model, provenance: check.status } };
   }
   const read = optional(host, 'roleOutput');
@@ -150,12 +167,12 @@ function planFromAgent(root, state, agent) {
   const output = read(handoff, { home: home(), check });
   if (output.problem) throw refuse(output.problem, `check the agent id (${fragment(host, 'howToStart', handoff)}), or save the planner's YAML unchanged to a file and use \`wf plan --file <file>\``);
   const text = lastFencedYaml(output.entries);
-  if (text === null) throw refuse(`the transcript of ${agent} (${output.file}) has no fenced YAML block`, 'ask the planner to return its plan in one ```yaml block, or save it to a file and use `wf plan --file <file>`');
+  if (text === null) throw plannerOutputDefect(refuse(`the transcript of ${agent} (${output.file}) has no fenced YAML block`, 'ask the planner to return its plan in one ```yaml block, or save it to a file and use `wf plan --file <file>`'), null, output.file);
   let doc;
   try {
     doc = YAML.parse(text);
   } catch (error) {
-    throw refuse(`the last YAML block in ${agent}'s transcript does not parse: ${error.message.split('\n')[0]}`);
+    throw plannerOutputDefect(refuse(`the last YAML block in ${agent}'s transcript does not parse: ${error.message.split('\n')[0]}`), text);
   }
   return { doc, text, source: { agent, transcript: output.file, agentType: output.agentType, model: output.model, provenance: check.status } };
 }
@@ -220,11 +237,31 @@ export function freezeCriteria(root, options) {
   if (state.criteria) throw refuse('criteria are already frozen', 'change them with `wf criteria amend --file <f> --reason <why>`');
   if (typeof options.file !== 'string' && typeof options['from-agent'] !== 'string') throw new WfError('--file <plan.yaml|json> or --from-agent <planner agent id> is required');
   if (typeof options.file === 'string' && typeof options['from-agent'] === 'string') throw new WfError('pass --file or --from-agent, not both');
-  const fromAgent = typeof options['from-agent'] === 'string' ? planFromAgent(root, state, options['from-agent']) : null;
-  const fileText = fromAgent ? null : readOnce(options.file);
-  const doc = fromAgent ? fromAgent.doc : parseStructured(options.file, fileText);
-  let plan, work, impactRecord;
+  let fromAgent = null, fileText = null, doc, plan, work, impactRecord;
+  // What the planner's output said when it could not be read as a plan: kept with the refusal (below).
+  let unreadable = null;
   try {
+    // Named failure (I-114): reading the planner's output ran outside this block, so a transcript with no fenced YAML block
+    // and YAML that does not parse were refused and left no record, and the next planner's bundle (`priorPlanRefusals`)
+    // carried no word of it, as it carries a plan the validators refused (I-84, I-87). The same for a `--file` that does not
+    // parse. A refusal about who was handed the planning, or a file that cannot be opened, is the owner's and is not kept.
+    if (typeof options['from-agent'] === 'string') {
+      try {
+        fromAgent = planFromAgent(root, state, options['from-agent']);
+      } catch (error) {
+        if (error.plannerOutput) unreadable = error.plannerOutput;
+        throw error;
+      }
+      doc = fromAgent.doc;
+    } else {
+      fileText = readOnce(options.file);
+      try {
+        doc = parseStructured(options.file, fileText);
+      } catch (error) {
+        unreadable = { text: fileText, where: path.resolve(String(options.file)) };
+        throw error;
+      }
+    }
     plan = planFromDoc(doc);
     // D9 (0.7.0): the plan's prediction is the input the owner agent compares the course against; without it every course
     // line reads "the plan states no expectation" and the comparison is inert (final review of 0.7.0). The number is the
@@ -245,22 +282,30 @@ export function freezeCriteria(root, options) {
     // as evidence and handed to the next planner's bundle.
     try {
       const n = (state.planRefusals?.length ?? 0) + 1;
-      const kept = keepRaw(root, state.id, `plans/refused-${n}.raw.${fromAgent ? 'yaml' : extOf(options.file)}`, fromAgent ? fromAgent.text : fileText);
-      append(root, state.id, 'plan.refused', { agent: fromAgent?.source.agent ?? state.handoffs.filter((h) => h.role === 'planner').at(-1)?.agent ?? null, report: kept.file, sha256: kept.sha256, error: String(error.message).slice(0, 4000) }, actor(options));
+      // The output a refusal could not read is kept as it was found; a transcript with no block has none, so the report says so.
+      const text = unreadable ? unreadable.text ?? `# the planner's output had no fenced YAML block${unreadable.where ? ` (${unreadable.where})` : ''}\n` : fromAgent ? fromAgent.text : fileText;
+      if (text !== null && text !== undefined) {
+        recordedTogether(root, state.id, () => {
+          const kept = keepRaw(root, state.id, `plans/refused-${n}.raw.${typeof options['from-agent'] === 'string' ? 'yaml' : extOf(options.file)}`, text);
+          append(root, state.id, 'plan.refused', { agent: fromAgent?.source.agent ?? state.handoffs.filter((h) => h.role === 'planner' && (typeof options['from-agent'] !== 'string' || h.agent === options['from-agent'])).at(-1)?.agent ?? null, report: kept.file, sha256: kept.sha256, error: String(error.message).slice(0, 4000) }, actor(options));
+        });
+      }
     } catch {}
     throw error;
   }
-  let source = null;
-  if (fromAgent) {
-    source = { ...fromAgent.source, ...keepRaw(root, state.id, 'plans/plan-1.raw.yaml', fromAgent.text) };
-  } else {
-    // Where available, the model the planner ran on: an agent whose class pins no model inherits the session's.
-    const planner = state.handoffs.filter((h) => h.role === 'planner').at(-1);
-    const model = planner ? optional(findHost(planner.runtime), 'roleModel')?.(planner, { home: home() }) ?? null : null;
-    const from = path.resolve(String(options.file));
-    source = { ...keepRaw(root, state.id, `plans/plan-1.raw.${extOf(from)}`, fileText), from, agent: planner?.agent ?? null, model };
-  }
-  append(root, state.id, 'criteria.frozen', { criteria: doc.criteria, plan, source, ...(work ? { work } : {}), ...(impactRecord ? { impact: impactRecord } : {}) }, actor(options));
+  let model = null;
+  // Where available, the model the planner ran on: an agent whose class pins no model inherits the session's.
+  const planner = state.handoffs.filter((h) => h.role === 'planner').at(-1);
+  if (!fromAgent) model = planner ? optional(findHost(planner.runtime), 'roleModel')?.(planner, { home: home() }) ?? null : null;
+  recordedTogether(root, state.id, () => {
+    let source;
+    if (fromAgent) source = { ...fromAgent.source, ...keepRaw(root, state.id, 'plans/plan-1.raw.yaml', fromAgent.text) };
+    else {
+      const from = path.resolve(String(options.file));
+      source = { ...keepRaw(root, state.id, `plans/plan-1.raw.${extOf(from)}`, fileText), from, agent: planner?.agent ?? null, model };
+    }
+    append(root, state.id, 'criteria.frozen', { criteria: doc.criteria, plan, source, ...(work ? { work } : {}), ...(impactRecord ? { impact: impactRecord } : {}) }, actor(options));
+  });
   const frozen = loadState(root, state.id);
   // Named failure (I-94): criteria needing screenshots were frozen although no gate step collects any, and acceptance found
   // the missing route at the end. Said now, while the owner can still import captures or register a collecting step.
@@ -362,14 +407,30 @@ export function amendCriteria(root, options) {
     append(root, state.id, 'repo.added', { repo: name, entry: entryOf, reason: String(options.reason) }, actor(options));
     added.push({ repo: name, worktree: entryOf.worktree, base: entryOf.base });
   }
-  const raw = keepRaw(root, state.id, `plans/amend-${state.criteriaAmendments.length + 1}.raw.${extOf(from)}`, amendText);
-  append(root, state.id, 'criteria.amended', { criteria, changes, reason: String(options.reason), previous: state.criteria, raw, ...(expectOf(stated) ? { expect: expectOf(stated) } : {}), ...(doc.work ? { work } : {}), ...(added.length ? { addedRepos: added.map((a) => a.repo) } : {}), ...(impactAddendum ? { impact: impactAddendum } : {}), ...(impactOwed ? { impactOwed } : {}) }, actor(options));
-  // Telemetry: how much the ticket grew with this amendment (criteria counts always; endpoints, error codes and repos
-  // when the amendment file states them under `scope`).
-  append(root, state.id, 'scope.changed', { amendment: state.criteriaAmendments.length + 1, reason: String(options.reason), criteria: { before: state.criteria.length, after: criteria.length, added: changes.added.length, changed: changes.changed.length, dropped: changes.dropped.length }, ...scope, addedRepos: added.map((a) => a.repo) }, actor(options));
+  // Named failure (I-107): an amendment on an accepted attempt added a criterion and left the acceptance standing, so
+  // `wf deliver` shipped it with no evidence mapped to it (`wf accept` would have refused). An amendment that adds or
+  // changes a criterion, or adds a repo, withdraws the acceptance, as a supplemental validation does: the attempt is
+  // reviewed and accepted again on its tree (a new gate when the code moved). D7: this is an obligation a release adds to
+  // an attempt that was already accepted, so it applies to attempts admitted at 0.7.4 or later; for an earlier one the
+  // acceptance stands, the amendment says so, and `wf resume` warns until a fresh review maps the criteria.
+  // The decision is written into the event, so folding an older ledger again changes nothing.
+  const reopensScope = Boolean(changes.added.length || changes.changed.length || addRepos.length);
+  const acceptedNow = Boolean(state.accepted) && !state.delivery.completedAt && !['handoff-pending', 'done', 'abandoned'].includes(state.phase);
+  const withdrewAcceptance = reopensScope && acceptedNow && obligationSince(state, '0.7.4');
+  recordedTogether(root, state.id, () => {
+    const raw = keepRaw(root, state.id, `plans/amend-${state.criteriaAmendments.length + 1}.raw.${extOf(from)}`, amendText);
+    append(root, state.id, 'criteria.amended', { criteria, changes, reason: String(options.reason), previous: state.criteria, raw, ...(expectOf(stated) ? { expect: expectOf(stated) } : {}), ...(doc.work ? { work } : {}), ...(added.length ? { addedRepos: added.map((a) => a.repo) } : {}), ...(impactAddendum ? { impact: impactAddendum } : {}), ...(impactOwed ? { impactOwed } : {}), ...(withdrewAcceptance ? { withdrewAcceptance: true } : {}) }, actor(options));
+    // Telemetry: how much the ticket grew with this amendment (criteria counts always; endpoints, error codes and repos
+    // when the amendment file states them under `scope`).
+    append(root, state.id, 'scope.changed', { amendment: state.criteriaAmendments.length + 1, reason: String(options.reason), criteria: { before: state.criteria.length, after: criteria.length, added: changes.added.length, changed: changes.changed.length, dropped: changes.dropped.length }, ...scope, addedRepos: added.map((a) => a.repo) }, actor(options));
+  });
   const after = loadState(root, state.id);
   const route = captureWarning(root, after); // I-94, as at `wf plan`
-  return { state: after, changes, added, impactOwed, restrictions: [...restrictionWarnings(trusted, after), ...(route ? [route] : [])] };
+  const ids = [...changes.added, ...changes.changed];
+  const acceptance = withdrewAcceptance
+    ? `acceptance withdrawn: ${ids.length ? `${ids.join(', ')} ${ids.length === 1 ? 'was' : 'were'} added or changed` : 'a repo was added'} after the review that was accepted, so no review mapped ${ids.length ? 'it' : 'its seam'} to evidence; next: ${nextAction(root, after)}`
+    : reopensScope && acceptedNow ? `${state.id} was admitted before 0.7.4, so its acceptance stands and \`wf deliver\` would ship ${ids.join(', ') || 'the added repo'} with no review having mapped it to evidence; hand a fresh reviewer (\`wf handoff reviewer --agent <new id>\`) and \`wf accept\` again before delivering` : null;
+  return { state: after, changes, added, impactOwed, acceptanceWithdrawn: withdrewAcceptance, restrictions: [...restrictionWarnings(trusted, after), ...(route ? [route] : []), ...(acceptance ? [acceptance] : [])] };
 }
 
 // Plan restrictions (doNotRun, externalServices) that name a repo or suite this attempt's diff now touches (I-25).
@@ -508,11 +569,13 @@ export function handoff(root, role, options) {
   let repair = null;
   if (role === 'implementer') {
     const lastReview = state.reviews.at(-1)?.at ?? null;
-    const swept = new Set(state.handoffs.filter((h) => h.role === 'implementer' && lastReview && h.at > lastReview).flatMap((h) => (h.sweeps ?? []).flatMap((x) => x.findings ?? [x.finding])));
+    // Named failure (I-79, I-89): a handoff closed `--outcome stopped` before its implementer did anything still spent the
+    // sweep it was handed, so the replacement's corrected `--sweep` was refused with "no open review finding is owed a sweep".
+    // Only a handoff that ran (still open, or closed done) spends one.
+    const swept = new Set(state.handoffs.filter((h) => h.role === 'implementer' && lastReview && h.at > lastReview && sweepSpent(state, h)).flatMap((h) => (h.sweeps ?? []).flatMap((x) => x.findings ?? [x.finding])));
     const mine = earlierOpenFindings(state, null).filter((f) => f.blocks && (!work || !f.work || f.work === work.id));
     const owed = mine.filter((f) => !swept.has(`${f.round}:${f.id}`));
     repair = mine.length ? familiesOf(mine) : null;
-    const groups = familiesOf(owed);
     // 0.7.0 (goals, not methods): the sweep is optional. The implementer finds the other instances of each family and
     // answers it with one proof in its report; an owner-written query steered its search (final review of 0.7.0).
     if (options.sweep !== undefined) {
@@ -547,6 +610,8 @@ export function handoff(root, role, options) {
   const runtimeAuthority = preferred && runtime !== preferred ? { runtime, from: preferred, by: actor(options) } : null;
 
   const selected = ['planner', 'implementer', 'reviewer'].includes(role) && !(role === 'reviewer' && mode === 'delta') ? relevantLessons(root, role, state, changed, { work }) : null;
+  // Trusted copies of the rule documents the bundle lists: collected while it is built, written when it is recorded.
+  const ruleDocs = [];
   const n = state.handoffs.length + 1;
   let file = path.join(attemptDir(root, state.id), 'handoffs', `${String(n).padStart(2, '0')}-${role}.json`);
   const appendix = cfg.roles?.[role]?.appendix ? path.resolve(root, ADAPTER_DIR, cfg.roles[role].appendix) : null;
@@ -608,6 +673,9 @@ export function handoff(root, role, options) {
     // Findings that left this delivery (a follow-up ticket, a sibling attempt) and why: a reviewer raises one again as a
     // finding when it should not have left (final review of 0.7.0: the evidence reviewer never saw them).
     followUps: role === 'reviewer' ? followUpsOf(state) : undefined,
+    // Named failure (I-69): scope an earlier recorded round said it did not reach (`notReached`) reached no later reader, so
+    // the next reviewer could not know what was never looked at. Coverage, not findings: a full round stays blind.
+    unreachedBefore: role === 'reviewer' && unreachedSince(state).length ? { note: 'Scope an earlier recorded round said it did not reach, and no complete full audit has covered since; none of these rounds counted as an audit. It adds to your goal and narrows nothing: what an earlier reviewer did not reach was not cleared.', rounds: unreachedSince(state) } : undefined,
     mode: role === 'reviewer' ? mode : undefined,
     // A repair handoff: the open findings that block, grouped by family.
     repair: role === 'implementer' ? repair ?? undefined : undefined,
@@ -637,7 +705,7 @@ export function handoff(root, role, options) {
     qualityBar: ['planner', 'implementer', 'reviewer'].includes(role) ? trusted.quality ?? [] : undefined,
     // Project rule documents this change falls under, and the skills this round needs: a pure function of the adapter
     // at base and the changed files, the same for every reviewer. Context for the review; no verdict form is owed.
-    rules: role === 'reviewer' && mode === 'full' ? reviewRules(root, trusted, state, changed) : undefined,
+    rules: role === 'reviewer' && mode === 'full' ? reviewRules(root, trusted, state, changed, ruleDocs) : undefined,
     // Named failure (I-94): UI criteria requiring screenshots were frozen although no gate step of the adapter collects any,
     // and only acceptance found the missing route. The planner is told which steps can produce captures.
     // Named failure (I-84, I-87): the plans `wf plan` refused earlier, unchanged, with the validator's message. Planners only: a
@@ -678,7 +746,7 @@ export function handoff(root, role, options) {
   if (role === 'reviewer' && bundle.historicalReports?.length) bundle.instructions += ' Historical reports are observations from earlier implementations, not proof of current unresolved work. Judge each historicalReports entry on the current tree and add reportedIssues: [{ id, verdict: fixed|verified-nonissue|open, evidence, fixedIn, repo, rationale, finding }]. A fixed verdict names a fix commit of this attempt; verified-nonissue gives a purpose-based rationale; open names an open finding. Missing verdicts refuse the closure, and open findings block the full gate and delivery.';
   if (role === 'reviewer' && bundle.impactMap) bundle.instructions += ' Impact discovery under impactMap.derived is textual, not structurally resolved consumer analysis, and bounded (its `incomplete` and `symbolsTruncated` say how far it got): a hit is a lead to judge against the real imports and behaviour, and a missing hit is no proof of coverage.';
   if (role === 'reviewer') {
-    const problems = reviewDocumentProblems(bundle);
+    const problems = reviewDocumentProblems(bundle, ruleDocs);
     if (problems.length) throw refuse(`review readiness refused:\n  - ${problems.join('\n  - ')}`);
   }
   // Named failure: independent flows waited behind one reviewer, or file-count splits omitted shared dependencies.
@@ -727,6 +795,7 @@ export function handoff(root, role, options) {
       return withEvidenceTransaction(root, state.id, () => {
       if (reviewSnapshot(loadState(root, state.id)) !== reviewSnapshot(state)) throw refuse('review obligations changed while preparing the group; prepare a fresh handoff');
       const { planFile, planText, historyFile, historyText } = division.evidence;
+      writeRuleDocuments(ruleDocs);
       writeImmutable(planFile, planText); writeImmutable(historyFile, historyText);
       const tree = treeHashes(state), patch = patchIds(state);
       if (reviewOverride) append(root, state.id, 'review.override', { ...reviewOverride, agent }, actor(options));
@@ -742,6 +811,7 @@ export function handoff(root, role, options) {
       seal(append, { root, id: state.id });
       });
     }
+    writeRuleDocuments(ruleDocs);
     writeJson(file, bundle);
     if (bundle.reviewClosureFile) mkdirStateDirectory(path.dirname(bundle.reviewClosureFile), { recursive: true });
     if (bundle.implementerReportFile) mkdirStateDirectory(path.dirname(bundle.implementerReportFile), { recursive: true });
@@ -787,9 +857,9 @@ export function handoff(root, role, options) {
 
 // Reviewer instructions by round mode (0.7.0, D2). A full round is the blind audit (the first code review, the evidence
 // review); a delta round reviews what changed since the last reviewed tree and the findings still open.
-const REVIEWER_FULL = 'This is a full review of the whole change, blind. Your goal: the truth about whether it meets its goals (the frozen criteria, `qualityBar`, the invariants) and what it broke. When `gate.passedOnThisTree` is true this is the evidence review: open every screenshot under `gate.screenshots` (exactly the files `gate.artifacts` lists) and record the sha256 of each one you viewed in `screenshotsInspected`; compare captures of the same state and record `anomalies` ("none seen", or each with the cause you found); a step marked `uncovered` needs `noEvidence: [{ step, reason }]` or a finding. When it is false, judge the diff and list no screenshots. Rules, skills, lessons, design-system hits, discovered issues, seams, supplemental validations, implementer reports and files outside the plan in this bundle are context for your judgement: cite them in findings; no verdict form is owed. Every finding is located (`path:line`) and rated honestly on the one scale (`severity`: high = a user, a tenant or the business is harmed or blocked: wrong or lost data, a broken flow, security, money, a visible defect on a primary screen; medium = degraded but usable; low = polish: wording, spacing, naming, style; a tenant, authorization or money defect is always high). The rating decides two things: a finding rated low never opens a round, and an unfixed high one is fixed in this delivery unless the person approves. `followUps` lists findings that already left this delivery: raise one again as a finding if it should not have. The engine decides what blocks: a frozen criterion the change fails (`criterion`), a regression on a line this attempt changed, a critical invariant (`invariant`), or a finding that cites none of these in a full round. Everything else is an observation. Early in your work write your plan into the closure file (`scope`: what you will cover; `expect: { minutes }`: how long you expect it to take) and add `findings` and `criteria` only when you have them, saying what you did not reach in `notReached`. Write the closure to `reviewClosureFile`: { reviewer, scope, expect, findings: [{ id, severity, summary, status, evidence, work, family, criterion, invariant }], criteria: [{ id, evidence: { kind: test|screenshot|output|not-applicable|dropped-with-reason, ref, reason } }], screenshotsInspected, anomalies, noEvidence, notReached }.';
-const REVIEWER_EVIDENCE_DELTA = 'This is the evidence review of a tree a gate passed on, as a delta: an earlier evidence review audited the whole change, so your scope is the diff since the last reviewed tree (`delta`), the findings still open (`openFindings`) and this gate\'s evidence. Your goal: every frozen criterion is proven by this gate\'s evidence, and the changes since the last review fix what they set out to fix and break nothing. Map every frozen criterion to its evidence in `criteria`. Open every screenshot under `gate.screenshots` that is not marked `inspectedBefore` (an earlier review saw those exact bytes; look again at any you judge useful) and record the sha256 of each one you viewed in `screenshotsInspected`; compare captures of the same state and record `anomalies` ("none seen", or each with the cause you found); a step marked `uncovered` needs `noEvidence: [{ step, reason }]` or a finding. Verify the open findings against the current code: `priorFindings: [{ round, id, status: fixed|verified-nonissue|open, evidence, severity }]`, every one that blocks and every observation you can settle (one with `claimedFixed` names the commit said to fix it); give `severity` when you rate one differently from its reviewer. A defect outside the changed lines is an observation (report it located, with its `severity` and a `family` where it repeats), never a blocker unless it fails a frozen criterion (`criterion`) or breaks a critical invariant (`invariant`). `followUps` lists findings that left this delivery: raise one again as a finding if it should not have. Early in your work write your plan into the closure file (`scope`; `expect: { minutes }`) and say what you did not reach in `notReached`. Write the closure to `reviewClosureFile`: { reviewer, scope, expect, findings, priorFindings, criteria: [{ id, evidence: { kind: test|screenshot|output|not-applicable|dropped-with-reason, ref, reason } }], screenshotsInspected, anomalies, noEvidence, notReached }.';
-const REVIEWER_DELTA = 'This is a delta review: the diff since the last reviewed tree (`delta`: the diff commands, the changed files and their line ranges) and the findings still open (`openFindings`, each with whether it blocks). Your goal: whether the changes since then fix what they set out to fix and break nothing. Verify the open findings against the current code: `priorFindings: [{ round, id, status: fixed|verified-nonissue|open, evidence, severity }]`, every one that blocks and every observation you can settle (one with `claimedFixed` names the commit said to fix it); give `severity` when you rate one differently from its reviewer. A defect you notice outside the changed lines is an observation (report it located, with its `severity` and a `family` where it repeats), never a blocker unless it fails a frozen criterion (`criterion`) or breaks a critical invariant (`invariant`). When the bundle has `sweeps`, a family proof (a command and the result it must give) is evidence: run it. Early in your work write your plan into the closure file (`scope`: what you will cover; `expect: { minutes }`: how long you expect it to take) and add `findings` and `criteria` only when you have them, saying what you did not reach in `notReached`. Write the closure to `reviewClosureFile` with `criteria: []`.';
+const REVIEWER_FULL = 'This is a full review of the whole change, blind. Your goal: the truth about whether it meets its goals (the frozen criteria, `qualityBar`, the invariants) and what it broke. When `gate.passedOnThisTree` is true this is the evidence review: open every screenshot under `gate.screenshots` (exactly the files `gate.artifacts` lists) and record the sha256 of each one you viewed in `screenshotsInspected`; compare captures of the same state and record `anomalies` ("none seen", or each with the cause you found); a step marked `uncovered` needs `noEvidence: [{ step, reason }]` or a finding. When it is false, judge the diff and list no screenshots. Rules, skills, lessons, design-system hits, discovered issues, seams, supplemental validations, implementer reports and files outside the plan in this bundle are context for your judgement: cite them in findings; no verdict form is owed. Every finding is located (`path:line`) and rated honestly on the one scale (`severity`: high = a user, a tenant or the business is harmed or blocked: wrong or lost data, a broken flow, security, money, a visible defect on a primary screen; medium = degraded but usable; low = polish: wording, spacing, naming, style; a tenant, authorization or money defect is always high). The rating decides two things: a finding rated low never opens a round, and an unfixed high one is fixed in this delivery unless the person approves. `followUps` lists findings that already left this delivery: raise one again as a finding if it should not have. The engine decides what blocks: a frozen criterion the change fails (`criterion`), a regression on a line this attempt changed, a critical invariant (`invariant`), or a finding that cites none of these in a full round. Everything else is an observation. Early in your work write your plan into the closure file (`scope`: what you will cover; `expect: { minutes }`: how long you expect it to take) and add `findings` and `criteria` only when you have them, saying what you did not reach in `notReached`; end with a recorded closure (`wf review --closure`), since a round with none counts toward nothing, and a closure that names unreached scope is not counted as the full audit (`unreachedBefore` in a bundle lists scope earlier rounds did not reach). Write the closure to `reviewClosureFile`: { reviewer, scope, expect, findings: [{ id, severity, summary, status, evidence, work, family, criterion, invariant }], criteria: [{ id, evidence: { kind: test|screenshot|output|not-applicable|dropped-with-reason, ref, reason } }], screenshotsInspected, anomalies, noEvidence, notReached }.';
+const REVIEWER_EVIDENCE_DELTA = 'This is the evidence review of a tree a gate passed on, as a delta: an earlier evidence review audited the whole change, so your scope is the diff since the last reviewed tree (`delta`), the findings still open (`openFindings`) and this gate\'s evidence. Your goal: every frozen criterion is proven by this gate\'s evidence, and the changes since the last review fix what they set out to fix and break nothing. Map every frozen criterion to its evidence in `criteria`. Open every screenshot under `gate.screenshots` that is not marked `inspectedBefore` (an earlier review saw those exact bytes; look again at any you judge useful) and record the sha256 of each one you viewed in `screenshotsInspected`; compare captures of the same state and record `anomalies` ("none seen", or each with the cause you found); a step marked `uncovered` needs `noEvidence: [{ step, reason }]` or a finding. Verify the open findings against the current code: `priorFindings: [{ round, id, status: fixed|verified-nonissue|open, evidence, severity }]`, every one that blocks and every observation you can settle (one with `claimedFixed` names the commit said to fix it); give `severity` when you rate one differently from its reviewer. A defect outside the changed lines is an observation (report it located, with its `severity` and a `family` where it repeats), never a blocker unless it fails a frozen criterion (`criterion`) or breaks a critical invariant (`invariant`). `followUps` lists findings that left this delivery: raise one again as a finding if it should not have. Early in your work write your plan into the closure file (`scope`; `expect: { minutes }`) and say what you did not reach in `notReached`; end with a recorded closure (`wf review --closure`). Write the closure to `reviewClosureFile`: { reviewer, scope, expect, findings, priorFindings, criteria: [{ id, evidence: { kind: test|screenshot|output|not-applicable|dropped-with-reason, ref, reason } }], screenshotsInspected, anomalies, noEvidence, notReached }.';
+const REVIEWER_DELTA = 'This is a delta review: the diff since the last reviewed tree (`delta`: the diff commands, the changed files and their line ranges) and the findings still open (`openFindings`, each with whether it blocks). Your goal: whether the changes since then fix what they set out to fix and break nothing. Verify the open findings against the current code: `priorFindings: [{ round, id, status: fixed|verified-nonissue|open, evidence, severity }]`, every one that blocks and every observation you can settle (one with `claimedFixed` names the commit said to fix it); give `severity` when you rate one differently from its reviewer. A defect you notice outside the changed lines is an observation (report it located, with its `severity` and a `family` where it repeats), never a blocker unless it fails a frozen criterion (`criterion`) or breaks a critical invariant (`invariant`). When the bundle has `sweeps`, a family proof (a command and the result it must give) is evidence: run it. Early in your work write your plan into the closure file (`scope`: what you will cover; `expect: { minutes }`: how long you expect it to take) and add `findings` and `criteria` only when you have them, saying what you did not reach in `notReached`; end with a recorded closure (`wf review --closure`). Write the closure to `reviewClosureFile` with `criteria: []`.';
 
 // Findings grouped by `family` (a stable key a reviewer gives a defect pattern); a finding with none is its own group.
 export function familiesOf(findings) {
@@ -813,8 +883,19 @@ function impactMapFor(root, cfg, state, role, queryResults = null) {
   return { ...map, inventory: inv, derived: deriveFromDiff(root, cfg, state, { queryResults }) };
 }
 
+// Whether an implementer handoff spent the pattern sweeps it was handed: not when it was closed stopped or failed, because
+// it did not do the fix round they belong to (I-79, I-89). A handoff still open, or closed done, did.
+function sweepSpent(state, h) {
+  const x = (state.implementers ?? []).find((y) => y.handoff === handoffId(h.bundle));
+  return !(x?.closedAt && ['stopped', 'failed'].includes(x.outcome));
+}
+
 function sweepsForReviewer(root, cfg, state) {
-  const { answers } = sweepAnswers(state, { sinceReview: true });
+  // A sweep handed to an implementer that was stopped or failed is not part of the fix pass the reviewer is handed, unless
+  // that implementer answered it anyway (a commit trailer): it showed as an unanswered sweep of a round nobody ran.
+  const dropped = new Set(state.handoffs.filter((h) => h.role === 'implementer' && !sweepSpent(state, h)).flatMap((h) => (h.sweeps ?? []).map((x) => x.id)));
+  const { answers: all } = sweepAnswers(state, { sinceReview: true });
+  const answers = all.filter((s) => !dropped.has(s.id) || s.answer);
   if (!answers.length) return undefined;
   return answers.map((s) => {
     // A sweep that cannot be re-run refuses the handoff (0.5.0 second review, fail-open: it was shown as no hits now).
@@ -1327,6 +1408,29 @@ const openFindings = (r, state) => blockingIn(state ?? {}, r);
 
 const EVIDENCE_KINDS = new Set(['test', 'screenshot', 'output', 'not-applicable', 'dropped-with-reason']);
 
+// Criteria the recorded round `r` did not judge in their present form. `added`: current criteria its closure maps no
+// evidence for (an amendment added them after the round was handed; `wf accept` refuses these for every attempt).
+// `changed`: criteria an amendment re-worded after the round was handed, which the round judged in their earlier wording;
+// accepted on the old mapping, a changed criterion shipped unproven (I-107, same cause). The second list is an obligation
+// of 0.7.4 (D7), so it is empty for an attempt admitted earlier.
+export function criteriaAfterReview(state, r) {
+  const handed = (state.handoffs ?? []).find((x) => x.bundle === r?.handoff);
+  const since = handed?.at ?? r?.at ?? '';
+  const mapped = new Set((r?.closure?.criteria ?? []).map((c) => c.id));
+  const current = new Set((state.criteria ?? []).map((c) => c.id));
+  const added = [...current].filter((id) => !mapped.has(id));
+  const changed = obligationSince(state, '0.7.4') ? [...new Set((state.criteriaAmendments ?? []).filter((a) => a.at > since).flatMap((a) => a.changes?.changed ?? []))].filter((id) => current.has(id) && !added.includes(id)) : [];
+  return { added, changed, since };
+}
+
+// An attempt admitted before 0.7.4 keeps its acceptance through an amendment (D7). The criteria such an amendment added or
+// changed after the acceptance, so `wf resume` can say that delivery would ship them with no review having mapped them.
+export function amendedAfterAcceptance(state) {
+  if (!state.accepted || state.delivery?.completedAt) return [];
+  const current = new Set((state.criteria ?? []).map((c) => c.id));
+  return [...new Set((state.criteriaAmendments ?? []).filter((a) => a.at > state.accepted.at).flatMap((a) => [...(a.changes?.added ?? []), ...(a.changes?.changed ?? [])]))].filter((id) => current.has(id));
+}
+
 export function acceptReview(root, options) {
   const state = openState(root, options);
   const r = state.review;
@@ -1340,10 +1444,12 @@ export function acceptReview(root, options) {
     if (!f.evidence) problems.push(`finding ${f.id} has no evidence`);
   }
   const mapped = new Map(r.closure.criteria.map((c) => [c.id, c]));
+  const late = criteriaAfterReview(state, r);
+  const lateAmended = new Set((state.criteriaAmendments ?? []).filter((a) => a.at > late.since).flatMap((a) => [...(a.changes?.added ?? []), ...(a.changes?.changed ?? [])]));
   for (const c of state.criteria ?? []) {
     const m = mapped.get(c.id);
     if (!m) {
-      problems.push(`criterion ${c.id} is not mapped to evidence`);
+      problems.push(`criterion ${c.id} is not mapped to evidence${lateAmended.has(c.id) ? ' (an amendment added or changed it after this review round was handed): hand a fresh reviewer, which maps every criterion to the gate evidence' : ''}`);
       continue;
     }
     // A criterion kept only because of precedent (a past merge, an existing test, an earlier verdict) needs a
@@ -1385,6 +1491,8 @@ export function acceptReview(root, options) {
   const inspected = inspectedEver(state);
   const unseen = shots.filter((h) => !inspected.has(h));
   if (unseen.length) problems.push(`${unseen.length} gate screenshot(s) not inspected by the reviewer (the gate's expanded artifacts globs matched them for this ticket): ${collected.filter((a) => !inspected.has(a.sha256)).slice(0, 5).map((a) => a.source ?? a.path).join(', ')}${unseen.length > 5 ? ' …' : ''}`);
+  // Named failure (I-107): a re-worded criterion kept the evidence a reviewer mapped to its earlier wording.
+  for (const id of late.changed) problems.push(`criterion ${id} was re-worded by an amendment after this review round was handed, so the round judged its earlier wording: hand a fresh reviewer, which maps every criterion to the gate evidence`);
   const pending = unverifiedPrior(state, r);
   if (pending.length) problems.push(`earlier-round finding(s) not verified: ${pending.map((f) => `${f.round}:${f.id}`).join(', ')}; the reviewer of this round adds \`priorFindings\` (fixed or verified-nonissue, with evidence) after its blind closure and records it again`);
   // Acceptance needs three things on the current tree: a passing full gate, a clean closure written for this tree, and
@@ -2028,8 +2136,10 @@ export function recordShown(root, options) {
   const anomalies = shownAnomalies(raw, set.screenshots, problems);
   if (problems.length) throw refuse(`screenshots not acknowledged:\n  - ${problems.join('\n  - ')}`);
   const n = (state.delivery.shownRecords ?? 0) + 1;
-  const kept = keepRaw(root, state.id, `delivery/shown-${n}.raw.json`, text);
-  append(root, state.id, 'delivery.shown', { screenshots: shown, none: null, anomalies, raw: { path: kept.file, sha256: kept.sha256 } }, actor(options));
+  recordedTogether(root, state.id, () => {
+    const kept = keepRaw(root, state.id, `delivery/shown-${n}.raw.json`, text);
+    append(root, state.id, 'delivery.shown', { screenshots: shown, none: null, anomalies, raw: { path: kept.file, sha256: kept.sha256 } }, actor(options));
+  });
   const after = loadState(root, state.id);
   try {
     writeDeliveredComment(root, loadConfig(root), after);
@@ -2128,8 +2238,10 @@ export function narrowDelivery(root, options) {
   if (kept.length === from) throw refuse(`all ${from} delivered files are kept; nothing to narrow`);
   const plan = { keep, from, to: kept.length, dropped: from - kept.length, reason, legacy: source.legacy, kept: kept.map((f) => ({ sha256: f.sha256, title: f.title ?? path.basename(f.path), path: f.path })) };
   if (options['dry-run']) return { state, dryRun: plan };
-  const raw = Array.isArray(parsed) ? null : keepRaw(root, state.id, 'delivery/narrow.raw.json', parsed.text);
-  append(root, state.id, 'delivery.narrowed', { keep, from, to: kept.length, dropped: from - kept.length, reason, legacy: source.legacy, raw: raw ? { path: raw.file, sha256: raw.sha256 } : null }, actor(options));
+  recordedTogether(root, state.id, () => {
+    const raw = Array.isArray(parsed) ? null : keepRaw(root, state.id, 'delivery/narrow.raw.json', parsed.text);
+    append(root, state.id, 'delivery.narrowed', { keep, from, to: kept.length, dropped: from - kept.length, reason, legacy: source.legacy, raw: raw ? { path: raw.file, sha256: raw.sha256 } : null }, actor(options));
+  });
   const after = loadState(root, state.id);
   // A legacy attempt has no draft and owes no `wf shown`: its kept uploads are checked by title only, as before.
   if (!source.legacy) writeDraft(root, after, { attempt: state.id, item: state.item, note: 'Edit this file in place (it is outside the evidence): view each image (the `file` copy, with the Read tool), replace each caption with what the image shows (which screen, which state), set `anomalies` ("none seen", or each value that differs between captures of the same state or contradicts a criterion, with its investigated cause or a follow-up), then `wf shown --file <this file>`.', anomalies: null, screenshots: after.delivery.screenshots.screenshots.map((f) => ({ sha256: f.sha256, title: f.title, path: f.path, proposed: f.proposed, caption: f.proposed })) });
@@ -2268,11 +2380,17 @@ export function integrationCheckOwed(cfg, state) {
   return !(state.checks ?? []).some((c) => c.status === 'passed' && !c.repos && c.tree && canonical(c.tree) === here);
 }
 
+// Named failure (I-115): on an attempt admitted before 0.7.0, one implementer handed with `--work W1` and a later one handed
+// without it left the other items "not started" for good, because the unscoped handoff recorded no `covers` (0.7.0 records
+// them) and named nothing. An unscoped handoff of such an attempt covers every item that existed when it was handed and
+// that no scoped handoff names. A relaxation, so it applies to every attempt.
 export function unstartedWork(state) {
   const handoffs = state.handoffs.filter((h) => h.role === 'implementer');
   const named = new Set(handoffs.flatMap((h) => (h.work ? [h.work] : h.covers ?? [])));
   if (!named.size && handoffs.length && !obligationSince(state, '0.7.0')) return [];
-  return (state.work ?? []).filter((w) => !named.has(w.id));
+  const unscoped = obligationSince(state, '0.7.0') ? [] : handoffs.filter((h) => !h.work && !h.covers);
+  const coveredByUnscoped = (w) => unscoped.some((h) => (state.workIntroduced?.[w.id] ?? '') <= h.at);
+  return (state.work ?? []).filter((w) => !named.has(w.id) && !coveredByUnscoped(w));
 }
 
 // Named failure: prose-only next steps could not safely drive runtime-independent execution.
@@ -2344,7 +2462,7 @@ export function nextDecision(root, state) {
     if (refused) return result('review', 'owner', 'the review was refused');
     if (canonical(h.tree) !== canonical(tree)) return result('review', 'owner', 'the handed tree changed');
     if (!h.launch) return result('review', 'owner', 'existing handoff has no native receipt; it may already be running externally', { handoff: h.bundle, runtime: h.runtime, guidance: guidance });
-    return result('review', 'owner', 'process completed but a valid closure is missing', { handoff: h.bundle, guidance: `reviewer ${h.agent} completed; record its closure through the handed reviewer; process completion does not prove a valid review` });
+    return result('review', 'owner', 'process completed but a valid closure is missing', { handoff: h.bundle, guidance: withAttempt(root, state, closureMissingGuidance(state, h)) });
   }
   const r = state.review;
   if (state.lastGate?.status === 'stopped' && ['major-finding', 'tree-change'].includes(state.stops.at(-1)?.class) && canonical(state.lastGate.tree) === canonical(tree)) return result('repair', 'owner', 'gate stopped for a defect or tree change; repair and fresh review are required', { guidance: guidance });
@@ -2361,6 +2479,10 @@ export function nextDecision(root, state) {
     return blockers.length ? result('gate', 'owner', blockers.join('; ')) : result('gate', 'ready', null, { guidance: canonical(r.tree ?? r.handoffTree) === canonical(tree) ? guidance : withAttempt(root, state, 'clean code review covers this change: run one `wf gate`; then the evidence review') });
   }
   if (!reviewedAfterGate(r)) return result('review', 'ready', null, { round: 'evidence-review' });
+  // Named failure (I-107): criteria an amendment added or re-worded after this round was handed are mapped by no round, and
+  // `wf accept` refuses; the next step is a reviewer, not the acceptance.
+  const late = criteriaAfterReview(state, r);
+  if (late.added.length || late.changed.length) return result('review', 'ready', null, { round: 'evidence-review' });
   return result('accept', 'ready');
 }
 
@@ -2423,7 +2545,10 @@ function phaseAction(root, cfg, state) {
   const openIssues = openDiscovered(state);
   if (openIssues.length) return `${openIssues.filter((d) => d.blockedBy).map((d) => `route ${d.id} to the implementer of ${d.blockedBy} (continue it with SendMessage); `).join('')}fix the discovered issue(s) ${openIssues.map((d) => `${d.id}${d.severity ? ` (${d.severity})` : ''}`).join(', ')} through the implementer that found each (never yourself) (\`wf discovered list\`), commit, then \`wf discovered close <id> --fixed <commit>\`; a criterion or scope that blocks the fix is amended (\`wf criteria amend --file <f> --reason "why"\`, \`--add-repo <repo>\` when the fix needs another repo). By the person's severity rule an issue may instead wait (\`wf discovered close <id> --deferred --reason "why"\`): high or unrated only when the person confirms it with \`wf approve\`, medium on your judgement, low freely; a split moves one to a sibling attempt of the batch (\`wf split\`)`;
   if (state.accepted && observations(state).length) return `${observations(state).length} review observation(s) are unresolved and delivery waits for them: ${observationLines(state).slice(0, 5).join('; ')}; each is fixed (the next reviewer verifies it, or \`wf scope fixed --finding <ref> --commit <sha>\`), moved to a sibling attempt (\`wf scope move\`), ticketed (\`wf scope ticket\`) or left for later as a known issue (\`wf scope defer\`); leaving the delivery follows the severity rule: high only with the person's \`wf approve\`, medium with your \`--reason\`, low freely; \`wf scope list\` shows each one's severity`;
-  if (state.accepted) return state.batchPending ? `accepted; ${state.batchOf} (reserved by a split) waits for the other members to be accepted, then \`wf batch create --members <every member of the split>\` assembles it` : state.batchOf ? `waiting for batch ${state.batchOf}` : 'deliver: `wf deliver`';
+  // An attempt admitted before 0.7.4 keeps its acceptance through an amendment (D7, I-107): say what delivery would ship.
+  const unmapped = amendedAfterAcceptance(state);
+  const unmappedNote = unmapped.length ? ` -- WARNING: ${unmapped.join(', ')} ${unmapped.length === 1 ? 'was' : 'were'} added or re-worded after the acceptance and no review mapped ${unmapped.length === 1 ? 'it' : 'them'} to evidence (this attempt was admitted before 0.7.4, so the engine leaves the acceptance standing): for the evidence, hand a fresh reviewer (\`wf handoff reviewer --agent <new id>\`) and \`wf accept\` again, then deliver` : '';
+  if (state.accepted) return state.batchPending ? `accepted; ${state.batchOf} (reserved by a split) waits for the other members to be accepted, then \`wf batch create --members <every member of the split>\` assembles it` : state.batchOf ? `waiting for batch ${state.batchOf}` : `deliver: \`wf deliver\`${unmappedNote}`;
   // Order of work (I-27): code-review rounds until one comes back clean (no gate meanwhile), then one gate on that tree,
   // then the evidence review of the gated tree. Review and gate never run side by side.
   const g = state.lastGate;
@@ -2449,7 +2574,7 @@ function phaseAction(root, cfg, state) {
       return 'reviewer ' + inFlight.agent + ' is ready but has not launched: \x60wf handoff run --agent ' + inFlight.agent + ' --attempt ' + state.id + '\x60';
     }
     if (inFlight.launch.status === 'failed') return 'reviewer ' + inFlight.agent + ' launch failed; create a fresh reviewer handoff and run it; no review is running';
-    if (inFlight.launch.status === 'completed') return 'reviewer ' + inFlight.agent + ' completed; record its closure with \x60wf review --closure <its file> --attempt ' + state.id + '\x60';
+    if (inFlight.launch.status === 'completed') return closureMissingGuidance(state, inFlight);
     // 0.7.0: the launcher hands control back once a role passes its own estimate; the role keeps running.
     if (inFlight.launch.pid) {
       const running = (() => { try { process.kill(inFlight.launch.pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } })();
@@ -2475,5 +2600,7 @@ function phaseAction(root, cfg, state) {
   if (!pass.ok && obsNow.length) return `clean code review on this tree, with ${obsNow.length} open observation(s) to place first: ${observationLines(state).slice(0, 5).join('; ')}; fix them now in one pass through the implementer (then the next review round), or let them wait by the severity rule (\`wf scope defer\` or \`wf scope ticket\`); then ${gateRun}`;
   if (!pass.ok) return `clean code review on this tree: ${gateRun}; then the evidence review`;
   if (!reviewedAfterGate(r)) return `evidence review: the gate passed on the reviewed tree, so hand to ${fresh} to inspect the gate evidence (logs and screenshots)`;
+  const late = criteriaAfterReview(state, r);
+  if (late.added.length || late.changed.length) return `evidence review: ${[...late.added, ...late.changed].join(', ')} ${late.added.length + late.changed.length === 1 ? 'was' : 'were'} added or re-worded by an amendment after the last review round was handed, so no round mapped ${late.added.length + late.changed.length === 1 ? 'it' : 'them'} to this gate's evidence (\`wf accept\` would refuse): hand to ${fresh}; it maps every criterion`;
   return 'accept the review: `wf accept`';
 }

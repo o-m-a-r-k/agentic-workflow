@@ -45,12 +45,13 @@ actual, with no threshold:
     review rounds recorded: 3; the plan expected 3
     minutes since admission: 74; the plan expected 60
     implementer impl-1 (W1) done: took 38 min; it expected 25 min; approach: ...
-    review round 3 (rev-3): took 18 min; it expected 25 min; scope: ...
+    review round 3 (rev-3): took 18 min; it expected 25 min; scope: ...; did not reach: ...
     reviewer rev-4 is working: 12 min since handed, it expects 20 min; last activity 2 min ago; scope: ...
     strategist S1 (delta-review) predicted blockingLatest <= 2 by round 5: pending
 ```
 
-`wf signals` adds the numbers behind it: review rounds handed and recorded, the recorded ones with their blocking and observation counts and families,
+`wf signals` adds the numbers behind it: review rounds handed and recorded, the recorded ones with their blocking and observation counts, families and the scope the reviewer said it did not reach (`notReached`: the round is
+not counted as the full audit, I-69),
 rounds since blocking findings last decreased, criteria at freeze and now, amendments, the files the plan's anchors name,
 the latest reviewer bundle size, each working role's last transcript activity, open observations and the strategist's
 predictions that held or missed. Which harness runs the agents is an execution detail: no signal reads a harness's usage

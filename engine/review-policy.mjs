@@ -12,8 +12,10 @@
 //   (c) it is tagged as breaking a critical invariant (`invariant: "<which one>"`).
 // Every other open finding is an observation: it never opens a round, and it is fixed, ticketed or moved to a sibling
 // attempt before delivery. Severity alone never blocks.
+import fs from 'node:fs';
 import { git, hashValue, run } from './util.mjs';
 import { gatePassedForCurrentTree } from './gate.mjs';
+import { obligationSince } from './versions.mjs';
 
 // 'moved': a finding `wf split` handed to a sibling attempt of the batch (the sibling carries the obligation).
 const SETTLED = new Set(['fixed', 'verified-nonissue', 'moved']);
@@ -29,9 +31,53 @@ const text = (v) => (typeof v === 'string' ? v.trim() : '');
 // returned to a fresh audit of the whole change, which finds about two issues per hundred tool calls whatever the code;
 // acceptance was the old unreachable exit, moved to the last stage.
 const isEvidenceRound = (h) => h.round === 'evidence-review' || (!h.round && Boolean(h.gate));
+
+// What a recorded closure says it did not reach: a list of strings (a lone string is one item; "none" and the like are
+// an empty list). The reviewer states it honestly (templates/agents/reviewer.md); the engine never judges the words.
+const NOTHING = /^(none|nothing|n\/a|na|-|--)\.?$/i;
+export function unreachedOf(closure) {
+  const v = closure?.notReached;
+  const list = Array.isArray(v) ? v : typeof v === 'string' ? [v] : [];
+  return list.map((x) => (typeof x === 'string' ? x : x && typeof x === 'object' ? x.what ?? x.scope ?? x.item ?? x.area ?? JSON.stringify(x) : String(x ?? ''))).map((x) => String(x).trim()).filter((x) => x && !NOTHING.test(x));
+}
+
+// Rounds with a recorded closure, once each (a round recorded twice, blind and then with its prior-finding verdicts,
+// counts at its latest record), in the order they were first recorded.
+export function recordedRoundsOf(state) {
+  const by = new Map();
+  for (const r of state.reviews ?? []) by.set(r.handoff ?? `reviewer:${r.reviewer}`, r);
+  return [...by.values()];
+}
+
+// Scope earlier rounds said they did not reach and no complete full audit has covered since: what the owner and the next
+// reviewer should see beside the course. A complete full audit judged the whole change, so everything before it is moot.
+// Named failure (I-69): a launched reviewer stopped early and recorded `notReached`; the round counted as the attempt's one
+// full audit and nothing showed the owner, the next reviewer or the delivered comment what was never looked at.
+export function unreachedSince(state) {
+  const handoffs = new Map((state.handoffs ?? []).filter((h) => h.role === 'reviewer').map((h) => [h.bundle, h]));
+  const rounds = recordedRoundsOf(state);
+  const lastAudit = rounds.map((r) => handoffs.get(r.handoff)).findLastIndex((h, i) => h && (h.mode ?? 'full') === 'full' && !unreachedOf(rounds[i].closure).length);
+  return rounds.slice(lastAudit + 1).map((r) => ({ round: r.handoff ? String(r.handoff).replace(/^.*\//, '').replace(/\.json$/, '') : null, reviewer: r.reviewer ?? r.closure?.reviewer ?? null, mode: handoffs.get(r.handoff)?.mode ?? 'full', notReached: unreachedOf(r.closure) })).filter((x) => x.notReached.length);
+}
+
+// What the owner does when the reviewer it handed (and the engine launched) is gone and recorded no closure. Named failure
+// (I-69): the line said "record its closure through the handed reviewer", which named no route; a second `wf handoff run`
+// is refused (a handoff launches once), and nothing said that a round with no recorded closure is not an audit. Two routes
+// exist: record the closure the reviewer wrote, when it is a complete one, or hand a fresh reviewer.
+export function closureMissingGuidance(state, h) {
+  const next = roundMode(state);
+  const file = h.closureFile && fs.existsSync(h.closureFile) ? h.closureFile : null;
+  return `reviewer ${h.agent} completed with no closure recorded (process completion does not prove a review). A round with no recorded closure is not an audit and counts toward nothing, so the next reviewer is handed a ${next} round. ${file ? `If its closure file is complete (\`findings\` and \`criteria\` as well as the plan it stated early), record it: \`wf review --closure ${file} --attempt ${state.id}\`; the engine refuses a file without them, and a closure that names scope it did not reach (\`notReached\`) is recorded as it is and does not count as the full audit. ` : 'It wrote no closure file. '}Otherwise hand a fresh reviewer with a new id: \`wf handoff reviewer --agent <new id> --attempt ${state.id}\`, then \`wf handoff run --agent <new id> --attempt ${state.id}\` (\`wf handoff run\` launches a handoff once; the new bundle lists any scope earlier rounds named as not reached, and a long input is no reason for a reviewer to end without a closure)`;
+}
+
 export function roundMode(state, { evidence } = {}) {
   const handoffs = new Map((state.handoffs ?? []).filter((h) => h.role === 'reviewer').map((h) => [h.bundle, h]));
-  const audits = (state.reviews ?? []).map((r) => handoffs.get(r.handoff)).filter((h) => h && (h.mode ?? 'full') === 'full');
+  // Named failure (I-69): a closure that names scope it did not reach was recorded as the attempt's full audit, so every
+  // later round was a delta and the unreached scope was never looked at. Only a round that reached everything is an audit.
+  // D7: this makes the next round of an attempt that already recorded such a closure a full one, so it applies to attempts
+  // admitted at 0.7.4 or later; the others keep counting it.
+  const reached = obligationSince(state, '0.7.4') ? (r) => !unreachedOf(r.closure).length : () => true;
+  const audits = recordedRoundsOf(state).filter(reached).map((r) => handoffs.get(r.handoff)).filter((h) => h && (h.mode ?? 'full') === 'full');
   if (evidence ?? gatePassedForCurrentTree(state).ok) return audits.some(isEvidenceRound) ? 'delta' : 'full';
   // A strategist's `delta-review` decision (state.strategy.nextRound) makes the next code review a delta, once a recorded
   // review gives it a tree to take the delta from. Read before the reviewer handoff is appended, which clears it.

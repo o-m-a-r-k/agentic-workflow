@@ -183,7 +183,7 @@ test('an engine-launched Codex reviewer is recorded as launched by the engine wh
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--runtime', 'codex', '--attempt', id]));
   assert.match(ok(wf(root, ['resume', '--attempt', id])).out, /ready but has not launched/);
   ok(wf(root, ['handoff', 'run', '--agent', 'r', '--attempt', id], { env }));
-  assert.match(ok(wf(root, ['resume', '--attempt', id])).out, /completed; record its closure/);
+  assert.match(ok(wf(root, ['resume', '--attempt', id])).out, /reviewer r completed with no closure recorded[\s\S]*wf handoff reviewer --agent <new id>/);
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r')), '--attempt', id], { env }));
   assert.equal(state(root, id).reviews.at(-1).provenance, 'engine-launched');
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'r2', '--runtime', 'codex', '--attempt', id]));
