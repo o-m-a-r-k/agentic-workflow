@@ -75,7 +75,16 @@ export function playwrightJsonSuites(doc) {
     }
     for (const child of suite.suites ?? []) walk(child);
   };
-  for (const s of doc?.suites ?? []) walk(s);
+  for (const s of Array.isArray(doc?.suites) ? doc.suites : []) if (s && typeof s === 'object') walk(s);
+  // A spec file that failed to load is reported only in the top-level `errors`: it is a failed suite, so a rerun of the
+  // failed suites runs it again (0.7.6 review: it could otherwise pass without it).
+  for (const e of Array.isArray(doc?.errors) ? doc.errors : []) {
+    const file = e?.location?.file;
+    if (typeof file !== 'string' || !file) continue;
+    const s = files.get(file) ?? { id: file, file, tests: 0, failures: 0, skipped: 0, durationMs: 0 };
+    s.failures += 1;
+    files.set(file, s);
+  }
   return [...files.values()].map((s) => ({ ...s, status: s.failures > 0 ? 'failed' : 'passed' }));
 }
 

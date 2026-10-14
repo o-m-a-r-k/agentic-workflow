@@ -572,12 +572,17 @@ export function staticArtifactWarnings(cfg) {
 // only failed suites when a step declares a suite report (`report.junit`, or `report.playwright` for Playwright's JSON
 // reporter) and how its runner takes files (`select`, with `{select}` in `run`).
 export function suiteRerunWarnings(cfg) {
-  return cfg.gate.steps.filter((s) => s.tier === 'heavy' && !(s.select && (s.report?.junit || s.report?.playwright))).map((s) => ({
+  return cfg.gate.steps.filter((s) => s.tier === 'heavy' && !s.plugin && !rerunsOnlyFailed(s)).map((s) => ({
     check: `suite reruns of step ${s.id}`,
-    problem: `step ${s.id} reruns whole after a failure: it declares ${s.select ? 'no suite report' : s.report?.junit || s.report?.playwright ? 'no `select`' : 'neither a suite report nor `select`'}, so the gate cannot rerun only the suites that failed`,
-    fix: 'declare `report: { junit: <file> }` or `report: { playwright: <JSON report file> }` and `select: "<how the runner takes files, e.g. {suites}>"`, with `{select}` in the step\'s `run` (docs/gate.md)',
+    problem: `step ${s.id} reruns whole after a failure (it has ${[s.select ? null : 'no `select`', s.report?.junit || s.report?.playwright ? null : 'no suite report', s.select && !String(s.run ?? '').includes('{select}') ? 'no `{select}` in `run`' : null, s.inputs?.length ? null : 'no `inputs`'].filter(Boolean).join(', ')}); if it runs test suites, the gate cannot rerun only the ones that failed`,
+    fix: 'docs/gate.md, "Suite-level reruns", describes what lets the gate rerun only the failed suites of a step',
   }));
 }
+
+// Whether the gate can rerun only a step's failed suites: it names its suites (a JUnit or Playwright report), how its runner
+// takes files (`select`, used in `run`), and its inputs (the file hashes that tell a changed suite from an unchanged one); a
+// plugin step supplies its own suites and ignores both.
+export const rerunsOnlyFailed = (s) => Boolean(!s?.plugin && s?.select && (s.report?.junit || s.report?.playwright) && String(s.run ?? '').includes('{select}') && s.inputs?.length);
 
 // A step whose command reads a sibling repo (`../web`, `$WF_ROOT/web`, the attempt's `web` worktree) but does not list
 // it in `alsoInputs` is reused after that repo changes: a passing end-to-end run was reused against old API code.

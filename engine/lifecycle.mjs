@@ -11,6 +11,7 @@ import { pathToFileURL, fileURLToPath } from 'node:url';
 import { actor, addRepoWorktree, baseRef, branchName, onTarget, changedFiles, cleanupWorktrees, entry, missingWorktrees, openState, treeHashes, worktreeDir } from './attempt.mjs';
 import { channelOf, discoveredVerdicts, openDiscovered, seamVerdicts, unacknowledged, reportsForReview, reportedIssueVerdicts } from './discovered.mjs';
 import { executionSettings, rejectModelOverrides } from './models.mjs';
+import { rerunsOnlyFailed } from './onboard.mjs';
 import { detectOwner, findHost, fragment, hostChoice, isHost, lastFencedYaml, optional } from './hosts/index.mjs';
 import { defaultRuntime } from './runtime-policy.mjs';
 import { ADAPTER_DIR, adapterFileAtCommit, agentTypeFor, attemptAdapter, declared, loadConfig, repoDir, roleClass, trustedAdapter } from './config.mjs';
@@ -2003,24 +2004,26 @@ export function deliveredFiles(state) {
 // touched, came from the test environment's state. Every failure is fixed in the attempt (the person's rule).
 export function failedGateFor(state, cfg) {
   const g = state.lastGate;
-  const changed = new Set(Object.values(g.changed ?? {}).flat());
+  const changed = [...new Set(Object.values(g.changed ?? {}).flat())];
+  const untouched = (f) => !changed.some((c) => c === f || c.endsWith(`/${f}`) || f.endsWith(`/${c}`));
   const steps = (g.steps ?? []).filter((s) => s.status === 'failed').map((s) => {
     const def = (cfg?.gate?.steps ?? []).find((x) => x.id === s.id);
-    const suites = (s.suites ?? []).filter((x) => x.status === 'failed').map((x) => x.file ?? x.id);
+    const suites = [...new Set((s.suites ?? []).filter((x) => x.status === 'failed').map((x) => x.file ?? x.id))];
     const tests = s.failures?.tests ?? [];
-    const rerunsSuites = Boolean(def?.select && (def.report?.junit || def.report?.playwright));
-    const files = [...new Set([...suites, ...tests.map((t) => String(t).split(/[ :›]/)[0]).filter((f) => /\.[a-z]+$/.test(f))])];
+    // A test named by its file and line (`path/to/x.spec.ts:12:3 › title`) gives its file; a name without one gives none.
+    const testFiles = tests.map((t) => /^([^\s:›]+\.[A-Za-z]+):\d+/.exec(String(t))?.[1]).filter(Boolean);
+    const files = [...new Set([...(s.suites ?? []).filter((x) => x.status === 'failed' && x.file).map((x) => x.file), ...testFiles])];
     return {
       id: s.id,
-      minutes: s.durationMs ? Math.round(s.durationMs / 60000) : null,
-      failedTests: tests.slice(0, 100),
-      ...(tests.length > 100 ? { moreFailedTests: tests.length - 100 } : {}),
-      failedSuites: suites.slice(0, 100),
-      rerunsOnlyFailed: rerunsSuites,
-      failingFilesNotChanged: files.filter((f) => ![...changed].some((c) => c === f || c.endsWith(`/${f}`) || f.endsWith(`/${c}`))).length,
+      lastRunMinutes: s.durationMs ? Math.round(s.durationMs / 6000) / 10 : null,
+      failedTestCount: s.failures?.total ?? tests.length,
+      failedTests: tests, // the gate keeps the first names of a long list; failedTestCount is the whole count
+      failedSuites: suites,
+      rerunsOnlyFailed: rerunsOnlyFailed(def),
+      failingFilesNotChanged: files.filter(untouched),
     };
   });
-  return { runId: g.runId, steps };
+  return { runId: g.runId, tree: g.tree ?? null, onCurrentTree: canonical(g.tree ?? {}) === canonical(treeHashes(state)), steps };
 }
 
 // One answer for every caller (engine/paths.mjs): any project's evidence, as written or as the OS resolves it, or below

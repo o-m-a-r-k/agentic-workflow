@@ -343,7 +343,14 @@ function suitesToRerun(prior, planned) {
   if (!prior?.suites?.length || !priorHashes || !planned.fileHashes) return null;
   prior = { ...prior, fileHashes: priorHashes };
   const files = Object.keys(planned.fileHashes);
-  const fileOf = (suite) => (suite.file ? files.find((f) => f === suite.file || f.endsWith(`/${suite.file}`) || suite.file.endsWith(`/${f}`)) : null);
+  // An exact path first; a suffix that matches more than one file names none, so the suite reruns (0.7.6 review: a top-level
+  // b.spec.ts could take a/b.spec.ts's hash).
+  const fileOf = (suite) => {
+    if (!suite.file) return null;
+    if (files.includes(suite.file)) return suite.file;
+    const near = files.filter((f) => f.endsWith(`/${suite.file}`) || suite.file.endsWith(`/${f}`));
+    return near.length === 1 ? near[0] : null;
+  };
   const suiteFiles = new Set(prior.suites.map(fileOf).filter(Boolean));
   const nonSuite = (hashes) => hashValue(Object.fromEntries(Object.entries(hashes).filter(([f]) => !suiteFiles.has(f))));
   if (nonSuite(prior.fileHashes) !== nonSuite(planned.fileHashes)) return null;
@@ -483,7 +490,19 @@ async function executeStep(root, cfg, state, planned, ctx) {
     const files = (step.report?.junit ? [step.report.junit].flat() : []).flatMap((p) => globFiles(planned.dir, substitute(p, vars)));
     // The suites come from a JUnit report, or from Playwright's JSON report (0.7.6, I-118), so `select` reruns only what failed.
     const playwrightFiles = (step.report?.playwright ? [step.report.playwright].flat() : []).flatMap((p) => globFiles(planned.dir, substitute(p, vars)));
-    let suites = [...readJUnitFiles(files), ...readPlaywrightSuites(playwrightFiles)];
+    // One suite per id (0.7.6 review: a step with both reports listed each spec twice, once with no file, so it reran whole):
+    // the entry that names a file, failed when either says failed.
+    const byId = new Map();
+    for (const x of [...readJUnitFiles(files), ...readPlaywrightSuites(playwrightFiles)]) {
+      const y = byId.get(x.id);
+      if (!y) byId.set(x.id, x);
+      else {
+        const base = y.file || !x.file ? y : x;
+        const failed = x.status === 'failed' || y.status === 'failed';
+        byId.set(x.id, { ...base, failures: Math.max(x.failures ?? 0, y.failures ?? 0), status: failed ? 'failed' : base.status });
+      }
+    }
+    let suites = [...byId.values()];
     for (const f of files) {
       prepareWrite(path.join(evidenceDir, `junit-${path.basename(f)}`));
       const junit = readRegular(f);

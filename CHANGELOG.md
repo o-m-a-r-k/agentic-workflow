@@ -5,20 +5,27 @@ Release notes, newest first, then every fix that came from a failure in the work
 ## 0.7.6 - A repair after a failed gate gets its facts, and Playwright steps rerun only what failed
 
 - I-118: an implementer handed "fix each failing e2e" after a gate with 55 failures proved every fix by rerunning whole
-  suites (15 and 18 minutes each, eight times: 68 of its 113 minutes were waits); most failures, in files the change never
+  suites (10 to 22 minutes each, eight times: 68 of its 113 minutes were waits); most failures, in files the change never
   touched, came from the test environment's state. Every failure is still fixed in the attempt. The engine now supplies
   facts and a capability, and the role texts state the goal; how to use them is the implementer's decision:
-  - The implementer's bundle after a failed gate carries `failedGate`: for each failing step what failed (tests, suites),
-    how long it runs, whether it can rerun only what failed, and how many failing test files the change did not touch.
-  - A Playwright step's JSON report is a suite list (`report: { playwright: <file> }`, one suite per spec file), so with
-    `select` the gate reruns only the failed spec files, as it already did from a JUnit report.
-  - `wf doctor` names each heavy step that cannot rerun only its failed suites (no suite report or no `select`).
-  - The implementer's goal: every failure fixed at its cause, each fix proven by the smallest run that proves it, the full
-    gate once on the settled tree. The owner's: an estimate is judged when it is written, not only when it is passed.
+  - The implementer's bundle after a failed gate carries `failedGate`: the gate's tree and whether it is the current one,
+    and for each failing step the failed tests (the whole count, and the names the gate kept), the failed suites, how long
+    it last ran, whether it can rerun only what failed, and which failing test files the change did not touch.
+  - A Playwright step's JSON report is a suite list (`report: { playwright: <file> }`, one suite per spec file; a spec that
+    failed to load is a failed suite), so with `select` the gate reruns only the failed spec files, as it already did from a
+    JUnit report. A step with both reports keeps one suite per id. A suite file that matches more than one input by suffix
+    names none, so the step reruns whole rather than reuse another file's result.
+  - `wf doctor` names each heavy, non-plugin step that cannot rerun only its failed suites, and what it lacks (`select`, a
+    suite report, `{select}` in `run`, `inputs`).
+  - Proving a repair is the gate's job: the gate after the fix reruns what failed (only the failed suites, where a step
+    allows it) and reuses what still passes. The implementer's goal: every failure fixed at its cause, whatever its
+    origin; its own runs serve finding causes. The owner's: an estimate is judged when it is written, not only when it is
+    passed.
 - Align the CLI package and both host plugin manifests at 0.7.6.
 
 Regression scenarios: `scenarios/focused-repair.test.mjs` (Playwright suites rerun only the failed spec files; the
-`failedGate` facts, with no prescribed method; the doctor notice); each fails on 0.7.5.
+`failedGate` facts, with no prescribed method; the doctor notice; a spec that failed to load reruns; an ambiguous suite file
+reruns whole); each fails on 0.7.5.
 
 ## 0.7.5 - Close an attempt that shipped outside the workflow
 
