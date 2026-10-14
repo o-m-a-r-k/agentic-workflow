@@ -87,7 +87,7 @@ test('I-80: actual fresh native role bootstrap separates structured input from t
     // Structured handoff JSON goes through `wf evidence inspect` and is never printed whole; the documents a bundle names
     // are separate files, each read far enough to apply every rule that bears on the work (the page mechanics are the reviewer bundle's, tested with it).
     assert.ok(body.includes(inspect[host]),host+' '+role);
-    assert.match(body,/Read the required documents far enough to apply every rule that bears on your work, and deliver the complete output; never claim a read that was truncated/);
+    assert.match(body,/Read the documents your work depends on far enough to apply what bears on it, and say what you did not reach rather than claiming it\./);
     assert.doesNotMatch(body,/read receipt|document receipt|document-read/i);
     assert.doesNotMatch(body,/read large handoffs and required documents with one plain/);
   }

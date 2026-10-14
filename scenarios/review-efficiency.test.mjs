@@ -30,7 +30,7 @@ test('I-58: large handoffs use bounded structured inspection', () => {
     const bootstrap = roleInstructions(loadConfig(p.root), 'reviewer', 'review', '', host);
     assert.match(bootstrap, /inspected in bounded sections with `wf evidence inspect <handed path> --attempt <id>`, never as one full dump, and no section is skipped/);
     assert.ok(bootstrap.includes(inspect[host]), host);
-    assert.match(bootstrap, /Read the required documents far enough to apply every rule that bears on your work, and deliver the complete output; never claim a read that was truncated/);
+    assert.match(bootstrap, /Read the documents your work depends on far enough to apply what bears on it, and say what you did not reach rather than claiming it\./);
   }
 });
 
