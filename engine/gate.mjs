@@ -7,7 +7,7 @@ import { pathToFileURL } from 'node:url';
 import { adapterFileAtCommit, attemptAdapter, expandArtifactGlob, loadConfig, repoDir, trustedAdapter } from './config.mjs';
 import { changedFiles, treeHash, treeHashes, uncommitted, untrackedSnapshot } from './attempt.mjs';
 import { chooseShards, chooseWorkers } from './machine.mjs';
-import { readJUnitFiles, readPlaywrightSuites } from './junit.mjs';
+import { oneSuitePerId, readJUnitFiles, readPlaywrightSuites } from './junit.mjs';
 import { stepFailures } from './failures.mjs';
 import { append, attemptDir, loadState } from './ledger.mjs';
 import { projectEnv } from './env.mjs';
@@ -338,7 +338,7 @@ function priorFileHashes(prior) {
   return JSON.parse(fs.readFileSync(ref.path, 'utf8'));
 }
 
-function suitesToRerun(prior, planned) {
+function suitesToRerun(prior, planned, { listsEverySuite = false } = {}) {
   const priorHashes = priorFileHashes(prior);
   if (!prior?.suites?.length || !priorHashes || !planned.fileHashes) return null;
   prior = { ...prior, fileHashes: priorHashes };
@@ -358,6 +358,18 @@ function suitesToRerun(prior, planned) {
   for (const s of prior.suites) {
     const f = fileOf(s);
     if (!f || s.status !== 'passed' || prior.fileHashes[f] !== planned.fileHashes[f]) rerun.push(s.file ?? s.id);
+  }
+  // A report that names only the suites that ran (JUnit) leaves out the ones a run that stopped early never reached (Jest
+  // --bail): every input named like a suite (the suffix of a reported suite's file, `.e2e-spec.ts`) that the prior run did
+  // not report is rerun too, so a suite that never ran is never passed over (independent review of 0.7.6).
+  if (!listsEverySuite) {
+    const suffix = (f) => {
+      const b = path.basename(f);
+      const i = b.indexOf('.');
+      return i > 0 ? b.slice(i) : null;
+    };
+    const suffixes = new Set([...suiteFiles].map(suffix).filter(Boolean));
+    for (const f of files) if (!suiteFiles.has(f) && suffixes.has(suffix(f)) && planned.fileHashes[f] !== 'deleted') rerun.push(f);
   }
   return rerun.length ? [...new Set(rerun)] : null;
 }
@@ -454,9 +466,23 @@ async function executeStep(root, cfg, state, planned, ctx) {
   const env = projectEnv(cfg, { ...stepEnv(root, cfg, step.id, validationCatalog(root, state, step.id)), WF_ROOT: root, WF_ATTEMPT: state.id, WF_ITEM: String(state.item ?? state.id), WF_ITEMS: [...new Set(units.map((u) => String(u.item)))].join(' '), WF_STEP: step.id, WF_EVIDENCE: scratch, WF_WORKERS: String(workers.n) });
   const started = Date.now();
   const prior = allGateSteps(state).filter((s) => s.id === step.id && s.status !== 'reused' && s.suites).at(-1);
-  const rerun = step.select ? suitesToRerun(prior, planned) : null;
+  // Playwright's JSON report names every test it found, run or not; a JUnit report names only the suites that ran.
+  const rerun = step.select ? suitesToRerun(prior, planned, { listsEverySuite: Boolean(step.report?.playwright) }) : null;
   const vars = { workers: workers.n, shards: shards.n, evidence: scratch };
   vars.select = rerun ? substitute(step.select, { suites: rerun.map(shellQuote).join(' ') }) : '';
+  // The report files present before the run, by signature: only a report this run wrote or rewrote is read after it (one an
+  // earlier run left at a fixed path is not this run's; a run that died before writing would otherwise be read as the
+  // earlier run's suites, and their passes carried).
+  const reportSignature = (f) => {
+    try {
+      const st = fs.statSync(f);
+      return `${st.mtimeMs}:${st.size}:${st.ino}`;
+    } catch {
+      return null;
+    }
+  };
+  const reportGlobs = step.plugin ? [] : [step.report?.junit, step.report?.playwright].flat().filter(Boolean);
+  const reportsBefore = new Map(reportGlobs.flatMap((p) => globFiles(planned.dir, substitute(p, vars))).map((f) => [f, reportSignature(f)]));
   let result;
   let returned = [];
   if (step.plugin) {
@@ -487,22 +513,12 @@ async function executeStep(root, cfg, state, planned, ctx) {
       writeNoFollow(logFile, ctx.redact(`$ ${command}\n`), { append: true });
       codes.push(await spawnStep(command, { cwd: planned.dir, env: { ...env, WF_SHARD: String(shard), WF_SHARDS: String(shards.n) }, logFile, redact: ctx.redact, onSpawn: (pid) => ctx.addChild(pid) }));
     }
-    const files = (step.report?.junit ? [step.report.junit].flat() : []).flatMap((p) => globFiles(planned.dir, substitute(p, vars)));
+    const fresh = (f) => !reportsBefore.has(f) || reportsBefore.get(f) !== reportSignature(f);
+    const files = (step.report?.junit ? [step.report.junit].flat() : []).flatMap((p) => globFiles(planned.dir, substitute(p, vars))).filter(fresh);
     // The suites come from a JUnit report, or from Playwright's JSON report (0.7.6, I-118), so `select` reruns only what failed.
-    const playwrightFiles = (step.report?.playwright ? [step.report.playwright].flat() : []).flatMap((p) => globFiles(planned.dir, substitute(p, vars)));
-    // One suite per id (0.7.6 review: a step with both reports listed each spec twice, once with no file, so it reran whole):
-    // the entry that names a file, failed when either says failed.
-    const byId = new Map();
-    for (const x of [...readJUnitFiles(files), ...readPlaywrightSuites(playwrightFiles)]) {
-      const y = byId.get(x.id);
-      if (!y) byId.set(x.id, x);
-      else {
-        const base = y.file || !x.file ? y : x;
-        const failed = x.status === 'failed' || y.status === 'failed';
-        byId.set(x.id, { ...base, failures: Math.max(x.failures ?? 0, y.failures ?? 0), status: failed ? 'failed' : base.status });
-      }
-    }
-    let suites = [...byId.values()];
+    const playwrightFiles = (step.report?.playwright ? [step.report.playwright].flat() : []).flatMap((p) => globFiles(planned.dir, substitute(p, vars))).filter(fresh);
+    // One suite per id (0.7.6 review: a step with both reports listed each spec twice, once with no file, so it reran whole).
+    let suites = oneSuitePerId([...readJUnitFiles(files), ...readPlaywrightSuites(playwrightFiles)]);
     for (const f of files) {
       prepareWrite(path.join(evidenceDir, `junit-${path.basename(f)}`));
       const junit = readRegular(f);

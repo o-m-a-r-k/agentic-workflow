@@ -38,6 +38,35 @@ export function parseJUnit(xml) {
   return [...suites.values()].map((s) => ({ ...s, status: s.failures > 0 ? 'failed' : 'passed' }));
 }
 
+// A suite's status when two reports or shards speak for it: failed over not-run over passed, so no merge can turn a suite
+// that failed, or that did not run, into one that passed (independent review of 0.7.6: three merges recomputed
+// failed-or-passed only, so a not-run suite was carried as passed).
+const RANK = { failed: 2, 'not-run': 1, passed: 0 };
+export const worstStatus = (...statuses) => statuses.reduce((a, b) => ((RANK[b] ?? 2) > (RANK[a] ?? 2) ? b : a), 'passed');
+
+// Shards or report files of one runner: the same suite in two of them is one suite, its counts summed.
+function sumSuite(a, b) {
+  const failures = a.failures + b.failures;
+  const notRun = (a.notRun ?? 0) + (b.notRun ?? 0);
+  return { ...a, file: a.file ?? b.file, tests: a.tests + b.tests, failures, skipped: a.skipped + b.skipped, ...(notRun ? { notRun } : {}), durationMs: a.durationMs + b.durationMs, status: worstStatus(a.status, b.status, failures > 0 ? 'failed' : 'passed') };
+}
+
+// Two reports of one run (JUnit and Playwright JSON) for the same suite: one entry, the one naming its file, with the worse
+// status and the larger counts (they describe the same tests, so counts are not summed).
+export function oneSuitePerId(list) {
+  const byId = new Map();
+  for (const x of list) {
+    const y = byId.get(x.id);
+    if (!y) byId.set(x.id, x);
+    else {
+      const base = y.file || !x.file ? y : x;
+      const notRun = Math.max(x.notRun ?? 0, y.notRun ?? 0);
+      byId.set(x.id, { ...base, failures: Math.max(x.failures ?? 0, y.failures ?? 0), ...(notRun ? { notRun } : {}), status: worstStatus(x.status, y.status) });
+    }
+  }
+  return [...byId.values()];
+}
+
 export function readJUnitFiles(files) {
   const all = [];
   for (const f of files) {
@@ -48,7 +77,7 @@ export function readJUnitFiles(files) {
   for (const s of all) {
     const prev = merged.get(s.id);
     if (!prev) merged.set(s.id, s);
-    else merged.set(s.id, { ...prev, tests: prev.tests + s.tests, failures: prev.failures + s.failures, skipped: prev.skipped + s.skipped, durationMs: prev.durationMs + s.durationMs, status: prev.failures + s.failures > 0 ? 'failed' : 'passed' });
+    else merged.set(s.id, sumSuite(prev, s));
   }
   return [...merged.values()];
 }
@@ -70,10 +99,11 @@ export function playwrightJsonSuites(doc) {
         const results = t.results ?? [];
         s.durationMs += results.reduce((n, r) => n + (Number(r.duration) || 0), 0);
         if (t.status === 'skipped' || (results.length && results.every((r) => r.status === 'skipped'))) s.skipped += 1;
-        // Skipped with no result is a test that did not run (the run stopped first: maxFailures, globalTimeout, a failed
-        // dependency project); a skip the spec declares has a result. Independent review of 0.7.6 (high): such a suite was
-        // passed, so it was carried, and a later gate went green without running it.
-        if (t?.status === 'skipped' && !results.length) s.notRun = (s.notRun ?? 0) + 1;
+        // Skipped without a skipped result is a test that did not run: none (the run stopped first: maxFailures, a failed
+        // dependency project) or only an interrupted one (globalTimeout, a stop). A skip the spec declares has a skipped
+        // result. Independent review of 0.7.6 (high): such a suite was passed, so it was carried, and a later gate went
+        // green without running it.
+        if (t?.status === 'skipped' && !results.some((r) => r?.status === 'skipped')) s.notRun = (s.notRun ?? 0) + 1;
       }
       // One failure per failing test, a test being a spec in one project (0.7.6: a spec failing in four projects is four).
       const unexpected = (spec.tests ?? []).filter((t) => t?.status === 'unexpected').length;
@@ -108,7 +138,7 @@ export function readPlaywrightSuites(files) {
     }
     for (const s of playwrightJsonSuites(doc)) {
       const prev = all.get(s.id);
-      all.set(s.id, prev ? { ...prev, tests: prev.tests + s.tests, failures: prev.failures + s.failures, skipped: prev.skipped + s.skipped, durationMs: prev.durationMs + s.durationMs, status: prev.failures + s.failures > 0 ? 'failed' : 'passed' } : s);
+      all.set(s.id, prev ? sumSuite(prev, s) : s);
     }
   }
   return [...all.values()];

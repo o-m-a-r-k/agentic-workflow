@@ -4,7 +4,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { commitIn, criteriaFile, ok, OUT_OF_ORDER, singleRepoProject, wf } from './helpers.mjs';
 import { rerunsOnlyFailed } from '../engine/onboard.mjs';
-import { playwrightJsonSuites } from '../engine/junit.mjs';
+import { oneSuitePerId, playwrightJsonSuites, readPlaywrightSuites } from '../engine/junit.mjs';
+import os from 'node:os';
 
 // 0.7.6, I-118, named failure (field): after a gate failed with 55 e2e failures, the implementer handed the repair proved
 // every fix by rerunning whole suites (10 to 22 minutes each, eight times: 68 of its 113 minutes were waits). The steps
@@ -181,5 +182,62 @@ test('`wf resume <item>` names a damaged ledger of that item instead of showing 
   assert.notEqual(r.code, 0);
   assert.match(r.err, new RegExp(`ledger of ${second.id.replace('.', '\\.')} cannot be read`));
   assert.deepEqual(ok(wf(root, ['report', '--attempt', 'eng-72', '--json'])).json().attempts.map((x) => x.id), [first.id], 'an item names its attempts in any case');
+});
+
+test('no merge turns a suite that did not run into a passed one, and a test that was interrupted did not run', () => {
+  const spec = (tests) => ({ suites: [{ file: 'a.spec.ts', specs: [{ title: 't', file: 'a.spec.ts', line: 1, ok: true, tests }] }] });
+  const passed = { projectName: 'en', status: 'expected', results: [{ status: 'passed' }] };
+  assert.equal(playwrightJsonSuites(spec([{ status: 'skipped', results: [{ status: 'interrupted' }] }]))[0].status, 'not-run', 'interrupted');
+  assert.equal(playwrightJsonSuites(spec([{ status: 'skipped', results: [{ status: 'skipped' }] }]))[0].status, 'passed', 'a declared skip ran');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wf-pw-'));
+  fs.writeFileSync(path.join(dir, '1.json'), JSON.stringify(spec([{ status: 'skipped', results: [] }])));
+  fs.writeFileSync(path.join(dir, '2.json'), JSON.stringify(spec([passed])));
+  for (const order of [['1.json', '2.json'], ['2.json', '1.json']]) assert.equal(readPlaywrightSuites(order.map((f) => path.join(dir, f)))[0].status, 'not-run', `two report files, ${order}`);
+  const junitPassed = { id: 'a.spec.ts', file: 'a.spec.ts', tests: 1, failures: 0, skipped: 0, durationMs: 1, status: 'passed' };
+  const pwNotRun = { id: 'a.spec.ts', file: 'a.spec.ts', tests: 1, failures: 0, skipped: 1, notRun: 1, durationMs: 0, status: 'not-run' };
+  for (const list of [[junitPassed, pwNotRun], [pwNotRun, junitPassed]]) assert.equal(oneSuitePerId(list)[0].status, 'not-run');
+  assert.equal(oneSuitePerId([junitPassed, { ...pwNotRun, status: 'failed', failures: 1 }])[0].status, 'failed');
+});
+
+// A Jest-like runner writing JUnit: stops after the first failing suite (--bail) and names only the suites that ran; with
+// a crash marker it dies before writing any report.
+const JUNIT_RUNNER = `
+const fs=require('fs');const sel=process.argv.slice(2);
+const all=['test/a.e2e-spec.ts','test/b.e2e-spec.ts','test/c.e2e-spec.ts'];const run=sel.length?sel:all;
+fs.appendFileSync(process.env.WF_EVIDENCE+'/../ran.txt',run.join(',')+'\\n');
+if(fs.existsSync('crash')){process.exit(1);}
+const bad=(f)=>fs.readFileSync(f,'utf8').includes('bad');const ran=[];
+for(const f of run){ran.push(f);if(bad(f))break;}
+fs.mkdirSync('reports',{recursive:true});
+fs.writeFileSync('reports/junit.xml','<testsuites>'+ran.map(f=>'<testsuite name="'+f+'" file="'+f+'" tests="1"><testcase name="works" file="'+f+'">'+(bad(f)?'<failure>no</failure>':'')+'</testcase></testsuite>').join('')+'</testsuites>');
+if(ran.some(bad))process.exit(1);`;
+const junitFiles = { 'runner.cjs': JUNIT_RUNNER, 'test/a.e2e-spec.ts': 'a\n', 'test/b.e2e-spec.ts': 'b\n', 'test/c.e2e-spec.ts': 'c\n', 'src/app.txt': 'app\n' };
+const junitStep = { id: 'e2e', repo: 'app', run: 'node runner.cjs {select}', select: '{suites}', report: { junit: 'reports/junit.xml' }, inputs: ['test/**', 'src/**', 'runner.cjs'], tier: 'heavy' };
+
+test('a suite a run that stopped early never reported is rerun with the failed ones (JUnit names only what ran)', () => {
+  const { base, root } = singleRepoProject('junit-bail', { gate: { steps: [junitStep] } }, junitFiles);
+  const e = admitted(root, base, 'ENG-66');
+  commitIn(e.repos.app.worktree, { 'test/a.e2e-spec.ts': 'bad\n', 'test/c.e2e-spec.ts': 'bad\n' });
+  const g1 = gateJson(root, e.id);
+  assert.equal(g1.code, 1);
+  assert.deepEqual(g1.data.steps[0].suites.map((s) => s.id), ['test/a.e2e-spec.ts'], 'the run stopped at a');
+  commitIn(e.repos.app.worktree, { 'test/a.e2e-spec.ts': 'good\n' });
+  const g2 = gateJson(root, e.id);
+  assert.equal(g2.code, 1, 'c, never reached, runs now and fails');
+  const ran = fs.readFileSync(path.join(root, '.wf-worktrees', '_gate', e.id, g2.data.runId, 'ran.txt'), 'utf8').trim();
+  assert.deepEqual(ran.split(',').sort(), ['test/a.e2e-spec.ts', 'test/b.e2e-spec.ts', 'test/c.e2e-spec.ts']);
+});
+
+test('a report an earlier run left at a fixed path is not read as this run\'s', () => {
+  const { base, root } = singleRepoProject('junit-stale', { gate: { steps: [junitStep] } }, junitFiles);
+  const e = admitted(root, base, 'ENG-67');
+  commitIn(e.repos.app.worktree, { 'test/b.e2e-spec.ts': 'bad\n' });
+  const g1 = gateJson(root, e.id);
+  assert.equal(g1.code, 1);
+  assert.ok(g1.data.steps[0].suites.length > 0);
+  commitIn(e.repos.app.worktree, { crash: 'x\n', 'src/app.txt': 'changed\n' });
+  const g2 = gateJson(root, e.id);
+  assert.equal(g2.code, 1);
+  assert.deepEqual(g2.data.steps[0].suites, [], 'the run died before writing: no suites, not the earlier run\'s');
 });
 
