@@ -339,8 +339,9 @@ export async function main(argv) {
   // The commands that decide something final re-hash every recorded file and every ledger entry first (accept, deliver,
   // verify, doctor, export); the others check presence, type, size and mode, re-hash a file whose stat signature changed,
   // and check the ledger's links and its last entry, and a file a command reads is checked against its recorded sha256 as it
-  // is read (0.7.0, named failure: a read took 9 seconds on a 96 MB ledger). Whatever this process wrote into an attempt's
-  // evidence is recorded and protected when it ends.
+  // is read (0.7.0, named failure: a read took 9 seconds on a 96 MB ledger). Every file a command writes into an attempt's
+  // evidence is written and recorded in one transaction with its ledger entry (`recordedTogether`, 0.7.4, D15); sealing what
+  // this process wrote when it ends is only the safety net.
   setVerifyLevel(FULL_VERIFY.has(cmd) ? 'full' : 'quick');
   try {
     return await dispatch(cmd, sub && !sub.startsWith('--') ? sub : null, positional, { ...options, _: passthrough });

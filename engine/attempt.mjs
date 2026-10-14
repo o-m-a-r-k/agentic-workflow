@@ -1,3 +1,4 @@
+import { writeNoFollow } from './evidence.mjs';
 import { mkdirStateDirectory } from './state-folders.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -266,7 +267,7 @@ export function entry(root, options) {
       // it was in the opening snapshot unrecorded and refused as an extra file).
       openEvidence(root, id);
       mkdirStateDirectory(path.dirname(dest), { recursive: true });
-      fs.copyFileSync(src, dest);
+      writeNoFollow(dest, fs.readFileSync(src), { exclusive: true }); // never through a link planted at the destination
       issue = { file: dest, sha256: hashFile(dest) };
     }
     createAttempt(root, id, { id, item, lane, intent, repos, adapterBase, adapter, issue, originRuntime, reopenedFrom: options.reopenedFrom ?? null, deferHeavy: options.deferHeavy === true || options.deferHeavy === 'true' }, owner);

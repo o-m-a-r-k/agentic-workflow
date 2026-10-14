@@ -24,9 +24,10 @@ Acceptance and review (D13)
 Evidence and gate
 - I-78: an emptied or truncated ledger is reported by `wf verify` (never "verified"), `wf status`, `wf resume` and every
   other command, which no longer crash on it; `wf verify --all` reports an attempt whose anchor survives its ledger.
-- I-109: no command writes evidence outside the transaction that records it (reviewer rule copies, the strategist bundle,
-  an issue file, plans, amendments, tracker records, captures, exports, scope records), so a concurrent reader never sees
-  an "extra file".
+- I-109 (D15): no command writes evidence outside the transaction that records it (reviewer rule copies, the strategist
+  bundle, an issue file, plans, amendments, tracker readbacks and captures, the delivered comment, imported captures, exports,
+  scope records), and a write outside one is an engine error; `wf verify` reads under the same lock; a tracker readback waits
+  on the network before the transaction opens. A concurrent reader never sees an "extra file".
 - I-88, I-113: `wf run --lease` re-reads lease capacity while it waits; a waiting step names the lease, its holders and
   how capacity is raised; `wf status` and `wf resume` show why a check or gate was stopped.
 - I-91: an error inside the runner's scheduler records the run failed and stops every step it started (SIGTERM to each
@@ -720,6 +721,7 @@ A second adversarial pass over the integrated 0.5.0 branch, with scenarios in `s
 | [I-112](improvements/I-112.md) | A lesson for a repo the attempt did not admit lands untracked in that repo's main checkout | 0.7.4 | `scenarios/fix-074-lessons.test.mjs` |
 | [I-111](improvements/I-111.md) | Admission-time provisioning runs without the secrets a private install needs | 0.7.4 | `scenarios/fix-074-gate.test.mjs` |
 | [I-110](improvements/I-110.md) | Texts still describe checks 0.7.0 removed | 0.7.4 | `scenarios/fix-074-texts.test.mjs` |
+| [I-109](improvements/I-109.md) | Two evidence writes land outside the evidence transaction | 0.7.4 | `scenarios/fix-074-lifecycle.test.mjs` |
 | [I-108](improvements/I-108.md) | A valid Codex patch with an empty context line is refused as evidence | 0.7.4 | `scenarios/fix-074-lessons.test.mjs` |
 | [I-107](improvements/I-107.md) | A criterion added after acceptance is delivered without evidence | 0.7.4 | `scenarios/fix-074-lifecycle.test.mjs` |
 | [I-106](improvements/I-106.md) | The person could confirm no reserved decision away from the machine | 0.7.3 | `scenarios/approve-question.test.mjs` |
