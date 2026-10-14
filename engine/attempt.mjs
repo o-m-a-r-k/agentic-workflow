@@ -12,7 +12,7 @@ import { adoptNeedsApproval } from './owner.mjs';
 import { requireYes } from './approve.mjs';
 import { detectOwner, ownerRuntime, ownerString } from './hosts/index.mjs';
 import { noteAttempt } from './refusals.mjs';
-import { WfError, assertEngine, assertPlainGit, assertSafeId, git, hashFile, refuse, run, sha256 } from './util.mjs';
+import { WfError, assertEngine, assertPlainGit, assertSafeId, canonical as canonicalValue, git, hashFile, refuse, run, sha256 } from './util.mjs';
 
 export const worktreesRoot = (root) => path.join(root, '.wf-worktrees');
 export const worktreeDir = (root, id, repoName) => path.join(worktreesRoot(root), id, repoName);
@@ -31,6 +31,19 @@ const OPEN = (s) => !['done', 'abandoned'].includes(s.phase);
 // --all` and `wf resume` with "git failed to start: spawnSync git ENOENT" for every attempt, because the first git call
 // ran with the missing folder as its working directory. A folder without its `.git` entry counts as missing too: git
 // would walk up to the project's own repository from inside it and answer for the wrong tree. Decided before any git call.
+// Whether an accepted attempt's tree is still the one that was accepted: its heads are unchanged (a commit after the
+// acceptance, a repair or a base merge, moves them). An acceptance recorded without heads (before they were recorded)
+// stands; a tree that cannot be read is not taken as moved. One answer for the strategist and the lessons (0.7.4).
+export function acceptedTreeStands(state) {
+  if (!state.accepted) return false;
+  if (!state.accepted.heads) return true;
+  try {
+    return canonicalValue(state.accepted.heads) === canonicalValue(treeHashes(state));
+  } catch {
+    return true;
+  }
+}
+
 export const missingWorktrees = (state) => Object.entries(state.repos ?? {}).filter(([, r]) => r.worktree && !fs.existsSync(path.join(r.worktree, '.git'))).map(([repo, r]) => ({ repo, worktree: r.worktree, branch: r.branch ?? branchName(state.id) }));
 
 // --attempt wins; otherwise the attempt whose worktree contains cwd; otherwise the only open attempt. The answer is noted

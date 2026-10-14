@@ -41,7 +41,7 @@ if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === imp
       verdict = null;
     }
     if (verdict) {
-      process.stderr.write(`${verdict === MALFORMED ? MALFORMED_REFUSAL : REFUSAL} (${verdict})\n`);
+      process.stderr.write(`${verdict.startsWith(MALFORMED) ? MALFORMED_REFUSAL : REFUSAL} (${verdict})\n`);
       process.exit(2);
     }
     process.exit(0);
@@ -96,7 +96,7 @@ export function check(data) {
   for (const id of hostIds()) {
     const found = optional(findHost(id), 'fileTargets')?.(data);
     if (!found) continue;
-    if (found.malformed) return MALFORMED;
+    if (found.malformed) return typeof found.malformed === 'string' ? `${MALFORMED}: ${found.malformed}` : MALFORMED;
     files.push(...found.targets);
     fileEdit ||= found.fileEdit === true;
   }

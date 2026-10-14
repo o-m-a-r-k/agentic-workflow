@@ -754,7 +754,7 @@ test('I-108: the guard passes a valid patch with an empty context line, refuses 
   assert.match(judge(P(BEGIN, '*** Update File: notes/a.txt', '*** Move to: .wf-evidence/x', '@@', ' one', '', '-two', '+TWO', END)), /is workflow evidence/);
   assert.match(judge(P(BEGIN, '*** Delete File: notes/a.txt', '', '*** Update File: .wf-evidence/x', '@@', '-a', '+b', END)), /malformed native file-edit payload/, 'a blank line after a Delete is not a patch Codex reads');
   assert.equal(judge(scratch, 'Bash'), null, 'a shell command is never read as a patch');
-  for (const bad of ['not a patch', P(BEGIN, '*** Update File: a.txt', '@@', '-a', '+b', 'oops', END), P(BEGIN, '*** Add File: a.txt', '+a')]) assert.equal(judge(bad), 'malformed native file-edit payload', bad);
+  for (const bad of ['not a patch', P(BEGIN, '*** Update File: a.txt', '@@', '-a', '+b', 'oops', END), P(BEGIN, '*** Add File: a.txt', '+a')]) assert.match(judge(bad), /^malformed native file-edit payload: \S/, bad); // with the parser's reason (0.7.4)
 });
 
 // Named failure (I-108): the refusal for an unreadable payload said "this targets the workflow evidence folder", so the agent

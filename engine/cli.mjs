@@ -18,7 +18,7 @@ import { append, listAttempts, loadState, openEvidence } from './ledger.mjs';
 import { canonical, touchesEvidence } from './paths.mjs';
 import { openCount } from './improve.mjs';
 import { reviewDivisionSummary } from './review-groups.mjs';
-import { LESSON_FILE, addLesson, applySnippet, exportPluginLessons, findLesson, lessonPrompts, lessonWarnings, loadLessons, moveLesson, recur, relevantLessons, reviewLessons, setLesson } from './lessons.mjs';
+import { addLesson, applySnippet, exportPluginLessons, findLesson, isProjectWide, LESSON_FILE, lessonPrompts, lessonWarnings, loadLessons, moveLesson, recur, relevantLessons, reviewLessons, setLesson } from './lessons.mjs';
 import { LinkRefused, changesOf, ledgerEmpty, lostLedgers, rebaseline, releaseAttempt, seal, setVerifyLevel, unlockEvidence, verifyAttempt } from './evidence.mjs';
 import { acceptReview, amendCriteria, closeImplementer, designWarning, gateOrderCheck, batchCreate, batchEject, closeAfterHandoff, deliver, deliveredFiles, exportScreenshots, freezeCriteria, handoff, narrowDelivery, needsShown, nextAction, nextDecision, orphanNext, orphansOf, outsideWarning, recordReview, recordShown, reopen, screenshotsExportDir, shownDraftFile, uncovered, withAttempt } from './lifecycle.mjs';
 import { addDiscovered, channelOf, closeDiscovered, discoveredLine, openDiscovered, rateDiscovered } from './discovered.mjs';
@@ -735,10 +735,12 @@ async function dispatch(cmd, sub, positional, options) {
       if (sub !== 'amend') throw new WfError('usage: wf criteria amend --file f --reason "why"');
       const { state: s, changes, added, impactOwed, restrictions } = amendCriteria(root, options);
       const list = (ids) => ids.join(', ') || 'none';
-      for (const w of restrictions ?? []) process.stderr.write(`warning: ${w}\n`);
+      // A withdrawn acceptance is the outcome of the command (I-107), so it is printed with it, not as a warning.
+      const withdrawn = (restrictions ?? []).filter((w) => w.startsWith('acceptance withdrawn'));
+      for (const w of (restrictions ?? []).filter((x) => !withdrawn.includes(x))) process.stderr.write(`warning: ${w}\n`);
       const owedLine = impactOwed ? `\n  impact owed: this amendment adds scope without an impact map; the next implementer is told to find and report its consumers (or record it: \`wf criteria amend --file <f> --reason "..."\` with an \`impact\` addendum)` : s.impact?.addenda?.length && s.criteriaAmendments.at(-1)?.impact === true ? '\n  impact addendum recorded' : '';
       const addedLines = added.map((a) => `\n  repo added: ${a.repo} (worktree ${a.worktree}, base ${a.base.slice(0, 10)}); hand its work item to an implementer, and the reviewer judges the seam on both sides`).join('');
-      print(options, `criteria amended (${s.criteriaAmendments.length} amendment(s)); the reviewer will see the reason${addedLines}\n  criteria now (${s.criteria.length}): ${list(s.criteria.map((c) => c.id))}\n  changed: ${list(changes.changed)}; added: ${list(changes.added)}; dropped: ${list(changes.dropped.map((d) => `${d.id} (${d.reason})`))}${owedLine}`, { ...s, changes });
+      print(options, `criteria amended (${s.criteriaAmendments.length} amendment(s)); the reviewer will see the reason${withdrawn.map((w) => `\n  ${w}`).join('')}${addedLines}\n  criteria now (${s.criteria.length}): ${list(s.criteria.map((c) => c.id))}\n  changed: ${list(changes.changed)}; added: ${list(changes.added)}; dropped: ${list(changes.dropped.map((d) => `${d.id} (${d.reason})`))}${owedLine}`, { ...s, changes });
       return 0;
     }
     case 'scope': {
@@ -949,7 +951,9 @@ async function dispatch(cmd, sub, positional, options) {
     case 'accept': {
       const s = acceptReview(root, options);
       const lp = lessonPrompts(s).filter((p) => p.startsWith('finding'));
-      print(options, `review accepted.${lp.map((p) => `\nlesson: ${p}`).join('')} next: ${nextAction(root, s)}`, s);
+      // I-69: scope the accepted round said it did not reach is said here too, not only in resume, export and the comment.
+      const unreached = Array.isArray(s.review?.closure?.notReached) ? s.review.closure.notReached.filter((x) => String(x ?? '').trim()) : [];
+      print(options, `review accepted.${unreached.length ? `\nnot reached by this review: ${unreached.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join('; ')}` : ''}${lp.map((p) => `\nlesson: ${p}`).join('')} next: ${nextAction(root, s)}`, s);
       return 0;
     }
     case 'deliver': {
@@ -1232,7 +1236,7 @@ async function dispatch(cmd, sub, positional, options) {
         // tags in the ticket", but since I-64 it applies to every change in the project (`projectWide` in relevantLessons, engine/lessons.mjs).
         const declared = [l.repo ? `repo ${l.repo}` : null, l.components?.length ? `components ${l.components.join(', ')}` : null, l.paths.length ? `paths ${l.paths.join(', ')}` : null, l.kinds?.length ? `kinds ${l.kinds.join(', ')}` : null].filter(Boolean);
         const reach = declared.length ? declared.join('; ')
-          : l.scope === 'project' && !l.tags.length ? 'none declared, so it applies to every change in the project (a project lesson that narrows itself by nothing is project-wide)'
+          : isProjectWide(l) ? 'none declared, so it applies to every change in the project (a project lesson that narrows itself by nothing is project-wide)'
             : l.tags.length ? 'none declared (matched only by its tags in the ticket)'
               : 'none declared, and no tags: it matches no change (add `paths: ["**"]` to apply it to every change)';
         print(options, `${show(l)}\n  what happened: ${l.trigger?.what ?? ''}${l.trigger?.quote ? `\n  in their words: "${l.trigger.quote}"` : ''}${l.trigger?.attempt ? `\n  seen in: ${l.trigger.attempt}${l.trigger.finding ? ` (finding ${l.trigger.finding})` : ''}` : ''}\n  tags: ${l.tags.join(', ') || 'none'}; scope: ${reach}\n  ${l.file}`, l);

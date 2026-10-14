@@ -29,7 +29,7 @@ import { obligationSince } from './versions.mjs';
 import { requireOwnerDecision, strategistHandoff, strategistWaiting, strategyHold } from './strategy.mjs';
 import { requireYes } from './approve.mjs';
 import { home, startPromptFor, verifyAgent } from './provenance.mjs';
-import { allRecordedQueries, buildSweeps, deriveFromDiff, impactRequired, inventory, readSweepFile, rerun, staleRestrictionLines, staleRestrictions, sweepAnswers, validateAmendImpact, validatePlanImpact } from './impact.mjs';
+import { allRecordedQueries, buildSweeps, deriveFromDiff, documentationMatcher, impactRequired, inventory, readSweepFile, rerun, staleRestrictionLines, staleRestrictions, sweepAnswers, validateAmendImpact, validatePlanImpact } from './impact.mjs';
 import { ENGINE_VERSION, semverLt, WfError, YAML, assertEngine, assertSafeId, canonical, git, hashFile, hashValue, matchesAny, readJson, refuse, run, sha256, writeImmutable, writeJson } from './util.mjs';
 
 // An input file is read once: the text parsed is the text kept raw (a file rewritten between two reads could otherwise
@@ -754,7 +754,7 @@ export function handoff(root, role, options) {
   let division = null, groupMembers = null;
   if (role === 'reviewer' && mode === 'full' && divisionOptions.enabled) {
     const proposed = options.division === undefined ? null : JSON.parse(readOnce(options.division));
-    division = divideReview(bundle, reviewQueries ?? {}, { reviewers: divisionOptions.reviewers, division: proposed, weights: () => changedWeights(state, bundle) });
+    division = divideReview(bundle, reviewQueries ?? {}, { reviewers: divisionOptions.reviewers, division: proposed, weights: () => changedWeights(state, bundle), documentation: documentationMatcher(trusted) });
     if (division.mode === 'parallel') {
       const id = `review-${n}`, snapshot = reviewSnapshot(state), members = [...division.slices.map(s => `${agent}-${s.id}`), agent];
       const planFile = path.join(attemptDir(root, state.id), 'review', `division-${n}.json`);

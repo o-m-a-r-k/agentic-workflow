@@ -102,7 +102,7 @@ export default {
   // file-edit protocol is parsed; a shell command is never read as a patch.
   fileTargets(data) {
     if (data?.tool_name !== 'apply_patch' || !data.tool_input || typeof data.tool_input !== 'object') return null;
-    try { return { targets: patchTargets(data.tool_input.command), fileEdit: true }; } catch { return { malformed: true }; }
+    try { return { targets: patchTargets(data.tool_input.command), fileEdit: true }; } catch (error) { return { malformed: String(error?.message ?? true) }; }
   },
   findSkill,
   sandbox: 'workspace-write',

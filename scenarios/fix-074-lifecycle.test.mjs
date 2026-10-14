@@ -117,7 +117,7 @@ test('I-107: an amendment that adds a criterion withdraws the acceptance; delive
   assert.equal(refused.code, 75, 'a criterion no review mapped to evidence is not delivered');
   assert.match(refused.err, /review not accepted/);
   assert.equal(s.criteriaAmendments.at(-1).withdrewAcceptance, true);
-  assert.match(amended.err, /acceptance withdrawn: C2 was added or changed after the review that was accepted/);
+  assert.match(amended.out, /acceptance withdrawn: C2 was added or changed after the review that was accepted/, 'the outcome is printed with the command, not as a warning');
   assert.doesNotMatch(s.next, /deliver: `wf deliver`/, 'resume no longer says to deliver');
   assert.match(s.next, /C2 was added or re-worded by an amendment[\s\S]*wf handoff reviewer --agent <new id>/);
   const accept = run(a.root, ['accept', '--attempt', a.id]);

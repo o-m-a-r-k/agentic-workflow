@@ -13,11 +13,11 @@ import path from 'node:path';
 import { ADAPTER_DIR, adapterLocation, attemptAdapter, loadConfig, repoDir, trustedAdapter } from './config.mjs';
 import { readRegular, writeNoFollow } from './evidence.mjs';
 import { canonical, isInside, touchesEvidence } from './paths.mjs';
-import { treeHashes } from './attempt.mjs';
+import { acceptedTreeStands } from './attempt.mjs';
 import { append, listAttempts, loadState, readLedger } from './ledger.mjs';
 import { formatLesson, lessonStyle } from './lessons-format.mjs';
 import { componentsOf } from './topology.mjs';
-import { WfError, YAML, canonical as canonicalValue, git, matchesAny, now, refuse } from './util.mjs';
+import { WfError, YAML, git, matchesAny, now, refuse } from './util.mjs';
 import { obligationSince } from './versions.mjs';
 
 export const CAUSES = ['process', 'tooling', 'criteria', 'review', 'test', 'design-system', 'other'];
@@ -220,6 +220,10 @@ function validate(l, cfg = null) {
   return p;
 }
 
+// A project lesson that narrows itself by nothing (no repo, components, kinds, paths or tags) applies to every change in the
+// project (I-64); `wf lesson show` states the same rule from here (I-110).
+export const isProjectWide = (l) => l.scope === 'project' && !l.repo && !(l.components ?? []).length && !(l.kinds ?? []).length && !(l.paths ?? []).length && !(l.tags ?? []).length;
+
 // Whether the attempt's acceptance still describes its tree. It does not once the tree moved past the accepted heads (commits
 // made after the acceptance: a repair), nor once an implementer was handed after it and is still open (a repair under way,
 // before its first commit). An implementer left open when the review was accepted is no sign of either: committing a lesson
@@ -231,12 +235,7 @@ function acceptanceHolds(state) {
   const accepted = state.accepted;
   if (!accepted) return false;
   if ((state.implementers ?? []).some((x) => !x.closedAt && x.openedAt > accepted.at)) return false;
-  if (!accepted.heads) return true;
-  try {
-    return canonicalValue(accepted.heads) === canonicalValue(treeHashes(state));
-  } catch {
-    return true;
-  }
+  return acceptedTreeStands(state);
 }
 
 // Where a lesson of `repoName` is written now, and why: the attempt's worktree of that repo (committed there) while the attempt
@@ -571,7 +570,7 @@ export function relevantLessons(root, role, state, changed, { work = null } = {}
     // Named failure (I-64): `wf lesson add --project` with no tags and no paths, components or kinds could match nothing, ever
     // (the tags were its only selector and it had none), so the project lesson never reached a bundle. A project lesson that
     // narrows itself by nothing applies project-wide.
-    const projectWide = l.scope === 'project' && !l.repo && !l.components.length && !l.kinds.length && !l.paths.length && !l.tags.length;
+    const projectWide = isProjectWide(l);
     if (everyChange) why.push('it applies to every change (paths **)');
     else if (projectWide) why.push('it is a project-wide lesson (no narrower scope declared)');
     for (const t of l.tags) if (new RegExp(`(^|[^a-z0-9])${t.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([^a-z0-9]|$)`).test(text)) why.push(`the ticket mentions "${t}"`);

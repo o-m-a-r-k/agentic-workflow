@@ -15,7 +15,7 @@
 // Obligations from this module apply to attempts admitted at 0.7.0 or later (engine/versions.mjs, D7).
 import fs from 'node:fs';
 import path from 'node:path';
-import { actor, openState, treeHashes } from './attempt.mjs';
+import { acceptedTreeStands, actor, openState } from './attempt.mjs';
 import { approveHint, createDecision, questionFor } from './approve.mjs';
 import { STRATEGY_DEFAULTS, ADAPTER_DIR, agentTypeFor, roleClass, trustedAdapter } from './config.mjs';
 import { seal, withEvidenceTransaction } from './evidence.mjs';
@@ -31,7 +31,7 @@ import { severityLevel } from './review-policy.mjs';
 import { performSplit, resolveSplitItems } from './split.mjs';
 import { obligationSince } from './versions.mjs';
 import { detectOwner, hostChoice, isHost } from './hosts/index.mjs';
-import { WfError, assertSafeId, canonical, readJson, refuse, writeJson } from './util.mjs';
+import { WfError, assertSafeId, readJson, refuse, writeJson } from './util.mjs';
 
 export const ACTIONS = ['continue', 'consolidate', 'cluster', 'delta-review', 'split', 'ticket', 'model', 'escalate'];
 
@@ -71,15 +71,7 @@ function adapterOf(root, state) {
 // rounds; an acceptance counts only while the tree is the one accepted.
 // A delivered attempt's worktrees are gone: it is not being worked (second final review of 0.7.0: `wf signals` on a delivered
 // attempt refused instead of showing its numbers).
-const acceptedNow = (state) => {
-  if (!state.accepted) return false;
-  if (!state.accepted.heads) return true;
-  try {
-    return canonical(state.accepted.heads) === canonical(treeHashes(state));
-  } catch {
-    return true;
-  }
-};
+const acceptedNow = (state) => acceptedTreeStands(state);
 // A batch counts too (final review of 0.7.0: batches sat outside the person's escalation).
 const worked = (state) => obligationSince(state, '0.7.0') && state.intent === 'implementation' && !['done', 'abandoned', 'handoff-pending'].includes(state.phase) && !state.delivery?.completedAt && !acceptedNow(state);
 const switchedOff = (cfg) => cfg?.roles?.strategist === false || cfg?.strategy?.enabled === false;
