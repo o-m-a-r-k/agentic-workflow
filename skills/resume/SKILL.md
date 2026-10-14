@@ -5,7 +5,7 @@ description: Resume agentic-workflow work after an interruption, a compaction or
 
 # Resume
 
-1. `wf status` lists open attempts in this project (`wf status --all` across projects). An attempt whose worktree is gone shows as orphaned; `wf abandon --reason "..."` closes it and keeps its branches.
+1. `wf status` lists open attempts in this project (`wf status --all` across projects). An attempt whose worktree is gone shows as orphaned; `wf abandon --reason "..."` closes it and keeps its branches. When its change is already on its target branches (merged outside the workflow, or one repo delivered and the rest merged by hand), `wf close --shipped --reason "..."` closes it as shipped: the engine checks the commits are there and the user confirms the decision.
 2. `wf resume --attempt <id>` prints the next action and how far each base moved. With several open attempts always pass `--attempt`.
 3. To take over an attempt from another session: `wf adopt --attempt <id>` (or `--item <ticket>`). If the previous owner session is gone or idle, adoption is recorded at once; if it is still active, the engine creates a decision the user confirms: ask them in your question panel with the question and options it printed, then `wf approve <id> --from-question --attempt <attempt>`; or they type `wf approve <id> --attempt <attempt>` in their own terminal. Adoption keeps holds and existing work; it never lifts a hold or widens scope.
 4. A gate whose runner died, or that the owner stopped, continues with `wf gate`; finished steps are carried. A gate stopped for a finding or a tree change is not resumed: the fixed tree gets a delta review first.

@@ -9,7 +9,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 import { refreshModels } from './models.mjs';
-import { abandon, adopt, changedFiles, entry, hold, openState, release, resolveAttempt, setIntent } from './attempt.mjs';
+import { abandon, adopt, changedFiles, closeShipped, entry, hold, openState, release, resolveAttempt, setIntent } from './attempt.mjs';
 import { baseLines, baseMerge, baseStatus } from './base.mjs';
 import { findRoot, loadConfig, repoDir, requireRoot } from './config.mjs';
 import { exportAttempt, exportFile } from './export.mjs';
@@ -152,6 +152,7 @@ Work
   wf adopt [--attempt ID | --item ID] take over an open attempt as the current chat (an owner session active in the last
                                     30 minutes needs the owner's \`wf approve\`)
   wf abandon --reason "why" [--acknowledge-integration REPO:STATE]
+  wf close --shipped --reason "why"  close an attempt whose change is already on its target branches, without its acceptance (the owner's decision)
   wf batch create --members A,B | wf batch eject --batch B --member A
 
 Status
@@ -1104,6 +1105,14 @@ async function dispatch(cmd, sub, positional, options) {
     case 'adopt': {
       const s = adopt(root, options);
       print(options, `you now own ${s.id}.\n${summary(root, s)}`, s);
+      return 0;
+    }
+    case 'close': {
+      if (!options.shipped) throw new WfError('usage: wf close --shipped --reason "why" --attempt ID (an attempt whose change is already on its target branches)');
+      const s = closeShipped(root, options);
+      const lines = Object.entries(s.shipped.repos).map(([n, h]) => `  ${n}: ${h.unchanged ? 'unchanged' : `${h.commit.slice(0, 10)} on ${h.target}`}`);
+      const open = [...(s.shipped.open?.discovered ?? []).map((d) => `${d.id} (discovered${d.severity ? `, ${d.severity}` : ''}): ${d.summary}`), ...(s.shipped.open?.lastReview ?? []).map((f) => `${f.id} (last review${f.severity ? `, ${f.severity}` : ''}): ${f.summary}`)];
+      print(options, `${s.id} closed as shipped (decision ${s.shipped.decision}), without the workflow's acceptance:\n${lines.join('\n')}${open.length ? `\nstill open when it was closed (recorded):\n  ${open.join('\n  ')}` : ''}\nworktrees removed; the tracker is not touched: move the ticket yourself`, s);
       return 0;
     }
     case 'abandon': {

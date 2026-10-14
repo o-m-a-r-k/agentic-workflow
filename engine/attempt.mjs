@@ -350,7 +350,7 @@ export function abandon(root, options) {
   const landed = recorded.filter((d) => !(d.skipped && !d.commit));
   if (landed.length) {
     const list = recorded.map((d) => (d.skipped ? `${d.repo} skipped (${d.skipped}; nothing pushed)` : `${d.repo} delivered (${String(d.commit ?? '').slice(0, 10)} on ${d.target ?? 'its target'})`)).join('; ');
-    throw refuse(`${state.id} is partly delivered: ${list}; a delivered repo cannot be taken back, so the attempt is finished, not abandoned`, `\`wf deliver\` delivers the remaining repos; after a delivery adapter fault, commit the fixed adapter on the base branch and re-pin this attempt to it: \`wf deliver --repin-adapter --reason "<why>"\` (docs/lifecycle.md, "Recovering from an adapter fault")`);
+    throw refuse(`${state.id} is partly delivered: ${list}; a delivered repo cannot be taken back, so the attempt is finished, not abandoned`, `\`wf deliver\` delivers the remaining repos; when every change is already on its target branch (merged outside the workflow), \`wf close --shipped --reason "<why>"\` closes it under the owner's decision; after a delivery adapter fault, commit the fixed adapter on the base branch and re-pin this attempt to it: \`wf deliver --repin-adapter --reason "<why>"\` (docs/lifecycle.md, "Recovering from an adapter fault")`);
   }
   // Named failure (0.5.0 integration review): abandon looked only at `repo.delivered`. A delivery adapter that had already
   // merged the change (a post-merge state the owner had not acknowledged) or left it awaiting merge records only
@@ -362,18 +362,21 @@ export function abandon(root, options) {
   const cfg = trustedAdapter(root, state);
   // An orphaned attempt (its worktree folder is gone) is abandoned without a git call into the missing folder; the branch stays.
   const gone = new Set(missingWorktrees(state).map((m) => m.repo));
+  // A repo whose worktree is gone is asked from its recorded change in its own checkout (I-116: an orphan whose change had been
+  // merged by hand was abandoned, the shipped change recorded as given up).
+  const goneLanded = gone.size ? new Map(changesOnTarget(root, state, cfg).filter((c) => gone.has(c.repo) && c.landed).map((c) => [c.repo, c])) : new Map();
   const onTargets = [];
   const open = [];
   for (const [name, r] of Object.entries(state.repos)) {
     if (state.delivery.repos[name]) continue;
     const repo = cfg.repos.find((x) => x.name === name);
-    const on = repo && r.worktree && !gone.has(name) ? onTarget(r, repo) : null;
+    const on = repo && r.worktree && !gone.has(name) ? onTarget(r, repo) : goneLanded.has(name) ? { head: goneLanded.get(name).commit, target: goneLanded.get(name).target } : null;
     if (on) onTargets.push(`${name}: ${on.head.slice(0, 10)} is already on ${on.target}`);
     const i = state.delivery.integrating?.[name];
     const st = i ? (i.observed?.state === undefined || i.observed?.state === null || i.observed?.state === '' ? 'none' : String(i.observed.state)) : null;
     if (i && st !== 'rejected' && !on) open.push({ repo: name, state: st, url: typeof i.url === 'string' ? i.url : null });
   }
-  if (onTargets.length) throw refuse(`${state.id} is not abandoned: its change is on the target branch (${onTargets.join('; ')}); a change that landed is delivered or reverted in a new attempt, never abandoned`, '`wf deliver` records it (the adapter is asked again); to take it back, revert it in a new attempt (`wf reopen`)');
+  if (onTargets.length) throw refuse(`${state.id} is not abandoned: its change is on the target branch (${onTargets.join('; ')}); a change that landed is delivered, closed as shipped (\`wf close --shipped\`, the owner's decision) or reverted in a new attempt, never abandoned`, '`wf deliver` records it (the adapter is asked again); to take it back, revert it in a new attempt (`wf reopen`)');
   const given = typeof options['acknowledge-integration'] === 'string' ? options['acknowledge-integration'].split(',').map((x) => x.trim()).filter(Boolean) : [];
   const unacked = open.filter((o) => !given.includes(`${o.repo}:${o.state}`));
   // 0.7.0: abandoning past an integration the adapter still reports is overriding a check; the person confirms it.
@@ -415,6 +418,63 @@ export function release(root, options) {
   // `wf approve` (kind lift-hold) instead of the owner's words read from a transcript.
   const approval = requireYes(root, state, { kind: 'lift-hold', key: `release:${state.id}:${state.activeHold.at ?? ''}`, summary: `lift the hold on ${state.id}: ${state.activeHold.reason}`, what: `lifting the hold on ${state.id}`, options });
   append(root, state.id, 'release', { decision: approval.decision }, actor(options));
+  return loadState(root, state.id);
+}
+
+// `wf close --shipped`: an attempt whose change reached its target branches outside the workflow (a repo delivered and the
+// others merged by hand, or all of them), closed as shipped without the workflow's acceptance (I-116). Named failure: such an
+// attempt could be neither abandoned (a delivered repo is never taken back) nor delivered (no acceptance), so it stayed
+// ORPHANED in every listing after the person had decided to close it as it shipped.
+//
+// The engine checks the fact, the person makes the decision. Each repo's change is its delivered commit, else the head the
+// last gate ran on, else the accepted head, else its worktree's HEAD; a repo whose change is its base changed nothing. Every
+// other change must be on its repo's remote target branch (fetched now, in the repo's own checkout, so a missing worktree
+// does not matter). Closing without the acceptance is the person's (override-gate), one decision that also covers a hold;
+// what was still open (discovered issues, the last review's findings) is recorded with it. The tracker is not touched.
+// Each repo's change and whether it is on its remote target branch, asked of the repo's own checkout (a missing worktree does
+// not matter): { repo, commit, target, unchanged, landed, known } or { repo, problem }. The change is the delivered commit,
+// else the head the last gate ran on, else the accepted head, else the worktree's HEAD (I-116).
+export function changesOnTarget(root, state, cfg = trustedAdapter(root, state)) {
+  const lastGate = (state.gates ?? []).filter((g) => g.tree).at(-1);
+  return Object.entries(state.repos).map(([name, r]) => {
+    const repo = cfg.repos.find((x) => x.name === name);
+    if (!repo) return { repo: name, problem: 'not a repo of the adapter this attempt was admitted under' };
+    const worktreeHead = () => (r.worktree && fs.existsSync(path.join(r.worktree, '.git')) ? git(r.worktree, ['rev-parse', 'HEAD']) : null);
+    const candidate = state.delivery.repos[name]?.commit ?? lastGate?.tree?.[name] ?? state.accepted?.heads?.[name] ?? worktreeHead();
+    const head = typeof candidate === 'string' ? candidate.replace(/\+dirty$/, '') : null;
+    if (!head || !/^[0-9a-f]{40}$/.test(head)) return { repo: name, problem: 'no recorded change to check (no delivery, gate, acceptance or worktree head)' };
+    const target = `${repo.remote ?? 'origin'}/${repo.base}`;
+    if (head === r.base) return { repo: name, commit: head, target, unchanged: true, landed: false, known: true };
+    const dir = repoDir(root, repo);
+    run('git', ['fetch', '--quiet', repo.remote ?? 'origin', repo.base], { cwd: dir, allowFail: true });
+    const known = run('git', ['cat-file', '-e', `${head}^{commit}`], { cwd: dir, allowFail: true }).status === 0;
+    const landed = known && run('git', ['merge-base', '--is-ancestor', head, target], { cwd: dir, allowFail: true }).status === 0;
+    return { repo: name, commit: head, target, unchanged: false, landed, known };
+  });
+}
+
+export function closeShipped(root, options) {
+  const state = openState(root, options);
+  if (!options.reason || options.reason === true) throw new WfError('--reason is required: why the attempt is closed as it shipped');
+  if (['done', 'abandoned'].includes(state.phase)) throw refuse(`${state.id} is already ${state.phase}`);
+  const heads = {};
+  const problems = [];
+  for (const c of changesOnTarget(root, state)) {
+    if (c.problem) problems.push(`${c.repo}: ${c.problem}`);
+    else if (c.unchanged) heads[c.repo] = { commit: c.commit, target: c.target, unchanged: true };
+    else if (!c.landed) problems.push(`${c.repo}: ${c.commit.slice(0, 10)} is ${c.known ? 'not' : 'not known, so not shown to be'} on ${c.target}`);
+    else heads[c.repo] = { commit: c.commit, target: c.target };
+  }
+  if (problems.length) throw refuse(`${state.id} is not closed as shipped: ${problems.join('; ')}`, 'a change that is not on its target branch is delivered (`wf deliver`) or abandoned; only an attempt whose every change has landed is closed as shipped', { id: 'close:not-shipped' });
+  const list = Object.entries(heads).map(([n, h]) => (h.unchanged ? `${n} unchanged` : `${n} ${h.commit.slice(0, 10)} on ${h.target}`)).join('; ');
+  const decision = requireYes(root, state, { kind: 'override-gate', key: `close-shipped:${state.id}:${sha256(JSON.stringify(heads)).slice(0, 16)}`, summary: `close ${state.id} as shipped without its acceptance (${list})${state.activeHold ? `, over its hold "${state.activeHold.reason}"` : ''}`, what: `closing ${state.id} as shipped`, options }).decision;
+  const lastReview = (state.reviews ?? []).at(-1);
+  const open = {
+    discovered: (state.discovered ?? []).filter((d) => d.status === 'open').map((d) => ({ id: d.id, severity: d.severity ?? null, summary: String(d.summary ?? '').slice(0, 300) })),
+    lastReview: lastReview ? (lastReview.closure?.findings ?? []).map((f) => ({ id: f.id, severity: f.severity ?? null, summary: String(f.summary ?? f.title ?? '').slice(0, 300) })) : [],
+  };
+  append(root, state.id, 'shipped.closed', { reason: String(options.reason), decision, repos: heads, open, ...(state.activeHold ? { hold: state.activeHold.reason } : {}) }, actor(options));
+  cleanupWorktrees(root, loadState(root, state.id));
   return loadState(root, state.id);
 }
 

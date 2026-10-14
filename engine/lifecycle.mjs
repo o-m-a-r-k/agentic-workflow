@@ -2414,7 +2414,7 @@ export function orphanNext(root, s, gone) {
     const repo = cfg?.repos.find((r) => r.name === m.repo);
     return repo ? `git -C ${repoDir(root, repo)} worktree prune && git -C ${repoDir(root, repo)} worktree add ${m.worktree} ${m.branch}` : null;
   }).filter(Boolean);
-  return `ORPHANED, worktree missing: ${gone.map((m) => m.worktree).join(', ')}. Nothing runs in a missing folder. If it was removed by mistake, put it back from the branch (committed work only): ${restore.join(' ; ') || 'git worktree add <path> <branch> from the repo checkout'}. Otherwise \`wf abandon --attempt ${s.id} --reason "<why>"\` (its branch is kept)`;
+  return `ORPHANED, worktree missing: ${gone.map((m) => m.worktree).join(', ')}. Nothing runs in a missing folder. If it was removed by mistake, put it back from the branch (committed work only): ${restore.join(' ; ') || 'git worktree add <path> <branch> from the repo checkout'}. Otherwise \`wf abandon --attempt ${s.id} --reason "<why>"\` (its branch is kept), or, when its change is already on its target branches (merged outside the workflow), \`wf close --shipped --attempt ${s.id} --reason "<why>"\` (the owner's decision)`;
 }
 
 export function nextDecision(root, state) {

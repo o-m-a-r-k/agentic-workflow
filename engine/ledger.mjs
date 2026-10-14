@@ -628,6 +628,12 @@ export function reduce(entries) {
         s.abandoned = { reason: d.reason, at: e.at };
         s.phase = 'abandoned';
         break;
+      // I-116: closed as it shipped, outside the workflow's acceptance (the person's decision); its hold ends with it.
+      case 'shipped.closed':
+        s.shipped = { reason: d.reason, at: e.at, decision: d.decision ?? null, repos: d.repos ?? {}, open: d.open ?? null };
+        s.phase = 'done';
+        for (const h of s.holds) if (!h.released) h.released = { at: e.at, by: e.actor, decision: d.decision ?? null, closedAsShipped: true };
+        break;
       default:
         break;
     }
