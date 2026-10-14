@@ -109,8 +109,9 @@ test('I-42: an exact historical issue deferred by the owner is reconciled withou
   const p = project('deferred-ledger-report');
   const file = report(p, 'impl-old', 'Follow-up: the total is wrong.');
   const before = fs.readFileSync(file);
-  ok(wf(p.root, ['discovered', 'add', '--summary', 'the total is wrong', '--found-by', 'impl-old', '--attempt', p.id]));
-  assert.match(wf(p.root, ['discovered', 'close', 'D1', '--deferred', '--attempt', p.id], { ownerSilent: true }).err, /deferring D1 is the owner's decision/);
+  // Only a low issue may be deferred (D17), and only with the person's yes: the authority is theirs, not the review's.
+  ok(wf(p.root, ['discovered', 'add', '--summary', 'the total is wrong', '--severity', 'low', '--found-by', 'impl-old', '--attempt', p.id]));
+  assert.match(wf(p.root, ['discovered', 'close', 'D1', '--deferred', '--attempt', p.id], { ownerSilent: true }).err, /letting D1 leave is the owner's decision/);
   ok(wf(p.root, ['discovered', 'close', 'D1', '--deferred', '--reason', 'complete the total repair in the next ticket', '--attempt', p.id]));
   commitIn(p.wt, { 'src/a.txt': 'other repair\n' });
   ok(review(p));

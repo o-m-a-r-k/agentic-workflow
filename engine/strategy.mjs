@@ -26,7 +26,9 @@ import { planPaths } from './scope.mjs';
 import { mkdirStateDirectory } from './state-folders.mjs';
 import { computeSignals, courseLines, handedRounds, recordedRounds, roundMetrics } from './signals.mjs';
 import { introducedFindings } from './introduced.mjs';
-import { severityLevel } from './review-policy.mjs';
+import { observations, placementLevel, severityLevel } from './review-policy.mjs';
+import { discoveredLevel } from './discovered.mjs';
+import { RULE } from './leaving.mjs';
 import { performSplit, resolveSplitItems } from './split.mjs';
 import { obligationSince } from './versions.mjs';
 import { detectOwner, hostChoice, isHost } from './hosts/index.mjs';
@@ -308,9 +310,8 @@ export function strategistHandoff(root, state, options) {
         return null;
       }
     })(),
-    // The person's rule for what may leave the delivery (2026-10-13): high (or unrated) is fixed here or waits only with the
-    // person's `wf approve`; medium is your judgement, with its reason; low may be ticketed.
-    severityRule: 'high: fixed in this delivery (here or a sibling attempt of the batch), leaves only with the person\'s approval; medium: your judgement, give the reason; low: may be ticketed',
+    // The person's rule for what may leave the delivery (D17, 2026-10-14).
+    severityRule: RULE,
     earlierDecisions: state.strategy.decisions.map((d) => ({ id: d.id, at: d.at, action: d.action, rationale: d.rationale, handedBecause: d.handedBecause ?? null, prediction: d.prediction, outcome: predictionStatus(state, d, signals, nowMs) })),
     invariants: cfg.invariants ? path.resolve(root, ADAPTER_DIR, cfg.invariants) : null,
     roleAppendix: appendix && fs.existsSync(appendix) ? appendix : null,
@@ -321,7 +322,7 @@ export function strategistHandoff(root, state, options) {
       action: ACTIONS.join(' | '),
       rationale: 'why this action, in a few sentences',
       prediction: { signal: `<${Object.keys(PREDICTABLE).join(' | ')}> <op> <number>, for example "blockingLatest <= 2"`, by: 'a review round number (recorded rounds so far: ' + signals.rounds.length + ') or an ISO time' },
-      items: 'optional: the observation (`reviewer:id`) or discovered (`D<n>`) ids to ticket (ticket; by the severity rule), the families to sweep (cluster), the criteria to consolidate',
+      items: 'optional: the observation (`reviewer:id`) or discovered (`D<n>`) ids to ticket (ticket; low items only, each then decided by the person), the families to sweep (cluster), the criteria to consolidate',
       split: '{ items: [work item, criterion, observation `reviewer:id` or discovered ids], reason } (action split)',
       model: '{ role: implementer|reviewer|planner, class } (action model): the next handoffs of that role run at that work class, with its pinned model and effort',
       options: '2 or 3 short choices for the owner (action escalate)',
@@ -410,11 +411,20 @@ export function recordStrategy(root, options) {
   let moved = null;
   if (closure.action === 'split') moved = resolveSplitItems(root, state, closure.split.items);
   if (closure.action === 'ticket') {
-    // Open observations and open discovered issues; whether one may leave the delivery is the person's severity rule,
+    // Open observations and open discovered issues; whether one may leave the delivery is the person's rule (D17),
     // applied when the owner agent files it (`wf scope ticket`, `wf discovered close --deferred`).
     const refs = new Set([...signals.observationsOpen.map((o) => o.ref), ...(state.discovered ?? []).filter((d) => d.status === 'open' && d.kind !== 'bookkeeping').map((d) => d.id)]);
     const bad = closure.items.filter((id) => !refs.has(id));
     if (bad.length) throw refuse(`${bad.join(', ')} ${bad.length > 1 ? 'are' : 'is'} not an open observation or discovered issue of ${state.id}${refs.size ? ` (open: ${[...refs].join(', ')})` : ''}; a finding that blocks is fixed, or waived by the person`, null, { id: 'strategy:unknown-item' });
+    // Only a low item may be queued to leave (D17); the person then decides it with the owner's `wf scope ticket`.
+    const levelOf = (ref) => {
+      const d = (state.discovered ?? []).find((x) => x.id === ref);
+      if (d) return discoveredLevel(d);
+      const f = observations(state).find((x) => x.ref === ref);
+      return f ? placementLevel(state, f) : 'high';
+    };
+    const kept = closure.items.filter((ref) => levelOf(ref) !== 'low');
+    if (kept.length) throw refuse(`${kept.join(', ')} ${kept.length > 1 ? 'are' : 'is'} medium or high: ${RULE}`, 'write a closure that fixes them (cluster, consolidate or split into a sibling attempt of the batch)', { id: 'strategy:ticket-not-low' });
   }
   const id = `S${state.strategy.decisions.length + 1}`;
   const outcomes = state.strategy.decisions.map((d) => ({ d, o: predictionStatus(state, d, signals, nowMs) })).filter(({ d, o }) => !state.strategy.outcomes[d.id] && ['held', 'missed'].includes(o.status)).map(({ d, o }) => ({ decision: d.id, status: o.status, observed: o.observed }));

@@ -30,7 +30,7 @@ You are the implementer for one agentic-workflow attempt. Read the bundle path t
 
 **Severity** (one scale for every reviewer and implementer): **high** = a user, a tenant or the business is harmed or blocked (wrong or lost data, a broken flow, security, money, a visible defect on a primary screen); **medium** = degraded but usable (a secondary flow, an edge case, a confusing state); **low** = polish (wording, spacing, naming, style). A tenant-isolation, authorization or money defect is always high.
 
-**Your report** (the engine records it at `wf handoff close`; a `left` item becomes a discovered issue, so nothing you saw is dropped; its honest `severity` decides whether it may wait: high is fixed in this delivery unless the person approves, medium is the owner's judgement, low may wait for a follow-up ticket; an item that breaks a critical invariant of the project carries `invariant` (which one) and is high): write JSON to the bundle's `implementerReportFile`, early with `implementer`, `approach` and `expect`, and complete it when you finish:
+**Your report** (the engine records it at `wf handoff close`; a `left` item becomes a discovered issue, so nothing you saw is dropped; its honest `severity` decides whether it may wait: medium and high are fixed in this delivery, a low one waits only with the person's yes; an item that breaks a critical invariant of the project carries `invariant` (which one) and is high): write JSON to the bundle's `implementerReportFile`, early with `implementer`, `approach` and `expect`, and complete it when you finish:
 
 ```json
 { "implementer": "<your agent id>",

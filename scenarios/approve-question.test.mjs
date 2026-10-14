@@ -149,7 +149,8 @@ test('Codex: a question-panel reply bound to its request_user_input call confirm
 test('a deferral the person confirmed in the question panel says so wherever it is listed', () => {
   const p = singleRepoProject('approve-q-defer', {});
   const e = ok(wf(p.root, ['entry', '--item', 'ENG-933', '--json'], silent)).json();
-  ok(wf(p.root, ['discovered', 'add', '--attempt', e.id, '--summary', 'tables have no phone card view', '--severity', 'high'], silent));
+  // Only a low issue may leave the delivery (D17), and only with the person's yes: the channel of that yes is what is listed.
+  ok(wf(p.root, ['discovered', 'add', '--attempt', e.id, '--summary', 'tables have no phone card view', '--severity', 'low'], silent));
   assert.equal(wf(p.root, ['discovered', 'close', 'D1', '--deferred', '--reason', 'the mobile pass', '--attempt', e.id], silent).code, 75);
   const d = state(p.root, e.id).decisions[0];
   const env = { CLAUDE_CODE_SESSION_ID: CLAUDE };

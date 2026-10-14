@@ -9,6 +9,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 import { refreshModels } from './models.mjs';
+import { RULE } from './leaving.mjs';
 import { abandon, adopt, attemptForName, changedFiles, closeShipped, entry, hold, openState, release, resolveAttempt, setIntent } from './attempt.mjs';
 import { baseLines, baseMerge, baseStatus } from './base.mjs';
 import { findRoot, loadConfig, repoDir, requireRoot } from './config.mjs';
@@ -57,9 +58,8 @@ Work
   wf discovered add --summary "..." [--severity high|medium|low] [--invariant "<which>"] [--kind defect|bookkeeping] [--where file:line] [--found-by ID] [--blocked-by W] | list
   wf discovered rate D1 --severity high|medium|low [--reason "why"]
                                     correct a rating (lowering records its reason; an invariant issue stays high)
-  wf discovered close D1[,D2] --fixed SHA | --deferred --reason "why"
-                                    high or unrated waits only when the owner confirms it with \`wf approve\`;
-                                    medium needs --reason; low may wait
+  wf discovered close D1[,D2] --fixed SHA | --deferred [--reason "why"]
+                                    only a low issue may wait, with the person's yes; medium and high are fixed here
   wf handoff planner|implementer|reviewer|tester --agent ID [--work W1] [--sweep F] [--session SID] [--runtime ${hostChoice()}]
                                     --sweep (optional): a fix handoff names a pattern sweep per family of open findings
   wf handoff wait --agent ID [--minutes N]
@@ -106,13 +106,12 @@ Work
   wf stop --class major-finding|tree-change|owner-decision --reason "why"
                                     stop a running gate; records the class and the minutes discarded
   wf scope list                     every open review finding: blocks or observation, its family, where it went
-  wf scope ticket --finding REVIEWER:F1[,REVIEWER:F2] --capture RAW.json [--reason "why it waits"]
-                                    raw tracker readback of the follow-up ticket; high severity, or a finding that blocks,
-                                    needs wf approve, medium needs --reason, low neither
+  wf scope ticket --finding REVIEWER:F1[,D3] --capture RAW.json [--reason "why it waits"]
+                                    raw tracker readback of the follow-up ticket; low items only, with the person's yes
   wf scope fixed --finding REVIEWER:F1 --commit SHA
                                     an observation this attempt fixed; the next reviewer verifies it
-  wf scope defer --finding REVIEWER:F1[,REVIEWER:F2] [--reason "why it waits"]
-                                    observations left for later, listed in the delivered comment (same severity rule)
+  wf scope defer --finding REVIEWER:F1[,D3] [--reason "why it waits"]
+                                    low observations and discovered issues left for later, in one decision of the person
   wf scope waive --finding REVIEWER:F1 [--reason "why"]
                                     a blocking finding set aside: the person's decision (\`wf approve\`)
   wf scope move --finding REVIEWER:F1 --sibling ATTEMPT
@@ -779,7 +778,7 @@ async function dispatch(cmd, sub, positional, options) {
       // I-18: the discovered-issue ledger. Any role records what it finds; only the owner defers (a confirmed decision).
       if (sub === 'add') {
         const r = addDiscovered(root, options);
-        print(options, `discovered ${r.id} recorded on ${r.state.id}; fix it here and close it with the fix commit (\`wf discovered close ${r.id} --fixed <commit>\`), or, by the severity rule, let it wait (\`wf discovered close ${r.id} --deferred --reason "<why>"\`: low freely, medium with your reason, high, unrated or an invariant only with the person's \`wf approve\`)`, r.state.discovered.at(-1));
+        print(options, `discovered ${r.id} recorded on ${r.state.id}; fix it here and close it with the fix commit (\`wf discovered close ${r.id} --fixed <commit>\`); ${RULE}`, r.state.discovered.at(-1));
         return 0;
       }
       if (sub === 'close') {
@@ -798,7 +797,7 @@ async function dispatch(cmd, sub, positional, options) {
         print(options, s.discovered.length ? s.discovered.map((d) => discoveredLine(d, s.id)).join('\n') : `no discovered issues on ${s.id}`, s.discovered);
         return 0;
       }
-      throw new WfError('usage: wf discovered add --summary "..." [--severity high|medium|low] [--invariant "<which>"] [--kind defect|bookkeeping] [--where file:line] [--found-by ID] | list | rate D1 --severity S [--reason "..."] | close D1[,D2] --fixed SHA | --deferred --reason "..." (high, unrated or an invariant: the owner confirms with wf approve)');
+      throw new WfError('usage: wf discovered add --summary "..." [--severity high|medium|low] [--invariant "<which>"] [--kind defect|bookkeeping] [--where file:line] [--found-by ID] | list | rate D1 --severity S [--reason "..."] | close D1[,D2] --fixed SHA | --deferred [--reason "..."] (a low issue only, with the person\'s yes; medium and high are fixed here)');
     }
     case 'handoff': {
       if (sub === 'wait') {

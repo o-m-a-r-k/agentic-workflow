@@ -2,8 +2,8 @@
 // during a ticket (a pager summing only the current page, a table with no phone view, an implicit default, a failed step
 // that strands the user) and parked them as follow-ups or "harmless today" without the owner deciding. Every issue found
 // during a ticket is recorded here by whoever finds it; it ends fixed by a commit of this ticket or deferred by the
-// person's severity rule (engine/review-policy.mjs placementOf: high only with `wf approve`, medium with a recorded
-// reason, low freely); delivery refuses an open one and the reviewer gives each a verdict.
+// person's rule (D17, engine/leaving.mjs: medium and high are fixed here; a low one waits only with the person's yes);
+// delivery refuses an open one and the reviewer gives each a verdict.
 import { isBookkeeping, legacyWaived, severityLevel } from './review-policy.mjs';
 import { actor, openState } from './attempt.mjs';
 import { append, loadState } from './ledger.mjs';
@@ -11,7 +11,8 @@ import crypto from 'node:crypto';
 import { home } from './provenance.mjs';
 import { findHost, optional } from './hosts/index.mjs';
 import { WfError, git, refuse, run } from './util.mjs';
-import { deliverCoreDecision, requireYes } from './approve.mjs';
+import { requireYes } from './approve.mjs';
+import { leavingDecision } from './leaving.mjs';
 
 const text = (v) => (typeof v === 'string' ? v.trim() : '');
 const OPEN = (s) => !['done', 'abandoned'].includes(s.phase);
@@ -62,7 +63,7 @@ export function ticketCommit(state, sha, repo) {
   return found[0];
 }
 
-// Where a discovered issue may go (the person's severity rule, D10): one that breaks a critical invariant (tenant
+// Where a discovered issue may go (the person's rule, D17): one that breaks a critical invariant (tenant
 // isolation, authorization, money; `invariant`) is high whatever it is rated; unrated is high.
 // Named failure (second final review of 0.7.0): a tenant defect an implementer rated medium was deferred on the agent's
 // reason alone, against D1.
@@ -82,31 +83,26 @@ export function closeDiscovered(root, idArg, options) {
   if (!entries.length) throw new WfError('name the discovered issue(s): `wf discovered close D1[,D2] --fixed <commit> | --deferred --reason "..."`');
   const fixed = typeof options.fixed === 'string' ? options.fixed.trim() : '';
   const deferred = options.deferred === true;
-  if (Boolean(fixed) === deferred) throw new WfError(`close ${ids.join(',')} with either --fixed <commit> or --deferred --reason "<why it waits>" (a high-severity, unrated or invariant issue waits only with the person's \`wf approve\`)`);
+  if (Boolean(fixed) === deferred) throw new WfError(`close ${ids.join(',')} with either --fixed <commit> or --deferred [--reason "<why it waits>"] (only a low issue may wait, with the person's yes; medium and high are fixed here)`);
   if (fixed) {
     const c = ticketCommit(state, fixed, typeof options.repo === 'string' ? options.repo : null);
     for (const e of entries) append(root, state.id, 'discovered.closed', { id: e.id, outcome: 'fixed', repo: c.repo, commit: c.commit, evidence: text(options.evidence) || null }, actor(options));
     return { state: loadState(root, state.id), outcome: 'fixed', ids, ...c };
   }
-  // Deferral moves a defect out of this delivery. The person's severity rule (2026-10-13): high (or unrated, or an
-  // invariant) waits only with `wf approve`; medium is the owner agent's judgement with its reason recorded; low may wait.
-  // Named failure (0.7.0): the owner-phrase grammar refused real deferrals after the person had said yes.
+  // Deferral moves a defect out of this delivery: only a low one, with the person's yes (D17, engine/leaving.mjs; 0.7.6
+  // and earlier let a medium one wait on the owner agent's reason and a low one freely). Named failure (0.7.0): the
+  // owner-phrase grammar refused real deferrals after the person had said yes.
   const reason = text(options.reason);
-  const medium = entries.filter((e) => discoveredLevel(e) === 'medium');
-  if (medium.length && !reason) throw refuse(`${medium.map((e) => e.id).join(', ')} ${medium.length > 1 ? 'are' : 'is'} medium severity: fixing it here or deferring it is your judgement; say why it waits`, `\`wf discovered close ${ids.join(',')} --deferred --reason "<why it can wait>"\``, { id: 'discovered:medium-reason' });
-  const high = entries.filter((e) => discoveredLevel(e) === 'high');
-  let decision = null;
-  if (high.length) {
-    const latest = high.map((e) => e.at).filter(Boolean).sort().at(-1) ?? null;
-    const core = deliverCoreDecision(state, latest);
-    decision = core ? core.id : requireYes(root, state, { kind: 'move-out-of-batch', key: `${state.id}:${high.map((e) => e.id).join(',')}`, summary: `defer out of this delivery: ${high.map((e) => `${state.id}:${e.id} (${e.invariant ? `invariant: ${e.invariant}` : e.severity ?? 'unrated'}) ${e.summary}`).join('; ')}${reason ? ` (${reason})` : ''}`, what: `deferring ${high.map((e) => e.id).join(', ')}`, options }).decision;
-  }
+  const ratedFrom = (e) => {
+    const first = (e.rated ?? [])[0];
+    const was = first ? severityLevel(first.from) ?? 'high' : null;
+    return was && { high: 2, medium: 1, low: 0 }[was] > { high: 2, medium: 1, low: 0 }[discoveredLevel(e)] ? first.from ?? 'unrated' : null;
+  };
+  const decision = leavingDecision(root, state, entries.map((e) => ({ ref: e.id, level: discoveredLevel(e), blocks: false, severity: e.severity ?? null, summary: e.summary, ratedFrom: ratedFrom(e), raisedAt: e.at ?? null })), { verb: 'deferred', reason, options });
+  // The channel the person used (their terminal or the question panel) travels with the deferral (0.7.3).
+  const via = (state.decisions ?? []).find((x) => x.id === decision)?.approved?.via ?? null;
   for (const e of entries) {
-    const level = discoveredLevel(e);
-    // The channel the person used (their terminal or the question panel) travels with the deferral (0.7.3).
-    const via = (state.decisions ?? []).find((x) => x.id === decision)?.approved?.via ?? null;
-    const source = level === 'high' ? { provenance: 'approved-decision', decision, ...(via ? { via } : {}) } : { provenance: 'severity-rule', severity: e.severity };
-    append(root, state.id, 'discovered.closed', { id: e.id, outcome: 'deferred', decision: reason || (level === 'high' ? `confirmed with wf approve (${decision})` : `${level} severity: deferred`), source, attributedTo: text(options.by) || null }, actor(options));
+    append(root, state.id, 'discovered.closed', { id: e.id, outcome: 'deferred', decision: reason || `left for later with the person's decision ${decision}`, source: { provenance: 'approved-decision', decision, ...(via ? { via } : {}) }, attributedTo: text(options.by) || null }, actor(options));
   }
   return { state: loadState(root, state.id), outcome: 'deferred', ids };
 }
@@ -181,7 +177,7 @@ export function unacknowledged(root, state, loadMember, { acknowledged = false }
   return out;
 }
 
-export const discoveredLine = (d, attemptId) => `${d.id}  ${d.status}${d.kind === 'bookkeeping' ? ' (bookkeeping)' : ''}${d.severity ? `  ${d.severity}` : ''}  ${d.summary}${d.where || d.foundBy ? `  (${[d.where, d.foundBy ? `found by ${d.foundBy}` : null].filter(Boolean).join('; ')})` : ''}${d.blockedBy && d.status === 'open' ? `  blocked by ${d.blockedBy}: route it to that work item's implementer` : ''}${d.status === 'fixed' ? `  fixed in ${d.fixed.repo}@${d.fixed.commit.slice(0, 10)}` : d.status === 'deferred' ? `  deferred (${channelOf(d)}): "${d.deferred.decision}"` : attemptId ? `\n    to defer it: wf discovered close ${d.id} --deferred --reason "<why>" (${discoveredLevel(d) === 'high' ? 'high, unrated or an invariant: the person confirms it with wf approve' : `${discoveredLevel(d)} severity: your judgement`})` : ''}`;
+export const discoveredLine = (d, attemptId) => `${d.id}  ${d.status}${d.kind === 'bookkeeping' ? ' (bookkeeping)' : ''}${d.severity ? `  ${d.severity}` : ''}  ${d.summary}${d.where || d.foundBy ? `  (${[d.where, d.foundBy ? `found by ${d.foundBy}` : null].filter(Boolean).join('; ')})` : ''}${d.blockedBy && d.status === 'open' ? `  blocked by ${d.blockedBy}: route it to that work item's implementer` : ''}${d.status === 'fixed' ? `  fixed in ${d.fixed.repo}@${d.fixed.commit.slice(0, 10)}` : d.status === 'deferred' ? `  deferred (${channelOf(d)}): "${d.deferred.decision}"` : attemptId ? (discoveredLevel(d) === 'low' ? `\n    low: it may leave only with the person's yes, with every other low item in one question (wf scope defer --finding ${d.id}[,<ref>...])` : `\n    ${discoveredLevel(d)}: fixed in this delivery (here or in a sibling attempt of the batch); it never leaves`) : ''}`;
 
 // I-18 (extended), named failure: an implementer reported "Not fixed, outside the brief: <a defect>" and handed the issue
 // back to the owner agent to relay. A line of an implementer's final report that leaves an issue unfixed must name its

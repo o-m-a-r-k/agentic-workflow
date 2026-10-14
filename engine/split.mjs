@@ -70,7 +70,7 @@ export function resolveSplitItems(root, state, items) {
     if (matches.length === 1) {
       // The fix lives where the code is: a finding on a line this attempt changed is fixed here (a sibling starts from the
       // base and has no such line); one on code the attempt did not change may move (refusal audit of 0.7.0).
-      if (matches[0].onAttemptLines) problems.push(`${matches[0].ref} is on a line this attempt changed: its fix lives in this attempt's branch (a sibling starts from the base); fix it here, or ticket it by the severity rule (\`wf scope ticket\`)`);
+      if (matches[0].onAttemptLines) problems.push(`${matches[0].ref} is on a line this attempt changed: its fix lives in this attempt's branch (a sibling starts from the base); fix it here`);
       else found.push(matches[0].ref);
     } else if (matches.length > 1) problems.push(`${t} names ${matches.length} findings (${matches.map((m) => m.ref).join(', ')}); name one as reviewer:id`);
     else problems.push(`${t} is not a work item, criterion, open finding or open discovered issue of ${state.id}`);

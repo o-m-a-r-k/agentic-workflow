@@ -6,13 +6,15 @@
 // this module only records where an unfixed one went: a follow-up ticket (a raw tracker readback) or a sibling attempt.
 // Placement is not obligation: nothing broken is dropped, but where a fix lives can change. A defect the change caused or
 // one on a critical boundary leaves the delivery batch only with the owner's `wf approve` (kind move-out-of-batch).
+// 0.7.7 (D17): medium and high never leave; a low one leaves only with the person's yes (engine/leaving.mjs).
 import path from 'node:path';
 import { actor, openState } from './attempt.mjs';
 import { append, attemptDir, loadState, recordedTogether } from './ledger.mjs';
-import { deliverCoreDecision, requireYes } from './approve.mjs';
+import { requireYes } from './approve.mjs';
 import { readRegular, withEvidenceTransaction } from './evidence.mjs';
-import { blockingIn, dispositionOf, locationsOf, observations, openAcrossRounds, placementLevel } from './review-policy.mjs';
-import { ticketCommit } from './discovered.mjs';
+import { blockingIn, dispositionOf, locationsOf, observations, openAcrossRounds, placementLevel, severityLevel } from './review-policy.mjs';
+import { discoveredLevel, ticketCommit } from './discovered.mjs';
+import { leavingDecision } from './leaving.mjs';
 import { git, run } from './util.mjs';
 import { hashFile, refuse, WfError, writeImmutable } from './util.mjs';
 
@@ -45,7 +47,35 @@ const find = (state, ref) => {
 // such line (the same rule as `wf split`). Refusal audit of 0.7.0: a move asked the person's approval although nothing
 // left the delivery, and `wf split` and `wf scope move` answered the same finding differently.
 function movable(f) {
-  if (f.classified.onAttemptLines) throw refuse(`${f.ref} is on a line this attempt changed: its fix lives in this attempt's branch (a sibling starts from the base); fix it here, or ticket it by the severity rule (\`wf scope ticket\`)`, null, { id: 'scope:move-own-line' });
+  if (f.classified.onAttemptLines) throw refuse(`${f.ref} is on a line this attempt changed: its fix lives in this attempt's branch (a sibling starts from the base); fix it here`, null, { id: 'scope:move-own-line' });
+}
+
+// The items a placement names: review findings (`reviewer:F1`) and discovered issues (`D3`) together, so every low item
+// that leaves is put to the person in one question (D17).
+const lowerThan = { high: 2, medium: 1, low: 0 };
+function leavingItems(state, refs) {
+  return refs.map((ref) => {
+    if (/^D\d+$/.test(ref)) {
+      const d = (state.discovered ?? []).find((x) => x.id === ref);
+      if (!d) throw new WfError(`no discovered issue ${ref} on ${state.id}${state.discovered?.length ? ` (${state.discovered.map((x) => x.id).join(', ')})` : ''}`);
+      if (d.status !== 'open') throw refuse(`${ref} is already ${d.status}`);
+      const level = discoveredLevel(d);
+      const first = (d.rated ?? [])[0];
+      const was = first ? severityLevel(first.from) ?? 'high' : null;
+      return { kind: 'discovered', ref, entry: d, level, blocks: false, severity: d.severity ?? null, summary: d.summary ?? '', ratedFrom: was && lowerThan[was] > lowerThan[level] ? first.from ?? 'unrated' : null, raisedAt: d.at ?? null };
+    }
+    const f = find(state, ref);
+    if (dispositionOf(state, f.ref)) throw refuse(`${f.ref} already went elsewhere`);
+    return { kind: 'finding', ref: f.ref, entry: f, level: placementLevel(state, f), blocks: f.classified.blocks, severity: f.severity ?? null, summary: f.summary ?? '', ratedFrom: null, raisedAt: raisedAt(state, [f]) };
+  });
+}
+
+// Each discovered issue of a placement, closed under the decision that let it leave (with the follow-up ticket, if any).
+function closeLeaving(root, state, items, decision, reason, options, ticket = null) {
+  const via = (state.decisions ?? []).find((x) => x.id === decision)?.approved?.via ?? null;
+  for (const x of items.filter((i) => i.kind === 'discovered')) {
+    append(root, state.id, 'discovered.closed', { id: x.ref, outcome: 'deferred', decision: `${ticket ? `ticketed as ${ticket.id} (${ticket.url})` : 'left for later as a known issue'}, with the person's decision ${decision}${reason ? `: ${reason}` : ''}`, source: { provenance: 'approved-decision', decision, ...(via ? { via } : {}) }, ...(ticket ? { ticket } : {}), attributedTo: text(options.by) || null }, actor(options));
+  }
 }
 
 // Moves open findings to a sibling attempt (`wf scope move`, and the strategist's split). The sibling carries the obligation.
@@ -81,10 +111,8 @@ export function moveOut(root, options, refs, { to, reason }) {
   return loadState(root, state.id);
 }
 
-// A follow-up ticket for one or more open findings (`--finding a,b`: one tracker issue may cover a family), with the
-// tracker's raw readback of the created issue. Leaving the delivery follows the person's severity rule
-// (engine/review-policy.mjs placementOf): a high finding needs `wf approve` (one decision covers every high finding of
-// the ticket), a medium one needs `--reason` (the agent's recorded judgement), a low one needs neither.
+// A follow-up ticket for one or more open findings or discovered issues (`--finding a,b,D3`: one tracker issue may cover a
+// family), with the tracker's raw readback of the created issue. Only low items leave, with the person's yes (D17).
 export function completeScopeTicket(root, options) {
   const opened = openState(root, options);
   // Named failure (I-109): the follow-up ticket's readback was written inside the transaction but recorded in the manifest only when
@@ -93,9 +121,9 @@ export function completeScopeTicket(root, options) {
 }
 function ticketLocked(root, options, state) {
   const refs = [...new Set(String(options.finding ?? '').split(',').map((x) => x.trim()).filter(Boolean))];
-  if (!refs.length) throw new WfError('usage: wf scope ticket --finding <round:id>[,<round:id>] --capture <raw readback> [--reason "..."]');
-  const found = refs.map((ref) => find(state, ref));
-  for (const f of found) if (dispositionOf(state, f.ref)) throw refuse(`${f.ref} already went elsewhere`);
+  if (!refs.length) throw new WfError('usage: wf scope ticket --finding <round:id|D-id>[,...] --capture <raw readback> [--reason "..."]');
+  const items = leavingItems(state, refs);
+  const found = items.filter((x) => x.kind === 'finding').map((x) => x.entry);
   if (typeof options.capture !== 'string') throw new WfError('--capture is the tracker raw readback saved after creating the follow-up');
   const raw = readRegular(path.resolve(options.capture));
   if (!raw || raw.bytes.length > 1024 * 1024) throw refuse('ticket readback must be a regular file at most 1 MiB');
@@ -110,17 +138,11 @@ function ticketLocked(root, options, state) {
   const url = text(issue.url) || text(issue.web_url);
   if (!id || !text(issue.title) || !/^https:\/\//.test(url)) throw refuse('raw ticket readback must contain issue id/identifier, title and HTTPS url; failed creation leaves the finding unresolved');
   const reason = text(options.reason);
-  const level = (f) => placementLevel(state, f);
-  const medium = found.filter((f) => level(f) === 'medium' && !f.classified.blocks);
-  if (medium.length && !reason) throw refuse(`${medium.map((f) => f.ref).join(', ')} ${medium.length > 1 ? 'are' : 'is'} medium severity: fixing it here or ticketing it is your judgement; say why it waits`, 'pass `--reason "<why it can wait>"`', { id: 'scope:medium-reason' });
-  // A finding that blocks leaves only by the person's decision, whatever its severity (as waiving it does).
-  const high = found.filter((f) => level(f) === 'high' || f.classified.blocks);
-  // The person's `deliver-core` answer to the round escalation already decided that non-blocking findings may leave.
-  const core = high.length && !high.some((f) => f.classified.blocks) ? deliverCoreDecision(state, raisedAt(state, high)) : null;
-  const decision = core ? core.id : high.length ? requireYes(root, state, { kind: 'move-out-of-batch', key: `ticket:${high.map((f) => f.ref).join(',')}`, summary: `ticket instead of fixing in this delivery: ${high.map((f) => `${f.ref} (${f.severity ?? 'unrated'}: ${f.summary ?? ''})`).join('; ')}${reason ? ` (${reason})` : ''}`, what: `ticketing ${high.map((f) => f.ref).join(', ')}`, options }).decision : null;
-  const file = path.join(attemptDir(root, state.id), 'scope', `${found[0].ref.replace(/[^\w.-]+/g, '_')}${found.length > 1 ? `+${found.length - 1}` : ''}.ticket.json`);
+  const decision = leavingDecision(root, state, items, { verb: 'ticketed', reason, options });
+  const file = path.join(attemptDir(root, state.id), 'scope', `${items[0].ref.replace(/[^\w.-]+/g, '_')}${items.length > 1 ? `+${items.length - 1}` : ''}.ticket.json`);
   writeImmutable(file, raw.bytes.toString('utf8'));
-  append(root, state.id, 'scope.ticketed', { keys: found.map((f) => f.ref), choice: 'ticketed', raw: { file, sha256: hashFile(file) }, ticket: { id, url, title: issue.title, capture: file, provenance: 'agent-reported-raw-readback' }, reason: reason || null, placement: Object.fromEntries(found.map((f) => [f.ref, level(f)])), ...(decision ? { decision } : {}), blocked: found.some((f) => f.classified.blocks) }, actor(options));
+  if (found.length) append(root, state.id, 'scope.ticketed', { keys: found.map((f) => f.ref), choice: 'ticketed', raw: { file, sha256: hashFile(file) }, ticket: { id, url, title: issue.title, capture: file, provenance: 'agent-reported-raw-readback' }, reason: reason || null, placement: Object.fromEntries(found.map((f) => [f.ref, placementLevel(state, f)])), decision, blocked: false }, actor(options));
+  closeLeaving(root, state, items, decision, reason, options, { id, url, title: issue.title, capture: file });
   return loadState(root, state.id);
 }
 
@@ -181,29 +203,20 @@ export function waiveFinding(root, options) {
   });
 }
 
-// `wf scope defer --finding a,b [--reason "..."]`: observations that wait without a follow-up ticket, listed in the delivered
-// comment's known limits. The person's severity rule (D10) applies as to a ticket: high (or unrated) only with `wf approve`,
-// medium with a reason, low freely. Named failure (refusal audit of 0.7.0): every low nit needed a tracker issue and a
-// saved readback before delivery, while a low discovered issue could simply be deferred.
+// `wf scope defer --finding a,b,D3 [--reason "..."]`: low observations and discovered issues that wait without a follow-up
+// ticket, listed in the delivered comment's known limits, under one decision of the person (D17); medium and high stay.
 export function deferFindings(root, options) {
   const opened = openState(root, options);
   return withEvidenceTransaction(root, opened.id, () => {
     const state = loadState(root, opened.id);
     const refs = [...new Set(String(options.finding ?? '').split(',').map((x) => x.trim()).filter(Boolean))];
-    if (!refs.length) throw new WfError('usage: wf scope defer --finding <round:id>[,<round:id>] [--reason "..."]');
-    const found = refs.map((ref) => find(state, ref));
-    for (const f of found) {
-      if (dispositionOf(state, f.ref)) throw refuse(`${f.ref} already went elsewhere`);
-    }
+    if (!refs.length) throw new WfError('usage: wf scope defer --finding <round:id|D-id>[,...] [--reason "..."]');
+    const items = leavingItems(state, refs);
+    const found = items.filter((x) => x.kind === 'finding').map((x) => x.entry);
     const reason = text(options.reason);
-    const level = (f) => placementLevel(state, f);
-    const medium = found.filter((f) => level(f) === 'medium' && !f.classified.blocks);
-    if (medium.length && !reason) throw refuse(`${medium.map((f) => f.ref).join(', ')} ${medium.length > 1 ? 'are' : 'is'} medium severity: fixing it here or letting it wait is your judgement; say why it waits`, 'pass `--reason "<why it can wait>"`', { id: 'scope:medium-reason' });
-    // A finding that blocks waits only by the person's decision, whatever its severity (as with a ticket or a waiver).
-    const high = found.filter((f) => level(f) === 'high' || f.classified.blocks);
-    const core = high.length ? deliverCoreDecision(state, raisedAt(state, high)) : null;
-    const decision = core ? core.id : high.length ? requireYes(root, state, { kind: 'move-out-of-batch', key: `defer:${high.map((f) => f.ref).join(',')}`, summary: `defer out of this delivery: ${high.map((f) => `${f.ref} (${f.severity ?? 'unrated'}: ${f.summary ?? ''})`).join('; ')}${reason ? ` (${reason})` : ''}`, what: `deferring ${high.map((f) => f.ref).join(', ')}`, options }).decision : null;
-    append(root, state.id, 'scope.deferred', { keys: found.map((f) => f.ref), choice: 'deferred', reason: reason || null, placement: Object.fromEntries(found.map((f) => [f.ref, level(f)])), summaries: Object.fromEntries(found.map((f) => [f.ref, f.summary ?? ''])), ...(decision ? { decision } : {}) }, actor(options));
+    const decision = leavingDecision(root, state, items, { verb: 'deferred', reason, options });
+    if (found.length) append(root, state.id, 'scope.deferred', { keys: found.map((f) => f.ref), choice: 'deferred', reason: reason || null, placement: Object.fromEntries(found.map((f) => [f.ref, placementLevel(state, f)])), summaries: Object.fromEntries(found.map((f) => [f.ref, f.summary ?? ''])), decision }, actor(options));
+    closeLeaving(root, state, items, decision, reason, options);
     return loadState(root, state.id);
   });
 }

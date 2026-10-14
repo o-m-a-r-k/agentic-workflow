@@ -229,10 +229,9 @@ function memberLine(state, place) {
 
 // ---- Placement by severity (the person's rule, 2026-10-13) ----
 // Where an unfixed finding or discovered issue may go is decided by its severity, not by whether it blocks a round:
-// high (critical, high, major, or unrated) is fixed in this delivery, in the attempt or a sibling attempt of its batch,
-// and leaves the delivery only with the person's `wf approve`; medium is the owner agent's or strategist's call, with the
-// reason recorded; low may be ticketed as a follow-up. A finding that fails a frozen criterion or breaks a critical
-// invariant is high whatever its severity says.
+// high (critical, high, major, or unrated) and medium are fixed in this delivery, in the attempt or a sibling attempt of
+// its batch; a low one leaves only with the person's yes (D17, 2026-10-14, engine/leaving.mjs). A finding that fails a
+// frozen criterion or breaks a critical invariant is high whatever its severity says.
 // Named failure: the 0.7.0 draft let any finding a delta round classed as not caused be ticketed with no approval, so a
 // major defect in code the attempt itself wrote in an earlier round could leave the delivery unasked; and every
 // discovered issue, a nit included, needed the person's approval to wait.
@@ -266,7 +265,7 @@ export function classifyWith(state, f, ctx) {
   const base = { mode: ctx.mode, causedByChange: Boolean(onDelta), onAttemptLines: Boolean(onAttempt), ...(batchMember ? { memberLine: true } : {}), ...placementOf(f, cited, invariant) };
   if (cited.length) return { ...base, blocks: true, reason: `cites frozen criterion ${cited.join(', ')} that the change fails`, criterion: cited[0] };
   if (invariant) return { ...base, blocks: true, reason: `breaks a critical invariant (${invariant})`, invariant };
-  // A finding its reviewer rates low never opens a round (the person's rule: low may wait). It is an observation: fixed in the
+  // A finding its reviewer rates low never opens a round (a low one may leave only with the person's yes, D17). It is an observation: fixed in the
   // next pass, or deferred. Named failure (second final review of 0.7.0): a nit one line inside the diff forced a fix cycle,
   // a gate and another review, and could not be deferred, while the same nit one line outside was deferred freely.
   if (base.placement === 'low') return { ...base, blocks: false, reason: `observation: rated ${text(f?.severity)} (low)${onDelta ? ` on a changed line (${onDelta})` : ''}; it may be fixed in the next pass or wait` };

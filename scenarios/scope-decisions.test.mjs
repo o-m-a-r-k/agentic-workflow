@@ -2,7 +2,8 @@
 // form on every finding made agents class 97% of findings "in scope", and an owner question (`wf scope ask`/`decide`)
 // stood in front of every unrelated defect. The engine now computes whether a finding blocks; an observation is ticketed
 // or moved to a sibling attempt without a question, and a defect the change caused (or one on a critical boundary)
-// leaves the batch only with `wf approve` (kind move-out-of-batch).
+// leaves the batch only with `wf approve` (kind move-out-of-batch). 0.7.7 (D17): a defect that blocks never leaves by a
+// ticket or a deferral, and a medium or high one never leaves; only a low observation does, with the person's yes.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -72,9 +73,12 @@ test('a closed sibling cannot take a finding: it would be dropped', () => {
 
 // Refusal audit of 0.7.0: a move within the batch asked the person although nothing left the delivery, while `wf split`
 // refused the same finding. Now one rule: a defect on a line this attempt wrote is fixed here (a sibling starts from the
-// base and has no such line); leaving the delivery instead (a ticket) is the person's decision for a high one (D10).
-test('a defect on a line the change wrote is fixed here: it never moves to a sibling; ticketing it is the person\'s decision, which then releases the gate', async () => {
+// base and has no such line). D17: it cannot leave the delivery by a ticket or a deferral either, whatever its severity and
+// whoever asks, the person's yes included (nothing is even put to them); only the person's waiver (`wf scope waive`),
+// their decision that the finding is wrong, sets it aside and releases the gate.
+test('a defect on a line the change wrote is fixed here: it never moves to a sibling and is never ticketed or deferred; only the person\'s waiver releases the gate', async () => {
   const p = project('sd-approve');
+  const refusals = () => fs.readFileSync(path.join(p.root, '..', 'refusals.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
   review(p, [observation, caused]);
   assert.deepEqual(blockingFindings(loadState(p.root, p.id)).map((f) => f.id), ['F2']);
   assert.match(wf(p.root, ['gate', '--attempt', p.id]).err, /has open findings \(F2\)/);
@@ -83,9 +87,23 @@ test('a defect on a line the change wrote is fixed here: it never moves to a sib
   assert.match(moved.err, /r1:F2 is on a line this attempt changed: its fix lives in this attempt's branch/);
   const capture = path.join(p.base, 'ticket.json');
   fs.writeFileSync(capture, JSON.stringify({ issue: { identifier: 'ENG-9', title: 'label', url: 'https://tracker.example.test/ENG-9' } }));
-  const ticket = () => wf(p.root, ['scope', 'ticket', '--finding', 'r1:F2', '--capture', capture, '--attempt', p.id], { ownerSilent: true });
-  assert.match(ticket().err, /ticketing r1:F2 is the owner's decision \(A1: ticket instead of fixing in this delivery: r1:F2 \(major: the new label is empty\)\)/);
-  assert.deepEqual(state(p.root, p.id).decisions.filter((d) => d.kind === 'move-out-of-batch').map((d) => d.key), ['ticket:r1:F2']);
+  // A ticket or a deferral of a finding that blocks is refused outright (leave:blocks): no question reaches the person, and a
+  // low observation named together with it stays where it is.
+  const ticket = (refs = 'r1:F2') => wf(p.root, ['scope', 'ticket', '--finding', refs, '--capture', capture, '--attempt', p.id], { ownerSilent: true });
+  const defer = (refs = 'r1:F2') => wf(p.root, ['scope', 'defer', '--finding', refs, '--reason', 'the label can wait', '--attempt', p.id], { ownerSilent: true });
+  for (const [verb, leave] of [['ticket', ticket], ['defer', defer]]) {
+    for (const refs of ['r1:F2', 'r1:F1,r1:F2']) {
+      const refused = leave(refs);
+      assert.equal(refused.code, 75, `${verb} ${refs}`);
+      assert.match(refused.err, /r1:F2 blocks this delivery: it is fixed here; a finding the person judges wrong is waived by them \(`wf scope waive`\)/);
+      assert.equal(refusals().at(-1).id, 'leave:blocks');
+    }
+  }
+  assert.deepEqual(state(p.root, p.id).decisions, [], 'nothing was put to the person');
+  assert.deepEqual(state(p.root, p.id).scopeDecisions ?? [], [], 'nothing was ticketed or deferred');
+  assert.deepEqual(observations(loadState(p.root, p.id)).map((f) => f.ref), ['r1:F1'], 'the observation named with it did not leave');
+  // The person may still waive it: their decision, put to them by the waiver and confirmed with `wf approve`.
+  assert.match(wf(p.root, ['scope', 'waive', '--finding', 'r1:F2', '--attempt', p.id], { ownerSilent: true }).err, /waiving r1:F2 is the owner's decision \(A1: waive r1:F2 \(major: the new label is empty\)/);
   const { approveInTerminal } = await import('../engine/approve.mjs');
   await inProcess(p.root, async () => {
     const t = terminal();
@@ -93,11 +111,10 @@ test('a defect on a line the change wrote is fixed here: it never moves to a sib
     setImmediate(() => t.input.write('yes\n'));
     assert.equal((await pending).choice, 'yes');
   });
-  ok(ticket());
+  ok(wf(p.root, ['scope', 'waive', '--finding', 'r1:F2', '--attempt', p.id], { ownerSilent: true }));
   const d = state(p.root, p.id).scopeDecisions.at(-1);
-  assert.deepEqual([d.choice, d.keys, d.blocked, d.decision], ['ticketed', ['r1:F2'], true, 'A1']);
-  assert.ok(state(p.root, p.id).decisions[0].spent, 'the approval is spent by the ticket');
-  assert.deepEqual(blockingFindings(loadState(p.root, p.id)), [], 'the ticketed defect no longer holds this attempt');
+  assert.deepEqual([d.choice, d.keys, d.decision], ['waived', ['r1:F2'], 'A1']);
+  assert.deepEqual(blockingFindings(loadState(p.root, p.id)), [], 'the waived defect no longer holds this attempt');
   ok(wf(p.root, ['gate', '--attempt', p.id]));
 });
 

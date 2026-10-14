@@ -8,7 +8,7 @@ The design of the lessons harness: [LESSONS.md](LESSONS.md).
 
 Three different things, kept apart:
 
-- A **discovered issue** is a defect found during a ticket. Related defects are fixed in that ticket; independent existing defects are recorded with a severity and placed by the person's severity rule (high only with `wf approve`, medium with a recorded reason, low freely; a ticket, a sibling attempt or a known issue; [what blocks and where the rest goes](scope-decisions.md)). Deferring one is `wf discovered close <id> --deferred` ([lifecycle](lifecycle.md#review-rounds-blocking-findings-and-observations)). Calling it a follow-up does not close it.
+- A **discovered issue** is a defect found during a ticket. Related defects are fixed in that ticket; independent existing defects are recorded with a severity and placed by the person's rule (D17): medium and high are fixed in this delivery, a low one leaves only with the person's yes (a ticket or a known issue, or a sibling attempt of the batch for any severity; [what blocks and where the rest goes](scope-decisions.md)). Deferring one is `wf discovered close <id> --deferred` ([lifecycle](lifecycle.md#review-rounds-blocking-findings-and-observations)). Calling it a follow-up does not close it.
 - A **lesson** is what the project learns so a kind of mistake does not recur (below).
 - A **plugin improvement** is a finding about the workflow itself (below).
 

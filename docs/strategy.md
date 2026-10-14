@@ -94,7 +94,7 @@ ignored.
 | cluster | recorded: findings are fixed by family, one mechanical proof each |
 | delta-review | the next reviewer round is a delta round |
 | split | `wf split` for the items (below) |
-| ticket | the listed observations and discovered issues are owed as follow-up tickets (`toTicket`); filing each follows the person's severity rule (high only with `wf approve`, medium with a reason, low freely), and a finding that blocks leaves only with `wf approve` whatever its severity |
+| ticket | the listed observations and discovered issues are owed as follow-up tickets (`toTicket`); only low items may be queued, and filing each is the person's decision (medium and high are fixed in the delivery; a finding that blocks never leaves) |
 | model | `model: { role, class }`: the next handoffs of that role run at that work class of the adapter, with the models and effort it pins |
 | escalate | a reserved decision with 2-3 options the person confirms with `wf approve` |
 
@@ -123,7 +123,7 @@ delivery is refused; once every member is accepted, `wf batch create --members <
 batch, which is gated, reviewed, accepted and delivered as one. A split asks nobody, because what moved is still
 delivered with the parent; ejecting a member of a split batch needs the person's `wf approve`. A split moves obligations,
 not code: a work item that already has an implementer cannot move, and a finding on a line the attempt changed stays
-in this attempt (a sibling starts from the base and has no such line; fix it here, or ticket it by the severity rule).
+in this attempt (a sibling starts from the base and has no such line; fix it here).
 
 ## The owner's escalation
 

@@ -5,7 +5,8 @@ export const CHANNEL = {
   'approved-decision': 'approved-decision (confirmed with `wf approve` at an interactive terminal; a pseudo-terminal wrapper can answer it)',
   // 0.7.3 (D12): the person answered in the agent session's question panel.
   'approved-decision:question-panel': 'approved-decision (answered by the person in the question panel; the harness recorded the answer, not a signature)',
-  'severity-rule': "the owner agent's judgement under the person's severity rule (a medium or low issue may wait; D10)",
+  // Recorded only before 0.7.7: from then a deferral is always the person's decision (D17).
+  'severity-rule': "the owner agent's judgement under the person's severity rule of 0.7.6 and earlier (a medium or low issue could wait; D10)",
   'host-recorded': "host-recorded (the owner session's transcript; a process running as you could have written it)",
   'interactive-terminal (unverified)': 'interactive-terminal (unverified: typed at a terminal; a pseudo-terminal wrapper can answer it)',
 };
