@@ -2,7 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { approveAsOwner, closureFile, commitIn, criteriaFile, goodClosure, ok, sh, singleRepoProject, state, toAccepted, wf } from './helpers.mjs';
+import { approveAsOwner, closureFile, commitIn, criteriaFile, goodClosure, ok, OUT_OF_ORDER, sh, singleRepoProject, state, toAccepted, wf } from './helpers.mjs';
+import { knownLimits } from '../engine/tracker.mjs';
+import { loadState } from '../engine/ledger.mjs';
 
 // 0.7.7, D17, named failure (field): under D10 a medium finding was the owner agent's call and a low one left freely, so
 // an owner deferred 14 of 15 findings on its own judgement, among them a behaviour the person had asked for (called "a
@@ -175,5 +177,44 @@ test('a medium discovered issue closed fixed after the last review is not delive
   const r = wf(root, ['deliver', '--attempt', e.id], silent);
   assert.notEqual(r.code, 0);
   assert.match(r.err, /D1 \(medium\) closed fixed after the last review: a review round sees the fix before delivery/);
+});
+
+test('when the person lets the holder of a moved finding leave, the rest of the batch still delivers', () => {
+  const heavy = [{ id: 'unit', repo: 'app', run: 'true', inputs: ['src/**'] }, { id: 'e2e', repo: 'app', run: 'true', tier: 'heavy' }];
+  const { base, root } = singleRepoProject('d17-moved-letgo', { gate: { steps: heavy } }, { 'src/b.txt': 'b\n', 'src/old.txt': 'o1\no2\no3\n' });
+  const e = ok(wf(root, ['entry', '--item', 'PM-1', '--owner', 'o', '--json', '--defer-heavy'])).json();
+  ok(wf(root, ['handoff', 'planner', '--agent', 'plan-1', '--attempt', e.id, '--owner', 'o']));
+  ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id, '--owner', 'o']));
+  ok(wf(root, ['handoff', 'implementer', '--agent', 'impl-1', '--attempt', e.id, '--owner', 'o']));
+  commitIn(e.repos.app.worktree, { 'src/a.txt': 'one\n' });
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-0', '--attempt', e.id, '--owner', 'o']));
+  const obs = { id: 'F1', severity: 'medium', summary: 'credit note never exported to accounting', status: 'open', evidence: 'src/old.txt:2 no export call' };
+  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('rev-0', { findings: [obs] })), '--attempt', e.id]));
+  ok(wf(root, ['gate', '--attempt', e.id]));
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-1', '--attempt', e.id, '--owner', 'o']));
+  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('rev-1')), '--attempt', e.id]));
+  ok(wf(root, ['accept', '--attempt', e.id, '--owner', 'o']));
+  const m2 = toAccepted(root, base, { item: 'PM-2', owner: 'o', change: { 'src/b.txt': 'two\n' }, extraEntry: ['--defer-heavy'] }).id;
+  const b = ok(wf(root, ['batch', 'create', '--members', `${e.id},${m2}`, '--owner', 'o', '--json'])).json();
+  ok(wf(root, ['scope', 'move', '--finding', 'rev-0:F1', '--sibling', m2, '--reason', 'belongs with PM-2', '--attempt', e.id]));
+  const asked = wf(root, ['batch', 'eject', '--batch', b.id, '--member', m2, '--reason', 'PM-2 waits', '--owner', 'o'], silent);
+  assert.equal(asked.code, 75);
+  approveAsOwner(root, m2, asked.err.match(/wf approve (A\d+)/)[1], 'yes');
+  ok(wf(root, ['batch', 'eject', '--batch', b.id, '--member', m2, '--reason', 'PM-2 waits', '--owner', 'o'], silent));
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', b.id]));
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'rb', '--attempt', b.id, '--owner', 'o']));
+  ok(wf(root, ['review', '--closure', closureFile(base, { reviewer: 'rb', findings: [], criteria: [{ id: 'B1', evidence: { kind: 'output', ref: 'batch gate' } }], screenshotsInspected: [] }), '--attempt', b.id]));
+  ok(wf(root, ['accept', '--attempt', b.id, '--owner', 'o']));
+  const del = wf(root, ['deliver', '--attempt', b.id, '--owner', 'o'], silent);
+  assert.doesNotMatch(del.err, /moved to .* which is not in this delivery/, 'the person let it leave: the check passes');
+});
+
+test('a low item closed fixed after the last review is a known limit: no reviewer verified it', () => {
+  const p = project('d17-limits');
+  ok(run(p, ['discovered', 'add', '--summary', 'a label wraps on a phone', '--severity', 'low']));
+  const wt = state(p.root, p.id).repos.app.worktree;
+  commitIn(wt, { 'src/old.txt': 'o1\no2\no3 wrapped\n' }, 'fix the label');
+  ok(run(p, ['discovered', 'close', 'D4', '--fixed', sh(wt, 'git rev-parse HEAD')]));
+  assert.match(knownLimits(loadState(p.root, p.id)), /Closed as fixed after the last review, not verified by a reviewer: DR-1\.1:D4 \(low\): a label wraps on a phone/);
 });
 

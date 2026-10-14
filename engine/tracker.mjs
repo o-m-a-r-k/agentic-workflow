@@ -13,7 +13,7 @@ import { home } from './provenance.mjs';
 import { prepareWrite, readEvidenceFile, readRegular, writeNoFollow } from './evidence.mjs';
 import { connectorCalls, ownerTranscript } from './host-record.mjs';
 import { screenshots } from './gate.mjs';
-import { unreachedSince } from './review-policy.mjs';
+import { lastReviewSeenAt, unreachedSince } from './review-policy.mjs';
 import { discoveredLevel } from './discovered.mjs';
 import { cliEnv, scrub } from './scrub.mjs';
 
@@ -93,7 +93,7 @@ export function knownLimits(state) {
   // An issue found during the ticket that the owner deferred (I-18): the tester sees it with the owner's words.
   for (const d of state.discovered ?? []) if (d.status === 'deferred') out.push(`Deferred ${state.id}:${d.id}${d.severity ? ` (${d.severity})` : ''}: ${d.summary}.${(d.rated ?? []).length ? ` Rated ${d.rated.map((r) => `from ${r.from ?? 'unrated'} to ${r.to}${r.reason ? ` ("${r.reason}")` : ''}`).join(', then ')}.` : ''} Why it waits: "${d.deferred.decision}". Decided by: ${channelOf(d)}.`);
   // A low item closed as fixed after the last review was not verified by any reviewer (0.7.7): the tester sees it.
-  const lastReviewAt = (state.reviews ?? []).map((r) => r.at).filter(Boolean).sort().at(-1) ?? '';
+  const lastReviewAt = lastReviewSeenAt(state) ?? '';
   for (const d of state.discovered ?? []) if (d.status === 'fixed' && d.kind !== 'bookkeeping' && discoveredLevel(d) === 'low' && d.fixed?.at > lastReviewAt) out.push(`Closed as fixed after the last review, not verified by a reviewer: ${state.id}:${d.id} (low): ${d.summary}.`);
   for (const d of state.scopeDecisions ?? []) if (d.choice === 'fixed' && d.at > lastReviewAt) for (const k of d.keys ?? []) out.push(`Closed as fixed after the last review, not verified by a reviewer: ${k}.`);
   // A review finding that is not fixed here (0.7.0): ticketed for later, or moved to a sibling attempt of the batch.

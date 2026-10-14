@@ -397,7 +397,15 @@ export const isBookkeeping = (d) => d?.kind === 'bookkeeping';
 // round (`fixedSinceReview`), so a reviewer sees the claimed fix and raises a finding if it does not hold (independent
 // review of 0.7.7: a fixed claim never reached a reviewer). Older fixed defects and bookkeeping are the attempt's history.
 // An entry the owner waived under the old extra-scope flow (before 0.7.0) stays settled.
+// When the last recorded review round was handed its bundle (else when it was recorded): a fix closed after that time is
+// one no reviewer was shown (independent review of 0.7.7: the recording time let a fix closed while a round ran pass).
+export const lastReviewSeenAt = (state) => {
+  const r = (state?.reviews ?? []).filter((x) => x.at).sort((a, b) => (a.at < b.at ? -1 : 1)).at(-1);
+  if (!r) return null;
+  const h = (state.handoffs ?? []).filter((x) => x.role === 'reviewer' && r.handoff && x.bundle === r.handoff).at(-1);
+  return h?.at ?? r.at;
+};
 export const reviewerDiscovered = (entries, state = null) => {
-  const lastReview = (state?.reviews ?? []).map((r) => r.at).filter(Boolean).sort().at(-1) ?? null;
+  const lastReview = lastReviewSeenAt(state);
   return (entries ?? []).filter((d) => !isBookkeeping(d) && !(state && legacyWaived(state, d)) && (d.status !== 'fixed' || (state && (!lastReview || (d.fixed?.at && d.fixed.at > lastReview))))).map((d) => (d.status === 'fixed' ? { ...d, fixedSinceReview: true } : d));
 };

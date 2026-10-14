@@ -1,7 +1,7 @@
 import { gateAdapter, validationReviewProblems } from './validation.mjs';
 import { captureWarning } from './captures.mjs';
 import { mkdirStateDirectory } from './state-folders.mjs';
-import { blockingIn, classifyFinding, closureMissingGuidance, deltaLines, dispositionOf, earlierBlocking, observations, openAcrossRounds, placementLevel, reviewerDiscovered, roundMode, severityLevel, sinceOf, stampClosure, stripStamp, unreachedSince } from './review-policy.mjs';
+import { blockingIn, classifyFinding, closureMissingGuidance, deltaLines, dispositionOf, earlierBlocking, lastReviewSeenAt, observations, openAcrossRounds, placementLevel, reviewerDiscovered, roundMode, severityLevel, sinceOf, stampClosure, stripStamp, unreachedSince } from './review-policy.mjs';
 import { observationLines } from './scope-decisions.mjs';
 import { GROUP_INSTRUCTIONS, assignedVerdicts, changedWeights, currentReviewGroup, divideReview, findingIds, impactCatalog, isCurrentReviewer, mergeParts, reviewSnapshot, reviewDivisionOptions } from './review-groups.mjs';
 import fs from 'node:fs';
@@ -1720,11 +1720,18 @@ export async function deliver(root, options) {
       } catch {
         sib = null;
       }
-      if (!sib || !delivering.has(dsp.sibling) || ['abandoned'].includes(sib.phase)) throw refuse(`not delivered: ${(dsp.keys ?? []).join(', ')} of ${x.id} moved to ${dsp.sibling}, which is not in this delivery${sib?.phase === 'abandoned' ? ' (abandoned)' : ''}: ${RULE_SHORT}`, 'deliver the sibling in this batch, or record the item again here as a discovered issue and fix it', { id: 'deliver:moved-elsewhere' });
+      if (sib && delivering.has(dsp.sibling) && sib.phase !== 'abandoned') continue;
+      // It left with the person's decision (independent review of 0.7.7: a person-approved eject or abandon of the holder,
+      // or the person's deferral of the moved item there, otherwise left the parent undeliverable for good).
+      const issue = (sib?.discovered ?? []).find((d) => d.id === dsp.siblingIssue);
+      const deferredByPerson = issue?.status === 'deferred' && issue.deferred?.source?.provenance === 'approved-decision';
+      const letGo = (sib?.decisions ?? []).find((d) => d.kind === 'move-out-of-batch' && d.approved?.choice === 'yes' && d.approved.at > (dsp.at ?? '') && (String(d.key).startsWith('eject:') || d.key === `abandon-split:${dsp.sibling}`));
+      if (deferredByPerson || letGo) continue;
+      throw refuse(`not delivered: ${(dsp.keys ?? []).join(', ')} of ${x.id} moved to ${dsp.sibling}, which is not in this delivery${sib?.phase === 'abandoned' ? ' (abandoned)' : ''} and did not leave it by the person's decision: ${RULE_SHORT}`, `deliver ${dsp.sibling} in this batch; it leaves the delivery only by the person's decision (ejecting or abandoning it asks)`, { id: 'deliver:moved-elsewhere' });
     }
     // A medium or high discovered issue closed fixed after the last recorded review waits for a round that sees the fix,
     // as a medium or high observation claimed fixed does (independent review of 0.7.7).
-    const lastReviewAt = (x.reviews ?? []).map((r) => r.at).filter(Boolean).sort().at(-1) ?? '';
+    const lastReviewAt = lastReviewSeenAt(x) ?? '';
     const unverified = (x.discovered ?? []).filter((d) => d.status === 'fixed' && d.kind !== 'bookkeeping' && discoveredLevel(d) !== 'low' && d.fixed?.at && d.fixed.at > lastReviewAt);
     if (unverified.length) throw refuse(`not delivered: ${unverified.map((d) => `${d.id} (${discoveredLevel(d)})`).join(', ')}${x.id !== state.id ? ` of ${x.id}` : ''} closed fixed after the last review: a review round sees the fix before delivery`, 'hand a delta reviewer (`wf handoff reviewer --agent <new id>`), then accept again', { id: 'deliver:fixed-unreviewed' });
     const obs = observations(x);
