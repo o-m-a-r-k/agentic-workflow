@@ -161,6 +161,9 @@ export function reduce(entries) {
     planSource: null,
     impact: null,
     work: null,
+    // When each work item id first appeared (the plan's or an amendment's): an unscoped implementer handed before 0.7.0
+    // covers the items that existed when it was handed (`unstartedWork`, engine/lifecycle.mjs).
+    workIntroduced: {},
     roles: { planner: [], implementer: [], reviewer: [], tester: [], strategist: [] },
     handoffs: [],
     gates: [],
@@ -257,6 +260,7 @@ export function reduce(entries) {
         s.expect = expectOf(d.plan?.expect);
         s.expectations = s.expect ? [{ at: e.at, source: 'plan', amendment: null, reason: null, expect: s.expect }] : [];
         s.work = d.work ?? null;
+        for (const w of s.work ?? []) s.workIntroduced[w.id] ??= e.at;
         // I-26: the planner's survey and impact map, with what each query returned when the plan was frozen. A sibling
         // attempt a split created carries its parent's addenda (`wf split`).
         s.impact = d.impact ? { ...d.impact, addenda: d.impact.addenda ?? [], owed: null } : null;
@@ -274,6 +278,7 @@ export function reduce(entries) {
       case 'criteria.amended':
         s.criteria = d.criteria;
         if (d.work) s.work = d.work;
+        for (const w of d.work ?? []) s.workIntroduced[w.id] ??= e.at;
         s.criteriaAmendments.push({ at: e.at, reason: d.reason, by: e.actor, changes: d.changes ?? null, impact: d.impact ? true : d.impactOwed ? 'owed' : null, ...(d.withdrewAcceptance === true ? { withdrewAcceptance: true } : {}) });
         // Named failure (I-107): an amendment on an accepted attempt left the acceptance standing, so `wf deliver` shipped a
         // criterion no review had mapped to evidence. The engine that writes the amendment decides (D7: only for attempts

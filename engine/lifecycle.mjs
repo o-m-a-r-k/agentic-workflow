@@ -569,11 +569,13 @@ export function handoff(root, role, options) {
   let repair = null;
   if (role === 'implementer') {
     const lastReview = state.reviews.at(-1)?.at ?? null;
-    const swept = new Set(state.handoffs.filter((h) => h.role === 'implementer' && lastReview && h.at > lastReview).flatMap((h) => (h.sweeps ?? []).flatMap((x) => x.findings ?? [x.finding])));
+    // Named failure (I-79, I-89): a handoff closed `--outcome stopped` before its implementer did anything still spent the
+    // sweep it was handed, so the replacement's corrected `--sweep` was refused with "no open review finding is owed a sweep".
+    // Only a handoff that ran (still open, or closed done) spends one.
+    const swept = new Set(state.handoffs.filter((h) => h.role === 'implementer' && lastReview && h.at > lastReview && sweepSpent(state, h)).flatMap((h) => (h.sweeps ?? []).flatMap((x) => x.findings ?? [x.finding])));
     const mine = earlierOpenFindings(state, null).filter((f) => f.blocks && (!work || !f.work || f.work === work.id));
     const owed = mine.filter((f) => !swept.has(`${f.round}:${f.id}`));
     repair = mine.length ? familiesOf(mine) : null;
-    const groups = familiesOf(owed);
     // 0.7.0 (goals, not methods): the sweep is optional. The implementer finds the other instances of each family and
     // answers it with one proof in its report; an owner-written query steered its search (final review of 0.7.0).
     if (options.sweep !== undefined) {
@@ -881,8 +883,19 @@ function impactMapFor(root, cfg, state, role, queryResults = null) {
   return { ...map, inventory: inv, derived: deriveFromDiff(root, cfg, state, { queryResults }) };
 }
 
+// Whether an implementer handoff spent the pattern sweeps it was handed: not when it was closed stopped or failed, because
+// it did not do the fix round they belong to (I-79, I-89). A handoff still open, or closed done, did.
+function sweepSpent(state, h) {
+  const x = (state.implementers ?? []).find((y) => y.handoff === handoffId(h.bundle));
+  return !(x?.closedAt && ['stopped', 'failed'].includes(x.outcome));
+}
+
 function sweepsForReviewer(root, cfg, state) {
-  const { answers } = sweepAnswers(state, { sinceReview: true });
+  // A sweep handed to an implementer that was stopped or failed is not part of the fix pass the reviewer is handed, unless
+  // that implementer answered it anyway (a commit trailer): it showed as an unanswered sweep of a round nobody ran.
+  const dropped = new Set(state.handoffs.filter((h) => h.role === 'implementer' && !sweepSpent(state, h)).flatMap((h) => (h.sweeps ?? []).map((x) => x.id)));
+  const { answers: all } = sweepAnswers(state, { sinceReview: true });
+  const answers = all.filter((s) => !dropped.has(s.id) || s.answer);
   if (!answers.length) return undefined;
   return answers.map((s) => {
     // A sweep that cannot be re-run refuses the handoff (0.5.0 second review, fail-open: it was shown as no hits now).
@@ -2367,11 +2380,17 @@ export function integrationCheckOwed(cfg, state) {
   return !(state.checks ?? []).some((c) => c.status === 'passed' && !c.repos && c.tree && canonical(c.tree) === here);
 }
 
+// Named failure (I-115): on an attempt admitted before 0.7.0, one implementer handed with `--work W1` and a later one handed
+// without it left the other items "not started" for good, because the unscoped handoff recorded no `covers` (0.7.0 records
+// them) and named nothing. An unscoped handoff of such an attempt covers every item that existed when it was handed and
+// that no scoped handoff names. A relaxation, so it applies to every attempt.
 export function unstartedWork(state) {
   const handoffs = state.handoffs.filter((h) => h.role === 'implementer');
   const named = new Set(handoffs.flatMap((h) => (h.work ? [h.work] : h.covers ?? [])));
   if (!named.size && handoffs.length && !obligationSince(state, '0.7.0')) return [];
-  return (state.work ?? []).filter((w) => !named.has(w.id));
+  const unscoped = obligationSince(state, '0.7.0') ? [] : handoffs.filter((h) => !h.work && !h.covers);
+  const coveredByUnscoped = (w) => unscoped.some((h) => (state.workIntroduced?.[w.id] ?? '') <= h.at);
+  return (state.work ?? []).filter((w) => !named.has(w.id) && !coveredByUnscoped(w));
 }
 
 // Named failure: prose-only next steps could not safely drive runtime-independent execution.

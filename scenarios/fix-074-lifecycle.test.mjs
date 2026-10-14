@@ -359,3 +359,71 @@ test('I-69 (D7): an attempt admitted before 0.7.4 still counts the partial round
   assert.deepEqual(second.unreachedBefore.rounds.map((r) => r.notReached), [['the export module']]);
 });
 
+// ---- I-79, I-89 ----
+
+const CHANGED = 'l1\nL2\nl3\nl4\nl5\nl6\n';
+function twoBlocking(name) {
+  const a = started(runner('0.7.4'), name, { files: { 'src/a.txt': 'l1\nl2\nl3\nl4\nl5\nl6\n' } });
+  commitIn(a.wt, { 'src/a.txt': CHANGED }, 'change');
+  const finding = (id) => ({ id, severity: 'major', summary: `${id}: a raw label`, status: 'open', evidence: 'src/a.txt:2', criterion: 'C1', family: 'raw-labels' });
+  const bundle = round(a, 'r1', goodClosure('r1', { findings: [finding('F1'), finding('F2')] }));
+  assert.ok(bundle);
+  a.sweep = (n) => { const f = path.join(a.base, `sweep-${n}.json`); fs.writeFileSync(f, JSON.stringify({ sweeps: [{ family: 'raw-labels', why: `pass ${n}`, query: { pattern: 'l', kind: 'literal', paths: ['src/**'] } }] })); return f; };
+  a.fix = (agent, n) => a.run(a.root, ['handoff', 'implementer', '--agent', agent, '--attempt', a.id, ...(n ? ['--sweep', a.sweep(n)] : [])]);
+  return a;
+}
+
+// Named failure (I-79, I-89): a repair handoff stopped before its implementer ran still spent the sweeps it was handed, so the
+// replacement's corrected `--sweep` was refused with "no open review finding is owed a sweep" (false), and the next reviewer was
+// shown the stopped handoff's sweep as unanswered.
+test('I-79/I-89: a repair handoff stopped before it ran does not spend its sweeps; the replacement\'s corrected sweep is handed and the reviewer sees only that one', () => {
+  const a = twoBlocking('i79');
+  ok(a.fix('impl-2', 1));
+  ok(a.run(a.root, ['handoff', 'close', '--agent', 'impl-2', '--outcome', 'stopped', '--attempt', a.id]));
+  const replacement = a.fix('impl-3', 2);
+  assert.equal(replacement.code, 0, replacement.err);
+  const bundle = JSON.parse(fs.readFileSync(replacement.out.match(/bundle: (\S+)/)[1], 'utf8'));
+  assert.deepEqual(bundle.sweep.map((s) => [s.id, s.family, s.findings]), [['S2', 'raw-labels', ['r1:F1', 'r1:F2']]]);
+  commitIn(a.wt, { 'src/a.txt': CHANGED.replace('l5', 'L5') }, 'repair');
+  ok(a.run(a.root, ['handoff', 'close', '--agent', 'impl-3', '--attempt', a.id]));
+  const handed = ok(a.run(a.root, ['handoff', 'reviewer', '--agent', 'r2', '--attempt', a.id]));
+  const forReviewer = JSON.parse(fs.readFileSync(handed.out.match(/^Read (\S+)/m)[1], 'utf8'));
+  assert.deepEqual(forReviewer.sweeps.map((s) => s.id), ['S2'], 'the stopped handoff\'s sweep is not an unanswered sweep of this pass');
+});
+
+test('I-79/I-89: a handoff that ran and was closed done still spends the sweep it was handed', () => {
+  const a = twoBlocking('i79-done');
+  ok(a.fix('impl-2', 1));
+  commitIn(a.wt, { 'src/a.txt': CHANGED.replace('l5', 'L5') }, 'repair');
+  ok(a.run(a.root, ['handoff', 'close', '--agent', 'impl-2', '--attempt', a.id]));
+  const second = a.fix('impl-3', 2);
+  assert.equal(second.code, 75);
+  assert.match(second.err, /no open review finding is owed a sweep/);
+});
+
+// ---- I-115 ----
+
+// Named failure (I-115): on an attempt admitted before 0.7.0, one implementer handed with --work W1 and a later one handed without
+// it left W2 "not started" for ever (0.7.0 records what an unscoped handoff covers; the earlier ones recorded nothing).
+test('I-115: on a legacy attempt, an implementer handed without --work covers every item no scoped handoff names, and items added later stay unstarted', () => {
+  const old = runner('0.6.9');
+  const p = singleRepoProject('i115', { gate: { steps } });
+  const work = (...ids) => ids.map((id) => ({ id, criteria: ['C1'], repos: ['app'], class: 'light', why: 'fixture' }));
+  const e = ok(old(p.root, ['entry', '--item', 'ENG-1', '--owner', 'owner-1', '--json'])).json();
+  ok(old(p.root, ['handoff', 'planner', '--agent', 'plan-1', '--attempt', e.id, '--owner', 'owner-1']));
+  const planFile = path.join(p.base, 'plan.json');
+  fs.writeFileSync(planFile, JSON.stringify(planDoc({ plan: 'change a', criteria: [{ id: 'C1', text: 'a changes', uat: false }], work: work('W1', 'W2', 'W3') })));
+  ok(old(p.root, ['plan', '--file', planFile, '--attempt', e.id, '--owner', 'owner-1']));
+  ok(old(p.root, ['handoff', 'implementer', '--work', 'W1', '--agent', 'i1', '--attempt', e.id]));
+  assert.match(old.state(p.root, e.id).next, /start the implementers for the open work items[\s\S]*W2[\s\S]*W3/);
+  ok(old(p.root, ['handoff', 'implementer', '--agent', 'i2', '--attempt', e.id]));
+  assert.deepEqual(old.state(p.root, e.id).handoffs.at(-1).covers, undefined, 'a legacy handoff recorded no cover');
+  assert.doesNotMatch(old.state(p.root, e.id).next, /start the implementers for the open work items/, 'W2 and W3 are covered by the unscoped implementer');
+  // A work item an amendment adds after that handoff has no implementer yet.
+  const amendment = amendFile(p.base, [{ id: 'C1', text: 'a changes', uat: false }], { work: work('W1', 'W2', 'W3', 'W4') });
+  ok(old(p.root, ['criteria', 'amend', '--file', amendment, '--reason', 'W4 joins', '--attempt', e.id]));
+  const after = old.state(p.root, e.id).next;
+  assert.match(after, /start the implementers for the open work items[\s\S]*W4/);
+  assert.doesNotMatch(after, /W2 class|W3 class/);
+});
+
