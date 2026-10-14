@@ -126,13 +126,13 @@ test('macOS: a hard link swapped in while the immutable flag is set gets the cha
       }
     };
     const { exportAttempt } = await import('../engine/export.mjs');
-    const { openEvidence, loadState, append } = await import('../engine/ledger.mjs');
-    const { seal, setVerifyLevel } = await import('../engine/evidence.mjs');
+    const { openEvidence, loadState } = await import('../engine/ledger.mjs');
+    const { setVerifyLevel } = await import('../engine/evidence.mjs');
     process.env.WF_EVIDENCE_FLAGS = '1';
     setVerifyLevel('full');
     openEvidence(root, id);
-    exportAttempt(root, loadState(root, id));
-    assert.throws(() => seal(append), /replaced while its flag was changed/);
+    // The export records its page before it returns (I-109: written and recorded in one transaction), so the swap is met there.
+    assert.throws(() => exportAttempt(root, loadState(root, id)), /replaced while its flag was changed/);
   } finally {
     linkSeams.beforeFlag = null;
     delete process.env.WF_EVIDENCE_FLAGS;

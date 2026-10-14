@@ -3,8 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { loadConfig, loadConfigAtCommit, adapterLocation, adapterRecord, repoDir, trustedAdapter } from './config.mjs';
-import { seal, withEvidenceTransaction } from './evidence.mjs';
-import { append, assertSchema, createAttempt, listAttempts, loadState, openEvidence } from './ledger.mjs';
+import { append, assertSchema, createAttempt, listAttempts, loadState, openEvidence, recordedTogether } from './ledger.mjs';
 import { projectEnv } from './env.mjs';
 import { loadCatalog, missingFor, provisionUse, redactor, stepEnv } from './secrets.mjs';
 import { emitTrackerEvent, itemProblem } from './tracker.mjs';
@@ -235,7 +234,7 @@ export function entry(root, options) {
   // transaction around them, and the copy was recorded in the manifest only when the process ended (after the tracker's admission
   // read, which can take a while): a `wf` command another session ran in between listed the attempt and refused it with "extra
   // file (not written by wf)". Copied, admitted and recorded in one transaction: a reader sees none of it or all.
-  withEvidenceTransaction(root, id, () => {
+  recordedTogether(root, id, () => {
     let issue = null;
     if (src) {
       const dest = path.join(root, '.wf-evidence', 'attempts', id, 'issue', path.basename(src));
@@ -247,7 +246,6 @@ export function entry(root, options) {
       issue = { file: dest, sha256: hashFile(dest) };
     }
     createAttempt(root, id, { id, item, lane, intent, repos, adapterBase, adapter, issue, originRuntime, reopenedFrom: options.reopenedFrom ?? null, deferHeavy: options.deferHeavy === true || options.deferHeavy === 'true' }, owner);
-    seal(append, { root, id });
   });
   if (lane === 'standard' && intent === 'implementation' && !options.sibling) emitTrackerEvent(root, cfg, id, 'admitted');
   return loadState(root, id);

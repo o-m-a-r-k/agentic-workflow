@@ -2,7 +2,7 @@ import { mkdirStateDirectory } from './state-folders.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { loadConfig } from './config.mjs';
-import { attemptDir } from './ledger.mjs';
+import { attemptDir, recordedTogether } from './ledger.mjs';
 import { evidenceSteps, noEvidenceVerdicts, readBundle } from './lifecycle.mjs';
 import { unreachedOf } from './review-policy.mjs';
 import { redactor } from './secrets.mjs';
@@ -220,8 +220,13 @@ export function exportAttempt(root, state, { out = null, json = false } = {}) {
   const redact = (x) => scrub(catalogued(x));
   const file = out ? path.resolve(String(out)) : exportFile(root, state.id, json);
   const text = json ? redact(`${JSON.stringify(data, null, 2)}\n`) : redactHtml(root, state.id, redact, data);
-  prepareWrite(file);
-  mkdirStateDirectory(path.dirname(file), { recursive: true });
-  writeNoFollow(file, text);
+  // Named failure (I-109): the page was written (a second export rewrites it in place) with no transaction and recorded in the
+  // manifest only when the process ended, so a `wf status` run in between was refused with "extra file (not written by wf)" or a
+  // size mismatch. The `exported` entry the command adds next only cites the file, which is recorded by then.
+  recordedTogether(root, state.id, () => {
+    prepareWrite(file);
+    mkdirStateDirectory(path.dirname(file), { recursive: true });
+    writeNoFollow(file, text);
+  });
   return { file, data, text };
 }

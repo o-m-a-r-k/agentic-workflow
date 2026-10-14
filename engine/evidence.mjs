@@ -7,9 +7,14 @@ import { mkdirStateDirectory } from './state-folders.mjs';
 // refuses to use anything that differs.
 //
 // - Recording. The first time a `wf` process opens an attempt it verifies it and takes a snapshot of the files there.
-//   When the process ends (and right before a gate run is recorded finished) every file it created in the attempt's
-//   evidence, and every file it rewrote through `prepareWrite`, is opened without following links, read once, and
-//   recorded as { path, sha256, size, mode } in an `evidence.recorded` ledger entry, from that same buffer.
+//   Every file a command writes into the evidence is written inside `recordingTransaction` (`recordedTogether`, engine/
+//   ledger.mjs), which holds the evidence lock and, before it lets go, opens every file the process created in the
+//   attempt's evidence, and every file it rewrote through `prepareWrite`, without following links, reads it once, and
+//   records it as { path, sha256, size, mode } in an `evidence.recorded` ledger entry, from that same buffer. A reader
+//   (every command opens the attempt under the same lock, `wf verify` included) sees none of a write or all of it.
+//   `prepareWrite` refuses a write made anywhere else. A gate run's own folder is the exception: it is recorded right
+//   before the run is recorded finished, and exempt from verification until then. The end of the process records what is
+//   left, as a net and not as the rule.
 // - Protection. Recorded files are 0444 and, on macOS, user-immutable (`chflags uchg`; on Linux `chattr +i`, which
 //   needs root and a filesystem that supports it, else silently skipped); directories 0555 between commands. Only the
 //   engine lifts it (`prepareWrite`, `unlockDirs`, `releaseAttempt`). `WF_EVIDENCE_FLAGS=0` skips the immutable flag.
@@ -119,6 +124,40 @@ export function withEvidenceTransaction(root, id, fn) {
     if (!current || JSON.parse(current.bytes).token !== token) throw refuse('evidence transaction ownership changed; retain the lock for diagnosis');
     fs.unlinkSync(file);
   }
+}
+
+// Named failure (I-109): commands wrote files into an attempt's evidence outside the transaction that records them (a delivered
+// comment, a summary, a tracker capture, an export, an imported capture, a scope ticket: written first, entered in the manifest
+// only when the process ended or in a later transaction), so a `wf status`, `wf resume` or `wf verify` another session ran in
+// between was refused with "extra file (not written by wf)" (or, for a file rewritten in place, a size or sha256 mismatch). Every
+// write of an evidence file now happens inside one of these: the evidence transaction is held, the writes and the ledger
+// entries that go with them are made, and everything this process created or rewrote is recorded in the manifest (`seal`)
+// before the lock is let go, also when the writes failed half way. A reader sees none of it or all. `prepareWrite` refuses a
+// write made anywhere else (the gate's own folder aside), so a new writer cannot reopen the window unseen.
+// `fn` is synchronous: the lock is let go when it returns, so work that waits (a tracker's network answer, a launched role) is
+// done before and the result passed in.
+const recording = new Set(); // lock files whose holder is inside recordingTransaction
+export function recordingTransaction(root, id, appendFn, fn) {
+  return withEvidenceTransaction(root, id, () => {
+    const key = transactionLockFile(root, id), nested = recording.has(key);
+    recording.add(key);
+    try {
+      let out;
+      try {
+        out = fn();
+      } catch (error) {
+        // What was written before the failure is recorded too (the end of the process would record it, but a reader must not
+        // be able to see it unrecorded in between).
+        try { seal(appendFn, { root, id }); } catch {}
+        throw error;
+      }
+      if (typeof out?.then === 'function') throw new Error('internal error: a recorded transaction takes a synchronous function; the evidence lock is let go when it returns, so wait first and pass the result in');
+      seal(appendFn, { root, id });
+      return out;
+    } finally {
+      if (!nested) recording.delete(key);
+    }
+  });
 }
 
 // ---- no-follow primitives (named finding, 0.1.21 review: chmod, chflags and writes followed a symlink planted at an
@@ -481,6 +520,12 @@ export function prepareWrite(file) {
   if (at < 0) return abs;
   const evRoot = parts.slice(0, at + 1).join(path.sep);
   assertRealFolders(path.dirname(abs), evRoot);
+  // Named failure (I-109): see `recordingTransaction`. Only files of an attempt are judged; its ledger (protected by its own hash
+  // chain and anchor) and its gate folder (a run records its own files, and a file of a run still open is exempt from the
+  // manifest until the run is recorded finished) are written under the rules above them.
+  if (parts[at + 1] === 'attempts' && parts[at + 2] && parts.length > at + 3 && parts[at + 3] !== 'gate' && !(parts.length === at + 4 && parts[at + 3].startsWith('ledger.jsonl'))) {
+    if (!recording.has(transactionLockFile(parts.slice(0, at).join(path.sep), parts[at + 2]))) throw new Error(`internal error: ${abs} is written outside a recorded transaction (recordedTogether in engine/ledger.mjs): a command running meanwhile would see it as an extra file`);
+  }
   // From the attempt's own folder down: `attempts/` is shared by every attempt (and concurrent gates) and never locked.
   for (let i = at + 3; i < parts.length; i++) {
     const d = parts.slice(0, i).join(path.sep);
@@ -672,7 +717,10 @@ function writeCache(root, id, cache) {
 // file's stat signature, for a later `assertUnchanged`.
 export function verifyAttempt(root, id, { full = false, sigs = null } = {}) {
   try {
-    return verifyInner(root, id, full, sigs);
+    // Named failure (I-109): `wf verify` read the evidence without the evidence lock, so a verification run while another command
+    // was between writing a file and recording it (inside its transaction) listed that file as "extra file (not written by wf)".
+    // A verification waits for the transaction as every other reader does (`touch` holds it already; it is re-entrant).
+    return withEvidenceTransaction(root, id, () => verifyInner(root, id, full, sigs));
   } catch (error) {
     return [`verification failed: ${error.message}`];
   }
