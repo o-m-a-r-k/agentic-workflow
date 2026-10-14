@@ -43,6 +43,7 @@ test('an orphaned attempt whose change was merged by hand is closed as shipped u
   assert.match(ok(wf(a.root, ['resume', '--attempt', a.id])).out, /closed as shipped outside the workflow/);
   assert.match(wf(a.root, ['deliver', '--attempt', a.id], silent).err, /closed as shipped outside the workflow .*nothing to deliver/);
   assert.match(wf(a.root, ['abandon', '--reason', 'x', '--attempt', a.id], silent).err, /is already done \(closed as shipped\); a closed attempt is not abandoned/);
+  assert.match(wf(a.root, ['hold', '--reason', 'x', '--attempt', a.id], silent).err, /is already done; a hold applies to an open attempt/);
   assert.match(closed.out, /the tracker is not touched/);
   const s = state(a.root, a.id);
   assert.equal(s.phase, 'done');
@@ -112,7 +113,9 @@ test('a remote that cannot be fetched is not taken as proof that the change ship
 test('an attempt that changed nothing is not closed as shipped', () => {
   const p = singleRepoProject('close-nothing', { gate: { steps } });
   const e = ok(wf(p.root, ['entry', '--item', 'ENG-706', '--json'])).json();
-  assert.match(wf(p.root, ['close', '--shipped', '--reason', 'nothing', '--attempt', e.id], silent).err, /no repo of it changed anything, so nothing shipped: abandon it instead/);
+  const r = wf(p.root, ['close', '--shipped', '--reason', 'nothing', '--attempt', e.id], silent);
+  assert.match(r.err, /no repo of it changed anything, so nothing shipped/);
+  assert.match(r.err, /`wf abandon --reason "<why>"` closes an attempt that changed nothing/);
 });
 
 // Independent review of 0.7.5: an orphan never gated, whose commit had been pushed by hand, was abandoned (only a worktree's

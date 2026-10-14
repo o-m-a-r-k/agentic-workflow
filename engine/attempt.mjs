@@ -409,6 +409,8 @@ export function setIntent(root, options, to) {
 export function hold(root, options) {
   const state = openState(root, options);
   if (!options.reason) throw new WfError('--reason is required');
+  // A hold vetoes a delivery; a closed attempt has none left to veto (independent review of 0.7.5).
+  if (['done', 'abandoned'].includes(state.phase)) throw refuse(`${state.id} is already ${state.phase}; a hold applies to an open attempt`);
   append(root, state.id, 'hold', { reason: String(options.reason) }, actor(options));
   return loadState(root, state.id);
 }
@@ -491,7 +493,7 @@ export function closeShipped(root, options) {
     else if (!c.landed) problems.push(`${c.repo}: ${c.commit.slice(0, 10)} (${c.source}) is ${c.known ? 'not' : 'not known, so not shown to be'} on ${c.target}`);
     else heads[c.repo] = { commit: c.commit, target: c.target, source: c.source };
   }
-  if (!problems.length && !Object.values(heads).some((h) => !h.unchanged)) problems.push('no repo of it changed anything, so nothing shipped: abandon it instead (`wf abandon --reason "<why>"`)');
+  if (!problems.length && !Object.values(heads).some((h) => !h.unchanged)) throw refuse(`${state.id} is not closed as shipped: no repo of it changed anything, so nothing shipped`, '`wf abandon --reason "<why>"` closes an attempt that changed nothing', { id: 'close:nothing-shipped' });
   if (problems.length) throw refuse(`${state.id} is not closed as shipped: ${problems.join('; ')}`, 'a change that is not on its target branch is delivered (`wf deliver`) or abandoned; only an attempt whose every change has landed is closed as shipped', { id: 'close:not-shipped' });
   const list = Object.entries(heads).map(([n, h]) => (h.unchanged ? `${n} unchanged` : `${n} ${h.commit.slice(0, 10)} (${h.source}) on ${h.target}`)).join('; ');
   const decision = requireYes(root, state, { kind: 'override-gate', key: `close-shipped:${state.id}:${sha256(JSON.stringify(heads)).slice(0, 16)}`, summary: `close ${state.id} as shipped without its acceptance (${list})${state.activeHold ? `, over its hold "${state.activeHold.reason}"` : ''}`, what: `closing ${state.id} as shipped`, options }).decision;
