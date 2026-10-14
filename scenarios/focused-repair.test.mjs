@@ -32,9 +32,9 @@ const runner = (all, { stopAtFirstFailure = false } = {}) => `
 const fs=require('fs');const sel=process.argv.slice(2);
 const all=${JSON.stringify(all)};const run=sel.length?sel:all;
 fs.appendFileSync(process.env.WF_EVIDENCE+'/../ran.txt',run.join(',')+'\\n');
-const has=(f,w)=>fs.readFileSync(f,'utf8').includes(w);const bad=(f)=>has(f,'bad');const broken=(f)=>has(f,'broken');
+const has=(f,w)=>fs.readFileSync(f,'utf8').includes(w);const bad=(f)=>has(f,'bad');const broken=(f)=>has(f,'broken');const unstarted=(f)=>has(f,'unstarted');
 let stopped=false;const notRun=(f)=>{const r=stopped;if(bad(f)&&${stopAtFirstFailure})stopped=true;return r;};
-const suites=run.filter(f=>!broken(f)).map(f=>notRun(f)?{title:f,file:f,specs:[{title:'works',file:f,line:1,ok:true,tests:[{status:'skipped',results:[]}]}],suites:[]}:({title:f,file:f,specs:[{title:'works',file:f,line:1,ok:!bad(f),tests:[{status:bad(f)?'unexpected':'expected',results:[{status:bad(f)?'failed':'passed',duration:1200}]}]}],suites:[]}));
+const suites=run.filter(f=>!broken(f)).map(f=>notRun(f)||unstarted(f)?{title:f,file:f,specs:[{title:'works',file:f,line:1,ok:true,tests:[{status:'skipped',results:[]}]}],suites:[]}:({title:f,file:f,specs:[{title:'works',file:f,line:1,ok:!bad(f),tests:[{status:bad(f)?'unexpected':'expected',results:[{status:bad(f)?'failed':'passed',duration:1200}]}]}],suites:[]}));
 const errors=run.filter(broken).map(f=>({message:'SyntaxError',location:{file:f,line:1,column:1}}));
 fs.writeFileSync(process.env.WF_EVIDENCE+'/results.json',JSON.stringify({suites,errors}));
 run.filter(bad).forEach((f,i)=>console.log('  '+(i+1)+') '+f+':1:1 › works'));
@@ -271,5 +271,14 @@ test('suite files named by their extension alone rerun whole (JUnit cannot say w
   assert.equal(g2.code, 0);
   const ran = fs.readFileSync(path.join(root, '.wf-worktrees', '_gate', e.id, g2.data.runId, 'ran.txt'), 'utf8').trim();
   assert.deepEqual(ran.split(',').sort(), ['test/a.ts', 'test/b.ts', 'test/c.ts']);
+});
+
+test('a run that exits 0 with a test that never started does not pass the step', () => {
+  const { base, root } = singleRepoProject('pw-exit0', { gate: { steps: [playwrightStep] } }, files);
+  const e = admitted(root, base, 'ENG-80');
+  commitIn(e.repos.app.worktree, { 'specs/b.spec.ts': 'unstarted\n' });
+  const g = gateJson(root, e.id);
+  assert.equal(g.code, 1, 'the runner exited 0 (its exit code swallowed) but b never started');
+  assert.deepEqual(g.data.steps[0].neverStarted, ['specs/b.spec.ts']);
 });
 

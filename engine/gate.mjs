@@ -543,8 +543,11 @@ async function executeStep(root, cfg, state, planned, ctx) {
       suites = [...prior.suites.filter((s) => !reported(s) && !requested(s)).map((s) => ({ ...s, carried: true })), ...unreported, ...fresh.values()];
     }
     const interrupted = codes.some((c) => c.signal);
-    const failed = codes.some((c) => c.code !== 0) || suites.some((s) => s.status === 'failed') || unreported.length > 0;
-    result = { status: interrupted ? 'interrupted' : failed ? 'failed' : 'passed', suites, exitCodes: codes.map((c) => c.code), artifacts: [], ...(unreported.length ? { unreported: unreported.map((s) => s.file ?? s.id) } : {}) };
+    // Independent review of 0.7.6: a run whose exit code was swallowed (`|| true`, a wrapper) passed with a test that never
+    // started. Only this run's suites count (a carried suite ran in an earlier run).
+    const neverStarted = suites.filter((s) => !s.carried && s.neverStarted > 0).map((s) => s.file ?? s.id);
+    const failed = codes.some((c) => c.code !== 0) || suites.some((s) => s.status === 'failed') || unreported.length > 0 || neverStarted.length > 0;
+    result = { status: interrupted ? 'interrupted' : failed ? 'failed' : 'passed', suites, exitCodes: codes.map((c) => c.code), artifacts: [], ...(unreported.length ? { unreported: unreported.map((s) => s.file ?? s.id) } : {}), ...(neverStarted.length ? { neverStarted } : {}) };
     // Which tests failed, recorded on the step (telemetry): read from the reports and output this run wrote.
     if (result.status === 'failed') {
       result.failures = stepFailures({ junitFiles: files, playwrightFiles, log: logFile, exitCodes: result.exitCodes, suites, redact: ctx.redact });

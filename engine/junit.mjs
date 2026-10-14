@@ -48,7 +48,8 @@ export const worstStatus = (...statuses) => statuses.reduce((a, b) => ((RANK[b] 
 function sumSuite(a, b) {
   const failures = a.failures + b.failures;
   const notRun = (a.notRun ?? 0) + (b.notRun ?? 0);
-  return { ...a, file: a.file ?? b.file, tests: a.tests + b.tests, failures, skipped: a.skipped + b.skipped, ...(notRun ? { notRun } : {}), durationMs: a.durationMs + b.durationMs, status: worstStatus(a.status, b.status, failures > 0 ? 'failed' : 'passed') };
+  const neverStarted = (a.neverStarted ?? 0) + (b.neverStarted ?? 0);
+  return { ...a, file: a.file ?? b.file, tests: a.tests + b.tests, failures, skipped: a.skipped + b.skipped, ...(notRun ? { notRun } : {}), ...(neverStarted ? { neverStarted } : {}), durationMs: a.durationMs + b.durationMs, status: worstStatus(a.status, b.status, failures > 0 ? 'failed' : 'passed') };
 }
 
 // Two reports of one run (JUnit and Playwright JSON) for the same suite: one entry, the one naming its file, with the worse
@@ -61,7 +62,8 @@ export function oneSuitePerId(list) {
     else {
       const base = y.file || !x.file ? y : x;
       const notRun = Math.max(x.notRun ?? 0, y.notRun ?? 0);
-      byId.set(x.id, { ...base, failures: Math.max(x.failures ?? 0, y.failures ?? 0), ...(notRun ? { notRun } : {}), status: worstStatus(x.status, y.status) });
+      const neverStarted = Math.max(x.neverStarted ?? 0, y.neverStarted ?? 0);
+      byId.set(x.id, { ...base, failures: Math.max(x.failures ?? 0, y.failures ?? 0), ...(notRun ? { notRun } : {}), ...(neverStarted ? { neverStarted } : {}), status: worstStatus(x.status, y.status) });
     }
   }
   return [...byId.values()];
@@ -107,6 +109,9 @@ export function playwrightJsonSuites(doc) {
         // dependency project); a skip the spec declares has a skipped result (observed on Playwright 1.63). Independent review of 0.7.6 (high): such a suite was passed, so it was carried, and a later gate went
         // green without running it.
         if (t?.status === 'skipped' && (runStopped || !results.some((r) => r?.status === 'skipped'))) s.notRun = (s.notRun ?? 0) + 1;
+        // A test that never started (skipped, no result at all) is what a stopped run leaves; a green run gives a declared
+        // skip a result (observed on Playwright 1.63), so a step whose run has one does not pass, whatever its exit code.
+        if (t?.status === 'skipped' && !results.length) s.neverStarted = (s.neverStarted ?? 0) + 1;
       }
       // One failure per failing test, a test being a spec in one project (0.7.6: a spec failing in four projects is four).
       const unexpected = (spec.tests ?? []).filter((t) => t?.status === 'unexpected').length;

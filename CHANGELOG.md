@@ -24,7 +24,9 @@ Release notes, newest first, then every fix that came from a failure in the work
     ones; and only report files the run wrote are read, so a run that died before writing is not read as an earlier
     run's suites. A suite the gate asked to rerun that the run did not report stays
     `not-run` and the step does not pass; in a Playwright run stopped as a whole every skipped test counts as not run;
-    JUnit suite files named by their extension alone (`login.ts`) rerun the step whole.
+    A step whose run reports a test that never started does not pass, whatever its exit
+    code. JUnit suite files named by their extension alone (`login.ts`, `test_a.py`) now rerun the step whole; name them with
+    an infix (`.spec.ts`, `.test.js`) to keep suite-level reruns.
   - A failing Playwright test is counted once per project, in the log and in the JSON report (612 failures read as 448).
   - `wf doctor` names each heavy, non-plugin step that cannot rerun only its failed suites, and what it lacks (`select`, a
     suite report, `{select}` in `run`, `inputs`).
