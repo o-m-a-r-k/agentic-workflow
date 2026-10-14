@@ -54,7 +54,7 @@ const commitFor = (root, cfg, state, repo) => {
 // the attempt's evidence), the changed files it matched, and whether the ticket itself changed one of its documents.
 // Named failure: applicable documents missing at the frozen base silently removed review obligations.
 // Refuse before a reviewer is created; an unrelated missing rule remains only a doctor warning.
-export function reviewRules(root, trusted, state, changed) {
+export function reviewRules(root, trusted, state, changed, pending = null) {
   const multi = Object.keys(changed).length > 1;
   const out = [];
   const applicable = [];
@@ -77,11 +77,13 @@ export function reviewRules(root, trusted, state, changed) {
     const worktreeCopies = {};
     for (const d of docs.filter((x) => x.text)) {
       const file = path.join(attemptDir(root, state.id), 'rules', `${sha256(d.text).slice(0, 12)}-${path.posix.basename(d.doc)}`);
-      if (!fs.existsSync(file)) {
-        prepareWrite(file);
-        mkdirStateDirectory(path.dirname(file), { recursive: true });
-        writeNoFollow(file, d.text);
-      }
+      // Named failure (I-109): the copy was written here, while the bundle was still being built and before the handoff was
+      // recorded, so a `wf status` run at that moment was refused with "extra file (not written by wf)", and a handoff
+      // refused afterwards left the copy behind. With `pending` the caller writes it (`writeRuleDocuments`) inside the
+      // transaction that records the handoff; without it (no caller does that now) it is written at once.
+      if (pending) {
+        if (!pending.some((p) => p.file === file)) pending.push({ file, text: d.text });
+      } else writeRuleDocument({ file, text: d.text });
       read.push(file);
       // The worktree copy counts as read only when the ticket did not change it (then it is the same document).
       const wt = repo && state.repos[repo.name]?.worktree;
@@ -93,9 +95,20 @@ export function reviewRules(root, trusted, state, changed) {
   return out;
 }
 
+// Writes the trusted copies `reviewRules` collected (a copy already on disk is the same bytes: its name carries its hash).
+// Called inside the evidence transaction that records the handoff, before it is sealed.
+export function writeRuleDocument({ file, text }) {
+  if (fs.existsSync(file)) return;
+  prepareWrite(file);
+  mkdirStateDirectory(path.dirname(file), { recursive: true });
+  writeNoFollow(file, text);
+}
+export const writeRuleDocuments = (pending) => { for (const doc of pending) writeRuleDocument(doc); };
+
 // Named failure: unavailable handed documents were discovered only after an expensive review.
 // Check the exact handed files, never substitute a ticket's edited copy for a frozen rule document.
-export function reviewDocumentProblems(bundle) {
+// `pending`: rule documents collected but not yet written (`reviewRules`), judged from the text the handoff will write.
+export function reviewDocumentProblems(bundle, pending = []) {
   const documents = [
     ...(bundle.rules ?? []).flatMap((r) => r.read.map((file) => ({ label: `rule ${r.id}`, file }))),
     ...(bundle.skills ?? []).map((s) => ({ label: `skill ${s.name}`, file: s.file })),
@@ -106,7 +119,8 @@ export function reviewDocumentProblems(bundle) {
   for (const { label, file } of documents) {
     try {
       if (typeof file !== 'string' || !path.isAbsolute(file)) throw new Error('no absolute handed path');
-      const data = readRegular(file);
+      const waiting = pending.find((p) => p.file === file);
+      const data = waiting ? { bytes: Buffer.from(waiting.text) } : readRegular(file);
       if (!data || !data.bytes.length || data.bytes.length > 4 * 1024 * 1024) throw new Error('missing, unreadable, linked, empty or larger than 4 MiB');
       new TextDecoder('utf-8', { fatal: true }).decode(data.bytes);
     } catch (error) {
