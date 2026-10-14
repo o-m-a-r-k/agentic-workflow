@@ -10,15 +10,36 @@ export const CONFIG_FILE = 'project.yaml';
 // The project root is the nearest ancestor holding `.workflow/project.yaml`.
 // Inside an attempt worktree (…/.wf-worktrees/<id>/<repo>/…) the worktree's own copy is skipped, so commands
 // run from where agents work resolve to the real project.
+// Named failure (0.7.1, field): a multi-repo project keeps its adapter in one repo and links `<root>/.workflow` to it
+// (the layout `wf init` makes). From any folder inside that repo the walk stopped at the repo's own `.workflow/` and took
+// the repo for the project: `wf status` there listed no open attempts while the project had them, and `wf doctor` and
+// `wf entry` failed with "`.workflow/` is not inside any listed repo". The project is the folder whose `.workflow` link
+// leads to the adapter found, when one above links to it.
 export function findRoot(start = process.cwd()) {
   let dir = path.resolve(start);
   for (;;) {
     const inWorktree = dir.split(path.sep).includes('.wf-worktrees');
-    if (!inWorktree && fs.existsSync(path.join(dir, ADAPTER_DIR, CONFIG_FILE))) return dir;
+    if (!inWorktree && fs.existsSync(path.join(dir, ADAPTER_DIR, CONFIG_FILE))) return linkingRoot(dir) ?? dir;
     const parent = path.dirname(dir);
     if (parent === dir) return null;
     dir = parent;
   }
+}
+function linkingRoot(found) {
+  let adapter;
+  try {
+    adapter = fs.realpathSync(path.join(found, ADAPTER_DIR));
+  } catch {
+    return null;
+  }
+  for (let dir = path.dirname(found); dir !== path.dirname(dir); dir = path.dirname(dir)) {
+    const link = path.join(dir, ADAPTER_DIR);
+    if (!fs.lstatSync(link, { throwIfNoEntry: false })?.isSymbolicLink()) continue;
+    try {
+      if (fs.realpathSync(link) === adapter) return dir;
+    } catch {}
+  }
+  return null;
 }
 
 export function requireRoot(start) {

@@ -72,6 +72,19 @@ function multiRepo(name, extra = {}) {
   return { base, root };
 }
 
+// Named failure (0.7.1, field): run from inside the repo that holds the adapter, `wf` took that repo for the project.
+test('wf run from inside the adapter repo of a multi-repo project works on the project, not on the repo', () => {
+  const { root } = multiRepo('root-from-repo');
+  // Admitted from inside the adapter repo (0.7.1 refused: "`.workflow/` is not inside any listed repo").
+  const e = ok(wf(path.join(root, 'api'), ['entry', '--item', 'ENG-40', '--owner', 'o', '--json'])).json();
+  assert.equal(fs.realpathSync(path.dirname(path.dirname(e.repos.api.worktree))), fs.realpathSync(path.join(root, '.wf-worktrees')), 'the attempt lives under the project');
+  for (const cwd of [root, path.join(root, 'api'), path.join(root, 'api', 'src'), path.join(root, 'web'), e.repos.api.worktree]) {
+    assert.match(ok(wf(cwd, ['status'])).out, /ENG-40\.1 /, cwd);
+    assert.doesNotMatch(ok(wf(cwd, ['doctor', '--no-steps'])).out, /✗/, cwd);
+  }
+  assert.ok(!fs.existsSync(path.join(root, 'api', '.wf-worktrees')), 'nothing was written under the repo as if it were a project');
+});
+
 test('a changed contract pulls dependents into the gate; delivery goes providers first; partial delivery resumes', () => {
   const { base, root } = multiRepo('topology');
   const e = ok(wf(root, ['entry', '--item', 'ENG-33', '--owner', 'o', '--json'])).json();
