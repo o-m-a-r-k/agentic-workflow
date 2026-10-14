@@ -218,7 +218,9 @@ function summary(root, s, { base = null, resume = false } = {}) {
   const live = ['done', 'abandoned'].includes(s.phase) ? null : liveGate(root, s);
   if (live) {
     lines.push(`  gate running: ${live.runId} (pid ${live.pid})`);
-    lines.push(`    running: ${live.running.map((r) => `${r.id} (${r.seconds}s)`).join(', ') || 'none (waiting for a lease)'}`);
+    lines.push(`    running: ${live.running.map((r) => `${r.id} (${r.seconds}s)`).join(', ') || `none${live.waiting.length ? '' : ' (waiting for a lease)'}`}`);
+    // Named failure (I-113): the line said only "waiting for a lease". It names the lease, its holders and how capacity is raised.
+    for (const w of live.waiting) lines.push(`    waiting: ${w.id} for lease ${w.lease} (${w.capacity} slot(s), all held) for ${w.seconds}s: ${w.text}`);
     lines.push(`    finished: ${live.finished.map((r) => `${r.id} ${r.status}${r.seconds !== null ? ` ${r.seconds}s` : ''}`).join(', ') || 'none yet'}`);
   }
   if (s.discovered?.length) {
@@ -228,10 +230,19 @@ function summary(root, s, { base = null, resume = false } = {}) {
   const watching = ['done', 'abandoned'].includes(s.phase) ? [] : observations(s);
   if (watching.length) lines.push(`  observations: ${watching.length} unresolved, delivery waits for them (${watching.slice(0, 6).map((f) => f.ref).join(', ')}${watching.length > 6 ? ', …' : ''}; \`wf scope list\`)`);
   for (const a of s.addedRepos ?? []) lines.push(`  repo added: ${a.repo} (${a.reason})`);
-  if (s.lastGate) lines.push(`  last gate: ${s.lastGate.status} (${s.lastGate.runId})`);
+  // Named failure (I-113): a stopped run showed only "stopped"; the class and reason `wf stop` recorded were in the ledger and
+  // the result, and nobody reading `wf status` or `wf resume` could tell a tree change from an owner decision.
+  const ended = (r) => {
+    if (r.status === 'stopped') {
+      const stop = r.stop ?? s.stops?.filter((x) => x.runId === r.runId).at(-1);
+      return stop ? `stopped (${stop.class ?? 'no class'}: ${stop.reason ?? 'no reason'})` : 'stopped (no reason recorded: not stopped with `wf stop`)';
+    }
+    return r.error ? `${r.status} (${r.error})` : r.status;
+  };
+  if (s.lastGate) lines.push(`  last gate: ${ended(s.lastGate)} (${s.lastGate.runId})`);
   for (const t of s.tracker.done) if (t.provenance === 'host-recorded') lines.push(`  tracker ${t.event}: readback host-recorded (the tracker's answer as the ${findHost(t.host?.runtime)?.label ?? 'harness'} host wrote it in the owner's transcript, not the agent; a process running as the same user could edit that file)`);
   for (const t of s.tracker.done) if (t.provenance === 'agent-reported, unverified') lines.push(`  tracker ${t.event}: readback agent-reported, unverified (an engine route verifies it: \`wf tracker mode api|cli|files\`)`);
-  if (s.checks?.length) lines.push(`  last check: ${s.checks.at(-1).status} (${s.checks.at(-1).runId}; light steps only, never counts as the gate)`);
+  if (s.checks?.length) lines.push(`  last check: ${ended(s.checks.at(-1))} (${s.checks.at(-1).runId}; light steps only, never counts as the gate)`);
   if (s.flaky?.length) lines.push(`  flaky: ${[...new Set(s.flaky.map((f) => `${f.step}${f.suites?.length ? ` (${f.suites.join(', ')})` : ''}`))].join(', ')} failed and then passed with the same inputs`);
   if (s.criteria && isOpen(s) && !s.accepted) {
     try {
@@ -877,7 +888,7 @@ async function dispatch(cmd, sub, positional, options) {
       if ((options.step !== undefined && !step) || (!step && (!options.lease || options.lease === true)) || (options.lease === true) || (!step && !options._.length)) throw new WfError('usage: wf run --lease <name> -- <command...>   or   wf run --step <gate step id> [--lease <name>] (runs the step\'s declared `prepare`)');
       if (step) return await runPrepared(root, openState(root, options), step, options._, { lease: options.lease ? String(options.lease) : null });
       const cfg = loadConfig(root);
-      return await runWithLease(cfg, String(options.lease), options._);
+      return await runWithLease(cfg, String(options.lease), options._, { root });
     }
     case 'summary': {
       const cfg = loadConfig(root);
