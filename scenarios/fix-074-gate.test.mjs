@@ -168,8 +168,6 @@ test('I-88: wf run --lease waiting on a full lease starts when the project raise
   const r = startWf(f, ['run', '--lease', 'docker', '--', 'echo', 'ran-it']);
   try {
     await until('the wait notice', () => /waiting for a `docker` lease/.test(r.text()));
-    assert.match(r.text(), /held by pid \d+/, 'it says who holds the slot');
-    assert.match(r.text(), /raise `gate\.leases\.docker` in the project's \.workflow\/project\.yaml/, 'and how capacity is raised');
     await sleep(1200);
     assert.equal(r.child.exitCode, null, 'it waits while the only docker slot is held');
     setLeases(f, { docker: 2 });
@@ -177,6 +175,8 @@ test('I-88: wf run --lease waiting on a full lease starts when the project raise
     assert.equal(code, 0, r.text());
     assert.match(r.text(), /ran-it/);
     assert.match(r.text(), /lease `docker` now allows 2 slot\(s\) \(it was 1\)/);
+    assert.match(r.text(), /held by pid \d+ \(no details recorded\)/, 'the wait says who holds the slot (a holder that recorded nothing is named by its pid)');
+    assert.match(r.text(), /raise `gate\.leases\.docker` in the project's \.workflow\/project\.yaml/, 'and how capacity is raised');
   } finally {
     r.child.kill('SIGKILL');
     fs.rmSync(path.join(leasesOf(f), 'docker.1'), { force: true });
@@ -341,6 +341,45 @@ test('I-91: a lease slot that vanishes or cannot be read is waited for, not an e
     fs.rmSync(holdFile(f));
     assert.equal(await Promise.race([r.ended, sleep(20000).then(() => 'timeout')]), 0, r.text());
     assert.equal(state(f.root, e.id).checks.at(-1).status, 'passed');
+  } finally {
+    watch.stop();
+    r.child.kill('SIGKILL');
+    for (const pid of watch.seen) killGroup(pid);
+    fs.rmSync(holdFile(f), { force: true });
+  }
+});
+
+// Defense in depth for the same failure: an error thrown from a timer inside a step plugin (which runs in the runner's process)
+// is an uncaught exception; it used to kill the runner, with the other steps' processes running on.
+test('I-91: an error thrown from a step plugin\'s timer ends the run failed and signals the other steps\' processes', async () => {
+  const plugin = `let release;
+export default {
+  async run() {
+    setTimeout(() => { throw new Error('plugin-timer-boom'); }, 700);
+    await new Promise((resolve) => { release = resolve; });
+    return { status: 'passed', suites: [] };
+  },
+  async cleanup() { release?.(); },
+};`;
+  const f = singleRepoProject('plugin-timer', { gate: { maxParallelSteps: 2, steps: [
+    { id: 'long', repo: 'app', run: 'while [ -f "$WF_ROOT/../hold" ]; do sleep 0.2; done', inputs: ['src/**'] },
+    { id: 'boom', repo: 'app', plugin: 'steps/boom.mjs', inputs: ['src/**'] },
+  ] } }, { '.workflow/steps/boom.mjs': plugin });
+  const e = committed(f, 'ENG-1', 'one\n');
+  fs.writeFileSync(holdFile(f), '');
+  const r = startWf(f, ['check', '--attempt', e.id]);
+  const watch = watchChildren(f, e.id);
+  try {
+    const code = await Promise.race([r.ended, sleep(20000).then(() => 'timeout')]);
+    await sleep(300);
+    assert.deepEqual([...watch.seen].filter(alive), [], `no step process outlives the runner (runner exit ${code}):\n${r.text()}`);
+    assert.equal(lockData(f, e.id), null, `gate.lock is removed:\n${r.text()}`);
+    assert.equal(code, 1, r.text());
+    assert.match(r.text(), /wf check: aborting: plugin-timer-boom/);
+    const last = state(f.root, e.id).checks.at(-1);
+    assert.equal(last.status, 'failed');
+    assert.equal(last.error, 'plugin-timer-boom');
+    assert.deepEqual(last.steps.map((x) => `${x.id}:${x.status}`).sort(), ['boom:interrupted', 'long:interrupted']);
   } finally {
     watch.stop();
     r.child.kill('SIGKILL');

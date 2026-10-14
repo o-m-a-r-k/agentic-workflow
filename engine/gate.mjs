@@ -972,6 +972,13 @@ async function executeRun(root, state, plan, live, run) {
     process.on(signal, onSignal);
     run.handlers.push([signal, onSignal]);
   }
+  // Whatever else throws while the run goes on (a step plugin's timer, a stream callback) is the run's failure, not the
+  // process's: it ends the run the same way, instead of killing the runner with its steps' processes still running.
+  const onFatal = (error) => abort(error instanceof Error ? error : new Error(String(error)));
+  for (const event of ['uncaughtException', 'unhandledRejection']) {
+    process.on(event, onFatal);
+    run.handlers.push([event, onFatal]);
+  }
 
   // Light steps first (their failures are cheap to learn early), then heavy steps longest first, so the gate's wall
   // time is not the serial chain of heavy steps started in adapter order. Unknown durations count as longest.
@@ -1063,7 +1070,8 @@ async function executeRun(root, state, plan, live, run) {
                 if (lease) held[lease] -= 1;
                 if (machine.has(p.id)) releaseMachineLease(machine.get(p.id));
                 machine.delete(p.id);
-                let final = stopping && r.status !== 'passed' ? { ...r, status: 'interrupted' } : r;
+                // A run ended by its own error certifies nothing that was still running when it ended, whatever the step returns after it was signalled.
+                let final = fatal || (stopping && r.status !== 'passed') ? { ...r, status: 'interrupted' } : r;
                 const secs = ((Date.now() - runningNow.get(p.id)) / 1000).toFixed(1);
                 runningNow.delete(p.id);
                 try {
