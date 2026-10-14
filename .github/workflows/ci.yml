@@ -36,11 +36,12 @@ jobs:
           git config --global user.name ci
           git config --global user.email ci@example.test
           git config --global init.defaultBranch main
-      # Named failure: competing Git-heavy fixtures exhausted the stop scenario's unchanged 20-second deadline.
-      # Isolate files on macOS; scenarios still exercise their own concurrent runners and reviewers.
+      # One file per core of the macOS runner (3). Files ran one at a time after competing Git-heavy fixtures exhausted the
+      # stop scenario's fixed 20-second deadline; that deadline is 60 seconds since 0.7.0, and serial runs took about 30
+      # minutes against Linux's 9. A test that needs more time under load gets headroom, never a serial suite.
       - name: scenarios on macOS
         if: runner.os == 'macOS'
-        run: node --test --test-reporter=spec --test-concurrency=1 scenarios/*.test.mjs
+        run: node --test --test-reporter=spec --test-concurrency=3 scenarios/*.test.mjs
       - name: scenarios on Linux
         if: runner.os != 'macOS'
         run: node --test --test-reporter=spec scenarios/*.test.mjs
