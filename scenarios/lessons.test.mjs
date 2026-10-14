@@ -82,7 +82,11 @@ test('an accepted attempt reopened for repairs records its lesson in the worktre
   assert.ok(fs.existsSync(lessonFile(wt, 'L-1')), 'in the attempt worktree');
   assert.ok(!fs.existsSync(lessonFile(root, 'L-1')), 'not in the main checkout');
   ok(wf(root, ['handoff', 'close', '--agent', 'repair', '--attempt', id]));
-  assert.match(add(root, ['--attempt', id, '--title', 'Again', '--what', 'w', '--cause', 'test', '--mechanism', 'doc']).out, /in app's main checkout: commit it there/, 'with no implementer open the accepted tree stays frozen');
+  // 0.7.4 (I-99), changed on purpose: the lesson above was committed, so the tree is no longer the accepted one and the
+  // attempt is being repaired; with the implementer closed the next lesson is still part of the repair, not an untracked file
+  // in the main checkout. (An accepted tree that has not moved stays frozen: scenarios/fix-074-lessons.test.mjs.)
+  assert.match(add(root, ['--attempt', id, '--title', 'Again', '--what', 'w', '--cause', 'test', '--mechanism', 'doc']).out, /committed in ENG-310\.1's worktree/, 'the tree moved past the acceptance, so the repair goes on in the worktree');
+  assert.ok(fs.existsSync(lessonFile(wt, 'L-2')) && !fs.existsSync(lessonFile(root, 'L-2')));
 });
 
 // Named failure (I-64): a project lesson recorded with no tags, paths, components or kinds could match nothing, so it never

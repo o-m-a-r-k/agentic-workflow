@@ -49,6 +49,217 @@ function multiRepoProject(name, { api = {}, web = {} } = {}) {
 const lessonArgs = (title, what = 'a thing went wrong', extra = []) => ['--title', title, '--what', what, '--cause', 'test', '--mechanism', 'doc', ...extra];
 
 // ======================================================================================================================
+// I-99 / I-112: where a lesson is written
+// ======================================================================================================================
+
+// Named failure (I-99): an accepted attempt that was repaired (commits made after the acceptance, its implementer closed)
+// still had its lesson written untracked into the pull-only main checkout, and moved by hand each time; the rule was "accepted
+// with an implementer open", which says nothing about whether the accepted tree is still the tree.
+test('I-99: a lesson recorded after the accepted tree moved (a repair committed, no implementer open) is committed in the attempt worktree', () => {
+  const { base, root } = singleRepoProject('fix074-moved', { gate: { steps } });
+  const { id, wt } = toAccepted(root, base, { item: 'ENG-401' });
+  commitIn(wt, { 'src/a.txt': 'repaired after the acceptance\n' }, 'repair after acceptance');
+  const r = ok(add(root, ['--attempt', id, ...lessonArgs('Repairs after acceptance are reviewed again')]));
+  assert.match(r.out, /committed in ENG-401\.1's worktree: it is reviewed and delivered with this attempt/);
+  assert.ok(fs.existsSync(lessonFile(wt, 'L-1')), 'in the attempt worktree');
+  assert.ok(!fs.existsSync(lessonFile(root, 'L-1')), 'not in the main checkout');
+  assert.equal(sh(root, 'git status --porcelain'), '', 'the main checkout holds no untracked lesson');
+  assert.match(sh(wt, 'git log -1 --format=%s'), /^Lesson L-1: Repairs after acceptance are reviewed again$/);
+  // A recurrence and a status change follow the same rule: they update the lesson in the worktree.
+  ok(wf(root, ['lesson', 'set', 'L-1', '--status', 'retired', '--attempt', id]));
+  assert.match(sh(wt, 'git log -1 --format=%s'), /^Lesson L-1: retired$/);
+  assert.equal(sh(root, 'git status --porcelain'), '');
+});
+
+// Named failure (I-99, fix-induced edge): an implementer left open when the review was accepted counted as "repairing", so a
+// later `wf lesson add` committed into the worktree, HEAD moved past the accepted tree, and `wf deliver` refused "modified
+// after acceptance". An open implementer opened before the acceptance says nothing about the tree.
+test('I-99: an implementer left open at acceptance does not make a later lesson move the accepted tree; the lesson waits in the main checkout and the attempt delivers', () => {
+  const { base, root } = singleRepoProject('fix074-open-at-accept', { gate: { steps } });
+  const open = { implementersOpen: true };
+  const why = ['--reason', 'scenario: the implementer is still open'];
+  const owner = 'owner-1';
+  const e = ok(wf(root, ['entry', '--item', 'ENG-402', '--owner', owner, '--json'])).json();
+  const id = e.id;
+  ok(wf(root, ['handoff', 'planner', '--agent', 'plan-1', '--attempt', id, '--owner', owner]));
+  ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', id, '--owner', owner]));
+  ok(wf(root, ['handoff', 'implementer', '--agent', 'impl-1', '--attempt', id, '--owner', owner]));
+  commitIn(e.repos.app.worktree, { 'src/a.txt': 'b\n' });
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-0', '--attempt', id, '--owner', owner, ...why], open));
+  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('rev-0')), '--attempt', id]));
+  ok(wf(root, ['gate', '--attempt', id]));
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-1', '--attempt', id, '--owner', owner, ...why], open));
+  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure()), '--attempt', id]));
+  ok(wf(root, ['accept', '--attempt', id, '--owner', owner]));
+  assert.ok(state(root, id).implementers.some((x) => !x.closedAt), 'the implementer is still open');
+  const head = sh(e.repos.app.worktree, 'git rev-parse HEAD');
+  const r = ok(add(root, ['--attempt', id, ...lessonArgs('A lesson learned while the accepted tree waits')]));
+  assert.match(r.out, /in app's main checkout: commit it there/, 'the accepted tree is frozen: the lesson waits outside it');
+  assert.equal(sh(e.repos.app.worktree, 'git rev-parse HEAD'), head, 'the accepted tree did not move');
+  assert.ok(!fs.existsSync(lessonFile(e.repos.app.worktree, 'L-1')));
+  ok(wf(root, ['deliver', '--attempt', id]));
+  assert.equal(state(root, id).phase, 'done');
+});
+
+// An implementer handed after the acceptance (a repair about to begin) moves the work back into the worktree before its first
+// commit; closed with nothing committed, the accepted tree stands again.
+test('I-99: an implementer handed after the acceptance and still open sends the lesson to the worktree; closed with the tree unmoved, the acceptance stands again', () => {
+  const { base, root } = singleRepoProject('fix074-adopted', { gate: { steps } });
+  const { id, wt } = toAccepted(root, base, { item: 'ENG-403' });
+  // Handed and closed with nothing committed: the accepted tree is as it was, so the lesson waits outside it.
+  ok(wf(root, ['handoff', 'implementer', '--agent', 'repair-0', '--attempt', id]));
+  ok(wf(root, ['handoff', 'close', '--agent', 'repair-0', '--attempt', id]));
+  assert.match(ok(add(root, ['--attempt', id, ...lessonArgs('Nothing was committed')])).out, /in app's main checkout: commit it there/);
+  assert.ok(!fs.existsSync(lessonFile(wt, 'L-1')));
+  // Handed again and open: the repair is under way, so the lesson belongs to it, committed in the worktree.
+  ok(wf(root, ['handoff', 'implementer', '--agent', 'repair-1', '--attempt', id]));
+  assert.match(ok(add(root, ['--attempt', id, ...lessonArgs('Lesson while a repair is under way')])).out, /committed in ENG-403\.1's worktree/);
+  assert.ok(fs.existsSync(lessonFile(wt, 'L-2')));
+  // The lesson moved the tree, so the next one stays in the worktree even after the implementer closes.
+  ok(wf(root, ['handoff', 'close', '--agent', 'repair-1', '--attempt', id]));
+  assert.match(ok(add(root, ['--attempt', id, ...lessonArgs('Second lesson of the repair')])).out, /committed in ENG-403\.1's worktree/);
+});
+
+// Named failure (I-99 class): a lesson the attempt itself added lives in its worktree and is delivered from there. A reviewer's
+// `finding` verdict counts as a recurrence right after the acceptance, and the recurrence was written as a second, untracked copy
+// into the main checkout, which the delivered file then collided with.
+test('I-99 class: a recurrence recorded at acceptance for a lesson the attempt itself added leaves the main checkout clean', () => {
+  const { base, root } = singleRepoProject('fix074-recur-at-accept', { gate: { steps } });
+  const owner = 'owner-1';
+  const e = ok(wf(root, ['entry', '--item', 'ENG-405', '--owner', owner, '--json'])).json();
+  const id = e.id;
+  ok(wf(root, ['handoff', 'planner', '--agent', 'plan-1', '--attempt', id, '--owner', owner]));
+  ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', id, '--owner', owner]));
+  ok(wf(root, ['handoff', 'implementer', '--agent', 'impl-1', '--attempt', id, '--owner', owner]));
+  commitIn(e.repos.app.worktree, { 'src/a.txt': 'b\n' });
+  ok(add(root, ['--attempt', id, ...lessonArgs('The attempt teaches its own lesson', 'a thing went wrong', ['--paths', 'src/**'])]));
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-0', '--attempt', id, '--owner', owner]));
+  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('rev-0')), '--attempt', id]));
+  ok(wf(root, ['gate', '--attempt', id]));
+  const handed = ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-1', '--attempt', id, '--owner', owner])).out;
+  const bundle = JSON.parse(fs.readFileSync((handed.match(/bundle: (\S+)/) ?? handed.match(/^Read (\S+)/m))[1], 'utf8'));
+  assert.deepEqual(bundle.lessons.apply.map((l) => l.id), ['L-1']);
+  const finding = { id: 'F1', severity: 'minor', summary: 'the lesson was not followed', status: 'fixed', evidence: 'src/a.txt:1', category: 'review' };
+  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('rev-1', { findings: [finding], lessons: [{ lesson: 'L-1', verdict: 'finding', evidence: 'src/a.txt', finding: 'F1' }] })), '--attempt', id]));
+  ok(wf(root, ['accept', '--attempt', id, '--owner', owner]));
+  assert.equal(state(root, id).lessons.recurred[0].id, 'L-1', 'the recurrence is recorded in the ledger');
+  assert.ok(!fs.existsSync(lessonFile(root, 'L-1')), 'and no second copy of the lesson is written into the main checkout');
+  assert.equal(sh(root, 'git status --porcelain'), '');
+  ok(wf(root, ['deliver', '--attempt', id]));
+  assert.equal(sh(root, 'git status --porcelain'), '', 'the delivered lesson did not collide with a stray copy');
+});
+
+// Named failure (I-99 class): `wf lesson move --attempt` wrote the lesson into the other repo's worktree and committed it there,
+// but removed the source file from its own worktree without committing the removal: the tree was dirty (the next gate or review
+// saw uncommitted work) and the delivered change carried the lesson in both repos.
+test('I-99 class: a lesson moved out of an attempt worktree is removed there by a commit, not left as an uncommitted deletion', () => {
+  const { base, root } = multiRepoProject('fix074-move-attempt');
+  const e = ok(wf(root, ['entry', '--item', 'ENG-406', '--owner', 'o', '--json'])).json();
+  ok(wf(root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id]));
+  ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id]));
+  ok(add(root, ['--attempt', e.id, '--repo', 'api', ...lessonArgs('Moves to the web repo')]));
+  ok(add(root, ['--attempt', e.id, '--repo', 'api', ...lessonArgs('Goes to the improvement inbox')]));
+  const moved = ok(wf(root, ['lesson', 'move', 'L-1', '--repo', 'web', '--attempt', e.id]));
+  assert.match(moved.out, /\(committed in the attempt\)/);
+  const api = e.repos.api.worktree, web = e.repos.web.worktree;
+  assert.equal(sh(api, 'git status --porcelain'), '', 'the source worktree has no uncommitted deletion');
+  assert.match(sh(api, 'git log -1 --format=%s'), /^Lesson L-1 moved to web$/);
+  assert.ok(!fs.existsSync(lessonFile(api, 'L-1')) && fs.existsSync(lessonFile(web, 'L-1')));
+  assert.equal(sh(web, 'git status --porcelain'), '');
+  ok(wf(root, ['lesson', 'move', 'L-2', '--improvement', '--attempt', e.id]));
+  assert.equal(sh(api, 'git status --porcelain'), '');
+  assert.match(sh(api, 'git log -1 --format=%s'), /^Lesson L-2 moved to the improvement inbox$/);
+});
+
+// Named failure (I-99 class, found in review): moving a lesson that lives in an accepted tree removed the file from its worktree
+// without committing the removal (the tree no longer matched its acceptance) while the copy went untracked into the other repo,
+// and the lesson was delivered twice.
+test('I-99 class: a lesson that is part of the accepted tree is not moved out from under its acceptance', () => {
+  const bin = engineAt('0.7.4');
+  const { base, root } = multiRepoProject('fix074-move-accepted');
+  const owner = 'owner-1';
+  const run = (args) => ok(wf(root, args, { bin }));
+  const e = run(['entry', '--item', 'ENG-407', '--owner', owner, '--json']).json();
+  run(['handoff', 'planner', '--agent', 'plan-1', '--attempt', e.id, '--owner', owner]);
+  run(['plan', '--file', criteriaFile(base), '--attempt', e.id, '--owner', owner]);
+  run(['handoff', 'implementer', '--agent', 'impl-1', '--attempt', e.id, '--owner', owner]);
+  commitIn(e.repos.api.worktree, { 'src/a.txt': 'b\n' });
+  ok(add(root, ['--attempt', e.id, '--repo', 'api', ...lessonArgs('Part of the accepted tree')], { bin }));
+  run(['handoff', 'reviewer', '--agent', 'rev-0', '--attempt', e.id, '--owner', owner]);
+  run(['review', '--closure', closureFile(base, goodClosure('rev-0')), '--attempt', e.id]);
+  run(['gate', '--attempt', e.id]);
+  run(['handoff', 'reviewer', '--agent', 'rev-1', '--attempt', e.id, '--owner', owner]);
+  run(['review', '--closure', closureFile(base, goodClosure()), '--attempt', e.id]);
+  run(['accept', '--attempt', e.id, '--owner', owner]);
+  const api = e.repos.api.worktree;
+  const head = sh(api, 'git rev-parse HEAD');
+  const refused = wf(root, ['lesson', 'move', 'L-1', '--repo', 'web', '--attempt', e.id], { bin });
+  assert.equal(refused.code, 75, refused.err);
+  assert.match(refused.err, /lesson L-1 is part of ENG-407\.1's accepted tree \(\.workflow\/lessons\/L-1\.yaml\), and moving it would change that tree/);
+  assert.equal(wf(root, ['lesson', 'move', 'L-1', '--improvement', '--attempt', e.id], { bin }).code, 75);
+  assert.equal(sh(api, 'git status --porcelain'), '', 'the accepted tree is untouched');
+  assert.equal(sh(api, 'git rev-parse HEAD'), head);
+  assert.ok(!fs.existsSync(lessonFile(path.join(root, 'web'), 'L-1')), 'and nothing was copied into the other repo');
+  run(['deliver', '--attempt', e.id]);
+});
+
+// Named failure (I-112): `wf lesson add --repo X` with X not among the attempt's repos (or a project lesson whose adapter repo is
+// not) wrote the file into X's main checkout as an untracked file, even though the attempt was open, and reported it recorded.
+test('I-112: a lesson for a repository the attempt did not admit is refused with the route; without --attempt it is written to the main checkout on purpose', () => {
+  const bin = engineAt('0.7.4');
+  const { base, root } = multiRepoProject('fix074-not-admitted');
+  const e = ok(wf(root, ['entry', '--item', 'ENG-410', '--owner', 'o', '--repos', 'web', '--json'], { bin })).json();
+  assert.deepEqual(Object.keys(e.repos), ['web']);
+  const refused = add(root, ['--attempt', e.id, '--repo', 'api', ...lessonArgs('A lesson for the repo the attempt does not hold')], { bin });
+  assert.equal(refused.code, 75, refused.err);
+  assert.match(refused.err, /lesson not recorded: api is not part of ENG-410\.1 \(its repos: web\), so the lesson could not be committed, reviewed or delivered with this attempt, and a file written into api's main checkout would stay untracked there/);
+  assert.match(refused.err, /wf criteria amend --file <amendment\.json> --reason "<why>" --add-repo api --attempt ENG-410\.1/);
+  assert.match(refused.err, /without `--attempt` \(it is written into api's main checkout, to commit there\)/);
+  assert.ok(!fs.existsSync(path.join(root, 'api', '.workflow', 'lessons')), 'nothing was written');
+  assert.deepEqual(state(root, e.id).lessons?.recorded ?? [], [], 'nothing is recorded in the ledger');
+  // A project lesson lives in the adapter repo; here it is not admitted either.
+  const project = add(root, ['--attempt', e.id, '--project', ...lessonArgs('A project lesson learned in a web-only ticket')], { bin });
+  assert.equal(project.code, 75);
+  assert.match(project.err, /lesson not recorded: api \(the adapter repo, where a project lesson lives\) is not part of ENG-410\.1/);
+  // The repo the attempt does hold is unchanged.
+  assert.match(ok(add(root, ['--attempt', e.id, '--repo', 'web', ...lessonArgs('A lesson for the repo the attempt holds')], { bin })).out, /committed in ENG-410\.1's worktree/);
+  // Outside the attempt the owner can still write it on purpose, and the command says where.
+  const apart = ok(add(root, [...lessonArgs('A lesson recorded outside the attempt'), '--repo', 'api'], { bin }));
+  assert.match(apart.out, /in api's main checkout: commit it there/);
+  assert.ok(fs.existsSync(lessonFile(path.join(root, 'api'), 'L-2')));
+  // Moving a lesson into a repository the attempt does not hold is the same write, and the same refusal.
+  const move = wf(root, ['lesson', 'move', 'L-1', '--repo', 'api', '--attempt', e.id], { bin });
+  assert.equal(move.code, 75, move.err);
+  assert.match(move.err, /lesson not moved: api is not part of ENG-410\.1 \(its repos: web\)/);
+  assert.ok(fs.existsSync(lessonFile(state(root, e.id).repos.web.worktree, 'L-1')), 'the lesson stays where it was');
+  assert.ok(base);
+});
+
+test('I-112: the route works: amending the attempt to add the repo lets the lesson be committed in that repo\'s worktree', () => {
+  const bin = engineAt('0.7.4');
+  const { base, root } = multiRepoProject('fix074-add-repo');
+  const e = ok(wf(root, ['entry', '--item', 'ENG-411', '--owner', 'o', '--repos', 'web', '--json'], { bin })).json();
+  ok(wf(root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id], { bin }));
+  ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id], { bin }));
+  ok(wf(root, ['criteria', 'amend', '--file', amendFile(base, [{ id: 'C1', text: 'a changes', uat: 'a shows the new text' }]), '--reason', 'the api lesson needs its repo', '--add-repo', 'api', '--attempt', e.id], { bin }));
+  const r = ok(add(root, ['--attempt', e.id, '--repo', 'api', ...lessonArgs('A lesson for the api repo, now in the attempt')], { bin }));
+  assert.match(r.out, /committed in ENG-411\.1's worktree/);
+  assert.ok(fs.existsSync(lessonFile(state(root, e.id).repos.api.worktree, 'L-1')));
+  assert.ok(!fs.existsSync(path.join(root, 'api', '.workflow', 'lessons')));
+});
+
+// D7: an attempt admitted before 0.7.4 keeps the write it had.
+test('I-112 (D7): an attempt admitted before 0.7.4 is not refused: the lesson goes to the repo\'s main checkout as it did', () => {
+  const bin = engineAt('0.7.3');
+  const { root } = multiRepoProject('fix074-not-admitted-old');
+  const e = ok(wf(root, ['entry', '--item', 'ENG-412', '--owner', 'o', '--repos', 'web', '--json'], { bin })).json();
+  assert.equal(state(root, e.id).engineVersion, '0.7.3');
+  const r = ok(add(root, ['--attempt', e.id, '--repo', 'api', ...lessonArgs('Written as before')], { bin }));
+  assert.match(r.out, /in api's main checkout: commit it there/);
+  assert.ok(fs.existsSync(lessonFile(path.join(root, 'api'), 'L-1')));
+});
+
+// ======================================================================================================================
 // I-49: a generated lesson passes the repository's own Prettier check
 // ======================================================================================================================
 

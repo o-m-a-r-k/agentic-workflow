@@ -5,18 +5,20 @@ import { mkdirStateDirectory } from './state-folders.mjs';
 //
 // Where lessons live (named correction, 0.2.x): a lesson belongs to the repository it concerns and is committed and
 // delivered with the ticket that taught it: `<repo>/.workflow/lessons/<id>.yaml`, in the attempt's worktree of that repo
-// while the attempt is open and not yet accepted (committed there, so it is in the reviewed diff), in that repo's main
-// checkout otherwise. A cross-repo (`project`) lesson lives the same way in the adapter repo. A finding about the
-// workflow itself is a plugin improvement (`wf improve`), never written into a project.
+// while the attempt is open and its acceptance (if it has one) does not stand any more (committed there, so it is in the
+// reviewed diff), in that repo's main checkout otherwise. A cross-repo (`project`) lesson lives the same way in the adapter
+// repo. A finding about the workflow itself is a plugin improvement (`wf improve`), never written into a project.
 import fs from 'node:fs';
 import path from 'node:path';
 import { ADAPTER_DIR, adapterLocation, attemptAdapter, loadConfig, repoDir, trustedAdapter } from './config.mjs';
 import { readRegular, writeNoFollow } from './evidence.mjs';
 import { canonical, isInside, touchesEvidence } from './paths.mjs';
+import { treeHashes } from './attempt.mjs';
 import { append, listAttempts, loadState, readLedger } from './ledger.mjs';
 import { formatLesson, lessonStyle } from './lessons-format.mjs';
 import { componentsOf } from './topology.mjs';
-import { WfError, YAML, git, matchesAny, now, refuse } from './util.mjs';
+import { WfError, YAML, canonical as canonicalValue, git, matchesAny, now, refuse } from './util.mjs';
+import { obligationSince } from './versions.mjs';
 
 export const CAUSES = ['process', 'tooling', 'criteria', 'review', 'test', 'design-system', 'other'];
 export const MECHANISMS = ['review-rule', 'designSystem-rule', 'planner-criterion-template', 'reviewer-checklist', 'gate-check', 'engine-change', 'doc'];
@@ -218,17 +220,49 @@ function validate(l, cfg = null) {
   return p;
 }
 
-// Where a lesson of `repoName` is written now.
+// Whether the attempt's acceptance still describes its tree. It does not once the tree moved past the accepted heads (commits
+// made after the acceptance: a repair), nor once an implementer was handed after it and is still open (a repair under way,
+// before its first commit). An implementer left open when the review was accepted is no sign of either: committing a lesson
+// then would move the tree off the accepted one and `wf deliver` would refuse "modified after acceptance".
+// Named failure (I-98, I-99): the old signal was "accepted, with an implementer open", so a lesson recorded after the
+// implementer closed (its repairs committed, the attempt waiting for its review) went untracked into the pull-only main
+// checkout, and one recorded with an implementer left open at acceptance committed into the worktree and blocked delivery.
+function acceptanceHolds(state) {
+  const accepted = state.accepted;
+  if (!accepted) return false;
+  if ((state.implementers ?? []).some((x) => !x.closedAt && x.openedAt > accepted.at)) return false;
+  if (!accepted.heads) return true;
+  try {
+    return canonicalValue(accepted.heads) === canonicalValue(treeHashes(state));
+  } catch {
+    return true;
+  }
+}
+
+// Where a lesson of `repoName` is written now, and why: the attempt's worktree of that repo (committed there) while the attempt
+// is open and its acceptance does not stand; otherwise the repo's main checkout (a file to commit there). `why` is one of
+// attempt, no-attempt, finished (delivered or abandoned), accepted (the accepted tree is frozen), not-admitted (the attempt does
+// not hold that repo) and no-worktree (its worktree is gone).
 function targetFor(root, cfg, repoName, state) {
   const repo = cfg.repos.find((r) => r.name === repoName);
   if (!repo) throw refuse(`no repo \`${repoName}\` (repos: ${cfg.repos.map((r) => r.name).join(', ')})`);
-  const wt = state?.repos?.[repoName]?.worktree;
-  // Named failure (I-98, I-99): an accepted attempt adopted for repairs (its criteria amended, an implementer handed again)
-  // still carries its old acceptance, so a lesson recorded by that implementer was written untracked into the pull-only
-  // main checkout and moved by hand each time. An open implementer handoff means the worktree is where work happens.
-  const repairing = state?.accepted && (state.implementers ?? []).some((x) => !x.closedAt);
-  if (wt && fs.existsSync(wt) && (!state.accepted || repairing) && !['done', 'abandoned', 'handoff-pending'].includes(state.phase)) return { dir: wt, attempt: state.id, commit: true };
-  return { dir: repoDir(root, repo), attempt: null, commit: false };
+  const main = (why) => ({ dir: repoDir(root, repo), attempt: null, commit: false, why });
+  if (!state) return main('no-attempt');
+  if (['done', 'abandoned', 'handoff-pending'].includes(state.phase)) return main('finished');
+  const held = state.repos?.[repoName];
+  if (!held) return main('not-admitted');
+  if (!held.worktree || !fs.existsSync(held.worktree)) return main('no-worktree');
+  if (acceptanceHolds(state)) return main('accepted');
+  return { dir: held.worktree, attempt: state.id, commit: true, why: 'attempt' };
+}
+
+// Named failure (I-112): a lesson for a repository the attempt did not admit (`--repo X` not among its repos, or a project lesson
+// whose adapter repo is not) was written into that repo's main checkout as an untracked file even though the attempt was open, so
+// it was neither reviewed nor delivered with the ticket, and the report called it "recorded". It is refused with the route;
+// without `--attempt` the same lesson is written to the main checkout on purpose. An attempt admitted before 0.7.4 keeps the
+// write it always had (D7).
+function notAdmitted(state, repoName, project, verb) {
+  return refuse(`lesson not ${verb}: ${repoName}${project ? ' (the adapter repo, where a project lesson lives)' : ''} is not part of ${state.id} (its repos: ${Object.keys(state.repos).join(', ')}), so the lesson could not be committed, reviewed or delivered with this attempt, and a file written into ${repoName}'s main checkout would stay untracked there`, `to deliver it with ${state.id}, add the repo first (\`wf criteria amend --file <amendment.json> --reason "<why>" --add-repo ${repoName} --attempt ${state.id}\`) and run this again; to keep it outside the attempt, run it without \`--attempt\` (it is written into ${repoName}'s main checkout, to commit there)`, { id: 'lesson:repo-not-admitted' });
 }
 
 function writeLesson(target, l, { create = false, message } = {}) {
@@ -332,11 +366,13 @@ export function addLesson(root, options, actorId) {
   const problems = validate(l, cfg);
   if (problems.length) throw new WfError(`lesson not recorded:\n  - ${problems.join('\n  - ')}`);
   const recurs = [...new Set([...recurrenceOf(lessons, l).map((x) => x.id), ...asList(options.recurs)])];
-  const target = targetFor(root, cfg, l.repo ?? adapterLocation(root, cfg).repo.name, state);
+  const home = l.repo ?? adapterLocation(root, cfg).repo.name;
+  const target = targetFor(root, cfg, home, state);
+  if (target.why === 'not-admitted' && obligationSince(state, '0.7.4')) throw notAdmitted(state, home, l.scope === 'project', 'recorded');
   const file = writeLesson(target, l, { create: true });
   if (l.trigger.attempt) append(root, String(l.trigger.attempt), 'lesson.recorded', { id: l.id, repo: l.repo, for: options.for ?? (state?.reopenedFrom ? 'reopen' : 'finding'), file, inAttempt: Boolean(target.attempt) }, actorId);
   const flagged = recurs.map((id) => recur(root, id, l.trigger.attempt, actorId, `new lesson ${l.id}`));
-  return { lesson: l, file, recurred: flagged, inAttempt: Boolean(target.attempt), repo: l.repo ?? adapterLocation(root, cfg).repo.name, scope: l.scope };
+  return { lesson: l, file, recurred: flagged, inAttempt: Boolean(target.attempt), repo: home, scope: l.scope };
 }
 
 // The lesson's mechanism failed: it happened again.
@@ -346,9 +382,46 @@ export function recur(root, id, attempt, actorId, why) {
   if (!l) throw refuse(`no lesson ${id}`);
   l.recurrence = (l.recurrence ?? 0) + 1;
   // A shipped lesson's recurrence is recorded on the attempt only: it is never copied into a project.
-  writeLesson(targetFor(root, loadConfig(root), l.home, state), l, { message: `Lesson ${l.id} recurred (${l.recurrence})` });
+  // Named failure (I-99 class): a lesson this attempt itself added lives in its worktree and is delivered from there; with the
+  // acceptance standing (a reviewer's `finding` verdict counts as a recurrence right after it) the recurrence was written as a
+  // second, untracked copy into the main checkout, which the delivered file then collided with. The ledger records the
+  // recurrence (`lesson.recurred`); the file in the delivered tree is the one the attempt reviewed.
+  const target = targetFor(root, loadConfig(root), l.home, state);
+  if (!(target.why === 'accepted' && l.where === 'attempt')) writeLesson(target, l, { message: `Lesson ${l.id} recurred (${l.recurrence})` });
   if (attempt) append(root, String(attempt), 'lesson.recurred', { id, recurrence: l.recurrence, why }, actorId);
   return { id, recurrence: l.recurrence, promote: l.recurrence >= 2 && l.mechanism?.kind !== 'gate-check' };
+}
+
+// The attempt worktree a lesson file lives in while that attempt's acceptance stands: the file is part of the accepted tree.
+function frozenSource(state, file) {
+  if (!state || ['done', 'abandoned', 'handoff-pending'].includes(state.phase)) return null;
+  const held = Object.values(state.repos ?? {}).find((r) => r.worktree && isInside(path.resolve(file), path.resolve(r.worktree)));
+  return held && acceptanceHolds(state) ? held : null;
+}
+// Named failure (I-99 class, found in review): `wf lesson move --attempt` of a lesson that lives in an accepted tree removed the
+// file from the worktree (an uncommitted deletion: the tree no longer matched its acceptance, gate or review) while the copy went
+// untracked into the other repo's main checkout, and the lesson was then delivered twice. A change to the accepted tree is not
+// made behind its back.
+function refuseAcceptedSource(state, l) {
+  const held = frozenSource(state, l.file);
+  if (held && obligationSince(state, '0.7.4')) {
+    throw refuse(`lesson ${l.id} is part of ${state.id}'s accepted tree (${path.relative(held.worktree, l.file)}), and moving it would change that tree: \`wf deliver\` refuses a change made after the acceptance`, 'move it after the delivery (without `--attempt`), or while the work is reopened (an implementer handed for a repair)', { id: 'lesson:accepted-tree' });
+  }
+}
+
+// Removes a lesson's file after it moved away. A file that lives in an attempt's worktree is tracked there, so its removal is
+// committed with the attempt (the worktree stays clean and the delivered change does not carry the lesson twice); one in a main
+// checkout is left to the owner, as every main-checkout change is.
+// Named failure (I-99 class): `wf lesson move --attempt` left the source worktree with an uncommitted deletion, and the move
+// said it was "committed in the attempt".
+function removeLessonFile(state, file, message) {
+  const st = fs.lstatSync(file, { throwIfNoEntry: false });
+  if (!st?.isFile() || st.nlink !== 1) return;
+  fs.unlinkSync(file);
+  const held = Object.values(state?.repos ?? {}).find((r) => r.worktree && isInside(path.resolve(file), path.resolve(r.worktree)));
+  if (!held || ['done', 'abandoned', 'handoff-pending'].includes(state.phase) || acceptanceHolds(state)) return;
+  const rel = path.relative(held.worktree, file).split(path.sep).join('/');
+  if (git(held.worktree, ['add', '--', rel], { allowFail: true }) !== null) git(held.worktree, ['commit', '-q', '-m', message, '--', rel], { allowFail: true });
 }
 
 // `wf lesson move <id> --repo R`: a lesson stored in the wrong repository goes to the one it concerns.
@@ -361,7 +434,9 @@ export function moveLesson(root, id, options) {
   const project = options.project === true;
   const to = project ? adapterLocation(root, cfg).repo.name : String(options.repo ?? '');
   if (!cfg.repos.some((r) => r.name === to)) throw refuse(`--repo names one of ${cfg.repos.map((r) => r.name).join(', ')} (or --project for a lesson that spans repos)`);
+  refuseAcceptedSource(state, l);
   const target = targetFor(root, cfg, to, state);
+  if (target.why === 'not-admitted' && obligationSince(state, '0.7.4')) throw notAdmitted(state, to, project, 'moved');
   // Named failure (I-95): a move wrote over a file of the same id in the target repository, hiding the lesson it held.
   const there = fileIn(target.dir, l.fileId);
   const held = path.resolve(there) === path.resolve(l.file) ? null : readRegular(there);
@@ -370,10 +445,7 @@ export function moveLesson(root, id, options) {
     if (other.title !== l.title || other.trigger?.what !== l.trigger?.what) throw refuse(`${to} already holds a different lesson ${l.fileId} (${there}); moving ${l.id} there would overwrite it`, 'rename one of them first (its file name and `id`)');
   }
   const out = writeLesson(target, { ...l, scope: project ? 'project' : 'repo', repo: project ? null : to }, { message: `Lesson ${l.id} moved to ${to}` });
-  if (path.resolve(out) !== path.resolve(l.file)) {
-    const st = fs.lstatSync(l.file, { throwIfNoEntry: false });
-    if (st?.isFile() && st.nlink === 1) fs.unlinkSync(l.file);
-  }
+  if (path.resolve(out) !== path.resolve(l.file)) removeLessonFile(state, l.file, `Lesson ${l.id} moved to ${to}`);
   return { id, from: l.file, to: out, inAttempt: Boolean(target.attempt) };
 }
 
@@ -632,13 +704,14 @@ export function exportPluginLessons(root, cfg) {
 // text sanitised) and leaves the project.
 export async function lessonToImprovement(root, id, options) {
   const cfg = loadConfig(root);
-  const l = findLesson(loadLessons(root, { state: options.attempt ? loadState(root, String(options.attempt)) : null }), id);
+  const state = options.attempt ? loadState(root, String(options.attempt)) : null;
+  const l = findLesson(loadLessons(root, { state }), id);
   if (!l) throw refuse(`no lesson ${id}`);
   if (!l.file) throw refuse(`${id} exists only in a commit; check out a branch that has it first`);
+  refuseAcceptedSource(state, l);
   const { addImprovement } = await import('./improve.mjs');
   const names = [cfg.name, ...cfg.repos.map((r) => r.name), ...cfg.repos.map((r) => path.basename(path.resolve(root, r.path))), path.basename(root)];
   const r = addImprovement({ title: l.title, what: l.trigger?.what ?? l.title, class: String(options.class ?? 'other'), 'observed-in': l.trigger?.attempt ?? null, quote: l.trigger?.quote ?? null }, names);
-  const st = fs.lstatSync(l.file, { throwIfNoEntry: false });
-  if (st?.isFile() && st.nlink === 1) fs.unlinkSync(l.file);
+  removeLessonFile(state, l.file, `Lesson ${l.id} moved to the improvement inbox`);
   return { id, improvement: r.item.id, file: r.file, removed: l.file };
 }

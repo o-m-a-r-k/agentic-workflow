@@ -43,9 +43,27 @@ the owner relays), the question is: **project or workflow?**
 
 - A **repo** lesson: `<repo>/.workflow/lessons/<id>.yaml`, field `repo` set to that repo.
 - A **project** lesson: in the adapter repo's `.workflow/lessons/`, `scope: project`, `repo: null`.
-- Recorded during an open attempt (before acceptance), the file is committed in that attempt's worktree of the repo:
-  it is in the reviewed diff (`lesson (covered)` in `wf status`, never an unplanned file) and delivered with the
-  ticket. Otherwise it goes to the repo's main checkout, to commit there.
+- **Which checkout** (0.7.4, I-99, I-112; `wf lesson add|recur|set|move --attempt <id>`). The file is committed in the
+  attempt's worktree of the repo, so it is in the reviewed diff (`lesson (covered)` in `wf status`, never an unplanned
+  file) and delivered with the ticket, while the attempt is open and **its acceptance does not stand**. An acceptance
+  stands while the tree is the accepted one: nothing committed since, and no implementer handed after the acceptance still
+  open (`wf deliver` refuses a tree "modified after acceptance", so a lesson cannot be committed into it). Then the lesson
+  is written to the repo's main checkout, to commit there. The worktree takes over again as soon as the tree has moved
+  past the accepted heads (a repair committed, the implementer closed or not) or an implementer handed after the
+  acceptance is open: that repair is reviewed again, and the lesson with it. An implementer that was already open when the
+  review was accepted counts for nothing. A delivered or abandoned attempt, and a command without `--attempt`, write to
+  the main checkout. A recurrence recorded at acceptance (a reviewer's `finding` verdict) on a lesson the attempt itself
+  added is recorded in the ledger only (the file in the attempt's worktree is the one delivered, and no second copy goes
+  into the main checkout; the file's own count rises with the next change to the lesson). A lesson that is part of the
+  accepted tree is not moved out of it (`wf lesson move --attempt`, refused for attempts admitted at 0.7.4 or later): that
+  would change the tree the acceptance describes.
+- **A repo the attempt does not hold.** `wf lesson add --attempt <id> --repo X` with X not among the attempt's repos, or
+  `--project` when the adapter repo is not, is refused (attempts admitted at 0.7.4 or later; earlier ones keep the write
+  to the main checkout): the lesson could be neither reviewed nor delivered with the ticket, and an untracked file in a
+  main checkout is what the other rules above exist to avoid. The refusal names the route: add the repo to the attempt
+  (`wf criteria amend --file <amendment.json> --reason "<why>" --add-repo X --attempt <id>`) and record the lesson again,
+  or record it without `--attempt` to write it into X's main checkout on purpose (a reopened attempt that owes a lesson
+  then closes the obligation with `wf lesson waive --reason "<where it went>"`).
 - Without `--repo`: the only repo, or the attempt's repo with the most changed files; otherwise wf asks.
 - Read from every declared repo: at the attempt's base commit, in the main checkout, and in the attempt's worktree. A
   lesson at the base or in the main checkout is never replaced by a weaker worktree copy: a ticket can add lessons and
@@ -131,8 +149,9 @@ here can match it.
   falls in is in the planner, implementer and reviewer bundles, with why it matched, labelled enforced or advisory.
   Planner: the ticket's words (tags), the plan's paths, the lesson's repo admitted. Implementer: tags, planned and
   changed files in scope, its repo only when it is the attempt's only repo or the work item's. Reviewer: tags and the
-  changed files in scope. A lesson declaring no scope matches by its tags only. Enforced and recurring lessons are never
-  capped; the rest at most 5, omitted ids listed. Handoffs print `lessons injected: ...` and the filtered ids; filtered
+  changed files in scope. A lesson declaring no scope (no repo, components, paths or kinds) matches by its tags only; a
+  project lesson that declares no scope and no tags applies project-wide (I-64), and `paths: ["**"]` on a project lesson
+  says "every change". Enforced and recurring lessons are never capped; the rest at most 5, omitted ids listed. Handoffs print `lessons injected: ...` and the filtered ids; filtered
   lessons stay out of the bundle (no verdict owed). `wf lesson preview --attempt ID --role ...` shows both, with why
   each was filtered.
 - **Acknowledge** (optional): an implementer may add a commit trailer per lesson (`Lesson <id>: applied - <how>` or
