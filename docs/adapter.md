@@ -64,6 +64,8 @@ invariants: .workflow/AGENTS.invariants.md
 requires: { skills: [], connectors: [linear], tools: [{ name: docker, check: "docker info" }] }
 ```
 
+**`docsOnly`.** A package's `docsOnly` globs (relative to the package) name files that are not product code: the gate does not rerun a step for them, the scope checks do not call them unplanned, and the reviewer's symbol scan of the final diff takes no declarations from them. (A review division leaves out prose, `docs` folders and `LICENSE`/`NOTICE` files by their own names: [parallel review](parallel-review.md#division).)
+
 **Planning and review classes.** The planner and the reviewer default to the `review` class, which pins the Claude model `opus` with high effort. `wf doctor` fails when either role resolves to a class with no model for the selected runtime (`claude.model` or `codex.model`) (the planner is skipped when `roles.planner: false`): set the model on that class, or point the role back at `review`. Override `classes.review.claude.model` or `classes.review.codex.model` with an exact model id to pin a version. Doctor detects the current agent runtime; outside one it defaults to Claude. Select explicitly with `wf doctor --runtime codex` or `--runtime claude`. Codex has no default model pin: choose the strongest model available to your account.
 
 **`impact`.** `requiredFor` lists the work classes whose plans must carry the survey and impact map (default `[full]`: a plan with any `full` work item, or with no work items while the implementer role is `full`); only lanes with a planner are checked. The byte caps bound what the engine's own query runner reads; queries never run through a shell. Details: [lifecycle.md](lifecycle.md#impact-analysis).

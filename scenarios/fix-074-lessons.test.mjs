@@ -49,6 +49,137 @@ function multiRepoProject(name, { api = {}, web = {} } = {}) {
 const lessonArgs = (title, what = 'a thing went wrong', extra = []) => ['--title', title, '--what', what, '--cause', 'test', '--mechanism', 'doc', ...extra];
 
 // ======================================================================================================================
+// I-96: documentation and provenance files do not decide the review division
+// ======================================================================================================================
+
+// Two separable flows of 24 product files each, plus `docs` documentation files that no flow maps.
+function twoFlows({ docs = 0, perFlow = 24, docLines = 500, docDir = 'docs/verification', docExt = 'md' } = {}) {
+  const product = ['alpha', 'beta'].flatMap((feature) => Array.from({ length: perFlow }, (_, i) => `${feature}/${i}.ts`));
+  const documentation = Array.from({ length: docs }, (_, i) => `${docDir}/record-${i}.${docExt}`);
+  const flows = ['alpha', 'beta'].map((id) => ({ id, flow: `use ${id}`, failure: 'show retry', query: id }));
+  const bundle = { changed: { app: [...product, ...documentation] }, impactMap: { survey: { flows }, derived: { outside: [] } } };
+  const results = Object.fromEntries(flows.map((f) => [f.id, { files: product.filter((p) => p.startsWith(f.id)).map((p) => `app:${p}`) }]));
+  const weights = Object.fromEntries([...product.map((p) => [`app:${p}`, 2]), ...documentation.map((d) => [`app:${d}`, docLines])]);
+  return { bundle, results, weights, product, documentation };
+}
+
+// Named failure (I-96): 12 documentation files of 500 lines in a 48-file change of two separable flows were read as product code.
+// No flow maps them, so they were unmapped integration work (cost 6000 of 6096, over the 3048 threshold) and a division into two
+// scopes became one reviewer; 10 such files already did, and 49 also tripped the file-count threshold.
+test('I-96: documentation files neither weigh on the division nor count toward its thresholds, and the integration reviewer still owns them', async () => {
+  const { divideReview, reviewDivisionSummary, validateDivision } = await import('../engine/review-groups.mjs');
+  for (const docs of [10, 12, 49]) {
+    const { bundle, results, weights } = twoFlows({ docs });
+    const plan = divideReview(bundle, results, { weights });
+    assert.equal(plan.mode, 'parallel', `${docs} documentation files: ${plan.reason}`);
+    assert.deepEqual(plan.slices.map((s) => s.files.length), [24, 24]);
+    assert.equal(plan.documentation.length, docs);
+    assert.ok(plan.documentation.every((f) => plan.integration.files.includes(f)), 'integration is handed every documentation file');
+    assert.equal(plan.integration.files.length, docs);
+    assert.equal(plan.integration.estimatedCost, 0, 'and they cost it nothing');
+    assert.equal(plan.diagnostics.integration.unmapped.files, 0, 'they are not unmapped integration code');
+    assert.equal(plan.diagnostics.changedFiles, 48);
+    assert.equal(plan.diagnostics.documentationFiles, docs);
+    assert.equal(plan.files.length, 48 + docs, 'the plan still lists every changed file');
+    assert.match(reviewDivisionSummary(plan), new RegExp(`48 changed files \\(${docs} documentation files more, handed to integration and outside the estimate\\)`));
+    validateDivision(plan, bundle);
+  }
+  // The same change without them, and a plan that lies about a documentation file, for the check that owns them.
+  const { bundle, results, weights } = twoFlows({ docs: 12 });
+  const plan = divideReview(bundle, results, { weights });
+  const forged = structuredClone(plan);
+  forged.documentation.push('app:alpha/0.ts');
+  assert.throws(() => validateDivision(forged, bundle), /documentation file that is not a changed file owned by integration/);
+  const lost = structuredClone(plan);
+  lost.integration.files = lost.integration.files.filter((f) => f !== plan.documentation[0]);
+  assert.throws(() => validateDivision(lost, bundle), /every changed file exactly once|documentation file/);
+});
+
+test('I-96: the 40-file threshold counts product files; a flow\'s query that returns a documentation file does not make it a flow file', async () => {
+  const { divideReview } = await import('../engine/review-groups.mjs');
+  const small = twoFlows({ perFlow: 15, docs: 20 });
+  const single = divideReview(small.bundle, small.results, { weights: small.weights });
+  assert.equal(single.mode, 'single', '30 product files and 20 documentation files are not 50 files to divide');
+  assert.equal(single.diagnostics.reasonCode, 'below-minimum-files');
+  assert.match(single.reason, /only 30 changed product files; retain one reviewer below 40/);
+  assert.equal(single.diagnostics.documentationFiles, 20);
+  assert.equal(single.integration.files.length, 50, 'a single reviewer is handed all of them');
+  const wide = twoFlows({ docs: 3 });
+  wide.results.alpha.files.push('app:docs/verification/record-0.md');
+  const plan = divideReview(wide.bundle, wide.results, { weights: wide.weights });
+  assert.equal(plan.mode, 'parallel');
+  assert.ok(plan.flows.every((f) => f.files.every((file) => !file.includes('docs/'))), 'documentation is not a flow file');
+  assert.deepEqual(plan.integration.interfaces, [], 'and a changed documentation file in a query\'s results is no outside consumer');
+});
+
+test('I-96: what counts as documentation: prose and docs folders by name, and the adapter\'s docsOnly files through its matcher', async () => {
+  const { divideReview } = await import('../engine/review-groups.mjs');
+  const { documentationMatcher, isDocumentationFile } = await import('../engine/impact.mjs');
+  for (const file of ['README.md', 'docs/a.json', 'packages/x/docs/img/capture.png', 'guide.mdx', 'notes.rst', 'manual.adoc', 'Doc/a.txt', 'LICENSE', 'sub/NOTICE']) assert.ok(isDocumentationFile(file), file);
+  for (const file of ['src/a.ts', 'src/docs.ts', 'src/documents/a.ts', 'requirements.txt', 'robots.txt', 'app/evidence/log.ts', 'src/readme.ts', 'a.md.ts']) assert.ok(!isDocumentationFile(file), file);
+  const matcher = documentationMatcher({ repos: [{ name: 'app', packages: [{ path: '.', docsOnly: ['evidence/**'] }] }, { name: 'api', packages: [{ path: 'services/billing', docsOnly: ['fixtures/**/*.json'] }] }] });
+  assert.ok(matcher('app', 'evidence/run-1.json') && matcher('app', 'README.md'));
+  assert.ok(!matcher('app', 'src/evidence.ts'));
+  assert.ok(matcher('api', 'services/billing/fixtures/a/b.json') && !matcher('api', 'services/billing/src/a.json') && !matcher('api', 'fixtures/a.json'));
+  assert.ok(!matcher('other', 'evidence/run-1.json'));
+  // The caller passes the matcher; the division then leaves those files out as well.
+  const { bundle, results, weights } = twoFlows({ docs: 12, docDir: 'evidence', docExt: 'json' });
+  assert.equal(divideReview(bundle, results, { weights }).mode, 'single', 'without the adapter\'s notion these are product files');
+  const plan = divideReview(bundle, results, { weights, documentation: matcher });
+  assert.equal(plan.mode, 'parallel');
+  assert.equal(plan.documentation.length, 12);
+});
+
+// The default handoff, with no caller-supplied notion: 12 documentation files of 500 lines in the diff, next to two flows of 25 files.
+function flowFiles() {
+  const files = { 'shared.ts': 'alpha beta\n', 'unmapped.ts': 'common\n' };
+  for (const feature of ['alpha', 'beta']) for (let i = 0; i < 24; i++) files[`${feature}/${i}.ts`] = `${feature}\n`;
+  return files;
+}
+test('I-96: an ordinary reviewer handoff still divides a large separable change that also commits a documentation package', () => {
+  const files = flowFiles();
+  const p = singleRepoProject('fix074-docs-division', { strategy: { enabled: false }, gate: { steps: [] } }, files);
+  const e = ok(wf(p.root, ['entry', '--lane', 'quick', '--json'])).json();
+  const queries = ['alpha', 'beta'].map((id) => ({ id, pattern: id, kind: 'literal', paths: ['alpha/**', 'beta/**', 'shared.ts'], hits: 25 }));
+  const doc = { survey: { queries, patterns: [{ id: 'P', query: 'alpha', hits: 25 }] }, expect: { files: 2, rounds: 2, minutes: 60 }, criteria: [{ id: 'C1', text: 'flows remain coherent' }], plan: { anchors: ['src/a.txt'], tests: { run: ['flow-test'] } },
+    impact: { changes: queries.map((q) => ({ id: q.id, element: q.id, kind: 'symbol', cites: ['C1'], covers: ['P'], consumers: { query: q.id, hits: 25 }, flows: [{ flow: `use ${q.id}`, failure: 'retry', query: q.id, hits: 25 }], contracts: [], suites: [{ suite: 'flow-test', query: q.id, hits: 25 }] })) } };
+  ok(wf(p.root, ['plan', '--file', closureFile(p.base, doc), '--attempt', e.id]));
+  ok(wf(p.root, ['handoff', 'implementer', '--agent', 'impl', '--attempt', e.id]));
+  const change = Object.fromEntries(Object.entries(files).map(([file, text]) => [file, `${text}changed\n`]));
+  for (let i = 0; i < 12; i++) change[`docs/verification/capture-${i}.md`] = 'a recorded http result line\n'.repeat(500);
+  commitIn(e.repos.app.worktree, change);
+  const h = ok(wf(p.root, ['handoff', 'reviewer', '--agent', 'integration', '--attempt', e.id, '--json'])).json();
+  assert.equal(h.division.mode, 'parallel', h.division.reason);
+  assert.equal(h.members.length, 3);
+  assert.equal(h.division.documentation.length, 12);
+  const integration = JSON.parse(fs.readFileSync(h.bundle, 'utf8'));
+  assert.ok(integration.primaryFiles.includes('app:docs/verification/capture-0.md'), 'the integration reviewer is handed the documentation');
+  assert.ok(integration.primaryFiles.includes('app:shared.ts'));
+  for (const member of h.members.filter((m) => m !== h.members.at(-1))) assert.ok(!JSON.stringify(JSON.parse(fs.readFileSync(member.file ?? member.bundle ?? h.bundle, 'utf8')).primaryFiles ?? []).includes('docs/verification'), 'a scope is not handed them');
+});
+
+// Named failure (I-96, same class): the symbol scan of the final diff took declarations out of documentation files, so a code block
+// in a guide put `renderGuide` among the symbols whose callers every reviewer was asked about.
+test('I-96: declarations in documentation files are not symbols of the final diff', () => {
+  const { base, root } = singleRepoProject('fix074-docs-symbols', { gate: { steps } });
+  const e = ok(wf(root, ['entry', '--item', 'ENG-420', '--owner', 'o', '--json'])).json();
+  ok(wf(root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id]));
+  ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id]));
+  ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
+  commitIn(e.repos.app.worktree, {
+    'src/table.js': 'export function renderTable(rows) {\n  return rows;\n}\n',
+    'docs/guide.md': '# Guide\n\n```js\nexport function renderGuide(rows) {\n  return rows;\n}\nclass GuideHelper {}\n```\n',
+    'docs/manifest.json': '{ "note": "export function renderManifest() {}" }\n',
+  });
+  ok(wf(root, ['gate', '--reason', 'scenario: gate mechanics, outside the order of work', '--attempt', e.id]));
+  const start = ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-1', '--attempt', e.id])).out;
+  const bundle = JSON.parse(fs.readFileSync(start.match(/^Read (\S+)/m)[1], 'utf8'));
+  assert.ok(bundle.impactMap.derived.symbols.includes('renderTable'), 'product declarations are still scanned');
+  for (const symbol of ['renderGuide', 'GuideHelper', 'renderManifest']) assert.ok(!bundle.impactMap.derived.symbols.includes(symbol), `${symbol} is documentation`);
+  assert.deepEqual(Object.keys(bundle.impactMap.derived.declarationOrigins), ['renderTable']);
+});
+
+// ======================================================================================================================
 // I-108: every native patch Codex itself applies is parsed; a malformed payload is refused as malformed
 // ======================================================================================================================
 
