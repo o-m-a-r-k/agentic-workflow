@@ -91,7 +91,7 @@ export default {
   agentsDir: '.codex/agents',
   skillsDir: '.agents/skills',
   fragments: {
-    toolCompatibility: 'Codex inspects structured handoff JSON with `wf evidence inspect` (never one full-output dump), reads text inside the selected attempt with `wf evidence show <path> --attempt <id>` (or its supported full-file Node reader when available) and views exported image copies with `view_image`. Read a required skill through its exact handed file.',
+    toolCompatibility: 'Codex inspects structured handoff JSON with `wf evidence inspect` (never one full-output dump), reads text inside the selected attempt with `wf evidence show <path> --attempt <id>` (`--offset`/`--length` for a long file) and views exported image copies with `view_image`. Read a required skill through its exact handed file.',
     closureWriter: 'Node `fs.writeFile` or `apply_patch`',
   },
   // Codex loads custom agents from TOML files in .codex/agents/.
