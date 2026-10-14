@@ -1226,14 +1226,13 @@ export function recordReview(root, options) {
       (['not-applicable', 'dropped-with-reason'].includes(c.evidence?.kind) ? !String(c.evidence.reason ?? '').trim() : !String(c.evidence?.ref ?? '').trim()));
     if (incomplete.length) throw refuse('group criterion evidence is incomplete: ' + incomplete.map(c => c.id).join(', '));
   }
-  // Every lesson injected into the reviewer's bundle needs a verdict before the closure is recorded.
   // 0.7.0 (goals, not forms): the reviewer's goal is the truth about whether the change meets its goals and what it broke.
   // Verdict forms for project rules, lessons, design-system hits, discovered items, seams, supplemental validations and
   // files outside the plan are context in the bundle, not obligations: they measured compliance with the form, not
   // defects, and a third of reviewer commands went to them. What stays: criteria evidence, located findings, prior
   // findings verified, anomalies when screenshots were handed, every gate screenshot inspected.
-  // Every design-system hit in the reviewer's bundle needs a verdict before the closure is recorded.
-  // Every issue found during the ticket (I-18) and every seam to a repo added for a fix (I-19) needs a verdict.
+  // What a closure still owes: the historical implementation reports of an attempt admitted before 0.7.0, and the anomalies
+  // in the screenshots it was handed.
   const hv = reportedIssueVerdicts(handed.historicalReports ?? [], closure, state);
   if (hv.problems.length) throw refuse('closure refused: historical report observations have no valid verdict:\n  - ' + hv.problems.join('\n  - '), 'add reportedIssues: [{ id, verdict: fixed|verified-nonissue|open, evidence, fixedIn, repo, rationale, finding }]; judge the current code, never edit the old transcript');
   const av = reviewAnomalies(handed.gate, closure);
