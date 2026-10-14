@@ -30,7 +30,7 @@ import { requireOwnerDecision, strategistHandoff, strategistWaiting, strategyHol
 import { requireYes } from './approve.mjs';
 import { home, startPromptFor, verifyAgent } from './provenance.mjs';
 import { allRecordedQueries, buildSweeps, deriveFromDiff, impactRequired, inventory, readSweepFile, rerun, staleRestrictionLines, staleRestrictions, sweepAnswers, validateAmendImpact, validatePlanImpact } from './impact.mjs';
-import { WfError, YAML, assertEngine, assertSafeId, canonical, git, hashFile, hashValue, matchesAny, readJson, refuse, run, sha256, writeImmutable, writeJson } from './util.mjs';
+import { ENGINE_VERSION, semverLt, WfError, YAML, assertEngine, assertSafeId, canonical, git, hashFile, hashValue, matchesAny, readJson, refuse, run, sha256, writeImmutable, writeJson } from './util.mjs';
 
 // An input file is read once: the text parsed is the text kept raw (a file rewritten between two reads could otherwise
 // be judged on one content and recorded with another).
@@ -410,16 +410,17 @@ export function amendCriteria(root, options) {
   // Named failure (I-107): an amendment on an accepted attempt added a criterion and left the acceptance standing, so
   // `wf deliver` shipped it with no evidence mapped to it (`wf accept` would have refused). An amendment that adds or
   // changes a criterion, or adds a repo, withdraws the acceptance, as a supplemental validation does: the attempt is
-  // reviewed and accepted again on its tree (a new gate when the code moved). D7: this is an obligation a release adds to
-  // an attempt that was already accepted, so it applies to attempts admitted at 0.7.4 or later; for an earlier one the
-  // acceptance stands, the amendment says so, and `wf resume` warns until a fresh review maps the criteria.
-  // The decision is written into the event, so folding an older ledger again changes nothing.
+  // reviewed and accepted again on its tree (a new gate when the code moved). This is not a new obligation (D7, D13): every
+  // delivered criterion was always to be mapped to evidence, and the amendment was a way around it. So the engine that
+  // records the amendment decides, whatever version the attempt was admitted at: from 0.7.4 every such amendment
+  // withdraws. The decision is written into the event, so an amendment an earlier engine recorded is not judged again
+  // when its ledger is folded; for those `wf resume` warns until a fresh review maps the criteria.
   const reopensScope = Boolean(changes.added.length || changes.changed.length || addRepos.length);
   const acceptedNow = Boolean(state.accepted) && !state.delivery.completedAt && !['handoff-pending', 'done', 'abandoned'].includes(state.phase);
-  const withdrewAcceptance = reopensScope && acceptedNow && obligationSince(state, '0.7.4');
+  const withdrewAcceptance = reopensScope && acceptedNow && !semverLt(ENGINE_VERSION, '0.7.4');
   recordedTogether(root, state.id, () => {
     const raw = keepRaw(root, state.id, `plans/amend-${state.criteriaAmendments.length + 1}.raw.${extOf(from)}`, amendText);
-    append(root, state.id, 'criteria.amended', { criteria, changes, reason: String(options.reason), previous: state.criteria, raw, ...(expectOf(stated) ? { expect: expectOf(stated) } : {}), ...(doc.work ? { work } : {}), ...(added.length ? { addedRepos: added.map((a) => a.repo) } : {}), ...(impactAddendum ? { impact: impactAddendum } : {}), ...(impactOwed ? { impactOwed } : {}), ...(withdrewAcceptance ? { withdrewAcceptance: true } : {}) }, actor(options));
+    append(root, state.id, 'criteria.amended', { criteria, changes, reason: String(options.reason), previous: state.criteria, raw, engine: ENGINE_VERSION, ...(expectOf(stated) ? { expect: expectOf(stated) } : {}), ...(doc.work ? { work } : {}), ...(added.length ? { addedRepos: added.map((a) => a.repo) } : {}), ...(impactAddendum ? { impact: impactAddendum } : {}), ...(impactOwed ? { impactOwed } : {}), ...(withdrewAcceptance ? { withdrewAcceptance: true } : {}) }, actor(options));
     // Telemetry: how much the ticket grew with this amendment (criteria counts always; endpoints, error codes and repos
     // when the amendment file states them under `scope`).
     append(root, state.id, 'scope.changed', { amendment: state.criteriaAmendments.length + 1, reason: String(options.reason), criteria: { before: state.criteria.length, after: criteria.length, added: changes.added.length, changed: changes.changed.length, dropped: changes.dropped.length }, ...scope, addedRepos: added.map((a) => a.repo) }, actor(options));
@@ -429,7 +430,7 @@ export function amendCriteria(root, options) {
   const ids = [...changes.added, ...changes.changed];
   const acceptance = withdrewAcceptance
     ? `acceptance withdrawn: ${ids.length ? `${ids.join(', ')} ${ids.length === 1 ? 'was' : 'were'} added or changed` : 'a repo was added'} after the review that was accepted, so no review mapped ${ids.length ? 'it' : 'its seam'} to evidence; next: ${nextAction(root, after)}`
-    : reopensScope && acceptedNow ? `${state.id} was admitted before 0.7.4, so its acceptance stands and \`wf deliver\` would ship ${ids.join(', ') || 'the added repo'} with no review having mapped it to evidence; hand a fresh reviewer (\`wf handoff reviewer --agent <new id>\`) and \`wf accept\` again before delivering` : null;
+    : reopensScope && acceptedNow ? `this engine (${ENGINE_VERSION}) leaves ${state.id}'s acceptance standing, and \`wf deliver\` would ship ${ids.join(', ') || 'the added repo'} with no review having mapped it to evidence; hand a fresh reviewer (\`wf handoff reviewer --agent <new id>\`) and \`wf accept\` again before delivering` : null;
   return { state: after, changes, added, impactOwed, acceptanceWithdrawn: withdrewAcceptance, restrictions: [...restrictionWarnings(trusted, after), ...(route ? [route] : []), ...(acceptance ? [acceptance] : [])] };
 }
 
@@ -1411,19 +1412,19 @@ const EVIDENCE_KINDS = new Set(['test', 'screenshot', 'output', 'not-applicable'
 // Criteria the recorded round `r` did not judge in their present form. `added`: current criteria its closure maps no
 // evidence for (an amendment added them after the round was handed; `wf accept` refuses these for every attempt).
 // `changed`: criteria an amendment re-worded after the round was handed, which the round judged in their earlier wording;
-// accepted on the old mapping, a changed criterion shipped unproven (I-107, same cause). The second list is an obligation
-// of 0.7.4 (D7), so it is empty for an attempt admitted earlier.
+// accepted on the old mapping, a changed criterion shipped unproven (I-107, same cause). The second list counts the
+// amendments an engine of 0.7.4 or later recorded (D13), whatever the attempt's admission version.
 export function criteriaAfterReview(state, r) {
   const handed = (state.handoffs ?? []).find((x) => x.bundle === r?.handoff);
   const since = handed?.at ?? r?.at ?? '';
   const mapped = new Set((r?.closure?.criteria ?? []).map((c) => c.id));
   const current = new Set((state.criteria ?? []).map((c) => c.id));
   const added = [...current].filter((id) => !mapped.has(id));
-  const changed = obligationSince(state, '0.7.4') ? [...new Set((state.criteriaAmendments ?? []).filter((a) => a.at > since).flatMap((a) => a.changes?.changed ?? []))].filter((id) => current.has(id) && !added.includes(id)) : [];
+  const changed = [...new Set((state.criteriaAmendments ?? []).filter((a) => a.at > since && a.engine && !semverLt(a.engine, '0.7.4')).flatMap((a) => a.changes?.changed ?? []))].filter((id) => current.has(id) && !added.includes(id));
   return { added, changed, since };
 }
 
-// An attempt admitted before 0.7.4 keeps its acceptance through an amendment (D7). The criteria such an amendment added or
+// An amendment an engine before 0.7.4 recorded left the acceptance standing (I-107). The criteria such an amendment added or
 // changed after the acceptance, so `wf resume` can say that delivery would ship them with no review having mapped them.
 export function amendedAfterAcceptance(state) {
   if (!state.accepted || state.delivery?.completedAt) return [];
@@ -2545,9 +2546,9 @@ function phaseAction(root, cfg, state) {
   const openIssues = openDiscovered(state);
   if (openIssues.length) return `${openIssues.filter((d) => d.blockedBy).map((d) => `route ${d.id} to the implementer of ${d.blockedBy} (continue it with SendMessage); `).join('')}fix the discovered issue(s) ${openIssues.map((d) => `${d.id}${d.severity ? ` (${d.severity})` : ''}`).join(', ')} through the implementer that found each (never yourself) (\`wf discovered list\`), commit, then \`wf discovered close <id> --fixed <commit>\`; a criterion or scope that blocks the fix is amended (\`wf criteria amend --file <f> --reason "why"\`, \`--add-repo <repo>\` when the fix needs another repo). By the person's severity rule an issue may instead wait (\`wf discovered close <id> --deferred --reason "why"\`): high or unrated only when the person confirms it with \`wf approve\`, medium on your judgement, low freely; a split moves one to a sibling attempt of the batch (\`wf split\`)`;
   if (state.accepted && observations(state).length) return `${observations(state).length} review observation(s) are unresolved and delivery waits for them: ${observationLines(state).slice(0, 5).join('; ')}; each is fixed (the next reviewer verifies it, or \`wf scope fixed --finding <ref> --commit <sha>\`), moved to a sibling attempt (\`wf scope move\`), ticketed (\`wf scope ticket\`) or left for later as a known issue (\`wf scope defer\`); leaving the delivery follows the severity rule: high only with the person's \`wf approve\`, medium with your \`--reason\`, low freely; \`wf scope list\` shows each one's severity`;
-  // An attempt admitted before 0.7.4 keeps its acceptance through an amendment (D7, I-107): say what delivery would ship.
+  // An amendment an engine before 0.7.4 recorded left the acceptance standing (I-107): say what delivery would ship.
   const unmapped = amendedAfterAcceptance(state);
-  const unmappedNote = unmapped.length ? ` -- WARNING: ${unmapped.join(', ')} ${unmapped.length === 1 ? 'was' : 'were'} added or re-worded after the acceptance and no review mapped ${unmapped.length === 1 ? 'it' : 'them'} to evidence (this attempt was admitted before 0.7.4, so the engine leaves the acceptance standing): for the evidence, hand a fresh reviewer (\`wf handoff reviewer --agent <new id>\`) and \`wf accept\` again, then deliver` : '';
+  const unmappedNote = unmapped.length ? ` -- WARNING: ${unmapped.join(', ')} ${unmapped.length === 1 ? 'was' : 'were'} added or re-worded after the acceptance and no review mapped ${unmapped.length === 1 ? 'it' : 'them'} to evidence (the amendment was recorded before 0.7.4, which left the acceptance standing): for the evidence, hand a fresh reviewer (\`wf handoff reviewer --agent <new id>\`) and \`wf accept\` again, then deliver` : '';
   if (state.accepted) return state.batchPending ? `accepted; ${state.batchOf} (reserved by a split) waits for the other members to be accepted, then \`wf batch create --members <every member of the split>\` assembles it` : state.batchOf ? `waiting for batch ${state.batchOf}` : `deliver: \`wf deliver\`${unmappedNote}`;
   // Order of work (I-27): code-review rounds until one comes back clean (no gate meanwhile), then one gate on that tree,
   // then the evidence review of the gated tree. Review and gate never run side by side.

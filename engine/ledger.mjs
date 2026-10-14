@@ -279,10 +279,10 @@ export function reduce(entries) {
         s.criteria = d.criteria;
         if (d.work) s.work = d.work;
         for (const w of d.work ?? []) s.workIntroduced[w.id] ??= e.at;
-        s.criteriaAmendments.push({ at: e.at, reason: d.reason, by: e.actor, changes: d.changes ?? null, impact: d.impact ? true : d.impactOwed ? 'owed' : null, ...(d.withdrewAcceptance === true ? { withdrewAcceptance: true } : {}) });
+        s.criteriaAmendments.push({ at: e.at, reason: d.reason, by: e.actor, changes: d.changes ?? null, impact: d.impact ? true : d.impactOwed ? 'owed' : null, engine: d.engine ?? null, ...(d.withdrewAcceptance === true ? { withdrewAcceptance: true } : {}) });
         // Named failure (I-107): an amendment on an accepted attempt left the acceptance standing, so `wf deliver` shipped a
-        // criterion no review had mapped to evidence. The engine that writes the amendment decides (D7: only for attempts
-        // admitted at 0.7.4 or later) and records the decision in the event; an amendment written before that carries no
+        // criterion no review had mapped to evidence. The engine that writes the amendment decides (D13: from 0.7.4, for
+        // every attempt) and records the decision in the event; an amendment written before that carries no
         // flag, so folding an older ledger again changes nothing. As `validation.added` does, it reopens the attempt.
         if (d.withdrewAcceptance === true) {
           s.accepted = null;

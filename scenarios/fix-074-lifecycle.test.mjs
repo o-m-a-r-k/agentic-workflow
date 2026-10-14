@@ -148,22 +148,37 @@ test('I-107: a criterion re-worded after the last review round is not accepted o
   assert.notEqual(run.state(a.root, a.id).accepted, null, 'an amendment that changes no criterion leaves the acceptance');
 });
 
-// D7: the obligation a release adds to an attempt that was already accepted belongs to attempts admitted at 0.7.4 or later.
-test('I-107 (D7): an attempt admitted before 0.7.4 keeps its acceptance through an amendment, is told what delivery would ship, and re-folds unchanged', () => {
+// D13: the engine that records an amendment decides; an amendment an earlier engine recorded keeps its acceptance when
+// its ledger is folded again, and `wf resume` says what delivery would ship.
+test('I-107 (D13): an amendment an engine before 0.7.4 recorded keeps its acceptance, is told what delivery would ship, and re-folds unchanged', () => {
   const old = runner('0.7.3');
   const a = accepted(old, 'i107-old');
   const amended = ok(old(a.root, ['criteria', 'amend', '--file', amendFile(a.base, [{ id: 'C2', text: 'a second thing holds', uat: 'second' }]), '--reason', 'add C2', '--attempt', a.id]));
-  assert.match(amended.err, /was admitted before 0.7.4, so its acceptance stands and `wf deliver` would ship C2 with no review having mapped it to evidence/);
+  assert.match(amended.err, /this engine \(0\.7\.3\) leaves \S+ acceptance standing, and `wf deliver` would ship C2 with no review having mapped it to evidence/);
   const s = old.state(a.root, a.id);
   assert.notEqual(s.accepted, null);
   assert.equal(s.criteriaAmendments.at(-1).withdrewAcceptance, undefined, 'the older attempt\'s amendment carries no flag');
-  assert.match(s.next, /deliver: `wf deliver` -- WARNING: C2 was added or re-worded after the acceptance and no review mapped it to evidence \(this attempt was admitted before 0.7.4/);
+  assert.match(s.next, /deliver: `wf deliver` -- WARNING: C2 was added or re-worded after the acceptance and no review mapped it to evidence \(the amendment was recorded before 0.7.4/);
   // A newer engine reading the same ledger folds the same state: nothing is broken retroactively.
   const again = ok(wf(a.root, ['resume', '--attempt', a.id, '--json'])).json();
   assert.notEqual(again.accepted, null);
   assert.equal(again.phase, 'accepted');
   // The earlier behaviour stays for it: delivery is not refused (the warning is the engine's whole answer).
   ok(old(a.root, ['deliver', '--attempt', a.id]));
+});
+
+// D13: the hole is closed for attempts already in flight. An attempt admitted and accepted under 0.7.3 and amended by
+// 0.7.4 loses its acceptance like a new one: every delivered criterion was always to be mapped to evidence.
+test('I-107 (D13): an attempt admitted before 0.7.4 and amended by 0.7.4 has its acceptance withdrawn', () => {
+  const old = runner('0.7.3');
+  const a = accepted(old, 'i107-inflight');
+  const now = runner('0.7.4');
+  const amended = ok(now(a.root, ['criteria', 'amend', '--file', amendFile(a.base, [{ id: 'C2', text: 'a second thing holds', uat: 'second' }]), '--reason', 'add C2', '--attempt', a.id]));
+  assert.match(amended.out + amended.err, /acceptance withdrawn/);
+  const s = now.state(a.root, a.id);
+  assert.equal(s.accepted, null);
+  assert.equal(s.criteriaAmendments.at(-1).engine, '0.7.4');
+  assert.equal(now(a.root, ['deliver', '--attempt', a.id], { ownerSilent: true }).code, 75, 'delivery waits for a review that maps C2');
 });
 
 // ---- I-114 ----
