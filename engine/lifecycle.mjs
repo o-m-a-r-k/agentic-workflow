@@ -402,9 +402,10 @@ export function amendCriteria(root, options) {
   const impactOwed = impactApplies && addsScope && !impactAddendum ? owedScope : null;
   const from = path.resolve(String(options.file));
   const added = [];
+  const repoEntries = [];
   for (const name of addRepos) {
     const entryOf = addRepoWorktree(root, cfg, state, name);
-    append(root, state.id, 'repo.added', { repo: name, entry: entryOf, reason: String(options.reason) }, actor(options));
+    repoEntries.push({ repo: name, entry: entryOf, reason: String(options.reason) });
     added.push({ repo: name, worktree: entryOf.worktree, base: entryOf.base });
   }
   // Named failure (I-107): an amendment on an accepted attempt added a criterion and left the acceptance standing, so
@@ -419,6 +420,9 @@ export function amendCriteria(root, options) {
   const acceptedNow = Boolean(state.accepted) && !state.delivery.completedAt && !['handoff-pending', 'done', 'abandoned'].includes(state.phase);
   const withdrewAcceptance = reopensScope && acceptedNow && !semverLt(ENGINE_VERSION, '0.7.4');
   recordedTogether(root, state.id, () => {
+    // The added repos are recorded with the amendment, in one transaction (independent review of 0.7.4: a repo recorded
+    // before the amendment left it added with the acceptance standing when the command stopped in between).
+    for (const r of repoEntries) append(root, state.id, 'repo.added', r, actor(options));
     const raw = keepRaw(root, state.id, `plans/amend-${state.criteriaAmendments.length + 1}.raw.${extOf(from)}`, amendText);
     append(root, state.id, 'criteria.amended', { criteria, changes, reason: String(options.reason), previous: state.criteria, raw, engine: ENGINE_VERSION, ...(expectOf(stated) ? { expect: expectOf(stated) } : {}), ...(doc.work ? { work } : {}), ...(added.length ? { addedRepos: added.map((a) => a.repo) } : {}), ...(impactAddendum ? { impact: impactAddendum } : {}), ...(impactOwed ? { impactOwed } : {}), ...(withdrewAcceptance ? { withdrewAcceptance: true } : {}) }, actor(options));
     // Telemetry: how much the ticket grew with this amendment (criteria counts always; endpoints, error codes and repos
@@ -1419,7 +1423,10 @@ export function criteriaAfterReview(state, r) {
   const mapped = new Set((r?.closure?.criteria ?? []).map((c) => c.id));
   const current = new Set((state.criteria ?? []).map((c) => c.id));
   const added = [...current].filter((id) => !mapped.has(id));
-  const changed = [...new Set((state.criteriaAmendments ?? []).filter((a) => a.at > since && a.engine && !semverLt(a.engine, '0.7.4')).flatMap((a) => a.changes?.changed ?? []))].filter((id) => current.has(id) && !added.includes(id));
+  // A criterion dropped and added again under the same id after the round was handed is re-worded as well: the round mapped
+  // its earlier text (independent review of 0.7.4).
+  const recent = (state.criteriaAmendments ?? []).filter((a) => a.at > since && a.engine && !semverLt(a.engine, '0.7.4'));
+  const changed = [...new Set(recent.flatMap((a) => [...(a.changes?.changed ?? []), ...(a.changes?.added ?? []).filter((id) => mapped.has(id))]))].filter((id) => current.has(id) && !added.includes(id));
   return { added, changed, since };
 }
 
@@ -1719,6 +1726,10 @@ export async function deliver(root, options) {
       if (ms.activeHold) throw refuse(`batch member ${m} is on hold: "${ms.activeHold.reason}"`, `release it, or \`wf batch eject --batch ${state.id} --member ${m}\``);
       if (['abandoned', 'done'].includes(ms.phase)) throw refuse(`batch member ${m} is ${ms.phase}; eject it from ${state.id}`);
       if (ms.batchOf !== state.id) throw refuse(`${m} is no longer a member of ${state.id}`);
+      // Independent review of 0.7.4 (high): a member's acceptance withdrawn after it joined (an amendment, a supplemental
+      // validation) was not looked at, and the batch's own review maps only the batch criteria, so the member's new
+      // criterion shipped unmapped (the I-107 class).
+      if (!ms.accepted) throw refuse(`batch member ${m} is not accepted: its acceptance was withdrawn after it joined ${state.id} (an amendment or a supplemental validation), so a criterion of it has no evidence any review mapped`, `review and accept it again (\`wf handoff reviewer --agent <new id> --attempt ${m}\`, then \`wf accept --attempt ${m}\`), or \`wf batch eject --batch ${state.id} --member ${m}\``);
       for (const [n, head] of Object.entries(state.batch.heads?.[m] ?? {})) {
         if (git(ms.repos[n].worktree, ['rev-parse', 'HEAD']) !== head) throw refuse(`batch member ${m} changed in ${n} after it joined ${state.id}; eject and re-add it`);
       }

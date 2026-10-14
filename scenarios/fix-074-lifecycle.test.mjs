@@ -17,7 +17,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { amendFile, closureFile, commitIn, criteriaFile, goodClosure, ok, planDoc, singleRepoProject, tmp, wf, write } from './helpers.mjs';
+import { OUT_OF_ORDER, amendFile, closureFile, commitIn, criteriaFile, goodClosure, ok, planDoc, singleRepoProject, tmp, toAccepted, wf, write } from './helpers.mjs';
 import { loadState } from '../engine/ledger.mjs';
 import { knownLimits } from '../engine/tracker.mjs';
 import { verifyAttempt } from '../engine/evidence.mjs';
@@ -179,6 +179,40 @@ test('I-107 (D13): an attempt admitted before 0.7.4 and amended by 0.7.4 has its
   assert.equal(s.accepted, null);
   assert.equal(s.criteriaAmendments.at(-1).engine, '0.7.4');
   assert.equal(now(a.root, ['deliver', '--attempt', a.id], { ownerSilent: true }).code, 75, 'delivery waits for a review that maps C2');
+});
+
+// Independent review of 0.7.4: a criterion dropped and added again under the same id before acceptance was accepted on the
+// evidence mapped to its earlier wording, because it was compared by id only.
+test('I-107: a criterion dropped and added again under the same id is not accepted on the evidence mapped to its earlier wording', () => {
+  const run = runner('0.7.4');
+  const a = started(run, 'i107-readd');
+  ok(run(a.root, ['criteria', 'amend', '--file', amendFile(a.base, [{ id: 'C2', text: 'a second thing holds', uat: 'second' }]), '--reason', 'add C2', '--attempt', a.id]));
+  round(a, 'rev-0', goodClosure('rev-0', { criteria: map('C1', 'C2') }));
+  ok(run(a.root, ['gate', '--attempt', a.id]));
+  round(a, 'rev-1', goodClosure('rev-1', { criteria: map('C1', 'C2') }));
+  ok(run(a.root, ['criteria', 'amend', '--file', amendFile(a.base, [{ id: 'C2', dropped: true, reason: 'not needed' }], { impact: undefined }), '--reason', 'drop C2', '--attempt', a.id]));
+  ok(run(a.root, ['criteria', 'amend', '--file', amendFile(a.base, [{ id: 'C2', text: 'something else entirely holds', uat: 'other' }]), '--reason', 'C2 again', '--attempt', a.id]));
+  const refused = run(a.root, ['accept', '--attempt', a.id], { ownerSilent: true });
+  assert.equal(refused.code, 75);
+  assert.match(refused.err, /criterion C2 was re-worded by an amendment after this review round was handed/);
+});
+
+// Independent review of 0.7.4 (high): a batch delivered a member whose acceptance an amendment had withdrawn after it
+// joined, and the batch's own review maps only the batch criteria, so the member's new criterion shipped unmapped.
+test('I-107: a batch is not delivered while a member\'s acceptance is withdrawn', () => {
+  const heavy = [{ id: 'unit', repo: 'app', run: 'true', inputs: ['src/**'] }, { id: 'e2e', repo: 'app', run: 'true', tier: 'heavy' }];
+  const { base, root } = singleRepoProject('i107-batch', { gate: { steps: heavy } }, { 'src/b.txt': 'b\n' });
+  const m1 = toAccepted(root, base, { item: 'ENG-40', change: { 'src/a.txt': 'one\n' }, extraEntry: ['--defer-heavy'] });
+  const m2 = toAccepted(root, base, { item: 'ENG-41', change: { 'src/b.txt': 'two\n' }, extraEntry: ['--defer-heavy'] });
+  const b = ok(wf(root, ['batch', 'create', '--members', `${m1.id},${m2.id}`, '--owner', 'o', '--json'])).json();
+  ok(wf(root, ['criteria', 'amend', '--file', amendFile(base, [{ id: 'C2', text: 'a second thing holds', uat: 'second' }]), '--reason', 'add C2', '--attempt', m1.id]));
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', b.id]));
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'rb', '--attempt', b.id]));
+  ok(wf(root, ['review', '--closure', closureFile(base, { reviewer: 'rb', findings: [], criteria: [{ id: 'B1', evidence: { kind: 'output', ref: 'batch gate' } }], screenshotsInspected: [] }), '--attempt', b.id]));
+  ok(wf(root, ['accept', '--attempt', b.id]));
+  const refused = wf(root, ['deliver', '--attempt', b.id], { ownerSilent: true });
+  assert.equal(refused.code, 75);
+  assert.match(refused.err, new RegExp(`batch member ${m1.id.replace('.', '\\.')} is not accepted: its acceptance was withdrawn after it joined`));
 });
 
 // ---- I-114 ----
@@ -358,7 +392,7 @@ test('I-69: a closure with unreached scope is not the full audit, and the scope 
   ok(run(a.root, ['gate', '--attempt', a.id]));
   round(a, 'rev-3', goodClosure('rev-3', { notReached: ['the dark theme'] }));
   ok(run(a.root, ['accept', '--attempt', a.id]));
-  assert.match(knownLimits(loadState(a.root, a.id)), /- Not reached by the review that was accepted: the dark theme/);
+  assert.match(knownLimits(loadState(a.root, a.id)), /- Not reached by review \S+ \([^)]+\): the dark theme/);
   ok(run(a.root, ['export', '--attempt', a.id]));
   assert.match(fs.readFileSync(path.join(a.root, '.wf-evidence', 'attempts', a.id, 'export', 'attempt.html'), 'utf8'), /not reached by this round: the dark theme/);
 });

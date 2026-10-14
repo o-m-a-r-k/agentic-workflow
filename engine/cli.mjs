@@ -3,7 +3,7 @@ import { captureWarning } from './captures.mjs';
 import { findHost, fragment, hostChoice, hostIds, hostLabels, hostNames } from './hosts/index.mjs';
 import { mkdirStateDirectory } from './state-folders.mjs';
 import { completeScopeTicket, deferFindings, moveOut, recordFixed, scopeRows, waiveFinding } from './scope-decisions.mjs';
-import { observations } from './review-policy.mjs';
+import { observations, unreachedOf } from './review-policy.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -952,8 +952,8 @@ async function dispatch(cmd, sub, positional, options) {
       const s = acceptReview(root, options);
       const lp = lessonPrompts(s).filter((p) => p.startsWith('finding'));
       // I-69: scope the accepted round said it did not reach is said here too, not only in resume, export and the comment.
-      const unreached = Array.isArray(s.review?.closure?.notReached) ? s.review.closure.notReached.filter((x) => String(x ?? '').trim()) : [];
-      print(options, `review accepted.${unreached.length ? `\nnot reached by this review: ${unreached.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join('; ')}` : ''}${lp.map((p) => `\nlesson: ${p}`).join('')} next: ${nextAction(root, s)}`, s);
+      const unreached = unreachedOf(s.review?.closure);
+      print(options, `review accepted.${unreached.length ? `\nnot reached by this review: ${unreached.join('; ')}` : ''}${lp.map((p) => `\nlesson: ${p}`).join('')} next: ${nextAction(root, s)}`, s);
       return 0;
     }
     case 'deliver': {
