@@ -48,11 +48,11 @@ test('wf improve close strips the maintainer\'s private names from what it write
   sh(plugin, 'git init -q && git add -A && git -c user.name=t -c user.email=t@example.test commit -q -m init');
   const env = { env: { WF_IMPROVEMENTS_DIR: inbox, WF_PLUGIN_REPO: plugin } };
   const cwd = tmp('privacy-anywhere');
-  ok(wf(cwd, ['improve', 'add', '--title', 'acmeapp lost a closure', '--what', 'In review_643_r30 the acmeapp reviewer stopped', '--class', 'engine'], env));
+  ok(wf(cwd, ['improve', 'add', '--title', 'acmeapp lost a closure', '--what', 'In batch_77_x9 the acmeapp reviewer stopped', '--class', 'engine'], env));
   // The names are listed after the item was recorded: the inbox still holds them, and only close stands between them and the repo.
-  fs.writeFileSync(path.join(home, 'privacy-denylist'), 'acmeapp\n/review_\\d+_r\\d+/\n');
+  fs.writeFileSync(path.join(home, 'privacy-denylist'), 'acmeapp\n/batch_\\d+_x\\d+/\n');
   ok(wf(cwd, ['improve', 'close', 'I-1', '--version', '9.9.9', '--test', 'scenarios/fix.test.mjs', '--fix', 'acmeapp closures are kept'], env));
   const written = fs.readFileSync(path.join(plugin, 'improvements', 'I-1.md'), 'utf8');
-  for (const leak of ['acmeapp', 'review_643_r30']) assert.ok(!written.toLowerCase().includes(leak), `leaked ${leak}:\n${written}`);
+  for (const leak of ['acmeapp', 'batch_77_x9']) assert.ok(!written.toLowerCase().includes(leak), `leaked ${leak}:\n${written}`);
   assert.match(written, /<name> lost a closure/);
 });
