@@ -89,6 +89,10 @@ export function readJUnitFiles(files) {
 // test that did not run is `not-run`.
 export function playwrightJsonSuites(doc) {
   const files = new Map();
+  // A run stopped as a whole (a global timeout, maxFailures, a stop) is named in the top-level `errors` with no file; then a
+  // test it cut off reads `skipped` with a skipped result, like a declared skip (observed on Playwright 1.63), so in such a
+  // run every skipped test is counted as not run.
+  const runStopped = (Array.isArray(doc?.errors) ? doc.errors : []).some((e) => e && typeof e.location?.file !== 'string');
   const walk = (suite) => {
     for (const spec of suite.specs ?? []) {
       const file = spec.file ?? suite.file ?? null;
@@ -99,11 +103,10 @@ export function playwrightJsonSuites(doc) {
         const results = t.results ?? [];
         s.durationMs += results.reduce((n, r) => n + (Number(r.duration) || 0), 0);
         if (t.status === 'skipped' || (results.length && results.every((r) => r.status === 'skipped'))) s.skipped += 1;
-        // Skipped without a skipped result is a test that did not run: none (the run stopped first: maxFailures, a failed
-        // dependency project) or only an interrupted one (globalTimeout, a stop). A skip the spec declares has a skipped
-        // result. Independent review of 0.7.6 (high): such a suite was passed, so it was carried, and a later gate went
+        // Skipped without a skipped result is a test that did not run (the run stopped first: maxFailures, a failed
+        // dependency project); a skip the spec declares has a skipped result (observed on Playwright 1.63). Independent review of 0.7.6 (high): such a suite was passed, so it was carried, and a later gate went
         // green without running it.
-        if (t?.status === 'skipped' && !results.some((r) => r?.status === 'skipped')) s.notRun = (s.notRun ?? 0) + 1;
+        if (t?.status === 'skipped' && (runStopped || !results.some((r) => r?.status === 'skipped'))) s.notRun = (s.notRun ?? 0) + 1;
       }
       // One failure per failing test, a test being a spec in one project (0.7.6: a spec failing in four projects is four).
       const unexpected = (spec.tests ?? []).filter((t) => t?.status === 'unexpected').length;

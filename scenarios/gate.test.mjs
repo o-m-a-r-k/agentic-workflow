@@ -70,26 +70,28 @@ test('the gate trusts the adapter at base: a ticket cannot remove its own checks
 test('JUnit suites are recorded per suite, and `select` reruns only failed or changed suites', () => {
   const script = `
 const fs=require('fs');const sel=process.argv.slice(2);
-const fail=fs.readFileSync('tests/b.test','utf8').includes('bad');
-const all=['tests/a.test','tests/b.test'];const run=sel.length?sel:all;
+const fail=fs.readFileSync('tests/b.test.js','utf8').includes('bad');
+const all=['tests/a.test.js','tests/b.test.js'];const run=sel.length?sel:all;
 fs.appendFileSync(process.env.WF_EVIDENCE+'/../ran.txt',run.join(',')+'\\n');
-const cases=run.map(f=>'<testcase classname="x" name="'+f+'" file="'+f+'">'+(f==='tests/b.test'&&fail?'<failure/>':'')+'</testcase>').join('');
+const cases=run.map(f=>'<testcase classname="x" name="'+f+'" file="'+f+'">'+(f==='tests/b.test.js'&&fail?'<failure/>':'')+'</testcase>').join('');
 fs.writeFileSync(process.env.WF_EVIDENCE+'/junit.xml','<testsuites><testsuite name="s">'+cases+'</testsuite></testsuites>');
-process.exit(run.includes('tests/b.test')&&fail?1:0);`;
+process.exit(run.includes('tests/b.test.js')&&fail?1:0);`;
+  // Suite files named with an infix (`.test.js`): from a JUnit report, which names only the suites that ran, the gate
+  // can tell which other inputs are suites (0.7.6); a file named by its extension alone reruns the step whole.
   const steps = [{ id: 'unit', repo: 'app', run: 'node runner.cjs {select}', select: '{suites}', report: { junit: '{evidence}/junit.xml' }, inputs: ['tests/**', 'runner.cjs'] }];
-  const { base, root } = singleRepoProject('junit', { gate: { steps } }, { 'runner.cjs': script, 'tests/a.test': 'a\n', 'tests/b.test': 'b\n' });
+  const { base, root } = singleRepoProject('junit', { gate: { steps } }, { 'runner.cjs': script, 'tests/a.test.js': 'a\n', 'tests/b.test.js': 'b\n' });
   const e = admitted(root, base, 'ENG-23');
-  commitIn(e.repos.app.worktree, { 'tests/b.test': 'bad\n' });
+  commitIn(e.repos.app.worktree, { 'tests/b.test.js': 'bad\n' });
   const g1 = gateJson(root, e.id);
   assert.equal(g1.code, 1);
-  assert.deepEqual(g1.data.steps[0].suites.map((s) => `${s.id}:${s.status}`).sort(), ['tests/a.test:passed', 'tests/b.test:failed']);
-  commitIn(e.repos.app.worktree, { 'tests/b.test': 'good\n' });
+  assert.deepEqual(g1.data.steps[0].suites.map((s) => `${s.id}:${s.status}`).sort(), ['tests/a.test.js:passed', 'tests/b.test.js:failed']);
+  commitIn(e.repos.app.worktree, { 'tests/b.test.js': 'good\n' });
   const g2 = gateJson(root, e.id);
   assert.equal(g2.code, 0);
   // Steps write into their scratch folder (WF_EVIDENCE), outside the evidence; its parent is the run's scratch folder.
   const ran = fs.readFileSync(path.join(root, '.wf-worktrees', '_gate', e.id, g2.data.runId, 'ran.txt'), 'utf8').trim();
-  assert.equal(ran, 'tests/b.test', 'only the failed/changed suite reran');
-  assert.ok(g2.data.steps[0].suites.find((s) => s.id === 'tests/a.test').carried, 'the passing suite is carried');
+  assert.equal(ran, 'tests/b.test.js', 'only the failed/changed suite reran');
+  assert.ok(g2.data.steps[0].suites.find((s) => s.id === 'tests/a.test.js').carried, 'the passing suite is carried');
 });
 
 test('steps run in parallel up to the limit and leases keep heavy steps apart', () => {

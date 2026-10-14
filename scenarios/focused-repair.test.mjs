@@ -189,6 +189,9 @@ test('no merge turns a suite that did not run into a passed one, and a test that
   const passed = { projectName: 'en', status: 'expected', results: [{ status: 'passed' }] };
   assert.equal(playwrightJsonSuites(spec([{ status: 'skipped', results: [{ status: 'interrupted' }] }]))[0].status, 'not-run', 'interrupted');
   assert.equal(playwrightJsonSuites(spec([{ status: 'skipped', results: [{ status: 'skipped' }] }]))[0].status, 'passed', 'a declared skip ran');
+  // A global timeout reports the test it cut off as skipped with a skipped result (Playwright 1.63), and names the stop
+  // in the top-level errors with no file: in such a run every skipped test did not run.
+  assert.equal(playwrightJsonSuites({ ...spec([{ status: 'skipped', results: [{ status: 'skipped' }] }]), errors: [{ message: 'Timed out waiting 2s for the test suite to run' }] })[0].status, 'not-run', 'cut off by a global timeout');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wf-pw-'));
   fs.writeFileSync(path.join(dir, '1.json'), JSON.stringify(spec([{ status: 'skipped', results: [] }])));
   fs.writeFileSync(path.join(dir, '2.json'), JSON.stringify(spec([passed])));
@@ -205,7 +208,7 @@ const JUNIT_RUNNER = `
 const fs=require('fs');const sel=process.argv.slice(2);
 const all=['test/a.e2e-spec.ts','test/b.e2e-spec.ts','test/c.e2e-spec.ts'];const run=sel.length?sel:all;
 fs.appendFileSync(process.env.WF_EVIDENCE+'/../ran.txt',run.join(',')+'\\n');
-if(fs.existsSync('crash')){process.exit(1);}
+if(fs.existsSync('crash')||run.some(f=>fs.readFileSync(f,'utf8').includes('crash'))){process.exit(1);}
 const bad=(f)=>fs.readFileSync(f,'utf8').includes('bad');const ran=[];
 for(const f of run){ran.push(f);if(bad(f))break;}
 fs.mkdirSync('reports',{recursive:true});
@@ -239,5 +242,34 @@ test('a report an earlier run left at a fixed path is not read as this run\'s', 
   const g2 = gateJson(root, e.id);
   assert.equal(g2.code, 1);
   assert.deepEqual(g2.data.steps[0].suites, [], 'the run died before writing: no suites, not the earlier run\'s');
+});
+
+test('a suite the gate asked to rerun that the run never reported stays not-run, and the step does not pass', () => {
+  const { base, root } = singleRepoProject('junit-unreported', { gate: { steps: [junitStep] } }, junitFiles);
+  const e = admitted(root, base, 'ENG-68');
+  commitIn(e.repos.app.worktree, { 'test/b.e2e-spec.ts': 'bad\n' });
+  assert.equal(gateJson(root, e.id).code, 1);
+  commitIn(e.repos.app.worktree, { 'test/b.e2e-spec.ts': 'crash\n' });
+  const g2 = gateJson(root, e.id);
+  assert.equal(g2.code, 1);
+  assert.equal(g2.data.steps[0].suites.find((s) => s.id === 'test/b.e2e-spec.ts')?.status, 'not-run', 'b was asked for and never reported');
+  commitIn(e.repos.app.worktree, { 'test/a.e2e-spec.ts': 'a2\n' });
+  const g3 = gateJson(root, e.id);
+  assert.equal(g3.code, 1, 'b, never run since it changed, runs again and still crashes');
+  const ran = fs.readFileSync(path.join(root, '.wf-worktrees', '_gate', e.id, g3.data.runId, 'ran.txt'), 'utf8').trim();
+  assert.ok(ran.split(',').includes('test/b.e2e-spec.ts'));
+});
+
+test('suite files named by their extension alone rerun whole (JUnit cannot say which other inputs are suites)', () => {
+  const plain = JUNIT_RUNNER.replace("const all=['test/a.e2e-spec.ts','test/b.e2e-spec.ts','test/c.e2e-spec.ts']", "const all=['test/a.ts','test/b.ts','test/c.ts']");
+  const { base, root } = singleRepoProject('junit-plain', { gate: { steps: [junitStep] } }, { 'runner.cjs': plain, 'test/a.ts': 'a\n', 'test/b.ts': 'b\n', 'test/c.ts': 'c\n', 'src/app.txt': 'app\n' });
+  const e = admitted(root, base, 'ENG-69');
+  commitIn(e.repos.app.worktree, { 'test/b.ts': 'bad\n' });
+  assert.equal(gateJson(root, e.id).code, 1);
+  commitIn(e.repos.app.worktree, { 'test/b.ts': 'good\n' });
+  const g2 = gateJson(root, e.id);
+  assert.equal(g2.code, 0);
+  const ran = fs.readFileSync(path.join(root, '.wf-worktrees', '_gate', e.id, g2.data.runId, 'ran.txt'), 'utf8').trim();
+  assert.deepEqual(ran.split(',').sort(), ['test/a.ts', 'test/b.ts', 'test/c.ts']);
 });
 

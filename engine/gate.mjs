@@ -369,6 +369,8 @@ function suitesToRerun(prior, planned, { listsEverySuite = false } = {}) {
       return i > 0 ? b.slice(i) : null;
     };
     const suffixes = new Set([...suiteFiles].map(suffix).filter(Boolean));
+    // A suite file named with its extension alone (`login.ts`) does not say which other inputs are suites: rerun whole.
+    if ([...suiteFiles].some((f) => (suffix(f)?.split('.').length ?? 0) < 3)) return null;
     for (const f of files) if (!suiteFiles.has(f) && suffixes.has(suffix(f)) && planned.fileHashes[f] !== 'deleted') rerun.push(f);
   }
   return rerun.length ? [...new Set(rerun)] : null;
@@ -529,13 +531,20 @@ async function executeStep(root, cfg, state, planned, ctx) {
       const report = readRegular(f);
       if (report) writeNoFollow(path.join(evidenceDir, `playwright-${path.basename(f)}`), report.bytes);
     }
+    // A suite the gate asked to rerun that this run did not report (the runner died before writing, or ran something else)
+    // stays as `not-run`, rerun the next time, and the step does not pass (independent review of 0.7.6: it was dropped, so a
+    // later gate went green without it). Suites it was not asked to rerun are carried.
+    let unreported = [];
     if (rerun && prior?.suites) {
       const fresh = new Map(suites.map((s) => [s.id, s]));
-      suites = [...prior.suites.filter((s) => !fresh.has(s.id) && !rerun.includes(s.file ?? s.id)).map((s) => ({ ...s, carried: true })), ...fresh.values()];
+      const reported = (s) => fresh.has(s.id) || (s.file && [...fresh.values()].some((x) => x.file === s.file));
+      const requested = (s) => rerun.includes(s.file ?? s.id);
+      unreported = prior.suites.filter((s) => requested(s) && !reported(s)).map((s) => ({ ...s, status: 'not-run', carried: undefined }));
+      suites = [...prior.suites.filter((s) => !reported(s) && !requested(s)).map((s) => ({ ...s, carried: true })), ...unreported, ...fresh.values()];
     }
     const interrupted = codes.some((c) => c.signal);
-    const failed = codes.some((c) => c.code !== 0) || suites.some((s) => s.status === 'failed');
-    result = { status: interrupted ? 'interrupted' : failed ? 'failed' : 'passed', suites, exitCodes: codes.map((c) => c.code), artifacts: [] };
+    const failed = codes.some((c) => c.code !== 0) || suites.some((s) => s.status === 'failed') || unreported.length > 0;
+    result = { status: interrupted ? 'interrupted' : failed ? 'failed' : 'passed', suites, exitCodes: codes.map((c) => c.code), artifacts: [], ...(unreported.length ? { unreported: unreported.map((s) => s.file ?? s.id) } : {}) };
     // Which tests failed, recorded on the step (telemetry): read from the reports and output this run wrote.
     if (result.status === 'failed') {
       result.failures = stepFailures({ junitFiles: files, playwrightFiles, log: logFile, exitCodes: result.exitCodes, suites, redact: ctx.redact });

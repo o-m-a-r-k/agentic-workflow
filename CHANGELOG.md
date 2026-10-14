@@ -22,7 +22,9 @@ Release notes, newest first, then every fix that came from a failure in the work
   - A suite that never ran is never passed over: after a run that stopped early (Jest `--bail`; a JUnit report names only
     the suites that ran), every input named like a reported suite that the run did not report is rerun with the failed
     ones; and only report files the run wrote are read, so a run that died before writing is not read as an earlier
-    run's suites.
+    run's suites. A suite the gate asked to rerun that the run did not report stays
+    `not-run` and the step does not pass; in a Playwright run stopped as a whole every skipped test counts as not run;
+    JUnit suite files named by their extension alone (`login.ts`) rerun the step whole.
   - A failing Playwright test is counted once per project, in the log and in the JSON report (612 failures read as 448).
   - `wf doctor` names each heavy, non-plugin step that cannot rerun only its failed suites, and what it lacks (`select`, a
     suite report, `{select}` in `run`, `inputs`).
@@ -33,7 +35,8 @@ Release notes, newest first, then every fix that came from a failure in the work
 Regression scenarios: `scenarios/focused-repair.test.mjs` (Playwright suites rerun only the failed spec files; the
 `failedGate` facts, with no prescribed method; the doctor notice; a spec that failed to load reruns; an ambiguous suite file
 reruns whole; one suite per id; a spec that did not run, or was interrupted, is rerun; no merge passes a not-run suite; an early-stopped
-JUnit run reruns the suites it never reported; a stale report is not read; `wf resume <item>` (and a damaged ledger of that item) and `wf report
+JUnit run reruns the suites it never reported; a stale report is not read; a requested suite never reported stays
+not-run; extension-only suite names rerun whole; `wf resume <item>` (and a damaged ledger of that item) and `wf report
 --attempt`) and `scenarios/telemetry.test.mjs` (a test
 failing in two projects is two failures); each fails on 0.7.5.
 
