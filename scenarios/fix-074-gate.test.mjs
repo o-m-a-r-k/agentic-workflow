@@ -512,3 +512,28 @@ test('I-111: a failing install that echoes its token is masked in the refusal', 
   assert.doesNotMatch(`${failed.out}${failed.err}`, /registry-value-123456/);
   assert.equal(fs.existsSync(path.join(f.root, '.wf-worktrees', 'ENG-1.1')), false, 'rolled back cleanly');
 });
+
+// ---------------------------------------------------------------------------------------------------------------------
+// I-110 (the part in the CLI). Named failure: `wf lesson show` printed "none declared (matched only by its tags in the ticket)" for a
+// bare project lesson, but since I-64 a project lesson that narrows itself by nothing applies to every change in the project. The
+// text is pinned to what the handoff really does: the lesson the text calls project-wide reaches an implementer's bundle.
+test('I-110: wf lesson show says a bare project lesson applies to every change in the project, and a tagged one only when the ticket mentions a tag', () => {
+  const f = singleRepoProject('lesson-show-reach', { gate: { steps } });
+  const add = (args) => ok(wf(f.root, ['lesson', 'add', '--project', '--cause', 'review', '--mechanism', 'doc', '--what', 'it happened', ...args]));
+  add(['--title', 'Name the rollback']);
+  add(['--tags', 'analytics', '--title', 'One clock']);
+  ok(wf(f.root, ['lesson', 'add', '--title', 'Tables', '--what', 'w', '--cause', 'review', '--mechanism', 'doc', '--paths', 'src/**', '--repo', 'app']));
+
+  const bare = ok(wf(f.root, ['lesson', 'show', 'L-1'])).out;
+  assert.match(bare, /scope: none declared, so it applies to every change in the project/);
+  assert.doesNotMatch(bare, /matched only by its tags/);
+  const tagged = ok(wf(f.root, ['lesson', 'show', 'L-2'])).out;
+  assert.match(tagged, /scope: none declared \(matched only by its tags in the ticket\)/);
+  assert.match(ok(wf(f.root, ['lesson', 'show', 'L-3'])).out, /scope: repo app; paths src\/\*\*/);
+
+  // What the text says is what the handoff does.
+  const e = planned(f, 'ENG-1');
+  const impl = ok(wf(f.root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
+  const bundle = JSON.parse(fs.readFileSync(impl.out.match(/bundle: (\S+)/)[1], 'utf8'));
+  assert.deepEqual(bundle.lessons.apply.map((l) => l.id).filter((id) => ['L-1', 'L-2'].includes(id)), ['L-1']);
+});

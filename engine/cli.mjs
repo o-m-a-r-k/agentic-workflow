@@ -1228,7 +1228,14 @@ async function dispatch(cmd, sub, positional, options) {
       if (sub === 'show') {
         const l = findLesson(loadLessons(root), positional[0]);
         if (!l) throw new WfError(`no lesson ${positional[0] ?? ''}`);
-        print(options, `${show(l)}\n  what happened: ${l.trigger?.what ?? ''}${l.trigger?.quote ? `\n  in their words: "${l.trigger.quote}"` : ''}${l.trigger?.attempt ? `\n  seen in: ${l.trigger.attempt}${l.trigger.finding ? ` (finding ${l.trigger.finding})` : ''}` : ''}\n  tags: ${l.tags.join(', ') || 'none'}; scope: ${[l.repo ? `repo ${l.repo}` : null, l.components?.length ? `components ${l.components.join(', ')}` : null, l.paths.length ? `paths ${l.paths.join(', ')}` : null, l.kinds?.length ? `kinds ${l.kinds.join(', ')}` : null].filter(Boolean).join('; ') || 'none declared (matched only by its tags in the ticket)'}\n  ${l.file}`, l);
+        // Named failure (I-110): a project lesson that declares no repo, components, paths, kinds or tags was shown as "matched only by its
+        // tags in the ticket", but since I-64 it applies to every change in the project (`projectWide` in relevantLessons, engine/lessons.mjs).
+        const declared = [l.repo ? `repo ${l.repo}` : null, l.components?.length ? `components ${l.components.join(', ')}` : null, l.paths.length ? `paths ${l.paths.join(', ')}` : null, l.kinds?.length ? `kinds ${l.kinds.join(', ')}` : null].filter(Boolean);
+        const reach = declared.length ? declared.join('; ')
+          : l.scope === 'project' && !l.tags.length ? 'none declared, so it applies to every change in the project (a project lesson that narrows itself by nothing is project-wide)'
+            : l.tags.length ? 'none declared (matched only by its tags in the ticket)'
+              : 'none declared, and no tags: it matches no change (add `paths: ["**"]` to apply it to every change)';
+        print(options, `${show(l)}\n  what happened: ${l.trigger?.what ?? ''}${l.trigger?.quote ? `\n  in their words: "${l.trigger.quote}"` : ''}${l.trigger?.attempt ? `\n  seen in: ${l.trigger.attempt}${l.trigger.finding ? ` (finding ${l.trigger.finding})` : ''}` : ''}\n  tags: ${l.tags.join(', ') || 'none'}; scope: ${reach}\n  ${l.file}`, l);
         return 0;
       }
       if (sub === 'review') {
