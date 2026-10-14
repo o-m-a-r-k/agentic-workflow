@@ -9,10 +9,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { actor, addRepoWorktree, baseRef, branchName, onTarget, changedFiles, cleanupWorktrees, entry, missingWorktrees, openState, treeHashes, worktreeDir } from './attempt.mjs';
-import { channelOf, discoveredVerdicts, headsNow, openDiscovered, seamVerdicts, unacknowledged, reportsForReview, reportedIssueVerdicts } from './discovered.mjs';
+import { channelOf, discoveredLevel, discoveredVerdicts, headsNow, openDiscovered, seamVerdicts, unacknowledged, reportsForReview, reportedIssueVerdicts } from './discovered.mjs';
 import { executionSettings, rejectModelOverrides } from './models.mjs';
 import { rerunsOnlyFailed } from './onboard.mjs';
-import { carriesMovedWork, RULE, RULE_SHORT } from './leaving.mjs';
+import { carriesMovedWork, movedHeld, RULE, RULE_SHORT } from './leaving.mjs';
 import { detectOwner, findHost, fragment, hostChoice, isHost, lastFencedYaml, optional } from './hosts/index.mjs';
 import { defaultRuntime } from './runtime-policy.mjs';
 import { ADAPTER_DIR, adapterFileAtCommit, agentTypeFor, attemptAdapter, declared, loadConfig, repoDir, roleClass, trustedAdapter } from './config.mjs';
@@ -1710,6 +1710,23 @@ export async function deliver(root, options) {
     if (open.length) throw refuse(`not delivered: ${open.length} discovered issue(s) are open${x.id !== state.id ? ` in ${x.id}` : ''}: ${open.map((d) => `${d.id} ${d.summary}`).join('; ')}`, `fix it in this ticket and close it with the fix commit (\`wf discovered close <id> --fixed <commit>\`; a fix after acceptance needs the gate and a fresh review); ${RULE}`);
     // Named failure (0.7.0): a finding that does not block (D2) must not simply stay open past delivery. It ends fixed and
     // verified by a round, ticketed, or moved to a sibling attempt; the strategist schedules it.
+    // Moved work ships only with its sibling: each `moved` disposition's sibling is an open member of this delivery
+    // (independent review of 0.7.7: a moved finding "fixed" in a sibling that then left the batch shipped nowhere).
+    const delivering = new Set([state.id, ...(state.batch?.members ?? [])]);
+    for (const dsp of (x.scopeDecisions ?? []).filter((y) => y.choice === 'moved')) {
+      let sib = null;
+      try {
+        sib = loadState(root, dsp.sibling);
+      } catch {
+        sib = null;
+      }
+      if (!sib || !delivering.has(dsp.sibling) || ['abandoned'].includes(sib.phase)) throw refuse(`not delivered: ${(dsp.keys ?? []).join(', ')} of ${x.id} moved to ${dsp.sibling}, which is not in this delivery${sib?.phase === 'abandoned' ? ' (abandoned)' : ''}: ${RULE_SHORT}`, 'deliver the sibling in this batch, or record the item again here as a discovered issue and fix it', { id: 'deliver:moved-elsewhere' });
+    }
+    // A medium or high discovered issue closed fixed after the last recorded review waits for a round that sees the fix,
+    // as a medium or high observation claimed fixed does (independent review of 0.7.7).
+    const lastReviewAt = (x.reviews ?? []).map((r) => r.at).filter(Boolean).sort().at(-1) ?? '';
+    const unverified = (x.discovered ?? []).filter((d) => d.status === 'fixed' && d.kind !== 'bookkeeping' && discoveredLevel(d) !== 'low' && d.fixed?.at && d.fixed.at > lastReviewAt);
+    if (unverified.length) throw refuse(`not delivered: ${unverified.map((d) => `${d.id} (${discoveredLevel(d)})`).join(', ')}${x.id !== state.id ? ` of ${x.id}` : ''} closed fixed after the last review: a review round sees the fix before delivery`, 'hand a delta reviewer (`wf handoff reviewer --agent <new id>`), then accept again', { id: 'deliver:fixed-unreviewed' });
     const obs = observations(x);
     if (obs.length) throw refuse(`not delivered: ${obs.length} review observation(s) are unresolved${x.id !== state.id ? ` in ${x.id}` : ''}: ${obs.slice(0, 8).map((f) => `${f.ref}${f.family ? ` [${f.family}]` : ''} ${f.summary ?? ''}`).join('; ')}${obs.length > 8 ? ` and ${obs.length - 8} more` : ''}`, `each is fixed (a later review round verifies it, or \`wf scope fixed\`) or moved to a sibling attempt (\`wf scope move\`); ${RULE}; \`wf scope list\` shows them with their severity`, { id: 'review:observations-open' });
   }
@@ -2377,7 +2394,7 @@ export function batchEject(root, options) {
   // Independent review of 0.7.0 (HIGH): the split guarantee was removable after assembly. A member that came from, or made,
   // a split leaves the batch only on the person's one-use approval.
   const ms0 = loadState(root, member);
-  const ejectDecision = (ms0.splitFrom || ms0.splits?.length || carriesMovedWork(ms0)) ? requireYes(root, ms0, { kind: 'move-out-of-batch', key: `eject:${batch.id}:${member}:${(ms0.batchJoins ?? 0)}`, summary: `${member} leaves the assembled ${batch.id}, which carries work a split moved`, what: `ejecting ${member} from ${batch.id}`, options }).decision : null;
+  const ejectDecision = (ms0.splitFrom || ms0.splits?.length || carriesMovedWork(ms0)) ? requireYes(root, ms0, { kind: 'move-out-of-batch', key: `eject:${batch.id}:${member}:${(ms0.batchJoins ?? 0)}`, summary: `${member} leaves the assembled ${batch.id}${carriesMovedWork(ms0) ? ` with the work moved to it: ${movedHeld(ms0).join('; ')}` : ', which carries work a split moved'}`, what: `ejecting ${member} from ${batch.id}`, options }).decision : null;
   const remaining = members.filter((m) => m !== member);
   for (const [name, r] of Object.entries(batch.repos)) {
     run('git', ['checkout', '--quiet', '-B', branchName(batch.id), r.base], { cwd: r.worktree });

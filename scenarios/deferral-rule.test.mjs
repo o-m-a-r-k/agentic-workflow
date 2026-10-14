@@ -142,10 +142,38 @@ test('a finding moved to a sibling leaves the batch only by the person: ejecting
   ok(wf(root, ['scope', 'move', '--finding', 'rev-0:F1', '--sibling', m2, '--reason', 'belongs with PR-2', '--attempt', e.id]));
   const moved = state(root, m2).discovered.at(-1);
   assert.deepEqual(moved.movedFrom, { attempt: e.id, ref: 'rev-0:F1' }, 'the sibling keeps where the item came from');
+  // Closing the moved item "fixed" with any later commit of the sibling does not change that: a fix in a branch that
+  // leaves the batch is not delivered (independent review of 0.7.7).
+  const sibWt = state(root, m2).repos.app.worktree;
+  commitIn(sibWt, { 'src/b.txt': 'two, again\n' }, 'an unrelated change');
+  ok(wf(root, ['discovered', 'close', moved.id, '--fixed', sh(sibWt, 'git rev-parse HEAD'), '--attempt', m2]));
   const eject = wf(root, ['batch', 'eject', '--batch', b.id, '--member', m2, '--reason', 'ship PR-1 alone', '--owner', 'o'], silent);
   assert.equal(eject.code, 75, 'ejecting the holder of moved work is the person\'s decision');
+  assert.match(eject.err, new RegExp(`with the work moved to it: ${moved.id} \\(fixed, from ${e.id.replace('.', '\\.')} rev-0:F1\\)`));
   const abandon = wf(root, ['abandon', '--attempt', m2, '--reason', 'not now', '--owner', 'o'], silent);
   assert.equal(abandon.code, 75, 'abandoning it too');
   assert.equal(state(root, m2).phase !== 'abandoned', true);
+});
+
+test('a medium discovered issue closed fixed after the last review is not delivered until a round sees the fix', () => {
+  const { base, root } = singleRepoProject('d17-fixed-unreviewed', { gate: { steps } }, { 'src/a.txt': LINES, 'src/old.txt': 'o1\no2\no3\n' });
+  const e = ok(wf(root, ['entry', '--item', 'DR-2', '--owner', 'o', '--json'])).json();
+  ok(wf(root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id]));
+  ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id]));
+  ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
+  ok(wf(root, ['discovered', 'add', '--summary', 'the export sums one page only', '--severity', 'medium', '--attempt', e.id]));
+  commitIn(e.repos.app.worktree, { 'src/a.txt': LINES.replace('l2', 'L2'), 'src/old.txt': 'o1 fixed\no2\no3\n' }, 'the change and the fix');
+  const fix = sh(e.repos.app.worktree, 'git rev-parse HEAD');
+  ok(wf(root, ['handoff', 'close', '--agent', 'i', '--attempt', e.id]));
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'r1', '--attempt', e.id]));
+  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r1')), '--attempt', e.id]));
+  ok(wf(root, ['gate', '--attempt', e.id]));
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'r2', '--attempt', e.id]));
+  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r2')), '--attempt', e.id]));
+  ok(wf(root, ['accept', '--attempt', e.id]));
+  ok(wf(root, ['discovered', 'close', 'D1', '--fixed', fix, '--attempt', e.id]));
+  const r = wf(root, ['deliver', '--attempt', e.id], silent);
+  assert.notEqual(r.code, 0);
+  assert.match(r.err, /D1 \(medium\) closed fixed after the last review: a review round sees the fix before delivery/);
 });
 

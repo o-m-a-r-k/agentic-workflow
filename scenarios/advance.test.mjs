@@ -108,7 +108,11 @@ for (const runtime of ['codex', 'claude']) {
     child.stderr.on('data', (b) => { stderr += b; }); child.stdout.on('data', (b) => { stdout += b; });
     const ended = new Promise((r) => child.once('close', r));
     try {
-      for (let n=0; n<60 && child.exitCode===null && !fs.existsSync(path.join(p.base,'review-recorded')); n++) await new Promise(r=>setTimeout(r,50));
+      // Wait for the child's recorded review until it exits or the test's own deadline nears, never a fixed few seconds
+      // (I-122: under a full parallel run a 3 s budget ran out before the child recorded, and the test failed on a race).
+      const deadline = Date.now() + 12000;
+      while (child.exitCode === null && !fs.existsSync(path.join(p.base, 'review-recorded')) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+      assert.ok(fs.existsSync(path.join(p.base, 'review-recorded')), `the child recorded its review before the deadline: ${stderr}`);
       assert.equal(state(p.root,p.id).reviews.length,1,stderr);
       assert.equal(state(p.root,p.id).gates.length,0);
       const competing=wf(p.root,['advance','--once','--runtime',runtime,'--attempt',p.id],{env:p.env});

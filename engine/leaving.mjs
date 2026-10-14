@@ -42,10 +42,16 @@ export function leavingDecision(root, state, items, { verb, reason = '', options
   }).decision;
 }
 
-// Whether an attempt holds work another attempt of its batch moved to it (`wf scope move`, a split): an open discovered
-// issue or a live criterion with `movedFrom`. Ejecting or abandoning it would drop that work from the delivery, so it is the
+// Whether an attempt holds work another attempt of its batch moved to it (`wf scope move`, a split): a discovered issue
+// or a live criterion with `movedFrom`. Ejecting or abandoning it would drop that work from the delivery, so it is the
 // person's decision (independent review of 0.7.7: move, then eject, then abandon let a medium finding leave unasked).
-export const carriesMovedWork = (state) => (state.discovered ?? []).some((d) => d.movedFrom && d.status === 'open') || (state.criteria ?? []).some((c) => c.movedFrom);
+export const carriesMovedWork = (state) => movedHeld(state).length > 0;
+// The moved items an attempt holds, for the person's question: every moved discovered issue except one the person let leave
+// (a fix in a branch that leaves the batch is not delivered: independent review of 0.7.7), and every moved criterion.
+export const movedHeld = (state) => [
+  ...(state.discovered ?? []).filter((d) => d.movedFrom && d.status !== 'deferred').map((d) => `${d.id} (${d.status}, from ${d.movedFrom.attempt} ${d.movedFrom.ref})`),
+  ...(state.criteria ?? []).filter((c) => c.movedFrom).map((c) => `${c.id} (from ${c.movedFrom.attempt} ${c.movedFrom.ref})`),
+];
 
 // The rating facts of a discovered issue for the person's question: its reporter and every re-rating.
 export const discoveredRating = (d) => ({ ratedBy: d.foundBy ? `${/^left by /.test(d.summary ?? '') ? 'its implementer ' : ''}${d.foundBy}` : d.by ?? null, ratings: (d.rated ?? []).map((r) => ({ from: r.from, to: r.to, by: r.by, reason: r.reason })), where: d.where ?? null });

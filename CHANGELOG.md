@@ -19,7 +19,13 @@ Release notes, newest first, then every fix that came from a failure in the work
     decision; ejecting or abandoning an attempt that holds work moved to it from another (`wf scope move`, a split) is
     the person's decision; dropping or rewording a criterion a split moved is the person's decision; a medium (as a high)
     observation claimed fixed with `wf scope fixed` waits for a reviewer's `fixed`; a discovered issue claimed fixed needs
-    a commit made after it was recorded, and the next reviewer is handed it (`fixedSinceReview`) to verify.
+    a commit made after it was recorded, and the next reviewer is handed it (`fixedSinceReview`) to verify; a medium or
+    high one closed fixed after the last review is not delivered until a round sees the fix, and a low one is listed in
+    the delivered comment's known limits as not verified by a reviewer. A moved item counts as held by its sibling
+    whatever its status (a fix in a branch that leaves the batch is not delivered), and delivery refuses a `moved`
+    disposition whose sibling is not in it.
+- I-122: a scenario that waited a fixed 3 s for a live child under a full parallel run now waits until the child exits
+  or the test's deadline.
   - A finding that blocks never leaves through a deferral or a ticket (the person may still waive it). The person's
     `deliver-core` answer to the round escalation stays the one exception.
   - The role and skill texts say so: the default is to fix; a fix that needs a product decision is a question for the
@@ -808,6 +814,7 @@ A second adversarial pass over the integrated 0.5.0 branch, with scenarios in `s
 
 | Item | Failure fixed | Fixed in | Scenario test |
 | --- | --- | --- | --- |
+| [I-122](improvements/I-122.md) | The advance live-child scenario fails once under full-suite load | 0.7.7 | `scenarios/advance.test.mjs` |
 | [I-121](improvements/I-121.md) | The owner agent deferred most findings of a delivery on its own judgement | 0.7.7 | `scenarios/deferral-rule.test.mjs` |
 | [I-118](improvements/I-118.md) | A repair after a failed gate reran whole e2e suites to prove each fix | 0.7.6 | `scenarios/focused-repair.test.mjs` |
 | [I-116](improvements/I-116.md) | An attempt whose change shipped outside the workflow cannot be closed | 0.7.5 | `scenarios/close-shipped.test.mjs` |
