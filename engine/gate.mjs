@@ -1421,6 +1421,31 @@ async function executeRun(root, state, plan, live, run) {
   return record;
 }
 
+// The last executed run of a step on this attempt (a reused one ran nothing).
+function lastRunOf(state, id) {
+  const last = allGateSteps(state).filter((s) => s.id === id && s.status !== 'reused' && typeof s.durationMs === 'number').at(-1);
+  return last ? { lastSeconds: Math.round(last.durationMs / 1000) } : {};
+}
+
+// The latest non-empty line of a step's live log: what the step is doing now, in its own words.
+function latestLogLine(file) {
+  let fd;
+  try {
+    fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    const size = fs.fstatSync(fd).size;
+    const length = Math.min(size, 8192);
+    const buf = Buffer.alloc(length);
+    fs.readSync(fd, buf, 0, length, size - length);
+    // eslint-disable-next-line no-control-regex
+    const line = buf.toString('utf8').replace(/\u001b\[[0-9;]*[A-Za-z]/g, '').split(/[\r\n]+/).map((l) => l.trim()).filter(Boolean).at(-1);
+    return line ? { latest: line.slice(0, 160) } : {};
+  } catch {
+    return {};
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
 // The gate running right now for this attempt, read from its lock and live progress file; null when none runs.
 export function liveGate(root, state) {
   const file = lockFile(root, state.id);
@@ -1440,7 +1465,9 @@ export function liveGate(root, state) {
     runId: lock.runId,
     pid: lock.pid,
     startedAt: lock.startedAt,
-    running: (progress.running ?? []).map((r) => ({ id: r.id, seconds: Math.round((at - Date.parse(r.startedAt)) / 1000) })),
+    // How far a long step is (0.7.16): its last run's duration on this attempt, and the latest line of its live log (written
+    // redacted as it runs). Named failure: an owner waiting on a 27-minute end-to-end step could not tell test 200 from 1,100.
+    running: (progress.running ?? []).map((r) => ({ id: r.id, seconds: Math.round((at - Date.parse(r.startedAt)) / 1000), ...lastRunOf(state, r.id), ...latestLogLine(path.join(gateDir(root, state.id), lock.runId, r.id, 'output.log')) })),
     // Steps queued behind a full lease (I-113), with the lease's current holders read now.
     waiting: (progress.waiting ?? []).map((w) => ({ id: w.id, lease: w.lease, capacity: w.capacity, seconds: Math.round((at - Date.parse(w.since)) / 1000), text: leaseWaitText(w.lease) })),
     finished: (progress.steps ?? []).map((r) => ({ id: r.id, status: r.status, seconds: r.durationMs !== undefined && r.status !== 'reused' ? Math.round(r.durationMs / 1000) : null })),

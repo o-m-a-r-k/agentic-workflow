@@ -245,7 +245,8 @@ function summary(root, s, { base = null, resume = false } = {}) {
   const live = ['done', 'abandoned'].includes(s.phase) ? null : liveGate(root, s);
   if (live) {
     lines.push(`  gate running: ${live.runId} (pid ${live.pid})`);
-    lines.push(`    running: ${live.running.map((r) => `${r.id} (${r.seconds}s)`).join(', ') || `none${live.waiting.length ? '' : ' (waiting for a lease)'}`}`);
+    const clock = (sec) => (sec >= 60 ? `${Math.round(sec / 60)} min` : `${sec}s`);
+    lines.push(`    running: ${live.running.map((r) => `${r.id} (${clock(r.seconds)}${r.lastSeconds !== undefined ? ` of ~${clock(r.lastSeconds)} last time` : ''})${r.latest ? `\n      latest: ${r.latest}` : ''}`).join(', ') || `none${live.waiting.length ? '' : ' (waiting for a lease)'}`}`);
     // Named failure (I-113): the line said only "waiting for a lease". It names the lease, its holders and how capacity is raised.
     for (const w of live.waiting) lines.push(`    waiting: ${w.id} for lease ${w.lease} (${w.capacity} slot(s), all held) for ${w.seconds}s: ${w.text}`);
     lines.push(`    finished: ${live.finished.map((r) => `${r.id} ${r.status}${r.seconds !== null ? ` ${r.seconds}s` : ''}`).join(', ') || 'none yet'}`);
