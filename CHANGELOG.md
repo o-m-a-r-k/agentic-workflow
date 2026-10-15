@@ -12,13 +12,19 @@ waited 5,772 minutes to be closed. One long ticket's lessons are folded in too (
   one ticket is taken in any other ticket of the project without asking again, when it sets the same definition and
   plugin code. Two checks had been corrected 7 times across 5 tickets, each time waiting 28 to 147 minutes for the same
   answer. Each ticket still gets its fresh review and gate.
-- **Owners keep their turn while a role runs.** Nothing starts an owner's turn when a role finishes, and on Codex nothing
-  ever does. One owner sat 192 minutes after its implementer finished. The work and resume skills now say:
-  - a turn does not end while a handed role runs;
+  - An approval counts only while it stands. A correction the person later replaced is not taken again, and a `no` the
+    person gave to the same correction in any ticket asks again.
+  - The command says when it took an earlier answer, and whose.
+- **A finished role reaches its owner.** On Codex nothing starts an owner's turn when a role finishes; one owner sat
+  192 minutes after its implementer finished. The work and resume skills now say:
+  - where the harness notifies the owner (Claude Code does), the owner may end its turn and wait for the notification;
+  - where it does not, the turn does not end while a handed role runs, and the owner waits in bounded
+    `wf handoff wait --minutes N` calls;
   - a decision for the person goes in the question panel, not only in prose;
   - whenever a turn starts again, finished roles are acted on first.
 - **A completed launched implementer is closed by the engine** when its work is committed and its report written, with
-  every check `wf handoff close` makes. Otherwise it stays open and the owner is told why. Finished implementers waiting
+  every check `wf handoff close` makes. The ledger records that the engine closed it. Otherwise it stays open and the
+  owner is told why. Finished implementers waiting
   to be closed had cost one ticket 40% of its implementer time.
 - **A re-plan is measured from the re-plan.** Its expected minutes and rounds are compared with what happened since it.
   The whole attempt is compared only with an expectation the plan itself stated: a small repair's 65 minutes had been set

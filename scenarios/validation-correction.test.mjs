@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { closureFile, commitIn, criteriaFile, goodClosure, ok, sh, singleRepoProject, state, wf, write, yaml } from './helpers.mjs';
+import { approveAsOwner, closureFile, commitIn, criteriaFile, goodClosure, ok, sh, singleRepoProject, state, wf, write, yaml } from './helpers.mjs';
 
 // Named failure (I-102): review found a defect in a supplemental validation's plugin, and registration had no remove,
 // overwrite or repin. Fixing and committing the plugin left the gate running the defective plugin pinned at registration for
@@ -178,6 +178,38 @@ test('a correction of an admission check the person approved in one attempt is t
   commitIn(e2.repos.app.worktree, { '.workflow/project.yaml': cfg('test -f src/a.txt && echo another-correction') });
   const asked = wf(f.root, ['validation', 'correct', '--steps', 'unit', '--reason', 'a different change', '--attempt', e2.id], { ownerSilent: true });
   assert.equal(asked.code, 75, 'a correction the person has not approved anywhere asks');
+});
+
+// Independent review of 0.7.15: an approval counts only while it stands. A correction the person later replaced because it
+// was itself wrong is not taken again, and a `no` the person gave to the same correction anywhere asks again.
+test('a replaced correction or one the person refused is never taken from another attempt', () => {
+  const f = fixture('validation-correct-standing');
+  const cfg = (run) => yaml({ version: 1, enabled: true, name: 'fixture', repos: [{ name: 'app', path: '.', base: 'main' }], gate: { steps: [{ id: 'unit', repo: 'app', run, inputs: ['src/**'] }] } });
+  const X = 'test -f src/a.txt && echo x', Y = 'test -f src/a.txt && echo y', Z = 'test -f src/a.txt && echo z';
+  const another = (item) => {
+    const e = ok(wf(f.root, ['entry', '--item', item, '--json'])).json();
+    ok(wf(f.root, ['handoff', 'planner', '--agent', `p-${item}`, '--attempt', e.id]));
+    ok(wf(f.root, ['plan', '--file', criteriaFile(f.base), '--attempt', e.id]));
+    ok(wf(f.root, ['handoff', 'implementer', '--agent', `i-${item}`, '--attempt', e.id]));
+    commitIn(e.repos.app.worktree, { 'src/a.txt': `${item}\n` });
+    ok(wf(f.root, ['handoff', 'close', '--agent', `i-${item}`, '--attempt', e.id]));
+    return e;
+  };
+  const tryCorrect = (e, run) => {
+    commitIn(e.repos.app.worktree, { '.workflow/project.yaml': cfg(run) });
+    return wf(f.root, ['validation', 'correct', '--steps', 'unit', '--reason', 'correct it', '--attempt', e.id], { ownerSilent: true });
+  };
+  commitIn(f.wt, { '.workflow/project.yaml': cfg(X) });
+  ok(correct(f, ['--steps', 'unit', '--reason', 'first fix']));
+  commitIn(f.wt, { '.workflow/project.yaml': cfg(Y) });
+  ok(correct(f, ['--steps', 'unit', '--reason', 'the first fix was itself wrong']));
+  assert.equal(tryCorrect(another('ENG-3'), X).code, 75, 'the correction the person replaced asks again');
+  const c = another('ENG-4');
+  const refused = tryCorrect(c, Z);
+  assert.equal(refused.code, 75);
+  approveAsOwner(f.root, c.id, refused.err.match(/wf approve (A\d+)/)[1], 'no');
+  assert.equal(tryCorrect(another('ENG-5'), Z).code, 75, 'a correction the person refused elsewhere asks again');
+  assert.equal(tryCorrect(another('ENG-6'), Y).code, 0, 'the standing approval is still taken');
 });
 
 // 0.7.11, named failure (one ticket, audit of 51 attempts): a correction that only scoped a step's evidence glob to the ticket

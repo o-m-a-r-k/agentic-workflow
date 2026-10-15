@@ -48,3 +48,31 @@ test('a working role\'s shell commands are read from its transcript on both harn
   assert.match(line, /running now: `npx playwright test e2e\/specs\/120\.spec\.ts` for 30 min/);
   assert.match(line, /20 min of its time in 1 shell command\(s\) of 5 min or more \(longest: `for i in \$\(seq 1 59\); do \[ -f \$S\/done \] && break; sleep 10; done`, 20 min\)/);
 });
+
+// 0.7.15 (lessons of one long attempt): a re-plan is measured from itself, the whole attempt only against the plan's own
+// expectation; criterion churn and repeating discovered families are shown; an ended attempt's minutes stop at its end.
+test('course lines measure a re-plan from itself and show churn and repeating discovered families', async () => {
+  const { pastEstimates } = await import('../engine/signals.mjs');
+  const base = { files: { changed: 724 }, rounds: [], implementers: [], sessions: [], wallMinutes: 7644, amendments: 138, churn: { changed: 163, added: 5, dropped: 0 }, discoveredFamilies: { 'payroll-fence-callers': 3, once: 1 } };
+  const replanned = { ...base, expect: { files: 4, rounds: 1, minutes: 65 }, firstExpect: { files: 4, rounds: 1, minutes: 65 }, planExpect: null, replan: { at: at(0), amendment: 138, minutes: 356, rounds: 0 } };
+  const lines = courseLines(replanned, { shell: false }).join('\n');
+  assert.match(lines, /files changed: 724; the plan states no expectation/, 'a re-plan never stands for the whole attempt');
+  assert.match(lines, /since the re-plan \(amendment 138\): 356 minutes and 0 review round\(s\); it expected 65 minutes and 1 round\(s\) \(past its own estimate\)/);
+  assert.match(lines, /plan amendments: 138 \(163 criterion text\(s\) rewritten, 5 added, 0 dropped\)/);
+  assert.match(lines, /discovered issues of family payroll-fence-callers: 3 open; fix the class in one sweep/);
+  assert.doesNotMatch(lines, /family once/);
+  assert.deepEqual(pastEstimates(replanned), ['356 minutes since the re-plan (it expected 65)'], 'no files prompt right after a re-plan');
+  const planned = { ...base, files: { changed: 3 }, wallMinutes: 30, expect: { files: 2, rounds: 1, minutes: 60 }, firstExpect: { files: 2, rounds: 1, minutes: 60 }, planExpect: { files: 2, rounds: 1, minutes: 60 }, replan: null };
+  assert.deepEqual(pastEstimates(planned), ['files changed 3 (the plan expected 2)'], 'without a re-plan nothing changes');
+});
+
+test('an ended attempt counts its minutes to its end, not to now', async () => {
+  const { computeSignals } = await import('../engine/signals.mjs');
+  const { loadState } = await import('../engine/ledger.mjs');
+  const { singleRepoProject, ok, wf } = await import('./helpers.mjs');
+  const p = singleRepoProject('signals-ended', { gate: { steps: [] } });
+  const e = ok(wf(p.root, ['entry', '--item', 'ENG-1', '--owner', 'o', '--json'])).json();
+  ok(wf(p.root, ['abandon', '--reason', 'scenario', '--attempt', e.id]));
+  const sig = computeSignals(p.root, loadState(p.root, e.id), { nowMs: Date.now() + 24 * 3600 * 1000 });
+  assert.ok(sig.wallMinutes < 5, `wall minutes ${sig.wallMinutes}`);
+});

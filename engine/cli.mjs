@@ -760,7 +760,8 @@ async function dispatch(cmd, sub, positional, options) {
     case 'validation': {
       if (sub !== 'add' && sub !== 'correct') throw new WfError('usage: wf validation add --steps IDs --criteria IDs --reason why | wf validation correct --steps IDs --reason why [--criteria IDs]');
       const s = await (sub === 'correct' ? correctValidation : addValidation)(root, options);
-      print(options, `required supplemental validation ${sub === 'correct' ? 'corrected' : 'registered'}; admission checks unchanged; fresh code review and full gate required`, s.validations.at(-1));
+      const taken = sub === 'correct' ? s.validationCorrections?.at(-1)?.approvedIn : null;
+      print(options, `required supplemental validation ${sub === 'correct' ? 'corrected' : 'registered'}; admission checks unchanged; fresh code review and full gate required${taken ? `\nno question asked: the person approved this same correction in ${taken.attempt} (${taken.decision}${taken.at ? `, ${taken.at}` : ''}); tell them it was taken on that answer` : ''}`, s.validations.at(-1));
       return 0;
     }
     case 'captures': {

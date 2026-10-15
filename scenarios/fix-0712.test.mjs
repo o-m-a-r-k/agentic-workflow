@@ -70,7 +70,10 @@ test('a launched implementer that completes with its work committed and its repo
   const run = wf(root, ['handoff', 'run', '--agent', 'i', '--attempt', id, '--json'], { env });
   assert.equal(run.code, 0, run.err);
   assert.match(run.err, /implementer i completed and the engine closed it/);
-  assert.notEqual(state(root, id).implementers[0].closedAt, null);
+  assert.equal(state(root, id).implementers[0].closedBy, 'engine', 'the ledger says who closed it');
+  const again = wf(root, ['handoff', 'close', '--agent', 'i', '--attempt', id], { env });
+  assert.notEqual(again.code, 0);
+  assert.match(again.err, /i is already closed: the engine closed it when its launch completed/);
 });
 
 // ---- I-140: `wf handoff wait --minutes N` counted N from the launch, so on a role past N it returned at once; a bare wait on

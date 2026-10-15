@@ -423,7 +423,7 @@ export function reduce(entries) {
         break;
       case 'implementer.closed': {
         const x = s.implementers.filter((y) => y.agent === d.agent && !y.closedAt).at(-1);
-        if (x) Object.assign(x, { closedAt: e.at, outcome: d.outcome ?? 'done', closedHeads: d.heads ?? null, commits: d.commits ?? null });
+        if (x) Object.assign(x, { closedAt: e.at, outcome: d.outcome ?? 'done', closedHeads: d.heads ?? null, commits: d.commits ?? null, ...(d.closedBy ? { closedBy: d.closedBy } : {}) });
         break;
       }
       case 'scope.changed':

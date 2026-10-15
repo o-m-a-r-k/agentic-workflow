@@ -294,8 +294,10 @@ export function pastEstimates(sig) {
   const out = [];
   // After a re-plan, its rounds and minutes are counted from it; files stay the whole attempt's, against the first plan's.
   const r = sig.replan ?? null;
-  const files = r ? sig.planExpect?.files : e.files;
-  if (typeof files === 'number' && sig.files.changed > files) out.push(`files changed ${sig.files.changed} (the plan expected ${files})`);
+  // After a re-plan, files are the whole attempt's and amendments record no tree to count them from: the course lines show
+  // them against the first plan, and the prompt to judge the course does not repeat that every turn (independent review of
+  // 0.7.15: right after a re-plan the prompt still asked for one).
+  if (!r && typeof e.files === 'number' && sig.files.changed > e.files) out.push(`files changed ${sig.files.changed} (the plan expected ${e.files})`);
   const rounds = r ? r.rounds : Math.max(sig.rounds.length, sig.roundsHanded ?? 0);
   if (typeof e.rounds === 'number' && rounds > e.rounds) out.push(`review rounds ${rounds}${r ? ' since the re-plan' : ''} (${r ? 'it' : 'the plan'} expected ${e.rounds})`);
   const minutes = r ? r.minutes : sig.wallMinutes;

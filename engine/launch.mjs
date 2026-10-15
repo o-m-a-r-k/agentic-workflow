@@ -368,9 +368,11 @@ async function implementerEnded(root, id, h, label) {
   if (!open) return;
   try {
     const { closeImplementer } = await import('./lifecycle.mjs');
-    closeImplementer(root, { attempt: id, agent: h.agent });
+    closeImplementer(root, { attempt: id, agent: h.agent, closedBy: 'engine' });
     process.stderr.write(`${label} implementer ${h.agent} completed and the engine closed it (its work is committed and its report recorded); read its report in \`wf resume\` and continue\n`);
   } catch (error) {
+    // The owner may have closed it meanwhile: then there is nothing to say.
+    if (!(loadState(root, id).implementers ?? []).some((x) => x.agent === h.agent && !x.closedAt)) return;
     process.stderr.write(`${label} implementer ${h.agent} completed but is still open: ${String(error.message ?? error).split('\n')[0]}; close it with \`wf handoff close --agent ${h.agent} --attempt ${id}\` once that is settled\n`);
   }
 }

@@ -1161,6 +1161,8 @@ export function closeImplementer(root, options) {
   if (!options.agent || options.agent === true) throw new WfError('--agent <implementer id> is required');
   const agent = String(options.agent);
   const open = state.implementers.filter((x) => x.agent === agent && !x.closedAt).at(-1);
+  const closedByEngine = !open && state.implementers.filter((x) => x.agent === agent).at(-1)?.closedBy === 'engine' ? state.implementers.filter((x) => x.agent === agent).at(-1) : null;
+  if (closedByEngine) throw refuse(`${agent} is already closed: the engine closed it when its launch completed (${closedByEngine.closedAt}); read its report in \`wf resume\` and continue`, null, { id: 'close:closed-by-engine' });
   if (!open) throw refuse(`no open implementer \`${agent}\` on ${state.id}${state.implementers.length ? ` (open: ${state.implementers.filter((x) => !x.closedAt).map((x) => x.agent).join(', ') || 'none'})` : ''}`);
   const outcome = options.outcome && options.outcome !== true ? String(options.outcome) : 'done';
   if (!['done', 'stopped', 'failed'].includes(outcome)) throw new WfError('--outcome must be done, stopped or failed');
@@ -1205,7 +1207,7 @@ export function closeImplementer(root, options) {
     const raisedOn = headsNow(state);
     for (const l of r.left ?? []) append(root, state.id, 'discovered.added', { id: `D${next++}`, raisedOn, summary: `left by ${agent}: ${l.what}`, kind: 'defect', severity: typeof l.severity === 'string' && l.severity.trim() ? l.severity.trim() : null, ...(typeof l.family === 'string' && l.family.trim() ? { family: l.family.trim().slice(0, 80) } : {}), ...(typeof l.invariant === 'string' && l.invariant.trim() ? { invariant: l.invariant.trim() } : {}), where: l.where ?? null, foundBy: agent, blockedBy: null, why: l.why ?? null }, actor(options));
   }
-  append(root, state.id, 'implementer.closed', { handoff: open.handoff, agent, outcome, heads, commits }, actor(options));
+  append(root, state.id, 'implementer.closed', { handoff: open.handoff, agent, outcome, heads, commits, ...(options.closedBy === 'engine' ? { closedBy: 'engine' } : {}) }, actor(options));
   return { state: loadState(root, state.id), handoff: open.handoff, outcome, commits, children };
 }
 
