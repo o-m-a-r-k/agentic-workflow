@@ -178,7 +178,15 @@ test('a correction that only narrows a step\'s evidence glob reuses the recorded
   const first = ok(wf(f.root, ['gate', '--attempt', f.e.id, '--json'])).json();
   assert.deepEqual(first.steps[0].artifacts.map((a) => a.source).sort(), ['shots/ENG-1/a.png', 'shots/OTHER/b.png']);
   assert.equal(ran(), 1);
-  commitIn(f.wt, { '.workflow/project.yaml': yaml({ version: 1, enabled: true, name: 'fixture', repos: [{ name: 'app', path: '.', base: 'main' }], gate: { steps: [step(['shots/{item}/**/*.png'])] } }) });
+  // The adapter on the base branch now scopes the glob to the ticket: the refusal over uninspected screenshots names the way.
+  const narrowed = yaml({ version: 1, enabled: true, name: 'fixture', repos: [{ name: 'app', path: '.', base: 'main' }], gate: { steps: [step(['shots/{item}/**/*.png'])] } });
+  commitIn(f.root, { '.workflow/project.yaml': narrowed });
+  ok(wf(f.root, ['handoff', 'reviewer', '--agent', 'ev-0', '--attempt', f.e.id]));
+  ok(wf(f.root, ['review', '--closure', closureFile(f.base, goodClosure('ev-0', { anomalies: 'none seen' })), '--attempt', f.e.id]));
+  const refused = wf(f.root, ['accept', '--attempt', f.e.id]);
+  assert.equal(refused.code, 75);
+  assert.match(refused.err, /the evidence globs this attempt was admitted with differ from the adapter's now: ui \(collected with shots\/\*\*\/\*\.png; the adapter now says shots\/\{item\}\/\*\*\/\*\.png\)\. To use the adapter's, commit its step definition in this attempt and run `wf validation correct --steps ui/);
+  commitIn(f.wt, { '.workflow/project.yaml': narrowed });
   ok(correct(f, ['--steps', 'ui', '--reason', 'the evidence glob counted other tickets\' screenshots']));
   review(f, 'code-1');
   const second = ok(wf(f.root, ['gate', '--attempt', f.e.id, '--json'])).json();

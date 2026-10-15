@@ -1602,6 +1602,21 @@ export function acceptReview(root, options) {
   // gate cycle re-sampled unchanged screens for new findings.
   const inspected = inspectedEver(state);
   const unseen = shots.filter((h) => !inspected.has(h));
+  // Named failure (one ticket, 0.7.10): 4,008 other tickets' screenshots were counted because the step's evidence glob was
+  // frozen at admission, before the adapter scoped it to the ticket; the refusal named no way out and the owner agent
+  // proposed guessing at engine internals. When the adapter on the base branch now collects differently, the route is named.
+  if (unseen.length) {
+    let current = null;
+    try {
+      current = loadConfig(root);
+    } catch {}
+    const wider = (state.lastGate?.steps ?? []).filter((st) => st.artifactGlobs?.length).flatMap((st) => {
+      const now = current?.gate?.steps?.find((x) => x.id === st.id)?.artifacts ?? null;
+      const then = st.artifactGlobs.map((g) => g.glob);
+      return now && canonical(now) !== canonical(then) ? [`${st.id} (collected with ${then.join(', ')}; the adapter now says ${now.join(', ')})`] : [];
+    });
+    if (wider.length) problems.push(`the evidence globs this attempt was admitted with differ from the adapter's now: ${wider.join('; ')}. To use the adapter's, commit its step definition in this attempt and run \`wf validation correct --steps ${wider.map((w) => w.split(' ')[0]).join(',')} --reason "<why>" --attempt ${state.id}\` (the person confirms; the next gate reuses the recorded run and re-selects this ticket's files)`);
+  }
   if (unseen.length) problems.push(`${unseen.length} gate screenshot(s) not inspected by the reviewer (the gate's expanded artifacts globs matched them for this ticket): ${collected.filter((a) => !inspected.has(a.sha256)).slice(0, 5).map((a) => a.source ?? a.path).join(', ')}${unseen.length > 5 ? ' …' : ''}`);
   // Named failure (I-107): a re-worded criterion kept the evidence a reviewer mapped to its earlier wording.
   for (const id of late.changed) problems.push(`criterion ${id} was re-worded by an amendment after this review round was handed, so the round judged its earlier wording: hand a fresh reviewer, which maps every criterion to the gate evidence`);

@@ -72,7 +72,7 @@ The ordinary evidence protection and review/gate lock paths also govern registra
 `wf validation correct` is the one way a registered pin moves (0.7.0, I-102): forward only, to a commit of the same
 adapter repo that descends from the previous pin, under the same obligations as a registration (closed roles, a clean
 committed tree, a recorded reason, existing catalogued keys, admitted repos), with both pins kept in the ledger and a
-fresh code review and full gate required before acceptance. Admission steps are never corrected.
+fresh code review and full gate required before acceptance. An admission step is corrected the same way, as the person's decision (I-125); a correction that only narrows which files are kept as evidence reruns nothing (0.7.11).
 
 ## Imported captures
 
