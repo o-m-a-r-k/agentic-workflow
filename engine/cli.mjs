@@ -919,6 +919,10 @@ async function dispatch(cmd, sub, positional, options) {
         if (w) (options.json ? process.stderr : process.stdout).write(`wf ${cmd}: warning: ${w}\n`);
         const dw = s.accepted ? null : designWarning(root, s);
         if (dw) (options.json ? process.stderr : process.stdout).write(`wf ${cmd}: warning: ${dw}\n`);
+        // 0.7.11, a warning and never a refusal: an implementer's own `wf check` runs while its handoff is open. Named
+        // failure (audit of 51 attempts): gates started while work was still being committed were stopped or thrown away.
+        const open = cmd === 'gate' ? (s.implementers ?? []).filter((x) => !x.closedAt).map((x) => x.agent) : [];
+        if (open.length) (options.json ? process.stderr : process.stdout).write(`wf gate: warning: implementer ${open.join(', ')} ${open.length > 1 ? 'are' : 'is'} still open; if ${open.length > 1 ? 'they' : 'it'} may still commit, this gate runs on a tree that will change: close ${open.length > 1 ? 'them' : 'it'} first (\`wf handoff close --agent <id>\`)\n`);
       } catch {}
       // Live progress goes to stdout, or to stderr with --json so stdout stays one JSON document.
       // The order of work (I-27): a gate runs only after a clean code-review round on this tree, never beside a round.
