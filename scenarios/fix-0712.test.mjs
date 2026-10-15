@@ -215,3 +215,13 @@ test('I-141 guard: a symlink / a hard-linked / a directory at the lock path stil
   fs.mkdirSync(lock);
   assert.throws(() => withEvidenceTransaction(p.root, 'ENG-1.1', () => {}), /unreadable/);
 });
+
+// ---- Second review of 0.7.12: a strategist's delta decision after a partial round only took the delta from the partial
+// round's tree, so what it never reached went to no reviewer. ----
+test('a strategist delta decision after only a partial round hands a full round', async () => {
+  const { roundMode } = await import('../engine/review-policy.mjs');
+  const partialOnly = { engineVersion: '0.7.12', handoffs: [{ role: 'reviewer', bundle: 'b1', mode: 'full' }], reviews: [{ handoff: 'b1', partial: true, closure: { notReached: ['the round ended before the reviewer finished (stopped)'] } }], strategy: { nextRound: 'delta' } };
+  assert.equal(roundMode(partialOnly, { evidence: false }), 'full');
+  const finished = { ...partialOnly, reviews: [{ handoff: 'b1', closure: {} }] };
+  assert.equal(roundMode(finished, { evidence: false }), 'delta');
+});

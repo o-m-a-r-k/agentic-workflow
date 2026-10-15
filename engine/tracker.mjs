@@ -107,7 +107,7 @@ export function knownLimits(state, { load = null } = {}) {
   for (const d of state.scopeDecisions ?? []) if (d.choice === 'fixed' && d.at > lastReviewAt) for (const k of d.keys ?? []) out.push(`Closed as fixed after the last review, not verified by a reviewer: ${k}.`);
   // A review finding that is not fixed here (0.7.0): ticketed for later, or moved to a sibling attempt of the batch.
   for (const d of state.scopeDecisions ?? []) {
-    if (d.choice === 'ticketed') out.push(`Follow-up ticketed for ${d.keys?.join(', ')}: ${d.ticket?.title ?? ''} ${d.ticket?.url ?? ''}`);
+    if (d.choice === 'ticketed') out.push(`Follow-up ticketed for ${d.keys?.join(', ')}: ${d.ticket?.title ?? ''} ${d.ticket?.url ?? ''}${[...new Set((d.keys ?? []).map((k) => directedBy(state, d.decisionFor?.[k])).filter(Boolean))].join('')}`);
     if (d.choice === 'deferred') for (const k of d.keys ?? []) out.push(`Known issue left for later (${d.placement?.[k] ?? 'unrated'}): ${d.summaries?.[k] ?? k}${d.reason ? `. Why it waits: "${d.reason}"` : ''}.${directedBy(state, d.decisionFor?.[k])}`);
     else if (d.choice === 'moved') {
       // I-123: a sibling that left this delivery (ejected, abandoned) still owes the item; the tester reads that it did not ship.

@@ -91,7 +91,8 @@ export function roundMode(state, { evidence } = {}) {
   if (evidence ?? gatePassedForCurrentTree(state).ok) return audits.some(isEvidenceRound) ? 'delta' : 'full';
   // A strategist's `delta-review` decision (state.strategy.nextRound) makes the next code review a delta, once a recorded
   // review gives it a tree to take the delta from. Read before the reviewer handoff is appended, which clears it.
-  if (state.strategy?.nextRound === 'delta' && (state.reviews ?? []).length) return 'delta';
+  // A partial round (I-152) gives no tree to take it from: it stopped part-way (second review of 0.7.12).
+  if (state.strategy?.nextRound === 'delta' && (state.reviews ?? []).some((r) => !r.partial)) return 'delta';
   return audits.length ? 'delta' : 'full';
 }
 

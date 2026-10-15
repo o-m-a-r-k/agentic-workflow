@@ -2708,7 +2708,7 @@ function legacyNextAction(root, state) {
   // I-23: the reviewer handoff refuses while an implementer handoff is open; a step that hands a reviewer says so first.
   // I-137: an implementer whose launch already ended is not "working": the owner looks at its report and commits once and
   // closes it, whatever the next step is (independent review of 0.7.12: said only before a reviewer handoff).
-  const allOpen = openImplementersOf(root, state);
+  const allOpen = ['done', 'abandoned'].includes(state.phase) ? [] : openImplementersOf(root, state);
   const ended = (x) => { const l = state.handoffs.filter((y) => y.role === 'implementer' && y.agent === x.agent).at(-1)?.launch; return ['completed', 'failed'].includes(l?.status) ? l : null; };
   const done = allOpen.filter(ended), pending = step.includes('wf handoff reviewer') ? allOpen.filter((x) => !ended(x)) : [];
   const close = [

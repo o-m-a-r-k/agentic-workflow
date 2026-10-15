@@ -1218,6 +1218,8 @@ async function executeRun(root, state, plan, live, run) {
     const from = s.sourceRecord?.log;
     const read = from ? readRegular(from) : null;
     if (!read || (s.sourceRecord.logSha256 && sha256(read.bytes) !== s.sourceRecord.logSha256)) {
+      // It runs now, so it needs its secrets like any step planned to run (second review of 0.7.12).
+      if (s.missingSecrets?.length) throw refuse(`secrets missing: ${s.id} needs ${s.missingSecrets.join(', ')} (the pass it would have reused from ${s.reusedFromAttempt} has no readable log, so it runs)`, 'run `wf secrets guide` in your terminal');
       Object.assign(s, { decision: 'run', reason: `the log of ${s.reusedFrom} in ${s.reusedFromAttempt} ${read ? 'differs from its recorded sha256' : 'cannot be read'}: runs`, reusedFrom: null, reusedFromAttempt: undefined, sourceRecord: undefined });
       continue;
     }
