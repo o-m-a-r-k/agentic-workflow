@@ -95,7 +95,7 @@ export default {
     // What the role instructions say about the tools this harness exposes.
     toolCompatibility: 'Claude Code reads text and images with Read, loads skills with Skill and writes the permitted files with Write; structured handoff JSON is inspected with `wf evidence inspect` (never one full-output dump) and text inside the selected attempt is read with `wf evidence show <path> --attempt <id>`. Read a required skill through its exact handed file when Skill is unavailable.',
     closureWriter: 'the Write tool',
-    staleRole: (agentType) => `Claude Code reads agent files when a session starts, so an agent of type ${agentType} started from this session is started with the old instructions; its bundle points it at the current file, which it reads first. No restart is needed.`,
+    staleRole: (agentType) => `Claude Code reads agent files when a session starts, so an agent of type ${agentType} started from this session is started with the old instructions; its bundle points it at the current file, which it reads first, so no restart is needed for its instructions; a change to its tools (the \`tools:\` line) still needs this session restarted (\`claude --resume\` keeps the conversation).`,
     restartHint: '`claude --resume` keeps the conversation',
     pluginUpdate: 'claude plugin update agentic-workflow@agentic-workflow',
   },

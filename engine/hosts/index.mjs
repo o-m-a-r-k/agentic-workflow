@@ -75,7 +75,7 @@ export function unregisterHost(id) {
 const FRAGMENTS = {
   toolCompatibility: 'Use the file reader and writer your host provides.',
   closureWriter: 'your file writer',
-  staleRole: (agentType) => `A session reads agent files when it starts, so an agent of type ${agentType} started from this session is started with the old instructions; its bundle points it at the current file, which it reads first. No restart is needed.`,
+  staleRole: (agentType) => `A session reads agent files when it starts, so an agent of type ${agentType} started from this session is started with the old instructions; its bundle points it at the current file, which it reads first, so no restart is needed for its instructions; a change to its tools still needs the session restarted.`,
   howToStart: (h) => `start it as agent type \`${h.agentType ?? 'the one `wf handoff` printed'}\`, named \`${h.agent}\`, with only the printed line as its prompt`,
 };
 export function fragment(host, name, ...args) {

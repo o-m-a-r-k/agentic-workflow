@@ -134,14 +134,28 @@ export default {
   shellRuns: (file) => shellRunsOf(tailLines(file), {
     call: (e) => {
       const p = e.type === 'response_item' ? e.payload : null;
-      if (p?.type === 'custom_tool_call' && typeof p.input === 'string') return [{ id: p.call_id, command: codexCommand(p.input), continues: /tools\.write_stdin\(/.test(p.input) && !/exec_command\(/.test(p.input) }];
+      if (p?.type === 'custom_tool_call' && typeof p.input === 'string') {
+        // The sessions a script polls: `write_stdin({session_id: N})`, or a list it maps over (`[N, M].map(session_id =>
+        // tools.write_stdin({session_id, ...}))`). A poll whose sessions cannot be read is a wait on earlier commands.
+        const polls = /write_stdin\(/.test(p.input);
+        let waits = [...p.input.matchAll(/write_stdin\(\s*\{[^}]*?session_id"?\s*:\s*(\d+)/g)].map((m) => Number(m[1]));
+        if (polls && !waits.length) waits = (/\[\s*(\d+(?:\s*,\s*\d+)*)\s*\]\s*\.map\(/.exec(p.input)?.[1] ?? '').split(',').filter(Boolean).map(Number);
+        if (polls && !waits.length) waits = ['earlier'];
+        return [{ id: p.call_id, command: codexCommand(p.input), waitsOn: waits }];
+      }
       if (p?.type === 'function_call') {
         const a = parseArgs(p.arguments);
         return [{ id: p.call_id, command: Array.isArray(a.command) ? a.command.join(' ') : a.command ?? a.cmd ?? p.name ?? '' }];
       }
       return [];
     },
-    result: (e) => (e.type === 'response_item' && ['custom_tool_call_output', 'function_call_output'].includes(e.payload?.type) ? [e.payload.call_id] : []),
+    result: (e) => {
+      if (e.type !== 'response_item' || !['custom_tool_call_output', 'function_call_output'].includes(e.payload?.type)) return [];
+      // A command still running when it yields announces its session: `{"session_id": N, ...}` with no exit code.
+      const text = Array.isArray(e.payload.output) ? e.payload.output.map((b) => b?.text ?? '').join('\n') : String(e.payload.output ?? '');
+      const yielded = /"session_id"\s*:\s*(\d+)/.exec(text);
+      return [{ id: e.payload.call_id, session: yielded && !/"exit_code"\s*:/.test(text) ? Number(yielded[1]) : null }];
+    },
   }),
   roleFile({ root, name, description, model, effort, body }) {
     return { file: path.join(root, '.codex', 'agents', `${name}.toml`), content: tomlRole({ name, description, model, effort, body }) };

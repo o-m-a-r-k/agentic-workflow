@@ -38,13 +38,17 @@ export function tailLines(file, max = 16 * 1024 * 1024) {
 }
 
 // The shell commands a session ran, each paired with its result by id: the one still running (the last without a result)
-// and every finished one with its minutes. `call(entry)` gives [{ id, command, continues }], `result(entry)` gives [id]; a
-// harness supplies both for its own transcript format. A call that `continues` waits on the command before it (Codex polls a
-// long command with `write_stdin` after `exec_command` yields): its minutes are that command's. Named failure (0.7.14): an implementer spent 201 of 266 minutes in sleep
-// loops waiting for its own background end-to-end runs, and the owner saw only "active within the last minute".
+// and every finished one with its minutes. `call(entry)` gives [{ id, command, waitsOn }], `result(entry)` gives ids or
+// [{ id, session }]. A harness that yields a long command to a session (Codex: `exec_command` returns a `session_id` while it
+// still runs) names that session in the result, and a later call that waits on it (`write_stdin` with that `session_id`)
+// gives `waitsOn`: its minutes are that command's. Independent review of 0.7.14: polls added to the last finished command
+// named a 6-second export as a 23-minute run. A wait on a session no result in the window announced is its own entry.
+// Named failure (0.7.14): an implementer spent 201 of 266 minutes in sleep loops waiting for its own background end-to-end
+// runs, and the owner saw only "active within the last minute".
 export function shellRunsOf(lines, { call, result }) {
   const open = new Map();
   const runs = [];
+  const bySession = new Map();
   for (const line of lines) {
     if (!line) continue;
     let e;
@@ -55,17 +59,38 @@ export function shellRunsOf(lines, { call, result }) {
     }
     const at = Date.parse(e.timestamp);
     if (!Number.isFinite(at)) continue;
-    for (const c of call(e)) if (c?.id) open.set(c.id, { command: String(c.command ?? ''), at, continues: Boolean(c.continues) });
-    for (const id of result(e)) {
+    for (const c of call(e)) if (c?.id) open.set(c.id, { command: String(c.command ?? ''), at, waitsOn: [c.waitsOn ?? []].flat().filter((x) => x !== null && x !== undefined) });
+    for (const r of result(e)) {
+      const id = typeof r === 'string' ? r : r?.id;
       const o = open.get(id);
       if (!o) continue;
-      const minutes = (at - o.at) / 60000;
-      if (o.continues && runs.length) runs.at(-1).minutes += minutes;
-      else runs.push({ command: o.command, minutes });
       open.delete(id);
+      const minutes = (at - o.at) / 60000;
+      // A call that waits on earlier commands gives its minutes to them (shared when it waits on several); a command it
+      // starts itself and leaves running is kept under the session its result announces.
+      if (o.waitsOn.length) {
+        for (const s of o.waitsOn) {
+          let target = bySession.get(s);
+          if (!target) {
+            target = { command: s === 'earlier' ? 'waiting on earlier commands' : `a command started earlier (session ${s})`, minutes: 0 };
+            runs.push(target);
+            bySession.set(s, target);
+          }
+          target.minutes += minutes / o.waitsOn.length;
+        }
+        if (r?.session !== undefined && r.session !== null && !bySession.has(r.session)) {
+          const started = { command: o.command, minutes: 0 };
+          runs.push(started);
+          bySession.set(r.session, started);
+        }
+        continue;
+      }
+      const run = { command: o.command, minutes };
+      runs.push(run);
+      if (r?.session !== undefined && r.session !== null) bySession.set(r.session, run);
     }
   }
   const last = [...open.values()].at(-1) ?? null;
-  const waitingOn = last?.continues && runs.length ? runs.at(-1) : null;
+  const waitingOn = last?.waitsOn?.length ? bySession.get(last.waitsOn[0]) ?? null : null;
   return { running: last ? { command: waitingOn ? waitingOn.command : last.command, startedAt: new Date(last.at - (waitingOn ? waitingOn.minutes * 60000 : 0)).toISOString() } : null, runs };
 }

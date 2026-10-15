@@ -27,18 +27,21 @@ test('a working role\'s shell commands are read from its transcript on both harn
   // The shapes real Codex sessions record: a shell run is an `exec` script calling `tools.exec_command`, a long one is
   // followed by `write_stdin` polls (its minutes add to the command they wait on), and older sessions used `function_call`.
   const exec = (id, script, min) => ({ timestamp: at(min), type: 'response_item', payload: { type: 'custom_tool_call', name: 'exec', call_id: id, input: script } });
-  const done = (id, min, type = 'custom_tool_call_output') => ({ timestamp: at(min), type: 'response_item', payload: { type, call_id: id, output: [] } });
+  const done = (id, min, type = 'custom_tool_call_output', text = '{"exit_code":0,"output":""}') => ({ timestamp: at(min), type: 'response_item', payload: { type, call_id: id, output: [{ type: 'input_text', text: 'Script completed\nWall time 1 seconds\nOutput:\n' }, { type: 'input_text', text }] } });
   fs.writeFileSync(codex, [
     exec('c1', 'const r = await tools.exec_command({cmd:"npx playwright test e2e/specs/120.spec.ts","workdir":"/w","yield_time_ms":10000}); text(r.output);\n', 0),
-    done('c1', 1),
-    exec('c2', 'const r = await tools.write_stdin({session_id:7,chars:"",yield_time_ms:60000}); text(r.output);\n', 1),
+    done('c1', 1, 'custom_tool_call_output', '{"session_id":7,"output":""}'),
+    exec('c5', 'text(await tools.exec_command({cmd:"rg --files src"}));\n', 1),
+    done('c5', 1.1),
+    exec('c2', 'const r = await tools.write_stdin({session_id:7,chars:"",yield_time_ms:60000}); text(r.output);\n', 1.1),
     done('c2', 7),
     { timestamp: at(8), type: 'response_item', payload: { type: 'function_call', name: 'shell', call_id: 'c3', arguments: JSON.stringify({ command: ['bash', '-lc', 'git status'] }) } },
     done('c3', 8, 'function_call_output'),
     exec('c4', 'const r = await tools.exec_command({cmd:"sleep 600"}); text(r.output);\n', 9),
   ].map((x) => JSON.stringify(x)).join('\n'));
   const x = findHost('codex').shellRuns(codex);
-  assert.deepEqual(x.runs.map((r) => [r.command, Math.round(r.minutes)]), [['npx playwright test e2e/specs/120.spec.ts', 7], ['bash -lc git status', 0]]);
+  // The poll's minutes are the playwright run's, by its session, not the quick search that finished just before it.
+  assert.deepEqual(x.runs.map((r) => [r.command, Math.round(r.minutes)]), [['npx playwright test e2e/specs/120.spec.ts', 7], ['rg --files src', 0], ['bash -lc git status', 0]]);
   assert.equal(x.running.command, 'sleep 600');
   const shell = { running: { command: c.running.command, minutes: 30 }, longRuns: 1, longMinutes: 20, longest: [{ command: c.runs[0].command, minutes: 20 }] };
   const line = courseLines({ files: { changed: 1 }, rounds: [], implementers: [], wallMinutes: 60, sessions: [{ role: 'implementer', agent: 'i', minutes: 60, expectMinutes: 30, located: true, idleMinutes: 0, shell }], expect: {} }).find((l) => l.startsWith('implementer i'));

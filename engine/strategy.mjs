@@ -310,7 +310,8 @@ export function strategistHandoff(root, state, options) {
     planFiles: state.plan ? planPaths(state.plan, scopeFiles(state)) : [],
     // Why the owner agent handed you: what it saw diverge from what was predicted (null when it said nothing).
     handedBecause,
-    signals,
+    // Without the roles' shell commands (`sessions[].shell`): the bundle is kept as evidence.
+    signals: { ...signals, sessions: (signals.sessions ?? []).map(({ shell, ...rest }) => rest) },
     // The comparison the owner agent made, as `wf resume` shows it: the plan's expectation, each implementer's and reviewer's
     // own, and your earlier predictions, beside what happened.
     // Without the roles' shell commands: the bundle is kept as evidence, and a command may carry a value no one should keep.
