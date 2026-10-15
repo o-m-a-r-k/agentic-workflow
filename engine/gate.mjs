@@ -1281,6 +1281,7 @@ async function executeRun(root, state, plan, live, run) {
   const machine = run.machine; // step id -> machine-wide lease slot file
   const max = Math.max(1, plan.cfg.gate.maxParallelSteps ?? 1);
   const active = new Set();
+  const leaseWaits = new Map();
   const leaseOf = (p) => plan.cfg.gate.steps.find((x) => x.id === p.id).lease;
   // Named failure (I-113): a check waiting for a full lease printed nothing after "N to run", and `wf status` said only "waiting
   // for a lease". The wait names the lease, who holds its slots and how capacity is raised, once when it begins (again when
@@ -1319,6 +1320,10 @@ async function executeRun(root, state, plan, live, run) {
           starting = p;
           const lease = leaseOf(p);
           if (lease) held[lease] = (held[lease] ?? 0) + 1;
+          // How long it waited for a slot another gate held: recorded with its result (audit of one project: 22% of gate
+          // time had no step running, and nothing recorded why).
+          const waited = waiting.get(p.id);
+          if (waited) leaseWaits.set(p.id, { lease: waited.lease, seconds: Math.round((Date.now() - waited.since) / 1000) });
           waiting.delete(p.id);
           runningNow.set(p.id, Date.now());
           saveProgress();
@@ -1337,6 +1342,7 @@ async function executeRun(root, state, plan, live, run) {
                 machine.delete(p.id);
                 // A run ended by its own error certifies nothing that was still running when it ended, whatever the step returns after it was signalled.
                 let final = fatal || (stopping && r.status !== 'passed') ? { ...r, status: 'interrupted' } : r;
+                if (leaseWaits.has(p.id)) final = { ...final, leaseWait: leaseWaits.get(p.id) };
                 const secs = ((Date.now() - runningNow.get(p.id)) / 1000).toFixed(1);
                 runningNow.delete(p.id);
                 try {
@@ -1402,7 +1408,7 @@ async function executeRun(root, state, plan, live, run) {
   const producedUntracked = {};
   for (const [name, r] of Object.entries(state.repos)) producedUntracked[name] = untrackedSnapshot(r.worktree);
   say(`${status} (${runId})`);
-  const record = { runId, status, producedUntracked, changed: plan.changed, full: plan.full, focused: plan.focused, check: plan.check || undefined, repos: plan.repos ?? undefined, rerunFailed: plan.rerunFailed ?? undefined, adapterBase: state.adapterBase, validationDigest: validationDigest(state), tree: plan.tree, impact: plan.impact, unchecked: plan.unchecked, ...(Object.keys(leaseCapacity).length ? { leaseCapacity } : {}), ...(ownerStop ? { stop: { class: ownerStop.class, reason: ownerStop.reason } } : {}), ...(fatal ? { error: ctx.redact(String(fatal.message ?? fatal)) } : {}), steps: results, finishedAt: now() };
+  const record = { runId, status, producedUntracked, changed: plan.changed, full: plan.full, focused: plan.focused, check: plan.check || undefined, repos: plan.repos ?? undefined, rerunFailed: plan.rerunFailed ?? undefined, adapterBase: state.adapterBase, validationDigest: validationDigest(state), tree: plan.tree, impact: plan.impact, unchecked: plan.unchecked, ...(Object.keys(leaseCapacity).length ? { leaseCapacity } : {}), ...(leaseWaits.size ? { leaseWaitSeconds: Math.max(...[...leaseWaits.values()].map((w) => w.seconds)) } : {}), ...(ownerStop ? { stop: { class: ownerStop.class, reason: ownerStop.reason } } : {}), ...(fatal ? { error: ctx.redact(String(fatal.message ?? fatal)) } : {}), steps: results, finishedAt: now() };
   writeImmutable(path.join(runDir, 'result.json'), `${JSON.stringify(record, null, 2)}\n`);
   // Recorded before the run is: once it is finished, an unrecorded file in its folder is an extra file.
   await retryWhileLocked(() => {

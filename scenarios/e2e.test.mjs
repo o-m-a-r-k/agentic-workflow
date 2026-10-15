@@ -148,6 +148,10 @@ test('leases are machine-wide: two gates from different attempts never share a d
   for (const [a, ts, kind] of fs.readFileSync(path.join(home, '..', 'times.txt'), 'utf8').trim().split('\n').map((l) => l.split(' '))) (t[a] ??= {})[kind] = Number(ts);
   const [x, y] = ids;
   assert.ok(t[x].end <= t[y].start || t[y].end <= t[x].start, 'the two docker steps did not overlap');
+  // The step that waited for the slot says so in its result (0.7.15: gate time with no step running had no recorded cause).
+  const { loadState } = await import('../engine/ledger.mjs');
+  const waits = ids.map((id) => loadState(root, id).lastGate.steps.find((s) => s.id === 'e2e').leaseWait ?? null);
+  assert.equal(waits.filter((w) => w?.lease === 'docker').length, 1, JSON.stringify(waits));
 });
 
 test('the reviewer hint says what to do with open findings', () => {

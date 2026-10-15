@@ -337,7 +337,8 @@ function gateText(result) {
   });
   const focused = (result.record ?? result.plan)?.focused ? ' (focused: proof while repairing; acceptance and delivery need a gate without --focused)' : '';
   const stopped = result.record?.stop ? ` — stopped by the owner (${result.record.stop.class}: ${result.record.stop.reason})` : '';
-  const head = result.record ? `gate ${result.record.status}${stopped} (${result.record.runId})${focused}` : `gate plan${result.plan.full ? ' (full: the adapter changed)' : ''}${focused}`;
+  const waited = result.record?.leaseWaitSeconds >= 60 ? `; steps waited up to ${Math.round(result.record.leaseWaitSeconds / 60)} min for a lease other gates held (\`gate.leases\` sets the slots)` : '';
+  const head = result.record ? `gate ${result.record.status}${stopped} (${result.record.runId})${focused}${waited}` : `gate plan${result.plan.full ? ' (full: the adapter changed)' : ''}${focused}`;
   const imp = result.plan?.impact ?? result.record?.impact;
   const impLine = imp && (imp.contractsChanged.length || imp.dependents.length) ? `\n  contracts changed: ${imp.contractsChanged.map((c) => c.contract).join(', ') || 'none'}; dependents pulled in: ${imp.dependents.join(', ') || 'none'}` : '';
   return `${head}${result.recovered ? `\n  recovered ${result.recovered.carried} finished step(s) from run ${result.recovered.runId} (runner died)` : ''}${impLine}\n${rows.join('\n')}`;
