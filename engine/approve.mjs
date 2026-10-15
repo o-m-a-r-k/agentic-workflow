@@ -55,7 +55,12 @@ export function createDecision(root, state, { kind, key, summary, choices = ['ye
 // and its options are exactly the decision's choices.
 export const questionFor = (state, d) => `${state.id} ${d.id}: ${d.summary}`;
 
-export const approveHint = (state, d) => `ask the owner to run \`wf approve ${d.id} --attempt ${state.id}\` in their own terminal (choices: ${d.choices.join(' | ')}), or ask them in your question panel, with exactly the options ${d.choices.join(' | ')}, the question "${questionFor(state, d)}", then run \`wf approve ${d.id} --from-question --attempt ${state.id}\`; then run this command again`;
+// Named failure (I-135): the question tool answered "accepted" but the person saw no panel and no way to decide, and the
+// reply around it held file links and workflow words. The decision is shown in the reply itself (what it does, why, what
+// remains), whatever the panel does: a tool's acceptance is no proof the person can see it. The answer still counts only
+// as the panel recorded it or as typed in their terminal.
+const SHOW = 'say in your reply, in plain words, what this decides, why, and what happens after each choice (a question panel may not show, and its acceptance proves nothing)';
+export const approveHint = (state, d) => `${SHOW}; then ask the owner in your question panel, with exactly the options ${d.choices.join(' | ')}, the question "${questionFor(state, d)}", and run \`wf approve ${d.id} --from-question --attempt ${state.id}\`, or they run \`wf approve ${d.id} --attempt ${state.id}\` in their own terminal (choices: ${d.choices.join(' | ')}); then run this command again`;
 
 // A yes/no reserved decision that must be answered `yes` (0.7.0). Named failure: `requireApproved` returns whatever
 // choice was approved, so an answer of `no` read as an approval at a caller that only tested for a value. A `no` refuses,
@@ -122,7 +127,7 @@ export async function approveFromQuestion(root, id, options, { env = process.env
   if (d.withdrawn) throw refuse(`${id} was withdrawn (${d.withdrawn.reason ?? ''}); the next command asks a fresh question`, null, { id: 'approve:withdrawn' });
   if (options.choice !== undefined && options.choice !== true) throw new WfError('--choice is for the terminal; with --from-question the choice is the one the person picked in the panel');
   const question = questionFor(state, d);
-  const how = `ask the person in your question panel: the question "${question}" with exactly the options ${d.choices.join(' | ')}; then run this again`;
+  const how = `${SHOW}; ask again in your question panel (the question "${question}" with exactly the options ${d.choices.join(' | ')}) and run this again, or, when the panel does not show for them, give them the terminal route: \`wf approve ${id} --attempt ${state.id}\``;
   const caller = detectOwner(env);
   const host = caller ? findHost(caller.runtime) : null;
   const read = optional(host, 'questionAnswers');

@@ -82,6 +82,9 @@ test('an answer counts only when bound to the decision, offered its choices, giv
   fs.mkdirSync(path.dirname(transcript), { recursive: true });
   fs.writeFileSync(transcript, JSON.stringify({ type: 'user', timestamp: at(1000), message: { role: 'user', content: 'yes, lift the hold on A1' } }) + '\n');
   refusedWith(/no answer to A1 in this session's question panel/, 'the person typed yes in the chat: prose is never read');
+  // I-135: a panel that showed nothing is not the end of the road: the reply explains the decision, and the terminal route is given.
+  refusedWith(/say in your reply, in plain words, what this decides, why, and what happens after each choice \(a question panel may not show, and its acceptance proves nothing\)/, 'the decision is explained in the reply');
+  refusedWith(new RegExp(`when the panel does not show for them, give them the terminal route: \`wf approve A1 --attempt ${e.id.replace('.', '\\.')}\``), 'the terminal route is given');
   claudeAsks(p, { question: `${e.id} ${d.id}: lift it?`, answer: 'yes' });
   refusedWith(/no answer to A1/, 'the question does not say what the decision does');
   claudeAsks(p, { question: `${d.id}: ${d.summary}`, answer: 'yes' });
