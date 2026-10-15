@@ -21,6 +21,7 @@ import { prepareWrite, readRegular, writeNoFollow } from './evidence.mjs';
 import { mkdirStateDirectory } from './state-folders.mjs';
 import { gateAdapter } from './validation.mjs';
 import { WfError, canonical, git, refuse, sha256 } from './util.mjs';
+import { imageSize } from './image-size.mjs';
 
 const IMAGE = /\.(png|jpe?g|webp|gif)$/i;
 // What a criterion says when it names a screenshot as the way to see that it holds.
@@ -143,7 +144,7 @@ function importLocked(root, options, state) {
     mkdirStateDirectory(path.dirname(dest), { recursive: true });
     writeNoFollow(dest, read.bytes, { exclusive: true });
     const modifiedMs = read.st.mtimeMs;
-    files.push({ path: dest, sha256: digest, kind: 'screenshot', source: `import-${n}/${rel}`, units, origin: 'imported by the owner', import: n, modifiedAt: new Date(modifiedMs).toISOString(), ...(modifiedMs < committedAt ? { madeBeforeLastCommit: true } : {}) });
+    files.push({ path: dest, sha256: digest, kind: 'screenshot', ...(imageSize(read.bytes) ?? {}), source: `import-${n}/${rel}`, units, origin: 'imported by the owner', import: n, modifiedAt: new Date(modifiedMs).toISOString(), ...(modifiedMs < committedAt ? { madeBeforeLastCommit: true } : {}) });
   }
   if (!files.length) throw refuse(`no capture imported from ${from ?? options.file}${skipped.length ? `:\n  - ${skipped.slice(0, 10).map((s) => `${s.file}: ${s.why}`).join('\n  - ')}` : ignored ? ` (${ignored} file(s) that are not png, jpeg, webp or gif images were ignored)` : ''}`, 'give a folder that holds png, jpeg, webp or gif files made on the committed tree', { id: 'captures:none' });
   const note = typeof options.note === 'string' ? options.note.trim() : '';

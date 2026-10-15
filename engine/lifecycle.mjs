@@ -970,7 +970,7 @@ function sweepsForReviewer(root, cfg, state) {
 export function artifactsByStep(state, cfg) {
   const changed = state.lastGate?.changed ?? {};
   return (state.lastGate?.steps ?? []).filter((s) => s.artifactGlobs?.length).map((s) => {
-    const globs = s.artifactGlobs.map((g) => ({ glob: g.glob, expanded: g.expanded, files: g.files.map((f) => ({ source: f.source, path: f.path, sha256: f.sha256, kind: f.kind })) }));
+    const globs = s.artifactGlobs.map((g) => ({ glob: g.glob, expanded: g.expanded, files: g.files.map((f) => ({ source: f.source, path: f.path, sha256: f.sha256, kind: f.kind, ...(f.width ? { width: f.width, height: f.height } : {}) })) }));
     const none = globs.every((g) => !g.files.length);
     const changedHere = cfg ? changedForStep(cfg, s.id, s.repo, changed) : [];
     const uncovered = none && changedHere.length > 0;

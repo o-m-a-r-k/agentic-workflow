@@ -17,6 +17,7 @@ import { impact, inside, rel } from './topology.mjs';
 import { canonical as canonicalPath } from './paths.mjs';
 import { WfError, assertEngine, canonical, git, globToRegExp, hashFile, hashValue, isPidAlive, matchesAny, now, refuse, run, sha256, shellQuote, writeImmutable, writeJson } from './util.mjs';
 import { appendStreamNoFollow, ownGateRun, prepareWrite, readRegular, seal, writeNoFollow } from './evidence.mjs';
+import { imageSize } from './image-size.mjs';
 
 const gateDir = (root, id) => path.join(attemptDir(root, id), 'gate');
 const lockFile = (root, id) => path.join(gateDir(root, id), 'gate.lock');
@@ -323,7 +324,8 @@ function collectArtifacts(step, dir, destDir, since, units) {
     // Whose evidence the file is: the units whose own expansion of a matching glob matches it. A batch member delivers
     // (and attaches to its ticket) only its own files; a placeholder-less glob matches for every unit.
     const owners = units.filter((u) => hit.some((g) => matchesAny(r, expandArtifactGlob(g.glob, [u])))).map((u) => u.attempt);
-    const a = { path: dest, sha256: sha256(bytes), kind: /\.(png|jpe?g|webp|gif)$/i.test(r) ? 'screenshot' : 'file', source: r, units: owners };
+    const kind = /\.(png|jpe?g|webp|gif)$/i.test(r) ? 'screenshot' : 'file';
+    const a = { path: dest, sha256: sha256(bytes), kind, ...(kind === 'screenshot' ? sizeOf(bytes) : {}), source: r, units: owners };
     out.push(a);
     for (const g of hit) g.files.push(a);
   }
@@ -444,10 +446,16 @@ function harvestPluginArtifacts(returned, { scratch, dir, evidenceDir, taken }) 
     }
     if (!bytes || seen.has(managed)) continue;
     seen.add(managed);
-    artifacts.push({ ...a, path: managed, sha256: sha256(bytes), source });
+    artifacts.push({ ...a, path: managed, sha256: sha256(bytes), ...(/\.(png|jpe?g|webp|gif)$/i.test(managed) ? sizeOf(bytes) : {}), source });
   }
   return { artifacts, problems };
 }
+
+// I-117: a screenshot's measured pixel size, for the reviewer to compare with the viewport its criterion names.
+const sizeOf = (bytes) => {
+  const s = imageSize(bytes);
+  return s ? { width: s.width, height: s.height } : {};
+};
 
 async function executeStep(root, cfg, state, planned, ctx) {
   const step = cfg.gate.steps.find((s) => s.id === planned.id);
