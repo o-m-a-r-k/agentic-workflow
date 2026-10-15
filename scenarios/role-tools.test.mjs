@@ -104,6 +104,8 @@ test('wf sync names the role files it changed and says a running session keeps t
   const changed = ok(wf(root, ['sync'])).out;
   assert.match(changed, /role file\(s\) changed: \.claude\/agents\/wf-planner\.md, \.codex\/agents\/wf-planner\.toml\n {2}Claude Code and Codex read agent files when a session starts: a session that was already running keeps the old roles/);
   const stale = ok(wf(root, ['handoff', 'planner', '--agent', 'p2', '--attempt', e.id, '--owner', 'o'], { env: { CLAUDE_CODE_SESSION_ID: 'sess-old' } }));
-  assert.match(stale.err, /warning: \.claude\/agents\/wf-planner\.md changed at \S+, after this Claude Code session started \(\S+\)\. Claude Code reads agent files when a session starts, so an agent of type wf-planner started from this session runs the old role/);
-  assert.match(stale.err, /Restart Claude Code \(`claude --resume` keeps this conversation\)/);
+  assert.match(stale.err, /warning: \.claude\/agents\/wf-planner\.md changed at \S+, after this Claude Code session started \(\S+\)\. Claude Code reads agent files when a session starts, so an agent of type wf-planner started from this session would run the old role/);
+  // A plugin update reaches the next role with no restart: it is launched as a fresh process that reads the current file.
+  assert.match(stale.out, /Run wf handoff run --agent \S+ --attempt \S+ \(not the agent type: this session loaded wf-planner before the plugin changed it\)/);
+  assert.doesNotMatch(stale.err + stale.out, /Restart|Start agent type/);
 });
