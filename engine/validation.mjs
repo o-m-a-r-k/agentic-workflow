@@ -30,7 +30,11 @@ export function gateAdapter(root, state) {
     const candidate = trustedAdapter(root, state, record.commit);
     for (const selected of record.steps) {
       const step = candidate.gate.steps.find((s) => s.id === selected.id);
-      const wasAdmission = (state.validationCorrections ?? []).some((c) => (c.from ?? []).some((f) => f.id === selected.id && f.admission));
+      // I-138: corrections recorded by an earlier local build (before 0.7.8 required the person's decision) marked the
+      // corrected step itself (`steps[].admission`) and kept the original in `from` unmarked; reviewed since, they blocked
+      // every check and correction of their attempt. That exact shape counts; the engine writes it no more (a new admission
+      // correction marks `from` and carries the person's decision).
+      const wasAdmission = (state.validationCorrections ?? []).some((c) => (c.from ?? []).some((f) => f.id === selected.id && f.admission) || ((c.steps ?? []).some((x) => x.id === selected.id && x.admission === true) && !(c.from ?? []).some((f) => f.admission)));
       if (!step || canonical(step) !== canonical(selected.definition)) throw refuse('supplemental validation no longer matches its recorded committed definition');
       // I-125: an admission step the person let the attempt correct runs at its corrected definition, in its place.
       const at = steps.findIndex((s) => s.id === step.id);

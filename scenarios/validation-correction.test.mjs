@@ -202,3 +202,18 @@ test('a correction that only narrows a step\'s evidence glob reuses the recorded
   assert.equal(third.steps[0].status, 'reused');
   assert.equal(ran(), 1);
 });
+
+// I-138: a correction an earlier local build recorded marked the corrected step itself (`steps[].admission`) and kept the
+// original in `from` unmarked; every check and correction then refused. That shape counts, with the person's decision only.
+test('an admission correction in the earlier recorded shape is honoured; a replaced admission step marked nowhere is not', async () => {
+  const f = fixture('validation-correct-legacy');
+  commitIn(f.wt, { '.workflow/project.yaml': yaml({ version: 1, enabled: true, name: 'fixture', repos: [{ name: 'app', path: '.', base: 'main' }], gate: { steps: [{ id: 'unit', repo: 'app', run: 'test -f src/a.txt && echo legacy-shape', inputs: ['src/**'] }] } }) });
+  ok(correct(f, ['--steps', 'unit', '--reason', 'it read a failed request as empty data']));
+  const { loadState } = await import('../engine/ledger.mjs');
+  const { gateAdapter } = await import('../engine/validation.mjs');
+  const s = loadState(f.root, f.e.id);
+  const legacy = (decision) => ({ ...s, validations: s.validations.map((v) => ({ ...v, steps: v.steps.map((x) => ({ ...x, admission: true })) })), validationCorrections: s.validationCorrections.map((c) => ({ ...c, steps: c.steps.map((x) => ({ ...x, admission: true })), from: c.from.map(({ admission, ...rest }) => rest), decision })) });
+  assert.match(gateAdapter(f.root, legacy(undefined)).gate.steps.find((x) => x.id === 'unit').run, /legacy-shape/, 'recorded before decisions were required');
+  const unmarked = { ...s, validations: s.validations, validationCorrections: s.validationCorrections.map((c) => ({ ...c, from: c.from.map(({ admission, ...rest }) => rest) })) };
+  assert.throws(() => gateAdapter(f.root, unmarked), /no longer matches its recorded committed definition/, 'an admission step replaced with no mark is refused');
+});
