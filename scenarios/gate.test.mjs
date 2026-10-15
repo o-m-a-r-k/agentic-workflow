@@ -410,6 +410,10 @@ test('a running gate shows progress: wf gate prints each step as it starts and f
   const child = spawn(process.execPath, [WF, 'gate', ...OUT_OF_ORDER, '--attempt', e.id], { cwd: root, env, stdio: ['ignore', fd, fd] });
   const exited = new Promise((r) => child.on('exit', r));
   const read = () => fs.readFileSync(outFile, 'utf8');
+  // The slow step waits for this file: whatever an assertion below does, the gate is released and the test never hangs (a
+  // failed assertion here once left the gate waiting until CI's job was cancelled, 0.7.16).
+  const release = () => fs.writeFileSync(path.join(root, '..', 'go'), '');
+  try {
   const deadline = Date.now() + 30000;
   while (Date.now() < deadline && !(/passed\s+fast/.test(read()) && /failed\s+bad/.test(read()))) await new Promise((r) => setTimeout(r, 100));
   const midway = read();
@@ -424,7 +428,9 @@ test('a running gate shows progress: wf gate prints each step as it starts and f
   assert.match(status, /finished: .*fast passed/);
   assert.match(status, /bad failed/);
   assert.match(ok(wf(root, ['resume', '--attempt', e.id])).out, /a gate is running/);
-  fs.writeFileSync(path.join(root, '..', 'go'), '');
+  } finally {
+    release();
+  }
   assert.equal(await exited, 1);
   fs.closeSync(fd);
   assert.match(read(), /passed\s+slow/, 'a failing step does not stop the others');
