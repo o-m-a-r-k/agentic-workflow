@@ -291,3 +291,43 @@ test('ten review rounds are the owner\'s decision: continue gives another ten, s
   assert.match(held.err, /the owner chose stop at A2/);
   assert.match(v7.state(root, a.id).activeHold.reason, /the owner chose stop at the escalation A2/);
 });
+
+// 0.7.11, named failure: a strategist's escalation reached the person as its own rationale with options like
+// "authorize-policy-correction", no description and no recommendation ("very cryptic … I don't have context, nor
+// suggestions, nor even proper description"). An escalation is now a plain question with labelled options, what follows each,
+// and a recommendation when there is one; the person answers by the label.
+test('an escalation is a plain question: labelled options with what follows each, a recommendation, answered by its label', async () => {
+  const cur = runner('0.7.11');
+  const ctx = project('plain-escalation');
+  const a = started(cur, ctx, { item: 'ENG-730' });
+  const { root, base } = ctx;
+  reviewRound(cur, ctx, a, { findings: 1 });
+  const h = ok(cur.run(root, ['handoff', 'strategist', '--agent', 'strat-1', '--attempt', a.id, '--reason', 'the same finding keeps coming back', '--json'])).json();
+  const prediction = { signal: 'blockingLatest <= 0', by: 3 };
+  const legacy = strategistClosure(base, h.bundle, { strategist: 'strat-1', action: 'escalate', rationale: 'r', prediction, options: ['authorize-policy-correction', 'retain-blocked'] });
+  const refused = cur.run(root, ['strategy', 'record', '--closure', legacy.file, '--attempt', a.id]);
+  assert.notEqual(refused.code, 0);
+  assert.match(refused.err, /action escalate needs `question`: in plain words/);
+  assert.match(refused.err, /2 or 3 of \{ "label": "<plain words/);
+  const plain = strategistClosure(base, h.bundle, { strategist: 'strat-1', action: 'escalate', rationale: 'The same finding came back after two fixes.', prediction,
+    question: 'The same problem came back after two fixes. Should the work that keeps reopening move to its own ticket?',
+    options: [{ label: 'Move it to its own ticket', then: 'this ticket ships what is done; the rest is planned again' }, { label: 'Keep fixing it here', then: 'another fix and review round starts now' }],
+    recommend: { label: 'Move it to its own ticket', why: 'two fixes did not hold' } });
+  const rec = ok(cur.run(root, ['strategy', 'record', '--closure', plain.file, '--attempt', a.id, '--json'])).json();
+  const d = cur.state(root, a.id).decisions.find((x) => x.id === rec.escalation);
+  assert.deepEqual(d.choices, ['move-it-to-its-own-ticket', 'keep-fixing-it-here']);
+  assert.equal(d.plain, 'The same problem came back after two fixes. Should the work that keeps reopening move to its own ticket?');
+  assert.deepEqual(d.recommend, { choice: 'move-it-to-its-own-ticket', why: 'two fixes did not hold' });
+  const blocked = cur.run(root, ['handoff', 'reviewer', '--agent', 'rev-x', '--attempt', a.id, '--owner', a.owner], { ownerSilent: true });
+  assert.equal(blocked.code, 75);
+  assert.match(blocked.err, new RegExp(`the question "${a.id.replace('.', '\\.')} ${d.id}: The same problem came back after two fixes\\. Should the work that keeps reopening move to its own ticket\\?"`));
+  assert.match(blocked.err, /"Move it to its own ticket \(Recommended\)": this ticket ships what is done; the rest is planned again; "Keep fixing it here": another fix and review round starts now\. Recommended because two fixes did not hold/);
+  const { approveInTerminal } = await import('../engine/approve.mjs');
+  await inProcess(root, async () => {
+    const input = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => {} });
+    const output = Object.assign(new PassThrough(), { isTTY: true, columns: 80 });
+    const pending = approveInTerminal(root, d.id, { attempt: a.id }, { input, output, env: {} });
+    setImmediate(() => input.write('Keep fixing it here\n'));
+    assert.equal((await pending).choice, 'keep-fixing-it-here', 'the person answers by the label');
+  });
+});

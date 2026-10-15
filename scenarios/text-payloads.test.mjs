@@ -116,7 +116,7 @@ test('the strategist\'s example closure is recorded by `wf strategy record`, and
   for (const line of lines) {
     const extra = JSON.parse(fill(line));
     actions.push(extra.action);
-    assert.deepEqual(closureProblems({ ...closure, ...extra }, { rounds: 0 }), [], `the ${extra.action} keys in the text are refused by the engine`);
+    assert.deepEqual(closureProblems({ ...closure, ...extra }, { rounds: 0, plainEscalation: true }), [], `the ${extra.action} keys in the text are refused by the engine`);
   }
   assert.deepEqual(actions, ['cluster', 'ticket', 'split', 'model', 'escalate']);
 
@@ -127,7 +127,7 @@ test('the strategist\'s example closure is recorded by `wf strategy record`, and
     { ...closure, action: 'model', model: { role: 'reviewer' } },
     { ...closure, action: 'escalate', options: ['only-one'] },
     { ...closure, prediction: { ...closure.prediction, by: 0 } },
-  ]) assert.ok(closureProblems(bad, { rounds: 0 }).length >= 1, `${bad.action} closure ${JSON.stringify(bad).slice(0, 80)} should be refused`);
+  ]) assert.ok(closureProblems(bad, { rounds: 0, plainEscalation: true }).length >= 1, `${bad.action} closure ${JSON.stringify(bad).slice(0, 80)} should be refused`);
 });
 
 test('the closure the strategy page shows is accepted too', () => {

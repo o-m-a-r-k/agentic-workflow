@@ -55,6 +55,16 @@ export function roundsEscalation(rounds, c = STRATEGY_DEFAULTS) {
 // The owner's decision for the escalation (kind escalation, created by the engine; `wf approve`).
 export const ownerDecisionKey = (f) => `tripwire:${f.id}:${f.key}`;
 export const OWNER_CHOICES = ['continue', 'split', 'deliver-core', 'stop'];
+// What the person sees for each choice of the round escalation, and what follows it (0.7.11: plain questions).
+const OWNER_WORDS = {
+  labels: { continue: 'Keep going as now', split: 'Split off the rest as its own ticket', 'deliver-core': 'Ship what the criteria need now', stop: 'Stop this ticket' },
+  then: {
+    continue: 'the next fix and review round starts; this question comes back after the next ten rounds',
+    split: 'the work that keeps reopening moves to a sibling attempt delivered with this one',
+    'deliver-core': 'what the criteria need is fixed and shipped; the other open findings are listed as known issues or ticketed',
+    stop: 'nothing more is worked on; the attempt waits to be abandoned or reopened',
+  },
+};
 const ownerDecision = (state, f) => (state.decisions ?? []).filter((d) => d.kind === 'escalation' && d.key === ownerDecisionKey(f)).at(-1) ?? null;
 
 // The adapter at the attempt's base: a ticket cannot loosen its own escalation. Null when it cannot be read; the defaults
@@ -196,7 +206,7 @@ export function requireOwnerDecision(root, state, role) {
   if (hold.owner) {
     recordEscalation(root, state, hold.owner);
     const answeredInWords = hold.ownerPending?.approved ? hold.ownerPending : null;
-    const d = hold.ownerPending && !hold.ownerPending.approved && !hold.ownerPending.withdrawn ? hold.ownerPending : createDecision(root, state, { kind: 'escalation', key: ownerDecisionKey(hold.owner), choices: OWNER_CHOICES, summary: `${hold.owner.summary}: continue | split | deliver-core | stop` });
+    const d = hold.ownerPending && !hold.ownerPending.approved && !hold.ownerPending.withdrawn ? hold.ownerPending : createDecision(root, state, { kind: 'escalation', key: ownerDecisionKey(hold.owner), choices: OWNER_CHOICES, summary: `${hold.owner.summary}: continue | split | deliver-core | stop`, plain: `This ticket has been through ${hold.owner.summary.split(' ')[0]} review rounds and keeps finding new problems. How should it go on?`, ...OWNER_WORDS });
     throw refuse(`not handed: ${hold.owner.summary} (${d.id}); no ${role} starts until the owner decides${wordsOf(answeredInWords)}`, `${approveHint(state, d)}. Bring the person the brief first (\`wf signals --attempt ${state.id}\`): the numbers, what keeps coming back, 2-3 options and your recommendation`, { id: 'strategy:owner-escalation' });
   }
   const esc = hold.escalation.approved || hold.escalation.withdrawn ? createDecision(root, state, { kind: 'escalation', key: hold.escalation.key, summary: hold.escalation.summary, choices: hold.escalation.choices }) : hold.escalation;
@@ -356,11 +366,30 @@ export function strategistHandoff(root, state, options) {
 
 // ---- `wf strategy record` ----
 
-const KEYS = ['strategist', 'action', 'rationale', 'prediction', 'items', 'split', 'model', 'options'];
+const KEYS = ['strategist', 'action', 'rationale', 'prediction', 'items', 'split', 'model', 'options', 'question', 'recommend'];
 const TOKEN = /^[a-z0-9][a-z0-9-]{0,39}$/;
+// An option the person reads: plain words, not an identifier.
+const plainLabel = (v) => typeof v === 'string' && v.trim().length >= 3 && v.trim().length <= 80 && !TOKEN.test(v.trim());
+const slug = (v, taken) => {
+  let s = String(v).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'option';
+  while (taken.has(s)) s = `${s.slice(0, 37)}-${taken.size}`;
+  taken.add(s);
+  return s;
+};
+// The escalation as the person will read it: the choice ids the engine keeps, and their plain labels, consequences and the
+// recommendation (engine/approve.mjs createDecision).
+export function escalationWords(c) {
+  if (!Array.isArray(c.options) || !c.options.every((o) => o && typeof o === 'object')) return null;
+  const taken = new Set();
+  const choices = c.options.map((o) => slug(o.label, taken));
+  const labels = Object.fromEntries(choices.map((id, i) => [id, c.options[i].label.trim()]));
+  const then = Object.fromEntries(choices.map((id, i) => [id, String(c.options[i].then).trim()]));
+  const pick = c.recommend && typeof c.recommend === 'object' ? choices.find((id) => labels[id] === String(c.recommend.label ?? '').trim()) : null;
+  return { choices, plain: String(c.question).trim(), labels, then, ...(pick ? { recommend: { choice: pick, why: String(c.recommend.why ?? '').trim() || null } } : {}) };
+}
 
 // Schema check of the strategist's closure; returns the problems (empty when it is valid).
-export function closureProblems(c, { rounds = 0, nowMs = Date.now() } = {}) {
+export function closureProblems(c, { rounds = 0, nowMs = Date.now(), plainEscalation = false } = {}) {
   const p = [];
   const text = (v) => typeof v === 'string' && v.trim();
   const list = (v) => Array.isArray(v) && v.length > 0 && v.every(text);
@@ -391,7 +420,15 @@ export function closureProblems(c, { rounds = 0, nowMs = Date.now() } = {}) {
     // free model string would bypass the committed pin (I-44), so it names a class.
     if (!m || typeof m !== 'object' || Array.isArray(m) || !['implementer', 'reviewer', 'planner'].includes(m.role) || !text(m.class)) p.push('action model needs `model: { role: implementer|reviewer|planner, class: <a work class of the adapter> }`');
   }
-  if (c.action === 'escalate') {
+  // 0.7.11: an escalation is a question the person answers, often on a phone with nothing else to read. It says in plain
+  // words what is decided and why it is theirs (`question`), and each option is a plain label with what happens next
+  // (`then`); a recommendation is welcome, never required (one forced would be invented).
+  if (c.action === 'escalate' && plainEscalation) {
+    if (!text(c.question) || c.question.trim().length > 400) p.push('action escalate needs `question`: in plain words, for someone with no other context, what the person decides and why it is theirs (at most 400 characters; no ids, no workflow terms)');
+    if (!Array.isArray(c.options) || c.options.length < 2 || c.options.length > 3 || !c.options.every((o) => o && typeof o === 'object' && plainLabel(o.label) && text(o.then))) p.push('action escalate needs `options`: 2 or 3 of { "label": "<plain words, 3-80 characters, not an identifier>", "then": "<what happens next if the person picks it>" }');
+    else if (new Set(c.options.map((o) => o.label.trim())).size !== c.options.length) p.push('the escalation options need distinct labels');
+    if (c.recommend !== undefined && (!c.recommend || typeof c.recommend !== 'object' || !c.options?.some?.((o) => o?.label?.trim() === String(c.recommend.label ?? '').trim()))) p.push('`recommend`, when given, is { "label": "<one of the option labels>", "why": "<one line>" }');
+  } else if (c.action === 'escalate') {
     if (!Array.isArray(c.options) || c.options.length < 2 || c.options.length > 3 || !c.options.every((o) => typeof o === 'string' && TOKEN.test(o))) p.push('action escalate needs `options`: 2 or 3 short choices for the owner (lowercase letters, digits and dashes, for example "split", "continue", "abandon")');
   }
   return p;
@@ -403,7 +440,9 @@ export function recordStrategy(root, options) {
   const state = openState(root, options);
   if (typeof options.closure !== 'string') throw new WfError('--closure <file> is required');
   const closure = readJson(options.closure);
-  const problems = closureProblems(closure, { rounds: computeRounds(state) });
+  // D7: attempts admitted before 0.7.11 keep the escalation form they were admitted with (or may use the new one).
+  const plainEscalation = obligationSince(state, '0.7.11') || (Array.isArray(closure?.options) && closure.options.some((o) => o && typeof o === 'object'));
+  const problems = closureProblems(closure, { rounds: computeRounds(state), plainEscalation });
   if (problems.length) throw new WfError(`the strategist closure is invalid:\n  - ${problems.join('\n  - ')}`, { hint: 'the bundle\'s `closureSchema` shows the shape' });
   if (['done', 'abandoned'].includes(state.phase)) throw refuse(`${state.id} is ${state.phase}`, null, { id: 'strategy:closed' });
   const h = state.handoffs.filter((x) => x.role === 'strategist' && x.agent === closure.strategist).at(-1);
@@ -447,7 +486,8 @@ export function recordStrategy(root, options) {
   let escalation = null;
   if (closure.action === 'escalate') {
     const fresh = loadState(root, state.id);
-    escalation = createDecision(root, fresh, { kind: 'escalation', key: `strategy:${id}`, summary: closure.rationale.trim().split('\n')[0].slice(0, 300), choices: closure.options, options });
+    const words = escalationWords(closure);
+    escalation = createDecision(root, fresh, { kind: 'escalation', key: `strategy:${id}`, summary: closure.rationale.trim().split('\n')[0].slice(0, 300), choices: words?.choices ?? closure.options, ...(words ? { plain: words.plain, labels: words.labels, then: words.then, recommend: words.recommend ?? null } : {}), options });
   }
   append(root, state.id, 'strategy.decided', {
     id,
@@ -458,6 +498,7 @@ export function recordStrategy(root, options) {
     split: splitResult ? { id: splitResult.id, items: closure.split.items, reason: closure.split.reason, siblings: splitResult.siblings.map((s) => s.id), batch: splitResult.batch } : null,
     model: closure.model ?? null,
     options: closure.options ?? null,
+    ...(closure.question ? { question: closure.question } : {}),
     escalation: escalation?.id ?? null,
     outcomes,
     strategist: closure.strategist,

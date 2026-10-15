@@ -42,25 +42,33 @@ export const pendingDecisions = (state) => (state.decisions ?? []).filter((d) =>
 export const chose = (d) => Boolean(d?.approved && d.approved.choice !== 'other' && !d.withdrawn);
 
 // Records a decision the person must confirm, once per kind + key while it is pending; returns it.
-export function createDecision(root, state, { kind, key, summary, choices = ['yes', 'no'], options = {} }) {
+// `plain`: the question in the person's words; `labels`: { choice: plain label }; `then`: { choice: what happens next };
+// `recommend`: { choice, why }. Named failure (0.7.11): a strategist's escalation reached the person as its own rationale
+// with options like "authorize-policy-correction", no description, no recommendation: "very cryptic … I don't have
+// context, nor suggestions, nor even proper description". The choices stay the ids the engine acts on; the person sees
+// and picks the labels.
+export function createDecision(root, state, { kind, key, summary, choices = ['yes', 'no'], plain = null, labels = null, then = null, recommend = null, options = {} }) {
   if (!RESERVED.includes(kind)) throw new WfError(`unknown reserved decision kind ${kind}`);
   const open = decisionFor(state, kind, key);
   if (open && !open.approved) return open;
   const id = `A${(state.decisions ?? []).length + 1}`;
-  append(root, state.id, 'decision.created', { id, kind, key: String(key), summary: String(summary), choices: choices.map(String) }, actor(options));
+  append(root, state.id, 'decision.created', { id, kind, key: String(key), summary: String(summary), choices: choices.map(String), ...(plain ? { plain: String(plain) } : {}), ...(labels ? { labels } : {}), ...(then ? { then } : {}), ...(recommend ? { recommend } : {}) }, actor(options));
   return loadState(root, state.id).decisions.find((d) => d.id === id);
 }
 
-// The question the person is asked in the question panel: it names the attempt and the decision and says what it does,
-// and its options are exactly the decision's choices.
-export const questionFor = (state, d) => `${state.id} ${d.id}: ${d.summary}`;
+// The question the person is asked in the question panel: it names the attempt and the decision and says, in plain words
+// when it has them, what it decides; its options are the decision's choices, by their plain labels when it has them.
+export const questionFor = (state, d) => `${state.id} ${d.id}: ${d.plain ?? d.summary}`;
+export const labelOf = (d, c) => d.labels?.[c] ?? c;
+// Each option as the panel shows it: its label, what happens next, and the recommendation marked.
+export const optionLines = (d) => d.choices.map((c) => `"${labelOf(d, c)}${d.recommend?.choice === c ? ' (Recommended)' : ''}"${d.then?.[c] ? `: ${d.then[c]}` : ''}`).join('; ') + (d.recommend?.why ? `. Recommended because ${d.recommend.why}` : '');
 
 // Named failure (I-135): the question tool answered "accepted" but the person saw no panel and no way to decide, and the
 // reply around it held file links and workflow words. The decision is shown in the reply itself (what it does, why, what
 // remains), whatever the panel does: a tool's acceptance is no proof the person can see it. The answer still counts only
 // as the panel recorded it or as typed in their terminal.
 const SHOW = 'say in your reply, in plain words, what this decides, why, and what happens after each choice (a question panel may not show, and its acceptance proves nothing)';
-export const approveHint = (state, d) => `${SHOW}; then ask the owner in your question panel, with exactly the options ${d.choices.join(' | ')}, the question "${questionFor(state, d)}", and run \`wf approve ${d.id} --from-question --attempt ${state.id}\`, or they run \`wf approve ${d.id} --attempt ${state.id}\` in their own terminal (choices: ${d.choices.join(' | ')}); then run this command again`;
+export const approveHint = (state, d) => `${SHOW}; then ask the owner in your question panel the question "${questionFor(state, d)}" with exactly these options (label, then its description): ${optionLines(d)}; and run \`wf approve ${d.id} --from-question --attempt ${state.id}\`, or they run \`wf approve ${d.id} --attempt ${state.id}\` in their own terminal (choices: ${d.choices.join(' | ')}); then run this command again`;
 
 // A yes/no reserved decision that must be answered `yes` (0.7.0). Named failure: `requireApproved` returns whatever
 // choice was approved, so an answer of `no` read as an approval at a caller that only tested for a value. A `no` refuses,
@@ -91,7 +99,7 @@ export async function approveInTerminal(root, id, options, { input = process.std
   if (!input.isTTY || !output.isTTY) throw refuse(`not an interactive terminal: \`wf approve\` is run by the owner in their own terminal, where it asks them to type the choice`, `run \`wf approve ${id} --attempt ${state.id}\` in a terminal`, { id: 'approve:no-tty' });
   const preset = options.choice === undefined || options.choice === true ? null : String(options.choice);
   if (preset && !d.choices.includes(preset)) throw new WfError(`--choice ${preset}: not one of ${d.choices.join(' | ')}`);
-  output.write(`${state.id} ${d.id} (${d.kind}): ${d.summary}\n${preset ? `Type ${preset} to confirm: ` : `Type one of ${d.choices.join(' | ')}: `}`);
+  output.write(`${state.id} ${d.id} (${d.kind}): ${d.plain ?? d.summary}\n${d.labels || d.then ? `${d.choices.map((c) => `  ${c}: ${labelOf(d, c)}${d.then?.[c] ? ` (${d.then[c]})` : ''}${d.recommend?.choice === c ? ' [recommended]' : ''}`).join('\n')}\n` : ''}${preset ? `Type ${preset} to confirm: ` : `Type one of ${d.choices.join(' | ')}: `}`);
   const rl = readline.createInterface({ input, output, terminal: true });
   const answer = await new Promise((resolve) => {
     rl.once('line', (l) => resolve(l));
@@ -100,7 +108,7 @@ export async function approveInTerminal(root, id, options, { input = process.std
   rl.close();
   if (answer === null) throw refuse(`not confirmed (the input ended); nothing recorded`, null, { id: 'approve:eof' });
   const typed = String(answer).trim();
-  const choice = preset ? (typed === preset ? preset : null) : d.choices.find((c) => c === typed) ?? null;
+  const choice = preset ? (typed === preset ? preset : null) : d.choices.find((c) => c === typed || labelOf(d, c) === typed) ?? null;
   if (!choice) throw refuse(`not confirmed (typed ${JSON.stringify(typed)}); nothing recorded`, null, { id: 'approve:mismatch' });
   append(root, state.id, 'decision.approved', { id, choice, via: 'interactive-terminal (unverified)' }, actor(options));
   noteAnswer(root, state, d, choice, null);
@@ -127,7 +135,7 @@ export async function approveFromQuestion(root, id, options, { env = process.env
   if (d.withdrawn) throw refuse(`${id} was withdrawn (${d.withdrawn.reason ?? ''}); the next command asks a fresh question`, null, { id: 'approve:withdrawn' });
   if (options.choice !== undefined && options.choice !== true) throw new WfError('--choice is for the terminal; with --from-question the choice is the one the person picked in the panel');
   const question = questionFor(state, d);
-  const how = `${SHOW}; ask again in your question panel (the question "${question}" with exactly the options ${d.choices.join(' | ')}) and run this again, or, when the panel does not show for them, give them the terminal route: \`wf approve ${id} --attempt ${state.id}\``;
+  const how = `${SHOW}; ask again in your question panel (the question "${question}" with exactly these options: ${optionLines(d)}) and run this again, or, when the panel does not show for them, give them the terminal route: \`wf approve ${id} --attempt ${state.id}\``;
   const caller = detectOwner(env);
   const host = caller ? findHost(caller.runtime) : null;
   const read = optional(host, 'questionAnswers');
@@ -137,7 +145,7 @@ export async function approveFromQuestion(root, id, options, { env = process.env
   const created = Date.parse(d.createdAt);
   // A label may carry the panel's recommendation suffix ("yes (Recommended)"); the choice is the label without it.
   const norm = (x) => String(x).trim().replace(/\s*\(recommended\)$/i, '').trim().toLowerCase();
-  const offered = (opts) => !opts || (opts.length === d.choices.length && d.choices.every((c) => opts.some((o) => norm(o) === norm(c))));
+  const offered = (opts) => !opts || (opts.length === d.choices.length && d.choices.every((c) => opts.some((o) => norm(o) === norm(c) || norm(o) === norm(labelOf(d, c)))));
   // The question carries the exact text, as a whole: `ENG-1.1 A1: ...` never matches inside `ENG-1.1 A10: ...` or
   // `XENG-1.1 A1: ...` (independent review of 0.7.3). It was asked, and answered, after the decision existed.
   const carries = (q) => {
@@ -148,7 +156,7 @@ export async function approveFromQuestion(root, id, options, { env = process.env
   const bound = (await read(t.file)).filter((a) => carries(a.question) && offered(a.options) && after(a.at) && (a.askedAt == null || after(a.askedAt)));
   const last = bound.at(-1);
   if (!last) throw refuse(`no answer to ${d.id} in this session's question panel after the decision was created`, how, { id: 'approve:no-answer' });
-  const choice = d.choices.find((c) => norm(c) === norm(last.answer)) ?? null;
+  const choice = d.choices.find((c) => norm(c) === norm(last.answer) || norm(labelOf(d, c)) === norm(last.answer)) ?? null;
   // An answer in the person's own words (the panel's free-text option) is theirs: recorded as `other` with the words, so the
   // question is answered and the owner follows the words; it grants nothing a choice would (0.7.8: it left the question
   // open for ever).

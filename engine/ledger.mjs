@@ -629,7 +629,9 @@ export function reduce(entries) {
         s.tracker.done.push({ event: d.event, at: e.at, capture: d.capture, provenance: d.provenance ?? null, verified: d.verified ?? null, ...(d.mode ? { mode: d.mode, readAt: d.readAt ?? null, comment: d.comment ?? null } : {}), ...(d.host ? { host: d.host } : {}), extraLines: d.extraLines ?? [], ...(d.attachments ? { attachments: d.attachments } : {}) });
         break;
       case 'decision.created':
-        s.decisions.push({ id: d.id, kind: d.kind, key: d.key, summary: d.summary, choices: d.choices, createdAt: e.at, by: e.actor, approved: null });
+        // 0.7.11: a decision may carry the person's words for it: a plain question, a plain label and what follows for each
+        // choice, and a recommendation (engine/approve.mjs).
+        s.decisions.push({ id: d.id, kind: d.kind, key: d.key, summary: d.summary, choices: d.choices, ...(d.plain ? { plain: d.plain } : {}), ...(d.labels ? { labels: d.labels } : {}), ...(d.then ? { then: d.then } : {}), ...(d.recommend ? { recommend: d.recommend } : {}), createdAt: e.at, by: e.actor, approved: null });
         break;
       case 'decision.approved': {
         const x = s.decisions.find((y) => y.id === d.id);

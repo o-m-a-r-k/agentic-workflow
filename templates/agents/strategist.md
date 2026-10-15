@@ -18,7 +18,7 @@ You are the strategist for one agentic-workflow attempt. Read the bundle path th
 - `split`: move work into a sibling attempt of the same delivery batch (`split: { items, reason }`; a work item with no implementer yet, a criterion with its work item, an observation as `reviewer:id`, or a discovered issue). The obligation stays in this delivery, so the move asks nobody. A sibling takes obligations, not code: work already built cannot be split off (for that, the person re-plans the work per module), and a finding on a line this attempt changed stays here (a sibling starts from the base and has no such line).
 - `ticket`: observations (`reviewer:id`) or discovered issues (`D<n>`) leave as follow-up tickets (`items`); the owner's agent files them. Only items at a level the project lets leave may be queued (`severityRule` and `severityScale.leaving` in the bundle; by default only low ones): the rest are fixed in this delivery (cluster, consolidate or split them into a sibling attempt of the batch), and who lets a queued one go (the person, one short question per item, or the owner) is applied when the owner files it. A finding that blocks leaves only by the person's `wf approve`, whatever its severity.
 - `model`: run a role's next handoffs at another work class of the project, with the model and effort it pins (`model: { role: implementer|reviewer|planner, class }`; the classes are the adapter's).
-- `escalate`: the owner decides (2-3 short `options`); required when your last two predictions were missed (`predictions.escalateRequired`).
+- `escalate`: the person decides; required when your last two predictions were missed (`predictions.escalateRequired`). They read it on a phone with nothing else in front of them, so write it for that: `question` says in plain words what they decide and why it is theirs (no ids, no workflow terms; what the ticket is, what is in the way); `options` are 2 or 3 of `{ "label": "<plain words>", "then": "<what happens next if they pick it>" }`; `recommend` (`{ "label": "<one of the labels>", "why": "<one line>" }`) when you have a recommendation.
 
 Contraction is allowed and expected when work keeps growing. "Keep going the same way" needs a reason the numbers do not contradict.
 
@@ -38,7 +38,7 @@ The signal is `<name> <op> <number>` with a name from the bundle's `closureSchem
 { "action": "ticket", "items": ["reviewer:F2", "D3"] }
 { "action": "split", "split": { "items": ["W2"], "reason": "the second module shares nothing with the first" } }
 { "action": "model", "model": { "role": "reviewer", "class": "review" } }
-{ "action": "escalate", "options": ["split", "continue"] }
+{ "action": "escalate", "question": "The ticket is done and reviewed, but 5 issues the reviewers found, mostly in older code, are not fixed. Your rule says they are fixed in this delivery. Fix them now, or ship and list them?", "options": [{ "label": "Fix them now, then ship", "then": "an implementer fixes the five; a short review and the gate follow" }, { "label": "Ship now, list them as known issues", "then": "it ships now; the five are named in the ticket comment" }], "recommend": { "label": "Fix them now, then ship", "why": "one of them hides a server error from admins" } }
 ```
 
 Report the action and the prediction in two lines and stop. Leave no background command running.
