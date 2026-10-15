@@ -8,6 +8,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { knownLimits } from '../engine/tracker.mjs';
+import { loadState } from '../engine/ledger.mjs';
 import { approveAsOwner, closureFile, commitIn, criteriaFile, goodClosure, ok, sh, singleRepoProject, state, wf, writeReport } from './helpers.mjs';
 
 const steps = [{ id: 'unit', repo: 'app', run: 'true' }];
@@ -49,11 +51,11 @@ test('a finding rated low never opens a round, on a changed line included; crite
   hand(p, 'r1');
   ok(record(p, goodClosure('r1', { findings: [finding('F1', 'nit', 'src/a.txt:2 wording'), finding('F2', 'low', 'src/a.txt:5', { invariant: 'tenant isolation' }), finding('F3', 'major', 'src/a.txt:5')] })));
   assert.deepEqual(state(p.root, p.id).review.closure.findings.map((f) => [f.id, f.classified.blocks]), [['F1', false], ['F2', true], ['F3', true]]);
-  // The nit may wait, with the person's yes (D17: low leaves only with it). A rated-low finding that blocks (here by the
+  // The nit may wait, with the person's answer (D17: low leaves only with it). A rated-low finding that blocks (here by the
   // invariant it breaks) never leaves by a deferral, and a major one that blocks does not either.
   const asked = wf(p.root, ['scope', 'defer', '--finding', 'r1:F1', '--attempt', p.id], { ownerSilent: true });
   assert.equal(asked.code, 75);
-  assert.match(asked.err, /letting r1:F1 leave is the owner's decision/);
+  assert.match(asked.err, /question: "[^"]* A\d+: r1:F1: F1 is wrong \(nit, rated by reviewer r1, a\.txt:2\)\. Fix it now, or let it leave this delivery as a known issue\?"/);
   assert.deepEqual(state(p.root, p.id).scopeDecisions ?? [], [], 'nothing waits before the person answers');
   for (const ref of ['r1:F2', 'r1:F3']) {
     const refused = wf(p.root, ['scope', 'defer', '--finding', ref, '--attempt', p.id], { ownerSilent: true });
@@ -63,7 +65,7 @@ test('a finding rated low never opens a round, on a changed line included; crite
   }
   ok(wf(p.root, ['scope', 'defer', '--finding', 'r1:F1', '--attempt', p.id]));
   assert.deepEqual(state(p.root, p.id).scopeDecisions.map((d) => [d.choice, d.keys]), [['deferred', ['r1:F1']]]);
-  assert.deepEqual((state(p.root, p.id).decisions ?? []).map((d) => [d.kind, d.approved?.choice]), [['move-out-of-batch', 'yes']], 'one question, for the nit alone');
+  assert.deepEqual((state(p.root, p.id).decisions ?? []).map((d) => [d.kind, d.key, d.approved?.choice]), [['move-out-of-batch', 'leave:r1:F1', 'let it leave']], 'one question, for the nit alone');
 });
 
 test('a later reviewer may re-rate a finding it verifies: re-rated low it stops blocking, but where it may go keeps the higher rating', () => {
@@ -115,10 +117,12 @@ test('`wf scope fixed` needs a commit made after the finding; a reviewer\'s "ope
   fixRound(p, { 'src/old.txt': 'o1 fixed\no2\no3 fixed\n' });
   const fix = sh(p.wt, 'git rev-parse HEAD');
   ok(wf(p.root, ['scope', 'fixed', '--finding', 'r1:F1,r1:F2', '--commit', fix, '--attempt', p.id]));
-  // Neither claim settles it: medium and high stay in the delivery, so each waits for a reviewer's `fixed` (0.7.7, D17).
+  // Only the high claim waits for a reviewer's `fixed`; a medium one is settled by the claim again (0.7.8, D18: 0.7.7 made it
+  // wait as well, a stop the person did not want), and the delivered comment lists it as not verified by a reviewer.
   const watching = () => ok(wf(p.root, ['scope', 'list', '--attempt', p.id, '--json'])).json().filter((r) => !r.blocks);
   const open = () => ok(wf(p.root, ['signals', '--attempt', p.id, '--json'])).json().observationsOpen.map((o) => o.ref);
-  assert.deepEqual(open(), ['r1:F1', 'r1:F2']);
+  assert.deepEqual(open(), ['r1:F1'], 'the medium claim is settled; the high one is not');
+  assert.match(knownLimits(loadState(p.root, p.id)), /Closed as fixed after the last review, not verified by a reviewer: r1:F2\./);
   // A delta reviewer finds F1 still open: the claim is undone.
   const b = hand(p, 'r2');
   assert.ok(b.openFindings.find((f) => f.id === 'F1').claimedFixed);
@@ -164,18 +168,18 @@ test('the person\'s deliver-core answer covers only what was recorded before it 
   ok(wf(p.root, ['scope', 'ticket', '--finding', 'r1:F1', '--capture', capture(p, 1), '--attempt', p.id], { ownerSilent: true }));
   hand(p, 'r-11');
   ok(record(p, goodClosure('r-11', { criteria: [], findings: [finding('F9', 'critical', 'src/old.txt:1 payment double-charge on retry'), finding('F8', 'nit', 'src/old.txt:2 a typo')] })));
-  // Raised after it, the answer does not cover them: the high one stays in this delivery, the low one needs the person's yes.
+  // Raised after it, the answer does not cover them: the high one stays in this delivery, the low one needs the person's answer.
   const after = wf(p.root, ['scope', 'ticket', '--finding', 'r-11:F9', '--capture', capture(p, 2), '--attempt', p.id], { ownerSilent: true });
   assert.equal(after.code, 75);
   assert.match(after.err, /r-11:F9 \(high, rated critical\) stays in this delivery/);
   assert.equal(refusals(p).at(-1).id, 'leave:medium-high');
   const low = wf(p.root, ['scope', 'ticket', '--finding', 'r-11:F8', '--capture', capture(p, 3), '--attempt', p.id], { ownerSilent: true });
   assert.equal(low.code, 75);
-  assert.match(low.err, /letting r-11:F8 leave is the owner's decision/);
+  assert.match(low.err, /question: "[^"]* A\d+: r-11:F8: F8 is wrong \(nit, rated by reviewer r-11, old\.txt:2\)\. Fix it now, or let it leave this delivery as a follow-up ticket\?"/);
   assert.deepEqual(state(p.root, p.id).scopeDecisions.map((d) => d.keys), [['r1:F1']], 'only what was recorded before the answer left');
 });
 
-test('a discovered issue on a critical invariant is high whatever its rating; ratings can be corrected; several ids under one decision (O5)', () => {
+test('a discovered issue on a critical invariant is high whatever its rating; ratings can be corrected; several ids each get their own decision (O5)', () => {
   const p = project('fr2-disc');
   ok(wf(p.root, ['handoff', 'implementer', '--agent', 'i2', '--attempt', p.id]));
   commitIn(p.wt, { 'src/a.txt': CHANGED.replace('l1', 'L1') }, 'w');
@@ -204,16 +208,26 @@ test('a discovered issue on a critical invariant is high whatever its rating; ra
   assert.match(stays.err, new RegExp(`${slow.id} \\(medium\\) stays in this delivery`));
   assert.equal(refusals(p).at(-1).id, 'leave:medium-high');
   assert.deepEqual(state(p.root, p.id).discovered.filter((d) => [typo.id, slow.id].includes(d.id)).map((d) => d.status), ['open', 'open'], 'the command is refused as a whole');
-  // Lowered once more (into low it is the person's decision, D17), both are low and leave under one question for the two.
+  // Lowered once more (into low nobody is asked since 0.7.8: only out of high), both are low and each leaves under a question
+  // of its own, the two asked together.
+  const approved = () => (state(p.root, p.id).decisions ?? []).filter((d) => d.approved).length;
+  const before = approved();
   ok(wf(p.root, ['discovered', 'rate', slow.id, '--severity', 'low', '--reason', 'cosmetic on the admin list', '--attempt', p.id]));
+  assert.equal(approved(), before, 'rating into low asked nobody');
   const both = `${typo.id},${slow.id}`;
   const asked = wf(p.root, ['discovered', 'close', both, '--deferred', '--reason', 'next sprint', '--attempt', p.id], { ownerSilent: true });
   assert.equal(asked.code, 75);
-  assert.match(asked.err, /let 2 low item\(s\) leave this delivery \(deferred\)/);
+  assert.equal(asked.err.match(/--from-question/g).length, 2, 'one question per id');
+  // Each question shows who rated the item and every re-rating, with its reason (what the person weighs when they answer).
+  assert.match(asked.err, new RegExp(`${typo.id}: a tooltip typo \\(low, rated by its implementer i2, re-rated low to high, high to low \\(a tooltip\\)\\)\\. Fix it now, or let it leave`));
+  assert.match(asked.err, new RegExp(`${slow.id}: a slow list \\(low, rated by its implementer i2, re-rated high to medium \\(only the admin list, 200 rows\\), medium to low \\(cosmetic on the admin list\\)\\)\\. Fix it now, or let it leave`));
   ok(wf(p.root, ['discovered', 'close', both, '--deferred', '--reason', 'next sprint', '--attempt', p.id]));
-  assert.deepEqual(state(p.root, p.id).discovered.filter((d) => [typo.id, slow.id].includes(d.id)).map((d) => d.status), ['deferred', 'deferred']);
-  assert.equal((state(p.root, p.id).decisions ?? []).filter((d) => d.approved).length, 4, 'the person decided the two ratings out of high, the rating into low and, once, the two deferrals');
-  assert.equal((state(p.root, p.id).decisions ?? []).filter((d) => d.key === `deferred:${[typo.id, slow.id].sort().join(',')}` && d.approved?.choice === 'yes').length, 1, 'one decision covers both ids');
+  const left = state(p.root, p.id).discovered.filter((d) => [typo.id, slow.id].includes(d.id));
+  assert.deepEqual(left.map((d) => d.status), ['deferred', 'deferred']);
+  assert.equal(approved(), 4, 'the person decided the two ratings out of high and, one per item, the two deferrals');
+  const leaves = (state(p.root, p.id).decisions ?? []).filter((d) => d.key.startsWith('leave:'));
+  assert.deepEqual(leaves.map((d) => [d.key, d.approved?.choice]).sort(), [[`leave:${slow.id}`, 'let it leave'], [`leave:${typo.id}`, 'let it leave']].sort(), 'one decision per id');
+  assert.deepEqual(left.map((d) => d.deferred.source.decision), [typo.id, slow.id].map((id) => leaves.find((d) => d.key === `leave:${id}`).id), 'each closure names its own item\'s decision');
 });
 
 test('open observations are named before the gate, and what waits as a known issue is in every reviewer\'s followUps (O7, O8)', () => {
@@ -223,7 +237,7 @@ test('open observations are named before the gate, and what waits as a known iss
   const next = state(p.root, p.id).next;
   assert.match(next, /2 open observation\(s\) to place first: r1:F1/);
   assert.match(next, /then run one `wf gate`/);
-  // Only the low one may wait (with the person's yes); the high one is fixed here.
+  // Only the low one may wait (with the person's answer); the high one is fixed here.
   ok(wf(p.root, ['scope', 'defer', '--finding', 'r1:F2', '--reason', 'redesign next sprint', '--attempt', p.id]));
   ok(wf(p.root, ['gate', '--attempt', p.id]));
   const ev = hand(p, 'r2');

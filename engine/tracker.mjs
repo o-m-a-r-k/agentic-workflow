@@ -81,7 +81,8 @@ export function uatScope(state) {
 
 // Known limits and follow-ups: a criterion's `finalHandoff` note, a criterion dropped by an amendment (with its
 // reason), every anomaly the owner recorded with `wf shown` as a follow-up, and every discovered issue the owner deferred.
-export function knownLimits(state) {
+// `load` reads another attempt's state (a sibling a finding moved to), when the caller has the project root.
+export function knownLimits(state, { load = null } = {}) {
   const out = [];
   for (const c of state.criteria ?? []) if (typeof c.finalHandoff === 'string' && c.finalHandoff.trim()) out.push(c.finalHandoff.trim());
   for (const a of state.criteriaAmendments ?? []) for (const d of a.changes?.dropped ?? []) out.push(`Not delivered: ${d.reason}`);
@@ -92,15 +93,26 @@ export function knownLimits(state) {
   for (const a of state.delivery?.shown?.anomalies ?? []) if (a.followUp) out.push(`Follow-up: ${a.observation} (${a.followUp})`);
   // An issue found during the ticket that the owner deferred (I-18): the tester sees it with the owner's words.
   for (const d of state.discovered ?? []) if (d.status === 'deferred') out.push(`Deferred ${state.id}:${d.id}${d.severity ? ` (${d.severity})` : ''}: ${d.summary}.${(d.rated ?? []).length ? ` Rated ${d.rated.map((r) => `from ${r.from ?? 'unrated'} to ${r.to}${r.reason ? ` ("${r.reason}")` : ''}`).join(', then ')}.` : ''} Why it waits: "${d.deferred.decision}". Decided by: ${channelOf(d)}.`);
-  // A low item closed as fixed after the last review was not verified by any reviewer (0.7.7): the tester sees it.
+  // An item closed as fixed after the last review was not verified by any reviewer: the tester sees it (0.7.8: information,
+  // not a stop, for every level).
   const lastReviewAt = lastReviewSeenAt(state) ?? '';
-  for (const d of state.discovered ?? []) if (d.status === 'fixed' && d.kind !== 'bookkeeping' && discoveredLevel(d) === 'low' && d.fixed?.at > lastReviewAt) out.push(`Closed as fixed after the last review, not verified by a reviewer: ${state.id}:${d.id} (low): ${d.summary}.`);
+  for (const d of state.discovered ?? []) if (d.status === 'fixed' && d.kind !== 'bookkeeping' && d.fixed?.at > lastReviewAt) out.push(`Closed as fixed after the last review, not verified by a reviewer: ${state.id}:${d.id} (${discoveredLevel(d)}): ${d.summary}.`);
   for (const d of state.scopeDecisions ?? []) if (d.choice === 'fixed' && d.at > lastReviewAt) for (const k of d.keys ?? []) out.push(`Closed as fixed after the last review, not verified by a reviewer: ${k}.`);
   // A review finding that is not fixed here (0.7.0): ticketed for later, or moved to a sibling attempt of the batch.
   for (const d of state.scopeDecisions ?? []) {
     if (d.choice === 'ticketed') out.push(`Follow-up ticketed for ${d.keys?.join(', ')}: ${d.ticket?.title ?? ''} ${d.ticket?.url ?? ''}`);
     if (d.choice === 'deferred') for (const k of d.keys ?? []) out.push(`Known issue left for later (${d.placement?.[k] ?? 'unrated'}): ${d.summaries?.[k] ?? k}${d.reason ? `. Why it waits: "${d.reason}"` : ''}.`);
-    else if (d.choice === 'moved') out.push(`Follow-up moved to ${d.sibling} for ${d.keys?.join(', ')}${d.reason ? `: ${d.reason}` : ''}`);
+    else if (d.choice === 'moved') {
+      // I-123: a sibling that left this delivery (ejected, abandoned) still owes the item; the tester reads that it did not ship.
+      let sib = null;
+      try {
+        sib = load ? load(d.sibling) : null;
+      } catch {
+        sib = null;
+      }
+      const together = sib && sib.phase !== 'abandoned' && (sib.batchOf ?? null) !== null && sib.batchOf === (state.batchOf ?? state.id);
+      out.push(sib && !together ? `Moved to ${d.sibling}, which is not in this delivery${sib.phase === 'abandoned' ? ' (abandoned)' : ''}: ${d.keys?.join(', ')} is still open there${d.reason ? ` (${d.reason})` : ''}` : `Follow-up moved to ${d.sibling} for ${d.keys?.join(', ')}${d.reason ? `: ${d.reason}` : ''}`);
+    }
   }
   return out.map((l) => `- ${l.replace(/\s*\n\s*/g, ' ')}`).join('\n');
 }
@@ -146,7 +158,8 @@ export function deliveredComment(root, cfg, state, assets = {}) {
   const key = deliveredKey(cfg);
   if (!key || !templateRef(cfg, key, state)) return null;
   const summary = state.delivery?.summary?.text ?? null;
-  const vars = { id: state.item, url: '', uatScope: uatScope(state) || '- No user-visible change to check in the product.', summary: summary ?? '', screenshots: screenshotSection(state, assets), limits: knownLimits(state) ? `Known limits and follow-ups:\n${knownLimits(state)}` : '' };
+  const limitsText = knownLimits(state, { load: (id) => loadState(root, id) });
+  const vars = { id: state.item, url: '', uatScope: uatScope(state) || '- No user-visible change to check in the product.', summary: summary ?? '', screenshots: screenshotSection(state, assets), limits: limitsText ? `Known limits and follow-ups:\n${limitsText}` : '' };
   const rendered = renderTemplate(root, cfg, key, vars, state);
   const tpl = rendered.template;
   let body = rendered.body.replace(/\s+$/, '');

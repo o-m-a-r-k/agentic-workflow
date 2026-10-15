@@ -377,13 +377,13 @@ export const blockingOpen = (state) => blockingIn(state, state.review);
 
 // Open findings that do not block, from every round, not yet fixed, ticketed or moved: the strategist schedules them
 // (a batch fix pass, a sibling attempt, or a ticket) and delivery waits for them.
-// A medium or high observation the owner recorded fixed (`wf scope fixed`) still waits for a reviewer's `fixed`: a claim
-// is not evidence for what must be fixed in this delivery (second final review of 0.7.0, for high; independent review of
-// 0.7.7, for medium, which D17 also keeps in the delivery). A low one is settled by it.
+// A high observation the owner recorded fixed (`wf scope fixed`) still waits for a reviewer's `fixed` (second final review
+// of 0.7.0). A medium or low one is settled by the claim; one no reviewer saw is listed in the delivered comment's known
+// limits (0.7.8: blocking delivery on it was a stop the person did not want).
 export const observations = (state) => openAcrossRounds(state).filter((f) => {
   if (f.classified.blocks) return false;
   const d = dispositionOf(state, f.ref);
-  return !d || (d.choice === 'fixed' && placementLevel(state, f) !== 'low');
+  return !d || (d.choice === 'fixed' && placementLevel(state, f) === 'high');
 });
 
 // Earlier rounds' blocking findings: what a later round must verify before the gate or acceptance.

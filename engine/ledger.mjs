@@ -617,7 +617,13 @@ export function reduce(entries) {
         break;
       case 'decision.approved': {
         const x = s.decisions.find((y) => y.id === d.id);
-        if (x) x.approved = { choice: d.choice, at: e.at, via: d.via };
+        if (x) x.approved = { choice: d.choice, at: e.at, via: d.via, ...(d.words ? { words: d.words } : {}) };
+        break;
+      }
+      // A question withdrawn by the owner (0.7.8): its subject changed, so it is no longer asked; it never granted anything.
+      case 'decision.withdrawn': {
+        const x = s.decisions.find((y) => y.id === d.id);
+        if (x) x.withdrawn = { reason: d.reason ?? null, at: e.at, by: e.actor };
         break;
       }
       case 'closed':

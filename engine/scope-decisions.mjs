@@ -14,7 +14,8 @@ import { requireYes } from './approve.mjs';
 import { readRegular, withEvidenceTransaction } from './evidence.mjs';
 import { blockingIn, dispositionOf, locationsOf, observations, openAcrossRounds, placementLevel } from './review-policy.mjs';
 import { discoveredLevel, headsNow, ticketCommit } from './discovered.mjs';
-import { discoveredRating, leavingDecision } from './leaving.mjs';
+import { discoveredRating, leavingDecisions, policyOf } from './leaving.mjs';
+import { trustedAdapter } from './config.mjs';
 import { git, run } from './util.mjs';
 import { hashFile, refuse, WfError, writeImmutable } from './util.mjs';
 
@@ -68,10 +69,28 @@ function leavingItems(state, refs) {
 }
 
 // Each discovered issue of a placement, closed under the decision that let it leave (with the follow-up ticket, if any).
-function closeLeaving(root, state, items, decision, reason, options, ticket = null) {
-  const via = (state.decisions ?? []).find((x) => x.id === decision)?.approved?.via ?? null;
+// The person's plain wording per item, when the owner gives it (`--explain <file.json>`: { "<ref>": { what, fix } }).
+function explainOf(options) {
+  if (typeof options.explain !== 'string') return {};
+  const raw = readRegular(path.resolve(options.explain));
+  if (!raw) throw refuse('--explain must be a regular JSON file');
+  try {
+    const doc = JSON.parse(raw.bytes.toString('utf8'));
+    if (!doc || typeof doc !== 'object' || Array.isArray(doc)) throw new Error('not an object');
+    return doc;
+  } catch {
+    throw refuse('--explain is { "<ref>": { "what": "<what is wrong, one line>", "fix": "<what fixing it now takes>" } }');
+  }
+}
+// Who let each item leave, as recorded: the person's decision (and the channel they answered in) or the owner's reason.
+const sourceOf = (state, id) => (id === 'owner' ? { provenance: 'owner-reason' } : { provenance: 'approved-decision', decision: id, ...((state.decisions ?? []).find((x) => x.id === id)?.approved?.via ? { via: state.decisions.find((x) => x.id === id).approved.via } : {}) });
+export const decidedIds = (decided) => [...new Set(Object.values(decided).filter((v) => v !== 'owner'))];
+
+// Each discovered issue of a placement, closed under what let it leave (with the follow-up ticket, if any).
+function closeLeaving(root, state, items, decided, reason, options, ticket = null) {
   for (const x of items.filter((i) => i.kind === 'discovered')) {
-    append(root, state.id, 'discovered.closed', { id: x.ref, outcome: 'deferred', decision: `${ticket ? `ticketed as ${ticket.id} (${ticket.url})` : 'left for later as a known issue'}, with the person's decision ${decision}${reason ? `: ${reason}` : ''}`, source: { provenance: 'approved-decision', decision, ...(via ? { via } : {}) }, ...(ticket ? { ticket } : {}), attributedTo: text(options.by) || null }, actor(options));
+    const by = decided[x.ref] === 'owner' ? 'on the owner\'s reason' : `with the person's decision ${decided[x.ref]}`;
+    append(root, state.id, 'discovered.closed', { id: x.ref, outcome: 'deferred', decision: `${ticket ? `ticketed as ${ticket.id} (${ticket.url})` : 'left for later as a known issue'}, ${by}${reason ? `: ${reason}` : ''}`, source: sourceOf(state, decided[x.ref]), ...(ticket ? { ticket } : {}), attributedTo: text(options.by) || null }, actor(options));
   }
 }
 
@@ -124,8 +143,8 @@ function ticketLocked(root, options, state) {
   // The person is asked before the follow-up ticket exists (independent review of 0.7.7: the readback was required first,
   // so a `no` left an orphaned tracker issue and the question a formality). With their yes, create it and record it.
   const reason = text(options.reason);
-  const decision = leavingDecision(root, state, items, { verb: 'ticketed', reason, options });
-  if (typeof options.capture !== 'string') throw refuse(`the person let ${items.map((x) => x.ref).join(', ')} leave as a follow-up ticket (${decision}): create it in the tracker now, save its raw readback, and run this command again with \`--capture <raw.json>\``, null, { id: 'scope:ticket-capture' });
+  const decided = leavingDecisions(root, state, items, { verb: 'ticketed', reason, options, policy: policyOf(trustedAdapter(root, state)), explain: explainOf(options) });
+  if (typeof options.capture !== 'string') throw refuse(`${items.map((x) => x.ref).join(', ')} may leave as a follow-up ticket (${decidedIds(decided).join(', ') || 'your reason'}): create it in the tracker now, save its raw readback, and run this command again with \`--capture <raw.json>\``, null, { id: 'scope:ticket-capture' });
   const raw = readRegular(path.resolve(options.capture));
   if (!raw || raw.bytes.length > 1024 * 1024) throw refuse('ticket readback must be a regular file at most 1 MiB');
   let data;
@@ -140,8 +159,8 @@ function ticketLocked(root, options, state) {
   if (!id || !text(issue.title) || !/^https:\/\//.test(url)) throw refuse('raw ticket readback must contain issue id/identifier, title and HTTPS url; failed creation leaves the finding unresolved');
   const file = path.join(attemptDir(root, state.id), 'scope', `${items[0].ref.replace(/[^\w.-]+/g, '_')}${items.length > 1 ? `+${items.length - 1}` : ''}.ticket.json`);
   writeImmutable(file, raw.bytes.toString('utf8'));
-  if (found.length) append(root, state.id, 'scope.ticketed', { keys: found.map((f) => f.ref), choice: 'ticketed', raw: { file, sha256: hashFile(file) }, ticket: { id, url, title: issue.title, capture: file, provenance: 'agent-reported-raw-readback' }, reason: reason || null, placement: Object.fromEntries(found.map((f) => [f.ref, placementLevel(state, f)])), decision, blocked: false }, actor(options));
-  closeLeaving(root, state, items, decision, reason, options, { id, url, title: issue.title, capture: file });
+  if (found.length) append(root, state.id, 'scope.ticketed', { keys: found.map((f) => f.ref), choice: 'ticketed', raw: { file, sha256: hashFile(file) }, ticket: { id, url, title: issue.title, capture: file, provenance: 'agent-reported-raw-readback' }, reason: reason || null, placement: Object.fromEntries(found.map((f) => [f.ref, placementLevel(state, f)])), decisions: decidedIds(decided), decisionFor: Object.fromEntries(found.map((f) => [f.ref, decided[f.ref]])), blocked: false }, actor(options));
+  closeLeaving(root, state, items, decided, reason, options, { id, url, title: issue.title, capture: file });
   return loadState(root, state.id);
 }
 
@@ -213,9 +232,9 @@ export function deferFindings(root, options) {
     const items = leavingItems(state, refs);
     const found = items.filter((x) => x.kind === 'finding').map((x) => x.entry);
     const reason = text(options.reason);
-    const decision = leavingDecision(root, state, items, { verb: 'deferred', reason, options });
-    if (found.length) append(root, state.id, 'scope.deferred', { keys: found.map((f) => f.ref), choice: 'deferred', reason: reason || null, placement: Object.fromEntries(found.map((f) => [f.ref, placementLevel(state, f)])), summaries: Object.fromEntries(found.map((f) => [f.ref, f.summary ?? ''])), decision }, actor(options));
-    closeLeaving(root, state, items, decision, reason, options);
+    const decided = leavingDecisions(root, state, items, { verb: 'deferred', reason, options, policy: policyOf(trustedAdapter(root, state)), explain: explainOf(options) });
+    if (found.length) append(root, state.id, 'scope.deferred', { keys: found.map((f) => f.ref), choice: 'deferred', reason: reason || null, placement: Object.fromEntries(found.map((f) => [f.ref, placementLevel(state, f)])), summaries: Object.fromEntries(found.map((f) => [f.ref, f.summary ?? ''])), decisions: decidedIds(decided), decisionFor: Object.fromEntries(found.map((f) => [f.ref, decided[f.ref]])) }, actor(options));
+    closeLeaving(root, state, items, decided, reason, options);
     return loadState(root, state.id);
   });
 }

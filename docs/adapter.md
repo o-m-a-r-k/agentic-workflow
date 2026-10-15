@@ -61,6 +61,15 @@ gate:
     - { id: backend-e2e, repo: backend, plugin: ./steps/e2e.mjs, tier: heavy, deferrable: true, lease: docker }
     - { id: web-e2e, repo: frontend, run: "npx playwright test --workers={workers} --reporter=junit", report: { junit: results.xml }, workers: { auto: true, min: 2, max: 8, perWorkerGiB: 1 }, tier: heavy, lease: browser, alsoInputs: [backend] }
 invariants: .workflow/AGENTS.invariants.md
+# Optional (0.7.8, D18). Who lets an unfixed finding or discovered issue of each level leave a delivery: never (fixed here
+# or in a sibling attempt of the batch), person (one short question per item) or owner (the owner agent's recorded reason).
+# Default: high never, medium never, low person.
+leaving: { high: never, medium: never, low: person }
+# Optional: the project's own examples added to each level of the one severity scale every role reads (bundle
+# `severityScale.projectExamples`). Words, not floors: the rating stays the rater's judgement.
+severity:
+  high: ["anything that changes a customer's invoice, tax document or payment"]
+  low: ["wording on an internal admin screen"]
 requires: { skills: [], connectors: [linear], tools: [{ name: docker, check: "docker info" }] }
 ```
 

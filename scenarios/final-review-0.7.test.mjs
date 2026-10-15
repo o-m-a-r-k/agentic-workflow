@@ -67,14 +67,14 @@ test('the evidence review after a fix is a delta: a finding on code earlier roun
   const f2 = state(p.root, p.id).review.closure.findings[0].classified;
   assert.deepEqual([f2.blocks, f2.mode], [false, 'delta']);
   ok(wf(p.root, ['accept', '--attempt', p.id]));
-  // Delivery waits for the observation; a minor (low) one is ticketed only with the person's yes (D17), asked once.
+  // Delivery waits for the observation; a minor (low) one is ticketed only with the person's answer (D17, D18), asked once.
   assert.match(wf(p.root, ['deliver', '--attempt', p.id]).err, /observation/);
   assert.equal(wf(p.root, ['scope', 'ticket', '--finding', 'r4:F2', '--capture', capture(p, 1), '--attempt', p.id], { ownerSilent: true }).code, 75, 'the person is asked for a low-severity follow-up');
   ok(wf(p.root, ['scope', 'ticket', '--finding', 'r4:F2', '--capture', capture(p, 1), '--attempt', p.id]));
-  assert.deepEqual((state(p.root, p.id).decisions ?? []).map((d) => [d.kind, d.key, d.approved?.choice]), [['move-out-of-batch', 'ticketed:r4:F2', 'yes']], 'one decision, the person\'s yes');
+  assert.deepEqual((state(p.root, p.id).decisions ?? []).map((d) => [d.kind, d.key, d.approved?.choice]), [['move-out-of-batch', 'leave:r4:F2', 'let it leave']], 'one decision, the person\'s answer');
 });
 
-test('what leaves the delivery follows the person\'s rule (D17): a major defect the attempt wrote and a medium one are refused whatever the reason, a minor one needs the person\'s yes (P9)', () => {
+test('what leaves the delivery follows the person\'s rule (D17): a major defect the attempt wrote and a medium one are refused whatever the reason, a minor one needs the person\'s answer to its own question (P9)', () => {
   const p = project('fr-p9');
   hand(p, 'r1');
   ok(record(p, goodClosure('r1')));
@@ -105,17 +105,18 @@ test('what leaves the delivery follows the person\'s rule (D17): a major defect 
   assert.equal(refusals(p).at(-1).id, 'leave:medium-high');
   assert.deepEqual(state(p.root, p.id).decisions ?? [], [], 'nothing was put to the person');
   assert.deepEqual(state(p.root, p.id).scopeDecisions ?? [], [], 'nothing left');
-  // A minor one is the person's yes, asked once; the reason travels with the ticket.
+  // A minor one is the person's answer to a question of its own, asked once; the reason travels with the ticket.
   const low = ticket('r2:F3', 5, ['--reason', 'the export page is redesigned next sprint']);
   assert.equal(low.code, 75);
-  assert.match(low.err, /letting r2:F3 leave is the owner's decision \(A1: let 1 low item\(s\) leave this delivery \(ticketed\): r2:F3 \(nit, rated by reviewer r2; at src\/old\.txt:2\)/);
+  assert.match(low.err, /question: "[^"]* A1: r2:F3: F3 is wrong \(nit, rated by reviewer r2, old\.txt:2\)\. Fix it now, or let it leave this delivery as a follow-up ticket\?"/);
   ok(wf(p.root, ['scope', 'ticket', '--finding', 'r2:F3', '--capture', capture(p, 5), '--reason', 'the export page is redesigned next sprint', '--attempt', p.id]));
   const t = state(p.root, p.id).scopeDecisions.at(-1);
-  assert.deepEqual([t.keys, t.reason, t.placement, t.decision], [['r2:F3'], 'the export page is redesigned next sprint', { 'r2:F3': 'low' }, 'A1']);
+  assert.deepEqual([t.keys, t.reason, t.placement, t.decisions, t.decisionFor], [['r2:F3'], 'the export page is redesigned next sprint', { 'r2:F3': 'low' }, ['A1'], { 'r2:F3': 'A1' }]);
+  assert.equal(t.decision, undefined, 'one decision per item, not one for the event');
   assert.ok(state(p.root, p.id).decisions[0].spent, 'the approval is spent by the ticket');
 });
 
-test('discovered issues follow the same rule (D17): a medium or unrated one is refused whatever the reason, a low one waits only with the person\'s yes (P3)', () => {
+test('discovered issues follow the same rule (D17): a medium or unrated one is refused whatever the reason, a low one waits only with the person\'s answer (P3)', () => {
   const p = project('fr-p3');
   const add = (summary, severity) => ok(wf(p.root, ['discovered', 'add', '--summary', summary, ...(severity ? ['--severity', severity] : []), '--attempt', p.id])).out;
   add('a tooltip typo', 'low');
@@ -126,7 +127,7 @@ test('discovered issues follow the same rule (D17): a medium or unrated one is r
   const close = (id, extra = [], opts = { ownerSilent: true }) => wf(p.root, ['discovered', 'close', id, '--deferred', ...extra, '--attempt', p.id], opts);
   const lowAsked = close(ds[0].id);
   assert.equal(lowAsked.code, 75);
-  assert.match(lowAsked.err, /wf approve A\d+/, 'a low one waits for the person\'s yes');
+  assert.match(lowAsked.err, /wf approve A\d+/, 'a low one waits for the person\'s answer');
   ok(close(ds[0].id, [], {}));
   const medium = close(ds[1].id, ['--reason', 'the export page is rebuilt next']);
   assert.equal(medium.code, 75);
@@ -140,7 +141,7 @@ test('discovered issues follow the same rule (D17): a medium or unrated one is r
   const s = state(p.root, p.id);
   assert.deepEqual(s.discovered.slice(-3).map((d) => d.status), ['deferred', 'open', 'open']);
   assert.equal(s.discovered.at(-3).deferred.source.provenance, 'approved-decision');
-  assert.match(s.next, /medium and high are fixed in this delivery[\s\S]*a low one leaves only with the person's yes/, 'the next step names the rule, not a phrase to type');
+  assert.match(s.next, /medium and high are fixed in this delivery[\s\S]*a low one leaves only with the person's answer, one short question per item/, 'the next step names the rule, not a phrase to type');
   assert.doesNotMatch(s.next, /message starts with/);
 });
 
@@ -331,7 +332,7 @@ test('onboarding drafts a quality bar from what the project documents, and docto
   assert.match(out.out + out.err, /the adapter states no `quality:` goals/);
 });
 
-test('refusal audit: a blocking finding is waived only by the person; a low observation waits as a known issue only with the person\'s yes, a high one never (D17)', () => {
+test('refusal audit: a blocking finding is waived only by the person; a low observation waits as a known issue only with the person\'s answer to its own question, a high one never (D17)', () => {
   const p = project('fr-audit');
   hand(p, 'r1');
   ok(record(p, goodClosure('r1', { findings: [
@@ -353,10 +354,11 @@ test('refusal audit: a blocking finding is waived only by the person; a low obse
   assert.match(asked.err, /wf approve A\d+/);
   ok(wf(p.root, ['scope', 'waive', '--finding', 'r1:F1', '--reason', 'covered by the next release', '--attempt', p.id]));
   assert.ok(!state(p.root, p.id).review.closure.findings.some((f) => f.id === 'F1' && wf(p.root, ['scope', 'list', '--attempt', p.id]).out.includes('r1:F1  blocks')), 'the waived finding no longer blocks');
-  // Defer: a low observation waits for the person's yes; a high one (F3, rated major, not blocking) is refused.
+  // Defer: a low observation waits for the person's answer; a high one (F3, rated major, not blocking) is refused.
   const lowAsked = wf(p.root, ['scope', 'defer', '--finding', 'r1:F2', '--attempt', p.id], { ownerSilent: true });
   assert.equal(lowAsked.code, 75);
-  assert.match(lowAsked.err, /letting r1:F2 leave is the owner's decision/);
+  assert.match(lowAsked.err, /question: "[^"]* A\d+: r1:F2: F2 is wrong \(nit, rated by reviewer r1, old\.txt:1\)\. Fix it now, or let it leave this delivery as a known issue\?"/);
+  assert.equal(refusals(p).at(-1).id, 'leave:ask');
   assert.deepEqual(state(p.root, p.id).scopeDecisions.map((d) => d.choice), ['waived'], 'nothing waits before the person answers');
   const high = wf(p.root, ['scope', 'defer', '--finding', 'r1:F3', '--attempt', p.id], { ownerSilent: true });
   assert.equal(high.code, 75);

@@ -7,6 +7,8 @@ export const CHANNEL = {
   'approved-decision:question-panel': 'approved-decision (answered by the person in the question panel; the harness recorded the answer, not a signature)',
   // Recorded only before 0.7.7: from then a deferral is always the person's decision (D17).
   'severity-rule': "the owner agent's judgement under the person's severity rule of 0.7.6 and earlier (a medium or low issue could wait; D10)",
+  // 0.7.8: the project's `leaving:` policy let the owner decide this level, with its recorded reason.
+  'owner-reason': "the owner agent's recorded reason, under the project's `leaving:` policy",
   'host-recorded': "host-recorded (the owner session's transcript; a process running as you could have written it)",
   'interactive-terminal (unverified)': 'interactive-terminal (unverified: typed at a terminal; a pseudo-terminal wrapper can answer it)',
 };

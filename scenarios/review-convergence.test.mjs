@@ -229,18 +229,19 @@ test('a repair handoff groups the blocking findings by family; one proof answers
 test('deliver refuses while a review observation is unresolved, and accepts it ticketed', () => {
   const p = project('rc-deliver');
   hand(p, 'r1');
-  // A low observation may leave the delivery as a follow-up, with the person's yes (D17: a medium or high one is fixed here).
+  // A low observation may leave the delivery as a follow-up, with the person's answer (D17, D18: a medium or high one is fixed here).
   ok(record(p, goodClosure('r1', { findings: [finding('F1', { severity: 'low', family: 'old-empty-state', summary: 'old.txt has no empty state' })] })));
   ok(wf(p.root, ['gate', '--attempt', p.id]));
   hand(p, 'r2');
   ok(record(p, goodClosure('r2')));
   ok(wf(p.root, ['accept', '--attempt', p.id]), 'an observation does not hold acceptance');
   assert.match(state(p.root, p.id).next, /1 review observation\(s\) are unresolved and delivery waits for them: r1:F1 \[old-empty-state\]/);
+  assert.match(state(p.root, p.id).next, /wf scope move[\s\S]*medium and high are fixed in this delivery; a low one leaves only with the person's answer, one short question per item \(`wf scope defer` or `wf scope ticket`\)/, 'the next step names how a low observation leaves');
   const refused = wf(p.root, ['deliver', '--attempt', p.id]);
   assert.equal(refused.code, 75);
   assert.match(refused.err, /not delivered: 1 review observation\(s\) are unresolved: r1:F1 \[old-empty-state\] old\.txt has no empty state/);
-  assert.match(refused.err, /wf scope move[\s\S]*medium and high are fixed in this delivery[\s\S]*a low one leaves only with the person's yes[\s\S]*wf scope defer --finding <ref>/);
-  // The person is asked before the follow-up ticket exists (0.7.7); with their yes, the command says to create it.
+  assert.match(refused.err, /wf scope move[\s\S]*medium and high are fixed in this delivery[\s\S]*a low one leaves only with the person's answer, one short question per item \(`wf scope defer` or `wf scope ticket`\)/);
+  // The person is asked before the follow-up ticket exists (0.7.7); with their answer, the command says to create it.
   const asked = wf(p.root, ['scope', 'ticket', '--finding', 'r1:F1', '--attempt', p.id], { ownerSilent: true });
   assert.equal(asked.code, 75, 'the person is asked before a low observation leaves, and before any ticket is created');
   assert.deepEqual(observations(loadState(p.root, p.id)).map((f) => f.ref), ['r1:F1']);
@@ -254,7 +255,7 @@ test('deliver refuses while a review observation is unresolved, and accepts it t
   fs.writeFileSync(good, JSON.stringify({ issue: { identifier: 'ENG-9', title: 'old.txt empty state', url: 'https://tracker.example.test/ENG-9' } }));
   ok(wf(p.root, ['scope', 'ticket', '--finding', 'r1:F1', '--capture', good, '--attempt', p.id]));
   assert.deepEqual(observations(loadState(p.root, p.id)), []);
-  assert.deepEqual(state(p.root, p.id).decisions.filter((d) => d.kind === 'move-out-of-batch').map((d) => [d.key, d.approved?.choice]), [['ticketed:r1:F1', 'yes']]);
+  assert.deepEqual(state(p.root, p.id).decisions.filter((d) => d.kind === 'move-out-of-batch').map((d) => [d.key, d.approved?.choice]), [['leave:r1:F1', 'let it leave']]);
   assert.match(ok(wf(p.root, ['scope', 'list', '--attempt', p.id])).out, /r1:F1 {2}observation {2}low {2}\[old-empty-state\] {2}ticketed https:\/\/tracker\.example\.test\/ENG-9/);
   assert.match(ok(wf(p.root, ['deliver', '--attempt', p.id])).out, /delivered RC-1/);
 });

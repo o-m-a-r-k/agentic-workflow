@@ -12,7 +12,7 @@ import { actor, addRepoWorktree, baseRef, branchName, onTarget, changedFiles, cl
 import { channelOf, discoveredLevel, discoveredVerdicts, headsNow, openDiscovered, seamVerdicts, unacknowledged, reportsForReview, reportedIssueVerdicts } from './discovered.mjs';
 import { executionSettings, rejectModelOverrides } from './models.mjs';
 import { rerunsOnlyFailed } from './onboard.mjs';
-import { carriesMovedWork, movedHeld, RULE, RULE_SHORT } from './leaving.mjs';
+import { policyOf, RULE, RULE_SHORT } from './leaving.mjs';
 import { detectOwner, findHost, fragment, hostChoice, isHost, lastFencedYaml, optional } from './hosts/index.mjs';
 import { defaultRuntime } from './runtime-policy.mjs';
 import { ADAPTER_DIR, adapterFileAtCommit, agentTypeFor, attemptAdapter, declared, loadConfig, repoDir, roleClass, trustedAdapter } from './config.mjs';
@@ -367,11 +367,6 @@ export function amendCriteria(root, options) {
   const expectIssues = expectProblems(stated, PLAN_EXPECT, 'expect');
   if (expectIssues.length) throw new WfError(`the amendment's expectation cannot be compared:\n  - ${expectIssues.join('\n  - ')}`);
   const { criteria, changes } = doc?.criteria === undefined && (doc?.impact !== undefined || stated !== undefined) ? { criteria: state.criteria, changes: { changed: [], added: [], dropped: [] } } : mergeAmendment(state.criteria, doc.criteria);
-  // A criterion that carries work moved from another attempt (a split's `O<n>`) is dropped or reworded only by the person:
-  // otherwise a split, then a drop, let a medium or high finding leave the delivery with nobody asked (independent review
-  // of 0.7.7, D17).
-  const movedCriteria = (state.criteria ?? []).filter((c) => c.movedFrom && (changes.dropped.some((d) => d.id === c.id) || changes.changed.includes(c.id)));
-  const movedDecision = movedCriteria.length ? requireYes(root, state, { kind: 'move-out-of-batch', key: `amend-moved:${movedCriteria.map((c) => c.id).join(',')}:${(state.scopeChanges ?? []).length}`, summary: `drop or reword ${movedCriteria.map((c) => `${c.id} (moved from ${c.movedFrom.attempt} ${c.movedFrom.ref}: ${c.text})`).join('; ')}: ${String(options.reason)}`, what: `amending ${movedCriteria.map((c) => c.id).join(', ')}`, options }).decision : null;
   const scope = scopeOf(doc.scope);
   // Work items survive an amendment unless the file replaces them; either way they must name criteria that still exist.
   // Classes and repos are the base adapter's: a repo the working copy adds is unknown here.
@@ -422,7 +417,7 @@ export function amendCriteria(root, options) {
     // before the amendment left it added with the acceptance standing when the command stopped in between).
     for (const r of repoEntries) append(root, state.id, 'repo.added', r, actor(options));
     const raw = keepRaw(root, state.id, `plans/amend-${state.criteriaAmendments.length + 1}.raw.${extOf(from)}`, amendText);
-    append(root, state.id, 'criteria.amended', { criteria, changes, reason: String(options.reason), previous: state.criteria, raw, engine: ENGINE_VERSION, ...(expectOf(stated) ? { expect: expectOf(stated) } : {}), ...(doc.work ? { work } : {}), ...(added.length ? { addedRepos: added.map((a) => a.repo) } : {}), ...(impactAddendum ? { impact: impactAddendum } : {}), ...(impactOwed ? { impactOwed } : {}), ...(withdrewAcceptance ? { withdrewAcceptance: true } : {}), ...(movedDecision ? { decision: movedDecision } : {}) }, actor(options));
+    append(root, state.id, 'criteria.amended', { criteria, changes, reason: String(options.reason), previous: state.criteria, raw, engine: ENGINE_VERSION, ...(expectOf(stated) ? { expect: expectOf(stated) } : {}), ...(doc.work ? { work } : {}), ...(added.length ? { addedRepos: added.map((a) => a.repo) } : {}), ...(impactAddendum ? { impact: impactAddendum } : {}), ...(impactOwed ? { impactOwed } : {}), ...(withdrewAcceptance ? { withdrewAcceptance: true } : {}) }, actor(options));
     // Telemetry: how much the ticket grew with this amendment (criteria counts always; endpoints, error codes and repos
     // when the amendment file states them under `scope`).
     append(root, state.id, 'scope.changed', { amendment: state.criteriaAmendments.length + 1, reason: String(options.reason), criteria: { before: state.criteria.length, after: criteria.length, added: changes.added.length, changed: changes.changed.length, dropped: changes.dropped.length }, ...scope, addedRepos: added.map((a) => a.repo) }, actor(options));
@@ -708,6 +703,8 @@ export function handoff(root, role, options) {
       : null,
     // The project's quality bar (adapter `quality:`): standing goals, context for every role (0.7.0).
     qualityBar: ['planner', 'implementer', 'reviewer'].includes(role) ? trusted.quality ?? [] : undefined,
+    // 0.7.8 (D18): the project's own examples added to each severity level, and who lets each level leave a delivery.
+    severityScale: ['planner', 'implementer', 'reviewer', 'strategist'].includes(role) ? { projectExamples: trusted.severity ?? null, leaving: policyOf(trusted) } : undefined,
     // Project rule documents this change falls under, and the skills this round needs: a pure function of the adapter
     // at base and the changed files, the same for every reviewer. Context for the review; no verdict form is owed.
     rules: role === 'reviewer' && mode === 'full' ? reviewRules(root, trusted, state, changed, ruleDocs) : undefined,
@@ -1070,8 +1067,12 @@ export function closeImplementer(root, options) {
   const outcome = options.outcome && options.outcome !== true ? String(options.outcome) : 'done';
   if (!['done', 'stopped', 'failed'].includes(outcome)) throw new WfError('--outcome must be done, stopped or failed');
   const heads = treeHashes(state);
-  // A `done` close says the tree is settled for a review (I-23): uncommitted work means the implementer is not done.
-  const dirty = Object.entries(heads).filter(([, t]) => String(t).includes('+dirty')).map(([n]) => n);
+  // A `done` close says the implementer's work is settled (I-23): uncommitted work in its repos means it is not done.
+  // I-124 (0.7.8): with a work item, only that item's repos count; another implementer's work in progress elsewhere is not
+  // this one's to wait for. The review handoff still needs the whole combined tree committed.
+  const ownWork = open.work ? (state.work ?? []).find((w) => w.id === open.work) : null;
+  const owned = new Set(ownWork?.repos?.length ? ownWork.repos : Object.keys(heads));
+  const dirty = Object.entries(heads).filter(([n, t]) => owned.has(n) && String(t).includes('+dirty')).map(([n]) => n);
   // Bookkeeping since 0.7.0 (engine/owner.mjs): the owner agent closes the implementer as itself. The reviewer stays bound
   // to the tree it is handed, whoever closes.
   if (outcome === 'done' && dirty.length) throw refuse(`${agent} is not done: uncommitted changes in ${dirty.join(', ')}`, `have the implementer commit its work, then close it; for an implementer you stopped, \`wf handoff close --agent ${agent} --outcome stopped\``);
@@ -1707,35 +1708,11 @@ export async function deliver(root, options) {
       if (reports.current.length || reports.historical.some((r) => !handed.has(r.id)) || hv.problems.length || hv.verdicts.some((v) => v.verdict === 'open')) throw refuse('not delivered: current or historical implementation reports need resolution and a fresh review on ' + x.id);
     }
     const open = openDiscovered(x);
-    if (open.length) throw refuse(`not delivered: ${open.length} discovered issue(s) are open${x.id !== state.id ? ` in ${x.id}` : ''}: ${open.map((d) => `${d.id} ${d.summary}`).join('; ')}`, `fix it in this ticket and close it with the fix commit (\`wf discovered close <id> --fixed <commit>\`; a fix after acceptance needs the gate and a fresh review); ${RULE}`);
+    if (open.length) throw refuse(`not delivered: ${open.length} discovered issue(s) are open${x.id !== state.id ? ` in ${x.id}` : ''}: ${open.map((d) => `${d.id} ${d.summary}`).join('; ')}`, `fix it in this ticket and close it with the fix commit (\`wf discovered close <id> --fixed <commit>\`; a fix after acceptance needs the gate and a fresh review); ${RULE_SHORT}`);
     // Named failure (0.7.0): a finding that does not block (D2) must not simply stay open past delivery. It ends fixed and
     // verified by a round, ticketed, or moved to a sibling attempt; the strategist schedules it.
-    // Moved work ships only with its sibling: each `moved` disposition's sibling is an open member of this delivery
-    // (independent review of 0.7.7: a moved finding "fixed" in a sibling that then left the batch shipped nowhere).
-    const delivering = new Set([state.id, ...(state.batch?.members ?? [])]);
-    for (const dsp of (x.scopeDecisions ?? []).filter((y) => y.choice === 'moved')) {
-      let sib = null;
-      try {
-        sib = loadState(root, dsp.sibling);
-      } catch {
-        sib = null;
-      }
-      if (sib && delivering.has(dsp.sibling) && sib.phase !== 'abandoned') continue;
-      // It left with the person's decision (independent review of 0.7.7: a person-approved eject or abandon of the holder,
-      // or the person's deferral of the moved item there, otherwise left the parent undeliverable for good).
-      const issue = (sib?.discovered ?? []).find((d) => d.id === dsp.siblingIssue);
-      const deferredByPerson = issue?.status === 'deferred' && issue.deferred?.source?.provenance === 'approved-decision';
-      const letGo = (sib?.decisions ?? []).find((d) => d.kind === 'move-out-of-batch' && d.approved?.choice === 'yes' && d.approved.at > (dsp.at ?? '') && (String(d.key).startsWith('eject:') || d.key === `abandon-split:${dsp.sibling}`));
-      if (deferredByPerson || letGo) continue;
-      throw refuse(`not delivered: ${(dsp.keys ?? []).join(', ')} of ${x.id} moved to ${dsp.sibling}, which is not in this delivery${sib?.phase === 'abandoned' ? ' (abandoned)' : ''} and did not leave it by the person's decision: ${RULE_SHORT}`, `deliver ${dsp.sibling} in this batch; it leaves the delivery only by the person's decision (ejecting or abandoning it asks)`, { id: 'deliver:moved-elsewhere' });
-    }
-    // A medium or high discovered issue closed fixed after the last recorded review waits for a round that sees the fix,
-    // as a medium or high observation claimed fixed does (independent review of 0.7.7).
-    const lastReviewAt = lastReviewSeenAt(x) ?? '';
-    const unverified = (x.discovered ?? []).filter((d) => d.status === 'fixed' && d.kind !== 'bookkeeping' && discoveredLevel(d) !== 'low' && d.fixed?.at && d.fixed.at > lastReviewAt);
-    if (unverified.length) throw refuse(`not delivered: ${unverified.map((d) => `${d.id} (${discoveredLevel(d)})`).join(', ')}${x.id !== state.id ? ` of ${x.id}` : ''} closed fixed after the last review: a review round sees the fix before delivery`, 'hand a delta reviewer (`wf handoff reviewer --agent <new id>`), then accept again', { id: 'deliver:fixed-unreviewed' });
     const obs = observations(x);
-    if (obs.length) throw refuse(`not delivered: ${obs.length} review observation(s) are unresolved${x.id !== state.id ? ` in ${x.id}` : ''}: ${obs.slice(0, 8).map((f) => `${f.ref}${f.family ? ` [${f.family}]` : ''} ${f.summary ?? ''}`).join('; ')}${obs.length > 8 ? ` and ${obs.length - 8} more` : ''}`, `each is fixed (a later review round verifies it, or \`wf scope fixed\`) or moved to a sibling attempt (\`wf scope move\`); ${RULE}; \`wf scope list\` shows them with their severity`, { id: 'review:observations-open' });
+    if (obs.length) throw refuse(`not delivered: ${obs.length} review observation(s) are unresolved${x.id !== state.id ? ` in ${x.id}` : ''}: ${obs.slice(0, 8).map((f) => `${f.ref}${f.family ? ` [${f.family}]` : ''} ${f.summary ?? ''}`).join('; ')}${obs.length > 8 ? ` and ${obs.length - 8} more` : ''}`, `each is fixed (a later review round verifies it, or \`wf scope fixed\`) or moved to a sibling attempt (\`wf scope move\`); ${RULE_SHORT}; \`wf scope list\` shows them with their severity`, { id: 'review:observations-open' });
   }
   // Every deferral is listed at delivery, in the delivery output and the delivered comment's known limits. 0.7.0: the
   // deferral was decided when it was recorded (the person's `wf approve` for a high one, the owner agent's recorded
@@ -2401,7 +2378,7 @@ export function batchEject(root, options) {
   // Independent review of 0.7.0 (HIGH): the split guarantee was removable after assembly. A member that came from, or made,
   // a split leaves the batch only on the person's one-use approval.
   const ms0 = loadState(root, member);
-  const ejectDecision = (ms0.splitFrom || ms0.splits?.length || carriesMovedWork(ms0)) ? requireYes(root, ms0, { kind: 'move-out-of-batch', key: `eject:${batch.id}:${member}:${(ms0.batchJoins ?? 0)}`, summary: `${member} leaves the assembled ${batch.id}${carriesMovedWork(ms0) ? ` with the work moved to it: ${movedHeld(ms0).join('; ')}` : ', which carries work a split moved'}`, what: `ejecting ${member} from ${batch.id}`, options }).decision : null;
+  const ejectDecision = (ms0.splitFrom || ms0.splits?.length) ? requireYes(root, ms0, { kind: 'move-out-of-batch', key: `eject:${batch.id}:${member}:${(ms0.batchJoins ?? 0)}`, summary: `${member} leaves the assembled ${batch.id}, which carries work a split moved`, what: `ejecting ${member} from ${batch.id}`, options }).decision : null;
   const remaining = members.filter((m) => m !== member);
   for (const [name, r] of Object.entries(batch.repos)) {
     run('git', ['checkout', '--quiet', '-B', branchName(batch.id), r.base], { cwd: r.worktree });

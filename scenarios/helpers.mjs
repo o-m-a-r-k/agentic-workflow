@@ -141,6 +141,12 @@ function scriptedReport(cwd, args) {
 // The person confirms the decision a refusal named (`wf approve A1 --attempt X`, choices a | b): `--choice` when the
 // command carries one the decision offers, else yes.
 function approvePending(cwd, args, stderr, opts) {
+  // 0.7.8 (D18): items that would leave a delivery are asked one question each; the scripted person lets them all leave.
+  if (/the person decides th/.test(stderr)) {
+    const asked = [...stderr.matchAll(/wf approve (A\d+) --from-question --attempt (\S+)/g)];
+    for (const [, id, attempt] of asked) approveAsOwner(cwd, attempt, id, 'let it leave', opts);
+    return asked.length > 0;
+  }
   const m = /`wf approve (A\d+) --attempt (\S+)` in their own terminal \(choices: ([^)]*)\)/.exec(stderr);
   if (!m) return false;
   const choices = m[3].split(' | ');

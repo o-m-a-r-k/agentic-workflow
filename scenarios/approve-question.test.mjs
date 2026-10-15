@@ -100,8 +100,6 @@ test('an answer counts only when bound to the decision, offered its choices, giv
   refusedWith(/no answer to A1/, 'a sub-agent line is not the session\'s panel');
   claudeAsks(p, { question, answer: 'yes', session: 'c1aude00-0000-4000-8000-0000000000ff' });
   refusedWith(/no answer to A1/, 'another session\'s panel');
-  claudeAsks(p, { question, answer: 'only on Monday' });
-  refusedWith(/answered "only on Monday", which is not one of yes \| no/, 'typed text that is not a choice');
 
   const outside = approveQ(p, e.id, d.id, {});
   assert.equal(outside.code, 75);
@@ -114,8 +112,23 @@ test('an answer counts only when bound to the decision, offered its choices, giv
   assert.ok(state(p.root, e.id).activeHold, 'a "no" never lifts the hold');
   const again = state(p.root, e.id).decisions.at(-1);
   assert.notEqual(again.id, d.id);
-  claudeAsks(p, { question: `${e.id} ${again.id}: ${again.summary}`, answer: 'yes' });
-  ok(approveQ(p, e.id, again.id, env));
+
+  // Typed text that is not a choice (the panel's free-text option) is the person's answer too (0.7.8): recorded as `other` with
+  // their words, it is answered and nothing more. It confirms nothing a choice would, so the hold stays and the next ask names it.
+  claudeAsks(p, { question: `${e.id} ${again.id}: ${again.summary}`, answer: 'only on Monday' });
+  const worded = ok(approveQ(p, e.id, again.id, env));
+  assert.match(worded.out, /A2 decided: in the person's own words: "only on Monday" \(follow them; it grants nothing a choice would\)/);
+  const own = state(p.root, e.id).decisions.find((x) => x.id === again.id).approved;
+  assert.deepEqual([own.choice, own.words], ['other', 'only on Monday']);
+  assert.match(own.via, /^question-panel \(Claude Code, host-recorded\)$/);
+  const waits = wf(p.root, ['release', '--attempt', e.id], silent);
+  assert.equal(waits.code, 75);
+  assert.match(waits.err, /the earlier answer, A2, was in their own words: "only on Monday"/);
+  assert.ok(state(p.root, e.id).activeHold, 'their own words never lift the hold');
+  const third = state(p.root, e.id).decisions.at(-1);
+  assert.notEqual(third.id, again.id);
+  claudeAsks(p, { question: `${e.id} ${third.id}: ${third.summary}`, answer: 'yes' });
+  ok(approveQ(p, e.id, third.id, env));
   ok(wf(p.root, ['release', '--attempt', e.id], silent));
   assert.equal(state(p.root, e.id).activeHold, null);
 });
@@ -149,12 +162,14 @@ test('Codex: a question-panel reply bound to its request_user_input call confirm
 test('a deferral the person confirmed in the question panel says so wherever it is listed', () => {
   const p = singleRepoProject('approve-q-defer', {});
   const e = ok(wf(p.root, ['entry', '--item', 'ENG-933', '--json'], silent)).json();
-  // Only a low issue may leave the delivery (D17), and only with the person's yes: the channel of that yes is what is listed.
+  // Only a low issue may leave the delivery (D17), and only with the person's answer to its own question (D18): the channel of
+  // that answer is what is listed.
   ok(wf(p.root, ['discovered', 'add', '--attempt', e.id, '--summary', 'tables have no phone card view', '--severity', 'low'], silent));
   assert.equal(wf(p.root, ['discovered', 'close', 'D1', '--deferred', '--reason', 'the mobile pass', '--attempt', e.id], silent).code, 75);
   const d = state(p.root, e.id).decisions[0];
+  assert.deepEqual([d.key, d.choices], ['leave:D1', ['let it leave', 'fix now']]);
   const env = { CLAUDE_CODE_SESSION_ID: CLAUDE };
-  claudeAsks(p, { question: `${e.id} ${d.id}: ${d.summary}`, answer: 'yes' });
+  claudeAsks(p, { question: `${e.id} ${d.id}: ${d.summary}`, options: d.choices, answer: 'let it leave' });
   ok(approveQ(p, e.id, d.id, env));
   ok(wf(p.root, ['discovered', 'close', 'D1', '--deferred', '--reason', 'the mobile pass', '--attempt', e.id], silent));
   assert.match(ok(wf(p.root, ['discovered', 'list', '--attempt', e.id], silent)).out, /deferred \(approved-decision \(answered by the person in the question panel; the harness recorded the answer, not a signature\)\)/);

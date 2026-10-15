@@ -1,57 +1,86 @@
-// What may leave a delivery (D17, the person's rule of 2026-10-14). A review finding or discovered issue that is high or
-// medium (unrated, citing a frozen criterion or breaking a critical invariant counts as high) is fixed in this delivery
-// batch, here or in a sibling attempt, and is never deferred or ticketed. A low one leaves only by the person's decision,
-// one decision for every item named together, so the person answers once per delivery. The person's `deliver-core` answer
-// to the round escalation stays the one exception: they decided there that what does not block may leave.
+// What may leave a delivery unfixed (D17, refined by D18 in 0.7.8). By default a review finding or discovered issue that is
+// high or medium (unrated, citing a frozen criterion or breaking a critical invariant counts as high) is fixed in this
+// delivery batch, here or in a sibling attempt; a low one leaves only with the person's answer. The project's adapter may
+// change who decides each level (`leaving: { high, medium, low }`: never, person or owner). The person's `deliver-core`
+// answer to the round escalation stays the one exception: they decided there that what does not block may leave.
 //
-// Named failure (field, 0.7.6): under D10 a medium issue was the owner agent's call and a low one left freely, so an owner
-// deferred 14 of 15 findings, among them a behaviour the person had asked for (called "a product decision") and two
-// money and customer-data defects its reviewer had rated low.
-import { deliverCoreDecision, requireYes } from './approve.mjs';
+// D18 (0.7.8), named failure (field): the person was asked one yes/no question about three items at once, in the reviewers'
+// own long text, so they could neither understand it nor fix one and let another go; their written answer ("fix all here,
+// except F3 if a follow-up ticket already has it") was not a choice, so the question stayed open. Each item is now its own short question,
+// with two choices, and an answer in the person's own words is recorded as theirs.
+import { createDecision, decisionFor, deliverCoreDecision } from './approve.mjs';
 import { observations, placementLevel, severityLevel } from './review-policy.mjs';
 import { refuse } from './util.mjs';
 
-export const RULE = 'medium and high are fixed in this delivery, here or in a sibling attempt of the batch, never deferred or ticketed; a low one leaves only with the person\'s yes, every low one in one question (`wf scope defer --finding <ref>[,<D-id>...]` as a known issue, or `wf scope ticket` with a follow-up ticket; discovered issues included); a fix that needs a product decision is a question for the person, not a deferral';
+export const LEAVE = 'let it leave';
+export const FIX = 'fix now';
+const LEVELS = ['high', 'medium', 'low'];
+export const DEFAULT_POLICY = { high: 'never', medium: 'never', low: 'person' };
+export const policyOf = (cfg) => ({ ...DEFAULT_POLICY, ...(cfg?.leaving ?? {}) });
 
-// The same rule in a line, for routine output (next steps, a recorded issue); refusals print RULE in full.
-export const RULE_SHORT = 'medium and high are fixed in this delivery; a low one leaves only with the person\'s yes (`wf scope defer` or `wf scope ticket`, every low item in one question)';
+const who = { never: 'never leaves (fixed here, or in a sibling attempt of the batch)', person: 'leaves only with the person\'s answer', owner: 'may leave on the owner\'s recorded reason' };
+export const ruleText = (policy = DEFAULT_POLICY) => `${LEVELS.map((l) => `${l}: ${who[policy[l]]}`).join('; ')}${LEVELS.every((l) => policy[l] === DEFAULT_POLICY[l]) ? '' : ' (the project\'s `leaving:` policy)'}; a fix that needs a product decision is a question for the person, not a deferral`;
+export const RULE = ruleText();
+// The same rule in a line, for routine output (next steps, a recorded issue); refusals print the full rule.
+export const RULE_SHORT = 'medium and high are fixed in this delivery; a low one leaves only with the person\'s answer, one short question per item (`wf scope defer` or `wf scope ticket`), unless the project\'s `leaving:` policy says otherwise';
 
-// items: [{ ref, level: 'high'|'medium'|'low', blocks, severity, summary, raisedAt, ratedBy, ratings, where }]. Returns the
-// decision id that lets them leave, or throws: a refusal naming what must stay, or the person's question for the low ones.
-// The question shows, per item, who rated it, every re-rating with its reason, and where it is, so the person's yes is
-// informed (independent review of 0.7.7: it showed only "rated down from").
-export function leavingDecision(root, state, items, { verb, reason = '', options = {} }) {
+// The first sentence of a long text, for a question the person reads on a phone; the whole text stays in the record.
+const firstSentence = (s) => {
+  const t = String(s ?? '').replace(/^left by [^:]+:\s*/, '').replace(/^F\d+:\s*/, '').trim();
+  const end = t.search(/[.;](\s|$)/);
+  const cut = end > 0 && end < 200 ? t.slice(0, end) : t;
+  return cut.length > 200 ? `${cut.slice(0, 197)}...` : cut;
+};
+const shortWhere = (w) => (w ? String(w).split('/').pop() : null);
+
+// The person's question for one item: what is wrong in one plain line, the facts behind its rating, and what leaving means.
+function questionText(x, verb, explain) {
+  const what = typeof explain?.[x.ref]?.what === 'string' && explain[x.ref].what.trim() ? explain[x.ref].what.trim() : firstSentence(x.summary);
+  const rated = `${x.severity ?? x.level}, rated by ${x.ratedBy ?? 'its reporter'}${x.ratings?.length ? `, re-rated ${x.ratings.map((r) => `${r.from ?? 'unrated'} to ${r.to}${r.reason ? ` (${r.reason})` : ''}`).join(', ')}` : ''}${x.where ? `, ${shortWhere(x.where)}` : ''}`;
+  return `${x.ref}: ${what} (${rated}). Fix it now, or let it leave this delivery ${verb === 'ticketed' ? 'as a follow-up ticket' : 'as a known issue'}?`;
+}
+
+// items: [{ ref, level, blocks, severity, summary, raisedAt, ratedBy, ratings, where }]. Returns { ref: decision id |
+// 'owner' } for every item that may leave, or throws: a refusal naming what must stay, the person's answers to follow, or
+// the person's questions (one per item, asked together).
+export function leavingDecisions(root, state, items, { verb, reason = '', options = {}, policy = DEFAULT_POLICY, explain = {} }) {
   const blocking = items.filter((x) => x.blocks);
   if (blocking.length) throw refuse(`${blocking.map((x) => x.ref).join(', ')} ${blocking.length > 1 ? 'block' : 'blocks'} this delivery: it is fixed here; a finding the person judges wrong is waived by them (\`wf scope waive\`)`, null, { id: 'leave:blocks' });
   const raised = items.map((x) => x.raisedAt).filter(Boolean).sort().at(-1) ?? null;
   const core = deliverCoreDecision(state, raised);
-  if (core) return core.id;
-  const kept = items.filter((x) => x.level !== 'low');
-  if (kept.length) throw refuse(`not ${verb}: ${kept.map((x) => `${x.ref} (${x.level}${x.severity && x.severity !== x.level ? `, rated ${x.severity}` : ''})`).join(', ')} ${kept.length > 1 ? 'stay' : 'stays'} in this delivery: ${RULE}`, 'fix it through the implementer that did that work, or move it to a sibling attempt of the batch (`wf scope move`)', { id: 'leave:medium-high' });
-  const line = (x) => `${x.ref} (${x.severity ?? 'low'}, rated by ${x.ratedBy ?? 'its reporter'}${x.ratings?.length ? `; re-rated ${x.ratings.map((r) => `${r.from ?? 'unrated'} to ${r.to} by ${r.by}${r.reason ? ` because ${r.reason}` : ''}`).join(', ')}` : ''}${x.where ? `; at ${x.where}` : ''}): ${x.summary ?? ''}`;
-  // Every other open low item is named, so the owner puts them in this same question rather than a second one (the
-  // promise is one question for the items named together; independent review of 0.7.7).
-  const named = new Set(items.map((x) => x.ref));
-  const others = otherOpenLow(state).filter((ref) => !named.has(ref));
-  return requireYes(root, state, {
-    kind: 'move-out-of-batch',
-    key: `${verb}:${items.map((x) => x.ref).sort().join(',')}`,
-    summary: `let ${items.length} low item(s) leave this delivery (${verb}): ${items.map(line).join('; ')}${reason ? ` (${reason})` : ''}${others.length ? `; other open low items not in this question: ${others.join(', ')}` : ''}`,
-    what: `letting ${items.map((x) => x.ref).join(', ')} leave`,
-    options,
-  }).decision;
+  if (core) return Object.fromEntries(items.map((x) => [x.ref, core.id]));
+  const whoFor = (x) => policy[x.level] ?? DEFAULT_POLICY[x.level];
+  const kept = items.filter((x) => whoFor(x) === 'never');
+  if (kept.length) throw refuse(`not ${verb}: ${kept.map((x) => `${x.ref} (${x.level}${x.severity && x.severity !== x.level ? `, rated ${x.severity}` : ''})`).join(', ')} ${kept.length > 1 ? 'stay' : 'stays'} in this delivery: ${ruleText(policy)}`, 'fix it through the implementer that did that work, or move it to a sibling attempt of the batch (`wf scope move`)', { id: 'leave:medium-high' });
+  const owner = items.filter((x) => whoFor(x) === 'owner');
+  if (owner.length && !reason) throw refuse(`${owner.map((x) => x.ref).join(', ')} may leave on your judgement under the project's \`leaving:\` policy: say why it waits`, 'pass `--reason "<why it can wait>"`', { id: 'leave:owner-reason' });
+  const decided = Object.fromEntries(owner.map((x) => [x.ref, 'owner']));
+  const answered = [];
+  const asked = [];
+  let current = state;
+  for (const x of items.filter((i) => whoFor(i) === 'person')) {
+    const d = decisionFor(current, 'move-out-of-batch', `leave:${x.ref}`);
+    if (d?.approved && !d.spent) {
+      if (d.approved.choice === LEAVE) decided[x.ref] = d.id;
+      else answered.push({ x, d });
+      continue;
+    }
+    if (d && !d.approved) {
+      asked.push({ x, d });
+      continue;
+    }
+    const made = createDecision(root, current, { kind: 'move-out-of-batch', key: `leave:${x.ref}`, summary: questionText(x, verb, explain), choices: [LEAVE, FIX], options });
+    asked.push({ x, d: made });
+    current = { ...current, decisions: [...(current.decisions ?? []), made] };
+  }
+  if (answered.length) throw refuse(`not ${verb}: the person answered ${answered.map(({ x, d }) => `${x.ref} "${d.approved.words ?? d.approved.choice}" (${d.id})`).join(', ')}: follow that answer and leave ${answered.length > 1 ? 'them' : 'it'} out of this command`, 'fix what they chose to fix; to ask again (the situation changed), withdraw the answer first: `wf decisions withdraw <id> --reason "<what changed>"`', { id: 'leave:person-answered' });
+  if (asked.length) {
+    const fix = (x) => (typeof explain?.[x.ref]?.fix === 'string' && explain[x.ref].fix.trim() ? explain[x.ref].fix.trim() : 'fixed in this delivery (a fix pass, a delta review and the gate)');
+    const lines = asked.map(({ x, d }) => `  ${d.id}  header "${x.ref}"\n      question: "${state.id} ${d.id}: ${d.summary}"\n      options: "${LEAVE}" (${verb === 'ticketed' ? 'tracked as a follow-up ticket' : 'listed as a known issue in the delivery comment'}) | "${FIX}" (${fix(x)})\n      then: wf approve ${d.id} --from-question --attempt ${state.id}`);
+    throw refuse(`the person decides ${asked.length > 1 ? 'these' : 'this'} (one short question per item; ask them together, as many questions in one panel as it allows):\n${lines.join('\n')}`, `ask exactly these questions with exactly these two options each (the descriptions are yours to word); an answer in the person's own words is recorded as theirs. Then run this command again with the items they let leave. A plain line per item is clearer than the reviewer's text: pass \`--explain <file.json>\` ({ "<ref>": { "what": "<what is wrong, one line>", "fix": "<what fixing it now takes>" } }) before asking`, { id: 'leave:ask' });
+  }
+  return decided;
 }
-
-// Whether an attempt holds work another attempt of its batch moved to it (`wf scope move`, a split): a discovered issue
-// or a live criterion with `movedFrom`. Ejecting or abandoning it would drop that work from the delivery, so it is the
-// person's decision (independent review of 0.7.7: move, then eject, then abandon let a medium finding leave unasked).
-export const carriesMovedWork = (state) => movedHeld(state).length > 0;
-// The moved items an attempt holds, for the person's question: every moved discovered issue except one the person let leave
-// (a fix in a branch that leaves the batch is not delivered: independent review of 0.7.7), and every moved criterion.
-export const movedHeld = (state) => [
-  ...(state.discovered ?? []).filter((d) => d.movedFrom && d.status !== 'deferred').map((d) => `${d.id} (${d.status}, from ${d.movedFrom.attempt} ${d.movedFrom.ref})`),
-  ...(state.criteria ?? []).filter((c) => c.movedFrom).map((c) => `${c.id} (from ${c.movedFrom.attempt} ${c.movedFrom.ref})`),
-];
 
 // The rating facts of a discovered issue for the person's question: its reporter and every re-rating.
 export const discoveredRating = (d) => ({ ratedBy: d.foundBy ? `${/^left by /.test(d.summary ?? '') ? 'its implementer ' : ''}${d.foundBy}` : d.by ?? null, ratings: (d.rated ?? []).map((r) => ({ from: r.from, to: r.to, by: r.by, reason: r.reason })), where: d.where ?? null });

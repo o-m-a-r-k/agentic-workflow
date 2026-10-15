@@ -98,7 +98,7 @@ for (const runtime of ['codex', 'claude']) {
     assert.equal(held.json().operations.length, 0);
     assert.equal(state(p.root, p.id).gates.length, 0);
   });
-  test(`${runtime}: a recorded closure from a live child never advances; competing runner refuses and interruption preserves its receipt`, { timeout: 15000 }, async () => {
+  test(`${runtime}: a recorded closure from a live child never advances; competing runner refuses and interruption preserves its receipt`, { timeout: 90000 }, async () => {
     const p = prepared(runtime, 'held');
     const env = { ...process.env, ...p.env, WF_EVIDENCE_FLAGS: '0', WF_CONFIG_HOME: path.join(p.base, '.wfhome') };
     for (const key of ['CODEX_THREAD_ID','CLAUDE_CODE_SESSION_ID','CLAUDECODE','AI_AGENT','GROK_SESSION_ID']) delete env[key];
@@ -110,7 +110,8 @@ for (const runtime of ['codex', 'claude']) {
     try {
       // Wait for the child's recorded review until it exits or the test's own deadline nears, never a fixed few seconds
       // (I-122: under a full parallel run a 3 s budget ran out before the child recorded, and the test failed on a race).
-      const deadline = Date.now() + 12000;
+      // The test's own limit is 90 s: a loaded machine (another gate running) slows the child, never the assertion.
+      const deadline = Date.now() + 60000;
       while (child.exitCode === null && !fs.existsSync(path.join(p.base, 'review-recorded')) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
       assert.ok(fs.existsSync(path.join(p.base, 'review-recorded')), `the child recorded its review before the deadline: ${stderr}`);
       assert.equal(state(p.root,p.id).reviews.length,1,stderr);

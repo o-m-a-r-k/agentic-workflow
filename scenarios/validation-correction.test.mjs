@@ -92,9 +92,12 @@ test('a correction invalidates acceptance and keeps the admission checks as they
 
 test('a correction keeps every registration obligation: a registered step, a new commit that descends from the pin, a committed tree, closed roles, a reason', () => {
   const f = registered('validation-correct-refusals');
-  // Not registered: an admission step is never corrected, and a step nobody registered is registered with `add`.
-  assert.match(correct(f, ['--steps', 'unit', '--reason', 'r']).err, /not a registered supplemental validation step/);
-  assert.match(correct(f, ['--steps', 'ghost', '--reason', 'r']).err, /not a registered supplemental validation step/);
+  // An admission step is corrected only by the person's decision (I-125, 0.7.8); a step nobody registered is registered
+  // with `add`.
+  const admission = wf(f.root, ['validation', 'correct', '--steps', 'unit', '--reason', 'r', '--attempt', f.e.id], { ownerSilent: true });
+  assert.equal(admission.code, 75);
+  assert.match(admission.err, /correct the admission check unit to its definition committed at/);
+  assert.match(correct(f, ['--steps', 'ghost', '--reason', 'r']).err, /neither a registered supplemental validation step nor an admission step/);
   // No reason.
   assert.match(correct(f, ['--steps', 'http']).err, /needs --reason/);
   // Nothing committed since the pin: there is nothing to correct.
@@ -126,3 +129,21 @@ test('a correction is limited to the criteria the attempt froze and to existing 
   commitIn(f.wt, { '.workflow/secrets.yaml': yaml({ keys: [] }) });
   ok(correct(f));
 });
+
+test('a check frozen at admission that is itself wrong is corrected with the person\'s yes; the gate runs the correction after a fresh review (I-125)', () => {
+  const f = fixture('validation-correct-admission');
+  const admission = state(f.root, f.e.id).adapterBase;
+  commitIn(f.wt, { '.workflow/project.yaml': yaml({ version: 1, enabled: true, name: 'fixture', repos: [{ name: 'app', path: '.', base: 'main' }], gate: { steps: [{ id: 'unit', repo: 'app', run: 'test -f src/a.txt && echo corrected-admission-check', inputs: ['src/**'] }] } }) });
+  const asked = wf(f.root, ['validation', 'correct', '--steps', 'unit', '--reason', 'it read a failed request as empty data', '--attempt', f.e.id], { ownerSilent: true });
+  assert.equal(asked.code, 75, 'changing a check frozen at admission is the person\'s decision');
+  ok(correct(f, ['--steps', 'unit', '--reason', 'it read a failed request as empty data']));
+  const s = state(f.root, f.e.id);
+  assert.equal(s.adapterBase, admission, 'the admission adapter itself is untouched');
+  assert.deepEqual(s.validationCorrections[0].from.map((x) => [x.id, x.commit, x.admission]), [['unit', admission, true]], 'the original stays in the record');
+  assert.equal(s.validationCorrections[0].from[0].definition.run, 'test -f src/a.txt');
+  review(f, 'code-1');
+  const run = ok(wf(f.root, ['gate', '--attempt', f.e.id, '--json'])).json();
+  assert.match(logOf(run, 'unit'), /corrected-admission-check/);
+  assert.deepEqual(run.steps.map((x) => x.id), ['unit'], 'it runs in place of the original, once');
+});
+

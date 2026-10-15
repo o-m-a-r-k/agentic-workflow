@@ -28,7 +28,7 @@ You are the implementer for one agentic-workflow attempt. Read the bundle path t
 - Leave no background command, Monitor or polling loop running when you report.
 - If your work turns out to touch something a stronger class covers than the one you run as, stop and tell the owner.
 
-**Severity** (one scale for every reviewer and implementer): **high** = a user, a tenant or the business is harmed or blocked (wrong or lost data, a broken flow, security, money, a visible defect on a primary screen); **medium** = degraded but usable (a secondary flow, an edge case, a confusing state); **low** = polish (wording, spacing, naming, style). A tenant-isolation, authorization or money defect is always high.
+**Severity** (one scale for every reviewer and implementer; the bundle's `severityScale.projectExamples` adds the project's own examples to each level): **high** = a user, a tenant or the business is harmed or blocked (wrong or lost data, a broken flow, security, money, a visible defect on a primary screen); **medium** = degraded but usable (a secondary flow, an edge case, a confusing state); **low** = polish (wording, spacing, naming, style). A tenant-isolation, authorization or money defect is always high.
 
 **Your report** (the engine records it at `wf handoff close`; a `left` item becomes a discovered issue, so nothing you saw is dropped; its honest `severity` decides whether it may wait: medium and high are fixed in this delivery, a low one waits only with the person's yes; an item that breaks a critical invariant of the project carries `invariant` (which one) and is high): write JSON to the bundle's `implementerReportFile`, early with `implementer`, `approach` and `expect`, and complete it when you finish:
 

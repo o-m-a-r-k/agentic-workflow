@@ -5,6 +5,7 @@ import { PassThrough } from 'node:stream';
 import path from 'node:path';
 import { closureFile, commitIn, goodClosure, ok, OUT_OF_ORDER, sh } from './helpers.mjs';
 import { C, W, inProcess, project, runner, started } from './strategist-fixtures.mjs';
+import { knownLimits } from '../engine/tracker.mjs';
 
 // 0.7.0 (D1), named failure: a ticket that had outgrown itself could not be contracted. Agents proposed splitting it three
 // times and the proposals were lost: "split" was neither a command nor a record, so the choices were to keep growing one
@@ -111,7 +112,7 @@ test('wf split: every sibling of a split is a member of the one batch; a member 
   assert.equal(v7.run(root, ['batch', 'eject', '--batch', one.batch, '--member', 'ENG-810.3']).code, 75, 'not waiting for it any more');
 });
 
-test('wf split: a discovered issue moves as a criterion of the sibling, and leaves the parent open set', () => {
+test('wf split: a discovered issue moves as a criterion of the sibling, and leaves the parent open set; dropping that criterion asks nobody and is told to the tester', () => {
   const ctx = project('splitdisc');
   const { root } = ctx;
   const a = started(v7, ctx, { item: 'ENG-820', work: W });
@@ -128,11 +129,13 @@ test('wf split: a discovered issue moves as a criterion of the sibling, and leav
   assert.match(sib.criteria[1].text, /Resolve ENG-820\.1:D1: the legacy exporter repeats the same rounding \(src\/a\.txt:3\)/);
   assert.deepEqual(sib.work.map((w) => w.id), ['W2', 'W3'], 'the moved issue has a work item of its own beside W2');
   assert.deepEqual(sib.work[1].criteria, ['O1']);
-  // The moved criterion is dropped or reworded only by the person (0.7.7, D17): a split then a drop let it leave unasked.
+  // Dropping or rewording a criterion a split moved asked the person in 0.7.7 (D17); since 0.7.8 (D18) it asks nobody: the
+  // amendment is the owner's call, recorded with its reason, and the delivered known limits say what was not delivered.
   const drop = path.join(ctx.base, 'drop-o1.json');
   fs.writeFileSync(drop, JSON.stringify({ criteria: [{ id: 'O1', dropped: true, reason: 'not part of this change after all' }], work: sib.work.filter((w) => w.id !== 'W3') }));
-  const asked = v7.run(root, ['criteria', 'amend', '--file', drop, '--reason', 'drop the exporter', '--attempt', sib.id], { ownerSilent: true });
-  assert.equal(asked.code, 75);
-  assert.match(asked.err, /drop or reword O1 \(moved from ENG-820\.1 ENG-820\.1:D1/);
-  assert.deepEqual(v7.state(root, sib.id).criteria.map((c) => c.id), ['C2', 'O1'], 'nothing dropped without the person');
+  ok(v7.run(root, ['criteria', 'amend', '--file', drop, '--reason', 'drop the exporter', '--attempt', sib.id], { ownerSilent: true }));
+  const after = v7.state(root, sib.id);
+  assert.deepEqual(after.criteria.map((c) => c.id), ['C2'], 'the moved criterion is dropped');
+  assert.deepEqual(after.decisions ?? [], [], 'nobody was asked');
+  assert.match(knownLimits(after), /- Not delivered: not part of this change after all/);
 });

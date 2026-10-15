@@ -161,6 +161,23 @@ function normalize(raw, source) {
   const errors = [];
   const fail = (m) => errors.push(m);
   if (raw.version !== 1) fail('`version` must be 1');
+  if (raw.leaving !== undefined && raw.leaving !== null) {
+    const l = raw.leaving;
+    if (typeof l !== 'object' || Array.isArray(l)) fail('`leaving` is { high, medium, low }: who lets an unfixed item of that level leave a delivery (never, person or owner)');
+    else for (const [k, v] of Object.entries(l)) {
+      if (!['high', 'medium', 'low'].includes(k)) fail(`\`leaving.${k}\`: the levels are high, medium and low`);
+      else if (!['never', 'person', 'owner'].includes(v)) fail(`\`leaving.${k}\` is never, person or owner, not \`${v}\``);
+    }
+  }
+  if (raw.severity !== undefined && raw.severity !== null) {
+    const sv = raw.severity;
+    const list = (v) => Array.isArray(v) && v.every((x) => typeof x === 'string' && x.trim());
+    if (typeof sv !== 'object' || Array.isArray(sv)) fail('`severity` is { high, medium, low }: lists of the project\'s own examples added to each level of the scale');
+    else for (const [k, v] of Object.entries(sv)) {
+      if (!['high', 'medium', 'low'].includes(k)) fail(`\`severity.${k}\`: the levels are high, medium and low`);
+      else if (!list(v)) fail(`\`severity.${k}\` is a list of examples (text)`);
+    }
+  }
   const cfg = {
     version: raw.version,
     enabled: raw.enabled === true,
@@ -170,6 +187,10 @@ function normalize(raw, source) {
     instructionFiles: raw.instructionFiles ?? null,
     lanes: raw.lanes ?? ['quick', 'standard'],
     invariants: raw.invariants ?? null,
+    // 0.7.8 (D18): who may let an unfixed item of each level leave a delivery (never, person or owner), and the project's own
+    // words added to the one severity scale every role reads.
+    leaving: raw.leaving ?? null,
+    severity: raw.severity ?? null,
     roles: raw.roles ?? {},
     focused: raw.focused ?? [],
     requires: { skills: raw.requires?.skills ?? [], connectors: raw.requires?.connectors ?? [], tools: raw.requires?.tools ?? [] },

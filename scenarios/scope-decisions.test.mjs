@@ -3,7 +3,8 @@
 // stood in front of every unrelated defect. The engine now computes whether a finding blocks; an observation is ticketed
 // or moved to a sibling attempt without a question, and a defect the change caused (or one on a critical boundary)
 // leaves the batch only with `wf approve` (kind move-out-of-batch). 0.7.7 (D17): a defect that blocks never leaves by a
-// ticket or a deferral, and a medium or high one never leaves; only a low observation does, with the person's yes.
+// ticket or a deferral, and a medium or high one never leaves; only a low observation does, with the person's answer (0.7.8, D18:
+// one short question per item).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';

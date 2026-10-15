@@ -3,6 +3,7 @@ import { actor, openState, treeHashes } from './attempt.mjs';
 import { append, loadState } from './ledger.mjs';
 import { loadCatalog } from './secrets.mjs';
 import { canonical, git, hashValue, refuse, YAML } from './util.mjs';
+import { requireYes } from './approve.mjs';
 import fs from 'node:fs';
 
 // Named failure: required HTTP/browser proof discovered after admission could
@@ -29,8 +30,13 @@ export function gateAdapter(root, state) {
     const candidate = trustedAdapter(root, state, record.commit);
     for (const selected of record.steps) {
       const step = candidate.gate.steps.find((s) => s.id === selected.id);
-      if (!step || canonical(step) !== canonical(selected.definition) || steps.some((s) => s.id === step.id)) throw refuse('supplemental validation no longer matches its recorded committed definition');
-      steps.push({ ...step, deferrable: false });
+      if (!step || canonical(step) !== canonical(selected.definition)) throw refuse('supplemental validation no longer matches its recorded committed definition');
+      // I-125: an admission step the person let the attempt correct runs at its corrected definition, in its place.
+      const at = steps.findIndex((s) => s.id === step.id);
+      if (at >= 0) {
+        if (!(record.correctedFrom ?? []).some((f) => f.id === step.id && f.admission)) throw refuse('supplemental validation no longer matches its recorded committed definition');
+        steps[at] = step;
+      } else steps.push({ ...step, deferrable: false });
     }
   }
   return { ...frozen, gate: { ...frozen.gate, steps } };
@@ -70,10 +76,15 @@ async function registerValidation(root, options, correcting) {
     const ids = typeof options.steps === 'string' ? options.steps.split(',').map((s) => s.trim()) : [];
     const registered = (state.validations ?? []).flatMap((v) => v.steps.map((s) => ({ id: s.id, commit: v.commit, criteria: v.criteria ?? [], secretKeys: s.secretKeys })));
     if (!ids.length || ids.some((id) => !/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(id)) || new Set(ids).size !== ids.length) throw refuse('--steps must name distinct supplemental step ids');
-    const unknown = correcting ? ids.filter((id) => !registered.some((r) => r.id === id)) : [];
-    if (unknown.length) throw refuse(`${unknown.join(', ')} ${unknown.length > 1 ? 'are' : 'is'} not a registered supplemental validation step (registered: ${registered.map((r) => r.id).join(', ') || 'none'}); an admission step is never corrected, and a new one is registered with \`wf validation add\``, undefined, { id: 'validation:correct-unregistered' });
-    // A correction keeps the criteria its steps were registered for unless it names others.
-    const criteria = typeof options.criteria === 'string' ? options.criteria.split(',').map((s) => s.trim()) : correcting ? [...new Set(ids.flatMap((id) => registered.find((r) => r.id === id).criteria))] : [];
+    // I-125 (0.7.8): an admission step (frozen with the adapter at admission) may be corrected too, as the person's decision:
+    // a frozen check that is itself wrong (it read a failed request as empty data) otherwise blocked the full gate for good.
+    const base = trustedAdapter(root, state);
+    const admission = correcting ? ids.filter((id) => !registered.some((r) => r.id === id) && base.gate.steps.some((s) => s.id === id)) : [];
+    const unknown = correcting ? ids.filter((id) => !registered.some((r) => r.id === id) && !admission.includes(id)) : [];
+    if (unknown.length) throw refuse(`${unknown.join(', ')} ${unknown.length > 1 ? 'are' : 'is'} neither a registered supplemental validation step nor an admission step (registered: ${registered.map((r) => r.id).join(', ') || 'none'}); a new one is registered with \`wf validation add\``, undefined, { id: 'validation:correct-unregistered' });
+    // A correction keeps the criteria its steps were registered for unless it names others; an admission step answers for
+    // every frozen criterion.
+    const criteria = typeof options.criteria === 'string' ? options.criteria.split(',').map((s) => s.trim()) : correcting ? [...new Set(ids.flatMap((id) => registered.find((r) => r.id === id)?.criteria ?? state.criteria.filter((c) => !c.dropped).map((c) => c.id)))] : [];
     if (!criteria.length || criteria.some((id) => !state.criteria.some((c) => c.id === id)) || new Set(criteria).size !== criteria.length) throw refuse('--criteria must name distinct frozen acceptance criteria');
     const frozen = gateAdapter(root, state);
     if (!correcting && ids.some((id) => frozen.gate.steps.some((s) => s.id === id))) throw refuse('supplemental validation cannot replace an existing step');
@@ -84,8 +95,9 @@ async function registerValidation(root, options, correcting) {
     if (!own?.worktree) throw refuse('the admission adapter repo must belong to this attempt');
     const commit = git(own.worktree, ['rev-parse', 'HEAD']);
     if (git(own.worktree, ['merge-base', state.adapterBase, commit]) !== state.adapterBase) throw refuse('supplemental adapter must descend from the admission commit');
-    if (correcting) for (const pin of new Set(ids.map((id) => registered.find((r) => r.id === id).commit))) {
-      if (pin === commit) throw refuse(`the adapter repo is still at ${pin.slice(0, 10)}, where ${ids.filter((id) => registered.find((r) => r.id === id).commit === pin).join(', ')} is already pinned: commit the corrected definition or plugin first`, undefined, { id: 'validation:correct-unchanged' });
+    const pinOf = (id) => registered.find((r) => r.id === id)?.commit ?? state.adapterBase;
+    if (correcting) for (const pin of new Set(ids.map(pinOf))) {
+      if (pin === commit) throw refuse(`the adapter repo is still at ${pin.slice(0, 10)}, where ${ids.filter((id) => pinOf(id) === pin).join(', ')} is already pinned: commit the corrected definition or plugin first`, undefined, { id: 'validation:correct-unchanged' });
       if (git(own.worktree, ['merge-base', pin, commit], { allowFail: true }) !== pin) throw refuse(`the corrected definition must descend from the commit it is pinned at (${pin.slice(0, 10)}); a correction moves a pin forward, never sideways or back`, undefined, { id: 'validation:correct-not-descendant' });
     }
     const candidate = trustedAdapter(root, state, commit);
@@ -105,9 +117,11 @@ async function registerValidation(root, options, correcting) {
       return { id, definition: step, secretKeys };
     });
     if (correcting) {
+      // Changing a check frozen at admission is the person's decision (kind override-gate); the original stays in the ledger.
+      const decision = admission.length ? requireYes(root, state, { kind: 'override-gate', key: `correct-admission:${admission.join(',')}:${commit}`, summary: `correct the admission check ${admission.join(', ')} to its definition committed at ${commit.slice(0, 10)}: ${String(options.reason)} (the original stays in the record; a fresh review and the full gate follow)`, what: `correcting the admission check ${admission.join(', ')}`, options }).decision : null;
       // Both pins stay in the ledger: what the step was, and what it is now.
-      const from = ids.map((id) => ({ id, commit: registered.find((r) => r.id === id).commit, definition: state.validations.flatMap((v) => v.steps).find((s) => s.id === id).definition }));
-      append(root, state.id, 'validation.corrected', { commit, steps, criteria, reason: String(options.reason), tree: trees, from }, actor(options));
+      const from = ids.map((id) => (admission.includes(id) ? { id, commit: state.adapterBase, definition: base.gate.steps.find((s) => s.id === id), admission: true } : { id, commit: pinOf(id), definition: state.validations.flatMap((v) => v.steps).find((s) => s.id === id).definition }));
+      append(root, state.id, 'validation.corrected', { commit, steps, criteria, reason: String(options.reason), tree: trees, from, ...(decision ? { decision } : {}) }, actor(options));
     } else append(root, state.id, 'validation.added', { commit, steps, criteria, reason: String(options.reason), tree: trees }, actor(options));
     return loadState(root, state.id);
   });

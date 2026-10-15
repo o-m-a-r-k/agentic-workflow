@@ -26,7 +26,7 @@ export const RESERVED = ['waive-finding', 'override-gate', 'move-out-of-batch', 
 const same = (d, kind, key) => d.kind === kind && d.key === String(key);
 
 // The newest decision for kind + key, approved or not.
-export const decisionFor = (state, kind, key) => (state.decisions ?? []).filter((d) => same(d, kind, key)).at(-1) ?? null;
+export const decisionFor = (state, kind, key) => (state.decisions ?? []).filter((d) => same(d, kind, key) && !d.withdrawn).at(-1) ?? null;
 
 // The approved choice for kind + key, or null. An approval is used once: the action that recorded it spent it
 // (engine/ledger.mjs), and the next action under the same key needs a new decision.
@@ -35,7 +35,7 @@ export const approvedChoice = (state, kind, key) => {
   return d?.approved && !d.spent ? d.approved.choice : null;
 };
 
-export const pendingDecisions = (state) => (state.decisions ?? []).filter((d) => !d.approved);
+export const pendingDecisions = (state) => (state.decisions ?? []).filter((d) => !d.approved && !d.withdrawn);
 
 // Records a decision the person must confirm, once per kind + key while it is pending; returns it.
 export function createDecision(root, state, { kind, key, summary, choices = ['yes', 'no'], options = {} }) {
@@ -66,7 +66,7 @@ export function requireYes(root, state, { kind, key, summary, what, options = {}
   const answered = decisionFor(state, kind, key);
   if (answered?.approved?.choice === 'yes' && !answered.spent) return { decision: answered.id };
   const d = createDecision(root, state, { kind, key, summary, options });
-  const earlier = answered?.approved && !answered.spent ? ` (the earlier answer, ${answered.id}, was ${answered.approved.choice})` : '';
+  const earlier = answered?.approved && !answered.spent ? ` (the earlier answer, ${answered.id}, was ${answered.approved.words ? `in their own words: "${answered.approved.words}"` : answered.approved.choice})` : '';
   throw refuse(`not done: ${what} is the owner's decision (${d.id}: ${d.summary})${earlier}`, approveHint(state, d), { id: `approve:${kind}` });
 }
 
@@ -130,9 +130,27 @@ export async function approveFromQuestion(root, id, options, { env = process.env
   const last = bound.at(-1);
   if (!last) throw refuse(`no answer to ${d.id} in this session's question panel after the decision was created`, how, { id: 'approve:no-answer' });
   const choice = d.choices.find((c) => norm(c) === norm(last.answer)) ?? null;
-  if (!choice) throw refuse(`the person answered "${last.answer.slice(0, 200)}", which is not one of ${d.choices.join(' | ')}; nothing recorded`, how, { id: 'approve:mismatch' });
-  append(root, state.id, 'decision.approved', { id, choice, via: `question-panel (${host.label}, host-recorded)`, question: { text: last.question.slice(0, 2000), at: last.at, askedAt: last.askedAt } }, actor(options));
-  return { state: loadState(root, state.id), decision: id, choice };
+  // An answer in the person's own words (the panel's free-text option) is theirs: recorded as `other` with the words, so the
+  // question is answered and the owner follows the words; it grants nothing a choice would (0.7.8: it left the question
+  // open for ever).
+  const words = choice ? null : String(last.answer).trim().slice(0, 2000);
+  if (!choice && !words) throw refuse(`the person's answer to ${d.id} is empty; nothing recorded`, how, { id: 'approve:mismatch' });
+  append(root, state.id, 'decision.approved', { id, choice: choice ?? 'other', ...(words ? { words } : {}), via: `question-panel (${host.label}, host-recorded)`, question: { text: last.question.slice(0, 2000), at: last.at, askedAt: last.askedAt } }, actor(options));
+  return { state: loadState(root, state.id), decision: id, choice: choice ?? 'other', words };
 }
 
-export const decisionLine = (d) => `${d.id}  ${d.kind}  ${d.approved ? `decided: ${d.approved.choice}${d.spent ? ' (used)' : ''}` : `pending (${d.choices.join(' | ')})`}  ${d.summary}`;
+export const decisionLine = (d) => `${d.id}  ${d.kind}  ${d.withdrawn ? `withdrawn: ${d.withdrawn.reason ?? ''}` : d.approved ? `decided: ${d.approved.words ? `in their words: "${d.approved.words}"` : d.approved.choice}${d.spent ? ' (used)' : ''}` : `pending (${d.choices.join(' | ')})`}  ${d.summary}`;
+
+// `wf decisions withdraw <id> --reason`: the owner takes back a question whose subject changed (a pending one, or one
+// answered and not yet used), so it is not asked or read any more. It grants nothing; the next command asks afresh.
+export function withdrawDecision(root, id, options) {
+  const state = openState(root, options);
+  const d = (state.decisions ?? []).find((x) => x.id === id);
+  if (!d) throw new WfError(`no decision ${id ?? ''} on ${state.id}; \`wf decisions --attempt ${state.id}\` lists them`);
+  if (d.withdrawn) throw refuse(`${id} is already withdrawn`);
+  if (d.spent) throw refuse(`${id} was already used by the action it allowed; nothing to withdraw`);
+  const reason = typeof options.reason === 'string' ? options.reason.trim() : '';
+  if (!reason) throw new WfError('--reason says what changed');
+  append(root, state.id, 'decision.withdrawn', { id, reason }, actor(options));
+  return loadState(root, state.id);
+}

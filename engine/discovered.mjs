@@ -12,7 +12,8 @@ import { home } from './provenance.mjs';
 import { findHost, optional } from './hosts/index.mjs';
 import { WfError, git, refuse, run } from './util.mjs';
 import { requireYes } from './approve.mjs';
-import { discoveredRating, leavingDecision } from './leaving.mjs';
+import { discoveredRating, leavingDecisions, policyOf } from './leaving.mjs';
+import { trustedAdapter } from './config.mjs';
 
 const text = (v) => (typeof v === 'string' ? v.trim() : '');
 const OPEN = (s) => !['done', 'abandoned'].includes(s.phase);
@@ -104,11 +105,13 @@ export function closeDiscovered(root, idArg, options) {
   // and earlier let a medium one wait on the owner agent's reason and a low one freely). Named failure (0.7.0): the
   // owner-phrase grammar refused real deferrals after the person had said yes.
   const reason = text(options.reason);
-  const decision = leavingDecision(root, state, entries.map((e) => ({ ref: e.id, level: discoveredLevel(e), blocks: false, severity: e.severity ?? null, summary: e.summary, raisedAt: e.at ?? null, ...discoveredRating(e) })), { verb: 'deferred', reason, options });
-  // The channel the person used (their terminal or the question panel) travels with the deferral (0.7.3).
-  const via = (state.decisions ?? []).find((x) => x.id === decision)?.approved?.via ?? null;
+  const decided = leavingDecisions(root, state, entries.map((e) => ({ ref: e.id, level: discoveredLevel(e), blocks: false, severity: e.severity ?? null, summary: e.summary, raisedAt: e.at ?? null, ...discoveredRating(e) })), { verb: 'deferred', reason, options, policy: policyOf(trustedAdapter(root, state)) });
   for (const e of entries) {
-    append(root, state.id, 'discovered.closed', { id: e.id, outcome: 'deferred', decision: reason || `left for later with the person's decision ${decision}`, source: { provenance: 'approved-decision', decision, ...(via ? { via } : {}) }, attributedTo: text(options.by) || null }, actor(options));
+    const id = decided[e.id];
+    // The channel the person used (their terminal or the question panel) travels with the deferral (0.7.3).
+    const via = (state.decisions ?? []).find((x) => x.id === id)?.approved?.via ?? null;
+    const source = id === 'owner' ? { provenance: 'owner-reason' } : { provenance: 'approved-decision', decision: id, ...(via ? { via } : {}) };
+    append(root, state.id, 'discovered.closed', { id: e.id, outcome: 'deferred', decision: reason || (id === 'owner' ? 'left for later on the owner\'s reason' : `left for later with the person's decision ${id}`), source, attributedTo: text(options.by) || null }, actor(options));
   }
   return { state: loadState(root, state.id), outcome: 'deferred', ids };
 }
@@ -126,10 +129,10 @@ export function rateDiscovered(root, id, options) {
   const fromLevel = discoveredLevel(entry);
   const lowering = rank[severityLevel(severity)] < rank[fromLevel];
   if (lowering && !text(options.reason)) throw refuse(`lowering ${id} from ${entry.severity ?? 'unrated'} to ${severity} is a judgement: say why`, 'pass `--reason "..."`', { id: 'discovered:rate-reason' });
-  // Out of high (or unrated), or into low, it is the person's decision: otherwise the agent that wants to deliver could rate
-  // a defect down and defer it alone (verification of the second final review; into low since D17, where low is the only
-  // level that may leave: independent review of 0.7.7). An invariant issue stays high whatever it is rated.
-  const decision = lowering && (fromLevel === 'high' || severityLevel(severity) === 'low') ? requireYes(root, state, { kind: 'move-out-of-batch', key: `rate:${state.id}:${id}:${severity}`, summary: `rate ${state.id}:${id} down from ${entry.severity ?? 'unrated'} to ${severity}: ${entry.summary} (${text(options.reason)})`, what: `rating ${id} down`, options }).decision : null;
+  // Out of high (or unrated) it is the person's decision (verification of the second final review); a lower rating is shown,
+  // with its reason, in the person's question if the item is ever proposed to leave (0.7.8: asking for every rating into low
+  // was a question the person did not want). An invariant issue stays high whatever it is rated.
+  const decision = lowering && fromLevel === 'high' ? requireYes(root, state, { kind: 'move-out-of-batch', key: `rate:${state.id}:${id}:${severity}`, summary: `rate ${state.id}:${id} down from ${entry.severity ?? 'unrated'} to ${severity}: ${entry.summary} (${text(options.reason)})`, what: `rating ${id} down`, options }).decision : null;
   append(root, state.id, 'discovered.rated', { id, severity, from: entry.severity ?? null, reason: text(options.reason) || null, ...(decision ? { decision } : {}) }, actor(options));
   return loadState(root, state.id);
 }
@@ -184,7 +187,7 @@ export function unacknowledged(root, state, loadMember, { acknowledged = false }
   return out;
 }
 
-export const discoveredLine = (d, attemptId) => `${d.id}  ${d.status}${d.kind === 'bookkeeping' ? ' (bookkeeping)' : ''}${d.severity ? `  ${d.severity}` : ''}  ${d.summary}${d.where || d.foundBy ? `  (${[d.where, d.foundBy ? `found by ${d.foundBy}` : null].filter(Boolean).join('; ')})` : ''}${d.blockedBy && d.status === 'open' ? `  blocked by ${d.blockedBy}: route it to that work item's implementer` : ''}${d.status === 'fixed' ? `  fixed in ${d.fixed.repo}@${d.fixed.commit.slice(0, 10)}` : d.status === 'deferred' ? `  deferred (${channelOf(d)}): "${d.deferred.decision}"` : attemptId ? (discoveredLevel(d) === 'low' ? `\n    low: it may leave only with the person's yes, with every other low item in one question (wf scope defer --finding ${d.id}[,<ref>...])` : `\n    ${discoveredLevel(d)}: fixed in this delivery (here or in a sibling attempt of the batch); it never leaves`) : ''}`;
+export const discoveredLine = (d, attemptId) => `${d.id}  ${d.status}${d.kind === 'bookkeeping' ? ' (bookkeeping)' : ''}${d.severity ? `  ${d.severity}` : ''}  ${d.summary}${d.where || d.foundBy ? `  (${[d.where, d.foundBy ? `found by ${d.foundBy}` : null].filter(Boolean).join('; ')})` : ''}${d.blockedBy && d.status === 'open' ? `  blocked by ${d.blockedBy}: route it to that work item's implementer` : ''}${d.status === 'fixed' ? `  fixed in ${d.fixed.repo}@${d.fixed.commit.slice(0, 10)}` : d.status === 'deferred' ? `  deferred (${channelOf(d)}): "${d.deferred.decision}"` : attemptId ? (discoveredLevel(d) === 'low' ? `\n    low: it leaves only with the person's answer, one short question per item (wf scope defer --finding ${d.id}[,<ref>...])` : `\n    ${discoveredLevel(d)}: fixed in this delivery (here or in a sibling attempt of the batch), unless the project's \`leaving:\` says otherwise`) : ''}`;
 
 // I-18 (extended), named failure: an implementer reported "Not fixed, outside the brief: <a defect>" and handed the issue
 // back to the owner agent to relay. A line of an implementer's final report that leaves an issue unfixed must name its

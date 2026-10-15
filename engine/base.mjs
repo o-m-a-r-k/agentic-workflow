@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { actor, branchName, changedFiles, openState, uncommitted } from './attempt.mjs';
 import { loadConfig } from './config.mjs';
 import { liveGate } from './gate.mjs';
-import { append, loadState } from './ledger.mjs';
+import { append, listAttempts, loadState } from './ledger.mjs';
 import { packageOf } from './topology.mjs';
 import { git, gitEnv, matchesAny, refuse, run } from './util.mjs';
 
@@ -25,6 +25,20 @@ function sharedInfraTouched(repo, files) {
 }
 
 // One entry per repo of the attempt: how far its base moved past the worktree, and what that touches.
+// The commits this project's workflow delivered to a repo's base (every attempt's recorded delivery).
+function deliveredCommits(root, repoName) {
+  const out = new Set();
+  for (const id of listAttempts(root)) {
+    try {
+      const c = loadState(root, id).delivery?.repos?.[repoName]?.commit;
+      if (typeof c === 'string' && /^[0-9a-f]{7,40}$/.test(c)) out.add(c);
+    } catch {
+      // a damaged ledger names nothing delivered
+    }
+  }
+  return [...out];
+}
+
 export function baseStatus(root, state, { fetch = true } = {}) {
   const cfg = loadConfig(root);
   const out = [];
@@ -42,6 +56,12 @@ export function baseStatus(root, state, { fetch = true } = {}) {
       const delta = git(r.worktree, ['diff', '--name-only', own, tip]).split('\n').filter(Boolean);
       const mine = new Set(changedFiles(state, name));
       Object.assign(entry, { commits: Number(git(r.worktree, ['rev-list', '--count', `${own}..${tip}`])), files: delta.length, overlap: delta.filter((f) => mine.has(f)), infra: sharedInfraTouched(repo, delta) });
+      // I-119: commits the base gained that no workflow delivery of this project covers (merged by hand, so no gate passed
+      // them). Named failure (field): a change merged by hand after its gates failed made the base red, and the next
+      // attempt's gate failed on it with nothing saying the failures came from the base. Information, never a stop.
+      const delivered = deliveredCommits(root, name).filter((c) => git(r.worktree, ['cat-file', '-t', c], { allowFail: true }) === 'commit');
+      const unproven = git(r.worktree, ['rev-list', '--no-merges', `${own}..${tip}`, ...(delivered.length ? ['--not', ...delivered] : [])], { allowFail: true }).split('\n').filter(Boolean);
+      if (unproven.length) entry.unproven = { count: unproven.length, subjects: unproven.slice(0, 3).map((c) => git(r.worktree, ['log', '-1', '--format=%s', c], { allowFail: true })) };
     }
     out.push(entry);
   }
@@ -53,7 +73,7 @@ const list = (files) => `${files.slice(0, 5).join(', ')}${files.length > 5 ? ` (
 export function baseLines(entries) {
   return entries
     .filter((e) => e.commits || e.note)
-    .map((e) => `  base ${e.repo}: ${e.commits ? `${e.ref} moved ${e.commits} commit(s); ${e.overlap.length ? `overlaps your changed files: ${list(e.overlap)}` : 'no overlap with your changed files'}${e.infra.length ? `; touches shared infrastructure: ${list(e.infra)}` : ''} (\`wf base merge\` merges it in)` : 'current'}${e.note ? ` — ${e.note}` : ''}`);
+    .map((e) => `  base ${e.repo}: ${e.commits ? `${e.ref} moved ${e.commits} commit(s); ${e.overlap.length ? `overlaps your changed files: ${list(e.overlap)}` : 'no overlap with your changed files'}${e.infra.length ? `; touches shared infrastructure: ${list(e.infra)}` : ''} (\`wf base merge\` merges it in)` : 'current'}${e.unproven ? `; ${e.unproven.count} of them reached ${e.ref} without a workflow delivery, so no gate passed them (${e.unproven.subjects.join('; ')}${e.unproven.count > 3 ? ', ...' : ''}): a gate failure may come from the base` : ''}${e.note ? ` — ${e.note}` : ''}`);
 }
 
 // Merges each repo's base into its worktree. Refuses a dirty tree or a running gate; a conflict is aborted so the
