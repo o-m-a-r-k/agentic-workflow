@@ -39,7 +39,7 @@ test('the reviewer is told what blocks, to state its plan early and to name what
   assert.match(prompt, /regression on a line this attempt changed/);
   assert.match(prompt, /breaks a critical invariant/);
   assert.match(prompt, /Every other finding is an observation/);
-  assert.match(prompt, /Your plan stated early in your closure file \(`scope`: what you will cover; `expect: \{ minutes \}`: how long you expect it to take\), with `findings` and `criteria` added only when you have them/);
+  assert.match(prompt, /Your plan stated early in your closure file \(`scope`: what you will cover; `expect: \{ minutes \}`: how long you expect it to take\), with `findings` and `criteria` lists from the start and each finding written into the file as soon as you have it \(if your session ends early, what you wrote is kept as a partial round\)/);
   assert.doesNotMatch(prompt, /budget/);
   assert.match(prompt, /notReached/);
   assert.match(prompt, /delta/);
