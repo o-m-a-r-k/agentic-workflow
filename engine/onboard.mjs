@@ -533,9 +533,10 @@ export function generatedStatus(root) {
   const out = [];
   if (cfg.enabled) {
     const block = agentsBlock(root, cfg);
+    // Only a block `wf sync` already wrote is kept current; creating one is `wf enable`'s and `wf sync`'s.
     for (const f of instructionFiles(root, cfg)) {
       const { text, next } = nextBlockText(f, block);
-      if (text !== next) out.push({ file: f, kind: 'block', content: next, tracked: fs.existsSync(f) && tracked(f) });
+      if (text.includes(BEGIN) && text !== next) out.push({ file: f, kind: 'block', content: next, tracked: tracked(f) });
     }
   }
   for (const { file, content } of roleFileContents(root, cfg)) {
@@ -543,7 +544,9 @@ export function generatedStatus(root) {
     try {
       before = fs.readFileSync(file, 'utf8');
     } catch {}
-    if (before !== content) out.push({ file, kind: 'role', content, tracked: before !== null && tracked(file) });
+    // Only a role file that exists and that `wf sync` generated is kept current: a missing one is not created here, and one a
+    // person wrote is not theirs to lose.
+    if (before !== null && before !== content && isGeneratedRoleFile(before)) out.push({ file, kind: 'role', content, tracked: tracked(file) });
   }
   return out;
 }

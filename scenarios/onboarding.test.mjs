@@ -239,10 +239,15 @@ test('generated files follow the installed plugin: untracked role files are refr
   fs.writeFileSync(path.join(root, 'AGENTS.md'), fs.readFileSync(path.join(root, 'AGENTS.md'), 'utf8').replace('What holds in every version:', 'Old rules: medium is your judgement.'));
   sh(root, 'git commit -qam "an old block"');
   const e = ok(wf(root, ['entry', '--item', 'ENG-1', '--owner', 'o', '--json'])).json();
-  fs.writeFileSync(role, 'an old planner role\n');
+  const current = fs.readFileSync(role, 'utf8');
+  fs.writeFileSync(role, current.replace('You are the planner', 'You are the old planner'));
+  // A role file a person wrote (no generated marker) is theirs: never refreshed.
+  const mine = path.join(root, '.claude', 'agents', 'wf-mine.md');
+  fs.writeFileSync(mine, 'my own role\n');
   const h = ok(wf(root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id]));
   assert.match(h.err, /role files refreshed to the installed plugin/);
-  assert.notEqual(fs.readFileSync(role, 'utf8'), 'an old planner role\n');
+  assert.equal(fs.readFileSync(role, 'utf8'), current);
+  assert.equal(fs.readFileSync(mine, 'utf8'), 'my own role\n');
   assert.match(ok(wf(root, ['resume', '--attempt', e.id])).out, /agentic-workflow files older than the installed plugin \([^)]+\): AGENTS\.md; run `wf sync` and commit them/);
   assert.match(fs.readFileSync(path.join(root, 'AGENTS.md'), 'utf8'), /medium is your judgement/, 'a tracked file is never rewritten behind the project');
 });

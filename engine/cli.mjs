@@ -1,6 +1,6 @@
 import { addValidation, correctValidation } from './validation.mjs';
 import { captureWarning } from './captures.mjs';
-import { findHost, fragment, hostChoice, hostIds, hostLabels, hostNames } from './hosts/index.mjs';
+import { defaultHostId, detectOwner, findHost, fragment, hostChoice, hostIds, hostLabels, hostNames } from './hosts/index.mjs';
 import { mkdirStateDirectory } from './state-folders.mjs';
 import { completeScopeTicket, deferFindings, moveOut, recordFixed, scopeRows, waiveFinding } from './scope-decisions.mjs';
 import { observations, unreachedOf } from './review-policy.mjs';
@@ -865,7 +865,8 @@ async function dispatch(cmd, sub, positional, options) {
       // 0.7.11: the role files a native start reads follow the installed plugin by themselves (untracked ones are rewritten).
       {
         const g = refreshGenerated(root);
-        if (g.refreshed.some((f) => /[\\/]\.(claude|codex)[\\/]agents[\\/]/.test(f))) process.stderr.write(`note: role files refreshed to the installed plugin (${g.refreshed.length}); a session that was already running reads them after a restart (\`claude --resume\` keeps the conversation)\n`);
+        const roles = g.refreshed.filter((f) => hostIds().some((id) => findHost(id)?.agentsDir && f.includes(path.join(root, findHost(id).agentsDir))));
+        if (roles.length) process.stderr.write(`note: role files refreshed to the installed plugin (${roles.length}); a session that was already running reads them after a restart${fragment(findHost(options.runtime ?? detectOwner()?.runtime ?? defaultHostId()), 'restartHint') ? ` (${fragment(findHost(options.runtime ?? detectOwner()?.runtime ?? defaultHostId()), 'restartHint')})` : ''}\n`);
       }
       const r = handoff(root, sub, options);
       const startPrompt = r.startPrompt;
