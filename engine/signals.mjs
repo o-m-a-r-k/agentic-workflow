@@ -111,6 +111,23 @@ function activityOf(h, home) {
   return null;
 }
 
+// Where a working role's time goes, from its transcript's shell commands: the one running now and the long ones (5 minutes
+// or more each) it has run, with their total. Facts for the owner's judgement of what a role is doing, never a limit. Named
+// failure (0.7.14): an implementer 266 minutes in had spent 201 of them in sleep loops waiting for its own background end-to-end
+// runs, and the owner read "active within the last minute" as progress.
+const LONG_RUN_MINUTES = 5;
+function shellOf(h, file, nowMs) {
+  try {
+    const got = optional(findHost(h.runtime), 'shellRuns')?.(file);
+    if (!got) return null;
+    const long = got.runs.filter((r) => r.minutes >= LONG_RUN_MINUTES).sort((a, b) => b.minutes - a.minutes);
+    const running = got.running ? { command: got.running.command.slice(0, 200), minutes: round1(Math.max(0, (nowMs - Date.parse(got.running.startedAt)) / 60000)) } : null;
+    return { running, longRuns: long.length, longMinutes: round1(long.reduce((n, r) => n + r.minutes, 0)), longest: long.slice(0, 2).map((r) => ({ command: r.command.slice(0, 200), minutes: round1(r.minutes) })) };
+  } catch {
+    return null;
+  }
+}
+
 // What a running role has said so far, from the file it writes early and completes at the end: an implementer's report,
 // a reviewer's closure. Null when it has stated nothing (yet).
 const statedBy = (h) => (h.role === 'implementer' ? readStatement(h.reportFile, 'approach') : h.role === 'reviewer' ? readStatement(h.closureFile, 'scope') : null);
@@ -163,13 +180,14 @@ export function runningSessions(state, nowMs, home) {
     const deciding = h.role === 'strategist' && h.launch?.status !== 'failed' && !state.strategy.decisions.some((d) => d.handoff === h.bundle) && !(decidedAt && h.at && h.at <= decidedAt);
     if (!launched && !waitedFor && !open && !deciding) continue;
     const seen = activityOf(h, home);
+    const shell = seen?.file ? shellOf(h, seen.file, nowMs) : null;
     const since = Math.max(Date.parse(h.at) || 0, Date.parse(h.launch?.startedAt) || 0);
     const lastAt = seen ? Math.max(seen.mtime, since) : null;
     const said = statedBy(h);
     // I-137: a launch that finished (an implementer the owner has not closed yet) is observed execution up to its end and then
     // time the owner has not acted; the two are never one number. `minutes` is the first for it, `waitingMinutes` the second.
     const endedAt = ['completed', 'failed'].includes(h.launch?.status) ? Date.parse(h.launch.finishedAt) || null : null;
-    out.push({ agent: h.agent, role: h.role, work: h.work ?? null, runtime: h.runtime, handoff: idOf(h.bundle), handedAt: h.at, launch: h.launch?.status ?? null, located: Boolean(seen), lastActivityAt: lastAt ? new Date(lastAt).toISOString() : null, idleMinutes: lastAt ? Math.max(0, round1((nowMs - lastAt) / 60000)) : null, minutes: since ? Math.max(0, round1(((endedAt ?? nowMs) - since) / 60000)) : null, ...(endedAt ? { finished: h.launch.status, finishedAt: h.launch.finishedAt, waitingMinutes: Math.max(0, round1((nowMs - endedAt) / 60000)) } : {}), expectMinutes: said?.minutes ?? null, said: said?.said ?? null , ...(asleepSince(lastAt, nowMs) ?? {}) });
+    out.push({ agent: h.agent, role: h.role, work: h.work ?? null, runtime: h.runtime, handoff: idOf(h.bundle), handedAt: h.at, launch: h.launch?.status ?? null, located: Boolean(seen), lastActivityAt: lastAt ? new Date(lastAt).toISOString() : null, idleMinutes: lastAt ? Math.max(0, round1((nowMs - lastAt) / 60000)) : null, minutes: since ? Math.max(0, round1(((endedAt ?? nowMs) - since) / 60000)) : null, ...(endedAt ? { finished: h.launch.status, finishedAt: h.launch.finishedAt, waitingMinutes: Math.max(0, round1((nowMs - endedAt) / 60000)) } : {}), expectMinutes: said?.minutes ?? null, said: said?.said ?? null , ...(shell ? { shell } : {}), ...(asleepSince(lastAt, nowMs) ?? {}) });
   }
   return out;
 }
@@ -275,6 +293,11 @@ const ago = (n) => (n === null || n === undefined ? 'unknown' : n < 1 ? 'under a
 // beside what is. No threshold, no verdict: "expected" and "actual" side by side, or "states none". `predictions` are the
 // strategist's decisions with whether each prediction held. The latest three finished implementers and rounds are listed
 // (`wf signals --json` has every one).
+// A command as the owner reads it: leading variable assignments and temporary paths dropped, so `S=/tmp/x; for ...; sleep 10`
+// reads as the loop it is.
+const oneLine = (c) => String(c).replace(/\s+/g, ' ').replace(/^(\s*[A-Za-z_][A-Za-z0-9_]*=\S*\s*;?\s*)+/, '').replace(/(\/private)?\/(tmp|var\/folders)\/\S*/g, '…').slice(0, 120);
+const shellText = (x) => !x ? '' : `${x.running ? `; running now: \`${oneLine(x.running.command)}\` for ${mins(x.running.minutes)}` : ''}${x.longRuns ? `; ${mins(x.longMinutes)} of its time in ${x.longRuns} shell command(s) of ${LONG_RUN_MINUTES} min or more (longest: \`${oneLine(x.longest[0].command)}\`, ${mins(x.longest[0].minutes)}): judge whether those runs add anything the gate will not` : ''}`;
+
 export function courseLines(sig, { predictions = [] } = {}) {
   const e = sig.expect ?? {};
   const first = sig.firstExpect ?? null;
@@ -291,7 +314,7 @@ export function courseLines(sig, { predictions = [] } = {}) {
   for (const r of sig.rounds.slice(-3)) out.push(`review round ${r.n} (${r.reviewer ?? r.handoff}): took ${mins(r.minutes)}${lastActive(r)}; it ${r.expectMinutes ? `expected ${r.expectMinutes} min${past(r.minutes, r.expectMinutes)}` : 'stated no expectation'}${r.scope ? `; scope: ${r.scope.slice(0, 200)}` : ''}${r.notReached?.length ? `; did not reach: ${r.notReached.slice(0, 5).map((x) => x.slice(0, 150)).join('; ')}${r.notReached.length > 5 ? ` and ${r.notReached.length - 5} more` : ''}` : ''}`);
   for (const s of sig.sessions) out.push(s.finished
     ? `${s.role} ${s.agent}${s.work ? ` (${s.work})` : ''} ${s.finished === 'completed' ? 'finished' : 'ended (failed)'} after ${mins(s.minutes)} of observed execution, ${s.expectMinutes ? `it expected ${s.expectMinutes} min${past(s.minutes, s.expectMinutes)}` : 'it stated no expectation'}; ${mins(s.waitingMinutes)} since then it has waited for the owner to close it, which is waiting and not work (\`wf handoff close --agent ${s.agent}\`)${s.said ? `; approach: ${s.said.slice(0, 200)}` : ''}`
-    : `${s.role} ${s.agent}${s.work ? ` (${s.work})` : ''} is working: ${mins(s.minutes)} since handed, ${s.expectMinutes ? `it expects ${s.expectMinutes} min${past(s.minutes, s.expectMinutes)}` : 'it stated no expectation'}; last activity ${s.located ? ago(s.idleMinutes) : 'unknown (transcript not found)'}${typeof s.asleepMinutes === 'number' && s.asleepMinutes >= 1 ? ` (${Math.round(s.asleepMinutes)} min of that with the machine asleep; it woke ${ago(s.wokeMinutesAgo)}: not a stall)` : ''}${s.said ? `; ${s.role === 'reviewer' ? 'scope' : 'approach'}: ${s.said.slice(0, 200)}` : ''}`);
+    : `${s.role} ${s.agent}${s.work ? ` (${s.work})` : ''} is working: ${mins(s.minutes)} since handed, ${s.expectMinutes ? `it expects ${s.expectMinutes} min${past(s.minutes, s.expectMinutes)}` : 'it stated no expectation'}; last activity ${s.located ? ago(s.idleMinutes) : 'unknown (transcript not found)'}${typeof s.asleepMinutes === 'number' && s.asleepMinutes >= 1 ? ` (${Math.round(s.asleepMinutes)} min of that with the machine asleep; it woke ${ago(s.wokeMinutesAgo)}: not a stall)` : ''}${shellText(s.shell)}${s.said ? `; ${s.role === 'reviewer' ? 'scope' : 'approach'}: ${s.said.slice(0, 200)}` : ''}`);
   for (const d of predictions) out.push(`strategist ${d.id} (${d.action}) predicted ${d.prediction ? `${d.prediction.signal} by ${typeof d.prediction.by === 'number' ? `round ${d.prediction.by}` : d.prediction.by}` : 'nothing'}: ${d.prediction_status.status}${d.prediction_status.observed !== null && d.prediction_status.observed !== undefined ? ` (observed ${d.prediction_status.observed})` : ''}`);
   return out;
 }

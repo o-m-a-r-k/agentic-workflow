@@ -9,7 +9,7 @@ import { roleChangedSinceSessionStart } from './claude-stale.mjs';
 import { markdownRole } from './role-files.mjs';
 import { readLines } from './safe-file.mjs';
 import { claudeQuestionAnswers } from './questions.mjs';
-import { genericFileTargets, textOf, toolOf } from './tool-calls.mjs';
+import { genericFileTargets, shellRunsOf, tailLines, textOf, toolOf } from './tool-calls.mjs';
 import { lastModel } from './turns.mjs';
 
 // The tracker's own answer as Claude Code recorded it: an assistant line holds `{ type: 'tool_use', id, name, input }`
@@ -139,6 +139,11 @@ export default {
     const entries = assistantTurns(raw);
     return { entries, model: lastModel(entries), agentType: found[0].agentType, file: found[0].file };
   },
+  // The shell commands a role's transcript shows: Bash tool calls answered by their tool results.
+  shellRuns: (file) => shellRunsOf(tailLines(file), {
+    call: (e) => (Array.isArray(e.message?.content) ? e.message.content.filter((x) => x?.type === 'tool_use' && x.name === 'Bash').map((x) => ({ id: x.id, command: x.input?.command })) : []),
+    result: (e) => (Array.isArray(e.message?.content) ? e.message.content.filter((x) => x?.type === 'tool_result').map((x) => x.tool_use_id) : []),
+  }),
   // When the role was last active: the sub-agent file Claude Code wrote under the name the owner started it with.
   roleActivity(handoff, { home }) {
     const t = subagentTranscripts(home, handoff.agent, handoff.agentType ?? null, handoff.at)[0];

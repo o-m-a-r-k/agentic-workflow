@@ -93,7 +93,16 @@ engine starts.
   failure does it fix, and how often was it seen; would it have made a recent delivery worse; what does it remove? A
   change that adds weight without an observed failure is retired, not built. Named failure: 0.7.7 closed every way a
   reviewer found an owner agent could move a finding out of a delivery with another question to the person, and the
-  person found the workflow "too tight", "restrictive, not helpful".
+  person found the workflow "too tight", "restrictive, not helpful". The review is run by an independent reviewer on the
+  strongest model available, briefed with the threat model (agents are fallible, not adversarial) and with the rule that
+  a new question to the person or a new stop needs an observed failure.
+- **Nothing reruns that cannot add information** (D21). Before a rule makes a step, a gate or a review run again, ask
+  whether the rerun could change the result. Find waste by measuring real ledgers by kind, largest first, not incident by
+  incident.
+- **A rule the person gives lives in the texts the agents read**: the role templates, the skills, the engine's bundle
+  and next-step texts. A note kept only by whoever maintains the plugin reaches no agent. Named failure: the person's
+  test-economy rule lived in a maintainer's private notes; an implementer spent four hours rerunning a whole end-to-end
+  spec under load that the gate would run anyway.
 - **Design decisions live in the decision register,** [docs/DESIGN.md](docs/DESIGN.md#decision-register), not in any
   agent's memory, a session's notes or a private plan. A change that decides something, or reverses an earlier
   decision, adds its entry (date, decision, the failure behind it) in the same commit. Read the register before

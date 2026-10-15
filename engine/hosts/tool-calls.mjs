@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+
 // Pieces of a connector tool call every harness's transcript shares: the tool's own name inside the connector's long
 // one, and the text of a stored result.
 
@@ -19,3 +21,47 @@ export const parseArgs = (a) => {
 
 // The file targets most harnesses' file tools share: `file_path`, `notebook_path`, `path`, and one `file_path` per edit.
 export const genericFileTargets = (t) => [t.file_path, t.notebook_path, t.path, ...(Array.isArray(t.edits) ? t.edits.map((e) => e?.file_path) : [])];
+
+// The last `max` bytes of a transcript as whole lines (a large session file is read from its end).
+export function tailLines(file, max = 16 * 1024 * 1024) {
+  const size = fs.statSync(file).size;
+  const fd = fs.openSync(file, 'r');
+  try {
+    const length = Math.min(size, max);
+    const buf = Buffer.alloc(length);
+    fs.readSync(fd, buf, 0, length, size - length);
+    const lines = buf.toString('utf8').split('\n');
+    return size > max ? lines.slice(1) : lines;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+// The shell commands a session ran, each paired with its result by id: the one still running (the last without a result)
+// and every finished one with its minutes. `call(entry)` gives [{ id, command }], `result(entry)` gives [id]; a harness
+// supplies both for its own transcript format. Named failure (0.7.14): an implementer spent 201 of 270 minutes in sleep
+// loops waiting for its own background end-to-end runs, and the owner saw only "active within the last minute".
+export function shellRunsOf(lines, { call, result }) {
+  const open = new Map();
+  const runs = [];
+  for (const line of lines) {
+    if (!line) continue;
+    let e;
+    try {
+      e = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const at = Date.parse(e.timestamp);
+    if (!Number.isFinite(at)) continue;
+    for (const c of call(e)) if (c?.id) open.set(c.id, { command: String(c.command ?? ''), at });
+    for (const id of result(e)) {
+      const o = open.get(id);
+      if (!o) continue;
+      runs.push({ command: o.command, minutes: (at - o.at) / 60000 });
+      open.delete(id);
+    }
+  }
+  const last = [...open.values()].at(-1) ?? null;
+  return { running: last ? { command: last.command, startedAt: new Date(last.at).toISOString() } : null, runs };
+}

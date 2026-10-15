@@ -25,7 +25,8 @@ Rules for agents working on this repository (the plugin itself). Terms: project,
   example payload through the engine and `scenarios/final-review-0.7.test.mjs` checks every named command; a reading of
   the prose is still owed. Named failure (0.7.0): the engine was relaxed first and the texts followed a day later, so
   agents were told to do what the engine refused.
-- Parallel streams or agents that change one tree run the full suite on the combined tree before any of them reports done.
+- Parallel streams or agents that change one tree run the full suite on the combined tree before any of them reports done; their changes to one file merge field by field (the union of both), never one side per hunk.
+- A maintainer release goes to main after a green `npm run verify`, with no pull request (one that exists is merged by the maintainer); the commit messages are scanned against the privacy denylist as well as the diff, and the release is tagged from the pushed commit once CI is green.
 - Commit with an identity that is fine to publish (a GitHub noreply address).
 - Security-sensitive paths (`hooks/`, `engine/evidence.mjs`, `engine/paths.mjs`, `engine/gate.mjs`,
   `engine/lifecycle.mjs`, `engine/cli.mjs`, `engine/attempt.mjs`): paths go through `engine/paths.mjs`; evidence writes

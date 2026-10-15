@@ -9,7 +9,7 @@ import { codexUsage } from './codex-usage.mjs';
 import { tomlRole } from './role-files.mjs';
 import { readLines } from './safe-file.mjs';
 import { codexQuestionAnswers } from './questions.mjs';
-import { parseArgs, textOf, toolOf } from './tool-calls.mjs';
+import { parseArgs, shellRunsOf, tailLines, textOf, toolOf } from './tool-calls.mjs';
 
 const LABEL = 'Codex';
 
@@ -112,6 +112,16 @@ export default {
     closureWriter: 'Node `fs.writeFile` or `apply_patch`',
   },
   // Codex loads custom agents from TOML files in .codex/agents/.
+  // The shell commands a role's session shows: shell function calls answered by their outputs (by call id).
+  shellRuns: (file) => shellRunsOf(tailLines(file), {
+    call: (e) => {
+      const p = e.type === 'response_item' ? e.payload : null;
+      if (p?.type !== 'function_call' || !['shell', 'exec_command', 'local_shell', 'container.exec'].includes(p.name)) return [];
+      const a = parseArgs(p.arguments);
+      return [{ id: p.call_id, command: Array.isArray(a.command) ? a.command.join(' ') : a.command ?? a.cmd ?? '' }];
+    },
+    result: (e) => (e.type === 'response_item' && e.payload?.type === 'function_call_output' ? [e.payload.call_id] : []),
+  }),
   roleFile({ root, name, description, model, effort, body }) {
     return { file: path.join(root, '.codex', 'agents', `${name}.toml`), content: tomlRole({ name, description, model, effort, body }) };
   },
