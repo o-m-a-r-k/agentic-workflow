@@ -305,7 +305,13 @@ export function freezeCriteria(root, options) {
     }
     if (state.handoffs.some((h) => h.role === 'implementer')) throw refuse('implementation already started; criteria must be frozen before implementation');
     impactRecord = validatePlanImpact(root, cfg, state, doc, { plan, criteria: doc.criteria, work, required: impactNeeded(cfg, state, work) });
+    // `--check`: the planner's own dry run (0.7.11). Named failure (audit of 51 attempts): 9 plans were refused for the form
+    // of their impact analysis (a survey entry naming no query, a change with no suites, a file no query hit), each found
+    // only after the planner had reported, and two needed a fresh planner. Everything above ran; nothing is recorded.
+    if (options.check) return { checked: true, criteria: doc.criteria.length, work: work?.length ?? 0, impact: Boolean(impactRecord) };
   } catch (error) {
+    // A dry run records no refusal: the planner fixes its own plan.
+    if (options.check) throw error;
     // Named failure (I-84, I-87): a refused plan left nothing behind, so the replacement planner started blind and made the
     // same mistake (component paths with a repository prefix). The refused report and the validator's message are kept
     // as evidence and handed to the next planner's bundle.

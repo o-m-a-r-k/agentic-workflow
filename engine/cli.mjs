@@ -53,6 +53,7 @@ Work
   wf entry [--item ID] [--lane quick|standard] [--intent implementation|analysis] [--repos a,b] [--defer-heavy] [--issue-file F]
   wf plan --file plan.yaml | --from-agent PLANNER_ID
                                     freeze acceptance criteria and the plan (--from-agent: the planner's last YAML block)
+  wf plan --check --file plan.yaml   the planner's dry run: every check wf plan runs, nothing recorded
   wf criteria amend --file f --reason "why" [--add-repo R]
                                     --add-repo: a fix needs another repo; its worktree joins the attempt with the work items
                                     added scope without \`impact\` is shown to the next implementer as consumers to find
@@ -697,6 +698,11 @@ async function dispatch(cmd, sub, positional, options) {
       return 0;
     }
     case 'plan': {
+      if (options.check) {
+        const r = freezeCriteria(root, options);
+        print(options, `the plan would be accepted: ${r.criteria} criteria, ${r.work} work item(s)${r.impact ? ', the impact analysis checks out (queries re-run)' : ''}; nothing was recorded`, r);
+        return 0;
+      }
       const s = freezeCriteria(root, options);
       const loose = uncovered(s);
       const sections = s.plan && typeof s.plan === 'object' ? Object.keys(s.plan) : [];
