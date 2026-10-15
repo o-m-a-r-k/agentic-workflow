@@ -755,7 +755,8 @@ export function handoff(root, role, options) {
     // (`--kind bookkeeping`) is never a reviewer's verdict item.
     discovered: ['implementer', 'reviewer'].includes(role) ? reviewerDiscovered(state.discovered, state) : undefined,
     // I-42: unresolved historical observations require a current-tree reviewer verdict.
-    historicalReports: role === 'reviewer' && mode === 'full' ? historicalReports : undefined,
+    // A full round judges every historical report; a delta round the ones no recorded round has judged yet.
+    historicalReports: role !== 'reviewer' ? undefined : mode === 'full' ? historicalReports : historicalReports.filter((h) => !historicalJudged(state).has(h.id)).length ? historicalReports.filter((h) => !historicalJudged(state).has(h.id)) : undefined,
     // Repos added to the attempt by an owner amendment for a fix (I-19): the reviewer judges each seam on both sides.
     // Every reviewer round, delta included: acceptance checks the accepted round was handed every added repo (repair
     // review of 0.7.0: an evidence review after a fix is a delta, and without them acceptance was unreachable).
@@ -1567,6 +1568,13 @@ export function amendedAfterAcceptance(state) {
   return [...new Set((state.criteriaAmendments ?? []).filter((a) => a.at > state.accepted.at).flatMap((a) => [...(a.changes?.added ?? []), ...(a.changes?.changed ?? [])]))].filter((id) => current.has(id));
 }
 
+// The latest verdict each historical report got from any recorded review round of the attempt.
+function historicalJudged(state) {
+  const by = new Map();
+  for (const r of state.reviews ?? []) for (const v of r.closure?.reportedIssues ?? []) if (v?.id && ['fixed', 'verified-nonissue', 'open'].includes(v.verdict)) by.set(v.id, v);
+  return by;
+}
+
 export function acceptReview(root, options) {
   const state = openState(root, options);
   const r = state.review;
@@ -1612,12 +1620,15 @@ export function acceptReview(root, options) {
   // I-18: every issue found during the ticket was judged by this round, and none was found open.
   const reviewedBundle = readBundle(r.handoff);
   const reportedNow = reportsForReview(state);
-  const reportedIds = new Set((reviewedBundle?.historicalReports ?? []).map((r) => r.id));
-  if (!obligationSince(state, '0.7.0')) for (const r of reportedNow.historical) if (!reportedIds.has(r.id)) problems.push('historical report ' + r.id + ' was not handed to this reviewer; hand the tree to a fresh reviewer');
+  // A historical report counts as judged when any recorded round gave it a verdict (the latest one stands). Named failure (one
+  // attempt admitted before 0.7.0): only the last round's bundle was read, only full rounds are handed historical reports,
+  // and after the first evidence audit every round is a delta, so acceptance could never pass.
+  const judged = historicalJudged(state);
+  if (!obligationSince(state, '0.7.0')) for (const r of reportedNow.historical) if (!judged.has(r.id)) problems.push(`historical report ${r.id} has no verdict from any review round of this attempt; the next review round is handed it (\`wf handoff reviewer --agent <new id>\`)`);
   if (!obligationSince(state, '0.7.0')) for (const r of reportedNow.current) problems.push(r.agent + ': current report leaves unrecorded unresolved work; record and fix it before review');
   const hv = reportedIssueVerdicts(reviewedBundle?.historicalReports ?? [], r.closure, state);
   problems.push(...hv.problems);
-  for (const v of hv.verdicts) if (v.verdict === 'open') problems.push('historical report ' + v.id + ': reviewer found it open; fix its finding through an implementer, then start a fresh review');
+  if (!obligationSince(state, '0.7.0')) for (const r of reportedNow.historical) if (judged.get(r.id)?.verdict === 'open') problems.push('historical report ' + r.id + ': reviewer found it open; fix its finding through an implementer, then start a fresh review');
   const handedIds = new Set((reviewedBundle?.discovered ?? []).map((d) => d.id));
   // I-19: every repo added for a fix had its seam judged on both sides by this round.
   const handedRepos = new Set((reviewedBundle?.addedRepos ?? []).map((a) => a.repo));
@@ -1856,9 +1867,10 @@ export async function deliver(root, options) {
     if (!obligationSince(x, '0.7.0')) {
       const reports = reportsForReview(x);
       const bundle = readBundle(x.review?.handoff);
-      const handed = new Set((bundle?.historicalReports ?? []).map((r) => r.id));
+      // Judged by any recorded round, the latest verdict standing, as at acceptance.
+      const judged = historicalJudged(x);
       const hv = reportedIssueVerdicts(bundle?.historicalReports ?? [], x.review?.closure ?? {}, x);
-      if (reports.current.length || reports.historical.some((r) => !handed.has(r.id)) || hv.problems.length || hv.verdicts.some((v) => v.verdict === 'open')) throw refuse('not delivered: current or historical implementation reports need resolution and a fresh review on ' + x.id);
+      if (reports.current.length || reports.historical.some((r) => !judged.has(r.id) || judged.get(r.id).verdict === 'open') || hv.problems.length) throw refuse('not delivered: current or historical implementation reports need resolution and a fresh review on ' + x.id);
     }
     const open = openDiscovered(x);
     if (open.length) throw refuse(`not delivered: ${open.length} discovered issue(s) are open${x.id !== state.id ? ` in ${x.id}` : ''}: ${open.map((d) => `${d.id} ${d.summary}`).join('; ')}`, `fix it in this ticket and close it with the fix commit (\`wf discovered close <id> --fixed <commit>\`; a fix after acceptance needs the gate and a fresh review); ${RULE_SHORT}`);

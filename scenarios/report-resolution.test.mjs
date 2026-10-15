@@ -177,6 +177,33 @@ test('I-42: an independently judged historical fix survives both reviews and del
   assert.deepEqual(fs.readFileSync(p.oldFile), p.original);
 });
 
+// 0.7.16, named failure (one attempt admitted before 0.7.0): acceptance read only the last round's bundle, historical
+// reports are handed only to full rounds, and every round after the first evidence audit is a delta, so `wf accept` could
+// never pass. A report judged by any recorded round counts; a delta round is handed only the ones no round has judged.
+test('a historical report judged in an earlier round counts at acceptance and delivery after a delta evidence round', () => {
+  const p = historicalProject('historical-delta');
+  const code = reviewBundle(p, 'historical-code-reviewer-2');
+  ok(record(p, 'historical-code-reviewer-2', { reportedIssues: fixedReports(p, code) }));
+  ok(wf(p.root, ['gate', '--attempt', p.id]));
+  const evidence = reviewBundle(p, 'historical-evidence-reviewer-2');
+  ok(record(p, 'historical-evidence-reviewer-2', { reportedIssues: fixedReports(p, evidence) }));
+  // A later fix, its delta review and a new gate: the evidence round on it is a delta, handed no historical report.
+  ok(wf(p.root, ['handoff', 'implementer', '--agent', 'impl-third', '--runtime', 'claude', '--attempt', p.id]));
+  commitIn(p.wt, { 'src/b.txt': 'one more fix\n' });
+  report(p, 'impl-third', 'Done and committed.');
+  ok(wf(p.root, ['handoff', 'close', '--agent', 'impl-third', '--attempt', p.id]));
+  const delta = reviewBundle(p, 'historical-delta-reviewer');
+  assert.equal(delta.mode, 'delta');
+  assert.equal(delta.historicalReports, undefined, 'a report an earlier round judged is not handed again');
+  ok(record(p, 'historical-delta-reviewer', {}));
+  ok(wf(p.root, ['gate', '--attempt', p.id]));
+  const last = reviewBundle(p, 'historical-delta-evidence');
+  assert.equal(last.mode, 'delta');
+  ok(record(p, 'historical-delta-evidence', {}));
+  ok(wf(p.root, ['accept', '--attempt', p.id]));
+  ok(wf(p.root, ['deliver', '--attempt', p.id]));
+});
+
 test('I-42: a new unresolved report after acceptance blocks delivery without a code change', () => {
   const p = historicalProject('historical-after-acceptance');
   const code = reviewBundle(p, 'late-code-reviewer');
