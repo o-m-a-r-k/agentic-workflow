@@ -157,6 +157,29 @@ test('a check frozen at admission that is itself wrong is corrected with the per
 });
 
 
+// 0.7.15, named failure (audit of one project's tickets): two admission checks were corrected seven times across five
+// parallel tickets, and the person was asked each time, waiting 28 to 147 minutes to answer the same question.
+test('a correction of an admission check the person approved in one attempt is taken in another without asking again; a different one still asks', () => {
+  const f = fixture('validation-correct-shared');
+  const cfg = (run) => yaml({ version: 1, enabled: true, name: 'fixture', repos: [{ name: 'app', path: '.', base: 'main' }], gate: { steps: [{ id: 'unit', repo: 'app', run, inputs: ['src/**'] }] } });
+  commitIn(f.wt, { '.workflow/project.yaml': cfg('test -f src/a.txt && echo corrected') });
+  ok(correct(f, ['--steps', 'unit', '--reason', 'it read a failed request as empty data']));
+  const e2 = ok(wf(f.root, ['entry', '--item', 'ENG-2', '--json'])).json();
+  ok(wf(f.root, ['handoff', 'planner', '--agent', 'planner2', '--attempt', e2.id]));
+  ok(wf(f.root, ['plan', '--file', criteriaFile(f.base), '--attempt', e2.id]));
+  ok(wf(f.root, ['handoff', 'implementer', '--agent', 'impl2', '--attempt', e2.id]));
+  commitIn(e2.repos.app.worktree, { 'src/a.txt': 'changed too\n', '.workflow/project.yaml': cfg('test -f src/a.txt && echo corrected') });
+  ok(wf(f.root, ['handoff', 'close', '--agent', 'impl2', '--attempt', e2.id]));
+  const taken = wf(f.root, ['validation', 'correct', '--steps', 'unit', '--reason', 'the same defect', '--attempt', e2.id, '--json'], { ownerSilent: true });
+  assert.equal(taken.code, 0, taken.err);
+  const s2 = state(f.root, e2.id);
+  assert.equal(s2.validationCorrections[0].approvedIn.attempt, f.e.id, 'the person\'s earlier yes is recorded as the approval');
+  assert.equal((s2.decisions ?? []).filter((d) => d.kind === 'override-gate').length, 0, 'no new question');
+  commitIn(e2.repos.app.worktree, { '.workflow/project.yaml': cfg('test -f src/a.txt && echo another-correction') });
+  const asked = wf(f.root, ['validation', 'correct', '--steps', 'unit', '--reason', 'a different change', '--attempt', e2.id], { ownerSilent: true });
+  assert.equal(asked.code, 75, 'a correction the person has not approved anywhere asks');
+});
+
 // 0.7.11, named failure (one ticket, audit of 51 attempts): a correction that only scoped a step's evidence glob to the ticket
 // (4,008 other tickets' screenshots had been counted) made its 25-minute e2e step look new and run again, though its result
 // could not change. Which files are kept as evidence is not part of a step's identity: the gate re-uses the recorded run and

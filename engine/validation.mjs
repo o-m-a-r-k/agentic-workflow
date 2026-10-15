@@ -1,8 +1,8 @@
 import { attemptAdapter, trustedAdapter, adapterFileAtCommit } from './config.mjs';
 import { actor, openState, treeHashes } from './attempt.mjs';
-import { append, loadState } from './ledger.mjs';
+import { append, listAttempts, loadState } from './ledger.mjs';
 import { loadCatalog } from './secrets.mjs';
-import { canonical, git, hashValue, refuse, YAML } from './util.mjs';
+import { canonical, git, hashFile, hashValue, refuse, YAML } from './util.mjs';
 import { requireYes } from './approve.mjs';
 import fs from 'node:fs';
 
@@ -68,6 +68,42 @@ export const addValidation = (root, options) => registerValidation(root, options
 // changed digest and the later date make the gate wait for a fresh code review and run every step again.
 export const correctValidation = (root, options) => registerValidation(root, options, true);
 
+// What a corrected step is: its definition and the plugin code it runs, as committed.
+function correctionIdentity(root, state, commit, step) {
+  let pluginHash = null;
+  try {
+    pluginHash = step.definition.plugin ? hashFile(adapterFileAtCommit(root, state, commit, step.definition.plugin)) : null;
+  } catch {
+    return null;
+  }
+  return hashValue({ id: step.id, definition: step.definition, pluginHash });
+}
+
+// The person's yes to this exact correction in another attempt of the project: the same admission steps corrected to the
+// same definitions and plugin code. Named failure (audit of one project's tickets): two admission checks were corrected
+// seven times across five parallel tickets, and each time the person was asked again and waited 28 to 147 minutes to
+// answer the same question. The approval counts once for the project; the attempt still gets the fresh review and the gate.
+function approvedElsewhere(root, state, steps, commit) {
+  const want = steps.map((s) => correctionIdentity(root, state, commit, s));
+  if (want.some((w) => !w)) return null;
+  for (const id of listAttempts(root)) {
+    if (id === state.id) continue;
+    let other;
+    try {
+      other = loadState(root, id);
+    } catch {
+      continue;
+    }
+    for (const c of other.validationCorrections ?? []) {
+      const d = c.decision ? (other.decisions ?? []).find((x) => x.id === c.decision) : null;
+      if (d?.approved?.choice !== 'yes') continue;
+      const have = (c.steps ?? []).map((s) => correctionIdentity(root, other, c.commit, s));
+      if (canonical([...have].sort()) === canonical([...want].sort())) return { attempt: id, decision: d.id, at: d.approved.at ?? c.at };
+    }
+  }
+  return null;
+}
+
 async function registerValidation(root, options, correcting) {
   const { withReviewLock } = await import('./gate.mjs');
   const { reviewInFlight, openImplementersOf } = await import('./lifecycle.mjs');
@@ -125,11 +161,12 @@ async function registerValidation(root, options, correcting) {
     });
     if (correcting) {
       // Changing a check frozen at admission is the person's decision (kind override-gate); the original stays in the ledger.
-      const decision = admission.length ? requireYes(root, state, { kind: 'override-gate', key: `correct-admission:${admission.join(',')}:${commit}`, summary: `correct the admission check ${admission.join(', ')} to its definition committed at ${commit.slice(0, 10)}: ${String(options.reason)} (the original stays in the record; a fresh review and the full gate follow)`, what: `correcting the admission check ${admission.join(', ')}`, options }).decision : null;
+      const earlier = admission.length ? approvedElsewhere(root, state, steps, commit) : null;
+      const decision = earlier ? null : admission.length ? requireYes(root, state, { kind: 'override-gate', key: `correct-admission:${admission.join(',')}:${commit}`, summary: `correct the admission check ${admission.join(', ')} to its definition committed at ${commit.slice(0, 10)}: ${String(options.reason)} (the original stays in the record; a fresh review and the full gate follow)`, what: `correcting the admission check ${admission.join(', ')}`, options }).decision : null;
       // Both pins stay in the ledger: what the step was, and what it is now.
       const current = (id) => state.validations.flatMap((v) => v.steps).find((s) => s.id === id)?.definition;
       const from = ids.map((id) => (admission.includes(id) ? { id, commit: pinOf(id), definition: current(id) ?? base.gate.steps.find((s) => s.id === id), admission: true } : { id, commit: pinOf(id), definition: current(id) }));
-      append(root, state.id, 'validation.corrected', { commit, steps, criteria, reason: String(options.reason), tree: trees, from, ...(decision ? { decision } : {}) }, actor(options));
+      append(root, state.id, 'validation.corrected', { commit, steps, criteria, reason: String(options.reason), tree: trees, from, ...(decision ? { decision } : {}), ...(earlier ? { approvedIn: earlier } : {}) }, actor(options));
     } else append(root, state.id, 'validation.added', { commit, steps, criteria, reason: String(options.reason), tree: trees }, actor(options));
     return loadState(root, state.id);
   });
