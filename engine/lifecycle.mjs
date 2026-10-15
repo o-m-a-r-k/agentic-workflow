@@ -1260,6 +1260,11 @@ export function recordReview(root, options) {
   // (the reviewer may write only its closure file, outside them) invalidates it.
   if (reviewerHandoff.tree && canonical(treeHashes(state)) !== canonical(reviewerHandoff.tree)) {
     const moved = Object.keys({ ...treeHashes(state), ...reviewerHandoff.tree }).filter((k) => treeHashes(state)[k] !== reviewerHandoff.tree[k]);
+    // Only uncommitted changes on the same commits: the closure may still describe the committed tree, so the round stays
+    // open to record it once they are gone. Named failure (audit of 51 attempts): a closure refused while the worktree was
+    // briefly dirty ended its round; the tree was restored to the same commit and a fresh reviewer judged it again.
+    const headOf = (t) => String(t ?? '').split('+dirty')[0];
+    if (moved.every((k) => headOf(treeHashes(state)[k]) === headOf(reviewerHandoff.tree[k]))) throw refuse(`the worktree has uncommitted changes since the review round was handed (${moved.join(', ')}); the commits are the ones under review, so the round stays open`, 'restore those changes (or have the implementer commit them, which starts a new round), then record this closure again', { id: 'review:tree-dirty' });
     // Named failure (I-23): two review rounds were refused because implementers were still editing, and nothing in the
     // ledger showed it. The refused round is recorded; it is over, and the next round starts on the committed tree.
     append(root, state.id, 'review.refused', { handoff: reviewerHandoff.bundle, reviewer: reviewerHandoff.agent, reason: 'tree-changed', moved, handedTree: reviewerHandoff.tree, tree: treeHashes(state) }, String(closure.reviewer ?? reviewerHandoff.agent));

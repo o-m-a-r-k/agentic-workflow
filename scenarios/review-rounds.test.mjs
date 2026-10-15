@@ -91,3 +91,16 @@ test('I-133: a code review that names unreached scope is still no audit (I-69 st
   repair(p, { 'src/a.txt': CHANGED.replace('L2', 'L2 fixed') });
   assert.equal(hand(p, 'r2').mode, 'full');
 });
+
+// 0.7.11, named failure (audit of 51 attempts): a closure refused while the worktree was briefly dirty ended its round; the tree
+// was restored to the same commit and a fresh reviewer judged it again. Uncommitted changes on the same commits keep it open.
+test('a closure recorded while the worktree has uncommitted changes on the same commits is refused, and the round stays open', () => {
+  const p = project('rr-dirty');
+  hand(p, 'r1');
+  fs.writeFileSync(`${p.wt}/src/a.txt`, 'scratch\n');
+  const dirty = record(p, goodClosure('r1'));
+  assert.equal(dirty.code, 75);
+  assert.match(dirty.err, /the worktree has uncommitted changes since the review round was handed \(app\); the commits are the ones under review, so the round stays open/);
+  fs.writeFileSync(`${p.wt}/src/a.txt`, CHANGED);
+  ok(record(p, goodClosure('r1')));
+});

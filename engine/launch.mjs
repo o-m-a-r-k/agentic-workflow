@@ -265,17 +265,31 @@ async function follow(root, id, h, { host, runtime, label, requestedSession, chi
   }
   if (!success) process.stderr.write(`${label} role failed: ${problem ?? (stderr.trim() || 'no completed turn')}\n`);
   if (diagnosis) process.stderr.write(`${diagnosis.advice}\n`);
-  if (success && h.role === 'reviewer' && !h.reviewGroup) reviewerEnded(root, id, h, label);
+  if (success && h.role === 'reviewer' && !h.reviewGroup) await reviewerEnded(root, id, h, label);
   return { agent: h.agent, session, status: success ? 'completed' : 'failed', exitCode: success ? 0 : code || 1 };
 }
 
 // A launched reviewer's process ended cleanly. Named failure (I-69): two launched reviewers ended with no closure and the
 // owner was told only that the process had completed; one that recorded a closure naming scope it did not reach was counted
 // as the full audit. Said once, on stderr, at the moment the owner learns the process ended.
-function reviewerEnded(root, id, h, label) {
-  const now = loadState(root, id);
+async function reviewerEnded(root, id, h, label) {
+  let now = loadState(root, id);
   const handed = now.handoffs.find((x) => x.bundle === h.bundle);
   if (!handed) return;
+  // The closure the reviewer wrote and did not record is recorded for it, with every check `wf review` makes. Named failure
+  // (audit of 51 attempts): three launched reviewers ended with their work done and no closure recorded, and fresh
+  // reviewers judged the same tree again.
+  const file = handed.closureFile ?? null;
+  if (file && fs.existsSync(file) && !(now.reviews ?? []).some((r) => r.handoff === h.bundle) && !(now.reviewsRefused ?? []).some((r) => r.handoff === h.bundle)) {
+    try {
+      const { recordReview } = await import('./lifecycle.mjs');
+      recordReview(root, { attempt: id, closure: file });
+      process.stderr.write(`${label} reviewer ${h.agent} ended without recording its closure; the engine recorded the closure it wrote (${file})\n`);
+    } catch (error) {
+      process.stderr.write(`${label} reviewer ${h.agent} ended without recording its closure, and the closure it wrote was not recorded: ${String(error.message ?? error).split('\n')[0]}\n`);
+    }
+    now = loadState(root, id);
+  }
   const recorded = (now.reviews ?? []).filter((r) => r.handoff === h.bundle).at(-1);
   if (recorded) {
     const unreached = unreachedOf(recorded.closure);

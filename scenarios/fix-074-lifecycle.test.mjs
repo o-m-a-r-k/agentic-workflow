@@ -98,6 +98,11 @@ fs.writeFileSync(file, [
   line({ type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: ${JSON.stringify(reply)} }] } }),
 ].join('\\n') + '\\n');
 console.log(JSON.stringify({ type: 'thread.started', thread_id: sid }));
+// A reviewer that writes its closure file and ends without recording it (FAKE_CLOSURE: the closure, reviewer filled in).
+if (process.env.FAKE_CLOSURE) {
+  const bundle = JSON.parse(fs.readFileSync(/Read (\\S+) and follow/.exec(prompt)[1], 'utf8'));
+  if (bundle.reviewClosureFile) { fs.mkdirSync(path.dirname(bundle.reviewClosureFile), { recursive: true }); fs.writeFileSync(bundle.reviewClosureFile, JSON.stringify({ ...JSON.parse(process.env.FAKE_CLOSURE), reviewer: bundle.agent })); }
+}
 console.log(JSON.stringify({ type: 'turn.completed' }));
 `);
   fs.chmodSync(path.join(bin, 'codex'), 0o755);
@@ -340,6 +345,25 @@ test('I-109: the files a reviewer handoff, a plan and an amendment write into th
 // Named failure (I-69): two engine-launched reviewers completed (exit 0) before whole-change review and wrote no closure. The
 // owner read "record its closure through the handed reviewer", could not run `wf handoff run` again (a handoff launches once),
 // and nothing said that a round with no recorded closure is not an audit.
+// 0.7.11, named failure (audit of 51 attempts): three launched reviewers ended with their closure written and not recorded,
+// and fresh reviewers judged the same tree again. The engine records the closure the reviewer wrote, with every check.
+test('a launched reviewer that wrote its closure and did not record it has it recorded by the engine', () => {
+  const p = singleRepoProject('i69-salvage', { gate: { steps }, ...codexConfig });
+  const env = { ...fakeCodex(p.base), FAKE_CLOSURE: JSON.stringify(goodClosure('x')) };
+  const run = (args, opts = {}) => wf(p.root, args, { env, ...opts });
+  const id = ok(run(['entry', '--item', 'ENG-1', '--owner', 'o', '--json'])).json().id;
+  ok(run(['handoff', 'planner', '--agent', 'p', '--runtime', 'codex', '--attempt', id]));
+  ok(run(['plan', '--file', criteriaFile(p.base), '--attempt', id]));
+  ok(run(['handoff', 'implementer', '--agent', 'i', '--attempt', id]));
+  commitIn(loadState(p.root, id).repos.app.worktree, { 'src/a.txt': 'changed\n' });
+  ok(run(['handoff', 'close', '--agent', 'i', '--attempt', id]));
+  ok(run(['handoff', 'reviewer', '--agent', 'r', '--runtime', 'codex', '--attempt', id]));
+  const launched = ok(run(['handoff', 'run', '--agent', 'r', '--attempt', id]));
+  assert.match(launched.err, /reviewer r ended without recording its closure; the engine recorded the closure it wrote/);
+  assert.doesNotMatch(launched.err, /completed with no closure recorded/);
+  assert.deepEqual(loadState(p.root, id).reviews.map((r) => r.reviewer), ['r']);
+});
+
 test('I-69: a launched reviewer that ends with no closure leaves the owner the real routes, and the round is not an audit', () => {
   const p = singleRepoProject('i69-guidance', { gate: { steps }, ...codexConfig });
   const env = fakeCodex(p.base);
