@@ -21,6 +21,7 @@ import { roleInstructions } from './onboard.mjs';
 import { roleProgress, ROLE_HEARTBEAT_MS } from './role-progress.mjs';
 import { findHost, hostNames, launchEnvDeletes } from './hosts/index.mjs';
 import { isPlainSessionId } from './hosts/safe-file.mjs';
+import { endProcessTree, STOP_GRACE_MS, STOP_KILL_MS } from './process-tree.mjs';
 import { WfError, assertPlainGit, canonical, git, refuse, sha256, withFileLock, writeJson } from './util.mjs';
 import { readStatement } from './expectations.mjs';
 
@@ -284,12 +285,21 @@ export async function waitRole(root, options) {
   return follow(root, state.id, h, { host, runtime: h.runtime, label: host.name, requestedSession: h.launch.requestedSession ?? null, io, untilMinutes: minutes });
 }
 
-// `wf handoff stop --agent X`: ends a launched role's process group and records it failed (stopped by the owner).
-export function stopRole(root, options) {
+// `wf handoff stop --agent X`: ends a launched role's whole process tree and, once they are observed gone, records the
+// role failed (stopped by the owner). Named failure (I-128): the stop was recorded and reported after one SIGTERM to the
+// role's group that nothing checked; the role and its child kept running. A tree that cannot be ended is an error that
+// says what still runs, and nothing is recorded.
+export async function stopRole(root, options) {
   const { state, h } = launched(root, options);
   if (['completed', 'failed'].includes(h.launch.status)) throw refuse(`${h.agent} already ${h.launch.status}`);
-  if (h.launch.pid && alive(h.launch.pid)) {
-    try { process.kill(-h.launch.pid, 'SIGTERM'); } catch {}
+  if (h.launch.pid) {
+    const { left, denied } = await endProcessTree(h.launch.pid);
+    if (left.length) {
+      const named = (pids) => pids.map((pid) => `pid ${pid}`).join(', ');
+      const survived = left.filter((pid) => !denied.includes(pid));
+      const why = [...(denied.length ? [`not permitted to signal ${named(denied)} (a sandbox, or another user's process)`] : []), ...(survived.length ? [`${named(survived)} survived SIGTERM and SIGKILL (${(STOP_GRACE_MS + STOP_KILL_MS) / 1000}s)`] : [])];
+      throw new WfError(`${h.agent} was not stopped, still running: ${why.join('; ')}`, { hint: `nothing was recorded as stopped. End ${left.length === 1 ? 'it' : 'them'} from a shell that may signal ${left.length === 1 ? 'it' : 'them'} (\`kill -9 ${left.join(' ')}\`), then hand a fresh role (\`wf resume\`)` });
+    }
   }
   append(root, state.id, 'agent.launch.finished', { handoff: h.bundle, status: 'failed', exitCode: 143, failure: { kind: 'stopped', detail: `stopped by the owner${typeof options.reason === 'string' && options.reason.trim() ? `: ${options.reason.trim()}` : ''}` } }, actor(options));
   seal(append);
