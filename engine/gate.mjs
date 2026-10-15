@@ -301,7 +301,8 @@ export async function planGate(root, state, options = {}) {
       decision: prior ? 'reuse' : 'run',
       reason: prior ? `same inputs and runner as ${prior.runId}${fromAttempt ? ` in ${fromAttempt}` : ''}` : outside.length ? `changed file(s) outside this step's inputs since its last pass: ${outside.slice(0, 3).join(', ')}${outside.length > 3 ? '…' : ''}` : notCovered.length ? `changed file(s) outside every step's inputs: ${notCovered.slice(0, 3).join(', ')}${notCovered.length > 3 ? '…' : ''}` : also.unreadable.length ? `cannot read the tree of ${also.unreadable.join(', ')} (alsoInputs): always runs` : key ? (isDependent ? 'dependent of a changed contract' : infraChanged ? 'shared infrastructure changed' : also.trees ? 'inputs or a repo in alsoInputs changed, or never passed' : 'inputs changed or never passed') : 'no `inputs` declared: always runs',
       reusedFrom: prior?.runId ?? null,
-      ...(fromAttempt ? { reusedFromAttempt: fromAttempt } : {}),
+      // The record itself travels with the plan: the other attempt's ledger is not read again when the gate runs.
+      ...(fromAttempt ? { reusedFromAttempt: fromAttempt, sourceRecord: prior } : {}),
       ...(prior && reselect ? { reselect } : {}),
       missingSecrets: missingFor(root, cfg, step.id, validationCatalog(root, state, step.id)),
     });
@@ -1157,7 +1158,7 @@ async function executeRun(root, state, plan, live, run) {
     .sort((a, b) => a.heavy - b.heavy || (a.heavy ? b.d - a.d : 0) || a.i - b.i)
     .map((x) => x.s);
   for (const s of plan.steps.filter((x) => x.decision === 'reuse')) {
-    const prior = reusedRecord(s.reusedFromAttempt ? loadState(root, s.reusedFromAttempt) : state, s.id, s.reusedFrom);
+    const prior = s.sourceRecord ?? reusedRecord(state, s.id, s.reusedFrom);
     // Recorded under today's key and identity, so the next gate finds it directly; the evidence is re-selected when the
     // step's globs narrowed since the run (files the run collected, by their source path, unchanged bytes).
     const picked = s.reselect ? reselectArtifacts(prior, s.reselect, artifactUnits(root, state)) : null;
