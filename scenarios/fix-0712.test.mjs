@@ -39,9 +39,11 @@ test('I-137: a completed native implementer left open is shown as waiting on the
   ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--runtime', 'codex', '--attempt', id], { env }));
   const h = state(root, id).handoffs.at(-1);
   fs.mkdirSync(path.dirname(h.reportFile), { recursive: true });
-  fs.writeFileSync(h.reportFile, JSON.stringify({ implementer: 'i', approach: 'edit a', expect: { minutes: 60 } }));
+  // A report `wf handoff close` would refuse keeps it open (0.7.15 closes a completed implementer only when close would).
+  fs.writeFileSync(h.reportFile, JSON.stringify([{ implementer: 'i', approach: 'edit a', expect: { minutes: 60 } }]));
   const run = wf(root, ['handoff', 'run', '--agent', 'i', '--attempt', id, '--json'], { env });
   assert.equal(run.code, 0, run.err);
+  assert.match(run.err, /implementer i completed but is still open: i has not reported/);
   const s = state(root, id);
   assert.equal(s.handoffs.at(-1).launch.status, 'completed');
   assert.equal(s.implementers[0].closedAt, null, 'the owner has not closed it');
@@ -54,6 +56,21 @@ test('I-137: a completed native implementer left open is shown as waiting on the
   assert.deepEqual(pastEstimates(sig).filter((x) => /implementer i/.test(x)), [], 'owner idle time is not an implementer overrun');
   assert.match(lines.join('\n'), /finished after .* of observed execution.*waited for the owner to close it/);
   assert.match(next, /launch completed at .*: look at its report and commits once and close it now/);
+});
+
+// 0.7.15, named failure (lessons of one attempt): 4,381 of 11,083 implementer minutes (40%) were finished roles waiting
+// for the owner to close them.
+test('a launched implementer that completes with its work committed and its report written is closed by the engine', () => {
+  const { base, root, id, env } = preparedDone();
+  ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', id], { env }));
+  ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--runtime', 'codex', '--attempt', id], { env }));
+  const h = state(root, id).handoffs.at(-1);
+  fs.mkdirSync(path.dirname(h.reportFile), { recursive: true });
+  fs.writeFileSync(h.reportFile, JSON.stringify({ implementer: 'i', approach: 'edit a', expect: { minutes: 60 }, summary: 'done', ran: [], proofs: [], left: [] }));
+  const run = wf(root, ['handoff', 'run', '--agent', 'i', '--attempt', id, '--json'], { env });
+  assert.equal(run.code, 0, run.err);
+  assert.match(run.err, /implementer i completed and the engine closed it/);
+  assert.notEqual(state(root, id).implementers[0].closedAt, null);
 });
 
 // ---- I-140: `wf handoff wait --minutes N` counted N from the launch, so on a role past N it returned at once; a bare wait on

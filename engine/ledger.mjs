@@ -520,7 +520,7 @@ export function reduce(entries) {
         break;
       // The discovered-issue ledger (I-18): every issue found during the ticket, fixed or deferred in the owner's words.
       case 'discovered.added':
-        s.discovered.push({ id: d.id, summary: d.summary, kind: d.kind ?? 'defect', severity: d.severity ?? null, invariant: d.invariant ?? null, scope: d.scope ?? null, where: d.where ?? null, foundBy: d.foundBy ?? null, blockedBy: d.blockedBy ?? null, anchor: d.anchor ?? null, ...(d.movedFrom ? { movedFrom: d.movedFrom } : {}), ...(d.raisedOn ? { raisedOn: d.raisedOn } : {}), at: e.at, by: e.actor, status: 'open', fixed: null, deferred: null });
+        s.discovered.push({ id: d.id, summary: d.summary, kind: d.kind ?? 'defect', severity: d.severity ?? null, invariant: d.invariant ?? null, scope: d.scope ?? null, where: d.where ?? null, foundBy: d.foundBy ?? null, ...(d.family ? { family: d.family } : {}), blockedBy: d.blockedBy ?? null, anchor: d.anchor ?? null, ...(d.movedFrom ? { movedFrom: d.movedFrom } : {}), ...(d.raisedOn ? { raisedOn: d.raisedOn } : {}), at: e.at, by: e.actor, status: 'open', fixed: null, deferred: null });
         break;
       case 'discovered.rated': {
         const x = s.discovered.find((y) => y.id === d.id);

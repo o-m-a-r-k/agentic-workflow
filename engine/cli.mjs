@@ -925,6 +925,10 @@ async function dispatch(cmd, sub, positional, options) {
         // failure (audit of 51 attempts): gates started while work was still being committed were stopped or thrown away.
         const open = cmd === 'gate' ? (s.implementers ?? []).filter((x) => !x.closedAt).map((x) => x.agent) : [];
         if (open.length) (options.json ? process.stderr : process.stdout).write(`wf gate: warning: implementer ${open.join(', ')} ${open.length > 1 ? 'are' : 'is'} still open; if ${open.length > 1 ? 'they' : 'it'} may still commit, this gate runs on a tree that will change: close ${open.length > 1 ? 'them' : 'it'} first (\`wf handoff close --agent <id>\`)\n`);
+        // 0.7.15 (lessons of one attempt): gates were run and stopped while 23 discovered issues were still open; fixing them
+        // changes the tree the gate proves. Said once, never a refusal.
+        const owed = cmd === 'gate' ? (s.discovered ?? []).filter((d) => d.status === 'open' && d.kind !== 'bookkeeping') : [];
+        if (owed.length) (options.json ? process.stderr : process.stdout).write(`wf gate: warning: ${owed.length} discovered issue(s) still open (${owed.slice(0, 5).map((d) => d.id).join(', ')}${owed.length > 5 ? ', …' : ''}); the ones fixed in this delivery change the tree this gate proves, so fixing them first saves a gate\n`);
       } catch {}
       // Live progress goes to stdout, or to stderr with --json so stdout stays one JSON document.
       // The order of work (I-27): a gate runs only after a clean code-review round on this tree, never beside a round.

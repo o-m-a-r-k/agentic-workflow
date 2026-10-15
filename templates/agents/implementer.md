@@ -44,7 +44,7 @@ The bundle's `intent` and `intentChanges` say what the attempt is for and why it
   "expect": { "minutes": 25 },
   "ran": [{ "command": "yarn test src/list", "result": "passed, 42 tests" }],
   "proofs": [{ "family": "raw-enum-labels", "command": "rg -c 'status}' src", "expected": "0" }],
-  "left": [{ "what": "the export page sums one page only", "where": "src/export.tsx:40", "why": "not caused by this change", "severity": "medium" }, { "what": "the audit list shows another tenant's rows", "where": "src/audit.ts:12", "why": "not caused by this change", "invariant": "tenant isolation" }] }
+  "left": [{ "what": "the export page sums one page only", "where": "src/export.tsx:40", "why": "not caused by this change", "severity": "medium", "family": "page-only-totals" }, { "what": "the audit list shows another tenant's rows", "where": "src/audit.ts:12", "why": "not caused by this change", "invariant": "tenant isolation" }] }
 ```
 
 A commit trailer `Sweep <id>: proof - <command> => <expected result>` also answers a family sweep.

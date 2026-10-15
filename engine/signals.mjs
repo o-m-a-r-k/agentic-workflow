@@ -253,6 +253,8 @@ export function computeSignals(root, state, { nowMs = Date.now(), cfg = null, ho
     expect: state.expect ?? null,
     // The first prediction, kept beside a re-plan's (final review of 0.7.0: a re-plan replaced the baseline it is judged by).
     firstExpect: state.expectations?.[0]?.expect ?? null,
+    // The expectation the plan itself stated, if it stated one (a re-plan's never stands for the whole attempt).
+    planExpect: (state.expectations ?? []).find((x) => x.source === 'plan')?.expect ?? null,
     rounds,
     roundsRecorded: metrics.rounds,
     roundsHanded: handedRounds(state),
@@ -264,6 +266,17 @@ export function computeSignals(root, state, { nowMs = Date.now(), cfg = null, ho
     blockingFindings: blocking.map(ref),
     criteria: { atFreeze: state.criteriaAtFreeze, now: (state.criteria ?? []).length },
     amendments: (state.criteriaAmendments ?? []).length,
+    discoveredFamilies: (state.discovered ?? []).filter((d) => d.status === 'open' && d.family).reduce((n, d) => ({ ...n, [d.family]: (n[d.family] ?? 0) + 1 }), {}),
+    // How much the criteria moved, not only how many there are (lessons of one attempt: the count went from 22 to 27 while
+    // 163 criterion texts were rewritten over 138 amendments, and nothing the owner read showed it).
+    churn: (state.criteriaAmendments ?? []).reduce((n, a) => ({ changed: n.changed + (a.changes?.changed?.length ?? 0), added: n.added + (a.changes?.added?.length ?? 0), dropped: n.dropped + (a.changes?.dropped?.length ?? 0) }), { changed: 0, added: 0, dropped: 0 }),
+    // A re-plan's expectation is measured from the re-plan: a small repair's 65 minutes was compared with five days.
+    replan: (() => {
+      const last = (state.expectations ?? []).at(-1);
+      if (last?.source !== 'amendment') return null;
+      const end = Date.parse(state.delivery?.completedAt ?? state.closedAt ?? state.abandoned?.at ?? '') || nowMs;
+      return { at: last.at, amendment: last.amendment, minutes: round1(Math.max(0, (end - Date.parse(last.at)) / 60000)), rounds: (state.reviews ?? []).filter((r) => r.at > last.at).length };
+    })(),
     files: filesSignal(state, cfg),
     bundle: bundleSignal(state),
     implementers: implementersSignal(state, nowMs, sessions, home),
@@ -279,10 +292,15 @@ export function computeSignals(root, state, { nowMs = Date.now(), cfg = null, ho
 export function pastEstimates(sig) {
   const e = sig.expect ?? {};
   const out = [];
-  if (typeof e.files === 'number' && sig.files.changed > e.files) out.push(`files changed ${sig.files.changed} (the plan expected ${e.files})`);
-  const rounds = Math.max(sig.rounds.length, sig.roundsHanded ?? 0);
-  if (typeof e.rounds === 'number' && rounds > e.rounds) out.push(`review rounds ${rounds} (the plan expected ${e.rounds})`);
-  if (typeof e.minutes === 'number' && sig.wallMinutes !== null && sig.wallMinutes > e.minutes) out.push(`${Math.round(sig.wallMinutes)} minutes (the plan expected ${e.minutes}${typeof sig.longestQuietMinutes === 'number' && sig.longestQuietMinutes >= 1 ? `; ${Math.round(sig.longestQuietMinutes)} of them in one stretch with nothing recorded` : ''})`);
+  // After a re-plan, its rounds and minutes are counted from it; files stay the whole attempt's, against the first plan's.
+  const r = sig.replan ?? null;
+  const files = r ? sig.planExpect?.files : e.files;
+  if (typeof files === 'number' && sig.files.changed > files) out.push(`files changed ${sig.files.changed} (the plan expected ${files})`);
+  const rounds = r ? r.rounds : Math.max(sig.rounds.length, sig.roundsHanded ?? 0);
+  if (typeof e.rounds === 'number' && rounds > e.rounds) out.push(`review rounds ${rounds}${r ? ' since the re-plan' : ''} (${r ? 'it' : 'the plan'} expected ${e.rounds})`);
+  const minutes = r ? r.minutes : sig.wallMinutes;
+  if (r && typeof e.minutes === 'number' && minutes > e.minutes) out.push(`${Math.round(minutes)} minutes since the re-plan (it expected ${e.minutes})`);
+  else if (!r && typeof e.minutes === 'number' && sig.wallMinutes !== null && sig.wallMinutes > e.minutes) out.push(`${Math.round(sig.wallMinutes)} minutes (the plan expected ${e.minutes}${typeof sig.longestQuietMinutes === 'number' && sig.longestQuietMinutes >= 1 ? `; ${Math.round(sig.longestQuietMinutes)} of them in one stretch with nothing recorded` : ''})`);
   for (const s of sig.sessions ?? []) if (s.expectMinutes && s.minutes > s.expectMinutes) out.push(`${s.role} ${s.agent} ${s.finished ? 'ran' : 'working'} ${Math.round(s.minutes)} min (it expected ${s.expectMinutes})`);
   return out;
 }
@@ -307,11 +325,18 @@ export function courseLines(sig, { predictions = [], shell = true } = {}) {
   // judgement, never a limit (D9).
   const past = (actual, expected) => (typeof actual === 'number' && typeof expected === 'number' && actual > expected ? ' (past its own estimate)' : '');
   const line = (what, actual, expected, unit = '', key = null) => `${what}: ${actual}${unit}; the plan ${expected === undefined ? 'states no expectation' : `expected ${expected}${unit}${past(actual, expected)}${key && first && first[key] !== undefined && first[key] !== expected ? ` (first predicted ${first[key]}${unit})` : ''}`}`;
+  // After a re-plan the whole attempt is set against the first plan, and the re-plan against what happened since it.
+  const total = sig.replan ? sig.planExpect ?? {} : e;
   const out = [
-    line('files changed', sig.files.changed, e.files, '', 'files'),
-    `${line('review rounds recorded', sig.rounds.length, e.rounds, '', 'rounds')}${sig.roundsHanded !== undefined && sig.roundsHanded > sig.rounds.length ? `; ${sig.roundsHanded} handed (${sig.roundsHanded - sig.rounds.length} never recorded)` : ''}`,
-    `${line('minutes since admission', sig.wallMinutes === null ? 'n/a' : Math.round(sig.wallMinutes), e.minutes, '', 'minutes')}${typeof sig.longestQuietMinutes === 'number' && sig.longestQuietMinutes >= 1 ? `; the longest stretch with nothing recorded was ${Math.round(sig.longestQuietMinutes)} min` : ''}`,
+    line('files changed', sig.files.changed, total.files, '', sig.replan ? null : 'files'),
+    `${line('review rounds recorded', sig.rounds.length, total.rounds, '', sig.replan ? null : 'rounds')}${sig.roundsHanded !== undefined && sig.roundsHanded > sig.rounds.length ? `; ${sig.roundsHanded} handed (${sig.roundsHanded - sig.rounds.length} never recorded)` : ''}`,
+    `${line('minutes since admission', sig.wallMinutes === null ? 'n/a' : Math.round(sig.wallMinutes), total.minutes, '', sig.replan ? null : 'minutes')}${typeof sig.longestQuietMinutes === 'number' && sig.longestQuietMinutes >= 1 ? `; the longest stretch with nothing recorded was ${Math.round(sig.longestQuietMinutes)} min` : ''}`,
   ];
+  if (sig.replan) out.push(`since the re-plan (amendment ${sig.replan.amendment}): ${Math.round(sig.replan.minutes)} minutes and ${sig.replan.rounds} review round(s); it expected ${e.minutes ?? 'n/a'} minutes and ${e.rounds ?? 'n/a'} round(s)${past(sig.replan.minutes, e.minutes) || past(sig.replan.rounds, e.rounds)}`);
+  // A pattern found one place at a time is a class to fix in one sweep (lessons of one attempt: about 35 of 67 discovered
+  // issues were callers needing the same new guard, each found and recorded separately).
+  for (const [family, n] of Object.entries(sig.discoveredFamilies ?? {})) if (n >= 2) out.push(`discovered issues of family ${family}: ${n} open; fix the class in one sweep (find every place it occurs) rather than one at a time`);
+  if (sig.amendments) out.push(`plan amendments: ${sig.amendments} (${sig.churn?.changed ?? 0} criterion text(s) rewritten, ${sig.churn?.added ?? 0} added, ${sig.churn?.dropped ?? 0} dropped)`);
   for (const x of sig.implementers.filter((i) => !i.open).slice(-3)) out.push(`implementer ${x.agent}${x.work ? ` (${x.work})` : ''} ${x.outcome ?? 'closed'}: took ${mins(x.minutes)}${lastActive(x)}; it ${x.expectMinutes ? `expected ${x.expectMinutes} min${past(x.minutes, x.expectMinutes)}` : 'stated no expectation'}${x.approach ? `; approach: ${x.approach.slice(0, 200)}` : ''}`);
   for (const r of sig.rounds.slice(-3)) out.push(`review round ${r.n} (${r.reviewer ?? r.handoff}): took ${mins(r.minutes)}${lastActive(r)}; it ${r.expectMinutes ? `expected ${r.expectMinutes} min${past(r.minutes, r.expectMinutes)}` : 'stated no expectation'}${r.scope ? `; scope: ${r.scope.slice(0, 200)}` : ''}${r.notReached?.length ? `; did not reach: ${r.notReached.slice(0, 5).map((x) => x.slice(0, 150)).join('; ')}${r.notReached.length > 5 ? ` and ${r.notReached.length - 5} more` : ''}` : ''}`);
   for (const s of sig.sessions) out.push(s.finished

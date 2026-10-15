@@ -290,6 +290,7 @@ async function follow(root, id, h, { host, runtime, label, requestedSession, chi
   if (!success) process.stderr.write(`${label} role failed: ${problem ?? (stderr.trim() || 'no completed turn')}\n`);
   if (diagnosis) process.stderr.write(`${diagnosis.advice}\n`);
   if (success && h.role === 'reviewer' && !h.reviewGroup) await reviewerEnded(root, id, h, label);
+  if (success && h.role === 'implementer') await implementerEnded(root, id, h, label);
   if (!success && h.role === 'reviewer' && !h.reviewGroup) await reviewerPartial(root, id, h, label, failure?.kind ?? 'failed');
   return { agent: h.agent, session, status: success ? 'completed' : 'failed', exitCode: success ? 0 : code || 1 };
 }
@@ -356,6 +357,21 @@ async function reviewerPartial(root, id, h, label, why) {
     const meanwhile = (loadState(root, id).reviews ?? []).find((r) => r.handoff === h.bundle && r.partial);
     if (meanwhile) return void keptNote(meanwhile);
     process.stderr.write(`${label} reviewer ${h.agent} did not finish, and its findings so far could not be kept: ${String(error.message ?? error).split('\n')[0]} (they are in ${file})\n`);
+  }
+}
+
+// A launched implementer that completed is closed by the engine, with every check `wf handoff close` makes (its work
+// committed, its report written); when one fails, it stays open and the owner is told why. Named failure (lessons of one
+// attempt): 4,381 of 11,083 implementer minutes (40%) were finished roles waiting for the owner to close them.
+async function implementerEnded(root, id, h, label) {
+  const open = (loadState(root, id).implementers ?? []).some((x) => x.agent === h.agent && !x.closedAt);
+  if (!open) return;
+  try {
+    const { closeImplementer } = await import('./lifecycle.mjs');
+    closeImplementer(root, { attempt: id, agent: h.agent });
+    process.stderr.write(`${label} implementer ${h.agent} completed and the engine closed it (its work is committed and its report recorded); read its report in \`wf resume\` and continue\n`);
+  } catch (error) {
+    process.stderr.write(`${label} implementer ${h.agent} completed but is still open: ${String(error.message ?? error).split('\n')[0]}; close it with \`wf handoff close --agent ${h.agent} --attempt ${id}\` once that is settled\n`);
   }
 }
 

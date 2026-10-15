@@ -25,7 +25,7 @@ export function addDiscovered(root, options) {
   const state = openState(root, options);
   if (!OPEN(state) || state.delivery.completedAt) throw refuse(`${state.id} is ${state.delivery.completedAt && OPEN(state) ? 'delivered' : state.phase}; record the issue on a new attempt (\`wf reopen\` or \`wf entry\`)`);
   const summary = text(options.summary);
-  if (!summary) throw new WfError('usage: wf discovered add --summary "<what is wrong, in one line>" [--severity high|medium|low] [--kind defect|bookkeeping] [--where <file:line>] [--found-by <agent id>]');
+  if (!summary) throw new WfError('usage: wf discovered add --summary "<what is wrong, in one line>" [--severity high|medium|low] [--kind defect|bookkeeping] [--where <file:line>] [--found-by <agent id>] [--family <name>]');
   const severity = text(options.severity) || null;
   if (severity && !severityLevel(severity)) throw new WfError('--severity is high, medium or low (critical, major, minor and nit are read as their level)');
   // A tenant-isolation, authorization or money defect names the invariant it breaks: it is high whatever it is rated.
@@ -40,7 +40,7 @@ export function addDiscovered(root, options) {
   const kind = options.kind === undefined ? 'defect' : text(options.kind);
   if (!['defect', 'bookkeeping'].includes(kind)) throw new WfError('--kind is defect (default) or bookkeeping');
   const id = `D${(state.discovered?.length ?? 0) + 1}`;
-  append(root, state.id, 'discovered.added', { id, summary, kind, severity, ...(invariant ? { invariant } : {}), where: text(options.where) || null, foundBy: text(options['found-by']) || null, blockedBy, raisedOn: headsNow(state) }, actor(options));
+  append(root, state.id, 'discovered.added', { id, summary, kind, severity, ...(invariant ? { invariant } : {}), where: text(options.where) || null, foundBy: text(options['found-by']) || null, ...(text(options.family) ? { family: text(options.family).slice(0, 80) } : {}), blockedBy, raisedOn: headsNow(state) }, actor(options));
   return { state: loadState(root, state.id), id };
 }
 

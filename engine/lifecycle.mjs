@@ -1203,7 +1203,7 @@ export function closeImplementer(root, options) {
     append(root, state.id, 'implementer.report', { handoff: open.handoff, agent, file: handed.reportFile, sha256: report.sha256, summary: r.summary, approach: r.approach ?? null, expect: r.expect ?? null, ran: r.ran ?? [], proofs: r.proofs ?? [], left: r.left ?? [] }, actor(options));
     let next = (loadState(root, state.id).discovered?.length ?? 0) + 1;
     const raisedOn = headsNow(state);
-    for (const l of r.left ?? []) append(root, state.id, 'discovered.added', { id: `D${next++}`, raisedOn, summary: `left by ${agent}: ${l.what}`, kind: 'defect', severity: typeof l.severity === 'string' && l.severity.trim() ? l.severity.trim() : null, ...(typeof l.invariant === 'string' && l.invariant.trim() ? { invariant: l.invariant.trim() } : {}), where: l.where ?? null, foundBy: agent, blockedBy: null, why: l.why ?? null }, actor(options));
+    for (const l of r.left ?? []) append(root, state.id, 'discovered.added', { id: `D${next++}`, raisedOn, summary: `left by ${agent}: ${l.what}`, kind: 'defect', severity: typeof l.severity === 'string' && l.severity.trim() ? l.severity.trim() : null, ...(typeof l.family === 'string' && l.family.trim() ? { family: l.family.trim().slice(0, 80) } : {}), ...(typeof l.invariant === 'string' && l.invariant.trim() ? { invariant: l.invariant.trim() } : {}), where: l.where ?? null, foundBy: agent, blockedBy: null, why: l.why ?? null }, actor(options));
   }
   append(root, state.id, 'implementer.closed', { handoff: open.handoff, agent, outcome, heads, commits }, actor(options));
   return { state: loadState(root, state.id), handoff: open.handoff, outcome, commits, children };
