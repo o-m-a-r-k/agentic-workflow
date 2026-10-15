@@ -210,6 +210,11 @@ test('a replaced correction or one the person refused is never taken from anothe
   approveAsOwner(f.root, c.id, refused.err.match(/wf approve (A\d+)/)[1], 'no');
   assert.equal(tryCorrect(another('ENG-5'), Z).code, 75, 'a correction the person refused elsewhere asks again');
   assert.equal(tryCorrect(another('ENG-6'), Y).code, 0, 'the standing approval is still taken');
+  // An approval taken from another attempt stands only while the one it rests on does: once the person replaces Y in the
+  // attempt that approved it, the attempt that took Y no longer lends it out.
+  commitIn(f.wt, { '.workflow/project.yaml': cfg(Z.replace('z', 'w')) });
+  ok(correct(f, ['--steps', 'unit', '--reason', 'Y was wrong too']));
+  assert.equal(tryCorrect(another('ENG-7'), Y).code, 75, 'a chained approval of a replaced correction asks again');
 });
 
 // 0.7.11, named failure (one ticket, audit of 51 attempts): a correction that only scoped a step's evidence glob to the ticket

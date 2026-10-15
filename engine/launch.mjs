@@ -193,10 +193,13 @@ async function follow(root, id, h, { host, runtime, label, requestedSession, chi
     const file = h.role === 'implementer' ? h.reportFile : h.role === 'reviewer' ? h.closureFile : null;
     return readStatement(file, h.role === 'reviewer' ? 'scope' : 'approach')?.minutes != null;
   };
+  // The owner's `--minutes` at launch is also an upper bound on a role's own estimate: an owner whose harness limits how long
+  // one call may block gets control back within it (independent review of 0.7.15: a 90-minute estimate outlasted the call).
   const estimate = () => {
     if (untilMinutes !== null) return untilMinutes;
     const file = h.role === 'implementer' ? h.reportFile : h.role === 'reviewer' ? h.closureFile : null;
-    return readStatement(file, h.role === 'reviewer' ? 'scope' : 'approach')?.minutes ?? ownerMinutes;
+    const own = readStatement(file, h.role === 'reviewer' ? 'scope' : 'approach')?.minutes ?? null;
+    return own !== null && ownerMinutes !== null ? Math.min(own, ownerMinutes) : own ?? ownerMinutes;
   };
   // A bare `wait` on a role already past the estimate it stated follows it to its end (or to a later estimate it states):
   // returning at once on the estimate already passed made the owner call it again and again (I-140).
@@ -240,7 +243,7 @@ async function follow(root, id, h, { host, runtime, label, requestedSession, chi
       // `--minutes` on `wait` is a new interval measured from this call (I-140); a role's own estimate and the owner's
       // expectation at launch are totals since the launch (a launch's interval and total coincide).
       const over = untilMinutes !== null ? (Date.now() - followedFrom) / 60000 > untilMinutes : minutes !== null && minutes !== passedAtStart && (Date.now() - startedAt) / 60000 > minutes;
-      if (over) { returned = untilMinutes !== null ? 'waited' : minutes === ownerMinutes && !roleSaid() ? 'owner-estimate' : 'past-estimate'; break; }
+      if (over) { returned = untilMinutes !== null ? 'waited' : ownerMinutes !== null && minutes === ownerMinutes ? 'owner-estimate' : 'past-estimate'; break; }
       await new Promise((r) => setTimeout(r, 250));
     }
   } catch (e) {
@@ -265,7 +268,7 @@ async function follow(root, id, h, { host, runtime, label, requestedSession, chi
     progress.finish();
     const minutes = Math.round((Date.now() - startedAt) / 60000);
     const said = estimate();
-    process.stderr.write(`${label} ${h.role} ${h.agent} is still running (pid ${pid}, ${minutes} min since launch${returned === 'past-estimate' ? `, past its own estimate of ${said} min` : returned === 'owner-estimate' ? `, past your expectation of ${ownerMinutes} min (it stated none)` : returned === 'waited' ? `, the ${untilMinutes} min you chose to wait` : ''}). Judge it: \`wf handoff wait --agent ${h.agent} --attempt ${id} [--minutes N]\` follows it again (N: how much longer you expect), \`wf handoff stop --agent ${h.agent} --attempt ${id}\` ends it so a fresh handoff can take over.\n`);
+    process.stderr.write(`${label} ${h.role} ${h.agent} is still running (pid ${pid}, ${minutes} min since launch${returned === 'past-estimate' ? `, past its own estimate of ${said} min` : returned === 'owner-estimate' ? `, past your expectation of ${ownerMinutes} min${roleSaid() ? '' : ' (it stated none)'}` : returned === 'waited' ? `, the ${untilMinutes} min you chose to wait` : ''}). Judge it: \`wf handoff wait --agent ${h.agent} --attempt ${id} [--minutes N]\` follows it again (N: how much longer you expect), \`wf handoff stop --agent ${h.agent} --attempt ${id}\` ends it so a fresh handoff can take over.\n`);
     return { agent: h.agent, session, status: 'running', pid, minutes, exitCode: 0 };
   }
   // The process has ended (or was stopped): wait for its exit code when this call launched it.

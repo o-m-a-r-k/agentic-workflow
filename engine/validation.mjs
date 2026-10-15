@@ -86,38 +86,50 @@ function correctionIdentity(root, state, commit, step) {
 // It counts only while it stands (independent review of 0.7.15): the correction is that attempt's latest of those steps (one
 // the person replaced, because it was itself wrong, is not taken again), and a `no` the person gave to the same correction in
 // any attempt, this one included, asks again.
-function approvedElsewhere(root, state, steps, commit, ids) {
+function approvedElsewhere(root, state, steps, commit, ids, admission) {
   const want = steps.map((s) => correctionIdentity(root, state, commit, s));
   if (want.some((w) => !w)) return null;
   const same = (have) => have.every(Boolean) && canonical([...have].sort()) === canonical([...want].sort());
-  const sameIds = (list) => canonical([...list].sort()) === canonical([...ids].sort());
-  const attempts = [];
+  const sameIds = (list, of) => canonical([...list].sort()) === canonical([...of].sort());
+  const attempts = new Map();
   for (const id of listAttempts(root)) {
     try {
-      attempts.push(id === state.id ? state : loadState(root, id));
+      attempts.set(id, id === state.id ? state : loadState(root, id));
     } catch {}
   }
-  for (const a of attempts) {
+  // A non-yes answer to the same admission correction, anywhere, asks again. The question names the admission steps only
+  // (its key), so they are what is compared; one whose definitions cannot be read any more is taken as the same, and asks.
+  const wantAdmission = steps.filter((s) => admission.includes(s.id)).map((s) => correctionIdentity(root, state, commit, s));
+  for (const a of attempts.values()) {
     for (const d of a.decisions ?? []) {
       const m = /^correct-admission:([^:]+):([0-9a-f]{7,40})$/.exec(d.kind === 'override-gate' ? String(d.key) : '');
-      if (!m || !d.approved || d.approved.choice === 'yes' || !sameIds(m[1].split(','))) continue;
+      if (!m || !d.approved || d.approved.choice === 'yes' || !sameIds(m[1].split(','), admission)) continue;
       let candidate;
       try {
         candidate = trustedAdapter(root, a, m[2]);
       } catch {
-        continue;
+        return null;
       }
       const have = m[1].split(',').map((id) => { const def = candidate.gate.steps.find((x) => x.id === id); return def ? correctionIdentity(root, a, m[2], { id, definition: def }) : null; });
-      if (same(have)) return null;
+      if (!have.every(Boolean) || canonical([...have].sort()) === canonical([...wantAdmission].sort())) return null;
     }
   }
-  for (const other of attempts) {
-    if (other.id === state.id) continue;
+  // An approval stands while the correction it approved is still its attempt's latest of those steps; one taken on another
+  // attempt's approval stands only while that one does (independent review of 0.7.15: a chained approval outlived the
+  // correction the person had since replaced).
+  const stands = (attemptId, depth = 0) => {
+    const other = attempts.get(attemptId);
+    if (!other || depth > 10) return null;
     const latest = (other.validationCorrections ?? []).filter((c) => (c.steps ?? []).some((x) => ids.includes(x.id))).at(-1);
-    if (!latest || !sameIds((latest.steps ?? []).map((x) => x.id))) continue;
+    if (!latest || !sameIds((latest.steps ?? []).map((x) => x.id), ids) || !same((latest.steps ?? []).map((x) => correctionIdentity(root, other, latest.commit, x)))) return null;
     const d = latest.decision ? (other.decisions ?? []).find((x) => x.id === latest.decision) : null;
-    const approval = d?.approved?.choice === 'yes' ? { attempt: other.id, decision: d.id, at: d.approved.at ?? latest.at } : latest.approvedIn ?? null;
-    if (approval && same((latest.steps ?? []).map((x) => correctionIdentity(root, other, latest.commit, x)))) return approval;
+    if (d?.approved?.choice === 'yes') return { attempt: other.id, decision: d.id, at: d.approved.at ?? latest.at };
+    return latest.approvedIn ? stands(latest.approvedIn.attempt, depth + 1) : null;
+  };
+  for (const id of attempts.keys()) {
+    if (id === state.id) continue;
+    const approval = stands(id);
+    if (approval) return approval;
   }
   return null;
 }
@@ -179,7 +191,7 @@ async function registerValidation(root, options, correcting) {
     });
     if (correcting) {
       // Changing a check frozen at admission is the person's decision (kind override-gate); the original stays in the ledger.
-      const earlier = admission.length ? approvedElsewhere(root, state, steps, commit, ids) : null;
+      const earlier = admission.length ? approvedElsewhere(root, state, steps, commit, ids, admission) : null;
       const decision = earlier ? null : admission.length ? requireYes(root, state, { kind: 'override-gate', key: `correct-admission:${admission.join(',')}:${commit}`, summary: `correct the admission check ${admission.join(', ')} to its definition committed at ${commit.slice(0, 10)}: ${String(options.reason)} (the original stays in the record; a fresh review and the full gate follow)`, what: `correcting the admission check ${admission.join(', ')}`, options }).decision : null;
       // Both pins stay in the ledger: what the step was, and what it is now.
       const current = (id) => state.validations.flatMap((v) => v.steps).find((s) => s.id === id)?.definition;
