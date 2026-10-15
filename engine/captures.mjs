@@ -40,7 +40,8 @@ export function needsScreenshots(criterion) {
 
 // The gate steps that can write captures for this attempt: a step of an admitted repo with `artifacts` globs or a plugin
 // (a plugin returns its captures as artifacts), the steps `captureRoutes` hands the planner.
-export const capturingSteps = (cfg, state) => cfg.gate.steps.filter((s) => state.repos?.[s.repo] && (s.artifacts?.length || s.plugin));
+// A quick fix's gate runs light steps only (gate.mjs), so a heavy step collects nothing for it.
+export const capturingSteps = (cfg, state) => cfg.gate.steps.filter((s) => state.repos?.[s.repo] && (s.artifacts?.length || s.plugin) && !(state.lane === 'quick' && (s.tier ?? 'light') === 'heavy'));
 
 // The criteria that need screenshots and have no way to get them: the line the owner reads, or null.
 export function captureWarning(root, state) {
@@ -64,7 +65,7 @@ export function captureWarning(root, state) {
   const open = needs.filter((id) => !covered.has(id));
   if (!open.length) return null;
   const earlier = imports.length && !here.length ? ` Captures imported earlier were made on an earlier tree; import them again from the current one.` : '';
-  return `${open.join(', ')} ${open.length > 1 ? 'name' : 'names'} screenshots as evidence, but no gate step of this attempt collects any (a step needs \`artifacts\` globs or a plugin), so acceptance would find nothing to inspect. Once the work is committed, bring in captures made on that tree with \`wf captures import --from <folder> --attempt ${state.id}\` (they join the gate's screenshots, bound to the tree and recorded by wf), or register a collecting step with \`wf validation add\`.${earlier}`;
+  return `${open.join(', ')} ${open.length > 1 ? 'name' : 'names'} screenshots as evidence, but no gate step of this attempt collects any (a step needs \`artifacts\` globs or a plugin${state.lane === 'quick' ? '; a quick fix runs light steps only' : ''}), so acceptance would find nothing to inspect. Once the work is committed, bring in captures made on that tree with \`wf captures import --from <folder> --attempt ${state.id}\` (they join the gate's screenshots, bound to the tree and recorded by wf), or register a collecting step with \`wf validation add\`.${earlier}`;
 }
 
 function listImages(dir, rel = '', out = []) {

@@ -74,6 +74,32 @@ test('a pass another attempt recorded under the same key is reused; a step that 
   assert.equal(sc.unit.status, 'passed', 'a file the inputs leave out differs from the run it would reuse');
 });
 
+// The person's rule (2026-10-15): "hotfixes should be quick fixes, not ones that take hours"; the review stays. A quick fix's
+// gate runs the light steps, and it counts for acceptance and delivery.
+test('a quick fix runs light steps only, and that gate counts; --full runs the heavy ones too', async () => {
+  const { gatePassedForCurrentTree } = await import('../engine/gate.mjs');
+  const { loadState } = await import('../engine/ledger.mjs');
+  const steps = [
+    { id: 'unit', repo: 'app', run: 'echo x >> ../ran-unit.txt', inputs: ['src/**'] },
+    { id: 'e2e', repo: 'app', tier: 'heavy', run: 'echo x >> ../ran-e2e.txt', inputs: ['src/**'] },
+  ];
+  const { base, root } = singleRepoProject('quick-light', { gate: { steps } });
+  const e = ok(wf(root, ['entry', '--lane', 'quick', '--owner', 'o', '--json'])).json();
+  ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id]));
+  ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
+  commitIn(e.repos.app.worktree, { 'src/a.txt': 'fix\n' });
+  const g = gateJson(root, e.id);
+  assert.equal(g.code, 0, g.err);
+  const s = byId(g.data.steps);
+  assert.equal(s.unit.status, 'passed');
+  assert.equal(s.e2e.status, 'skipped');
+  assert.equal(s.e2e.skippedBy, 'quick-lane');
+  assert.ok(!fs.existsSync(`${e.repos.app.worktree}/../ran-e2e.txt`), 'the heavy step did not run');
+  assert.equal(gatePassedForCurrentTree(loadState(root, e.id)).ok, true, 'the quick fix gate counts');
+  const full = byId(gateJson(root, e.id, ['--full']).data.steps);
+  assert.equal(full.e2e.status, 'passed');
+});
+
 test('worker overrides: auto sizing is recorded, invalid override exits 2', () => {
   const steps = [{ id: 'unit', repo: 'app', run: 'test "{workers}" -ge 1', inputs: ['src/**'], workers: { auto: true, min: 2, max: 4, perWorkerGiB: 1 } }];
   const { base, root } = singleRepoProject('workers', { gate: { steps } });
