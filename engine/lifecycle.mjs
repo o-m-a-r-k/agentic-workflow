@@ -2071,7 +2071,7 @@ export function deliveredSet(root, state) {
 
 // The heavy steps a quick fix's gate did not run (gate.mjs: the quick lane runs light steps only), for the reviewer and the
 // delivered evidence. Named failure (independent review of 0.7.13): the evidence review was handed only the steps that ran.
-export const notRunOf = (state) => (state.lastGate?.steps ?? []).filter((s) => s.status === 'skipped' && s.skippedBy === 'quick-lane').map((s) => ({ step: s.id, tier: s.tier, reason: s.reason }));
+export const notRunOf = (state) => (state.lastGate?.steps ?? []).filter((s) => s.status === 'skipped' && s.skippedBy === 'quick-lane').map((s) => ({ step: s.id, tier: s.tier, reason: s.reason, lastResult: s.lastResult ?? null }));
 
 // Why an attempt delivers no screenshots, per step, from the gate's expanded globs and the reviewer's verdicts.
 export function noScreenshotsReason(root, state) {

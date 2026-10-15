@@ -56,7 +56,7 @@ test('wf plan and wf criteria amend say that a criterion needs screenshots no st
   const f = quick('capture-route-notice');
   const r = wf(f.root, ['plan', '--file', criteriaFile(f.base, CRITERIA), '--attempt', f.e.id]);
   ok(r);
-  assert.match(r.err, /warning: C1 names screenshots as evidence, but no gate step of this attempt collects any \(a step needs `artifacts` globs or a plugin\)/);
+  assert.match(r.err, /warning: C1 names screenshots as evidence, but no gate step of this attempt collects any \(a step needs `artifacts` globs or a plugin(; a quick fix runs light steps only)?\)/);
   assert.match(r.err, /wf captures import --from <folder> --attempt ENG-90\.1/);
   assert.doesNotMatch(r.err, /C2/);
   assert.match(ok(wf(f.root, ['resume', '--attempt', f.e.id])).out, /warning: C1 names screenshots as evidence/);

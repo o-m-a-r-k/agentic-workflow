@@ -347,15 +347,16 @@ export async function planGate(root, state, options = {}) {
     }
     // A quick fix runs the light steps (lint, types, unit, build of what it touched): its gate takes minutes, not hours.
     // A heavy step is reused when an identical pass exists, and otherwise runs only when the owner asks for the whole gate
-    // (`--full`), the attempt froze it as a validation of its own, or it already failed on these inputs (a known failure is
-    // never skipped into a pass: independent review of 0.7.13). The person's rule (2026-10-15): "hotfixes should be quick
+    // (`--full`), the attempt froze it as a validation of its own, or it failed in this attempt and has not passed since: it
+    // runs until it passes, whatever changed (a known failure is never skipped into a pass: independent review of 0.7.13;
+    // the fix that follows a failure is the hotfix path itself). The person's rule (2026-10-15): "hotfixes should be quick
     // fixes, not ones that take hours"; the independent review stays, and its bundle lists what did not run. A gate that
     // skips them counts for acceptance and delivery. The plugin sets the default; a project's adapter may run every step in
     // its quick fixes (`gate.quickLane: full`).
     if (!prior && !full && state.lane === 'quick' && (cfg.gate.quickLane ?? 'light') === 'light' && entry.tier === 'heavy' && !validationIds(state).includes(step.id)) {
-      const last = key ? allGateSteps(state).filter((s) => s.id === step.id && s.key === key && ['passed', 'reused', 'failed'].includes(s.status)).at(-1) : null;
+      const last = allGateSteps(state).filter((s) => s.id === step.id && ['passed', 'reused', 'failed'].includes(s.status)).at(-1) ?? null;
       if (last?.status !== 'failed') {
-        steps.push({ ...entry, decision: 'skip', skippedBy: 'quick-lane', reason: 'a quick fix runs light steps only (`wf gate --full` runs this one too)' });
+        steps.push({ ...entry, decision: 'skip', skippedBy: 'quick-lane', reason: 'a quick fix runs light steps only (`wf gate --full` runs this one too)', lastResult: last ? { status: last.status, runId: last.runId } : null });
         continue;
       }
     }
@@ -1254,7 +1255,7 @@ async function executeRun(root, state, plan, live, run) {
     const picked = s.reselect ? reselectArtifacts(prior, s.reselect, artifactUnits(root, state)) : null;
     results.push({ ...prior, ...(picked ?? {}), ...(copiedLogs.get(s.id) ?? {}), key: s.key, runnerIdentity: s.runnerIdentity, resultIdentity: true, status: 'reused', reusedFrom: prior.runId, reusedFromAttempt: s.reusedFromAttempt ?? null, reason: s.reselect ? `${s.reason}; evidence re-selected by the step's current globs` : s.reason, runId });
   }
-  for (const s of plan.steps.filter((x) => ['skip', 'defer'].includes(x.decision))) results.push({ id: s.id, repo: s.repo, tier: s.tier, status: s.decision === 'defer' ? 'deferred' : 'skipped', reason: s.reason, skippedBy: s.skippedBy, runId });
+  for (const s of plan.steps.filter((x) => ['skip', 'defer'].includes(x.decision))) results.push({ id: s.id, repo: s.repo, tier: s.tier, status: s.decision === 'defer' ? 'deferred' : 'skipped', reason: s.reason, skippedBy: s.skippedBy, ...(s.lastResult !== undefined ? { lastResult: s.lastResult } : {}), runId });
   if (results.length) append(root, state.id, 'gate.step', { runId, steps: results }, null);
   saveProgress();
   say(`run ${runId}: ${queue.length} to run, ${results.filter((r) => r.status === 'reused').length} reused, ${results.length - results.filter((r) => r.status === 'reused').length} skipped or deferred`);
