@@ -1311,10 +1311,12 @@ export function recordReview(root, options) {
   // The engine classifies every finding against the tree and round it was recorded on (engine/review-policy.mjs); the
   // reviewer's own `classified` field is replaced.
   closure = stampClosure(state, closure, { mode, since: reviewerHandoff.deltaFrom ?? null });
+  const recorded = (state.reviews ?? []).find((r) => r.handoff === round);
   const revealed = (state.reviews ?? []).find((r) => r.handoff === round && r.revealed);
-  if (!revealed && !delta && closure.priorFindings?.length) throw refuse('`priorFindings` are listed only after your own blind closure is recorded; record the closure without them first');
-  if (revealed && canonical(stripStamp(revealed.closure.findings)) !== canonical(stripStamp(closure.findings))) throw refuse('your own findings were recorded blind and cannot change after earlier rounds were revealed; only add `priorFindings`');
-  if (revealed && canonical(revealed.closure.reportedIssues ?? []) !== canonical(closure.reportedIssues ?? [])) throw refuse('historical report verdicts were recorded blind and cannot change after earlier rounds were revealed; only add priorFindings');
+  if (!recorded && !delta && closure.priorFindings?.length) throw refuse('`priorFindings` are listed only after your own blind closure is recorded; record the closure without them first');
+  const sealed = revealed ?? (closure.priorFindings?.length ? recorded : null);
+  if (sealed && canonical(stripStamp(sealed.closure.findings)) !== canonical(stripStamp(closure.findings))) throw refuse('your own findings were recorded blind and cannot change once `priorFindings` are added; only add `priorFindings`');
+  if (sealed && canonical(sealed.closure.reportedIssues ?? []) !== canonical(closure.reportedIssues ?? [])) throw refuse('historical report verdicts were recorded blind and cannot change once `priorFindings` are added; only add priorFindings');
   // Only findings that block are revealed (and must be verified); observations wait for a ticket, a move or a fix.
   const revealNow = !revealed && !delta && earlierBlocking(state, round).length > 0;
   return recordedTogether(root, state.id, () => {
@@ -1329,8 +1331,9 @@ export function recordReview(root, options) {
   // The closure is for the tree the reviewer was handed. It inspected gate evidence only if a passing gate on that tree
   // was in its bundle (0.1.5 and earlier handed a reviewer only after such a gate, so their handoffs carry no field).
   const gateEvidenceInspected = 'gate' in reviewerHandoff ? Boolean(reviewerHandoff.gate) : true;
+  const covered = reviewerHandoff.round === 'evidence-review' && (handed.criteria ?? []).filter((c) => !c.dropped).every((c) => (closure.criteria ?? []).some((m) => m?.id === c.id && EVIDENCE_KINDS.has(m.evidence?.kind))) && (handed.gate?.screenshots ?? []).filter((x) => !x.inspectedBefore).every((x) => (closure.screenshotsInspected ?? []).includes(x.sha256));
   let reviewerModel = optional(findHost(reviewerHandoff.runtime), 'roleModel')?.(reviewerHandoff, { home: home() }) ?? null;
-  append(root, state.id, 'review.recorded', { closure, file: dest, raw, handoff: round, mode, revealed: Boolean(revealed) || revealNow, provenance: provenance.status, session: reviewerHandoff.session ?? null, tree: reviewerHandoff.tree, gateRun: reviewerHandoff.gate ?? null, gateEvidenceInspected, handoffTree: reviewerHandoff.tree, handoffPatch: reviewerHandoff.patch, reviewerModel, impactGaps: (closure.findings ?? []).filter((f) => f?.category === 'impact-gap').length }, closure.reviewer);
+  append(root, state.id, 'review.recorded', { closure, file: dest, raw, handoff: round, mode, covered, revealed: Boolean(revealed) || revealNow, provenance: provenance.status, session: reviewerHandoff.session ?? null, tree: reviewerHandoff.tree, gateRun: reviewerHandoff.gate ?? null, gateEvidenceInspected, handoffTree: reviewerHandoff.tree, handoffPatch: reviewerHandoff.patch, reviewerModel, impactGaps: (closure.findings ?? []).filter((f) => f?.category === 'impact-gap').length }, closure.reviewer);
   append(root, state.id, 'review.round', roundData(state, reviewerHandoff, closure, { outcome: 'recorded', model: reviewerModel, revealed: Boolean(revealed) }), null);
   const after = loadState(root, state.id);
   const toVerify = delta ? [] : unverifiedPrior(after, after.review);

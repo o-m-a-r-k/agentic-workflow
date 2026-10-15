@@ -272,7 +272,7 @@ function reviewerEnded(root, id, h, label) {
   const recorded = (now.reviews ?? []).filter((r) => r.handoff === h.bundle).at(-1);
   if (recorded) {
     const unreached = unreachedOf(recorded.closure);
-    if (unreached.length) process.stderr.write(`${label} reviewer ${h.agent} recorded a closure that names scope it did not reach: ${unreached.slice(0, 5).join('; ')}${unreached.length > 5 ? ` and ${unreached.length - 5} more` : ''}. That round does not count as the full audit (the next reviewer is handed a ${roundMode(now)} round and sees this list).\n`);
+    if (unreached.length && recorded.covered !== true) process.stderr.write(`${label} reviewer ${h.agent} recorded a closure that names scope it did not reach: ${unreached.slice(0, 5).join('; ')}${unreached.length > 5 ? ` and ${unreached.length - 5} more` : ''}. That round does not count as the full audit (the next reviewer is handed a ${roundMode(now)} round and sees this list).\n`);
     return;
   }
   if ((now.reviewsRefused ?? []).some((r) => r.handoff === h.bundle)) return;

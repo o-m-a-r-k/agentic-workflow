@@ -53,10 +53,13 @@ export function recordedRoundsOf(state) {
 // reviewer should see beside the course. A complete full audit judged the whole change, so everything before it is moot.
 // Named failure (I-69): a launched reviewer stopped early and recorded `notReached`; the round counted as the attempt's one
 // full audit and nothing showed the owner, the next reviewer or the delivered comment what was never looked at.
+// A recorded round that counts as an audit: an evidence round the engine found covered, or one that named nothing unreached.
+export const auditReached = (r) => r.covered === true || !unreachedOf(r.closure).length;
+
 export function unreachedSince(state) {
   const handoffs = new Map((state.handoffs ?? []).filter((h) => h.role === 'reviewer').map((h) => [h.bundle, h]));
   const rounds = recordedRoundsOf(state);
-  const lastAudit = rounds.map((r) => handoffs.get(r.handoff)).findLastIndex((h, i) => h && (h.mode ?? 'full') === 'full' && !unreachedOf(rounds[i].closure).length);
+  const lastAudit = rounds.map((r) => handoffs.get(r.handoff)).findLastIndex((h, i) => h && (h.mode ?? 'full') === 'full' && auditReached(rounds[i]));
   return rounds.slice(lastAudit + 1).map((r) => ({ round: r.handoff ? String(r.handoff).replace(/^.*\//, '').replace(/\.json$/, '') : null, reviewer: r.reviewer ?? r.closure?.reviewer ?? null, mode: handoffs.get(r.handoff)?.mode ?? 'full', notReached: unreachedOf(r.closure) })).filter((x) => x.notReached.length);
 }
 
@@ -76,7 +79,11 @@ export function roundMode(state, { evidence } = {}) {
   // later round was a delta and the unreached scope was never looked at. Only a round that reached everything is an audit.
   // D7: this makes the next round of an attempt that already recorded such a closure a full one, so it applies to attempts
   // admitted at 0.7.4 or later; the others keep counting it.
-  const reached = obligationSince(state, '0.7.4') ? (r) => !unreachedOf(r.closure).length : () => true;
+  // Named failure (I-133): an evidence round that mapped every criterion to the gate's evidence and opened every new
+  // screenshot (what the engine checks: `covered`, stamped when it is recorded) wrote caveats under `notReached` (a check
+  // its criteria exclude, "may not change the tree"), lost its audit status, and the next round after a one-family repair
+  // was handed full, with 94 screenshots, 51 of them inspected before.
+  const reached = obligationSince(state, '0.7.4') ? auditReached : () => true;
   const audits = recordedRoundsOf(state).filter(reached).map((r) => handoffs.get(r.handoff)).filter((h) => h && (h.mode ?? 'full') === 'full');
   if (evidence ?? gatePassedForCurrentTree(state).ok) return audits.some(isEvidenceRound) ? 'delta' : 'full';
   // A strategist's `delta-review` decision (state.strategy.nextRound) makes the next code review a delta, once a recorded
