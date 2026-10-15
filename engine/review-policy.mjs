@@ -59,8 +59,10 @@ export const auditReached = (r) => r.covered === true || !unreachedOf(r.closure)
 export function unreachedSince(state) {
   const handoffs = new Map((state.handoffs ?? []).filter((h) => h.role === 'reviewer').map((h) => [h.bundle, h]));
   const rounds = recordedRoundsOf(state);
-  const lastAudit = rounds.map((r) => handoffs.get(r.handoff)).findLastIndex((h, i) => h && (h.mode ?? 'full') === 'full' && auditReached(rounds[i]));
-  return rounds.slice(lastAudit + 1).map((r) => ({ round: r.handoff ? String(r.handoff).replace(/^.*\//, '').replace(/\.json$/, '') : null, reviewer: r.reviewer ?? r.closure?.reviewer ?? null, mode: handoffs.get(r.handoff)?.mode ?? 'full', notReached: unreachedOf(r.closure) })).filter((x) => x.notReached.length);
+  const lastAudit = rounds.map((r) => handoffs.get(r.handoff)).findLastIndex((h, i) => h && (h.mode ?? 'full') === 'full' && !unreachedOf(rounds[i].closure).length);
+  // What a round named as not reached is shown whether or not the round counted as the audit (I-133: a covered evidence
+  // round still counts; the person and the next reviewer still see what it named).
+  return rounds.slice(lastAudit + 1).map((r) => ({ round: r.handoff ? String(r.handoff).replace(/^.*\//, '').replace(/\.json$/, '') : null, reviewer: r.reviewer ?? r.closure?.reviewer ?? null, mode: handoffs.get(r.handoff)?.mode ?? 'full', notReached: unreachedOf(r.closure), ...(r.covered === true ? { covered: true } : {}) })).filter((x) => x.notReached.length);
 }
 
 // What the owner does when the reviewer it handed (and the engine launched) is gone and recorded no closure. Named failure

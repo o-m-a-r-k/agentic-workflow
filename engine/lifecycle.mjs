@@ -751,7 +751,7 @@ export function handoff(root, role, options) {
     followUps: role === 'reviewer' ? followUpsOf(state) : undefined,
     // Named failure (I-69): scope an earlier recorded round said it did not reach (`notReached`) reached no later reader, so
     // the next reviewer could not know what was never looked at. Coverage, not findings: a full round stays blind.
-    unreachedBefore: role === 'reviewer' && unreachedSince(state).length ? { note: `Scope an earlier recorded round said it did not reach, and no complete full audit has covered since; ${obligationSince(state, '0.7.4') ? 'none of these rounds counted as an audit' : 'on this attempt (admitted before 0.7.4) a full round that named such scope still counted as its audit'}. It adds to your goal and narrows nothing: what an earlier reviewer did not reach was not cleared.`, rounds: unreachedSince(state) } : undefined,
+    unreachedBefore: role === 'reviewer' && unreachedSince(state).length ? { note: `Scope an earlier recorded round said it did not reach, and no complete full audit has covered since; ${obligationSince(state, '0.7.4') ? (unreachedSince(state).some((x) => x.covered) ? 'an evidence round that mapped every criterion and opened every new screenshot still counted as the audit, and the others did not' : 'none of these rounds counted as an audit') : 'on this attempt (admitted before 0.7.4) a full round that named such scope still counted as its audit'}. It adds to your goal and narrows nothing: what an earlier reviewer did not reach was not cleared.`, rounds: unreachedSince(state) } : undefined,
     mode: role === 'reviewer' ? mode : undefined,
     // A repair handoff: the open findings that block, grouped by family.
     repair: role === 'implementer' ? repair ?? undefined : undefined,
