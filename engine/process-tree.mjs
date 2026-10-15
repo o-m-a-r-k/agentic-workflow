@@ -88,3 +88,12 @@ export async function endProcessTree(leader, { graceMs = STOP_GRACE_MS, killMs =
     await sleep(POLL_MS);
   }
 }
+
+// In words, what `endProcessTree` left running: why each process could not be ended, and how to end it by hand.
+export function leftOver({ left, denied }) {
+  const named = (pids) => pids.map((pid) => `pid ${pid}`).join(', ');
+  const survived = left.filter((pid) => !denied.includes(pid));
+  const why = [...(denied.length ? [`not permitted to signal ${named(denied)} (a sandbox, or another user's process)`] : []), ...(survived.length ? [`${named(survived)} survived SIGTERM and SIGKILL (${(STOP_GRACE_MS + STOP_KILL_MS) / 1000}s)`] : [])].join('; ');
+  const them = left.length === 1 ? 'it' : 'them';
+  return { why, byHand: `End ${them} from a shell that may signal ${them} (\`kill -9 ${left.join(' ')}\`)` };
+}

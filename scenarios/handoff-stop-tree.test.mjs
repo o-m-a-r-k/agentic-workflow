@@ -1,6 +1,7 @@
 // Named failure (I-128): `wf handoff stop` reported a launched role stopped while the role's process tree kept running.
 // It sent one SIGTERM to the role's process group, ignored a signal that did not arrive, did not look again and recorded
-// `stopped`. The fake runtime below starts a long-running child of its own, as a real runtime does for each command: one in
+// `stopped`. The interrupt and error paths of a foreground `wf handoff run` (follow in engine/launch.mjs) had the same flaw:
+// one SIGTERM to the group, then a wait for the role itself. The fake runtime below starts a long-running child of its own, as a real runtime does for each command: one in
 // the role's process group, one that left it (a group of its own, with a child of its own). The same fake runs as the Codex
 // and as the Claude binary: both are launched the same way (engine/launch.mjs).
 import { test } from 'node:test';
@@ -10,7 +11,7 @@ import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { ok, singleRepoProject, state, wf, write, WF } from './helpers.mjs';
 import { endProcessTree, processSeams } from '../engine/process-tree.mjs';
-import { stopRole } from '../engine/launch.mjs';
+import { stopRole, waitRole } from '../engine/launch.mjs';
 
 const KID = `import fs from 'node:fs'; import path from 'node:path'; import { spawn } from 'node:child_process'; import { fileURLToPath } from 'node:url';
 const [name, dir, stubborn, grandchild] = process.argv.slice(2);
@@ -102,20 +103,62 @@ test('a role and its children that ignore SIGTERM are ended by force; the stop r
 
 // The wrapper of the report: `wf handoff run` was still in the foreground, following the role, when the stop came from
 // another process. Both had to end, the wrapper by itself once the role it follows is gone.
-test('a stop from another process ends the role under a foreground wf handoff run, which then returns', { timeout: 30_000 }, async () => {
-  const p = prepared('codex');
+// A foreground `wf handoff run` in its own process, following the role until something ends it.
+function foreground(p) {
   const env = { ...process.env, ...p.env, WF_CONFIG_HOME: path.join(p.base, '.wfhome'), WF_EVIDENCE_FLAGS: '0' };
   for (const key of ['CLAUDE_CODE_SESSION_ID', 'CLAUDECODE', 'AI_AGENT', 'GROK_SESSION_ID']) delete env[key];
-  const wrapper = spawn(process.execPath, [WF, 'handoff', 'run', '--agent', 'p', '--attempt', p.id, '--json'], { cwd: p.root, env, stdio: 'ignore' });
+  const wrapper = spawn(process.execPath, [WF, 'handoff', 'run', '--agent', 'p', '--attempt', p.id, '--json'], { cwd: p.root, env, stdio: ['ignore', 'pipe', 'pipe'] });
+  let out = '', err = '';
+  wrapper.stdout.on('data', (b) => { out += b; });
+  wrapper.stderr.on('data', (b) => { err += b; });
   const closed = new Promise((resolve) => wrapper.once('close', (code) => resolve(code)));
+  const within = (ms) => Promise.race([closed, new Promise((r) => setTimeout(() => r('still running'), ms))]);
+  return { wrapper, within, out: () => out, err: () => err };
+}
+
+test('a stop from another process ends the role under a foreground wf handoff run, which then returns', { timeout: 30_000 }, async () => {
+  const p = prepared('codex');
+  const run = foreground(p);
   const pids = await running(p.dir);
   try {
-    assert.equal(wrapper.exitCode, null, 'the wrapper is following the role');
+    assert.equal(run.wrapper.exitCode, null, 'the wrapper is following the role');
     ok(wf(p.root, ['handoff', 'stop', '--agent', 'p', '--attempt', p.id], { env: p.env }));
     assert.deepEqual(survivors(pids), []);
-    assert.equal(await Promise.race([closed, new Promise((r) => setTimeout(() => r('still running'), 10_000))]), 1, 'the wrapper returned, failed');
+    assert.equal(await run.within(10_000), 1, 'the wrapper returned, failed');
     assert.equal(state(p.root, p.id).handoffs.at(-1).launch.status, 'failed');
-  } finally { endAll(pids); if (wrapper.exitCode === null) wrapper.kill('SIGKILL'); }
+  } finally { endAll(pids); if (run.wrapper.exitCode === null) run.wrapper.kill('SIGKILL'); }
+});
+
+// Named failure (I-128, interrupt path): an interrupted foreground run sent one SIGTERM to the role's group; the child that
+// had left the group (and its own child) outlived the command that reported the role cancelled.
+for (const runtime of ['codex', 'claude']) {
+  test(`${runtime}: an interrupted foreground wf handoff run has ended the whole tree, the child that left the group included, when it returns`, { timeout: 30_000 }, async () => {
+    const p = prepared(runtime);
+    const run = foreground(p);
+    const pids = await running(p.dir);
+    try {
+      run.wrapper.kill('SIGTERM');
+      assert.equal(await run.within(10_000), 1, run.err());
+      assert.deepEqual(survivors(pids), [], 'nothing of the launched tree is left once the command has returned');
+      assert.equal(JSON.parse(run.out()).status, 'failed');
+      assert.match(run.err(), /the role launch was interrupted/);
+      assert.equal(state(p.root, p.id).handoffs.at(-1).launch.status, 'failed');
+    } finally { endAll(pids); if (run.wrapper.exitCode === null) run.wrapper.kill('SIGKILL'); }
+  });
+}
+
+// Named failure (I-128, interrupt path): after the one SIGTERM the command waited for the role itself to exit, so a role that
+// ignored it held the interrupted command for as long as the role chose.
+test('an interrupted foreground wf handoff run does not hang on a role that ignores SIGTERM: the tree is killed and it returns', { timeout: 30_000 }, async () => {
+  const p = prepared('codex', { stubborn: true });
+  const run = foreground(p);
+  const pids = await running(p.dir);
+  try {
+    run.wrapper.kill('SIGINT');
+    assert.equal(await run.within(20_000), 1, run.err());
+    assert.deepEqual(survivors(pids), []);
+    assert.equal(state(p.root, p.id).handoffs.at(-1).launch.status, 'failed');
+  } finally { endAll(pids); if (run.wrapper.exitCode === null) run.wrapper.kill('SIGKILL'); }
 });
 
 // A stop that cannot end the tree says so and records nothing: this process is not permitted to signal it (a sandbox, or
@@ -155,4 +198,36 @@ test('without a process listing the role\'s own group is still ended and verifie
     assert.equal(gone(pids.role), true);
     assert.equal(gone(pids.same), true, 'a member of the role\'s group');
   } finally { processSeams.table = table; endAll(pids); }
+});
+
+// An interrupted run that cannot end the tree says so, returns at once (it does not wait for a role it cannot signal) and
+// records nothing: the launch stays running, which is what is true. The handler follow() installs is called as the signal
+// would call it.
+test('an interrupted run that cannot signal the tree returns, says what is still running and records nothing', { timeout: 30_000 }, async () => {
+  const p = prepared('codex');
+  ok(wf(p.root, ['handoff', 'run', '--agent', 'p', '--minutes', '0.02', '--attempt', p.id, '--json'], { env: p.env }));
+  const pids = await running(p.dir);
+  const real = processSeams.kill, write = process.stderr.write;
+  process.env.WF_EVIDENCE_FLAGS = '0';
+  let said = '';
+  try {
+    processSeams.kill = (target, signal) => {
+      if (signal === 0) return real(target, 0);
+      throw Object.assign(new Error('operation not permitted'), { code: 'EPERM' });
+    };
+    process.stderr.write = (chunk, ...rest) => { said += chunk; return write.call(process.stderr, chunk, ...rest); };
+    const before = state(p.root, p.id).handoffs.at(-1).launch;
+    const known = new Set(process.listeners('SIGTERM'));
+    const following = waitRole(p.root, { attempt: p.id, agent: 'p' });
+    await new Promise((r) => setTimeout(r, 400));
+    const handler = process.listeners('SIGTERM').find((l) => !known.has(l));
+    assert.ok(handler, 'the run is following the role');
+    handler();
+    const result = await Promise.race([following, new Promise((r) => setTimeout(() => r('hung'), 10_000))]);
+    assert.deepEqual([result.status, result.exitCode, result.pid], ['running', 1, pids.role]);
+    assert.match(said, new RegExp(`the role launch was interrupted, and it is still running: not permitted to signal pid ${pids.role}\\b`));
+    assert.match(said, /Nothing was recorded as finished\./);
+    assert.deepEqual(state(p.root, p.id).handoffs.at(-1).launch, before, 'no finished record');
+    assert.deepEqual(survivors(pids), NAMES);
+  } finally { processSeams.kill = real; process.stderr.write = write; endAll(pids); }
 });
