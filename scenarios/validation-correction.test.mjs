@@ -145,5 +145,14 @@ test('a check frozen at admission that is itself wrong is corrected with the per
   const run = ok(wf(f.root, ['gate', '--attempt', f.e.id, '--json'])).json();
   assert.match(logOf(run, 'unit'), /corrected-admission-check/);
   assert.deepEqual(run.steps.map((x) => x.id), ['unit'], 'it runs in place of the original, once');
+  // The correction was itself wrong: a second one is still the person's decision, and the gate runs it (review of 0.7.8: a
+  // second correction skipped the person and left the gate refusing for good).
+  commitIn(f.wt, { '.workflow/project.yaml': yaml({ version: 1, enabled: true, name: 'fixture', repos: [{ name: 'app', path: '.', base: 'main' }], gate: { steps: [{ id: 'unit', repo: 'app', run: 'test -f src/a.txt && echo corrected-twice', inputs: ['src/**'] }] } }) });
+  const second = wf(f.root, ['validation', 'correct', '--steps', 'unit', '--reason', 'the first correction missed a case', '--attempt', f.e.id], { ownerSilent: true });
+  assert.equal(second.code, 75, 'the second correction asks the person too');
+  ok(correct(f, ['--steps', 'unit', '--reason', 'the first correction missed a case']));
+  assert.deepEqual(state(f.root, f.e.id).validationCorrections.map((c) => c.from[0].admission), [true, true]);
+  review(f, 'code-2');
+  assert.match(logOf(ok(wf(f.root, ['gate', '--attempt', f.e.id, '--json'])).json(), 'unit'), /corrected-twice/);
 });
 

@@ -9,7 +9,6 @@
 // except F3 if a follow-up ticket already has it") was not a choice, so the question stayed open. Each item is now its own short question,
 // with two choices, and an answer in the person's own words is recorded as theirs.
 import { createDecision, decisionFor, deliverCoreDecision } from './approve.mjs';
-import { observations, placementLevel, severityLevel } from './review-policy.mjs';
 import { refuse } from './util.mjs';
 
 export const LEAVE = 'let it leave';
@@ -27,7 +26,8 @@ export const RULE_SHORT = 'medium and high are fixed in this delivery; a low one
 // The first sentence of a long text, for a question the person reads on a phone; the whole text stays in the record.
 const firstSentence = (s) => {
   const t = String(s ?? '').replace(/^left by [^:]+:\s*/, '').replace(/^F\d+:\s*/, '').trim();
-  const end = t.search(/[.;](\s|$)/);
+  // The end of the first sentence: a full stop or semicolon after a word longer than two letters (not "e.g", "i.e").
+  const end = t.search(/(?<![\s.][A-Za-z]{1,2})[.;](\s|$)/);
   const cut = end > 0 && end < 200 ? t.slice(0, end) : t;
   return cut.length > 200 ? `${cut.slice(0, 197)}...` : cut;
 };
@@ -73,7 +73,11 @@ export function leavingDecisions(root, state, items, { verb, reason = '', option
     asked.push({ x, d: made });
     current = { ...current, decisions: [...(current.decisions ?? []), made] };
   }
-  if (answered.length) throw refuse(`not ${verb}: the person answered ${answered.map(({ x, d }) => `${x.ref} "${d.approved.words ?? d.approved.choice}" (${d.id})`).join(', ')}: follow that answer and leave ${answered.length > 1 ? 'them' : 'it'} out of this command`, 'fix what they chose to fix; to ask again (the situation changed), withdraw the answer first: `wf decisions withdraw <id> --reason "<what changed>"`', { id: 'leave:person-answered' });
+  if (answered.length) {
+    const fixNow = answered.filter(({ d }) => d.approved.choice === FIX);
+    const words = answered.filter(({ d }) => d.approved.choice !== FIX);
+    throw refuse(`not ${verb}: ${[fixNow.length ? `the person chose to fix ${fixNow.map(({ x, d }) => `${x.ref} (${d.id})`).join(', ')} now` : '', words.length ? `the person answered ${words.map(({ x, d }) => `${x.ref} in their own words, "${d.approved.words ?? d.approved.choice}" (${d.id})`).join(', ')}, which is neither choice` : ''].filter(Boolean).join('; ')}`, `${fixNow.length ? 'fix what they chose to fix and leave it out of this command' : ''}${fixNow.length && words.length ? '; ' : ''}${words.length ? `follow their words: if they mean "fix now", fix it; if they mean "let it leave", withdraw the answer with their words as the reason (\`wf decisions withdraw <id> --reason "<their words>"\`) and ask again with the two options` : ''}`, { id: 'leave:person-answered' });
+  }
   if (asked.length) {
     const fix = (x) => (typeof explain?.[x.ref]?.fix === 'string' && explain[x.ref].fix.trim() ? explain[x.ref].fix.trim() : 'fixed in this delivery (a fix pass, a delta review and the gate)');
     const lines = asked.map(({ x, d }) => `  ${d.id}  header "${x.ref}"\n      question: "${state.id} ${d.id}: ${d.summary}"\n      options: "${LEAVE}" (${verb === 'ticketed' ? 'tracked as a follow-up ticket' : 'listed as a known issue in the delivery comment'}) | "${FIX}" (${fix(x)})\n      then: wf approve ${d.id} --from-question --attempt ${state.id}`);
@@ -84,9 +88,3 @@ export function leavingDecisions(root, state, items, { verb, reason = '', option
 
 // The rating facts of a discovered issue for the person's question: its reporter and every re-rating.
 export const discoveredRating = (d) => ({ ratedBy: d.foundBy ? `${/^left by /.test(d.summary ?? '') ? 'its implementer ' : ''}${d.foundBy}` : d.by ?? null, ratings: (d.rated ?? []).map((r) => ({ from: r.from, to: r.to, by: r.by, reason: r.reason })), where: d.where ?? null });
-
-// Open low review observations and discovered issues of the attempt, by ref.
-export const otherOpenLow = (state) => [
-  ...observations(state).filter((f) => placementLevel(state, f) === 'low').map((f) => f.ref),
-  ...(state.discovered ?? []).filter((d) => d.status === 'open' && d.kind !== 'bookkeeping' && !(typeof d.invariant === 'string' && d.invariant.trim()) && severityLevel(d.severity) === 'low').map((d) => d.id),
-];

@@ -6,7 +6,7 @@
 // this module only records where an unfixed one went: a follow-up ticket (a raw tracker readback) or a sibling attempt.
 // Placement is not obligation: nothing broken is dropped, but where a fix lives can change. A defect the change caused or
 // one on a critical boundary leaves the delivery batch only with the owner's `wf approve` (kind move-out-of-batch).
-// 0.7.7 (D17): medium and high never leave; a low one leaves only with the person's yes (engine/leaving.mjs).
+// 0.7.7 (D17): medium and high never leave; a low one leaves only with the person's answer, one short question per item (D18, engine/leaving.mjs).
 import path from 'node:path';
 import { actor, openState } from './attempt.mjs';
 import { append, attemptDir, loadState, recordedTogether } from './ledger.mjs';
@@ -52,7 +52,7 @@ function movable(f) {
 }
 
 // The items a placement names: review findings (`reviewer:F1`) and discovered issues (`D3`) together, so every low item
-// that leaves is put to the person in one question (D17).
+// that leaves is put to the person in the same panel, one short question per item (D18).
 function leavingItems(state, refs) {
   return refs.map((ref) => {
     if (/^D\d+$/.test(ref)) {
@@ -128,7 +128,7 @@ export function moveOut(root, options, refs, { to, reason }) {
 }
 
 // A follow-up ticket for one or more open findings or discovered issues (`--finding a,b,D3`: one tracker issue may cover a
-// family), with the tracker's raw readback of the created issue. Only low items leave, with the person's yes (D17).
+// family), with the tracker's raw readback of the created issue. By default only low items leave, with the person's answer (D17, D18).
 export function completeScopeTicket(root, options) {
   const opened = openState(root, options);
   // Named failure (I-109): the follow-up ticket's readback was written inside the transaction but recorded in the manifest only when

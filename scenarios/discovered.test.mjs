@@ -167,7 +167,7 @@ test('0.7.0: a deferral is the owner\'s confirmed decision: per entry, used once
   }
   const declined = close(1, [], silent);
   assert.notEqual(declined.code, 0);
-  assert.match(declined.err, /the person answered D1 "fix now" \(A1\)/);
+  assert.match(declined.err, /the person chose to fix D1 \(A1\) now/);
   assert.equal(fs.readFileSync(path.join(root, '..', 'refusals.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l).id).at(-1), 'leave:person-answered', 'nothing to ask: the person has answered');
   assert.equal(state(root, id).discovered[0].status, 'open');
   assert.equal(state(root, id).decisions.length, 1, 'asking again made no new decision');

@@ -90,7 +90,7 @@ test('low items leave only with the person\'s answer: one short question per ite
   const refused = run(p, ['scope', 'defer', '--finding', `r1:F2,${d2}`]);
   assert.notEqual(refused.code, 0, 'a fix-now answer lets nothing in the command leave');
   assert.equal(refusals(p).at(-1).id, 'leave:person-answered');
-  assert.match(refused.err, /the person answered r1:F2 "fix now"/);
+  assert.match(refused.err, /the person chose to fix r1:F2 \(A\d+\) now/);
   assert.equal(state(p.root, p.id).discovered.find((x) => x.id === d2).status, 'open');
   ok(run(p, ['scope', 'defer', '--finding', d2]));
   const s = state(p.root, p.id);
@@ -155,7 +155,7 @@ test('the strategist cannot queue a medium or high item for a ticket', async () 
   for (const items of [['r1:F1'], [d1], ['r1:F2', 'r1:F1']]) {
     const r = wf(p.root, ['strategy', 'record', '--closure', strategistClosure(p.base, h.bundle, closure(items)).file, '--attempt', p.id], silent);
     assert.notEqual(r.code, 0, items.join(','));
-    assert.match(r.err, /medium or high: high: never leaves [^;]*; medium: never leaves [^;]*; low: leaves only with the person's answer/);
+    assert.match(r.err, /at a level the project never lets leave: high: never leaves [^;]*; medium: never leaves [^;]*; low: leaves only with the person's answer/);
   }
   ok(wf(p.root, ['strategy', 'record', '--closure', strategistClosure(p.base, h.bundle, closure(['r1:F2'])).file, '--attempt', p.id]));
 });

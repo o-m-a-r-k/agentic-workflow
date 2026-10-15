@@ -25,23 +25,23 @@ function sharedInfraTouched(repo, files) {
 }
 
 // One entry per repo of the attempt: how far its base moved past the worktree, and what that touches.
-// The commits this project's workflow delivered to a repo's base (every attempt's recorded delivery).
-function deliveredCommits(root, repoName) {
-  const out = new Set();
+// The commits this project's workflow delivered, per repo (every attempt's recorded delivery), in one pass over the ledgers.
+function deliveredHeads(root) {
+  const out = {};
   for (const id of listAttempts(root)) {
     try {
-      const c = loadState(root, id).delivery?.repos?.[repoName]?.commit;
-      if (typeof c === 'string' && /^[0-9a-f]{7,40}$/.test(c)) out.add(c);
+      for (const [repo, r] of Object.entries(loadState(root, id).delivery?.repos ?? {})) if (typeof r?.commit === 'string' && /^[0-9a-f]{7,40}$/.test(r.commit)) (out[repo] ??= new Set()).add(r.commit);
     } catch {
       // a damaged ledger names nothing delivered
     }
   }
-  return [...out];
+  return Object.fromEntries(Object.entries(out).map(([k, v]) => [k, [...v]]));
 }
 
 export function baseStatus(root, state, { fetch = true } = {}) {
   const cfg = loadConfig(root);
   const out = [];
+  let delivered = null; // every attempt's delivered commits, read once, on the first repo whose base moved (I-119)
   for (const [name, r] of Object.entries(state.repos)) {
     const repo = cfg.repos.find((x) => x.name === name);
     if (!repo || !fs.existsSync(r.worktree)) continue;
@@ -59,8 +59,9 @@ export function baseStatus(root, state, { fetch = true } = {}) {
       // I-119: commits the base gained that no workflow delivery of this project covers (merged by hand, so no gate passed
       // them). Named failure (field): a change merged by hand after its gates failed made the base red, and the next
       // attempt's gate failed on it with nothing saying the failures came from the base. Information, never a stop.
-      const delivered = deliveredCommits(root, name).filter((c) => git(r.worktree, ['cat-file', '-t', c], { allowFail: true }) === 'commit');
-      const unproven = git(r.worktree, ['rev-list', '--no-merges', `${own}..${tip}`, ...(delivered.length ? ['--not', ...delivered] : [])], { allowFail: true }).split('\n').filter(Boolean);
+      delivered ??= deliveredHeads(root);
+      const shipped = (delivered[name] ?? []).filter((c) => git(r.worktree, ['cat-file', '-t', c], { allowFail: true }) === 'commit');
+      const unproven = git(r.worktree, ['rev-list', '--no-merges', `${own}..${tip}`, ...(shipped.length ? ['--not', ...shipped] : [])], { allowFail: true }).split('\n').filter(Boolean);
       if (unproven.length) entry.unproven = { count: unproven.length, subjects: unproven.slice(0, 3).map((c) => git(r.worktree, ['log', '-1', '--format=%s', c], { allowFail: true })) };
     }
     out.push(entry);

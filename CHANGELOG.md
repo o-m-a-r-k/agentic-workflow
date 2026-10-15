@@ -27,6 +27,10 @@ Release notes, newest first, then every fix that came from a failure in the work
 - I-125: a check frozen at admission that is itself wrong can be corrected with `wf validation correct --steps <id>`, as
   the person's decision (kind `override-gate`); the original definition stays in the record, and a fresh review and the
   full gate follow, as for a supplemental correction.
+- An answer in the person's own words never acts as a choice anywhere: an escalation answered in words stays open, and
+  the next handoff asks it again quoting the words.
+- Upgrading: a 0.7.7 deferral question (one question for several items, key `deferred:<refs>`) is not read any more; the
+  next `wf scope defer` asks one question per item. Withdraw the old one with `wf decisions withdraw <id> --reason`.
 - Align the CLI package and both host plugin manifests at 0.7.8.
 
 Regression scenarios: `scenarios/decisions-per-item.test.mjs` (per-item questions and mixed answers; `--explain`; own words

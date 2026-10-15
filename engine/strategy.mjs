@@ -16,7 +16,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { acceptedTreeStands, actor, openState } from './attempt.mjs';
-import { approveHint, createDecision, questionFor } from './approve.mjs';
+import { approveHint, chose, createDecision, questionFor } from './approve.mjs';
 import { STRATEGY_DEFAULTS, ADAPTER_DIR, agentTypeFor, roleClass, trustedAdapter } from './config.mjs';
 import { append, attemptDir, loadState, recordedTogether } from './ledger.mjs';
 import { executionSettings } from './models.mjs';
@@ -28,7 +28,7 @@ import { computeSignals, courseLines, handedRounds, recordedRounds, roundMetrics
 import { introducedFindings } from './introduced.mjs';
 import { observations, placementLevel, severityLevel } from './review-policy.mjs';
 import { discoveredLevel } from './discovered.mjs';
-import { policyOf, RULE, ruleText } from './leaving.mjs';
+import { policyOf, ruleText } from './leaving.mjs';
 import { performSplit, resolveSplitItems } from './split.mjs';
 import { obligationSince } from './versions.mjs';
 import { detectOwner, hostChoice, isHost } from './hosts/index.mjs';
@@ -133,11 +133,15 @@ export function missedStreak(state, signals, nowMs = Date.now()) {
 
 // ---- The hold ----
 
+// The strategist's escalation still open: its latest question (a fresh one is asked after an answer in the person's own
+// words) that no choice has answered.
 const openEscalation = (state) => {
   const last = state.strategy.decisions.at(-1);
-  const d = last?.action === 'escalate' && last.escalation ? state.decisions.find((x) => x.id === last.escalation) : null;
-  return d && !d.approved ? d : null;
+  const first = last?.action === 'escalate' && last.escalation ? state.decisions.find((x) => x.id === last.escalation) : null;
+  const d = first ? state.decisions.filter((x) => x.kind === 'escalation' && x.key === first.key && !x.withdrawn).at(-1) : null;
+  return d && !chose(d) ? d : null;
 };
+const wordsOf = (d) => (d?.approved?.words ? `; the person answered ${d.id} in their own words, "${d.approved.words}": follow them, and if they mean one of the choices, ask again with exactly these options` : '');
 
 // A strategist handed and not yet decided (a launch the engine saw fail does not count) on an attempt still being worked:
 // `wf resume` tells the owner to wait for it. Information, not a refusal: the owner decides whether to wait. A handoff
@@ -157,7 +161,7 @@ export function strategyHold(root, state) {
   const cfg = adapterOf(root, state);
   if (switchedOff(cfg)) return null;
   const firing = roundsEscalation(handedRounds(state), cfg?.strategy ?? STRATEGY_DEFAULTS);
-  const owner = firing && !ownerDecision(state, firing)?.approved ? firing : null;
+  const owner = firing && !chose(ownerDecision(state, firing)) ? firing : null;
   const escalation = openEscalation(state);
   if (!owner && !escalation) return null;
   if (owner) {
@@ -189,10 +193,12 @@ export function requireOwnerDecision(root, state, role) {
   if (!hold) return;
   if (hold.owner) {
     recordEscalation(root, state, hold.owner);
-    const d = hold.ownerPending ?? createDecision(root, state, { kind: 'escalation', key: ownerDecisionKey(hold.owner), choices: OWNER_CHOICES, summary: `${hold.owner.summary}: continue | split | deliver-core | stop` });
-    throw refuse(`not handed: ${hold.owner.summary} (${d.id}); no ${role} starts until the owner decides`, `${approveHint(state, d)}. Bring the person the brief first (\`wf signals --attempt ${state.id}\`): the numbers, what keeps coming back, 2-3 options and your recommendation`, { id: 'strategy:owner-escalation' });
+    const answeredInWords = hold.ownerPending?.approved ? hold.ownerPending : null;
+    const d = hold.ownerPending && !hold.ownerPending.approved ? hold.ownerPending : createDecision(root, state, { kind: 'escalation', key: ownerDecisionKey(hold.owner), choices: OWNER_CHOICES, summary: `${hold.owner.summary}: continue | split | deliver-core | stop` });
+    throw refuse(`not handed: ${hold.owner.summary} (${d.id}); no ${role} starts until the owner decides${wordsOf(answeredInWords)}`, `${approveHint(state, d)}. Bring the person the brief first (\`wf signals --attempt ${state.id}\`): the numbers, what keeps coming back, 2-3 options and your recommendation`, { id: 'strategy:owner-escalation' });
   }
-  throw refuse(`not handed: the strategist escalated ${state.id} (${hold.escalation.id}: ${hold.escalation.summary}); no ${role} starts until the owner decides`, approveHint(state, hold.escalation), { id: 'strategy:escalated' });
+  const esc = hold.escalation.approved ? createDecision(root, state, { kind: 'escalation', key: hold.escalation.key, summary: hold.escalation.summary, choices: hold.escalation.choices }) : hold.escalation;
+  throw refuse(`not handed: the strategist escalated ${state.id} (${esc.id}: ${esc.summary}); no ${role} starts until the owner decides${wordsOf(hold.escalation.approved ? hold.escalation : null)}`, approveHint(state, esc), { id: 'strategy:escalated' });
 }
 
 // ---- `wf signals` ----
@@ -210,7 +216,7 @@ export function signalsReport(root, state) {
     ...signals,
     strategy: {
       applies: strategyApplies(state, cfg),
-      escalation: { everyRounds: c.reviewRoundsEscalate, firing: firing ? { ...firing, answeredBy: answer?.approved ? answer.id : null } : null },
+      escalation: { everyRounds: c.reviewRoundsEscalate, firing: firing ? { ...firing, answeredBy: chose(answer) ? answer.id : null } : null },
       decisions: decisionsOf(state, signals, nowMs),
       missedPredictionsInARow: missedStreak(state, signals, nowMs),
       // What the plan expected, and each re-plan's expectation after it (`wf criteria amend`).
@@ -311,7 +317,8 @@ export function strategistHandoff(root, state, options) {
       }
     })(),
     // The person's rule for what may leave the delivery (D17, 2026-10-14).
-    severityRule: RULE,
+    severityRule: ruleText(policyOf(cfg)),
+    severityScale: { projectExamples: cfg.severity ?? null, leaving: policyOf(cfg) },
     earlierDecisions: state.strategy.decisions.map((d) => ({ id: d.id, at: d.at, action: d.action, rationale: d.rationale, handedBecause: d.handedBecause ?? null, prediction: d.prediction, outcome: predictionStatus(state, d, signals, nowMs) })),
     invariants: cfg.invariants ? path.resolve(root, ADAPTER_DIR, cfg.invariants) : null,
     roleAppendix: appendix && fs.existsSync(appendix) ? appendix : null,
@@ -426,7 +433,7 @@ export function recordStrategy(root, options) {
     };
     const policy = policyOf(adapterOf(root, state));
     const kept = closure.items.filter((ref) => policy[levelOf(ref)] === 'never');
-    if (kept.length) throw refuse(`${kept.join(', ')} ${kept.length > 1 ? 'are' : 'is'} medium or high: ${ruleText(policy)}`, 'write a closure that fixes them (cluster, consolidate or split into a sibling attempt of the batch)', { id: 'strategy:ticket-not-low' });
+    if (kept.length) throw refuse(`${kept.join(', ')} ${kept.length > 1 ? 'are' : 'is'} at a level the project never lets leave: ${ruleText(policy)}`, 'write a closure that fixes them (cluster, consolidate or split into a sibling attempt of the batch)', { id: 'strategy:ticket-not-low' });
   }
   const id = `S${state.strategy.decisions.length + 1}`;
   const outcomes = state.strategy.decisions.map((d) => ({ d, o: predictionStatus(state, d, signals, nowMs) })).filter(({ d, o }) => !state.strategy.outcomes[d.id] && ['held', 'missed'].includes(o.status)).map(({ d, o }) => ({ decision: d.id, status: o.status, observed: o.observed }));

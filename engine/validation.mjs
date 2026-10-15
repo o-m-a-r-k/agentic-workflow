@@ -30,11 +30,12 @@ export function gateAdapter(root, state) {
     const candidate = trustedAdapter(root, state, record.commit);
     for (const selected of record.steps) {
       const step = candidate.gate.steps.find((s) => s.id === selected.id);
+      const wasAdmission = (state.validationCorrections ?? []).some((c) => (c.from ?? []).some((f) => f.id === selected.id && f.admission));
       if (!step || canonical(step) !== canonical(selected.definition)) throw refuse('supplemental validation no longer matches its recorded committed definition');
       // I-125: an admission step the person let the attempt correct runs at its corrected definition, in its place.
       const at = steps.findIndex((s) => s.id === step.id);
       if (at >= 0) {
-        if (!(record.correctedFrom ?? []).some((f) => f.id === step.id && f.admission)) throw refuse('supplemental validation no longer matches its recorded committed definition');
+        if (!wasAdmission) throw refuse('supplemental validation no longer matches its recorded committed definition');
         steps[at] = step;
       } else steps.push({ ...step, deferrable: false });
     }
@@ -79,7 +80,9 @@ async function registerValidation(root, options, correcting) {
     // I-125 (0.7.8): an admission step (frozen with the adapter at admission) may be corrected too, as the person's decision:
     // a frozen check that is itself wrong (it read a failed request as empty data) otherwise blocked the full gate for good.
     const base = trustedAdapter(root, state);
-    const admission = correcting ? ids.filter((id) => !registered.some((r) => r.id === id) && base.gate.steps.some((s) => s.id === id)) : [];
+    // A step frozen at admission stays one through every correction (independent review of 0.7.8: a second correction was
+    // taken for a supplemental one, skipped the person and left the gate refusing for good).
+    const admission = correcting ? ids.filter((id) => base.gate.steps.some((s) => s.id === id)) : [];
     const unknown = correcting ? ids.filter((id) => !registered.some((r) => r.id === id) && !admission.includes(id)) : [];
     if (unknown.length) throw refuse(`${unknown.join(', ')} ${unknown.length > 1 ? 'are' : 'is'} neither a registered supplemental validation step nor an admission step (registered: ${registered.map((r) => r.id).join(', ') || 'none'}); a new one is registered with \`wf validation add\``, undefined, { id: 'validation:correct-unregistered' });
     // A correction keeps the criteria its steps were registered for unless it names others; an admission step answers for
@@ -120,7 +123,8 @@ async function registerValidation(root, options, correcting) {
       // Changing a check frozen at admission is the person's decision (kind override-gate); the original stays in the ledger.
       const decision = admission.length ? requireYes(root, state, { kind: 'override-gate', key: `correct-admission:${admission.join(',')}:${commit}`, summary: `correct the admission check ${admission.join(', ')} to its definition committed at ${commit.slice(0, 10)}: ${String(options.reason)} (the original stays in the record; a fresh review and the full gate follow)`, what: `correcting the admission check ${admission.join(', ')}`, options }).decision : null;
       // Both pins stay in the ledger: what the step was, and what it is now.
-      const from = ids.map((id) => (admission.includes(id) ? { id, commit: state.adapterBase, definition: base.gate.steps.find((s) => s.id === id), admission: true } : { id, commit: pinOf(id), definition: state.validations.flatMap((v) => v.steps).find((s) => s.id === id).definition }));
+      const current = (id) => state.validations.flatMap((v) => v.steps).find((s) => s.id === id)?.definition;
+      const from = ids.map((id) => (admission.includes(id) ? { id, commit: pinOf(id), definition: current(id) ?? base.gate.steps.find((s) => s.id === id), admission: true } : { id, commit: pinOf(id), definition: current(id) }));
       append(root, state.id, 'validation.corrected', { commit, steps, criteria, reason: String(options.reason), tree: trees, from, ...(decision ? { decision } : {}) }, actor(options));
     } else append(root, state.id, 'validation.added', { commit, steps, criteria, reason: String(options.reason), tree: trees }, actor(options));
     return loadState(root, state.id);

@@ -36,6 +36,9 @@ export const approvedChoice = (state, kind, key) => {
 };
 
 export const pendingDecisions = (state) => (state.decisions ?? []).filter((d) => !d.approved && !d.withdrawn);
+// The person picked one of the decision's choices. An answer in their own words (`other`) is recorded and shown, but it is no
+// choice: it never acts as one (independent review of 0.7.8: words answering an escalation cleared it as `continue`).
+export const chose = (d) => Boolean(d?.approved && d.approved.choice !== 'other');
 
 // Records a decision the person must confirm, once per kind + key while it is pending; returns it.
 export function createDecision(root, state, { kind, key, summary, choices = ['yes', 'no'], options = {} }) {

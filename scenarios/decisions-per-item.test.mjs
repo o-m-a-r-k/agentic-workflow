@@ -46,7 +46,7 @@ test('each item is its own short question; the person fixes one and lets another
   approveAsOwner(p.root, p.id, q1.id, 'let it leave');
   approveAsOwner(p.root, p.id, q2.id, 'fix now');
   const mixed = run(p, ['scope', 'defer', '--finding', 'r1:F1,r1:F2']);
-  assert.match(mixed.err, /the person answered r1:F2 "fix now"/);
+  assert.match(mixed.err, /the person chose to fix r1:F2 \(A\d+\) now/);
   assert.equal(mixed.code, 75);
   ok(run(p, ['scope', 'defer', '--finding', 'r1:F1']));
   const s = state(p.root, p.id);
@@ -84,7 +84,8 @@ test('an answer in the person\'s own words is recorded as theirs, and a changed 
   const recorded = state(p.root, p.id).decisions.find((x) => x.id === id).approved;
   assert.deepEqual([recorded.choice, recorded.words], ['other', words]);
   const follow = run(p, ['scope', 'defer', '--finding', 'r1:F1']);
-  assert.match(follow.err, /the person answered r1:F1 "fix it here unless it is already in ENG-636"/);
+  assert.match(follow.err, /the person answered r1:F1 in their own words, "fix it here unless it is already in ENG-636" \(A\d+\), which is neither choice/);
+  assert.match(follow.err, /if they mean "let it leave", withdraw the answer with their words as the reason/);
   assert.match(wf(p.root, ['decisions', 'withdraw', id, '--attempt', p.id]).err, /--reason says what changed/);
   ok(wf(p.root, ['decisions', 'withdraw', id, '--reason', 'it is in ENG-636 after all: ask again', '--attempt', p.id]));
   assert.notEqual(state(p.root, p.id).phase, 'done', 'withdrawing a question never closes the attempt');
@@ -168,5 +169,34 @@ test('an implementer is closed when its own repos are committed, whatever anothe
   const web = wf(root, ['handoff', 'close', '--agent', 'i-web', '--attempt', e.id]);
   assert.notEqual(web.code, 0);
   assert.match(web.err, /i-web is not done: uncommitted changes in web/);
+});
+
+// Claude Code's record of a question-panel exchange in which the person typed their own answer.
+function answeredInWords(base, question, words, tool, choices) {
+  const file = path.join(base, '.home', '.claude', 'projects', 'proj', `${CLAUDE}.jsonl`);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.appendFileSync(file, [
+    { type: 'assistant', timestamp: at(1000), message: { role: 'assistant', content: [{ type: 'tool_use', id: tool, name: 'AskUserQuestion', input: { questions: [{ question, header: 'wf', multiSelect: false, options: choices.map((label) => ({ label, description: label })) }] } }] } },
+    { type: 'user', timestamp: at(1000), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: tool, content: `answered` }] }, toolUseResult: { questions: [], answers: { [question]: words } } },
+  ].map((l) => JSON.stringify(l)).join('\n') + '\n');
+}
+
+test('an escalation answered in the person\'s own words stays open: words never act as a choice', async () => {
+  const { project: proj, runner: rn, started, reviewRound } = await import('./strategist-fixtures.mjs');
+  const r = rn('0.7.8');
+  const ctx = proj('pi-escalate', { strategy: { reviewRoundsEscalate: 1 } });
+  const a = started(r, ctx, { item: 'ENG-990' });
+  reviewRound(r, ctx, a, { findings: 1 });
+  const held = r.run(ctx.root, ['handoff', 'implementer', '--agent', 'impl-2', '--attempt', a.id, '--owner', a.owner], silent);
+  assert.equal(held.code, 75);
+  const id = held.err.match(/wf approve (A\d+)/)[1];
+  const d = r.state(ctx.root, a.id).decisions.find((x) => x.id === id);
+  const words = 'stop, this is going nowhere; park it';
+  answeredInWords(ctx.base, `${a.id} ${d.id}: ${d.summary}`, words, 'toolu_pi_escalate', d.choices);
+  ok(r.run(ctx.root, ['approve', id, '--from-question', '--attempt', a.id], { env: { CLAUDE_CODE_SESSION_ID: CLAUDE }, ...silent }));
+  const again = r.run(ctx.root, ['handoff', 'implementer', '--agent', 'impl-2', '--attempt', a.id, '--owner', a.owner], silent);
+  assert.equal(again.code, 75, 'the words did not let the work continue');
+  assert.match(again.err, /in their own words, "stop, this is going nowhere; park it": follow them/);
+  assert.notEqual(again.err.match(/wf approve (A\d+)/)[1], id, 'the escalation is asked again with its choices');
 });
 

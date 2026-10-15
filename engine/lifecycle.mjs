@@ -1,7 +1,7 @@
 import { gateAdapter, validationReviewProblems } from './validation.mjs';
 import { captureWarning } from './captures.mjs';
 import { mkdirStateDirectory } from './state-folders.mjs';
-import { blockingIn, classifyFinding, closureMissingGuidance, deltaLines, dispositionOf, earlierBlocking, lastReviewSeenAt, observations, openAcrossRounds, placementLevel, reviewerDiscovered, roundMode, severityLevel, sinceOf, stampClosure, stripStamp, unreachedSince } from './review-policy.mjs';
+import { blockingIn, classifyFinding, closureMissingGuidance, deltaLines, dispositionOf, earlierBlocking, observations, openAcrossRounds, placementLevel, reviewerDiscovered, roundMode, severityLevel, sinceOf, stampClosure, stripStamp, unreachedSince } from './review-policy.mjs';
 import { observationLines } from './scope-decisions.mjs';
 import { GROUP_INSTRUCTIONS, assignedVerdicts, changedWeights, currentReviewGroup, divideReview, findingIds, impactCatalog, isCurrentReviewer, mergeParts, reviewSnapshot, reviewDivisionOptions } from './review-groups.mjs';
 import fs from 'node:fs';
@@ -9,7 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { actor, addRepoWorktree, baseRef, branchName, onTarget, changedFiles, cleanupWorktrees, entry, missingWorktrees, openState, treeHashes, worktreeDir } from './attempt.mjs';
-import { channelOf, discoveredLevel, discoveredVerdicts, headsNow, openDiscovered, seamVerdicts, unacknowledged, reportsForReview, reportedIssueVerdicts } from './discovered.mjs';
+import { channelOf, discoveredVerdicts, headsNow, openDiscovered, seamVerdicts, unacknowledged, reportsForReview, reportedIssueVerdicts } from './discovered.mjs';
 import { executionSettings, rejectModelOverrides } from './models.mjs';
 import { rerunsOnlyFailed } from './onboard.mjs';
 import { policyOf, RULE, RULE_SHORT } from './leaving.mjs';

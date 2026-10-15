@@ -59,7 +59,7 @@ Work
   wf discovered rate D1 --severity high|medium|low [--reason "why"]
                                     correct a rating (lowering records its reason; an invariant issue stays high)
   wf discovered close D1[,D2] --fixed SHA | --deferred [--reason "why"]
-                                    only a low issue may wait, with the person's yes; medium and high are fixed here
+                                    by default only a low issue may wait, with the person's answer (one question per item)
   wf handoff planner|implementer|reviewer|tester --agent ID [--work W1] [--sweep F] [--session SID] [--runtime ${hostChoice()}]
                                     --sweep (optional): a fix handoff names a pattern sweep per family of open findings
   wf handoff wait --agent ID [--minutes N]
@@ -112,7 +112,7 @@ Work
   wf scope fixed --finding REVIEWER:F1 --commit SHA
                                     an observation this attempt fixed; the next reviewer verifies it
   wf scope defer --finding REVIEWER:F1[,D3] [--reason "why it waits"] [--explain FILE.json]
-                                    low observations and discovered issues left for later, in one decision of the person
+                                    low observations and discovered issues left for later; one short question per item
   wf scope waive --finding REVIEWER:F1 [--reason "why"]
                                     a blocking finding set aside: the person's decision (\`wf approve\`)
   wf scope move --finding REVIEWER:F1 --sibling ATTEMPT

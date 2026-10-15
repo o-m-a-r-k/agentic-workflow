@@ -2,7 +2,7 @@
 // during a ticket (a pager summing only the current page, a table with no phone view, an implicit default, a failed step
 // that strands the user) and parked them as follow-ups or "harmless today" without the owner deciding. Every issue found
 // during a ticket is recorded here by whoever finds it; it ends fixed by a commit of this ticket or deferred by the
-// person's rule (D17, engine/leaving.mjs: medium and high are fixed here; a low one waits only with the person's yes);
+// person's rule (D17, engine/leaving.mjs: medium and high are fixed here; a low one waits only with the person's answer, D18);
 // delivery refuses an open one and the reviewer gives each a verdict.
 import { isBookkeeping, legacyWaived, severityLevel } from './review-policy.mjs';
 import { actor, openState } from './attempt.mjs';
@@ -88,7 +88,7 @@ export function closeDiscovered(root, idArg, options) {
   if (!entries.length) throw new WfError('name the discovered issue(s): `wf discovered close D1[,D2] --fixed <commit> | --deferred --reason "..."`');
   const fixed = typeof options.fixed === 'string' ? options.fixed.trim() : '';
   const deferred = options.deferred === true;
-  if (Boolean(fixed) === deferred) throw new WfError(`close ${ids.join(',')} with either --fixed <commit> or --deferred [--reason "<why it waits>"] (only a low issue may wait, with the person's yes; medium and high are fixed here)`);
+  if (Boolean(fixed) === deferred) throw new WfError(`close ${ids.join(',')} with either --fixed <commit> or --deferred [--reason "<why it waits>"] (by default only a low issue may wait, with the person's answer; medium and high are fixed here)`);
   if (fixed) {
     const c = ticketCommit(state, fixed, typeof options.repo === 'string' ? options.repo : null);
     for (const e of entries) {
@@ -101,7 +101,7 @@ export function closeDiscovered(root, idArg, options) {
     for (const e of entries) append(root, state.id, 'discovered.closed', { id: e.id, outcome: 'fixed', repo: c.repo, commit: c.commit, evidence: text(options.evidence) || null }, actor(options));
     return { state: loadState(root, state.id), outcome: 'fixed', ids, ...c };
   }
-  // Deferral moves a defect out of this delivery: only a low one, with the person's yes (D17, engine/leaving.mjs; 0.7.6
+  // Deferral moves a defect out of this delivery: by default only a low one, with the person's answer (D17, D18, engine/leaving.mjs; 0.7.6
   // and earlier let a medium one wait on the owner agent's reason and a low one freely). Named failure (0.7.0): the
   // owner-phrase grammar refused real deferrals after the person had said yes.
   const reason = text(options.reason);
