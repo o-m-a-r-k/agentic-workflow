@@ -260,15 +260,6 @@ export async function planGate(root, state, options = {}) {
         continue;
       }
     }
-    // A quick fix runs the light steps (lint, types, unit, build of what it touched): its gate takes minutes, not hours.
-    // A heavy step runs only when the owner asks for the whole gate (`--full`) or the attempt froze it as a validation of its
-    // own. The person's rule (2026-10-15): "hotfixes should be quick fixes, not ones that take hours"; the independent review
-    // stays. A gate that skips them counts for acceptance and delivery, as the lane's gate. The plugin sets the default; a
-    // project's adapter may run every step in its quick fixes (`gate.quickLane: full`).
-    if (!full && state.lane === 'quick' && (cfg.gate.quickLane ?? 'light') === 'light' && entry.tier === 'heavy' && !validationIds(state).includes(step.id)) {
-      steps.push({ ...entry, decision: 'skip', skippedBy: 'quick-lane', reason: 'a quick fix runs light steps only (`wf gate --full` runs this one too)' });
-      continue;
-    }
     if (!full && focused && entry.tier === 'heavy') {
       steps.push({ ...entry, decision: 'skip', skippedBy: 'focused', reason: 'focused proof runs light steps only' });
       continue;
@@ -353,6 +344,20 @@ export async function planGate(root, state, options = {}) {
     if (options.rerunFailed && !prior && !options.rerunFailed.includes(step.id)) {
       steps.push({ ...entry, decision: 'skip', skippedBy: 'rerun-failed', reason: '--rerun-failed reruns only the steps that failed last time' });
       continue;
+    }
+    // A quick fix runs the light steps (lint, types, unit, build of what it touched): its gate takes minutes, not hours.
+    // A heavy step is reused when an identical pass exists, and otherwise runs only when the owner asks for the whole gate
+    // (`--full`), the attempt froze it as a validation of its own, or it already failed on these inputs (a known failure is
+    // never skipped into a pass: independent review of 0.7.13). The person's rule (2026-10-15): "hotfixes should be quick
+    // fixes, not ones that take hours"; the independent review stays, and its bundle lists what did not run. A gate that
+    // skips them counts for acceptance and delivery. The plugin sets the default; a project's adapter may run every step in
+    // its quick fixes (`gate.quickLane: full`).
+    if (!prior && !full && state.lane === 'quick' && (cfg.gate.quickLane ?? 'light') === 'light' && entry.tier === 'heavy' && !validationIds(state).includes(step.id)) {
+      const last = key ? allGateSteps(state).filter((s) => s.id === step.id && s.key === key && ['passed', 'reused', 'failed'].includes(s.status)).at(-1) : null;
+      if (last?.status !== 'failed') {
+        steps.push({ ...entry, decision: 'skip', skippedBy: 'quick-lane', reason: 'a quick fix runs light steps only (`wf gate --full` runs this one too)' });
+        continue;
+      }
     }
     steps.push({
       ...entry,

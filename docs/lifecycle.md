@@ -134,12 +134,12 @@ Everything an agent or the owner produced is kept verbatim, write-once and hash-
 
 ```mermaid
 flowchart LR
-  Q["quick<br/>small fix, no ticket needed"] --> QG["review + gate"] --> QD["deliver"]
+  Q["quick<br/>small fix, no ticket needed"] --> QG["review + light gate"] --> QD["deliver"]
   S["standard<br/>one ticket"] --> SP["plan"] --> SG["review + gate"] --> SD["deliver + tracker handoff"]
   B["batch<br/>several tickets"] --> BM["each member: plan, review, light gate"] --> BG["one shared heavy gate + review"] --> BD["one delivery, per-ticket handoff"]
 ```
 
-- **quick:** for small fixes. Same gate and independent review, but no planner and no tracker.
+- **quick:** for small fixes. A light gate (lint, types, unit, build; heavy steps run with `wf gate --full`, or always when the project sets `gate.quickLane: full`) and an independent review, which is told which steps did not run; no planner and no tracker.
 - **standard:** one ticket, the full lifecycle.
 - **batch:** tickets share their heavy gate. Each ticket defers its heavy steps, the batch runs them once, then everything is delivered together and each ticket gets its own handoff.
 - **focused:** a gate option, not a lane. When every changed file is in the adapter's `focused` paths, `wf gate --focused` runs only the light steps: fast proof while repairing. It never counts as the proof of a tree: `wf accept` and `wf deliver` refuse a focused gate, a reviewer handed a focused-gated tree is told no gate passed on it, and name the heavy steps it skipped.

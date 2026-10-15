@@ -98,6 +98,23 @@ test('a quick fix runs light steps only, and that gate counts; --full runs the h
   assert.equal(gatePassedForCurrentTree(loadState(root, e.id)).ok, true, 'the quick fix gate counts');
   const full = byId(gateJson(root, e.id, ['--full']).data.steps);
   assert.equal(full.e2e.status, 'passed');
+  // Independent review of 0.7.13: the evidence reviewer is told what did not run, and a known failure is never skipped.
+  commitIn(e.repos.app.worktree, { 'src/a.txt': 'fix 2\n' });
+  const fresh = byId(gateJson(root, e.id).data.steps);
+  assert.equal(fresh.e2e.skippedBy, 'quick-lane');
+  ok(wf(root, ['handoff', 'close', '--agent', 'i', '--attempt', e.id]));
+  const handed = ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', e.id, '--json'])).json();
+  const bundle = JSON.parse(fs.readFileSync(handed.bundle, 'utf8'));
+  assert.deepEqual(bundle.gate.notRun.map((x) => x.step), ['e2e']);
+  const broken = singleRepoProject('quick-known-failure', { gate: { steps: [steps[0], { ...steps[1], run: 'exit 1' }] } });
+  const k = ok(wf(broken.root, ['entry', '--lane', 'quick', '--owner', 'o', '--json'])).json();
+  ok(wf(broken.root, ['plan', '--file', criteriaFile(broken.base), '--attempt', k.id]));
+  ok(wf(broken.root, ['handoff', 'implementer', '--agent', 'i', '--attempt', k.id]));
+  commitIn(k.repos.app.worktree, { 'src/a.txt': 'fix\n' });
+  assert.equal(byId(gateJson(broken.root, k.id, ['--full']).data.steps).e2e.status, 'failed');
+  const again = gateJson(broken.root, k.id);
+  assert.notEqual(again.code, 0, 'a heavy step that failed on these inputs runs again and fails, not skipped into a pass');
+  assert.equal(byId(again.data.steps).e2e.status, 'failed');
   // A project may run every step in its quick fixes.
   const own = singleRepoProject('quick-full', { gate: { quickLane: 'full', steps } });
   const q = ok(wf(own.root, ['entry', '--lane', 'quick', '--owner', 'o', '--json'])).json();
