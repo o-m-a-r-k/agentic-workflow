@@ -427,3 +427,15 @@ test('a check stopped for a tree change says why, and is not retried on the unch
     assert.equal(wf(root, ['check', '--attempt', e.id]).code, 0, 'a new commit lifts it');
   }
 });
+
+// 0.7.11, named failure (audit of 51 attempts): gates started while an implementer was still committing were stopped or
+// thrown away. A gate says so when an implementer is open: a warning, never a refusal (its own `wf check` runs then).
+test('a gate started while an implementer is open warns that the tree may still change', () => {
+  const { base, root } = singleRepoProject('gate-open-impl', { gate: { steps: [{ id: 'unit', repo: 'app', run: 'true', inputs: ['src/**'] }] } });
+  const e = admitted(root, base, 'ENG-77');
+  commitIn(e.repos.app.worktree, { 'src/a.txt': 'x\n' });
+  const g = ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]));
+  assert.match(g.out, /wf gate: warning: implementer i is still open; if it may still commit, this gate runs on a tree that will change: close it first/);
+  ok(wf(root, ['handoff', 'close', '--agent', 'i', '--attempt', e.id]));
+  assert.doesNotMatch(ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id])).out, /is still open/);
+});
