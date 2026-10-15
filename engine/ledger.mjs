@@ -437,7 +437,7 @@ export function reduce(entries) {
         break;
       case 'review.recorded':
         s.review = { ...d, at: e.at, closure: withMoved(s, d.closure) };
-        s.reviews.push({ reviewer: d.closure?.reviewer ?? null, mode: d.mode ?? null, at: e.at, reviewerModel: d.reviewerModel ?? null, handoff: d.handoff ?? null, covered: d.covered ?? null, revealed: d.revealed ?? false, closure: withMoved(s, d.closure), provenance: d.provenance ?? null, identity: d.identity ?? null, reads: d.reads ?? null, raw: d.raw ?? null, tree: d.tree });
+        s.reviews.push({ reviewer: d.closure?.reviewer ?? null, mode: d.mode ?? null, at: e.at, reviewerModel: d.reviewerModel ?? null, handoff: d.handoff ?? null, covered: d.covered ?? null, ...(d.recordedBy ? { recordedBy: d.recordedBy } : {}), revealed: d.revealed ?? false, closure: withMoved(s, d.closure), provenance: d.provenance ?? null, identity: d.identity ?? null, reads: d.reads ?? null, raw: d.raw ?? null, tree: d.tree });
         break;
       case 'base.merged':
         s.baseMerges.push({ ...d, at: e.at });

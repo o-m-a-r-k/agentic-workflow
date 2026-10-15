@@ -524,7 +524,10 @@ export function sync(root) {
 // would write now, each with whether git tracks it. Named failure (0.7.10): two projects' AGENTS.md carried a rule three
 // releases old ("medium is your judgement") because the block was refreshed only by a `wf sync` nobody ran, and an agent
 // escalated the contradiction to the person.
+// Whether git tracks the file. A folder outside every repository (a multi-repo workspace root) tracks nothing.
 const tracked = (file) => {
+  const inRepo = spawnSync('git', ['rev-parse', '--is-inside-work-tree'], { cwd: path.dirname(file), encoding: 'utf8' });
+  if (inRepo.status !== 0) return false;
   const r = spawnSync('git', ['ls-files', '--error-unmatch', path.basename(file)], { cwd: path.dirname(file), encoding: 'utf8' });
   return r.status === 0;
 };

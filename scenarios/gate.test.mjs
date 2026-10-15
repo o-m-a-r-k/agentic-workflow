@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { globsCovered } from '../engine/gate.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -438,4 +439,21 @@ test('a gate started while an implementer is open warns that the tree may still 
   assert.match(g.out, /wf gate: warning: implementer i is still open; if it may still commit, this gate runs on a tree that will change: close it first/);
   ok(wf(root, ['handoff', 'close', '--agent', 'i', '--attempt', e.id]));
   assert.doesNotMatch(ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id])).out, /is still open/);
+});
+
+// Independent review of 0.7.11: a step that runs a script in the workflow folder depends on it, though the folder is not the
+// project's code; and a widened evidence glob is never read as a narrowed one.
+test('a step that runs a script in the workflow folder reruns when it changes; widened globs are not covered', () => {
+  const steps = [{ id: 'wfscript', repo: 'app', run: 'bash .workflow/check.sh', inputs: ['**'] }];
+  const { base, root } = singleRepoProject('gate-own-script', { gate: { steps } }, { '.workflow/check.sh': 'exit 0\n' });
+  const e = admitted(root, base, 'ENG-78');
+  commitIn(e.repos.app.worktree, { 'src/a.txt': 'x\n' });
+  ok(wf(root, ['handoff', 'close', '--agent', 'i', '--attempt', e.id]));
+  assert.equal(gateJson(root, e.id, OUT_OF_ORDER).data.steps[0].status, 'passed');
+  commitIn(e.repos.app.worktree, { '.workflow/check.sh': 'exit 1\n' });
+  const g = gateJson(root, e.id, OUT_OF_ORDER);
+  assert.equal(g.data.steps[0].status, 'failed', 'the changed script ran');
+  assert.equal(globsCovered(['shots/t-1/**/*.png'], ['shots/**/*.png']), true, 'narrowed');
+  assert.equal(globsCovered(['shots/**/x/*.png'], ['shots/*/x/*.png']), false, 'widened: deeper files were never collected');
+  assert.equal(globsCovered(['shots/**/*.png'], ['shots/t-1/**/*.png']), false);
 });

@@ -24,7 +24,7 @@ import { lessonStats } from './learning.mjs';
 import { LinkRefused, changesOf, ledgerEmpty, lostLedgers, rebaseline, releaseAttempt, seal, setVerifyLevel, unlockEvidence, verifyAttempt } from './evidence.mjs';
 import { acceptReview, amendCriteria, closeImplementer, designWarning, gateOrderCheck, batchCreate, batchEject, closeAfterHandoff, deliver, deliveredFiles, exportScreenshots, freezeCriteria, handoff, narrowDelivery, needsShown, nextAction, nextDecision, orphanNext, orphansOf, outsideWarning, recordReview, recordShown, reopen, screenshotsExportDir, shownDraftFile, uncovered, withAttempt } from './lifecycle.mjs';
 import { addDiscovered, channelOf, closeDiscovered, discoveredLine, openDiscovered, rateDiscovered } from './discovered.mjs';
-import { detect, doctor, refreshGenerated, register, registry, setEnabled, sync, writeDraft } from './onboard.mjs';
+import { detect, doctor, generatedStatus, refreshGenerated, register, registry, setEnabled, sync, writeDraft } from './onboard.mjs';
 import * as secrets from './secrets.mjs';
 import { report, toCsv, toHandoffCsv, toHtml, toJson, toText } from './telemetry.mjs';
 import { impact } from './topology.mjs';
@@ -233,7 +233,8 @@ function summary(root, s, { base = null, resume = false } = {}) {
     // 0.7.11: generated files the project tracks and that are older than the installed plugin are named, with the fix.
     if (!['done', 'abandoned'].includes(s.phase)) {
       try {
-        const g = refreshGenerated(root);
+        // Read only here (independent review of 0.7.11): `wf status` and `wf resume` write nothing; the handoff refreshes.
+        const g = { trackedStale: generatedStatus(root).filter((x) => x.tracked).map((x) => x.file) };
         if (g.trackedStale.length) lines.push(`  agentic-workflow files older than the installed plugin (${ENGINE_VERSION}): ${g.trackedStale.map((f) => path.relative(root, f)).join(', ')}; run \`wf sync\` and commit them`);
       } catch {}
     }

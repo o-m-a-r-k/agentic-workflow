@@ -101,7 +101,10 @@ const reusedRecord = (state, stepId, runId) => allGateSteps(state).filter((s) =>
 // Whether files collected under the `before` expanded globs include everything the `now` globs can match: each glob now
 // is one of them, or one of them matches it as a path (`e2e/.evidence/**/*.png` covers `e2e/.evidence/t-1/**/*.png`).
 // A recorded run holds only the files its globs matched, so narrowing re-selects from it and widening reruns.
-const globsCovered = (now, before) => now.every((p) => before.some((q) => q === p || matchesAny(p, [q])));
+// A glob with `**` now is covered only by one that has `**` at the same segment or earlier: `*` matching the literal `**`
+// would read a widened glob as narrowed (independent review of 0.7.11).
+const deepAt = (g) => g.split('/').indexOf('**');
+export const globsCovered = (now, before) => now.every((p) => before.some((q) => q === p || (matchesAny(p, [q]) && (deepAt(p) < 0 || (deepAt(q) >= 0 && deepAt(q) <= deepAt(p))))));
 
 // Selection is computed from the adapter committed at the attempt's base, never the worktree copy.
 export async function planGate(root, state, options = {}) {
@@ -117,7 +120,9 @@ export async function planGate(root, state, options = {}) {
   // broad `**`. Named failure (audit of 51 attempts): an attempt whose only change was in that folder (a lesson, the
   // adapter) ran ten steps for 32 minutes, seven of them identical to passes already recorded.
   const own = (repoName, f) => repoName === adapterRepo.name && inside(f, adapterRel);
-  const namesOwnFolder = (step, pkg) => step.repo === adapterRepo.name && (step.inputs ?? []).some((p) => { const r = pkg.path === '.' ? p : `${pkg.path}/${p}`; return r === adapterRel || r.startsWith(`${adapterRel}/`); });
+  // A step that runs or reads something in that folder (its inputs name it, or its command, selection or report path does)
+  // depends on it (independent review of 0.7.11: `run: bash .workflow/check.sh` was reused after the script changed).
+  const namesOwnFolder = (step, pkg) => step.repo === adapterRepo.name && ((step.inputs ?? []).some((p) => { const r = pkg.path === '.' ? p : `${pkg.path}/${p}`; return r === adapterRel || r.startsWith(`${adapterRel}/`); }) || [step.run, step.select, JSON.stringify(step.report ?? null)].some((t) => typeof t === 'string' && t.includes(`${path.basename(adapterRel)}/`)));
   const changedCode = Object.fromEntries(Object.entries(changed).map(([r, files]) => [r, files.filter((f) => !own(r, f))]));
   // A change in the adapter folder no longer makes the run full (0.7.11): the gate reads its steps from the adapter at the
   // pin, never the worktree, and a step whose inputs include the adapter folder sees the change in its inputs hash. Named
@@ -214,7 +219,8 @@ export async function planGate(root, state, options = {}) {
     // A pass recorded before 0.7.11 was keyed on the whole definition and on inputs that counted the workflow folder: it is
     // matched on those terms, so an upgrade reruns nothing that 0.7.10 would have reused.
     const recordedBefore = allGateSteps(state).some((s) => s.id === step.id && !s.resultIdentity && ['passed', 'reused'].includes(s.status));
-    const inputsBefore = recordedBefore && inputs && !namesOwnFolder(step, pkg) ? stepInputs(state, step, repo, pkg) : inputs;
+    // Hashed the old way only when no pass matches today's key (a reuse records today's key, so this happens once).
+    const inputsBefore = recordedBefore && inputs && !namesOwnFolder(step, pkg) && !findReuse(state, step.id, key) ? stepInputs(state, step, repo, pkg) : inputs;
     const legacyKey = (s) => (!inputsBefore || also.unreadable.length ? null : hashValue(also.trees ? { inputs: inputsBefore.hash, runner: legacyRunnerIdentity(root, state, step, (s.artifactGlobs ?? []).map((g) => g.glob)), also: also.trees } : { inputs: inputsBefore.hash, runner: legacyRunnerIdentity(root, state, step, (s.artifactGlobs ?? []).map((g) => g.glob)) }));
     let prior = findReuse(state, step.id, key, recordedBefore ? legacyKey : null);
     // Which of the recorded run's files are this ticket's evidence now: its expanded globs must cover today's, or it reruns.

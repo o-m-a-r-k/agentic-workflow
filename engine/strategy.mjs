@@ -369,7 +369,8 @@ export function strategistHandoff(root, state, options) {
 const KEYS = ['strategist', 'action', 'rationale', 'prediction', 'items', 'split', 'model', 'options', 'question', 'recommend'];
 const TOKEN = /^[a-z0-9][a-z0-9-]{0,39}$/;
 // An option the person reads: plain words, not an identifier.
-const plainLabel = (v) => typeof v === 'string' && v.trim().length >= 3 && v.trim().length <= 80 && !TOKEN.test(v.trim());
+const plainLabel = (v) => typeof v === 'string' && v.trim().length >= 3 && v.trim().length <= 80 && !TOKEN.test(v.trim()) && !/\(recommended\)\s*$/i.test(v);
+const sameLabel = (v) => String(v ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
 const slug = (v, taken) => {
   let s = String(v).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'option';
   while (taken.has(s)) s = `${s.slice(0, 37)}-${taken.size}`;
@@ -425,8 +426,8 @@ export function closureProblems(c, { rounds = 0, nowMs = Date.now(), plainEscala
   // (`then`); a recommendation is welcome, never required (one forced would be invented).
   if (c.action === 'escalate' && plainEscalation) {
     if (!text(c.question) || c.question.trim().length > 400) p.push('action escalate needs `question`: in plain words, for someone with no other context, what the person decides and why it is theirs (at most 400 characters; no ids, no workflow terms)');
-    if (!Array.isArray(c.options) || c.options.length < 2 || c.options.length > 3 || !c.options.every((o) => o && typeof o === 'object' && plainLabel(o.label) && text(o.then))) p.push('action escalate needs `options`: 2 or 3 of { "label": "<plain words, 3-80 characters, not an identifier>", "then": "<what happens next if the person picks it>" }');
-    else if (new Set(c.options.map((o) => o.label.trim())).size !== c.options.length) p.push('the escalation options need distinct labels');
+    if (!Array.isArray(c.options) || c.options.length < 2 || c.options.length > 3 || !c.options.every((o) => o && typeof o === 'object' && plainLabel(o.label) && text(o.then))) p.push('action escalate needs `options`: 2 or 3 of { "label": "<plain words, 3-80 characters, not an identifier, not ending in (Recommended)>", "then": "<what happens next if the person picks it>" }');
+    else if (new Set(c.options.map((o) => sameLabel(o.label))).size !== c.options.length) p.push('the escalation options need distinct labels (letter case aside)');
     if (c.recommend !== undefined && (!c.recommend || typeof c.recommend !== 'object' || !c.options?.some?.((o) => o?.label?.trim() === String(c.recommend.label ?? '').trim()))) p.push('`recommend`, when given, is { "label": "<one of the option labels>", "why": "<one line>" }');
   } else if (c.action === 'escalate') {
     if (!Array.isArray(c.options) || c.options.length < 2 || c.options.length > 3 || !c.options.every((o) => typeof o === 'string' && TOKEN.test(o))) p.push('action escalate needs `options`: 2 or 3 short choices for the owner (lowercase letters, digits and dashes, for example "split", "continue", "abandon")');

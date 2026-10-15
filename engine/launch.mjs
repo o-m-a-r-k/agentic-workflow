@@ -283,7 +283,7 @@ async function reviewerEnded(root, id, h, label) {
   if (file && fs.existsSync(file) && !(now.reviews ?? []).some((r) => r.handoff === h.bundle) && !(now.reviewsRefused ?? []).some((r) => r.handoff === h.bundle)) {
     try {
       const { recordReview } = await import('./lifecycle.mjs');
-      recordReview(root, { attempt: id, closure: file });
+      recordReview(root, { attempt: id, closure: file, salvaged: true });
       process.stderr.write(`${label} reviewer ${h.agent} ended without recording its closure; the engine recorded the closure it wrote (${file})\n`);
     } catch (error) {
       process.stderr.write(`${label} reviewer ${h.agent} ended without recording its closure, and the closure it wrote was not recorded: ${String(error.message ?? error).split('\n')[0]}\n`);

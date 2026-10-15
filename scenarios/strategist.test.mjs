@@ -309,6 +309,8 @@ test('an escalation is a plain question: labelled options with what follows each
   assert.notEqual(refused.code, 0);
   assert.match(refused.err, /action escalate needs `question`: in plain words/);
   assert.match(refused.err, /2 or 3 of \{ "label": "<plain words/);
+  const sameish = strategistClosure(base, h.bundle, { strategist: 'strat-1', action: 'escalate', rationale: 'r', prediction, question: 'Which way?', options: [{ label: 'Fix now', then: 'a' }, { label: 'fix NOW', then: 'b' }] });
+  assert.match(cur.run(root, ['strategy', 'record', '--closure', sameish.file, '--attempt', a.id]).err, /distinct labels \(letter case aside\)/);
   const plain = strategistClosure(base, h.bundle, { strategist: 'strat-1', action: 'escalate', rationale: 'The same finding came back after two fixes.', prediction,
     question: 'The same problem came back after two fixes. Should the work that keeps reopening move to its own ticket?',
     options: [{ label: 'Move it to its own ticket', then: 'this ticket ships what is done; the rest is planned again' }, { label: 'Keep fixing it here', then: 'another fix and review round starts now' }],

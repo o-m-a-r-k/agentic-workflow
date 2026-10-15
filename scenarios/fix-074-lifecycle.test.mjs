@@ -361,7 +361,7 @@ test('a launched reviewer that wrote its closure and did not record it has it re
   const launched = ok(run(['handoff', 'run', '--agent', 'r', '--attempt', id]));
   assert.match(launched.err, /reviewer r ended without recording its closure; the engine recorded the closure it wrote/);
   assert.doesNotMatch(launched.err, /completed with no closure recorded/);
-  assert.deepEqual(loadState(p.root, id).reviews.map((r) => r.reviewer), ['r']);
+  assert.deepEqual(loadState(p.root, id).reviews.map((r) => [r.reviewer, r.recordedBy]), [['r', 'engine']], 'recorded by the engine, and said so');
 });
 
 test('I-69: a launched reviewer that ends with no closure leaves the owner the real routes, and the round is not an audit', () => {
