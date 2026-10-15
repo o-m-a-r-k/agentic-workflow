@@ -9,6 +9,8 @@ Release notes, newest first, then every fix that came from a failure in the work
     not change. Heavy steps, such as end-to-end suites, are recorded as skipped.
   - That gate counts for acceptance and delivery. The independent review stays.
   - `wf gate --full` runs the heavy steps as well. A heavy step the attempt froze as a validation of its own always runs.
+  - This is the plugin's default. A project whose quick fixes should run every step sets `gate.quickLane: full` in its
+    adapter.
   - Screenshots for a quick UI fix come from captures made by hand on the committed tree (`wf captures import`).
 
 ## 0.7.12 - Kept findings, reused passes, and roles read as they are

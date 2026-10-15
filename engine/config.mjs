@@ -309,6 +309,8 @@ function normalize(raw, source) {
   if (cfg.adapterRepo && !repoNames.has(cfg.adapterRepo)) fail(`adapterRepo \`${cfg.adapterRepo}\` is not a listed repo`);
   const stepIds = new Set();
   for (const [name, n] of Object.entries(cfg.gate.leases ?? {})) if (!Number.isInteger(n) || n < 1) fail(`lease \`${name}\` must allow at least 1 holder`);
+  // What a quick fix's gate runs (D23): the plugin's default is the light steps; a project may set `full`.
+  if (cfg.gate.quickLane !== undefined && !['light', 'full'].includes(cfg.gate.quickLane)) fail('`gate.quickLane` is `light` (the default: a quick fix runs light steps only) or `full`');
   // Extra variables gate steps and provisioning receive beyond the base list (engine/env.mjs): names, or prefixes ending in `*`.
   if (cfg.gate.env !== undefined) {
     const pass = cfg.gate.env?.pass;

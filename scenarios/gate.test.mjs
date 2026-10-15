@@ -98,6 +98,15 @@ test('a quick fix runs light steps only, and that gate counts; --full runs the h
   assert.equal(gatePassedForCurrentTree(loadState(root, e.id)).ok, true, 'the quick fix gate counts');
   const full = byId(gateJson(root, e.id, ['--full']).data.steps);
   assert.equal(full.e2e.status, 'passed');
+  // A project may run every step in its quick fixes.
+  const own = singleRepoProject('quick-full', { gate: { quickLane: 'full', steps } });
+  const q = ok(wf(own.root, ['entry', '--lane', 'quick', '--owner', 'o', '--json'])).json();
+  ok(wf(own.root, ['plan', '--file', criteriaFile(own.base), '--attempt', q.id]));
+  ok(wf(own.root, ['handoff', 'implementer', '--agent', 'i', '--attempt', q.id]));
+  commitIn(q.repos.app.worktree, { 'src/a.txt': 'fix\n' });
+  assert.equal(byId(gateJson(own.root, q.id).data.steps).e2e.status, 'passed');
+  const bad = singleRepoProject('quick-bad', { gate: { quickLane: 'none', steps } });
+  assert.match(wf(bad.root, ['doctor']).err + wf(bad.root, ['doctor']).out, /`gate.quickLane` is `light`/);
 });
 
 test('worker overrides: auto sizing is recorded, invalid override exits 2', () => {

@@ -41,7 +41,7 @@ export function needsScreenshots(criterion) {
 // The gate steps that can write captures for this attempt: a step of an admitted repo with `artifacts` globs or a plugin
 // (a plugin returns its captures as artifacts), the steps `captureRoutes` hands the planner.
 // A quick fix's gate runs light steps only (gate.mjs), so a heavy step collects nothing for it.
-export const capturingSteps = (cfg, state) => cfg.gate.steps.filter((s) => state.repos?.[s.repo] && (s.artifacts?.length || s.plugin) && !(state.lane === 'quick' && (s.tier ?? 'light') === 'heavy'));
+export const capturingSteps = (cfg, state) => cfg.gate.steps.filter((s) => state.repos?.[s.repo] && (s.artifacts?.length || s.plugin) && !(state.lane === 'quick' && (cfg.gate.quickLane ?? 'light') === 'light' && (s.tier ?? 'light') === 'heavy'));
 
 // The criteria that need screenshots and have no way to get them: the line the owner reads, or null.
 export function captureWarning(root, state) {

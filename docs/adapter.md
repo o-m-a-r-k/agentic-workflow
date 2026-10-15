@@ -48,6 +48,7 @@ impact:                      # the planner's two-stage impact analysis (lifecycl
 gate:
   maxParallelSteps: 2
   leases: { docker: 1, browser: 1 }
+  # quickLane: full          # a quick fix's gate runs light steps only (the plugin's default, `light`); `full` runs heavy steps too
   steps:
     - { id: backend-lint, repo: backend, run: yarn lint, inputs: ["src/**", "test/**"], tier: light }
     - id: backend-unit
