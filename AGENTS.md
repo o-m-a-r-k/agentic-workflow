@@ -5,8 +5,10 @@ Rules for agents working on this repository (the plugin itself). Terms: project,
 
 ## CI is always green
 
-- Never push without a green `npm run verify`: the scenario suite on this machine and in a Linux container, as a
-  non-root user and as root. `npm run setup` installs the pre-push hook that runs it.
+- A commit reaches main only once GitHub CI ran the whole scenario suite on it (macOS and Linux) and passed: push the
+  release branch, run CI on it (`gh workflow run scenarios --ref <branch>`), and fast-forward main once it is green.
+  `npm run setup` installs the pre-push hook that checks this. The whole suite never runs on a shared machine (it holds every
+  core for minutes); locally run only the scenario files a change touches, at most four at a time, at low priority.
 - After every push, watch CI to completion: `gh run watch <id> --exit-status` (find the id with `gh run list --limit 1`).
   Report a release only with the green run id.
 - A red CI is fixed before any other work. Find the root cause; never retry, skip or loosen a test to make it pass.

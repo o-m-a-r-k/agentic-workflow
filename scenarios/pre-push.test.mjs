@@ -8,51 +8,34 @@ import { makeRepo, sh, tmp, write } from './helpers.mjs';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-test('pre-push verification uses foreign fixture repositories without changing the source Git metadata', () => {
-  // Named failure I-30: Git hook variables sent the verifier fixtures into the source Git directory.
-  const base = tmp('pre-push-env');
-  const { dir: source, remote } = makeRepo(path.join(base, 'source'), { 'a.txt': 'original\n' });
-  const dir = path.join(base, 'linked');
-  sh(source, 'git worktree add -q -b candidate ' + JSON.stringify(dir));
-  const hooks = path.join(dir, '.hooks');
+// 2026-10-15, named cost: the hook ran the whole scenario suite on this machine before every push, holding every core for 6
+// to 11 minutes on a machine shared with other agents' gates. A commit now reaches main only once GitHub CI passed on it;
+// the hook asks GitHub (here a stub `gh`) and runs no test itself. Other branches are not checked.
+test('a push to main needs CI to have passed on the commit; a branch push is not checked and no suite runs here', () => {
+  const base = tmp('pre-push-ci');
+  const { dir, remote } = makeRepo(path.join(base, 'source'), { 'a.txt': 'original\n' });
+  fs.mkdirSync(path.join(dir, '.githooks'), { recursive: true });
+  fs.mkdirSync(path.join(dir, 'scripts'), { recursive: true });
+  fs.copyFileSync(path.join(repo, '.githooks/pre-push'), path.join(dir, '.githooks/pre-push'));
+  fs.copyFileSync(path.join(repo, 'scripts/ci-passed.mjs'), path.join(dir, 'scripts/ci-passed.mjs'));
+  fs.chmodSync(path.join(dir, '.githooks/pre-push'), 0o755);
+  sh(dir, 'git config core.hooksPath .githooks');
   const bin = path.join(base, 'bin');
-  fs.mkdirSync(hooks);
-  fs.mkdirSync(bin);
-  fs.copyFileSync(path.join(repo, '.githooks/pre-push'), path.join(hooks, 'pre-push'));
-  fs.chmodSync(path.join(hooks, 'pre-push'), 0o755);
-  sh(dir, 'git config core.hooksPath .hooks');
+  const calls = path.join(base, 'gh-calls.txt');
+  write(bin, 'gh', `#!/bin/sh\necho "$@" >> ${JSON.stringify(calls)}\nprintf '%s' "$GH_STUB"\n`);
+  fs.chmodSync(path.join(bin, 'gh'), 0o755);
+  write(bin, 'npm', '#!/bin/sh\nexit 97\n');
+  fs.chmodSync(path.join(bin, 'npm'), 0o755);
+  const push = (ref, stub) => spawnSync('git', ['push', '-q', remote, ref], { cwd: dir, encoding: 'utf8', env: { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, GH_STUB: stub } });
   write(dir, 'a.txt', 'changed\n');
   sh(dir, 'git add a.txt && git commit -q -m change');
-  const head = sh(dir, 'git rev-parse HEAD');
-  const configFile = path.join(source, '.git/config');
-  const config = fs.readFileSync(configFile, 'utf8');
-  const fixture = path.join(base, 'fixture');
-  const marker = path.join(base, 'verified.json');
-  write(bin, 'npm', `#!/usr/bin/env node
-const fs = require('node:fs');
-const { spawnSync } = require('node:child_process');
-if (process.argv.slice(2).join(' ') !== 'run --silent verify') process.exit(97);
-fs.mkdirSync(process.env.TEST_FIXTURE);
-const initialized = spawnSync('git', ['init', '-q', '-b', 'fixture'], { cwd: process.env.TEST_FIXTURE, encoding: 'utf8' });
-const observed = spawnSync('git', ['rev-parse', '--absolute-git-dir'], { cwd: process.env.TEST_FIXTURE, encoding: 'utf8' });
-fs.writeFileSync(process.env.TEST_MARKER, JSON.stringify({ initialized: initialized.status, observed: observed.status, gitdir: observed.stdout.trim() }));
-process.exit(Number(process.env.TEST_VERIFY_EXIT));
-`);
-  fs.chmodSync(path.join(bin, 'npm'), 0o755);
-  const env = { ...process.env, PATH: bin + path.delimiter + process.env.PATH, TEST_FIXTURE: fixture, TEST_MARKER: marker, TEST_VERIFY_EXIT: '0' };
-  const pushed = spawnSync('git', ['push', '-q', 'origin', 'HEAD:main'], { cwd: dir, env, encoding: 'utf8' });
-  assert.equal(pushed.status, 0, pushed.stderr);
-  assert.deepEqual(JSON.parse(fs.readFileSync(marker, 'utf8')), { initialized: 0, observed: 0, gitdir: path.join(fixture, '.git') });
-  assert.equal(sh(dir, 'git rev-parse HEAD'), head);
-  assert.equal(fs.readFileSync(configFile, 'utf8'), config);
-  assert.equal(sh(base, 'git --git-dir=' + remote + ' rev-parse main'), head);
-
-  // The hook still runs the verifier and refuses a push when it fails.
-  write(dir, 'a.txt', 'refused\n');
-  sh(dir, 'git add a.txt && git commit -q -m refused');
-  const refused = spawnSync('git', ['push', '-q', 'origin', 'HEAD:main'], {
-    cwd: dir, env: { ...env, TEST_FIXTURE: path.join(base, 'refused-fixture'), TEST_VERIFY_EXIT: '23' }, encoding: 'utf8',
-  });
-  assert.notEqual(refused.status, 0);
-  assert.equal(sh(base, 'git --git-dir=' + remote + ' rev-parse main'), head, 'failed verification leaves the remote unchanged');
+  const branch = push('HEAD:refs/heads/release', '[]');
+  assert.equal(branch.status, 0, branch.stderr);
+  assert.ok(!fs.existsSync(calls), 'a branch push asks nothing');
+  const red = push('HEAD:refs/heads/main', JSON.stringify([{ conclusion: 'failure', status: 'completed', databaseId: 1 }]));
+  assert.notEqual(red.status, 0);
+  assert.match(red.stderr, /CI has not passed on [0-9a-f]{10} \(its runs: failure\)/);
+  const green = push('HEAD:refs/heads/main', JSON.stringify([{ conclusion: 'success', status: 'completed', databaseId: 2 }]));
+  assert.equal(green.status, 0, green.stderr);
+  assert.match(fs.readFileSync(calls, 'utf8'), new RegExp(`run list --commit ${sh(dir, 'git rev-parse HEAD')} --workflow scenarios`));
 });

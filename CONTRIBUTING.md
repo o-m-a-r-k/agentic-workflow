@@ -15,11 +15,9 @@ Never use "workspace" for any of these.
 
 ```bash
 npm run setup                  # once: installs the pre-push hook (git config core.hooksPath .githooks)
-npm run verify                 # before every push: the suite here and in a Linux container (non-root and root), in parallel
-npm run verify -- --host-only  # this machine only, every core (not enough before a push)
-npm run verify -- --linux-only # the two container legs only
-npm run verify -- --serial     # one leg after the other, each with the whole machine
-WF_VERIFY_FORCE=1 npm run verify # runs a clean tree that already passed every leg here (otherwise it is not run again)
+nice -n 10 node --test --test-concurrency=4 scenarios/<file>.test.mjs   # while working: only the files a change touches
+gh workflow run scenarios --ref <branch>                                # before main: the whole suite, macOS and Linux, in CI
+npm run verify                 # the whole suite here and in two Linux containers: only on a machine nothing else uses
 npm test                       # the scenario suite: node --test scenarios/
 node --test scenarios/<file>.test.mjs                                # one file
 node --test scenarios/<file>.test.mjs --test-name-pattern "<name>"   # one test while iterating

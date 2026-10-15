@@ -1,10 +1,17 @@
 #!/bin/sh
-# Never push without a green verify: the scenario suite on this machine and in a Linux container.
+# A commit reaches main only after GitHub CI ran the whole scenario suite on it (macOS and Linux) and passed. The suite is
+# never run on this machine for a push: it is shared with other agents' gates, and running it here before every push held
+# every core for 6 to 11 minutes at a time (2026-10-15, about ten runs in a day). Push the release branch, run CI on it
+# (`gh workflow run scenarios --ref <branch>`), and fast-forward main once it is green. Other branches are not checked.
 # Installed by `npm run setup` (git config core.hooksPath .githooks).
-# Named failure I-30: a linked-worktree push exported Git variables that redirected verifier fixtures into this repo.
-# Git documents clearing these variables before a hook runs commands in foreign repositories.
 wf_git_local_env=$(git rev-parse --local-env-vars) || exit 1
 for wf_git_env_name in $wf_git_local_env; do
   unset "$wf_git_env_name"
 done
-exec npm run --silent verify
+status=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ "$remote_ref" = "refs/heads/main" ] || continue
+  case "$local_sha" in 0000000000000000000000000000000000000000) continue ;; esac
+  node "$(dirname "$0")/../scripts/ci-passed.mjs" "$local_sha" || status=1
+done
+exit $status
