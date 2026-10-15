@@ -79,7 +79,8 @@ test('outside the plan: a plan that names no paths requires nothing', () => {
 test('I-129: outside the plan reads repo-prefixed anchors and the scope accepted amendments add', () => {
   const { root, id } = project('scope-prefixed', change, { ...plan, plan: { ...plan.plan, anchors: ['app:src/a.txt:1 the text', 'app:src/audit.txt the audit read'] } });
   assert.match(ok(wf(root, ['status', '--attempt', id])).out, /warning: 1 changed file\(s\) outside the plan: app:\.gitignore — amend the criteria/);
-  const amended = { impact: { survey: { consumers: [{ id: 'S1', file: 'src/a.txt' }] }, addenda: [{ survey: { flows: [{ id: 'S9', file: 'app:.gitignore' }] } }] } };
-  assert.deepEqual(scopeFiles(amended), ['src/a.txt', 'app:.gitignore']);
+  // The plan's own survey lists what the change reaches, not what it changes: only amendment addenda add scope.
+  const amended = { impact: { survey: { consumers: [{ id: 'S1', file: 'src/other.txt' }] }, addenda: [{ survey: { flows: [{ id: 'S9', file: 'app:.gitignore' }] } }] } };
+  assert.deepEqual(scopeFiles(amended), ['app:.gitignore']);
   assert.deepEqual(outsidePlan(plan.plan, { app: ['src/a.txt', '.gitignore', 'src/other.txt'] }, null, scopeFiles(amended)), ['app:src/other.txt']);
 });

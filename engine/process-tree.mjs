@@ -16,7 +16,30 @@ const POLL_MS = 100;
 export const processSeams = {
   kill: (pid, signal) => process.kill(pid, signal),
   table: processTable,
+  startedAt: processStart,
 };
+
+// When the process `pid` started (ms), or null when it is gone or this host does not say.
+function processStart(pid) {
+  const r = spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', env: { ...process.env, LC_ALL: 'C' } });
+  if (r.error || r.status !== 0) return null;
+  const at = Date.parse(String(r.stdout).trim());
+  return Number.isFinite(at) ? at : null;
+}
+
+// Whether `pid` is still the process launched at `spawnedAt` (ISO): a process that started well after it holds a pid the
+// system gave out again. Named failure (independent review of 0.7.9): a stale launch record's pid, reused by another
+// process that leads its own group (a shell job, a daemon), would have made that group "the role" and killed it. While a
+// group of the old pid still had members the system could not have reused the pid, so a reused leader means the role's
+// group is gone. Unknown (no start time, no record) counts as the same process, as before.
+export function stillTheRole(pid, spawnedAt) {
+  const launched = Date.parse(spawnedAt ?? '');
+  if (!Number.isFinite(launched)) return true;
+  const started = processSeams.startedAt(pid);
+  if (started === null) return true;
+  // `ps` reports whole seconds; the spawn is recorded right after the process starts.
+  return started <= launched + 30_000 && started >= launched - 30_000;
+}
 
 // Every process as { ppid, pgid, zombie } by pid, or null when this host does not let us list them (a sandbox can forbid
 // `ps`; see processCommand in engine/gate.mjs). A zombie has died and waits for its parent to collect it: it is gone.
@@ -47,13 +70,15 @@ function treeMembers(leader, seen) {
   const table = processSeams.table();
   if (!table) return null;
   const tree = new Set();
-  for (const [pid, p] of table) if (p.pgid === leader || seen.has(pid)) tree.add(pid);
+  // A process seen in the tree before counts while it keeps the group it had then (an orphan's parent changes, its group
+  // does not); a pid given to a new process meanwhile does not.
+  for (const [pid, p] of table) if (p.pgid === leader || seen.get(pid) === p.pgid) tree.add(pid);
   for (let grew = true; grew;) {
     grew = false;
     for (const [pid, p] of table) if (!tree.has(pid) && tree.has(p.ppid)) { tree.add(pid); grew = true; }
   }
   tree.delete(process.pid);
-  return [...tree].filter((pid) => !table.get(pid).zombie);
+  return [...tree].filter((pid) => !table.get(pid).zombie).map((pid) => ({ pid, pgid: table.get(pid).pgid }));
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -64,7 +89,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // signal, so a process the tree started meanwhile is ended too. Without a process table only the role's group can be
 // probed, which still catches the role and everything that stayed in its group.
 export async function endProcessTree(leader, { graceMs = STOP_GRACE_MS, killMs = STOP_KILL_MS } = {}) {
-  const seen = new Set(), signalled = new Map(), denied = new Set(), groupSignalled = new Set();
+  const seen = new Map(), signalled = new Map(), denied = new Set(), groupSignalled = new Set();
   const startedAt = Date.now();
   const send = (target, signal) => {
     try {
@@ -75,9 +100,9 @@ export async function endProcessTree(leader, { graceMs = STOP_GRACE_MS, killMs =
   };
   for (;;) {
     const members = treeMembers(leader, seen);
-    const alive = members ?? (exists(-leader) ? [leader] : []);
+    if (members) for (const m of members) if (!seen.has(m.pid)) seen.set(m.pid, m.pgid);
+    const alive = members ? members.map((m) => m.pid) : exists(-leader) ? [leader] : [];
     if (!alive.length) return { left: [], denied: [] };
-    for (const pid of alive) seen.add(pid);
     const elapsed = Date.now() - startedAt;
     if (elapsed >= graceMs + killMs) return { left: alive, denied: [...denied].filter((pid) => alive.includes(pid)) };
     const signal = elapsed < graceMs ? 'SIGTERM' : 'SIGKILL';

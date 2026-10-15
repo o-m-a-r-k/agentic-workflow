@@ -75,6 +75,18 @@ export function lessonStats(root, { except = null } = {}) {
       if (!s.lastRepeatAt || f.at > s.lastRepeatAt) s.lastRepeatAt = f.at;
     } else if (f.kind === 'injected' && f.attempt !== except) for (const id of f.lessons ?? []) get(id).carriedIn.add(f.attempt ?? f.at);
   }
+  // A merged lesson ranks by its members' evidence too (independent review of 0.7.9: the lessons the owner was told to
+  // consolidate fell under the cap right after, their last repeat lost). Their repeats are already in its file's count.
+  for (const f of learnedFacts(root)) {
+    if (f.kind !== 'merged' || !f.lesson) continue;
+    const s = get(f.lesson);
+    for (const m of f.members ?? []) {
+      const ms = out.get(m);
+      if (!ms) continue;
+      if (ms.lastRepeatAt && (!s.lastRepeatAt || ms.lastRepeatAt > s.lastRepeatAt)) s.lastRepeatAt = ms.lastRepeatAt;
+      for (const a of ms.carriedIn) s.carriedIn.add(a);
+    }
+  }
   for (const s of out.values()) s.injections = s.carriedIn.size;
   return out;
 }
@@ -167,9 +179,13 @@ export function classify(c, { goal, choices, items }) {
 
 // What the person answered when asked whether an item may leave a delivery: `fix now` and their own words are what a
 // reviewer reads as "what this person fixes" when it rates similar items (never a rule: the reviewer still rates).
+// The most recent ones only: every reviewer reads them every round, and older answers add reading, not information.
+export const PERSON_FIXED_SHOWN = 20;
 export function personFixed(root) {
   return learnedFacts(root)
     .filter((f) => f.kind === 'answer' && (f.choice === 'fix now' || f.choice === 'other'))
+    .slice(-PERSON_FIXED_SHOWN)
+    .reverse()
     .map((f) => ({ at: f.at, item: f.summary ?? null, ...(f.choice === 'other' ? { ownWords: f.words ?? null } : { answer: 'fix now' }) }));
 }
 

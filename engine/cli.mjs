@@ -19,7 +19,7 @@ import { append, listAttempts, loadState, openEvidence } from './ledger.mjs';
 import { canonical, touchesEvidence } from './paths.mjs';
 import { openCount } from './improve.mjs';
 import { reviewDivisionSummary } from './review-groups.mjs';
-import { addLesson, applySnippet, exportPluginLessons, findLesson, isProjectWide, LESSON_FILE, lessonPrompts, lessonWarnings, loadLessons, mergeLessons, mergeSuggestions, moveLesson, recur, relevantLessons, reviewLessons, setLesson, lessonKey, totalRecurrence } from './lessons.mjs';
+import { addLesson, applySnippet, exportPluginLessons, findLesson, isProjectWide, LESSON_FILE, lessonPrompts, lessonWarnings, loadLessons, mergeLessons, mergeSuggestions, moveLesson, recur, relevantLessons, reviewLessons, setLesson, lessonKey, totalRecurrence, mergeableIn, distinctLessons } from './lessons.mjs';
 import { lessonStats } from './learning.mjs';
 import { LinkRefused, changesOf, ledgerEmpty, lostLedgers, rebaseline, releaseAttempt, seal, setVerifyLevel, unlockEvidence, verifyAttempt } from './evidence.mjs';
 import { acceptReview, amendCriteria, closeImplementer, designWarning, gateOrderCheck, batchCreate, batchEject, closeAfterHandoff, deliver, deliveredFiles, exportScreenshots, freezeCriteria, handoff, narrowDelivery, needsShown, nextAction, nextDecision, orphanNext, orphansOf, outsideWarning, recordReview, recordShown, reopen, screenshotsExportDir, shownDraftFile, uncovered, withAttempt } from './lifecycle.mjs';
@@ -151,7 +151,7 @@ Work
   wf approve ID [--choice C]        the owner confirms a reserved decision in their own terminal
   wf approve ID --from-question     or the agent records the owner's answer from its question panel (as the harness recorded it);
                                     an answer in their own words is recorded as theirs (choice "other"), to follow
-  wf lesson add|waive|recur|merge|move|set|apply|show|list|preview|review|export
+  wf lesson add|waive|recur|merge|distinct|move|set|apply|show|list|preview|review|export
                                     the project's lessons (.workflow/lessons/): capture, enforce, recurrence, merge lessons that describe one mistake
   wf reopen --item ID --reason "feedback" [--no-lesson "why"]
   wf adopt [--attempt ID | --item ID] take over an open attempt as the current chat (an owner session active in the last
@@ -220,10 +220,13 @@ function summary(root, s, { base = null, resume = false } = {}) {
     const labelled = s.learning?.at(-1);
     if (labelled?.error) lines.push(`  learning: the classifier (${labelled.model ?? labelled.runtime}) gave no labels at acceptance (${labelled.error.slice(0, 160)}); lesson ranking is unchanged`);
     if (isOpen(s)) {
-      const held = new Set(Object.keys(s.repos));
-      const byId = new Map(all.map((l) => [l.id, l]));
-      const merges = mergeSuggestions(root, { state: s }).filter((g) => g.every((id) => held.has(byId.get(id)?.home)));
-      if (merges.length) lines.push(`  lessons describing one mistake (classifier): ${merges.map((g) => g.join(' + ')).join('; ')}: merge each into one lesson in this attempt (\`wf lesson merge <ids> --title "<the one mistake>" --attempt ${s.id}\`; reviewed and delivered with it)`);
+      // Proposed where the merge can be made (this attempt holds the repos and its acceptance does not stand), else for later.
+      const merges = mergeSuggestions(root, { state: s });
+      const here = merges.filter((g) => mergeableIn(root, s, g));
+      const later = merges.filter((g) => !here.includes(g));
+      const named = (gs) => gs.map((g) => g.join(' + ')).join('; ');
+      if (here.length) lines.push(`  lessons describing one mistake (classifier): ${named(here)}: merge each into one lesson in this attempt (\`wf lesson merge <ids> --title "<the one mistake>" --attempt ${s.id}\`; reviewed and delivered with it), or \`wf lesson distinct <ids>\` if they are different mistakes`);
+      if (later.length && !here.length) lines.push(`  lessons describing one mistake (classifier): ${named(later)}: merge them in an open attempt that holds their repos, before its review is accepted (\`wf lesson distinct <ids>\` if they are different mistakes)`);
     }
     if (!['done', 'abandoned'].includes(s.phase)) for (const p of lessonPrompts(s)) lines.push(`  lesson: ${p}${/reopens/.test(p) ? '; a finding about the workflow itself is a plugin improvement instead: `wf improve add ...`' : ''}`);
     const inbox = openCount();
@@ -1234,6 +1237,11 @@ async function dispatch(cmd, sub, positional, options) {
         print(options, `lessons ${r.merged.join(', ')} merged into ${r.lesson.id} (recurrence ${r.lesson.recurrence}): ${r.lesson.title}\n  ${r.file} (committed in ${s.id}; the members are retired there, and stop applying once it is delivered)`, r);
         return 0;
       }
+      if (sub === 'distinct') {
+        const r = distinctLessons(root, positional);
+        print(options, `lessons ${r.lessons.join(', ')} are different mistakes: no merge of them is proposed again`, r);
+        return 0;
+      }
       if (sub === 'recur') {
         const id = positional[0];
         if (!id) throw new WfError('usage: wf lesson recur <id> --attempt <attempt>');
@@ -1311,7 +1319,7 @@ async function dispatch(cmd, sub, positional, options) {
         print(options, `${all.length ? all.map(show).join('\n') : `no lessons yet (${path.join('.workflow', 'lessons')})`}${warn}`, all);
         return 0;
       }
-      throw new WfError('usage: wf lesson add|waive|recur|merge|move|set|apply|show|list|preview|review|export');
+      throw new WfError('usage: wf lesson add|waive|recur|merge|distinct|move|set|apply|show|list|preview|review|export');
     }
     case 'evidence': {
       // I-16: read-only access to an attempt's evidence, so no shell command needs the folder's name.

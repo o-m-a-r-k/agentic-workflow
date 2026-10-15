@@ -231,3 +231,41 @@ test('an interrupted run that cannot signal the tree returns, says what is still
     assert.deepEqual(survivors(pids), NAMES);
   } finally { processSeams.kill = real; process.stderr.write = write; endAll(pids); }
 });
+
+// Named failure (independent review of 0.7.9): a stale launch record's pid, given by the system to another process that
+// leads its own group, would have made that group "the role" and killed it. Here the recorded pid is said to have started
+// an hour after the launch: the stop records the launch stopped and signals nothing.
+test('a recorded pid that is another process now is left alone, and the launch is recorded stopped', { timeout: 30_000 }, async () => {
+  const p = prepared('codex');
+  ok(wf(p.root, ['handoff', 'run', '--agent', 'p', '--minutes', '0.02', '--attempt', p.id, '--json'], { env: p.env }));
+  const pids = await running(p.dir);
+  const startedAt = processSeams.startedAt, kill = processSeams.kill;
+  process.env.WF_EVIDENCE_FLAGS = '0';
+  const signalled = [];
+  try {
+    const launch = state(p.root, p.id).handoffs.at(-1).launch;
+    assert.ok(launch.spawnedAt, 'the spawn time is recorded with the pid');
+    processSeams.startedAt = () => Date.parse(launch.spawnedAt) + 3_600_000;
+    processSeams.kill = (target, signal) => { if (signal !== 0) signalled.push(target); return kill(target, signal); };
+    const r = await stopRole(p.root, { attempt: p.id, agent: 'p', owner: 'o' });
+    assert.equal(r.status, 'stopped');
+    assert.deepEqual(signalled, [], 'nothing was signalled');
+    assert.deepEqual(survivors(pids), NAMES, 'the process holding the pid runs on');
+    assert.match(state(p.root, p.id).handoffs.at(-1).launch.failure.detail, /its process had already ended; pid \d+ is another process now, left alone/);
+  } finally { processSeams.startedAt = startedAt; processSeams.kill = kill; endAll(pids); }
+});
+
+// A pid seen in the tree that the system gave to a process of another group meanwhile is not the tree's any more.
+test('a pid seen in the tree that changed group is not ended', { timeout: 10_000 }, async () => {
+  const table = processSeams.table, kill = processSeams.kill;
+  let call = 0;
+  const signalled = [];
+  try {
+    // First look: the leader 900 and its member 901. Then the leader is gone and 901 is a new process in group 950.
+    processSeams.table = () => (call++ === 0 ? new Map([[900, { ppid: 1, pgid: 900, zombie: false }], [901, { ppid: 900, pgid: 900, zombie: false }]]) : new Map([[901, { ppid: 1, pgid: 950, zombie: false }]]));
+    processSeams.kill = (target, signal) => { signalled.push([target, signal]); };
+    const ended = await endProcessTree(900, { graceMs: 200, killMs: 200 });
+    assert.deepEqual(ended.left, []);
+    assert.equal(signalled.filter(([target]) => target === 901).length, 1, 'one SIGTERM while it was a member, nothing after');
+  } finally { processSeams.table = table; processSeams.kill = kill; }
+});

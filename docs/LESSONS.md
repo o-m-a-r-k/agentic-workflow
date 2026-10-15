@@ -202,9 +202,12 @@ per ticket), so a mistake that kept coming back was spread over near-copies.
 - **Lessons that describe one mistake become one lesson**: `wf resume` names them, and the owner merges them in an open
   attempt with `wf lesson merge <ids> --title "<the one mistake>" --attempt <id>`. The merged lesson carries the members'
   scope and recurrences; the members are retired with `mergedInto`. It is committed in the attempt, reviewed and delivered
-  with it, and `git revert` undoes it.
+  with it, and `git revert` undoes it. The merged lesson keeps its members' ranking evidence. A merge is proposed only
+  where it can be made, and once: another open attempt is not asked again. `wf lesson distinct <ids>` says the
+  classifier was wrong (different mistakes), and no merge of them is proposed again. A lesson recorded from a finding
+  is that finding's lesson, never counted as its repeat.
 - **The person's answers**: what they chose to fix when asked whether an item could leave (and their own words) reaches
-  later reviewers as `severityScale.personFixed`, examples to rate by, never a rule.
+  later reviewers as `severityScale.personFixed` (the 20 most recent), examples to rate by, never a rule.
 - **Estimates**: each delivered attempt's prediction beside what happened reaches later planners and strategists as
   `pastEstimates` (per lane, median actual over predicted); never an implementer's or a reviewer's (D9).
 

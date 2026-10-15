@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { closureFile, commitIn, criteriaFile, goodClosure, ok, sh, singleRepoProject, state, tmp, wf, WF } from './helpers.mjs';
-import { classifierFor } from '../engine/learning.mjs';
+import { classifierFor, lessonStats } from '../engine/learning.mjs';
 import codex from '../engine/hosts/codex.mjs';
 
 // 0.7.9, D19, named failure (field): one project had 70 lessons, all `proposed`, 16 recurred and none ever curated: the
@@ -41,7 +41,7 @@ function fakeClaude(base) {
 }
 
 // An attempt whose first review raised one finding, fixed before the evidence review; stops before acceptance.
-function reviewed(root, base, item, finding) {
+function reviewed(root, base, item, finding, { afterFirstReview = null } = {}) {
   const e = ok(wf(root, ['entry', '--item', item, '--owner', 'o', '--json'])).json();
   ok(wf(root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id]));
   ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id]));
@@ -49,6 +49,7 @@ function reviewed(root, base, item, finding) {
   commitIn(e.repos.app.worktree, { 'src/a.txt': `${item}\n` });
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-0', '--attempt', e.id]));
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('rev-0', { findings: finding ? [{ id: 'F1', severity: 'low', summary: finding, status: 'fixed', evidence: 'src/a.txt:1', category: 'design-system' }] : [] })), '--attempt', e.id]));
+  afterFirstReview?.(e);
   ok(wf(root, ['gate', '--attempt', e.id]));
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-1', '--attempt', e.id]));
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure()), '--attempt', e.id]));
@@ -67,7 +68,8 @@ function project(name, config = {}) {
 test('at acceptance the classifier labels what the attempt taught: a finding that repeats a lesson is its recurrence, lessons that describe one mistake become a merge, and lessons rank by it', () => {
   const { base, root } = project('learning-accept');
   const fake = fakeClaude(base);
-  const env = { WF_LEARNING: 'on', PATH: fake.bin + path.delimiter + process.env.PATH, CLASSIFY_RULES: JSON.stringify([{ match: 'no loading row', label: 'L-1' }, { match: 'List loading states', label: 'L-1' }]) };
+  // The classifier is right about L-3 and wrong about L-2 (the owner says so with `wf lesson distinct`).
+  const env = { WF_LEARNING: 'on', PATH: fake.bin + path.delimiter + process.env.PATH, CLASSIFY_RULES: JSON.stringify([{ match: 'no loading row', label: 'L-1' }, { match: 'List loading states', label: 'L-1' }, { match: 'Invoice totals', label: 'L-1' }]) };
   const e = reviewed(root, base, 'ENG-1', 'the orders table shows no loading row while it loads');
   const accepted = ok(wf(root, ['accept', '--attempt', e.id], { env }));
   assert.match(accepted.out, /learned: rev-0:F1 repeats L-1 \(counted as recurrences; lessons rank by them\)/);
@@ -85,7 +87,7 @@ test('at acceptance the classifier labels what the attempt taught: a finding tha
   const s = state(root, e.id);
   assert.equal(s.learning.at(-1).model, 'claude-haiku-fixture');
   assert.deepEqual(s.learning.at(-1).findings, { 'rev-0:F1': 'L-1' });
-  assert.deepEqual(s.learning.at(-1).lessons, { 'L-1': 'none', 'L-2': 'none', 'L-3': 'L-1' });
+  assert.deepEqual(s.learning.at(-1).lessons, { 'L-1': 'none', 'L-2': 'L-1', 'L-3': 'L-1' });
   assert.match(s.lessons.recurred.at(-1).why, /^classifier \(claude-haiku-fixture\): review finding rev-0:F1 repeats it$/);
   const listed = ok(wf(root, ['lesson', 'list'])).out;
   assert.match(listed, /^L-1 .*recurrence 1 \(last \d{4}-\d{2}-\d{2}\)/m);
@@ -94,11 +96,13 @@ test('at acceptance the classifier labels what the attempt taught: a finding tha
   assert.equal(sh(root, 'git status --porcelain'), '');
   assert.ok(fs.existsSync(path.join(root, '.workflow-maintenance', 'learned.jsonl')));
 
-  // The merge is suggested where it can be made: an open attempt holding the lessons' repo, before its acceptance stands.
+  // The merge is proposed where it can be made: an open attempt holding the lessons' repo, before its acceptance stands.
+  assert.match(ok(wf(root, ['status', '--attempt', e.id])).out, /lessons describing one mistake \(classifier\): L-1 \+ L-2 \+ L-3: merge them in an open attempt that holds their repos, before its review is accepted/);
   const merge = ['lesson', 'merge', 'L-1', 'L-3', '--title', 'Tables and lists show the shared skeleton row while loading', '--attempt'];
   const late = wf(root, [...merge, e.id]);
   assert.equal(late.code, 75);
   assert.match(late.err, /lessons not merged: lesson L-\d+ would be written into app's main checkout \(accepted\), outside ENG-1\.1's review/);
+  assert.match(ok(wf(root, ['lesson', 'distinct', 'L-1', 'L-2'])).out, /lessons L-1, L-2 are different mistakes: no merge of them is proposed again/);
   const next = ok(wf(root, ['entry', '--item', 'ENG-2', '--owner', 'o', '--json'])).json();
   assert.match(ok(wf(root, ['status', '--attempt', next.id])).out, /lessons describing one mistake \(classifier\): L-1 \+ L-3: merge each into one lesson in this attempt/);
   // The next planner sees the lesson whose mistake repeated first.
@@ -109,9 +113,37 @@ test('at acceptance the classifier labels what the attempt taught: a finding tha
   const merged = fs.readFileSync(path.join(wt, '.workflow', 'lessons', 'L-4.yaml'), 'utf8');
   assert.match(merged, /^merged:\n {2}- L-1\n {2}- L-3$/m);
   assert.match(merged, /^tags:\n {2}- tables\n {2}- lists$/m);
+  assert.match(merged, /what: a table rendered empty while its rows loaded; a list showed a spinner instead of rows/, 'what happened, in the members\' words');
+  // The merged lesson inherits its members' ranking evidence.
+  const stats = lessonStats(root);
+  assert.equal(stats.get('L-4@app').lastRepeatAt, stats.get('L-1@app').lastRepeatAt);
   assert.match(fs.readFileSync(path.join(wt, '.workflow', 'lessons', 'L-3.yaml'), 'utf8'), /^status: retired$[\s\S]*^mergedInto: L-4$/m);
   assert.equal(sh(wt, 'git status --porcelain'), '', 'committed in the attempt');
   assert.doesNotMatch(ok(wf(root, ['status', '--attempt', next.id])).out, /lessons describing one mistake/);
+  // Another open attempt is not asked to merge them again.
+  const other = ok(wf(root, ['entry', '--item', 'ENG-7', '--owner', 'o', '--json'])).json();
+  assert.doesNotMatch(ok(wf(root, ['status', '--attempt', other.id])).out, /lessons describing one mistake/);
+});
+
+// Independent review of 0.7.9: the owner records a lesson from a finding, and at acceptance the classifier matched that
+// finding to the new lesson, so the lesson was born recurring, ranked first and was soon proposed for promotion.
+test('a lesson recorded from a finding is that finding\'s lesson, not its repeat', () => {
+  const { base, root } = project('learning-origin');
+  const fake = fakeClaude(base);
+  const env = { WF_LEARNING: 'on', PATH: fake.bin + path.delimiter + process.env.PATH, CLASSIFY_RULES: JSON.stringify([{ match: 'unrounded subtotal', label: 'L-4' }]) };
+  const e = reviewed(root, base, 'ENG-8', 'an unrounded subtotal reaches the invoice footer', {
+    // Recorded during the review rounds (committed in the attempt), so the next round reviews it.
+    afterFirstReview: (x) => {
+      add(root, ['--attempt', x.id, '--finding', 'F1', '--title', 'Footers show rounded subtotals', '--what', 'an unrounded subtotal reached a footer', '--cause', 'test', '--mechanism', 'reviewer-checklist', '--tags', 'footers', '--paths', 'src/**']);
+      ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-0b', '--attempt', x.id]));
+      ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('rev-0b')), '--attempt', x.id]));
+    },
+  });
+  ok(wf(root, ['accept', '--attempt', e.id], { env }));
+  const s = state(root, e.id);
+  assert.deepEqual(s.learning.at(-1).findings, { 'rev-0:F1': 'L-4' }, 'the label is kept');
+  assert.deepEqual(s.lessons.recurred, [], 'and counts as no recurrence');
+  assert.doesNotMatch(ok(wf(root, ['status', '--attempt', e.id])).out, /LESSON L-4 RECURRED/);
 });
 
 test('learning is a configurable agent: the adapter pins the classifier per runtime or turns it off, and a failed classifier never fails an acceptance', () => {

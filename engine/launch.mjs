@@ -21,7 +21,7 @@ import { roleInstructions } from './onboard.mjs';
 import { roleProgress, ROLE_HEARTBEAT_MS } from './role-progress.mjs';
 import { findHost, hostNames, launchEnvDeletes } from './hosts/index.mjs';
 import { isPlainSessionId } from './hosts/safe-file.mjs';
-import { endProcessTree, leftOver } from './process-tree.mjs';
+import { endProcessTree, leftOver, stillTheRole } from './process-tree.mjs';
 import { WfError, assertPlainGit, canonical, git, refuse, sha256, withFileLock, writeJson } from './util.mjs';
 import { readStatement } from './expectations.mjs';
 
@@ -305,14 +305,16 @@ export async function waitRole(root, options) {
 export async function stopRole(root, options) {
   const { state, h } = launched(root, options);
   if (['completed', 'failed'].includes(h.launch.status)) throw refuse(`${h.agent} already ${h.launch.status}`);
-  if (h.launch.pid) {
+  // A role whose pid now belongs to another process ended long ago: nothing of it is left to signal.
+  const reused = h.launch.pid && !stillTheRole(h.launch.pid, h.launch.spawnedAt);
+  if (h.launch.pid && !reused) {
     const ended = await endProcessTree(h.launch.pid);
     if (ended.left.length) {
       const { why, byHand } = leftOver(ended);
       throw new WfError(`${h.agent} was not stopped, still running: ${why}`, { hint: `nothing was recorded as stopped. ${byHand}, then \`wf handoff stop --agent ${h.agent} --attempt ${state.id}\` again to record it` });
     }
   }
-  append(root, state.id, 'agent.launch.finished', { handoff: h.bundle, status: 'failed', exitCode: 143, failure: { kind: 'stopped', detail: `stopped by the owner${typeof options.reason === 'string' && options.reason.trim() ? `: ${options.reason.trim()}` : ''}` } }, actor(options));
+  append(root, state.id, 'agent.launch.finished', { handoff: h.bundle, status: 'failed', exitCode: 143, failure: { kind: 'stopped', detail: `stopped by the owner${typeof options.reason === 'string' && options.reason.trim() ? `: ${options.reason.trim()}` : ''}${reused ? ` (its process had already ended; pid ${h.launch.pid} is another process now, left alone)` : ''}` } }, actor(options));
   seal(append);
   return { agent: h.agent, status: 'stopped' };
 }

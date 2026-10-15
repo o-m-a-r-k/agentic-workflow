@@ -29,15 +29,16 @@ export function planPaths(plan, extra = []) {
   return [...new Set(out)];
 }
 
-// The files the attempt's accepted scope names beyond the plan's anchors and tests: the impact survey's files, the plan's
-// and every recorded amendment addendum's. Named failure (I-129): an accepted impact amendment brought work items' files
-// into scope, yet the outside-plan list kept naming them, because only the plan as first frozen was read.
+// The files accepted amendments brought into scope beyond the plan's anchors and tests: each recorded amendment addendum's
+// survey files. Named failure (I-129): an accepted impact amendment brought work items' files into scope, yet the
+// outside-plan list kept naming them, because only the plan as first frozen was read. The plan's own survey lists what the
+// change reaches, not what it changes, so a surveyed consumer changed without a plan is still listed.
 const SURVEY_LISTS = ['components', 'consumers', 'flows', 'patterns'];
 export function scopeFiles(state) {
   const impact = state?.impact;
   if (!impact) return [];
   const listed = (survey) => SURVEY_LISTS.flatMap((k) => (Array.isArray(survey?.[k]) ? survey[k] : [])).map((e) => e?.file).filter((f) => typeof f === 'string');
-  return [...listed(impact.survey), ...(impact.addenda ?? []).flatMap((a) => listed(a.survey))];
+  return (impact.addenda ?? []).flatMap((a) => listed(a.survey));
 }
 
 function covered(repo, file, p) {

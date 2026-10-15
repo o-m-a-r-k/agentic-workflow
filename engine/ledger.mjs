@@ -360,7 +360,7 @@ export function reduce(entries) {
       }
       case 'agent.launch.spawned': {
         const h = s.handoffs.find((h) => h.bundle === d.handoff);
-        if (h?.launch) h.launch = { ...h.launch, pid: d.pid, out: d.out, err: d.err };
+        if (h?.launch) h.launch = { ...h.launch, pid: d.pid, out: d.out, err: d.err, spawnedAt: e.at };
         break;
       }
       case 'agent.launch.started': {

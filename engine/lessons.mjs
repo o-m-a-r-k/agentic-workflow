@@ -1,5 +1,5 @@
 import { mkdirStateDirectory } from './state-folders.mjs';
-import { checkedLessons, classifierFor, classify, lessonStats, noteLearned, sameMistakes } from './learning.mjs';
+import { checkedLessons, classifierFor, classify, learnedFacts, lessonStats, noteLearned, sameMistakes } from './learning.mjs';
 // Lessons: each project's learning path (docs/LESSONS.md). Capture, apply, inject, acknowledge, feedback, export. The
 // engine never edits the adapter or an instruction file to enforce a lesson: it prints what to add, and the owner
 // commits it.
@@ -792,6 +792,9 @@ export function learnFromReview(root, state, actorId) {
   for (const it of items) {
     const to = labels[it.key];
     if (!to || to === 'none') continue;
+    // A lesson this attempt recorded is its findings' lesson, not a repeat of them (independent review of 0.7.9: the owner
+    // records a lesson from a finding, and that finding then counted as the new lesson's first recurrence).
+    if (it.ref && isNew(lessons.find((l) => l.id === to))) continue;
     if (it.lesson) noteLearned(root, { kind: 'same', lesson: lessonKey(it.lesson), as: lessonKey(lessons.find((l) => l.id === to)), attempt: state.id });
     // An older lesson that describes the same mistake as another is a merge to make, not a new occurrence of it.
     if (it.lesson && !isNew(it.lesson)) continue;
@@ -825,8 +828,23 @@ export function mergeSuggestions(root, { state = null } = {}) {
     while (parent.has(x)) x = parent.get(x);
     return x;
   };
+  // Lessons an attempt has merged already (its merge applies once delivered; an abandoned one's never does), and pairs the
+  // owner said are different mistakes (`wf lesson distinct`).
+  const merging = new Set();
+  const status = new Map();
+  for (const f of learnedFacts(root).filter((x) => x.kind === 'merged')) {
+    if (!status.has(f.attempt)) {
+      try {
+        status.set(f.attempt, loadState(root, String(f.attempt)).phase);
+      } catch {
+        status.set(f.attempt, 'unknown');
+      }
+    }
+    if (status.get(f.attempt) !== 'abandoned') for (const m of f.members ?? []) merging.add(m);
+  }
+  const apart = new Set(learnedFacts(root).filter((x) => x.kind === 'distinct').flatMap((x) => (x.lessons ?? []).flatMap((a) => (x.lessons ?? []).map((b) => `${a}\n${b}`))));
   for (const { lesson, as } of sameMistakes(root)) {
-    if (!live.has(lesson) || !live.has(as)) continue;
+    if (!live.has(lesson) || !live.has(as) || merging.has(lesson) || merging.has(as) || apart.has(`${lesson}\n${as}`)) continue;
     const a = find(lesson);
     const b = find(as);
     if (a !== b) parent.set(a, b);
@@ -835,6 +853,32 @@ export function mergeSuggestions(root, { state = null } = {}) {
   for (const id of live) if (parent.has(id) || [...parent.values()].includes(id)) groups.set(find(id), [...(groups.get(find(id)) ?? []), id]);
   const byId = (a, b) => String(a).localeCompare(String(b), undefined, { numeric: true });
   return [...groups.values()].filter((g) => g.length > 1).map((g) => g.map((k) => idOf.get(k)).sort(byId)).sort((a, b) => byId(a[0], b[0]));
+}
+
+// Whether these lessons can be merged in this attempt now: it holds every member's repository (and the merged lesson's),
+// is open, and its acceptance does not stand. `wf resume` proposes a merge only where it can be made.
+export function mergeableIn(root, state, ids) {
+  try {
+    const cfg = loadConfig(root);
+    const all = loadLessons(root, { state });
+    const members = ids.map((id) => findLesson(all, id));
+    if (members.some((m) => !m)) return false;
+    const repos = [...new Set(members.map((m) => m.repo ?? null))];
+    const home = repos.length === 1 && repos[0] ? repos[0] : adapterLocation(root, cfg).repo.name;
+    return [home, ...members.map((m) => m.home)].every((repo) => targetFor(root, cfg, repo, state).why === 'attempt');
+  } catch {
+    return false;
+  }
+}
+
+// `wf lesson distinct <ids...>`: the owner says the classifier was wrong, these lessons are different mistakes; no merge of
+// them is proposed again. A learned fact only: nothing in any repository changes.
+export function distinctLessons(root, ids) {
+  const all = loadLessons(root);
+  const members = [...new Set((ids ?? []).map(String))].map((id) => findLesson(all, id) ?? (() => { throw refuse(`no lesson ${id}`); })());
+  if (members.length < 2) throw refuse('name two or more lessons: `wf lesson distinct <id> <id>...`');
+  noteLearned(root, { kind: 'distinct', lessons: members.map(lessonKey) });
+  return { lessons: members.map((m) => m.id) };
 }
 
 // `wf lesson merge <ids...> --title "..." --attempt <id>`: lessons that describe one mistake become one lesson, written and
@@ -873,7 +917,8 @@ export function mergeLessons(root, ids, options, actorId) {
   const l = {
     id: options.id ?? nextId(all, takenByOpenAttempts(root)),
     title,
-    trigger: { what: options.what ?? `${members.length} lessons described one mistake: ${members.map((m) => `${m.id} (${m.title})`).join('; ')}`, attempt: state.id, finding: null, quote: null },
+    // What happened, in the members' own words (what every bundle shows); the members' ids are in `merged`.
+    trigger: { what: options.what ?? [...new Set(members.map((m) => String(m.trigger?.what ?? '').trim()).filter(Boolean))].join('; '), attempt: state.id, finding: null, quote: null },
     cause,
     mechanism: { kind, ref: null, text: null },
     scope,
@@ -902,7 +947,9 @@ export function mergeLessons(root, ids, options, actorId) {
   const file = writeLesson(target, l, { create: true, message: `Lesson ${l.id}: ${l.title} (merges ${l.merged.join(', ')})` });
   for (const [m, t] of targets) writeLesson(t, { ...m, status: 'retired', mergedInto: l.id }, { message: `Lesson ${m.id} merged into ${l.id}` });
   append(root, state.id, 'lesson.merged', { id: l.id, repo: l.repo, merged: l.merged, file }, actorId);
-  // The members were compared already; the merged lesson is their sum, so it needs no comparison of its own.
+  // The members were compared already; the merged lesson is their sum, so it needs no comparison of its own. It inherits
+  // their ranking evidence (when their mistake last repeated, where they were carried): engine/learning.mjs lessonStats.
   noteLearned(root, { kind: 'checked', lessons: [lessonKey({ ...l, home })], attempt: state.id });
+  noteLearned(root, { kind: 'merged', lesson: lessonKey({ ...l, home }), members: members.map(lessonKey), attempt: state.id });
   return { lesson: l, file, merged: l.merged };
 }
