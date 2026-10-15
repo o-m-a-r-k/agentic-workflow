@@ -35,3 +35,25 @@ test('wf status shows a running step\'s time against its last run and the latest
     await exited;
   }
 });
+
+// Independent review of 0.7.16: the gate holds back the tail of a step's output until it can redact it, so the log usually
+// ends mid-line; and a link, a FIFO or a file with another name at the log's path must neither show nor block.
+test('the latest log line is the last complete one, and the log is read like any evidence file', async () => {
+  const { latestLogLine } = await import('../engine/gate.mjs');
+  const { tmp } = await import('./helpers.mjs');
+  const { spawnSync } = await import('node:child_process');
+  const dir = tmp('latest-line');
+  const log = path.join(dir, 'output.log');
+  fs.writeFileSync(log, 'starting\ntest 412 of 1211\ntest 413 of 12');
+  assert.deepEqual(latestLogLine(log), { latest: 'test 412 of 1211' }, 'a partial last line is not shown');
+  fs.writeFileSync(log, `${'x'.repeat(300)}\n`);
+  assert.equal(latestLogLine(log).latest.length, 160, 'a long line shows its end');
+  const fifo = path.join(dir, 'fifo.log');
+  spawnSync('mkfifo', [fifo]);
+  assert.deepEqual(latestLogLine(fifo), {}, 'a FIFO shows nothing and does not block');
+  const secret = path.join(dir, '.env.local');
+  fs.writeFileSync(secret, 'TOKEN=abc\n');
+  const linked = path.join(dir, 'linked.log');
+  fs.linkSync(secret, linked);
+  assert.deepEqual(latestLogLine(linked), {}, 'a file with another name shows nothing');
+});

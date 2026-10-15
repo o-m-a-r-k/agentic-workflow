@@ -1421,24 +1421,31 @@ async function executeRun(root, state, plan, live, run) {
   return record;
 }
 
-// The last executed run of a step on this attempt (a reused one ran nothing).
+// The last whole run of a step on this attempt: one that ran to its end (passed or failed) over every suite. A reused one ran
+// nothing, a stopped one ended early, and a rerun of only the failed suites is shorter (independent review of 0.7.16).
 function lastRunOf(state, id) {
-  const last = allGateSteps(state).filter((s) => s.id === id && s.status !== 'reused' && typeof s.durationMs === 'number').at(-1);
+  const last = allGateSteps(state).filter((s) => s.id === id && ['passed', 'failed'].includes(s.status) && typeof s.durationMs === 'number' && !s.rerunSuites?.length).at(-1);
   return last ? { lastSeconds: Math.round(last.durationMs / 1000) } : {};
 }
 
-// The latest non-empty line of a step's live log: what the step is doing now, in its own words.
-function latestLogLine(file) {
+// The latest complete line of a step's live log: what the step is doing now, in its own words. Only lines that end in a
+// newline count: the gate holds back the tail of a step's output until it can redact it, so the file usually ends mid-line.
+// Read like every evidence file (independent review of 0.7.16): never through a link, never blocking on a FIFO, never a file
+// with another name elsewhere; anything else shows nothing.
+export function latestLogLine(file) {
   let fd;
   try {
-    fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
-    const size = fs.fstatSync(fd).size;
-    const length = Math.min(size, 8192);
+    fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | (fs.constants.O_NONBLOCK ?? 0));
+    const st = fs.fstatSync(fd);
+    if (!st.isFile() || st.nlink > 1) return {};
+    const length = Math.min(st.size, 16384);
     const buf = Buffer.alloc(length);
-    fs.readSync(fd, buf, 0, length, size - length);
+    fs.readSync(fd, buf, 0, length, st.size - length);
+    const text = buf.toString('utf8');
+    const complete = text.slice(0, Math.max(text.lastIndexOf('\n'), text.lastIndexOf('\r')) + 1);
     // eslint-disable-next-line no-control-regex
-    const line = buf.toString('utf8').replace(/\u001b\[[0-9;]*[A-Za-z]/g, '').split(/[\r\n]+/).map((l) => l.trim()).filter(Boolean).at(-1);
-    return line ? { latest: line.slice(0, 160) } : {};
+    const line = complete.replace(/\u001b\[[0-9;]*[A-Za-z]/g, '').split(/[\r\n]+/).map((l) => l.trim()).filter(Boolean).at(-1);
+    return line ? { latest: line.length > 160 ? `…${line.slice(-159)}` : line } : {};
   } catch {
     return {};
   } finally {

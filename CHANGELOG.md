@@ -5,10 +5,12 @@ Release notes, newest first, then every fix that came from a failure in the work
 ## 0.7.16 - See how far a gate step is
 
 - **`wf status` and `wf resume` show how far a running gate step is.** Each running step shows its time next to the
-  duration of its last run on this attempt, and the latest line of its live log, such as the last test the runner
+  duration of its last whole run on this attempt (not a stopped run or a rerun of only the failed suites), and the latest
+  complete line of its live log, such as the last test the runner
   finished. An owner waiting on a 27-minute end-to-end step could see only that it was running.
-- **The work skill says where to look.** `wf status --attempt <id>` shows a running gate's progress. The gate's own
-  output is live too, except with `--json`, which prints one document when the gate ends.
+- **The work skill says where to look.** `wf status --attempt <id>` shows a running gate's progress inside each step. The
+  gate's own output says when each step starts and ends. With `--json` that goes to stderr and the JSON document to stdout
+  at the end, so a file meant to show progress takes both streams (`2>&1`).
 
 ## 0.7.15 - Less waiting
 
