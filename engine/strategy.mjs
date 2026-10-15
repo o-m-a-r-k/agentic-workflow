@@ -59,7 +59,7 @@ export const OWNER_CHOICES = ['continue', 'split', 'deliver-core', 'stop'];
 const OWNER_WORDS = {
   labels: { continue: 'Keep going as now', split: 'Split off the rest as its own ticket', 'deliver-core': 'Ship what the criteria need now', stop: 'Stop this ticket' },
   then: {
-    continue: 'the next fix and review round starts; this question comes back after the next ten rounds',
+    continue: 'the next fix and review round starts; this question comes back after as many rounds again',
     split: 'the work that keeps reopening moves to a sibling attempt delivered with this one',
     'deliver-core': 'what the criteria need is fixed and shipped; the other open findings are listed as known issues or ticketed',
     stop: 'nothing more is worked on; the attempt waits to be abandoned or reopened',
@@ -206,7 +206,7 @@ export function requireOwnerDecision(root, state, role) {
   if (hold.owner) {
     recordEscalation(root, state, hold.owner);
     const answeredInWords = hold.ownerPending?.approved ? hold.ownerPending : null;
-    const d = hold.ownerPending && !hold.ownerPending.approved && !hold.ownerPending.withdrawn ? hold.ownerPending : createDecision(root, state, { kind: 'escalation', key: ownerDecisionKey(hold.owner), choices: OWNER_CHOICES, summary: `${hold.owner.summary}: continue | split | deliver-core | stop`, plain: `This ticket has been through ${hold.owner.summary.split(' ')[0]} review rounds and keeps finding new problems. How should it go on?`, ...OWNER_WORDS });
+    const d = hold.ownerPending && !hold.ownerPending.approved && !hold.ownerPending.withdrawn ? hold.ownerPending : createDecision(root, state, { kind: 'escalation', key: ownerDecisionKey(hold.owner), choices: OWNER_CHOICES, summary: `${hold.owner.summary}: continue | split | deliver-core | stop`, plain: `This ticket has been through ${hold.owner.summary.split(' ')[0]} review round${hold.owner.summary.split(' ')[0] === '1' ? '' : 's'} and the reviews keep finding problems. How should it go on?`, ...OWNER_WORDS });
     throw refuse(`not handed: ${hold.owner.summary} (${d.id}); no ${role} starts until the owner decides${wordsOf(answeredInWords)}`, `${approveHint(state, d)}. Bring the person the brief first (\`wf signals --attempt ${state.id}\`): the numbers, what keeps coming back, 2-3 options and your recommendation`, { id: 'strategy:owner-escalation' });
   }
   const esc = hold.escalation.approved || hold.escalation.withdrawn ? createDecision(root, state, { kind: 'escalation', key: hold.escalation.key, summary: hold.escalation.summary, choices: hold.escalation.choices }) : hold.escalation;

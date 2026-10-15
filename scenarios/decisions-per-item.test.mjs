@@ -206,7 +206,7 @@ test('an escalation answered in the person\'s own words stays open: words never 
   const id = held.err.match(/wf approve (A\d+)/)[1];
   const d = r.state(ctx.root, a.id).decisions.find((x) => x.id === id);
   const words = 'stop, this is going nowhere; park it';
-  answeredInWords(ctx.base, `${a.id} ${d.id}: ${d.summary}`, words, 'toolu_pi_escalate', d.choices);
+  answeredInWords(ctx.base, `${a.id} ${d.id}: ${d.plain ?? d.summary}`, words, 'toolu_pi_escalate', d.choices.map((c) => d.labels?.[c] ?? c));
   ok(r.run(ctx.root, ['approve', id, '--from-question', '--attempt', a.id], { env: { CLAUDE_CODE_SESSION_ID: CLAUDE }, ...silent }));
   assert.match(r.state(ctx.root, a.id).next, /answered in the person's own words, "stop, this is going nowhere; park it": follow that/, 'resume says what happened, not "answer the old question"');
   assert.match(r.run(ctx.root, ['approve', id, '--choice', 'stop', '--attempt', a.id], silent).err, /already decided/);
