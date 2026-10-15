@@ -1444,7 +1444,7 @@ export function latestLogLine(file) {
     const text = buf.toString('utf8');
     const complete = text.slice(0, Math.max(text.lastIndexOf('\n'), text.lastIndexOf('\r')) + 1);
     // eslint-disable-next-line no-control-regex
-    const line = complete.replace(/\u001b\[[0-9;]*[A-Za-z]/g, '').split(/[\r\n]+/).map((l) => l.trim()).filter(Boolean).at(-1);
+    const line = complete.replace(/\u001b\[[0-9;?]*[A-Za-z]/g, '').split(/[\r\n]+/).map((l) => l.trim()).filter(Boolean).at(-1);
     return line ? { latest: line.length > 160 ? `…${line.slice(-159)}` : line } : {};
   } catch {
     return {};

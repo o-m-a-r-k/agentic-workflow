@@ -245,7 +245,7 @@ function summary(root, s, { base = null, resume = false } = {}) {
   const live = ['done', 'abandoned'].includes(s.phase) ? null : liveGate(root, s);
   if (live) {
     lines.push(`  gate running: ${live.runId} (pid ${live.pid})`);
-    const clock = (sec) => (sec < 60 ? `${sec}s` : `${Math.floor(sec / 60)}m${String(sec % 60).padStart(2, '0')}s`);
+    const clock = (sec) => (sec < 1 ? 'under 1s' : sec < 60 ? `${sec}s` : `${Math.floor(sec / 60)}m${String(sec % 60).padStart(2, '0')}s`);
     if (!live.running.length) lines.push(`    running: none${live.waiting.length ? '' : ' (waiting for a lease)'}`);
     for (const r of live.running) lines.push(`    running: ${r.id} (${clock(r.seconds)}${r.lastSeconds !== undefined ? ` of ~${clock(r.lastSeconds)} last time` : ''})${r.latest ? `\n      latest: ${r.latest}` : ''}`);
     // Named failure (I-113): the line said only "waiting for a lease". It names the lease, its holders and how capacity is raised.

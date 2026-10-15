@@ -28,7 +28,7 @@ test('wf status shows a running step\'s time against its last run and the latest
     view = wf(f.root, ['status', '--attempt', e.id]).out;
   }
   try {
-    assert.match(view, /running: e2e \(\d+s of ~\d+s last time\)/);
+    assert.match(view, /running: e2e \((\d+s|under 1s) of ~(\d+s|under 1s) last time\)/);
     assert.match(view, /latest: test 412 of 1211/);
   } finally {
     wf(f.root, ['stop', '--class', 'owner-decision', '--reason', 'scenario', '--attempt', e.id]);
@@ -46,6 +46,8 @@ test('the latest log line is the last complete one, and the log is read like any
   const log = path.join(dir, 'output.log');
   fs.writeFileSync(log, 'starting\ntest 412 of 1211\ntest 413 of 12');
   assert.deepEqual(latestLogLine(log), { latest: 'test 412 of 1211' }, 'a partial last line is not shown');
+  fs.writeFileSync(log, 'running\n\u001b[?25lhidden cursor\u001b[0m\n');
+  assert.deepEqual(latestLogLine(log), { latest: 'hidden cursor' }, 'terminal codes are dropped');
   fs.writeFileSync(log, `${'x'.repeat(300)}\n`);
   assert.equal(latestLogLine(log).latest.length, 160, 'a long line shows its end');
   const fifo = path.join(dir, 'fifo.log');
