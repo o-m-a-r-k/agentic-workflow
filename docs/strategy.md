@@ -96,7 +96,7 @@ ignored.
 | split | `wf split` for the items (below) |
 | ticket | the listed observations and discovered issues are owed as follow-up tickets (`toTicket`); only low items may be queued, and filing each is the person's decision (medium and high are fixed in the delivery; a finding that blocks never leaves) |
 | model | `model: { role, class }`: the next handoffs of that role run at that work class of the adapter, with the models and effort it pins |
-| escalate | a reserved decision with 2-3 options the person confirms with `wf approve` |
+| escalate | a reserved decision the person answers: a plain `question`, 2-3 `options` each `{ label, then }` (plain words and what follows), and a `recommend` when there is one (0.7.11; attempts admitted earlier may keep 2-3 short option tokens) |
 
 A prediction names a signal, a comparison and a number, and a round or time by which it should hold. It is the strategist's
 own: two missed predictions in a row make its next decision an escalation (`predictions.escalateRequired` in the bundle;
