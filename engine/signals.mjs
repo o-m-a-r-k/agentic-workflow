@@ -246,7 +246,9 @@ export function computeSignals(root, state, { nowMs = Date.now(), cfg = null, ho
     at: new Date(nowMs).toISOString(),
     admittedAt: state.admittedAt,
     engineVersion: state.engineVersion,
-    wallMinutes: state.admittedAt ? round1((nowMs - Date.parse(state.admittedAt)) / 60000) : null,
+    // Up to its delivery or close for an attempt that ended (audit of one project: a delivered attempt read 1,818 minutes,
+    // counted to the moment `wf signals` ran).
+    wallMinutes: state.admittedAt ? round1(((Date.parse(state.delivery?.completedAt ?? state.closedAt ?? state.abandoned?.at ?? '') || nowMs) - Date.parse(state.admittedAt)) / 60000) : null,
     // The plan's own prediction ({ files, rounds, minutes }; a re-plan's replaces it), null when it states none.
     expect: state.expect ?? null,
     // The first prediction, kept beside a re-plan's (final review of 0.7.0: a re-plan replaced the baseline it is judged by).
