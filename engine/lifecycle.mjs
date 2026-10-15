@@ -378,6 +378,26 @@ export function scopeOf(scope) {
 
 // What an amendment file applies (docs/lifecycle.md, "Amendments").
 const AMEND_FIELDS = ['criteria', 'expect', 'impact', 'scope', 'work'];
+// The fields of an amendment file it would drop: anything an amendment does not apply, except a plan and survey equal to the
+// frozen ones (the owner re-sent the plan file with new criteria).
+function droppedFields(state, doc) {
+  const rest = Object.keys(doc).filter((k) => !AMEND_FIELDS.includes(k));
+  if (!rest.length) return [];
+  const known = rest.filter((k) => PLAN_FILE_KEYS.includes(k));
+  if (known.length < rest.length) return rest;
+  const withoutExpect = (p) => (p && typeof p === 'object' ? Object.fromEntries(Object.entries(p).filter(([k]) => k !== 'expect')) : p ?? null);
+  let plan = null;
+  try {
+    plan = planFromDoc(Object.fromEntries(rest.filter((k) => k !== 'survey').map((k) => [k, doc[k]])));
+  } catch {
+    return rest;
+  }
+  const out = [];
+  const planKeys = rest.filter((k) => k !== 'survey');
+  if (planKeys.length && canonical(withoutExpect(plan) ?? {}) !== canonical(withoutExpect(state.plan) ?? {})) out.push(...planKeys);
+  if (rest.includes('survey') && canonical(doc.survey ?? null) !== canonical(state.impact?.survey ?? null)) out.push('survey');
+  return out;
+}
 export function amendCriteria(root, options) {
   const state = openState(root, options);
   if (!state.criteria) throw refuse('criteria are not frozen yet; use `wf plan`');
@@ -385,8 +405,9 @@ export function amendCriteria(root, options) {
   const amendText = readOnce(options.file);
   const doc = parseStructured(options.file, amendText);
   // Named failure (I-127): an amendment carrying only `plan.summary` was accepted, changed nothing and reached no bundle, so
-  // the owner believed the planner's new plan was recorded. A field no amendment applies is refused with where it goes.
-  const ignored = doc && typeof doc === 'object' ? Object.keys(doc).filter((k) => !AMEND_FIELDS.includes(k)) : [];
+  // the owner believed the planner's new plan was recorded. A field no amendment applies is refused with where it goes when
+  // it would be lost: a whole plan file sent again with its plan and survey as frozen loses nothing and is accepted.
+  const ignored = doc && typeof doc === 'object' ? droppedFields(state, doc) : [];
   if (ignored.length && obligationSince(state, '0.7.9')) throw refuse(`the amendment carries ${ignored.map((k) => `\`${k}\``).join(', ')}, which no amendment applies: an amendment changes ${AMEND_FIELDS.map((k) => `\`${k}\``).join(', ')} only`, `${replanAfterUpgrade(state) ? `this attempt was upgraded to implementation after its plan was frozen: record the planner's whole plan with \`wf plan --from-agent <planner id> --attempt ${state.id}\` (it replaces the analysis plan); ` : ''}to tell the next planner something, hand it with \`wf handoff planner --agent <id> --context "<what the person asked>"\`; remove the other fields and amend again`, { id: 'amend:ignored-fields' });
   // An amendment may carry only an impact update (I-26): the criteria then stay as frozen.
   const stated = doc?.expect;
