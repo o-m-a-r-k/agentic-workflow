@@ -987,7 +987,9 @@ async function dispatch(cmd, sub, positional, options) {
       }
       // The reviewer runs this. Its console shows nothing but the receipt: no owner next steps, tracker actions or
       // state, which carried earlier rounds' findings and the owner's notes into a blind review.
-      const { state: s, reveal, toVerify, part } = recordReview(root, options);
+      // `salvaged` and `partial` are the engine's own marks for a closure it kept from a launched reviewer (launch.mjs),
+      // never a flag: a closure the reviewer records itself is its own.
+      const { state: s, reveal, toVerify, part } = recordReview(root, { ...options, salvaged: false, partial: false });
       if (part) {
         const recorded = s.reviewParts.at(-1);
         print(options, `scoped review recorded (${recorded.closure.findings.length} finding(s)); integration is still required`, { recorded: true, part: true, attempt: s.id, findings: recorded.closure.findings.length, sha256: recorded.raw.sha256 });

@@ -1278,8 +1278,9 @@ export function recordReview(root, options) {
   // round's reviewer: `wf handoff reviewer`), and the session id of an engine-launched round (`wf handoff run`) stays on
   // the handoff. Telemetry may still read transcripts; nothing here does.
   // A round the engine launched (`wf handoff run`) says so, from the engine's own launch record; one whose launch failed is
-  // refused (the engine knows it produced nothing), whatever a transcript might show.
-  if (reviewerHandoff.launch?.status === 'failed') {
+  // refused, whatever a transcript might show, unless the engine itself keeps what the reviewer wrote before it ended
+  // as a partial round (I-152), which is neither an audit nor an acceptance.
+  if (reviewerHandoff.launch?.status === 'failed' && !options.partial) {
     refusedRound(root, state, reviewerHandoff, closure, 'launch-failed', 'the engine launch of this reviewer failed');
     throw refuse(`the engine launch of reviewer ${reviewerHandoff.agent} failed; no closure is taken from it`, `create a fresh reviewer handoff: \`wf handoff reviewer --agent <new id>\``);
   }
@@ -1380,9 +1381,9 @@ export function recordReview(root, options) {
     if (!ev.ref) return false;
     return ev.kind !== 'screenshot' || collectedShots.some((a) => [a.sha256, a.source, a.path].includes(String(ev.ref).trim()));
   };
-  const covered = mode === 'full' && reviewerHandoff.round === 'evidence-review' && (handed.criteria ?? []).filter((c) => !c.dropped).every((c) => evidenced((closure.criteria ?? []).find((m) => m?.id === c.id))) && (handed.gate?.screenshots ?? []).filter((x) => !x.inspectedBefore).every((x) => (closure.screenshotsInspected ?? []).includes(x.sha256));
+  const covered = !options.partial && mode === 'full' && reviewerHandoff.round === 'evidence-review' && (handed.criteria ?? []).filter((c) => !c.dropped).every((c) => evidenced((closure.criteria ?? []).find((m) => m?.id === c.id))) && (handed.gate?.screenshots ?? []).filter((x) => !x.inspectedBefore).every((x) => (closure.screenshotsInspected ?? []).includes(x.sha256));
   let reviewerModel = optional(findHost(reviewerHandoff.runtime), 'roleModel')?.(reviewerHandoff, { home: home() }) ?? null;
-  append(root, state.id, 'review.recorded', { closure, file: dest, raw, handoff: round, mode, covered, ...(options.salvaged ? { recordedBy: 'engine' } : {}), revealed: Boolean(revealed) || revealNow, provenance: provenance.status, session: reviewerHandoff.session ?? null, tree: reviewerHandoff.tree, gateRun: reviewerHandoff.gate ?? null, gateEvidenceInspected, handoffTree: reviewerHandoff.tree, handoffPatch: reviewerHandoff.patch, reviewerModel, impactGaps: (closure.findings ?? []).filter((f) => f?.category === 'impact-gap').length }, closure.reviewer);
+  append(root, state.id, 'review.recorded', { closure, file: dest, raw, handoff: round, mode, covered, ...(options.salvaged ? { recordedBy: 'engine' } : {}), ...(options.partial ? { partial: true } : {}), revealed: Boolean(revealed) || revealNow, provenance: provenance.status, session: reviewerHandoff.session ?? null, tree: reviewerHandoff.tree, gateRun: reviewerHandoff.gate ?? null, gateEvidenceInspected, handoffTree: reviewerHandoff.tree, handoffPatch: reviewerHandoff.patch, reviewerModel, impactGaps: (closure.findings ?? []).filter((f) => f?.category === 'impact-gap').length }, closure.reviewer);
   append(root, state.id, 'review.round', roundData(state, reviewerHandoff, closure, { outcome: 'recorded', model: reviewerModel, revealed: Boolean(revealed) }), null);
   const after = loadState(root, state.id);
   const toVerify = delta ? [] : unverifiedPrior(after, after.review);
@@ -1554,6 +1555,8 @@ export function acceptReview(root, options) {
   if (!r) throw refuse('no review recorded: `wf review --closure <file>`');
   const problems = [];
   if (authorsOf(root, state).has(r.closure.reviewer)) problems.push(`reviewer ${r.closure.reviewer} also planned, wrote or owns this change`);
+  // I-152: a round the engine kept from a reviewer that did not finish holds what it found, never an acceptance.
+  if (r.partial) problems.push(`the latest round (${r.closure.reviewer}) ended before its reviewer finished; its findings are kept, and a fresh reviewer's round is accepted: \`wf handoff reviewer --agent <new id> --attempt ${state.id}\``);
   // Only a finding that blocks holds acceptance; an observation is fixed, ticketed or moved before delivery.
   const blocking = new Set(openFindings(r, state).map((f) => f.id));
   for (const f of r.closure.findings) {

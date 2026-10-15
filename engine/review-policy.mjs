@@ -54,7 +54,8 @@ export function recordedRoundsOf(state) {
 // Named failure (I-69): a launched reviewer stopped early and recorded `notReached`; the round counted as the attempt's one
 // full audit and nothing showed the owner, the next reviewer or the delivered comment what was never looked at.
 // A recorded round that counts as an audit: an evidence round the engine found covered, or one that named nothing unreached.
-export const auditReached = (r) => r.covered === true || !unreachedOf(r.closure).length;
+// A round the engine kept from a reviewer that did not finish (I-152) is never an audit, whatever it mapped.
+export const auditReached = (r) => r.partial !== true && (r.covered === true || !unreachedOf(r.closure).length);
 
 export function unreachedSince(state) {
   const handoffs = new Map((state.handoffs ?? []).filter((h) => h.role === 'reviewer').map((h) => [h.bundle, h]));
@@ -85,7 +86,7 @@ export function roundMode(state, { evidence } = {}) {
   // screenshot (what the engine checks: `covered`, stamped when it is recorded) wrote caveats under `notReached` (a check
   // its criteria exclude, "may not change the tree"), lost its audit status, and the next round after a one-family repair
   // was handed full, with 94 screenshots, 51 of them inspected before.
-  const reached = obligationSince(state, '0.7.4') ? auditReached : () => true;
+  const reached = obligationSince(state, '0.7.4') ? auditReached : (r) => r.partial !== true;
   const audits = recordedRoundsOf(state).filter(reached).map((r) => handoffs.get(r.handoff)).filter((h) => h && (h.mode ?? 'full') === 'full');
   if (evidence ?? gatePassedForCurrentTree(state).ok) return audits.some(isEvidenceRound) ? 'delta' : 'full';
   // A strategist's `delta-review` decision (state.strategy.nextRound) makes the next code review a delta, once a recorded

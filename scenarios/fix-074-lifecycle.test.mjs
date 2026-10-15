@@ -103,6 +103,8 @@ if (process.env.FAKE_CLOSURE) {
   const bundle = JSON.parse(fs.readFileSync(/Read (\\S+) and follow/.exec(prompt)[1], 'utf8'));
   if (bundle.reviewClosureFile) { fs.mkdirSync(path.dirname(bundle.reviewClosureFile), { recursive: true }); fs.writeFileSync(bundle.reviewClosureFile, JSON.stringify({ ...JSON.parse(process.env.FAKE_CLOSURE), reviewer: bundle.agent })); }
 }
+// A session that ends before it finishes (FAKE_EXIT: its exit code), after anything it wrote.
+if (process.env.FAKE_EXIT) process.exit(Number(process.env.FAKE_EXIT));
 console.log(JSON.stringify({ type: 'turn.completed' }));
 `);
   fs.chmodSync(path.join(bin, 'codex'), 0o755);
@@ -362,6 +364,34 @@ test('a launched reviewer that wrote its closure and did not record it has it re
   assert.match(launched.err, /reviewer r ended without recording its closure; the engine recorded the closure it wrote/);
   assert.doesNotMatch(launched.err, /completed with no closure recorded/);
   assert.deepEqual(loadState(p.root, id).reviews.map((r) => [r.reviewer, r.recordedBy]), [['r', 'engine']], 'recorded by the engine, and said so');
+});
+
+// I-152, named failure (audit of role launches): a reviewer that ran 12 hours on a 1,303-file change and one stopped after
+// 94 minutes kept their findings only in their transcripts. What a reviewer wrote into its closure file is kept as a
+// partial round: its findings count, and it is neither an audit nor an acceptance.
+test('I-152: a launched reviewer that dies after writing findings has them kept as a partial round', () => {
+  const p = singleRepoProject('i152-partial', { gate: { steps }, ...codexConfig });
+  const found = { ...goodClosure('x'), findings: [{ id: 'F1', severity: 'medium', summary: 'the total is off by one', status: 'open', evidence: 'src/a.txt:1', criterion: 'C1' }] };
+  const env = { ...fakeCodex(p.base), FAKE_CLOSURE: JSON.stringify(found), FAKE_EXIT: '1' };
+  const run = (args, opts = {}) => wf(p.root, args, { env, ...opts });
+  const id = ok(run(['entry', '--item', 'ENG-1', '--owner', 'o', '--json'])).json().id;
+  ok(run(['handoff', 'planner', '--agent', 'p', '--runtime', 'codex', '--attempt', id]));
+  ok(run(['plan', '--file', criteriaFile(p.base), '--attempt', id]));
+  ok(run(['handoff', 'implementer', '--agent', 'i', '--attempt', id]));
+  commitIn(loadState(p.root, id).repos.app.worktree, { 'src/a.txt': 'changed\n' });
+  ok(run(['handoff', 'close', '--agent', 'i', '--attempt', id]));
+  ok(run(['handoff', 'reviewer', '--agent', 'r', '--runtime', 'codex', '--attempt', id]));
+  const launched = run(['handoff', 'run', '--agent', 'r', '--attempt', id]);
+  assert.match(launched.err, /reviewer r did not finish; the engine kept the 1 finding\(s\) it had written, as a partial round/);
+  const state = loadState(p.root, id);
+  assert.deepEqual(state.reviews.map((r) => [r.reviewer, r.recordedBy, r.partial, r.covered]), [['r', 'engine', true, false]]);
+  assert.deepEqual(state.reviews[0].closure.findings.map((f) => f.id), ['F1'], 'the finding it wrote is kept');
+  assert.match(state.reviews[0].closure.notReached.join(' '), /ended before the reviewer finished \(/);
+  const accept = wf(p.root, ['accept', '--attempt', id], { env });
+  assert.notEqual(accept.code, 0);
+  assert.match(accept.err, /ended before its reviewer finished; its findings are kept/);
+  const next = ok(run(['handoff', 'reviewer', '--agent', 'r2', '--runtime', 'codex', '--attempt', id, '--json'])).json();
+  assert.equal(next.mode ?? JSON.parse(fs.readFileSync(next.bundle, 'utf8')).mode, 'full', 'the next round is a full one');
 });
 
 test('I-69: a launched reviewer that ends with no closure leaves the owner the real routes, and the round is not an audit', () => {

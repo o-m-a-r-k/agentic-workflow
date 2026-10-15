@@ -266,6 +266,7 @@ async function follow(root, id, h, { host, runtime, label, requestedSession, chi
   if (!success) process.stderr.write(`${label} role failed: ${problem ?? (stderr.trim() || 'no completed turn')}\n`);
   if (diagnosis) process.stderr.write(`${diagnosis.advice}\n`);
   if (success && h.role === 'reviewer' && !h.reviewGroup) await reviewerEnded(root, id, h, label);
+  if (!success && h.role === 'reviewer' && !h.reviewGroup) await reviewerPartial(root, id, h, label, failure?.kind ?? 'failed');
   return { agent: h.agent, session, status: success ? 'completed' : 'failed', exitCode: success ? 0 : code || 1 };
 }
 
@@ -298,6 +299,34 @@ async function reviewerEnded(root, id, h, label) {
   }
   if ((now.reviewsRefused ?? []).some((r) => r.handoff === h.bundle)) return;
   process.stderr.write(`${label} ${closureMissingGuidance(now, handed)}\n`);
+}
+
+// A launched reviewer that did not finish: the findings it wrote into its closure file so far are kept, as a partial round
+// that names what it did not reach (so it is no audit). Named failure (I-152, audit of role launches): a reviewer that ran
+// 12 hours on a 1,303-file change and one stopped after 94 minutes kept their findings only in their transcripts.
+async function reviewerPartial(root, id, h, label, why) {
+  const now = loadState(root, id);
+  const handed = now.handoffs.find((x) => x.bundle === h.bundle);
+  const file = handed?.closureFile ?? null;
+  if (!file || !fs.existsSync(file) || (now.reviews ?? []).some((r) => r.handoff === h.bundle) || (now.reviewsRefused ?? []).some((r) => r.handoff === h.bundle)) return;
+  let closure;
+  try {
+    closure = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {
+    process.stderr.write(`${label} reviewer ${h.agent} did not finish, and its closure file is not readable JSON (${file}); nothing was kept\n`);
+    return;
+  }
+  if (!Array.isArray(closure.findings) || !closure.findings.length) return;
+  const partial = path.join(path.dirname(file), `partial-${path.basename(file)}`);
+  const unreached = Array.isArray(closure.notReached) ? closure.notReached.filter((x) => typeof x === 'string' && x.trim() && !/^none$/i.test(x.trim())) : [];
+  fs.writeFileSync(partial, JSON.stringify({ ...closure, criteria: Array.isArray(closure.criteria) ? closure.criteria : [], notReached: [...unreached, `the round ended before the reviewer finished (${why}); the findings it wrote so far are kept`] }));
+  try {
+    const { recordReview } = await import('./lifecycle.mjs');
+    recordReview(root, { attempt: id, closure: partial, salvaged: true, partial: true });
+    process.stderr.write(`${label} reviewer ${h.agent} did not finish; the engine kept the ${closure.findings.length} finding(s) it had written, as a partial round (not an audit: the next round is a full one)\n`);
+  } catch (error) {
+    process.stderr.write(`${label} reviewer ${h.agent} did not finish, and its findings so far could not be kept: ${String(error.message ?? error).split('\n')[0]} (they are in ${file})\n`);
+  }
 }
 
 // The launched role of `--agent`, with its host, for `wf handoff wait|stop`.
@@ -340,5 +369,6 @@ export async function stopRole(root, options) {
   }
   append(root, state.id, 'agent.launch.finished', { handoff: h.bundle, status: 'failed', exitCode: 143, failure: { kind: 'stopped', detail: `stopped by the owner${typeof options.reason === 'string' && options.reason.trim() ? `: ${options.reason.trim()}` : ''}${reused ? ` (its process had already ended; pid ${h.launch.pid} is another process now, left alone)` : ''}` } }, actor(options));
   seal(append);
+  if (h.role === 'reviewer' && !h.reviewGroup) await reviewerPartial(root, state.id, h, h.agent, 'stopped');
   return { agent: h.agent, status: 'stopped' };
 }
