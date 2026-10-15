@@ -259,10 +259,13 @@ export async function planGate(root, state, options = {}) {
     // failure (I-150, audit of 51 attempts): 163 reruns had a key another attempt had already passed.
     let fromAttempt = null;
     if (!prior && key && !step.artifacts?.length && !options.rerunFailed?.includes(step.id)) {
-      const oldInputs = inputs && !namesOwnFolder(step, pkg) ? (inputsBefore !== inputs ? inputsBefore : null) : inputs;
-      const legacyAcross = (s) => {
-        const before = oldInputs ?? stepInputs(state, step, repo, pkg);
-        return !before || also.unreadable.length ? null : hashValue(also.trees ? { inputs: before.hash, runner: legacyRunnerIdentity(root, state, step, []), also: also.trees } : { inputs: before.hash, runner: legacyRunnerIdentity(root, state, step, []) });
+      // The key a pass recorded before 0.7.11 would have here (hashed the old way once, and only if such a pass exists).
+      let legacy;
+      const legacyAcross = () => {
+        if (legacy !== undefined) return legacy;
+        const before = inputs && !namesOwnFolder(step, pkg) ? (inputsBefore !== inputs ? inputsBefore : stepInputs(state, step, repo, pkg)) : inputs;
+        const runnerBefore = legacyRunnerIdentity(root, state, step, []);
+        return (legacy = !before || also.unreadable.length ? null : hashValue(also.trees ? { inputs: before.hash, runner: runnerBefore, also: also.trees } : { inputs: before.hash, runner: runnerBefore }));
       };
       const found = otherAttempts().flatMap((o) => {
         const p = findReuse(o, step.id, key, legacyAcross);
