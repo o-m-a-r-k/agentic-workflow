@@ -37,17 +37,22 @@ function trackedFiles(worktree) {
 }
 
 // Every tracked file under the package matching the step's inputs or the package's sharedInfra, with its content hash.
+// `legacyHash` is the hash the same files had before 0.7.11, when the workflow's own folder (`skipFolder`) still counted:
+// computed in the same pass, so matching a pass recorded then costs no second walk of a large tree.
 function stepInputs(state, step, repo, pkg, skipFolder = null) {
   if (!step.inputs?.length) return null;
   const wt = state.repos[repo.name].worktree;
   const fileHashes = {};
-  for (const f of trackedFiles(wt).filter((x) => inside(x, pkg.path) && !(skipFolder && repo.name === skipFolder.repo && inside(x, skipFolder.folder))).sort()) {
+  const ownHashes = {};
+  for (const f of trackedFiles(wt).filter((x) => inside(x, pkg.path)).sort()) {
     const r = rel(f, pkg.path);
     if (!matchesAny(r, step.inputs) && !matchesAny(r, pkg.sharedInfra)) continue;
     const abs = path.join(wt, f);
-    fileHashes[f] = fs.existsSync(abs) ? hashFile(abs) : 'deleted';
+    const into = skipFolder && repo.name === skipFolder.repo && inside(f, skipFolder.folder) ? ownHashes : fileHashes;
+    into[f] = fs.existsSync(abs) ? hashFile(abs) : 'deleted';
   }
-  return { hash: hashValue(fileHashes), fileHashes };
+  const hash = hashValue(fileHashes);
+  return { hash, fileHashes, legacyHash: Object.keys(ownHashes).length ? hashValue({ ...fileHashes, ...ownHashes }) : hash };
 }
 
 // Identity of what runs the step: its definition and the committed plugin code, without the fields that cannot change a
@@ -229,7 +234,7 @@ export async function planGate(root, state, options = {}) {
     // matched on those terms, so an upgrade reruns nothing that 0.7.10 would have reused.
     const recordedBefore = allGateSteps(state).some((s) => s.id === step.id && !s.resultIdentity && ['passed', 'reused'].includes(s.status));
     // Hashed the old way only when no pass matches today's key (a reuse records today's key, so this happens once).
-    const inputsBefore = recordedBefore && inputs && !namesOwnFolder(step, pkg) && !findReuse(state, step.id, key) ? stepInputs(state, step, repo, pkg) : inputs;
+    const inputsBefore = inputs ? { hash: inputs.legacyHash } : inputs;
     const legacyKey = (s) => (!inputsBefore || also.unreadable.length ? null : hashValue(also.trees ? { inputs: inputsBefore.hash, runner: legacyRunnerIdentity(root, state, step, (s.artifactGlobs ?? []).map((g) => g.glob)), also: also.trees } : { inputs: inputsBefore.hash, runner: legacyRunnerIdentity(root, state, step, (s.artifactGlobs ?? []).map((g) => g.glob)) }));
     let prior = findReuse(state, step.id, key, recordedBefore ? legacyKey : null);
     // Which of the recorded run's files are this ticket's evidence now: its expanded globs must cover today's, or it reruns.
@@ -263,7 +268,7 @@ export async function planGate(root, state, options = {}) {
       let legacy;
       const legacyAcross = () => {
         if (legacy !== undefined) return legacy;
-        const before = inputs && !namesOwnFolder(step, pkg) ? (inputsBefore !== inputs ? inputsBefore : stepInputs(state, step, repo, pkg)) : inputs;
+        const before = inputsBefore;
         const runnerBefore = legacyRunnerIdentity(root, state, step, []);
         return (legacy = !before || also.unreadable.length ? null : hashValue(also.trees ? { inputs: before.hash, runner: runnerBefore, also: also.trees } : { inputs: before.hash, runner: runnerBefore }));
       };
