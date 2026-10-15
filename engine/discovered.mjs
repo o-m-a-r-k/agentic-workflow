@@ -91,17 +91,23 @@ export function closeDiscovered(root, idArg, options) {
   if (Boolean(fixed) === deferred) throw new WfError(`close ${ids.join(',')} with either --fixed <commit> or --deferred [--reason "<why it waits>"] (by default only a low issue may wait, with the person's answer; medium and high are fixed here)`);
   if (fixed) {
     const c = ticketCommit(state, fixed, typeof options.repo === 'string' ? options.repo : null);
-    for (const e of entries) {
+    // I-139: a fix the entry's own implementer made, in the handoff that recorded it, before it recorded it, closes it as
+    // repaired before the record when the ledger and git show exactly that (`reconciliation`); everything else is checked
+    // as a fix made after the record.
+    const reconcile = entries.map((e) => reconciliation(state, e, c, text(options.evidence)));
+    for (const [n, e] of entries.entries()) {
+      if (reconcile[n].ok) continue;
+      const why = e.kind === 'bookkeeping' ? ` (not a repair made before the record either: ${reconcile[n].why})` : '';
       const head = e.raisedOn?.[c.repo];
       // A repo added after the issue was recorded has no head in `raisedOn`: its commit must be dated after the issue.
       const committed = e.raisedOn && !head ? git(state.repos[c.repo].worktree, ['show', '-s', '--format=%cI', c.commit], { allowFail: true }) : null;
       // Git dates a commit to the second and the ledger to the millisecond: a commit in the same second as the record is
       // not before it. Named failure (0.7.10 verify): a fix committed within the second the issue was recorded was refused
       // as older than the issue, on one of three verify legs.
-      if (committed && e.at && Date.parse(committed) < Math.floor(Date.parse(e.at) / 1000) * 1000) throw refuse(`${c.commit.slice(0, 10)} was committed before ${e.id} was recorded: it cannot be the fix`, 'name the commit that fixed it, made after the issue was recorded', { id: 'discovered:fixed-before-issue' });
-      if (head && run('git', ['merge-base', '--is-ancestor', c.commit, head], { cwd: state.repos[c.repo].worktree, allowFail: true }).status === 0) throw refuse(`${c.commit.slice(0, 10)} was already in the tree ${e.id} was recorded on: it cannot be the fix`, 'name the commit that fixed it, made after the issue was recorded', { id: 'discovered:fixed-before-issue' });
+      if (committed && e.at && Date.parse(committed) < Math.floor(Date.parse(e.at) / 1000) * 1000) throw refuse(`${c.commit.slice(0, 10)} was committed before ${e.id} was recorded: it cannot be the fix${why}`, 'name the commit that fixed it, made after the issue was recorded', { id: 'discovered:fixed-before-issue' });
+      if (head && run('git', ['merge-base', '--is-ancestor', c.commit, head], { cwd: state.repos[c.repo].worktree, allowFail: true }).status === 0) throw refuse(`${c.commit.slice(0, 10)} was already in the tree ${e.id} was recorded on: it cannot be the fix${why}`, 'name the commit that fixed it, made after the issue was recorded', { id: 'discovered:fixed-before-issue' });
     }
-    for (const e of entries) append(root, state.id, 'discovered.closed', { id: e.id, outcome: 'fixed', repo: c.repo, commit: c.commit, evidence: text(options.evidence) || null }, actor(options));
+    for (const [n, e] of entries.entries()) append(root, state.id, 'discovered.closed', { id: e.id, outcome: 'fixed', repo: c.repo, commit: c.commit, evidence: text(options.evidence) || null, ...(reconcile[n].ok ? { reconciled: reconcile[n].record } : {}) }, actor(options));
     return { state: loadState(root, state.id), outcome: 'fixed', ids, ...c };
   }
   // Deferral moves a defect out of this delivery: by default only a low one, with the person's answer (D17, D18, engine/leaving.mjs; 0.7.6
@@ -117,6 +123,28 @@ export function closeDiscovered(root, idArg, options) {
     append(root, state.id, 'discovered.closed', { id: e.id, outcome: 'deferred', decision: reason || (id === 'owner' ? 'left for later on the owner\'s reason' : `left for later with the person's decision ${id}`), source, attributedTo: text(options.by) || null }, actor(options));
   }
   return { state: loadState(root, state.id), outcome: 'deferred', ids };
+}
+
+// I-139, named failure: an implementer repaired a bookkeeping item and then recorded it, and every route to close it with
+// the commit that repaired it was refused as "already in the tree": the commit predates the record. A commit already in the
+// tree the entry was recorded on is its fix when the ledger and git show exactly that, never on the caller's word: the
+// entry is the implementer's own low bookkeeping (never a defect, never an invariant), recorded while that implementer's
+// handoff was open; the commit is in that handoff's own range (after the tree the handoff started on, no later than the
+// tree the entry was recorded on) and touches the file the entry names (or `--evidence` says what it repaired).
+function reconciliation(state, e, c, evidence) {
+  const no = (why) => ({ ok: false, why });
+  if (e.kind !== 'bookkeeping' || e.invariant || discoveredLevel(e) !== 'low') return no('only an implementer\'s own low bookkeeping entry with no invariant qualifies');
+  const h = (state.implementers ?? []).filter((x) => x.agent === e.foundBy && x.openedAt <= e.at && (!x.closedAt || x.closedAt >= e.at)).at(-1);
+  if (!e.foundBy || !h) return no(`${e.foundBy ?? 'nobody'} had no implementer handoff open when it was recorded`);
+  const wt = state.repos[c.repo].worktree, start = String(h.heads?.[c.repo] ?? '').split('+')[0], recorded = e.raisedOn?.[c.repo];
+  const inside = (a, b) => run('git', ['merge-base', '--is-ancestor', a, b], { cwd: wt, allowFail: true }).status === 0;
+  if (!start || !recorded) return no(`${c.repo} was not part of the handoff or the record`);
+  if (c.commit === start || !inside(start, c.commit)) return no(`${c.commit.slice(0, 10)} was already in the tree ${h.agent}'s handoff started on`);
+  if (!inside(c.commit, recorded)) return no(`${c.commit.slice(0, 10)} was made after ${e.id} was recorded`);
+  const file = String(e.where ?? '').replace(/:\d+(?::\d+)?$/, '');
+  const touched = (git(wt, ['diff-tree', '--no-commit-id', '--name-only', '-r', c.commit], { allowFail: true }) ?? '').split('\n').filter(Boolean);
+  if (file ? !touched.includes(file) : !evidence) return no(file ? `${c.commit.slice(0, 10)} changes none of the file ${e.id} names (${file})` : 'say what the commit repaired with `--evidence "<text>"`');
+  return { ok: true, record: { handoff: h.handoff, agent: h.agent, handoffHead: start, raisedOn: recorded } };
 }
 
 // `wf discovered rate D1 --severity <s> --reason "..."`: a discovered issue re-rated; raising needs no reason, lowering
@@ -190,7 +218,7 @@ export function unacknowledged(root, state, loadMember, { acknowledged = false }
   return out;
 }
 
-export const discoveredLine = (d, attemptId) => `${d.id}  ${d.status}${d.kind === 'bookkeeping' ? ' (bookkeeping)' : ''}${d.severity ? `  ${d.severity}` : ''}  ${d.summary}${d.where || d.foundBy ? `  (${[d.where, d.foundBy ? `found by ${d.foundBy}` : null].filter(Boolean).join('; ')})` : ''}${d.blockedBy && d.status === 'open' ? `  blocked by ${d.blockedBy}: route it to that work item's implementer` : ''}${d.status === 'fixed' ? `  fixed in ${d.fixed.repo}@${d.fixed.commit.slice(0, 10)}` : d.status === 'deferred' ? `  deferred (${channelOf(d)}): "${d.deferred.decision}"` : attemptId ? (discoveredLevel(d) === 'low' ? `\n    low: it leaves only with the person's answer, one short question per item (wf scope defer --finding ${d.id}[,<ref>...])` : `\n    ${discoveredLevel(d)}: fixed in this delivery (here or in a sibling attempt of the batch), unless the project's \`leaving:\` says otherwise`) : ''}`;
+export const discoveredLine = (d, attemptId) => `${d.id}  ${d.status}${d.kind === 'bookkeeping' ? ' (bookkeeping)' : ''}${d.severity ? `  ${d.severity}` : ''}  ${d.summary}${d.where || d.foundBy ? `  (${[d.where, d.foundBy ? `found by ${d.foundBy}` : null].filter(Boolean).join('; ')})` : ''}${d.blockedBy && d.status === 'open' ? `  blocked by ${d.blockedBy}: route it to that work item's implementer` : ''}${d.status === 'fixed' ? `  fixed in ${d.fixed.repo}@${d.fixed.commit.slice(0, 10)}${d.fixed.reconciled ? ` (repaired by ${d.fixed.reconciled.agent} before it was recorded)` : ''}` : d.status === 'deferred' ? `  deferred (${channelOf(d)}): "${d.deferred.decision}"` : attemptId ? (discoveredLevel(d) === 'low' ? `\n    low: it leaves only with the person's answer, one short question per item (wf scope defer --finding ${d.id}[,<ref>...])` : `\n    ${discoveredLevel(d)}: fixed in this delivery (here or in a sibling attempt of the batch), unless the project's \`leaving:\` says otherwise`) : ''}`;
 
 // I-18 (extended), named failure: an implementer reported "Not fixed, outside the brief: <a defect>" and handed the issue
 // back to the owner agent to relay. A line of an implementer's final report that leaves an issue unfixed must name its

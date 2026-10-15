@@ -79,9 +79,10 @@ export function unlockEvidence(root, id) {
   assertSafeId(id, 'attempt');
   const file = transactionLockFile(root, id);
   if (canonicalPath(file) !== file) throw refuse('evidence transaction control path resolves outside its recorded location', undefined, { id: 'lock:path' });
-  const st = fs.lstatSync(file, { throwIfNoEntry: false });
-  if (!st) return { id, removed: false, note: `${id} has no evidence lock` };
-  const read = readRegular(file);
+  // One read decides (I-141): a lock released between a look and the read is "no lock", never "unreadable".
+  const seen = readRegularOutcome(file);
+  if (seen.state === 'missing') return { id, removed: false, note: `${id} has no evidence lock` };
+  const read = seen.read;
   const lock = parseLock(read);
   if (!read || !lock) throw refuse(`the evidence lock of ${id} cannot be read, so its owner is unknown; it is not removed`, `inspect ${file} by hand: if no wf command runs, delete that file yourself`, { id: 'lock:unreadable' });
   if (!deadOwner(lock)) {
@@ -106,11 +107,13 @@ export function withEvidenceTransaction(root, id, fn) {
     catch (error) {
       if (error.code !== 'EEXIST') throw error;
       transactionSeams.afterCollision?.(file);
-      const current = readRegular(file);
-      // Named failure: the owner can release its lock between EEXIST and our no-follow read.
-      // Retry a missing entry only; links, unreadable entries and uncertain owners still fail closed.
-      if (!current && fs.lstatSync(file, { throwIfNoEntry: false })) throw refuse('evidence transaction lock is unreadable; reconcile its owner before cleanup', undefined, { id: 'lock:unreadable' });
-      const held = parseLock(current);
+      // Named failure (I-141): the owner can release its lock between EEXIST and our no-follow read, and another process can
+      // create a replacement before anything else looks. The outcome of that one read decides: a missing entry is another
+      // collision (retry); an entry the read refused (link, non-regular, hard link, unreadable) fails closed. No second
+      // look at the path: a later lstat sees a different entry than the read did.
+      const seen = readRegularOutcome(file);
+      if (seen.state === 'unsafe') throw refuse('evidence transaction lock is unreadable; reconcile its owner before cleanup', undefined, { id: 'lock:unreadable' });
+      const held = parseLock(seen.read);
       if (held && deadOwner(held) && reclaimDeadLock(file, held.token)) continue;
       if (Date.now() > deadline) throw refuse('evidence transaction is still locked; reconcile its owner before cleanup, never expire it by age', `its owner is pid ${held?.pid ?? 'unknown'}${held?.pid ? ' (still running)' : ''}: wait for it, or stop it and run \`wf unlock --attempt ${id}\``, { id: 'lock:held' });
       Atomics.wait(sleeper, 0, 0, 20);
@@ -465,21 +468,28 @@ export function recordedFileProblem(root, id, abs) {
   return hashBuf(r.bytes) === m.sha256 ? null : `${rel}: content differs from its recorded sha256`;
 }
 
-export function readRegular(file) {
+// One no-follow read and what became of it: { state: 'ok', read } | { state: 'missing' } (ENOENT at the open) | { state: 'unsafe' }
+// (a link, a folder, a file with another name, any other failure to open or read). Callers that must tell "gone" from
+// "there but not readable" use this and never look at the path a second time.
+export function readRegularOutcome(file) {
   let fd;
   try {
     fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | (fs.constants.O_NONBLOCK ?? 0));
-  } catch {
-    return null;
+  } catch (error) {
+    return { state: error?.code === 'ENOENT' ? 'missing' : 'unsafe', read: null };
   }
   try {
     const st = fs.fstatSync(fd);
     // A file with another name elsewhere is not evidence (its data can be changed through that name).
-    if (!st.isFile() || st.nlink > 1) return null;
-    return { bytes: fs.readFileSync(fd), st };
+    if (!st.isFile() || st.nlink > 1) return { state: 'unsafe', read: null };
+    return { state: 'ok', read: { bytes: fs.readFileSync(fd), st } };
   } finally {
     fs.closeSync(fd);
   }
+}
+// A function declaration, so it is defined before any module in an import cycle calls it.
+export function readRegular(file) {
+  return readRegularOutcome(file).read;
 }
 
 const sigOf = (st) => [st.size, Math.round(st.mtimeMs), Math.round(st.ctimeMs), st.ino, st.mode & 0o777].join(':');

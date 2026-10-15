@@ -534,7 +534,7 @@ export function reduce(entries) {
         const x = s.discovered.find((y) => y.id === d.id);
         if (!x) break;
         x.status = d.outcome;
-        if (d.outcome === 'fixed') x.fixed = { repo: d.repo, commit: d.commit, evidence: d.evidence ?? null, at: e.at, by: e.actor };
+        if (d.outcome === 'fixed') x.fixed = { repo: d.repo, commit: d.commit, evidence: d.evidence ?? null, ...(d.reconciled ? { reconciled: d.reconciled } : {}), at: e.at, by: e.actor };
         else x.deferred = { decision: d.decision, source: d.source ?? null, attributedTo: d.attributedTo ?? null, at: e.at, by: e.actor };
         break;
       }

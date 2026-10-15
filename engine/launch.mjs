@@ -129,7 +129,7 @@ const alive = (pid) => {
 };
 
 // Follows a launched role's event stream from the start and records what it shows: the session it started, then its end.
-// Returns when the process has ended, or (still running) once `untilMinutes` have passed since it started, or once it has
+// Returns when the process has ended, or (still running) once `untilMinutes` have passed since this call, or once it has
 // passed the estimate it stated itself (`expect.minutes` in its report or closure file) when no `untilMinutes` is given.
 // Nothing is decided from the estimate: the role keeps running and the owner judges (D9).
 async function follow(root, id, h, { host, runtime, label, requestedSession, child = null, io, untilMinutes = null, ownerMinutes = null }) {
@@ -143,6 +143,7 @@ async function follow(root, id, h, { host, runtime, label, requestedSession, chi
   let completed = false, problem = null, lastError = null, offset = 0, rest = '';
   if (session) progress.start(session);
   const startedAt = Date.parse(h.launch?.requestedAt ?? '') || Date.now();
+  const followedFrom = Date.now();
   // An interrupt of this process cancels the role, as before 0.7.0: the owner meant to stop it. Named failure (I-128): the
   // interrupt and error paths sent one SIGTERM to the role's group and then waited for the role itself to exit, so a role that
   // ignored it hung the interrupted command, and a child outside the group outlived it unseen. The whole tree is ended and
@@ -184,6 +185,13 @@ async function follow(root, id, h, { host, runtime, label, requestedSession, chi
     const file = h.role === 'implementer' ? h.reportFile : h.role === 'reviewer' ? h.closureFile : null;
     return readStatement(file, h.role === 'reviewer' ? 'scope' : 'approach')?.minutes ?? ownerMinutes;
   };
+  // A bare `wait` on a role already past the estimate it stated follows it to its end (or to a later estimate it states):
+  // returning at once on the estimate already passed made the owner call it again and again (I-140).
+  const passedAtStart = (() => {
+    if (untilMinutes !== null) return null;
+    const m = estimate();
+    return m !== null && (followedFrom - startedAt) / 60000 > m ? m : null;
+  })();
   let returned = null;
   try {
     for (;;) {
@@ -216,7 +224,10 @@ async function follow(root, id, h, { host, runtime, label, requestedSession, chi
       if (done || stillRunning) break;
       if (problem) { await new Promise((r) => setTimeout(r, 100)); continue; }
       const minutes = estimate();
-      if (minutes !== null && (Date.now() - startedAt) / 60000 > minutes) { returned = untilMinutes !== null ? 'waited' : minutes === ownerMinutes && !roleSaid() ? 'owner-estimate' : 'past-estimate'; break; }
+      // `--minutes` on `wait` is a new interval measured from this call (I-140); a role's own estimate and the owner's
+      // expectation at launch are totals since the launch (a launch's interval and total coincide).
+      const over = untilMinutes !== null ? (Date.now() - followedFrom) / 60000 > untilMinutes : minutes !== null && minutes !== passedAtStart && (Date.now() - startedAt) / 60000 > minutes;
+      if (over) { returned = untilMinutes !== null ? 'waited' : minutes === ownerMinutes && !roleSaid() ? 'owner-estimate' : 'past-estimate'; break; }
       await new Promise((r) => setTimeout(r, 250));
     }
   } catch (e) {
@@ -338,12 +349,12 @@ function launched(root, options) {
 }
 
 // `wf handoff wait --agent X [--minutes N]`: follows a launched role again and records its end. With `--minutes`, returns
-// after that many minutes since its launch if it is still running (the owner's own new expectation).
+// after that many more minutes from now if it is still running (the owner's own new expectation).
 export async function waitRole(root, options) {
   const { state, h, host } = launched(root, options);
   if (['completed', 'failed'].includes(h.launch.status)) return { agent: h.agent, session: h.session ?? null, status: h.launch.status, exitCode: h.launch.status === 'completed' ? 0 : 1 };
   const minutes = options.minutes === undefined ? null : Number(options.minutes);
-  if (minutes !== null && !(Number.isFinite(minutes) && minutes > 0)) throw new WfError('--minutes is a positive number (minutes since the launch)');
+  if (minutes !== null && !(Number.isFinite(minutes) && minutes > 0)) throw new WfError('--minutes is a positive number (how many more minutes to follow it, from now)');
   // A role whose pid the system has given to another process ended long ago: following that process would end its group
   // on an interrupt (independent review of 0.7.9). `wf handoff stop` records it, signalling nothing.
   if (h.launch.pid && !stillTheRole(h.launch.pid, h.launch.spawnedAt)) throw refuse(`${h.agent}'s process ended; pid ${h.launch.pid} is another process now, so it is not followed`, `record it with \`wf handoff stop --agent ${h.agent} --attempt ${state.id}\` (it signals nothing), then hand a fresh role`, { id: 'launch:pid-reused' });

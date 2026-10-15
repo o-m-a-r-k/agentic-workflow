@@ -166,7 +166,10 @@ export function runningSessions(state, nowMs, home) {
     const since = Math.max(Date.parse(h.at) || 0, Date.parse(h.launch?.startedAt) || 0);
     const lastAt = seen ? Math.max(seen.mtime, since) : null;
     const said = statedBy(h);
-    out.push({ agent: h.agent, role: h.role, work: h.work ?? null, runtime: h.runtime, handoff: idOf(h.bundle), handedAt: h.at, launch: h.launch?.status ?? null, located: Boolean(seen), lastActivityAt: lastAt ? new Date(lastAt).toISOString() : null, idleMinutes: lastAt ? Math.max(0, round1((nowMs - lastAt) / 60000)) : null, minutes: since ? Math.max(0, round1((nowMs - since) / 60000)) : null, expectMinutes: said?.minutes ?? null, said: said?.said ?? null , ...(asleepSince(lastAt, nowMs) ?? {}) });
+    // I-137: a launch that finished (an implementer the owner has not closed yet) is observed execution up to its end and then
+    // time the owner has not acted; the two are never one number. `minutes` is the first for it, `waitingMinutes` the second.
+    const endedAt = ['completed', 'failed'].includes(h.launch?.status) ? Date.parse(h.launch.finishedAt) || null : null;
+    out.push({ agent: h.agent, role: h.role, work: h.work ?? null, runtime: h.runtime, handoff: idOf(h.bundle), handedAt: h.at, launch: h.launch?.status ?? null, located: Boolean(seen), lastActivityAt: lastAt ? new Date(lastAt).toISOString() : null, idleMinutes: lastAt ? Math.max(0, round1((nowMs - lastAt) / 60000)) : null, minutes: since ? Math.max(0, round1(((endedAt ?? nowMs) - since) / 60000)) : null, ...(endedAt ? { finished: h.launch.status, finishedAt: h.launch.finishedAt, waitingMinutes: Math.max(0, round1((nowMs - endedAt) / 60000)) } : {}), expectMinutes: said?.minutes ?? null, said: said?.said ?? null , ...(asleepSince(lastAt, nowMs) ?? {}) });
   }
   return out;
 }
@@ -260,7 +263,7 @@ export function pastEstimates(sig) {
   const rounds = Math.max(sig.rounds.length, sig.roundsHanded ?? 0);
   if (typeof e.rounds === 'number' && rounds > e.rounds) out.push(`review rounds ${rounds} (the plan expected ${e.rounds})`);
   if (typeof e.minutes === 'number' && sig.wallMinutes !== null && sig.wallMinutes > e.minutes) out.push(`${Math.round(sig.wallMinutes)} minutes (the plan expected ${e.minutes}${typeof sig.longestQuietMinutes === 'number' && sig.longestQuietMinutes >= 1 ? `; ${Math.round(sig.longestQuietMinutes)} of them in one stretch with nothing recorded` : ''})`);
-  for (const s of sig.sessions ?? []) if (s.expectMinutes && s.minutes > s.expectMinutes) out.push(`${s.role} ${s.agent} working ${Math.round(s.minutes)} min (it expected ${s.expectMinutes})`);
+  for (const s of sig.sessions ?? []) if (s.expectMinutes && s.minutes > s.expectMinutes) out.push(`${s.role} ${s.agent} ${s.finished ? 'ran' : 'working'} ${Math.round(s.minutes)} min (it expected ${s.expectMinutes})`);
   return out;
 }
 
@@ -286,7 +289,9 @@ export function courseLines(sig, { predictions = [] } = {}) {
   ];
   for (const x of sig.implementers.filter((i) => !i.open).slice(-3)) out.push(`implementer ${x.agent}${x.work ? ` (${x.work})` : ''} ${x.outcome ?? 'closed'}: took ${mins(x.minutes)}${lastActive(x)}; it ${x.expectMinutes ? `expected ${x.expectMinutes} min${past(x.minutes, x.expectMinutes)}` : 'stated no expectation'}${x.approach ? `; approach: ${x.approach.slice(0, 200)}` : ''}`);
   for (const r of sig.rounds.slice(-3)) out.push(`review round ${r.n} (${r.reviewer ?? r.handoff}): took ${mins(r.minutes)}${lastActive(r)}; it ${r.expectMinutes ? `expected ${r.expectMinutes} min${past(r.minutes, r.expectMinutes)}` : 'stated no expectation'}${r.scope ? `; scope: ${r.scope.slice(0, 200)}` : ''}${r.notReached?.length ? `; did not reach: ${r.notReached.slice(0, 5).map((x) => x.slice(0, 150)).join('; ')}${r.notReached.length > 5 ? ` and ${r.notReached.length - 5} more` : ''}` : ''}`);
-  for (const s of sig.sessions) out.push(`${s.role} ${s.agent}${s.work ? ` (${s.work})` : ''} is working: ${mins(s.minutes)} since handed, ${s.expectMinutes ? `it expects ${s.expectMinutes} min${past(s.minutes, s.expectMinutes)}` : 'it stated no expectation'}; last activity ${s.located ? ago(s.idleMinutes) : 'unknown (transcript not found)'}${typeof s.asleepMinutes === 'number' && s.asleepMinutes >= 1 ? ` (${Math.round(s.asleepMinutes)} min of that with the machine asleep; it woke ${ago(s.wokeMinutesAgo)}: not a stall)` : ''}${s.said ? `; ${s.role === 'reviewer' ? 'scope' : 'approach'}: ${s.said.slice(0, 200)}` : ''}`);
+  for (const s of sig.sessions) out.push(s.finished
+    ? `${s.role} ${s.agent}${s.work ? ` (${s.work})` : ''} ${s.finished === 'completed' ? 'finished' : 'ended (failed)'} after ${mins(s.minutes)} of observed execution, ${s.expectMinutes ? `it expected ${s.expectMinutes} min${past(s.minutes, s.expectMinutes)}` : 'it stated no expectation'}; ${mins(s.waitingMinutes)} since then it has waited for the owner to close it, which is waiting and not work (\`wf handoff close --agent ${s.agent}\`)${s.said ? `; approach: ${s.said.slice(0, 200)}` : ''}`
+    : `${s.role} ${s.agent}${s.work ? ` (${s.work})` : ''} is working: ${mins(s.minutes)} since handed, ${s.expectMinutes ? `it expects ${s.expectMinutes} min${past(s.minutes, s.expectMinutes)}` : 'it stated no expectation'}; last activity ${s.located ? ago(s.idleMinutes) : 'unknown (transcript not found)'}${typeof s.asleepMinutes === 'number' && s.asleepMinutes >= 1 ? ` (${Math.round(s.asleepMinutes)} min of that with the machine asleep; it woke ${ago(s.wokeMinutesAgo)}: not a stall)` : ''}${s.said ? `; ${s.role === 'reviewer' ? 'scope' : 'approach'}: ${s.said.slice(0, 200)}` : ''}`);
   for (const d of predictions) out.push(`strategist ${d.id} (${d.action}) predicted ${d.prediction ? `${d.prediction.signal} by ${typeof d.prediction.by === 'number' ? `round ${d.prediction.by}` : d.prediction.by}` : 'nothing'}: ${d.prediction_status.status}${d.prediction_status.observed !== null && d.prediction_status.observed !== undefined ? ` (observed ${d.prediction_status.observed})` : ''}`);
   return out;
 }

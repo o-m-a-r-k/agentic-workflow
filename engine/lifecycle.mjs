@@ -2694,7 +2694,13 @@ function legacyNextAction(root, state) {
   const step = nextStep(root, state);
   // I-23: the reviewer handoff refuses while an implementer handoff is open; a step that hands a reviewer says so first.
   const openImpl = step.includes('wf handoff reviewer') ? openImplementersOf(root, state) : [];
-  const close = openImpl.length ? `close the implementer(s) still open, once each has reported done and committed: ${openImpl.map((x) => `\`wf handoff close --agent ${x.agent}\``).join(', ')}; then ` : '';
+  // I-137: an implementer whose launch already ended is not "working": the owner looks at its report and commits once and closes it.
+  const ended = (x) => { const l = state.handoffs.filter((y) => y.role === 'implementer' && y.agent === x.agent).at(-1)?.launch; return ['completed', 'failed'].includes(l?.status) ? l : null; };
+  const done = openImpl.filter(ended), pending = openImpl.filter((x) => !ended(x));
+  const close = [
+    done.length ? `${done.map((x) => `implementer ${x.agent}'s launch ${ended(x).status} at ${ended(x).finishedAt}`).join(', ')}: look at its report and commits once and close it now, not at the next status report (${done.map((x) => `\`wf handoff close --agent ${x.agent}\``).join(', ')}; it refuses, naming why, when the work is uncommitted or the report missing); then ` : '',
+    pending.length ? `close the implementer(s) still open, once each has reported done and committed: ${pending.map((x) => `\`wf handoff close --agent ${x.agent}\``).join(', ')}; then ` : '',
+  ].join('');
   return withAttempt(root, state, `${close}${step}`);
 }
 
