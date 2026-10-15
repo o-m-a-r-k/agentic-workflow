@@ -110,13 +110,27 @@ function readDir(dir, extra, problems) {
   return out;
 }
 
+// The lesson files at a commit, read once per repository and commit for the whole command: a commit never changes, and
+// every attempt's worktree of one repository shares its objects. Named cost (audit of one project): `wf status` over 25
+// attempts read the same lesson files again for each, 17 seconds of git calls.
+const commonDirs = new Map();
+const lessonFiles = new Map();
+function lessonFilesAt(repoRoot, commit) {
+  if (!commonDirs.has(repoRoot)) commonDirs.set(repoRoot, git(repoRoot, ['rev-parse', '--path-format=absolute', '--git-common-dir'], { allowFail: true }) || repoRoot);
+  const key = `${commonDirs.get(repoRoot)}\0${commit}`;
+  if (!lessonFiles.has(key)) {
+    const names = git(repoRoot, ['ls-tree', '--name-only', `${commit}:${LESSONS_POSIX}`], { allowFail: true });
+    lessonFiles.set(key, (names ? names.split('\n').filter(Boolean) : []).map((name) => ({ name, text: git(repoRoot, ['show', `${commit}:${LESSONS_POSIX}/${name}`], { allowFail: true }) })));
+  }
+  return lessonFiles.get(key);
+}
+
 // The lessons a repo holds at a commit (git objects: no link is followed there).
 function readAtCommit(repoRoot, commit, extra, problems) {
-  const names = git(repoRoot, ['ls-tree', '--name-only', `${commit}:${LESSONS_POSIX}`], { allowFail: true });
-  if (!names) return [];
+  const files = lessonFilesAt(repoRoot, commit);
+  if (!files.length) return [];
   const out = [];
-  for (const name of names.split('\n').filter(Boolean)) {
-    const text = git(repoRoot, ['show', `${commit}:${LESSONS_POSIX}/${name}`], { allowFail: true });
+  for (const { name, text } of files) {
     const l = parseLesson(name, text ?? '', `${extra.repo}@${String(commit).slice(0, 10)}:${LESSONS_POSIX}/${name}`, problems);
     if (l) out.push({ ...l, ...extra, file: null });
   }

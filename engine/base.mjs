@@ -12,9 +12,18 @@ import { git, gitEnv, matchesAny, refuse, run } from './util.mjs';
 
 const FETCH_TIMEOUT_MS = 15000;
 
+// One fetch per repository, remote and base for the whole command: an attempt's worktrees share their repository's object
+// store, so every attempt on that repository sees it. Named cost (audit of one project): `wf status` over 25 open attempts
+// fetched the same remotes about a hundred times and took six minutes, 308 seconds of them in `git fetch`.
+const fetched = new Map();
 function fetchBase(dir, repo) {
-  const r = spawnSync('git', ['fetch', '--quiet', repo.remote, repo.base], { cwd: dir, encoding: 'utf8', timeout: FETCH_TIMEOUT_MS, env: gitEnv({ ...process.env, GIT_TERMINAL_PROMPT: '0' }) });
-  return r.status === 0;
+  const common = git(dir, ['rev-parse', '--path-format=absolute', '--git-common-dir'], { allowFail: true }) || dir;
+  const key = `${common}\0${repo.remote}\0${repo.base}`;
+  if (!fetched.has(key)) {
+    const r = spawnSync('git', ['fetch', '--quiet', repo.remote, repo.base], { cwd: dir, encoding: 'utf8', timeout: FETCH_TIMEOUT_MS, env: gitEnv({ ...process.env, GIT_TERMINAL_PROMPT: '0' }) });
+    fetched.set(key, r.status === 0);
+  }
+  return fetched.get(key);
 }
 
 function sharedInfraTouched(repo, files) {
@@ -26,7 +35,9 @@ function sharedInfraTouched(repo, files) {
 
 // One entry per repo of the attempt: how far its base moved past the worktree, and what that touches.
 // The commits this project's workflow delivered, per repo (every attempt's recorded delivery), in one pass over the ledgers.
+const deliveredCache = new Map();
 function deliveredHeads(root) {
+  if (deliveredCache.has(root)) return deliveredCache.get(root);
   const out = {};
   for (const id of listAttempts(root)) {
     try {
@@ -35,7 +46,9 @@ function deliveredHeads(root) {
       // a damaged ledger names nothing delivered
     }
   }
-  return Object.fromEntries(Object.entries(out).map(([k, v]) => [k, [...v]]));
+  const heads = Object.fromEntries(Object.entries(out).map(([k, v]) => [k, [...v]]));
+  deliveredCache.set(root, heads);
+  return heads;
 }
 
 export function baseStatus(root, state, { fetch = true } = {}) {
