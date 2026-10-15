@@ -76,7 +76,11 @@ if (docker && docker.status !== 0) {
 // on it), each by its cost: on macOS the host leg costs about 1.4 times a container leg (measured: 508 against 360 CPU
 // seconds a suite run; process starts cost more on macOS). Run alone, a leg takes every core but one, node's default.
 // WF_VERIFY_JOBS overrides it for every leg.
-const cores = os.availableParallelism();
+// The cores free now, not all of them: the machine is shared with other agents' gates, and a verify that took every core made
+// their end-to-end steps flaky (2026-10-15: verify ran about ten times on a machine at load 60 to 380 on 16 cores). The
+// containers also get a CPU cap and a low CPU weight, so a gate's own containers win when both want the processor, and the
+// host leg runs at low priority.
+const cores = Math.max(2, Math.round(os.availableParallelism() - os.loadavg()[0]));
 const parallel = !flags.has('--serial') && legs.length > 1;
 const weight = (leg) => (leg.host && process.platform === 'darwin' ? 1.4 : 1);
 const totalWeight = legs.reduce((n, leg) => n + weight(leg), 0);
@@ -85,14 +89,14 @@ const share = (leg) => Number(process.env.WF_VERIFY_JOBS) || (parallel ? Math.ma
 function command(leg) {
   const jobs = share(leg);
   const suite = ['--test', '--test-reporter=spec', `--test-concurrency=${jobs}`];
-  if (leg.host) return { jobs, cmd: process.execPath, args: [...suite, ...files] };
+  if (leg.host) return process.platform === 'win32' ? { jobs, cmd: process.execPath, args: [...suite, ...files] } : { jobs, cmd: 'nice', args: ['-n', '10', process.execPath, ...suite, ...files] };
   // Read-only mounts, copied inside the container: the suite writes into its own copy, never into this checkout or its
   // git directories (a linked worktree's are mounted and relinked too: scripts/verify-layout.mjs).
   const layout = verifyLayout(repo);
   const script = `set -e; ${layout.script} && cd ${layout.checkout} && mkdir -p /tmp/h && git config --global --add safe.directory "*" && git config --global user.email ci@example.test && git config --global user.name ci && git config --global init.defaultBranch main && git rev-parse --verify HEAD >/dev/null && node ${suite.join(' ')} scenarios/*.test.mjs`;
   const mounts = layout.binds.flatMap((b) => ['-v', `${b.host}:${b.at}:ro`]);
   const env = Object.entries(layout.env).flatMap(([k, v]) => ['-e', `${k}=${v}`]);
-  return { jobs, cmd: 'docker', args: ['run', '--rm', '--label', label, '--user', leg.user, '-e', 'HOME=/tmp/h', ...env, ...mounts, image, 'sh', '-c', script] };
+  return { jobs, cmd: 'docker', args: ['run', '--rm', '--label', label, '--cpus', String(jobs), '--cpu-shares', '256', '--user', leg.user, '-e', 'HOME=/tmp/h', ...env, ...mounts, image, 'sh', '-c', script] };
 }
 
 function run(leg) {
