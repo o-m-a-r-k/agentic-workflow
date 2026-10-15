@@ -80,7 +80,7 @@ test('enable writes the AGENTS.md block and role agents; disable removes the blo
   assert.equal(wf(root, ['status', '--quiet']).code, 0);
   const agents = fs.readFileSync(path.join(root, 'AGENTS.md'), 'utf8');
   assert.match(agents, /Keep me\./);
-  assert.match(agents, /agentic-workflow:begin[\s\S]*wf entry[\s\S]*agentic-workflow:end/);
+  assert.match(agents, /agentic-workflow:begin[\s\S]*`wf resume` always says what is next[\s\S]*agentic-workflow:end/);
   for (const f of ['.claude/agents/wf-reviewer.md', '.codex/agents/wf-reviewer.toml', '.claude/agents/wf-implementer.md']) assert.ok(fs.existsSync(path.join(root, f)), f);
   assert.match(fs.readFileSync(path.join(root, '.claude/agents/wf-reviewer.md'), 'utf8'), /^---\nname: wf-reviewer\n/);
   ok(wf(root, ['enable']));
@@ -226,3 +226,24 @@ test('wf --version reports the released plugin version, which package.json match
   assert.equal(pkg, plugin, 'package.json and plugin.json carry the same release version');
   assert.equal(codex, plugin, 'Codex and Claude manifests carry the same release version');
 });
+
+// 0.7.11, named failure: two projects' AGENTS.md carried a rule three releases old ("medium is your judgement") because the
+// block was refreshed only by a `wf sync` nobody ran, and an agent escalated the contradiction to the person. Generated files
+// git does not track follow the installed plugin by themselves; tracked ones are named with the one command.
+test('generated files follow the installed plugin: untracked role files are refreshed at a handoff, a stale tracked block is named', () => {
+  const { root } = onboarded([{ id: 'ok', repo: 'app', run: 'true' }]);
+  ok(wf(root, ['enable']));
+  sh(root, 'git add AGENTS.md && git commit -q -m "agents block"');
+  const role = path.join(root, '.claude', 'agents', 'wf-planner.md');
+  assert.equal(spawnStatus(root, role), 1, 'the role file is not tracked');
+  fs.writeFileSync(path.join(root, 'AGENTS.md'), fs.readFileSync(path.join(root, 'AGENTS.md'), 'utf8').replace('What holds in every version:', 'Old rules: medium is your judgement.'));
+  sh(root, 'git commit -qam "an old block"');
+  const e = ok(wf(root, ['entry', '--item', 'ENG-1', '--owner', 'o', '--json'])).json();
+  fs.writeFileSync(role, 'an old planner role\n');
+  const h = ok(wf(root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id]));
+  assert.match(h.err, /role files refreshed to the installed plugin/);
+  assert.notEqual(fs.readFileSync(role, 'utf8'), 'an old planner role\n');
+  assert.match(ok(wf(root, ['resume', '--attempt', e.id])).out, /agentic-workflow files older than the installed plugin \([^)]+\): AGENTS\.md; run `wf sync` and commit them/);
+  assert.match(fs.readFileSync(path.join(root, 'AGENTS.md'), 'utf8'), /medium is your judgement/, 'a tracked file is never rewritten behind the project');
+});
+const spawnStatus = (cwd, file) => (sh(cwd, `git ls-files --error-unmatch ${JSON.stringify(path.relative(cwd, file))} >/dev/null 2>&1; echo $?`) === '0' ? 0 : 1);

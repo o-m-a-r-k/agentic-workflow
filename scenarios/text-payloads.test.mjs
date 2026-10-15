@@ -278,8 +278,10 @@ test('the severity scale reads alike in every text that states it', () => {
     'polish (wording, spacing, naming, style)',
     'A tenant-isolation, authorization or money defect is always high',
   ];
+  // 0.7.11: the AGENTS.md block no longer copies the rules into projects (two projects carried a rule three releases old);
+  // it points to the plugin's texts, which state them.
   const states = [
-    'templates/AGENTS.block.md', 'templates/agents/reviewer.md', 'templates/agents/implementer.md', 'templates/agents/planner.md',
+    'templates/agents/reviewer.md', 'templates/agents/implementer.md', 'templates/agents/planner.md',
     'skills/work/SKILL.md', 'skills/quick-fix/SKILL.md', 'docs/scope-decisions.md', 'docs/lifecycle.md', 'docs/releases/v0.7.0.md',
   ];
   const missing = [];
@@ -295,7 +297,7 @@ test('the severity scale reads alike in every text that states it', () => {
 });
 
 test('the rule for what blocks a round reads alike in every text that states it: a low finding never opens one', () => {
-  const states = ['templates/AGENTS.block.md', 'templates/agents/reviewer.md', 'skills/work/SKILL.md', 'skills/quick-fix/SKILL.md', 'docs/scope-decisions.md', 'docs/lifecycle.md', 'docs/trust-model.md'];
+  const states = ['templates/agents/reviewer.md', 'skills/work/SKILL.md', 'skills/quick-fix/SKILL.md', 'docs/scope-decisions.md', 'docs/lifecycle.md', 'docs/trust-model.md'];
   const problems = [];
   for (const rel of states) {
     const text = flat(rel);

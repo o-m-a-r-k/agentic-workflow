@@ -196,7 +196,7 @@ test('an engine-launched Codex reviewer is recorded as launched by the engine wh
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'r2', '--runtime', 'codex', '--attempt', id]));
   ok(wf(root, ['handoff', 'run', '--agent', 'r2', '--attempt', id], { env }));
   fs.writeFileSync(path.join(state(root, id).repos.app.worktree, 'src/a.txt'), 'changed during review');
-  assert.match(wf(root, ['review', '--closure', closureFile(base, goodClosure('r2')), '--attempt', id], { env }).err, /worktree changed during the review/);
+  assert.match(wf(root, ['review', '--closure', closureFile(base, goodClosure('r2')), '--attempt', id], { env }).err, /uncommitted changes since the review round was handed/);
 });
 
 // Named failure I-75: the native bootstrap required an unavailable Claude writer after inspecting the tree.

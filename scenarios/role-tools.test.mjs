@@ -41,7 +41,8 @@ test('wf review refuses a closure when the worktree changed during the review ro
   write(e.repos.app.worktree, 'src/a.txt', 'the reviewer edited this\n');
   const r = wf(root, ['review', '--closure', closureFile(base, goodClosure('r')), '--attempt', e.id]);
   assert.equal(r.code, 75);
-  assert.match(r.err, /the worktree changed during the review round \(app\): the closure no longer describes the tree under review/);
+  // 0.7.11: uncommitted changes on the reviewed commits keep the round open: restore them and record the same closure.
+  assert.match(r.err, /the worktree has uncommitted changes since the review round was handed \(app\)[\s\S]*record this closure again/);
   fs.writeFileSync(path.join(e.repos.app.worktree, 'src/a.txt'), 'b\n');
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r')), '--attempt', e.id]));
 });

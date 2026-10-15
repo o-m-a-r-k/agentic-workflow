@@ -24,7 +24,7 @@ import { lessonStats } from './learning.mjs';
 import { LinkRefused, changesOf, ledgerEmpty, lostLedgers, rebaseline, releaseAttempt, seal, setVerifyLevel, unlockEvidence, verifyAttempt } from './evidence.mjs';
 import { acceptReview, amendCriteria, closeImplementer, designWarning, gateOrderCheck, batchCreate, batchEject, closeAfterHandoff, deliver, deliveredFiles, exportScreenshots, freezeCriteria, handoff, narrowDelivery, needsShown, nextAction, nextDecision, orphanNext, orphansOf, outsideWarning, recordReview, recordShown, reopen, screenshotsExportDir, shownDraftFile, uncovered, withAttempt } from './lifecycle.mjs';
 import { addDiscovered, channelOf, closeDiscovered, discoveredLine, openDiscovered, rateDiscovered } from './discovered.mjs';
-import { detect, doctor, register, registry, setEnabled, sync, writeDraft } from './onboard.mjs';
+import { detect, doctor, refreshGenerated, register, registry, setEnabled, sync, writeDraft } from './onboard.mjs';
 import * as secrets from './secrets.mjs';
 import { report, toCsv, toHandoffCsv, toHtml, toJson, toText } from './telemetry.mjs';
 import { impact } from './topology.mjs';
@@ -230,6 +230,13 @@ function summary(root, s, { base = null, resume = false } = {}) {
       if (later.length && !here.length) lines.push(`  lessons describing one mistake (classifier): ${named(later)}: merge them in an open attempt that holds their repos, before its review is accepted (\`wf lesson distinct <ids>\` if they are different mistakes)`);
     }
     if (!['done', 'abandoned'].includes(s.phase)) for (const p of lessonPrompts(s)) lines.push(`  lesson: ${p}${/reopens/.test(p) ? '; a finding about the workflow itself is a plugin improvement instead: `wf improve add ...`' : ''}`);
+    // 0.7.11: generated files the project tracks and that are older than the installed plugin are named, with the fix.
+    if (!['done', 'abandoned'].includes(s.phase)) {
+      try {
+        const g = refreshGenerated(root);
+        if (g.trackedStale.length) lines.push(`  agentic-workflow files older than the installed plugin (${ENGINE_VERSION}): ${g.trackedStale.map((f) => path.relative(root, f)).join(', ')}; run \`wf sync\` and commit them`);
+      } catch {}
+    }
     const inbox = openCount();
     if (inbox) lines.push(`  ${inbox} open plugin improvement(s) in the inbox (\`wf improve list\`)`);
   } catch {}
@@ -854,6 +861,11 @@ async function dispatch(cmd, sub, positional, options) {
         const c = closeImplementer(root, options);
         print(options, `implementer ${options.agent} closed (${c.outcome}) on ${c.state.id}; commits since its handoff: ${Object.entries(c.commits).map(([k, v]) => `${k} ${v ?? '?'}`).join(', ')}${c.children.length ? `; ${c.children.length} sub-agent(s) attributed to ${c.handoff}` : ''}${c.state.implementers.some((x) => !x.closedAt) ? `\n  still open: ${c.state.implementers.filter((x) => !x.closedAt).map((x) => x.agent).join(', ')}` : '\n  every implementer is closed: the tree is settled for a review'}`, { handoff: c.handoff, outcome: c.outcome, commits: c.commits, children: c.children });
         return 0;
+      }
+      // 0.7.11: the role files a native start reads follow the installed plugin by themselves (untracked ones are rewritten).
+      {
+        const g = refreshGenerated(root);
+        if (g.refreshed.some((f) => /[\\/]\.(claude|codex)[\\/]agents[\\/]/.test(f))) process.stderr.write(`note: role files refreshed to the installed plugin (${g.refreshed.length}); a session that was already running reads them after a restart (\`claude --resume\` keeps the conversation)\n`);
       }
       const r = handoff(root, sub, options);
       const startPrompt = r.startPrompt;

@@ -6,6 +6,7 @@ import { ruleWarnings } from './rules.mjs';
 import { protectionLayers } from './evidence.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
+import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ADAPTER_DIR, ARTIFACT_PLACEHOLDERS, CONFIG_FILE, adapterLocation, agentTypeFor, declared, findRoot, loadConfig, loadConfigAtCommit, placeholdersIn, repoDir, roleClass, trustedAdapter } from './config.mjs';
@@ -381,13 +382,17 @@ function agentsBlock(root, cfg) {
     .trim();
 }
 
-export function writeBlock(file, block) {
+function nextBlockText(file, block) {
   const text = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
   // Named failure I-61: sync must preserve the formatter's blank line after the opening HTML marker.
   const wrapped = `${BEGIN}\n\n${block}\n${END}`;
   let next;
   if (text.includes(BEGIN) && text.includes(END) && text.indexOf(END) > text.indexOf(BEGIN)) next = text.slice(0, text.indexOf(BEGIN)) + wrapped + text.slice(text.indexOf(END) + END.length);
   else next = `${text}${text && !text.endsWith('\n') ? '\n' : ''}${text ? '\n' : ''}${wrapped}\n`;
+  return { text, next };
+}
+export function writeBlock(file, block) {
+  const { next } = nextBlockText(file, block);
   mkdirStateDirectory(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, next);
 }
@@ -443,6 +448,25 @@ function writeIfChanged(file, content, changed) {
   changed.push({ file, created: before === null });
 }
 
+// One generated role file: what `wf sync` writes for a role of a class on a runtime.
+function roleFileOf(root, cfg, host, runtime, { role, cls, name }) {
+  const tpl = fs.readFileSync(path.join(PLUGIN_ROOT, 'templates', 'agents', `${role}.md`), 'utf8');
+  const rc = cfg.roles?.[role] ?? {};
+  const { effort, model } = declared(cfg, cls, runtime);
+  const description = `${tpl.match(/^description: (.*)$/m)?.[1] ?? role} Class ${cls}: ${cfg.classes[cls].use}`.replace(/\s+/g, ' ').trim();
+  const body = roleInstructions(cfg, role, cls, rc.appendix && fs.existsSync(path.join(root, ADAPTER_DIR, rc.appendix)) ? fs.readFileSync(path.join(root, ADAPTER_DIR, rc.appendix), 'utf8') : '', host);
+  return host.roleFile({ root, role, name, description, model, effort, body });
+}
+function roleFileContents(root, cfg) {
+  const out = [];
+  for (const runtime of hostIds()) {
+    const host = hostFor(runtime);
+    if (!host.roleFile) continue;
+    for (const a of roleAgents(cfg)) out.push(roleFileOf(root, cfg, host, runtime, a));
+  }
+  return out;
+}
+
 export function sync(root) {
   const cfg = loadConfig(root);
   const written = [];
@@ -463,12 +487,7 @@ export function sync(root) {
     const ours = new Set();
     for (const { role, cls, name } of agents) {
       // Role templates live under templates/ so the plugin does not register them as agents in every project.
-      const tpl = fs.readFileSync(path.join(PLUGIN_ROOT, 'templates', 'agents', `${role}.md`), 'utf8');
-      const rc = cfg.roles?.[role] ?? {};
-      const { effort, model } = declared(cfg, cls, runtime);
-      const description = `${tpl.match(/^description: (.*)$/m)?.[1] ?? role} Class ${cls}: ${cfg.classes[cls].use}`.replace(/\s+/g, ' ').trim();
-      const body = roleInstructions(cfg, role, cls, rc.appendix && fs.existsSync(path.join(root, ADAPTER_DIR, rc.appendix)) ? fs.readFileSync(path.join(root, ADAPTER_DIR, rc.appendix), 'utf8') : '', host);
-      const { file, content } = host.roleFile({ root, role, name, description, model, effort, body });
+      const { file, content } = roleFileOf(root, cfg, host, runtime, { role, cls, name });
       writeIfChanged(file, content, changedRoles);
       ours.add(file);
       written.push(file);
@@ -499,6 +518,54 @@ export function sync(root) {
     }
   }
   return written;
+}
+
+// The files `wf sync` generates (the AGENTS.md block, each runtime's role files) that differ from what the installed plugin
+// would write now, each with whether git tracks it. Named failure (0.7.10): two projects' AGENTS.md carried a rule three
+// releases old ("medium is your judgement") because the block was refreshed only by a `wf sync` nobody ran, and an agent
+// escalated the contradiction to the person.
+const tracked = (file) => {
+  const r = spawnSync('git', ['ls-files', '--error-unmatch', path.basename(file)], { cwd: path.dirname(file), encoding: 'utf8' });
+  return r.status === 0;
+};
+export function generatedStatus(root) {
+  const cfg = loadConfig(root);
+  const out = [];
+  if (cfg.enabled) {
+    const block = agentsBlock(root, cfg);
+    for (const f of instructionFiles(root, cfg)) {
+      const { text, next } = nextBlockText(f, block);
+      if (text !== next) out.push({ file: f, kind: 'block', content: next, tracked: fs.existsSync(f) && tracked(f) });
+    }
+  }
+  for (const { file, content } of roleFileContents(root, cfg)) {
+    let before = null;
+    try {
+      before = fs.readFileSync(file, 'utf8');
+    } catch {}
+    if (before !== content) out.push({ file, kind: 'role', content, tracked: before !== null && tracked(file) });
+  }
+  return out;
+}
+// Writes the generated files that are stale and that git does not track (a role file at an untracked workspace root): what
+// the plugin generates follows the installed plugin by itself. A tracked one is the project's to commit: reported, never
+// written behind its back.
+export function refreshGenerated(root) {
+  let stale = [];
+  try {
+    stale = generatedStatus(root);
+  } catch {
+    return { refreshed: [], trackedStale: [] };
+  }
+  const refreshed = [];
+  for (const s of stale.filter((x) => !x.tracked)) {
+    try {
+      mkdirStateDirectory(path.dirname(s.file), { recursive: true });
+      fs.writeFileSync(s.file, s.content);
+      refreshed.push(s.file);
+    } catch {}
+  }
+  return { refreshed, trackedStale: stale.filter((x) => x.tracked).map((x) => x.file) };
 }
 
 export function setEnabled(root, enabled) {
