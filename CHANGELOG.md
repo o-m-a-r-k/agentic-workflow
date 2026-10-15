@@ -23,8 +23,8 @@ Release notes, newest first, then every fix that came from a failure in the work
     their repos, before its review is accepted), and the owner merges them there:
     `wf lesson merge <ids> --title "<the one mistake>" --attempt <id>`. The merge is committed, reviewed and delivered
     with the attempt; the members are retired with `mergedInto`, and the merged lesson keeps their ranking evidence. A
-    merge one attempt made is not proposed to another. `wf lesson distinct <ids>` tells the workflow the classifier was
-    wrong: no merge of them is proposed again. A lesson recorded from a finding is never counted as that finding's repeat.
+    merge one attempt made is not proposed to another. `wf lesson distinct <ids>` (with `--attempt` for a lesson still in
+    an attempt) tells the workflow the classifier was wrong: no merge of them is proposed again. A lesson recorded from a finding is never counted as that finding's repeat.
   - **What the person chose.** Items the person chose to fix when asked whether they could leave (`fix now`, or their
     own words) reach later reviewers as `severityScale.personFixed` (the 20 most recent): examples to rate by, never a
     rule.
@@ -57,8 +57,8 @@ Release notes, newest first, then every fix that came from a failure in the work
     It escalates to SIGKILL, and records `stopped` only once every process is observed gone.
   - When something cannot be signalled, it says so, names the processes and records nothing.
   - A recorded pid the system has given to another process since (it started well after the launch) is left alone: the
-    launch is recorded stopped and nothing is signalled. A pid seen in the tree that moved to another group is not
-    ended either.
+    launch is recorded stopped and nothing is signalled, and `wf handoff wait` does not follow it. A pid seen in the tree
+    that moved to another group is not ended either.
   - An interrupted foreground `wf handoff run` ends its tree the same way, and reports a launch it could not end as
     still running.
 - Align the CLI package and both host plugin manifests at 0.7.9.

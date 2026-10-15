@@ -294,6 +294,9 @@ export async function waitRole(root, options) {
   if (['completed', 'failed'].includes(h.launch.status)) return { agent: h.agent, session: h.session ?? null, status: h.launch.status, exitCode: h.launch.status === 'completed' ? 0 : 1 };
   const minutes = options.minutes === undefined ? null : Number(options.minutes);
   if (minutes !== null && !(Number.isFinite(minutes) && minutes > 0)) throw new WfError('--minutes is a positive number (minutes since the launch)');
+  // A role whose pid the system has given to another process ended long ago: following that process would end its group
+  // on an interrupt (independent review of 0.7.9). `wf handoff stop` records it, signalling nothing.
+  if (h.launch.pid && !stillTheRole(h.launch.pid, h.launch.spawnedAt)) throw refuse(`${h.agent}'s process ended; pid ${h.launch.pid} is another process now, so it is not followed`, `record it with \`wf handoff stop --agent ${h.agent} --attempt ${state.id}\` (it signals nothing), then hand a fresh role`, { id: 'launch:pid-reused' });
   const io = { ...runnerFiles(root, state.id, h), ...(h.launch.out ? { out: h.launch.out, err: h.launch.err } : {}) };
   return follow(root, state.id, h, { host, runtime: h.runtime, label: host.name, requestedSession: h.launch.requestedSession ?? null, io, untilMinutes: minutes });
 }

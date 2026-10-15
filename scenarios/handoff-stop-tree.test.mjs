@@ -247,6 +247,7 @@ test('a recorded pid that is another process now is left alone, and the launch i
     assert.ok(launch.spawnedAt, 'the spawn time is recorded with the pid');
     processSeams.startedAt = () => Date.parse(launch.spawnedAt) + 3_600_000;
     processSeams.kill = (target, signal) => { if (signal !== 0) signalled.push(target); return kill(target, signal); };
+    await assert.rejects(waitRole(p.root, { attempt: p.id, agent: 'p', owner: 'o' }), /p's process ended; pid \d+ is another process now, so it is not followed/, 'never followed, so an interrupt cannot end it');
     const r = await stopRole(p.root, { attempt: p.id, agent: 'p', owner: 'o' });
     assert.equal(r.status, 'stopped');
     assert.deepEqual(signalled, [], 'nothing was signalled');

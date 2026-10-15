@@ -139,11 +139,14 @@ test('a lesson recorded from a finding is that finding\'s lesson, not its repeat
       ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('rev-0b')), '--attempt', x.id]));
     },
   });
-  ok(wf(root, ['accept', '--attempt', e.id], { env }));
+  assert.doesNotMatch(ok(wf(root, ['accept', '--attempt', e.id], { env })).out, /learned:/, 'nothing was counted, so nothing is said');
   const s = state(root, e.id);
   assert.deepEqual(s.learning.at(-1).findings, { 'rev-0:F1': 'L-4' }, 'the label is kept');
   assert.deepEqual(s.lessons.recurred, [], 'and counts as no recurrence');
   assert.doesNotMatch(ok(wf(root, ['status', '--attempt', e.id])).out, /LESSON L-4 RECURRED/);
+  // A lesson that lives in the attempt until its delivery is named with the attempt.
+  assert.match(wf(root, ['lesson', 'distinct', 'L-1', 'L-4']).err, /no lesson L-4/);
+  assert.match(ok(wf(root, ['lesson', 'distinct', 'L-1', 'L-4', '--attempt', e.id])).out, /lessons L-1, L-4 are different mistakes/);
 });
 
 test('learning is a configurable agent: the adapter pins the classifier per runtime or turns it off, and a failed classifier never fails an acceptance', () => {

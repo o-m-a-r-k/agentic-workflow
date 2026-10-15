@@ -225,7 +225,7 @@ function summary(root, s, { base = null, resume = false } = {}) {
       const here = merges.filter((g) => mergeableIn(root, s, g));
       const later = merges.filter((g) => !here.includes(g));
       const named = (gs) => gs.map((g) => g.join(' + ')).join('; ');
-      if (here.length) lines.push(`  lessons describing one mistake (classifier): ${named(here)}: merge each into one lesson in this attempt (\`wf lesson merge <ids> --title "<the one mistake>" --attempt ${s.id}\`; reviewed and delivered with it), or \`wf lesson distinct <ids>\` if they are different mistakes`);
+      if (here.length) lines.push(`  lessons describing one mistake (classifier): ${named(here)}: merge each into one lesson in this attempt (\`wf lesson merge <ids> --title "<the one mistake>" --attempt ${s.id}\`; reviewed and delivered with it), or \`wf lesson distinct <ids> --attempt ${s.id}\` if they are different mistakes`);
       if (later.length && !here.length) lines.push(`  lessons describing one mistake (classifier): ${named(later)}: merge them in an open attempt that holds their repos, before its review is accepted (\`wf lesson distinct <ids>\` if they are different mistakes)`);
     }
     if (!['done', 'abandoned'].includes(s.phase)) for (const p of lessonPrompts(s)) lines.push(`  lesson: ${p}${/reopens/.test(p) ? '; a finding about the workflow itself is a plugin improvement instead: `wf improve add ...`' : ''}`);
@@ -981,7 +981,9 @@ async function dispatch(cmd, sub, positional, options) {
       const unreached = unreachedOf(s.review?.closure);
       // 0.7.9 (D19): what the classifier learned from this attempt's findings.
       const labelled = s.learning?.at(-1);
-      const learnedLine = labelled && !labelled.error ? Object.entries(labelled.findings ?? {}).filter(([, l]) => l && l !== 'none').map(([ref, l]) => `${ref} repeats ${l}`) : [];
+      // Only what was counted: a label naming a lesson this attempt recorded is that finding's own lesson, not a repeat.
+      const counted = new Set((s.lessons?.recurred ?? []).map((r) => r.id));
+      const learnedLine = labelled && !labelled.error ? Object.entries(labelled.findings ?? {}).filter(([, l]) => l && l !== 'none' && counted.has(l)).map(([ref, l]) => `${ref} repeats ${l}`) : [];
       print(options, `review accepted.${unreached.length ? `\nnot reached by this review: ${unreached.join('; ')}` : ''}${lp.map((p) => `\nlesson: ${p}`).join('')}${learnedLine.length ? `\nlearned: ${learnedLine.join('; ')} (counted as recurrences; lessons rank by them)` : ''} next: ${nextAction(root, s)}`, s);
       return 0;
     }
@@ -1238,7 +1240,7 @@ async function dispatch(cmd, sub, positional, options) {
         return 0;
       }
       if (sub === 'distinct') {
-        const r = distinctLessons(root, positional);
+        const r = distinctLessons(root, positional, { state: options.attempt ? openState(root, options) : null });
         print(options, `lessons ${r.lessons.join(', ')} are different mistakes: no merge of them is proposed again`, r);
         return 0;
       }

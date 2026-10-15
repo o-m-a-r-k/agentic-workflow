@@ -873,8 +873,9 @@ export function mergeableIn(root, state, ids) {
 
 // `wf lesson distinct <ids...>`: the owner says the classifier was wrong, these lessons are different mistakes; no merge of
 // them is proposed again. A learned fact only: nothing in any repository changes.
-export function distinctLessons(root, ids) {
-  const all = loadLessons(root);
+export function distinctLessons(root, ids, { state = null } = {}) {
+  // A lesson recorded in an open attempt lives in its worktree until delivered: read with that attempt (`--attempt`).
+  const all = loadLessons(root, { state });
   const members = [...new Set((ids ?? []).map(String))].map((id) => findLesson(all, id) ?? (() => { throw refuse(`no lesson ${id}`); })());
   if (members.length < 2) throw refuse('name two or more lessons: `wf lesson distinct <id> <id>...`');
   noteLearned(root, { kind: 'distinct', lessons: members.map(lessonKey) });
