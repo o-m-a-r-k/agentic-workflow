@@ -54,6 +54,20 @@ test('each item is its own short question; the person fixes one and lets another
   assert.deepEqual(s.scopeDecisions.at(-1).decisionFor, { 'r1:F1': q1.id });
 });
 
+test('what the person chose to fix reaches the reviewers who rate similar items, in the project (0.7.9, D19)', () => {
+  const p = project('pi-learn');
+  const [q1, q2] = asked(run(p, ['scope', 'defer', '--finding', 'r1:F1,r1:F2']));
+  approveAsOwner(p.root, p.id, q1, 'let it leave');
+  approveAsOwner(p.root, p.id, q2, 'fix now');
+  const h = ok(wf(p.root, ['handoff', 'reviewer', '--agent', 'r2', '--attempt', p.id, '--json'])).json();
+  const fixed = JSON.parse(fs.readFileSync(h.bundle, 'utf8')).severityScale.personFixed;
+  assert.equal(fixed.length, 1, 'a "let it leave" answer teaches nothing');
+  assert.equal(fixed[0].answer, 'fix now');
+  assert.match(fixed[0].item, /^r1:F2: src\/old\.txt:3 payment history says Succeeded beside a partial credit \(low, rated by reviewer r1/);
+  const impl = ok(wf(p.root, ['handoff', 'implementer', '--agent', 'i3', '--attempt', p.id, '--json'])).json();
+  assert.equal(JSON.parse(fs.readFileSync(impl.bundle, 'utf8')).severityScale.personFixed, undefined, 'only the reviewer rates');
+});
+
 test('the owner can word each question plainly with --explain', () => {
   const p = project('pi-explain');
   const explain = path.join(p.base, 'explain.json');

@@ -6,14 +6,18 @@ import { matchesAny } from './util.mjs';
 // `wf check`, `wf handoff reviewer`), and `wf accept` needs the reviewer's verdict per file (`outsideVerdicts`).
 
 // A plan entry names a file as `path`, `path:line ...`, `repo/path`, a directory ending in `/`, or a glob.
-export function planPaths(plan) {
+// Named failure (I-129): an anchor written `<repo>:<path>` (the form findings and the outside-plan list use) was never
+// matched, so every file it named was listed outside the plan. It reads as `<repo>/<path>`.
+const repoPrefixed = (p) => p.replace(/^([A-Za-z0-9][A-Za-z0-9._-]*):(?!\/\/)(?=[^\s:])/, '$1/');
+
+export function planPaths(plan, extra = []) {
   if (!plan || typeof plan !== 'object') return [];
   const out = [];
   const take = (v) => {
     for (const item of [v].flat()) {
       if (typeof item !== 'string') continue;
       for (const tok of item.split(/\s+/)) {
-        const p = tok.replace(/^[`'"([]+|[`'",)\]]+$/g, '').replace(/:\d+(?:-\d+)?$/, '').replace(/:$/, '');
+        const p = repoPrefixed(tok.replace(/^[`'"([]+|[`'",)\]]+$/g, '').replace(/:\d+(?:-\d+)?$/, '').replace(/:$/, ''));
         if (p && /[/*]|\.\w+$/.test(p) && !/^https?:/.test(p) && !p.startsWith('-')) out.push(p);
       }
     }
@@ -21,7 +25,19 @@ export function planPaths(plan) {
   take(plan.anchors);
   take(plan.tests?.changed);
   take(plan.tests?.run);
+  take(extra);
   return [...new Set(out)];
+}
+
+// The files the attempt's accepted scope names beyond the plan's anchors and tests: the impact survey's files, the plan's
+// and every recorded amendment addendum's. Named failure (I-129): an accepted impact amendment brought work items' files
+// into scope, yet the outside-plan list kept naming them, because only the plan as first frozen was read.
+const SURVEY_LISTS = ['components', 'consumers', 'flows', 'patterns'];
+export function scopeFiles(state) {
+  const impact = state?.impact;
+  if (!impact) return [];
+  const listed = (survey) => SURVEY_LISTS.flatMap((k) => (Array.isArray(survey?.[k]) ? survey[k] : [])).map((e) => e?.file).filter((f) => typeof f === 'string');
+  return [...listed(impact.survey), ...(impact.addenda ?? []).flatMap((a) => listed(a.survey))];
 }
 
 function covered(repo, file, p) {
@@ -48,8 +64,8 @@ export function scopeNoise(cfg, repo, file) {
 }
 
 // null when the plan names no paths at all: nothing to compare against.
-export function outsidePlan(plan, changed, cfg = null) {
-  const paths = planPaths(plan);
+export function outsidePlan(plan, changed, cfg = null, extra = []) {
+  const paths = planPaths(plan, extra);
   if (!paths.length) return null;
   const out = [];
   // A lesson file is covered by the lesson harness (recorded, reviewed and delivered with the attempt), never unplanned.

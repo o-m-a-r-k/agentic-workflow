@@ -87,6 +87,12 @@ engine starts.
   unless an incident shows an agent doing it: agents are fallible, not adversarial ([threat
   model](docs/trust-model.md#threat-model)). Named failure: an automated security-review hook drove nine releases in 95
   minutes with no incident behind any of them.
+- **A change from the improvement inbox passes an experience review before it ships** (D19). The review answers four
+  questions: does it add a question, a stop, a refusal, a step or text the person or the agents must read; which observed
+  failure does it fix, and how often was it seen; would it have made a recent delivery worse; what does it remove? A
+  change that adds weight without an observed failure is retired, not built. Named failure: 0.7.7 closed every way a
+  reviewer found an owner agent could move a finding out of a delivery with another question to the person, and the
+  person found the workflow "too tight", "restrictive, not helpful".
 - **Design decisions live in the decision register,** [docs/DESIGN.md](docs/DESIGN.md#decision-register), not in any
   agent's memory, a session's notes or a private plan. A change that decides something, or reverses an earlier
   decision, adds its entry (date, decision, the failure behind it) in the same commit. Read the register before

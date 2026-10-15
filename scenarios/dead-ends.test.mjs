@@ -218,6 +218,36 @@ test('wf intent implementation upgrades an analysis attempt in place and records
   assert.match(closed.err, /ENG-7\.1 is abandoned; its intent is final/);
 });
 
+// Named failure (I-127): after an upgrade to implementation, fresh planners got the analysis plan with no word of the intent
+// or why it changed, could only amend criteria (an amendment carries no plan), and an amendment carrying only
+// `plan.summary` was accepted and dropped; the person's request reached no planner.
+test('I-127: a planner after an upgrade knows why, its plan replaces the analysis one, an amendment refuses what it would drop, and the owner can carry the person\'s words', () => {
+  const f = singleRepoProject('intent-replan', { gate: { steps } });
+  const e = ok(wf(f.root, ['entry', '--item', 'ENG-9', '--intent', 'analysis', '--json'])).json();
+  ok(wf(f.root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id]));
+  ok(wf(f.root, ['plan', '--file', criteriaFile(f.base), '--attempt', e.id]));
+  ok(wf(f.root, ['intent', 'implementation', '--attempt', e.id, '--reason', 'add the fix to the release']));
+  const amend = path.join(f.base, 'amend-plan.json');
+  fs.writeFileSync(amend, JSON.stringify({ plan: { summary: 'implement the fix' } }));
+  const r = wf(f.root, ['criteria', 'amend', '--file', amend, '--reason', 'the implementation plan', '--attempt', e.id]);
+  assert.equal(r.code, 75);
+  assert.match(r.err, /the amendment carries `plan`, which no amendment applies: an amendment changes `criteria`, `expect`, `impact`, `scope`, `work` only/);
+  assert.match(r.err, /record the planner's whole plan with `wf plan --from-agent <planner id> --attempt ENG-9\.1` \(it replaces the analysis plan\)/);
+  const h = ok(wf(f.root, ['handoff', 'planner', '--agent', 'p2', '--attempt', e.id, '--context', 'the person: we are cutting a release, add the fix to it', '--json'])).json();
+  const b = JSON.parse(fs.readFileSync(h.bundle, 'utf8'));
+  assert.equal(b.intent, 'implementation');
+  assert.deepEqual(b.intentChanges.map((c) => [c.from, c.to, c.reason]), [['analysis', 'implementation', 'add the fix to the release']]);
+  assert.match(b.replacesPlan, /replaces the analysis plan/);
+  assert.equal(b.ownerContext, 'the person: we are cutting a release, add the fix to it');
+  ok(wf(f.root, ['plan', '--file', criteriaFile(f.base, [{ id: 'C1', text: 'the fix ships in the release', uat: 'the release has the fix' }]), '--attempt', e.id]));
+  const s = state(f.root, e.id);
+  assert.equal(s.criteria[0].text, 'the fix ships in the release', 'the implementation plan replaced the analysis one');
+  assert.equal(s.plansFrozen, 2);
+  ok(wf(f.root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
+  assert.match(wf(f.root, ['plan', '--file', criteriaFile(f.base), '--attempt', e.id]).err, /criteria are already frozen/, 'once implementation started, never again');
+  assert.match(wf(f.root, ['handoff', 'implementer', '--agent', 'i2', '--attempt', e.id, '--context', 'x']).err, /--context is for a planner handoff/);
+});
+
 // Named failure (I-78): with the evidence folder renamed, `wf verify --attempt X` printed "verified 1 attempt(s)" for an
 // attempt with no ledger at all.
 test('I-78: wf verify of an attempt that does not exist, or whose folder was renamed, fails instead of reporting success', () => {

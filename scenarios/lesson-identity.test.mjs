@@ -66,8 +66,11 @@ test('a lesson is addressed by its qualified identity; a bare id that is two les
   assert.match(fs.readFileSync(lessonFile(root, 'api', 'L-4'), 'utf8'), /status"?: "?proposed/, 'the other repository\'s lesson is untouched');
   const recurred = ok(wf(root, ['lesson', 'recur', 'L-4@api', '--json'])).json();
   assert.equal(recurred.recurrence, 1);
-  assert.match(fs.readFileSync(lessonFile(root, 'api', 'L-4'), 'utf8'), /recurrence"?: 1/);
-  assert.match(fs.readFileSync(lessonFile(root, 'web', 'L-4'), 'utf8'), /recurrence"?: 0/);
+  // I-130 (0.7.9): learned under the repository's lesson, never written into either file.
+  const listed = ok(wf(root, ['lesson', 'list'])).out;
+  assert.match(listed, /^L-4@api {2}api .*recurrence 1/m);
+  assert.match(listed, /^L-4@web {2}web .*recurrence 0/m);
+  assert.doesNotMatch(fs.readFileSync(lessonFile(root, 'api', 'L-4'), 'utf8'), /recurrence"?: [1-9]/);
   // Once one is renamed the other has its plain id again, and the qualified form recorded while they collided still names it.
   fs.renameSync(lessonFile(root, 'api', 'L-4'), lessonFile(root, 'api', 'L-9'));
   put(root, 'api', 'L-9', 'API lesson', { recurrence: 1 });

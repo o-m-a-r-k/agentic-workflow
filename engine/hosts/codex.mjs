@@ -1,4 +1,5 @@
 // Codex as a host adapter: the one place the workflow learns what Codex is.
+import fs from 'node:fs';
 import path from 'node:path';
 import { verifyRole } from './codex-agent.mjs';
 import { patchTargets, wrappedConnectorCall, wrappedConnectorResult } from './codex-tool.mjs';
@@ -62,6 +63,17 @@ function buildLaunch(h, { root, body, nonGitRoot }) {
   return { bin: 'codex', args };
 }
 
+// The classifier (engine/learning.mjs): one read-only `codex exec` turn, no session kept; its last message is the answer.
+function classifyLaunch({ prompt, model, effort, dir }) {
+  const outFile = path.join(dir, 'answer.txt');
+  const args = ['exec', '--skip-git-repo-check', '--ephemeral', '--sandbox', 'read-only', '--output-last-message', outFile];
+  if (model) args.push('--model', model);
+  if (effort) args.push('-c', `model_reasoning_effort=${JSON.stringify(effort)}`);
+  args.push('-');
+  return { bin: 'codex', args, input: prompt, outFile };
+}
+const classifyResult = ({ outFile }) => ({ text: fs.readFileSync(outFile, 'utf8') });
+
 function interpretEvent(e) {
   if (e.type === 'thread.started') return { started: e.thread_id };
   if (e.type === 'turn.completed') return { terminal: { success: true } };
@@ -88,6 +100,9 @@ export default {
   envPrefixes: ['CODEX_', 'OPENAI_'],
   // Codex takes the model and effort its own configuration names unless a project's `classes` pin them.
   classDefaults: {},
+  // The classifier labels items with given choices and does no reasoning: the fast, cheap model. A project's
+  // `learning.classifier.codex` overrides it.
+  classifierDefaults: { model: 'gpt-6-luna', effort: 'low' },
   agentsDir: '.codex/agents',
   skillsDir: '.agents/skills',
   fragments: {
@@ -110,6 +125,8 @@ export default {
   // (named failure I-46), so the launcher checks every recorded worktree itself first.
   needsGitRoot: true,
   buildLaunch,
+  classifyLaunch,
+  classifyResult,
   interpretEvent,
   roleReport,
   diagnoseLaunch,

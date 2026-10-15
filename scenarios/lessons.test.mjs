@@ -165,14 +165,15 @@ test('a reopened attempt records its lesson before the review; it is then delive
   assert.equal(state(root, id3).lessons.waived.reason, 'a typo in a label, nothing to learn');
 });
 
-test('every role gets the lessons that apply, with why; proposed ones are advisory; enforced and recurring are never capped; the implementer may acknowledge each in a commit trailer and the reviewer may judge each (neither is required; a finding verdict counts as a recurrence)', () => {
+test('every role gets the lessons that apply, with why; proposed ones are advisory; enforced ones are never capped and the rest rank by evidence (0.7.9); the implementer may acknowledge each in a commit trailer and the reviewer may judge each (neither is required; a finding verdict counts as a recurrence)', () => {
   const { base, root } = singleRepoProject('lessons-inject', { gate: { steps } });
   for (let i = 1; i <= 8; i++) ok(add(root, ['--title', `lesson ${i}`, '--what', 'w', '--cause', 'review', '--mechanism', 'reviewer-checklist', '--tags', `t${i}`, '--paths', i === 8 ? 'docs/**' : 'src/**']));
   ok(wf(root, ['lesson', 'set', 'L-7', '--status', 'enforced', '--ref', 'roles.reviewer.appendix']));
   ok(wf(root, ['lesson', 'recur', 'L-6']));
   const e = ok(wf(root, ['entry', '--item', 'ENG-302', '--owner', 'o', '--json'])).json();
   const planner = ok(wf(root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id])).out;
-  assert.match(planner, /^lessons injected: L-6, L-7, L-1, L-2, L-3, L-4, L-5 \(omitted by the cap: L-8\)/m);
+  // 0.7.9 (D19): only enforced lessons pass the cap; the lesson whose mistake repeated ranks first among the rest.
+  assert.match(planner, /^lessons injected: L-7, L-6, L-1, L-2, L-3, L-4 \(omitted by the cap: L-5, L-8\)/m);
   const pb = bundleOf(planner);
   assert.deepEqual(pb.lessons.apply.find((l) => l.id === 'L-1').matched, ['its repo app is in this attempt']);
   assert.equal(pb.lessons.apply.find((l) => l.id === 'L-7').label, 'enforced by reviewer-checklist (roles.reviewer.appendix)');
@@ -182,9 +183,10 @@ test('every role gets the lessons that apply, with why; proposed ones are adviso
   assert.match(preview, /the implementer of ENG-302\.1 would receive/);
   const impl = ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id])).out;
   const ib = bundleOf(impl);
-  assert.deepEqual(ib.lessons.apply.slice(0, 2).map((l) => l.id), ['L-6', 'L-7'], 'recurring and enforced first, never capped');
-  assert.equal(ib.lessons.apply.length, 7);
-  assert.deepEqual(ib.lessons.omitted, ['L-8']);
+  assert.deepEqual(ib.lessons.apply.slice(0, 2).map((l) => l.id), ['L-7', 'L-6'], 'enforced first, never capped; then the lesson whose mistake repeated');
+  assert.equal(ib.lessons.apply.length, 6);
+  assert.deepEqual(ib.lessons.omitted, ['L-5', 'L-8']);
+  assert.equal(ib.lessons.apply.find((l) => l.id === 'L-6').recurrence, 1, 'the learned recurrence is in the bundle');
   assert.match(fs.readFileSync(path.join(import.meta.dirname, '..', 'templates', 'agents', 'implementer.md'), 'utf8'), /lessons and design-system components as context/, 'the lessons are the implementer\'s context; a trailer is optional and recorded when written (below)');
   // Trailers: one -m per paragraph, so each is a line of the message as an implementer would write it.
   const commitWith = (files, ...paras) => {
@@ -197,7 +199,7 @@ test('every role gets the lessons that apply, with why; proposed ones are adviso
   // that exist are recorded and shown; five lessons with none do not stop the reviewer handoff.
   const rv = wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', e.id]);
   assert.equal(rv.code, 0, rv.err);
-  assert.match(rv.err, /lessons injected: L-6, L-7, /);
+  assert.match(rv.err, /lessons injected: L-7, L-6, /);
   const rb = bundleOf(rv.out);
   assert.deepEqual(rb.lessons.acknowledged.map((a) => `${a.lesson}:${a.ack}`).sort(), ['L-6:applied', 'L-7:not-applicable']);
   assert.equal(state(root, e.id).lessons.acknowledged.length, 2, 'acknowledgements are in the ledger');
@@ -231,7 +233,11 @@ test('a new lesson matching an existing one (same mechanism kind, a shared tag) 
   ok(add(root, ['--title', 'Investigate anomalies between captures', '--what', 'a count differed between two captures and was called cosmetic', '--cause', 'review', '--mechanism', 'reviewer-checklist', '--tags', 'screenshots,anomalies']));
   const r = ok(add(root, ['--attempt', id, '--title', 'Dates differed between captures', '--what', 'dates differed and nobody asked why', '--cause', 'review', '--mechanism', 'reviewer-checklist', '--tags', 'anomalies']));
   assert.match(r.out, /lesson L-1 recurred \(recurrence 1\): its mechanism failed/);
-  assert.match(fs.readFileSync(lessonFile(root, 'L-1'), 'utf8'), /recurrence: 1/);
+  // I-130: the recurrence is learned (the attempt's ledger and the project's learned record), never written into the
+  // lesson file of the pull-only main checkout, where nobody would commit it.
+  assert.match(fs.readFileSync(lessonFile(root, 'L-1'), 'utf8'), /recurrence: 0/);
+  assert.equal(sh(root, 'git status --porcelain -- .workflow/lessons'), '?? .workflow/lessons/', 'the main checkout holds only the new lesson files, as before');
+  assert.match(ok(wf(root, ['lesson', 'list'])).out, /L-1 .*recurrence 1 \(last \d{4}-\d{2}-\d{2}\)/);
   assert.match(ok(wf(root, ['status', '--attempt', id])).out, /LESSON L-1 RECURRED \(recurrence 1\)/);
 });
 

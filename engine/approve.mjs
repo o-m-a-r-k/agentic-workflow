@@ -14,6 +14,7 @@
 // Two ways to confirm (0.7.3, the person's choice): typed at their own terminal, or answered in the session's question
 // panel, where the harness records the answer (`wf approve <id> --from-question`). Named failure: from the phone the person
 // could confirm nothing, so an attempt stopped until they reached the machine.
+import { noteLearned } from './learning.mjs';
 import readline from 'node:readline';
 import { actor, openState } from './attempt.mjs';
 import { append, loadState } from './ledger.mjs';
@@ -97,7 +98,15 @@ export async function approveInTerminal(root, id, options, { input = process.std
   const choice = preset ? (typed === preset ? preset : null) : d.choices.find((c) => c === typed) ?? null;
   if (!choice) throw refuse(`not confirmed (typed ${JSON.stringify(typed)}); nothing recorded`, null, { id: 'approve:mismatch' });
   append(root, state.id, 'decision.approved', { id, choice, via: 'interactive-terminal (unverified)' }, actor(options));
+  noteAnswer(root, state, d, choice, null);
   return { state: loadState(root, state.id), decision: id, choice };
+}
+
+// 0.7.9 (D19): what the person answered when asked whether an item may leave a delivery, kept for the project (the
+// reviewers of later attempts see what this person fixes when they rate similar items; engine/learning.mjs).
+function noteAnswer(root, state, d, choice, words) {
+  if (d.kind !== 'move-out-of-batch' || !String(d.key ?? '').startsWith('leave:')) return;
+  noteLearned(root, { kind: 'answer', attempt: state.id, choice, ...(words ? { words } : {}), summary: d.summary ?? null });
 }
 
 // `wf approve <id> --from-question`: the answer the person gave in the calling session's question panel, as the harness
@@ -141,6 +150,7 @@ export async function approveFromQuestion(root, id, options, { env = process.env
   const words = choice ? null : String(last.answer).trim().slice(0, 2000);
   if (!choice && !words) throw refuse(`the person's answer to ${d.id} is empty; nothing recorded`, how, { id: 'approve:mismatch' });
   append(root, state.id, 'decision.approved', { id, choice: choice ?? 'other', ...(words ? { words } : {}), via: `question-panel (${host.label}, host-recorded)`, question: { text: last.question.slice(0, 2000), at: last.at, askedAt: last.askedAt } }, actor(options));
+  noteAnswer(root, state, d, choice ?? 'other', words);
   return { state: loadState(root, state.id), decision: id, choice: choice ?? 'other', words };
 }
 

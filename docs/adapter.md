@@ -70,6 +70,9 @@ leaving: { high: never, medium: never, low: person }
 severity:
   high: ["anything that changes a customer's invoice, tax document or payment"]
   low: ["wording on an internal admin screen"]
+# Optional (0.7.9, D19). Project learning: the classifier labels which lessons an attempt's findings repeat. Its model and
+# effort per runtime override the host's (Claude haiku, Codex gpt-6-luna, both low); `enabled: false` turns it off.
+learning: { classifier: { claude: { model: haiku, effort: low }, codex: { model: gpt-6-luna, effort: low } } }
 requires: { skills: [], connectors: [linear], tools: [{ name: docker, check: "docker info" }] }
 ```
 
@@ -116,4 +119,4 @@ A project whose adapter has no step with `artifacts` or a plugin cannot collect 
 
 `wf models refresh --attempt <id>` records the current committed tip of the admission adapter repo's configured base. Refreshing is bookkeeping: the owner agent records it as itself (0.7.0). A ticket config, uncommitted edit, arbitrary model/effort flag, unrelated commit or moved adapter location cannot provide execution settings.
 
-Future handoffs resolve model and effort from this separate execution pin: implementers keep their frozen work class, and other roles use their class mapping at the execution pin solely to select model/effort. The admission class, its use text, role instructions and appendices, criteria, gate, tracker, review rules, skills, the `leaving:` policy and the `severity:` examples stay frozen (a change to `leaving:` applies to attempts admitted after it). Existing handoffs retain their own execution pin; refresh requires a fresh handoff for new settings. `wf doctor --runtime codex --attempt <id>` reports the attempt pin as well as the current setup. Resume distinguishes unlaunched, running, failed and completed native reviewers.
+Future handoffs resolve model and effort from this separate execution pin: implementers keep their frozen work class, and other roles use their class mapping at the execution pin solely to select model/effort. The admission class, its use text, role instructions and appendices, criteria, gate, tracker, review rules, skills, the `leaving:` policy, the `severity:` examples and the `learning:` settings stay frozen (a change to `leaving:` or `learning:` applies to attempts admitted after it). Existing handoffs retain their own execution pin; refresh requires a fresh handoff for new settings. `wf doctor --runtime codex --attempt <id>` reports the attempt pin as well as the current setup. Resume distinguishes unlaunched, running, failed and completed native reviewers.

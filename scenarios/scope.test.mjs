@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { closureFile, commitIn, goodClosure, ok, OUT_OF_ORDER, planDoc, singleRepoProject, state, wf } from './helpers.mjs';
+import { outsidePlan, scopeFiles } from '../engine/scope.mjs';
 
 const plan = { plan: { summary: 's', anchors: ['src/a.txt:1 the text'], tests: { changed: ['test/a.test.js'] } }, criteria: [{ id: 'C1', text: 'a changes', uat: 'a shows the new text' }, { id: 'C2', text: 'audit read is logged', uat: false }] };
 const repos = [{ name: 'app', path: '.', base: 'main', packages: [{ path: '.', docsOnly: ['docs/**'] }] }];
@@ -71,4 +72,14 @@ test('outside the plan: a plan that names no paths requires nothing', () => {
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', id]));
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r')), '--attempt', id]));
   ok(wf(root, ['accept', '--attempt', id]));
+});
+
+// Named failure (I-129): anchors written `<repo>:<path>` matched nothing, and the files an accepted impact amendment brought
+// into scope stayed listed outside the plan, because only the first plan's anchors and tests were read.
+test('I-129: outside the plan reads repo-prefixed anchors and the scope accepted amendments add', () => {
+  const { root, id } = project('scope-prefixed', change, { ...plan, plan: { ...plan.plan, anchors: ['app:src/a.txt:1 the text', 'app:src/audit.txt the audit read'] } });
+  assert.match(ok(wf(root, ['status', '--attempt', id])).out, /warning: 1 changed file\(s\) outside the plan: app:\.gitignore — amend the criteria/);
+  const amended = { impact: { survey: { consumers: [{ id: 'S1', file: 'src/a.txt' }] }, addenda: [{ survey: { flows: [{ id: 'S9', file: 'app:.gitignore' }] } }] } };
+  assert.deepEqual(scopeFiles(amended), ['src/a.txt', 'app:.gitignore']);
+  assert.deepEqual(outsidePlan(plan.plan, { app: ['src/a.txt', '.gitignore', 'src/other.txt'] }, null, scopeFiles(amended)), ['app:src/other.txt']);
 });

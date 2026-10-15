@@ -31,3 +31,8 @@ and recommends comparing local evidence and ledgers before restoring the expecte
 
 Scenarios check first-write ordering, all four names, real macOS attributes, failure before payload creation,
 existing-folder preservation, link refusal, Git ignores including linked worktrees, and non-mutating doctor warnings.
+
+`.workflow-maintenance/learned.jsonl` (0.7.9, D19) is the project's learned record: append-only lines saying which lesson's
+mistake repeated, which lessons each attempt carried, which lessons describe one mistake, what the person answered when
+asked whether an item may leave, and what each delivered attempt predicted against what happened. It is local to the
+machine, never committed, and outlives the attempts' evidence; deleting it forgets the ranking, never a lesson.

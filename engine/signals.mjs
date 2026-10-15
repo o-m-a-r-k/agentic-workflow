@@ -14,7 +14,7 @@ import { ownerTranscript } from './host-record.mjs';
 import { home as hostHome } from './provenance.mjs';
 import { blockingOpen, observations, placementLevel, unreachedOf } from './review-policy.mjs';
 import { expectOf, readStatement } from './expectations.mjs';
-import { planPaths, scopeNoise } from './scope.mjs';
+import { planPaths, scopeFiles, scopeNoise } from './scope.mjs';
 import { findHost, optional, ownerString } from './hosts/index.mjs';
 import { canonical } from './util.mjs';
 import { readLedger } from './ledger.mjs';
@@ -80,7 +80,7 @@ function filesSignal(state, cfg) {
     changed += files.length;
   }
   // The files the frozen plan names (anchors and tests); null when it names none, so there is nothing to compare with.
-  const planned = state.plan ? planPaths(state.plan).length : 0;
+  const planned = state.plan ? planPaths(state.plan, scopeFiles(state)).length : 0;
   return { changed, planned: planned || null, perRepo };
 }
 

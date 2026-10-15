@@ -19,7 +19,8 @@ import { append, listAttempts, loadState, openEvidence } from './ledger.mjs';
 import { canonical, touchesEvidence } from './paths.mjs';
 import { openCount } from './improve.mjs';
 import { reviewDivisionSummary } from './review-groups.mjs';
-import { addLesson, applySnippet, exportPluginLessons, findLesson, isProjectWide, LESSON_FILE, lessonPrompts, lessonWarnings, loadLessons, moveLesson, recur, relevantLessons, reviewLessons, setLesson } from './lessons.mjs';
+import { addLesson, applySnippet, exportPluginLessons, findLesson, isProjectWide, LESSON_FILE, lessonPrompts, lessonWarnings, loadLessons, mergeLessons, mergeSuggestions, moveLesson, recur, relevantLessons, reviewLessons, setLesson, lessonKey, totalRecurrence } from './lessons.mjs';
+import { lessonStats } from './learning.mjs';
 import { LinkRefused, changesOf, ledgerEmpty, lostLedgers, rebaseline, releaseAttempt, seal, setVerifyLevel, unlockEvidence, verifyAttempt } from './evidence.mjs';
 import { acceptReview, amendCriteria, closeImplementer, designWarning, gateOrderCheck, batchCreate, batchEject, closeAfterHandoff, deliver, deliveredFiles, exportScreenshots, freezeCriteria, handoff, narrowDelivery, needsShown, nextAction, nextDecision, orphanNext, orphansOf, outsideWarning, recordReview, recordShown, reopen, screenshotsExportDir, shownDraftFile, uncovered, withAttempt } from './lifecycle.mjs';
 import { addDiscovered, channelOf, closeDiscovered, discoveredLine, openDiscovered, rateDiscovered } from './discovered.mjs';
@@ -62,6 +63,7 @@ Work
                                     by default only a low issue may wait, with the person's answer (one question per item)
   wf handoff planner|implementer|reviewer|tester --agent ID [--work W1] [--sweep F] [--session SID] [--runtime ${hostChoice()}]
                                     --sweep (optional): a fix handoff names a pattern sweep per family of open findings
+                                    --context "<text>" | --context-file F (planner): what the person asked, carried in its bundle
   wf handoff wait --agent ID [--minutes N]
                                     follow a launched role again; N: return after that many minutes since its launch
   wf handoff stop --agent ID [--reason "why"]
@@ -149,8 +151,8 @@ Work
   wf approve ID [--choice C]        the owner confirms a reserved decision in their own terminal
   wf approve ID --from-question     or the agent records the owner's answer from its question panel (as the harness recorded it);
                                     an answer in their own words is recorded as theirs (choice "other"), to follow
-  wf lesson add|waive|recur|set|apply|show|list|review|export
-                                    the project's lessons (.workflow/lessons/): capture, enforce, recurrence
+  wf lesson add|waive|recur|merge|move|set|apply|show|list|preview|review|export
+                                    the project's lessons (.workflow/lessons/): capture, enforce, recurrence, merge lessons that describe one mistake
   wf reopen --item ID --reason "feedback" [--no-lesson "why"]
   wf adopt [--attempt ID | --item ID] take over an open attempt as the current chat (an owner session active in the last
                                     30 minutes needs the owner's \`wf approve\`)
@@ -214,6 +216,15 @@ function summary(root, s, { base = null, resume = false } = {}) {
       lines.push(`  lessons: ${all.length} in the project (${by('enforced')} enforced, ${by('proposed')} proposed); this attempt: ${s.lessons?.recorded?.length ?? 0} recorded${s.lessons?.waived ? `, none needed ("${s.lessons.waived.reason}")` : ''}`);
     }
     for (const r of s.lessons?.recurred ?? []) lines.push(`  LESSON ${r.id} RECURRED (recurrence ${r.recurrence}): its mechanism failed${r.recurrence >= 2 ? '; `wf lesson review` proposes promoting it to a gate check' : ''}`);
+    // 0.7.9 (D19): what learning did for this attempt, and lessons that describe one mistake (a merge to make here).
+    const labelled = s.learning?.at(-1);
+    if (labelled?.error) lines.push(`  learning: the classifier (${labelled.model ?? labelled.runtime}) gave no labels at acceptance (${labelled.error.slice(0, 160)}); lesson ranking is unchanged`);
+    if (isOpen(s)) {
+      const held = new Set(Object.keys(s.repos));
+      const byId = new Map(all.map((l) => [l.id, l]));
+      const merges = mergeSuggestions(root, { state: s }).filter((g) => g.every((id) => held.has(byId.get(id)?.home)));
+      if (merges.length) lines.push(`  lessons describing one mistake (classifier): ${merges.map((g) => g.join(' + ')).join('; ')}: merge each into one lesson in this attempt (\`wf lesson merge <ids> --title "<the one mistake>" --attempt ${s.id}\`; reviewed and delivered with it)`);
+    }
     if (!['done', 'abandoned'].includes(s.phase)) for (const p of lessonPrompts(s)) lines.push(`  lesson: ${p}${/reopens/.test(p) ? '; a finding about the workflow itself is a plugin improvement instead: `wf improve add ...`' : ''}`);
     const inbox = openCount();
     if (inbox) lines.push(`  ${inbox} open plugin improvement(s) in the inbox (\`wf improve list\`)`);
@@ -372,7 +383,7 @@ export async function main(argv) {
 const FULL_VERIFY = new Set(['accept', 'deliver', 'verify', 'doctor', 'export']);
 
 const WRITE_OPTIONS = ['out', 'csv', 'handoffs-csv', 'html', 'dir', 'to', 'root'];
-const READ_OPTIONS = ['file', 'sweep', 'division', 'capture', 'explain', 'comments', 'summary-file', 'closure', 'issue-file', 'from', 'comment-file'];
+const READ_OPTIONS = ['file', 'sweep', 'division', 'capture', 'explain', 'comments', 'summary-file', 'closure', 'issue-file', 'from', 'comment-file', 'context-file'];
 const PATH_OPTIONS = [...WRITE_OPTIONS, ...READ_OPTIONS];
 const FOLDER_OPTIONS = new Set(['dir', 'to', 'root', 'from']);
 
@@ -965,7 +976,10 @@ async function dispatch(cmd, sub, positional, options) {
       const lp = lessonPrompts(s).filter((p) => p.startsWith('finding'));
       // I-69: scope the accepted round said it did not reach is said here too, not only in resume, export and the comment.
       const unreached = unreachedOf(s.review?.closure);
-      print(options, `review accepted.${unreached.length ? `\nnot reached by this review: ${unreached.join('; ')}` : ''}${lp.map((p) => `\nlesson: ${p}`).join('')} next: ${nextAction(root, s)}`, s);
+      // 0.7.9 (D19): what the classifier learned from this attempt's findings.
+      const labelled = s.learning?.at(-1);
+      const learnedLine = labelled && !labelled.error ? Object.entries(labelled.findings ?? {}).filter(([, l]) => l && l !== 'none').map(([ref, l]) => `${ref} repeats ${l}`) : [];
+      print(options, `review accepted.${unreached.length ? `\nnot reached by this review: ${unreached.join('; ')}` : ''}${lp.map((p) => `\nlesson: ${p}`).join('')}${learnedLine.length ? `\nlearned: ${learnedLine.join('; ')} (counted as recurrences; lessons rank by them)` : ''} next: ${nextAction(root, s)}`, s);
       return 0;
     }
     case 'deliver': {
@@ -1189,7 +1203,8 @@ async function dispatch(cmd, sub, positional, options) {
     case 'lessons': {
       const { actor } = await import('./attempt.mjs');
       const cfg = loadConfig(root);
-      const show = (l) => `${l.id}  ${l.scope === 'project' ? `project, in ${l.home}` : l.repo} (${l.where})  [${l.status}, ${l.cause}, ${l.mechanism?.kind}${l.mechanism?.ref ? ` ${l.mechanism.ref}` : ''}] recurrence ${l.recurrence}  ${l.title}`;
+      const stats = lessonStats(root);
+      const show = (l) => `${l.id}  ${l.scope === 'project' ? `project, in ${l.home}` : l.repo} (${l.where})  [${l.status}, ${l.cause}, ${l.mechanism?.kind}${l.mechanism?.ref ? ` ${l.mechanism.ref}` : ''}${l.mergedInto ? `, merged into ${l.mergedInto}` : ''}] recurrence ${totalRecurrence(l, stats)}${stats.get(lessonKey(l))?.lastRepeatAt ? ` (last ${stats.get(lessonKey(l)).lastRepeatAt.slice(0, 10)})` : ''}  ${l.title}`;
       if (sub === 'add') {
         if (options.attempt) openState(root, options);
         const r = addLesson(root, options, actor(options));
@@ -1210,6 +1225,13 @@ async function dispatch(cmd, sub, positional, options) {
         append(root, s.id, 'lesson.waived', { reason, on: 'waive' }, actor(options));
         const after = closeAfterHandoff(root, loadState(root, s.id));
         print(options, `no lesson for ${s.id}: "${reason}" (recorded)${after.phase === 'done' ? `\n${s.id} closed.` : `\nnext: ${nextAction(root, after)}`}`);
+        return 0;
+      }
+      if (sub === 'merge') {
+        if (positional.length < 2) throw new WfError('usage: wf lesson merge <id> <id>... --title "<the one mistake>" --attempt <id> [--what "..."] [--cause <class>] [--mechanism <kind>]');
+        const s = openState(root, options);
+        const r = mergeLessons(root, positional, { ...options, attempt: s.id }, actor(options));
+        print(options, `lessons ${r.merged.join(', ')} merged into ${r.lesson.id} (recurrence ${r.lesson.recurrence}): ${r.lesson.title}\n  ${r.file} (committed in ${s.id}; the members are retired there, and stop applying once it is delivered)`, r);
         return 0;
       }
       if (sub === 'recur') {
@@ -1289,7 +1311,7 @@ async function dispatch(cmd, sub, positional, options) {
         print(options, `${all.length ? all.map(show).join('\n') : `no lessons yet (${path.join('.workflow', 'lessons')})`}${warn}`, all);
         return 0;
       }
-      throw new WfError('usage: wf lesson add|waive|recur|move|set|apply|show|list|preview|review|export');
+      throw new WfError('usage: wf lesson add|waive|recur|merge|move|set|apply|show|list|preview|review|export');
     }
     case 'evidence': {
       // I-16: read-only access to an attempt's evidence, so no shell command needs the folder's name.

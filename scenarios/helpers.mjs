@@ -36,6 +36,20 @@ export function sh(cwd, cmd) {
   return r.stdout.trim();
 }
 
+// The person's own user-level state (the refusal log, the improvements inbox, the project registry, gate leases) is
+// never a scenario's: a command a test spawns with a copy of process.env inherits this test-file process's private
+// folders. Named failure (I-131): one scenario's runs wrote 138 refusals from temporary projects into the person's log, which
+// `wf refusals` and plugin triage then read as real use. Spawns that name their own folders still override these.
+{
+  const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'wf-user-state-'));
+  process.once('exit', () => fs.rmSync(dir, { recursive: true, force: true }));
+  process.env.WF_IMPROVEMENTS_DIR = path.join(dir, 'improvements');
+  process.env.WF_CONFIG_HOME = path.join(dir, 'config');
+  // No scenario calls a real model: the learning classifier (engine/learning.mjs) runs only where a scenario turns it on
+  // with a fake runtime on PATH.
+  process.env.WF_LEARNING = 'off';
+}
+
 // Node's on-disk compile cache for the `wf` processes this test file starts (keyed by source hash, so an edited engine
 // file is compiled afresh). Named cost: a scenario run starts some 3,000 of them, each compiling the whole engine
 // (about 8ms). The cache is code the engine runs, so it is never at a path anyone else can predict or pre-create: a

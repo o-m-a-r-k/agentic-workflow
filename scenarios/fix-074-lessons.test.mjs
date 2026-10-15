@@ -415,7 +415,9 @@ test('I-49: a lesson written with bare CR line endings is read back by the comma
   ok(wf(root, ['lesson', 'set', 'L-1', '--status', 'enforced', '--ref', 'table-has-pagination']));
   const after = fs.readFileSync(lessonFile(root, 'L-1'), 'utf8');
   assert.ok(!after.includes('\n'));
-  assert.equal(readBack(after).recurrence, 1);
+  // I-130 (0.7.9): a recurrence is learned, never written into the file; `set` rewrites it in its layout.
+  assert.equal(readBack(after).recurrence, 0);
+  assert.match(ok(wf(root, ['lesson', 'list'])).out, /^L-1 {2}app \(main\) .*recurrence 1/m);
   assert.equal(readBack(after).status, 'enforced');
 });
 
@@ -480,7 +482,7 @@ test('I-49: a config form that cannot be read statically stops the search; a new
 
 // Named failure (I-49): `recur`, `set` and `move` re-serialise the whole file, so a manual `prettier --write` was undone by the
 // next command. The file is laid out for the config again; where the config is not readable, the file keeps its own layout.
-test('I-49: recur, set and move write the layout the config asks for; where the config is unreadable the file keeps its own', () => {
+test('I-49: set and move write the layout the config asks for; where the config is unreadable the file keeps its own', () => {
   const { root } = singleRepoProject('fix074-rewrite', { gate: { steps } }, { '.prettierrc': '{"tabWidth": 4, "singleQuote": true, "endOfLine": "crlf"}\n' });
   addLong(root, 'L-1');
   ok(wf(root, ['lesson', 'recur', 'L-1']));
@@ -488,7 +490,7 @@ test('I-49: recur, set and move write the layout the config asks for; where the 
   const text = fs.readFileSync(lessonFile(root, 'L-1'), 'utf8');
   assert.deepEqual(layoutProblems(text, { tabWidth: 4, singleQuote: true, endOfLine: 'crlf' }), []);
   const parsed = YAML.parse(text);
-  assert.equal(parsed.recurrence, 1);
+  assert.equal(parsed.recurrence, 0, 'I-130: a recurrence is learned, never written into the file');
   assert.equal(parsed.status, 'enforced');
   assert.equal(parsed.trigger.what, WORDS.what);
 
@@ -507,11 +509,12 @@ test('I-49: recur, set and move write the layout the config asks for; where the 
   fs.mkdirSync(path.dirname(lessonFile(own.root, 'L-1')), { recursive: true });
   fs.writeFileSync(lessonFile(own.root, 'L-1'), YAML.stringify(seed, { indent: 4, singleQuote: true, lineWidth: 0 }).replace(/\n/g, '\r\n'));
   sh(own.root, 'git add -A && git commit -q -m "lesson formatted by the project"');
-  ok(wf(own.root, ['lesson', 'recur', 'L-1']));
+  // A rewrite (I-130, 0.7.9: `set`; a recurrence no longer writes the file) keeps the file's own layout.
+  ok(wf(own.root, ['lesson', 'set', 'L-1', '--status', 'enforced', '--ref', 'table-has-pagination']));
   const kept = fs.readFileSync(lessonFile(own.root, 'L-1'), 'utf8');
   assert.deepEqual(layoutProblems(kept, { tabWidth: 4, singleQuote: true, endOfLine: 'crlf' }), []);
   assert.match(kept, /^ {4}what: 'a raw table shipped: no reviewer caught it'\r$/m);
-  assert.equal(YAML.parse(kept).recurrence, 1);
+  assert.equal(YAML.parse(kept).status, 'enforced');
   ok(add(own.root, lessonArgs('A new lesson', 'a raw table shipped: no reviewer caught it')));
   assert.deepEqual(layoutProblems(fs.readFileSync(lessonFile(own.root, 'L-2'), 'utf8')), [], 'a new lesson in the defaults');
 

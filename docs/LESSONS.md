@@ -182,8 +182,36 @@ here can match it.
   flagged "regression of I-n fixed in X" and goes first. A retired item never makes a regression.
 - **Visibility**: counts in `wf status` and `wf doctor`.
 
+## Learning (0.7.9, D19)
+
+Named failure: one project had 70 lessons, all `proposed`, 16 recurred and none ever curated. Counting waited for a
+reviewer to volunteer a verdict, and merging, promoting and retiring waited for a person; the lessons were narrow (one
+per ticket), so a mistake that kept coming back was spread over near-copies.
+
+- **At review acceptance** a classifier labels what the attempt taught: each finding any round raised gets the lesson
+  whose mistake it repeats (or none), and each lesson the attempt recorded, and each lesson never compared before, gets
+  another lesson that describes the same mistake (or none). The classifier is a cheap model with no tools, given fixed
+  choices: Claude `haiku` and Codex `gpt-6-luna` by default, pinned per runtime in the adapter's `learning.classifier`.
+  `wf review accept` says what it learned; a classifier that fails is one line in `wf status`, never a failed acceptance.
+- **A repeat is the lesson's recurrence**, once per lesson per attempt, recorded on the attempt and in the project's
+  learned record (`.workflow-maintenance/learned.jsonl`, git-excluded). A recurrence is never written into the lesson
+  file any more (I-130): the file keeps the count it was committed with, and `wf lesson list` shows both together.
+- **Bundles rank by evidence**: the lesson whose mistake repeated most recently first, then the one that repeated most,
+  then the one carried in the fewest attempts. Only enforced lessons pass the cap; a quiet lesson falls below it and
+  comes back the next time its mistake does.
+- **Lessons that describe one mistake become one lesson**: `wf resume` names them, and the owner merges them in an open
+  attempt with `wf lesson merge <ids> --title "<the one mistake>" --attempt <id>`. The merged lesson carries the members'
+  scope and recurrences; the members are retired with `mergedInto`. It is committed in the attempt, reviewed and delivered
+  with it, and `git revert` undoes it.
+- **The person's answers**: what they chose to fix when asked whether an item could leave (and their own words) reaches
+  later reviewers as `severityScale.personFixed`, examples to rate by, never a rule.
+- **Estimates**: each delivered attempt's prediction beside what happened reaches later planners and strategists as
+  `pastEstimates` (per lane, median actual over predicted); never an implementer's or a reviewer's (D9).
+
 ## Deliberately left out
 
-- No automatic edits of the adapter, instruction files or templates; no auto-filed issues; nothing posted.
-- No similarity scoring beyond tags, mechanism kind and title words; no embedding or free-text matching.
-- No per-lesson metrics beyond the recurrence counter and the injection history the ledgers already hold.
+- No automatic edits of the adapter, instruction files or templates; no auto-filed issues; nothing posted. A lesson
+  merge is the owner's, inside an attempt.
+- Nothing learned asks the person, stops, refuses, lowers a rating, or changes who lets an item leave.
+- No similarity scoring in the engine itself: matching a finding or a lesson to a lesson is the classifier's label,
+  recorded with the model that gave it.

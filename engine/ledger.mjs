@@ -266,6 +266,9 @@ export function reduce(entries) {
         if (!s.owners.includes(e.actor)) s.owners.push(e.actor);
         break;
       case 'criteria.frozen':
+        // A second freeze re-plans an analysis attempt upgraded to implementation (I-127): it replaces the first.
+        s.plansFrozen = (s.plansFrozen ?? 0) + 1;
+        s.planFrozenAt = e.at;
         s.criteria = d.criteria;
         s.criteriaAtFreeze = d.criteria?.length ?? null;
         s.plan = d.plan ?? null;
@@ -501,6 +504,14 @@ export function reduce(entries) {
         break;
       case 'lesson.recurred':
         (s.lessons ??= { recorded: [], waived: null, recurred: [] }).recurred.push({ id: d.id, recurrence: d.recurrence, why: d.why ?? null, at: e.at });
+        break;
+      // 0.7.9 (D19): the classifier's labels at acceptance (findings and lessons to the lesson describing the same mistake),
+      // and lessons merged into one in this attempt.
+      case 'lessons.labelled':
+        (s.learning ??= []).push({ ...d, at: e.at });
+        break;
+      case 'lesson.merged':
+        ((s.lessons ??= { recorded: [], waived: null, recurred: [] }).merged ??= []).push({ id: d.id, merged: d.merged ?? [], at: e.at, by: e.actor });
         break;
       // The discovered-issue ledger (I-18): every issue found during the ticket, fixed or deferred in the owner's words.
       case 'discovered.added':

@@ -19,11 +19,13 @@ import { ADAPTER_DIR, adapterFileAtCommit, agentTypeFor, attemptAdapter, declare
 import { focusedSkips, gateBusy, gatePassedForCurrentTree, gateRunningRefusal, screenshots, withReviewLock } from './gate.mjs';
 import { append, attemptDir, evidenceRoot, keptFiles, listAttempts, loadState, openEvidence, recordedTogether } from './ledger.mjs';
 import { assertUnchanged, readEvidenceFile, seal } from './evidence.mjs';
-import { implementerAcks, lessonPrompts, lessonVerdicts, owesLesson, recur, relevantLessons } from './lessons.mjs';
+import { implementerAcks, learnFromReview, lessonPrompts, lessonVerdicts, owesLesson, recur, relevantLessons } from './lessons.mjs';
+import { noteLearned, pastCourse, personFixed } from './learning.mjs';
+import { computeSignals } from './signals.mjs';
 import { canonical as canonicalPath, isInside, touchesEvidence } from './paths.mjs';
 import { changedForStep, deliveryOrder, impact, inside, packageOf } from './topology.mjs';
 import { findSkill } from './skills.mjs';
-import { outsidePlan, outsideVerdicts } from './scope.mjs';
+import { outsidePlan, outsideVerdicts, scopeFiles } from './scope.mjs';
 import { commentFile, emitTrackerEvent, needsSummary, recordSummary, writeDeliveredComment } from './tracker.mjs';
 import { designChecks, designVerdicts, requiredSkills, reviewDocumentProblems, reviewRules, ruleVerdicts, skillFiles, writeRuleDocuments } from './rules.mjs';
 import { expectOf, expectProblems, PLAN_EXPECT, ROLE_EXPECT } from './expectations.mjs';
@@ -58,7 +60,7 @@ export function outsideFiles(root, state) {
       return [r, []];
     }
   }));
-  return outsidePlan(state.plan, changed, trusted);
+  return outsidePlan(state.plan, changed, trusted, scopeFiles(state));
 }
 
 // The owner's warning before a review: amend the criteria for an intentional change, or fix it. Never a refusal.
@@ -221,13 +223,31 @@ function validateWork(cfg, work, criteria) {
   return out;
 }
 
+// I-127: the owner's context for a planner (`--context "<text>"` or `--context-file <file>`), or null.
+function contextOf(role, options) {
+  const given = options.context !== undefined || options['context-file'] !== undefined;
+  if (!given) return null;
+  if (role !== 'planner') throw new WfError('--context is for a planner handoff: the other roles work from the frozen criteria and the plan');
+  if (options.context !== undefined && options['context-file'] !== undefined) throw new WfError('pass --context or --context-file, not both');
+  const text = String(options['context-file'] !== undefined ? readOnce(options['context-file']) : options.context === true ? '' : options.context).trim();
+  if (!text) throw new WfError('--context needs the text the planner should know');
+  return text;
+}
+
+// I-127: an attempt upgraded from analysis to implementation after its plan was frozen, no implementer handed yet.
+export const replanAfterUpgrade = (state) => Boolean(state.criteria) && (state.intentChanges ?? []).some((c) => c.to === 'implementation' && (!state.planFrozenAt || c.at > state.planFrozenAt)) && !(state.handoffs ?? []).some((h) => h.role === 'implementer');
+
 // Criteria no work item covers. Shown to the owner, never refused.
 export const uncovered = (state) => (state.work ? (state.criteria ?? []).map((c) => c.id).filter((id) => !state.work.some((w) => w.criteria.includes(id))) : []);
 
 export function freezeCriteria(root, options) {
   const state = openState(root, options);
   const cfg = trustedAdapter(root, state);
-  if (state.criteria) throw refuse('criteria are already frozen', 'change them with `wf criteria amend --file <f> --reason <why>`');
+  // Named failure (I-127): an analysis attempt upgraded to implementation kept the plan written for the analysis. Its fresh
+  // planners could only amend criteria (an amendment carries no plan), so their implementation plans never reached a
+  // bundle and they wrote documentation plans again. Until the first implementer is handed, the plan of an attempt upgraded
+  // after it was frozen is replaced whole by `wf plan`.
+  if (state.criteria && !replanAfterUpgrade(state)) throw refuse('criteria are already frozen', `change them with \`wf criteria amend --file <f> --reason <why>\`${(state.intentChanges ?? []).length ? '; a plan is replaced whole only after an upgrade to implementation and before the first implementer' : ''}`);
   if (typeof options.file !== 'string' && typeof options['from-agent'] !== 'string') throw new WfError('--file <plan.yaml|json> or --from-agent <planner agent id> is required');
   if (typeof options.file === 'string' && typeof options['from-agent'] === 'string') throw new WfError('pass --file or --from-agent, not both');
   let fromAgent = null, fileText = null, doc, plan, work, impactRecord;
@@ -292,10 +312,10 @@ export function freezeCriteria(root, options) {
   if (!fromAgent) model = planner ? optional(findHost(planner.runtime), 'roleModel')?.(planner, { home: home() }) ?? null : null;
   recordedTogether(root, state.id, () => {
     let source;
-    if (fromAgent) source = { ...fromAgent.source, ...keepRaw(root, state.id, 'plans/plan-1.raw.yaml', fromAgent.text) };
+    if (fromAgent) source = { ...fromAgent.source, ...keepRaw(root, state.id, `plans/plan-${(state.plansFrozen ?? 0) + 1}.raw.yaml`, fromAgent.text) };
     else {
       const from = path.resolve(String(options.file));
-      source = { ...keepRaw(root, state.id, `plans/plan-1.raw.${extOf(from)}`, fileText), from, agent: planner?.agent ?? null, model };
+      source = { ...keepRaw(root, state.id, `plans/plan-${(state.plansFrozen ?? 0) + 1}.raw.${extOf(from)}`, fileText), from, agent: planner?.agent ?? null, model };
     }
     append(root, state.id, 'criteria.frozen', { criteria: doc.criteria, plan, source, ...(work ? { work } : {}), ...(impactRecord ? { impact: impactRecord } : {}) }, actor(options));
   });
@@ -356,12 +376,18 @@ export function scopeOf(scope) {
   return out;
 }
 
+// What an amendment file applies (docs/lifecycle.md, "Amendments").
+const AMEND_FIELDS = ['criteria', 'expect', 'impact', 'scope', 'work'];
 export function amendCriteria(root, options) {
   const state = openState(root, options);
   if (!state.criteria) throw refuse('criteria are not frozen yet; use `wf plan`');
   if (!options.reason || options.reason === true) throw new WfError('--reason is required (say why the criteria change)');
   const amendText = readOnce(options.file);
   const doc = parseStructured(options.file, amendText);
+  // Named failure (I-127): an amendment carrying only `plan.summary` was accepted, changed nothing and reached no bundle, so
+  // the owner believed the planner's new plan was recorded. A field no amendment applies is refused with where it goes.
+  const ignored = doc && typeof doc === 'object' ? Object.keys(doc).filter((k) => !AMEND_FIELDS.includes(k)) : [];
+  if (ignored.length && obligationSince(state, '0.7.9')) throw refuse(`the amendment carries ${ignored.map((k) => `\`${k}\``).join(', ')}, which no amendment applies: an amendment changes ${AMEND_FIELDS.map((k) => `\`${k}\``).join(', ')} only`, `${replanAfterUpgrade(state) ? `this attempt was upgraded to implementation after its plan was frozen: record the planner's whole plan with \`wf plan --from-agent <planner id> --attempt ${state.id}\` (it replaces the analysis plan); ` : ''}to tell the next planner something, hand it with \`wf handoff planner --agent <id> --context "<what the person asked>"\`; remove the other fields and amend again`, { id: 'amend:ignored-fields' });
   // An amendment may carry only an impact update (I-26): the criteria then stay as frozen.
   const stated = doc?.expect;
   const expectIssues = expectProblems(stated, PLAN_EXPECT, 'expect');
@@ -608,6 +634,7 @@ export function handoff(root, role, options) {
   const runtimeAuthority = preferred && runtime !== preferred ? { runtime, from: preferred, by: actor(options) } : null;
 
   const selected = ['planner', 'implementer', 'reviewer'].includes(role) && !(role === 'reviewer' && mode === 'delta') ? relevantLessons(root, role, state, changed, { work }) : null;
+  const ownerContext = contextOf(role, options);
   // Trusted copies of the rule documents the bundle lists: collected while it is built, written when it is recorded.
   const ruleDocs = [];
   const n = state.handoffs.length + 1;
@@ -634,6 +661,13 @@ export function handoff(root, role, options) {
     bases: Object.fromEntries(Object.entries(state.repos).map(([k, v]) => [k, git(v.worktree, ['merge-base', v.baseRef ?? v.base, 'HEAD'], { allowFail: true }) || v.base])),
     // What the planner (and every role) reads first: the issue as captured at entry and from the tracker.
     issue: { file: state.issue?.file ?? null, trackerCaptures: state.tracker.done.map((d) => d.capture?.path).filter(Boolean) },
+    // I-127: what this attempt is for now, and why it changed: a planner handed after an analysis attempt was upgraded to
+    // implementation plans the implementation (and, before the first implementer, its plan replaces the analysis one).
+    intent: role === 'planner' ? state.intent : undefined,
+    intentChanges: role === 'planner' && (state.intentChanges ?? []).length ? state.intentChanges.map(({ from, to, reason, at }) => ({ from, to, reason, at })) : undefined,
+    replacesPlan: role === 'planner' && replanAfterUpgrade(state) ? 'this attempt was upgraded to implementation after its plan was frozen: write the whole implementation plan; recorded with `wf plan`, it replaces the analysis plan' : undefined,
+    // I-127: what the owner was asked to carry to the planner (the person's words, a decision), recorded with the handoff.
+    ownerContext: ownerContext ?? undefined,
     criteria: state.criteria,
     // The planner's `expect` is a prediction for the owner and the strategist to compare, not a target: an implementer or a
     // reviewer reading it would build or judge toward a number.
@@ -704,7 +738,10 @@ export function handoff(root, role, options) {
     // The project's quality bar (adapter `quality:`): standing goals, context for every role (0.7.0).
     qualityBar: ['planner', 'implementer', 'reviewer'].includes(role) ? trusted.quality ?? [] : undefined,
     // 0.7.8 (D18): the project's own examples added to each severity level, and who lets each level leave a delivery.
-    severityScale: ['planner', 'implementer', 'reviewer', 'strategist'].includes(role) ? { projectExamples: trusted.severity ?? null, leaving: policyOf(trusted) } : undefined,
+    severityScale: ['planner', 'implementer', 'reviewer', 'strategist'].includes(role) ? { projectExamples: trusted.severity ?? null, leaving: policyOf(trusted), ...(role === 'reviewer' ? personFixedOf(root) : {}) } : undefined,
+    // 0.7.9 (D19): how this project's plans predicted against what happened, per lane, for the planner's own estimate. A
+    // prediction for the owner and the strategist, never a target (D9), so no other role sees it.
+    pastEstimates: role === 'planner' ? pastCourse(root) ?? undefined : undefined,
     // Project rule documents this change falls under, and the skills this round needs: a pure function of the adapter
     // at base and the changed files, the same for every reviewer. Context for the review; no verdict form is owed.
     rules: role === 'reviewer' && mode === 'full' ? reviewRules(root, trusted, state, changed, ruleDocs) : undefined,
@@ -722,7 +759,7 @@ export function handoff(root, role, options) {
     skills: role === 'reviewer' && mode === 'full' ? skillFiles(root, requiredSkills(trusted, role, state, changed), runtime) : undefined,
     // Changed files no plan anchor or test path names (docs-only, ignored and evidence files left out): context for the
     // reviewer, who judges whether each serves the goal.
-    outsidePlan: state.criteria && !(role === 'reviewer' && mode === 'delta') ? outsidePlan(state.plan, changed, trusted) : null,
+    outsidePlan: state.criteria && !(role === 'reviewer' && mode === 'delta') ? outsidePlan(state.plan, changed, trusted, scopeFiles(state)) : null,
     // 0.7.0: information, not a stop. Named failure (I-25) behind the old refusal: consumers were found one at a time.
     impactOwed: role === 'implementer' && state.impact?.owed ? { amendment: state.impact.owed.amendment, reason: state.impact.owed.reason, note: 'this amendment added scope without an impact map: find the consumers and flows it reaches as you build, and report them' } : undefined,
     // The implementer's definition of done: these light steps pass for its repos (`wf check`). Never counts as a gate.
@@ -821,7 +858,9 @@ export function handoff(root, role, options) {
     const openImplementers = role === 'reviewer' ? state.implementers.filter((x) => !x.closedAt).map((x) => x.agent) : undefined;
     // The owner handed the tree while an implementer was open (I-23): recorded before the round it opens.
     if (reviewOverride) append(root, state.id, 'review.override', { ...reviewOverride, agent }, actor(options));
-    append(root, state.id, 'handoff', { ...(runtimeAuthority ? { runtimeAuthority, runtimeSelected: true, runtimeSelectionOwner: owner } : {}), ...(sweeps ? { sweeps } : {}), lessons: (bundle.lessons?.apply ?? []).map((l) => l.id), lessonsFiltered: (selected?.filtered ?? []).map((l) => l.id), role, agent, runtime, session: options.session ?? null, agentType, class: cls, effort, model, sourceClass, runtimeAdapterBase, sessionModel: sessionModelNow, startPrompt: startPromptFor(file), work: work?.id ?? null, ...(covers ? { covers } : {}), bundle: file, ...(bundle.implementerReportFile ? { reportFile: bundle.implementerReportFile } : {}), ...(bundle.reviewClosureFile ? { closureFile: bundle.reviewClosureFile } : {}), tree, patch: patchIds(state), ...(role === 'reviewer' ? { gate: gateNow.ok ? state.lastGate.runId : null, round: bundle.round, mode, ...(deltaFrom ? { deltaFrom } : {}), openImplementers } : {}) }, actor(options));
+    append(root, state.id, 'handoff', { ...(runtimeAuthority ? { runtimeAuthority, runtimeSelected: true, runtimeSelectionOwner: owner } : {}), ...(sweeps ? { sweeps } : {}), lessons: (bundle.lessons?.apply ?? []).map((l) => l.id), lessonsFiltered: (selected?.filtered ?? []).map((l) => l.id), ...(ownerContext ? { context: ownerContext } : {}), role, agent, runtime, session: options.session ?? null, agentType, class: cls, effort, model, sourceClass, runtimeAdapterBase, sessionModel: sessionModelNow, startPrompt: startPromptFor(file), work: work?.id ?? null, ...(covers ? { covers } : {}), bundle: file, ...(bundle.implementerReportFile ? { reportFile: bundle.implementerReportFile } : {}), ...(bundle.reviewClosureFile ? { closureFile: bundle.reviewClosureFile } : {}), tree, patch: patchIds(state), ...(role === 'reviewer' ? { gate: gateNow.ok ? state.lastGate.runId : null, round: bundle.round, mode, ...(deltaFrom ? { deltaFrom } : {}), openImplementers } : {}) }, actor(options));
+    // 0.7.9 (D19): which lessons this handoff carried, so a lesson carried often whose mistake never came back ranks lower.
+    if (selected?.keys?.length) noteLearned(root, { kind: 'injected', lessons: selected.keys, attempt: state.id, role });
     if (role === 'implementer') append(root, state.id, 'implementer.opened', { handoff: handoffId(file), agent, work: work?.id ?? null, class: cls, heads: tree }, actor(options));
   };
   // The model the owner's session runs on now: an agent whose class pins no model inherits it (`wf report` shows it).
@@ -1525,6 +1564,11 @@ export function acceptReview(root, options) {
   // A lesson the change did not comply with recurred: its mechanism failed (once per lesson per attempt).
   const already = new Set((state.lessons?.recurred ?? []).map((x) => x.id));
   for (const v of lv.verdicts) if (v.verdict === 'finding' && !already.has(v.lesson)) recur(root, v.lesson, state.id, actor(options), `review finding ${v.finding}`);
+  // 0.7.9 (D19): the classifier labels which lessons this attempt's findings repeat. Best effort: learning never fails an
+  // acceptance.
+  try {
+    learnFromReview(root, loadState(root, state.id), actor(options));
+  } catch {}
   return loadState(root, state.id);
 }
 
@@ -1865,6 +1909,23 @@ export async function deliver(root, options) {
   return { state: loadState(root, state.id) };
 }
 
+// 0.7.9 (D19): what the person chose to fix when asked whether an item may leave, for the reviewer rating similar items.
+function personFixedOf(root) {
+  const fixed = personFixed(root);
+  return fixed.length ? { personFixed: fixed } : {};
+}
+
+// 0.7.9 (D19): a delivered attempt's plan prediction beside what happened, kept for the next planners of the project
+// (engine/learning.mjs pastCourse). Minutes leave out the longest stretch with nothing recorded (a night, a wait).
+function noteCourse(root, cfg, state) {
+  if (!state.expect) return;
+  try {
+    const sig = computeSignals(root, state, { cfg });
+    const minutes = typeof sig.wallMinutes === 'number' ? Math.max(0, Math.round(sig.wallMinutes - (sig.longestQuietMinutes ?? 0))) : null;
+    noteLearned(root, { kind: 'course', attempt: state.id, lane: state.lane ?? null, expected: state.expect, actual: { files: sig.files?.changed ?? null, rounds: sig.rounds?.length ?? null, minutes } });
+  } catch {}
+}
+
 // ---- Delivered screenshots: shown to the owner in the chat, attached to the ticket as uploaded files ----
 // Named failure: the owner session was told only "show the user every delivered screenshot", so whether the owner saw
 // them, and what each one showed, existed nowhere; a link attachment or an earlier attempt's file with the same name
@@ -1972,6 +2033,7 @@ export function safeWrite(root, file, content) {
 export const safeWriteJson = (root, file, value) => safeWrite(root, file, `${JSON.stringify(value, null, 2)}\n`);
 
 function finishDelivered(root, cfg, state) {
+  noteCourse(root, cfg, state);
   if (state.lane !== 'batch') {
     const set = deliveredSet(root, state);
     const none = set.length ? null : noScreenshotsReason(root, state);

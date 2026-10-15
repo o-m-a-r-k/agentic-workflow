@@ -1,4 +1,5 @@
 import { mkdirStateDirectory } from './state-folders.mjs';
+import { checkedLessons, classifierFor, classify, lessonStats, noteLearned, sameMistakes } from './learning.mjs';
 // Lessons: each project's learning path (docs/LESSONS.md). Capture, apply, inject, acknowledge, feedback, export. The
 // engine never edits the adapter or an instruction file to enforce a lesson: it prints what to add, and the owner
 // commits it.
@@ -19,6 +20,9 @@ import { formatLesson, lessonStyle } from './lessons-format.mjs';
 import { componentsOf } from './topology.mjs';
 import { WfError, YAML, git, matchesAny, now, refuse } from './util.mjs';
 import { obligationSince } from './versions.mjs';
+import { recordedRoundsOf, refOf } from './review-policy.mjs';
+import { defaultRuntime } from './runtime-policy.mjs';
+import { defaultHostId } from './hosts/index.mjs';
 
 export const CAUSES = ['process', 'tooling', 'criteria', 'review', 'test', 'design-system', 'other'];
 export const MECHANISMS = ['review-rule', 'designSystem-rule', 'planner-criterion-template', 'reviewer-checklist', 'gate-check', 'engine-change', 'doc'];
@@ -29,7 +33,7 @@ const STATUSES = ['proposed', 'enforced', 'retired'];
 const SCOPES = ['repo', 'project'];
 // Finding categories that mean "the way we work let this through": each prompts a lesson.
 export const LESSON_CATEGORIES = new Set(['process', 'tooling', 'criteria', 'review', 'test', 'design-system', 'precedent-only']);
-// At most this many advisory lessons per bundle; enforced and recurring lessons are never dropped by the cap.
+// At most this many advisory lessons per bundle; enforced lessons are never dropped by the cap (0.7.9: the rest are ranked by evidence).
 export const CAP = 5;
 
 const LESSONS_REL = path.join(ADAPTER_DIR, 'lessons');
@@ -374,25 +378,26 @@ export function addLesson(root, options, actorId) {
   return { lesson: l, file, recurred: flagged, inAttempt: Boolean(target.attempt), repo: home, scope: l.scope };
 }
 
-// The lesson's mechanism failed: it happened again.
+// The lesson's mechanism failed: it happened again. Recorded on the attempt (`lesson.recurred`) and in the project's learned
+// record (engine/learning.mjs), never in the lesson's file: the file's `recurrence` is the count it was committed with.
+// Named failure (I-130): a recurrence found at acceptance wrote the lesson file of the pull-only main checkout
+// (`targetFor` answers `accepted` or `finished` then), the I-99 class the earlier ledger-only exceptions only narrowed;
+// and the ledgers that held the rest are cleaned away with their evidence, so nothing remembered which lesson repeated.
 export function recur(root, id, attempt, actorId, why) {
   const state = attempt ? loadState(root, String(attempt)) : null;
   const l = findLesson(loadLessons(root, { state }), id);
   if (!l) throw refuse(`no lesson ${id}`);
-  l.recurrence = (l.recurrence ?? 0) + 1;
-  // A shipped lesson's recurrence is recorded on the attempt only: it is never copied into a project.
-  // Named failure (I-99 class): a lesson this attempt itself added lives in its worktree and is delivered from there; with the
-  // acceptance standing (a reviewer's `finding` verdict counts as a recurrence right after it) the recurrence was written as a
-  // second, untracked copy into the main checkout, which the delivered file then collided with. The ledger records the
-  // recurrence (`lesson.recurred`); the file in the delivered tree is the one the attempt reviewed.
-  const target = targetFor(root, loadConfig(root), l.home, state);
-  // A recurrence for a lesson of a repo the attempt did not admit is recorded on the attempt only, too: writing it would change a
-  // tracked file of that repo's pull-only main checkout (independent review of 0.7.4).
-  const ledgerOnly = (target.why === 'accepted' && l.where === 'attempt') || (target.why === 'not-admitted' && obligationSince(state, '0.7.4'));
-  if (!ledgerOnly) writeLesson(target, l, { message: `Lesson ${l.id} recurred (${l.recurrence})` });
-  if (attempt) append(root, String(attempt), 'lesson.recurred', { id, recurrence: l.recurrence, why }, actorId);
-  return { id, recurrence: l.recurrence, promote: l.recurrence >= 2 && l.mechanism?.kind !== 'gate-check' };
+  noteLearned(root, { kind: 'repeat', lesson: lessonKey(l), attempt: attempt ? String(attempt) : null, why: why ?? null });
+  const recurrence = totalRecurrence(l, lessonStats(root));
+  if (attempt) append(root, String(attempt), 'lesson.recurred', { id: l.id, recurrence, why, ledgerOnly: true }, actorId);
+  return { id: l.id, recurrence, promote: recurrence >= 2 && l.mechanism?.kind !== 'gate-check' };
 }
+
+// The name learning keeps a lesson under: its file id and the repository holding it, whether or not another repository
+// holds the same id now (I-95), so its history survives a collision appearing or going away.
+export const lessonKey = (l) => `${l.fileId ?? l.id}@${l.home ?? l.repo ?? ''}`;
+// A lesson's recurrences: those committed in its file and those learned since.
+export const totalRecurrence = (l, stats) => (l.recurrence ?? 0) + (stats.get(lessonKey(l))?.repeats ?? 0);
 
 // The attempt worktree a lesson file lives in while that attempt's acceptance stands: the file is part of the accepted tree.
 function frozenSource(state, file) {
@@ -550,7 +555,7 @@ function inLessonScope(cfg, l, repo, file) {
 // Planner (nothing changed yet): a tag the ticket mentions, a file the plan names that is in the lesson's scope, or the
 // lesson's repo (or one of its components' repos) admitted to the attempt. Implementer: a tag, a planned or already
 // changed file in scope, and its repo only when that repo is the attempt's only repo or the work item's. Reviewer: a tag,
-// or a changed file in scope. Enforced and recurring lessons are always kept; the rest are capped at CAP, the omitted
+// or a changed file in scope. Enforced lessons are always kept; the rest are ranked by evidence and capped at CAP, the omitted
 // ones listed by id.
 export function relevantLessons(root, role, state, changed, { work = null } = {}) {
   let cfg = null;
@@ -599,16 +604,25 @@ export function relevantLessons(root, role, state, changed, { work = null } = {}
     if (why.length) matches.push({ l, why: [...new Set(why)] });
     else filtered.push({ id: l.id, title: l.title, repo: l.repo ?? null, reason: !declared.length ? `declares no scope (repo, components, paths or kinds), so only its tags match${l.tags.length ? `, and the ticket mentions none of ${l.tags.join(', ')}` : ', and it has none'}; add \`paths: ["**"]\` if it applies to every change` : role === 'planner' ? `nothing planned is in its scope (${declared.join('; ')})` : `no ${role === 'reviewer' ? 'changed' : 'changed or planned'} file is in its scope (${declared.join('; ')})` });
   }
-  const must = (m) => m.l.status === 'enforced' || m.l.recurrence >= 1;
-  const order = (a, b) => b.l.recurrence - a.l.recurrence || String(a.l.id).localeCompare(String(b.l.id), undefined, { numeric: true });
+  // 0.7.9 (D19): ranked by evidence. A lesson whose mistake repeated most recently comes first, then the one that repeated
+  // most, then the one carried in the fewest attempts (a lesson carried in many whose mistake never came back has done its work);
+  // only enforced lessons are always kept. Named failure (independent review of the 0.7.9 design): every lesson that had
+  // recurred once bypassed the cap, so 16 of one project's 70 lessons were carried in every matching bundle whatever their
+  // age, and counting recurrences from review findings would only have grown that set.
+  const stats = lessonStats(root, { except: state.id });
+  const ev = (l) => stats.get(lessonKey(l)) ?? {};
+  const must = (m) => m.l.status === 'enforced';
+  const order = (a, b) => String(ev(b.l).lastRepeatAt ?? '').localeCompare(String(ev(a.l).lastRepeatAt ?? '')) || totalRecurrence(b.l, stats) - totalRecurrence(a.l, stats) || (ev(a.l).injections ?? 0) - (ev(b.l).injections ?? 0) || String(a.l.id).localeCompare(String(b.l.id), undefined, { numeric: true });
   const kept = matches.filter(must).sort(order);
   const rest = matches.filter((m) => !must(m)).sort(order);
   const chosen = [...kept, ...rest.slice(0, CAP)];
   const omitted = rest.slice(CAP).map((m) => m.l.id);
   return {
-    apply: chosen.map(({ l, why }) => ({ id: l.id, title: l.title, repo: l.repo ?? null, cause: l.cause, mechanism: l.mechanism, status: l.status, label: label(l), recurrence: l.recurrence, matched: why, what: l.trigger?.what ?? null })),
+    apply: chosen.map(({ l, why }) => ({ id: l.id, title: l.title, repo: l.repo ?? null, cause: l.cause, mechanism: l.mechanism, status: l.status, label: label(l), recurrence: totalRecurrence(l, stats), ...(ev(l).lastRepeatAt ? { lastRepeated: ev(l).lastRepeatAt } : {}), matched: why, what: l.trigger?.what ?? null })),
     omitted,
     more: omitted.length,
+    // The learned names of the lessons carried (engine/learning.mjs), for counting; not part of any bundle.
+    keys: chosen.map(({ l }) => lessonKey(l)),
     filtered: filtered.sort((a, b) => String(a.id).localeCompare(String(b.id), undefined, { numeric: true })),
   };
 }
@@ -722,4 +736,173 @@ export async function lessonToImprovement(root, id, options) {
   const r = addImprovement({ title: l.title, what: l.trigger?.what ?? l.title, class: String(options.class ?? 'other'), 'observed-in': l.trigger?.attempt ?? null, quote: l.trigger?.quote ?? null }, names);
   removeLessonFile(state, l.file, `Lesson ${l.id} moved to the improvement inbox`);
   return { id, improvement: r.item.id, file: r.file, removed: l.file };
+}
+
+// ---- Learning (0.7.9, D19) ----
+
+// At review acceptance the classifier labels what this attempt taught (engine/learning.mjs). Each finding any round raised
+// (a verified non-issue is no mistake) gets the lesson whose mistake it repeats, or none. Each lesson this attempt recorded,
+// and each lesson never compared yet (once, so a project's existing lessons are consolidated too), gets another lesson that
+// describes the same mistake, or none. A repeat counts as the lesson's recurrence, once per lesson per attempt as a
+// reviewer's `finding` verdict does; "the same mistake" becomes a merge the owner makes in an attempt (`wf lesson merge`),
+// reviewed and delivered like any lesson. Labels only rank lessons: nothing is refused or asked because of one.
+// Named failure: 70 lessons of one project were all `proposed`, 16 had recurred and none had ever been curated, because the
+// counting waited for a reviewer to volunteer a verdict and the merging, promoting and retiring waited for a person.
+export function learnFromReview(root, state, actorId) {
+  let cfg;
+  try {
+    cfg = trustedAdapter(root, state);
+  } catch {
+    return null;
+  }
+  const c = classifierFor(cfg, defaultRuntime(state) ?? defaultHostId());
+  if (!c) return null;
+  const lessons = liveLessons(loadLessons(root, { state }));
+  if (!lessons.length) return null;
+  const refs = new Set();
+  const findings = [];
+  for (const r of recordedRoundsOf(state)) {
+    for (const f of r.closure?.findings ?? []) {
+      const ref = refOf(r.closure?.reviewer ?? r.reviewer, f.id);
+      if (f.status === 'verified-nonissue' || refs.has(ref)) continue;
+      refs.add(ref);
+      findings.push({ ref, text: [f.summary, f.family ? `family ${f.family}` : null, f.category ? `category ${f.category}` : null].filter(Boolean).join('; ') });
+    }
+  }
+  const recorded = new Set((state.lessons?.recorded ?? []).map((x) => String(x.id)));
+  const isNew = (l) => recorded.has(String(l.fileId ?? l.id));
+  const checked = checkedLessons(root);
+  const fresh = lessons.filter((l) => isNew(l) || !checked.has(lessonKey(l)));
+  if (!findings.length && !fresh.length) return null;
+  const about = (l) => `${l.title}${l.trigger?.what ? ` (${l.trigger.what})` : ''}`;
+  const items = [...findings.map((f, i) => ({ key: `F${i + 1}`, text: `a review finding: ${f.text}`, ref: f.ref })), ...fresh.map((l, i) => ({ key: `N${i + 1}`, text: `the lesson ${l.id}: ${about(l)}`, not: l.id, lesson: l }))];
+  const res = classify(c, {
+    goal: "You match a software project's review findings and lessons to its lessons. For each item, choose the lesson that describes the same mistake: following that lesson would have prevented the item. Choose none when no lesson does; a lesson about the same area but a different mistake is none. A lesson item never chooses itself.",
+    choices: [{ id: 'none', text: 'no lesson below describes the same mistake' }, ...lessons.map((l) => ({ id: l.id, text: about(l) }))],
+    items: items.map(({ key, text, not }) => ({ key, text, not })),
+  });
+  const labels = res.labels ?? {};
+  const event = { runtime: c.runtime, model: res.model ?? c.model, ms: res.ms ?? null, ...(typeof res.costUsd === 'number' ? { costUsd: res.costUsd } : {}), ...(res.error ? { error: res.error } : {}), findings: Object.fromEntries(items.filter((i) => i.ref).map((i) => [i.ref, labels[i.key] ?? null])), lessons: Object.fromEntries(items.filter((i) => i.lesson).map((i) => [i.lesson.id, labels[i.key] ?? null])) };
+  append(root, state.id, 'lessons.labelled', event, actorId);
+  if (res.error) return { ...event, repeated: [] };
+  const compared = items.filter((i) => i.lesson && labels[i.key]).map((i) => lessonKey(i.lesson));
+  if (compared.length) noteLearned(root, { kind: 'checked', lessons: compared, attempt: state.id });
+  const already = new Set((loadState(root, state.id).lessons?.recurred ?? []).map((x) => x.id));
+  const repeated = [];
+  for (const it of items) {
+    const to = labels[it.key];
+    if (!to || to === 'none') continue;
+    if (it.lesson) noteLearned(root, { kind: 'same', lesson: lessonKey(it.lesson), as: lessonKey(lessons.find((l) => l.id === to)), attempt: state.id });
+    // An older lesson that describes the same mistake as another is a merge to make, not a new occurrence of it.
+    if (it.lesson && !isNew(it.lesson)) continue;
+    if (already.has(to)) continue;
+    recur(root, to, state.id, actorId, it.ref ? `classifier (${event.model ?? c.runtime}): review finding ${it.ref} repeats it` : `classifier (${event.model ?? c.runtime}): new lesson ${it.lesson.id} describes the same mistake`);
+    already.add(to);
+    repeated.push(to);
+  }
+  return { ...event, repeated };
+}
+
+// The lessons learning compares: not retired, not the plugin's, and not merged into another (a merge an open attempt made
+// retires its members only when it is delivered, so the attempt's own merged lesson names them).
+function liveLessons(all) {
+  const mergedAway = new Set(all.filter((l) => l.status !== 'retired').flatMap((l) => l.merged ?? []).map(String));
+  return all.filter((l) => l.status !== 'retired' && l.scope !== 'plugin' && !l.builtin && !mergedAway.has(String(l.fileId ?? l.id)) && !mergedAway.has(l.id));
+}
+
+// Groups of live lessons the classifier labelled as one mistake: each a merge to make (`wf lesson merge`).
+export function mergeSuggestions(root, { state = null } = {}) {
+  let lessons;
+  try {
+    lessons = liveLessons(loadLessons(root, { state }));
+  } catch {
+    return [];
+  }
+  const idOf = new Map(lessons.map((l) => [lessonKey(l), l.id]));
+  const live = new Set(idOf.keys());
+  const parent = new Map();
+  const find = (x) => {
+    while (parent.has(x)) x = parent.get(x);
+    return x;
+  };
+  for (const { lesson, as } of sameMistakes(root)) {
+    if (!live.has(lesson) || !live.has(as)) continue;
+    const a = find(lesson);
+    const b = find(as);
+    if (a !== b) parent.set(a, b);
+  }
+  const groups = new Map();
+  for (const id of live) if (parent.has(id) || [...parent.values()].includes(id)) groups.set(find(id), [...(groups.get(find(id)) ?? []), id]);
+  const byId = (a, b) => String(a).localeCompare(String(b), undefined, { numeric: true });
+  return [...groups.values()].filter((g) => g.length > 1).map((g) => g.map((k) => idOf.get(k)).sort(byId)).sort((a, b) => byId(a[0], b[0]));
+}
+
+// `wf lesson merge <ids...> --title "..." --attempt <id>`: lessons that describe one mistake become one lesson, written and
+// committed in the attempt's worktree (reviewed and delivered with it, so `git revert` undoes it). The new lesson carries
+// the members' scope (their tags, paths, components and kinds together; classes only when every member names some) and
+// their recurrences summed; each member is retired with `mergedInto`. A lesson at the base keeps applying until the merge
+// is delivered: a ticket never drops a lesson behind its review.
+export function mergeLessons(root, ids, options, actorId) {
+  if (!options.attempt) throw refuse('a merge is committed with an attempt and reviewed and delivered with it: pass `--attempt <id>`');
+  const cfg = loadConfig(root);
+  const state = loadState(root, String(options.attempt));
+  const all = loadLessons(root, { state });
+  const members = [];
+  for (const id of new Set((ids ?? []).map(String))) {
+    const m = findLesson(all, id);
+    if (!m) throw refuse(`no lesson ${id}`);
+    if (m.status === 'retired') throw refuse(`lesson ${m.id} is retired${m.mergedInto ? ` (merged into ${m.mergedInto})` : ''}`);
+    if (m.status === 'enforced') throw refuse(`lesson ${m.id} is enforced by ${m.mechanism?.ref ?? 'its mechanism'}; merge proposed lessons only, so no enforcement is lost`);
+    members.push(m);
+  }
+  if (members.length < 2) throw refuse('a merge takes two or more lessons: `wf lesson merge <id> <id>... --title "<the one mistake>" --attempt <id>`');
+  const title = String(options.title ?? '').trim();
+  if (!title) throw refuse('`--title` says in one line the one mistake these lessons describe');
+  const one = (key, flag) => {
+    const values = [...new Set(members.map((m) => (key === 'kind' ? m.mechanism?.kind : m[key])))];
+    if (options[flag]) return String(options[flag]);
+    if (values.length === 1) return values[0];
+    throw refuse(`these lessons differ in ${flag} (${values.join(', ')}): pass \`--${flag} <one>\``);
+  };
+  const cause = one('cause', 'cause');
+  const kind = one('kind', 'mechanism');
+  const repos = [...new Set(members.map((m) => m.repo ?? null))];
+  const scope = repos.length === 1 && repos[0] ? 'repo' : 'project';
+  const union = (k) => [...new Set(members.flatMap((m) => m[k] ?? []))];
+  const stats = lessonStats(root);
+  const l = {
+    id: options.id ?? nextId(all, takenByOpenAttempts(root)),
+    title,
+    trigger: { what: options.what ?? `${members.length} lessons described one mistake: ${members.map((m) => `${m.id} (${m.title})`).join('; ')}`, attempt: state.id, finding: null, quote: null },
+    cause,
+    mechanism: { kind, ref: null, text: null },
+    scope,
+    status: 'proposed',
+    tags: union('tags'),
+    paths: union('paths'),
+    components: union('components'),
+    kinds: union('kinds'),
+    classes: members.every((m) => (m.classes ?? []).length) ? union('classes') : [],
+    recurrence: members.reduce((n, m) => n + totalRecurrence(m, stats), 0),
+    merged: members.map((m) => m.id),
+    created: now(),
+    repo: scope === 'repo' ? repos[0] : null,
+  };
+  const problems = validate(l, cfg);
+  if (problems.length) throw new WfError(`lessons not merged:\n  - ${problems.join('\n  - ')}`);
+  const home = l.repo ?? adapterLocation(root, cfg).repo.name;
+  const committed = (repo, what) => {
+    const t = targetFor(root, cfg, repo, state);
+    if (t.why !== 'attempt') throw refuse(`lessons not merged: ${what} would be written into ${repo}'s ${t.why === 'not-admitted' ? 'main checkout (the attempt does not hold that repo)' : `main checkout (${t.why})`}, outside ${state.id}'s review`, t.why === 'not-admitted' ? `add the repo first (\`wf criteria amend --file <amendment.json> --reason "<why>" --add-repo ${repo} --attempt ${state.id}\`)` : 'merge while the attempt is open and its acceptance does not stand (before the review, or while the work is reopened)', { id: 'lesson:merge-outside-attempt' });
+    return t;
+  };
+  const target = committed(home, `lesson ${l.id}`);
+  const targets = members.map((m) => [m, committed(m.home, `lesson ${m.id}`)]);
+  for (const m of members) refuseAcceptedSource(state, m, 'merging', 'merge');
+  const file = writeLesson(target, l, { create: true, message: `Lesson ${l.id}: ${l.title} (merges ${l.merged.join(', ')})` });
+  for (const [m, t] of targets) writeLesson(t, { ...m, status: 'retired', mergedInto: l.id }, { message: `Lesson ${m.id} merged into ${l.id}` });
+  append(root, state.id, 'lesson.merged', { id: l.id, repo: l.repo, merged: l.merged, file }, actorId);
+  // The members were compared already; the merged lesson is their sum, so it needs no comparison of its own.
+  noteLearned(root, { kind: 'checked', lessons: [lessonKey({ ...l, home })], attempt: state.id });
+  return { lesson: l, file, merged: l.merged };
 }

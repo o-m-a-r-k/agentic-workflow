@@ -14,6 +14,9 @@
 //   sessionEnv, markerEnv, envPrefixes   environment names of its sessions, and prefixes of its credentials
 //   detect(env)                          -> { session } | null          (omitted: the harness can launch roles but never own an attempt)
 //   classDefaults                        per work class defaults ({ full: { effort }, ... })
+//   classifierDefaults                   the learning classifier's { model, effort } (engine/learning.mjs)
+//   classifyLaunch({ prompt, model, effort, dir }) -> { bin, args, input, outFile? }   optional: one tool-less labelling turn
+//   classifyResult({ stdout, outFile })  -> { text, costUsd?, model? }                optional: that turn's answer
 //
 // A harness is added by writing one module here and listing it in `builtin()` below; `registerHost` adds one at run time
 // (the plug-in scenario registers a throwaway harness this way, touching no engine file).

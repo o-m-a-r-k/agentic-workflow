@@ -22,13 +22,14 @@ import { append, attemptDir, loadState, recordedTogether } from './ledger.mjs';
 import { executionSettings } from './models.mjs';
 import { startPromptFor } from './provenance.mjs';
 import { defaultRuntime } from './runtime-policy.mjs';
-import { planPaths } from './scope.mjs';
+import { planPaths, scopeFiles } from './scope.mjs';
 import { mkdirStateDirectory } from './state-folders.mjs';
 import { computeSignals, courseLines, handedRounds, recordedRounds, roundMetrics } from './signals.mjs';
 import { introducedFindings } from './introduced.mjs';
 import { observations, placementLevel, severityLevel } from './review-policy.mjs';
 import { discoveredLevel } from './discovered.mjs';
 import { policyOf, ruleText } from './leaving.mjs';
+import { pastCourse } from './learning.mjs';
 import { performSplit, resolveSplitItems } from './split.mjs';
 import { obligationSince } from './versions.mjs';
 import { detectOwner, hostChoice, isHost } from './hosts/index.mjs';
@@ -296,13 +297,16 @@ export function strategistHandoff(root, state, options) {
     worktrees: Object.fromEntries(Object.entries(state.repos).map(([k, v]) => [k, v.worktree])),
     criteria: state.criteria,
     workItems: state.work,
-    planFiles: state.plan ? planPaths(state.plan) : [],
+    planFiles: state.plan ? planPaths(state.plan, scopeFiles(state)) : [],
     // Why the owner agent handed you: what it saw diverge from what was predicted (null when it said nothing).
     handedBecause,
     signals,
     // The comparison the owner agent made, as `wf resume` shows it: the plan's expectation, each implementer's and reviewer's
     // own, and your earlier predictions, beside what happened.
     course: courseLines(signals, { predictions: decisions }),
+    // 0.7.9 (D19): how this project's plans predicted against what happened in delivered attempts, per lane, so a
+    // predictable overrun is judged as one (D9: measurement, never a threshold).
+    pastEstimates: pastCourse(root) ?? undefined,
     expectations: state.expectations,
     predictions: { missedInARow: streak, escalateRequired: streak >= 2 },
     blocking: { count: signals.blockingOpen, byFamily: familyGroups(signals.blockingFindings) },

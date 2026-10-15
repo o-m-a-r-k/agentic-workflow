@@ -50,6 +50,18 @@ function buildLaunch(h, { body, requestedSession }) {
   return { bin: 'claude', args };
 }
 
+// The classifier (engine/learning.mjs): one `claude --print` turn with no tools and no session kept, answering in text.
+function classifyLaunch({ prompt, model, effort }) {
+  const args = ['--print', '--output-format', 'json', '--tools', '', '--no-session-persistence', '--strict-mcp-config'];
+  if (model) args.push('--model', model);
+  if (effort) args.push('--effort', effort);
+  return { bin: 'claude', args, input: prompt };
+}
+function classifyResult({ stdout }) {
+  const j = JSON.parse(stdout);
+  return { text: j.is_error ? '' : typeof j.result === 'string' ? j.result : '', costUsd: typeof j.total_cost_usd === 'number' ? j.total_cost_usd : null, model: Object.keys(j.modelUsage ?? {})[0] ?? null };
+}
+
 function interpretEvent(e) {
   if (e.type === 'system' && e.subtype === 'init') return { started: e.session_id };
   if (e.type === 'result') return { terminal: { session: e.session_id, success: e.subtype === 'success' && e.is_error === false } };
@@ -71,6 +83,9 @@ export default {
   // The strongest model for planning and review (a class that pins none inherits the owner session's), and an effort for
   // the implementer classes. Unmeasured starting points: a project's `classes` override them.
   classDefaults: { full: { effort: 'high' }, light: { effort: 'low' }, review: { model: 'opus', effort: 'high' } },
+  // The classifier labels items with given choices and does no reasoning: the fast, cheap model. A project's
+  // `learning.classifier.claude` overrides it.
+  classifierDefaults: { model: 'haiku', effort: 'low' },
   agentsDir: '.claude/agents',
   skillsDir: '.claude/skills',
   fragments: {
@@ -94,6 +109,8 @@ export default {
   needsGitRoot: false,
   requestedSession: () => randomUUID(),
   buildLaunch,
+  classifyLaunch,
+  classifyResult,
   interpretEvent,
   roleReport,
   roleTools: ROLE_TOOLS,

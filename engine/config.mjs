@@ -178,6 +178,26 @@ function normalize(raw, source) {
       else if (!list(v)) fail(`\`severity.${k}\` is a list of examples (text)`);
     }
   }
+  // 0.7.9 (D19): project learning. `enabled: false` turns the classifier off; `classifier.<runtime>` pins its model and
+  // effort over the host's defaults (any non-empty string, as a class's are: I-29).
+  if (raw.learning !== undefined && raw.learning !== null) {
+    const ln = raw.learning;
+    if (typeof ln !== 'object' || Array.isArray(ln)) fail('`learning` is { enabled, classifier: { <runtime>: { model, effort } } }');
+    else {
+      for (const k of Object.keys(ln)) if (!['enabled', 'classifier'].includes(k)) fail(`\`learning.${k}\`: learning takes \`enabled\` and \`classifier\``);
+      if (ln.enabled !== undefined && typeof ln.enabled !== 'boolean') fail('`learning.enabled` is true or false');
+      const c = ln.classifier;
+      if (c !== undefined && c !== null && (typeof c !== 'object' || Array.isArray(c))) fail(`\`learning.classifier\` maps runtimes (${hostIds().join(', ')}) to { model, effort }`);
+      else for (const [rt, pin] of Object.entries(c ?? {})) {
+        if (!hostIds().includes(rt)) fail(`\`learning.classifier.${rt}\`: the runtimes are ${hostIds().join(', ')}`);
+        else if (!pin || typeof pin !== 'object' || Array.isArray(pin)) fail(`\`learning.classifier.${rt}\` is { model, effort }`);
+        else for (const [field, value] of Object.entries(pin)) {
+          if (!['model', 'effort'].includes(field)) fail(`\`learning.classifier.${rt}.${field}\`: a classifier pins \`model\` and \`effort\``);
+          else if (typeof value !== 'string' || !value.trim() || /[\u0000-\u001f\u007f]/.test(value)) fail(`\`learning.classifier.${rt}.${field}\` must be a non-empty string without control characters`);
+        }
+      }
+    }
+  }
   const cfg = {
     version: raw.version,
     enabled: raw.enabled === true,
@@ -191,6 +211,7 @@ function normalize(raw, source) {
     // words added to the one severity scale every role reads.
     leaving: raw.leaving ?? null,
     severity: raw.severity ?? null,
+    learning: raw.learning ?? null,
     roles: raw.roles ?? {},
     focused: raw.focused ?? [],
     requires: { skills: raw.requires?.skills ?? [], connectors: raw.requires?.connectors ?? [], tools: raw.requires?.tools ?? [] },
