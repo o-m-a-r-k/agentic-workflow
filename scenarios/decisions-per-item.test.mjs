@@ -194,9 +194,18 @@ test('an escalation answered in the person\'s own words stays open: words never 
   const words = 'stop, this is going nowhere; park it';
   answeredInWords(ctx.base, `${a.id} ${d.id}: ${d.summary}`, words, 'toolu_pi_escalate', d.choices);
   ok(r.run(ctx.root, ['approve', id, '--from-question', '--attempt', a.id], { env: { CLAUDE_CODE_SESSION_ID: CLAUDE }, ...silent }));
+  assert.match(r.state(ctx.root, a.id).next, /answered in the person's own words, "stop, this is going nowhere; park it": follow that/, 'resume says what happened, not "answer the old question"');
+  assert.match(r.run(ctx.root, ['approve', id, '--choice', 'stop', '--attempt', a.id], silent).err, /already decided/);
   const again = r.run(ctx.root, ['handoff', 'implementer', '--agent', 'impl-2', '--attempt', a.id, '--owner', a.owner], silent);
   assert.equal(again.code, 75, 'the words did not let the work continue');
   assert.match(again.err, /in their own words, "stop, this is going nowhere; park it": follow them/);
-  assert.notEqual(again.err.match(/wf approve (A\d+)/)[1], id, 'the escalation is asked again with its choices');
+  const fresh = again.err.match(/wf approve (A\d+)/)[1];
+  assert.notEqual(fresh, id, 'the escalation is asked again with its choices');
+  // A withdrawn question is not an answer either: it cannot be approved, and the next handoff asks afresh.
+  ok(r.run(ctx.root, ['decisions', 'withdraw', fresh, '--reason', 'reworded the brief', '--attempt', a.id]));
+  assert.match(r.run(ctx.root, ['approve', fresh, '--choice', 'continue', '--attempt', a.id], silent).err, /was withdrawn/);
+  const third = r.run(ctx.root, ['handoff', 'implementer', '--agent', 'impl-2', '--attempt', a.id, '--owner', a.owner], silent);
+  assert.equal(third.code, 75, 'still held');
+  assert.notEqual(third.err.match(/wf approve (A\d+)/)[1], fresh);
 });
 

@@ -38,7 +38,7 @@ export const approvedChoice = (state, kind, key) => {
 export const pendingDecisions = (state) => (state.decisions ?? []).filter((d) => !d.approved && !d.withdrawn);
 // The person picked one of the decision's choices. An answer in their own words (`other`) is recorded and shown, but it is no
 // choice: it never acts as one (independent review of 0.7.8: words answering an escalation cleared it as `continue`).
-export const chose = (d) => Boolean(d?.approved && d.approved.choice !== 'other');
+export const chose = (d) => Boolean(d?.approved && d.approved.choice !== 'other' && !d.withdrawn);
 
 // Records a decision the person must confirm, once per kind + key while it is pending; returns it.
 export function createDecision(root, state, { kind, key, summary, choices = ['yes', 'no'], options = {} }) {
@@ -79,6 +79,7 @@ export async function approveInTerminal(root, id, options, { input = process.std
   const d = (state.decisions ?? []).find((x) => x.id === id);
   if (!d) throw new WfError(`no decision ${id ?? ''} on ${state.id}; \`wf decisions --attempt ${state.id}\` lists them`);
   if (d.approved) throw refuse(`${id} was already decided: ${d.approved.choice}`, null, { id: 'approve:already' });
+  if (d.withdrawn) throw refuse(`${id} was withdrawn (${d.withdrawn.reason ?? ''}); the next command asks a fresh question`, null, { id: 'approve:withdrawn' });
   const agentEnv = agentEnvNames().filter((k) => env[k]);
   if (agentEnv.length) throw refuse(`\`wf approve\` runs in the owner's own terminal, not under an agent runtime (${agentEnv.join(', ')})`, `ask the person in your question panel (the question "${questionFor(state, d)}", exactly the options ${d.choices.join(' | ')}), then run \`wf approve ${id} --from-question --attempt ${state.id}\`; or they run \`wf approve ${id} --attempt ${state.id}\` in a terminal outside the agent app`, { id: 'approve:agent-env' });
   if (!input.isTTY || !output.isTTY) throw refuse(`not an interactive terminal: \`wf approve\` is run by the owner in their own terminal, where it asks them to type the choice`, `run \`wf approve ${id} --attempt ${state.id}\` in a terminal`, { id: 'approve:no-tty' });
@@ -109,6 +110,7 @@ export async function approveFromQuestion(root, id, options, { env = process.env
   const d = (state.decisions ?? []).find((x) => x.id === id);
   if (!d) throw new WfError(`no decision ${id ?? ''} on ${state.id}; \`wf decisions --attempt ${state.id}\` lists them`);
   if (d.approved) throw refuse(`${id} was already decided: ${d.approved.choice}`, null, { id: 'approve:already' });
+  if (d.withdrawn) throw refuse(`${id} was withdrawn (${d.withdrawn.reason ?? ''}); the next command asks a fresh question`, null, { id: 'approve:withdrawn' });
   if (options.choice !== undefined && options.choice !== true) throw new WfError('--choice is for the terminal; with --from-question the choice is the one the person picked in the panel');
   const question = questionFor(state, d);
   const how = `ask the person in your question panel: the question "${question}" with exactly the options ${d.choices.join(' | ')}; then run this again`;

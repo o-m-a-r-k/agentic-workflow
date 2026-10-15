@@ -138,7 +138,8 @@ export function missedStreak(state, signals, nowMs = Date.now()) {
 const openEscalation = (state) => {
   const last = state.strategy.decisions.at(-1);
   const first = last?.action === 'escalate' && last.escalation ? state.decisions.find((x) => x.id === last.escalation) : null;
-  const d = first ? state.decisions.filter((x) => x.kind === 'escalation' && x.key === first.key && !x.withdrawn).at(-1) : null;
+  // A withdrawn question is not an answer: the escalation stays open and the next handoff asks it afresh.
+  const d = first ? state.decisions.filter((x) => x.kind === 'escalation' && x.key === first.key).at(-1) : null;
   return d && !chose(d) ? d : null;
 };
 const wordsOf = (d) => (d?.approved?.words ? `; the person answered ${d.id} in their own words, "${d.approved.words}": follow them, and if they mean one of the choices, ask again with exactly these options` : '');
@@ -166,7 +167,7 @@ export function strategyHold(root, state) {
   if (!owner && !escalation) return null;
   if (owner) {
     const pending = ownerDecision(state, owner);
-    const guidance = `${owner.summary}. This is the person's decision: bring them the brief from \`wf signals --attempt ${state.id}\` (rounds, blocking findings per round, the families that keep coming back, changed files against what the plan expected, amendments) with 2-3 options and your recommendation. ${pending ? `They answer ${pending.id} in their own terminal (\`wf approve ${pending.id} --attempt ${state.id}\`) or in your question panel, with the question "${questionFor(state, pending)}" and exactly the options ${pending.choices.join(' | ')}, then \`wf approve ${pending.id} --from-question --attempt ${state.id}\`` : 'The next implementer or reviewer handoff opens the decision they answer with `wf approve`'} (continue: another ${(cfg?.strategy ?? STRATEGY_DEFAULTS).reviewRoundsEscalate} rounds before asking again | split: unstarted work, observations and discovered issues move to a sibling attempt of the batch (\`wf split\`); code already built stays | deliver-core: what the criteria need and what blocks stays, every other finding and discovered issue may be ticketed under this decision | stop: a hold). No implementer or reviewer starts until they decide.`;
+    const guidance = `${owner.summary}. This is the person's decision: bring them the brief from \`wf signals --attempt ${state.id}\` (rounds, blocking findings per round, the families that keep coming back, changed files against what the plan expected, amendments) with 2-3 options and your recommendation. ${pending?.approved || pending?.withdrawn ? `${pending.id} was ${pending.withdrawn ? 'withdrawn' : `answered in the person's own words, "${pending.approved.words}"`}: follow that, and the next implementer or reviewer handoff asks the question again with its choices. ` : ''}${pending && !pending.approved && !pending.withdrawn ? `They answer ${pending.id} in their own terminal (\`wf approve ${pending.id} --attempt ${state.id}\`) or in your question panel, with the question "${questionFor(state, pending)}" and exactly the options ${pending.choices.join(' | ')}, then \`wf approve ${pending.id} --from-question --attempt ${state.id}\`` : 'The next implementer or reviewer handoff opens the decision they answer with `wf approve`'} (continue: another ${(cfg?.strategy ?? STRATEGY_DEFAULTS).reviewRoundsEscalate} rounds before asking again | split: unstarted work, observations and discovered issues move to a sibling attempt of the batch (\`wf split\`); code already built stays | deliver-core: what the criteria need and what blocks stays, every other finding and discovered issue may be ticketed under this decision | stop: a hold). No implementer or reviewer starts until they decide.`;
     return { owner, ownerPending: pending, escalation, guidance };
   }
   return { owner: null, ownerPending: null, escalation, guidance: `the strategist escalated (${escalation.id}: ${escalation.summary}); the owner decides in their own terminal: \`wf approve ${escalation.id}\` (choices: ${escalation.choices.join(' | ')}), or in your question panel (the question "${questionFor(state, escalation)}", exactly those options), then \`wf approve ${escalation.id} --from-question\`; no implementer or reviewer starts until then` };
@@ -194,10 +195,10 @@ export function requireOwnerDecision(root, state, role) {
   if (hold.owner) {
     recordEscalation(root, state, hold.owner);
     const answeredInWords = hold.ownerPending?.approved ? hold.ownerPending : null;
-    const d = hold.ownerPending && !hold.ownerPending.approved ? hold.ownerPending : createDecision(root, state, { kind: 'escalation', key: ownerDecisionKey(hold.owner), choices: OWNER_CHOICES, summary: `${hold.owner.summary}: continue | split | deliver-core | stop` });
+    const d = hold.ownerPending && !hold.ownerPending.approved && !hold.ownerPending.withdrawn ? hold.ownerPending : createDecision(root, state, { kind: 'escalation', key: ownerDecisionKey(hold.owner), choices: OWNER_CHOICES, summary: `${hold.owner.summary}: continue | split | deliver-core | stop` });
     throw refuse(`not handed: ${hold.owner.summary} (${d.id}); no ${role} starts until the owner decides${wordsOf(answeredInWords)}`, `${approveHint(state, d)}. Bring the person the brief first (\`wf signals --attempt ${state.id}\`): the numbers, what keeps coming back, 2-3 options and your recommendation`, { id: 'strategy:owner-escalation' });
   }
-  const esc = hold.escalation.approved ? createDecision(root, state, { kind: 'escalation', key: hold.escalation.key, summary: hold.escalation.summary, choices: hold.escalation.choices }) : hold.escalation;
+  const esc = hold.escalation.approved || hold.escalation.withdrawn ? createDecision(root, state, { kind: 'escalation', key: hold.escalation.key, summary: hold.escalation.summary, choices: hold.escalation.choices }) : hold.escalation;
   throw refuse(`not handed: the strategist escalated ${state.id} (${esc.id}: ${esc.summary}); no ${role} starts until the owner decides${wordsOf(hold.escalation.approved ? hold.escalation : null)}`, approveHint(state, esc), { id: 'strategy:escalated' });
 }
 
