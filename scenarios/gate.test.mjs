@@ -39,6 +39,35 @@ test('unchanged inputs are reused; only steps whose inputs changed rerun', () =>
   assert.equal(g2.always.status, 'passed', 'a step without inputs always runs');
 });
 
+// I-150, named failure (audit of 51 attempts): 163 reruns had a key another attempt had already passed; reuse read only the
+// attempt's own runs.
+test('a pass another attempt recorded under the same key is reused; a step that keeps evidence, or a file outside its inputs that differs, reruns', () => {
+  const steps = [
+    { id: 'unit', repo: 'app', run: 'echo x >> ../ran-unit.txt', inputs: ['src/**'] },
+    { id: 'ui', repo: 'app', run: 'mkdir -p shots && printf one > shots/a.png && echo x >> ../ran-ui.txt', inputs: ['src/**'], artifacts: ['shots/*.png'] },
+  ];
+  const { base, root } = singleRepoProject('reuse-across', { gate: { steps } }, { '.gitignore': '.wf-evidence/\n.wf-worktrees/\nshots/\n' });
+  const counts = (wt) => Object.fromEntries(['unit', 'ui'].map((k) => [k, fs.existsSync(`${wt}/../ran-${k}.txt`) ? fs.readFileSync(`${wt}/../ran-${k}.txt`, 'utf8').trim().split('\n').length : 0]));
+  const a = admitted(root, base, 'ENG-30');
+  commitIn(a.repos.app.worktree, { 'src/a.txt': 'same\n' });
+  assert.equal(gateJson(root, a.id).code, 0);
+  assert.deepEqual(counts(a.repos.app.worktree), { unit: 1, ui: 1 });
+  const b = admitted(root, base, 'ENG-31');
+  commitIn(b.repos.app.worktree, { 'src/a.txt': 'same\n' });
+  const gb = gateJson(root, b.id);
+  assert.equal(gb.code, 0, gb.err);
+  const sb = byId(gb.data.steps);
+  assert.equal(sb.unit.status, 'reused');
+  assert.equal(sb.unit.reusedFromAttempt, a.id);
+  assert.match(sb.unit.reason, new RegExp(`in ${a.id}`));
+  assert.equal(sb.ui.status, 'passed', 'a step that keeps evidence files runs for its own ticket');
+  assert.deepEqual(counts(b.repos.app.worktree), { unit: 0, ui: 1 }, "the reused step did not run here");
+  const c = admitted(root, base, 'ENG-32');
+  commitIn(c.repos.app.worktree, { 'src/a.txt': 'same\n', 'lib/b.txt': 'outside the inputs\n' });
+  const sc = byId(gateJson(root, c.id).data.steps);
+  assert.equal(sc.unit.status, 'passed', 'a file the inputs leave out differs from the run it would reuse');
+});
+
 test('worker overrides: auto sizing is recorded, invalid override exits 2', () => {
   const steps = [{ id: 'unit', repo: 'app', run: 'test "{workers}" -ge 1', inputs: ['src/**'], workers: { auto: true, min: 2, max: 4, perWorkerGiB: 1 } }];
   const { base, root } = singleRepoProject('workers', { gate: { steps } });

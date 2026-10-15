@@ -9,7 +9,7 @@ import { changedFiles, treeHash, treeHashes, uncommitted, untrackedSnapshot } fr
 import { chooseShards, chooseWorkers } from './machine.mjs';
 import { oneSuitePerId, readJUnitFiles, readPlaywrightSuites } from './junit.mjs';
 import { stepFailures } from './failures.mjs';
-import { append, attemptDir, loadState } from './ledger.mjs';
+import { append, attemptDir, listAttempts, loadState } from './ledger.mjs';
 import { projectEnv } from './env.mjs';
 import { obligationSince } from './versions.mjs';
 import { missingFor, redactor, stepEnv } from './secrets.mjs';
@@ -128,6 +128,15 @@ export async function planGate(root, state, options = {}) {
   // pin, never the worktree, and a step whose inputs include the adapter folder sees the change in its inputs hash. Named
   // failure (audit of 51 attempts): 38 step runs for packages with no changed file, after a change to adapter files only.
   const full = options.full === true;
+  // The project's other attempts, read once per plan and only when a step looks in them (I-150).
+  let others = null;
+  const otherAttempts = () => (others ??= listAttempts(root).filter((x) => x !== state.id).flatMap((x) => {
+    try {
+      return [loadState(root, x)];
+    } catch {
+      return [];
+    }
+  }));
   const imp = impact(cfg, changed);
   const allChanged = Object.values(changed).flat();
   let focused = false;
@@ -244,6 +253,36 @@ export async function planGate(root, state, options = {}) {
       outside = since.filter((f) => inside(f, pkg.path) && (namesOwnFolder(step, pkg) || !own(repo.name, f)) && !matchesAny(rel(f, pkg.path), pkg.docsOnly) && !matchesAny(rel(f, pkg.path), step.inputs ?? ['**']) && !matchesAny(rel(f, pkg.path), step.ignores ?? []));
       if (outside.length || !head) prior = null;
     }
+    // A pass another attempt of this project recorded under the same key (inputs, runner, alsoInputs trees), on a tree
+    // that differs from this one in no file of the package the step's inputs leave out: the same proof, so it is reused
+    // and says where it came from. Only for a step that keeps no evidence files, which are this ticket's own. Named
+    // failure (I-150, audit of 51 attempts): 163 reruns had a key another attempt had already passed.
+    let fromAttempt = null;
+    if (!prior && key && !step.artifacts?.length && !options.rerunFailed?.includes(step.id)) {
+      const oldInputs = inputs && !namesOwnFolder(step, pkg) ? (inputsBefore !== inputs ? inputsBefore : null) : inputs;
+      const legacyAcross = (s) => {
+        const before = oldInputs ?? stepInputs(state, step, repo, pkg);
+        return !before || also.unreadable.length ? null : hashValue(also.trees ? { inputs: before.hash, runner: legacyRunnerIdentity(root, state, step, []), also: also.trees } : { inputs: before.hash, runner: legacyRunnerIdentity(root, state, step, []) });
+      };
+      const found = otherAttempts().flatMap((o) => {
+        const p = findReuse(o, step.id, key, legacyAcross);
+        return p ? [{ o, p }] : [];
+      }).sort((a, b) => String(b.p.at ?? '').localeCompare(String(a.p.at ?? '')));
+      for (const { o, p } of found) {
+        const ranOn = [...o.gates, ...(o.checks ?? [])].find((g) => g.runId === p.runId)?.tree?.[repo.name];
+        if (!ranOn || !/^[0-9a-f]{40}$/.test(ranOn)) continue;
+        let since;
+        try {
+          since = git(state.repos[repo.name].worktree, ['diff', '--name-only', ranOn, 'HEAD']).split('\n').filter(Boolean);
+        } catch {
+          continue;
+        }
+        if (since.some((f) => inside(f, pkg.path) && (namesOwnFolder(step, pkg) || !own(repo.name, f)) && !matchesAny(rel(f, pkg.path), pkg.docsOnly) && !matchesAny(rel(f, pkg.path), step.inputs ?? ['**']) && !matchesAny(rel(f, pkg.path), step.ignores ?? []))) continue;
+        prior = p;
+        fromAttempt = o.id;
+        break;
+      }
+    }
     if (options.rerunFailed && !prior && !options.rerunFailed.includes(step.id)) {
       steps.push({ ...entry, decision: 'skip', skippedBy: 'rerun-failed', reason: '--rerun-failed reruns only the steps that failed last time' });
       continue;
@@ -257,8 +296,9 @@ export async function planGate(root, state, options = {}) {
       runnerIdentity: runner,
       alsoInputs: also.trees ?? undefined,
       decision: prior ? 'reuse' : 'run',
-      reason: prior ? `same inputs and runner as ${prior.runId}` : outside.length ? `changed file(s) outside this step's inputs since its last pass: ${outside.slice(0, 3).join(', ')}${outside.length > 3 ? '…' : ''}` : notCovered.length ? `changed file(s) outside every step's inputs: ${notCovered.slice(0, 3).join(', ')}${notCovered.length > 3 ? '…' : ''}` : also.unreadable.length ? `cannot read the tree of ${also.unreadable.join(', ')} (alsoInputs): always runs` : key ? (isDependent ? 'dependent of a changed contract' : infraChanged ? 'shared infrastructure changed' : also.trees ? 'inputs or a repo in alsoInputs changed, or never passed' : 'inputs changed or never passed') : 'no `inputs` declared: always runs',
+      reason: prior ? `same inputs and runner as ${prior.runId}${fromAttempt ? ` in ${fromAttempt}` : ''}` : outside.length ? `changed file(s) outside this step's inputs since its last pass: ${outside.slice(0, 3).join(', ')}${outside.length > 3 ? '…' : ''}` : notCovered.length ? `changed file(s) outside every step's inputs: ${notCovered.slice(0, 3).join(', ')}${notCovered.length > 3 ? '…' : ''}` : also.unreadable.length ? `cannot read the tree of ${also.unreadable.join(', ')} (alsoInputs): always runs` : key ? (isDependent ? 'dependent of a changed contract' : infraChanged ? 'shared infrastructure changed' : also.trees ? 'inputs or a repo in alsoInputs changed, or never passed' : 'inputs changed or never passed') : 'no `inputs` declared: always runs',
       reusedFrom: prior?.runId ?? null,
+      ...(fromAttempt ? { reusedFromAttempt: fromAttempt } : {}),
       ...(prior && reselect ? { reselect } : {}),
       missingSecrets: missingFor(root, cfg, step.id, validationCatalog(root, state, step.id)),
     });
@@ -1114,11 +1154,11 @@ async function executeRun(root, state, plan, live, run) {
     .sort((a, b) => a.heavy - b.heavy || (a.heavy ? b.d - a.d : 0) || a.i - b.i)
     .map((x) => x.s);
   for (const s of plan.steps.filter((x) => x.decision === 'reuse')) {
-    const prior = reusedRecord(state, s.id, s.reusedFrom);
+    const prior = reusedRecord(s.reusedFromAttempt ? loadState(root, s.reusedFromAttempt) : state, s.id, s.reusedFrom);
     // Recorded under today's key and identity, so the next gate finds it directly; the evidence is re-selected when the
     // step's globs narrowed since the run (files the run collected, by their source path, unchanged bytes).
     const picked = s.reselect ? reselectArtifacts(prior, s.reselect, artifactUnits(root, state)) : null;
-    results.push({ ...prior, ...(picked ?? {}), key: s.key, runnerIdentity: s.runnerIdentity, resultIdentity: true, status: 'reused', reusedFrom: prior.runId, reason: s.reselect ? `${s.reason}; evidence re-selected by the step's current globs` : s.reason, runId });
+    results.push({ ...prior, ...(picked ?? {}), key: s.key, runnerIdentity: s.runnerIdentity, resultIdentity: true, status: 'reused', reusedFrom: prior.runId, reusedFromAttempt: s.reusedFromAttempt ?? null, reason: s.reselect ? `${s.reason}; evidence re-selected by the step's current globs` : s.reason, runId });
   }
   for (const s of plan.steps.filter((x) => ['skip', 'defer'].includes(x.decision))) results.push({ id: s.id, repo: s.repo, tier: s.tier, status: s.decision === 'defer' ? 'deferred' : 'skipped', reason: s.reason, skippedBy: s.skippedBy, runId });
   if (results.length) append(root, state.id, 'gate.step', { runId, steps: results }, null);
