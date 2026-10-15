@@ -1,7 +1,7 @@
 import { gateAdapter, validationReviewProblems } from './validation.mjs';
 import { captureWarning } from './captures.mjs';
 import { mkdirStateDirectory } from './state-folders.mjs';
-import { blockingIn, classifyFinding, closureMissingGuidance, deltaLines, dispositionOf, earlierBlocking, observations, openAcrossRounds, placementLevel, reviewerDiscovered, roundMode, severityLevel, sinceOf, stampClosure, stripStamp, unreachedSince } from './review-policy.mjs';
+import { blockingIn, classifyFinding, closureMissingGuidance, deltaLines, dispositionOf, earlierBlocking, observations, openAcrossRounds, placementLevel, reviewerDiscovered, roundMode, severityLevel, sinceOf, stampClosure, stripStamp, unreachedOf, unreachedSince } from './review-policy.mjs';
 import { observationLines } from './scope-decisions.mjs';
 import { GROUP_INSTRUCTIONS, assignedVerdicts, changedWeights, currentReviewGroup, divideReview, findingIds, impactCatalog, isCurrentReviewer, mergeParts, reviewSnapshot, reviewDivisionOptions } from './review-groups.mjs';
 import fs from 'node:fs';
@@ -661,7 +661,10 @@ export function handoff(root, role, options) {
   let deltaInfo = null;
   let deltaFrom = null;
   if (role === 'reviewer' && mode === 'delta') {
-    deltaFrom = state.review?.tree ?? state.review?.handoffTree ?? {};
+    // From the last round that finished: a partial round (I-152) stopped part-way, so what came before its tree may be
+    // unread (independent review of 0.7.12: the next delta started at the partial round's tree and the rest went unread).
+    const finished = (state.reviews ?? []).findLast((r) => !r.partial);
+    deltaFrom = finished?.tree ?? state.review?.tree ?? state.review?.handoffTree ?? {};
     deltaInfo = { since: {}, diff: {}, changed: {}, lines: deltaLines(state, deltaFrom) };
     for (const [name, r] of Object.entries(state.repos)) {
       const from = sinceOf(r, deltaFrom[name]);
@@ -1333,10 +1336,17 @@ export function recordReview(root, options) {
   // findings verified, anomalies when screenshots were handed, every gate screenshot inspected.
   // What a closure still owes: the historical implementation reports of an attempt admitted before 0.7.0, and the anomalies
   // in the screenshots it was handed.
+  // A partial round (I-152: the engine keeps what a reviewer that did not finish wrote) owes none of these: what it did not
+  // get to is named in its `notReached`, and it is never the audit or the acceptance. Independent review of 0.7.12: the
+  // obligations refused the findings of exactly the rounds reviewers are most often stopped in (deltas, evidence rounds).
+  const partial = options.partial === true;
+  const unfinished = [];
   const hv = reportedIssueVerdicts(handed.historicalReports ?? [], closure, state);
-  if (hv.problems.length) throw refuse('closure refused: historical report observations have no valid verdict:\n  - ' + hv.problems.join('\n  - '), 'add reportedIssues: [{ id, verdict: fixed|verified-nonissue|open, evidence, fixedIn, repo, rationale, finding }]; judge the current code, never edit the old transcript');
+  if (hv.problems.length && partial) unfinished.push(`verdicts on ${hv.problems.length} historical report observation(s)`);
+  else if (hv.problems.length) throw refuse('closure refused: historical report observations have no valid verdict:\n  - ' + hv.problems.join('\n  - '), 'add reportedIssues: [{ id, verdict: fixed|verified-nonissue|open, evidence, fixedIn, repo, rationale, finding }]; judge the current code, never edit the old transcript');
   const av = reviewAnomalies(handed.gate, closure);
-  if (av.length) throw refuse(`closure refused: the anomalies seen in the screenshots are not accounted for:\n  - ${av.join('\n  - ')}`, `add \`anomalies\` to the closure: "none seen" after comparing the captures, or [{ "screenshots": ["<sha256>"], "observation": "<what differs>", "cause": "<the cause you found>", "evidence": "<file:line or data you checked>" }] or, when it is a defect (a value no test pins included), { ..., "finding": "<your finding id>" }; then \`wf review --closure <file>\` again`);
+  if (av.length && partial) unfinished.push(`the anomalies in the screenshots (${av.length})`);
+  else if (av.length) throw refuse(`closure refused: the anomalies seen in the screenshots are not accounted for:\n  - ${av.join('\n  - ')}`, `add \`anomalies\` to the closure: "none seen" after comparing the captures, or [{ "screenshots": ["<sha256>"], "observation": "<what differs>", "cause": "<the cause you found>", "evidence": "<file:line or data you checked>" }] or, when it is a defect (a value no test pins included), { ..., "finding": "<your finding id>" }; then \`wf review --closure <file>\` again`);
   // Commit, then reveal: the first closure of a full round is blind. Earlier rounds' findings are shown only after it is
   // recorded, and a later closure of the same round may only add their verification. A delta round is handed them up
   // front (`openFindings`), so it answers them in the one closure.
@@ -1344,8 +1354,11 @@ export function recordReview(root, options) {
   const delta = mode === 'delta';
   if (delta) {
     const owed = earlierBlocking(state, round).filter((f) => !(closure.priorFindings ?? []).some((p) => p?.round === f.round && p?.id === f.id && ['fixed', 'verified-nonissue', 'open'].includes(p.status) && String(p.evidence ?? '').trim()));
-    if (owed.length) throw refuse(`closure refused: ${owed.length} open finding(s) the bundle handed you have no verdict: ${owed.map((f) => f.ref).join(', ')}`, 'add `priorFindings: [{ "round": "<reviewer id>", "id": "F1", "status": "fixed|verified-nonissue|open", "evidence": "path:line" }]` for each finding listed under `openFindings` that blocks, and run `wf review --closure <file>` again', { id: 'review:delta-prior-missing' });
+    if (owed.length && partial) unfinished.push(`verdicts on the open finding(s) ${owed.map((f) => f.ref).join(', ')}`);
+    else if (owed.length) throw refuse(`closure refused: ${owed.length} open finding(s) the bundle handed you have no verdict: ${owed.map((f) => f.ref).join(', ')}`, 'add `priorFindings: [{ "round": "<reviewer id>", "id": "F1", "status": "fixed|verified-nonissue|open", "evidence": "path:line" }]` for each finding listed under `openFindings` that blocks, and run `wf review --closure <file>` again', { id: 'review:delta-prior-missing' });
   }
+  if (partial && !delta && closure.priorFindings?.length) closure = { ...closure, priorFindings: undefined };
+  if (unfinished.length) closure = { ...closure, notReached: [...unreachedOf(closure), `not reached before it ended: ${unfinished.join('; ')}`] };
   // The engine classifies every finding against the tree and round it was recorded on (engine/review-policy.mjs); the
   // reviewer's own `classified` field is replaced.
   closure = stampClosure(state, closure, { mode, since: reviewerHandoff.deltaFrom ?? null });
@@ -1556,7 +1569,7 @@ export function acceptReview(root, options) {
   const problems = [];
   if (authorsOf(root, state).has(r.closure.reviewer)) problems.push(`reviewer ${r.closure.reviewer} also planned, wrote or owns this change`);
   // I-152: a round the engine kept from a reviewer that did not finish holds what it found, never an acceptance.
-  if (r.partial) problems.push(`the latest round (${r.closure.reviewer}) ended before its reviewer finished; its findings are kept, and a fresh reviewer's round is accepted: \`wf handoff reviewer --agent <new id> --attempt ${state.id}\``);
+  if (r.partial) problems.push(`the latest round (${r.closure.reviewer}) ended before its reviewer finished; its findings are kept, and only a round that finishes is accepted: ${openFindings(r, state).length ? 'repair the findings it kept that block, then hand' : 'hand'} a fresh reviewer (\`wf handoff reviewer --agent <new id> --attempt ${state.id}\`)`);
   // Only a finding that blocks holds acceptance; an observation is fixed, ticketed or moved before delivery.
   const blocking = new Set(openFindings(r, state).map((f) => f.id));
   for (const f of r.closure.findings) {
@@ -2693,10 +2706,11 @@ export const outstandingReviewFindings = (state) => state.review ? unverifiedPri
 function legacyNextAction(root, state) {
   const step = nextStep(root, state);
   // I-23: the reviewer handoff refuses while an implementer handoff is open; a step that hands a reviewer says so first.
-  const openImpl = step.includes('wf handoff reviewer') ? openImplementersOf(root, state) : [];
-  // I-137: an implementer whose launch already ended is not "working": the owner looks at its report and commits once and closes it.
+  // I-137: an implementer whose launch already ended is not "working": the owner looks at its report and commits once and
+  // closes it, whatever the next step is (independent review of 0.7.12: said only before a reviewer handoff).
+  const allOpen = openImplementersOf(root, state);
   const ended = (x) => { const l = state.handoffs.filter((y) => y.role === 'implementer' && y.agent === x.agent).at(-1)?.launch; return ['completed', 'failed'].includes(l?.status) ? l : null; };
-  const done = openImpl.filter(ended), pending = openImpl.filter((x) => !ended(x));
+  const done = allOpen.filter(ended), pending = step.includes('wf handoff reviewer') ? allOpen.filter((x) => !ended(x)) : [];
   const close = [
     done.length ? `${done.map((x) => `implementer ${x.agent}'s launch ${ended(x).status} at ${ended(x).finishedAt}`).join(', ')}: look at its report and commits once and close it now, not at the next status report (${done.map((x) => `\`wf handoff close --agent ${x.agent}\``).join(', ')}; it refuses, naming why, when the work is uncommitted or the report missing); then ` : '',
     pending.length ? `close the implementer(s) still open, once each has reported done and committed: ${pending.map((x) => `\`wf handoff close --agent ${x.agent}\``).join(', ')}; then ` : '',

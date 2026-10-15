@@ -74,7 +74,7 @@ export function leavingDecisions(root, state, items, { verb, reason = '', option
       continue;
     }
     const neverLevel = (policy[x.level] ?? DEFAULT_POLICY[x.level]) === 'never';
-    const made = createDecision(root, current, { kind: 'move-out-of-batch', key: `leave:${x.ref}`, summary: neverLevel ? `${questionText(x, verb, explain)} (Your rule fixes ${x.level} items in the delivery; you asked to leave this out: "${directed}".)` : questionText(x, verb, explain), choices: [LEAVE, FIX], options });
+    const made = createDecision(root, current, { kind: 'move-out-of-batch', key: `leave:${x.ref}`, summary: neverLevel ? `${questionText(x, verb, explain)} (Your rule fixes ${x.level} items in the delivery; you asked to leave this out: "${directed}".)` : questionText(x, verb, explain), choices: [LEAVE, FIX], ...(neverLevel ? { personDirected: directed } : {}), options });
     asked.push({ x, d: made });
     current = { ...current, decisions: [...(current.decisions ?? []), made] };
   }

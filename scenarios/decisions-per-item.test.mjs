@@ -241,4 +241,6 @@ test('a medium or high item the person directs out of the ticket leaves on their
   approveAsOwner(p.root, p.id, id, 'let it leave');
   ok(run(p, ['scope', 'defer', '--finding', 'r1:F3', '--person-directed', 'leave the old export as it is']));
   assert.deepEqual(state(p.root, p.id).scopeDecisions.at(-1).keys, ['r1:F3']);
+  assert.equal(d.personDirected, 'leave the old export as it is');
+  assert.match(knownLimits(state(p.root, p.id)), /Known issue left for later \(medium\).*Left out at the person's direction: "leave the old export as it is"\./);
 });

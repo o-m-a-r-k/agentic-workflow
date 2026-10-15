@@ -109,7 +109,7 @@ Work
   wf stop --class major-finding|tree-change|owner-decision --reason "why"
                                     stop a running gate; records the class and the minutes discarded
   wf scope list                     every open review finding: blocks or observation, its family, where it went
-  wf scope ticket --finding REVIEWER:F1[,D3] [--capture RAW.json] [--reason "why it waits"] [--explain FILE.json]
+  wf scope ticket --finding REVIEWER:F1[,D3] [--capture RAW.json] [--reason "why it waits"] [--explain FILE.json] [--person-directed "<their words>"]
                                     low items only: asks the person first; with their yes, create the ticket and record
                                     its raw tracker readback with --capture
   wf scope fixed --finding REVIEWER:F1 --commit SHA

@@ -111,6 +111,49 @@ const reusedRecord = (state, stepId, runId) => allGateSteps(state).filter((s) =>
 const deepAt = (g) => g.split('/').indexOf('**');
 export const globsCovered = (now, before) => now.every((p) => before.some((q) => q === p || (matchesAny(p, [q]) && (deepAt(p) < 0 || (deepAt(q) >= 0 && deepAt(q) <= deepAt(p))))));
 
+// Which step keys an attempt has passed: a small index kept in the project's scratch folder and rebuilt only when the
+// attempt's ledger changed (its size or time), so a plan reads another attempt's ledger once after it changes, and in full
+// only for an attempt holding a matching pass. Named cost (independent review of 0.7.12): every plan parsed every other
+// attempt's whole ledger (up to 115 MB, ~0.4 GB of memory for two) under its lock. An index that cannot be refreshed (the
+// ledger is being written) is used as it stands: a pass recorded is never unrecorded. Null when there is none to use.
+function passIndex(root, id) {
+  const ledger = path.join(attemptDir(root, id), 'ledger.jsonl');
+  const file = path.join(root, '.wf-worktrees', '_passes', `${id}.json`);
+  let st;
+  try {
+    st = fs.statSync(ledger);
+  } catch {
+    return null;
+  }
+  let cached = null;
+  try {
+    cached = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {}
+  if (cached && cached.size === st.size && cached.mtimeMs === st.mtimeMs && Array.isArray(cached.passes)) return cached.passes;
+  let s;
+  try {
+    s = loadState(root, id);
+  } catch {
+    return Array.isArray(cached?.passes) ? cached.passes : null;
+  }
+  const seen = new Set();
+  const passes = [];
+  for (const x of [...s.gates, ...(s.checks ?? [])].flatMap((g) => g.steps ?? [])) {
+    if (!['passed', 'reused'].includes(x.status) || !x.key) continue;
+    const k = `${x.id}|${x.key}|${x.resultIdentity ? 1 : 0}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    passes.push({ id: x.id, key: x.key, resultIdentity: Boolean(x.resultIdentity) });
+  }
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const tmp = `${file}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify({ size: st.size, mtimeMs: st.mtimeMs, passes }));
+    fs.renameSync(tmp, file);
+  } catch {}
+  return passes;
+}
+
 // Selection is computed from the adapter committed at the attempt's base, never the worktree copy.
 export async function planGate(root, state, options = {}) {
   const live = loadConfig(root);
@@ -133,15 +176,21 @@ export async function planGate(root, state, options = {}) {
   // pin, never the worktree, and a step whose inputs include the adapter folder sees the change in its inputs hash. Named
   // failure (audit of 51 attempts): 38 step runs for packages with no changed file, after a change to adapter files only.
   const full = options.full === true;
-  // The project's other attempts, read once per plan and only when a step looks in them (I-150).
+  // The project's other attempts (I-150): their pass indexes, read once per plan and only when a step looks in them; an
+  // attempt's ledger is read in full only when its index holds a pass for the key a step looks for.
   let others = null;
-  const otherAttempts = () => (others ??= listAttempts(root).filter((x) => x !== state.id).flatMap((x) => {
-    try {
-      return [loadState(root, x)];
-    } catch {
-      return [];
+  const otherIndexes = () => (others ??= listAttempts(root).filter((x) => x !== state.id).map((x) => ({ id: x, passes: passIndex(root, x) })).filter((x) => x.passes?.length));
+  const loaded = new Map();
+  const otherState = (x) => {
+    if (!loaded.has(x)) {
+      try {
+        loaded.set(x, loadState(root, x));
+      } catch {
+        loaded.set(x, null);
+      }
     }
-  }));
+    return loaded.get(x);
+  };
   const imp = impact(cfg, changed);
   const allChanged = Object.values(changed).flat();
   let focused = false;
@@ -272,10 +321,11 @@ export async function planGate(root, state, options = {}) {
         const runnerBefore = legacyRunnerIdentity(root, state, step, []);
         return (legacy = !before || also.unreadable.length ? null : hashValue(also.trees ? { inputs: before.hash, runner: runnerBefore, also: also.trees } : { inputs: before.hash, runner: runnerBefore }));
       };
-      const found = otherAttempts().flatMap((o) => {
-        const p = findReuse(o, step.id, key, legacyAcross);
+      const found = otherIndexes().filter((x) => x.passes.some((p) => p.id === step.id && (p.key === key || (!p.resultIdentity && p.key === legacyAcross())))).flatMap((x) => {
+        const o = otherState(x.id);
+        const p = o ? findReuse(o, step.id, key, legacyAcross) : null;
         return p ? [{ o, p }] : [];
-      }).sort((a, b) => String(b.p.at ?? '').localeCompare(String(a.p.at ?? '')));
+      }).sort((a, b) => String(b.p.runId ?? '').localeCompare(String(a.p.runId ?? '')));
       for (const { o, p } of found) {
         const ranOn = [...o.gates, ...(o.checks ?? [])].find((g) => g.runId === p.runId)?.tree?.[repo.name];
         if (!ranOn || !/^[0-9a-f]{40}$/.test(ranOn)) continue;
@@ -1159,6 +1209,25 @@ async function executeRun(root, state, plan, live, run) {
   // Light steps first (their failures are cheap to learn early), then heavy steps longest first, so the gate's wall
   // time is not the serial chain of heavy steps started in adapter order. Unknown durations count as longest.
   const lastDuration = (id) => allGateSteps(state).filter((s) => s.id === id && s.durationMs !== undefined && s.status !== 'reused').at(-1)?.durationMs ?? Infinity;
+  // A pass reused from another attempt brings its log into this run's evidence, verified against the sha256 that run
+  // recorded: the proof then lives with the attempt that relies on it. Named failure (independent review of 0.7.12): the
+  // log stayed in the other attempt, and releasing that attempt's evidence left this one citing a file that was gone. A log
+  // that cannot be read or does not match makes the step run.
+  const copiedLogs = new Map();
+  for (const s of plan.steps.filter((x) => x.decision === 'reuse' && x.reusedFromAttempt)) {
+    const from = s.sourceRecord?.log;
+    const read = from ? readRegular(from) : null;
+    if (!read || (s.sourceRecord.logSha256 && sha256(read.bytes) !== s.sourceRecord.logSha256)) {
+      Object.assign(s, { decision: 'run', reason: `the log of ${s.reusedFrom} in ${s.reusedFromAttempt} ${read ? 'differs from its recorded sha256' : 'cannot be read'}: runs`, reusedFrom: null, reusedFromAttempt: undefined, sourceRecord: undefined });
+      continue;
+    }
+    const dir = path.join(runDir, s.id);
+    const log = path.join(dir, 'output.log');
+    prepareWrite(log);
+    mkdirStateDirectory(dir, { recursive: true });
+    writeNoFollow(log, read.bytes, { exclusive: true });
+    copiedLogs.set(s.id, { log, logSha256: sha256(read.bytes) });
+  }
   const queue = plan.steps.filter((s) => s.decision === 'run').map((s, i) => ({ s, i, heavy: s.tier === 'heavy' ? 1 : 0, d: lastDuration(s.id) }))
     .sort((a, b) => a.heavy - b.heavy || (a.heavy ? b.d - a.d : 0) || a.i - b.i)
     .map((x) => x.s);
@@ -1167,7 +1236,7 @@ async function executeRun(root, state, plan, live, run) {
     // Recorded under today's key and identity, so the next gate finds it directly; the evidence is re-selected when the
     // step's globs narrowed since the run (files the run collected, by their source path, unchanged bytes).
     const picked = s.reselect ? reselectArtifacts(prior, s.reselect, artifactUnits(root, state)) : null;
-    results.push({ ...prior, ...(picked ?? {}), key: s.key, runnerIdentity: s.runnerIdentity, resultIdentity: true, status: 'reused', reusedFrom: prior.runId, reusedFromAttempt: s.reusedFromAttempt ?? null, reason: s.reselect ? `${s.reason}; evidence re-selected by the step's current globs` : s.reason, runId });
+    results.push({ ...prior, ...(picked ?? {}), ...(copiedLogs.get(s.id) ?? {}), key: s.key, runnerIdentity: s.runnerIdentity, resultIdentity: true, status: 'reused', reusedFrom: prior.runId, reusedFromAttempt: s.reusedFromAttempt ?? null, reason: s.reselect ? `${s.reason}; evidence re-selected by the step's current globs` : s.reason, runId });
   }
   for (const s of plan.steps.filter((x) => ['skip', 'defer'].includes(x.decision))) results.push({ id: s.id, repo: s.repo, tier: s.tier, status: s.decision === 'defer' ? 'deferred' : 'skipped', reason: s.reason, skippedBy: s.skippedBy, runId });
   if (results.length) append(root, state.id, 'gate.step', { runId, steps: results }, null);

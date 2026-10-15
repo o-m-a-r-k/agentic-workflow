@@ -394,6 +394,42 @@ test('I-152: a launched reviewer that dies after writing findings has them kept 
   assert.equal(next.mode ?? JSON.parse(fs.readFileSync(next.bundle, 'utf8')).mode, 'full', 'the next round is a full one');
 });
 
+// Independent review of 0.7.12: a delta reviewer stopped before it gave the prior findings their verdicts had its findings
+// refused, and after a kept partial round the next delta started at the partial round's tree, so what it never reached
+// was handed to no reviewer.
+test('I-152: a delta reviewer that dies before its verdicts keeps its findings, and the next delta starts where the last finished round did', () => {
+  const p = singleRepoProject('i152-delta', { gate: { steps }, ...codexConfig });
+  const base = fakeCodex(p.base);
+  const run = (args, env = {}) => wf(p.root, args, { env: { ...base, ...env } });
+  const id = ok(run(['entry', '--item', 'ENG-1', '--owner', 'o', '--json'])).json().id;
+  ok(run(['handoff', 'planner', '--agent', 'p', '--runtime', 'codex', '--attempt', id]));
+  ok(run(['plan', '--file', criteriaFile(p.base), '--attempt', id]));
+  const wt = loadState(p.root, id).repos.app.worktree;
+  ok(run(['handoff', 'implementer', '--agent', 'i', '--attempt', id]));
+  commitIn(wt, { 'src/a.txt': 'changed\n' });
+  ok(run(['handoff', 'close', '--agent', 'i', '--attempt', id]));
+  ok(run(['handoff', 'reviewer', '--agent', 'r1', '--attempt', id]));
+  ok(run(['review', '--closure', closureFile(p.base, { ...goodClosure('r1'), findings: [{ id: 'F1', severity: 'high', summary: 'wrong total', status: 'open', evidence: 'src/a.txt:1', criterion: 'C1' }] }), '--attempt', id]));
+  const judged = loadState(p.root, id).reviews[0].tree;
+  ok(run(['handoff', 'implementer', '--agent', 'i2', '--attempt', id]));
+  commitIn(wt, { 'src/a.txt': 'fixed\n', 'src/b.txt': 'new code\n' });
+  ok(run(['handoff', 'close', '--agent', 'i2', '--attempt', id]));
+  ok(run(['handoff', 'reviewer', '--agent', 'r2', '--runtime', 'codex', '--attempt', id]));
+  const died = { ...goodClosure('x'), criteria: [], findings: [{ id: 'F1', severity: 'medium', summary: 'b is wrong', status: 'open', evidence: 'src/b.txt:1', criterion: 'C1' }] };
+  const launched = run(['handoff', 'run', '--agent', 'r2', '--attempt', id], { FAKE_CLOSURE: JSON.stringify(died), FAKE_EXIT: '1' });
+  assert.match(launched.err, /kept the 1 finding\(s\) it had written, as a partial round/);
+  const kept = loadState(p.root, id).reviews.find((r) => r.reviewer === 'r2');
+  assert.equal(kept.partial, true);
+  assert.match(kept.closure.notReached.join(' '), /not reached before it ended: verdicts on the open finding\(s\) r1:F1/);
+  ok(run(['handoff', 'implementer', '--agent', 'i3', '--attempt', id]));
+  commitIn(wt, { 'src/b.txt': 'b fixed\n' });
+  ok(run(['handoff', 'close', '--agent', 'i3', '--attempt', id]));
+  ok(run(['handoff', 'reviewer', '--agent', 'r3', '--runtime', 'codex', '--attempt', id]));
+  const next = loadState(p.root, id).handoffs.findLast((h) => h.agent === 'r3');
+  assert.equal(next.mode, 'delta');
+  assert.deepEqual(next.deltaFrom, judged, 'the delta starts at the tree the last finished round judged, not the partial one');
+});
+
 test('I-69: a launched reviewer that ends with no closure leaves the owner the real routes, and the round is not an audit', () => {
   const p = singleRepoProject('i69-guidance', { gate: { steps }, ...codexConfig });
   const env = fakeCodex(p.base);

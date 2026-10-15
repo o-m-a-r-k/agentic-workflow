@@ -319,7 +319,11 @@ async function reviewerPartial(root, id, h, label, why) {
   const now = loadState(root, id);
   const handed = now.handoffs.find((x) => x.bundle === h.bundle);
   const file = handed?.closureFile ?? null;
-  if (!file || !fs.existsSync(file) || (now.reviews ?? []).some((r) => r.handoff === h.bundle) || (now.reviewsRefused ?? []).some((r) => r.handoff === h.bundle)) return;
+  // The stop and a `wait` following the role both see it end: whichever records second says what the first kept.
+  const keptNote = (r) => process.stderr.write(`${label} reviewer ${h.agent} did not finish; the ${r.closure?.findings?.length ?? 0} finding(s) it had written were kept as a partial round\n`);
+  const already = (now.reviews ?? []).find((r) => r.handoff === h.bundle);
+  if (already?.partial) keptNote(already);
+  if (!file || !fs.existsSync(file) || already || (now.reviewsRefused ?? []).some((r) => r.handoff === h.bundle)) return;
   let closure;
   try {
     closure = JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -334,8 +338,10 @@ async function reviewerPartial(root, id, h, label, why) {
   try {
     const { recordReview } = await import('./lifecycle.mjs');
     recordReview(root, { attempt: id, closure: partial, salvaged: true, partial: true });
-    process.stderr.write(`${label} reviewer ${h.agent} did not finish; the engine kept the ${closure.findings.length} finding(s) it had written, as a partial round (not an audit: the next round is a full one)\n`);
+    process.stderr.write(`${label} reviewer ${h.agent} did not finish; the engine kept the ${closure.findings.length} finding(s) it had written, as a partial round (not an audit: the next round covers what it did not reach, from the last finished round)\n`);
   } catch (error) {
+    const meanwhile = (loadState(root, id).reviews ?? []).find((r) => r.handoff === h.bundle && r.partial);
+    if (meanwhile) return void keptNote(meanwhile);
     process.stderr.write(`${label} reviewer ${h.agent} did not finish, and its findings so far could not be kept: ${String(error.message ?? error).split('\n')[0]} (they are in ${file})\n`);
   }
 }

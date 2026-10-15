@@ -62,6 +62,12 @@ test('a pass another attempt recorded under the same key is reused; a step that 
   assert.match(sb.unit.reason, new RegExp(`in ${a.id}`));
   assert.equal(sb.ui.status, 'passed', 'a step that keeps evidence files runs for its own ticket');
   assert.deepEqual(counts(b.repos.app.worktree), { unit: 0, ui: 1 }, "the reused step did not run here");
+  // Its log is copied into this attempt's evidence, so releasing the attempt it came from loses no proof.
+  assert.ok(sb.unit.log.includes(`${path.sep}${b.id}${path.sep}`) && fs.existsSync(sb.unit.log), sb.unit.log);
+  ok(wf(root, ['abandon', '--reason', 'scenario', '--attempt', a.id]));
+  ok(wf(root, ['evidence', 'release', '--attempt', a.id, '--reason', 'scenario']));
+  assert.ok(fs.existsSync(sb.unit.log));
+  assert.match(ok(wf(root, ['verify', '--attempt', b.id])).out, /verified|match/);
   const c = admitted(root, base, 'ENG-32');
   commitIn(c.repos.app.worktree, { 'src/a.txt': 'same\n', 'lib/b.txt': 'outside the inputs\n' });
   const sc = byId(gateJson(root, c.id).data.steps);
