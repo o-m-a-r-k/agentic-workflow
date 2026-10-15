@@ -81,7 +81,9 @@ function delivered(name, item) {
   ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'q\n' });
   const shots = ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id, '--json'])).json().steps[0].artifacts;
-  ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', e.id]));
+  const handed = ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', e.id, '--json'])).json();
+  // The reviewer writes its closure with a file tool, which the guard judges: the file it is handed is outside the evidence.
+  assert.doesNotMatch(JSON.parse(fs.readFileSync(handed.bundle, 'utf8')).reviewClosureFile, /\.wf-evidence/);
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r', { screenshotsInspected: shots.map((a) => a.sha256) })), '--attempt', e.id]));
   ok(wf(root, ['accept', '--attempt', e.id]));
   ok(wf(root, ['deliver', '--attempt', e.id]));

@@ -8,7 +8,6 @@ import { commitIn, criteriaFile, makeRepo, ok, singleRepoProject, state, tmp, wf
 import { reviewDocumentProblems } from '../engine/rules.mjs';
 import { deriveFromDiff, impactCheckProblems } from '../engine/impact.mjs';
 import { loadConfig } from '../engine/config.mjs';
-import { roleInstructions } from '../engine/onboard.mjs';
 
 function ready(name, review, files = {}) {
   const p = singleRepoProject(name, { review, gate: { steps: [] } }, files);
@@ -18,21 +17,6 @@ function ready(name, review, files = {}) {
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'changed\n' });
   return { ...p, id: e.id, wt: e.repos.app.worktree };
 }
-
-test('I-58: large handoffs use bounded structured inspection', () => {
-  const p = ready('large-handoff', { rules: [{ id: 'policy', paths: ['src/**'], read: ['docs/policy.md'] }] }, { 'docs/policy.md': '# Required policy\nRead the whole document.\n' });
-  const h = ok(wf(p.root, ['handoff', 'reviewer', '--agent', 'reviewer', '--runtime', 'codex', '--attempt', p.id, '--json'])).json();
-  const handed = JSON.parse(fs.readFileSync(h.bundle, 'utf8'));
-  assert.doesNotMatch(handed.instructions, /receipt/i, 'no read receipt is taught or required (0.7.0)');
-  // The role a native reviewer starts from names the tool and the bound, and keeps documents whole.
-  const inspect = { claude: 'structured handoff JSON is inspected with `wf evidence inspect` (never one full-output dump)', codex: 'inspects structured handoff JSON with `wf evidence inspect` (never one full-output dump)' };
-  for (const host of ['claude', 'codex']) {
-    const bootstrap = roleInstructions(loadConfig(p.root), 'reviewer', 'review', '', host);
-    assert.match(bootstrap, /inspected in bounded sections with `wf evidence inspect <handed path> --attempt <id>`, never as one full dump, and no section is skipped/);
-    assert.ok(bootstrap.includes(inspect[host]), host);
-    assert.match(bootstrap, /Read the documents your work depends on far enough to apply what bears on it, and say what you did not reach rather than claiming it\./);
-  }
-});
 
 test('review readiness: all/partly missing applicable base documents refuse; ticket copies never replace them', () => {
   for (const partial of [false, true]) {

@@ -33,27 +33,6 @@ function project(name, config = {}) {
 const run = (p, args, opts = silent) => wf(p.root, [...args, '--attempt', p.id], opts);
 const asked = (r) => [...r.err.matchAll(/wf approve (A\d+) --from-question/g)].map((m) => m[1]);
 
-test('each item is its own short question; the person fixes one and lets another leave', () => {
-  const p = project('pi-each');
-  const r = run(p, ['scope', 'defer', '--finding', 'r1:F1,r1:F2']);
-  assert.equal(r.code, 75);
-  const ids = asked(r);
-  assert.equal(ids.length, 2, 'one question per item');
-  const [q1, q2] = ids.map((id) => state(p.root, p.id).decisions.find((d) => d.id === id));
-  assert.deepEqual(q1.choices, ['let it leave', 'fix now']);
-  assert.match(q1.summary, /^r1:F1: src\/old\.txt:2 the XML button is never clicked by a test \(low, rated by reviewer r1, old\.txt:2\)\. Fix it now, or let it leave this delivery as a known issue\?$/);
-  assert.doesNotMatch(q1.summary, /More detail the reviewer wrote/, 'the reviewer\'s long text stays in the record, not in the question');
-  approveAsOwner(p.root, p.id, q1.id, 'let it leave');
-  approveAsOwner(p.root, p.id, q2.id, 'fix now');
-  const mixed = run(p, ['scope', 'defer', '--finding', 'r1:F1,r1:F2']);
-  assert.match(mixed.err, /the person chose to fix r1:F2 \(A\d+\) now/);
-  assert.equal(mixed.code, 75);
-  ok(run(p, ['scope', 'defer', '--finding', 'r1:F1']));
-  const s = state(p.root, p.id);
-  assert.deepEqual(s.scopeDecisions.at(-1).keys, ['r1:F1']);
-  assert.deepEqual(s.scopeDecisions.at(-1).decisionFor, { 'r1:F1': q1.id });
-});
-
 test('what the person chose to fix reaches the reviewers who rate similar items, in the project (0.7.9, D19)', () => {
   const p = project('pi-learn');
   const [q1, q2] = asked(run(p, ['scope', 'defer', '--finding', 'r1:F1,r1:F2']));
@@ -231,7 +210,6 @@ test('a medium or high item the person directs out of the ticket leaves on their
   const p = project('pi-directed');
   const refused = run(p, ['scope', 'defer', '--finding', 'r1:F3']);
   assert.equal(refused.code, 75);
-  assert.match(refused.err, /r1:F3 \(medium\) stays in this delivery/);
   assert.match(refused.err, /if the person told you to leave it out of this ticket, run this again with `--person-directed "<their words>"`/);
   const asked = run(p, ['scope', 'defer', '--finding', 'r1:F3', '--person-directed', 'leave the old export as it is']);
   assert.equal(asked.code, 75);

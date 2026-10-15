@@ -78,21 +78,6 @@ test('I-80: structured handoffs beyond4 MiB inspect bounded original sections',a
   fs.rmSync(f.root,{recursive:true,force:true});
 });
 
-test('I-80: actual fresh native role bootstrap separates structured input from the documents read far enough to apply every rule',async()=>{
-  const {roleInstructions}=await import('../engine/onboard.mjs');
-  const cfg={classes:{full:{use:'Critical boundaries'}}};
-  const inspect={claude:'structured handoff JSON is inspected with `wf evidence inspect` (never one full-output dump)',codex:'inspects structured handoff JSON with `wf evidence inspect` (never one full-output dump)'};
-  for(const [role,host] of ['implementer','reviewer','planner'].flatMap((r)=>['claude','codex'].map((h)=>[r,h]))) {
-    const body=roleInstructions(cfg,role,'full','',host);
-    // Structured handoff JSON goes through `wf evidence inspect` and is never printed whole; the documents a bundle names
-    // are separate files, each read far enough to apply every rule that bears on the work (the page mechanics are the reviewer bundle's, tested with it).
-    assert.ok(body.includes(inspect[host]),host+' '+role);
-    assert.match(body,/Read the documents your work depends on far enough to apply what bears on it, and say what you did not reach rather than claiming it\./);
-    assert.doesNotMatch(body,/read receipt|document receipt|document-read/i);
-    assert.doesNotMatch(body,/read large handoffs and required documents with one plain/);
-  }
-});
-
 // Named failure I-80: budgeting before final pagination metadata could overflow on Linux fixture paths.
 test('I-80: final pretty-printed inspection pages stay bounded across filename lengths',async()=>{
   const {inspectEvidence}=await import('../engine/evidence-read.mjs');

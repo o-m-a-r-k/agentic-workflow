@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { changedInventory, divideReview, impactCatalog, isCurrentReviewer, validateDivision } from '../engine/review-groups.mjs';
-import { transactionSeams, withEvidenceTransaction } from '../engine/evidence.mjs';
+import { withEvidenceTransaction } from '../engine/evidence.mjs';
 import { closureFile, commitIn, criteriaFile, FIXTURE_EXPECT, goodClosure, impactCheckedFrom, ok, sh, singleRepoProject, state, wf, WF, write } from './helpers.mjs';
 
 function flowInput() {
@@ -241,23 +241,6 @@ test('evidence transaction rejects unsafe identities and control-path aliases be
   const alias = path.join(p.root, '.wf-worktrees'); fs.symlinkSync(p.base, alias);
   assert.throws(() => withEvidenceTransaction(p.root, 'ENG-1.1', () => {}), /control path/);
   assert.equal(fs.existsSync(path.join(p.base, 'ENG-1.1')), false);
-});
-
-test('evidence transactions tolerate release after collision and remain independent of runner links', () => {
-  const p = singleRepoProject('transaction-release', { gate: { steps: [] } });
-  const control = path.join(p.root, '.wf-worktrees', '_transactions');
-  fs.mkdirSync(control, { recursive: true });
-  const lock = path.join(control, 'ENG-1.1.lock');
-  fs.writeFileSync(lock, JSON.stringify({ pid: process.pid, token: 'owner' }));
-  transactionSeams.afterCollision = file => fs.unlinkSync(file);
-  try { assert.equal(withEvidenceTransaction(p.root, 'ENG-1.1', () => 'acquired'), 'acquired'); }
-  finally { transactionSeams.afterCollision = null; }
-  fs.mkdirSync(path.join(p.root, '.wf-worktrees', 'ENG-1.1'), { recursive: true });
-  fs.symlinkSync(p.base, path.join(p.root, '.wf-worktrees', 'ENG-1.1', '_runner'));
-  assert.equal(withEvidenceTransaction(p.root, 'ENG-1.1', () => 'readable'), 'readable');
-  fs.symlinkSync(path.join(p.base, 'outside'), lock);
-  assert.throws(() => withEvidenceTransaction(p.root, 'ENG-1.1', () => {}), /control path|unreadable/);
-  assert.equal(fs.existsSync(path.join(p.base, 'outside')), false);
 });
 
 test('group launch eligibility rejects partial, superseded and mismatched groups', () => {

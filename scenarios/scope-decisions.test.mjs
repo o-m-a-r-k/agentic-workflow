@@ -96,13 +96,15 @@ test('a defect on a line the change wrote is fixed here: it never moves to a sib
     for (const refs of ['r1:F2', 'r1:F1,r1:F2']) {
       const refused = leave(refs);
       assert.equal(refused.code, 75, `${verb} ${refs}`);
-      assert.match(refused.err, /r1:F2 blocks this delivery: it is fixed here; a finding the person judges wrong is waived by them \(`wf scope waive`\)/);
+      assert.ok(refused.err.includes('r1:F2'), `${verb} ${refs}: the refusal names the finding that blocks`);
       assert.equal(refusals().at(-1).id, 'leave:blocks');
     }
   }
   assert.deepEqual(state(p.root, p.id).decisions, [], 'nothing was put to the person');
   assert.deepEqual(state(p.root, p.id).scopeDecisions ?? [], [], 'nothing was ticketed or deferred');
   assert.deepEqual(observations(loadState(p.root, p.id)).map((f) => f.ref), ['r1:F1'], 'the observation named with it did not leave');
+  // A waiver is for a finding that blocks: an observation has nothing to waive.
+  assert.match(wf(p.root, ['scope', 'waive', '--finding', 'r1:F1', '--attempt', p.id]).err, /does not block/);
   // The person may still waive it: their decision, put to them by the waiver and confirmed with `wf approve`.
   assert.match(wf(p.root, ['scope', 'waive', '--finding', 'r1:F2', '--attempt', p.id], { ownerSilent: true }).err, /waiving r1:F2 is the owner's decision \(A1: waive r1:F2 \(major: the new label is empty\)/);
   const { approveInTerminal } = await import('../engine/approve.mjs');

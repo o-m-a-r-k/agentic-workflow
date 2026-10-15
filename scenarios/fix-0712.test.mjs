@@ -198,6 +198,10 @@ test('I-141: replacement lock after ENOENT on the no-follow open is another coll
   try { assert.equal(withEvidenceTransaction(p.root, 'ENG-1.1', () => 'acquired'), 'acquired'); }
   finally { fs.openSync = realOpen; transactionSeams.afterCollision = null; }
   assert.ok(replaced && collisions >= 2, `replacement seen (collisions ${collisions})`);
+  // A link at the attempt's runner path is no obstacle to the transaction.
+  fs.mkdirSync(path.join(p.root, '.wf-worktrees', 'ENG-1.1'), { recursive: true });
+  fs.symlinkSync(p.base, path.join(p.root, '.wf-worktrees', 'ENG-1.1', '_runner'));
+  assert.equal(withEvidenceTransaction(p.root, 'ENG-1.1', () => 'readable'), 'readable');
 });
 
 // What must keep failing closed after the fix.
@@ -208,6 +212,7 @@ test('I-141 guard: a symlink / a hard-linked / a directory at the lock path stil
   const lock = path.join(fs.realpathSync(control), 'ENG-1.1.lock');
   fs.symlinkSync(path.join(p.base, 'outside'), lock);
   assert.throws(() => withEvidenceTransaction(p.root, 'ENG-1.1', () => {}), /control path|unreadable/);
+  assert.equal(fs.existsSync(path.join(p.base, 'outside')), false, 'nothing is written through the link');
   fs.unlinkSync(lock);
   fs.writeFileSync(path.join(p.base, 'other'), '{}'); fs.linkSync(path.join(p.base, 'other'), lock);
   assert.throws(() => withEvidenceTransaction(p.root, 'ENG-1.1', () => {}), /unreadable/);

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { closureFile, commitIn, goodClosure, ok, planDoc, reportFileOf, wf, writeReport } from './helpers.mjs';
-import { C, growTo, inProcess, jsonl, planFile, project, reviewRound, runner, started } from './strategist-fixtures.mjs';
+import { C, inProcess, jsonl, planFile, project, reviewRound, runner, started } from './strategist-fixtures.mjs';
 
 // 0.7.0 (D3), named failures: nothing showed rounds, scope growth, wall time or quiet sessions. A review round stayed open
 // 745 minutes after its session died; one ticket grew to 303 changed files against a plan of a few dozen anchors; the owner
@@ -93,20 +93,6 @@ test('a plan that states no expectation is refused at 0.7.0 with a hint; an atte
   ok(old.run(ctx6.root, ['handoff', 'implementer', '--agent', 'impl-ENG-746', '--attempt', o.id, '--owner', 'owner-1']));
   assert.equal(old.signals(ctx6.root, o.id).expect, null);
   assert.match(ok(old.run(ctx6.root, ['resume', '--attempt', o.id])).out, /files changed: 0; the plan states no expectation/);
-});
-
-test('growth refuses nothing: 40 changed files are handed on and shown against what the plan expected', () => {
-  // Named failure: the first answer stopped every handoff at changed files above 2x the plan's (and amendments above 1x the criteria).
-  const ctx = project('growth');
-  const a = started(v7, ctx, { item: 'ENG-742', expect: EXPECT });
-  const { root } = ctx;
-  growTo(a, 40);
-  reviewRound(v7, ctx, a, { findings: 1 });
-  const sig = v7.signals(root, a.id);
-  assert.equal(sig.files.changed, 40);
-  assert.match(ok(v7.run(root, ['resume', '--attempt', a.id])).out, /files changed: 40; the plan expected 2/);
-  assert.notEqual(v7.state(root, a.id).decision.kind, 'strategy');
-  ok(v7.run(root, ['handoff', 'reviewer', '--agent', 'free-reviewer', '--attempt', a.id, '--owner', a.owner]));
 });
 
 // ---- Roles say what they expect, in the file they write early ----
@@ -264,13 +250,6 @@ test('wf sync writes the strategist agent for Claude and Codex, and `roles.strat
   assert.match(claude, /^name: wf-strategist$/m);
   assert.match(claude, /^tools: Read, Grep, Glob, Bash, Write$/m);
   assert.match(claude, /model: opus/);
-  // Handed because the course diverged from what was predicted; one decision from the eight actions, one prediction.
-  assert.match(claude, /handed you because the course diverged from what was predicted/);
-  assert.doesNotMatch(claude, /tripwire/i);
-  assert.match(claude, /\*\*You decide\*\* one action/);
-  for (const action of ['continue', 'consolidate', 'cluster', 'delta-review', 'split', 'ticket', 'model', 'escalate']) assert.match(claude, new RegExp(`^- \`${action}\`: `, 'm'), action);
-  assert.match(claude, /one prediction the engine can check/);
-  assert.match(claude, /`wf strategy record --closure <that file> --attempt <id>`/);
   const codex = fs.readFileSync(path.join(ctx.root, '.codex', 'agents', 'wf-strategist.toml'), 'utf8');
   assert.match(codex, /name = "wf-strategist"/);
   assert.match(codex, /developer_instructions = """/);

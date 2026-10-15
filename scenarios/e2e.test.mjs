@@ -181,18 +181,6 @@ test('narrow inputs fail closed: a change outside them reruns the step instead o
   assert.match(g.steps[0].reason ?? '', /outside (this|every) step's inputs/);
 });
 
-// 0.7.0: the guard judges file targets and the working directory, never shell text (scenarios/trust-0.7.test.mjs).
-test('the guard hook blocks a shell run inside the evidence and a file edit of it; shell text is not scanned', async () => {
-  const { check } = await import('../hooks/guard-evidence.mjs');
-  const blocked = (command, cwd = '/p') => Boolean(check({ cwd, tool_name: 'Bash', tool_input: { command } }));
-  assert.equal(blocked('echo x >> ledger.jsonl', '/p/.wf-evidence/attempts/A'), true);
-  assert.equal(blocked('ls', '/p/.wf-evidence/attempts/A/gate'), true);
-  assert.equal(blocked('cp .wf-evidence/a /tmp/x'), false, 'shell text is not scanned');
-  assert.equal(blocked(`python3 -c "open('x','w')"`, '/p'), false, 'outside evidence nothing is checked');
-  assert.equal(blocked('wf status --attempt ENG-1.1'), false);
-  assert.equal(Boolean(check({ cwd: '/p', tool_name: 'Write', tool_input: { file_path: '/p/.wf-evidence/attempts/A/ledger.jsonl' } })), true);
-});
-
 test('one step with narrow inputs is not reused just because another step covers the changed file', () => {
   const steps = [
     { id: 'lint', repo: 'app', run: 'true', inputs: ['**'] },

@@ -124,20 +124,6 @@ test('two different lessons with one id in two repositories are reported, never 
   assert.match(again, /^L-1 {2}api \(main\)/m, 'and it keeps its plain id');
 });
 
-// Named failure (I-49): a generated lesson was double-quoted in a repository whose Prettier config asks for single quotes,
-// so it failed that repository's own format check.
-test('a lesson is written with the single quotes the repository\'s Prettier config asks for', () => {
-  const what = 'a raw table shipped: no reviewer caught it';
-  const lesson = (root) => {
-    ok(add(root, ['--title', 'Tables use the shared component', '--what', what, '--cause', 'test', '--mechanism', 'doc']));
-    return fs.readFileSync(lessonFile(root, 'L-1'), 'utf8');
-  };
-  assert.match(lesson(singleRepoProject('lessons-plain', { gate: { steps } }).root), /what: "a raw table shipped: no reviewer caught it"/);
-  assert.match(lesson(singleRepoProject('lessons-single', { gate: { steps } }, { '.prettierrc': '{"singleQuote": true}\n' }).root), /what: 'a raw table shipped: no reviewer caught it'/);
-  assert.match(lesson(singleRepoProject('lessons-pkg', { gate: { steps } }, { 'package.json': JSON.stringify({ name: 'x', prettier: { singleQuote: true } }) }).root), /what: 'a raw table shipped: no reviewer caught it'/);
-  assert.match(lesson(singleRepoProject('lessons-override', { gate: { steps } }, { '.prettierrc.json': JSON.stringify({ singleQuote: true, overrides: [{ files: '*.yaml', options: { singleQuote: false } }] }) }).root), /what: "a raw table shipped: no reviewer caught it"/);
-});
-
 test('a reopened attempt records its lesson before the review; it is then delivered with the change', () => {
   const { base, root } = singleRepoProject('lessons-reopen', { gate: { steps } });
   const first = toAccepted(root, base, { item: 'ENG-301' });
@@ -187,7 +173,6 @@ test('every role gets the lessons that apply, with why; proposed ones are adviso
   assert.equal(ib.lessons.apply.length, 6);
   assert.deepEqual(ib.lessons.omitted, ['L-5', 'L-8']);
   assert.equal(ib.lessons.apply.find((l) => l.id === 'L-6').recurrence, 1, 'the learned recurrence is in the bundle');
-  assert.match(fs.readFileSync(path.join(import.meta.dirname, '..', 'templates', 'agents', 'implementer.md'), 'utf8'), /lessons and design-system components as context/, 'the lessons are the implementer\'s context; a trailer is optional and recorded when written (below)');
   // Trailers: one -m per paragraph, so each is a line of the message as an implementer would write it.
   const commitWith = (files, ...paras) => {
     for (const [rel, content] of Object.entries(files)) fs.writeFileSync(path.join(e.repos.app.worktree, rel), content);

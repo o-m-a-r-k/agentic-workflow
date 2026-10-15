@@ -36,6 +36,11 @@ implementer spent 266 minutes on a 90-minute estimate: 201 of them in sleep loop
   - Experience reviews run on the strongest model, briefed with the threat model.
   - Nothing reruns that cannot add information.
   - A maintainer release goes to main after a green verify, with no pull request.
+- **The scenario suite keeps only tests that catch an engine failure.** 29 tests are gone: 15 that only matched the
+  wording of a role text, skill or doc (one of them failed a release verify after an intended wording change), and 14 that
+  repeated what another test asserts, each with its unique assertions moved first. Generated role files are checked for
+  structure, and long message regexes give way to the refusal ids the engine records. The checks that agent texts name
+  commands and links that exist are kept.
 
 ## 0.7.13 - Quick fixes take minutes
 

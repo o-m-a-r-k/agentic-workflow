@@ -13,22 +13,22 @@ test('doctor states the tracker mode trade-off; api mode needs its key; the read
   // Connector mode: a warning naming the gap and the one-line switch.
   const a = singleRepoProject('mode-agent', { tracker: { kind: 'linear', statuses } });
   const d = wf(a.root, ['doctor', '--no-steps']);
-  assert.match(d.out, /warning: tracker mode — the linear tracker is driven by the agent's connector: convenient, but the handoff is agent-reported \(recorded "agent-reported, unverified"\), so wf cannot prove the status, the comment or the attachments are the tracker's own answer[\s\S]*fix: let the engine reach it: `wf tracker mode api` \(then the owner runs `wf secrets guide LINEAR_API_KEY`\)/);
-  assert.match(d.out, /tracker readback level\n {4}verifiable: agent-reported in this shell \(no Claude Code or Codex session\); host-recorded when the owner runs wf from Claude Code or Codex/);
-  assert.match(d.out, /connectors: tracker linear\/connector\n {4}verifiable: the agent acts through its connector/);
+  assert.match(d.out, /warning: tracker mode[\s\S]*agent-reported[\s\S]*`wf tracker mode api`[\s\S]*`wf secrets guide LINEAR_API_KEY`/);
+  assert.match(d.out, /tracker readback level\n {4}verifiable: agent-reported/);
+  assert.match(d.out, /connectors: tracker linear\/connector/);
   // Api mode without the key catalogued, then catalogued but not set: doctor fails with the exact command.
   const b = singleRepoProject('mode-api', { tracker: { kind: 'linear', via: 'api', statuses } });
   const d1 = wf(b.root, ['doctor', '--no-steps']);
   assert.notEqual(d1.code, 0);
-  assert.match(d1.out, /✗ secrets: LINEAR_API_KEY — tracker\.via is api but LINEAR_API_KEY is not catalogued in \.workflow\/secrets\.yaml/);
+  assert.match(d1.out, /✗ secrets: LINEAR_API_KEY[^\n]*not catalogued/);
   const c = singleRepoProject('mode-api-key', { tracker: { kind: 'linear', via: 'api', statuses } }, { '.workflow/secrets.yaml': yaml({ keys: [{ key: 'LINEAR_API_KEY', kind: 'provided', required: true }] }) });
   const d2 = wf(c.root, ['doctor', '--no-steps']);
-  assert.match(d2.out, /✗ secrets: LINEAR_API_KEY — tracker\.via is api but LINEAR_API_KEY is not set\n {4}fix: the owner runs `wf secrets guide LINEAR_API_KEY` in their own terminal/);
+  assert.match(d2.out, /✗ secrets: LINEAR_API_KEY[^\n]*not set\n {4}fix: the owner runs `wf secrets guide LINEAR_API_KEY`/);
   // Switching: printed, or written into the adapter with its comments kept.
   const file = path.join(a.root, '.workflow', 'project.yaml');
   fs.writeFileSync(file, `# the adapter\n${fs.readFileSync(file, 'utf8')}`);
   assert.match(ok(wf(a.root, ['tracker', 'mode', 'api'])).out, /set in \.workflow\/project\.yaml:\n {2}tracker:\n {4}via: api\n {4}apiKey: LINEAR_API_KEY/);
-  assert.match(ok(wf(a.root, ['tracker', 'mode', 'api', '--write'])).out, /tracker\.via set to api .*commit it on the base branch[\s\S]*wf secrets guide LINEAR_API_KEY/);
+  assert.match(ok(wf(a.root, ['tracker', 'mode', 'api', '--write'])).out, /tracker\.via set to api[\s\S]*wf secrets guide LINEAR_API_KEY/);
   const text = fs.readFileSync(file, 'utf8');
   assert.match(text, /^# the adapter/);
   assert.match(text, /via: api/);

@@ -76,8 +76,6 @@ test('wf check runs light steps only, never counts as a gate, and the gate reuse
   const { root, id, wt, implBundle } = implemented('check', { gate: { steps: two } });
   assert.deepEqual(implBundle.check.steps.map((s) => s.id), ['lint'], 'the implementer bundle names the light steps');
   assert.match(implBundle.check.command, /^wf check --attempt ENG-1\.1/);
-  // The implementer's goal includes a passing `wf check` on the whole tree; its bundle carries the command.
-  assert.match(fs.readFileSync(path.join(import.meta.dirname, '..', 'templates', 'agents', 'implementer.md'), 'utf8'), /`wf check` passes on the tree you report[^.]*`check\.command`/);
   const c = ok(wf(root, ['check', '--attempt', id]));
   assert.match(c.out, /^wf check: run[\s\S]*^check passed[\s\S]*skipped {5}e2e {2}`wf check` runs light steps only[\s\S]*never counts as one/m);
   const s = state(root, id);

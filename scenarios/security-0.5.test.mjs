@@ -90,21 +90,6 @@ function attemptWithPlan(name, config = {}, files = {}) {
   return { ...p, e };
 }
 
-test('impact queries read the repos and limits of the adapter at the base, never the working tree\'s copy', () => {
-  const { base, root, e } = attemptWithPlan('impact-trusted');
-  // Another checkout on the machine, with a line the query looks for.
-  makeRepo(path.join(base, 'other'), { 'notes.txt': 'planted-line-from-another-checkout\n' });
-  const q = JSON.stringify({ pattern: 'planted-line-from-another-checkout', kind: 'literal', repo: 'extra' });
-  // Uncommitted edit of the adapter in the project root: a repo the base adapter never had, pointed at that checkout.
-  const file = path.join(root, '.workflow', 'project.yaml');
-  const cfg = JSON.parse(fs.readFileSync(file, 'utf8'));
-  write(root, '.workflow/project.yaml', yaml({ ...cfg, repos: [...cfg.repos, { name: 'extra', path: '../other', base: 'main' }] }));
-  const r = wf(root, ['impact', 'run', '--attempt', e.id, '--query', q]);
-  assert.equal(r.code, 75, `${r.out}${r.err}`);
-  assert.match(r.err, /unknown repo `extra` in the adapter at the attempt's base/);
-  assert.doesNotMatch(r.out, /notes\.txt/);
-});
-
 test('a regex query that backtracks without end is stopped and refused, never a hang', () => {
   const { root, e } = attemptWithPlan('impact-regex', { impact: { regexTimeoutMs: 1500 } }, { 'src/slow.txt': `${'a'.repeat(40)}!\n` });
   const t = Date.now();

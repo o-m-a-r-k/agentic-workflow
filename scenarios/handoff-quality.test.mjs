@@ -161,7 +161,6 @@ test('design system: bans and companions run over added lines; the hits are cont
   assert.deepEqual(pb.designSystem.components.map((c) => c.name), ['DataTable', 'Pagination'], 'the planner sees the shared components');
   // The planner is asked for targets that name the shared components a surface uses (the quality bar and the design system).
   assert.match(pb.instructions, /the quality bar \(`qualityBar`\) turned into targets for this ticket/);
-  assert.match(fs.readFileSync(path.join(import.meta.dirname, '..', 'templates', 'agents', 'planner.md'), 'utf8'), /which surfaces ship, which shared components they use, which contract stays matched/);
   ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id]));
   ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
   commitIn(e.repos.app.worktree, {

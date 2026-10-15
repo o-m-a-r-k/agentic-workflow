@@ -126,6 +126,7 @@ test('a finding that cites a failed criterion or a critical invariant blocks whe
     finding('F2', { criterion: 'C9' }),
     finding('F3', { invariant: 'tenant isolation: another workspace sees the row' }),
     finding('F4', { severity: 'critical' }),
+    finding('F5', { severity: 'low', invariant: 'tenant isolation: another workspace sees the row' }),
   ] })));
   assert.equal(classified(p, 'F1').blocks, true);
   assert.match(classified(p, 'F1').reason, /cites frozen criterion C1/);
@@ -133,7 +134,8 @@ test('a finding that cites a failed criterion or a critical invariant blocks whe
   assert.equal(classified(p, 'F3').blocks, true);
   assert.match(classified(p, 'F3').reason, /breaks a critical invariant \(tenant isolation/);
   assert.equal(classified(p, 'F4').blocks, false);
-  assert.match(wf(p.root, ['gate', '--attempt', p.id]).err, /has open findings \(F1, F3\)/);
+  assert.equal(classified(p, 'F5').blocks, true, 'a finding rated low still blocks when it breaks a critical invariant');
+  assert.match(wf(p.root, ['gate', '--attempt', p.id]).err, /has open findings \(F1, F3, F5\)/);
   assert.match(wf(p.root, ['accept', '--attempt', p.id]).err, /finding F1 is open and blocks: cites frozen criterion C1/);
 });
 
@@ -147,6 +149,7 @@ test('a regression on lines this attempt changed blocks, computed from git and n
     finding('F4', { evidence: 'src/a.txt:3 an old line of a file the ticket touched' }),
     finding('F5', { evidence: 'src/a.txt:1-3 the first lines' }),
     finding('F6', { evidence: 'no location at all', scope: { kind: 'in', causedByChange: true } }),
+    finding('F7', { severity: 'nit', evidence: 'src/a.txt:2 wording' }),
   ] })));
   for (const id of ['F1', 'F2', 'F3', 'F5']) {
     assert.equal(classified(p, id).blocks, true, id);
@@ -154,6 +157,7 @@ test('a regression on lines this attempt changed blocks, computed from git and n
   }
   assert.match(classified(p, 'F1').reason, /regression on a line this attempt changed \(src\/a\.txt:2\)/);
   assert.equal(classified(p, 'F4').blocks, false, 'older code in a file the ticket touched');
+  assert.equal(classified(p, 'F7').blocks, false, 'a finding rated low never opens a round, a changed line included');
   // A declared causality (the old scope form) is not evidence; a full-round finding that cites nothing checkable blocks
   // until it is located or verified (security review of the A1 merge: unlocated findings must not fail open).
   assert.equal(classified(p, 'F6').causedByChange, false, 'a declared causality, or the old scope form, is not evidence');

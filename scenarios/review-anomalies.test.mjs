@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import path from 'node:path';
 import { closureFile, commitIn, criteriaFile, fixtureImpactChecked, ok, singleRepoProject, state, wf } from './helpers.mjs';
 
 // I-12: investigate anomalies seen in evidence before calling them cosmetic. Named failure: a cross-locale difference in
@@ -26,7 +25,6 @@ test('I-12: the reviewer closure accounts for anomalies in the screenshots; cosm
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'r1', '--attempt', id]));
   const bundle = JSON.parse(fs.readFileSync(state(root, id).handoffs.at(-1).bundle, 'utf8'));
   assert.match(bundle.instructions, /compare captures of the same state and record `anomalies` \("none seen", or each with the cause you found\)/, 'the reviewer is told to account for anomalies');
-  assert.match(fs.readFileSync(path.join(import.meta.dirname, '..', 'templates', 'agents', 'reviewer.md'), 'utf8'), /find the cause of an anomaly before you call it cosmetic/, 'and not to call one cosmetic uninvestigated');
   const closure = (reviewer, extra) => closureFile(base, { reviewer, findings: [], criteria: [{ id: 'C1', evidence: { kind: 'screenshot', ref: shas[0] } }], screenshotsInspected: shas, impactChecked: fixtureImpactChecked(), ...extra });
   const review = (reviewer, extra) => wf(root, ['review', '--closure', closure(reviewer, extra), '--attempt', id]);
   const seen = { screenshots: [shas[0], shas[1]], observation: 'the English capture shows 3 active items, the French one 1' };

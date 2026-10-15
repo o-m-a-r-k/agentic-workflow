@@ -95,14 +95,6 @@ test('I-16: `wf evidence show` refuses a link and cuts a large file at 4 MiB', a
   assert.throws(() => showEvidence(root, { id: e.id }, 'link.txt'), /link\.txt is not a regular file; nothing is read through it/);
 });
 
-test('I-16: role texts and skills read evidence with `wf evidence` and say how to avoid the guard', () => {
-  const read = (p) => fs.readFileSync(path.resolve(import.meta.dirname, '..', p), 'utf8');
-  for (const p of ['templates/agents/reviewer.md', 'templates/agents/implementer.md', 'skills/work/SKILL.md']) {
-    assert.match(read(p), /wf evidence list/, p);
-    assert.match(read(p), /the evidence folder/, p);
-  }
-});
-
 test('I-45: native roles can read an absolute handed path only inside their selected attempt', () => {
   const { root } = singleRepoProject('native-evidence-path');
   const a = ok(wf(root, ['entry', '--item', 'ENG-84', '--json'])).json().id;

@@ -124,7 +124,7 @@ Don't use it for:
 | [Lessons and improvements](docs/lessons-and-improvements.md) | How a project learns from corrections, and how workflow findings reach the plugin ([design](docs/LESSONS.md)) |
 | [Trust model](docs/trust-model.md) | What is enforced, what relies on you, what is not stopped |
 | [Telemetry](docs/telemetry.md) | What `wf report` measures (measurement only) |
-| [Scenarios](docs/SCENARIOS.md) | The demo, the game day, every behaviour scenario |
+| [Scenarios](docs/SCENARIOS.md) | The demo and every behaviour scenario |
 | [Design](docs/DESIGN.md) | The full design and its open questions |
 
 ## Contributing, security, license

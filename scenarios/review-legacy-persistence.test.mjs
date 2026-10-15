@@ -32,29 +32,3 @@ test('legacy discovery compatibility preserves fix evidence; a finding blocks on
   assert.doesNotMatch(prompt, /Uncertain causality remains blocking/);
   assert.doesNotMatch(prompt, /requiredByRequest|affectsChangedContract|wf scope ask/);
 });
-
-test('the reviewer is told what blocks, to state its plan early and to name what it did not reach', () => {
-  const prompt = reviewer();
-  assert.match(prompt, /cites a frozen criterion the change fails/);
-  assert.match(prompt, /regression on a line this attempt changed/);
-  assert.match(prompt, /breaks a critical invariant/);
-  assert.match(prompt, /Every other finding is an observation/);
-  assert.match(prompt, /Your plan stated early in your closure file \(`scope`: what you will cover; `expect: \{ minutes \}`: how long you expect it to take\), with `findings` and `criteria` lists from the start and each finding written into the file as soon as you have it \(if your session ends early, what you wrote is kept as a partial round\)/);
-  assert.doesNotMatch(prompt, /budget/);
-  assert.match(prompt, /notReached/);
-  assert.match(prompt, /delta/);
-  assert.doesNotMatch(prompt, /report every finding now/i);
-  assert.doesNotMatch(prompt, /until every required judgment is complete and the closure is recorded/, 'a delta review is complete when its changed lines and open findings are judged');
-});
-
-test('native reviewer inspects large inputs in bounded batches without narrowing its blind review', () => {
-  const prompt = reviewer();
-  // Blind: the whole change, no earlier finding until the closure is recorded, and nothing the owner adds narrows it.
-  assert.match(prompt, /the whole change, blind/);
-  assert.match(prompt, /shown only after your closure is recorded/);
-  assert.match(prompt, /let it narrow nothing/);
-  // A large handoff is inspected in bounded sections, none skipped, and the evidence review keeps every screenshot.
-  assert.match(prompt, /inspected in bounded sections with `wf evidence inspect <handed path> --attempt <id>`, never as one full dump, and no section is skipped/);
-  assert.match(prompt, /every screenshot/);
-  assert.match(prompt, /Never fabricate verdicts or reduce scope to finish/);
-});

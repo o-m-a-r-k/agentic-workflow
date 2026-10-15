@@ -216,10 +216,7 @@ test('I-26: the reviewer bundle carries the impact map and the callers the final
   assert.deepEqual(bundle.impactMap.queries['Q-consumers'].hits, 2);
   assert.ok(bundle.impactMap.derived.symbols.includes('renderTable'));
   assert.deepEqual(bundle.impactMap.derived.outside, [{ symbol: 'renderTable', declaredIn: 'app:src/table.js', declarationOrigins: ['app:src/table.js'], originAmbiguous: false, matchKind: 'textual', file: 'app:docs/notes.md' }]);
-  // The reviewer role says how to re-run the map and tag a gap; the bundle says what the derived callers are (textual).
-  const reviewerRole = fs.readFileSync(path.join(import.meta.dirname, '..', 'templates', 'agents', 'reviewer.md'), 'utf8');
-  assert.match(reviewerRole, /`wf impact run --attempt <id>` re-runs its queries on this tree; record what you checked under `impactChecked`/);
-  assert.match(reviewerRole, /`"category": "impact-gap"`/);
+  // The bundle says what the derived callers are (textual).
   assert.match(bundle.instructions, /Impact discovery under impactMap\.derived is textual, not structurally resolved consumer analysis/);
   assert.doesNotMatch(bundle.instructions, /impactChecked\.sampled/);
   const run = ok(wf(a.root, ['impact', 'run', '--attempt', a.id]));
@@ -315,25 +312,6 @@ test('I-25: a plan externalServices restriction that names a repo or suite the d
   assert.doesNotMatch(m.err, /doNotRun/);
   const rev = ok(wf(a.root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', a.id]));
   assert.doesNotMatch(rev.out, /warning/, 'the reviewer prompt on stdout stays one line');
-});
-
-test('I-25/I-26: role texts and skills: the planner surveys first and keeps what the change causes; fix briefs answer a family with one proof; the reviewer checks impact', () => {
-  const root = path.resolve(import.meta.dirname, '..');
-  const read = (f) => fs.readFileSync(path.join(root, f), 'utf8');
-  const planner = read('templates/agents/planner.md');
-  assert.doesNotMatch(planner, /Note follow-ups separately|Keep the scope to the issue|Keep the criteria to the issue/);
-  assert.match(planner, /survey/);
-  // D1 (0.7.0): nothing broken is dropped, but where a fix lives can change; what the change causes or exposes stays here.
-  assert.match(planner, /Never fence a fix off: a defect the change causes or exposes[\s\S]*stays in this attempt/);
-  assert.doesNotMatch(planner, /Never plan it as a follow-up/);
-  assert.match(read('templates/agents/reviewer.md'), /impactChecked/);
-  assert.match(read('templates/agents/reviewer.md'), /impact-gap/);
-  assert.match(read('templates/agents/implementer.md'), /Sweep <id>: proof - <command> => <expected result>/);
-  // 0.7.0: a sweep is optional (the owner passes `--sweep` only when it already knows the pattern), so the ticket skill
-  // mentions the option and the quick-fix skill, which answers a family with one proof in the report, need not.
-  assert.match(read('skills/work/SKILL.md'), /--sweep/);
-  assert.match(read('skills/work/SKILL.md'), /survey/);
-  assert.match(read('docs/adapter.md'), /impact:/);
 });
 
 // Named failure (I-84, I-87): a plan `wf plan` refused left nothing behind, so the replacement planner started blind and made the

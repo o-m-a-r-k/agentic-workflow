@@ -24,7 +24,7 @@ function project(name) {
   commitIn(e.repos.app.worktree, { 'src/a.txt': LINES.replace('l2', 'L2') });
   ok(wf(p.root, ['handoff', 'close', '--agent', 'i', '--attempt', e.id]));
   ok(wf(p.root, ['handoff', 'reviewer', '--agent', 'r1', '--attempt', e.id]));
-  const finding = (id, severity, evidence) => ({ id, severity, summary: `${id}: ${evidence}`, status: 'open', evidence });
+  const finding = (id, severity, evidence) => ({ id, severity, summary: `${id}: ${evidence}. More detail the reviewer wrote at length about the reason and the files involved.`, status: 'open', evidence });
   const closure = goodClosure('r1', { findings: [finding('F1', 'medium', 'src/old.txt:2 the export sums one page only'), finding('F2', 'low', 'src/old.txt:3 a tooltip typo')] });
   ok(wf(p.root, ['review', '--closure', closureFile(p.base, closure), '--attempt', e.id]));
   const add = (summary, severity) => ok(wf(p.root, ['discovered', 'add', '--summary', summary, ...(severity ? ['--severity', severity] : []), '--attempt', e.id]));
@@ -55,7 +55,6 @@ test('medium and high stay in the delivery: no command defers or tickets them, w
   ]) {
     const r = run(p, args);
     assert.notEqual(r.code, 0, `refused: ${args.join(' ')}`);
-    assert.match(r.err, /stays? in this delivery: high: never leaves [^;]*; medium: never leaves [^;]*; low: leaves only with the person's answer/, args.join(' '));
     assert.equal(refusals(p).at(-1).id, 'leave:medium-high', args.join(' '));
     assert.doesNotMatch(r.err, /wf approve A\d+/, 'nothing to ask: no answer lets a medium or high item leave');
   }
@@ -70,6 +69,9 @@ test('low items leave only with the person\'s answer: one short question per ite
   // Lowering a discovered issue into low no longer asks the person (0.7.8): the re-rating and its reason are in the item's own
   // question instead, when it is proposed to leave.
   ok(run(p, ['discovered', 'rate', d2, '--severity', 'low', '--reason', 'an ignored folder']));
+  const known = state(p.root, p.id).discovered.length;
+  assert.match(run(p, ['discovered', 'add', '--summary', 'x', '--severity', 'urgent']).err, /--severity is high, medium or low/);
+  assert.equal(state(p.root, p.id).discovered.length, known, 'an unknown severity records nothing');
   assert.deepEqual(state(p.root, p.id).decisions ?? [], [], 'rating an item down into low put no question to the person');
   const asked = run(p, ['scope', 'defer', '--finding', `r1:F2,${d2}`, '--reason', 'polish']);
   assert.equal(asked.code, 75);
@@ -82,6 +84,7 @@ test('low items leave only with the person\'s answer: one short question per ite
     assert.deepEqual(q.choices, ['let it leave', 'fix now']);
     assert.match(asked.err, new RegExp(`wf approve ${q.id} --from-question --attempt ${p.id.replace('.', '\\.')}`), 'the refusal lists every question to ask');
   }
+  // The question is short: the reviewer's long text stays in the record, not in what the person is asked.
   assert.equal(qF2.summary, 'r1:F2: src/old.txt:3 a tooltip typo (low, rated by reviewer r1, old.txt:3). Fix it now, or let it leave this delivery as a known issue?');
   assert.match(qD2.summary, new RegExp(`^${d2}: a stale screenshot in the ignored folder \\(low, rated by [^,]+, re-rated medium to low \\(an ignored folder\\)\\)\\. Fix it now, or let it leave this delivery as a known issue\\?$`));
   // The person fixes one and lets the other go: nothing in the command leaves until the command follows the answers.
@@ -152,10 +155,11 @@ test('the strategist cannot queue a medium or high item for a ticket', async () 
   const [d1] = state(p.root, p.id).discovered.map((d) => d.id);
   const h = ok(wf(p.root, ['handoff', 'strategist', '--agent', 'strat-1', '--attempt', p.id, '--reason', 'observations pile up', '--json'])).json();
   const closure = (items) => ({ strategist: 'strat-1', action: 'ticket', items, rationale: 'they can wait', prediction: { signal: 'observationsOpen <= 1', by: 3 } });
-  for (const items of [['r1:F1'], [d1], ['r1:F2', 'r1:F1']]) {
+  for (const [items, kept] of [[['r1:F1'], 'r1:F1'], [[d1], d1], [['r1:F2', 'r1:F1'], 'r1:F1']]) {
     const r = wf(p.root, ['strategy', 'record', '--closure', strategistClosure(p.base, h.bundle, closure(items)).file, '--attempt', p.id], silent);
     assert.notEqual(r.code, 0, items.join(','));
-    assert.match(r.err, /at a level the project never lets leave: high: never leaves [^;]*; medium: never leaves [^;]*; low: leaves only with the person's answer/);
+    assert.equal(refusals(p).at(-1).id, 'strategy:ticket-not-low', items.join(','));
+    assert.ok(r.err.includes(kept), `${items.join(',')}: the refusal names ${kept}`);
   }
   ok(wf(p.root, ['strategy', 'record', '--closure', strategistClosure(p.base, h.bundle, closure(['r1:F2'])).file, '--attempt', p.id]));
 });

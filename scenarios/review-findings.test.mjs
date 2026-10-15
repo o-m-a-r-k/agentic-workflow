@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { closureFile, commitIn, criteriaFile, goodClosure, ok, OUT_OF_ORDER, sh, singleRepoProject, state, toAccepted, WF, wf, ownerSpeaks, spawnHome, ownerSession } from './helpers.mjs';
+import { closureFile, commitIn, criteriaFile, ok, OUT_OF_ORDER, sh, singleRepoProject, state, toAccepted, WF, wf, ownerSpeaks, spawnHome, ownerSession } from './helpers.mjs';
 
 // Adoption uses the receiving interactive session's human request, supplied by the scenario wrapper.
 // Prepare its interactive session metadata; no previous-session release is required.
@@ -160,24 +160,4 @@ test('a commit pushed by hand after acceptance is not recorded as delivered', ()
   ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', id]));
   assert.equal(wf(root, ['deliver', '--attempt', id]).code, 75, 'still refused after a fresh gate');
   assert.equal(state(root, id).delivery.repos.app, undefined);
-});
-
-test('the reviewer can write its closure under the guard hook; evidence is read with the Read tool', async () => {
-  const { spawnSync } = await import('node:child_process');
-  const hook = path.join(path.dirname(WF), '..', 'hooks', 'guard-evidence.mjs');
-  const run = (command) => spawnSync(process.execPath, [hook], { input: JSON.stringify({ tool_input: { command } }), encoding: 'utf8' }).status;
-  const { base, root } = singleRepoProject('closure-path', { gate: { steps: [{ id: 'u', repo: 'app', run: 'true' }] } });
-  const e = admitted(root, base, 'RF-10');
-  commitIn(e.repos.app.worktree, { 'src/a.txt': 'r\n' });
-  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]));
-  const h = JSON.parse(ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', e.id, '--json'])).out);
-  const closurePath = JSON.parse(fs.readFileSync(h.bundle, 'utf8')).reviewClosureFile;
-  assert.doesNotMatch(closurePath, /\.wf-evidence/);
-  assert.equal(run(`cat > ${closurePath} <<'X'\n{}\nX`), 0);
-  const edit = (file_path) => spawnSync(process.execPath, [hook], { input: JSON.stringify({ tool_name: 'Edit', tool_input: { file_path } }), encoding: 'utf8' }).status;
-  assert.equal(edit(`${root}/.wf-evidence/attempts/${e.id}/ledger.jsonl`), 2, 'a file edit of evidence is refused');
-  assert.equal(edit(closurePath), 0);
-  fs.writeFileSync(closurePath, JSON.stringify(goodClosure('r')));
-  ok(wf(root, ['review', '--closure', closurePath, '--attempt', e.id]));
-  ok(wf(root, ['accept', '--attempt', e.id]));
 });

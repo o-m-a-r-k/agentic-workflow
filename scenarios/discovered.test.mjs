@@ -16,8 +16,6 @@ import { runner } from './strategist-fixtures.mjs';
 // the running attempt in one owner step; the reviewer's bundle lists the added repo so the seam can be judged on both
 // sides (0.7.0: a seam verdict is optional, and recorded when given).
 
-const TEMPLATES = path.resolve(import.meta.dirname, '..', 'templates', 'agents');
-const SKILLS = path.resolve(import.meta.dirname, '..', 'skills');
 const bundleOf = (r) => JSON.parse(fs.readFileSync(r.out.match(/^Read (\S+)/m)?.[1] ?? r.out.match(/bundle: (\S+)/)[1], 'utf8'));
 const disc = (root, args, opts) => wf(root, ['discovered', ...args], opts);
 
@@ -271,33 +269,6 @@ test('I-19: a discovered fix adds a repo and its work items to the running attem
   assert.equal(sh(path.join(root, 'api'), 'git fetch -q origin && git show origin/main:src/totals.txt'), 'page\ntotal');
 });
 
-test('scope decisions (0.7.0): role texts say what blocks, send the rest to observations and families, and ask the owner nothing', () => {
-  const read = (...f) => fs.readFileSync(path.join(...f), 'utf8');
-  const reviewer = read(TEMPLATES, 'reviewer.md');
-  const implementer = read(TEMPLATES, 'implementer.md');
-  const planner = read(TEMPLATES, 'planner.md');
-  assert.match(reviewer, /cites a frozen criterion the change fails/);
-  assert.match(reviewer, /regression on a line this attempt changed/);
-  assert.match(reviewer, /Every other finding is an observation/);
-  // The implementer fixes what its change causes or exposes without asking, says what it left (the engine turns each into
-  // a discovered issue), and answers a family of findings with one proof.
-  assert.match(implementer, /anything this change causes or exposes[^.]*is yours without asking/);
-  assert.match(implementer, /a `left` item becomes a discovered issue/);
-  assert.match(implementer, /Sweep <id>: proof - <command> => <expected result>/);
-  // The planner fences no fix off; an unrelated defect is recorded with a severity and placed by the person's rule (D17):
-  // medium and high are fixed in this delivery, a low one leaves only with the person's answer (D18).
-  assert.match(planner, /Never fence a fix off: a defect the change causes or exposes[\s\S]*stays in this attempt wherever the fix lives/);
-  assert.match(planner, /an unrelated existing defect is recorded \(`wf discovered add --severity high\|medium\|low`[^)]*\) and placed by the person's rule/);
-  assert.match(planner, /medium and high are fixed in this delivery[^;]*; a low one leaves only with the person's answer/);
-  const policy = read(path.dirname(TEMPLATES), '..', 'docs', 'scope-decisions.md');
-  assert.match(policy, /Placement is not obligation/);
-  assert.match(policy, /a low one leaves only with the person's answer, one short question per item[\s\S]*kind `move-out-of-batch`[\s\S]*medium and high are refused/);
-  for (const doc of [reviewer, implementer, planner, policy]) {
-    assert.doesNotMatch(doc, /Uncertain causality remains blocking|wf scope ask|wf scope decide|increase scope and fix|silence and agent text do not count|requiredByRequest/);
-    assert.doesNotMatch(doc, /Every issue.*(?:is fixed|fixed by you).*whatever|outside the brief.*never a reason to leave it/);
-  }
-});
-
 // I-18 (extended), named failure: an implementer reported "Not fixed, outside the brief: the status field shows the
 // raw enum value" and handed the issue back to the owner agent to relay. An issue found while working is fixed by the
 // role that found it, in this attempt, in whatever file it lives in; the only exception is a file another work item is
@@ -417,14 +388,6 @@ test('0.7.0: an implementer closes with its report; each item it left becomes an
   assert.equal(refused.code, 75);
   assert.match(refused.err, /not delivered: 1 discovered issue\(s\) are open: D2 left by impl-2: the footer shows no total/);
   assert.doesNotMatch(refused.err, /D1/, 'the fixed entry no longer blocks');
-});
-
-test('related repair ownership remains with implementers; owner routes and never writes the product repair', () => {
-  // The implementer owns the repair of what its change causes or exposes, the reviewer verifies and never fixes, and the
-  // owner routes every repair to an implementer.
-  assert.match(fs.readFileSync(path.join(TEMPLATES, 'implementer.md'), 'utf8'), /anything this change causes or exposes[^.]*is yours without asking/);
-  assert.match(fs.readFileSync(path.join(TEMPLATES, 'reviewer.md'), 'utf8'), /Verify, do not fix/);
-  assert.match(fs.readFileSync(path.join(SKILLS, 'work', 'SKILL.md'), 'utf8'), /route every repair to an implementer and never write the product repair yourself/);
 });
 
 // Independent review of 0.4.5: a batch delivery lists every member's deferrals, qualified by attempt. 0.7.0 (final review):

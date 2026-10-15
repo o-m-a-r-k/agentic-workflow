@@ -94,55 +94,27 @@ test('what leaves the delivery follows the person\'s rule (D17): a major defect 
   // put to the person. A low one named together with it does not leave either, the command being refused as a whole.
   const major = ticket('r2:F1', 2);
   assert.equal(major.code, 75);
-  assert.match(major.err, /r2:F1 \(high, rated major\) stays in this delivery/);
+  assert.match(major.err, /r2:F1 \(high, rated major\)/);
   assert.equal(refusals(p).at(-1).id, 'leave:medium-high');
   const medium = ticket('r2:F2', 3, ['--reason', 'the export page is redesigned next sprint']);
   assert.equal(medium.code, 75);
-  assert.match(medium.err, /r2:F2 \(medium\) stays in this delivery/);
+  assert.match(medium.err, /r2:F2 \(medium\)/);
   assert.equal(refusals(p).at(-1).id, 'leave:medium-high');
   const together = ticket('r2:F1,r2:F2,r2:F3', 4);
-  assert.match(together.err, /r2:F1 \(high, rated major\), r2:F2 \(medium\) stay in this delivery/);
+  assert.match(together.err, /r2:F1 \(high, rated major\), r2:F2 \(medium\)/);
   assert.equal(refusals(p).at(-1).id, 'leave:medium-high');
   assert.deepEqual(state(p.root, p.id).decisions ?? [], [], 'nothing was put to the person');
   assert.deepEqual(state(p.root, p.id).scopeDecisions ?? [], [], 'nothing left');
   // A minor one is the person's answer to a question of its own, asked once; the reason travels with the ticket.
   const low = ticket('r2:F3', 5, ['--reason', 'the export page is redesigned next sprint']);
   assert.equal(low.code, 75);
-  assert.match(low.err, /question: "[^"]* A1: r2:F3: F3 is wrong \(nit, rated by reviewer r2, old\.txt:2\)\. Fix it now, or let it leave this delivery as a follow-up ticket\?"/);
+  assert.equal(refusals(p).at(-1).id, 'leave:ask');
+  assert.match(low.err, /A1: r2:F3/);
   ok(wf(p.root, ['scope', 'ticket', '--finding', 'r2:F3', '--capture', capture(p, 5), '--reason', 'the export page is redesigned next sprint', '--attempt', p.id]));
   const t = state(p.root, p.id).scopeDecisions.at(-1);
   assert.deepEqual([t.keys, t.reason, t.placement, t.decisions, t.decisionFor], [['r2:F3'], 'the export page is redesigned next sprint', { 'r2:F3': 'low' }, ['A1'], { 'r2:F3': 'A1' }]);
   assert.equal(t.decision, undefined, 'one decision per item, not one for the event');
   assert.ok(state(p.root, p.id).decisions[0].spent, 'the approval is spent by the ticket');
-});
-
-test('discovered issues follow the same rule (D17): a medium or unrated one is refused whatever the reason, a low one waits only with the person\'s answer (P3)', () => {
-  const p = project('fr-p3');
-  const add = (summary, severity) => ok(wf(p.root, ['discovered', 'add', '--summary', summary, ...(severity ? ['--severity', severity] : []), '--attempt', p.id])).out;
-  add('a tooltip typo', 'low');
-  add('export sums one page only', 'medium');
-  add('a pager resets on refresh', null);
-  const ds = state(p.root, p.id).discovered.slice(-3);
-  assert.deepEqual(ds.map((d) => d.severity), ['low', 'medium', null]);
-  const close = (id, extra = [], opts = { ownerSilent: true }) => wf(p.root, ['discovered', 'close', id, '--deferred', ...extra, '--attempt', p.id], opts);
-  const lowAsked = close(ds[0].id);
-  assert.equal(lowAsked.code, 75);
-  assert.match(lowAsked.err, /wf approve A\d+/, 'a low one waits for the person\'s answer');
-  ok(close(ds[0].id, [], {}));
-  const medium = close(ds[1].id, ['--reason', 'the export page is rebuilt next']);
-  assert.equal(medium.code, 75);
-  assert.match(medium.err, new RegExp(`${ds[1].id} \\(medium\\) stays in this delivery`));
-  assert.equal(refusals(p).at(-1).id, 'leave:medium-high');
-  const unrated = close(ds[2].id, ['--reason', 'later']);
-  assert.equal(unrated.code, 75);
-  assert.match(unrated.err, new RegExp(`${ds[2].id} \\(high\\) stays in this delivery`), 'unrated counts as high');
-  assert.equal(refusals(p).at(-1).id, 'leave:medium-high');
-  assert.match(wf(p.root, ['discovered', 'add', '--summary', 'x', '--severity', 'urgent', '--attempt', p.id]).err, /--severity is high, medium or low/);
-  const s = state(p.root, p.id);
-  assert.deepEqual(s.discovered.slice(-3).map((d) => d.status), ['deferred', 'open', 'open']);
-  assert.equal(s.discovered.at(-3).deferred.source.provenance, 'approved-decision');
-  assert.match(s.next, /medium and high are fixed in this delivery[\s\S]*a low one leaves only with the person's answer, one short question per item/, 'the next step names the rule, not a phrase to type');
-  assert.doesNotMatch(s.next, /message starts with/);
 });
 
 test('an observation the attempt fixed is settled by its commit; a blocking finding is refused; a commit that does not touch the cited file is recorded with that fact', () => {
@@ -214,21 +186,6 @@ test('in a batch, a line a member wrote does not open a round in the batch\'s fu
 function write3(dir, rel, content) {
   fs.writeFileSync(path.join(dir, rel), content);
 }
-
-test('a resume line past its own estimate prompts a judgement on the line the owner acts on (D9)', () => {
-  const p = singleRepoProject('fr-past', { gate: { steps } }, { 'src/a.txt': LINES, 'src/b.txt': 'b\n', 'src/c.txt': 'c\n' });
-  const e = ok(wf(p.root, ['entry', '--item', 'FR-2', '--owner', 'o', '--json'])).json();
-  ok(wf(p.root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id]));
-  const plan = path.join(p.base, 'plan-small.json');
-  const doc = JSON.parse(fs.readFileSync(criteriaFile(p.base), 'utf8'));
-  fs.writeFileSync(plan, JSON.stringify({ ...doc, expect: { files: 1, rounds: 1, minutes: 120 } }));
-  ok(wf(p.root, ['plan', '--file', plan, '--attempt', e.id]));
-  ok(wf(p.root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
-  commitIn(e.repos.app.worktree, { 'src/a.txt': CHANGED, 'src/b.txt': 'B\n', 'src/c.txt': 'C\n' });
-  const out = ok(wf(p.root, ['resume', '--attempt', e.id])).out;
-  assert.match(out, /files changed: 3; the plan expected 1 \(past its own estimate\)/);
-  assert.match(out, /next: past its own estimate: files changed 3 \(the plan expected 1\)\. Judge the course before the next step/);
-});
 
 // ---- The texts agents read say what the engine does ----
 
@@ -330,41 +287,4 @@ test('onboarding drafts a quality bar from what the project documents, and docto
   const p = singleRepoProject('fr-noquality', { gate: { steps } });
   const out = wf(p.root, ['doctor', '--no-steps']);
   assert.match(out.out + out.err, /the adapter states no `quality:` goals/);
-});
-
-test('refusal audit: a blocking finding is waived only by the person; a low observation waits as a known issue only with the person\'s answer to its own question, a high one never (D17)', () => {
-  const p = project('fr-audit');
-  hand(p, 'r1');
-  ok(record(p, goodClosure('r1', { findings: [
-    finding('F1', { severity: 'major', evidence: 'src/a.txt:2 wrong' }),
-    finding('F2', { severity: 'nit', evidence: 'src/old.txt:1' }),
-    finding('F3', { severity: 'major', evidence: 'src/old.txt:2' }),
-  ] })));
-  const s = state(p.root, p.id);
-  assert.deepEqual(s.review.closure.findings.map((f) => f.classified.blocks), [true, false, false]);
-  // A finding that blocks is not deferred, with or without anyone's yes; the person may waive it instead.
-  const blocked = wf(p.root, ['scope', 'defer', '--finding', 'r1:F1', '--attempt', p.id], { ownerSilent: true });
-  assert.equal(blocked.code, 75);
-  assert.match(blocked.err, /r1:F1 blocks this delivery: it is fixed here/);
-  assert.equal(refusals(p).at(-1).id, 'leave:blocks');
-  // Waive: refused for an observation; for a blocking one it is the person's decision.
-  assert.match(wf(p.root, ['scope', 'waive', '--finding', 'r1:F2', '--attempt', p.id]).err, /does not block/);
-  const asked = wf(p.root, ['scope', 'waive', '--finding', 'r1:F1', '--reason', 'covered by the next release', '--attempt', p.id], { ownerSilent: true });
-  assert.equal(asked.code, 75);
-  assert.match(asked.err, /wf approve A\d+/);
-  ok(wf(p.root, ['scope', 'waive', '--finding', 'r1:F1', '--reason', 'covered by the next release', '--attempt', p.id]));
-  assert.ok(!state(p.root, p.id).review.closure.findings.some((f) => f.id === 'F1' && wf(p.root, ['scope', 'list', '--attempt', p.id]).out.includes('r1:F1  blocks')), 'the waived finding no longer blocks');
-  // Defer: a low observation waits for the person's answer; a high one (F3, rated major, not blocking) is refused.
-  const lowAsked = wf(p.root, ['scope', 'defer', '--finding', 'r1:F2', '--attempt', p.id], { ownerSilent: true });
-  assert.equal(lowAsked.code, 75);
-  assert.match(lowAsked.err, /question: "[^"]* A\d+: r1:F2: F2 is wrong \(nit, rated by reviewer r1, old\.txt:1\)\. Fix it now, or let it leave this delivery as a known issue\?"/);
-  assert.equal(refusals(p).at(-1).id, 'leave:ask');
-  assert.deepEqual(state(p.root, p.id).scopeDecisions.map((d) => d.choice), ['waived'], 'nothing waits before the person answers');
-  const high = wf(p.root, ['scope', 'defer', '--finding', 'r1:F3', '--attempt', p.id], { ownerSilent: true });
-  assert.equal(high.code, 75);
-  assert.match(high.err, /r1:F3 \(high, rated major\) stays in this delivery/);
-  assert.equal(refusals(p).at(-1).id, 'leave:medium-high');
-  ok(wf(p.root, ['scope', 'defer', '--finding', 'r1:F2', '--attempt', p.id]));
-  const s2 = state(p.root, p.id);
-  assert.deepEqual(s2.scopeDecisions.map((d) => d.choice), ['waived', 'deferred']);
 });

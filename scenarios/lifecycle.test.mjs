@@ -154,16 +154,6 @@ test('entry refuses an item that is not the tracker\'s ticket id before creating
   assert.match(wf(bad.root, ['entry', '--item', 'PRJ-3', '--owner', 'o']).err, /tracker\.itemPattern/);
 });
 
-test('a hand-edited ledger is detected', () => {
-  const { root } = singleRepoProject('tamper', { gate: { steps } });
-  const e = ok(wf(root, ['entry', '--item', 'ENG-9', '--owner', 'o', '--json'])).json();
-  const ledger = path.join(root, '.wf-evidence', 'attempts', e.id, 'ledger.jsonl');
-  fs.writeFileSync(ledger, fs.readFileSync(ledger, 'utf8').replace('"intent":"implementation"', '"intent":"analysis"'));
-  const r = wf(root, ['resume', '--attempt', e.id]);
-  assert.notEqual(r.code, 0);
-  assert.match(r.err, /hash chain broken/);
-});
-
 test('reopen after delivery starts a linked attempt', () => {
   const { base, root } = singleRepoProject('reopen', { gate: { steps } });
   const { id } = toAccepted(root, base, { item: 'ENG-10' });

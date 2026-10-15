@@ -9,7 +9,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { closureFile, commitIn, criteriaFile, goodClosure, ok, singleRepoProject, wf } from './helpers.mjs';
+import { closureFile, commitIn, criteriaFile, goodClosure, ok, OUT_OF_ORDER, singleRepoProject, wf } from './helpers.mjs';
 
 const steps = [{ id: 'unit', repo: 'app', run: 'true' }];
 const LINES = 'l1\nl2\nl3\nl4\nl5\nl6\n';
@@ -34,7 +34,7 @@ const repair = (p, files) => {
   ok(wf(p.root, ['handoff', 'close', '--agent', 'i', '--attempt', p.id]));
 };
 
-test('I-132: a recorded blind evidence closure takes its priorFindings in a second record; its own findings stay as recorded', () => {
+test('I-132: a recorded blind evidence closure takes its priorFindings in a second record; its own findings stay as recorded; acceptance refuses an earlier finding no round verified', () => {
   const p = project('rr-132');
   hand(p, 'r1');
   ok(record(p, goodClosure('r1', { findings: [finding('F1', 'major', 'src/a.txt:2 wrong', { criterion: 'C1' }), finding('F2', 'low', 'src/old.txt:1 wording')] })));
@@ -58,6 +58,22 @@ test('I-132: a recorded blind evidence closure takes its priorFindings in a seco
   assert.match(changed.err, /your own findings were recorded blind and cannot change once `priorFindings` are added/);
   assert.equal(record(p, { ...blind, priorFindings: priors }).code, 75, 'sealed on the standing record, not the first');
   ok(record(p, { ...blind2, priorFindings: priors }));
+
+  // With no delta round between, the evidence round's blind closure leaves the earlier blocking finding unverified, and
+  // acceptance refuses until the round's priorFindings are recorded.
+  const q = project('rr-132-accept');
+  hand(q, 'r1');
+  ok(record(q, goodClosure('r1', { findings: [finding('F1', 'major', 'src/a.txt:2 wrong', { criterion: 'C1' })] })));
+  repair(q, { 'src/a.txt': CHANGED.replace('L2', 'L2 fixed') });
+  ok(wf(q.root, ['gate', ...OUT_OF_ORDER, '--attempt', q.id]));
+  const evidenceQ = hand(q, 'r2');
+  assert.equal(evidenceQ.round, 'evidence-review');
+  assert.doesNotMatch(JSON.stringify(evidenceQ), /F1 is wrong/, 'the blind bundle carries no earlier finding');
+  const blindQ = goodClosure('r2', { criteria: [{ id: 'C1', evidence: { kind: 'output', ref: 'gate log' } }] });
+  assert.match(ok(record(q, blindQ)).out, /1 finding\(s\) from earlier rounds to verify/);
+  assert.match(wf(q.root, ['accept', '--attempt', q.id]).err, /earlier-round finding\(s\) not verified: r1:F1/);
+  ok(record(q, { ...blindQ, priorFindings: [{ round: 'r1', id: 'F1', status: 'fixed', evidence: 'src/a.txt:2' }] }));
+  ok(wf(q.root, ['accept', '--attempt', q.id]));
 });
 
 test('I-133: an evidence review that covered every criterion and screenshot stays the audit whatever caveats it names, so the round after a repair is a delta', () => {
