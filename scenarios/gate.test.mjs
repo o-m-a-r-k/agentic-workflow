@@ -63,7 +63,8 @@ test('the gate trusts the adapter at base: a ticket cannot remove its own checks
   commitIn(e.repos.app.worktree, { '.workflow/project.yaml': yaml(weakened), 'src/a.txt': 'forbidden\n' });
   const g = gateJson(root, e.id);
   assert.equal(g.code, 1, 'base adapter still runs `guard`');
-  assert.equal(g.data.full, true, 'touching .workflow forces the full gate');
+  // 0.7.11: the adapter folder no longer forces a full run: the gate reads its steps at the pin, never the worktree copy.
+  assert.equal(g.data.full, false);
   assert.equal(g.data.steps[0].status, 'failed');
 });
 

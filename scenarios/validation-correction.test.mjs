@@ -156,3 +156,41 @@ test('a check frozen at admission that is itself wrong is corrected with the per
   assert.match(logOf(ok(wf(f.root, ['gate', '--attempt', f.e.id, '--json'])).json(), 'unit'), /corrected-twice/);
 });
 
+
+// 0.7.11, named failure (one ticket, audit of 51 attempts): a correction that only scoped a step's evidence glob to the ticket
+// (4,008 other tickets' screenshots had been counted) made its 25-minute e2e step look new and run again, though its result
+// could not change. Which files are kept as evidence is not part of a step's identity: the gate re-uses the recorded run and
+// re-selects this ticket's files from it. A change in the workflow's own folder (a lesson, the adapter) reruns nothing.
+test('a correction that only narrows a step\'s evidence glob reuses the recorded run and re-selects the ticket\'s files; a lesson commit reruns nothing', () => {
+  const shoot = `mkdir -p shots/ENG-1 shots/OTHER && echo run >> ../ran.txt && printf one > shots/ENG-1/a.png && printf two > shots/OTHER/b.png`;
+  const step = (artifacts) => ({ id: 'ui', repo: 'app', run: shoot, inputs: ['src/**'], artifacts });
+  const config = { gate: { steps: [step(['shots/**/*.png'])] } };
+  const f0 = singleRepoProject('validation-correct-evidence', config, { '.gitignore': '.wf-evidence/\n.wf-worktrees/\nshots/\n' });
+  const e = ok(wf(f0.root, ['entry', '--item', 'ENG-1', '--json'])).json();
+  ok(wf(f0.root, ['handoff', 'planner', '--agent', 'planner', '--attempt', e.id]));
+  ok(wf(f0.root, ['plan', '--file', criteriaFile(f0.base), '--attempt', e.id]));
+  ok(wf(f0.root, ['handoff', 'implementer', '--agent', 'impl', '--attempt', e.id]));
+  commitIn(e.repos.app.worktree, { 'src/a.txt': 'changed\n' });
+  ok(wf(f0.root, ['handoff', 'close', '--agent', 'impl', '--attempt', e.id]));
+  const f = { ...f0, e, wt: e.repos.app.worktree, config };
+  const ran = () => fs.readFileSync(`${f.wt}/../ran.txt`, 'utf8').trim().split('\n').length;
+  review(f, 'code-0');
+  const first = ok(wf(f.root, ['gate', '--attempt', f.e.id, '--json'])).json();
+  assert.deepEqual(first.steps[0].artifacts.map((a) => a.source).sort(), ['shots/ENG-1/a.png', 'shots/OTHER/b.png']);
+  assert.equal(ran(), 1);
+  commitIn(f.wt, { '.workflow/project.yaml': yaml({ version: 1, enabled: true, name: 'fixture', repos: [{ name: 'app', path: '.', base: 'main' }], gate: { steps: [step(['shots/{item}/**/*.png'])] } }) });
+  ok(correct(f, ['--steps', 'ui', '--reason', 'the evidence glob counted other tickets\' screenshots']));
+  review(f, 'code-1');
+  const second = ok(wf(f.root, ['gate', '--attempt', f.e.id, '--json'])).json();
+  assert.equal(second.steps[0].status, 'reused', 'the result cannot change: nothing reruns');
+  assert.match(second.steps[0].reason, /evidence re-selected by the step's current globs/);
+  assert.deepEqual(second.steps[0].artifacts.map((a) => a.source), ['shots/ENG-1/a.png'], 'only this ticket\'s file');
+  assert.equal(second.steps[0].artifacts[0].sha256, first.steps[0].artifacts.find((a) => a.source === 'shots/ENG-1/a.png').sha256);
+  assert.equal(ran(), 1);
+  // A lesson committed with the ticket is the workflow's own file, not the project's code.
+  commitIn(f.wt, { '.workflow/lessons/L-1.yaml': 'id: L-1\n' });
+  review(f, 'code-2');
+  const third = ok(wf(f.root, ['gate', '--attempt', f.e.id, '--json'])).json();
+  assert.equal(third.steps[0].status, 'reused');
+  assert.equal(ran(), 1);
+});

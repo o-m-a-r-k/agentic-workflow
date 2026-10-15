@@ -37,11 +37,11 @@ function trackedFiles(worktree) {
 }
 
 // Every tracked file under the package matching the step's inputs or the package's sharedInfra, with its content hash.
-function stepInputs(state, step, repo, pkg) {
+function stepInputs(state, step, repo, pkg, skipFolder = null) {
   if (!step.inputs?.length) return null;
   const wt = state.repos[repo.name].worktree;
   const fileHashes = {};
-  for (const f of trackedFiles(wt).filter((x) => inside(x, pkg.path)).sort()) {
+  for (const f of trackedFiles(wt).filter((x) => inside(x, pkg.path) && !(skipFolder && repo.name === skipFolder.repo && inside(x, skipFolder.folder))).sort()) {
     const r = rel(f, pkg.path);
     if (!matchesAny(r, step.inputs) && !matchesAny(r, pkg.sharedInfra)) continue;
     const abs = path.join(wt, f);
@@ -50,11 +50,25 @@ function stepInputs(state, step, repo, pkg) {
   return { hash: hashValue(fileHashes), fileHashes };
 }
 
-// Identity of what runs the step: its definition (minus worker counts) and the committed plugin code.
+// Identity of what runs the step: its definition and the committed plugin code, without the fields that cannot change a
+// result (0.7.11): worker counts, which files are kept as evidence (`artifacts`), scheduling (`tier`, `lease`, `deferrable`),
+// when it is planned (`when`, `component`, `ignores`) and `prepare` (run by `wf prepare` only, never by the gate). Named
+// failure (audit of 51 attempts; one ticket's correction of its evidence glob): the whole definition was hashed, so a
+// change to which screenshots count as the ticket's made a 25-minute e2e step look new, though its result could not change.
+const RESULT_NEUTRAL = ['workers', 'shards', 'artifacts', 'tier', 'lease', 'deferrable', 'when', 'component', 'ignores', 'prepare'];
+function pluginHashOf(root, state, step) {
+  return step.plugin ? hashFile(adapterFileAtCommit(root, state, validationCommit(state, step.id), step.plugin)) : null;
+}
 function runnerIdentity(root, live, state, step) {
-  const { workers, shards, ...definition } = step;
-  const pluginHash = step.plugin ? hashFile(adapterFileAtCommit(root, state, validationCommit(state, step.id), step.plugin)) : null;
-  return hashValue({ definition, pluginHash });
+  const definition = Object.fromEntries(Object.entries(step).filter(([k]) => !RESULT_NEUTRAL.includes(k)));
+  return hashValue({ definition, pluginHash: pluginHashOf(root, state, step) });
+}
+// The identity a step recorded before 0.7.11 under this definition, with the evidence globs it ran with: the whole
+// definition minus worker counts. A pass recorded then is reusable when it differs from today's only in its evidence globs.
+function legacyRunnerIdentity(root, state, step, artifacts) {
+  const { workers, shards, artifacts: _ignored, ...rest } = step;
+  const definition = artifacts?.length ? { ...rest, artifacts } : rest;
+  return hashValue({ definition, pluginHash: pluginHashOf(root, state, step) });
 }
 
 // Trees of the other repos a step reads (`alsoInputs`): the attempt's worktree when the repo is part of the
@@ -77,10 +91,17 @@ function alsoInputTrees(root, cfg, state, step) {
 // `wf check` runs record their steps under the same keys, so a full gate reuses what a check already proved.
 const allGateSteps = (state) => [...state.gates, ...(state.checks ?? [])].sort((a, b) => String(a.at).localeCompare(String(b.at))).flatMap((g) => g.steps ?? []);
 
-function findReuse(state, stepId, key) {
+// `legacy(s)` gives the key a step recorded before 0.7.11 would have under today's definition (see runnerIdentity).
+function findReuse(state, stepId, key, legacy = null) {
   if (!key) return null;
-  return allGateSteps(state).filter((s) => s.id === stepId && s.key === key && ['passed', 'reused'].includes(s.status)).at(-1) ?? null;
+  return allGateSteps(state).filter((s) => s.id === stepId && ['passed', 'reused'].includes(s.status) && (s.key === key || (legacy && !s.resultIdentity && s.key === legacy(s)))).at(-1) ?? null;
 }
+const reusedRecord = (state, stepId, runId) => allGateSteps(state).filter((s) => s.id === stepId && s.runId === runId && ['passed', 'reused'].includes(s.status)).at(-1) ?? null;
+
+// Whether files collected under the `before` expanded globs include everything the `now` globs can match: each glob now
+// is one of them, or one of them matches it as a path (`e2e/.evidence/**/*.png` covers `e2e/.evidence/t-1/**/*.png`).
+// A recorded run holds only the files its globs matched, so narrowing re-selects from it and widening reruns.
+const globsCovered = (now, before) => now.every((p) => before.some((q) => q === p || matchesAny(p, [q])));
 
 // Selection is computed from the adapter committed at the attempt's base, never the worktree copy.
 export async function planGate(root, state, options = {}) {
@@ -91,7 +112,17 @@ export async function planGate(root, state, options = {}) {
   const { repo: adapterRepo, relative } = attemptAdapter(root, state);
   const adapterRel = relative.split(path.sep).join('/');
   const adapterTouched = (changed[adapterRepo.name] ?? []).some((f) => inside(f, adapterRel));
-  const full = adapterTouched || options.full === true;
+  // The workflow's own folder (the adapter, its lessons and step code) is not the project's code: a change there counts for
+  // a step only when the step's inputs name that folder explicitly (a step that tests the workflow code), never through a
+  // broad `**`. Named failure (audit of 51 attempts): an attempt whose only change was in that folder (a lesson, the
+  // adapter) ran ten steps for 32 minutes, seven of them identical to passes already recorded.
+  const own = (repoName, f) => repoName === adapterRepo.name && inside(f, adapterRel);
+  const namesOwnFolder = (step, pkg) => step.repo === adapterRepo.name && (step.inputs ?? []).some((p) => { const r = pkg.path === '.' ? p : `${pkg.path}/${p}`; return r === adapterRel || r.startsWith(`${adapterRel}/`); });
+  const changedCode = Object.fromEntries(Object.entries(changed).map(([r, files]) => [r, files.filter((f) => !own(r, f))]));
+  // A change in the adapter folder no longer makes the run full (0.7.11): the gate reads its steps from the adapter at the
+  // pin, never the worktree, and a step whose inputs include the adapter folder sees the change in its inputs hash. Named
+  // failure (audit of 51 attempts): 38 step runs for packages with no changed file, after a change to adapter files only.
+  const full = options.full === true;
   const imp = impact(cfg, changed);
   const allChanged = Object.values(changed).flat();
   let focused = false;
@@ -108,7 +139,7 @@ export async function planGate(root, state, options = {}) {
   // every step of its package to run, and a file no step checks at all is listed as unchecked.
   const uncovered = {};
   const unchecked = [];
-  for (const [repoName, files] of Object.entries(changed)) {
+  for (const [repoName, files] of Object.entries(changedCode)) {
     const repoCfg = cfg.repos.find((r) => r.name === repoName);
     for (const f of files) {
       const pkg = [...repoCfg.packages].filter((p) => inside(f, p.path)).sort((a, b) => b.path.length - a.path.length)[0];
@@ -123,6 +154,7 @@ export async function planGate(root, state, options = {}) {
     }
   }
   const steps = [];
+  const units = artifactUnits(root, state);
   for (const step of cfg.gate.steps) {
     const entry = { id: step.id, repo: step.repo, package: step.package ?? null, tier: step.tier ?? 'light' };
     if (!state.repos[step.repo]) {
@@ -130,9 +162,10 @@ export async function planGate(root, state, options = {}) {
       continue;
     }
     const { repo, pkg, dir } = stepPackage(cfg, state, step);
-    const pkgChanged = (changed[repo.name] ?? []).filter((f) => inside(f, pkg.path));
+    const forStep = namesOwnFolder(step, pkg) ? changed : changedCode;
+    const pkgChanged = (forStep[repo.name] ?? []).filter((f) => inside(f, pkg.path));
     // Shared infrastructure (lockfiles, manifests, build config) can change what any step means: no skipping.
-    const infraChanged = pkgChanged.some((f) => matchesAny(rel(f, pkg.path), pkg.sharedInfra)) || (changed[repo.name] ?? []).some((f) => matchesAny(f, repo.sharedInfra ?? []));
+    const infraChanged = pkgChanged.some((f) => matchesAny(rel(f, pkg.path), pkg.sharedInfra)) || (forStep[repo.name] ?? []).some((f) => matchesAny(f, repo.sharedInfra ?? []));
     const notCovered = uncovered[`${repo.name}|${pkg.path}`] ?? [];
     const component = cfg.components.find((c) => c.repo === repo.name && (c.package ?? '.') === pkg.path) ?? (step.component ? cfg.components.find((c) => c.id === step.component) : null);
     const isDependent = Boolean(component && imp.dependents.includes(component.id));
@@ -145,7 +178,7 @@ export async function planGate(root, state, options = {}) {
         return !p || !matchesAny(rel(f, p.path), p.docsOnly);
       }).map((f) => `${name}:${f}`);
     });
-    if (!mustRun && !alsoChanged.length && !(changed[repo.name] ?? []).length) {
+    if (!mustRun && !alsoChanged.length && !(forStep[repo.name] ?? []).length) {
       steps.push({ ...entry, decision: 'skip', reason: 'no changes in this repo' });
       continue;
     }
@@ -173,11 +206,28 @@ export async function planGate(root, state, options = {}) {
     }
     chooseWorkers(step);
     chooseShards(step);
-    const inputs = stepInputs(state, step, repo, pkg);
+    const inputs = stepInputs(state, step, repo, pkg, namesOwnFolder(step, pkg) ? null : { repo: adapterRepo.name, folder: adapterRel });
     const runner = runnerIdentity(root, live, state, step);
     const also = alsoInputTrees(root, cfg, state, step);
-    const key = !inputs || also.unreadable.length ? null : hashValue(also.trees ? { inputs: inputs.hash, runner, also: also.trees } : { inputs: inputs.hash, runner });
-    let prior = findReuse(state, step.id, key);
+    const keyOf = (r) => (!inputs || also.unreadable.length ? null : hashValue(also.trees ? { inputs: inputs.hash, runner: r, also: also.trees } : { inputs: inputs.hash, runner: r }));
+    const key = keyOf(runner);
+    // A pass recorded before 0.7.11 was keyed on the whole definition and on inputs that counted the workflow folder: it is
+    // matched on those terms, so an upgrade reruns nothing that 0.7.10 would have reused.
+    const recordedBefore = allGateSteps(state).some((s) => s.id === step.id && !s.resultIdentity && ['passed', 'reused'].includes(s.status));
+    const inputsBefore = recordedBefore && inputs && !namesOwnFolder(step, pkg) ? stepInputs(state, step, repo, pkg) : inputs;
+    const legacyKey = (s) => (!inputsBefore || also.unreadable.length ? null : hashValue(also.trees ? { inputs: inputsBefore.hash, runner: legacyRunnerIdentity(root, state, step, (s.artifactGlobs ?? []).map((g) => g.glob)), also: also.trees } : { inputs: inputsBefore.hash, runner: legacyRunnerIdentity(root, state, step, (s.artifactGlobs ?? []).map((g) => g.glob)) }));
+    let prior = findReuse(state, step.id, key, recordedBefore ? legacyKey : null);
+    // Which of the recorded run's files are this ticket's evidence now: its expanded globs must cover today's, or it reruns.
+    const expandedNow = (step.artifacts ?? []).map((glob) => ({ glob, expanded: expandArtifactGlob(glob, units) }));
+    let reselect = null;
+    if (prior) {
+      const before = (prior.artifactGlobs ?? []).flatMap((g) => g.expanded ?? []);
+      const now = expandedNow.flatMap((g) => g.expanded);
+      if (canonical(now) !== canonical(before)) {
+        if (globsCovered(now, before)) reselect = expandedNow;
+        else prior = null;
+      }
+    }
     let outside = [];
     if (prior) {
       // Since the commit the passing run saw, did anything change in this package that the step's inputs don't
@@ -185,7 +235,7 @@ export async function planGate(root, state, options = {}) {
       const ranOn = [...state.gates, ...(state.checks ?? [])].find((g) => g.runId === prior.runId)?.tree?.[repo.name];
       const head = ranOn && /^[0-9a-f]{40}$/.test(ranOn) ? ranOn : null;
       const since = head ? git(state.repos[repo.name].worktree, ['diff', '--name-only', head, 'HEAD']).split('\n').filter(Boolean) : pkgChanged;
-      outside = since.filter((f) => inside(f, pkg.path) && !matchesAny(rel(f, pkg.path), pkg.docsOnly) && !matchesAny(rel(f, pkg.path), step.inputs ?? ['**']) && !matchesAny(rel(f, pkg.path), step.ignores ?? []));
+      outside = since.filter((f) => inside(f, pkg.path) && (namesOwnFolder(step, pkg) || !own(repo.name, f)) && !matchesAny(rel(f, pkg.path), pkg.docsOnly) && !matchesAny(rel(f, pkg.path), step.inputs ?? ['**']) && !matchesAny(rel(f, pkg.path), step.ignores ?? []));
       if (outside.length || !head) prior = null;
     }
     if (options.rerunFailed && !prior && !options.rerunFailed.includes(step.id)) {
@@ -203,6 +253,7 @@ export async function planGate(root, state, options = {}) {
       decision: prior ? 'reuse' : 'run',
       reason: prior ? `same inputs and runner as ${prior.runId}` : outside.length ? `changed file(s) outside this step's inputs since its last pass: ${outside.slice(0, 3).join(', ')}${outside.length > 3 ? '…' : ''}` : notCovered.length ? `changed file(s) outside every step's inputs: ${notCovered.slice(0, 3).join(', ')}${notCovered.length > 3 ? '…' : ''}` : also.unreadable.length ? `cannot read the tree of ${also.unreadable.join(', ')} (alsoInputs): always runs` : key ? (isDependent ? 'dependent of a changed contract' : infraChanged ? 'shared infrastructure changed' : also.trees ? 'inputs or a repo in alsoInputs changed, or never passed' : 'inputs changed or never passed') : 'no `inputs` declared: always runs',
       reusedFrom: prior?.runId ?? null,
+      ...(prior && reselect ? { reselect } : {}),
       missingSecrets: missingFor(root, cfg, step.id, validationCatalog(root, state, step.id)),
     });
   }
@@ -289,6 +340,12 @@ export function globFiles(baseDir, pattern) {
   const start = parts.slice(0, firstWild).join('/') || '/';
   const re = globToRegExp(abs);
   return walkFiles(start).filter((f) => re.test(f));
+}
+
+// The files of a recorded run that today's expanded globs select, with the units that own each (I-136/WAK correction).
+function reselectArtifacts(prior, globsNow, units) {
+  const artifacts = (prior.artifacts ?? []).filter((a) => globsNow.some((g) => matchesAny(a.source, g.expanded))).map((a) => ({ ...a, units: units.filter((u) => globsNow.some((g) => matchesAny(a.source, expandArtifactGlob(g.glob, [u])))).map((u) => u.attempt) }));
+  return { artifacts, artifactGlobs: globsNow.map((g) => ({ glob: g.glob, expanded: g.expanded, files: artifacts.filter((a) => matchesAny(a.source, g.expanded)) })) };
 }
 
 // Whose evidence a gate collects: the attempt itself, and for a batch every member (their heavy steps run here).
@@ -584,6 +641,7 @@ async function executeStep(root, cfg, state, planned, ctx) {
     repo: step.repo,
     tier: planned.tier,
     key: planned.key,
+    resultIdentity: true,
     inputsHash: planned.inputsHash,
     reason: planned.reason,
     fileHashesRef,
@@ -1050,8 +1108,11 @@ async function executeRun(root, state, plan, live, run) {
     .sort((a, b) => a.heavy - b.heavy || (a.heavy ? b.d - a.d : 0) || a.i - b.i)
     .map((x) => x.s);
   for (const s of plan.steps.filter((x) => x.decision === 'reuse')) {
-    const prior = findReuse(state, s.id, s.key);
-    results.push({ ...prior, status: 'reused', reusedFrom: prior.runId, reason: s.reason, runId });
+    const prior = reusedRecord(state, s.id, s.reusedFrom);
+    // Recorded under today's key and identity, so the next gate finds it directly; the evidence is re-selected when the
+    // step's globs narrowed since the run (files the run collected, by their source path, unchanged bytes).
+    const picked = s.reselect ? reselectArtifacts(prior, s.reselect, artifactUnits(root, state)) : null;
+    results.push({ ...prior, ...(picked ?? {}), key: s.key, runnerIdentity: s.runnerIdentity, resultIdentity: true, status: 'reused', reusedFrom: prior.runId, reason: s.reselect ? `${s.reason}; evidence re-selected by the step's current globs` : s.reason, runId });
   }
   for (const s of plan.steps.filter((x) => ['skip', 'defer'].includes(x.decision))) results.push({ id: s.id, repo: s.repo, tier: s.tier, status: s.decision === 'defer' ? 'deferred' : 'skipped', reason: s.reason, skippedBy: s.skippedBy, runId });
   if (results.length) append(root, state.id, 'gate.step', { runId, steps: results }, null);
