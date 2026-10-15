@@ -263,7 +263,15 @@ test('I-120: an amendment restates plan sections, and every role sees the intent
   const ib = JSON.parse(fs.readFileSync(JSON.parse(first.out).bundle, 'utf8'));
   assert.equal(ib.intent, 'implementation');
   assert.deepEqual(ib.intentChanges.map((c) => c.reason), ['fix it in this release']);
-  assert.match(ib.planNote, /the plan's narrative was written while this attempt was an analysis \(upgraded to implementation: "fix it in this release"\); the criteria, work items, impact map and amendments are the contract now/);
+  assert.match(ib.planNote, /the plan's narrative was written while this attempt was an analysis \(since upgraded to implementation: "fix it in this release"\); the criteria, work items, impact map and amendments are the contract now/);
+  // A blind reviewer gets the facts, not the owner's words.
+  commitIn(e.repos.app.worktree, { 'src/a.txt': 'implemented\n' });
+  ok(wf(f.root, ['handoff', 'close', '--agent', 'i', '--attempt', e.id]));
+  const rb = JSON.parse(fs.readFileSync(ok(wf(f.root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', e.id, '--json'])).json().bundle, 'utf8'));
+  assert.deepEqual(rb.intentChanges.map((c) => [c.from, c.to, c.reason]), [['analysis', 'implementation', undefined]]);
+  assert.match(rb.planNote, /written while this attempt was an analysis \(since upgraded to implementation\);/);
+  assert.doesNotMatch(rb.planNote, /fix it in this release/);
+  ok(wf(f.root, ['review', '--closure', closureFile(f.base, goodClosure('r')), '--attempt', e.id]));
   const amend = path.join(f.base, 'restate.json');
   fs.writeFileSync(amend, JSON.stringify({ plan: { summary: 'implement the fix in the release', contract: 'the release ships the fix' } }));
   ok(wf(f.root, ['criteria', 'amend', '--file', amend, '--reason', 'the plan for the implementation', '--attempt', e.id]));
@@ -271,7 +279,6 @@ test('I-120: an amendment restates plan sections, and every role sees the intent
   assert.equal(s.plan.summary, 'implement the fix in the release');
   assert.deepEqual(Object.keys(s.planHistory.at(-1).replaced).sort(), ['contract', 'summary'], 'what it replaced is kept');
   assert.equal(s.accepted ?? null, null);
-  ok(wf(f.root, ['handoff', 'close', '--agent', 'i', '--attempt', e.id]));
   const next = JSON.parse(fs.readFileSync(ok(wf(f.root, ['handoff', 'implementer', '--agent', 'i2', '--attempt', e.id, '--json'])).json().bundle, 'utf8'));
   assert.equal(next.plan.summary, 'implement the fix in the release');
   assert.equal(next.planNote, undefined, 'restated after the upgrade: nothing to explain');

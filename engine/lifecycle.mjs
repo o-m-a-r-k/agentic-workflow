@@ -242,11 +242,11 @@ function intentHistory(state) {
 
 // I-120: when the plan's narrative predates what the attempt is for: frozen before an upgrade to implementation and not
 // restated by an amendment since, or copied from the attempt a split made this one from.
-function planNote(state) {
+function planNote(state, { quote = true } = {}) {
   const upgrade = [...(state.splitFrom?.intentChanges ?? []), ...(state.intentChanges ?? [])].filter((c) => c.to === 'implementation').at(-1);
   const restatedSince = upgrade && (state.planHistory ?? []).some((h) => h.at > upgrade.at);
-  if (upgrade && !state.splitFrom && state.planFrozenAt && state.planFrozenAt < upgrade.at && !restatedSince) return `the plan's narrative was written while this attempt was an analysis (upgraded to implementation: "${upgrade.reason}"); the criteria, work items, impact map and amendments are the contract now`;
-  if (state.splitFrom && !(state.planHistory ?? []).length) return `this attempt was split from ${state.splitFrom.attempt} (${state.splitFrom.reason}); its plan narrative is ${state.splitFrom.attempt}'s, written for the whole change${upgrade ? ` (${upgrade.attempt ?? state.splitFrom.attempt} was upgraded from analysis to implementation: "${upgrade.reason}")` : ''}; its own criteria and work items are this attempt's contract`;
+  if (upgrade && !state.splitFrom && state.planFrozenAt && state.planFrozenAt < upgrade.at && !restatedSince) return `the plan's narrative was written while this attempt was an analysis (since upgraded to implementation${quote ? `: "${upgrade.reason}"` : ''}); the criteria, work items, impact map and amendments are the contract now`;
+  if (state.splitFrom && !(state.planHistory ?? []).length) return `this attempt was split from ${state.splitFrom.attempt}${quote ? ` (${state.splitFrom.reason})` : ''}; its plan narrative is ${state.splitFrom.attempt}'s, written for the whole change${upgrade ? ` (${upgrade.attempt ?? state.splitFrom.attempt} was upgraded from analysis to implementation${quote ? `: "${upgrade.reason}"` : ''})` : ''}; its own criteria and work items are this attempt's contract`;
   return null;
 }
 
@@ -427,10 +427,12 @@ export function amendCriteria(root, options) {
   const ignored = doc && typeof doc === 'object' ? droppedFields(state, doc) : [];
   if (ignored.length && obligationSince(state, '0.7.9')) throw refuse(`the amendment carries ${ignored.map((k) => `\`${k}\``).join(', ')}, which no amendment applies: an amendment changes ${AMEND_FIELDS.map((k) => `\`${k}\``).join(', ')} and plan sections (\`plan\` or ${AMEND_PLAN_KEYS.slice(1).map((k) => `\`${k}\``).join(', ')}) only`, `${replanAfterUpgrade(state) ? `this attempt was upgraded to implementation after its plan was frozen: record the planner's whole plan with \`wf plan --from-agent <planner id> --attempt ${state.id}\` (it replaces the analysis plan); ` : ''}to tell the next planner something, hand it with \`wf handoff planner --agent <id> --context "<what the person asked>"\`; remove the other fields and amend again`, { id: 'amend:ignored-fields' });
   // An amendment may carry only an impact update (I-26): the criteria then stay as frozen.
-  const stated = doc?.expect;
+  // The expectation an amendment states, at its top level or (as in a plan file) under `plan` (independent review of 0.7.10).
+  const stated = doc?.expect ?? (doc?.plan && typeof doc.plan === 'object' ? doc.plan.expect : undefined);
   const expectIssues = expectProblems(stated, PLAN_EXPECT, 'expect');
   if (expectIssues.length) throw new WfError(`the amendment's expectation cannot be compared:\n  - ${expectIssues.join('\n  - ')}`);
   const restated = planUpdate(state, doc);
+  if (restated && replanAfterUpgrade(state)) process.stderr.write(`note: ${state.id} was upgraded to implementation after its plan was frozen and no implementer has started: \`wf plan --from-agent <planner id> --attempt ${state.id}\` replaces the analysis plan whole (criteria, work and impact map with it); this amendment restates only the sections it names\n`);
   const { criteria, changes } = doc?.criteria === undefined && (doc?.impact !== undefined || stated !== undefined || restated) ? { criteria: state.criteria, changes: { changed: [], added: [], dropped: [] } } : mergeAmendment(state.criteria, doc.criteria);
   const scope = scopeOf(doc.scope);
   // Work items survive an amendment unless the file replaces them; either way they must name criteria that still exist.
@@ -705,11 +707,12 @@ export function handoff(root, role, options) {
     // I-127: what this attempt is for now, and why it changed: a planner handed after an analysis attempt was upgraded to
     // implementation plans the implementation (and, before the first implementer, its plan replaces the analysis one).
     intent: ['planner', 'implementer', 'reviewer'].includes(role) ? state.intent : undefined,
-    intentChanges: ['planner', 'implementer', 'reviewer'].includes(role) ? intentHistory(state) : undefined,
+    // A blind reviewer gets the facts, not the owner's words (independent review of 0.7.10): no reason, no quote.
+    intentChanges: ['planner', 'implementer'].includes(role) ? intentHistory(state) : role === 'reviewer' ? intentHistory(state)?.map(({ from, to, at }) => ({ from, to, at })) : undefined,
     replacesPlan: role === 'planner' && replanAfterUpgrade(state) ? 'this attempt was upgraded to implementation after its plan was frozen: write the whole implementation plan; recorded with `wf plan`, it replaces the analysis plan' : undefined,
     // I-120: where the plan's narrative came from, when it is older than what the attempt is for now. Facts, no steering.
-    splitFrom: ['planner', 'implementer', 'reviewer'].includes(role) && state.splitFrom ? { attempt: state.splitFrom.attempt, reason: state.splitFrom.reason, items: state.splitFrom.items } : undefined,
-    planNote: ['planner', 'implementer', 'reviewer'].includes(role) ? planNote(state) ?? undefined : undefined,
+    splitFrom: ['planner', 'implementer', 'reviewer'].includes(role) && state.splitFrom ? { attempt: state.splitFrom.attempt, items: state.splitFrom.items, ...(role === 'reviewer' ? {} : { reason: state.splitFrom.reason }) } : undefined,
+    planNote: ['planner', 'implementer', 'reviewer'].includes(role) ? planNote(state, { quote: role !== 'reviewer' }) ?? undefined : undefined,
     // I-127: what the owner was asked to carry to the planner (the person's words, a decision), recorded with the handoff.
     ownerContext: ownerContext ?? undefined,
     criteria: state.criteria,
@@ -1334,7 +1337,8 @@ export function recordReview(root, options) {
   // The engine classifies every finding against the tree and round it was recorded on (engine/review-policy.mjs); the
   // reviewer's own `classified` field is replaced.
   closure = stampClosure(state, closure, { mode, since: reviewerHandoff.deltaFrom ?? null });
-  const recorded = (state.reviews ?? []).find((r) => r.handoff === round);
+  // The round's standing record: a reviewer may record its blind closure again before adding `priorFindings`.
+  const recorded = (state.reviews ?? []).findLast((r) => r.handoff === round);
   const revealed = (state.reviews ?? []).find((r) => r.handoff === round && r.revealed);
   if (!recorded && !delta && closure.priorFindings?.length) throw refuse('`priorFindings` are listed only after your own blind closure is recorded; record the closure without them first');
   const sealed = revealed ?? (closure.priorFindings?.length ? recorded : null);
@@ -1354,7 +1358,18 @@ export function recordReview(root, options) {
   // The closure is for the tree the reviewer was handed. It inspected gate evidence only if a passing gate on that tree
   // was in its bundle (0.1.5 and earlier handed a reviewer only after such a gate, so their handoffs carry no field).
   const gateEvidenceInspected = 'gate' in reviewerHandoff ? Boolean(reviewerHandoff.gate) : true;
-  const covered = reviewerHandoff.round === 'evidence-review' && (handed.criteria ?? []).filter((c) => !c.dropped).every((c) => (closure.criteria ?? []).some((m) => m?.id === c.id && EVIDENCE_KINDS.has(m.evidence?.kind))) && (handed.gate?.screenshots ?? []).filter((x) => !x.inspectedBefore).every((x) => (closure.screenshotsInspected ?? []).includes(x.sha256));
+  // I-133: a full evidence round that mapped every criterion to evidence acceptance would take (a known kind, its ref or
+  // reason, a screenshot the gate collected) and opened every screenshot new to it covered the change: it counts as the
+  // audit whatever caveats it names. A delta round never is the audit (independent review of 0.7.10).
+  const collectedShots = screenshots(state);
+  const evidenced = (m) => {
+    const ev = m?.evidence;
+    if (!EVIDENCE_KINDS.has(ev?.kind)) return false;
+    if (['not-applicable', 'dropped-with-reason'].includes(ev.kind)) return Boolean(String(ev.reason ?? '').trim());
+    if (!ev.ref) return false;
+    return ev.kind !== 'screenshot' || collectedShots.some((a) => [a.sha256, a.source, a.path].includes(String(ev.ref).trim()));
+  };
+  const covered = mode === 'full' && reviewerHandoff.round === 'evidence-review' && (handed.criteria ?? []).filter((c) => !c.dropped).every((c) => evidenced((closure.criteria ?? []).find((m) => m?.id === c.id))) && (handed.gate?.screenshots ?? []).filter((x) => !x.inspectedBefore).every((x) => (closure.screenshotsInspected ?? []).includes(x.sha256));
   let reviewerModel = optional(findHost(reviewerHandoff.runtime), 'roleModel')?.(reviewerHandoff, { home: home() }) ?? null;
   append(root, state.id, 'review.recorded', { closure, file: dest, raw, handoff: round, mode, covered, revealed: Boolean(revealed) || revealNow, provenance: provenance.status, session: reviewerHandoff.session ?? null, tree: reviewerHandoff.tree, gateRun: reviewerHandoff.gate ?? null, gateEvidenceInspected, handoffTree: reviewerHandoff.tree, handoffPatch: reviewerHandoff.patch, reviewerModel, impactGaps: (closure.findings ?? []).filter((f) => f?.category === 'impact-gap').length }, closure.reviewer);
   append(root, state.id, 'review.round', roundData(state, reviewerHandoff, closure, { outcome: 'recorded', model: reviewerModel, revealed: Boolean(revealed) }), null);

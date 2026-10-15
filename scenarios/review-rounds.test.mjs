@@ -50,10 +50,14 @@ test('I-132: a recorded blind evidence closure takes its priorFindings in a seco
   assert.equal(early.code, 75, 'before the blind closure is recorded, priorFindings wait');
   assert.match(early.err, /`priorFindings` are listed only after your own blind closure is recorded/);
   ok(record(p, blind));
+  // Before any priorFindings, the blind closure may be recorded again; the standing record is the one sealed.
+  const blind2 = { ...blind, findings: [finding('F8', 'low', 'src/a.txt:6 wording')] };
+  ok(record(p, blind2));
   const changed = record(p, { ...blind, findings: [finding('F9', 'low', 'src/a.txt:5 new')], priorFindings: priors });
   assert.equal(changed.code, 75);
   assert.match(changed.err, /your own findings were recorded blind and cannot change once `priorFindings` are added/);
-  ok(record(p, { ...blind, priorFindings: priors }));
+  assert.equal(record(p, { ...blind, priorFindings: priors }).code, 75, 'sealed on the standing record, not the first');
+  ok(record(p, { ...blind2, priorFindings: priors }));
 });
 
 test('I-133: an evidence review that covered every criterion and screenshot stays the audit whatever caveats it names, so the round after a repair is a delta', () => {
@@ -66,6 +70,18 @@ test('I-133: an evidence review that covered every criterion and screenshot stay
   repair(p, { 'src/a.txt': CHANGED.replace('L2', 'L2 fixed') });
   ok(wf(p.root, ['gate', '--attempt', p.id]));
   assert.equal(hand(p, 'r3').mode, 'delta');
+});
+
+test('I-133: an evidence review whose evidence acceptance would refuse (no ref) is no audit when it names unreached scope', () => {
+  const p = project('rr-133-weak');
+  hand(p, 'r1');
+  ok(record(p, goodClosure('r1')));
+  ok(wf(p.root, ['gate', '--attempt', p.id]));
+  hand(p, 'r2');
+  ok(record(p, goodClosure('r2', { criteria: [{ id: 'C1', evidence: { kind: 'output' } }], notReached: ['the gate log for C1'], findings: [finding('F1', 'major', 'src/a.txt:2 wrong', { criterion: 'C1' })] })));
+  repair(p, { 'src/a.txt': CHANGED.replace('L2', 'L2 fixed') });
+  ok(wf(p.root, ['gate', '--attempt', p.id]));
+  assert.equal(hand(p, 'r3').mode, 'full');
 });
 
 test('I-133: a code review that names unreached scope is still no audit (I-69 stands)', () => {
