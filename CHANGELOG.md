@@ -45,6 +45,9 @@ implementer spent 266 minutes on a 90-minute estimate: 201 of them in sleep loop
   Generated role files are checked for structure, and long message regexes give way to the refusal ids the engine
   records. Kept: the checks that every text states the same severity scale and blocking rule, that no text repeats a
   claim the engine retired, and that agent texts name commands and links that exist.
+- **An interrupt during a role's launch ends the role.** A stop that arrived after a role process started but before
+  `wf handoff run` was listening killed the command and left the role running with no owner. It is now held until the
+  command listens, and then the whole role tree is ended. This was found by the Linux verify under load.
 
 ## 0.7.13 - Quick fixes take minutes
 

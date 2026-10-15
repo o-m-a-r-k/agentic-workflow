@@ -95,10 +95,19 @@ export async function runRole(root, options) {
   fs.mkdirSync(path.dirname(io.out), { recursive: true });
   fs.writeFileSync(io.prompt, h.startPrompt, { mode: 0o600 });
   const fds = [fs.openSync(io.prompt, 'r'), fs.openSync(io.out, 'w', 0o600), fs.openSync(io.err, 'w', 0o600)];
+  // An interrupt from here on cancels the role. Named failure (Linux verify of 0.7.14, under load): a SIGTERM that arrived
+  // after the spawn but before follow() listened (the spawn event, the ledger write and its seal) killed this process by the
+  // default action and left the role's tree running with no owner. It is held until follow() listens, which ends the tree.
+  let earlyInterrupt = false;
+  const early = () => { earlyInterrupt = true; };
+  process.on('SIGINT', early);
+  process.on('SIGTERM', early);
+  const releaseEarly = () => { process.removeListener('SIGINT', early); process.removeListener('SIGTERM', early); return earlyInterrupt; };
   const child = spawn(launch.bin, launch.args, { cwd: root, env, stdio: fds, detached: true });
   for (const fd of fds) fs.closeSync(fd);
   const spawned = await new Promise((resolve) => { child.once('spawn', () => resolve(null)); child.once('error', (e) => resolve(e.message)); });
   if (spawned) {
+    releaseEarly();
     append(root, state.id, 'agent.launch.finished', { handoff: h.bundle, status: 'failed', exitCode: 1 }, `engine:${runtime}`);
     seal(append);
     process.stderr.write(`${label} role failed: ${spawned}\n`);
@@ -109,8 +118,11 @@ export async function runRole(root, options) {
   // The owner's own expectation (`--minutes`) is the return point for a role that states none (a planner, a strategist, or
   // any role before it writes its estimate). Named failure (second final review of 0.7.0): such a launch still never returned.
   const ownerMinutes = options.minutes === undefined ? null : Number(options.minutes);
-  if (ownerMinutes !== null && !(Number.isFinite(ownerMinutes) && ownerMinutes > 0)) throw new WfError('--minutes is a positive number (your own expectation for this role, minutes since its launch)');
-  return follow(root, state.id, h, { host, runtime, label, requestedSession, child, io, ownerMinutes });
+  if (ownerMinutes !== null && !(Number.isFinite(ownerMinutes) && ownerMinutes > 0)) {
+    releaseEarly();
+    throw new WfError('--minutes is a positive number (your own expectation for this role, minutes since its launch)');
+  }
+  return follow(root, state.id, h, { host, runtime, label, requestedSession, child, io, ownerMinutes, releaseEarly });
 }
 
 // Where an engine-launched role's start prompt, event stream and error output live (outside the evidence).
@@ -132,7 +144,7 @@ const alive = (pid) => {
 // Returns when the process has ended, or (still running) once `untilMinutes` have passed since this call, or once it has
 // passed the estimate it stated itself (`expect.minutes` in its report or closure file) when no `untilMinutes` is given.
 // Nothing is decided from the estimate: the role keeps running and the owner judges (D9).
-async function follow(root, id, h, { host, runtime, label, requestedSession, child = null, io, untilMinutes = null, ownerMinutes = null }) {
+async function follow(root, id, h, { host, runtime, label, requestedSession, child = null, io, untilMinutes = null, ownerMinutes = null, releaseEarly = () => false }) {
   const progress = roleProgress(h, { runtime: label });
   const pid = child?.pid ?? h.launch?.pid ?? null;
   const exited = () => (child ? child.exitCode !== null || child.signalCode !== null : !pid || !alive(pid));
@@ -153,6 +165,7 @@ async function follow(root, id, h, { host, runtime, label, requestedSession, chi
   const interrupted = () => { problem = 'the role launch was interrupted'; if (pid) endTree(); };
   process.on('SIGINT', interrupted);
   process.on('SIGTERM', interrupted);
+  if (releaseEarly()) interrupted();
   const heartbeat = setInterval(() => { if (!exited()) progress.heartbeat(); }, ROLE_HEARTBEAT_MS);
   heartbeat.unref();
   const readNew = () => {
