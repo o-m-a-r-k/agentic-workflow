@@ -223,3 +223,22 @@ test('an escalation answered in the person\'s own words stays open: words never 
   assert.notEqual(third.err.match(/wf approve (A\d+)/)[1], fresh);
 });
 
+
+// I-142 (the person's rule, 2026-10-15): the person told a session to leave a legacy part unchanged, and nothing let a high or
+// medium item leave even on their answer. When the person directs it, each such item is their own question; an agent never
+// lets it go.
+test('a medium or high item the person directs out of the ticket leaves on their own answer to it, never an agent\'s', () => {
+  const p = project('pi-directed');
+  const refused = run(p, ['scope', 'defer', '--finding', 'r1:F3']);
+  assert.equal(refused.code, 75);
+  assert.match(refused.err, /r1:F3 \(medium\) stays in this delivery/);
+  assert.match(refused.err, /if the person told you to leave it out of this ticket, run this again with `--person-directed "<their words>"`/);
+  const asked = run(p, ['scope', 'defer', '--finding', 'r1:F3', '--person-directed', 'leave the old export as it is']);
+  assert.equal(asked.code, 75);
+  const [id] = asked.err.match(/wf approve (A\d+) --from-question/).slice(1);
+  const d = state(p.root, p.id).decisions.find((x) => x.id === id);
+  assert.match(d.summary, /Your rule fixes medium items in the delivery; you asked to leave this out: "leave the old export as it is"\./);
+  approveAsOwner(p.root, p.id, id, 'let it leave');
+  ok(run(p, ['scope', 'defer', '--finding', 'r1:F3', '--person-directed', 'leave the old export as it is']));
+  assert.deepEqual(state(p.root, p.id).scopeDecisions.at(-1).keys, ['r1:F3']);
+});

@@ -49,9 +49,13 @@ export function leavingDecisions(root, state, items, { verb, reason = '', option
   const raised = items.map((x) => x.raisedAt).filter(Boolean).sort().at(-1) ?? null;
   const core = deliverCoreDecision(state, raised);
   if (core) return Object.fromEntries(items.map((x) => [x.ref, core.id]));
-  const whoFor = (x) => policy[x.level] ?? DEFAULT_POLICY[x.level];
+  // I-142 (the person's rule, 2026-10-15): when the person directs that an item stays out of the ticket ("leave the legacy
+  // part unchanged"), even a level that never leaves may leave on their own answer to that item; an agent never lets it go.
+  // The owner passes the person's words (`--person-directed "<their words>"`); the person still answers each item.
+  const directed = typeof options['person-directed'] === 'string' && options['person-directed'].trim() ? options['person-directed'].trim().slice(0, 500) : null;
+  const whoFor = (x) => { const w = policy[x.level] ?? DEFAULT_POLICY[x.level]; return w === 'never' && directed ? 'person' : w; };
   const kept = items.filter((x) => whoFor(x) === 'never');
-  if (kept.length) throw refuse(`not ${verb}: ${kept.map((x) => `${x.ref} (${x.level}${x.severity && x.severity !== x.level ? `, rated ${x.severity}` : ''})`).join(', ')} ${kept.length > 1 ? 'stay' : 'stays'} in this delivery: ${ruleText(policy)}`, 'fix it through the implementer that did that work, or move it to a sibling attempt of the batch (`wf scope move`)', { id: 'leave:medium-high' });
+  if (kept.length) throw refuse(`not ${verb}: ${kept.map((x) => `${x.ref} (${x.level}${x.severity && x.severity !== x.level ? `, rated ${x.severity}` : ''})`).join(', ')} ${kept.length > 1 ? 'stay' : 'stays'} in this delivery: ${ruleText(policy)}`, 'fix it through the implementer that did that work, or move it to a sibling attempt of the batch (`wf scope move`); if the person told you to leave it out of this ticket, run this again with `--person-directed "<their words>"`: they answer each item themselves', { id: 'leave:medium-high' });
   const owner = items.filter((x) => whoFor(x) === 'owner');
   if (owner.length && !reason) throw refuse(`${owner.map((x) => x.ref).join(', ')} may leave on your judgement under the project's \`leaving:\` policy: say why it waits`, 'pass `--reason "<why it can wait>"`', { id: 'leave:owner-reason' });
   const decided = Object.fromEntries(owner.map((x) => [x.ref, 'owner']));
@@ -69,7 +73,8 @@ export function leavingDecisions(root, state, items, { verb, reason = '', option
       asked.push({ x, d });
       continue;
     }
-    const made = createDecision(root, current, { kind: 'move-out-of-batch', key: `leave:${x.ref}`, summary: questionText(x, verb, explain), choices: [LEAVE, FIX], options });
+    const neverLevel = (policy[x.level] ?? DEFAULT_POLICY[x.level]) === 'never';
+    const made = createDecision(root, current, { kind: 'move-out-of-batch', key: `leave:${x.ref}`, summary: neverLevel ? `${questionText(x, verb, explain)} (Your rule fixes ${x.level} items in the delivery; you asked to leave this out: "${directed}".)` : questionText(x, verb, explain), choices: [LEAVE, FIX], options });
     asked.push({ x, d: made });
     current = { ...current, decisions: [...(current.decisions ?? []), made] };
   }
