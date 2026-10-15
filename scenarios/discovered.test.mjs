@@ -241,7 +241,11 @@ test('I-19: a discovered fix adds a repo and its work items to the running attem
   assert.match(ok(wf(root, ['resume', '--attempt', id])).out, /W2 class full .*`wf handoff implementer --work W2/);
 
   ok(wf(root, ['handoff', 'implementer', '--work', 'W2', '--agent', 'impl-2', '--attempt', id, '--owner', 'o']));
-  commitIn(s.repos.api.worktree, { 'src/totals.txt': 'page\ntotal\n' }, 'list response carries the full total');
+  // The fix is committed in the same second D1 was recorded (git dates to the second; the ledger to the millisecond):
+  // not before it. Named failure (0.7.10 verify): this step was refused on one verify leg when the two fell in one second.
+  const second = new Date(Math.floor(Date.parse(s.discovered.find((d) => d.id === 'D1').at) / 1000) * 1000).toISOString();
+  fs.writeFileSync(path.join(s.repos.api.worktree, 'src', 'totals.txt'), 'page\ntotal\n');
+  sh(s.repos.api.worktree, `git add -A && GIT_COMMITTER_DATE=${second} GIT_AUTHOR_DATE=${second} git commit -q -m "list response carries the full total"`);
   const fix = sh(s.repos.api.worktree, 'git rev-parse HEAD');
   ok(disc(root, ['close', 'D1', '--fixed', fix, '--attempt', id, '--owner', 'o']));
   ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', id]));

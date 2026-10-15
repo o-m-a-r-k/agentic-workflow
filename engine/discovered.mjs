@@ -95,7 +95,10 @@ export function closeDiscovered(root, idArg, options) {
       const head = e.raisedOn?.[c.repo];
       // A repo added after the issue was recorded has no head in `raisedOn`: its commit must be dated after the issue.
       const committed = e.raisedOn && !head ? git(state.repos[c.repo].worktree, ['show', '-s', '--format=%cI', c.commit], { allowFail: true }) : null;
-      if (committed && e.at && Date.parse(committed) < Date.parse(e.at)) throw refuse(`${c.commit.slice(0, 10)} was committed before ${e.id} was recorded: it cannot be the fix`, 'name the commit that fixed it, made after the issue was recorded', { id: 'discovered:fixed-before-issue' });
+      // Git dates a commit to the second and the ledger to the millisecond: a commit in the same second as the record is
+      // not before it. Named failure (0.7.10 verify): a fix committed within the second the issue was recorded was refused
+      // as older than the issue, on one of three verify legs.
+      if (committed && e.at && Date.parse(committed) < Math.floor(Date.parse(e.at) / 1000) * 1000) throw refuse(`${c.commit.slice(0, 10)} was committed before ${e.id} was recorded: it cannot be the fix`, 'name the commit that fixed it, made after the issue was recorded', { id: 'discovered:fixed-before-issue' });
       if (head && run('git', ['merge-base', '--is-ancestor', c.commit, head], { cwd: state.repos[c.repo].worktree, allowFail: true }).status === 0) throw refuse(`${c.commit.slice(0, 10)} was already in the tree ${e.id} was recorded on: it cannot be the fix`, 'name the commit that fixed it, made after the issue was recorded', { id: 'discovered:fixed-before-issue' });
     }
     for (const e of entries) append(root, state.id, 'discovered.closed', { id: e.id, outcome: 'fixed', repo: c.repo, commit: c.commit, evidence: text(options.evidence) || null }, actor(options));

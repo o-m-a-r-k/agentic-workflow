@@ -38,6 +38,9 @@ Release notes, newest first, then every fix that came from a failure in the work
 - I-136 is retired as a duplicate of I-134 (choosing the e2e specs a change can affect). I-134 stays open. A static
   estimate over one project's last 25 tickets found the saving would be about 5 minutes of a 35-minute run: 19 of the 25
   tickets touch code every spec executes. The larger lever there is the project's own e2e parallelism.
+- A fix committed in the same second its discovered issue was recorded was refused as older than the issue (git dates
+  commits to the second, the ledger to the millisecond; 0.7.8's check). A commit in the same second is no longer before
+  it (`scenarios/discovered.test.mjs`, I-19).
 - Existing projects pick up the new role texts (reviewer, planner, implementer) and the AGENTS block with `wf sync`.
 - The CLI package and both host plugin manifests are aligned at 0.7.10.
 
