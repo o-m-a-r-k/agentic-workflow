@@ -12,6 +12,9 @@ Release notes, newest first, then every fix that came from a failure in the work
   - This is the plugin's default. A project whose quick fixes should run every step sets `gate.quickLane: full` in its
     adapter.
   - Screenshots for a quick UI fix come from captures made by hand on the committed tree (`wf captures import`).
+- **`npm run verify` does not run a tree again that already passed.** A clean tree that passed every leg on this machine
+  (same tree, node and container image) returns at once, so the pre-push hook no longer repeats an 11-minute run that
+  just passed. `WF_VERIFY_FORCE=1` runs it anyway.
 
 ## 0.7.12 - Kept findings, reused passes, and roles read as they are
 

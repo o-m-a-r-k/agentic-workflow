@@ -13,6 +13,10 @@
 //   npm run verify -- --host-only      this machine only (not enough before a push: Linux-only failures are real)
 //   npm run verify -- --linux-only     the two container legs only
 //   npm run verify -- --serial         one leg after the other, each with the whole machine
+//
+// A clean tree that already passed every leg on this machine (same tree, host node, container image) is not run again:
+// the result cannot differ. Named cost (0.7.12 release): the same tree was verified three times, 11 minutes each, once by
+// hand and twice by the pre-push hook. WF_VERIFY_FORCE=1 runs it anyway.
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -29,6 +33,33 @@ for (const f of flags) if (!['--host-only', '--linux-only', '--serial'].includes
   process.exit(2);
 }
 const files = fs.readdirSync(path.join(repo, 'scenarios')).filter((f) => f.endsWith('.test.mjs')).sort().map((f) => `scenarios/${f}`);
+
+// What a full run proves: this clean tree on this machine's node and the container image. Null when the tree has
+// uncommitted or untracked changes (the suite reads the working tree) or a part cannot be read.
+function passKey() {
+  if (flags.size) return null;
+  const git = (args) => spawnSync('git', args, { cwd: repo, encoding: 'utf8' });
+  const status = git(['status', '--porcelain']);
+  const tree = git(['rev-parse', 'HEAD^{tree}']);
+  if (status.status !== 0 || status.stdout.trim() || tree.status !== 0) return null;
+  const imageId = spawnSync('docker', ['image', 'inspect', '--format', '{{.Id}}', image], { encoding: 'utf8' });
+  if (imageId.status !== 0) return null;
+  return JSON.stringify({ tree: tree.stdout.trim(), node: process.version, platform: `${process.platform} ${os.release()}`, image: imageId.stdout.trim() });
+}
+const commonDir = spawnSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: repo, encoding: 'utf8' }).stdout.trim();
+const passFile = commonDir ? path.join(commonDir, 'wf-verify-passed.json') : null;
+const key = process.env.WF_VERIFY_FORCE ? null : passKey();
+if (key && passFile) {
+  let passed = [];
+  try {
+    passed = JSON.parse(fs.readFileSync(passFile, 'utf8'));
+  } catch {}
+  const hit = Array.isArray(passed) ? passed.find((p) => p.key === key) : null;
+  if (hit) {
+    process.stdout.write(`verify: this tree (${JSON.parse(key).tree.slice(0, 12)}) passed every leg on this machine at ${hit.at} with the same node and image; nothing to run again (WF_VERIFY_FORCE=1 runs it)\n`);
+    process.exit(0);
+  }
+}
 
 const legs = [];
 if (!flags.has('--linux-only')) legs.push({ name: `host (${process.platform} ${os.release()}, node ${process.version})`, host: true });
@@ -120,4 +151,15 @@ for (const r of results) process.stdout.write(`${r.ok ? (r.skipped ? '!' : '✓'
 const failed = results.filter((r) => !r.ok);
 const total = Math.round((Date.now() - started) / 1000);
 process.stdout.write(failed.length ? `verify FAILED: ${failed.map((r) => r.name).join(', ')} (${total}s)\n` : `verify passed (${total}s${parallel ? ', legs in parallel' : ''})\n`);
+// Recorded only for a full run on a tree that did not change while it ran, with every leg run (none skipped).
+if (!failed.length && key && passFile && !results.some((r) => r.skipped) && passKey() === key) {
+  let passed = [];
+  try {
+    passed = JSON.parse(fs.readFileSync(passFile, 'utf8'));
+  } catch {}
+  passed = [...(Array.isArray(passed) ? passed : []).filter((p) => p.key !== key), { key, at: new Date().toISOString() }].slice(-20);
+  try {
+    fs.writeFileSync(passFile, JSON.stringify(passed, null, 2));
+  } catch {}
+}
 process.exit(failed.length ? 1 : 0);
