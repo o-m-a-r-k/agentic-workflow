@@ -67,7 +67,7 @@ Work
   wf handoff wait --agent ID [--minutes N]
                                     follow a launched role again; N: return after that many minutes since its launch
   wf handoff stop --agent ID [--reason "why"]
-                                    end a launched role's process; a fresh handoff takes over
+                                    end a launched role's whole process tree (reported only once it is gone); a fresh handoff takes over
   wf handoff close --agent ID [--outcome done|stopped|failed]
                                     an implementer finished: no review round starts while one is open
   wf handoff strategist --agent ID [--reason "what diverged"]
@@ -823,7 +823,7 @@ async function dispatch(cmd, sub, positional, options) {
       }
       if (sub === 'stop') {
         const { stopRole } = await import('./launch.mjs');
-        const result = stopRole(root, options);
+        const result = await stopRole(root, options);
         print(options, `${result.agent} stopped; hand a fresh one to continue (\`wf resume\`)`, result);
         return 0;
       }

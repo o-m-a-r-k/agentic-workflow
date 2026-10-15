@@ -21,6 +21,7 @@ import { roleInstructions } from './onboard.mjs';
 import { roleProgress, ROLE_HEARTBEAT_MS } from './role-progress.mjs';
 import { findHost, hostNames, launchEnvDeletes } from './hosts/index.mjs';
 import { isPlainSessionId } from './hosts/safe-file.mjs';
+import { endProcessTree, leftOver } from './process-tree.mjs';
 import { WfError, assertPlainGit, canonical, git, refuse, sha256, withFileLock, writeJson } from './util.mjs';
 import { readStatement } from './expectations.mjs';
 
@@ -141,8 +142,13 @@ async function follow(root, id, h, { host, runtime, label, requestedSession, chi
   let completed = false, problem = null, offset = 0, rest = '';
   if (session) progress.start(session);
   const startedAt = Date.parse(h.launch?.requestedAt ?? '') || Date.now();
-  // An interrupt of this process cancels the role, as before 0.7.0: the owner meant to stop it.
-  const interrupted = () => { problem = 'the role launch was interrupted'; if (pid) { try { process.kill(-pid, 'SIGTERM'); } catch {} } };
+  // An interrupt of this process cancels the role, as before 0.7.0: the owner meant to stop it. Named failure (I-128): the
+  // interrupt and error paths sent one SIGTERM to the role's group and then waited for the role itself to exit, so a role that
+  // ignored it hung the interrupted command, and a child outside the group outlived it unseen. The whole tree is ended and
+  // verified (engine/process-tree.mjs, bounded); what is left is said, never waited for.
+  let ending = null, stillRunning = null;
+  const endTree = () => { ending ??= endProcessTree(pid).then((ended) => { if (ended.left.length) stillRunning = ended; }); };
+  const interrupted = () => { problem = 'the role launch was interrupted'; if (pid) endTree(); };
   process.on('SIGINT', interrupted);
   process.on('SIGTERM', interrupted);
   const heartbeat = setInterval(() => { if (!exited()) progress.heartbeat(); }, ROLE_HEARTBEAT_MS);
@@ -203,7 +209,7 @@ async function follow(root, id, h, { host, runtime, label, requestedSession, chi
         }
         if (seen.failed) problem = `${label} reported a failed turn`;
       }
-      if (done) break;
+      if (done || stillRunning) break;
       if (problem) { await new Promise((r) => setTimeout(r, 100)); continue; }
       const minutes = estimate();
       if (minutes !== null && (Date.now() - startedAt) / 60000 > minutes) { returned = untilMinutes !== null ? 'waited' : minutes === ownerMinutes && !roleSaid() ? 'owner-estimate' : 'past-estimate'; break; }
@@ -211,11 +217,19 @@ async function follow(root, id, h, { host, runtime, label, requestedSession, chi
     }
   } catch (e) {
     problem = e.message;
-    if (pid) { try { process.kill(-pid, 'SIGTERM'); } catch {} }
+    if (pid) endTree();
   } finally {
     clearInterval(heartbeat);
     process.removeListener('SIGINT', interrupted);
     process.removeListener('SIGTERM', interrupted);
+  }
+  if (ending) await ending;
+  if (stillRunning) {
+    // The tree could not be ended: the launch stays recorded as running, which is what is true.
+    progress.finish();
+    const { why, byHand } = leftOver(stillRunning);
+    process.stderr.write(`${label} ${h.role} ${h.agent}: ${problem}, and it is still running: ${why}. Nothing was recorded as finished. ${byHand}, then \`wf handoff stop --agent ${h.agent} --attempt ${id}\` records it.\n`);
+    return { agent: h.agent, session, status: 'running', pid, exitCode: 1 };
   }
   if (returned && !problem) {
     // The role keeps running in its own process group; this process no longer waits for it.
@@ -284,12 +298,19 @@ export async function waitRole(root, options) {
   return follow(root, state.id, h, { host, runtime: h.runtime, label: host.name, requestedSession: h.launch.requestedSession ?? null, io, untilMinutes: minutes });
 }
 
-// `wf handoff stop --agent X`: ends a launched role's process group and records it failed (stopped by the owner).
-export function stopRole(root, options) {
+// `wf handoff stop --agent X`: ends a launched role's whole process tree and, once they are observed gone, records the
+// role failed (stopped by the owner). Named failure (I-128): the stop was recorded and reported after one SIGTERM to the
+// role's group that nothing checked; the role and its child kept running. A tree that cannot be ended is an error that
+// says what still runs, and nothing is recorded.
+export async function stopRole(root, options) {
   const { state, h } = launched(root, options);
   if (['completed', 'failed'].includes(h.launch.status)) throw refuse(`${h.agent} already ${h.launch.status}`);
-  if (h.launch.pid && alive(h.launch.pid)) {
-    try { process.kill(-h.launch.pid, 'SIGTERM'); } catch {}
+  if (h.launch.pid) {
+    const ended = await endProcessTree(h.launch.pid);
+    if (ended.left.length) {
+      const { why, byHand } = leftOver(ended);
+      throw new WfError(`${h.agent} was not stopped, still running: ${why}`, { hint: `nothing was recorded as stopped. ${byHand}, then \`wf handoff stop --agent ${h.agent} --attempt ${state.id}\` again to record it` });
+    }
   }
   append(root, state.id, 'agent.launch.finished', { handoff: h.bundle, status: 'failed', exitCode: 143, failure: { kind: 'stopped', detail: `stopped by the owner${typeof options.reason === 'string' && options.reason.trim() ? `: ${options.reason.trim()}` : ''}` } }, actor(options));
   seal(append);
