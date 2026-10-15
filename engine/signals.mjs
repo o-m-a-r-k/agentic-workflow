@@ -9,6 +9,7 @@
 // owner agent judges the course (the owner skill). Nothing here allows or blocks a command.
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { changedFiles, treeHashes } from './attempt.mjs';
 import { ownerTranscript } from './host-record.mjs';
 import { home as hostHome } from './provenance.mjs';
@@ -118,6 +119,28 @@ const statedBy = (h) => (h.role === 'implementer' ? readStatement(h.reportFile, 
 // when it has neither a closure nor a refusal (the round the owner is waiting for), an implementer the owner has not closed
 // and a strategist that has recorded no decision. Each with the time since it was handed, its last transcript activity and
 // what it said it expects (its own words, never a limit).
+// The machine's last sleep, when the host says (macOS: the kernel's last sleep and wake times), so time a role spent with the
+// machine asleep is not read as the role going quiet. Named failure (audit of role launches): a reviewer 94 minutes into its
+// work was stopped as stalled 11 seconds after the machine woke from a 68-minute sleep; "68 minutes since its last event"
+// was the sleep. A seam for scenarios.
+export const sleepSeams = { last: lastMachineSleep };
+let sleepCache;
+function lastMachineSleep() {
+  if (sleepCache !== undefined) return sleepCache;
+  sleepCache = null;
+  if (process.platform !== 'darwin') return sleepCache;
+  const r = spawnSync('sysctl', ['-n', 'kern.sleeptime', 'kern.waketime'], { encoding: 'utf8' });
+  const secs = [...String(r.stdout ?? '').matchAll(/sec = (\d+)/g)].map((m) => Number(m[1]) * 1000);
+  if (secs.length === 2 && secs[0] > 0 && secs[1] >= secs[0]) sleepCache = { sleptAt: secs[0], wokeAt: secs[1] };
+  return sleepCache;
+}
+// Minutes of the stretch since `lastAt` the machine was asleep, and how long ago it woke; null when it did not sleep since.
+export function asleepSince(lastAt, nowMs) {
+  const s = sleepSeams.last();
+  if (!s || !lastAt || s.wokeAt <= lastAt || s.wokeAt > nowMs) return null;
+  return { asleepMinutes: round1((s.wokeAt - Math.max(s.sleptAt, lastAt)) / 60000), wokeMinutesAgo: round1((nowMs - s.wokeAt) / 60000) };
+}
+
 export function runningSessions(state, nowMs, home) {
   const lastReviewer = state.handoffs.filter((h) => h.role === 'reviewer').at(-1);
   const ended = (h) => (state.reviews ?? []).some((r) => r.handoff === h.bundle) || (state.reviewsRefused ?? []).some((r) => r.handoff === h.bundle);
@@ -143,7 +166,7 @@ export function runningSessions(state, nowMs, home) {
     const since = Math.max(Date.parse(h.at) || 0, Date.parse(h.launch?.startedAt) || 0);
     const lastAt = seen ? Math.max(seen.mtime, since) : null;
     const said = statedBy(h);
-    out.push({ agent: h.agent, role: h.role, work: h.work ?? null, runtime: h.runtime, handoff: idOf(h.bundle), handedAt: h.at, launch: h.launch?.status ?? null, located: Boolean(seen), lastActivityAt: lastAt ? new Date(lastAt).toISOString() : null, idleMinutes: lastAt ? Math.max(0, round1((nowMs - lastAt) / 60000)) : null, minutes: since ? Math.max(0, round1((nowMs - since) / 60000)) : null, expectMinutes: said?.minutes ?? null, said: said?.said ?? null });
+    out.push({ agent: h.agent, role: h.role, work: h.work ?? null, runtime: h.runtime, handoff: idOf(h.bundle), handedAt: h.at, launch: h.launch?.status ?? null, located: Boolean(seen), lastActivityAt: lastAt ? new Date(lastAt).toISOString() : null, idleMinutes: lastAt ? Math.max(0, round1((nowMs - lastAt) / 60000)) : null, minutes: since ? Math.max(0, round1((nowMs - since) / 60000)) : null, expectMinutes: said?.minutes ?? null, said: said?.said ?? null , ...(asleepSince(lastAt, nowMs) ?? {}) });
   }
   return out;
 }
@@ -263,7 +286,7 @@ export function courseLines(sig, { predictions = [] } = {}) {
   ];
   for (const x of sig.implementers.filter((i) => !i.open).slice(-3)) out.push(`implementer ${x.agent}${x.work ? ` (${x.work})` : ''} ${x.outcome ?? 'closed'}: took ${mins(x.minutes)}${lastActive(x)}; it ${x.expectMinutes ? `expected ${x.expectMinutes} min${past(x.minutes, x.expectMinutes)}` : 'stated no expectation'}${x.approach ? `; approach: ${x.approach.slice(0, 200)}` : ''}`);
   for (const r of sig.rounds.slice(-3)) out.push(`review round ${r.n} (${r.reviewer ?? r.handoff}): took ${mins(r.minutes)}${lastActive(r)}; it ${r.expectMinutes ? `expected ${r.expectMinutes} min${past(r.minutes, r.expectMinutes)}` : 'stated no expectation'}${r.scope ? `; scope: ${r.scope.slice(0, 200)}` : ''}${r.notReached?.length ? `; did not reach: ${r.notReached.slice(0, 5).map((x) => x.slice(0, 150)).join('; ')}${r.notReached.length > 5 ? ` and ${r.notReached.length - 5} more` : ''}` : ''}`);
-  for (const s of sig.sessions) out.push(`${s.role} ${s.agent}${s.work ? ` (${s.work})` : ''} is working: ${mins(s.minutes)} since handed, ${s.expectMinutes ? `it expects ${s.expectMinutes} min${past(s.minutes, s.expectMinutes)}` : 'it stated no expectation'}; last activity ${s.located ? ago(s.idleMinutes) : 'unknown (transcript not found)'}${s.said ? `; ${s.role === 'reviewer' ? 'scope' : 'approach'}: ${s.said.slice(0, 200)}` : ''}`);
+  for (const s of sig.sessions) out.push(`${s.role} ${s.agent}${s.work ? ` (${s.work})` : ''} is working: ${mins(s.minutes)} since handed, ${s.expectMinutes ? `it expects ${s.expectMinutes} min${past(s.minutes, s.expectMinutes)}` : 'it stated no expectation'}; last activity ${s.located ? ago(s.idleMinutes) : 'unknown (transcript not found)'}${typeof s.asleepMinutes === 'number' && s.asleepMinutes >= 1 ? ` (${Math.round(s.asleepMinutes)} min of that with the machine asleep; it woke ${ago(s.wokeMinutesAgo)}: not a stall)` : ''}${s.said ? `; ${s.role === 'reviewer' ? 'scope' : 'approach'}: ${s.said.slice(0, 200)}` : ''}`);
   for (const d of predictions) out.push(`strategist ${d.id} (${d.action}) predicted ${d.prediction ? `${d.prediction.signal} by ${typeof d.prediction.by === 'number' ? `round ${d.prediction.by}` : d.prediction.by}` : 'nothing'}: ${d.prediction_status.status}${d.prediction_status.observed !== null && d.prediction_status.observed !== undefined ? ` (observed ${d.prediction_status.observed})` : ''}`);
   return out;
 }

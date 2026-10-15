@@ -65,7 +65,9 @@ function classifyResult({ stdout }) {
 function interpretEvent(e) {
   if (e.type === 'system' && e.subtype === 'init') return { started: e.session_id };
   if (e.type === 'result') return { terminal: { session: e.session_id, success: e.subtype === 'success' && e.is_error === false } };
-  if (e.type === 'turn.failed' || e.type === 'error') return { failed: true };
+  if (e.type === 'turn.failed') return { failed: true };
+  // An error event may be passing (a reconnect, a retried request): it fails the launch only if no turn completes after it.
+  if (e.type === 'error') return { error: String(e.message ?? e.error?.message ?? e.error ?? 'error').slice(0, 300) };
   return {};
 }
 

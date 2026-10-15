@@ -77,7 +77,9 @@ const classifyResult = ({ outFile }) => ({ text: fs.readFileSync(outFile, 'utf8'
 function interpretEvent(e) {
   if (e.type === 'thread.started') return { started: e.thread_id };
   if (e.type === 'turn.completed') return { terminal: { success: true } };
-  if (e.type === 'turn.failed' || e.type === 'error') return { failed: true };
+  if (e.type === 'turn.failed') return { failed: true };
+  // An error event may be passing (a reconnect, a retried request): it fails the launch only if no turn completes after it.
+  if (e.type === 'error') return { error: String(e.message ?? e.error?.message ?? e.error ?? 'error').slice(0, 300) };
   return {};
 }
 

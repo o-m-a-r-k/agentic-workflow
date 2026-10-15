@@ -106,14 +106,21 @@ test('native role relays agent-reported progress without leaking reasoning or ch
   assert.deepEqual(readLedger(root, id).filter((e) => e.type.startsWith('agent.launch.')).map((e) => e.type), ['agent.launch.requested', 'agent.launch.spawned', 'agent.launch.started', 'agent.launch.finished']);
 });
 
-test('runtime errors and a zero-exit process without completion remain failed launches', () => {
-  for (const mode of ['runtime-error', 'no-completion']) {
+// 0.7.11, named failure (audit of role launches): an error event followed by a completed turn (a retried stream) was latched,
+// and four roles that had finished their work were recorded failed. An error fails a launch only if no turn completes after it.
+test('a passing error before a completed turn is a completed launch; a launch with no completed turn fails, and says why', () => {
+  const passing = prepared('runtime-error');
+  const ok1 = wf(passing.root, ['handoff', 'run', '--agent', 'p', '--attempt', passing.id, '--json'], { env: passing.env });
+  assert.equal(ok1.code, 0, ok1.err);
+  assert.equal(state(passing.root, passing.id).handoffs.at(-1).launch.status, 'completed');
+  for (const mode of ['no-completion']) {
     const { root, id, env } = prepared(mode);
     const result = wf(root, ['handoff', 'run', '--agent', 'p', '--attempt', id, '--json'], { env });
     assert.equal(result.code, 1);
     assert.equal(result.json().status, 'failed');
     assert.match(result.err, /session .* started/);
     assert.equal(state(root, id).handoffs.at(-1).launch.status, 'failed');
+    assert.deepEqual(state(root, id).handoffs.at(-1).launch.failure, { kind: 'exited', detail: 'no completed turn' }, 'why it ended is in the ledger');
     assert.equal(wf(root, ['plan', '--from-agent', 'p', '--attempt', id], { env }).code, 75);
   }
 });
@@ -169,7 +176,7 @@ test('engine-launched Codex provenance refuses a steered prompt and a failed pla
     assert.equal(imported.code, 75, imported.out);
     assert.match(imported.err, mode === 'failed' ? /not completed successfully/ : /start prompt/);
     assert.equal(state(root, id).criteria, null);
-    assert.equal(state(root, id).handoffs.at(-1).launch.failure, undefined, 'a started failed turn is not a host initialization failure');
+    assert.notEqual(state(root, id).handoffs.at(-1).launch.failure?.kind, 'host-initialization-permission', 'a started failed turn is not a host initialization failure');
   }
 });
 

@@ -137,9 +137,10 @@ async function follow(root, id, h, { host, runtime, label, requestedSession, chi
   const pid = child?.pid ?? h.launch?.pid ?? null;
   const exited = () => (child ? child.exitCode !== null || child.signalCode !== null : !pid || !alive(pid));
   let exitCode = null;
-  if (child) child.once('exit', (code) => { exitCode = code ?? 1; });
+  let exitSignal = null;
+  if (child) child.once('exit', (code, signal) => { exitCode = code ?? 1; exitSignal = signal ?? null; });
   let session = loadState(root, id).handoffs.find((x) => x.bundle === h.bundle)?.session ?? null;
-  let completed = false, problem = null, offset = 0, rest = '';
+  let completed = false, problem = null, lastError = null, offset = 0, rest = '';
   if (session) progress.start(session);
   const startedAt = Date.parse(h.launch?.requestedAt ?? '') || Date.now();
   // An interrupt of this process cancels the role, as before 0.7.0: the owner meant to stop it. Named failure (I-128): the
@@ -208,6 +209,9 @@ async function follow(root, id, h, { host, runtime, label, requestedSession, chi
           if (!completed && seen.terminal.session !== undefined) problem = `${label} reported a failed turn`;
         }
         if (seen.failed) problem = `${label} reported a failed turn`;
+        // Named failure (audit of role launches): four roles that finished cleanly were recorded failed, because one passing
+        // error event set the failure for good. It counts only if no turn completes after it.
+        if (seen.error) lastError = seen.error;
       }
       if (done || stillRunning) break;
       if (problem) { await new Promise((r) => setTimeout(r, 100)); continue; }
@@ -244,6 +248,7 @@ async function follow(root, id, h, { host, runtime, label, requestedSession, chi
   if (child && exitCode === null) exitCode = await new Promise((r) => { if (child.exitCode !== null || child.signalCode !== null) r(child.exitCode ?? 1); else child.once('exit', (c) => r(c ?? 1)); });
   progress.finish();
   const code = exitCode ?? (completed ? 0 : 1);
+  if (!completed && !problem && lastError) problem = `${label} reported an error: ${lastError}`;
   const success = code === 0 && session && completed && !problem;
   let stderr = '';
   try { stderr = fs.readFileSync(io.err, 'utf8').slice(-4000); } catch {}
@@ -251,7 +256,9 @@ async function follow(root, id, h, { host, runtime, label, requestedSession, chi
   // Named failure I-47: a parent sandbox can block host initialization before any native session starts.
   // Diagnose only the observed permission signature; never change or retry the child's sandbox here.
   const diagnosis = !session && !success && !problem ? host.diagnoseLaunch?.({ stderr }) ?? null : null;
-  const failure = diagnosis ? { kind: diagnosis.kind, detail: diagnosis.detail } : null;
+  // Why a launch did not succeed, in the ledger. Named failure (audit of role launches): 30 failed launches carried only
+  // "exit 1"; telling an owner's stop from a model at capacity from a crash took reading transcripts by hand.
+  const failure = diagnosis ? { kind: diagnosis.kind, detail: diagnosis.detail } : success ? null : { kind: problem === 'the role launch was interrupted' ? 'interrupted' : !session ? 'no-session' : !completed && /failed turn|reported an error/.test(problem ?? '') ? 'failed-turn' : 'exited', detail: String(problem ?? (stderr.trim().split('\n').slice(-3).join(' ') || 'no completed turn')).slice(-500), ...(exitSignal ? { signal: exitSignal } : {}) };
   if (!['completed', 'failed'].includes(loadState(root, id).handoffs.find((x) => x.bundle === h.bundle)?.launch?.status)) {
     append(root, id, 'agent.launch.finished', { handoff: h.bundle, status: success ? 'completed' : 'failed', exitCode: code, ...(failure ? { failure } : {}) }, `engine:${runtime}`);
     seal(append);
