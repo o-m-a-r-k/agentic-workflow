@@ -304,6 +304,11 @@ export function reduce(entries) {
           s.accepted = null;
           s.phase = 'implementing';
         }
+        // I-120: plan sections an amendment restates replace the frozen ones; what they replaced stays in `planHistory`.
+        if (d.plan && typeof d.plan === 'object') {
+          (s.planHistory ??= []).push({ at: e.at, amendment: s.criteriaAmendments.length, reason: d.reason, replaced: Object.fromEntries(Object.keys(d.plan).map((k) => [k, s.plan?.[k] ?? null])) });
+          s.plan = { ...(s.plan ?? {}), ...d.plan };
+        }
         // A re-plan states its own expectation; the earlier ones stay in `expectations`.
         if (expectOf(d.expect)) {
           s.expect = expectOf(d.expect);
@@ -613,7 +618,7 @@ export function reduce(entries) {
       }
       // `wf split` on a sibling attempt: where its obligations came from.
       case 'split.created':
-        s.splitFrom = { attempt: d.from, split: d.split, items: d.items ?? [], reason: d.reason, at: e.at };
+        s.splitFrom = { attempt: d.from, split: d.split, items: d.items ?? [], reason: d.reason, at: e.at, intentChanges: d.intentChanges ?? [] };
         break;
       case 'tracker.pending':
         s.tracker.pending.push(...d.actions.map((a) => narrowAttach({ ...a, event: d.event }, s.delivery.narrowed)));

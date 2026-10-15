@@ -234,6 +234,22 @@ function contextOf(role, options) {
   return text;
 }
 
+// I-120: every change of intent this attempt's plan was written under: its own, and its parent's for a split sibling.
+function intentHistory(state) {
+  const all = [...(state.splitFrom?.intentChanges ?? []), ...(state.intentChanges ?? []).map(({ from, to, reason, at }) => ({ from, to, reason, at }))];
+  return all.length ? all : undefined;
+}
+
+// I-120: when the plan's narrative predates what the attempt is for: frozen before an upgrade to implementation and not
+// restated by an amendment since, or copied from the attempt a split made this one from.
+function planNote(state) {
+  const upgrade = [...(state.splitFrom?.intentChanges ?? []), ...(state.intentChanges ?? [])].filter((c) => c.to === 'implementation').at(-1);
+  const restatedSince = upgrade && (state.planHistory ?? []).some((h) => h.at > upgrade.at);
+  if (upgrade && !state.splitFrom && state.planFrozenAt && state.planFrozenAt < upgrade.at && !restatedSince) return `the plan's narrative was written while this attempt was an analysis (upgraded to implementation: "${upgrade.reason}"); the criteria, work items, impact map and amendments are the contract now`;
+  if (state.splitFrom && !(state.planHistory ?? []).length) return `this attempt was split from ${state.splitFrom.attempt} (${state.splitFrom.reason}); its plan narrative is ${state.splitFrom.attempt}'s, written for the whole change${upgrade ? ` (${upgrade.attempt ?? state.splitFrom.attempt} was upgraded from analysis to implementation: "${upgrade.reason}")` : ''}; its own criteria and work items are this attempt's contract`;
+  return null;
+}
+
 // I-127: an attempt upgraded from analysis to implementation after its plan was frozen, no implementer handed yet.
 export const replanAfterUpgrade = (state) => Boolean(state.criteria) && (state.intentChanges ?? []).some((c) => c.to === 'implementation' && (!state.planFrozenAt || c.at > state.planFrozenAt)) && !(state.handoffs ?? []).some((h) => h.role === 'implementer');
 
@@ -376,27 +392,28 @@ export function scopeOf(scope) {
   return out;
 }
 
-// What an amendment file applies (docs/lifecycle.md, "Amendments").
+// What an amendment file applies (docs/lifecycle.md, "Amendments"): criteria, work, impact, scope, the expectation, and
+// (0.7.10, I-120) plan sections, under `plan` or at the top level as in a plan file.
 const AMEND_FIELDS = ['criteria', 'expect', 'impact', 'scope', 'work'];
+const AMEND_PLAN_KEYS = ['plan', ...PLAN_SECTIONS.filter((k) => k !== 'expect')];
+// The plan sections an amendment restates that differ from the plan now (null when none). Named failure (I-120): an
+// analysis attempt upgraded to implementation kept its "no code, no delivery" plan narrative once implementation had
+// started, and split siblings inherited it; an amendment could change everything but the plan, so implementer bundles
+// needed the owner's reasons to explain a contract that contradicted the criteria.
+function planUpdate(state, doc) {
+  const keys = Object.keys(doc ?? {}).filter((k) => AMEND_PLAN_KEYS.includes(k));
+  if (!keys.length) return null;
+  const restated = planFromDoc(Object.fromEntries(keys.map((k) => [k, doc[k]])));
+  const changed = Object.fromEntries(Object.entries(restated ?? {}).filter(([k, v]) => k !== 'expect' && canonical(v) !== canonical(state.plan?.[k] ?? null)));
+  return Object.keys(changed).length ? changed : null;
+}
 // The fields of an amendment file it would drop: anything an amendment does not apply, except a plan and survey equal to the
 // frozen ones (the owner re-sent the plan file with new criteria).
 function droppedFields(state, doc) {
-  const rest = Object.keys(doc).filter((k) => !AMEND_FIELDS.includes(k));
+  const rest = Object.keys(doc).filter((k) => !AMEND_FIELDS.includes(k) && !AMEND_PLAN_KEYS.includes(k));
   if (!rest.length) return [];
-  const known = rest.filter((k) => PLAN_FILE_KEYS.includes(k));
-  if (known.length < rest.length) return rest;
-  const withoutExpect = (p) => (p && typeof p === 'object' ? Object.fromEntries(Object.entries(p).filter(([k]) => k !== 'expect')) : p ?? null);
-  let plan = null;
-  try {
-    plan = planFromDoc(Object.fromEntries(rest.filter((k) => k !== 'survey').map((k) => [k, doc[k]])));
-  } catch {
-    return rest;
-  }
-  const out = [];
-  const planKeys = rest.filter((k) => k !== 'survey');
-  if (planKeys.length && canonical(withoutExpect(plan) ?? {}) !== canonical(withoutExpect(state.plan) ?? {})) out.push(...planKeys);
-  if (rest.includes('survey') && canonical(doc.survey ?? null) !== canonical(state.impact?.survey ?? null)) out.push('survey');
-  return out;
+  // A survey belongs under `impact` in an amendment; the plan file's own, sent again unchanged, loses nothing.
+  return rest.filter((k) => k !== 'survey' || canonical(doc.survey ?? null) !== canonical(state.impact?.survey ?? null));
 }
 export function amendCriteria(root, options) {
   const state = openState(root, options);
@@ -408,12 +425,13 @@ export function amendCriteria(root, options) {
   // the owner believed the planner's new plan was recorded. A field no amendment applies is refused with where it goes when
   // it would be lost: a whole plan file sent again with its plan and survey as frozen loses nothing and is accepted.
   const ignored = doc && typeof doc === 'object' ? droppedFields(state, doc) : [];
-  if (ignored.length && obligationSince(state, '0.7.9')) throw refuse(`the amendment carries ${ignored.map((k) => `\`${k}\``).join(', ')}, which no amendment applies: an amendment changes ${AMEND_FIELDS.map((k) => `\`${k}\``).join(', ')} only`, `${replanAfterUpgrade(state) ? `this attempt was upgraded to implementation after its plan was frozen: record the planner's whole plan with \`wf plan --from-agent <planner id> --attempt ${state.id}\` (it replaces the analysis plan); ` : ''}to tell the next planner something, hand it with \`wf handoff planner --agent <id> --context "<what the person asked>"\`; remove the other fields and amend again`, { id: 'amend:ignored-fields' });
+  if (ignored.length && obligationSince(state, '0.7.9')) throw refuse(`the amendment carries ${ignored.map((k) => `\`${k}\``).join(', ')}, which no amendment applies: an amendment changes ${AMEND_FIELDS.map((k) => `\`${k}\``).join(', ')} and plan sections (\`plan\` or ${AMEND_PLAN_KEYS.slice(1).map((k) => `\`${k}\``).join(', ')}) only`, `${replanAfterUpgrade(state) ? `this attempt was upgraded to implementation after its plan was frozen: record the planner's whole plan with \`wf plan --from-agent <planner id> --attempt ${state.id}\` (it replaces the analysis plan); ` : ''}to tell the next planner something, hand it with \`wf handoff planner --agent <id> --context "<what the person asked>"\`; remove the other fields and amend again`, { id: 'amend:ignored-fields' });
   // An amendment may carry only an impact update (I-26): the criteria then stay as frozen.
   const stated = doc?.expect;
   const expectIssues = expectProblems(stated, PLAN_EXPECT, 'expect');
   if (expectIssues.length) throw new WfError(`the amendment's expectation cannot be compared:\n  - ${expectIssues.join('\n  - ')}`);
-  const { criteria, changes } = doc?.criteria === undefined && (doc?.impact !== undefined || stated !== undefined) ? { criteria: state.criteria, changes: { changed: [], added: [], dropped: [] } } : mergeAmendment(state.criteria, doc.criteria);
+  const restated = planUpdate(state, doc);
+  const { criteria, changes } = doc?.criteria === undefined && (doc?.impact !== undefined || stated !== undefined || restated) ? { criteria: state.criteria, changes: { changed: [], added: [], dropped: [] } } : mergeAmendment(state.criteria, doc.criteria);
   const scope = scopeOf(doc.scope);
   // Work items survive an amendment unless the file replaces them; either way they must name criteria that still exist.
   // Classes and repos are the base adapter's: a repo the working copy adds is unknown here.
@@ -464,7 +482,7 @@ export function amendCriteria(root, options) {
     // before the amendment left it added with the acceptance standing when the command stopped in between).
     for (const r of repoEntries) append(root, state.id, 'repo.added', r, actor(options));
     const raw = keepRaw(root, state.id, `plans/amend-${state.criteriaAmendments.length + 1}.raw.${extOf(from)}`, amendText);
-    append(root, state.id, 'criteria.amended', { criteria, changes, reason: String(options.reason), previous: state.criteria, raw, engine: ENGINE_VERSION, ...(expectOf(stated) ? { expect: expectOf(stated) } : {}), ...(doc.work ? { work } : {}), ...(added.length ? { addedRepos: added.map((a) => a.repo) } : {}), ...(impactAddendum ? { impact: impactAddendum } : {}), ...(impactOwed ? { impactOwed } : {}), ...(withdrewAcceptance ? { withdrewAcceptance: true } : {}) }, actor(options));
+    append(root, state.id, 'criteria.amended', { criteria, changes, reason: String(options.reason), previous: state.criteria, raw, engine: ENGINE_VERSION, ...(expectOf(stated) ? { expect: expectOf(stated) } : {}), ...(restated ? { plan: restated } : {}), ...(doc.work ? { work } : {}), ...(added.length ? { addedRepos: added.map((a) => a.repo) } : {}), ...(impactAddendum ? { impact: impactAddendum } : {}), ...(impactOwed ? { impactOwed } : {}), ...(withdrewAcceptance ? { withdrewAcceptance: true } : {}) }, actor(options));
     // Telemetry: how much the ticket grew with this amendment (criteria counts always; endpoints, error codes and repos
     // when the amendment file states them under `scope`).
     append(root, state.id, 'scope.changed', { amendment: state.criteriaAmendments.length + 1, reason: String(options.reason), criteria: { before: state.criteria.length, after: criteria.length, added: changes.added.length, changed: changes.changed.length, dropped: changes.dropped.length }, ...scope, addedRepos: added.map((a) => a.repo) }, actor(options));
@@ -656,6 +674,8 @@ export function handoff(root, role, options) {
 
   const selected = ['planner', 'implementer', 'reviewer'].includes(role) && !(role === 'reviewer' && mode === 'delta') ? relevantLessons(root, role, state, changed, { work }) : null;
   const ownerContext = contextOf(role, options);
+  // I-120: the first implementer closes the window in which a fresh planner's plan replaces the analysis plan whole.
+  if (role === 'implementer' && replanAfterUpgrade(state)) process.stderr.write(`warning: ${state.id} was upgraded to implementation after its plan was frozen, and this first implementer closes the window in which \`wf plan\` replaces that plan whole; after it, restate plan sections with \`wf criteria amend\` (\`plan\` in the amendment file)\n`);
   // Trusted copies of the rule documents the bundle lists: collected while it is built, written when it is recorded.
   const ruleDocs = [];
   const n = state.handoffs.length + 1;
@@ -684,9 +704,12 @@ export function handoff(root, role, options) {
     issue: { file: state.issue?.file ?? null, trackerCaptures: state.tracker.done.map((d) => d.capture?.path).filter(Boolean) },
     // I-127: what this attempt is for now, and why it changed: a planner handed after an analysis attempt was upgraded to
     // implementation plans the implementation (and, before the first implementer, its plan replaces the analysis one).
-    intent: role === 'planner' ? state.intent : undefined,
-    intentChanges: role === 'planner' && (state.intentChanges ?? []).length ? state.intentChanges.map(({ from, to, reason, at }) => ({ from, to, reason, at })) : undefined,
+    intent: ['planner', 'implementer', 'reviewer'].includes(role) ? state.intent : undefined,
+    intentChanges: ['planner', 'implementer', 'reviewer'].includes(role) ? intentHistory(state) : undefined,
     replacesPlan: role === 'planner' && replanAfterUpgrade(state) ? 'this attempt was upgraded to implementation after its plan was frozen: write the whole implementation plan; recorded with `wf plan`, it replaces the analysis plan' : undefined,
+    // I-120: where the plan's narrative came from, when it is older than what the attempt is for now. Facts, no steering.
+    splitFrom: ['planner', 'implementer', 'reviewer'].includes(role) && state.splitFrom ? { attempt: state.splitFrom.attempt, reason: state.splitFrom.reason, items: state.splitFrom.items } : undefined,
+    planNote: ['planner', 'implementer', 'reviewer'].includes(role) ? planNote(state) ?? undefined : undefined,
     // I-127: what the owner was asked to carry to the planner (the person's words, a decision), recorded with the handoff.
     ownerContext: ownerContext ?? undefined,
     criteria: state.criteria,

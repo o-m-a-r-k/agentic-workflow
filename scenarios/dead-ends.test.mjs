@@ -228,10 +228,11 @@ test('I-127: a planner after an upgrade knows why, its plan replaces the analysi
   ok(wf(f.root, ['plan', '--file', criteriaFile(f.base), '--attempt', e.id]));
   ok(wf(f.root, ['intent', 'implementation', '--attempt', e.id, '--reason', 'add the fix to the release']));
   const amend = path.join(f.base, 'amend-plan.json');
-  fs.writeFileSync(amend, JSON.stringify({ plan: { summary: 'implement the fix' } }));
+  // A field no amendment applies is refused, not dropped (0.7.10, I-120: plan sections are applied).
+  fs.writeFileSync(amend, JSON.stringify({ approach: 'implement the fix' }));
   const r = wf(f.root, ['criteria', 'amend', '--file', amend, '--reason', 'the implementation plan', '--attempt', e.id]);
   assert.equal(r.code, 75);
-  assert.match(r.err, /the amendment carries `plan`, which no amendment applies: an amendment changes `criteria`, `expect`, `impact`, `scope`, `work` only/);
+  assert.match(r.err, /the amendment carries `approach`, which no amendment applies: an amendment changes `criteria`, `expect`, `impact`, `scope`, `work` and plan sections/);
   assert.match(r.err, /record the planner's whole plan with `wf plan --from-agent <planner id> --attempt ENG-9\.1` \(it replaces the analysis plan\)/);
   const h = ok(wf(f.root, ['handoff', 'planner', '--agent', 'p2', '--attempt', e.id, '--context', 'the person: we are cutting a release, add the fix to it', '--json'])).json();
   const b = JSON.parse(fs.readFileSync(h.bundle, 'utf8'));
@@ -246,6 +247,34 @@ test('I-127: a planner after an upgrade knows why, its plan replaces the analysi
   ok(wf(f.root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
   assert.match(wf(f.root, ['plan', '--file', criteriaFile(f.base), '--attempt', e.id]).err, /criteria are already frozen/, 'once implementation started, never again');
   assert.match(wf(f.root, ['handoff', 'implementer', '--agent', 'i2', '--attempt', e.id, '--context', 'x']).err, /--context is for a planner handoff/);
+});
+
+// Named failure (I-120): after an upgrade, once implementation had started, the plan's "no code, no delivery" narrative stayed
+// the contract every implementer read (an amendment could change all but the plan), and split siblings inherited it with no
+// word of why; the owner had to explain the contradiction in every handoff.
+test('I-120: an amendment restates plan sections, and every role sees the intent change and where the plan came from', () => {
+  const f = singleRepoProject('intent-restate', { gate: { steps } });
+  const e = ok(wf(f.root, ['entry', '--item', 'ENG-10', '--intent', 'analysis', '--json'])).json();
+  ok(wf(f.root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id]));
+  ok(wf(f.root, ['plan', '--file', criteriaFile(f.base), '--attempt', e.id]));
+  ok(wf(f.root, ['intent', 'implementation', '--attempt', e.id, '--reason', 'fix it in this release']));
+  const first = wf(f.root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id, '--json']);
+  assert.match(first.err, /this first implementer closes the window in which `wf plan` replaces that plan whole/);
+  const ib = JSON.parse(fs.readFileSync(JSON.parse(first.out).bundle, 'utf8'));
+  assert.equal(ib.intent, 'implementation');
+  assert.deepEqual(ib.intentChanges.map((c) => c.reason), ['fix it in this release']);
+  assert.match(ib.planNote, /the plan's narrative was written while this attempt was an analysis \(upgraded to implementation: "fix it in this release"\); the criteria, work items, impact map and amendments are the contract now/);
+  const amend = path.join(f.base, 'restate.json');
+  fs.writeFileSync(amend, JSON.stringify({ plan: { summary: 'implement the fix in the release', contract: 'the release ships the fix' } }));
+  ok(wf(f.root, ['criteria', 'amend', '--file', amend, '--reason', 'the plan for the implementation', '--attempt', e.id]));
+  const s = state(f.root, e.id);
+  assert.equal(s.plan.summary, 'implement the fix in the release');
+  assert.deepEqual(Object.keys(s.planHistory.at(-1).replaced).sort(), ['contract', 'summary'], 'what it replaced is kept');
+  assert.equal(s.accepted ?? null, null);
+  ok(wf(f.root, ['handoff', 'close', '--agent', 'i', '--attempt', e.id]));
+  const next = JSON.parse(fs.readFileSync(ok(wf(f.root, ['handoff', 'implementer', '--agent', 'i2', '--attempt', e.id, '--json'])).json().bundle, 'utf8'));
+  assert.equal(next.plan.summary, 'implement the fix in the release');
+  assert.equal(next.planNote, undefined, 'restated after the upgrade: nothing to explain');
 });
 
 // Named failure (I-78): with the evidence folder renamed, `wf verify --attempt X` printed "verified 1 attempt(s)" for an

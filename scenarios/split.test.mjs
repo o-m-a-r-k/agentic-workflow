@@ -49,7 +49,11 @@ test('wf split: a sibling in the same batch carries the moved work; the batch is
   assert.match(v7.state(root, a.id).decision.guidance, /./);
   // Both work on the same base in their own worktrees; each changes its own file.
   const sib = { id: 'ENG-800.2', wt: path.join(root, '.wf-worktrees', 'ENG-800.2', 'app'), owner: a.owner };
-  ok(v7.run(root, ['handoff', 'implementer', '--agent', 'impl-sib', '--work', 'W2', '--attempt', sib.id, '--owner', a.owner]));
+  const sibHandoff = ok(v7.run(root, ['handoff', 'implementer', '--agent', 'impl-sib', '--work', 'W2', '--attempt', sib.id, '--owner', a.owner, '--json'])).json();
+  // I-120: the sibling's implementer is told where its plan came from and what its own contract is.
+  const sb = JSON.parse(fs.readFileSync(sibHandoff.bundle, 'utf8'));
+  assert.deepEqual(sb.splitFrom, { attempt: a.id, reason: 'the second module is independent of the first', items: ['W2'] });
+  assert.match(sb.planNote, new RegExp(`this attempt was split from ${a.id.replace('.', '\\.')} \\(the second module is independent of the first\\); its plan narrative is`));
   commitIn(sib.wt, { 'src/b.txt': 'sibling\n' });
   accept(ctx, sib, ['C2'], 's');
   commitIn(a.wt, { 'src/a.txt': 'parent\n' });

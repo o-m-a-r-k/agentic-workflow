@@ -138,7 +138,8 @@ export function performSplit(root, state, { resolved, reason, options = {} }) {
   // The sibling starts from the current base on its own branch; the same item, so a sibling's id reads `<item>.<n>`.
   const sibling = entry(root, { item: state.item, lane: state.lane, intent: 'implementation', repos: repos.join(','), id: nextAttemptId(root, state.item), owner: state.owner, deferHeavy: true, sibling: true, ...(state.issue?.file ? { 'issue-file': state.issue.file } : {}) });
   const by = actor(options);
-  append(root, sibling.id, 'split.created', { from: state.id, split: splitId, items: r.items, reason: why }, by);
+  // I-120: why the parent's plan reads as it does (an analysis upgraded to implementation) travels with the plan it copies.
+  append(root, sibling.id, 'split.created', { from: state.id, split: splitId, items: r.items, reason: why, ...((state.intentChanges ?? []).length ? { intentChanges: state.intentChanges.map(({ from, to, reason, at }) => ({ from, to, reason, at, attempt: state.id })) } : {}) }, by);
   append(root, sibling.id, 'criteria.frozen', { criteria: allCriteria, plan: siblingPlan(state.plan), source: { split: state.id }, ...(work ? { work } : {}), ...(state.impact ? { impact: { survey: state.impact.survey, impact: state.impact.impact, results: state.impact.results ?? {}, addenda: state.impact.addenda ?? [] } } : {}) }, by);
   append(root, sibling.id, 'batch.joined', { batch, pending: true, split: splitId }, by);
   if (state.batchOf !== batch) append(root, state.id, 'batch.joined', { batch, pending: true, split: splitId }, by);
