@@ -693,11 +693,19 @@ export function handoff(root, role, options) {
   let file = path.join(attemptDir(root, state.id), 'handoffs', `${String(n).padStart(2, '0')}-${role}.json`);
   const appendix = cfg.roles?.[role]?.appendix ? path.resolve(root, ADAPTER_DIR, cfg.roles[role].appendix) : null;
   const repairNow = role === 'implementer' && Boolean(repair);
+  // The agent type's role file changed after the owner's session loaded it (I-15): an agent started by type runs the old
+  // role, so its bundle (read first) points it at the current file. A plugin update reaches the next role with no restart and
+  // with the role's own tools (independent review of 0.7.14: launching it natively instead ran it with fewer permissions).
+  let roleStale = null;
+  try {
+    roleStale = optional(findHost(runtime), 'roleStale')?.(root, agentType, detectOwner(), { home: home() }) ?? null;
+  } catch {}
   const bundle = {
     attempt: state.id,
     item: state.item,
     lane: state.lane,
     role,
+    ...(roleStale ? { roleFileChanged: { file: roleStale.file, note: 'Your role instructions changed after the session that started you loaded them: read this file now and follow it where it differs from what you were started with.' } } : {}),
     agent,
     // The agent type the owner starts; its generated file (wf sync) sets this effort and model.
     agentType,
@@ -938,11 +946,6 @@ export function handoff(root, role, options) {
   // Once per attempt: with parallel work items every implementer handoff queued another identical tracker read.
   const firstImplementer = role === 'implementer' && !state.handoffs.some((h) => h.role === 'implementer');
   if (firstImplementer && state.lane !== 'quick' && state.intent === 'implementation' && !state.splitFrom) emitTrackerEvent(root, loadConfig(root), state.id, 'implementing');
-  // The agent type's role file changed after the owner's session loaded it (I-15): the agent would run the old role.
-  let roleStale = null;
-  try {
-    roleStale = optional(findHost(runtime), 'roleStale')?.(root, agentType, owning, { home: home() }) ?? null;
-  } catch {}
   return { bundle: file, startPrompt: startPromptFor(file), agentType, agent, roleStale, sweeps, division: division ? { ...division, evidence: undefined } : undefined,
     members: groupMembers?.map(m => ({ agent: m.bundle.agent, slot: m.bundle.reviewGroup.slot, bundle: m.file, startPrompt: startPromptFor(m.file) })),
     restrictions: restrictionWarnings(trusted, state), class: cls, effort, model, work: work?.id ?? null, lessons: bundle.lessons ? { ...bundle.lessons, filtered: selected.filtered } : null, state: loadState(root, state.id) };

@@ -23,12 +23,13 @@ implementer spent 266 minutes on a 90-minute estimate: 201 of them in sleep loop
   - Before the gate, a moved base is merged and the failures already known on it are fixed.
   - The person's scope words are taken literally.
   - Items left as follow-up work go into one ticket.
-- **`wf signals`** shows, for each working role, the shell command it is running now and the time it spent in commands
-  of 5 minutes or more, with the longest. The owner sees "208 min in 23 commands; longest: a sleep loop" while it
-  happens.
+- **`wf signals`** shows, for each working role, the command it is running now and the time it spent in tool calls of
+  5 minutes or more, with the longest, on both harnesses. Codex polls on a long command count toward that command. The
+  owner sees "208 min in 23 commands; longest: a sleep loop" while it happens. The strategist's stored bundle leaves the
+  commands out.
 - **Plugin updates reach running sessions without a restart.** When a role's file changed after the owner's session
-  started (a plugin update), the handoff says to launch that role with `wf handoff run`, a fresh process that reads the
-  current file, instead of starting it by agent type. `wf sync` no longer asks for restarts.
+  started (a plugin update), the role's bundle points it at the current file, which it reads first. It keeps the
+  session's own tools and permissions. `wf sync` no longer asks for restarts.
 - **Planners:** a contract names shared test helpers and fixtures; work items that edit one hub file run in sequence.
 - **Reviewers:** a skill the project requires is applied to the evidence it covers, not only named.
 - **Plugin development:**
@@ -36,11 +37,14 @@ implementer spent 266 minutes on a 90-minute estimate: 201 of them in sleep loop
   - Experience reviews run on the strongest model, briefed with the threat model.
   - Nothing reruns that cannot add information.
   - A maintainer release goes to main after a green verify, with no pull request.
-- **The scenario suite keeps only tests that catch an engine failure.** 29 tests are gone: 15 that only matched the
-  wording of a role text, skill or doc (one of them failed a release verify after an intended wording change), and 14 that
-  repeated what another test asserts, each with its unique assertions moved first. Generated role files are checked for
-  structure, and long message regexes give way to the refusal ids the engine records. The checks that agent texts name
-  commands and links that exist are kept.
+- **The scenario suite keeps only tests that catch an engine failure.** 26 tests are gone:
+  - 12 only matched the wording of one role text, skill or doc. One of them failed a release verify after an intended
+    wording change.
+  - 14 repeated what another test asserts; each one's unique assertions were moved first.
+
+  Generated role files are checked for structure, and long message regexes give way to the refusal ids the engine
+  records. Kept: the checks that every text states the same severity scale and blocking rule, that no text repeats a
+  claim the engine retired, and that agent texts name commands and links that exist.
 
 ## 0.7.13 - Quick fixes take minutes
 

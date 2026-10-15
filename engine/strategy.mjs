@@ -313,7 +313,8 @@ export function strategistHandoff(root, state, options) {
     signals,
     // The comparison the owner agent made, as `wf resume` shows it: the plan's expectation, each implementer's and reviewer's
     // own, and your earlier predictions, beside what happened.
-    course: courseLines(signals, { predictions: decisions }),
+    // Without the roles' shell commands: the bundle is kept as evidence, and a command may carry a value no one should keep.
+    course: courseLines(signals, { predictions: decisions, shell: false }),
     // 0.7.9 (D19): how this project's plans predicted against what happened in delivered attempts, per lane, so a
     // predictable overrun is judged as one (D9: measurement, never a threshold).
     pastEstimates: pastCourse(root) ?? undefined,

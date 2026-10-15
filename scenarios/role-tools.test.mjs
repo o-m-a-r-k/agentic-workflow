@@ -79,7 +79,7 @@ test('every handoff names the agent type and the name to start it under, the rev
 
 // ---- I-15: role files are read when a session starts ----
 
-test('wf sync names the role files it changed; the handoff warns when the role changed after the session started and offers `wf handoff run`', () => {
+test('wf sync names the role files it changed; the handoff notes when the role changed after the session started and its bundle points at the current file', () => {
   // Named failure: `wf sync` added Write to the reviewer's tools, the next reviewer started from the same session still
   // ran without it (agent files are read at session start) and fell back to a shell heredoc.
   const { root } = singleRepoProject('role-stale', { gate: { steps: [{ id: 'unit', repo: 'app', run: 'true' }] } });
@@ -103,8 +103,10 @@ test('wf sync names the role files it changed; the handoff warns when the role c
   const changed = ok(wf(root, ['sync'])).out;
   assert.match(changed, /role file\(s\) changed: \.claude\/agents\/wf-planner\.md, \.codex\/agents\/wf-planner\.toml/);
   const stale = ok(wf(root, ['handoff', 'planner', '--agent', 'p2', '--attempt', e.id, '--owner', 'o'], { env: { CLAUDE_CODE_SESSION_ID: 'sess-old' } }));
-  assert.match(stale.err, /warning: \.claude\/agents\/wf-planner\.md changed at \S+, after this Claude Code session started \(\S+\)/);
-  // A plugin update reaches the next role with no restart: it is launched as a fresh process that reads the current file.
-  assert.match(stale.out, /Run wf handoff run --agent \S+ --attempt \S+/);
-  assert.doesNotMatch(stale.err + stale.out, /Restart|Start agent type/);
+  assert.match(stale.err, /note: \.claude\/agents\/wf-planner\.md changed at \S+, after this Claude Code session started \(\S+\)/);
+  // A plugin update reaches the next role with no restart and with the role's own tools: its bundle points it at the
+  // current role file, which it reads first.
+  const handed = JSON.parse(fs.readFileSync(stale.out.match(/bundle: (\S+)/)[1], 'utf8'));
+  assert.equal(handed.roleFileChanged.file, path.join(root, '.claude', 'agents', 'wf-planner.md'));
+  assert.doesNotMatch(stale.err + stale.out, /Restart/);
 });

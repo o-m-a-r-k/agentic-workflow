@@ -11,6 +11,21 @@ import { readLines } from './safe-file.mjs';
 import { codexQuestionAnswers } from './questions.mjs';
 import { parseArgs, shellRunsOf, tailLines, textOf, toolOf } from './tool-calls.mjs';
 
+// What a Codex `exec` script ran, as the owner reads it: the shell command it passed to `exec_command`, or the tool it
+// called (`tools.wait(...)`), or the start of the script.
+function codexCommand(input) {
+  const cmd = /exec_command\(\s*\{\s*"?cmd"?\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(input);
+  if (cmd) {
+    try {
+      return JSON.parse(`"${cmd[1]}"`);
+    } catch {
+      return cmd[1];
+    }
+  }
+  const tool = /tools\.([A-Za-z0-9_]+)\(/.exec(input);
+  return tool ? `${tool[1]}(…)` : input.trim().slice(0, 200);
+}
+
 const LABEL = 'Codex';
 
 // Named failure I-40: the native Codex connector adds linear_ to tools the adapter registers without that prefix.
@@ -112,15 +127,21 @@ export default {
     closureWriter: 'Node `fs.writeFile` or `apply_patch`',
   },
   // Codex loads custom agents from TOML files in .codex/agents/.
-  // The shell commands a role's session shows: shell function calls answered by their outputs (by call id).
+  // The tool calls a role's session shows, each answered by its output (by call id). Codex records a shell run as a
+  // `custom_tool_call` named `exec` whose input is a script calling `tools.exec_command({cmd: "..."})` (a wait, a sleep or
+  // any other tool the same way), answered by `custom_tool_call_output`; older sessions used a `function_call`. Named failure
+  // (independent review of 0.7.14): only the older shape was read, so every real Codex session showed no runs at all.
   shellRuns: (file) => shellRunsOf(tailLines(file), {
     call: (e) => {
       const p = e.type === 'response_item' ? e.payload : null;
-      if (p?.type !== 'function_call' || !['shell', 'exec_command', 'local_shell', 'container.exec'].includes(p.name)) return [];
-      const a = parseArgs(p.arguments);
-      return [{ id: p.call_id, command: Array.isArray(a.command) ? a.command.join(' ') : a.command ?? a.cmd ?? '' }];
+      if (p?.type === 'custom_tool_call' && typeof p.input === 'string') return [{ id: p.call_id, command: codexCommand(p.input), continues: /tools\.write_stdin\(/.test(p.input) && !/exec_command\(/.test(p.input) }];
+      if (p?.type === 'function_call') {
+        const a = parseArgs(p.arguments);
+        return [{ id: p.call_id, command: Array.isArray(a.command) ? a.command.join(' ') : a.command ?? a.cmd ?? p.name ?? '' }];
+      }
+      return [];
     },
-    result: (e) => (e.type === 'response_item' && e.payload?.type === 'function_call_output' ? [e.payload.call_id] : []),
+    result: (e) => (e.type === 'response_item' && ['custom_tool_call_output', 'function_call_output'].includes(e.payload?.type) ? [e.payload.call_id] : []),
   }),
   roleFile({ root, name, description, model, effort, body }) {
     return { file: path.join(root, '.codex', 'agents', `${name}.toml`), content: tomlRole({ name, description, model, effort, body }) };

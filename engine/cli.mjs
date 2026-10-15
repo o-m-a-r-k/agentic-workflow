@@ -637,7 +637,7 @@ async function dispatch(cmd, sub, positional, options) {
     case 'sync': {
       const files = sync(root);
       const roles = files.changedRoles ?? [];
-      const note = roles.length ? `\nrole file(s) changed: ${roles.map((c) => `${path.relative(root, c.file)}${c.removed ? ' (removed)' : c.created ? ' (new)' : ''}`).join(', ')}\n  ${hostLabels(' and ')} read agent files when a session starts: a session that was already running keeps the old roles, so its next handoff of a changed role says to launch it with \`wf handoff run\` (a fresh process that reads the current file); no restart is needed.` : '\nno role file changed';
+      const note = roles.length ? `\nrole file(s) changed: ${roles.map((c) => `${path.relative(root, c.file)}${c.removed ? ' (removed)' : c.created ? ' (new)' : ''}`).join(', ')}\n  ${hostLabels(' and ')} read agent files when a session starts: a session that was already running keeps the old roles, so the bundle of a changed role points it at the current file, which it reads first; no restart is needed.` : '\nno role file changed';
       print(options, `wrote ${files.length} file(s):\n${files.map((f) => `  ${path.relative(root, f)}`).join('\n')}${note}`, files);
       return 0;
     }
@@ -866,7 +866,7 @@ async function dispatch(cmd, sub, positional, options) {
       {
         const g = refreshGenerated(root);
         const roles = g.refreshed.filter((f) => hostIds().some((id) => findHost(id)?.agentsDir && f.includes(path.join(root, findHost(id).agentsDir))));
-        if (roles.length) process.stderr.write(`note: role files refreshed to the installed plugin (${roles.length}); a session that was already running launches a changed role with \`wf handoff run\`, which reads the current file\n`);
+        if (roles.length) process.stderr.write(`note: role files refreshed to the installed plugin (${roles.length}); a role started from a session that was already running is pointed at the current file by its bundle\n`);
       }
       const r = handoff(root, sub, options);
       const startPrompt = r.startPrompt;
@@ -881,13 +881,10 @@ async function dispatch(cmd, sub, positional, options) {
       const lessonsLine = r.lessons ? `lessons injected: ${r.lessons.apply.map((l) => l.id).join(', ') || 'none'}${r.lessons.omitted?.length ? ` (omitted by the cap: ${r.lessons.omitted.join(', ')})` : ''}${r.lessons.filtered?.length ? `\nlessons filtered out (outside this change's scope): ${r.lessons.filtered.map((l) => l.id).join(', ')}; \`wf lesson preview --attempt ${r.state.id} --role ${sub}\` says why` : ''}\n` : '';
       // Named failure (I-15): a role file `wf sync` changed after this session started is not what the agent loads.
       const staleHost = findHost(r.state.handoffs.find((x) => x.bundle === r.bundle)?.runtime);
-      const stale = r.roleStale ? `warning: ${path.relative(root, r.roleStale.file)} changed at ${r.roleStale.changedAt}, after this ${staleHost.label} session started (${r.roleStale.sessionStartedAt}). ${fragment(staleHost, 'staleRole', r.agentType)}\n` : '';
+      const stale = r.roleStale ? `note: ${path.relative(root, r.roleStale.file)} changed at ${r.roleStale.changedAt}, after this ${staleHost.label} session started (${r.roleStale.sessionStartedAt}). ${fragment(staleHost, 'staleRole', r.agentType)}\n` : '';
       // Named failure (I-14): the reviewer handoff printed no agent name, the reviewer was started unnamed, and its
       // closure was refused after the whole review. The owner is told the agent type and name on stderr.
-      // A role whose file changed after this session started is launched as a fresh process, which reads the current file:
-      // a plugin update reaches the next role with no restart (the person's rule, 2026-10-15: "if there is an update to the
-      // plugin, the session should use the new plugin automatically").
-      const how = r.members ? `Run wf handoff run --agent ${r.agent} --attempt ${r.state.id}; retain that foreground handle for scopes and integration` : r.roleStale ? `Run wf handoff run --agent ${r.agent} --attempt ${r.state.id} (not the agent type: this session loaded ${r.agentType} before the plugin changed it)` : `Start agent type ${r.agentType} (name it ${r.agent}; do not pass a model)`;
+      const how = r.members ? `Run wf handoff run --agent ${r.agent} --attempt ${r.state.id}; retain that foreground handle for scopes and integration` : `Start agent type ${r.agentType} (name it ${r.agent}; do not pass a model)`;
       // The reviewer is started blind: this one line is its whole prompt, so nothing else is printed to pass along.
       if (sub === 'reviewer') {
         // To the owner on stderr, never into the reviewer's one-line prompt on stdout.
@@ -895,14 +892,14 @@ async function dispatch(cmd, sub, positional, options) {
         if (w) process.stderr.write(`warning: ${w}\n`);
         if (r.division) process.stderr.write(`review division: ${r.division.mode}; ${r.division.reason}\n${reviewDivisionSummary(r.division)}`);
         for (const member of r.members ?? []) process.stderr.write(`group ${member.slot}: ${member.agent}; frozen prompt: ${member.startPrompt}\n`);
-        process.stderr.write(`${lessonsLine}${stale}${how}${r.roleStale && !r.members ? ' (it passes the line on stdout as the prompt):' : ' with only the line on stdout as its prompt:'}\n`);
+        process.stderr.write(`${lessonsLine}${stale}${how} with only the line on stdout as its prompt:\n`);
         print(options, startPrompt, { ...r, startPrompt });
       } else {
         if (stale) process.stderr.write(stale);
         // I-23: the implementer handoff stays open until it is closed, and no review round starts while it is open.
         const closeLine = sub === 'implementer' ? `\nWhen it reports done (and its work is committed), close it: \`wf handoff close --agent ${r.agent} --attempt ${r.state.id}\` (\`--outcome stopped\` if you stop it); \`wf handoff reviewer\` refuses while it is open.`
           : sub === 'strategist' ? `\nIt records its own decision (\`wf strategy record --closure ${r.closureFile}\`). Wait for its completion notification, or run it in the foreground: \`wf handoff run --agent ${r.agent} --attempt ${r.state.id}\`; never poll. Apply its decision before the next handoff.` : '';
-        print(options, `${lessonsLine}${sweepLines}${sub} bundle: ${r.bundle}${r.work ? `\nwork item ${r.work}, class ${r.class}` : `\nclass ${r.class}`}${r.effort ? `, effort ${r.effort}` : ''}${r.model ? `, model ${r.model}` : ''}\n${how}${r.roleStale && !r.members ? '' : ` with: "${startPrompt}"`}${closeLine}`, { ...r, startPrompt });
+        print(options, `${lessonsLine}${sweepLines}${sub} bundle: ${r.bundle}${r.work ? `\nwork item ${r.work}, class ${r.class}` : `\nclass ${r.class}`}${r.effort ? `, effort ${r.effort}` : ''}${r.model ? `, model ${r.model}` : ''}\n${how} with: "${startPrompt}"${closeLine}`, { ...r, startPrompt });
       }
       return 0;
     }

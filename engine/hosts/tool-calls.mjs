@@ -38,8 +38,9 @@ export function tailLines(file, max = 16 * 1024 * 1024) {
 }
 
 // The shell commands a session ran, each paired with its result by id: the one still running (the last without a result)
-// and every finished one with its minutes. `call(entry)` gives [{ id, command }], `result(entry)` gives [id]; a harness
-// supplies both for its own transcript format. Named failure (0.7.14): an implementer spent 201 of 270 minutes in sleep
+// and every finished one with its minutes. `call(entry)` gives [{ id, command, continues }], `result(entry)` gives [id]; a
+// harness supplies both for its own transcript format. A call that `continues` waits on the command before it (Codex polls a
+// long command with `write_stdin` after `exec_command` yields): its minutes are that command's. Named failure (0.7.14): an implementer spent 201 of 266 minutes in sleep
 // loops waiting for its own background end-to-end runs, and the owner saw only "active within the last minute".
 export function shellRunsOf(lines, { call, result }) {
   const open = new Map();
@@ -54,14 +55,17 @@ export function shellRunsOf(lines, { call, result }) {
     }
     const at = Date.parse(e.timestamp);
     if (!Number.isFinite(at)) continue;
-    for (const c of call(e)) if (c?.id) open.set(c.id, { command: String(c.command ?? ''), at });
+    for (const c of call(e)) if (c?.id) open.set(c.id, { command: String(c.command ?? ''), at, continues: Boolean(c.continues) });
     for (const id of result(e)) {
       const o = open.get(id);
       if (!o) continue;
-      runs.push({ command: o.command, minutes: (at - o.at) / 60000 });
+      const minutes = (at - o.at) / 60000;
+      if (o.continues && runs.length) runs.at(-1).minutes += minutes;
+      else runs.push({ command: o.command, minutes });
       open.delete(id);
     }
   }
   const last = [...open.values()].at(-1) ?? null;
-  return { running: last ? { command: last.command, startedAt: new Date(last.at).toISOString() } : null, runs };
+  const waitingOn = last?.continues && runs.length ? runs.at(-1) : null;
+  return { running: last ? { command: waitingOn ? waitingOn.command : last.command, startedAt: new Date(last.at - (waitingOn ? waitingOn.minutes * 60000 : 0)).toISOString() } : null, runs };
 }

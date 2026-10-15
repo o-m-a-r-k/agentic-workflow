@@ -101,8 +101,8 @@ engine starts.
   incident.
 - **A rule the person gives lives in the texts the agents read**: the role templates, the skills, the engine's bundle
   and next-step texts. A note kept only by whoever maintains the plugin reaches no agent. Named failure: the person's
-  test-economy rule lived in a maintainer's private notes; an implementer spent four hours rerunning a whole end-to-end
-  spec under load that the gate would run anyway.
+  test-economy rule lived in a maintainer's private notes; an implementer spent 266 minutes, on a 90-minute estimate,
+  rerunning a whole end-to-end spec under load that the gate would run anyway.
 - **Design decisions live in the decision register,** [docs/DESIGN.md](docs/DESIGN.md#decision-register), not in any
   agent's memory, a session's notes or a private plan. A change that decides something, or reverses an earlier
   decision, adds its entry (date, decision, the failure behind it) in the same commit. Read the register before

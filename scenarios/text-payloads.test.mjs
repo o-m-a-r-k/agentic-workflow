@@ -264,3 +264,82 @@ test('the quick-fix skill\'s plan is frozen by `wf plan` in the quick lane, and 
   assert.equal(refused.code, 75);
   assert.match(refused.err, /states no expectation/);
 });
+
+// ---- The texts agree where they state the same rule ----
+
+const flat = (rel) => read(rel).replace(/\*\*/g, '').replace(/\s+/g, ' ').toLowerCase();
+
+// The scale is one scale: the same definitions in every text that states it. A change to it is a change to all of them.
+test('the severity scale reads alike in every text that states it', () => {
+  const scale = [
+    'a user, a tenant or the business is harmed or blocked (wrong or lost data, a broken flow, security, money, a visible defect on a primary screen)',
+    'degraded but usable (a secondary flow, an edge case, a confusing state)',
+    'polish (wording, spacing, naming, style)',
+    'A tenant-isolation, authorization or money defect is always high',
+  ];
+  // 0.7.11: the AGENTS.md block no longer copies the rules into projects (two projects carried a rule three releases old);
+  // it points to the plugin's texts, which state them.
+  const states = [
+    'templates/agents/reviewer.md', 'templates/agents/implementer.md', 'templates/agents/planner.md',
+    'skills/work/SKILL.md', 'skills/quick-fix/SKILL.md', 'docs/scope-decisions.md', 'docs/lifecycle.md', 'docs/releases/v0.7.0.md',
+  ];
+  const missing = [];
+  for (const rel of states) {
+    const text = flat(rel);
+    for (const part of scale) if (!text.includes(part.toLowerCase())) missing.push(`${rel}: ${part}`);
+  }
+  assert.deepEqual(missing, []);
+  // The scale the examples use is the scale: no example rates a finding or an item on another one.
+  for (const key of ['reviewerClosure', 'implementerReport']) {
+    for (const m of payload(key).matchAll(/"severity":\s*"([^"]+)"/g)) assert.ok(['high', 'medium', 'low'].includes(m[1]), `${key} rates something "${m[1]}"`);
+  }
+});
+
+test('the rule for what blocks a round reads alike in every text that states it: a low finding never opens one', () => {
+  const states = ['templates/agents/reviewer.md', 'skills/work/SKILL.md', 'skills/quick-fix/SKILL.md', 'docs/scope-decisions.md', 'docs/lifecycle.md', 'docs/trust-model.md'];
+  const problems = [];
+  for (const rel of states) {
+    const text = flat(rel);
+    if (!/rated low (?:never opens a round|is an observation)/i.test(text)) problems.push(`${rel}: does not say a finding rated low never opens a round`);
+    if (!/criterion/.test(text) || !/invariant/.test(text)) problems.push(`${rel}: does not name the frozen criterion and the critical invariant`);
+  }
+  assert.deepEqual(problems, []);
+});
+
+// ---- Claims the engine retired ----
+
+// Each pattern is a sentence a text once said that the 0.7.0 engine contradicts, with the engine behaviour it contradicts. A
+// text that says it again fails here, with the file and the line.
+const RETIRED = [
+  [/acknowledge-deferrals/, 'deferrals are listed at delivery on their own; nothing is acknowledged'],
+  [/about an hour/, 'the engine holds no tickets to a duration; the plan\'s own prediction is compared'],
+  [/amend the plan so one work item covers/, 'an implementer handed without --work covers every unstarted work item'],
+  [/with the user's approval, in a sibling/, 'a move to a sibling attempt of the batch asks nobody'],
+  [/prediction it cannot compare is refused at once/, 'only a plan\'s expect is refused; a role\'s own unreadable expect is dropped'],
+  [/(?:runs|run) only the specs (?:it|they) changed/, 'a method, not a goal: the implementer owns the criteria on the whole tree'],
+  [/may not appear in `doNotRun`/, 'doNotRun restricts nothing'],
+  [/deferred on the owner's confirmed decision/, 'a deferral follows the severity rule'],
+  [/Deferral stays the owner's decision/, 'a deferral follows the severity rule'],
+  [/every deferral[^.|]*creates a decision/i, 'only a high, unrated or invariant-breaking deferral does'],
+  [/need a verdict per rule/, 'a verdict per rule is optional context'],
+  [/`wf review` refuses a closure missing one/, 'a verdict per design hit is optional context'],
+  [/`wf accept` refuses a missing verdict/, 'a verdict per rule is optional context'],
+  [/Without it the handoff is refused/, 'a sweep is optional'],
+  [/`wf handoff reviewer` refuses while one is unanswered/, 'an unanswered sweep stops nothing'],
+  [/No implementer starts while an amendment owes/, 'an owed impact update is information'],
+  [/Until it is recorded, `wf handoff implementer` and `wf accept` refuse/, 'an owed impact update is information'],
+  [/Where Claude Code transcripts exist, `wf review` refuses/, 'the engine reads no reviewer transcript'],
+  [/identifies the round's agent by that name in its transcript/, 'the engine reads no reviewer transcript'],
+  [/with a verdict for each rule/, 'a verdict per rule is optional context'],
+];
+test('no text repeats a claim the engine retired', () => {
+  const docs = fs.readdirSync(path.join(ROOT, 'docs')).filter((f) => f.endsWith('.md') && f !== 'DESIGN.md' && !/^v\d/.test(f)).map((f) => `docs/${f}`);
+  const files = [...TEXTS, ...docs, 'README.md', 'CONTRIBUTING.md'];
+  const found = [];
+  for (const rel of files) {
+    read(rel).split('\n').forEach((line, i) => {
+      for (const [re, why] of RETIRED) if (re.test(line)) found.push(`${rel}:${i + 1}: ${line.trim().slice(0, 110)}  [${why}]`);
+    });
+  }
+  assert.deepEqual(found, []);
+});
