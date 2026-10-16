@@ -113,6 +113,11 @@ test('removing an older release\'s block changes only the block and its seam: fe
   write(root, 'AGENTS.md', `A\n\n${OLD_BLOCK}\nB\n\n${OLD_BLOCK}\nC\n`);
   ok(wf(root, ['sync']));
   assert.equal(fs.readFileSync(file, 'utf8'), 'A\n\nB\n\nC\n');
+  // A damaged block (a BEGIN with no END of its own) is left alone, and the authored text after it is never taken.
+  const damaged = `# Mine\n\n<!-- agentic-workflow:begin -->\nrules\n\nMiddle, authored.\n\n${OLD_BLOCK}`;
+  write(root, 'AGENTS.md', damaged);
+  ok(wf(root, ['sync']));
+  assert.match(fs.readFileSync(file, 'utf8'), /Middle, authored\./);
 });
 
 test('the session rules come from the plugin\'s SessionStart hook, in an enabled project only, with where the adapter keeps its invariants', async () => {

@@ -392,14 +392,26 @@ export function sessionRules(root, cfg) {
 // endings included (independent review of 0.7.24: a whole-file clean-up collapsed blank lines inside a code fence and
 // rewrote CRLF endings). Markers quoted inside a fence are text, not a block.
 function blockAt(text) {
+  const lines = text.split('\n');
   let fenced = false;
   let at = 0;
-  for (const line of text.split('\n')) {
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
     if (/^\s*(```|~~~)/.test(line)) fenced = !fenced;
     else if (!fenced && line.trim() === BEGIN) {
-      // Its END is a line of its own after it; without one the block is damaged and nothing is touched.
-      const m = new RegExp(`(^|\\n)[ \\t]*${END.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[ \\t]*(?=\\r?\\n|$)`).exec(text.slice(at + line.length));
-      return m ? { start: at, end: at + line.length + m.index + m[0].length } : null;
+      // Its END is a line of its own after it, outside any fence, before any other BEGIN; without one the block is damaged
+      // and nothing is touched (independent review of 0.7.24: a BEGIN with no END took the authored text up to the next
+      // block's END with it).
+      let inner = false;
+      let pos = at + line.length + 1;
+      for (let k = i + 1; k < lines.length; k++) {
+        const l = lines[k];
+        if (/^\s*(```|~~~)/.test(l)) inner = !inner;
+        else if (!inner && l.trim() === BEGIN) return null;
+        else if (!inner && l.replace(/\r$/, '').trim() === END) return { start: at, end: pos + l.replace(/\r$/, '').length };
+        pos += l.length + 1;
+      }
+      return null;
     }
     at += line.length + 1;
   }
