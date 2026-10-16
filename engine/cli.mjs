@@ -164,7 +164,7 @@ Work
                                     30 minutes needs the owner's \`wf approve\`)
   wf abandon --reason "why" [--acknowledge-integration REPO:STATE]
   wf close --shipped --reason "why"  close an attempt whose change is already on its target branches, without its acceptance (the owner's decision)
-  wf batch create --members A,B | wf batch eject --batch B --member A
+  wf batch create --members A,B | wf batch eject --batch B --member A [--drop-own-commits]
 
 Status
   wf resume [ITEM|ATTEMPT]          what to do next (the attempt of that item, else the one open here)

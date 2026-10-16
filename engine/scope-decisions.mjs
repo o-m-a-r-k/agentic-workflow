@@ -108,14 +108,20 @@ export function moveOut(root, options, refs, { to, reason }) {
   }
   if (['done', 'abandoned'].includes(target.phase)) throw refuse(`${sibling} is ${target.phase}; the finding would be dropped`, 'move it to an attempt that is still open', { id: 'scope:move-closed' });
   // A sibling carries the obligation only if it is delivered with this attempt: same batch (a `wf split` reserves one).
-  if (!state.batchOf || state.batchOf !== target.batchOf) throw refuse(`${sibling} is not in ${state.id}'s delivery batch (${state.batchOf ?? 'none'}); a moved finding would not be delivered with this change`, 'split the work first (`wf split`), or ticket the finding (`wf scope ticket`)', { id: 'scope:move-outside-batch' });
+  // 0.7.23 (I-177): so does the assembled batch itself, which contains this member's lines and is where a member's pinned HEAD
+  // can still be repaired. Named failure (field): a member's observation the person answered "fix now" after the batch was
+  // assembled had no home: the batch was never a sibling (its own `batchOf` is null), the member's commit could not be
+  // recorded (the batch pins its HEAD), and the only advice was to eject it, which rebuilds the batch without its own commits.
+  const intoOwnBatch = target.lane === 'batch' && !state.batchPending && state.batchOf === target.id;
+  if (!intoOwnBatch && (!state.batchOf || state.batchOf !== target.batchOf)) throw refuse(`${sibling} is not in ${state.id}'s delivery batch (${state.batchOf ?? 'none'}); a moved finding would not be delivered with this change`, 'split the work first (`wf split`), or ticket the finding (`wf scope ticket`)', { id: 'scope:move-outside-batch' });
   // Security review (check-then-act): the disposition and approval checks and the append run in one evidence
   // transaction, so a concurrent `wf scope move|ticket` cannot record a second disposition between them.
   for (const ref of refs) withEvidenceTransaction(root, state.id, () => {
     const now = loadState(root, state.id);
     const f = find(now, ref);
     if (dispositionOf(now, ref)) throw refuse(`${ref} already went elsewhere`);
-    movable(f);
+    // The own-line rule exists because a sibling starts from the base; the member's own batch contains the member's lines.
+    if (!intoOwnBatch) movable(f);
     // Independent review of 0.7.0 (HIGH): the move only dropped the finding from this attempt; the sibling never heard of
     // it. It now becomes an open defect of the sibling, which its reviewer judges and its delivery waits for (D1).
     const sib = loadState(root, sibling);

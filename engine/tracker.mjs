@@ -142,7 +142,8 @@ export function limitItems(state, { load = null } = {}) {
       } catch {
         sib = null;
       }
-      const together = sib && sib.phase !== 'abandoned' && (sib.batchOf ?? null) !== null && sib.batchOf === (state.batchOf ?? state.id);
+      // 0.7.23 (I-177): an item moved into the member's own assembled batch is fixed in this delivery, not left outside it.
+      const together = sib && sib.phase !== 'abandoned' && (((sib.batchOf ?? null) !== null && sib.batchOf === (state.batchOf ?? state.id)) || (sib.lane === 'batch' && sib.id === state.batchOf));
       for (const k of d.keys ?? []) {
         const what = wording(state, k, findingSummary(state, k));
         add(k, sib && !together ? `Moved to ${d.sibling}, which is not in this delivery${sib.phase === 'abandoned' ? ' (abandoned)' : ''}: ${what} is still open there${d.reason ? ` (${d.reason})` : ''}` : `Follow-up moved to ${d.sibling}: ${what}${d.reason ? ` (${d.reason})` : ''}`);

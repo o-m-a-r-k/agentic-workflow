@@ -2011,7 +2011,7 @@ export async function deliver(root, options) {
     // Named failure (0.7.0): a finding that does not block (D2) must not simply stay open past delivery. It ends fixed and
     // verified by a round, ticketed, or moved to a sibling attempt; the strategist schedules it.
     const obs = observations(x);
-    if (obs.length) throw refuse(`not delivered: ${obs.length} review observation(s) are unresolved${x.id !== state.id ? ` in ${x.id}` : ''}: ${obs.slice(0, 8).map((f) => `${f.ref}${f.family ? ` [${f.family}]` : ''} ${f.summary ?? ''}`).join('; ')}${obs.length > 8 ? ` and ${obs.length - 8} more` : ''}`, `each is fixed (a later review round verifies it, or \`wf scope fixed\`) or moved to a sibling attempt (\`wf scope move\`); ${RULE_SHORT}; \`wf scope list\` shows them with their severity`, { id: 'review:observations-open' });
+    if (obs.length) throw refuse(`not delivered: ${obs.length} review observation(s) are unresolved${x.id !== state.id ? ` in ${x.id}` : ''}: ${obs.slice(0, 8).map((f) => `${f.ref}${f.family ? ` [${f.family}]` : ''} ${f.summary ?? ''}`).join('; ')}${obs.length > 8 ? ` and ${obs.length - 8} more` : ''}`, `each is fixed (a later review round verifies it, or \`wf scope fixed\`) or moved to a sibling attempt (\`wf scope move\`${x.id !== state.id ? `; the member is pinned by ${state.id}, so \`wf scope move --finding <ref> --sibling ${state.id} --attempt ${x.id}\` hands it to the batch, which fixes it` : ''}); ${RULE_SHORT}; \`wf scope list\` shows them with their severity`, { id: 'review:observations-open' });
   }
   // Every deferral is listed at delivery, in the delivery output and the delivered comment's known limits. 0.7.0: the
   // deferral was decided when it was recorded (the person's `wf approve` for a high one, the owner agent's recorded
@@ -2029,7 +2029,14 @@ export async function deliver(root, options) {
       // criterion shipped unmapped (the I-107 class).
       if (!ms.accepted) throw refuse(`batch member ${m} is not accepted: its acceptance was withdrawn after it joined ${state.id} (an amendment or a supplemental validation), so a criterion of it has no evidence any review mapped`, `review and accept it again (\`wf handoff reviewer --agent <new id> --attempt ${m}\`, then \`wf accept --attempt ${m}\`), or \`wf batch eject --batch ${state.id} --member ${m}\``);
       for (const [n, head] of Object.entries(state.batch.heads?.[m] ?? {})) {
-        if (git(ms.repos[n].worktree, ['rev-parse', 'HEAD']) !== head) throw refuse(`batch member ${m} changed in ${n} after it joined ${state.id}; eject and re-add it`);
+        if (git(ms.repos[n].worktree, ['rev-parse', 'HEAD']) !== head) {
+          // 0.7.23 (I-177), named failure (field): "eject and re-add it" was the only advice, and an eject rebuilds the batch branch
+          // from its base and the other members, so it dropped every commit the batch had made itself; a member cannot be added to an assembled batch either.
+          const own = batchOwnCommits(root, state);
+          throw refuse(`batch member ${m} changed in ${n} after it joined ${state.id}`, own.length
+            ? `${state.id} holds commits of its own (${ownList(own)}), which ejecting ${m} would drop. Put ${m} back at ${head.slice(0, 10)}, the commit it had when it joined, and settle what changed through the batch (an observation of ${m} moves into it: \`wf scope move --finding <ref> --sibling ${state.id} --attempt ${m}\`, then the batch fixes it and closes it with \`wf discovered close\`); or eject ${m} knowingly (\`wf batch eject --batch ${state.id} --member ${m} --drop-own-commits\`), review and accept it again, and re-create those commits`
+            : `eject it (\`wf batch eject --batch ${state.id} --member ${m}\`: the batch is rebuilt from the other members), review and accept ${m} again, and assemble it in a new batch (\`wf batch create\`)`, { id: 'batch:member-changed' });
+        }
       }
     }
   }
@@ -2744,6 +2751,10 @@ export function batchEject(root, options) {
   const members = batchMembers(root, batch.id);
   if (!members.includes(member)) throw refuse(`${member} is not in ${batch.id}`);
   if (batch.delivery.completedAt || Object.keys(batch.delivery.repos).length) throw refuse(`${batch.id} is already being delivered`);
+  // 0.7.23 (I-177), named failure (field): the rebuild below starts from the base and merges the remaining members, so every commit
+  // the batch made itself (an integration fix, a moved item's fix) was lost, and the batch's gate and review no longer covered what was left.
+  const own = batchOwnCommits(root, batch);
+  if (own.length && options['drop-own-commits'] !== true) throw refuse(`${batch.id} holds ${own.length} commit${own.length > 1 ? 's' : ''} of its own (${ownList(own)}) that ejecting ${member} would drop: the batch branch is rebuilt from its base and the other members`, `keep ${member} in ${batch.id}: an observation of ${member} that is still open moves into the batch (\`wf scope move --finding <ref> --sibling ${batch.id} --attempt ${member}\`), which fixes it and closes it with \`wf discovered close\`; or take ${member} out knowingly with \`--drop-own-commits\` (the commits are recorded in the batch's ledger) and re-create them afterwards`, { id: 'batch:eject-own-commits' });
   // Independent review of 0.7.0 (HIGH): the split guarantee was removable after assembly. A member that came from, or made,
   // a split leaves the batch only on the person's one-use approval.
   const ms0 = loadState(root, member);
@@ -2757,11 +2768,31 @@ export function batchEject(root, options) {
     }
   }
   append(root, member, 'batch.ejected', { batch: batch.id, reason: options.reason ?? null, ...(ejectDecision ? { decision: ejectDecision } : {}) }, actor(options));
-  append(root, batch.id, 'batch.members', { members: remaining, ejected: member }, actor(options));
+  append(root, batch.id, 'batch.members', { members: remaining, ejected: member, ...(own.length ? { droppedCommits: own } : {}) }, actor(options));
   return loadState(root, batch.id);
 }
 
 export const batchMembers = (root, batchId) => loadState(root, batchId).batch?.members ?? [];
+
+// The commits an assembled batch made itself in each repo: on its branch, in no member (neither at the head each had when it
+// joined nor at its branch now) and not a merge. The merges that assembled the batch and the members' commits are rebuilt by
+// an eject; these are not (0.7.23, I-177).
+export function batchOwnCommits(root, batch) {
+  const own = [];
+  for (const [name, r] of Object.entries(batch.repos ?? {})) {
+    if (!r.worktree || !fs.existsSync(path.join(r.worktree, '.git'))) continue;
+    const exclude = [r.base];
+    for (const m of batch.batch?.members ?? []) {
+      const joined = batch.batch.heads?.[m]?.[name];
+      if (joined) exclude.push(joined);
+      const tip = git(r.worktree, ['rev-parse', '--verify', '--quiet', `refs/heads/${branchName(m)}`], { allowFail: true });
+      if (tip) exclude.push(tip);
+    }
+    for (const commit of git(r.worktree, ['rev-list', '--no-merges', '--reverse', 'HEAD', ...exclude.map((x) => `^${x}`)], { allowFail: true }).split('\n').filter(Boolean)) own.push({ repo: name, commit });
+  }
+  return own;
+}
+const ownList = (own) => `${own.slice(0, 3).map((c) => `${c.repo}@${c.commit.slice(0, 10)}`).join(', ')}${own.length > 3 ? ` and ${own.length - 3} more` : ''}`;
 
 // With several open attempts a command without --attempt is refused, so every command the engine prints names it.
 export function withAttempt(root, state, text) {
@@ -2989,7 +3020,7 @@ function phaseAction(root, cfg, state) {
   // 0.7.19: entries whose fix predates their record wait for a reviewer, not another fix.
   if (openIssues.length && openIssues.every((d) => d.claim)) return `${openIssues.map((d) => `${d.id} (claimed fixed in ${d.claim.repo}@${String(d.claim.commit).slice(0, 10)}, made before it was recorded)`).join(', ')}: a reviewer verifies each; hand a reviewer (\`wf handoff reviewer --agent <id>\`): its bundle asks it to verify the claimed commit, and its \`fixed\` verdict closes the entry; no new fix and no question for the person`;
   if (openIssues.length) return `${openIssues.filter((d) => d.blockedBy).map((d) => `route ${d.id} to the implementer of ${d.blockedBy} (continue it with SendMessage); `).join('')}${openIssues.some((d) => d.claim) ? `${openIssues.filter((d) => d.claim).map((d) => d.id).join(', ')}: claimed fixed before it was recorded, so the next reviewer verifies it (no new fix); ` : ''}fix the discovered issue(s) ${openIssues.filter((d) => !d.claim).map((d) => `${d.id}${d.severity ? ` (${d.severity})` : ''}`).join(', ')} through the implementer that found each (never yourself) (\`wf discovered list\`), commit, then \`wf discovered close <id> --fixed <commit>\`; a criterion or scope that blocks the fix is amended (\`wf criteria amend --file <f> --reason "why"\`, \`--add-repo <repo>\` when the fix needs another repo). ${RULE_SHORT}; a split moves one to a sibling attempt of the batch (\`wf split\`)`;
-  if (state.accepted && observations(state).length) return `${observations(state).length} review observation(s) are unresolved and delivery waits for them: ${observationLines(state).slice(0, 5).join('; ')}; each is fixed (the next reviewer verifies it, or \`wf scope fixed --finding <ref> --commit <sha>\`) or moved to a sibling attempt (\`wf scope move\`); ${RULE_SHORT}; \`wf scope list\` shows each one's severity`;
+  if (state.accepted && observations(state).length) return `${observations(state).length} review observation(s) are unresolved and delivery waits for them: ${observationLines(state).slice(0, 5).join('; ')}; each is fixed (the next reviewer verifies it, or \`wf scope fixed --finding <ref> --commit <sha>\`) or moved to a sibling attempt (\`wf scope move\`${state.batchOf && !state.batchPending ? `; ${state.batchOf} is assembled, so \`wf scope move --finding <ref> --sibling ${state.batchOf}\` hands it to the batch, which fixes it` : ''}); ${RULE_SHORT}; \`wf scope list\` shows each one's severity`;
   // An amendment an engine before 0.7.4 recorded left the acceptance standing (I-107): say what delivery would ship.
   const unmapped = amendedAfterAcceptance(state);
   const unmappedNote = unmapped.length ? ` -- WARNING: ${unmapped.join(', ')} ${unmapped.length === 1 ? 'was' : 'were'} added or re-worded after the acceptance and no review mapped ${unmapped.length === 1 ? 'it' : 'them'} to evidence (the amendment was recorded before 0.7.4, which left the acceptance standing): for the evidence, hand a fresh reviewer (\`wf handoff reviewer --agent <new id>\`) and \`wf accept\` again, then deliver` : '';

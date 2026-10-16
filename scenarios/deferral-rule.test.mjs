@@ -4,7 +4,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { approveAsOwner, closureFile, commitIn, criteriaFile, goodClosure, ok, OUT_OF_ORDER, sh, singleRepoProject, state, toAccepted, wf } from './helpers.mjs';
 import { knownLimits } from '../engine/tracker.mjs';
-import { loadState } from '../engine/ledger.mjs';
+import { loadState, readLedger } from '../engine/ledger.mjs';
+import { observations } from '../engine/review-policy.mjs';
 
 // 0.7.7, D17, named failure (field): under D10 a medium finding was the owner agent's call and a low one left freely, so
 // an owner deferred 14 of 15 findings on its own judgement, among them a behaviour the person had asked for (called "a
@@ -201,6 +202,113 @@ test('ejecting or abandoning the sibling that holds a moved finding no longer as
   assert.equal(state(root, m2).phase, 'abandoned', 'abandoning it asks nothing either');
   assert.deepEqual(state(root, m2).decisions ?? [], []);
   assert.match(knownLimits(loadState(root, e.id), { load: (id) => loadState(root, id) }), new RegExp(`Moved to ${m2.replace('.', '\\.')}, which is not in this delivery \\(abandoned\\): customer invoice reads carry admin-only fields is still open there`));
+});
+
+// 0.7.23 (I-177), named failure (field): the batch was assembled and accepted, then delivery listed a member's open low
+// observation; the person answered "fix now". The member's HEAD is pinned by the batch and `wf scope move` took only a sibling
+// of the same batch, so the batch could not be the target: no way to settle the item remained but an eject, which rebuilt
+// the batch branch without the batch's own commits. A member now moves it to its own batch, which fixes it.
+const batchClosure = (base, reviewer) => closureFile(base, { reviewer, findings: [], criteria: [{ id: 'B1', evidence: { kind: 'output', ref: 'batch gate' } }], screenshotsInspected: [] });
+// Two accepted members (the first with an open observation, when `finding` is given) assembled into a batch that is gated,
+// reviewed and accepted: the state delivery is attempted from.
+function acceptedBatch(name, { finding = null } = {}) {
+  const heavy = [{ id: 'unit', repo: 'app', run: 'true', inputs: ['src/**'] }, { id: 'e2e', repo: 'app', run: 'true', tier: 'heavy' }];
+  const { base, root } = singleRepoProject(name, { gate: { steps: heavy } }, { 'src/b.txt': 'b\n', 'src/old.txt': 'o1\no2\no3\n' });
+  const e = ok(wf(root, ['entry', '--item', 'IB-1', '--owner', 'o', '--json', '--defer-heavy'])).json();
+  ok(wf(root, ['handoff', 'planner', '--agent', 'plan-1', '--attempt', e.id, '--owner', 'o']));
+  ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id, '--owner', 'o']));
+  ok(wf(root, ['handoff', 'implementer', '--agent', 'impl-1', '--attempt', e.id, '--owner', 'o']));
+  commitIn(e.repos.app.worktree, { 'src/a.txt': 'one\n' });
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-0', '--attempt', e.id, '--owner', 'o']));
+  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('rev-0', { findings: finding ? [finding] : [] })), '--attempt', e.id]));
+  ok(wf(root, ['gate', '--attempt', e.id]));
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-1', '--attempt', e.id, '--owner', 'o']));
+  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('rev-1')), '--attempt', e.id]));
+  ok(wf(root, ['accept', '--attempt', e.id, '--owner', 'o']));
+  const m2 = toAccepted(root, base, { item: 'IB-2', owner: 'o', change: { 'src/b.txt': 'two\n' }, extraEntry: ['--defer-heavy'] }).id;
+  const b = ok(wf(root, ['batch', 'create', '--members', `${e.id},${m2}`, '--owner', 'o', '--json'])).json();
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', b.id]));
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'rb', '--attempt', b.id, '--owner', 'o']));
+  ok(wf(root, ['review', '--closure', batchClosure(base, 'rb'), '--attempt', b.id]));
+  ok(wf(root, ['accept', '--attempt', b.id, '--owner', 'o']));
+  return { base, root, e, m2, b };
+}
+
+test('0.7.23 (I-177): a member observation the person answered "fix now" after the batch was assembled moves into the batch, which fixes it; the member stays as accepted', () => {
+  const obs = { id: 'F1', severity: 'low', summary: 'the export button label is cut off on a narrow screen', status: 'open', evidence: 'src/old.txt:2 the label overflows' };
+  const { base, root, e, b } = acceptedBatch('i177-move-to-batch', { finding: obs });
+  // Delivery lists the member's observation; the person is asked and answers "fix now".
+  assert.match(wf(root, ['deliver', '--attempt', b.id, '--owner', 'o'], silent).err, /review observation\(s\) are unresolved in .*rev-0:F1/);
+  const asked = wf(root, ['scope', 'defer', '--finding', 'rev-0:F1', '--attempt', e.id], silent);
+  assert.equal(asked.code, 75);
+  const q = state(root, e.id).decisions.find((x) => x.key === 'leave:rev-0:F1');
+  approveAsOwner(root, e.id, q.id, 'fix now');
+  assert.notEqual(wf(root, ['scope', 'defer', '--finding', 'rev-0:F1', '--attempt', e.id], silent).code, 0);
+  // The batch is a place the item can go (it contains the member's lines, so the own-line rule does not apply), and it asks nobody.
+  const memberWt = state(root, e.id).repos.app.worktree;
+  const memberHead = sh(memberWt, 'git rev-parse HEAD');
+  ok(wf(root, ['scope', 'move', '--finding', 'rev-0:F1', '--sibling', b.id, '--reason', 'the batch fixes it', '--attempt', e.id], silent));
+  const issue = state(root, b.id).discovered.at(-1);
+  assert.deepEqual(issue.movedFrom, { attempt: e.id, ref: 'rev-0:F1' }, 'the batch owes the item and keeps where it came from');
+  assert.equal(issue.status, 'open');
+  assert.deepEqual(observations(loadState(root, e.id)), [], 'the member has no open observation: it moved');
+  assert.equal(sh(memberWt, 'git rev-parse HEAD'), memberHead, 'the member is untouched');
+  assert.doesNotMatch(knownLimits(loadState(root, e.id), { load: (id) => loadState(root, id) }), /not in this delivery/, 'the batch is this delivery');
+  // The batch's delivery waits for the item: it is the batch's open discovered issue.
+  const waits = wf(root, ['deliver', '--attempt', b.id, '--owner', 'o'], silent);
+  assert.notEqual(waits.code, 0);
+  assert.match(waits.err, new RegExp(`discovered issue\\(s\\) are open: ${issue.id} moved from ${e.id.replace('.', '\\.')} rev-0:F1`));
+  // The batch's own commit fixes it and closes it; no member changed, so the pins hold.
+  const batchWt = state(root, b.id).repos.app.worktree;
+  commitIn(batchWt, { 'src/b.txt': 'two, label fixed\n' }, 'fix the label');
+  ok(wf(root, ['discovered', 'close', issue.id, '--fixed', sh(batchWt, 'git rev-parse HEAD'), '--attempt', b.id]));
+  assert.equal(state(root, b.id).discovered.at(-1).status, 'fixed');
+  // The change on the batch needs its gate and a fresh review, as any change after acceptance; the member takes no part in that.
+  assert.match(wf(root, ['deliver', '--attempt', b.id, '--owner', 'o'], silent).err, /modified after acceptance/);
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'rb-2', '--attempt', b.id, '--owner', 'o']));
+  ok(wf(root, ['review', '--closure', batchClosure(base, 'rb-2'), '--attempt', b.id]));
+  ok(wf(root, ['gate', '--attempt', b.id]));
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'rb-3', '--attempt', b.id, '--owner', 'o']));
+  ok(wf(root, ['review', '--closure', batchClosure(base, 'rb-3'), '--attempt', b.id]));
+  ok(wf(root, ['accept', '--attempt', b.id, '--owner', 'o']));
+  ok(wf(root, ['deliver', '--attempt', b.id, '--owner', 'o'], silent));
+  assert.equal(state(root, b.id).phase, 'done');
+  assert.equal(state(root, e.id).accepted.heads.app, memberHead, 'the member was delivered as it was accepted, its HEAD untouched');
+  assert.match(knownLimits(loadState(root, e.id), { load: (id) => loadState(root, id) }), new RegExp(`Follow-up moved to ${b.id}: the export button label is cut off`));
+});
+
+test('0.7.23 (I-177): an eject that would drop the batch\'s own commits is refused, and the delivery refusal for a member changed after it joined no longer advises it', () => {
+  const { root, e, m2, b } = acceptedBatch('i177-eject-own');
+  const memberWt = state(root, e.id).repos.app.worktree;
+  const batchWt = state(root, b.id).repos.app.worktree;
+  // A member that changed after it joined: with nothing of the batch's own to lose, ejecting it is the advice.
+  commitIn(memberWt, { 'src/a.txt': 'one, again\n' }, 'a later change of the member');
+  const plain = wf(root, ['deliver', '--attempt', b.id, '--owner', 'o'], silent);
+  assert.equal(plain.code, 75);
+  assert.equal(refusals({ root }).at(-1).id, 'batch:member-changed');
+  assert.match(plain.err, new RegExp(`batch member ${e.id.replace('.', '\\.')} changed in app after it joined ${b.id}`));
+  assert.match(plain.err, new RegExp(`wf batch eject --batch ${b.id} --member ${e.id.replace('.', '\\.')}`));
+  assert.doesNotMatch(plain.err, /re-add/);
+  // The batch then makes a commit of its own: ejecting would rebuild the branch without it.
+  commitIn(batchWt, { 'src/b.txt': 'two, integration fix\n' }, 'an integration fix');
+  const ownCommit = sh(batchWt, 'git rev-parse HEAD');
+  const own = wf(root, ['deliver', '--attempt', b.id, '--owner', 'o'], silent);
+  assert.equal(own.code, 75);
+  assert.match(own.err, /holds commits of its own \(app@/);
+  assert.doesNotMatch(own.err, /re-add/);
+  const refused = wf(root, ['batch', 'eject', '--batch', b.id, '--member', m2, '--owner', 'o'], silent);
+  assert.equal(refused.code, 75);
+  assert.equal(refusals({ root }).at(-1).id, 'batch:eject-own-commits');
+  assert.match(refused.err, new RegExp(`${b.id} holds 1 commit of its own \\(app@${ownCommit.slice(0, 10)}\\)`));
+  assert.match(refused.err, /wf scope move --finding <ref> --sibling BATCH-1/);
+  assert.deepEqual(state(root, b.id).batch.members, [e.id, m2], 'nothing was ejected');
+  assert.equal(state(root, m2).batchOf, b.id);
+  assert.equal(sh(batchWt, 'git rev-parse HEAD'), ownCommit, 'the batch branch was not rebuilt');
+  // Dropping them is possible, knowingly, and the ledger keeps what was dropped.
+  ok(wf(root, ['batch', 'eject', '--batch', b.id, '--member', m2, '--drop-own-commits', '--owner', 'o'], silent));
+  assert.deepEqual(state(root, b.id).batch.members, [e.id]);
+  assert.notEqual(sh(batchWt, 'git rev-parse HEAD'), ownCommit);
+  assert.deepEqual(readLedger(root, b.id).filter((r) => r.type === 'batch.members').at(-1).data.droppedCommits, [{ repo: 'app', commit: ownCommit }]);
 });
 
 test('a medium discovered issue closed fixed after the last review is delivered, and the known limits say no reviewer verified it', () => {

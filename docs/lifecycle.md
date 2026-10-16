@@ -141,7 +141,7 @@ flowchart LR
 
 - **quick:** for small fixes, with a tracker ticket (`--item`, whose tracker steps run as in the standard lane: admission readback, In progress, the delivered status and comment) or without one (`QF-<n>`, no tracker steps). A light gate (lint, types, unit, build; heavy steps run with `wf gate --full`, or always when the project sets `gate.quickLane: full`) and an independent review, which is told which steps did not run; no planner.
 - **standard:** one ticket, the full lifecycle.
-- **batch:** tickets share their heavy gate. Each ticket defers its heavy steps, the batch runs them once, then everything is delivered together and each ticket gets its own handoff.
+- **batch:** tickets share their heavy gate. Each ticket defers its heavy steps, the batch runs them once, then everything is delivered together and each ticket gets its own handoff. A member's HEAD is pinned once the batch is assembled: an observation of a member that is still open moves into the batch (`wf scope move --finding <ref> --sibling <batch id> --attempt <member>`), which fixes it with a commit of its own; ejecting a member is refused while the batch holds such commits (`--drop-own-commits` drops them knowingly).
 - **focused:** a gate option, not a lane. When every changed file is in the adapter's `focused` paths, `wf gate --focused` runs only the light steps: fast proof while repairing. It never counts as the proof of a tree: `wf accept` and `wf deliver` refuse a focused gate, a reviewer handed a focused-gated tree is told no gate passed on it, and name the heavy steps it skipped.
 
 ## Roles and handoffs
