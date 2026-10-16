@@ -414,3 +414,18 @@ test('0.7.24 (I-181): an item a member handed to its batch comes back to the mem
   // A member whose heavy steps were deferred ships in a batch: its next step says so, not `wf deliver`.
   assert.match(state(root, m2).next, /ships in one: `wf batch create --members /);
 });
+
+test('0.7.24 (I-181): an item the batch already fixed comes back to the member too, since its fix is only on the abandoned branch', () => {
+  const obs = { id: 'F1', severity: 'low', summary: 'the export button label is cut off on a narrow screen', status: 'open', evidence: 'src/old.txt:2 the label overflows' };
+  const { root, e, b } = acceptedBatch('i181-fixed-back', { finding: obs });
+  assert.equal(wf(root, ['scope', 'defer', '--finding', 'rev-0:F1', '--attempt', e.id], silent).code, 75);
+  approveAsOwner(root, e.id, state(root, e.id).decisions.find((x) => x.key === 'leave:rev-0:F1').id, 'fix now');
+  ok(wf(root, ['scope', 'move', '--finding', 'rev-0:F1', '--sibling', b.id, '--reason', 'the batch fixes it', '--attempt', e.id], silent));
+  const issue = state(root, b.id).discovered.at(-1);
+  commitIn(state(root, b.id).repos.app.worktree, { 'src/old.txt': 'o1\no2 fixed\no3\n' }, 'fix the label');
+  ok(wf(root, ['discovered', 'close', issue.id, '--fixed', sh(state(root, b.id).repos.app.worktree, 'git rev-parse HEAD'), '--attempt', b.id], silent));
+  ok(wf(root, ['abandon', '--reason', 'combine differently', '--attempt', b.id, '--owner', 'o'], silent));
+  const back = state(root, e.id).discovered.filter((d) => d.status === 'open');
+  assert.equal(back.length, 1, 'the member owes it: the fix is not in its change');
+  assert.match(back[0].summary, /fixed only in the abandoned BATCH-[^,]+, app@[0-9a-f]{10}, which this change does not contain/);
+});

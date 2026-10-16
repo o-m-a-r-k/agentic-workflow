@@ -397,8 +397,9 @@ function blockAt(text) {
   for (const line of text.split('\n')) {
     if (/^\s*(```|~~~)/.test(line)) fenced = !fenced;
     else if (!fenced && line.trim() === BEGIN) {
-      const end = text.indexOf(END, at);
-      return end > at ? { start: at, end: end + END.length } : null;
+      // Its END is a line of its own after it; without one the block is damaged and nothing is touched.
+      const m = new RegExp(`(^|\\n)[ \\t]*${END.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[ \\t]*(?=\\r?\\n|$)`).exec(text.slice(at + line.length));
+      return m ? { start: at, end: at + line.length + m.index + m[0].length } : null;
     }
     at += line.length + 1;
   }

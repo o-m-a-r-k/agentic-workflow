@@ -160,7 +160,7 @@ export function limitItems(state, { load = null } = {}) {
         // follow-up on a workflow id).
         const ownBatch = sib && sib.lane === 'batch' && sib.id === state.batchOf;
         // Handed back when the batch was abandoned (0.7.24): the member's own discovered issue tracks it.
-        if (sib?.phase === 'abandoned' && (state.discovered ?? []).some((x) => x.movedFrom?.attempt === d.sibling)) continue;
+        if (sib?.phase === 'abandoned' && (state.discovered ?? []).some((x) => x.movedFrom?.attempt === d.sibling && (!d.siblingIssue || x.movedFrom?.ref === d.siblingIssue))) continue;
         add(k, sib && !together ? `Moved to ${d.sibling}, which is not in this delivery${sib.phase === 'abandoned' ? ' (abandoned)' : ''}: ${what} is still open there${d.reason ? ` (${d.reason})` : ''}` : ownBatch ? `Fixed in the combined delivery: ${what}` : `Follow-up moved to ${d.sibling}: ${what}${d.reason ? ` (${d.reason})` : ''}`);
       }
     }
