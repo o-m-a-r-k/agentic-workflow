@@ -653,7 +653,10 @@ async function dispatch(cmd, sub, positional, options) {
       const files = sync(root);
       const roles = files.changedRoles ?? [];
       const note = roles.length ? `\nrole file(s) changed: ${roles.map((c) => `${path.relative(root, c.file)}${c.removed ? ' (removed)' : c.created ? ' (new)' : ''}`).join(', ')}\n  ${hostLabels(' and ')} read agent files when a session starts: a session that was already running keeps the old roles, so the bundle of a changed role points it at the current file, which it reads first; no restart is needed.` : '\nno role file changed';
-      print(options, `${files.length ? `removed the agentic-workflow block an older release wrote from ${files.length} file(s) (commit the change; the rules now come from the plugin):\n${files.map((f) => `  ${path.relative(root, f)}`).join('\n')}` : 'no instruction file holds an agentic-workflow block'}${note}`, files);
+      // 0.7.25: the block removals and the files regenerated are told apart (0.7.24 said every file it wrote had held a block).
+      const removed = files.blocksRemoved ?? [];
+      const generated = files.filter((f) => !removed.includes(f));
+      print(options, `${removed.length ? `removed the agentic-workflow block an older release wrote from ${removed.length} file(s); commit the removal (the rules now come from the plugin):\n${removed.map((f) => `  ${path.relative(root, f)}`).join('\n')}` : 'no instruction file holds an agentic-workflow block'}\nwrote ${generated.length} generated file(s):\n${generated.map((f) => `  ${path.relative(root, f)}`).join('\n')}${note}`, files);
       return 0;
     }
     case 'topology': {

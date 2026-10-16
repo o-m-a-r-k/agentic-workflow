@@ -515,7 +515,11 @@ export function sync(root) {
   written.changedRoles = changedRoles;
   // 0.7.24 (D30): the plugin writes nothing into the project's instruction files; a block an earlier release wrote is removed
   // (the session rules come from the plugin's SessionStart hook).
-  for (const f of instructionFiles(root, cfg)) if (removeBlock(f)) written.push(f);
+  written.blocksRemoved = [];
+  for (const f of instructionFiles(root, cfg)) if (removeBlock(f)) {
+    written.push(f);
+    written.blocksRemoved.push(f);
+  }
   const agents = roleAgents(cfg);
   for (const runtime of hostIds()) {
     const host = hostFor(runtime);

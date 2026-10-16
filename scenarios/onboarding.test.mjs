@@ -89,7 +89,8 @@ test('enable writes role agents and nothing into AGENTS.md; a block an older rel
   // A block an older release wrote, between authored text, is removed and the authored text kept byte for byte.
   write(root, 'AGENTS.md', `# Existing rules\n\nKeep me.\n\n${OLD_BLOCK}\n## Authored appendix\n\nKeep the suffix.\n`);
   const synced = ok(wf(root, ['sync']));
-  assert.match(synced.out, /AGENTS\.md/);
+  assert.match(synced.out, /removed the agentic-workflow block an older release wrote from 1 file\(s\); commit the removal \(the rules now come from the plugin\):\n  AGENTS\.md\nwrote \d+ generated file\(s\):/);
+  assert.doesNotMatch(synced.out.split('wrote ')[0], /\.claude\/agents/, 'role files are generated, not files a block was removed from');
   assert.equal(fs.readFileSync(path.join(root, 'AGENTS.md'), 'utf8'), '# Existing rules\n\nKeep me.\n\n## Authored appendix\n\nKeep the suffix.\n');
   ok(wf(root, ['sync']));
   assert.equal(fs.readFileSync(path.join(root, 'AGENTS.md'), 'utf8'), '# Existing rules\n\nKeep me.\n\n## Authored appendix\n\nKeep the suffix.\n', 'a second sync changes nothing');
