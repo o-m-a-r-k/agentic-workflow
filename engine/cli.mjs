@@ -28,7 +28,7 @@ import { detect, doctor, generatedStatus, refreshGenerated, register, registry, 
 import * as secrets from './secrets.mjs';
 import { report, toCsv, toHandoffCsv, toHtml, toJson, toText } from './telemetry.mjs';
 import { impact } from './topology.mjs';
-import { commentFile, limitItemsText, performTracker, publicAssetsProblem, recordSummary, recordTracker } from './tracker.mjs';
+import { commentFile, hasTicket, limitItemsText, performTracker, publicAssetsProblem, recordSummary, recordTracker } from './tracker.mjs';
 import { ENGINE_VERSION, WfError, parseArgs, refuse } from './util.mjs';
 import { approveFromQuestion, approveInTerminal, decisionLine, pendingDecisions, withdrawDecision } from './approve.mjs';
 import { logRefusal, readRefusals, refusalCounts } from './refusals.mjs';
@@ -1032,7 +1032,7 @@ async function dispatch(cmd, sub, positional, options) {
         const { gateFiles } = await import('./lifecycle.mjs');
         const s0 = openState(root, options);
         const cfg0 = loadConfig(root);
-        const problem = await publicAssetsProblem(root, cfg0, { screenshots: gateFiles(s0).length > 0 && s0.lane !== 'quick' });
+        const problem = await publicAssetsProblem(root, cfg0, { screenshots: gateFiles(s0).length > 0 && hasTicket(s0) });
         if (problem) throw refuse(`not delivered: ${problem}`);
       }
       const r = await deliver(root, options);

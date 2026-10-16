@@ -201,8 +201,14 @@ function deliveredKey(cfg) {
 }
 
 // Whether delivering this attempt posts a delivered comment (and so needs the owner's summary).
+// Whether an attempt works a ticket of the tracker: any lane but a batch (each member hands off its own), unless its item
+// is one `wf` numbered itself (`QF-<n>`, a quick fix with no ticket). Named failure (0.7.21): a project worked its tracker's
+// tickets through the quick lane, the engine read the lane as "no ticket", and those tickets never moved to In progress or
+// In UAT and never got the tester's comment.
+export const hasTicket = (state) => state.lane !== 'batch' && !/^QF-\d+$/.test(String(state.item ?? ''));
+
 export function needsSummary(cfg, state) {
-  if (cfg.tracker.kind === 'none' || ['quick', 'batch'].includes(state.lane)) return false;
+  if (cfg.tracker.kind === 'none' || !hasTicket(state)) return false;
   const key = deliveredKey(cfg);
   return Boolean(key && templateRef(cfg, key, state));
 }

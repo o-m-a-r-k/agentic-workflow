@@ -7,7 +7,7 @@ import { loadConfig, loadConfigAtCommit, adapterLocation, adapterRecord, repoDir
 import { append, assertSchema, createAttempt, listAttempts, loadState, openEvidence, recordedTogether } from './ledger.mjs';
 import { projectEnv } from './env.mjs';
 import { loadCatalog, missingFor, provisionUse, redactor, stepEnv } from './secrets.mjs';
-import { emitTrackerEvent, itemProblem } from './tracker.mjs';
+import { emitTrackerEvent, hasTicket, itemProblem } from './tracker.mjs';
 import { adoptNeedsApproval } from './owner.mjs';
 import { requireYes } from './approve.mjs';
 import { detectOwner, ownerRuntime, ownerString } from './hosts/index.mjs';
@@ -219,7 +219,7 @@ export function entry(root, options) {
   if (!cfg.lanes.includes(lane)) throw refuse(`lane \`${lane}\` is not enabled for this project (lanes: ${cfg.lanes.join(', ')})`);
   let item = options.item ? assertSafeId(options.item, 'item') : null;
   if (lane === 'standard' && !item) throw new WfError('standard lane needs --item <ticket id>');
-  if (lane === 'standard') {
+  if (lane === 'standard' || (lane === 'quick' && item)) {
     const wrong = itemProblem(cfg, item);
     if (wrong) throw refuse(wrong, 'run `wf entry --item <the tracker\'s ticket id>`');
   }
@@ -302,7 +302,7 @@ export function entry(root, options) {
     }
     createAttempt(root, id, { id, item, lane, intent, repos, adapterBase, adapter, issue, originRuntime, reopenedFrom: options.reopenedFrom ?? null, deferHeavy: options.deferHeavy === true || options.deferHeavy === 'true' }, owner);
   });
-  if (lane === 'standard' && intent === 'implementation' && !options.sibling) emitTrackerEvent(root, cfg, id, 'admitted');
+  if (lane !== 'batch' && hasTicket({ lane, item }) && intent === 'implementation' && !options.sibling) emitTrackerEvent(root, cfg, id, 'admitted');
   return loadState(root, id);
 }
 
@@ -432,7 +432,7 @@ export function setIntent(root, options, to) {
   if (state.intent === 'implementation') return { state, changed: false };
   if (!reason) throw new WfError('--reason "why this analysis is now to be implemented" is required');
   append(root, state.id, 'intent.changed', { from: state.intent, to, reason }, actor(options));
-  if (state.lane === 'standard') emitTrackerEvent(root, loadConfig(root), state.id, 'admitted');
+  if (hasTicket(state)) emitTrackerEvent(root, loadConfig(root), state.id, 'admitted');
   return { state: loadState(root, state.id), changed: true };
 }
 

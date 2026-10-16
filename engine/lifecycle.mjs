@@ -26,7 +26,7 @@ import { canonical as canonicalPath, isInside, touchesEvidence } from './paths.m
 import { changedForStep, deliveryOrder, impact, inside, packageOf } from './topology.mjs';
 import { findSkill } from './skills.mjs';
 import { outsidePlan, outsideVerdicts, scopeFiles } from './scope.mjs';
-import { commentFile, emitTrackerEvent, needsSummary, recordSummary, writeDeliveredComment } from './tracker.mjs';
+import { commentFile, emitTrackerEvent, hasTicket, needsSummary, recordSummary, writeDeliveredComment } from './tracker.mjs';
 import { designChecks, designVerdicts, requiredSkills, reviewDocumentProblems, reviewRules, ruleVerdicts, skillFiles, writeRuleDocuments } from './rules.mjs';
 import { expectOf, expectProblems, PLAN_EXPECT, ROLE_EXPECT } from './expectations.mjs';
 import { obligationSince } from './versions.mjs';
@@ -946,7 +946,7 @@ export function handoff(root, role, options) {
   else publish();
   // Once per attempt: with parallel work items every implementer handoff queued another identical tracker read.
   const firstImplementer = role === 'implementer' && !state.handoffs.some((h) => h.role === 'implementer');
-  if (firstImplementer && state.lane !== 'quick' && state.intent === 'implementation' && !state.splitFrom) emitTrackerEvent(root, loadConfig(root), state.id, 'implementing');
+  if (firstImplementer && hasTicket(state) && state.intent === 'implementation' && !state.splitFrom) emitTrackerEvent(root, loadConfig(root), state.id, 'implementing');
   return { bundle: file, startPrompt: startPromptFor(file), agentType, agent, roleStale, sweeps, division: division ? { ...division, evidence: undefined } : undefined,
     members: groupMembers?.map(m => ({ agent: m.bundle.agent, slot: m.bundle.reviewGroup.slot, bundle: m.file, startPrompt: startPromptFor(m.file) })),
     restrictions: restrictionWarnings(trusted, state), class: cls, effort, model, work: work?.id ?? null, lessons: bundle.lessons ? { ...bundle.lessons, filtered: selected.filtered } : null, state: loadState(root, state.id) };
@@ -2201,7 +2201,7 @@ function finishDelivered(root, cfg, state) {
     state = loadState(root, state.id);
   }
   const set = state.delivery.screenshots?.screenshots ?? [];
-  const actions = state.lane === 'quick' || state.lane === 'batch' ? [] : emitTrackerEvent(root, cfg, state.id, 'delivered', { screenshots: set });
+  const actions = !hasTicket(state) ? [] : emitTrackerEvent(root, cfg, state.id, 'delivered', { screenshots: set });
   if (actions.some((a) => a.rendered === 'delivered')) writeDeliveredComment(root, cfg, loadState(root, state.id));
   if (!actions.length && !needsShown(state) && !owesLesson(loadState(root, state.id))) {
     append(root, state.id, 'closed', { reason: cfg.tracker.kind === 'none' || state.lane !== 'standard' ? 'no tracker handoff for this lane' : 'no tracker actions configured' }, null);
@@ -2556,7 +2556,7 @@ export function reopen(root, options) {
   // Bookkeeping since 0.7.0 (engine/owner.mjs): the waiver and its reason are recorded with the caller as actor.
   if (waiver) append(root, s.id, 'lesson.waived', { reason: waiver, on: 'reopen' }, actor(options));
   const cfg = loadConfig(root);
-  if (s.lane !== 'quick') emitTrackerEvent(root, cfg, s.id, 'reopened');
+  if (hasTicket(s)) emitTrackerEvent(root, cfg, s.id, 'reopened');
   return loadState(root, s.id);
 }
 
