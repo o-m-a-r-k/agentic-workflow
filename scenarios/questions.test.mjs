@@ -137,6 +137,11 @@ test('a finding a later review raises again about a gap the person accepted is r
   const famRef = wf(p.root, ['scope', 'waive', '--finding', 'r3:F1', '--same-as', accepted.id, '--reason', 'r', '--attempt', p.id], silent);
   assert.equal(famRef.code, 75);
   assert.match(famRef.err, /r3:F1 is not the same as what A\d+ decided: .*family playback-crash.*family recording-proof/);
+  // A finding with no family says nothing about which gap it is: its own question.
+  commitIn(p.wt, { 'src/a.txt': LINES.replace('l2', 'L2!!!').replace('l5', 'L5') }, 'a fourth fix');
+  review(p, 'r4', [blocking('F1', 'C1', 'Recording proof still missing.')], { priorFindings: [{ round: 'r2', id: 'F2', status: 'open', evidence: 'src/a.txt:2 still unproven' }, { round: 'r3', id: 'F1', status: 'open', evidence: 'src/a.txt:2 still crashes' }] });
+  assert.equal(wf(p.root, ['scope', 'waive', '--finding', 'r4:F1', '--same-as', accepted.id, '--reason', 'r', '--attempt', p.id], silent).code, 75);
+  assert.equal(state(p.root, p.id).decisions.length, 1);
   assert.equal(state(p.root, p.id).decisions.length, 1);
 });
 

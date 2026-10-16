@@ -245,10 +245,11 @@ export function waiveFinding(root, options) {
         continue;
       }
       if (same) {
-        // The same criterion or invariant, and the same family when the accepted finding has one (independent review of
-        // 0.7.23: a criterion names a whole behaviour, so another defect under it is not the same gap).
+        // The same criterion or invariant, and the same family on both (independent review and security review of 0.7.23: a
+        // criterion names a whole behaviour, so another defect under it is not the same gap, and a finding with no family
+        // says nothing about which gap it is). Anything else is its own question.
         const basis = basisOf(f);
-        const match = same.findings.find((x) => basisOf(x) === basis && (!x.family || x.family === f.family));
+        const match = same.findings.find((x) => basisOf(x) === basis && x.family && f.family && x.family === f.family);
         if (!basis || !match) throw refuse(`${f.ref} is not the same as what ${same.decision.id} decided: it blocks because it ${f.classified.reason}${f.family ? ` (family ${f.family})` : ''}, and ${same.decision.id} accepted ${same.findings.map((x) => `${x.ref} (it ${x.classified.reason}${x.family ? `, family ${x.family}` : ''})`).join(', ') || 'no finding'}`, 'a finding that blocks for another reason is its own question: run this again without `--same-as`', { id: 'scope:same-as' });
         append(root, state.id, 'scope.waived', { keys: [f.ref], choice: 'waived', reason: reason || null, under: same.decision.id, sameAs: match.ref }, actor(options));
         continue;

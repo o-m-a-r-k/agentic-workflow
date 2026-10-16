@@ -48,8 +48,7 @@ Release notes, newest first, then every fix that came from a failure in the work
     usual commands, with no new question. The answer is never used up by them, so it can still be withdrawn.
   - **A finding a later review raises again about a gap the person already accepted** is recorded under that answer with
     `wf scope waive --finding <id> --same-as <their decision> --reason "<how it is the same>"`. It must block for the
-    same criterion or invariant, and be of the same family when the accepted one has a family; anything else is its own
-    question. The delivered comment words it as the finding the person accepted.
+    same criterion or invariant, and both must carry the same family; anything else is its own question. The delivered comment words it as the finding the person accepted.
   - **A gate-order approval holds across a base merge that leaves the ticket's own change alone (I-180).** The approval
     is keyed by the ticket's change and by what the gate order still owes, not by the whole tree. The ticket's change is
     compared without blob ids and hunk line numbers, so lines merged in above it no longer make the reviewed change look
