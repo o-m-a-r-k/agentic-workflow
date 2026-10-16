@@ -425,5 +425,5 @@ export const lastReviewSeenAt = (state) => {
 };
 export const reviewerDiscovered = (entries, state = null) => {
   const lastReview = lastReviewSeenAt(state);
-  return (entries ?? []).filter((d) => !isBookkeeping(d) && !(state && legacyWaived(state, d)) && (d.status !== 'fixed' || (state && (!lastReview || (d.fixed?.at && d.fixed.at > lastReview))))).map((d) => (d.status === 'fixed' ? { ...d, fixedSinceReview: true } : d.claim ? { ...d, claimedFixed: { repo: d.claim.repo, commit: d.claim.commit, note: 'fixed by a commit made before it was recorded: verify it, and give `discovered: [{ "id": "' + d.id + '", "verdict": "fixed" | "open", "evidence": "<file:line>" }]`; your `fixed` closes it' } } : d));
+  return (entries ?? []).filter((d) => (!isBookkeeping(d) || (d.status === 'open' && d.claim)) && !(state && legacyWaived(state, d)) && (d.status !== 'fixed' || (state && (!lastReview || (d.fixed?.at && d.fixed.at > lastReview))))).map((d) => (d.status === 'fixed' ? { ...d, fixedSinceReview: true } : d.claim ? { ...d, claimedFixed: { repo: d.claim.repo, commit: d.claim.commit, note: 'fixed by a commit made before it was recorded; the reviewer checks that commit and gives `discovered: [{ "id": "' + d.id + '", "verdict": "fixed" | "open", "evidence": "<file:line>" }]`, and its `fixed` closes the entry' } } : d));
 };

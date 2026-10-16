@@ -1402,13 +1402,17 @@ export function recordReview(root, options) {
   };
   const covered = !options.partial && mode === 'full' && reviewerHandoff.round === 'evidence-review' && (handed.criteria ?? []).filter((c) => !c.dropped).every((c) => evidenced((closure.criteria ?? []).find((m) => m?.id === c.id))) && (handed.gate?.screenshots ?? []).filter((x) => !x.inspectedBefore).every((x) => (closure.screenshotsInspected ?? []).includes(x.sha256));
   let reviewerModel = optional(findHost(reviewerHandoff.runtime), 'roleModel')?.(reviewerHandoff, { home: home() }) ?? null;
-  append(root, state.id, 'review.recorded', { closure, file: dest, raw, handoff: round, mode, covered, ...(options.salvaged ? { recordedBy: 'engine' } : {}), ...(options.partial ? { partial: true } : {}), revealed: Boolean(revealed) || revealNow, provenance: provenance.status, session: reviewerHandoff.session ?? null, tree: reviewerHandoff.tree, gateRun: reviewerHandoff.gate ?? null, gateEvidenceInspected, handoffTree: reviewerHandoff.tree, handoffPatch: reviewerHandoff.patch, reviewerModel, impactGaps: (closure.findings ?? []).filter((f) => f?.category === 'impact-gap').length }, closure.reviewer);
+  append(root, state.id, 'review.recorded', { closure, file: dest, raw, handoff: round, mode, covered, discoveredHanded: (handed.discovered ?? []).map((x) => x?.id).filter(Boolean), ...(options.salvaged ? { recordedBy: 'engine' } : {}), ...(options.partial ? { partial: true } : {}), revealed: Boolean(revealed) || revealNow, provenance: provenance.status, session: reviewerHandoff.session ?? null, tree: reviewerHandoff.tree, gateRun: reviewerHandoff.gate ?? null, gateEvidenceInspected, handoffTree: reviewerHandoff.tree, handoffPatch: reviewerHandoff.patch, reviewerModel, impactGaps: (closure.findings ?? []).filter((f) => f?.category === 'impact-gap').length }, closure.reviewer);
   append(root, state.id, 'review.round', roundData(state, reviewerHandoff, closure, { outcome: 'recorded', model: reviewerModel, revealed: Boolean(revealed) }), null);
-  // 0.7.19: a defect whose fix predates its record closes on this reviewer's `fixed` verdict for it.
+  // 0.7.19: a defect whose fix predates its record closes on this reviewer's `fixed` verdict for it, when the bundle handed
+  // it that entry and that claimed commit (independent review of 0.7.19: a verdict on an entry the reviewer was never shown,
+  // or on a commit the owner claimed after it was handed, verified nothing it was asked about).
   for (const d of loadState(root, state.id).discovered ?? []) {
     if (d.status !== 'open' || !d.claim) continue;
+    const shown = (handed.discovered ?? []).find((x) => x?.id === d.id)?.claimedFixed;
+    if (!shown || shown.commit !== d.claim.commit) continue;
     const v = (Array.isArray(closure.discovered) ? closure.discovered : []).find((x) => x?.id === d.id);
-    if (v?.verdict === 'fixed' && String(v.evidence ?? '').trim()) append(root, state.id, 'discovered.closed', { id: d.id, outcome: 'fixed', repo: d.claim.repo, commit: d.claim.commit, evidence: String(v.evidence).trim(), beforeRecord: true, verifiedBy: { reviewer: closure.reviewer ?? null, round, evidence: String(v.evidence).trim() } }, null);
+    if (v?.verdict === 'fixed' && String(v.evidence ?? '').trim()) append(root, state.id, 'discovered.closed', { id: d.id, outcome: 'fixed', repo: d.claim.repo, commit: d.claim.commit, evidence: String(v.evidence).trim(), beforeRecord: true, verifiedBy: { reviewer: closure.reviewer ?? null, round, evidence: String(v.evidence).trim(), ...(options.partial ? { partial: true } : {}) } }, null);
   }
   const after = loadState(root, state.id);
   const toVerify = delta ? [] : unverifiedPrior(after, after.review);
@@ -2791,6 +2795,8 @@ function phaseAction(root, cfg, state) {
   }
   if (state.lane !== 'batch' && !state.handoffs.some((h) => h.role === 'implementer')) return `start the implementer: \`wf handoff implementer --agent <id>\` [${agentTypeFor(cfg, 'implementer')}]`;
   const openIssues = openDiscovered(state);
+  // 0.7.19: entries whose fix predates their record wait for a reviewer, not another fix.
+  if (openIssues.length && openIssues.every((d) => d.claim)) return `${openIssues.map((d) => `${d.id} (claimed fixed in ${d.claim.repo}@${String(d.claim.commit).slice(0, 10)}, made before it was recorded)`).join(', ')}: a reviewer verifies each; hand a reviewer (\`wf handoff reviewer --agent <id>\`): its bundle asks it to verify the claimed commit, and its \`fixed\` verdict closes the entry; no new fix and no question for the person`;
   if (openIssues.length) return `${openIssues.filter((d) => d.blockedBy).map((d) => `route ${d.id} to the implementer of ${d.blockedBy} (continue it with SendMessage); `).join('')}fix the discovered issue(s) ${openIssues.map((d) => `${d.id}${d.severity ? ` (${d.severity})` : ''}`).join(', ')} through the implementer that found each (never yourself) (\`wf discovered list\`), commit, then \`wf discovered close <id> --fixed <commit>\`; a criterion or scope that blocks the fix is amended (\`wf criteria amend --file <f> --reason "why"\`, \`--add-repo <repo>\` when the fix needs another repo). ${RULE_SHORT}; a split moves one to a sibling attempt of the batch (\`wf split\`)`;
   if (state.accepted && observations(state).length) return `${observations(state).length} review observation(s) are unresolved and delivery waits for them: ${observationLines(state).slice(0, 5).join('; ')}; each is fixed (the next reviewer verifies it, or \`wf scope fixed --finding <ref> --commit <sha>\`) or moved to a sibling attempt (\`wf scope move\`); ${RULE_SHORT}; \`wf scope list\` shows each one's severity`;
   // An amendment an engine before 0.7.4 recorded left the acceptance standing (I-107): say what delivery would ship.

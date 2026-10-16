@@ -178,17 +178,19 @@ test('I-139 guards: defects, invariants, unrated/medium, foreign commits, other 
   ok(d(p, ['add', '--summary', 'elsewhere', '--kind', 'bookkeeping', '--severity', 'low', '--found-by', 'i', '--where', 'docs/other.md:1']));       // D5 file not touched
   // A defect (0.7.19) is not refused: its claim waits for a reviewer's verification and closes nothing yet.
   assert.match(ok(d(p, ['close', 'D1', '--fixed', fix])).out, /D1: \S+ was made before D1 was recorded, so a reviewer verifies it/);
-  for (const id of ['D2', 'D3', 'D4', 'D5']) refused(['close', id, '--fixed', fix], new RegExp(`${id} was recorded on: it cannot be the fix \\(not a repair made before the record either: `));
+  // Not reconciled on the owner's word either (0.7.19): each is a claim a reviewer verifies, never closed here.
+  for (const id of ['D2', 'D3', 'D4', 'D5']) assert.match(ok(d(p, ['close', id, '--fixed', fix])).out, new RegExp(`${id}: \\S+ was made before ${id} was recorded, so a reviewer verifies it`));
   assert.deepEqual(state(p.root, p.id).discovered.map((x) => x.status), ['open', 'open', 'open', 'open', 'open']);
 });
 
-test('I-139 guard: a commit from before the handoff opened cannot be claimed', () => {
+test('I-139 guard: a commit from before the handoff opened is not reconciled; it is a claim a reviewer verifies (0.7.19)', () => {
   const p = project('i139h', { pre: true });
   const early = sh(p.wt, 'git rev-parse HEAD~0');       // made before the handoff, in the tree it started on
   commitIn(p.wt, { 'src/a.txt': 'l1\nL2\nl3\n' }, 'unrelated');
   late(p);
-  const r = d(p, ['close', 'D1', '--fixed', early]);
-  assert.notEqual(r.code, 0); assert.match(r.err, /already in the tree i's handoff started on/);
+  assert.match(ok(d(p, ['close', 'D1', '--fixed', early])).out, /D1: \S+ was made before D1 was recorded, so a reviewer verifies it/);
+  const s = state(p.root, p.id).discovered[0];
+  assert.deepEqual([s.status, s.fixed, s.claim.commit], ['open', null, early]);
 });
 
 // ---- I-141: a lock released and re-taken between the collision and the read was refused as unreadable. ----

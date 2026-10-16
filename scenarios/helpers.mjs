@@ -8,6 +8,10 @@ import { verifyAttempt } from '../engine/evidence.mjs';
 import { assertSchema, listAttempts, loadState } from '../engine/ledger.mjs';
 import { ENGINE_VERSION } from '../engine/util.mjs';
 
+// Every wf a scenario starts, through these helpers or a bare spawn of `...process.env`, is this checkout's, never the release
+// installed on the machine (0.7.19 forwards an older copy to it).
+process.env.WF_NO_FORWARD = '1';
+
 export const WF = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'wf');
 
 // Named cost: on macOS without another git first on PATH, `git` is /usr/bin/git, the developer-tools shim that asks

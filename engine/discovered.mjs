@@ -113,7 +113,7 @@ export function closeDiscovered(root, idArg, options) {
       const datedBefore = committed && e.at && Date.parse(committed) < Math.floor(Date.parse(e.at) / 1000) * 1000;
       const inTree = head && run('git', ['merge-base', '--is-ancestor', c.commit, head], { cwd: state.repos[c.repo].worktree, allowFail: true }).status === 0;
       if (!datedBefore && !inTree) return { e, how: 'after', record: {} };
-      if (isBookkeeping(e)) throw refuse(datedBefore ? `${c.commit.slice(0, 10)} was committed before ${e.id} was recorded: it cannot be the fix${why}` : `${c.commit.slice(0, 10)} was already in the tree ${e.id} was recorded on: it cannot be the fix${why}`, 'name the commit that fixed it, made after the issue was recorded');
+      // A bookkeeping entry that the I-139 reconciliation does not cover takes the same route as a defect.
       const verified = verifiedFix(state, e);
       if (verified) return { e, how: 'verified', record: { beforeRecord: true, verifiedBy: verified } };
       return { e, how: 'claim' };
@@ -143,9 +143,9 @@ export function closeDiscovered(root, idArg, options) {
 // An independent reviewer's `fixed` verdict on this entry, given in a round recorded after the entry was (0.7.19).
 export function verifiedFix(state, e) {
   for (const r of [...(state.reviews ?? [])].reverse()) {
-    if (!e.at || !r.at || r.at <= e.at) continue;
+    if (!e.at || !r.at || r.at <= e.at || !(r.discoveredHanded ?? []).includes(e.id)) continue;
     const v = (Array.isArray(r.closure?.discovered) ? r.closure.discovered : []).find((x) => x?.id === e.id);
-    if (v?.verdict === 'fixed' && text(v.evidence)) return { reviewer: r.closure?.reviewer ?? r.reviewer ?? null, round: r.handoff ?? null, evidence: text(v.evidence), at: r.at };
+    if (v?.verdict === 'fixed' && text(v.evidence)) return { reviewer: r.closure?.reviewer ?? r.reviewer ?? null, round: r.handoff ?? null, evidence: text(v.evidence), at: r.at, ...(r.partial ? { partial: true } : {}) };
   }
   return null;
 }
@@ -243,7 +243,7 @@ export function unacknowledged(root, state, loadMember, { acknowledged = false }
   return out;
 }
 
-export const discoveredLine = (d, attemptId) => `${d.id}  ${d.status}${d.kind === 'bookkeeping' ? ' (bookkeeping)' : ''}${d.severity ? `  ${d.severity}` : ''}  ${d.summary}${d.where || d.foundBy ? `  (${[d.where, d.foundBy ? `found by ${d.foundBy}` : null].filter(Boolean).join('; ')})` : ''}${d.blockedBy && d.status === 'open' ? `  blocked by ${d.blockedBy}: route it to that work item's implementer` : ''}${d.status === 'fixed' ? `  fixed in ${d.fixed.repo}@${d.fixed.commit.slice(0, 10)}${d.fixed.reconciled ? ` (repaired by ${d.fixed.reconciled.agent} before it was recorded)` : ''}` : d.status === 'deferred' ? `  deferred (${channelOf(d)}): "${d.deferred.decision}"` : attemptId ? (discoveredLevel(d) === 'low' ? `\n    low: it leaves only with the person's answer, one short question per item (wf scope defer --finding ${d.id}[,<ref>...])` : `\n    ${discoveredLevel(d)}: fixed in this delivery (here or in a sibling attempt of the batch), unless the project's \`leaving:\` says otherwise`) : ''}`;
+export const discoveredLine = (d, attemptId) => `${d.id}  ${d.status}${d.kind === 'bookkeeping' ? ' (bookkeeping)' : ''}${d.severity ? `  ${d.severity}` : ''}  ${d.summary}${d.where || d.foundBy ? `  (${[d.where, d.foundBy ? `found by ${d.foundBy}` : null].filter(Boolean).join('; ')})` : ''}${d.blockedBy && d.status === 'open' ? `  blocked by ${d.blockedBy}: route it to that work item's implementer` : ''}${d.claim && d.status === 'open' ? `  claimed fixed in ${d.claim.repo}@${String(d.claim.commit).slice(0, 10)} (made before it was recorded; a reviewer's \`fixed\` closes it)` : ''}${d.status === 'fixed' ? `  fixed in ${d.fixed.repo}@${d.fixed.commit.slice(0, 10)}${d.fixed.reconciled ? ` (repaired by ${d.fixed.reconciled.agent} before it was recorded)` : ''}` : d.status === 'deferred' ? `  deferred (${channelOf(d)}): "${d.deferred.decision}"` : attemptId ? (discoveredLevel(d) === 'low' ? `\n    low: it leaves only with the person's answer, one short question per item (wf scope defer --finding ${d.id}[,<ref>...])` : `\n    ${discoveredLevel(d)}: fixed in this delivery (here or in a sibling attempt of the batch), unless the project's \`leaving:\` says otherwise`) : ''}`;
 
 // I-18 (extended), named failure: an implementer reported "Not fixed, outside the brief: <a defect>" and handed the issue
 // back to the owner agent to relay. A line of an implementer's final report that leaves an issue unfixed must name its
