@@ -87,7 +87,7 @@ Work
                                     optional foreground review/gate runner; stops for owner decisions
   wf handoff run --agent ID [--detach]
                                     launch the existing ${hostNames()} handoff fresh, with engine-recorded prompt provenance;
-                                    --detach returns once it has started (two roles at once); wf handoff wait follows it
+                                    --detach returns once it has started its session (two roles at once); wf handoff wait follows it
                                     returns when the role ends, or once it passes its own estimate (it keeps running);
                                     --minutes N: your own expectation, for a role that states none
   wf handoff reviewer --agent ID --reason "why"

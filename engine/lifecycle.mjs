@@ -113,7 +113,7 @@ function panelBundle(state, p) {
     ...(p.stage !== 'draft' ? { drafts: Object.values(st.drafts).map(draft) } : {}),
     ...(p.stage === 'merge' && st.objections ? { previousMerge: st.lastMerge?.raw?.file ?? null, objections: st.objections.map((o) => ({ seat: o.seat, agent: o.agent, objections: o.objections })) } : {}),
     ...(p.stage === 'confirm' ? { merged: st.lastMerge?.raw?.file ?? null, disagreements: st.lastMerge?.disagreements ?? [], yourDraft: st.drafts[p.seat]?.raw?.file ?? null } : {}),
-    records: p.stage === 'confirm' ? 'one fenced yaml block: `verdict: agree` (optional `notes`), or `verdict: object` with `objections: [{ point, why }]`' : p.stage === 'merge' ? 'one fenced yaml block: the whole plan, with `disagreements: [{ point, draft1, draft2, chosen, why }]` (an empty list when the drafts agree)' : 'one fenced yaml block: the whole plan, as a single planner writes it',
+    records: p.stage === 'confirm' ? 'one fenced yaml block: `verdict: agree` (optional `notes`), or `verdict: object` with `objections: [{ point, why }]`' : p.stage === 'merge' ? 'one fenced yaml block: the whole plan, with `disagreements: [{ point, draft1, draft2, chosen, why }]` (one `draft<n>` per seat; an empty list when the drafts agree); dry-run it first with `wf plan --check --file <f> --agent <your agent id>`' : 'one fenced yaml block: the whole plan, as a single planner writes it; dry-run it first with `wf plan --check --file <f> --agent <your agent id>`',
   };
 }
 
@@ -289,7 +289,17 @@ export function freezeCriteria(root, options) {
   const gen = (state.plansFrozen ?? 0) + 1;
   const producer = state.handoffs.filter((h) => h.role === 'planner' && h.agent === (typeof options['from-agent'] === 'string' ? options['from-agent'] : typeof options.agent === 'string' ? options.agent : undefined)).at(-1);
   const seatOf = producer?.panel?.gen === gen ? producer.panel : null;
-  if (!seatOf && typeof options.file === 'string' && state.handoffs.some((h) => h.role === 'planner' && h.panel?.gen === gen)) throw new WfError('a planning panel is planning this attempt: pass `--agent <the planner whose output this is>` with `--file`, or use `--from-agent <id>`');
+  // While a panel plans this attempt (its first plan, or a plan replaced whole after an upgrade), only a seat's own output
+  // is recorded (independent review of 0.7.22: a re-plan froze a single planner's plan past the panel).
+  const panelRuntime = defaultRuntime(state) ?? producer?.runtime ?? null;
+  const panelNow = panelRuntime && panelActive(cfg, state, panelRuntime) && (!state.criteria || replanAfterUpgrade(state));
+  if (panelNow && !seatOf) {
+    const named = typeof options['from-agent'] === 'string' ? options['from-agent'] : typeof options.agent === 'string' ? options.agent : null;
+    throw new WfError(named ? `\`${named}\` holds no seat of the planning panel planning ${state.id} now: record a seat's output (\`wf plan --from-agent <seat's agent>\`, or \`--file <f> --agent <seat's agent>\`); \`wf resume\` names the step` : `a planning panel is planning ${state.id}: record a seat's output with \`wf plan --from-agent <id>\`, or \`--file <f> --agent <the seat's agent>\`; \`wf resume\` names the step`);
+  }
+  // A step recorded out of order is the owner's bookkeeping, not the planner's plan: refused, and not kept for the next
+  // planner as a refused plan (independent review of 0.7.22).
+  const bookkeeping = (message) => Object.assign(refuse(message), { bookkeeping: true });
   let panelFreeze = null;
   try {
     // Named failure (I-114): reading the planner's output ran outside this block, so a transcript with no fenced YAML block
@@ -315,22 +325,31 @@ export function freezeCriteria(root, options) {
     }
     if (seatOf?.stage === 'confirm') {
       const st = panelStage(state, seatOf.of);
-      if (st.stage !== 'confirm' || st.seat !== seatOf.seat || st.round !== seatOf.round) throw refuse(`seat ${seatOf.seat}'s verdict on round ${seatOf.round} is not the one owed now (the panel is at: ${st.stage}${st.seat ? ` seat ${st.seat}` : ''}, round ${st.round})`);
+      if (st.stage !== 'confirm' || st.seat !== seatOf.seat || st.round !== seatOf.round) throw bookkeeping(`seat ${seatOf.seat}'s verdict on round ${seatOf.round} is not the one owed now (the panel is at: ${st.stage}${st.seat ? ` seat ${st.seat}` : ''}, round ${st.round})`);
       const verdict = doc?.verdict;
       const objections = Array.isArray(doc?.objections) ? doc.objections.filter((o) => o && typeof o === 'object' && String(o.point ?? '').trim() && String(o.why ?? '').trim()) : [];
       if (!['agree', 'object'].includes(verdict)) throw new WfError('a confirmation is `verdict: agree` (optional `notes`) or `verdict: object` with `objections: [{ point, why }]`');
       if (verdict === 'object' && !objections.length) throw new WfError('`verdict: object` needs `objections: [{ point, why }]`, each naming the point and why the plan is wrong or weaker there');
       const text = fromAgent ? fromAgent.text : fileText;
+      const verdictExt = typeof options['from-agent'] === 'string' ? 'yaml' : extOf(options.file);
       const record = { gen, type: verdict === 'agree' ? 'agreed' : 'objected', seat: seatOf.seat, round: seatOf.round, agent: producer.agent, ...(verdict === 'object' ? { objections } : {}), ...(typeof doc.notes === 'string' && doc.notes.trim() ? { notes: doc.notes.trim().slice(0, 4000) } : {}) };
       const last = verdict === 'agree' && !Array.from({ length: seatOf.of - 1 }, (_, i) => i + 2).some((s) => s !== seatOf.seat && !st.verdicts.some((v) => v.seat === s));
+      // A dry run records nothing; the last agreement's dry run goes on to check the merged plan as the freeze would.
+      if (options.check && !last) return { checked: true, verdict: record.type };
       if (!last) {
-        recordedTogether(root, state.id, () => append(root, state.id, 'plan.panel', { ...record, raw: keepRaw(root, state.id, `plans/panel-${gen}/verdict-${seatOf.round}-${seatOf.seat}.raw.${typeof options['from-agent'] === 'string' ? 'yaml' : extOf(options.file)}`, text) }, actor(options)));
+        recordedTogether(root, state.id, () => append(root, state.id, 'plan.panel', { ...record, raw: keepRaw(root, state.id, `plans/panel-${gen}/verdict-${seatOf.round}-${seatOf.seat}.raw.${verdictExt}`, text) }, actor(options)));
         return { panelRecorded: record, state: loadState(root, state.id) };
       }
       // The last seat agreed: the merged plan is the plan, frozen below as any plan is.
       const mergedText = fs.readFileSync(st.lastMerge.raw.file, 'utf8');
       doc = parseStructured(st.lastMerge.raw.file, mergedText);
-      panelFreeze = { record, text, mergedText, st };
+      panelFreeze = { record, text, mergedText, st, verdictExt };
+    }
+    // A draft or merge recorded out of order is the owner's mistake: refused before the plan is judged.
+    if (seatOf && seatOf.stage !== 'confirm') {
+      const st = panelStage(state, seatOf.of);
+      const owed = seatOf.stage === 'draft' ? st.stage === 'draft' && st.missing.includes(seatOf.seat) : st.stage === 'merge' && st.round === seatOf.round;
+      if (!owed) throw bookkeeping(`${seatOf.stage === 'draft' ? `seat ${seatOf.seat}'s draft` : `the merge of round ${seatOf.round}`} is already recorded (the panel is at: ${st.stage}${st.seat ? ` seat ${st.seat}` : ''}, round ${st.round})`);
     }
     if (seatOf?.stage === 'merge' && !Array.isArray(doc?.disagreements)) throw refuse('the merged plan lists no `disagreements`: every point the drafts (or the objections) differ on that changes what is built or how it is proven, with what you chose and why (`disagreements: []` when they agree)');
     plan = planFromDoc(doc);
@@ -353,9 +372,6 @@ export function freezeCriteria(root, options) {
     if (options.check) return { checked: true, criteria: doc.criteria.length, work: work?.length ?? 0, impact: Boolean(impactRecord) };
     // A draft or a merge is recorded and the panel goes on; nothing is frozen yet.
     if (seatOf && seatOf.stage !== 'confirm') {
-      const st = panelStage(state, seatOf.of);
-      const owed = seatOf.stage === 'draft' ? st.stage === 'draft' && st.missing.includes(seatOf.seat) : st.stage === 'merge' && st.round === seatOf.round;
-      if (!owed) throw refuse(`${seatOf.stage === 'draft' ? `seat ${seatOf.seat}'s draft` : `the merge of round ${seatOf.round}`} is already recorded (the panel is at: ${st.stage}${st.seat ? ` seat ${st.seat}` : ''}, round ${st.round})`);
       const text = fromAgent ? fromAgent.text : fileText;
       const record = { gen, type: seatOf.stage === 'draft' ? 'draft' : 'merged', seat: seatOf.seat, round: seatOf.round, agent: producer.agent, ...(seatOf.stage === 'merge' ? { disagreements: doc.disagreements } : {}), expect: plan?.expect ?? null };
       recordedTogether(root, state.id, () => append(root, state.id, 'plan.panel', { ...record, raw: keepRaw(root, state.id, `plans/panel-${gen}/${seatOf.stage === 'draft' ? `draft-${seatOf.seat}` : `merge-${seatOf.round}`}.raw.${typeof options['from-agent'] === 'string' ? 'yaml' : extOf(options.file)}`, text) }, actor(options)));
@@ -364,6 +380,21 @@ export function freezeCriteria(root, options) {
   } catch (error) {
     // A dry run records no refusal: the planner fixes its own plan.
     if (options.check) throw error;
+    // The owner recorded a step out of order: nothing of the planner's is refused.
+    if (error.bookkeeping) throw error;
+    // The last agreement's merged plan was refused at the freeze: the refusal is the merge's, kept for the merger, and the
+    // panel goes back to the merge with the engine's reason as its objection (independent review of 0.7.22).
+    if (panelFreeze) {
+      try {
+        const n = (state.planRefusals?.length ?? 0) + 1;
+        recordedTogether(root, state.id, () => {
+          const kept = keepRaw(root, state.id, `plans/refused-${n}.raw.${extOf(panelFreeze.st.lastMerge.raw.file)}`, panelFreeze.mergedText);
+          append(root, state.id, 'plan.refused', { agent: panelFreeze.st.lastMerge.agent, report: kept.file, sha256: kept.sha256, error: String(error.message).slice(0, 4000) }, actor(options));
+          append(root, state.id, 'plan.panel', { gen, type: 'merge-refused', round: panelFreeze.st.lastMerge.round, seat: null, agent: 'engine', objections: [{ point: 'the merged plan', why: String(error.message).slice(0, 4000) }] }, null);
+        });
+      } catch {}
+      throw refuse(`the merged plan was agreed but refused at the freeze: ${error.message}`, `the panel goes back to the merge with this as its objection: \`wf resume\` names the step`);
+    }
     // Named failure (I-84, I-87): a refused plan left nothing behind, so the replacement planner started blind and made the
     // same mistake (component paths with a repository prefix). The refused report and the validator's message are kept
     // as evidence and handed to the next planner's bundle.
@@ -374,7 +405,7 @@ export function freezeCriteria(root, options) {
       if (text !== null && text !== undefined) {
         recordedTogether(root, state.id, () => {
           const kept = keepRaw(root, state.id, `plans/refused-${n}.raw.${typeof options['from-agent'] === 'string' ? 'yaml' : extOf(options.file)}`, text);
-          append(root, state.id, 'plan.refused', { agent: fromAgent?.source.agent ?? state.handoffs.filter((h) => h.role === 'planner' && (typeof options['from-agent'] !== 'string' || h.agent === options['from-agent'])).at(-1)?.agent ?? null, report: kept.file, sha256: kept.sha256, error: String(error.message).slice(0, 4000) }, actor(options));
+          append(root, state.id, 'plan.refused', { agent: fromAgent?.source.agent ?? producer?.agent ?? state.handoffs.filter((h) => h.role === 'planner').at(-1)?.agent ?? null, report: kept.file, sha256: kept.sha256, error: String(error.message).slice(0, 4000) }, actor(options));
         });
       }
     } catch {}
@@ -388,14 +419,14 @@ export function freezeCriteria(root, options) {
     let source;
     // A panel's plan: the merged plan, with the drafts, merges and verdicts that made it (the last verdict recorded with it).
     if (panelFreeze) {
-      const verdictRaw = keepRaw(root, state.id, `plans/panel-${gen}/verdict-${panelFreeze.record.round}-${panelFreeze.record.seat}.raw.yaml`, panelFreeze.text);
+      const verdictRaw = keepRaw(root, state.id, `plans/panel-${gen}/verdict-${panelFreeze.record.round}-${panelFreeze.record.seat}.raw.${panelFreeze.verdictExt}`, panelFreeze.text);
       append(root, state.id, 'plan.panel', { ...panelFreeze.record, raw: verdictRaw }, actor(options));
       const all = [...(state.panel ?? []).filter((e) => e.gen === gen), { ...panelFreeze.record, raw: verdictRaw }];
       source = { ...keepRaw(root, state.id, `plans/plan-${gen}.raw.${extOf(panelFreeze.st.lastMerge.raw.file)}`, panelFreeze.mergedText), agent: panelFreeze.st.lastMerge.agent, panel: { gen, seats: panelFreeze.st.seats, rounds: panelFreeze.st.lastMerge.round, steps: all.map((e) => ({ type: e.type, seat: e.seat, round: e.round, agent: e.agent, file: e.raw?.file ?? null })), disagreements: panelFreeze.st.lastMerge.disagreements ?? [] } };
     } else if (fromAgent) source = { ...fromAgent.source, ...keepRaw(root, state.id, `plans/plan-${(state.plansFrozen ?? 0) + 1}.raw.yaml`, fromAgent.text) };
     else {
       const from = path.resolve(String(options.file));
-      source = { ...keepRaw(root, state.id, `plans/plan-${(state.plansFrozen ?? 0) + 1}.raw.${extOf(from)}`, fileText), from, agent: planner?.agent ?? null, model };
+      source = { ...keepRaw(root, state.id, `plans/plan-${(state.plansFrozen ?? 0) + 1}.raw.${extOf(from)}`, fileText), from, agent: producer?.agent ?? planner?.agent ?? null, model };
     }
     append(root, state.id, 'criteria.frozen', { criteria: doc.criteria, plan, source, ...(work ? { work } : {}), ...(impactRecord ? { impact: impactRecord } : {}) }, actor(options));
   });
@@ -746,7 +777,13 @@ export function handoff(root, role, options) {
       const holds = st.missing.find((s) => st.draftHanded[s]?.agent === agent);
       const seated = Object.values(st.draftHanded).some((h) => h.agent === agent) || Object.values(st.drafts).some((d) => d.agent === agent);
       if (!holds && seated) throw refuse(`${agent} already holds a seat of this planning panel: each draft is written blind by its own planner`, 'hand the other seat to a new agent id');
-      seat = holds ?? st.missing.find((s) => !st.draftHanded[s]) ?? st.missing[0];
+      const free = st.missing.find((s) => !st.draftHanded[s]);
+      // Every seat still owed a draft has its planner: a new agent replaces one only when the owner names it (independent
+      // review of 0.7.22: guessing replaced a live seat and left the dead one owed).
+      const asked = options.seat === undefined ? null : Number(options.seat);
+      if (asked !== null && !st.missing.includes(asked)) throw refuse(`seat ${options.seat} is not owed a draft (seats owed: ${st.missing.join(', ')})`);
+      if (!holds && !free && asked === null) throw refuse(`every seat owed a draft has its planner (${st.missing.map((s) => `seat ${s}: ${st.draftHanded[s].agent}`).join(', ')})`, `to replace one whose planner is gone, pass \`--seat <n>\`; otherwise record each draft when it reports (\`wf plan --from-agent <id>\`)`);
+      seat = holds ?? asked ?? free;
     } else if (st.stage === 'merge') seat = 1;
     else if (st.stage === 'confirm') {
       seat = st.seat;
@@ -2929,9 +2966,10 @@ function phaseAction(root, cfg, state) {
     if (['major-finding', 'tree-change'].includes(stop.class)) return `gate stopped (${stop.class}: ${stop.reason}); fix and commit through the implementer that did that work, then the code review of the new tree: hand it to a fresh reviewer (\`wf handoff reviewer --agent <new id>\`); the gate runs once a round comes back clean`;
     return `gate stopped (${stop.class ? `${stop.class}: ` : ''}${stop.reason}); run \`wf gate\` to continue with finished steps carried`;
   }
+  // A panel planning this attempt (its first plan, or a plan replaced whole after an upgrade) says its next step.
+  const panelRuntime = defaultRuntime(state) ?? detectOwner()?.runtime ?? null;
+  if (panelRuntime && panelActive(cfg, state, panelRuntime) && (!state.criteria || replanAfterUpgrade(state))) return panelAction(cfg, state, panelRuntime);
   if (!state.criteria) {
-    const runtime = defaultRuntime(state) ?? detectOwner()?.runtime ?? null;
-    if (needsPlanner(cfg, state) && runtime && panelActive(cfg, state, runtime)) return panelAction(cfg, state, runtime);
     if (needsPlanner(cfg, state) && !state.handoffs.some((h) => h.role === 'planner')) return 'start the planner: `wf handoff planner --agent <id>`';
     return 'freeze the criteria: `wf plan --file <criteria.yaml>`';
   }

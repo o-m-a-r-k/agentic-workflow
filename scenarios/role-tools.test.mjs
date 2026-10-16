@@ -101,7 +101,8 @@ test('wf sync names the role files it changed; the handoff notes when the role c
   const cfgFile = path.join(root, '.workflow', 'project.yaml');
   fs.writeFileSync(cfgFile, JSON.stringify({ ...JSON.parse(fs.readFileSync(cfgFile, 'utf8')), roles: { planner: { appendix: 'planner-extra.md' } } }));
   const changed = ok(wf(root, ['sync'])).out;
-  assert.match(changed, /role file\(s\) changed: \.claude\/agents\/wf-planner\.md, \.codex\/agents\/wf-planner\.toml/);
+  // The planner appendix reaches every planner agent, the one older attempts plan with (`wf-planner-review`, 0.7.22) too.
+  assert.match(changed, /role file\(s\) changed: \.claude\/agents\/wf-planner\.md, \.claude\/agents\/wf-planner-review\.md, \.codex\/agents\/wf-planner\.toml, \.codex\/agents\/wf-planner-review\.toml/);
   const stale = ok(wf(root, ['handoff', 'planner', '--agent', 'p2', '--attempt', e.id, '--owner', 'o'], { env: { CLAUDE_CODE_SESSION_ID: 'sess-old' } }));
   assert.match(stale.err, /note: \.claude\/agents\/wf-planner\.md changed at \S+, after this Claude Code session started \(\S+\)/);
   // A plugin update reaches the next role with no restart and with the role's own tools: its bundle points it at the

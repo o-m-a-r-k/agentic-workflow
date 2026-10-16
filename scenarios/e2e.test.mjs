@@ -26,6 +26,8 @@ test('a drafted adapter fails the gate when code outside any test folder breaks'
   ok(wf(root, ['init']));
   const draft = YAML.parse(fs.readFileSync(path.join(root, '.workflow', 'project.yaml'), 'utf8'));
   assert.ok(draft.gate.steps.some((s) => s.id === 'app-unit'));
+  // A drafted adapter plans with the panel (0.7.22); this scenario is about the gate, so it plans with one planner.
+  fs.writeFileSync(path.join(root, '.workflow', 'project.yaml'), YAML.stringify({ ...draft, roles: { ...(draft.roles ?? {}), planner: { ...(draft.roles?.planner ?? {}), panel: ['planning'] } } }));
   sh(root, 'git add -A && git commit -q -m adapter && git push -q origin main');
   ok(wf(root, ['doctor']));
   ok(wf(root, ['enable']));

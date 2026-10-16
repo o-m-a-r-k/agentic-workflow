@@ -91,8 +91,17 @@ cat > "$WORK/criteria.json" <<'EOF'
       "contracts": [], "suites": [ { "suite": "unit", "query": "Q1", "hits": 2 } ] } ],
     "excluded": [ { "survey": "S3", "reason": "tickets and the invariants describe greet(); none calls it" } ] } }
 EOF
+say "Two planners draft the plan blind; the first merges the drafts, the second agrees, and wf freezes it"
 wf handoff planner --agent planner-1 --attempt "$ATTEMPT"
-wf plan --file "$WORK/criteria.json" --attempt "$ATTEMPT"
+wf handoff planner --agent planner-2 --attempt "$ATTEMPT"
+wf plan --file "$WORK/criteria.json" --agent planner-1 --attempt "$ATTEMPT"
+wf plan --file "$WORK/criteria.json" --agent planner-2 --attempt "$ATTEMPT"
+node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));p.disagreements=[];fs.writeFileSync(process.argv[2],JSON.stringify(p))' "$WORK/criteria.json" "$WORK/merged.json"
+wf handoff planner --agent planner-1 --attempt "$ATTEMPT"
+wf plan --file "$WORK/merged.json" --agent planner-1 --attempt "$ATTEMPT"
+wf handoff planner --agent planner-2 --attempt "$ATTEMPT"
+echo '{ "verdict": "agree" }' > "$WORK/agree.json"
+wf plan --file "$WORK/agree.json" --agent planner-2 --attempt "$ATTEMPT"
 
 say "The implementer's first try forgets the comma"
 wf handoff implementer --agent implementer-1 --attempt "$ATTEMPT" | tee "$WORK/implementer-handoff.txt"

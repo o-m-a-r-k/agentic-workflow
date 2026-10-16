@@ -12,7 +12,7 @@ import { obligationSince } from './versions.mjs';
 
 // The planner seats, as work classes (the class pins each seat's model and effort per runtime). A project names them with
 // `roles.planner.panel: [<class>, ...]`; one class is a single planner. By default the planner role's class leads, and the
-// host names the second seat's class (Claude: `review`, another model) or repeats the lead's.
+// host names the second seat's class (one harness seats `review`, another model) or repeats the lead's.
 export function plannerPanel(cfg, runtime) {
   const set = cfg.roles?.planner?.panel;
   if (Array.isArray(set) && set.length) return set.map(String);
@@ -31,7 +31,9 @@ export function panelClasses(cfg, runtimes) {
 export const plannerClassFor = (cfg, state) => (cfg.roles?.planner?.class ?? (obligationSince(state, '0.7.22') ? roleClass(cfg, 'planner') : 'review'));
 
 // The panel applies to attempts admitted from 0.7.22 (D7: a live attempt keeps the planning it started with).
-export const panelActive = (cfg, state, runtime) => cfg.roles?.planner !== false && obligationSince(state, '0.7.22') && plannerPanel(cfg, runtime).length > 1;
+// Only in a lane that plans with a planner (independent review of 0.7.22: a quick fix that handed a planner was put on a
+// panel its lane does not have).
+export const panelActive = (cfg, state, runtime) => cfg.roles?.planner !== false && (cfg.roles?.planner?.lanes ?? ['standard']).includes(state.lane) && obligationSince(state, '0.7.22') && plannerPanel(cfg, runtime).length > 1;
 
 // Where the panel of the plan being written stands, from the ledger. A plan replaced whole (an attempt upgraded to
 // implementation) starts a new panel: `gen` counts the plans frozen.
@@ -45,13 +47,16 @@ export function panelStage(state, seats) {
   for (const h of handed.filter((x) => x.panel.stage === 'draft')) draftHanded[h.panel.seat] = h;
   const merges = ev.filter((x) => x.type === 'merged');
   const lastMerge = merges.at(-1) ?? null;
-  const verdicts = lastMerge ? ev.filter((x) => ['agreed', 'objected'].includes(x.type) && x.round === lastMerge.round) : [];
+  // A merged plan the engine refused at the freeze (its queries no longer match, an obligation it misses) counts as an
+  // objection to that merge: the panel goes back to the merge with the engine's reason (independent review of 0.7.22: a
+  // refusal there had no way back).
+  const verdicts = lastMerge ? ev.filter((x) => ['agreed', 'objected', 'merge-refused'].includes(x.type) && x.round === lastMerge.round) : [];
   const base = { gen, seats, drafts, draftHanded, lastMerge, verdicts };
   const missing = [];
   for (let seat = 1; seat <= seats; seat++) if (!drafts[seat]) missing.push(seat);
   if (missing.length) return { ...base, stage: 'draft', missing, round: 0 };
   if (!lastMerge) return { ...base, stage: 'merge', seat: 1, round: 1 };
-  const objected = verdicts.filter((v) => v.type === 'objected');
+  const objected = verdicts.filter((v) => v.type === 'objected' || v.type === 'merge-refused');
   if (objected.length) return { ...base, stage: 'merge', seat: 1, round: lastMerge.round + 1, objections: objected };
   for (let seat = 2; seat <= seats; seat++) if (!verdicts.some((v) => v.seat === seat)) return { ...base, stage: 'confirm', seat, round: lastMerge.round };
   return { ...base, stage: 'agreed', round: lastMerge.round };

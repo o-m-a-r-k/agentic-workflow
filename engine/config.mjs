@@ -260,6 +260,8 @@ function normalize(raw, source) {
     const moved = ['model', 'effort', ...hostIds()].filter((k) => k in rc);
     if (moved.length) fail(`roles.${role}: ${moved.join(', ')} moved to \`classes\`; set \`roles.${role}.class\` and the class's ${hostChoice('/')} effort and model`);
     if (rc.class !== undefined && !cfg.classes[rc.class]) fail(`roles.${role}.class \`${rc.class}\` is not a known class (known: ${Object.keys(cfg.classes).join(', ')})`);
+    // 0.7.22 (D28): the planning panel's seats are classes.
+    if (rc.panel !== undefined && (role !== 'planner' || !Array.isArray(rc.panel) || !rc.panel.length || rc.panel.some((c) => !cfg.classes[c]))) fail(role !== 'planner' ? `roles.${role}.panel: only the planner has a panel` : `roles.planner.panel lists the planner seats as known classes, at least one (known: ${Object.keys(cfg.classes).join(', ')})`);
     if (rc.runtime !== undefined && !hostIds().includes(rc.runtime)) fail(`roles.${role}.runtime must be ${hostChoice(' or ')}`);
   }
   for (const lane of cfg.lanes) if (!LANES.has(lane)) fail(`unknown lane \`${lane}\``);

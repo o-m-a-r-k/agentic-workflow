@@ -414,7 +414,9 @@ export function roleAgents(cfg) {
     // One planner agent per class a planning panel seats (0.7.22).
     if (role === 'planner' && cfg.roles?.planner !== false) {
       const lead = roleClass(cfg, 'planner');
-      for (const cls of [lead, ...panelClasses(cfg, hostIds()).filter((c) => c !== lead)]) out.push({ role, cls, name: agentTypeFor(cfg, role, cls) });
+      // An attempt admitted before 0.7.22 plans at `review` when the adapter names no planner class (D7): its agent too.
+      const legacy = cfg.roles?.planner?.class ? [] : ['review'];
+      for (const cls of [...new Set([lead, ...panelClasses(cfg, hostIds()), ...legacy])].filter((c) => cfg.classes[c])) out.push({ role, cls, name: agentTypeFor(cfg, role, cls) });
       continue;
     }
     if (role !== 'implementer') {
@@ -755,7 +757,7 @@ export async function doctor(root, { runSteps = true, runtime = detectOwner()?.r
     if (installed && installed !== ENGINE_VERSION) report.warnings.push({ ok: true, warn: true, check: `${hostFor(runtime).name} plugin version`, note: `${hostFor(runtime).name} has agentic-workflow ${installed} installed while wf is ${ENGINE_VERSION}: its hooks and skills are older or newer than this engine; update the plugin in ${hostFor(runtime).name} and restart its sessions` });
   }
   // Named failure I-36: one harness's model pins concealed another's inheritance; check the selected/owning runtime instead.
-  for (const [role, cls] of [...(cfg.roles?.planner === false ? [] : plannerPanel(cfg, runtime).map((c) => ['planner', c])), ['reviewer', roleClass(cfg, 'reviewer')]]) {
+  for (const [role, cls] of [...(cfg.roles?.planner === false ? [] : [...new Set(plannerPanel(cfg, runtime))].map((c) => ['planner', c])), ['reviewer', roleClass(cfg, 'reviewer')]]) {
     const { model } = declared(cfg, cls, runtime);
     if (model) report.config.push({ ok: true, runtime, check: `${role} model: ${model} (class ${cls})` });
     else bad('config', { check: `${role} model`, runtime, problem: `the ${role} role runs at class \`${cls}\`, which pins no ${hostFor(runtime).name} model, so its agent inherits whatever model the owner's session runs`, fix: `set \`classes.${cls}.${runtime}.model\` (the strongest model you use), or \`roles.${role}.class: review\` (the plugin's planning and review class), in .workflow/project.yaml; then \`wf sync\`` });
@@ -769,7 +771,7 @@ export async function doctor(root, { runSteps = true, runtime = detectOwner()?.r
       for (const role of ['planner', 'reviewer']) {
         const trusted = trustedAdapter(root, st);
         if (role === 'planner' && trusted.roles?.planner === false) continue;
-        const settings = executionSettings(root, st, role, role === 'planner' ? plannerClassFor(trusted, st) : roleClass(trusted, role), runtime);
+        const settings = executionSettings(root, st, role, role === 'planner' ? (st.strategy?.classFor?.planner && trusted.classes?.[st.strategy.classFor.planner] ? st.strategy.classFor.planner : plannerClassFor(trusted, st)) : roleClass(trusted, role), runtime);
         const check = id + ' ' + role + ' execution model (pin ' + settings.runtimeAdapterBase.slice(0, 12) + ')';
         if (settings.model) report.config.push({ ok: true, runtime, check, note: settings.model + (settings.effort ? ' / ' + settings.effort : '') });
         else {

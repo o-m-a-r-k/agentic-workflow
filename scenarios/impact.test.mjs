@@ -277,11 +277,11 @@ test('I-25: a fix handoff may name a pattern sweep per family (0.7.0: optional);
 test('I-25: doctor fails when the planner or reviewer resolves to no model; the default review class pins one and wf sync writes it', () => {
   const ok1 = singleRepoProject('doctor-models', { gate: { steps } });
   const d = ok(wf(ok1.root, ['doctor', '--no-steps']));
-  assert.match(d.out, /✓ config: planner model: opus \(class review\) \(claude\)\n✓ config: reviewer model: opus \(class review\) \(claude\)/);
+  assert.match(d.out, /✓ config: planner model: fable \(class planning\) \(claude\)\n✓ config: reviewer model: opus \(class review\) \(claude\)/);
   ok(wf(ok1.root, ['sync']));
   const front = fs.readFileSync(path.join(ok1.root, '.claude/agents/wf-reviewer.md'), 'utf8');
   assert.match(front, /^model: opus$/m);
-  assert.match(fs.readFileSync(path.join(ok1.root, '.claude/agents/wf-planner.md'), 'utf8'), /^model: opus$/m);
+  assert.match(fs.readFileSync(path.join(ok1.root, '.claude/agents/wf-planner.md'), 'utf8'), /^model: fable$/m);
   const bad = singleRepoProject('doctor-nomodel', { gate: { steps }, roles: { reviewer: { class: 'full' } } });
   const r = wf(bad.root, ['doctor', '--no-steps']);
   assert.equal(r.code, 1);

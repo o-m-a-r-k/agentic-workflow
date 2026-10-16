@@ -23,7 +23,7 @@ const ADAPTER = `export default {
 const SESSION = 'grok-session-0001';
 
 function prepared(mode = 'ok') {
-  const p = singleRepoProject('host-plugin', { classes: { review: { grok: { model: 'grok-test-model', effort: 'high' } } }, gate: { steps: [] } });
+  const p = singleRepoProject('host-plugin', { classes: { review: { grok: { model: 'grok-test-model', effort: 'high' } }, planning: { grok: { model: 'grok-test-model', effort: 'high' } } }, gate: { steps: [] } });
   const dir = path.join(p.base, 'fake-bin');
   write(dir, 'grok', `#!/usr/bin/env node
 import fs from 'node:fs';
