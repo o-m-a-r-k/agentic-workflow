@@ -361,7 +361,7 @@ export function writeDraft(root, detected, { force = false } = {}) {
   return file;
 }
 
-// ---------- sync: AGENTS.md block, role agents, vendored skills ----------
+// ---------- sync: role agents, vendored skills; the removal of an older release's AGENTS.md block ----------
 const BEGIN = '<!-- agentic-workflow:begin -->';
 const END = '<!-- agentic-workflow:end -->';
 
@@ -372,11 +372,13 @@ export function instructionFiles(root, cfg) {
 }
 
 // The standing rules every session in an enabled project starts with (0.7.24, D30): the plugin's text with the project's
-// adapter facts, given by the plugin's SessionStart hook (hooks/session-rules.mjs), never written into the project's files.
-// The project's invariants are named by where they are in the adapter, not copied.
+// adapter facts and invariants, given by the plugin's SessionStart and SubagentStart hooks (hooks/session-rules.mjs) and in
+// every role bundle, never written into the project's files.
 export function sessionRules(root, cfg) {
   const tpl = fs.readFileSync(path.join(PLUGIN_ROOT, 'templates', 'session-rules.md'), 'utf8');
-  const invariants = cfg.invariants && fs.existsSync(path.join(root, ADAPTER_DIR, cfg.invariants)) ? `- The project's critical invariants are in \`${path.join(ADAPTER_DIR, cfg.invariants)}\`: read them before changing anything on a critical boundary.` : '';
+  // The adapter's invariants are the project's own text, carried as written (they change with the project, not the plugin).
+  const file = cfg.invariants ? path.join(root, ADAPTER_DIR, cfg.invariants) : null;
+  const invariants = file && fs.existsSync(file) ? `\nThe project's critical invariants (\`${path.join(ADAPTER_DIR, cfg.invariants)}\`):\n\n${fs.readFileSync(file, 'utf8').trim()}` : '';
   return tpl
     .replace('{project}', cfg.name)
     .replace('{lanes}', cfg.lanes.join(', '))
@@ -385,10 +387,33 @@ export function sessionRules(root, cfg) {
     .replace('{invariants}', invariants)
     .trim();
 }
-// A block an earlier release wrote into an instruction file (between the markers), removed by `wf sync` (D30).
-const hasBlock = (text) => text.includes(BEGIN) && text.includes(END) && text.indexOf(END) > text.indexOf(BEGIN);
+// A block an earlier release wrote into an instruction file (between the markers, outside any code fence), removed by
+// `wf sync` (D30). Only the block and the blank lines at its seam change: the authored text keeps every byte, its line
+// endings included (independent review of 0.7.24: a whole-file clean-up collapsed blank lines inside a code fence and
+// rewrote CRLF endings). Markers quoted inside a fence are text, not a block.
+function blockAt(text) {
+  let fenced = false;
+  let at = 0;
+  for (const line of text.split('\n')) {
+    if (/^\s*(```|~~~)/.test(line)) fenced = !fenced;
+    else if (!fenced && line.trim() === BEGIN) {
+      const end = text.indexOf(END, at);
+      return end > at ? { start: at, end: end + END.length } : null;
+    }
+    at += line.length + 1;
+  }
+  return null;
+}
+const hasBlock = (text) => Boolean(blockAt(text));
 function withoutBlock(text) {
-  return (text.slice(0, text.indexOf(BEGIN)) + text.slice(text.indexOf(END) + END.length)).replace(/\n{3,}/g, '\n\n').trimEnd() + '\n';
+  let out = text;
+  for (let b = blockAt(out); b; b = blockAt(out)) {
+    const eol = out.includes('\r\n') ? '\r\n' : '\n';
+    const before = out.slice(0, b.start).replace(/(\r?\n)+$/, '');
+    const after = out.slice(b.end).replace(/^(\r?\n)+/, '');
+    out = !before ? after : !after ? `${before}${eol}` : `${before}${eol}${eol}${after}`;
+  }
+  return out;
 }
 
 export function removeBlock(file) {

@@ -99,6 +99,22 @@ test('enable writes role agents and nothing into AGENTS.md; a block an older rel
   assert.equal(wf(root, ['entry', '--item', 'X-1']).code, 75, 'disabled projects refuse work');
 });
 
+test('removing an older release\'s block changes only the block and its seam: fences, CRLF endings, quoted markers and a second block', () => {
+  const { root } = onboarded([{ id: 'ok', repo: 'app', run: 'true' }]);
+  const file = path.join(root, 'AGENTS.md');
+  const fence = '# Rules\n\n```md\n<!-- agentic-workflow:begin -->\nquoted, not a block\n\n\n\nthree blank lines kept\n<!-- agentic-workflow:end -->\n```\n';
+  write(root, 'AGENTS.md', `${fence}\n${OLD_BLOCK}\n## Tail   \n`);
+  ok(wf(root, ['sync']));
+  assert.equal(fs.readFileSync(file, 'utf8'), `${fence}\n## Tail   \n`, 'the fenced example and the trailing spaces stay');
+  const crlf = '# Rules\r\n\r\nKeep.\r\n\r\n' + OLD_BLOCK.replace(/\n/g, '\r\n') + '\r\n## More\r\n';
+  fs.writeFileSync(file, crlf);
+  ok(wf(root, ['sync']));
+  assert.equal(fs.readFileSync(file, 'utf8'), '# Rules\r\n\r\nKeep.\r\n\r\n## More\r\n');
+  write(root, 'AGENTS.md', `A\n\n${OLD_BLOCK}\nB\n\n${OLD_BLOCK}\nC\n`);
+  ok(wf(root, ['sync']));
+  assert.equal(fs.readFileSync(file, 'utf8'), 'A\n\nB\n\nC\n');
+});
+
 test('the session rules come from the plugin\'s SessionStart hook, in an enabled project only, with where the adapter keeps its invariants', async () => {
   const { root } = singleRepoProject('session-rules', { enabled: false, invariants: 'AGENTS.invariants.md', gate: { steps: [{ id: 'ok', repo: 'app', run: 'true' }] } }, { '.workflow/AGENTS.invariants.md': '- Money is exact.\n' });
   const { spawnSync } = await import('node:child_process');
@@ -114,11 +130,18 @@ test('the session rules come from the plugin\'s SessionStart hook, in an enabled
   assert.equal(out.hookEventName, 'SessionStart');
   assert.match(out.additionalContext, /^agentic-workflow runs changes in this project \(/);
   assert.match(out.additionalContext, /Reserved decisions \(.*\) are the user's\. Ask them in plain words, one question per item, never one they already answered; a typed answer and the question panel both count\./);
-  assert.match(out.additionalContext, /critical invariants are in `\.workflow\/AGENTS\.invariants\.md`/);
-  assert.doesNotMatch(out.additionalContext, /Money is exact/, 'named, not copied');
+  assert.match(out.additionalContext, /critical invariants \(`\.workflow\/AGENTS\.invariants\.md`\):\n\n- Money is exact\./, 'the adapter\'s own text, as written');
+  const hooks = JSON.parse(fs.readFileSync(path.join(path.dirname(hook), 'hooks.json'), 'utf8')).hooks;
+  // A subagent gets the same rules when it starts (it does not see its session's SessionStart context).
+  const sub = spawnSync(process.execPath, [hook], { input: JSON.stringify({ hook_event_name: 'SubagentStart', cwd: root }), encoding: 'utf8' });
+  assert.equal(JSON.parse(sub.stdout).hookSpecificOutput.hookEventName, 'SubagentStart');
+  assert.match(hooks.SubagentStart?.[0]?.hooks?.[0]?.command ?? '', /hooks\/session-rules\.mjs/);
+  // A role has them in its bundle, whatever its harness.
+  const e = ok(wf(root, ['entry', '--item', 'SR-1', '--owner', 'o', '--json'])).json();
+  const h = ok(wf(root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id, '--json'])).json();
+  assert.match(JSON.parse(fs.readFileSync(h.bundle, 'utf8')).workflowRules, /^agentic-workflow runs changes in this project/);
   const outside = run(tmp('no-project'));
   assert.equal(outside.stdout, '', 'nothing outside a project');
-  const hooks = JSON.parse(fs.readFileSync(path.join(path.dirname(hook), 'hooks.json'), 'utf8')).hooks;
   assert.match(hooks.SessionStart[0].hooks[0].command, /hooks\/session-rules\.mjs/);
 });
 
@@ -251,7 +274,7 @@ test('generated files follow the installed plugin: untracked role files are refr
   assert.match(h.err, /role files refreshed to the installed plugin/);
   assert.equal(fs.readFileSync(role, 'utf8'), current);
   assert.equal(fs.readFileSync(mine, 'utf8'), 'my own role\n');
-  assert.match(ok(wf(root, ['resume', '--attempt', e.id])).out, /agentic-workflow files older than the installed plugin \([^)]+\): AGENTS\.md; run `wf sync` and commit them/);
+  assert.match(ok(wf(root, ['resume', '--attempt', e.id])).out, /AGENTS\.md still holds the agentic-workflow block an older release wrote \(the rules now come from the plugin, [^)]+\): run `wf sync` and commit the removal/);
   assert.match(fs.readFileSync(path.join(root, 'AGENTS.md'), 'utf8'), /medium is your judgement/, 'a tracked file is never rewritten behind the project');
 });
 const spawnStatus = (cwd, file) => (sh(cwd, `git ls-files --error-unmatch ${JSON.stringify(path.relative(cwd, file))} >/dev/null 2>&1; echo $?`) === '0' ? 0 : 1);

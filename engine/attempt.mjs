@@ -1,4 +1,5 @@
-import { ledgerEmpty, writeNoFollow } from './evidence.mjs';
+import { ledgerEmpty, withEvidenceTransaction, writeNoFollow } from './evidence.mjs';
+import { headsNow } from './discovered.mjs';
 import { mkdirStateDirectory } from './state-folders.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -424,8 +425,18 @@ export function abandon(root, options) {
   // members; members a split put together leave it only on the person's decision, one question for the batch (D1).
   const released = state.lane === 'batch' ? (state.batch?.members ?? []).map((m) => loadState(root, m)).filter((m) => m.batchOf === state.id && !['done', 'abandoned'].includes(m.phase)) : [];
   const splitMembers = released.filter((m) => m.splitFrom || m.splits?.length);
-  const releaseDecision = splitMembers.length ? requireYes(root, state, { kind: 'move-out-of-batch', key: `abandon-batch:${state.id}`, summary: `abandon ${state.id}; ${splitMembers.map((m) => m.id).join(', ')} came from or made a split and would leave the batch that ships them together`, what: `abandoning ${state.id}`, frame: FRAMES.abandonBatch({ batch: state.id, members: released.map((m) => m.id) }), options }).decision : null;
-  for (const m of released) append(root, m.id, 'batch.ejected', { batch: state.id, reason: `${state.id} was abandoned: ${String(options.reason)}`, ...(releaseDecision && splitMembers.includes(m) ? { decision: releaseDecision } : {}) }, actor(options));
+  const releaseDecision = splitMembers.length ? requireYes(root, state, { kind: 'move-out-of-batch', key: `abandon-batch:${state.id}:${sha256(JSON.stringify(treeHashes(state))).slice(0, 16)}`, summary: `abandon ${state.id}; ${splitMembers.map((m) => m.id).join(', ')} came from or made a split and would leave the batch that ships them together`, what: `abandoning ${state.id}`, frame: FRAMES.abandonBatch({ batch: state.id, members: released.map((m) => m.id) }), options }).decision : null;
+  for (const m of released) {
+    withEvidenceTransaction(root, m.id, () => {
+      append(root, m.id, 'batch.ejected', { batch: state.id, reason: `${state.id} was abandoned: ${String(options.reason)}`, ...(releaseDecision && splitMembers.includes(m) ? { decision: releaseDecision } : {}) }, actor(options));
+      // What the member moved into the batch to be fixed there (0.7.23, I-177) comes back to it, still open, so its delivery
+      // waits for it again (independent review of 0.7.24: the abandon dropped it, and the member delivered without the fix).
+      for (const d of (state.discovered ?? []).filter((x) => x.status === 'open' && x.movedFrom?.attempt === m.id)) {
+        const ms = loadState(root, m.id);
+        append(root, m.id, 'discovered.added', { id: `D${(ms.discovered ?? []).length + 1}`, summary: `moved back from ${state.id} ${d.id}, abandoned: ${String(d.summary ?? '').replace(/^moved from \S+ \S+: /, '')}`, kind: d.kind ?? 'defect', severity: d.severity ?? null, ...(d.invariant ? { invariant: d.invariant } : {}), where: d.where ?? null, foundBy: d.foundBy ?? null, blockedBy: null, movedFrom: { attempt: state.id, ref: d.id }, raisedOn: headsNow(ms) }, actor(options));
+      }
+    });
+  }
   append(root, state.id, 'abandoned', { reason: String(options.reason), ...(splitDecision ? { decision: splitDecision } : {}), ...(released.length ? { released: released.map((m) => m.id) } : {}), ...(recorded.length ? { skipped: recorded.map((d) => d.repo) } : {}), ...(open.length ? { integrationsClosed: open.map((o) => `${o.repo}:${o.state}`), decisions } : {}) }, actor(options));
   cleanupWorktrees(root, loadState(root, state.id));
   return loadState(root, state.id);

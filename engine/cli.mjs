@@ -244,7 +244,10 @@ function summary(root, s, { base = null, resume = false } = {}) {
       try {
         // Read only here (independent review of 0.7.11): `wf status` and `wf resume` write nothing; the handoff refreshes.
         const g = { trackedStale: generatedStatus(root).filter((x) => x.tracked).map((x) => x.file) };
-        if (g.trackedStale.length) lines.push(`  agentic-workflow files older than the installed plugin (${ENGINE_VERSION}): ${g.trackedStale.map((f) => path.relative(root, f)).join(', ')}; run \`wf sync\` and commit them`);
+        const blocks = generatedStatus(root).filter((x) => x.tracked && x.kind === 'block').map((x) => x.file);
+        const roles = g.trackedStale.filter((f) => !blocks.includes(f));
+        if (blocks.length) lines.push(`  ${blocks.map((f) => path.relative(root, f)).join(', ')} still hold${blocks.length === 1 ? 's' : ''} the agentic-workflow block an older release wrote (the rules now come from the plugin, ${ENGINE_VERSION}): run \`wf sync\` and commit the removal`);
+        if (roles.length) lines.push(`  agentic-workflow files older than the installed plugin (${ENGINE_VERSION}): ${roles.map((f) => path.relative(root, f)).join(', ')}; run \`wf sync\` and commit them`);
       } catch {}
     }
     const inbox = openCount();
@@ -650,7 +653,7 @@ async function dispatch(cmd, sub, positional, options) {
       const files = sync(root);
       const roles = files.changedRoles ?? [];
       const note = roles.length ? `\nrole file(s) changed: ${roles.map((c) => `${path.relative(root, c.file)}${c.removed ? ' (removed)' : c.created ? ' (new)' : ''}`).join(', ')}\n  ${hostLabels(' and ')} read agent files when a session starts: a session that was already running keeps the old roles, so the bundle of a changed role points it at the current file, which it reads first; no restart is needed.` : '\nno role file changed';
-      print(options, `wrote ${files.length} file(s):\n${files.map((f) => `  ${path.relative(root, f)}`).join('\n')}${note}`, files);
+      print(options, `${files.length ? `removed the agentic-workflow block an older release wrote from ${files.length} file(s) (commit the change; the rules now come from the plugin):\n${files.map((f) => `  ${path.relative(root, f)}`).join('\n')}` : 'no instruction file holds an agentic-workflow block'}${note}`, files);
       return 0;
     }
     case 'topology': {

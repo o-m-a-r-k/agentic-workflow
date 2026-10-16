@@ -179,9 +179,15 @@ export const FRAMES = {
   }),
   abandonBatch: ({ batch, members }) => ({
     aliases: { yes: ['give it up', 'abandon it'], no: ['keep it'] },
-    question: `Should ${batch}, the combined delivery of ${members.join(' and ')}, be given up? Its parts were split so that they ship together; after this, each ships on its own.`,
+    question: `Should ${batch}, the combined delivery of ${members.join(' and ')}, be given up? Its parts were split so that they ship together; after this they no longer have to.`,
     labels: { yes: 'Give it up', no: 'Keep it' },
-    then: { yes: 'the combined delivery is closed (its branch is kept) and each part goes back to being delivered on its own; work made only in the combined delivery is not delivered', no: 'it stays, and its parts ship together' },
+    then: { yes: 'the combined delivery is closed (its branch is kept); each part waits to be combined again before it ships, anything a part handed to it to fix comes back to that part, and work made only in the combined delivery is not delivered', no: 'it stays, and its parts ship together' },
+  }),
+  leaveAbandoned: ({ id, batch }) => ({
+    aliases: { yes: ['release it', 'take it out'], no: ['leave it'] },
+    question: `${batch}, the combined delivery ${id} was split into so that its parts ship together, was given up earlier. Should ${id} be released from it, so it can be combined again?`,
+    labels: { yes: 'Release it', no: 'Leave it as it is' },
+    then: { yes: 'it is free to be combined again with the parts that remain', no: 'it stays tied to the given-up delivery and cannot ship' },
   }),
   eject: ({ id, batch }) => ({
     aliases: { yes: ['take it out'], no: ['keep it'] },

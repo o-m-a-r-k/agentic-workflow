@@ -23,7 +23,7 @@ Rules for agents working on this repository (the plugin itself). Terms: project,
   commit messages). `scenarios/privacy.test.mjs` checks tracked files against your local `.privacy-denylist`
   (gitignored; create it with the names you must never publish).
 - A change to what the engine does changes, in the same commit, every text that states it: role templates, skills, the
-  AGENTS block, `wf resume` lines and refusal hints, docs and release notes. `scenarios/text-payloads.test.mjs` runs every
+  session rules (`templates/session-rules.md`), `wf resume` lines and refusal hints, docs and release notes. `scenarios/text-payloads.test.mjs` runs every
   example payload through the engine and `scenarios/final-review-0.7.test.mjs` checks every named command; a reading of
   the prose is still owed. Named failure (0.7.0): the engine was relaxed first and the texts followed a day later, so
   agents were told to do what the engine refused.

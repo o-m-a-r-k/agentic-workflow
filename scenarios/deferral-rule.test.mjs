@@ -397,3 +397,20 @@ test('0.7.24 (I-181): abandoning an assembled batch releases its members; a memb
   assert.equal(state(old.root, old.e.id).batchOf, null);
   assert.match(wf(old.root, ['batch', 'eject', '--batch', old.b.id, '--member', old.e.id, '--owner', 'o'], silent).err, /is not in .* any more/);
 });
+
+test('0.7.24 (I-181): an item a member handed to its batch comes back to the member when the batch is abandoned, still to fix', () => {
+  const obs = { id: 'F1', severity: 'low', summary: 'the export button label is cut off on a narrow screen', status: 'open', evidence: 'src/old.txt:2 the label overflows' };
+  const { root, e, m2, b } = acceptedBatch('i181-moved-back', { finding: obs });
+  assert.equal(wf(root, ['scope', 'defer', '--finding', 'rev-0:F1', '--attempt', e.id], silent).code, 75);
+  approveAsOwner(root, e.id, state(root, e.id).decisions.find((x) => x.key === 'leave:rev-0:F1').id, 'fix now');
+  ok(wf(root, ['scope', 'move', '--finding', 'rev-0:F1', '--sibling', b.id, '--reason', 'the batch fixes it', '--attempt', e.id], silent));
+  ok(wf(root, ['abandon', '--reason', 'combine differently', '--attempt', b.id, '--owner', 'o'], silent));
+  const back = state(root, e.id).discovered.filter((d) => d.status === 'open');
+  assert.equal(back.length, 1, 'the member owes it again');
+  assert.equal(back[0].movedFrom.attempt, b.id);
+  assert.match(back[0].summary, /the export button label is cut off on a narrow screen/);
+  assert.match(state(root, e.id).next, /D\d+/, 'its next step names the item it owes');
+  assert.doesNotMatch(knownLimits(loadState(root, e.id), { load: (id) => loadState(root, id) }), /still open there/);
+  // A member whose heavy steps were deferred ships in a batch: its next step says so, not `wf deliver`.
+  assert.match(state(root, m2).next, /ships in one: `wf batch create --members /);
+});

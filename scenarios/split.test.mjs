@@ -171,7 +171,7 @@ test('abandoning a batch a split put together asks the person once, then release
   const asked = cur.run(root, ['abandon', '--reason', 'ship them separately', '--attempt', b.id, '--owner', a.owner], { ownerSilent: true });
   assert.equal(asked.code, 75);
   const d = state(root, b.id).decisions.at(-1);
-  assert.equal(d.key, `abandon-batch:${b.id}`);
+  assert.match(d.key, new RegExp(`^abandon-batch:${b.id.replace('.', '\\.')}:[0-9a-f]{16}$`), 'bound to the batch as it is when asked');
   assert.match(d.plain, new RegExp(`^Should ${b.id.replace('.', '\\.')}, the combined delivery of ${a.id.replace('.', '\\.')} and ENG-820\\.2, be given up\\?`));
   assert.equal(state(root, a.id).batchOf, b.id, 'nothing moved before the answer');
   approveAsOwner(root, b.id, d.id, 'yes');

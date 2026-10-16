@@ -12,7 +12,7 @@ import { pathToFileURL, fileURLToPath } from 'node:url';
 import { actor, addRepoWorktree, baseRef, branchName, onTarget, changedFiles, cleanupWorktrees, entry, missingWorktrees, openState, treeHashes, worktreeDir } from './attempt.mjs';
 import { channelOf, discoveredVerdicts, headsNow, openDiscovered, seamVerdicts, unacknowledged, reportsForReview, reportedIssueVerdicts } from './discovered.mjs';
 import { executionSettings, rejectModelOverrides } from './models.mjs';
-import { rerunsOnlyFailed } from './onboard.mjs';
+import { rerunsOnlyFailed, sessionRules } from './onboard.mjs';
 import { policyOf, RULE, RULE_SHORT } from './leaving.mjs';
 import { detectOwner, findHost, fragment, hostChoice, isHost, lastFencedYaml, optional } from './hosts/index.mjs';
 import { defaultRuntime } from './runtime-policy.mjs';
@@ -837,6 +837,9 @@ export function handoff(root, role, options) {
     item: state.item,
     lane: state.lane,
     role,
+    // 0.7.24 (D30): the workflow's standing rules, which reach a session from the plugin's hooks; a role has them here too,
+    // whatever its harness and whether or not a hook has been trusted.
+    workflowRules: sessionRules(root, cfg),
     ...(roleStale ? { roleFileChanged: { file: roleStale.file, note: 'Your role instructions changed after the session that started you loaded them: read this file now and follow it where it differs from what you were started with.' } } : {}),
     agent,
     // The agent type the owner starts; its generated file (wf sync) sets this effort and model.
@@ -2797,7 +2800,7 @@ export function batchEject(root, options) {
   if (batch.phase === 'abandoned') {
     const ms = loadState(root, member);
     if (ms.batchOf !== batch.id) throw refuse(`${member} is not in ${batch.id} any more`);
-    const decision = (ms.splitFrom || ms.splits?.length) ? requireYes(root, ms, { kind: 'move-out-of-batch', key: `eject:${batch.id}:${member}:${(ms.batchJoins ?? 0)}`, summary: `${member} leaves the abandoned ${batch.id}, which carried work a split moved`, what: `ejecting ${member} from ${batch.id}`, frame: FRAMES.eject({ id: member, batch: batch.id }), options }).decision : null;
+    const decision = (ms.splitFrom || ms.splits?.length) ? requireYes(root, ms, { kind: 'move-out-of-batch', key: `eject-abandoned:${batch.id}:${member}`, summary: `${member} leaves the abandoned ${batch.id}, which carried work a split moved`, what: `ejecting ${member} from ${batch.id}`, frame: FRAMES.leaveAbandoned({ id: member, batch: batch.id }), options }).decision : null;
     append(root, member, 'batch.ejected', { batch: batch.id, reason: options.reason ?? `${batch.id} was abandoned`, ...(decision ? { decision } : {}) }, actor(options));
     return loadState(root, member);
   }
@@ -3079,7 +3082,7 @@ function phaseAction(root, cfg, state) {
   // An amendment an engine before 0.7.4 recorded left the acceptance standing (I-107): say what delivery would ship.
   const unmapped = amendedAfterAcceptance(state);
   const unmappedNote = unmapped.length ? ` -- WARNING: ${unmapped.join(', ')} ${unmapped.length === 1 ? 'was' : 'were'} added or re-worded after the acceptance and no review mapped ${unmapped.length === 1 ? 'it' : 'them'} to evidence (the amendment was recorded before 0.7.4, which left the acceptance standing): for the evidence, hand a fresh reviewer (\`wf handoff reviewer --agent <new id>\`) and \`wf accept\` again, then deliver` : '';
-  if (state.accepted) return state.batchPending ? `accepted; ${state.batchOf} (reserved by a split) waits for the other members to be accepted, then \`wf batch create --members <every member of the split>\` assembles it` : state.batchOf ? `waiting for batch ${state.batchOf}` : `deliver: \`wf deliver\`${unmappedNote}`;
+  if (state.accepted) return state.batchPending ? `accepted; ${state.batchOf} (reserved by a split) waits for the other members to be accepted, then \`wf batch create --members <every member of the split>\` assembles it` : state.batchOf ? `waiting for batch ${state.batchOf}` : state.deferHeavy ? `accepted; its heavy steps were deferred to a batch, so it ships in one: \`wf batch create --members ${state.id},<the other members>\`` : `deliver: \`wf deliver\`${unmappedNote}`;
   // Order of work (I-27): code-review rounds until one comes back clean (no gate meanwhile), then one gate on that tree,
   // then the evidence review of the gated tree. Review and gate never run side by side.
   const g = state.lastGate;

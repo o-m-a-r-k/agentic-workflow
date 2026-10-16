@@ -57,7 +57,7 @@ engine starts.
   scenario file.
 - A new refusal, limit or check must name the concrete failure it catches. "It might be safer" is not enough.
 - A change to what the engine does changes every text that states it in the same commit (role templates, skills, the
-  AGENTS block, `wf resume` lines, refusal hints, docs, release notes); `scenarios/text-payloads.test.mjs` runs every
+  session rules (`templates/session-rules.md`), `wf resume` lines, refusal hints, docs, release notes); `scenarios/text-payloads.test.mjs` runs every
   example payload through the engine.
 - Workflow findings from using the plugin are recorded with `wf improve add` and closed with
   `wf improve close <id> --version X --test scenarios/<file>.test.mjs --fix "..."`, which writes the history entry in
