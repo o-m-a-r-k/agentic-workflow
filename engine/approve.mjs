@@ -47,12 +47,12 @@ export const chose = (d) => Boolean(d?.approved && d.approved.choice !== 'other'
 // with options like "authorize-policy-correction", no description, no recommendation: "very cryptic … I don't have
 // context, nor suggestions, nor even proper description". The choices stay the ids the engine acts on; the person sees
 // and picks the labels.
-export function createDecision(root, state, { kind, key, summary, choices = ['yes', 'no'], plain = null, labels = null, then = null, recommend = null, personDirected = null, options = {} }) {
+export function createDecision(root, state, { kind, key, summary, choices = ['yes', 'no'], plain = null, labels = null, then = null, recommend = null, personDirected = null, what = null, options = {} }) {
   if (!RESERVED.includes(kind)) throw new WfError(`unknown reserved decision kind ${kind}`);
   const open = decisionFor(state, kind, key);
   if (open && !open.approved) return open;
   const id = `A${(state.decisions ?? []).length + 1}`;
-  append(root, state.id, 'decision.created', { id, kind, key: String(key), summary: String(summary), choices: choices.map(String), ...(plain ? { plain: String(plain) } : {}), ...(labels ? { labels } : {}), ...(then ? { then } : {}), ...(recommend ? { recommend } : {}), ...(personDirected ? { personDirected: String(personDirected) } : {}) }, actor(options));
+  append(root, state.id, 'decision.created', { id, kind, key: String(key), summary: String(summary), choices: choices.map(String), ...(plain ? { plain: String(plain) } : {}), ...(labels ? { labels } : {}), ...(then ? { then } : {}), ...(recommend ? { recommend } : {}), ...(personDirected ? { personDirected: String(personDirected) } : {}), ...(what ? { what: String(what) } : {}) }, actor(options));
   return loadState(root, state.id).decisions.find((d) => d.id === id);
 }
 

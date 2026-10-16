@@ -376,6 +376,13 @@ export function openAcrossRounds(state, exceptRound = null) {
   return [...open.values()];
 }
 
+// What a finding said, by its ref, from the latest round that recorded it (null when no round did).
+export function findingSummary(state, ref) {
+  let summary = null;
+  for (const r of state.reviews ?? []) for (const f of r.closure?.findings ?? []) if (refOf(reviewerOf(r), f.id) === ref && f.summary) summary = f.summary;
+  return summary;
+}
+
 // Open findings of one recorded review that block the gate and acceptance.
 // One that went to a sibling attempt or a ticket (a move the owner approved) no longer holds this attempt.
 export const blockingIn = (state, review) => (review?.closure?.findings ?? []).filter((f) => {

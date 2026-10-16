@@ -631,7 +631,7 @@ export function reduce(entries) {
       case 'decision.created':
         // 0.7.11: a decision may carry the person's words for it: a plain question, a plain label and what follows for each
         // choice, and a recommendation (engine/approve.mjs).
-        s.decisions.push({ id: d.id, kind: d.kind, key: d.key, summary: d.summary, choices: d.choices, ...(d.plain ? { plain: d.plain } : {}), ...(d.labels ? { labels: d.labels } : {}), ...(d.then ? { then: d.then } : {}), ...(d.recommend ? { recommend: d.recommend } : {}), ...(d.personDirected ? { personDirected: d.personDirected } : {}), createdAt: e.at, by: e.actor, approved: null });
+        s.decisions.push({ id: d.id, kind: d.kind, key: d.key, summary: d.summary, choices: d.choices, ...(d.plain ? { plain: d.plain } : {}), ...(d.labels ? { labels: d.labels } : {}), ...(d.then ? { then: d.then } : {}), ...(d.recommend ? { recommend: d.recommend } : {}), ...(d.personDirected ? { personDirected: d.personDirected } : {}), createdAt: e.at, by: e.actor, approved: null , ...(d.what ? { what: d.what } : {}) });
         break;
       case 'decision.approved': {
         const x = s.decisions.find((y) => y.id === d.id);

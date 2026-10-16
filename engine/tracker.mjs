@@ -1,6 +1,5 @@
 import { mkdirStateDirectory } from './state-folders.mjs';
 import fs from 'node:fs';
-import { channelOf } from './channels.mjs';
 import { detectOwner, findHost, hostIds, hostLabels, optional } from './hosts/index.mjs';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
@@ -13,7 +12,8 @@ import { home } from './provenance.mjs';
 import { prepareWrite, readEvidenceFile, readRegular, writeNoFollow } from './evidence.mjs';
 import { connectorCalls, ownerTranscript } from './host-record.mjs';
 import { screenshots } from './gate.mjs';
-import { lastReviewSeenAt, unreachedSince } from './review-policy.mjs';
+import { findingSummary, lastReviewSeenAt, unreachedSince } from './review-policy.mjs';
+import { firstSentence } from './leaving.mjs';
 import { discoveredLevel } from './discovered.mjs';
 import { cliEnv, scrub } from './scrub.mjs';
 
@@ -81,34 +81,55 @@ export function uatScope(state) {
 
 // I-142: an item whose level is always fixed in the delivery, left out because the person directed it, says so in their words
 // (independent review of 0.7.12: the words lived only in the question, and the list read like any low left for later).
+// The plain line the owner gave for an item when the person was asked about it (`--explain`), if any.
+const plainFor = (state, id) => (id ? (state.decisions ?? []).find((x) => x.id === id)?.what : null) ?? null;
 const directedBy = (state, id) => {
   const words = id ? (state.decisions ?? []).find((x) => x.id === id)?.personDirected : null;
   return words ? ` Left out at the person's direction: "${words}".` : '';
 };
 
-// Known limits and follow-ups: a criterion's `finalHandoff` note, a criterion dropped by an amendment (with its
-// reason), every anomaly the owner recorded with `wf shown` as a follow-up, and every discovered issue the owner deferred.
-// `load` reads another attempt's state (a sibling a finding moved to), when the caller has the project root.
+// Known limits and follow-ups, for the tester who reads the delivered comment: what was not delivered, what is still known to
+// be wrong, what no review checked at the end, and the follow-up tickets, in plain words. The engine's own bookkeeping (who
+// decided, ratings, why each item waits, every round's caveats) stays in the delivery record and `wf export`. Named failure
+// (0.7.17): one delivered comment carried 53 lines of this, 25 of them per-round reviewer notes with file paths and test
+// counts, against the person's rule that a tracker comment reads in product language.
+// One plain line per item: the first sentence of what its reporter wrote (the whole text stays in the record).
+const sentence = (t) => firstSentence(String(t ?? '').trim().replace(/\s+/g, ' ')).replace(/[.\s]+$/, '');
 export function knownLimits(state, { load = null } = {}) {
   const out = [];
   for (const c of state.criteria ?? []) if (typeof c.finalHandoff === 'string' && c.finalHandoff.trim()) out.push(c.finalHandoff.trim());
   for (const a of state.criteriaAmendments ?? []) for (const d of a.changes?.dropped ?? []) out.push(`Not delivered: ${d.reason}`);
-  // Named failure (I-69): a review named scope it did not reach (`notReached`) and nothing the tester reads said so. Every
-  // round since the last complete full audit counts (independent review of 0.7.4: on an attempt that counts a partial
-  // round as its audit, the accepted round was a clean delta and the partial one went unsaid).
-  for (const u of unreachedSince(state)) out.push(`Not reached by review${u.round ? ` ${u.round}` : ''}${u.reviewer ? ` (${u.reviewer})` : ''}: ${u.notReached.join('; ')}`);
+  // Named failure (I-69): a review named scope it did not reach (`notReached`) and nothing the tester reads said so. The
+  // tester reads what the latest of those rounds did not check; the earlier rounds' notes are counted, not copied.
+  // Reviewers write these in engineering terms (steps, suites, files), so the tester reads how many there are and where the
+  // list is.
+  // The final review's own notes; earlier rounds' were mostly checked by the rounds after them, and stay in the record.
+  const unreached = unreachedSince(state).at(-1)?.notReached.length ?? 0;
+  if (unreached) out.push(`The final review left ${unreached} item(s) unchecked; the delivery record lists them.`);
   for (const a of state.delivery?.shown?.anomalies ?? []) if (a.followUp) out.push(`Follow-up: ${a.observation} (${a.followUp})`);
-  // An issue found during the ticket that the owner deferred (I-18): the tester sees it with the owner's words.
-  for (const d of state.discovered ?? []) if (d.status === 'deferred') out.push(`Deferred ${state.id}:${d.id}${d.severity ? ` (${d.severity})` : ''}: ${d.summary}.${(d.rated ?? []).length ? ` Rated ${d.rated.map((r) => `from ${r.from ?? 'unrated'} to ${r.to}${r.reason ? ` ("${r.reason}")` : ''}`).join(', then ')}.` : ''} Why it waits: "${d.deferred.decision}". Decided by: ${channelOf(d)}.${directedBy(state, d.deferred.source?.decision)}`);
+  // What is still known to be wrong, once each. A medium or high item left out at the person's direction is named, in their
+  // words; the minor ones (their text is the reviewers' and implementers' engineering notes) are counted, and the owner's
+  // summary describes in product words any a tester could meet.
+  const seen = new Set();
+  let minor = 0;
+  const knownIssue = (summary, level, extra = '') => {
+    const text = sentence(summary);
+    if (!text || seen.has(text.toLowerCase())) return;
+    seen.add(text.toLowerCase());
+    if (level === 'low' && !extra) minor += 1;
+    else out.push(`Known issue: ${text}.${extra}`);
+  };
+  for (const d of state.discovered ?? []) if (d.status === 'deferred') knownIssue(plainFor(state, d.deferred?.source?.decision) ?? d.summary, discoveredLevel(d), directedBy(state, d.deferred?.source?.decision));
+  for (const d of state.scopeDecisions ?? []) if (d.choice === 'deferred') for (const k of d.keys ?? []) knownIssue(plainFor(state, d.decisionFor?.[k]) ?? d.summaries?.[k] ?? k, d.placement?.[k] ?? 'low', directedBy(state, d.decisionFor?.[k]));
+  if (minor) out.push(`${minor} minor known issue(s) left for later; the delivery record lists them.`);
   // An item closed as fixed after the last review was not verified by any reviewer: the tester sees it (0.7.8: information,
   // not a stop, for every level).
   const lastReviewAt = lastReviewSeenAt(state) ?? '';
-  for (const d of state.discovered ?? []) if (d.status === 'fixed' && d.kind !== 'bookkeeping' && d.fixed?.at > lastReviewAt) out.push(`Closed as fixed after the last review, not verified by a reviewer: ${state.id}:${d.id} (${discoveredLevel(d)}): ${d.summary}.`);
-  for (const d of state.scopeDecisions ?? []) if (d.choice === 'fixed' && d.at > lastReviewAt) for (const k of d.keys ?? []) out.push(`Closed as fixed after the last review, not verified by a reviewer: ${k}.`);
+  for (const d of state.discovered ?? []) if (d.status === 'fixed' && d.kind !== 'bookkeeping' && d.fixed?.at > lastReviewAt) out.push(`Fixed after the last review, not verified by a reviewer: ${sentence(d.summary)}.`);
+  for (const d of state.scopeDecisions ?? []) if (d.choice === 'fixed' && d.at > lastReviewAt) for (const k of d.keys ?? []) out.push(`Fixed after the last review, not verified by a reviewer: ${sentence(findingSummary(state, k) ?? k)}.`);
   // A review finding that is not fixed here (0.7.0): ticketed for later, or moved to a sibling attempt of the batch.
   for (const d of state.scopeDecisions ?? []) {
-    if (d.choice === 'ticketed') out.push(`Follow-up ticketed for ${d.keys?.join(', ')}: ${d.ticket?.title ?? ''} ${d.ticket?.url ?? ''}${[...new Set((d.keys ?? []).map((k) => directedBy(state, d.decisionFor?.[k])).filter(Boolean))].join('')}`);
-    if (d.choice === 'deferred') for (const k of d.keys ?? []) out.push(`Known issue left for later (${d.placement?.[k] ?? 'unrated'}): ${d.summaries?.[k] ?? k}${d.reason ? `. Why it waits: "${d.reason}"` : ''}.${directedBy(state, d.decisionFor?.[k])}`);
+    if (d.choice === 'ticketed') out.push(`Follow-up ticket: ${d.ticket?.title ?? ''} ${d.ticket?.url ?? ''}`.trim() + [...new Set((d.keys ?? []).map((k) => directedBy(state, d.decisionFor?.[k])).filter(Boolean))].join(''));
     else if (d.choice === 'moved') {
       // I-123: a sibling that left this delivery (ejected, abandoned) still owes the item; the tester reads that it did not ship.
       let sib = null;
@@ -118,7 +139,8 @@ export function knownLimits(state, { load = null } = {}) {
         sib = null;
       }
       const together = sib && sib.phase !== 'abandoned' && (sib.batchOf ?? null) !== null && sib.batchOf === (state.batchOf ?? state.id);
-      out.push(sib && !together ? `Moved to ${d.sibling}, which is not in this delivery${sib.phase === 'abandoned' ? ' (abandoned)' : ''}: ${d.keys?.join(', ')} is still open there${d.reason ? ` (${d.reason})` : ''}` : `Follow-up moved to ${d.sibling} for ${d.keys?.join(', ')}${d.reason ? `: ${d.reason}` : ''}`);
+      const what = (d.keys ?? []).map((k) => sentence(findingSummary(state, k) ?? k)).join('; ');
+      out.push(sib && !together ? `Moved to ${d.sibling}, which is not in this delivery${sib.phase === 'abandoned' ? ' (abandoned)' : ''}: ${what} is still open there${d.reason ? ` (${d.reason})` : ''}` : `Follow-up moved to ${d.sibling}: ${what}${d.reason ? ` (${d.reason})` : ''}`);
     }
   }
   return out.map((l) => `- ${l.replace(/\s*\n\s*/g, ' ')}`).join('\n');
@@ -600,7 +622,7 @@ export async function recordTracker(root, cfg, state, options) {
           const got = canonicalComment(match.body);
           const i = want.findIndex((l, k) => got[k] !== l);
           const at = i < 0 ? want.length : i;
-          problems.push(`the posted comment is not the one \`wf\` rendered (summary sha256 ${expected.summary ? sha256(expected.summary).slice(0, 12) : 'none'}); first difference at line ${at + 1}: expected ${JSON.stringify(want[at] ?? '(end)')}, posted ${JSON.stringify(got[at] ?? '(end)')}. Post ${commentFile(root, state.id)} unchanged, with each {assetUrl:<title>} replaced by that upload's assetUrl`);
+          problems.push(`the posted comment is not the one \`wf\` rendered (summary sha256 ${expected.summary ? sha256(expected.summary).slice(0, 12) : 'none'}); first difference at line ${at + 1}: expected ${JSON.stringify(want[at] ?? '(end)')}, posted ${JSON.stringify(got[at] ?? '(end)')}. Post ${commentFile(root, state.id)} unchanged, with each {assetUrl:<title>} replaced by that upload's assetUrl; when a comment is already posted, edit that comment to it in place (an edited comment counts), so the ticket keeps one`);
         }
         // Screenshots must be visible on the ticket: an attachment alone shows only as "added N links".
         if (a.rendered === 'delivered') {

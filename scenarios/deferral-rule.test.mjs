@@ -193,12 +193,12 @@ test('ejecting or abandoning the sibling that holds a moved finding no longer as
   ok(wf(root, ['batch', 'eject', '--batch', b.id, '--member', m2, '--reason', 'ship PR-1 alone', '--owner', 'o'], silent));
   assert.deepEqual(state(root, m2).decisions ?? [], [], 'ejecting the holder of moved work put no question to the person');
   const left = knownLimits(loadState(root, e.id), { load: (id) => loadState(root, id) });
-  assert.match(left, new RegExp(`Moved to ${m2.replace('.', '\\.')}, which is not in this delivery: rev-0:F1 is still open there \\(belongs with PR-2\\)`));
+  assert.match(left, new RegExp(`Moved to ${m2.replace('.', '\\.')}, which is not in this delivery: customer invoice reads carry admin-only fields is still open there \\(belongs with PR-2\\)`));
   assert.doesNotMatch(left, /Follow-up moved to/);
   ok(wf(root, ['abandon', '--attempt', m2, '--reason', 'not now', '--owner', 'o'], silent));
   assert.equal(state(root, m2).phase, 'abandoned', 'abandoning it asks nothing either');
   assert.deepEqual(state(root, m2).decisions ?? [], []);
-  assert.match(knownLimits(loadState(root, e.id), { load: (id) => loadState(root, id) }), new RegExp(`Moved to ${m2.replace('.', '\\.')}, which is not in this delivery \\(abandoned\\): rev-0:F1 is still open there`));
+  assert.match(knownLimits(loadState(root, e.id), { load: (id) => loadState(root, id) }), new RegExp(`Moved to ${m2.replace('.', '\\.')}, which is not in this delivery \\(abandoned\\): customer invoice reads carry admin-only fields is still open there`));
 });
 
 test('a medium discovered issue closed fixed after the last review is delivered, and the known limits say no reviewer verified it', () => {
@@ -223,7 +223,7 @@ test('a medium discovered issue closed fixed after the last review is delivered,
   const done = loadState(root, e.id);
   assert.equal(done.phase, 'done');
   assert.equal(done.discovered.find((d) => d.id === 'D1').status, 'fixed');
-  assert.match(knownLimits(done), /Closed as fixed after the last review, not verified by a reviewer: DR-2\.1:D1 \(medium\): the export sums one page only/);
+  assert.match(knownLimits(done), /Fixed after the last review, not verified by a reviewer: the export sums one page only\./);
 });
 
 test('when the holder of a moved finding leaves the batch, the rest of the batch still delivers, and the known limits say the sibling still owes the item', () => {
@@ -255,7 +255,7 @@ test('when the holder of a moved finding leaves the batch, the rest of the batch
   ok(wf(root, ['deliver', '--attempt', b.id, '--owner', 'o'], silent));
   assert.equal(state(root, b.id).phase, 'done');
   assert.equal(state(root, m2).discovered.at(-1).status, 'open');
-  assert.match(knownLimits(loadState(root, e.id), { load: (id) => loadState(root, id) }), new RegExp(`Moved to ${m2.replace('.', '\\.')}, which is not in this delivery: rev-0:F1 is still open there \\(belongs with PM-2\\)`));
+  assert.match(knownLimits(loadState(root, e.id), { load: (id) => loadState(root, id) }), new RegExp(`Moved to ${m2.replace('.', '\\.')}, which is not in this delivery: credit note never exported to accounting is still open there \\(belongs with PM-2\\)`));
 });
 
 test('a low item closed fixed after the last review is a known limit: no reviewer verified it', () => {
@@ -264,6 +264,6 @@ test('a low item closed fixed after the last review is a known limit: no reviewe
   const wt = state(p.root, p.id).repos.app.worktree;
   commitIn(wt, { 'src/old.txt': 'o1\no2\no3 wrapped\n' }, 'fix the label');
   ok(run(p, ['discovered', 'close', 'D4', '--fixed', sh(wt, 'git rev-parse HEAD')]));
-  assert.match(knownLimits(loadState(p.root, p.id)), /Closed as fixed after the last review, not verified by a reviewer: DR-1\.1:D4 \(low\): a label wraps on a phone/);
+  assert.match(knownLimits(loadState(p.root, p.id)), /Fixed after the last review, not verified by a reviewer: a label wraps on a phone\./);
 });
 

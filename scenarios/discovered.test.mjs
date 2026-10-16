@@ -128,9 +128,10 @@ test('I-18: discovered issues are recorded, end fixed by a ticket commit or defe
   assert.deepEqual(s.discovered.map((x) => [x.id, x.status]), [['D1', 'fixed'], ['D2', 'deferred'], ['D3', 'deferred'], ['D4', 'deferred']]);
   assert.ok(s.discovered.filter((x) => x.status === 'deferred').every((x) => x.deferred.acknowledged?.at), 'a successful delivery records that each deferral was listed');
   assert.match(ok(wf(root, ['export', '--attempt', id, '--json'])).out, /park it for the mobile pass next sprint/);
-  // The tester sees each deferral among the delivered comment's known limits: its severity, why it waits and who decided.
-  assert.match(knownLimits(s), /- Deferred ENG-700\.1:D2 \(low\): tables have no phone card view\. Why it waits: "park it for the mobile pass next sprint"\. Decided by: approved-decision \(confirmed with `wf approve` at an interactive terminal; a pseudo-terminal wrapper can answer it\)\./);
-  assert.match(knownLimits(s), /- Deferred ENG-700\.1:D3 \(low\): an implicit page-size default\. Why it waits: "the default is the documented one"\. Decided by: approved-decision \(confirmed with `wf approve` at an interactive terminal; a pseudo-terminal wrapper can answer it\)\./);
+  // The tester reads the minor deferrals as a count (their wording stays in the delivery record and the export above); the
+  // owner's summary names any a tester could meet.
+  assert.match(knownLimits(s), /- 3 minor known issue\(s\) left for later; the delivery record lists them\./);
+  assert.doesNotMatch(knownLimits(s), /ENG-700|Why it waits|Decided by/);
 });
 
 test('0.7.0: a deferral is the owner\'s confirmed decision: per entry, used once, a fix-now answer defers nothing until the question is withdrawn and asked afresh', async () => {

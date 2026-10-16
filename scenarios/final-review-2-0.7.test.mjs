@@ -100,7 +100,7 @@ test('`wf scope fixed` needs a commit made after the finding; a reviewer\'s "ope
   const watching = () => ok(wf(p.root, ['scope', 'list', '--attempt', p.id, '--json'])).json().filter((r) => !r.blocks);
   const open = () => ok(wf(p.root, ['signals', '--attempt', p.id, '--json'])).json().observationsOpen.map((o) => o.ref);
   assert.deepEqual(open(), ['r1:F1'], 'the medium claim is settled; the high one is not');
-  assert.match(knownLimits(loadState(p.root, p.id)), /Closed as fixed after the last review, not verified by a reviewer: r1:F2\./);
+  assert.match(knownLimits(loadState(p.root, p.id)), /Fixed after the last review, not verified by a reviewer: F2 is wrong\./);
   // A delta reviewer finds F1 still open: the claim is undone.
   const b = hand(p, 'r2');
   assert.ok(b.openFindings.find((f) => f.id === 'F1').claimedFixed);

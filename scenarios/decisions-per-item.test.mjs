@@ -124,13 +124,13 @@ test('fixes no reviewer saw and a sibling that left are told to the tester, not 
   commitIn(p.wt, { 'src/old.txt': 'o1 fixed\no2\no3\n' }, 'fix the export');
   ok(run(p, ['discovered', 'close', 'D1', '--fixed', sh(p.wt, 'git rev-parse HEAD')]));
   const limits = knownLimits(loadState(p.root, p.id), { load: (id) => loadState(p.root, id) });
-  assert.match(limits, /Closed as fixed after the last review, not verified by a reviewer: PI-1\.1:D1 \(medium\): the export sums one page only/);
+  assert.match(limits, /Fixed after the last review, not verified by a reviewer: the export sums one page only\./);
   // A moved finding whose sibling is not delivered with this attempt reads as still open there.
   const fake = { ...loadState(p.root, p.id), batchOf: 'BATCH-X', scopeDecisions: [{ choice: 'moved', keys: ['r1:F3'], sibling: 'PI-9.1', reason: 'belongs there' }] };
   const told = knownLimits(fake, { load: () => ({ phase: 'abandoned', batchOf: null }) });
-  assert.match(told, /Moved to PI-9\.1, which is not in this delivery \(abandoned\): r1:F3 is still open there/);
+  assert.match(told, /Moved to PI-9\.1, which is not in this delivery \(abandoned\): [^\n]*the export sums one page only is still open there \(belongs there\)/);
   const together = knownLimits(fake, { load: () => ({ phase: 'implementing', batchOf: 'BATCH-X' }) });
-  assert.match(together, /Follow-up moved to PI-9\.1 for r1:F3/);
+  assert.match(together, /Follow-up moved to PI-9\.1: [^\n]*the export sums one page only \(belongs there\)/);
 });
 
 test('the base gaining commits that no workflow delivery covered is named in resume (I-119)', () => {
@@ -211,14 +211,17 @@ test('a medium or high item the person directs out of the ticket leaves on their
   const refused = run(p, ['scope', 'defer', '--finding', 'r1:F3']);
   assert.equal(refused.code, 75);
   assert.match(refused.err, /if the person told you to leave it out of this ticket, run this again with `--person-directed "<their words>"`/);
-  const asked = run(p, ['scope', 'defer', '--finding', 'r1:F3', '--person-directed', 'leave the old export as it is']);
+  // The owner's plain line for the item (`--explain`) is what the tester reads in the delivered comment.
+  const explain = path.join(p.base, 'explain.json');
+  fs.writeFileSync(explain, JSON.stringify({ 'r1:F3': { what: 'Totals on the old export page count only the first page' } }));
+  const asked = run(p, ['scope', 'defer', '--finding', 'r1:F3', '--person-directed', 'leave the old export as it is', '--explain', explain]);
   assert.equal(asked.code, 75);
   const [id] = asked.err.match(/wf approve (A\d+) --from-question/).slice(1);
   const d = state(p.root, p.id).decisions.find((x) => x.id === id);
   assert.match(d.summary, /Your rule fixes medium items in the delivery; you asked to leave this out: "leave the old export as it is"\./);
   approveAsOwner(p.root, p.id, id, 'let it leave');
-  ok(run(p, ['scope', 'defer', '--finding', 'r1:F3', '--person-directed', 'leave the old export as it is']));
+  ok(run(p, ['scope', 'defer', '--finding', 'r1:F3', '--person-directed', 'leave the old export as it is', '--explain', explain]));
   assert.deepEqual(state(p.root, p.id).scopeDecisions.at(-1).keys, ['r1:F3']);
   assert.equal(d.personDirected, 'leave the old export as it is');
-  assert.match(knownLimits(state(p.root, p.id)), /Known issue left for later \(medium\).*Left out at the person's direction: "leave the old export as it is"\./);
+  assert.match(knownLimits(state(p.root, p.id)), /- Known issue: Totals on the old export page count only the first page\. Left out at the person's direction: "leave the old export as it is"\./);
 });

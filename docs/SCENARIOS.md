@@ -48,7 +48,7 @@ A tiny library (`examples/hello-ticket/`) with two tickets as files and `node --
 | Partial delivery | One repo delivered, the next fails; rerunning delivers only the rest | delivery |
 | Batch | Members defer heavy steps and cannot deliver alone; the batch runs heavy steps once and delivers every member | delivery |
 | Tracker | Status, comment (template lines, UAT bullets, no internals) and screenshot attachments verified from the readback; reviewer must inspect every screenshot | delivery |
-| Delivered comment | Owner summary required before delivery (verbatim criteria and "not user visible" refused); UAT scope from user-visible criteria only; screenshots inline under captions; known limits from `finalHandoff`, dropped criteria and anomaly follow-ups | handoff-quality |
+| Delivered comment | Owner summary required before delivery (verbatim criteria and "not user visible" refused); UAT scope from user-visible criteria only; screenshots inline under captions; known limits from `finalHandoff`, dropped criteria and anomaly follow-ups; known issues in product words, minor ones and unchecked review items counted | handoff-quality, discovered, decisions-per-item |
 | Visible screenshots | The readback refuses a comment that does not embed every delivered screenshot by its uploaded asset; the API mode uploads first and embeds | handoff-quality, durable |
 | Raw readback | A hand-built, abridged or signature-stripped `delivered` capture is refused with how to save the raw output; the posted body must match the rendered one | handoff-quality |
 | Viewable after close | Delivery exports the delivered set by title, sha256-checked; `wf export screenshots --to`; resume names the folder | handoff-quality |
