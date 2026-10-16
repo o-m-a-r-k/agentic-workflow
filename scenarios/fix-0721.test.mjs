@@ -35,11 +35,13 @@ test('a quick fix admitted with a ticket moves that ticket like any other; one w
 });
 
 test('wf\'s own numbered item is recorded at admission: a typed QF-7 ticket is a ticket, and a numbered fix reopens under the id pattern', () => {
-  const { base, root } = singleRepoProject('quick-own-item', { tracker: { ...tracker, itemPattern: '^(ENG|QF)-\\d+$' }, gate: { steps: [{ id: 'unit', repo: 'app', run: 'true' }] } }, files);
-  // A ticket the tracker named QF-7 is the tracker's: admission reads it.
-  const typed = ok(wf(root, ['entry', '--item', 'QF-7', '--lane', 'quick', '--owner', 'o', '--json'])).json();
-  assert.equal(state(root, typed.id).autoItem, false);
-  assert.ok(events(state(root, typed.id)).includes('admitted'));
+  // A ticket the tracker named QF-7 is the tracker's: admission reads it (the built-in pattern accepts it).
+  const plain = singleRepoProject('quick-typed-qf', { tracker, gate: { steps: [{ id: 'unit', repo: 'app', run: 'true' }] } }, files);
+  const typed = ok(wf(plain.root, ['entry', '--item', 'QF-7', '--lane', 'quick', '--owner', 'o', '--json'])).json();
+  assert.equal(state(plain.root, typed.id).autoItem, false);
+  assert.ok(events(state(plain.root, typed.id)).includes('admitted'));
+  // Under a pattern that admits no QF ticket, wf's own numbered fix still enters, delivers and reopens.
+  const { base, root } = singleRepoProject('quick-own-item', { tracker: { ...tracker, itemPattern: '^ENG-\\d+$' }, gate: { steps: [{ id: 'unit', repo: 'app', run: 'true' }] } }, files);
   // An item outside the project's id pattern is refused for the quick lane as for the standard one.
   assert.match(wf(root, ['entry', '--item', 'NOPE', '--lane', 'quick', '--owner', 'o']).err, /not a ticket id/);
   // A numbered fix: no tracker steps, delivered and closed, then reopened as the same numbered fix.
