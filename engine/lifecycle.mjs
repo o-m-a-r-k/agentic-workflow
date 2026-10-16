@@ -291,8 +291,11 @@ export function freezeCriteria(root, options) {
   const seatOf = producer?.panel?.gen === gen ? producer.panel : null;
   // While a panel plans this attempt (its first plan, or a plan replaced whole after an upgrade), only a seat's own output
   // is recorded (independent review of 0.7.22: a re-plan froze a single planner's plan past the panel).
-  const panelRuntime = defaultRuntime(state) ?? producer?.runtime ?? null;
-  const panelNow = panelRuntime && panelActive(cfg, state, panelRuntime) && (!state.criteria || replanAfterUpgrade(state));
+  const panelHandoff = state.handoffs.filter((h) => h.role === 'planner' && h.panel?.gen === gen).at(-1);
+  const panelRuntime = defaultRuntime(state) ?? producer?.runtime ?? panelHandoff?.runtime ?? null;
+  // A seat handed for this plan is the panel's own evidence that it plans it (independent review of 0.7.22: an attempt with
+  // no owning runtime let a single plan past the panel).
+  const panelNow = Boolean(panelHandoff) || (panelRuntime && panelActive(cfg, state, panelRuntime) && (!state.criteria || replanAfterUpgrade(state)));
   if (panelNow && !seatOf) {
     const named = typeof options['from-agent'] === 'string' ? options['from-agent'] : typeof options.agent === 'string' ? options.agent : null;
     throw new WfError(named ? `\`${named}\` holds no seat of the planning panel planning ${state.id} now: record a seat's output (\`wf plan --from-agent <seat's agent>\`, or \`--file <f> --agent <seat's agent>\`); \`wf resume\` names the step` : `a planning panel is planning ${state.id}: record a seat's output with \`wf plan --from-agent <id>\`, or \`--file <f> --agent <the seat's agent>\`; \`wf resume\` names the step`);
@@ -340,6 +343,9 @@ export function freezeCriteria(root, options) {
         recordedTogether(root, state.id, () => append(root, state.id, 'plan.panel', { ...record, raw: keepRaw(root, state.id, `plans/panel-${gen}/verdict-${seatOf.round}-${seatOf.seat}.raw.${verdictExt}`, text) }, actor(options)));
         return { panelRecorded: record, state: loadState(root, state.id) };
       }
+      // A worktree changed since the confirmation was handed is not the merged plan's fault: refused here, the panel stays at
+      // the confirmation (independent review of 0.7.22).
+      if (canonical(treeHashes(state)) !== canonical(producer.tree)) throw bookkeeping('the worktree changed since this confirmation was handed: planning is read-only; restore it (or commit what belongs to the ticket) and hand the confirmation again');
       // The last seat agreed: the merged plan is the plan, frozen below as any plan is.
       const mergedText = fs.readFileSync(st.lastMerge.raw.file, 'utf8');
       doc = parseStructured(st.lastMerge.raw.file, mergedText);
@@ -784,7 +790,8 @@ export function handoff(root, role, options) {
       if (asked !== null && !st.missing.includes(asked)) throw refuse(`seat ${options.seat} is not owed a draft (seats owed: ${st.missing.join(', ')})`);
       if (!holds && !free && asked === null) throw refuse(`every seat owed a draft has its planner (${st.missing.map((s) => `seat ${s}: ${st.draftHanded[s].agent}`).join(', ')})`, `to replace one whose planner is gone, pass \`--seat <n>\`; otherwise record each draft when it reports (\`wf plan --from-agent <id>\`)`);
       seat = holds ?? asked ?? free;
-    } else if (st.stage === 'merge') seat = 1;
+    } else if (options.seat !== undefined) throw refuse(`--seat replaces a draft seat; the panel is at the ${st.stage}`);
+    else if (st.stage === 'merge') seat = 1;
     else if (st.stage === 'confirm') {
       seat = st.seat;
       if (st.lastMerge?.agent === agent) throw refuse(`${agent} wrote the merged plan: another seat confirms it`, `hand seat ${seat}'s confirmation to ${st.drafts[seat]?.agent ?? 'its planner'} or a new agent id`);
@@ -2967,7 +2974,7 @@ function phaseAction(root, cfg, state) {
     return `gate stopped (${stop.class ? `${stop.class}: ` : ''}${stop.reason}); run \`wf gate\` to continue with finished steps carried`;
   }
   // A panel planning this attempt (its first plan, or a plan replaced whole after an upgrade) says its next step.
-  const panelRuntime = defaultRuntime(state) ?? detectOwner()?.runtime ?? null;
+  const panelRuntime = defaultRuntime(state) ?? (state.handoffs ?? []).filter((h) => h.role === 'planner' && h.panel?.gen === (state.plansFrozen ?? 0) + 1).at(-1)?.runtime ?? detectOwner()?.runtime ?? null;
   if (panelRuntime && panelActive(cfg, state, panelRuntime) && (!state.criteria || replanAfterUpgrade(state))) return panelAction(cfg, state, panelRuntime);
   if (!state.criteria) {
     if (needsPlanner(cfg, state) && !state.handoffs.some((h) => h.role === 'planner')) return 'start the planner: `wf handoff planner --agent <id>`';

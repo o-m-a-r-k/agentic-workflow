@@ -156,3 +156,21 @@ test('a merged plan the engine refuses at the freeze goes back to the merge with
   const m = ok(t.call(['handoff', 'planner', '--agent', 'pa', '--json'])).json();
   assert.equal(JSON.parse(fs.readFileSync(m.bundle, 'utf8')).panel.objections[0].agent, 'engine');
 });
+
+test('a worktree changed before the last agreement is the owner\'s to restore; the panel stays at the confirmation', () => {
+  const t = panelProject('panel-dirty', 'ENG-15');
+  toConfirm(t);
+  fs.writeFileSync(path.join(t.e.repos.app.worktree, 'src', 'a.txt'), 'changed while planning\n');
+  assert.match(t.call(['plan', '--file', file(t.base, 'agree', { verdict: 'agree' }), '--agent', 'pb']).err, /the worktree changed since this confirmation was handed/);
+  const s = state(t.root, t.e.id);
+  assert.deepEqual([(s.panel ?? []).some((x) => x.type === 'merge-refused'), (s.planRefusals ?? []).length], [false, 0]);
+  assert.match(ok(t.call(['resume'])).out, /hand the confirmation of round 1 to seat 2/);
+});
+
+test('an attempt with no owning runtime is still planned by its panel once a seat is handed', () => {
+  const { base, root } = singleRepoProject('panel-noruntime', { roles: { planner: { panel: null } } });
+  const e = ok(wf(root, ['entry', '--item', 'ENG-16', '--owner', 'plain:person', '--json'])).json();
+  ok(wf(root, ['handoff', 'planner', '--agent', 'pa', '--runtime', 'claude', '--attempt', e.id], { preserveRuntime: true }));
+  assert.match(wf(root, ['plan', '--file', plan(base, 'single'), '--attempt', e.id]).err, /a planning panel is planning ENG-16\.1/);
+  assert.match(ok(wf(root, ['resume', '--attempt', e.id])).out, /planning panel \(2 planners\)/);
+});

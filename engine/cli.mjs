@@ -715,6 +715,10 @@ async function dispatch(cmd, sub, positional, options) {
     case 'plan': {
       if (options.check) {
         const r = freezeCriteria(root, options);
+        if (r.verdict) {
+          print(options, `the ${r.verdict === 'agreed' ? 'agreement' : 'objections'} would be recorded; nothing was recorded`, r);
+          return 0;
+        }
         print(options, `the plan would be accepted: ${r.criteria} criteria, ${r.work} work item(s)${r.impact ? ', the impact analysis checks out (queries re-run)' : ''}; nothing was recorded`, r);
         return 0;
       }
