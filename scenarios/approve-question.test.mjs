@@ -329,3 +329,22 @@ test('chat on Codex: a reply after a panel the person never saw binds to its que
   assert.match(ok(approveQ(u.p, u.e.id, u.d.id, codexEnv)).out, /A1 decided: yes/);
   assert.match(state(u.p.root, u.e.id).decisions[0].approved.via, /^chat \(Codex, host-recorded\)$/);
 });
+
+test('chat on Claude Code: a panel answer ends the message, so a later "yes" never outranks it; "decision A1:" in the agent\'s words still binds', () => {
+  const t = heldAttempt('chat-claude-panel', 'ENG-990');
+  const id = 'toolu_panel_ans';
+  claudeLines(t.p, [
+    says('Lifting the hold lets work continue.', at(300)),
+    { type: 'assistant', timestamp: at(400), message: { role: 'assistant', content: [{ type: 'tool_use', id, name: 'AskUserQuestion', input: { questions: [{ question: t.question, header: 'wf', multiSelect: false, options: [{ label: 'yes', description: '' }, { label: 'no', description: '' }] }] } }] } },
+    types([{ type: 'tool_result', tool_use_id: id, content: `Your questions have been answered: "${t.question}"="no".` }], at(800), { toolUseResult: { answers: { [t.question]: 'no' } } }),
+    says('You said no, so the hold stays. Shall I write up the blocker?', at(900)),
+    types('yes', at(1000)),
+  ]);
+  assert.match(ok(approveQ(t.p, t.e.id, t.d.id, env)).out, /A1 decided: no/);
+  assert.match(state(t.p.root, t.e.id).decisions[0].approved.via, /^question-panel/);
+  // The agent's own label for the decision is not another decision's key; a bare "Yes." keeps no reply beside the choice.
+  const u = heldAttempt('chat-claude-label', 'ENG-991');
+  claudeLines(u.p, [says(`Reserved decision A1: lifting the hold lets the planner start.\n\n"${u.question}"\n\nOption A1: yes, lift it / no`, at(500)), types('Yes.', at(1000))]);
+  assert.match(ok(approveQ(u.p, u.e.id, u.d.id, env)).out, /^A1 decided: yes\. next:/m);
+  assert.equal(state(u.p.root, u.e.id).decisions[0].approved.reply, undefined);
+});

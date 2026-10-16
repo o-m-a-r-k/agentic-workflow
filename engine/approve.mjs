@@ -161,8 +161,9 @@ export async function approveFromQuestion(root, id, options, { env = process.env
   // decision of the attempt, and no other decision named the engine's way (`<attempt> A<n>:`, of any attempt), so a "yes" can
   // answer only one decision.
   const others = (state.decisions ?? []).filter((x) => x.id !== d.id && !x.approved && !x.withdrawn).map((x) => questionFor(state, x));
-  const named = (text) => new Set([...text.matchAll(/(?<![\p{L}\p{N}._-])([\p{L}\p{N}][\p{L}\p{N}._-]* A\d+):/gu)].map((m) => m[1]));
-  const alone = (a) => a.channel !== 'chat' || (!others.some((q) => carriesText(a.question, q)) && [...named(a.question)].every((k) => k === `${state.id} ${d.id}`));
+  // An attempt id is `<item>.<n>` (engine/attempt.mjs), so "decision A1:" in the agent's own words is no decision's key.
+  const named = (text) => new Set([...text.matchAll(/(?<![\p{L}\p{N}._-])([\p{L}\p{N}][\p{L}\p{N}._-]*\.\d+ A\d+):/gu)].map((m) => m[1]));
+  const alone = (a) => a.channel !== 'chat' || (!others.some((q) => carriesText(a.question, q)) && [...named(a.question)].every((k) => k === `${state.id} ${d.id}`) && (a.panels ?? []).every((x) => !carriesText(x.text, question) || offered(x.options)));
   const answers = [...(await read(t.file)), ...(chat ? await chat(t.file) : [])];
   const bound = answers.filter((a) => carries(a.question) && alone(a) && offered(a.options) && after(a.at) && (a.askedAt == null || after(a.askedAt))).sort((x, y) => Date.parse(x.at) - Date.parse(y.at));
   const last = bound.at(-1);
@@ -177,7 +178,7 @@ export async function approveFromQuestion(root, id, options, { env = process.env
   const rest = lead ? reply.slice(Math.max(...leads(lead).map((l) => l.length))) : '';
   const wholeWord = (text, l) => new RegExp(`(?<![\\p{L}\\p{N}])${l.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}\\p{N}])`, 'u').test(text);
   const choice = lead && !d.choices.filter((c) => c !== lead).some((c) => labelsOf(c).some((l) => wholeWord(rest, l))) ? lead : null;
-  const said = choice && last.channel === 'chat' && reply !== leads(choice).sort((x, y) => y.length - x.length)[0] ? String(last.answer).trim().slice(0, 2000) : null;
+  const said = choice && last.channel === 'chat' && /[\p{L}\p{N}]/u.test(reply.slice(Math.max(...leads(choice).map((l) => l.length)))) ? String(last.answer).trim().slice(0, 2000) : null;
   // An answer in the person's own words (the panel's free-text option) is theirs: recorded as `other` with the words, so the
   // question is answered and the owner follows the words; it grants nothing a choice would (0.7.8: it left the question
   // open for ever).

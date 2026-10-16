@@ -68,7 +68,7 @@ export async function codexQuestionAnswers(file) {
       return;
     }
     if (e?.type === 'session_meta') {
-      interactive = !metaSeen && ['cli', 'vscode'].includes(e.payload?.source) && e.payload?.originator !== 'codex_exec';
+      interactive = !metaSeen && ['cli', 'vscode'].includes(e.payload?.source) && e.payload?.originator !== 'codex_exec' && !e.payload?.parent_thread_id;
       metaSeen = true;
       return;
     }
@@ -154,6 +154,8 @@ export async function claudeChatAnswers(file) {
   const out = [];
   let said = [];
   let saidAt = null;
+  let panels = [];
+  const asked = new Set();
   await readLines(file, (line) => {
     if (!line.includes('"assistant"') && !line.includes('"user"')) return;
     let e;
@@ -167,17 +169,27 @@ export async function claudeChatAnswers(file) {
     if (e?.type === 'assistant' && Array.isArray(content)) {
       for (const b of content) {
         if (b?.type === 'text' && typeof b.text === 'string' && b.text.trim()) said.push(b.text);
-        else if (b?.type === 'tool_use' && b.name === 'AskUserQuestion' && Array.isArray(b.input?.questions)) said.push(...b.input.questions.filter((q) => record(q) && typeof q.question === 'string').map((q) => q.question));
-        else if (b?.type === 'tool_use') said = [];
+        else if (b?.type === 'tool_use' && b.name === 'AskUserQuestion' && Array.isArray(b.input?.questions)) {
+          const qs = b.input.questions.filter((q) => record(q) && typeof q.question === 'string');
+          said.push(...qs.map((q) => q.question));
+          panels.push(...qs.map((q) => ({ text: q.question, options: labels(q.options) })));
+          if (typeof b.id === 'string') asked.add(b.id);
+        } else if (b?.type === 'tool_use') {
+          said = [];
+          panels = [];
+        }
       }
       saidAt = e.timestamp ?? saidAt;
       return;
     }
-    const person = claudePerson(e);
+    // The person's answer in the panel is their turn too (independent review of 0.7.18): it ends the message.
+    const panelAnswer = e?.type === 'user' && !e.isSidechain && Array.isArray(content) && content.some((b) => b?.type === 'tool_result' && asked.has(b.tool_use_id));
+    const person = panelAnswer ? { turn: true } : claudePerson(e);
     if (!person) return;
-    if (person.reply && said.length) out.push({ askedAt: saidAt, at: e.timestamp ?? null, question: said.join('\n'), options: null, answer: person.reply, channel: 'chat' });
+    if (person.reply && said.length) out.push({ askedAt: saidAt, at: e.timestamp ?? null, question: said.join('\n'), panels, options: null, answer: person.reply, channel: 'chat' });
     said = [];
     saidAt = null;
+    panels = [];
   });
   return out;
 }
@@ -201,6 +213,7 @@ export async function codexChatAnswers(file) {
   const out = [];
   let said = [];
   let saidAt = null;
+  let panels = [];
   let metaSeen = false;
   let interactive = false;
   await readLines(file, (line) => {
@@ -213,7 +226,7 @@ export async function codexChatAnswers(file) {
     }
     if (e?.type === 'session_meta') {
       // The person's own session only: not `codex exec`, not a sub-agent's thread (whose "user" is its parent agent).
-      interactive = !metaSeen && ['cli', 'vscode'].includes(e.payload?.source) && e.payload?.originator !== 'codex_exec' && !e.payload?.parent_thread_id && !e.payload?.forked_from_id;
+      interactive = !metaSeen && ['cli', 'vscode'].includes(e.payload?.source) && e.payload?.originator !== 'codex_exec' && !e.payload?.parent_thread_id;
       metaSeen = true;
       return;
     }
@@ -224,8 +237,15 @@ export async function codexChatAnswers(file) {
       if (QUESTION_TOOLS.has(tool)) {
         const field = tool === 'request_user_input_async' ? 'title' : 'question';
         const questions = parseArgs(p.arguments)?.questions;
-        if (Array.isArray(questions)) said.push(...questions.filter((q) => record(q) && typeof q[field] === 'string').map((q) => q[field]));
-      } else said = [];
+        if (Array.isArray(questions)) {
+          const qs = questions.filter((q) => record(q) && typeof q[field] === 'string');
+          said.push(...qs.map((q) => q[field]));
+          panels.push(...qs.map((q) => ({ text: q[field], options: labels(q.options) })));
+        }
+      } else {
+        said = [];
+        panels = [];
+      }
       return;
     }
     if (p.type !== 'message' || !Array.isArray(p.content)) return;
@@ -237,9 +257,10 @@ export async function codexChatAnswers(file) {
     if (p.role !== 'user') return;
     const person = codexPerson(p);
     if (!person) return;
-    if (person.reply && said.length) out.push({ askedAt: saidAt, at: e.timestamp ?? null, question: said.join('\n'), options: null, answer: person.reply, channel: 'chat' });
+    if (person.reply && said.length) out.push({ askedAt: saidAt, at: e.timestamp ?? null, question: said.join('\n'), panels, options: null, answer: person.reply, channel: 'chat' });
     said = [];
     saidAt = null;
+    panels = [];
   });
   return out;
 }
