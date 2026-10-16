@@ -176,7 +176,7 @@ test('a discovered issue on a critical invariant is high whatever its rating; ra
   const both = `${typo.id},${slow.id}`;
   const asked = wf(p.root, ['discovered', 'close', both, '--deferred', '--reason', 'next sprint', '--attempt', p.id], { ownerSilent: true });
   assert.equal(asked.code, 75);
-  assert.equal(asked.err.match(/--from-question/g).length, 2, 'one question per id');
+  assert.equal(asked.err.match(/then: wf approve A\d+ --from-question/g).length, 2, 'one question per id');
   // Each question shows who rated the item and every re-rating, with its reason (what the person weighs when they answer).
   assert.match(asked.err, new RegExp(`${typo.id}: a tooltip typo \\(low, rated by its implementer i2, re-rated low to high, high to low \\(a tooltip\\)\\)\\. Fix it now, or let it leave`));
   assert.match(asked.err, new RegExp(`${slow.id}: a slow list \\(low, rated by its implementer i2, re-rated high to medium \\(only the admin list, 200 rows\\), medium to low \\(cosmetic on the admin list\\)\\)\\. Fix it now, or let it leave`));

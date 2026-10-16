@@ -134,7 +134,7 @@ test('open low items are asked about together: one refusal lists one question pe
   const ds = state(p.root, p.id).decisions;
   assert.deepEqual(ds.map((x) => x.key), ['leave:r1:F2', 'leave:D4'], 'the question for F2 is kept, D4 gets its own');
   for (const d of ds) assert.match(asked.err, new RegExp(`wf approve ${d.id} --from-question --attempt ${p.id.replace('.', '\\.')}`));
-  assert.equal(asked.err.match(/--from-question/g).length, 2, 'two questions, to ask together in one panel');
+  assert.equal(asked.err.match(/then: wf approve A\d+ --from-question/g).length, 2, 'two questions, to ask together in one panel');
 });
 
 test('a discovered issue is closed fixed only by a commit made after it was recorded', () => {
