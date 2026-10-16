@@ -128,9 +128,9 @@ test('I-18: discovered issues are recorded, end fixed by a ticket commit or defe
   assert.deepEqual(s.discovered.map((x) => [x.id, x.status]), [['D1', 'fixed'], ['D2', 'deferred'], ['D3', 'deferred'], ['D4', 'deferred']]);
   assert.ok(s.discovered.filter((x) => x.status === 'deferred').every((x) => x.deferred.acknowledged?.at), 'a successful delivery records that each deferral was listed');
   assert.match(ok(wf(root, ['export', '--attempt', id, '--json'])).out, /park it for the mobile pass next sprint/);
-  // The tester reads the minor deferrals as a count (their wording stays in the delivery record and the export above); the
-  // owner's summary names any a tester could meet.
-  assert.match(knownLimits(s), /- 3 minor known issue\(s\) left for later; the delivery record lists them\./);
+  // The tester reads each deferral in the delivered comment's known limits, in plain words; who decided and why it waits
+  // stay in the delivery output above and the export.
+  assert.match(knownLimits(s), /- Known issue: tables have no phone card view\.\n- Known issue: an implicit page-size default\.\n- Known issue: a failed Next strands the user\./);
   assert.doesNotMatch(knownLimits(s), /ENG-700|Why it waits|Decided by/);
 });
 

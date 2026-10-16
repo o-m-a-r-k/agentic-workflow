@@ -230,3 +230,39 @@ test('design system config is validated', () => {
   assert.match(`${r.out}${r.err}`, /designSystem rule `y`: `description`/);
   assert.match(`${r.out}${r.err}`, /invalid regex/);
 });
+
+// 0.7.17: the delivered comment lists every known limit, nothing counted away; the owner words any item for the tester by
+// its ref (`wf summary --explain`), and items worded the same show once. Named failure: one comment carried 53 lines of
+// reviewer notes with file paths and test counts, and the first fix counted the minor items away instead.
+test('every known limit is listed; the owner words items for the tester by ref, and the same wording shows once', () => {
+  const { base, root } = singleRepoProject('limits-wording', { tracker }, { ...ignore, '.workflow/uat.md': '{id} is ready for UAT.\n' });
+  const item = 'ENG-170';
+  const issue = { identifier: item, description: 'd', state: { name: 'In Progress' } };
+  const e = ok(wf(root, ['entry', '--item', item, '--owner', 'o', '--json'])).json();
+  ok(wf(root, ['tracker', 'record', '--event', 'admitted', '--capture', cap(base, { issue }), '--attempt', e.id]));
+  ok(wf(root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id]));
+  ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id]));
+  ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
+  commitIn(e.repos.app.worktree, { 'src/a.txt': 'ui\n' });
+  ok(wf(root, ['handoff', 'close', '--agent', 'i', '--attempt', e.id]));
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', e.id]));
+  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r', { notReached: ['the dark theme (Docker-backed; not run). More detail for engineers.', 'the French screens were not viewed'] })), '--attempt', e.id]));
+  const listed = ok(wf(root, ['summary', '--file', summaryFile(base), '--attempt', e.id])).out;
+  const [dark] = listed.match(/^ {2}(\S+:U1) {2}Not checked by review: the dark theme \(Docker-backed; not run\)\.$/m).slice(1);
+  const french = dark.replace(/U1$/, 'U2');
+  assert.match(listed, new RegExp(`^ {2}${french} {2}Not checked by review: the French screens were not viewed\\.$`, 'm'));
+  assert.equal(knownLimits(state(root, e.id)), '- Not checked by review: the dark theme (Docker-backed; not run).\n- Not checked by review: the French screens were not viewed.');
+  const lines = (obj) => {
+    const f = path.join(base, `lines-${Math.random().toString(36).slice(2)}.json`);
+    fs.writeFileSync(f, JSON.stringify(obj));
+    return f;
+  };
+  assert.match(wf(root, ['summary', '--file', summaryFile(base), '--explain', lines({ 'r:F9': 'x' }), '--attempt', e.id]).err, new RegExp(`--explain names r:F9, which is not a known-limit item of ${e.id.replace('.', '\\.')} \\(its refs: ${dark}, ${french}\\)`));
+  assert.match(wf(root, ['summary', '--file', summaryFile(base), '--explain', lines({ [dark]: 'see src/theme/dark.tsx' }), '--attempt', e.id]).err, /--explain wording for \S+:U1 contains internals: source file path/);
+  const same = 'Dark mode and the French screens were not checked by a reviewer';
+  ok(wf(root, ['summary', '--file', summaryFile(base), '--explain', lines({ [dark]: same, [french]: { what: same } }), '--attempt', e.id]));
+  assert.equal(knownLimits(state(root, e.id)), `- Not checked by review: ${same}.`);
+  // The wording stays with a later summary that gives none.
+  ok(wf(root, ['summary', '--file', summaryFile(base, 'The list now shows active accounts.'), '--attempt', e.id]));
+  assert.equal(knownLimits(state(root, e.id)), `- Not checked by review: ${same}.`);
+});

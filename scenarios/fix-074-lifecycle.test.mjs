@@ -482,7 +482,7 @@ test('I-69: a closure with unreached scope is not the full audit, and the scope 
   ok(run(a.root, ['gate', '--attempt', a.id]));
   round(a, 'rev-3', goodClosure('rev-3', { notReached: ['the dark theme'] }));
   ok(run(a.root, ['accept', '--attempt', a.id]));
-  assert.match(knownLimits(loadState(a.root, a.id)), /- The final review left 1 item\(s\) unchecked; the delivery record lists them\./);
+  assert.match(knownLimits(loadState(a.root, a.id)), /- Not checked by review: the dark theme\./);
   ok(run(a.root, ['export', '--attempt', a.id]));
   assert.match(fs.readFileSync(path.join(a.root, '.wf-evidence', 'attempts', a.id, 'export', 'attempt.html'), 'utf8'), /not reached by this round: the dark theme/);
 });

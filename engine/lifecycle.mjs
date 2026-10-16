@@ -2383,7 +2383,7 @@ export function recordShown(root, options) {
 // the owner looked and saw none.
 export function shownAnomalies(raw, set, problems) {
   const v = Array.isArray(raw) ? undefined : raw?.anomalies;
-  const hint = 'add `"anomalies": "none seen"`, or `[{ "screenshots": [<title or sha256>], "observation": "<what differs>", "cause": "<investigated cause, with evidence>" | "followUp": "<follow-up filed>" }]`';
+  const hint = 'add `"anomalies": "none seen"`, or `[{ "screenshots": [<title or sha256>], "observation": "<what differs>", "cause": "<investigated cause, with evidence>" | "followUp": "<follow-up filed>" }]`; an anomaly that needs no follow-up has a `cause` (the tester reads each `followUp` in the delivered comment)';
   if (v === undefined || v === null) {
     problems.push(`no \`anomalies\` key: while viewing the screenshots, compare values between captures of the same state (counts, dates, names) and against the criteria; ${hint}`);
     return [];

@@ -24,7 +24,7 @@ export const RULE = ruleText();
 export const RULE_SHORT = 'medium and high are fixed in this delivery; a low one leaves only with the person\'s answer, one short question per item (`wf scope defer` or `wf scope ticket`), unless the project\'s `leaving:` policy says otherwise';
 
 // The first sentence of a long text, for a question the person reads on a phone; the whole text stays in the record.
-export const firstSentence = (s) => {
+const firstSentence = (s) => {
   const t = String(s ?? '').replace(/^left by [^:]+:\s*/, '').replace(/^F\d+:\s*/, '').trim();
   // The end of the first sentence: a full stop or semicolon after a word longer than two letters (not "e.g", "i.e").
   const end = t.search(/(?<![\s.][A-Za-z]{1,2})[.;](\s|$)/);
@@ -34,7 +34,7 @@ export const firstSentence = (s) => {
 const shortWhere = (w) => (w ? String(w).split('/').pop() : null);
 
 // The owner's plain line for an item (`--explain`), kept on its decision: the delivered comment names the item by it.
-const plainWhat = (x, explain) => (typeof explain?.[x.ref]?.what === 'string' && explain[x.ref].what.trim() ? explain[x.ref].what.trim().slice(0, 300) : null);
+const plainWhat = (x, explain) => (typeof explain?.[x.ref]?.what === 'string' && explain[x.ref].what.trim() ? explain[x.ref].what.trim() : null);
 
 // The person's question for one item: what is wrong in one plain line, the facts behind its rating, and what leaving means.
 function questionText(x, verb, explain) {

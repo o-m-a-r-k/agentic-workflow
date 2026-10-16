@@ -490,7 +490,8 @@ export function reduce(entries) {
         break;
       // The owner's plain-language summary for the delivered comment (the latest one counts).
       case 'delivery.summary':
-        s.delivery.summary = { text: d.text, sha256: d.sha256, raw: d.raw ?? null, at: e.at, by: e.actor };
+        // 0.7.17: the owner's tester wording per known-limit item, kept across summaries until replaced.
+        s.delivery.summary = { text: d.text, sha256: d.sha256, raw: d.raw ?? null, at: e.at, by: e.actor, ...((d.lines ?? s.delivery.summary?.lines) ? { lines: d.lines ?? s.delivery.summary.lines } : {}) };
         s.delivery.summaries = (s.delivery.summaries ?? 0) + 1;
         break;
       // `wf export screenshots` (and closing): viewable copies of the delivered set outside the evidence.
@@ -631,7 +632,7 @@ export function reduce(entries) {
       case 'decision.created':
         // 0.7.11: a decision may carry the person's words for it: a plain question, a plain label and what follows for each
         // choice, and a recommendation (engine/approve.mjs).
-        s.decisions.push({ id: d.id, kind: d.kind, key: d.key, summary: d.summary, choices: d.choices, ...(d.plain ? { plain: d.plain } : {}), ...(d.labels ? { labels: d.labels } : {}), ...(d.then ? { then: d.then } : {}), ...(d.recommend ? { recommend: d.recommend } : {}), ...(d.personDirected ? { personDirected: d.personDirected } : {}), createdAt: e.at, by: e.actor, approved: null , ...(d.what ? { what: d.what } : {}) });
+        s.decisions.push({ id: d.id, kind: d.kind, key: d.key, summary: d.summary, choices: d.choices, ...(d.plain ? { plain: d.plain } : {}), ...(d.labels ? { labels: d.labels } : {}), ...(d.then ? { then: d.then } : {}), ...(d.recommend ? { recommend: d.recommend } : {}), ...(d.personDirected ? { personDirected: d.personDirected } : {}), createdAt: e.at, by: e.actor, approved: null, ...(d.what ? { what: d.what } : {}) });
         break;
       case 'decision.approved': {
         const x = s.decisions.find((y) => y.id === d.id);

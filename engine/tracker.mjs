@@ -13,8 +13,6 @@ import { prepareWrite, readEvidenceFile, readRegular, writeNoFollow } from './ev
 import { connectorCalls, ownerTranscript } from './host-record.mjs';
 import { screenshots } from './gate.mjs';
 import { findingSummary, lastReviewSeenAt, unreachedSince } from './review-policy.mjs';
-import { firstSentence } from './leaving.mjs';
-import { discoveredLevel } from './discovered.mjs';
 import { cliEnv, scrub } from './scrub.mjs';
 
 const BUILTIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'adapters', 'tracker');
@@ -88,48 +86,54 @@ const directedBy = (state, id) => {
   return words ? ` Left out at the person's direction: "${words}".` : '';
 };
 
-// Known limits and follow-ups, for the tester who reads the delivered comment: what was not delivered, what is still known to
-// be wrong, what no review checked at the end, and the follow-up tickets, in plain words. The engine's own bookkeeping (who
-// decided, ratings, why each item waits, every round's caveats) stays in the delivery record and `wf export`. Named failure
-// (0.7.17): one delivered comment carried 53 lines of this, 25 of them per-round reviewer notes with file paths and test
-// counts, against the person's rule that a tracker comment reads in product language.
-// One plain line per item: the first sentence of what its reporter wrote (the whole text stays in the record).
-const sentence = (t) => firstSentence(String(t ?? '').trim().replace(/\s+/g, ' ')).replace(/[.\s]+$/, '');
-export function knownLimits(state, { load = null } = {}) {
-  const out = [];
-  for (const c of state.criteria ?? []) if (typeof c.finalHandoff === 'string' && c.finalHandoff.trim()) out.push(c.finalHandoff.trim());
-  for (const a of state.criteriaAmendments ?? []) for (const d of a.changes?.dropped ?? []) out.push(`Not delivered: ${d.reason}`);
-  // Named failure (I-69): a review named scope it did not reach (`notReached`) and nothing the tester reads said so. The
-  // tester reads what the latest of those rounds did not check; the earlier rounds' notes are counted, not copied.
-  // Reviewers write these in engineering terms (steps, suites, files), so the tester reads how many there are and where the
-  // list is.
-  // The final review's own notes; earlier rounds' were mostly checked by the rounds after them, and stay in the record.
-  const unreached = unreachedSince(state).at(-1)?.notReached.length ?? 0;
-  if (unreached) out.push(`The final review left ${unreached} item(s) unchecked; the delivery record lists them.`);
-  for (const a of state.delivery?.shown?.anomalies ?? []) if (a.followUp) out.push(`Follow-up: ${a.observation} (${a.followUp})`);
-  // What is still known to be wrong, once each. A medium or high item left out at the person's direction is named, in their
-  // words; the minor ones (their text is the reviewers' and implementers' engineering notes) are counted, and the owner's
-  // summary describes in product words any a tester could meet.
-  const seen = new Set();
-  let minor = 0;
-  const knownIssue = (summary, level, extra = '') => {
-    const text = sentence(summary);
-    if (!text || seen.has(text.toLowerCase())) return;
-    seen.add(text.toLowerCase());
-    if (level === 'low' && !extra) minor += 1;
-    else out.push(`Known issue: ${text}.${extra}`);
-  };
-  for (const d of state.discovered ?? []) if (d.status === 'deferred') knownIssue(plainFor(state, d.deferred?.source?.decision) ?? d.summary, discoveredLevel(d), directedBy(state, d.deferred?.source?.decision));
-  for (const d of state.scopeDecisions ?? []) if (d.choice === 'deferred') for (const k of d.keys ?? []) knownIssue(plainFor(state, d.decisionFor?.[k]) ?? d.summaries?.[k] ?? k, d.placement?.[k] ?? 'low', directedBy(state, d.decisionFor?.[k]));
-  if (minor) out.push(`${minor} minor known issue(s) left for later; the delivery record lists them.`);
-  // An item closed as fixed after the last review was not verified by any reviewer: the tester sees it (0.7.8: information,
-  // not a stop, for every level).
+// Known limits and follow-ups, for the tester who reads the delivered comment: every item, once, in plain words. Nothing is
+// counted away or capped: the tester sees each known issue, each scope a review named as not checked, each fix no reviewer
+// saw and each follow-up. The engine's bookkeeping (ids, ratings, who decided, why it waits) stays in `wf deliver`'s output
+// and `wf export`. Each line is the item's tester wording: the owner's line for it (`wf summary --explain`), else the plain
+// line the person was asked with, else the first sentence its writer recorded (the role texts make that sentence plain; the
+// detail after it is for engineers). Two items worded the same show once, so the owner can join items that read alike.
+// Named failure (0.7.17): one delivered comment carried 53 lines, 25 of them per-round reviewer notes with file paths and
+// test counts; the first fix counted the minor items away instead, hiding two a tester needed to see.
+const firstSentence = (t) => {
+  const s = String(t ?? '').replace(/^left by [^:]+:\s*/, '').replace(/^F\d+:\s*/, '').trim().replace(/\s+/g, ' ');
+  // The end of the first sentence: a full stop or semicolon outside brackets, followed by a space or the end, after a word
+  // longer than two letters (not "e.g", "i.e").
+  let depth = 0;
+  for (let i = 0; i < s.length; i++) {
+    if ('(['.includes(s[i])) depth++;
+    else if (')]'.includes(s[i]) && depth > 0) depth--;
+    else if (!depth && '.;'.includes(s[i]) && (i + 1 === s.length || s[i + 1] === ' ') && !/[\s.][A-Za-z]{1,2}$/.test(s.slice(0, i))) return s.slice(0, i).replace(/[.\s]+$/, '');
+  }
+  return s.replace(/[.\s]+$/, '');
+};
+const ownLine = (state, ref) => {
+  const own = state.delivery?.summary?.lines?.[ref];
+  return typeof own === 'string' && own.trim() ? own.trim().replace(/\s+/g, ' ').replace(/[.\s]+$/, '') : null;
+};
+// One item's tester wording, never empty: the item's ref when nothing else is recorded.
+const wording = (state, ref, text, decision = null) => ownLine(state, ref) ?? (plainFor(state, decision) ? firstSentence(plainFor(state, decision)) : null) ?? (firstSentence(text) || ref);
+
+// Every item the delivered comment lists, with the ref the owner words it by (`ref: null` for lines already written for the
+// tester: a criterion's `finalHandoff`, a dropped criterion's reason, a screenshot follow-up, a ticket).
+export function limitItems(state, { load = null } = {}) {
+  const items = [];
+  const add = (ref, line) => items.push({ ref, line: line.replace(/\s*\n\s*/g, ' ') });
+  for (const c of state.criteria ?? []) if (typeof c.finalHandoff === 'string' && c.finalHandoff.trim()) add(null, c.finalHandoff.trim());
+  for (const a of state.criteriaAmendments ?? []) for (const d of a.changes?.dropped ?? []) add(null, `Not delivered: ${d.reason}`);
+  // What is still known to be wrong (I-18), with the person's words when they directed it out of the ticket (I-142).
+  for (const d of state.discovered ?? []) if (d.status === 'deferred') add(d.id, `Known issue: ${wording(state, d.id, d.summary, d.deferred?.source?.decision)}.${directedBy(state, d.deferred?.source?.decision)}`);
+  for (const d of state.scopeDecisions ?? []) if (d.choice === 'deferred') for (const k of d.keys ?? []) add(k, `Known issue: ${wording(state, k, d.summaries?.[k] ?? findingSummary(state, k), d.decisionFor?.[k])}.${directedBy(state, d.decisionFor?.[k])}`);
+  // Named failure (I-69): a review named scope it did not reach (`notReached`) and nothing the tester reads said so. Every
+  // round since the last complete full audit counts: a delta round does not go back over an earlier round's gaps.
+  for (const u of unreachedSince(state)) u.notReached.forEach((n, i) => add(`${u.round ?? u.reviewer}:U${i + 1}`, `Not checked by review: ${wording(state, `${u.round ?? u.reviewer}:U${i + 1}`, n)}.`));
+  for (const a of state.delivery?.shown?.anomalies ?? []) if (a.followUp) add(null, `Follow-up: ${a.observation} (${a.followUp})`);
+  // An item closed as fixed after the last review was not verified by any reviewer (0.7.8: information, not a stop).
   const lastReviewAt = lastReviewSeenAt(state) ?? '';
-  for (const d of state.discovered ?? []) if (d.status === 'fixed' && d.kind !== 'bookkeeping' && d.fixed?.at > lastReviewAt) out.push(`Fixed after the last review, not verified by a reviewer: ${sentence(d.summary)}.`);
-  for (const d of state.scopeDecisions ?? []) if (d.choice === 'fixed' && d.at > lastReviewAt) for (const k of d.keys ?? []) out.push(`Fixed after the last review, not verified by a reviewer: ${sentence(findingSummary(state, k) ?? k)}.`);
+  for (const d of state.discovered ?? []) if (d.status === 'fixed' && d.kind !== 'bookkeeping' && d.fixed?.at > lastReviewAt) add(d.id, `Fixed after the last review, not verified by a reviewer: ${wording(state, d.id, d.summary)}.`);
+  for (const d of state.scopeDecisions ?? []) if (d.choice === 'fixed' && d.at > lastReviewAt) for (const k of d.keys ?? []) add(k, `Fixed after the last review, not verified by a reviewer: ${wording(state, k, findingSummary(state, k))}.`);
   // A review finding that is not fixed here (0.7.0): ticketed for later, or moved to a sibling attempt of the batch.
   for (const d of state.scopeDecisions ?? []) {
-    if (d.choice === 'ticketed') out.push(`Follow-up ticket: ${d.ticket?.title ?? ''} ${d.ticket?.url ?? ''}`.trim() + [...new Set((d.keys ?? []).map((k) => directedBy(state, d.decisionFor?.[k])).filter(Boolean))].join(''));
+    if (d.choice === 'ticketed') add(null, `Follow-up ticket: ${d.ticket?.title ?? ''} ${d.ticket?.url ?? ''}`.trim() + [...new Set((d.keys ?? []).map((k) => directedBy(state, d.decisionFor?.[k])).filter(Boolean))].join(''));
     else if (d.choice === 'moved') {
       // I-123: a sibling that left this delivery (ejected, abandoned) still owes the item; the tester reads that it did not ship.
       let sib = null;
@@ -139,12 +143,31 @@ export function knownLimits(state, { load = null } = {}) {
         sib = null;
       }
       const together = sib && sib.phase !== 'abandoned' && (sib.batchOf ?? null) !== null && sib.batchOf === (state.batchOf ?? state.id);
-      const what = (d.keys ?? []).map((k) => sentence(findingSummary(state, k) ?? k)).join('; ');
-      out.push(sib && !together ? `Moved to ${d.sibling}, which is not in this delivery${sib.phase === 'abandoned' ? ' (abandoned)' : ''}: ${what} is still open there${d.reason ? ` (${d.reason})` : ''}` : `Follow-up moved to ${d.sibling}: ${what}${d.reason ? ` (${d.reason})` : ''}`);
+      for (const k of d.keys ?? []) {
+        const what = wording(state, k, findingSummary(state, k));
+        add(k, sib && !together ? `Moved to ${d.sibling}, which is not in this delivery${sib.phase === 'abandoned' ? ' (abandoned)' : ''}: ${what} is still open there${d.reason ? ` (${d.reason})` : ''}` : `Follow-up moved to ${d.sibling}: ${what}${d.reason ? ` (${d.reason})` : ''}`);
+      }
     }
   }
-  return out.map((l) => `- ${l.replace(/\s*\n\s*/g, ' ')}`).join('\n');
+  return items;
 }
+
+export function knownLimits(state, options = {}) {
+  const seen = new Set();
+  const out = [];
+  for (const { line } of limitItems(state, options)) {
+    if (seen.has(line.toLowerCase())) continue;
+    seen.add(line.toLowerCase());
+    out.push(`- ${line}`);
+  }
+  return out.join('\n');
+}
+
+// For the owner (`wf summary`, `wf deliver`): each item the comment lists, by the ref to word it with.
+export const limitItemsText = (state, options = {}) => {
+  const items = limitItems(state, options).filter((x) => x.ref);
+  return items.length ? `\nknown limits by item, as the tester reads them (word any of them plainly for the tester: \`wf summary --file <summary.md> --explain <lines.json>\` with { "<ref>": "<one plain line>" }; items worded the same show once):\n${items.map((x) => `  ${x.ref}  ${x.line}`).join('\n')}` : '';
+};
 
 // In an agent-posted comment the owner replaces each placeholder with the `assetUrl` the upload returned; the API mode
 // substitutes it itself. Linear signs the url when the comment is read.
@@ -251,6 +274,33 @@ export function recordSummary(root, cfg, state, options) {
   if (verbatim.length) problems.push(`it repeats criteria text verbatim (${verbatim.join(', ')}); the UAT scope is added from the criteria, the summary says in plain words what changed`);
   const hits = forbidden(cfg, text);
   if (hits.length) problems.push(`it contains internals: ${hits.join(', ')}`);
+  // The owner's tester wording for known-limit items (`--explain <lines.json>`: { "<ref>": "<one plain line>" }), kept until
+  // replaced; `{}` drops it.
+  let own = null;
+  if (options.explain !== undefined) {
+    const rawLines = options.explain === true ? null : readRegular(path.resolve(String(options.explain)));
+    let parsed = null;
+    try {
+      parsed = rawLines ? JSON.parse(rawLines.bytes.toString('utf8')) : null;
+    } catch {
+      parsed = null;
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) problems.push('--explain is a regular JSON file { "<ref>": "<one plain line for the tester>" }, with the refs `wf summary` lists');
+    else {
+      const refs = new Set(limitItems(state).map((x) => x.ref).filter(Boolean));
+      own = {};
+      for (const [ref, v] of Object.entries(parsed)) {
+        const line = String((typeof v === 'object' && v !== null ? v.what : v) ?? '').replace(/\s+/g, ' ').trim();
+        if (!refs.has(ref)) problems.push(`--explain names ${ref}, which is not a known-limit item of ${state.id} (its refs: ${[...refs].join(', ') || 'none'})`);
+        else if (!line) problems.push(`--explain gives ${ref} no wording`);
+        else {
+          const bad = forbidden(cfg, line);
+          if (bad.length) problems.push(`--explain wording for ${ref} contains internals: ${bad.join(', ')}`);
+          own[ref] = line;
+        }
+      }
+    }
+  }
   if (problems.length) throw refuse(`summary refused:\n  - ${problems.join('\n  - ')}`);
   const n = (state.delivery.summaries ?? 0) + 1;
   const raw = path.join(attemptDir(root, state.id), 'delivery', `summary-${n}.raw.md`);
@@ -259,7 +309,7 @@ export function recordSummary(root, cfg, state, options) {
   // ledger entry and the refreshed comment.
   return recordedTogether(root, state.id, () => {
     writeImmutable(raw, `${text}\n`);
-    append(root, state.id, 'delivery.summary', { text, sha256: sha256(text), raw: { path: raw, sha256: hashFile(raw) } }, options.actorId ?? null);
+    append(root, state.id, 'delivery.summary', { text, sha256: sha256(text), raw: { path: raw, sha256: hashFile(raw) }, ...(own ? { lines: own } : {}) }, options.actorId ?? null);
     const after = loadState(root, state.id);
     if (after.delivery.completedAt) writeDeliveredComment(root, cfg, after);
     return after;
@@ -367,13 +417,19 @@ async function recordFromTranscript(root, cfg, state, options, event, pending, a
   const capture = path.join(dir, `${event}-${tools.read}-${read.resultLine}.json`);
   writeNoFollow(capture, read.result);
   let comments = null;
+  // A comment edited in place is saved by the comment's own id, with no issue named; it is the owner's when the ticket's
+  // comment list holds that id (named failure, 0.7.17 review: an edited comment was refused as not posted by the owner).
+  let listedIds = [];
   if (pending.some((a) => a.op === 'comment')) {
     const list = calls.filter((c) => c.tool === tools.comments && forItem(c, ids) && after(c)).sort((a, b) => b.resultLine - a.resultLine)[0];
     if (!list) throw refuse(`no host-recorded readback: the owner's transcript has no ${tools.comments} result for ${state.item} after ${event === 'delivered' ? 'delivery' : 'the event'}`, `call the connector's ${tools.comments} for ${state.item} now, then run this again`);
+    const listed = parseJson(list.result);
+    listedIds = (Array.isArray(listed) ? listed : (listed?.comments ?? listed?.nodes ?? [])).map((c) => c?.id).filter((x) => x !== undefined && x !== null).map(String);
     comments = path.join(dir, `${event}-${tools.comments}-${list.resultLine}.json`);
     writeNoFollow(comments, list.result);
   }
-  const mine = calls.filter((c) => forItem(c, ids) && (!since || (c.calledAt && Date.parse(c.calledAt) >= Date.parse(since))));
+  const edit = (c) => (tools.comment ?? []).includes(c.tool) && c.input?.id !== undefined && listedIds.includes(String(c.input.id));
+  const mine = calls.filter((c) => (forItem(c, ids) || edit(c)) && (!since || (c.calledAt && Date.parse(c.calledAt) >= Date.parse(since))));
   const posted = {
     comments: mine.filter((c) => (tools.comment ?? []).includes(c.tool)).map((c) => String(c.input?.body ?? '')),
     statuses: mine.filter((c) => (tools.status ?? []).includes(c.tool)).map((c) => c.input?.state ?? c.input?.status ?? null).filter(Boolean),

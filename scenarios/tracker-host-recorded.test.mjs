@@ -100,11 +100,13 @@ test('host-recorded (Claude Code): admitted, implementing and delivered are read
   const asset = 'https://uploads.linear.app/fake/home.png';
   const posted = `${rendered.replace(/\{assetUrl:home\.png\}/g, asset)}\nOwner note: please also check the dark theme, log at https://logs.example.test/run?signature=SECRETSIG123.\n`;
   t.call('create_attachment_from_upload', { issue: 'ENG-70', assetUrl: asset, title: 'home.png', subtitle: 'Home screen with the new text' }, { id: 'a1', title: 'home.png', subtitle: 'Home screen with the new text', url: `${asset}?signature=s` });
-  t.call('save_comment', { issueId: 'ENG-70', body: posted }, { id: 'c1', body: posted });
+  // A hand-trimmed comment, then the same comment edited in place to the rendering: one comment on the ticket.
+  t.call('save_comment', { issueId: 'ENG-70', body: 'Ready for testing.' }, { id: 'c1', body: 'Ready for testing.' });
+  t.call('save_comment', { id: 'c1', body: posted }, { id: 'c1', body: posted });
   t.call('save_issue', { id: 'ENG-70', state: 'Ready for UAT' }, { id: 'ENG-70' });
   t.call('get_issue', { id: 'ENG-70' }, rawIssue('ENG-70', 'Ready for UAT', { description, attachments: [{ id: 'a1', title: 'home.png', subtitle: 'Home screen with the new text', url: asset }] }));
   const at = tick();
-  t.call('list_comments', { issueId: 'ENG-70' }, rawComments([{ id: 'c1', body: posted, createdAt: at }]));
+  t.call('list_comments', { issueId: 'ENG-70' }, rawComments([{ id: 'c1', body: posted, createdAt: at, updatedAt: tick() }]));
   const d = ok(record(root, id, 'delivered'));
   assert.match(d.out, /tracker delivered verified from the host's record .*1 line\(s\) added to the comment beyond the rendered one\. Attempt closed/);
   s = state(root, id);
