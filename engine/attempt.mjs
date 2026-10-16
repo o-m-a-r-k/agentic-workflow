@@ -10,6 +10,7 @@ import { loadCatalog, missingFor, provisionUse, redactor, stepEnv } from './secr
 import { emitTrackerEvent, hasTicket, itemProblem } from './tracker.mjs';
 import { adoptNeedsApproval } from './owner.mjs';
 import { requireYes } from './approve.mjs';
+import { FRAMES } from './asking.mjs';
 import { detectOwner, ownerRuntime, ownerString } from './hosts/index.mjs';
 import { noteAttempt } from './refusals.mjs';
 import { WfError, assertEngine, assertPlainGit, assertSafeId, canonical as canonicalValue, git, hashFile, refuse, run, sha256 } from './util.mjs';
@@ -356,7 +357,7 @@ export function adopt(root, options) {
   // (no session to measure) or whose transcript cannot be read is the person's decision (`wf approve`, kind adopt-live);
   // taking over a session owner whose transcript is gone or idle is bookkeeping, recorded with the caller as actor. The
   // key carries the number of earlier transfers, so an owner changing back and forth needs a new decision each time.
-  const approval = adoptNeedsApproval(state.owner) ? requireYes(root, state, { kind: 'adopt-live', key: `adopt:${state.id}:${state.owner}:${by}:${state.ownerTransfers}`, summary: `adopt ${state.id} as ${by} from ${state.owner}, whose session is active, unreadable or not a session`, what: `adopting ${state.id} from ${state.owner}`, options }) : null;
+  const approval = adoptNeedsApproval(state.owner) ? requireYes(root, state, { kind: 'adopt-live', key: `adopt:${state.id}:${state.owner}:${by}:${state.ownerTransfers}`, summary: `adopt ${state.id} as ${by} from ${state.owner}, whose session is active, unreadable or not a session`, what: `adopting ${state.id} from ${state.owner}`, frame: FRAMES.adopt({ item: state.item }), options }) : null;
   append(root, state.id, 'owner.adopted', { from: state.owner, reason: options.reason ?? null, ...(approval ? { decision: approval.decision } : {}) }, by);
   return loadState(root, state.id);
 }
@@ -377,7 +378,7 @@ export function abandon(root, options) {
   if (['done', 'abandoned'].includes(state.phase)) throw refuse(`${state.id} is already ${state.phase}${state.shipped ? ' (closed as shipped)' : ''}; a closed attempt is not abandoned`);
   // Independent review of 0.7.0 (HIGH): abandoning a split member dropped what the split moved into it. It is the person's
   // one-use decision.
-  const splitDecision = (state.splitFrom || state.splits?.length) && !['done', 'abandoned'].includes(state.phase) ? requireYes(root, state, { kind: 'move-out-of-batch', key: `abandon-split:${state.id}`, summary: `abandon ${state.id}, which carries or handed work in a split batch`, what: `abandoning ${state.id}`, options }).decision : null;
+  const splitDecision = (state.splitFrom || state.splits?.length) && !['done', 'abandoned'].includes(state.phase) ? requireYes(root, state, { kind: 'move-out-of-batch', key: `abandon-split:${state.id}`, summary: `abandon ${state.id}, which carries or handed work in a split batch`, what: `abandoning ${state.id}`, frame: FRAMES.abandonSplit({ item: state.item, id: state.id }), options }).decision : null;
   // I-22: the refusal names the case. A repo recorded as skipped had no changes, so nothing of it reached a target branch;
   // an attempt whose recorded repos are all skipped is abandoned like one with nothing recorded. A repo recorded as
   // delivered is on its target branch: the attempt is finished, never abandoned.
@@ -416,7 +417,7 @@ export function abandon(root, options) {
   const given = typeof options['acknowledge-integration'] === 'string' ? options['acknowledge-integration'].split(',').map((x) => x.trim()).filter(Boolean) : [];
   const unacked = open.filter((o) => !given.includes(`${o.repo}:${o.state}`));
   // 0.7.0: abandoning past an integration the adapter still reports is overriding a check; the person confirms it.
-  const decisions = unacked.length ? [] : open.map((o) => requireYes(root, state, { kind: 'override-gate', key: `abandon:${state.id}:${o.repo}:${o.state}`, summary: `abandon ${state.id} with ${o.repo}'s integration (${o.state}) closed where it is integrated`, what: `abandoning ${state.id} with ${o.repo}'s integration (${o.state}) closed`, options }).decision);
+  const decisions = unacked.length ? [] : open.map((o) => requireYes(root, state, { kind: 'override-gate', key: `abandon:${state.id}:${o.repo}:${o.state}`, summary: `abandon ${state.id} with ${o.repo}'s integration (${o.state}) closed where it is integrated`, what: `abandoning ${state.id} with ${o.repo}'s integration (${o.state}) closed`, frame: FRAMES.abandonIntegration({ item: state.item, repo: o.repo }), options }).decision);
   if (unacked.length) throw refuse(`${state.id} is not abandoned: the delivery adapter last reported ${unacked.map((o) => `${o.repo} ${o.state}${o.url ? ` (${o.url})` : ''}`).join('; ')}; that integration can still land on the target branch`, `close it where it is integrated, or let \`wf deliver\` finish it; once it is closed, \`wf abandon --acknowledge-integration ${unacked.map((o) => `${o.repo}:${o.state}`).join(',')} --reason "<why>"\` asks the owner to confirm it with \`wf approve\`, then records it`);
   append(root, state.id, 'abandoned', { reason: String(options.reason), ...(splitDecision ? { decision: splitDecision } : {}), ...(recorded.length ? { skipped: recorded.map((d) => d.repo) } : {}), ...(open.length ? { integrationsClosed: open.map((o) => `${o.repo}:${o.state}`), decisions } : {}) }, actor(options));
   cleanupWorktrees(root, loadState(root, state.id));
@@ -454,7 +455,7 @@ export function release(root, options) {
   if (!state.activeHold) throw refuse(`${state.id} has no active hold`);
   // A hold is the owner's veto; only the person lifts it (0.5.0 second review: any agent could release it). 0.7.0: with
   // `wf approve` (kind lift-hold) instead of the owner's words read from a transcript.
-  const approval = requireYes(root, state, { kind: 'lift-hold', key: `release:${state.id}:${state.activeHold.at ?? ''}`, summary: `lift the hold on ${state.id}: ${state.activeHold.reason}`, what: `lifting the hold on ${state.id}`, options });
+  const approval = requireYes(root, state, { kind: 'lift-hold', key: `release:${state.id}:${state.activeHold.at ?? ''}`, summary: `lift the hold on ${state.id}: ${state.activeHold.reason}`, what: `lifting the hold on ${state.id}`, frame: FRAMES.liftHold({ item: state.item, reason: state.activeHold.reason }), options });
   append(root, state.id, 'release', { decision: approval.decision }, actor(options));
   return loadState(root, state.id);
 }
@@ -530,7 +531,7 @@ export function closeShipped(root, options) {
   if (!problems.length && !Object.values(heads).some((h) => !h.unchanged)) throw refuse(`${state.id} is not closed as shipped: no repo of it changed anything, so nothing shipped`, '`wf abandon --reason "<why>"` closes an attempt that changed nothing', { id: 'close:nothing-shipped' });
   if (problems.length) throw refuse(`${state.id} is not closed as shipped: ${problems.join('; ')}`, 'a change that is not on its target branch is delivered (`wf deliver`) or abandoned; only an attempt whose every change has landed is closed as shipped', { id: 'close:not-shipped' });
   const list = Object.entries(heads).map(([n, h]) => (h.unchanged ? `${n} unchanged` : `${n} ${h.commit.slice(0, 10)} (${h.source}) on ${h.target}`)).join('; ');
-  const decision = requireYes(root, state, { kind: 'override-gate', key: `close-shipped:${state.id}:${sha256(JSON.stringify(heads)).slice(0, 16)}`, summary: `close ${state.id} as shipped without its acceptance (${list})${state.activeHold ? `, over its hold "${state.activeHold.reason}"` : ''}`, what: `closing ${state.id} as shipped`, options }).decision;
+  const decision = requireYes(root, state, { kind: 'override-gate', key: `close-shipped:${state.id}:${sha256(JSON.stringify(heads)).slice(0, 16)}`, summary: `close ${state.id} as shipped without its acceptance (${list})${state.activeHold ? `, over its hold "${state.activeHold.reason}"` : ''}`, what: `closing ${state.id} as shipped`, frame: FRAMES.closeShipped({ item: state.item, hold: state.activeHold?.reason ?? null }), options }).decision;
   const lastReview = (state.reviews ?? []).at(-1);
   const open = {
     discovered: (state.discovered ?? []).filter((d) => d.status === 'open').map((d) => ({ id: d.id, severity: d.severity ?? null, summary: String(d.summary ?? '').slice(0, 300) })),

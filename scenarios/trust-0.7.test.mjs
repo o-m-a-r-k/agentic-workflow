@@ -74,7 +74,7 @@ test('`wf handoff close` is bookkeeping: recorded with the caller as actor, no a
   assert.deepEqual(state(q.root, q.id).decisions.map((d) => d.kind), ['override-gate'], 'only the gate-order skip needed the owner; the override of open implementers did not');
 });
 
-test('`wf release` needs an approved lift-hold decision, used once; a declined decision asks again', () => {
+test('`wf release` needs an approved lift-hold decision, used once; a declined decision stands until it is withdrawn (0.7.23)', () => {
   const p = started('trust-release');
   ok(wf(p.root, ['hold', '--reason', 'local only', '--attempt', p.id], silent));
   const refused = wf(p.root, ['release', '--attempt', p.id], silent);
@@ -83,11 +83,16 @@ test('`wf release` needs an approved lift-hold decision, used once; a declined d
   assert.match(refused.err, /wf approve A1 --attempt TR-1\.1/);
   assert.equal(state(p.root, p.id).decisions[0].kind, 'lift-hold');
   assert.ok(state(p.root, p.id).activeHold, 'the hold stands');
-  // The owner declines: still held, and the next try is a new question.
+  // The owner declines: still held, and the same question is not asked again until the answer is withdrawn with what changed.
   approveAsOwner(p.root, p.id, 'A1', 'no');
+  const declined = wf(p.root, ['release', '--attempt', p.id], silent);
+  assert.equal(declined.code, 75);
+  assert.match(declined.err, /lifting the hold on TR-1\.1: the person answered A1 "Keep it paused"/);
+  assert.equal(state(p.root, p.id).decisions.length, 1);
+  ok(wf(p.root, ['decisions', 'withdraw', 'A1', '--reason', 'the reason for the hold is gone', '--attempt', p.id]));
   const again = wf(p.root, ['release', '--attempt', p.id], silent);
   assert.equal(again.code, 75);
-  assert.match(again.err, /\(A2: .*\) \(the earlier answer, A1, was no\)/);
+  assert.match(again.err, /\(A2: /);
   assert.ok(state(p.root, p.id).activeHold);
   // The owner approves: released once, and the decision is recorded on the release.
   approveAsOwner(p.root, p.id, 'A2', 'yes');

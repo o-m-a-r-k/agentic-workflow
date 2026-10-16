@@ -32,7 +32,8 @@ import { designChecks, designVerdicts, requiredSkills, reviewDocumentProblems, r
 import { expectOf, expectProblems, PLAN_EXPECT, ROLE_EXPECT } from './expectations.mjs';
 import { obligationSince } from './versions.mjs';
 import { requireOwnerDecision, strategistHandoff, strategistWaiting, strategyHold } from './strategy.mjs';
-import { requireYes } from './approve.mjs';
+import { approveHint, decisionFor, labelOf, requireYes } from './approve.mjs';
+import { FRAMES } from './asking.mjs';
 import { home, startPromptFor, verifyAgent } from './provenance.mjs';
 import { allRecordedQueries, buildSweeps, deriveFromDiff, documentationMatcher, impactRequired, inventory, readSweepFile, rerun, staleRestrictionLines, staleRestrictions, sweepAnswers, validateAmendImpact, validatePlanImpact } from './impact.mjs';
 import { ENGINE_VERSION, semverLt, WfError, YAML, assertEngine, assertSafeId, canonical, git, hashFile, hashValue, matchesAny, readJson, refuse, run, sha256, writeImmutable, writeJson } from './util.mjs';
@@ -196,14 +197,22 @@ const needsPlanner = (cfg, state) => plannerLanes(cfg).includes(state.lane) && c
 const impactNeeded = (cfg, state, work) => impactRequired(cfg, { plannerNeeded: needsPlanner(cfg, state), work, implementerClass: roleClass(cfg, 'implementer') });
 
 // The ticket's own change, independent of where the base branch is: survives merging an advanced base.
-export function patchIds(state) {
-  const out = {};
+export const patchIds = (state) => changeIds(state).patch;
+
+// The same change as `patch`, and as git's patch-id sees it (`stablePatch`, 0.7.23, I-180): without blob ids and hunk line
+// numbers, which move when a base merged in adds lines above the change. Named failure (field): a base merge that changed
+// only the workflow's config moved the ticket's hunk from line 965 to 974, so its reviewed change looked new: a fresh review
+// round, and the person's approval asked again. Whitespace stays (it is meaning in YAML and Python), unlike `git patch-id`.
+export function changeIds(state) {
+  const patch = {};
+  const stablePatch = {};
   for (const [name, r] of Object.entries(state.repos)) {
     const mb = git(r.worktree, ['merge-base', r.baseRef ?? r.base, 'HEAD']);
     const diff = git(r.worktree, ['diff', '--binary', mb, 'HEAD']);
-    out[name] = diff ? hashValue(diff) : 'empty';
+    patch[name] = diff ? hashValue(diff) : 'empty';
+    stablePatch[name] = diff ? hashValue(diff.replace(/^index [0-9a-f]+\.\.[0-9a-f]+.*\n/gm, '').replace(/^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/gm, '@@')) : 'empty';
   }
-  return out;
+  return { patch, stablePatch };
 }
 
 function validateCriteria(list) {
@@ -644,7 +653,7 @@ export function handoff(root, role, options) {
   // 0.7.0 (D3): the strategist's bundle is built in engine/strategy.mjs; no implementer or reviewer starts while the
   // person's round escalation or a strategist's escalation awaits their decision.
   if (role === 'strategist') return strategistHandoff(root, state, options);
-  if (['implementer', 'reviewer'].includes(role)) requireOwnerDecision(root, state, role);
+  if (['implementer', 'reviewer'].includes(role)) requireOwnerDecision(root, state, role, options);
   if (!options.agent) throw new WfError('--agent <identity of the agent you are starting> is required');
   const agent = String(options.agent);
   const owner = state.owner;
@@ -1025,14 +1034,14 @@ export function handoff(root, role, options) {
       const { planFile, planText, historyFile, historyText } = division.evidence;
       writeRuleDocuments(ruleDocs);
       writeImmutable(planFile, planText); writeImmutable(historyFile, historyText);
-      const tree = treeHashes(state), patch = patchIds(state);
+      const tree = treeHashes(state), { patch, stablePatch } = changeIds(state);
       if (reviewOverride) append(root, state.id, 'review.override', { ...reviewOverride, agent }, actor(options));
       for (const member of groupMembers) {
         writeJson(member.file, member.bundle);
         mkdirStateDirectory(path.dirname(member.bundle.reviewClosureFile), { recursive: true });
         append(root, state.id, 'handoff', { ...(runtimeAuthority ? { runtimeAuthority, runtimeSelected: true, runtimeSelectionOwner: owner } : {}),
           role, agent: member.bundle.agent, runtime, session: null, agentType, class: cls, effort, model, sourceClass, runtimeAdapterBase,
-          sessionModel: sessionModelNow, startPrompt: startPromptFor(member.file), work: null, bundle: member.file, closureFile: member.bundle.reviewClosureFile, tree, patch,
+          sessionModel: sessionModelNow, startPrompt: startPromptFor(member.file), work: null, bundle: member.file, closureFile: member.bundle.reviewClosureFile, tree, patch, stablePatch,
           gate: gateNow.ok ? state.lastGate.runId : null, round: bundle.round, mode,
           reviewGroup: { ...member.bundle.reviewGroup, bundleSha256: sha256(JSON.stringify(member.bundle, null, 2) + '\n') } }, actor(options));
       }
@@ -1047,7 +1056,7 @@ export function handoff(root, role, options) {
     const openImplementers = role === 'reviewer' ? state.implementers.filter((x) => !x.closedAt).map((x) => x.agent) : undefined;
     // The owner handed the tree while an implementer was open (I-23): recorded before the round it opens.
     if (reviewOverride) append(root, state.id, 'review.override', { ...reviewOverride, agent }, actor(options));
-    append(root, state.id, 'handoff', { ...(runtimeAuthority ? { runtimeAuthority, runtimeSelected: true, runtimeSelectionOwner: owner } : {}), ...(sweeps ? { sweeps } : {}), ...(panel ? { panel: { gen: panel.gen, stage: panel.stage, seat: panel.seat, of: panel.of, round: panel.round } } : {}), lessons: (bundle.lessons?.apply ?? []).map((l) => l.id), lessonsFiltered: (selected?.filtered ?? []).map((l) => l.id), ...(ownerContext ? { context: ownerContext } : {}), role, agent, runtime, session: options.session ?? null, agentType, class: cls, effort, model, sourceClass, runtimeAdapterBase, sessionModel: sessionModelNow, startPrompt: startPromptFor(file), work: work?.id ?? null, ...(covers ? { covers } : {}), bundle: file, ...(bundle.implementerReportFile ? { reportFile: bundle.implementerReportFile } : {}), ...(bundle.reviewClosureFile ? { closureFile: bundle.reviewClosureFile } : {}), tree, patch: patchIds(state), ...(role === 'reviewer' ? { gate: gateNow.ok ? state.lastGate.runId : null, round: bundle.round, mode, ...(deltaFrom ? { deltaFrom } : {}), openImplementers } : {}) }, actor(options));
+    append(root, state.id, 'handoff', { ...(runtimeAuthority ? { runtimeAuthority, runtimeSelected: true, runtimeSelectionOwner: owner } : {}), ...(sweeps ? { sweeps } : {}), ...(panel ? { panel: { gen: panel.gen, stage: panel.stage, seat: panel.seat, of: panel.of, round: panel.round } } : {}), lessons: (bundle.lessons?.apply ?? []).map((l) => l.id), lessonsFiltered: (selected?.filtered ?? []).map((l) => l.id), ...(ownerContext ? { context: ownerContext } : {}), role, agent, runtime, session: options.session ?? null, agentType, class: cls, effort, model, sourceClass, runtimeAdapterBase, sessionModel: sessionModelNow, startPrompt: startPromptFor(file), work: work?.id ?? null, ...(covers ? { covers } : {}), bundle: file, ...(bundle.implementerReportFile ? { reportFile: bundle.implementerReportFile } : {}), ...(bundle.reviewClosureFile ? { closureFile: bundle.reviewClosureFile } : {}), tree, ...changeIds(state), ...(role === 'reviewer' ? { gate: gateNow.ok ? state.lastGate.runId : null, round: bundle.round, mode, ...(deltaFrom ? { deltaFrom } : {}), openImplementers } : {}) }, actor(options));
     // 0.7.9 (D19): which lessons this handoff carried, so a lesson carried often whose mistake never came back ranks lower.
     if (selected?.keys?.length) noteLearned(root, { kind: 'injected', lessons: selected.keys, attempt: state.id, role });
     if (role === 'implementer') append(root, state.id, 'implementer.opened', { handoff: handoffId(file), agent, work: work?.id ?? null, class: cls, heads: tree }, actor(options));
@@ -1547,7 +1556,7 @@ export function recordReview(root, options) {
   };
   const covered = !options.partial && mode === 'full' && reviewerHandoff.round === 'evidence-review' && (handed.criteria ?? []).filter((c) => !c.dropped).every((c) => evidenced((closure.criteria ?? []).find((m) => m?.id === c.id))) && (handed.gate?.screenshots ?? []).filter((x) => !x.inspectedBefore).every((x) => (closure.screenshotsInspected ?? []).includes(x.sha256));
   let reviewerModel = optional(findHost(reviewerHandoff.runtime), 'roleModel')?.(reviewerHandoff, { home: home() }) ?? null;
-  append(root, state.id, 'review.recorded', { closure, file: dest, raw, handoff: round, mode, covered, discoveredHanded: (handed.discovered ?? []).map((x) => x?.id).filter(Boolean), ...(options.salvaged ? { recordedBy: 'engine' } : {}), ...(options.partial ? { partial: true } : {}), revealed: Boolean(revealed) || revealNow, provenance: provenance.status, session: reviewerHandoff.session ?? null, tree: reviewerHandoff.tree, gateRun: reviewerHandoff.gate ?? null, gateEvidenceInspected, handoffTree: reviewerHandoff.tree, handoffPatch: reviewerHandoff.patch, reviewerModel, impactGaps: (closure.findings ?? []).filter((f) => f?.category === 'impact-gap').length }, closure.reviewer);
+  append(root, state.id, 'review.recorded', { closure, file: dest, raw, handoff: round, mode, covered, discoveredHanded: (handed.discovered ?? []).map((x) => x?.id).filter(Boolean), ...(options.salvaged ? { recordedBy: 'engine' } : {}), ...(options.partial ? { partial: true } : {}), revealed: Boolean(revealed) || revealNow, provenance: provenance.status, session: reviewerHandoff.session ?? null, tree: reviewerHandoff.tree, gateRun: reviewerHandoff.gate ?? null, gateEvidenceInspected, handoffTree: reviewerHandoff.tree, handoffPatch: reviewerHandoff.patch, ...(reviewerHandoff.stablePatch ? { handoffStablePatch: reviewerHandoff.stablePatch } : {}), reviewerModel, impactGaps: (closure.findings ?? []).filter((f) => f?.category === 'impact-gap').length }, closure.reviewer);
   append(root, state.id, 'review.round', roundData(state, reviewerHandoff, closure, { outcome: 'recorded', model: reviewerModel, revealed: Boolean(revealed) }), null);
   // 0.7.19: a defect whose fix predates its record closes on this reviewer's `fixed` verdict for it, when the bundle handed
   // it that entry and that claimed commit (independent review of 0.7.19: a verdict on an entry the reviewer was never shown,
@@ -1590,7 +1599,8 @@ function reviewCovers(state, r) {
   const reviewed = r.handoffPatch ?? null;
   if (!reviewed) return false;
   try {
-    return canonical(patchIds(state)) === canonical(reviewed);
+    const now = changeIds(state);
+    return canonical(now.patch) === canonical(reviewed) || Boolean(r.handoffStablePatch && canonical(now.stablePatch) === canonical(r.handoffStablePatch));
   } catch {
     return false;
   }
@@ -1649,8 +1659,19 @@ export function gateOrderCheck(root, options) {
     if (!problems.length) return;
     const reason = typeof options.reason === 'string' ? options.reason.trim() : '';
     if (!reason) throw refuse(`the gate runs after a clean code review, never beside or before it:\n  - ${problems.join('\n  - ')}`, `follow the order (\`wf resume\` names the next step); only the owner skips it: \`wf gate --reason "<why>"\` asks the owner to confirm the skip with \`wf approve\`, then records the override in the ledger`);
-    // 0.7.0: skipping a check is reserved (engine/owner.mjs); the person confirms it for this tree with wf approve.
-    const approval = requireYes(root, state, { kind: 'override-gate', key: `gate:${state.id}:${hashValue(treeHashes(state))}`, summary: `run the gate out of the order of work (${reason}): ${problems.join('; ')}`, what: 'running the gate out of the order of work', options });
+    // 0.7.0: skipping a check is reserved (engine/owner.mjs); the person confirms it with wf approve.
+    // 0.7.23 (I-180, the person's rule "i don't want the same question asked multiple times"): the answer holds for what they
+    // were asked: the ticket's own change and what the order still owes. Named failure (field): the person approved running
+    // the gate before an evidence finding was verified; a base merge that changed only the workflow's config moved the tree,
+    // and the same question came back as a new decision. Any change to the ticket's own diff, or to what is owed, asks again.
+    // A question asked under the earlier key (this exact tree) is the same question: its "yes" holds, a pending one is asked
+    // as it is, and another answer stands (independent review of 0.7.23: a pending or declined one was asked again).
+    const legacy = decisionFor(state, 'override-gate', `gate:${state.id}:${hashValue(treeHashes(state))}`);
+    if (legacy && !legacy.spent && !legacy.approved) throw refuse(`not done: running the gate out of the order of work is the owner's decision (${legacy.id}: ${legacy.summary})`, approveHint(state, legacy), { id: 'approve:override-gate' });
+    if (legacy?.approved && !legacy.spent && legacy.approved.choice !== 'yes') throw refuse(`not done: running the gate out of the order of work: the person answered ${legacy.id} ${legacy.approved.words ? `in their own words, "${legacy.approved.words}"` : `"${labelOf(legacy, legacy.approved.choice)}"`}`, `follow their answer; it is not asked again. If something changed since they answered, withdraw it with what changed (\`wf decisions withdraw ${legacy.id} --attempt ${state.id} --reason "<what changed>"\`) and run this command again`, { id: 'approve:answered' });
+    const rv = state.review;
+    const owes = { uncovered: !rv || !reviewCovers(state, rv), open: rv ? openFindings(rv, state).map((f) => `${rv.closure.reviewer}:${f.id}`).sort() : [], unverified: rv ? unverifiedPrior(state, rv, { forGate: true }).map((f) => `${f.round}:${f.id}`).sort() : [], validationPending: Boolean(state.validations?.length && (!rv || rv.at <= state.validations.at(-1).at)) };
+    const approval = legacy?.approved?.choice === 'yes' && !legacy.spent ? { decision: legacy.id } : requireYes(root, state, { kind: 'override-gate', key: `gate:${state.id}:${hashValue({ change: changeIds(state).stablePatch, owes })}`, summary: `run the gate out of the order of work (${reason}): ${problems.join('; ')}`, what: 'running the gate out of the order of work', frame: FRAMES.gateOrder({ item: state.item, owes }), options });
     append(root, state.id, 'gate.override', { reason, problems, tree: treeHashes(state), decision: approval.decision }, actor(options));
   };
 }
@@ -1884,7 +1905,7 @@ function postMerge(root, state, options, name, landed, observed, integrated) {
     // with the caller as actor. Accepting a delivery whose adapter reports a failed check (ci-failed, rejected) is
     // overriding that check, and the person confirms it with `wf approve`.
     const failed = ['ci-failed', 'rejected'].includes(observed?.state);
-    const approval = failed ? requireYes(root, state, { kind: 'override-gate', key: `acknowledge:${state.id}:${label}`, summary: `accept ${name} as delivered while its delivery adapter reports ${stateLabel(observed)} after the merge`, what: `accepting ${name} as delivered while its adapter reports ${stateLabel(observed)}`, options }) : null;
+    const approval = failed ? requireYes(root, state, { kind: 'override-gate', key: `acknowledge:${state.id}:${label}`, summary: `accept ${name} as delivered while its delivery adapter reports ${stateLabel(observed)} after the merge`, what: `accepting ${name} as delivered while its adapter reports ${stateLabel(observed)}`, frame: FRAMES.acknowledge({ item: state.item, repo: name, observed: stateLabel(observed) }), options }) : null;
     return { ...adapterResult(integrated), repo: name, commit: landed.head, target: landed.target, adapterState: stateLabel(observed), observed: observed ?? null, acknowledged: label, ...(approval ? { decision: approval.decision } : {}) };
   }
   const url = integrated?.url ? ` (${integrated.url})` : '';
@@ -1943,7 +1964,7 @@ function repinAdapter(root, cfg, state, options) {
     throw refuse(`not re-pinned${want && !tip.startsWith(want) ? `: ${want} is not the tip of ${ref} (${tip.slice(0, 10)})` : ''}${!reason ? ': --reason is required' : ''}. Re-pinning ${state.id}'s delivery adapter:\n  from: ${repo.name}@${pinned.slice(0, 10)} (delivery kind ${kinds.from})\n  to:   ${repo.name}@${tip.slice(0, 10)}, the tip of ${ref}, fetched from ${remoteUrl} (delivery kind ${kinds.to})\n  adapter files that differ: ${changed.join(', ') || 'none'}\n  recorded so far: ${done}\n  still to deliver: ${left}\n  the gate, the review and the tracker stay on the admission pin ${state.adapterBase.slice(0, 10)}`, `show this to the owner, then \`wf deliver --repin-adapter ${tip.slice(0, 12)} --reason "<why>"\` asks the owner to confirm the re-pin with \`wf approve\``);
   }
   // 0.7.0: a re-pin changes which delivery checks run, so it is reserved (kind override-gate): the person confirms it.
-  const approval = requireYes(root, state, { kind: 'override-gate', key: `repin:${state.id}:${tip}`, summary: `re-pin the delivery adapter of ${state.id} from ${pinned.slice(0, 10)} to ${tip.slice(0, 10)} (${reason})`, what: `re-pinning the delivery adapter of ${state.id} to ${tip.slice(0, 12)}`, options });
+  const approval = requireYes(root, state, { kind: 'override-gate', key: `repin:${state.id}:${tip}`, summary: `re-pin the delivery adapter of ${state.id} from ${pinned.slice(0, 10)} to ${tip.slice(0, 10)} (${reason})`, what: `re-pinning the delivery adapter of ${state.id} to ${tip.slice(0, 12)}`, frame: FRAMES.repin({ item: state.item, tip: tip.slice(0, 10) }), options });
   append(root, state.id, 'adapter.repinned', { from: pinned, to: tip, ref, repo: repo.name, reason, changed, delivered, kinds, decision: approval.decision }, actor(options));
   return loadState(root, state.id);
 }
@@ -2763,7 +2784,7 @@ export function batchEject(root, options) {
     if (!(waiting.batchPending && waiting.batchOf === options.batch)) throw refuse(`${waiting.id} is not waiting for ${options.batch}`);
     // D1: placement is not obligation. A split put these members in one batch so that what moved is still delivered; one
     // leaving it is the owner's decision (`wf approve`).
-    const approval = requireYes(root, waiting, { kind: 'move-out-of-batch', key: `${options.batch}:${waiting.id}`, summary: `${waiting.id} leaves ${options.batch}, which a split reserved for it and its siblings`, what: `ejecting ${waiting.id} from ${options.batch}`, options });
+    const approval = requireYes(root, waiting, { kind: 'move-out-of-batch', key: `${options.batch}:${waiting.id}`, summary: `${waiting.id} leaves ${options.batch}, which a split reserved for it and its siblings`, what: `ejecting ${waiting.id} from ${options.batch}`, frame: FRAMES.eject({ id: waiting.id, batch: options.batch }), options });
     append(root, waiting.id, 'batch.ejected', { batch: options.batch, reason: options.reason ?? null, decision: approval.decision }, actor(options));
     return loadState(root, waiting.id);
   }
@@ -2779,7 +2800,7 @@ export function batchEject(root, options) {
   // Independent review of 0.7.0 (HIGH): the split guarantee was removable after assembly. A member that came from, or made,
   // a split leaves the batch only on the person's one-use approval.
   const ms0 = loadState(root, member);
-  const ejectDecision = (ms0.splitFrom || ms0.splits?.length) ? requireYes(root, ms0, { kind: 'move-out-of-batch', key: `eject:${batch.id}:${member}:${(ms0.batchJoins ?? 0)}`, summary: `${member} leaves the assembled ${batch.id}, which carries work a split moved`, what: `ejecting ${member} from ${batch.id}`, options }).decision : null;
+  const ejectDecision = (ms0.splitFrom || ms0.splits?.length) ? requireYes(root, ms0, { kind: 'move-out-of-batch', key: `eject:${batch.id}:${member}:${(ms0.batchJoins ?? 0)}`, summary: `${member} leaves the assembled ${batch.id}, which carries work a split moved`, what: `ejecting ${member} from ${batch.id}`, frame: FRAMES.eject({ id: member, batch: batch.id }), options }).decision : null;
   const remaining = members.filter((m) => m !== member);
   for (const [name, r] of Object.entries(batch.repos)) {
     run('git', ['checkout', '--quiet', '-B', branchName(batch.id), r.base], { cwd: r.worktree });
@@ -2809,11 +2830,15 @@ export function batchOwnCommits(root, batch) {
       const tip = git(r.worktree, ['rev-parse', '--verify', '--quiet', `refs/heads/${branchName(m)}`], { allowFail: true });
       if (tip) exclude.push(tip);
     }
-    for (const commit of git(r.worktree, ['rev-list', '--no-merges', '--reverse', 'HEAD', ...exclude.map((x) => `^${x}`)], { allowFail: true }).split('\n').filter(Boolean)) own.push({ repo: name, commit });
+    // A check that cannot run counts as commits of its own: the guard exists so that no work is dropped unseen (independent
+    // review of 0.7.23: a failed git call read as none, and the eject went ahead).
+    const listed = run('git', ['rev-list', '--no-merges', '--reverse', 'HEAD', ...exclude.map((x) => `^${x}`)], { cwd: r.worktree, allowFail: true });
+    if (listed.status !== 0) own.push({ repo: name, commit: null, problem: String(listed.stderr ?? '').trim().split('\n')[0] || 'git rev-list failed' });
+    else for (const commit of String(listed.stdout ?? '').split('\n').filter(Boolean)) own.push({ repo: name, commit });
   }
   return own;
 }
-const ownList = (own) => `${own.slice(0, 3).map((c) => `${c.repo}@${c.commit.slice(0, 10)}`).join(', ')}${own.length > 3 ? ` and ${own.length - 3} more` : ''}`;
+const ownList = (own) => own.map((c) => (c.commit ? `${c.repo}@${c.commit.slice(0, 10)}` : `${c.repo} (its commits could not be listed: ${c.problem})`)).join(', ');
 
 // With several open attempts a command without --attempt is refused, so every command the engine prints names it.
 export function withAttempt(root, state, text) {

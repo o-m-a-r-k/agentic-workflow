@@ -80,10 +80,16 @@ export function uatScope(state) {
 // I-142: an item whose level is always fixed in the delivery, left out because the person directed it, says so in their words
 // (independent review of 0.7.12: the words lived only in the question, and the list read like any low left for later).
 // The plain line the owner gave for an item when the person was asked about it (`--explain`), if any.
-const plainFor = (state, id) => (id ? (state.decisions ?? []).find((x) => x.id === id)?.what : null) ?? null;
+// The plain line the person was asked with for an item: its own line in a question that named several (0.7.23), else the
+// question's line.
+const plainFor = (state, id, ref = null) => {
+  const d = id ? (state.decisions ?? []).find((x) => x.id === id) : null;
+  return (ref ? d?.items?.[ref]?.what : null) ?? d?.what ?? null;
+};
 const directedBy = (state, id) => {
-  const words = id ? (state.decisions ?? []).find((x) => x.id === id)?.personDirected : null;
-  return words ? ` Left out at the person's direction: "${words}".` : '';
+  const d = id ? (state.decisions ?? []).find((x) => x.id === id) : null;
+  if (d?.kind === 'escalation' && d.approved) return ` Left out by the person's answer "${d.labels?.[d.approved.choice] ?? d.approved.choice}".`;
+  return d?.personDirected ? ` Left out at the person's direction: "${d.personDirected}".` : '';
 };
 
 // Known limits and follow-ups, for the tester who reads the delivered comment: every item, once, in plain words. Nothing is
@@ -111,7 +117,7 @@ const ownLine = (state, ref) => {
   return typeof own === 'string' && own.trim() ? own.trim().replace(/\s+/g, ' ').replace(/[.\s]+$/, '') : null;
 };
 // One item's tester wording, never empty: the item's ref when nothing else is recorded.
-const wording = (state, ref, text, decision = null) => ownLine(state, ref) ?? (plainFor(state, decision) ? firstSentence(plainFor(state, decision)) : null) ?? (firstSentence(text) || ref);
+const wording = (state, ref, text, decision = null) => ownLine(state, ref) ?? (plainFor(state, decision, ref) ? firstSentence(plainFor(state, decision, ref)) : null) ?? (firstSentence(text) || ref);
 
 // Every item the delivered comment lists, with the ref the owner words it by (`ref: null` for lines already written for the
 // tester: a criterion's `finalHandoff`, a dropped criterion's reason, a screenshot follow-up, a ticket).
@@ -122,6 +128,10 @@ export function limitItems(state, { load = null } = {}) {
   for (const a of state.criteriaAmendments ?? []) for (const d of a.changes?.dropped ?? []) add(null, `Not delivered: ${d.reason}`);
   // What is still known to be wrong (I-18), with the person's words when they directed it out of the ticket (I-142).
   for (const d of state.discovered ?? []) if (d.status === 'deferred') add(d.id, `Known issue: ${wording(state, d.id, d.summary, d.deferred?.source?.decision)}.${directedBy(state, d.deferred?.source?.decision)}`);
+  // A finding the person accepted without a fix (0.7.23): the tester reads what was accepted. Named failure: six findings the
+  // person waived (no proof that recording works on a real phone) were in no line of the delivered comment.
+  // A finding recorded as the same gap as one the person accepted (`sameAs`) reads as that one's plain line.
+  for (const d of state.scopeDecisions ?? []) if (d.choice === 'waived') for (const k of d.keys ?? []) add(k, `Accepted without a fix: ${ownLine(state, k) ?? (d.sameAs && plainFor(state, d.under, d.sameAs) ? firstSentence(plainFor(state, d.under, d.sameAs)) : wording(state, k, findingSummary(state, k), d.decision ?? d.under))}.${directedBy(state, d.under)}`);
   for (const d of state.scopeDecisions ?? []) if (d.choice === 'deferred') for (const k of d.keys ?? []) add(k, `Known issue: ${wording(state, k, d.summaries?.[k] ?? findingSummary(state, k), d.decisionFor?.[k])}.${directedBy(state, d.decisionFor?.[k])}`);
   // Named failure (I-69): a review named scope it did not reach (`notReached`) and nothing the tester reads said so. Every
   // round since the last complete full audit counts: a delta round does not go back over an earlier round's gaps.
@@ -146,7 +156,10 @@ export function limitItems(state, { load = null } = {}) {
       const together = sib && sib.phase !== 'abandoned' && (((sib.batchOf ?? null) !== null && sib.batchOf === (state.batchOf ?? state.id)) || (sib.lane === 'batch' && sib.id === state.batchOf));
       for (const k of d.keys ?? []) {
         const what = wording(state, k, findingSummary(state, k));
-        add(k, sib && !together ? `Moved to ${d.sibling}, which is not in this delivery${sib.phase === 'abandoned' ? ' (abandoned)' : ''}: ${what} is still open there${d.reason ? ` (${d.reason})` : ''}` : `Follow-up moved to ${d.sibling}: ${what}${d.reason ? ` (${d.reason})` : ''}`);
+        // Moved into the member's own assembled batch, it is fixed in this delivery (independent review of 0.7.23: it read as a
+        // follow-up on a workflow id).
+        const ownBatch = sib && sib.lane === 'batch' && sib.id === state.batchOf;
+        add(k, sib && !together ? `Moved to ${d.sibling}, which is not in this delivery${sib.phase === 'abandoned' ? ' (abandoned)' : ''}: ${what} is still open there${d.reason ? ` (${d.reason})` : ''}` : ownBatch ? `Fixed in the combined delivery: ${what}` : `Follow-up moved to ${d.sibling}: ${what}${d.reason ? ` (${d.reason})` : ''}`);
       }
     }
   }

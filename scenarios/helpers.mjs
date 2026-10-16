@@ -88,7 +88,7 @@ export const ownerSession = (name) => (/^(claude|codex):/.test(String(name)) ? S
 const homeOf = (cwd, env) => env.WF_HOME ?? path.join(cwd, '..', '.home');
 const APPROVE = path.join(path.dirname(fileURLToPath(import.meta.url)), 'approve-as-owner.mjs');
 
-export function wf(cwd, args, { env = {}, input, home, implementersOpen = false, ownerSilent = false, preserveRuntime = false, bin = WF } = {}) {
+export function wf(cwd, args, { env = {}, input, home, implementersOpen = false, ownerSilent = false, words = true, preserveRuntime = false, bin = WF } = {}) {
   args = [...args];
   // Historical role fixtures model Claude unless a runtime was explicit.
   if (!preserveRuntime && args[0] === 'handoff' && ['planner', 'implementer', 'reviewer', 'tester'].includes(args[1]) && !args.includes('--runtime')) {
@@ -105,6 +105,12 @@ export function wf(cwd, args, { env = {}, input, home, implementersOpen = false,
   const run = () => spawnSync(process.execPath, [bin, ...args], { cwd, encoding: 'utf8', input, maxBuffer: 512 * 1024 * 1024, env: { ...baseEnv(), WF_CONFIG_HOME: home ?? path.join(cwd, '..', '.wfhome'), WF_HOME: path.join(cwd, '..', '.home'), WF_IMPROVEMENTS_DIR: path.join(cwd, '..', '.improvements'), ...env } });
   if (!ownerSilent) scriptedReport(cwd, args);
   let r = run();
+  // 0.7.23 (D29): a question is written before it is asked; the scripted owner agent writes the words the refusal asks for,
+  // also when the person stays silent (`ownerSilent`: nobody answers). A scenario about that refusal passes `words: false`.
+  if (words && r.status === 75 && !args.includes('--ask') && /not asked yet: /.test(r.stderr)) {
+    args = [...args, '--ask', scriptedAsk(cwd, args.includes('--explain') ? '' : r.stderr)];
+    r = run();
+  }
   if (!ownerSilent && r.status === 75 && approvePending(cwd, args, r.stderr, opts)) r = run();
   return { code: r.status, out: r.stdout, err: r.stderr, json: () => JSON.parse(r.stdout) };
 }
@@ -157,6 +163,23 @@ function scriptedReport(cwd, args) {
   }
 }
 
+// The scripted owner's words for a question the engine will ask (`--ask`): plain context, no recommendation, and a line for
+// every item the refusal names.
+let asks = 0;
+export function scriptedAsk(cwd, stderr = '', extra = {}) {
+  const refs = /\} for ([^\s,]+(?:, [^\s,]+)*) to a file and run this command again/.exec(stderr)?.[1]?.split(', ').map((x) => x.trim()).filter(Boolean) ?? [];
+  // The item's own words, as the refusal's facts give them (an owner agent words them for the person; the scenarios reuse them).
+  const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const whatOf = (r) => new RegExp(`(?:^|[\\s|:])${esc(r)}: (.+?) \\((?:low|medium|high|nit|minor|major|critical|blocker|unrated)\\b`).exec(stderr)?.[1] ?? new RegExp(`waive ${esc(r)} \\([^:]+: (.+?)\\); it blocks`).exec(stderr)?.[1] ?? null;
+  return askFile(cwd, refs, extra, Object.fromEntries(refs.map((r) => [r, whatOf(r)])));
+}
+// An `--ask` file for the refs a command names (a scenario's own words go in `extra`; `whats`: a plain line per ref).
+export function askFile(cwd, refs = [], extra = {}, whats = {}) {
+  const file = path.join(cwd, '..', `.ask-${process.pid}-${++asks}.json`);
+  fs.writeFileSync(file, JSON.stringify({ context: 'The scripted owner explains what happened and what it means for the people who use the product.', recommend: { choice: null, why: 'it depends on what the person wants for this release' }, ...(refs.length ? { items: Object.fromEntries(refs.map((r) => [r, { what: whats[r] ?? `what is wrong in ${r}, for a user` }])) } : {}), ...extra }));
+  return file;
+}
+
 // The person confirms the decision a refusal named (`wf approve A1 --attempt X`, choices a | b): `--choice` when the
 // command carries one the decision offers, else yes.
 function approvePending(cwd, args, stderr, opts) {
@@ -185,7 +208,9 @@ export function approveAsOwner(cwd, attempt, id, choice, { env = {}, home } = {}
 // with its pending decision, and confirm that decision; the scenario then spawns the same command. Its env must carry the
 // scenario's WF_HOME (`spawnHome`).
 export function ownerSpeaks(cwd, args) {
-  const r = spawnSync(process.execPath, [WF, ...args], { cwd, encoding: 'utf8', env: { ...baseEnv(), WF_CONFIG_HOME: path.join(cwd, '..', '.wfhome'), WF_HOME: path.join(cwd, '..', '.home'), WF_IMPROVEMENTS_DIR: path.join(cwd, '..', '.improvements') } });
+  const spawn = (a) => spawnSync(process.execPath, [WF, ...a], { cwd, encoding: 'utf8', env: { ...baseEnv(), WF_CONFIG_HOME: path.join(cwd, '..', '.wfhome'), WF_HOME: path.join(cwd, '..', '.home'), WF_IMPROVEMENTS_DIR: path.join(cwd, '..', '.improvements') } });
+  let r = spawn(args);
+  if (r.status === 75 && /not asked yet: /.test(r.stderr)) r = spawn([...args, '--ask', scriptedAsk(cwd, r.stderr)]);
   if (r.status === 75) approvePending(cwd, args, r.stderr, { env: {} });
 }
 export const spawnHome = (cwd) => ({ WF_HOME: path.join(cwd, '..', '.home') });

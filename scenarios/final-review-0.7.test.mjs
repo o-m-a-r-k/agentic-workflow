@@ -109,7 +109,7 @@ test('what leaves the delivery follows the person\'s rule (D17): a major defect 
   const low = ticket('r2:F3', 5, ['--reason', 'the export page is redesigned next sprint']);
   assert.equal(low.code, 75);
   assert.equal(refusals(p).at(-1).id, 'leave:ask');
-  assert.match(low.err, /A1: r2:F3/);
+  assert.match(low.err, /A1  header "r2:F3"/);
   ok(wf(p.root, ['scope', 'ticket', '--finding', 'r2:F3', '--capture', capture(p, 5), '--reason', 'the export page is redesigned next sprint', '--attempt', p.id]));
   const t = state(p.root, p.id).scopeDecisions.at(-1);
   assert.deepEqual([t.keys, t.reason, t.placement, t.decisions, t.decisionFor], [['r2:F3'], 'the export page is redesigned next sprint', { 'r2:F3': 'low' }, ['A1'], { 'r2:F3': 'A1' }]);

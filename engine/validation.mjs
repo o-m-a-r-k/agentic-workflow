@@ -4,6 +4,7 @@ import { append, listAttempts, loadState } from './ledger.mjs';
 import { loadCatalog } from './secrets.mjs';
 import { canonical, git, hashFile, hashValue, refuse, YAML } from './util.mjs';
 import { requireYes } from './approve.mjs';
+import { FRAMES } from './asking.mjs';
 import fs from 'node:fs';
 
 // Named failure: required HTTP/browser proof discovered after admission could
@@ -192,7 +193,7 @@ async function registerValidation(root, options, correcting) {
     if (correcting) {
       // Changing a check frozen at admission is the person's decision (kind override-gate); the original stays in the ledger.
       const earlier = admission.length ? approvedElsewhere(root, state, steps, commit, ids, admission) : null;
-      const decision = earlier ? null : admission.length ? requireYes(root, state, { kind: 'override-gate', key: `correct-admission:${admission.join(',')}:${commit}`, summary: `correct the admission check ${admission.join(', ')} to its definition committed at ${commit.slice(0, 10)}: ${String(options.reason)} (the original stays in the record; a fresh review and the full gate follow)`, what: `correcting the admission check ${admission.join(', ')}`, options }).decision : null;
+      const decision = earlier ? null : admission.length ? requireYes(root, state, { kind: 'override-gate', key: `correct-admission:${admission.join(',')}:${commit}`, summary: `correct the admission check ${admission.join(', ')} to its definition committed at ${commit.slice(0, 10)}: ${String(options.reason)} (the original stays in the record; a fresh review and the full gate follow)`, what: `correcting the admission check ${admission.join(', ')}`, frame: FRAMES.correctCheck({ item: state.item }), options }).decision : null;
       // Both pins stay in the ledger: what the step was, and what it is now.
       const current = (id) => state.validations.flatMap((v) => v.steps).find((s) => s.id === id)?.definition;
       const from = ids.map((id) => (admission.includes(id) ? { id, commit: pinOf(id), definition: current(id) ?? base.gate.steps.find((s) => s.id === id), admission: true } : { id, commit: pinOf(id), definition: current(id) }));

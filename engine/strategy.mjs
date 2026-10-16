@@ -26,7 +26,8 @@ import { planPaths, scopeFiles } from './scope.mjs';
 import { mkdirStateDirectory } from './state-folders.mjs';
 import { computeSignals, courseLines, handedRounds, recordedRounds, roundMetrics } from './signals.mjs';
 import { introducedFindings } from './introduced.mjs';
-import { observations, placementLevel, severityLevel } from './review-policy.mjs';
+import { dispositionOf, observations, openAcrossRounds, placementLevel, severityLevel } from './review-policy.mjs';
+import { FRAMES, askFirst, askProblems, composeAsk, readAsk } from './asking.mjs';
 import { discoveredLevel } from './discovered.mjs';
 import { policyOf, ruleText } from './leaving.mjs';
 import { pastCourse } from './learning.mjs';
@@ -58,6 +59,7 @@ export const OWNER_CHOICES = ['continue', 'split', 'deliver-core', 'stop'];
 // What the person sees for each choice of the round escalation, and what follows it (0.7.11: plain questions).
 const OWNER_WORDS = {
   labels: { continue: 'Keep going as now', split: 'Split off the rest as its own ticket', 'deliver-core': 'Ship what the criteria need now', stop: 'Stop this ticket' },
+  aliases: { continue: ['keep going', 'go on', 'carry on'], split: ['split it', 'split off the rest'], 'deliver-core': ['ship what is needed', 'ship the core'], stop: ['stop it'] },
   then: {
     continue: 'the next fix and review round starts; this question comes back after as many rounds again',
     split: 'the work that keeps reopening moves to a sibling attempt delivered with this one',
@@ -178,10 +180,10 @@ export function strategyHold(root, state) {
   if (!owner && !escalation) return null;
   if (owner) {
     const pending = ownerDecision(state, owner);
-    const guidance = `${owner.summary}. This is the person's decision: bring them the brief from \`wf signals --attempt ${state.id}\` (rounds, blocking findings per round, the families that keep coming back, changed files against what the plan expected, amendments) with 2-3 options and your recommendation. ${pending?.approved || pending?.withdrawn ? `${pending.id} was ${pending.withdrawn ? 'withdrawn' : `answered in the person's own words, "${pending.approved.words}"`}: follow that, and the next implementer or reviewer handoff asks the question again with its choices. ` : ''}${pending && !pending.approved && !pending.withdrawn ? `They answer ${pending.id} in their own terminal (\`wf approve ${pending.id} --attempt ${state.id}\`) or in your question panel, with the question "${questionFor(state, pending)}" and exactly the options ${pending.choices.join(' | ')}, then \`wf approve ${pending.id} --from-question --attempt ${state.id}\`` : 'The next implementer or reviewer handoff opens the decision they answer with `wf approve`'} (continue: another ${(cfg?.strategy ?? STRATEGY_DEFAULTS).reviewRoundsEscalate} rounds before asking again | split: unstarted work, observations and discovered issues move to a sibling attempt of the batch (\`wf split\`); code already built stays | deliver-core: what the criteria need and what blocks stays, every other finding and discovered issue may be ticketed under this decision | stop: a hold). No implementer or reviewer starts until they decide.`;
+    const guidance = `${owner.summary}. This is the person's decision: bring them the brief from \`wf signals --attempt ${state.id}\` (rounds, blocking findings per round, the families that keep coming back, changed files against what the plan expected, amendments) and your recommendation; write them into the question's \`--ask\` file for the next implementer or reviewer handoff, which asks it. ${pending?.approved || pending?.withdrawn ? `${pending.id} was ${pending.withdrawn ? 'withdrawn' : `answered in the person's own words, "${pending.approved.words}"`}: follow that, and the next implementer or reviewer handoff asks the question again with its choices. ` : ''}${pending && !pending.approved && !pending.withdrawn ? `They answer ${pending.id}: ${approveHint(state, pending)}` : 'The next implementer or reviewer handoff (with `--ask <file>`) opens the decision they answer with `wf approve`'} (continue: another ${(cfg?.strategy ?? STRATEGY_DEFAULTS).reviewRoundsEscalate} rounds before asking again | split: unstarted work, observations and discovered issues move to a sibling attempt of the batch (\`wf split\`); code already built stays | deliver-core: what the criteria need and what blocks stays, every other finding and discovered issue may be ticketed under this decision | stop: a hold). No implementer or reviewer starts until they decide.`;
     return { owner, ownerPending: pending, escalation, guidance };
   }
-  return { owner: null, ownerPending: null, escalation, guidance: `the strategist escalated (${escalation.id}: ${escalation.summary}); the owner decides in their own terminal: \`wf approve ${escalation.id}\` (choices: ${escalation.choices.join(' | ')}), or in your question panel (the question "${questionFor(state, escalation)}", exactly those options), then \`wf approve ${escalation.id} --from-question\` (when the panel does not reach them, ask in your message, quoting that question exactly and asking nothing else, and run the same command after their reply); no implementer or reviewer starts until then` };
+  return { owner: null, ownerPending: null, escalation, guidance: `the strategist escalated (${escalation.id}); the person decides: ${approveHint(state, escalation)}; no implementer or reviewer starts until then` };
 }
 
 // Recorded when the engine refuses because of the escalation: the report counts them. At most once per firing.
@@ -199,17 +201,31 @@ function stopChosen(root, state) {
 }
 
 // `wf handoff implementer|reviewer`: refused while the person's escalation or a strategist's escalation stands.
-export function requireOwnerDecision(root, state, role) {
+export function requireOwnerDecision(root, state, role, options = {}) {
   stopChosen(root, state);
   const hold = strategyHold(root, state);
   if (!hold) return;
   if (hold.owner) {
     recordEscalation(root, state, hold.owner);
     const answeredInWords = hold.ownerPending?.approved ? hold.ownerPending : null;
-    const d = hold.ownerPending && !hold.ownerPending.approved && !hold.ownerPending.withdrawn ? hold.ownerPending : createDecision(root, state, { kind: 'escalation', key: ownerDecisionKey(hold.owner), choices: OWNER_CHOICES, summary: `${hold.owner.summary}: continue | split | deliver-core | stop`, plain: `This ticket has been through ${hold.owner.summary.split(' ')[0]} review round${hold.owner.summary.split(' ')[0] === '1' ? '' : 's'} and the reviews keep finding problems. How should it go on?`, ...OWNER_WORDS });
-    throw refuse(`not handed: ${hold.owner.summary} (${d.id}); no ${role} starts until the owner decides${wordsOf(answeredInWords)}`, `${approveHint(state, d)}. Bring the person the brief first (\`wf signals --attempt ${state.id}\`): the numbers, what keeps coming back, 2-3 options and your recommendation`, { id: 'strategy:owner-escalation' });
+    const pendingOwner = hold.ownerPending && !hold.ownerPending.approved && !hold.ownerPending.withdrawn ? hold.ownerPending : null;
+    // 0.7.23 (D29): the question carries the brief (what keeps coming back) and the owner agent's recommendation, written
+    // before it is asked (`--ask`), as every question the person answers does.
+    const rounds = Number(hold.owner.summary.split(' ')[0]) || 0;
+    const frame = { ...FRAMES.owner({ rounds }), ...OWNER_WORDS };
+    let d = pendingOwner;
+    if (!d) {
+      const ask = readAsk(options);
+      const problems = askProblems(ask, { choices: OWNER_CHOICES, labels: OWNER_WORDS.labels });
+      if (problems.length) throw askFirst(`how ${state.id} goes on after ${hold.owner.summary}${wordsOf(answeredInWords)}`, frame, OWNER_CHOICES, problems, `${hold.owner.summary}; \`wf signals --attempt ${state.id}\` has the numbers: rounds, blocking findings per round, the families that keep coming back, changed files against the plan, amendments`);
+      d = createDecision(root, state, { kind: 'escalation', key: ownerDecisionKey(hold.owner), choices: OWNER_CHOICES, summary: `${hold.owner.summary}: continue | split | deliver-core | stop`, ...composeAsk(ask, frame, OWNER_CHOICES) });
+    }
+    throw refuse(`not handed: ${hold.owner.summary} (${d.id}); no ${role} starts until the owner decides${wordsOf(answeredInWords)}`, approveHint(state, d), { id: 'strategy:owner-escalation' });
   }
-  const esc = hold.escalation.approved || hold.escalation.withdrawn ? createDecision(root, state, { kind: 'escalation', key: hold.escalation.key, summary: hold.escalation.summary, choices: hold.escalation.choices }) : hold.escalation;
+  // Asked again after an answer in the person's own words or a withdrawal, with the same words (0.7.23: the second asking
+  // lost them and showed the strategist's rationale).
+  const e = hold.escalation;
+  const esc = e.approved || e.withdrawn ? createDecision(root, state, { kind: 'escalation', key: e.key, summary: e.summary, choices: e.choices, plain: e.plain ?? null, labels: e.labels ?? null, then: e.then ?? null, recommend: e.recommend ?? null, settles: e.settles ?? null, items: e.items ?? null }) : e;
   throw refuse(`not handed: the strategist escalated ${state.id} (${esc.id}: ${esc.summary}); no ${role} starts until the owner decides${wordsOf(hold.escalation.approved ? hold.escalation : null)}`, approveHint(state, esc), { id: 'strategy:escalated' });
 }
 
@@ -349,7 +365,9 @@ export function strategistHandoff(root, state, options) {
       items: 'optional: the observation (`reviewer:id`) or discovered (`D<n>`) ids to ticket (ticket; low items only, each then decided by the person), the families to sweep (cluster), the criteria to consolidate',
       split: '{ items: [work item, criterion, observation `reviewer:id` or discovered ids], reason } (action split)',
       model: '{ role: implementer|reviewer|planner, class } (action model): the next handoffs of that role run at that work class, with its pinned model and effort',
-      options: '2 or 3 short choices for the owner (action escalate)',
+      question: 'action escalate: in plain words, for someone with no other context, what the person decides and why it is theirs',
+      options: 'action escalate: 2 or 3 of { "label": "<plain words>", "then": "<what happens next>", "settles": [{ "ref": "<open finding or discovered id this option decides>", "what": "<what it is, one plain line>" }] (optional: each is shown to the person and not asked again) }',
+      recommend: 'action escalate: { "label": "<one of the labels>", "why": "<one line>" }, or { "label": null, "why": "<what it depends on>" }',
     },
     instructions: `You are the strategist. The owner agent handed you because the course diverged from what was predicted (\`handedBecause\` says what it saw). Read \`course\` (the expectations beside what happened), the signals and the earlier decisions; choose one action; give a prediction the engine can check. Contraction is allowed and expected when work keeps growing. A finding that blocks is never waived here (that is the owner's \`wf approve\`), and nothing the change caused leaves the delivery batch without the owner's approval. Write the closure file named in \`strategyClosureFile\`, then run \`wf strategy record --closure <that file> --attempt ${state.id}\`.${streak >= 2 ? ' Two of your earlier predictions were missed: the only action the engine accepts now is `escalate`.' : ''}`,
   };
@@ -381,18 +399,38 @@ const slug = (v, taken) => {
 };
 // The escalation as the person will read it: the choice ids the engine keeps, and their plain labels, consequences and the
 // recommendation (engine/approve.mjs createDecision).
-export function escalationWords(c) {
+// 0.7.23 (D29): an option may name the open items it decides (`settles`: [{ ref, what }]): the engine lists each in its
+// `then`, in the strategist's plain words, and those items are recorded under the person's answer instead of being asked
+// about again (the person's rule: "i don't want the same question asked multiple times"). Named failure (field): an
+// escalation's option said "the owner presents the six blocking findings ... for your explicit approvals", so the answer the
+// person gave was asked again seven times. A recommendation is written into the question itself (`plain`).
+const settleRef = (x) => String(x?.ref ?? '').trim();
+export function escalationWords(c, { blocking = new Set(), ruleNote = () => null } = {}) {
   if (!Array.isArray(c.options) || !c.options.every((o) => o && typeof o === 'object')) return null;
   const taken = new Set();
   const choices = c.options.map((o) => slug(o.label, taken));
   const labels = Object.fromEntries(choices.map((id, i) => [id, c.options[i].label.trim()]));
-  const then = Object.fromEntries(choices.map((id, i) => [id, String(c.options[i].then).trim()]));
-  const pick = c.recommend && typeof c.recommend === 'object' ? choices.find((id) => labels[id] === String(c.recommend.label ?? '').trim()) : null;
-  return { choices, plain: String(c.question).trim(), labels, then, ...(pick ? { recommend: { choice: pick, why: String(c.recommend.why ?? '').trim() || null } } : {}) };
+  const listed = choices.map((id, i) => [id, (Array.isArray(c.options[i].settles) ? c.options[i].settles : []).filter((x) => settleRef(x))]);
+  const settles = Object.fromEntries(listed.filter(([, xs]) => xs.length).map(([id, xs]) => [id, [...new Set(xs.map(settleRef))]]));
+  // Every item, each in its own words (never a count: the person sees what they decide).
+  const decides = (xs) => {
+    // An item the project's rule fixes before shipping says so (independent review of 0.7.23: a medium item left on the
+    // answer with no word that the rule would have kept it).
+    const line = (x) => `${String(x.what).trim().replace(/[.\s]+$/, '')}${blocking.has(settleRef(x)) ? ' (accepted without a fix)' : ` (shipped unfixed, listed for later${ruleNote(settleRef(x)) ? `; ${ruleNote(settleRef(x))}` : ''})`}`;
+    return ` Choosing this also decides ${xs.length === 1 ? 'this, without asking you again' : `these ${xs.length}, without asking you again about each`}: ${xs.map((x, n) => `${xs.length > 1 ? `(${n + 1}) ` : ''}${line(x)}`).join('; ')}.`;
+  };
+  const then = Object.fromEntries(choices.map((id, i) => [id, listed[i][1].length ? `${String(c.options[i].then).trim().replace(/[.\s]+$/, '')}.${decides(listed[i][1])}` : String(c.options[i].then).trim()]));
+  // Each settled item's plain line, for the delivered comment's known limits (engine/tracker.mjs).
+  const items = Object.fromEntries(listed.flatMap(([, xs]) => xs.map((x) => [settleRef(x), { what: String(x.what).trim() }])));
+  const rec = c.recommend && typeof c.recommend === 'object' ? c.recommend : null;
+  const pick = rec ? choices.find((id) => labels[id] === String(rec.label ?? '').trim()) ?? null : null;
+  const why = String(rec?.why ?? '').trim();
+  const plain = rec && why ? composeAsk({ context: '', recommend: { choice: pick, why } }, { question: String(c.question).trim(), labels, then }, choices).plain : String(c.question).trim();
+  return { choices, plain, labels, then, ...(pick ? { recommend: { choice: pick, why: why || null } } : {}), ...(Object.keys(settles).length ? { settles, items } : {}) };
 }
 
 // Schema check of the strategist's closure; returns the problems (empty when it is valid).
-export function closureProblems(c, { rounds = 0, nowMs = Date.now(), plainEscalation = false } = {}) {
+export function closureProblems(c, { rounds = 0, nowMs = Date.now(), plainEscalation = false, openRefs = null } = {}) {
   const p = [];
   const text = (v) => typeof v === 'string' && v.trim();
   const list = (v) => Array.isArray(v) && v.length > 0 && v.every(text);
@@ -430,7 +468,17 @@ export function closureProblems(c, { rounds = 0, nowMs = Date.now(), plainEscala
     if (!text(c.question) || c.question.trim().length > 400) p.push('action escalate needs `question`: in plain words, for someone with no other context, what the person decides and why it is theirs (at most 400 characters; no ids, no workflow terms)');
     if (!Array.isArray(c.options) || c.options.length < 2 || c.options.length > 3 || !c.options.every((o) => o && typeof o === 'object' && plainLabel(o.label) && text(o.then))) p.push('action escalate needs `options`: 2 or 3 of { "label": "<plain words, 3-80 characters, not an identifier, not ending in (Recommended)>", "then": "<what happens next if the person picks it>" }');
     else if (new Set(c.options.map((o) => sameLabel(o.label))).size !== c.options.length) p.push('the escalation options need distinct labels (letter case aside)');
-    if (c.recommend !== undefined && (!c.recommend || typeof c.recommend !== 'object' || !c.options?.some?.((o) => o?.label?.trim() === String(c.recommend.label ?? '').trim()))) p.push('`recommend`, when given, is { "label": "<one of the option labels>", "why": "<one line>" }');
+    // 0.7.23: the person asked for a recommendation with every question; "none" is allowed when it depends on something only
+    // they know, and `why` says what (a recommendation forced would be invented).
+    if (!c.recommend || typeof c.recommend !== 'object' || !(c.recommend.label === null || c.options?.some?.((o) => o?.label?.trim() === String(c.recommend.label ?? '').trim())) || !text(c.recommend.why)) p.push('action escalate needs `recommend`: { "label": "<one of the option labels>", "why": "<one line>" }, or { "label": null, "why": "<what the choice depends on>" } when it truly depends on something only the person knows');
+    for (const o of Array.isArray(c.options) ? c.options : []) {
+      if (!o || typeof o !== 'object' || o.settles === undefined) continue;
+      if (!Array.isArray(o.settles) || !o.settles.every((x) => x && typeof x === 'object' && text(x.ref) && text(x.what))) p.push('`settles`, when given, is a list of { "ref": "<open finding `reviewer:id` or discovered `D<n>`>", "what": "<what it is, in one plain line>" }: the items the option decides, each shown to the person');
+      else if (openRefs) {
+        const bad = o.settles.map((x) => x.ref.trim()).filter((r) => !openRefs.has(r));
+        if (bad.length) p.push(`\`settles\` of "${o.label}": ${bad.join(', ')} ${bad.length > 1 ? 'are' : 'is'} not an open finding or discovered issue of this attempt`);
+      }
+    }
   } else if (c.action === 'escalate') {
     if (!Array.isArray(c.options) || c.options.length < 2 || c.options.length > 3 || !c.options.every((o) => typeof o === 'string' && TOKEN.test(o))) p.push('action escalate needs `options`: 2 or 3 short choices for the owner (lowercase letters, digits and dashes, for example "split", "continue", "abandon")');
   }
@@ -445,7 +493,9 @@ export function recordStrategy(root, options) {
   const closure = readJson(options.closure);
   // D7: attempts admitted before 0.7.11 keep the escalation form they were admitted with (or may use the new one).
   const plainEscalation = obligationSince(state, '0.7.11') || (Array.isArray(closure?.options) && closure.options.some((o) => o && typeof o === 'object'));
-  const problems = closureProblems(closure, { rounds: computeRounds(state), plainEscalation });
+  const openFound = openAcrossRounds(state).filter((f) => !dispositionOf(state, f.ref));
+  const openRefs = new Set([...openFound.map((f) => f.ref), ...(state.discovered ?? []).filter((d) => d.status === 'open' && d.kind !== 'bookkeeping').map((d) => d.id)]);
+  const problems = closureProblems(closure, { rounds: computeRounds(state), plainEscalation, openRefs });
   if (problems.length) throw new WfError(`the strategist closure is invalid:\n  - ${problems.join('\n  - ')}`, { hint: 'the bundle\'s `closureSchema` shows the shape' });
   if (['done', 'abandoned'].includes(state.phase)) throw refuse(`${state.id} is ${state.phase}`, null, { id: 'strategy:closed' });
   const h = state.handoffs.filter((x) => x.role === 'strategist' && x.agent === closure.strategist).at(-1);
@@ -489,8 +539,16 @@ export function recordStrategy(root, options) {
   let escalation = null;
   if (closure.action === 'escalate') {
     const fresh = loadState(root, state.id);
-    const words = escalationWords(closure);
-    escalation = createDecision(root, fresh, { kind: 'escalation', key: `strategy:${id}`, summary: closure.rationale.trim().split('\n')[0].slice(0, 300), choices: words?.choices ?? closure.options, ...(words ? { plain: words.plain, labels: words.labels, then: words.then, recommend: words.recommend ?? null } : {}), options });
+    const policy = policyOf(adapterOf(root, state));
+    const levelOf = (ref) => {
+      const dd = (state.discovered ?? []).find((x) => x.id === ref);
+      if (dd) return discoveredLevel(dd);
+      const ff = openFound.find((x) => x.ref === ref);
+      return ff ? placementLevel(state, ff) : null;
+    };
+    const ruleNote = (ref) => (levelOf(ref) && policy[levelOf(ref)] === 'never' ? `a ${levelOf(ref)} issue, which your rule normally fixes before shipping` : null);
+    const words = escalationWords(closure, { blocking: new Set(openFound.filter((f) => f.classified.blocks).map((f) => f.ref)), ruleNote });
+    escalation = createDecision(root, fresh, { kind: 'escalation', key: `strategy:${id}`, summary: closure.rationale.trim().split('\n')[0].slice(0, 300), choices: words?.choices ?? closure.options, ...(words ? { plain: words.plain, labels: words.labels, then: words.then, recommend: words.recommend ?? null, settles: words.settles ?? null, items: words.items ?? null } : {}), options });
   }
   append(root, state.id, 'strategy.decided', {
     id,

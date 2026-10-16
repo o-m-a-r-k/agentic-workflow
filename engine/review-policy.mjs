@@ -376,6 +376,13 @@ export function openAcrossRounds(state, exceptRound = null) {
   return [...open.values()];
 }
 
+// A finding by its ref, as the latest round that recorded it has it, with its classification (null when no round did).
+export function findingByRef(state, ref) {
+  let found = null;
+  for (const r of state.reviews ?? []) for (const f of r.closure?.findings ?? []) if (refOf(reviewerOf(r), f.id) === ref) found = { ...f, ref, round: reviewerOf(r) };
+  return found ? { ...found, classified: classifyFinding(state, found) } : null;
+}
+
 // What a finding said, by its ref, from the latest round that recorded it (null when no round did).
 export function findingSummary(state, ref) {
   let summary = null;

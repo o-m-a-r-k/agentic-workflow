@@ -13,6 +13,7 @@ import { home } from './provenance.mjs';
 import { findHost, optional } from './hosts/index.mjs';
 import { WfError, git, refuse, run } from './util.mjs';
 import { requireYes } from './approve.mjs';
+import { FRAMES, PERSON_RULE } from './asking.mjs';
 import { discoveredRating, leavingDecisions, policyOf } from './leaving.mjs';
 import { trustedAdapter } from './config.mjs';
 
@@ -200,7 +201,7 @@ export function rateDiscovered(root, id, options) {
   // Out of high (or unrated) it is the person's decision (verification of the second final review); a lower rating is shown,
   // with its reason, in the person's question if the item is ever proposed to leave (0.7.8: asking for every rating into low
   // was a question the person did not want). An invariant issue stays high whatever it is rated.
-  const decision = lowering && fromLevel === 'high' ? requireYes(root, state, { kind: 'move-out-of-batch', key: `rate:${state.id}:${id}:${severity}`, summary: `rate ${state.id}:${id} down from ${entry.severity ?? 'unrated'} to ${severity}: ${entry.summary} (${text(options.reason)})`, what: `rating ${id} down`, options }).decision : null;
+  const decision = lowering && fromLevel === 'high' ? requireYes(root, state, { kind: 'move-out-of-batch', key: `rate:${state.id}:${id}:${severity}`, summary: `rate ${state.id}:${id} down from ${entry.severity ?? 'unrated'} to ${severity}: ${entry.summary} (${text(options.reason)})`, what: `rating ${id} down`, frame: FRAMES.rateDown({ item: state.item, from: entry.severity ?? fromLevel, to: severity, toRule: PERSON_RULE[policyOf(trustedAdapter(root, state))[severityLevel(severity)]] ?? PERSON_RULE.never }), items: [id], options }).decision : null;
   append(root, state.id, 'discovered.rated', { id, severity, from: entry.severity ?? null, reason: text(options.reason) || null, ...(decision ? { decision } : {}) }, actor(options));
   return loadState(root, state.id);
 }

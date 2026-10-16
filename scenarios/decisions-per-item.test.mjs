@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { approveAsOwner, closureFile, commitIn, criteriaFile, goodClosure, makeRepo, ok, sh, singleRepoProject, state, tmp, wf, write, yaml } from './helpers.mjs';
+import { approveAsOwner, askFile, closureFile, commitIn, criteriaFile, goodClosure, makeRepo, ok, sh, singleRepoProject, state, tmp, wf, write, yaml } from './helpers.mjs';
 import { knownLimits } from '../engine/tracker.mjs';
 import { loadState } from '../engine/ledger.mjs';
 
@@ -12,6 +12,7 @@ import { loadState } from '../engine/ledger.mjs';
 // it asked them about ratings, ejections and dropped criteria they never wanted to decide.
 
 const silent = { ownerSilent: true };
+const unworded = { ownerSilent: true, words: false };
 const CLAUDE = 'c1aude00-0000-4000-8000-00000000d018';
 const at = (offsetMs = 0) => new Date(Date.now() + offsetMs).toISOString();
 const LINES = 'l1\nl2\nl3\nl4\nl5\nl6\n';
@@ -30,7 +31,10 @@ function project(name, config = {}) {
   ok(wf(p.root, ['review', '--closure', closureFile(p.base, closure), '--attempt', e.id]));
   return { ...p, id: e.id, wt: e.repos.app.worktree };
 }
-const run = (p, args, opts = silent) => wf(p.root, [...args, '--attempt', p.id], opts);
+// The owner writes each question's words (0.7.23, D29: `--ask`) for the items a command would put to the person.
+const refsOf = (args) => (args.includes('--finding') ? String(args[args.indexOf('--finding') + 1]).split(',') : []);
+const asking = (p, args) => (args[0] === 'scope' && ['defer', 'ticket', 'waive'].includes(args[1]) && !args.includes('--ask') ? ['--ask', askFile(p.root, args.includes('--explain') ? [] : refsOf(args))] : []);
+const run = (p, args, opts = silent) => wf(p.root, [...args, ...asking(p, args), '--attempt', p.id], opts);
 const asked = (r) => [...r.err.matchAll(/wf approve (A\d+) --from-question/g)].map((m) => m[1]);
 
 test('what the person chose to fix reaches the reviewers who rate similar items, in the project (0.7.9, D19)', () => {
@@ -47,13 +51,28 @@ test('what the person chose to fix reaches the reviewers who rate similar items,
   assert.equal(JSON.parse(fs.readFileSync(impl.bundle, 'utf8')).severityScale.personFixed, undefined, 'only the reviewer rates');
 });
 
-test('the owner can word each question plainly with --explain', () => {
+test('the owner words each question plainly; the engine says what is decided and what each choice does (0.7.23, D29)', () => {
   const p = project('pi-explain');
-  const explain = path.join(p.base, 'explain.json');
-  fs.writeFileSync(explain, JSON.stringify({ 'r1:F1': { what: 'The Download XML button has no test that clicks it', fix: 'One test and a screenshot, on the next gate' } }));
-  const r = run(p, ['scope', 'defer', '--finding', 'r1:F1', '--explain', explain]);
-  assert.match(r.err, /"PI-1\.1 A\d+: r1:F1: The Download XML button has no test that clicks it \(low, rated by reviewer r1, old\.txt:2\)/);
-  assert.match(r.err, /"fix now" \(One test and a screenshot, on the next gate\)/);
+  // Without the owner's words nothing is put to the person: the refusal shows the question, its choices and the facts.
+  const bare = wf(p.root, ['scope', 'defer', '--finding', 'r1:F1', '--attempt', p.id], unworded);
+  assert.equal(bare.code, 75);
+  assert.match(bare.err, /not asked yet: letting r1:F1 leave without a fix is the person's decision/);
+  assert.match(bare.err, /the question: Should PI-1 ship without fixing this, listing it as a known issue, or should it be fixed first\?/);
+  assert.match(bare.err, /the facts behind it \(for you; the person reads your words\): r1:F1: src\/old\.txt:2 the XML button is never clicked by a test \(low, rated by reviewer r1, old\.txt:2\)\. Fix it now/);
+  assert.match(bare.err, /missing: no `--ask` file/);
+  assert.equal((state(p.root, p.id).decisions ?? []).length, 0, 'nothing was created');
+  const ask = askFile(p.root, [], { context: 'Exporting invoices as XML works, but nothing checks the button, so a later change could break it unnoticed.', recommend: { choice: 'Fix it first', why: 'one short test now saves a broken export later' }, items: { 'r1:F1': { what: 'The Download XML button has no test that clicks it', fix: 'One test and a screenshot, on the next gate' } } });
+  const r = run(p, ['scope', 'defer', '--finding', 'r1:F1', '--ask', ask]);
+  assert.match(r.err, /"PI-1\.1 A\d+: Should PI-1 ship without fixing this, listing it as a known issue, or should it be fixed first\? The issue: The Download XML button has no test that clicks it\. Exporting invoices as XML works, but nothing checks the button, so a later change could break it unnoticed\. Rated low by a reviewer\. Recommended: "Fix it first", because one short test now saves a broken export later\."/);
+  assert.match(r.err, /"Ship now, list it as known": it ships without this fix; the delivery note lists it as a known issue; "Fix it first \(Recommended\)": One test and a screenshot, on the next gate/);
+  // The older per-item file still words the item; the question still needs the context and a recommendation.
+  const p2 = project('pi-explain-old');
+  const explain = path.join(p2.base, 'explain.json');
+  fs.writeFileSync(explain, JSON.stringify({ 'r1:F1': { what: 'The Download XML button has no test that clicks it', fix: 'One test' } }));
+  const old = wf(p2.root, ['scope', 'defer', '--finding', 'r1:F1', '--explain', explain, '--attempt', p2.id], unworded);
+  assert.match(old.err, /missing: `context`: in plain words/);
+  const both = run(p2, ['scope', 'defer', '--finding', 'r1:F1', '--explain', explain, '--ask', askFile(p2.root)]);
+  assert.match(both.err, /The issue: The Download XML button has no test that clicks it\./);
 });
 
 test('an answer in the person\'s own words is recorded as theirs, and a changed question is withdrawn and asked again', () => {
@@ -61,7 +80,7 @@ test('an answer in the person\'s own words is recorded as theirs, and a changed 
   const r = run(p, ['scope', 'defer', '--finding', 'r1:F1']);
   const id = asked(r)[0];
   const d = state(p.root, p.id).decisions.find((x) => x.id === id);
-  const question = `${p.id} ${d.id}: ${d.summary}`;
+  const question = `${p.id} ${d.id}: ${d.plain}`;
   // Claude Code's record of the question panel: the person typed their own answer.
   const file = path.join(p.base, '.home', '.claude', 'projects', 'proj', `${CLAUDE}.jsonl`);
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -115,7 +134,7 @@ test('lowering a rating into low is a reason, not a question; the person sees it
   ok(run(p, ['discovered', 'rate', 'D1', '--severity', 'low', '--reason', 'an ignored folder']));
   assert.equal((state(p.root, p.id).decisions ?? []).length, 0);
   const r = run(p, ['scope', 'defer', '--finding', 'D1']);
-  assert.match(r.err, /D1: a stale screenshot in the ignored folder \(low, rated by [^,]+, re-rated medium to low \(an ignored folder\)\)/);
+  assert.match(r.err, /Rated low by a person, re-rated medium to low \(an ignored folder\)\./);
 });
 
 test('fixes no reviewer saw and a sibling that left are told to the tester, not stops (I-123)', () => {
@@ -180,24 +199,31 @@ test('an escalation answered in the person\'s own words stays open: words never 
   const ctx = proj('pi-escalate', { strategy: { reviewRoundsEscalate: 1 } });
   const a = started(r, ctx, { item: 'ENG-990' });
   reviewRound(r, ctx, a, { findings: 1 });
-  const held = r.run(ctx.root, ['handoff', 'implementer', '--agent', 'impl-2', '--attempt', a.id, '--owner', a.owner], silent);
+  // 0.7.23 (D29): the owner writes the brief and a recommendation into the question before it is asked.
+  const unasked = r.run(ctx.root, ['handoff', 'implementer', '--agent', 'impl-2', '--attempt', a.id, '--owner', a.owner], unworded);
+  assert.match(unasked.err, /not asked yet: how ENG-990\.1 goes on after 1 review round/);
+  const held = r.run(ctx.root, ['handoff', 'implementer', '--agent', 'impl-2', '--attempt', a.id, '--owner', a.owner, '--ask', askFile(ctx.root, [], { recommend: { choice: 'Keep going as now', why: 'the last round found one small issue' } })], silent);
   assert.equal(held.code, 75);
   const id = held.err.match(/wf approve (A\d+)/)[1];
+  assert.match(r.state(ctx.root, a.id).decisions.find((x) => x.id === id).plain, /^This ticket has been through 1 review round and the reviews keep finding problems\. How should it go on\? The scripted owner explains .* Recommended: "Keep going as now", because the last round found one small issue\.$/);
   const d = r.state(ctx.root, a.id).decisions.find((x) => x.id === id);
-  const words = 'stop, this is going nowhere; park it';
+  const words = 'this is going nowhere; park it for now';
   answeredInWords(ctx.base, `${a.id} ${d.id}: ${d.plain ?? d.summary}`, words, 'toolu_pi_escalate', d.choices.map((c) => d.labels?.[c] ?? c));
   ok(r.run(ctx.root, ['approve', id, '--from-question', '--attempt', a.id], { env: { CLAUDE_CODE_SESSION_ID: CLAUDE }, ...silent }));
-  assert.match(r.state(ctx.root, a.id).next, /answered in the person's own words, "stop, this is going nowhere; park it": follow that/, 'resume says what happened, not "answer the old question"');
+  assert.match(r.state(ctx.root, a.id).next, /answered in the person's own words, "this is going nowhere; park it for now": follow that/, 'resume says what happened, not "answer the old question"');
   assert.match(r.run(ctx.root, ['approve', id, '--choice', 'stop', '--attempt', a.id], silent).err, /already decided/);
-  const again = r.run(ctx.root, ['handoff', 'implementer', '--agent', 'impl-2', '--attempt', a.id, '--owner', a.owner], silent);
+  const unwordedRun = r.run(ctx.root, ['handoff', 'implementer', '--agent', 'impl-2', '--attempt', a.id, '--owner', a.owner], unworded);
+  assert.equal(unwordedRun.code, 75, 'the words did not let the work continue');
+  assert.match(unwordedRun.err, /in their own words, "this is going nowhere; park it for now": follow them/);
+  const again = r.run(ctx.root, ['handoff', 'implementer', '--agent', 'impl-2', '--attempt', a.id, '--owner', a.owner, '--ask', askFile(ctx.root)], silent);
   assert.equal(again.code, 75, 'the words did not let the work continue');
-  assert.match(again.err, /in their own words, "stop, this is going nowhere; park it": follow them/);
+  assert.match(again.err, /in their own words, "this is going nowhere; park it for now": follow them/);
   const fresh = again.err.match(/wf approve (A\d+)/)[1];
   assert.notEqual(fresh, id, 'the escalation is asked again with its choices');
   // A withdrawn question is not an answer either: it cannot be approved, and the next handoff asks afresh.
   ok(r.run(ctx.root, ['decisions', 'withdraw', fresh, '--reason', 'reworded the brief', '--attempt', a.id]));
   assert.match(r.run(ctx.root, ['approve', fresh, '--choice', 'continue', '--attempt', a.id], silent).err, /was withdrawn/);
-  const third = r.run(ctx.root, ['handoff', 'implementer', '--agent', 'impl-2', '--attempt', a.id, '--owner', a.owner], silent);
+  const third = r.run(ctx.root, ['handoff', 'implementer', '--agent', 'impl-2', '--attempt', a.id, '--owner', a.owner, '--ask', askFile(ctx.root)], silent);
   assert.equal(third.code, 75, 'still held');
   assert.notEqual(third.err.match(/wf approve (A\d+)/)[1], fresh);
 });

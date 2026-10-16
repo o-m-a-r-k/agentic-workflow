@@ -230,7 +230,9 @@ export function reduce(entries) {
     // repeats (a second hold, an owner changing back) reused the first approval.
     if (!e.type.startsWith('decision.')) {
       for (const ref of [d?.decision, ...(Array.isArray(d?.decisions) ? d.decisions : []), d?.source?.decision, d?.authority?.decision]) {
-        const spent = typeof ref === 'string' ? s.decisions.find((y) => y.id === ref && y.approved && !y.spent) : null;
+        // An escalation is an answer about the course, not a one-use permission: the items recorded under it never use it up
+        // (independent review of 0.7.23: the first item left under the person's answer showed it "(used)" and unwithdrawable).
+        const spent = typeof ref === 'string' ? s.decisions.find((y) => y.id === ref && y.approved && !y.spent && y.kind !== 'escalation') : null;
         if (spent) spent.spent = { at: e.at, by: e.type };
       }
     }
@@ -636,8 +638,9 @@ export function reduce(entries) {
       case 'tracker.pending':
         // 0.7.23 (I-178): a batch has no ticket, so its derived state never owes a tracker step. A 0.7.20 engine queued one
         // (it excluded the quick lane only), and the owner was told to do it for the batch's own id; the event stays in the
-        // chain, and a relaxation applies to every attempt (D7).
-        if (s.lane === 'batch') break;
+        // chain, and a relaxation applies to every attempt (D7). The same holds for an attempt that owns its item (a numbered
+        // quick fix, engine/tracker.mjs ownItem): an older engine could queue its `integrating` step.
+        if (s.lane === 'batch' || (typeof s.autoItem === 'boolean' ? s.autoItem : /^QF-\d+$/.test(String(s.item ?? '')))) break;
         s.tracker.pending.push(...d.actions.map((a) => narrowAttach({ ...a, event: d.event }, s.delivery.narrowed)));
         s.tracker.pendingAt = { ...(s.tracker.pendingAt ?? {}), [d.event]: e.at };
         break;
@@ -647,8 +650,9 @@ export function reduce(entries) {
         break;
       case 'decision.created':
         // 0.7.11: a decision may carry the person's words for it: a plain question, a plain label and what follows for each
-        // choice, and a recommendation (engine/approve.mjs).
-        s.decisions.push({ id: d.id, kind: d.kind, key: d.key, summary: d.summary, choices: d.choices, ...(d.plain ? { plain: d.plain } : {}), ...(d.labels ? { labels: d.labels } : {}), ...(d.then ? { then: d.then } : {}), ...(d.recommend ? { recommend: d.recommend } : {}), ...(d.personDirected ? { personDirected: d.personDirected } : {}), createdAt: e.at, by: e.actor, approved: null, ...(d.what ? { what: d.what } : {}) });
+        // choice, and a recommendation (engine/approve.mjs). 0.7.23 (D29): the agent's context and technical line, the plain
+        // line per item it names, and the items an escalation's choices decide.
+        s.decisions.push({ id: d.id, kind: d.kind, key: d.key, summary: d.summary, choices: d.choices, ...(d.plain ? { plain: d.plain } : {}), ...(d.labels ? { labels: d.labels } : {}), ...(d.then ? { then: d.then } : {}), ...(d.aliases ? { aliases: d.aliases } : {}), ...(d.recommend ? { recommend: d.recommend } : {}), ...(d.context ? { context: d.context } : {}), ...(d.technical ? { technical: d.technical } : {}), ...(d.items ? { items: d.items } : {}), ...(d.settles ? { settles: d.settles } : {}), ...(d.personDirected ? { personDirected: d.personDirected } : {}), createdAt: e.at, by: e.actor, approved: null, ...(d.what ? { what: d.what } : {}) });
         break;
       case 'decision.approved': {
         const x = s.decisions.find((y) => y.id === d.id);

@@ -48,7 +48,7 @@ test('the person confirms adopting a live owner\'s attempt in the question panel
   const refused = adopt(p, e.id, env);
   assert.equal(refused.code, 75);
   const d = state(p.root, e.id).decisions.find((x) => x.kind === 'adopt-live');
-  const question = `${e.id} ${d.id}: ${d.summary}`;
+  const question = `${e.id} ${d.id}: ${d.plain ?? d.summary}`;
   assert.ok(refused.err.includes(`the question "${question}"`), 'the refusal gives the exact question to ask');
   assert.match(refused.err, new RegExp(`wf approve ${d.id} --from-question --attempt ${e.id.replace('.', '\\.')}`));
 
@@ -70,7 +70,7 @@ test('an answer counts only when bound to the decision, offered its choices, giv
   const before = at(-60_000);
   assert.equal(wf(p.root, ['release', '--attempt', e.id], silent).code, 75);
   const d = state(p.root, e.id).decisions[0];
-  const question = `${e.id} ${d.id}: ${d.summary}`;
+  const question = `${e.id} ${d.id}: ${d.plain ?? d.summary}`;
   const env = { CLAUDE_CODE_SESSION_ID: CLAUDE };
   const refusedWith = (re, msg) => {
     const r = approveQ(p, e.id, d.id, env);
@@ -85,11 +85,11 @@ test('an answer counts only when bound to the decision, offered its choices, giv
   refusedWith(/no answer to A1 in this session's question panel/, 'the person typed yes in the chat: prose is never read');
   // I-135: a panel that showed nothing is not the end of the road: the reply explains the decision, and the terminal route is given.
   refusedWith(/say in your reply, in plain words, what this decides, why, and what happens after each choice \(a question panel may not show, and its acceptance proves nothing\)/, 'the decision is explained in the reply');
-  refusedWith(/When the panel does not show for them \(a phone, a mode without it\), ask in your message instead: quote the question exactly/, 'the chat route is given');
+  refusedWith(/ask them in your message, quoting the question ".*" exactly with its options .* so they can type the answer \(you may also show it in your question panel: a typed reply and a panel answer both count\)/, 'the chat route is given first');
   refusedWith(new RegExp(`or they run \`wf approve A1 --attempt ${e.id.replace('.', '\\.')}\` in their own terminal`), 'the terminal route is given');
   claudeAsks(p, { question: `${e.id} ${d.id}: lift it?`, answer: 'yes' });
   refusedWith(/no answer to A1/, 'the question does not say what the decision does');
-  claudeAsks(p, { question: `${d.id}: ${d.summary}`, answer: 'yes' });
+  claudeAsks(p, { question: `${d.id}: ${d.plain ?? d.summary}`, answer: 'yes' });
   refusedWith(/no answer to A1/, 'the question does not name the attempt');
   claudeAsks(p, { question, options: ['yes', 'no', 'yes and delete the branch'], answer: 'yes' });
   refusedWith(/no answer to A1/, 'other options were offered');
@@ -97,7 +97,7 @@ test('an answer counts only when bound to the decision, offered its choices, giv
   refusedWith(/no answer to A1/, 'answered before the decision existed');
   claudeAsks(p, { question, answer: 'yes', askedWhen: before });
   refusedWith(/no answer to A1/, 'asked before the decision existed, answered after');
-  claudeAsks(p, { question: `${e.id} ${d.id}0: ${d.summary} (another decision)`, answer: 'yes' });
+  claudeAsks(p, { question: `${e.id} ${d.id}0: ${d.plain ?? d.summary} (another decision)`, answer: 'yes' });
   refusedWith(/no answer to A1/, 'a question for A10 is not one for A1');
   claudeAsks(p, { question: `X${question}`, answer: 'yes' });
   refusedWith(/no answer to A1/, 'another attempt whose id ends the same');
@@ -110,17 +110,21 @@ test('an answer counts only when bound to the decision, offered its choices, giv
   assert.equal(outside.code, 75);
   assert.match(outside.err, /--from-question reads the question panel of the agent session that runs it/);
 
-  // The person's "no" is recorded as theirs; the command stays refused and asks again.
+  // The person's "no" is recorded as theirs; the command stays refused, and the same question is not asked again until the
+  // answer is withdrawn with what changed (0.7.23).
   claudeAsks(p, { question, answer: 'no' });
   assert.match(ok(approveQ(p, e.id, d.id, env)).out, /A1 decided: no/);
-  assert.equal(wf(p.root, ['release', '--attempt', e.id], silent).code, 75);
+  assert.match(wf(p.root, ['release', '--attempt', e.id], silent).err, /the person answered A1 "Keep it paused"/);
   assert.ok(state(p.root, e.id).activeHold, 'a "no" never lifts the hold');
+  assert.equal(state(p.root, e.id).decisions.length, 1);
+  ok(wf(p.root, ['decisions', 'withdraw', d.id, '--reason', 'they are back', '--attempt', e.id]));
+  assert.equal(wf(p.root, ['release', '--attempt', e.id], silent).code, 75);
   const again = state(p.root, e.id).decisions.at(-1);
   assert.notEqual(again.id, d.id);
 
   // Typed text that is not a choice (the panel's free-text option) is the person's answer too (0.7.8): recorded as `other` with
   // their words, it is answered and nothing more. It confirms nothing a choice would, so the hold stays and the next ask names it.
-  claudeAsks(p, { question: `${e.id} ${again.id}: ${again.summary}`, answer: 'only on Monday' });
+  claudeAsks(p, { question: `${e.id} ${again.id}: ${again.plain ?? again.summary}`, answer: 'only on Monday' });
   const worded = ok(approveQ(p, e.id, again.id, env));
   assert.match(worded.out, /A2 decided: in the person's own words: "only on Monday" \(follow them; it grants nothing a choice would\)/);
   const own = state(p.root, e.id).decisions.find((x) => x.id === again.id).approved;
@@ -128,11 +132,13 @@ test('an answer counts only when bound to the decision, offered its choices, giv
   assert.match(own.via, /^question-panel \(Claude Code, host-recorded\)$/);
   const waits = wf(p.root, ['release', '--attempt', e.id], silent);
   assert.equal(waits.code, 75);
-  assert.match(waits.err, /the earlier answer, A2, was in their own words: "only on Monday"/);
+  assert.match(waits.err, /the person answered A2 in their own words, "only on Monday"/);
   assert.ok(state(p.root, e.id).activeHold, 'their own words never lift the hold');
+  ok(wf(p.root, ['decisions', 'withdraw', again.id, '--reason', 'it is Monday', '--attempt', e.id]));
+  assert.equal(wf(p.root, ['release', '--attempt', e.id], silent).code, 75);
   const third = state(p.root, e.id).decisions.at(-1);
   assert.notEqual(third.id, again.id);
-  claudeAsks(p, { question: `${e.id} ${third.id}: ${third.summary}`, answer: 'yes' });
+  claudeAsks(p, { question: `${e.id} ${third.id}: ${third.plain ?? third.summary}`, answer: 'yes' });
   ok(approveQ(p, e.id, third.id, env));
   ok(wf(p.root, ['release', '--attempt', e.id], silent));
   assert.equal(state(p.root, e.id).activeHold, null);
@@ -144,7 +150,7 @@ test('Codex: a question-panel reply bound to its request_user_input call confirm
   ok(wf(p.root, ['hold', '--reason', 'wait', '--attempt', e.id], silent));
   assert.equal(wf(p.root, ['release', '--attempt', e.id], silent).code, 75);
   const d = state(p.root, e.id).decisions[0];
-  const question = `${e.id} ${d.id}: ${d.summary}`;
+  const question = `${e.id} ${d.id}: ${d.plain ?? d.summary}`;
   const file = path.join(homeOf(p), '.codex', 'sessions', '2026', '10', '14', `rollout-q-${CODEX}.jsonl`);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const write = (source) => {
@@ -174,7 +180,7 @@ test('a deferral the person confirmed in the question panel says so wherever it 
   const d = state(p.root, e.id).decisions[0];
   assert.deepEqual([d.key, d.choices], ['leave:D1', ['let it leave', 'fix now']]);
   const env = { CLAUDE_CODE_SESSION_ID: CLAUDE };
-  claudeAsks(p, { question: `${e.id} ${d.id}: ${d.summary}`, options: d.choices, answer: 'let it leave' });
+  claudeAsks(p, { question: `${e.id} ${d.id}: ${d.plain ?? d.summary}`, options: d.choices, answer: 'let it leave' });
   ok(approveQ(p, e.id, d.id, env));
   ok(wf(p.root, ['discovered', 'close', 'D1', '--deferred', '--reason', 'the mobile pass', '--attempt', e.id], silent));
   assert.match(ok(wf(p.root, ['discovered', 'list', '--attempt', e.id], silent)).out, /deferred \(approved-decision \(answered by the person in the question panel; the harness recorded the answer, not a signature\)\)/);
@@ -200,9 +206,10 @@ test('chat: the person\'s reply to a message asking exactly the decision\'s ques
   ok(wf(p.root, ['hold', '--reason', 'wait', '--attempt', e.id], silent));
   const asked = wf(p.root, ['release', '--attempt', e.id], silent);
   assert.equal(asked.code, 75);
-  assert.match(asked.err, /when the panel does not show for them \(a phone, a mode without it\), ask in your message instead, quoting that question exactly/);
+  assert.match(asked.err, /then ask them in your message, so they can simply type their answer: quote the question ".*" exactly with these options/);
+  assert.match(asked.err, /You may also show the same question and options in your question panel: a typed reply and a panel answer both count/);
   const d = state(p.root, e.id).decisions[0];
-  const question = `${e.id} ${d.id}: ${d.summary}`;
+  const question = `${e.id} ${d.id}: ${d.plain ?? d.summary}`;
   const env = { CLAUDE_CODE_SESSION_ID: CLAUDE };
   // A "yes" to a message that does not carry the question binds to nothing.
   claudeChat(p, { said: 'Shall I go ahead and finish the delivery?', reply: 'Yes' });
@@ -213,7 +220,7 @@ test('chat: the person\'s reply to a message asking exactly the decision\'s ques
   const other = state(p.root, e.id).decisions.find((x) => x.id !== d.id && !x.approved);
   assert.ok(other, "a second open decision exists");
   {
-    claudeChat(p, { said: `Two questions.\n${question}\n${e.id} ${other.id}: ${other.summary}`, reply: 'yes', saidWhen: at(1500), when: at(2000) });
+    claudeChat(p, { said: `Two questions.\n${question}\n${e.id} ${other.id}: ${other.plain ?? other.summary}`, reply: 'yes', saidWhen: at(1500), when: at(2000) });
     assert.match(approveQ(p, e.id, d.id, env).err, /no answer to A1/);
   }
   // The question quoted exactly, its options listed, and the person's reply in their own words starting with a choice.
@@ -230,7 +237,7 @@ test('chat on Codex: a reply after the agent\'s message with the exact question 
   ok(wf(p.root, ['hold', '--reason', 'wait', '--attempt', e.id], silent));
   assert.equal(wf(p.root, ['release', '--attempt', e.id], silent).code, 75);
   const d = state(p.root, e.id).decisions[0];
-  const question = `${e.id} ${d.id}: ${d.summary}`;
+  const question = `${e.id} ${d.id}: ${d.plain ?? d.summary}`;
   const file = path.join(homeOf(p), '.codex', 'sessions', '2026', '10', '16', `rollout-chat-${CODEX}.jsonl`);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const write = (reply) => fs.writeFileSync(file, [
@@ -260,7 +267,7 @@ function heldAttempt(name, item) {
   ok(wf(p.root, ['hold', '--reason', 'wait', '--attempt', e.id], silent));
   assert.equal(wf(p.root, ['release', '--attempt', e.id], silent).code, 75);
   const d = state(p.root, e.id).decisions[0];
-  return { p, e, d, question: `${e.id} ${d.id}: ${d.summary}` };
+  return { p, e, d, question: `${e.id} ${d.id}: ${d.plain ?? d.summary}` };
 }
 const env = { CLAUDE_CODE_SESSION_ID: CLAUDE };
 
@@ -297,10 +304,15 @@ test('chat choice: a reply that takes it back is the person\'s words; a conditio
   let t = heldAttempt('chat-retract', 'ENG-970');
   claudeLines(t.p, [says(`${t.question}\n\nyes / no`, at(500)), types('yes, actually no', at(1000))]);
   assert.match(ok(approveQ(t.p, t.e.id, t.d.id, env)).out, /A1 decided: in the person's own words: "yes, actually no"/);
+  // 0.7.23: a condition that moves the action in time ("only after the failing test is fixed") can turn the answer around,
+  // so it is the person's words; one that does not move it stays beside the choice.
   t = heldAttempt('chat-condition', 'ENG-971');
+  claudeLines(t.p, [says(`${t.question}\n\nyes / no`, at(500)), types('Yes, but keep the old export button visible', at(1000))]);
+  assert.match(ok(approveQ(t.p, t.e.id, t.d.id, env)).out, /A1 decided: yes \(their reply: "Yes, but keep the old export button visible"; follow any condition in it\)/);
+  assert.equal(state(t.p.root, t.e.id).decisions[0].approved.reply, 'Yes, but keep the old export button visible');
+  t = heldAttempt('chat-condition-time', 'ENG-972');
   claudeLines(t.p, [says(`${t.question}\n\nyes / no`, at(500)), types('Yes, but only after the failing test is fixed', at(1000))]);
-  assert.match(ok(approveQ(t.p, t.e.id, t.d.id, env)).out, /A1 decided: yes \(their reply: "Yes, but only after the failing test is fixed"; follow any condition in it\)/);
-  assert.equal(state(t.p.root, t.e.id).decisions[0].approved.reply, 'Yes, but only after the failing test is fixed');
+  assert.match(ok(approveQ(t.p, t.e.id, t.d.id, env)).out, /A1 decided: in the person's own words: "Yes, but only after the failing test is fixed"/);
   assert.match(channelOf({ deferred: { source: { provenance: 'approved-decision', via: 'chat (Claude Code, host-recorded)' } } }), /answered by the person in the chat/);
 });
 
@@ -357,4 +369,49 @@ test('chat on Claude Code: a panel answer ends the message, so a later "yes" nev
   claudeLines(u.p, [says(`Reserved decision A1: lifting the hold lets the planner start.\n\n"${u.question}"\n\nOption A1: yes, lift it / no`, at(500)), types('Yes.', at(1000))]);
   assert.match(ok(approveQ(u.p, u.e.id, u.d.id, env)).out, /^A1 decided: yes\. next:/m);
   assert.equal(state(u.p.root, u.e.id).decisions[0].approved.reply, undefined);
+});
+
+// 0.7.23, the person's rule: "why are you stopping me from just typing no, why do i have to answer the questionnaire? both
+// should be accepted". Named failure (field): the person typed "ok fix all and continue" to the round-limit question; the
+// session had explained the question in its own words, and the reply did not start with a choice, so it was refused twice and
+// the session put the question panel in front of them.
+test('typed replies: one that names an option anywhere confirms it, with the rest kept; without the question quoted, only an option named plainly binds', () => {
+  const p = singleRepoProject('approve-typed', {});
+  const e = ok(wf(p.root, ['entry', '--item', 'ENG-950', '--json'], silent)).json();
+  ok(wf(p.root, ['hold', '--reason', 'wait for the store review', '--attempt', e.id], silent));
+  assert.equal(wf(p.root, ['release', '--attempt', e.id], silent).code, 75);
+  const d = state(p.root, e.id).decisions[0];
+  const env = { CLAUDE_CODE_SESSION_ID: CLAUDE };
+  // The session explained the question in its own words: a bare "yes" says nothing about which question it answers.
+  claudeChat(p, { said: 'The store review came back. Want me to carry on?', reply: 'yes' });
+  assert.match(approveQ(p, e.id, d.id, env).err, /no answer to A1/);
+  // A message that never names the decision binds no reply, even one naming an option plainly.
+  claudeChat(p, { said: 'The store review came back. Should the pause end?', reply: 'ok lift the pause and ship it', saidWhen: at(1200), when: at(1400) });
+  assert.match(approveQ(p, e.id, d.id, env).err, /no answer to A1/);
+  // A reply that negates the option it names is the person's words, not that option.
+  claudeChat(p, { said: `About ${e.id} ${d.id}: the store review came back. Should the pause end?`, reply: "don't lift the pause yet", saidWhen: at(1500), when: at(2000) });
+  assert.match(approveQ(p, e.id, d.id, env).err, /no answer to A1/);
+  // Naming the option plainly binds when the message named the decision in the session's own words, and the rest of the
+  // reply is kept beside it.
+  claudeChat(p, { said: `About ${e.id} ${d.id}: the store review came back. Should the pause end?`, reply: 'ok lift the pause and ship it', saidWhen: at(2500), when: at(3000) });
+  const typed = ok(approveQ(p, e.id, d.id, env));
+  assert.match(typed.out, /A1 decided: yes \(their reply: "ok lift the pause and ship it"; follow any condition in it\)/);
+  const recorded = state(p.root, e.id).decisions[0].approved;
+  assert.deepEqual([recorded.choice, recorded.reply], ['yes', 'ok lift the pause and ship it']);
+  assert.match(recorded.via, /^chat, the question not quoted \(Claude Code, host-recorded\)$/);
+
+  // With the question quoted, "ok" and "nope" are answers, and a question back is not.
+  const q = singleRepoProject('approve-typed-quoted', {});
+  const f = ok(wf(q.root, ['entry', '--item', 'ENG-951', '--json'], silent)).json();
+  ok(wf(q.root, ['hold', '--reason', 'wait', '--attempt', f.id], silent));
+  assert.equal(wf(q.root, ['release', '--attempt', f.id], silent).code, 75);
+  const g = state(q.root, f.id).decisions[0];
+  const question = `${f.id} ${g.id}: ${g.plain}`;
+  claudeChat(q, { said: question, reply: 'ok but why now?' });
+  assert.match(approveQ(q, f.id, g.id, env).out, /A1 decided: in the person's own words: "ok but why now\?"/);
+  ok(wf(q.root, ['decisions', 'withdraw', g.id, '--reason', 'answered their question', '--attempt', f.id]));
+  assert.equal(wf(q.root, ['release', '--attempt', f.id], silent).code, 75);
+  const h = state(q.root, f.id).decisions.at(-1);
+  claudeChat(q, { said: `${f.id} ${h.id}: ${h.plain}`, reply: 'nope', saidWhen: at(1500), when: at(2000) });
+  assert.match(ok(approveQ(q, f.id, h.id, env)).out, /A2 decided: no/);
 });

@@ -10,9 +10,10 @@
 import path from 'node:path';
 import { actor, openState } from './attempt.mjs';
 import { append, attemptDir, loadState, recordedTogether } from './ledger.mjs';
-import { requireYes } from './approve.mjs';
+import { chose, createDecision, decisionFor, optionLines, questionFor, requireYes, settledBy, SHOW_TEXT } from './approve.mjs';
+import { FRAMES, askFirst, askProblems, composeAsk, itemAsk, itemWords, readAsk } from './asking.mjs';
 import { readRegular, withEvidenceTransaction } from './evidence.mjs';
-import { blockingIn, dispositionOf, locationsOf, observations, openAcrossRounds, placementLevel } from './review-policy.mjs';
+import { blockingIn, dispositionOf, findingByRef, locationsOf, observations, openAcrossRounds, placementLevel } from './review-policy.mjs';
 import { discoveredLevel, headsNow, ticketCommit } from './discovered.mjs';
 import { discoveredRating, leavingDecisions, policyOf } from './leaving.mjs';
 import { trustedAdapter } from './config.mjs';
@@ -204,27 +205,97 @@ export function recordFixed(root, options) {
   });
 }
 
-// `wf scope waive --finding R:F1 [--reason "..."]`: a finding that blocks is set aside by the person's decision (kind
-// waive-finding, `wf approve`), D4. Named failure (refusal audit of 0.7.0): the reserved kind existed and every message
-// pointed to it, but no command created it, so a blocking finding could leave only by being fixed or ticketed.
+// `wf scope waive --finding R:F1[,R:F2] [--reason "..."] [--same-as A<n>] --ask <file>`: findings that block are set aside by
+// the person's decision (kind waive-finding, `wf approve`), D4. Named failure (refusal audit of 0.7.0): the reserved kind
+// existed and every message pointed to it, but no command created it, so a blocking finding could leave only by being fixed
+// or ticketed.
+// 0.7.23 (D29). The person's rules (2026-10-16): "separate findings as different questions", clear enough to understand, and
+// "i don't want the same question asked multiple times". Each finding is its own question in the agent's plain words. A
+// finding the person already decided is recorded under that answer and never asked again: one an escalation option they chose
+// names (`settles`, listed in that option for them), or one a later review raised again about a gap they already accepted
+// (`--same-as A<n>`: it must block for the same reason, the same frozen criterion or critical invariant). Named failure
+// (field): after the person chose to ship without a proof, six findings from three review rounds asking for that proof were
+// six more questions, each in the reviewer's own text.
 export function waiveFinding(root, options) {
   const opened = openState(root, options);
   return withEvidenceTransaction(root, opened.id, () => {
-    const state = loadState(root, opened.id);
-    const ref = text(options.finding);
-    // The person's yes already sets the finding aside (review-policy waivedRef); this records the waiver once.
-    const answered = (state.decisions ?? []).filter((d) => d.kind === 'waive-finding' && d.key === ref).at(-1);
-    if (answered?.approved?.choice === 'yes') {
-      if (!(state.scopeDecisions ?? []).some((d) => d.choice === 'waived' && (d.keys ?? []).includes(ref))) append(root, state.id, 'scope.waived', { keys: [ref], choice: 'waived', reason: text(options.reason) || null, decision: answered.id }, actor(options));
+    let state = loadState(root, opened.id);
+    const refs = [...new Set(String(options.finding ?? '').split(',').map((x) => x.trim()).filter(Boolean))];
+    if (!refs.length) throw new WfError('usage: wf scope waive --finding <round:id>[,...] [--reason "..."] [--same-as A<n>] [--ask FILE.json]');
+    const reason = text(options.reason);
+    const recorded = (ref) => (state.scopeDecisions ?? []).some((d) => d.choice === 'waived' && (d.keys ?? []).includes(ref));
+    // The person's yes already sets a finding aside (review-policy waivedRef); this records each waiver once.
+    const yesFor = (ref) => {
+      const d = decisionFor(state, 'waive-finding', ref);
+      return d?.approved?.choice === 'yes' ? d : null;
+    };
+    for (const ref of refs.filter((r) => !recorded(r) && yesFor(r))) append(root, state.id, 'scope.waived', { keys: [ref], choice: 'waived', reason: reason || null, decision: yesFor(ref).id }, actor(options));
+    const open = refs.filter((r) => !recorded(r) && !yesFor(r)).map((ref) => find(state, ref));
+    const observation = open.filter((f) => !f.classified.blocks);
+    if (observation.length) throw refuse(`${observation.map((f) => f.ref).join(', ')} ${observation.length > 1 ? 'do' : 'does'} not block: an observation is fixed, moved, deferred or ticketed (\`wf scope list\`)`, null, { id: 'scope:waive-observation' });
+    const same = sameAsDecision(state, options['same-as']);
+    if (same && !reason) throw refuse(`--same-as ${same.decision.id}: say how this is the gap the person accepted there`, 'pass `--reason "<how it is the same>"`', { id: 'scope:same-as' });
+    const asked = [];
+    for (const f of open) {
+      // Decided by the person's answer to an escalation, or the same gap as one they already accepted: recorded under that
+      // answer (`under`, not `decision`, which would spend it).
+      const by = settledBy(state, f.ref);
+      if (by) {
+        append(root, state.id, 'scope.waived', { keys: [f.ref], choice: 'waived', reason: reason || null, under: by.id }, actor(options));
+        continue;
+      }
+      if (same) {
+        // The same criterion or invariant, and the same family when the accepted finding has one (independent review of
+        // 0.7.23: a criterion names a whole behaviour, so another defect under it is not the same gap).
+        const basis = basisOf(f);
+        const match = same.findings.find((x) => basisOf(x) === basis && (!x.family || x.family === f.family));
+        if (!basis || !match) throw refuse(`${f.ref} is not the same as what ${same.decision.id} decided: it blocks because it ${f.classified.reason}${f.family ? ` (family ${f.family})` : ''}, and ${same.decision.id} accepted ${same.findings.map((x) => `${x.ref} (it ${x.classified.reason}${x.family ? `, family ${x.family}` : ''})`).join(', ') || 'no finding'}`, 'a finding that blocks for another reason is its own question: run this again without `--same-as`', { id: 'scope:same-as' });
+        append(root, state.id, 'scope.waived', { keys: [f.ref], choice: 'waived', reason: reason || null, under: same.decision.id, sameAs: match.ref }, actor(options));
+        continue;
+      }
+      asked.push(f);
+    }
+    if (!asked.length) return loadState(root, state.id);
+    state = loadState(root, state.id);
+    const summaryOf = (f) => `waive ${f.ref} (${f.severity ?? 'unrated'}: ${f.summary ?? ''}); it blocks because it ${f.classified.reason}${reason ? `; why: ${reason}` : ''}`;
+    if (asked.length === 1) {
+      const [f] = asked;
+      const decision = requireYes(root, state, { kind: 'waive-finding', key: f.ref, summary: summaryOf(f), what: `waiving ${f.ref}`, frame: FRAMES.waive({ item: state.item, n: 1 }), items: [f.ref], ask: itemAsk(readAsk(options), null, f.ref), options }).decision;
+      append(root, state.id, 'scope.waived', { keys: [f.ref], choice: 'waived', reason: reason || null, decision }, actor(options));
       return loadState(root, state.id);
     }
-    const f = find(state, ref);
-    if (!f.classified.blocks) throw refuse(`${f.ref} does not block: an observation is fixed, moved, deferred or ticketed (\`wf scope list\`)`, null, { id: 'scope:waive-observation' });
-    const reason = text(options.reason);
-    const decision = requireYes(root, state, { kind: 'waive-finding', key: f.ref, summary: `waive ${f.ref} (${f.severity ?? 'unrated'}: ${f.summary ?? ''}); it blocks because it ${f.classified.reason}${reason ? `; why: ${reason}` : ''}`, what: `waiving ${f.ref}`, options }).decision;
-    append(root, state.id, 'scope.waived', { keys: [f.ref], choice: 'waived', reason: reason || null, decision }, actor(options));
-    return loadState(root, state.id);
+    // Several findings: one question each, asked together.
+    const frame = FRAMES.waive({ item: state.item, n: 1 });
+    const answeredNo = asked.map((f) => ({ f, d: decisionFor(state, 'waive-finding', f.ref) })).filter(({ d }) => d?.approved && !d.spent);
+    if (answeredNo.length) throw refuse(`not waived: ${answeredNo.map(({ f, d }) => `the person answered ${d.approved.words ? `in their own words, "${d.approved.words}"` : d.approved.choice} to ${f.ref} (${d.id})`).join('; ')}`, 'a finding they did not accept is fixed; to ask again after something changed, withdraw their answer with what changed (`wf decisions withdraw <id> --reason "..."`)', { id: 'scope:waive-answered' });
+    const ask = readAsk(options);
+    const fresh = asked.filter((f) => !decisionFor(state, 'waive-finding', f.ref));
+    const problems = fresh.flatMap((f) => askProblems(itemAsk(ask, null, f.ref), { choices: ['yes', 'no'], labels: frame.labels, items: [f.ref] }).map((p) => `${f.ref}: ${p}`));
+    if (problems.length) throw askFirst(`waiving ${fresh.map((f) => f.ref).join(', ')}`, frame, ['yes', 'no'], [...new Set(problems)], fresh.map(summaryOf).join(' | '), { items: fresh.map((f) => f.ref) });
+    let current = state;
+    const lines = [];
+    for (const f of asked) {
+      const words = itemAsk(ask, null, f.ref);
+      const d = decisionFor(current, 'waive-finding', f.ref) ?? createDecision(root, current, { kind: 'waive-finding', key: f.ref, summary: summaryOf(f), ...composeAsk(words, frame, ['yes', 'no'], { items: [{ ref: f.ref, ...itemWords(ask, null, f.ref) }] }), options });
+      current = loadState(root, state.id);
+      lines.push(`  ${d.id}  header "${f.ref}"\n      question: "${questionFor(current, d)}"\n      options: ${optionLines(d)}\n      then: wf approve ${d.id} --from-question --attempt ${state.id}`);
+    }
+    throw refuse(`the person decides these (one question per finding; ask them together, as many questions in one panel as it allows):\n${lines.join('\n')}`, `ask exactly these questions with exactly these options, by their labels with what follows each as its description; ${SHOW_TEXT}. Ask them in your messages, one question per message, quoting it exactly with its options, so the person can type each answer, or together in your question panel; a typed reply and a panel answer both count. Run its \`wf approve <id> --from-question\` after each answer; then run this command again`, { id: 'scope:waive-ask' });
   });
+}
+
+// What a finding blocks for: the frozen criterion or the critical invariant it names (null for anything else).
+const basisOf = (f) => (f?.classified?.criterion ? `criterion ${f.classified.criterion}` : f?.classified?.invariant ? `invariant ${f.classified.invariant}` : null);
+
+// The decision `--same-as` names: one the person answered by accepting findings (a waiver they said yes to, or an escalation
+// whose chosen option settles findings), with those findings.
+function sameAsDecision(state, id) {
+  if (id === undefined || id === null || id === false) return null;
+  const d = (state.decisions ?? []).find((x) => x.id === String(id));
+  const accepted = d && !d.withdrawn ? (d.kind === 'waive-finding' && d.approved?.choice === 'yes' ? [d.key] : d.kind === 'escalation' && chose(d) ? d.settles?.[d.approved.choice] ?? [] : []) : [];
+  const findings = accepted.map((ref) => findingByRef(state, ref)).filter(Boolean);
+  if (!findings.length) throw refuse(`--same-as ${id}: not a decision of ${state.id} in which the person accepted a finding that blocks`, '`wf decisions --attempt <id> --all` lists them', { id: 'scope:same-as' });
+  return { decision: d, findings };
 }
 
 // `wf scope defer --finding a,b,D3 [--reason "..."]`: low observations and discovered issues that wait without a follow-up

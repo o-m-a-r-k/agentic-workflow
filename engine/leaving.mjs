@@ -8,7 +8,8 @@
 // own long text, so they could neither understand it nor fix one and let another go; their written answer ("fix all here,
 // except F3 if a follow-up ticket already has it") was not a choice, so the question stayed open. Each item is now its own short question,
 // with two choices, and an answer in the person's own words is recorded as theirs.
-import { createDecision, decisionFor, deliverCoreDecision } from './approve.mjs';
+import { createDecision, decisionFor, deliverCoreDecision, optionLines, questionFor, settledBy } from './approve.mjs';
+import { FRAMES, askFirst, askProblems, composeAsk, itemAsk, itemWords, readAsk } from './asking.mjs';
 import { refuse } from './util.mjs';
 
 export const LEAVE = 'let it leave';
@@ -36,7 +37,13 @@ const shortWhere = (w) => (w ? String(w).split('/').pop() : null);
 // The owner's plain line for an item (`--explain`), kept on its decision: the delivered comment names the item by it.
 const plainWhat = (x, explain) => (typeof explain?.[x.ref]?.what === 'string' && explain[x.ref].what.trim() ? explain[x.ref].what.trim() : null);
 
-// The person's question for one item: what is wrong in one plain line, the facts behind its rating, and what leaving means.
+// Who rated an item, by role (an agent's id means nothing to the person), and every re-rating (D18): "Rated low by a
+// reviewer, re-rated medium to low (why)".
+const raterOf = (by) => (!by ? 'its reporter' : /^reviewer /.test(by) ? 'a reviewer' : /^its implementer /.test(by) ? 'the implementer' : /^human:/.test(by) ? 'a person' : 'the agent running the ticket');
+const ratedText = (x) => `Rated ${x.severity ?? x.level} by ${raterOf(x.ratedBy)}${x.ratings?.length ? `, re-rated ${x.ratings.map((r) => `${r.from ?? 'unrated'} to ${r.to}${r.reason ? ` (${r.reason})` : ''}`).join(', ')}` : ''}.`;
+
+// The item's facts for the record (the decision's summary): what is wrong in one line, the facts behind its rating, and
+// what leaving means.
 function questionText(x, verb, explain) {
   const what = typeof explain?.[x.ref]?.what === 'string' && explain[x.ref].what.trim() ? explain[x.ref].what.trim() : firstSentence(x.summary);
   const rated = `${x.severity ?? x.level}, rated by ${x.ratedBy ?? 'its reporter'}${x.ratings?.length ? `, re-rated ${x.ratings.map((r) => `${r.from ?? 'unrated'} to ${r.to}${r.reason ? ` (${r.reason})` : ''}`).join(', ')}` : ''}${x.where ? `, ${shortWhere(x.where)}` : ''}`;
@@ -56,14 +63,19 @@ export function leavingDecisions(root, state, items, { verb, reason = '', option
   // part unchanged"), even a level that never leaves may leave on their own answer to that item; an agent never lets it go.
   // The owner passes the person's words (`--person-directed "<their words>"`); the person still answers each item.
   const directed = typeof options['person-directed'] === 'string' && options['person-directed'].trim() ? options['person-directed'].trim().slice(0, 500) : null;
-  const whoFor = (x) => { const w = policy[x.level] ?? DEFAULT_POLICY[x.level]; return w === 'never' && directed ? 'person' : w; };
+  // 0.7.23 (D29): an item the person's answer to an escalation already decided (its chosen option settles it) leaves under that
+  // answer, whatever its level: the person read that the option decides it.
+  const settled = Object.fromEntries(items.map((x) => [x.ref, settledBy(state, x.ref)]).filter(([, d]) => d));
+  const whoFor = (x) => { if (settled[x.ref]) return 'settled'; const w = policy[x.level] ?? DEFAULT_POLICY[x.level]; return w === 'never' && directed ? 'person' : w; };
   const kept = items.filter((x) => whoFor(x) === 'never');
   if (kept.length) throw refuse(`not ${verb}: ${kept.map((x) => `${x.ref} (${x.level}${x.severity && x.severity !== x.level ? `, rated ${x.severity}` : ''})`).join(', ')} ${kept.length > 1 ? 'stay' : 'stays'} in this delivery: ${ruleText(policy)}`, 'fix it through the implementer that did that work, or move it to a sibling attempt of the batch (`wf scope move`); if the person told you to leave it out of this ticket, run this again with `--person-directed "<their words>"`: they answer each item themselves', { id: 'leave:medium-high' });
   const owner = items.filter((x) => whoFor(x) === 'owner');
   if (owner.length && !reason) throw refuse(`${owner.map((x) => x.ref).join(', ')} may leave on your judgement under the project's \`leaving:\` policy: say why it waits`, 'pass `--reason "<why it can wait>"`', { id: 'leave:owner-reason' });
-  const decided = Object.fromEntries(owner.map((x) => [x.ref, 'owner']));
+  const decided = Object.fromEntries([...owner.map((x) => [x.ref, 'owner']), ...Object.entries(settled).map(([ref, d]) => [ref, d.id])]);
   const answered = [];
   const asked = [];
+  const unworded = [];
+  const ask = readAsk(options);
   let current = state;
   for (const x of items.filter((i) => whoFor(i) === 'person')) {
     const d = decisionFor(current, 'move-out-of-batch', `leave:${x.ref}`);
@@ -77,9 +89,21 @@ export function leavingDecisions(root, state, items, { verb, reason = '', option
       continue;
     }
     const neverLevel = (policy[x.level] ?? DEFAULT_POLICY[x.level]) === 'never';
-    const made = createDecision(root, current, { kind: 'move-out-of-batch', key: `leave:${x.ref}`, summary: neverLevel ? `${questionText(x, verb, explain)} (Your rule fixes ${x.level} items in the delivery; you asked to leave this out: "${directed}".)` : questionText(x, verb, explain), choices: [LEAVE, FIX], ...(neverLevel ? { personDirected: directed } : {}), what: plainWhat(x, explain), options });
+    const frame = FRAMES.leave({ item: state.item, ticketed: verb === 'ticketed', fix: itemWords(ask, explain, x.ref).fix, LEAVE, FIX, directed: neverLevel ? directed : null, level: x.level, rated: ratedText(x) });
+    const words = itemAsk(ask, explain, x.ref);
+    const problems = askProblems(words, { choices: [LEAVE, FIX], labels: frame.labels, items: [x.ref], explain });
+    if (problems.length) {
+      unworded.push({ x, frame, problems });
+      continue;
+    }
+    const made = createDecision(root, current, { kind: 'move-out-of-batch', key: `leave:${x.ref}`, summary: neverLevel ? `${questionText(x, verb, explain)} (Your rule fixes ${x.level} items in the delivery; you asked to leave this out: "${directed}".)` : questionText(x, verb, explain), choices: [LEAVE, FIX], ...composeAsk(words, frame, [LEAVE, FIX], { items: [{ ref: x.ref, ...itemWords(ask, explain, x.ref) }], itemNoun: 'issue' }), ...(neverLevel ? { personDirected: directed } : {}), what: plainWhat(x, explain) ?? itemWords(ask, explain, x.ref).what, options });
     asked.push({ x, d: made });
     current = { ...current, decisions: [...(current.decisions ?? []), made] };
+  }
+  if (unworded.length) {
+    const refs = unworded.map(({ x }) => x.ref);
+    const { frame } = unworded[0];
+    throw askFirst(`letting ${refs.join(', ')} leave without a fix`, frame, [LEAVE, FIX], [...new Set(unworded.flatMap(({ x, problems }) => problems.map((p) => (refs.length > 1 ? `${x.ref}: ${p}` : p))))], unworded.map(({ x }) => questionText(x, verb, explain)).join(' | '), { items: refs });
   }
   if (answered.length) {
     const fixNow = answered.filter(({ d }) => d.approved.choice === FIX);
@@ -88,8 +112,8 @@ export function leavingDecisions(root, state, items, { verb, reason = '', option
   }
   if (asked.length) {
     const fix = (x) => (typeof explain?.[x.ref]?.fix === 'string' && explain[x.ref].fix.trim() ? explain[x.ref].fix.trim() : 'fixed in this delivery (a fix pass, a delta review and the gate)');
-    const lines = asked.map(({ x, d }) => `  ${d.id}  header "${x.ref}"\n      question: "${state.id} ${d.id}: ${d.summary}"\n      options: "${LEAVE}" (${verb === 'ticketed' ? 'tracked as a follow-up ticket' : 'listed as a known issue in the delivery comment'}) | "${FIX}" (${fix(x)})\n      then: wf approve ${d.id} --from-question --attempt ${state.id}`);
-    throw refuse(`the person decides ${asked.length > 1 ? 'these' : 'this'} (one short question per item; ask them together, as many questions in one panel as it allows):\n${lines.join('\n')}`, `ask exactly these questions with exactly these two options each (the descriptions are yours to word); an answer in the person's own words is recorded as theirs. Say in your reply, in plain words, what each item is and what fixing it takes (a panel may not show, and its acceptance proves nothing); when it shows nothing for them (a phone, a mode without it), ask in your messages instead, one question per message, quoting it exactly with its two options, and run its \`wf approve <id> --from-question\` after each reply (0.7.18); or they run \`wf approve <id> --attempt ${state.id}\` in their own terminal (I-135). Then run this command again with the items they let leave. A plain line per item is clearer than the reviewer's text: pass \`--explain <file.json>\` ({ "<ref>": { "what": "<what is wrong, one line>", "fix": "<what fixing it now takes>" } }) before asking`, { id: 'leave:ask' });
+    const lines = asked.map(({ x, d }) => `  ${d.id}  header "${x.ref}"\n      question: "${questionFor(state, d)}"\n      options: ${d.labels ? optionLines(d) : `"${LEAVE}" (${verb === 'ticketed' ? 'tracked as a follow-up ticket' : 'listed as a known issue in the delivery comment'}) | "${FIX}" (${fix(x)})`}\n      then: wf approve ${d.id} --from-question --attempt ${state.id}`);
+    throw refuse(`the person decides ${asked.length > 1 ? 'these' : 'this'} (one short question per item; ask them together, as many questions in one panel as it allows):\n${lines.join('\n')}`, `ask exactly these questions with exactly these two options each, by their labels with what follows each as its description; an answer in the person's own words is recorded as theirs. Say in your reply, in plain words, what each item is and what fixing it takes. Ask them in your messages, one question per message, quoting it exactly with its two options, so the person can type each answer, or together in your question panel; a typed reply and a panel answer both count. Run its \`wf approve <id> --from-question\` after each answer; or they run \`wf approve <id> --attempt ${state.id}\` in their own terminal (I-135). Then run this command again with the items they let leave`, { id: 'leave:ask' });
   }
   return decided;
 }

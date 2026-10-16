@@ -318,12 +318,12 @@ test('an escalation is a plain question: labelled options with what follows each
   const rec = ok(cur.run(root, ['strategy', 'record', '--closure', plain.file, '--attempt', a.id, '--json'])).json();
   const d = cur.state(root, a.id).decisions.find((x) => x.id === rec.escalation);
   assert.deepEqual(d.choices, ['move-it-to-its-own-ticket', 'keep-fixing-it-here']);
-  assert.equal(d.plain, 'The same problem came back after two fixes. Should the work that keeps reopening move to its own ticket?');
+  assert.equal(d.plain, 'The same problem came back after two fixes. Should the work that keeps reopening move to its own ticket? Recommended: "Move it to its own ticket", because two fixes did not hold.');
   assert.deepEqual(d.recommend, { choice: 'move-it-to-its-own-ticket', why: 'two fixes did not hold' });
   const blocked = cur.run(root, ['handoff', 'reviewer', '--agent', 'rev-x', '--attempt', a.id, '--owner', a.owner], { ownerSilent: true });
   assert.equal(blocked.code, 75);
-  assert.match(blocked.err, new RegExp(`the question "${a.id.replace('.', '\\.')} ${d.id}: The same problem came back after two fixes\\. Should the work that keeps reopening move to its own ticket\\?"`));
-  assert.match(blocked.err, /"Move it to its own ticket \(Recommended\)": this ticket ships what is done; the rest is planned again; "Keep fixing it here": another fix and review round starts now\. Recommended because two fixes did not hold/);
+  assert.match(blocked.err, new RegExp(`the question "${a.id.replace('.', '\\.')} ${d.id}: The same problem came back after two fixes\\. Should the work that keeps reopening move to its own ticket\\? Recommended: "Move it to its own ticket", because two fixes did not hold\\."`));
+  assert.match(blocked.err, /"Move it to its own ticket \(Recommended\)": this ticket ships what is done; the rest is planned again; "Keep fixing it here": another fix and review round starts now, and ask nothing else in that message/);
   const { approveInTerminal } = await import('../engine/approve.mjs');
   await inProcess(root, async () => {
     const input = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => {} });

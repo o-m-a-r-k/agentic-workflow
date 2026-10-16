@@ -134,7 +134,7 @@ test('the person\'s deliver-core answer covers only what was recorded before it 
   const low = wf(p.root, ['scope', 'ticket', '--finding', 'r-11:F8', '--capture', capture(p, 3), '--attempt', p.id], { ownerSilent: true });
   assert.equal(low.code, 75);
   assert.equal(refusals(p).at(-1).id, 'leave:ask');
-  assert.match(low.err, /A\d+: r-11:F8/);
+  assert.match(low.err, /A\d+  header \"r-11:F8\"/);
   assert.deepEqual(state(p.root, p.id).scopeDecisions.map((d) => d.keys), [['r1:F1']], 'only what was recorded before the answer left');
 });
 
@@ -178,8 +178,8 @@ test('a discovered issue on a critical invariant is high whatever its rating; ra
   assert.equal(asked.code, 75);
   assert.equal(asked.err.match(/then: wf approve A\d+ --from-question/g).length, 2, 'one question per id');
   // Each question shows who rated the item and every re-rating, with its reason (what the person weighs when they answer).
-  assert.match(asked.err, new RegExp(`${typo.id}: a tooltip typo \\(low, rated by its implementer i2, re-rated low to high, high to low \\(a tooltip\\)\\)\\. Fix it now, or let it leave`));
-  assert.match(asked.err, new RegExp(`${slow.id}: a slow list \\(low, rated by its implementer i2, re-rated high to medium \\(only the admin list, 200 rows\\), medium to low \\(cosmetic on the admin list\\)\\)\\. Fix it now, or let it leave`));
+  assert.match(asked.err, new RegExp(`header "${typo.id}"\\n\\s+question: "[^"]*Rated low by the implementer, re-rated low to high, high to low \\(a tooltip\\)\\.`));
+  assert.match(asked.err, new RegExp(`header "${slow.id}"\\n\\s+question: "[^"]*Rated low by the implementer, re-rated high to medium \\(only the admin list, 200 rows\\), medium to low \\(cosmetic on the admin list\\)\\.`));
   ok(wf(p.root, ['discovered', 'close', both, '--deferred', '--reason', 'next sprint', '--attempt', p.id]));
   const left = state(p.root, p.id).discovered.filter((d) => [typo.id, slow.id].includes(d.id));
   assert.deepEqual(left.map((d) => d.status), ['deferred', 'deferred']);

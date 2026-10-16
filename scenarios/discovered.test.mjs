@@ -64,7 +64,7 @@ test('I-18: discovered issues are recorded, end fixed by a ticket commit or defe
   const asked = disc(root, ['close', 'D2', '--deferred', '--reason', 'park it for the mobile pass next sprint', '--attempt', id], silent);
   assert.equal(asked.code, 75);
   assert.match(asked.err, /the person decides this \(one short question per item/);
-  assert.match(asked.err, /question: "ENG-700\.1 A1: D2: tables have no phone card view \(low, rated by impl-1\)\. Fix it now, or let it leave this delivery as a known issue\?"/);
+  assert.match(asked.err, /header "D2"\n\s+question: "ENG-700\.1 A1: Should ENG-700 ship without fixing this, listing it as a known issue, or should it be fixed first\? [^"]*Rated low by [^"]*"/);
   assert.match(asked.err, /then: wf approve A1 --from-question --attempt ENG-700\.1/);
   assert.equal(state(root, id).discovered[1].status, 'open');
   assert.deepEqual(state(root, id).decisions.map((d) => [d.id, d.kind, d.key, d.choices, d.approved]), [['A1', 'move-out-of-batch', 'leave:D2', ['let it leave', 'fix now'], null]]);
@@ -97,7 +97,7 @@ test('I-18: discovered issues are recorded, end fixed by a ticket commit or defe
   // (A2 is the gate-order override above.)
   const lowAsked = disc(root, ['close', 'D3', '--deferred', '--reason', 'the default is the documented one', '--attempt', id], silent);
   assert.equal(lowAsked.code, 75);
-  assert.match(lowAsked.err, /question: "ENG-700\.1 A3: D3: an implicit page-size default \(low, rated by o\)\. Fix it now, or let it leave this delivery as a known issue\?"/);
+  assert.match(lowAsked.err, /header "D3"\n\s+question: "ENG-700\.1 A3: Should ENG-700 ship without fixing this, listing it as a known issue, or should it be fixed first\? [^"]*Rated low by [^"]*"/);
   assert.equal(state(root, id).discovered[2].status, 'open');
   ok(disc(root, ['close', 'D3', '--deferred', '--reason', 'the default is the documented one', '--attempt', id]));
   assert.deepEqual([state(root, id).discovered[2].deferred.source.provenance, state(root, id).discovered[2].deferred.source.decision], ['approved-decision', 'A3'], 'a deferral is always the person\'s decision now');
@@ -109,7 +109,7 @@ test('I-18: discovered issues are recorded, end fixed by a ticket commit or defe
   assert.match(d.err, /not delivered: 1 discovered issue\(s\) are open: D4 a failed Next strands the user[\s\S]*fix it in this ticket[\s\S]*medium and high are fixed in this delivery[\s\S]*a low one leaves only with the person's answer, one short question per item/);
   // An approval is used once and belongs to its entry: D2's and D3's do not defer D4.
   const d4 = disc(root, ['close', 'D4', '--deferred', '--reason', 'separate ticket ENG-701, agreed', '--attempt', id], silent);
-  assert.match(d4.err, /question: "ENG-700\.1 A4: D4: a failed Next strands the user \(low, rated by [^)]+\)\. Fix it now, or let it leave/);
+  assert.match(d4.err, /header "D4"\n\s+question: "ENG-700\.1 A4: Should ENG-700 ship without fixing this/);
   assert.equal(state(root, id).discovered[3].status, 'open');
   ok(disc(root, ['close', 'D4', '--deferred', '--reason', 'separate ticket ENG-701, agreed', '--attempt', id]));
   // A refused delivery records no listing: nothing is marked as shown, and the same command works once the cause is gone.
@@ -173,14 +173,14 @@ test('0.7.0: a deferral is the owner\'s confirmed decision: per entry, used once
   ok(wf(root, ['decisions', 'withdraw', 'A1', '--reason', 'the situation changed', '--attempt', id], silent));
   const again = close(1, [], silent);
   assert.equal(again.code, 75, 'asked afresh');
-  assert.match(again.err, /question: "ENG-730\.1 A2: D1: the export button is mislabelled \(low, rated by [^)]+\)\. Fix it now, or let it leave this delivery as a known issue\?"/);
+  assert.match(again.err, /header "D1"\n\s+question: "ENG-730\.1 A2: Should ENG-730 ship without fixing this, listing it as a known issue, or should it be fixed first\? [^"]*Rated low by [^"]*"/);
   assert.equal(state(root, id).discovered[0].status, 'open');
   // A yes for D1 does not defer D2: the key names the entry.
   ok(close(1));
   assert.equal(state(root, id).discovered[0].status, 'deferred');
   const second = close(2, [], silent);
   assert.equal(second.code, 75);
-  assert.match(second.err, /question: "ENG-730\.1 A3: D2: the import button is mislabelled \(low, rated by [^)]+\)\. Fix it now, or let it leave/);
+  assert.match(second.err, /header "D2"\n\s+question: "ENG-730\.1 A3: Should ENG-730 ship without fixing this/);
   assert.equal(state(root, id).discovered[1].status, 'open');
   // Free text on the command line is not the owner's decision: `--decision` is ignored, the reason is recorded as given.
   const r = ok(close(2, ['--decision', 'harmless today', '--json'])).json();

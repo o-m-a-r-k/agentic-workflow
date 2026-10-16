@@ -30,7 +30,7 @@ import { report, toCsv, toHandoffCsv, toHtml, toJson, toText } from './telemetry
 import { impact } from './topology.mjs';
 import { commentFile, hasTicket, limitItemsText, performTracker, publicAssetsProblem, recordSummary, recordTracker } from './tracker.mjs';
 import { ENGINE_VERSION, WfError, parseArgs, refuse } from './util.mjs';
-import { approveFromQuestion, approveInTerminal, decisionLine, pendingDecisions, withdrawDecision } from './approve.mjs';
+import { approveFromQuestion, approveHint, approveInTerminal, decisionLine, pendingDecisions, withdrawDecision } from './approve.mjs';
 import { logRefusal, readRefusals, refusalCounts } from './refusals.mjs';
 import { recordStrategy, signalsReport, signalsText } from './strategy.mjs';
 import { courseLines, pastEstimates } from './signals.mjs';
@@ -111,15 +111,16 @@ Work
   wf stop --class major-finding|tree-change|owner-decision --reason "why"
                                     stop a running gate; records the class and the minutes discarded
   wf scope list                     every open review finding: blocks or observation, its family, where it went
-  wf scope ticket --finding REVIEWER:F1[,D3] [--capture RAW.json] [--reason "why it waits"] [--explain FILE.json] [--person-directed "<their words>"]
+  wf scope ticket --finding REVIEWER:F1[,D3] [--capture RAW.json] [--reason "why it waits"] [--ask FILE.json] [--person-directed "<their words>"]
                                     low items only: asks the person first; with their yes, create the ticket and record
                                     its raw tracker readback with --capture
   wf scope fixed --finding REVIEWER:F1 --commit SHA
                                     an observation this attempt fixed; the next reviewer verifies it
-  wf scope defer --finding REVIEWER:F1[,D3] [--reason "why it waits"] [--explain FILE.json] [--person-directed "<their words>"]
+  wf scope defer --finding REVIEWER:F1[,D3] [--reason "why it waits"] [--ask FILE.json] [--person-directed "<their words>"]
                                     low observations and discovered issues left for later; one short question per item
-  wf scope waive --finding REVIEWER:F1 [--reason "why"]
-                                    a blocking finding set aside: the person's decision (\`wf approve\`)
+  wf scope waive --finding REVIEWER:F1[,REVIEWER:F2] [--reason "why"] [--ask FILE.json] [--same-as A<n>]
+                                    blocking findings set aside: the person's decision (\`wf approve\`), one question per
+                                    finding; --same-as: a finding raised again about a gap the person already accepted in A<n>
   wf scope move --finding REVIEWER:F1 --sibling ATTEMPT
                                     hand a finding on code this attempt did not change to a sibling attempt of the batch
   wf review --closure file.json     record the reviewer's closure
@@ -151,6 +152,9 @@ Work
   wf unlock --attempt ID            remove the evidence lock of an attempt whose owner process is gone (a live owner is refused)
   wf hold --reason "why" | wf release   (release asks the owner to confirm with \`wf approve\`)
   wf decisions [--all]              the owner's reserved decisions on the attempt, pending first
+  --ask FILE.json                   on any command that needs the person's answer: the question's words, written before it
+                                    is asked: { "context", "recommend": { "choice", "why" }, "technical", "items": { "<ref>":
+                                    { "what", "fix" } } }; without it the command says what to write
   wf decisions withdraw ID --reason "what changed"
                                     take back a question whose subject changed (pending, or answered and not yet used)
   wf approve ID [--choice C]        the owner confirms a reserved decision in their own terminal
@@ -403,7 +407,7 @@ export async function main(argv) {
 const FULL_VERIFY = new Set(['accept', 'deliver', 'verify', 'doctor', 'export']);
 
 const WRITE_OPTIONS = ['out', 'csv', 'handoffs-csv', 'html', 'dir', 'to', 'root'];
-const READ_OPTIONS = ['file', 'sweep', 'division', 'capture', 'explain', 'comments', 'summary-file', 'closure', 'issue-file', 'from', 'comment-file', 'context-file'];
+const READ_OPTIONS = ['file', 'sweep', 'division', 'capture', 'explain', 'ask', 'comments', 'summary-file', 'closure', 'issue-file', 'from', 'comment-file', 'context-file'];
 const PATH_OPTIONS = [...WRITE_OPTIONS, ...READ_OPTIONS];
 const FOLDER_OPTIONS = new Set(['dir', 'to', 'root', 'from']);
 
@@ -1132,7 +1136,8 @@ async function dispatch(cmd, sub, positional, options) {
       const id = sub ?? positional[0];
       if (!id) throw new WfError('usage: wf approve ID [--choice C] --attempt ATTEMPT (in the owner\'s own terminal) | wf approve ID --from-question --attempt ATTEMPT (the owner\'s answer in the question panel)');
       const r = options['from-question'] ? await approveFromQuestion(root, id, options) : await approveInTerminal(root, id, options);
-      print(options, `${r.decision} decided: ${r.words ? `in the person's own words: "${r.words}" (follow them; it grants nothing a choice would)` : r.choice}${r.reply ? ` (their reply: "${r.reply}"; follow any condition in it)` : ''}. next: ${nextAction(root, r.state)}`, { decision: r.decision, choice: r.choice, ...(r.words ? { words: r.words } : {}), ...(r.reply ? { reply: r.reply } : {}) });
+      const settled = (r.state.decisions ?? []).find((x) => x.id === r.decision)?.settles?.[r.choice] ?? [];
+      print(options, `${r.decision} decided: ${r.words ? `in the person's own words: "${r.words}" (follow them; it grants nothing a choice would)` : r.choice}${r.reply ? ` (their reply: "${r.reply}"; follow any condition in it)` : ''}.${settled.length ? ` This answer also decides ${settled.join(', ')}: record each with the command it needs (\`wf scope waive --finding <ids>\` for findings that block, \`wf scope defer\` or \`wf scope ticket\` for the rest, \`wf discovered close\` for a discovered issue); none asks the person again.` : ''} next: ${nextAction(root, r.state)}`, { decision: r.decision, choice: r.choice, ...(r.words ? { words: r.words } : {}), ...(r.reply ? { reply: r.reply } : {}) });
       return 0;
     }
     case 'intent': {
@@ -1157,7 +1162,7 @@ async function dispatch(cmd, sub, positional, options) {
       const d = r.decision;
       const parts = [`strategy decision ${d.id} recorded on ${r.state.id}: ${d.action}`, `prediction: ${d.prediction.signal} by ${typeof d.prediction.by === 'number' ? `round ${d.prediction.by}` : d.prediction.by}`];
       if (r.split) parts.push(`split ${r.split.id}: ${r.split.siblings.map((x) => x.id).join(', ')} joined ${r.split.batch} with ${r.state.id}`);
-      if (r.escalation) parts.push(`the owner decides ${r.escalation.id} (${r.escalation.choices.join(' | ')}): in their own terminal, \`wf approve ${r.escalation.id}\`, or in your question panel, then \`wf approve ${r.escalation.id} --from-question\``);
+      if (r.escalation) parts.push(`the person decides ${r.escalation.id}: ${approveHint(r.state, r.escalation)}`);
       if (d.action === 'delta-review') parts.push('the next reviewer round is a delta round');
       if (d.action === 'ticket') parts.push(`follow-up tickets owed for ${d.items.join(', ')}: file them in the tracker (the engine records no ticket); they are not part of this delivery`);
       print(options, `${parts.join('\n  ')}\nnext: ${nextAction(root, r.state)}`, { decision: d, split: r.split ? { id: r.split.id, batch: r.split.batch, siblings: r.split.siblings.map((x) => x.id), moved: r.split.moved } : null, escalation: r.escalation?.id ?? null });

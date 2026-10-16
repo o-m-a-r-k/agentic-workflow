@@ -253,7 +253,8 @@ test('0.7.23 (I-177): a member observation the person answered "fix now" after t
   assert.equal(issue.status, 'open');
   assert.deepEqual(observations(loadState(root, e.id)), [], 'the member has no open observation: it moved');
   assert.equal(sh(memberWt, 'git rev-parse HEAD'), memberHead, 'the member is untouched');
-  assert.doesNotMatch(knownLimits(loadState(root, e.id), { load: (id) => loadState(root, id) }), /not in this delivery/, 'the batch is this delivery');
+  assert.doesNotMatch(knownLimits(loadState(root, e.id), { load: (id) => loadState(root, id) }), /not in this delivery|Follow-up moved to BATCH/, 'the batch is this delivery');
+  assert.match(knownLimits(loadState(root, e.id), { load: (id) => loadState(root, id) }), /Fixed in the combined delivery: /);
   // The batch's delivery waits for the item: it is the batch's open discovered issue.
   const waits = wf(root, ['deliver', '--attempt', b.id, '--owner', 'o'], silent);
   assert.notEqual(waits.code, 0);
@@ -274,7 +275,7 @@ test('0.7.23 (I-177): a member observation the person answered "fix now" after t
   ok(wf(root, ['deliver', '--attempt', b.id, '--owner', 'o'], silent));
   assert.equal(state(root, b.id).phase, 'done');
   assert.equal(state(root, e.id).accepted.heads.app, memberHead, 'the member was delivered as it was accepted, its HEAD untouched');
-  assert.match(knownLimits(loadState(root, e.id), { load: (id) => loadState(root, id) }), new RegExp(`Follow-up moved to ${b.id}: the export button label is cut off`));
+  assert.match(knownLimits(loadState(root, e.id), { load: (id) => loadState(root, id) }), /Fixed in the combined delivery: the export button label is cut off/);
 });
 
 test('0.7.23 (I-177): an eject that would drop the batch\'s own commits is refused, and the delivery refusal for a member changed after it joined no longer advises it', () => {
