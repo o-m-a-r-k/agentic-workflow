@@ -152,6 +152,8 @@ Work
   wf decisions withdraw ID --reason "what changed"
                                     take back a question whose subject changed (pending, or answered and not yet used)
   wf approve ID [--choice C]        the owner confirms a reserved decision in their own terminal
+                                    (--from-question: their answer in the session's question panel, or their chat reply
+                                    to a message that asked exactly the decision's question)
   wf approve ID --from-question     or the agent records the owner's answer from its question panel (as the harness recorded it);
                                     an answer in their own words is recorded as theirs (choice "other"), to follow
   wf lesson add|waive|recur|merge|distinct|move|set|apply|show|list|preview|review|export

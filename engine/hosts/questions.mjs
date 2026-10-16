@@ -119,3 +119,80 @@ export async function codexQuestionAnswers(file) {
   });
   return out;
 }
+
+// The person's reply in the chat, bound to the message it answers (0.7.18). Each entry pairs a reply the person typed with the
+// agent's whole message just before it (every text the agent wrote since the person's previous turn), as the harness recorded
+// both. What a reply may confirm is the engine's decision (engine/approve.mjs): only a message that carries a decision's exact
+// question binds a reply to it.
+//
+// Named failure (0.7.18): a person working from the phone did not get the harness's question panel (and one host's default
+// mode tells its agent never to use the panel for approvals). They answered "Yes" in the chat twice; the engine read only the
+// panel and their own terminal, so the decision stayed open, the agent merged around the workflow on their "override it", and
+// closing the ticket then needed one more answer they had no way to give.
+export async function claudeChatAnswers(file) {
+  const out = [];
+  let said = [];
+  let saidAt = null;
+  await readLines(file, (line) => {
+    if (!line.includes('"assistant"') && !line.includes('"user"')) return;
+    let e;
+    try {
+      e = JSON.parse(line);
+    } catch {
+      return;
+    }
+    if (e?.isSidechain) return;
+    const content = e?.message?.content;
+    if (e?.type === 'assistant' && Array.isArray(content)) {
+      for (const b of content) if (b?.type === 'text' && typeof b.text === 'string' && b.text.trim()) said.push(b.text);
+      saidAt = e.timestamp ?? saidAt;
+      return;
+    }
+    // A prompt the person typed: not a tool result, not a harness note (`isMeta`), not a command wrapper.
+    if (e?.type !== 'user' || e.isMeta) return;
+    const text = typeof content === 'string' ? content : Array.isArray(content) && !content.some((c) => c?.type === 'tool_result') ? content.filter((c) => c?.type === 'text').map((c) => c.text ?? '').join('\n') : null;
+    if (typeof text !== 'string' || !text.trim() || /^\s*</.test(text)) return;
+    if (said.length) out.push({ askedAt: saidAt, at: e.timestamp ?? null, question: said.join('\n'), options: null, answer: text.trim(), channel: 'chat' });
+    said = [];
+    saidAt = null;
+  });
+  return out;
+}
+
+// Codex: the agent's `message` items (role assistant, `output_text`) since the person's previous turn, then the person's
+// `message` (role user, `input_text` only; harness context and panel replies start with a tag and are not replies).
+export async function codexChatAnswers(file) {
+  const out = [];
+  let said = [];
+  let saidAt = null;
+  let metaSeen = false;
+  let interactive = false;
+  await readLines(file, (line) => {
+    if (!line.includes('session_meta') && !line.includes('"message"')) return;
+    let e;
+    try {
+      e = JSON.parse(line);
+    } catch {
+      return;
+    }
+    if (e?.type === 'session_meta') {
+      interactive = !metaSeen && ['cli', 'vscode'].includes(e.payload?.source) && e.payload?.originator !== 'codex_exec';
+      metaSeen = true;
+      return;
+    }
+    const p = e?.payload;
+    if (!interactive || e?.type !== 'response_item' || p?.type !== 'message' || !Array.isArray(p.content)) return;
+    if (p.role === 'assistant') {
+      for (const b of p.content) if (b?.type === 'output_text' && typeof b.text === 'string' && b.text.trim()) said.push(b.text);
+      saidAt = e.timestamp ?? saidAt;
+      return;
+    }
+    if (p.role !== 'user' || !p.content.every((b) => b?.type === 'input_text')) return;
+    const text = p.content.map((b) => b.text ?? '').join('\n');
+    if (!text.trim() || /^\s*</.test(text)) return;
+    if (said.length) out.push({ askedAt: saidAt, at: e.timestamp ?? null, question: said.join('\n'), options: null, answer: text.trim(), channel: 'chat' });
+    said = [];
+    saidAt = null;
+  });
+  return out;
+}

@@ -8,7 +8,7 @@ import { codexTranscript } from './codex-transcript.mjs';
 import { codexUsage } from './codex-usage.mjs';
 import { tomlRole } from './role-files.mjs';
 import { readLines } from './safe-file.mjs';
-import { codexQuestionAnswers } from './questions.mjs';
+import { codexChatAnswers, codexQuestionAnswers } from './questions.mjs';
 import { parseArgs, shellRunsOf, tailLines, textOf, toolOf } from './tool-calls.mjs';
 
 // What a Codex `exec` script ran, as the owner reads it: the shell command it passed to `exec_command`, or the tool it
@@ -185,6 +185,7 @@ export default {
   connectorCalls,
   // The person's answers to the session's question panel (request_user_input), bound to the call each names.
   questionAnswers: codexQuestionAnswers,
+  chatAnswers: codexChatAnswers,
 
   // ---- Roles ----
   verifyRole,

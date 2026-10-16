@@ -65,10 +65,11 @@ export const optionLines = (d) => d.choices.map((c) => `"${labelOf(d, c)}${d.rec
 
 // Named failure (I-135): the question tool answered "accepted" but the person saw no panel and no way to decide, and the
 // reply around it held file links and workflow words. The decision is shown in the reply itself (what it does, why, what
-// remains), whatever the panel does: a tool's acceptance is no proof the person can see it. The answer still counts only
-// as the panel recorded it or as typed in their terminal.
+// remains), whatever the panel does: a tool's acceptance is no proof the person can see it. The answer counts as the panel
+// recorded it, as the person's chat reply to a message that asked exactly this question (0.7.18), or as typed in their
+// terminal.
 const SHOW = 'say in your reply, in plain words, what this decides, why, and what happens after each choice (a question panel may not show, and its acceptance proves nothing)';
-export const approveHint = (state, d) => `${SHOW}; then ask the owner in your question panel the question "${questionFor(state, d)}" with exactly these options (label, then its description): ${optionLines(d)}; and run \`wf approve ${d.id} --from-question --attempt ${state.id}\`, or they run \`wf approve ${d.id} --attempt ${state.id}\` in their own terminal (choices: ${d.choices.join(' | ')}); then run this command again`;
+export const approveHint = (state, d) => `${SHOW}; then ask the owner in your question panel the question "${questionFor(state, d)}" with exactly these options (label, then its description): ${optionLines(d)}; and run \`wf approve ${d.id} --from-question --attempt ${state.id}\`; when the panel does not show for them (a phone, a mode without it), ask in your message instead, quoting that question exactly with its options and asking nothing else in that message, and after they reply run the same \`--from-question\` command; or they run \`wf approve ${d.id} --attempt ${state.id}\` in their own terminal (choices: ${d.choices.join(' | ')}); then run this command again`;
 
 // A yes/no reserved decision that must be answered `yes` (0.7.0). Named failure: `requireApproved` returns whatever
 // choice was approved, so an answer of `no` read as an approval at a caller that only tested for a value. A `no` refuses,
@@ -95,7 +96,7 @@ export async function approveInTerminal(root, id, options, { input = process.std
   if (d.approved) throw refuse(`${id} was already decided: ${d.approved.choice}`, null, { id: 'approve:already' });
   if (d.withdrawn) throw refuse(`${id} was withdrawn (${d.withdrawn.reason ?? ''}); the next command asks a fresh question`, null, { id: 'approve:withdrawn' });
   const agentEnv = agentEnvNames().filter((k) => env[k]);
-  if (agentEnv.length) throw refuse(`\`wf approve\` runs in the owner's own terminal, not under an agent runtime (${agentEnv.join(', ')})`, `ask the person in your question panel (the question "${questionFor(state, d)}", exactly the options ${d.choices.join(' | ')}), then run \`wf approve ${id} --from-question --attempt ${state.id}\`; or they run \`wf approve ${id} --attempt ${state.id}\` in a terminal outside the agent app`, { id: 'approve:agent-env' });
+  if (agentEnv.length) throw refuse(`\`wf approve\` runs in the owner's own terminal, not under an agent runtime (${agentEnv.join(', ')})`, `ask the person in your question panel (the question "${questionFor(state, d)}", exactly the options ${d.choices.join(' | ')}), then run \`wf approve ${id} --from-question --attempt ${state.id}\`; when the panel does not show for them (a phone, a mode without it), ask in your message instead, quoting the question exactly with its options and asking nothing else in that message, and after they reply run the same \`--from-question\` command; or they run \`wf approve ${id} --attempt ${state.id}\` in a terminal outside the agent app`, { id: 'approve:agent-env' });
   if (!input.isTTY || !output.isTTY) throw refuse(`not an interactive terminal: \`wf approve\` is run by the owner in their own terminal, where it asks them to type the choice`, `run \`wf approve ${id} --attempt ${state.id}\` in a terminal`, { id: 'approve:no-tty' });
   const preset = options.choice === undefined || options.choice === true ? null : String(options.choice);
   if (preset && !d.choices.includes(preset)) throw new WfError(`--choice ${preset}: not one of ${d.choices.join(' | ')}`);
@@ -122,8 +123,8 @@ function noteAnswer(root, state, d, choice, words) {
   noteLearned(root, { kind: 'answer', attempt: state.id, choice, ...(words ? { words } : {}), summary: d.summary ?? null });
 }
 
-// `wf approve <id> --from-question`: the answer the person gave in the calling session's question panel, as the harness
-// recorded it. It counts when the question names this attempt and decision and carries the decision's own summary (so the
+// `wf approve <id> --from-question`: the answer the person gave in the calling session's question panel, or their reply in
+// its chat to a message that asked the decision's exact question (0.7.18), as the harness recorded it. It counts when the question names this attempt and decision and carries the decision's own summary (so the
 // person saw what they confirm), offered exactly the decision's choices (when the harness records the options), and was
 // answered after the decision was created; the latest such answer is the person's. Nothing else in the transcript is read.
 // Its stated limit, as for the tracker readback: the host's record, not a signature (docs/trust-model.md).
@@ -135,10 +136,11 @@ export async function approveFromQuestion(root, id, options, { env = process.env
   if (d.withdrawn) throw refuse(`${id} was withdrawn (${d.withdrawn.reason ?? ''}); the next command asks a fresh question`, null, { id: 'approve:withdrawn' });
   if (options.choice !== undefined && options.choice !== true) throw new WfError('--choice is for the terminal; with --from-question the choice is the one the person picked in the panel');
   const question = questionFor(state, d);
-  const how = `${SHOW}; ask again in your question panel (the question "${question}" with exactly these options: ${optionLines(d)}) and run this again, or, when the panel does not show for them, give them the terminal route: \`wf approve ${id} --attempt ${state.id}\``;
+  const how = `${SHOW}; ask again in your question panel (the question "${question}" with exactly these options: ${optionLines(d)}) and run this again. When the panel does not show for them (a phone, a mode without it), ask in your message instead: quote the question exactly, list the options, ask nothing else in that message, and run this again after they reply; or they run \`wf approve ${id} --attempt ${state.id}\` in their own terminal`;
   const caller = detectOwner(env);
   const host = caller ? findHost(caller.runtime) : null;
   const read = optional(host, 'questionAnswers');
+  const chat = optional(host, 'chatAnswers');
   if (!caller || !read) throw refuse(`--from-question reads the question panel of the agent session that runs it, and this is not a session whose harness records one`, `the person runs \`wf approve ${id} --attempt ${state.id}\` in their own terminal`, { id: 'approve:no-panel' });
   const t = optional(host, 'transcriptFile')?.(caller.session, { home: home() });
   if (!t?.file) throw refuse(`this session's transcript cannot be read (${t?.problem ?? 'no transcript'}), so its question panel cannot be`, `the person runs \`wf approve ${id} --attempt ${state.id}\` in their own terminal`, { id: 'approve:no-panel' });
@@ -153,16 +155,26 @@ export async function approveFromQuestion(root, id, options, { env = process.env
     return at >= 0 && (at === 0 || /\s/.test(q[at - 1]));
   };
   const after = (x) => Number.isFinite(Date.parse(x)) && Date.parse(x) >= created;
-  const bound = (await read(t.file)).filter((a) => carries(a.question) && offered(a.options) && after(a.at) && (a.askedAt == null || after(a.askedAt)));
+  // A chat reply binds to this decision only when the message it answers asks this question and no other open one of the
+  // attempt, so a "yes" can answer only one decision.
+  const others = (state.decisions ?? []).filter((x) => x.id !== d.id && !x.approved && !x.withdrawn).map((x) => questionFor(state, x));
+  const alone = (a) => a.channel !== 'chat' || !others.some((q) => {
+    const at = a.question.indexOf(q);
+    return at >= 0 && (at === 0 || /\s/.test(a.question[at - 1]));
+  });
+  const answers = [...(await read(t.file)), ...(chat ? await chat(t.file) : [])];
+  const bound = answers.filter((a) => carries(a.question) && alone(a) && offered(a.options) && after(a.at) && (a.askedAt == null || after(a.askedAt))).sort((x, y) => Date.parse(x.at) - Date.parse(y.at));
   const last = bound.at(-1);
-  if (!last) throw refuse(`no answer to ${d.id} in this session's question panel after the decision was created`, how, { id: 'approve:no-answer' });
-  const choice = d.choices.find((c) => norm(c) === norm(last.answer) || norm(labelOf(d, c)) === norm(last.answer)) ?? null;
+  if (!last) throw refuse(`no answer to ${d.id} in this session's question panel, or in its chat to a message asking exactly its question, after the decision was created`, how, { id: 'approve:no-answer' });
+  // A chat reply chooses by its first words ("yes, go ahead" is yes); the panel's answer is the option itself.
+  const leads = (c) => [c, labelOf(d, c)].map(norm).filter((l) => l && (norm(last.answer) === l || (last.channel === 'chat' && norm(last.answer).startsWith(l) && /^[^\p{L}\p{N}]/u.test(norm(last.answer).slice(l.length)))));
+  const choice = d.choices.filter((c) => leads(c).length).sort((x, y) => Math.max(...leads(y).map((l) => l.length)) - Math.max(...leads(x).map((l) => l.length)))[0] ?? null;
   // An answer in the person's own words (the panel's free-text option) is theirs: recorded as `other` with the words, so the
   // question is answered and the owner follows the words; it grants nothing a choice would (0.7.8: it left the question
   // open for ever).
   const words = choice ? null : String(last.answer).trim().slice(0, 2000);
   if (!choice && !words) throw refuse(`the person's answer to ${d.id} is empty; nothing recorded`, how, { id: 'approve:mismatch' });
-  append(root, state.id, 'decision.approved', { id, choice: choice ?? 'other', ...(words ? { words } : {}), via: `question-panel (${host.label}, host-recorded)`, question: { text: last.question.slice(0, 2000), at: last.at, askedAt: last.askedAt } }, actor(options));
+  append(root, state.id, 'decision.approved', { id, choice: choice ?? 'other', ...(words ? { words } : {}), via: `${last.channel === 'chat' ? 'chat' : 'question-panel'} (${host.label}, host-recorded)`, question: { text: last.question.slice(0, 2000), at: last.at, askedAt: last.askedAt } }, actor(options));
   noteAnswer(root, state, d, choice ?? 'other', words);
   return { state: loadState(root, state.id), decision: id, choice: choice ?? 'other', words };
 }

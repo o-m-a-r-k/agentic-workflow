@@ -84,7 +84,8 @@ test('an answer counts only when bound to the decision, offered its choices, giv
   refusedWith(/no answer to A1 in this session's question panel/, 'the person typed yes in the chat: prose is never read');
   // I-135: a panel that showed nothing is not the end of the road: the reply explains the decision, and the terminal route is given.
   refusedWith(/say in your reply, in plain words, what this decides, why, and what happens after each choice \(a question panel may not show, and its acceptance proves nothing\)/, 'the decision is explained in the reply');
-  refusedWith(new RegExp(`when the panel does not show for them, give them the terminal route: \`wf approve A1 --attempt ${e.id.replace('.', '\\.')}\``), 'the terminal route is given');
+  refusedWith(/When the panel does not show for them \(a phone, a mode without it\), ask in your message instead: quote the question exactly/, 'the chat route is given');
+  refusedWith(new RegExp(`or they run \`wf approve A1 --attempt ${e.id.replace('.', '\\.')}\` in their own terminal`), 'the terminal route is given');
   claudeAsks(p, { question: `${e.id} ${d.id}: lift it?`, answer: 'yes' });
   refusedWith(/no answer to A1/, 'the question does not say what the decision does');
   claudeAsks(p, { question: `${d.id}: ${d.summary}`, answer: 'yes' });
@@ -176,4 +177,69 @@ test('a deferral the person confirmed in the question panel says so wherever it 
   ok(approveQ(p, e.id, d.id, env));
   ok(wf(p.root, ['discovered', 'close', 'D1', '--deferred', '--reason', 'the mobile pass', '--attempt', e.id], silent));
   assert.match(ok(wf(p.root, ['discovered', 'list', '--attempt', e.id], silent)).out, /deferred \(approved-decision \(answered by the person in the question panel; the harness recorded the answer, not a signature\)\)/);
+});
+
+// 0.7.18 (D26), named failure (field): a person on the phone got no question panel and answered "Yes" in the chat twice; the
+// engine read neither, the agent merged around the workflow, and closing the ticket then needed one more answer they could
+// not give. Their chat reply now confirms, bound to the agent's message just before it when that message asks exactly the
+// decision's question and no other open one.
+function claudeChat(p, { said, reply, saidWhen = at(500), when = at(1000), session = CLAUDE }) {
+  const file = path.join(homeOf(p), '.claude', 'projects', 'proj', `${session}.jsonl`);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.appendFileSync(file, [
+    { type: 'assistant', timestamp: saidWhen, message: { role: 'assistant', content: [{ type: 'text', text: said }] } },
+    { type: 'user', timestamp: when, message: { role: 'user', content: reply } },
+  ].map((l) => JSON.stringify(l)).join('\n') + '\n');
+}
+
+test('chat: the person\'s reply to a message asking exactly the decision\'s question confirms it; an unbound or ambiguous reply does not', () => {
+  const p = singleRepoProject('approve-chat', {});
+  const e = ok(wf(p.root, ['entry', '--item', 'ENG-940', '--owner', `codex:${OLD}`, '--json'], silent)).json();
+  liveCodexOwner(p, OLD);
+  ok(wf(p.root, ['hold', '--reason', 'wait', '--attempt', e.id], silent));
+  const asked = wf(p.root, ['release', '--attempt', e.id], silent);
+  assert.equal(asked.code, 75);
+  assert.match(asked.err, /when the panel does not show for them \(a phone, a mode without it\), ask in your message instead, quoting that question exactly/);
+  const d = state(p.root, e.id).decisions[0];
+  const question = `${e.id} ${d.id}: ${d.summary}`;
+  const env = { CLAUDE_CODE_SESSION_ID: CLAUDE };
+  // A "yes" to a message that does not carry the question binds to nothing.
+  claudeChat(p, { said: 'Shall I go ahead and finish the delivery?', reply: 'Yes' });
+  assert.match(approveQ(p, e.id, d.id, env).err, /no answer to A1 in this session's question panel, or in its chat to a message asking exactly its question/);
+  // A message that also carries another open decision's question binds no reply to either.
+  // A second open decision: taking over the live owner's attempt.
+  assert.equal(adopt(p, e.id, env).code, 75);
+  const other = state(p.root, e.id).decisions.find((x) => x.id !== d.id && !x.approved);
+  assert.ok(other, "a second open decision exists");
+  {
+    claudeChat(p, { said: `Two questions.\n${question}\n${e.id} ${other.id}: ${other.summary}`, reply: 'yes', saidWhen: at(1500), when: at(2000) });
+    assert.match(approveQ(p, e.id, d.id, env).err, /no answer to A1/);
+  }
+  // The question quoted exactly, its options listed, and the person's reply in their own words starting with a choice.
+  claudeChat(p, { said: `Lifting the hold lets the work continue.\n\n${question}\n\nOptions: yes / no`, reply: 'Yes, go ahead', saidWhen: at(2500), when: at(3000) });
+  assert.match(ok(approveQ(p, e.id, d.id, env)).out, /A1 decided: yes/);
+  const recorded = state(p.root, e.id).decisions.find((x) => x.id === d.id).approved;
+  assert.equal(recorded.choice, 'yes');
+  assert.match(recorded.via, /^chat \(Claude Code, host-recorded\)$/);
+});
+
+test('chat on Codex: a reply after the agent\'s message with the exact question confirms; a word that only starts like a choice is the person\'s words', () => {
+  const p = singleRepoProject('approve-chat-codex', {});
+  const e = ok(wf(p.root, ['entry', '--item', 'ENG-941', '--json'], silent)).json();
+  ok(wf(p.root, ['hold', '--reason', 'wait', '--attempt', e.id], silent));
+  assert.equal(wf(p.root, ['release', '--attempt', e.id], silent).code, 75);
+  const d = state(p.root, e.id).decisions[0];
+  const question = `${e.id} ${d.id}: ${d.summary}`;
+  const file = path.join(homeOf(p), '.codex', 'sessions', '2026', '10', '16', `rollout-chat-${CODEX}.jsonl`);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const write = (reply) => fs.writeFileSync(file, [
+    { timestamp: at(), type: 'session_meta', payload: { id: CODEX, source: 'vscode', originator: 'Codex Desktop' } },
+    { timestamp: at(200), type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: '<environment_context>cwd</environment_context>' }] } },
+    { timestamp: at(500), type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: `The panel did not reach you, so here it is.\n\n${question}\n\nOptions: yes / no` }] } },
+    { timestamp: at(1000), type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: reply }] } },
+  ].map((r) => JSON.stringify(r)).join('\n') + '\n');
+  const env = { CODEX_THREAD_ID: CODEX };
+  write('yesterday was fine');
+  assert.match(ok(approveQ(p, e.id, d.id, env)).out, /A1 decided: in the person's own words: "yesterday was fine"/);
+  assert.equal(state(p.root, e.id).decisions[0].approved.choice, 'other', '"yesterday" is not "yes"');
 });
