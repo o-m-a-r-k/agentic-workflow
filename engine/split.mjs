@@ -10,6 +10,7 @@
 // What a split moves is obligations, not code: a sibling starts from the current base, so only work that has no code
 // yet moves (an unstarted work item, a criterion, an observation, a discovered issue). Findings that block stay with
 // the attempt that caused them.
+import { ownItem } from './tracker.mjs';
 import { actor, entry, nextAttemptId } from './attempt.mjs';
 import { roleClass, trustedAdapter } from './config.mjs';
 import { append, listAttempts, loadState } from './ledger.mjs';
@@ -136,7 +137,7 @@ export function performSplit(root, state, { resolved, reason, options = {} }) {
   const work = state.work ? [...movedWork.map((w) => ({ ...w })), ...(synthetic.length ? [{ id: `W${k}`, criteria: synthetic.map((c) => c.id), repos: [], class: roleClass(cfg, 'implementer'), why: `moved from ${state.id} by a split` }] : [])] : null;
   const repos = movedWork.length && movedWork.every((w) => w.repos?.length) ? [...new Set(movedWork.flatMap((w) => w.repos))] : Object.keys(state.repos);
   // The sibling starts from the current base on its own branch; the same item, so a sibling's id reads `<item>.<n>`.
-  const sibling = entry(root, { item: state.item, lane: state.lane, intent: 'implementation', repos: repos.join(','), id: nextAttemptId(root, state.item), owner: state.owner, deferHeavy: true, sibling: true, ...(state.issue?.file ? { 'issue-file': state.issue.file } : {}) });
+  const sibling = entry(root, { item: state.item, lane: state.lane, autoItem: ownItem(state), intent: 'implementation', repos: repos.join(','), id: nextAttemptId(root, state.item), owner: state.owner, deferHeavy: true, sibling: true, ...(state.issue?.file ? { 'issue-file': state.issue.file } : {}) });
   const by = actor(options);
   // I-120: why the parent's plan reads as it does (an analysis upgraded to implementation) travels with the plan it copies.
   append(root, sibling.id, 'split.created', { from: state.id, split: splitId, items: r.items, reason: why, ...((state.intentChanges ?? []).length ? { intentChanges: state.intentChanges.map(({ from, to, reason, at }) => ({ from, to, reason, at, attempt: state.id })) } : {}) }, by);

@@ -219,7 +219,11 @@ export function entry(root, options) {
   if (!cfg.lanes.includes(lane)) throw refuse(`lane \`${lane}\` is not enabled for this project (lanes: ${cfg.lanes.join(', ')})`);
   let item = options.item ? assertSafeId(options.item, 'item') : null;
   if (lane === 'standard' && !item) throw new WfError('standard lane needs --item <ticket id>');
-  if (lane === 'standard' || (lane === 'quick' && item)) {
+  // An item `wf` numbers itself (a quick fix with no ticket) is recorded as such and kept through reopen and split; any
+  // other item is the tracker's ticket and is checked as one (independent review of 0.7.21: guessing from a `QF-` prefix
+  // lost a real `QF-7` ticket and refused reopening a numbered fix under the project's id pattern).
+  const autoItem = options.autoItem === true || (lane === 'quick' && !item);
+  if ((lane === 'standard' || lane === 'quick') && item && !autoItem) {
     const wrong = itemProblem(cfg, item);
     if (wrong) throw refuse(wrong, 'run `wf entry --item <the tracker\'s ticket id>`');
   }
@@ -300,9 +304,9 @@ export function entry(root, options) {
       writeNoFollow(dest, fs.readFileSync(src), { exclusive: true }); // never through a link planted at the destination
       issue = { file: dest, sha256: hashFile(dest) };
     }
-    createAttempt(root, id, { id, item, lane, intent, repos, adapterBase, adapter, issue, originRuntime, reopenedFrom: options.reopenedFrom ?? null, deferHeavy: options.deferHeavy === true || options.deferHeavy === 'true' }, owner);
+    createAttempt(root, id, { id, item, lane, intent, autoItem, repos, adapterBase, adapter, issue, originRuntime, reopenedFrom: options.reopenedFrom ?? null, deferHeavy: options.deferHeavy === true || options.deferHeavy === 'true' }, owner);
   });
-  if (lane !== 'batch' && hasTicket({ lane, item }) && intent === 'implementation' && !options.sibling) emitTrackerEvent(root, cfg, id, 'admitted');
+  if (hasTicket({ lane, item, autoItem }) && intent === 'implementation' && !options.sibling) emitTrackerEvent(root, cfg, id, 'admitted');
   return loadState(root, id);
 }
 

@@ -33,3 +33,31 @@ test('a quick fix admitted with a ticket moves that ticket like any other; one w
   assert.match(q.id, /^QF-\d+\.1$/);
   assert.deepEqual(events(state(root, q.id)), []);
 });
+
+test('wf\'s own numbered item is recorded at admission: a typed QF-7 ticket is a ticket, and a numbered fix reopens under the id pattern', () => {
+  const { base, root } = singleRepoProject('quick-own-item', { tracker: { ...tracker, itemPattern: '^(ENG|QF)-\\d+$' }, gate: { steps: [{ id: 'unit', repo: 'app', run: 'true' }] } }, files);
+  // A ticket the tracker named QF-7 is the tracker's: admission reads it.
+  const typed = ok(wf(root, ['entry', '--item', 'QF-7', '--lane', 'quick', '--owner', 'o', '--json'])).json();
+  assert.equal(state(root, typed.id).autoItem, false);
+  assert.ok(events(state(root, typed.id)).includes('admitted'));
+  // An item outside the project's id pattern is refused for the quick lane as for the standard one.
+  assert.match(wf(root, ['entry', '--item', 'NOPE', '--lane', 'quick', '--owner', 'o']).err, /not a ticket id/);
+  // A numbered fix: no tracker steps, delivered and closed, then reopened as the same numbered fix.
+  const q = ok(wf(root, ['entry', '--lane', 'quick', '--owner', 'o', '--json'])).json();
+  assert.equal(state(root, q.id).autoItem, true);
+  const call = (args) => wf(root, [...args, '--attempt', q.id]);
+  ok(call(['plan', '--file', criteriaFile(base)]));
+  ok(call(['handoff', 'implementer', '--agent', 'i']));
+  commitIn(q.repos.app.worktree, { 'src/a.txt': 'fixed\n' });
+  ok(call(['handoff', 'close', '--agent', 'i']));
+  ok(call(['gate', ...OUT_OF_ORDER]));
+  ok(call(['handoff', 'reviewer', '--agent', 'r']));
+  ok(call(['review', '--closure', closureFile(base, goodClosure('r'))]));
+  ok(call(['accept']));
+  ok(call(['deliver']));
+  assert.equal(state(root, q.id).phase, 'done');
+  const item = state(root, q.id).item;
+  const reopened = ok(wf(root, ['reopen', '--item', item, '--reason', 'the fix regressed', '--owner', 'o', '--json'])).json();
+  const r = state(root, reopened.id ?? reopened.state?.id);
+  assert.deepEqual([r.lane, r.autoItem, events(r)], ['quick', true, []]);
+});

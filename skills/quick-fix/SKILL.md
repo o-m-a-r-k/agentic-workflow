@@ -1,6 +1,6 @@
 ---
 name: quick-fix
-description: Make a small fix without a ticket through agentic-workflow's quick lane. Use when the user explicitly asks for a quick fix in an enabled project.
+description: Make a small fix through agentic-workflow's quick lane, with or without a tracker ticket. Use when the user explicitly asks for a quick fix in an enabled project, or the project's rules route a kind of ticket through the quick lane.
 ---
 
 # Quick fix
@@ -9,7 +9,7 @@ A quick fix is small: one implementer, a handful of criteria, one review, one li
 
 With more than one open attempt, pass `--attempt <id>` to every `wf` command. Never poll a running role: run it in the foreground or wait for the host's completion notification. If your harness cannot start an agent type by name, launch each handed role with `wf handoff run --agent <id> --attempt <id>`; native launches load fresh engine instructions.
 
-1. `wf entry` (no `--item`: lane `quick`, id `QF-<n>`).
+1. `wf entry` with no ticket (lane `quick`, id `QF-<n>`), or `wf entry --item <ticket> --lane quick` for a ticket the project routes through the quick lane (`--item` alone admits it to the standard lane).
 2. Write the criteria yourself from the user's request, with your own prediction of the fix (the engine refuses a plan that states none, and shows it beside what happens; it is not a limit): `wf plan --file <yaml>`. No planner, no impact analysis.
 
    ```yaml

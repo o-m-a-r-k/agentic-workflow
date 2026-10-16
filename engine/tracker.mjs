@@ -202,10 +202,12 @@ function deliveredKey(cfg) {
 
 // Whether delivering this attempt posts a delivered comment (and so needs the owner's summary).
 // Whether an attempt works a ticket of the tracker: any lane but a batch (each member hands off its own), unless its item
-// is one `wf` numbered itself (`QF-<n>`, a quick fix with no ticket). Named failure (0.7.21): a project worked its tracker's
+// is one `wf` numbered itself (a quick fix with no ticket), as recorded at admission; for a ledger written before 0.7.21,
+// a `QF-<n>` item is `wf`'s own. Named failure (0.7.21): a project worked its tracker's
 // tickets through the quick lane, the engine read the lane as "no ticket", and those tickets never moved to In progress or
 // In UAT and never got the tester's comment.
-export const hasTicket = (state) => state.lane !== 'batch' && !/^QF-\d+$/.test(String(state.item ?? ''));
+export const ownItem = (state) => (typeof state.autoItem === 'boolean' ? state.autoItem : /^QF-\d+$/.test(String(state.item ?? '')));
+export const hasTicket = (state) => state.lane !== 'batch' && !ownItem(state);
 
 export function needsSummary(cfg, state) {
   if (cfg.tracker.kind === 'none' || !hasTicket(state)) return false;
@@ -273,7 +275,7 @@ export function recordSummary(root, cfg, state, options) {
   // `--explain` alone words items against the summary already recorded.
   const keep = (!file || file === true) && options.explain !== undefined && state.delivery?.summary?.text ? state.delivery.summary.text : null;
   if ((!file || file === true) && keep === null) throw new WfError('--file <summary.md> is required: a few plain-language lines on what changed, for the person who tests it');
-  if (!needsSummary(cfg, state)) throw refuse(`${state.id} posts no delivered comment (${cfg.tracker.kind === 'none' ? 'no tracker' : `lane ${state.lane}, or no delivered comment template`}); no summary is needed`);
+  if (!needsSummary(cfg, state)) throw refuse(`${state.id} posts no delivered comment (${cfg.tracker.kind === 'none' ? 'no tracker' : !hasTicket(state) ? `no ticket (${state.lane === 'batch' ? 'a batch: each member posts its own' : `${state.item} is wf's own number`})` : 'no delivered comment template'}); no summary is needed`);
   if (state.tracker.done.some((d) => d.event === 'delivered')) throw refuse('the delivered comment is already verified on the ticket; the summary can no longer change');
   // Posted to the tracker: read without following a link, a regular file with one name.
   const read = keep === null ? readRegular(path.resolve(String(file))) : null;

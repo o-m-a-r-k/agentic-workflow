@@ -26,7 +26,7 @@ import { canonical as canonicalPath, isInside, touchesEvidence } from './paths.m
 import { changedForStep, deliveryOrder, impact, inside, packageOf } from './topology.mjs';
 import { findSkill } from './skills.mjs';
 import { outsidePlan, outsideVerdicts, scopeFiles } from './scope.mjs';
-import { commentFile, emitTrackerEvent, hasTicket, needsSummary, recordSummary, writeDeliveredComment } from './tracker.mjs';
+import { commentFile, emitTrackerEvent, hasTicket, needsSummary, ownItem, recordSummary, writeDeliveredComment } from './tracker.mjs';
 import { designChecks, designVerdicts, requiredSkills, reviewDocumentProblems, reviewRules, ruleVerdicts, skillFiles, writeRuleDocuments } from './rules.mjs';
 import { expectOf, expectProblems, PLAN_EXPECT, ROLE_EXPECT } from './expectations.mjs';
 import { obligationSince } from './versions.mjs';
@@ -2204,7 +2204,7 @@ function finishDelivered(root, cfg, state) {
   const actions = !hasTicket(state) ? [] : emitTrackerEvent(root, cfg, state.id, 'delivered', { screenshots: set });
   if (actions.some((a) => a.rendered === 'delivered')) writeDeliveredComment(root, cfg, loadState(root, state.id));
   if (!actions.length && !needsShown(state) && !owesLesson(loadState(root, state.id))) {
-    append(root, state.id, 'closed', { reason: cfg.tracker.kind === 'none' || state.lane !== 'standard' ? 'no tracker handoff for this lane' : 'no tracker actions configured' }, null);
+    append(root, state.id, 'closed', { reason: cfg.tracker.kind === 'none' ? 'no tracker' : !hasTicket(state) ? 'no ticket: no tracker handoff' : 'no tracker actions configured' }, null);
     closeExport(root, loadState(root, state.id));
     cleanupWorktrees(root, loadState(root, state.id));
   }
@@ -2551,7 +2551,7 @@ export function reopen(root, options) {
     .at(-1);
   if (!delivered) throw refuse(`${options.item} has no delivered (or shipped) attempt to reopen`);
   const waiver = typeof options['no-lesson'] === 'string' && options['no-lesson'].trim() ? options['no-lesson'].trim() : null;
-  const s = entry(root, { ...options, lane: delivered.lane === 'quick' ? 'quick' : 'standard', repos: Object.keys(delivered.repos).join(','), reopenedFrom: delivered.id });
+  const s = entry(root, { ...options, lane: delivered.lane === 'quick' ? 'quick' : 'standard', autoItem: ownItem(delivered), repos: Object.keys(delivered.repos).join(','), reopenedFrom: delivered.id });
   append(root, s.id, 'reopen.reason', { reason: String(options.reason), from: delivered.id }, actor(options));
   // Bookkeeping since 0.7.0 (engine/owner.mjs): the waiver and its reason are recorded with the caller as actor.
   if (waiver) append(root, s.id, 'lesson.waived', { reason: waiver, on: 'reopen' }, actor(options));

@@ -241,6 +241,7 @@ export function reduce(entries) {
           item: d.item,
           lane: d.lane,
           intent: d.intent,
+          ...(typeof d.autoItem === 'boolean' ? { autoItem: d.autoItem } : {}),
           owner: e.actor,
           originRuntime: d.originRuntime ?? ownerRuntime(e.actor),
           owners: [e.actor],

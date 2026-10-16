@@ -16,7 +16,12 @@ Release notes, newest first, then every fix that came from a failure in the work
   - a reopened attempt reports it.
 
   A quick fix with no ticket, which `wf` numbers itself (`QF-<n>`), still has no tracker steps and closes on delivery.
-  The quick-fix skill and the lifecycle docs say so.
+  Whether an item is `wf`'s own number is recorded at admission and kept through reopen and split, so a tracker ticket
+  that happens to be named `QF-7` is still a ticket. The quick-fix skill and the lifecycle docs say how to admit a quick
+  fix on a ticket (`wf entry --item <ticket> --lane quick`).
+- **Live attempts.** A quick attempt already open with a ticket follows this at its next step. Its delivery now asks for
+  the summary (`wf deliver --summary-file <summary.md>`) and ends in the tracker handoff, so its ticket moves to the
+  delivered status with the comment even though it never showed In progress.
 
 ## 0.7.20 - Every screenshot exports
 
