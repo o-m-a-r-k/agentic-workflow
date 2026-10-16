@@ -367,6 +367,8 @@ export function trackerActions(root, cfg, state, event, extra = {}) {
 
 export function emitTrackerEvent(root, cfg, id, event, extra = {}) {
   const state = loadState(root, id);
+  // 0.7.23 (I-178): whatever the caller, an attempt that works no ticket (a batch, a numbered quick fix) queues no tracker step.
+  if (!hasTicket(state)) return [];
   const actions = trackerActions(root, cfg, state, event, extra);
   if (actions.length) append(root, id, 'tracker.pending', { event, actions }, null);
   return actions;

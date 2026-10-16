@@ -634,6 +634,10 @@ export function reduce(entries) {
         s.splitFrom = { attempt: d.from, split: d.split, items: d.items ?? [], reason: d.reason, at: e.at, intentChanges: d.intentChanges ?? [] };
         break;
       case 'tracker.pending':
+        // 0.7.23 (I-178): a batch has no ticket, so its derived state never owes a tracker step. A 0.7.20 engine queued one
+        // (it excluded the quick lane only), and the owner was told to do it for the batch's own id; the event stays in the
+        // chain, and a relaxation applies to every attempt (D7).
+        if (s.lane === 'batch') break;
         s.tracker.pending.push(...d.actions.map((a) => narrowAttach({ ...a, event: d.event }, s.delivery.narrowed)));
         s.tracker.pendingAt = { ...(s.tracker.pendingAt ?? {}), [d.event]: e.at };
         break;
