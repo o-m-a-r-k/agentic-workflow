@@ -143,3 +143,38 @@ test('wf split: a discovered issue moves as a criterion of the sibling, and leav
   assert.deepEqual(after.decisions ?? [], [], 'nobody was asked');
   assert.match(knownLimits(after), /- Not delivered: not part of this change after all/);
 });
+
+// 0.7.24 (I-181): members a split put together leave an abandoned batch only on the person's decision, one question for it.
+test('abandoning a batch a split put together asks the person once, then releases its members', async () => {
+  const cur = runner(JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version);
+  const { approveAsOwner, state } = await import('./helpers.mjs');
+  const ctx = project('split-abandon-batch', {}, { 'src/b.txt': 'b\n' });
+  const { root } = ctx;
+  const a = started(cur, ctx, { item: 'ENG-820', work: W });
+  ok(cur.run(root, ['split', '--items', 'W2', '--reason', 'the second module is independent', '--attempt', a.id, '--json']));
+  const sib = { id: 'ENG-820.2', wt: path.join(root, '.wf-worktrees', 'ENG-820.2', 'app'), owner: a.owner };
+  ok(cur.run(root, ['handoff', 'implementer', '--agent', 'impl-sib', '--work', 'W2', '--attempt', sib.id, '--owner', a.owner]));
+  commitIn(sib.wt, { 'src/b.txt': 'sibling\n' });
+  const accept2 = (x, criteria, tag) => {
+    const closure = (reviewer) => goodClosure(reviewer, { criteria: criteria.map((id) => ({ id, evidence: { kind: 'output', ref: 'log line 1' } })) });
+    ok(cur.run(root, ['handoff', 'reviewer', '--agent', `rev-${tag}0`, '--attempt', x.id, '--owner', x.owner]));
+    ok(cur.run(root, ['review', '--closure', closureFile(ctx.base, closure(`rev-${tag}0`)), '--attempt', x.id]));
+    ok(cur.run(root, ['gate', '--attempt', x.id]));
+    ok(cur.run(root, ['handoff', 'reviewer', '--agent', `rev-${tag}1`, '--attempt', x.id, '--owner', x.owner]));
+    ok(cur.run(root, ['review', '--closure', closureFile(ctx.base, closure(`rev-${tag}1`)), '--attempt', x.id]));
+    ok(cur.run(root, ['accept', '--attempt', x.id, '--owner', x.owner]));
+  };
+  accept2(sib, ['C2'], 's');
+  commitIn(a.wt, { 'src/a.txt': 'parent\n' });
+  accept2(a, ['C1'], 'p');
+  const b = ok(cur.run(root, ['batch', 'create', '--members', `${a.id},${sib.id}`, '--owner', a.owner, '--json'])).json();
+  const asked = cur.run(root, ['abandon', '--reason', 'ship them separately', '--attempt', b.id, '--owner', a.owner], { ownerSilent: true });
+  assert.equal(asked.code, 75);
+  const d = state(root, b.id).decisions.at(-1);
+  assert.equal(d.key, `abandon-batch:${b.id}`);
+  assert.match(d.plain, new RegExp(`^Should ${b.id.replace('.', '\\.')}, the combined delivery of ${a.id.replace('.', '\\.')} and ENG-820\\.2, be given up\\?`));
+  assert.equal(state(root, a.id).batchOf, b.id, 'nothing moved before the answer');
+  approveAsOwner(root, b.id, d.id, 'yes');
+  ok(cur.run(root, ['abandon', '--reason', 'ship them separately', '--attempt', b.id, '--owner', a.owner], { ownerSilent: true }));
+  for (const id of [a.id, sib.id]) assert.equal(state(root, id).batchOf, null);
+});

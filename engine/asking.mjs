@@ -177,6 +177,12 @@ export const FRAMES = {
     labels: { yes: 'Give it up', no: 'Keep it' },
     then: { yes: 'it is closed as abandoned; the work it carries does not ship with the other parts and needs a new attempt', no: 'it stays, and ships with the other parts' },
   }),
+  abandonBatch: ({ batch, members }) => ({
+    aliases: { yes: ['give it up', 'abandon it'], no: ['keep it'] },
+    question: `Should ${batch}, the combined delivery of ${members.join(' and ')}, be given up? Its parts were split so that they ship together; after this, each ships on its own.`,
+    labels: { yes: 'Give it up', no: 'Keep it' },
+    then: { yes: 'the combined delivery is closed (its branch is kept) and each part goes back to being delivered on its own; work made only in the combined delivery is not delivered', no: 'it stays, and its parts ship together' },
+  }),
   eject: ({ id, batch }) => ({
     aliases: { yes: ['take it out'], no: ['keep it'] },
     question: `Should ${id} be taken out of ${batch}, the combined delivery that was set up so that it ships together with its other parts?`,

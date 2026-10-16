@@ -2792,6 +2792,15 @@ export function batchEject(root, options) {
   const member = assertSafeId(options.member ?? '', 'attempt id');
   const members = batchMembers(root, batch.id);
   if (!members.includes(member)) throw refuse(`${member} is not in ${batch.id}`);
+  // 0.7.24 (I-181): a member of a batch abandoned before 0.7.24 still points at it; it leaves with only its own record (the
+  // batch has no worktree left to rebuild and delivers nothing), on the person's decision when a split put it there.
+  if (batch.phase === 'abandoned') {
+    const ms = loadState(root, member);
+    if (ms.batchOf !== batch.id) throw refuse(`${member} is not in ${batch.id} any more`);
+    const decision = (ms.splitFrom || ms.splits?.length) ? requireYes(root, ms, { kind: 'move-out-of-batch', key: `eject:${batch.id}:${member}:${(ms.batchJoins ?? 0)}`, summary: `${member} leaves the abandoned ${batch.id}, which carried work a split moved`, what: `ejecting ${member} from ${batch.id}`, frame: FRAMES.eject({ id: member, batch: batch.id }), options }).decision : null;
+    append(root, member, 'batch.ejected', { batch: batch.id, reason: options.reason ?? `${batch.id} was abandoned`, ...(decision ? { decision } : {}) }, actor(options));
+    return loadState(root, member);
+  }
   if (batch.delivery.completedAt || Object.keys(batch.delivery.repos).length) throw refuse(`${batch.id} is already being delivered`);
   // 0.7.23 (I-177), named failure (field): the rebuild below starts from the base and merges the remaining members, so every commit
   // the batch made itself (an integration fix, a moved item's fix) was lost, and the batch's gate and review no longer covered what was left.

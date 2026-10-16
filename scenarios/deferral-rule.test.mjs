@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { approveAsOwner, closureFile, commitIn, criteriaFile, goodClosure, ok, OUT_OF_ORDER, sh, singleRepoProject, state, toAccepted, wf } from './helpers.mjs';
 import { knownLimits } from '../engine/tracker.mjs';
-import { loadState, readLedger } from '../engine/ledger.mjs';
+import { append, loadState, readLedger } from '../engine/ledger.mjs';
 import { observations } from '../engine/review-policy.mjs';
 
 // 0.7.7, D17, named failure (field): under D10 a medium finding was the owner agent's call and a low one left freely, so
@@ -378,3 +378,22 @@ test('a low item closed fixed after the last review is a known limit: no reviewe
   assert.match(knownLimits(loadState(p.root, p.id)), /Fixed after the last review, not verified by a reviewer: a label wraps on a phone\./);
 });
 
+// 0.7.24 (I-181), named failure (found fixing I-177): an abandoned batch left each member pointing at it, so a member could be
+// neither delivered alone, ejected (the batch's worktree was gone) nor batched again.
+test('0.7.24 (I-181): abandoning an assembled batch releases its members; a member left behind by an earlier abandon is ejected from it', () => {
+  const { root, e, m2, b } = acceptedBatch('i181-release');
+  ok(wf(root, ['abandon', '--reason', 'deliver them one by one', '--attempt', b.id, '--owner', 'o'], silent));
+  for (const id of [e.id, m2]) assert.equal(state(root, id).batchOf, null, `${id} is free again`);
+  assert.equal((state(root, b.id).decisions ?? []).filter((x) => x.kind === 'move-out-of-batch').length, 0, 'members no split put together leave without a question');
+  assert.deepEqual(readLedger(root, b.id).find((x) => x.type === 'abandoned').data.released, [e.id, m2]);
+  ok(wf(root, ['batch', 'create', '--members', `${e.id},${m2}`, '--owner', 'o']));
+
+  // A batch abandoned before 0.7.24 kept its members; its worktree is gone. Each member leaves it with `wf batch eject`.
+  const old = acceptedBatch('i181-stranded');
+  append(old.root, old.b.id, 'abandoned', { reason: 'abandoned by an earlier engine' }, 'human:scenario');
+  fs.rmSync(path.dirname(state(old.root, old.b.id).repos.app.worktree), { recursive: true, force: true });
+  assert.equal(state(old.root, old.e.id).batchOf, old.b.id, 'stranded');
+  ok(wf(old.root, ['batch', 'eject', '--batch', old.b.id, '--member', old.e.id, '--owner', 'o'], silent));
+  assert.equal(state(old.root, old.e.id).batchOf, null);
+  assert.match(wf(old.root, ['batch', 'eject', '--batch', old.b.id, '--member', old.e.id, '--owner', 'o'], silent).err, /is not in .* any more/);
+});
