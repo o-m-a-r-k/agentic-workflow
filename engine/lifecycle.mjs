@@ -2090,10 +2090,31 @@ export function deliveredSet(root, state) {
   const batch = state.delivery.viaBatch ? loadState(root, state.delivery.viaBatch) : null;
   const seen = new Set();
   const files = [...screenshots(state), ...(batch ? screenshots(batch) : [])].filter(mine).filter((a) => !seen.has(a.sha256) && seen.add(a.sha256));
+  const titles = titlesOf(files);
+  return files.map((a, n) => ({ path: a.path, sha256: a.sha256, source: a.source ?? null, title: titles[n], proposed: proposeCaption(state, a) }));
+}
+
+// Each record's title, unique in its set: the file name; the source path when two share a name; the gate step that
+// captured it when two steps captured one source path; a number last. Named failure (I-170): two steps captured the same
+// relative path, so two records shared a title, the export refused them, and one upload could satisfy both records'
+// attachment check.
+function titlesOf(files) {
   const base = (a) => path.posix.basename(a.source ?? a.path);
-  const count = {};
-  for (const a of files) count[base(a)] = (count[base(a)] ?? 0) + 1;
-  return files.map((a) => ({ path: a.path, sha256: a.sha256, source: a.source ?? null, title: count[base(a)] > 1 ? String(a.source ?? a.path).replace(/^\/+/, '').replace(/\//g, '-') : base(a), proposed: proposeCaption(state, a) }));
+  const flat = (a) => String(a.source ?? a.path).replace(/^\/+/, '').replace(/\//g, '-');
+  const tally = (list) => list.reduce((m, t) => m.set(t, (m.get(t) ?? 0) + 1), new Map());
+  const names = files.map(base);
+  const byName = tally(names);
+  let titles = files.map((a, n) => (byName.get(names[n]) > 1 ? flat(a) : names[n]));
+  const byTitle = tally(titles);
+  titles = titles.map((t, n) => (byTitle.get(t) > 1 && files[n].step ? `${files[n].step}-${t}` : t));
+  const taken = new Set();
+  return titles.map((t) => {
+    const ext = path.extname(t);
+    let title = t;
+    for (let k = 2; taken.has(title); k++) title = `${t.slice(0, t.length - ext.length)}-${k}${ext}`;
+    taken.add(title);
+    return title;
+  });
 }
 
 // The heavy steps a quick fix's gate did not run (gate.mjs: the quick lane runs light steps only), for the reviewer and the
@@ -2247,10 +2268,8 @@ export function safeFileName(title) {
 export function gateFiles(state) {
   const seen = new Set();
   const files = screenshots(state).filter((a) => !seen.has(a.sha256) && seen.add(a.sha256));
-  const base = (a) => path.posix.basename(a.source ?? a.path);
-  const count = {};
-  for (const a of files) count[base(a)] = (count[base(a)] ?? 0) + 1;
-  return files.map((a) => ({ path: a.path, sha256: a.sha256, title: count[base(a)] > 1 ? String(a.source ?? a.path).replace(/^\/+/, '').replace(/\//g, '-') : base(a) }));
+  const titles = titlesOf(files);
+  return files.map((a, n) => ({ path: a.path, sha256: a.sha256, title: titles[n] }));
 }
 
 // Test seams: called just before a source is opened and just before a destination is created.
@@ -2312,10 +2331,14 @@ export function exportScreenshots(root, state, to = null, { gate = false } = {})
     let dest = path.join(dir, name);
     let fd;
     let failed = null;
+    let moved = false;
     for (let n = 1; n <= files.length + 1; n++) {
       dest = path.join(dir, n === 1 ? name : `${stem}-${n}${ext}`);
       exportSeams.beforeDestOpen?.(dest, dir);
-      if (!same()) break;
+      if (!same()) {
+        moved = true;
+        break;
+      }
       try {
         fd = fs.openSync(dest, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o644);
         break;
@@ -2327,7 +2350,8 @@ export function exportScreenshots(root, state, to = null, { gate = false } = {})
         }
       }
     }
-    if (!same()) {
+    if (moved || !same()) {
+      if (fd !== undefined) fs.closeSync(fd);
       problems.push(`${dir}: the export folder was replaced or moved during the export; nothing more written`);
       break;
     }

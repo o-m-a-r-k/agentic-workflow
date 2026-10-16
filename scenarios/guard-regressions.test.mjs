@@ -160,7 +160,7 @@ test('export screenshots: a symlink or file swapped in during the copy is never 
   assert.deepEqual(r.files.map((f) => path.basename(f.file)).sort(), ['home.png', 'menu.png']);
 });
 
-test('export screenshots: titles are plain file names; `..` and colliding names are refused', async () => {
+test('export screenshots: titles are plain file names; `..` is refused, clashing names are numbered', async () => {
   const { append } = await import('../engine/ledger.mjs');
   const { base, root, shots } = delivered('export-titles', 'ENG-172');
   const legacy = (item, files) => {

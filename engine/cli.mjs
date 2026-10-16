@@ -966,7 +966,7 @@ async function dispatch(cmd, sub, positional, options) {
       const s = openState(root, options);
       if (sub === 'screenshots') {
         const r = exportScreenshots(root, s, options.to && options.to !== true ? options.to : null, { gate: options.gate === true });
-        print(options, `copied ${r.files.length} ${options.gate ? 'gate' : 'delivered'} screenshot(s) of ${s.id} to ${r.dir} (each sha256-checked; view them with the Read tool):\n${r.files.map((f) => `  ${f.file}`).join('\n')}`, r);
+        print(options, `copied ${r.files.length} ${options.gate ? 'gate' : 'delivered'} screenshot(s) of ${s.id} to ${r.dir} (each sha256-checked; view them with the Read tool):\n${r.files.map((f) => `  ${f.file}${path.basename(f.file) !== f.title ? `  (${f.title})` : ''}`).join('\n')}`, r);
         return 0;
       }
       if (sub) throw new WfError('usage: wf export [--out FILE] [--json] | wf export screenshots [--gate] [--to DIR]');

@@ -1619,6 +1619,6 @@ export function importedCaptures(state) {
 }
 
 export function screenshots(state) {
-  return [...(state.lastGate?.steps ?? []).flatMap((s) => s.artifacts ?? []), ...importedCaptures(state)].filter((a) => a.kind === 'screenshot');
+  return [...(state.lastGate?.steps ?? []).flatMap((s) => (s.artifacts ?? []).map((a) => (a.step ? a : { ...a, step: s.id }))), ...importedCaptures(state)].filter((a) => a.kind === 'screenshot');
 }
 
