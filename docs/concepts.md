@@ -20,7 +20,6 @@ flowchart LR
   end
   subgraph Project["Each project (opt-in)"]
     A[".workflow/ adapter<br/>repos · components · gate steps<br/>tracker · delivery · secrets catalog"]
-    AG["AGENTS.md<br/>generated block"]
   end
   subgraph Runtimes["Agent runtimes"]
     C["Claude Code"]
@@ -33,8 +32,8 @@ flowchart LR
   P -- reads --> A
   C -- calls wf --> P
   X -- calls wf --> P
-  C -. reads .-> AG
-  X -. reads .-> AG
+  C -. session rules .-> P
+  X -. session rules .-> P
   P -- delivery adapter --> G
   C -. connector .-> T
   P -- engine route --> T
@@ -43,7 +42,7 @@ flowchart LR
 
 - **Plugin:** the engine and the `wf` CLI. It knows no framework, tracker or company.
 - **Adapter:** a committed `.workflow/` folder in each project. If it's missing or disabled, the plugin does nothing in that project.
-- **AGENTS.md:** the only instruction file the workflow writes. Claude Code and Codex both read it.
+- **Session rules:** the plugin's SessionStart hook gives every session in an enabled project the workflow's standing rules. The workflow writes nothing into the project's own instruction files (`AGENTS.md`, `CLAUDE.md`).
 
 ## Principles
 

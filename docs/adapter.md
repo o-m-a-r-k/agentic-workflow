@@ -26,7 +26,7 @@ repos:                       # git roots
       - { path: ., sharedInfra: [package.json, yarn.lock], docsOnly: ["**/*.md"] }
     provision: { clone: [node_modules], fingerprint: [yarn.lock], install: yarn install --immutable }
 adapterRepo: backend           # the repo whose committed .workflow/ judges each attempt; a root .workflow may only link to <that repo>/.workflow
-instructionFiles: [backend/AGENTS.md, frontend/AGENTS.md]
+instructionFiles: [backend/AGENTS.md, frontend/AGENTS.md]   # where releases before 0.7.24 wrote their block; `wf sync` removes it
 components: [...]
 delivery: { kind: push-main }
 tracker: { kind: linear, itemPattern: '^ENG-\d+$', statuses: { started: In Progress, delivered: Ready for UAT, done: Done } }

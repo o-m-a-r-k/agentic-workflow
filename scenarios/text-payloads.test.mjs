@@ -47,7 +47,7 @@ function fenced(rel) {
 }
 
 const TEXTS = [
-  'templates/AGENTS.block.md',
+  'templates/session-rules.md',
   ...fs.readdirSync(path.join(ROOT, 'templates', 'agents')).filter((f) => f.endsWith('.md')).map((f) => `templates/agents/${f}`),
   ...fs.readdirSync(path.join(ROOT, 'skills')).map((d) => `skills/${d}/SKILL.md`).filter((f) => fs.existsSync(path.join(ROOT, f))),
 ];

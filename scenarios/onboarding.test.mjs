@@ -72,50 +72,54 @@ test('wf doctor runs light steps on a clean base and tells config errors from re
   assert.equal(fs.existsSync(path.join(bad.root, '.wf-worktrees')) && fs.readdirSync(path.join(bad.root, '.wf-worktrees')).length, 0, 'doctor cleans its worktrees');
 });
 
-test('enable writes the AGENTS.md block and role agents; disable removes the block; status --quiet reflects it', () => {
+const OLD_BLOCK = '<!-- agentic-workflow:begin -->\n\n## agentic-workflow (old)\n\nOld rules: medium is your judgement.\n<!-- agentic-workflow:end -->\n';
+
+// 0.7.24 (D30): the plugin writes nothing into the project's instruction files; the session rules come from its SessionStart
+// hook. Named failure: the block put the plugin's text into each project's AGENTS.md, so a plugin release was a commit in
+// every project. The person: "this is part of the workflow plugin or adapter setup. not agents.md".
+test('enable writes role agents and nothing into AGENTS.md; a block an older release wrote is removed; status --quiet reflects it', () => {
   const { root } = onboarded([{ id: 'ok', repo: 'app', run: 'true' }]);
   write(root, 'AGENTS.md', '# Existing rules\n\nKeep me.\n');
   assert.equal(wf(root, ['status', '--quiet']).code, 3);
   ok(wf(root, ['enable']));
   assert.equal(wf(root, ['status', '--quiet']).code, 0);
-  const agents = fs.readFileSync(path.join(root, 'AGENTS.md'), 'utf8');
-  assert.match(agents, /Keep me\./);
-  assert.match(agents, /agentic-workflow:begin[\s\S]*agentic-workflow:end/);
+  assert.equal(fs.readFileSync(path.join(root, 'AGENTS.md'), 'utf8'), '# Existing rules\n\nKeep me.\n', 'the project\'s file is untouched');
   for (const f of ['.claude/agents/wf-reviewer.md', '.codex/agents/wf-reviewer.toml', '.claude/agents/wf-implementer.md']) assert.ok(fs.existsSync(path.join(root, f)), f);
   assert.match(fs.readFileSync(path.join(root, '.claude/agents/wf-reviewer.md'), 'utf8'), /^---\nname: wf-reviewer\n/);
-  ok(wf(root, ['enable']));
-  assert.equal((fs.readFileSync(path.join(root, 'AGENTS.md'), 'utf8').match(/agentic-workflow:begin/g) ?? []).length, 1, 'block is replaced, not duplicated');
+  // A block an older release wrote, between authored text, is removed and the authored text kept byte for byte.
+  write(root, 'AGENTS.md', `# Existing rules\n\nKeep me.\n\n${OLD_BLOCK}\n## Authored appendix\n\nKeep the suffix.\n`);
+  const synced = ok(wf(root, ['sync']));
+  assert.match(synced.out, /AGENTS\.md/);
+  assert.equal(fs.readFileSync(path.join(root, 'AGENTS.md'), 'utf8'), '# Existing rules\n\nKeep me.\n\n## Authored appendix\n\nKeep the suffix.\n');
+  ok(wf(root, ['sync']));
+  assert.equal(fs.readFileSync(path.join(root, 'AGENTS.md'), 'utf8'), '# Existing rules\n\nKeep me.\n\n## Authored appendix\n\nKeep the suffix.\n', 'a second sync changes nothing');
+  write(root, 'AGENTS.md', `# Existing rules\n\n${OLD_BLOCK}`);
   ok(wf(root, ['disable']));
-  const after = fs.readFileSync(path.join(root, 'AGENTS.md'), 'utf8');
-  assert.doesNotMatch(after, /agentic-workflow:begin/);
-  assert.match(after, /Keep me\./);
+  assert.equal(fs.readFileSync(path.join(root, 'AGENTS.md'), 'utf8'), '# Existing rules\n');
   assert.equal(wf(root, ['entry', '--item', 'X-1']).code, 75, 'disabled projects refuse work');
 });
 
-// Named failure I-61: sync removed the two Markdown separators restored by the formatter.
-test('I-61: generated Markdown separators survive repeated sync without altering authored text', () => {
-  const { root } = onboarded([{ id: 'ok', repo: 'app', run: 'true' }]);
-  const prefix = '# Existing rules\n\nKeep the authored prefix.\n';
-  const suffix = '\n## Authored appendix\n\nKeep the authored suffix.\n';
-  write(root, 'AGENTS.md', prefix);
+test('the session rules come from the plugin\'s SessionStart hook, in an enabled project only, with where the adapter keeps its invariants', async () => {
+  const { root } = singleRepoProject('session-rules', { enabled: false, invariants: 'AGENTS.invariants.md', gate: { steps: [{ id: 'ok', repo: 'app', run: 'true' }] } }, { '.workflow/AGENTS.invariants.md': '- Money is exact.\n' });
+  const { spawnSync } = await import('node:child_process');
+  const hook = path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'hooks', 'session-rules.mjs');
+  const run = (cwd) => spawnSync(process.execPath, [hook], { input: JSON.stringify({ hook_event_name: 'SessionStart', cwd }), encoding: 'utf8', env: { ...process.env, WF_HOME: path.join(root, '..', '.home'), WF_CONFIG_HOME: path.join(root, '..', '.wfhome') } });
+  const disabled = run(root);
+  assert.equal(disabled.status, 0);
+  assert.equal(disabled.stdout, '', 'nothing in a disabled project');
   ok(wf(root, ['enable']));
-  const file = path.join(root, 'AGENTS.md');
-  fs.appendFileSync(file, suffix);
-  const generated = fs.readFileSync(file, 'utf8');
-  // Freeze only the two independently observed formatter repairs, not a formatter implementation.
-  const formatted = generated
-    .replace('<!-- agentic-workflow:begin -->\n##', '<!-- agentic-workflow:begin -->\n\n##')
-    .replace('**Rules**\n- ', '**Rules**\n\n- ');
-  assert.ok(generated === formatted, 'enable must generate formatter-compatible separators');
-  fs.writeFileSync(file, formatted);
-  for (let i = 0; i < 2; i++) {
-    ok(wf(root, ['sync']));
-    const after = fs.readFileSync(file, 'utf8');
-    assert.equal(after, formatted, 'sync must preserve the formatter-clean document');
-    assert.ok(after.startsWith(prefix));
-    assert.ok(after.endsWith(suffix));
-    assert.equal((after.match(/<!-- agentic-workflow:begin -->/g) ?? []).length, 1);
-  }
+  const enabled = run(path.join(root, 'src'));
+  assert.equal(enabled.status, 0);
+  const out = JSON.parse(enabled.stdout).hookSpecificOutput;
+  assert.equal(out.hookEventName, 'SessionStart');
+  assert.match(out.additionalContext, /^agentic-workflow runs changes in this project \(/);
+  assert.match(out.additionalContext, /Reserved decisions \(.*\) are the user's\. Ask them in plain words, one question per item, never one they already answered; a typed answer and the question panel both count\./);
+  assert.match(out.additionalContext, /critical invariants are in `\.workflow\/AGENTS\.invariants\.md`/);
+  assert.doesNotMatch(out.additionalContext, /Money is exact/, 'named, not copied');
+  const outside = run(tmp('no-project'));
+  assert.equal(outside.stdout, '', 'nothing outside a project');
+  const hooks = JSON.parse(fs.readFileSync(path.join(path.dirname(hook), 'hooks.json'), 'utf8')).hooks;
+  assert.match(hooks.SessionStart[0].hooks[0].command, /hooks\/session-rules\.mjs/);
 });
 
 test('sync vendors required skills for every runtime; a reviewer handoff needs them', () => {
@@ -230,14 +234,13 @@ test('wf --version reports the released plugin version, which package.json match
 // 0.7.11, named failure: two projects' AGENTS.md carried a rule three releases old ("medium is your judgement") because the
 // block was refreshed only by a `wf sync` nobody ran, and an agent escalated the contradiction to the person. Generated files
 // git does not track follow the installed plugin by themselves; tracked ones are named with the one command.
-test('generated files follow the installed plugin: untracked role files are refreshed at a handoff, a stale tracked block is named', () => {
+test('generated files follow the installed plugin: untracked role files are refreshed at a handoff, a tracked block an older release wrote is named', () => {
   const { root } = onboarded([{ id: 'ok', repo: 'app', run: 'true' }]);
   ok(wf(root, ['enable']));
-  sh(root, 'git add AGENTS.md && git commit -q -m "agents block"');
+  write(root, 'AGENTS.md', `# Rules\n\n${OLD_BLOCK}`);
+  sh(root, 'git add AGENTS.md && git commit -q -m "an old block"');
   const role = path.join(root, '.claude', 'agents', 'wf-planner.md');
   assert.equal(spawnStatus(root, role), 1, 'the role file is not tracked');
-  fs.writeFileSync(path.join(root, 'AGENTS.md'), fs.readFileSync(path.join(root, 'AGENTS.md'), 'utf8').replace('What holds in every version:', 'Old rules: medium is your judgement.'));
-  sh(root, 'git commit -qam "an old block"');
   const e = ok(wf(root, ['entry', '--item', 'ENG-1', '--owner', 'o', '--json'])).json();
   const current = fs.readFileSync(role, 'utf8');
   fs.writeFileSync(role, current.replace('You are the planner', 'You are the old planner'));

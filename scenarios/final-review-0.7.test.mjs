@@ -207,7 +207,7 @@ test('every wf command an agent-facing text names exists, and no text asks the p
   }
   for (const m of cli.matchAll(/cmd === '([a-z][a-z-]*)'/g)) if (!subs.has(m[1])) subs.set(m[1], new Set());
   const files = [
-    'templates/AGENTS.block.md',
+    'templates/session-rules.md',
     ...fs.readdirSync(path.join(ROOT, 'templates', 'agents')).map((f) => `templates/agents/${f}`),
     ...fs.readdirSync(path.join(ROOT, 'skills')).map((d) => `skills/${d}/SKILL.md`).filter((f) => fs.existsSync(path.join(ROOT, f))),
   ];

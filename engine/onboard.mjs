@@ -371,9 +371,12 @@ export function instructionFiles(root, cfg) {
   return cfg.repos.map((r) => path.join(repoDir(root, r), 'AGENTS.md'));
 }
 
-function agentsBlock(root, cfg) {
-  const tpl = fs.readFileSync(path.join(PLUGIN_ROOT, 'templates', 'AGENTS.block.md'), 'utf8');
-  const invariants = cfg.invariants && fs.existsSync(path.join(root, ADAPTER_DIR, cfg.invariants)) ? fs.readFileSync(path.join(root, ADAPTER_DIR, cfg.invariants), 'utf8').trim() : '_No project invariants recorded yet._';
+// The standing rules every session in an enabled project starts with (0.7.24, D30): the plugin's text with the project's
+// adapter facts, given by the plugin's SessionStart hook (hooks/session-rules.mjs), never written into the project's files.
+// The project's invariants are named by where they are in the adapter, not copied.
+export function sessionRules(root, cfg) {
+  const tpl = fs.readFileSync(path.join(PLUGIN_ROOT, 'templates', 'session-rules.md'), 'utf8');
+  const invariants = cfg.invariants && fs.existsSync(path.join(root, ADAPTER_DIR, cfg.invariants)) ? `- The project's critical invariants are in \`${path.join(ADAPTER_DIR, cfg.invariants)}\`: read them before changing anything on a critical boundary.` : '';
   return tpl
     .replace('{project}', cfg.name)
     .replace('{lanes}', cfg.lanes.join(', '))
@@ -382,29 +385,20 @@ function agentsBlock(root, cfg) {
     .replace('{invariants}', invariants)
     .trim();
 }
-
-function nextBlockText(file, block) {
-  const text = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
-  // Named failure I-61: sync must preserve the formatter's blank line after the opening HTML marker.
-  const wrapped = `${BEGIN}\n\n${block}\n${END}`;
-  let next;
-  if (text.includes(BEGIN) && text.includes(END) && text.indexOf(END) > text.indexOf(BEGIN)) next = text.slice(0, text.indexOf(BEGIN)) + wrapped + text.slice(text.indexOf(END) + END.length);
-  else next = `${text}${text && !text.endsWith('\n') ? '\n' : ''}${text ? '\n' : ''}${wrapped}\n`;
-  return { text, next };
-}
-export function writeBlock(file, block) {
-  const { next } = nextBlockText(file, block);
-  mkdirStateDirectory(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, next);
+// A block an earlier release wrote into an instruction file (between the markers), removed by `wf sync` (D30).
+const hasBlock = (text) => text.includes(BEGIN) && text.includes(END) && text.indexOf(END) > text.indexOf(BEGIN);
+function withoutBlock(text) {
+  return (text.slice(0, text.indexOf(BEGIN)) + text.slice(text.indexOf(END) + END.length)).replace(/\n{3,}/g, '\n\n').trimEnd() + '\n';
 }
 
 export function removeBlock(file) {
-  if (!fs.existsSync(file)) return;
+  if (!fs.existsSync(file)) return false;
   const text = fs.readFileSync(file, 'utf8');
-  if (!text.includes(BEGIN) || !text.includes(END) || text.indexOf(END) < text.indexOf(BEGIN)) return; // never guess at a damaged block
-  const next = (text.slice(0, text.indexOf(BEGIN)) + text.slice(text.indexOf(END) + END.length)).replace(/\n{3,}/g, '\n\n');
-  if (next.trim()) fs.writeFileSync(file, next.trimEnd() + '\n');
+  if (!hasBlock(text)) return false; // never guess at a damaged block
+  const next = withoutBlock(text);
+  if (next.trim()) fs.writeFileSync(file, next);
   else fs.rmSync(file);
+  return true;
 }
 
 // One agent per role, and one implementer per class (`wf-implementer` is the implementer role's class).
@@ -481,13 +475,9 @@ export function sync(root) {
   const written = [];
   const changedRoles = [];
   written.changedRoles = changedRoles;
-  if (cfg.enabled) {
-    const block = agentsBlock(root, cfg);
-    for (const f of instructionFiles(root, cfg)) {
-      writeBlock(f, block);
-      written.push(f);
-    }
-  }
+  // 0.7.24 (D30): the plugin writes nothing into the project's instruction files; a block an earlier release wrote is removed
+  // (the session rules come from the plugin's SessionStart hook).
+  for (const f of instructionFiles(root, cfg)) if (removeBlock(f)) written.push(f);
   const agents = roleAgents(cfg);
   for (const runtime of hostIds()) {
     const host = hostFor(runtime);
@@ -543,13 +533,10 @@ const tracked = (file) => {
 export function generatedStatus(root) {
   const cfg = loadConfig(root);
   const out = [];
-  if (cfg.enabled) {
-    const block = agentsBlock(root, cfg);
-    // Only a block `wf sync` already wrote is kept current; creating one is `wf enable`'s and `wf sync`'s.
-    for (const f of instructionFiles(root, cfg)) {
-      const { text, next } = nextBlockText(f, block);
-      if (text.includes(BEGIN) && text !== next) out.push({ file: f, kind: 'block', content: next, tracked: tracked(f) });
-    }
+  // A block an earlier release wrote is stale by definition (D30): its removal is the pending change.
+  for (const f of instructionFiles(root, cfg)) {
+    const text = fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : '';
+    if (hasBlock(text)) out.push({ file: f, kind: 'block', content: withoutBlock(text), tracked: tracked(f) });
   }
   for (const { file, content } of roleFileContents(root, cfg)) {
     let before = null;

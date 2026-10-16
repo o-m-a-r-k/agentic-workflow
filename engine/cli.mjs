@@ -44,7 +44,7 @@ Onboarding
   wf doctor [--no-steps] [--runtime ${hostChoice()}]
                                     check config, tools, secrets, skills; run light steps on a clean base
   wf enable | wf disable            turn the workflow on/off for this project
-  wf sync                           regenerate the AGENTS.md block, role agents, vendored skills
+  wf sync                           regenerate role agents and vendored skills; remove an AGENTS.md block an older release wrote
   wf topology [--check]             show components and what the change touches; --check compares with the code
   wf skills update NAME --from DIR  replace a vendored skill (review and commit it, then wf sync)
   wf secrets status|init|set KEY|guide [KEY]

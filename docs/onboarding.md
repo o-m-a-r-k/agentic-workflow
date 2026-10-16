@@ -74,7 +74,7 @@ flowchart TD
   TOP --> ASK["Ask only what can't be detected<br/>tracker, lanes, invariants, product stage"]
   ASK --> SEC["Secrets: guided setup in your terminal"]
   SEC --> REQ["Skills, connectors, tools<br/>present or missing, per runtime"]
-  REQ --> WR["Write .workflow/, AGENTS.md block, role files"]
+  REQ --> WR["Write .workflow/ and role files"]
   WR --> DOC{"wf doctor<br/>on a clean base"}
   DOC -- "config wrong" --> WR
   DOC -- "tests already failing" --> FIX["Fix them as the first quick fix"]

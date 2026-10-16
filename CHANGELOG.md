@@ -12,10 +12,16 @@ Release notes, newest first, then every fix that came from a failure in the work
     the batch, in the 0.7.23 question shape. Nothing is released before the answer.
   - **A member left behind by a batch abandoned before 0.7.24** leaves it with `wf batch eject --batch <id> --member <id>`.
     Its own record changes; the batch, closed, is not rebuilt.
-- **The workflow block in each project's AGENTS.md holds only the stable rule for the person's questions.** The details
-  of how to ask (the `--ask` file, quoting, the question panel) live in the plugin's `work` skill and in `wf`'s own
-  messages. They change with the plugin, so a release no longer means a commit in every project. Named failure: 0.7.23 put
-  those details into the block, so the release changed every project's AGENTS.md.
+- **The workflow writes nothing into a project's AGENTS.md (D30).** Its standing rules reach every session from the plugin
+  itself. A new SessionStart hook, which Claude Code and Codex both run, gives each session started in an enabled project
+  the rules, with the project's lanes, tracker and delivery, and names where the adapter keeps its invariants. Outside an
+  enabled project it gives nothing. `wf sync`, `wf enable` and `wf disable` remove the block earlier releases wrote into
+  `AGENTS.md`, keeping the project's own text byte for byte, and `wf status` names a tracked file that still has one.
+  - Named failure: the block put the plugin's text into each project's own instruction file, so a plugin release that
+    changed it meant a commit in every project. The person: "this is part of the workflow plugin or adapter setup. not
+    agents.md".
+  - **After installing:** run `wf sync` in each project and commit the removal of the block. Codex may ask once to trust
+    the new hook.
 
 ## 0.7.23 - Questions the person can read, one per finding, never asked twice
 
