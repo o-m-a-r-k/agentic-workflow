@@ -1,9 +1,10 @@
 name: scenarios
 
+# A release runs once, by hand on its release branch (`gh workflow run scenarios --ref release/X`); main is then
+# fast-forwarded to that commit, which the pre-push hook checks passed (scripts/ci-passed.mjs). A run on the push to main
+# would test the same commit again.
 on:
   pull_request:
-  push:
-    branches: [main]
   # Weekly, so drift in the runners or Node is caught without a push.
   schedule:
     - cron: '17 5 * * 1'
