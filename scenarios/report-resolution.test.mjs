@@ -112,7 +112,7 @@ test('I-42: an exact historical issue deferred by the owner is reconciled withou
   // Only a low issue may be deferred (D17), and only with the person's answer to its own question (D18): the authority is theirs,
   // not the review's.
   ok(wf(p.root, ['discovered', 'add', '--summary', 'the total is wrong', '--severity', 'low', '--found-by', 'impl-old', '--attempt', p.id]));
-  assert.match(wf(p.root, ['discovered', 'close', 'D1', '--deferred', '--attempt', p.id], { ownerSilent: true }).err, /question: "[^"]* A1: D1: the total is wrong \(low, rated by impl-old\)\. Fix it now, or let it leave this delivery as a known issue\?"/);
+  assert.match(wf(p.root, ['discovered', 'close', 'D1', '--deferred', '--attempt', p.id], { ownerSilent: true }).err, /header "D1"\n\s+question: "[^\n]* A1: Should [^\n]* ship without fixing this[^\n]*The issue: the total is wrong\.[^\n]*Rated low by [^\n]*"/);
   ok(wf(p.root, ['discovered', 'close', 'D1', '--deferred', '--reason', 'complete the total repair in the next ticket', '--attempt', p.id]));
   commitIn(p.wt, { 'src/a.txt': 'other repair\n' });
   ok(review(p));
