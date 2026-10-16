@@ -4,12 +4,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { closureFile, commitIn, criteriaFile, goodClosure, ok, sh, singleRepoProject, state, wf, write, yaml } from './helpers.mjs';
 
-function fixture(name, files = {}, unit = { id: 'unit', repo: 'app', run: 'test -f src/a.txt', inputs: ['src/**'] }) {
+function fixture(name, files = {}, unit = { id: 'unit', repo: 'app', run: 'test -f src/a.txt', inputs: ['src/**'] }, criteria = undefined) {
   const config = { gate: { steps: [unit] } };
   const f = singleRepoProject(name, config, files);
   const e = ok(wf(f.root, ['entry', '--item', 'ENG-1', '--json'])).json();
   ok(wf(f.root, ['handoff', 'planner', '--agent', 'planner', '--attempt', e.id]));
-  ok(wf(f.root, ['plan', '--file', criteriaFile(f.base), '--attempt', e.id]));
+  ok(wf(f.root, ['plan', '--file', criteriaFile(f.base, criteria), '--attempt', e.id]));
   ok(wf(f.root, ['handoff', 'implementer', '--agent', 'impl', '--attempt', e.id]));
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'changed\n' });
   ok(wf(f.root, ['handoff', 'close', '--agent', 'impl', '--attempt', e.id]));
@@ -147,4 +147,81 @@ test('review records supplemental verdicts or none: the bundle carries the pinne
     ok(wf(f.root,['review','--closure',closureFile(f.base,goodClosure(agent,{validationChecked})),'--attempt',f.e.id]));
   }
   assert.deepEqual(state(f.root,f.e.id).reviews.map((r)=>r.closure.reviewer),rounds.map(([agent])=>agent),'every closure was recorded');
+});
+
+// 0.7.23 (I-179), named failure (field): an evidence review raised a blocking finding ("the required browser check was never
+// run in the gate"), the owner registered the missing step, and the next code review honestly kept the finding open with
+// evidence (a check that has not run cannot be verified). The gate order then waited for every earlier blocking finding to be
+// verified, and only the person's gate-order override could run the gate that would run the check. For the gate order only,
+// a finding whose proof is the registered step does not hold the gate; acceptance and the reviewer's handoff still need it verified.
+const WANT = { id: 'F1', severity: 'high', summary: 'The required browser check was never run in the gate', status: 'open', criterion: 'C1', evidence: 'src/a.txt:1 no step of the gate runs the browser check C1 requires' };
+const STILL = (round) => ({ priorFindings: [{ round, id: 'F1', status: 'open', evidence: 'src/a.txt:1 the step has not run yet, so nothing can show it passes' }] });
+const NOT_VERIFIED = /the latest review round \(code-2\) has not verified 1 earlier-round finding\(s\) \(\w+-\d:F1\)/;
+const mapped = [{ id: 'C1', evidence: { kind: 'output', ref: 'gate log line 1' } }, { id: 'C2', evidence: { kind: 'output', ref: 'gate log line 2' } }];
+
+test('0.7.23 (I-179): the gate runs, with no override and no decision, when the only earlier finding it waits for is one an evidence review raised and the step that proves it was registered; acceptance still waits for an evidence round to verify it', () => {
+  const f = fixture('supplemental-evidence-repair');
+  review(f, 'code-0');
+  ok(wf(f.root, ['gate', '--attempt', f.e.id]));
+  review(f, 'evidence-1', { findings: [WANT] });
+  candidate(f, { id: 'http', repo: 'app', run: 'true' });
+  ok(add(f));
+  review(f, 'code-2', STILL('evidence-1'));
+  // The next step and the gate agree: the gate is next.
+  const before = state(f.root, f.e.id);
+  assert.deepEqual([before.decision.kind, before.decision.status], ['gate', 'ready']);
+  assert.doesNotMatch(before.next, /must verify/);
+  const run = ok(wf(f.root, ['gate', '--attempt', f.e.id, '--json'])).json();
+  assert.deepEqual(run.steps.map((x) => x.id).sort(), ['http', 'unit']);
+  const s = state(f.root, f.e.id);
+  assert.deepEqual([s.gateOverrides ?? [], s.decisions ?? []], [[], []], 'no override and no question to the person');
+  // After the gate the evidence review is next, the round that can verify the finding.
+  assert.deepEqual([s.decision.kind, s.decision.round], ['review', 'evidence-review']);
+  assert.match(s.next, /^evidence review: the gate passed/);
+  // Acceptance is not eased: the finding stays an earlier blocking finding that only a later round can settle.
+  const refused = wf(f.root, ['accept', '--attempt', f.e.id]);
+  assert.notEqual(refused.code, 0);
+  assert.match(refused.err, /earlier-round finding\(s\) not verified: evidence-1:F1/);
+  // An evidence round written after the gate that still finds it open is not eased either: the next step is the repair.
+  review(f, 'evidence-3', STILL('evidence-1'));
+  assert.equal(state(f.root, f.e.id).decision.kind, 'repair');
+  assert.match(state(f.root, f.e.id).next, /must verify 1 earlier-round finding\(s\) \(evidence-1:F1\)/);
+  assert.notEqual(wf(f.root, ['accept', '--attempt', f.e.id]).code, 0);
+  review(f, 'evidence-4', { priorFindings: [{ round: 'evidence-1', id: 'F1', status: 'fixed', evidence: 'the http step ran in the gate and passed' }] });
+  ok(wf(f.root, ['accept', '--attempt', f.e.id]));
+});
+
+test('0.7.23 (I-179): the gate still waits when no step was registered, when the step is for another criterion, and when a code-review round raised the finding', () => {
+  const waits = (f, why) => {
+    const refused = wf(f.root, ['gate', '--attempt', f.e.id]);
+    assert.equal(refused.code, 75, why);
+    assert.match(refused.err, NOT_VERIFIED, why);
+    const s = state(f.root, f.e.id);
+    assert.equal(s.decision.kind, 'repair', `${why}: the next step is the verification`);
+    assert.match(s.next, /must verify 1 earlier-round finding\(s\)/, why);
+  };
+  // No registration: the fix was a commit, and the code review could not verify it either.
+  const none = fixture('supplemental-evidence-none');
+  review(none, 'code-0');
+  ok(wf(none.root, ['gate', '--attempt', none.e.id]));
+  review(none, 'evidence-1', { findings: [WANT] });
+  commitIn(none.wt, { 'src/a.txt': 'attempted fix\n' });
+  review(none, 'code-2', STILL('evidence-1'));
+  waits(none, 'no registration');
+  // A step registered for another criterion proves nothing about this finding.
+  const other = fixture('supplemental-evidence-other', {}, undefined, [{ id: 'C1', text: 'a changes', uat: false }, { id: 'C2', text: 'b changes', uat: false }]);
+  review(other, 'code-0', { criteria: mapped });
+  ok(wf(other.root, ['gate', '--attempt', other.e.id]));
+  review(other, 'evidence-1', { criteria: mapped, findings: [WANT] });
+  candidate(other, { id: 'http', repo: 'app', run: 'true' });
+  ok(wf(other.root, ['validation', 'add', '--steps', 'http', '--criteria', 'C2', '--reason', 'Required real execution', '--attempt', other.e.id]));
+  review(other, 'code-2', { criteria: mapped, ...STILL('evidence-1') });
+  waits(other, 'a step for another criterion');
+  // A finding a code-review round raised: the step was registered after it, but no gate has judged it yet, and a code review is the round that raised it.
+  const code = fixture('supplemental-evidence-code');
+  review(code, 'code-1', { findings: [WANT] });
+  candidate(code, { id: 'http', repo: 'app', run: 'true' });
+  ok(add(code));
+  review(code, 'code-2', STILL('code-1'));
+  waits(code, 'a code-review round raised it');
 });

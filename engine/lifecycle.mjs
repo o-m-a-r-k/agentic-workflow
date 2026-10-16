@@ -1197,13 +1197,34 @@ function followUpsOf(state) {
   return (state.scopeDecisions ?? []).filter((d) => ['ticketed', 'moved', 'deferred'].includes(d.choice)).flatMap((d) => (d.keys ?? []).map((ref) => ({ ref, went: d.choice, ticket: d.ticket?.url ?? null, sibling: d.sibling ?? null, reason: d.reason ?? null, summary: open.get(ref)?.summary ?? d.summaries?.[ref] ?? null, severity: open.get(ref)?.severity ?? null })));
 }
 
-// The earlier rounds' blocking findings a round must have verified.
-function unverifiedPrior(state, review) {
+// 0.7.23 (I-179), named failure (field): an evidence review raised a blocking finding ("the required browser check was never
+// run in the gate"), the owner registered the missing step, and the next code review honestly kept the finding open with
+// evidence (a check that has not run cannot be verified). The gate order then waited for the verification only the gate's own
+// run could make possible, and only the person's override got through. A finding is not waited for, by the gate order alone, when an
+// evidence-review round raised it on a criterion, a supplemental validation for that criterion was registered (or corrected)
+// after that round, and the latest round judged it still open with evidence. It stays an earlier blocking finding: acceptance
+// and the next reviewer's handoff still need a later round to verify it.
+function awaitsItsProof(state, review, f) {
+  const criterion = f.classified?.criterion;
+  if (!criterion) return false;
+  const kept = (review.closure.priorFindings ?? []).find((p) => `${p.round}:${p.id}` === f.ref);
+  if (!kept || kept.status !== 'open' || !kept.evidence) return false;
+  const raised = (state.reviews ?? []).find((r) => (r.closure?.reviewer ?? r.reviewer) === f.round && (r.closure?.findings ?? []).some((x) => x.id === f.id));
+  const handed = raised && (state.handoffs ?? []).find((h) => h.bundle === raised.handoff);
+  if (!handed || !(handed.round === 'evidence-review' || (!handed.round && handed.gate))) return false;
+  return (state.validations ?? []).some((v) => v.at > raised.at && (v.criteria ?? []).includes(criterion));
+}
+
+// The earlier rounds' blocking findings a round must have verified. `forGate`: the gate order's question only, which does
+// not wait for a finding that awaits the proof the gate itself runs (awaitsItsProof): the gate, and the evidence review after it,
+// which is the round that verifies it. The next step reads it the same way until a round written after the gate has judged it.
+function unverifiedPrior(state, review, { forGate = false } = {}) {
   const required = earlierBlocking(state, roundKey(review));
   const verified = new Map((review.closure.priorFindings ?? []).map((p) => [`${p.round}:${p.id}`, p]));
   return required.filter((f) => {
     const v = verified.get(f.ref);
     if (v && v.status === 'open' && v.evidence && severityLevel(v.severity) === 'low' && !f.classified.criterion && !f.classified.invariant) return false;
+    if (forGate && awaitsItsProof(state, review, f)) return false;
     return !v || !settled(v.status) || !v.evidence;
   }).map((f) => ({ round: f.round, id: f.id, severity: f.severity ?? null, summary: f.summary ?? '', evidence: f.evidence ?? null, work: f.work ?? null, family: f.family ?? null }));
 }
@@ -1616,7 +1637,7 @@ export function gateOrderProblems(state) {
   }
   const open = openFindings(r, state);
   if (open.length) problems.push(`the latest review round (${r.closure.reviewer}) has open findings (${open.map((f) => f.id).join(', ')}): fix them through the implementer, commit, and run the next code-review round until one comes back clean`);
-  const toVerify = unverifiedPrior(state, r);
+  const toVerify = unverifiedPrior(state, r, { forGate: true });
   if (toVerify.length) problems.push(`the latest review round (${r.closure.reviewer}) has not verified ${toVerify.length} earlier-round finding(s) (${toVerify.map((f) => `${f.round}:${f.id}`).join(', ')})`);
   return problems;
 }
@@ -2919,8 +2940,8 @@ export function nextDecision(root, state) {
   if ((!r || !reviewCovers(state, r)) && evidenceFixReady(state) && !gatePassedForCurrentTree(state).ok) return result('gate', 'ready', null, { guidance: withAttempt(root, state, 'the evidence review\'s findings are fixed by the implementers handed after it: run one `wf gate`; the evidence review after it verifies the fixes and the new evidence') });
   if ((!r || !reviewCovers(state, r)) && integrationCheckOwed(trustedAdapter(root, state), state)) return result('check', 'owner', `the combined tree of ${state.work.length} work items needs a passing \`wf check\` before its code review`, { guidance: `run \`wf check --attempt ${state.id}\` on the combined tree and fix what it finds through the implementers; then the code review` });
   if (!r || !reviewCovers(state, r)) return result('review', 'ready', null, { round: 'code-review' });
-  if (r && (openFindings(r, state).length || unverifiedPrior(state, r).length)) return result('repair', 'owner', 'review findings or earlier-finding verification remain open');
   const passed = gatePassedForCurrentTree(state);
+  if (r && (openFindings(r, state).length || unverifiedPrior(state, r, { forGate: !(passed.ok && reviewedAfterGate(r)) }).length)) return result('repair', 'owner', 'review findings or earlier-finding verification remain open');
   if (!passed.ok) {
     const blockers = gateOrderProblems(state);
     return blockers.length ? result('gate', 'owner', blockers.join('; ')) : result('gate', 'ready', null, { guidance: canonical(r.tree ?? r.handoffTree) === canonical(tree) ? guidance : withAttempt(root, state, 'clean code review covers this change: run one `wf gate`; then the evidence review') });
@@ -3068,7 +3089,7 @@ function phaseAction(root, cfg, state) {
   if (!r || !onTree(r.tree ?? r.handoffTree)) return integrationCheckOwed(cfg, state) ? `the combined tree of ${state.work.length} work items needs a passing \`wf check --attempt ${state.id}\` first (fix what it finds through the implementers); then the code review: hand to ${fresh}; ${noGate}` : `code review: hand to ${fresh}; ${noGate}`;
   const open = openFindings(r, state);
   if (open.length) return `fix the open findings (${open.map((f) => (f.work ? `${f.id} in ${f.work}` : f.id)).join(', ')}): hand them to the implementer that did that work as a fix round (\`wf handoff implementer --agent <its id>${open.some((f) => f.work) ? ' --work <item>' : ''}\`, then continue it with the printed line), so its report and the defect history are recorded; then the next code-review round: hand to ${fresh}; ${noGate}`;
-  const toVerify = unverifiedPrior(state, r);
+  const toVerify = unverifiedPrior(state, r, { forGate: !(pass.ok && reviewedAfterGate(r)) });
   if (toVerify.length) return `reviewer ${r.closure.reviewer} must verify ${toVerify.length} earlier-round finding(s) (${toVerify.map((f) => `${f.round}:${f.id}`).join(', ')}): it adds \`priorFindings\` to its closure and runs \`wf review --closure <its file>\` again; if it is gone, hand to ${fresh}; ${noGate}`;
   // Observations are placed before the gate, while a fix still costs no extra gate (second final review of 0.7.0: they
   // were named only after acceptance, so each one placed then cost another gate cycle).

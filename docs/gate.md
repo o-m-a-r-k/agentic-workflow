@@ -209,7 +209,7 @@ Registration clears prior acceptance and invalidates the old gate. Obtain a fres
 next full gate. Review each added definition and its single-file plugin at the recorded commit, not a later edited
 copy. The reviewer judges each registered step as context (a verdict it chooses to give is
 `validationChecked: [{ id, commit, verdict: complies|finding, evidence, finding }]`, one entry per step; none is
-required). Then run the normal full gate and a fresh evidence review. Missing, skipped,
+required). Then run the normal full gate and a fresh evidence review. When the step was registered for a blocking finding an evidence review raised ("the required check never ran in the gate"), the code review after the registration cannot verify that finding before the check has run: it keeps the finding open with evidence, and the gate order does not wait for it (0.7.23, I-179). Acceptance still does: only an evidence round written after the gate verifies it. Missing, skipped,
 deferred or failed supplemental execution is not passing proof. Reports and captures use the ordinary sealed
 evidence, no-follow, reuse, redaction, cleanup and screenshot-inspection paths. Direct diagnostic reports cannot
 be imported as prior execution. Registration is additive: it cannot remove or overwrite a step.
