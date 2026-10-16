@@ -125,7 +125,7 @@ export function limitItems(state, { load = null } = {}) {
   for (const d of state.scopeDecisions ?? []) if (d.choice === 'deferred') for (const k of d.keys ?? []) add(k, `Known issue: ${wording(state, k, d.summaries?.[k] ?? findingSummary(state, k), d.decisionFor?.[k])}.${directedBy(state, d.decisionFor?.[k])}`);
   // Named failure (I-69): a review named scope it did not reach (`notReached`) and nothing the tester reads said so. Every
   // round since the last complete full audit counts: a delta round does not go back over an earlier round's gaps.
-  for (const u of unreachedSince(state)) u.notReached.forEach((n, i) => add(`${u.round ?? u.reviewer}:U${i + 1}`, `Not checked by review: ${wording(state, `${u.round ?? u.reviewer}:U${i + 1}`, n)}.`));
+  for (const u of unreachedSince(state)) u.notReached.forEach((n, i) => add(`${u.round ?? u.reviewer ?? 'review'}:U${i + 1}`, `Not checked by review: ${wording(state, `${u.round ?? u.reviewer ?? 'review'}:U${i + 1}`, n)}.`));
   for (const a of state.delivery?.shown?.anomalies ?? []) if (a.followUp) add(null, `Follow-up: ${a.observation} (${a.followUp})`);
   // An item closed as fixed after the last review was not verified by any reviewer (0.7.8: information, not a stop).
   const lastReviewAt = lastReviewSeenAt(state) ?? '';
@@ -164,9 +164,14 @@ export function knownLimits(state, options = {}) {
 }
 
 // For the owner (`wf summary`, `wf deliver`): each item the comment lists, by the ref to word it with.
-export const limitItemsText = (state, options = {}) => {
+export const limitItemsText = (state, { cfg = null, ...options } = {}) => {
   const items = limitItems(state, options).filter((x) => x.ref);
-  return items.length ? `\nknown limits by item, as the tester reads them (word any of them plainly for the tester: \`wf summary --file <summary.md> --explain <lines.json>\` with { "<ref>": "<one plain line>" }; items worded the same show once):\n${items.map((x) => `  ${x.ref}  ${x.line}`).join('\n')}` : '';
+  // A line the readback would refuse as internals (a file path, a hash) is marked here, before the comment is posted.
+  const flag = (line) => {
+    const hits = cfg ? forbidden(cfg, line) : [];
+    return hits.length ? `  [carries ${hits.join(', ')}: word it]` : '';
+  };
+  return items.length ? `\nknown limits by item, as the tester reads them (word any of them plainly for the tester: \`wf summary --explain <lines.json>\` with { "<ref>": "<one plain line>" }, merged into earlier wording, "" drops one; items worded the same show once):\n${items.map((x) => `  ${x.ref}  ${x.line}${flag(x.line)}`).join('\n')}` : '';
 };
 
 // In an agent-posted comment the owner replaces each placeholder with the `assetUrl` the upload returned; the API mode
@@ -259,13 +264,15 @@ export const imageRefs = (body) => [...String(body ?? '').matchAll(/!\[([^\]]*)\
 // written for the person who tests it. Refused when it is empty, carries internals, or repeats the criteria verbatim.
 export function recordSummary(root, cfg, state, options) {
   const file = options['summary-file'] ?? options.file;
-  if (!file || file === true) throw new WfError('--file <summary.md> is required: a few plain-language lines on what changed, for the person who tests it');
+  // `--explain` alone words items against the summary already recorded.
+  const keep = (!file || file === true) && options.explain !== undefined && state.delivery?.summary?.text ? state.delivery.summary.text : null;
+  if ((!file || file === true) && keep === null) throw new WfError('--file <summary.md> is required: a few plain-language lines on what changed, for the person who tests it');
   if (!needsSummary(cfg, state)) throw refuse(`${state.id} posts no delivered comment (${cfg.tracker.kind === 'none' ? 'no tracker' : `lane ${state.lane}, or no delivered comment template`}); no summary is needed`);
   if (state.tracker.done.some((d) => d.event === 'delivered')) throw refuse('the delivered comment is already verified on the ticket; the summary can no longer change');
   // Posted to the tracker: read without following a link, a regular file with one name.
-  const read = readRegular(path.resolve(String(file)));
-  if (!read) throw refuse(`${file} is missing, a link or not a regular file with one name; the summary is not read through it`);
-  const text = read.bytes.toString('utf8').replace(/\r/g, '').trim();
+  const read = keep === null ? readRegular(path.resolve(String(file))) : null;
+  if (keep === null && !read) throw refuse(`${file} is missing, a link or not a regular file with one name; the summary is not read through it`);
+  const text = keep ?? read.bytes.toString('utf8').replace(/\r/g, '').trim();
   const problems = [];
   if (!text) problems.push('the summary is empty');
   if (/not user[- ]?visible/i.test(text)) problems.push('it contains "not user visible": write what changed for the person who tests it, and leave internal-only criteria out');
@@ -274,8 +281,8 @@ export function recordSummary(root, cfg, state, options) {
   if (verbatim.length) problems.push(`it repeats criteria text verbatim (${verbatim.join(', ')}); the UAT scope is added from the criteria, the summary says in plain words what changed`);
   const hits = forbidden(cfg, text);
   if (hits.length) problems.push(`it contains internals: ${hits.join(', ')}`);
-  // The owner's tester wording for known-limit items (`--explain <lines.json>`: { "<ref>": "<one plain line>" }), kept until
-  // replaced; `{}` drops it.
+  // The owner's tester wording for known-limit items (`--explain <lines.json>`: { "<ref>": "<one plain line>" }), merged per
+  // ref into what earlier summaries recorded; "" or null drops a ref's wording.
   let own = null;
   if (options.explain !== undefined) {
     const rawLines = options.explain === true ? null : readRegular(path.resolve(String(options.explain)));
@@ -288,11 +295,11 @@ export function recordSummary(root, cfg, state, options) {
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) problems.push('--explain is a regular JSON file { "<ref>": "<one plain line for the tester>" }, with the refs `wf summary` lists');
     else {
       const refs = new Set(limitItems(state).map((x) => x.ref).filter(Boolean));
-      own = {};
+      own = { ...(state.delivery?.summary?.lines ?? {}) };
       for (const [ref, v] of Object.entries(parsed)) {
         const line = String((typeof v === 'object' && v !== null ? v.what : v) ?? '').replace(/\s+/g, ' ').trim();
-        if (!refs.has(ref)) problems.push(`--explain names ${ref}, which is not a known-limit item of ${state.id} (its refs: ${[...refs].join(', ') || 'none'})`);
-        else if (!line) problems.push(`--explain gives ${ref} no wording`);
+        if (!line && (refs.has(ref) || ref in own)) delete own[ref];
+        else if (!refs.has(ref)) problems.push(`--explain names ${ref}, which is not a known-limit item of ${state.id} (its refs: ${[...refs].join(', ') || 'none'})`);
         else {
           const bad = forbidden(cfg, line);
           if (bad.length) problems.push(`--explain wording for ${ref} contains internals: ${bad.join(', ')}`);

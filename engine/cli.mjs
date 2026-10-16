@@ -125,8 +125,10 @@ Work
                                     automatically divide large separable flows; --single keeps one reviewer
   wf review parts                   inspect immutable current-group scoped reports before integration
   wf accept                         accept the review
-  wf summary --file summary.md      the owner's plain-language summary for the delivered comment
-  wf deliver [--summary-file F]
+  wf summary --file summary.md [--explain lines.json]
+                                    the owner's plain-language summary for the delivered comment; --explain words
+                                    known-limit items for the tester by ref ({ "<ref>": "<one plain line>" }, "" drops one)
+  wf deliver [--summary-file F] [--explain lines.json]
                                     integrate every repo, then start the tracker handoff (every deferral listed first)
   wf deliver --acknowledge-adapter-state REPO:STATE
                                     the change is on the target branch but the delivery adapter reports another state (a failed check needs \`wf approve\`)
@@ -953,7 +955,7 @@ async function dispatch(cmd, sub, positional, options) {
       const cfg = loadConfig(root);
       const { actor } = await import('./attempt.mjs');
       const s = recordSummary(root, cfg, openState(root, options), { ...options, actorId: actor(options) });
-      print(options, `summary recorded for ${s.id} (${s.delivery.summary.text.split('\n').length} line(s)${s.delivery.summary.lines ? `, ${Object.keys(s.delivery.summary.lines).length} item(s) worded for the tester` : ''}).${s.delivery.completedAt ? ` Delivered comment: ${commentFile(root, s.id)}` : ''}${limitItemsText(s, { load: (id) => loadState(root, id) })}\nnext: ${nextAction(root, s)}`, s);
+      print(options, `summary recorded for ${s.id} (${s.delivery.summary.text.split('\n').length} line(s)${s.delivery.summary.lines ? `, ${Object.keys(s.delivery.summary.lines).length} item(s) worded for the tester` : ''}).${s.delivery.completedAt ? ` Delivered comment: ${commentFile(root, s.id)}` : ''}${limitItemsText(s, { cfg, load: (id) => loadState(root, id) })}\nnext: ${nextAction(root, s)}`, s);
       return 0;
     }
     case 'export': {
@@ -1037,7 +1039,7 @@ async function dispatch(cmd, sub, positional, options) {
       const api = await trackerApi(root, r.state.id);
       const after = loadState(root, r.state.id);
       const members = (after.batch?.members ?? []).map((m) => showBlock(root, loadState(root, m))).join('');
-      const comment = after.tracker.pending.some((a) => a.rendered === 'delivered') ? `\ndelivered comment to post (rendered from your summary, the user-visible UAT scope, the screenshots and known limits): ${commentFile(root, after.id)}\n  replace each {assetUrl:<title>} with the assetUrl its upload returned, so every screenshot shows inline; post it unchanged otherwise${limitItemsText(after, { load: (id) => loadState(root, id) })}` : '';
+      const comment = after.tracker.pending.some((a) => a.rendered === 'delivered') ? `\ndelivered comment to post (rendered from your summary, the user-visible UAT scope, the screenshots and known limits): ${commentFile(root, after.id)}\n  replace each {assetUrl:<title>} with the assetUrl its upload returned, so every screenshot shows inline; post it unchanged otherwise${limitItemsText(after, { cfg: loadConfig(root), load: (id) => loadState(root, id) })}` : '';
       const deferrals = [after, ...(after.batch?.members ?? []).map((m) => loadState(root, m))].flatMap((st) => (st.discovered ?? []).filter((x) => x.status === 'deferred').map((x) => ({ ...x, id: st.id === after.id ? x.id : `${st.id}:${x.id}` }))).map((x) => `\n  ${x.id} deferred (${x.deferred.source?.provenance ?? 'recorded'}${x.deferred.source?.file ? `, ${x.deferred.source.file}:${x.deferred.source.line}` : ''}): ${x.summary}\n    taken as the owner's decision: "${x.deferred.decision}"\n    channel: ${channelOf(x)}`).join('');
       // I-20: a repo delivered while its adapter reported another state after the merge, as the owner acknowledged it.
       const postMerge = Object.values(after.delivery.repos).filter((d) => d.acknowledged).map((d) => `\n  ${d.repo}: on ${d.target} while the delivery adapter reported ${d.adapterState}${d.observed?.evidence ? ` (${d.observed.evidence})` : ''}; acknowledged by the owner as ${d.acknowledged}`).join('');

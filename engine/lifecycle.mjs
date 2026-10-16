@@ -1907,7 +1907,7 @@ export async function deliver(root, options) {
     state = loadState(root, state.id);
   }
   // The delivered comment carries the owner's plain-language summary; it is recorded before anything is pushed.
-  if (options['summary-file'] && options['summary-file'] !== true) {
+  if ((options['summary-file'] && options['summary-file'] !== true) || options.explain !== undefined) {
     if (state.batch) throw new WfError('a batch delivers no comment of its own: record each member\'s summary with `wf summary --file <f> --attempt <member>`');
     state = recordSummary(root, cfg, state, { ...options, actorId: actor(options) });
   }

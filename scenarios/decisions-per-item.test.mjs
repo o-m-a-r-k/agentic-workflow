@@ -223,5 +223,8 @@ test('a medium or high item the person directs out of the ticket leaves on their
   ok(run(p, ['scope', 'defer', '--finding', 'r1:F3', '--person-directed', 'leave the old export as it is', '--explain', explain]));
   assert.deepEqual(state(p.root, p.id).scopeDecisions.at(-1).keys, ['r1:F3']);
   assert.equal(d.personDirected, 'leave the old export as it is');
-  assert.match(knownLimits(state(p.root, p.id)), /- Known issue: Totals on the old export page count only the first page\. Left out at the person's direction: "leave the old export as it is"\./);
+  const st = state(p.root, p.id);
+  assert.match(knownLimits(st), /- Known issue: Totals on the old export page count only the first page\. Left out at the person's direction: "leave the old export as it is"\./);
+  // The owner's wording at delivery comes before the line the person was asked with.
+  assert.match(knownLimits({ ...st, delivery: { ...st.delivery, summary: { lines: { 'r1:F3': 'Old export totals cover one page' } } } }), /- Known issue: Old export totals cover one page\. Left out at the person's direction/);
 });

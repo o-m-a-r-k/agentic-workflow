@@ -246,23 +246,41 @@ test('every known limit is listed; the owner words items for the tester by ref, 
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'ui\n' });
   ok(wf(root, ['handoff', 'close', '--agent', 'i', '--attempt', e.id]));
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', e.id]));
-  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r', { notReached: ['the dark theme (Docker-backed; not run). More detail for engineers.', 'the French screens were not viewed'] })), '--attempt', e.id]));
-  const listed = ok(wf(root, ['summary', '--file', summaryFile(base), '--attempt', e.id])).out;
-  const [dark] = listed.match(/^ {2}(\S+:U1) {2}Not checked by review: the dark theme \(Docker-backed; not run\)\.$/m).slice(1);
-  const french = dark.replace(/U1$/, 'U2');
-  assert.match(listed, new RegExp(`^ {2}${french} {2}Not checked by review: the French screens were not viewed\\.$`, 'm'));
-  assert.equal(knownLimits(state(root, e.id)), '- Not checked by review: the dark theme (Docker-backed; not run).\n- Not checked by review: the French screens were not viewed.');
-  const lines = (obj) => {
+  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r', { notReached: ['the dark theme (Docker-backed; not run). More detail for engineers.', 'the French screens were not viewed', 'the RTL layout (src/rtl/layout.tsx not run)'] })), '--attempt', e.id]));
+  const lines0 = (obj) => {
     const f = path.join(base, `lines-${Math.random().toString(36).slice(2)}.json`);
     fs.writeFileSync(f, JSON.stringify(obj));
     return f;
   };
-  assert.match(wf(root, ['summary', '--file', summaryFile(base), '--explain', lines({ 'r:F9': 'x' }), '--attempt', e.id]).err, new RegExp(`--explain names r:F9, which is not a known-limit item of ${e.id.replace('.', '\\.')} \\(its refs: ${dark}, ${french}\\)`));
+  const listed = ok(wf(root, ['summary', '--file', summaryFile(base), '--attempt', e.id])).out;
+  const [dark] = listed.match(/^ {2}(\S+:U1) {2}Not checked by review: the dark theme \(Docker-backed; not run\)\.$/m).slice(1);
+  const french = dark.replace(/U1$/, 'U2');
+  const rtl = dark.replace(/U1$/, 'U3');
+  assert.match(listed, new RegExp(`^ {2}${french} {2}Not checked by review: the French screens were not viewed\\.$`, 'm'));
+  // A line the readback would refuse as internals is marked for wording before anything is posted.
+  assert.match(listed, new RegExp(`^ {2}${rtl} {2}Not checked by review: the RTL layout \\(src/rtl/layout\\.tsx not run\\)\\. {2}\\[carries source file path: word it\\]$`, 'm'));
+  ok(wf(root, ['summary', '--explain', lines0({ [rtl]: 'Right-to-left layout was not checked by a reviewer' }), '--attempt', e.id]));
+  assert.equal(knownLimits(state(root, e.id)), '- Not checked by review: the dark theme (Docker-backed; not run).\n- Not checked by review: the French screens were not viewed.\n- Not checked by review: Right-to-left layout was not checked by a reviewer.');
+  const lines = lines0;
+  assert.match(wf(root, ['summary', '--file', summaryFile(base), '--explain', lines({ 'r:F9': 'x' }), '--attempt', e.id]).err, new RegExp(`--explain names r:F9, which is not a known-limit item of ${e.id.replace('.', '\\.')} \\(its refs: ${dark}, ${french}, ${rtl}\\)`));
   assert.match(wf(root, ['summary', '--file', summaryFile(base), '--explain', lines({ [dark]: 'see src/theme/dark.tsx' }), '--attempt', e.id]).err, /--explain wording for \S+:U1 contains internals: source file path/);
   const same = 'Dark mode and the French screens were not checked by a reviewer';
+  const rtlLine = '- Not checked by review: Right-to-left layout was not checked by a reviewer.';
   ok(wf(root, ['summary', '--file', summaryFile(base), '--explain', lines({ [dark]: same, [french]: { what: same } }), '--attempt', e.id]));
-  assert.equal(knownLimits(state(root, e.id)), `- Not checked by review: ${same}.`);
+  assert.equal(knownLimits(state(root, e.id)), `- Not checked by review: ${same}.\n${rtlLine}`, 'merged per ref into the earlier wording');
   // The wording stays with a later summary that gives none.
   ok(wf(root, ['summary', '--file', summaryFile(base, 'The list now shows active accounts.'), '--attempt', e.id]));
-  assert.equal(knownLimits(state(root, e.id)), `- Not checked by review: ${same}.`);
+  assert.equal(knownLimits(state(root, e.id)), `- Not checked by review: ${same}.\n${rtlLine}`);
+  // "" drops one ref's wording; its recorded sentence shows again.
+  ok(wf(root, ['summary', '--explain', lines({ [french]: '' }), '--attempt', e.id]));
+  assert.equal(knownLimits(state(root, e.id)), `- Not checked by review: ${same}.\n- Not checked by review: the French screens were not viewed.\n${rtlLine}`);
+});
+
+// Fable review of 0.7.17: a delta round does not go back over an earlier round's gaps, so every round since the last complete
+// full audit is listed, not only the latest that named any.
+test('scope named as not checked in any round since the last full audit stays in the known limits', () => {
+  const round = (n, mode, notReached) => ({ review: { handoff: `b/0${n}-reviewer.json`, reviewer: `r${n}`, closure: { notReached } }, handoff: { role: 'reviewer', bundle: `b/0${n}-reviewer.json`, mode } });
+  const rounds = [round(2, 'full', ['the dark theme']), round(3, 'delta', ['the French screens were not viewed']), round(4, 'delta', [])];
+  const s = { reviews: rounds.map((r) => r.review), handoffs: rounds.map((r) => r.handoff) };
+  assert.equal(knownLimits(s), '- Not checked by review: the dark theme.\n- Not checked by review: the French screens were not viewed.');
 });
