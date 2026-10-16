@@ -84,7 +84,9 @@ export default {
   envPrefixes: ['CLAUDE_CODE_', 'CLAUDECODE', 'ANTHROPIC_'],
   // The strongest model for planning and review (a class that pins none inherits the owner session's), and an effort for
   // the implementer classes. Unmeasured starting points: a project's `classes` override them.
-  classDefaults: { full: { effort: 'high' }, light: { effort: 'low' }, review: { model: 'opus', effort: 'high' } },
+  classDefaults: { full: { effort: 'high' }, light: { effort: 'low' }, review: { model: 'opus', effort: 'high' }, planning: { model: 'fable', effort: 'high' } },
+  // The planning panel's second seat (0.7.22): another model than the lead's, so the two plans differ in more than wording.
+  panelSecond: 'review',
   // The classifier labels items with given choices and does no reasoning: the fast, cheap model. A project's
   // `learning.classifier.claude` overrides it.
   classifierDefaults: { model: 'haiku', effort: 'low' },

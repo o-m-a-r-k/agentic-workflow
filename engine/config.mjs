@@ -76,6 +76,8 @@ const CLASS_USES = {
   // later. Planning and review default to this class, which pins the strongest model (`wf doctor` fails when either role
   // resolves to no model on the runtime it runs on).
   review: 'Planning and independent review: the whole change judged against the frozen criteria.',
+  // 0.7.22 (D28): the planner role's own class, so planning and review can run on different models.
+  planning: 'Planning: produce the plan and frozen acceptance criteria for the whole change.',
 };
 export function defaultClasses() {
   const out = {};
@@ -85,7 +87,7 @@ export function defaultClasses() {
   }
   return out;
 }
-export const ROLE_DEFAULT_CLASS = { planner: 'review', reviewer: 'review', implementer: 'full', tester: 'full', strategist: 'review' };
+export const ROLE_DEFAULT_CLASS = { planner: 'planning', reviewer: 'review', implementer: 'full', tester: 'full', strategist: 'review' };
 
 // What the engine stops for on its own, from the adapter's `strategy:` block (engine/strategy.mjs). Only the owner's
 // escalation is a number: the engine judges no work against a threshold it picked, so the amendment, file, bundle-size,
@@ -135,8 +137,9 @@ export function roleClass(cfg, role) {
   return (rc && typeof rc === 'object' ? rc.class : null) ?? ROLE_DEFAULT_CLASS[role] ?? 'full';
 }
 export function agentTypeFor(cfg, role, cls = roleClass(cfg, role)) {
-  if (role !== 'implementer') return `wf-${role}`;
-  return cls === roleClass(cfg, 'implementer') ? 'wf-implementer' : `wf-implementer-${cls}`;
+  // A planning panel's seat at another class has its own agent type, as an implementer class has (0.7.22).
+  if (role !== 'implementer' && role !== 'planner') return `wf-${role}`;
+  return cls === roleClass(cfg, role) ? `wf-${role}` : `wf-${role}-${cls}`;
 }
 export function declared(cfg, cls, runtime) {
   const c = cfg.classes[cls] ?? {};

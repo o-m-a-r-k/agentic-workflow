@@ -9,7 +9,8 @@ export function executionSettings(root, state, role, cls, runtime, commit = stat
   const source = trustedAdapter(root, state, commit);
   // A strategist's model decision names a work class for the role's next handoffs (0.7.0); the class still pins the models.
   const chosen = state.strategy?.classFor?.[role];
-  const sourceClass = chosen && source.classes?.[chosen] ? chosen : role === 'implementer' ? cls : roleClass(source, role);
+  // An implementer's work class, or a planning panel seat's class (0.7.22), is the handoff's own.
+  const sourceClass = chosen && source.classes?.[chosen] ? chosen : role === 'implementer' || role === 'planner' ? cls : roleClass(source, role);
   return { ...declared(source, sourceClass, runtime), sourceClass, runtimeAdapterBase: commit };
 }
 

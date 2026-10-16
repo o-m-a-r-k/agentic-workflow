@@ -85,7 +85,9 @@ Work
   wf models refresh --attempt ID    pin execution model/effort settings from the committed adapter base
   wf advance --once|--until-owner [--runtime ${hostChoice()}] [--max-steps N] [--single] [--reviewers 2|3]
                                     optional foreground review/gate runner; stops for owner decisions
-  wf handoff run --agent ID         launch the existing ${hostNames()} handoff fresh, with engine-recorded prompt provenance
+  wf handoff run --agent ID [--detach]
+                                    launch the existing ${hostNames()} handoff fresh, with engine-recorded prompt provenance;
+                                    --detach returns once it has started (two roles at once); wf handoff wait follows it
                                     returns when the role ends, or once it passes its own estimate (it keeps running);
                                     --minutes N: your own expectation, for a role that states none
   wf handoff reviewer --agent ID --reason "why"
@@ -717,6 +719,12 @@ async function dispatch(cmd, sub, positional, options) {
         return 0;
       }
       const s = freezeCriteria(root, options);
+      if (s.panelRecorded) {
+        const r = s.panelRecorded;
+        const what = { draft: `seat ${r.seat}'s draft`, merged: `the merged plan (round ${r.round}, ${r.disagreements?.length ?? 0} disagreement(s) settled)`, objected: `seat ${r.seat}'s objections to round ${r.round} (${r.objections?.length ?? 0})`, agreed: `seat ${r.seat}'s agreement with round ${r.round}` }[r.type];
+        print(options, `planning panel: ${what} recorded for ${s.state.id}.\nnext: ${nextAction(root, s.state)}`, r);
+        return 0;
+      }
       const loose = uncovered(s);
       const sections = s.plan && typeof s.plan === 'object' ? Object.keys(s.plan) : [];
       print(options, `criteria frozen (${s.criteria.length}): ${s.criteria.map((c) => c.id).join(', ')}\nplan sections: ${sections.join(', ') || 'none'}${s.planSource?.transcript ? ` (from ${s.planSource.agent}'s transcript)` : ''}${s.work ? `\nwork items (${s.work.length}): ${s.work.map((w) => `${w.id} [${w.class}] ${w.criteria.join(',')}`).join('; ')}` : ''}${loose.length ? `\nnote: no work item covers ${loose.join(', ')}` : ''}\nnext: ${nextAction(root, s)}`, s);
@@ -909,7 +917,8 @@ async function dispatch(cmd, sub, positional, options) {
         // I-23: the implementer handoff stays open until it is closed, and no review round starts while it is open.
         const closeLine = sub === 'implementer' ? `\nWhen it reports done (and its work is committed), close it: \`wf handoff close --agent ${r.agent} --attempt ${r.state.id}\` (\`--outcome stopped\` if you stop it); \`wf handoff reviewer\` refuses while it is open.`
           : sub === 'strategist' ? `\nIt records its own decision (\`wf strategy record --closure ${r.closureFile}\`). Wait for its completion notification, or run it in the foreground: \`wf handoff run --agent ${r.agent} --attempt ${r.state.id}\`; never poll. Apply its decision before the next handoff.` : '';
-        print(options, `${lessonsLine}${sweepLines}${sub} bundle: ${r.bundle}${r.work ? `\nwork item ${r.work}, class ${r.class}` : `\nclass ${r.class}`}${r.effort ? `, effort ${r.effort}` : ''}${r.model ? `, model ${r.model}` : ''}\n${how} with: "${startPrompt}"${closeLine}`, { ...r, startPrompt });
+        const panelLine = r.panel ? `\nplanning panel: seat ${r.panel.seat} of ${r.panel.of}, ${r.panel.stage}${r.panel.round ? ` (round ${r.panel.round})` : ''}` : '';
+        print(options, `${lessonsLine}${sweepLines}${sub} bundle: ${r.bundle}${panelLine}${r.work ? `\nwork item ${r.work}, class ${r.class}` : `\nclass ${r.class}`}${r.effort ? `, effort ${r.effort}` : ''}${r.model ? `, model ${r.model}` : ''}\n${how} with: "${startPrompt}"${closeLine}`, { ...r, startPrompt });
       }
       return 0;
     }

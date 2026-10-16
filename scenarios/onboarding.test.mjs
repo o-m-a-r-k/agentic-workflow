@@ -191,12 +191,12 @@ test('installed skills are found per runtime, and a plugin whose marketplace is 
 
 test('doctor validates planner and reviewer models for the selected Codex runtime', () => {
   // Named failure I-36: Claude pins made Codex look configured, and Codex-only pins failed Claude-only checks.
-  const missing = singleRepoProject('codex-model-missing', { classes: { review: { claude: { model: 'opus' }, codex: { model: null } } } });
+  const missing = singleRepoProject('codex-model-missing', { classes: { review: { claude: { model: 'opus' }, codex: { model: null } }, planning: { claude: { model: 'opus' }, codex: { model: null } } } });
   const bad = wf(missing.root, ['doctor', '--runtime', 'codex', '--no-steps', '--json']);
   assert.equal(bad.code, 1);
   assert.equal(bad.json().config.filter((c) => !c.ok && /planner model|reviewer model/.test(c.check)).length, 2);
   assert.match(JSON.stringify(bad.json().config), /codex\.model/);
-  const pinned = singleRepoProject('codex-model-pinned', { classes: { review: { claude: { model: null }, codex: { model: 'future-codex-model', effort: 'max' } } } });
+  const pinned = singleRepoProject('codex-model-pinned', { classes: { review: { claude: { model: null }, codex: { model: 'future-codex-model', effort: 'max' } }, planning: { claude: { model: null }, codex: { model: 'future-codex-model', effort: 'max' } } } });
   const good = ok(wf(pinned.root, ['doctor', '--runtime', 'codex', '--no-steps', '--json'])).json();
   assert.equal(good.config.filter((c) => c.ok && c.runtime === 'codex' && /model: future-codex-model/.test(c.check)).length, 2);
 });

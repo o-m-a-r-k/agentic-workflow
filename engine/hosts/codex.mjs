@@ -116,7 +116,7 @@ export default {
   markerEnv: ['CODEX_SANDBOX'],
   envPrefixes: ['CODEX_', 'OPENAI_'],
   // Codex takes the model and effort its own configuration names unless a project's `classes` pin them.
-  classDefaults: {},
+  classDefaults: { planning: { model: 'gpt-6-astra', effort: 'high' } },
   // The classifier labels items with given choices and does no reasoning: the fast, cheap model. A project's
   // `learning.classifier.codex` overrides it.
   classifierDefaults: { model: 'gpt-6-luna', effort: 'low' },

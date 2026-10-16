@@ -122,7 +122,9 @@ export async function runRole(root, options) {
     releaseEarly();
     throw new WfError('--minutes is a positive number (your own expectation for this role, minutes since its launch)');
   }
-  return follow(root, state.id, h, { host, runtime, label, requestedSession, child, io, ownerMinutes, releaseEarly });
+  // `--detach` (0.7.22): return once the role has started, so an owner starts two roles that run at the same time (a
+  // planning panel's drafts); `wf handoff wait` follows each to its end.
+  return follow(root, state.id, h, { host, runtime, label, requestedSession, child, io, ownerMinutes, releaseEarly, detach: options.detach === true });
 }
 
 // Where an engine-launched role's start prompt, event stream and error output live (outside the evidence).
@@ -144,7 +146,7 @@ const alive = (pid) => {
 // Returns when the process has ended, or (still running) once `untilMinutes` have passed since this call, or once it has
 // passed the estimate it stated itself (`expect.minutes` in its report or closure file) when no `untilMinutes` is given.
 // Nothing is decided from the estimate: the role keeps running and the owner judges (D9).
-async function follow(root, id, h, { host, runtime, label, requestedSession, child = null, io, untilMinutes = null, ownerMinutes = null, releaseEarly = () => false }) {
+async function follow(root, id, h, { host, runtime, label, requestedSession, child = null, io, untilMinutes = null, ownerMinutes = null, releaseEarly = () => false, detach = false }) {
   const progress = roleProgress(h, { runtime: label });
   const pid = child?.pid ?? h.launch?.pid ?? null;
   const exited = () => (child ? child.exitCode !== null || child.signalCode !== null : !pid || !alive(pid));
@@ -239,6 +241,7 @@ async function follow(root, id, h, { host, runtime, label, requestedSession, chi
       }
       if (done || stillRunning) break;
       if (problem) { await new Promise((r) => setTimeout(r, 100)); continue; }
+      if (detach && session) { returned = 'detached'; break; }
       const minutes = estimate();
       // `--minutes` on `wait` is a new interval measured from this call (I-140); a role's own estimate and the owner's
       // expectation at launch are totals since the launch (a launch's interval and total coincide).
@@ -268,7 +271,7 @@ async function follow(root, id, h, { host, runtime, label, requestedSession, chi
     progress.finish();
     const minutes = Math.round((Date.now() - startedAt) / 60000);
     const said = estimate();
-    process.stderr.write(`${label} ${h.role} ${h.agent} is still running (pid ${pid}, ${minutes} min since launch${returned === 'past-estimate' ? `, past its own estimate of ${said} min` : returned === 'owner-estimate' ? `, past your expectation of ${ownerMinutes} min${roleSaid() ? '' : ' (it stated none)'}` : returned === 'waited' ? `, the ${untilMinutes} min you chose to wait` : ''}). Judge it: \`wf handoff wait --agent ${h.agent} --attempt ${id} [--minutes N]\` follows it again (N: how much longer you expect), \`wf handoff stop --agent ${h.agent} --attempt ${id}\` ends it so a fresh handoff can take over.\n`);
+    process.stderr.write(`${label} ${h.role} ${h.agent} is still running (pid ${pid}, ${minutes} min since launch${returned === 'past-estimate' ? `, past its own estimate of ${said} min` : returned === 'owner-estimate' ? `, past your expectation of ${ownerMinutes} min${roleSaid() ? '' : ' (it stated none)'}` : returned === 'waited' ? `, the ${untilMinutes} min you chose to wait` : returned === 'detached' ? ', detached as you asked' : ''}). Judge it: \`wf handoff wait --agent ${h.agent} --attempt ${id} [--minutes N]\` follows it again (N: how much longer you expect), \`wf handoff stop --agent ${h.agent} --attempt ${id}\` ends it so a fresh handoff can take over.\n`);
     return { agent: h.agent, session, status: 'running', pid, minutes, exitCode: 0 };
   }
   // The process has ended (or was stopped): wait for its exit code when this call launched it.

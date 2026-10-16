@@ -296,6 +296,10 @@ export function singleRepoProject(name, config, files = {}) {
   const base = tmp(name);
   const root = path.join(base, 'proj');
   const cfg = { version: 1, enabled: true, name, repos: [{ name: 'app', path: '.', base: 'main' }], lanes: ['quick', 'standard', 'batch'], ...config };
+  // Scenarios about other things plan with one planner; a planning panel (0.7.22) is configured where a scenario is about it.
+  // `panel: null` keeps the plugin's default panel.
+  if (cfg.roles?.planner?.panel === null) cfg.roles = { ...cfg.roles, planner: Object.fromEntries(Object.entries(cfg.roles.planner).filter(([k]) => k !== 'panel')) };
+  else if (cfg.roles?.planner !== false && !cfg.roles?.planner?.panel) cfg.roles = { ...(cfg.roles ?? {}), planner: { ...(cfg.roles?.planner ?? {}), panel: [cfg.roles?.planner?.class ?? 'planning'] } };
   makeRepo(root, { '.gitignore': '.wf-evidence/\n.wf-worktrees/\n', '.workflow/project.yaml': yaml(cfg), 'src/a.txt': 'a\n', ...files });
   return { base, root, remote: `${root}.origin.git` };
 }

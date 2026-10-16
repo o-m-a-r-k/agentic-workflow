@@ -64,6 +64,7 @@ test('wf sync preserves current and future runtime model and effort strings with
     const classes = {
       full: { codex: { model: 'future-coding-model', effort } },
       review: { codex: { model: 'future-review-model', effort } },
+      planning: { codex: { model: 'future-review-model', effort } },
       light: { claude: { model: 'future-light-model', effort: 'future-effort' } },
     };
     const { root } = singleRepoProject('open-runtime-settings', { classes, gate: { steps: [] } });
@@ -93,7 +94,7 @@ test('wf sync preserves current and future runtime model and effort strings with
 
 test('the adapter refuses unknown classes, malformed model settings and the old per-role model/effort fields', () => {
   const cases = [
-    [{ roles: { implementer: { class: 'heavy' } } }, /roles\.implementer\.class `heavy` is not a known class \(known: full, light, review\)/],
+    [{ roles: { implementer: { class: 'heavy' } } }, /roles\.implementer\.class `heavy` is not a known class \(known: full, light, review, planning\)/],
     [{ roles: { reviewer: { effort: 'high' } } }, /roles\.reviewer: effort moved to `classes`/],
     [{ classes: { docs: { claude: { effort: 'low' } } } }, /class `docs` needs `use`/],
   ];
@@ -127,7 +128,7 @@ function planned(name, work, criteria = [{ id: 'C1', text: 'api' }, { id: 'C2', 
 test('planner work items: unknown classes, unknown criteria and duplicate ids are refused', () => {
   const unknownClass = planned('w-class', [{ id: 'W1', criteria: ['C1'], class: 'medium' }]).plan;
   assert.notEqual(unknownClass.code, 0);
-  assert.match(unknownClass.err, /class `medium` is not a known class \(known: full, light, review\)/);
+  assert.match(unknownClass.err, /class `medium` is not a known class \(known: full, light, review, planning\)/);
   assert.match(planned('w-crit', [{ id: 'W1', criteria: ['C9'], class: 'light' }]).plan.err, /unknown criteria C9/);
   assert.match(planned('w-dup', [{ id: 'W1', criteria: ['C1'] }, { id: 'W1', criteria: ['C2'] }]).plan.err, /duplicate work item id W1/);
   const loose = planned('w-loose', [{ id: 'W1', criteria: ['C1'], class: 'light' }]).plan;

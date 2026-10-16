@@ -35,7 +35,7 @@ classes:                     # merged over the plugin's full/light/review defaul
   light: { use: "Screens on a frozen API contract, translations, fixtures.", claude: { effort: low }, codex: { effort: low } }
   review: { claude: { model: opus, effort: high } }   # the default: planning and review on the strongest model
 roles:
-  planner:     { lanes: [standard], class: review, appendix: .workflow/roles/planner.md }
+  planner:     { lanes: [standard], class: planning, panel: [planning, review], appendix: .workflow/roles/planner.md }
   implementer: { class: full, appendix: .workflow/roles/implementer.md }
   reviewer:    { class: review, appendix: .workflow/roles/reviewer.md }
 strategy:
@@ -89,7 +89,11 @@ Only that repo's `install` gets the key, wherever it runs (`wf entry`, `wf crite
 
 **`docsOnly`.** A package's `docsOnly` globs (relative to the package) name files that are not product code: the gate does not rerun a step for them, the scope checks do not call them unplanned, and the reviewer's symbol scan of the final diff takes no declarations from them. A review division leaves them out too, besides the files that are documentation by type (prose and licence files): [parallel review](parallel-review.md#division). A folder name alone makes nothing documentation: a `docs` folder of assets is named here.
 
-**Planning and review classes.** The planner and the reviewer default to the `review` class, which pins the Claude model `opus` with high effort. `wf doctor` fails when either role resolves to a class with no model for the selected runtime (`claude.model` or `codex.model`) (the planner is skipped when `roles.planner: false`): set the model on that class, or point the role back at `review`. Override `classes.review.claude.model` or `classes.review.codex.model` with an exact model id to pin a version. Doctor detects the current agent runtime; outside one it defaults to Claude. Select explicitly with `wf doctor --runtime codex` or `--runtime claude`. Codex has no default model pin: choose the strongest model available to your account.
+**Planning and review classes.** The planner defaults to the `planning` class (from 0.7.22: Claude `fable`, Codex `gpt-6-astra`, high effort) and the reviewer to the `review` class (Claude `opus`, high effort).
+
+**The planning panel (0.7.22).** `roles.planner.panel` lists the planner seats as classes, each pinning its model and effort per runtime. By default the planner's class leads and a second seat follows: Claude's second seat is the `review` class (another model: Fable and Opus), Codex's repeats the lead's (Astra twice). The seats draft the plan blind and at the same time; seat 1 merges the drafts and lists every point they differ on with what it chose (`disagreements`); the other seats agree or object point by point, and an objection goes back to the merge; the agreement freezes the merged plan. `panel: [<class>]` (one seat) plans with a single planner as before. Attempts admitted before 0.7.22 keep the planning they started with.
+
+ `wf doctor` fails when either role resolves to a class with no model for the selected runtime (`claude.model` or `codex.model`) (the planner is skipped when `roles.planner: false`): set the model on that class, or point the role back at `review`. Override `classes.review.claude.model` or `classes.review.codex.model` with an exact model id to pin a version. Doctor detects the current agent runtime; outside one it defaults to Claude. Select explicitly with `wf doctor --runtime codex` or `--runtime claude`. Codex has no default model pin: choose the strongest model available to your account.
 
 **`impact`.** `requiredFor` lists the work classes whose plans must carry the survey and impact map (default `[full]`: a plan with any `full` work item, or with no work items while the implementer role is `full`); only lanes with a planner are checked. The byte caps bound what the engine's own query runner reads; queries never run through a shell. Details: [lifecycle.md](lifecycle.md#impact-analysis).
 

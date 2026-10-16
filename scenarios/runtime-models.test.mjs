@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { commitIn, ok, singleRepoProject, state, wf, yaml, sh } from './helpers.mjs';
 
 test('I-44: doctor reports the attempt pin and refresh imports only committed execution settings', () => {
-  const initial = { classes: { review: { codex: {} } }, gate: { steps: [{ id: 'unit', repo: 'app', run: 'true' }] } };
+  const initial = { classes: { review: { codex: {} }, planning: { codex: { model: null } } }, gate: { steps: [{ id: 'unit', repo: 'app', run: 'true' }] } };
   const { root } = singleRepoProject('runtime-refresh', initial);
   const id = ok(wf(root, ['entry', '--item', 'ENG-81', '--json'])).json().id;
   const admission = state(root, id).adapterBase;
@@ -24,7 +24,7 @@ test('I-44: doctor reports the attempt pin and refresh imports only committed ex
   const h = ok(wf(root, ['handoff', 'planner', '--agent', 'planner-new', '--runtime', 'codex', '--attempt', id, '--json'])).json();
   assert.equal(h.model, 'future-planner');
   assert.equal(h.effort, 'high');
-  assert.equal(h.class, 'review', 'admission class semantics stay frozen');
+  assert.equal(h.class, 'planning', 'admission class semantics stay frozen (0.7.22: the planner\'s own class)');
   ok(wf(root, ['doctor', '--runtime', 'codex', '--no-steps', '--attempt', id]));
   assert.equal(wf(root, ['models', 'refresh', '--model', 'arbitrary', '--attempt', id]).code, 75);
   assert.equal(wf(root, ['handoff', 'planner', '--model', 'arbitrary', '--agent', 'bad', '--attempt', id]).code, 75);
@@ -34,7 +34,7 @@ test('I-44: refresh pins future launches, keeps old handoffs immutable and retai
   const fs = await import('node:fs');
   const path = await import('node:path');
   const { trustedAdapter } = await import('../engine/config.mjs');
-  const initial = { classes: { review: { codex: { model: 'legacy-model', effort: 'low' } } }, gate: { steps: [{ id: 'unit', repo: 'app', run: 'true' }] } };
+  const initial = { classes: { review: { codex: { model: 'legacy-model', effort: 'low' } }, planning: { codex: { model: 'legacy-model', effort: 'low' } } }, gate: { steps: [{ id: 'unit', repo: 'app', run: 'true' }] } };
   const { base, root } = singleRepoProject('runtime-handoff-pin', initial);
   const id = ok(wf(root, ['entry', '--item', 'ENG-83', '--json'])).json().id;
   ok(wf(root, ['handoff', 'planner', '--agent', 'old', '--runtime', 'codex', '--attempt', id]));

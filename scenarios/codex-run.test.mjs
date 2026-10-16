@@ -10,7 +10,7 @@ import { readLedger } from '../engine/ledger.mjs';
 
 const SID = '01a110b4-1637-7a42-b353-d0ad25e60000';
 function prepared(mode = '', { nonGitRoot = false, config = {}, files = {} } = {}) {
-  const p = singleRepoProject('codex-run', { classes: { review: { codex: { model: 'future-model', effort: 'max' } } }, gate: { steps: [{ id: 'unit', repo: 'app', run: 'true' }] }, ...config }, files);
+  const p = singleRepoProject('codex-run', { classes: { review: { codex: { model: 'future-model', effort: 'max' } }, planning: { codex: { model: 'future-model', effort: 'max' } } }, gate: { steps: [{ id: 'unit', repo: 'app', run: 'true' }] }, ...config }, files);
   if (nonGitRoot) {
     const cfg = JSON.parse(fs.readFileSync(path.join(p.root, '.workflow/project.yaml'), 'utf8'));
     cfg.repos[0].path = 'proj';
@@ -337,4 +337,15 @@ test('a launched role that states no estimate returns at the owner\'s own expect
   assert.match(run.err, /past your expectation of 0\.02 min \(it stated none\)/);
   ok(wf(root, ['handoff', 'stop', '--agent', 'p', '--attempt', id], { env }));
   assert.match(wf(root, ['handoff', 'run', '--agent', 'p', '--minutes', 'soon', '--attempt', id], { env }).err, /--minutes is a positive number|already launched/);
+});
+
+// 0.7.22: a planning panel's two drafts run at the same time; an engine-launched role returns once it has started.
+test('wf handoff run --detach returns once the role has started; wf handoff wait and stop follow it', () => {
+  const { root, id, env } = prepared('held');
+  const started = Date.now();
+  const r = ok(wf(root, ['handoff', 'run', '--agent', 'p', '--detach', '--attempt', id], { env }));
+  assert.ok(Date.now() - started < 30000, 'it does not wait for the role to finish');
+  assert.match(r.err, /planner p is still running .*detached as you asked/);
+  assert.ok(state(root, id).handoffs.at(-1).launch?.session, 'the session it started is recorded');
+  ok(wf(root, ['handoff', 'stop', '--agent', 'p', '--attempt', id], { env }));
 });

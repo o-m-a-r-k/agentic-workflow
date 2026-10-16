@@ -404,6 +404,10 @@ export function reduce(entries) {
       case 'plan.refused':
         s.planRefusals.push({ ...d, at: e.at });
         break;
+      // 0.7.22 (D28): a planning panel's draft, merge or verdict.
+      case 'plan.panel':
+        (s.panel ??= []).push({ ...d, at: e.at, by: e.actor });
+        break;
       // A gate the owner started out of the order of work (I-27), with the reason it was recorded under.
       case 'gate.override':
         s.gateOverrides.push({ ...d, at: e.at, by: e.actor });
