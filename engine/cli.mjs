@@ -822,7 +822,10 @@ async function dispatch(cmd, sub, positional, options) {
       if (sub === 'close') {
         const r = closeDiscovered(root, positional[0], options);
         const ds = r.ids.map((id) => r.state.discovered.find((x) => x.id === id));
-        print(options, ds.map((d) => (r.outcome === 'fixed' ? `${d.id} fixed in ${r.repo}@${r.commit.slice(0, 10)}` : `${d.id} deferred (${channelOf(d)}): "${d.deferred.decision}"`)).join('\n'), ds.length === 1 ? ds[0] : ds);
+        const fixedLine = (d) => `${d.id} fixed in ${r.repo}@${r.commit.slice(0, 10)}${d.fixed?.verifiedBy ? ` (made before it was recorded; verified by reviewer ${d.fixed.verifiedBy.reviewer})` : ''}`;
+        const claimLines = (r.claimed ?? []).map((id) => `${id}: ${r.repo}@${r.commit.slice(0, 10)} was made before ${id} was recorded, so a reviewer verifies it: hand a reviewer (\`wf handoff reviewer --agent <id>\`); its bundle asks it to verify ${id}, and its \`fixed\` verdict closes ${id}. No question for the person.`);
+        const all = [...ds.map((d) => (r.outcome === 'fixed' ? fixedLine(d) : `${d.id} deferred (${channelOf(d)}): "${d.deferred.decision}"`)), ...claimLines];
+        print(options, all.join('\n'), ds.length === 1 && !claimLines.length ? ds[0] : { closed: ds, claimed: r.claimed ?? [] });
         return 0;
       }
       if (sub === 'rate') {

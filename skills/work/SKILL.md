@@ -86,6 +86,7 @@ When a reviewer asks for missing proof, route it to a gate step that collects `a
 
 ## Recovery
 
+- Run `wf` from your PATH, as installed: a copy of the plugin or its engine in a cache or temporary folder misses every later release (an older copy now hands its commands to the installed `wf`). Never change the workflow from a ticket: when `wf` refuses and names no route, say so to the user and record it with `wf improve add`; the plugin's maintainers change it.
 - `wf resume` after any interruption or compaction. An attempt whose worktree is gone shows as ORPHANED: restore the folder from its branch with the git command `wf resume` prints (committed work only), or `wf abandon --reason "..."` (branches are kept); an attempt whose change already landed on its target branches outside the workflow is closed with `wf close --shipped --reason "..."` (the user's decision; the tracker is not touched).
 - A stale evidence lock left by a dead process clears itself; `wf unlock --attempt <id>` removes one explicitly and refuses while its owner is alive. Never delete the lock file by hand.
 - `wf status` shows when a base moved; `wf base merge` merges it (the review and gate then run on the merged tree).

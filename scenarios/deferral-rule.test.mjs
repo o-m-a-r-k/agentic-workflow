@@ -142,9 +142,11 @@ test('a discovered issue is closed fixed only by a commit made after it was reco
   const wt = state(p.root, p.id).repos.app.worktree;
   const before = sh(wt, 'git rev-parse HEAD');
   const [d1] = state(p.root, p.id).discovered.map((d) => d.id);
-  const r = run(p, ['discovered', 'close', d1, '--fixed', before]);
-  assert.notEqual(r.code, 0);
-  assert.match(r.err, /was already in the tree D1 was recorded on: it cannot be the fix/);
+  // 0.7.19: a commit already in the tree the defect was recorded on closes nothing on the owner's word; the claim waits for a
+  // reviewer's verification.
+  const r = ok(run(p, ['discovered', 'close', d1, '--fixed', before]));
+  assert.match(r.out, /was made before D1 was recorded, so a reviewer verifies it/);
+  assert.equal(state(p.root, p.id).discovered.find((x) => x.id === d1).status, 'open');
   commitIn(wt, { 'src/old.txt': 'o1\no2 fixed\no3\n' }, 'fix D1');
   ok(run(p, ['discovered', 'close', d1, '--fixed', sh(wt, 'git rev-parse HEAD')]));
 });

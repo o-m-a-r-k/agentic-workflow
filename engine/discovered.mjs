@@ -95,8 +95,14 @@ export function closeDiscovered(root, idArg, options) {
     // repaired before the record when the ledger and git show exactly that (`reconciliation`); everything else is checked
     // as a fix made after the record.
     const reconcile = entries.map((e) => reconciliation(state, e, c, text(options.evidence)));
-    for (const [n, e] of entries.entries()) {
-      if (reconcile[n].ok) continue;
+    // 0.7.19: a defect fixed by a commit made before it was recorded (the implementer fixed it, then wrote it down) is not
+    // refused for ever. Its fix stands when an independent reviewer verified it after the record; otherwise the claim is
+    // recorded and the next reviewer's bundle asks it to verify that commit, and its `fixed` closes the entry. A wrong
+    // commit named by mistake closes nothing on the owner's word, at any level. Named failure: a high
+    // privacy defect, fixed and then recorded, could not be closed by any route, so the owner agent asked the person to
+    // approve changing the workflow itself.
+    const plan = entries.map((e, n) => {
+      if (reconcile[n].ok) return { e, how: 'reconciled', record: { reconciled: reconcile[n].record } };
       const why = e.kind === 'bookkeeping' ? ` (not a repair made before the record either: ${reconcile[n].why})` : '';
       const head = e.raisedOn?.[c.repo];
       // A repo added after the issue was recorded has no head in `raisedOn`: its commit must be dated after the issue.
@@ -104,11 +110,20 @@ export function closeDiscovered(root, idArg, options) {
       // Git dates a commit to the second and the ledger to the millisecond: a commit in the same second as the record is
       // not before it. Named failure (0.7.10 verify): a fix committed within the second the issue was recorded was refused
       // as older than the issue, on one of three verify legs.
-      if (committed && e.at && Date.parse(committed) < Math.floor(Date.parse(e.at) / 1000) * 1000) throw refuse(`${c.commit.slice(0, 10)} was committed before ${e.id} was recorded: it cannot be the fix${why}`, 'name the commit that fixed it, made after the issue was recorded', { id: 'discovered:fixed-before-issue' });
-      if (head && run('git', ['merge-base', '--is-ancestor', c.commit, head], { cwd: state.repos[c.repo].worktree, allowFail: true }).status === 0) throw refuse(`${c.commit.slice(0, 10)} was already in the tree ${e.id} was recorded on: it cannot be the fix${why}`, 'name the commit that fixed it, made after the issue was recorded', { id: 'discovered:fixed-before-issue' });
+      const datedBefore = committed && e.at && Date.parse(committed) < Math.floor(Date.parse(e.at) / 1000) * 1000;
+      const inTree = head && run('git', ['merge-base', '--is-ancestor', c.commit, head], { cwd: state.repos[c.repo].worktree, allowFail: true }).status === 0;
+      if (!datedBefore && !inTree) return { e, how: 'after', record: {} };
+      if (isBookkeeping(e)) throw refuse(datedBefore ? `${c.commit.slice(0, 10)} was committed before ${e.id} was recorded: it cannot be the fix${why}` : `${c.commit.slice(0, 10)} was already in the tree ${e.id} was recorded on: it cannot be the fix${why}`, 'name the commit that fixed it, made after the issue was recorded');
+      const verified = verifiedFix(state, e);
+      if (verified) return { e, how: 'verified', record: { beforeRecord: true, verifiedBy: verified } };
+      return { e, how: 'claim' };
+    });
+    for (const x of plan) {
+      if (x.how === 'claim') append(root, state.id, 'discovered.claimed', { id: x.e.id, repo: c.repo, commit: c.commit, evidence: text(options.evidence) || null }, actor(options));
+      else append(root, state.id, 'discovered.closed', { id: x.e.id, outcome: 'fixed', repo: c.repo, commit: c.commit, evidence: text(options.evidence) || null, ...x.record }, actor(options));
     }
-    for (const [n, e] of entries.entries()) append(root, state.id, 'discovered.closed', { id: e.id, outcome: 'fixed', repo: c.repo, commit: c.commit, evidence: text(options.evidence) || null, ...(reconcile[n].ok ? { reconciled: reconcile[n].record } : {}) }, actor(options));
-    return { state: loadState(root, state.id), outcome: 'fixed', ids, ...c };
+    const claimed = plan.filter((x) => x.how === 'claim').map((x) => x.e.id);
+    return { state: loadState(root, state.id), outcome: 'fixed', ids: ids.filter((id) => !claimed.includes(id)), claimed, ...c };
   }
   // Deferral moves a defect out of this delivery: by default only a low one, with the person's answer (D17, D18, engine/leaving.mjs; 0.7.6
   // and earlier let a medium one wait on the owner agent's reason and a low one freely). Named failure (0.7.0): the
@@ -123,6 +138,16 @@ export function closeDiscovered(root, idArg, options) {
     append(root, state.id, 'discovered.closed', { id: e.id, outcome: 'deferred', decision: reason || (id === 'owner' ? 'left for later on the owner\'s reason' : `left for later with the person's decision ${id}`), source, attributedTo: text(options.by) || null }, actor(options));
   }
   return { state: loadState(root, state.id), outcome: 'deferred', ids };
+}
+
+// An independent reviewer's `fixed` verdict on this entry, given in a round recorded after the entry was (0.7.19).
+export function verifiedFix(state, e) {
+  for (const r of [...(state.reviews ?? [])].reverse()) {
+    if (!e.at || !r.at || r.at <= e.at) continue;
+    const v = (Array.isArray(r.closure?.discovered) ? r.closure.discovered : []).find((x) => x?.id === e.id);
+    if (v?.verdict === 'fixed' && text(v.evidence)) return { reviewer: r.closure?.reviewer ?? r.reviewer ?? null, round: r.handoff ?? null, evidence: text(v.evidence), at: r.at };
+  }
+  return null;
 }
 
 // I-139, named failure: an implementer repaired a bookkeeping item and then recorded it, and every route to close it with

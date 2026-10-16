@@ -1404,6 +1404,12 @@ export function recordReview(root, options) {
   let reviewerModel = optional(findHost(reviewerHandoff.runtime), 'roleModel')?.(reviewerHandoff, { home: home() }) ?? null;
   append(root, state.id, 'review.recorded', { closure, file: dest, raw, handoff: round, mode, covered, ...(options.salvaged ? { recordedBy: 'engine' } : {}), ...(options.partial ? { partial: true } : {}), revealed: Boolean(revealed) || revealNow, provenance: provenance.status, session: reviewerHandoff.session ?? null, tree: reviewerHandoff.tree, gateRun: reviewerHandoff.gate ?? null, gateEvidenceInspected, handoffTree: reviewerHandoff.tree, handoffPatch: reviewerHandoff.patch, reviewerModel, impactGaps: (closure.findings ?? []).filter((f) => f?.category === 'impact-gap').length }, closure.reviewer);
   append(root, state.id, 'review.round', roundData(state, reviewerHandoff, closure, { outcome: 'recorded', model: reviewerModel, revealed: Boolean(revealed) }), null);
+  // 0.7.19: a defect whose fix predates its record closes on this reviewer's `fixed` verdict for it.
+  for (const d of loadState(root, state.id).discovered ?? []) {
+    if (d.status !== 'open' || !d.claim) continue;
+    const v = (Array.isArray(closure.discovered) ? closure.discovered : []).find((x) => x?.id === d.id);
+    if (v?.verdict === 'fixed' && String(v.evidence ?? '').trim()) append(root, state.id, 'discovered.closed', { id: d.id, outcome: 'fixed', repo: d.claim.repo, commit: d.claim.commit, evidence: String(v.evidence).trim(), beforeRecord: true, verifiedBy: { reviewer: closure.reviewer ?? null, round, evidence: String(v.evidence).trim() } }, null);
+  }
   const after = loadState(root, state.id);
   const toVerify = delta ? [] : unverifiedPrior(after, after.review);
   let reveal = null;
@@ -1873,7 +1879,7 @@ export async function deliver(root, options) {
       if (reports.current.length || reports.historical.some((r) => !judged.has(r.id) || judged.get(r.id).verdict === 'open') || hv.problems.length) throw refuse('not delivered: current or historical implementation reports need resolution and a fresh review on ' + x.id);
     }
     const open = openDiscovered(x);
-    if (open.length) throw refuse(`not delivered: ${open.length} discovered issue(s) are open${x.id !== state.id ? ` in ${x.id}` : ''}: ${open.map((d) => `${d.id} ${d.summary}`).join('; ')}`, `fix it in this ticket and close it with the fix commit (\`wf discovered close <id> --fixed <commit>\`; a fix after acceptance needs the gate and a fresh review); ${RULE_SHORT}`);
+    if (open.length) throw refuse(`not delivered: ${open.length} discovered issue(s) are open${x.id !== state.id ? ` in ${x.id}` : ''}: ${open.map((d) => `${d.id} ${d.summary}${d.claim ? ` (its fix ${d.claim.repo}@${String(d.claim.commit).slice(0, 10)} predates its record and waits for a reviewer's verification: hand a reviewer; its \`fixed\` closes it)` : ''}`).join('; ')}`, `fix it in this ticket and close it with the fix commit (\`wf discovered close <id> --fixed <commit>\`; a fix after acceptance needs the gate and a fresh review); ${RULE_SHORT}`);
     // Named failure (0.7.0): a finding that does not block (D2) must not simply stay open past delivery. It ends fixed and
     // verified by a round, ticketed, or moved to a sibling attempt; the strategist schedules it.
     const obs = observations(x);

@@ -66,7 +66,8 @@ export function compileCacheDir() {
 
 const baseEnv = () => {
   // The immutable flag stays off in tests (temporary folders must stay removable); modes and the manifest still apply.
-  const env = { NODE_COMPILE_CACHE: compileCacheDir(), ...process.env, WF_EVIDENCE_FLAGS: '0', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.test', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.test' };
+  // A scenario runs this checkout's wf, never the release installed on the machine (0.7.19 forwards an older copy to it).
+  const env = { NODE_COMPILE_CACHE: compileCacheDir(), ...process.env, WF_NO_FORWARD: '1', WF_EVIDENCE_FLAGS: '0', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.test', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.test' };
   for (const k of ['CLAUDE_CODE_SESSION_ID', 'CLAUDECODE', 'CODEX_THREAD_ID', 'CODEX_SANDBOX', 'AI_AGENT', 'GROK_SESSION_ID']) delete env[k]; // no agent runtime: the scenario is the owner at a terminal (engine/owner.mjs)
   delete env.CODEX_THREAD_ID;
   delete env.GROK_SESSION_ID;

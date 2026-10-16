@@ -129,7 +129,7 @@ export function limitItems(state, { load = null } = {}) {
   for (const a of state.delivery?.shown?.anomalies ?? []) if (a.followUp) add(null, `Follow-up: ${a.observation} (${a.followUp})`);
   // An item closed as fixed after the last review was not verified by any reviewer (0.7.8: information, not a stop).
   const lastReviewAt = lastReviewSeenAt(state) ?? '';
-  for (const d of state.discovered ?? []) if (d.status === 'fixed' && d.kind !== 'bookkeeping' && d.fixed?.at > lastReviewAt) add(d.id, `Fixed after the last review, not verified by a reviewer: ${wording(state, d.id, d.summary)}.`);
+  for (const d of state.discovered ?? []) if (d.status === 'fixed' && d.kind !== 'bookkeeping' && !d.fixed?.verifiedBy && d.fixed?.at > lastReviewAt) add(d.id, `Fixed after the last review, not verified by a reviewer: ${wording(state, d.id, d.summary)}.`);
   for (const d of state.scopeDecisions ?? []) if (d.choice === 'fixed' && d.at > lastReviewAt) for (const k of d.keys ?? []) add(k, `Fixed after the last review, not verified by a reviewer: ${wording(state, k, findingSummary(state, k))}.`);
   // A review finding that is not fixed here (0.7.0): ticketed for later, or moved to a sibling attempt of the batch.
   for (const d of state.scopeDecisions ?? []) {

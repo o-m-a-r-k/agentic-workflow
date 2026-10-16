@@ -425,5 +425,5 @@ export const lastReviewSeenAt = (state) => {
 };
 export const reviewerDiscovered = (entries, state = null) => {
   const lastReview = lastReviewSeenAt(state);
-  return (entries ?? []).filter((d) => !isBookkeeping(d) && !(state && legacyWaived(state, d)) && (d.status !== 'fixed' || (state && (!lastReview || (d.fixed?.at && d.fixed.at > lastReview))))).map((d) => (d.status === 'fixed' ? { ...d, fixedSinceReview: true } : d));
+  return (entries ?? []).filter((d) => !isBookkeeping(d) && !(state && legacyWaived(state, d)) && (d.status !== 'fixed' || (state && (!lastReview || (d.fixed?.at && d.fixed.at > lastReview))))).map((d) => (d.status === 'fixed' ? { ...d, fixedSinceReview: true } : d.claim ? { ...d, claimedFixed: { repo: d.claim.repo, commit: d.claim.commit, note: 'fixed by a commit made before it was recorded: verify it, and give `discovered: [{ "id": "' + d.id + '", "verdict": "fixed" | "open", "evidence": "<file:line>" }]`; your `fixed` closes it' } } : d));
 };

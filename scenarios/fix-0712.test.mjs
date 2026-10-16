@@ -176,7 +176,8 @@ test('I-139 guards: defects, invariants, unrated/medium, foreign commits, other 
   ok(d(p, ['add', '--summary', 'unrated bookkeeping', '--kind', 'bookkeeping', '--found-by', 'i', '--where', 'tests/fixture.txt:1']));             // D3 unrated = high
   ok(d(p, ['add', '--summary', 'by a reviewer', '--kind', 'bookkeeping', '--severity', 'low', '--found-by', 'r9', '--where', 'tests/fixture.txt:1'])); // D4 foundBy not an implementer
   ok(d(p, ['add', '--summary', 'elsewhere', '--kind', 'bookkeeping', '--severity', 'low', '--found-by', 'i', '--where', 'docs/other.md:1']));       // D5 file not touched
-  refused(['close', 'D1', '--fixed', fix], /was already in the tree D1 was recorded on: it cannot be the fix$/m);
+  // A defect (0.7.19) is not refused: its claim waits for a reviewer's verification and closes nothing yet.
+  assert.match(ok(d(p, ['close', 'D1', '--fixed', fix])).out, /D1: \S+ was made before D1 was recorded, so a reviewer verifies it/);
   for (const id of ['D2', 'D3', 'D4', 'D5']) refused(['close', id, '--fixed', fix], new RegExp(`${id} was recorded on: it cannot be the fix \\(not a repair made before the record either: `));
   assert.deepEqual(state(p.root, p.id).discovered.map((x) => x.status), ['open', 'open', 'open', 'open', 'open']);
 });

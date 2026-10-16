@@ -1,5 +1,49 @@
 #!/usr/bin/env node
-import { main } from '../engine/cli.mjs';
+import fs from 'node:fs';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+
+// A copy of wf older than the installed release runs the installed one instead (0.7.19). Named failure: an owner session
+// copied the plugin's engine into a temporary folder to use a release early, then ran that copy for two days and six
+// releases, so every later fix missed it (approving in the chat among them) and its owner reached for changing the
+// workflow itself. The installed release is the one `wf install` linked into ~/.local/bin; a copy that is not older, or
+// `WF_NO_FORWARD`, runs as it is.
+const here = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const versionOf = (dir) => {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8')).version ?? null;
+  } catch {
+    return null;
+  }
+};
+const newer = (a, b) => {
+  const x = String(a).split('.').map(Number);
+  const y = String(b).split('.').map(Number);
+  for (let i = 0; i < 3; i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0);
+  return false;
+};
+function installed() {
+  if (process.env.WF_NO_FORWARD || !process.env.HOME) return null;
+  let target;
+  try {
+    target = path.dirname(path.dirname(fs.realpathSync(path.join(process.env.HOME, '.local', 'bin', 'wf'))));
+  } catch {
+    return null;
+  }
+  if (target === here) return null;
+  const mine = versionOf(here);
+  const theirs = versionOf(target);
+  return mine && theirs && newer(theirs, mine) ? { target, mine, theirs } : null;
+}
+const to = installed();
+if (to) {
+  process.stderr.write(`wf: this copy is ${to.mine} (${here}); running the installed ${to.theirs} instead. Run \`wf\` from your PATH, not a copy.\n`);
+  const r = spawnSync(process.execPath, [path.join(to.target, 'bin', 'wf'), ...process.argv.slice(2)], { stdio: 'inherit', env: { ...process.env, WF_NO_FORWARD: '1' } });
+  process.exit(r.status ?? 1);
+}
+
+const { main } = await import('../engine/cli.mjs');
 
 // Exit only once stdout and stderr are drained: `process.exit` right after a large write to a pipe cut `--json`
 // output at 64 KB (named failure: a gate with 1,320 screenshots printed unparsable JSON).

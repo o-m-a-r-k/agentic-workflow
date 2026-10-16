@@ -535,8 +535,15 @@ export function reduce(entries) {
         const x = s.discovered.find((y) => y.id === d.id);
         if (!x) break;
         x.status = d.outcome;
-        if (d.outcome === 'fixed') x.fixed = { repo: d.repo, commit: d.commit, evidence: d.evidence ?? null, ...(d.reconciled ? { reconciled: d.reconciled } : {}), at: e.at, by: e.actor };
+        delete x.claim;
+        if (d.outcome === 'fixed') x.fixed = { repo: d.repo, commit: d.commit, evidence: d.evidence ?? null, ...(d.reconciled ? { reconciled: d.reconciled } : {}), ...(d.beforeRecord ? { beforeRecord: true } : {}), ...(d.verifiedBy ? { verifiedBy: d.verifiedBy } : {}), at: e.at, by: e.actor };
         else x.deferred = { decision: d.decision, source: d.source ?? null, attributedTo: d.attributedTo ?? null, at: e.at, by: e.actor };
+        break;
+      }
+      // 0.7.19: a high defect fixed before it was recorded waits for a reviewer's verification of that commit.
+      case 'discovered.claimed': {
+        const x = s.discovered.find((y) => y.id === d.id);
+        if (x) x.claim = { repo: d.repo, commit: d.commit, evidence: d.evidence ?? null, at: e.at, by: e.actor };
         break;
       }
       // The owner saw each deferral at delivery and acknowledged it (second security review of 0.4.5).
