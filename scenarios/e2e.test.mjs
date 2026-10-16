@@ -120,7 +120,7 @@ test('init in a multi-repo folder writes the adapter into a repo and links it fr
 });
 
 test('leases are machine-wide: two gates from different attempts never share a docker slot', async () => {
-  const stamp = "node -e \"const f=process.env.WF_CONFIG_HOME+'/../times.txt';require('fs').appendFileSync(f,process.env.WF_ATTEMPT+' '+Date.now()+' start\\n');setTimeout(()=>require('fs').appendFileSync(f,process.env.WF_ATTEMPT+' '+Date.now()+' end\\n'),700)\"";
+  const stamp = "node -e \"const f=process.env.WF_CONFIG_HOME+'/../times.txt';require('fs').appendFileSync(f,process.env.WF_ATTEMPT+' '+Date.now()+' start\\n');setTimeout(()=>require('fs').appendFileSync(f,process.env.WF_ATTEMPT+' '+Date.now()+' end\\n'),2500)\"";
   const steps = [{ id: 'e2e', repo: 'app', run: stamp, lease: 'docker', inputs: ['src/**'] }];
   const { base, root } = singleRepoProject('machine-lease', { gate: { leases: { docker: 1 }, steps } });
   const ids = [];
@@ -136,8 +136,11 @@ test('leases are machine-wide: two gates from different attempts never share a d
   const env = { ...process.env, WF_CONFIG_HOME: home , ...spawnHome(root) };
   for (const k of ['CLAUDE_CODE_SESSION_ID', 'CLAUDECODE', 'CODEX_THREAD_ID', 'CODEX_SANDBOX', 'AI_AGENT', 'GROK_SESSION_ID']) delete env[k]; // no agent runtime: the scenario is the owner at a terminal (engine/owner.mjs)
   // Each gate's output is kept: a refusal says why (the run that hid it with stdio 'ignore' failed only as [0, 75]).
+  // Both gates are approved first and then started together, so the second always finds the slot taken. Named failure
+  // (0.7.23 CI, macOS): approving the second gate while the first was already running took longer than the first gate's
+  // step, so the two never met and neither waited ([null, null]); the step is long enough that they meet.
+  for (const id of ids) ownerSpeaks(root, ['gate', ...OUT_OF_ORDER, '--attempt', id]);
   const run = (id) => new Promise((resolve) => {
-    ownerSpeaks(root, ['gate', ...OUT_OF_ORDER, '--attempt', id]);
     const c = spawn(process.execPath, [WF, 'gate', ...OUT_OF_ORDER, '--attempt', id], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '';
     c.stdout.on('data', (d) => (out += d));
