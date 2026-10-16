@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -173,10 +174,17 @@ test('export screenshots: titles are plain file names; `..` and colliding names 
   const r = ok(wf(root, ['export', 'screenshots', '--attempt', esc, '--to', path.join(base, 'esc')])).out;
   assert.deepEqual(fs.readdirSync(r.match(/to (\S+)/)[1]), ['escape.png']);
   assert.ok(!fs.existsSync(path.join(base, 'escape.png')) && !fs.existsSync(path.join(root, 'escape.png')));
-  const bad = legacy('ENG-174', [{ ...f, title: '..' }, { ...f, title: 'a/home.png' }, { ...f, title: 'b/home.png' }]);
-  const err = wf(root, ['export', 'screenshots', '--attempt', bad, '--to', path.join(base, 'bad')]).err;
-  assert.match(err, /"\.\.": not a usable file name/);
-  assert.match(err, /b\/home\.png and a\/home\.png would both be written as home\.png/);
+  const bad = legacy('ENG-174', [{ ...f, title: '..' }, { ...f, title: 'a/home.png' }]);
+  assert.match(wf(root, ['export', 'screenshots', '--attempt', bad, '--to', path.join(base, 'bad')]).err, /"\.\.": not a usable file name/);
+  // I-170 (0.7.20): titles that flatten to one name, or that the filesystem folds together (case, Unicode forms), are all
+  // exported, the later ones numbered, each checked against its sha256.
+  const same = legacy('ENG-175', [{ ...f, title: 'a/home.png' }, { ...f, title: 'b/home.png' }, { ...f, title: 'Home.png' }, { ...f, title: 'caf\u00e9.png' }, { ...f, title: 'cafe\u0301.png' }]);
+  const out = ok(wf(root, ['export', 'screenshots', '--attempt', same, '--to', path.join(base, 'same')])).out;
+  const dir = out.match(/to (\S+)/)[1];
+  const written = fs.readdirSync(dir);
+  assert.equal(written.length, 5, `every record is written: ${written.join(', ')}`);
+  assert.ok(written.includes('home.png') && written.includes('home-2.png'));
+  for (const name of written) assert.equal(crypto.createHash('sha256').update(fs.readFileSync(path.join(dir, name))).digest('hex'), f.sha256);
 });
 
 test('the shown draft and every other engine write outside the evidence never follow a planted link into it', async () => {

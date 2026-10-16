@@ -2269,13 +2269,18 @@ export function exportScreenshots(root, state, to = null, { gate = false } = {})
   const parent = canonicalPath(String(to ?? screenshotsExportDir(root, state.id)));
   const outside = 'export outside .wf-evidence/ (checked where the folder really points): the evidence is written only by `wf`';
   if (underEvidence(root, parent)) throw refuse(outside);
-  const names = new Map();
+  // Each record keeps its title (where it came from); the file it is written as is its title, or, when that name is taken
+  // in the export folder, the title with a number (I-170, named failure: two suites captured the same relative path, so
+  // their titles flattened to one name and the whole export was refused; a reviewer could open none of 422 screenshots).
+  // A name the filesystem reports taken by a file this export wrote (the same name, or one it folds to the same entry: case,
+  // Unicode forms) is another record's, and the next number is tried; anything else there (a link, a file it did not write)
+  // is refused as before.
+  const names = [];
   const problems = [];
   for (const f of files) {
     const name = safeFileName(path.basename(String(f.title ?? '').replace(/\\/g, '/')) || f.title);
     if (!name) problems.push(`${JSON.stringify(f.title)}: not a usable file name`);
-    else if (names.has(name)) problems.push(`${f.title} and ${names.get(name).title} would both be written as ${name}`);
-    else names.set(name, f);
+    else names.push([name, f]);
   }
   if (problems.length) throw refuse(`screenshots not exported:\n  - ${problems.join('\n  - ')}`);
   mkdirStateDirectory(parent, { recursive: true });
@@ -2292,6 +2297,7 @@ export function exportScreenshots(root, state, to = null, { gate = false } = {})
   };
   const { O_RDONLY, O_WRONLY, O_CREAT, O_EXCL, O_NOFOLLOW } = fs.constants;
   const out = [];
+  const written = new Set();
   for (const [name, f] of names) {
     exportSeams.beforeSourceOpen?.(f.path);
     let bytes;
@@ -2301,20 +2307,37 @@ export function exportScreenshots(root, state, to = null, { gate = false } = {})
       problems.push(error.code === 'ESHA' ? `${f.title}: bytes differ from the recorded sha256 (${f.path})` : `${f.title}: source not readable as a regular file (${error.code ?? error.message}): ${error.message}`);
       continue;
     }
-    const dest = path.join(dir, name);
-    exportSeams.beforeDestOpen?.(dest, dir);
+    const ext = path.extname(name);
+    const stem = name.slice(0, name.length - ext.length);
+    let dest = path.join(dir, name);
+    let fd;
+    let failed = null;
+    for (let n = 1; n <= files.length + 1; n++) {
+      dest = path.join(dir, n === 1 ? name : `${stem}-${n}${ext}`);
+      exportSeams.beforeDestOpen?.(dest, dir);
+      if (!same()) break;
+      try {
+        fd = fs.openSync(dest, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o644);
+        break;
+      } catch (error) {
+        const there = error.code === 'EEXIST' ? fs.lstatSync(dest, { throwIfNoEntry: false }) : null;
+        if (!there || !there.isFile() || !written.has(`${there.dev}:${there.ino}`)) {
+          failed = error;
+          break;
+        }
+      }
+    }
     if (!same()) {
       problems.push(`${dir}: the export folder was replaced or moved during the export; nothing more written`);
       break;
     }
-    let fd;
-    try {
-      fd = fs.openSync(dest, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o644);
-    } catch (error) {
-      problems.push(`${dest}: not created (${error.code ?? error.message}); an existing file or link is never followed or replaced`);
+    if (fd === undefined) {
+      problems.push(`${dest}: not created (${failed?.code ?? failed?.message ?? 'every numbered name was taken'}); an existing file or link is never followed or replaced`);
       continue;
     }
     try {
+      const st = fs.fstatSync(fd);
+      written.add(`${st.dev}:${st.ino}`);
       fs.writeSync(fd, bytes);
       fs.fsyncSync(fd);
     } finally {
