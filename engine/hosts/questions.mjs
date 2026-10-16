@@ -182,8 +182,9 @@ export async function claudeChatAnswers(file) {
       saidAt = e.timestamp ?? saidAt;
       return;
     }
-    // The person's answer in the panel is their turn too (independent review of 0.7.18): it ends the message.
-    const panelAnswer = e?.type === 'user' && !e.isSidechain && Array.isArray(content) && content.some((b) => b?.type === 'tool_result' && asked.has(b.tool_use_id));
+    // The person's answer in the panel is their turn too (independent review of 0.7.18): it ends the message. A panel they
+    // dismissed (a result with no answers) leaves the question standing, so what they type next answers it.
+    const panelAnswer = e?.type === 'user' && !e.isSidechain && Array.isArray(content) && record(e.toolUseResult?.answers) && content.some((b) => b?.type === 'tool_result' && asked.has(b.tool_use_id));
     const person = panelAnswer ? { turn: true } : claudePerson(e);
     if (!person) return;
     if (person.reply && said.length) out.push({ askedAt: saidAt, at: e.timestamp ?? null, question: said.join('\n'), panels, options: null, answer: person.reply, channel: 'chat' });

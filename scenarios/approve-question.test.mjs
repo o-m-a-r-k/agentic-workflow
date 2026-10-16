@@ -342,6 +342,16 @@ test('chat on Claude Code: a panel answer ends the message, so a later "yes" nev
   ]);
   assert.match(ok(approveQ(t.p, t.e.id, t.d.id, env)).out, /A1 decided: no/);
   assert.match(state(t.p.root, t.e.id).decisions[0].approved.via, /^question-panel/);
+  // A panel the person dismissed (no answers recorded) leaves the question standing: their typed reply answers it.
+  const w = heldAttempt('chat-claude-dismissed', 'ENG-992');
+  const dismissed = 'toolu_panel_dismissed';
+  claudeLines(w.p, [
+    { type: 'assistant', timestamp: at(400), message: { role: 'assistant', content: [{ type: 'tool_use', id: dismissed, name: 'AskUserQuestion', input: { questions: [{ question: w.question, header: 'wf', multiSelect: false, options: [{ label: 'yes', description: '' }, { label: 'no', description: '' }] }] } }] } },
+    types([{ type: 'tool_result', tool_use_id: dismissed, is_error: true, content: 'The user did not answer.' }], at(800)),
+    types('yes', at(1000)),
+  ]);
+  assert.match(ok(approveQ(w.p, w.e.id, w.d.id, env)).out, /A1 decided: yes/);
+  assert.match(state(w.p.root, w.e.id).decisions[0].approved.via, /^chat \(Claude Code, host-recorded\)$/);
   // The agent's own label for the decision is not another decision's key; a bare "Yes." keeps no reply beside the choice.
   const u = heldAttempt('chat-claude-label', 'ENG-991');
   claudeLines(u.p, [says(`Reserved decision A1: lifting the hold lets the planner start.\n\n"${u.question}"\n\nOption A1: yes, lift it / no`, at(500)), types('Yes.', at(1000))]);
