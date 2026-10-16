@@ -103,3 +103,17 @@ test('a copy of wf older than the installed release runs the installed one; the 
   assert.doesNotMatch(run({}).stdout, /installed ran/, 'an older installed release is not run');
   fs.rmSync(home, { recursive: true, force: true });
 });
+
+test('a round recorded before 0.7.19 counts as verification when its bundle file showed the entry', async () => {
+  const { verifiedFix } = await import('../engine/discovered.mjs');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wf-old-round-'));
+  const bundle = path.join(dir, '03-reviewer.json');
+  fs.writeFileSync(bundle, JSON.stringify({ discovered: [{ id: 'D3' }] }));
+  const e = { id: 'D3', at: '2026-10-16T10:02:23.199Z' };
+  const round = (extra) => ({ reviews: [{ at: '2026-10-16T10:34:03.315Z', handoff: bundle, reviewer: 'r9', closure: { reviewer: 'r9', discovered: [{ id: 'D3', verdict: 'fixed', evidence: 'SceneDelegate.swift:273' }] }, ...extra }] });
+  assert.equal(verifiedFix(round({}), e).reviewer, 'r9', 'an old round with no discoveredHanded reads its bundle');
+  assert.equal(verifiedFix(round({ discoveredHanded: [] }), e), null, 'a new round that was not shown the entry does not count');
+  fs.writeFileSync(bundle, JSON.stringify({ discovered: [] }));
+  assert.equal(verifiedFix(round({}), e), null, 'an old round whose bundle did not show the entry does not count');
+  fs.rmSync(dir, { recursive: true, force: true });
+});

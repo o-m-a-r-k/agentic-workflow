@@ -8,6 +8,7 @@ import { isBookkeeping, legacyWaived, severityLevel } from './review-policy.mjs'
 import { actor, openState } from './attempt.mjs';
 import { append, loadState } from './ledger.mjs';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import { home } from './provenance.mjs';
 import { findHost, optional } from './hosts/index.mjs';
 import { WfError, git, refuse, run } from './util.mjs';
@@ -140,10 +141,21 @@ export function closeDiscovered(root, idArg, options) {
   return { state: loadState(root, state.id), outcome: 'deferred', ids };
 }
 
+// The discovered entries a round's bundle showed its reviewer: recorded with the round from 0.7.19, read from the round's
+// bundle file for a round recorded before (independent review of 0.7.19: those rounds could otherwise never count).
+const handedIds = (r) => {
+  if (Array.isArray(r.discoveredHanded)) return r.discoveredHanded;
+  try {
+    const listed = JSON.parse(fs.readFileSync(r.handoff, 'utf8'))?.discovered;
+    return Array.isArray(listed) ? listed.map((x) => x?.id).filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+};
 // An independent reviewer's `fixed` verdict on this entry, given in a round recorded after the entry was (0.7.19).
 export function verifiedFix(state, e) {
   for (const r of [...(state.reviews ?? [])].reverse()) {
-    if (!e.at || !r.at || r.at <= e.at || !(r.discoveredHanded ?? []).includes(e.id)) continue;
+    if (!e.at || !r.at || r.at <= e.at || !handedIds(r).includes(e.id)) continue;
     const v = (Array.isArray(r.closure?.discovered) ? r.closure.discovered : []).find((x) => x?.id === e.id);
     if (v?.verdict === 'fixed' && text(v.evidence)) return { reviewer: r.closure?.reviewer ?? r.reviewer ?? null, round: r.handoff ?? null, evidence: text(v.evidence), at: r.at, ...(r.partial ? { partial: true } : {}) };
   }

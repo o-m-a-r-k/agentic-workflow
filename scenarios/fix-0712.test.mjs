@@ -166,7 +166,7 @@ test('I-139: a bookkeeping entry recorded after its own handoff-made fix is reco
   assert.match(ok(d(p, ['list'])).out, /repaired by i before it was recorded/);
 });
 
-test('I-139 guards: defects, invariants, unrated/medium, foreign commits, other handoffs and unrelated files are all refused', () => {
+test('I-139 guards: defects, invariants, unrated/medium, foreign commits, other handoffs and unrelated files are never reconciled; each is a claim (0.7.19)', () => {
   const p = project('i139g');
   commitIn(p.wt, { 'tests/fixture.txt': 'f1 fixed\n', 'src/a.txt': 'l1\nL2\nl3\n' }, 'the real fix');
   const fix = head(p);
