@@ -656,7 +656,7 @@ async function dispatch(cmd, sub, positional, options) {
       // 0.7.25: the block removals and the files regenerated are told apart (0.7.24 said every file it wrote had held a block).
       const removed = files.blocksRemoved ?? [];
       const generated = files.filter((f) => !removed.includes(f));
-      print(options, `${removed.length ? `removed the agentic-workflow block an older release wrote from ${removed.length} file(s); commit the removal (the rules now come from the plugin):\n${removed.map((f) => `  ${path.relative(root, f)}`).join('\n')}` : 'no instruction file holds an agentic-workflow block'}\nwrote ${generated.length} generated file(s):\n${generated.map((f) => `  ${path.relative(root, f)}`).join('\n')}${note}`, files);
+      print(options, `${removed.length ? `removed the agentic-workflow block an older release wrote from ${removed.length} file(s); commit the removal (the rules now come from the plugin):\n${removed.map((f) => `  ${path.relative(root, f)}`).join('\n')}` : 'no instruction file holds an agentic-workflow block'}${generated.length ? `\nwrote ${generated.length} generated file(s):\n${generated.map((f) => `  ${path.relative(root, f)}`).join('\n')}` : ''}${note}`, files);
       return 0;
     }
     case 'topology': {
