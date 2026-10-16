@@ -5,6 +5,8 @@ export const CHANNEL = {
   'approved-decision': 'approved-decision (confirmed with `wf approve` at an interactive terminal; a pseudo-terminal wrapper can answer it)',
   // 0.7.3 (D12): the person answered in the agent session's question panel.
   'approved-decision:question-panel': 'approved-decision (answered by the person in the question panel; the harness recorded the answer, not a signature)',
+  // 0.7.18 (D26): the person replied in the chat to a message that asked exactly this question.
+  'approved-decision:chat': 'approved-decision (answered by the person in the chat, replying to a message that asked exactly this question; the harness recorded the reply, not a signature)',
   // Recorded only before 0.7.7: from then a deferral is always the person's decision (D17).
   'severity-rule': "the owner agent's judgement under the person's severity rule of 0.7.6 and earlier (a medium or low issue could wait; D10)",
   // 0.7.8: the project's `leaving:` policy let the owner decide this level, with its recorded reason.
@@ -12,5 +14,5 @@ export const CHANNEL = {
   'host-recorded': "host-recorded (the owner session's transcript; a process running as you could have written it)",
   'interactive-terminal (unverified)': 'interactive-terminal (unverified: typed at a terminal; a pseudo-terminal wrapper can answer it)',
 };
-const keyOf = (source) => (source?.provenance === 'approved-decision' && String(source.via ?? '').startsWith('question-panel') ? 'approved-decision:question-panel' : source?.provenance);
+const keyOf = (source) => (source?.provenance === 'approved-decision' && /^(question-panel|chat)\b/.test(String(source.via ?? '')) ? `approved-decision:${String(source.via).startsWith('chat') ? 'chat' : 'question-panel'}` : source?.provenance);
 export const channelOf = (d) => CHANNEL[keyOf(d.deferred?.source)] ?? (d.deferred?.source?.provenance ?? 'recorded before 0.4.5 (unverified)');

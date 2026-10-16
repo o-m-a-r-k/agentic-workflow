@@ -8,17 +8,29 @@ Release notes, newest first, then every fix that came from a failure in the work
   in a host mode that keeps the panel from approvals), the agent asks in its message instead. It quotes the engine's
   question exactly, lists the options and asks nothing else in that message. `wf approve <id> --from-question` then reads
   the person's reply as the harness recorded it, in Claude Code and in Codex.
-  - A reply counts only when the agent's message just before it carries that decision's exact question and no other open
-    decision's question, and only when it was given after the decision was created.
-  - A reply that starts with a choice ("Yes, go ahead") is that choice. Any other reply is recorded as the person's own
-    words, which grant nothing a choice would.
-  - The decision records `chat (<harness>, host-recorded)`. The terminal and the question panel still work as before.
+  - **What a reply binds to.** A reply counts only when the agent's message just before it carries that decision's exact
+    question and no other decision's, of any attempt. The question may be plain, quoted, bold or in code. The reply must
+    also come after the decision was created.
+    - The message is the agent's final text after its last tool call, plus any question it put in the panel.
+    - Every turn of the person's ends that message: a reply, a panel answer, a slash command.
+    - Harness lines are never read as the person: task notices, reminders, interrupt markers, compaction summaries,
+      context, a sub-agent's thread.
+    - A reply to a quoted message is read as what the person typed after the quote.
+  - **Which choice it makes.** A reply that leads with a choice ("Yes, go ahead") is that choice, and a longer reply is kept
+    beside it, so a condition reaches the owner. A reply that names another choice after the first ("yes, actually no") is
+    recorded as the person's own words, which grant nothing a choice would.
+  - **What gets recorded.** The decision records `chat (<harness>, host-recorded)`, and a deferral it confirmed is listed
+    with that channel. The terminal and the question panel still work as before.
 
   A person working from the phone got no panel and answered "Yes" in the chat twice. The engine read neither, so the agent
   merged around the workflow on their "override it". Closing the ticket then needed one more answer they had no way to give.
-- **The texts agents read say so.** The work skill, `wf approve` refusals and every decision's question hint name the chat
-  route. They also tell agents never to approve a decision themselves, never to word the person's reply, and never to
-  work around a decision because answering it was hard.
+- **The texts agents read say so.** The chat route is named in:
+  - the work, resume and quick-fix skills;
+  - the AGENTS.md block `wf sync` writes into each project;
+  - `wf approve` refusals and the question hints of decisions, leaving items and escalations.
+
+  The texts also tell agents never to approve a decision themselves, never to word the person's reply, and never to work around a
+  decision because answering it was hard.
 
 ## 0.7.17 - Known limits a tester can read, with nothing left out
 

@@ -636,7 +636,7 @@ export function reduce(entries) {
         break;
       case 'decision.approved': {
         const x = s.decisions.find((y) => y.id === d.id);
-        if (x) x.approved = { choice: d.choice, at: e.at, via: d.via, ...(d.words ? { words: d.words } : {}) };
+        if (x) x.approved = { choice: d.choice, at: e.at, via: d.via, ...(d.words ? { words: d.words } : {}), ...(d.reply ? { reply: d.reply } : {}) };
         break;
       }
       // A question withdrawn by the owner (0.7.8): its subject changed, so it is no longer asked; it never granted anything.

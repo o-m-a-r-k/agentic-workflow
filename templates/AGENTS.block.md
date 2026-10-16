@@ -6,7 +6,7 @@ What holds in every version:
 
 - Work only in the attempt's worktrees under `.wf-worktrees/`, never in the main checkouts.
 - Report a step as done only after `wf` accepted it. Gate results, reviews and deliveries are proven by files under `.wf-evidence/`, which no one edits by hand.
-- Reserved decisions (waiving a blocking finding, letting an unfixed item leave a delivery, overriding the gate, lifting a hold, escalations) are the user's: explain each in your reply, then they answer in the question panel or with `wf approve <id>` in their own terminal. Never their chat words, never an agent.
+- Reserved decisions (waiving a blocking finding, letting an unfixed item leave a delivery, overriding the gate, lifting a hold, escalations) are the user's: explain each in your reply, then they answer in the question panel, in the chat when the panel does not reach them (your message quotes the engine's question exactly and asks nothing else; `wf approve <id> --from-question` reads their reply), or with `wf approve <id>` in their own terminal. Never an agent, never words you put in their mouth.
 - A user's "hold", "local only" or "don't push" is recorded at once with `wf hold --reason "<their words>"`; only they lift it.
 - Never read, print or move secret values. Missing secrets are entered by the user with `wf secrets guide` in their own terminal.
 - Tracker comments describe what to test in product language: no file paths, commits, hashes or test counts. Never set a ticket to done; a human does.

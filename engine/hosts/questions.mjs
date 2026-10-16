@@ -121,14 +121,35 @@ export async function codexQuestionAnswers(file) {
 }
 
 // The person's reply in the chat, bound to the message it answers (0.7.18). Each entry pairs a reply the person typed with the
-// agent's whole message just before it (every text the agent wrote since the person's previous turn), as the harness recorded
-// both. What a reply may confirm is the engine's decision (engine/approve.mjs): only a message that carries a decision's exact
-// question binds a reply to it.
+// agent's message just before it, as the harness recorded both: the text the agent wrote after its last tool call (its final
+// reply; commentary between tool calls is not the message the person answers), plus any question it put in the harness's
+// question panel since then. Every turn of the person's, a reply or not (a panel answer, a slash command), ends the message;
+// what the harness writes (task notices, reminders, interrupt markers, compaction summaries, context) is not the person and
+// is skipped. What a reply may confirm is the engine's decision (engine/approve.mjs): only a message that carries one
+// decision's exact question binds a reply to it.
 //
 // Named failure (0.7.18): a person working from the phone did not get the harness's question panel (and one host's default
 // mode tells its agent never to use the panel for approvals). They answered "Yes" in the chat twice; the engine read only the
 // panel and their own terminal, so the decision stayed open, the agent merged around the workflow on their "override it", and
 // closing the ticket then needed one more answer they had no way to give.
+const CLAUDE_HARNESS = /^<(task-notification|system-reminder|local-command-stdout|local-command-stderr|local-command-caveat|command-message|user-prompt-submit-hook)\b|^\[Request interrupted by user/;
+// What the person typed in one Claude Code user line: { reply } when they typed text, { turn: true } when they acted without
+// replying (a slash command, a shell line, a paste alone), null when the harness wrote it.
+function claudePerson(e) {
+  if (e?.type !== 'user' || e.isMeta || e.isCompactSummary || e.isSidechain) return null;
+  const c = e.message?.content;
+  if (Array.isArray(c) && c.some((b) => b?.type === 'tool_result')) return null;
+  const blocks = typeof c === 'string' ? [c] : Array.isArray(c) ? c.filter((b) => b?.type === 'text' && typeof b.text === 'string').map((b) => b.text) : [];
+  const kept = blocks.map((b) => b.trim()).filter((b) => b && !CLAUDE_HARNESS.test(b));
+  if (!kept.length) return Array.isArray(c) && c.some((b) => b?.type === 'image') ? { turn: true } : null;
+  let text = kept.join('\n').replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').replace(/<pasted_content\b[^>]*>[\s\S]*?<\/pasted_content>/g, '').trim();
+  // A reply to a quoted message: the quote (lines starting with ">"), then what they typed.
+  const quote = /^<!--\s*reply\s+\d+\s*-->[ \t]*\n(?:>.*(?:\n|$))*/.exec(text);
+  if (quote) text = text.slice(quote[0].length).trim();
+  if (!text || /^</.test(text)) return { turn: true };
+  return { reply: text };
+}
+const QUESTION_TOOLS = new Set(['AskUserQuestion', 'request_user_input', 'request_user_input_async']);
 export async function claudeChatAnswers(file) {
   const out = [];
   let said = [];
@@ -144,23 +165,38 @@ export async function claudeChatAnswers(file) {
     if (e?.isSidechain) return;
     const content = e?.message?.content;
     if (e?.type === 'assistant' && Array.isArray(content)) {
-      for (const b of content) if (b?.type === 'text' && typeof b.text === 'string' && b.text.trim()) said.push(b.text);
+      for (const b of content) {
+        if (b?.type === 'text' && typeof b.text === 'string' && b.text.trim()) said.push(b.text);
+        else if (b?.type === 'tool_use' && b.name === 'AskUserQuestion' && Array.isArray(b.input?.questions)) said.push(...b.input.questions.filter((q) => record(q) && typeof q.question === 'string').map((q) => q.question));
+        else if (b?.type === 'tool_use') said = [];
+      }
       saidAt = e.timestamp ?? saidAt;
       return;
     }
-    // A prompt the person typed: not a tool result, not a harness note (`isMeta`), not a command wrapper.
-    if (e?.type !== 'user' || e.isMeta) return;
-    const text = typeof content === 'string' ? content : Array.isArray(content) && !content.some((c) => c?.type === 'tool_result') ? content.filter((c) => c?.type === 'text').map((c) => c.text ?? '').join('\n') : null;
-    if (typeof text !== 'string' || !text.trim() || /^\s*</.test(text)) return;
-    if (said.length) out.push({ askedAt: saidAt, at: e.timestamp ?? null, question: said.join('\n'), options: null, answer: text.trim(), channel: 'chat' });
+    const person = claudePerson(e);
+    if (!person) return;
+    if (person.reply && said.length) out.push({ askedAt: saidAt, at: e.timestamp ?? null, question: said.join('\n'), options: null, answer: person.reply, channel: 'chat' });
     said = [];
     saidAt = null;
   });
   return out;
 }
 
-// Codex: the agent's `message` items (role assistant, `output_text`) since the person's previous turn, then the person's
-// `message` (role user, `input_text` only; harness context and panel replies start with a tag and are not replies).
+// Codex: the agent's `message` items (role assistant, `output_text`) after its last tool call, plus its question-panel calls;
+// the person's `message` (role user) ends it. Harness context (AGENTS.md, environment, plugin notes, by the item kinds the
+// harness records or a context tag) is not the person; a panel reply or another tagged line is their turn but not a reply.
+const CODEX_WRAPPERS = ['plugins.recommendations', 'agents_md.instructions', 'environments.environment_context'];
+const CODEX_HARNESS = /^<(environment_context|user_instructions|permissions|turn_aborted|user_shell_command)\b|^# AGENTS\.md instructions/;
+function codexPerson(p) {
+  const kinds = p.internal_chat_message_metadata_passthrough?.content_item_kinds;
+  if (Array.isArray(kinds) && kinds.length && kinds.every((k) => CODEX_WRAPPERS.includes(k))) return null;
+  const blocks = p.content.filter((b) => b?.type === 'input_text' && typeof b.text === 'string').map((b) => b.text.trim()).filter(Boolean);
+  if (!blocks.length) return p.content.some((b) => b?.type === 'input_image') ? { turn: true } : null;
+  if (blocks.every((b) => CODEX_HARNESS.test(b))) return null;
+  const text = blocks.filter((b) => !CODEX_HARNESS.test(b)).join('\n').trim();
+  return !text || /^</.test(text) ? { turn: true } : { reply: text };
+}
+const CODEX_CALLS = new Set(['function_call', 'custom_tool_call', 'local_shell_call', 'web_search_call', 'tool_search_call']);
 export async function codexChatAnswers(file) {
   const out = [];
   let said = [];
@@ -168,7 +204,7 @@ export async function codexChatAnswers(file) {
   let metaSeen = false;
   let interactive = false;
   await readLines(file, (line) => {
-    if (!line.includes('session_meta') && !line.includes('"message"')) return;
+    if (!line.includes('session_meta') && !line.includes('response_item')) return;
     let e;
     try {
       e = JSON.parse(line);
@@ -176,21 +212,32 @@ export async function codexChatAnswers(file) {
       return;
     }
     if (e?.type === 'session_meta') {
-      interactive = !metaSeen && ['cli', 'vscode'].includes(e.payload?.source) && e.payload?.originator !== 'codex_exec';
+      // The person's own session only: not `codex exec`, not a sub-agent's thread (whose "user" is its parent agent).
+      interactive = !metaSeen && ['cli', 'vscode'].includes(e.payload?.source) && e.payload?.originator !== 'codex_exec' && !e.payload?.parent_thread_id && !e.payload?.forked_from_id;
       metaSeen = true;
       return;
     }
     const p = e?.payload;
-    if (!interactive || e?.type !== 'response_item' || p?.type !== 'message' || !Array.isArray(p.content)) return;
+    if (!interactive || e?.type !== 'response_item' || !p) return;
+    if (CODEX_CALLS.has(p.type)) {
+      const tool = codexTool(p.name);
+      if (QUESTION_TOOLS.has(tool)) {
+        const field = tool === 'request_user_input_async' ? 'title' : 'question';
+        const questions = parseArgs(p.arguments)?.questions;
+        if (Array.isArray(questions)) said.push(...questions.filter((q) => record(q) && typeof q[field] === 'string').map((q) => q[field]));
+      } else said = [];
+      return;
+    }
+    if (p.type !== 'message' || !Array.isArray(p.content)) return;
     if (p.role === 'assistant') {
       for (const b of p.content) if (b?.type === 'output_text' && typeof b.text === 'string' && b.text.trim()) said.push(b.text);
       saidAt = e.timestamp ?? saidAt;
       return;
     }
-    if (p.role !== 'user' || !p.content.every((b) => b?.type === 'input_text')) return;
-    const text = p.content.map((b) => b.text ?? '').join('\n');
-    if (!text.trim() || /^\s*</.test(text)) return;
-    if (said.length) out.push({ askedAt: saidAt, at: e.timestamp ?? null, question: said.join('\n'), options: null, answer: text.trim(), channel: 'chat' });
+    if (p.role !== 'user') return;
+    const person = codexPerson(p);
+    if (!person) return;
+    if (person.reply && said.length) out.push({ askedAt: saidAt, at: e.timestamp ?? null, question: said.join('\n'), options: null, answer: person.reply, channel: 'chat' });
     said = [];
     saidAt = null;
   });

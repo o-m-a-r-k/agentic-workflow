@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { ok, singleRepoProject, state, wf } from './helpers.mjs';
+import { channelOf } from '../engine/channels.mjs';
 
 // 0.7.3, named failure (field): the person, working from the phone, could confirm no reserved decision, because `wf
 // approve` needed their own terminal. An attempt whose owner session had locked itself in the evidence folder still read
@@ -242,4 +243,89 @@ test('chat on Codex: a reply after the agent\'s message with the exact question 
   write('yesterday was fine');
   assert.match(ok(approveQ(p, e.id, d.id, env)).out, /A1 decided: in the person's own words: "yesterday was fine"/);
   assert.equal(state(p.root, e.id).decisions[0].approved.choice, 'other', '"yesterday" is not "yes"');
+});
+
+// Independent review of 0.7.18: the binding as agents and harnesses really write it.
+function claudeLines(p, lines, session = CLAUDE) {
+  const file = path.join(homeOf(p), '.claude', 'projects', 'proj', `${session}.jsonl`);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.appendFileSync(file, lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
+}
+const says = (text, when) => ({ type: 'assistant', timestamp: when, message: { role: 'assistant', content: [{ type: 'text', text }] } });
+const tool = (when) => ({ type: 'assistant', timestamp: when, message: { role: 'assistant', content: [{ type: 'tool_use', id: `toolu_${Math.random().toString(36).slice(2)}`, name: 'Bash', input: { command: 'wf status' } }] } });
+const types = (content, when, extra = {}) => ({ type: 'user', timestamp: when, message: { role: 'user', content }, ...extra });
+function heldAttempt(name, item) {
+  const p = singleRepoProject(name, {});
+  const e = ok(wf(p.root, ['entry', '--item', item, '--json'], silent)).json();
+  ok(wf(p.root, ['hold', '--reason', 'wait', '--attempt', e.id], silent));
+  assert.equal(wf(p.root, ['release', '--attempt', e.id], silent).code, 75);
+  const d = state(p.root, e.id).decisions[0];
+  return { p, e, d, question: `${e.id} ${d.id}: ${d.summary}` };
+}
+const env = { CLAUDE_CODE_SESSION_ID: CLAUDE };
+
+test('chat binding: quoted, bold or code questions bind; harness lines are never the person; a reply-to quote is the person\'s reply', () => {
+  for (const [i, wrap] of [(q) => `"${q}"`, (q) => `**${q}**`, (q) => `\`${q}\``].entries()) {
+    const { p, e, d, question } = heldAttempt(`chat-wrap-${i}`, `ENG-95${i}`);
+    claudeLines(p, [
+      says(`Lifting the hold lets work continue.\n\n${wrap(question)}\n\nyes / no`, at(500)),
+      types('<task-notification>\n<task-id>x</task-id>\n<status>completed</status>\n</task-notification>', at(600)),
+      types([{ type: 'text', text: '[Request interrupted by user]' }], at(650)),
+      types('This session is being continued from a previous conversation.', at(660), { isCompactSummary: true }),
+      types(i === 2 ? '<!-- reply 1 -->\n> Lifting the hold lets work continue.\n\nyes' : 'yes', at(1000)),
+    ]);
+    assert.match(ok(approveQ(p, e.id, d.id, env)).out, /A1 decided: yes/, `bound when the question is wrapped as ${wrap('Q')}`);
+  }
+});
+
+test('chat binding: every turn of the person\'s ends the message; only the final reply after the last tool call is the message', () => {
+  // A slash command between the question and an unrelated "yes" ends the message the question was in.
+  let t = heldAttempt('chat-turn', 'ENG-960');
+  claudeLines(t.p, [says(`${t.question}\n\nyes / no`, at(500)), types('<command-name>/status</command-name>', at(600)), says('Shall I also update the README?', at(700)), types('yes', at(1000))]);
+  assert.match(approveQ(t.p, t.e.id, t.d.id, env).err, /no answer to A1/);
+  // A question written between tool calls is not the message the person answers.
+  t = heldAttempt('chat-midturn', 'ENG-961');
+  claudeLines(t.p, [says(`${t.question}\n\nyes / no`, at(500)), tool(at(600)), says('Waiting for the gate.', at(700)), types('yes', at(1000))]);
+  assert.match(approveQ(t.p, t.e.id, t.d.id, env).err, /no answer to A1/);
+  // A message that also names another attempt's decision binds to neither.
+  t = heldAttempt('chat-other-attempt', 'ENG-962');
+  claudeLines(t.p, [says(`${t.question}\nENG-999.1 A1: close ENG-999.1\n\nyes / no`, at(500)), types('yes', at(1000))]);
+  assert.match(approveQ(t.p, t.e.id, t.d.id, env).err, /no answer to A1/);
+});
+
+test('chat choice: a reply that takes it back is the person\'s words; a condition is kept beside the choice', () => {
+  let t = heldAttempt('chat-retract', 'ENG-970');
+  claudeLines(t.p, [says(`${t.question}\n\nyes / no`, at(500)), types('yes, actually no', at(1000))]);
+  assert.match(ok(approveQ(t.p, t.e.id, t.d.id, env)).out, /A1 decided: in the person's own words: "yes, actually no"/);
+  t = heldAttempt('chat-condition', 'ENG-971');
+  claudeLines(t.p, [says(`${t.question}\n\nyes / no`, at(500)), types('Yes, but only after the failing test is fixed', at(1000))]);
+  assert.match(ok(approveQ(t.p, t.e.id, t.d.id, env)).out, /A1 decided: yes \(their reply: "Yes, but only after the failing test is fixed"; follow any condition in it\)/);
+  assert.equal(state(t.p.root, t.e.id).decisions[0].approved.reply, 'Yes, but only after the failing test is fixed');
+  assert.match(channelOf({ deferred: { source: { provenance: 'approved-decision', via: 'chat (Claude Code, host-recorded)' } } }), /answered by the person in the chat/);
+});
+
+test('chat on Codex: a reply after a panel the person never saw binds to its question; a panel answer ends the message; a sub-agent thread is not the person', () => {
+  const t = heldAttempt('chat-codex-panel', 'ENG-980');
+  const meta = (extra = {}) => ({ timestamp: at(), type: 'session_meta', payload: { id: CODEX, source: 'vscode', originator: 'Codex Desktop', ...extra } });
+  const panel = (call) => ({ timestamp: at(400), type: 'response_item', payload: { type: 'function_call', name: 'request_user_input_async', call_id: call, arguments: JSON.stringify({ questions: [{ title: t.question, options: [{ label: 'yes' }, { label: 'no' }] }] }) } });
+  const user = (text, when) => ({ timestamp: when, type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text }] } });
+  const agent = (text, when) => ({ timestamp: when, type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text }] } });
+  const write = (pp, rows) => {
+    const file = path.join(homeOf(pp), '.codex', 'sessions', '2026', '10', '16', `rollout-panel-${CODEX}.jsonl`);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
+  };
+  const codexEnv = { CODEX_THREAD_ID: CODEX };
+  // A sub-agent's thread: its "user" is the parent agent.
+  write(t.p, [meta({ parent_thread_id: 'parent' }), panel('c0'), user('yes', at(1000))]);
+  assert.match(approveQ(t.p, t.e.id, t.d.id, codexEnv).err, /no answer to A1/);
+  // The panel answered "no", then an unrelated "yes" in the chat: the "no" stands.
+  const reply = JSON.stringify([{ questionItemId: JSON.stringify(['request_user_input_async', 'c1', 0]), question: t.question, answer: 'no' }]);
+  write(t.p, [meta(), panel('c1'), user(`<send_user_message_question_reply>${reply}</send_user_message_question_reply>`, at(800)), agent('You said no. Shall I write up the blocker?', at(900)), user('yes', at(1000))]);
+  assert.match(ok(approveQ(t.p, t.e.id, t.d.id, codexEnv)).out, /A1 decided: no/);
+  // The field case: the panel never showed; the person typed "Yes" in the chat.
+  const u = heldAttempt('chat-codex-field', 'ENG-981');
+  write(u.p, [meta(), { ...panel('c2'), payload: { ...panel('c2').payload, arguments: JSON.stringify({ questions: [{ title: u.question, options: [{ label: 'yes' }, { label: 'no' }] }] }) } }, user('Yes', at(1000))]);
+  assert.match(ok(approveQ(u.p, u.e.id, u.d.id, codexEnv)).out, /A1 decided: yes/);
+  assert.match(state(u.p.root, u.e.id).decisions[0].approved.via, /^chat \(Codex, host-recorded\)$/);
 });

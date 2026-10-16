@@ -149,34 +149,43 @@ export async function approveFromQuestion(root, id, options, { env = process.env
   const norm = (x) => String(x).trim().replace(/\s*\(recommended\)$/i, '').trim().toLowerCase();
   const offered = (opts) => !opts || (opts.length === d.choices.length && d.choices.every((c) => opts.some((o) => norm(o) === norm(c) || norm(o) === norm(labelOf(d, c)))));
   // The question carries the exact text, as a whole: `ENG-1.1 A1: ...` never matches inside `ENG-1.1 A10: ...` or
-  // `XENG-1.1 A1: ...` (independent review of 0.7.3). It was asked, and answered, after the decision existed.
-  const carries = (q) => {
-    const at = q.indexOf(question);
-    return at >= 0 && (at === 0 || /\s/.test(q[at - 1]));
+  // `XENG-1.1 A1: ...` (independent review of 0.7.3), and may sit in quotes, bold or code, as the engine's hints show it
+  // (independent review of 0.7.18). It was asked, and answered, after the decision existed.
+  const carriesText = (text, q) => {
+    for (let at = text.indexOf(q); at >= 0; at = text.indexOf(q, at + 1)) if (at === 0 || !/[\p{L}\p{N}]/u.test(text[at - 1])) return true;
+    return false;
   };
+  const carries = (q) => carriesText(q, question);
   const after = (x) => Number.isFinite(Date.parse(x)) && Date.parse(x) >= created;
-  // A chat reply binds to this decision only when the message it answers asks this question and no other open one of the
-  // attempt, so a "yes" can answer only one decision.
+  // A chat reply binds to this decision only when the message it answers asks this question and no other: no other open
+  // decision of the attempt, and no other decision named the engine's way (`<attempt> A<n>:`, of any attempt), so a "yes" can
+  // answer only one decision.
   const others = (state.decisions ?? []).filter((x) => x.id !== d.id && !x.approved && !x.withdrawn).map((x) => questionFor(state, x));
-  const alone = (a) => a.channel !== 'chat' || !others.some((q) => {
-    const at = a.question.indexOf(q);
-    return at >= 0 && (at === 0 || /\s/.test(a.question[at - 1]));
-  });
+  const named = (text) => new Set([...text.matchAll(/(?<![\p{L}\p{N}._-])([\p{L}\p{N}][\p{L}\p{N}._-]* A\d+):/gu)].map((m) => m[1]));
+  const alone = (a) => a.channel !== 'chat' || (!others.some((q) => carriesText(a.question, q)) && [...named(a.question)].every((k) => k === `${state.id} ${d.id}`));
   const answers = [...(await read(t.file)), ...(chat ? await chat(t.file) : [])];
   const bound = answers.filter((a) => carries(a.question) && alone(a) && offered(a.options) && after(a.at) && (a.askedAt == null || after(a.askedAt))).sort((x, y) => Date.parse(x.at) - Date.parse(y.at));
   const last = bound.at(-1);
   if (!last) throw refuse(`no answer to ${d.id} in this session's question panel, or in its chat to a message asking exactly its question, after the decision was created`, how, { id: 'approve:no-answer' });
-  // A chat reply chooses by its first words ("yes, go ahead" is yes); the panel's answer is the option itself.
-  const leads = (c) => [c, labelOf(d, c)].map(norm).filter((l) => l && (norm(last.answer) === l || (last.channel === 'chat' && norm(last.answer).startsWith(l) && /^[^\p{L}\p{N}]/u.test(norm(last.answer).slice(l.length)))));
-  const choice = d.choices.filter((c) => leads(c).length).sort((x, y) => Math.max(...leads(y).map((l) => l.length)) - Math.max(...leads(x).map((l) => l.length)))[0] ?? null;
+  // A chat reply chooses by its first words ("yes, go ahead" is yes); the panel's answer is the option itself. A reply that
+  // names another choice after the first ("yes, actually no") is the person's words, not a choice; a longer reply keeps its
+  // words beside the choice, so a condition ("yes, but only after the fix") reaches the owner.
+  const reply = norm(last.answer);
+  const labelsOf = (c) => [c, labelOf(d, c)].map(norm).filter(Boolean);
+  const leads = (c) => labelsOf(c).filter((l) => reply === l || (last.channel === 'chat' && reply.startsWith(l) && /^[^\p{L}\p{N}]/u.test(reply.slice(l.length))));
+  const lead = d.choices.filter((c) => leads(c).length).sort((x, y) => Math.max(...leads(y).map((l) => l.length)) - Math.max(...leads(x).map((l) => l.length)))[0] ?? null;
+  const rest = lead ? reply.slice(Math.max(...leads(lead).map((l) => l.length))) : '';
+  const wholeWord = (text, l) => new RegExp(`(?<![\\p{L}\\p{N}])${l.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}\\p{N}])`, 'u').test(text);
+  const choice = lead && !d.choices.filter((c) => c !== lead).some((c) => labelsOf(c).some((l) => wholeWord(rest, l))) ? lead : null;
+  const said = choice && last.channel === 'chat' && reply !== leads(choice).sort((x, y) => y.length - x.length)[0] ? String(last.answer).trim().slice(0, 2000) : null;
   // An answer in the person's own words (the panel's free-text option) is theirs: recorded as `other` with the words, so the
   // question is answered and the owner follows the words; it grants nothing a choice would (0.7.8: it left the question
   // open for ever).
   const words = choice ? null : String(last.answer).trim().slice(0, 2000);
   if (!choice && !words) throw refuse(`the person's answer to ${d.id} is empty; nothing recorded`, how, { id: 'approve:mismatch' });
-  append(root, state.id, 'decision.approved', { id, choice: choice ?? 'other', ...(words ? { words } : {}), via: `${last.channel === 'chat' ? 'chat' : 'question-panel'} (${host.label}, host-recorded)`, question: { text: last.question.slice(0, 2000), at: last.at, askedAt: last.askedAt } }, actor(options));
+  append(root, state.id, 'decision.approved', { id, choice: choice ?? 'other', ...(words ? { words } : {}), ...(said ? { reply: said } : {}), via: `${last.channel === 'chat' ? 'chat' : 'question-panel'} (${host.label}, host-recorded)`, question: { text: last.question.slice(0, 2000), at: last.at, askedAt: last.askedAt } }, actor(options));
   noteAnswer(root, state, d, choice ?? 'other', words);
-  return { state: loadState(root, state.id), decision: id, choice: choice ?? 'other', words };
+  return { state: loadState(root, state.id), decision: id, choice: choice ?? 'other', words, reply: said };
 }
 
 export const decisionLine = (d) => `${d.id}  ${d.kind}  ${d.withdrawn ? `withdrawn: ${d.withdrawn.reason ?? ''}` : d.approved ? `decided: ${d.approved.words ? `in their words: "${d.approved.words}"` : d.approved.choice}${d.spent ? ' (used)' : ''}` : `pending (${d.choices.join(' | ')})`}  ${d.summary}`;

@@ -152,9 +152,8 @@ Work
   wf decisions withdraw ID --reason "what changed"
                                     take back a question whose subject changed (pending, or answered and not yet used)
   wf approve ID [--choice C]        the owner confirms a reserved decision in their own terminal
-                                    (--from-question: their answer in the session's question panel, or their chat reply
-                                    to a message that asked exactly the decision's question)
-  wf approve ID --from-question     or the agent records the owner's answer from its question panel (as the harness recorded it);
+  wf approve ID --from-question     or the agent records the owner's answer from its question panel, or their chat reply to
+                                    a message that asked exactly the decision's question (as the harness recorded it);
                                     an answer in their own words is recorded as theirs (choice "other"), to follow
   wf lesson add|waive|recur|merge|distinct|move|set|apply|show|list|preview|review|export
                                     the project's lessons (.workflow/lessons/): capture, enforce, recurrence, merge lessons that describe one mistake
@@ -1117,7 +1116,7 @@ async function dispatch(cmd, sub, positional, options) {
       const id = sub ?? positional[0];
       if (!id) throw new WfError('usage: wf approve ID [--choice C] --attempt ATTEMPT (in the owner\'s own terminal) | wf approve ID --from-question --attempt ATTEMPT (the owner\'s answer in the question panel)');
       const r = options['from-question'] ? await approveFromQuestion(root, id, options) : await approveInTerminal(root, id, options);
-      print(options, `${r.decision} decided: ${r.words ? `in the person's own words: "${r.words}" (follow them; it grants nothing a choice would)` : r.choice}. next: ${nextAction(root, r.state)}`, { decision: r.decision, choice: r.choice, ...(r.words ? { words: r.words } : {}) });
+      print(options, `${r.decision} decided: ${r.words ? `in the person's own words: "${r.words}" (follow them; it grants nothing a choice would)` : r.choice}${r.reply ? ` (their reply: "${r.reply}"; follow any condition in it)` : ''}. next: ${nextAction(root, r.state)}`, { decision: r.decision, choice: r.choice, ...(r.words ? { words: r.words } : {}), ...(r.reply ? { reply: r.reply } : {}) });
       return 0;
     }
     case 'intent': {
