@@ -1,5 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
 import { ok, sh, singleRepoProject, state, toAccepted, wf } from './helpers.mjs';
 import { steps } from './adapter-fault-fixtures.mjs';
 import { headOf, integrations, mrAdapter, reconcile } from './base-merge-in-flight-fixtures.mjs';
@@ -56,4 +58,28 @@ test('I-183: a conflicting base merge into an accepted attempt delivered through
   assert.equal(r.code, 75);
   assert.match(r.err, /conflicts in src\/m\.txt; the merge was aborted/);
   assert.match(r.err, /The acceptance names the commit the delivery adapter integrates, so it has to be redone: `wf deliver` refuses until the merged tree is gated, reviewed and accepted again/);
+});
+
+// Named failure (review of 0.7.26, medium): an adapter that could not be read made `wf base merge` act as if the delivery were the
+// built-in push-main (the acceptance stands, and a recorded repo refuses), a guess about which of the two rules applied. It says
+// it cannot tell, and why.
+test('I-183: wf base merge refuses when the delivery adapter cannot be read, naming why, instead of guessing push-main', () => {
+  const { base, root } = project('mr-unreadable');
+  const { id } = toAccepted(root, base, { item: 'ENG-192' });
+  assert.match(ok(wf(root, ['deliver', '--attempt', id])).out, /app: awaiting-merge/);
+  sh(root, "printf 'o2\\n' > src/other.txt && git commit -qam 'unrelated base change' && git push -q origin main");
+  const git = path.join(root, '.git');
+  fs.renameSync(git, `${git}.off`);
+  let r;
+  try {
+    r = wf(root, ['base', 'merge', '--attempt', id]);
+  } finally {
+    fs.renameSync(`${git}.off`, git);
+  }
+  assert.equal(r.code, 75);
+  assert.match(r.err, /the delivery adapter of ENG-192\.1 cannot be read, so it is not known whether the base is merged at delivery: /);
+  assert.equal(state(root, id).baseMerges.length, 0, 'nothing was merged on a guess');
+  assert.ok(state(root, id).accepted, 'the acceptance was not touched');
+  // Readable again, the same command works and follows the adapter rule.
+  assert.match(ok(wf(root, ['base', 'merge', '--attempt', id])).out, /the acceptance is withdrawn/);
 });

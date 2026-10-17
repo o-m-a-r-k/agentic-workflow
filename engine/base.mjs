@@ -124,10 +124,13 @@ export function baseMerge(root, options) {
   if (['done', 'abandoned'].includes(state.phase)) throw refuse(`${state.id} is ${state.phase}`);
   if (state.delivery.completedAt) throw refuse(`${state.id} is already delivered; nothing is left to merge the base into`, '`wf resume` says what is left (the tracker handoff)', { id: 'base:delivered' });
   // The delivery adapter as the attempt reads it (the admission pin, or the owner's re-pin): only the built-in push-main merges the base itself.
-  let viaAdapter = false;
+  // Named failure (review of 0.7.26): an adapter that could not be read was taken for push-main, a guess about which rule applies.
+  let viaAdapter;
   try {
     viaAdapter = trustedAdapter(root, state, state.deliveryAdapterBase ?? state.adapterBase).delivery.kind !== 'push-main';
-  } catch {}
+  } catch (error) {
+    throw refuse(`the delivery adapter of ${state.id} cannot be read, so it is not known whether the base is merged at delivery: ${String(error?.message ?? error).split('\n')[0]}`, 'fix what the message names (the adapter is read as committed at the attempt\'s pin), then `wf base merge` again', { id: 'base:adapter-unreadable' });
+  }
   if (!viaAdapter && Object.keys(state.delivery.repos).length) throw refuse(`${state.id} is already being delivered; \`wf deliver\` merges the base itself`, 'it merges the base into each repo still to deliver and refuses with what to do when that conflicts; a repo already recorded is not touched', { id: 'base:delivering' });
   if (liveGate(root, state)) throw refuse('a gate is running on these worktrees; wait for it or `wf stop` it first');
   const dirty = uncommitted(state);
