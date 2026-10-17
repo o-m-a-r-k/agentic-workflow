@@ -97,7 +97,7 @@ export const ROLE_DEFAULT_CLASS = { planner: 'planning', reviewer: 'review', imp
 // what happened). `enabled: false` turns the escalation off for a project.
 export const STRATEGY_DEFAULTS = {
   enabled: true,
-  // Recorded review rounds before the owner (not the strategist) decides how to continue; again every as many rounds.
+  // Handed review rounds before the owner (not the strategist) decides how to continue; again as many rounds after each answer.
   // The person's own number, not an agent-facing limit: one ticket ran 47 rounds before anyone stepped back.
   reviewRoundsEscalate: 10,
 };

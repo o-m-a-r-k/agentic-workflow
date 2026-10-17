@@ -35,7 +35,7 @@ test('wf signals, wf resume and wf status show the plan\'s expectation beside th
   assert.deepEqual(sig.files, { changed: 1, planned: 2, perRepo: { app: 1 } });
   assert.ok(sig.bundle.bytes > 0 && /reviewer$/.test(sig.bundle.handoff));
   // The round escalation is the one number left, and it is the person's.
-  assert.deepEqual(sig.strategy.escalation, { everyRounds: 10, firing: null });
+  assert.deepEqual(sig.strategy.escalation, { everyRounds: 10, nextAt: 10, lastAnswer: null, firing: null });
   assert.ok(!('thresholds' in sig.strategy) && !('tripwires' in sig.strategy));
   assert.deepEqual(sig.strategy.expectations.map((x) => [x.source, x.expect]), [['plan', EXPECT]]);
   // Each place the owner looks shows expected beside actual, with no verdict.

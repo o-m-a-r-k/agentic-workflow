@@ -163,3 +163,15 @@ stays), `deliver-core` (what the criteria need and what blocks stays; every othe
 answer may be ticketed under this one decision, never one raised after it), `hold` ("It needs a product or legal answer first:
 hold": the attempt is held in those words until the person lifts it; 0.7.28, after an escalation whose answer was a product
 question stayed open 390 minutes overnight with no option for it), `stop` (the attempt is held in the person's words). Batch attempts count too.
+
+The next question comes as many rounds after the person's answer, whatever they chose: it is due at the handed round count
+at which they answered plus 10, never at the next multiple of 10 (0.7.29, I-214). Named failure (field): the person answered
+"Keep going as now" at 17 handed rounds, on an attempt an earlier release had let run past 10 unasked, and at 20 the next
+implementer handoff asked the same question again, three rounds later. The count at which they answered is read from the
+ledger (the rounds handed by the time of the answer), so an attempt in flight replays the same way. A round question already
+asked and not yet answered stays the one question, whatever round an earlier release keyed it to; one an earlier release
+opened before it was due again is withdrawn by the engine on the next implementer or reviewer handoff, with the reason, and
+never asked. `wf signals` shows when the question is next due and the answer it counts from. The other
+"comes back" rules already count from the answer: a course signal on review rounds counts from the latest expectation (a
+re-plan's, or the strategist's `continue` with a new `expect`), and the two-missed-predictions rule counts only the
+strategist's decisions after its last escalation, which cannot be recorded before the person answers it.

@@ -34,8 +34,9 @@ export function recordedRounds(state) {
 // Every review round handed, recorded or not (a review group counts once): what the person's escalation counts.
 // Named failure (final review of 0.7.0): ten reviewers handed and never recorded (dead sessions, a tree moved under them)
 // showed "recorded rounds: 0" and the escalation never fired; one ticket had 21 of its 47 rounds without a closure.
-export function handedRounds(state) {
-  return new Set((state.handoffs ?? []).filter((h) => h.role === 'reviewer').map((h) => h.reviewGroup?.id ?? h.bundle)).size;
+// `until` (an instant): the rounds handed by then (0.7.29, I-214: the round count at which the person answered the escalation).
+export function handedRounds(state, until = null) {
+  return new Set((state.handoffs ?? []).filter((h) => h.role === 'reviewer' && (!until || String(h.at) <= String(until))).map((h) => h.reviewGroup?.id ?? h.bundle)).size;
 }
 
 const round1 = (n) => Math.round(n * 10) / 10;

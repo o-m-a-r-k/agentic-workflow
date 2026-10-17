@@ -43,22 +43,76 @@ import { WfError, assertSafeId, readJson, refuse, writeJson } from './util.mjs';
 export const ACTIONS = ['continue', 'consolidate', 'cluster', 'delta-review', 'split', 'ticket', 'model', 'escalate'];
 
 // ---- The owner's escalation ----
-// The one number the engine stops for, and it is the person's: at `reviewRoundsEscalate` recorded review rounds the next
-// implementer or reviewer handoff opens a reserved decision (`wf approve`), and again every as many rounds after a
-// `continue`. Named failure: one ticket ran 47 review rounds before anyone stepped back; an automatic stop at round 3 was
-// too early; the person's rule: "make it 10 and then raise it to me to discuss how to continue".
+// The one number the engine stops for, and it is the person's: at `reviewRoundsEscalate` handed review rounds the next
+// implementer or reviewer handoff opens a reserved decision (`wf approve`), and again as many rounds after each answer.
+// Named failure: one ticket ran 47 review rounds before anyone stepped back; an automatic stop at round 3 was too early; the
+// person's rule: "make it 10 and then raise it to me to discuss how to continue".
 const ESCALATION = 'rounds-escalation';
-
-// The firing at `rounds` recorded review rounds, or null. `key` names one firing (the round it fired at).
-export function roundsEscalation(rounds, c = STRATEGY_DEFAULTS) {
-  const every = c.reviewRoundsEscalate;
-  if (!every || rounds < every) return null;
-  const at = Math.floor(rounds / every) * every;
-  return { id: ESCALATION, key: `rounds:${at}`, summary: `${rounds} review rounds handed; the owner decides how to continue` };
-}
 
 // The owner's decision for the escalation (kind escalation, created by the engine; `wf approve`).
 export const ownerDecisionKey = (f) => `tripwire:${f.id}:${f.key}`;
+const OWNER_KEY = `tripwire:${ESCALATION}:`;
+const isOwnerQuestion = (d) => d?.kind === 'escalation' && String(d.key ?? '').startsWith(OWNER_KEY);
+const keyedRound = (d) => Number(/:rounds:(\d+)$/.exec(String(d.key ?? ''))?.[1]) || 0;
+
+// The person's latest answer to the round question that chose one of its options, with the handed round count at which they
+// gave it, or null. Read from the ledger as it stands (the rounds handed by the time of the answer), so a ledger an earlier
+// release wrote replays the same way.
+function ownerAnswer(state) {
+  const d = (state.decisions ?? []).filter((x) => isOwnerQuestion(x) && chose(x)).sort((x, y) => String(x.approved.at ?? '').localeCompare(String(y.approved.at ?? ''))).at(-1);
+  if (!d) return null;
+  return { decision: d, rounds: Math.max(keyedRound(d), d.approved.at ? handedRounds(state, d.approved.at) : 0) };
+}
+
+// The handed round count at which the round question is next due: `every` rounds, and after each answer `every` rounds after
+// the count at which the person answered, whatever they chose. 0.7.29 (I-214). Named failure (field): the person answered
+// "Keep going as now" at 17 handed rounds (an attempt an earlier release let run past 10 unasked, I-185), whose promise is
+// another 10 rounds before asking again; the next firing was keyed to the next multiple of 10, so at 20 the next implementer
+// handoff asked the same question again, three rounds later. A question is never asked twice: "comes back after N" counts from
+// the answer.
+export function escalationDue(state, c = STRATEGY_DEFAULTS) {
+  const every = c.reviewRoundsEscalate;
+  if (!every) return null;
+  const answer = ownerAnswer(state);
+  return { at: answer ? answer.rounds + every : every, answer };
+}
+
+// The round question asked since the person's latest answer (or since the start, before any), open or answered in their own
+// words, or null: the question a firing due now asks. An earlier release keyed a first question to the multiple of the count
+// it was opened at (`rounds:20` for an attempt it let run to 23 unasked); that question is still this firing's, so it is never
+// asked twice. A withdrawn one is no question: the next handoff asks afresh.
+function askedSince(state, answer) {
+  const since = String(answer?.decision.approved.at ?? '');
+  return (state.decisions ?? []).filter((d) => isOwnerQuestion(d) && !d.withdrawn && d.id !== answer?.decision.id && String(d.createdAt ?? '') > since).at(-1) ?? null;
+}
+
+// The firing at `rounds` handed review rounds, or null. `key` names one firing: the round count it is due at, or the key of
+// the question already asked for it.
+export function roundsEscalation(state, c = STRATEGY_DEFAULTS, rounds = handedRounds(state)) {
+  const due = escalationDue(state, c);
+  if (!due || rounds < due.at) return null;
+  const asked = askedSince(state, due.answer);
+  return { id: ESCALATION, key: asked ? asked.key.slice(OWNER_KEY.length) : `rounds:${due.at}`, summary: `${rounds} review rounds handed; the owner decides how to continue` };
+}
+
+// A round question still open that is not the firing's: one an earlier release opened at the next multiple of the count,
+// before as many rounds had passed since the person's answer (I-214). The engine withdraws it, saying why, on the next
+// implementer or reviewer handoff, so it is never asked; the question due later is a new one.
+function withdrawEarlyQuestions(root, state) {
+  if (!worked(state)) return state;
+  const cfg = adapterOf(root, state);
+  if (switchedOff(cfg)) return state;
+  const c = cfg?.strategy ?? STRATEGY_DEFAULTS;
+  const firing = roundsEscalation(state, c);
+  const early = (state.decisions ?? []).filter((d) => isOwnerQuestion(d) && !d.approved && !d.withdrawn && (!firing || d.key !== ownerDecisionKey(firing)));
+  if (!early.length) return state;
+  const due = escalationDue(state, c);
+  const answer = due?.answer;
+  const why = `${answer ? `the person answered ${answer.decision.id} (${answer.decision.approved.choice}) at ${answer.rounds} handed rounds; ` : ''}the round question comes back at ${due?.at ?? '?'} handed rounds, counted from the answer: this one was opened before it was due again and is not asked`;
+  for (const d of early) append(root, state.id, 'decision.withdrawn', { id: d.id, reason: why }, null);
+  return loadState(root, state.id);
+}
+
 // 0.7.28 (I-210): `hold`. Named failure (field): a round-10 escalation was answered with a product question ("what is the
 // industry best practice here?"); no option fitted, so it stayed open 390 minutes overnight. A question that needs a product or
 // legal answer first now has a route: the ticket is held in the person's words until they lift it.
@@ -187,13 +241,14 @@ export function strategyHold(root, state) {
   if (!worked(state)) return null;
   const cfg = adapterOf(root, state);
   if (switchedOff(cfg)) return null;
-  const firing = roundsEscalation(handedRounds(state), cfg?.strategy ?? STRATEGY_DEFAULTS);
-  const owner = firing && !chose(ownerDecision(state, firing)) ? firing : null;
+  const c = cfg?.strategy ?? STRATEGY_DEFAULTS;
+  // Due only when as many rounds have passed since the person's latest answer (I-214): an answered firing is never due again.
+  const owner = roundsEscalation(state, c);
   const escalation = openEscalation(state);
   if (!owner && !escalation) return null;
   if (owner) {
     const pending = ownerDecision(state, owner);
-    const guidance = `${owner.summary}. This is the person's decision: bring them the brief from \`wf signals --attempt ${state.id}\` (rounds, blocking findings per round, the families that keep coming back, changed files against what the plan expected, amendments) and your recommendation; write them into the question's \`--ask\` file for the next implementer or reviewer handoff, which asks it. ${pending?.approved || pending?.withdrawn ? `${pending.id} was ${pending.withdrawn ? 'withdrawn' : `answered in the person's own words, "${pending.approved.words}"`}: follow that, and the next implementer or reviewer handoff asks the question again with its choices. ` : ''}${pending && !pending.approved && !pending.withdrawn ? `They answer ${pending.id}: ${approveHint(state, pending)}` : 'The next implementer or reviewer handoff (with `--ask <file>`) opens the decision they answer with `wf approve`'} (continue: another ${(cfg?.strategy ?? STRATEGY_DEFAULTS).reviewRoundsEscalate} rounds before asking again | split: unstarted work, observations and discovered issues move to a sibling attempt of the batch (\`wf split\`); code already built stays | deliver-core: what the criteria need and what blocks stays, every other finding and discovered issue may be ticketed under this decision | hold: it needs a product or legal answer first, so the ticket is held until the person gives it | stop: a hold). No implementer or reviewer starts until they decide.`;
+    const guidance = `${owner.summary}. This is the person's decision: bring them the brief from \`wf signals --attempt ${state.id}\` (rounds, blocking findings per round, the families that keep coming back, changed files against what the plan expected, amendments) and your recommendation; write them into the question's \`--ask\` file for the next implementer or reviewer handoff, which asks it. ${pending?.approved || pending?.withdrawn ? `${pending.id} was ${pending.withdrawn ? 'withdrawn' : `answered in the person's own words, "${pending.approved.words}"`}: follow that, and the next implementer or reviewer handoff asks the question again with its choices. ` : ''}${pending && !pending.approved && !pending.withdrawn ? `They answer ${pending.id}: ${approveHint(state, pending)}` : 'The next implementer or reviewer handoff (with `--ask <file>`) opens the decision they answer with `wf approve`'} (continue: another ${c.reviewRoundsEscalate} rounds, counted from their answer, before asking again | split: unstarted work, observations and discovered issues move to a sibling attempt of the batch (\`wf split\`); code already built stays | deliver-core: what the criteria need and what blocks stays, every other finding and discovered issue may be ticketed under this decision | hold: it needs a product or legal answer first, so the ticket is held until the person gives it | stop: a hold). No implementer or reviewer starts until they decide.`;
     return { owner, ownerPending: pending, escalation, guidance: `${guidance}${waitingNote(state, escalation)}` };
   }
   return { owner: null, ownerPending: null, escalation, guidance: escalationGuidance(state, escalation) };
@@ -242,6 +297,7 @@ function stopChosen(root, state) {
 // `wf handoff implementer|reviewer`: refused while the person's escalation or a strategist's escalation stands.
 export function requireOwnerDecision(root, state, role, options = {}) {
   stopChosen(root, state);
+  state = withdrawEarlyQuestions(root, state);
   const hold = strategyHold(root, state);
   if (!hold) return;
   if (hold.owner) {
@@ -283,13 +339,16 @@ export function signalsReport(root, state) {
   const c = cfg?.strategy ?? STRATEGY_DEFAULTS;
   const nowMs = Date.now();
   const signals = computeSignals(root, state, { cfg, nowMs });
-  const firing = roundsEscalation(signals.roundsHanded, c);
-  const answer = firing ? ownerDecision(state, firing) : null;
+  const due = escalationDue(state, c);
+  const firing = roundsEscalation(state, c, signals.roundsHanded);
+  const last = due?.answer ?? null;
   return {
     ...signals,
     strategy: {
       applies: strategyApplies(state, cfg),
-      escalation: { everyRounds: c.reviewRoundsEscalate, firing: firing ? { ...firing, answeredBy: chose(answer) ? answer.id : null } : null },
+      // When the round question is next due (handed rounds, counted from the person's latest answer), that answer, and the
+      // firing when it is due now.
+      escalation: { everyRounds: c.reviewRoundsEscalate, nextAt: due?.at ?? null, lastAnswer: last ? { id: last.decision.id, choice: last.decision.approved.choice, rounds: last.rounds } : null, firing },
       decisions: decisionsOf(state, signals, nowMs),
       missedPredictionsInARow: missedStreak(state, signals, nowMs),
       // What the plan expected, and each re-plan's expectation after it (`wf criteria amend`).
@@ -312,7 +371,7 @@ export function signalsText(r) {
   lines.push(`  criteria: ${n(r.criteria.atFreeze)} at freeze, ${r.criteria.now} now; amendments: ${r.amendments}`);
   lines.push(`  plan names ${n(r.files.planned)} path(s) in its anchors and tests; latest reviewer bundle: ${n(r.bundle.bytes, ' bytes')}`);
   const e = r.strategy.escalation;
-  lines.push(`  owner escalation${r.strategy.applies ? '' : ' (does not apply to this attempt: accepted, delivered or switched off)'}: every ${e.everyRounds} recorded rounds; ${e.firing ? `${e.firing.summary}${e.firing.answeredBy ? ` [answered by ${e.firing.answeredBy}]` : ' [UNANSWERED]'}` : 'not firing'}`);
+  lines.push(`  owner escalation${r.strategy.applies ? '' : ' (does not apply to this attempt: accepted, delivered or switched off)'}: every ${e.everyRounds} handed rounds, counted from the person's latest answer; ${e.firing ? `${e.firing.summary} [UNANSWERED]` : `next at ${e.nextAt} handed rounds${e.lastAnswer ? ` (${e.lastAnswer.id} answered ${e.lastAnswer.choice} at ${e.lastAnswer.rounds})` : ''}`}`);
   for (const t of r.strategy.toTicket) lines.push(`  to ticket (${t.decision}): ${t.items.join(', ')}`);
   if (r.strategy.missedPredictionsInARow) lines.push(`  strategist predictions missed in a row: ${r.strategy.missedPredictionsInARow}${r.strategy.missedPredictionsInARow >= 2 ? '; its next decision must be an escalation' : ''}`);
   return lines.join('\n');
