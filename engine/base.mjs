@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { actor, branchName, changedFiles, openState, uncommitted } from './attempt.mjs';
-import { loadConfig } from './config.mjs';
+import { loadConfig, trustedAdapter } from './config.mjs';
 import { liveGate } from './gate.mjs';
 import { append, listAttempts, loadState } from './ledger.mjs';
 import { packageOf } from './topology.mjs';
@@ -111,16 +111,24 @@ export function baseLines(entries) {
 // `awaiting-merge` while the base branch moved on by dozens of commits. `wf base merge` refused ("already being delivered;
 // `wf deliver` merges the base itself") because the first `wf deliver` had recorded the attempt's unchanged repos as
 // skipped, yet only the built-in push-main merges the base at delivery: with an adapter every later `wf deliver` just asked
-// the adapter again and the branch stayed behind. Now the base comes into every repo still to deliver. A repo recorded for
-// the delivery (delivered, or skipped for having no change), a repo this ticket changes nothing in and a repo whose change is
-// already on its target are left as they are. When the delivery had started and the attempt was accepted, the acceptance is withdrawn
-// (`withdrewAcceptance` on the event): it names the commit the pending integration was opened for, so the merged tree
-// gets its gate, its review and its acceptance before `wf deliver` asks the adapter to integrate it again; carried over, a
-// manual merge of the reconciled branch was later refused as "not the accepted, gated commit".
+// the adapter again and the branch stayed behind. One rule for a delivery through an adapter: the base comes into every repo
+// the ticket changes and that is still to deliver (a repo recorded for the delivery, one the ticket changes nothing in and one
+// whose change is already on its target are left as they are), and an accepted attempt's acceptance is withdrawn
+// (`withdrewAcceptance` on the event), whether or not a delivery has started: it names the commit the adapter will integrate
+// and the person's merge will be recognised by, so the merged tree gets its gate, its review and its acceptance before
+// `wf deliver` asks the adapter to integrate it. Carried over, the person's merge of the reconciled branch was refused as "not
+// the accepted, gated commit; pushed outside wf". The built-in push-main keeps its own behaviour: the acceptance stands across
+// a base merge, and once a repo is recorded `wf deliver` merges the base itself.
 export function baseMerge(root, options) {
   const state = openState(root, options);
   if (['done', 'abandoned'].includes(state.phase)) throw refuse(`${state.id} is ${state.phase}`);
   if (state.delivery.completedAt) throw refuse(`${state.id} is already delivered; nothing is left to merge the base into`, '`wf resume` says what is left (the tracker handoff)', { id: 'base:delivered' });
+  // The delivery adapter as the attempt reads it (the admission pin, or the owner's re-pin): only the built-in push-main merges the base itself.
+  let viaAdapter = false;
+  try {
+    viaAdapter = trustedAdapter(root, state, state.deliveryAdapterBase ?? state.adapterBase).delivery.kind !== 'push-main';
+  } catch {}
+  if (!viaAdapter && Object.keys(state.delivery.repos).length) throw refuse(`${state.id} is already being delivered; \`wf deliver\` merges the base itself`, 'it merges the base into each repo still to deliver and refuses with what to do when that conflicts; a repo already recorded is not touched', { id: 'base:delivering' });
   if (liveGate(root, state)) throw refuse('a gate is running on these worktrees; wait for it or `wf stop` it first');
   const dirty = uncommitted(state);
   if (Object.keys(dirty).length) throw refuse(`commit or remove uncommitted changes before merging the base: ${Object.entries(dirty).map(([r, l]) => `${r} (${l.slice(0, 3).join('; ')})`).join(', ')}`);
@@ -132,18 +140,18 @@ export function baseMerge(root, options) {
   if (options.repo && settled.length) throw refuse(`${names[0]} is already settled in this delivery (${how(recorded(names[0]))}); \`wf base merge\` leaves what is recorded as delivered or skipped as it is`, `merge the base into a repo that is still to deliver (${Object.keys(state.repos).filter((n) => !recorded(n)).join(', ') || 'none is left: \`wf deliver\` finishes the delivery'})`, { id: 'base:settled-repo' });
   const open = names.filter((n) => !recorded(n));
   if (!open.length) throw refuse(`every repo of ${state.id} is already recorded in its delivery (${settled.map((n) => `${n} ${how(recorded(n))}`).join('; ')}); nothing is left to merge the base into`, '`wf deliver` finishes the delivery', { id: 'base:delivered' });
-  // The delivery has started when a repo is recorded or an adapter was asked: the accepted commit is already out.
+  // The delivery has started when a repo is recorded or the adapter was asked: the accepted commit is already out.
   const started = Object.keys(state.delivery.repos).length > 0 || Object.keys(state.delivery.integrating ?? {}).length > 0;
-  const withdraws = started && Boolean(state.accepted);
+  const withdraws = viaAdapter && Boolean(state.accepted);
   const results = settled.map((n) => ({ repo: n, settled: how(recorded(n)) }));
   for (const entry of baseStatus(root, { ...state, repos: Object.fromEntries(open.map((n) => [n, state.repos[n]])) })) {
     if (entry.landed && state.delivery.integrating?.[entry.repo]) {
       results.push({ repo: entry.repo, landed: true, ref: entry.ref });
       continue;
     }
-    // A repo this ticket changes nothing in has nothing to deliver; the delivery records it as skipped. Once the delivery has
-    // started its base is not merged in unasked: it would move that repo's tree, so its gate steps would run again for nothing.
-    if (started && !options.repo && changedFiles(state, entry.repo).length === 0) {
+    // A repo this ticket changes nothing in has nothing to deliver; the delivery records it as skipped. With an adapter its base is
+    // not merged in unasked: it would move that repo's tree, so its gate steps would run again for nothing.
+    if (viaAdapter && !options.repo && changedFiles(state, entry.repo).length === 0) {
       results.push({ repo: entry.repo, idle: true });
       continue;
     }
@@ -165,5 +173,5 @@ export function baseMerge(root, options) {
     append(root, state.id, 'base.merged', data, actor(options));
     results.push(data);
   }
-  return { state: loadState(root, state.id), results, withdrewAcceptance: withdraws && results.some((x) => x.withdrewAcceptance) };
+  return { state: loadState(root, state.id), results, withdrewAcceptance: withdraws && results.some((x) => x.withdrewAcceptance), started };
 }

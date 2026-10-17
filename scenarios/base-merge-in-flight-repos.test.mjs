@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { ok, sh, state, wf } from './helpers.mjs';
+import { makeRepo, ok, sh, state, tmp, wf, yaml } from './helpers.mjs';
 import { accepted, multiRepo } from './adapter-fault-fixtures.mjs';
 import { headOf, integrations, perRepoAdapter, reconcile } from './base-merge-in-flight-fixtures.mjs';
 
@@ -67,3 +67,29 @@ for (const [shape, x] of Object.entries(SHAPES)) {
   });
 }
 
+
+// The built-in push-main delivers repo by repo and merges the base itself for each; once a repo is recorded, `wf base merge`
+// keeps its old answer for it (the refusal that was wrong for an adapter, whose delivery never merges the base).
+test('I-183: with the built-in push-main, once a repo is recorded for the delivery wf base merge still refuses: wf deliver merges the base itself', () => {
+  const base = tmp('pm-recorded');
+  const root = path.join(base, 'ws');
+  fs.mkdirSync(root);
+  const cfg = {
+    version: 1, enabled: true, name: 'pm-recorded', adapterRepo: 'api', lanes: ['quick', 'standard', 'batch'],
+    repos: [{ name: 'api', path: 'api', base: 'main' }, { name: 'web', path: 'web', base: 'main' }],
+    components: [{ id: 'api', kind: 'service', repo: 'api', provides: [{ contract: 'http', spec: 'openapi.json' }] }, { id: 'web', kind: 'web', repo: 'web', dependsOn: [{ component: 'api', via: 'http', contract: 'api/openapi.json' }] }],
+    gate: { steps: [{ id: 'api-unit', repo: 'api', run: 'true', inputs: ['src/**'] }, { id: 'web-unit', repo: 'web', run: 'true', inputs: ['src/**'] }] },
+  };
+  makeRepo(path.join(root, 'api'), { '.workflow/project.yaml': yaml(cfg), 'openapi.json': '{}\n', 'src/a.txt': 'a\n' });
+  makeRepo(path.join(root, 'web'), { 'src/w.txt': 'w\n' });
+  fs.symlinkSync(path.join('api', '.workflow'), path.join(root, '.workflow'));
+  const e = ok(wf(root, ['entry', '--item', 'ENG-189', '--owner', 'o', '--json'])).json();
+  accepted(root, base, e.id, [[e.repos.web.worktree, { 'src/w.txt': 'web\n' }]]);
+  // The base changes the same line the ticket changed: delivering web merges it and conflicts, after api was recorded as skipped.
+  sh(path.join(root, 'web'), "printf 'other\\n' > src/w.txt && git commit -qam 'conflicting base change' && git push -q origin main");
+  assert.match(wf(root, ['deliver', '--attempt', e.id]).err, /moved and conflicts/);
+  assert.equal(state(root, e.id).delivery.repos.api.skipped, 'no changes');
+  const r = wf(root, ['base', 'merge', '--attempt', e.id]);
+  assert.equal(r.code, 75);
+  assert.match(r.err, /is already being delivered; `wf deliver` merges the base itself/);
+});

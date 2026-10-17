@@ -118,3 +118,53 @@ test('I-183: the merge request was merged and the base moved on: wf base merge l
   assert.equal(s.delivery.repos.app.commit, reviewed);
   assert.equal(sh(base, `git --git-dir=${remote} show main:src/a.txt`), 'b');
 });
+
+// 0.7.26 (I-183), one rule: with a delivery adapter the acceptance names the commit the adapter will be asked to integrate and the
+// person's merge will be recognised by, whether or not a delivery has started. Named failure (reproduced): an accepted attempt
+// base-merged before its first `wf deliver`, was gated again and delivered; the request opened, the person merged it, and
+// `wf deliver` refused the merged commit as "not the accepted, gated commit; it was pushed outside wf".
+test('I-183: an accepted attempt that base-merges before any deliver, through a delivery adapter: the acceptance is withdrawn, and the person\'s merge of the reconciled branch is recognised', () => {
+  const { base, root, remote } = singleRepoProject('mr-base-early', { delivery: { kind: './delivery/mr.mjs' }, gate: { steps } }, { '.workflow/delivery/mr.mjs': mrAdapter, 'src/other.txt': 'o\n' });
+  const { id, wt } = toAccepted(root, base, { item: 'ENG-187' });
+  const reviewed = headOf(wt);
+  assert.deepEqual(state(root, id).delivery.integrating, {}, 'nothing was delivered yet');
+  sh(root, "printf 'o2\\n' > src/other.txt && git commit -qam 'unrelated base change' && git push -q origin main");
+  const m = ok(wf(root, ['base', 'merge', '--attempt', id]));
+  assert.match(m.out, /the acceptance is withdrawn, because it names the commit the delivery adapter will integrate/);
+  const merged = headOf(wt);
+  assert.equal(ledger(root, id).filter((e) => e.type === 'base.merged').at(-1).data.withdrewAcceptance, true);
+  let s = state(root, id);
+  assert.equal(s.accepted, null);
+  assert.equal(s.decision.kind, 'gate', 'the ticket\'s own lines are untouched: the gate, then the evidence review');
+  const early = wf(root, ['deliver', '--attempt', id]);
+  assert.equal(early.code, 75);
+  assert.match(early.err, /review not accepted/);
+  assert.deepEqual(reconcile(root, base, id, 'rev-early'), ['gate', 'evidence-review']);
+  assert.equal(state(root, id).accepted.heads.app, merged);
+  assert.match(ok(wf(root, ['deliver', '--attempt', id])).out, /app: awaiting-merge/);
+  assert.deepEqual(integrations(root), [`app ${merged}`], 'the request was opened for the reviewed, reconciled commit only');
+  assert.notEqual(merged, reviewed);
+  // The person merges the request; the next deliver recognises exactly that commit.
+  sh(wt, 'git push -q origin HEAD:refs/heads/main');
+  ok(wf(root, ['deliver', '--attempt', id]));
+  s = state(root, id);
+  assert.ok(s.delivery.completedAt);
+  assert.equal(s.delivery.repos.app.commit, merged);
+  assert.equal(sh(base, `git --git-dir=${remote} show main:src/other.txt`), 'o2');
+});
+
+// The built-in push-main merges the base itself at delivery and carries the gate, so a base merge before it keeps its own
+// behaviour: the acceptance stands (the gate runs again), and no delivery adapter is involved.
+test('I-183: with the built-in push-main a base merge on an accepted attempt keeps the acceptance, as before', () => {
+  const { base, root, remote } = singleRepoProject('pm-base', { gate: { steps } }, { 'src/other.txt': 'o\n' });
+  const { id } = toAccepted(root, base, { item: 'ENG-188' });
+  sh(root, "printf 'o2\\n' > src/other.txt && git commit -qam 'unrelated base change' && git push -q origin main");
+  const m = ok(wf(root, ['base', 'merge', '--attempt', id]));
+  assert.doesNotMatch(m.out, /withdrawn/);
+  assert.match(m.out, /the gate and the review are bound to the tree/);
+  assert.equal(ledger(root, id).filter((e) => e.type === 'base.merged').at(-1).data.withdrewAcceptance, undefined);
+  assert.ok(state(root, id).accepted, 'the acceptance stands');
+  ok(wf(root, ['gate', '--attempt', id]));
+  ok(wf(root, ['deliver', '--attempt', id]));
+  assert.equal(sh(base, `git --git-dir=${remote} show main:src/other.txt`), 'o2');
+});
