@@ -51,9 +51,10 @@ for (const [shape, x] of Object.entries(SHAPES)) {
     assert.deepEqual(state(root, e.id).delivery.repos[x.other], settled, 'its delivery record is as it was');
     assert.equal(state(root, e.id).accepted, null);
 
-    // Gate, review, accept again (a delivered repo's change no longer shows in its diff, so a code review comes first there).
+    // Gate, review, accept again. The merge left the ticket's lines alone, so the code review still covers the change: a repo
+    // recorded as delivered cannot change, and its diff no longer showing (its change is on the target) is not a change to review.
     const merged = headOf(wt(x.pending));
-    assert.deepEqual(reconcile(root, base, e.id, 'rev-again'), shape === 'delivered' ? ['code-review', 'gate', 'evidence-review'] : ['gate', 'evidence-review']);
+    assert.deepEqual(reconcile(root, base, e.id, 'rev-again'), ['gate', 'evidence-review']);
     const before = integrations(root).length;
     assert.match(ok(wf(root, ['deliver', '--attempt', e.id])).out, new RegExp(`${x.pending}: awaiting-merge`));
     assert.deepEqual(integrations(root).slice(before), [`${x.pending} ${merged}`], 'only the waiting repo was integrated again');
