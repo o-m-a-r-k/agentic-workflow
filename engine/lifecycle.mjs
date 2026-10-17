@@ -2108,6 +2108,9 @@ export async function deliver(root, options) {
   }
   const unsummarised = (state.batch ? state.batch.members.map((m) => loadState(root, m)) : [state]).filter((x) => needsSummary(cfg, x) && !x.delivery.summary);
   if (unsummarised.length) throw refuse(`the delivered comment needs the owner's summary first: a few plain-language lines on what changed, for the person who tests it (the UAT scope, screenshots and known limits are added by \`wf\`)`, unsummarised.map((x) => (state.batch ? `\`wf summary --file <summary.md> --attempt ${x.id}\`` : `\`wf deliver --summary-file <summary.md>\` (or \`wf summary --file <summary.md>\` first)`)).join('; '));
+  // 0.7.26 (I-183, review): a repo recorded for this delivery is final; a change made in it since would be left behind.
+  const late = lateInRecordedRepos(state);
+  if (late.length) throw refuse(`not delivered: ${late.join('; ')}`, 'a repo recorded for a delivery is not delivered again: that change belongs to a new attempt (`wf entry`), and this attempt\'s worktree has to hold what was recorded', { id: 'deliver:recorded-repo-changed' });
   // A push that landed before the process died is recognised from the remote, not redone or refused. With a delivery
   // adapter, the adapter is asked again (I-20): ancestry alone is not its whole proof.
   const adapter = await loadDeliveryAdapter(root, cfg, state);
@@ -2991,6 +2994,26 @@ export function orphanNext(root, s, gone) {
   return `ORPHANED, worktree missing: ${gone.map((m) => m.worktree).join(', ')}. Nothing runs in a missing folder. If it was removed by mistake, put it back from the branch (committed work only): ${restore.join(' ; ') || 'git worktree add <path> <branch> from the repo checkout'}. Otherwise \`wf abandon --attempt ${s.id} --reason "<why>"\` (its branch is kept), or, when its change is already on its target branches (merged outside the workflow), \`wf close --shipped --attempt ${s.id} --reason "<why>"\` (the owner's decision)`;
 }
 
+// 0.7.26 (I-183, review of 0.7.26). Named failure (the delivery half pre-existing): a commit made in a repo already recorded for the
+// delivery (skipped for having no change, or delivered) was never delivered, and `wf deliver` finished the attempt without it. A
+// recorded repo is final: what its worktree holds now has to be what was recorded.
+export function lateInRecordedRepos(state) {
+  if (state.delivery.completedAt) return [];
+  const out = [];
+  for (const [name, d] of Object.entries(state.delivery.repos)) {
+    const r = state.repos[name];
+    if (!r || !fs.existsSync(r.worktree)) continue;
+    if (d.commit) {
+      const head = git(r.worktree, ['rev-parse', 'HEAD'], { allowFail: true });
+      if (head && head !== d.commit) out.push(`${name} was recorded as delivered at ${d.commit.slice(0, 10)} and its worktree is at ${head.slice(0, 10)}`);
+    } else if (d.skipped) {
+      const files = changedFiles(state, name);
+      if (files.length) out.push(`${name} was recorded as skipped (${d.skipped}) for this delivery and now has ${files.length} changed file(s) (${files.slice(0, 3).join(', ')}${files.length > 3 ? ', …' : ''})`);
+    }
+  }
+  return out;
+}
+
 // 0.7.26 (I-183, review of 0.7.26): the repos still to deliver whose tree is not the one the acceptance names (a base merged by
 // hand, a commit made after it). `acceptanceMoved` is that for an adapter delivery, the only kind that goes by the accepted commit.
 export function movedSinceAcceptance(state) {
@@ -3038,6 +3061,8 @@ export function nextDecision(root, state) {
   }
   if (state.intent !== 'implementation' || state.lane === 'batch' || (state.batchOf && !state.batchPending)) return result('owner', 'owner', 'this trial advances standalone implementation attempts only');
   if (!state.criteria) return result('plan', 'owner', 'criteria must be frozen by the owner');
+  const recordedLate = lateInRecordedRepos(state);
+  if (recordedLate.length) return result('repair', 'owner', recordedLate.join('; '), { guidance: `${recordedLate.join('; ')}: a repo recorded for a delivery is not delivered again, so that change belongs to a new attempt (\`wf entry\`) and this attempt's worktree has to hold what was recorded` });
   if (state.accepted && !moved.length) return result('delivery', 'owner', 'accepted; delivery and presentation remain with the owning chat');
   if (state.tracker.pending.length) return result('tracker', 'owner', 'tracker actions require the owning chat');
   const unstarted = unstartedWork(state);

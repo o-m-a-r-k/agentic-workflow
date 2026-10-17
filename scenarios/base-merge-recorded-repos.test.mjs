@@ -60,3 +60,42 @@ test('I-183: a commit made in a repo recorded as skipped is compared again: the 
   assert.equal(gate.code, 75);
   assert.match(gate.err, /no review round covers the current tree/);
 });
+
+// Named failure (review of 0.7.26, medium; the delivery half pre-existing): a commit made in a repo already recorded for the
+// delivery (skipped for having no change, or delivered) was never delivered, and `wf deliver` finished the attempt without it.
+test('I-183: a commit made in a repo recorded as skipped after a partial delivery: deliver refuses naming it, and the next step says so', () => {
+  const { root, base, e, wt } = project('late-skipped');
+  accepted(root, base, e.id, [[wt('web'), { 'src/w.txt': 'web\n' }]]);
+  assert.match(ok(wf(root, ['deliver', '--attempt', e.id])).out, /web: awaiting-merge/);
+  ok(wf(root, ['handoff', 'implementer', '--agent', 'i-late', '--attempt', e.id]));
+  commitIn(wt('api'), { 'src/z.txt': 'late\n' }, 'late api change');
+  ok(wf(root, ['handoff', 'close', '--agent', 'i-late', '--attempt', e.id]));
+  const s = state(root, e.id);
+  assert.equal(s.decision.kind, 'repair');
+  assert.match(s.next, /api was recorded as skipped \(no changes\) for this delivery and now has 1 changed file\(s\) \(src\/z\.txt\)/);
+  fs.writeFileSync(path.join(root, '..', 'merged.web'), '');
+  const d = wf(root, ['deliver', '--attempt', e.id]);
+  assert.equal(d.code, 75);
+  assert.match(d.err, /not delivered: api was recorded as skipped \(no changes\) for this delivery and now has 1 changed file\(s\) \(src\/z\.txt\)/);
+  assert.match(d.err, /a repo recorded for a delivery is not delivered again/);
+  assert.equal(state(root, e.id).delivery.completedAt, null, 'nothing was finished without it');
+});
+
+test('I-183: a commit made in a repo recorded as delivered after a partial delivery: deliver refuses naming the commit it was recorded at', () => {
+  const { root, base, e, wt } = project('late-delivered');
+  accepted(root, base, e.id, [[wt('web'), { 'src/w.txt': 'web\n' }], [wt('api'), { 'src/a.txt': 'api\n' }]]);
+  fs.writeFileSync(path.join(root, '..', 'merged.api'), '');
+  assert.match(ok(wf(root, ['deliver', '--attempt', e.id])).out, /web: awaiting-merge/);
+  const recorded = state(root, e.id).delivery.repos.api.commit;
+  assert.equal(recorded, headOf(wt('api')));
+  ok(wf(root, ['handoff', 'implementer', '--agent', 'i-late', '--attempt', e.id]));
+  commitIn(wt('api'), { 'src/z.txt': 'late\n' }, 'late api change');
+  ok(wf(root, ['handoff', 'close', '--agent', 'i-late', '--attempt', e.id]));
+  const late = headOf(wt('api'));
+  assert.match(state(root, e.id).next, new RegExp(`api was recorded as delivered at ${recorded.slice(0, 10)} and its worktree is at ${late.slice(0, 10)}`));
+  fs.writeFileSync(path.join(root, '..', 'merged.web'), '');
+  const d = wf(root, ['deliver', '--attempt', e.id]);
+  assert.equal(d.code, 75);
+  assert.match(d.err, new RegExp(`not delivered: api was recorded as delivered at ${recorded.slice(0, 10)} and its worktree is at ${late.slice(0, 10)}`));
+  assert.equal(state(root, e.id).delivery.completedAt, null);
+});
