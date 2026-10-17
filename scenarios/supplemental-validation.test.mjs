@@ -225,3 +225,26 @@ test('0.7.23 (I-179): the gate still waits when no step was registered, when the
   review(code, 'code-2', STILL('code-1'));
   waits(code, 'a code-review round raised it');
 });
+
+// 0.7.29 (I-206, I-205), named failure (field): six checks were registered on a batch (`wf validation add`) before its next
+// reviewer handoff, and that delta round's bundle carried `supplementalValidation: []`, because a delta was handed corrections
+// only; the reviewer kept a finding that the required proof was not registered until the owner showed it the ledger event.
+test('0.7.29 (I-206): a check registered after the last reviewed round reaches the next delta reviewer, which is asked its verdict on the pinned definition; the round after carries none', () => {
+  const f = fixture('supplemental-delta-added');
+  review(f, 'code-0');
+  candidate(f, { id: 'http', repo: 'app', run: 'true' });
+  ok(add(f));
+  const pin = state(f.root, f.e.id).validations[0].commit;
+  const bundleOf = (agent) => {
+    const hand = ok(wf(f.root, ['handoff', 'reviewer', '--agent', agent, '--attempt', f.e.id, '--json'])).json();
+    return JSON.parse(fs.readFileSync(hand.bundle ?? hand.file, 'utf8'));
+  };
+  const one = bundleOf('code-1');
+  assert.equal(one.mode, 'delta');
+  assert.deepEqual(one.supplementalValidation.map((v) => [v.commit, v.steps.map((s) => s.id)]), [[pin, ['http']]], 'the registration since the last round is handed');
+  assert.match(one.instructions, /`supplementalValidation` lists the checks registered, corrected or carried from a batch member since the last reviewed round \(http\): the gate runs each at its pinned commit[^.]*validationChecked/);
+  ok(wf(f.root, ['review', '--closure', closureFile(f.base, goodClosure('code-1', { validationChecked: [{ id: 'http', commit: pin, verdict: 'complies', evidence: 'Pinned definition inspected' }] })), '--attempt', f.e.id]));
+  const two = bundleOf('code-2');
+  assert.deepEqual(two.supplementalValidation, [], 'a round handed after it has nothing new');
+  assert.doesNotMatch(two.instructions, /`supplementalValidation` lists the checks/);
+});

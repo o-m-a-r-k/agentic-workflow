@@ -204,6 +204,8 @@ export function reduce(entries) {
     reopenedFrom: null,
     stops: [],
     reviewsRefused: [],
+    // 0.7.29 (I-154): each time `wf accept` refused the latest review, its reasons; the next evidence review is handed them.
+    acceptanceRefusals: [],
     planRefusals: [],
     gateOverrides: [],
     reviewOverrides: [],
@@ -353,6 +355,13 @@ export function reduce(entries) {
         s.phase = 'implementing';
         break;
       }
+      // 0.7.29 (I-204): the checks a batch's members registered or corrected, carried into the batch when it is assembled
+      // (engine/validation.mjs `carriedValidations`). Each record names the members it came from (`carriedFrom`); nothing
+      // else changes: the batch has just been created and no review or gate has seen it.
+      case 'validation.carried':
+        for (const r of d.records ?? []) s.validations.push({ ...r, at: e.at });
+        if (d.notCarried?.length) s.validationsNotCarried = d.notCarried;
+        break;
       // I-94: captures the owner brought in with `wf captures import`, bound to the tree they were made on; the gate's
       // `screenshots` reads them as its own for that tree (engine/captures.mjs).
       case 'captures.imported':
@@ -410,6 +419,10 @@ export function reduce(entries) {
       // A review round whose closure was refused because the tree changed during it (I-23): the round is over.
       case 'review.refused':
         s.reviewsRefused.push({ ...d, at: e.at });
+        break;
+      // 0.7.29 (I-154): why `wf accept` refused the latest review (engine/lifecycle.mjs `acceptReview`).
+      case 'acceptance.refused':
+        (s.acceptanceRefusals ??= []).push({ ...d, at: e.at, by: e.actor });
         break;
       // A plan `wf plan` refused (I-84, I-87): its kept report and the validator's message, handed to the next planner.
       case 'plan.refused':
@@ -626,6 +639,15 @@ export function reduce(entries) {
         break;
       case 'batch.members':
         s.batch = { members: d.members, heads: { ...(s.batch?.heads ?? {}), ...(d.heads ?? {}) } };
+        // 0.7.29 (I-204): an ejected member's carried checks leave with it (its change is no longer in the batch's tree). A
+        // check another member carried too stays, pinned at that member's commit.
+        if (d.ejected) {
+          s.validations = s.validations.map((v) => {
+            if (!v.carriedFrom) return v;
+            const left = v.carriedFrom.filter((c) => c.attempt !== d.ejected);
+            return left.length === v.carriedFrom.length ? v : { ...v, carriedFrom: left, commit: left[0]?.commit ?? v.commit };
+          }).filter((v) => !v.carriedFrom || v.carriedFrom.length);
+        }
         break;
       case 'batch.joined':
         s.batchOf = d.batch;

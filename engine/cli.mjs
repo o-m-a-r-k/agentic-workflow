@@ -52,6 +52,8 @@ Onboarding
 
 Work
   wf entry [--item ID] [--lane quick|standard] [--intent implementation|analysis] [--repos a,b] [--defer-heavy] [--issue-file F]
+                                    --defer-heavy: its heavy steps run once in a batch's gate; only attempts admitted with it
+                                    join \`wf batch create\` (decide before implementing: it is set at admission)
   wf plan --file plan.yaml | --from-agent PLANNER_ID
                                     freeze acceptance criteria and the plan (--from-agent: the planner's last YAML block)
   wf plan --check --file plan.yaml   the planner's dry run: every check wf plan runs, nothing recorded
@@ -191,6 +193,8 @@ Work
   wf abandon --reason "why" [--acknowledge-integration REPO:STATE]
   wf close --shipped --reason "why"  close an attempt whose change is already on its target branches, without its acceptance (the owner's decision)
   wf batch create --members A,B | wf batch eject --batch B --member A [--drop-own-commits]
+                                    members are accepted attempts admitted with --defer-heavy; the batch carries the checks
+                                    each registered (\`wf validation add\`), required on the combined tree
 
 Status
   wf resume [ITEM|ATTEMPT]          what to do next (the attempt of that item, else the one open here)
@@ -1340,7 +1344,10 @@ async function dispatch(cmd, sub, positional, options) {
     case 'batch': {
       if (sub === 'create') {
         const s = batchCreate(root, options);
-        print(options, summary(root, s), s);
+        // 0.7.29 (I-204): the members' checks the batch's gate now owes, and any it does not carry with why.
+        const carried = (s.validations ?? []).filter((v) => v.carriedFrom).flatMap((v) => v.steps.map((x) => `${x.id} (from ${v.carriedFrom.map((c) => c.attempt).join(', ')})`));
+        const left = (s.validationsNotCarried ?? []).map((x) => `${x.id} of ${x.member}: ${x.why}`);
+        print(options, `${summary(root, s)}${carried.length ? `\nrequired on the combined tree, carried from the members: ${carried.join(', ')}; the batch's gate runs each at its pinned definition` : ''}${left.length ? `\nnot carried: ${left.join('; ')}` : ''}`, s);
         return 0;
       }
       if (sub === 'eject') {

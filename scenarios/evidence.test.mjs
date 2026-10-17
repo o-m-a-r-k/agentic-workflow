@@ -98,19 +98,48 @@ test('no evidence: nothing is required from a step whose package did not change'
   ok(wf(root, ['accept', '--attempt', e.id]));
 });
 
-test('a screenshot criterion must reference a screenshot the gate collected', () => {
-  const steps = [{ id: 'ui', repo: 'app', run: writeShots, artifacts: ['shots/{itemLower}/**/*.png'] }];
+// 0.7.29 (I-154, I-175, I-197), named failure (field): on three tickets an evidence review cited several screenshots (hashes or
+// paths joined by commas or semicolons, or a glob) in one criterion's `evidence.ref`; `wf review` recorded it and `wf accept`
+// refused it once the reviewer had finished, a whole evidence round each time. `wf review` runs acceptance's check, the round
+// stays open, and a criterion several screenshots show cites each in its own entry.
+test('a screenshot criterion must reference a screenshot the gate collected, one per evidence entry: `wf review` refuses another while its reviewer can correct it', () => {
+  const steps = [{ id: 'ui', repo: 'app', run: writeShots, artifacts: ['shots/{itemLower}/**/*.png', 'att/{attempt}/*.png'] }];
   const { base, root } = singleRepoProject('evidence-criterion', { gate: { steps } }, ignore);
   const { id, bundle } = toReview(root, base, 'ENG-70');
-  const shot = bundle.gate.artifacts[0].globs[0].files[0];
-  const closure = (reviewer, ref) => goodClosure(reviewer, { criteria: [{ id: 'C1', evidence: { kind: 'screenshot', ref } }], screenshotsInspected: [shot.sha256] });
-  ok(wf(root, ['review', '--closure', closureFile(base, closure('r', 'shots/eng-99/other.png')), '--attempt', id]));
-  const refused = wf(root, ['accept', '--attempt', id]);
+  const [first, second] = bundle.gate.screenshots;
+  const one = (ref) => ({ id: 'C1', evidence: { kind: 'screenshot', ref } });
+  const record = (criteria) => wf(root, ['review', '--closure', closureFile(base, goodClosure('r', { criteria, screenshotsInspected: [first.sha256, second.sha256] })), '--attempt', id]);
+  let refused = record([one('shots/eng-99/other.png')]);
   assert.equal(refused.code, 75);
   assert.match(refused.err, /criterion C1: screenshot `shots\/eng-99\/other\.png` is not one the gate collected/);
-  ok(wf(root, ['handoff', 'reviewer', '--agent', 'r2', '--attempt', id]));
-  ok(wf(root, ['review', '--closure', closureFile(base, closure('r2', shot.source)), '--attempt', id]));
-  ok(wf(root, ['accept', '--attempt', id]), 'matched by source path');
+  refused = record([one(`${first.sha256}, ${second.sha256}`)]);
+  assert.match(refused.err, /criterion C1: screenshot `[0-9a-f]{64}, [0-9a-f]+\.\.\.` names 2 artifacts in one ref \(2 of them collected by the gate\); an evidence entry cites one artifact: give each screenshot its own entry/);
+  assert.match(refused.err, /a criterion several screenshots show gets one entry per screenshot, with the same `id`/);
+  assert.match(record([one(`${first.source}; ${second.source}`)]).err, /names 2 artifacts in one ref/);
+  assert.match(record([one('shots/eng-70/*.png')]).err, /criterion C1: screenshot `shots\/eng-70\/\*\.png` is a pattern, not one artifact/);
+  assert.equal(state(root, id).reviews.length, 0, 'nothing was recorded, and the round is still open');
+  ok(record([one(first.source), one(second.sha256)]));
+  ok(wf(root, ['accept', '--attempt', id]), 'each entry matched, by source path and by sha256');
+});
+
+// 0.7.29 (I-154, I-197), named failure (field): a fresh evidence review was handed nothing about why acceptance had refused the
+// round before it, and repeated the same citation error.
+test('0.7.29 (I-154): why `wf accept` refused an evidence round reaches the next evidence review, recorded once however often it is refused', () => {
+  const steps = [{ id: 'ui', repo: 'app', run: writeShots, artifacts: ['shots/{itemLower}/**/*.png', 'att/{attempt}/*.png'] }];
+  const { base, root } = singleRepoProject('evidence-refused', { gate: { steps } }, ignore);
+  const { id, bundle } = toReview(root, base, 'ENG-70');
+  const [first, second] = bundle.gate.screenshots;
+  assert.equal(bundle.acceptanceRefused, undefined);
+  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r', { screenshotsInspected: [first.sha256] })), '--attempt', id]));
+  for (let i = 0; i < 2; i++) assert.match(wf(root, ['accept', '--attempt', id]).err, /1 gate screenshot\(s\) not inspected by the reviewer/);
+  assert.deepEqual(state(root, id).acceptanceRefusals.map((x) => [x.reviewer, x.problems.map((p) => p.citation)]), [['r', [true]]], 'the same refusal of the same round is recorded once');
+  const h = ok(wf(root, ['handoff', 'reviewer', '--agent', 'r2', '--attempt', id, '--json'])).json();
+  const next = JSON.parse(fs.readFileSync(h.bundle, 'utf8'));
+  assert.equal(next.acceptanceRefused.reviewer, 'r');
+  assert.match(next.acceptanceRefused.problems.join('\n'), new RegExp(`1 gate screenshot\\(s\\) not inspected by the reviewer .*: ${second.source}$`));
+  assert.match(next.instructions, /`acceptanceRefused` lists why `wf accept` refused the last evidence round \(r's\): your closure must not repeat them/);
+  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r2', { screenshotsInspected: [first.sha256, second.sha256] })), '--attempt', id]));
+  ok(wf(root, ['accept', '--attempt', id]));
 });
 
 // The env var decides WHICH captures the tests make; where they go stays the project's convention (the artifacts glob).
