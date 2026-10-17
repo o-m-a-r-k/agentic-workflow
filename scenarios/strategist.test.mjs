@@ -446,8 +446,12 @@ test('a question the engine asked again after a withdrawal is live: no decision 
   assert.equal(refused.code, 75);
   assert.match(refused.err, new RegExp(`the strategist escalated ${a.id.replace('.', '\\.')} \\(${fresh}\\) and the owner has not decided`));
   assert.match(refused.err, new RegExp(`wf approve ${fresh} --from-question`));
+  // The question can be wrong (it is the withdrawn one, asked again as it was): withdrawing it is the other way on, then the decision.
+  assert.match(refused.err, new RegExp(`or, if the question is wrong, withdraw it with what changed \\(\`wf decisions withdraw ${fresh} --attempt ${a.id.replace('.', '\\.')} --reason "<what changed>"\`\\) and record the decision again: a recorded decision supersedes a withdrawn question`));
   assert.ok(refusalRows(root).some((x) => x.id === 'strategy:escalation-pending'));
-  approveAsOwner(root, a.id, fresh, 'fix-both-together');
+  // The route works: withdrawn with what changed, the decision is recorded.
+  ok(wf(root, ['decisions', 'withdraw', fresh, '--reason', 'the question is the old one', '--attempt', a.id]));
+  ok(wf(root, ['strategy', 'record', '--closure', corrected.file, '--attempt', a.id], { ownerSilent: true }));
 });
 
 test('an escalation the person answered in their own words is not a decision: recording is refused with the routes that work (follow the words, or withdraw them and hand the strategist again)', () => {

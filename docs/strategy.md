@@ -51,7 +51,7 @@ actual, with no threshold:
 ```
 
 `wf signals` adds the numbers behind it: review rounds handed and recorded, the recorded ones with the blocking findings each raised
-(`blocking`, and `blockingLatest` for the latest) and the blocking findings still open after it (`open`), their observation counts, families and the scope the reviewer said it did not reach (`notReached`: the round is
+(`blocking`, and `blockingLatest` for the latest) and, of the findings of the rounds up to it, how many block and are open now (`open`: today's waivers and dispositions apply, so it is not what stood open when that round was recorded), their observation counts, families and the scope the reviewer said it did not reach (`notReached`: the round is
 not counted as the full audit, I-69),
 rounds since the new blocking findings last decreased, the blocking findings open now (`blockingOpen`, every round's, with how many an earlier round raised: `blockingCarried`; a round that raises nothing new has cleared nothing an earlier round raised, I-185), criteria at freeze and now, amendments, the causes that came back after a fix (`recurringCauses`: a finding still open that a reviewer linked, with `sameCauseAs`, to one already marked fixed; `familyRecurrences`: one with only the family of a finding already marked fixed, a label match to check), the files the plan's anchors name,
 the latest reviewer bundle size, each working role's last transcript activity, open observations and the strategist's

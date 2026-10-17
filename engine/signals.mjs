@@ -236,7 +236,7 @@ function longestQuiet(root, state, nowMs) {
 // base (scope noise, nothing else); `home` the host home the engine already reads transcripts from (WF_HOME in tests).
 export function computeSignals(root, state, { nowMs = Date.now(), cfg = null, home = hostHome() } = {}) {
   const finals = recordedRounds(state);
-  // `blocking` is what a round raised itself; `open` the blocking findings still open after it, the ones earlier rounds raised
+  // `blocking` is what a round raised itself; `open` how many of the blocking findings of the rounds up to it are open now (today's waivers apply), the ones earlier rounds raised
   // included (0.7.27, I-185: a round that raises nothing new has not cleared what earlier rounds raised).
   const openAfter = blockingSeries(state);
   const rounds = finals.map((r, i) => ({ ...roundCounts(state, r, home), n: i + 1, open: openAfter[i] }));
