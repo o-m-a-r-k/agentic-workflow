@@ -65,7 +65,31 @@ comparison and analyzes it: what explains the difference, and is the approach co
 findings that did not go down, a diff that widens with every fix, consumers found one at a time, a role far past its own
 estimate with no recent activity. When the course diverged and it cannot explain why, it changes the approach: it hands the
 strategist, or re-plans (`wf criteria amend`, with a new `expect`), and records why (the handoff's `--reason`, the
-amendment's `--reason`). The owner skill says this in goal terms; the engine takes no part in the judgement.
+amendment's `--reason`). The owner skill says this in goal terms.
+
+## Course signals: the strategist as the next step (0.7.28, D43)
+
+Six signals are not the owner's to judge away. Named failure: in a three-ticket batch (47 review rounds against 11 planned)
+the owner wrote "converging, not calling the strategist" six times and handed no strategist while files ran two to four
+times the plan and the criteria were amended upward four times. `engine/course.mjs` names them:
+
+| Signal | When |
+| --- | --- |
+| `files` | files changed are more than twice the latest expectation that states files (the plan's, a re-plan's or a strategist's) |
+| `rounds` | review rounds handed are past the latest expectation that states rounds (counted from a re-plan's or a strategist's when that is the latest) |
+| `amended` | an amendment added criteria after implementation started (not the one that carries out a strategist's `consolidate`) |
+| `recurring` | a cause came back after a fix (a reviewer's `sameCauseAs`, or the family of a finding already marked fixed) |
+| `regression` | the latest round's findings sit on lines the fix round before it wrote (`git blame`) |
+| `divergence`, `replan` | an implementer expects more than twice the fix the reviewers stated for what it was handed (`fix: { what, minutes }` on each finding), or its report asks for a re-plan |
+
+While one stands that no strategist decision answered, a next step that hands an implementer or a new code-review round
+is the strategist's handoff (`wf resume` and `wf advance` say `strategy`, with the signals and no "continue" offered beside
+them; its bundle carries them as `courseSignals`, with the `outstanding` items for a pass). A gate, an evidence review, a
+verification a reviewer owes, the acceptance and delivery are not held. Nothing is refused: a handoff made past it prints a
+note. A decision answers the signals it saw (`course` on the recorded decision), and its action drives the next step:
+`consolidate` (one planned pass for all remaining work, with an expectation), `split`, or `continue` with a new `expect`,
+which is what the course is compared with from then on. It applies to every attempt in flight; `roles.strategist: false` or
+`strategy.enabled: false` turns it off with the round escalation.
 
 ## The strategist
 
@@ -90,8 +114,8 @@ ignored.
 
 | Action | Effect |
 | --- | --- |
-| continue | recorded |
-| consolidate | recorded: one amendment for the whole dependency map follows |
+| continue | recorded; with `expect`, the course is compared with it from then on (0.7.28) |
+| consolidate | recorded: one amendment that restates all remaining work as one planned pass with an expectation follows (0.7.28) |
 | cluster | recorded: findings are fixed by family, one mechanical proof each |
 | delta-review | the next reviewer round is a delta round |
 | split | `wf split` for the items (below) |
@@ -136,4 +160,6 @@ brief from `wf signals`: rounds, blocking findings per round, the families that 
 the plan expected, amendments, with 2-3 options and a recommendation. Choices: `continue` (another 10 rounds before asking
 again), `split` (unstarted work items, observations and discovered issues move to a sibling attempt; code already built
 stays), `deliver-core` (what the criteria need and what blocks stays; every other finding or discovered issue recorded before the
-answer may be ticketed under this one decision, never one raised after it), `stop` (the attempt is held in the person's words). Batch attempts count too.
+answer may be ticketed under this one decision, never one raised after it), `hold` ("It needs a product or legal answer first:
+hold": the attempt is held in those words until the person lifts it; 0.7.28, after an escalation whose answer was a product
+question stayed open 390 minutes overnight with no option for it), `stop` (the attempt is held in the person's words). Batch attempts count too.

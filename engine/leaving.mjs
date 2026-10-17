@@ -68,6 +68,10 @@ export function leavingDecisions(root, state, items, { verb, reason = '', option
   const whoFor = (x) => { if (settled[x.ref]) return 'settled'; const w = policy[x.level] ?? DEFAULT_POLICY[x.level]; return w === 'never' && directed ? 'person' : w; };
   const kept = items.filter((x) => whoFor(x) === 'never');
   if (kept.length) throw refuse(`not ${verb}: ${kept.map((x) => `${x.ref} (${x.level}${x.severity && x.severity !== x.level ? `, rated ${x.severity}` : ''})`).join(', ')} ${kept.length > 1 ? 'stay' : 'stays'} in this delivery: ${ruleText(policy)}`, 'fix it through the implementer that did that work, or move it to a sibling attempt of the batch (`wf scope move`); if the person told you to leave it out of this ticket, run this again with `--person-directed "<their words>"`: they answer each item themselves', { id: 'leave:medium-high' });
+  // 0.7.28 (I-207): the person's "fix all" (`wf scope fix-all`) is their answer for every item they would be asked about: none is
+  // asked again, unless they now direct one out (`--person-directed`, their new words), which asks that item.
+  const fixAll = state.fixAll && !directed ? items.filter((x) => whoFor(x) === 'person' && !decisionFor(state, 'move-out-of-batch', `leave:${x.ref}`)) : [];
+  if (fixAll.length) throw refuse(`not ${verb}: the person said to fix every item ("${state.fixAll.words}", ${state.fixAll.at}), so ${fixAll.map((x) => x.ref).join(', ')} ${fixAll.length > 1 ? 'are' : 'is'} fixed in this delivery and not asked about again`, 'fix it in the next planned pass (`wf resume` names it); if the person now tells you to let one leave, run this again with `--person-directed "<their words>"`: they answer that item themselves', { id: 'leave:fix-all' });
   const owner = items.filter((x) => whoFor(x) === 'owner');
   if (owner.length && !reason) throw refuse(`${owner.map((x) => x.ref).join(', ')} may leave on your judgement under the project's \`leaving:\` policy: say why it waits`, 'pass `--reason "<why it can wait>"`', { id: 'leave:owner-reason' });
   const decided = Object.fromEntries([...owner.map((x) => [x.ref, 'owner']), ...Object.entries(settled).map(([ref, d]) => [ref, d.id])]);

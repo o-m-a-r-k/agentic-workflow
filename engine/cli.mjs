@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 import { refreshModels } from './models.mjs';
 import { RULE_SHORT } from './leaving.mjs';
-import { abandon, adopt, attemptForName, changedFiles, closeShipped, entry, hold, openState, release, resolveAttempt, setIntent } from './attempt.mjs';
+import { abandon, actor as actorOf, adopt, attemptForName, changedFiles, closeShipped, entry, hold, openState, release, resolveAttempt, setIntent } from './attempt.mjs';
 import { baseLines, baseMerge, baseMovedForDelivery, baseStatus } from './base.mjs';
 import { findRoot, loadConfig, repoDir, requireRoot } from './config.mjs';
 import { exportAttempt, exportFile } from './export.mjs';
@@ -55,7 +55,7 @@ Work
   wf plan --file plan.yaml | --from-agent PLANNER_ID
                                     freeze acceptance criteria and the plan (--from-agent: the planner's last YAML block)
   wf plan --check --file plan.yaml   the planner's dry run: every check wf plan runs, nothing recorded
-  wf criteria amend --file f --reason "why" [--add-repo R]
+  wf criteria amend --file f --reason "why" [--add-repo R]   (\`pass: [{ items, why, repos }]\` plans one pass of what does not block)
                                     --add-repo: a fix needs another repo; its worktree joins the attempt with the work items
                                     added scope without \`impact\` is shown to the next implementer as consumers to find
   wf discovered add --summary "..." [--severity high|medium|low] [--invariant "<which>"] [--kind defect|bookkeeping] [--where file:line] [--found-by ID] [--blocked-by W] | list
@@ -109,7 +109,10 @@ Work
   wf check [--repo R]               light steps only, for the implementer; reused by the gate, never counts as one
   wf gate [--prepare-only] [--full] [--focused] [--rerun-failed] [--reason "why"]
                                     after a clean code review only (or after an evidence review's fixes by the implementers
-                                    handed after it); --reason out of that order asks the person's \`wf approve\`
+                                    handed after it, or after a planned pass); --reason out of that order asks the person's \`wf approve\`
+  wf gate quarantine --step ID --suite FILE --reason "why"
+                                    a suite that failed in the last gate and that the delivery does not change: the person
+                                    decides whether it is set aside for this delivery (one question)
   wf run --lease NAME -- CMD...     run a command holding a machine-wide lease (docker, browser...)
   wf run --step ID                  run that gate step's declared \`prepare\` command with the secrets the step uses
   wf base [merge] [--repo R]        how far each base moved; merge merges it into the worktrees
@@ -128,6 +131,8 @@ Work
                                     finding; --same-as: a finding raised again about a gap the person already accepted in A<n>
   wf scope move --finding REVIEWER:F1 --sibling ATTEMPT
                                     hand a finding on code this attempt did not change to a sibling attempt of the batch
+  wf scope fix-all --person-said "<their words>"
+                                    the person's "fix all", recorded once: no item is asked about leaving again
   wf review --closure file.json     record the reviewer's closure
   wf handoff reviewer --agent ID [--single] [--reviewers 2|3] [--division FILE]
                                     automatically divide large separable flows; --single keeps one reviewer
@@ -340,7 +345,10 @@ function summary(root, s, { base = null, resume = false } = {}) {
     } catch {}
   }
   // D9: the comparison reaches the line the owner agent acts on (final review of 0.7.0: it sat above it as a passive block).
-  const judge = past.length && !live ? `past its own estimate: ${past.join('; ')}. Judge the course before the next step: continue, re-plan with a new expectation (\`wf criteria amend\` with \`expect\`), or hand the strategist what diverged (\`wf handoff strategist --agent <id> --reason "..."\`). Then: ` : '';
+  // 0.7.28 (I-210): when the course signals make the strategist the next step, that step is the line, with no "continue" offered
+  // beside it (the owner judged "converging" six times in a ticket that handed no strategist in 47 rounds).
+  const coursing = !live && !['done', 'abandoned'].includes(s.phase) && (() => { try { return Boolean(nextDecision(root, s).courseSignals?.length); } catch { return false; } })();
+  const judge = past.length && !live && !coursing ? `past its own estimate: ${past.join('; ')}. Judge the course before the next step: continue, re-plan with a new expectation (\`wf criteria amend\` with \`expect\`), or hand the strategist what diverged (\`wf handoff strategist --agent <id> --reason "..."\`). Then: ` : '';
   lines.push(`  next: ${judge}${live ? withAttempt(root, s, 'a gate is running: wait for it to finish (or `wf stop --class major-finding|tree-change|owner-decision --reason "why"`); do not edit the worktrees or hand a reviewer the tree meanwhile; once it passes, the evidence review') : nextAction(root, s)}`);
   return lines.join('\n');
 }
@@ -477,6 +485,10 @@ function resolvePathOption(k, v) {
   const st = fs.statSync(resolved, { throwIfNoEntry: false });
   if (READ_OPTIONS.includes(k)) {
     if (!FOLDER_OPTIONS.has(k) && /[\\/]$/.test(raw)) bad('ends with a slash but names a file');
+    // 0.7.28 (I-213). Named failure (field): `wf criteria amend --file` with a path where no file was (an amendment moved
+    // while its survey was being restated) threw the reader's stack trace (lifecycle.mjs:428 under 0.7.18), and the owner read
+    // the engine's source to find out why. An input that is not there is refused here, for every command that reads one.
+    if (!st && !FOLDER_OPTIONS.has(k)) bad(`is not there (no such file: ${resolved}); write the file first, or pass the path it was written to`);
     if (st && !(FOLDER_OPTIONS.has(k) ? st.isDirectory() : st.isFile())) bad(`is not a regular ${FOLDER_OPTIONS.has(k) ? 'folder' : 'file'}`);
   } else if (st && FOLDER_OPTIONS.has(k) !== st.isDirectory()) bad(FOLDER_OPTIONS.has(k) ? 'is not a folder' : 'is a folder; give a file path');
   return resolved;
@@ -839,14 +851,14 @@ async function dispatch(cmd, sub, positional, options) {
     }
     case 'criteria': {
       if (sub !== 'amend') throw new WfError('usage: wf criteria amend --file f --reason "why"');
-      const { state: s, changes, added, impactOwed, restrictions } = amendCriteria(root, options);
+      const { state: s, changes, added, impactOwed, restrictions, pass = [] } = amendCriteria(root, options);
       const list = (ids) => ids.join(', ') || 'none';
       // A withdrawn acceptance is the outcome of the command (I-107), so it is printed with it, not as a warning.
       const withdrawn = (restrictions ?? []).filter((w) => w.startsWith('acceptance withdrawn'));
       for (const w of (restrictions ?? []).filter((x) => !withdrawn.includes(x))) process.stderr.write(`warning: ${w}\n`);
       const owedLine = impactOwed ? `\n  impact owed: this amendment adds scope without an impact map; the next implementer is told to find and report its consumers (or record it: \`wf criteria amend --file <f> --reason "..."\` with an \`impact\` addendum)` : s.impact?.addenda?.length && s.criteriaAmendments.at(-1)?.impact === true ? '\n  impact addendum recorded' : '';
       const addedLines = added.map((a) => `\n  repo added: ${a.repo} (worktree ${a.worktree}, base ${a.base.slice(0, 10)}); hand its work item to an implementer, and the reviewer judges the seam on both sides`).join('');
-      print(options, `criteria amended (${s.criteriaAmendments.length} amendment(s)); the reviewer will see the reason${withdrawn.map((w) => `\n  ${w}`).join('')}${addedLines}\n  criteria now (${s.criteria.length}): ${list(s.criteria.map((c) => c.id))}\n  changed: ${list(changes.changed)}; added: ${list(changes.added)}; dropped: ${list(changes.dropped.map((d) => `${d.id} (${d.reason})`))}${owedLine}`, { ...s, changes });
+      print(options, `criteria amended (${s.criteriaAmendments.length} amendment(s)); the reviewer will see the reason${withdrawn.map((w) => `\n  ${w}`).join('')}${addedLines}\n  criteria now (${s.criteria.length}): ${list(s.criteria.map((c) => c.id))}\n  changed: ${list(changes.changed)}; added: ${list(changes.added)}; dropped: ${list(changes.dropped.map((d) => `${d.id} (${d.reason})`))}${owedLine}${pass.map((w) => `\n  planned pass ${w.id}: ${w.items.join(', ')}`).join('')}\n  next: ${nextAction(root, s)}`, { ...s, changes, pass });
       return 0;
     }
     case 'scope': {
@@ -870,7 +882,19 @@ async function dispatch(cmd, sub, positional, options) {
         print(options, `${refs.join(', ')} moved to ${options.sibling}; run wf resume`, r);
         return 0;
       }
-      throw new WfError('usage: wf scope list|ticket|move|fixed|defer|waive');
+      // 0.7.28 (I-207): the person's "fix all", recorded once as their answer for every item that does not block, so it is never
+      // asked again and never a reason for a round of its own: every item joins the planned pass. Named failure (field): the
+      // person's standing "fix all" was used to open an implementer round and a review round for each low item and each item an
+      // implementer left (10 of one ticket's 16 rounds).
+      if (sub === 'fix-all') {
+        const words = typeof options['person-said'] === 'string' ? options['person-said'].trim() : '';
+        if (!words) throw new WfError('usage: wf scope fix-all --person-said "<the person\'s words, as they wrote them>"');
+        if (s.fixAll) { print(options, `the person's "fix all" is already recorded on ${s.id} (${s.fixAll.at}): "${s.fixAll.words}"; nothing is asked again`, s.fixAll); return 0; }
+        append(root, s.id, 'scope.fixAll', { words: words.slice(0, 500) }, actorOf(options));
+        print(options, `recorded on ${s.id}: the person said to fix every item ("${words.slice(0, 500)}"). No item is asked about leaving again unless they say so (then \`--person-directed "<their words>"\` asks that item); every item that does not block joins the next planned pass, never a round of its own. next: ${nextAction(root, loadState(root, s.id))}`, loadState(root, s.id).fixAll);
+        return 0;
+      }
+      throw new WfError('usage: wf scope list|ticket|move|fixed|defer|waive|fix-all');
     }
     case 'discovered': {
       // I-18: the discovered-issue ledger. Any role records what it finds; only the owner defers (a confirmed decision).
@@ -938,7 +962,10 @@ async function dispatch(cmd, sub, positional, options) {
         const roles = g.refreshed.filter((f) => hostIds().some((id) => findHost(id)?.agentsDir && f.includes(path.join(root, findHost(id).agentsDir))));
         if (roles.length) process.stderr.write(`note: role files refreshed to the installed plugin (${roles.length}); a role started from a session that was already running is pointed at the current file by its bundle\n`);
       }
+      // 0.7.28 (I-210): a round handed past unanswered course signals is said to the owner (the strategist was the next step).
+      const coursePending = ['implementer', 'reviewer'].includes(sub) ? (() => { try { return nextDecision(root, openState(root, options)).courseSignals ?? []; } catch { return []; } })() : [];
       const r = handoff(root, sub, options);
+      if (coursePending.length) process.stderr.write(`note: handed while course signals stand that no strategist has answered (${coursePending.map((x) => x.id).join(', ')}): the next step was the strategist; hand it before the next round (\`wf resume\` names it)\n`);
       const startPrompt = r.startPrompt;
       const launchHost = findHost(options.runtime);
       if (launchHost?.spawnMode === 'engine-only' && ['planner', 'reviewer'].includes(sub) && !r.model) process.stderr.write(`warning: this handoff pins no ${launchHost.name} model and cannot launch; run \`wf models refresh --attempt ${r.state.id}\`, then create a fresh handoff\n`);
@@ -954,7 +981,10 @@ async function dispatch(cmd, sub, positional, options) {
       const stale = r.roleStale ? `note: ${path.relative(root, r.roleStale.file)} changed at ${r.roleStale.changedAt}, after this ${staleHost.label} session started (${r.roleStale.sessionStartedAt}). ${fragment(staleHost, 'staleRole', r.agentType)}\n` : '';
       // Named failure (I-14): the reviewer handoff printed no agent name, the reviewer was started unnamed, and its
       // closure was refused after the whole review. The owner is told the agent type and name on stderr.
-      const how = r.members ? `Run wf handoff run --agent ${r.agent} --attempt ${r.state.id}; retain that foreground handle for scopes and integration` : `Start agent type ${r.agentType} (name it ${r.agent}; do not pass a model)`;
+      // 0.7.28 (I-211): a divided review prints no reviewer prompt at all, only the one command that starts it (its scoped
+      // reviewers, then the integration); started from a bundle's prompt, a reviewer of it records nothing.
+      const groupStart = r.members ? `wf handoff run --agent ${r.agent} --attempt ${r.state.id}` : null;
+      const how = r.members ? `This review is divided (${r.members.length - 1} scoped reviewers and an integration): start it only by running the command below, in the foreground, and keep that handle; it launches the scoped reviewers and then the integration. Never start a reviewer of it from a bundle's prompt: such a reviewer records nothing. Run` : `Start agent type ${r.agentType} (name it ${r.agent}; do not pass a model)`;
       // The reviewer is started blind: this one line is its whole prompt, so nothing else is printed to pass along.
       if (sub === 'reviewer') {
         // To the owner on stderr, never into the reviewer's one-line prompt on stdout.
@@ -962,8 +992,8 @@ async function dispatch(cmd, sub, positional, options) {
         if (w) process.stderr.write(`warning: ${w}\n`);
         if (r.division) process.stderr.write(`review division: ${r.division.mode}; ${r.division.reason}\n${reviewDivisionSummary(r.division)}`);
         for (const member of r.members ?? []) process.stderr.write(`group ${member.slot}: ${member.agent}; frozen prompt: ${member.startPrompt}\n`);
-        process.stderr.write(`${lessonsLine}${stale}${how} with only the line on stdout as its prompt:\n`);
-        print(options, startPrompt, { ...r, startPrompt });
+        process.stderr.write(groupStart ? `${lessonsLine}${stale}${how}:\n` : `${lessonsLine}${stale}${how} with only the line on stdout as its prompt:\n`);
+        print(options, groupStart ?? startPrompt, { ...r, startPrompt, ...(groupStart ? { start: groupStart } : {}) });
       } else {
         if (stale) process.stderr.write(stale);
         // I-23: the implementer handoff stays open until it is closed, and no review round starts while it is open.
@@ -983,6 +1013,13 @@ async function dispatch(cmd, sub, positional, options) {
     case 'gate':
     case 'check': {
       const s = openState(root, options);
+      // 0.7.28 (I-212): the person's decision to set aside a pre-existing failing suite the delivery does not touch.
+      if (cmd === 'gate' && sub === 'quarantine') {
+        const { quarantineSuite } = await import('./gate.mjs');
+        const r = quarantineSuite(root, s, options);
+        print(options, `${r.suite} of ${r.step} is set aside for ${s.id} (${r.decision}): the next \`wf gate\` counts ${r.step} passed while it is that step's only failure, and the delivered comment says the suite was not proven. next: ${nextAction(root, loadState(root, s.id))}`, r);
+        return 0;
+      }
       const check = cmd === 'check';
       const repos = check && options.repo ? String(options.repo).split(',') : null;
       // Before the run: an unplanned change is amended into the criteria (or fixed) before the review, not after.
@@ -1055,6 +1092,11 @@ async function dispatch(cmd, sub, positional, options) {
         if (!group) throw refuse('no current parallel review group');
         const required = group.members.filter(h => h.reviewGroup.slot !== 'integration');
         const parts = required.map(h => (s.reviewParts ?? []).find(p => p.handoff === h.bundle));
+        // 0.7.28 (I-211). Named failure (field): a divided review was started as a plain reviewer with the integration bundle's
+        // prompt; its scoped reviewers were never created, nothing could be recorded, and the owner polled for 80 minutes. A
+        // reviewer that reads its parts and finds no scoped reviewer was ever launched was not started by `wf handoff run`: it stops.
+        const integration = group.members.find(h => h.reviewGroup.slot === 'integration');
+        if (parts.every(p => !p) && required.every(h => !h.launch)) throw refuse(`the scoped reviewers of ${group.id} (${required.map(h => h.agent).join(', ')}) were never launched: this divided review was started outside \`wf handoff run\`, and nothing it reviews can be recorded`, `stop now and tell the owner: a divided review starts only with \`wf handoff run --agent ${integration?.agent ?? '<integration>'} --attempt ${s.id}\`, which launches the scoped reviewers and then the integration`, { id: 'review:group-plain-start' });
         if (parts.some(p => !p)) throw refuse('scoped reports are incomplete; integration can inspect its own code while waiting');
         print({ ...options, json: true }, null, parts.map(p => ({ agent: p.closure.reviewer, sha256: p.raw.sha256, file: p.raw.path ?? p.raw.file, closure: p.closure, provenance: p.provenance })));
         return 0;

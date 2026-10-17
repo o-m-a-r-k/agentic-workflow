@@ -46,7 +46,10 @@ test('I-18: discovered issues are recorded, end fixed by a ticket commit or defe
   const a = ok(disc(root, ['add', '--attempt', id, '--summary', 'the pager total sums only the current page', '--where', 'src/a.txt:1', '--found-by', 'impl-1']));
   assert.match(a.out, /discovered D1 recorded on ENG-700\.1/);
   assert.match(ok(disc(root, ['list', '--attempt', id])).out, /D1 {2}open {2}the pager total sums only the current page {2}\(src\/a\.txt:1; found by impl-1\)/);
-  assert.match(ok(wf(root, ['resume', '--attempt', id])).out, /discovered: 1 open \(D1\)[\s\S]*next: fix the discovered issue\(s\) D1 through the implementer that found each/);
+  // 0.7.28 (I-207): an open discovered issue is no round of its own: it joins the next pass (and delivery waits for it, below).
+  const listed = ok(wf(root, ['resume', '--attempt', id])).out;
+  assert.match(listed, /discovered: 1 open \(D1\)/);
+  assert.doesNotMatch(listed, /next: fix the discovered issue/);
 
   // Fixed means a commit of this ticket: not the base, not an unknown sha.
   const baseSha = sh(wt, 'git rev-parse HEAD');
@@ -238,6 +241,12 @@ test('I-19: a discovered fix adds a repo and its work items to the running attem
   assert.deepEqual(Object.keys(s.repos).sort(), ['api', 'web']);
   assert.ok(fs.existsSync(path.join(s.repos.api.worktree, 'src', 'totals.txt')));
   assert.deepEqual(s.addedRepos.map((x) => [x.repo, x.reason]), [['api', 'D1 needs the api total']]);
+  // 0.7.28 (I-210): a criterion added after implementation started is a course signal: the strategist decides before W2 starts.
+  assert.match(ok(wf(root, ['resume', '--attempt', id])).out, /next: the course needs the strategist[^\n]*amendment 1 added C2 after implementation started/);
+  ok(wf(root, ['handoff', 'strategist', '--agent', 'strat-1', '--attempt', id]));
+  const strat = path.join(base, 'strategy.json');
+  fs.writeFileSync(strat, JSON.stringify({ strategist: 'strat-1', action: 'continue', rationale: 'the api total is the fix D1 needs, one work item', prediction: { signal: 'blockingLatest <= 1', by: 3 } }));
+  ok(wf(root, ['strategy', 'record', '--closure', strat, '--attempt', id]));
   assert.match(ok(wf(root, ['resume', '--attempt', id])).out, /W2 class full .*`wf handoff implementer --work W2/);
 
   ok(wf(root, ['handoff', 'implementer', '--work', 'W2', '--agent', 'impl-2', '--attempt', id, '--owner', 'o']));
@@ -372,7 +381,9 @@ test('0.7.0: an implementer closes with its report; each item it left becomes an
   ]);
   // A `left` item may carry the severity the implementer rates it at; the ledger keeps it (null when unrated).
   assert.deepEqual(closed.discovered.map((d) => d.severity), ['major', null]);
-  assert.match(ok(wf(root, ['resume', '--attempt', id])).out, /discovered: 2 open \(D1, D2\)[\s\S]*next: fix the discovered issue\(s\) D1 \(major\), D2 through the implementer that found each/);
+  // 0.7.28 (I-207): the items it left join the next pass; the review comes first, never a round for them alone.
+  const after = ok(wf(root, ['resume', '--attempt', id])).out;
+  assert.match(after, /discovered: 2 open \(D1, D2\)[\s\S]*next: code review/);
 
   // D1 is fixed in this ticket and D2 stays open. The reviewer is handed the report, the open entry as context, and D1 marked
   // fixed since the last round, to verify the claim (0.7.7).

@@ -32,25 +32,33 @@ function resolve(state, cited, commitOf) {
   return null;
 }
 
+// The implementer record (`state.implementers`) whose commits last wrote the line a located finding of round `r` cites, or null
+// when the finding cites no line, the line predates the attempt, or no implementer's commits hold it. `undefined` when the
+// finding cites no location at all (nothing to trace).
+export function implementerOf(state, r, f) {
+  const loc = locationsOf(f)[0];
+  if (!loc) return undefined;
+  const impl = (state.implementers ?? []).filter((x) => x.heads);
+  const where = resolve(state, loc.file.replace(/^\.\//, ''), (name) => head(r.tree?.[name]));
+  const commit = where ? head(r.tree?.[where.repo]) : null;
+  const sha = where && commit && fs.existsSync(where.dir) ? blameLine(where.dir, commit, where.file, loc.start) : null;
+  return sha ? impl.find((x) => {
+    const from = head(x.heads?.[where.repo]);
+    const to = head(x.closedHeads?.[where.repo]) ?? commit;
+    return from && to && sha !== from && isAncestor(where.dir, from, sha) && isAncestor(where.dir, sha, to);
+  }) ?? null : null;
+}
+
 // { byAgent: { [agent]: { work, blocking, observations } }, unattributed, traced } for the attempt's recorded rounds.
 export function introducedFindings(state, { limit = 200 } = {}) {
   const byAgent = {};
   let unattributed = 0, traced = 0;
-  const impl = (state.implementers ?? []).filter((x) => x.heads);
   for (const r of state.reviews ?? []) {
     for (const f of r.closure?.findings ?? []) {
       if (traced >= limit) break;
-      const loc = locationsOf(f)[0];
-      if (!loc) continue;
+      const who = implementerOf(state, r, f);
+      if (who === undefined) continue;
       traced++;
-      const where = resolve(state, loc.file.replace(/^\.\//, ''), (name) => head(r.tree?.[name]));
-      const commit = where ? head(r.tree?.[where.repo]) : null;
-      const sha = where && commit && fs.existsSync(where.dir) ? blameLine(where.dir, commit, where.file, loc.start) : null;
-      const who = sha ? impl.find((x) => {
-        const from = head(x.heads?.[where.repo]);
-        const to = head(x.closedHeads?.[where.repo]) ?? commit;
-        return from && to && sha !== from && isAncestor(where.dir, from, sha) && isAncestor(where.dir, sha, to);
-      }) : null;
       if (!who) {
         unattributed++;
         continue;

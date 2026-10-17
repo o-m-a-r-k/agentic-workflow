@@ -16,6 +16,11 @@ wf handoff reviewer --agent review-2 --single --attempt ENG-1.1
 wf advance --until-owner --single --attempt ENG-1.1
 ```
 
+A divided review starts only through `wf handoff run --agent <integration> --attempt <id>` (or `wf advance`): the handoff
+prints that line and no reviewer prompt, the integration reviewer's first step is `wf review parts`, which refuses a group
+none of whose scoped reviewers was launched (`review:group-plain-start`), and `wf resume` says nothing runs for such a group
+(0.7.28, I-211, D47: a divided review started as a plain reviewer created no sub-reviews, and the owner polled 80 minutes).
+
 When parallel review is selected, the default is two scoped reviewers plus integration. `--reviewers 3` permits
 three scoped reviewers without any activation flag. The existing `--parallel` flag remains a compatibility alias
 for automatic selection; it does not force a split that fails the flow checks. `--single` cannot be combined with

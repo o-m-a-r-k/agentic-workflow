@@ -35,6 +35,8 @@ import { policyOf, ruleText } from './leaving.mjs';
 import { pastCourse } from './learning.mjs';
 import { performSplit, resolveSplitItems } from './split.mjs';
 import { obligationSince } from './versions.mjs';
+import { courseSignals, outstanding, unanswered } from './course.mjs';
+import { expectOf, expectProblems, PLAN_EXPECT } from './expectations.mjs';
 import { detectOwner, hostChoice, isHost } from './hosts/index.mjs';
 import { WfError, assertSafeId, readJson, refuse, writeJson } from './util.mjs';
 
@@ -57,14 +59,18 @@ export function roundsEscalation(rounds, c = STRATEGY_DEFAULTS) {
 
 // The owner's decision for the escalation (kind escalation, created by the engine; `wf approve`).
 export const ownerDecisionKey = (f) => `tripwire:${f.id}:${f.key}`;
-export const OWNER_CHOICES = ['continue', 'split', 'deliver-core', 'stop'];
+// 0.7.28 (I-210): `hold`. Named failure (field): a round-10 escalation was answered with a product question ("what is the
+// industry best practice here?"); no option fitted, so it stayed open 390 minutes overnight. A question that needs a product or
+// legal answer first now has a route: the ticket is held in the person's words until they lift it.
+export const OWNER_CHOICES = ['continue', 'split', 'deliver-core', 'hold', 'stop'];
 // What the person sees for each choice of the round escalation, and what follows it (0.7.11: plain questions).
 const OWNER_WORDS = {
-  labels: { continue: 'Keep going as now', split: 'Split off the rest as its own ticket', 'deliver-core': 'Ship what the criteria need now', stop: 'Stop this ticket' },
+  labels: { continue: 'Keep going as now', split: 'Split off the rest as its own ticket', 'deliver-core': 'Ship what the criteria need now', hold: 'It needs a product or legal answer first: hold', stop: 'Stop this ticket' },
   then: {
     continue: 'the next fix and review round starts; this question comes back after as many rounds again',
     split: 'the work that keeps reopening moves to a sibling attempt delivered with this one',
     'deliver-core': 'what the criteria need is fixed and shipped; the other open findings are listed as known issues or ticketed',
+    hold: 'the ticket is held until you give that answer and lift the hold; the agent can gather what you need to decide meanwhile, and nothing else is built',
     stop: 'nothing more is worked on; the attempt waits to be abandoned or reopened',
   },
 };
@@ -187,7 +193,7 @@ export function strategyHold(root, state) {
   if (!owner && !escalation) return null;
   if (owner) {
     const pending = ownerDecision(state, owner);
-    const guidance = `${owner.summary}. This is the person's decision: bring them the brief from \`wf signals --attempt ${state.id}\` (rounds, blocking findings per round, the families that keep coming back, changed files against what the plan expected, amendments) and your recommendation; write them into the question's \`--ask\` file for the next implementer or reviewer handoff, which asks it. ${pending?.approved || pending?.withdrawn ? `${pending.id} was ${pending.withdrawn ? 'withdrawn' : `answered in the person's own words, "${pending.approved.words}"`}: follow that, and the next implementer or reviewer handoff asks the question again with its choices. ` : ''}${pending && !pending.approved && !pending.withdrawn ? `They answer ${pending.id}: ${approveHint(state, pending)}` : 'The next implementer or reviewer handoff (with `--ask <file>`) opens the decision they answer with `wf approve`'} (continue: another ${(cfg?.strategy ?? STRATEGY_DEFAULTS).reviewRoundsEscalate} rounds before asking again | split: unstarted work, observations and discovered issues move to a sibling attempt of the batch (\`wf split\`); code already built stays | deliver-core: what the criteria need and what blocks stays, every other finding and discovered issue may be ticketed under this decision | stop: a hold). No implementer or reviewer starts until they decide.`;
+    const guidance = `${owner.summary}. This is the person's decision: bring them the brief from \`wf signals --attempt ${state.id}\` (rounds, blocking findings per round, the families that keep coming back, changed files against what the plan expected, amendments) and your recommendation; write them into the question's \`--ask\` file for the next implementer or reviewer handoff, which asks it. ${pending?.approved || pending?.withdrawn ? `${pending.id} was ${pending.withdrawn ? 'withdrawn' : `answered in the person's own words, "${pending.approved.words}"`}: follow that, and the next implementer or reviewer handoff asks the question again with its choices. ` : ''}${pending && !pending.approved && !pending.withdrawn ? `They answer ${pending.id}: ${approveHint(state, pending)}` : 'The next implementer or reviewer handoff (with `--ask <file>`) opens the decision they answer with `wf approve`'} (continue: another ${(cfg?.strategy ?? STRATEGY_DEFAULTS).reviewRoundsEscalate} rounds before asking again | split: unstarted work, observations and discovered issues move to a sibling attempt of the batch (\`wf split\`); code already built stays | deliver-core: what the criteria need and what blocks stays, every other finding and discovered issue may be ticketed under this decision | hold: it needs a product or legal answer first, so the ticket is held until the person gives it | stop: a hold). No implementer or reviewer starts until they decide.`;
     return { owner, ownerPending: pending, escalation, guidance: `${guidance}${waitingNote(state, escalation)}` };
   }
   return { owner: null, ownerPending: null, escalation, guidance: escalationGuidance(state, escalation) };
@@ -223,12 +229,14 @@ function recordEscalation(root, state, f) {
   append(root, state.id, 'strategy.tripwire', { tripwire: f.id, key: f.key, summary: f.summary }, null);
 }
 
-// The owner answered the escalation with `stop`: the attempt is held in his words, once per decision.
+// The owner answered the escalation with `stop`, or with `hold` (a product or legal answer is needed first): the attempt is held
+// in his words, once per decision.
 function stopChosen(root, state) {
-  const stopped = (state.decisions ?? []).find((d) => d.kind === 'escalation' && String(d.key).startsWith('tripwire:') && d.approved?.choice === 'stop' && !(state.holds ?? []).some((h) => h.decision === d.id));
+  const stopped = (state.decisions ?? []).find((d) => d.kind === 'escalation' && String(d.key).startsWith('tripwire:') && ['stop', 'hold'].includes(d.approved?.choice) && !(state.holds ?? []).some((h) => h.decision === d.id));
   if (!stopped) return;
-  append(root, state.id, 'hold', { reason: `the owner chose stop at the escalation ${stopped.id} (${stopped.summary})`, decision: stopped.id }, null);
-  throw refuse(`not handed: the owner chose stop at ${stopped.id}; ${state.id} is on hold`, 'only the owner lifts it (`wf release`, confirmed with `wf approve`)', { id: 'strategy:owner-stop' });
+  const hold = stopped.approved.choice === 'hold';
+  append(root, state.id, 'hold', { reason: hold ? `the person needs to give a product or legal answer first (escalation ${stopped.id}: ${stopped.summary})` : `the owner chose stop at the escalation ${stopped.id} (${stopped.summary})`, decision: stopped.id }, null);
+  throw refuse(hold ? `not handed: the person chose to hold ${state.id} at ${stopped.id} until they give a product or legal answer` : `not handed: the owner chose stop at ${stopped.id}; ${state.id} is on hold`, hold ? 'gather what they need to decide (read-only), bring it to them, and wait: only they lift the hold (`wf release`, confirmed with `wf approve`)' : 'only the owner lifts it (`wf release`, confirmed with `wf approve`)', { id: 'strategy:owner-stop' });
 }
 
 // `wf handoff implementer|reviewer`: refused while the person's escalation or a strategist's escalation stands.
@@ -249,7 +257,7 @@ export function requireOwnerDecision(root, state, role, options = {}) {
       const ask = readAsk(options);
       const problems = askProblems(ask, { choices: OWNER_CHOICES, labels: OWNER_WORDS.labels });
       if (problems.length) throw askFirst(`how ${state.id} goes on after ${hold.owner.summary}${wordsOf(answeredInWords)}`, frame, OWNER_CHOICES, problems, `${hold.owner.summary}; \`wf signals --attempt ${state.id}\` has the numbers: rounds, blocking findings per round, the families that keep coming back, changed files against the plan, amendments`);
-      d = createDecision(root, state, { kind: 'escalation', key: ownerDecisionKey(hold.owner), choices: OWNER_CHOICES, summary: `${hold.owner.summary}: continue | split | deliver-core | stop`, ...composeAsk(ask, frame, OWNER_CHOICES) });
+      d = createDecision(root, state, { kind: 'escalation', key: ownerDecisionKey(hold.owner), choices: OWNER_CHOICES, summary: `${hold.owner.summary}: continue | split | deliver-core | hold | stop`, ...composeAsk(ask, frame, OWNER_CHOICES) });
     }
     throw refuse(`not handed: ${hold.owner.summary} (${d.id}); no ${role} starts until the owner decides${wordsOf(answeredInWords)}`, approveHint(state, d), { id: 'strategy:owner-escalation' });
   }
@@ -363,6 +371,10 @@ export function strategistHandoff(root, state, options) {
     planFiles: state.plan ? planPaths(state.plan, scopeFiles(state)) : [],
     // Why the owner agent handed you: what it saw diverge from what was predicted (null when it said nothing).
     handedBecause,
+    // 0.7.28 (I-210): what the engine saw that no strategist has answered (engine/course.mjs): why it made you the next step.
+    courseSignals: unanswered(state, courseSignals(state, signals)).map(({ id, line }) => ({ id, line })),
+    // 0.7.28 (I-207): what does not block and is still open, for one planned pass (`consolidate`).
+    outstanding: outstanding(state),
     // Without the roles' shell commands (`sessions[].shell`): the bundle is kept as evidence.
     signals: { ...signals, sessions: (signals.sessions ?? []).map(({ shell, ...rest }) => rest) },
     // The comparison the owner agent made, as `wf resume` shows it: the plan's expectation, each implementer's and reviewer's
@@ -405,8 +417,9 @@ export function strategistHandoff(root, state, options) {
       question: 'action escalate: in plain words, for someone with no other context, what the person decides and why it is theirs',
       options: 'action escalate: 2 or 3 of { "label": "<plain words>", "then": "<what happens next>", "settles": [{ "ref": "<open finding or discovered id this option decides>", "what": "<what it is, one plain line>" }] (optional: each is shown to the person and not asked again) }',
       recommend: 'action escalate: { "label": "<one of the labels>", "why": "<one line>" }, or { "label": null, "why": "<what it depends on>" }',
+      expect: 'optional, any action: { files: <the whole change>, rounds: <from now>, minutes: <from now> }: the expectation the course is compared with from now on (`continue` with a new expectation; a consolidation states the pass it plans)',
     },
-    instructions: `You are the strategist. The owner agent handed you because the course diverged from what was predicted (\`handedBecause\` says what it saw). Read \`course\` (the expectations beside what happened), the signals and the earlier decisions; choose one action; give a prediction the engine can check. Contraction is allowed and expected when work keeps growing. A finding that blocks is never waived here (that is the owner's \`wf approve\`), and nothing the change caused leaves the delivery batch without the owner's approval. Write the closure file named in \`strategyClosureFile\`, then run \`wf strategy record --closure <that file> --attempt ${state.id}\`.${streak >= 2 ? ' Two of your earlier predictions were missed: the only action the engine accepts now is `escalate`.' : ''}`,
+    instructions: `You are the strategist. You were handed because the course diverged from what was predicted: \`courseSignals\` is what the engine saw that no strategist has answered (files past twice the plan, rounds past it, criteria amended upward, a cause that keeps coming back, a fix whose own lines were where the next defects were found, an implementer whose expectation is far above the fix the reviewers stated, or one that asks for a re-plan), and \`handedBecause\` what the owner saw. Your decision answers those signals and drives the next step: \`consolidate\` restates all remaining work (the open findings, \`outstanding\`, unstarted work) as one planned pass with an expectation, never scope added piecemeal; \`split\` moves part of it to a sibling attempt; \`continue\` says why the numbers are explained and states the new \`expect\` the course is compared with from now on. Read \`course\` (the expectations beside what happened), the signals and the earlier decisions; choose one action; give a prediction the engine can check. Contraction is allowed and expected when work keeps growing. A finding that blocks is never waived here (that is the owner's \`wf approve\`), and nothing the change caused leaves the delivery batch without the owner's approval. Write the closure file named in \`strategyClosureFile\`, then run \`wf strategy record --closure <that file> --attempt ${state.id}\`.${streak >= 2 ? ' Two of your earlier predictions were missed: the only action the engine accepts now is `escalate`.' : ''}`,
   };
   mkdirStateDirectory(path.dirname(closureFile), { recursive: true });
   const startPrompt = startPromptFor(file);
@@ -423,7 +436,7 @@ export function strategistHandoff(root, state, options) {
 
 // ---- `wf strategy record` ----
 
-const KEYS = ['strategist', 'action', 'rationale', 'prediction', 'items', 'split', 'model', 'options', 'question', 'recommend'];
+const KEYS = ['strategist', 'action', 'rationale', 'prediction', 'items', 'split', 'model', 'options', 'question', 'recommend', 'expect'];
 const TOKEN = /^[a-z0-9][a-z0-9-]{0,39}$/;
 // An option the person reads: plain words, not an identifier.
 const plainLabel = (v) => typeof v === 'string' && v.trim().length >= 3 && v.trim().length <= 80 && !TOKEN.test(v.trim()) && !/\(recommended\)\s*$/i.test(v);
@@ -487,6 +500,8 @@ export function closureProblems(c, { rounds = 0, nowMs = Date.now(), plainEscala
       if (Date.parse(pr.by) <= nowMs) p.push('`prediction.by` is a time that has already passed');
     } else p.push('`prediction.by` must be a review round number or an ISO time');
   }
+  // 0.7.28 (I-210): a new expectation the course is compared with from now on (any action may state one).
+  p.push(...expectProblems(c.expect, PLAN_EXPECT, 'expect'));
   // Fields another action uses are ignored, not refused: the role file shows them all (second final review of 0.7.0).
   if (c.action === 'ticket' && !list(c.items)) p.push('action ticket needs `items`: the observation ids to ticket');
   if (c.action === 'split') {
@@ -613,6 +628,9 @@ export function recordStrategy(root, options) {
     handoff: h.bundle,
     handedBecause: h.reason ?? null,
     roundsAtDecision: signals.rounds.length,
+    // 0.7.28 (I-210): the course signals this decision answers (engine/course.mjs), and the expectation it states.
+    course: courseSignals(state, signals).map((x) => x.key),
+    ...(expectOf(closure.expect) ? { expect: expectOf(closure.expect) } : {}),
     signals: { rounds: signals.rounds.map((r) => ({ n: r.n, blocking: r.blocking, findings: r.findings })), roundsSinceDecrease: signals.roundsSinceDecrease, blockingOpen: signals.blockingOpen, observationsOpen: signals.observationsOpen.length, amendments: signals.amendments, changedFiles: signals.files.changed, plannedFiles: signals.files.planned, bundleBytes: signals.bundle.bytes, wallMinutes: signals.wallMinutes},
   }, actor(options));
   return { state: loadState(root, state.id), decision: loadState(root, state.id).strategy.decisions.at(-1), split: splitResult, escalation };

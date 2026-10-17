@@ -146,7 +146,27 @@ test('I-83 owner division diagnostics never enter the blind reviewer start promp
   assert.match(h.err, /workload estimate: S1 24 files\/24 changed-line cost; S2 24 files\/24 changed-line cost; integration 2 files\/2 cost/);
   assert.match(h.err, /integration causes: unmapped 1, unassigned 0, cross-scope shared 1/);
   assert.equal(h.out.trim().split('\n').length, 1);
-  assert.match(h.out, /^Read .* and follow its instructions\.\n$/);
+  // 0.7.28 (I-211): a divided review prints no reviewer prompt, only the command that starts it.
+  assert.match(h.out, /^wf handoff run --agent diagnostic --attempt \S+\n$/);
+});
+
+// 0.7.28 (I-211), named failure (field): a divided review was started as a plain reviewer with the integration bundle's prompt;
+// its scoped reviewers S1 and S2 were never created, nothing could be recorded, and the owner polled for about 80 minutes. The
+// handoff prints only the `wf handoff run` line, the integration stops at once when it finds no scoped reviewer was launched,
+// and `wf resume` says nothing is running for the group.
+test('I-211: a divided review starts only through wf handoff run: a plain start is refused at its first step and resume says nothing runs', () => {
+  const p = ready({ handoffReviewer: false });
+  const h = ok(wf(p.root, ['handoff', 'reviewer', '--agent', 'plain', '--attempt', p.id]));
+  assert.equal(h.out.trim(), `wf handoff run --agent plain --attempt ${p.id}`);
+  assert.match(h.err, /This review is divided \(2 scoped reviewers and an integration\): start it only by running the command below[\s\S]*Never start a reviewer of it from a bundle's prompt: such a reviewer records nothing/);
+  const bundle = JSON.parse(fs.readFileSync(state(p.root, p.id).handoffs.filter((x) => x.role === 'reviewer').at(-1).bundle, 'utf8'));
+  assert.match(bundle.instructions, /Integration reviewer\. Before anything else run wf review parts --attempt <attempt>: if it says the scoped reviewers were never launched, you were started outside wf handoff run/);
+  // The integration reviewer, started plainly, reads its parts first and is told to stop.
+  const parts = wf(p.root, ['review', 'parts', '--attempt', p.id]);
+  assert.equal(parts.code, 75);
+  assert.match(parts.err, /the scoped reviewers of review-\d+ \(plain-S1, plain-S2\) were never launched: this divided review was started outside `wf handoff run`/);
+  assert.match(parts.err, /a divided review starts only with `wf handoff run --agent plain --attempt /);
+  assert.match(state(p.root, p.id).next, /review group review-\d+ was never launched \([^)]*\): nothing is running for it\. A divided review starts only with `wf handoff run --agent plain/);
 });
 
 test('review selection refuses conflicting flags and invalid values before handing or advancing roles', () => {

@@ -15,6 +15,8 @@ The bundle's `intent` says what the attempt is for: `analysis` plans an investig
 - The consumers and flows the change reaches, found by queries the engine re-runs (`survey` before the design, `impact` after it), so the implementer starts from the whole picture.
 - A `contract` when repos or work items run in parallel, exact enough for each side to build against, naming the shared test helpers and fixtures both sides use; work items that edit one hub file run in sequence, or the file is split first.
 - A ticket that is several deliverables, or that sweeps many modules, planned as module batches: separate work items, or a split proposal.
+- Every place a pattern the change relies on lives, planned up front: when the change touches a pattern used in several places (a state, a label, a guard, a calculation), the survey's query finds them all and the plan names the sweep as a work item, so reviewers do not find the same cause one place per round (named failure: one cause found one place per round, three or four rounds for each of four causes).
+- A re-plan (a strategist's `consolidate`, a re-plan an implementer asked for) restates all remaining work as one pass with its own expectation; it never adds scope piecemeal.
 - Investigations resolved from the read-only sources (logs, database, cluster, tracker, the deployed app) before anything is asked.
 
 Criteria are the ticket's goals, not a list of defects: a defect found later is fixed as an observation, not added as a criterion (a criterion makes every finding that cites it a blocker).

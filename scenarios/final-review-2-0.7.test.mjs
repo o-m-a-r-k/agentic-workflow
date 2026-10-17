@@ -194,8 +194,9 @@ test('open observations are named before the gate, and what waits as a known iss
   hand(p, 'r1');
   ok(record(p, goodClosure('r1', { findings: [finding('F1', 'high', 'src/old.txt:3 export sums one page'), finding('F2', 'low', 'src/old.txt:1 a confusing label')] })));
   const next = state(p.root, p.id).next;
-  assert.match(next, /2 open observation\(s\) to place first: r1:F1/);
-  assert.match(next, /then run one `wf gate`/);
+  // 0.7.28 (I-207): they are named before the gate as one planned pass (an amendment's `pass`), then the gate.
+  assert.match(next, /2 item\(s\) that do not block are open \(r1:F1 \(high\), r1:F2 \(low\)\): they are fixed in one planned pass/);
+  assert.match(next, /then the gate: the evidence review after it verifies the pass/);
   // Only the low one may wait (with the person's answer); the high one is fixed here.
   ok(wf(p.root, ['scope', 'defer', '--finding', 'r1:F2', '--reason', 'redesign next sprint', '--attempt', p.id]));
   ok(wf(p.root, ['gate', '--attempt', p.id]));

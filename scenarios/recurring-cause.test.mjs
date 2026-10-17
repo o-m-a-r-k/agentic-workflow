@@ -72,7 +72,8 @@ test('a finding that shares its cause with a finding already marked fixed is a r
   assert.deepEqual(sig.recurringCauses.map((x) => [x.cause, x.again, x.fixed]), [['cause-1', 'r2:F1', ['r1:F1']]]);
   assert.match(ok(wf(p.root, ['signals', '--attempt', p.id])).out, line);
   const state = resume(p);
-  assert.equal(state.decision.kind, 'repair');
+  // 0.7.28 (I-210): a cause that came back is a course signal: the strategist's handoff is the next step, and it says why.
+  assert.equal(state.decision.kind, 'strategy');
   assert.match(state.decision.guidance, line, 'the next step starts with it');
   assert.match(ok(wf(p.root, ['resume', '--attempt', p.id])).out, line);
   assert.match(ok(wf(p.root, ['status', '--attempt', p.id])).out, line);
@@ -184,7 +185,7 @@ test('a finding open with the family of an earlier finding marked fixed is shown
   assert.doesNotMatch(text, /r2:F3 has the family|r1:F2 has the family/);
   assert.doesNotMatch(text, /the cause of .* came back in/, 'not claimed as a confirmed recurrence');
   for (const cmd of ['resume', 'status']) assert.match(ok(wf(p.root, [cmd, '--attempt', p.id])).out, line('r2:F1'), cmd);
-  assert.match(resume(p).decision.guidance, /^possible recurring cause: r2:F1 has the family of r1:F1/, 'the next step starts with it');
+  assert.match(resume(p).decision.guidance, /^the course needs the strategist[^\n]*r2:F1 has the family of r1:F1/, 'the next step starts with it (0.7.28, I-210: the strategist)');
   const strategist = JSON.parse(fs.readFileSync(ok(wf(p.root, ['handoff', 'strategist', '--agent', 'strat-f', '--attempt', p.id, '--reason', 'the family came back', '--json'])).json().bundle, 'utf8'));
   assert.ok(strategist.course.some((l) => line('r2:F1').test(l)), 'the strategist reads the same course');
   // The next fix round's history marks the possible shared cause, apart from a confirmed `cause`.

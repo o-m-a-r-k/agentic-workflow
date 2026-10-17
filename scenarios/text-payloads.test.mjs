@@ -111,14 +111,14 @@ test('the strategist\'s example closure is recorded by `wf strategy record`, the
 
   // Each action's own keys, merged over the example (one JSON object per line in the text).
   const lines = payload('strategistActions').split('\n').filter((l) => l.trim());
-  assert.ok(lines.length >= 5, 'the text lists the keys of cluster, ticket, split, model and escalate');
+  assert.ok(lines.length >= 6, 'the text lists the keys of continue (its new expectation, 0.7.28), cluster, ticket, split, model and escalate');
   const actions = [];
   for (const line of lines) {
     const extra = JSON.parse(fill(line));
     actions.push(extra.action);
     assert.deepEqual(closureProblems({ ...closure, ...extra }, { rounds: 0, plainEscalation: true }), [], `the ${extra.action} keys in the text are refused by the engine`);
   }
-  assert.deepEqual(actions, ['cluster', 'ticket', 'split', 'model', 'escalate']);
+  assert.deepEqual(actions, ['continue', 'cluster', 'ticket', 'split', 'model', 'escalate']);
 
   // The check is not vacuous: an action without the key it needs, or a prediction naming a round already recorded, is refused.
   for (const bad of [
@@ -127,6 +127,7 @@ test('the strategist\'s example closure is recorded by `wf strategy record`, the
     { ...closure, action: 'model', model: { role: 'reviewer' } },
     { ...closure, action: 'escalate', options: ['only-one'] },
     { ...closure, prediction: { ...closure.prediction, by: 0 } },
+    { ...closure, action: 'continue', expect: { files: 'many' } },
   ]) assert.ok(closureProblems(bad, { rounds: 0, plainEscalation: true }).length >= 1, `${bad.action} closure ${JSON.stringify(bad).slice(0, 80)} should be refused`);
 
   // The closure the strategy page shows is accepted too.

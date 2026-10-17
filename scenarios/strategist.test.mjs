@@ -41,9 +41,11 @@ test('the owner agent hands the strategist when the course diverges; nothing was
   const resume = ok(v7.run(root, ['resume', '--attempt', a.id])).out;
   assert.match(resume, /files changed: 40; the plan expected 2 \(past its own estimate\)/);
   assert.match(resume, /review rounds recorded: 4; the plan expected 2 \(past its own estimate\)/);
-  // ... and the line the owner agent acts on starts with the comparison, as a prompt to judge the course, not a refusal.
-  assert.match(resume, /next: past its own estimate: files changed 40 \(the plan expected 2\); review rounds 4 \(the plan expected 2\)\. Judge the course before the next step: continue, re-plan[^\n]*wf handoff strategist/);
-  assert.notEqual(v7.state(root, a.id).decision.kind, 'strategy', 'no strategist is summoned by the engine');
+  // ... and the line the owner agent acts on is the strategist's handoff (0.7.28, I-210: the owner judged "converging" six times in
+  // a ticket that handed no strategist in 47 rounds), with no "continue" offered beside it; still nothing is refused.
+  assert.match(resume, /next: the course needs the strategist \(the engine's next step, not a judgement call\): 40 files changed, more than twice the 2 the plan expected; 4 review rounds handed, past the 2 the plan expected/);
+  assert.doesNotMatch(resume, /next: past its own estimate/);
+  assert.equal(v7.state(root, a.id).decision.kind, 'strategy', 'the strategist is the next step the engine names');
   // The strategist may not be one of the attempt's implementers; a reason is text.
   const implementer = v7.state(root, a.id).roles.implementer[0];
   const asImplementer = v7.run(root, ['handoff', 'strategist', '--agent', implementer, '--attempt', a.id]);
@@ -60,7 +62,8 @@ test('the owner agent hands the strategist when the course diverges; nothing was
   assert.ok(!('tripwires' in bundle), 'there are no engine tripwires to answer');
   assert.deepEqual(bundle.predictions, { missedInARow: 0, escalateRequired: false });
   assert.ok(bundle.course.includes('files changed: 40; the plan expected 2 (past its own estimate)'));
-  assert.match(bundle.instructions, /handed you because the course diverged from what was predicted/);
+  assert.match(bundle.instructions, /handed because the course diverged from what was predicted/);
+  assert.deepEqual(bundle.courseSignals.map((x) => x.id), ['files', 'rounds']);
   assert.equal(bundle.signals.rounds.length, 4);
   assert.deepEqual(Object.keys(bundle.blocking.byFamily), ['(none)']);
   assert.deepEqual(bundle.earlierDecisions, []);
@@ -289,7 +292,7 @@ test('ten review rounds are the owner\'s decision: continue gives another ten, s
   const refused = v7.run(root, ['handoff', 'reviewer', '--agent', 'rev-x', '--attempt', a.id, '--owner', a.owner], { ownerSilent: true });
   assert.equal(refused.code, 75);
   assert.match(refused.err, /2 review rounds handed; the owner decides how to continue \(A1\); no reviewer starts until the owner decides/);
-  assert.match(ok(v7.run(root, ['decisions', '--attempt', a.id])).out, /A1 {2}escalation {2}pending \(continue \| split \| deliver-core \| stop\)/);
+  assert.match(ok(v7.run(root, ['decisions', '--attempt', a.id])).out, /A1 {2}escalation {2}pending \(continue \| split \| deliver-core \| hold \| stop\)/);
   const { approveInTerminal } = await import('../engine/approve.mjs');
   const answer = (id, choice) => inProcess(root, async () => {
     const input = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => {} });

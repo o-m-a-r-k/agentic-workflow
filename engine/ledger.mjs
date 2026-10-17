@@ -299,6 +299,10 @@ export function reduce(entries) {
       case 'scope.deferred':
         s.scopeDecisions.push({ ...d, at: e.at });
         break;
+      // 0.7.28 (I-207): the person's "fix all", recorded once (engine/cli.mjs `wf scope fix-all`).
+      case 'scope.fixAll':
+        s.fixAll ??= { words: d.words, at: e.at, by: e.actor };
+        break;
       case 'criteria.amended':
         s.criteria = d.criteria;
         if (d.work) s.work = d.work;
@@ -431,7 +435,7 @@ export function reduce(entries) {
         s.implementers.push({ handoff: d.handoff, agent: d.agent, work: d.work ?? null, heads: d.heads ?? null, openedAt: e.at, closedAt: null, outcome: null });
         break;
       case 'implementer.report':
-        (s.implementerReports ??= []).push({ handoff: d.handoff, agent: d.agent, at: e.at, summary: d.summary, approach: d.approach, expect: expectOf(d.expect), ran: d.ran, proofs: d.proofs, left: d.left });
+        (s.implementerReports ??= []).push({ handoff: d.handoff, agent: d.agent, at: e.at, summary: d.summary, approach: d.approach, expect: expectOf(d.expect), ran: d.ran, proofs: d.proofs, left: d.left, ...(d.replan ? { replan: d.replan } : {}) });
         break;
       case 'implementer.closed': {
         const x = s.implementers.filter((y) => y.agent === d.agent && !y.closedAt).at(-1);
@@ -634,7 +638,12 @@ export function reduce(entries) {
       // The strategist's recorded decision (engine/strategy.mjs): the action, its prediction and why it was handed.
       case 'strategy.decided': {
         const id = d.id ?? `S${s.strategy.decisions.length + 1}`;
-        s.strategy.decisions.push({ id, at: e.at, by: e.actor, action: d.action, rationale: d.rationale, prediction: d.prediction ?? null, items: d.items ?? [], split: d.split ?? null, model: d.model ?? null, strategist: d.strategist ?? null, handoff: d.handoff ?? null, handedBecause: d.handedBecause ?? null, escalation: d.escalation ?? null, roundsAtDecision: d.roundsAtDecision ?? null, signals: d.signals ?? null });
+        s.strategy.decisions.push({ id, at: e.at, by: e.actor, action: d.action, rationale: d.rationale, prediction: d.prediction ?? null, items: d.items ?? [], split: d.split ?? null, model: d.model ?? null, strategist: d.strategist ?? null, handoff: d.handoff ?? null, handedBecause: d.handedBecause ?? null, escalation: d.escalation ?? null, roundsAtDecision: d.roundsAtDecision ?? null, signals: d.signals ?? null, ...(d.course ? { course: d.course } : {}), ...(d.expect ? { expect: d.expect } : {}) });
+        // 0.7.28 (I-210): a strategist's own expectation (continue with a new expectation) is what the course is compared with next.
+        if (expectOf(d.expect)) {
+          s.expect = { ...(s.expect ?? {}), ...expectOf(d.expect) };
+          s.expectations.push({ at: e.at, source: 'strategy', amendment: null, decision: id, reason: d.rationale ?? null, expect: expectOf(d.expect) });
+        }
         for (const o of d.outcomes ?? []) s.strategy.outcomes[o.decision] = { status: o.status, observed: o.observed ?? null, at: e.at };
         if (d.action === 'delta-review') s.strategy.nextRound = 'delta';
         // A model decision: the next handoffs of that role run at the class it names (engine/models.mjs).
