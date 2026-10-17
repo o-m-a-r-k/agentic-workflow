@@ -14,6 +14,7 @@
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { cliEnv } from '../../engine/scrub.mjs';
+import { statusNames } from '../../engine/status-route.mjs';
 
 const TYPES = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif' };
 const numberOf = (item) => {
@@ -87,7 +88,8 @@ async function perform(via, { token, url, item, actions, cfg }) {
   const call = transport(via, { token, url, cfg });
   const repo = repoOf(cfg);
   const n = numberOf(item);
-  const statuses = Object.values(cfg.tracker.statuses ?? {}).filter(Boolean);
+  // Every status name a label can stand for, the routed ones too (0.7.27, I-190): setting one removes the others.
+  const statuses = statusNames(cfg.tracker);
   const tag = String(cfg.tracker.releaseTag ?? 'wf-attachments');
   const prefix = `${item}--`;
   let release = null;
@@ -171,6 +173,7 @@ export default {
       status: labels.find((l) => statuses.includes(l)) ?? (issue.state === 'closed' ? 'closed' : null),
       url: issue.html_url ?? null,
       updatedAt: issue.updated_at ?? null,
+      labels,
       comments: (raw?.comments ?? []).map((c) => ({ id: c.id, body: c.body ?? '', createdAt: c.created_at, updatedAt: c.updated_at ?? c.created_at })),
       attachments: (raw?.assets ?? []).map((a) => ({ id: a.id, title: String(a.name).startsWith(prefix) ? String(a.name).slice(prefix.length) : a.name, subtitle: a.label || null, filename: a.name, url: a.browser_download_url, size: a.size })),
     };

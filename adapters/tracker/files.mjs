@@ -173,6 +173,8 @@ export default {
       status: issue.status ?? null,
       url: issue.url ?? null,
       updatedAt: null,
+      // The ticket's labels (0.7.27, I-190: the project may route a status by them); absent when the readback has none to give.
+      ...(Array.isArray(issue.labels) ? { labels: issue.labels.map(String) } : {}),
       comments: (issue.comments ?? []).map((c) => ({ id: c.id, body: c.body ?? '', createdAt: c.createdAt, updatedAt: c.updatedAt ?? c.createdAt })),
       attachments: (issue.attachments ?? []).map((a) => ({ id: a.id, title: a.title, subtitle: a.subtitle ?? null, filename: a.title, url: a.url, sha256: a.sha256 ?? null, stored: a.stored })),
     };

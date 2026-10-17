@@ -141,6 +141,14 @@ export const FRAMES = {
     labels: { yes: `Count it as ${to}`, no: `Keep it ${from}` },
     then: { yes: `it counts as ${to}: ${toRule}`, no: `it stays ${from} and is fixed in this delivery` },
   }),
+  // 0.7.27 (I-188): a discovered issue the owner says is not a defect at all. "Yes" keeps the product as it works now.
+  notDefect: ({ item, rated, directed }) => ({
+    aliases: { yes: ['keep it', 'keep it as it is', 'not a problem', 'it is not a problem'], no: ['fix it', 'fix the problem', 'it is a problem'] },
+    facts: [rated, directed ? `You told us: "${directed}".` : ''].filter(Boolean).join(' '),
+    question: `Should ${item} keep working as it does now, because the problem reported in it is not one?`,
+    labels: { yes: 'Yes, keep it as it is', no: 'No, fix the problem' },
+    then: { yes: 'the report is closed as not a problem and nothing is changed for it; the delivery note does not list it, and the report and why it is not a problem stay in the record', no: 'it stays open and is fixed in this delivery (a fix, a short review and the tests) before it ships' },
+  }),
   gateOrder: ({ item, owes = {} }) => ({
     aliases: { yes: ['run the tests', 'run them', 'run it'], no: ['keep the order', 'wait'] },
     question: `Should ${item}'s full test run start now, ${[owes.uncovered ? 'before a code review has looked at the latest code' : '', owes.open?.length ? `while the last code review still has ${owes.open.length === 1 ? 'a problem' : `${owes.open.length} problems`} open` : '', owes.unverified?.length ? `before a reviewer has confirmed ${owes.unverified.length === 1 ? 'an earlier problem is' : `${owes.unverified.length} earlier problems are`} fixed` : '', owes.validationPending ? 'before a code review has checked a newly added test step' : ''].filter(Boolean).join(', and ') || 'before the step that normally comes first'}?`,

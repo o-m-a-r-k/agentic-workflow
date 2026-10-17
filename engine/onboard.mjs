@@ -845,7 +845,7 @@ export async function doctor(root, { runSteps = true, runtime = detectOwner()?.r
   for (const c of cfg.requires.connectors ?? []) report.connectors.push({ ok: true, connector: c.name, note: `not checkable from the CLI: the agent confirms ${c.name} with one read-only call` });
   // How wf talks to the tracker: api (verifiable readback) or the agent's connector (agent-reported readback).
   for (const t of await trackerModeChecks(root, cfg, { loadCatalog, readSecret })) {
-    if (t.info) report.connectors.push({ ok: true, connector: t.check, note: `verifiable: ${t.problem}` });
+    if (t.info) report.connectors.push({ ok: true, connector: t.check, note: t.plain ? t.problem : `verifiable: ${t.problem}` });
     else if (t.fail) bad('secrets', { key: t.key, problem: t.problem, fix: t.fix });
     else report.warnings.push({ ok: true, warn: true, check: t.check, problem: t.problem, fix: t.fix });
   }

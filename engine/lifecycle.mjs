@@ -10,7 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { actor, addRepoWorktree, baseRef, branchName, onTarget, changedFiles, cleanupWorktrees, entry, missingWorktrees, openState, treeHashes, worktreeDir } from './attempt.mjs';
-import { channelOf, discoveredVerdicts, headsNow, openDiscovered, seamVerdicts, unacknowledged, reportsForReview, reportedIssueVerdicts } from './discovered.mjs';
+import { channelOf, discoveredVerdicts, headsNow, nonissueVerdicts, openDiscovered, seamVerdicts, unacknowledged, reportsForReview, reportedIssueVerdicts } from './discovered.mjs';
 import { executionSettings, rejectModelOverrides } from './models.mjs';
 import { rerunsOnlyFailed, sessionRules } from './onboard.mjs';
 import { policyOf, RULE, RULE_SHORT } from './leaving.mjs';
@@ -28,7 +28,7 @@ import { canonical as canonicalPath, isInside, touchesEvidence } from './paths.m
 import { changedForStep, deliveryOrder, impact, inside, packageOf } from './topology.mjs';
 import { findSkill } from './skills.mjs';
 import { outsidePlan, outsideVerdicts, scopeFiles } from './scope.mjs';
-import { commentFile, emitTrackerEvent, hasTicket, needsSummary, ownItem, recordSummary, writeDeliveredComment } from './tracker.mjs';
+import { commentFile, emitTrackerEvent, hasTicket, loadTrackerAdapter, needsSummary, ownItem, recordSummary, screenshotMode, writeDeliveredComment } from './tracker.mjs';
 import { designChecks, designVerdicts, requiredSkills, reviewDocumentProblems, reviewRules, ruleVerdicts, skillFiles, writeRuleDocuments } from './rules.mjs';
 import { expectOf, expectProblems, PLAN_EXPECT, ROLE_EXPECT } from './expectations.mjs';
 import { obligationSince } from './versions.mjs';
@@ -993,6 +993,8 @@ export function handoff(root, role, options) {
     }[role],
   };
   if (role === 'reviewer' && bundle.historicalReports?.length) bundle.instructions += ' Historical reports are observations from earlier implementations, not proof of current unresolved work. Judge each historicalReports entry on the current tree and add reportedIssues: [{ id, verdict: fixed|verified-nonissue|open, evidence, fixedIn, repo, rationale, finding }]. A fixed verdict names a fix commit of this attempt; verified-nonissue gives a purpose-based rationale; open names an open finding. Missing verdicts refuse the closure, and open findings block the full gate and delivery.';
+  // 0.7.27 (I-188): a discovered issue the reviewer finds not to be a defect is closed by its verdict, with the evidence and rationale.
+  if (role === 'reviewer' && (bundle.discovered ?? []).some((d) => d.status === 'open' || d.notADefectSinceReview)) bundle.instructions += ' A discovered issue you judge not to be a defect at all (the code does what the product intends, or the claim misread it) is settled by your verdict, which closes it: `discovered: [{ "id": "D3", "verdict": "verified-nonissue", "evidence": "<file:line you checked>", "rationale": "<why it is not a defect, in terms of what the product is for>" }]`; the claim stays in the record beside your reason. One marked `notADefectSinceReview` was closed that way on the word of the person or the owner: raise a finding if the claim holds after all.';
   if (role === 'reviewer' && bundle.impactMap) bundle.instructions += ' Impact discovery under impactMap.derived is textual, not structurally resolved consumer analysis, and bounded (its `incomplete` and `symbolsTruncated` say how far it got): a hit is a lead to judge against the real imports and behaviour, and a missing hit is no proof of coverage.';
   if (role === 'reviewer') {
     const problems = reviewDocumentProblems(bundle, ruleDocs);
@@ -1547,6 +1549,10 @@ export function recordReview(root, options) {
   const hv = reportedIssueVerdicts(handed.historicalReports ?? [], closure, state);
   if (hv.problems.length && partial) unfinished.push(`verdicts on ${hv.problems.length} historical report observation(s)`);
   else if (hv.problems.length) throw refuse('closure refused: historical report observations have no valid verdict:\n  - ' + hv.problems.join('\n  - '), 'add reportedIssues: [{ id, verdict: fixed|verified-nonissue|open, evidence, fixedIn, repo, rationale, finding }]; judge the current code, never edit the old transcript');
+  // 0.7.27 (I-188): a verdict that a discovered issue is not a defect closes it, so it carries its evidence and rationale.
+  const nv = nonissueVerdicts(handed, closure, state);
+  if (nv.problems.length && partial) unfinished.push(`verdicts that ${nv.problems.length} discovered issue(s) are not defects`);
+  else if (nv.problems.length) throw refuse('closure refused: a verdict that a discovered issue is not a defect is incomplete:\n  - ' + nv.problems.join('\n  - '), 'give `discovered: [{ "id": "D3", "verdict": "verified-nonissue", "evidence": "<file:line you checked>", "rationale": "<why it is not a defect, in terms of what the product is for>" }]` for an issue of your bundle that is still open, or leave the verdict out, and run `wf review --closure <file>` again', { id: 'review:discovered-nonissue' });
   const av = reviewAnomalies(handed.gate, closure);
   if (av.length && partial) unfinished.push(`the anomalies in the screenshots (${av.length})`);
   else if (av.length) throw refuse(`closure refused: the anomalies seen in the screenshots are not accounted for:\n  - ${av.join('\n  - ')}`, `add \`anomalies\` to the closure: "none seen" after comparing the captures, or [{ "screenshots": ["<sha256>"], "observation": "<what differs>", "cause": "<the cause you found>", "evidence": "<file:line or data you checked>" }] or, when it is a defect (a value no test pins included), { ..., "finding": "<your finding id>" }; then \`wf review --closure <file>\` again`);
@@ -1612,6 +1618,11 @@ export function recordReview(root, options) {
     if (!shown || shown.commit !== d.claim.commit) continue;
     const v = (Array.isArray(closure.discovered) ? closure.discovered : []).find((x) => x?.id === d.id);
     if (v?.verdict === 'fixed' && String(v.evidence ?? '').trim()) append(root, state.id, 'discovered.closed', { id: d.id, outcome: 'fixed', repo: d.claim.repo, commit: d.claim.commit, evidence: String(v.evidence).trim(), beforeRecord: true, verifiedBy: { reviewer: closure.reviewer ?? null, round, evidence: String(v.evidence).trim(), ...(options.partial ? { partial: true } : {}) } }, null);
+  }
+  // 0.7.27 (I-188): the issues this reviewer found not to be defects close on its verdict (an issue closed meanwhile stays as it is).
+  for (const v of nv.verdicts) {
+    if (loadState(root, state.id).discovered.find((d) => d.id === v.id)?.status !== 'open') continue;
+    append(root, state.id, 'discovered.closed', { id: v.id, outcome: 'not-a-defect', reason: v.rationale, evidence: v.evidence, source: { provenance: 'reviewer-verdict', reviewer: closure.reviewer ?? null, round, ...(options.partial ? { partial: true } : {}) } }, null);
   }
   const after = loadState(root, state.id);
   const toVerify = delta ? [] : unverifiedPrior(after, after.review);
@@ -2103,7 +2114,7 @@ export async function deliver(root, options) {
       if (reports.current.length || reports.historical.some((r) => !judged.has(r.id) || judged.get(r.id).verdict === 'open') || hv.problems.length) throw refuse('not delivered: current or historical implementation reports need resolution and a fresh review on ' + x.id);
     }
     const open = openDiscovered(x);
-    if (open.length) throw refuse(`not delivered: ${open.length} discovered issue(s) are open${x.id !== state.id ? ` in ${x.id}` : ''}: ${open.map((d) => `${d.id} ${d.summary}${d.claim ? ` (its fix ${d.claim.repo}@${String(d.claim.commit).slice(0, 10)} predates its record and waits for a reviewer's verification: hand a reviewer; its \`fixed\` closes it)` : ''}`).join('; ')}`, `fix it in this ticket and close it with the fix commit (\`wf discovered close <id> --fixed <commit>\`; a fix after acceptance needs the gate and a fresh review); ${RULE_SHORT}`);
+    if (open.length) throw refuse(`not delivered: ${open.length} discovered issue(s) are open${x.id !== state.id ? ` in ${x.id}` : ''}: ${open.map((d) => `${d.id} ${d.summary}${d.claim ? ` (its fix ${d.claim.repo}@${String(d.claim.commit).slice(0, 10)} predates its record and waits for a reviewer's verification: hand a reviewer; its \`fixed\` closes it)` : ''}`).join('; ')}`, `fix it in this ticket and close it with the fix commit (\`wf discovered close <id> --fixed <commit>\`; a fix after acceptance needs the gate and a fresh review); one that is not a defect at all is closed by an independent reviewer's \`verified-nonissue\` verdict, or by the person's decision (\`wf discovered close <id> --not-a-defect --reason "<why>"\`); ${RULE_SHORT}`);
     // Named failure (0.7.0): a finding that does not block (D2) must not simply stay open past delivery. It ends fixed and
     // verified by a round, ticketed, or moved to a sibling attempt; the strategist schedules it.
     const obs = observations(x);
@@ -2268,11 +2279,14 @@ export async function deliver(root, options) {
   }
   append(root, state.id, 'delivered', { order }, actor(options));
   state = loadState(root, state.id);
-  finishDelivered(root, cfg, state);
+  // 0.7.27 (I-189): how the tracker adapter shows screenshots (embedded in the comment, or attached to the ticket) is queued with the comment.
+  const shotsOf = async (s) => (cfg.tracker.kind === 'none' ? 'embedded' : screenshotMode(await loadTrackerAdapter(root, cfg, s).catch(() => null)));
+  finishDelivered(root, cfg, state, await shotsOf(state));
   if (state.batch) {
     for (const member of state.batch.members) {
       append(root, member, 'batch.member.delivered', { batch: state.id }, actor(options));
-      finishDelivered(root, cfg, loadState(root, member));
+      const m = loadState(root, member);
+      finishDelivered(root, cfg, m, await shotsOf(m));
     }
   }
   return { state: loadState(root, state.id) };
@@ -2467,7 +2481,7 @@ export function safeWrite(root, file, content) {
 }
 export const safeWriteJson = (root, file, value) => safeWrite(root, file, `${JSON.stringify(value, null, 2)}\n`);
 
-function finishDelivered(root, cfg, state) {
+function finishDelivered(root, cfg, state, screenshotsMode = 'embedded') {
   noteCourse(root, cfg, state);
   if (state.lane !== 'batch') {
     const set = deliveredSet(root, state);
@@ -2479,7 +2493,7 @@ function finishDelivered(root, cfg, state) {
     state = loadState(root, state.id);
   }
   const set = state.delivery.screenshots?.screenshots ?? [];
-  const actions = !hasTicket(state) ? [] : emitTrackerEvent(root, cfg, state.id, 'delivered', { screenshots: set });
+  const actions = !hasTicket(state) ? [] : emitTrackerEvent(root, cfg, state.id, 'delivered', { screenshots: set, screenshotsMode });
   if (actions.some((a) => a.rendered === 'delivered')) writeDeliveredComment(root, cfg, loadState(root, state.id));
   if (!actions.length && !needsShown(state) && !owesLesson(loadState(root, state.id))) {
     append(root, state.id, 'closed', { reason: cfg.tracker.kind === 'none' ? 'no tracker' : !hasTicket(state) ? 'no ticket: no tracker handoff' : 'no tracker actions configured' }, null);
@@ -3198,11 +3212,11 @@ function nextStep(root, state) {
   }
   if (state.tracker.pending.length) {
     const ev = state.tracker.pending[0].event;
-    const comment = (a) => (a.rendered !== 'delivered' ? 'post the comment (body in `wf status --json`)' : state.delivery.summary ? `post the comment in ${commentFile(root, state.id)} unchanged, each {assetUrl:<title>} replaced by that upload's assetUrl, so every screenshot shows as an image on the ticket (an attachment alone is only a link row)` : 'record the owner\'s summary (`wf summary --file <summary.md>`), then post the comment it renders');
-    const ops = state.tracker.pending.filter((a) => a.event === ev).map((a) => (a.op === 'setStatus' ? `set status to "${a.status}"` : a.op === 'comment' ? comment(a) : a.op === 'attach' ? `upload and attach ${a.files.length} screenshot(s) as files (title = the name, subtitle = its caption; listed under "delivered screenshots"), keeping each assetUrl` : a.op)).join(', ');
+    const comment = (a) => (a.rendered !== 'delivered' ? 'post the comment (body in `wf status --json`)' : state.delivery.summary ? (a.screenshots ? `post the comment in ${commentFile(root, state.id)} unchanged${a.screenshots === 'attachments' ? ' (it lists each screenshot with its caption)' : ''}: this tracker's adapter shows the screenshots as attachments, so they are attached to the ticket as files, not embedded in the comment` : `post the comment in ${commentFile(root, state.id)} unchanged, each {assetUrl:<title>} replaced by that upload's assetUrl, so every screenshot shows as an image on the ticket (an attachment alone is only a link row)`) : 'record the owner\'s summary (`wf summary --file <summary.md>`), then post the comment it renders');
+    const ops = state.tracker.pending.filter((a) => a.event === ev).map((a) => (a.op === 'setStatus' ? `set status to "${a.status}"${a.route ? ` (the ticket's label "${a.route.label}" routes it there instead of "${a.route.default}"; the project chose that in its adapter)` : ''}` : a.op === 'comment' ? comment(a) : a.op === 'attach' ? `upload and attach ${a.files.length} screenshot(s) as files (title = the name, subtitle = its caption; listed under "delivered screenshots"), keeping each assetUrl` : a.op)).join(', ');
     const raw = ev === 'delivered' ? 'save the RAW get_issue and list_comments results unchanged (never rebuilt or abridged)' : 'save the readback';
     if (cfg?.tracker?.via === 'connector') return `${state.phase === 'handoff-pending' ? '' : `${phaseAction(root, cfg, state)}${holdNote}. Pending `}tracker (${ev}): through the connector: ${ops}; then read the issue${state.tracker.pending.some((a) => a.event === ev && a.op === 'comment') ? ' and its comments' : ''} back with the connector and run \`wf tracker record --event ${ev} --from-transcript\` (the readback as the host recorded it). Without a host transcript: \`--capture <saved tool result>\`, or \`--agent-reported --file reported.json${state.tracker.pending.some((a) => a.event === ev && a.op === 'comment') ? ' --comment-file <posted text>' : ''}\``;
-    const reported = cfg?.tracker?.via === 'connector' ? `; or, when the tool results are only in the chat, write what the tracker showed to reported.json ({ issue, status, comment: { id, bodySha256, createdAt }, attachments: [{ title, subtitle, assetUrl }], readAt }) and run \`wf tracker record --event ${ev} --agent-reported --file reported.json${state.tracker.pending.some((a) => a.event === ev && a.op === 'comment') ? ' --comment-file <the posted comment text>' : ''}\` (recorded agent-reported, unverified)` : '';
+    const reported = cfg?.tracker?.via === 'connector' ? `; or, when the tool results are only in the chat, write what the tracker showed to reported.json ({ issue, status, labels (when the project routes a status by them), comment: { id, bodySha256, createdAt }, attachments: [{ title, subtitle, assetUrl }], readAt }) and run \`wf tracker record --event ${ev} --agent-reported --file reported.json${state.tracker.pending.some((a) => a.event === ev && a.op === 'comment') ? ' --comment-file <the posted comment text>' : ''}\` (recorded agent-reported, unverified)` : '';
     const tracker = `tracker (${ev}): ${ops}; ${raw} and run \`wf tracker record --event ${ev} --capture <file>\`${reported}`;
     if (state.phase === 'handoff-pending') return tracker;
     return `${phaseAction(root, cfg, state)}${holdNote}. Pending ${tracker}`;
@@ -3260,7 +3274,7 @@ function phaseAction(root, cfg, state) {
   const openIssues = openDiscovered(state);
   // 0.7.19: entries whose fix predates their record wait for a reviewer, not another fix.
   if (openIssues.length && openIssues.every((d) => d.claim)) return `${openIssues.map((d) => `${d.id} (claimed fixed in ${d.claim.repo}@${String(d.claim.commit).slice(0, 10)}, made before it was recorded)`).join(', ')}: a reviewer verifies each; hand a reviewer (\`wf handoff reviewer --agent <id>\`): its bundle asks it to verify the claimed commit, and its \`fixed\` verdict closes the entry; no new fix and no question for the person`;
-  if (openIssues.length) return `${openIssues.filter((d) => d.blockedBy).map((d) => `route ${d.id} to the implementer of ${d.blockedBy} (continue it with SendMessage); `).join('')}${openIssues.some((d) => d.claim) ? `${openIssues.filter((d) => d.claim).map((d) => d.id).join(', ')}: claimed fixed before it was recorded, so the next reviewer verifies it (no new fix); ` : ''}fix the discovered issue(s) ${openIssues.filter((d) => !d.claim).map((d) => `${d.id}${d.severity ? ` (${d.severity})` : ''}`).join(', ')} through the implementer that found each (never yourself) (\`wf discovered list\`), commit, then \`wf discovered close <id> --fixed <commit>\`; a criterion or scope that blocks the fix is amended (\`wf criteria amend --file <f> --reason "why"\`, \`--add-repo <repo>\` when the fix needs another repo). ${RULE_SHORT}; a split moves one to a sibling attempt of the batch (\`wf split\`)`;
+  if (openIssues.length) return `${openIssues.filter((d) => d.blockedBy).map((d) => `route ${d.id} to the implementer of ${d.blockedBy} (continue it with SendMessage); `).join('')}${openIssues.some((d) => d.claim) ? `${openIssues.filter((d) => d.claim).map((d) => d.id).join(', ')}: claimed fixed before it was recorded, so the next reviewer verifies it (no new fix); ` : ''}fix the discovered issue(s) ${openIssues.filter((d) => !d.claim).map((d) => `${d.id}${d.severity ? ` (${d.severity})` : ''}`).join(', ')} through the implementer that found each (never yourself) (\`wf discovered list\`), commit, then \`wf discovered close <id> --fixed <commit>\` (one that is not a defect at all: a reviewer's \`verified-nonissue\` verdict closes it, or the person's decision with \`wf discovered close <id> --not-a-defect --reason "<why>"\`); a criterion or scope that blocks the fix is amended (\`wf criteria amend --file <f> --reason "why"\`, \`--add-repo <repo>\` when the fix needs another repo). ${RULE_SHORT}; a split moves one to a sibling attempt of the batch (\`wf split\`)`;
   // 0.7.26 (I-183, review): an acceptance that names another tree than the worktrees hold (adapter delivery) stands for nothing now.
   const accepted = Boolean(state.accepted) && !acceptanceMoved(root, state).length;
   if (accepted && observations(state).length) return `${observations(state).length} review observation(s) are unresolved and delivery waits for them: ${observationLines(state).slice(0, 5).join('; ')}; each is fixed (the next reviewer verifies it, or \`wf scope fixed --finding <ref> --commit <sha>\`) or moved to a sibling attempt (\`wf scope move\`${state.batchOf && !state.batchPending ? `; ${state.batchOf} is assembled, so \`wf scope move --finding <ref> --sibling ${state.batchOf}\` hands it to the batch, which fixes it` : ''}); ${RULE_SHORT}; \`wf scope list\` shows each one's severity`;

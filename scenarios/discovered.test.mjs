@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { knownLimits } from '../engine/tracker.mjs';
-import { closureFile, commitIn, criteriaFile, FIXTURE_EXPECT, goodClosure, impactAddendum, impactCheckedFrom, makeRepo, ok, OUT_OF_ORDER, planDoc, reportFileOf, sh, singleRepoProject, state, tmp, toAccepted, WF, wf, writeReport, yaml } from './helpers.mjs';
+import { approveAsOwner, closureFile, commitIn, criteriaFile, FIXTURE_EXPECT, goodClosure, impactAddendum, impactCheckedFrom, makeRepo, ok, OUT_OF_ORDER, planDoc, reportFileOf, sh, singleRepoProject, state, tmp, toAccepted, WF, wf, writeReport, yaml } from './helpers.mjs';
 import { runner } from './strategist-fixtures.mjs';
 import { readLedger } from '../engine/ledger.mjs';
 
@@ -60,7 +60,7 @@ test('I-18: discovered issues are recorded, end fixed by a ticket commit or defe
   // Deferral is the owner's decision (`wf approve`), never the agent's words. Only a low issue may wait (D17).
   ok(disc(root, ['add', '--attempt', id, '--summary', 'tables have no phone card view', '--severity', 'low', '--found-by', 'impl-1']));
   assert.match(ok(disc(root, ['list', '--attempt', id])).out, /D2 {2}open {2}low {2}tables have no phone card view.*\n {4}low: it leaves only with the person's answer, one short question per item \(wf scope defer --finding D2/);
-  assert.match(disc(root, ['close', 'D2', '--fixed', fix, '--deferred', '--attempt', id]).err, /either --fixed <commit> or --deferred/);
+  assert.match(disc(root, ['close', 'D2', '--fixed', fix, '--deferred', '--attempt', id]).err, /with exactly one of --fixed <commit>, --deferred/);
   // An agent's call alone is refused and leaves the pending decision; nothing is deferred.
   const asked = disc(root, ['close', 'D2', '--deferred', '--reason', 'park it for the mobile pass next sprint', '--attempt', id], silent);
   assert.equal(asked.code, 75);
@@ -558,4 +558,131 @@ export default {
   assert.equal(s.delivery.repos.app.recovered, true);
   assert.ok(s.discovered[0].deferred.acknowledged?.at, 'the delivery that succeeded listed the deferral');
   assert.match(again.out, /D1 deferred \(approved-decision\): x\n {4}taken as the owner's decision: "later"/);
+});
+
+// 0.7.27 (I-188), named failure (field): a discovered issue was rated high on a faulty premise (a helper and a dormant branch
+// misread what current behaviour is). The planner found no authoritative alternative policy and the person said to keep the
+// behaviour as it is; no work was planned or built. The only ways to close the entry were `--fixed <commit>`, a fix that was
+// never made, or `--deferred`, which would list a claim nobody holds as a known issue and needs a reason it does not have;
+// a reviewer's verdict on it could only be fixed, deferred or open, so the reviewer wrote that the claim "is not established"
+// in its summary, which settles nothing. An entry that is not a defect is closed as such: the claim and why it is not one
+// stay in the record, and the delivered comment does not list it. Who may close it follows who may let a defect leave: an
+// independent reviewer's verdict (`verified-nonissue`, as for findings) or the person's decision (the project's `leaving:`
+// policy may let the owner agent do it for a level, with its reason).
+const CLAIM = 'a yearly limit counts loans over a rolling year, which can wrongly allow or reject a request';
+const WHY = 'the rolling year is what the product means by yearly; the helper misread it';
+const refusalIds = (root) => fs.readFileSync(path.join(root, '..', 'refusals.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l).id);
+
+function nonissueScene(name, config = {}) {
+  const { base, root } = singleRepoProject(name, { gate: { steps: [{ id: 'unit', repo: 'app', run: 'true' }] }, ...config });
+  const e = ok(wf(root, ['entry', '--item', 'ENG-880', '--json'])).json();
+  const id = e.id;
+  ok(wf(root, ['handoff', 'planner', '--agent', 'plan-1', '--attempt', id]));
+  ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', id]));
+  ok(wf(root, ['handoff', 'implementer', '--agent', 'impl-1', '--attempt', id]));
+  commitIn(e.repos.app.worktree, { 'src/a.txt': 'b\n' });
+  return { base, root, id, wt: e.repos.app.worktree };
+}
+
+test('0.7.27 (I-188): an independent reviewer\'s verified-nonissue verdict closes a discovered issue as not a defect; the claim stays in the record and delivery no longer waits for it', () => {
+  const { base, root, id } = nonissueScene('discovered-nonissue-reviewer');
+  ok(disc(root, ['add', '--attempt', id, '--summary', CLAIM, '--severity', 'high', '--where', 'src/a.txt:1', '--found-by', 'impl-1']));
+  const h = ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-0', '--attempt', id]));
+  const bundle = bundleOf(h);
+  assert.deepEqual(bundle.discovered.map((d) => [d.id, d.status]), [['D1', 'open']]);
+  assert.match(bundle.instructions, /"verdict": "verified-nonissue"/, 'the reviewer is told how to say a discovered issue is not a defect');
+  const record = (verdicts, agent = 'rev-0') => wf(root, ['review', '--closure', closureFile(base, goodClosure(agent, { discovered: verdicts })), '--attempt', id]);
+  // A verdict that says neither why nor what it checked refuses the closure and records nothing.
+  const bare = record([{ id: 'D1', verdict: 'verified-nonissue', evidence: 'src/a.txt:1' }]);
+  assert.equal(bare.code, 75);
+  assert.match(bare.err, /D1: verified-nonissue needs a rationale/);
+  assert.match(bare.err, /"rationale"/, 'the hint shows the shape');
+  assert.equal(refusalIds(root).at(-1), 'review:discovered-nonissue');
+  assert.match(record([{ id: 'D1', verdict: 'verified-nonissue', rationale: WHY }]).err, /D1: verified-nonissue needs evidence/);
+  // An issue this reviewer was never handed is not its to close.
+  ok(disc(root, ['add', '--attempt', id, '--summary', 'recorded after the round was handed', '--severity', 'low', '--found-by', 'o']));
+  const unseen = record([{ id: 'D2', verdict: 'verified-nonissue', evidence: 'src/a.txt:1', rationale: WHY }]);
+  assert.equal(unseen.code, 75);
+  assert.match(unseen.err, /D2: not in your bundle/);
+  assert.deepEqual(state(root, id).discovered.map((d) => d.status), ['open', 'open']);
+  assert.equal((state(root, id).reviews ?? []).length, 0, 'no refusal recorded a round');
+  // The verdict, with its evidence and rationale, closes it.
+  ok(record([{ id: 'D1', verdict: 'verified-nonissue', evidence: 'src/a.txt:1', rationale: WHY }]));
+  const s = state(root, id);
+  const d1 = s.discovered[0];
+  assert.equal(d1.status, 'not-a-defect');
+  assert.equal(d1.summary, CLAIM, 'the original claim stays');
+  assert.equal(d1.severity, 'high');
+  assert.equal(d1.notADefect.reason, WHY);
+  assert.equal(d1.notADefect.evidence, 'src/a.txt:1');
+  assert.deepEqual([d1.notADefect.source.provenance, d1.notADefect.source.reviewer], ['reviewer-verdict', 'rev-0']);
+  assert.equal(d1.deferred, null, 'it is not a deferral');
+  assert.equal(s.discovered[1].status, 'open');
+  assert.match(ok(disc(root, ['list', '--attempt', id])).out, /D1 {2}not-a-defect {2}high {2}a yearly limit counts loans[^\n]*  not a defect \(an independent reviewer's verdict[^)]*\): "the rolling year is what the product means by yearly/);
+  // It is nobody's known issue: not in the delivered comment, and delivery waits only for what is still open.
+  assert.doesNotMatch(knownLimits(s), /rolling|yearly/);
+  ok(wf(root, ['gate', '--attempt', id]));
+  // The evidence reviewer is shown the closed issue once, to dispute it with a finding if the claim holds after all.
+  const evidence = bundleOf(ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-1', '--attempt', id])));
+  assert.deepEqual(evidence.discovered.map((d) => [d.id, d.status, d.notADefectSinceReview ?? false]), [['D1', 'not-a-defect', true], ['D2', 'open', false]]);
+  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('rev-1')), '--attempt', id]));
+  ok(wf(root, ['accept', '--attempt', id]));
+  const refused = wf(root, ['deliver', '--attempt', id]);
+  assert.match(refused.err, /not delivered: 1 discovered issue\(s\) are open: D2 recorded after the round was handed/);
+  assert.doesNotMatch(refused.err, /D1 a yearly/);
+  assert.match(ok(wf(root, ['export', '--attempt', id, '--json'])).out, /the rolling year is what the product means by yearly/, 'the export keeps why');
+});
+
+test('0.7.27 (I-188): the person decides a discovered issue is not a defect, one question per item; the project\'s leaving policy may let the owner agent do it for a level', () => {
+  const { root, id } = nonissueScene('discovered-nonissue-person');
+  ok(disc(root, ['add', '--attempt', id, '--summary', CLAIM, '--severity', 'high', '--invariant', 'loan policy must allow and deny as the product intends', '--found-by', 'impl-1']));
+  ok(disc(root, ['add', '--attempt', id, '--summary', 'the export button is mislabelled', '--severity', 'medium', '--found-by', 'impl-1']));
+  const close = (ref, extra = [], opts = silent) => disc(root, ['close', ref, '--not-a-defect', ...extra, '--attempt', id], opts);
+  // One way to close at a time, and a reason that says why it is not a defect.
+  assert.match(disc(root, ['close', 'D1', '--fixed', 'abc1234', '--not-a-defect', '--attempt', id]).err, /exactly one of --fixed <commit>, --deferred/);
+  const noReason = close('D1');
+  assert.equal(noReason.code, 75);
+  assert.match(noReason.err, /--not-a-defect needs --reason/);
+  assert.equal(refusalIds(root).at(-1), 'discovered:nonissue-reason');
+  // An agent's word alone closes a high issue at no level: the question is written first, then asked.
+  const unworded = close('D1', ['--reason', WHY], { ownerSilent: true, words: false });
+  assert.equal(unworded.code, 75);
+  assert.match(unworded.err, /not asked yet: closing D1 as not a defect is the person's decision/);
+  assert.match(unworded.err, /the question: Should ENG-880 keep working as it does now, because the problem reported in it is not one\?/);
+  assert.equal((state(root, id).decisions ?? []).length, 0, 'nothing is put to the person before its words exist');
+  const asked = close('D1', ['--reason', WHY, '--person-directed', 'this should remain the same way it is now']);
+  assert.equal(asked.code, 75);
+  assert.match(asked.err, /ENG-880\.1 A1: Should ENG-880 keep working as it does now, because the problem reported in it is not one\?/);
+  const d = state(root, id).decisions[0];
+  assert.deepEqual([d.kind, d.key, d.choices], ['move-out-of-batch', 'nonissue:D1', ['yes', 'no']]);
+  assert.match(d.plain, /You told us: "this should remain the same way it is now"\./, 'the person\'s own words are shown back to them');
+  assert.equal(state(root, id).discovered[0].status, 'open');
+  // Their yes closes it, with their words and the decision in the record; the other issue is its own question.
+  approveAsOwner(root, id, 'A1', 'yes');
+  const done = ok(close('D1', ['--reason', WHY, '--person-directed', 'this should remain the same way it is now', '--json'], silent)).json();
+  assert.equal(done.status, 'not-a-defect');
+  assert.equal(done.summary, CLAIM);
+  assert.deepEqual([done.notADefect.reason, done.notADefect.personDirected, done.notADefect.source.provenance, done.notADefect.source.decision], [WHY, 'this should remain the same way it is now', 'approved-decision', 'A1']);
+  assert.ok(state(root, id).decisions[0].spent, 'the approval is used once');
+  assert.match(disc(root, ['close', 'D1', '--not-a-defect', '--reason', 'again', '--attempt', id]).err, /D1 is already not-a-defect/);
+  const second = close('D2', ['--reason', 'the label is the agreed wording']);
+  assert.equal(second.code, 75);
+  assert.equal(state(root, id).decisions.length, 2);
+  // A no stands: the issue is a defect and is fixed; it is not asked again.
+  approveAsOwner(root, id, 'A2', 'no');
+  const declined = close('D2', ['--reason', 'the label is the agreed wording']);
+  assert.equal(declined.code, 75);
+  assert.match(declined.err, /closing D2 as not a defect: the person answered A2 "No, fix the problem"/);
+  assert.equal(state(root, id).discovered[1].status, 'open');
+  assert.equal(state(root, id).decisions.length, 2);
+  assert.doesNotMatch(knownLimits(state(root, id)), /rolling|yearly|mislabelled/);
+
+  // Under a project policy that lets the owner agent decide a low issue, a low one closes on its reason; a high one still asks.
+  const o = nonissueScene('discovered-nonissue-owner', { leaving: { low: 'owner' } });
+  ok(disc(o.root, ['add', '--attempt', o.id, '--summary', 'a stale comment says the page size is 10', '--severity', 'low', '--found-by', 'impl-1']));
+  ok(disc(o.root, ['add', '--attempt', o.id, '--summary', CLAIM, '--severity', 'high', '--found-by', 'impl-1']));
+  const low = ok(disc(o.root, ['close', 'D1', '--not-a-defect', '--reason', 'the comment is right: the page size is 10', '--attempt', o.id, '--json'], silent)).json();
+  assert.deepEqual([low.status, low.notADefect.source.provenance], ['not-a-defect', 'owner-reason']);
+  assert.equal(disc(o.root, ['close', 'D2', '--not-a-defect', '--reason', WHY, '--attempt', o.id], silent).code, 75, 'a level the policy does not give the owner is still the person\'s');
+  assert.equal(state(o.root, o.id).discovered[1].status, 'open');
 });

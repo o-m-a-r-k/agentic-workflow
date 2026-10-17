@@ -439,7 +439,9 @@ export const lastReviewSeenAt = (state) => {
   const h = (state.handoffs ?? []).filter((x) => x.role === 'reviewer' && r.handoff && x.bundle === r.handoff).at(-1);
   return h?.at ?? r.at;
 };
+// 0.7.27 (I-188): an entry closed as not a defect is shown to the next round once, as a fixed one is, so the claim can be raised
+// again as a finding if it holds after all.
 export const reviewerDiscovered = (entries, state = null) => {
   const lastReview = lastReviewSeenAt(state);
-  return (entries ?? []).filter((d) => (!isBookkeeping(d) || (d.status === 'open' && d.claim)) && !(state && legacyWaived(state, d)) && (d.status !== 'fixed' || (state && (!lastReview || (d.fixed?.at && d.fixed.at > lastReview))))).map((d) => (d.status === 'fixed' ? { ...d, fixedSinceReview: true } : d.claim ? { ...d, claimedFixed: { repo: d.claim.repo, commit: d.claim.commit, note: 'fixed by a commit made before it was recorded; the reviewer checks that commit and gives `discovered: [{ "id": "' + d.id + '", "verdict": "fixed" | "open", "evidence": "<file:line>" }]`, and its `fixed` closes the entry' } } : d));
+  return (entries ?? []).filter((d) => (!isBookkeeping(d) || (d.status === 'open' && d.claim)) && !(state && legacyWaived(state, d)) && (d.status !== 'fixed' || (state && (!lastReview || (d.fixed?.at && d.fixed.at > lastReview)))) && (d.status !== 'not-a-defect' || (state && (!lastReview || (d.notADefect?.at && d.notADefect.at > lastReview))))).map((d) => (d.status === 'fixed' ? { ...d, fixedSinceReview: true } : d.status === 'not-a-defect' ? { ...d, notADefectSinceReview: true } : d.claim ? { ...d, claimedFixed: { repo: d.claim.repo, commit: d.claim.commit, note: 'fixed by a commit made before it was recorded; the reviewer checks that commit and gives `discovered: [{ "id": "' + d.id + '", "verdict": "fixed" | "open", "evidence": "<file:line>" }]`, and its `fixed` closes the entry' } } : d));
 };

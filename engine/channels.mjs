@@ -11,8 +11,14 @@ export const CHANNEL = {
   'severity-rule': "the owner agent's judgement under the person's severity rule of 0.7.6 and earlier (a medium or low issue could wait; D10)",
   // 0.7.8: the project's `leaving:` policy let the owner decide this level, with its recorded reason.
   'owner-reason': "the owner agent's recorded reason, under the project's `leaving:` policy",
+  // 0.7.27 (I-188): an independent reviewer judged the issue not to be a defect, with its evidence and rationale.
+  'reviewer-verdict': "an independent reviewer's verdict, with its evidence and rationale",
   'host-recorded': "host-recorded (the owner session's transcript; a process running as you could have written it)",
   'interactive-terminal (unverified)': 'interactive-terminal (unverified: typed at a terminal; a pseudo-terminal wrapper can answer it)',
 };
 const keyOf = (source) => (source?.provenance === 'approved-decision' && /^(question-panel|chat)\b/.test(String(source.via ?? '')) ? `approved-decision:${String(source.via).startsWith('chat') ? 'chat' : 'question-panel'}` : source?.provenance);
-export const channelOf = (d) => CHANNEL[keyOf(d.deferred?.source)] ?? (d.deferred?.source?.provenance ?? 'recorded before 0.4.5 (unverified)');
+// The channel of a deferral, or of the closing of an issue as not a defect (0.7.27, I-188).
+export const channelOf = (d) => {
+  const source = (d.deferred ?? d.notADefect)?.source;
+  return CHANNEL[keyOf(source)] ?? (source?.provenance ?? 'recorded before 0.4.5 (unverified)');
+};

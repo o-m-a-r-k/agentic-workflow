@@ -23,6 +23,7 @@ function uploadUrlProblem(uploadUrl, apiUrl) {
 
 const ISSUE = `query Issue($id: String!) { issue(id: $id) { id identifier title description url updatedAt state { name }
   team { states { nodes { id name } } }
+  labels { nodes { name } }
   comments { nodes { id body createdAt updatedAt } }
   attachments { nodes { id title subtitle url } } } }`;
 const UPDATE = 'mutation Update($id: String!, $stateId: String!) { issueUpdate(id: $id, input: { stateId: $stateId }) { success } }';
@@ -198,6 +199,8 @@ export default {
       status: first(issue.state?.name, issue.status?.name, issue.status, issue.state),
       url: issue.url ?? null,
       updatedAt: issue.updatedAt ?? null,
+      // The issue's label names, as get_issue lists them or the API's `labels { nodes { name } }` (0.7.27, I-190); absent when the readback has none.
+      ...(issue.labels !== undefined && issue.labels !== null ? { labels: list(unwrap(issue.labels), 'labels').map((l) => (typeof l === 'string' ? l : l?.name)).filter(Boolean).map(String) } : {}),
       comments: list(unwrap(first(raw.comments, issue.comments)), 'comments').map((c) => ({ id: c.id, body: c.body ?? '', createdAt: c.createdAt, updatedAt: c.updatedAt ?? c.createdAt })),
       attachments: list(unwrap(first(raw.attachments, issue.attachments)), 'attachments').map((a) => ({ id: a.id, title: a.title ?? '', subtitle: a.subtitle ?? null, filename: a.filename ?? a.title ?? '', url: a.url ?? null })),
     };

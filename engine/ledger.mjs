@@ -554,6 +554,8 @@ export function reduce(entries) {
         x.status = d.outcome;
         delete x.claim;
         if (d.outcome === 'fixed') x.fixed = { repo: d.repo, commit: d.commit, evidence: d.evidence ?? null, ...(d.reconciled ? { reconciled: d.reconciled } : {}), ...(d.beforeRecord ? { beforeRecord: true } : {}), ...(d.verifiedBy ? { verifiedBy: d.verifiedBy } : {}), at: e.at, by: e.actor };
+        // 0.7.27 (I-188): the claim stays as recorded; why it is not a defect, and who said so, are kept beside it.
+        else if (d.outcome === 'not-a-defect') x.notADefect = { reason: d.reason, evidence: d.evidence ?? null, source: d.source ?? null, ...(d.personDirected ? { personDirected: d.personDirected } : {}), attributedTo: d.attributedTo ?? null, at: e.at, by: e.actor };
         else x.deferred = { decision: d.decision, source: d.source ?? null, attributedTo: d.attributedTo ?? null, at: e.at, by: e.actor };
         break;
       }
@@ -656,7 +658,7 @@ export function reduce(entries) {
         break;
       case 'tracker.recorded':
         s.tracker.pending = s.tracker.pending.filter((a) => a.event !== d.event);
-        s.tracker.done.push({ event: d.event, at: e.at, capture: d.capture, provenance: d.provenance ?? null, verified: d.verified ?? null, ...(d.mode ? { mode: d.mode, readAt: d.readAt ?? null, comment: d.comment ?? null } : {}), ...(d.host ? { host: d.host } : {}), extraLines: d.extraLines ?? [], ...(d.attachments ? { attachments: d.attachments } : {}) });
+        s.tracker.done.push({ event: d.event, at: e.at, capture: d.capture, provenance: d.provenance ?? null, verified: d.verified ?? null, ...(d.mode ? { mode: d.mode, readAt: d.readAt ?? null, comment: d.comment ?? null } : {}), ...(d.host ? { host: d.host } : {}), ...(Array.isArray(d.labels) ? { labels: d.labels } : {}), extraLines: d.extraLines ?? [], ...(d.attachments ? { attachments: d.attachments } : {}) });
         break;
       case 'decision.created':
         // 0.7.11: a decision may carry the person's words for it: a plain question, a plain label and what follows for each

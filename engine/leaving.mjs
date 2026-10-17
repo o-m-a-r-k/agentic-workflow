@@ -40,7 +40,7 @@ const plainWhat = (x, explain) => (typeof explain?.[x.ref]?.what === 'string' &&
 // Who rated an item, by role (an agent's id means nothing to the person), and every re-rating (D18): "Rated low by a
 // reviewer, re-rated medium to low (why)".
 const raterOf = (by) => (!by ? 'its reporter' : /^reviewer /.test(by) ? 'a reviewer' : /^its implementer /.test(by) ? 'the implementer' : /^human:/.test(by) ? 'a person' : 'the agent running the ticket');
-const ratedText = (x) => `Rated ${x.severity ?? x.level} by ${raterOf(x.ratedBy)}${x.ratings?.length ? `, re-rated ${x.ratings.map((r) => `${r.from ?? 'unrated'} to ${r.to}${r.reason ? ` (${r.reason})` : ''}`).join(', ')}` : ''}.`;
+export const ratedText = (x) => `Rated ${x.severity ?? x.level} by ${raterOf(x.ratedBy)}${x.ratings?.length ? `, re-rated ${x.ratings.map((r) => `${r.from ?? 'unrated'} to ${r.to}${r.reason ? ` (${r.reason})` : ''}`).join(', ')}` : ''}.`;
 
 // The item's facts for the record (the decision's summary): what is wrong in one line, the facts behind its rating, and
 // what leaving means.

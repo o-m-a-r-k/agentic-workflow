@@ -30,6 +30,8 @@ instructionFiles: [backend/AGENTS.md, frontend/AGENTS.md]   # where releases bef
 components: [...]
 delivery: { kind: push-main }
 tracker: { kind: linear, itemPattern: '^ENG-\d+$', statuses: { started: In Progress, delivered: Ready for UAT, done: Done } }
+# Optional (0.7.27): a step's status by the ticket's labels, the person's choice; no step sets Done unless the adapter says so.
+#   tracker.statusByLabel: { delivered: { "Self-serve": Done } }
 lanes: [quick, standard, batch]
 classes:                     # merged over the plugin's full/light/review defaults by name; open list
   light: { use: "Screens on a frozen API contract, translations, fixtures.", claude: { effort: low }, codex: { effort: low } }
@@ -64,6 +66,8 @@ gate:
 invariants: .workflow/AGENTS.invariants.md
 # Optional (0.7.8, D18). Who lets an unfixed finding or discovered issue of each level leave a delivery: never (fixed here
 # or in a sibling attempt of the batch), person (one short question per item) or owner (the owner agent's recorded reason).
+# The same policy says who may close a discovered issue as not a defect (`wf discovered close --not-a-defect`): the person, unless
+# the level is `owner`; an independent reviewer's `verified-nonissue` verdict closes one at any level (0.7.27).
 # Default: high never, medium never, low person.
 leaving: { high: never, medium: never, low: person }
 # Optional: the project's own examples added to each level of the one severity scale every role reads (bundle

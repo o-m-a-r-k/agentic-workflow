@@ -277,3 +277,96 @@ test('an admission correction in the earlier recorded shape is honoured; a repla
   const unmarked = { ...s, validations: s.validations, validationCorrections: s.validationCorrections.map((c) => ({ ...c, from: c.from.map(({ admission, ...rest }) => rest) })) };
   assert.throws(() => gateAdapter(f.root, unmarked), /no longer matches its recorded committed definition/, 'an admission step replaced with no mark is refused');
 });
+
+// 0.7.27 (I-187), named failure (field): the person approved correcting two admission checks to their definitions committed at
+// one commit. A base merge advanced the attempt's HEAD before the command ran again, and the question key named the HEAD
+// commit, so the same correction under the same definitions was asked a second time ("never ask the same question twice").
+// The answer holds for what the person approved: the admission steps and the definitions they are corrected to.
+const ADMISSION = (run) => yaml({ version: 1, enabled: true, name: 'fixture', repos: [{ name: 'app', path: '.', base: 'main' }], gate: { steps: [{ id: 'unit', repo: 'app', run, inputs: ['src/**'] }] } });
+const FIXED = 'test -f src/a.txt && echo corrected-after-merge';
+const REASON = ['--steps', 'unit', '--reason', 'it read a failed request as empty data'];
+const baseMerge = (f, file = 'docs/upstream.txt') => {
+  commitIn(f.root, { [file]: 'moved on the base\n' }, 'upstream');
+  sh(f.wt, 'git merge -q --no-edit main');
+};
+const askedDecisions = (f) => (state(f.root, f.e.id).decisions ?? []).filter((d) => d.kind === 'override-gate');
+
+test('0.7.27 (I-187): an approved correction not yet applied holds across a base merge that leaves its definitions alone; changed definitions ask again', () => {
+  const f = fixture('validation-correct-merge');
+  commitIn(f.wt, { '.workflow/project.yaml': ADMISSION(FIXED) });
+  const asked = wf(f.root, ['validation', 'correct', ...REASON, '--attempt', f.e.id], { ownerSilent: true });
+  assert.equal(asked.code, 75);
+  const [d] = askedDecisions(f);
+  approveAsOwner(f.root, f.e.id, d.id, 'yes');
+  // The base moves on and is merged in: HEAD is another commit, the step definitions are the ones the person approved.
+  const before = sh(f.wt, 'git rev-parse HEAD');
+  baseMerge(f);
+  assert.notEqual(sh(f.wt, 'git rev-parse HEAD'), before);
+  const done = wf(f.root, ['validation', 'correct', ...REASON, '--attempt', f.e.id, '--json'], { ownerSilent: true });
+  assert.equal(done.code, 0, `the answer the person gave holds: ${done.err}`);
+  const s = state(f.root, f.e.id);
+  assert.equal(askedDecisions(f).length, 1, 'no second question for the same definitions');
+  assert.equal(s.validationCorrections[0].decision, d.id, 'the correction is recorded under the person\'s answer');
+  assert.ok(s.decisions[0].spent, 'and uses it up');
+  assert.equal(s.validations[0].commit, sh(f.wt, 'git rev-parse HEAD'), 'the corrected step is pinned at the merged HEAD');
+
+  // A change to the definitions the person approved is another question.
+  const g = fixture('validation-correct-merge-changed');
+  commitIn(g.wt, { '.workflow/project.yaml': ADMISSION(FIXED) });
+  assert.equal(wf(g.root, ['validation', 'correct', ...REASON, '--attempt', g.e.id], { ownerSilent: true }).code, 75);
+  approveAsOwner(g.root, g.e.id, askedDecisions(g)[0].id, 'yes');
+  baseMerge(g);
+  commitIn(g.wt, { '.workflow/project.yaml': ADMISSION(`${FIXED} && echo and-one-more-thing`) });
+  const again = wf(g.root, ['validation', 'correct', ...REASON, '--attempt', g.e.id], { ownerSilent: true });
+  assert.equal(again.code, 75, 'other definitions than the ones the person approved ask again');
+  assert.equal(askedDecisions(g).length, 2);
+  assert.ok(!askedDecisions(g)[0].spent, 'the earlier answer is not used up by a correction it did not approve');
+});
+
+test('0.7.27 (I-187): a declined correction stands across a base merge, and a question an earlier release asked under its commit is the same question while the definitions are', async () => {
+  // Declined: the same definitions are not asked about again after the merge.
+  const f = fixture('validation-correct-merge-declined');
+  commitIn(f.wt, { '.workflow/project.yaml': ADMISSION(FIXED) });
+  assert.equal(wf(f.root, ['validation', 'correct', ...REASON, '--attempt', f.e.id], { ownerSilent: true }).code, 75);
+  approveAsOwner(f.root, f.e.id, askedDecisions(f)[0].id, 'no');
+  baseMerge(f);
+  const declined = wf(f.root, ['validation', 'correct', ...REASON, '--attempt', f.e.id], { ownerSilent: true });
+  assert.equal(declined.code, 75);
+  assert.match(declined.err, /correcting the admission check unit: the person answered A1 "Keep the original step"/);
+  assert.equal(askedDecisions(f).length, 1, 'a no stands: it is not asked again');
+
+  // Asked by 0.7.26 and earlier, whose key named the commit it was asked at.
+  const { append } = await import('../engine/ledger.mjs');
+  const legacy = (name, answer) => {
+    const g = fixture(name);
+    commitIn(g.wt, { '.workflow/project.yaml': ADMISSION(FIXED) });
+    const asked = sh(g.wt, 'git rev-parse HEAD');
+    append(g.root, g.e.id, 'decision.created', { id: 'A1', kind: 'override-gate', key: `correct-admission:unit:${asked}`, summary: `correct the admission check unit to its definition committed at ${asked.slice(0, 10)}: it read a failed request as empty data (the original stays in the record; a fresh review and the full gate follow)`, choices: ['yes', 'no'] }, 'human:scenario');
+    if (answer) approveAsOwner(g.root, g.e.id, 'A1', answer);
+    baseMerge(g);
+    return g;
+  };
+  const pending = legacy('validation-correct-legacy-pending', null);
+  const stillPending = wf(pending.root, ['validation', 'correct', ...REASON, '--attempt', pending.e.id], { ownerSilent: true });
+  assert.equal(stillPending.code, 75);
+  assert.match(stillPending.err, /\(A1: correct the admission check unit/);
+  assert.equal(askedDecisions(pending).length, 1, 'the pending question is asked as it is, not a second one');
+
+  const no = legacy('validation-correct-legacy-no', 'no');
+  assert.match(wf(no.root, ['validation', 'correct', ...REASON, '--attempt', no.e.id], { ownerSilent: true }).err, /the person answered A1 "no"/);
+  assert.equal(askedDecisions(no).length, 1);
+
+  const yes = legacy('validation-correct-legacy-yes', 'yes');
+  const taken = wf(yes.root, ['validation', 'correct', ...REASON, '--attempt', yes.e.id, '--json'], { ownerSilent: true });
+  assert.equal(taken.code, 0, taken.err);
+  const s = state(yes.root, yes.e.id);
+  assert.equal(askedDecisions(yes).length, 1, 'the yes the person gave to the question as it was asked is taken after the merge');
+  assert.equal(s.validationCorrections[0].decision, 'A1');
+  assert.ok(s.decisions[0].spent);
+
+  // The definitions changed after the earlier question: that is another question.
+  const changed = legacy('validation-correct-legacy-changed', 'yes');
+  commitIn(changed.wt, { '.workflow/project.yaml': ADMISSION(`${FIXED} && echo changed-since`) });
+  assert.equal(wf(changed.root, ['validation', 'correct', ...REASON, '--attempt', changed.e.id], { ownerSilent: true }).code, 75);
+  assert.equal(askedDecisions(changed).length, 2);
+});

@@ -3,7 +3,7 @@ import { actor, openState, treeHashes } from './attempt.mjs';
 import { append, listAttempts, loadState } from './ledger.mjs';
 import { loadCatalog } from './secrets.mjs';
 import { canonical, git, hashFile, hashValue, refuse, YAML } from './util.mjs';
-import { requireYes } from './approve.mjs';
+import { approveHint, decisionFor, labelOf, requireYes } from './approve.mjs';
 import { FRAMES } from './asking.mjs';
 import fs from 'node:fs';
 
@@ -80,6 +80,52 @@ function correctionIdentity(root, state, commit, step) {
   return hashValue({ id: step.id, definition: step.definition, pluginHash });
 }
 
+// 0.7.27 (I-187), named failure (field): the person approved correcting two admission checks to the definitions committed at one
+// commit; a base merge advanced the attempt's HEAD before the command ran again, and the question's key named that HEAD, so the
+// same correction under the same definitions was asked a second time. What the person approves is the correction: the
+// admission steps and the definitions (and plugin code) they are corrected to, whatever commit holds them. The key is made of
+// exactly that. The reason is the agent's note in the record, not part of the question the person reads; another attempt's
+// approval is taken whatever its reason (below), and so is this attempt's own. Where a plugin cannot be read the identity is
+// unknown and the key names the commit, as before. A question an earlier release asked under its commit is the same question
+// while the definitions at that commit are the ones asked for now (`askedUnderCommit`).
+const sameIds = (list, of) => canonical([...list].sort()) === canonical([...of].sort());
+const admissionIdentities = (root, state, commit, steps, admission) => steps.filter((s) => admission.includes(s.id)).map((s) => correctionIdentity(root, state, commit, s));
+const admissionIdentity = (identities) => (identities.length && identities.every(Boolean) ? hashValue([...identities].sort()) : null);
+const correctionKey = (admission, identity, commit) => `correct-admission:${[...admission].sort().join(',')}:${identity ? `identity-${identity}` : commit}`;
+const KEY = /^correct-admission:([^:]+):(?:([0-9a-f]{7,40})|identity-([0-9a-f]{64}))$/;
+
+// The identities of the named admission steps as committed at `commit`, or null when that commit's adapter or a step cannot be read.
+function identitiesAt(root, state, commit, ids) {
+  let candidate;
+  try {
+    candidate = trustedAdapter(root, state, commit);
+  } catch {
+    return null;
+  }
+  const have = ids.map((id) => { const definition = candidate.gate.steps.find((x) => x.id === id); return definition ? correctionIdentity(root, state, commit, { id, definition }) : null; });
+  return have.every(Boolean) ? have : null;
+}
+
+// A question an earlier release asked under the commit it was asked at (`correct-admission:<ids>:<commit>`) is the question asked
+// now when the definitions at that commit are the ones asked for now. Its answer holds, pending, declined or approved and not yet
+// used, however far HEAD has moved since. The attempt's latest such question.
+function askedUnderCommit(root, state, admission, wantAdmission) {
+  for (const d of [...(state.decisions ?? [])].reverse()) {
+    const m = d.kind === 'override-gate' && !d.withdrawn && !d.spent ? KEY.exec(String(d.key)) : null;
+    if (!m?.[2] || !sameIds(m[1].split(','), admission)) continue;
+    const have = identitiesAt(root, state, m[2], m[1].split(','));
+    if (have && canonical([...have].sort()) === canonical([...wantAdmission].sort())) return d;
+  }
+  return null;
+}
+
+// What a question asked under the earlier key says now: asked as it is, a declined one stands, an approval is taken.
+function standingAnswer(state, d) {
+  if (!d.approved) throw refuse(`not done: correcting an admission check is the owner's decision (${d.id}: ${d.summary})`, approveHint(state, d), { id: 'approve:override-gate' });
+  if (d.approved.choice !== 'yes') throw refuse(`not done: correcting the admission check: the person answered ${d.id} ${d.approved.words ? `in their own words, "${d.approved.words}"` : `"${labelOf(d, d.approved.choice)}"`}`, `follow their answer; it is not asked again. If something changed since they answered, withdraw it with what changed (\`wf decisions withdraw ${d.id} --attempt ${state.id} --reason "<what changed>"\`) and run this command again`, { id: 'approve:answered' });
+  return d.id;
+}
+
 // The person's yes to this exact correction in another attempt of the project: the same admission steps corrected to the
 // same definitions and plugin code. Named failure (audit of one project's tickets): two admission checks were corrected
 // seven times across five parallel tickets, and each time the person was asked again and waited 28 to 147 minutes to
@@ -91,7 +137,6 @@ function approvedElsewhere(root, state, steps, commit, ids, admission) {
   const want = steps.map((s) => correctionIdentity(root, state, commit, s));
   if (want.some((w) => !w)) return null;
   const same = (have) => have.every(Boolean) && canonical([...have].sort()) === canonical([...want].sort());
-  const sameIds = (list, of) => canonical([...list].sort()) === canonical([...of].sort());
   const attempts = new Map();
   for (const id of listAttempts(root)) {
     try {
@@ -100,19 +145,19 @@ function approvedElsewhere(root, state, steps, commit, ids, admission) {
   }
   // A non-yes answer to the same admission correction, anywhere, asks again. The question names the admission steps only
   // (its key), so they are what is compared; one whose definitions cannot be read any more is taken as the same, and asks.
-  const wantAdmission = steps.filter((s) => admission.includes(s.id)).map((s) => correctionIdentity(root, state, commit, s));
+  const wantAdmission = admissionIdentities(root, state, commit, steps, admission);
+  const asked = admissionIdentity(wantAdmission);
   for (const a of attempts.values()) {
     for (const d of a.decisions ?? []) {
-      const m = /^correct-admission:([^:]+):([0-9a-f]{7,40})$/.exec(d.kind === 'override-gate' ? String(d.key) : '');
+      const m = d.kind === 'override-gate' ? KEY.exec(String(d.key)) : null;
       if (!m || !d.approved || d.approved.choice === 'yes' || !sameIds(m[1].split(','), admission)) continue;
-      let candidate;
-      try {
-        candidate = trustedAdapter(root, a, m[2]);
-      } catch {
-        return null;
+      // Asked by this release: the key holds the identity of what was asked.
+      if (m[3]) {
+        if (m[3] === asked) return null;
+        continue;
       }
-      const have = m[1].split(',').map((id) => { const def = candidate.gate.steps.find((x) => x.id === id); return def ? correctionIdentity(root, a, m[2], { id, definition: def }) : null; });
-      if (!have.every(Boolean) || canonical([...have].sort()) === canonical([...wantAdmission].sort())) return null;
+      const have = identitiesAt(root, a, m[2], m[1].split(','));
+      if (!have || canonical([...have].sort()) === canonical([...wantAdmission].sort())) return null;
     }
   }
   // An approval stands while the correction it approved is still its attempt's latest of those steps; one taken on another
@@ -193,7 +238,15 @@ async function registerValidation(root, options, correcting) {
     if (correcting) {
       // Changing a check frozen at admission is the person's decision (kind override-gate); the original stays in the ledger.
       const earlier = admission.length ? approvedElsewhere(root, state, steps, commit, ids, admission) : null;
-      const decision = earlier ? null : admission.length ? requireYes(root, state, { kind: 'override-gate', key: `correct-admission:${admission.join(',')}:${commit}`, summary: `correct the admission check ${admission.join(', ')} to its definition committed at ${commit.slice(0, 10)}: ${String(options.reason)} (the original stays in the record; a fresh review and the full gate follow)`, what: `correcting the admission check ${admission.join(', ')}`, frame: FRAMES.correctCheck({ item: state.item }), options }).decision : null;
+      let decision = null;
+      if (!earlier && admission.length) {
+        const wantAdmission = admissionIdentities(root, state, commit, steps, admission);
+        const key = correctionKey(admission, admissionIdentity(wantAdmission), commit);
+        // 0.7.27 (I-187): the key holds what is asked, not the commit that holds it; a question an earlier release asked under its
+        // commit is this one while the definitions are the same (the current key's own answer, if any, is read first).
+        const before = key.includes(':identity-') && !decisionFor(state, 'override-gate', key) ? askedUnderCommit(root, state, admission, wantAdmission) : null;
+        decision = before ? standingAnswer(state, before) : requireYes(root, state, { kind: 'override-gate', key, summary: `correct the admission check ${admission.join(', ')} to its definition committed at ${commit.slice(0, 10)}: ${String(options.reason)} (the original stays in the record; a fresh review and the full gate follow)`, what: `correcting the admission check ${admission.join(', ')}`, frame: FRAMES.correctCheck({ item: state.item }), options }).decision;
+      }
       // Both pins stay in the ledger: what the step was, and what it is now.
       const current = (id) => state.validations.flatMap((v) => v.steps).find((s) => s.id === id)?.definition;
       const from = ids.map((id) => (admission.includes(id) ? { id, commit: pinOf(id), definition: current(id) ?? base.gate.steps.find((s) => s.id === id), admission: true } : { id, commit: pinOf(id), definition: current(id) }));
