@@ -200,8 +200,10 @@ export function strategyHold(root, state) {
 // afresh, verbatim: the person was asked about the same stop twice, once with a question already judged wrong. The waiting
 // strategist's decision supersedes the withdrawn question, so it comes first.
 function waitingNote(state, escalation) {
-  const waiting = escalation?.withdrawn ? strategistWaiting(state) : null;
-  if (!waiting) return '';
+  if (!escalation?.withdrawn) return '';
+  const waiting = strategistWaiting(state);
+  // No strategist handed since: the next handoff after the person's answer asks the withdrawn question again, as it was.
+  if (!waiting) return ` The strategist's escalation ${escalation.id} was withdrawn (${escalation.withdrawn.reason ?? 'no reason recorded'}) and no strategist has been handed since: hand one and record its decision before the next handoff, or ${escalation.id}'s question is asked again as it was after this one, a question already judged wrong: \`wf handoff strategist --agent <id> --reason "..."\`, then \`wf strategy record --closure <file> --attempt ${state.id}\` (its decision supersedes the withdrawn question).`;
   return ` The strategist's escalation ${escalation.id} was withdrawn (${escalation.withdrawn.reason ?? 'no reason recorded'}) and strategist ${waiting.agent} was handed after it: record its decision first, which supersedes the withdrawn question (\`wf strategy record --closure <file> --attempt ${state.id}\`), so the person is not asked that question as well.`;
 }
 
@@ -260,7 +262,9 @@ export function requireOwnerDecision(root, state, role, options = {}) {
   const successor = e.withdrawn ? strategistWaiting(state) : null;
   if (successor) throw refuse(`not handed: the strategist's escalation ${e.id} was withdrawn and strategist ${successor.agent} was handed after it and has recorded no decision; no ${role} starts until it does (its decision supersedes ${e.id}, so the person is not asked it again)`, `wait for ${successor.agent}'s completion notification, then \`wf strategy record --closure <file> --attempt ${state.id}\`; if it is gone, hand a fresh strategist with a new id (\`wf handoff strategist --agent <new id> --reason "..."\`) and record that one's decision`, { id: 'strategy:escalated' });
   const esc = e.approved || e.withdrawn ? createDecision(root, state, { kind: 'escalation', key: e.key, summary: e.summary, choices: e.choices, plain: e.plain ?? null, labels: e.labels ?? null, then: e.then ?? null, recommend: e.recommend ?? null, settles: e.settles ?? null, items: e.items ?? null }) : e;
-  throw refuse(`not handed: the strategist escalated ${state.id} (${esc.id}: ${esc.summary}); no ${role} starts until the owner decides${wordsOf(hold.escalation.approved ? hold.escalation : null)}`, approveHint(state, esc), { id: 'strategy:escalated' });
+  // Asked again as it was after a withdrawal (the owner judged it wrong): the way out is named where it is asked (review of the release).
+  const askedAgain = e.withdrawn ? ` ${esc.id} is the withdrawn question ${e.id} asked again as it was; if it is still wrong, withdraw it (\`wf decisions withdraw ${esc.id} --attempt ${state.id} --reason "<what changed>"\`), hand a strategist (\`wf handoff strategist --agent <id> --reason "..."\`) and record its decision: a recorded decision supersedes the question.` : '';
+  throw refuse(`not handed: the strategist escalated ${state.id} (${esc.id}: ${esc.summary}); no ${role} starts until the owner decides${wordsOf(hold.escalation.approved ? hold.escalation : null)}`, askedAgain ? `${approveHint(state, esc)}.${askedAgain}` : approveHint(state, esc), { id: 'strategy:escalated' });
 }
 
 // ---- `wf signals` ----

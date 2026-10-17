@@ -109,7 +109,7 @@ and that has not decided is waited for (`wf resume` says `strategy`); no handoff
 Three things, none of them a number the engine picked:
 
 - the person's own round escalation (below), the one number left, adapter-configurable (`strategy: { reviewRoundsEscalate }`);
-- a strategist's escalation awaiting the person's `wf approve` (when the owner withdraws it with `wf decisions withdraw`, it holds the handoffs until a strategist's decision is recorded, which supersedes it (the next implementer or reviewer handoff asks the question again only when no strategist handed after the withdrawal is still to decide); `wf resume` names both, and the waiting strategist beside the person's round question when that is due too, and a question answered in the person's own words is followed or withdrawn first);
+- a strategist's escalation awaiting the person's `wf approve` (when the owner withdraws it with `wf decisions withdraw`, it holds the handoffs until a strategist's decision is recorded, which supersedes it (the next implementer or reviewer handoff asks the question again only when no strategist handed after the withdrawal is still to decide); `wf resume` names both, and the waiting strategist beside the person's round question when that is due too (with none handed since, that one is to be handed and to decide before the next handoff, or the withdrawn question is asked again as it was; the handoff that asks it again names the way out), and a question answered in the person's own words is followed or withdrawn first);
 - the strategist's own rule above.
 
 Everything else the engine checks is a fact: the tree, evidence, reviewer independence, the gate, approvals and the combined-tree
