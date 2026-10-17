@@ -126,7 +126,8 @@ export async function codexQuestionAnswers(file) {
 // question panel since then. Every turn of the person's, a reply or not (a panel answer, a slash command), ends the message;
 // what the harness writes (task notices, reminders, interrupt markers, compaction summaries, context) is not the person and
 // is skipped. What a reply may confirm is the engine's decision (engine/approve.mjs): only a message that carries one
-// decision's exact question binds a reply to it.
+// decision's exact question binds a reply to it by itself, and the words the agent quotes when it reads an answer must be in
+// one of these replies (0.7.27, D41).
 //
 // Named failure (0.7.18): a person working from the phone did not get the harness's question panel (and one host's default
 // mode tells its agent never to use the panel for approvals). They answered "Yes" in the chat twice; the engine read only the
@@ -195,8 +196,8 @@ export async function claudeChatAnswers(file) {
     const panelAnswer = e?.type === 'user' && !e.isSidechain && Array.isArray(content) && record(e.toolUseResult?.answers) && content.some((b) => b?.type === 'tool_result' && asked.has(b.tool_use_id));
     const person = panelAnswer ? { turn: true } : e?.type === 'attachment' ? claudeQueued(e) : claudePerson(e);
     if (!person) return;
-    // 0.7.27 (I-192): every reply is the person's words, also one after no message of the agent's (`question` is then empty and
-    // binds nothing by itself; engine/approve.mjs reads such a reply only for the decision's own terms).
+    // 0.7.27 (I-192, D41): every reply is the person's words, also one after no message of the agent's (`question` is then empty
+    // and binds nothing by itself; the agent may quote it when it reads their answer, engine/approve.mjs).
     if (person.reply) out.push({ askedAt: said.length ? saidAt : null, at: e.timestamp ?? null, question: said.join('\n'), panels, options: null, answer: person.reply, channel: 'chat' });
     said = [];
     saidAt = null;

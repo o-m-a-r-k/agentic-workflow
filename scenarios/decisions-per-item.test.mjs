@@ -91,7 +91,11 @@ test('an answer in the person\'s own words is recorded as theirs, and a changed 
     { type: 'user', timestamp: at(1000), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: tool, content: `Your questions have been answered: "${question}"="${words}".` }] }, toolUseResult: { questions: [], answers: { [question]: words } } },
   ].map((l) => JSON.stringify(l)).join('\n') + '\n');
   const env = { CLAUDE_CODE_SESSION_ID: CLAUDE };
-  const answered = ok(wf(p.root, ['approve', id, '--from-question', '--attempt', p.id], { env, ...silent }));
+  // 0.7.27 (D41): words that are no option are the agent's to read; it records them as the person's own (`--choice other`).
+  const unread = wf(p.root, ['approve', id, '--from-question', '--attempt', p.id], { env, ...silent });
+  assert.equal(unread.code, 75);
+  assert.match(unread.err, /read their words yourself/);
+  const answered = ok(wf(p.root, ['approve', id, '--from-question', '--attempt', p.id, '--choice', 'other', '--quote', words], { env, ...silent }));
   assert.match(answered.out, /in the person's own words: "fix it here unless it is already in ENG-636"/);
   const recorded = state(p.root, p.id).decisions.find((x) => x.id === id).approved;
   assert.deepEqual([recorded.choice, recorded.words], ['other', words]);
@@ -209,7 +213,8 @@ test('an escalation answered in the person\'s own words stays open: words never 
   const d = r.state(ctx.root, a.id).decisions.find((x) => x.id === id);
   const words = 'this is going nowhere; park it for now';
   answeredInWords(ctx.base, `${a.id} ${d.id}: ${d.plain ?? d.summary}`, words, 'toolu_pi_escalate', d.choices.map((c) => d.labels?.[c] ?? c));
-  ok(r.run(ctx.root, ['approve', id, '--from-question', '--attempt', a.id], { env: { CLAUDE_CODE_SESSION_ID: CLAUDE }, ...silent }));
+  assert.equal(r.run(ctx.root, ['approve', id, '--from-question', '--attempt', a.id], { env: { CLAUDE_CODE_SESSION_ID: CLAUDE }, ...silent }).code, 75, 'words that are no option are the agent\'s to read (0.7.27, D41)');
+  ok(r.run(ctx.root, ['approve', id, '--from-question', '--attempt', a.id, '--choice', 'other', '--quote', words], { env: { CLAUDE_CODE_SESSION_ID: CLAUDE }, ...silent }));
   assert.match(r.state(ctx.root, a.id).next, /answered in the person's own words, "this is going nowhere; park it for now": follow that/, 'resume says what happened, not "answer the old question"');
   assert.match(r.run(ctx.root, ['approve', id, '--choice', 'stop', '--attempt', a.id], silent).err, /already decided/);
   const unwordedRun = r.run(ctx.root, ['handoff', 'implementer', '--agent', 'impl-2', '--attempt', a.id, '--owner', a.owner], unworded);

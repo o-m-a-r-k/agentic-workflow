@@ -201,75 +201,36 @@ test('an approval to run the tests early holds across a base merge that leaves t
   assert.equal(state(p.root, p.id).decisions.length, 2);
 });
 
-test('a reply chooses by naming one option, anywhere and not negated; a question back, two options or a negation are the person\'s words', async () => {
-  const { choiceOfReply } = await import('../engine/approve.mjs');
-  const escalation = { choices: ['continue', 'split', 'deliver-core', 'stop'], labels: { continue: 'Keep going as now', split: 'Split off the rest as its own ticket', 'deliver-core': 'Ship what the criteria need now', stop: 'Stop this ticket' } };
-  const yesNo = { choices: ['yes', 'no'], labels: { yes: 'Accept it and ship', no: 'No, fix it first' } };
-  const cases = [
-    [escalation, 'ok fix all and continue', true, 'continue'],
-    [escalation, 'ok fix all and continue', false, 'continue'],
-    [escalation, 'stop, this is going nowhere', true, 'stop'],
-    [escalation, "don't continue", true, null],
-    [escalation, 'continue or stop?', true, null],
-    [escalation, 'keep going as now', true, 'continue'],
-    [yesNo, 'no', true, 'no'],
-    [yesNo, 'ok', true, 'yes'],
-    [yesNo, 'go ahead', true, 'yes'],
-    [yesNo, 'nope', true, 'no'],
-    [yesNo, 'ok but only after the fix', true, null],
-    [yesNo, 'yes, but keep the old button visible', true, 'yes'],
-    [yesNo, 'yes, actually no', true, null],
-    [yesNo, "I don't know", true, null],
-    [yesNo, 'yes', false, null],
-    [yesNo, 'ok', false, null],
-    [yesNo, 'accept it and ship', false, 'yes'],
-    [escalation, 'continue is not an option', true, null],
-    [escalation, 'continue would be a mistake', true, null],
-    [escalation, 'fix all first, then we can decide whether to continue', true, null],
-    [escalation, 'I would prefer that we do not at this point continue', true, null],
-    [yesNo, 'Accept it and ship is not what I want', true, null],
-    [yesNo, 'fix it first', true, 'no'],
-    [yesNo, 'no, not now', true, 'no'],
-    [yesNo, 'yes, but only after the failing test is fixed', true, null],
-    [{ ...yesNo, aliases: { yes: ['ship it'], no: ['fix it'] } }, 'ship it after the fix', true, null],
-    [{ ...yesNo, aliases: { yes: ['ship it'], no: ['fix it'] } }, 'fix it here unless it is already in another ticket', true, null],
-    [escalation, 'ok continue, except the lint part', true, null],
-    [{ ...yesNo, aliases: { yes: ['ship it'], no: ['fix it'] } }, 'fix it', true, 'no'],
-    [{ ...yesNo, aliases: { yes: ['ship it'], no: ['fix it'] } }, 'ok, ship it', false, 'yes'],
-  ];
-  for (const [d, reply, quoted, want] of cases) assert.equal(choiceOfReply(d, reply, { quoted }).choice, want, `${JSON.stringify(reply)} (${quoted ? 'quoted' : 'not quoted'})`);
-  assert.equal(choiceOfReply(escalation, 'ok fix all and continue').said, 'ok fix all and continue', 'the rest of the reply is kept beside the choice');
-});
-
-// 0.7.27 (I-192, D41), named failure (field): "ok we can close this then. ticket is on done? and clean up completed?" chose
-// nothing: the question marks of two questions about other things made the whole reply a question back, and "close this" was no
-// name of the option. A reply is read per sentence, and a decision's frame, read from its kind and key, gives its action's own
-// terms to every question asked under it, whichever release asked it.
-test('a reply is read per sentence, and the decision\'s own terms for its action choose, also for a question an older release asked', async () => {
-  const { choiceOfReply, namesAction } = await import('../engine/approve.mjs');
+// 0.7.27 (D41). Named failure (an independent review of the first fix for I-192): reading a reply's meaning with patterns bound
+// replies the person never meant ("close it if the deploy is fine", "close it. NO.", "lift the pause on" another ticket) and
+// refused or misfiled clear ones ("proceed", "ok do it"). The engine binds by itself only a reply that is exactly one option:
+// its choice, its label (for a question an earlier release asked without labels, its frame's, read from its kind and key), or for
+// a yes or no question a bare yes or no word. Everything else is the agent's to read (`--choice` with `--quote`).
+test('a reply binds by itself only when it is exactly one option; every other reply is the agent\'s to read', async () => {
+  const { exactChoice } = await import('../engine/approve.mjs');
+  const escalation = { kind: 'escalation', key: 'x', choices: ['continue', 'split', 'deliver-core', 'stop'], labels: { continue: 'Keep going as now', split: 'Split off the rest as its own ticket', 'deliver-core': 'Ship what the criteria need now', stop: 'Stop this ticket' } };
+  const waive = { kind: 'waive-finding', key: 'r1:F1', choices: ['yes', 'no'], labels: { yes: 'Accept it and ship', no: 'No, fix it first' } };
+  // A close-shipped question 0.7.17 created: no labels; its frame gives them.
   const close = { kind: 'override-gate', key: 'close-shipped:ENG-1.1:abc', choices: ['yes', 'no'], summary: 'close ENG-1.1 as shipped without its acceptance' };
-  const refs = ['ENG-1.1', 'ENG-1'];
-  // `own`: the message before the reply neither quoted nor named the decision; only its action's own terms count.
-  const own = [
-    ['ok we can close this then. ticket is on done? and clean up completed?', 'yes'], ['close this', 'yes'], ['go ahead and close', 'yes'],
-    ['close the ticket', 'yes'], ['ok, close ENG-1', 'yes'], ['can you close it?', 'yes'], ['Close it. Is the deploy safe?', 'yes'], ['keep it open', 'no'],
-    ["don't close it yet", null], ['we shouldn\u2019t close it', null], ['hold off on closing it', null], ['close it after the review', null],
-    ['when the deploy is done, close it', null], ['verify deployment. then if all good check the data, and then close the ticket (mark done)', null],
-    ['should we close it?', null], ['ok should we close it', null], ['close it?', null], ['close it. why?', null], ['close it, keep it open', null],
-    ['ok', null], ['yes', null], ['close the PR', null], ['close the browser tab', null], ['close ENG-12', null], ['close ENG-1.2', null],
+  const exact = [
+    [escalation, 'continue', 'continue'], [escalation, 'Keep going as now.', 'continue'], [escalation, 'STOP THIS TICKET', 'stop'], [escalation, 'deliver-core', 'deliver-core'],
+    [waive, 'yes', 'yes'], [waive, 'Yes!', 'yes'], [waive, 'ok', 'yes'], [waive, 'proceed', 'yes'], [waive, 'go for it', 'yes'], [waive, 'do it', 'yes'], [waive, 'confirm', 'yes'],
+    [waive, 'accept it and ship', 'yes'], [waive, 'No, fix it first', 'no'], [waive, 'nope', 'no'], [waive, 'no.', 'no'], [waive, 'yes (Recommended)', 'yes'],
+    [close, 'Close it as shipped', 'yes'], [close, 'keep it open', 'no'], [close, 'y', 'yes'],
   ];
-  for (const [reply, want] of own) assert.equal(choiceOfReply(close, reply, { own: true, refs }).choice, want, JSON.stringify(reply));
-  assert.equal(namesAction(close, "don't close it yet", refs), true, 'a negated action still names it: the latest such words decide');
-  assert.equal(namesAction(close, 'close the PR', refs), false);
-  // To a message that quoted the question: a question about something else is set aside; one about the decision is a question back.
-  for (const [reply, want] of [['Yes. Is the ticket done too?', 'yes'], ['yes. are you sure?', null], ['Yes. Why?', null], ['close it', 'yes'], ['keep it open', 'no']]) assert.equal(choiceOfReply(close, reply).choice, want, JSON.stringify(reply));
-  assert.equal(choiceOfReply(close, 'Yes. Is the ticket done too?').said, 'Yes. Is the ticket done too?', 'the question set aside is kept beside the choice');
-  // "Go with your recommendation" chooses the recommended option; an auxiliary opens a question only before its subject.
-  const hold = { kind: 'lift-hold', key: 'release:ENG-1.1:x', choices: ['yes', 'no'], labels: { yes: 'Lift the pause', no: 'Keep it paused' }, recommend: { choice: 'yes', why: 'the review is in' } };
-  for (const [reply, want] of [['go with your recommendation', 'yes'], ['not the recommended one', null], ['why is that the recommendation?', null], ['will do. lift it', 'yes'], ['should we lift it', null]]) assert.equal(choiceOfReply(hold, reply).choice, want, JSON.stringify(reply));
-  // An escalation has no terms of its own: its generic words never choose without a message that asked or named it.
-  const escalation = { kind: 'escalation', key: 'x', choices: ['continue', 'stop'], aliases: { continue: ['keep going'], stop: ['stop it'] } };
-  for (const reply of ['keep going', 'stop it', 'continue']) assert.equal(choiceOfReply(escalation, reply, { own: true, refs }).choice, null, reply);
+  for (const [d, reply, want] of exact) assert.equal(exactChoice(d, reply), want, JSON.stringify(reply));
+  const never = [
+    [escalation, 'ok fix all and continue'], [escalation, 'keep going'], [escalation, "don't continue"], [escalation, 'continue or stop?'], [escalation, 'the first one'],
+    [waive, 'ok do it'], [waive, 'yes, actually no'], [waive, 'yes, but keep the old button visible'], [waive, 'fix it'], [waive, 'ship it after the fix'],
+    [waive, 'I refuse to ship it as is'], [waive, 'nobody should ship it as is'], [waive, 'I would hate to accept it'],
+    [close, 'ok we can close this then. ticket is on done? and clean up completed?'], [close, 'close it. NO.'], [close, 'close it if the deploy is fine'], [close, 'close it tomorrow'],
+    [close, 'stop asking me to close it'], [close, 'maybe close it'], [close, 'verify the deploy, then close it'], [close, 'make sure the user can close it'], [close, "let's close this for today"],
+    [close, 'is it on main?'], [close, 'yesterday'], [close, ''],
+  ];
+  for (const [d, reply] of never) assert.equal(exactChoice(d, reply), null, JSON.stringify(reply));
+  // Without the question in the message, a bare yes or no says nothing about which question it answers.
+  assert.equal(exactChoice(waive, 'yes', { bare: false, ids: () => false }), null);
+  assert.equal(exactChoice(waive, 'Accept it and ship', { bare: false, ids: () => false }), 'yes');
 });
 
 test('a gate-order question asked before this release is the same question: pending, it is asked as it is; declined, it stands', async () => {

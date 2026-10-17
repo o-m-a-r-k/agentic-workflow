@@ -40,6 +40,8 @@ function claudeAsks(p, { question, options = ['yes', 'no'], answer, when = at(10
 
 const adopt = (p, id, env) => wf(p.root, ['adopt', '--attempt', id, '--reason', 'the owner session cannot act', '--json'], { env, ...silent });
 const approveQ = (p, id, decision, env) => wf(p.root, ['approve', decision, '--from-question', '--attempt', id], { env, ...silent });
+// 0.7.27 (D41): the agent's reading of the person's words, with the words it relies on.
+const readQ = (p, id, decision, env, choice, quote) => wf(p.root, ['approve', decision, '--from-question', '--attempt', id, '--choice', choice, '--quote', quote], { env, ...silent });
 
 test('the person confirms adopting a live owner\'s attempt in the question panel; the harness-recorded answer is the approval', () => {
   const p = singleRepoProject('approve-q-adopt', {});
@@ -82,10 +84,11 @@ test('an answer counts only when bound to the decision, offered its choices, giv
 
   const transcript = path.join(homeOf(p), '.claude', 'projects', 'proj', `${CLAUDE}.jsonl`);
   fs.mkdirSync(path.dirname(transcript), { recursive: true });
-  // A "yes" typed to no message that asked the question answers nothing. (0.7.27, D41: words naming what the decision does,
-  // "lift the hold", are the person's answer whatever came before them; scenarios below.)
+  // A "yes" typed to no message that asked the question is recorded by nothing automatically: the agent reads it (0.7.27, D41;
+  // scenarios below).
   fs.writeFileSync(transcript, JSON.stringify({ type: 'user', timestamp: at(1000), message: { role: 'user', content: 'yes, go ahead with A1' } }) + '\n');
   refusedWith(/no answer to A1 in this session's question panel/, 'the person typed yes in the chat, to no message that asked it');
+  refusedWith(/read their words yourself/, 'the agent is told to read them');
   // I-135: a panel that showed nothing is not the end of the road: the reply explains the decision, and the terminal route is given.
   refusedWith(/say in your reply, in plain words, what this decides, why, and what happens after each choice \(a question panel may not show, and its acceptance proves nothing\)/, 'the decision is explained in the reply');
   refusedWith(/ask them in your message, quoting the question ".*" exactly with its options .* so they can type the answer \(you may also show it in your question panel: a typed reply and a panel answer both count\)/, 'the chat route is given first');
@@ -125,14 +128,18 @@ test('an answer counts only when bound to the decision, offered its choices, giv
   const again = state(p.root, e.id).decisions.at(-1);
   assert.notEqual(again.id, d.id);
 
-  // Typed text that is not a choice (the panel's free-text option) is the person's answer too (0.7.8): recorded as `other` with
-  // their words, it is answered and nothing more. It confirms nothing a choice would, so the hold stays and the next ask names it.
+  // Typed text that is not a choice (the panel's free-text option) is the person's answer too (0.7.8). From 0.7.27 (D41) the
+  // engine records no meaning of its own for it: the agent reads it, and records words that choose no option as theirs (`other`).
+  // It confirms nothing a choice would, so the hold stays and the next ask names it.
   claudeAsks(p, { question: `${e.id} ${again.id}: ${again.plain ?? again.summary}`, answer: 'only on Monday' });
-  const worded = ok(approveQ(p, e.id, again.id, env));
+  const free = approveQ(p, e.id, again.id, env);
+  assert.equal(free.code, 75);
+  assert.match(free.err, /the person's latest words since then: "only on Monday" \(their answer in the question panel\)/);
+  const worded = ok(wf(p.root, ['approve', again.id, '--from-question', '--attempt', e.id, '--choice', 'other', '--quote', 'only on Monday'], { env, ...silent }));
   assert.match(worded.out, /A2 decided: in the person's own words: "only on Monday" \(follow them; it grants nothing a choice would\)/);
   const own = state(p.root, e.id).decisions.find((x) => x.id === again.id).approved;
-  assert.deepEqual([own.choice, own.words], ['other', 'only on Monday']);
-  assert.match(own.via, /^question-panel \(Claude Code, host-recorded\)$/);
+  assert.deepEqual([own.choice, own.words, own.quote], ['other', 'only on Monday', 'only on Monday']);
+  assert.match(own.via, /^question-panel, read by the agent \(Claude Code, host-recorded\)$/);
   const waits = wf(p.root, ['release', '--attempt', e.id], silent);
   assert.equal(waits.code, 75);
   assert.match(waits.err, /the person answered A2 in their own words, "only on Monday"/);
@@ -226,12 +233,25 @@ test('chat: the person\'s reply to a message asking exactly the decision\'s ques
     claudeChat(p, { said: `Two questions.\n${question}\n${e.id} ${other.id}: ${other.plain ?? other.summary}`, reply: 'yes', saidWhen: at(1500), when: at(2000) });
     assert.match(approveQ(p, e.id, d.id, env).err, /no answer to A1/);
   }
-  // The question quoted exactly, its options listed, and the person's reply in their own words starting with a choice.
-  claudeChat(p, { said: `Lifting the hold lets the work continue.\n\n${question}\n\nOptions: yes / no`, reply: 'Yes, go ahead', saidWhen: at(2500), when: at(3000) });
+  // The question quoted exactly, its options listed, and the person's reply exactly one of them.
+  claudeChat(p, { said: `Lifting the hold lets the work continue.\n\n${question}\n\nOptions: yes / no`, reply: 'Yes.', saidWhen: at(2500), when: at(3000) });
   assert.match(ok(approveQ(p, e.id, d.id, env)).out, /A1 decided: yes/);
   const recorded = state(p.root, e.id).decisions.find((x) => x.id === d.id).approved;
   assert.equal(recorded.choice, 'yes');
   assert.match(recorded.via, /^chat \(Claude Code, host-recorded\)$/);
+  // A reply in more words than an option's name is the agent's to read (0.7.27, D41): refused by itself, recorded with its words.
+  ok(wf(p.root, ['decisions', 'withdraw', other.id, '--reason', 'asked on its own later', '--attempt', e.id]));
+  assert.equal(adopt(p, e.id, env).code, 75);
+  const take = state(p.root, e.id).decisions.at(-1);
+  const takeQ = `${e.id} ${take.id}: ${take.plain ?? take.summary}`;
+  claudeChat(p, { said: `Taking it over lets this session carry on.\n\n${takeQ}\n\nOptions: yes / no`, reply: 'Yes, go ahead', saidWhen: at(3500), when: at(4000) });
+  const refused = approveQ(p, e.id, take.id, env);
+  assert.equal(refused.code, 75);
+  assert.match(refused.err, /the person's latest words since then: "Yes, go ahead" \(a reply to your message that asked it\)/);
+  assert.match(refused.err, new RegExp(`read their words yourself .*--choice <choice> --quote "<their words`));
+  const read = ok(readQ(p, e.id, take.id, env, 'yes', 'Yes, go ahead'));
+  assert.match(read.out, new RegExp(`${take.id} decided: yes, as you read the person's words "Yes, go ahead"`));
+  assert.match(state(p.root, e.id).decisions.find((x) => x.id === take.id).approved.via, /^chat, read by the agent \(Claude Code, host-recorded\)$/);
 });
 
 test('chat on Codex: a reply after the agent\'s message with the exact question confirms; a word that only starts like a choice is no answer', () => {
@@ -307,20 +327,28 @@ test('chat binding: every turn of the person\'s ends the message; only the final
   assert.match(approveQ(t.p, t.e.id, t.d.id, env).err, /no answer to A1/);
 });
 
-test('chat choice: a reply that takes it back is the person\'s words; a condition is kept beside the choice', () => {
-  let t = heldAttempt('chat-retract', 'ENG-970');
-  claudeLines(t.p, [says(`${t.question}\n\nyes / no`, at(500)), types('yes, actually no', at(1000))]);
-  assert.match(ok(approveQ(t.p, t.e.id, t.d.id, env)).out, /A1 decided: in the person's own words: "yes, actually no"/);
-  // 0.7.23: a condition that moves the action in time ("only after the failing test is fixed") can turn the answer around,
-  // so it is the person's words; one that does not move it stays beside the choice.
-  t = heldAttempt('chat-condition', 'ENG-971');
-  claudeLines(t.p, [says(`${t.question}\n\nyes / no`, at(500)), types('Yes, but keep the old export button visible', at(1000))]);
-  assert.match(ok(approveQ(t.p, t.e.id, t.d.id, env)).out, /A1 decided: yes \(their reply: "Yes, but keep the old export button visible"; follow any condition in it\)/);
-  assert.equal(state(t.p.root, t.e.id).decisions[0].approved.reply, 'Yes, but keep the old export button visible');
-  t = heldAttempt('chat-condition-time', 'ENG-972');
-  claudeLines(t.p, [says(`${t.question}\n\nyes / no`, at(500)), types('Yes, but only after the failing test is fixed', at(1000))]);
-  assert.match(ok(approveQ(t.p, t.e.id, t.d.id, env)).out, /A1 decided: in the person's own words: "Yes, but only after the failing test is fixed"/);
+// 0.7.27 (D41): the engine reads no meaning into a reply. One that takes it back, or adds a condition, is refused by itself and
+// recorded by nothing; the agent reads it, records the choice it makes with the words it relies on, and follows the rest.
+test('chat choice: a reply that is not exactly one option records nothing by itself; the agent\'s reading keeps the whole message', () => {
+  for (const [i, words] of ['yes, actually no', 'Yes, but keep the old export button visible', 'Yes, but only after the failing test is fixed'].entries()) {
+    const t = heldAttempt(`chat-more-${i}`, `ENG-97${i}`);
+    claudeLines(t.p, [says(`${t.question}\n\nyes / no`, at(500)), types(words, at(1000))]);
+    const r = approveQ(t.p, t.e.id, t.d.id, env);
+    assert.equal(r.code, 75, words);
+    assert.match(r.err, /read their words yourself/, words);
+    assert.equal(state(t.p.root, t.e.id).decisions[0].approved, null, words);
+    if (i !== 1) continue;
+    // The condition does not move the action: the agent records "yes" from "Yes", and the whole message stays beside it.
+    const read = ok(readQ(t.p, t.e.id, t.d.id, env, 'yes', 'Yes'));
+    assert.match(read.out, /A1 decided: yes, as you read the person's words "Yes" in their message "Yes, but keep the old export button visible"/);
+    assert.match(read.out, /follow anything else their message asks/);
+    const recorded = state(t.p.root, t.e.id).decisions[0].approved;
+    assert.deepEqual([recorded.choice, recorded.quote, recorded.message], ['yes', 'Yes', words]);
+  }
   assert.match(channelOf({ deferred: { source: { provenance: 'approved-decision', via: 'chat (Claude Code, host-recorded)' } } }), /answered by the person in the chat/);
+  assert.match(channelOf({ deferred: { source: { provenance: 'approved-decision', via: 'chat, read by the agent (Claude Code, host-recorded)' } } }), /the owner agent read them as this answer and quoted them/);
+  // 0.7.27's first form (`chat, in their own words`) still reads in a ledger that recorded it.
+  assert.match(channelOf({ deferred: { source: { provenance: 'approved-decision', via: 'chat, in their own words (Codex, host-recorded)' } } }), /in their own words naming what it decides/);
 });
 
 test('chat on Codex: a reply after a panel the person never saw binds to its question; a panel answer ends the message; a sub-agent thread is not the person', () => {
@@ -382,7 +410,7 @@ test('chat on Claude Code: a panel answer ends the message, so a later "yes" nev
 // should be accepted". Named failure (field): the person typed "ok fix all and continue" to the round-limit question; the
 // session had explained the question in its own words, and the reply did not start with a choice, so it was refused twice and
 // the session put the question panel in front of them.
-test('typed replies: one that names an option anywhere confirms it, with the rest kept; without the question quoted, only an option named plainly binds', () => {
+test('typed replies: exactly one option binds; without the question quoted, only an option\'s label binds; anything else is the agent\'s to read', () => {
   const p = singleRepoProject('approve-typed', {});
   const e = ok(wf(p.root, ['entry', '--item', 'ENG-950', '--json'], silent)).json();
   ok(wf(p.root, ['hold', '--reason', 'wait for the store review', '--attempt', e.id], silent));
@@ -392,23 +420,22 @@ test('typed replies: one that names an option anywhere confirms it, with the res
   // The session explained the question in its own words: a bare "yes" says nothing about which question it answers.
   claudeChat(p, { said: 'The store review came back. Want me to carry on?', reply: 'yes' });
   assert.match(approveQ(p, e.id, d.id, env).err, /no answer to A1/);
-  // A message that never names the decision binds no option's short name or bare choice ("carry on" is no name of this one).
-  // (0.7.27, D41: a reply naming the decision's own action, "lift the pause", binds whatever the message said: below.)
+  // A message that never names the decision binds no bare choice or word of its own ("carry on" is no name of this one).
   claudeChat(p, { said: 'The store review came back. Should the pause end?', reply: 'ok carry on then', saidWhen: at(1200), when: at(1400) });
   assert.match(approveQ(p, e.id, d.id, env).err, /no answer to A1/);
-  // A reply that negates the option it names is the person's words, not that option.
-  claudeChat(p, { said: `About ${e.id} ${d.id}: the store review came back. Should the pause end?`, reply: "don't lift the pause yet", saidWhen: at(1500), when: at(2000) });
-  assert.match(approveQ(p, e.id, d.id, env).err, /no answer to A1/);
-  // Naming the option plainly binds when the message named the decision in the session's own words, and the rest of the
-  // reply is kept beside it.
-  claudeChat(p, { said: `About ${e.id} ${d.id}: the store review came back. Should the pause end?`, reply: 'ok lift the pause and ship it', saidWhen: at(2500), when: at(3000) });
+  // A message that names the decision in the session's own words binds only a reply that is exactly an option's label.
+  for (const [i, words] of ["don't lift the pause yet", 'ok lift the pause and ship it', 'yes'].entries()) {
+    claudeChat(p, { said: `About ${e.id} ${d.id}: the store review came back. Should the pause end?`, reply: words, saidWhen: at(1500 + i * 400), when: at(1700 + i * 400) });
+    assert.match(approveQ(p, e.id, d.id, env).err, /no answer to A1/, words);
+  }
+  claudeChat(p, { said: `About ${e.id} ${d.id}: the store review came back. Should the pause end?`, reply: 'Lift the pause', saidWhen: at(2500), when: at(3000) });
   const typed = ok(approveQ(p, e.id, d.id, env));
-  assert.match(typed.out, /A1 decided: yes \(their reply: "ok lift the pause and ship it"; follow any condition in it\)/);
+  assert.match(typed.out, /^A1 decided: yes\. next:/m);
   const recorded = state(p.root, e.id).decisions[0].approved;
-  assert.deepEqual([recorded.choice, recorded.reply], ['yes', 'ok lift the pause and ship it']);
+  assert.equal(recorded.choice, 'yes');
   assert.match(recorded.via, /^chat, the question not quoted \(Claude Code, host-recorded\)$/);
 
-  // With the question quoted, "ok" and "nope" are answers, and a question back is not.
+  // With the question quoted, "ok", "nope", "proceed", "go for it" and "do it" are answers; a question back is the agent's to answer.
   const q = singleRepoProject('approve-typed-quoted', {});
   const f = ok(wf(q.root, ['entry', '--item', 'ENG-951', '--json'], silent)).json();
   ok(wf(q.root, ['hold', '--reason', 'wait', '--attempt', f.id], silent));
@@ -416,21 +443,29 @@ test('typed replies: one that names an option anywhere confirms it, with the res
   const g = state(q.root, f.id).decisions[0];
   const question = `${f.id} ${g.id}: ${g.plain}`;
   claudeChat(q, { said: question, reply: 'ok but why now?' });
-  assert.match(approveQ(q, f.id, g.id, env).out, /A1 decided: in the person's own words: "ok but why now\?"/);
-  ok(wf(q.root, ['decisions', 'withdraw', g.id, '--reason', 'answered their question', '--attempt', f.id]));
-  assert.equal(wf(q.root, ['release', '--attempt', f.id], silent).code, 75);
-  const h = state(q.root, f.id).decisions.at(-1);
-  claudeChat(q, { said: `${f.id} ${h.id}: ${h.plain}`, reply: 'nope', saidWhen: at(1500), when: at(2000) });
-  assert.match(ok(approveQ(q, f.id, h.id, env)).out, /A2 decided: no/);
+  assert.match(approveQ(q, f.id, g.id, env).err, /the person's latest words since then: "ok but why now\?" \(a reply to your message that asked it\)/);
+  assert.equal(state(q.root, f.id).decisions[0].approved, null, 'a question back is no answer');
+  claudeChat(q, { said: `Because the review is in.\n\n${question}`, reply: 'nope', saidWhen: at(1500), when: at(2000) });
+  assert.match(ok(approveQ(q, f.id, g.id, env)).out, /A1 decided: no/);
+  for (const [i, words] of ['proceed', 'Go for it!', 'do it', 'confirm', 'OK.'].entries()) {
+    ok(wf(q.root, ['decisions', 'withdraw', state(q.root, f.id).decisions.at(-1).id, '--reason', 'asked afresh', '--attempt', f.id]));
+    assert.equal(wf(q.root, ['release', '--attempt', f.id], silent).code, 75);
+    const h = state(q.root, f.id).decisions.at(-1);
+    claudeChat(q, { said: `${f.id} ${h.id}: ${h.plain}`, reply: words, saidWhen: at(2500 + i * 1000), when: at(3000 + i * 1000) });
+    assert.match(ok(approveQ(q, f.id, h.id, env)).out, new RegExp(`${h.id} decided: yes`), words);
+  }
 });
 
 // 0.7.27 (I-192, D41), named failure (field): the person's clear answer in their own words was refused. A decision `wf close
-// --shipped` had created under 0.7.17 (no aliases, labels or plain words) was asked exactly, with yes and no, on day 1, and the
-// person did not answer that day. On day 2 the harness put its context and the page open beside the chat before their first
-// message, the agent described the closure as what remained in its own words, and the person replied "ok we can close this
-// then. ticket is on done? and clean up completed?". `wf approve --from-question` refused it (no-answer): the message before it
-// did not quote or name the decision, the two questions about other things made the whole reply a question back, and "close
-// this" was no name the engine gave the option. The agent then ended its turn without asking anything.
+// --shipped` had created under 0.7.17 (no labels or plain words) was asked exactly, with yes and no, on day 1, and the person did
+// not answer that day. On day 2 the harness put its context and the page open beside the chat before their first message, the
+// agent described the closure as what remained in its own words, and the person replied "ok we can close this then. ticket is on
+// done? and clean up completed?". `wf approve --from-question` refused it, and the agent ended its turn without asking anything.
+// The first fix read the reply's meaning with patterns; an independent review proved it bound replies the person never meant
+// ("close it if the deploy is fine", "lift the pause on" another ticket) and refused or misfiled clear ones ("do it", "proceed").
+// Now the agent, which has the whole conversation, reads the words and names the choice and the words it relies on; the engine
+// proves only what it can: the words are verbatim from one of the person's own messages in this session, written after the
+// question existed, and the choice is one of the question's.
 const DAY = 24 * 3600 * 1000;
 const shippedSummary = (id) => `close ${id} as shipped without its acceptance (app 1a2b3c4d5e (worktree) on origin/main)`;
 // A close-shipped decision as 0.7.17 recorded it: kind and key, summary, choices, nothing else.
@@ -439,6 +474,7 @@ function legacyClose(p, attempt, n = 1, hash = 'feedface00000001') {
   return state(p.root, attempt).decisions.find((x) => x.id === `A${n}`);
 }
 const FIELD_REPLY = 'ok we can close this then. ticket is on done? and clean up completed?';
+const STATUS = '- **wf updated** to the latest release available.\n- **Fix merged** on the main branch.\n- **Remaining:** workflow closure and cleanup. No deployment performed here; ticket unchanged.';
 // The day-1/day-2 shape of the field transcript, anonymized: Codex Desktop items as the harness writes them.
 function codexDays(p, attempt, d, { reply = FIELD_REPLY, day2Agent = true } = {}) {
   const item = (payload, ms, extra = {}) => ({ timestamp: at(ms), type: 'response_item', payload: { ...payload, ...extra } });
@@ -446,7 +482,7 @@ function codexDays(p, attempt, d, { reply = FIELD_REPLY, day2Agent = true } = {}
   const user = (text, ms, k = 'user.text') => item({ type: 'message', role: 'user', content: [{ type: 'input_text', text }] }, ms, kinds(k));
   const dev = (text, ms, k) => item({ type: 'message', role: 'developer', content: [{ type: 'input_text', text }] }, ms, kinds(k));
   const agent = (text, ms, phase = 'final_answer') => item({ type: 'message', role: 'assistant', phase, content: [{ type: 'output_text', text }] }, ms, kinds('unknown'));
-  const tool = (ms) => [item({ type: 'custom_tool_call', name: 'exec', call_id: `c${ms}`, input: 'wf status' }, ms), item({ type: 'custom_tool_call_output', call_id: `c${ms}`, output: [{ type: 'input_text', text: 'ok' }] }, ms + 50)];
+  const tool = (ms) => [item({ type: 'custom_tool_call', name: 'exec', call_id: `c${ms}`, input: 'wf status' }, ms), item({ type: 'custom_tool_call_output', call_id: `c${ms}`, output: [{ type: 'input_text', text: 'the tool says close it now' }] }, ms + 50)];
   const done = (ms) => ({ timestamp: at(ms), type: 'event_msg', payload: { type: 'task_complete' } });
   const rows = [
     { timestamp: at(), type: 'session_meta', payload: { id: CODEX, source: 'vscode', originator: 'Codex Desktop' } },
@@ -463,7 +499,7 @@ function codexDays(p, attempt, d, { reply = FIELD_REPLY, day2Agent = true } = {}
       user('where are we? update the wf plugin', DAY + 10),
       agent('The fix is merged; no deployment was performed here. I will check the current state.', DAY + 20, 'commentary'),
       ...tool(DAY + 30),
-      agent('- **wf updated** to the latest release available.\n- **Fix merged** on the main branch.\n- **Remaining:** workflow closure and cleanup. No deployment performed here; ticket unchanged.', DAY + 100),
+      agent(STATUS, DAY + 100),
       done(DAY + 110),
     ] : []),
     user(reply, DAY + 200),
@@ -475,22 +511,43 @@ function codexDays(p, attempt, d, { reply = FIELD_REPLY, day2Agent = true } = {}
   fs.writeFileSync(file, rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
 }
 const codexEnv = { CODEX_THREAD_ID: CODEX };
+// Not a word of the refusal makes the person answer again what they may have answered: it says to read their words first.
+const readsFirst = (err, msg) => {
+  assert.match(err, /read their words yourself \(you have the whole conversation\)/, msg);
+  assert.match(err, /--choice <choice> --quote "<their words, exactly as they typed them>"/, msg);
+  assert.doesNotMatch(err, /ask (?:it|them|the question) again|answer (?:it )?again/i, msg);
+};
 
-test('0.7.27 (I-192): Codex, the field shape: "ok we can close this then" closes a shipped attempt whose decision an older release created, after the agent described it in its own words', () => {
+test('0.7.27 (I-192, D41): Codex, the field shape: the agent records "yes" from "ok we can close this then"; with no choice named, the reply is the agent\'s to read', () => {
   const p = singleRepoProject('approve-own-words-codex', {});
   const e = ok(wf(p.root, ['entry', '--item', 'ENG-1200', '--json'], silent)).json();
   const d = legacyClose(p, e.id);
-  assert.equal(d.aliases, undefined, 'created as an older release did: no words of the frame');
+  assert.equal(d.labels, undefined, 'created as an older release did: no words of the frame');
   // Until it is answered, `wf status` and `wf resume` name it where the owner reads what is next, with the form that asks it.
   const waiting = ok(wf(p.root, ['resume', '--attempt', e.id], silent)).out;
   assert.match(waiting, new RegExp(`waiting on the person: A1 is not answered\\. Ask it in your reply \\(a mention in your own words, such as what remains, does not ask it\\): quote "${e.id.replace('.', '\\.')} A1: close ${e.id.replace('.', '\\.')} as shipped`));
+  assert.match(waiting, /--choice <choice> --quote "<their words>"/, 'and how their answer in more words is recorded');
   codexDays(p, e.id, d);
-  const r = ok(approveQ(p, e.id, d.id, codexEnv));
-  assert.match(r.out, /A1 decided: yes \(their reply: "ok we can close this then\. ticket is on done\? and clean up completed\?"; follow any condition in it\)/);
+  const refused = approveQ(p, e.id, d.id, codexEnv);
+  assert.equal(refused.code, 75);
+  assert.match(refused.err, /the person's latest words since then: "ok we can close this then\. ticket is on done\? and clean up completed\?" \(a reply to a message that did not ask it\); their reply to your message that asked it: "where are we\? update the wf plugin"/);
+  readsFirst(refused.err, 'the field reply with no choice named');
+  assert.equal(state(p.root, e.id).decisions[0].approved, null);
+  // Words the harness, a tool or the agent wrote are never the person's.
+  for (const words of ['page_id', 'current_date', 'the tool says close it now', 'workflow closure and cleanup']) {
+    const r = readQ(p, e.id, d.id, codexEnv, 'yes', words);
+    assert.equal(r.code, 75, words);
+    assert.match(r.err, new RegExp(`not recorded: "${words}" is in no message of the person's in this session`), words);
+  }
+  const r = ok(readQ(p, e.id, d.id, codexEnv, 'yes', 'ok we can close this then'));
+  assert.match(r.out, /A1 decided: yes, as you read the person's words "ok we can close this then" in their message "ok we can close this then\. ticket is on done\? and clean up completed\?"/);
+  assert.match(r.out, /In this same reply, tell them what you recorded and from which words/);
   const recorded = state(p.root, e.id).decisions.find((x) => x.id === d.id).approved;
-  assert.deepEqual([recorded.choice, recorded.reply], ['yes', FIELD_REPLY]);
-  assert.match(recorded.via, /^chat, in their own words \(Codex, host-recorded\)$/);
+  assert.deepEqual([recorded.choice, recorded.quote, recorded.message], ['yes', 'ok we can close this then', FIELD_REPLY]);
+  assert.equal(recorded.question.text, STATUS, 'the agent message the reply answered');
+  assert.match(recorded.via, /^chat, read by the agent \(Codex, host-recorded\)$/);
   assert.doesNotMatch(ok(wf(p.root, ['resume', '--attempt', e.id], silent)).out, /waiting on the person/);
+  assert.match(ok(wf(p.root, ['decisions', '--attempt', e.id])).out, /A1 {2}override-gate {2}decided: yes \(read from their words "ok we can close this then"\)/);
 });
 
 test('0.7.27 (I-192): Codex, the page the harness records before the person\'s first message of a day is not their turn: a "yes" the next day answers the question asked the day before', () => {
@@ -503,7 +560,7 @@ test('0.7.27 (I-192): Codex, the page the harness records before the person\'s f
   assert.match(state(p.root, e.id).decisions[0].approved.via, /^chat \(Codex, host-recorded\)$/, 'bound to the message that quoted the question');
 });
 
-test('0.7.27 (I-192): Claude Code, the field shape: "ok we can close this then" after a status in the agent\'s own words closes it', () => {
+test('0.7.27 (I-192, D41): Claude Code, the field shape: the first message of the day records nothing; the agent records "yes" from "ok we can close this then"', () => {
   const p = singleRepoProject('approve-own-words-claude', {});
   const e = ok(wf(p.root, ['entry', '--item', 'ENG-1202', '--json'], silent)).json();
   const d = legacyClose(p, e.id);
@@ -517,94 +574,168 @@ test('0.7.27 (I-192): Claude Code, the field shape: "ok we can close this then" 
     attachment('hook_success', DAY + 1, { hookName: 'SessionStart', content: 'the plugin rules' }),
     types('where are we? update the wf plugin', at(DAY + 10)),
   ]);
-  // The first message of the day follows the message that asked the question, but speaks of something else: no answer, and
-  // nothing recorded that would stand in the way of a real one (before, it was recorded as their answer in their own words).
-  assert.match(approveQ(p, e.id, d.id, env).err, /no answer to A1/);
+  // The first message of the day follows the message that asked the question but speaks of something else: nothing is recorded
+  // that would stand in the way of a real answer.
+  const first = approveQ(p, e.id, d.id, env);
+  assert.match(first.err, /no answer to A1/);
+  readsFirst(first.err, 'the first message of the day');
   assert.equal(state(p.root, e.id).decisions[0].approved, null);
   claudeLines(p, [
     says('The fix is merged; no deployment was performed here. I will check the current state.', at(DAY + 20)),
     tool(at(DAY + 30)),
     result(DAY + 40),
-    says('- **wf updated** to the latest release available.\n- **Fix merged** on the main branch.\n- **Remaining:** workflow closure and cleanup. No deployment performed here; ticket unchanged.', at(DAY + 100)),
+    says(STATUS, at(DAY + 100)),
     types(FIELD_REPLY, at(DAY + 200)),
   ]);
-  const r = ok(approveQ(p, e.id, d.id, env));
-  assert.match(r.out, /A1 decided: yes \(their reply: "ok we can close this then\./);
-  assert.match(state(p.root, e.id).decisions[0].approved.via, /^chat, in their own words \(Claude Code, host-recorded\)$/);
+  readsFirst(approveQ(p, e.id, d.id, env).err, 'the field reply with no choice named');
+  const r = ok(readQ(p, e.id, d.id, env, 'yes', 'ok we can close this then'));
+  assert.match(r.out, /A1 decided: yes, as you read the person's words "ok we can close this then"/);
+  const recorded = state(p.root, e.id).decisions[0].approved;
+  assert.match(recorded.via, /^chat, read by the agent \(Claude Code, host-recorded\)$/);
+  assert.deepEqual([recorded.quote, recorded.message, recorded.question.text], ['ok we can close this then', FIELD_REPLY, STATUS]);
 });
 
-test('0.7.27 (I-192): words that negate, condition or ask about the closure, a bare "ok" after another message, and words that fit two open questions bind nothing', () => {
-  const p = singleRepoProject('approve-own-words-negative', {});
-  const e = ok(wf(p.root, ['entry', '--item', 'ENG-1203', '--json'], silent)).json();
-  const d = legacyClose(p, e.id);
-  const refused = (re, msg) => {
-    const r = approveQ(p, e.id, d.id, env);
+// The independent review of the first fix proved each of these recorded an answer the person did not give, or refused one they
+// gave. None is recorded by the engine by itself, even replying to a message that quoted the question exactly.
+test('0.7.27 (D41): replies a pattern misread are never recorded by themselves; the agent\'s reading of a clear one is', () => {
+  const p = singleRepoProject('approve-never-auto', {});
+  const e = ok(wf(p.root, ['entry', '--item', 'ENG-1301', '--json'], silent)).json();
+  const close = legacyClose(p, e.id);
+  append(p.root, e.id, 'decision.created', { id: 'A2', kind: 'waive-finding', key: 'r1:F1', summary: 'waive r1:F1', plain: 'Should ENG-1301 ship with a problem the reviewers found accepted as it is, instead of fixed?', choices: ['yes', 'no'], labels: { yes: 'Accept it and ship', no: 'No, fix it first' } }, 'human:scenario');
+  append(p.root, e.id, 'decision.created', { id: 'A3', kind: 'escalation', key: 'round-limit:test', summary: 'how ENG-1301 goes on', choices: ['continue', 'split', 'deliver-core', 'stop'], labels: { continue: 'Keep going as now', split: 'Split off the rest as its own ticket', 'deliver-core': 'Ship what the criteria need now', stop: 'Stop this ticket' } }, 'human:scenario');
+  const other = ok(wf(p.root, ['entry', '--item', 'ENG-1302', '--json'], silent)).json();
+  ok(wf(p.root, ['hold', '--reason', 'wait for the store review', '--attempt', e.id], silent));
+  ok(wf(p.root, ['hold', '--reason', 'wait for the store review', '--attempt', other.id], silent));
+  assert.equal(wf(p.root, ['release', '--attempt', e.id], silent).code, 75);
+  const hold = state(p.root, e.id).decisions.at(-1);
+  const q = (d) => `${e.id} ${d.id}: ${d.plain ?? d.summary}`;
+  const cases = [
+    [close, ['close it. NO.', 'close it. not yet', 'close it. hold on', 'close it. never mind', 'close it if the deploy is fine', 'close it, pending the data check', 'close it as soon as the deploy is green', 'close it tomorrow', 'stop asking me to close it', 'she told me to close it, but I disagree', 'I was going to say close it but no', 'maybe close it', 'I think we could close it, but let me check first', 'verify the deploy, then close it', 'make sure the user can close it', 'the dialog needs a button to close it', "let's close this for today", 'ok do it', 'the first one', 'is it on main?', FIELD_REPLY]],
+    [{ id: 'A2', plain: 'Should ENG-1301 ship with a problem the reviewers found accepted as it is, instead of fixed?' }, ['I refuse to ship it as is', 'nobody should ship it as is', 'I would hate to accept it']],
+    [{ id: 'A3', summary: 'how ENG-1301 goes on' }, ['stop it, you are spamming the tracker', 'keep going', 'carry on']],
+    [hold, [`lift the pause on ${other.item}`]],
+  ];
+  let t = 1000;
+  for (const [d, replies] of cases) {
+    for (const reply of replies) {
+      // The question quoted exactly, alone in the agent's message, and the reply right after it.
+      claudeChat(p, { said: `${q(d)}\n\nOptions: yes / no`, reply, saidWhen: at((t += 500)), when: at((t += 500)) });
+      const r = approveQ(p, e.id, d.id, env);
+      assert.equal(r.code, 75, reply);
+      readsFirst(r.err, reply);
+      assert.equal(state(p.root, e.id).decisions.find((x) => x.id === d.id).approved, null, reply);
+    }
+  }
+  assert.equal(state(p.root, other.id).decisions.length, 0, 'the other ticket was never asked');
+  // A stray question back records nothing, so the person's real answer still counts.
+  claudeChat(p, { said: `${q(close)}\n\nOptions: yes / no`, reply: 'is it on main?', saidWhen: at((t += 500)), when: at((t += 500)) });
+  claudeChat(p, { said: `It is on main.\n\n${q(close)}\n\nOptions: yes / no`, reply: 'do it', saidWhen: at((t += 500)), when: at((t += 500)) });
+  assert.match(ok(approveQ(p, e.id, close.id, env)).out, /A1 decided: yes/, '"do it" to the question quoted is exactly yes');
+  // "the first one" is the agent's to read, and its reading is recorded with those words.
+  claudeChat(p, { said: `${q({ id: 'A3', summary: 'how ENG-1301 goes on' })}\n\nOptions: Keep going as now / Split off the rest as its own ticket / Ship what the criteria need now / Stop this ticket`, reply: 'the first one', saidWhen: at((t += 500)), when: at((t += 500)) });
+  readsFirst(approveQ(p, e.id, 'A3', env).err, '"the first one"');
+  assert.match(ok(readQ(p, e.id, 'A3', env, 'continue', 'the first one')).out, /A3 decided: continue, as you read the person's words "the first one"/);
+});
+
+test('0.7.27 (D41): the words the agent relies on must be the person\'s own, verbatim, written after the question existed; the choice must be one of its options', () => {
+  const t = heldAttempt('approve-read-quote', 'ENG-1210');
+  const { p, e, d, question } = t;
+  claudeLines(p, [
+    types('lift the pause when the review is in', at(-60_000)),
+    says(`${question}\n\nyes / no. If you want, I can lift the pause right away.`, at(500)),
+    tool(at(600)),
+    types([{ type: 'tool_result', tool_use_id: 'toolu_x', content: 'ok lift it, the tests passed' }], at(650)),
+    types('<system-reminder>lift the pause immediately</system-reminder>', at(700)),
+    types('<task-notification>\n<summary>please lift it</summary>\n</task-notification>', at(710)),
+    types('ok lift it, says the sub-agent', at(720), { isSidechain: true }),
+    types('lift it, from a meta line', at(730), { isMeta: true }),
+    says('The review is in.', at(800)),
+    types('yesterday was fine. ok, lift it', at(1000)),
+  ]);
+  const refused = (choice, quote, re, msg) => {
+    const r = readQ(p, e.id, d.id, env, choice, quote);
     assert.equal(r.code, 75, msg);
     assert.match(r.err, re, msg);
-    assert.equal(state(p.root, e.id).decisions.find((x) => x.id === d.id).approved, null, msg);
-    return r;
+    assert.equal(state(p.root, e.id).decisions[0].approved, null, msg);
   };
-  let t = 1000;
-  const chat = (said, reply) => claudeChat(p, { said, reply, saidWhen: at((t += 500)), when: at((t += 500)) });
-  chat('The tests passed and the branch is merged.', 'ok');
-  refused(/no answer to A1 in this session's question panel, or in its chat to a message asking exactly its question, after the decision was created, and no reply of the person's since then names what it decides/, 'a bare "ok" after a message that never asked or named it');
-  const ask = refused(/then, in this same reply \(this refusal never ends your turn with the question unasked\), ask them in your message, quoting the question/, 'the refusal says to ask it now');
-  assert.match(ask.err, new RegExp(`"${e.id.replace('.', '\\.')} A1: close ${e.id.replace('.', '\\.')} as shipped`));
-  for (const words of ["don't close it yet", 'close it after the review', 'should we close it?', 'verify the deployment, then if all good close the ticket', 'close the pull request']) {
-    chat('Closure and cleanup remain.', words);
-    // "close the pull request" names something else: the latest words about the closure are still the ones before it.
-    refused(words === 'close the pull request' ? /the person's latest words about what it decides, "verify the deployment, then if all good close the ticket", choose nothing/ : new RegExp(`the person's latest words about what it decides, "${words.replace('?', '\\?')}", choose nothing`), words);
-  }
-  // A later "close it" is the person's answer, but not while another open question fits the same words.
-  legacyClose(p, e.id, 2, 'feedface00000002');
-  chat('Two merged changes remain to close.', 'ok close it');
-  refused(/the person's words "ok close it" name what it decides, and could answer .* A2 .* as well, so they answer neither/, 'two open decisions fit "close"');
-  assert.equal(approveQ(p, e.id, 'A2', env).code, 75, 'nor the other one');
-  // Another open attempt's question fits "close it" too; naming the ticket says which one.
-  ok(wf(p.root, ['decisions', 'withdraw', 'A2', '--reason', 'asked again on its own', '--attempt', e.id]));
-  const other = ok(wf(p.root, ['entry', '--item', 'ENG-1204', '--json'], silent)).json();
-  legacyClose(p, other.id);
-  chat('Both merged changes can be closed.', 'close it');
-  refused(/could answer ENG-1204\.1 A1/, 'another attempt\'s open question fits');
-  chat('Both merged changes can be closed.', 'close ENG-1203 please');
-  assert.match(ok(approveQ(p, e.id, d.id, env)).out, /A1 decided: yes/);
-  // To the question quoted, a reply in the person's own words about it (it shares the question's words) is still theirs.
-  const third = ok(wf(p.root, ['entry', '--item', 'ENG-1208', '--json'], silent)).json();
-  const q = legacyClose(p, third.id);
-  claudeChat(p, { said: `${third.id} ${q.id}: ${q.summary}\n\nyes / no`, reply: 'wait until the worktree is cleaned up', saidWhen: at((t += 500)), when: at((t += 500)) });
-  assert.match(ok(approveQ(p, third.id, q.id, env)).out, /A1 decided: in the person's own words: "wait until the worktree is cleaned up"/);
+  const notTheirs = (quote) => new RegExp(`not recorded: "${quote}" is in no message of the person's in this session \\(what they typed in the chat or answered in the question panel, as the harness recorded it; never your own text, a tool's output, a note the harness adds or a sub-agent's thread\\)`);
+  refused('yes', 'we can lift it now', notTheirs('we can lift it now'), 'not verbatim');
+  refused('yes', 'I can lift the pause right away', notTheirs('I can lift the pause right away'), "the agent's own message");
+  refused('yes', 'the tests passed', notTheirs('the tests passed'), 'a tool\'s output');
+  refused('yes', 'lift the pause immediately', notTheirs('lift the pause immediately'), 'a harness reminder');
+  refused('yes', 'please lift it', notTheirs('please lift it'), 'a task notification');
+  refused('yes', 'says the sub-agent', notTheirs('says the sub-agent'), 'a sub-agent thread');
+  refused('yes', 'from a meta line', notTheirs('from a meta line'), 'a meta line');
+  refused('yes', 'yes', notTheirs('yes'), 'part of a word ("yesterday") is not their word');
+  refused('yes', 'lift the pause when the review is in', /not recorded: the person wrote "lift the pause when the review is in" before A1 existed/, 'words from before the question');
+  refused('maybe', 'ok, lift it', /not recorded: --choice maybe is none of A1's options \(yes "Lift the pause", no "Keep it paused"\), nor other/, 'a choice outside the options');
+  const noQuote = wf(p.root, ['approve', d.id, '--from-question', '--attempt', e.id, '--choice', 'yes'], { env, ...silent });
+  assert.notEqual(noQuote.code, 0);
+  assert.match(noQuote.err, /--choice with --from-question records your reading of the person's words: add --quote "<their words>"/);
+  const noChoice = wf(p.root, ['approve', d.id, '--from-question', '--attempt', e.id, '--quote', 'ok, lift it'], { env, ...silent });
+  assert.notEqual(noChoice.code, 0);
+  assert.match(noChoice.err, /--quote goes with --choice/);
+  // Case and spacing aside, the words are theirs; the label names the choice as well as its id.
+  const r = ok(readQ(p, e.id, d.id, env, 'Lift the pause', 'OK,  LIFT IT'));
+  assert.match(r.out, /A1 decided: yes, as you read the person's words "OK, {2}LIFT IT" in their message "yesterday was fine\. ok, lift it"/);
+  const recorded = state(p.root, e.id).decisions[0].approved;
+  assert.deepEqual([recorded.choice, recorded.quote, recorded.message, recorded.question.text], ['yes', 'OK,  LIFT IT', 'yesterday was fine. ok, lift it', 'The review is in.']);
+  // The export shows the reading: the words, the whole message, the message it answered and who read it.
+  const exported = JSON.parse(ok(wf(p.root, ['export', '--json', '--attempt', e.id], silent)).out);
+  const row = exported.decisions.find((x) => x.id === d.id);
+  assert.deepEqual([row.answer.choice, row.answer.quote, row.answer.message, row.answer.answered], ['yes', 'OK,  LIFT IT', 'yesterday was fine. ok, lift it', 'The review is in.']);
+  assert.match(row.answer.via, /^chat, read by the agent/);
+  const page = path.join(p.base, 'page.html');
+  ok(wf(p.root, ['export', '--out', page, '--attempt', e.id], silent));
+  const html = fs.readFileSync(page, 'utf8');
+  assert.ok(html.includes('The person&#39;s decisions') && html.includes('OK,  LIFT IT') && html.includes('yesterday was fine. ok, lift it'), 'the page shows the decision and the words read');
 });
 
-test('0.7.27 (I-192, D41): a generic word said about something else never answers a question: escalations and short names bind only to a message that asked or named them', () => {
-  const p = singleRepoProject('approve-own-words-generic', {});
-  const e = ok(wf(p.root, ['entry', '--item', 'ENG-1205', '--json'], silent)).json();
-  append(p.root, e.id, 'decision.created', { id: 'A1', kind: 'escalation', key: 'round-limit:test', summary: 'how ENG-1205 goes on: continue | split | deliver-core | stop', choices: ['continue', 'split', 'deliver-core', 'stop'], labels: { continue: 'Keep going as now', split: 'Split off the rest as its own ticket', 'deliver-core': 'Ship what the criteria need now', stop: 'Stop this ticket' }, aliases: { continue: ['keep going', 'go on', 'carry on'], split: ['split it'], 'deliver-core': ['ship the core'], stop: ['stop it'] } }, 'human:scenario');
-  for (const [i, words] of ['stop it, you are spamming the tracker', 'keep going', 'carry on', 'continue'].entries()) {
-    claudeChat(p, { said: 'The linter is noisy today.', reply: words, saidWhen: at(1000 + i * 1000), when: at(1500 + i * 1000) });
-    assert.match(approveQ(p, e.id, 'A1', env).err, /no answer to A1/, words);
-  }
-  const q = singleRepoProject('approve-own-words-hold', {});
-  const f = ok(wf(q.root, ['entry', '--item', 'ENG-1206', '--json'], silent)).json();
-  ok(wf(q.root, ['hold', '--reason', 'wait for the store review', '--attempt', f.id], silent));
-  assert.equal(wf(q.root, ['release', '--attempt', f.id], silent).code, 75);
-  // "keep it" is a short name of the hold question's "no", for a reply to a message that asked it; said about something else it is
-  // no answer.
-  claudeChat(q, { said: 'The store review came back.', reply: 'keep it simple', saidWhen: at(500), when: at(1000) });
-  assert.match(approveQ(q, f.id, 'A1', env).err, /no answer to A1/);
-  claudeChat(q, { said: 'The store review came back.', reply: 'ok lift the pause and ship it', saidWhen: at(1500), when: at(2000) });
-  assert.match(ok(approveQ(q, f.id, 'A1', env)).out, /A1 decided: yes \(their reply: "ok lift the pause and ship it"/);
-  assert.match(state(q.root, f.id).decisions[0].approved.via, /^chat, in their own words/);
+test('0.7.27 (D41): an exact answer given after the words the agent relies on stands, and a reply that is exactly one option is not read as another', () => {
+  let t = heldAttempt('approve-read-later', 'ENG-1211');
+  claudeLines(t.p, [says(`${t.question}\n\nyes / no`, at(500)), types('lift it', at(1000)), says(`Just to be sure:\n\n${t.question}\n\nyes / no`, at(1500)), types('no', at(2000))]);
+  const later = readQ(t.p, t.e.id, t.d.id, env, 'yes', 'lift it');
+  assert.equal(later.code, 75);
+  assert.match(later.err, /not recorded: the person answered A1 after those words, "no" \(.*\), and that answer stands/);
+  assert.match(later.err, new RegExp(`run \`wf approve A1 --from-question --attempt ${t.e.id.replace('.', '\\.')}\` without --choice to record it`));
+  assert.match(ok(approveQ(t.p, t.e.id, t.d.id, env)).out, /A1 decided: no/);
+  t = heldAttempt('approve-read-exact', 'ENG-1212');
+  claudeLines(t.p, [says(`${t.question}\n\nyes / no`, at(500)), types('no', at(1000))]);
+  const exact = readQ(t.p, t.e.id, t.d.id, env, 'yes', 'no');
+  assert.equal(exact.code, 75);
+  assert.match(exact.err, /not recorded: their reply "no" is exactly the option no/);
+  assert.equal(state(t.p.root, t.e.id).decisions[0].approved, null);
 });
 
 // 0.7.27 (I-192): Claude Code records a message the person typed while the agent was working as an `attachment` line
 // (`queued_command`, origin human), not a user line; it is the person's words like any other reply.
-test('0.7.27 (I-192): Claude Code, a message the person typed while the agent worked counts as theirs; one from anything else does not', () => {
+test('0.7.27 (I-192): Claude Code, a message the person typed while the agent worked is theirs to quote; one from anything else is not', () => {
   const p = singleRepoProject('approve-queued', {});
   const e = ok(wf(p.root, ['entry', '--item', 'ENG-1207', '--json'], silent)).json();
   const d = legacyClose(p, e.id);
   const queued = (prompt, ms, origin = 'human') => ({ type: 'attachment', timestamp: at(ms), attachment: { type: 'queued_command', prompt, source_uuid: 'u', commandMode: 'prompt', origin: { kind: origin } } });
   claudeLines(p, [says('Checking whether the change is on the main branch.', at(400)), tool(at(500)), queued('go ahead and close it', 600, 'task-notification')]);
-  assert.match(approveQ(p, e.id, d.id, env).err, /no answer to A1/, 'not the person');
+  const notTheirs = readQ(p, e.id, d.id, env, 'yes', 'go ahead and close it');
+  assert.equal(notTheirs.code, 75, 'not the person');
+  assert.match(notTheirs.err, /is in no message of the person's in this session/);
   claudeLines(p, [queued('go ahead and close it', 700)]);
-  assert.match(ok(approveQ(p, e.id, d.id, env)).out, /A1 decided: yes \(their reply: "go ahead and close it"/);
+  readsFirst(approveQ(p, e.id, d.id, env).err, 'a queued message in more words than an option');
+  assert.match(ok(readQ(p, e.id, d.id, env, 'yes', 'go ahead and close it')).out, /A1 decided: yes, as you read the person's words "go ahead and close it"/);
+});
+
+// 0.7.27 (D41): a ledger the first form of this release wrote replays: its decision carries short names (`aliases`, no longer
+// read) and its answer the channel `chat, in their own words`; the answer still acts, and every place that shows it reads it.
+test('0.7.27 (D41): an answer the first form of 0.7.27 recorded still reads and still acts', () => {
+  const p = singleRepoProject('approve-replay', {});
+  const e = ok(wf(p.root, ['entry', '--item', 'ENG-1213', '--json'], silent)).json();
+  ok(wf(p.root, ['hold', '--reason', 'wait for the store review', '--attempt', e.id], silent));
+  append(p.root, e.id, 'decision.created', { id: 'A1', kind: 'lift-hold', key: `release:${e.id}:${state(p.root, e.id).activeHold.at}`, summary: `lift the hold on ${e.id}`, choices: ['yes', 'no'], labels: { yes: 'Lift the pause', no: 'Keep it paused' }, aliases: { yes: ['lift it'], no: ['keep it'] } }, 'human:scenario');
+  append(p.root, e.id, 'decision.approved', { id: 'A1', choice: 'yes', reply: 'ok lift the pause and ship it', via: 'chat, in their own words (Claude Code, host-recorded)', question: { text: 'The store review came back.', at: at(), askedAt: at() } }, 'human:scenario');
+  ok(wf(p.root, ['verify', '--attempt', e.id], silent));
+  assert.match(ok(wf(p.root, ['decisions', '--attempt', e.id])).out, /A1 {2}lift-hold {2}decided: yes {2}lift the hold/);
+  const row = JSON.parse(ok(wf(p.root, ['export', '--json', '--attempt', e.id], silent)).out).decisions.find((x) => x.id === 'A1');
+  assert.deepEqual([row.answer.choice, row.answer.via, row.answer.reply, row.answer.answered], ['yes', 'chat, in their own words (Claude Code, host-recorded)', 'ok lift the pause and ship it', 'The store review came back.']);
+  assert.match(channelOf({ deferred: { source: { provenance: 'approved-decision', via: row.answer.via } } }), /in their own words naming what it decides/);
+  ok(wf(p.root, ['release', '--attempt', e.id], silent));
+  assert.equal(state(p.root, e.id).activeHold, null, 'the recorded answer lifted the hold');
 });

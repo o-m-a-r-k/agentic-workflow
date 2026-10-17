@@ -345,6 +345,11 @@ const RETIRED = [
   [/cannot route at admission/, 'a rule for the first step routes at admission (the engine reads the labels first; a connector\'s pending action names the routes)'],
   // 0.7.27 (D41): a decision is asked in the agent's message in the form that binds; the panel is optional.
   [/goes in the question panel \(or `wf approve`\)/, 'a reserved question is asked in the agent\'s message, quoted exactly; the panel is optional'],
+  // 0.7.27 (D41, as reworked): the engine reads no meaning into a reply; the agent reads it and records the choice with the words it
+  // relies on (`--choice` with `--quote`). Named failure: patterns bound "close it if the deploy is fine" and refused "proceed".
+  [/names what (?:the question|the decision|it) decides|whatever (?:your|the) message before it said|in its frame's own terms/i, 'the engine reads no meaning into a reply: the agent reads it and records its reading with the person\'s words'],
+  [/reply chooses when it names one of (?:the|its) options|go with your recommendation|reply is read (?:per|sentence by) sentence/i, 'a reply binds by itself only when it is exactly one option; the agent reads any other'],
+  [/`wf approve <id> --from-question` reads it\)/, 'the agent reads the person\'s words; `wf approve --from-question` checks they are theirs and records the reading'],
 ];
 test('no text repeats a claim the engine retired', () => {
   const docs = fs.readdirSync(path.join(ROOT, 'docs')).filter((f) => f.endsWith('.md') && f !== 'DESIGN.md' && !/^v\d/.test(f)).map((f) => `docs/${f}`);
