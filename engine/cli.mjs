@@ -1124,7 +1124,7 @@ async function dispatch(cmd, sub, positional, options) {
         const s = await closeAfterHandoff(root, openState(root, options));
         const api = await trackerApi(root, s.id);
         const after = loadState(root, s.id);
-        print(options, `${api.trim() || (after.phase === 'done' ? `${after.id} closed and worktrees removed.` : 'tracker: nothing to perform (no pending actions, or `tracker.via` is the connector)')}\nnext: ${nextAction(root, after)}`);
+        print(options, `${api.trim() || (after.phase === 'done' ? `${after.id} closed and worktrees removed.` : (after.tracker?.pending?.length ? `tracker: ${after.tracker.pending.length} pending action(s), performed through the connector (below)` : 'tracker: nothing to perform'))}\nnext: ${nextAction(root, after)}`);
         return 0;
       }
       if (sub === 'mode') {
