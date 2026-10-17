@@ -25,7 +25,7 @@ function project(name, tracker, files = {}) {
 }
 
 // Plan, implement, gate, review, accept, deliver and show: returns the gate's screenshot.
-function deliver(base, root, id, env) {
+function deliver(base, root, id, env, beforeDeliver = null) {
   ok(wf(root, ['handoff', 'planner', '--agent', 'p', '--attempt', id], { env }));
   ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', id], { env }));
   ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', id], { env }));
@@ -34,6 +34,7 @@ function deliver(base, root, id, env) {
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', id], { env }));
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r', { screenshotsInspected: [g.steps[0].artifacts[0].sha256] })), '--attempt', id], { env }));
   ok(wf(root, ['accept', '--attempt', id], { env }));
+  beforeDeliver?.();
   ok(wf(root, ['deliver', '--attempt', id, '--summary-file', summaryFile(base)], { env }));
   const shown = path.join(base, 'shown.json');
   fs.writeFileSync(shown, JSON.stringify({ screenshots: [{ sha256: g.steps[0].artifacts[0].sha256, caption: 'Home screen with the new text' }], anomalies: 'none seen' }));
@@ -71,6 +72,36 @@ test('github via cli: the engine labels, uploads, comments and reads back throug
   after.issue.labels = after.issue.labels.filter((l) => l.name !== 'bug');
   assertDelivered(after);
   assert.ok(fs.readFileSync(`${db}.argv`, 'utf8').split('\n').filter(Boolean).every((l) => !/gho_|authorization/i.test(l)), 'wf passes no token to gh');
+});
+
+// 0.7.27 (review of the release): the engine routes the status it sets by the labels it reads when it performs, by the rule the
+// readback is judged by. Queued from the labels of the admission readback, the pending status can be days stale.
+test('github via cli: the status label set is the one the issue\'s labels route to when the engine performs, not the one routed at admission', () => {
+  const routed = { delivered: { 'Self-serve': 'Done' } };
+  const labelsAfter = (db) => JSON.parse(fs.readFileSync(db, 'utf8')).issue.labels.map((l) => l.name).sort();
+  const relabel = (db, change) => {
+    const data = JSON.parse(fs.readFileSync(db, 'utf8'));
+    data.issue.labels = change(data.issue.labels.map((l) => l.name)).map((name) => ({ name }));
+    fs.writeFileSync(db, JSON.stringify(data));
+  };
+  // The label was on the issue at admission and was taken off before delivery.
+  const a = project('gh-route-removed', { via: 'cli', statusByLabel: routed });
+  const dbA = path.join(a.base, 'github.json');
+  seed(dbA, { labels: ['Self-serve'] });
+  const envA = { PATH: ghOnPath(a.base), WF_TEST_GH_STATE: dbA };
+  const ea = ok(wf(a.root, ['entry', '--item', 'GH-12', '--owner', 'o', '--json'], { env: envA })).json();
+  deliver(a.base, a.root, ea.id, envA, () => relabel(dbA, (labels) => labels.filter((l) => l !== 'Self-serve')));
+  assert.deepEqual(labelsAfter(dbA), ['Ready for UAT'], 'the default status label');
+  assert.equal(state(a.root, ea.id).phase, 'done');
+  // The label was put on after admission.
+  const b = project('gh-route-added', { via: 'cli', statusByLabel: routed });
+  const dbB = path.join(b.base, 'github.json');
+  seed(dbB, { labels: [] });
+  const envB = { PATH: ghOnPath(b.base), WF_TEST_GH_STATE: dbB };
+  const eb = ok(wf(b.root, ['entry', '--item', 'GH-12', '--owner', 'o', '--json'], { env: envB })).json();
+  deliver(b.base, b.root, eb.id, envB, () => relabel(dbB, (labels) => [...labels, 'Self-serve']));
+  assert.deepEqual(labelsAfter(dbB), ['Done', 'Self-serve']);
+  assert.equal(state(b.root, eb.id).phase, 'done');
 });
 
 async function serve(mode, file, ...args) {

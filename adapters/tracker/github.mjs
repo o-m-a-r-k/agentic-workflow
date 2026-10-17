@@ -14,7 +14,7 @@
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { cliEnv } from '../../engine/scrub.mjs';
-import { statusNames } from '../../engine/status-route.mjs';
+import { statusFor, statusNames } from '../../engine/status-route.mjs';
 
 const TYPES = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif' };
 const numberOf = (item) => {
@@ -118,9 +118,11 @@ async function perform(via, { token, url, item, actions, cfg }) {
   for (const a of ordered) {
     if (a.op === 'setStatus') {
       const labels = (cur.issue.labels ?? []).map((l) => (typeof l === 'string' ? l : l.name));
-      if (labels.includes(a.status) || (a.unless ?? []).some((u) => labels.includes(u))) continue;
-      for (const old of labels.filter((l) => statuses.includes(l) && l !== a.status)) await call('DELETE', `/repos/${repo}/issues/${n}/labels/${encodeURIComponent(old)}`);
-      await call('POST', `/repos/${repo}/issues/${n}/labels`, { labels: [a.status] });
+      // Routed by the labels read just now (0.7.27, review of the release), by the rule the readback is judged by.
+      const want = statusFor(cfg.tracker, a, labels).status;
+      if (labels.includes(want) || (a.unless ?? []).some((u) => labels.includes(u))) continue;
+      for (const old of labels.filter((l) => statuses.includes(l) && l !== want)) await call('DELETE', `/repos/${repo}/issues/${n}/labels/${encodeURIComponent(old)}`);
+      await call('POST', `/repos/${repo}/issues/${n}/labels`, { labels: [want] });
     } else if (a.op === 'attach') {
       // Release assets of a public repository are downloadable by anyone: uploaded only with the owner's
       // acknowledgement (checked again here, whatever the caller did).

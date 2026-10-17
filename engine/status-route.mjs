@@ -52,6 +52,22 @@ export function routedStatus(tracker, step, labels) {
   return null;
 }
 
+// The status a `setStatus` action sets and expects, given the ticket's labels as they were just read (0.7.27, review of the
+// release). The action was queued with the status the labels of an earlier readback routed to (`status`, with `route.default`
+// when it was routed), which can be days old: the labels in hand decide, so the status the engine sets when it performs and the
+// status the readback is judged by are one rule. Labels not read (a tracker that reports none), or no rules to apply, keep the
+// status the action carries. `route` is what was used, for the record; `note` says why in a refusal.
+export function statusFor(tracker, a, labels) {
+  if (!Array.isArray(labels) || !tracker) return { status: a.status, route: null, note: '' };
+  const fallback = a.route?.default ?? a.status;
+  const route = routedStatus(tracker, a.key, labels);
+  return {
+    status: route?.status ?? fallback,
+    route: route ? { step: a.key, label: route.label, status: route.status, default: fallback } : null,
+    note: route ? ` (the ticket's label "${route.label}" routes it)` : a.route ? ` (the ticket's labels, as read back, do not carry "${a.route.label}")` : '',
+  };
+}
+
 // The ticket's labels as its latest recorded readback showed them, or null when no readback carried any.
 export function ticketLabels(state) {
   const read = [...(state?.tracker?.done ?? [])].reverse().find((d) => Array.isArray(d.labels));

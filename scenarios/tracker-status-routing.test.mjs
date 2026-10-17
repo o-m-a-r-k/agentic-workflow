@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { readLedger } from '../engine/ledger.mjs';
+import { YAML } from '../engine/util.mjs';
 import crypto from 'node:crypto';
 import { closureFile, commitIn, criteriaFile, goodClosure, ok, singleRepoProject, state, summaryFile, toAccepted, wf, yaml } from './helpers.mjs';
 
@@ -184,4 +185,74 @@ test('0.7.27 (I-190): doctor says that a rule for the first step cannot route at
   const out = ok(wf(p.root, ['doctor', '--no-steps'])).out;
   assert.match(out, /started goes to "Working" for a ticket labelled "Self-serve" \(otherwise "In Progress"\); not at admission, which comes before any readback has shown the labels/);
   assert.doesNotMatch(out, /delivered goes to "Done"[^\n]*not at admission/);
+});
+
+// 0.7.27 (review of the release), named failure: the engine performed the status the pending action carried, routed from the
+// labels of an earlier readback, and then judged the readback by the ticket's labels as it read them; a label taken off (or put
+// on) in between made the readback refuse what the engine itself had just set, and a retry set it again and was refused again,
+// with no refusal naming a way out. The engine now routes at the moment it performs, from the labels it reads then, with the
+// rule the readback is judged by.
+const relabel = (root, item, change) => {
+  const file = path.join(root, 'tickets', `${item}.md`);
+  const text = fs.readFileSync(file, 'utf8');
+  const m = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/.exec(text);
+  const front = YAML.parse(m[1]);
+  front.labels = change(front.labels ?? []);
+  fs.writeFileSync(file, `---\n${YAML.stringify(front)}---\n${m[2]}`);
+};
+
+test('0.7.27 (I-190): the engine sets the status the ticket\'s labels route to when it performs, not the one routed from an earlier readback', () => {
+  const p = project('tracker-route-perform', ROUTED);
+  // The label was on the ticket at admission and the person took it off before delivery: the default is set, and the readback accepts it.
+  const removed = toAccepted(p.root, p.base, { item: 'ENG-400', change: { 'src/a.txt': 'removed\n' } });
+  relabel(p.root, 'ENG-400', (labels) => labels.filter((l) => l !== 'Self-serve'));
+  const done = ok(wf(p.root, ['deliver', '--attempt', removed.id, '--summary-file', summaryFile(p.base)]));
+  assert.match(done.out, /tracker: delivered performed/);
+  assert.equal(statusOf(p.root, 'ENG-400'), 'Ready for UAT', 'the labels the engine read when it performed decide');
+  assert.equal(delivery(p.root, removed.id).status, 'Done', 'pending as routed when the label was last seen');
+  assert.equal(state(p.root, removed.id).phase, 'done');
+  assert.equal(readLedger(p.root, removed.id).filter((e) => e.type === 'tracker.recorded').at(-1).data.routed, undefined);
+  // The label was put on after admission: the routed status is set, and the readback accepts it.
+  const added = toAccepted(p.root, p.base, { item: 'ENG-401', change: { 'src/b.txt': 'added\n' } });
+  relabel(p.root, 'ENG-401', (labels) => [...labels, 'self-serve']);
+  ok(wf(p.root, ['deliver', '--attempt', added.id, '--summary-file', summaryFile(p.base)]));
+  assert.equal(statusOf(p.root, 'ENG-401'), 'Done');
+  const route = [{ step: 'delivered', label: 'Self-serve', status: 'Done', default: 'Ready for UAT' }];
+  assert.deepEqual(readLedger(p.root, added.id).filter((e) => e.type === 'tracker.recorded').at(-1).data.routed, route);
+  // The route used is in the state (`wf resume --json`, and `wf status --json` while the attempt is open), and in the export.
+  assert.deepEqual(state(p.root, added.id).tracker.done.find((d) => d.event === 'delivered').routed, route);
+  assert.deepEqual(JSON.parse(ok(wf(p.root, ['export', '--attempt', added.id, '--json'])).out).tracker.done.find((d) => d.event === 'delivered').routed, route);
+  assert.equal(state(p.root, removed.id).tracker.done.find((d) => d.event === 'delivered').routed, undefined, 'none when the default was used');
+  const page = fs.readFileSync(ok(wf(p.root, ['export', '--attempt', added.id])).out.match(/(\S+\.html)/)[1], 'utf8');
+  assert.match(page, /routed to Done by the label Self-serve/);
+});
+
+test('0.7.27 (I-190): the Linear API sets the workflow state the ticket\'s labels route to when it performs', async () => {
+  const { default: linear } = await import('../adapters/tracker/linear.mjs');
+  const states = { nodes: [{ id: 's-uat', name: 'Ready for UAT' }, { id: 's-done', name: 'Done' }, { id: 's-wip', name: 'In Progress' }] };
+  const issue = (labels) => ({ id: 'u1', identifier: 'ENG-9', title: 't', description: 'd', url: 'https://linear.app/x/ENG-9', updatedAt: 'x', state: { name: 'In Progress' }, labels: { nodes: labels.map((name) => ({ name })) }, comments: { nodes: [] }, attachments: { nodes: [] }, team: { states } });
+  const real = globalThis.fetch;
+  const run = async (labels, action) => {
+    const set = [];
+    globalThis.fetch = async (url, init) => {
+      const body = JSON.parse(init.body);
+      if (/issueUpdate/.test(body.query)) {
+        set.push(body.variables.stateId);
+        return Response.json({ data: { issueUpdate: { success: true } } });
+      }
+      return Response.json({ data: { issue: issue(labels) } });
+    };
+    try {
+      await linear.api.perform({ token: 'lin_api_secret', url: 'https://api.linear.app/graphql', item: 'ENG-9', actions: [action], cfg: { tracker: { kind: 'linear', statuses, statusByLabel: ROUTED } } });
+    } finally {
+      globalThis.fetch = real;
+    }
+    return set;
+  };
+  const routed = { op: 'setStatus', key: 'delivered', status: 'Done', route: { label: 'Self-serve', default: 'Ready for UAT' }, unless: [] };
+  const plain = { op: 'setStatus', key: 'delivered', status: 'Ready for UAT', unless: [] };
+  assert.deepEqual(await run(['Bug'], routed), ['s-uat'], 'the label is gone: the default');
+  assert.deepEqual(await run(['Bug', 'self-serve'], routed), ['s-done'], 'the label is there: the routed state');
+  assert.deepEqual(await run(['Bug', 'Self-serve'], plain), ['s-done'], 'put on after the action was queued: routed');
+  assert.deepEqual(await run(['Bug'], plain), ['s-uat']);
 });

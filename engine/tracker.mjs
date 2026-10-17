@@ -14,7 +14,7 @@ import { connectorCalls, ownerTranscript } from './host-record.mjs';
 import { screenshots } from './gate.mjs';
 import { findingSummary, lastReviewSeenAt, unreachedSince } from './review-policy.mjs';
 import { cliEnv, scrub } from './scrub.mjs';
-import { routeLines, routedStatus, ticketLabels } from './status-route.mjs';
+import { routeLines, routedStatus, statusFor, ticketLabels } from './status-route.mjs';
 
 const BUILTIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'adapters', 'tracker');
 
@@ -402,16 +402,7 @@ export function trackerActions(root, cfg, state, event, extra = {}) {
 // to show exactly that status, so a label taken off the ticket before delivery (to keep it from closing itself) still forced the
 // routed status (Done). The labels of the readback in hand decide: the status they route to, else the step's default. A readback
 // that reports no labels is judged as the pending action says. `route` is what was used, for the record; `note` says why in a refusal.
-function expectedStatus(cfg, a, labels) {
-  if (!Array.isArray(labels)) return { status: a.status, route: null, note: '' };
-  const fallback = a.route?.default ?? a.status;
-  const route = routedStatus(cfg.tracker, a.key, labels);
-  return {
-    status: route?.status ?? fallback,
-    route: route ? { step: a.key, label: route.label, status: route.status, default: fallback } : null,
-    note: route ? ` (the ticket's label "${route.label}" routes it)` : a.route ? ` (the ticket's labels, as read back, do not carry "${a.route.label}")` : '',
-  };
-}
+const expectedStatus = (cfg, a, labels) => statusFor(cfg.tracker, a, labels);
 
 export function emitTrackerEvent(root, cfg, id, event, extra = {}) {
   const state = loadState(root, id);
