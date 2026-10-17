@@ -622,7 +622,11 @@ async function recordAgentReported(root, cfg, state, options, event, pending) {
         const caption = shown?.screenshots?.find((x) => x.sha256 === f.sha256)?.caption ?? null;
         const named = listed.filter((x) => x.title === title || x.filename === title);
         if (!named.length) problems.push(`${title}: not among the reported attachments`);
-        else if (caption && !named.some((x) => String(x.subtitle ?? '').trim() === caption || (shotMode === 'attachments' && !String(x.subtitle ?? '').trim()))) problems.push(`${title}: reported without the subtitle "${caption}"`);
+        else if (caption && !named.some((x) => String(x.subtitle ?? '').trim() === caption)) problems.push(`${title}: reported without the subtitle "${caption}"`);
+        // 0.7.27 (review of the release). With the screenshots attached and no image in the comment, the report's attachment is the
+        // only trace of the upload: it names it by an https url, as the embedded modes name an image by one (a title alone proves
+        // no file was attached).
+        else if (attached(shotMode) && !named.filter((x) => !caption || String(x.subtitle ?? '').trim() === caption).some((x) => reportedAssetUrl(x))) problems.push(`${title}: the report gives no \`assetUrl\` (https) for its upload`);
       }
     }
   }
@@ -717,8 +721,7 @@ export async function recordTracker(root, cfg, state, options) {
     }
   }
   const verifiedAttachments = new Map();
-  // 0.7.27 (I-189): how this adapter shows screenshots; attached, they are not embedded in the comment, and with `attachments`
-  // the comment lists each caption, so an attachment that carries none of its own is not refused for it.
+  // 0.7.27 (I-189): how this adapter shows screenshots; attached, they are not embedded in the comment.
   const shotMode = pending.find((x) => x.op === 'comment' && x.rendered === 'delivered')?.screenshots ?? 'embedded';
   // Attachments are checked first: the comment must embed each verified upload by its asset.
   const ordered = [...pending].sort((x, y) => (x.op === 'attach' ? -1 : 0) - (y.op === 'attach' ? -1 : 0));
@@ -788,7 +791,9 @@ export async function recordTracker(root, cfg, state, options) {
           const caption = shown?.screenshots?.find((x) => x.sha256 === f.sha256)?.caption ?? null;
           const named = issue.attachments.filter((x) => x.title === title || x.filename === title);
           const uploads = named.filter((x) => adapter.isUpload(x));
-          const exact = caption ? uploads.filter((x) => String(x.subtitle ?? '').trim() === caption || (shotMode === 'attachments' && !String(x.subtitle ?? '').trim())) : uploads;
+          // 0.7.27 (review of the release): the subtitle is the caption in every attached mode. An upload with none cannot be told from an
+          // earlier attempt's file of the same name, which is what the guard below is for.
+          const exact = caption ? uploads.filter((x) => String(x.subtitle ?? '').trim() === caption) : uploads;
           if (!named.length) missing.push(`${title} (${f.path}): no attachment with this title`);
           else if (!uploads.length) missing.push(`${title} (${f.path}): attached as a link, not an uploaded file (${named[0].url ?? 'no url in the capture'})`);
           else if (!exact.length) missing.push(`${title} (${f.path}): uploaded, but no attachment of it has the subtitle "${caption}" (an earlier attempt's file with the same name does not count)`);

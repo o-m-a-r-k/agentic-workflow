@@ -76,7 +76,7 @@ const commentOf = (root, id) => fs.readFileSync(path.join(root, '.wf-evidence', 
 const tickets = (root, item) => JSON.parse(fs.readFileSync(path.join(root, 'notes-db', `${item}.json`), 'utf8'));
 
 test('0.7.27 (I-189): an adapter whose screenshots are attachments gets a comment that lists them in plain words, and the delivery is recorded without an embedded image', () => {
-  const { base, root } = project('attach-listed', 'attachments');
+  const { base, root } = project('attach-listed', 'attachments', { subtitle: true });
   const { id, shown } = toShown(base, root);
   assert.match(ok(wf(root, ['doctor', '--no-steps'])).out, /tracker screenshots\n {4}the adapter shows screenshots as attachments \(`screenshots: attachments`\): the delivered comment lists each file and its caption, and no image is embedded/);
   const comment = commentOf(root, id);
@@ -112,6 +112,17 @@ test('0.7.27 (I-189): "attachments-only" lists nothing in the comment; the attac
   const linked = wf(link.root, ['shown', '--file', c.shown, '--attempt', c.id]);
   assert.match(`${linked.out}${linked.err}`, /home\.png[^\n]*attached as a link, not an uploaded file/);
   assert.notEqual(state(link.root, c.id).phase, 'done');
+});
+
+// 0.7.27 (review of the release), named failure: in `attachments` mode an upload with no subtitle at all was accepted, which
+// weakened the guard that an earlier attempt's upload with the same file name does not count as this delivery's: the caption the
+// owner gave the screenshot is the only thing that tells the two apart. The subtitle is the caption in both attached modes.
+test('0.7.27 (I-189): in "attachments" mode an upload without the caption as its subtitle is refused, as in "attachments-only"', () => {
+  const bare = project('attach-listed-bare', 'attachments');
+  const a = toShown(bare.base, bare.root);
+  const refused = wf(bare.root, ['shown', '--file', a.shown, '--attempt', a.id]);
+  assert.match(`${refused.out}${refused.err}`, /home\.png[^\n]*uploaded, but no attachment of it has the subtitle "Home screen with the new text" \(an earlier attempt's file with the same name does not count\)/);
+  assert.notEqual(state(bare.root, a.id).phase, 'done');
 });
 
 test('0.7.27 (I-189): every other adapter embeds as before, and an adapter that declares something else is refused by name', () => {
@@ -156,12 +167,19 @@ test('0.7.27 (I-189): through a connector the agent-reported readback of such an
   assert.match(ok(wf(root, ['resume', '--attempt', id])).out, /post the comment in [^\n]* unchanged \(it lists each screenshot with its caption\): this tracker's adapter shows the screenshots as attachments, so they are attached to the ticket as files, not embedded in the comment/);
   const posted = commentOf(root, id);
   write(base, 'posted.md', posted);
-  const good = { issue: 'ENG-72', status: 'Ready for UAT', comment: { id: 'c1', bodySha256: crypto.createHash('sha256').update(posted).digest('hex'), createdAt: at() }, attachments: [{ title: 'home.png', subtitle: 'Home screen with the new text' }] };
+  const good = { issue: 'ENG-72', status: 'Ready for UAT', comment: { id: 'c1', bodySha256: crypto.createHash('sha256').update(posted).digest('hex'), createdAt: at() }, attachments: [{ title: 'home.png', subtitle: 'Home screen with the new text', assetUrl: 'https://uploads.example.test/home.png?sig=abc' }] };
   const missing = rec('delivered', { ...good, attachments: [], readAt: at() }, ['--comment-file', path.join(base, 'posted.md')]);
   assert.equal(missing.code, 75);
   assert.match(missing.err, /home\.png: not among the reported attachments/);
   assert.doesNotMatch(missing.err, /shows no image|embedded/, 'no image is asked for');
+  // Each reported attachment names the upload by an https url (a file attached on the ticket, not a title written in a report).
+  for (const [attachments, why] of [[[{ title: 'home.png', subtitle: 'Home screen with the new text' }], 'no url'], [[{ title: 'home.png', subtitle: 'Home screen with the new text', assetUrl: 'http://uploads.example.test/home.png' }], 'not https'], [[{ title: 'home.png', assetUrl: 'https://uploads.example.test/home.png' }], 'no subtitle']]) {
+    const refused = rec('delivered', { ...good, attachments, readAt: at() }, ['--comment-file', path.join(base, 'posted.md')]);
+    assert.equal(refused.code, 75, why);
+    assert.match(refused.err, why === 'no subtitle' ? /home\.png: reported without the subtitle "Home screen with the new text"/ : /home\.png: the report gives no `assetUrl` \(https\) for its upload/, why);
+  }
   const done = ok(rec('delivered', { ...good, readAt: at() }, ['--comment-file', path.join(base, 'posted.md')]));
+  assert.equal(JSON.stringify(state(root, id).tracker.done.find((d) => d.event === 'delivered').attachments).includes('sig=abc'), false, 'the upload signature is not kept');
   assert.match(done.out, /tracker delivered recorded as agent-reported, unverified/);
   assert.equal(state(root, id).phase, 'done');
 });
