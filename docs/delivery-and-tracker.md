@@ -15,7 +15,7 @@ stateDiagram-v2
 ```
 
 - **Delivery adapters** do the git side, in three parts:
-  - `integrate`: push to main, or open a PR/MR.
+  - `integrate`: push to main, or open a PR/MR. It runs on every `wf deliver` for a repo that is not delivered yet, so it keeps an open request at the worktree's HEAD (or tells the owner where to push it): after a base moved while the request waited and `wf base merge` reconciled the branch, the gate, review and acceptance run again and this call is what updates the request ([Base movement](lifecycle.md#base-movement)).
   - `observe`: report the state: `integrated`, `awaiting-merge` or `ci-running` (`wf deliver` exits 0 and says to run it again once merged), or `rejected` or `ci-failed` (`wf deliver` refuses with the state and what to do). Any other value, a typo or no state at all refuses too, naming what was received and the valid states. When the change is already on the target branch and the adapter reports anything but `integrated` or a pending state, `wf deliver` refuses until the owner acknowledges that repo and state (`--acknowledge-adapter-state <repo>:<state>`); a retry always asks the adapter again. The adapter is read from the commit the attempt was admitted at, so committing a fixed adapter does not reach the running attempt by itself: `wf deliver --repin-adapter --reason "<why>"` shows the owner what changes and, once confirmed with the base tip, re-reads the delivery adapter from the base branch. [Recovering from an adapter fault](lifecycle.md#recovering-from-an-adapter-fault) gives each case and the scenario that proves it.
   - `readback`: prove the change is on the target branch.
 

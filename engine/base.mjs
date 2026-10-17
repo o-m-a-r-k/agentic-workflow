@@ -64,7 +64,11 @@ export function baseStatus(root, state, { fetch = true } = {}) {
     const tip = git(r.worktree, ['rev-parse', '--verify', '--quiet', ref], { allowFail: true });
     if (!tip) continue;
     const own = git(r.worktree, ['merge-base', 'HEAD', tip], { allowFail: true });
-    const entry = { repo: name, ref, fetched, note: fetched === false ? 'not fetched (offline?); compared with the last fetched base' : null, commits: 0, overlap: [], infra: [], files: 0, tip, own };
+    // 0.7.26 (I-183): the attempt's commits are already in the base (its merge request was merged). Merging the base in would
+    // only fast-forward the branch past the commit the delivery recognises, so there is nothing to merge in.
+    const head = git(r.worktree, ['rev-parse', 'HEAD'], { allowFail: true });
+    const landed = Boolean(head) && head !== r.base && own === head;
+    const entry = { repo: name, ref, fetched, note: fetched === false ? 'not fetched (offline?); compared with the last fetched base' : null, commits: 0, overlap: [], infra: [], files: 0, tip, own, ...(landed ? { landed: true } : {}) };
     if (own && own !== tip) {
       const delta = git(r.worktree, ['diff', '--name-only', own, tip]).split('\n').filter(Boolean);
       const mine = new Set(changedFiles(state, name));
@@ -82,28 +86,67 @@ export function baseStatus(root, state, { fetch = true } = {}) {
   return out;
 }
 
+// 0.7.26 (I-183): the repos still to deliver whose base moved past the branch (read from the last fetch). A repo recorded for the
+// delivery is settled, one this ticket changes nothing in is skipped, and one whose change is already on its target has nothing
+// to merge in.
+export function baseMovedForDelivery(root, state) {
+  const open = Object.keys(state.repos).filter((n) => !state.delivery.repos[n] && fs.existsSync(state.repos[n].worktree) && changedFiles(state, n).length > 0);
+  if (!open.length) return [];
+  return baseStatus(root, { ...state, repos: Object.fromEntries(open.map((n) => [n, state.repos[n]])) }, { fetch: false }).filter((e) => e.commits && !e.landed);
+}
+
 const list = (files) => `${files.slice(0, 5).join(', ')}${files.length > 5 ? ` (+${files.length - 5} more)` : ''}`;
 
 export function baseLines(entries) {
   return entries
     .filter((e) => e.commits || e.note)
-    .map((e) => `  base ${e.repo}: ${e.commits ? `${e.ref} moved ${e.commits} commit(s); ${e.overlap.length ? `overlaps your changed files: ${list(e.overlap)}` : 'no overlap with your changed files'}${e.infra.length ? `; touches shared infrastructure: ${list(e.infra)}` : ''} (\`wf base merge\` merges it in)` : 'current'}${e.unproven ? `; ${e.unproven.count} of them reached ${e.ref} without a workflow delivery, so no gate passed them (${e.unproven.subjects.join('; ')}${e.unproven.count > 3 ? ', ...' : ''}): a gate failure may come from the base` : ''}${e.note ? ` — ${e.note}` : ''}`);
+    .map((e) => `  base ${e.repo}: ${e.commits && e.landed ? `${e.ref} moved ${e.commits} commit(s) and already holds this attempt's commits (nothing to merge in)` : e.commits ? `${e.ref} moved ${e.commits} commit(s); ${e.overlap.length ? `overlaps your changed files: ${list(e.overlap)}` : 'no overlap with your changed files'}${e.infra.length ? `; touches shared infrastructure: ${list(e.infra)}` : ''} (\`wf base merge\` merges it in)` : 'current'}${e.unproven ? `; ${e.unproven.count} of them reached ${e.ref} without a workflow delivery, so no gate passed them (${e.unproven.subjects.join('; ')}${e.unproven.count > 3 ? ', ...' : ''}): a gate failure may come from the base` : ''}${e.note ? ` — ${e.note}` : ''}`);
 }
 
 // Merges each repo's base into its worktree. Refuses a dirty tree or a running gate; a conflict is aborted so the
 // worktree is left as it was, and reported. The gate and the review are bound to the tree, so a merge that moves HEAD
 // leaves neither counting for the new tree.
+//
+// 0.7.26 (I-183). Named failure (field): a manual delivery adapter opened a merge request and `observe` kept reporting
+// `awaiting-merge` while the base branch moved on by dozens of commits. `wf base merge` refused ("already being delivered;
+// `wf deliver` merges the base itself") because the first `wf deliver` had recorded the attempt's unchanged repos as
+// skipped, yet only the built-in push-main merges the base at delivery: with an adapter every later `wf deliver` just asked
+// the adapter again and the branch stayed behind. Now the base comes into every repo still to deliver. A repo recorded for
+// the delivery (delivered, or skipped for having no change), a repo this ticket changes nothing in and a repo whose change is
+// already on its target are left as they are. When the delivery had started and the attempt was accepted, the acceptance is withdrawn
+// (`withdrewAcceptance` on the event): it names the commit the pending integration was opened for, so the merged tree
+// gets its gate, its review and its acceptance before `wf deliver` asks the adapter to integrate it again; carried over, a
+// manual merge of the reconciled branch was later refused as "not the accepted, gated commit".
 export function baseMerge(root, options) {
   const state = openState(root, options);
   if (['done', 'abandoned'].includes(state.phase)) throw refuse(`${state.id} is ${state.phase}`);
-  if (Object.keys(state.delivery.repos).length) throw refuse(`${state.id} is already being delivered; \`wf deliver\` merges the base itself`);
+  if (state.delivery.completedAt) throw refuse(`${state.id} is already delivered; nothing is left to merge the base into`, '`wf resume` says what is left (the tracker handoff)', { id: 'base:delivered' });
   if (liveGate(root, state)) throw refuse('a gate is running on these worktrees; wait for it or `wf stop` it first');
   const dirty = uncommitted(state);
   if (Object.keys(dirty).length) throw refuse(`commit or remove uncommitted changes before merging the base: ${Object.entries(dirty).map(([r, l]) => `${r} (${l.slice(0, 3).join('; ')})`).join(', ')}`);
   const names = options.repo ? [String(options.repo)] : Object.keys(state.repos);
   for (const n of names) if (!state.repos[n]) throw refuse(`repo \`${n}\` is not part of ${state.id} (repos: ${Object.keys(state.repos).join(', ')})`);
-  const results = [];
-  for (const entry of baseStatus(root, { ...state, repos: Object.fromEntries(names.map((n) => [n, state.repos[n]])) })) {
+  const recorded = (n) => state.delivery.repos[n] ?? null;
+  const how = (d) => (d.skipped ? `skipped, ${d.skipped}` : `delivered ${String(d.commit ?? '').slice(0, 10)}`);
+  const settled = names.filter(recorded);
+  if (options.repo && settled.length) throw refuse(`${names[0]} is already settled in this delivery (${how(recorded(names[0]))}); \`wf base merge\` leaves what is recorded as delivered or skipped as it is`, `merge the base into a repo that is still to deliver (${Object.keys(state.repos).filter((n) => !recorded(n)).join(', ') || 'none is left: \`wf deliver\` finishes the delivery'})`, { id: 'base:settled-repo' });
+  const open = names.filter((n) => !recorded(n));
+  if (!open.length) throw refuse(`every repo of ${state.id} is already recorded in its delivery (${settled.map((n) => `${n} ${how(recorded(n))}`).join('; ')}); nothing is left to merge the base into`, '`wf deliver` finishes the delivery', { id: 'base:delivered' });
+  // The delivery has started when a repo is recorded or an adapter was asked: the accepted commit is already out.
+  const started = Object.keys(state.delivery.repos).length > 0 || Object.keys(state.delivery.integrating ?? {}).length > 0;
+  const withdraws = started && Boolean(state.accepted);
+  const results = settled.map((n) => ({ repo: n, settled: how(recorded(n)) }));
+  for (const entry of baseStatus(root, { ...state, repos: Object.fromEntries(open.map((n) => [n, state.repos[n]])) })) {
+    if (entry.landed && state.delivery.integrating?.[entry.repo]) {
+      results.push({ repo: entry.repo, landed: true, ref: entry.ref });
+      continue;
+    }
+    // A repo this ticket changes nothing in has nothing to deliver; the delivery records it as skipped. Once the delivery has
+    // started its base is not merged in unasked: it would move that repo's tree, so its gate steps would run again for nothing.
+    if (started && !options.repo && changedFiles(state, entry.repo).length === 0) {
+      results.push({ repo: entry.repo, idle: true });
+      continue;
+    }
     if (!entry.commits) {
       results.push({ repo: entry.repo, upToDate: true, note: entry.note });
       continue;
@@ -114,13 +157,13 @@ export function baseMerge(root, options) {
     if (merge.status !== 0) {
       const conflicts = git(wt, ['diff', '--name-only', '--diff-filter=U'], { allowFail: true }).split('\n').filter(Boolean);
       run('git', ['merge', '--abort'], { cwd: wt, allowFail: true });
-      const done = results.filter((x) => !x.upToDate).map((x) => x.repo);
+      const done = results.filter((x) => x.headAfter).map((x) => x.repo);
       throw refuse(`merging ${entry.ref} into ${entry.repo} conflicts${conflicts.length ? ` in ${list(conflicts)}` : ''}; the merge was aborted and ${entry.repo} is unchanged${done.length ? ` (already merged: ${done.join(', ')})` : ''}`, `have the implementer of the overlapping work merge ${entry.ref} in ${wt}, resolve and commit; then \`wf gate\` and a fresh reviewer`);
     }
     const after = git(wt, ['rev-parse', 'HEAD']);
-    const data = { repo: entry.repo, ref: entry.ref, from: entry.own, to: entry.tip, commits: entry.commits, files: entry.files, overlap: entry.overlap, infra: entry.infra, headBefore: before, headAfter: after, note: entry.note };
+    const data = { repo: entry.repo, ref: entry.ref, from: entry.own, to: entry.tip, commits: entry.commits, files: entry.files, overlap: entry.overlap, infra: entry.infra, headBefore: before, headAfter: after, note: entry.note, ...(withdraws && before !== after ? { withdrewAcceptance: true } : {}) };
     append(root, state.id, 'base.merged', data, actor(options));
     results.push(data);
   }
-  return { state: loadState(root, state.id), results };
+  return { state: loadState(root, state.id), results, withdrewAcceptance: withdraws && results.some((x) => x.withdrewAcceptance) };
 }

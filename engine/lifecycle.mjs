@@ -2984,6 +2984,10 @@ export function nextDecision(root, state) {
     return blockers.length ? result('gate', 'owner', blockers.join('; ')) : result('gate', 'ready', null, { guidance: canonical(r.tree ?? r.handoffTree) === canonical(tree) ? guidance : withAttempt(root, state, 'clean code review covers this change: run one `wf gate`; then the evidence review') });
   }
   if (!reviewedAfterGate(r)) return result('review', 'ready', null, { round: 'evidence-review' });
+  // 0.7.26 (I-183). Named failure: a base merge that left the reviewed change alone kept the round "covering" the moved tree, so
+  // the decision (and `wf advance`) named the acceptance after the gate, and `wf accept` refused: it wants a closure written for
+  // the tree as it is. The round that inspects the new gate's evidence on this tree comes first.
+  if (canonical(r.tree ?? r.handoffTree) !== canonical(tree)) return result('review', 'ready', null, { round: 'evidence-review' });
   // Named failure (I-107): criteria an amendment added or re-worded after this round was handed are mapped by no round, and
   // `wf accept` refuses; the next step is a reviewer, not the acceptance.
   const late = criteriaAfterReview(state, r);
@@ -3052,6 +3056,14 @@ function panelAction(cfg, state, runtime) {
   return 'freeze the criteria: `wf plan --file <criteria.yaml>`';
 }
 
+// 0.7.26 (I-183): an integration the delivery adapter reported as pending, for the repos not yet delivered: `wf deliver` asks the
+// adapter again, and a base that moved meanwhile comes in with `wf base merge` (the combined tree is then reviewed again).
+function waitingNote(state) {
+  const waiting = Object.entries(state.delivery.integrating ?? {}).filter(([n, i]) => !state.delivery.repos[n] && PENDING.includes(i.observed?.state));
+  if (!waiting.length) return '';
+  return ` -- ${waiting.map(([n, i]) => `${n} is ${i.observed.state}${i.url ? ` (${i.url})` : ''}`).join('; ')}: \`wf deliver\` asks the adapter again; if the base branch moved meanwhile, \`wf base merge\` brings it in and the merged tree is gated, reviewed and accepted again before \`wf deliver\` integrates it`;
+}
+
 function phaseAction(root, cfg, state) {
   // The stop reason is the owner's note about the tree it stopped on; once the code changed it is stale and, shown to a
   // later reviewer, it carried an earlier round's findings into a blind review.
@@ -3082,7 +3094,7 @@ function phaseAction(root, cfg, state) {
   // An amendment an engine before 0.7.4 recorded left the acceptance standing (I-107): say what delivery would ship.
   const unmapped = amendedAfterAcceptance(state);
   const unmappedNote = unmapped.length ? ` -- WARNING: ${unmapped.join(', ')} ${unmapped.length === 1 ? 'was' : 'were'} added or re-worded after the acceptance and no review mapped ${unmapped.length === 1 ? 'it' : 'them'} to evidence (the amendment was recorded before 0.7.4, which left the acceptance standing): for the evidence, hand a fresh reviewer (\`wf handoff reviewer --agent <new id>\`) and \`wf accept\` again, then deliver` : '';
-  if (state.accepted) return state.batchPending ? `accepted; ${state.batchOf} (reserved by a split) waits for the other members to be accepted, then \`wf batch create --members <every member of the split>\` assembles it` : state.batchOf ? `waiting for batch ${state.batchOf}` : state.deferHeavy ? `accepted; its heavy steps were deferred to a batch, so it ships in one: \`wf batch create --members ${state.id},<the other members>\`` : `deliver: \`wf deliver\`${unmappedNote}`;
+  if (state.accepted) return state.batchPending ? `accepted; ${state.batchOf} (reserved by a split) waits for the other members to be accepted, then \`wf batch create --members <every member of the split>\` assembles it` : state.batchOf ? `waiting for batch ${state.batchOf}` : state.deferHeavy ? `accepted; its heavy steps were deferred to a batch, so it ships in one: \`wf batch create --members ${state.id},<the other members>\`` : `deliver: \`wf deliver\`${unmappedNote}${waitingNote(state)}`;
   // Order of work (I-27): code-review rounds until one comes back clean (no gate meanwhile), then one gate on that tree,
   // then the evidence review of the gated tree. Review and gate never run side by side.
   const g = state.lastGate;

@@ -448,6 +448,13 @@ export function reduce(entries) {
         break;
       case 'base.merged':
         s.baseMerges.push({ ...d, at: e.at });
+        // 0.7.26 (I-183): a base merged into an attempt whose delivery had started moved the commit the acceptance names (the one
+        // the pending integration was opened for), so the engine that writes the event decides and records it
+        // (`withdrewAcceptance`), as an amendment does (I-107): folding an older ledger changes nothing.
+        if (d.withdrewAcceptance === true) {
+          s.accepted = null;
+          s.phase = 'implementing';
+        }
         break;
       case 'review.accepted':
         s.accepted = { ...d, at: e.at };

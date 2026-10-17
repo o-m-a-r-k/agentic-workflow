@@ -11,7 +11,7 @@ import os from 'node:os';
 import { refreshModels } from './models.mjs';
 import { RULE_SHORT } from './leaving.mjs';
 import { abandon, adopt, attemptForName, changedFiles, closeShipped, entry, hold, openState, release, resolveAttempt, setIntent } from './attempt.mjs';
-import { baseLines, baseMerge, baseStatus } from './base.mjs';
+import { baseLines, baseMerge, baseMovedForDelivery, baseStatus } from './base.mjs';
 import { findRoot, loadConfig, repoDir, requireRoot } from './config.mjs';
 import { exportAttempt, exportFile } from './export.mjs';
 import { STOP_CLASSES, liveGate, runGate, runPrepared, runWithLease, stopGate } from './gate.mjs';
@@ -1060,7 +1060,13 @@ async function dispatch(cmd, sub, positional, options) {
       }
       const r = await deliver(root, options);
       if (r.waiting) {
-        print(options, `${r.waiting.repo}: ${r.waiting.state}${r.waiting.url ? ` (${r.waiting.url})` : ''}${r.waiting.onTarget ? `; the change is already on ${r.waiting.onTarget}` : ''}. Run \`wf deliver\` again once it is merged.`, r);
+        // 0.7.26 (I-183): the base branch may have moved while the integration waits; the way in is named where the owner reads it.
+        let moved = [];
+        try {
+          moved = r.waiting.onTarget ? [] : baseMovedForDelivery(root, r.state);
+        } catch {}
+        const note = moved.length ? `\nthe base moved meanwhile (${moved.map((e) => `${e.repo}: ${e.ref} +${e.commits} commit(s)`).join('; ')}): \`wf base merge\` brings it into the branch, the merged tree is gated, reviewed and accepted again, and \`wf deliver\` then asks the delivery adapter to integrate the reconciled branch` : '';
+        print(options, `${r.waiting.repo}: ${r.waiting.state}${r.waiting.url ? ` (${r.waiting.url})` : ''}${r.waiting.onTarget ? `; the change is already on ${r.waiting.onTarget}` : ''}. Run \`wf deliver\` again once it is merged.${note}`, moved.length ? { ...r, baseMoved: moved } : r);
         return 0;
       }
       const api = await trackerApi(root, r.state.id);
@@ -1488,9 +1494,11 @@ async function dispatch(cmd, sub, positional, options) {
     case 'base': {
       if (sub === 'merge') {
         const r = baseMerge(root, options);
-        const lines = r.results.map((x) => (x.upToDate ? `${x.repo}: already on its base${x.note ? ` (${x.note})` : ''}` : `${x.repo}: merged ${x.ref} (${x.commits} commit(s), ${x.files} file(s)); HEAD ${x.headBefore.slice(0, 10)} -> ${x.headAfter.slice(0, 10)}${x.overlap.length ? `\n  note: the merge brought in changes to files this ticket also changes: ${x.overlap.join(', ')}; check the merged result` : ''}${x.infra.length ? `\n  note: shared infrastructure changed: ${x.infra.join(', ')}` : ''}`));
-        const moved = r.results.some((x) => !x.upToDate && x.headBefore !== x.headAfter);
-        if (moved) lines.push('HEAD changed: the gate and the review are bound to the tree, so neither counts for the merged tree. Run `wf gate`, then hand the tree to a fresh reviewer.');
+        const lines = r.results.map((x) => (x.settled ? `${x.repo}: left as it is (already settled in this delivery: ${x.settled})` : x.idle ? `${x.repo}: left as it is (this ticket changes nothing there, so the delivery skips it)` : x.landed ? `${x.repo}: left as it is (its change is already on ${x.ref}; \`wf deliver\` records it)` : x.upToDate ? `${x.repo}: already on its base${x.note ? ` (${x.note})` : ''}` : `${x.repo}: merged ${x.ref} (${x.commits} commit(s), ${x.files} file(s)); HEAD ${x.headBefore.slice(0, 10)} -> ${x.headAfter.slice(0, 10)}${x.overlap.length ? `\n  note: the merge brought in changes to files this ticket also changes: ${x.overlap.join(', ')}; check the merged result` : ''}${x.infra.length ? `\n  note: shared infrastructure changed: ${x.infra.join(', ')}` : ''}`));
+        const moved = r.results.some((x) => x.headAfter && x.headBefore !== x.headAfter);
+        // 0.7.26 (I-183): with the delivery under way the acceptance is withdrawn; the line says what runs again and what stays.
+        if (r.withdrewAcceptance) lines.push('HEAD changed: the acceptance is withdrawn, because it names the commit the pending integration (the merge or pull request) was opened for, and the merged tree has neither a gate nor a review. Gate it, have it reviewed and accept it again; then `wf deliver` asks the delivery adapter to integrate the reconciled branch. A repo already delivered or skipped is not touched.');
+        else if (moved) lines.push('HEAD changed: the gate and the review are bound to the tree, so neither counts for the merged tree. Run `wf gate`, then hand the tree to a fresh reviewer.');
         print(options, `${lines.join('\n')}\nnext: ${nextAction(root, r.state)}`, r);
         return 0;
       }
