@@ -8,7 +8,9 @@
 // `tracker.statusByLabel: { <step>: { "<label>": "<status>" } }` is the person's routing, in the adapter: when the ticket
 // carries the label, that step's status is the one named instead of the step's default in `tracker.statuses`. The default stays
 // everywhere else: no step sets Done unless the adapter routes it there (or names it as a default). The labels are the ticket's
-// own, as its latest recorded readback showed them (`labels` of the normalised issue), never anything an agent says here.
+// own, as a readback showed them (`labels` of the normalised issue), never anything an agent says here. The status asked for is
+// worked out from the labels of the latest readback recorded so far; the readback that proves it is judged by its own labels
+// (engine/tracker.mjs expectedStatus), so a label taken off in between is not held against the ticket.
 
 const fold = (s) => String(s ?? '').normalize('NFKC').trim().toLowerCase();
 
@@ -60,4 +62,5 @@ export function ticketLabels(state) {
 export const statusNames = (tracker) => [...new Set([...Object.values(tracker?.statuses ?? {}), ...Object.values(tracker?.statusByLabel ?? {}).flatMap((byLabel) => Object.values(byLabel ?? {}))].filter((s) => typeof s === 'string' && s))];
 
 // What `wf doctor` says about the routing: one line per rule.
-export const routeLines = (tracker) => Object.entries(tracker?.statusByLabel ?? {}).flatMap(([step, byLabel]) => Object.entries(byLabel ?? {}).map(([label, status]) => `${step} goes to "${status}" for a ticket labelled "${label}" (otherwise "${tracker.statuses?.[step]}")`));
+// A rule for the first step cannot route at admission: the labels are those of a readback, and the first one is taken then.
+export const routeLines = (tracker) => Object.entries(tracker?.statusByLabel ?? {}).flatMap(([step, byLabel]) => Object.entries(byLabel ?? {}).map(([label, status]) => `${step} goes to "${status}" for a ticket labelled "${label}" (otherwise "${tracker.statuses?.[step]}")${step === 'started' ? '; not at admission, which comes before any readback has shown the labels' : ''}`));

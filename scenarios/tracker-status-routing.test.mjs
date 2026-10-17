@@ -89,8 +89,9 @@ test('0.7.27 (I-190): the built-in trackers hand the engine their issue\'s label
   assert.deepEqual(files.normalize({ issue: { identifier: 'ENG-1', title: 't', status: 'Todo', labels: ['Self-serve'] } }).labels, ['Self-serve']);
 });
 
-test('0.7.27 (I-190): through a connector, the labels the agent\'s readback reports route the status, and the readback must show the routed status', () => {
-  const { base, root } = singleRepoProject('tracker-route-connector', { tracker: { kind: 'linear', via: 'connector', statuses, deliveredComment: 'uat.md', statusByLabel: ROUTED }, gate: { steps: [{ id: 'unit', repo: 'app', run: 'true' }] } }, { '.workflow/uat.md': '{id} is ready for UAT.\n\nUAT scope:\n{uatScope}\n' });
+// A project whose tracker is worked through a connector: the agent reports each readback (`--agent-reported`), the engine checks it.
+function connector(name) {
+  const { base, root } = singleRepoProject(name, { tracker: { kind: 'linear', via: 'connector', statuses, deliveredComment: 'uat.md', statusByLabel: ROUTED }, gate: { steps: [{ id: 'unit', repo: 'app', run: 'true' }] } }, { '.workflow/uat.md': '{id} is ready for UAT.\n\nUAT scope:\n{uatScope}\n' });
   let n = 0;
   const at = () => new Date(Date.now() + 1000 * ++n).toISOString();
   const report = (r) => {
@@ -117,18 +118,24 @@ test('0.7.27 (I-190): through a connector, the labels the agent\'s readback repo
     ok(wf(root, ['deliver', '--attempt', id, '--summary-file', summaryFile(base)]));
     return { id, rec };
   };
-  const post = ({ id, rec }, item, status) => {
+  // The delivered readback: the status the ticket shows and, when the tracker reports them, the labels it carries then.
+  const post = ({ id, rec }, item, status, labels) => {
     const posted = fs.readFileSync(path.join(root, '.wf-evidence', 'attempts', id, 'delivery', 'delivered-comment.md'), 'utf8');
-    const file = path.join(base, `posted-${id}.md`);
+    const file = path.join(base, `posted-${id}-${++n}.md`);
     fs.writeFileSync(file, posted);
-    return rec('delivered', { issue: item, status, comment: { id: 'c1', bodySha256: crypto.createHash('sha256').update(posted).digest('hex'), createdAt: at() }, attachments: [], readAt: at() }, ['--comment-file', file]);
+    return rec('delivered', { issue: item, status, ...(labels ? { labels } : {}), comment: { id: 'c1', bodySha256: crypto.createHash('sha256').update(posted).digest('hex'), createdAt: at() }, attachments: [], readAt: at() }, ['--comment-file', file]);
   };
+  return { root, run, post };
+}
+
+test('0.7.27 (I-190): through a connector, the labels the agent\'s readback reports route the status, and the readback must show the routed status', () => {
+  const { root, run, post } = connector('tracker-route-connector');
   // A ticket whose admission readback lists the label: the delivered action is Done, and the resume text says why.
   const ts = run('ENG-50', ['Bug', 'Self-serve']);
   assert.deepEqual(state(root, ts.id).tracker.done.find((d) => d.event === 'admitted').labels, ['Bug', 'Self-serve']);
   const action = state(root, ts.id).tracker.pending.find((a) => a.event === 'delivered' && a.op === 'setStatus');
   assert.deepEqual([action.status, action.route.label], ['Done', 'Self-serve']);
-  assert.match(ok(wf(root, ['resume', '--attempt', ts.id])).out, /set status to "Done" \(the ticket's label "Self-serve" routes it there instead of "Ready for UAT"; the project chose that in its adapter\)/);
+  assert.match(ok(wf(root, ['resume', '--attempt', ts.id])).out, /set status to "Done" \(the ticket's label "Self-serve" routes it there instead of "Ready for UAT"; the project chose that in its adapter/);
   const wrong = post(ts, 'ENG-50', 'Ready for UAT');
   assert.equal(wrong.code, 75);
   assert.match(wrong.err, /status is `Ready for UAT`, expected `Done`/);
@@ -139,4 +146,42 @@ test('0.7.27 (I-190): through a connector, the labels the agent\'s readback repo
   assert.equal(state(root, plain.id).tracker.pending.find((a) => a.event === 'delivered' && a.op === 'setStatus').status, 'Ready for UAT');
   const unknown = run('ENG-52', null);
   assert.equal(state(root, unknown.id).tracker.pending.find((a) => a.event === 'delivered' && a.op === 'setStatus').status, 'Ready for UAT', 'no labels reported: the default');
+});
+
+// 0.7.27 (review of the release), named failure: the route was taken from the labels of the latest recorded readback, which can be
+// days old, and the delivered readback then had to show exactly that status. A label removed before delivery (the person took it
+// off to keep the ticket from closing itself) still forced Done. The labels of the readback being recorded decide.
+test('0.7.27 (I-190): the delivered readback\'s own labels decide the routed status, not the labels of an earlier readback', () => {
+  const { root, run, post } = connector('tracker-route-fresh');
+  // The label was on the ticket at admission and is gone at delivery: the default status is the one to show, and Done is refused.
+  const removed = run('ENG-60', ['Bug', 'Self-serve']);
+  assert.equal(state(root, removed.id).tracker.pending.find((a) => a.event === 'delivered' && a.op === 'setStatus').status, 'Done', 'pending when the label was last seen');
+  assert.match(ok(wf(root, ['resume', '--attempt', removed.id])).out, /if the ticket no longer carries "Self-serve" when you read it back, set "Ready for UAT"/);
+  const stale = post(removed, 'ENG-60', 'Done', ['Bug']);
+  assert.equal(stale.code, 75);
+  assert.match(stale.err, /status is `Done`, expected `Ready for UAT` \(the ticket's labels, as read back, do not carry "Self-serve"\)/);
+  ok(post(removed, 'ENG-60', 'Ready for UAT', ['Bug']));
+  const rec = readLedger(root, removed.id).filter((e) => e.type === 'tracker.recorded').at(-1).data;
+  assert.equal(rec.routed, undefined, 'no route was used');
+  // The label is still there at delivery: Done is accepted and the route used is recorded.
+  const kept = run('ENG-61', ['Self-serve']);
+  ok(post(kept, 'ENG-61', 'Done', ['Self-serve', 'Bug']));
+  assert.deepEqual(readLedger(root, kept.id).filter((e) => e.type === 'tracker.recorded').at(-1).data.routed, [{ step: 'delivered', label: 'Self-serve', status: 'Done', default: 'Ready for UAT' }]);
+  // The label was put on after admission: the delivered readback's labels route it, whatever was pending.
+  const added = run('ENG-62', ['Bug']);
+  assert.equal(state(root, added.id).tracker.pending.find((a) => a.event === 'delivered' && a.op === 'setStatus').status, 'Ready for UAT');
+  const early = post(added, 'ENG-62', 'Ready for UAT', ['Bug', 'self-serve']);
+  assert.equal(early.code, 75);
+  assert.match(early.err, /status is `Ready for UAT`, expected `Done` \(the ticket's label "Self-serve" routes it\)/);
+  ok(post(added, 'ENG-62', 'Done', ['Bug', 'self-serve']));
+  // A readback that reports no labels is judged as the pending action says.
+  const silent = run('ENG-63', ['Self-serve']);
+  ok(post(silent, 'ENG-63', 'Done'));
+});
+
+test('0.7.27 (I-190): doctor says that a rule for the first step cannot route at admission', () => {
+  const p = project('tracker-route-started', { started: { 'Self-serve': 'Working' }, delivered: { 'Self-serve': 'Done' } });
+  const out = ok(wf(p.root, ['doctor', '--no-steps'])).out;
+  assert.match(out, /started goes to "Working" for a ticket labelled "Self-serve" \(otherwise "In Progress"\); not at admission, which comes before any readback has shown the labels/);
+  assert.doesNotMatch(out, /delivered goes to "Done"[^\n]*not at admission/);
 });

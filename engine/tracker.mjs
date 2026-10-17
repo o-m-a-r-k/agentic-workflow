@@ -397,6 +397,22 @@ export function trackerActions(root, cfg, state, event, extra = {}) {
   return actions;
 }
 
+// 0.7.27 (review of the release, I-190). The status a `setStatus` action expects from the readback being recorded. Named failure:
+// the route was taken from the labels of the latest recorded readback, which can be days old, and the delivered readback then had
+// to show exactly that status, so a label taken off the ticket before delivery (to keep it from closing itself) still forced the
+// routed status (Done). The labels of the readback in hand decide: the status they route to, else the step's default. A readback
+// that reports no labels is judged as the pending action says. `route` is what was used, for the record; `note` says why in a refusal.
+function expectedStatus(cfg, a, labels) {
+  if (!Array.isArray(labels)) return { status: a.status, route: null, note: '' };
+  const fallback = a.route?.default ?? a.status;
+  const route = routedStatus(cfg.tracker, a.key, labels);
+  return {
+    status: route?.status ?? fallback,
+    route: route ? { step: a.key, label: route.label, status: route.status, default: fallback } : null,
+    note: route ? ` (the ticket's label "${route.label}" routes it)` : a.route ? ` (the ticket's labels, as read back, do not carry "${a.route.label}")` : '',
+  };
+}
+
 export function emitTrackerEvent(root, cfg, id, event, extra = {}) {
   const state = loadState(root, id);
   // 0.7.23 (I-178): whatever the caller, an attempt that works no ticket (a batch, a numbered quick fix) queues no tracker step.
@@ -544,8 +560,13 @@ async function recordAgentReported(root, cfg, state, options, event, pending) {
   const extra = [];
   // 0.7.27 (I-189): how this adapter shows screenshots; attached, they are not embedded in the comment.
   const shotMode = pending.find((x) => x.op === 'comment' && x.rendered === 'delivered')?.screenshots ?? 'embedded';
+  const routed = [];
   for (const a of pending) {
-    if (a.op === 'setStatus' && ![a.status, ...(a.unless ?? [])].includes(r.status)) problems.push(`status is \`${r.status ?? '(none)'}\`, expected \`${a.status}\``);
+    if (a.op === 'setStatus') {
+      const want = expectedStatus(cfg, a, Array.isArray(r.labels) ? r.labels.map(String) : null);
+      if (![want.status, ...(a.unless ?? [])].includes(r.status)) problems.push(`status is \`${r.status ?? '(none)'}\`, expected \`${want.status}\`${want.note}`);
+      else if (want.route && r.status === want.status) routed.push(want.route);
+    }
     if (a.op === 'comment') {
       if (typeof options['comment-file'] !== 'string') {
         problems.push('--comment-file <posted.md> is required: the comment text exactly as posted (copy it from the tracker), so the engine can check and hash it');
@@ -617,7 +638,7 @@ async function recordAgentReported(root, cfg, state, options, event, pending) {
       writeImmutable(cdest, comment.text);
       commentRec = { path: cdest, sha256: comment.sha256, id: r.comment?.id ?? null };
     }
-    append(root, state.id, 'tracker.recorded', { event, provenance: AGENT_REPORTED, verified: false, mode: 'agent-reported', capture: { path: dest, sha256: hashFile(dest) }, readAt: r.readAt, status: r.status ?? null, ...(Array.isArray(r.labels) ? { labels: r.labels.map(String) } : {}), ...(commentRec ? { comment: commentRec } : {}), ...(extra.length ? { extraLines: extra.slice(0, 50).map((l) => scrub(l)) } : {}), attachments: (Array.isArray(r.attachments) ? r.attachments : []).slice(0, 200).map((x) => ({ title: x?.title ?? null, caption: x?.subtitle ?? null, assetUrl: reportedAssetUrl(x) })) }, null);
+    append(root, state.id, 'tracker.recorded', { event, provenance: AGENT_REPORTED, verified: false, mode: 'agent-reported', capture: { path: dest, sha256: hashFile(dest) }, readAt: r.readAt, status: r.status ?? null, ...(Array.isArray(r.labels) ? { labels: r.labels.map(String) } : {}), ...(routed.length ? { routed } : {}), ...(commentRec ? { comment: commentRec } : {}), ...(extra.length ? { extraLines: extra.slice(0, 50).map((l) => scrub(l)) } : {}), attachments: (Array.isArray(r.attachments) ? r.attachments : []).slice(0, 200).map((x) => ({ title: x?.title ?? null, caption: x?.subtitle ?? null, assetUrl: reportedAssetUrl(x) })) }, null);
   });
   return loadState(root, state.id);
 }
@@ -701,10 +722,12 @@ export async function recordTracker(root, cfg, state, options) {
   const shotMode = pending.find((x) => x.op === 'comment' && x.rendered === 'delivered')?.screenshots ?? 'embedded';
   // Attachments are checked first: the comment must embed each verified upload by its asset.
   const ordered = [...pending].sort((x, y) => (x.op === 'attach' ? -1 : 0) - (y.op === 'attach' ? -1 : 0));
+  const routed = [];
   for (const a of ordered) {
     if (a.op === 'setStatus') {
-      const ok = [a.status, ...(a.unless ?? [])];
-      if (!ok.includes(issue.status)) problems.push(`status is \`${issue.status}\`, expected \`${a.status}\``);
+      const want = expectedStatus(cfg, a, Array.isArray(issue.labels) ? issue.labels.map(String) : null);
+      if (![want.status, ...(a.unless ?? [])].includes(issue.status)) problems.push(`status is \`${issue.status}\`, expected \`${want.status}\`${want.note}`);
+      else if (want.route && issue.status === want.status) routed.push(want.route);
     }
     if (a.op === 'comment') {
       const since = event === 'delivered' ? state.delivery.completedAt : null;
@@ -797,7 +820,7 @@ export async function recordTracker(root, cfg, state, options) {
   recordedTogether(root, state.id, () => {
     if (engine) writeEngineAnswer(engine);
     writeImmutable(dest, captureText);
-    append(root, state.id, 'tracker.recorded', { event, provenance, verified: level, capture: { path: dest, sha256: hashFile(dest) }, status: issue.status, ...(Array.isArray(issue.labels) ? { labels: issue.labels.map(String) } : {}), ...(host ? { host } : {}), ...(extraLines.length ? { extraLines: extraLines.slice(0, 50).map((l) => scrub(l)) } : {}), ...(verified.length ? { attachments: verified } : {}) }, null);
+    append(root, state.id, 'tracker.recorded', { event, provenance, verified: level, capture: { path: dest, sha256: hashFile(dest) }, status: issue.status, ...(Array.isArray(issue.labels) ? { labels: issue.labels.map(String) } : {}), ...(routed.length ? { routed } : {}), ...(host ? { host } : {}), ...(extraLines.length ? { extraLines: extraLines.slice(0, 50).map((l) => scrub(l)) } : {}), ...(verified.length ? { attachments: verified } : {}) }, null);
   });
   return loadState(root, state.id);
 }
