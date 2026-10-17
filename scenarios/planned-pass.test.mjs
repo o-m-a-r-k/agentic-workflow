@@ -179,7 +179,7 @@ test('"fix all" given in the message that started the attempt, or in one naming 
   // Neither the message that started it nor one naming PP-3: refused, saying so.
   const older = wf(p.root, ['scope', 'fix-all', '--person-said', 'fix every finding without asking me', '--attempt', e.id], session);
   assert.equal(older.code, 75);
-  assert.match(older.err, /in a message that does not name PP-3 and is not the one that started it \(their last before the admission, at [^)]+\): words about something else/);
+  assert.match(older.err, /in a message that does not name PP-3 and is not the one that started it \(their last chat message before the admission that answers no decision's question, at [^)]+\): words about something else/);
   // The kickoff counts, and the record says why.
   const kicked = ok(wf(p.root, ['scope', 'fix-all', '--person-said', 'fix all findings, do not ask me about leaving any', '--attempt', e.id], session));
   assert.match(kicked.out, /the person said to fix every item \("fix all findings, do not ask me about leaving any"\)/);
@@ -188,6 +188,45 @@ test('"fix all" given in the message that started the attempt, or in one naming 
   const e4 = ok(wf(p.root, ['entry', '--item', 'PP-4', '--owner', 'o', '--json'])).json();
   ok(wf(p.root, ['scope', 'fix-all', '--person-said', 'for PP-4 fix all the lows as well', '--attempt', e4.id], session));
   assert.match(JSON.parse(ok(wf(p.root, ['resume', '--attempt', e4.id, '--json'])).out).fixAll.via, /written before the admission, naming PP-4/);
+});
+
+// Third review of 0.7.28. Named failures (a review's cases): "for ENG-9 fix all the lows, do not ask me about them", the last message
+// before PP-3 was admitted, was recorded as PP-3's kickoff; so was a question-panel answer to ENG-9's decision. The kickoff is a chat
+// message that answers no decision's question and names no other item; a reply to another attempt's question is never this one's;
+// a message naming this item and others says so in the read-back; an encoding's name is no ticket id.
+test('"fix all" said about another ticket is never this one\'s: not as the last message, not as a panel answer to its question; one naming others says so', () => {
+  const p = singleRepoProject('pp-kickoff-else', { gate: { steps } }, { 'src/a.txt': LINES, 'src/b.txt': LINES });
+  const file = path.join(p.base, '.home', '.claude', 'projects', 'proj', `${CLAUDE}.jsonl`);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const ago = (sec) => new Date(Date.now() - sec * 1000).toISOString();
+  const line = (x) => fs.appendFileSync(file, `${JSON.stringify(x)}\n`);
+  const said = (text, sec) => line({ type: 'user', timestamp: ago(sec), message: { role: 'user', content: text } });
+  const panel = (question, answer, sec) => {
+    const id = `toolu_${Math.random().toString(36).slice(2)}`;
+    line({ type: 'assistant', timestamp: ago(sec + 1), message: { role: 'assistant', content: [{ type: 'tool_use', id, name: 'AskUserQuestion', input: { questions: [{ question, header: 'wf', multiSelect: false, options: [{ label: 'Fix it now', description: 'x' }, { label: 'Let it leave', description: 'y' }] }] } }] } });
+    line({ type: 'user', timestamp: ago(sec), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: `Your questions have been answered: "${question}"="${answer}".` }] }, toolUseResult: { questions: [], answers: { [question]: answer } } });
+  };
+  said('implement PP-3', 400);
+  said('for PP-5 and ENG-9, fix all the copy findings, store it as UTF-8', 300);
+  panel('ENG-9.1 A2: ENG-9.1 r1:F3: the label reads oddly. Fix it now, or let it leave?', 'No, fix all of them', 200);
+  said('for ENG-9 fix all the lows, do not ask me about them', 60);
+  const e = ok(wf(p.root, ['entry', '--item', 'PP-3', '--owner', 'o', '--json'])).json();
+  const fixAll = (words, attempt = e.id) => wf(p.root, ['scope', 'fix-all', '--person-said', words, '--attempt', attempt], session);
+  // Repro 1: the last message names only ENG-9.
+  const last = fixAll('fix all the lows, do not ask me about them');
+  assert.equal(last.code, 75);
+  assert.match(last.err, /in a message that names ENG-9, not PP-3: words about something else/);
+  // Repro 2: a panel answer to ENG-9's decision.
+  const answer = fixAll('fix all of them');
+  assert.equal(answer.code, 75);
+  assert.match(answer.err, /in a message that answers another ticket's question \(ENG-9\.1\): words about something else/);
+  // An encoding's name is not a ticket: the message names PP-5 and ENG-9 only.
+  const named = fixAll('fix all the copy findings', ok(wf(p.root, ['entry', '--item', 'PP-5', '--owner', 'o', '--json'])).json().id);
+  assert.equal(named.code, 0, named.err);
+  const s5 = JSON.parse(ok(wf(p.root, ['resume', '--attempt', 'PP-5.1', '--json'])).out);
+  assert.match(s5.fixAll.via, /written before the admission, naming PP-5; it also names ENG-9$/);
+  assert.doesNotMatch(s5.fixAll.via, /UTF-8/);
+  assert.equal(JSON.parse(ok(wf(p.root, ['resume', '--attempt', e.id, '--json'])).out).fixAll, undefined, 'nothing recorded on PP-3');
 });
 
 // Review of 0.7.28 (L3): "fix all" covers a level the project lets the owner decide too, and the person has a terminal route.

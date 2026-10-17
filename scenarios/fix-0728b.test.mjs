@@ -158,7 +158,8 @@ test('I-212: the quarantine question names what the step reads as the gate reads
   const root = path.join(base, 'proj');
   fs.mkdirSync(root);
   const step = (id, extra = {}) => ({ ...e2e, id, ignores: ['src/notes/**'], ...extra });
-  const cfg = { version: 1, enabled: true, name: 'i212-repos', adapterRepo: 'app', repos: [{ name: 'app', path: 'app', base: 'main', packages: [{ path: '.', docsOnly: ['**/*.md'] }] }, { name: 'api', path: 'api', base: 'main', packages: [{ path: '.', docsOnly: ['**/*.md'] }] }], lanes: ['quick', 'standard', 'batch'], gate: { steps: [unit, step('e2e'), step('e2e-api', { alsoInputs: ['api'] })] } };
+  const { inputs: _inputs, ...readsAll } = step('e2e-all');
+  const cfg = { version: 1, enabled: true, name: 'i212-repos', adapterRepo: 'app', repos: [{ name: 'app', path: 'app', base: 'main', packages: [{ path: '.', docsOnly: ['**/*.md'] }] }, { name: 'api', path: 'api', base: 'main', packages: [{ path: '.', docsOnly: ['**/*.md'] }] }], lanes: ['quick', 'standard', 'batch'], gate: { steps: [unit, step('e2e'), step('e2e-api', { alsoInputs: ['api'] }), readsAll] } };
   makeRepo(path.join(root, 'app'), { '.gitignore': '.wf-evidence/\n.wf-worktrees/\n', '.workflow/project.yaml': yaml(cfg), ...files('c bad, before this ticket\n'), 'README.md': 'app\n', 'src/notes/n.txt': 'n\n' });
   makeRepo(path.join(root, 'api'), { 'src/svc.txt': 'svc\n', 'README.md': 'api\n' });
   fs.symlinkSync(path.join('app', '.workflow'), path.join(root, '.workflow'));
@@ -166,7 +167,7 @@ test('I-212: the quarantine question names what the step reads as the gate reads
   ok(wf(root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id]));
   ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id]));
   ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
-  commitIn(e.repos.app.worktree, { 'src/app.txt': 'app 2\n', 'README.md': 'app, documented\n', 'src/notes/n.txt': 'n 2\n' });
+  commitIn(e.repos.app.worktree, { 'src/app.txt': 'app 2\n', 'README.md': 'app, documented\n', 'src/notes/n.txt': 'n 2\n', '.workflow/notes.txt': 'a workflow note\n' });
   commitIn(e.repos.api.worktree, { 'src/svc.txt': 'svc 2\n', 'README.md': 'api, documented\n' });
   ok(wf(root, ['handoff', 'close', '--agent', 'i', '--attempt', e.id]));
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', e.id]));
@@ -184,4 +185,8 @@ test('I-212: the quarantine question names what the step reads as the gate reads
   const both = plainOf('e2e-api');
   assert.match(both, /this change edits 2 file\(s\) the step reads: app:src\/app\.txt, api:src\/svc\.txt\./);
   assert.doesNotMatch(both, /README|does not declare/);
+  // Third review of 0.7.28: a step that reads its whole package does not read the workflow's own folder, as the gate's plan has it.
+  const all = plainOf('e2e-all');
+  assert.match(all, /this change edits 1 file\(s\) the step reads: app:src\/app\.txt\./);
+  assert.doesNotMatch(all, /\.workflow|README|notes/);
 });

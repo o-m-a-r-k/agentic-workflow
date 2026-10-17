@@ -474,14 +474,23 @@ const holdsAny = (theirs, quote) => theirs.some((a) => holds(a.answer, quote));
 // reading is (D41): verbatim in one of the person's own messages in the calling session. Returns { quote, message, at, via } or
 // { problem }. Named failure (a review's case): "fix all" was recorded on the agent's word alone, while its effect (no item is asked
 // about again) stands for the rest of the attempt.
-// Which message counts (second review of 0.7.28): one written since the attempt was admitted (`sinceAt`); before it, the person's
-// last message before the admission (the one that started this attempt: "implement ENG-1 and fix all findings"), or one that names
-// the attempt's item. Named failure: the person's kickoff instruction, written a minute before `wf entry`, was refused as "words
-// about another ticket", which would have made the agent ask them again. A message before the admission that is neither is about
-// something else, and the refusal says which.
-const ITEM_LIKE = /(?<![\p{L}\p{N}_-])[A-Z][A-Z0-9]*-\d+(?![\p{N}])/gu;
+// Which message counts (second and third reviews of 0.7.28), by structure, never by meaning:
+// - not one about another ticket: a reply (in the chat or the question panel) to a question of another attempt's decision
+//   (`<attempt> A<n>:`, as the engine names its questions), or a message that names other items and not this one;
+// - one written since the attempt was admitted (`sinceAt`);
+// - before it, one that names the attempt's item (the read-back names any other item it names too), or the message that started
+//   this attempt: the person's last chat message before the admission that answers no decision's question and names no other item.
+// Named failures: the person's kickoff, written a minute before `wf entry`, was refused as "words about another ticket", which would
+// have made the agent ask them again; then the kickoff rule took "for ENG-9 fix all the lows", and a panel answer to ENG-9's
+// decision, as the kickoff of the next ticket.
+const ITEM_LIKE = /(?<![\p{L}\p{N}_-])([A-Z][A-Z0-9]*)-\d+(?![\p{N}])/gu;
+// Names of encodings, hashes and standards have the shape of a ticket id and are never one (a refusal said "names UTF-8").
+const NOT_TICKETS = new Set(['UTF', 'UCS', 'SHA', 'MD', 'ISO', 'RFC', 'IEC', 'ECMA']);
+const prefixOf = (item) => /^([A-Za-z][A-Za-z0-9]*)-\d+$/.exec(String(item ?? ''))?.[1]?.toUpperCase() ?? null;
 const namesItem = (text, item) => Boolean(item) && new RegExp(`(?<![\\p{L}\\p{N}_-])${String(item).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{N}])`, 'iu').test(String(text ?? ''));
-export async function personSaid(quote, { sinceAt = null, item = null, env = process.env } = {}) {
+const itemsIn = (text, item) => [...new Set([...String(text ?? '').matchAll(ITEM_LIKE)].filter((m) => !NOT_TICKETS.has(m[1]) || m[1] === prefixOf(item)).map((m) => m[0]))].filter((x) => !namesItem(x, item));
+const DECISION_KEY = /(?<![\p{L}\p{N}._-])([\p{L}\p{N}][\p{L}\p{N}._-]*\.\d+) A\d+:/gu;
+export async function personSaid(quote, { sinceAt = null, item = null, attempt = null, env = process.env } = {}) {
   const caller = detectOwner(env);
   const host = caller ? findHost(caller.runtime) : null;
   const read = optional(host, 'questionAnswers');
@@ -497,16 +506,22 @@ export async function personSaid(quote, { sinceAt = null, item = null, env = pro
   const holding = theirs.filter((a) => holds(a.answer, q));
   if (!holding.length) return { problem: `"${clip(quote)}" is in no message of the person's in this session (what they typed in the chat or answered in the question panel, as the harness recorded it; never your own text, a tool's output, a note the harness adds or a sub-agent's thread)` };
   const since = Date.parse(sinceAt ?? '') || 0;
-  const done = (m, rule) => ({ quote: String(q).trim().slice(0, 500), message: String(m.answer).trim().slice(0, 2000), at: m.at ?? null, via: `${m.channel === 'chat' ? 'chat' : 'question-panel'}, read by the agent (${host.label}, host-recorded)${rule ? `; ${rule}` : ''}` });
-  const fresh = latest(holding.filter((a) => time(a) >= since));
+  const answered = (a) => [...new Set([...flat(a.question ?? '').matchAll(DECISION_KEY)].map((m) => m[1]))];
+  const toOther = (a) => answered(a).length > 0 && answered(a).every((id) => id !== attempt);
+  const others = (a) => itemsIn(a.answer, item);
+  const aboutElse = (a) => toOther(a) || (others(a).length > 0 && !namesItem(a.answer, item));
+  const also = (a) => (others(a).length ? `; it also names ${others(a).join(', ')}` : '');
+  const done = (m, rule) => ({ quote: String(q).trim().slice(0, 500), message: String(m.answer).trim().slice(0, 2000), at: m.at ?? null, via: `${m.channel === 'chat' ? 'chat' : 'question-panel'}, read by the agent (${host.label}, host-recorded)${rule ? `; ${rule}` : ''}${also(m)}` });
+  const fresh = latest(holding.filter((a) => time(a) >= since && !aboutElse(a)));
   if (fresh) return done(fresh, null);
-  const named = latest(holding.filter((a) => namesItem(a.answer, item)));
+  const named = latest(holding.filter((a) => time(a) < since && namesItem(a.answer, item) && !toOther(a)));
   if (named) return done(named, `written before the admission, naming ${item}`);
-  const kickoff = latest(theirs.filter((a) => time(a) < since));
-  if (kickoff && holding.some((a) => a.at === kickoff.at && a.answer === kickoff.answer)) return done(kickoff, 'the message that started this attempt (the last before its admission)');
+  const kickoff = latest(theirs.filter((a) => time(a) < since && a.channel === 'chat' && !answered(a).length));
+  const kicked = kickoff && !others(kickoff).length && holding.some((a) => a.at === kickoff.at && a.answer === kickoff.answer);
+  if (kicked) return done(kickoff, 'the message that started this attempt (the last before its admission)');
   const m = latest(holding);
-  const others = [...new Set([...String(m.answer).matchAll(ITEM_LIKE)].map((x) => x[0]))].filter((x) => !namesItem(x, item));
-  return { problem: `the person wrote "${clip(quote)}" at ${m.at ?? 'an unknown time'}, before this attempt was admitted (${sinceAt}), in a message ${others.length ? `that names ${others.join(', ')}${item ? `, not ${item}` : ''}` : `that does not name ${item ?? 'this ticket'} and is not the one that started it (their last before the admission${kickoff ? `, at ${kickoff.at}` : ''})`}: words about something else` };
+  const why = toOther(m) ? `that answers another ticket's question (${answered(m).map((id) => `${id}`).join(', ')})` : others(m).length && !namesItem(m.answer, item) ? `that names ${others(m).join(', ')}${item ? `, not ${item}` : ''}` : time(m) >= since ? 'after the admission that is not about this ticket' : m.channel !== 'chat' ? `in the question panel before the admission, which is not the message that started this attempt` : `that does not name ${item ?? 'this ticket'} and is not the one that started it (their last chat message before the admission that answers no decision's question${kickoff ? `, at ${kickoff.at}` : ''})`;
+  return { problem: `the person wrote "${clip(quote)}" at ${m.at ?? 'an unknown time'}${time(m) < since ? `, before this attempt was admitted (${sinceAt})` : ''}, in a message ${why}: words about something else` };
 }
 
 // Whether this process runs under an agent runtime (the terminal route of a person's own command is refused there).

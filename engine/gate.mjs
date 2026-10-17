@@ -161,17 +161,8 @@ export async function planGate(root, state, options = {}) {
   const cfg = gateAdapter(root, state);
   const changed = {};
   for (const name of Object.keys(state.repos)) changed[name] = changedFiles(state, name);
-  const { repo: adapterRepo, relative } = attemptAdapter(root, state);
-  const adapterRel = relative.split(path.sep).join('/');
+  const { adapterRepo, adapterRel, own, namesOwnFolder } = workflowFolder(root, state);
   const adapterTouched = (changed[adapterRepo.name] ?? []).some((f) => inside(f, adapterRel));
-  // The workflow's own folder (the adapter, its lessons and step code) is not the project's code: a change there counts for
-  // a step only when the step's inputs name that folder explicitly (a step that tests the workflow code), never through a
-  // broad `**`. Named failure (audit of 51 attempts): an attempt whose only change was in that folder (a lesson, the
-  // adapter) ran ten steps for 32 minutes, seven of them identical to passes already recorded.
-  const own = (repoName, f) => repoName === adapterRepo.name && inside(f, adapterRel);
-  // A step that runs or reads something in that folder (its inputs name it, or its command, selection or report path does)
-  // depends on it (independent review of 0.7.11: `run: bash .workflow/check.sh` was reused after the script changed).
-  const namesOwnFolder = (step, pkg) => step.repo === adapterRepo.name && ((step.inputs ?? []).some((p) => { const r = pkg.path === '.' ? p : `${pkg.path}/${p}`; return r === adapterRel || r.startsWith(`${adapterRel}/`); }) || [step.run, step.select, JSON.stringify(step.report ?? null)].some((t) => typeof t === 'string' && t.includes(`${path.basename(adapterRel)}/`)));
   const changedCode = Object.fromEntries(Object.entries(changed).map(([r, files]) => [r, files.filter((f) => !own(r, f))]));
   // A change in the adapter folder no longer makes the run full (0.7.11): the gate reads its steps from the adapter at the
   // pin, never the worktree, and a step whose inputs include the adapter folder sees the change in its inputs hash. Named
@@ -478,6 +469,22 @@ function reselectArtifacts(prior, globsNow, units) {
   return { artifacts, artifactGlobs: globsNow.map((g) => ({ glob: g.glob, expanded: g.expanded, files: artifacts.filter((a) => matchesAny(a.source, g.expanded)) })) };
 }
 
+// The workflow's own folder (the adapter, its lessons and step code) is not the project's code: a change there counts for
+// a step only when the step's inputs name that folder explicitly (a step that tests the workflow code), never through a
+// broad `**`. Named failure (audit of 51 attempts): an attempt whose only change was in that folder (a lesson, the
+// adapter) ran ten steps for 32 minutes, seven of them identical to passes already recorded.
+// A step that runs or reads something in that folder (its inputs name it, or its command, selection or report path does)
+// depends on it (independent review of 0.7.11: `run: bash .workflow/check.sh` was reused after the script changed).
+// One rule for the plan and for the quarantine question (third review of 0.7.28: the question named an adapter change as a file
+// the step reads).
+function workflowFolder(root, state) {
+  const { repo: adapterRepo, relative } = attemptAdapter(root, state);
+  const adapterRel = relative.split(path.sep).join('/');
+  const own = (repoName, f) => repoName === adapterRepo.name && inside(f, adapterRel);
+  const namesOwnFolder = (step, pkg) => step.repo === adapterRepo.name && ((step.inputs ?? []).some((p) => { const r = pkg.path === '.' ? p : `${pkg.path}/${p}`; return r === adapterRel || r.startsWith(`${adapterRel}/`); }) || [step.run, step.select, JSON.stringify(step.report ?? null)].some((t) => typeof t === 'string' && t.includes(`${path.basename(adapterRel)}/`)));
+  return { adapterRepo, adapterRel, own, namesOwnFolder };
+}
+
 // 0.7.28 (I-212): the suites of a step the person set aside for this attempt (`override-gate`, key `quarantine:<attempt>:<step>:<suite>`).
 export function quarantinedSuites(state, stepId) {
   const prefix = `quarantine:${state.id}:${stepId}:`;
@@ -514,16 +521,19 @@ export function quarantineSuite(root, state, options) {
   // What the step reads, as the gate itself reads it (its inputs, less its ignores and the package's docs-only files), in its own
   // repo and in every repo it declares (`alsoInputs`); a repo of the attempt it does not declare is named apart (review of 0.7.28:
   // a README was listed as read, and in a multi-repo attempt an api change that breaks a portal suite was not listed at all).
+  // The workflow's own folder counts only for a step that names it, as the gate's plan has it (`changedCode`).
+  const wfFolder = workflowFolder(root, state);
+  const code = (name) => (f) => wfFolder.namesOwnFolder(step, pkg) && name === repo.name ? true : !wfFolder.own(name, f);
   const reads = (f) => inside(f, pkg.path) && f !== file && !matchesAny(rel(f, pkg.path), pkg.docsOnly ?? []) && matchesAny(rel(f, pkg.path), step.inputs ?? ['**']) && !matchesAny(rel(f, pkg.path), step.ignores ?? []);
-  const own = changedFiles(state, repo.name).filter(reads).map((f) => `${repo.name}:${f}`);
+  const own = changedFiles(state, repo.name).filter(code(repo.name)).filter(reads).map((f) => `${repo.name}:${f}`);
   const notDocs = (name) => (f) => {
     const other = cfg.repos.find((r) => r.name === name);
     const p = [...(other?.packages ?? [])].filter((x) => inside(f, x.path)).sort((a, b) => b.path.length - a.path.length)[0];
     return !p || !matchesAny(rel(f, p.path), p.docsOnly ?? []);
   };
-  const also = (step.alsoInputs ?? []).filter((name) => state.repos[name]).flatMap((name) => changedFiles(state, name).filter(notDocs(name)).map((f) => `${name}:${f}`));
+  const also = (step.alsoInputs ?? []).filter((name) => state.repos[name]).flatMap((name) => changedFiles(state, name).filter(code(name)).filter(notDocs(name)).map((f) => `${name}:${f}`));
   const read = [...own, ...also];
-  const undeclared = Object.keys(state.repos).filter((name) => name !== repo.name && !(step.alsoInputs ?? []).includes(name)).map((name) => [name, changedFiles(state, name).filter(notDocs(name)).length]).filter(([, n]) => n > 0);
+  const undeclared = Object.keys(state.repos).filter((name) => name !== repo.name && !(step.alsoInputs ?? []).includes(name)).map((name) => [name, changedFiles(state, name).filter(code(name)).filter(notDocs(name)).length]).filter(([, n]) => n > 0);
   const elsewhere = undeclared.length ? ` This change also edits ${undeclared.map(([name, n]) => `${n} file(s) in ${name}`).join(' and ')}, which the step does not declare it reads (\`alsoInputs\`); a suite that drives ${undeclared.length > 1 ? 'those repos' : 'that repo'} can fail because of ${undeclared.length > 1 ? 'them' : 'it'}.` : '';
   const checked = `What the engine checked: this change does not edit the test file. ${read.length ? `What it did not check: whether the code the suite exercises changed; this change edits ${read.length} file(s) the step reads: ${read.join(', ')}.` : `This change edits no other file the step reads (its declared inputs${step.alsoInputs?.length ? ` in ${[repo.name, ...step.alsoInputs].join(', ')}` : ''}).`}${elsewhere}`;
   const setAsideFrame = {
