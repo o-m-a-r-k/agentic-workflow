@@ -373,9 +373,9 @@ async function implementerEnded(root, id, h, label) {
   const open = (loadState(root, id).implementers ?? []).some((x) => x.agent === h.agent && !x.closedAt);
   if (!open) return;
   try {
-    const { closeImplementer } = await import('./lifecycle.mjs');
-    closeImplementer(root, { attempt: id, agent: h.agent, closedBy: 'engine' });
-    process.stderr.write(`${label} implementer ${h.agent} completed and the engine closed it (its work is committed and its report recorded); read its report in \`wf resume\` and continue\n`);
+    const { closeImplementer, leftNotes } = await import('./lifecycle.mjs');
+    const closed = closeImplementer(root, { attempt: id, agent: h.agent, closedBy: 'engine' });
+    process.stderr.write(`${label} implementer ${h.agent} completed and the engine closed it (its work is committed and its report recorded); read its report in \`wf resume\` and continue\n${leftNotes(closed, id).map((l) => `${label} ${l}\n`).join('')}`);
   } catch (error) {
     // The owner may have closed it meanwhile: then there is nothing to say.
     if (!(loadState(root, id).implementers ?? []).some((x) => x.agent === h.agent && !x.closedAt)) return;

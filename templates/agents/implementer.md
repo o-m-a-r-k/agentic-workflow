@@ -44,8 +44,10 @@ The bundle's `intent` and `intentChanges` say what the attempt is for and why it
   "expect": { "minutes": 25 },
   "ran": [{ "command": "yarn test src/list", "result": "passed, 42 tests" }],
   "proofs": [{ "family": "raw-enum-labels", "command": "rg -c 'status}' src", "expected": "0" }],
-  "left": [{ "what": "the export page sums one page only", "where": "src/export.tsx:40", "why": "not caused by this change", "severity": "medium", "family": "page-only-totals" }, { "what": "the audit list shows another tenant's rows", "where": "src/audit.ts:12", "why": "not caused by this change", "invariant": "tenant isolation" }] }
+  "left": [{ "what": "the export page sums one page only", "where": "src/export.tsx:40", "why": "not caused by this change", "severity": "medium", "family": "page-only-totals" }, { "what": "the audit list shows another tenant's rows", "where": "src/audit.ts:12", "why": "not caused by this change", "invariant": "tenant isolation" }, { "what": "the totals row ignores the filter", "where": "src/export.tsx:52", "why": "recorded when I found it", "severity": "medium", "discoveredId": "D1" }] }
 ```
+
+An issue already in the ledger (you recorded it with `wf discovered add`, or the bundle's `discovered` lists it) is named in its `left` item with `discoveredId`, as in the third item: the item links to that entry and creates no second one, so one defect is one scope item (the entry keeps its own rating and words; one already fixed stays fixed, and a defect that is still there after a fix is a new item without `discoveredId`). A `discoveredId` that is no issue of this attempt is recorded as a new issue, and the close says so. `family` names the pattern when items share a cause (the engine lists a family with several open issues so the owner fixes it in one sweep).
 
 A commit trailer `Sweep <id>: proof - <command> => <expected result>` also answers a family sweep.
 

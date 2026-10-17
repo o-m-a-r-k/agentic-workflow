@@ -178,12 +178,17 @@ test('the implementer\'s example report is recorded at `wf handoff close`: what 
   commitIn(a.wt, { 'src/a.txt': 'built\n' });
   const agent = 'impl-ENG-903';
   const report = JSON.parse(fill(payload('implementerReport'), { agent }));
+  // The example's third item names an issue the implementer recorded earlier with `wf discovered add` (0.7.27, I-184).
+  const named = report.left.find((l) => l.discoveredId);
+  assert.ok(named, 'the example shows an item that names an issue already in the ledger');
+  ok(wf(ctx.root, ['discovered', 'add', '--summary', named.what, '--severity', named.severity, '--where', named.where, '--found-by', agent, '--attempt', a.id]));
   fs.mkdirSync(path.dirname(reportFileOf(ctx.root, a.id, agent)), { recursive: true });
   fs.writeFileSync(reportFileOf(ctx.root, a.id, agent), JSON.stringify(report));
   ok(wf(ctx.root, ['handoff', 'close', '--agent', agent, '--attempt', a.id]));
   const state = ok(wf(ctx.root, ['resume', '--attempt', a.id, '--json'])).json();
-  assert.equal(state.discovered.length, report.left.length, 'every item it left is a discovered issue');
-  const [first, second] = state.discovered;
+  assert.equal(state.discovered.length, report.left.length, 'every item it left is one discovered issue: the item that names D1 is D1, not another');
+  assert.equal(state.discovered.filter((d) => d.summary.includes(named.what)).length, 1, 'the named issue is not recorded twice');
+  const [, first, second] = state.discovered;
   assert.match(first.summary, /the export page sums one page only/);
   assert.equal(first.severity, 'medium');
   assert.match(second.summary, /another tenant's rows/);

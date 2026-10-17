@@ -6,6 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { knownLimits } from '../engine/tracker.mjs';
 import { closureFile, commitIn, criteriaFile, FIXTURE_EXPECT, goodClosure, impactAddendum, impactCheckedFrom, makeRepo, ok, OUT_OF_ORDER, planDoc, reportFileOf, sh, singleRepoProject, state, tmp, toAccepted, WF, wf, writeReport, yaml } from './helpers.mjs';
 import { runner } from './strategist-fixtures.mjs';
+import { readLedger } from '../engine/ledger.mjs';
 
 // I-18, named failure: implementers, reviewers and the owner agent noted real defects found during a ticket and parked
 // them as follow-ups or "harmless today" without the owner deciding. Every issue found during a ticket is now in the
@@ -389,6 +390,57 @@ test('0.7.0: an implementer closes with its report; each item it left becomes an
   assert.equal(refused.code, 75);
   assert.match(refused.err, /not delivered: 1 discovered issue\(s\) are open: D2 left by impl-2: the footer shows no total/);
   assert.doesNotMatch(refused.err, /D1/, 'the fixed entry no longer blocks');
+});
+
+// 0.7.27 (I-184), named failure (field): an implementer recorded a defect with `wf discovered add` (D70) and named it in its
+// report's `left` with `discoveredId: "D70"`, the same family and the same summary. Closing the handoff recorded D71 for the
+// same defect: one defect, two scope items, two delivery blockers. The report's reading also dropped the `family` the template
+// shows on a `left` item, so the entries it did create had none.
+test('0.7.27 (I-184): a left item that names a discovered issue of the attempt links to it and records no second one; a named id that is no issue is recorded as new and reported', () => {
+  const { base, root } = singleRepoProject('report-linked', { gate: { steps: [{ id: 'unit', repo: 'app', run: 'true' }] } });
+  const e = ok(wf(root, ['entry', '--item', 'ENG-722', '--owner', 'o', '--json'])).json();
+  const id = e.id;
+  const wt = e.repos.app.worktree;
+  ok(wf(root, ['handoff', 'planner', '--agent', 'plan-1', '--attempt', id, '--owner', 'o']));
+  ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', id, '--owner', 'o']));
+  ok(wf(root, ['handoff', 'implementer', '--agent', 'impl-1', '--attempt', id, '--owner', 'o']));
+  commitIn(wt, { 'src/a.txt': 'b\n' }, 'the change');
+  // The implementer records the defect when it finds it, and names it again when it reports.
+  ok(disc(root, ['add', '--attempt', id, '--summary', 'the export page sums one page only', '--severity', 'medium', '--where', 'src/export.tsx:40', '--found-by', 'impl-1', '--family', 'page-only-totals']));
+  writeReport(root, id, 'impl-1', {
+    summary: 'C1 holds',
+    left: [
+      { what: 'the export page sums one page only', where: 'src/export.tsx:40', why: 'recorded as D1', severity: 'medium', family: 'page-only-totals', discoveredId: 'D1' },
+      { what: 'the footer shows no total', severity: 'low', family: 'missing-totals' },
+      { what: 'the header is cut off on a phone', discoveredId: 'D9' },
+    ],
+  });
+  const closed = ok(wf(root, ['handoff', 'close', '--agent', 'impl-1', '--attempt', id], silent));
+  const s = state(root, id);
+  assert.deepEqual(s.discovered.map((d) => [d.id, d.summary]), [
+    ['D1', 'the export page sums one page only'],
+    ['D2', 'left by impl-1: the footer shows no total'],
+    ['D3', 'left by impl-1: the header is cut off on a phone'],
+  ], 'the item that names D1 links to it: one defect, one scope item');
+  assert.equal(s.discovered[0].severity, 'medium', 'the entry keeps its own rating and words');
+  assert.equal(s.discovered[1].family, 'missing-totals', 'a left item\'s family reaches its issue (the template shows it)');
+  assert.match(readLedger(root, id).filter((x) => x.type === 'discovered.added').at(-1).data.why, /named D9, which is not a discovered issue of this attempt/, 'the record of the new issue says why it is new');
+  // The report as recorded says what each item became.
+  assert.deepEqual(s.implementerReports.at(-1).left.map((l) => [l.linked ?? null, l.recorded ?? null]), [['D1', null], [null, 'D2'], [null, 'D3']]);
+  // The close says so, for the owner who reads it: the link, and the id that matched nothing (recorded, not dropped).
+  assert.match(closed.out, /left item linked to D1 \(open\): no second issue recorded/);
+  assert.match(closed.out, /left item names D9, which is not a discovered issue of ENG-722\.1: recorded as D3/);
+  // An item that names an issue already fixed links to it without reopening it.
+  commitIn(wt, { 'src/export.txt': 'every page\n' }, 'the export sums every page');
+  ok(disc(root, ['close', 'D1', '--fixed', sh(wt, 'git rev-parse HEAD'), '--attempt', id]));
+  ok(wf(root, ['handoff', 'implementer', '--agent', 'impl-2', '--attempt', id, '--owner', 'o']));
+  commitIn(wt, { 'src/b.txt': 'c\n' }, 'finished');
+  writeReport(root, id, 'impl-2', { left: [{ what: 'the export page sums one page only', discoveredId: 'D1' }] });
+  const again = ok(wf(root, ['handoff', 'close', '--agent', 'impl-2', '--attempt', id], silent));
+  const after = state(root, id);
+  assert.equal(after.discovered.length, 3, 'no fourth entry');
+  assert.equal(after.discovered[0].status, 'fixed', 'a link reopens nothing');
+  assert.match(again.out, /left item linked to D1 \(fixed\): not reopened/);
 });
 
 // Independent review of 0.4.5: a batch delivery lists every member's deferrals, qualified by attempt. 0.7.0 (final review):

@@ -22,7 +22,7 @@ import { reviewDivisionSummary } from './review-groups.mjs';
 import { addLesson, applySnippet, exportPluginLessons, findLesson, isProjectWide, LESSON_FILE, lessonPrompts, lessonWarnings, loadLessons, mergeLessons, mergeSuggestions, moveLesson, recur, relevantLessons, reviewLessons, setLesson, lessonKey, totalRecurrence, mergeableIn, distinctLessons } from './lessons.mjs';
 import { lessonStats } from './learning.mjs';
 import { LinkRefused, changesOf, ledgerEmpty, lostLedgers, rebaseline, releaseAttempt, seal, setVerifyLevel, unlockEvidence, verifyAttempt } from './evidence.mjs';
-import { acceptReview, amendCriteria, closeImplementer, designWarning, gateOrderCheck, batchCreate, batchEject, closeAfterHandoff, deliver, deliveredFiles, deliveryCaptures, RANK_WORDS, verifiedCaptures, exportScreenshots, freezeCriteria, handoff, narrowDelivery, needsShown, nextAction, nextDecision, orphanNext, orphansOf, outsideWarning, recordReview, recordShown, reopen, screenshotsExportDir, shownDraftFile, uncovered, withAttempt } from './lifecycle.mjs';
+import { acceptReview, amendCriteria, closeImplementer, designWarning, leftNotes, gateOrderCheck, batchCreate, batchEject, closeAfterHandoff, deliver, deliveredFiles, deliveryCaptures, RANK_WORDS, verifiedCaptures, exportScreenshots, freezeCriteria, handoff, narrowDelivery, needsShown, nextAction, nextDecision, orphanNext, orphansOf, outsideWarning, recordReview, recordShown, reopen, screenshotsExportDir, shownDraftFile, uncovered, withAttempt } from './lifecycle.mjs';
 import { addDiscovered, channelOf, closeDiscovered, discoveredLine, openDiscovered, rateDiscovered } from './discovered.mjs';
 import { detect, doctor, generatedStatus, refreshGenerated, register, registry, setEnabled, sync, writeDraft } from './onboard.mjs';
 import * as secrets from './secrets.mjs';
@@ -900,7 +900,7 @@ async function dispatch(cmd, sub, positional, options) {
       }
       if (sub === 'close') {
         const c = closeImplementer(root, options);
-        print(options, `implementer ${options.agent} closed (${c.outcome}) on ${c.state.id}; commits since its handoff: ${Object.entries(c.commits).map(([k, v]) => `${k} ${v ?? '?'}`).join(', ')}${c.children.length ? `; ${c.children.length} sub-agent(s) attributed to ${c.handoff}` : ''}${c.state.implementers.some((x) => !x.closedAt) ? `\n  still open: ${c.state.implementers.filter((x) => !x.closedAt).map((x) => x.agent).join(', ')}` : '\n  every implementer is closed: the tree is settled for a review'}`, { handoff: c.handoff, outcome: c.outcome, commits: c.commits, children: c.children });
+        print(options, `implementer ${options.agent} closed (${c.outcome}) on ${c.state.id}; commits since its handoff: ${Object.entries(c.commits).map(([k, v]) => `${k} ${v ?? '?'}`).join(', ')}${c.children.length ? `; ${c.children.length} sub-agent(s) attributed to ${c.handoff}` : ''}${leftNotes(c, c.state.id).map((l) => `\n  ${l}`).join('')}${c.state.implementers.some((x) => !x.closedAt) ? `\n  still open: ${c.state.implementers.filter((x) => !x.closedAt).map((x) => x.agent).join(', ')}` : '\n  every implementer is closed: the tree is settled for a review'}`, { handoff: c.handoff, outcome: c.outcome, commits: c.commits, children: c.children, linked: c.linked, unknownIds: c.unknownIds });
         return 0;
       }
       // 0.7.11: the role files a native start reads follow the installed plugin by themselves (untracked ones are rewritten).

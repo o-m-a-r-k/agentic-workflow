@@ -1358,16 +1358,37 @@ export function closeImplementer(root, options) {
   const clip = (v, n) => (v === null || v === undefined ? null : String(v).slice(0, n));
   children = children.slice(0, 200).map((c) => ({ agentId: clip(c.agentId, 200), name: clip(c.name, 200), agentType: clip(c.agentType, 200), parentAgentId: clip(c.parentAgentId, 200), depth: Number.isInteger(c.depth) ? c.depth : null, description: clip(c.description, 500) }));
   if (children.length) append(root, state.id, 'subagents.attributed', { handoff: open.handoff, children }, actor(options));
+  const placed = [];
   if (report.value) {
     const r = report.value;
-    append(root, state.id, 'implementer.report', { handoff: open.handoff, agent, file: handed.reportFile, sha256: report.sha256, summary: r.summary, approach: r.approach ?? null, expect: r.expect ?? null, ran: r.ran ?? [], proofs: r.proofs ?? [], left: r.left ?? [] }, actor(options));
-    let next = (loadState(root, state.id).discovered?.length ?? 0) + 1;
+    // 0.7.27 (I-184). Named failure (field): an implementer recorded a defect with `wf discovered add` and named it in its report's
+    // `left` (`discoveredId`, the same family and summary); closing the handoff recorded the same defect again, so one defect was
+    // two scope items and two delivery blockers. An item that names an issue of this attempt links to it. A named id that is no
+    // issue of this attempt is still recorded as a new one (what an implementer left is never dropped) with the mismatch said in
+    // the issue and in the close, since a mistyped id would otherwise make the duplicate again unseen.
+    const have = loadState(root, state.id).discovered ?? [];
+    const byId = new Map(have.map((d) => [d.id, d]));
+    let next = have.length + 1;
+    for (const l of r.left ?? []) {
+      const named = typeof l.discoveredId === 'string' ? l.discoveredId.trim().toUpperCase() : '';
+      if (named && byId.has(named)) placed.push({ l, linked: named, status: byId.get(named).status });
+      else placed.push({ l, recorded: `D${next++}`, ...(named ? { unknownId: String(l.discoveredId).trim() } : {}) });
+    }
+    append(root, state.id, 'implementer.report', { handoff: open.handoff, agent, file: handed.reportFile, sha256: report.sha256, summary: r.summary, approach: r.approach ?? null, expect: r.expect ?? null, ran: r.ran ?? [], proofs: r.proofs ?? [], left: placed.map(({ l, linked, recorded }) => ({ ...l, ...(linked ? { linked } : { recorded }) })) }, actor(options));
     const raisedOn = headsNow(state);
-    for (const l of r.left ?? []) append(root, state.id, 'discovered.added', { id: `D${next++}`, raisedOn, summary: `left by ${agent}: ${l.what}`, kind: 'defect', severity: typeof l.severity === 'string' && l.severity.trim() ? l.severity.trim() : null, ...(typeof l.family === 'string' && l.family.trim() ? { family: l.family.trim().slice(0, 80) } : {}), ...(typeof l.invariant === 'string' && l.invariant.trim() ? { invariant: l.invariant.trim() } : {}), where: l.where ?? null, foundBy: agent, blockedBy: null, why: l.why ?? null }, actor(options));
+    for (const { l, recorded, unknownId } of placed.filter((x) => x.recorded)) append(root, state.id, 'discovered.added', { id: recorded, raisedOn, summary: `left by ${agent}: ${l.what}`, kind: 'defect', severity: typeof l.severity === 'string' && l.severity.trim() ? l.severity.trim() : null, ...(typeof l.family === 'string' && l.family.trim() ? { family: l.family.trim().slice(0, 80) } : {}), ...(typeof l.invariant === 'string' && l.invariant.trim() ? { invariant: l.invariant.trim() } : {}), where: l.where ?? null, foundBy: agent, blockedBy: null, why: unknownId ? [l.why, `its report named ${unknownId}, which is not a discovered issue of this attempt`].filter(Boolean).join('; ') : l.why ?? null }, actor(options));
   }
   append(root, state.id, 'implementer.closed', { handoff: open.handoff, agent, outcome, heads, commits, ...(options.closedBy === 'engine' ? { closedBy: 'engine' } : {}) }, actor(options));
-  return { state: loadState(root, state.id), handoff: open.handoff, outcome, commits, children };
+  const after = loadState(root, state.id);
+  return { state: after, handoff: open.handoff, outcome, commits, children, linked: placed.filter((x) => x.linked).map((x) => ({ id: x.linked, status: x.status })), unknownIds: placed.filter((x) => x.unknownId).map((x) => ({ named: x.unknownId, recorded: x.recorded })) };
 }
+
+// What the close tells the owner about the items its report left: a link to an issue already in the ledger (and that a closed one
+// stays closed), and an id that matched no issue (recorded as a new one).
+export const leftNotes = (c, attempt) => [
+  ...(c.linked ?? []).map((x) => `left item linked to ${x.id} (${x.status}): ${x.status === 'open' ? 'no second issue recorded' : 'not reopened; a defect that is still there is a new issue, so leave `discoveredId` out of its item'}`),
+  ...(c.unknownIds ?? []).map((x) => `left item names ${x.named}, which is not a discovered issue of ${attempt}: recorded as ${x.recorded}; if it meant an existing issue, that one is still open and ${x.recorded} is a second record of the same defect`),
+];
 
 // The implementer's report, validated: { value, sha256 } or { problem }. Fields are bounded before they reach the ledger.
 function readImplementerReport(file, agent) {
@@ -1399,7 +1420,9 @@ function readImplementerReport(file, agent) {
     ran: listOf(r.ran).slice(0, 100).map((x) => ({ command: str(x?.command, 500) ?? str(x, 500), result: str(x?.result, 500) })),
     proofs: listOf(r.proofs).slice(0, 100).map((x) => ({ family: str(x?.family, 200), command: str(x?.command, 500) ?? str(x, 500), expected: str(x?.expected, 500) })),
     // An item it left is never dropped: one with no `what` keeps its `why` or `where` as the summary.
-    left: listOf(r.left).map(leftItem).filter(Boolean).slice(0, 100).map((x) => ({ what: str(x.what, 1000) ?? str(x.why, 1000) ?? str(x.where, 1000) ?? 'an issue the implementer left (no description)', where: str(x?.where, 500), why: str(x?.why, 1000), severity: str(x?.severity, 40), invariant: str(x?.invariant, 300) })),
+    // `family` and `discoveredId` are read as the template shows them (0.7.27, I-184: both were dropped, so a left item neither
+    // carried its family to its issue nor could name the issue it repeats).
+    left: listOf(r.left).map(leftItem).filter(Boolean).slice(0, 100).map((x) => ({ what: str(x.what, 1000) ?? str(x.why, 1000) ?? str(x.where, 1000) ?? 'an issue the implementer left (no description)', where: str(x?.where, 500), why: str(x?.why, 1000), severity: str(x?.severity, 40), invariant: str(x?.invariant, 300), family: str(x?.family, 80), discoveredId: str(x?.discoveredId, 40) })),
   };
   return { value, sha256: sha256(raw) };
 }
