@@ -247,7 +247,7 @@ test('I-25: a fix handoff may name a pattern sweep per family (0.7.0: optional);
   const bareBundle = JSON.parse(fs.readFileSync(bare.out.match(/bundle: (\S+)/)[1], 'utf8'));
   assert.equal(bareBundle.sweep, undefined);
   assert.deepEqual(bareBundle.repair.map((g) => [g.family, g.findings.map((f) => f.ref)]), [[null, ['rev-1:F1']]]);
-  assert.match(bareBundle.instructions, /This is a fix round: find the cause of each family in `repair` and fix it once, with one proof/);
+  assert.match(bareBundle.instructions, /Your goal: no review finds this problem again, anywhere[\s\S]*This is a fix round\. `repair` holds the findings open now and `findingHistory` every earlier finding/);
   // A sweep that is given is still checked.
   const sweepFile = (sweeps) => a.file({ sweeps }, 'sweep');
   assert.match(fix(['--sweep', sweepFile([{ finding: 'rev-1:F9', query: { pattern: 'isError' } }])]).err, /`rev-1:F9` is not an open finding or family \(open: rev-1:F1\)/);
@@ -256,7 +256,7 @@ test('I-25: a fix handoff may name a pattern sweep per family (0.7.0: optional);
   assert.match(h.out, /pattern sweep \(answer each family in a commit trailer with one proof: `Sweep <id>: proof - <command> => <expected result>`\):\n {2}S1 for rev-1:F1: 2 hit\(s\)\n {4}app:src\/pages\/a\.js\n {4}app:src\/pages\/c\.js/);
   const implBundle = JSON.parse(fs.readFileSync(h.out.match(/bundle: (\S+)/)[1], 'utf8'));
   assert.deepEqual(implBundle.sweep.map((s) => [s.id, s.finding, s.hits]), [['S1', 'rev-1:F1', 2]]);
-  assert.match(implBundle.instructions, /This is a fix round: find the cause of each family in `repair` and fix it once, with one proof/);
+  assert.match(implBundle.instructions, /Your goal: no review finds this problem again, anywhere[\s\S]*This is a fix round\. `repair` holds the findings open now and `findingHistory` every earlier finding/);
   assert.deepEqual(implBundle.repair.map((g) => [g.family, g.findings.map((f) => f.ref)]), [[null, ['rev-1:F1']]], 'a repair handoff lists the blocking findings by family');
   commitIn(a.wt, { 'src/pages/a.js': "import { renderTable } from '../table.js';\nrenderTable([]);\n" }, 'F1: keep the table on error');
   // Named failure (0.7.0): the reviewer handoff was refused until each sweep had its trailer, and the fix implementer wrote

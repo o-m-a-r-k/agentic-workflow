@@ -205,7 +205,7 @@ test('a repair handoff groups the blocking findings by family; one proof answers
   assert.equal(bareBundle.sweep, undefined);
   assert.deepEqual(bareBundle.repair.map((g) => [g.family, g.findings.map((f) => f.ref)]), [['raw-enum-labels', ['r1:F1', 'r1:F2']], [null, ['r1:F3']]]);
   // The brief says it is a fix round whether or not a sweep came with it (final review of 0.7.0: it said so only with one).
-  assert.match(bareBundle.instructions, /This is a fix round: find the cause of each family in `repair` and fix it once, with one proof/);
+  assert.match(bareBundle.instructions, /Your goal: no review finds this problem again, anywhere[\s\S]*This is a fix round\. `repair` holds the findings open now and `findingHistory` every earlier finding/);
   // One sweep names a member and covers its whole family. (A sweep file need not name every family: the sweep is
   // optional, refusal audit of 0.7.0; the bare handoff above is the case with none.)
   const handed = ok(fix(['--sweep', sweepFile([{ family: 'raw-enum-labels', why: 'a raw enum label', query }, { finding: 'r1:F3', why: 'its own pattern', query }])]));

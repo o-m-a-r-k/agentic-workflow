@@ -168,6 +168,10 @@ test('the reviewer\'s example closure is recorded by `wf review` in the delta ro
   assert.equal(byRef['rev-1:F4']?.blocks, false);
   assert.equal(byRef['rev-1:F4']?.severity, 'low', 'a later reviewer\'s severity on a prior finding it finds still open decides where it may go');
   assert.equal(byRef['rev-1:F3'], undefined, 'F3 was verified fixed');
+  // 0.7.27 (I-191): the example's `sameCauseAs` is read as the text says. F1 shares the cause of F3, which this closure verified
+  // fixed: the cause came back, and the owner is told.
+  const sig = ok(wf(ctx.root, ['signals', '--attempt', a.id, '--json'])).json();
+  assert.deepEqual(sig.recurringCauses.map((x) => [x.again, x.fixed]), [['rev-2:F1', ['rev-1:F3']]], 'the link in the example reaches the signals');
 });
 
 // ---- The implementer's report ----
