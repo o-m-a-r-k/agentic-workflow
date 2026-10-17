@@ -756,6 +756,31 @@ test('0.7.27 (D41, review of the rework): the exact and quote paths hold only wh
   readsFirst(twice.err, 'a bare "ok" to a message that asked two things');
   assert.equal(state(t.p.root, t.e.id).decisions[0].approved, null);
   assert.match(ok(readQ(t.p, t.e.id, t.d.id, env, 'yes', 'ok')).out, /A1 decided: yes, as you read the person's words "ok"/);
+  // The literal choices are bare words too (verification of the fix: "yes" and "YES" still bound through the choice's id).
+  for (const [i, word] of ['yes', 'no', 'Yes.', 'YES'].entries()) {
+    const u = heldAttempt(`approve-two-asks-${i}`, `ENG-123${i}`);
+    claudeLines(u.p, [says(`${u.question}\n\nOptions: yes / no\n\nAlso: should I update the README while we wait?`, at(500)), types(word, at(1000))]);
+    const r = approveQ(u.p, u.e.id, u.d.id, env);
+    assert.equal(r.code, 75, word);
+    assert.match(r.err, /also asked something else/, word);
+    assert.equal(state(u.p.root, u.e.id).decisions[0].approved, null, word);
+  }
+  // A panel question that asks something else besides the question is held to the same rule.
+  const asks = heldAttempt('approve-two-asks-panel', 'ENG-1234');
+  claudeAsks(asks.p, { question: `${asks.question} Also: should I update the README?`, answer: 'yes' });
+  assert.equal(approveQ(asks.p, asks.e.id, asks.d.id, env).code, 75, 'a panel question that asked two things');
+  assert.equal(state(asks.p.root, asks.e.id).decisions[0].approved, null);
+  // A message that only names a decision an earlier release created (no labels) binds no bare "yes" through the choice's id;
+  // its frame's label still binds.
+  const named = singleRepoProject('approve-named-legacy', {});
+  const ne = ok(wf(named.root, ['entry', '--item', 'ENG-1235', '--json'], silent)).json();
+  const nd = legacyClose(named, ne.id);
+  claudeLines(named, [says(`About ${ne.id} ${nd.id}: the change is on main, so the attempt can be closed as shipped. Options: yes / no`, at(500)), types('yes', at(1000))]);
+  assert.equal(approveQ(named, ne.id, nd.id, env).code, 75, 'a bare "yes" to a message that only named the decision');
+  assert.equal(state(named.root, ne.id).decisions[0].approved, null);
+  claudeLines(named, [says(`About ${ne.id} ${nd.id}: the change is on main. Options: "Close it as shipped" / "Keep it open"`, at(1500)), types('Close it as shipped', at(2000))]);
+  assert.match(ok(approveQ(named, ne.id, nd.id, env)).out, /A1 decided: yes/);
+  assert.match(state(named.root, ne.id).decisions[0].approved.via, /^chat, the question not quoted/);
   // The label of this question's option is exact whatever else the message asked.
   t = heldAttempt('approve-two-asks-label', 'ENG-1221');
   claudeLines(t.p, [says(`${t.question}\n\nOptions: "Lift the pause" / "Keep it paused"\n\nAlso: should I update the README?`, at(500)), types('Lift the pause', at(1000))]);

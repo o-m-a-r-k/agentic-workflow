@@ -182,10 +182,15 @@ const isYesNo = (d) => d.choices.length === 2 && d.choices.includes('yes') && d.
 const labelsOf = (d, c) => [...new Set([labelOf(d, c), ...(frameLabels(d)[c] ?? [])])];
 // A choice in plain words: the label the question showed, else its frame's (a question an earlier release asked), else its id.
 export const plainLabel = (d, c) => d.labels?.[c] ?? frameLabels(d)[c]?.[0] ?? c;
+// Without bare words, a yes or no question's literal "yes" and "no" are bare words too, whether they come as the choice's id or as
+// the label a question with no labels falls back to (verification of the rework: "yes" and "YES" to a message that also asked
+// something else still bound through the id, and "yes" to a message that only named a decision an earlier release created
+// bound through the fallback label). A real label ("Lift the pause") stays.
 export function exactChoice(d, text, { bare = true, ids = () => true } = {}) {
   const reply = whole(text ?? '');
   if (!reply) return null;
-  const names = (c) => [...(ids(c) ? [c] : []), ...labelsOf(d, c), ...(bare && isYesNo(d) ? BARE[c] : [])].map(whole).filter(Boolean);
+  const literal = (n) => !bare && isYesNo(d) && ['yes', 'no'].includes(n);
+  const names = (c) => [...(ids(c) ? [c] : []), ...labelsOf(d, c), ...(bare && isYesNo(d) ? BARE[c] : [])].map(whole).filter((n) => n && !literal(n));
   const hits = d.choices.filter((c) => names(c).includes(reply));
   return hits.length === 1 ? hits[0] : null;
 }
@@ -313,12 +318,12 @@ export async function approveFromQuestion(root, id, options, { env = process.env
     for (let at = rest.indexOf(question); at >= 0; at = rest.indexOf(question)) rest = rest.slice(0, at) + rest.slice(at + question.length);
     return rest;
   };
-  const asksElse = (a) => a.channel === 'chat' && (/[?\uff1f]/u.test(besides(a.question)) || (a.panels ?? []).some((x) => !carriesText(x.text, question)));
+  // A panel question is held to it too: "<the question> Also: should I update the README?" answered "yes" binds nothing by itself.
+  const asksElse = (a) => /[?\uff1f]/u.test(besides(a.question)) || (a.channel === 'chat' && (a.panels ?? []).some((x) => !carriesText(x.text, question)));
   const exactOf = (a) => (a.unquoted ? exactChoice(d, a.answer, { bare: false, ids: unquotedIds(a) }) : exactChoice(d, a.answer, { bare: !asksElse(a) }));
   // The person's latest answer to the question decides: when it is exactly one option, it is recorded as it is; any other is
   // the agent's to read, and an earlier exact answer never outranks it (a "yes" is not recorded over a later "wait, not yet").
   const last = latest([...asked, ...unquoted]);
-  const recordable = latest([...asked, ...unquoted].filter((a) => exactOf(a)));
   // The person's own messages: what they typed in the chat (a reply after no message of the agent's too) and what they answered
   // in the question panel, as the harness recorded them; never the agent's text, a tool's output, a harness note or a
   // sub-agent's thread (engine/hosts/questions.mjs).
