@@ -180,18 +180,42 @@ test('0.7.27 (I-190): the delivered readback\'s own labels decide the routed sta
   ok(post(silent, 'ENG-63', 'Done'));
 });
 
-test('0.7.27 (I-190): doctor says that a rule for the first step cannot route at admission', () => {
+// 0.7.27 (verification of the release), named failure: doctor and the design said a rule for the first step could not route at
+// admission, while a tracker the engine performs did route it (the engine reads the ticket's labels through the adapter before
+// it sets the status), and through a connector the admission readback was judged by its labels while the pending action named
+// the default, so a labelled ticket's first readback was refused with nothing saying why beforehand. Doctor says what happens
+// for each, and the pending action through a connector names the routes.
+test('0.7.27 (I-190): a rule for the first step routes at admission: the engine reads the labels first; through a connector the pending action names the route', () => {
   const p = project('tracker-route-started', { started: { 'Self-serve': 'Working' }, delivered: { 'Self-serve': 'Done' } });
   const out = ok(wf(p.root, ['doctor', '--no-steps'])).out;
-  assert.match(out, /started goes to "Working" for a ticket labelled "Self-serve" \(otherwise "In Progress"\); not at admission, which comes before any readback has shown the labels/);
-  assert.doesNotMatch(out, /delivered goes to "Done"[^\n]*not at admission/);
+  assert.match(out, /started goes to "Working" for a ticket labelled "Self-serve" \(otherwise "In Progress"\); also at admission: the engine reads the ticket's labels before it sets the status/);
+  assert.doesNotMatch(out, /delivered goes to "Done"[^\n]*admission/);
+  assert.doesNotMatch(out, /not at admission/);
+  ok(wf(p.root, ['entry', '--item', 'ENG-400', '--json']));
+  ok(wf(p.root, ['entry', '--item', 'ENG-401', '--json']));
+  assert.equal(statusOf(p.root, 'ENG-400'), 'Working', 'the labelled ticket is routed when the work starts');
+  assert.equal(statusOf(p.root, 'ENG-401'), 'In Progress');
+  // Through a connector.
+  const { base, root } = singleRepoProject('tracker-route-started-connector', { tracker: { kind: 'linear', via: 'connector', statuses, statusByLabel: { started: { 'Self-serve': 'Working' } } } });
+  assert.match(ok(wf(root, ['doctor', '--no-steps'])).out, /started goes to "Working" for a ticket labelled "Self-serve" \(otherwise "In Progress"\); at admission no readback has shown the labels yet, so the pending action names "In Progress": set "Working" when the ticket you read carries "Self-serve" \(the admission readback is judged by the labels it shows\)/);
+  const e = ok(wf(root, ['entry', '--item', 'ENG-50', '--json'])).json();
+  assert.match(ok(wf(root, ['resume', '--attempt', e.id])).out, /set status to "In Progress" \(or, when the ticket you read carries a label the project routes in its adapter, the status that label routes to: "Working" for "Self-serve"; the readback is judged by the labels it shows\)/);
+  const report = (status, n) => {
+    const f = path.join(base, `admitted-${n}.json`);
+    fs.writeFileSync(f, JSON.stringify({ issue: 'ENG-50', title: 'Show a', description: 'Show the new text.', status, labels: ['Self-serve'], readAt: new Date(Date.now() + n * 1000).toISOString() }));
+    return wf(root, ['tracker', 'record', '--event', 'admitted', '--agent-reported', '--file', f, '--attempt', e.id]);
+  };
+  assert.match(report('In Progress', 1).err, /status is `In Progress`, expected `Working` \(the ticket's label "Self-serve" routes it\)/);
+  ok(report('Working', 2));
 });
 
 // 0.7.27 (review of the release), named failure: the engine performed the status the pending action carried, routed from the
 // labels of an earlier readback, and then judged the readback by the ticket's labels as it read them; a label taken off (or put
 // on) in between made the readback refuse what the engine itself had just set, and a retry set it again and was refused again,
-// with no refusal naming a way out. The engine now routes at the moment it performs, from the labels it reads then, with the
-// rule the readback is judged by.
+// with no refusal naming a way out. The engine now resolves a routed status at the seam when it performs (engine/tracker.mjs
+// performTracker), for every adapter alike: it reads the ticket through the adapter's own `perform` with no actions, routes from
+// the labels that readback reports, by the rule the readback is judged by, and hands `perform` the status to set; no adapter
+// carries the rule.
 const relabel = (root, item, change) => {
   const file = path.join(root, 'tickets', `${item}.md`);
   const text = fs.readFileSync(file, 'utf8');
@@ -297,4 +321,15 @@ test('0.7.27 (I-190): a project adapter with its own perform is handed the statu
   edit('ENG-82', (t) => ({ ...t, labels: ['ui'], status: 'Done' }));
   ok(wf(root, ['deliver', '--attempt', stuck.id, '--summary-file', summaryFile(base)]));
   assert.equal(JSON.parse(fs.readFileSync(db('ENG-82'), 'utf8')).status, 'Ready for UAT', 'the status the labels route to, whatever the ticket held');
+});
+
+// 0.7.27 (verification of the release): when the read before a routed status fails, the note names the adapter's contract it
+// relies on, so the adapter's author knows what to fix: `perform` with an empty `actions` list only reads and returns its readback.
+test('0.7.27 (I-190): a project adapter whose perform cannot read with no actions is told the contract; nothing is set', () => {
+  const strict = probe.replace('const t = read(root, item);', "if (!actions.length) throw new Error('nothing to do');\n      const t = read(root, item);");
+  const { base, root } = singleRepoProject('tracker-route-contract', { tracker: { kind: './tracker/probe.mjs', via: 'files', statuses, deliveredComment: 'uat.md', statusByLabel: ROUTED }, gate: { steps: [{ id: 'unit', repo: 'app', run: 'true' }] } }, { '.gitignore': '.wf-evidence/\n.wf-worktrees/\nprobe-db/\n', '.workflow/uat.md': '{id} is ready for UAT.\n\nUAT scope:\n{uatScope}\n', '.workflow/tracker/probe.mjs': strict });
+  const a = toAccepted(root, base, { item: 'ENG-90', change: { 'src/a.txt': 'p\n' } });
+  const out = ok(wf(root, ['deliver', '--attempt', a.id, '--summary-file', summaryFile(base)])).out;
+  assert.match(out, /could not read the ticket's labels before setting a routed status: nothing to do; the actions stay pending\. The adapter's `perform` called with an empty `actions` list must only read the ticket and return its readback/);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'probe-db', 'ENG-90.json'), 'utf8')).status, 'In Progress', 'nothing was set at delivery');
 });

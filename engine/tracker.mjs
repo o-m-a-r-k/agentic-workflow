@@ -1016,7 +1016,7 @@ export async function performTracker(root, cfg, state) {
         const labels = adapter.normalize(await impl.perform({ token, url: endpoint, item: s.item, actions: [], root, cfg, state: s }))?.labels;
         actions = actions.map((a) => (a.op === 'setStatus' ? { ...a, status: statusFor(cfg.tracker, a, labels).status } : a));
       } catch (error) {
-        return { performed, note: `tracker ${via} (${event}) could not read the ticket's labels before setting a routed status: ${scrub(String(error?.message ?? error), [token])}; the actions stay pending` };
+        return { performed, note: `tracker ${via} (${event}) could not read the ticket's labels before setting a routed status: ${scrub(String(error?.message ?? error), [token])}; the actions stay pending. The adapter's \`perform\` called with an empty \`actions\` list must only read the ticket and return its readback (the labels a routed status is resolved from)` };
       }
     }
     let raw;

@@ -119,6 +119,9 @@ export function askFirst(what, frame, choices, problems, facts, { items = [] } =
 // facts the engine holds, in the words the person reads; the agent's `context` says what the facts mean. `item` is the
 // ticket (the tracker item), the name the person knows the work by.
 const they = (n, one, many) => (n === 1 ? one : many);
+// The two choices of an item leaving a delivery (engine/leaving.mjs), defined here so a frame's words can name them.
+export const LEAVE = 'let it leave';
+export const FIX = 'fix now';
 // What a level means for an item, in the person's words, under the project's `leaving:` policy (engine/leaving.mjs).
 export const PERSON_RULE = { never: 'it is still fixed before this delivery ships', person: 'it may ship unfixed, but only if you say so when asked', owner: 'it may ship unfixed on the recorded reason of the agent running the ticket' };
 export const FRAMES = {
@@ -225,3 +228,65 @@ export const FRAMES = {
     question: `This ticket has been through ${rounds} review round${rounds === 1 ? '' : 's'} and the reviews keep finding problems. How should it go on?`,
   }),
 };
+
+// 0.7.27 (I-192, D41). The frame a decision was asked under, read from its kind and key. Named failure (field): a decision
+// `wf close --shipped` created under 0.7.17 carried no aliases, no labels and no plain words (frames came in 0.7.23), so the
+// person's "ok we can close this then" named nothing the engine knew, although the decision's kind and key say which frame it is.
+// The engine's words for a frame apply to every question asked under it, whichever release asked it.
+const FRAME_KEYS = [
+  ['override-gate', 'close-shipped:', 'closeShipped'],
+  ['override-gate', 'abandon:', 'abandonIntegration'],
+  ['override-gate', 'gate:', 'gateOrder'],
+  ['override-gate', 'acknowledge:', 'acknowledge'],
+  ['override-gate', 'repin:', 'repin'],
+  ['override-gate', 'correct-admission:', 'correctCheck'],
+  ['lift-hold', 'release:', 'liftHold'],
+  ['adopt-live', 'adopt:', 'adopt'],
+  ['move-out-of-batch', 'abandon-split:', 'abandonSplit'],
+  ['move-out-of-batch', 'abandon-batch:', 'abandonBatch'],
+  ['move-out-of-batch', 'eject-abandoned:', 'leaveAbandoned'],
+  ['move-out-of-batch', 'eject:', 'eject'],
+  ['move-out-of-batch', 'nonissue:', 'notDefect'],
+  ['move-out-of-batch', 'rate:', 'rateDown'],
+  ['move-out-of-batch', 'leave:', 'leave'],
+  ['waive-finding', '', 'waive'],
+];
+export const frameOf = (d) => FRAME_KEYS.find(([kind, prefix]) => d?.kind === kind && String(d.key ?? '').startsWith(prefix))?.[2] ?? null;
+// What a frame needs to say its words with none of the decision's facts (a word that needs a fact is left out).
+const PROBES = { waive: { n: 1 }, leave: { LEAVE, FIX }, gateOrder: { owes: {} }, abandonBatch: { members: [] } };
+
+// The decision's action in the person's own terms (0.7.27, I-192, D41): what a reply may say to choose an option when the
+// message before it neither quoted the question nor named the decision. `<it>` is a reference to the work (it, this, that,
+// the ticket, the task, the attempt, the item's or the attempt's id); `<it?>` is one or nothing ("go ahead and close").
+// These are the frame's own verbs and labels, specific to what it decides, never a generic word: "continue", "stop",
+// "keep it" or "fix it" said about something else must never answer a question (independent security review of 0.7.23), so
+// an escalation and a frame whose words are generic have none, and a "no" is an act only where its words are as specific.
+const ACTS = {
+  closeShipped: { yes: ['close <it?>', 'closing <it?>', 'mark <it> as shipped', 'mark <it> shipped'], no: ['keep <it> open', 'leave <it> open'] },
+  liftHold: { yes: ['lift the pause', 'lift the hold', 'lift <it>', 'unpause <it?>', 'end the pause'], no: ['keep <it> paused', 'keep the pause', 'keep the hold'] },
+  adopt: { yes: ['take <it> over', 'take over <it?>'], no: ['leave <it> with the other session'] },
+  abandonIntegration: { yes: ['give <it> up', 'abandon <it?>'] },
+  abandonSplit: { yes: ['give <it> up', 'abandon <it?>'] },
+  abandonBatch: { yes: ['give <it> up', 'abandon <it?>'] },
+  gateOrder: { yes: ['run the tests now', 'run the full test run', 'run the gate', 'start the tests'], no: ['keep the usual order'] },
+  acknowledge: { yes: ['count <it> as delivered'] },
+  repin: { yes: ['use the corrected settings', 'use the new settings'], no: ['keep the current settings'] },
+  correctCheck: { yes: ['use the corrected step', 'use the corrected check'], no: ['keep the original step', 'keep the original check'] },
+  waive: { yes: ['accept <it> and ship', 'accept <it> as is', 'ship <it> as is'] },
+  leave: { [LEAVE]: ['let <it> leave'] },
+};
+
+// The engine's words for each choice of a decision: the aliases and labels it was asked with, the ones its frame gives today
+// (an earlier release's question gets them too), and the acts above. { choice: { phrases, acts } }; display is unchanged
+// (`labelOf` still shows what the question showed).
+export function choiceWords(d) {
+  const name = frameOf(d);
+  let f = null;
+  try {
+    f = name ? FRAMES[name]({ ...(PROBES[name] ?? {}) }) : null;
+  } catch {
+    f = null;
+  }
+  const clean = (xs) => (Array.isArray(xs) ? xs : [xs]).filter((x) => typeof x === 'string' && x.trim() && !x.includes('undefined'));
+  return Object.fromEntries((d?.choices ?? []).map((c) => [c, { phrases: [...new Set([...clean(d.aliases?.[c] ?? []), ...clean(f?.aliases?.[c] ?? []), ...clean(f?.labels?.[c] ?? [])])], acts: clean(ACTS[name]?.[c] ?? []) }]));
+}

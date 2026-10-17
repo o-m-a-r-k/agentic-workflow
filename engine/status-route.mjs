@@ -78,6 +78,11 @@ export function ticketLabels(state) {
 // Every status name the adapter can set (a tracker that keeps status as a label removes the others when it sets one).
 export const statusNames = (tracker) => [...new Set([...Object.values(tracker?.statuses ?? {}), ...Object.values(tracker?.statusByLabel ?? {}).flatMap((byLabel) => Object.values(byLabel ?? {}))].filter((s) => typeof s === 'string' && s))];
 
-// What `wf doctor` says about the routing: one line per rule.
-// A rule for the first step cannot route at admission: the labels are those of a readback, and the first one is taken then.
-export const routeLines = (tracker) => Object.entries(tracker?.statusByLabel ?? {}).flatMap(([step, byLabel]) => Object.entries(byLabel ?? {}).map(([label, status]) => `${step} goes to "${status}" for a ticket labelled "${label}" (otherwise "${tracker.statuses?.[step]}")${step === 'started' ? '; not at admission, which comes before any readback has shown the labels' : ''}`));
+// What `wf doctor` says about the routing: one line per rule, with what happens at admission, which comes before any readback
+// was recorded. 0.7.27 (verification of the release): doctor said a rule for the first step could not route at admission, while
+// an engine-performed tracker did route it (it reads the ticket's labels through the adapter before it sets the status, engine/
+// tracker.mjs performTracker); through a connector the pending action names the default, and the admission readback is judged by
+// the labels it shows, so the agent sets the routed status when the ticket it read carries the label.
+const ENGINE_VIAS = ['api', 'cli', 'files'];
+const atAdmission = (tracker, step, label, status) => (step !== 'started' ? '' : ENGINE_VIAS.includes(tracker?.via) ? '; also at admission: the engine reads the ticket\'s labels before it sets the status' : `; at admission no readback has shown the labels yet, so the pending action names "${tracker.statuses?.[step]}": set "${status}" when the ticket you read carries "${label}" (the admission readback is judged by the labels it shows)`);
+export const routeLines = (tracker) => Object.entries(tracker?.statusByLabel ?? {}).flatMap(([step, byLabel]) => Object.entries(byLabel ?? {}).map(([label, status]) => `${step} goes to "${status}" for a ticket labelled "${label}" (otherwise "${tracker.statuses?.[step]}")${atAdmission(tracker, step, label, status)}`));

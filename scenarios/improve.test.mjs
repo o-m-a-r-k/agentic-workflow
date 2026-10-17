@@ -53,10 +53,32 @@ test('next: open items by recurrence, then age; close needs the scenario test an
   // A regression of a closed item: flagged and first in line.
   const reg = add('First thing went wrong again');
   assert.match(reg.out, /regression of I-1 fixed in 0\.9\.0: it goes to the top of `wf improve next`/);
-  assert.match(ok(wf(cwd, ['improve', 'next'], inboxEnv(inbox, plugin))).out, /^I-3 .*recurrence 1.*\(regression of I-1 fixed in 0\.9\.0\)/);
+  assert.match(ok(wf(cwd, ['improve', 'next'], inboxEnv(inbox, plugin))).out, /^I-3 .*recurrence 1.*\(regression of I-1 fixed in 0\.9\.0[,)]/);
   assert.match(add('Unrelated', ['--regression-of', 'I-2']).out, /regression of I-2/);
   // Outside the plugin repo, nothing closes.
   assert.match(wf(cwd, ['improve', 'close', 'I-2', '--version', '0.9.1', '--fix', 'f', '--test', 'scenarios/fix.test.mjs'], inboxEnv(inbox, cwd)).err, /is not the plugin repo checkout/);
+});
+
+// 0.7.27 (I-193), named failure: items closed during the preparation of a release read "closed, fixed in 0.7.27" while the
+// published and running wf was 0.7.26; the session concluded the fix was available, updated, and met the old behaviour again.
+test('list and show say when a fix is in a release newer than the running wf: not released or installed yet', () => {
+  const inbox = path.join(tmp('inbox-unshipped'), 'improvements');
+  const plugin = pluginRepo();
+  const cwd = tmp('anywhere-unshipped');
+  const run = (args) => ok(wf(cwd, ['improve', ...args], inboxEnv(inbox, plugin)));
+  run(['add', '--title', 'Fixed in a later release', '--what', 'it happened', '--class', 'engine']);
+  run(['add', '--title', 'Fixed in an earlier release', '--what', 'it happened', '--class', 'engine']);
+  run(['close', 'I-1', '--version', '99.0.0', '--fix', 'f', '--test', 'scenarios/fix.test.mjs']);
+  run(['close', 'I-2', '--version', '0.1.0', '--fix', 'f', '--test', 'scenarios/fix.test.mjs']);
+  const list = run(['list']).out;
+  const running = JSON.parse(fs.readFileSync(path.join(import.meta.dirname, '..', 'package.json'), 'utf8')).version;
+  assert.match(list, new RegExp(`I-1 {2}\\[closed, engine, fixed in 99\\.0\\.0, not released or installed yet: this wf is ${running.replace(/\./g, '\\.')}\\]`));
+  assert.match(list, /I-2 {2}\[closed, engine, fixed in 0\.1\.0\] {2}Fixed in an earlier release/);
+  assert.match(run(['show', 'I-1']).out, /fixed in 99\.0\.0, not released or installed yet/);
+  assert.doesNotMatch(run(['show', 'I-2']).out, /not released/);
+  // A regression of an item whose fix is not in this wf says so too: the fix is not running here.
+  assert.match(run(['add', '--title', 'Fixed in a later release again', '--what', 'it happened', '--class', 'engine', '--regression-of', 'I-1']).out, /regression of I-1/);
+  assert.match(run(['list']).out, /\(regression of I-1 fixed in 99\.0\.0, not released or installed yet: this wf is /);
 });
 
 test('a symlinked inbox, or one inside the evidence, is refused', () => {

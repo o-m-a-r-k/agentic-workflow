@@ -149,6 +149,14 @@ function claudePerson(e) {
   if (!text || /^</.test(text)) return { turn: true };
   return { reply: text };
 }
+// A message the person typed while the agent was working: Claude Code queues it and records it as an `attachment` line
+// (`queued_command`, origin human), not as a user line (0.7.27, I-192). Their words, in the middle of a turn.
+function claudeQueued(e) {
+  const a = e?.attachment;
+  if (a?.type !== 'queued_command' || a.origin?.kind !== 'human' || (a.commandMode ?? 'prompt') !== 'prompt' || typeof a.prompt !== 'string') return null;
+  const text = a.prompt.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim();
+  return text && !/^</.test(text) ? { reply: text } : null;
+}
 const QUESTION_TOOLS = new Set(['AskUserQuestion', 'request_user_input', 'request_user_input_async']);
 export async function claudeChatAnswers(file) {
   const out = [];
@@ -157,7 +165,7 @@ export async function claudeChatAnswers(file) {
   let panels = [];
   const asked = new Set();
   await readLines(file, (line) => {
-    if (!line.includes('"assistant"') && !line.includes('"user"')) return;
+    if (!line.includes('"assistant"') && !line.includes('"user"') && !line.includes('queued_command')) return;
     let e;
     try {
       e = JSON.parse(line);
@@ -185,9 +193,11 @@ export async function claudeChatAnswers(file) {
     // The person's answer in the panel is their turn too (independent review of 0.7.18): it ends the message. A panel they
     // dismissed (a result with no answers) leaves the question standing, so what they type next answers it.
     const panelAnswer = e?.type === 'user' && !e.isSidechain && Array.isArray(content) && record(e.toolUseResult?.answers) && content.some((b) => b?.type === 'tool_result' && asked.has(b.tool_use_id));
-    const person = panelAnswer ? { turn: true } : claudePerson(e);
+    const person = panelAnswer ? { turn: true } : e?.type === 'attachment' ? claudeQueued(e) : claudePerson(e);
     if (!person) return;
-    if (person.reply && said.length) out.push({ askedAt: saidAt, at: e.timestamp ?? null, question: said.join('\n'), panels, options: null, answer: person.reply, channel: 'chat' });
+    // 0.7.27 (I-192): every reply is the person's words, also one after no message of the agent's (`question` is then empty and
+    // binds nothing by itself; engine/approve.mjs reads such a reply only for the decision's own terms).
+    if (person.reply) out.push({ askedAt: said.length ? saidAt : null, at: e.timestamp ?? null, question: said.join('\n'), panels, options: null, answer: person.reply, channel: 'chat' });
     said = [];
     saidAt = null;
     panels = [];
@@ -198,11 +208,16 @@ export async function claudeChatAnswers(file) {
 // Codex: the agent's `message` items (role assistant, `output_text`) after its last tool call, plus its question-panel calls;
 // the person's `message` (role user) ends it. Harness context (AGENTS.md, environment, plugin notes, by the item kinds the
 // harness records or a context tag) is not the person; a panel reply or another tagged line is their turn but not a reply.
+// 0.7.27 (I-192), named failure (field): Codex Desktop adds, before the person's first message of a day, a user item recording
+// the page open beside the chat (`<external_codex_apps_open_page>`, kind `additional_content.codex_apps_open_page`); it was
+// read as a turn of the person's, so it ended the message that had asked the question the day before, and their reply to it
+// bound to nothing. What the harness adds (`additional_content.*`) is not the person.
 const CODEX_WRAPPERS = ['plugins.recommendations', 'agents_md.instructions', 'environments.environment_context'];
-const CODEX_HARNESS = /^<(environment_context|user_instructions|permissions|turn_aborted|user_shell_command)\b|^# AGENTS\.md instructions/;
+const CODEX_HARNESS = /^<(environment_context|user_instructions|permissions|turn_aborted|user_shell_command|external_codex_apps_[a-z_]+|codex_apps_[a-z_]+)\b|^# AGENTS\.md instructions/;
+const codexWrapper = (k) => CODEX_WRAPPERS.includes(k) || String(k).startsWith('additional_content.');
 function codexPerson(p) {
   const kinds = p.internal_chat_message_metadata_passthrough?.content_item_kinds;
-  if (Array.isArray(kinds) && kinds.length && kinds.every((k) => CODEX_WRAPPERS.includes(k))) return null;
+  if (Array.isArray(kinds) && kinds.length && kinds.every(codexWrapper)) return null;
   const blocks = p.content.filter((b) => b?.type === 'input_text' && typeof b.text === 'string').map((b) => b.text.trim()).filter(Boolean);
   if (!blocks.length) return p.content.some((b) => b?.type === 'input_image') ? { turn: true } : null;
   if (blocks.every((b) => CODEX_HARNESS.test(b))) return null;
@@ -258,7 +273,7 @@ export async function codexChatAnswers(file) {
     if (p.role !== 'user') return;
     const person = codexPerson(p);
     if (!person) return;
-    if (person.reply && said.length) out.push({ askedAt: saidAt, at: e.timestamp ?? null, question: said.join('\n'), panels, options: null, answer: person.reply, channel: 'chat' });
+    if (person.reply) out.push({ askedAt: said.length ? saidAt : null, at: e.timestamp ?? null, question: said.join('\n'), panels, options: null, answer: person.reply, channel: 'chat' });
     said = [];
     saidAt = null;
     panels = [];

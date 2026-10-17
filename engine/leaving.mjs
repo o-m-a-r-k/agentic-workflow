@@ -9,11 +9,10 @@
 // except F3 if a follow-up ticket already has it") was not a choice, so the question stayed open. Each item is now its own short question,
 // with two choices, and an answer in the person's own words is recorded as theirs.
 import { createDecision, decisionFor, deliverCoreDecision, optionLines, questionFor, settledBy } from './approve.mjs';
-import { FRAMES, askFirst, askProblems, composeAsk, itemAsk, itemWords, readAsk } from './asking.mjs';
+import { FIX, FRAMES, LEAVE, askFirst, askProblems, composeAsk, itemAsk, itemWords, readAsk } from './asking.mjs';
 import { refuse } from './util.mjs';
 
-export const LEAVE = 'let it leave';
-export const FIX = 'fix now';
+export { FIX, LEAVE };
 const LEVELS = ['high', 'medium', 'low'];
 export const DEFAULT_POLICY = { high: 'never', medium: 'never', low: 'person' };
 export const policyOf = (cfg) => ({ ...DEFAULT_POLICY, ...(cfg?.leaving ?? {}) });

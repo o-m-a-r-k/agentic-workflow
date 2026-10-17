@@ -340,6 +340,11 @@ const RETIRED = [
   [/Where Claude Code transcripts exist, `wf review` refuses/, 'the engine reads no reviewer transcript'],
   [/identifies the round's agent by that name in its transcript/, 'the engine reads no reviewer transcript'],
   [/with a verdict for each rule/, 'a verdict per rule is optional context'],
+  // 0.7.27 (D41, D39 as corrected): the person may ask the agent to set Done, and a rule for the first step routes at admission.
+  [/Never set a ticket to done|a human does\b/i, 'Done is set when the adapter routes the ticket there or the person explicitly asks for it'],
+  [/cannot route at admission/, 'a rule for the first step routes at admission (the engine reads the labels first; a connector\'s pending action names the routes)'],
+  // 0.7.27 (D41): a decision is asked in the agent's message in the form that binds; the panel is optional.
+  [/goes in the question panel \(or `wf approve`\)/, 'a reserved question is asked in the agent\'s message, quoted exactly; the panel is optional'],
 ];
 test('no text repeats a claim the engine retired', () => {
   const docs = fs.readdirSync(path.join(ROOT, 'docs')).filter((f) => f.endsWith('.md') && f !== 'DESIGN.md' && !/^v\d/.test(f)).map((f) => `docs/${f}`);

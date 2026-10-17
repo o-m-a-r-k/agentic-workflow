@@ -29,8 +29,8 @@ import * as secrets from './secrets.mjs';
 import { report, toCsv, toHandoffCsv, toHtml, toJson, toText } from './telemetry.mjs';
 import { impact } from './topology.mjs';
 import { commentFile, hasTicket, limitItemsText, performTracker, publicAssetsProblem, recordSummary, recordTracker } from './tracker.mjs';
-import { ENGINE_VERSION, WfError, parseArgs, refuse } from './util.mjs';
-import { approveFromQuestion, approveHint, approveInTerminal, decisionLine, pendingDecisions, withdrawDecision } from './approve.mjs';
+import { ENGINE_VERSION, WfError, compareVersions, parseArgs, parseVersion, refuse } from './util.mjs';
+import { approveFromQuestion, approveHint, approveInTerminal, decisionLine, optionLines, pendingDecisions, questionFor, withdrawDecision } from './approve.mjs';
 import { logRefusal, readRefusals, refusalCounts } from './refusals.mjs';
 import { recordStrategy, signalsReport, signalsText } from './strategy.mjs';
 import { courseLines, pastEstimates } from './signals.mjs';
@@ -163,9 +163,10 @@ Work
   wf decisions withdraw ID --reason "what changed"
                                     take back a question whose subject changed (pending, or answered and not yet used)
   wf approve ID [--choice C]        the owner confirms a reserved decision in their own terminal
-  wf approve ID --from-question     or the agent records the owner's answer from its question panel, or their chat reply to
-                                    a message that asked exactly the decision's question (as the harness recorded it);
-                                    an answer in their own words is recorded as theirs (choice "other"), to follow
+  wf approve ID --from-question     or the agent records the owner's answer from its question panel, their chat reply to
+                                    a message that asked exactly the decision's question, or their reply naming what the
+                                    decision does in their own words (as the harness recorded it); an answer in their own
+                                    words that is no choice is recorded as theirs (choice "other"), to follow
   wf lesson add|waive|recur|merge|distinct|move|set|apply|show|list|preview|review|export
                                     the project's lessons (.workflow/lessons/): capture, enforce, recurrence, merge lessons that describe one mistake
   wf reopen --item ID --reason "feedback" [--no-lesson "why"]
@@ -198,12 +199,18 @@ const print = (options, human, data) => {
   else process.stdout.write(`${typeof human === 'string' ? human : JSON.stringify(human, null, 2)}\n`);
 };
 
+// 0.7.27 (I-192): a question the person has not answered is named where the owner reads what is next, with the form that asks
+// it (an escalation is asked by the next step itself). Named failure (field): the agent reported a pending closure as
+// "Remaining: workflow closure and cleanup", in its own words, and never asked it; the person's answer to that status was refused.
+const unansweredLines = (s) => (['done', 'abandoned'].includes(s.phase) ? [] : pendingDecisions(s).filter((x) => x.kind !== 'escalation').map((d) => `  waiting on the person: ${d.id} is not answered. Ask it in your reply (a mention in your own words, such as what remains, does not ask it): quote "${questionFor(s, d)}" exactly with its options (${optionLines(d)}) and ask nothing else in that message; after their answer, \`wf approve ${d.id} --from-question --attempt ${s.id}\``));
+
 // An open attempt whose worktree folder is gone is shown as orphaned with its missing paths (orphansOf, orphanNext in
 // lifecycle.mjs, where every next line is decided).
 function orphanedSummary(root, s, gone) {
   const lines = [`${s.id}  ${s.item}  lane=${s.lane}  intent=${s.intent}  phase=${s.phase}  ORPHANED`, `  owner: ${s.owner}`];
   for (const [name, r] of Object.entries(s.repos)) lines.push(`  ${name}: ${r.worktree}${gone.some((m) => m.repo === name) ? '  (MISSING)' : ''} (base ${r.base.slice(0, 10)})`);
   if (s.activeHold) lines.push(`  HOLD: ${s.activeHold.reason}`);
+  lines.push(...unansweredLines(s));
   lines.push(`  ORPHANED: worktree missing: ${gone.map((m) => m.worktree).join(', ')}; the evidence and the branch are intact`);
   lines.push(`  next: ${orphanNext(root, s, gone)}`);
   return lines.join('\n');
@@ -216,6 +223,7 @@ function summary(root, s, { base = null, resume = false } = {}) {
   for (const [name, r] of Object.entries(s.repos)) lines.push(`  ${name}: ${r.worktree} (base ${r.base.slice(0, 10)})`);
   if (base) lines.push(...baseLines(base));
   if (s.activeHold) lines.push(`  HOLD: ${s.activeHold.reason}`);
+  lines.push(...unansweredLines(s));
   try {
     const all = loadLessons(root, { state: s });
     const lessonFiles = Object.keys(s.repos).flatMap((r) => {
@@ -488,7 +496,11 @@ function safeBase(root, s) {
 // names are stripped from what is stored.
 async function improveCommand(sub, positional, options) {
   const { addImprovement, closeImprovement, loadImprovements, nextImprovements, reviewRefusals } = await import('./improve.mjs');
-  const show = (x) => `${x.id}  [${x.status}, ${x.class}${x.recurrence ? `, recurrence ${x.recurrence}` : ''}${x.version ? `, ${x.status === 'retired' ? 'retired' : 'fixed'} in ${x.version}` : ''}]  ${x.title}${x.regressionOf ? `  (regression of ${x.regressionOf.id}${x.regressionOf.fixedIn ? ` fixed in ${x.regressionOf.fixedIn}` : ''})` : ''}`;
+  // 0.7.27 (I-193), named failure: items closed for a release still being prepared read "closed, fixed in 0.7.27" while the
+  // published and running wf was 0.7.26, so a session concluded the fix was available, updated, and still met the old behaviour.
+  // A fix in a release newer than this wf says that it is not in it.
+  const unshipped = (v) => (parseVersion(v) && compareVersions(v, ENGINE_VERSION) > 0 ? `, not released or installed yet: this wf is ${ENGINE_VERSION}` : '');
+  const show = (x) => `${x.id}  [${x.status}, ${x.class}${x.recurrence ? `, recurrence ${x.recurrence}` : ''}${x.version ? `, ${x.status === 'retired' ? 'retired' : 'fixed'} in ${x.version}${unshipped(x.version)}` : ''}]  ${x.title}${x.regressionOf ? `  (regression of ${x.regressionOf.id}${x.regressionOf.fixedIn ? ` fixed in ${x.regressionOf.fixedIn}${unshipped(x.regressionOf.fixedIn)}` : ''})` : ''}`;
   if (sub === 'add') {
     let names = [];
     const root = findRoot();
