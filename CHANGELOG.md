@@ -14,29 +14,40 @@ Release notes, newest first, then every fix that came from a failure in the work
     elsewhere stays open, naming where else, and a new finding that shares the cause of an earlier one says so
     (`sameCauseAs`);
   - when a cause comes back, `wf resume`, `wf status`, `wf signals` and the strategist say so plainly ("the cause of
-    r9:F1 came back in r10:F1: the last fix covered one place"), and a finding with the family of one marked fixed is
-    flagged as a possible recurrence. Information, not a stop.
+    r9:F1 came back in r10:F1: the last fix covered one place"), also when a finding marked fixed is found open again,
+    and a finding with the family of one marked fixed is flagged as a possible recurrence (a label match, apart from a
+    cause a reviewer confirmed). A `sameCauseAs` that names nothing is dropped and the receipt says which; it is never
+    a refusal. Information, not a stop.
 - **The person's review-round limit stops every ticket (I-185, D34).** An attempt admitted by an older release ran 14
   rounds and the "how should it go on" question never opened. The person's stops now apply to every ticket still worked,
   whichever release admitted it. A ticket already past the limit asks at its next handoff. `wf signals` no longer reads
-  "0 blocking" while earlier rounds' blocking findings are still open: it counts what is open now, new and carried.
+  "0 blocking" while earlier rounds' blocking findings are still open: it counts what is open now, new and carried
+  (per round: of the first N rounds' findings, open now).
 - **A withdrawn strategist question no longer blocks the strategist's corrected decision (I-186, D33).** The corrected
-  decision supersedes it; until then the withdrawn question still holds the work, and `wf resume` names the way on.
+  decision supersedes it; until then the withdrawn question still holds the work, and `wf resume` names the way on. When
+  the round question is due as well, the waiting strategist is named beside it, and the withdrawn question is not asked
+  afresh while a strategist handed after it has not decided (the person is not asked the same stop twice).
 - **Never asked twice, continued (I-187, D37).** An approved correction of an admission check holds across a base merge
   that leaves the corrected steps unchanged; it is keyed by what it changes, not by the commit. A question an earlier
   release asked under its commit is the same question while those steps are unchanged.
 - **"Not a defect" (I-188, D38).** A discovered issue raised on a wrong premise closes as `not-a-defect`, keeping its
   claim and the reason: by an independent reviewer's verdict (`verified-nonissue`, with evidence and rationale), or by the
   person's decision (`wf discovered close <id> --not-a-defect --reason "..."`, one question per item). It is not listed
-  as a known issue.
+  as a known issue. The next reviewer is told which of the three closed it.
 - **A left item that names an existing issue is that issue (I-184, D35).** An implementer report's `left` item with
   `discoveredId` links to the issue instead of creating a duplicate.
 - **Tracker statuses routed by label (I-190, D39).** `tracker.statusByLabel: { <step>: { "<label>": "<status>" } }`
-  routes a ticket's status by the labels its latest readback showed (for example, tickets with one label go to Done on
-  delivery). Nothing sets Done unless the project's setup routes it there; that is the person's choice in the adapter.
+  routes a ticket's status by the ticket's labels (for example, tickets with one label go to Done on delivery). The
+  status asked for comes from the latest readback recorded so far; the readback that proves it is judged by its own
+  labels, so a label taken off before delivery routes nothing, and the route used is recorded. A rule for `started`
+  cannot route at admission (no readback has shown the labels yet); `wf doctor` says so. Nothing sets Done unless the
+  project's setup routes it there; that is the person's choice in the adapter.
 - **Trackers that attach screenshots (I-189 plugin side, D40).** A tracker adapter may declare `screenshots:
   'attachments'` or `'attachments-only'`: the delivered comment lists the files instead of embedding images, and delivery
-  is checked against the readback's uploaded attachments by file name.
+  is checked against the readback's uploaded attachments by file name, each carrying the owner's caption as its
+  subtitle in both modes (an agent-reported attachment also names its upload by an https `assetUrl`). An attempt keeps
+  the tracker adapter committed at its admission, so a `screenshots` declared later applies to the attempts admitted
+  after the adapter commit; an attempt already running keeps embedding.
 
 ## 0.7.26 - A moved base reaches a delivery waiting on a merge request; a ticket's handoff shows its own screenshots
 
