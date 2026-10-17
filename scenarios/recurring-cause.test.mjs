@@ -107,29 +107,31 @@ test('findings that share a cause but have not come back after a fix are marked 
   assert.deepEqual(delta.openFindings.map((f) => [f.id, f.cause]), [['F1', 'cause-1'], ['F2', 'cause-1']]);
 });
 
-test('a closure whose sameCauseAs names a finding no round raised is refused with a hint; a finding of the same closure and an earlier round are named alike', () => {
+// 0.7.27 (review of the release): a link that names nothing is dropped and said, never a refusal. The refusal would have been a
+// new stop with no failure behind it; what is lost is only the link, and the reviewer is told which ones.
+test('a sameCauseAs that names a finding no round raised is dropped and said, not refused; the links that name something are kept', () => {
   const p = project('rc-unknown');
   hand(p, 'r1');
   ok(record(p, goodClosure('r1', { findings: [finding('F1', 'src/a.txt:2 wrong')] })));
   fixRound(p, { 'src/a.txt': CHANGED.replace('L2', 'L2 fixed') }, 'fix');
   hand(p, 'r2');
   const prior = [{ round: 'r1', id: 'F1', status: 'fixed', evidence: 'src/a.txt:2 fine' }];
-  const unknown = record(p, goodClosure('r2', { criteria: [], priorFindings: prior, findings: [finding('F1', 'src/a.txt:5 wrong', { sameCauseAs: ['r9:F9'] })] }));
-  assert.equal(unknown.code, 75);
-  assert.match(unknown.err, /F1: `sameCauseAs` names r9:F9, which no round of this attempt \(nor this closure\) raised/);
-  assert.match(unknown.err, /name a finding as "<round>:<id>"/);
-  const log = path.join(p.root, '..', 'refusals.jsonl');
-  assert.equal(JSON.parse(fs.readFileSync(log, 'utf8').trim().split('\n').at(-1)).id, 'review:same-cause-unknown');
-  for (const bad of ['r1:F1', ['no-colon'], ['r2:F1']]) {
-    const refused = record(p, goodClosure('r2', { criteria: [], priorFindings: prior, findings: [finding('F1', 'src/a.txt:5 wrong', { sameCauseAs: bad })] }));
-    if (JSON.stringify(bad) === JSON.stringify(['r2:F1'])) assert.match(refused.err, /names the finding itself/);
-    else assert.match(refused.err, /is a list of "<round>:<id>"/);
-    assert.equal(refused.code, 75);
-  }
-  assert.equal(signals(p).rounds.length, 1, 'none of them was recorded');
-  // Named right, the same closure records: one finding names an earlier round's, another names a sibling in this closure.
-  ok(record(p, goodClosure('r2', { criteria: [], priorFindings: prior, findings: [finding('F1', 'src/a.txt:5 wrong', { sameCauseAs: ['r1:F1'] }), finding('F2', 'src/a.txt:6 wrong', { sameCauseAs: ['r2:F1'] })] })));
-  assert.deepEqual(signals(p).recurringCauses.map((x) => [x.again, x.fixed]), [['r2:F1', ['r1:F1']]]);
+  const closure = goodClosure('r2', { criteria: [], priorFindings: prior, findings: [
+    finding('F1', 'src/a.txt:5 wrong', { sameCauseAs: ['r9:F9', 'r1:F1'] }),
+    finding('F2', 'src/a.txt:6 wrong', { sameCauseAs: 'r1:F1' }),
+    finding('F3', 'src/a.txt:3 wrong', { sameCauseAs: ['r2:F3', 'r2:F1'] }),
+  ] });
+  const recorded = ok(record(p, closure));
+  assert.match(recorded.out, /review recorded \(3 finding\(s\)\)/);
+  assert.match(recorded.out, /F1: `sameCauseAs` names r9:F9, which no round of this attempt \(nor this closure\) raised/);
+  assert.match(recorded.out, /F2: `sameCauseAs` is a list of "<round>:<id>"/);
+  assert.match(recorded.out, /F3: `sameCauseAs` names the finding itself/);
+  assert.match(recorded.out, /sameCauseAs links dropped \(3\)/);
+  const kept = JSON.parse(JSON.stringify(signals(p)));
+  assert.deepEqual(kept.recurringCauses.map((x) => [x.again, x.fixed]), [['r2:F1', ['r1:F1']]], 'the link that named something is kept');
+  const links = Object.fromEntries(resume(p).review.closure.findings.map((f) => [f.id, f.sameCauseAs ?? null]));
+  assert.deepEqual(links, { F1: ['r1:F1'], F2: null, F3: ['r2:F1'] }, 'the recorded closure holds only what named something');
+  assert.ok(!fs.existsSync(path.join(p.root, '..', 'refusals.jsonl')) || !/same-cause/.test(fs.readFileSync(path.join(p.root, '..', 'refusals.jsonl'), 'utf8')), 'nothing was refused');
 });
 
 test('a blind evidence closure takes its sameCauseAs in the second record, with the earlier findings it can then see; its findings are otherwise as recorded', () => {
@@ -205,4 +207,29 @@ test('a finding open with the family of an earlier finding marked fixed is shown
   const after = signals(p);
   assert.deepEqual(after.recurringCauses.map((x) => [x.again, x.fixed]), [['r3:F1', ['r1:F1']]]);
   assert.deepEqual(after.familyRecurrences.map((x) => [x.again, x.fixed]), [['r3:F1', ['r2:F1', 'r2:F2']]], 'the other fixed findings of the family are still only a label match');
+});
+
+// 0.7.27 (review of the release), named failure: a finding verified fixed in one round and found open again by a later one (the
+// same ref, no new finding) was not reported as a recurrence, because a recurrence was only a finding naming another.
+test('a finding marked fixed in one round and found open again in a later one is a recurrence of itself', () => {
+  const p = project('rc-reopened');
+  hand(p, 'r1');
+  ok(record(p, goodClosure('r1', { findings: [finding('F1', 'src/a.txt:2 wrong', { family: 'pending-label' })] })));
+  fixRound(p, { 'src/a.txt': CHANGED.replace('L2', 'L2 fixed') }, 'fix', 'Fixes-finding: r1:F1');
+  hand(p, 'r2');
+  ok(record(p, goodClosure('r2', { criteria: [], priorFindings: [{ round: 'r1', id: 'F1', status: 'fixed', evidence: 'src/a.txt:2 fine' }] })));
+  assert.deepEqual(signals(p).recurringCauses, [], 'fixed, and nothing says otherwise');
+  fixRound(p, { 'src/a.txt': CHANGED.replace('L2', 'L2 fixed again') }, 'another change');
+  hand(p, 'r3');
+  ok(record(p, goodClosure('r3', { criteria: [], priorFindings: [{ round: 'r1', id: 'F1', status: 'open', evidence: 'src/a.txt:5 the same wrong assumption' }] })));
+  const sig = signals(p);
+  assert.deepEqual(sig.recurringCauses.map((x) => [x.again, x.fixed, x.reopenedBy]), [['r1:F1', ['r1:F1'], 'r3']]);
+  const line = /r1:F1 was marked fixed and found open again by r3: the last fix covered one place; find the root cause before the next fix round/;
+  assert.match(ok(wf(p.root, ['signals', '--attempt', p.id])).out, line);
+  assert.match(ok(wf(p.root, ['resume', '--attempt', p.id])).out, line);
+  // A round that verifies it fixed again ends it.
+  fixRound(p, { 'src/a.txt': CHANGED.replace('L2', 'L2 fixed for good') }, 'fix for good', 'Fixes-finding: r1:F1');
+  hand(p, 'r4');
+  ok(record(p, goodClosure('r4', { criteria: [], priorFindings: [{ round: 'r1', id: 'F1', status: 'fixed', evidence: 'src/a.txt:5 fine' }] })));
+  assert.deepEqual(signals(p).recurringCauses, []);
 });

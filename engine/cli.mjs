@@ -1038,7 +1038,7 @@ async function dispatch(cmd, sub, positional, options) {
       // state, which carried earlier rounds' findings and the owner's notes into a blind review.
       // `salvaged` and `partial` are the engine's own marks for a closure it kept from a launched reviewer (launch.mjs),
       // never a flag: a closure the reviewer records itself is its own.
-      const { state: s, reveal, toVerify, part } = recordReview(root, { ...options, salvaged: false, partial: false });
+      const { state: s, reveal, toVerify, part, droppedLinks = [] } = recordReview(root, { ...options, salvaged: false, partial: false });
       if (part) {
         const recorded = s.reviewParts.at(-1);
         print(options, `scoped review recorded (${recorded.closure.findings.length} finding(s)); integration is still required`, { recorded: true, part: true, attempt: s.id, findings: recorded.closure.findings.length, sha256: recorded.raw.sha256 });
@@ -1046,7 +1046,8 @@ async function dispatch(cmd, sub, positional, options) {
       }
       // Revealed only now, after this round's own closure is recorded blind.
       const verify = reveal ? `\n${toVerify.length} finding(s) from earlier rounds to verify against the code: ${reveal}\nAdd \`priorFindings: [{ round, id, status, evidence }]\` to your closure (change nothing else) and run \`wf review --closure <file>\` again.` : '';
-      print(options, `review recorded (${s.review.closure.findings.length} finding(s)).${verify}`, { recorded: true, attempt: s.id, findings: s.review.closure.findings.length, file: s.review.file, provenance: s.review.provenance, verify: reveal ? { file: reveal, count: toVerify.length } : null });
+      const dropped = droppedLinks.length ? `\nsameCauseAs links dropped (${droppedLinks.length}), the closure is recorded without them:\n  - ${droppedLinks.join('\n  - ')}\nname a finding as "<round>:<id>" (the reviewer id that raised it, a colon, its id; \`openFindings\` in your bundle and \`wf scope list\` show them) and record the closure again to add a link.` : '';
+      print(options, `review recorded (${s.review.closure.findings.length} finding(s)).${dropped}${verify}`, { recorded: true, attempt: s.id, ...(droppedLinks.length ? { droppedLinks } : {}), findings: s.review.closure.findings.length, file: s.review.file, provenance: s.review.provenance, verify: reveal ? { file: reveal, count: toVerify.length } : null });
       return 0;
     }
     case 'accept': {

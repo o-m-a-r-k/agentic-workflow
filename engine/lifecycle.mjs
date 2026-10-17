@@ -1453,14 +1453,11 @@ export function recordReview(root, options) {
   if (!reviewerHandoff) throw refuse('no reviewer handoff: run `wf handoff reviewer --agent <id>`');
   if (closure.reviewer !== reviewerHandoff.agent) throw refuse(`closure reviewer \`${closure.reviewer}\` is not the reviewer handed this attempt (\`${reviewerHandoff.agent}\`)`);
   if (!Array.isArray(closure.findings) || !Array.isArray(closure.criteria)) throw new WfError('closure needs `findings` and `criteria` lists');
-  // 0.7.27 (I-191). A finding that shares its cause with another says so (`sameCauseAs: ["<round>:<id>"]`), and what it names
-  // must be a finding a round raised, or a link points nowhere and the recurrence it would show is lost without a word. A
-  // partial round, and a review group whose parts renamed their findings, keep the links that name something instead.
-  const causeProblems = sameCauseProblems(state, closure);
-  if (causeProblems.length) {
-    if (options.partial === true || reviewerHandoff.reviewGroup) closure = withoutUnknownCauses(state, closure);
-    else throw refuse(`closure refused: \`sameCauseAs\` links to findings that do not exist:\n  - ${causeProblems.join('\n  - ')}`, 'name a finding as "<round>:<id>": the reviewer id that raised it, a colon, its id (`openFindings` in your bundle and `wf scope list` show them); leave `sameCauseAs` out of a finding when you cannot name the one it shares a cause with, then run `wf review --closure <file>` again', { id: 'review:same-cause-unknown' });
-  }
+  // 0.7.27 (I-191). A finding that shares its cause with another says so (`sameCauseAs: ["<round>:<id>"]`). A link that names
+  // nothing any round raised is dropped, and the receipt says which: refusing the closure would be a stop with no failure behind it,
+  // and what is lost is only the link (a reviewer who meant one sees it named and can record the closure again).
+  const droppedLinks = sameCauseProblems(state, closure);
+  if (droppedLinks.length) closure = withoutUnknownCauses(state, closure);
   // A reviewer's stated expectation is optional context: one the engine cannot read is dropped, never a reason to refuse a
   // round's closure (refusal audit of 0.7.0).
   if (expectProblems(closure.expect, ROLE_EXPECT, 'expect').length) closure = { ...closure, expect: undefined };
@@ -1632,7 +1629,7 @@ export function recordReview(root, options) {
     safeWriteJson(root, reveal, { note: 'Findings earlier review rounds left open. Check each against the current code; add priorFindings to your closure.', findings: toVerify });
   }
   seal(append, { root, id: state.id });
-  return { state: after, reveal, toVerify };
+  return { state: after, reveal, toVerify, droppedLinks };
   });
 }
 

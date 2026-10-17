@@ -100,7 +100,26 @@ export function recurringCauses(state, { fixes = [] } = {}) {
       fixes: earlier.flatMap((a) => fixes.filter((x) => refOf(x.round, x.id) === a.ref).map((x) => ({ finding: a.ref, repo: x.repo, commit: String(x.commit).slice(0, 10) }))),
     });
   }
+  // A finding a round verified fixed and a later round found open again (the same ref): the fix covered one place, and no new
+  // finding was raised to say so. The engine settles a finding on its fixed verdict, so it is not among the open ones above.
+  for (const e of by.values()) {
+    const again = reopenedBy(e);
+    if (again) out.push({ cause: label.get(e.ref) ?? null, again: e.ref, fixed: [e.ref], reopenedBy: again, fixes: fixes.filter((x) => refOf(x.round, x.id) === e.ref).map((x) => ({ finding: e.ref, repo: x.repo, commit: String(x.commit).slice(0, 10) })) });
+  }
   return out;
+}
+
+// The round that last found a finding open again after one had verified it fixed, when no round has verified it fixed since.
+function reopenedBy(e) {
+  let fixed = e.own === 'fixed';
+  let by = null;
+  for (const v of e.verdicts) {
+    if (v.status === 'fixed' && text(v.evidence)) {
+      fixed = true;
+      by = null;
+    } else if (v.status === 'open' && text(v.evidence) && fixed) by = v.round;
+  }
+  return by;
 }
 
 // Earlier findings of the same `family` that a round had already marked fixed, per finding: a label match, not a confirmed
@@ -128,7 +147,7 @@ export function familyRecurrences(state) {
 
 // What the owner reads about a recurring cause (`wf resume`, `wf status`, `wf signals`): plain facts and the way on. Information,
 // never a refusal.
-export const recurrenceLine = (r) => `the cause of ${r.fixed.join(', ')} came back in ${r.again}: the last fix covered one place; find the root cause before the next fix round (an analysis of the assumption behind them and every place that relies on it, or the strategist's \`cluster\`) so one fix covers them all`;
+export const recurrenceLine = (r) => r.reopenedBy ? `${r.again} was marked fixed and found open again by ${r.reopenedBy}: the last fix covered one place; find the root cause before the next fix round (an analysis of the assumption behind it and every place that relies on it, or the strategist's \`cluster\`) so one fix covers them all` : `the cause of ${r.fixed.join(', ')} came back in ${r.again}: the last fix covered one place; find the root cause before the next fix round (an analysis of the assumption behind them and every place that relies on it, or the strategist's \`cluster\`) so one fix covers them all`;
 
 // The same, for a label match (`familyRecurrences`): worded for what is known.
 export const familyRecurrenceLine = (r) => `${r.again} has the family of ${r.fixed.join(', ')} (${r.family}), which ${r.fixed.length > 1 ? 'were' : 'was'} marked fixed: the last fix may have covered one place; check whether they share a cause (if they do, find the root cause before the next fix round: an analysis of the assumption behind them and every place that relies on it, or the strategist's \`cluster\`; the reviewer confirms it with \`sameCauseAs\`)`;
@@ -144,7 +163,7 @@ export function findingHistory(state, { fixes = [] } = {}) {
   return [...by.values()].map((e) => {
     const d = dispositionOf(state, e.ref);
     const last = e.verdicts.at(-1) ?? null;
-    const status = open.has(e.ref) ? (d ? 'claimed-fixed' : 'open') : waivedRef(state, e.ref) ? 'waived' : d ? d.choice : last && settled({ status: last.status }) ? last.status : e.own && settled({ status: e.own }) ? e.own : 'closed';
+    const status = open.has(e.ref) ? (d ? 'claimed-fixed' : 'open') : reopenedBy(e) ? 'reopened' : waivedRef(state, e.ref) ? 'waived' : d ? d.choice : last && settled({ status: last.status }) ? last.status : e.own && settled({ status: e.own }) ? e.own : 'closed';
     const fix = fixes.find((x) => refOf(x.round, x.id) === e.ref) ?? (d?.choice === 'fixed' ? d : null);
     const verified = [...e.verdicts].reverse().find((v) => settled({ status: v.status }) && text(v.evidence));
     return {
