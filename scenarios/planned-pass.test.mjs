@@ -167,6 +167,8 @@ test('"fix all" given in the message that started the attempt, or in one naming 
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const ago = (s) => new Date(Date.now() - s * 1000).toISOString();
   const said = (text, secondsAgo) => fs.appendFileSync(file, `${JSON.stringify({ type: 'user', timestamp: ago(secondsAgo), message: { role: 'user', content: text } })}\n`);
+  // ENG-9 is another ticket of this project (fourth review: another item is one of the project's own ids).
+  ok(wf(p.root, ['entry', '--item', 'ENG-9', '--owner', 'o', '--json']));
   said('for ENG-9 just fix all of them too', 300);
   said('fix every finding without asking me, every one', 200);
   said('and for PP-4 fix all the lows as well', 120);
@@ -206,6 +208,7 @@ test('"fix all" said about another ticket is never this one\'s: not as the last 
     line({ type: 'assistant', timestamp: ago(sec + 1), message: { role: 'assistant', content: [{ type: 'tool_use', id, name: 'AskUserQuestion', input: { questions: [{ question, header: 'wf', multiSelect: false, options: [{ label: 'Fix it now', description: 'x' }, { label: 'Let it leave', description: 'y' }] }] } }] } });
     line({ type: 'user', timestamp: ago(sec), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: `Your questions have been answered: "${question}"="${answer}".` }] }, toolUseResult: { questions: [], answers: { [question]: answer } } });
   };
+  ok(wf(p.root, ['entry', '--item', 'ENG-9', '--owner', 'o', '--json']));
   said('implement PP-3', 400);
   said('for PP-5 and ENG-9, fix all the copy findings, store it as UTF-8', 300);
   panel('ENG-9.1 A2: ENG-9.1 r1:F3: the label reads oddly. Fix it now, or let it leave?', 'No, fix all of them', 200);
@@ -219,7 +222,7 @@ test('"fix all" said about another ticket is never this one\'s: not as the last 
   // Repro 2: a panel answer to ENG-9's decision.
   const answer = fixAll('fix all of them');
   assert.equal(answer.code, 75);
-  assert.match(answer.err, /in a message that answers another ticket's question \(ENG-9\.1\): words about something else/);
+  assert.match(answer.err, /in a message that answers another ticket's question \(ENG-9\.1\) and does not name PP-3: words about something else/);
   // An encoding's name is not a ticket: the message names PP-5 and ENG-9 only.
   const named = fixAll('fix all the copy findings', ok(wf(p.root, ['entry', '--item', 'PP-5', '--owner', 'o', '--json'])).json().id);
   assert.equal(named.code, 0, named.err);
@@ -227,6 +230,49 @@ test('"fix all" said about another ticket is never this one\'s: not as the last 
   assert.match(s5.fixAll.via, /written before the admission, naming PP-5; it also names ENG-9$/);
   assert.doesNotMatch(s5.fixAll.via, /UTF-8/);
   assert.equal(JSON.parse(ok(wf(p.root, ['resume', '--attempt', e.id, '--json'])).out).fixAll, undefined, 'nothing recorded on PP-3');
+});
+
+// Fourth review of 0.7.28. Named failures (a review's cases): a kickoff naming PP-3, typed after the agent's message quoted ENG-9.1's
+// open question (as agents must), was refused as an answer to that question, so the person would be asked again; "for eng-9 fix all
+// the lows" was recorded on PP-3 because the id shape was uppercase only; "GPT-4" and "COVID-19" were read as tickets. A message
+// naming this item counts whatever it follows (the read-back says so), and another item is one of the project's own ids.
+test('a kickoff naming the ticket counts after another ticket\'s question; another item is one of the project\'s ids, in any case, and "GPT-4" is none', () => {
+  const p = singleRepoProject('pp-kickoff-ids', { gate: { steps } }, { 'src/a.txt': LINES, 'src/b.txt': LINES });
+  const file = path.join(p.base, '.home', '.claude', 'projects', 'proj', `${CLAUDE}.jsonl`);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const now = () => new Date().toISOString();
+  const line = (x) => fs.appendFileSync(file, `${JSON.stringify(x)}\n`);
+  const agent = (text) => line({ type: 'assistant', timestamp: now(), message: { role: 'assistant', content: [{ type: 'text', text }] } });
+  const said = (text) => line({ type: 'user', timestamp: now(), message: { role: 'user', content: text } });
+  const entry = (item) => ok(wf(p.root, ['entry', '--item', item, '--owner', 'o', '--json'])).json().id;
+  const fixAll = (words, attempt) => wf(p.root, ['scope', 'fix-all', '--person-said', words, '--attempt', attempt], session);
+  const via = (attempt) => JSON.parse(ok(wf(p.root, ['resume', '--attempt', attempt, '--json'])).out).fixAll?.via;
+  entry('ENG-9');
+  // The kickoff follows the agent's message quoting ENG-9.1's open question.
+  agent('Still open: **ENG-9.1 A3:** the label reads oddly. Fix it now, or let it leave?');
+  said('implement PP-3 and fix all findings, do not ask me about leaving any');
+  const pp3 = entry('PP-3');
+  ok(fixAll('fix all findings, do not ask me about leaving any', pp3));
+  assert.match(via(pp3), /written before the admission, naming PP-3; it followed ENG-9\.1's question$/);
+  // Another item in lower case is still another item.
+  said('for eng-9 fix all the lows, do not ask me about them');
+  const pp6 = entry('PP-6');
+  const lower = fixAll('fix all the lows, do not ask me about them', pp6);
+  assert.equal(lower.code, 75);
+  assert.match(lower.err, /in a message that names eng-9, not PP-6: words about something else/);
+  // Names that only look like ids are none of the project's: the kickoff counts.
+  said('use the GPT-4 summary and fix all the COVID-19 copy findings');
+  const pp7 = entry('PP-7');
+  ok(fixAll('fix all the COVID-19 copy findings', pp7));
+  assert.match(via(pp7), /the message that started this attempt \(the last before its admission\)$/);
+});
+
+test('with a tracker, another item is one with a ticket prefix the project uses or its item pattern; without one, only the other attempts\' ids', async () => {
+  const { itemsNamed } = await import('../engine/approve.mjs');
+  assert.deepEqual(itemsNamed('for eng-12, OPS-3 and GPT-4', 'PP-3', { ids: [], prefixes: ['ENG', 'PP'] }), ['eng-12']);
+  assert.deepEqual(itemsNamed('ABC-2 and ENG-1', 'PP-3', { ids: [], prefixes: [], pattern: '^ABC-\\d+$' }), ['ABC-2']);
+  assert.deepEqual(itemsNamed('QF-2 and QF-9, ENG-1', 'PP-3', { ids: ['QF-2'], prefixes: [] }), ['QF-2']);
+  assert.deepEqual(itemsNamed('PP-3 and pp-3', 'PP-3', { ids: ['PP-3'], prefixes: ['PP'] }), [], 'this item is never another');
 });
 
 // Review of 0.7.28 (L3): "fix all" covers a level the project lets the owner decide too, and the person has a terminal route.

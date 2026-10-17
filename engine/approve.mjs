@@ -475,22 +475,34 @@ const holdsAny = (theirs, quote) => theirs.some((a) => holds(a.answer, quote));
 // { problem }. Named failure (a review's case): "fix all" was recorded on the agent's word alone, while its effect (no item is asked
 // about again) stands for the rest of the attempt.
 // Which message counts (second and third reviews of 0.7.28), by structure, never by meaning:
-// - not one about another ticket: a reply (in the chat or the question panel) to a question of another attempt's decision
-//   (`<attempt> A<n>:`, as the engine names its questions), or a message that names other items and not this one;
+// - not one about another ticket: a message that does not name this item and is a reply (in the chat or the question panel) to a
+//   question of another attempt's decision (`<attempt> A<n>:`, as the engine names its questions) or names other items; a message
+//   that names this item counts whatever it follows, and its read-back says what it followed and what else it names;
 // - one written since the attempt was admitted (`sinceAt`);
 // - before it, one that names the attempt's item (the read-back names any other item it names too), or the message that started
 //   this attempt: the person's last chat message before the admission that answers no decision's question and names no other item.
 // Named failures: the person's kickoff, written a minute before `wf entry`, was refused as "words about another ticket", which would
 // have made the agent ask them again; then the kickoff rule took "for ENG-9 fix all the lows", and a panel answer to ENG-9's
-// decision, as the kickoff of the next ticket.
-const ITEM_LIKE = /(?<![\p{L}\p{N}_-])([A-Z][A-Z0-9]*)-\d+(?![\p{N}])/gu;
-// Names of encodings, hashes and standards have the shape of a ticket id and are never one (a refusal said "names UTF-8").
-const NOT_TICKETS = new Set(['UTF', 'UCS', 'SHA', 'MD', 'ISO', 'RFC', 'IEC', 'ECMA']);
-const prefixOf = (item) => /^([A-Za-z][A-Za-z0-9]*)-\d+$/.exec(String(item ?? ''))?.[1]?.toUpperCase() ?? null;
+// decision, as the kickoff of the next ticket; then a kickoff naming this item was refused because the agent's message before it
+// quoted another attempt's open question, as agents are told to.
+// What another item is, from the project's own ids (fourth review of 0.7.28: an ad-hoc token shape read "GPT-4" and "COVID-19" as
+// tickets and missed "eng-9"): the ids of the project's other attempts, and with a tracker, ids with a prefix the project's tickets
+// use (this attempt's and the other attempts') or that its `tracker.itemPattern` matches; case is ignored. `ids`:
+// { ids: [<other attempts' items>], prefixes: [<ticket prefixes>], pattern: <tracker.itemPattern or null> }.
+const ID_SHAPE = /(?<![\p{L}\p{N}_-])(\p{L}[\p{L}\p{N}]*)-(\d+)(?![\p{N}])/gu;
 const namesItem = (text, item) => Boolean(item) && new RegExp(`(?<![\\p{L}\\p{N}_-])${String(item).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{N}])`, 'iu').test(String(text ?? ''));
-const itemsIn = (text, item) => [...new Set([...String(text ?? '').matchAll(ITEM_LIKE)].filter((m) => !NOT_TICKETS.has(m[1]) || m[1] === prefixOf(item)).map((m) => m[0]))].filter((x) => !namesItem(x, item));
+export function itemsNamed(text, item, ids = {}) {
+  const exact = new Set((ids.ids ?? []).map((x) => String(x).toUpperCase()));
+  const prefixes = new Set((ids.prefixes ?? []).map((x) => String(x).toUpperCase()));
+  let pattern = null;
+  try {
+    pattern = ids.pattern ? new RegExp(String(ids.pattern).replace(/^\^/, '').replace(/\$$/, ''), 'iu') : null;
+  } catch {}
+  const isItem = (token, prefix) => exact.has(token.toUpperCase()) || prefixes.has(prefix.toUpperCase()) || Boolean(pattern && new RegExp(`^(?:${pattern.source})$`, 'iu').test(token));
+  return [...new Set([...String(text ?? '').matchAll(ID_SHAPE)].filter((m) => isItem(m[0], m[1])).map((m) => m[0]))].filter((x) => !namesItem(x, item));
+}
 const DECISION_KEY = /(?<![\p{L}\p{N}._-])([\p{L}\p{N}][\p{L}\p{N}._-]*\.\d+) A\d+:/gu;
-export async function personSaid(quote, { sinceAt = null, item = null, attempt = null, env = process.env } = {}) {
+export async function personSaid(quote, { sinceAt = null, item = null, attempt = null, ids = {}, env = process.env } = {}) {
   const caller = detectOwner(env);
   const host = caller ? findHost(caller.runtime) : null;
   const read = optional(host, 'questionAnswers');
@@ -508,19 +520,21 @@ export async function personSaid(quote, { sinceAt = null, item = null, attempt =
   const since = Date.parse(sinceAt ?? '') || 0;
   const answered = (a) => [...new Set([...flat(a.question ?? '').matchAll(DECISION_KEY)].map((m) => m[1]))];
   const toOther = (a) => answered(a).length > 0 && answered(a).every((id) => id !== attempt);
-  const others = (a) => itemsIn(a.answer, item);
-  const aboutElse = (a) => toOther(a) || (others(a).length > 0 && !namesItem(a.answer, item));
-  const also = (a) => (others(a).length ? `; it also names ${others(a).join(', ')}` : '');
+  const others = (a) => itemsNamed(a.answer, item, ids);
+  // A message that names this item is about it, whatever it follows (the agent quotes `<attempt> A<n>:` in every reply that mentions
+  // an open decision, so the person's kickoff often follows another attempt's question); the read-back says what it followed.
+  const aboutElse = (a) => !namesItem(a.answer, item) && (toOther(a) || others(a).length > 0);
+  const also = (a) => `${toOther(a) ? `; it followed ${answered(a).join(', ')}'s question` : ''}${others(a).length ? `; it also names ${others(a).join(', ')}` : ''}`;
   const done = (m, rule) => ({ quote: String(q).trim().slice(0, 500), message: String(m.answer).trim().slice(0, 2000), at: m.at ?? null, via: `${m.channel === 'chat' ? 'chat' : 'question-panel'}, read by the agent (${host.label}, host-recorded)${rule ? `; ${rule}` : ''}${also(m)}` });
   const fresh = latest(holding.filter((a) => time(a) >= since && !aboutElse(a)));
   if (fresh) return done(fresh, null);
-  const named = latest(holding.filter((a) => time(a) < since && namesItem(a.answer, item) && !toOther(a)));
+  const named = latest(holding.filter((a) => time(a) < since && namesItem(a.answer, item)));
   if (named) return done(named, `written before the admission, naming ${item}`);
   const kickoff = latest(theirs.filter((a) => time(a) < since && a.channel === 'chat' && !answered(a).length));
   const kicked = kickoff && !others(kickoff).length && holding.some((a) => a.at === kickoff.at && a.answer === kickoff.answer);
   if (kicked) return done(kickoff, 'the message that started this attempt (the last before its admission)');
   const m = latest(holding);
-  const why = toOther(m) ? `that answers another ticket's question (${answered(m).map((id) => `${id}`).join(', ')})` : others(m).length && !namesItem(m.answer, item) ? `that names ${others(m).join(', ')}${item ? `, not ${item}` : ''}` : time(m) >= since ? 'after the admission that is not about this ticket' : m.channel !== 'chat' ? `in the question panel before the admission, which is not the message that started this attempt` : `that does not name ${item ?? 'this ticket'} and is not the one that started it (their last chat message before the admission that answers no decision's question${kickoff ? `, at ${kickoff.at}` : ''})`;
+  const why = others(m).length && !namesItem(m.answer, item) ? `that names ${others(m).join(', ')}${item ? `, not ${item}` : ''}` : toOther(m) ? `that answers another ticket's question (${answered(m).join(', ')}) and does not name ${item ?? 'this ticket'}` : time(m) >= since ? 'after the admission that is not about this ticket' : m.channel !== 'chat' ? `in the question panel before the admission, which is not the message that started this attempt` : `that does not name ${item ?? 'this ticket'} and is not the one that started it (their last chat message before the admission that answers no decision's question${kickoff ? `, at ${kickoff.at}` : ''})`;
   return { problem: `the person wrote "${clip(quote)}" at ${m.at ?? 'an unknown time'}${time(m) < since ? `, before this attempt was admitted (${sinceAt})` : ''}, in a message ${why}: words about something else` };
 }
 

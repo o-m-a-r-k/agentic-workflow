@@ -11,12 +11,33 @@
 import { READ_LINE, createDecision, decisionFor, deliverCoreDecision, optionLines, panelNote, personSaid, questionFor, settledBy, underAgent } from './approve.mjs';
 import readline from 'node:readline';
 import { actor, openState } from './attempt.mjs';
-import { append, loadState } from './ledger.mjs';
+import { append, listAttempts, loadState } from './ledger.mjs';
+import { loadConfig } from './config.mjs';
 import { FIX, FRAMES, LEAVE, askFirst, askProblems, composeAsk, itemAsk, itemWords, readAsk } from './asking.mjs';
 import { WfError, refuse } from './util.mjs';
 
 export { FIX, LEAVE };
 const LEVELS = ['high', 'medium', 'low'];
+
+// The project's own notion of an item id, for telling a message about another ticket (fourth review of 0.7.28): the items of its
+// other attempts (an attempt id is `<item>.<n>`), and with a tracker, the ticket prefixes those items and this one use and the
+// adapter's `tracker.itemPattern`. The engine's own numbers (`QF-<n>` for a quick fix without a ticket, a batch's) are ids, never
+// ticket prefixes.
+function projectItemIds(root, state) {
+  let cfg = null;
+  try {
+    cfg = loadConfig(root);
+  } catch {}
+  const tracked = Boolean(cfg?.tracker?.kind && cfg.tracker.kind !== 'none');
+  const items = listAttempts(root).filter((id) => id !== state.id).map((id) => id.replace(/\.\d+$/, ''));
+  const prefix = (x) => /^([A-Za-z][A-Za-z0-9]*)-\d+$/.exec(String(x ?? ''))?.[1]?.toUpperCase() ?? null;
+  const own = (x) => /^(QF|BATCH)$/i.test(x);
+  return {
+    ids: items.filter((x) => /[A-Za-z]/.test(x)),
+    prefixes: tracked ? [...new Set([state.item, ...items].map(prefix).filter((p) => p && !own(p)))] : [],
+    pattern: tracked ? cfg.tracker.itemPattern ?? null : null,
+  };
+}
 
 // `wf scope fix-all` (0.7.28, I-207; proven in the review of 0.7.28, L2): the person's "fix all", recorded once. From an agent's
 // session the words are proven theirs (`personSaid`: verbatim in one of their own messages in this session, written since the
@@ -28,7 +49,7 @@ export async function recordFixAll(root, options, { env = process.env, input = p
   const words = typeof options['person-said'] === 'string' ? options['person-said'].trim() : '';
   if (underAgent(env)) {
     if (!words) throw new WfError('usage: wf scope fix-all --person-said "<the person\'s words, exactly as they wrote them>"');
-    const said = await personSaid(words, { sinceAt: state.admittedAt, item: state.item ?? null, attempt: state.id, env });
+    const said = await personSaid(words, { sinceAt: state.admittedAt, item: state.item ?? null, attempt: state.id, ids: projectItemIds(root, state), env });
     if (said.problem) throw refuse(`not recorded: ${said.problem}`, `quote the words of theirs that say to fix every item for this ticket, exactly as they typed them; when they have not said it for this ticket, ask them; or they run \`wf scope fix-all --attempt ${state.id}\` in their own terminal`, { id: 'scope:fix-all-quote' });
     append(root, state.id, 'scope.fixAll', { words: said.quote, message: said.message, said: said.at, via: said.via }, actor(options));
     return { state: loadState(root, state.id), words: said.quote };
