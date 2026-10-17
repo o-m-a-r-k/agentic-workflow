@@ -64,10 +64,10 @@ export function baseStatus(root, state, { fetch = true } = {}) {
     const tip = git(r.worktree, ['rev-parse', '--verify', '--quiet', ref], { allowFail: true });
     if (!tip) continue;
     const own = git(r.worktree, ['merge-base', 'HEAD', tip], { allowFail: true });
-    // 0.7.26 (I-183): the attempt's commits are already in the base (its merge request was merged). Merging the base in would
-    // only fast-forward the branch past the commit the delivery recognises, so there is nothing to merge in.
+    // 0.7.26 (I-183): the attempt's commits are already in the base (the merge request the adapter was asked to open was merged).
+    // Merging the base in would only fast-forward the branch past the commit the delivery recognises, so there is nothing to merge in.
     const head = git(r.worktree, ['rev-parse', 'HEAD'], { allowFail: true });
-    const landed = Boolean(head) && head !== r.base && own === head;
+    const landed = Boolean(head) && head !== r.base && own === head && Boolean(state.delivery?.integrating?.[name]);
     const entry = { repo: name, ref, fetched, note: fetched === false ? 'not fetched (offline?); compared with the last fetched base' : null, commits: 0, overlap: [], infra: [], files: 0, tip, own, ...(landed ? { landed: true } : {}) };
     if (own && own !== tip) {
       const delta = git(r.worktree, ['diff', '--name-only', own, tip]).split('\n').filter(Boolean);
@@ -148,13 +148,13 @@ export function baseMerge(root, options) {
   const withdraws = viaAdapter && Boolean(state.accepted);
   const results = settled.map((n) => ({ repo: n, settled: how(recorded(n)) }));
   for (const entry of baseStatus(root, { ...state, repos: Object.fromEntries(open.map((n) => [n, state.repos[n]])) })) {
-    if (entry.landed && state.delivery.integrating?.[entry.repo]) {
+    if (entry.landed) {
       results.push({ repo: entry.repo, landed: true, ref: entry.ref });
       continue;
     }
     // A repo this ticket changes nothing in has nothing to deliver; the delivery records it as skipped. With an adapter its base is
     // not merged in unasked: it would move that repo's tree, so its gate steps would run again for nothing.
-    if (viaAdapter && !options.repo && changedFiles(state, entry.repo).length === 0) {
+    if (viaAdapter && changedFiles(state, entry.repo).length === 0) {
       results.push({ repo: entry.repo, idle: true });
       continue;
     }

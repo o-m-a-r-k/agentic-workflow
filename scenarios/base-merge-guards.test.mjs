@@ -83,3 +83,24 @@ test('I-183: wf base merge refuses when the delivery adapter cannot be read, nam
   // Readable again, the same command works and follows the adapter rule.
   assert.match(ok(wf(root, ['base', 'merge', '--attempt', id])).out, /the acceptance is withdrawn/);
 });
+
+// Named failure (review of 0.7.26, low): `wf status` said a branch "already holds this attempt's commits (nothing to merge in)" for
+// any branch whose commits were in the base, though only a repo with an integration is skipped by `wf base merge`; for the rest the
+// line promised a skip that did not happen.
+test('I-183: wf status says nothing to merge in only for a repo whose integration the person merged', () => {
+  const { base, root } = project('mr-landed-line');
+  const { id, wt } = toAccepted(root, base, { item: 'ENG-193' });
+  // The commits reach the base by another route, before any wf deliver: no integration is recorded.
+  sh(wt, 'git push -q origin HEAD:refs/heads/main');
+  sh(root, "git pull -q --ff-only origin main && printf 'o2\\n' > src/other.txt && git commit -qam 'later base change' && git push -q origin main");
+  const plain = ok(wf(root, ['status', '--attempt', id])).out;
+  assert.match(plain, /base app: origin\/main moved 1 commit\(s\); no overlap with your changed files \(`wf base merge` merges it in\)/);
+  assert.doesNotMatch(plain, /already holds this attempt/);
+  // With the integration recorded and merged, the repo is skipped and the line says so.
+  const { base: base2, root: root2 } = project('mr-landed-line-2');
+  const second = toAccepted(root2, base2, { item: 'ENG-194' });
+  assert.match(ok(wf(root2, ['deliver', '--attempt', second.id])).out, /app: awaiting-merge/);
+  sh(second.wt, 'git push -q origin HEAD:refs/heads/main');
+  sh(root2, "git pull -q --ff-only origin main && printf 'o2\\n' > src/other.txt && git commit -qam 'later base change' && git push -q origin main");
+  assert.match(ok(wf(root2, ['status', '--attempt', second.id])).out, /base app: origin\/main moved 1 commit\(s\) and already holds this attempt's commits \(nothing to merge in\)/);
+});

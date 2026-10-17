@@ -99,3 +99,19 @@ test('I-183: a commit made in a repo recorded as delivered after a partial deliv
   assert.match(d.err, new RegExp(`not delivered: api was recorded as delivered at ${recorded.slice(0, 10)} and its worktree is at ${late.slice(0, 10)}`));
   assert.equal(state(root, e.id).delivery.completedAt, null);
 });
+
+// Named failure (review of 0.7.26, low): `--repo` naming a repo the ticket changes nothing in merged the base into it and withdrew
+// the acceptance, though the same repo is left alone without `--repo`: merging there moves a tree nothing is delivered from.
+test('I-183: wf base merge --repo naming a repo the ticket changes nothing in leaves it alone under an adapter and withdraws nothing', () => {
+  const { root, base, e, wt } = project('idle-explicit');
+  accepted(root, base, e.id, [[wt('api'), { 'src/a.txt': 'api\n' }]]);
+  assert.match(ok(wf(root, ['deliver', '--attempt', e.id])).out, /api: awaiting-merge/);
+  baseMoves(root, 'web');
+  const web = headOf(wt('web'));
+  const m = ok(wf(root, ['base', 'merge', '--repo', 'web', '--attempt', e.id]));
+  assert.match(m.out, /web: left as it is \(this ticket changes nothing there, so the delivery skips it\)/);
+  assert.doesNotMatch(m.out, /withdrawn/);
+  assert.equal(headOf(wt('web')), web);
+  assert.ok(state(root, e.id).accepted, 'the acceptance stands: nothing that is delivered moved');
+  assert.equal(state(root, e.id).baseMerges.length, 0);
+});
