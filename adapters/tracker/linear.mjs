@@ -2,7 +2,6 @@
 // raw response as the capture; the engine holds no credentials. `via: api`: the engine performs the pending actions
 // itself with a personal API key from `wf secrets` and stores its own readback as the capture.
 import path from 'node:path';
-import { statusFor } from '../../engine/status-route.mjs';
 
 // Where a screenshot may be PUT: Linear's own upload storage over https, or the same loopback host as a local test
 // endpoint. Anything else is refused before a byte is sent.
@@ -118,7 +117,7 @@ export default {
   api: {
     url: 'https://api.linear.app/graphql',
     // Performs one event's actions, then reads the issue back. The token never appears in an error message.
-    async perform({ token, url, item, actions, cfg }) {
+    async perform({ token, url, item, actions }) {
       const gql = async (query, variables) => {
         const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', authorization: token }, body: JSON.stringify({ query, variables }), redirect: 'manual' });
         if (r.status >= 300 && r.status < 400) throw new Error(`Linear API: redirected (${r.status}); a request with the key never follows a redirect`);
@@ -138,11 +137,9 @@ export default {
       const ordered = [...actions].sort((x, y) => (x.op === 'attach' ? -1 : 0) - (y.op === 'attach' ? -1 : 0));
       for (const a of ordered) {
         if (a.op === 'setStatus') {
-          // Routed by the labels read just now (0.7.27, review of the release), by the rule the readback is judged by.
-          const want = statusFor(cfg?.tracker, a, Array.isArray(issue.labels?.nodes) ? issue.labels.nodes.map((l) => l.name) : null).status;
-          if (issue.state?.name === want || (a.unless ?? []).includes(issue.state?.name)) continue;
-          const state = issue.team?.states?.nodes?.find((x) => x.name === want);
-          if (!state) throw new Error(`Linear API: no workflow state named "${want}" in the issue's team`);
+          if (issue.state?.name === a.status || (a.unless ?? []).includes(issue.state?.name)) continue;
+          const state = issue.team?.states?.nodes?.find((x) => x.name === a.status);
+          if (!state) throw new Error(`Linear API: no workflow state named "${a.status}" in the issue's team`);
           await gql(UPDATE, { id: issue.id, stateId: state.id });
         } else if (a.op === 'comment') {
           if (!a.body) continue;

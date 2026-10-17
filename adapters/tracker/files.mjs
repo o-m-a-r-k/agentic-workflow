@@ -13,7 +13,6 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { readRegular, writeNoFollow } from '../../engine/evidence.mjs';
 import { canonical, isInside, touchesEvidence } from '../../engine/paths.mjs';
-import { statusFor } from '../../engine/status-route.mjs';
 import { YAML } from '../../engine/util.mjs';
 
 // Named finding (0.4.0 review: path traversal): the item id was joined into paths, and folders created, before it
@@ -150,10 +149,8 @@ export default {
           writeNoFollow(listFile, `${JSON.stringify(list, null, 2)}\n`);
         } else if (a.op === 'setStatus') {
           const t = readTicket(folder, item);
-          // Routed by the labels read just now (0.7.27, review of the release), by the rule the readback is judged by.
-          const want = statusFor(cfg.tracker, a, Array.isArray(t.front.labels) ? t.front.labels.map(String) : null).status;
-          if (t.front.status === want || (a.unless ?? []).includes(t.front.status)) continue;
-          writeTicket(t, { ...t.front, status: want }, t.body);
+          if (t.front.status === a.status || (a.unless ?? []).includes(t.front.status)) continue;
+          writeTicket(t, { ...t.front, status: a.status }, t.body);
         } else if (a.op === 'comment') {
           if (!a.body) continue;
           const t = readTicket(folder, item);

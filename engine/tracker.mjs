@@ -1005,6 +1005,20 @@ export async function performTracker(root, cfg, state) {
       return { performed, note: `tracker ${via} (${event}) not performed: ${error.message}; nothing was sent, the actions stay pending`, state: s };
     }
     if (actions.some((a) => a.rendered === 'delivered' && !s.delivery.summary)) return { performed, note: `${event} waits for the owner's summary: \`wf summary --file <summary.md>\``, state: s };
+    // 0.7.27 (review of the release, second pass). One view of the ticket's labels decides both the status set and the status
+    // judged, for every adapter: a routed step is resolved here, from the labels the adapter's own readback reports (`perform` with
+    // no actions reads and changes nothing), by the rule the readback is judged by (`statusFor`), and `perform` is handed the status
+    // to set. An adapter carries no rule, so none can set a status its own readback then refuses. Named failures: a files ticket with
+    // no `labels:` key was set to the routed status while its readback judged it as carrying no label, and a project adapter's own
+    // `perform` was handed the status routed from an earlier readback's labels.
+    if (actions.some((a) => a.op === 'setStatus' && cfg.tracker.statusByLabel?.[a.key])) {
+      try {
+        const labels = adapter.normalize(await impl.perform({ token, url: endpoint, item: s.item, actions: [], root, cfg, state: s }))?.labels;
+        actions = actions.map((a) => (a.op === 'setStatus' ? { ...a, status: statusFor(cfg.tracker, a, labels).status } : a));
+      } catch (error) {
+        return { performed, note: `tracker ${via} (${event}) could not read the ticket's labels before setting a routed status: ${scrub(String(error?.message ?? error), [token])}; the actions stay pending` };
+      }
+    }
     let raw;
     try {
       raw = await impl.perform({ token, url: endpoint, item: s.item, actions, root, cfg, state: s });

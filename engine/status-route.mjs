@@ -56,7 +56,8 @@ export function routedStatus(tracker, step, labels) {
 // release). The action was queued with the status the labels of an earlier readback routed to (`status`, with `route.default`
 // when it was routed), which can be days old: the labels in hand decide, so the status the engine sets when it performs and the
 // status the readback is judged by are one rule. Labels not read (a tracker that reports none), or no rules to apply, keep the
-// status the action carries. `route` is what was used, for the record; `note` says why in a refusal.
+// status the action carries. Used at the seam (engine/tracker.mjs: performTracker resolves a routed step from the labels the
+// adapter's own readback reports, so no adapter carries the rule) and by the readback check. `route` is what was used, for the record; `note` says why in a refusal.
 export function statusFor(tracker, a, labels) {
   if (!Array.isArray(labels) || !tracker) return { status: a.status, route: null, note: '' };
   const fallback = a.route?.default ?? a.status;

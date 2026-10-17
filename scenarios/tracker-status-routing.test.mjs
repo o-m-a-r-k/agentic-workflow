@@ -197,7 +197,9 @@ const relabel = (root, item, change) => {
   const text = fs.readFileSync(file, 'utf8');
   const m = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/.exec(text);
   const front = YAML.parse(m[1]);
-  front.labels = change(front.labels ?? []);
+  const labels = change(front.labels ?? []);
+  if (labels === undefined) delete front.labels;
+  else front.labels = labels;
   fs.writeFileSync(file, `---\n${YAML.stringify(front)}---\n${m[2]}`);
 };
 
@@ -227,32 +229,72 @@ test('0.7.27 (I-190): the engine sets the status the ticket\'s labels route to w
   assert.match(page, /routed to Done by the label Self-serve/);
 });
 
-test('0.7.27 (I-190): the Linear API sets the workflow state the ticket\'s labels route to when it performs', async () => {
-  const { default: linear } = await import('../adapters/tracker/linear.mjs');
-  const states = { nodes: [{ id: 's-uat', name: 'Ready for UAT' }, { id: 's-done', name: 'Done' }, { id: 's-wip', name: 'In Progress' }] };
-  const issue = (labels) => ({ id: 'u1', identifier: 'ENG-9', title: 't', description: 'd', url: 'https://linear.app/x/ENG-9', updatedAt: 'x', state: { name: 'In Progress' }, labels: { nodes: labels.map((name) => ({ name })) }, comments: { nodes: [] }, attachments: { nodes: [] }, team: { states } });
-  const real = globalThis.fetch;
-  const run = async (labels, action) => {
-    const set = [];
-    globalThis.fetch = async (url, init) => {
-      const body = JSON.parse(init.body);
-      if (/issueUpdate/.test(body.query)) {
-        set.push(body.variables.stateId);
-        return Response.json({ data: { issueUpdate: { success: true } } });
+// 0.7.27 (review of the release, second pass), named failures. (A) The files adapter judged a ticket with no `labels:` key as
+// carrying none while it performed, and the readback judged it as carrying none too, but the adapter kept the status the action
+// carried when it read no list: it set Done and the readback then expected the default, so `wf deliver` stopped at 75 with the
+// ticket left at Done, and a retry did the same. (B) The rule lived in each built-in adapter: a project adapter with its own
+// `perform` got the status routed from stale labels and nothing told its author, so it kept the dead end. One view of the labels
+// decides both: the engine reads the ticket through the adapter's own `perform` with no actions (the readback the status is
+// judged by), resolves the status of each routed step from those labels, and hands `perform` the status to set.
+test('0.7.27 (I-190): a ticket whose labels key was deleted is judged as carrying none, by what is set and by the readback alike', () => {
+  const p = project('tracker-route-nokey', ROUTED);
+  const gone = toAccepted(p.root, p.base, { item: 'ENG-400', change: { 'src/a.txt': 'nokey\n' } });
+  relabel(p.root, 'ENG-400', () => undefined);
+  ok(wf(p.root, ['deliver', '--attempt', gone.id, '--summary-file', summaryFile(p.base)]));
+  assert.equal(statusOf(p.root, 'ENG-400'), 'Ready for UAT');
+  assert.equal(state(p.root, gone.id).phase, 'done');
+});
+
+const probe = `import fs from 'node:fs';
+import path from 'node:path';
+const file = (root, item) => path.join(root, 'probe-db', item + '.json');
+const read = (root, item) => (fs.existsSync(file(root, item)) ? JSON.parse(fs.readFileSync(file(root, item), 'utf8')) : { identifier: item, title: 'Show the text', description: 'The home screen shows the new text.', status: 'Todo', labels: ['ui', 'Self-serve'], comments: [] });
+export default {
+  via: 'files',
+  operations: { readIssue: 'read', setStatus: 'set', comment: 'comment', attach: 'none', readBack: 'read back' },
+  isUpload: () => false,
+  files: {
+    // A project adapter's own perform: it sets the status it is handed, and with no actions it only reads.
+    async perform({ root, item, actions }) {
+      const t = read(root, item);
+      for (const a of actions) {
+        if (a.op === 'setStatus') t.status = a.status;
+        else if (a.op === 'comment' && a.body) t.comments.push({ id: 'c' + (t.comments.length + 1), body: a.body, createdAt: new Date().toISOString() });
       }
-      return Response.json({ data: { issue: issue(labels) } });
-    };
-    try {
-      await linear.api.perform({ token: 'lin_api_secret', url: 'https://api.linear.app/graphql', item: 'ENG-9', actions: [action], cfg: { tracker: { kind: 'linear', statuses, statusByLabel: ROUTED } } });
-    } finally {
-      globalThis.fetch = real;
-    }
-    return set;
-  };
-  const routed = { op: 'setStatus', key: 'delivered', status: 'Done', route: { label: 'Self-serve', default: 'Ready for UAT' }, unless: [] };
-  const plain = { op: 'setStatus', key: 'delivered', status: 'Ready for UAT', unless: [] };
-  assert.deepEqual(await run(['Bug'], routed), ['s-uat'], 'the label is gone: the default');
-  assert.deepEqual(await run(['Bug', 'self-serve'], routed), ['s-done'], 'the label is there: the routed state');
-  assert.deepEqual(await run(['Bug', 'Self-serve'], plain), ['s-done'], 'put on after the action was queued: routed');
-  assert.deepEqual(await run(['Bug'], plain), ['s-uat']);
+      fs.mkdirSync(path.dirname(file(root, item)), { recursive: true });
+      fs.writeFileSync(file(root, item), JSON.stringify(t, null, 2));
+      return { issue: t };
+    },
+  },
+  normalize(raw) {
+    const i = raw.issue ?? raw;
+    return { id: i.identifier, title: i.title, description: i.description, status: i.status, labels: i.labels, url: null, updatedAt: null, comments: (i.comments ?? []).map((c) => ({ id: c.id, body: c.body, createdAt: c.createdAt, updatedAt: c.createdAt })), attachments: [] };
+  },
+};
+`;
+
+test('0.7.27 (I-190): a project adapter with its own perform is handed the status the ticket\'s labels route to when the engine performs; it carries no routing rule', () => {
+  const { base, root } = singleRepoProject('tracker-route-project-adapter', { tracker: { kind: './tracker/probe.mjs', via: 'files', statuses, deliveredComment: 'uat.md', statusByLabel: ROUTED }, gate: { steps: [{ id: 'unit', repo: 'app', run: 'true' }] } }, { '.gitignore': '.wf-evidence/\n.wf-worktrees/\nprobe-db/\n', '.workflow/uat.md': '{id} is ready for UAT.\n\nUAT scope:\n{uatScope}\n', '.workflow/tracker/probe.mjs': probe });
+  const db = (item) => path.join(root, 'probe-db', `${item}.json`);
+  const edit = (item, change) => fs.writeFileSync(db(item), JSON.stringify(change(JSON.parse(fs.readFileSync(db(item), 'utf8'))), null, 2));
+  // Labelled at admission, the label taken off before delivery.
+  const removed = toAccepted(root, base, { item: 'ENG-80', change: { 'src/a.txt': 'p1\n' } });
+  assert.deepEqual(JSON.parse(fs.readFileSync(db('ENG-80'), 'utf8')).labels, ['ui', 'Self-serve']);
+  edit('ENG-80', (t) => ({ ...t, labels: ['ui'] }));
+  ok(wf(root, ['deliver', '--attempt', removed.id, '--summary-file', summaryFile(base)]));
+  assert.equal(JSON.parse(fs.readFileSync(db('ENG-80'), 'utf8')).status, 'Ready for UAT', 'the adapter was handed the default');
+  assert.equal(state(root, removed.id).phase, 'done');
+  // Unlabelled at admission, the label put on before delivery.
+  fs.mkdirSync(path.dirname(db('ENG-81')), { recursive: true });
+  fs.writeFileSync(db('ENG-81'), JSON.stringify({ identifier: 'ENG-81', title: 'Show the text', description: 'The home screen shows the new text.', status: 'Todo', labels: ['ui'], comments: [] }));
+  const added = toAccepted(root, base, { item: 'ENG-81', change: { 'src/b.txt': 'p2\n' } });
+  edit('ENG-81', (t) => ({ ...t, labels: ['ui', 'self-serve'] }));
+  ok(wf(root, ['deliver', '--attempt', added.id, '--summary-file', summaryFile(base)]));
+  assert.equal(JSON.parse(fs.readFileSync(db('ENG-81'), 'utf8')).status, 'Done');
+  assert.deepEqual(readLedger(root, added.id).filter((e) => e.type === 'tracker.recorded').at(-1).data.routed.map((r) => [r.step, r.label, r.status]), [['delivered', 'Self-serve', 'Done']]);
+  // A stuck delivery (the ticket left at a status the labels no longer route to) is mended by the next attempt of the tracker step.
+  const stuck = toAccepted(root, base, { item: 'ENG-82', change: { 'src/c.txt': 'p3\n' } });
+  edit('ENG-82', (t) => ({ ...t, labels: ['ui'], status: 'Done' }));
+  ok(wf(root, ['deliver', '--attempt', stuck.id, '--summary-file', summaryFile(base)]));
+  assert.equal(JSON.parse(fs.readFileSync(db('ENG-82'), 'utf8')).status, 'Ready for UAT', 'the status the labels route to, whatever the ticket held');
 });
