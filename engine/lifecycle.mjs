@@ -1594,10 +1594,12 @@ export function reviewInFlight(state) {
   return last;
 }
 
-// The patch ids of the repos still to deliver. A repo recorded as delivered or skipped cannot change, and once its change is on
-// its target its diff against the base reads empty, which is no change to review (0.7.26, I-183: a repo already delivered made
-// every later round look uncovered, so a base merge that left the ticket's lines alone still cost a full code review).
-const stillToDeliver = (state, ids) => Object.fromEntries(Object.entries(ids ?? {}).filter(([name]) => !state.delivery.repos[name]));
+// The repos a review round is compared on: those with a change still to deliver. A repo recorded for the delivery, or whose
+// request was merged, has its change on the target, so its diff against the base reads empty, which is no change to review (0.7.26,
+// I-183: a repo already delivered made every later round look uncovered, so a base merge that left the ticket's lines alone still
+// cost a full code review). It is left out only while that diff is empty: a commit made in it afterwards is compared again.
+const comparedRepos = (state, now) => new Set(Object.keys(state.repos).filter((name) => !((state.delivery.repos[name] || state.delivery.integrating?.[name]) && now.patch[name] === 'empty')));
+const onlyRepos = (ids, names) => Object.fromEntries(Object.entries(ids ?? {}).filter(([name]) => names.has(name)));
 
 // Whether a recorded review round covers the tree as it is now: the same tree, or the same change of the ticket (a base
 // merged in without touching it keeps the reviewed change).
@@ -1608,7 +1610,8 @@ function reviewCovers(state, r) {
   if (!reviewed) return false;
   try {
     const now = changeIds(state);
-    const same = (a, b) => canonical(stillToDeliver(state, a)) === canonical(stillToDeliver(state, b));
+    const names = comparedRepos(state, now);
+    const same = (a, b) => canonical(onlyRepos(a, names)) === canonical(onlyRepos(b, names));
     return same(now.patch, reviewed) || Boolean(r.handoffStablePatch && same(now.stablePatch, r.handoffStablePatch));
   } catch {
     return false;
@@ -1680,7 +1683,7 @@ export function gateOrderCheck(root, options) {
     if (legacy?.approved && !legacy.spent && legacy.approved.choice !== 'yes') throw refuse(`not done: running the gate out of the order of work: the person answered ${legacy.id} ${legacy.approved.words ? `in their own words, "${legacy.approved.words}"` : `"${labelOf(legacy, legacy.approved.choice)}"`}`, `follow their answer; it is not asked again. If something changed since they answered, withdraw it with what changed (\`wf decisions withdraw ${legacy.id} --attempt ${state.id} --reason "<what changed>"\`) and run this command again`, { id: 'approve:answered' });
     const rv = state.review;
     const owes = { uncovered: !rv || !reviewCovers(state, rv), open: rv ? openFindings(rv, state).map((f) => `${rv.closure.reviewer}:${f.id}`).sort() : [], unverified: rv ? unverifiedPrior(state, rv, { forGate: true }).map((f) => `${f.round}:${f.id}`).sort() : [], validationPending: Boolean(state.validations?.length && (!rv || rv.at <= state.validations.at(-1).at)) };
-    const approval = legacy?.approved?.choice === 'yes' && !legacy.spent ? { decision: legacy.id } : requireYes(root, state, { kind: 'override-gate', key: `gate:${state.id}:${hashValue({ change: stillToDeliver(state, changeIds(state).stablePatch), owes })}`, summary: `run the gate out of the order of work (${reason}): ${problems.join('; ')}`, what: 'running the gate out of the order of work', frame: FRAMES.gateOrder({ item: state.item, owes }), options });
+    const approval = legacy?.approved?.choice === 'yes' && !legacy.spent ? { decision: legacy.id } : requireYes(root, state, { kind: 'override-gate', key: `gate:${state.id}:${hashValue({ change: ((ids) => onlyRepos(ids.stablePatch, comparedRepos(state, ids)))(changeIds(state)), owes })}`, summary: `run the gate out of the order of work (${reason}): ${problems.join('; ')}`, what: 'running the gate out of the order of work', frame: FRAMES.gateOrder({ item: state.item, owes }), options });
     append(root, state.id, 'gate.override', { reason, problems, tree: treeHashes(state), decision: approval.decision }, actor(options));
   };
 }
