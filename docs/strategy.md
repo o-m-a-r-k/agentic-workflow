@@ -50,9 +50,10 @@ actual, with no threshold:
     strategist S1 (delta-review) predicted blockingLatest <= 2 by round 5: pending
 ```
 
-`wf signals` adds the numbers behind it: review rounds handed and recorded, the recorded ones with their blocking and observation counts, families and the scope the reviewer said it did not reach (`notReached`: the round is
+`wf signals` adds the numbers behind it: review rounds handed and recorded, the recorded ones with the blocking findings each raised
+(`blocking`, and `blockingLatest` for the latest) and the blocking findings still open after it (`open`), their observation counts, families and the scope the reviewer said it did not reach (`notReached`: the round is
 not counted as the full audit, I-69),
-rounds since blocking findings last decreased, criteria at freeze and now, amendments, the files the plan's anchors name,
+rounds since the new blocking findings last decreased, the blocking findings open now (`blockingOpen`, every round's, with how many an earlier round raised: `blockingCarried`; a round that raises nothing new has cleared nothing an earlier round raised, I-185), criteria at freeze and now, amendments, the files the plan's anchors name,
 the latest reviewer bundle size, each working role's last transcript activity, open observations and the strategist's
 predictions that held or missed. Which harness runs the agents is an execution detail: no signal reads a harness's usage
 or budget.
@@ -112,8 +113,9 @@ Three things, none of them a number the engine picked:
 - the strategist's own rule above.
 
 Everything else the engine checks is a fact: the tree, evidence, reviewer independence, the gate, approvals and the combined-tree
-check. `strategy: { enabled: false }` or `roles: { strategist: false }` turns the round escalation off for a project. The
-escalation applies to attempts admitted at 0.7.0 or later.
+check. `strategy: { enabled: false }` or `roles: { strategist: false }` turns the round escalation off for a project. Both
+stops are the person's own and apply to every implementation attempt still being worked, whichever release admitted it (D34);
+the obligations a release adds to a handoff apply only to attempts admitted from it (D7).
 
 ## Split
 

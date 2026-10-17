@@ -13,7 +13,7 @@ import { spawnSync } from 'node:child_process';
 import { changedFiles, treeHashes } from './attempt.mjs';
 import { ownerTranscript } from './host-record.mjs';
 import { home as hostHome } from './provenance.mjs';
-import { blockingOpen, observations, placementLevel, unreachedOf } from './review-policy.mjs';
+import { blockingOpen, blockingSeries, earlierBlocking, observations, placementLevel, unreachedOf } from './review-policy.mjs';
 import { expectOf, readStatement } from './expectations.mjs';
 import { planPaths, scopeFiles, scopeNoise } from './scope.mjs';
 import { findHost, optional, ownerString } from './hosts/index.mjs';
@@ -59,8 +59,9 @@ function roundCounts(state, r, home = null) {
 }
 
 // The round-derived numbers, from the list of rounds alone (so a prediction about "round N" is judged on the rounds up to N).
-// `roundsSinceDecrease`: recorded rounds since blocking findings last went down (the first round is the baseline); 0
-// once nothing blocks.
+// `blocking` of a round is what that round raised itself, so `blockingLatest` and `roundsSinceDecrease` count new findings:
+// recorded rounds since the new blocking findings last went down (the first round is the baseline); 0 once the latest round
+// raised none. What earlier rounds raised and nothing has verified fixed is `open` (`blockingOpen`), never read from these (I-185).
 export function roundMetrics(rounds) {
   const n = rounds.length;
   let lastDecrease = 0;
@@ -233,11 +234,18 @@ function longestQuiet(root, state, nowMs) {
 // Everything `wf signals` shows: the numbers, and the plan's expectation beside them. `cfg` is the attempt's adapter at
 // base (scope noise, nothing else); `home` the host home the engine already reads transcripts from (WF_HOME in tests).
 export function computeSignals(root, state, { nowMs = Date.now(), cfg = null, home = hostHome() } = {}) {
-  const rounds = recordedRounds(state).map((r, i) => ({ ...roundCounts(state, r, home), n: i + 1 }));
+  const finals = recordedRounds(state);
+  // `blocking` is what a round raised itself; `open` the blocking findings still open after it, the ones earlier rounds raised
+  // included (0.7.27, I-185: a round that raises nothing new has not cleared what earlier rounds raised).
+  const openAfter = blockingSeries(state);
+  const rounds = finals.map((r, i) => ({ ...roundCounts(state, r, home), n: i + 1, open: openAfter[i] }));
   const metrics = roundMetrics(rounds);
-  const blocking = state.review ? blockingOpen(state) : [];
+  const blocking = (state.reviews ?? []).length ? earlierBlocking(state, null) : [];
+  const latest = finals.at(-1);
+  const latestReviewer = latest?.closure?.reviewer ?? latest?.reviewer ?? null;
   const observed = state.review ? observations(state) : [];
   const ref = (f) => ({ ref: f.ref ?? `${state.review?.closure?.reviewer ?? '?'}:${f.id}`, severity: f.severity ?? null, placement: placementLevel(state, f), summary: f.summary ?? '', family: f.family ?? null, work: f.work ?? null });
+  const blockRef = (f) => ({ ...ref(f), carried: f.round !== latestReviewer });
   const sessions = runningSessions(state, nowMs, home);
   return {
     schema: SIGNALS_SCHEMA,
@@ -261,9 +269,12 @@ export function computeSignals(root, state, { nowMs = Date.now(), cfg = null, ho
     blockingLatest: metrics.blockingLatest,
     findingsLatest: metrics.findingsLatest,
     roundsSinceDecrease: metrics.roundsSinceDecrease,
+    // Every blocking finding open across the rounds (what the gate and the acceptance wait for), and how many of them an
+    // earlier round raised. `blockingLatest` is only what the latest round raised.
     blockingOpen: blocking.length,
+    blockingCarried: blocking.filter((f) => f.round !== latestReviewer).length,
     observationsOpen: observed.map(ref),
-    blockingFindings: blocking.map(ref),
+    blockingFindings: blocking.map(blockRef),
     criteria: { atFreeze: state.criteriaAtFreeze, now: (state.criteria ?? []).length },
     amendments: (state.criteriaAmendments ?? []).length,
     discoveredFamilies: (state.discovered ?? []).filter((d) => d.status === 'open' && d.family).reduce((n, d) => ({ ...n, [d.family]: (n[d.family] ?? 0) + 1 }), {}),
@@ -337,6 +348,9 @@ export function courseLines(sig, { predictions = [], shell = true } = {}) {
   if (sig.replan) out.push(`since the re-plan (amendment ${sig.replan.amendment}): ${Math.round(sig.replan.minutes)} minutes and ${sig.replan.rounds} review round(s); it expected ${e.minutes ?? 'n/a'} minutes and ${e.rounds ?? 'n/a'} round(s)${past(sig.replan.minutes, e.minutes) || past(sig.replan.rounds, e.rounds)}`);
   // A pattern found one place at a time is a class to fix in one sweep (lessons of one attempt: about 35 of 67 discovered
   // issues were callers needing the same new guard, each found and recorded separately).
+  // 0.7.27 (I-185): findings an earlier round raised and no round has verified fixed are not shown as zero because the latest
+  // round raised none of its own.
+  if (sig.blockingCarried) out.push(`blocking findings open: ${sig.blockingOpen}, ${sig.blockingOpen - sig.blockingCarried ? `${sig.blockingOpen - sig.blockingCarried} raised by the latest round` : 'none raised by the latest round'}; carried from earlier rounds and not yet verified fixed: ${sig.blockingFindings.filter((f) => f.carried).map((f) => f.ref).join(', ')}`);
   for (const [family, n] of Object.entries(sig.discoveredFamilies ?? {})) if (n >= 2) out.push(`discovered issues of family ${family}: ${n} open; fix the class in one sweep (find every place it occurs) rather than one at a time`);
   if (sig.amendments) out.push(`plan amendments: ${sig.amendments} (${sig.churn?.changed ?? 0} criterion text(s) rewritten, ${sig.churn?.added ?? 0} added, ${sig.churn?.dropped ?? 0} dropped)`);
   for (const x of sig.implementers.filter((i) => !i.open).slice(-3)) out.push(`implementer ${x.agent}${x.work ? ` (${x.work})` : ''} ${x.outcome ?? 'closed'}: took ${mins(x.minutes)}${lastActive(x)}; it ${x.expectMinutes ? `expected ${x.expectMinutes} min${past(x.minutes, x.expectMinutes)}` : 'stated no expectation'}${x.approach ? `; approach: ${x.approach.slice(0, 200)}` : ''}`);

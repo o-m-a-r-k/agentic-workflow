@@ -400,6 +400,15 @@ export const blockingIn = (state, review) => (review?.closure?.findings ?? []).f
 // Open findings of the latest recorded review that block the gate and acceptance.
 export const blockingOpen = (state) => blockingIn(state, state.review);
 
+// Blocking findings still open after each recorded round, in the order the rounds were first recorded: those the rounds
+// raised that no later round verified fixed, and the owner did not waive, ticket or move. 0.7.27 (I-185). Named failure (field): a
+// delta round that raised nothing of its own while two earlier blocking findings stayed open was counted as "0 blocking",
+// because the per-round count is only what the round itself raised.
+export function blockingSeries(state) {
+  const rounds = recordedRoundsOf(state);
+  return rounds.map((_, i) => earlierBlocking({ ...state, reviews: rounds.slice(0, i + 1) }, null).length);
+}
+
 // Open findings that do not block, from every round, not yet fixed, ticketed or moved: the strategist schedules them
 // (a batch fix pass, a sibling attempt, or a ticket) and delivery waits for them.
 // A high observation the owner recorded fixed (`wf scope fixed`) still waits for a reviewer's `fixed` (second final review

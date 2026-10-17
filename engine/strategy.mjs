@@ -12,7 +12,9 @@
 // awaiting `wf approve`, and the rule that two missed predictions in a row make the strategist's next decision an
 // escalation (its own predictions, not a number of ours).
 //
-// Obligations from this module apply to attempts admitted at 0.7.0 or later (engine/versions.mjs, D7).
+// The obligations this module adds to a handoff (a plan's `expect`) apply to attempts admitted at 0.7.0 or later (engine/versions.mjs,
+// D7). The person's own stops, the round escalation and a strategist's escalation awaiting them, apply to every attempt being
+// worked, whatever release admitted it (0.7.27, D34).
 import fs from 'node:fs';
 import path from 'node:path';
 import { acceptedTreeStands, actor, openState } from './attempt.mjs';
@@ -79,15 +81,20 @@ function adapterOf(root, state) {
   }
 }
 
-// Whether the escalation applies to this attempt now: admitted at 0.7.0 or later, an implementation still being worked
-// on (not accepted, not delivered), and not switched off in the adapter.
+// Whether the escalation applies to this attempt now: an implementation still being worked on (not accepted, not delivered),
+// and not switched off in the adapter.
+// 0.7.27 (I-185, D34). Named failure (field): an attempt admitted by a release before 0.7.0 ran 14 review rounds handed (11
+// recorded) and was never asked how to go on, because the escalation was gated on the admission version (D7: a release adds no
+// obligation to an attempt in flight). The checkpoint is the person's own rule, a question that reopens nothing and costs one
+// answer, and its worth is the stop on a ticket that has run long: the attempt that has run longest is the one admitted
+// earliest. The agent that read the work skill noticed `wf decisions` was empty and had a strategist ask the person instead.
 // Independent review of 0.7.0: acceptance switched the hold off for good, though a base merge after it reopens review
 // rounds; an acceptance counts only while the tree is the one accepted.
 // A delivered attempt's worktrees are gone: it is not being worked (second final review of 0.7.0: `wf signals` on a delivered
 // attempt refused instead of showing its numbers).
 const acceptedNow = (state) => acceptedTreeStands(state);
 // A batch counts too (final review of 0.7.0: batches sat outside the person's escalation).
-const worked = (state) => obligationSince(state, '0.7.0') && state.intent === 'implementation' && !['done', 'abandoned', 'handoff-pending'].includes(state.phase) && !state.delivery?.completedAt && !acceptedNow(state);
+const worked = (state) => state.intent === 'implementation' && !['done', 'abandoned', 'handoff-pending'].includes(state.phase) && !state.delivery?.completedAt && !acceptedNow(state);
 const switchedOff = (cfg) => cfg?.roles?.strategist === false || cfg?.strategy?.enabled === false;
 export const strategyApplies = (state, cfg) => worked(state) && !switchedOff(cfg);
 
@@ -274,12 +281,12 @@ export function signalsText(r) {
   lines.push('  course (what was expected against what is; no limit applies, the owner agent judges at each round boundary):');
   for (const l of courseLines(r, { predictions: r.strategy.decisions })) lines.push(`    ${l}`);
   for (const x of r.strategy.expectations.filter((y) => y.source === 'amendment')) lines.push(`    re-plan at amendment ${x.amendment} expects ${Object.entries(x.expect).map(([k, v]) => `${k} ${v}`).join(', ')} ("${x.reason}")`);
-  lines.push(`  review rounds recorded: ${r.rounds.length}${r.rounds.length ? ` (blocking per round: ${r.rounds.map((x) => x.blocking).join(', ')}; findings: ${r.rounds.map((x) => x.findings).join(', ')})` : ''}; rounds since blocking findings last decreased: ${r.roundsSinceDecrease}`);
-  lines.push(`  open now: ${r.blockingOpen} blocking, ${r.observationsOpen.length} observation(s)`);
+  lines.push(`  review rounds recorded: ${r.rounds.length}${r.rounds.length ? ` (new blocking findings per round: ${r.rounds.map((x) => x.blocking).join(', ')}; findings: ${r.rounds.map((x) => x.findings).join(', ')}); still open after each round: ${r.rounds.map((x) => x.open).join(', ')}` : ''}; rounds since new blocking findings last decreased: ${r.roundsSinceDecrease}`);
+  lines.push(`  open now: ${r.blockingOpen} blocking${r.blockingOpen ? ` (${r.blockingOpen - r.blockingCarried} raised by the latest round, ${r.blockingCarried} carried from earlier rounds${r.blockingCarried ? `: ${r.blockingFindings.filter((f) => f.carried).map((f) => f.ref).join(', ')}` : ''})` : ''}, ${r.observationsOpen.length} observation(s)`);
   lines.push(`  criteria: ${n(r.criteria.atFreeze)} at freeze, ${r.criteria.now} now; amendments: ${r.amendments}`);
   lines.push(`  plan names ${n(r.files.planned)} path(s) in its anchors and tests; latest reviewer bundle: ${n(r.bundle.bytes, ' bytes')}`);
   const e = r.strategy.escalation;
-  lines.push(`  owner escalation${r.strategy.applies ? '' : ' (does not apply to this attempt: admitted before 0.7.0, accepted, or switched off)'}: every ${e.everyRounds} recorded rounds; ${e.firing ? `${e.firing.summary}${e.firing.answeredBy ? ` [answered by ${e.firing.answeredBy}]` : ' [UNANSWERED]'}` : 'not firing'}`);
+  lines.push(`  owner escalation${r.strategy.applies ? '' : ' (does not apply to this attempt: accepted, delivered or switched off)'}: every ${e.everyRounds} recorded rounds; ${e.firing ? `${e.firing.summary}${e.firing.answeredBy ? ` [answered by ${e.firing.answeredBy}]` : ' [UNANSWERED]'}` : 'not firing'}`);
   for (const t of r.strategy.toTicket) lines.push(`  to ticket (${t.decision}): ${t.items.join(', ')}`);
   if (r.strategy.missedPredictionsInARow) lines.push(`  strategist predictions missed in a row: ${r.strategy.missedPredictionsInARow}${r.strategy.missedPredictionsInARow >= 2 ? '; its next decision must be an escalation' : ''}`);
   return lines.join('\n');

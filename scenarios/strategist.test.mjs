@@ -131,15 +131,37 @@ test('a strategist that died undecided is superseded by a later one that decided
   assert.ok(!v7.signals(root, a.id).sessions.some((x) => x.agent === 'strat-dead'), 'the superseded strategist is not shown as running');
 });
 
-test('an attempt admitted before 0.7.0 is not held by the round escalation', () => {
+// 0.7.27 (I-185), named failure (field): an attempt admitted by a release before 0.7.0 ran 14 review rounds handed (11 recorded)
+// with no question to the person, because the round escalation was an obligation gated on the admission version (D7). The
+// 10-round checkpoint is the person's own rule, not something a release adds to what a handoff owes: it applies to every
+// implementation attempt still being worked, and so does a strategist's escalation awaiting the person (D34).
+test('an attempt admitted before 0.7.0 is held by the round escalation and by a strategist\'s escalation like any other', () => {
   const ctx = project('pre07', { strategy: { reviewRoundsEscalate: 2 } });
   const a = started(old, ctx, { item: 'ENG-710' });
-  for (let i = 0; i < 3; i++) reviewRound(old, ctx, a, { findings: 1 });
-  const sig = old.signals(ctx.root, a.id);
-  assert.equal(sig.roundsSinceDecrease, 2, 'the numbers are still shown');
-  assert.equal(sig.strategy.applies, false);
-  assert.notEqual(old.state(ctx.root, a.id).decision.kind, 'strategy');
-  ok(old.run(ctx.root, ['handoff', 'reviewer', '--agent', 'rev-more', '--attempt', a.id, '--owner', a.owner]));
+  const { root, base } = ctx;
+  // Two rounds are handed (the scripted owner answers a question the engine asks; here nobody does).
+  reviewRound(old, ctx, a, { findings: 1 });
+  reviewRound(old, ctx, a, { findings: 1 });
+  const sig = old.signals(root, a.id);
+  assert.equal(sig.engineVersion, '0.6.9');
+  assert.equal(sig.strategy.applies, true, 'the checkpoint applies whatever release admitted the attempt');
+  assert.equal(sig.strategy.escalation.firing.id, 'rounds-escalation');
+  assert.equal(sig.strategy.escalation.firing.answeredBy, null);
+  assert.equal(old.state(root, a.id).decision.kind, 'strategy', 'wf resume names the person\'s decision before any handoff is tried');
+  assert.match(old.state(root, a.id).decision.guidance, /This is the person's decision: bring them the brief/);
+  const held = old.run(root, ['handoff', 'reviewer', '--agent', 'rev-more', '--attempt', a.id, '--owner', a.owner], { ownerSilent: true });
+  assert.equal(held.code, 75);
+  assert.match(held.err, /2 review rounds handed; the owner decides how to continue \(A1\); no reviewer starts until the owner decides/);
+  assert.ok(refusalRows(root).some((x) => x.id === 'strategy:owner-escalation'));
+  assert.doesNotMatch(ok(old.run(root, ['signals', '--attempt', a.id])).out, /does not apply to this attempt/);
+  // The person answers; the work goes on; a strategist's escalation holds the attempt as well.
+  ok(old.run(root, ['handoff', 'reviewer', '--agent', 'rev-more', '--attempt', a.id, '--owner', a.owner]));
+  const h = ok(old.run(root, ['handoff', 'strategist', '--agent', 'strat-old', '--attempt', a.id, '--reason', 'the same finding keeps coming back', '--json'])).json();
+  const esc = strategistClosure(base, h.bundle, { strategist: 'strat-old', action: 'escalate', rationale: 'The same finding came back.', prediction: { signal: 'blockingLatest <= 0', by: 20 }, question: 'The same problem came back. Should it be fixed in this ticket?', options: [{ label: 'Fix it here', then: 'one more fix round' }, { label: 'List it as known', then: 'it ships listed' }], recommend: { label: 'Fix it here', why: 'it blocks' } });
+  ok(old.run(root, ['strategy', 'record', '--closure', esc.file, '--attempt', a.id]));
+  const blocked = old.run(root, ['handoff', 'reviewer', '--agent', 'rev-blocked', '--attempt', a.id, '--owner', a.owner], { ownerSilent: true });
+  assert.equal(blocked.code, 75);
+  assert.match(blocked.err, /the strategist escalated .* no reviewer starts until the owner decides/);
 });
 
 test('two missed predictions in a row leave escalate as the strategist\'s only answer, and the owner decides it', async () => {

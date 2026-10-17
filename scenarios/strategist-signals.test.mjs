@@ -14,6 +14,7 @@ import { C, inProcess, jsonl, planFile, project, reviewRound, runner, started } 
 const v7 = runner('0.7.0');
 const EXPECT = { files: 2, rounds: 3, minutes: 60 };
 
+
 // ---- The plan's expectation beside what happened ----
 
 test('wf signals, wf resume and wf status show the plan\'s expectation beside the numbers', () => {
@@ -39,7 +40,7 @@ test('wf signals, wf resume and wf status show the plan\'s expectation beside th
   assert.deepEqual(sig.strategy.expectations.map((x) => [x.source, x.expect]), [['plan', EXPECT]]);
   // Each place the owner looks shows expected beside actual, with no verdict.
   const text = ok(v7.run(root, ['signals', '--attempt', a.id])).out;
-  assert.match(text, /review rounds recorded: 2 \(blocking per round: 2, 1; findings: 2, 1\)/);
+  assert.match(text, /review rounds recorded: 2 \(new blocking findings per round: 2, 1; findings: 2, 1\); still open after each round: 2, 3;/);
   assert.match(text, /files changed: 1; the plan expected 2/);
   assert.match(text, /review rounds recorded: 2; the plan expected 3/);
   assert.match(text, /minutes since admission: \d+; the plan expected 60/);
@@ -49,6 +50,41 @@ test('wf signals, wf resume and wf status show the plan\'s expectation beside th
     assert.match(out, /files changed: 1; the plan expected 2/, cmd[0]);
     assert.match(out, /review rounds recorded: 2; the plan expected 3/, cmd[0]);
   }
+});
+
+// 0.7.27 (I-185), named failure (field): an attempt's latest rounds were code-only deltas that raised no finding of their own
+// while two earlier blocking findings stayed open pending runtime evidence, and `wf signals` read "0 blocking" (blockingLatest
+// 0, blockingOpen 0, "rounds since blocking findings last decreased: 0, once nothing blocks") as if nothing blocked. Findings
+// the latest round raised and findings earlier rounds raised that are still open are two numbers; neither stands for the other.
+test('a round that raises nothing new while earlier blocking findings stay open is not shown as zero blocking; a round that verifies them fixed is', () => {
+  const ctx = project('carried-blocking');
+  const a = started(v7, ctx, { item: 'ENG-747', expect: EXPECT });
+  const { root } = ctx;
+  reviewRound(v7, ctx, a, { findings: 2, tag: 'k1' });
+  reviewRound(v7, ctx, a, { findings: 0, tag: 'k2' });
+  reviewRound(v7, ctx, a, { findings: 0, tag: 'k3' });
+  const sig = v7.signals(root, a.id);
+  assert.deepEqual(sig.rounds.map((r) => [r.blocking, r.open]), [[2, 2], [0, 2], [0, 2]], 'raised by the round, and still open after it');
+  assert.equal(sig.blockingLatest, 0, 'the latest round raised nothing');
+  assert.equal(sig.blockingOpen, 2, 'but two blocking findings are open, the gate and the acceptance wait for them');
+  assert.equal(sig.blockingCarried, 2);
+  assert.deepEqual(sig.blockingFindings.map((f) => [f.ref, f.carried]), [['rev-k1:F1', true], ['rev-k1:F2', true]]);
+  assert.equal(sig.roundsSinceDecrease, 0, 'it still counts the findings each round raises');
+  const text = ok(v7.run(root, ['signals', '--attempt', a.id])).out;
+  assert.match(text, /new blocking findings per round: 2, 0, 0; findings: 2, 0, 0\); still open after each round: 2, 2, 2;/);
+  assert.match(text, /open now: 2 blocking \(0 raised by the latest round, 2 carried from earlier rounds: rev-k1:F1, rev-k1:F2\), 0 observation/);
+  // The owner's next step reads the same: a round with no finding of its own has not cleared what earlier rounds raised.
+  const resume = ok(v7.run(root, ['resume', '--attempt', a.id])).out;
+  assert.match(resume, /blocking findings open: 2, none raised by the latest round; carried from earlier rounds and not yet verified fixed: rev-k1:F1, rev-k1:F2/);
+  // The strategist is handed the same count and the same findings.
+  const h = ok(v7.run(root, ['handoff', 'strategist', '--agent', 'strat-k', '--attempt', a.id, '--reason', 'three rounds, nothing new', '--json'])).json();
+  const bundle = JSON.parse(fs.readFileSync(h.bundle, 'utf8'));
+  assert.equal(bundle.blocking.count, 2);
+  // A round that verifies them fixed clears both numbers.
+  reviewRound(v7, ctx, a, { findings: 0, tag: 'k4', fixPrior: true });
+  const cleared = v7.signals(root, a.id);
+  assert.deepEqual([cleared.blockingOpen, cleared.blockingCarried, cleared.rounds.at(-1).open], [0, 0, 0]);
+  assert.doesNotMatch(ok(v7.run(root, ['resume', '--attempt', a.id])).out, /blocking findings open:/);
 });
 
 test('a plan that states no expectation is refused at 0.7.0 with a hint; an attempt admitted before it is shown as stating none', () => {

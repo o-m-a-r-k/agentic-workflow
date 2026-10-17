@@ -54,8 +54,9 @@ export function started(r, { root, base }, { item, work = null, criteria = C, ow
 
 let n = 0;
 // One recorded review round on the current tree: commit a change, hand a fresh reviewer, record its closure. `findings`
-// are the open findings the reviewer reports; `criteria` the ids its closure must give evidence for.
-export function reviewRound(r, ctx, a, { findings = 1, criteria = ['C1', 'C2'], tag = `${++n}` } = {}) {
+// are the open findings the reviewer reports; `criteria` the ids its closure must give evidence for; `fixPrior` makes the
+// round verify every earlier finding fixed instead of still open.
+export function reviewRound(r, ctx, a, { findings = 1, criteria = ['C1', 'C2'], tag = `${++n}`, fixPrior = false } = {}) {
   commitIn(a.wt, { 'src/a.txt': `round ${tag} ${Math.random()}\n` });
   const agent = `rev-${tag}`;
   // 0.7.0: an attempt with several work items passes `wf check` on the combined tree before each review.
@@ -65,7 +66,7 @@ export function reviewRound(r, ctx, a, { findings = 1, criteria = ['C1', 'C2'], 
   const bundleFile = handed.out.match(/^Read (\S+)/m)?.[1];
   const prior = bundleFile ? (JSON.parse(fs.readFileSync(bundleFile, 'utf8')).openFindings ?? []) : [];
   const closure = goodClosure(agent, {
-    ...(prior.length ? { priorFindings: prior.map((f) => ({ round: f.round, id: f.id, status: 'open', evidence: 'still present at src/a.txt:1' })) } : {}),
+    ...(prior.length ? { priorFindings: prior.map((f) => ({ round: f.round, id: f.id, status: fixPrior ? 'fixed' : 'open', evidence: fixPrior ? 'src/a.txt:1 is correct now' : 'still present at src/a.txt:1' })) } : {}),
     criteria: criteria.map((id) => ({ id, evidence: { kind: 'output', ref: 'log line 1' } })),
     findings: Array.from({ length: findings }, (_, i) => ({ id: `F${i + 1}`, severity: 'major', summary: `defect ${i + 1} of round ${tag}`, status: 'open', evidence: 'src/a.txt:1' })),
   });
