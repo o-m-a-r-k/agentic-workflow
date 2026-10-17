@@ -492,7 +492,7 @@ export function reduce(entries) {
       // 0.7.27 (I-196, D42): the delivery waits after its tracker handoff until the deployment is confirmed and the fix tested where
       // it runs. `owed` says why (the label, or every ticket), where it deploys and who checks it (the delivery adapter, or the agent).
       case 'deployment.owed':
-        s.deployment = { owed: { where: d.where, label: d.label ?? null, check: d.check ?? 'agent', at: e.at }, observations: [], tested: null, closed: null };
+        s.deployment = { owed: { where: d.where, label: d.label ?? null, check: d.check ?? 'agent', ...(d.commits ? { commits: d.commits } : {}), at: e.at }, observations: [], tested: null, closed: null };
         break;
       case 'deployment.observed':
         (s.deployment ??= { owed: null, observations: [], tested: null, closed: null }).observations.push({ state: d.state, source: d.source, observed: d.observed ?? null, evidence: d.evidence ?? null, repos: d.repos ?? null, at: e.at, by: e.actor });

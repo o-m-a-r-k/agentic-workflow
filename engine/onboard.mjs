@@ -854,6 +854,7 @@ export async function doctor(root, { runSteps = true, runtime = detectOwner()?.r
   for (const t of await deploymentDoctor(root, cfg)) {
     if (t.info) report.config.push({ ok: true, check: t.check, note: t.problem });
     else if (t.fail) bad('config', { check: t.check, problem: t.problem, fix: t.fix });
+    else report.warnings.push({ ok: true, warn: true, check: t.check, problem: t.problem, fix: t.fix });
   }
   const inbox = openCount();
   if (inbox) report.warnings.push({ ok: true, warn: true, check: 'plugin improvements', problem: `${inbox} open plugin improvement(s) in your inbox`, fix: '`wf improve next` in a plugin maintainer session' });

@@ -1005,7 +1005,11 @@ export async function performTracker(root, cfg, state) {
     const problem = endpointProblem(e);
     if (problem) return { performed: [], note: `${problem}; nothing sent, the actions stay pending` };
   }
-  cfg = { ...cfg, tracker: trusted.tracker };
+  // 0.7.27 (review of the release, D42): the tracker policy (the statuses and the routes) is the version the actions were queued
+  // and the readback is judged with, the project's config; only endpoints, repository, folder and key come from the base commit.
+  // Named failure: an attempt in flight when the project added a route was set to the routed status (queued from the project's
+  // config) and its own readback refused it (judged by the base commit, which had no route).
+  cfg = { ...cfg, tracker: { ...trusted.tracker, statuses: cfg.tracker.statuses ?? trusted.tracker.statuses, statusByLabel: cfg.tracker.statusByLabel } };
   let token = null;
   if (via === 'api') {
     const keyName = cfg.tracker.apiKey ?? adapter.apiKey ?? 'LINEAR_API_KEY';

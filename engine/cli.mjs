@@ -1117,9 +1117,11 @@ async function dispatch(cmd, sub, positional, options) {
     }
     case 'tracker': {
       if (sub === 'sync') {
-        const s = openState(root, options);
+        // 0.7.27 (D42): first what the ledger owes and nothing queued yet (the `deployed` step held back by a hold), or the close.
+        const s = await closeAfterHandoff(root, openState(root, options));
         const api = await trackerApi(root, s.id);
-        print(options, `${api.trim() || 'tracker: nothing to perform (no pending actions, or `tracker.via` is the connector)'}\nnext: ${nextAction(root, loadState(root, s.id))}`);
+        const after = loadState(root, s.id);
+        print(options, `${api.trim() || (after.phase === 'done' ? `${after.id} closed and worktrees removed.` : 'tracker: nothing to perform (no pending actions, or `tracker.via` is the connector)')}\nnext: ${nextAction(root, after)}`);
         return 0;
       }
       if (sub === 'mode') {

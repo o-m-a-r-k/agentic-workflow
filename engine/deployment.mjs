@@ -59,9 +59,9 @@ export function deploymentRule(cfg, labels) {
 
 // What `wf doctor` says about the step, from the adapter as it stands: one line of what happens, and each mismatch between the
 // step and the status set at its end. `check`: whether the delivery adapter provides its own `deployment` check.
-// Named failures guarded: a status (or a label route) set at `deployed` with no step that waits for the deployment is never set,
-// so the person's "Done once deployed" silently never happens; a step with no status at its end leaves the ticket where the
-// delivery put it ("In progress", for a ticket routed away from UAT) for good.
+// Named failure guarded: a status (or a label route) set at `deployed` with no step that waits for the deployment is never set,
+// so the person's "Done once deployed" silently never happens (a failure). A step with no status at its end is a comment-only
+// setup: the ticket stays at its delivered status, which doctor says (a warning).
 export function deploymentChecks(cfg, { check = false } = {}) {
   const d = cfg?.delivery?.deployment;
   const statuses = cfg?.tracker?.statuses ?? {};
@@ -77,6 +77,7 @@ export function deploymentChecks(cfg, { check = false } = {}) {
   const who = Array.isArray(d.labels) && d.labels.length ? `a ticket labelled ${d.labels.map((l) => `"${l}"`).join(' or ')}` : 'every ticket';
   const status = !tracked ? 'no tracker step (no tracker)' : statuses.deployed ? `then the tracker step \`deployed\`: a comment, and the status "${statuses.deployed}"${routes ? ` (${Object.entries(routes).map(([l, s]) => `"${s}" for a ticket labelled "${l}"`).join(', ')})` : ''}` : 'then a comment on the ticket';
   out.push({ info: true, check: 'deployment after the merge', problem: `the delivery of ${who} waits after the merge until the merged change is confirmed running in ${where} (${check ? 'the delivery adapter\'s own `deployment` check decides' : 'the agent\'s recorded observation stands: the delivery adapter has no `deployment` check'}) and the fix is tested there where possible (or why not is recorded); ${status}` });
-  if (tracked && !statuses.deployed) out.push({ fail: true, check: 'deployment step', problem: `the delivery waits for the deployment (\`delivery.deployment\`), but no status is set when it is confirmed (\`tracker.statuses.deployed\`), so the ticket stays where the delivery put it`, fix: 'set `tracker.statuses.deployed` (for example Done); `tracker.statusByLabel.deployed` routes it by label like any step' });
+  // A comment-only step is a valid setup (review of 0.7.27): a warning that says what will happen, not a failure.
+  if (tracked && !statuses.deployed) out.push({ warn: true, check: 'deployment step', problem: `the delivery waits for the deployment (\`delivery.deployment\`), and no status is set when it is confirmed (\`tracker.statuses.deployed\`): once it is confirmed and the fix tested, the ticket gets the comment and stays at the status its delivery set`, fix: 'to set a status then, set `tracker.statuses.deployed` (for example Done); `tracker.statusByLabel.deployed` routes it by label like any step' });
   return out;
 }

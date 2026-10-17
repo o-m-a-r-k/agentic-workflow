@@ -16,7 +16,14 @@
 // Not confirmed (still rolling out, failed, cannot be seen), the attempt stays open and nothing is set; when it cannot be
 // confirmed at all the person decides whether to close the delivery without it (`wf deployment close`), the ticket left as
 // it is. Verification is read-only: a write where it deploys needs the person's authority under the project's rules.
-// Attempts admitted before 0.7.27 keep the delivery they started with (D7), and the person's hold stops the step.
+// Attempts admitted before 0.7.27 keep the delivery they started with (D7). The person's hold stops every write (the tracker
+// step, the close) and lets observations be recorded: a hold stops actions, not information.
+//
+// One config version (review of 0.7.27). Named failure: the step was read at the attempt's delivery pin while its routes were
+// read from the project's current config, so an attempt in flight when the project adopted both was moved to "In progress" at
+// the merge and then closed with no step, its ticket left there with nobody told (through an engine route, the readback refused
+// the status the engine had just set). The step (`delivery.deployment`) is read where the routes are, from the project's config
+// in its main checkout (`loadConfig`); code (the delivery adapter's `deployment` check) stays at the pin.
 import { DEPLOY_STATES, STATE_WORDS, deploymentChecks, deploymentRule } from './deployment.mjs';
 import { append, loadState } from './ledger.mjs';
 import { actor, branchName, openState } from './attempt.mjs';
@@ -42,31 +49,37 @@ const testedOk = (d) => Boolean(d?.tested) && d.tested.result !== 'failed';
 export const deploymentSettled = (d) => Boolean(d?.closed) || (deploymentConfirmed(d) && testedOk(d));
 const handoffDone = (state) => state.phase === 'handoff-pending' && !state.tracker.pending.length && !needsShown(state);
 
-// Whether this attempt's delivery waits for the deployment: { where, label, check } or null. Read from the adapter as committed
-// at the delivery pin (the delivery adapter, and the configuration that names it, as delivery reads them), with the ticket's
-// labels as its latest recorded readback showed them (the delivered one, once it is recorded), the labels its routed statuses
-// are judged by. `check`: the delivery adapter's own `deployment` check decides, or the agent's observation does.
+// The repos this attempt delivered, each with its commit: its own, or, for a batch member, its batch's (a member's commits are
+// delivered and recorded by its batch, as its screenshots are collected by it), for the repos the member changes.
+// Named failure (review of 0.7.27): a member's own ledger records no delivered repo, so the check ran over none and an empty
+// list confirmed the deployment without asking the adapter.
+export function deliveredRepos(root, state) {
+  const src = state.delivery?.viaBatch ? loadState(root, state.delivery.viaBatch) : state;
+  return Object.entries(src.delivery?.repos ?? {})
+    .filter(([name, rec]) => rec?.commit && !rec.skipped && (src === state || name in (state.repos ?? {})))
+    .map(([name, rec]) => ({ name, rec, worktree: state.repos?.[name]?.worktree ?? src.repos?.[name]?.worktree ?? null, batch: src === state ? null : src.id }));
+}
+const commitsOf = (root, state) => Object.fromEntries(deliveredRepos(root, state).map((r) => [r.name, r.rec.commit]));
+
+// Whether this attempt's delivery waits for the deployment: { where, label, check, commits } or null. The step is read from the
+// project's config, where its routes are read (one version: a ticket a route moves to its "wait" status is the one that waits),
+// with the ticket's labels as its latest recorded readback showed them (the delivered one, once recorded), the labels its routed
+// statuses are judged by. `check`: the delivery adapter's own `deployment` check, as committed at the delivery pin, decides, or
+// the agent's observation does. `commits`: what was delivered, the version to look for where it deploys.
 export async function deploymentOwed(root, state) {
   if (!state.delivery?.completedAt || state.shipped || !obligationSince(state, SINCE) || !hasTicket(state)) return null;
-  const cfg = trustedAdapter(root, state, deliveryPin(state));
-  const rule = deploymentRule(cfg, ticketLabels(state));
+  const rule = deploymentRule(loadConfig(root), ticketLabels(state));
   if (!rule) return null;
-  const adapter = await loadDeliveryAdapter(root, cfg, state);
-  return { ...rule, check: typeof adapter?.deployment === 'function' ? 'adapter' : 'agent' };
+  const adapter = await loadDeliveryAdapter(root, null, state);
+  return { ...rule, check: typeof adapter?.deployment === 'function' ? 'adapter' : 'agent', commits: commitsOf(root, state) };
 }
 
 // Why a delivery does not wait for a deployment, for a refusal.
 async function whyNotOwed(root, state) {
   if (!obligationSince(state, SINCE)) return `${state.id} was admitted under ${admittedVersion(state) ?? 'an older release'}, before the deployment confirmation existed (${SINCE}); it keeps the delivery it started with`;
   if (!hasTicket(state)) return `${state.id} works no ticket of the tracker`;
-  let cfg;
-  try {
-    cfg = trustedAdapter(root, state, deliveryPin(state));
-  } catch (error) {
-    return `its adapter at the delivery pin cannot be read (${error.message.split('\n')[0]})`;
-  }
-  const d = cfg.delivery?.deployment;
-  if (!d) return `the project's delivery, as committed for this attempt (${String(deliveryPin(state)).slice(0, 10)}), does not wait for a deployment (no \`delivery.deployment\`)`;
+  const d = loadConfig(root).delivery?.deployment;
+  if (!d) return 'the project\'s delivery does not wait for a deployment (no `delivery.deployment`)';
   const labels = ticketLabels(state);
   return `the delivery waits only for a ticket labelled ${(d.labels ?? []).map((l) => `"${l}"`).join(' or ')}, and ${state.item}'s labels, as read back, ${labels ? `are ${labels.length ? labels.map((l) => `"${l}"`).join(', ') : 'none'}` : 'were never reported'}`;
 }
@@ -96,14 +109,16 @@ export async function deploymentAfterHandoff(root, state) {
   return { state: s, reason: `deployment confirmed in ${d.owed.where} and the fix ${d.tested.result === 'passed' ? 'tested there' : 'not testable there (reason recorded)'}${handed ? '; tracker handoff verified' : ''}` };
 }
 
-// The state a `wf deployment` command works on: the delivery waits for its deployment, nothing is held, nothing settled.
+// The state a `wf deployment` command works on: the delivery waits for its deployment, nothing settled; a write (`write`: the
+// close) is not held.
 // Named failures these refusals name (field, I-196): the step is the person's rule for some tickets only, so a command on a
 // delivery that does not wait for it says why (`deployment:not-owed`) instead of recording a confirmation nothing reads; the
-// person's pause stops it (`deployment:on-hold`), as it stops `wf deliver`; a settled step is not recorded twice
-// (`deployment:settled`), so a retried command cannot queue the final status again.
-async function stepState(root, options) {
+// person's pause stops a write (`deployment:on-hold`: the close; the tracker step waits in closeAfterHandoff), as it stops
+// `wf deliver`, while an observation that sets nothing is recorded (review of 0.7.27: a hold stops actions, not information);
+// a settled step is not recorded twice (`deployment:settled`), so a retried command cannot queue the final status again.
+async function stepState(root, options, { write = false } = {}) {
   let state = openState(root, options);
-  if (state.activeHold) throw refuse(`delivery is on hold: "${state.activeHold.reason}"; the deployment step waits`, 'only the person lifts it (`wf release`)', { id: 'deployment:on-hold' });
+  if (write && state.activeHold) throw refuse(`delivery is on hold: "${state.activeHold.reason}"; closing it without the deployment waits`, 'only the person lifts it (`wf release`); observations are recorded meanwhile', { id: 'deployment:on-hold' });
   if (!state.deployment && handoffDone(state)) {
     const owed = await deploymentOwed(root, state);
     if (owed) {
@@ -131,10 +146,9 @@ export async function checkDeployment(root, options) {
   const cfg = trustedAdapter(root, state, deliveryPin(state));
   const adapter = await loadDeliveryAdapter(root, cfg, state);
   const repos = {};
-  for (const [name, rec] of Object.entries(state.delivery.repos)) {
-    if (!rec.commit || rec.skipped) continue;
+  for (const { name, rec, worktree, batch } of deliveredRepos(root, state)) {
     const repo = cfg.repos.find((r) => r.name === name);
-    const ctx = { ...adapterResult(rec), root, repo, worktree: state.repos[name]?.worktree ?? null, attempt: state.id, item: state.item, branch: branchName(state.id), commit: rec.commit, target: rec.target ?? null, where: d.owed.where };
+    const ctx = { ...adapterResult(rec), root, repo, worktree, attempt: state.id, item: state.item, branch: branchName(batch ?? state.id), commit: rec.commit, target: rec.target ?? null, where: d.owed.where, ...(batch ? { batch } : {}) };
     let r;
     try {
       r = await adapter.deployment(ctx);
@@ -145,8 +159,9 @@ export async function checkDeployment(root, options) {
     repos[name] = { state: known ? r.state : 'unknown', evidence: line(r?.evidence) || (known ? null : `the adapter reported ${r?.state === undefined || r?.state === null ? 'no state' : JSON.stringify(String(r.state))}, not one of ${DEPLOY_STATES.join(', ')}`) };
   }
   const states = Object.values(repos).map((x) => x.state);
-  const overall = states.every((x) => x === 'deployed') ? 'deployed' : ['failed', 'unknown', 'deploying'].find((x) => states.includes(x));
-  const evidence = Object.entries(repos).map(([n, x]) => `${n}: ${x.state}${x.evidence ? ` (${x.evidence})` : ''}`).join('; ') || 'no repo of this delivery changed anything';
+  // Nothing delivered was found to ask about: nothing is confirmed (an empty list never reads as "every repo deployed").
+  const overall = !states.length ? 'unknown' : states.every((x) => x === 'deployed') ? 'deployed' : ['failed', 'unknown', 'deploying'].find((x) => states.includes(x));
+  const evidence = Object.entries(repos).map(([n, x]) => `${n}: ${x.state}${x.evidence ? ` (${x.evidence})` : ''}`).join('; ') || `no delivered commit was found for ${state.id}${state.delivery.viaBatch ? ` (nor for its batch ${state.delivery.viaBatch})` : ''}, so the adapter was not asked`;
   append(root, state.id, 'deployment.observed', { state: overall, source: 'adapter', repos, evidence, ...(typeof options.observed === 'string' && options.observed.trim() ? { observed: line(options.observed) } : {}) }, actor(options));
   return loadState(root, state.id);
 }
@@ -160,6 +175,8 @@ export async function recordDeployment(root, options) {
   const st = typeof options.state === 'string' ? options.state.trim() : '';
   if (!DEPLOY_STATES.includes(st)) throw new WfError(`--state is one of ${DEPLOY_STATES.join(', ')}: what you saw of the merged change in ${d.owed.where}`);
   if (typeof options.observed !== 'string' || !options.observed.trim()) throw new WfError(`--observed "<what you saw>" is required: how you know (the running version against the merged commit, the rollout, the health), kept with the delivery`);
+  // The agent confirms a delivered version: with none found (the review's batch gap), nothing can be confirmed against it.
+  if (st === 'deployed' && !deliveredRepos(root, state).length) throw refuse(`no delivered commit was found for ${state.id}${state.delivery.viaBatch ? ` (nor for its batch ${state.delivery.viaBatch})` : ''}, so no running version can be confirmed against it`, 'record what you saw as `--state unknown`; the person decides (`wf deployment close --reason "<why>"`)', { id: 'deployment:nothing-delivered' });
   append(root, state.id, 'deployment.observed', { state: st, source: 'agent', observed: line(options.observed) }, actor(options));
   return loadState(root, state.id);
 }
@@ -190,14 +207,16 @@ export async function recordTested(root, options) {
 // `wf deployment close --reason "<why>"`: the deployment cannot be confirmed (or the fix failed there), and the person decides
 // whether the delivery closes without it. The ticket is left where the delivery put it, never set to the deployed status.
 export async function closeUnconfirmed(root, options) {
-  const state = await stepState(root, options);
+  const state = await stepState(root, options, { write: true });
   const reason = typeof options.reason === 'string' ? options.reason.trim() : '';
   if (!reason) throw new WfError('--reason "<why the deployment cannot be confirmed>" is required');
   const d = state.deployment;
   const last = latest(d);
   const where = d.owed.where;
   const why = d.tested?.result === 'failed' ? `the fix did not work when it was tested in ${where}` : !last ? `its deployment to ${where} has not been confirmed` : last.state === 'deployed' ? `it runs in ${where}, but the fix has not been tested there` : last.state === 'deploying' ? `it is still rolling out to ${where}` : last.state === 'failed' ? `its deployment to ${where} failed` : `whether it runs in ${where} cannot be seen from here`;
-  const key = `deployment-close:${state.id}:${sha256(JSON.stringify({ last: last?.at ?? null, tested: d.tested?.at ?? null })).slice(0, 16)}`;
+  // Keyed by the facts it is asked on (review of 0.7.27: keyed by the time of the last observation, an identical re-check after
+  // "keep it open" asked the same question again): the same last state and test result are never asked about twice.
+  const key = `deployment-close:${state.id}:${sha256(JSON.stringify({ last: last?.state ?? null, tested: d.tested?.result ?? null })).slice(0, 16)}`;
   const decision = requireYes(root, state, { kind: 'override-gate', key, summary: `close the delivery of ${state.id} without a confirmed deployment in ${where} (${reason}); the ticket is not moved`, what: `closing ${state.id}'s delivery without a confirmed deployment`, frame: FRAMES.closeUndeployed({ item: state.item, why, where }), options }).decision;
   append(root, state.id, 'deployment.closed', { reason: line(reason, 1000), decision, last: last ? { state: last.state, at: last.at } : null, tested: d.tested?.result ?? null }, actor(options));
   return loadState(root, state.id);
@@ -210,13 +229,15 @@ export function deploymentNext(root, state) {
   if (!d && handoffDone(state) && state.delivery?.completedAt && !state.shipped && obligationSince(state, SINCE) && hasTicket(state)) {
     let rule = null;
     try {
-      rule = deploymentRule(trustedAdapter(root, state, deliveryPin(state)), ticketLabels(state));
+      rule = deploymentRule(loadConfig(root), ticketLabels(state));
     } catch {
       rule = null;
     }
-    if (rule) d = { owed: { ...rule, check: 'either' }, observations: [], tested: null, closed: null };
+    if (rule) d = { owed: { ...rule, check: 'either', commits: commitsOf(root, state) }, observations: [], tested: null, closed: null };
   }
-  if (!d?.owed || deploymentSettled(d)) return null;
+  if (!d?.owed || d.closed) return null;
+  // Settled while a hold stood (or before a command that stopped queued it): the step that sets the status is not queued yet.
+  if (deploymentSettled(d)) return state.tracker.done.some((x) => x.event === 'deployed') ? null : `The deployment is confirmed and the fix ${d.tested.result === 'passed' ? 'tested' : 'found not testable'} there; the step that sets the ticket's status ${state.holds?.length ? 'waited for the hold' : 'is not queued yet'}: \`wf tracker sync\` continues the delivery`;
   const { where, label } = d.owed;
   const item = state.item;
   const why = label ? `${item} carries "${label}": its delivery ends once the merged change runs in ${where} and the fix is tested there` : `this project's delivery ends once the merged change runs in ${where} and the fix is tested there`;
@@ -225,7 +246,8 @@ export function deploymentNext(root, state) {
   const last = latest(d);
   if (d.tested?.result === 'failed' && deploymentConfirmed(d)) return `${why}. The fix failed when tested in ${where}: "${d.tested.text}". Tell the person what you saw; nothing is set. After a change there that may fix it (theirs to authorize), test again (\`wf deployment tested\`); a fix in the code is a new attempt of the ticket: \`wf deployment close --reason "<why>"\` asks the person to close this delivery without the confirmation, then \`wf reopen --item ${item} --reason "<what failed>"\``;
   if (deploymentConfirmed(d)) return `${why}. The deployment is confirmed (${last.source === 'adapter' ? `the delivery adapter's check: ${last.evidence}` : `your observation: ${last.observed}`}). Test the fix in ${where} where possible (${readOnly}) and record what you did and saw, in product words (it goes on the ticket): \`wf deployment tested --observed "<what you tested and saw>"\`; when it cannot be tested there, \`wf deployment tested --not-possible "<why>"\`; when it fails there, \`wf deployment tested --failed "<what you saw>"\` and tell the person`;
-  const look = `that the merged change runs in ${where} (the running version against the merged commit, the rollout finished), ${readOnly}`;
+  const commits = Object.entries(d.owed.commits ?? {}).map(([n, c]) => `${n} ${String(c).slice(0, 12)}`).join(', ');
+  const look = `that the merged change runs in ${where} (the running version against the merged commit${commits ? ` ${commits}` : ''}, the rollout finished), ${readOnly}`;
   const how = d.owed.check === 'either' ? `\`wf deployment check\` asks the delivery adapter (read-only) when it has its own check; without one, confirm ${look}, and record what you saw: \`wf deployment record --state deployed|deploying|failed|unknown --observed "<what you saw>"\`` : d.owed.check === 'adapter' ? `\`wf deployment check\` asks the delivery adapter (read-only) whether the merged change runs in ${where}` : `confirm ${look}, and record what you saw: \`wf deployment record --state deployed --observed "<what you saw>"\`; while it is still rolling out, failed, or cannot be seen from here, record that (\`--state deploying|failed|unknown\`)`;
   if (!last) return `${why}. ${how[0].toUpperCase()}${how.slice(1)}; ${closeRoute}`;
   const seen = `Not confirmed: ${STATE_WORDS[last.state]} (${last.source === 'adapter' ? `the delivery adapter's check, ${last.at}: ${last.evidence}` : `your observation, ${last.at}: ${last.observed}`})`;

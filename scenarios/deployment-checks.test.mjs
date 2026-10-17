@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { readLedger, reduce } from '../engine/ledger.mjs';
-import { closureFile, commitIn, criteriaFile, goodClosure, ok, singleRepoProject, state, toAccepted, wf } from './helpers.mjs';
+import { OUT_OF_ORDER, closureFile, commitIn, criteriaFile, goodClosure, ok, singleRepoProject, state, toAccepted, wf } from './helpers.mjs';
 import { runner } from './strategist-fixtures.mjs';
-import { TS, connector, deliver, dep, mergeAdapter, project, resume, routes, statusOf, statuses, steps } from './deployment-fixtures.mjs';
+import { TS, connector, deliver, dep, mergeAdapter, project, resume, routes, statusOf, statuses, steps, ticket } from './deployment-fixtures.mjs';
 
 // 0.7.27 (I-196, D42): the deployment confirmation (deployment-fixtures.mjs says why): through a connector, with a recorded
 // reason the fix could not be tested; the delivery adapter's own check; an attempt admitted before this release; a project that
@@ -129,7 +129,11 @@ test('0.7.27 (I-196): a project that does not opt in delivers as before; doctor 
     assert.match(r.out, re, name);
   };
   failing('deploy-status-only', { tracker: { kind: 'files', statuses, statusByLabel: { deployed: { 'Hotfix': 'Done' } } } }, /✗ config: deployment step — a status is set when the deployment is confirmed \(`tracker\.statuses\.deployed`: "Done"; `tracker\.statusByLabel\.deployed`: "Done" for "Hotfix"\), but no delivery waits for the deployment \(`delivery\.deployment`\), so it is never set/);
-  failing('deploy-step-only', { tracker: { kind: 'files', statuses: { started: 'In progress', delivered: 'In UAT', done: 'Done' } }, delivery: { kind: 'push-main', deployment: TS } }, /✗ config: deployment step — the delivery waits for the deployment \(`delivery\.deployment`\), but no status is set when it is confirmed \(`tracker\.statuses\.deployed`\), so the ticket stays where the delivery put it/);
+  // A step with no status at its end is a valid comment-only setup: doctor says what will happen, and passes.
+  const { root: commentOnly } = singleRepoProject('deploy-step-only', { gate: { steps }, tracker: { kind: 'files', statuses: { started: 'In progress', delivered: 'In UAT', done: 'Done' } }, delivery: { kind: 'push-main', deployment: TS } });
+  const warned = ok(wf(commentOnly, ['doctor', '--no-steps'])).out;
+  assert.match(warned, /! warning: deployment step — the delivery waits for the deployment \(`delivery\.deployment`\), and no status is set when it is confirmed \(`tracker\.statuses\.deployed`\): once it is confirmed and the fix tested, the ticket gets the comment and stays at the status its delivery set/);
+  assert.match(warned, /doctor: all checks passed/);
   // A shape that would wait for the wrong tickets is refused when the adapter is read.
   const refused = (name, config, re) => {
     const { root } = singleRepoProject(name, { gate: { steps }, ...config });
@@ -141,4 +145,36 @@ test('0.7.27 (I-196): a project that does not opt in delivers as before; doctor 
   refused('deploy-no-tracker', { delivery: { kind: 'push-main', deployment: TS } }, /`delivery\.deployment\.labels` needs a tracker/);
   refused('deploy-empty', { tracker: { kind: 'files', statuses }, delivery: { kind: 'push-main', deployment: { labels: [] } } }, /`delivery\.deployment\.labels` lists the ticket labels whose delivery waits for the deployment/);
   refused('deploy-shape', { tracker: { kind: 'files', statuses }, delivery: { kind: 'push-main', deployment: true } }, /`delivery\.deployment` says the delivery waits after the merge for the deployment to be confirmed/);
+});
+
+// Review of 0.7.27, named failure: a batch member's own ledger records no delivered repo (the commits are delivered and recorded
+// by its batch), so the check ran over no repo and an empty list confirmed the deployment without asking the adapter. The
+// member's delivered repos are resolved through its batch, as its screenshots are, and an empty set is never "deployed".
+test('0.7.27 (I-196): a batch member\'s deployment is checked against the commits its batch delivered', () => {
+  const heavy = [{ id: 'unit', repo: 'app', run: 'true', inputs: ['src/**'] }, { id: 'e2e', repo: 'app', run: 'true', tier: 'heavy' }];
+  const { base, root } = singleRepoProject('deploy-batch', {
+    // At the merge the hotfix shows "Merged" (a status its admission did not have, so its readback differs from the admission one).
+    tracker: { kind: 'files', statuses, statusByLabel: { delivered: { Hotfix: 'Merged' } } },
+    delivery: { kind: './delivery/mr.mjs', deployment: TS },
+    gate: { steps: heavy },
+  }, { '.workflow/delivery/mr.mjs': mergeAdapter, 'tickets/ENG-500.md': ticket('ENG-500', ['Hotfix']), 'tickets/ENG-502.md': ticket('ENG-502', ['Hotfix']), 'src/b.txt': 'b\n' });
+  const m1 = toAccepted(root, base, { item: 'ENG-500', change: { 'src/a.txt': 'one\n' }, extraEntry: ['--defer-heavy'] });
+  const m2 = toAccepted(root, base, { item: 'ENG-502', change: { 'src/b.txt': 'two\n' }, extraEntry: ['--defer-heavy'] });
+  const b = ok(wf(root, ['batch', 'create', '--members', `${m1.id},${m2.id}`, '--owner', 'o', '--json'])).json();
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', b.id]));
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'rb', '--attempt', b.id]));
+  ok(wf(root, ['review', '--closure', closureFile(base, { reviewer: 'rb', findings: [], criteria: [{ id: 'B1', evidence: { kind: 'output', ref: 'batch gate' } }], screenshotsInspected: [] }), '--attempt', b.id]));
+  ok(wf(root, ['accept', '--attempt', b.id]));
+  ok(wf(root, ['deliver', '--attempt', b.id]));
+  ok(wf(root, ['tracker', 'sync', '--attempt', m1.id]));
+  const batchCommit = state(root, b.id).delivery.repos.app.commit;
+  assert.deepEqual(state(root, m1.id).deployment.owed.commits, { app: batchCommit }, 'the member waits on the commit its batch delivered');
+  // The adapter is asked about that commit: still rolling out, then the merged version.
+  const p = { root };
+  assert.match(ok(dep(p, m1.id, ['check'])).out, /NOT confirmed: deploying \(the delivery adapter's check: app: deploying \(rollout: 1 of 3 replicas updated\)\)/);
+  fs.writeFileSync(path.join(root, '..', 'running.json'), JSON.stringify({ commit: batchCommit }));
+  assert.match(ok(dep(p, m1.id, ['check'])).out, /deployment in production confirmed \(the delivery adapter's check: app: deployed \(3 of 3 replicas run the merged version\)\)/);
+  ok(dep(p, m1.id, ['tested', '--observed', 'The totals page shows the corrected total']));
+  assert.equal(statusOf(root, 'ENG-500'), 'Done');
+  assert.equal(state(root, m1.id).phase, 'done');
 });

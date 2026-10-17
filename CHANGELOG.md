@@ -47,9 +47,14 @@ Release notes, newest first, then every fix that came from a failure in the work
   - when the deployment cannot be confirmed at all, you decide: `wf deployment close --reason "..."` asks whether the
     delivery closes without it, and the ticket is then left where the delivery put it;
   - checking and testing are read-only: any write where it deploys still needs your authority under the project's rules;
-    your hold stops the step; attempts admitted before 0.7.27, or before the project committed the step, keep the delivery
-    they started with; `wf doctor` fails on a `deployed` status with no step, or a step with no status. A project that
-    declares nothing delivers as before.
+    your hold stops every write (the status, closing without the confirmation) while observations are still recorded;
+    attempts admitted before 0.7.27 keep the delivery they started with;
+  - the step and its routes are read from one place, the project's config, so an attempt already in flight when you turn
+    the feature on also waits for its deployment (the delivery adapter's check code stays as committed for the attempt);
+    a batch member is checked against the commit its batch delivered, and nothing delivered found is never "deployed";
+  - a question about closing without the confirmation is not asked again for the same facts; `wf doctor` fails on a
+    `deployed` status with no step, and warns on a step with no status (the ticket then keeps its delivered status). A
+    project that declares nothing delivers as before.
 - **`wf improve` says when a fix is not out yet (I-193).** `wf improve list` and `show` add "not released or installed
   yet" beside a fix in a release newer than the running wf.
 - **A fix round's goal is that no review finds the problem again anywhere (I-191, D36).** Named failure: a ticket ran ten
