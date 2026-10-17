@@ -30,6 +30,8 @@ instructionFiles: [backend/AGENTS.md, frontend/AGENTS.md]   # where releases bef
 components: [...]
 delivery: { kind: push-main }
 tracker: { kind: linear, itemPattern: '^ENG-\d+$', statuses: { started: In Progress, delivered: Ready for UAT, done: Done } }
+# Optional (0.7.27): a step's status by the ticket's labels, the person's choice; no step sets Done unless the adapter says so.
+#   tracker.statusByLabel: { delivered: { "Self-serve": Done } }
 lanes: [quick, standard, batch]
 classes:                     # merged over the plugin's full/light/review defaults by name; open list
   light: { use: "Screens on a frozen API contract, translations, fixtures.", claude: { effort: low }, codex: { effort: low } }

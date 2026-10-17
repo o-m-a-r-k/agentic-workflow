@@ -14,6 +14,7 @@ import { connectorCalls, ownerTranscript } from './host-record.mjs';
 import { screenshots } from './gate.mjs';
 import { findingSummary, lastReviewSeenAt, unreachedSince } from './review-policy.mjs';
 import { cliEnv, scrub } from './scrub.mjs';
+import { routeLines, routedStatus, ticketLabels } from './status-route.mjs';
 
 const BUILTIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'adapters', 'tracker');
 
@@ -358,10 +359,12 @@ export function trackerActions(root, cfg, state, event, extra = {}) {
     if (step === 'read') actions.push({ op: 'read', what: 'issue with all comments, attachments and status history' });
     else if (step === 'readback') actions.push({ op: 'readback', what: 'issue status, the comment and attachments, saved as one capture' });
     else if (step.setStatus) {
-      const name = statuses[step.setStatus];
-      if (!name) continue;
+      const fallback = statuses[step.setStatus];
+      if (!fallback) continue;
+      // 0.7.27 (I-190): the project's routing by the ticket's labels (engine/status-route.mjs); every other ticket goes where it did.
+      const route = routedStatus(cfg.tracker, step.setStatus, ticketLabels(state));
       const startEvent = ['admitted', 'implementing'].includes(event);
-      actions.push({ op: 'setStatus', key: step.setStatus, status: name, unless: startEvent ? [statuses.done].filter(Boolean) : [] });
+      actions.push({ op: 'setStatus', key: step.setStatus, status: route?.status ?? fallback, ...(route ? { route: { label: route.label, default: fallback } } : {}), unless: startEvent ? [statuses.done].filter(Boolean) : [] });
     } else if (step.comment) {
       // The delivered comment is rendered from the ledger when it is shown or posted (summary, captions, asset urls).
       if (event === 'delivered' && templateRef(cfg, step.comment, state)) {
@@ -598,7 +601,7 @@ async function recordAgentReported(root, cfg, state, options, event, pending) {
       writeImmutable(cdest, comment.text);
       commentRec = { path: cdest, sha256: comment.sha256, id: r.comment?.id ?? null };
     }
-    append(root, state.id, 'tracker.recorded', { event, provenance: AGENT_REPORTED, verified: false, mode: 'agent-reported', capture: { path: dest, sha256: hashFile(dest) }, readAt: r.readAt, status: r.status ?? null, ...(commentRec ? { comment: commentRec } : {}), ...(extra.length ? { extraLines: extra.slice(0, 50).map((l) => scrub(l)) } : {}), attachments: (Array.isArray(r.attachments) ? r.attachments : []).slice(0, 200).map((x) => ({ title: x?.title ?? null, caption: x?.subtitle ?? null, assetUrl: reportedAssetUrl(x) })) }, null);
+    append(root, state.id, 'tracker.recorded', { event, provenance: AGENT_REPORTED, verified: false, mode: 'agent-reported', capture: { path: dest, sha256: hashFile(dest) }, readAt: r.readAt, status: r.status ?? null, ...(Array.isArray(r.labels) ? { labels: r.labels.map(String) } : {}), ...(commentRec ? { comment: commentRec } : {}), ...(extra.length ? { extraLines: extra.slice(0, 50).map((l) => scrub(l)) } : {}), attachments: (Array.isArray(r.attachments) ? r.attachments : []).slice(0, 200).map((x) => ({ title: x?.title ?? null, caption: x?.subtitle ?? null, assetUrl: reportedAssetUrl(x) })) }, null);
   });
   return loadState(root, state.id);
 }
@@ -775,7 +778,7 @@ export async function recordTracker(root, cfg, state, options) {
   recordedTogether(root, state.id, () => {
     if (engine) writeEngineAnswer(engine);
     writeImmutable(dest, captureText);
-    append(root, state.id, 'tracker.recorded', { event, provenance, verified: level, capture: { path: dest, sha256: hashFile(dest) }, status: issue.status, ...(host ? { host } : {}), ...(extraLines.length ? { extraLines: extraLines.slice(0, 50).map((l) => scrub(l)) } : {}), ...(verified.length ? { attachments: verified } : {}) }, null);
+    append(root, state.id, 'tracker.recorded', { event, provenance, verified: level, capture: { path: dest, sha256: hashFile(dest) }, status: issue.status, ...(Array.isArray(issue.labels) ? { labels: issue.labels.map(String) } : {}), ...(host ? { host } : {}), ...(extraLines.length ? { extraLines: extraLines.slice(0, 50).map((l) => scrub(l)) } : {}), ...(verified.length ? { attachments: verified } : {}) }, null);
   });
   return loadState(root, state.id);
 }
@@ -835,6 +838,7 @@ export async function trackerModeChecks(root, cfg, { loadCatalog: catalog, readS
   } catch {}
   const combo = `${cfg.tracker.kind}/${cfg.tracker.via}`;
   if (VERIFIABLE[combo]) out.push({ info: true, check: `tracker ${combo}`, problem: VERIFIABLE[combo] });
+  for (const line of routeLines(cfg.tracker)) out.push({ info: true, plain: true, check: 'tracker status routing', problem: line });
   if (cfg.tracker.via === 'connector') {
     const s = detectOwner();
     const owning = findHost(s?.runtime);

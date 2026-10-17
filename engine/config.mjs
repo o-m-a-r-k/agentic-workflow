@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { hostChoice, hostFor, hostIds } from './hosts/index.mjs';
 import { ENGINE_PIN, WfError, YAML, assertPlainGit, git, hashValue, refuse } from './util.mjs';
+import { routeProblems } from './status-route.mjs';
 
 export const ADAPTER_DIR = '.workflow';
 export const CONFIG_FILE = 'project.yaml';
@@ -273,6 +274,8 @@ function normalize(raw, source) {
   if (VIAS[cfg.tracker.kind] && cfg.tracker.kind !== 'none' && !VIAS[cfg.tracker.kind].includes(cfg.tracker.via)) fail(`\`tracker.via\` for ${cfg.tracker.kind} is one of ${VIAS[cfg.tracker.kind].join(', ')}, not \`${cfg.tracker.via}\``);
   if (!VIAS[cfg.tracker.kind] && !String(cfg.tracker.kind).startsWith('.')) fail(`\`tracker.kind\` is one of linear, github, files, none (or a project adapter \`./file.mjs\`), not \`${cfg.tracker.kind}\``);
   if (cfg.tracker.kind === 'github' && !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(String(cfg.tracker.repo ?? ''))) fail('`tracker.repo` names the GitHub repository holding the issues: `owner/name`');
+  // 0.7.27 (I-190): the person's routing of a step's status by the ticket's labels.
+  for (const problem of routeProblems(cfg.tracker)) fail(problem);
   if (cfg.tracker.itemPattern !== undefined) {
     let bad = typeof cfg.tracker.itemPattern !== 'string' || !cfg.tracker.itemPattern;
     if (!bad) {

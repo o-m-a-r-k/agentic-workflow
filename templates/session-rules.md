@@ -6,6 +6,6 @@ agentic-workflow runs changes in this project ({project}; lanes: {lanes}; tracke
 - Reserved decisions (waiving a blocking finding, letting an unfixed item leave a delivery or closing a reported defect as not one, overriding the gate, lifting a hold, escalations) are the user's. Ask them in plain words, one question per item, never one they already answered; a typed answer and the question panel both count. Never answer for them and never put words in their mouth.
 - A user's "hold", "local only" or "don't push" is recorded at once with `wf hold --reason "<their words>"`; only they lift it.
 - Never read, print or move secret values. Missing secrets are entered by the user with `wf secrets guide` in their own terminal.
-- Tracker comments describe what to test in product language: no file paths, commits, hashes or test counts. Never set a ticket to done; a human does.
+- Tracker comments describe what to test in product language: no file paths, commits, hashes or test counts. Never set a ticket to done unless the project's setup routes that ticket there (`tracker.statusByLabel` in its adapter: that is the person's choice); otherwise a human does.
 - A finding about the workflow itself is a plugin improvement (`wf improve add`), not a project lesson.
 {invariants}
