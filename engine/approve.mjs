@@ -255,8 +255,8 @@ function carriesText(text, question) {
 }
 // The option a panel showed (0.7.28, I-202, I-203): one of the decision's labels (a frame's label for a question an earlier
 // release asked without labels, or the choice itself), followed at most by the panel's " (Recommended)" and a ": <what follows>"
-// tail, quotes and emphasis aside. Codex's `request_user_input_async` takes each option as one plain string, and an agent wrote the
-// label with its description into it. A structural match on the label at the start, never a reading of the rest: "Use the
+// tail, quotes and emphasis aside. A harness whose panel takes each option as one plain string got the label with its description
+// written into it by an agent. A structural match on the label at the start, never a reading of the rest: "Use the
 // corrected step and skip the review" is no option of the question. { choice, label }, or null when none or more than one fits.
 // Review of the fix: a trailing "." or "!", "(Not recommended)" and an em or en dash in place of the colon are the same shape; a
 // tail that holds another option's label word for word ("yes: Keep it paused") is no option: the answer is the agent's to read.
@@ -378,8 +378,8 @@ export async function approveFromQuestion(root, id, options, { env = process.env
   };
   // A panel question is held to it too: "<the question> Also: should I update the README?" answered "yes" binds nothing by itself.
   const asksElse = (a) => /[?\uff1f]/u.test(besides(a.question)) || (a.channel === 'chat' && (a.panels ?? []).some((x) => !carriesText(x.text, question)));
-  // A panel answer that is one of the options the panel offered is that option's label (0.7.28, I-202: Codex records the option's
-  // whole string); the guards on a bare yes or no read that label as they read a typed one.
+  // A panel answer that is one of the options the panel offered is that option's label (0.7.28, I-202: a harness whose panel takes
+  // options as plain strings records the option's whole string); the guards on a bare yes or no read that label as they read a typed one.
   const isChat = (a) => a.channel === 'chat';
   const picked = (a) => {
     const o = !isChat(a) && Array.isArray(a.options) ? a.options.find((x) => whole(x) === whole(a.answer)) : null;
@@ -469,6 +469,33 @@ function recordReading(root, state, d, options, { reading, theirs, after, last, 
   return { state: loadState(root, state.id), decision: id, choice: named, words, read: { quote: String(quote).trim(), message: String(m.answer).trim() } };
 }
 const holdsAny = (theirs, quote) => theirs.some((a) => holds(a.answer, quote));
+
+// Words an agent records as the person's standing answer outside a decision (`wf scope fix-all`, review of 0.7.28, L2), proven as a
+// reading is (D41): verbatim in one of the person's own messages in the calling session, written at or after `sinceAt`. Returns
+// { quote, message, at, via } or { problem }. Named failure (a review's case): "fix all" was recorded on the agent's word alone,
+// while its effect (no item is asked about again) stands for the rest of the attempt.
+export async function personSaid(quote, { sinceAt = null, env = process.env } = {}) {
+  const caller = detectOwner(env);
+  const host = caller ? findHost(caller.runtime) : null;
+  const read = optional(host, 'questionAnswers');
+  const chat = optional(host, 'chatAnswers');
+  if (!caller || !read) return { problem: 'this is not an agent session whose harness records the person\'s messages' };
+  const t = optional(host, 'transcriptFile')?.(caller.session, { home: home() });
+  if (!t?.file) return { problem: `this session's transcript cannot be read (${t?.problem ?? 'no transcript'})` };
+  const theirs = [...(await read(t.file)), ...(chat ? await chat(t.file) : [])].filter((a) => typeof a.answer === 'string' && a.answer.trim());
+  const q = holdsAny(theirs, quote) ? quote : unwrap(quote) ?? quote;
+  const clip = (x) => String(x).trim().replace(/\s+/g, ' ').slice(0, 300);
+  const holding = theirs.filter((a) => holds(a.answer, q));
+  if (!holding.length) return { problem: `"${clip(quote)}" is in no message of the person's in this session (what they typed in the chat or answered in the question panel, as the harness recorded it; never your own text, a tool's output, a note the harness adds or a sub-agent's thread)` };
+  const since = Date.parse(sinceAt ?? '') || 0;
+  const fresh = holding.filter((a) => (Date.parse(a.at) || 0) >= since);
+  if (!fresh.length) return { problem: `the person wrote "${clip(quote)}" before this attempt was admitted (${sinceAt}): words about another ticket` };
+  const m = [...fresh].sort((x, y) => (Date.parse(x.at) || 0) - (Date.parse(y.at) || 0)).at(-1);
+  return { quote: String(q).trim().slice(0, 500), message: String(m.answer).trim().slice(0, 2000), at: m.at ?? null, via: `${m.channel === 'chat' ? 'chat' : 'question-panel'}, read by the agent (${host.label}, host-recorded)` };
+}
+
+// Whether this process runs under an agent runtime (the terminal route of a person's own command is refused there).
+export const underAgent = (env = process.env) => agentEnvNames().some((k) => env[k]) || Boolean(detectOwner(env));
 
 // An answer the agent read shows the words it relies on (0.7.27, D41).
 export const decisionLine = (d) => `${d.id}  ${d.kind}  ${d.withdrawn ? `withdrawn: ${d.withdrawn.reason ?? ''}` : d.approved ? `decided: ${d.approved.words ? `in their words: "${d.approved.words}"` : `${d.approved.choice}${d.approved.quote ? ` (read from their words "${d.approved.quote}")` : ''}`}${d.spent ? ' (used)' : ''}` : `pending (${d.choices.join(' | ')})`}  ${d.summary}`;

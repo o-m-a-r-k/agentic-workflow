@@ -8,12 +8,38 @@
 // own long text, so they could neither understand it nor fix one and let another go; their written answer ("fix all here,
 // except F3 if a follow-up ticket already has it") was not a choice, so the question stayed open. Each item is now its own short question,
 // with two choices, and an answer in the person's own words is recorded as theirs (from 0.7.27, D41, when the agent reads it so).
-import { READ_LINE, createDecision, decisionFor, deliverCoreDecision, optionLines, panelNote, questionFor, settledBy } from './approve.mjs';
+import { READ_LINE, createDecision, decisionFor, deliverCoreDecision, optionLines, panelNote, personSaid, questionFor, settledBy, underAgent } from './approve.mjs';
+import readline from 'node:readline';
+import { actor, openState } from './attempt.mjs';
+import { append, loadState } from './ledger.mjs';
 import { FIX, FRAMES, LEAVE, askFirst, askProblems, composeAsk, itemAsk, itemWords, readAsk } from './asking.mjs';
-import { refuse } from './util.mjs';
+import { WfError, refuse } from './util.mjs';
 
 export { FIX, LEAVE };
 const LEVELS = ['high', 'medium', 'low'];
+
+// `wf scope fix-all` (0.7.28, I-207; proven in the review of 0.7.28, L2): the person's "fix all", recorded once. From an agent's
+// session the words are proven theirs (`personSaid`: verbatim in one of their own messages in this session, written after the
+// attempt was admitted); in the person's own terminal they confirm it by typing yes.
+export async function recordFixAll(root, options, { env = process.env, input = process.stdin, output = process.stdout } = {}) {
+  const state = openState(root, options);
+  if (state.fixAll) return { state, already: true };
+  const words = typeof options['person-said'] === 'string' ? options['person-said'].trim() : '';
+  if (underAgent(env)) {
+    if (!words) throw new WfError('usage: wf scope fix-all --person-said "<the person\'s words, exactly as they wrote them>"');
+    const said = await personSaid(words, { sinceAt: state.admittedAt, env });
+    if (said.problem) throw refuse(`not recorded: ${said.problem}`, `quote the words of theirs that say to fix every item, exactly as they typed them; when they have not said it, ask them; or they run \`wf scope fix-all --attempt ${state.id}\` in their own terminal`, { id: 'scope:fix-all-quote' });
+    append(root, state.id, 'scope.fixAll', { words: said.quote, message: said.message, said: said.at, via: said.via }, actor(options));
+    return { state: loadState(root, state.id), words: said.quote };
+  }
+  if (!input.isTTY || !output.isTTY) throw refuse('not an interactive terminal: `wf scope fix-all` without an agent session is the person\'s own command, where it asks them to confirm', `run \`wf scope fix-all --attempt ${state.id}\` in a terminal`, { id: 'scope:fix-all-terminal' });
+  output.write(`${state.id}: record that every finding and discovered issue is fixed in this delivery; you are not asked about letting one leave again unless you say so. Type yes to record it: `);
+  const rl = readline.createInterface({ input, output, terminal: true });
+  const typed = await new Promise((resolve) => rl.once('line', (l) => { rl.close(); resolve(String(l).trim()); }));
+  if (typed.toLowerCase() !== 'yes') throw refuse('not recorded: the answer was not yes', null, { id: 'scope:fix-all-terminal' });
+  append(root, state.id, 'scope.fixAll', { words: words || 'fix all (typed in their own terminal)', via: 'terminal' }, actor(options));
+  return { state: loadState(root, state.id), words: words || 'fix all' };
+}
 export const DEFAULT_POLICY = { high: 'never', medium: 'never', low: 'person' };
 export const policyOf = (cfg) => ({ ...DEFAULT_POLICY, ...(cfg?.leaving ?? {}) });
 
@@ -70,7 +96,8 @@ export function leavingDecisions(root, state, items, { verb, reason = '', option
   if (kept.length) throw refuse(`not ${verb}: ${kept.map((x) => `${x.ref} (${x.level}${x.severity && x.severity !== x.level ? `, rated ${x.severity}` : ''})`).join(', ')} ${kept.length > 1 ? 'stay' : 'stays'} in this delivery: ${ruleText(policy)}`, 'fix it through the implementer that did that work, or move it to a sibling attempt of the batch (`wf scope move`); if the person told you to leave it out of this ticket, run this again with `--person-directed "<their words>"`: they answer each item themselves', { id: 'leave:medium-high' });
   // 0.7.28 (I-207): the person's "fix all" (`wf scope fix-all`) is their answer for every item they would be asked about: none is
   // asked again, unless they now direct one out (`--person-directed`, their new words), which asks that item.
-  const fixAll = state.fixAll && !directed ? items.filter((x) => whoFor(x) === 'person' && !decisionFor(state, 'move-out-of-batch', `leave:${x.ref}`)) : [];
+  // Review of 0.7.28 (L3): it covers what the project's policy lets the owner decide too: "fix all" is the person's answer for every item.
+  const fixAll = state.fixAll && !directed ? items.filter((x) => ['person', 'owner'].includes(whoFor(x)) && !decisionFor(state, 'move-out-of-batch', `leave:${x.ref}`)) : [];
   if (fixAll.length) throw refuse(`not ${verb}: the person said to fix every item ("${state.fixAll.words}", ${state.fixAll.at}), so ${fixAll.map((x) => x.ref).join(', ')} ${fixAll.length > 1 ? 'are' : 'is'} fixed in this delivery and not asked about again`, 'fix it in the next planned pass (`wf resume` names it); if the person now tells you to let one leave, run this again with `--person-directed "<their words>"`: they answer that item themselves', { id: 'leave:fix-all' });
   const owner = items.filter((x) => whoFor(x) === 'owner');
   if (owner.length && !reason) throw refuse(`${owner.map((x) => x.ref).join(', ')} may leave on your judgement under the project's \`leaving:\` policy: say why it waits`, 'pass `--reason "<why it can wait>"`', { id: 'leave:owner-reason' });

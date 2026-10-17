@@ -77,10 +77,10 @@ times the plan and the criteria were amended upward four times. `engine/course.m
 | --- | --- |
 | `files` | files changed are more than twice the latest expectation that states files (the plan's, a re-plan's or a strategist's) |
 | `rounds` | review rounds handed are past the latest expectation that states rounds (counted from a re-plan's or a strategist's when that is the latest) |
-| `amended` | an amendment added criteria after implementation started (not the one that carries out a strategist's `consolidate`) |
+| `amended` | an amendment added criteria after implementation started (not the one that carries out a strategist's `consolidate` or the re-plan an implementer asked for) |
 | `recurring` | a cause came back after a fix (a reviewer's `sameCauseAs`, or the family of a finding already marked fixed) |
 | `regression` | the latest round's findings sit on lines the fix round before it wrote (`git blame`) |
-| `divergence`, `replan` | an implementer expects more than twice the fix the reviewers stated for what it was handed (`fix: { what, minutes }` on each finding), or its report asks for a re-plan |
+| `divergence`, `replan` | an implementer expects more than twice the fix the reviewers stated for what it was handed (`fix: { what, minutes }` on each finding), by more than the plan's minutes per review round, or its report asks for a re-plan |
 
 While one stands that no strategist decision answered, a next step that hands an implementer or a new code-review round
 is the strategist's handoff (`wf resume` and `wf advance` say `strategy`, with the signals and no "continue" offered beside

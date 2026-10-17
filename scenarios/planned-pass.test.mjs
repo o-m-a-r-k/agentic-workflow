@@ -75,6 +75,10 @@ test('a low finding and an item an implementer left never open a round: they wai
   assert.equal(s.decision.kind, 'review');
   const evidence = bundleOf(ok(wf(p.root, ['handoff', 'reviewer', '--agent', 'r2', '--attempt', p.id])));
   assert.equal(evidence.round, 'evidence-review');
+  // Review of 0.7.28 (L1): the one review the pass gets is told it was built, with its items and the commits recorded for them.
+  assert.deepEqual(evidence.passBuilt.map((x) => [x.work, x.items.map((i) => [i.ref, i.kind, Boolean(i.fixedIn)])]), [['P1', [['r1:F1', 'finding', false], ['D1', 'discovered', true]]]]);
+  assert.equal(evidence.passBuilt[0].items[1].fixedIn.commit, sha.slice(0, 12));
+  assert.match(evidence.instructions, /A planned pass was built since the last review, with no code-review round of its own \(P1: r1:F1, D1\)/);
   // The first evidence review is a blind full audit: the earlier findings are verified in its second record.
   record(p, goodClosure('r2'));
   record(p, goodClosure('r2', { priorFindings: [{ round: 'r1', id: 'F1', status: 'fixed', evidence: 'src/a.txt:2 reads well' }] }));
@@ -116,22 +120,69 @@ test('a pass names only what waits for one: a blocking finding is refused with w
   assert.match(partial.err, /not in this pass: r1:F3: an item no pass names waits for another pass/);
 });
 
-test("the person's \"fix all\" is recorded once: no item is asked about leaving again, unless they direct one out in new words", () => {
+// Review of 0.7.28 (L2): the person's words are proven theirs, as a reading of an answer is (D41), since their effect stands.
+const CLAUDE = 'c1aude00-0000-4000-8000-0000000f1a11';
+const personWrites = (p, text, offsetMs = 1000) => {
+  const file = path.join(p.base, '.home', '.claude', 'projects', 'proj', `${CLAUDE}.jsonl`);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const when = (ms) => new Date(Date.now() + ms).toISOString();
+  fs.appendFileSync(file, [{ type: 'assistant', timestamp: when(offsetMs - 500), message: { role: 'assistant', content: [{ type: 'text', text: 'Fix the label finding now, or let it leave?' }] } }, { type: 'user', timestamp: when(offsetMs), message: { role: 'user', content: text } }].map((l) => JSON.stringify(l)).join('\n') + '\n');
+};
+const session = { env: { CLAUDE_CODE_SESSION_ID: CLAUDE } };
+
+test("the person's \"fix all\" is recorded once, from their own words: no item is asked about leaving again, unless they direct one out in new words", () => {
   const p = project('pp-fixall');
   ok(wf(p.root, ['handoff', 'implementer', '--agent', 'i1', '--attempt', p.id]));
   commitIn(p.wt, { 'src/a.txt': LINES.replace('l2', 'L2') }, 'implement C1');
   ok(wf(p.root, ['handoff', 'close', '--agent', 'i1', '--attempt', p.id]));
   ok(wf(p.root, ['handoff', 'reviewer', '--agent', 'r1', '--attempt', p.id]));
   record(p, goodClosure('r1', { findings: [low('F1', 'src/b.txt:5')] }));
-  const first = ok(wf(p.root, ['scope', 'fix-all', '--person-said', 'fix all', '--attempt', p.id]));
-  assert.match(first.out, /the person said to fix every item \("fix all"\)/);
-  assert.match(ok(wf(p.root, ['scope', 'fix-all', '--person-said', 'fix them all', '--attempt', p.id])).out, /already recorded on .*: "fix all"; nothing is asked again/);
+  // Words the person never wrote are not recorded as theirs.
+  personWrites(p, 'looks good so far');
+  const unproven = wf(p.root, ['scope', 'fix-all', '--person-said', 'fix all', '--attempt', p.id], session);
+  assert.equal(unproven.code, 75);
+  assert.match(unproven.err, /not recorded: "fix all" is in no message of the person's in this session/);
+  personWrites(p, 'fix all of them, every one', 2000);
+  const first = ok(wf(p.root, ['scope', 'fix-all', '--person-said', 'fix all of them', '--attempt', p.id], session));
+  assert.match(first.out, /the person said to fix every item \("fix all of them"\)/);
+  assert.match(resume(p).fixAll.via, /^chat, read by the agent/);
+  assert.match(ok(wf(p.root, ['scope', 'fix-all', '--person-said', 'fix them all', '--attempt', p.id], session)).out, /already recorded on .*: "fix all of them"; nothing is asked again/);
   const asked = wf(p.root, ['scope', 'defer', '--finding', 'r1:F1', '--attempt', p.id], { ownerSilent: true });
   assert.equal(asked.code, 75);
-  assert.match(asked.err, /the person said to fix every item \("fix all", [^)]+\), so r1:F1 is fixed in this delivery and not asked about again/);
+  assert.match(asked.err, /the person said to fix every item \("fix all of them", [^)]+\), so r1:F1 is fixed in this delivery and not asked about again/);
   assert.equal(resume(p).decisions.filter((d) => d.key === 'leave:r1:F1').length, 0, 'no question was created');
-  assert.match(resume(p).next, /the person said to fix every item \("fix all"\): no item is asked about again and none opens a round of its own/);
+  assert.match(resume(p).next, /the person said to fix every item \("fix all of them"\): no item is asked about again and none opens a round of its own/);
   // Their new words directing one out ask that item.
   const directed = wf(p.root, ['scope', 'defer', '--finding', 'r1:F1', '--person-directed', 'ok, let the label one go', '--attempt', p.id], { ownerSilent: true });
   assert.doesNotMatch(directed.err, /fix every item/);
+});
+
+// Review of 0.7.28 (L3): "fix all" covers a level the project lets the owner decide too, and the person has a terminal route.
+test('"fix all" also stops the owner deferring an item its policy delegates; the person records it in their own terminal by typing yes', async () => {
+  const p = singleRepoProject('pp-fixall-owner', { gate: { steps }, leaving: { low: 'owner' } }, { 'src/a.txt': LINES, 'src/b.txt': LINES });
+  const e = ok(wf(p.root, ['entry', '--item', 'PP-2', '--owner', 'o', '--json'])).json();
+  ok(wf(p.root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id]));
+  const plan = path.join(p.base, 'plan.json');
+  fs.writeFileSync(plan, JSON.stringify(planDoc({ plan: { summary: 'change a', expect: EXPECT, anchors: ['src/a.txt'] }, criteria: [{ id: 'C1', text: 'a changes', uat: 'a shows the new text' }] })));
+  ok(wf(p.root, ['plan', '--file', plan, '--attempt', e.id]));
+  ok(wf(p.root, ['handoff', 'implementer', '--agent', 'i1', '--attempt', e.id]));
+  commitIn(e.repos.app.worktree, { 'src/a.txt': LINES.replace('l2', 'L2') }, 'implement C1');
+  ok(wf(p.root, ['handoff', 'close', '--agent', 'i1', '--attempt', e.id]));
+  ok(wf(p.root, ['handoff', 'reviewer', '--agent', 'r1', '--attempt', e.id]));
+  ok(wf(p.root, ['review', '--closure', closureFile(p.base, goodClosure('r1', { findings: [low('F1', 'src/b.txt:5')] })), '--attempt', e.id]));
+  // Outside an agent session, not interactive: refused; interactive, the person types yes.
+  const { recordFixAll } = await import('../engine/leaving.mjs');
+  const { PassThrough } = await import('node:stream');
+  const { inProcess } = await import('./strategist-fixtures.mjs');
+  await inProcess(p.root, async () => {
+    await assert.rejects(recordFixAll(p.root, { attempt: e.id }, { env: {}, input: new PassThrough(), output: new PassThrough() }), /not an interactive terminal/);
+    const input = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => {} });
+    const output = Object.assign(new PassThrough(), { isTTY: true, columns: 80 });
+    const pending = recordFixAll(p.root, { attempt: e.id }, { env: {}, input, output });
+    setImmediate(() => input.write('yes\n'));
+    assert.equal((await pending).state.fixAll.via, 'terminal');
+  });
+  const deferred = wf(p.root, ['scope', 'defer', '--finding', 'r1:F1', '--reason', 'polish for later', '--attempt', e.id], { ownerSilent: true });
+  assert.equal(deferred.code, 75);
+  assert.match(deferred.err, /the person said to fix every item .* so r1:F1 is fixed in this delivery and not asked about again/);
 });

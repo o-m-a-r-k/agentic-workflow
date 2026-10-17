@@ -111,12 +111,15 @@ test('I-212: a member whose heavy steps are deferred runs the spec files its own
 // 0.7.28 (I-212, part 2), named failure (field): the batch gate then failed five times (158 minutes) on end-to-end specs that
 // were flaky before the batch and that it never touched, and each failure became a repair round. The person has one decision
 // for such a suite: set it aside for this delivery, and the delivered comment says it was not proven.
-test('I-212: the person sets aside a pre-existing failing suite the delivery does not touch; the gate passes on it and the delivered comment names it', async () => {
+test('I-212: the person sets aside a failing suite the delivery does not edit, told what was and was not checked; the gate passes on it and the delivered comment names it', async () => {
   const p = singleRepoProject('i212-quarantine', { gate: { steps: [unit, e2e] } }, files('c bad, before this ticket\n'));
   const e = reviewed(p, 'ENG-214', { 'src/app.txt': 'app 2\n' });
   const g1 = gate(p, e.id);
   assert.equal(g1.code, 1);
   assert.deepEqual(g1.data.steps.find((x) => x.id === 'e2e').suites.filter((x) => x.status === 'failed').map((x) => x.file), ['test/c.service.e2e-spec.ts']);
+  // Review of 0.7.28 (M2): the failed gate's next step names the suites whose test files the change does not edit, and the route.
+  const failedNext = JSON.parse(ok(wf(p.root, ['resume', '--attempt', e.id, '--json'])).out).next;
+  assert.match(failedNext, /1 failing suite\(s\) are test files this change does not edit \(e2e: test\/c\.service\.e2e-spec\.ts\): when one fails before this delivery too, setting it aside is the person's one decision instead of repair rounds \(`wf gate quarantine --step <id> --suite <file>/);
   const notFailing = wf(p.root, ['gate', 'quarantine', '--step', 'e2e', '--suite', 'test/a.e2e-spec.ts', '--reason', 'it is flaky', '--attempt', e.id]);
   assert.equal(notFailing.code, 75);
   assert.match(notFailing.err, /test\/a\.e2e-spec\.ts did not fail in e2e in the last gate on this tree \(failed there: test\/c\.service\.e2e-spec\.ts\)/);
@@ -126,13 +129,16 @@ test('I-212: the person sets aside a pre-existing failing suite the delivery doe
   const s0 = JSON.parse(ok(wf(p.root, ['resume', '--attempt', e.id, '--json'])).out);
   const d = s0.decisions.find((x) => x.key === `quarantine:${e.id}:e2e:test/c.service.e2e-spec.ts`);
   assert.equal(d.kind, 'override-gate');
-  assert.match(d.plain, /Should ENG-214 ship with the existing test suite test\/c\.service\.e2e-spec\.ts \(e2e\) set aside, instead of more repair rounds\? It failed in the gate, this change does not touch it, and it fails on the base branch too/);
+  // Review of 0.7.28 (M1): the question says only what the engine checked. This change edits src/app.txt, which the step reads:
+  // the suite may fail because of it, so the question names it, and the agent's reason is given as the agent's.
+  assert.match(d.plain, /Should ENG-214 ship with the test suite test\/c\.service\.e2e-spec\.ts \(e2e\) set aside for this delivery, instead of more repair rounds\? It failed in the gate\. What the engine checked: this change does not edit the test file\. What it did not check: whether the code the suite exercises changed; this change edits 1 file\(s\) the step reads: src\/app\.txt\. The agent's reason: it fails on the base branch too\./);
+  assert.doesNotMatch(d.plain, /does not touch/);
   const g2 = gate(p, e.id);
   assert.equal(g2.code, 0, g2.err);
   assert.deepEqual(g2.data.steps.find((x) => x.id === 'e2e').quarantined, ['test/c.service.e2e-spec.ts']);
   const { knownLimits } = await import('../engine/tracker.mjs');
   const after = JSON.parse(ok(wf(p.root, ['resume', '--attempt', e.id, '--json'])).out);
-  assert.match(knownLimits(after), /Not proven by the checks: the existing test suite test\/c\.service\.e2e-spec\.ts failed before this change and was set aside by your decision/);
+  assert.match(knownLimits(after), /Not proven by the checks: the test suite test\/c\.service\.e2e-spec\.ts failed and was set aside by your decision; this change does not edit that test file, and whether the code it exercises changed was not checked/);
 });
 
 test('I-212: a suite the delivery changes is its own to fix, never set aside', () => {

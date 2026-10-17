@@ -301,7 +301,7 @@ export function reduce(entries) {
         break;
       // 0.7.28 (I-207): the person's "fix all", recorded once (engine/cli.mjs `wf scope fix-all`).
       case 'scope.fixAll':
-        s.fixAll ??= { words: d.words, at: e.at, by: e.actor };
+        s.fixAll ??= { words: d.words, at: e.at, by: e.actor, ...(d.via ? { via: d.via } : {}), ...(d.message ? { message: d.message } : {}) };
         break;
       case 'criteria.amended':
         s.criteria = d.criteria;

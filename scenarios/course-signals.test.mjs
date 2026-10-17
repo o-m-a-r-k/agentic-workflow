@@ -107,10 +107,16 @@ test('an implementer whose expectation is far above the fix the reviewer stated,
   assert.deepEqual(b.repair[0].findings[0].fix, { what: 'compute the fingerprint before the provider call', minutes: 20 });
   assert.match(b.instructions, /Fix with the smallest change that removes the assumption, wherever it lives/);
   assert.match(b.instructions, /A fix that needs a migration, a new state or a new endpoint is not yours to build in a fix round: it is a re-plan request/);
+  // Review of 0.7.28 (L4a): past twice the stated fix but within one round of the plan (600 min over 6 rounds) is two estimates'
+  // noise, not a redesign: no signal.
+  writeReport(p.root, p.id, 'i1', { approach: 'move the fingerprint up', expect: { minutes: 41 } });
+  assert.notEqual(resume(p).decision.kind, 'strategy');
   // While it works, it states 240 minutes: the strategist is the next step at once.
   writeReport(p.root, p.id, 'i1', { approach: 'a reservation and reconciliation model', expect: { minutes: 240 } });
   let s = resume(p);
   assert.equal(s.decision.kind, 'strategy');
+  // Review of 0.7.28 (L5): the step says what to do with the implementer still building.
+  assert.match(s.next, /Implementer i1 is still open: the strategist decides alongside; when its decision changes the approach \(a consolidation, a split, a re-plan\), stop it before the next handoff/);
   assert.match(s.next, /implementer i1 expects 240 min for findings whose reviewers stated a fix of 20 min in all \(r1:F1: compute the fingerprint before the provider call\): an approach far larger than the fix asked for/);
   // It asks for a re-plan instead and builds none of it.
   writeReport(p.root, p.id, 'i1', { approach: 'the fix needs a new state', expect: { minutes: 15 }, replan: { why: 'the fingerprint needs a stored reservation', needs: ['migration', 'new state'] } });
@@ -120,8 +126,9 @@ test('an implementer whose expectation is far above the fix the reviewer stated,
   assert.equal(s.decision.kind, 'strategy');
   assert.deepEqual(s.decision.courseSignals.map((x) => x.id), ['replan']);
   assert.match(s.next, /implementer i1 asks for a re-plan: the fingerprint needs a stored reservation \(it needs migration, new state\)/);
-  // The re-plan it asked for answers it.
-  ok(wf(p.root, ['criteria', 'amend', '--file', closureFile(p.base, { expect: { minutes: 120, rounds: 2 }, plan: { summary: 'store a reservation before the provider call' } }), '--reason', 'the re-plan the implementer asked for', '--attempt', p.id]));
+  // The re-plan it asked for answers it, and adds a criterion without that being a new signal (review of 0.7.28, L4b): the
+  // amendment is the course correction that was asked for.
+  ok(wf(p.root, ['criteria', 'amend', '--file', closureFile(p.base, { criteria: [{ id: 'C2', text: 'a reservation is stored before the provider call', uat: 'a retried request reuses it' }], impact: { unchanged: 'the same module' }, expect: { minutes: 120, rounds: 2 }, plan: { summary: 'store a reservation before the provider call' } }), '--reason', 'the re-plan the implementer asked for', '--attempt', p.id]));
   assert.notEqual(resume(p).decision.kind, 'strategy');
 });
 

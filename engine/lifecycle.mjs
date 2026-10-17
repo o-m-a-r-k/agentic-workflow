@@ -34,7 +34,7 @@ import { expectOf, expectProblems, PLAN_EXPECT, ROLE_EXPECT } from './expectatio
 import { obligationSince } from './versions.mjs';
 import { deploymentAfterHandoff, deploymentNext } from './deployment-step.mjs';
 import { requireOwnerDecision, strategistHandoff, strategistWaiting, strategyApplies, strategyHold } from './strategy.mjs';
-import { consolidationOwed, consolidationStep, courseSignals, courseStep, outstanding, passItemsOf, passReady, passStep, unanswered } from './course.mjs';
+import { consolidationOwed, consolidationStep, courseSignals, courseStep, outstanding, passesSince, passItemsOf, passReady, passStep, unanswered } from './course.mjs';
 import { approveHint, decisionFor, labelOf, requireYes } from './approve.mjs';
 import { FRAMES } from './asking.mjs';
 import { home, startPromptFor, verifyAgent } from './provenance.mjs';
@@ -988,6 +988,8 @@ export function handoff(root, role, options) {
     possibleRecurrences: historyNow && familyRecurrences(state).length ? familyRecurrences(state) : undefined,
     alsoFix: alsoFix.length ? alsoFix : undefined,
     passItems: passItems ?? undefined,
+    // Review of 0.7.28 (L1): a planned pass built since the last review, its items and the commits recorded for them.
+    passBuilt: role === 'reviewer' && passesSince(state).length ? passesSince(state) : undefined,
     // I-118: a repair after a failed gate is handed what failed and the fastest proof of a fix.
     failedGate: role === 'implementer' && state.lastGate?.status === 'failed' ? failedGateFor(state, trusted) : undefined,
     impact: impact(trusted, changed),
@@ -1068,6 +1070,7 @@ export function handoff(root, role, options) {
     return `${d.id} ${src?.provenance === 'reviewer-verdict' ? `on reviewer ${src.reviewer ?? 'an earlier round'}'s verdict` : src?.provenance === 'approved-decision' ? "on the person's answer" : src?.provenance === 'owner-reason' ? "on the owner agent's recorded reason" : 'as the record shows'}`;
   }).join(', ');
   if (role === 'reviewer' && (bundle.discovered ?? []).some((d) => d.status === 'open' || d.notADefectSinceReview)) bundle.instructions += ' A discovered issue you judge not to be a defect at all (the code does what the product intends, or the claim misread it) is settled by your verdict, which closes it: `discovered: [{ "id": "D3", "verdict": "verified-nonissue", "evidence": "<file:line you checked>", "rationale": "<why it is not a defect, in terms of what the product is for>" }]`; the claim stays in the record beside your reason. One marked `notADefectSinceReview` was closed that way (' + closedBy + '): raise a finding if the claim holds after all.';
+  if (role === 'reviewer' && bundle.passBuilt) bundle.instructions += ` A planned pass was built since the last review, with no code-review round of its own (${bundle.passBuilt.map((x) => `${x.work}: ${x.items.map((i) => i.ref).join(', ')}`).join('; ')}): \`passBuilt\` lists its items, the commits recorded for each and the implementer's range. Its code is in your diff and this round is the one review it gets: review it as you review the rest, and verify each item at its cause (a finding in \`priorFindings\`; a discovered issue closed as fixed: raise a finding when its fix does not hold).`;
   if (role === 'reviewer' && bundle.impactMap) bundle.instructions += ' Impact discovery under impactMap.derived is textual, not structurally resolved consumer analysis, and bounded (its `incomplete` and `symbolsTruncated` say how far it got): a hit is a lead to judge against the real imports and behaviour, and a missing hit is no proof of coverage.';
   if (role === 'reviewer') {
     const problems = reviewDocumentProblems(bundle, ruleDocs);
@@ -3448,7 +3451,7 @@ function phaseStep(root, cfg, state) {
   // stands that no strategist has answered (engine/course.mjs), as `nextDecision` routes it.
   let courseNow;
   const routed = (text) => {
-    if ((courseNow ??= state.accepted ? [] : courseOpen(root, state)).length) return courseStep(courseNow, agentTypeFor(cfg, 'strategist'));
+    if ((courseNow ??= state.accepted ? [] : courseOpen(root, state)).length) return courseStep(courseNow, agentTypeFor(cfg, 'strategist'), (state.implementers ?? []).filter((x) => !x.closedAt).map((x) => x.agent));
     const owed = state.accepted ? null : consolidationOwed(state);
     return owed ? consolidationStep(owed, state.id) : text;
   };
@@ -3507,7 +3510,17 @@ function phaseStep(root, cfg, state) {
     }
   }
   if (inFlight) return `waiting for reviewer ${inFlight.agent}: \`wf review --closure <its file>\`; ${inFlight.round === 'evidence-review' || (!inFlight.round && inFlight.gate) ? 'evidence review of the gated tree' : 'code review'}, no gate while it runs`;
-  if (g?.status === 'failed' && onTree(g.tree)) return routed('gate failed: fix and commit through the implementer that did that work (its bundle carries `failedGate`, the facts of what failed); the fixed tree then gets a code-review round by a fresh reviewer before the next `wf gate` (a failure that needed no code change: `wf gate` again)');
+  if (g?.status === 'failed' && onTree(g.tree)) {
+    // Review of 0.7.28 (M2). Named failure (field, I-212): a batch gate failed five times on suites the batch never touched, each
+    // failure a repair round, and the route that lets the person set such a suite aside was named only in the help. Failing suites
+    // whose test files this change does not edit are named here with the command.
+    let untouched = [];
+    try {
+      untouched = failedGateFor(state, cfg).steps.flatMap((x) => x.failingFilesNotChanged.filter((f) => x.failedSuites.includes(f)).map((f) => ({ step: x.id, suite: f })));
+    } catch {}
+    const setAside = untouched.length ? `; ${untouched.length} failing suite(s) are test files this change does not edit (${untouched.map((x) => `${x.step}: ${x.suite}`).join(', ')}): when one fails before this delivery too, setting it aside is the person's one decision instead of repair rounds (\`wf gate quarantine --step <id> --suite <file> --reason "<what you know of why it fails>"\`, one question each, which says what the engine checked and what it did not)` : '';
+    return routed(`gate failed: fix and commit through the implementer that did that work (its bundle carries \`failedGate\`, the facts of what failed); the fixed tree then gets a code-review round by a fresh reviewer before the next \`wf gate\` (a failure that needed no code change: \`wf gate\` again)${setAside}`);
+  }
   const r = state.review;
   // 0.7.26 (I-183): the round covers the tree when it is the same tree or the same change (a base merged in without touching it),
   // as `nextDecision` reads it; this text read the tree alone and sent the owner to a code review the decision did not name.

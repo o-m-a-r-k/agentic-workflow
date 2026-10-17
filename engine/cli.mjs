@@ -887,11 +887,10 @@ async function dispatch(cmd, sub, positional, options) {
       // person's standing "fix all" was used to open an implementer round and a review round for each low item and each item an
       // implementer left (10 of one ticket's 16 rounds).
       if (sub === 'fix-all') {
-        const words = typeof options['person-said'] === 'string' ? options['person-said'].trim() : '';
-        if (!words) throw new WfError('usage: wf scope fix-all --person-said "<the person\'s words, as they wrote them>"');
-        if (s.fixAll) { print(options, `the person's "fix all" is already recorded on ${s.id} (${s.fixAll.at}): "${s.fixAll.words}"; nothing is asked again`, s.fixAll); return 0; }
-        append(root, s.id, 'scope.fixAll', { words: words.slice(0, 500) }, actorOf(options));
-        print(options, `recorded on ${s.id}: the person said to fix every item ("${words.slice(0, 500)}"). No item is asked about leaving again unless they say so (then \`--person-directed "<their words>"\` asks that item); every item that does not block joins the next planned pass, never a round of its own. next: ${nextAction(root, loadState(root, s.id))}`, loadState(root, s.id).fixAll);
+        const { recordFixAll } = await import('./leaving.mjs');
+        const r = await recordFixAll(root, options);
+        if (r.already) { print(options, `the person's "fix all" is already recorded on ${s.id} (${r.state.fixAll.at}): "${r.state.fixAll.words}"; nothing is asked again`, r.state.fixAll); return 0; }
+        print(options, `recorded on ${s.id}: the person said to fix every item ("${r.words}"). No item is asked about leaving again unless they say so (then \`--person-directed "<their words>"\` asks that item); every item that does not block joins the next planned pass, never a round of its own. next: ${nextAction(root, r.state)}`, r.state.fixAll);
         return 0;
       }
       throw new WfError('usage: wf scope list|ticket|move|fixed|defer|waive|fix-all');

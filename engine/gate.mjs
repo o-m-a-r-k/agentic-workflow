@@ -505,12 +505,20 @@ export function quarantineSuite(root, state, options) {
   const { repo, pkg } = stepPackage(cfg, state, step);
   const file = pkg.path === '.' ? suite : `${pkg.path}/${suite}`;
   if (changedFiles(state, repo.name).includes(file)) throw refuse(`${suite} is changed by this delivery (${repo.name}:${file}): its failure is this delivery's to fix`, 'fix it through the implementer that changed it; only a suite the delivery does not touch can be set aside', { id: 'gate:quarantine-touched' });
+  // Review of 0.7.28 (M1). Named failure (a review's case): the question said "this change does not touch it" when the engine had
+  // only seen that the test file is not in the diff; a change to the code the suite exercises (a service it calls) can be what
+  // fails it, and with the agent's "flaky before this ticket" beside it the person would set aside the regression it shows. The
+  // question says only what was checked, names every file the change edits that the step reads, and gives the agent's reason
+  // as the agent's. Running the suite on the base tree would make the claim true, but a heavy suite needs the project's whole
+  // environment (services, secrets, leases) in a base worktree: not something the engine can do cheaply for every project.
+  const read = changedFiles(state, repo.name).filter((f) => (pkg.path === '.' || f === pkg.path || f.startsWith(`${pkg.path}/`)) && f !== file && matchesAny(pkg.path === '.' ? f : f.slice(pkg.path.length + 1), step.inputs ?? ['**']));
+  const checked = `What the engine checked: this change does not edit the test file. ${read.length ? `What it did not check: whether the code the suite exercises changed; this change edits ${read.length} file(s) the step reads: ${read.join(', ')}.` : `This change edits no other file of ${repo.name} the step reads (its declared inputs).`}`;
   const setAsideFrame = {
-    question: `Should ${state.item ?? state.id} ship with the existing test suite ${suite} (${stepId}) set aside, instead of more repair rounds? It failed in the gate, this change does not touch it, and ${reason.replace(/[.\s]+$/, '')}.`,
+    question: `Should ${state.item ?? state.id} ship with the test suite ${suite} (${stepId}) set aside for this delivery, instead of more repair rounds? It failed in the gate. ${checked} The agent's reason: ${reason.replace(/[.\s]+$/, '')}.`,
     labels: { yes: 'Set it aside and ship', no: 'No, fix it in this delivery' },
     then: { yes: `the gate counts ${stepId} passed while ${suite} is its only failure; the delivered comment says that suite was not proven`, no: `${suite} stays a failure: it is fixed in this delivery before the gate passes` },
   };
-  const approval = requireYes(root, state, { kind: 'override-gate', key: `quarantine:${state.id}:${stepId}:${suite}`, summary: `set aside ${suite} of ${stepId} for this delivery: it fails before it and the delivery does not touch it (${reason})`, what: `setting aside ${suite} of ${stepId}`, frame: setAsideFrame, options });
+  const approval = requireYes(root, state, { kind: 'override-gate', key: `quarantine:${state.id}:${stepId}:${suite}`, summary: `set aside ${suite} of ${stepId} for this delivery: the change does not edit the test file${read.length ? ` and edits ${read.length} file(s) the step reads` : ' nor any other file the step reads'} (the agent's reason: ${reason})`, what: `setting aside ${suite} of ${stepId}`, frame: setAsideFrame, options });
   return { decision: approval.decision, step: stepId, suite };
 }
 

@@ -14,7 +14,7 @@
 // split, or continue with a new expectation) is what drives the step after it.
 import { implementerOf } from './introduced.mjs';
 import { familyRecurrenceLine, familyRecurrences, recurrenceLine, recurringCauses } from './causes.mjs';
-import { dispositionOf, observations, placementLevel, recordedRoundsOf } from './review-policy.mjs';
+import { dispositionOf, findingSummary, observations, placementLevel, recordedRoundsOf } from './review-policy.mjs';
 import { openDiscovered, discoveredLevel } from './discovered.mjs';
 import { readStatement } from './expectations.mjs';
 import { handedRounds } from './signals.mjs';
@@ -37,6 +37,15 @@ function reportOf(state, h) {
   return said ? { minutes: said.minutes, replan: null, at: null } : null;
 }
 
+// What the plan (or the latest re-plan or strategist expectation stating both) expects one review round to take: its minutes over its
+// rounds. Review of 0.7.28 (L4a). An implementer's expectation far above the reviewers' stated fix matters when the excess is more
+// than a whole round of the plan: the named failure was 240 minutes against a narrow fix, while 11 against 5 is the noise of two
+// estimates, cheaper to let run than a strategist's decision. Infinity when nothing states it: the comparison has no ground then.
+function roundMinutes(state) {
+  const both = [...(state.expectations ?? [])].reverse().find((x) => typeof x.expect?.minutes === 'number' && typeof x.expect?.rounds === 'number');
+  return both ? both.expect.minutes / Math.max(1, both.expect.rounds) : Infinity;
+}
+
 // Every course signal of the attempt now, answered or not: { id, key, line, at }.
 export function courseSignals(state, sig) {
   const out = [];
@@ -55,8 +64,12 @@ export function courseSignals(state, sig) {
   (state.criteriaAmendments ?? []).forEach((a, i) => {
     if (!a.changes?.added?.length || !firstImplementer || a.at < firstImplementer) return;
     const before = (state.strategy?.decisions ?? []).filter((d) => d.at <= a.at).at(-1);
-    const applying = before && before.action === 'consolidate' && !(state.handoffs ?? []).some((h) => h.role === 'implementer' && h.at > before.at && h.at < a.at);
-    if (applying) return;
+    const quiet = (since) => !(state.handoffs ?? []).some((h) => h.role === 'implementer' && h.at > since && h.at < a.at);
+    const applying = before && before.action === 'consolidate' && quiet(before.at);
+    // Review of 0.7.28 (L4b): the re-plan an implementer asked for (`replan` in its report) is the course correction itself, not a
+    // drift to send to the strategist: the amendment that answers it, recorded before the next implementer, carries it out.
+    const requested = (state.implementerReports ?? []).some((r) => r.replan && r.at && r.at < a.at && quiet(r.at));
+    if (applying || requested) return;
     out.push({ id: 'amended', key: `amended:${i + 1}`, at: a.at, line: `amendment ${i + 1} added ${a.changes.added.join(', ')} after implementation started (criteria ${state.criteriaAtFreeze ?? '?'} at freeze, ${(state.criteria ?? []).length} now)` });
   });
   // The same cause across rounds: a confirmed link, or the family of a finding already marked fixed.
@@ -85,7 +98,7 @@ export function courseSignals(state, sig) {
     const rep = reportOf(state, h);
     if (!rep) continue;
     const stated = h.statedFix?.minutes;
-    if (typeof stated === 'number' && stated > 0 && typeof rep.minutes === 'number' && rep.minutes > TWICE * stated) out.push({ id: 'divergence', key: `divergence:${h.bundle}`, at: rep.at ?? h.at, line: `implementer ${h.agent} expects ${rep.minutes} min for findings whose reviewers stated a fix of ${stated} min in all (${(h.statedFix.findings ?? []).map((x) => `${x.ref}: ${x.what}`).join('; ')}): an approach far larger than the fix asked for` });
+    if (typeof stated === 'number' && stated > 0 && typeof rep.minutes === 'number' && rep.minutes > TWICE * stated && rep.minutes - stated > roundMinutes(state)) out.push({ id: 'divergence', key: `divergence:${h.bundle}`, at: rep.at ?? h.at, line: `implementer ${h.agent} expects ${rep.minutes} min for findings whose reviewers stated a fix of ${stated} min in all (${(h.statedFix.findings ?? []).map((x) => `${x.ref}: ${x.what}`).join('; ')}): an approach far larger than the fix asked for` });
     if (rep.replan) out.push({ id: 'replan', key: `replan:${h.bundle}`, at: rep.at ?? h.at, line: `implementer ${h.agent} asks for a re-plan: ${rep.replan.why}${rep.replan.needs?.length ? ` (it needs ${rep.replan.needs.join(', ')})` : ''}` });
   }
   return out;
@@ -107,7 +120,9 @@ export function unanswered(state, signals) {
 
 // What the owner reads as the next step while signals stand unanswered: the strategist's handoff, said as the step, with what
 // the engine saw (its bundle carries the same list as `courseSignals`).
-export const courseStep = (open, agentType) => `the course needs the strategist (the engine's next step, not a judgement call): ${open.map((s) => s.line).join('; ')}. Hand it now: \`wf handoff strategist --agent <new id>\`${agentType ? ` [${agentType}]` : ''} (its bundle carries these signals as \`courseSignals\`; add \`--reason "<your analysis>"\` when you have one), then record its decision (\`wf strategy record --closure <file>\`): one planned pass for all remaining work (\`consolidate\`: a re-plan restating it as work items with a new expectation), a \`split\`, or \`continue\` with a new \`expect\`. Its decision drives the next step`;
+// Review of 0.7.28 (L5): with an implementer still open, the step says what to do with it: the strategist decides alongside, and a
+// decision that changes the approach stops it first (its work so far is kept in its commits).
+export const courseStep = (open, agentType, running = []) => `the course needs the strategist (the engine's next step, not a judgement call): ${open.map((s) => s.line).join('; ')}. Hand it now: \`wf handoff strategist --agent <new id>\`${agentType ? ` [${agentType}]` : ''} (its bundle carries these signals as \`courseSignals\`; add \`--reason "<your analysis>"\` when you have one), then record its decision (\`wf strategy record --closure <file>\`): one planned pass for all remaining work (\`consolidate\`: a re-plan restating it as work items with a new expectation), a \`split\`, or \`continue\` with a new \`expect\`. Its decision drives the next step${running.length ? `. Implementer ${running.join(', ')} ${running.length > 1 ? 'are' : 'is'} still open: the strategist decides alongside; when its decision changes the approach (a consolidation, a split, a re-plan), stop ${running.length > 1 ? 'them' : 'it'} before the next handoff (\`wf handoff stop --agent <id>\` for one wf launched, then \`wf handoff close --agent <id> --outcome stopped\`; what it committed stays), otherwise let ${running.length > 1 ? 'them' : 'it'} finish and close as usual` : ''}`;
 
 // ---- The planned pass (I-207) ----
 
@@ -164,3 +179,27 @@ export function consolidationOwed(state) {
   return d;
 }
 export const consolidationStep = (d, attempt) => `the strategist decided to consolidate (${d.id}): record its one amendment first, restating all remaining work as one planned pass with an expectation (\`wf criteria amend --file <f> --reason "${d.id}: <why>" --attempt ${attempt}\` with \`pass\` for the outstanding findings and discovered issues, \`work\` for work it regroups or adds, and \`expect\`), never scope added piecemeal; then one implementer pass and one review of it`;
+
+// ---- What the review after a pass is handed (review of 0.7.28, L1) ----
+
+// The planned passes built since the last recorded review (their implementers closed after it), with each item and the commits
+// recorded for it, and the implementer's own range. Named failure (a review's case): the evidence review after a pass, the one
+// review the pass gets, was handed only the diff since the last reviewed tree, with nothing saying that a pass was built, which
+// items it claimed to fix and where: it could verify the gate's evidence and miss the pass.
+export function passesSince(state) {
+  const since = state.review?.at ?? '';
+  const out = [];
+  for (const w of passItemsOf(state)) {
+    const impls = (state.implementers ?? []).filter((x) => x.closedAt && x.closedAt > since && (x.work === w.id || (!x.work && (state.handoffs ?? []).some((h) => h.role === 'implementer' && idOf(h.bundle) === x.handoff && (h.covers ?? []).includes(w.id)))));
+    if (!impls.length) continue;
+    const items = w.items.map((ref) => {
+      const d = (state.discovered ?? []).find((x) => x.id === ref);
+      if (d) return { ref, kind: 'discovered', summary: String(d.summary ?? '').slice(0, 300), status: d.status, ...(d.fixed?.commit ? { fixedIn: { repo: d.fixed.repo ?? null, commit: String(d.fixed.commit).slice(0, 12) } } : {}) };
+      const rec = (state.scopeDecisions ?? []).filter((x) => x.choice === 'fixed' && (x.keys ?? []).includes(ref)).at(-1);
+      return { ref, kind: 'finding', summary: String(findingSummary(state, ref) ?? '').slice(0, 300), ...(rec ? { fixedIn: { repo: rec.repo ?? null, commit: String(rec.commit).slice(0, 12) } } : {}) };
+    });
+    const ranges = impls.map((x) => ({ implementer: x.agent, commits: Object.fromEntries(Object.keys(x.closedHeads ?? {}).map((r) => [r, `${String(x.heads?.[r] ?? '').split('+')[0].slice(0, 12)}..${String(x.closedHeads[r]).split('+')[0].slice(0, 12)}`])) }));
+    out.push({ work: w.id, why: w.why ?? null, items, built: ranges });
+  }
+  return out;
+}
