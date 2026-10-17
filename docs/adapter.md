@@ -29,6 +29,9 @@ adapterRepo: backend           # the repo whose committed .workflow/ judges each
 instructionFiles: [backend/AGENTS.md, frontend/AGENTS.md]   # where releases before 0.7.24 wrote their block; `wf sync` removes it
 components: [...]
 delivery: { kind: push-main }
+# Optional (0.7.27): the delivery goes on after the merge until the merged change is confirmed running where it deploys and the
+# fix is tested there, for every ticket or only for labelled ones; then the `deployed` status (delivery-and-tracker.md).
+#   delivery.deployment: { labels: ["Hotfix"], where: production }   and   tracker.statuses.deployed: Done
 tracker: { kind: linear, itemPattern: '^ENG-\d+$', statuses: { started: In Progress, delivered: Ready for UAT, done: Done } }
 # Optional (0.7.27): a step's status by the ticket's labels, the person's choice; no step sets Done unless the adapter says so
 # (or the person asks the agent for it in the conversation).
@@ -107,6 +110,10 @@ Only that repo's `install` gets the key, wherever it runs (`wf entry`, `wf crite
 A step without `inputs` reruns every gate (no reuse). A passing result is reused only when every file changed in the package since that pass is in the step's `inputs`, its `ignores` (files the step provably does not depend on) or the package's `docsOnly`; otherwise the step reruns. A changed file that no step's `inputs` covers forces every step of its package to run (fail closed); a changed file in a package with no steps is listed as unchecked in the gate result. Files under the repo's `sharedInfra` (root lockfiles, shared config) force all of the repo's steps to run.
 
 `wf doctor` warns (never fails) when a `run` command references a sibling repo (`../web`, `$WF_ROOT/web`, `$WF_ATTEMPT/web`) that `alsoInputs` does not list: a portal end-to-end pass was reused against old API code. `alsoInputs: [repo, ...]` names other repos a step reads, for example an end-to-end step in one repo that builds a sibling repo's service from its worktree. The step's reuse key then also covers each listed repo's tree (HEAD plus a hash of tracked changes, the same as the gate's tree binding: the attempt's worktree when the repo is in the attempt, else its main checkout), so any change there reruns the step, and a non-docs change there keeps the step from being skipped as "no changes in this repo". A listed repo whose tree cannot be read makes the step always run (fail closed).
+
+## Delivery adapter contract
+
+`delivery.kind` is `push-main` (built in) or a project file (`./delivery/<name>.mjs`, read as committed at the attempt's delivery pin) whose default export has `integrate(ctx)`, `observe(ctx)` and `readback(ctx)` ([delivery-and-tracker.md](delivery-and-tracker.md)), and, optionally (0.7.27), `deployment(ctx)`: for a project whose delivery waits for the deployment (`delivery.deployment`), the project's own read-only check that the merged change runs where it deploys, called once per delivered repo by `wf deployment check`, returning `{ state: 'deployed' | 'deploying' | 'failed' | 'unknown', evidence }`; `ctx` carries the delivered `commit`, its `target`, `where`, the repo and the adapter's own fields recorded at delivery. Without it the agent's recorded observation stands ([the deployment confirmation](delivery-and-tracker.md#the-deployment-confirmation-after-the-merge)).
 
 ## Step plugin contract
 

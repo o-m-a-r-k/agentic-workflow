@@ -7,6 +7,7 @@ agentic-workflow runs changes in this project ({project}; lanes: {lanes}; tracke
 - A user's "hold", "local only" or "don't push" is recorded at once with `wf hold --reason "<their words>"`; only they lift it.
 - Never read, print or move secret values. Missing secrets are entered by the user with `wf secrets guide` in their own terminal.
 - Tracker comments describe what to test in product language: no file paths, commits, hashes or test counts.
-- Never move a ticket to Done on your own initiative. A ticket goes to Done when the project's routing sends it there (`tracker.statusByLabel` in its adapter, the person's choice), or when the person explicitly asks for it in this conversation: then you do it, once the delivery's readback is recorded.
+- Never move a ticket to Done on your own initiative. A ticket goes to Done when the project's routing sends it there (`tracker.statusByLabel` or the status at the end of its deployment confirmation, `delivery.deployment`, in its adapter: the person's choice), or when the person explicitly asks for it in this conversation: then you do it, once the delivery's readback is recorded.
+- Where the project's delivery waits for the deployment, `wf resume` says so: confirm the merged change runs where it deploys and test the fix there, read-only, and record both through `wf deployment`. Any write there (a redeploy, a restart, a data change, a setting) needs the user's authority under the project's rules.
 - A finding about the workflow itself is a plugin improvement (`wf improve add`), not a project lesson.
 {invariants}

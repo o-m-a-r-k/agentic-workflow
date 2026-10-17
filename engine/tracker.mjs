@@ -59,6 +59,10 @@ const DEFAULT_EVENTS = {
   implementing: ['read', { setStatus: 'started' }],
   integrating: [{ setStatus: 'inReview' }, { comment: 'reviewComment' }],
   delivered: [{ attach: 'screenshots' }, { comment: 'deliveredComment' }, { setStatus: 'delivered' }, 'readback'],
+  // 0.7.27 (I-196, D42): the end of a delivery that waits for the deployment (`delivery.deployment`): once the merged change is
+  // confirmed running where it deploys and the fix was tested there (or why not is recorded), a comment in product language, then
+  // the status `statuses.deployed` (routed by `statusByLabel.deployed`), read back.
+  deployed: [{ comment: 'deployedComment' }, { setStatus: 'deployed' }, 'readback'],
   reopened: [{ setStatus: 'started' }],
 };
 
@@ -68,8 +72,11 @@ const DEFAULT_EVENTS = {
 // comment that embeds them, from this built-in template when the project names none. A delivery without screenshots
 // and without a template posts no comment, as before.
 export const DEFAULT_DELIVERED_TEMPLATE = '{id} is ready for UAT.\n\nUAT scope:\n{uatScope}\n';
+// 0.7.27 (D42): the comment of the `deployed` event when the project names none (`tracker.deployedComment`); `{tested}` is the
+// owner's line on the test there, or why it could not be tested, in product words.
+export const DEFAULT_DEPLOYED_TEMPLATE = '{id} is live in {where}.\n\n{tested}\n';
 const hasShots = (state) => (state.delivery?.screenshots ? state.delivery.screenshots.screenshots.length : screenshots(state).length) > 0;
-const templateRef = (cfg, key, state = null) => cfg.tracker[key] ?? (state && key === deliveredKey(cfg) && hasShots(state) ? DEFAULT_DELIVERED_TEMPLATE : null);
+const templateRef = (cfg, key, state = null) => cfg.tracker[key] ?? (key === 'deployedComment' ? DEFAULT_DEPLOYED_TEMPLATE : state && key === deliveredKey(cfg) && hasShots(state) ? DEFAULT_DELIVERED_TEMPLATE : null);
 
 function renderTemplate(root, cfg, key, vars, state = null) {
   const ref = templateRef(cfg, key, state);
@@ -386,7 +393,9 @@ export function trackerActions(root, cfg, state, event, extra = {}) {
         continue;
       }
       const rendered = renderTemplate(root, cfg, step.comment, vars);
-      if (rendered) actions.push({ op: 'comment', templateKey: step.comment, body: rendered.body, reuseExisting: true });
+      // 0.7.27 (D42): the `deployed` comment is rendered once, from the ledger, and read back as rendered (`exact`), like the
+      // delivered one: a comment holding only its fixed lines (the built-in template has none) proves nothing was posted.
+      if (rendered) actions.push({ op: 'comment', templateKey: step.comment, body: rendered.body, reuseExisting: true, ...(event === 'deployed' ? { exact: true } : {}) });
     } else if (step.attach === 'screenshots') {
       // The delivered set: each file uploaded (never a link) as an attachment titled `title`, its subtitle the caption
       // the owner gives it in `wf shown`.
@@ -420,6 +429,7 @@ const DEFAULT_FORBID = [
   { name: 'evidence hash', re: /\bsha256[:=]/i },
 ];
 
+export const internalsIn = (cfg, text) => forbidden(cfg, String(text ?? ''));
 function forbidden(cfg, rawBody) {
   const body = rawBody.replace(/\bhttps?:\/\/\S+/g, ' ');
   const hits = [];
@@ -577,6 +587,12 @@ async function recordAgentReported(root, cfg, state, options, event, pending) {
       if (missingLines.length) problems.push(`the comment lacks the template's fixed line(s): ${missingLines.map((l) => JSON.stringify(l)).join(', ')}`);
       const hits = forbidden(cfg, body);
       if (hits.length) problems.push(`comment contains internals: ${hits.join(', ')}`);
+      // 0.7.27 (D42): a comment rendered once (the `deployed` one) is posted as rendered.
+      if (a.exact) {
+        const got = canonicalComment(body);
+        const missing = canonicalComment(a.body).filter((l) => !got.includes(l));
+        if (missing.length) problems.push(`the comment is not the one \`wf\` rendered for \`${event}\` (first missing line: ${JSON.stringify(missing[0])}); post the body \`wf status --json\` shows under tracker.pending unchanged`);
+      }
       if (a.rendered === 'delivered') {
         const expected = deliveredComment(root, cfg, state);
         const got = canonicalComment(body);
@@ -651,6 +667,8 @@ export async function recordTracker(root, cfg, state, options) {
   if (!event) throw new WfError('--event is required');
   const pending = state.tracker.pending.filter((a) => a.event === event);
   if (!pending.length) throw refuse(`no pending tracker actions for event \`${event}\``);
+  // 0.7.27 (D42): the person's hold stops the end of the delivery (the status set once the deployment is confirmed).
+  if (event === 'deployed' && state.activeHold) throw refuse(`the ticket's last delivery step waits: ${state.id} is on hold ("${state.activeHold.reason}")`, 'only the person lifts the hold (`wf release`); then set the status and record the readback', { id: 'tracker:deployed-on-hold' });
   if (options['agent-reported']) return recordAgentReported(root, cfg, state, options, event, pending);
   if (options['from-transcript']) return recordFromTranscript(root, cfg, state, options, event, pending, await loadTrackerAdapter(root, cfg, state));
   // The engine's own readback (`performTracker`) arrives as { file, text }: its bytes are in hand, and the file they are kept in is
@@ -724,11 +742,12 @@ export async function recordTracker(root, cfg, state, options) {
       else if (want.route && issue.status === want.status) routed.push(want.route);
     }
     if (a.op === 'comment') {
-      const since = event === 'delivered' ? state.delivery.completedAt : null;
+      // 0.7.27 (D42): a comment rendered once (`exact`, the `deployed` one) counts only when written after its event was queued.
+      const since = event === 'delivered' ? state.delivery.completedAt : a.exact ? state.tracker.pendingAt?.[event] ?? null : null;
       const tpl = renderTemplate(root, cfg, a.templateKey, {}, state);
       const lines = fixedLines(tpl?.template ?? a.body ?? '');
       const fresh = issue.comments.filter((c) => !since || (c.updatedAt ?? c.createdAt) >= since);
-      const expected = a.rendered === 'delivered' ? deliveredComment(root, cfg, state) : null;
+      const expected = a.rendered === 'delivered' ? deliveredComment(root, cfg, state) : a.exact ? { body: a.body, summary: null } : null;
       if (a.rendered === 'delivered' && !expected?.summary) problems.push('no summary recorded for the delivered comment: `wf summary --file <summary.md>` (plain language, for the person who tests it), then post the comment `wf` renders');
       const want = expected ? canonicalComment(expected.body) : null;
       // The rendered comment with sections the owner added (its lines all present, in order) counts as posted.
@@ -741,12 +760,17 @@ export async function recordTracker(root, cfg, state, options) {
       if (exact && want) extraLines.push(...canonicalComment(exact.body).filter((l) => !want.includes(l)));
       if (exact && want && options.hostRecorded?.posted?.comments?.length && !options.hostRecorded.posted.comments.some((b) => canonical(canonicalComment(b)) === canonical(canonicalComment(exact.body)))) problems.push('the comment on the ticket is not one the owner session posted after this event (by the transcript); post the rendered comment, then read it back');
       const match = exact ?? fresh.find((c) => lines.every((l) => c.body.includes(l)));
-      if (!match) problems.push(`no comment ${since ? 'written after delivery ' : ''}containing the template's fixed lines: ${lines.map((l) => JSON.stringify(l)).join(', ')}${expected ? `; post the body in ${commentFile(root, state.id)}` : ''}`);
+      if (!match) problems.push(a.exact ? `no comment written after the \`${event}\` step was queued is the one \`wf\` rendered (first line: ${JSON.stringify(want[0] ?? '')}); post the body \`wf status --json\` shows under tracker.pending unchanged` : `no comment ${since ? 'written after delivery ' : ''}containing the template's fixed lines: ${lines.map((l) => JSON.stringify(l)).join(', ')}${expected ? `; post the body in ${commentFile(root, state.id)}` : ''}`);
       else {
         const hits = forbidden(cfg, match.body);
         if (hits.length) problems.push(`comment contains internals: ${hits.join(', ')}`);
         if (event === 'delivered' && uatScope(state) && !/\n\s*[-*]\s+\S/.test(match.body)) problems.push('comment has no UAT scope bullets');
-        if (want && !exact) {
+        if (want && !exact && a.exact) {
+          const got = canonicalComment(match.body);
+          const i = want.findIndex((l, k) => got[k] !== l);
+          const at = i < 0 ? want.length : i;
+          problems.push(`the posted comment is not the one \`wf\` rendered for \`${event}\`; first difference at line ${at + 1}: expected ${JSON.stringify(want[at] ?? '(end)')}, posted ${JSON.stringify(got[at] ?? '(end)')}. Post the body \`wf status --json\` shows under tracker.pending unchanged (an edited comment counts)`);
+        } else if (want && !exact) {
           const got = canonicalComment(match.body);
           const i = want.findIndex((l, k) => got[k] !== l);
           const at = i < 0 ? want.length : i;
@@ -993,6 +1017,8 @@ export async function performTracker(root, cfg, state) {
   let s = state;
   while (s.tracker.pending.length) {
     const event = s.tracker.pending[0].event;
+    // 0.7.27 (D42): the person's hold stops the end of the delivery: the status set once the deployment is confirmed.
+    if (event === 'deployed' && s.activeHold) return { performed, note: `${event} waits: ${s.id} is on hold ("${s.activeHold.reason}"); only the person lifts it (\`wf release\`)`, state: s };
     // Attachments carry the owner's captions, so the delivered event waits for `wf shown`.
     const shownBy = s.delivery.shown && !s.delivery.shown.none ? s.delivery.shown.screenshots : null;
     const attaching = s.tracker.pending.some((a) => a.event === event && a.op === 'attach');

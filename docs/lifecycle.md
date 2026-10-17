@@ -25,7 +25,11 @@ flowchart TD
   H -- no --> D["Deliver<br/>delivery adapter, repos in order"]
   D --> TH["Tracker handoff<br/>comment, screenshots, status"]
   TH --> RB["Readback verified<br/>wf tracker record"]
-  RB --> DONE(["Done · worktrees cleaned up"])
+  RB --> DW{"Delivery waits for<br/>the deployment?"}
+  DW -- no --> DONE(["Done · worktrees cleaned up"])
+  DW -- yes --> DC["Deployment confirmed, fix tested there<br/>wf deployment, read-only"]
+  DC --> DT["deployed step<br/>comment, status, readback"]
+  DT --> DONE
 ```
 
 | Step | Command | What the engine checks |
@@ -42,6 +46,7 @@ flowchart TD
 | Deliver | `wf deliver [--summary-file F]` | Implementation intent, no hold, review accepted, no discovered issue open, no review observation unresolved (fixed, ticketed or moved); the owner's summary recorded when a delivered comment is posted. |
 | Shown | `wf shown` | Every delivered screenshot shown to the owner with a caption the owner wrote, and the anomalies seen (or "none seen"); nothing owed when none were delivered. |
 | Handoff | `wf tracker record` | From the raw tracker output: the status, the comment `wf` rendered (with every screenshot inline) and every delivered screenshot as an uploaded file with its caption. |
+| Deployment | `wf deployment check\|record\|tested\|close` | Only when the project's delivery waits for it (`delivery.deployment`, for every ticket or labelled ones; 0.7.27): the merged change confirmed running where it deploys (the delivery adapter's own check, or the agent's recorded observation), then the fix tested there or why not recorded, in product words; only then the `deployed` tracker step (comment, status, readback). Not confirmed, the attempt stays open and nothing is set; the person decides whether it closes without ([delivery-and-tracker.md](delivery-and-tracker.md#the-deployment-confirmation-after-the-merge)). |
 
 A stopped or interrupted attempt resumes with `wf resume`, which says exactly what's next. With more than one open attempt, every command it prints carries `--attempt <id>`.
 

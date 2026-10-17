@@ -18,6 +18,7 @@ import { chooseWorkers } from './machine.mjs';
 import { loadCatalog, missingFor, readSecret, redactor, status as secretsStatus, stepEnv } from './secrets.mjs';
 import { openCount } from './improve.mjs';
 import { trackerModeChecks } from './tracker.mjs';
+import { deploymentDoctor } from './deployment-step.mjs';
 import { findSkill } from './skills.mjs';
 import { report } from './telemetry.mjs';
 import { packageOfStep } from './topology.mjs';
@@ -848,6 +849,11 @@ export async function doctor(root, { runSteps = true, runtime = detectOwner()?.r
     if (t.info) report.connectors.push({ ok: true, connector: t.check, note: t.plain ? t.problem : `verifiable: ${t.problem}` });
     else if (t.fail) bad('secrets', { key: t.key, problem: t.problem, fix: t.fix });
     else report.warnings.push({ ok: true, warn: true, check: t.check, problem: t.problem, fix: t.fix });
+  }
+  // 0.7.27 (I-196, D42): the deployment confirmation after the merge, and a status set at its end with no step (or the reverse).
+  for (const t of await deploymentDoctor(root, cfg)) {
+    if (t.info) report.config.push({ ok: true, check: t.check, note: t.problem });
+    else if (t.fail) bad('config', { check: t.check, problem: t.problem, fix: t.fix });
   }
   const inbox = openCount();
   if (inbox) report.warnings.push({ ok: true, warn: true, check: 'plugin improvements', problem: `${inbox} open plugin improvement(s) in your inbox`, fix: '`wf improve next` in a plugin maintainer session' });

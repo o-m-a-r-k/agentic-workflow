@@ -176,6 +176,13 @@ export const FRAMES = {
     labels: { yes: 'Close it as shipped', no: 'Keep it open' },
     then: { yes: 'it is closed as shipped; what was still open stays in its record, and its working folders are removed', no: 'it stays open' },
   }),
+  // 0.7.27 (I-196, D42): the delivery waits for the deployment, and it cannot be confirmed (or the fix failed there).
+  closeUndeployed: ({ item, why, where }) => ({
+    aliases: { yes: ['close it without it', 'close it anyway', 'close the delivery'], no: ['keep it open', 'keep waiting', 'wait'] },
+    question: `${item}'s change is merged, but ${why}. Should its delivery be closed without that confirmation? The ticket is not moved to its final status: it stays where the delivery put it.`,
+    labels: { yes: 'Close it, the ticket stays as it is', no: 'Keep it open' },
+    then: { yes: 'the delivery is closed without a confirmed deployment, with the reason in its record; the ticket is yours to move, or to reopen for a fix', no: `it stays open until the deployment in ${where} is confirmed and the fix tested there` },
+  }),
   abandonIntegration: ({ item, repo }) => ({
     aliases: { yes: ['give it up', 'abandon it'], no: ['keep it'] },
     question: `Should this attempt at ${item} be given up, now that its open merge in ${repo} has been closed?`,
@@ -235,6 +242,7 @@ export const FRAMES = {
 // The engine's words for a frame apply to every question asked under it, whichever release asked it.
 const FRAME_KEYS = [
   ['override-gate', 'close-shipped:', 'closeShipped'],
+  ['override-gate', 'deployment-close:', 'closeUndeployed'],
   ['override-gate', 'abandon:', 'abandonIntegration'],
   ['override-gate', 'gate:', 'gateOrder'],
   ['override-gate', 'acknowledge:', 'acknowledge'],
@@ -263,6 +271,7 @@ const PROBES = { waive: { n: 1 }, leave: { LEAVE, FIX }, gateOrder: { owes: {} }
 // an escalation and a frame whose words are generic have none, and a "no" is an act only where its words are as specific.
 const ACTS = {
   closeShipped: { yes: ['close <it?>', 'closing <it?>', 'mark <it> as shipped', 'mark <it> shipped'], no: ['keep <it> open', 'leave <it> open'] },
+  closeUndeployed: { yes: ['close <it?>', 'close <it?> without the confirmation', 'close <it?> anyway', 'close the delivery'], no: ['keep <it> open', 'keep waiting'] },
   liftHold: { yes: ['lift the pause', 'lift the hold', 'lift <it>', 'unpause <it?>', 'end the pause'], no: ['keep <it> paused', 'keep the pause', 'keep the hold'] },
   adopt: { yes: ['take <it> over', 'take over <it?>'], no: ['leave <it> with the other session'] },
   abandonIntegration: { yes: ['give <it> up', 'abandon <it?>'] },

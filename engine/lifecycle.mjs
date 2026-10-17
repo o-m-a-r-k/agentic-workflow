@@ -32,6 +32,7 @@ import { commentFile, emitTrackerEvent, hasTicket, loadTrackerAdapter, needsSumm
 import { designChecks, designVerdicts, requiredSkills, reviewDocumentProblems, reviewRules, ruleVerdicts, skillFiles, writeRuleDocuments } from './rules.mjs';
 import { expectOf, expectProblems, PLAN_EXPECT, ROLE_EXPECT } from './expectations.mjs';
 import { obligationSince } from './versions.mjs';
+import { deploymentAfterHandoff, deploymentNext } from './deployment-step.mjs';
 import { requireOwnerDecision, strategistHandoff, strategistWaiting, strategyHold } from './strategy.mjs';
 import { approveHint, decisionFor, labelOf, requireYes } from './approve.mjs';
 import { FRAMES } from './asking.mjs';
@@ -1942,7 +1943,7 @@ const PENDING = ['awaiting-merge', 'ci-running'];
 // The commit the delivery adapter is read at: the admission pin, or the owner's re-pin (I-21). Only delivery reads it.
 export const deliveryPin = (state) => state.deliveryAdapterBase ?? state.adapterBase;
 
-async function loadDeliveryAdapter(root, cfg, state) {
+export async function loadDeliveryAdapter(root, cfg, state) {
   const trusted = trustedAdapter(root, state, deliveryPin(state));
   if (trusted.delivery.kind === 'push-main') return null;
   return (await import(pathToFileURL(adapterFileAtCommit(root, state, deliveryPin(state), trusted.delivery.kind)).href)).default;
@@ -1958,7 +1959,7 @@ const describeState = (observed) => (stateLabel(observed) === 'none' ? 'no state
 // and a recorded result could replace the worktree or attempt an adapter is called with. An adapter result keeps its own
 // fields; these are the engine's, set by it alone.
 const ENGINE_DELIVERY_KEYS = new Set(['repo', 'commit', 'target', 'skipped', 'recovered', 'adapterState', 'observed', 'acknowledged', 'onTarget', 'at', 'root', 'worktree', 'attempt', 'item']);
-const adapterResult = (x) => (x && typeof x === 'object' && !Array.isArray(x) ? Object.fromEntries(Object.entries(x).filter(([k]) => !ENGINE_DELIVERY_KEYS.has(k))) : {});
+export const adapterResult = (x) => (x && typeof x === 'object' && !Array.isArray(x) ? Object.fromEntries(Object.entries(x).filter(([k]) => !ENGINE_DELIVERY_KEYS.has(k))) : {});
 
 // I-20. Named failure: an adapter whose integrate pushes straight to the target branch and whose observe then reports
 // anything but `integrated` (CI that fails after the merge, a missing state) was counted as delivered on the next
@@ -2284,12 +2285,12 @@ export async function deliver(root, options) {
   state = loadState(root, state.id);
   // 0.7.27 (I-189): how the tracker adapter shows screenshots (embedded in the comment, or attached to the ticket) is queued with the comment.
   const shotsOf = async (s) => (cfg.tracker.kind === 'none' ? 'embedded' : screenshotMode(await loadTrackerAdapter(root, cfg, s).catch(() => null)));
-  finishDelivered(root, cfg, state, await shotsOf(state));
+  await finishDelivered(root, cfg, state, await shotsOf(state));
   if (state.batch) {
     for (const member of state.batch.members) {
       append(root, member, 'batch.member.delivered', { batch: state.id }, actor(options));
       const m = loadState(root, member);
-      finishDelivered(root, cfg, m, await shotsOf(m));
+      await finishDelivered(root, cfg, m, await shotsOf(m));
     }
   }
   return { state: loadState(root, state.id) };
@@ -2484,7 +2485,7 @@ export function safeWrite(root, file, content) {
 }
 export const safeWriteJson = (root, file, value) => safeWrite(root, file, `${JSON.stringify(value, null, 2)}\n`);
 
-function finishDelivered(root, cfg, state, screenshotsMode = 'embedded') {
+async function finishDelivered(root, cfg, state, screenshotsMode = 'embedded') {
   noteCourse(root, cfg, state);
   if (state.lane !== 'batch') {
     const set = deliveredSet(root, state);
@@ -2498,10 +2499,10 @@ function finishDelivered(root, cfg, state, screenshotsMode = 'embedded') {
   const set = state.delivery.screenshots?.screenshots ?? [];
   const actions = !hasTicket(state) ? [] : emitTrackerEvent(root, cfg, state.id, 'delivered', { screenshots: set, screenshotsMode });
   if (actions.some((a) => a.rendered === 'delivered')) writeDeliveredComment(root, cfg, loadState(root, state.id));
-  if (!actions.length && !needsShown(state) && !owesLesson(loadState(root, state.id))) {
-    append(root, state.id, 'closed', { reason: cfg.tracker.kind === 'none' ? 'no tracker' : !hasTicket(state) ? 'no ticket: no tracker handoff' : 'no tracker actions configured' }, null);
-    closeExport(root, loadState(root, state.id));
-    cleanupWorktrees(root, loadState(root, state.id));
+  if (!actions.length && !needsShown(state)) {
+    // 0.7.27 (D42): when the project's delivery waits for the deployment, it closes once that is confirmed (closeAfterHandoff).
+    const dep = await deploymentAfterHandoff(root, loadState(root, state.id));
+    if (!dep.waiting && !owesLesson(dep.state)) closeNow(root, dep.state, dep.reason ?? (cfg.tracker.kind === 'none' ? 'no tracker' : !hasTicket(state) ? 'no ticket: no tracker handoff' : 'no tracker actions configured'));
   }
 }
 
@@ -2845,11 +2846,18 @@ export function narrowDelivery(root, options) {
   return { state: after, dryRun: null };
 }
 
-export function closeAfterHandoff(root, state) {
-  if (state.phase === 'handoff-pending' && !state.tracker.pending.length && !needsShown(state) && !owesLesson(state)) {
-    append(root, state.id, 'closed', { reason: state.tracker.done.some((d) => d.event === 'delivered') ? 'tracker handoff verified' : 'delivered screenshots shown' }, null);
-    closeExport(root, loadState(root, state.id));
-    cleanupWorktrees(root, loadState(root, state.id));
+function closeNow(root, state, reason) {
+  append(root, state.id, 'closed', { reason }, null);
+  closeExport(root, loadState(root, state.id));
+  cleanupWorktrees(root, loadState(root, state.id));
+}
+
+export async function closeAfterHandoff(root, state) {
+  if (state.phase === 'handoff-pending' && !state.tracker.pending.length && !needsShown(state)) {
+    // 0.7.27 (I-196, D42): a delivery that waits for its deployment closes once it is confirmed and the fix tested there (and
+    // its `deployed` tracker step read back), or when the person closes it without; until then the attempt stays open.
+    const dep = await deploymentAfterHandoff(root, state);
+    if (!dep.waiting && !owesLesson(dep.state)) closeNow(root, dep.state, dep.reason ?? (state.tracker.done.some((d) => d.event === 'delivered') ? 'tracker handoff verified' : 'delivered screenshots shown'));
   }
   return loadState(root, state.id);
 }
@@ -3208,6 +3216,9 @@ function legacyNextAction(root, state) {
 function nextStep(root, state) {
   const cfg = loadConfig(root);
   if (state.phase === 'done') return state.shipped ? `nothing: closed as shipped outside the workflow (${state.shipped.at}, decision ${state.shipped.decision ?? 'none'}), without its acceptance` : 'nothing: this attempt is closed';
+  // 0.7.27 (D42): the deployment confirmation the delivery waits for comes after the delivered handoff, before the lesson.
+  const deploying = state.phase === 'handoff-pending' && !state.tracker.pending.length && !needsShown(state) ? deploymentNext(root, state) : null;
+  if (deploying) return deploying;
   if (state.phase === 'handoff-pending' && owesLesson(state) && !state.tracker.pending.length && !needsShown(state)) return lessonPrompts(state)[0];
   if (state.phase === 'abandoned') return 'nothing: this attempt was abandoned';
   const holdNote = state.activeHold ? ` (on hold: "${state.activeHold.reason}"; \`wf release\` lifts it)` : '';
@@ -3218,7 +3229,7 @@ function nextStep(root, state) {
   }
   if (state.tracker.pending.length) {
     const ev = state.tracker.pending[0].event;
-    const comment = (a) => (a.rendered !== 'delivered' ? 'post the comment (body in `wf status --json`)' : state.delivery.summary ? (a.screenshots ? `post the comment in ${commentFile(root, state.id)} unchanged${a.screenshots === 'attachments' ? ' (it lists each screenshot with its caption)' : ''}: this tracker's adapter shows the screenshots as attachments, so they are attached to the ticket as files, not embedded in the comment` : `post the comment in ${commentFile(root, state.id)} unchanged, each {assetUrl:<title>} replaced by that upload's assetUrl, so every screenshot shows as an image on the ticket (an attachment alone is only a link row)`) : 'record the owner\'s summary (`wf summary --file <summary.md>`), then post the comment it renders');
+    const comment = (a) => (a.exact ? 'post the comment `wf status --json` shows under tracker.pending (its `body`) unchanged' : a.rendered !== 'delivered' ? 'post the comment (body in `wf status --json`)' : state.delivery.summary ? (a.screenshots ? `post the comment in ${commentFile(root, state.id)} unchanged${a.screenshots === 'attachments' ? ' (it lists each screenshot with its caption)' : ''}: this tracker's adapter shows the screenshots as attachments, so they are attached to the ticket as files, not embedded in the comment` : `post the comment in ${commentFile(root, state.id)} unchanged, each {assetUrl:<title>} replaced by that upload's assetUrl, so every screenshot shows as an image on the ticket (an attachment alone is only a link row)`) : 'record the owner\'s summary (`wf summary --file <summary.md>`), then post the comment it renders');
     const ops = state.tracker.pending.filter((a) => a.event === ev).map((a) => (a.op === 'setStatus' ? `set status to "${a.status}"${a.route ? ` (the ticket's label "${a.route.label}" routes it there instead of "${a.route.default}"; the project chose that in its adapter; if the ticket no longer carries "${a.route.label}" when you read it back, set "${a.route.default}" instead)` : cfg?.tracker?.statusByLabel?.[a.key] ? ` (or, when the ticket you read carries a label the project routes in its adapter, the status that label routes to: ${Object.entries(cfg.tracker.statusByLabel[a.key]).map(([l, st]) => `"${st}" for "${l}"`).join(', ')}; the readback is judged by the labels it shows)` : ''}` : a.op === 'comment' ? comment(a) : a.op === 'attach' ? `upload and attach ${a.files.length} screenshot(s) as files (title = the name, subtitle = its caption; listed under "delivered screenshots"), keeping each assetUrl` : a.op)).join(', ');
     const raw = ev === 'delivered' ? 'save the RAW get_issue and list_comments results unchanged (never rebuilt or abridged)' : 'save the readback';
     if (cfg?.tracker?.via === 'connector') return `${state.phase === 'handoff-pending' ? '' : `${phaseAction(root, cfg, state)}${holdNote}. Pending `}tracker (${ev}): through the connector: ${ops}; then read the issue${state.tracker.pending.some((a) => a.event === ev && a.op === 'comment') ? ' and its comments' : ''} back with the connector and run \`wf tracker record --event ${ev} --from-transcript\` (the readback as the host recorded it). Without a host transcript: \`--capture <saved tool result>\`, or \`--agent-reported --file reported.json${state.tracker.pending.some((a) => a.event === ev && a.op === 'comment') ? ' --comment-file <posted text>' : ''}\``;

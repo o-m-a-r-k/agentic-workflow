@@ -35,6 +35,7 @@ import { logRefusal, readRefusals, refusalCounts } from './refusals.mjs';
 import { recordStrategy, signalsReport, signalsText } from './strategy.mjs';
 import { courseLines, pastEstimates } from './signals.mjs';
 import { splitCommand } from './split.mjs';
+import { deploymentLine } from './deployment-step.mjs';
 
 const help = () => `wf ${ENGINE_VERSION} — agentic-workflow
 
@@ -142,6 +143,12 @@ Work
   wf deliver --repin-adapter [COMMIT] --reason "why"
                                     after a delivery adapter fault: read the delivery adapter from the base branch tip (shows, then the owner confirms with \`wf approve\`)
   wf shown --file shown.json        record that every delivered screenshot was shown in the chat, with its caption and anomalies
+  wf deployment check | record --state deployed|deploying|failed|unknown --observed "..."
+                                    when the project's delivery waits for the deployment (\`delivery.deployment\`): the delivery
+                                    adapter's own check, or what you saw of the merged change where it deploys (read-only)
+  wf deployment tested --observed "..." | --not-possible "<why>" | --failed "..."
+                                    the fix tested where it runs, in product words (it goes on the ticket); then the \`deployed\` step
+  wf deployment close --reason "why"   the deployment cannot be confirmed: the person decides whether the delivery closes without it
   wf delivery list                  every verified capture the handoff can draw from, the ticket's own first, and whether the set holds it
   wf delivery narrow --keep SHA,... | --file keep.json --reason "why" [--dry-run]
                                     once, before \`wf shown\`: choose the delivered set, from the set or from any verified capture (\`wf delivery list\`)
@@ -311,6 +318,8 @@ function summary(root, s, { base = null, resume = false } = {}) {
   const delivered = s.delivery.completedAt ? deliveredFiles(s) : [];
   if (delivered.length) lines.push(`  delivered screenshots (${delivered.length}): ${s.delivery.exported ? `viewable copies in ${s.delivery.exported.dir}` : `copy them out to view: ${exportCommand(root, s)}`}`);
   if (s.phase === 'handoff-pending' && s.tracker.pending.some((a) => a.rendered === 'delivered')) lines.push(`  delivered comment: ${s.delivery.summary ? commentFile(root, s.id) : 'needs the owner\'s summary: `wf summary --file <summary.md>`'}`);
+  // 0.7.27 (D42): the deployment confirmation the delivery waits for, as it stands.
+  if (s.deployment?.owed) lines.push(`  ${deploymentLine(s)}`);
   if (resume) {
     const last = s.exports?.filter((x) => !x.json).at(-1)?.file ?? (fs.existsSync(exportFile(root, s.id)) ? exportFile(root, s.id) : null);
     lines.push(`  export: ${last ?? 'none yet'}${last ? '' : ' (`wf export` writes one page for this attempt)'}`);
@@ -480,7 +489,7 @@ async function trackerApi(root, id) {
   if (!['api', 'cli', 'files'].includes(cfg.tracker.via)) return '';
   const r = await performTracker(root, cfg, loadState(root, id));
   let s = loadState(root, id);
-  if (r.performed.length) s = closeAfterHandoff(root, s);
+  if (r.performed.length) s = await closeAfterHandoff(root, s);
   return `${r.performed.length ? `\ntracker: ${r.performed.join(', ')} performed ${{ api: 'through the API', cli: 'through `gh`', files: 'on the ticket files' }[cfg.tracker.via]} and read back${s.phase === 'done' ? '; attempt closed' : ''}` : ''}${r.note ? `\ntracker: ${r.note}` : ''}`;
 }
 // Base status is information: a failure to read it never fails the command.
@@ -1134,7 +1143,7 @@ async function dispatch(cmd, sub, positional, options) {
       if (sub !== 'record') throw new WfError('usage: wf tracker record --event E --capture file.json [--comments file.json] | wf tracker sync | wf tracker mode api|cli|files|connector');
       const cfg = loadConfig(root);
       let s = await recordTracker(root, cfg, openState(root, options), { ...options, engineCapture: undefined });
-      s = closeAfterHandoff(root, s);
+      s = await closeAfterHandoff(root, s);
       const rec = s.tracker.done.filter((d) => d.event === options.event).at(-1);
       const how = rec?.verified === 'host-recorded' ? `verified from the host's record (host-recorded: the ${findHost(rec.host?.runtime)?.label ?? 'harness'} transcript holds the tracker's answer; a same-user process could edit that file)${rec.extraLines?.length ? `; ${rec.extraLines.length} line(s) added to the comment beyond the rendered one` : ''}` : rec?.mode === 'agent-reported' ? `recorded as agent-reported, unverified (the engine checked what the agent reported, not the tracker's answer${rec.extraLines?.length ? `; ${rec.extraLines.length} line(s) added to the comment beyond the rendered one` : ''})` : 'verified';
       print(options, `tracker ${options.event} ${how}. ${s.phase === 'done' ? 'Attempt closed and worktrees removed.' : `next: ${nextAction(root, s)}`}`, s);
@@ -1162,9 +1171,26 @@ async function dispatch(cmd, sub, positional, options) {
     case 'shown': {
       let s = recordShown(root, options);
       const api = await trackerApi(root, s.id);
-      s = closeAfterHandoff(root, loadState(root, s.id));
+      s = await closeAfterHandoff(root, loadState(root, s.id));
       const lp = lessonPrompts(s).filter((p) => p.startsWith('anomaly'));
       print(options, `shown recorded for ${s.id}: ${s.delivery.shown.screenshots.length} screenshot(s) with the owner's captions.${lp.map((p) => `\nlesson: ${p}`).join('')}${api}${s.phase === 'done' ? ' Attempt closed and worktrees removed.' : `\nnext: ${nextAction(root, s)}`}`, s);
+      return 0;
+    }
+    case 'deployment': {
+      // 0.7.27 (I-196, D42): the deployment confirmation a project's delivery waits for after the merge.
+      const step = await import('./deployment-step.mjs');
+      if (!['check', 'record', 'tested', 'close'].includes(sub)) throw new WfError('usage: wf deployment check [--observed "<note>"] | wf deployment record --state deployed|deploying|failed|unknown --observed "<what you saw>" | wf deployment tested --observed "<what you tested and saw>" | --not-possible "<why>" | --failed "<what you saw>" | wf deployment close --reason "<why it cannot be confirmed>" [--ask FILE.json]');
+      let s = sub === 'check' ? await step.checkDeployment(root, options) : sub === 'record' ? await step.recordDeployment(root, options) : sub === 'tested' ? await step.recordTested(root, options) : await step.closeUnconfirmed(root, options);
+      // Settled, the `deployed` tracker step is queued (and performed by an engine route), or the attempt closes.
+      s = await closeAfterHandoff(root, s);
+      const api = await trackerApi(root, s.id);
+      s = loadState(root, s.id);
+      const d = s.deployment;
+      const last = d.observations.at(-1);
+      const head = sub === 'close' ? `${s.id}: delivery closed without a confirmed deployment (${d.closed.decision}, "${d.closed.reason}"); the ticket is not moved: it stays where the delivery put it, yours to move, or to reopen for a fix (\`wf reopen --item ${s.item} --reason "..."\`)` : sub === 'tested' ? `${s.id}: ${d.tested.result === 'passed' ? 'the fix is recorded as tested' : d.tested.result === 'not-possible' ? 'recorded why the fix cannot be tested' : 'recorded that the fix failed'} in ${d.owed.where}` : `${s.id}: deployment in ${d.owed.where} ${last.state === 'deployed' ? 'confirmed' : `NOT confirmed: ${last.state}`} (${last.source === 'adapter' ? `the delivery adapter's check: ${last.evidence}` : `your observation: ${last.observed}`})`;
+      const pending = s.tracker.pending.filter((a) => a.event === 'deployed');
+      const post = pending.length && loadConfig(root).tracker.via === 'connector' ? `\ntracker (deployed): ${pending.filter((a) => a.op !== 'readback').map((a) => (a.op === 'comment' ? `post this comment unchanged:\n${a.body.trimEnd().replace(/^(?=.)/gm, '    ')}` : a.op === 'setStatus' ? `  then set status to "${a.status}"` : `  ${a.op}`)).join('\n')}` : '';
+      print(options, `${head}${api}${post}${s.phase === 'done' ? `\n${s.id} closed and worktrees removed.` : `\nnext: ${nextAction(root, s)}`}`, s);
       return 0;
     }
     case 'decisions': {
@@ -1320,7 +1346,7 @@ async function dispatch(cmd, sub, positional, options) {
         const flags = r.recurred.map((x) => `\nlesson ${x.id} recurred (recurrence ${x.recurrence}): its mechanism failed${x.promote ? `; promote it to a gate check (\`wf lesson apply ${x.id}\` after setting \`mechanism.kind: gate-check\`)` : ''}`).join('');
         let closed = '';
         if (options.attempt) {
-          const s = closeAfterHandoff(root, loadState(root, String(options.attempt)));
+          const s = await closeAfterHandoff(root, loadState(root, String(options.attempt)));
           if (s.phase === 'done') closed = `\n${s.id} closed.`;
         }
         print(options, `${r.scope === 'project' ? 'project ' : ''}lesson ${r.lesson.id} recorded in ${r.repo}${r.scope === 'project' ? ' (the adapter repo: it spans the project)' : ''}: ${r.file}\n  ${r.inAttempt ? `committed in ${options.attempt}'s worktree: it is reviewed and delivered with this attempt` : `in ${r.repo}'s main checkout: commit it there`}; to enforce it: \`wf lesson apply ${r.lesson.id}\`${flags}${closed}`, r);
@@ -1331,7 +1357,7 @@ async function dispatch(cmd, sub, positional, options) {
         const reason = String(options.reason ?? '').trim();
         if (!reason || options.reason === true) throw new WfError('--reason "<why this needs no lesson>" is required');
         append(root, s.id, 'lesson.waived', { reason, on: 'waive' }, actor(options));
-        const after = closeAfterHandoff(root, loadState(root, s.id));
+        const after = await closeAfterHandoff(root, loadState(root, s.id));
         print(options, `no lesson for ${s.id}: "${reason}" (recorded)${after.phase === 'done' ? `\n${s.id} closed.` : `\nnext: ${nextAction(root, after)}`}`);
         return 0;
       }

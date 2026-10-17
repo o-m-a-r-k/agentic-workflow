@@ -4,6 +4,7 @@ import path from 'node:path';
 import { hostChoice, hostFor, hostIds } from './hosts/index.mjs';
 import { ENGINE_PIN, WfError, YAML, assertPlainGit, git, hashValue, refuse } from './util.mjs';
 import { routeProblems } from './status-route.mjs';
+import { deploymentProblems } from './deployment.mjs';
 
 export const ADAPTER_DIR = '.workflow';
 export const CONFIG_FILE = 'project.yaml';
@@ -276,6 +277,8 @@ function normalize(raw, source) {
   if (cfg.tracker.kind === 'github' && !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(String(cfg.tracker.repo ?? ''))) fail('`tracker.repo` names the GitHub repository holding the issues: `owner/name`');
   // 0.7.27 (I-190): the person's routing of a step's status by the ticket's labels.
   for (const problem of routeProblems(cfg.tracker)) fail(problem);
+  // 0.7.27 (I-196, D42): the delivery waits after the merge for the deployment to be confirmed, for every ticket or labelled ones.
+  for (const problem of deploymentProblems(cfg)) fail(problem);
   if (cfg.tracker.itemPattern !== undefined) {
     let bad = typeof cfg.tracker.itemPattern !== 'string' || !cfg.tracker.itemPattern;
     if (!bad) {

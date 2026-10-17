@@ -192,6 +192,9 @@ export function reduce(entries) {
     accepted: null,
     holds: [],
     delivery: { repos: {}, integrating: {}, completedAt: null },
+    // 0.7.27 (I-196, D42): the deployment confirmation a project's delivery waits for after the merge (engine/deployment-step.mjs):
+    // why it is owed, each observation of the deployment (the latest decides), the test there and the person's closing without it.
+    deployment: null,
     tracker: { pending: [], done: [] },
     batch: null,
     batchOf: null,
@@ -485,6 +488,21 @@ export function reduce(entries) {
       case 'delivered':
         s.delivery.completedAt = e.at;
         s.phase = 'handoff-pending';
+        break;
+      // 0.7.27 (I-196, D42): the delivery waits after its tracker handoff until the deployment is confirmed and the fix tested where
+      // it runs. `owed` says why (the label, or every ticket), where it deploys and who checks it (the delivery adapter, or the agent).
+      case 'deployment.owed':
+        s.deployment = { owed: { where: d.where, label: d.label ?? null, check: d.check ?? 'agent', at: e.at }, observations: [], tested: null, closed: null };
+        break;
+      case 'deployment.observed':
+        (s.deployment ??= { owed: null, observations: [], tested: null, closed: null }).observations.push({ state: d.state, source: d.source, observed: d.observed ?? null, evidence: d.evidence ?? null, repos: d.repos ?? null, at: e.at, by: e.actor });
+        break;
+      case 'deployment.tested':
+        (s.deployment ??= { owed: null, observations: [], tested: null, closed: null }).tested = { result: d.result, text: d.text, at: e.at, by: e.actor };
+        break;
+      // The person's decision to close the delivery without a confirmed deployment: the ticket is left where the delivery put it.
+      case 'deployment.closed':
+        (s.deployment ??= { owed: null, observations: [], tested: null, closed: null }).closed = { reason: d.reason, decision: d.decision ?? null, last: d.last ?? null, at: e.at, by: e.actor };
         break;
       // The delivered screenshot set (with titles and proposed captions), recorded at delivery, and the owner's
       // acknowledgement that each was shown in the chat with its caption (or, for an empty set, the statement why).
