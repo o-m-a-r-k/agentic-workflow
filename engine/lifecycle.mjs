@@ -2149,6 +2149,14 @@ export async function deliver(root, options) {
   const now = patchIds(state);
   const changedAfter = Object.keys(state.repos).filter((r) => !state.delivery.repos[r] && now[r] !== state.accepted.patch[r]);
   if (changedAfter.length) throw refuse(`the change was modified after acceptance (${changedAfter.join(', ')}); gate and review it again`);
+  // 0.7.26 (I-183, review of 0.7.26). Named failure: the base merged by hand in the worktree (or after `wf base merge` aborted on a
+  // conflict) moved HEAD with the acceptance standing; the adapter was handed the new HEAD while the acceptance named the old
+  // one, and the person's merge of it was refused as "not the accepted, gated commit; pushed outside wf". Only an adapter
+  // delivery goes by the accepted commit; push-main pushes the HEAD it finds (and merges the base) by design.
+  if (adapter) {
+    const moved = movedSinceAcceptance(state);
+    if (moved.length) throw refuse(`not delivered: ${moved.map((m) => `${m.repo}: the acceptance names ${m.accepted.slice(0, 10)} and the tree is ${m.tree.slice(0, 10)}`).join('; ')}`, 'a base merged by hand, or a commit made after the acceptance, moved the tree; review, gate and accept the tree as it is (`wf resume` names each step), then `wf deliver` hands it to the delivery adapter', { id: 'deliver:acceptance-moved' });
+  }
   const g = gatePassedForCurrentTree(state);
   if (!g.ok) throw refuse(`delivery needs a passing gate on the current code: ${g.reason}`);
   // Right before anything is pushed: nothing verified at open has changed since (members of a batch too).
@@ -2980,12 +2988,36 @@ export function orphanNext(root, s, gone) {
   return `ORPHANED, worktree missing: ${gone.map((m) => m.worktree).join(', ')}. Nothing runs in a missing folder. If it was removed by mistake, put it back from the branch (committed work only): ${restore.join(' ; ') || 'git worktree add <path> <branch> from the repo checkout'}. Otherwise \`wf abandon --attempt ${s.id} --reason "<why>"\` (its branch is kept), or, when its change is already on its target branches (merged outside the workflow), \`wf close --shipped --attempt ${s.id} --reason "<why>"\` (the owner's decision)`;
 }
 
+// 0.7.26 (I-183, review of 0.7.26): the repos still to deliver whose tree is not the one the acceptance names (a base merged by
+// hand, a commit made after it). `acceptanceMoved` is that for an adapter delivery, the only kind that goes by the accepted commit.
+export function movedSinceAcceptance(state) {
+  if (!state.accepted || state.delivery.completedAt) return [];
+  const now = treeHashes(state);
+  return Object.keys(state.repos).filter((n) => !state.delivery.repos[n] && state.accepted.heads?.[n] && now[n] !== state.accepted.heads[n] && changedFiles(state, n).length > 0).map((n) => ({ repo: n, accepted: state.accepted.heads[n], tree: now[n] }));
+}
+function acceptanceMoved(root, state) {
+  if (!state.accepted || state.batchOf || state.delivery.completedAt) return [];
+  try {
+    if (trustedAdapter(root, state, deliveryPin(state)).delivery.kind === 'push-main') return [];
+    return movedSinceAcceptance(state);
+  } catch {
+    return [];
+  }
+}
+
 export function nextDecision(root, state) {
   const gone = orphansOf(state);
   if (gone.length) return { kind: 'orphaned', status: 'blocked', actor: 'owner', attempt: state.id, owner: state.owner, tree: null, guidance: orphanNext(root, state, gone), blockers: [`worktree missing: ${gone.map((m) => m.worktree).join(', ')}`], orphaned: gone };
   const guidance = legacyNextAction(root, state);
   const tree = ['done', 'abandoned'].includes(state.phase) ? null : treeHashes(state);
-  const result = (kind, status, reason, extra = {}) => ({ kind, status, actor: status === 'ready' ? 'engine' : 'owner', attempt: state.id, owner: state.owner, tree, guidance: status === 'blocked' ? `blocked: ${reason}` : guidance, blockers: reason ? [reason] : [], ...extra });
+  // An acceptance that names another tree than the one in the worktrees is no acceptance of this one (adapter delivery): the next
+  // steps are the ones of an attempt not yet accepted, and the text says why.
+  const moved = acceptanceMoved(root, state);
+  const movedNote = moved.length ? `the acceptance names ${moved.map((m) => `${m.repo} ${m.accepted.slice(0, 10)} but its tree is ${m.tree.slice(0, 10)}`).join(', ')} (a base merged by hand, or a commit made after it): ` : '';
+  const result = (kind, status, reason, extra = {}) => {
+    const out = { kind, status, actor: status === 'ready' ? 'engine' : 'owner', attempt: state.id, owner: state.owner, tree, guidance: status === 'blocked' ? `blocked: ${reason}` : guidance, blockers: reason ? [reason] : [], ...extra };
+    return movedNote && out.status !== 'blocked' && out.status !== 'complete' ? { ...out, guidance: `${movedNote}${out.guidance}` } : out;
+  };
   if (['done', 'abandoned'].includes(state.phase)) return result('complete', 'complete');
   if (state.activeHold) return result('hold', 'blocked', state.activeHold.reason, { guidance: `on hold: ${state.activeHold.reason}; only the owner lifts it. Pending sequence after release: ${guidance}` });
   // 0.7.0 (D3): the person's round escalation and a strategist's escalation stop the course until they decide (attempts
@@ -3003,7 +3035,7 @@ export function nextDecision(root, state) {
   }
   if (state.intent !== 'implementation' || state.lane === 'batch' || (state.batchOf && !state.batchPending)) return result('owner', 'owner', 'this trial advances standalone implementation attempts only');
   if (!state.criteria) return result('plan', 'owner', 'criteria must be frozen by the owner');
-  if (state.accepted) return result('delivery', 'owner', 'accepted; delivery and presentation remain with the owning chat');
+  if (state.accepted && !moved.length) return result('delivery', 'owner', 'accepted; delivery and presentation remain with the owning chat');
   if (state.tracker.pending.length) return result('tracker', 'owner', 'tracker actions require the owning chat');
   const unstarted = unstartedWork(state);
   if (unstarted.length) return result('implementation', 'owner', 'work items have not started', { guidance: guidance });
@@ -3152,11 +3184,13 @@ function phaseAction(root, cfg, state) {
   // 0.7.19: entries whose fix predates their record wait for a reviewer, not another fix.
   if (openIssues.length && openIssues.every((d) => d.claim)) return `${openIssues.map((d) => `${d.id} (claimed fixed in ${d.claim.repo}@${String(d.claim.commit).slice(0, 10)}, made before it was recorded)`).join(', ')}: a reviewer verifies each; hand a reviewer (\`wf handoff reviewer --agent <id>\`): its bundle asks it to verify the claimed commit, and its \`fixed\` verdict closes the entry; no new fix and no question for the person`;
   if (openIssues.length) return `${openIssues.filter((d) => d.blockedBy).map((d) => `route ${d.id} to the implementer of ${d.blockedBy} (continue it with SendMessage); `).join('')}${openIssues.some((d) => d.claim) ? `${openIssues.filter((d) => d.claim).map((d) => d.id).join(', ')}: claimed fixed before it was recorded, so the next reviewer verifies it (no new fix); ` : ''}fix the discovered issue(s) ${openIssues.filter((d) => !d.claim).map((d) => `${d.id}${d.severity ? ` (${d.severity})` : ''}`).join(', ')} through the implementer that found each (never yourself) (\`wf discovered list\`), commit, then \`wf discovered close <id> --fixed <commit>\`; a criterion or scope that blocks the fix is amended (\`wf criteria amend --file <f> --reason "why"\`, \`--add-repo <repo>\` when the fix needs another repo). ${RULE_SHORT}; a split moves one to a sibling attempt of the batch (\`wf split\`)`;
-  if (state.accepted && observations(state).length) return `${observations(state).length} review observation(s) are unresolved and delivery waits for them: ${observationLines(state).slice(0, 5).join('; ')}; each is fixed (the next reviewer verifies it, or \`wf scope fixed --finding <ref> --commit <sha>\`) or moved to a sibling attempt (\`wf scope move\`${state.batchOf && !state.batchPending ? `; ${state.batchOf} is assembled, so \`wf scope move --finding <ref> --sibling ${state.batchOf}\` hands it to the batch, which fixes it` : ''}); ${RULE_SHORT}; \`wf scope list\` shows each one's severity`;
+  // 0.7.26 (I-183, review): an acceptance that names another tree than the worktrees hold (adapter delivery) stands for nothing now.
+  const accepted = Boolean(state.accepted) && !acceptanceMoved(root, state).length;
+  if (accepted && observations(state).length) return `${observations(state).length} review observation(s) are unresolved and delivery waits for them: ${observationLines(state).slice(0, 5).join('; ')}; each is fixed (the next reviewer verifies it, or \`wf scope fixed --finding <ref> --commit <sha>\`) or moved to a sibling attempt (\`wf scope move\`${state.batchOf && !state.batchPending ? `; ${state.batchOf} is assembled, so \`wf scope move --finding <ref> --sibling ${state.batchOf}\` hands it to the batch, which fixes it` : ''}); ${RULE_SHORT}; \`wf scope list\` shows each one's severity`;
   // An amendment an engine before 0.7.4 recorded left the acceptance standing (I-107): say what delivery would ship.
   const unmapped = amendedAfterAcceptance(state);
   const unmappedNote = unmapped.length ? ` -- WARNING: ${unmapped.join(', ')} ${unmapped.length === 1 ? 'was' : 'were'} added or re-worded after the acceptance and no review mapped ${unmapped.length === 1 ? 'it' : 'them'} to evidence (the amendment was recorded before 0.7.4, which left the acceptance standing): for the evidence, hand a fresh reviewer (\`wf handoff reviewer --agent <new id>\`) and \`wf accept\` again, then deliver` : '';
-  if (state.accepted) return state.batchPending ? `accepted; ${state.batchOf} (reserved by a split) waits for the other members to be accepted, then \`wf batch create --members <every member of the split>\` assembles it` : state.batchOf ? `waiting for batch ${state.batchOf}` : state.deferHeavy ? `accepted; its heavy steps were deferred to a batch, so it ships in one: \`wf batch create --members ${state.id},<the other members>\`` : `deliver: \`wf deliver\`${unmappedNote}${waitingNote(state)}`;
+  if (accepted) return state.batchPending ? `accepted; ${state.batchOf} (reserved by a split) waits for the other members to be accepted, then \`wf batch create --members <every member of the split>\` assembles it` : state.batchOf ? `waiting for batch ${state.batchOf}` : state.deferHeavy ? `accepted; its heavy steps were deferred to a batch, so it ships in one: \`wf batch create --members ${state.id},<the other members>\`` : `deliver: \`wf deliver\`${unmappedNote}${waitingNote(state)}`;
   // Order of work (I-27): code-review rounds until one comes back clean (no gate meanwhile), then one gate on that tree,
   // then the evidence review of the gated tree. Review and gate never run side by side.
   const g = state.lastGate;

@@ -166,7 +166,7 @@ export function baseMerge(root, options) {
       const conflicts = git(wt, ['diff', '--name-only', '--diff-filter=U'], { allowFail: true }).split('\n').filter(Boolean);
       run('git', ['merge', '--abort'], { cwd: wt, allowFail: true });
       const done = results.filter((x) => x.headAfter).map((x) => x.repo);
-      throw refuse(`merging ${entry.ref} into ${entry.repo} conflicts${conflicts.length ? ` in ${list(conflicts)}` : ''}; the merge was aborted and ${entry.repo} is unchanged${done.length ? ` (already merged: ${done.join(', ')})` : ''}`, `have the implementer of the overlapping work merge ${entry.ref} in ${wt}, resolve and commit; then \`wf gate\` and a fresh reviewer`);
+      throw refuse(`merging ${entry.ref} into ${entry.repo} conflicts${conflicts.length ? ` in ${list(conflicts)}` : ''}; the merge was aborted and ${entry.repo} is unchanged${done.length ? ` (already merged: ${done.join(', ')})` : ''}`, `have the implementer of the overlapping work merge ${entry.ref} in ${wt}, resolve and commit; then \`wf gate\` and a fresh reviewer${viaAdapter && state.accepted ? '. The acceptance names the commit the delivery adapter integrates, so it has to be redone: `wf deliver` refuses until the merged tree is gated, reviewed and accepted again' : ''}`);
     }
     const after = git(wt, ['rev-parse', 'HEAD']);
     const data = { repo: entry.repo, ref: entry.ref, from: entry.own, to: entry.tip, commits: entry.commits, files: entry.files, overlap: entry.overlap, infra: entry.infra, headBefore: before, headAfter: after, note: entry.note, ...(withdraws && before !== after ? { withdrewAcceptance: true } : {}) };
