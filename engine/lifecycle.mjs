@@ -3112,16 +3112,19 @@ export function nextDecision(root, state) {
   // 0.7.0 (D3): the person's round escalation and a strategist's escalation stop the course until they decide (attempts
   // admitted at 0.7.0+); a strategist the owner agent handed is waited for.
   const held = strategyHold(root, state);
-  if (held) return result('strategy', 'owner', held.owner ? held.owner.summary : held.escalation.withdrawn ? `the strategist's escalation ${held.escalation.id} was withdrawn and no decision has superseded it` : held.escalation.approved ? `the strategist's escalation ${held.escalation.id} was answered in the person's own words` : `the strategist's escalation ${held.escalation.id} awaits the owner`, { guidance: withAttempt(root, state, held.guidance), escalation: held.escalation?.id ?? null });
   const waiting = strategistWaiting(state);
-  if (waiting) {
-    const gone = waiting.launch?.status === 'completed';
-    const because = waiting.reason ? ` because: ${waiting.reason}` : '';
-    const guidance = gone
-      ? `Strategist ${waiting.agent} was handed${because} and its launch completed without recording a decision: hand a fresh strategist with a new id (\`wf handoff strategist --agent <new id>\`)`
-      : `Strategist ${waiting.agent} was handed${because} (${waiting.launch ? `launch ${waiting.launch.status}` : 'not launched through wf'}) and has recorded no decision: wait for its completion notification${waiting.launch ? '' : ', or run it in the foreground (\`wf handoff run --agent ' + waiting.agent + '\`) if it was never started'}; never poll. \`wf signals\` shows its last activity: if it has stopped, hand a fresh strategist with a new id. It records its decision with \`wf strategy record --closure <file>\``;
-    return result('strategy', 'owner', `strategist ${waiting.agent} was handed and has recorded no decision`, { guidance: withAttempt(root, state, guidance), handoff: waiting.bundle });
-  }
+  const waitingText = (w) => {
+    const gone = w.launch?.status === 'completed';
+    const because = w.reason ? ` because: ${w.reason}` : '';
+    return gone
+      ? `Strategist ${w.agent} was handed${because} and its launch completed without recording a decision: hand a fresh strategist with a new id (\`wf handoff strategist --agent <new id>\`)`
+      : `Strategist ${w.agent} was handed${because} (${w.launch ? `launch ${w.launch.status}` : 'not launched through wf'}) and has recorded no decision: wait for its completion notification${w.launch ? '' : ', or run it in the foreground (\`wf handoff run --agent ' + w.agent + '\`) if it was never started'}; never poll. \`wf signals\` shows its last activity: if it has stopped, hand a fresh strategist with a new id. It records its decision with \`wf strategy record --closure <file>\``;
+  };
+  // 0.7.27 (review of the release, I-185 x I-186): a waiting strategist is named beside a hold, not hidden by it. Named failure
+  // (a ticket's own shape): the round question was due and a corrected strategist had been handed after the owner withdrew
+  // its escalation; the next step spoke only of the round question.
+  if (held) return result('strategy', 'owner', held.owner ? held.owner.summary : held.escalation.withdrawn ? `the strategist's escalation ${held.escalation.id} was withdrawn and no decision has superseded it` : held.escalation.approved ? `the strategist's escalation ${held.escalation.id} was answered in the person's own words` : `the strategist's escalation ${held.escalation.id} awaits the owner`, { guidance: withAttempt(root, state, `${held.guidance}${waiting ? `. ${waitingText(waiting)}` : ''}`), escalation: held.escalation?.id ?? null, ...(waiting ? { handoff: waiting.bundle } : {}) });
+  if (waiting) return result('strategy', 'owner', `strategist ${waiting.agent} was handed and has recorded no decision`, { guidance: withAttempt(root, state, waitingText(waiting)), handoff: waiting.bundle });
   if (state.intent !== 'implementation' || state.lane === 'batch' || (state.batchOf && !state.batchPending)) return result('owner', 'owner', 'this trial advances standalone implementation attempts only');
   if (!state.criteria) return result('plan', 'owner', 'criteria must be frozen by the owner');
   const recordedLate = lateInRecordedRepos(state);

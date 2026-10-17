@@ -189,9 +189,20 @@ export function strategyHold(root, state) {
   if (owner) {
     const pending = ownerDecision(state, owner);
     const guidance = `${owner.summary}. This is the person's decision: bring them the brief from \`wf signals --attempt ${state.id}\` (rounds, blocking findings per round, the families that keep coming back, changed files against what the plan expected, amendments) and your recommendation; write them into the question's \`--ask\` file for the next implementer or reviewer handoff, which asks it. ${pending?.approved || pending?.withdrawn ? `${pending.id} was ${pending.withdrawn ? 'withdrawn' : `answered in the person's own words, "${pending.approved.words}"`}: follow that, and the next implementer or reviewer handoff asks the question again with its choices. ` : ''}${pending && !pending.approved && !pending.withdrawn ? `They answer ${pending.id}: ${approveHint(state, pending)}` : 'The next implementer or reviewer handoff (with `--ask <file>`) opens the decision they answer with `wf approve`'} (continue: another ${(cfg?.strategy ?? STRATEGY_DEFAULTS).reviewRoundsEscalate} rounds before asking again | split: unstarted work, observations and discovered issues move to a sibling attempt of the batch (\`wf split\`); code already built stays | deliver-core: what the criteria need and what blocks stays, every other finding and discovered issue may be ticketed under this decision | stop: a hold). No implementer or reviewer starts until they decide.`;
-    return { owner, ownerPending: pending, escalation, guidance };
+    return { owner, ownerPending: pending, escalation, guidance: `${guidance}${waitingNote(state, escalation)}` };
   }
   return { owner: null, ownerPending: null, escalation, guidance: escalationGuidance(state, escalation) };
+}
+
+// 0.7.27 (review of the release, I-185 x I-186). The person's round question can be due while the owner has withdrawn a
+// strategist's escalation and handed a corrected strategist that has not decided. Named failure (a ticket's own shape): the
+// guidance spoke only of the round question, and once the person answered it the next handoff asked the withdrawn question
+// afresh, verbatim: the person was asked about the same stop twice, once with a question already judged wrong. The waiting
+// strategist's decision supersedes the withdrawn question, so it comes first.
+function waitingNote(state, escalation) {
+  const waiting = escalation?.withdrawn ? strategistWaiting(state) : null;
+  if (!waiting) return '';
+  return ` The strategist's escalation ${escalation.id} was withdrawn (${escalation.withdrawn.reason ?? 'no reason recorded'}) and strategist ${waiting.agent} was handed after it: record its decision first, which supersedes the withdrawn question (\`wf strategy record --closure <file> --attempt ${state.id}\`), so the person is not asked that question as well.`;
 }
 
 // What the owner agent does about a strategist's escalation that holds the handoffs, by the state of its question. 0.7.27
@@ -244,6 +255,10 @@ export function requireOwnerDecision(root, state, role, options = {}) {
   // Asked again after an answer in the person's own words or a withdrawal, with the same words (0.7.23: the second asking
   // lost them and showed the strategist's rationale).
   const e = hold.escalation;
+  // 0.7.27 (review of the release): a withdrawn question is not asked afresh while a strategist handed after it has not decided;
+  // that decision supersedes it, and asking the person first would put the same stop to them twice.
+  const successor = e.withdrawn ? strategistWaiting(state) : null;
+  if (successor) throw refuse(`not handed: the strategist's escalation ${e.id} was withdrawn and strategist ${successor.agent} was handed after it and has recorded no decision; no ${role} starts until it does (its decision supersedes ${e.id}, so the person is not asked it again)`, `wait for ${successor.agent}'s completion notification, then \`wf strategy record --closure <file> --attempt ${state.id}\`; if it is gone, hand a fresh strategist with a new id (\`wf handoff strategist --agent <new id> --reason "..."\`) and record that one's decision`, { id: 'strategy:escalated' });
   const esc = e.approved || e.withdrawn ? createDecision(root, state, { kind: 'escalation', key: e.key, summary: e.summary, choices: e.choices, plain: e.plain ?? null, labels: e.labels ?? null, then: e.then ?? null, recommend: e.recommend ?? null, settles: e.settles ?? null, items: e.items ?? null }) : e;
   throw refuse(`not handed: the strategist escalated ${state.id} (${esc.id}: ${esc.summary}); no ${role} starts until the owner decides${wordsOf(hold.escalation.approved ? hold.escalation : null)}`, approveHint(state, esc), { id: 'strategy:escalated' });
 }

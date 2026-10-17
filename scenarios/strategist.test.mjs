@@ -469,3 +469,45 @@ test('an escalation the person answered in their own words is not a decision: re
   ok(wf(root, ['decisions', 'withdraw', 'A1', '--reason', words, '--attempt', a.id]));
   ok(wf(root, ['strategy', 'record', '--closure', corrected.file, '--attempt', a.id], { ownerSilent: true }));
 });
+
+// 0.7.27 (review of the release: I-185 x I-186), named failure (the field ticket's own shape): the person's round escalation was
+// due, the owner had withdrawn a strategist's escalation whose question was wrong, and a corrected strategist was handed and had
+// not decided. The hold's guidance named only the round question and the next step hid the waiting strategist; once the person
+// answered the round question, the next handoff asked the withdrawn strategist question afresh, verbatim, and the strategist's
+// decision was then refused behind it: the person was asked about the same stop twice, once with a question already judged wrong.
+test('with the round escalation due and a withdrawn strategist escalation, the waiting strategist is named beside the hold, and the withdrawn question is not asked again while its replacement is undecided', () => {
+  const ctx = project('both-holds', { strategy: { reviewRoundsEscalate: 2 } });
+  const a = started(now, ctx, { item: 'ENG-744' });
+  const { root, base } = ctx;
+  reviewRound(now, ctx, a, { findings: 1 });
+  reviewRound(now, ctx, a, { findings: 1 });
+  ok(wf(root, ['strategy', 'record', '--closure', escalated(ctx, a, 'strat-1').file, '--attempt', a.id]));
+  withdrawn(ctx, a, 'A1');
+  const corrected = handedStrategist(ctx, a, 'strat-2', { action: 'continue', rationale: 'The course is sound; the question was wrong.' });
+  const decisions = () => stateOf(root, a.id).decisions;
+  // The next step names the person's round question and the waiting strategist, and says the strategist's decision comes first.
+  const held = stateOf(root, a.id).decision;
+  assert.equal(held.kind, 'strategy');
+  assert.match(held.guidance, /2 review rounds handed; the owner decides how to continue/);
+  assert.match(held.guidance, /Strategist strat-2 was handed/);
+  assert.match(held.guidance, /A1 was withdrawn/);
+  assert.match(held.guidance, /record its decision first[^.]*supersedes the withdrawn question/);
+  // The person is asked the round question; the withdrawn strategist question is not asked beside it.
+  const asked = wf(root, ['handoff', 'reviewer', '--agent', 'rev-x', '--attempt', a.id, '--owner', a.owner], { ownerSilent: true });
+  assert.equal(asked.code, 75);
+  const round = asked.err.match(/wf approve (A\d+)/)[1];
+  assert.deepEqual(decisions().map((d) => d.id), ['A1', round]);
+  approveAsOwner(root, a.id, round, 'continue');
+  // Answered, the next handoff does not ask the withdrawn question afresh while strat-2 has not decided: it says so.
+  const before = decisions().length;
+  const waiting = wf(root, ['handoff', 'reviewer', '--agent', 'rev-y', '--attempt', a.id, '--owner', a.owner], { ownerSilent: true });
+  assert.equal(waiting.code, 75);
+  assert.equal(decisions().length, before, 'no decision was created: the withdrawn question is not asked again');
+  assert.match(waiting.err, /A1 was withdrawn and strategist strat-2 was handed after it and has recorded no decision/);
+  assert.match(waiting.err, /wf strategy record/);
+  assert.ok(refusalRows(root).some((x) => x.id === 'strategy:escalated'));
+  // Its decision supersedes the withdrawn question and the work goes on.
+  ok(wf(root, ['strategy', 'record', '--closure', corrected.file, '--attempt', a.id], { ownerSilent: true }));
+  assert.notEqual(stateOf(root, a.id).decision.kind, 'strategy');
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-z', '--attempt', a.id, '--owner', a.owner], { ownerSilent: true }));
+});
