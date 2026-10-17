@@ -625,6 +625,9 @@ test('0.7.27 (I-188): an independent reviewer\'s verified-nonissue verdict close
   // The evidence reviewer is shown the closed issue once, to dispute it with a finding if the claim holds after all.
   const evidence = bundleOf(ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-1', '--attempt', id])));
   assert.deepEqual(evidence.discovered.map((d) => [d.id, d.status, d.notADefectSinceReview ?? false]), [['D1', 'not-a-defect', true], ['D2', 'open', false]]);
+  // 0.7.27 (review of the release): the reviewer is told who closed it, as the record has it: this one on a reviewer's verdict.
+  assert.match(evidence.instructions, /closed that way \(D1 on reviewer rev-0's verdict\): raise a finding if the claim holds after all/);
+  assert.doesNotMatch(evidence.instructions, /on the word of the person or the owner/);
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('rev-1')), '--attempt', id]));
   ok(wf(root, ['accept', '--attempt', id]));
   const refused = wf(root, ['deliver', '--attempt', id]);
@@ -676,6 +679,8 @@ test('0.7.27 (I-188): the person decides a discovered issue is not a defect, one
   assert.equal(state(root, id).discovered[1].status, 'open');
   assert.equal(state(root, id).decisions.length, 2);
   assert.doesNotMatch(knownLimits(state(root, id)), /rolling|yearly|mislabelled/);
+  // The next reviewer is told it was the person's answer, never "a reviewer's verdict".
+  assert.match(bundleOf(ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-p', '--attempt', id]))).instructions, /closed that way \(D1 on the person's answer\): raise a finding/);
 
   // Under a project policy that lets the owner agent decide a low issue, a low one closes on its reason; a high one still asks.
   const o = nonissueScene('discovered-nonissue-owner', { leaving: { low: 'owner' } });
@@ -685,4 +690,5 @@ test('0.7.27 (I-188): the person decides a discovered issue is not a defect, one
   assert.deepEqual([low.status, low.notADefect.source.provenance], ['not-a-defect', 'owner-reason']);
   assert.equal(disc(o.root, ['close', 'D2', '--not-a-defect', '--reason', WHY, '--attempt', o.id], silent).code, 75, 'a level the policy does not give the owner is still the person\'s');
   assert.equal(state(o.root, o.id).discovered[1].status, 'open');
+  assert.match(bundleOf(ok(wf(o.root, ['handoff', 'reviewer', '--agent', 'rev-o', '--attempt', o.id]))).instructions, /closed that way \(D1 on the owner agent's recorded reason\): raise a finding/);
 });
