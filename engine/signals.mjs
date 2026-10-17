@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { changedFiles, treeHashes } from './attempt.mjs';
-import { recurrenceLine, recurringCauses } from './causes.mjs';
+import { familyRecurrenceLine, familyRecurrences, recurrenceLine, recurringCauses } from './causes.mjs';
 import { ownerTranscript } from './host-record.mjs';
 import { home as hostHome } from './provenance.mjs';
 import { blockingOpen, blockingSeries, earlierBlocking, observations, placementLevel, unreachedOf } from './review-policy.mjs';
@@ -278,6 +278,8 @@ export function computeSignals(root, state, { nowMs = Date.now(), cfg = null, ho
     blockingFindings: blocking.map(blockRef),
     // 0.7.27 (I-191): a finding still open that shares its cause with one already marked fixed (the reviewer's `sameCauseAs`).
     recurringCauses: recurringCauses(state),
+    // A finding still open with the family of one already marked fixed, no cause confirmed: a possible recurrence.
+    familyRecurrences: familyRecurrences(state),
     criteria: { atFreeze: state.criteriaAtFreeze, now: (state.criteria ?? []).length },
     amendments: (state.criteriaAmendments ?? []).length,
     discoveredFamilies: (state.discovered ?? []).filter((d) => d.status === 'open' && d.family).reduce((n, d) => ({ ...n, [d.family]: (n[d.family] ?? 0) + 1 }), {}),
@@ -350,6 +352,7 @@ export function courseLines(sig, { predictions = [], shell = true } = {}) {
   ];
   if (sig.replan) out.push(`since the re-plan (amendment ${sig.replan.amendment}): ${Math.round(sig.replan.minutes)} minutes and ${sig.replan.rounds} review round(s); it expected ${e.minutes ?? 'n/a'} minutes and ${e.rounds ?? 'n/a'} round(s)${past(sig.replan.minutes, e.minutes) || past(sig.replan.rounds, e.rounds)}`);
   for (const r of sig.recurringCauses ?? []) out.push(recurrenceLine(r));
+  for (const r of sig.familyRecurrences ?? []) out.push(familyRecurrenceLine(r));
   // A pattern found one place at a time is a class to fix in one sweep (lessons of one attempt: about 35 of 67 discovered
   // issues were callers needing the same new guard, each found and recorded separately).
   // 0.7.27 (I-185): findings an earlier round raised and no round has verified fixed are not shown as zero because the latest

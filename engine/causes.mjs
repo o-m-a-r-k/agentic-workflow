@@ -103,9 +103,35 @@ export function recurringCauses(state, { fixes = [] } = {}) {
   return out;
 }
 
+// Earlier findings of the same `family` that a round had already marked fixed, per finding: a label match, not a confirmed
+// cause (a reviewer confirms one with `sameCauseAs`; a pair already confirmed, or in one cause group, is not listed here).
+function sameFamilyFixed(by, label) {
+  const out = new Map();
+  for (const e of by.values()) {
+    const family = text(e.family);
+    if (!family) continue;
+    const earlier = [...by.values()].filter((a) => a.index < e.index && text(a.family) === family && fixedAt(a) !== null && fixedAt(a) <= e.index && !(label.get(a.ref) && label.get(a.ref) === label.get(e.ref)));
+    if (earlier.length) out.set(e.ref, earlier.map((a) => a.ref));
+  }
+  return out;
+}
+
+// A possible recurring cause: a finding still open with the family of an earlier finding marked fixed. The engine knows only
+// that the labels match, so it says that: the last fix may have covered one place.
+export function familyRecurrences(state) {
+  const by = ledgerOf(state);
+  if (!by.size) return [];
+  const { label } = causeGroups(state, by);
+  const open = openRefs(state);
+  return [...sameFamilyFixed(by, label)].filter(([ref]) => open.has(ref)).map(([again, fixed]) => ({ family: text(by.get(again).family), again, fixed }));
+}
+
 // What the owner reads about a recurring cause (`wf resume`, `wf status`, `wf signals`): plain facts and the way on. Information,
 // never a refusal.
 export const recurrenceLine = (r) => `the cause of ${r.fixed.join(', ')} came back in ${r.again}: the last fix covered one place; find the root cause before the next fix round (an analysis of the assumption behind them and every place that relies on it, or the strategist's \`cluster\`) so one fix covers them all`;
+
+// The same, for a label match (`familyRecurrences`): worded for what is known.
+export const familyRecurrenceLine = (r) => `${r.again} has the family of ${r.fixed.join(', ')} (${r.family}), which ${r.fixed.length > 1 ? 'were' : 'was'} marked fixed: the last fix may have covered one place; check whether they share a cause (if they do, find the root cause before the next fix round: an analysis of the assumption behind them and every place that relies on it, or the strategist's \`cluster\`; the reviewer confirms it with \`sameCauseAs\`)`;
 
 // Each finding the rounds recorded, briefly: where it stands now and the fix recorded for it. For the fix round's implementer,
 // who fixes a problem so that no review finds it again anywhere and can see here that findings across rounds share a cause.
@@ -114,6 +140,7 @@ export function findingHistory(state, { fixes = [] } = {}) {
   const by = ledgerOf(state);
   const { label } = causeGroups(state, by);
   const open = openRefs(state);
+  const labelled = sameFamilyFixed(by, label);
   return [...by.values()].map((e) => {
     const d = dispositionOf(state, e.ref);
     const last = e.verdicts.at(-1) ?? null;
@@ -130,6 +157,8 @@ export function findingHistory(state, { fixes = [] } = {}) {
       ...(verified && status !== 'open' ? { verifiedBy: verified.round, evidence: clip(verified.evidence, 160) } : {}),
       ...(label.has(e.ref) ? { cause: label.get(e.ref) } : {}),
       ...(e.sameCauseAs.length ? { sameCauseAs: e.sameCauseAs } : {}),
+      // A label match with an earlier finding marked fixed: a possible shared cause, apart from a confirmed `cause`.
+      ...(labelled.has(e.ref) ? { possibleSameCauseAs: labelled.get(e.ref) } : {}),
     };
   });
 }

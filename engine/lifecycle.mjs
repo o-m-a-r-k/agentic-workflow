@@ -23,7 +23,7 @@ import { assertUnchanged, readEvidenceFile, seal } from './evidence.mjs';
 import { implementerAcks, learnFromReview, lessonPrompts, lessonVerdicts, owesLesson, recur, relevantLessons } from './lessons.mjs';
 import { noteLearned, pastCourse, personFixed } from './learning.mjs';
 import { computeSignals } from './signals.mjs';
-import { findingHistory, markCauses, recurrenceLine, recurringCauses, sameCauseProblems, withoutUnknownCauses } from './causes.mjs';
+import { familyRecurrenceLine, familyRecurrences, findingHistory, markCauses, recurrenceLine, recurringCauses, sameCauseProblems, withoutUnknownCauses } from './causes.mjs';
 import { canonical as canonicalPath, isInside, touchesEvidence } from './paths.mjs';
 import { changedForStep, deliveryOrder, impact, inside, packageOf } from './topology.mjs';
 import { findSkill } from './skills.mjs';
@@ -920,6 +920,7 @@ export function handoff(root, role, options) {
     repair: role === 'implementer' ? repair ?? undefined : undefined,
     findingHistory: repairNow ? findingHistory(state, { fixes: fixesSoFar }) : undefined,
     recurringCauses: recurring.length ? recurring : undefined,
+    possibleRecurrences: repairNow && familyRecurrences(state).length ? familyRecurrences(state) : undefined,
     // I-118: a repair after a failed gate is handed what failed and the fastest proof of a fix.
     failedGate: role === 'implementer' && state.lastGate?.status === 'failed' ? failedGateFor(state, trusted) : undefined,
     impact: impact(trusted, changed),
@@ -986,7 +987,7 @@ export function handoff(root, role, options) {
     // Goals, not methods (0.7.0): the role file says what good looks like and what the engine checks.
     instructions: {
       planner: 'Your goal: targets an implementer can build and a person can check, complete enough that no consumer or flow surprises anyone later; the quality bar (`qualityBar`) turned into targets for this ticket.',
-      implementer: `Your goal: ${repairNow ? 'no review finds this problem again, anywhere, and ' : ''}the criteria you were handed hold on the whole combined tree, and nothing you touched regresses.${repairNow ? ' This is a fix round. `repair` holds the findings open now and `findingHistory` every earlier finding with where it stands and the fix recorded for it (findings a reviewer linked as one cause share a `cause`, and `recurringCauses` names a cause that came back after a fix): for each finding name the assumption or rule behind it, find every place that relies on it, fix them all and prove the class with one proof.' : ''} Early in your work write your report to \`implementerReportFile\` with your \`approach\` and \`expect: { minutes }\` (how long you expect to take), and complete it before you finish.`,
+      implementer: `Your goal: ${repairNow ? 'no review finds this problem again, anywhere, and ' : ''}the criteria you were handed hold on the whole combined tree, and nothing you touched regresses.${repairNow ? ' This is a fix round. `repair` holds the findings open now and `findingHistory` every earlier finding with where it stands and the fix recorded for it (findings a reviewer linked as one cause share a `cause`; `recurringCauses` names a cause that came back after a fix, and `possibleRecurrences` a family that came back after a fix, which may or may not share one): for each finding name the assumption or rule behind it, find every place that relies on it, fix them all and prove the class with one proof.' : ''} Early in your work write your report to \`implementerReportFile\` with your \`approach\` and \`expect: { minutes }\` (how long you expect to take), and complete it before you finish.`,
       reviewer: mode === 'delta' ? (gateNow.ok ? REVIEWER_EVIDENCE_DELTA : REVIEWER_DELTA) : REVIEWER_FULL,
       tester: 'Write requirement expectations from the issue before reading the implementation, then map each to gate tests.',
     }[role],
@@ -3086,6 +3087,8 @@ export function nextDecision(root, state) {
     // 0.7.27 (I-191): a cause that came back after a fix is said where the owner reads the next step. Information, no refusal.
     if (kind === 'repair' && status !== 'blocked') {
       const again = recurringCauses(state);
+      const maybe = familyRecurrences(state);
+      if (maybe.length) out.guidance = `possible recurring cause: ${maybe.map(familyRecurrenceLine).join('; ')}. Then: ${out.guidance}`;
       if (again.length) out.guidance = `recurring cause: ${again.map(recurrenceLine).join('; ')}. Then: ${out.guidance}`;
     }
     return movedNote && out.status !== 'blocked' && out.status !== 'complete' ? { ...out, guidance: `${movedNote}${out.guidance}` } : out;

@@ -153,3 +153,56 @@ test('a blind evidence closure takes its sameCauseAs in the second record, with 
   assert.equal(changed.code, 75);
   assert.match(changed.err, /your own findings were recorded blind and cannot change once `priorFindings` are added/);
 });
+
+// 0.7.27 (I-191, the family half). Named failure (field): the same ticket's reviewers raised `tax-currency-unstored-facts` in one
+// round, saw it marked fixed, and raised it again in the next round (twice) without writing `sameCauseAs`, so the recurrence
+// was visible only to someone who compared the labels. A finding still open that has the family of an earlier finding marked
+// fixed is shown as a possible recurrence: information worded for what the engine knows (a label matched), distinct from a
+// reviewer-confirmed link.
+test('a finding open with the family of an earlier finding marked fixed is shown as a possible recurring cause, apart from a confirmed one', () => {
+  const p = project('rc-family');
+  hand(p, 'r1');
+  ok(record(p, goodClosure('r1', { findings: [finding('F1', 'src/a.txt:2 wrong', { family: 'tax-facts' }), finding('F2', 'src/old.txt:1 wrong', { family: 'other-family' })] })));
+  const first = fixRound(p, { 'src/a.txt': CHANGED.replace('L2', 'L2 fixed') }, 'fix', 'Fixes-finding: r1:F1');
+  assert.equal(first.possibleRecurrences, undefined, 'nothing has come back');
+  hand(p, 'r2');
+  // F1 is verified fixed where it showed up; F2 stays open (a different family); the same family comes back as F1 and F2 of r2,
+  // and F3 has a family no earlier finding had.
+  ok(record(p, goodClosure('r2', {
+    criteria: [],
+    findings: [finding('F1', 'src/a.txt:5 wrong again', { family: 'tax-facts' }), finding('F2', 'src/a.txt:6 wrong again', { family: 'tax-facts' }), finding('F3', 'src/a.txt:3 new', { family: 'new-family' })],
+    priorFindings: [{ round: 'r1', id: 'F1', status: 'fixed', evidence: 'src/a.txt:2 fine' }, { round: 'r1', id: 'F2', status: 'open', evidence: 'src/old.txt:1 still wrong' }],
+  })));
+  const line = (again) => new RegExp(`${again} has the family of r1:F1 \\(tax-facts\\), which was marked fixed: the last fix may have covered one place; check whether they share a cause`);
+  const sig = signals(p);
+  assert.deepEqual(sig.familyRecurrences.map((x) => [x.again, x.fixed, x.family]), [['r2:F1', ['r1:F1'], 'tax-facts'], ['r2:F2', ['r1:F1'], 'tax-facts']]);
+  assert.deepEqual(sig.recurringCauses, [], 'no reviewer confirmed a shared cause');
+  const text = ok(wf(p.root, ['signals', '--attempt', p.id])).out;
+  for (const again of ['r2:F1', 'r2:F2']) assert.match(text, line(again));
+  assert.doesNotMatch(text, /r2:F3 has the family|r1:F2 has the family/);
+  assert.doesNotMatch(text, /the cause of .* came back in/, 'not claimed as a confirmed recurrence');
+  for (const cmd of ['resume', 'status']) assert.match(ok(wf(p.root, [cmd, '--attempt', p.id])).out, line('r2:F1'), cmd);
+  assert.match(resume(p).decision.guidance, /^possible recurring cause: r2:F1 has the family of r1:F1/, 'the next step starts with it');
+  const strategist = JSON.parse(fs.readFileSync(ok(wf(p.root, ['handoff', 'strategist', '--agent', 'strat-f', '--attempt', p.id, '--reason', 'the family came back', '--json'])).json().bundle, 'utf8'));
+  assert.ok(strategist.course.some((l) => line('r2:F1').test(l)), 'the strategist reads the same course');
+  // The next fix round's history marks the possible shared cause, apart from a confirmed `cause`.
+  const second = fixRound(p, { 'src/a.txt': CHANGED.replace('L2', 'L2 fixed').replace('L5', 'L5 fixed') }, 'fix again', 'Fixes-finding: r2:F1');
+  const byRef = Object.fromEntries(second.findingHistory.map((h) => [h.ref, h]));
+  assert.deepEqual(byRef['r2:F1'].possibleSameCauseAs, ['r1:F1']);
+  assert.deepEqual(byRef['r2:F2'].possibleSameCauseAs, ['r1:F1']);
+  assert.equal(byRef['r2:F1'].cause, undefined, 'a label match is not a confirmed cause');
+  assert.equal(byRef['r2:F3'].possibleSameCauseAs, undefined);
+  assert.equal(byRef['r1:F2'].possibleSameCauseAs, undefined);
+  assert.deepEqual(second.possibleRecurrences.map((x) => x.again), ['r2:F1', 'r2:F2']);
+  assert.match(second.instructions, /`possibleRecurrences` a family that came back after a fix/);
+  // A reviewer who confirms the shared cause turns the pair into a recurring cause, and the family line for that pair goes.
+  hand(p, 'r3');
+  ok(record(p, goodClosure('r3', {
+    criteria: [],
+    findings: [finding('F1', 'src/a.txt:6 the same assumption', { family: 'tax-facts', sameCauseAs: ['r1:F1'] })],
+    priorFindings: [{ round: 'r2', id: 'F1', status: 'fixed', evidence: 'src/a.txt:5 fine' }, { round: 'r2', id: 'F2', status: 'fixed', evidence: 'src/a.txt:6 fine' }, { round: 'r2', id: 'F3', status: 'fixed', evidence: 'src/a.txt:3 fine' }, { round: 'r1', id: 'F2', status: 'fixed', evidence: 'src/old.txt:1 fine' }],
+  })));
+  const after = signals(p);
+  assert.deepEqual(after.recurringCauses.map((x) => [x.again, x.fixed]), [['r3:F1', ['r1:F1']]]);
+  assert.deepEqual(after.familyRecurrences.map((x) => [x.again, x.fixed]), [['r3:F1', ['r2:F1', 'r2:F2']]], 'the other fixed findings of the family are still only a label match');
+});
