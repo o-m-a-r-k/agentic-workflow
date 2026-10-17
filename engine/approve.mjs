@@ -17,11 +17,11 @@
 import { noteLearned } from './learning.mjs';
 import readline from 'node:readline';
 import { actor, openState } from './attempt.mjs';
-import { append, listAttempts, loadState } from './ledger.mjs';
+import { append, loadState } from './ledger.mjs';
 import { home } from './provenance.mjs';
 import { agentEnvNames, detectOwner, findHost, optional } from './hosts/index.mjs';
 import { WfError, refuse } from './util.mjs';
-import { ASK_SHAPE, askFirst, askProblems, choiceWords, composeAsk, itemWords, readAsk } from './asking.mjs';
+import { ASK_SHAPE, askFirst, askProblems, composeAsk, frameLabels, itemWords, readAsk } from './asking.mjs';
 
 export const RESERVED = ['waive-finding', 'override-gate', 'move-out-of-batch', 'lift-hold', 'adopt-live', 'escalation'];
 
@@ -56,12 +56,12 @@ export const chose = (d) => Boolean(d?.approved && d.approved.choice !== 'other'
 // 0.7.23 (D29, engine/asking.mjs): `context` and `technical` are the owner agent's words the question carries (`plain` is the
 // whole question as asked); `items` is the plain line per item a question names ({ ref: { what, fix } }); `settles` is, per
 // choice of an escalation, the open items that choice decides with it ({ choice: [ref] }), so they are not asked again.
-export function createDecision(root, state, { kind, key, summary, choices = ['yes', 'no'], plain = null, labels = null, then = null, aliases = null, recommend = null, context = null, technical = null, items = null, settles = null, personDirected = null, what = null, options = {} }) {
+export function createDecision(root, state, { kind, key, summary, choices = ['yes', 'no'], plain = null, labels = null, then = null, recommend = null, context = null, technical = null, items = null, settles = null, personDirected = null, what = null, options = {} }) {
   if (!RESERVED.includes(kind)) throw new WfError(`unknown reserved decision kind ${kind}`);
   const open = decisionFor(state, kind, key);
   if (open && !open.approved) return open;
   const id = `A${(state.decisions ?? []).length + 1}`;
-  append(root, state.id, 'decision.created', { id, kind, key: String(key), summary: String(summary), choices: choices.map(String), ...(plain ? { plain: String(plain) } : {}), ...(labels ? { labels } : {}), ...(then ? { then } : {}), ...(aliases ? { aliases } : {}), ...(recommend ? { recommend } : {}), ...(context ? { context: String(context) } : {}), ...(technical ? { technical: String(technical) } : {}), ...(items && Object.keys(items).length ? { items } : {}), ...(settles && Object.keys(settles).length ? { settles } : {}), ...(personDirected ? { personDirected: String(personDirected) } : {}), ...(what ? { what: String(what) } : {}) }, actor(options));
+  append(root, state.id, 'decision.created', { id, kind, key: String(key), summary: String(summary), choices: choices.map(String), ...(plain ? { plain: String(plain) } : {}), ...(labels ? { labels } : {}), ...(then ? { then } : {}), ...(recommend ? { recommend } : {}), ...(context ? { context: String(context) } : {}), ...(technical ? { technical: String(technical) } : {}), ...(items && Object.keys(items).length ? { items } : {}), ...(settles && Object.keys(settles).length ? { settles } : {}), ...(personDirected ? { personDirected: String(personDirected) } : {}), ...(what ? { what: String(what) } : {}) }, actor(options));
   return loadState(root, state.id).decisions.find((d) => d.id === id);
 }
 
@@ -76,10 +76,13 @@ export const optionLines = (d) => d.choices.map((c) => `"${labelOf(d, c)}${d.rec
 // Named failure (I-135): the question tool answered "accepted" but the person saw no panel and no way to decide, and the
 // reply around it held file links and workflow words. The decision is shown in the reply itself (what it does, why, what
 // remains), whatever the panel does: a tool's acceptance is no proof the person can see it. The answer counts as the panel
-// recorded it, as the person's chat reply to a message that asked exactly this question (0.7.18), or as typed in their
-// terminal.
+// recorded it, as the person's chat reply to a message that asked exactly this question (0.7.18), as the agent read their words
+// and quoted them (0.7.27, D41), or as typed in their terminal.
 export const SHOW_TEXT = 'say in your reply, in plain words, what this decides, why, and what happens after each choice (a question panel may not show, and its acceptance proves nothing)';
-export const approveHint = (state, d) => `${SHOW_TEXT}; then ask them in your message, so they can simply type their answer: quote the question "${questionFor(state, d)}" exactly with these options (label, then what follows it): ${optionLines(d)}, and ask nothing else in that message (end your turn with it). You may also show the same question and options in your question panel: a typed reply and a panel answer both count. After they answer, run \`wf approve ${d.id} --from-question --attempt ${state.id}\`; or they run \`wf approve ${d.id} --attempt ${state.id}\` in their own terminal (choices: ${d.choices.join(' | ')}); then run this command again. Until they answer, any reply of yours that mentions this decision (a status, what remains) asks it in this form; one that describes it in your own words leaves it unasked`;
+// How the agent records an answer (0.7.27, D41): one that is exactly an option by itself; any other as its reading, with the words.
+export const READ_LINE = 'when an answer is more than one option\'s name, read it yourself and add `--choice <choice> --quote "<their words>"` (`--choice other` keeps words that choose no option as theirs), then tell them in that reply what you recorded and from which words';
+export const afterAnswer = (state, d) => `run \`wf approve ${d.id} --from-question --attempt ${state.id}\` (${READ_LINE})`;
+export const approveHint = (state, d) => `${SHOW_TEXT}; then ask them in your message, so they can simply type their answer: quote the question "${questionFor(state, d)}" exactly with these options (label, then what follows it): ${optionLines(d)}, and ask nothing else in that message (end your turn with it). You may also show the same question and options in your question panel: a typed reply and a panel answer both count. After they answer, ${afterAnswer(state, d)}; or they run \`wf approve ${d.id} --attempt ${state.id}\` in their own terminal (choices: ${d.choices.join(' | ')}); then run this command again. Until they answer, any reply of yours that mentions this decision (a status, what remains) asks it in this form; one that describes it in your own words leaves it unasked`;
 
 // A yes/no reserved decision that must be answered `yes` (0.7.0). Named failure: `requireApproved` returns whatever
 // choice was approved, so an answer of `no` read as an approval at a caller that only tested for a value. A `no` refuses,
@@ -127,8 +130,9 @@ export async function approveInTerminal(root, id, options, { input = process.std
   if (!d) throw new WfError(`no decision ${id ?? ''} on ${state.id}; \`wf decisions --attempt ${state.id}\` lists them`);
   if (d.approved) throw refuse(`${id} was already decided: ${d.approved.choice}`, null, { id: 'approve:already' });
   if (d.withdrawn) throw refuse(`${id} was withdrawn (${d.withdrawn.reason ?? ''}); the next command asks a fresh question`, withdrawnHint(state), { id: 'approve:withdrawn' });
+  if (options.quote !== undefined) throw new WfError('--quote goes with --from-question: the person\'s words the agent read in its session, with --choice');
   const agentEnv = agentEnvNames().filter((k) => env[k]);
-  if (agentEnv.length) throw refuse(`\`wf approve\` runs in the owner's own terminal, not under an agent runtime (${agentEnv.join(', ')})`, `in this same reply, ask them in your message, quoting the question "${questionFor(state, d)}" exactly with its options (${optionLines(d)}) and asking nothing else in that message, so they can type the answer (you may also show it in your question panel: either answer counts); after they answer run \`wf approve ${id} --from-question --attempt ${state.id}\`; or they run \`wf approve ${id} --attempt ${state.id}\` in a terminal outside the agent app`, { id: 'approve:agent-env' });
+  if (agentEnv.length) throw refuse(`\`wf approve\` runs in the owner's own terminal, not under an agent runtime (${agentEnv.join(', ')})`, `in this same reply, ask them in your message, quoting the question "${questionFor(state, d)}" exactly with its options (${optionLines(d)}) and asking nothing else in that message, so they can type the answer (you may also show it in your question panel: either answer counts); after they answer, ${afterAnswer(state, d)}; or they run \`wf approve ${id} --attempt ${state.id}\` in a terminal outside the agent app`, { id: 'approve:agent-env' });
   if (!input.isTTY || !output.isTTY) throw refuse(`not an interactive terminal: \`wf approve\` is run by the owner in their own terminal, where it asks them to type the choice`, `run \`wf approve ${id} --attempt ${state.id}\` in a terminal`, { id: 'approve:no-tty' });
   const preset = options.choice === undefined || options.choice === true ? null : String(options.choice);
   if (preset && !d.choices.includes(preset)) throw new WfError(`--choice ${preset}: not one of ${d.choices.join(' | ')}`);
@@ -141,7 +145,7 @@ export async function approveInTerminal(root, id, options, { input = process.std
   rl.close();
   if (answer === null) throw refuse(`not confirmed (the input ended); nothing recorded`, null, { id: 'approve:eof' });
   const typed = String(answer).trim();
-  const choice = preset ? (typed === preset ? preset : null) : d.choices.find((c) => c === typed || labelOf(d, c) === typed) ?? choiceOfReply(d, typed, { chat: false }).choice;
+  const choice = preset ? (typed === preset ? preset : null) : d.choices.find((c) => c === typed || labelOf(d, c) === typed) ?? exactChoice(d, typed);
   if (!choice) throw refuse(`not confirmed (typed ${JSON.stringify(typed)}); nothing recorded`, null, { id: 'approve:mismatch' });
   append(root, state.id, 'decision.approved', { id, choice, via: 'interactive-terminal (unverified)' }, actor(options));
   noteAnswer(root, state, d, choice, null);
@@ -155,180 +159,85 @@ function noteAnswer(root, state, d, choice, words) {
   noteLearned(root, { kind: 'answer', attempt: state.id, choice, ...(words ? { words } : {}), summary: d.summary ?? null });
 }
 
-// The choice a reply makes, and the words kept beside it (0.7.23). The person's rule (2026-10-16): "why are you stopping me
-// from just typing no, why do i have to answer the questionnaire? both should be accepted". Named failure (field): the person
-// typed "ok fix all and continue" to the round-limit question; it named one of its choices, but a reply chose only by its
-// first words, so it was refused and the session put the question panel in front of them. A reply chooses:
-// - by its first words: an option's label (with or without a leading "yes, " or "no, "), a short name the engine gives the
-//   option ("fix it", "ship it", "run the tests"), or its choice; for a yes or no question also "ok", "sure", "go ahead",
-//   "nope" and the like; or
-// - by naming exactly one option anywhere in it ("ok fix all and continue" is continue).
-// It is the person's own words, not a choice, when it asks something back, names two options ("yes, actually no"), negates
-// or conditions the one it names, before it ("don't continue", "decide whether to continue") or right after it ("continue
-// is not an option"). Words beside a choice are kept with it, so a condition reaches the owner. `quoted`: the message the
-// reply answers asked this question; a reply to one that did not chooses only by an option named plainly (a label or a
-// short name, or a choice other than yes and no when `ids`: a bare "yes" says nothing about which question it answers).
-//
-// 0.7.27 (I-192, D41). Named failure (field): the person answered "ok we can close this then. ticket is on done? and clean up
-// completed?"; the reply was no answer because it held a question mark, although both questions were about other things, and
-// "close this" was no name the engine gave the option. A reply is read sentence by sentence: a question about something else
-// (it names none of the options and has a subject of its own: "ticket is on done?") is set aside, and only a question about the
-// decision (one naming an option, or one with no subject of its own: "why?", "are you sure?") is a question back. A request in
-// a question's form ("can you close it?") asks for the action. A condition anywhere before the option in its sentence ("if all
-// good ... close it", "check the data and then close it") makes it the person's words. The frame's own terms for its action
-// count too (`acts`, engine/asking.mjs: "close this", "go ahead and close", "close the ticket"), and `own` reads a reply to a
-// message that neither quoted nor named the decision: only those terms count there, never a bare "yes", a label or a short name.
+// The choice a reply makes by itself (0.7.23, D29; 0.7.27, D41). The person's rule (2026-10-16): "why are you stopping me from
+// just typing no, why do i have to answer the questionnaire? both should be accepted": a typed reply counts like a panel answer.
+// Named failure (0.7.27, an independent review of the first fix for I-192): reading a reply's meaning with patterns could not be
+// made right in either direction. It recorded yes for replies the person did not mean ("close it. NO.", "close it if the deploy
+// is fine", "she told me to close it, but I disagree", "maybe close it", "lift the pause on" another ticket, "I refuse to ship it
+// as is"), refused or misfiled clear ones ("proceed", "go for it", "the first one", "ok do it"), and recorded a stray question
+// back ("is it on main?") as the person's own words, which then stood in the way of their real answer; every round of patterns
+// opened new holes. The engine now records by itself only a reply that is exactly one option: its choice, its label (for a
+// question an earlier release asked without labels, the labels of its frame, read from its kind and key: engine/asking.mjs), or
+// for a yes or no question a bare yes or no word. Case, spacing, a trailing "." or "!" and the panel's "(Recommended)" aside;
+// nothing else. Every other reply is read by the agent, which has the whole conversation, and recorded with the words it relies
+// on (`--choice` with `--quote`, below). `bare`: whether a bare yes or no word counts (not when the message did not quote the
+// question: it says nothing about which question it answers); `ids`: whether a choice's id counts, per choice.
 const norm = (x) => String(x).replace(/[\u2018\u2019\u02bc]/g, "'").trim().replace(/\s*\(recommended\)$/i, '').trim().toLowerCase();
-const flat = (x) => x.replace(/\s+/g, ' ').trim();
-const YES_WORDS = ['ok', 'okay', 'sure', 'go ahead', 'yep', 'yeah', 'approve', 'approved', 'accept', 'accepted', 'agreed', 'do it'];
-// The recommended option, named as such (0.7.27, I-192): "go with your recommendation" chose the option the question recommended.
-const RECOMMENDED = ['recommended', 'the recommended one', 'your recommendation', 'the recommendation', 'what you recommend', 'as you recommend'];
-const NO_WORDS = ['nope', 'nah', 'decline', 'declined', 'reject', 'rejected'];
-// A negation or a condition within four words before the option (independent review of 0.7.23: "I would prefer that we do
-// not at this point continue" and "decide whether to continue" read as continue). 0.7.27: any "n't" ("shouldn't", typed
-// with a phone's curly apostrophe too) and "hold off".
-const BEFORE = /(?:^|[^\p{L}\p{N}])(?:not|never|no|without|cannot|dont|cant|wont|shouldnt|wouldnt|didnt|doesnt|isnt|arent|couldnt|mustnt|\p{L}+n't|do not|hold off|instead of|rather than|if|unless|until|before|whether)(?:[^\p{L}\p{N}]+[\p{L}\p{N}'-]+){0,4}[^\p{L}\p{N}]*$/u;
-// A condition anywhere before the option in its sentence (0.7.27): "then if all good check the data, and then close the ticket".
-const CONDITION = /(?<![\p{L}\p{N}])(?:if|unless|until|before|after|once|when|whether|as soon as|provided|and then)(?![\p{L}\p{N}])/u;
-// A negation of the option right after it ("continue is not an option", "accept it and ship is not what I want").
-const AFTER = /^[^\p{L}\p{N}]*(?:is not|isn't|is no|is never|would be a mistake|is a mistake|would be wrong|is wrong|is the wrong)(?![\p{L}\p{N}])/u;
-// An exception or a time after the option can turn the answer around ("fix it here unless it is already in ENG-636", D18's
-// named failure; "ship it after the fix" means fix first; "lift it once the review is in" means not now): the person's
-// words, which the owner follows or asks about, not the option. A condition that does not move the action stays beside the
-// choice ("yes, but keep the old button").
-const EXCEPTION = /(?<![\p{L}\p{N}])(?:unless|except|otherwise|after|once|when|later|until|in the follow-up|next time)(?![\p{L}\p{N}])/u;
-const escapeRe = (l) => l.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-const wholeWordAt = (text, l) => {
-  const m = new RegExp(`(?<![\\p{L}\\p{N}])${escapeRe(l)}(?![\\p{L}\\p{N}])`, 'u').exec(text);
-  return m ? m.index : -1;
+const whole = (x) => norm(x).replace(/\s+/g, ' ').replace(/[\s.!]+$/u, '').replace(/\s*\(recommended\)$/i, '').trim();
+const BARE = {
+  yes: ['yes', 'y', 'yep', 'yeah', 'yup', 'ok', 'okay', 'sure', 'go ahead', 'do it', 'go for it', 'proceed', 'confirm', 'confirmed', 'approve', 'approved', 'accept', 'accepted', 'agreed'],
+  no: ['no', 'n', 'nope', 'nah', 'decline', 'declined', 'reject', 'rejected'],
 };
-// Sentences: a question is one that ends with "?" or opens as one ("should we close it"), after a filler word or two.
-const sentencesOf = (text) => String(text).split(/(?<=[.!?;])\s+|\n+/).map(flat).filter(Boolean);
-const FILLER = '(?:(?:ok|okay|so|and|but|then|well|hmm|hey|also|wait|right)[,\\s]+)*';
-// An auxiliary opens a question only before its subject ("should we", "is it", "can you"): "will do" and "is fine" are answers.
-const ASKING = new RegExp(`^${FILLER}(?:(?:should|shall|can|could|would|will|do|does|did|is|are|was|were|has|have|may|might|must|isn't|aren't|wouldn't|shouldn't|can't|won't|don't|doesn't) (?:we|i|you|it|this|that|they|he|she|there|the|our|my|your|its)|why|how|what|where|who|which|whether)(?![\\p{L}\\p{N}'])`, 'u');
-const REQUEST = new RegExp(`^${FILLER}(?:please|(?:can|could|would|will) you)(?![\\p{L}\\p{N}'])`, 'u');
-const isQuestion = (s) => /\?\s*$/.test(s) || ASKING.test(s);
-// A question with no subject of its own is about what was just said ("why?", "is it safe?", "are you sure about that?").
-const PLAIN_WORDS = new Set(("a an the it its it's this that these those them they there here you your we our us i me my he she " +
-  'is are was were be been being am do does did done has have had will would shall should can could may might must ' +
-  'not no yes ok okay sure really so then now too also just still yet and or but if to of on in at for with about by from as up ' +
-  "what why how when where who which whether safe right fine good wise correct wrong risky ready idea call thing way move option choice " +
-  "that's isn't aren't won't can't don't doesn't didn't hm hmm huh well though sound sounds look looks seem seems mean means think").split(' '));
-const ownSubject = (s) => (s.match(/[\p{L}\p{N}][\p{L}\p{N}'-]*/gu) ?? []).some((w) => !PLAIN_WORDS.has(w));
-// An act (engine/asking.mjs) as a pattern: `<it>` a reference to the work, `<it?>` one or nothing; after an open end only the
-// end of the clause or a word that cannot be its object ("close this then", never "close this PR" or "close the browser").
-const REF_NOUNS = 'ticket|task|attempt|item|work|story|card|change|one';
-const TAIL = 'now|then|too|also|please|pls|today|tomorrow|tonight|already|out|off|anyway|here|there|as|and|but|so|for|with|since|because|if|when|after|once|unless|until|before|without|or|yet|first|later|asap|thanks|thank';
-function actPattern(act, refs) {
-  const ref = `(?:${[...new Set(refs.filter(Boolean).map((r) => escapeRe(norm(r))))].sort((a, b) => b.length - a.length).concat(['this one', 'that one', 'it', 'this', 'that', 'them', 'these', 'those', `(?:the|this|that|our|my|your) (?:${REF_NOUNS})`]).join('|')})`;
-  let src = '';
-  act.split(' ').forEach((w, i) => {
-    if (w === '<it?>') src += `(?: ${ref})?`;
-    else src += `${i ? ' ' : ''}${w === '<it>' ? ref : escapeRe(w)}`;
-  });
-  const end = /<it\??>$/.test(act) ? `(?![.\\-_]?[\\p{L}\\p{N}])(?=\\s*$|\\s*[^\\p{L}\\p{N}\\s]|\\s+(?:${TAIL})(?![\\p{L}\\p{N}]))` : '(?![\\p{L}\\p{N}])';
-  return new RegExp(`(?<![\\p{L}\\p{N}])${src}${end}`, 'u');
+const isYesNo = (d) => d.choices.length === 2 && d.choices.includes('yes') && d.choices.includes('no');
+const labelsOf = (d, c) => [...new Set([labelOf(d, c), ...(frameLabels(d)[c] ?? [])])];
+// A choice in plain words: the label the question showed, else its frame's (a question an earlier release asked), else its id.
+export const plainLabel = (d, c) => d.labels?.[c] ?? frameLabels(d)[c]?.[0] ?? c;
+export function exactChoice(d, text, { bare = true, ids = () => true } = {}) {
+  const reply = whole(text ?? '');
+  if (!reply) return null;
+  const names = (c) => [...(ids(c) ? [c] : []), ...labelsOf(d, c), ...(bare && isYesNo(d) ? BARE[c] : [])].map(whole).filter(Boolean);
+  const hits = d.choices.filter((c) => names(c).includes(reply));
+  return hits.length === 1 ? hits[0] : null;
 }
-const actHits = (acts, text, refs) => acts.map((a) => actPattern(a, refs).exec(text)).filter(Boolean).map((m) => ({ at: m.index, l: m[0] }));
-// Whether a reply names this decision's action in its own terms, in any form (chosen, negated, conditioned or asked about):
-// the person's latest such words are their answer, or no answer. `phrases` also counts its labels and short names, for the
-// check that the same words could answer another open decision.
-export function namesAction(d, answer, refs = [], { phrases = false } = {}) {
-  const text = sentencesOf(norm(answer)).join(' ');
-  const words = choiceWords(d);
-  return d.choices.some((c) => actHits(words[c]?.acts ?? [], text, refs).length > 0 || (phrases && [...(words[c]?.phrases ?? []), labelOf(d, c) !== c ? labelOf(d, c) : null].filter(Boolean).map(norm).some((l) => wholeWordAt(text, l) >= 0)));
-}
-// Whether a chat reply speaks of this decision at all (0.7.27, I-192): it names one of its options (a label, a short name, a
-// choice, an act), says yes or no in any words (it replies to a message that quoted the question), or shares a word with the
-// question as the person read it (its words, its labels, what follows each choice: "let's wait for the phone" answers "...
-// or wait for a phone?" in their own words, which are recorded as theirs). Named failure (a transcript of the field case): the
-// person's first message of the next day, "where are we? update the wf plugin", followed the message that had asked the
-// question and would have been recorded as their answer in their own words, so the decision read as answered and their later
-// "ok we can close this then" could no longer count. A reply that does none of these is about something else: no answer.
-const STOP = new Set(['let', "let's", 'lets', 'please', 'thanks', 'thank', 'get', 'got', 'going', 'want', 'need', 'make', 'all', 'any', 'some', 'more', 'very', 'much', 'like', 'know', 'see', 'say', 'tell', 'give', 'take', 'than', 'their', 'into', 'over', 'out', 'off', 'new', 'yours', 'whom', 'everything', 'something', 'anything']);
-const contentWords = (t) => new Set((norm(t).match(/[\p{L}\p{N}][\p{L}\p{N}'-]*/gu) ?? []).filter((w) => w.length >= 3 && !PLAIN_WORDS.has(w) && !STOP.has(w)).map((w) => w.replace(/(?<=\p{L}{3})s$/u, '')));
-export function addresses(d, answer, { question = '', refs = [] } = {}) {
-  const text = sentencesOf(norm(answer)).join(' ');
-  const words = choiceWords(d);
-  const yesNo = d.choices.length === 2 && d.choices.includes('yes') && d.choices.includes('no');
-  if (d.choices.some((c) => [norm(labelOf(d, c)), norm(labelOf(d, c)).replace(/^(yes|no)\s*,\s*/, ''), norm(c), ...(words[c]?.phrases ?? []).map(norm), ...(yesNo ? (c === 'yes' ? YES_WORDS : NO_WORDS) : []), ...(d.recommend?.choice === c ? RECOMMENDED : [])].filter(Boolean).some((l) => wholeWordAt(text, l) >= 0) || actHits(words[c]?.acts ?? [], text, refs).length > 0)) return true;
-  const asked = contentWords([question, d.summary ?? '', ...d.choices.map((c) => labelOf(d, c)), ...Object.values(d.then ?? {}), d.context ?? '', d.technical ?? ''].join(' '));
-  return [...contentWords(answer)].some((w) => asked.has(w));
-}
-export const optionNamed = (d, text) => d.choices.some((c) => wholeWordAt(norm(text), norm(labelOf(d, c))) >= 0);
-export function choiceOfReply(d, answer, { chat = true, quoted = true, ids = true, own = false, refs = [] } = {}) {
-  const reply = norm(answer);
-  if (!reply) return { choice: null, said: null };
-  const words = choiceWords(d);
-  const yesNo = d.choices.length === 2 && d.choices.includes('yes') && d.choices.includes('no');
-  const label = (c) => norm(labelOf(d, c));
-  const plainly = (c) => (own ? [] : [...new Set([label(c), label(c).replace(/^(yes|no)\s*,\s*/, ''), ...(words[c]?.phrases ?? []).map(norm), ...(ids && (quoted || !['yes', 'no'].includes(c)) ? [norm(c)] : []), ...(d.recommend?.choice === c ? RECOMMENDED : [])].filter(Boolean))]);
-  const leading = (c) => [...plainly(c), ...(!own && quoted && yesNo ? (c === 'yes' ? YES_WORDS : c === 'no' ? NO_WORDS : []) : [])];
-  const hitsIn = (text, c) => [...plainly(c).map((l) => ({ at: wholeWordAt(text, l), l })).filter((h) => h.at >= 0), ...actHits(words[c]?.acts ?? [], text, refs)];
-  // The sentences read for the choice: every one in a typed reply but a question about something else; a question about the
-  // decision is a question back, and nothing is chosen.
-  let text = reply;
-  let setAside = false;
-  if (chat) {
-    const kept = [];
-    for (const s of sentencesOf(reply)) {
-      if (!isQuestion(s) || REQUEST.test(s)) kept.push(s);
-      else if (d.choices.some((c) => hitsIn(s, c).length || leading(c).some((l) => wholeWordAt(s, l) >= 0)) || !ownSubject(s)) return { choice: null, said: null };
-      else setAside = true;
-    }
-    text = kept.join(' ');
-    if (!text) return { choice: null, said: null };
-  }
-  const starts = (l) => text === l || (chat && text.startsWith(l) && /^[^\p{L}\p{N}]/u.test(text.slice(l.length)));
-  const leads = (c) => leading(c).filter(starts);
-  const longest = (ls) => Math.max(...ls.map((l) => l.length));
-  let choice = d.choices.filter((c) => leads(c).length).sort((x, y) => longest(leads(y)) - longest(leads(x)))[0] ?? null;
-  let used = choice ? longest(leads(choice)) : 0;
-  if (choice) {
-    const rest = text.slice(used);
-    if (AFTER.test(rest) || EXCEPTION.test(rest) || d.choices.some((c) => c !== choice && hitsIn(rest, c).length)) choice = null;
-  } else if (chat) {
-    const named = d.choices.filter((c) => hitsIn(text, c).length);
-    const hits = named.length === 1 ? hitsIn(text, named[0]).sort((x, y) => x.at - y.at || y.l.length - x.l.length) : [];
-    const hit = hits[0];
-    const head = hit ? text.slice(0, hit.at) : '';
-    const sentence = head.slice(Math.max(0, ...['. ', '! ', '? ', '; '].map((p) => (head.includes(p) ? head.lastIndexOf(p) + p.length : 0))));
-    if (hit && !BEFORE.test(head) && !CONDITION.test(sentence) && !AFTER.test(text.slice(hit.at + hit.l.length)) && !EXCEPTION.test(text.slice(hit.at + hit.l.length))) {
-      choice = named[0];
-      used = -1;
-    }
-  }
-  const said = choice && chat && (used < 0 || setAside || /[\p{L}\p{N}]/u.test(text.slice(used))) ? String(answer).trim().slice(0, 2000) : null;
-  return { choice, said };
-}
+export const optionNamed = (d, text) => {
+  const t = norm(text);
+  return d.choices.some((c) => labelsOf(d, c).some((l) => {
+    const m = new RegExp(`(?<![\\p{L}\\p{N}])${norm(l).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}\\p{N}])`, 'u');
+    return m.test(t);
+  }));
+};
 
-// Every other open question the same words could answer: this attempt's and every other open attempt's in the project (0.7.27,
-// I-192). An attempt that cannot be read is left out; it is not this decision's.
-function openDecisions(root, state, d) {
-  const open = (s) => (s.decisions ?? []).filter((x) => !x.approved && !x.withdrawn && !(s.id === state.id && x.id === d.id)).map((x) => ({ attempt: s.id, d: x, refs: [s.id, s.item] }));
-  const out = open(state);
-  for (const id of listAttempts(root)) {
-    if (id === state.id) continue;
-    try {
-      const s = loadState(root, id);
-      if (!['done', 'abandoned'].includes(s.phase)) out.push(...open(s));
-    } catch {}
+// Whether the words the agent relies on are verbatim in a message of the person's (0.7.27, D41): the same characters, case,
+// spacing and typographic quotes aside, starting and ending on a word's edge ("yes" is not in "yesterday").
+const fold = (x) => String(x ?? '').normalize('NFKC').replace(/[\u2018\u2019\u02bc\u2032]/g, "'").replace(/[\u201c\u201d\u2033]/g, '"').replace(/\s+/g, ' ').trim().toLowerCase();
+const wordy = (ch) => ch !== undefined && /[\p{L}\p{N}]/u.test(ch);
+function holds(message, quote) {
+  const t = fold(message);
+  const q = fold(quote);
+  if (!q || !/[\p{L}\p{N}]/u.test(q)) return false;
+  for (let at = t.indexOf(q); at >= 0; at = t.indexOf(q, at + 1)) {
+    const end = at + q.length;
+    if ((!wordy(q[0]) || !wordy(t[at - 1])) && (!wordy(q.at(-1)) || !wordy(t[end]))) return true;
   }
-  return out;
+  return false;
 }
+const unwrap = (q) => {
+  const m = /^\s*(["'\u201c\u2018])([\s\S]*)(["'\u201d\u2019])\s*$/.exec(q);
+  return m ? m[2] : null;
+};
 
 // What the agent does when an answer is refused: it asks the question now, in the same reply, in the form that binds (0.7.27,
 // I-192). Named failure (field): after `wf approve --from-question` refused, the agent recorded an improvement and ended its
 // turn having asked nothing, and the person waited a day on a question that was never put to them again.
 const askNowHint = (state, d) => `${SHOW_TEXT}; then, in this same reply (this refusal never ends your turn with the question unasked), ask them in your message, quoting the question "${questionFor(state, d)}" exactly with its options (${optionLines(d)}) and asking nothing else in that message, so they can type the answer (you may also show it in your question panel: a typed reply and a panel answer both count), and run this again after they answer; or they run \`wf approve ${d.id} --attempt ${state.id}\` in their own terminal`;
+// The options as `--choice` names them.
+const choiceList = (d) => d.choices.map((c) => `${c}${plainLabel(d, c) !== c ? ` "${plainLabel(d, c)}"` : ''}`).join(', ');
+// How the agent records what it read (0.7.27, D41): the words are the person's, the reading is the agent's, and the person sees it
+// at once, so a misreading is corrected in their next message. What is not a choice is listed, so it is asked about, not read in.
+export const READ_FORM = (state, d) => `\`wf approve ${d.id} --from-question --attempt ${state.id} --choice <choice> --quote "<their words, exactly as they typed them>"\``;
+export const NOT_A_CHOICE = 'a condition ("if the deploy is fine", "tomorrow"), a hedge ("maybe", "I think we could"), a later sentence that takes it back ("close it. not yet"), someone else\'s words reported ("she told me to close it"), words about something else ("the dialog needs a button to close it"), or the action meant for another ticket';
+const readHint = (state, d) => `read their words yourself (you have the whole conversation): when they choose one of its options (${choiceList(d)}), record it with ${READ_FORM(state, d)}; when they answer it in their own words that choose no option, \`--choice other\` with their words records them as theirs (they grant nothing a choice would); then tell them in that same reply what you recorded and from which words. Words that choose nothing are no answer: ${NOT_A_CHOICE}; for those, and only for those, ${askNowHint(state, d)}. A question they already answered is never put to them a second time`;
 
-// `wf approve <id> --from-question`: the answer the person gave in the calling session's question panel, or their reply in
-// its chat to a message that asked the decision's exact question (0.7.18), as the harness recorded it. It counts when the question names this attempt and decision and carries the decision's own summary (so the
-// person saw what they confirm), offered exactly the decision's choices (when the harness records the options), and was
-// answered after the decision was created; the latest such answer is the person's. From 0.7.27 (D41) a reply in the person's
-// own words that names what the decision does counts as well, whatever the message before it said (below). Nothing else in
-// the transcript is read: the agent's words are never an answer.
+// `wf approve <id> --from-question`: the answer the person gave in the calling session's question panel, or their reply in its
+// chat, as the harness recorded it (0.7.3, D12; 0.7.18, D26). It binds by itself when the question names this attempt and
+// decision and carries its summary (so the person saw what they confirm), offered exactly the decision's choices (when the harness
+// records the options), was asked and answered after the decision was created, and the answer is exactly one option; the latest
+// such answer is the person's. 0.7.27 (D41): every other answer is the agent's to read, and `--choice <choice> --quote "<words>"`
+// records its reading: the engine proves the words are verbatim in one of the person's own messages in this session's host
+// transcript (their typed messages and panel answers; never the agent's text, a tool's output, a harness note or a sub-agent's
+// thread), written after the decision existed and not followed by an exact answer of theirs, and that the choice is one of the
+// decision's options or `other` (the person's own words, recorded as theirs). The reading is the agent's: the decision records
+// the words, the whole message, the agent's message it answered and that the agent read it.
 // Its stated limit, as for the tracker readback: the host's record, not a signature (docs/trust-model.md).
 export async function approveFromQuestion(root, id, options, { env = process.env } = {}) {
   const state = openState(root, options);
@@ -336,7 +245,10 @@ export async function approveFromQuestion(root, id, options, { env = process.env
   if (!d) throw new WfError(`no decision ${id ?? ''} on ${state.id}; \`wf decisions --attempt ${state.id}\` lists them`);
   if (d.approved) throw refuse(`${id} was already decided: ${d.approved.choice}`, null, { id: 'approve:already' });
   if (d.withdrawn) throw refuse(`${id} was withdrawn (${d.withdrawn.reason ?? ''}); the next command asks a fresh question`, withdrawnHint(state), { id: 'approve:withdrawn' });
-  if (options.choice !== undefined && options.choice !== true) throw new WfError('--choice is for the terminal; with --from-question the choice is the one the person picked in the panel');
+  const given = (v) => v !== undefined && v !== true && String(v).trim() !== '';
+  if (given(options.quote) && !given(options.choice)) throw new WfError('--quote goes with --choice: the option the person\'s words choose (or other, for their own words)');
+  if (given(options.choice) && !given(options.quote)) throw new WfError(`--choice with --from-question records your reading of the person's words: add --quote "<their words>" (the words of theirs it relies on, exactly as they typed them)`);
+  const reading = given(options.choice) ? { choice: String(options.choice).trim(), quote: String(options.quote) } : null;
   const question = questionFor(state, d);
   const how = askNowHint(state, d);
   const caller = detectOwner(env);
@@ -358,6 +270,8 @@ export async function approveFromQuestion(root, id, options, { env = process.env
   };
   const carries = (q) => carriesText(q, question);
   const after = (x) => Number.isFinite(Date.parse(x)) && Date.parse(x) >= created;
+  const time = (a) => Date.parse(a.at) || 0;
+  const latest = (xs) => [...xs].sort((x, y) => time(x) - time(y)).at(-1) ?? null;
   // A chat reply binds to this decision only when the message it answers asks this question and no other: no other open
   // decision of the attempt, and no other decision named the engine's way (`<attempt> A<n>:`, of any attempt), so a "yes" can
   // answer only one decision.
@@ -365,52 +279,75 @@ export async function approveFromQuestion(root, id, options, { env = process.env
   // An attempt id is `<item>.<n>` (engine/attempt.mjs), so "decision A1:" in the agent's own words is no decision's key.
   const named = (text) => new Set([...text.matchAll(/(?<![\p{L}\p{N}._-])([\p{L}\p{N}][\p{L}\p{N}._-]*\.\d+ A\d+):/gu)].map((m) => m[1]));
   const alone = (a) => a.channel !== 'chat' || (!others.some((q) => carriesText(a.question, q)) && [...named(a.question)].every((k) => k === `${state.id} ${d.id}`) && (a.panels ?? []).every((x) => !carriesText(x.text, question) || offered(x.options)));
-  const answers = [...(await read(t.file)), ...(chat ? await chat(t.file) : [])];
-  const refs = [state.id, state.item];
-  // A chat reply to that message is an answer only when it speaks of the decision (`addresses`); the panel's answer always is.
-  const bound = answers.filter((a) => carries(a.question) && alone(a) && offered(a.options) && after(a.at) && (a.askedAt == null || after(a.askedAt)) && (a.channel !== 'chat' || addresses(d, a.answer, { question, refs })));
+  const panelAnswers = await read(t.file);
+  const answers = [...panelAnswers, ...(chat ? await chat(t.file) : [])];
+  // Every answer to the question asked exactly: the panel's, and each chat reply to a message that carried it.
+  const asked = answers.filter((a) => carries(a.question) && alone(a) && offered(a.options) && after(a.at) && (a.askedAt == null || after(a.askedAt)));
   // 0.7.23: a chat reply to a message that explained the question in the session's own words binds when that message names
-  // this decision by its id (`<attempt> <id>`) and no other, was written after the decision existed, the reply names one of
-  // its options plainly, and it is the attempt's only open question (named failure: "ok fix all and continue" was refused
-  // because the session had explained the question in its own words). A message that never named the decision binds no
-  // reply: a "stop" or "continue" said about something else is never the person's answer to it (independent security
-  // review of 0.7.23).
+  // this decision by its id (`<attempt> <id>`) and no other, was written after the decision existed, the reply is exactly an
+  // option's label (or a choice other than yes and no, when the message showed a label), and it is the attempt's only open
+  // question. A message that never named the decision binds no reply: a "stop" or "continue" said about something else is
+  // never the person's answer to it (independent security review of 0.7.23).
   const key = new RegExp(`(?<![\\p{L}\\p{N}._-])${state.id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} ${d.id}(?![\\p{N}])`, 'u');
   const namesOnlyThis = (text) => key.test(text) && [...named(text)].every((k) => k === `${state.id} ${d.id}`);
-  // A choice id counts there only when the message also showed an option's label; an answer to the quoted question, when
-  // there is one, is the person's answer (independent review of 0.7.23: "ENG-1.1 A2 is still pending; meanwhile should I
-  // split the lint fix?" answered "yes, split it" read as the escalation's split).
-  const unquoted = others.length || bound.length ? [] : answers.filter((a) => a.channel === 'chat' && !carries(a.question) && namesOnlyThis(a.question) && after(a.at) && a.askedAt != null && after(a.askedAt) && choiceOfReply(d, a.answer, { quoted: false, ids: optionNamed(d, a.question) }).choice).map((a) => ({ ...a, unquoted: true, ids: optionNamed(d, a.question) }));
-  // 0.7.27 (I-192, D41): a reply in the person's own words that names what this decision does, in its frame's own terms ("ok we
-  // can close this then"), whatever the message before it said (named failure: the agent had described the closure as what
-  // remained, in its own words; the person's clear "close this" was refused because of the form of that message). Every reply
-  // since the decision was created that names its action counts, chosen or not, and the latest reply bound any way is the
-  // person's answer: a later "don't close it yet" takes back an earlier "close it". Words that name another open decision's
-  // action or option as well (this attempt's or another open attempt's) answer neither.
-  const seen = new Set([...bound, ...unquoted].map((a) => `${a.at}\u0000${a.answer}`));
-  const own = answers.filter((a) => a.channel === 'chat' && after(a.at) && !seen.has(`${a.at}\u0000${a.answer}`) && namesAction(d, a.answer, refs)).map((a) => ({ ...a, own: true }));
-  const last = [...bound, ...unquoted, ...own].sort((x, y) => Date.parse(x.at) - Date.parse(y.at)).at(-1);
-  if (!last) throw refuse(`no answer to ${d.id} in this session's question panel, or in its chat to a message asking exactly its question, after the decision was created, and no reply of the person's since then names what it decides`, `answer what they asked, if they asked something; then ${how}`, { id: 'approve:no-answer' });
+  const unquotedIds = (a) => (c) => !['yes', 'no'].includes(c) && optionNamed(d, a.question);
+  const unquoted = others.length || asked.length ? [] : answers.filter((a) => a.channel === 'chat' && !carries(a.question) && namesOnlyThis(a.question) && after(a.at) && a.askedAt != null && after(a.askedAt) && exactChoice(d, a.answer, { bare: false, ids: unquotedIds(a) })).map((a) => ({ ...a, unquoted: true }));
+  const exactOf = (a) => (a.unquoted ? exactChoice(d, a.answer, { bare: false, ids: unquotedIds(a) }) : exactChoice(d, a.answer));
+  // The person's latest answer to the question decides: when it is exactly one option, it is recorded as it is; any other is
+  // the agent's to read, and an earlier exact answer never outranks it (a "yes" is not recorded over a later "wait, not yet").
+  const last = latest([...asked, ...unquoted]);
+  const recordable = latest([...asked, ...unquoted].filter((a) => exactOf(a)));
+  // The person's own messages: what they typed in the chat (a reply after no message of the agent's too) and what they answered
+  // in the question panel, as the harness recorded them; never the agent's text, a tool's output, a harness note or a
+  // sub-agent's thread (engine/hosts/questions.mjs).
+  const theirs = answers.filter((a) => typeof a.answer === 'string' && a.answer.trim()).map((a) => ({ ...a, how: a.channel === 'chat' ? 'chat' : 'question-panel' }));
   const clip = (x) => String(x).trim().replace(/\s+/g, ' ').slice(0, 300);
-  if (last.own) {
-    const fits = openDecisions(root, state, d).filter((o) => namesAction(o.d, last.answer, o.refs, { phrases: true }));
-    if (fits.length) throw refuse(`no answer to ${d.id}: the person's words "${clip(last.answer)}" name what it decides, and could answer ${fits.map((o) => `${o.attempt} ${o.d.id} (${o.d.plain ?? o.d.summary})`.slice(0, 200)).join('; ')} as well, so they answer neither`, `${how}; ask each open question on its own`, { id: 'approve:no-answer' });
-    if (!choiceOfReply(d, last.answer, { own: true, refs }).choice) throw refuse(`no answer to ${d.id}: the person's latest words about what it decides, "${clip(last.answer)}", choose nothing (they negate it, make it wait on something, or ask about it)`, `answer what they asked, if they asked something; then ${how}`, { id: 'approve:no-answer' });
+  if (reading) return recordReading(root, state, d, options, { reading, theirs, after, recordable, exactOf, host, how, clip });
+  if (!last || !exactOf(last)) {
+    const since = latest(theirs.filter((a) => after(a.at)));
+    const base = `no answer to ${d.id} in this session's question panel, or in its chat to a message asking exactly its question, after the decision was created`;
+    if (!since) throw refuse(`${base}: the person has written nothing in this session since it was created`, how, { id: 'approve:no-answer' });
+    const where = (a) => (a.how === 'question-panel' ? 'their answer in the question panel' : carries(a.question ?? '') ? 'a reply to your message that asked it' : namesOnlyThis(a.question ?? '') ? 'a reply to your message that named it' : 'a reply to a message that did not ask it');
+    const toIt = last && !(last.at === since.at && last.answer === since.answer) ? `; ${last.channel === 'chat' ? 'their reply to your message that asked it' : 'their answer to it in the question panel'}: "${clip(last.answer)}"` : '';
+    throw refuse(`${base}: the engine records by itself only a reply that is exactly one of its options; the person's latest words since then: "${clip(since.answer)}" (${where(since)})${toIt}`, readHint(state, d), { id: 'approve:no-answer' });
   }
-  // The panel's answer is the option itself, or what the person typed in its free-text field; a chat reply is read as
-  // `choiceOfReply` says.
-  const { choice, said } = choiceOfReply(d, last.answer, { chat: last.channel === 'chat' || !d.choices.some((c) => norm(c) === norm(last.answer) || norm(labelOf(d, c)) === norm(last.answer)), quoted: !last.unquoted && !last.own, ids: (!last.unquoted || last.ids) && !last.own, own: Boolean(last.own), refs });
-  // An answer in the person's own words (the panel's free-text option) is theirs: recorded as `other` with the words, so the
-  // question is answered and the owner follows the words; it grants nothing a choice would (0.7.8: it left the question
-  // open for ever).
-  const words = choice ? null : String(last.answer).trim().slice(0, 2000);
-  if (!choice && !words) throw refuse(`the person's answer to ${d.id} is empty; nothing recorded`, how, { id: 'approve:mismatch' });
-  append(root, state.id, 'decision.approved', { id, choice: choice ?? 'other', ...(words ? { words } : {}), ...(said ? { reply: said } : {}), via: `${last.channel === 'chat' ? (last.own ? 'chat, in their own words' : last.unquoted ? 'chat, the question not quoted' : 'chat') : 'question-panel'} (${host.label}, host-recorded)`, question: { text: last.question.slice(0, 2000), at: last.at, askedAt: last.askedAt } }, actor(options));
-  noteAnswer(root, state, d, choice ?? 'other', words);
-  return { state: loadState(root, state.id), decision: id, choice: choice ?? 'other', words, reply: said };
+  const choice = exactOf(last);
+  append(root, state.id, 'decision.approved', { id, choice, via: `${last.channel === 'chat' ? (last.unquoted ? 'chat, the question not quoted' : 'chat') : 'question-panel'} (${host.label}, host-recorded)`, question: { text: last.question.slice(0, 2000), at: last.at, askedAt: last.askedAt } }, actor(options));
+  noteAnswer(root, state, d, choice, null);
+  return { state: loadState(root, state.id), decision: id, choice, words: null };
 }
 
-export const decisionLine = (d) => `${d.id}  ${d.kind}  ${d.withdrawn ? `withdrawn: ${d.withdrawn.reason ?? ''}` : d.approved ? `decided: ${d.approved.words ? `in their words: "${d.approved.words}"` : d.approved.choice}${d.spent ? ' (used)' : ''}` : `pending (${d.choices.join(' | ')})`}  ${d.summary}`;
+// The agent's reading of the person's words (0.7.27, D41), recorded once the engine has checked what it can: the choice is one of
+// the decision's options (by its id or its label) or `other`; the words are verbatim in one of the person's own messages, the
+// latest that holds them, written after the decision existed; no exact answer of theirs to this question came after it; and
+// when that message is itself exactly one of this question's options, the reading names that option.
+function recordReading(root, state, d, options, { reading, theirs, after, recordable, exactOf, host, how, clip }) {
+  const id = d.id;
+  const named = reading.choice.toLowerCase() === 'other' ? 'other' : d.choices.find((c) => c === reading.choice) ?? d.choices.find((c) => whole(c) === whole(reading.choice) || labelsOf(d, c).some((l) => whole(l) === whole(reading.choice))) ?? null;
+  // Named failure (review of the reading path): an agent naming a choice the decision does not have would record nothing the
+  // action can use, or a choice of another question.
+  if (!named) throw refuse(`not recorded: --choice ${reading.choice} is none of ${id}'s options (${choiceList(d)}), nor other (the person's own words, recorded as theirs)`, `name the option their words choose by its choice or its label, or \`--choice other\``, { id: 'approve:read-choice' });
+  const quote = holdsAny(theirs, reading.quote) ? reading.quote : unwrap(reading.quote) ?? reading.quote;
+  const holding = theirs.filter((a) => holds(a.answer, quote));
+  // Named failure (review of the reading path): words from the agent's own message, a tool's output or a harness note read as the
+  // person's answer; and a paraphrase the agent wrote for them.
+  if (!holding.length) throw refuse(`not recorded: "${clip(reading.quote)}" is in no message of the person's in this session (what they typed in the chat or answered in the question panel, as the harness recorded it; never your own text, a tool's output, a note the harness adds or a sub-agent's thread)`, `quote the words of theirs your reading relies on, exactly as they typed them (whole words; case and spacing aside); when they have not answered, ${how}`, { id: 'approve:quote' });
+  const at = (a) => Date.parse(a.at) || 0;
+  const fresh = holding.filter((a) => after(a.at));
+  if (!fresh.length) throw refuse(`not recorded: the person wrote "${clip(reading.quote)}" before ${id} existed (at ${[...holding].sort((x, y) => at(x) - at(y)).at(-1).at ?? 'an unknown time'}; the question was created at ${d.createdAt}): words from before a question cannot answer it`, how, { id: 'approve:quote-before' });
+  const m = [...fresh].sort((x, y) => at(x) - at(y)).at(-1);
+  const same = (a, b) => a.at === b.at && a.answer === b.answer;
+  if (recordable && at(recordable) > at(m)) throw refuse(`not recorded: the person answered ${id} after those words, "${clip(recordable.answer)}" (${recordable.at}), and that answer stands`, `run \`wf approve ${id} --from-question --attempt ${state.id}\` without --choice to record it`, { id: 'approve:quote-superseded' });
+  if (recordable && same(recordable, m) && exactOf(recordable) !== named) throw refuse(`not recorded: their reply "${clip(m.answer)}" is exactly the option ${exactOf(recordable)}${labelOf(d, exactOf(recordable)) !== exactOf(recordable) ? ` ("${labelOf(d, exactOf(recordable))}")` : ''}, not ${named}`, `run \`wf approve ${id} --from-question --attempt ${state.id}\` without --choice to record it`, { id: 'approve:quote-exact' });
+  const words = named === 'other' ? String(quote).trim().slice(0, 2000) : null;
+  append(root, state.id, 'decision.approved', { id, choice: named, ...(words ? { words } : {}), quote: String(quote).trim().slice(0, 2000), message: String(m.answer).trim().slice(0, 2000), via: `${m.how}, read by the agent (${host.label}, host-recorded)`, question: { text: String(m.question ?? '').slice(0, 2000), at: m.at, askedAt: m.askedAt ?? null } }, actor(options));
+  noteAnswer(root, state, d, named, words);
+  return { state: loadState(root, state.id), decision: id, choice: named, words, read: { quote: String(quote).trim(), message: String(m.answer).trim() } };
+}
+const holdsAny = (theirs, quote) => theirs.some((a) => holds(a.answer, quote));
+
+// An answer the agent read shows the words it relies on (0.7.27, D41).
+export const decisionLine = (d) => `${d.id}  ${d.kind}  ${d.withdrawn ? `withdrawn: ${d.withdrawn.reason ?? ''}` : d.approved ? `decided: ${d.approved.words ? `in their words: "${d.approved.words}"` : `${d.approved.choice}${d.approved.quote ? ` (read from their words "${d.approved.quote}")` : ''}`}${d.spent ? ' (used)' : ''}` : `pending (${d.choices.join(' | ')})`}  ${d.summary}`;
 
 // `wf decisions withdraw <id> --reason`: the owner takes back a question whose subject changed (a pending one, or one
 // answered and not yet used), so it is not asked or read any more. It grants nothing; the next command asks afresh.

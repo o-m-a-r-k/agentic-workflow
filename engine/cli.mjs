@@ -30,7 +30,7 @@ import { report, toCsv, toHandoffCsv, toHtml, toJson, toText } from './telemetry
 import { impact } from './topology.mjs';
 import { commentFile, hasTicket, limitItemsText, performTracker, publicAssetsProblem, recordSummary, recordTracker } from './tracker.mjs';
 import { ENGINE_VERSION, WfError, compareVersions, parseArgs, parseVersion, refuse } from './util.mjs';
-import { approveFromQuestion, approveHint, approveInTerminal, decisionLine, optionLines, pendingDecisions, questionFor, withdrawDecision } from './approve.mjs';
+import { afterAnswer, approveFromQuestion, approveHint, approveInTerminal, decisionLine, optionLines, pendingDecisions, plainLabel, questionFor, withdrawDecision } from './approve.mjs';
 import { logRefusal, readRefusals, refusalCounts } from './refusals.mjs';
 import { recordStrategy, signalsReport, signalsText } from './strategy.mjs';
 import { courseLines, pastEstimates } from './signals.mjs';
@@ -163,10 +163,13 @@ Work
   wf decisions withdraw ID --reason "what changed"
                                     take back a question whose subject changed (pending, or answered and not yet used)
   wf approve ID [--choice C]        the owner confirms a reserved decision in their own terminal
-  wf approve ID --from-question     or the agent records the owner's answer from its question panel, their chat reply to
-                                    a message that asked exactly the decision's question, or their reply naming what the
-                                    decision does in their own words (as the harness recorded it); an answer in their own
-                                    words that is no choice is recorded as theirs (choice "other"), to follow
+  wf approve ID --from-question     or the agent records the owner's answer that is exactly one option: in its question
+                                    panel, or their chat reply to a message that asked exactly the decision's question
+                                    (as the harness recorded it)
+  wf approve ID --from-question --choice C --quote "their words"
+                                    or the agent records its reading of the owner's answer in more words: the option their
+                                    words choose (or other: their own words, recorded as theirs, to follow) and the words it
+                                    relies on, verbatim from one of their messages in this session after the question existed
   wf lesson add|waive|recur|merge|distinct|move|set|apply|show|list|preview|review|export
                                     the project's lessons (.workflow/lessons/): capture, enforce, recurrence, merge lessons that describe one mistake
   wf reopen --item ID --reason "feedback" [--no-lesson "why"]
@@ -202,7 +205,7 @@ const print = (options, human, data) => {
 // 0.7.27 (I-192): a question the person has not answered is named where the owner reads what is next, with the form that asks
 // it (an escalation is asked by the next step itself). Named failure (field): the agent reported a pending closure as
 // "Remaining: workflow closure and cleanup", in its own words, and never asked it; the person's answer to that status was refused.
-const unansweredLines = (s) => (['done', 'abandoned'].includes(s.phase) ? [] : pendingDecisions(s).filter((x) => x.kind !== 'escalation').map((d) => `  waiting on the person: ${d.id} is not answered. Ask it in your reply (a mention in your own words, such as what remains, does not ask it): quote "${questionFor(s, d)}" exactly with its options (${optionLines(d)}) and ask nothing else in that message; after their answer, \`wf approve ${d.id} --from-question --attempt ${s.id}\``));
+const unansweredLines = (s) => (['done', 'abandoned'].includes(s.phase) ? [] : pendingDecisions(s).filter((x) => x.kind !== 'escalation').map((d) => `  waiting on the person: ${d.id} is not answered. Ask it in your reply (a mention in your own words, such as what remains, does not ask it): quote "${questionFor(s, d)}" exactly with its options (${optionLines(d)}) and ask nothing else in that message; after they answer, ${afterAnswer(s, d)}`));
 
 // An open attempt whose worktree folder is gone is shown as orphaned with its missing paths (orphansOf, orphanNext in
 // lifecycle.mjs, where every next line is decided).
@@ -1180,10 +1183,14 @@ async function dispatch(cmd, sub, positional, options) {
     }
     case 'approve': {
       const id = sub ?? positional[0];
-      if (!id) throw new WfError('usage: wf approve ID [--choice C] --attempt ATTEMPT (in the owner\'s own terminal) | wf approve ID --from-question --attempt ATTEMPT (the owner\'s answer in the question panel)');
+      if (!id) throw new WfError('usage: wf approve ID [--choice C] --attempt ATTEMPT (in the owner\'s own terminal) | wf approve ID --from-question [--choice C --quote "their words"] --attempt ATTEMPT (the owner\'s answer in the question panel or the chat)');
       const r = options['from-question'] ? await approveFromQuestion(root, id, options) : await approveInTerminal(root, id, options);
-      const settled = (r.state.decisions ?? []).find((x) => x.id === r.decision)?.settles?.[r.choice] ?? [];
-      print(options, `${r.decision} decided: ${r.words ? `in the person's own words: "${r.words}" (follow them; it grants nothing a choice would)` : r.choice}${r.reply ? ` (their reply: "${r.reply}"; follow any condition in it)` : ''}.${settled.length ? ` This answer also decides ${settled.join(', ')}: record each with the command it needs (\`wf scope waive --finding <ids>\` for findings that block, \`wf scope defer\` or \`wf scope ticket\` for the rest, \`wf discovered close\` for a discovered issue); none asks the person again.` : ''} next: ${nextAction(root, r.state)}`, { decision: r.decision, choice: r.choice, ...(r.words ? { words: r.words } : {}), ...(r.reply ? { reply: r.reply } : {}) });
+      const decided = (r.state.decisions ?? []).find((x) => x.id === r.decision);
+      const settled = decided?.settles?.[r.choice] ?? [];
+      // 0.7.27 (D41): the agent read the person's words; it tells them what it recorded, from which words, in the same reply, so a
+      // misreading is seen at once and corrected (named failure: a reading the person never sees cannot be corrected).
+      const readBack = r.read ? `, as you read the person's words "${r.read.quote}"${r.read.message !== r.read.quote ? ` in their message "${r.read.message}"` : ''}. In this same reply, tell them what you recorded and from which words (${r.words ? 'their own words, recorded as theirs' : `"${plainLabel(decided, r.choice)}"`} to "${questionFor(r.state, decided)}"), and follow anything else their message asks; if they say that is not what they meant, honour it: while it is not used, withdraw it with their words (\`wf decisions withdraw ${r.decision} --attempt ${r.state.id} --reason "<their words>"\`) and record what they meant; once used, tell them what it did and follow their correction` : '';
+      print(options, `${r.decision} decided: ${r.words ? `in the person's own words: "${r.words}" (follow them; it grants nothing a choice would)` : r.choice}${readBack}.${settled.length ? ` This answer also decides ${settled.join(', ')}: record each with the command it needs (\`wf scope waive --finding <ids>\` for findings that block, \`wf scope defer\` or \`wf scope ticket\` for the rest, \`wf discovered close\` for a discovered issue); none asks the person again.` : ''} next: ${nextAction(root, r.state)}`, { decision: r.decision, choice: r.choice, ...(r.words ? { words: r.words } : {}), ...(r.read ? { read: r.read } : {}) });
       return 0;
     }
     case 'intent': {

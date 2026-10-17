@@ -61,7 +61,6 @@ export const OWNER_CHOICES = ['continue', 'split', 'deliver-core', 'stop'];
 // What the person sees for each choice of the round escalation, and what follows it (0.7.11: plain questions).
 const OWNER_WORDS = {
   labels: { continue: 'Keep going as now', split: 'Split off the rest as its own ticket', 'deliver-core': 'Ship what the criteria need now', stop: 'Stop this ticket' },
-  aliases: { continue: ['keep going', 'go on', 'carry on'], split: ['split it', 'split off the rest'], 'deliver-core': ['ship what is needed', 'ship the core'], stop: ['stop it'] },
   then: {
     continue: 'the next fix and review round starts; this question comes back after as many rounds again',
     split: 'the work that keeps reopening moves to a sibling attempt delivered with this one',

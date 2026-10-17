@@ -664,11 +664,13 @@ export function reduce(entries) {
         // 0.7.11: a decision may carry the person's words for it: a plain question, a plain label and what follows for each
         // choice, and a recommendation (engine/approve.mjs). 0.7.23 (D29): the agent's context and technical line, the plain
         // line per item it names, and the items an escalation's choices decide.
-        s.decisions.push({ id: d.id, kind: d.kind, key: d.key, summary: d.summary, choices: d.choices, ...(d.plain ? { plain: d.plain } : {}), ...(d.labels ? { labels: d.labels } : {}), ...(d.then ? { then: d.then } : {}), ...(d.aliases ? { aliases: d.aliases } : {}), ...(d.recommend ? { recommend: d.recommend } : {}), ...(d.context ? { context: d.context } : {}), ...(d.technical ? { technical: d.technical } : {}), ...(d.items ? { items: d.items } : {}), ...(d.settles ? { settles: d.settles } : {}), ...(d.personDirected ? { personDirected: d.personDirected } : {}), createdAt: e.at, by: e.actor, approved: null, ...(d.what ? { what: d.what } : {}) });
+        s.decisions.push({ id: d.id, kind: d.kind, key: d.key, summary: d.summary, choices: d.choices, ...(d.plain ? { plain: d.plain } : {}), ...(d.labels ? { labels: d.labels } : {}), ...(d.then ? { then: d.then } : {}), ...(d.recommend ? { recommend: d.recommend } : {}), ...(d.context ? { context: d.context } : {}), ...(d.technical ? { technical: d.technical } : {}), ...(d.items ? { items: d.items } : {}), ...(d.settles ? { settles: d.settles } : {}), ...(d.personDirected ? { personDirected: d.personDirected } : {}), createdAt: e.at, by: e.actor, approved: null, ...(d.what ? { what: d.what } : {}) });
         break;
       case 'decision.approved': {
         const x = s.decisions.find((y) => y.id === d.id);
-        if (x) x.approved = { choice: d.choice, at: e.at, via: d.via, ...(d.words ? { words: d.words } : {}), ...(d.reply ? { reply: d.reply } : {}) };
+        // 0.7.27 (D41): an answer the agent read carries the words it relied on (`quote`) and the person's whole message; the
+        // message it answered is kept for every chat or panel answer.
+        if (x) x.approved = { choice: d.choice, at: e.at, via: d.via, ...(d.words ? { words: d.words } : {}), ...(d.reply ? { reply: d.reply } : {}), ...(d.quote ? { quote: d.quote, message: d.message ?? null } : {}), ...(d.question ? { question: d.question } : {}) };
         break;
       }
       // A question withdrawn by the owner (0.7.8): its subject changed, so it is no longer asked; it never granted anything.
