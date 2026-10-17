@@ -5,6 +5,7 @@ import path from 'node:path';
 import { ok, singleRepoProject, state, wf } from './helpers.mjs';
 import { channelOf } from '../engine/channels.mjs';
 import { append } from '../engine/ledger.mjs';
+import { FRAMES, composeAsk } from '../engine/asking.mjs';
 
 // 0.7.3, named failure (field): the person, working from the phone, could confirm no reserved decision, because `wf
 // approve` needed their own terminal. An attempt whose owner session had locked itself in the evidence folder still read
@@ -87,30 +88,30 @@ test('an answer counts only when bound to the decision, offered its choices, giv
   // A "yes" typed to no message that asked the question is recorded by nothing automatically: the agent reads it (0.7.27, D41;
   // scenarios below).
   fs.writeFileSync(transcript, JSON.stringify({ type: 'user', timestamp: at(1000), message: { role: 'user', content: 'yes, go ahead with A1' } }) + '\n');
-  refusedWith(/no answer to A1 in this session's question panel/, 'the person typed yes in the chat, to no message that asked it');
+  refusedWith(/A1 is not recorded by itself: it followed no message of yours/, 'the person typed yes in the chat, to no message that asked it');
   refusedWith(/read their words yourself/, 'the agent is told to read them');
   // I-135: a panel that showed nothing is not the end of the road: the reply explains the decision, and the terminal route is given.
   refusedWith(/say in your reply, in plain words, what this decides, why, and what happens after each choice \(a question panel may not show, and its acceptance proves nothing\)/, 'the decision is explained in the reply');
-  refusedWith(/ask them in your message, quoting the question ".*" exactly with its options .* so they can type the answer \(you may also show it in your question panel: a typed reply and a panel answer both count\)/, 'the chat route is given first');
+  refusedWith(/ask them in your message, quoting the question ".*" exactly with its options .* so they can type the answer \(you may also show it in your question panel: a typed reply and a panel answer both count; in the panel, in `AskUserQuestion` each option's `label` is its label alone/, 'the chat route is given first, with how the host\'s panel takes its options');
   refusedWith(new RegExp(`or they run \`wf approve A1 --attempt ${e.id.replace('.', '\\.')}\` in their own terminal`), 'the terminal route is given');
   claudeAsks(p, { question: `${e.id} ${d.id}: lift it?`, answer: 'yes' });
-  refusedWith(/no answer to A1/, 'the question does not say what the decision does');
+  refusedWith(/A1 is not recorded by itself: the panel question named A1 but did not quote its question as wf printed it/, 'the question does not say what the decision does');
   claudeAsks(p, { question: `${d.id}: ${d.plain ?? d.summary}`, answer: 'yes' });
-  refusedWith(/no answer to A1/, 'the question does not name the attempt');
+  refusedWith(/A1 is not recorded by itself: the panel question did not carry A1's question as wf printed it/, 'the question does not name the attempt');
   claudeAsks(p, { question, options: ['yes', 'no', 'yes and delete the branch'], answer: 'yes' });
-  refusedWith(/no answer to A1/, 'other options were offered');
+  refusedWith(/A1 is not recorded by itself: the panel offered "yes", "no", "yes and delete the branch", not exactly A1's options \("Lift the pause", "Keep it paused"\)/, 'other options were offered');
   claudeAsks(p, { question, answer: 'yes', when: before });
-  refusedWith(/no answer to A1/, 'answered before the decision existed');
+  refusedWith(/A1 is not recorded by itself/, 'answered before the decision existed');
   claudeAsks(p, { question, answer: 'yes', askedWhen: before });
-  refusedWith(/no answer to A1/, 'asked before the decision existed, answered after');
+  refusedWith(/A1 is not recorded by itself: the panel question was asked before A1 existed/, 'asked before the decision existed, answered after');
   claudeAsks(p, { question: `${e.id} ${d.id}0: ${d.plain ?? d.summary} (another decision)`, answer: 'yes' });
-  refusedWith(/no answer to A1/, 'a question for A10 is not one for A1');
+  refusedWith(/A1 is not recorded by itself: the panel question did not carry A1's question/, 'a question for A10 is not one for A1');
   claudeAsks(p, { question: `X${question}`, answer: 'yes' });
-  refusedWith(/no answer to A1/, 'another attempt whose id ends the same');
+  refusedWith(/A1 is not recorded by itself: the panel question did not carry A1's question/, 'another attempt whose id ends the same');
   claudeAsks(p, { question, answer: 'yes', sidechain: true });
-  refusedWith(/no answer to A1/, 'a sub-agent line is not the session\'s panel');
+  refusedWith(/A1 is not recorded by itself/, 'a sub-agent line is not the session\'s panel');
   claudeAsks(p, { question, answer: 'yes', session: 'c1aude00-0000-4000-8000-0000000000ff' });
-  refusedWith(/no answer to A1/, 'another session\'s panel');
+  refusedWith(/A1 is not recorded by itself/, 'another session\'s panel');
 
   const outside = approveQ(p, e.id, d.id, {});
   assert.equal(outside.code, 75);
@@ -223,7 +224,7 @@ test('chat: the person\'s reply to a message asking exactly the decision\'s ques
   const env = { CLAUDE_CODE_SESSION_ID: CLAUDE };
   // A "yes" to a message that does not carry the question binds to nothing.
   claudeChat(p, { said: 'Shall I go ahead and finish the delivery?', reply: 'Yes' });
-  assert.match(approveQ(p, e.id, d.id, env).err, /no answer to A1 in this session's question panel, or in its chat to a message asking exactly its question/);
+  assert.match(approveQ(p, e.id, d.id, env).err, /A1 is not recorded by itself: your message before it did not carry A1's question as wf printed it/);
   // A message that also carries another open decision's question binds no reply to either.
   // A second open decision: taking over the live owner's attempt.
   assert.equal(adopt(p, e.id, env).code, 75);
@@ -231,7 +232,7 @@ test('chat: the person\'s reply to a message asking exactly the decision\'s ques
   assert.ok(other, "a second open decision exists");
   {
     claudeChat(p, { said: `Two questions.\n${question}\n${e.id} ${other.id}: ${other.plain ?? other.summary}`, reply: 'yes', saidWhen: at(1500), when: at(2000) });
-    assert.match(approveQ(p, e.id, d.id, env).err, /no answer to A1/);
+    assert.match(approveQ(p, e.id, d.id, env).err, /A1 is not recorded by itself: your message before it carried another decision's question too/);
   }
   // The question quoted exactly, its options listed, and the person's reply exactly one of them.
   claudeChat(p, { said: `Lifting the hold lets the work continue.\n\n${question}\n\nOptions: yes / no`, reply: 'Yes.', saidWhen: at(2500), when: at(3000) });
@@ -273,7 +274,7 @@ test('chat on Codex: a reply after the agent\'s message with the exact question 
   // "yesterday" is not "yes", and since 0.7.27 (I-192) a reply that names none of the options speaks of something else: it is no
   // answer, not the person's own words for this one.
   write('yesterday was fine');
-  assert.match(approveQ(p, e.id, d.id, env).err, /no answer to A1/);
+  assert.match(approveQ(p, e.id, d.id, env).err, /A1 is not recorded by itself: their reply is not exactly one of its options/);
   assert.equal(state(p.root, e.id).decisions[0].approved, null, '"yesterday" is not "yes"');
   write('yes');
   assert.match(ok(approveQ(p, e.id, d.id, env)).out, /A1 decided: yes/);
@@ -316,15 +317,15 @@ test('chat binding: every turn of the person\'s ends the message; only the final
   // A slash command between the question and an unrelated "yes" ends the message the question was in.
   let t = heldAttempt('chat-turn', 'ENG-960');
   claudeLines(t.p, [says(`${t.question}\n\nyes / no`, at(500)), types('<command-name>/status</command-name>', at(600)), says('Shall I also update the README?', at(700)), types('yes', at(1000))]);
-  assert.match(approveQ(t.p, t.e.id, t.d.id, env).err, /no answer to A1/);
+  assert.match(approveQ(t.p, t.e.id, t.d.id, env).err, /A1 is not recorded by itself: your message before it did not carry A1's question/);
   // A question written between tool calls is not the message the person answers.
   t = heldAttempt('chat-midturn', 'ENG-961');
   claudeLines(t.p, [says(`${t.question}\n\nyes / no`, at(500)), tool(at(600)), says('Waiting for the gate.', at(700)), types('yes', at(1000))]);
-  assert.match(approveQ(t.p, t.e.id, t.d.id, env).err, /no answer to A1/);
+  assert.match(approveQ(t.p, t.e.id, t.d.id, env).err, /A1 is not recorded by itself: your message before it did not carry A1's question/);
   // A message that also names another attempt's decision binds to neither.
   t = heldAttempt('chat-other-attempt', 'ENG-962');
   claudeLines(t.p, [says(`${t.question}\nENG-999.1 A1: close ENG-999.1\n\nyes / no`, at(500)), types('yes', at(1000))]);
-  assert.match(approveQ(t.p, t.e.id, t.d.id, env).err, /no answer to A1/);
+  assert.match(approveQ(t.p, t.e.id, t.d.id, env).err, /A1 is not recorded by itself: your message before it carried another decision's question too/);
 });
 
 // 0.7.27 (D41): the engine reads no meaning into a reply. One that takes it back, or adds a condition, is refused by itself and
@@ -419,14 +420,14 @@ test('typed replies: exactly one option binds; without the question quoted, only
   const env = { CLAUDE_CODE_SESSION_ID: CLAUDE };
   // The session explained the question in its own words: a bare "yes" says nothing about which question it answers.
   claudeChat(p, { said: 'The store review came back. Want me to carry on?', reply: 'yes' });
-  assert.match(approveQ(p, e.id, d.id, env).err, /no answer to A1/);
+  assert.match(approveQ(p, e.id, d.id, env).err, /A1 is not recorded by itself: your message before it did not carry A1's question/);
   // A message that never names the decision binds no bare choice or word of its own ("carry on" is no name of this one).
   claudeChat(p, { said: 'The store review came back. Should the pause end?', reply: 'ok carry on then', saidWhen: at(1200), when: at(1400) });
-  assert.match(approveQ(p, e.id, d.id, env).err, /no answer to A1/);
+  assert.match(approveQ(p, e.id, d.id, env).err, /A1 is not recorded by itself: your message before it did not carry A1's question/);
   // A message that names the decision in the session's own words binds only a reply that is exactly an option's label.
   for (const [i, words] of ["don't lift the pause yet", 'ok lift the pause and ship it', 'yes'].entries()) {
     claudeChat(p, { said: `About ${e.id} ${d.id}: the store review came back. Should the pause end?`, reply: words, saidWhen: at(1500 + i * 400), when: at(1700 + i * 400) });
-    assert.match(approveQ(p, e.id, d.id, env).err, /no answer to A1/, words);
+    assert.match(approveQ(p, e.id, d.id, env).err, /A1 is not recorded by itself: your message before it named A1 but did not quote its question as wf printed it, so only an option's label binds there/, words);
   }
   claudeChat(p, { said: `About ${e.id} ${d.id}: the store review came back. Should the pause end?`, reply: 'Lift the pause', saidWhen: at(2500), when: at(3000) });
   const typed = ok(approveQ(p, e.id, d.id, env));
@@ -577,7 +578,7 @@ test('0.7.27 (I-192, D41): Claude Code, the field shape: the first message of th
   // The first message of the day follows the message that asked the question but speaks of something else: nothing is recorded
   // that would stand in the way of a real answer.
   const first = approveQ(p, e.id, d.id, env);
-  assert.match(first.err, /no answer to A1/);
+  assert.match(first.err, /A1 is not recorded by itself: their reply is not exactly one of its options/);
   readsFirst(first.err, 'the first message of the day');
   assert.equal(state(p.root, e.id).decisions[0].approved, null);
   claudeLines(p, [
@@ -844,4 +845,190 @@ test('0.7.27 (D41, review of the rework): the exact and quote paths hold only wh
     assert.equal(approveQ(t.p, t.e.id, id, env).code, 75, id);
     assert.equal(state(t.p.root, t.e.id).decisions.find((x) => x.id === id).approved, null, id);
   }
+});
+
+// 0.7.28 (I-202), named failure (field): the person answered "Use the corrected step" in Codex's question panel
+// (`request_user_input_async`, whose options are plain strings). The agent had put each label with its description into the string,
+// "Use the corrected step (Recommended): the corrected step replaces it …", so the panel did not offer exactly the decision's labels,
+// and the engine said there was no answer instead of naming the mismatch. Its chat message had put the question in Markdown and
+// typographic quotes, so the exact-question route did not match either. The person's answer was visible and is never asked again.
+function correctionDecision(p, attempt, n = 1) {
+  const frame = FRAMES.correctCheck({ item: attempt.split('.')[0] });
+  const words = composeAsk({ context: 'The test step that checks the export was fixed after the work started.', recommend: { choice: 'yes', why: 'the corrected step checks what the ticket changed' } }, frame, ['yes', 'no']);
+  append(p.root, attempt, 'decision.created', { id: `A${n}`, kind: 'override-gate', key: 'correct-admission:export:ab12cd3', summary: `correct the admission step export of ${attempt}`, choices: ['yes', 'no'], ...words }, 'human:scenario');
+  return state(p.root, attempt).decisions.find((x) => x.id === `A${n}`);
+}
+const USE = 'Use the corrected step (Recommended): the corrected step replaces it (the original stays in the record); a fresh code review and the full test run follow';
+const KEEP = 'Keep the original step: the original step stays';
+function codexRows(p, rows, name = 'corr') {
+  const file = path.join(homeOf(p), '.codex', 'sessions', '2026', '10', '17', `rollout-${name}-${CODEX}.jsonl`);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, [{ timestamp: at(), type: 'session_meta', payload: { id: CODEX, source: 'vscode', originator: 'Codex Desktop' } }, ...rows].map((r) => JSON.stringify(r)).join('\n') + '\n');
+}
+const codexAsks = (title, options, call = 'call_corr', ms = 400) => ({ timestamp: at(ms), type: 'response_item', payload: { type: 'function_call', name: 'request_user_input_async', call_id: call, arguments: JSON.stringify({ questions: [{ title, options }] }) } });
+const codexReply = (title, answer, call = 'call_corr', ms = 1000) => ({ timestamp: at(ms), type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: `<send_user_message_question_reply>${JSON.stringify([{ questionItemId: JSON.stringify(['request_user_input_async', call, 0]), question: title, answer }])}</send_user_message_question_reply>` }] } });
+const codexSays = (text, ms) => ({ timestamp: at(ms), type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text }] } });
+const codexTypes = (text, ms) => ({ timestamp: at(ms), type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text }] } });
+const curly = (x) => x.replace(/"([^"]*)"/g, '“$1”');
+
+test('0.7.28 (I-202): a panel option that is a label with the recommendation suffix or a description counts as that label; the answer binds', () => {
+  for (const [i, answer] of [USE, 'Use the corrected step'].entries()) {
+    const p = singleRepoProject(`approve-option-tail-${i}`, {});
+    const e = ok(wf(p.root, ['entry', '--item', `ENG-130${i}`, '--json'], silent)).json();
+    const d = correctionDecision(p, e.id);
+    const question = `${e.id} ${d.id}: ${d.plain}`;
+    codexRows(p, [codexAsks(question, [USE, KEEP]), codexReply(question, answer)]);
+    const r = ok(approveQ(p, e.id, d.id, codexEnv));
+    assert.match(r.out, /A1 decided: yes/, answer);
+    assert.match(state(p.root, e.id).decisions[0].approved.via, /^question-panel \(Codex, host-recorded\)$/, answer);
+  }
+  // Picked in a panel whose question was not this one's, an option string is still exactly that option: never read as another.
+  {
+    const p = singleRepoProject('approve-option-exact', {});
+    const e = ok(wf(p.root, ['entry', '--item', 'ENG-1309', '--json'], silent)).json();
+    const d = correctionDecision(p, e.id);
+    codexRows(p, [codexAsks('Which step should the gate use?', [USE, KEEP]), codexReply('Which step should the gate use?', USE)]);
+    const r = readQ(p, e.id, d.id, codexEnv, 'no', USE);
+    assert.equal(r.code, 75);
+    assert.match(r.err, /is exactly the option yes \("Use the corrected step"\), not no/);
+    assert.equal(state(p.root, e.id).decisions[0].approved, null);
+  }
+  // A string that only starts like a label, or adds words of its own after it, is no label: nothing binds by itself.
+  const p = singleRepoProject('approve-option-other', {});
+  const e = ok(wf(p.root, ['entry', '--item', 'ENG-1310', '--json'], silent)).json();
+  const d = correctionDecision(p, e.id);
+  const question = `${e.id} ${d.id}: ${d.plain}`;
+  const odd = 'Use the corrected step and skip the review: faster';
+  codexRows(p, [codexAsks(question, [odd, KEEP]), codexReply(question, odd)]);
+  const refused = approveQ(p, e.id, d.id, codexEnv);
+  assert.equal(refused.code, 75);
+  assert.equal(state(p.root, e.id).decisions[0].approved, null);
+  // The refusal names what did not match and gives the read route: the panel answer is the person's words, quotable.
+  assert.match(refused.err, /the panel offered "Use the corrected step and skip the review: faster", "Keep the original step: the original step stays", not exactly A1's options \("Use the corrected step", "Keep the original step"\)/);
+  assert.match(refused.err, /each option is the label alone/);
+  assert.match(refused.err, /their answer in the question panel is their own words: quote it/);
+  assert.doesNotMatch(refused.err, /no answer to A1/);
+  readsFirst(refused.err, 'a panel whose options were not the labels');
+  // The host's note says how its panel takes options: Codex's are plain strings, each the label alone.
+  assert.match(refused.err, /in the panel, `request_user_input_async` takes each option as one plain string: write the label alone in it/);
+  const read = ok(readQ(p, e.id, d.id, codexEnv, 'yes', odd));
+  assert.match(read.out, /A1 decided: yes, as you read the person's words "Use the corrected step and skip the review: faster"/);
+  assert.match(state(p.root, e.id).decisions[0].approved.via, /^question-panel, read by the agent \(Codex, host-recorded\)$/);
+  // Later words about something else do not hide the panel answer: the refusal still names its mismatch and shows it.
+  const q = singleRepoProject('approve-option-later', {});
+  const f = ok(wf(q.root, ['entry', '--item', 'ENG-1311', '--json'], silent)).json();
+  const g = correctionDecision(q, f.id);
+  const asked = `${f.id} ${g.id}: ${g.plain}`;
+  codexRows(q, [codexAsks(asked, [odd, KEEP]), codexReply(asked, odd), codexSays('Checking the gate.', 1200), codexTypes('is the gate green?', 1500)]);
+  const later = approveQ(q, f.id, g.id, codexEnv);
+  assert.match(later.err, /A1 is not recorded by itself: the panel offered "Use the corrected step and skip the review: faster"/);
+  assert.match(later.err, /the person's latest words since then: "is the gate green\?" \(a reply to a message that did not ask it\); their answer to it in the question panel: "Use the corrected step and skip the review: faster"/);
+  assert.match(later.err, /their answer in the question panel is their own words: quote it as you would a typed reply \("Use the corrected step and skip the review: faster"\)/);
+});
+
+test('0.7.28 (I-202): the exact question in Markdown emphasis, code marks or typographic quotes binds a bare yes; the guards still hold', () => {
+  const wraps = [
+    (q) => q.replace(/^(\S+ A1:)/, '**$1**'),
+    (q) => `> **${curly(q)}**`,
+    (q) => `\`${q.replace(/^(\S+ A1:)/, '$1`')}`.replace(/^``/, '`'),
+    (q) => curly(q).replace(/^(\S+ A1):/, '_$1_:'),
+  ];
+  for (const [i, wrap] of wraps.entries()) {
+    const p = singleRepoProject(`approve-shown-${i}`, {});
+    const e = ok(wf(p.root, ['entry', '--item', `ENG-132${i}`, '--json'], silent)).json();
+    const d = correctionDecision(p, e.id);
+    const question = `${e.id} ${d.id}: ${d.plain}`;
+    const shown = wrap(question);
+    assert.ok(!shown.includes(question), `the message does not carry the raw text (${i})`);
+    codexRows(p, [codexSays(`The corrected step is ready.\n\n${shown}\n\n- **Use the corrected step** (Recommended)\n- **Keep the original step**`, 500), codexTypes('yes', 1000)]);
+    const r = ok(approveQ(p, e.id, d.id, codexEnv));
+    assert.match(r.out, /A1 decided: yes/, shown);
+    assert.match(state(p.root, e.id).decisions[0].approved.via, /^chat \(Codex, host-recorded\)$/, shown);
+  }
+  // Presented the same way, a message that also asks something else binds no bare yes; another decision's text is no match.
+  const p = singleRepoProject('approve-shown-guard', {});
+  const e = ok(wf(p.root, ['entry', '--item', 'ENG-1330', '--json'], silent)).json();
+  const d = correctionDecision(p, e.id);
+  const question = `${e.id} ${d.id}: ${d.plain}`;
+  codexRows(p, [codexSays(`**${curly(question)}**\n\nAlso: should I update the README?`, 500), codexTypes('yes', 1000)]);
+  const r = approveQ(p, e.id, d.id, codexEnv);
+  assert.equal(r.code, 75);
+  assert.match(r.err, /your message that asked it also asked something else/);
+  codexRows(p, [codexSays(`**${curly(question.replace(' A1:', ' A10:'))}**`, 500), codexTypes('yes', 1000)]);
+  assert.equal(approveQ(p, e.id, d.id, codexEnv).code, 75, 'A10 is not A1');
+  assert.equal(state(p.root, e.id).decisions[0].approved, null);
+  // A message that names the decision but paraphrases its question says so, and the reply is the agent's to read.
+  codexRows(p, [codexSays(`About ${e.id} ${d.id}: shall I swap in the corrected step?`, 500), codexTypes('yes', 1000)]);
+  const named = approveQ(p, e.id, d.id, codexEnv);
+  assert.match(named.err, /your message before it named A1 but did not quote its question as wf printed it/);
+  readsFirst(named.err, 'a paraphrased question');
+});
+
+// 0.7.28 (I-203), from the review of 0.7.27: a decision an earlier release created has no labels, and the agent writes its question
+// with a "?" appended ("ENG-1.1 A1: close ENG-1.1 as shipped without its acceptance (…)?"); the person's bare "yes" was refused in
+// the chat and in the panel, because the check that the message asked nothing else saw that "?". A panel offering the decision's
+// frame labels was refused with no read hint, and the hint said "your message" for a panel question too.
+test('0.7.28 (I-203): a "?" right after a legacy question and a panel offering its frame labels bind the exact answer; the hint is worded for panels', () => {
+  const legacy = (name, item) => {
+    const p = singleRepoProject(name, {});
+    const e = ok(wf(p.root, ['entry', '--item', item, '--json'], silent)).json();
+    const d = legacyClose(p, e.id);
+    return { p, e, d, q: `${e.id} ${d.id}: ${d.summary}` };
+  };
+  let t = legacy('approve-legacy-mark', 'ENG-1340');
+  claudeLines(t.p, [says(`The change is on main.\n\n${t.q}?\n\nOptions: yes / no`, at(500)), types('yes', at(1000))]);
+  assert.match(ok(approveQ(t.p, t.e.id, t.d.id, env)).out, /A1 decided: yes/, 'chat');
+  assert.match(state(t.p.root, t.e.id).decisions[0].approved.via, /^chat \(Claude Code, host-recorded\)$/);
+  t = legacy('approve-legacy-mark-panel', 'ENG-1341');
+  claudeAsks(t.p, { question: `**${t.q}**?`, answer: 'yes' });
+  assert.match(ok(approveQ(t.p, t.e.id, t.d.id, env)).out, /A1 decided: yes/, 'panel');
+  t = legacy('approve-legacy-frame-panel', 'ENG-1342');
+  claudeAsks(t.p, { question: t.q, options: ['Close it as shipped (Recommended)', 'Keep it open'], answer: 'Close it as shipped (Recommended)' });
+  assert.match(ok(approveQ(t.p, t.e.id, t.d.id, env)).out, /A1 decided: yes/, 'frame labels in the panel');
+  // A "?" that does not follow the question still asks something else.
+  t = legacy('approve-legacy-more', 'ENG-1343');
+  claudeLines(t.p, [says(`${t.q}, and shall I delete the branch too?\n\nOptions: yes / no`, at(500)), types('yes', at(1000))]);
+  assert.match(approveQ(t.p, t.e.id, t.d.id, env).err, /your message that asked it also asked something else/);
+  // A panel question that asked something else is named as the panel question, not as a message of the agent's.
+  t = legacy('approve-legacy-panel-else', 'ENG-1344');
+  claudeAsks(t.p, { question: `${t.q} Also: should I update the README?`, answer: 'yes' });
+  const r = approveQ(t.p, t.e.id, t.d.id, env);
+  assert.equal(r.code, 75);
+  assert.match(r.err, /the panel question also asked something else, so a bare yes or no there is yours to read/);
+  assert.doesNotMatch(r.err, /your message that asked it/);
+  assert.match(r.err, /their answer in the question panel is their own words: quote it/);
+  assert.equal(state(t.p.root, t.e.id).decisions[0].approved, null);
+});
+
+// 0.7.28 (I-174), older field report: the exact question was quoted; the person asked what it meant, got the explanation, and
+// answered "yes"; the engine recorded the clarification instead of the later yes. The 0.7.27 engine records by itself only an
+// exact answer, and the latest reply to the question decides.
+test('0.7.28 (I-174): after a clarification, the person\'s later exact "yes" decides; the clarification is never recorded by itself', () => {
+  const t = heldAttempt('approve-clarified', 'ENG-1350');
+  claudeLines(t.p, [
+    says(`${t.question}\n\nyes / no`, at(500)),
+    types('what does lifting it change for the users?', at(1000)),
+    says(`Lifting it lets the work continue; nothing ships until the review passes.\n\n${t.question}\n\nyes / no`, at(1500)),
+    types('yes', at(2000)),
+  ]);
+  assert.match(ok(approveQ(t.p, t.e.id, t.d.id, env)).out, /A1 decided: yes/);
+  const recorded = state(t.p.root, t.e.id).decisions[0].approved;
+  assert.equal(recorded.choice, 'yes');
+  assert.match(recorded.question.text, /^Lifting it lets the work continue/, 'bound to the message that explained and asked it again');
+  // Explained without asking it again: the "yes" is the agent's to read, the refusal shows it as their latest words, and the
+  // reading records it, not the clarification.
+  const u = heldAttempt('approve-clarified-explained', 'ENG-1351');
+  claudeLines(u.p, [
+    says(`${u.question}\n\nyes / no`, at(500)),
+    types('what does lifting it change for the users?', at(1000)),
+    says('Lifting it lets the work continue; nothing ships until the review passes.', at(1500)),
+    types('yes', at(2000)),
+  ]);
+  const refused = approveQ(u.p, u.e.id, u.d.id, env);
+  assert.equal(refused.code, 75);
+  assert.match(refused.err, /the person's latest words since then: "yes" \(a reply to a message that did not ask it\); their reply to your message that asked it: "what does lifting it change for the users\?"/);
+  readsFirst(refused.err, 'a yes after an explanation that did not ask again');
+  assert.equal(state(u.p.root, u.e.id).decisions[0].approved, null);
+  ok(readQ(u.p, u.e.id, u.d.id, env, 'yes', 'yes'));
+  assert.deepEqual([state(u.p.root, u.e.id).decisions[0].approved.choice, state(u.p.root, u.e.id).decisions[0].approved.message], ['yes', 'yes']);
 });

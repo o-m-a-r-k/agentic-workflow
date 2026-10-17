@@ -10,7 +10,7 @@
 import path from 'node:path';
 import { actor, openState } from './attempt.mjs';
 import { append, attemptDir, loadState, recordedTogether } from './ledger.mjs';
-import { chose, createDecision, decisionFor, optionLines, questionFor, READ_LINE, requireYes, settledBy, SHOW_TEXT } from './approve.mjs';
+import { chose, createDecision, decisionFor, optionLines, panelNote, questionFor, READ_LINE, requireYes, settledBy, SHOW_TEXT } from './approve.mjs';
 import { FRAMES, askFirst, askProblems, composeAsk, itemAsk, itemWords, readAsk } from './asking.mjs';
 import { readRegular, withEvidenceTransaction } from './evidence.mjs';
 import { blockingIn, dispositionOf, findingByRef, locationsOf, observations, openAcrossRounds, placementLevel } from './review-policy.mjs';
@@ -281,7 +281,7 @@ export function waiveFinding(root, options) {
       current = loadState(root, state.id);
       lines.push(`  ${d.id}  header "${f.ref}"\n      question: "${questionFor(current, d)}"\n      options: ${optionLines(d)}\n      then: wf approve ${d.id} --from-question --attempt ${state.id}`);
     }
-    throw refuse(`the person decides these (one question per finding; ask them together, as many questions in one panel as it allows):\n${lines.join('\n')}`, `ask exactly these questions with exactly these options, by their labels with what follows each as its description; ${SHOW_TEXT}. Ask them in your messages, one question per message, quoting it exactly with its options, so the person can type each answer, or together in your question panel; a typed reply and a panel answer both count. Run its \`wf approve <id> --from-question\` after each answer (${READ_LINE}); then run this command again`, { id: 'scope:waive-ask' });
+    throw refuse(`the person decides these (one question per finding; ask them together, as many questions in one panel as it allows):\n${lines.join('\n')}`, `ask exactly these questions with exactly these options, by their labels with what follows each (in the panel, ${panelNote()}); ${SHOW_TEXT}. Ask them in your messages, one question per message, quoting it exactly with its options, so the person can type each answer, or together in your question panel; a typed reply and a panel answer both count. Run its \`wf approve <id> --from-question\` after each answer (${READ_LINE}); then run this command again`, { id: 'scope:waive-ask' });
   });
 }
 

@@ -19,7 +19,7 @@ import readline from 'node:readline';
 import { actor, openState } from './attempt.mjs';
 import { append, loadState } from './ledger.mjs';
 import { home } from './provenance.mjs';
-import { agentEnvNames, detectOwner, findHost, optional } from './hosts/index.mjs';
+import { agentEnvNames, detectOwner, findHost, fragment, optional } from './hosts/index.mjs';
 import { WfError, refuse } from './util.mjs';
 import { ASK_SHAPE, askFirst, askProblems, composeAsk, frameLabels, itemWords, readAsk } from './asking.mjs';
 
@@ -78,11 +78,13 @@ export const optionLines = (d) => d.choices.map((c) => `"${labelOf(d, c)}${d.rec
 // remains), whatever the panel does: a tool's acceptance is no proof the person can see it. The answer counts as the panel
 // recorded it, as the person's chat reply to a message that asked exactly this question (0.7.18), as the agent read their words
 // and quoted them (0.7.27, D41), or as typed in their terminal.
+// How the calling session's question panel takes its options (0.7.28, I-202, the host's note): each is the option's label alone.
+export const panelNote = (env = process.env) => fragment(findHost(detectOwner(env)?.runtime), 'panelOptions');
 export const SHOW_TEXT = 'say in your reply, in plain words, what this decides, why, and what happens after each choice (a question panel may not show, and its acceptance proves nothing)';
 // How the agent records an answer (0.7.27, D41): one that is exactly an option by itself; any other as its reading, with the words.
 export const READ_LINE = 'when an answer is more than one option\'s name, read it yourself and add `--choice <choice> --quote "<their words>"` (`--choice other` keeps words that choose no option as theirs), then tell them in that reply what you recorded and from which words';
 export const afterAnswer = (state, d) => `run \`wf approve ${d.id} --from-question --attempt ${state.id}\` (${READ_LINE})`;
-export const approveHint = (state, d) => `${SHOW_TEXT}; then ask them in your message, so they can simply type their answer: quote the question "${questionFor(state, d)}" exactly with these options (label, then what follows it): ${optionLines(d)}, and ask nothing else in that message (end your turn with it). You may also show the same question and options in your question panel: a typed reply and a panel answer both count. After they answer, ${afterAnswer(state, d)}; or they run \`wf approve ${d.id} --attempt ${state.id}\` in their own terminal (choices: ${d.choices.join(' | ')}); then run this command again. Until they answer, any reply of yours that mentions this decision (a status, what remains) asks it in this form; one that describes it in your own words leaves it unasked`;
+export const approveHint = (state, d) => `${SHOW_TEXT}; then ask them in your message, so they can simply type their answer: quote the question "${questionFor(state, d)}" exactly with these options (label, then what follows it): ${optionLines(d)}, and ask nothing else in that message (end your turn with it). You may also show the same question and options in your question panel: a typed reply and a panel answer both count (in the panel, ${panelNote()}). After they answer, ${afterAnswer(state, d)}; or they run \`wf approve ${d.id} --attempt ${state.id}\` in their own terminal (choices: ${d.choices.join(' | ')}); then run this command again. Until they answer, any reply of yours that mentions this decision (a status, what remains) asks it in this form; one that describes it in your own words leaves it unasked`;
 
 // A yes/no reserved decision that must be answered `yes` (0.7.0). Named failure: `requireApproved` returns whatever
 // choice was approved, so an answer of `no` read as an approval at a caller that only tested for a value. A `no` refuses,
@@ -132,7 +134,7 @@ export async function approveInTerminal(root, id, options, { input = process.std
   if (d.withdrawn) throw refuse(`${id} was withdrawn (${d.withdrawn.reason ?? ''}); the next command asks a fresh question`, withdrawnHint(state), { id: 'approve:withdrawn' });
   if (options.quote !== undefined) throw new WfError('--quote goes with --from-question: the person\'s words the agent read in its session, with --choice');
   const agentEnv = agentEnvNames().filter((k) => env[k]);
-  if (agentEnv.length) throw refuse(`\`wf approve\` runs in the owner's own terminal, not under an agent runtime (${agentEnv.join(', ')})`, `in this same reply, ask them in your message, quoting the question "${questionFor(state, d)}" exactly with its options (${optionLines(d)}) and asking nothing else in that message, so they can type the answer (you may also show it in your question panel: either answer counts); after they answer, ${afterAnswer(state, d)}; or they run \`wf approve ${id} --attempt ${state.id}\` in a terminal outside the agent app`, { id: 'approve:agent-env' });
+  if (agentEnv.length) throw refuse(`\`wf approve\` runs in the owner's own terminal, not under an agent runtime (${agentEnv.join(', ')})`, `in this same reply, ask them in your message, quoting the question "${questionFor(state, d)}" exactly with its options (${optionLines(d)}) and asking nothing else in that message, so they can type the answer (you may also show it in your question panel: either answer counts; in the panel, ${panelNote(env)}); after they answer, ${afterAnswer(state, d)}; or they run \`wf approve ${id} --attempt ${state.id}\` in a terminal outside the agent app`, { id: 'approve:agent-env' });
   if (!input.isTTY || !output.isTTY) throw refuse(`not an interactive terminal: \`wf approve\` is run by the owner in their own terminal, where it asks them to type the choice`, `run \`wf approve ${id} --attempt ${state.id}\` in a terminal`, { id: 'approve:no-tty' });
   const preset = options.choice === undefined || options.choice === true ? null : String(options.choice);
   if (preset && !d.choices.includes(preset)) throw new WfError(`--choice ${preset}: not one of ${d.choices.join(' | ')}`);
@@ -227,10 +229,47 @@ const unwrap = (q) => {
   return m ? m[2] : null;
 };
 
+// The question as an agent presents it (0.7.28, I-202): Markdown emphasis and code marks, a blockquote, typographic quotes and line
+// breaks are taken out of the agent's message and of the question alike before the exact text is looked for; no word changes, and
+// every other guard reads the same text. Named failure (field): `**ENG-1.1 A4:** Should …` with typographic quotes around the
+// recommended label carried the question, and the person's "yes" to it bound nothing.
+const present = (x) => String(x ?? '').normalize('NFKC')
+  .replace(/[\u2018\u2019\u201a\u201b\u02bc\u2032]/g, "'")
+  .replace(/[\u201c\u201d\u201e\u201f\u2033\u00ab\u00bb]/g, '"')
+  .replace(/^[ \t]*>[ \t]?/gm, '')
+  .replace(/[*`]+/g, '')
+  .replace(/_+/g, (m, at, t) => (wordy(t[at - 1]) && wordy(t[at + m.length]) ? m : ''))
+  .replace(/\s+/g, ' ')
+  .trim();
+// The text carries the question as a whole: `ENG-1.1 A1: ...` never matches inside `ENG-1.1 A10: ...` or `XENG-1.1 A1: ...`
+// (independent review of 0.7.3), and may sit in quotes, bold or code, as the engine's hints show it (independent review of 0.7.18).
+function carriesText(text, question) {
+  const t = present(text);
+  const q = present(question);
+  for (let at = t.indexOf(q); q && at >= 0; at = t.indexOf(q, at + 1)) if (at === 0 || !wordy(t[at - 1])) return true;
+  return false;
+}
+// The option a panel showed (0.7.28, I-202, I-203): one of the decision's labels (a frame's label for a question an earlier
+// release asked without labels, or the choice itself), followed at most by the panel's " (Recommended)" and a ": <what follows>"
+// tail, quotes and emphasis aside. Codex's `request_user_input_async` takes each option as one plain string, and an agent wrote the
+// label with its description into it. A structural match on the label at the start, never a reading of the rest: "Use the
+// corrected step and skip the review" is no option of the question. { choice, label }, or null when none or more than one fits.
+const optionKey = (x) => present(x).replace(/"/g, '').trim().toLowerCase();
+const TAIL = /^\s*(?:\(recommended\))?\s*(?::[\s\S]*)?$/;
+export function optionOf(d, option) {
+  const t = optionKey(option);
+  const hits = d.choices.flatMap((c) => [c, ...labelsOf(d, c)].map((label) => ({ choice: c, label, key: optionKey(label) }))).filter((h) => h.key && t.startsWith(h.key) && TAIL.test(t.slice(h.key.length)));
+  if (new Set(hits.map((h) => h.choice)).size !== 1) return null;
+  const best = hits.sort((x, y) => y.key.length - x.key.length)[0];
+  return { choice: best.choice, label: best.label };
+}
+// The panel offered exactly the decision's options: one per choice, each choice once.
+const offeredAll = (d, opts) => !opts || (opts.length === d.choices.length && opts.every((o) => optionOf(d, o)) && new Set(opts.map((o) => optionOf(d, o).choice)).size === d.choices.length);
+
 // What the agent does when an answer is refused: it asks the question now, in the same reply, in the form that binds (0.7.27,
 // I-192). Named failure (field): after `wf approve --from-question` refused, the agent recorded an improvement and ended its
 // turn having asked nothing, and the person waited a day on a question that was never put to them again.
-const askNowHint = (state, d) => `${SHOW_TEXT}; then, in this same reply (this refusal never ends your turn with the question unasked), ask them in your message, quoting the question "${questionFor(state, d)}" exactly with its options (${optionLines(d)}) and asking nothing else in that message, so they can type the answer (you may also show it in your question panel: a typed reply and a panel answer both count), and run this again after they answer; or they run \`wf approve ${d.id} --attempt ${state.id}\` in their own terminal`;
+const askNowHint = (state, d) => `${SHOW_TEXT}; then, in this same reply (this refusal never ends your turn with the question unasked), ask them in your message, quoting the question "${questionFor(state, d)}" exactly with its options (${optionLines(d)}) and asking nothing else in that message, so they can type the answer (you may also show it in your question panel: a typed reply and a panel answer both count; in the panel, ${panelNote()}), and run this again after they answer; or they run \`wf approve ${d.id} --attempt ${state.id}\` in their own terminal`;
 // The options as `--choice` names them.
 const choiceList = (d) => d.choices.map((c) => `${c}${plainLabel(d, c) !== c ? ` "${plainLabel(d, c)}"` : ''}`).join(', ');
 // How the agent records what it read (0.7.27, D41): the words are the person's, the reading is the agent's, and the person sees it
@@ -240,12 +279,13 @@ const choiceList = (d) => d.choices.map((c) => `${c}${plainLabel(d, c) !== c ? `
 export const correctionHint = (state, d) => `if they say that is not what they meant, honour it: while it is not used, withdraw it with their words (\`wf decisions withdraw ${d.id} --attempt ${state.id} --reason "<their words>"\`) and record what they meant; once used, tell them what it did and follow their correction`;
 export const READ_FORM = (state, d) => `\`wf approve ${d.id} --from-question --attempt ${state.id} --choice <choice> --quote "<their words, exactly as they typed them>"\``;
 export const NOT_A_CHOICE = 'a condition ("if the deploy is fine", "tomorrow"), a hedge ("maybe", "I think we could"), a later sentence that takes it back ("close it. not yet"), someone else\'s words reported ("she told me to close it"), words about something else ("the dialog needs a button to close it"), or the action meant for another ticket';
-const readHint = (state, d) => `read their words yourself (you have the whole conversation): when they choose one of its options (${choiceList(d)}), record it with ${READ_FORM(state, d)}; when they answer it in their own words that choose no option, \`--choice other\` with their words records them as theirs (they grant nothing a choice would); then tell them in that same reply what you recorded and from which words. Words that choose nothing are no answer: ${NOT_A_CHOICE}; for those, and only for those, ${askNowHint(state, d)}. A question they already answered is never put to them a second time`;
+// For a panel answer (0.7.28, I-203): it is the person's words like a typed reply, and is quoted the same way.
+const readHint = (state, d, panel = null) => `${panel ? `their answer in the question panel is their own words: quote it as you would a typed reply ("${String(panel.answer).trim().replace(/\s+/g, ' ').slice(0, 300)}"); ` : ''}read their words yourself (you have the whole conversation): when they choose one of its options (${choiceList(d)}), record it with ${READ_FORM(state, d)}; when they answer it in their own words that choose no option, \`--choice other\` with their words records them as theirs (they grant nothing a choice would); then tell them in that same reply what you recorded and from which words. Words that choose nothing are no answer: ${NOT_A_CHOICE}; for those, and only for those, ${askNowHint(state, d)}. A question they already answered is never put to them a second time`;
 
 // `wf approve <id> --from-question`: the answer the person gave in the calling session's question panel, or their reply in its
 // chat, as the harness recorded it (0.7.3, D12; 0.7.18, D26). It binds by itself when the question names this attempt and
 // decision and carries its summary (so the person saw what they confirm), offered exactly the decision's choices (when the harness
-// records the options), was asked and answered after the decision was created, and the answer is exactly one option; the latest
+// records the options; each a label, at most with the recommendation suffix and a description after it, 0.7.28, D43), was asked and answered after the decision was created, and the answer is exactly one option; the latest
 // such answer is the person's. 0.7.27 (D41): every other answer is the agent's to read, and `--choice <choice> --quote "<words>"`
 // records its reading: the engine proves the words are verbatim in one of the person's own messages in this session's host
 // transcript (their typed messages and panel answers; never the agent's text, a tool's output, a harness note or a sub-agent's
@@ -273,15 +313,10 @@ export async function approveFromQuestion(root, id, options, { env = process.env
   const t = optional(host, 'transcriptFile')?.(caller.session, { home: home() });
   if (!t?.file) throw refuse(`this session's transcript cannot be read (${t?.problem ?? 'no transcript'}), so its question panel cannot be`, `the person runs \`wf approve ${id} --attempt ${state.id}\` in their own terminal`, { id: 'approve:no-panel' });
   const created = Date.parse(d.createdAt);
-  // A label may carry the panel's recommendation suffix ("yes (Recommended)"); the choice is the label without it (`norm`).
-  const offered = (opts) => !opts || (opts.length === d.choices.length && d.choices.every((c) => opts.some((o) => norm(o) === norm(c) || norm(o) === norm(labelOf(d, c)))));
-  // The question carries the exact text, as a whole: `ENG-1.1 A1: ...` never matches inside `ENG-1.1 A10: ...` or
-  // `XENG-1.1 A1: ...` (independent review of 0.7.3), and may sit in quotes, bold or code, as the engine's hints show it
-  // (independent review of 0.7.18). It was asked, and answered, after the decision existed.
-  const carriesText = (text, q) => {
-    for (let at = text.indexOf(q); at >= 0; at = text.indexOf(q, at + 1)) if (at === 0 || !/[\p{L}\p{N}]/u.test(text[at - 1])) return true;
-    return false;
-  };
+  // Each option is a label, with at most the panel's recommendation suffix and a description after it (0.7.28, I-202, `optionOf`).
+  const offered = (opts) => offeredAll(d, opts);
+  // The question carries the exact text, as a whole, as the agent presented it (`carriesText`). It was asked, and answered, after
+  // the decision existed.
   const carries = (q) => carriesText(q, question);
   const after = (x) => Number.isFinite(Date.parse(x)) && Date.parse(x) >= created;
   const time = (a) => Date.parse(a.at) || 0;
@@ -291,7 +326,7 @@ export async function approveFromQuestion(root, id, options, { env = process.env
   // answer only one decision.
   const others = (state.decisions ?? []).filter((x) => x.id !== d.id && !x.approved && !x.withdrawn).map((x) => questionFor(state, x));
   // An attempt id is `<item>.<n>` (engine/attempt.mjs), so "decision A1:" in the agent's own words is no decision's key.
-  const named = (text) => new Set([...text.matchAll(/(?<![\p{L}\p{N}._-])([\p{L}\p{N}][\p{L}\p{N}._-]*\.\d+ A\d+):/gu)].map((m) => m[1]));
+  const named = (text) => new Set([...present(text).matchAll(/(?<![\p{L}\p{N}._-])([\p{L}\p{N}][\p{L}\p{N}._-]*\.\d+ A\d+):/gu)].map((m) => m[1]));
   // A panel question is held to it as well (review of the rework, P8: one panel question carrying two decisions' questions,
   // answered "yes", answered both).
   const single = (text) => !others.some((q) => carriesText(text, q)) && [...named(text)].every((k) => k === `${state.id} ${d.id}`);
@@ -306,21 +341,34 @@ export async function approveFromQuestion(root, id, options, { env = process.env
   // question. A message that never named the decision binds no reply: a "stop" or "continue" said about something else is
   // never the person's answer to it (independent security review of 0.7.23).
   const key = new RegExp(`(?<![\\p{L}\\p{N}._-])${state.id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} ${d.id}(?![\\p{N}])`, 'u');
-  const namesOnlyThis = (text) => key.test(text) && [...named(text)].every((k) => k === `${state.id} ${d.id}`);
+  const namesOnlyThis = (text) => key.test(present(text)) && [...named(text)].every((k) => k === `${state.id} ${d.id}`);
   const unquotedIds = (a) => (c) => !['yes', 'no'].includes(c) && optionNamed(d, a.question);
   const unquoted = others.length || asked.length ? [] : answers.filter((a) => a.channel === 'chat' && !carries(a.question) && namesOnlyThis(a.question) && after(a.at) && a.askedAt != null && after(a.askedAt) && exactChoice(d, a.answer, { bare: false, ids: unquotedIds(a) })).map((a) => ({ ...a, unquoted: true }));
   // A bare yes or no binds by itself only to a message that asked nothing besides the question (review of the rework, P1: "ok"
   // to the question quoted with "Also: should I update the README?" recorded yes). The check is on the agent's message, never on
   // the person's words: once the question's own text is taken out, no question mark is left and no other panel question was
   // asked. When it trips, the reply is the agent's to read; an option's label still binds.
+  // A "?" right after the question (after its closing quote at most) is the question's own mark: an agent writes an earlier
+  // release's question, which has none, with one (0.7.28, I-203).
+  const shownQuestion = present(question);
   const besides = (text) => {
-    let rest = String(text ?? '');
-    for (let at = rest.indexOf(question); at >= 0; at = rest.indexOf(question)) rest = rest.slice(0, at) + rest.slice(at + question.length);
+    let rest = present(text);
+    for (let at = rest.indexOf(shownQuestion); at >= 0; at = rest.indexOf(shownQuestion)) {
+      const mark = /^["']?[?\uff1f]/u.exec(rest.slice(at + shownQuestion.length))?.[0] ?? '';
+      rest = rest.slice(0, at) + rest.slice(at + shownQuestion.length + mark.length);
+    }
     return rest;
   };
   // A panel question is held to it too: "<the question> Also: should I update the README?" answered "yes" binds nothing by itself.
   const asksElse = (a) => /[?\uff1f]/u.test(besides(a.question)) || (a.channel === 'chat' && (a.panels ?? []).some((x) => !carriesText(x.text, question)));
-  const exactOf = (a) => (a.unquoted ? exactChoice(d, a.answer, { bare: false, ids: unquotedIds(a) }) : exactChoice(d, a.answer, { bare: !asksElse(a) }));
+  // A panel answer that is one of the options the panel offered is that option's label (0.7.28, I-202: Codex records the option's
+  // whole string); the guards on a bare yes or no read that label as they read a typed one.
+  const isChat = (a) => a.channel === 'chat';
+  const picked = (a) => {
+    const o = !isChat(a) && Array.isArray(a.options) ? a.options.find((x) => whole(x) === whole(a.answer)) : null;
+    return o ? optionOf(d, o)?.label ?? a.answer : a.answer;
+  };
+  const exactOf = (a) => (a.unquoted ? exactChoice(d, a.answer, { bare: false, ids: unquotedIds(a) }) : exactChoice(d, picked(a), { bare: !asksElse(a) }));
   // The person's latest answer to the question decides: when it is exactly one option, it is recorded as it is; any other is
   // the agent's to read, and an earlier exact answer never outranks it (a "yes" is not recorded over a later "wait, not yet").
   const last = latest([...asked, ...unquoted]);
@@ -332,12 +380,35 @@ export async function approveFromQuestion(root, id, options, { env = process.env
   if (reading) return recordReading(root, state, d, options, { reading, theirs, after, last, exactOf, host, how, clip });
   if (!last || !exactOf(last)) {
     const since = latest(theirs.filter((a) => after(a.at)));
-    const base = `no answer to ${d.id} in this session's question panel, or in its chat to a message asking exactly its question, after the decision was created`;
-    if (!since) throw refuse(`${base}: the person has written nothing in this session since it was created`, how, { id: 'approve:no-answer' });
-    const where = (a) => (a.how === 'question-panel' ? 'their answer in the question panel' : carries(a.question ?? '') ? 'a reply to your message that asked it' : namesOnlyThis(a.question ?? '') ? 'a reply to your message that named it' : 'a reply to a message that did not ask it');
-    const toIt = last && !(last.at === since.at && last.answer === since.answer) ? `; ${last.channel === 'chat' ? 'their reply to your message that asked it' : 'their answer to it in the question panel'}: "${clip(last.answer)}"` : '';
-    const bareElse = last && asksElse(last) && exactChoice(d, last.answer) ? '; your message that asked it also asked something else, so a bare yes or no there is yours to read' : '';
-    throw refuse(`${base}: the engine records by itself only a reply that is exactly one of its options; the person's latest words since then: "${clip(since.answer)}" (${where(since)})${toIt}${bareElse}`, readHint(state, d), { id: 'approve:no-answer' });
+    if (!since) throw refuse(`no answer to ${d.id} in this session's question panel, or in its chat to a message asking exactly its question, after the decision was created: the person has written nothing in this session since it was created`, how, { id: 'approve:no-answer' });
+    // 0.7.28 (I-202): the person wrote something, so the refusal names what kept it from binding by itself, never "no answer":
+    // named failure (field), a panel whose options carried their descriptions was reported as no answer, while the person's
+    // answer was in front of the agent to read.
+    const where = (a) => (!isChat(a) ? 'their answer in the question panel' : carries(a.question ?? '') ? 'a reply to your message that asked it' : namesOnlyThis(a.question ?? '') ? 'a reply to your message that named it' : 'a reply to a message that did not ask it');
+    const listed = (opts) => opts.map((o) => `"${clip(o)}"`).join(', ');
+    const labels = d.choices.map((c) => `"${plainLabel(d, c)}"`).join(', ');
+    const offeredWrong = (opts) => `offered ${listed(opts)}, not exactly ${d.id}'s options (${labels}): each option is the label alone, with at most " (Recommended)" and ": <what follows>" after it`;
+    const why = (a) => {
+      const q = a.question ?? '';
+      const it = isChat(a) ? 'your message before it' : 'the panel question';
+      if (isChat(a) && !q.trim()) return 'it followed no message of yours';
+      if (!carries(q)) return namesOnlyThis(q) ? `${it} named ${d.id} but did not quote its question as wf printed it${isChat(a) ? ', so only an option\'s label binds there' : ''}` : `${it} did not carry ${d.id}'s question as wf printed it`;
+      if (!single(q)) return `${it} carried another decision's question too`;
+      const wrongPanel = isChat(a) ? (a.panels ?? []).find((x) => carriesText(x.text, question) && !offered(x.options)) : null;
+      if (wrongPanel) return `your question panel in that message ${offeredWrong(wrongPanel.options)}`;
+      if (!isChat(a) && !offered(a.options)) return `the panel ${offeredWrong(a.options)}`;
+      if (!after(a.askedAt ?? a.at)) return `${it} was asked before ${d.id} existed`;
+      if (asksElse(a) && exactChoice(d, picked(a))) return `${isChat(a) ? 'your message that asked it' : 'the panel question'} also asked something else, so a bare yes or no there is yours to read`;
+      return `${isChat(a) ? 'their reply' : 'their answer'} is not exactly one of its options`;
+    };
+    // The answer explained: their latest to the question asked exactly; else their latest words, unless those are a chat reply to a
+    // message that neither asked nor named it, when their latest answer to one that did (a panel whose options did not match, a
+    // message that paraphrased it) is explained and shown beside them.
+    const toQuestion = (a) => carries(a.question ?? '') || namesOnlyThis(a.question ?? '');
+    const focus = last ?? (isChat(since) && !toQuestion(since) ? latest(theirs.filter((a) => after(a.at) && toQuestion(a))) : null) ?? since;
+    const toIt = !(focus.at === since.at && focus.answer === since.answer) ? `; ${isChat(focus) ? where(focus).replace(/^a /, 'their ') : 'their answer to it in the question panel'}: "${clip(focus.answer)}"` : '';
+    const panelWords = [since, focus].find((a) => !isChat(a)) ?? null;
+    throw refuse(`${d.id} is not recorded by itself: ${why(focus)}; the engine records by itself only an answer that is exactly one of its options, to its question asked exactly; the person's latest words since then: "${clip(since.answer)}" (${where(since)})${toIt}`, readHint(state, d, panelWords), { id: 'approve:no-answer' });
   }
   const choice = exactOf(last);
   append(root, state.id, 'decision.approved', { id, choice, via: `${last.channel === 'chat' ? (last.unquoted ? 'chat, the question not quoted' : 'chat') : 'question-panel'} (${host.label}, host-recorded)`, question: { text: last.question.slice(0, 2000), at: last.at, askedAt: last.askedAt } }, actor(options));
@@ -371,7 +442,9 @@ function recordReading(root, state, d, options, { reading, theirs, after, last, 
     if (exactOf(last)) throw refuse(`not recorded: the person answered ${id} after those words, "${clip(last.answer)}" (${last.at}), and that answer stands`, `run \`wf approve ${id} --from-question --attempt ${state.id}\` without --choice to record it`, { id: 'approve:quote-superseded' });
     throw refuse(`not recorded: the person replied to ${id} after those words: "${clip(last.answer)}" (${last.at}); read that reply first`, `when it chooses an option, record it with its words (${READ_FORM(state, d)}); when it chooses nothing, ${how}`, { id: 'approve:quote-later' });
   }
-  const exactly = exactChoice(d, m.answer);
+  // A panel answer that is one of the option strings its panel offered is that option too (0.7.28, I-202).
+  const pickedOption = m.how === 'question-panel' && Array.isArray(m.options) ? m.options.find((x) => whole(x) === whole(m.answer)) : null;
+  const exactly = exactChoice(d, m.answer) ?? (pickedOption ? optionOf(d, pickedOption)?.choice ?? null : null);
   if (exactly && exactly !== named) throw refuse(`not recorded: their message "${clip(m.answer)}" is exactly the option ${exactly}${plainLabel(d, exactly) !== exactly ? ` ("${plainLabel(d, exactly)}")` : ''}, not ${named}`, `record what it says: \`wf approve ${id} --from-question --attempt ${state.id} --choice ${exactly} --quote "${clip(m.answer)}"\`, or, when it answered something else, ask the question`, { id: 'approve:quote-exact' });
   const words = named === 'other' ? String(quote).trim().slice(0, 2000) : null;
   append(root, state.id, 'decision.approved', { id, choice: named, ...(words ? { words } : {}), quote: String(quote).trim().slice(0, 2000), message: String(m.answer).trim().slice(0, 2000), via: `${m.how}, read by the agent (${host.label}, host-recorded)`, question: { text: String(m.question ?? '').slice(0, 2000), at: m.at, askedAt: m.askedAt ?? null } }, actor(options));

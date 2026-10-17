@@ -125,6 +125,9 @@ export default {
   fragments: {
     toolCompatibility: 'Codex inspects structured handoff JSON with `wf evidence inspect` (never one full-output dump), reads text inside the selected attempt with `wf evidence show <path> --attempt <id>` (`--offset`/`--length` for a long file) and views exported image copies with `view_image`. Read a required skill through its exact handed file.',
     closureWriter: 'Node `fs.writeFile` or `apply_patch`',
+    // Named failure (0.7.28, I-202): the options of `request_user_input_async` are plain strings, and an agent wrote each label
+    // with its description into one ("Use the corrected step (Recommended): the corrected step replaces it …").
+    panelOptions: '`request_user_input_async` takes each option as one plain string: write the label alone in it (the recommended one may end with " (Recommended)"), never the label with what follows it; what follows each label goes in the question\'s text',
   },
   // Codex loads custom agents from TOML files in .codex/agents/.
   // The tool calls a role's session shows, each answered by its output (by call id). Codex records a shell run as a

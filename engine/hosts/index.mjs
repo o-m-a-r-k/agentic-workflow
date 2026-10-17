@@ -77,6 +77,9 @@ const FRAGMENTS = {
   closureWriter: 'your file writer',
   staleRole: (agentType) => `A session reads agent files when it starts, so an agent of type ${agentType} started from this session is started with the old instructions; its bundle points it at the current file, which it reads first, so no restart is needed for its instructions; a change to its tools still needs the session restarted.`,
   howToStart: (h) => `start it as agent type \`${h.agentType ?? 'the one `wf handoff` printed'}\`, named \`${h.agent}\`, with only the printed line as its prompt`,
+  // How a question panel takes its options (0.7.28, I-202): each is the option's label alone, so the panel offers exactly the
+  // decision's options and the person's pick binds by itself (engine/approve.mjs).
+  panelOptions: 'each option is its label alone (the recommended one may end with " (Recommended)"); what follows a label goes in the option\'s description, or in the question\'s text when the panel has none',
 };
 export function fragment(host, name, ...args) {
   const text = host?.fragments?.[name] ?? FRAGMENTS[name];

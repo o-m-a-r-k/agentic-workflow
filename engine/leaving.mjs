@@ -8,7 +8,7 @@
 // own long text, so they could neither understand it nor fix one and let another go; their written answer ("fix all here,
 // except F3 if a follow-up ticket already has it") was not a choice, so the question stayed open. Each item is now its own short question,
 // with two choices, and an answer in the person's own words is recorded as theirs (from 0.7.27, D41, when the agent reads it so).
-import { READ_LINE, createDecision, decisionFor, deliverCoreDecision, optionLines, questionFor, settledBy } from './approve.mjs';
+import { READ_LINE, createDecision, decisionFor, deliverCoreDecision, optionLines, panelNote, questionFor, settledBy } from './approve.mjs';
 import { FIX, FRAMES, LEAVE, askFirst, askProblems, composeAsk, itemAsk, itemWords, readAsk } from './asking.mjs';
 import { refuse } from './util.mjs';
 
@@ -112,7 +112,7 @@ export function leavingDecisions(root, state, items, { verb, reason = '', option
   if (asked.length) {
     const fix = (x) => (typeof explain?.[x.ref]?.fix === 'string' && explain[x.ref].fix.trim() ? explain[x.ref].fix.trim() : 'fixed in this delivery (a fix pass, a delta review and the gate)');
     const lines = asked.map(({ x, d }) => `  ${d.id}  header "${x.ref}"\n      question: "${questionFor(state, d)}"\n      options: ${d.labels ? optionLines(d) : `"${LEAVE}" (${verb === 'ticketed' ? 'tracked as a follow-up ticket' : 'listed as a known issue in the delivery comment'}) | "${FIX}" (${fix(x)})`}\n      then: wf approve ${d.id} --from-question --attempt ${state.id}`);
-    throw refuse(`the person decides ${asked.length > 1 ? 'these' : 'this'} (one short question per item; ask them together, as many questions in one panel as it allows):\n${lines.join('\n')}`, `ask exactly these questions with exactly these two options each, by their labels with what follows each as its description. Say in your reply, in plain words, what each item is and what fixing it takes. Ask them in your messages, one question per message, quoting it exactly with its two options, so the person can type each answer, or together in your question panel; a typed reply and a panel answer both count. Run its \`wf approve <id> --from-question\` after each answer (${READ_LINE}); or they run \`wf approve <id> --attempt ${state.id}\` in their own terminal (I-135). Then run this command again with the items they let leave`, { id: 'leave:ask' });
+    throw refuse(`the person decides ${asked.length > 1 ? 'these' : 'this'} (one short question per item; ask them together, as many questions in one panel as it allows):\n${lines.join('\n')}`, `ask exactly these questions with exactly these two options each, by their labels with what follows each (in the panel, ${panelNote()}). Say in your reply, in plain words, what each item is and what fixing it takes. Ask them in your messages, one question per message, quoting it exactly with its two options, so the person can type each answer, or together in your question panel; a typed reply and a panel answer both count. Run its \`wf approve <id> --from-question\` after each answer (${READ_LINE}); or they run \`wf approve <id> --attempt ${state.id}\` in their own terminal (I-135). Then run this command again with the items they let leave`, { id: 'leave:ask' });
   }
   return decided;
 }
