@@ -365,10 +365,11 @@ export function currentReviewGroup(state) {
   return { id: latest.reviewGroup.id, integration: latest, members: state.handoffs.filter(h => h.reviewGroup?.id === latest.reviewGroup.id) };
 }
 
-export function assignedVerdicts(expected, rows, key, label) {
+// `repeats`: a row may name an id more than once (0.7.29, I-154: a criterion several artifacts prove has one evidence entry each).
+export function assignedVerdicts(expected, rows, key, label, { repeats = false } = {}) {
   const ids = new Set(expected), seen = new Set();
   for (const row of list(rows)) {
-    if (!ids.has(row?.[key]) || seen.has(row[key])) throw refuse(`${label}: verdict is duplicate or belongs to another assignment: ${row?.[key]}`);
+    if (!ids.has(row?.[key]) || (seen.has(row[key]) && !repeats)) throw refuse(`${label}: verdict is duplicate or belongs to another assignment: ${row?.[key]}`);
     seen.add(row[key]);
   }
   if (seen.size !== ids.size) throw refuse(`${label}: every assigned verdict is required`);

@@ -35,13 +35,17 @@ export function gateAdapter(root, state) {
       // corrected step itself (`steps[].admission`) and kept the original in `from` unmarked; reviewed since, they blocked
       // every check and correction of their attempt. That exact shape counts; the engine writes it no more (a new admission
       // correction marks `from` and carries the person's decision).
-      const wasAdmission = (state.validationCorrections ?? []).some((c) => (c.from ?? []).some((f) => f.id === selected.id && f.admission) || ((c.steps ?? []).some((x) => x.id === selected.id && x.admission === true) && !(c.from ?? []).some((f) => f.admission)));
+      // 0.7.29 (I-204): a correction a batch carried from a member says so in its own carried record (`correctedFrom`).
+      const wasAdmission = (record.carriedFrom && (record.correctedFrom ?? []).some((f) => f.id === selected.id && f.admission)) || (state.validationCorrections ?? []).some((c) => (c.from ?? []).some((f) => f.id === selected.id && f.admission) || ((c.steps ?? []).some((x) => x.id === selected.id && x.admission === true) && !(c.from ?? []).some((f) => f.admission)));
       if (!step || canonical(step) !== canonical(selected.definition)) throw refuse('supplemental validation no longer matches its recorded committed definition');
       // I-125: an admission step the person let the attempt correct runs at its corrected definition, in its place.
       const at = steps.findIndex((s) => s.id === step.id);
+      // 0.7.29 (I-204): a corrected admission step runs where a registered one does, in the attempt's own gate. Named failure
+      // (found reproducing I-204): a member admitted with --defer-heavy that corrected a heavy admission check deferred it, while
+      // its gate required every registered or corrected check to pass, so no gate of that member could pass short of `--full`.
       if (at >= 0) {
         if (!wasAdmission) throw refuse('supplemental validation no longer matches its recorded committed definition');
-        steps[at] = step;
+        steps[at] = { ...step, deferrable: false };
       } else steps.push({ ...step, deferrable: false });
     }
   }
@@ -57,6 +61,75 @@ export function validationCatalog(root, state, id) {
   const keys = new Set(selected.secretKeys);
   if ([...keys].some((key) => !catalog.some((e) => e.key === key))) throw refuse('supplemental validation requires an existing catalogued key that is no longer available');
   return catalog.filter((e) => keys.has(e.key)).map((e) => ({ ...e, usedBy: [id] }));
+}
+
+// 0.7.29 (I-204). Named failure (field): four accepted members, each admitted with `--defer-heavy`, were assembled into a batch.
+// Their registered HTTP and browser checks (`wf validation add`) lived in the members' ledgers and adapter commits only: the
+// batch was admitted on the base's adapter, `wf batch create` copied no member's registrations, and the batch's gate selected
+// none of them. A gate on the combined tree could pass without the members' required proofs; only its reviewer noticed. A
+// batch now carries every check a member registered or corrected, pinned where the member pinned it (its definition, its
+// plugin code and the screenshots it collects), and its gate counts only once each of them passed on the combined tree.
+
+// Each step a member registered or corrected: where it is pinned, what it is (definition and plugin code), and, for a
+// correction of one of the member's own admission steps, the admission definition it replaced.
+function memberSteps(root, member) {
+  if (!member.validations?.length) return [];
+  const admission = trustedAdapter(root, member).gate.steps;
+  return member.validations.flatMap((record) => record.steps.map((step) => ({
+    member: member.id, item: member.item, commit: record.commit, step, criteria: record.criteria ?? [], reason: record.reason ?? null,
+    original: admission.find((s) => s.id === step.id) ?? null,
+    identity: correctionIdentity(root, member, record.commit, step),
+  })));
+}
+
+// Two members that pinned one step id to different definitions or plugin code: the batch can run only one of them under
+// that id, so carrying either drops the other's proof. Checked before the batch exists.
+export function batchValidationConflicts(root, members) {
+  const first = new Map();
+  const conflicts = [];
+  for (const m of members) for (const x of memberSteps(root, m)) {
+    const seen = first.get(x.step.id);
+    if (!seen) first.set(x.step.id, x);
+    else if (!x.identity || x.identity !== seen.identity) conflicts.push(`${x.step.id} (${seen.member} pinned it at ${seen.commit.slice(0, 10)}, ${x.member} at ${x.commit.slice(0, 10)}, with a different definition or plugin)`);
+  }
+  return conflicts;
+}
+
+// The records the batch carries, and the member checks it does not carry with why. A member's own registration is carried
+// unless the batch's admission adapter (the base it was admitted on) already has a step of that id, which then runs as the
+// batch admitted it. A member's correction of one of its admission steps is carried when the batch admitted that step as the
+// member had it (the person approved that correction there, `approvedIn`); when the base already holds the corrected
+// definition there is nothing to carry, and when the base changed it otherwise the batch runs its own.
+export function carriedValidations(root, batch, members) {
+  const admission = trustedAdapter(root, batch).gate.steps;
+  const byId = new Map();
+  const notCarried = [];
+  for (const m of members) for (const x of memberSteps(root, m)) {
+    const from = { attempt: x.member, item: x.item, commit: x.commit, criteria: x.criteria, reason: x.reason };
+    const have = byId.get(x.step.id);
+    if (have) {
+      have.carriedFrom.push(from);
+      continue;
+    }
+    const own = admission.find((s) => s.id === x.step.id);
+    const record = { commit: x.commit, steps: [x.step], criteria: (batch.criteria ?? []).map((c) => c.id), reason: `carried from ${x.member}${x.reason ? `: ${x.reason}` : ''}`, carriedFrom: [from] };
+    if (x.original) {
+      if (own && canonical(own) === canonical(x.step.definition)) continue;
+      if (!own || canonical(own) !== canonical(x.original)) {
+        notCarried.push({ id: x.step.id, member: x.member, why: own ? `the batch's admission adapter defines ${x.step.id} differently from the definition ${x.member} corrected; the batch runs its own` : `the batch's admission adapter has no step ${x.step.id}` });
+        continue;
+      }
+      const decision = (m.validationCorrections ?? []).filter((c) => (c.steps ?? []).some((s) => s.id === x.step.id)).at(-1);
+      byId.set(x.step.id, { ...record, correctedFrom: [{ id: x.step.id, commit: batch.adapterBase, definition: own, admission: true }], ...(decision?.decision ? { approvedIn: { attempt: x.member, decision: decision.decision } } : decision?.approvedIn ? { approvedIn: decision.approvedIn } : {}) });
+      continue;
+    }
+    if (own) {
+      if (canonical(own) !== canonical(x.step.definition)) notCarried.push({ id: x.step.id, member: x.member, why: `the batch's admission adapter now defines ${x.step.id} itself, differently; the batch runs its own` });
+      continue;
+    }
+    byId.set(x.step.id, record);
+  }
+  return { records: [...byId.values()], notCarried };
 }
 
 export const addValidation = (root, options) => registerValidation(root, options, false);

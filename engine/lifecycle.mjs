@@ -1,5 +1,5 @@
 import { STAGE_GOAL, panelActive, panelStage, plannerClassFor, plannerPanel } from './panel.mjs';
-import { gateAdapter, validationReviewProblems } from './validation.mjs';
+import { batchValidationConflicts, carriedValidations, gateAdapter } from './validation.mjs';
 import { captureWarning, capturingSteps } from './captures.mjs';
 import { mkdirStateDirectory } from './state-folders.mjs';
 import { blockingIn, classifyFinding, closureMissingGuidance, deltaLines, dispositionOf, earlierBlocking, observations, openAcrossRounds, placementLevel, reviewerDiscovered, roundMode, severityLevel, sinceOf, stampClosure, stripStamp, unreachedOf, unreachedSince } from './review-policy.mjs';
@@ -1007,7 +1007,13 @@ export function handoff(root, role, options) {
     // reviewer inspects its logs and screenshots). Acceptance needs the evidence review.
     // Named failure (I-102): a corrected supplemental validation re-pins a step the last review already judged, and a delta
     // reviewer, handed none, could not tell that the plugin it reads in the diff is the one the gate now runs.
-    supplementalValidation: mode === 'delta' ? (state.validations ?? []).filter((v) => v.correctedFrom && v.at > (state.review?.at ?? '')) : state.validations ?? [],
+    // 0.7.29 (I-206), named failure (field): six checks registered on a batch before its next review were missing from that
+    // delta round's bundle, which carried corrections only; its reviewer kept a finding that the required proof was not
+    // registered. A delta round is handed every check registered, corrected or carried since the last recorded round.
+    supplementalValidation: mode === 'delta' ? validationsSince(state) : state.validations ?? [],
+    // 0.7.29 (I-154): why `wf accept` refused the last evidence round, for the evidence review that follows it. A full round
+    // is blind to earlier findings, so it is handed only the reasons about the closure's own evidence.
+    acceptanceRefused: role === 'reviewer' && gateNow?.ok ? acceptanceRefusedFor(state, mode) : undefined,
     round: role === 'reviewer' ? (gateNow.ok ? 'evidence-review' : 'code-review') : undefined,
     gate: role === 'reviewer'
       ? gateNow.ok
@@ -1071,6 +1077,8 @@ export function handoff(root, role, options) {
   }).join(', ');
   if (role === 'reviewer' && (bundle.discovered ?? []).some((d) => d.status === 'open' || d.notADefectSinceReview)) bundle.instructions += ' A discovered issue you judge not to be a defect at all (the code does what the product intends, or the claim misread it) is settled by your verdict, which closes it: `discovered: [{ "id": "D3", "verdict": "verified-nonissue", "evidence": "<file:line you checked>", "rationale": "<why it is not a defect, in terms of what the product is for>" }]`; the claim stays in the record beside your reason. One marked `notADefectSinceReview` was closed that way (' + closedBy + '): raise a finding if the claim holds after all.';
   if (role === 'reviewer' && bundle.passBuilt) bundle.instructions += ` A planned pass was built since the last review, with no code-review round of its own (${bundle.passBuilt.map((x) => `${x.work}: ${x.items.map((i) => i.ref).join(', ')}`).join('; ')}): \`passBuilt\` lists its items, the commits recorded for each and the implementer's range. Its code is in your diff and this round is the one review it gets: review it as you review the rest, and verify each item at its cause (a finding in \`priorFindings\`; a discovered issue closed as fixed: raise a finding when its fix does not hold).`;
+  if (role === 'reviewer' && mode === 'delta' && bundle.supplementalValidation.length) bundle.instructions += ` \`supplementalValidation\` lists the checks registered, corrected or carried from a batch member since the last reviewed round (${bundle.supplementalValidation.flatMap((v) => v.steps.map((x) => x.id)).join(', ')}): the gate runs each at its pinned commit, so judge its definition and plugin as committed there, not a later copy, and give your verdict on each in \`validationChecked: [{ "id", "commit", "verdict": "complies" | "finding", "evidence", "finding" }]\`; a defect in one is a finding.`;
+  if (role === 'reviewer' && bundle.acceptanceRefused) bundle.instructions += ` \`acceptanceRefused\` lists why \`wf accept\` refused the last evidence round (${bundle.acceptanceRefused.reviewer}'s): your closure must not repeat them. A citation it names is corrected in your own \`criteria\`: each evidence entry cites one artifact exactly as the bundle lists it, and a criterion several screenshots show gets one entry per screenshot, with the same \`id\`.`;
   if (role === 'reviewer' && bundle.impactMap) bundle.instructions += ' Impact discovery under impactMap.derived is textual, not structurally resolved consumer analysis, and bounded (its `incomplete` and `symbolsTruncated` say how far it got): a hit is a lead to judge against the real imports and behaviour, and a missing hit is no proof of coverage.';
   if (role === 'reviewer') {
     const problems = reviewDocumentProblems(bundle, ruleDocs);
@@ -1182,8 +1190,8 @@ export function handoff(root, role, options) {
 // made the batch's only high finding and four new ones, and a re-plan added eight criteria. "No review finds it again anywhere"
 // is about how far a fix reaches; this says how big it is.
 const REPLAN_RULE = ' Fix with the smallest change that removes the assumption, wherever it lives; a finding may carry the reviewer\'s stated fix (`fix`), the narrowest change it saw. A fix that needs a migration, a new state or a new endpoint is not yours to build in a fix round: it is a re-plan request. Write `replan: { why, needs: ["migration" | "new state" | "new endpoint" | ...] }` in your report, build none of it, finish and report: the owner hands it to the strategist or a planner, which plans it with the rest of the remaining work.';
-const REVIEWER_FULL = 'This is a full review of the whole change, blind. Your goal: the truth about whether it meets its goals (the frozen criteria, `qualityBar`, the invariants) and what it broke. Judge the cause, not the place: when you find where one wrong assumption lives, look for every other place that relies on it, and name the assumption in the finding. Findings of yours that share a cause say so: `sameCauseAs: ["<your agent id>:<id>"]`; the findings of earlier rounds are shown to you once your blind closure is recorded, and a link to one is added when you record the closure again with their verdicts. When `gate.passedOnThisTree` is true this is the evidence review: open every screenshot under `gate.screenshots` (exactly the files `gate.artifacts` lists) and record the sha256 of each one you viewed in `screenshotsInspected`; compare captures of the same state and record `anomalies` ("none seen", or each with the cause you found); a step marked `uncovered` needs `noEvidence: [{ step, reason }]` or a finding; `gate.notRun` lists the heavy steps the gate of a quick fix did not run: judge whether the change needs what they would have proven, and raise a finding where a criterion rests on them. When it is false, judge the diff and list no screenshots. Rules, skills, lessons, design-system hits, discovered issues, seams, supplemental validations, implementer reports and files outside the plan in this bundle are context for your judgement: cite them in findings; no verdict form is owed. Every finding is located (`path:line`) and rated honestly on the one scale (`severity`: high = a user, a tenant or the business is harmed or blocked: wrong or lost data, a broken flow, security, money, a visible defect on a primary screen; medium = degraded but usable; low = polish: wording, spacing, naming, style; a tenant, authorization or money defect is always high), and states, where you can see it, the narrowest change that removes it and roughly how long it takes (`fix: { what, minutes }`): an implementer who expects far more is shown to the owner, and a fix needing a migration, a new state or a new endpoint is re-planned, not improvised. The rating decides two things: a finding rated low never opens a round, and an unfixed medium or high one is fixed in this delivery (a low one leaves only with a yes from the person). `followUps` lists findings that already left this delivery: raise one again as a finding if it should not have. The engine decides what blocks: a frozen criterion the change fails (`criterion`), a regression on a line this attempt changed, a critical invariant (`invariant`), or a finding that cites none of these in a full round. Everything else is an observation. Early in your work write your plan into the closure file (`scope`: what you will cover; `expect: { minutes }`: how long you expect it to take) with `findings` and `criteria` lists from the start, writing each finding into the file as soon as you have it (if your session ends early, what you wrote is kept as a partial round), and say what you did not reach in `notReached`; end with a recorded closure (`wf review --closure`), since a round with none counts toward nothing, and a closure that names unreached scope is not counted as the full audit (`unreachedBefore` in a bundle lists scope earlier rounds did not reach). Write the closure to `reviewClosureFile`: { reviewer, scope, expect, findings: [{ id, severity, summary, status, evidence, work, family, criterion, invariant, sameCauseAs, fix }], criteria: [{ id, evidence: { kind: test|screenshot|output|not-applicable|dropped-with-reason, ref, reason } }], screenshotsInspected, anomalies, noEvidence, notReached }.';
-const REVIEWER_EVIDENCE_DELTA = 'This is the evidence review of a tree a gate passed on, as a delta: an earlier evidence review audited the whole change, so your scope is the diff since the last reviewed tree (`delta`), the findings still open (`openFindings`) and this gate\'s evidence. Your goal: every frozen criterion is proven by this gate\'s evidence, and the changes since the last review fix what they set out to fix and break nothing. Judge the cause, not the place: a finding fixed where it showed up while the same cause remains elsewhere is not fixed: give it `status: open` in `priorFindings`, with the other place (`path:line`) as its evidence and the shared assumption named. A new finding that shares its cause with an earlier one, or with another of yours, says so: `sameCauseAs: ["<round>:<id>"]` (the reviewer id that raised it, a colon, its id; `openFindings` lists them, and a `cause` on one marks findings already linked). A new finding states, where you can see it, the narrowest change that removes it and roughly how long it takes (`fix: { what, minutes }`). Map every frozen criterion to its evidence in `criteria`. Open every screenshot under `gate.screenshots` that is not marked `inspectedBefore` (an earlier review saw those exact bytes; look again at any you judge useful) and record the sha256 of each one you viewed in `screenshotsInspected`; compare captures of the same state and record `anomalies` ("none seen", or each with the cause you found); a step marked `uncovered` needs `noEvidence: [{ step, reason }]` or a finding; `gate.notRun` lists the heavy steps the gate of a quick fix did not run: judge whether the change needs what they would have proven, and raise a finding where a criterion rests on them. Verify the open findings against the current code: `priorFindings: [{ round, id, status: fixed|verified-nonissue|open, evidence, severity }]`, every one that blocks and every observation you can settle (one with `claimedFixed` names the commit said to fix it); give `severity` when you rate one differently from its reviewer. A defect outside the changed lines is an observation (report it located, with its `severity` and a `family` where it repeats), never a blocker unless it fails a frozen criterion (`criterion`) or breaks a critical invariant (`invariant`). `followUps` lists findings that left this delivery: raise one again as a finding if it should not have. Early in your work write your plan into the closure file (`scope`; `expect: { minutes }`) and say what you did not reach in `notReached`; end with a recorded closure (`wf review --closure`). Write the closure to `reviewClosureFile`: { reviewer, scope, expect, findings, priorFindings, criteria: [{ id, evidence: { kind: test|screenshot|output|not-applicable|dropped-with-reason, ref, reason } }], screenshotsInspected, anomalies, noEvidence, notReached }.';
+const REVIEWER_FULL = 'This is a full review of the whole change, blind. Your goal: the truth about whether it meets its goals (the frozen criteria, `qualityBar`, the invariants) and what it broke. Judge the cause, not the place: when you find where one wrong assumption lives, look for every other place that relies on it, and name the assumption in the finding. Findings of yours that share a cause say so: `sameCauseAs: ["<your agent id>:<id>"]`; the findings of earlier rounds are shown to you once your blind closure is recorded, and a link to one is added when you record the closure again with their verdicts. When `gate.passedOnThisTree` is true this is the evidence review: open every screenshot under `gate.screenshots` (exactly the files `gate.artifacts` lists) and record the sha256 of each one you viewed in `screenshotsInspected`; compare captures of the same state and record `anomalies` ("none seen", or each with the cause you found); a step marked `uncovered` needs `noEvidence: [{ step, reason }]` or a finding; `gate.notRun` lists the heavy steps the gate of a quick fix did not run: judge whether the change needs what they would have proven, and raise a finding where a criterion rests on them. When it is false, judge the diff and list no screenshots. Rules, skills, lessons, design-system hits, discovered issues, seams, supplemental validations, implementer reports and files outside the plan in this bundle are context for your judgement: cite them in findings; no verdict form is owed. Every finding is located (`path:line`) and rated honestly on the one scale (`severity`: high = a user, a tenant or the business is harmed or blocked: wrong or lost data, a broken flow, security, money, a visible defect on a primary screen; medium = degraded but usable; low = polish: wording, spacing, naming, style; a tenant, authorization or money defect is always high), and states, where you can see it, the narrowest change that removes it and roughly how long it takes (`fix: { what, minutes }`): an implementer who expects far more is shown to the owner, and a fix needing a migration, a new state or a new endpoint is re-planned, not improvised. The rating decides two things: a finding rated low never opens a round, and an unfixed medium or high one is fixed in this delivery (a low one leaves only with a yes from the person). `followUps` lists findings that already left this delivery: raise one again as a finding if it should not have. The engine decides what blocks: a frozen criterion the change fails (`criterion`), a regression on a line this attempt changed, a critical invariant (`invariant`), or a finding that cites none of these in a full round. Everything else is an observation. Early in your work write your plan into the closure file (`scope`: what you will cover; `expect: { minutes }`: how long you expect it to take) with `findings` and `criteria` lists from the start, writing each finding into the file as soon as you have it (if your session ends early, what you wrote is kept as a partial round), and say what you did not reach in `notReached`; end with a recorded closure (`wf review --closure`), since a round with none counts toward nothing, and a closure that names unreached scope is not counted as the full audit (`unreachedBefore` in a bundle lists scope earlier rounds did not reach). Write the closure to `reviewClosureFile`: { reviewer, scope, expect, findings: [{ id, severity, summary, status, evidence, work, family, criterion, invariant, sameCauseAs, fix }], criteria: [{ id, evidence: { kind: test|screenshot|output|not-applicable|dropped-with-reason, ref, reason } }], screenshotsInspected, anomalies, noEvidence, notReached }; each evidence entry cites one artifact exactly as the bundle lists it (a criterion several screenshots prove gets one entry per screenshot, with the same id).';
+const REVIEWER_EVIDENCE_DELTA = 'This is the evidence review of a tree a gate passed on, as a delta: an earlier evidence review audited the whole change, so your scope is the diff since the last reviewed tree (`delta`), the findings still open (`openFindings`) and this gate\'s evidence. Your goal: every frozen criterion is proven by this gate\'s evidence, and the changes since the last review fix what they set out to fix and break nothing. Judge the cause, not the place: a finding fixed where it showed up while the same cause remains elsewhere is not fixed: give it `status: open` in `priorFindings`, with the other place (`path:line`) as its evidence and the shared assumption named. A new finding that shares its cause with an earlier one, or with another of yours, says so: `sameCauseAs: ["<round>:<id>"]` (the reviewer id that raised it, a colon, its id; `openFindings` lists them, and a `cause` on one marks findings already linked). A new finding states, where you can see it, the narrowest change that removes it and roughly how long it takes (`fix: { what, minutes }`). Map every frozen criterion to its evidence in `criteria`. Open every screenshot under `gate.screenshots` that is not marked `inspectedBefore` (an earlier review saw those exact bytes; look again at any you judge useful) and record the sha256 of each one you viewed in `screenshotsInspected`; compare captures of the same state and record `anomalies` ("none seen", or each with the cause you found); a step marked `uncovered` needs `noEvidence: [{ step, reason }]` or a finding; `gate.notRun` lists the heavy steps the gate of a quick fix did not run: judge whether the change needs what they would have proven, and raise a finding where a criterion rests on them. Verify the open findings against the current code: `priorFindings: [{ round, id, status: fixed|verified-nonissue|open, evidence, severity }]`, every one that blocks and every observation you can settle (one with `claimedFixed` names the commit said to fix it); give `severity` when you rate one differently from its reviewer. A defect outside the changed lines is an observation (report it located, with its `severity` and a `family` where it repeats), never a blocker unless it fails a frozen criterion (`criterion`) or breaks a critical invariant (`invariant`). `followUps` lists findings that left this delivery: raise one again as a finding if it should not have. Early in your work write your plan into the closure file (`scope`; `expect: { minutes }`) and say what you did not reach in `notReached`; end with a recorded closure (`wf review --closure`). Write the closure to `reviewClosureFile`: { reviewer, scope, expect, findings, priorFindings, criteria: [{ id, evidence: { kind: test|screenshot|output|not-applicable|dropped-with-reason, ref, reason } }], screenshotsInspected, anomalies, noEvidence, notReached }; each evidence entry cites one artifact exactly as the bundle lists it (a criterion several screenshots prove gets one entry per screenshot, with the same id).';
 const REVIEWER_DELTA = 'This is a delta review: the diff since the last reviewed tree (`delta`: the diff commands, the changed files and their line ranges) and the findings still open (`openFindings`, each with whether it blocks). Your goal: whether the changes since then fix what they set out to fix and break nothing. Judge the cause, not the place: a finding fixed where it showed up while the same cause remains elsewhere is not fixed: give it `status: open` in `priorFindings`, with the other place (`path:line`) as its evidence and the shared assumption named. A new finding that shares its cause with an earlier one, or with another of yours, says so: `sameCauseAs: ["<round>:<id>"]` (the reviewer id that raised it, a colon, its id; `openFindings` lists them, and a `cause` on one marks findings already linked). A new finding states, where you can see it, the narrowest change that removes it and roughly how long it takes (`fix: { what, minutes }`). Verify the open findings against the current code: `priorFindings: [{ round, id, status: fixed|verified-nonissue|open, evidence, severity }]`, every one that blocks and every observation you can settle (one with `claimedFixed` names the commit said to fix it); give `severity` when you rate one differently from its reviewer. A discovered issue marked `fixedSinceReview` was closed as fixed on the word of the owner or implementer: if the fix does not hold, raise it as a finding. A defect you notice outside the changed lines is an observation (report it located, with its `severity` and a `family` where it repeats), never a blocker unless it fails a frozen criterion (`criterion`) or breaks a critical invariant (`invariant`). When the bundle has `sweeps`, a family proof (a command and the result it must give) is evidence: run it. Early in your work write your plan into the closure file (`scope`: what you will cover; `expect: { minutes }`: how long you expect it to take) with `findings` and `criteria` lists from the start, writing each finding into the file as soon as you have it (if your session ends early, what you wrote is kept as a partial round), and say what you did not reach in `notReached`; end with a recorded closure (`wf review --closure`). Write the closure to `reviewClosureFile` with `criteria: []`.';
 
 // Findings grouped by `family` (a stable key a reviewer gives a defect pattern); a finding with none is its own group.
@@ -1629,7 +1637,7 @@ export function recordReview(root, options) {
     const group = currentReviewGroup(state), parts = (state.reviewParts ?? []).filter(p => p.group === group.id);
     for (const part of parts) readEvidenceFile(root, state.id, { path: part.raw.file, sha256: part.raw.sha256 });
     closure = mergeParts(group, parts, closure);
-    assignedVerdicts(state.criteria.map(c => c.id), closure.criteria, 'id', 'criteria');
+    assignedVerdicts(state.criteria.map(c => c.id), closure.criteria, 'id', 'criteria', { repeats: true });
     const incomplete = closure.criteria.filter(c => !EVIDENCE_KINDS.has(c.evidence?.kind) ||
       (['not-applicable', 'dropped-with-reason'].includes(c.evidence?.kind) ? !String(c.evidence.reason ?? '').trim() : !String(c.evidence?.ref ?? '').trim()));
     if (incomplete.length) throw refuse('group criterion evidence is incomplete: ' + incomplete.map(c => c.id).join(', '));
@@ -1656,6 +1664,10 @@ export function recordReview(root, options) {
   const av = reviewAnomalies(handed.gate, closure);
   if (av.length && partial) unfinished.push(`the anomalies in the screenshots (${av.length})`);
   else if (av.length) throw refuse(`closure refused: the anomalies seen in the screenshots are not accounted for:\n  - ${av.join('\n  - ')}`, `add \`anomalies\` to the closure: "none seen" after comparing the captures, or [{ "screenshots": ["<sha256>"], "observation": "<what differs>", "cause": "<the cause you found>", "evidence": "<file:line or data you checked>" }] or, when it is a defect (a value no test pins included), { ..., "finding": "<your finding id>" }; then \`wf review --closure <file>\` again`);
+  // 0.7.29 (I-154): the screenshot citations acceptance checks, checked while the reviewer can still correct them. Only a round
+  // handed a passing gate cites its screenshots; a partial round is never accepted.
+  const sv = !partial && handed.gate?.passedOnThisTree === true ? screenshotRefProblems(state, closure) : [];
+  if (sv.length) throw refuse(`closure refused: a screenshot citation is not one artifact the gate collected:\n  - ${sv.join('\n  - ')}`, 'each criterion evidence entry cites one artifact exactly as `gate.screenshots` lists it (its `sha256` or `source`); a criterion several screenshots show gets one entry per screenshot, with the same `id`; then `wf review --closure <file>` again', { id: 'review:screenshot-ref' });
   // Commit, then reveal: the first closure of a full round is blind. Earlier rounds' findings are shown only after it is
   // recorded, and a later closure of the same round may only add their verification. A delta round is handed them up
   // front (`openFindings`), so it answers them in the one closure.
@@ -1705,7 +1717,8 @@ export function recordReview(root, options) {
     if (!ev.ref) return false;
     return ev.kind !== 'screenshot' || collectedShots.some((a) => [a.sha256, a.source, a.path].includes(String(ev.ref).trim()));
   };
-  const covered = !options.partial && mode === 'full' && reviewerHandoff.round === 'evidence-review' && (handed.criteria ?? []).filter((c) => !c.dropped).every((c) => evidenced((closure.criteria ?? []).find((m) => m?.id === c.id))) && (handed.gate?.screenshots ?? []).filter((x) => !x.inspectedBefore).every((x) => (closure.screenshotsInspected ?? []).includes(x.sha256));
+  // A criterion mapped once per artifact (0.7.29, I-154) is evidenced when every entry of it is.
+  const covered = !options.partial && mode === 'full' && reviewerHandoff.round === 'evidence-review' && (handed.criteria ?? []).filter((c) => !c.dropped).every((c) => { const entries = (closure.criteria ?? []).filter((m) => m?.id === c.id); return entries.length > 0 && entries.every(evidenced); }) && (handed.gate?.screenshots ?? []).filter((x) => !x.inspectedBefore).every((x) => (closure.screenshotsInspected ?? []).includes(x.sha256));
   let reviewerModel = optional(findHost(reviewerHandoff.runtime), 'roleModel')?.(reviewerHandoff, { home: home() }) ?? null;
   append(root, state.id, 'review.recorded', { closure, file: dest, raw, handoff: round, mode, covered, discoveredHanded: (handed.discovered ?? []).map((x) => x?.id).filter(Boolean), ...(options.salvaged ? { recordedBy: 'engine' } : {}), ...(options.partial ? { partial: true } : {}), revealed: Boolean(revealed) || revealNow, provenance: provenance.status, session: reviewerHandoff.session ?? null, tree: reviewerHandoff.tree, gateRun: reviewerHandoff.gate ?? null, gateEvidenceInspected, handoffTree: reviewerHandoff.tree, handoffPatch: reviewerHandoff.patch, ...(reviewerHandoff.stablePatch ? { handoffStablePatch: reviewerHandoff.stablePatch } : {}), reviewerModel, impactGaps: (closure.findings ?? []).filter((f) => f?.category === 'impact-gap').length }, closure.reviewer);
   append(root, state.id, 'review.round', roundData(state, reviewerHandoff, closure, { outcome: 'recorded', model: reviewerModel, revealed: Boolean(revealed) }), null);
@@ -1883,6 +1896,46 @@ const openFindings = (r, state) => blockingIn(state ?? {}, r);
 
 const EVIDENCE_KINDS = new Set(['test', 'screenshot', 'output', 'not-applicable', 'dropped-with-reason']);
 
+// 0.7.29 (I-154, I-175, I-197). Named failure (field): on three tickets in two days an evidence review cited several screenshots
+// (hashes or paths joined by commas or semicolons, or a glob) in one criterion's `evidence.ref`; `wf review` recorded it, `wf
+// accept` refused it once the reviewer had finished, and the next reviewer, told nothing, did the same: a whole evidence round
+// each time. `wf review` and `wf accept` run this one check, so the reviewer corrects the citation while it is still at work.
+// A criterion several screenshots show cites each in its own entry (the same `id`, one `ref` each).
+export function screenshotRefProblems(state, closure) {
+  const collected = screenshots(state);
+  const current = new Set((state.criteria ?? []).map((c) => c.id));
+  const known = (ref) => collected.some((a) => [a.sha256, a.source, a.path].includes(ref));
+  const problems = [];
+  for (const m of Array.isArray(closure?.criteria) ? closure.criteria : []) {
+    const ev = m?.evidence;
+    if (!current.has(m?.id) || ev?.kind !== 'screenshot' || !ev.ref) continue;
+    const ref = String(ev.ref).trim();
+    if (known(ref)) continue;
+    const shown = ref.length > 120 ? `${ref.slice(0, 117)}...` : ref;
+    // Joined by commas or semicolons, or hashes joined by spaces or new lines (a path may hold a space).
+    const joined = ref.split(/\s*[,;]\s*/).filter(Boolean);
+    const hashes = ref.split(/\s+/).filter(Boolean);
+    const parts = joined.length > 1 ? joined : hashes.length > 1 && hashes.every((h) => /^[0-9a-f]{64}$/i.test(h)) ? hashes : [ref];
+    if (parts.length > 1) problems.push(`criterion ${m.id}: screenshot \`${shown}\` names ${parts.length} artifacts in one ref (${parts.filter(known).length} of them collected by the gate); an evidence entry cites one artifact: give each screenshot its own entry, \`{ "id": "${m.id}", "evidence": { "kind": "screenshot", "ref": "<one sha256 or source path from gate.screenshots>" } }\``);
+    else if (/[*?[\]{}]/.test(ref)) problems.push(`criterion ${m.id}: screenshot \`${shown}\` is a pattern, not one artifact; cite each screenshot it means in its own entry by the sha256 or source path \`gate.screenshots\` lists`);
+    else problems.push(`criterion ${m.id}: screenshot \`${shown}\` is not one the gate collected for this ticket; reference a file in the bundle's \`gate.artifacts\` by sha256 or source path (captures made by hand are brought in with \`wf captures import\`, and the evidence review is then handed again)`);
+  }
+  return problems;
+}
+
+// 0.7.29 (I-206): the checks registered, corrected or carried since the last recorded review round.
+const validationsSince = (state) => (state.validations ?? []).filter((v) => v.at > (state.review?.at ?? ''));
+
+// 0.7.29 (I-154): the latest refusal of `wf accept` since the last recorded evidence round, as the next evidence review is
+// handed it; a full round gets only the reasons about the closure's own evidence (the others can name earlier findings).
+function acceptanceRefusedFor(state, mode) {
+  const since = (state.reviews ?? []).filter((r) => reviewedAfterGate(r)).at(-1)?.at ?? '';
+  const last = (state.acceptanceRefusals ?? []).filter((x) => x.at > since).at(-1);
+  if (!last) return undefined;
+  const problems = (last.problems ?? []).filter((p) => mode !== 'full' || p.citation).map((p) => p.text);
+  return problems.length ? { note: 'Why `wf accept` refused the last evidence round. Facts from the engine, not findings: your closure must not repeat them.', reviewer: last.reviewer, at: last.at, problems } : undefined;
+}
+
 // Criteria the recorded round `r` did not judge in their present form. `added`: current criteria its closure maps no
 // evidence for (an amendment added them after the round was handed; `wf accept` refuses these for every attempt).
 // `changed`: criteria an amendment re-worded after the round was handed, which the round judged in their earlier wording;
@@ -1930,33 +1983,39 @@ export function acceptReview(root, options) {
     if (blocking.has(f.id)) problems.push(`finding ${f.id} is ${f.status ?? 'open'} and blocks: ${classifyFinding(state, f).reason}`);
     if (!f.evidence) problems.push(`finding ${f.id} has no evidence`);
   }
-  const mapped = new Map(r.closure.criteria.map((c) => [c.id, c]));
+  // 0.7.29 (I-154): the reasons about the closure's own evidence (its criteria map, its screenshots), which the next evidence
+  // review is handed even when it is a blind full round.
+  const citation = new Set();
+  const cite = (text) => {
+    citation.add(problems.length);
+    problems.push(text);
+  };
+  // A criterion several artifacts prove is mapped once per artifact (0.7.29, I-154): every entry of it is checked.
+  const mapped = new Map();
+  for (const c of r.closure.criteria) mapped.set(c.id, [...(mapped.get(c.id) ?? []), c]);
   const late = criteriaAfterReview(state, r);
   const lateAmended = new Set((state.criteriaAmendments ?? []).filter((a) => a.at > late.since).flatMap((a) => [...(a.changes?.added ?? []), ...(a.changes?.changed ?? [])]));
   for (const c of state.criteria ?? []) {
-    const m = mapped.get(c.id);
-    if (!m) {
-      problems.push(`criterion ${c.id} is not mapped to evidence${lateAmended.has(c.id) ? ' (an amendment added or changed it after this review round was handed): hand a fresh reviewer, which maps every criterion to the gate evidence' : ''}`);
+    const entries = mapped.get(c.id) ?? [];
+    if (!entries.length) {
+      cite(`criterion ${c.id} is not mapped to evidence${lateAmended.has(c.id) ? ' (an amendment added or changed it after this review round was handed): hand a fresh reviewer, which maps every criterion to the gate evidence' : ''}`);
       continue;
     }
-    // A criterion kept only because of precedent (a past merge, an existing test, an earlier verdict) needs a
-    // purpose-based rationale naming the user of the surface, or a `precedent-only` finding.
-    if (m.precedentOnly === true && !String(m.rationale ?? c.rationale ?? '').trim() && !r.closure.findings.some((f) => f.category === 'precedent-only')) problems.push(`criterion ${c.id}: kept only on precedent; give a purpose-based \`rationale\` (who uses this surface and what they need) or raise a \`precedent-only\` finding`);
-    const kind = m.evidence?.kind;
-    if (!EVIDENCE_KINDS.has(kind)) problems.push(`criterion ${c.id}: evidence kind must be one of ${[...EVIDENCE_KINDS].join(', ')}`);
-    else if (['not-applicable', 'dropped-with-reason'].includes(kind) && !m.evidence.reason?.trim()) problems.push(`criterion ${c.id}: ${kind} needs a reason`);
-    else if (!['not-applicable', 'dropped-with-reason'].includes(kind) && !m.evidence.ref) problems.push(`criterion ${c.id}: ${kind} evidence needs a ref`);
+    for (const m of entries) {
+      // A criterion kept only because of precedent (a past merge, an existing test, an earlier verdict) needs a
+      // purpose-based rationale naming the user of the surface, or a `precedent-only` finding.
+      if (m.precedentOnly === true && !String(m.rationale ?? c.rationale ?? '').trim() && !r.closure.findings.some((f) => f.category === 'precedent-only')) cite(`criterion ${c.id}: kept only on precedent; give a purpose-based \`rationale\` (who uses this surface and what they need) or raise a \`precedent-only\` finding`);
+      const kind = m.evidence?.kind;
+      if (!EVIDENCE_KINDS.has(kind)) cite(`criterion ${c.id}: evidence kind must be one of ${[...EVIDENCE_KINDS].join(', ')}`);
+      else if (['not-applicable', 'dropped-with-reason'].includes(kind) && !m.evidence.reason?.trim()) cite(`criterion ${c.id}: ${kind} needs a reason`);
+      else if (!['not-applicable', 'dropped-with-reason'].includes(kind) && !m.evidence.ref) cite(`criterion ${c.id}: ${kind} evidence needs a ref`);
+    }
   }
   const collected = screenshots(state);
-  for (const c of state.criteria ?? []) {
-    const ev = mapped.get(c.id)?.evidence;
-    if (ev?.kind !== 'screenshot' || !ev.ref) continue;
-    const ref = String(ev.ref).trim();
-    if (!collected.some((a) => [a.sha256, a.source, a.path].includes(ref))) problems.push(`criterion ${c.id}: screenshot \`${ref}\` is not one the gate collected for this ticket; reference a file in the bundle's \`gate.artifacts\` by sha256 or source path (captures made by hand are brought in with \`wf captures import\`, and the evidence review is then handed again)`);
-  }
+  for (const p of screenshotRefProblems(state, r.closure)) cite(p);
   const verdicts = noEvidenceVerdicts(evidenceSteps(root, state), r.closure);
   for (const v of verdicts) {
-    if (!v.reason && !v.finding) problems.push(`step ${v.step}: its artifacts globs (${v.globs.join(', ')}) matched nothing though this ticket changed ${v.changed} file(s) in its package; the reviewer gives a verdict: \`noEvidence: [{ "step": "${v.step}", "reason": "<why no capture is needed>" }]\` in the closure, or a finding`);
+    if (!v.reason && !v.finding) cite(`step ${v.step}: its artifacts globs (${v.globs.join(', ')}) matched nothing though this ticket changed ${v.changed} file(s) in its package; the reviewer gives a verdict: \`noEvidence: [{ "step": "${v.step}", "reason": "<why no capture is needed>" }]\` in the closure, or a finding`);
   }
   // I-18: every issue found during the ticket was judged by this round, and none was found open.
   const reviewedBundle = readBundle(r.handoff);
@@ -1995,7 +2054,7 @@ export function acceptReview(root, options) {
     });
     if (wider.length) problems.push(`the evidence globs this attempt was admitted with differ from the adapter's now: ${wider.join('; ')}. To use the adapter's, commit its step definition in this attempt and run \`wf validation correct --steps ${wider.map((w) => w.split(' ')[0]).join(',')} --reason "<why>" --attempt ${state.id}\` (the person confirms; the next gate reuses the recorded run and re-selects this ticket's files)`);
   }
-  if (unseen.length) problems.push(`${unseen.length} gate screenshot(s) not inspected by the reviewer (the gate's expanded artifacts globs matched them for this ticket): ${collected.filter((a) => !inspected.has(a.sha256)).slice(0, 5).map((a) => a.source ?? a.path).join(', ')}${unseen.length > 5 ? ' …' : ''}`);
+  if (unseen.length) cite(`${unseen.length} gate screenshot(s) not inspected by the reviewer (the gate's expanded artifacts globs matched them for this ticket): ${collected.filter((a) => !inspected.has(a.sha256)).slice(0, 5).map((a) => a.source ?? a.path).join(', ')}${unseen.length > 5 ? ' …' : ''}`);
   // Named failure (I-107): a re-worded criterion kept the evidence a reviewer mapped to its earlier wording.
   for (const id of late.changed) problems.push(`criterion ${id} was re-worded by an amendment after this review round was handed, so the round judged its earlier wording: hand a fresh reviewer, which maps every criterion to the gate evidence`);
   const pending = unverifiedPrior(state, r);
@@ -2017,7 +2076,14 @@ export function acceptReview(root, options) {
   const dv = optional(designVerdicts, readBundle(r.handoff)?.designSystem?.hits ?? [], r.closure);
   const xv = optional(discoveredVerdicts, reviewedBundle?.discovered ?? [], r.closure);
   const sv = optional(seamVerdicts, reviewedBundle?.addedRepos ?? [], r.closure);
-  if (problems.length) throw refuse(`review not accepted:\n  - ${problems.join('\n  - ')}`);
+  if (problems.length) {
+    // 0.7.29 (I-154): recorded, so the next evidence review is handed why (`acceptanceRefused`); the same refusal of the same
+    // round is recorded once.
+    const reasons = problems.map((text, i) => ({ text, citation: citation.has(i) }));
+    const before = (state.acceptanceRefusals ?? []).at(-1);
+    if (!(before && before.handoff === r.handoff && canonical(before.problems) === canonical(reasons))) append(root, state.id, 'acceptance.refused', { reviewer: r.closure.reviewer, handoff: r.handoff, problems: reasons }, actor(options));
+    throw refuse(`review not accepted:\n  - ${problems.join('\n  - ')}`);
+  }
   // Nothing verified when this command opened the attempt may have changed while it decided.
   const moved = assertUnchanged(root, state.id);
   if (moved.length) throw refuse(`review not accepted: the evidence changed while it was checked:\n  - ${moved.slice(0, 10).join('\n  - ')}`);
@@ -2993,12 +3059,18 @@ export function batchCreate(root, options) {
     if (missing.length) throw refuse(`${reserved[0]} also waits for ${missing.join(', ')}: the members of a split are delivered together`, `add them: \`wf batch create --members ${[...members, ...missing].join(',')}\``, { id: 'batch:split-members' });
   }
   for (const s of states) {
-    if (!s.deferHeavy && !reserved[0]) throw refuse(`${s.id} was not admitted with --defer-heavy, so its heavy steps already ran or must run alone`);
+    // 0.7.29 (I-194). Named failure (field): the refusal named no way on, and `wf entry`'s help did not say a batch member is
+    // admitted with --defer-heavy; three attempts that had not been implemented yet waited for the person to work out a restart.
+    if (!s.deferHeavy && !reserved[0]) throw refuse(`${s.id} was not admitted with --defer-heavy: its heavy steps run in its own gate, so it is delivered on its own, not in a batch`, notDeferredRoute(s), { id: 'batch:not-deferred' });
     if (!s.accepted) throw refuse(`${s.id} is not accepted yet`);
     if (s.batchOf && !(reserved[0] && s.batchOf === reserved[0] && s.batchPending)) throw refuse(`${s.id} is already in ${s.batchOf}`);
     if (s.activeHold) throw refuse(`${s.id} is on hold: "${s.activeHold.reason}"`);
     if (['abandoned', 'done', 'handoff-pending'].includes(s.phase)) throw refuse(`${s.id} is ${s.phase}`);
   }
+  // 0.7.29 (I-204): every check a member registered stays required on the combined tree; two members that pinned one step id
+  // differently cannot both be carried, and carrying one would drop the other's proof unseen.
+  const conflicts = batchValidationConflicts(root, states);
+  if (conflicts.length) throw refuse(`the members registered the same check differently, and the batch can run only one of them: ${conflicts.join('; ')}`, 'make the registrations the same in the members (`wf validation correct --steps <id> --reason "<why>" --attempt <member>` re-pins one at a commit holding the other\'s definition and plugin; that member is then reviewed, gated and accepted again), or give one of the checks another id, then assemble the batch', { id: 'batch:validation-conflict' });
   const n = listAttempts(root).filter((id) => /^BATCH-\d+/.test(id)).length + 1;
   const id = reserved[0] ?? options.id ?? `BATCH-${n}`;
   const repos = [...new Set(states.flatMap((s) => Object.keys(s.repos)))];
@@ -3016,7 +3088,18 @@ export function batchCreate(root, options) {
   const heads = Object.fromEntries(states.map((s) => [s.id, Object.fromEntries(Object.entries(s.repos).map(([n, r]) => [n, git(r.worktree, ['rev-parse', 'HEAD'])]))]));
   append(root, id, 'batch.members', { members, heads }, actor(options));
   append(root, id, 'criteria.frozen', { criteria: [{ id: 'B1', text: `${members.join(', ')} integrate and pass the full gate together`, uat: false }], plan: null }, actor(options));
+  const carried = carriedValidations(root, loadState(root, id), states.map((s) => loadState(root, s.id)));
+  if (carried.records.length || carried.notCarried.length) append(root, id, 'validation.carried', carried, actor(options));
   return loadState(root, id);
+}
+
+// 0.7.29 (I-194): the way on for an attempt `wf batch create` refuses because it was not admitted with --defer-heavy.
+function notDeferredRoute(s) {
+  const started = (s.handoffs ?? []).some((h) => h.role === 'implementer');
+  const again = `\`wf abandon --attempt ${s.id} --reason "admitted again with --defer-heavy to join a batch"\` (its branch is kept), then \`wf entry${ownItem(s) ? '' : ` --item ${s.item}`}${s.lane === 'quick' ? ' --lane quick' : ''} --defer-heavy\``;
+  return started
+    ? `deliver it on its own: \`wf resume ${s.id}\` names its next step (\`wf deliver --attempt ${s.id}\` once accepted), and assemble the batch from the other members; to batch this work instead, admit it again with --defer-heavy: ${again}, and carry its commits over`
+    : `nothing is implemented in it yet: admit it again with --defer-heavy, ${again}, and use the new attempt as the member; or deliver it on its own`;
 }
 
 export function batchEject(root, options) {
