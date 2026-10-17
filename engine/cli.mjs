@@ -32,7 +32,7 @@ import { commentFile, hasTicket, limitItemsText, performTracker, publicAssetsPro
 import { ENGINE_VERSION, WfError, compareVersions, parseArgs, parseVersion, refuse } from './util.mjs';
 import { afterAnswer, approveFromQuestion, approveHint, approveInTerminal, correctionHint, decisionLine, optionLines, pendingDecisions, plainLabel, questionFor, withdrawDecision } from './approve.mjs';
 import { logRefusal, readRefusals, refusalCounts } from './refusals.mjs';
-import { recordStrategy, signalsReport, signalsText } from './strategy.mjs';
+import { recordStrategy, settleRoundQuestions, signalsReport, signalsText } from './strategy.mjs';
 import { courseLines, pastEstimates } from './signals.mjs';
 import { splitCommand } from './split.mjs';
 import { deploymentLine } from './deployment-step.mjs';
@@ -1589,7 +1589,7 @@ async function dispatch(cmd, sub, positional, options) {
           const s = loadState(root, id);
           if (!isOpen(s)) return [];
           openEvidence(root, id);
-          return [s];
+          return [settleRoundQuestions(root, s)];
         } catch (error) {
           damaged.push({ id, damaged: String(error.message ?? error).split('\n').filter(Boolean).slice(0, 2).join(' ') });
           return [];

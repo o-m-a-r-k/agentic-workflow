@@ -96,9 +96,12 @@ export function roundsEscalation(state, c = STRATEGY_DEFAULTS, rounds = handedRo
 }
 
 // A round question still open that is not the firing's: one an earlier release opened at the next multiple of the count,
-// before as many rounds had passed since the person's answer (I-214). The engine withdraws it, saying why, on the next
-// implementer or reviewer handoff, so it is never asked; the question due later is a new one.
-function withdrawEarlyQuestions(root, state) {
+// before as many rounds had passed since the person's answer (I-214). The engine withdraws it, saying why, when any command
+// opens the attempt (`openState`, and `wf status` for every open attempt), before anything lists it or tells the agent to ask
+// it: a question that is not due is never put to the person. The question due later is a new one. Returns the state as it
+// stands after.
+export function settleRoundQuestions(root, state) {
+  if (!(state.decisions ?? []).some((d) => isOwnerQuestion(d) && !d.approved && !d.withdrawn)) return state;
   if (!worked(state)) return state;
   const cfg = adapterOf(root, state);
   if (switchedOff(cfg)) return state;
@@ -297,7 +300,6 @@ function stopChosen(root, state) {
 // `wf handoff implementer|reviewer`: refused while the person's escalation or a strategist's escalation stands.
 export function requireOwnerDecision(root, state, role, options = {}) {
   stopChosen(root, state);
-  state = withdrawEarlyQuestions(root, state);
   const hold = strategyHold(root, state);
   if (!hold) return;
   if (hold.owner) {

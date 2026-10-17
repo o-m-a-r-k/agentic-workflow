@@ -15,7 +15,8 @@ Release notes, newest first, then every fix that came from a failure in the work
     same rule as soon as this release is installed;
   - a ten-round question you were already asked and have not answered stays the only one: you are not asked a second;
   - a ten-round question an earlier release opened too early, which you have not answered, is withdrawn by the
-    workflow with the reason at the agent's next step, and you are never asked it;
+    workflow with the reason as soon as the agent next looks at the ticket, before anything lists it, and you are
+    never asked it;
   - `wf signals` shows when the question is next due and which answer it counts from.
 
   The other rules that come back to a question already count from the answer: the strategist's signal for review rounds

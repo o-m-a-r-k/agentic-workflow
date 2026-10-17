@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { approveAsOwner, commitIn, ok, state as stateOf, wf } from './helpers.mjs';
-import { append } from '../engine/ledger.mjs';
+import { append, loadState } from '../engine/ledger.mjs';
 import { W, growTo, inProcess, project, reviewRound, runner, started, strategistClosure } from './strategist-fixtures.mjs';
 
 // 0.7.0 (D3), named failures: no role owned "stop, consolidate, split, or is this still worth its cost". A ticket ran 47
@@ -372,21 +372,33 @@ test('a round question an earlier release opened before it was due again is with
   for (const n of [6, 7, 8]) ok(handRound(ctx, a, `rev-${n}`));
   // At 8 handed rounds the earlier release opened the question again (its key was the next multiple of 4); nobody answered it.
   const earlier = stateOf(root, a.id).decisions.find((d) => d.id === 'A1');
-  append(root, a.id, 'decision.created', { id: 'A2', kind: 'escalation', key: 'tripwire:rounds-escalation:rounds:8', summary: '8 review rounds handed; the owner decides how to continue: continue | split | deliver-core | hold | stop', choices: earlier.choices, ...(earlier.labels ? { labels: earlier.labels } : {}), ...(earlier.then ? { then: earlier.then } : {}) }, null);
-  // The question is not due (the person answered at 5; it comes back at 9): nothing holds the attempt, the handoff goes ahead and
-  // the engine withdraws the early question, saying why, so it is never asked.
-  assert.notEqual(stateOf(root, a.id).decision.kind, 'strategy');
-  ok(handRound(ctx, a, 'rev-9'));
-  const a2 = stateOf(root, a.id).decisions.find((d) => d.id === 'A2');
-  assert.ok(a2.withdrawn, 'the early question is withdrawn');
+  const earlyQuestion = (id, at) => append(root, a.id, 'decision.created', { id, kind: 'escalation', key: `tripwire:rounds-escalation:rounds:${at}`, summary: `${at} review rounds handed; the owner decides how to continue: continue | split | deliver-core | hold | stop`, choices: earlier.choices, ...(earlier.labels ? { labels: earlier.labels } : {}), ...(earlier.then ? { then: earlier.then } : {}) }, null);
+  earlyQuestion('A2', 8);
+  // The question is not due (the person answered at 5; it comes back at 9). The first command that opens the attempt, here the list
+  // of every open attempt, withdraws it, saying why, before anything lists it or tells the agent to ask it.
+  assert.doesNotMatch(ok(wf(root, ['status'])).out, /A2/);
+  const a2 = loadState(root, a.id).decisions.find((d) => d.id === 'A2');
+  assert.ok(a2.withdrawn, 'the early question is withdrawn as soon as a command opens the attempt');
   assert.match(a2.withdrawn.reason, /the person answered A1 \(continue\) at 5 handed rounds; the round question comes back at 9/);
   assert.equal(a2.withdrawn.by, null, 'the engine withdrew it');
   assert.doesNotMatch(ok(wf(root, ['decisions', '--attempt', a.id])).out, /A2 {2}escalation {2}pending/);
+  assert.notEqual(stateOf(root, a.id).decision.kind, 'strategy', 'nothing holds the attempt');
+  ok(handRound(ctx, a, 'rev-9'));
   // At 9, four rounds after the answer, the question comes back once, as a new question.
   const again = handRound(ctx, a, 'rev-10');
   assert.equal(again.code, 75);
   assert.match(again.err, /9 review rounds handed; the owner decides how to continue \(A3\)/);
   assert.deepEqual(stateOf(root, a.id).decisions.filter((d) => !d.approved && !d.withdrawn).map((d) => [d.id, d.key]), [['A3', 'tripwire:rounds-escalation:rounds:9']]);
+  // Answered at 9, it comes back at 13. At 12 the earlier release opened it again: the attempt's own commands withdraw it too
+  // (here the list of its decisions), and no answer to it is taken.
+  approveAsOwner(root, a.id, 'A3', 'continue');
+  for (const n of [10, 11, 12]) ok(handRound(ctx, a, `rev-${n}a`));
+  earlyQuestion('A4', 12);
+  assert.doesNotMatch(ok(wf(root, ['decisions', '--attempt', a.id])).out, /A4/);
+  assert.match(loadState(root, a.id).decisions.find((d) => d.id === 'A4').withdrawn?.reason ?? '', /the person answered A3 \(continue\) at 9 handed rounds; the round question comes back at 13/);
+  assert.match(wf(root, ['approve', 'A4', '--choice', 'continue', '--attempt', a.id], { ownerSilent: true }).err, /A4 was withdrawn/);
+  ok(handRound(ctx, a, 'rev-13a'));
+  assert.match(handRound(ctx, a, 'rev-14a').err, /13 review rounds handed; the owner decides how to continue \(A5\)/);
 });
 
 test('a round question an earlier release opened and nobody has answered yet stays the one question, whatever round it was keyed to', () => {

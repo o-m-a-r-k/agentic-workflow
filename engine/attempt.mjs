@@ -12,6 +12,7 @@ import { emitTrackerEvent, hasTicket, itemProblem } from './tracker.mjs';
 import { adoptNeedsApproval } from './owner.mjs';
 import { requireYes } from './approve.mjs';
 import { FRAMES } from './asking.mjs';
+import { settleRoundQuestions } from './strategy.mjs';
 import { detectOwner, ownerRuntime, ownerString } from './hosts/index.mjs';
 import { noteAttempt } from './refusals.mjs';
 import { WfError, assertEngine, assertPlainGit, assertSafeId, canonical as canonicalValue, git, hashFile, refuse, run, sha256 } from './util.mjs';
@@ -113,7 +114,8 @@ export function openState(root, options) {
   openEvidence(root, id);
   const state = loadState(root, id);
   assertSchema(state);
-  return state;
+  // 0.7.29 (I-214): a round question an earlier release opened before it was due is withdrawn before anything reads the attempt.
+  return settleRoundQuestions(root, state);
 }
 
 function nextNumber(root, prefix) {
