@@ -554,6 +554,8 @@ export function reduce(entries) {
         x.status = d.outcome;
         delete x.claim;
         if (d.outcome === 'fixed') x.fixed = { repo: d.repo, commit: d.commit, evidence: d.evidence ?? null, ...(d.reconciled ? { reconciled: d.reconciled } : {}), ...(d.beforeRecord ? { beforeRecord: true } : {}), ...(d.verifiedBy ? { verifiedBy: d.verifiedBy } : {}), at: e.at, by: e.actor };
+        // 0.7.27 (I-188): the claim stays as recorded; why it is not a defect, and who said so, are kept beside it.
+        else if (d.outcome === 'not-a-defect') x.notADefect = { reason: d.reason, evidence: d.evidence ?? null, source: d.source ?? null, ...(d.personDirected ? { personDirected: d.personDirected } : {}), attributedTo: d.attributedTo ?? null, at: e.at, by: e.actor };
         else x.deferred = { decision: d.decision, source: d.source ?? null, attributedTo: d.attributedTo ?? null, at: e.at, by: e.actor };
         break;
       }

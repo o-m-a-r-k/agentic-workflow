@@ -62,6 +62,10 @@ Work
                                     correct a rating (lowering records its reason; an invariant issue stays high)
   wf discovered close D1[,D2] --fixed SHA | --deferred [--reason "why"] [--person-directed "<their words>"]
                                     by default only a low issue may wait, with the person's answer (one question per item)
+  wf discovered close D1[,D2] --not-a-defect --reason "why it is not a defect" [--person-directed "<their words>"]
+                                    it was never a defect: the person decides (one question per item), unless the project's \`leaving:\`
+                                    lets the owner decide that level; a reviewer's \`verified-nonissue\` verdict closes it too;
+                                    the claim and the reason stay in the record, the delivered comment does not list it
   wf handoff planner|implementer|reviewer|tester --agent ID [--work W1] [--sweep F] [--session SID] [--runtime ${hostChoice()}]
                                     --sweep (optional): a fix handoff names a pattern sweep per family of open findings
                                     --context "<text>" | --context-file F (planner): what the person asked, carried in its bundle
@@ -855,7 +859,7 @@ async function dispatch(cmd, sub, positional, options) {
         const ds = r.ids.map((id) => r.state.discovered.find((x) => x.id === id));
         const fixedLine = (d) => `${d.id} fixed in ${r.repo}@${r.commit.slice(0, 10)}${d.fixed?.verifiedBy ? ` (made before it was recorded; verified by reviewer ${d.fixed.verifiedBy.reviewer})` : ''}`;
         const claimLines = (r.claimed ?? []).map((id) => `${id}: ${r.repo}@${r.commit.slice(0, 10)} was made before ${id} was recorded, so a reviewer verifies it: hand a reviewer (\`wf handoff reviewer --agent <id>\`); its bundle asks it to verify ${id}, and its \`fixed\` verdict closes ${id}. No question for the person.`);
-        const all = [...ds.map((d) => (r.outcome === 'fixed' ? fixedLine(d) : `${d.id} deferred (${channelOf(d)}): "${d.deferred.decision}"`)), ...claimLines];
+        const all = [...ds.map((d) => (r.outcome === 'fixed' ? fixedLine(d) : r.outcome === 'not-a-defect' ? `${d.id} closed as not a defect (${channelOf(d)}): "${d.notADefect.reason}"; the claim stays in the record and the delivered comment does not list it` : `${d.id} deferred (${channelOf(d)}): "${d.deferred.decision}"`)), ...claimLines];
         print(options, all.join('\n'), ds.length === 1 && !claimLines.length ? ds[0] : { closed: ds, claimed: r.claimed ?? [] });
         return 0;
       }
@@ -869,7 +873,7 @@ async function dispatch(cmd, sub, positional, options) {
         print(options, s.discovered.length ? s.discovered.map((d) => discoveredLine(d, s.id)).join('\n') : `no discovered issues on ${s.id}`, s.discovered);
         return 0;
       }
-      throw new WfError('usage: wf discovered add --summary "..." [--severity high|medium|low] [--invariant "<which>"] [--kind defect|bookkeeping] [--where file:line] [--found-by ID] | list | rate D1 --severity S [--reason "..."] | close D1[,D2] --fixed SHA | --deferred [--reason "..."] (a low issue only, with the person\'s yes; medium and high are fixed here)');
+      throw new WfError('usage: wf discovered add --summary "..." [--severity high|medium|low] [--invariant "<which>"] [--kind defect|bookkeeping] [--where file:line] [--found-by ID] | list | rate D1 --severity S [--reason "..."] | close D1[,D2] --fixed SHA | --deferred [--reason "..."] (a low issue only, with the person\'s yes; medium and high are fixed here) | --not-a-defect --reason "why it is not a defect" (the person decides, or a reviewer\'s verified-nonissue verdict closes it)');
     }
     case 'handoff': {
       if (sub === 'wait') {

@@ -64,6 +64,8 @@ gate:
 invariants: .workflow/AGENTS.invariants.md
 # Optional (0.7.8, D18). Who lets an unfixed finding or discovered issue of each level leave a delivery: never (fixed here
 # or in a sibling attempt of the batch), person (one short question per item) or owner (the owner agent's recorded reason).
+# The same policy says who may close a discovered issue as not a defect (`wf discovered close --not-a-defect`): the person, unless
+# the level is `owner`; an independent reviewer's `verified-nonissue` verdict closes one at any level (0.7.27).
 # Default: high never, medium never, low person.
 leaving: { high: never, medium: never, low: person }
 # Optional: the project's own examples added to each level of the one severity scale every role reads (bundle

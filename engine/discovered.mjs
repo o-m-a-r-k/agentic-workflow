@@ -2,7 +2,8 @@
 // during a ticket (a pager summing only the current page, a table with no phone view, an implicit default, a failed step
 // that strands the user) and parked them as follow-ups or "harmless today" without the owner deciding. Every issue found
 // during a ticket is recorded here by whoever finds it; it ends fixed by a commit of this ticket or deferred by the
-// person's rule (D17, engine/leaving.mjs: medium and high are fixed here; a low one waits only with the person's answer, D18);
+// person's rule (D17, engine/leaving.mjs: medium and high are fixed here; a low one waits only with the person's answer, D18),
+// or is found not to be a defect at all (0.7.27, I-188: an independent reviewer's verdict, or the person's decision);
 // delivery refuses an open one and the reviewer gives each a verdict.
 import { isBookkeeping, legacyWaived, severityLevel } from './review-policy.mjs';
 import { actor, openState } from './attempt.mjs';
@@ -14,7 +15,7 @@ import { findHost, optional } from './hosts/index.mjs';
 import { WfError, git, refuse, run } from './util.mjs';
 import { requireYes } from './approve.mjs';
 import { FRAMES, PERSON_RULE } from './asking.mjs';
-import { discoveredRating, leavingDecisions, policyOf } from './leaving.mjs';
+import { DEFAULT_POLICY, discoveredRating, leavingDecisions, policyOf, ratedText } from './leaving.mjs';
 import { trustedAdapter } from './config.mjs';
 
 const text = (v) => (typeof v === 'string' ? v.trim() : '');
@@ -76,8 +77,8 @@ export function ticketCommit(state, sha, repo) {
 // reason alone, against D1.
 export const discoveredLevel = (d) => (text(d?.invariant) ? 'high' : severityLevel(d?.severity) ?? 'high');
 
-// `wf discovered close D1[,D2] --fixed <commit> | --deferred --reason "..."`: several issues under one command, and the
-// high ones under one decision of the person (second final review of 0.7.0: one approval per id).
+// `wf discovered close D1[,D2] --fixed <commit> | --deferred --reason "..." | --not-a-defect --reason "..."`: several issues
+// under one command, and the high ones under one decision of the person (second final review of 0.7.0: one approval per id).
 export function closeDiscovered(root, idArg, options) {
   const state = openState(root, options);
   const ids = [...new Set(String(idArg ?? '').split(',').map((x) => x.trim()).filter(Boolean))];
@@ -87,10 +88,12 @@ export function closeDiscovered(root, idArg, options) {
     if (entry.status !== 'open') throw refuse(`${id} is already ${entry.status}`);
     return entry;
   });
-  if (!entries.length) throw new WfError('name the discovered issue(s): `wf discovered close D1[,D2] --fixed <commit> | --deferred --reason "..."`');
+  if (!entries.length) throw new WfError('name the discovered issue(s): `wf discovered close D1[,D2] --fixed <commit> | --deferred --reason "..." | --not-a-defect --reason "..."`');
   const fixed = typeof options.fixed === 'string' ? options.fixed.trim() : '';
   const deferred = options.deferred === true;
-  if (Boolean(fixed) === deferred) throw new WfError(`close ${ids.join(',')} with either --fixed <commit> or --deferred [--reason "<why it waits>"] (by default only a low issue may wait, with the person's answer; medium and high are fixed here)`);
+  const notDefect = options['not-a-defect'] === true;
+  if ([Boolean(fixed), deferred, notDefect].filter(Boolean).length !== 1) throw new WfError(`close ${ids.join(',')} with exactly one of --fixed <commit>, --deferred [--reason "<why it waits>"] (by default only a low issue may wait, with the person's answer; medium and high are fixed here) or --not-a-defect --reason "<why it is not a defect>" (the person decides, or an independent reviewer's verdict closes it; the claim stays in the record)`);
+  if (notDefect) return closeNotDefect(root, state, entries, options);
   if (fixed) {
     const c = ticketCommit(state, fixed, typeof options.repo === 'string' ? options.repo : null);
     // I-139: a fix the entry's own implementer made, in the handoff that recorded it, before it recorded it, closes it as
@@ -140,6 +143,43 @@ export function closeDiscovered(root, idArg, options) {
     append(root, state.id, 'discovered.closed', { id: e.id, outcome: 'deferred', decision: reason || (id === 'owner' ? 'left for later on the owner\'s reason' : `left for later with the person's decision ${id}`), source, attributedTo: text(options.by) || null }, actor(options));
   }
   return { state: loadState(root, state.id), outcome: 'deferred', ids };
+}
+
+// 0.7.27 (I-188), named failure (field): a defect rated high on a faulty premise, and the person then said to keep the
+// behaviour as it is; the entry could close only fixed (a fix nobody made) or deferred (a known issue nobody holds). It closes
+// as not a defect, which keeps the claim and records why it is not one, without a fix or a deferral. Leaving the delivery
+// without a fix is never an agent's word alone at a level that never leaves, so it is the person's decision (one question
+// per item) unless the project's `leaving:` policy lets the owner decide that level (then the owner's reason is recorded
+// as it is for a deferral). An independent reviewer's `verified-nonissue` verdict is the other route (`nonissueVerdicts`).
+function closeNotDefect(root, state, entries, options) {
+  const reason = text(options.reason);
+  if (!reason) throw refuse('--not-a-defect needs --reason: why it is not a defect (what the code is for, what the product intends)', 'pass `--reason "<why it is not a defect>"`; the claim stays in the record beside it. If the person told you so, add their words with `--person-directed "<their words>"`', { id: 'discovered:nonissue-reason' });
+  const directed = text(options['person-directed']).slice(0, 500) || null;
+  const policy = policyOf(trustedAdapter(root, state));
+  const decided = {};
+  const standing = [];
+  for (const e of entries) {
+    const level = discoveredLevel(e);
+    if ((policy[level] ?? DEFAULT_POLICY[level]) === 'owner') {
+      decided[e.id] = 'owner';
+      continue;
+    }
+    try {
+      decided[e.id] = requireYes(root, state, { kind: 'move-out-of-batch', key: `nonissue:${e.id}`, summary: `close ${state.id}:${e.id} as not a defect: ${e.summary} (${reason})`, what: `closing ${e.id} as not a defect`, frame: FRAMES.notDefect({ item: state.item, rated: ratedText({ ...e, level, ...discoveredRating(e) }), directed }), items: [e.id], options }).decision;
+    } catch (error) {
+      if (error.code !== 75) throw error;
+      standing.push(error);
+    }
+  }
+  if (standing.length === 1) throw standing[0];
+  if (standing.length) throw refuse(standing.map((e) => e.message).join('\n'), standing.map((e) => e.hint).filter(Boolean).join('\n\n'), { id: standing[0].refusalId ?? 'approve:move-out-of-batch' });
+  for (const e of entries) {
+    const id = decided[e.id];
+    const via = (state.decisions ?? []).find((x) => x.id === id)?.approved?.via ?? null;
+    const source = id === 'owner' ? { provenance: 'owner-reason' } : { provenance: 'approved-decision', decision: id, ...(via ? { via } : {}) };
+    append(root, state.id, 'discovered.closed', { id: e.id, outcome: 'not-a-defect', reason, source, ...(directed ? { personDirected: directed } : {}), attributedTo: text(options.by) || null }, actor(options));
+  }
+  return { state: loadState(root, state.id), outcome: 'not-a-defect', ids: entries.map((e) => e.id) };
 }
 
 // The discovered entries a round's bundle showed its reviewer: recorded with the round from 0.7.19, read from the round's
@@ -209,7 +249,8 @@ export function rateDiscovered(root, id, options) {
 export const fold = (t) => String(t ?? '').normalize('NFKC').replace(/\s+/g, ' ').trim().toLowerCase();
 
 // The reviewer's verdict per entry its bundle listed: `fixed` (with evidence in the code), `deferred` (only for an entry
-// the owner deferred) or `open` (recorded honestly; acceptance then refuses).
+// the owner deferred), `verified-nonissue` (0.7.27, I-188: not a defect, with its evidence and rationale; it closes an open
+// entry, see `nonissueVerdicts`) or `open` (recorded honestly; acceptance then refuses).
 export function discoveredVerdicts(entries, closure) {
   const given = Array.isArray(closure?.discovered) ? closure.discovered : [];
   const problems = [];
@@ -218,10 +259,33 @@ export function discoveredVerdicts(entries, closure) {
   for (const d of (entries ?? []).filter((x) => !isBookkeeping(x))) {
     const v = given.find((x) => x?.id === d.id);
     if (!v) problems.push(`${d.id}: no verdict (${d.summary})`);
-    else if (!['fixed', 'deferred', 'open'].includes(v.verdict)) problems.push(`${d.id}: verdict must be fixed, deferred or open, not \`${v.verdict}\``);
+    else if (!['fixed', 'deferred', 'verified-nonissue', 'open'].includes(v.verdict)) problems.push(`${d.id}: verdict must be fixed, deferred, verified-nonissue or open, not \`${v.verdict}\``);
     else if (!text(v.evidence)) problems.push(`${d.id}: ${v.verdict} needs evidence (file:line of the fix, or what is still wrong)`);
+    else if (v.verdict === 'verified-nonissue' && !text(v.rationale)) problems.push(`${d.id}: verified-nonissue needs a rationale (why it is not a defect)`);
     else if (v.verdict === 'deferred' && d.status !== 'deferred') problems.push(`${d.id}: \`deferred\` only acknowledges a deferral the owner recorded; ${d.id} is ${d.status}: give \`fixed\` with the file:line of the fix, or \`open\``);
-    else verdicts.push({ id: d.id, verdict: v.verdict, evidence: text(v.evidence) });
+    else verdicts.push({ id: d.id, verdict: v.verdict, evidence: text(v.evidence), ...(v.verdict === 'verified-nonissue' ? { rationale: text(v.rationale) } : {}) });
+  }
+  return { problems, verdicts };
+}
+
+// 0.7.27 (I-188): an independent reviewer judges a discovered issue its bundle handed it not to be a defect at all
+// (`discovered: [{ id, verdict: 'verified-nonissue', evidence, rationale }]`, as `priorFindings` and historical reports can
+// be verified a non-issue), and its verdict closes the entry: the claim stays, with the reviewer's evidence and rationale. Named
+// failure (field): a reviewer found a high claim "not established" and wrote it in its summary, which closed nothing. Only an
+// open entry the reviewer was handed; a verdict missing its evidence or rationale is refused, never dropped.
+export function nonissueVerdicts(handed, closure, state) {
+  const given = (Array.isArray(closure?.discovered) ? closure.discovered : []).filter((v) => v?.verdict === 'verified-nonissue');
+  const problems = [];
+  const verdicts = [];
+  for (const v of given) {
+    const id = text(v.id);
+    const entry = (state.discovered ?? []).find((x) => x.id === id);
+    if (!id || !(handed?.discovered ?? []).some((x) => x?.id === id) || !entry) problems.push(`${id || '(no id)'}: not in your bundle (the issues you were handed: ${(handed?.discovered ?? []).map((x) => x?.id).filter(Boolean).join(', ') || 'none'})`);
+    else if (verdicts.some((x) => x.id === id) || given.filter((x) => text(x.id) === id).length > 1) problems.push(`${id}: give exactly one verdict`);
+    else if (entry.status !== 'open') problems.push(`${id}: it is already ${entry.status}; a verdict closes an open issue only`);
+    else if (!text(v.evidence)) problems.push(`${id}: verified-nonissue needs evidence (the file:line you checked, or what you ran)`);
+    else if (!text(v.rationale)) problems.push(`${id}: verified-nonissue needs a rationale (why it is not a defect, in terms of what the product is for)`);
+    else verdicts.push({ id, evidence: text(v.evidence), rationale: text(v.rationale) });
   }
   return { problems, verdicts };
 }
@@ -256,7 +320,7 @@ export function unacknowledged(root, state, loadMember, { acknowledged = false }
   return out;
 }
 
-export const discoveredLine = (d, attemptId) => `${d.id}  ${d.status}${d.kind === 'bookkeeping' ? ' (bookkeeping)' : ''}${d.severity ? `  ${d.severity}` : ''}  ${d.summary}${d.where || d.foundBy ? `  (${[d.where, d.foundBy ? `found by ${d.foundBy}` : null].filter(Boolean).join('; ')})` : ''}${d.blockedBy && d.status === 'open' ? `  blocked by ${d.blockedBy}: route it to that work item's implementer` : ''}${d.claim && d.status === 'open' ? `  claimed fixed in ${d.claim.repo}@${String(d.claim.commit).slice(0, 10)} (made before it was recorded; a reviewer's \`fixed\` closes it)` : ''}${d.status === 'fixed' ? `  fixed in ${d.fixed.repo}@${d.fixed.commit.slice(0, 10)}${d.fixed.reconciled ? ` (repaired by ${d.fixed.reconciled.agent} before it was recorded)` : ''}` : d.status === 'deferred' ? `  deferred (${channelOf(d)}): "${d.deferred.decision}"` : attemptId ? (discoveredLevel(d) === 'low' ? `\n    low: it leaves only with the person's answer, one short question per item (wf scope defer --finding ${d.id}[,<ref>...])` : `\n    ${discoveredLevel(d)}: fixed in this delivery (here or in a sibling attempt of the batch), unless the project's \`leaving:\` says otherwise`) : ''}`;
+export const discoveredLine = (d, attemptId) => `${d.id}  ${d.status}${d.kind === 'bookkeeping' ? ' (bookkeeping)' : ''}${d.severity ? `  ${d.severity}` : ''}  ${d.summary}${d.where || d.foundBy ? `  (${[d.where, d.foundBy ? `found by ${d.foundBy}` : null].filter(Boolean).join('; ')})` : ''}${d.blockedBy && d.status === 'open' ? `  blocked by ${d.blockedBy}: route it to that work item's implementer` : ''}${d.claim && d.status === 'open' ? `  claimed fixed in ${d.claim.repo}@${String(d.claim.commit).slice(0, 10)} (made before it was recorded; a reviewer's \`fixed\` closes it)` : ''}${d.status === 'fixed' ? `  fixed in ${d.fixed.repo}@${d.fixed.commit.slice(0, 10)}${d.fixed.reconciled ? ` (repaired by ${d.fixed.reconciled.agent} before it was recorded)` : ''}` : d.status === 'deferred' ? `  deferred (${channelOf(d)}): "${d.deferred.decision}"` : d.status === 'not-a-defect' ? `  not a defect (${channelOf(d)}): "${d.notADefect.reason}"` : attemptId ? (discoveredLevel(d) === 'low' ? `\n    low: it leaves only with the person's answer, one short question per item (wf scope defer --finding ${d.id}[,<ref>...])` : `\n    ${discoveredLevel(d)}: fixed in this delivery (here or in a sibling attempt of the batch), unless the project's \`leaving:\` says otherwise`) : ''}`;
 
 // I-18 (extended), named failure: an implementer reported "Not fixed, outside the brief: <a defect>" and handed the issue
 // back to the owner agent to relay. A line of an implementer's final report that leaves an issue unfixed must name its
@@ -284,10 +348,10 @@ function resolvedReportClause(state, clause, reportAt) {
   if (!Number.isFinite(when)) return false;
   const body = summaryText(clause.replace(/^(?:not (?:yet )?(?:fixed|addressed|handled|done)|follow-?up)(?:,\s*(?:outside|beyond) (?:the|my|this) (?:brief|scope|work item|task))?\s*:\s*/i, ''));
   return (state.discovered ?? []).some((d) => {
-    const resolution = d.status === 'fixed' ? d.fixed : d.status === 'deferred' ? d.deferred : null;
+    const resolution = d.status === 'fixed' ? d.fixed : d.status === 'deferred' ? d.deferred : d.status === 'not-a-defect' ? d.notADefect : null;
     if (!resolution || Date.parse(resolution.at) < when || !Number.isFinite(Date.parse(resolution.at))) return false;
     if (body !== summaryText(d.summary)) return false;
-    if (d.status === 'deferred') return Boolean(resolution.source);
+    if (d.status === 'deferred' || d.status === 'not-a-defect') return Boolean(resolution.source);
     const wt = state.repos[d.fixed.repo]?.worktree;
     return Boolean(wt && run('git', ['merge-base', '--is-ancestor', d.fixed.commit, 'HEAD'], { cwd: wt, allowFail: true }).status === 0);
   });
