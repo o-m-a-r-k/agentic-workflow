@@ -232,7 +232,7 @@ test('I-127: a planner after an upgrade knows why, its plan replaces the analysi
   fs.writeFileSync(amend, JSON.stringify({ approach: 'implement the fix' }));
   const r = wf(f.root, ['criteria', 'amend', '--file', amend, '--reason', 'the implementation plan', '--attempt', e.id]);
   assert.equal(r.code, 75);
-  assert.match(r.err, /the amendment carries `approach`, which no amendment applies: an amendment changes `criteria`, `expect`, `impact`, `scope`, `work` and plan sections/);
+  assert.match(r.err, /the amendment carries `approach`, which no amendment applies: an amendment changes `criteria`, `expect`, `impact`, `scope`, `work`, `pass` and plan sections/);
   assert.match(r.err, /record the planner's whole plan with `wf plan --from-agent <planner id> --attempt ENG-9\.1` \(it replaces the analysis plan\)/);
   const h = ok(wf(f.root, ['handoff', 'planner', '--agent', 'p2', '--attempt', e.id, '--context', 'the person: we are cutting a release, add the fix to it', '--json'])).json();
   const b = JSON.parse(fs.readFileSync(h.bundle, 'utf8'));

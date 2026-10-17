@@ -1,4 +1,5 @@
 import { gateAdapter, validationCommit, validationDigest, validationIds, validationCatalog } from './validation.mjs';
+import { requireYes } from './approve.mjs';
 import { mkdirStateDirectory } from './state-folders.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -60,7 +61,7 @@ function stepInputs(state, step, repo, pkg, skipFolder = null) {
 // when it is planned (`when`, `component`, `ignores`) and `prepare` (run by `wf prepare` only, never by the gate). Named
 // failure (audit of 51 attempts; one ticket's correction of its evidence glob): the whole definition was hashed, so a
 // change to which screenshots count as the ticket's made a 25-minute e2e step look new, though its result could not change.
-const RESULT_NEUTRAL = ['workers', 'shards', 'artifacts', 'tier', 'lease', 'deferrable', 'when', 'component', 'ignores', 'prepare'];
+const RESULT_NEUTRAL = ['workers', 'shards', 'artifacts', 'tier', 'lease', 'deferrable', 'when', 'component', 'ignores', 'prepare', 'specs'];
 function pluginHashOf(root, state, step) {
   return step.plugin ? hashFile(adapterFileAtCommit(root, state, validationCommit(state, step.id), step.plugin)) : null;
 }
@@ -268,9 +269,16 @@ export async function planGate(root, state, options = {}) {
       steps.push({ ...entry, decision: 'skip', skippedBy: 'check', reason: entry.tier === 'heavy' ? '`wf check` runs light steps only' : 'not one of the repos checked' });
       continue;
     }
+    // 0.7.28 (I-212). Named failure (field): with every heavy step deferred, a ticket's own new end-to-end spec first ran at hour
+    // 28, in the batch gate, and no reviewer saw its screenshots before then. A member runs the spec files its own change adds or
+    // edits (the step's `specs`, run through its `select`); the whole step still runs in the batch gate.
+    let ownSpecs = null;
     if (!full && state.deferHeavy && entry.tier === 'heavy' && step.deferrable !== false) {
-      steps.push({ ...entry, decision: 'defer', reason: 'batch member: heavy steps run in the batch gate' });
-      continue;
+      ownSpecs = step.specs?.length && step.select && !step.plugin ? pkgChanged.map((f) => rel(f, pkg.path)).filter((f) => matchesAny(f, step.specs) && fs.existsSync(path.join(dir, f))) : [];
+      if (!ownSpecs.length) {
+        steps.push({ ...entry, decision: 'defer', reason: 'batch member: heavy steps run in the batch gate' });
+        continue;
+      }
     }
     chooseWorkers(step);
     chooseShards(step);
@@ -278,7 +286,8 @@ export async function planGate(root, state, options = {}) {
     const runner = runnerIdentity(root, live, state, step);
     const also = alsoInputTrees(root, cfg, state, step);
     const keyOf = (r) => (!inputs || also.unreadable.length ? null : hashValue(also.trees ? { inputs: inputs.hash, runner: r, also: also.trees } : { inputs: inputs.hash, runner: r }));
-    const key = keyOf(runner);
+    // A run of the member's own specs proves those specs only: its key is its own, so it never stands for the whole step.
+    const key = ownSpecs && keyOf(runner) ? hashValue({ step: keyOf(runner), ownSpecs }) : keyOf(runner);
     // A pass recorded before 0.7.11 was keyed on the whole definition and on inputs that counted the workflow folder: it is
     // matched on those terms, so an upgrade reruns nothing that 0.7.10 would have reused.
     const recordedBefore = allGateSteps(state).some((s) => s.id === step.id && !s.resultIdentity && ['passed', 'reused'].includes(s.status));
@@ -312,7 +321,7 @@ export async function planGate(root, state, options = {}) {
     // and says where it came from. Only for a step that keeps no evidence files, which are this ticket's own. Named
     // failure (I-150, audit of 51 attempts): 163 reruns had a key another attempt had already passed.
     let fromAttempt = null;
-    if (!prior && key && !step.artifacts?.length && !options.rerunFailed?.includes(step.id)) {
+    if (!prior && key && !ownSpecs && !step.artifacts?.length && !options.rerunFailed?.includes(step.id)) {
       // The key a pass recorded before 0.7.11 would have here (hashed the old way once, and only if such a pass exists).
       let legacy;
       const legacyAcross = () => {
@@ -369,7 +378,8 @@ export async function planGate(root, state, options = {}) {
       runnerIdentity: runner,
       alsoInputs: also.trees ?? undefined,
       decision: prior ? 'reuse' : 'run',
-      reason: prior ? `same inputs and runner as ${prior.runId}${fromAttempt ? ` in ${fromAttempt}` : ''}` : outside.length ? `changed file(s) outside this step's inputs since its last pass: ${outside.slice(0, 3).join(', ')}${outside.length > 3 ? '…' : ''}` : notCovered.length ? `changed file(s) outside every step's inputs: ${notCovered.slice(0, 3).join(', ')}${notCovered.length > 3 ? '…' : ''}` : also.unreadable.length ? `cannot read the tree of ${also.unreadable.join(', ')} (alsoInputs): always runs` : key ? (isDependent ? 'dependent of a changed contract' : infraChanged ? 'shared infrastructure changed' : also.trees ? 'inputs or a repo in alsoInputs changed, or never passed' : 'inputs changed or never passed') : 'no `inputs` declared: always runs',
+      ...(ownSpecs ? { ownSpecs } : {}),
+      reason: ownSpecs && !prior ? `batch member: only the spec files this change adds or edits (${ownSpecs.join(', ')}); the whole step runs in the batch gate` : prior ? `same inputs and runner as ${prior.runId}${fromAttempt ? ` in ${fromAttempt}` : ''}` : outside.length ? `changed file(s) outside this step's inputs since its last pass: ${outside.slice(0, 3).join(', ')}${outside.length > 3 ? '…' : ''}` : notCovered.length ? `changed file(s) outside every step's inputs: ${notCovered.slice(0, 3).join(', ')}${notCovered.length > 3 ? '…' : ''}` : also.unreadable.length ? `cannot read the tree of ${also.unreadable.join(', ')} (alsoInputs): always runs` : key ? (isDependent ? 'dependent of a changed contract' : infraChanged ? 'shared infrastructure changed' : also.trees ? 'inputs or a repo in alsoInputs changed, or never passed' : 'inputs changed or never passed') : 'no `inputs` declared: always runs',
       reusedFrom: prior?.runId ?? null,
       // The record itself travels with the plan: the other attempt's ledger is not read again when the gate runs.
       ...(fromAttempt ? { reusedFromAttempt: fromAttempt, sourceRecord: prior } : {}),
@@ -466,6 +476,42 @@ export function globFiles(baseDir, pattern) {
 function reselectArtifacts(prior, globsNow, units) {
   const artifacts = (prior.artifacts ?? []).filter((a) => globsNow.some((g) => matchesAny(a.source, g.expanded))).map((a) => ({ ...a, units: units.filter((u) => globsNow.some((g) => matchesAny(a.source, expandArtifactGlob(g.glob, [u])))).map((u) => u.attempt) }));
   return { artifacts, artifactGlobs: globsNow.map((g) => ({ glob: g.glob, expanded: g.expanded, files: artifacts.filter((a) => matchesAny(a.source, g.expanded)) })) };
+}
+
+// 0.7.28 (I-212): the suites of a step the person set aside for this attempt (`override-gate`, key `quarantine:<attempt>:<step>:<suite>`).
+export function quarantinedSuites(state, stepId) {
+  const prefix = `quarantine:${state.id}:${stepId}:`;
+  return (state.decisions ?? []).filter((d) => d.kind === 'override-gate' && String(d.key).startsWith(prefix) && d.approved?.choice === 'yes').map((d) => String(d.key).slice(prefix.length));
+}
+
+// `wf gate quarantine --step <id> --suite <file> --reason "<why>"`: the person's one decision to set aside a suite that failed in the
+// last gate and that the delivery does not touch, instead of repair rounds for it. Named failure (field): a batch gate failed five
+// times (158 minutes) on end-to-end specs that were flaky before the batch and that it never touched, and each failure became a
+// repair round. The engine checks the facts (the suite failed in the last gate on this tree; no file of it is in the delivery's
+// change); the person decides; the gate then counts the step passed when that suite is its only failure, and the delivered
+// comment says it was not proven.
+export function quarantineSuite(root, state, options) {
+  const stepId = typeof options.step === 'string' ? options.step : null;
+  const suite = typeof options.suite === 'string' ? options.suite.trim() : '';
+  const reason = typeof options.reason === 'string' ? options.reason.trim() : '';
+  if (!stepId || !suite || !reason) throw new WfError('usage: wf gate quarantine --step <step id> --suite <the failing suite\'s file, as the gate reported it> --reason "<why it fails before this delivery>"');
+  const cfg = gateAdapter(root, state);
+  const step = cfg.gate.steps.find((x) => x.id === stepId);
+  if (!step) throw refuse(`no gate step \`${stepId}\` (steps: ${cfg.gate.steps.map((x) => x.id).join(', ')})`, null, { id: 'gate:quarantine-step' });
+  const last = state.lastGate;
+  const ran = last?.steps?.find((x) => x.id === stepId);
+  const failing = (ran?.suites ?? []).filter((x) => x.status === 'failed').map((x) => x.file ?? x.id);
+  if (!last || canonical(last.tree) !== canonical(treeHashes(state)) || !failing.includes(suite)) throw refuse(`${suite} did not fail in ${stepId} in the last gate on this tree${failing.length ? ` (failed there: ${failing.join(', ')})` : ''}`, 'only a suite that failed in the last gate on the tree as it is can be set aside: run `wf gate`, then name a suite it reports failed', { id: 'gate:quarantine-not-failing' });
+  const { repo, pkg } = stepPackage(cfg, state, step);
+  const file = pkg.path === '.' ? suite : `${pkg.path}/${suite}`;
+  if (changedFiles(state, repo.name).includes(file)) throw refuse(`${suite} is changed by this delivery (${repo.name}:${file}): its failure is this delivery's to fix`, 'fix it through the implementer that changed it; only a suite the delivery does not touch can be set aside', { id: 'gate:quarantine-touched' });
+  const setAsideFrame = {
+    question: `Should ${state.item ?? state.id} ship with the existing test suite ${suite} (${stepId}) set aside, instead of more repair rounds? It failed in the gate, this change does not touch it, and ${reason.replace(/[.\s]+$/, '')}.`,
+    labels: { yes: 'Set it aside and ship', no: 'No, fix it in this delivery' },
+    then: { yes: `the gate counts ${stepId} passed while ${suite} is its only failure; the delivered comment says that suite was not proven`, no: `${suite} stays a failure: it is fixed in this delivery before the gate passes` },
+  };
+  const approval = requireYes(root, state, { kind: 'override-gate', key: `quarantine:${state.id}:${stepId}:${suite}`, summary: `set aside ${suite} of ${stepId} for this delivery: it fails before it and the delivery does not touch it (${reason})`, what: `setting aside ${suite} of ${stepId}`, frame: setAsideFrame, options });
+  return { decision: approval.decision, step: stepId, suite };
 }
 
 // Whose evidence a gate collects: the attempt itself, and for a batch every member (their heavy steps run here).
@@ -654,7 +700,8 @@ async function executeStep(root, cfg, state, planned, ctx) {
   const started = Date.now();
   const prior = allGateSteps(state).filter((s) => s.id === step.id && s.status !== 'reused' && s.suites).at(-1);
   // Playwright's JSON report names every test it found, run or not; a JUnit report names only the suites that ran.
-  const rerun = step.select ? suitesToRerun(prior, planned, { listsEverySuite: Boolean(step.report?.playwright) }) : null;
+  // A batch member's own specs (I-212) are what this run runs; nothing an earlier whole run passed is carried into it.
+  const rerun = planned.ownSpecs?.length ? planned.ownSpecs : step.select ? suitesToRerun(prior, planned, { listsEverySuite: Boolean(step.report?.playwright) }) : null;
   const vars = { workers: workers.n, shards: shards.n, evidence: scratch };
   vars.select = rerun ? substitute(step.select, { suites: rerun.map(shellQuote).join(' ') }) : '';
   // The report files present before the run, by signature: only a report this run wrote or rewrote is read after it (one an
@@ -720,7 +767,7 @@ async function executeStep(root, cfg, state, planned, ctx) {
     // stays as `not-run`, rerun the next time, and the step does not pass (independent review of 0.7.6: it was dropped, so a
     // later gate went green without it). Suites it was not asked to rerun are carried.
     let unreported = [];
-    if (rerun && prior?.suites) {
+    if (rerun && prior?.suites && !planned.ownSpecs?.length) {
       const fresh = new Map(suites.map((s) => [s.id, s]));
       const reported = (s) => fresh.has(s.id) || (s.file && [...fresh.values()].some((x) => x.file === s.file));
       const requested = (s) => rerun.includes(s.file ?? s.id);
@@ -732,7 +779,13 @@ async function executeStep(root, cfg, state, planned, ctx) {
     // started. Only this run's suites count (a carried suite ran in an earlier run).
     const neverStarted = suites.filter((s) => !s.carried && s.neverStarted > 0).map((s) => s.file ?? s.id);
     const failed = codes.some((c) => c.code !== 0) || suites.some((s) => s.status === 'failed') || unreported.length > 0 || neverStarted.length > 0;
-    result = { status: interrupted ? 'interrupted' : failed ? 'failed' : 'passed', suites, exitCodes: codes.map((c) => c.code), artifacts: [], ...(unreported.length ? { unreported: unreported.map((s) => s.file ?? s.id) } : {}), ...(neverStarted.length ? { neverStarted } : {}) };
+    // 0.7.28 (I-212): a suite the person set aside for this delivery (a pre-existing failure the delivery does not touch,
+    // `wf gate quarantine`) does not fail the step when it is the step's only failure; the step records it, and the reviewer and
+    // the delivered comment see it.
+    const setAside = quarantinedSuites(state, step.id);
+    const failedSuites = suites.filter((x) => x.status === 'failed' && !x.carried).map((x) => x.file ?? x.id);
+    const onlySetAside = failed && failedSuites.length > 0 && failedSuites.every((f) => setAside.includes(f)) && !suites.some((x) => x.status === 'failed' && x.carried) && !unreported.length && !neverStarted.length;
+    result = { status: interrupted ? 'interrupted' : failed && !onlySetAside ? 'failed' : 'passed', suites, exitCodes: codes.map((c) => c.code), artifacts: [], ...(onlySetAside ? { quarantined: failedSuites } : {}), ...(unreported.length ? { unreported: unreported.map((s) => s.file ?? s.id) } : {}), ...(neverStarted.length ? { neverStarted } : {}) };
     // Which tests failed, recorded on the step (telemetry): read from the reports and output this run wrote.
     if (result.status === 'failed') {
       result.failures = stepFailures({ junitFiles: files, playwrightFiles, log: logFile, exitCodes: result.exitCodes, suites, redact: ctx.redact });
@@ -768,6 +821,7 @@ async function executeStep(root, cfg, state, planned, ctx) {
     runnerIdentity: planned.runnerIdentity,
     ...result,
     rerunSuites: rerun,
+    ...(planned.ownSpecs?.length ? { ownSpecs: planned.ownSpecs } : {}),
     workers,
     shards,
     durationMs: Date.now() - started,

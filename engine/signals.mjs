@@ -71,7 +71,7 @@ export function roundMetrics(rounds) {
   return { rounds: n, blockingLatest: latest?.blocking ?? 0, findingsLatest: latest?.findings ?? 0, roundsSinceDecrease: latest && latest.blocking > 0 ? n - 1 - lastDecrease : 0 };
 }
 
-function filesSignal(state, cfg) {
+export function filesSignal(state, cfg) {
   const perRepo = {};
   let changed = 0;
   for (const name of Object.keys(state.repos ?? {})) {

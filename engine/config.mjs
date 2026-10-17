@@ -345,6 +345,12 @@ function normalize(raw, source) {
         if (unknown.length) fail(`step \`${s.id}\`: artifacts glob \`${g}\` uses unknown placeholder(s) ${unknown.map((p) => `{${p}}`).join(', ')} (known: ${ARTIFACT_PLACEHOLDERS.map((p) => `{${p}}`).join(', ')})`);
       }
     }
+    // 0.7.28 (I-212): the step's own spec files (globs, relative to its package): a batch member whose heavy steps are deferred
+    // runs the ones its change adds or edits, through the step's `select`.
+    if (s.specs !== undefined) {
+      if (!Array.isArray(s.specs) || !s.specs.length || s.specs.some((g) => typeof g !== 'string' || !g.trim())) fail(`step \`${s.id}\`: specs must be a list of globs naming the step's spec files`);
+      else if (!s.select || s.plugin) fail(`step \`${s.id}\`: specs needs \`run\` with \`select\` (how the runner takes spec files, with \`{suites}\`), so a run can be limited to some of them`);
+    }
     if (s.alsoInputs !== undefined) {
       if (!Array.isArray(s.alsoInputs)) fail(`step \`${s.id}\`: alsoInputs must be a list of repo names`);
       else for (const r of s.alsoInputs) if (!repoNames.has(r)) fail(`step \`${s.id}\`: alsoInputs names unknown repo \`${r}\``);

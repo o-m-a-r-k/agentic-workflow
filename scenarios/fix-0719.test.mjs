@@ -75,7 +75,8 @@ test('a reviewer that verified a defect before the owner names its predating fix
   assert.deepEqual([s.discovered[0].status, s.discovered[0].fixed.verifiedBy.reviewer, s.discovered[0].fixed.beforeRecord], ['fixed', 'r1', true]);
   assert.equal(s.discovered[1].status, 'open');
   // `wf resume` and the list name the reviewer route for what is claimed, not a new fix.
-  assert.match(ok(wf(p.root, ['resume', '--attempt', e.id])).out, /D2 \(claimed fixed in app@\S+, made before it was recorded\): a reviewer verifies each; hand a reviewer/);
+  // 0.7.28 (I-207): said beside the next step (the review that comes anyway verifies it), not a round of its own.
+  assert.match(ok(wf(p.root, ['resume', '--attempt', e.id])).out, /D2 \(claimed fixed in app@\S+, made before it was recorded\): a reviewer verifies each: the next reviewer is handed it/);
   assert.match(ok(d(['list'])).out, /D2 {2}open {2}medium .*claimed fixed in app@\S+ \(made before it was recorded; a reviewer's `fixed` closes it\)/);
 });
 

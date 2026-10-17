@@ -476,8 +476,9 @@ main(process.argv.slice(2)).then((code) => process.exit(code ?? 0), (error) => {
   assert.equal(fs.readFileSync(path.join(evidenceDir(f, e.id), 'issue', 'issue.md'), 'utf8'), '# the request\n');
   // The file was checked before anything was created: a missing one leaves no worktree behind.
   const missing = wf(f.root, ['entry', '--item', 'ENG-2', '--issue-file', path.join(f.base, 'nope.md')]);
-  assert.equal(missing.code, 1);
-  assert.match(missing.err, /--issue-file not found/);
+  // 0.7.28 (I-213): an input that is not there is refused before any command reads it, for every command (exit 2).
+  assert.equal(missing.code, 2);
+  assert.match(missing.err, /--issue-file ".*nope\.md": is not there \(no such file/);
   assert.equal(fs.existsSync(path.join(f.root, '.wf-worktrees', 'ENG-2.1')), false, 'no worktree left behind');
 });
 
