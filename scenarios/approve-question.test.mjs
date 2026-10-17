@@ -402,7 +402,7 @@ test('chat on Claude Code: a panel answer ends the message, so a later "yes" nev
   // The agent's own label for the decision is not another decision's key; a bare "Yes." keeps no reply beside the choice.
   const u = heldAttempt('chat-claude-label', 'ENG-991');
   claudeLines(u.p, [says(`Reserved decision A1: lifting the hold lets the planner start.\n\n"${u.question}"\n\nOption A1: yes, lift it / no`, at(500)), types('Yes.', at(1000))]);
-  assert.match(ok(approveQ(u.p, u.e.id, u.d.id, env)).out, /^A1 decided: yes\. next:/m);
+  assert.match(ok(approveQ(u.p, u.e.id, u.d.id, env)).out, /^A1 decided: yes\. In this same reply, tell them what you recorded/m);
   assert.equal(state(u.p.root, u.e.id).decisions[0].approved.reply, undefined);
 });
 
@@ -430,7 +430,7 @@ test('typed replies: exactly one option binds; without the question quoted, only
   }
   claudeChat(p, { said: `About ${e.id} ${d.id}: the store review came back. Should the pause end?`, reply: 'Lift the pause', saidWhen: at(2500), when: at(3000) });
   const typed = ok(approveQ(p, e.id, d.id, env));
-  assert.match(typed.out, /^A1 decided: yes\. next:/m);
+  assert.match(typed.out, /^A1 decided: yes\. In this same reply, tell them what you recorded/m);
   const recorded = state(p.root, e.id).decisions[0].approved;
   assert.equal(recorded.choice, 'yes');
   assert.match(recorded.via, /^chat, the question not quoted \(Claude Code, host-recorded\)$/);
@@ -556,7 +556,7 @@ test('0.7.27 (I-192): Codex, the page the harness records before the person\'s f
   const d = legacyClose(p, e.id);
   codexDays(p, e.id, d, { reply: 'yes', day2Agent: false });
   const r = ok(approveQ(p, e.id, d.id, codexEnv));
-  assert.match(r.out, /^A1 decided: yes\. next:/m);
+  assert.match(r.out, /^A1 decided: yes\. In this same reply, tell them what you recorded/m);
   assert.match(state(p.root, e.id).decisions[0].approved.via, /^chat \(Codex, host-recorded\)$/, 'bound to the message that quoted the question');
 });
 
@@ -703,7 +703,7 @@ test('0.7.27 (D41): an exact answer given after the words the agent relies on st
   claudeLines(t.p, [says(`${t.question}\n\nyes / no`, at(500)), types('no', at(1000))]);
   const exact = readQ(t.p, t.e.id, t.d.id, env, 'yes', 'no');
   assert.equal(exact.code, 75);
-  assert.match(exact.err, /not recorded: their reply "no" is exactly the option no/);
+  assert.match(exact.err, /not recorded: their message "no" is exactly the option no \("Keep it paused"\), not yes/);
   assert.equal(state(t.p.root, t.e.id).decisions[0].approved, null);
 });
 
@@ -738,4 +738,85 @@ test('0.7.27 (D41): an answer the first form of 0.7.27 recorded still reads and 
   assert.match(channelOf({ deferred: { source: { provenance: 'approved-decision', via: row.answer.via } } }), /in their own words naming what it decides/);
   ok(wf(p.root, ['release', '--attempt', e.id], silent));
   assert.equal(state(p.root, e.id).activeHold, null, 'the recorded answer lifted the hold');
+});
+
+// 0.7.27 (D41), named failures (an independent review of the rework, probes P1-P12): a bare "ok" to a message that quoted the
+// question but also asked something else ("should I update the README?") recorded yes; an exact recording never told the agent
+// to say what it recorded; a quote older than the person's later reply to the question ("wait, not yet") was recorded; a whole
+// message that is exactly "no", to a message that did not ask it, was read as yes; a fragment cut at an apostrophe ("'t close
+// it" from "don't close it") passed as whole words; a thumbs-up had no route; words from before the question handed the ask
+// hint although newer words existed; and one panel question carrying two decisions' questions answered both.
+test('0.7.27 (D41, review of the rework): the exact and quote paths hold only what is exact, and every recording is read back', () => {
+  // P1: the question quoted, and something else asked in the same message: a bare "ok" is the agent's to read.
+  let t = heldAttempt('approve-two-asks', 'ENG-1220');
+  claudeLines(t.p, [says(`${t.question}\n\nOptions: yes / no\n\nAlso: should I update the README while we wait?`, at(500)), types('ok', at(1000))]);
+  const twice = approveQ(t.p, t.e.id, t.d.id, env);
+  assert.equal(twice.code, 75);
+  assert.match(twice.err, /your message that asked it also asked something else, so a bare yes or no there is yours to read/);
+  readsFirst(twice.err, 'a bare "ok" to a message that asked two things');
+  assert.equal(state(t.p.root, t.e.id).decisions[0].approved, null);
+  assert.match(ok(readQ(t.p, t.e.id, t.d.id, env, 'yes', 'ok')).out, /A1 decided: yes, as you read the person's words "ok"/);
+  // The label of this question's option is exact whatever else the message asked.
+  t = heldAttempt('approve-two-asks-label', 'ENG-1221');
+  claudeLines(t.p, [says(`${t.question}\n\nOptions: "Lift the pause" / "Keep it paused"\n\nAlso: should I update the README?`, at(500)), types('Lift the pause', at(1000))]);
+  assert.match(ok(approveQ(t.p, t.e.id, t.d.id, env)).out, /^A1 decided: yes\. In this same reply, tell them what you recorded/m);
+  // P9 and P2: an exact recording is read back too, so a retraction sent to a message that did not ask the question (which the
+  // engine cannot see as one, the stated limit) is seen and honoured.
+  t = heldAttempt('approve-read-back', 'ENG-1222');
+  claudeLines(t.p, [says(`${t.question}\n\nyes / no`, at(500)), types('yes', at(1000)), says('Lifting it now. Anything else before I continue?', at(1500)), types("wait, no, don't lift it", at(2000))]);
+  const exact = ok(approveQ(t.p, t.e.id, t.d.id, env));
+  assert.match(exact.out, new RegExp(`A1 decided: yes\\. In this same reply, tell them what you recorded \\("Lift the pause" to "${t.e.id.replace('.', '\\.')} A1: Should your pause`));
+  assert.match(exact.out, /if they say that is not what they meant, honour it: while it is not used, withdraw it with their words/);
+  const panel = heldAttempt('approve-read-back-panel', 'ENG-1223');
+  claudeAsks(panel.p, { question: panel.question, options: ['Lift the pause', 'Keep it paused'], answer: 'Keep it paused' });
+  assert.match(ok(approveQ(panel.p, panel.e.id, panel.d.id, env)).out, /A1 decided: no\. In this same reply, tell them what you recorded \("Keep it paused" to /);
+  // P3: words older than the person's later reply to the question are not recorded: that reply is read first.
+  t = heldAttempt('approve-later-reply', 'ENG-1224');
+  claudeLines(t.p, [says(`${t.question}\n\nyes / no`, at(500)), types('ok lift it', at(1000)), says(`Just to be sure:\n\n${t.question}\n\nyes / no`, at(1500)), types('wait, not yet', at(2000))]);
+  const older = readQ(t.p, t.e.id, t.d.id, env, 'yes', 'ok lift it');
+  assert.equal(older.code, 75);
+  assert.match(older.err, /not recorded: the person replied to A1 after those words: "wait, not yet" \(.*\); read that reply first/);
+  assert.doesNotMatch(older.err, /ask (?:it|them|the question) again/i);
+  assert.equal(state(t.p.root, t.e.id).decisions[0].approved, null);
+  // P4: a whole message that is exactly one option is never read as another, whatever message it answered.
+  t = heldAttempt('approve-whole-other', 'ENG-1225');
+  claudeLines(t.p, [says('Shall I update the README?', at(500)), types('no', at(1000))]);
+  const other = readQ(t.p, t.e.id, t.d.id, env, 'yes', 'no');
+  assert.equal(other.code, 75);
+  assert.match(other.err, /not recorded: their message "no" is exactly the option no \("Keep it paused"\), not yes/);
+  assert.equal(state(t.p.root, t.e.id).decisions[0].approved, null);
+  // P7: a thumbs-up has a route: the quote is the whole message.
+  t = heldAttempt('approve-thumbs', 'ENG-1226');
+  claudeLines(t.p, [says(`${t.question}\n\nyes / no`, at(500)), types('\u{1F44D}', at(1000))]);
+  readsFirst(approveQ(t.p, t.e.id, t.d.id, env).err, 'a thumbs-up');
+  assert.match(ok(readQ(t.p, t.e.id, t.d.id, env, 'yes', '\u{1F44D}')).out, /A1 decided: yes, as you read the person's words "\u{1F44D}"/u);
+  // P11: a fragment cut at an apostrophe is not their words.
+  const cut = singleRepoProject('approve-apostrophe', {});
+  const ce = ok(wf(cut.root, ['entry', '--item', 'ENG-1227', '--json'], silent)).json();
+  const cd = legacyClose(cut, ce.id);
+  claudeLines(cut, [says(`${ce.id} ${cd.id}: ${cd.summary}\n\nyes / no`, at(500)), types("don't close it", at(1000))]);
+  for (const quote of ["'t close it", 'don']) {
+    const r = readQ(cut, ce.id, cd.id, env, 'yes', quote);
+    assert.equal(r.code, 75, quote);
+    assert.match(r.err, /is in no message of the person's in this session/, quote);
+  }
+  // P12: words from before the question, while newer words exist: read the newer ones.
+  const early = singleRepoProject('approve-early', {});
+  const ee = ok(wf(early.root, ['entry', '--item', 'ENG-1228', '--json'], silent)).json();
+  claudeLines(early, [says('Working.', at(-60_000)), types('close it when you are done', at(-59_000))]);
+  const ed = legacyClose(early, ee.id);
+  claudeLines(early, [says(`${ee.id} ${ed.id}: ${ed.summary}\n\nyes / no`, at(500)), types('ok go ahead and close', at(1000))]);
+  const before = readQ(early, ee.id, ed.id, env, 'yes', 'close it when you are done');
+  assert.equal(before.code, 75);
+  assert.match(before.err, /before A1 existed/);
+  assert.match(before.err, /\n\s*→ read their words yourself/);
+  // P8: one panel question carrying two decisions' questions answers neither.
+  t = heldAttempt('approve-panel-two', 'ENG-1229');
+  const d2 = legacyClose(t.p, t.e.id, 2);
+  const combined = `${t.question} ${t.e.id} ${d2.id}: ${d2.summary}`;
+  claudeAsks(t.p, { question: combined, answer: 'yes' });
+  for (const id of [t.d.id, d2.id]) {
+    assert.equal(approveQ(t.p, t.e.id, id, env).code, 75, id);
+    assert.equal(state(t.p.root, t.e.id).decisions.find((x) => x.id === id).approved, null, id);
+  }
 });

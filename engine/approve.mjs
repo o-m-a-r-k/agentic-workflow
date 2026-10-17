@@ -198,16 +198,22 @@ export const optionNamed = (d, text) => {
 };
 
 // Whether the words the agent relies on are verbatim in a message of the person's (0.7.27, D41): the same characters, case,
-// spacing and typographic quotes aside, starting and ending on a word's edge ("yes" is not in "yesterday").
+// spacing and typographic quotes aside, starting and ending on a word's edge ("yes" is not in "yesterday"). An apostrophe inside a
+// word is part of it, so "'t close it" and "don" are not in "don't close it" (review of the rework, P11). The whole message is
+// always theirs to quote, so an answer with no letters (a thumbs-up) has a route too (P7).
 const fold = (x) => String(x ?? '').normalize('NFKC').replace(/[\u2018\u2019\u02bc\u2032]/g, "'").replace(/[\u201c\u201d\u2033]/g, '"').replace(/\s+/g, ' ').trim().toLowerCase();
 const wordy = (ch) => ch !== undefined && /[\p{L}\p{N}]/u.test(ch);
 function holds(message, quote) {
   const t = fold(message);
   const q = fold(quote);
+  if (q && q === t) return true;
   if (!q || !/[\p{L}\p{N}]/u.test(q)) return false;
+  const inner = (x) => wordy(x) || x === "'";
   for (let at = t.indexOf(q); at >= 0; at = t.indexOf(q, at + 1)) {
     const end = at + q.length;
-    if ((!wordy(q[0]) || !wordy(t[at - 1])) && (!wordy(q.at(-1)) || !wordy(t[end]))) return true;
+    const cutStart = (wordy(t[at - 1]) && inner(q[0])) || (t[at - 1] === "'" && wordy(t[at - 2]) && wordy(q[0]));
+    const cutEnd = (wordy(t[end]) && inner(q.at(-1))) || (t[end] === "'" && wordy(t[end + 1]) && wordy(q.at(-1)));
+    if (!cutStart && !cutEnd) return true;
   }
   return false;
 }
@@ -224,6 +230,9 @@ const askNowHint = (state, d) => `${SHOW_TEXT}; then, in this same reply (this r
 const choiceList = (d) => d.choices.map((c) => `${c}${plainLabel(d, c) !== c ? ` "${plainLabel(d, c)}"` : ''}`).join(', ');
 // How the agent records what it read (0.7.27, D41): the words are the person's, the reading is the agent's, and the person sees it
 // at once, so a misreading is corrected in their next message. What is not a choice is listed, so it is asked about, not read in.
+// What every recording from the agent's session tells it (0.7.27, D41, review of the rework: an exact recording told the agent
+// nothing, so a reply the engine could not see as a retraction went unseen): say what was recorded, and honour a correction.
+export const correctionHint = (state, d) => `if they say that is not what they meant, honour it: while it is not used, withdraw it with their words (\`wf decisions withdraw ${d.id} --attempt ${state.id} --reason "<their words>"\`) and record what they meant; once used, tell them what it did and follow their correction`;
 export const READ_FORM = (state, d) => `\`wf approve ${d.id} --from-question --attempt ${state.id} --choice <choice> --quote "<their words, exactly as they typed them>"\``;
 export const NOT_A_CHOICE = 'a condition ("if the deploy is fine", "tomorrow"), a hedge ("maybe", "I think we could"), a later sentence that takes it back ("close it. not yet"), someone else\'s words reported ("she told me to close it"), words about something else ("the dialog needs a button to close it"), or the action meant for another ticket';
 const readHint = (state, d) => `read their words yourself (you have the whole conversation): when they choose one of its options (${choiceList(d)}), record it with ${READ_FORM(state, d)}; when they answer it in their own words that choose no option, \`--choice other\` with their words records them as theirs (they grant nothing a choice would); then tell them in that same reply what you recorded and from which words. Words that choose nothing are no answer: ${NOT_A_CHOICE}; for those, and only for those, ${askNowHint(state, d)}. A question they already answered is never put to them a second time`;
@@ -278,7 +287,10 @@ export async function approveFromQuestion(root, id, options, { env = process.env
   const others = (state.decisions ?? []).filter((x) => x.id !== d.id && !x.approved && !x.withdrawn).map((x) => questionFor(state, x));
   // An attempt id is `<item>.<n>` (engine/attempt.mjs), so "decision A1:" in the agent's own words is no decision's key.
   const named = (text) => new Set([...text.matchAll(/(?<![\p{L}\p{N}._-])([\p{L}\p{N}][\p{L}\p{N}._-]*\.\d+ A\d+):/gu)].map((m) => m[1]));
-  const alone = (a) => a.channel !== 'chat' || (!others.some((q) => carriesText(a.question, q)) && [...named(a.question)].every((k) => k === `${state.id} ${d.id}`) && (a.panels ?? []).every((x) => !carriesText(x.text, question) || offered(x.options)));
+  // A panel question is held to it as well (review of the rework, P8: one panel question carrying two decisions' questions,
+  // answered "yes", answered both).
+  const single = (text) => !others.some((q) => carriesText(text, q)) && [...named(text)].every((k) => k === `${state.id} ${d.id}`);
+  const alone = (a) => single(a.question) && (a.channel !== 'chat' || (a.panels ?? []).every((x) => !carriesText(x.text, question) || offered(x.options)));
   const panelAnswers = await read(t.file);
   const answers = [...panelAnswers, ...(chat ? await chat(t.file) : [])];
   // Every answer to the question asked exactly: the panel's, and each chat reply to a message that carried it.
@@ -292,7 +304,17 @@ export async function approveFromQuestion(root, id, options, { env = process.env
   const namesOnlyThis = (text) => key.test(text) && [...named(text)].every((k) => k === `${state.id} ${d.id}`);
   const unquotedIds = (a) => (c) => !['yes', 'no'].includes(c) && optionNamed(d, a.question);
   const unquoted = others.length || asked.length ? [] : answers.filter((a) => a.channel === 'chat' && !carries(a.question) && namesOnlyThis(a.question) && after(a.at) && a.askedAt != null && after(a.askedAt) && exactChoice(d, a.answer, { bare: false, ids: unquotedIds(a) })).map((a) => ({ ...a, unquoted: true }));
-  const exactOf = (a) => (a.unquoted ? exactChoice(d, a.answer, { bare: false, ids: unquotedIds(a) }) : exactChoice(d, a.answer));
+  // A bare yes or no binds by itself only to a message that asked nothing besides the question (review of the rework, P1: "ok"
+  // to the question quoted with "Also: should I update the README?" recorded yes). The check is on the agent's message, never on
+  // the person's words: once the question's own text is taken out, no question mark is left and no other panel question was
+  // asked. When it trips, the reply is the agent's to read; an option's label still binds.
+  const besides = (text) => {
+    let rest = String(text ?? '');
+    for (let at = rest.indexOf(question); at >= 0; at = rest.indexOf(question)) rest = rest.slice(0, at) + rest.slice(at + question.length);
+    return rest;
+  };
+  const asksElse = (a) => a.channel === 'chat' && (/[?\uff1f]/u.test(besides(a.question)) || (a.panels ?? []).some((x) => !carriesText(x.text, question)));
+  const exactOf = (a) => (a.unquoted ? exactChoice(d, a.answer, { bare: false, ids: unquotedIds(a) }) : exactChoice(d, a.answer, { bare: !asksElse(a) }));
   // The person's latest answer to the question decides: when it is exactly one option, it is recorded as it is; any other is
   // the agent's to read, and an earlier exact answer never outranks it (a "yes" is not recorded over a later "wait, not yet").
   const last = latest([...asked, ...unquoted]);
@@ -302,26 +324,28 @@ export async function approveFromQuestion(root, id, options, { env = process.env
   // sub-agent's thread (engine/hosts/questions.mjs).
   const theirs = answers.filter((a) => typeof a.answer === 'string' && a.answer.trim()).map((a) => ({ ...a, how: a.channel === 'chat' ? 'chat' : 'question-panel' }));
   const clip = (x) => String(x).trim().replace(/\s+/g, ' ').slice(0, 300);
-  if (reading) return recordReading(root, state, d, options, { reading, theirs, after, recordable, exactOf, host, how, clip });
+  if (reading) return recordReading(root, state, d, options, { reading, theirs, after, last, exactOf, host, how, clip });
   if (!last || !exactOf(last)) {
     const since = latest(theirs.filter((a) => after(a.at)));
     const base = `no answer to ${d.id} in this session's question panel, or in its chat to a message asking exactly its question, after the decision was created`;
     if (!since) throw refuse(`${base}: the person has written nothing in this session since it was created`, how, { id: 'approve:no-answer' });
     const where = (a) => (a.how === 'question-panel' ? 'their answer in the question panel' : carries(a.question ?? '') ? 'a reply to your message that asked it' : namesOnlyThis(a.question ?? '') ? 'a reply to your message that named it' : 'a reply to a message that did not ask it');
     const toIt = last && !(last.at === since.at && last.answer === since.answer) ? `; ${last.channel === 'chat' ? 'their reply to your message that asked it' : 'their answer to it in the question panel'}: "${clip(last.answer)}"` : '';
-    throw refuse(`${base}: the engine records by itself only a reply that is exactly one of its options; the person's latest words since then: "${clip(since.answer)}" (${where(since)})${toIt}`, readHint(state, d), { id: 'approve:no-answer' });
+    const bareElse = last && asksElse(last) && exactChoice(d, last.answer) ? '; your message that asked it also asked something else, so a bare yes or no there is yours to read' : '';
+    throw refuse(`${base}: the engine records by itself only a reply that is exactly one of its options; the person's latest words since then: "${clip(since.answer)}" (${where(since)})${toIt}${bareElse}`, readHint(state, d), { id: 'approve:no-answer' });
   }
   const choice = exactOf(last);
   append(root, state.id, 'decision.approved', { id, choice, via: `${last.channel === 'chat' ? (last.unquoted ? 'chat, the question not quoted' : 'chat') : 'question-panel'} (${host.label}, host-recorded)`, question: { text: last.question.slice(0, 2000), at: last.at, askedAt: last.askedAt } }, actor(options));
   noteAnswer(root, state, d, choice, null);
-  return { state: loadState(root, state.id), decision: id, choice, words: null };
+  return { state: loadState(root, state.id), decision: id, choice, words: null, exact: true };
 }
 
 // The agent's reading of the person's words (0.7.27, D41), recorded once the engine has checked what it can: the choice is one of
 // the decision's options (by its id or its label) or `other`; the words are verbatim in one of the person's own messages, the
-// latest that holds them, written after the decision existed; no exact answer of theirs to this question came after it; and
-// when that message is itself exactly one of this question's options, the reading names that option.
-function recordReading(root, state, d, options, { reading, theirs, after, recordable, exactOf, host, how, clip }) {
+// latest that holds them, written after the decision existed; the person did not reply to the question after it (their later
+// reply is read first, exact or not: review of the rework, P3); and when that whole message is exactly one of this question's
+// options, whatever message it answered, the reading names that option (P4).
+function recordReading(root, state, d, options, { reading, theirs, after, last, exactOf, host, how, clip }) {
   const id = d.id;
   const named = reading.choice.toLowerCase() === 'other' ? 'other' : d.choices.find((c) => c === reading.choice) ?? d.choices.find((c) => whole(c) === whole(reading.choice) || labelsOf(d, c).some((l) => whole(l) === whole(reading.choice))) ?? null;
   // Named failure (review of the reading path): an agent naming a choice the decision does not have would record nothing the
@@ -334,11 +358,16 @@ function recordReading(root, state, d, options, { reading, theirs, after, record
   if (!holding.length) throw refuse(`not recorded: "${clip(reading.quote)}" is in no message of the person's in this session (what they typed in the chat or answered in the question panel, as the harness recorded it; never your own text, a tool's output, a note the harness adds or a sub-agent's thread)`, `quote the words of theirs your reading relies on, exactly as they typed them (whole words; case and spacing aside); when they have not answered, ${how}`, { id: 'approve:quote' });
   const at = (a) => Date.parse(a.at) || 0;
   const fresh = holding.filter((a) => after(a.at));
-  if (!fresh.length) throw refuse(`not recorded: the person wrote "${clip(reading.quote)}" before ${id} existed (at ${[...holding].sort((x, y) => at(x) - at(y)).at(-1).at ?? 'an unknown time'}; the question was created at ${d.createdAt}): words from before a question cannot answer it`, how, { id: 'approve:quote-before' });
+  // With newer words of theirs, those are read first, not the question asked again (review of the rework, P12).
+  if (!fresh.length) throw refuse(`not recorded: the person wrote "${clip(reading.quote)}" before ${id} existed (at ${[...holding].sort((x, y) => at(x) - at(y)).at(-1).at ?? 'an unknown time'}; the question was created at ${d.createdAt}): words from before a question cannot answer it`, theirs.some((a) => after(a.at)) ? readHint(state, d) : how, { id: 'approve:quote-before' });
   const m = [...fresh].sort((x, y) => at(x) - at(y)).at(-1);
   const same = (a, b) => a.at === b.at && a.answer === b.answer;
-  if (recordable && at(recordable) > at(m)) throw refuse(`not recorded: the person answered ${id} after those words, "${clip(recordable.answer)}" (${recordable.at}), and that answer stands`, `run \`wf approve ${id} --from-question --attempt ${state.id}\` without --choice to record it`, { id: 'approve:quote-superseded' });
-  if (recordable && same(recordable, m) && exactOf(recordable) !== named) throw refuse(`not recorded: their reply "${clip(m.answer)}" is exactly the option ${exactOf(recordable)}${labelOf(d, exactOf(recordable)) !== exactOf(recordable) ? ` ("${labelOf(d, exactOf(recordable))}")` : ''}, not ${named}`, `run \`wf approve ${id} --from-question --attempt ${state.id}\` without --choice to record it`, { id: 'approve:quote-exact' });
+  if (last && at(last) > at(m) && !same(last, m)) {
+    if (exactOf(last)) throw refuse(`not recorded: the person answered ${id} after those words, "${clip(last.answer)}" (${last.at}), and that answer stands`, `run \`wf approve ${id} --from-question --attempt ${state.id}\` without --choice to record it`, { id: 'approve:quote-superseded' });
+    throw refuse(`not recorded: the person replied to ${id} after those words: "${clip(last.answer)}" (${last.at}); read that reply first`, `when it chooses an option, record it with its words (${READ_FORM(state, d)}); when it chooses nothing, ${how}`, { id: 'approve:quote-later' });
+  }
+  const exactly = exactChoice(d, m.answer);
+  if (exactly && exactly !== named) throw refuse(`not recorded: their message "${clip(m.answer)}" is exactly the option ${exactly}${plainLabel(d, exactly) !== exactly ? ` ("${plainLabel(d, exactly)}")` : ''}, not ${named}`, `record what it says: \`wf approve ${id} --from-question --attempt ${state.id} --choice ${exactly} --quote "${clip(m.answer)}"\`, or, when it answered something else, ask the question`, { id: 'approve:quote-exact' });
   const words = named === 'other' ? String(quote).trim().slice(0, 2000) : null;
   append(root, state.id, 'decision.approved', { id, choice: named, ...(words ? { words } : {}), quote: String(quote).trim().slice(0, 2000), message: String(m.answer).trim().slice(0, 2000), via: `${m.how}, read by the agent (${host.label}, host-recorded)`, question: { text: String(m.question ?? '').slice(0, 2000), at: m.at, askedAt: m.askedAt ?? null } }, actor(options));
   noteAnswer(root, state, d, named, words);

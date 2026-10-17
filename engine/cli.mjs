@@ -30,7 +30,7 @@ import { report, toCsv, toHandoffCsv, toHtml, toJson, toText } from './telemetry
 import { impact } from './topology.mjs';
 import { commentFile, hasTicket, limitItemsText, performTracker, publicAssetsProblem, recordSummary, recordTracker } from './tracker.mjs';
 import { ENGINE_VERSION, WfError, compareVersions, parseArgs, parseVersion, refuse } from './util.mjs';
-import { afterAnswer, approveFromQuestion, approveHint, approveInTerminal, decisionLine, optionLines, pendingDecisions, plainLabel, questionFor, withdrawDecision } from './approve.mjs';
+import { afterAnswer, approveFromQuestion, approveHint, approveInTerminal, correctionHint, decisionLine, optionLines, pendingDecisions, plainLabel, questionFor, withdrawDecision } from './approve.mjs';
 import { logRefusal, readRefusals, refusalCounts } from './refusals.mjs';
 import { recordStrategy, signalsReport, signalsText } from './strategy.mjs';
 import { courseLines, pastEstimates } from './signals.mjs';
@@ -170,9 +170,10 @@ Work
   wf decisions withdraw ID --reason "what changed"
                                     take back a question whose subject changed (pending, or answered and not yet used)
   wf approve ID [--choice C]        the owner confirms a reserved decision in their own terminal
-  wf approve ID --from-question     or the agent records the owner's answer that is exactly one option: in its question
-                                    panel, or their chat reply to a message that asked exactly the decision's question
-                                    (as the harness recorded it)
+  wf approve ID --from-question     or the agent records the owner's answer that is exactly one option, as the harness
+                                    recorded it: in its question panel; their chat reply to a message that asked exactly the
+                                    decision's question and nothing else (a bare yes or no binds only there); or their reply
+                                    that is exactly an option's label to a message that named the decision by its id
   wf approve ID --from-question --choice C --quote "their words"
                                     or the agent records its reading of the owner's answer in more words: the option their
                                     words choose (or other: their own words, recorded as theirs, to follow) and the words it
@@ -1217,7 +1218,8 @@ async function dispatch(cmd, sub, positional, options) {
       const settled = decided?.settles?.[r.choice] ?? [];
       // 0.7.27 (D41): the agent read the person's words; it tells them what it recorded, from which words, in the same reply, so a
       // misreading is seen at once and corrected (named failure: a reading the person never sees cannot be corrected).
-      const readBack = r.read ? `, as you read the person's words "${r.read.quote}"${r.read.message !== r.read.quote ? ` in their message "${r.read.message}"` : ''}. In this same reply, tell them what you recorded and from which words (${r.words ? 'their own words, recorded as theirs' : `"${plainLabel(decided, r.choice)}"`} to "${questionFor(r.state, decided)}"), and follow anything else their message asks; if they say that is not what they meant, honour it: while it is not used, withdraw it with their words (\`wf decisions withdraw ${r.decision} --attempt ${r.state.id} --reason "<their words>"\`) and record what they meant; once used, tell them what it did and follow their correction` : '';
+      // 0.7.27 (review of the rework): an exact recording is read back too, so a reply the engine cannot see as a retraction is seen.
+      const readBack = r.read ? `, as you read the person's words "${r.read.quote}"${r.read.message !== r.read.quote ? ` in their message "${r.read.message}"` : ''}. In this same reply, tell them what you recorded and from which words (${r.words ? 'their own words, recorded as theirs' : `"${plainLabel(decided, r.choice)}"`} to "${questionFor(r.state, decided)}"), and follow anything else their message asks; ${correctionHint(r.state, decided)}` : r.exact ? `. In this same reply, tell them what you recorded ("${plainLabel(decided, r.choice)}" to "${questionFor(r.state, decided)}"); ${correctionHint(r.state, decided)}` : '';
       print(options, `${r.decision} decided: ${r.words ? `in the person's own words: "${r.words}" (follow them; it grants nothing a choice would)` : r.choice}${readBack}.${settled.length ? ` This answer also decides ${settled.join(', ')}: record each with the command it needs (\`wf scope waive --finding <ids>\` for findings that block, \`wf scope defer\` or \`wf scope ticket\` for the rest, \`wf discovered close\` for a discovered issue); none asks the person again.` : ''} next: ${nextAction(root, r.state)}`, { decision: r.decision, choice: r.choice, ...(r.words ? { words: r.words } : {}), ...(r.read ? { read: r.read } : {}) });
       return 0;
     }

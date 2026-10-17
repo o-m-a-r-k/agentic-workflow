@@ -13,13 +13,18 @@ Release notes, newest first, then every fix that came from a failure in the work
   "she told me to close it, but I disagree", "lift the pause on" another ticket) and still refused clear ones
   ("proceed", "the first one"). Now:
   - a reply that is exactly one of the options ("yes", "no", "ok", "proceed", or an option's label), to a message that
-    asked the question, is recorded as it is, as before, and so is the option you pick in the question panel;
+    asked the question, is recorded as it is, as before, and so is the option you pick in the question panel; a bare
+    "yes", "no" or "ok" counts by itself only when the agent's message asked nothing else, and a panel question that
+    carries two questions answers neither;
   - any other answer is read by the agent, which has the whole conversation: it records the option your words choose
     together with the words it relies on (`--choice` with `--quote`), and the workflow records it only when those words
     are in one of your own messages in that session, written after the question existed (never the agent's own text,
     a tool's output or a note the app adds), and the option is one of the question's;
-  - the agent tells you in the same reply what it recorded and from which words, so a misreading is visible at once;
-    say so and it is corrected;
+  - the agent tells you in the same reply what it recorded (and, for its reading, from which words), however it was
+    recorded, so a misreading, or a "wait, no" the workflow could not tie to the question, is visible at once; say so and
+    it is corrected;
+  - words you wrote before your latest reply to the question are not recorded over it: the agent reads that reply first;
+    a reply that is exactly one option is never read as another; a thumbs-up can be recorded too;
   - a condition ("if the deploy is fine"), a hedge ("maybe"), a sentence that takes it back, someone else's words, words
     about something else, or an action meant for another ticket is not an answer: the agent asks the question instead,
     and never asks again what you already answered;
