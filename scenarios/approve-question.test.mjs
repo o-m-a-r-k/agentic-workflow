@@ -289,10 +289,10 @@ function claudeLines(p, lines, session = CLAUDE) {
 const says = (text, when) => ({ type: 'assistant', timestamp: when, message: { role: 'assistant', content: [{ type: 'text', text }] } });
 const tool = (when) => ({ type: 'assistant', timestamp: when, message: { role: 'assistant', content: [{ type: 'tool_use', id: `toolu_${Math.random().toString(36).slice(2)}`, name: 'Bash', input: { command: 'wf status' } }] } });
 const types = (content, when, extra = {}) => ({ type: 'user', timestamp: when, message: { role: 'user', content }, ...extra });
-function heldAttempt(name, item) {
+function heldAttempt(name, item, reason = 'wait') {
   const p = singleRepoProject(name, {});
   const e = ok(wf(p.root, ['entry', '--item', item, '--json'], silent)).json();
-  ok(wf(p.root, ['hold', '--reason', 'wait', '--attempt', e.id], silent));
+  ok(wf(p.root, ['hold', '--reason', reason, '--attempt', e.id], silent));
   assert.equal(wf(p.root, ['release', '--attempt', e.id], silent).code, 75);
   const d = state(p.root, e.id).decisions[0];
   return { p, e, d, question: `${e.id} ${d.id}: ${d.plain ?? d.summary}` };
@@ -1031,4 +1031,87 @@ test('0.7.28 (I-174): after a clarification, the person\'s later exact "yes" dec
   assert.equal(state(u.p.root, u.e.id).decisions[0].approved, null);
   ok(readQ(u.p, u.e.id, u.d.id, env, 'yes', 'yes'));
   assert.deepEqual([state(u.p.root, u.e.id).decisions[0].approved.choice, state(u.p.root, u.e.id).decisions[0].approved.message], ['yes', 'yes']);
+});
+
+// 0.7.28, an independent review of the fix (probes kept as tests): the "?" after the question is its own only when the question
+// starts its own sentence; an option whose tail names another option's label is no option; small presentation differences that
+// are not a second ask or another option no longer refuse; an empty options list is worded.
+test('0.7.28 (review): a "?" after the question is its own only when the question starts a sentence; a compound ask still asks something else', () => {
+  const legacyAsked = (name, item, msg) => {
+    const p = singleRepoProject(name, {});
+    const e = ok(wf(p.root, ['entry', '--item', item, '--json'], silent)).json();
+    const d = legacyClose(p, e.id);
+    claudeLines(p, [says(msg(`${e.id} ${d.id}: ${d.summary}`), at(500)), types('yes', at(1000))]);
+    return { r: approveQ(p, e.id, d.id, env), p, e };
+  };
+  for (const [i, msg] of [(q) => `Shall I delete the branch, and ${q}?\n\nyes / no`, (q) => `Keep it open instead of ${q}?\n\nyes / no`, (q) => `Shall I delete the branch, and **${q}**?\n\nyes / no`].entries()) {
+    const { r, p, e } = legacyAsked(`approve-mark-compound-${i}`, `ENG-136${i}`, msg);
+    assert.equal(r.code, 75, `compound ${i}`);
+    assert.match(r.err, /your message that asked it also asked something else, so a bare yes or no there is yours to read/, `compound ${i}`);
+    assert.equal(state(p.root, e.id).decisions[0].approved, null, `compound ${i}`);
+  }
+  // The question starting its own sentence, line, list item or heading keeps the mark it was written with, a space before it too.
+  for (const [i, msg] of [(q) => `The change is on main. ${q}?\n\nyes / no`, (q) => `The change is on main\n\n- ${q} ?\n\nyes / no`, (q) => `### ${q}?\n\nyes / no`, (q) => `Question: "${q}"?\n\nyes / no`].entries()) {
+    const { r } = legacyAsked(`approve-mark-own-${i}`, `ENG-137${i}`, msg);
+    assert.match(ok(r).out, /A1 decided: yes/, `own sentence ${i}`);
+  }
+});
+
+test('0.7.28 (review): an option whose tail holds another option\'s label is no option; the answer is the agent\'s to read', () => {
+  for (const [i, options, answer] of [[0, ['yes: Keep it paused', 'no: Lift the pause'], 'yes: Keep it paused'], [1, ['Keep it paused: Lift the pause later', 'Lift the pause'], 'Keep it paused: Lift the pause later']]) {
+    const t = heldAttempt(`approve-tail-label-${i}`, `ENG-138${i}`);
+    claudeAsks(t.p, { question: t.question, options, answer });
+    const r = approveQ(t.p, t.e.id, t.d.id, env);
+    assert.equal(r.code, 75, answer);
+    assert.match(r.err, /not exactly A1's options \("Lift the pause", "Keep it paused"\): each option is the label alone, with at most .* after it, never another option's label/, answer);
+    readsFirst(r.err, answer);
+    assert.equal(state(t.p.root, t.e.id).decisions[0].approved, null, answer);
+  }
+  // Codex, the correction's labels: a description that names the other option.
+  const p = singleRepoProject('approve-tail-label-codex', {});
+  const e = ok(wf(p.root, ['entry', '--item', 'ENG-1382', '--json'], silent)).json();
+  const d = correctionDecision(p, e.id);
+  const question = `${e.id} ${d.id}: ${d.plain}`;
+  const risky = 'Keep the original step: Use the corrected step is risky';
+  codexRows(p, [codexAsks(question, [risky, USE]), codexReply(question, risky)]);
+  assert.equal(approveQ(p, e.id, d.id, codexEnv).code, 75);
+  assert.equal(state(p.root, e.id).decisions[0].approved, null);
+  // The words after the label that name no other option still bind the label (the stated trade-off).
+  const ok2 = heldAttempt('approve-tail-plain', 'ENG-1383');
+  claudeAsks(ok2.p, { question: ok2.question, options: ['Lift the pause: work continues', 'Keep it paused: nothing more ships'], answer: 'Keep it paused: nothing more ships' });
+  assert.match(ok(approveQ(ok2.p, ok2.e.id, ok2.d.id, env)).out, /A1 decided: no/);
+});
+
+test('0.7.28 (review): a trailing period, "(Not recommended)", an em dash, a space before the "?" and escaped underscores bind the right choice', () => {
+  for (const [i, options, answer, choice] of [
+    [0, ['Lift the pause.', 'Keep it paused.'], 'Lift the pause.', 'yes'],
+    [1, ['Lift the pause (Not recommended)', 'Keep it paused (Recommended)'], 'Keep it paused (Recommended)', 'no'],
+    [2, ['Lift the pause (Not recommended)', 'Keep it paused'], 'Lift the pause (Not recommended)', 'yes'],
+    [3, ['Lift the pause (Recommended) \u2014 work continues', 'Keep it paused \u2014 nothing more ships'], 'Keep it paused \u2014 nothing more ships', 'no'],
+    [4, ['Lift the pause (Recommended) \u2014 work continues', 'Keep it paused \u2014 nothing more ships'], 'Lift the pause (Recommended) \u2014 work continues', 'yes'],
+  ]) {
+    const t = heldAttempt(`approve-option-shape-${i}`, `ENG-139${i}`);
+    claudeAsks(t.p, { question: t.question, options, answer });
+    assert.match(ok(approveQ(t.p, t.e.id, t.d.id, env)).out, new RegExp(`A1 decided: ${choice}`), answer);
+  }
+  // "<q> ?": the space before the mark is presentation.
+  const sp = singleRepoProject('approve-mark-space', {});
+  const se = ok(wf(sp.root, ['entry', '--item', 'ENG-1395', '--json'], silent)).json();
+  const sd = legacyClose(sp, se.id);
+  claudeLines(sp, [says(`${se.id} ${sd.id}: ${sd.summary} ?\n\nyes / no`, at(500)), types('yes', at(1000))]);
+  assert.match(ok(approveQ(sp, se.id, sd.id, env)).out, /A1 decided: yes/);
+  // Markdown-escaped underscores (`wait\_for\_qa`) are the question's own underscores.
+  const u = heldAttempt('approve-escaped', 'ENG-1396', 'wait_for_qa');
+  assert.ok(u.question.includes('wait_for_qa'));
+  claudeLines(u.p, [says(`${u.question.replace(/_/g, '\\_')}\n\nyes / no`, at(500)), types('yes', at(1000))]);
+  assert.match(ok(approveQ(u.p, u.e.id, u.d.id, env)).out, /A1 decided: yes/);
+});
+
+test('0.7.28 (review): a panel that recorded no options is named as such', () => {
+  const t = heldAttempt('approve-no-options', 'ENG-1397');
+  claudeAsks(t.p, { question: t.question, options: [], answer: 'yes' });
+  const r = approveQ(t.p, t.e.id, t.d.id, env);
+  assert.equal(r.code, 75);
+  assert.match(r.err, /A1 is not recorded by itself: the panel offered no options, not A1's options \("Lift the pause", "Keep it paused"\)/);
+  assert.doesNotMatch(r.err, /offered ,/);
 });

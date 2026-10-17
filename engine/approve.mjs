@@ -229,23 +229,27 @@ const unwrap = (q) => {
   return m ? m[2] : null;
 };
 
-// The question as an agent presents it (0.7.28, I-202): Markdown emphasis and code marks, a blockquote, typographic quotes and line
-// breaks are taken out of the agent's message and of the question alike before the exact text is looked for; no word changes, and
-// every other guard reads the same text. Named failure (field): `**ENG-1.1 A4:** Should …` with typographic quotes around the
-// recommended label carried the question, and the person's "yes" to it bound nothing.
+// The question as an agent presents it (0.7.28, I-202): Markdown's backslash escapes, emphasis and code marks, a blockquote,
+// typographic quotes and line breaks are taken out of the agent's message and of the question alike before the exact text is looked
+// for; no word changes, and every other guard reads the same text. Named failure (field): `**ENG-1.1 A4:** Should …` with
+// typographic quotes around the recommended label carried the question, and the person's "yes" to it bound nothing. A run of
+// spaces is one space and a run holding a line break is one line break (`present`), so where a line starts is still known;
+// `flat` reads the same text on one line, position for position.
 const present = (x) => String(x ?? '').normalize('NFKC')
+  .replace(/\\([!-/:-@[-`{-~])/g, '$1')
   .replace(/[\u2018\u2019\u201a\u201b\u02bc\u2032]/g, "'")
   .replace(/[\u201c\u201d\u201e\u201f\u2033\u00ab\u00bb]/g, '"')
   .replace(/^[ \t]*>[ \t]?/gm, '')
   .replace(/[*`]+/g, '')
   .replace(/_+/g, (m, at, t) => (wordy(t[at - 1]) && wordy(t[at + m.length]) ? m : ''))
-  .replace(/\s+/g, ' ')
+  .replace(/\s+/g, (m) => (/[\n\r\u2028\u2029]/.test(m) ? '\n' : ' '))
   .trim();
+const flat = (x) => present(x).replace(/\n/g, ' ');
 // The text carries the question as a whole: `ENG-1.1 A1: ...` never matches inside `ENG-1.1 A10: ...` or `XENG-1.1 A1: ...`
 // (independent review of 0.7.3), and may sit in quotes, bold or code, as the engine's hints show it (independent review of 0.7.18).
 function carriesText(text, question) {
-  const t = present(text);
-  const q = present(question);
+  const t = flat(text);
+  const q = flat(question);
   for (let at = t.indexOf(q); q && at >= 0; at = t.indexOf(q, at + 1)) if (at === 0 || !wordy(t[at - 1])) return true;
   return false;
 }
@@ -254,13 +258,19 @@ function carriesText(text, question) {
 // tail, quotes and emphasis aside. Codex's `request_user_input_async` takes each option as one plain string, and an agent wrote the
 // label with its description into it. A structural match on the label at the start, never a reading of the rest: "Use the
 // corrected step and skip the review" is no option of the question. { choice, label }, or null when none or more than one fits.
-const optionKey = (x) => present(x).replace(/"/g, '').trim().toLowerCase();
-const TAIL = /^\s*(?:\(recommended\))?\s*(?::[\s\S]*)?$/;
+// Review of the fix: a trailing "." or "!", "(Not recommended)" and an em or en dash in place of the colon are the same shape; a
+// tail that holds another option's label word for word ("yes: Keep it paused") is no option: the answer is the agent's to read.
+const optionKey = (x) => flat(x).replace(/"/g, '').trim().toLowerCase().replace(/[\s.!]+$/u, '');
+const TAIL = /^\s*(?:\((?:not\s+)?recommended\))?\s*(?:[:\u2013\u2014][\s\S]*)?$/;
+const realLabels = (d, c) => [...new Set([d.labels?.[c], ...(frameLabels(d)[c] ?? [])].filter((l) => typeof l === 'string' && l.trim()))];
+const holdsWords = (text, words) => new RegExp(`(?<![\\p{L}\\p{N}])${words.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}\\p{N}])`, 'u').test(text);
 export function optionOf(d, option) {
   const t = optionKey(option);
   const hits = d.choices.flatMap((c) => [c, ...labelsOf(d, c)].map((label) => ({ choice: c, label, key: optionKey(label) }))).filter((h) => h.key && t.startsWith(h.key) && TAIL.test(t.slice(h.key.length)));
   if (new Set(hits.map((h) => h.choice)).size !== 1) return null;
   const best = hits.sort((x, y) => y.key.length - x.key.length)[0];
+  const tail = t.slice(best.key.length);
+  if (d.choices.some((c) => c !== best.choice && realLabels(d, c).some((l) => optionKey(l) && holdsWords(tail, optionKey(l))))) return null;
   return { choice: best.choice, label: best.label };
 }
 // The panel offered exactly the decision's options: one per choice, each choice once.
@@ -326,7 +336,7 @@ export async function approveFromQuestion(root, id, options, { env = process.env
   // answer only one decision.
   const others = (state.decisions ?? []).filter((x) => x.id !== d.id && !x.approved && !x.withdrawn).map((x) => questionFor(state, x));
   // An attempt id is `<item>.<n>` (engine/attempt.mjs), so "decision A1:" in the agent's own words is no decision's key.
-  const named = (text) => new Set([...present(text).matchAll(/(?<![\p{L}\p{N}._-])([\p{L}\p{N}][\p{L}\p{N}._-]*\.\d+ A\d+):/gu)].map((m) => m[1]));
+  const named = (text) => new Set([...flat(text).matchAll(/(?<![\p{L}\p{N}._-])([\p{L}\p{N}][\p{L}\p{N}._-]*\.\d+ A\d+):/gu)].map((m) => m[1]));
   // A panel question is held to it as well (review of the rework, P8: one panel question carrying two decisions' questions,
   // answered "yes", answered both).
   const single = (text) => !others.some((q) => carriesText(text, q)) && [...named(text)].every((k) => k === `${state.id} ${d.id}`);
@@ -341,21 +351,28 @@ export async function approveFromQuestion(root, id, options, { env = process.env
   // question. A message that never named the decision binds no reply: a "stop" or "continue" said about something else is
   // never the person's answer to it (independent security review of 0.7.23).
   const key = new RegExp(`(?<![\\p{L}\\p{N}._-])${state.id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} ${d.id}(?![\\p{N}])`, 'u');
-  const namesOnlyThis = (text) => key.test(present(text)) && [...named(text)].every((k) => k === `${state.id} ${d.id}`);
+  const namesOnlyThis = (text) => key.test(flat(text)) && [...named(text)].every((k) => k === `${state.id} ${d.id}`);
   const unquotedIds = (a) => (c) => !['yes', 'no'].includes(c) && optionNamed(d, a.question);
   const unquoted = others.length || asked.length ? [] : answers.filter((a) => a.channel === 'chat' && !carries(a.question) && namesOnlyThis(a.question) && after(a.at) && a.askedAt != null && after(a.askedAt) && exactChoice(d, a.answer, { bare: false, ids: unquotedIds(a) })).map((a) => ({ ...a, unquoted: true }));
   // A bare yes or no binds by itself only to a message that asked nothing besides the question (review of the rework, P1: "ok"
   // to the question quoted with "Also: should I update the README?" recorded yes). The check is on the agent's message, never on
   // the person's words: once the question's own text is taken out, no question mark is left and no other panel question was
   // asked. When it trips, the reply is the agent's to read; an option's label still binds.
-  // A "?" right after the question (after its closing quote at most) is the question's own mark: an agent writes an earlier
-  // release's question, which has none, with one (0.7.28, I-203).
-  const shownQuestion = present(question);
+  // A "?" right after the question (after its closing quote and a space at most) is the question's own mark when the question starts
+  // its own sentence (the message's start, a line, a list item or heading, or after a sentence's end): an agent writes an earlier
+  // release's question, which has none, with one (0.7.28, I-203). Review of the fix: "Shall I delete the branch, and <q>?" shares
+  // the sentence with a second ask, and its "?" asks both, so it stays.
+  const shownQuestion = flat(question);
+  const ownSentence = (before) => {
+    const pre = before.replace(/["'([]+$/u, '');
+    return /(?:^|\n)[ \t]*(?:[-+\u2022]|\d+[.)]|#{1,6})?[ \t]*$/u.test(pre) || /[.!?:;][ \t]*$/u.test(pre);
+  };
   const besides = (text) => {
     let rest = present(text);
-    for (let at = rest.indexOf(shownQuestion); at >= 0; at = rest.indexOf(shownQuestion)) {
-      const mark = /^["']?[?\uff1f]/u.exec(rest.slice(at + shownQuestion.length))?.[0] ?? '';
-      rest = rest.slice(0, at) + rest.slice(at + shownQuestion.length + mark.length);
+    for (let at = rest.replace(/\n/g, ' ').indexOf(shownQuestion); at >= 0; at = rest.replace(/\n/g, ' ').indexOf(shownQuestion)) {
+      const end = at + shownQuestion.length;
+      const mark = ownSentence(rest.slice(0, at)) ? /^["']?[ \t]?[?\uff1f]/u.exec(rest.slice(end))?.[0] ?? '' : '';
+      rest = rest.slice(0, at) + rest.slice(end + mark.length);
     }
     return rest;
   };
@@ -387,7 +404,7 @@ export async function approveFromQuestion(root, id, options, { env = process.env
     const where = (a) => (!isChat(a) ? 'their answer in the question panel' : carries(a.question ?? '') ? 'a reply to your message that asked it' : namesOnlyThis(a.question ?? '') ? 'a reply to your message that named it' : 'a reply to a message that did not ask it');
     const listed = (opts) => opts.map((o) => `"${clip(o)}"`).join(', ');
     const labels = d.choices.map((c) => `"${plainLabel(d, c)}"`).join(', ');
-    const offeredWrong = (opts) => `offered ${listed(opts)}, not exactly ${d.id}'s options (${labels}): each option is the label alone, with at most " (Recommended)" and ": <what follows>" after it`;
+    const offeredWrong = (opts) => (opts.length ? `offered ${listed(opts)}, not exactly ${d.id}'s options (${labels})` : `offered no options, not ${d.id}'s options (${labels})`) + `: each option is the label alone, with at most " (Recommended)" and ": <what follows>" after it, never another option's label`;
     const why = (a) => {
       const q = a.question ?? '';
       const it = isChat(a) ? 'your message before it' : 'the panel question';
