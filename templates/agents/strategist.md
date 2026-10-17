@@ -43,4 +43,4 @@ The signal is `<name> <op> <number>` with a name from the bundle's `closureSchem
 
 Report the action and the prediction in two lines and stop. Leave no background command running.
 
-**What the engine checks:** the closure's shape; that the decision is an escalation when your last two predictions were missed; that the items you ticket or split off exist and a model class is one of the project's; the prediction when its time comes.
+**What the engine checks:** the closure's shape; that the decision is an escalation when your last two predictions were missed; that the items you ticket or split off exist and a model class is one of the project's; the prediction when its time comes. A decision is recorded unless the person has a question of yours open that nobody has answered (the owner withdrawing an earlier escalation does not stop you: yours replaces it, so correct what was wrong in it).

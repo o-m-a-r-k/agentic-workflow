@@ -147,7 +147,8 @@ export function missedStreak(state, signals, nowMs = Date.now()) {
 // ---- The hold ----
 
 // The strategist's escalation still open: its latest question (a fresh one is asked after an answer in the person's own
-// words) that no choice has answered.
+// words) that no choice has answered. A later strategist decision supersedes it (it is the last decision's escalation that
+// counts), so a question the person withdrew stays open, holding the handoffs, until one is recorded or it is asked again.
 const openEscalation = (state) => {
   const last = state.strategy.decisions.at(-1);
   const first = last?.action === 'escalate' && last.escalation ? state.decisions.find((x) => x.id === last.escalation) : null;
@@ -183,7 +184,18 @@ export function strategyHold(root, state) {
     const guidance = `${owner.summary}. This is the person's decision: bring them the brief from \`wf signals --attempt ${state.id}\` (rounds, blocking findings per round, the families that keep coming back, changed files against what the plan expected, amendments) and your recommendation; write them into the question's \`--ask\` file for the next implementer or reviewer handoff, which asks it. ${pending?.approved || pending?.withdrawn ? `${pending.id} was ${pending.withdrawn ? 'withdrawn' : `answered in the person's own words, "${pending.approved.words}"`}: follow that, and the next implementer or reviewer handoff asks the question again with its choices. ` : ''}${pending && !pending.approved && !pending.withdrawn ? `They answer ${pending.id}: ${approveHint(state, pending)}` : 'The next implementer or reviewer handoff (with `--ask <file>`) opens the decision they answer with `wf approve`'} (continue: another ${(cfg?.strategy ?? STRATEGY_DEFAULTS).reviewRoundsEscalate} rounds before asking again | split: unstarted work, observations and discovered issues move to a sibling attempt of the batch (\`wf split\`); code already built stays | deliver-core: what the criteria need and what blocks stays, every other finding and discovered issue may be ticketed under this decision | stop: a hold). No implementer or reviewer starts until they decide.`;
     return { owner, ownerPending: pending, escalation, guidance };
   }
-  return { owner: null, ownerPending: null, escalation, guidance: `the strategist escalated (${escalation.id}); the person decides: ${approveHint(state, escalation)}; no implementer or reviewer starts until then` };
+  return { owner: null, ownerPending: null, escalation, guidance: escalationGuidance(state, escalation) };
+}
+
+// What the owner agent does about a strategist's escalation that holds the handoffs, by the state of its question. 0.7.27
+// (I-186). Named failure (field): the guidance for a question the owner had withdrawn was the one for a question awaiting the
+// person (ask it and run `wf approve`), a route `wf approve` refuses for a withdrawn question; the owner was left with no
+// supported way on, and the strategist's corrected decision was refused for the same reason.
+const redo = (state) => `hand a strategist with what changed (\`wf handoff strategist --agent <id> --reason "..."\`) and record its decision (\`wf strategy record --closure <file> --attempt ${state.id}\`): a recorded decision supersedes the question`;
+function escalationGuidance(state, e) {
+  if (e.withdrawn) return `the strategist's escalation ${e.id} was withdrawn (${e.withdrawn.reason ?? 'no reason recorded'}) and nobody can answer it; no implementer or reviewer starts until a decision supersedes it (${redo(state)}) or the question is asked again (the next implementer or reviewer handoff asks the question again with its choices, and the person answers that one)`;
+  if (e.approved) return `the strategist's escalation ${e.id} was answered in the person's own words, "${e.approved.words ?? e.approved.choice}", which is neither choice: follow them; no implementer or reviewer starts until the question is settled: the next implementer or reviewer handoff asks it again with exactly its choices, or, if their words change the course, withdraw it with what they said (\`wf decisions withdraw ${e.id} --attempt ${state.id} --reason "<their words>"\`) and ${redo(state)}`;
+  return `the strategist escalated (${e.id}); the person decides: ${approveHint(state, e)}; no implementer or reviewer starts until then`;
 }
 
 // Recorded when the engine refuses because of the escalation: the report counts them. At most once per firing.
@@ -507,7 +519,16 @@ export function recordStrategy(root, options) {
     if (!classes.includes(closure.model.class)) throw refuse(`\`${closure.model.class}\` is not a work class of this project (classes: ${classes.join(', ')})`, null, { id: 'strategy:unknown-class' });
   }
   const pending = openEscalation(state);
-  if (pending) throw refuse(`the strategist escalated ${state.id} (${pending.id}) and the owner has not decided; no further decision is recorded until then`, approveHint(state, pending), { id: 'strategy:escalation-pending' });
+  // 0.7.27 (I-186). Named failure (field): the owner withdrew an escalation whose question was wrong and asked the strategist
+  // for the corrected decision, and this refused it ("the owner has not decided", with `wf approve` of the withdrawn question,
+  // which `wf approve` refuses): the only way on was to edit the workflow. A withdrawn question can be answered by no one, so
+  // the decision recorded now supersedes it (the handoffs stay held until it is recorded, or the engine asks the question
+  // again, and then that one is live). A question answered in the person's own words stays: their words are followed or
+  // withdrawn first, because a decision recorded over them would never see them.
+  if (pending && !pending.withdrawn) {
+    if (pending.approved) throw refuse(`the strategist escalated ${state.id} (${pending.id}) and the person answered it in their own words, "${pending.approved.words ?? pending.approved.choice}", which is neither choice; no further decision is recorded over their words`, `follow their words; if they mean one of the choices, the next implementer or reviewer handoff asks the question again with exactly these options. If their words change the course, withdraw the question with what they said (\`wf decisions withdraw ${pending.id} --attempt ${state.id} --reason "<their words>"\`), then hand the strategist again (\`wf handoff strategist --agent <id> --reason "..."\`) and record its decision`, { id: 'strategy:escalation-pending' });
+    throw refuse(`the strategist escalated ${state.id} (${pending.id}) and the owner has not decided; no further decision is recorded until then`, approveHint(state, pending), { id: 'strategy:escalation-pending' });
+  }
   const signals = computeSignals(root, state, { cfg: adapterOf(root, state), nowMs });
   // The strategist's own rule, about its own predictions: two missed in a row and its next decision asks the owner.
   if (missedStreak(state, signals, nowMs) >= 2 && closure.action !== 'escalate') throw refuse(`${state.id}: the last two strategist predictions were missed, so the next decision is answered only by \`escalate\` (to the owner), not \`${closure.action}\``, 'write a closure with action escalate and 2 or 3 options for the owner', { id: 'strategy:escalate-required' });

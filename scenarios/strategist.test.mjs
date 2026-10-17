@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
-import { ok } from './helpers.mjs';
+import { approveAsOwner, ok, state as stateOf, wf } from './helpers.mjs';
+import { append } from '../engine/ledger.mjs';
 import { W, growTo, inProcess, project, reviewRound, runner, started, strategistClosure } from './strategist-fixtures.mjs';
 
 // 0.7.0 (D3), named failures: no role owned "stop, consolidate, split, or is this still worth its cost". A ticket ran 47
@@ -332,4 +333,117 @@ test('an escalation is a plain question: labelled options with what follows each
     setImmediate(() => input.write('Keep fixing it here\n'));
     assert.equal((await pending).choice, 'keep-fixing-it-here', 'the person answers by the label');
   });
+});
+
+// 0.7.27 (I-186), named failure (field): the owner withdrew a strategist's escalation because its question promised more than
+// its option did, and the strategist's corrected decision was refused (exit 75): "the strategist escalated A1 and the owner has
+// not decided; no further decision is recorded until then", with a hint to `wf approve` a question that was withdrawn and
+// cannot be approved. A withdrawn question is no question the person can answer: a decision recorded after it supersedes it.
+// It still holds the implementer and reviewer handoffs until a decision supersedes it or the engine asks it again.
+const now = { run: wf, state: stateOf };
+const SECOND_OPINION = [{ label: 'Fix both together', then: 'one more fix round covers both' }, { label: 'Ship without the second one', then: 'the second one is listed as a known issue' }];
+function escalated(ctx, a, agent, { question = 'The same problem came back after two fixes. Should both be fixed in this ticket?', options = SECOND_OPINION } = {}) {
+  const h = ok(wf(ctx.root, ['handoff', 'strategist', '--agent', agent, '--attempt', a.id, '--reason', 'the same finding keeps coming back', '--json'])).json();
+  return strategistClosure(ctx.base, h.bundle, { strategist: agent, action: 'escalate', rationale: 'The same finding came back after two fixes.', prediction: { signal: 'blockingLatest <= 0', by: 50 }, question, options, recommend: { label: options[0].label, why: 'two fixes did not hold' } });
+}
+function handedStrategist(ctx, a, agent, closure) {
+  const h = ok(wf(ctx.root, ['handoff', 'strategist', '--agent', agent, '--attempt', a.id, '--reason', 'the question it asked was withdrawn', '--json'])).json();
+  return strategistClosure(ctx.base, h.bundle, { strategist: agent, prediction: { signal: 'blockingLatest <= 0', by: 50 }, ...closure });
+}
+const withdrawn = (ctx, a, id) => ok(wf(ctx.root, ['decisions', 'withdraw', id, '--reason', 'the second option promised more than it does; ask it again, corrected', '--attempt', a.id]));
+
+test('a corrected strategy decision is recorded after the owner withdrew the escalation; until one is recorded the withdrawn question holds the handoffs and every refusal names a route that works', () => {
+  const ctx = project('withdrawn-escalation');
+  const a = started(now, ctx, { item: 'ENG-740' });
+  const { root } = ctx;
+  reviewRound(now, ctx, a, { findings: 1 });
+  const first = escalated(ctx, a, 'strat-1');
+  const rec = ok(wf(root, ['strategy', 'record', '--closure', first.file, '--attempt', a.id, '--json'])).json();
+  assert.equal(rec.escalation, 'A1');
+  withdrawn(ctx, a, 'A1');
+  assert.match(ok(wf(root, ['decisions', '--all', '--attempt', a.id])).out, /A1 {2}escalation {2}withdrawn: the second option promised more than it does/);
+  // The withdrawn question still holds the handoffs, and the owner is told a route that works: `wf approve A1` is refused for a
+  // withdrawn question, so the next step is the strategist's corrected decision (or the engine asking it again).
+  const held = now.state(root, a.id).decision;
+  assert.equal(held.kind, 'strategy');
+  assert.doesNotMatch(held.guidance, /wf approve A1/, 'a withdrawn question cannot be approved');
+  assert.match(held.guidance, /A1 was withdrawn \(the second option promised more than it does; ask it again, corrected\)/);
+  assert.match(held.guidance, /wf handoff strategist --agent <id>[\s\S]*wf strategy record/);
+  assert.match(held.guidance, /the next implementer or reviewer handoff asks the question again/);
+  const stale = wf(root, ['approve', 'A1', '--from-question', '--attempt', a.id], { ownerSilent: true });
+  assert.equal(stale.code, 75);
+  assert.match(stale.err, /A1 was withdrawn \(the second option promised more than it does/);
+  assert.match(stale.err, /wf resume --attempt [^ ]+ names the step that asks it afresh or supersedes it/, 'the refusal names where to go on');
+  // The corrected decision is recorded; it supersedes the withdrawn question, so nothing is held any more.
+  const corrected = handedStrategist(ctx, a, 'strat-2', { action: 'continue', rationale: 'The person withdrew the question; the course is sound as it is.' });
+  const second = wf(root, ['strategy', 'record', '--closure', corrected.file, '--attempt', a.id, '--json'], { ownerSilent: true });
+  assert.equal(second.code, 0, `the corrected decision is recorded, got ${second.code}: ${second.err}`);
+  assert.equal(second.json().decision.id, 'S2');
+  assert.notEqual(now.state(root, a.id).decision.kind, 'strategy', 'a decision superseded the withdrawn question');
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-after', '--attempt', a.id, '--owner', a.owner], { ownerSilent: true }));
+});
+
+test('a corrected escalation recorded after a withdrawn one is the question the person answers now; the withdrawn one is never asked', () => {
+  const ctx = project('withdrawn-then-corrected');
+  const a = started(now, ctx, { item: 'ENG-741' });
+  const { root } = ctx;
+  reviewRound(now, ctx, a, { findings: 1 });
+  ok(wf(root, ['strategy', 'record', '--closure', escalated(ctx, a, 'strat-1').file, '--attempt', a.id]));
+  withdrawn(ctx, a, 'A1');
+  const again = handedStrategist(ctx, a, 'strat-2', { action: 'escalate', rationale: 'The first question promised more than its option did.', question: 'The same problem came back after two fixes. Should only the one that blocks be fixed in this ticket?', options: SECOND_OPINION, recommend: { label: 'Ship without the second one', why: 'the other is old code' } });
+  const rec = ok(wf(root, ['strategy', 'record', '--closure', again.file, '--attempt', a.id, '--json'], { ownerSilent: true })).json();
+  assert.equal(rec.escalation, 'A2');
+  const decisions = ok(wf(root, ['decisions', '--all', '--attempt', a.id])).out;
+  assert.match(decisions, /A1 {2}escalation {2}withdrawn/);
+  assert.match(decisions, /A2 {2}escalation {2}pending/);
+  const blocked = wf(root, ['handoff', 'reviewer', '--agent', 'rev-x', '--attempt', a.id, '--owner', a.owner], { ownerSilent: true });
+  assert.equal(blocked.code, 75);
+  assert.match(blocked.err, /A2: /);
+  assert.match(blocked.err, /wf approve A2 --from-question/);
+  assert.doesNotMatch(blocked.err, /wf approve A1/);
+  // The person answers the corrected question and the work goes on.
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-y', '--attempt', a.id, '--owner', a.owner]));
+  assert.ok(stateOf(root, a.id).decisions.find((d) => d.id === 'A2').approved, 'the corrected question was the one answered');
+  assert.ok(!stateOf(root, a.id).decisions.find((d) => d.id === 'A1').approved, 'the withdrawn one never was');
+});
+
+test('a question the engine asked again after a withdrawal is live: no decision is recorded until the person answers it, and the refusal names `wf approve` for it', () => {
+  const ctx = project('withdrawn-asked-again');
+  const a = started(now, ctx, { item: 'ENG-742' });
+  const { root } = ctx;
+  reviewRound(now, ctx, a, { findings: 1 });
+  ok(wf(root, ['strategy', 'record', '--closure', escalated(ctx, a, 'strat-1').file, '--attempt', a.id]));
+  withdrawn(ctx, a, 'A1');
+  // A handoff asks the withdrawn question afresh (the engine's rule: a withdrawn question is not an answer).
+  const asked = wf(root, ['handoff', 'reviewer', '--agent', 'rev-x', '--attempt', a.id, '--owner', a.owner], { ownerSilent: true });
+  assert.equal(asked.code, 75);
+  const fresh = asked.err.match(/wf approve (A\d+)/)[1];
+  assert.notEqual(fresh, 'A1');
+  const corrected = handedStrategist(ctx, a, 'strat-2', { action: 'continue', rationale: 'The course is sound.' });
+  const refused = wf(root, ['strategy', 'record', '--closure', corrected.file, '--attempt', a.id], { ownerSilent: true });
+  assert.equal(refused.code, 75);
+  assert.match(refused.err, new RegExp(`the strategist escalated ${a.id.replace('.', '\\.')} \\(${fresh}\\) and the owner has not decided`));
+  assert.match(refused.err, new RegExp(`wf approve ${fresh} --from-question`));
+  assert.ok(refusalRows(root).some((x) => x.id === 'strategy:escalation-pending'));
+  approveAsOwner(root, a.id, fresh, 'fix-both-together');
+});
+
+test('an escalation the person answered in their own words is not a decision: recording is refused with the routes that work (follow the words, or withdraw them and hand the strategist again)', () => {
+  const ctx = project('escalation-own-words');
+  const a = started(now, ctx, { item: 'ENG-743' });
+  const { root } = ctx;
+  reviewRound(now, ctx, a, { findings: 1 });
+  ok(wf(root, ['strategy', 'record', '--closure', escalated(ctx, a, 'strat-1').file, '--attempt', a.id]));
+  const words = 'fix the one that blocks, and park the other for the next release';
+  append(root, a.id, 'decision.approved', { id: 'A1', choice: 'other', words, via: 'question' }, null);
+  const corrected = handedStrategist(ctx, a, 'strat-2', { action: 'continue', rationale: 'The course is sound.' });
+  const refused = wf(root, ['strategy', 'record', '--closure', corrected.file, '--attempt', a.id], { ownerSilent: true });
+  assert.equal(refused.code, 75);
+  assert.match(refused.err, /\(A1\) and the person answered it in their own words, "fix the one that blocks/);
+  assert.doesNotMatch(refused.err, /wf approve A1/, 'an answered question cannot be approved again');
+  assert.match(refused.err, /follow their words/);
+  assert.match(refused.err, /wf decisions withdraw A1 --attempt [^ ]+ --reason/);
+  // The route works: withdrawn with what they said, the corrected decision is recorded.
+  ok(wf(root, ['decisions', 'withdraw', 'A1', '--reason', words, '--attempt', a.id]));
+  ok(wf(root, ['strategy', 'record', '--closure', corrected.file, '--attempt', a.id], { ownerSilent: true }));
 });

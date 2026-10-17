@@ -115,13 +115,18 @@ export function requireYes(root, state, { kind, key, summary, what, frame = null
   throw refuse(`not done: ${what} is the owner's decision (${d.id}: ${d.summary})`, `${approveHint(state, d)}${unworded}`, { id: `approve:${kind}` });
 }
 
+// 0.7.27 (I-186). Named failure (field): a question the owner withdrew was shown to the owner as the thing to approve, and
+// `wf approve` refused it with no way on. A withdrawn question has no answer to give: `wf resume` names what happens next (the
+// command that asks it afresh, or, for a strategist's escalation, the decision that supersedes it).
+const withdrawnHint = (state) => `nothing is answered for a withdrawn question; \`wf resume --attempt ${state.id}\` names the step that asks it afresh or supersedes it`;
+
 // `wf approve <id>`: the person types the choice at an interactive terminal.
 export async function approveInTerminal(root, id, options, { input = process.stdin, output = process.stdout, env = process.env } = {}) {
   const state = openState(root, options);
   const d = (state.decisions ?? []).find((x) => x.id === id);
   if (!d) throw new WfError(`no decision ${id ?? ''} on ${state.id}; \`wf decisions --attempt ${state.id}\` lists them`);
   if (d.approved) throw refuse(`${id} was already decided: ${d.approved.choice}`, null, { id: 'approve:already' });
-  if (d.withdrawn) throw refuse(`${id} was withdrawn (${d.withdrawn.reason ?? ''}); the next command asks a fresh question`, null, { id: 'approve:withdrawn' });
+  if (d.withdrawn) throw refuse(`${id} was withdrawn (${d.withdrawn.reason ?? ''}); the next command asks a fresh question`, withdrawnHint(state), { id: 'approve:withdrawn' });
   const agentEnv = agentEnvNames().filter((k) => env[k]);
   if (agentEnv.length) throw refuse(`\`wf approve\` runs in the owner's own terminal, not under an agent runtime (${agentEnv.join(', ')})`, `ask them in your message, quoting the question "${questionFor(state, d)}" exactly with its options (${optionLines(d)}) and asking nothing else in that message, so they can type the answer (you may also show it in your question panel: either answer counts); after they answer run \`wf approve ${id} --from-question --attempt ${state.id}\`; or they run \`wf approve ${id} --attempt ${state.id}\` in a terminal outside the agent app`, { id: 'approve:agent-env' });
   if (!input.isTTY || !output.isTTY) throw refuse(`not an interactive terminal: \`wf approve\` is run by the owner in their own terminal, where it asks them to type the choice`, `run \`wf approve ${id} --attempt ${state.id}\` in a terminal`, { id: 'approve:no-tty' });
@@ -221,7 +226,7 @@ export async function approveFromQuestion(root, id, options, { env = process.env
   const d = (state.decisions ?? []).find((x) => x.id === id);
   if (!d) throw new WfError(`no decision ${id ?? ''} on ${state.id}; \`wf decisions --attempt ${state.id}\` lists them`);
   if (d.approved) throw refuse(`${id} was already decided: ${d.approved.choice}`, null, { id: 'approve:already' });
-  if (d.withdrawn) throw refuse(`${id} was withdrawn (${d.withdrawn.reason ?? ''}); the next command asks a fresh question`, null, { id: 'approve:withdrawn' });
+  if (d.withdrawn) throw refuse(`${id} was withdrawn (${d.withdrawn.reason ?? ''}); the next command asks a fresh question`, withdrawnHint(state), { id: 'approve:withdrawn' });
   if (options.choice !== undefined && options.choice !== true) throw new WfError('--choice is for the terminal; with --from-question the choice is the one the person picked in the panel');
   const question = questionFor(state, d);
   const how = `${SHOW_TEXT}; ask them in your message, quoting the question "${question}" exactly with its options (${optionLines(d)}) and asking nothing else in that message, so they can type the answer (you may also show it in your question panel: a typed reply and a panel answer both count), and run this again after they answer; or they run \`wf approve ${id} --attempt ${state.id}\` in their own terminal`;

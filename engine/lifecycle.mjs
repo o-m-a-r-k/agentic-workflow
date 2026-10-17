@@ -3049,7 +3049,7 @@ export function nextDecision(root, state) {
   // 0.7.0 (D3): the person's round escalation and a strategist's escalation stop the course until they decide (attempts
   // admitted at 0.7.0+); a strategist the owner agent handed is waited for.
   const held = strategyHold(root, state);
-  if (held) return result('strategy', 'owner', held.owner ? held.owner.summary : `the strategist's escalation ${held.escalation.id} awaits the owner`, { guidance: withAttempt(root, state, held.guidance), escalation: held.escalation?.id ?? null });
+  if (held) return result('strategy', 'owner', held.owner ? held.owner.summary : held.escalation.withdrawn ? `the strategist's escalation ${held.escalation.id} was withdrawn and no decision has superseded it` : held.escalation.approved ? `the strategist's escalation ${held.escalation.id} was answered in the person's own words` : `the strategist's escalation ${held.escalation.id} awaits the owner`, { guidance: withAttempt(root, state, held.guidance), escalation: held.escalation?.id ?? null });
   const waiting = strategistWaiting(state);
   if (waiting) {
     const gone = waiting.launch?.status === 'completed';
