@@ -171,7 +171,9 @@ implementer handoff asked the same question again, three rounds later. The count
 ledger (the rounds handed by the time of the answer), so an attempt in flight replays the same way. A round question already
 asked and not yet answered stays the one question, whatever round an earlier release keyed it to; one an earlier release
 opened before it was due again is withdrawn by the engine, with the reason, as soon as any command opens the attempt (`wf
-status`, `wf resume`, `wf decisions`, a handoff), so nothing lists it or tells the agent to ask it. `wf signals` shows when the question is next due and the answer it counts from. The other
+status`, `wf resume`, `wf decisions`, a handoff), so nothing lists it or tells the agent to ask it. It is judged again inside
+the ledger's transaction, so two commands at once withdraw it once, and nothing is withdrawn while the adapter cannot be read
+(the defaults would judge a project that asks at another count, and a question due there would be asked again). `wf signals` shows when the question is next due and the answer it counts from. The other
 "comes back" rules already count from the answer: a course signal on review rounds counts from the latest expectation (a
 re-plan's, or the strategist's `continue` with a new `expect`), and the two-missed-predictions rule counts only the
 strategist's decisions after its last escalation, which cannot be recorded before the person answers it.

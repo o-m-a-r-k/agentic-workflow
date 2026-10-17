@@ -95,24 +95,38 @@ export function roundsEscalation(state, c = STRATEGY_DEFAULTS, rounds = handedRo
   return { id: ESCALATION, key: asked ? asked.key.slice(OWNER_KEY.length) : `rounds:${due.at}`, summary: `${rounds} review rounds handed; the owner decides how to continue` };
 }
 
+// The open round questions that are not the firing's.
+const earlyQuestions = (state, c) => {
+  const firing = roundsEscalation(state, c);
+  return (state.decisions ?? []).filter((d) => isOwnerQuestion(d) && !d.approved && !d.withdrawn && (!firing || d.key !== ownerDecisionKey(firing)));
+};
+
 // A round question still open that is not the firing's: one an earlier release opened at the next multiple of the count,
 // before as many rounds had passed since the person's answer (I-214). The engine withdraws it, saying why, when any command
 // opens the attempt (`openState`, and `wf status` for every open attempt), before anything lists it or tells the agent to ask
 // it: a question that is not due is never put to the person. The question due later is a new one. Returns the state as it
 // stands after.
+//
+// Review of 0.7.29: with the adapter unreadable, the defaults (every 10 rounds) judged a project that asks every 4, so a
+// question due there was withdrawn and the person asked it again; nothing is withdrawn on a reading of the rules that is not
+// the project's. And two commands opening the attempt at once each read it before either withdrew, so each appended the
+// same withdrawals: the questions are read again and judged inside the ledger's transaction, before anything is appended.
 export function settleRoundQuestions(root, state) {
   if (!(state.decisions ?? []).some((d) => isOwnerQuestion(d) && !d.approved && !d.withdrawn)) return state;
   if (!worked(state)) return state;
   const cfg = adapterOf(root, state);
-  if (switchedOff(cfg)) return state;
-  const c = cfg?.strategy ?? STRATEGY_DEFAULTS;
-  const firing = roundsEscalation(state, c);
-  const early = (state.decisions ?? []).filter((d) => isOwnerQuestion(d) && !d.approved && !d.withdrawn && (!firing || d.key !== ownerDecisionKey(firing)));
-  if (!early.length) return state;
-  const due = escalationDue(state, c);
-  const answer = due?.answer;
-  const why = `${answer ? `the person answered ${answer.decision.id} (${answer.decision.approved.choice}) at ${answer.rounds} handed rounds; ` : ''}the round question comes back at ${due?.at ?? '?'} handed rounds, counted from the answer: this one was opened before it was due again and is not asked`;
-  for (const d of early) append(root, state.id, 'decision.withdrawn', { id: d.id, reason: why }, null);
+  if (!cfg || switchedOff(cfg)) return state;
+  const c = cfg.strategy ?? STRATEGY_DEFAULTS;
+  if (!earlyQuestions(state, c).length) return state;
+  recordedTogether(root, state.id, () => {
+    const current = loadState(root, state.id);
+    const early = worked(current) ? earlyQuestions(current, c) : [];
+    if (!early.length) return;
+    const due = escalationDue(current, c);
+    const answer = due?.answer;
+    const why = `${answer ? `the person answered ${answer.decision.id} (${answer.decision.approved.choice}) at ${answer.rounds} handed rounds; ` : ''}the round question comes back at ${due?.at ?? '?'} handed rounds, counted from the answer: this one was opened before it was due again and is not asked`;
+    for (const d of early) append(root, state.id, 'decision.withdrawn', { id: d.id, reason: why }, null);
+  });
   return loadState(root, state.id);
 }
 

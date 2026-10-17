@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { closureFile, commitIn, criteriaFile, goodClosure, ok, singleRepoProject, state, toAccepted, wf, yaml } from './helpers.mjs';
+import { closureFile, commitIn, criteriaFile, goodClosure, ok, sh, singleRepoProject, state, toAccepted, wf, yaml } from './helpers.mjs';
 
 const STEPS = [{ id: 'unit', repo: 'app', run: 'true', inputs: ['src/**'] }, { id: 'e2e', repo: 'app', run: 'true', tier: 'heavy' }];
 const IGNORE = '.wf-evidence/\n.wf-worktrees/\ncaptures/\n';
@@ -101,6 +101,25 @@ test('I-204: an admission step a member corrected runs in its own gate and in th
   assert.equal(e2e.status, 'passed');
   assert.match(fs.readFileSync(e2e.log, 'utf8'), /corrected-e2e/, 'the corrected definition ran on the combined tree');
   assert.deepEqual(state(p.root, b.id).decisions ?? [], [], 'the batch asked the person nothing again');
+});
+
+// Review of 0.7.29: a member check the batch does not carry (its admission adapter now defines the step itself) was printed once
+// by `wf batch create` and seen nowhere else; the batch's reviewer is handed it.
+test('I-204: a member check the batch does not carry, because the base now defines that step itself, reaches the batch\'s reviewer', () => {
+  const p = project('i204-not-carried');
+  const m1 = memberWithCheck(p, 'ENG-211', { 'src/a.txt': 'one\n' }, { id: 'http', repo: 'app', run: 'true', inputs: ['src/**'] });
+  const m2 = toAccepted(p.root, p.base, { item: 'ENG-212', change: { 'src/b.txt': 'two\n' }, extraEntry: ['--defer-heavy'] });
+  // The base defines `http` itself, differently, before the batch is admitted on it.
+  const cfg = { version: 1, enabled: true, name: p.name, repos: [{ name: 'app', path: '.', base: 'main' }], lanes: ['quick', 'standard', 'batch'], gate: { steps: [{ id: 'http', repo: 'app', run: 'echo base-http', inputs: ['src/**'] }, ...STEPS] } };
+  commitIn(p.root, { '.workflow/project.yaml': yaml(cfg) }, 'the base defines http');
+  sh(p.root, 'git push -q origin main');
+  const created = ok(wf(p.root, ['batch', 'create', '--members', `${m1.id},${m2.id}`, '--owner', 'o']));
+  assert.match(created.out, /not carried: http of ENG-211\.1: the batch's admission adapter now defines http itself, differently; the batch runs its own/);
+  const b = state(p.root, 'BATCH-1');
+  assert.deepEqual([b.validations, b.validationsNotCarried.map((x) => [x.id, x.member])], [[], [['http', m1.id]]]);
+  const bundle = bundleOf(ok(wf(p.root, ['handoff', 'reviewer', '--agent', 'rb0', '--attempt', b.id, '--json'])));
+  assert.deepEqual(bundle.validationsNotCarried, b.validationsNotCarried, 'the batch\'s reviewer is handed what was not carried and why');
+  assert.match(bundle.instructions, /`validationsNotCarried` lists checks a member registered or corrected that this batch does not carry, each with why \(http of ENG-211\.1\)/);
 });
 
 // 0.7.29 (I-194), named failure (field): `wf batch create` refused attempts not admitted with --defer-heavy and named no way on,

@@ -142,6 +142,52 @@ test('0.7.29 (I-154): why `wf accept` refused an evidence round reaches the next
   ok(wf(root, ['accept', '--attempt', id]));
 });
 
+// Review of 0.7.29: the refusal was anchored on the time of the latest recorded review, so it was dropped when the refused round
+// recorded its closure again (a full evidence round adds `priorFindings` in a second record). It is anchored on the round.
+test('0.7.29 (I-154): an acceptance refusal still reaches the next evidence review after the refused round records its closure again', () => {
+  const { base, root } = singleRepoProject('evidence-refused-again', { gate: { steps: [{ id: 'unit', repo: 'app', run: 'true' }] } }, { 'src/a.txt': 'l1\nl2\nl3\n' });
+  const e = ok(wf(root, ['entry', '--item', 'ENG-76', '--owner', 'o', '--json'])).json();
+  ok(wf(root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id]));
+  ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id]));
+  ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
+  commitIn(e.repos.app.worktree, { 'src/a.txt': 'l1\nL2\nl3\n' });
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'r1', '--attempt', e.id]));
+  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r1', { findings: [{ id: 'F1', severity: 'high', summary: 'F1 is wrong', status: 'open', evidence: 'src/a.txt:2 wrong', criterion: 'C1' }] })), '--attempt', e.id]));
+  ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
+  commitIn(e.repos.app.worktree, { 'src/a.txt': 'l1\nL2 fixed\nl3\n' });
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]));
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'r2', '--attempt', e.id]));
+  const blind = goodClosure('r2');
+  ok(wf(root, ['review', '--closure', closureFile(base, blind), '--attempt', e.id]));
+  assert.match(wf(root, ['accept', '--attempt', e.id]).err, /earlier-round finding\(s\) not verified: r1:F1/);
+  // The same round records its closure again, with the verdict on the earlier finding.
+  ok(wf(root, ['review', '--closure', closureFile(base, { ...blind, priorFindings: [{ round: 'r1', id: 'F1', status: 'fixed', evidence: 'src/a.txt:2' }] }), '--attempt', e.id]));
+  const h = ok(wf(root, ['handoff', 'reviewer', '--agent', 'r3', '--attempt', e.id, '--json'])).json();
+  const next = JSON.parse(fs.readFileSync(h.bundle, 'utf8'));
+  assert.equal(next.acceptanceRefused?.reviewer, 'r2', 'the refusal of the round is still handed');
+  assert.match(next.acceptanceRefused.problems.join('\n'), /earlier-round finding\(s\) not verified: r1:F1/);
+});
+
+// Review of 0.7.29: a blind full round was handed "kept only on precedent", the earlier reviewer's judgement of a criterion; only
+// the reasons about the form of the evidence reach it.
+test('0.7.29 (I-154): a blind full evidence round is handed the form of the evidence acceptance refused, never an earlier reviewer\'s judgement', () => {
+  const steps = [{ id: 'ui', repo: 'app', run: writeShots, artifacts: ['shots/{itemLower}/**/*.png', 'att/{attempt}/*.png'] }];
+  const { base, root } = singleRepoProject('evidence-refused-blind', { gate: { steps } }, ignore);
+  const { id, bundle } = toReview(root, base, 'ENG-70');
+  const [first] = bundle.gate.screenshots;
+  const criteria = [{ id: 'C1', evidence: { kind: 'output', ref: 'gate log line 1' }, precedentOnly: true }];
+  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r', { criteria, screenshotsInspected: [first.sha256], notReached: ['the second screen was not viewed'] })), '--attempt', id]));
+  const refused = wf(root, ['accept', '--attempt', id]).err;
+  assert.match(refused, /criterion C1: kept only on precedent/);
+  assert.match(refused, /1 gate screenshot\(s\) not inspected by the reviewer/);
+  const h = ok(wf(root, ['handoff', 'reviewer', '--agent', 'r2', '--attempt', id, '--json'])).json();
+  const next = JSON.parse(fs.readFileSync(h.bundle, 'utf8'));
+  assert.equal(next.mode, 'full', 'the round that did not reach everything was no audit');
+  assert.equal(next.acceptanceRefused.problems.length, 1);
+  assert.match(next.acceptanceRefused.problems[0], /1 gate screenshot\(s\) not inspected by the reviewer/);
+  assert.doesNotMatch(JSON.stringify(next.acceptanceRefused), /precedent/);
+});
+
 // The env var decides WHICH captures the tests make; where they go stays the project's convention (the artifacts glob).
 test('steps receive WF_ITEM and WF_ITEMS, for one attempt and for a batch', () => {
   const steps = [

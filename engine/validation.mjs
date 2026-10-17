@@ -14,16 +14,6 @@ export const validationDigest = (state) => state.validations?.length ? hashValue
 export const validationCommit = (state, id) => state.validations?.find((v) => v.steps.some((s) => s.id === id))?.commit ?? state.adapterBase;
 export const validationIds = (state) => (state.validations ?? []).flatMap((v) => v.steps.map((s) => s.id));
 
-export function validationReviewProblems(records, closure) {
-  const problems = [];
-  for (const record of records ?? []) for (const step of record.steps) {
-    const entries = (closure.validationChecked ?? []).filter((v) => v.id === step.id);
-    const v = entries[0];
-    if (entries.length !== 1 || v.commit !== record.commit || !v.evidence?.trim() || !['complies', 'finding'].includes(v.verdict) || (v.verdict === 'finding' && !closure.findings?.some((f) => f.id === v.finding))) problems.push(`supplemental validation ${step.id} needs one pinned-definition review verdict in validationChecked`);
-  }
-  return problems;
-}
-
 export function gateAdapter(root, state) {
   const frozen = trustedAdapter(root, state);
   const steps = [...frozen.gate.steps];

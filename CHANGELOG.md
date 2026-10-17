@@ -16,6 +16,8 @@ Release notes, newest first, then every fix that came from a failure in the work
   - a check two members registered alike is carried once; two members that registered one check differently are refused
     before the batch exists, with how to make them the same, since the batch can run only one of them;
   - a ticket taken out of the batch takes its checks with it;
+  - a ticket's check the batch does not carry, because the base now has its own rule for that step, is shown to the
+    batch's reviewer with why, so it can see a ticket's accepted proof was replaced;
   - a long check a ticket corrected with your yes now runs in that ticket's own test run, as a check it registered does.
     Found while reproducing the batch failure: a ticket waiting for a batch put the corrected check off to the batch while
     its own test run required it, so its test run could never pass.
@@ -38,7 +40,9 @@ Release notes, newest first, then every fix that came from a failure in the work
     same reviewer corrects it;
   - each piece of evidence names one screenshot (or test), and a criterion several screenshots show lists each in its own
     entry; the reviewer's instructions show that shape;
-  - when acceptance refuses a review, its reasons are recorded and the next evidence review is handed them.
+  - when acceptance refuses a review, its reasons are recorded and the next evidence review is handed them, also after the
+    refused review records its closure again; a review that starts afresh, without seeing earlier findings, is handed only
+    what was wrong with the form of the evidence, never the earlier reviewer's judgement.
 
 - **After you answer the ten-round question, it comes back as many rounds after your answer, not at the next multiple
   of ten (I-214, D34).** Named failure: you answered "Keep going as now" when a ticket had been through 17 review
@@ -52,7 +56,9 @@ Release notes, newest first, then every fix that came from a failure in the work
   - a ten-round question you were already asked and have not answered stays the only one: you are not asked a second;
   - a ten-round question an earlier release opened too early, which you have not answered, is withdrawn by the
     workflow with the reason as soon as the agent next looks at the ticket, before anything lists it, and you are
-    never asked it;
+    never asked it; it is withdrawn once even when two commands look at the ticket at the same moment, and never while
+    the project's settings cannot be read, so a question that is due under your project's number is not withdrawn and
+    asked again;
   - `wf signals` shows when the question is next due and which answer it counts from.
 
   The other rules that come back to a question already count from the answer: the strategist's signal for review rounds
@@ -1826,6 +1832,7 @@ A second adversarial pass over the integrated 0.5.0 branch, with scenarios in `s
 
 | Item | Failure fixed | Fixed in | Scenario test |
 | --- | --- | --- | --- |
+| [I-214](improvements/I-214.md) | Continuation approval at round17 blocks again after only three handed rounds | 0.7.29 | `scenarios/strategist.test.mjs` |
 | [I-213](improvements/I-213.md) | wf criteria amend crashed on a survey placed outside impact | 0.7.28 | `scenarios/fix-0728b.test.mjs` |
 | [I-212](improvements/I-212.md) | Deferred heavy steps hide a ticket's own e2e specs until the batch gate | 0.7.28 | `scenarios/fix-0728b.test.mjs` |
 | [I-211](improvements/I-211.md) | A divided review can be started as a plain reviewer and is never recorded | 0.7.28 | `scenarios/fix-0728b.test.mjs` |
@@ -1833,9 +1840,17 @@ A second adversarial pass over the integrated 0.5.0 branch, with scenarios in `s
 | [I-209](improvements/I-209.md) | Finding history (cause, not place) never reaches attempts admitted before 0.7.27 | 0.7.28 | `scenarios/fix-0728b.test.mjs` |
 | [I-208](improvements/I-208.md) | Implementers 'fix the class' with redesigns that introduce new defects | 0.7.28 | `scenarios/course-signals.test.mjs` |
 | [I-207](improvements/I-207.md) | A low finding or a not-caused left item opens its own fix round | 0.7.28 | `scenarios/planned-pass.test.mjs` |
+| [I-206](improvements/I-206.md) | Delta reviewer handoff omits newly added supplemental validation | 0.7.29 | `scenarios/supplemental-validation.test.mjs` |
+| [I-205](improvements/I-205.md) | Batch reviewer bundle omits accepted supplemental registrations |  |  |
+| [I-204](improvements/I-204.md) | Batch creation drops member supplemental proof registrations | 0.7.29 | `scenarios/batch-validation.test.mjs` |
 | [I-203](improvements/I-203.md) | A '?' the agent appends to a legacy question, or a panel offering a legacy decision's frame labels, costs an extra agent command | 0.7.28 | `scenarios/approve-question.test.mjs` |
 | [I-202](improvements/I-202.md) | Explain mismatched question-panel option labels instead of reporting no answer | 0.7.28 | `scenarios/approve-question.test.mjs` |
+| [I-200](improvements/I-200.md) | Carry unresolved critical observations in implementer goal context | 0.7.28 | `scenarios/planned-pass.test.mjs` |
+| [I-199](improvements/I-199.md) | Export interrupted-gate screenshots listed in evidence inventory |  |  |
+| [I-197](improvements/I-197.md) | Reject malformed screenshot references when recording review and retain acceptance refusals |  |  |
 | [I-196](improvements/I-196.md) | Delivery has no deployment step: a label route can only set the final status at merge, before the deployment is confirmed and the fix tested | 0.7.27 | `scenarios/deployment-confirmation.test.mjs` |
+| [I-195](improvements/I-195.md) | Frozen client steps lack pre-commit dependency preparation |  |  |
+| [I-194](improvements/I-194.md) | Batch admission requirement needs actionable guidance | 0.7.29 | `scenarios/batch-validation.test.mjs` |
 | [I-193](improvements/I-193.md) | Improvement list says 'fixed in X' before X is published or installed | 0.7.27 | `scenarios/improve.test.mjs` |
 | [I-192](improvements/I-192.md) | Shipped task closure cannot recognize explicit owner chat authorization | 0.7.27 | `scenarios/approve-question.test.mjs` |
 | [I-191](improvements/I-191.md) | Fix and review rounds work one finding at a time, so a cause that spans places recurs round after round | 0.7.27 | `scenarios/recurring-cause.test.mjs` |
@@ -1853,7 +1868,16 @@ A second adversarial pass over the integrated 0.5.0 branch, with scenarios in `s
 | [I-179](improvements/I-179.md) | Evidence-only gate repair trapped between clean-review and execution proof requirements | 0.7.23 | `scenarios/supplemental-validation.test.mjs` |
 | [I-178](improvements/I-178.md) | Synthetic delivery batch incorrectly requests tracker implementing lifecycle | 0.7.23 | `scenarios/fix-0721.test.mjs` |
 | [I-177](improvements/I-177.md) | Assembled batch cannot own or settle member observation selected for fix | 0.7.23 | `scenarios/deferral-rule.test.mjs` |
+| [I-175](improvements/I-175.md) | Reviewer closures repeatedly serialize multiple screenshot hashes as one artifact ref |  |  |
 | [I-174](improvements/I-174.md) | Chat approval reader selects clarification instead of latest explicit yes | 0.7.28 | `scenarios/approve-question.test.mjs` |
+| [I-172](improvements/I-172.md) | Installed screenshot exporter still refuses overlapping suite titles | 0.7.20 | `scenarios/fix-0720.test.mjs` |
+| [I-171](improvements/I-171.md) | Native Codex shell snapshot restores an older global wf despite engine PATH |  |  |
+| [I-170](improvements/I-170.md) | Screenshot export refuses repeated titles from multiple gate suites | 0.7.20 | `scenarios/fix-0720.test.mjs` |
+| [I-169](improvements/I-169.md) | Reconcile a defect recorded after its same-handoff repair with independent proof | 0.7.19 | `scenarios/fix-0719.test.mjs` |
+| [I-164](improvements/I-164.md) | Disambiguate screenshot exports from overlapping gate steps | 0.7.20 | `scenarios/fix-0720.test.mjs` |
+| [I-161](improvements/I-161.md) | Gate screenshot export collides across required steps | 0.7.20 | `scenarios/fix-0720.test.mjs` |
+| [I-156](improvements/I-156.md) | Investigate starvation of long-waiting runtime lease requests |  |  |
+| [I-154](improvements/I-154.md) | Validate screenshot references when recording a review | 0.7.29 | `scenarios/evidence.test.mjs` |
 | [I-152](improvements/I-152.md) | A long reviewer's findings are lost when it is stopped | 0.7.12 | `scenarios/fix-074-lifecycle.test.mjs` |
 | [I-150](improvements/I-150.md) | Step passes from another attempt with the same key are not reused | 0.7.12 | `scenarios/gate.test.mjs` |
 | [I-149](improvements/I-149.md) | A gate starts while an implementer is still committing | 0.7.11 | `scenarios/gate.test.mjs` |

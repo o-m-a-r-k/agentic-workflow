@@ -1014,6 +1014,9 @@ export function handoff(root, role, options) {
     // 0.7.29 (I-154): why `wf accept` refused the last evidence round, for the evidence review that follows it. A full round
     // is blind to earlier findings, so it is handed only the reasons about the closure's own evidence.
     acceptanceRefused: role === 'reviewer' && gateNow?.ok ? acceptanceRefusedFor(state, mode) : undefined,
+    // Review of 0.7.29: the member checks a batch did not carry (its admission adapter defines the step itself), printed once by
+    // `wf batch create` and seen nowhere else; its full rounds see a member's accepted proof was replaced by the base's rule.
+    validationsNotCarried: role === 'reviewer' && mode === 'full' && state.validationsNotCarried?.length ? state.validationsNotCarried : undefined,
     round: role === 'reviewer' ? (gateNow.ok ? 'evidence-review' : 'code-review') : undefined,
     gate: role === 'reviewer'
       ? gateNow.ok
@@ -1078,6 +1081,7 @@ export function handoff(root, role, options) {
   if (role === 'reviewer' && (bundle.discovered ?? []).some((d) => d.status === 'open' || d.notADefectSinceReview)) bundle.instructions += ' A discovered issue you judge not to be a defect at all (the code does what the product intends, or the claim misread it) is settled by your verdict, which closes it: `discovered: [{ "id": "D3", "verdict": "verified-nonissue", "evidence": "<file:line you checked>", "rationale": "<why it is not a defect, in terms of what the product is for>" }]`; the claim stays in the record beside your reason. One marked `notADefectSinceReview` was closed that way (' + closedBy + '): raise a finding if the claim holds after all.';
   if (role === 'reviewer' && bundle.passBuilt) bundle.instructions += ` A planned pass was built since the last review, with no code-review round of its own (${bundle.passBuilt.map((x) => `${x.work}: ${x.items.map((i) => i.ref).join(', ')}`).join('; ')}): \`passBuilt\` lists its items, the commits recorded for each and the implementer's range. Its code is in your diff and this round is the one review it gets: review it as you review the rest, and verify each item at its cause (a finding in \`priorFindings\`; a discovered issue closed as fixed: raise a finding when its fix does not hold).`;
   if (role === 'reviewer' && mode === 'delta' && bundle.supplementalValidation.length) bundle.instructions += ` \`supplementalValidation\` lists the checks registered, corrected or carried from a batch member since the last reviewed round (${bundle.supplementalValidation.flatMap((v) => v.steps.map((x) => x.id)).join(', ')}): the gate runs each at its pinned commit, so judge its definition and plugin as committed there, not a later copy, and give your verdict on each in \`validationChecked: [{ "id", "commit", "verdict": "complies" | "finding", "evidence", "finding" }]\`; a defect in one is a finding.`;
+  if (role === 'reviewer' && bundle.validationsNotCarried) bundle.instructions += ` \`validationsNotCarried\` lists checks a member registered or corrected that this batch does not carry, each with why (${bundle.validationsNotCarried.map((x) => `${x.id} of ${x.member}`).join(', ')}): for those steps the batch's gate follows its own admission adapter, the base's rule, so judge whether the member's criteria still rest on what they proved.`;
   if (role === 'reviewer' && bundle.acceptanceRefused) bundle.instructions += ` \`acceptanceRefused\` lists why \`wf accept\` refused the last evidence round (${bundle.acceptanceRefused.reviewer}'s): your closure must not repeat them. A citation it names is corrected in your own \`criteria\`: each evidence entry cites one artifact exactly as the bundle lists it, and a criterion several screenshots show gets one entry per screenshot, with the same \`id\`.`;
   if (role === 'reviewer' && bundle.impactMap) bundle.instructions += ' Impact discovery under impactMap.derived is textual, not structurally resolved consumer analysis, and bounded (its `incomplete` and `symbolsTruncated` say how far it got): a hit is a lead to judge against the real imports and behaviour, and a missing hit is no proof of coverage.';
   if (role === 'reviewer') {
@@ -1926,11 +1930,15 @@ export function screenshotRefProblems(state, closure) {
 // 0.7.29 (I-206): the checks registered, corrected or carried since the last recorded review round.
 const validationsSince = (state) => (state.validations ?? []).filter((v) => v.at > (state.review?.at ?? ''));
 
-// 0.7.29 (I-154): the latest refusal of `wf accept` since the last recorded evidence round, as the next evidence review is
-// handed it; a full round gets only the reasons about the closure's own evidence (the others can name earlier findings).
+// 0.7.29 (I-154): the latest refusal of `wf accept` of the last recorded evidence round, or of a round handed after it, as the
+// next evidence review is handed it; a full round gets only the reasons about the form of the closure's own evidence (the
+// others can name earlier findings or an earlier reviewer's judgement). Review of 0.7.29: anchored on the time of the latest
+// record, the refusal was dropped when the refused round recorded its closure again (a full round adds `priorFindings` in a
+// second record), so it is anchored on the round's handoff.
 function acceptanceRefusedFor(state, mode) {
-  const since = (state.reviews ?? []).filter((r) => reviewedAfterGate(r)).at(-1)?.at ?? '';
-  const last = (state.acceptanceRefusals ?? []).filter((x) => x.at > since).at(-1);
+  const order = (bundle) => (state.handoffs ?? []).findIndex((h) => h.bundle === bundle);
+  const since = order((state.reviews ?? []).filter((r) => reviewedAfterGate(r)).at(-1)?.handoff);
+  const last = (state.acceptanceRefusals ?? []).filter((x) => order(x.handoff) >= since).at(-1);
   if (!last) return undefined;
   const problems = (last.problems ?? []).filter((p) => mode !== 'full' || p.citation).map((p) => p.text);
   return problems.length ? { note: 'Why `wf accept` refused the last evidence round. Facts from the engine, not findings: your closure must not repeat them.', reviewer: last.reviewer, at: last.at, problems } : undefined;
@@ -1983,8 +1991,8 @@ export function acceptReview(root, options) {
     if (blocking.has(f.id)) problems.push(`finding ${f.id} is ${f.status ?? 'open'} and blocks: ${classifyFinding(state, f).reason}`);
     if (!f.evidence) problems.push(`finding ${f.id} has no evidence`);
   }
-  // 0.7.29 (I-154): the reasons about the closure's own evidence (its criteria map, its screenshots), which the next evidence
-  // review is handed even when it is a blind full round.
+  // 0.7.29 (I-154): the reasons about the form of the closure's own evidence (its criteria map, its screenshots), which the
+  // next evidence review is handed even when it is a blind full round.
   const citation = new Set();
   const cite = (text) => {
     citation.add(problems.length);
@@ -2004,7 +2012,8 @@ export function acceptReview(root, options) {
     for (const m of entries) {
       // A criterion kept only because of precedent (a past merge, an existing test, an earlier verdict) needs a
       // purpose-based rationale naming the user of the surface, or a `precedent-only` finding.
-      if (m.precedentOnly === true && !String(m.rationale ?? c.rationale ?? '').trim() && !r.closure.findings.some((f) => f.category === 'precedent-only')) cite(`criterion ${c.id}: kept only on precedent; give a purpose-based \`rationale\` (who uses this surface and what they need) or raise a \`precedent-only\` finding`);
+      // Not a reason about the form (review of 0.7.29): it is the reviewer's judgement, which a blind full round is not handed.
+      if (m.precedentOnly === true && !String(m.rationale ?? c.rationale ?? '').trim() && !r.closure.findings.some((f) => f.category === 'precedent-only')) problems.push(`criterion ${c.id}: kept only on precedent; give a purpose-based \`rationale\` (who uses this surface and what they need) or raise a \`precedent-only\` finding`);
       const kind = m.evidence?.kind;
       if (!EVIDENCE_KINDS.has(kind)) cite(`criterion ${c.id}: evidence kind must be one of ${[...EVIDENCE_KINDS].join(', ')}`);
       else if (['not-applicable', 'dropped-with-reason'].includes(kind) && !m.evidence.reason?.trim()) cite(`criterion ${c.id}: ${kind} needs a reason`);

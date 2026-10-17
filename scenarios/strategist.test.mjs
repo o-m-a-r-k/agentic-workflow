@@ -4,7 +4,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { approveAsOwner, commitIn, ok, state as stateOf, wf } from './helpers.mjs';
-import { append, loadState } from '../engine/ledger.mjs';
+import { append, loadState, readLedger } from '../engine/ledger.mjs';
+import { settleRoundQuestions } from '../engine/strategy.mjs';
 import { W, growTo, inProcess, project, reviewRound, runner, started, strategistClosure } from './strategist-fixtures.mjs';
 
 // 0.7.0 (D3), named failures: no role owned "stop, consolidate, split, or is this still worth its cost". A ticket ran 47
@@ -399,6 +400,42 @@ test('a round question an earlier release opened before it was due again is with
   assert.match(wf(root, ['approve', 'A4', '--choice', 'continue', '--attempt', a.id], { ownerSilent: true }).err, /A4 was withdrawn/);
   ok(handRound(ctx, a, 'rev-13a'));
   assert.match(handRound(ctx, a, 'rev-14a').err, /13 review rounds handed; the owner decides how to continue \(A5\)/);
+});
+
+// Review of 0.7.29: two commands that opened the attempt at once each read it before either withdrew an early question, and each
+// appended the same withdrawal; and with the adapter unreadable the defaults (every 10 rounds) judged a project that asks every
+// 4, so a question that was due there was withdrawn and the person would be asked it again.
+test('an early round question is withdrawn once when two commands read the attempt before either withdrew it; with the adapter unreadable a question that is due is never withdrawn', async () => {
+  const ctx = project('anchored-settle', { strategy: { reviewRoundsEscalate: 4 } });
+  const a = started(current, ctx, { item: 'ENG-749' });
+  const { root } = ctx;
+  earlierRounds(ctx, a, 5);
+  assert.match(handRound(ctx, a, 'rev-5').err, /5 review rounds handed; the owner decides how to continue \(A1\)/);
+  approveAsOwner(root, a.id, 'A1', 'continue');
+  for (const n of [6, 7, 8]) ok(handRound(ctx, a, `rev-${n}`));
+  const earlier = stateOf(root, a.id).decisions.find((d) => d.id === 'A1');
+  append(root, a.id, 'decision.created', { id: 'A2', kind: 'escalation', key: 'tripwire:rounds-escalation:rounds:8', summary: '8 review rounds handed; the owner decides how to continue: continue | split | deliver-core | hold | stop', choices: earlier.choices }, null);
+  const withdrawals = () => readLedger(root, a.id).filter((e) => e.type === 'decision.withdrawn').map((e) => e.data.id);
+  // Both read the attempt while A2 was open; the second appends nothing once the first has withdrawn it.
+  await inProcess(root, () => {
+    const stale = loadState(root, a.id);
+    settleRoundQuestions(root, stale);
+    settleRoundQuestions(root, stale);
+  });
+  assert.deepEqual(withdrawals(), ['A2'], 'one withdrawal');
+  ok(handRound(ctx, a, 'rev-9'));
+  // At 9, four rounds after the answer, the question is due and asked (A3).
+  assert.match(handRound(ctx, a, 'rev-10').err, /9 review rounds handed; the owner decides how to continue \(A3\)/);
+  // The adapter cannot be read for a moment (its folder moved): the defaults would say the question is not due until 10.
+  const adapter = path.join(root, '.workflow');
+  fs.renameSync(adapter, `${adapter}.moved`);
+  try {
+    await inProcess(root, () => settleRoundQuestions(root, loadState(root, a.id)));
+  } finally {
+    fs.renameSync(`${adapter}.moved`, adapter);
+  }
+  assert.deepEqual(withdrawals(), ['A2'], 'nothing withdrawn on rules that are not the project\'s');
+  assert.equal(loadState(root, a.id).decisions.find((d) => d.id === 'A3').withdrawn, undefined, 'the due question stays open');
 });
 
 test('a round question an earlier release opened and nobody has answered yet stays the one question, whatever round it was keyed to', () => {
