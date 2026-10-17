@@ -28,7 +28,7 @@ export const integrations = (root) => (fs.existsSync(path.join(root, '..', 'inte
 export const headOf = (dir) => sh(dir, 'git rev-parse HEAD');
 // Runs whatever the engine names next until it names the acceptance: a code review where the base merge changed the
 // ticket's change (or a delivered repo's change looks gone), the gate, the evidence review. Returns the steps it ran.
-export function reconcile(root, base, id, who) {
+export function reconcile(root, base, id, who, inspect = () => {}) {
   const ran = [];
   for (let n = 0; n < 6; n++) {
     const d = state(root, id).decision;
@@ -40,6 +40,7 @@ export function reconcile(root, base, id, who) {
       ok(wf(root, ['review', '--closure', closureFile(base, goodClosure(`${who}-${n}`)), '--attempt', id]));
     } else assert.fail(`unexpected next step ${d.kind}`);
     ran.push(d.kind === 'review' ? d.round : d.kind);
+    inspect(ran.at(-1), state(root, id));
   }
   ok(wf(root, ['accept', '--attempt', id]));
   return ran;

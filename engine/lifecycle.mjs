@@ -3194,10 +3194,13 @@ function phaseAction(root, cfg, state) {
   if (inFlight) return `waiting for reviewer ${inFlight.agent}: \`wf review --closure <its file>\`; ${inFlight.round === 'evidence-review' || (!inFlight.round && inFlight.gate) ? 'evidence review of the gated tree' : 'code review'}, no gate while it runs`;
   if (g?.status === 'failed' && onTree(g.tree)) return 'gate failed: fix and commit through the implementer that did that work (its bundle carries `failedGate`, the facts of what failed); the fixed tree then gets a code-review round by a fresh reviewer before the next `wf gate` (a failure that needed no code change: `wf gate` again)';
   const r = state.review;
-  if (!r || !onTree(r.tree ?? r.handoffTree)) {
+  // 0.7.26 (I-183): the round covers the tree when it is the same tree or the same change (a base merged in without touching it),
+  // as `nextDecision` reads it; this text read the tree alone and sent the owner to a code review the decision did not name.
+  const covered = Boolean(r) && reviewCovers(state, r);
+  if (!covered) {
     if (evidenceFixReady(state) && !pass.ok) return `the evidence review's findings are fixed by the implementers handed after it: ${gateRun}; the evidence review after it verifies the fixes and the new evidence`;
   }
-  if (!r || !onTree(r.tree ?? r.handoffTree)) return integrationCheckOwed(cfg, state) ? `the combined tree of ${state.work.length} work items needs a passing \`wf check --attempt ${state.id}\` first (fix what it finds through the implementers); then the code review: hand to ${fresh}; ${noGate}` : `code review: hand to ${fresh}; ${noGate}`;
+  if (!covered) return integrationCheckOwed(cfg, state) ? `the combined tree of ${state.work.length} work items needs a passing \`wf check --attempt ${state.id}\` first (fix what it finds through the implementers); then the code review: hand to ${fresh}; ${noGate}` : `code review: hand to ${fresh}; ${noGate}`;
   const open = openFindings(r, state);
   if (open.length) return `fix the open findings (${open.map((f) => (f.work ? `${f.id} in ${f.work}` : f.id)).join(', ')}): hand them to the implementer that did that work as a fix round (\`wf handoff implementer --agent <its id>${open.some((f) => f.work) ? ' --work <item>' : ''}\`, then continue it with the printed line), so its report and the defect history are recorded; then the next code-review round: hand to ${fresh}; ${noGate}`;
   const toVerify = unverifiedPrior(state, r, { forGate: !(pass.ok && reviewedAfterGate(r)) });
@@ -3206,7 +3209,9 @@ function phaseAction(root, cfg, state) {
   // were named only after acceptance, so each one placed then cost another gate cycle).
   const obsNow = observations(state);
   if (!pass.ok && obsNow.length) return `clean code review on this tree, with ${obsNow.length} open observation(s) to place first: ${observationLines(state).slice(0, 5).join('; ')}; fix them now in one pass through the implementer (then the next review round); ${RULE_SHORT}; then ${gateRun}`;
-  if (!pass.ok) return `clean code review on this tree: ${gateRun}; then the evidence review`;
+  if (!pass.ok) return onTree(r.tree ?? r.handoffTree) ? `clean code review on this tree: ${gateRun}; then the evidence review` : `clean code review covers this change: ${gateRun}; then the evidence review`;
+  // 0.7.26 (I-183): a base merge moved the tree and left the reviewed change alone: `wf accept` wants a closure written for this tree.
+  if (!onTree(r.tree ?? r.handoffTree)) return `evidence review: the gate passed on this tree (a base merged in moved it; the reviewed change is the same), so hand to ${fresh} to inspect the gate evidence (logs and screenshots)`;
   if (!reviewedAfterGate(r)) return `evidence review: the gate passed on the reviewed tree, so hand to ${fresh} to inspect the gate evidence (logs and screenshots)`;
   const late = criteriaAfterReview(state, r);
   if (late.added.length || late.changed.length) return `evidence review: ${[...late.added, ...late.changed].join(', ')} ${late.added.length + late.changed.length === 1 ? 'was' : 'were'} added or re-worded by an amendment after the last review round was handed, so no round mapped ${late.added.length + late.changed.length === 1 ? 'it' : 'them'} to this gate's evidence (\`wf accept\` would refuse): hand to ${fresh}; it maps every criterion`;

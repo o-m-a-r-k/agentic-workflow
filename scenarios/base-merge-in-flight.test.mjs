@@ -55,7 +55,14 @@ test('I-183: the base moved while the merge request awaits its merge: wf base me
   assert.equal(s.decision.kind, 'gate');
 
   // The ticket's own change is untouched, so the code review still covers it: the gate, then the evidence review, then accept.
-  assert.deepEqual(reconcile(root, base, id, 'rev-again'), ['gate', 'evidence-review']);
+  // 0.7.26 (I-183): after the gate on the moved tree the text, like the decision, names the evidence review (it said "code review:
+  // hand to a fresh reviewer ... no gate until a code-review round comes back clean" while the decision named the evidence review).
+  const afterGate = [];
+  assert.deepEqual(reconcile(root, base, id, 'rev-again', (step, s2) => { if (step === 'gate') afterGate.push(s2); }), ['gate', 'evidence-review']);
+  assert.equal(afterGate.length, 1);
+  assert.equal(afterGate[0].decision.round, 'evidence-review');
+  assert.match(afterGate[0].next, /^evidence review: the gate passed on this tree/);
+  assert.doesNotMatch(afterGate[0].next, /code review: hand to|no gate until/);
   s = state(root, id);
   assert.equal(s.accepted.heads.app, merged, 'the acceptance now names the reconciled commit');
 
