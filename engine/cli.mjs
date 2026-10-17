@@ -890,7 +890,9 @@ async function dispatch(cmd, sub, positional, options) {
         const { recordFixAll } = await import('./leaving.mjs');
         const r = await recordFixAll(root, options);
         if (r.already) { print(options, `the person's "fix all" is already recorded on ${s.id} (${r.state.fixAll.at}): "${r.state.fixAll.words}"; nothing is asked again`, r.state.fixAll); return 0; }
-        print(options, `recorded on ${s.id}: the person said to fix every item ("${r.words}"). No item is asked about leaving again unless they say so (then \`--person-directed "<their words>"\` asks that item); every item that does not block joins the next planned pass, never a round of its own. next: ${nextAction(root, r.state)}`, r.state.fixAll);
+        // Fifth review of 0.7.28: the read-back the agent shows the person says where the words came from, what the message followed
+        // and which other tickets it names (the record's `via`), not only in --json.
+        print(options, `recorded on ${s.id}: the person said to fix every item ("${r.words}"; ${r.state.fixAll.via ?? 'recorded'}). No item is asked about leaving again unless they say so (then \`--person-directed "<their words>"\` asks that item); every item that does not block joins the next planned pass, never a round of its own. next: ${nextAction(root, r.state)}`, r.state.fixAll);
         return 0;
       }
       throw new WfError('usage: wf scope list|ticket|move|fixed|defer|waive|fix-all');

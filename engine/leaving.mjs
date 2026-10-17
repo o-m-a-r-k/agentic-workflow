@@ -20,22 +20,23 @@ export { FIX, LEAVE };
 const LEVELS = ['high', 'medium', 'low'];
 
 // The project's own notion of an item id, for telling a message about another ticket (fourth review of 0.7.28): the items of its
-// other attempts (an attempt id is `<item>.<n>`), and with a tracker, the ticket prefixes those items and this one use and the
-// adapter's `tracker.itemPattern`. The engine's own numbers (`QF-<n>` for a quick fix without a ticket, a batch's) are ids, never
+// other attempts (an attempt id is `<item>.<n>`), the ticket prefixes those items and this one use, and the adapter's
+// `tracker.itemPattern` (which `wf entry` enforces with or without a tracker). The engine's own numbers (`QF-<n>` for a quick fix without a ticket, a batch's) are ids, never
 // ticket prefixes.
 function projectItemIds(root, state) {
   let cfg = null;
   try {
     cfg = loadConfig(root);
   } catch {}
-  const tracked = Boolean(cfg?.tracker?.kind && cfg.tracker.kind !== 'none');
   const items = listAttempts(root).filter((id) => id !== state.id).map((id) => id.replace(/\.\d+$/, ''));
   const prefix = (x) => /^([A-Za-z][A-Za-z0-9]*)-\d+$/.exec(String(x ?? ''))?.[1]?.toUpperCase() ?? null;
   const own = (x) => /^(QF|BATCH)$/i.test(x);
   return {
     ids: items.filter((x) => /[A-Za-z]/.test(x)),
-    prefixes: tracked ? [...new Set([state.item, ...items].map(prefix).filter((p) => p && !own(p)))] : [],
-    pattern: tracked ? cfg.tracker.itemPattern ?? null : null,
+    // Whether or not a tracker is set (fifth review of 0.7.28: with none, "ENG-12" was no item although ENG-9 is an attempt, and an
+    // `itemPattern` that `wf entry` enforces was ignored).
+    prefixes: [...new Set([state.item, ...items].map(prefix).filter((p) => p && !own(p)))],
+    pattern: cfg?.tracker?.itemPattern ?? null,
   };
 }
 

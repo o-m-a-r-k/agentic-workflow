@@ -144,7 +144,7 @@ test("the person's \"fix all\" is recorded once, from their own words: no item i
   assert.match(unproven.err, /not recorded: "fix all" is in no message of the person's in this session/);
   personWrites(p, 'fix all of them, every one', 2000);
   const first = ok(wf(p.root, ['scope', 'fix-all', '--person-said', 'fix all of them', '--attempt', p.id], session));
-  assert.match(first.out, /the person said to fix every item \("fix all of them"\)/);
+  assert.match(first.out, /the person said to fix every item \("fix all of them"; chat, read by the agent/);
   assert.match(resume(p).fixAll.via, /^chat, read by the agent/);
   assert.match(ok(wf(p.root, ['scope', 'fix-all', '--person-said', 'fix them all', '--attempt', p.id], session)).out, /already recorded on .*: "fix all of them"; nothing is asked again/);
   const asked = wf(p.root, ['scope', 'defer', '--finding', 'r1:F1', '--attempt', p.id], { ownerSilent: true });
@@ -184,7 +184,7 @@ test('"fix all" given in the message that started the attempt, or in one naming 
   assert.match(older.err, /in a message that does not name PP-3 and is not the one that started it \(their last chat message before the admission that answers no decision's question, at [^)]+\): words about something else/);
   // The kickoff counts, and the record says why.
   const kicked = ok(wf(p.root, ['scope', 'fix-all', '--person-said', 'fix all findings, do not ask me about leaving any', '--attempt', e.id], session));
-  assert.match(kicked.out, /the person said to fix every item \("fix all findings, do not ask me about leaving any"\)/);
+  assert.match(kicked.out, /the person said to fix every item \("fix all findings, do not ask me about leaving any"; chat, read by the agent \([^)]*\); the message that started this attempt \(the last before its admission\)\)/);
   assert.match(JSON.parse(ok(wf(p.root, ['resume', '--attempt', e.id, '--json'])).out).fixAll.via, /the message that started this attempt \(the last before its admission\)/);
   // A message before the admission that names the attempt's item counts too.
   const e4 = ok(wf(p.root, ['entry', '--item', 'PP-4', '--owner', 'o', '--json'])).json();
@@ -252,8 +252,10 @@ test('a kickoff naming the ticket counts after another ticket\'s question; anoth
   agent('Still open: **ENG-9.1 A3:** the label reads oddly. Fix it now, or let it leave?');
   said('implement PP-3 and fix all findings, do not ask me about leaving any');
   const pp3 = entry('PP-3');
-  ok(fixAll('fix all findings, do not ask me about leaving any', pp3));
+  const recorded = ok(fixAll('fix all findings, do not ask me about leaving any', pp3));
   assert.match(via(pp3), /written before the admission, naming PP-3; it followed ENG-9\.1's question$/);
+  // Fifth review of 0.7.28: the line the agent shows the person carries it too, not only --json.
+  assert.match(recorded.out, /the person said to fix every item \("fix all findings, do not ask me about leaving any"; chat, read by the agent \([^)]*\); written before the admission, naming PP-3; it followed ENG-9\.1's question\)/);
   // Another item in lower case is still another item.
   said('for eng-9 fix all the lows, do not ask me about them');
   const pp6 = entry('PP-6');
@@ -265,9 +267,30 @@ test('a kickoff naming the ticket counts after another ticket\'s question; anoth
   const pp7 = entry('PP-7');
   ok(fixAll('fix all the COVID-19 copy findings', pp7));
   assert.match(via(pp7), /the message that started this attempt \(the last before its admission\)$/);
+  // Fifth review of 0.7.28: with no tracker, a prefix the project's attempts use still makes an item (ENG-9 is an attempt).
+  said('for ENG-12 fix all the lows, ok');
+  const pp8 = entry('PP-8');
+  const prefixed = fixAll('fix all the lows, ok', pp8);
+  assert.equal(prefixed.code, 75);
+  assert.match(prefixed.err, /in a message that names ENG-12, not PP-8: words about something else/);
 });
 
-test('with a tracker, another item is one with a ticket prefix the project uses or its item pattern; without one, only the other attempts\' ids', async () => {
+// Fifth review of 0.7.28: a project with no tracker whose `tracker.itemPattern` `wf entry` enforces has that pattern read too, and a
+// pattern that validates (an escape the `u` flag refuses, `\-`) is not silently dropped.
+test('with no tracker, the item pattern the project declares names other items, compiled as config validation compiles it', async () => {
+  const p = singleRepoProject('pp-pattern', { gate: { steps }, tracker: { kind: 'none', itemPattern: '^(PRJ|OPS)\\-\\d+$' } }, { 'src/a.txt': LINES });
+  const file = path.join(p.base, '.home', '.claude', 'projects', 'proj', `${CLAUDE}.jsonl`);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.appendFileSync(file, `${JSON.stringify({ type: 'user', timestamp: new Date().toISOString(), message: { role: 'user', content: 'for OPS-4 fix all the lows' } })}\n`);
+  const e = ok(wf(p.root, ['entry', '--item', 'PRJ-1', '--owner', 'o', '--json'])).json();
+  const r = wf(p.root, ['scope', 'fix-all', '--person-said', 'fix all the lows', '--attempt', e.id], session);
+  assert.equal(r.code, 75);
+  assert.match(r.err, /in a message that names OPS-4, not PRJ-1: words about something else/);
+  const { itemsNamed } = await import('../engine/approve.mjs');
+  assert.deepEqual(itemsNamed('ENG-4 and OPS-1', 'PP-1', { pattern: '^ENG\\-\\d+$' }), ['ENG-4']);
+});
+
+test('another item is one with a ticket prefix the project uses, matching its item pattern, or another attempt\'s id', async () => {
   const { itemsNamed } = await import('../engine/approve.mjs');
   assert.deepEqual(itemsNamed('for eng-12, OPS-3 and GPT-4', 'PP-3', { ids: [], prefixes: ['ENG', 'PP'] }), ['eng-12']);
   assert.deepEqual(itemsNamed('ABC-2 and ENG-1', 'PP-3', { ids: [], prefixes: [], pattern: '^ABC-\\d+$' }), ['ABC-2']);

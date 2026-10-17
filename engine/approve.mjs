@@ -486,19 +486,26 @@ const holdsAny = (theirs, quote) => theirs.some((a) => holds(a.answer, quote));
 // decision, as the kickoff of the next ticket; then a kickoff naming this item was refused because the agent's message before it
 // quoted another attempt's open question, as agents are told to.
 // What another item is, from the project's own ids (fourth review of 0.7.28: an ad-hoc token shape read "GPT-4" and "COVID-19" as
-// tickets and missed "eng-9"): the ids of the project's other attempts, and with a tracker, ids with a prefix the project's tickets
-// use (this attempt's and the other attempts') or that its `tracker.itemPattern` matches; case is ignored. `ids`:
+// tickets and missed "eng-9"): the ids of the project's other attempts, and ids with a prefix the project's tickets
+// use (this attempt's and the other attempts') or that its `tracker.itemPattern` matches, with or without a tracker; case is ignored. `ids`:
 // { ids: [<other attempts' items>], prefixes: [<ticket prefixes>], pattern: <tracker.itemPattern or null> }.
 const ID_SHAPE = /(?<![\p{L}\p{N}_-])(\p{L}[\p{L}\p{N}]*)-(\d+)(?![\p{N}])/gu;
 const namesItem = (text, item) => Boolean(item) && new RegExp(`(?<![\\p{L}\\p{N}_-])${String(item).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{N}])`, 'iu').test(String(text ?? ''));
 export function itemsNamed(text, item, ids = {}) {
   const exact = new Set((ids.ids ?? []).map((x) => String(x).toUpperCase()));
   const prefixes = new Set((ids.prefixes ?? []).map((x) => String(x).toUpperCase()));
-  let pattern = null;
-  try {
-    pattern = ids.pattern ? new RegExp(String(ids.pattern).replace(/^\^/, '').replace(/\$$/, ''), 'iu') : null;
-  } catch {}
-  const isItem = (token, prefix) => exact.has(token.toUpperCase()) || prefixes.has(prefix.toUpperCase()) || Boolean(pattern && new RegExp(`^(?:${pattern.source})$`, 'iu').test(token));
+  // Compiled as config validation compiles it (no `u`), so a pattern that validates works here too (fifth review of 0.7.28:
+  // `^ENG\-\d+$` validated and was dropped under `u`); with `u` when it allows it.
+  const compile = (src) => {
+    for (const flags of ['iu', 'i']) {
+      try {
+        return new RegExp(src, flags);
+      } catch {}
+    }
+    return null;
+  };
+  const whole = ids.pattern ? compile(`^(?:${String(ids.pattern).replace(/^\^/, '').replace(/\$$/, '')})$`) : null;
+  const isItem = (token, prefix) => exact.has(token.toUpperCase()) || prefixes.has(prefix.toUpperCase()) || Boolean(whole?.test(token));
   return [...new Set([...String(text ?? '').matchAll(ID_SHAPE)].filter((m) => isItem(m[0], m[1])).map((m) => m[0]))].filter((x) => !namesItem(x, item));
 }
 const DECISION_KEY = /(?<![\p{L}\p{N}._-])([\p{L}\p{N}][\p{L}\p{N}._-]*\.\d+) A\d+:/gu;
