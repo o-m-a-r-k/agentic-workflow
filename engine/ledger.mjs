@@ -127,7 +127,9 @@ export const keptFiles = (files, keep) => {
   const seen = new Set();
   return files.filter((f) => keep.includes(f.sha256) && !seen.has(f.sha256) && seen.add(f.sha256));
 };
-const narrowAttach = (a, narrowed) => (narrowed && a.event === 'delivered' && a.op === 'attach' ? { ...a, files: keptFiles(a.files, narrowed.keep) } : a);
+// 0.7.26 (I-182): a capture the owner chose from the verified ones joins after the set's own kept files (`added`, recorded with
+// the entry so a replay needs no gate).
+const narrowAttach = (a, narrowed) => (narrowed && a.event === 'delivered' && a.op === 'attach' ? { ...a, files: keptFiles([...a.files, ...(narrowed.added ?? [])], narrowed.keep) } : a);
 
 // A split moves findings (`<reviewer>:<id>`) to a sibling attempt: in this attempt's closures they read as `moved`, which
 // every open-finding check treats as settled. The ledger's closure is never changed, only the derived view.
@@ -493,8 +495,9 @@ export function reduce(entries) {
       // pending `delivered` attach action whichever came first in the ledger, both derive from the kept list.
       case 'delivery.narrowed': {
         const keep = new Set(d.keep ?? []);
-        if (s.delivery.screenshots) s.delivery.screenshots = { ...s.delivery.screenshots, screenshots: keptFiles(s.delivery.screenshots.screenshots, [...keep]) };
-        s.delivery.narrowed = { from: d.from, to: d.to, dropped: d.dropped, reason: d.reason, legacy: d.legacy === true, keep: [...keep], raw: d.raw ?? null, at: e.at, by: e.actor };
+        const added = Array.isArray(d.added) ? d.added : [];
+        if (s.delivery.screenshots) s.delivery.screenshots = { ...s.delivery.screenshots, screenshots: keptFiles([...s.delivery.screenshots.screenshots, ...added], [...keep]) };
+        s.delivery.narrowed = { from: d.from, to: d.to, dropped: d.dropped, added, reason: d.reason, legacy: d.legacy === true, keep: [...keep], raw: d.raw ?? null, at: e.at, by: e.actor };
         s.tracker.pending = s.tracker.pending.map((a) => narrowAttach(a, s.delivery.narrowed));
         break;
       }

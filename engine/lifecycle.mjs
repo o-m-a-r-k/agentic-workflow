@@ -2257,17 +2257,57 @@ export function proposeCaption(state, a) {
   return shows.length ? `${words} (shows ${shows.join('; ')})` : words;
 }
 
-// What this attempt delivers: its own gate's screenshots and, for a batch member, the batch gate's files that belong
-// to it (never another member's). Each gets the attachment title (the file name; the source path when two share a
-// name) and a proposed caption. A batch delivers nothing itself: each member shows and attaches its own.
-export function deliveredSet(root, state) {
+// Every screenshot the attempt's handoff can draw from, ranked by how much it belongs to this ticket (0.7.26, I-182): its own
+// gate's and, for a batch member, the batch gate's, each once. Rank 0: one of its own criteria cites it as the evidence
+// (whatever its `units` say: the reviewer who mapped the criterion judged it this ticket's). 1: its `units` name this attempt
+// or its item and not every unit (a capture made for this ticket), or nobody tagged it and its own gate collected it. 2: shared
+// (`units` names the member and the batch, as a glob without a placeholder does for every unit) or untagged in the batch's gate. 3: tagged for other tickets only, the batch's own among them.
+// Within a rank, the gate's order. Named failure (field): a batch's gate recorded 510 verified captures; a project step plugin
+// tagged the ones it returned with the item ids it knows (`units: ["ENG-12"]`), while this read the attempt id only, so 470 of
+// them, the ticket's own 30 among them, were in no member's set, and the 40 left were the two steps whose globs had no
+// placeholder (every unit's): no cap, a filter whose key the writer of the tag did not know.
+export function verifiedCaptures(root, state) {
   if (state.lane === 'batch') return [];
-  const mine = (a) => !a.units || a.units.includes(state.id);
   const batch = state.delivery.viaBatch ? loadState(root, state.delivery.viaBatch) : null;
   const seen = new Set();
-  const files = [...screenshots(state), ...(batch ? screenshots(batch) : [])].filter(mine).filter((a) => !seen.has(a.sha256) && seen.add(a.sha256));
+  const own = new Set(screenshots(state).map((a) => a.sha256));
+  const files = [...screenshots(state), ...(batch ? screenshots(batch) : [])].filter((a) => !seen.has(a.sha256) && seen.add(a.sha256));
+  const norm = (x) => String(x ?? '').trim().toLowerCase();
+  const cited = new Set((state.review?.closure?.criteria ?? []).filter((c) => c.evidence?.kind === 'screenshot').map((c) => String(c.evidence.ref ?? '').trim()).filter(Boolean));
+  const mine = new Set([state.id, state.item].map(norm).filter(Boolean));
+  const group = batch ? norm(batch.id) : null;
+  const rank = (a) => {
+    if ([a.sha256, a.source, a.path].some((x) => x && cited.has(String(x)))) return 0;
+    // Nobody tagged it: one this attempt's own gate collected is its own, one of the batch gate's is shared.
+    if (!Array.isArray(a.units) || !a.units.length) return own.has(a.sha256) ? 1 : 2;
+    const named = a.units.map(norm);
+    const forMe = named.some((u) => mine.has(u));
+    // A glob with no placeholder names every unit, the batch among them; a capture for the batch alone is the batch's, not a member's.
+    if (forMe && group && named.includes(group)) return 2;
+    return forMe ? 1 : 3;
+  };
+  return files.map((a, n) => ({ a, n, rank: rank(a) })).sort((x, y) => x.rank - y.rank || x.n - y.n).map(({ a, rank: r }) => ({ ...a, rank: r }));
+}
+export const RANK_WORDS = ['cited by a criterion of this ticket', 'this ticket\'s own (tagged for it, or collected by its own gate)', 'shared by every unit, or untagged in the batch gate', 'tagged for other tickets only'];
+
+// What this attempt delivers: its own gate's screenshots and, for a batch member, the batch gate's, ticket's own first (see
+// `verifiedCaptures`); only the captures tagged for other tickets alone are left to `wf delivery list` and the owner's choice
+// (`wf delivery narrow --keep` may name any of them). A batch delivers nothing itself: each member shows and attaches its own.
+// Each gets the attachment title (the file name; the source path when two share a name) and a proposed caption.
+export function deliveredSet(root, state) {
+  const files = verifiedCaptures(root, state).filter((a) => a.rank <= 2);
   const titles = titlesOf(files);
   return files.map((a, n) => ({ path: a.path, sha256: a.sha256, source: a.source ?? null, title: titles[n], proposed: proposeCaption(state, a) }));
+}
+
+// What `wf delivery list` shows: every verified capture the handoff can draw from, the ticket's own first, and whether the
+// recorded set holds it. An attempt delivered before the set was recorded knows only its pending attach action's files.
+export function deliveryCaptures(root, state) {
+  const set = state.delivery.screenshots?.screenshots ?? null;
+  if (!set && state.delivery.completedAt) return { files: deliveredFiles(state).map((f) => ({ ...f, rank: 2 })), inSet: () => true, legacy: true };
+  const titles = new Map((set ?? []).map((f) => [f.sha256, f.title]));
+  const inSet = set ? (f) => titles.has(f.sha256) : (f) => f.rank <= 2;
+  return { files: verifiedCaptures(root, state).map((f) => ({ ...f, title: titles.get(f.sha256) })), inSet, legacy: false };
 }
 
 // Each record's title, unique in its set: the file name; the source path when two share a name; the gate step that
@@ -2693,16 +2733,32 @@ export function narrowDelivery(root, options) {
   const given = Array.isArray(parsed) ? parsed : parsed.keep;
   const keep = [...new Set(given)];
   if (!keep.length) throw refuse('keep at least one file: a delivery with no screenshots of its own is a different statement, not a narrowing');
-  const unknown = keep.filter((k) => !source.files.some((f) => f.sha256 === k));
-  if (unknown.length) throw refuse(`${unknown.length} kept sha256 not in the delivered set (full 64-character sha256 from \`wf status --json\` → ${source.legacy ? 'tracker.pending, the delivered attach action\'s files' : 'delivery.screenshots'}):\n  - ${unknown.join('\n  - ')}`);
+  // 0.7.26 (I-182): the handoff may name any verified capture of the gates it draws from, not only the recorded set. Named
+  // failure (field): the set held 40 broad captures of other tickets' screens, narrowing could only keep some of them, and the
+  // verified captures that proved the ticket (470 more in the same gate) could not be chosen while the handoff was pending.
+  // Such a capture joins the set with its title and proposed caption, recorded in the entry so a replay needs no gate.
+  const pool = source.legacy ? [] : verifiedCaptures(root, state);
+  const unknown = keep.filter((k) => !source.files.some((f) => f.sha256 === k) && !pool.some((f) => f.sha256 === k));
+  if (unknown.length) throw refuse(`${unknown.length} kept sha256 not in the delivered set or the verified captures (full 64-character sha256 from \`wf delivery list\` or \`wf status --json\` → ${source.legacy ? 'tracker.pending, the delivered attach action\'s files' : 'delivery.screenshots'}):\n  - ${unknown.join('\n  - ')}`);
   const from = source.files.length;
   const kept = keptFiles(source.files, keep);
-  if (kept.length === from) throw refuse(`all ${from} delivered files are kept; nothing to narrow`);
-  const plan = { keep, from, to: kept.length, dropped: from - kept.length, reason, legacy: source.legacy, kept: kept.map((f) => ({ sha256: f.sha256, title: f.title ?? path.basename(f.path), path: f.path })) };
+  const outside = keep.filter((k) => !source.files.some((f) => f.sha256 === k)).map((k) => pool.find((f) => f.sha256 === k));
+  const taken = new Set(kept.map((f) => f.title ?? path.basename(f.path)));
+  const titles = titlesOf(outside).map((t) => {
+    const ext = path.extname(t);
+    let title = t;
+    for (let k = 2; taken.has(title); k++) title = `${t.slice(0, t.length - ext.length)}-${k}${ext}`;
+    taken.add(title);
+    return title;
+  });
+  const added = outside.map((a, n) => ({ path: a.path, sha256: a.sha256, source: a.source ?? null, title: titles[n], proposed: proposeCaption(state, a) }));
+  if (kept.length === from && !added.length) throw refuse(`all ${from} delivered files are kept; nothing to narrow`);
+  const to = kept.length + added.length;
+  const plan = { keep, from, to, dropped: from - kept.length, added: added.length, reason, legacy: source.legacy, kept: [...kept, ...added].map((f) => ({ sha256: f.sha256, title: f.title ?? path.basename(f.path), path: f.path })) };
   if (options['dry-run']) return { state, dryRun: plan };
   recordedTogether(root, state.id, () => {
     const raw = Array.isArray(parsed) ? null : keepRaw(root, state.id, 'delivery/narrow.raw.json', parsed.text);
-    append(root, state.id, 'delivery.narrowed', { keep, from, to: kept.length, dropped: from - kept.length, reason, legacy: source.legacy, raw: raw ? { path: raw.file, sha256: raw.sha256 } : null }, actor(options));
+    append(root, state.id, 'delivery.narrowed', { keep, from, to, dropped: from - kept.length, ...(added.length ? { added } : {}), reason, legacy: source.legacy, raw: raw ? { path: raw.file, sha256: raw.sha256 } : null }, actor(options));
   });
   const after = loadState(root, state.id);
   // A legacy attempt has no draft and owes no `wf shown`: its kept uploads are checked by title only, as before.

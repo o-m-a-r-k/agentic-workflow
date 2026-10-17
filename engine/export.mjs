@@ -55,7 +55,7 @@ export function exportData(root, s) {
     outsidePlan: outsideView(s),
     flaky: s.flaky ?? [],
     tracker: { pending: s.tracker.pending.map((a) => ({ event: a.event, op: a.op, status: a.status ?? null })), done: s.tracker.done.map((d) => ({ event: d.event, at: d.at, provenance: d.provenance ?? null, ...(d.extraLines?.length ? { extraLines: d.extraLines } : {}) })) },
-    delivery: { completedAt: s.delivery.completedAt, narrowed: s.delivery.narrowed ? { from: s.delivery.narrowed.from, to: s.delivery.narrowed.to, dropped: s.delivery.narrowed.dropped, reason: s.delivery.narrowed.reason, legacy: s.delivery.narrowed.legacy, by: s.delivery.narrowed.by, at: s.delivery.narrowed.at } : null, repos: Object.values(s.delivery.repos).map((d) => ({ repo: d.repo, commit: d.commit ?? null, skipped: d.skipped ?? null })) },
+    delivery: { completedAt: s.delivery.completedAt, narrowed: s.delivery.narrowed ? { from: s.delivery.narrowed.from, to: s.delivery.narrowed.to, dropped: s.delivery.narrowed.dropped, added: (s.delivery.narrowed.added ?? []).length, reason: s.delivery.narrowed.reason, legacy: s.delivery.narrowed.legacy, by: s.delivery.narrowed.by, at: s.delivery.narrowed.at } : null, repos: Object.values(s.delivery.repos).map((d) => ({ repo: d.repo, commit: d.commit ?? null, skipped: d.skipped ?? null })) },
     // The delivered screenshots: what the owner was shown (with the caption given) and what the ticket got.
     delivered: deliveredView(s),
     closedAt: s.closedAt,
@@ -98,7 +98,7 @@ function deliveredView(s) {
   const attached = s.tracker.done.find((d) => d.event === 'delivered')?.attachments ?? [];
   return {
     none: set.none,
-    narrowed: s.delivery.narrowed ? { from: s.delivery.narrowed.from, to: s.delivery.narrowed.to, dropped: s.delivery.narrowed.dropped, reason: s.delivery.narrowed.reason, by: s.delivery.narrowed.by, at: s.delivery.narrowed.at } : null,
+    narrowed: s.delivery.narrowed ? { from: s.delivery.narrowed.from, to: s.delivery.narrowed.to, dropped: s.delivery.narrowed.dropped, added: (s.delivery.narrowed.added ?? []).length, reason: s.delivery.narrowed.reason, by: s.delivery.narrowed.by, at: s.delivery.narrowed.at } : null,
     shownAt: shown && !shown.auto ? shown.at : null,
     // What the owner noticed while viewing them: [] is "none seen"; null before `wf shown` (or for an older record).
     anomalies: shown && !shown.auto ? shown.anomalies ?? null : null,
@@ -144,7 +144,7 @@ function deliveredSection(d, images) {
   }).join('');
   const an = v.anomalies === null ? '' : v.anomalies.length ? `<h3>Anomalies seen</h3>${table(['Screenshots', 'Observation', 'Cause or follow-up'], v.anomalies.map((a) => [esc(a.screenshots.join(', ')), esc(a.observation), a.cause ? `cause: ${esc(a.cause)}${a.evidence ? ` <small>(${esc(a.evidence)})</small>` : ''}` : `follow-up: ${esc(a.followUp)}`]))}` : '<p class="muted">Anomalies: none seen.</p>';
   const out = v.exportedTo ? `<p class="muted">Viewable copies: ${esc(v.exportedTo)}</p>` : '';
-  const narrowed = v.narrowed ? `<p class="warn">Narrowed from ${esc(v.narrowed.from)} to ${esc(v.narrowed.to)}: ${esc(v.narrowed.reason)} (${esc(v.narrowed.by)}, ${esc(v.narrowed.at)})</p>` : '';
+  const narrowed = v.narrowed ? `<p class="warn">Narrowed from ${esc(v.narrowed.from)} to ${esc(v.narrowed.to)}${v.narrowed.added ? ` (${esc(v.narrowed.added)} chosen from the verified captures)` : ''}: ${esc(v.narrowed.reason)} (${esc(v.narrowed.by)}, ${esc(v.narrowed.at)})</p>` : '';
   return `<section><h2>Delivered screenshots</h2>${narrowed}<p class="muted">${v.shownAt ? `Shown to the owner ${esc(v.shownAt)}${v.shownBy ? ` by ${esc(v.shownBy)}` : ''}.` : 'Not yet shown to the owner (`wf shown`).'} Click an image to enlarge it.</p><div class="shots">${figs}</div>${an}${out}</section>`;
 }
 
@@ -178,7 +178,7 @@ export function exportHtml(d, images = {}) {
     d.lessons && (d.lessons.injected.length || d.lessons.recorded.length || d.lessons.waived || d.lessons.recurred.length) ? sec('Lessons', `<p class="muted">Project lessons that applied to this change, the reviewer's verdicts, and what this attempt taught.</p>${table(['Lesson', 'Verdict', 'Evidence'], d.lessons.injected.map((id) => { const v = d.lessons.verdicts.find((x) => x.lesson === id); return [esc(id), v ? badge(v.verdict) : '<span class="muted">not yet judged</span>', esc(v?.evidence ?? '')]; }))}${d.lessons.recorded.length ? `<p>Recorded here: ${d.lessons.recorded.map((r) => esc(r.id)).join(', ')}</p>` : ''}${d.lessons.waived ? `<p class="muted">No lesson needed: ${esc(d.lessons.waived.reason)}</p>` : ''}${d.lessons.recurred.map((r) => `<p class="warn">Lesson ${esc(r.id)} recurred (recurrence ${esc(r.recurrence)}): its mechanism failed.</p>`).join('')}`) : '',
     deliveredSection(d, images),
     d.shipped ? sec('Closed as shipped', `<p class="warn">Closed as shipped outside the workflow, without its acceptance (${esc(d.shipped.at)}, decision ${esc(d.shipped.decision ?? 'none')}): ${esc(d.shipped.reason)}</p>${table(['Repo', 'Commit', 'Target', 'From'], Object.entries(d.shipped.repos ?? {}).map(([n, h]) => [esc(n), esc(h.unchanged ? 'unchanged' : String(h.commit).slice(0, 12)), esc(h.target ?? ''), esc(h.source ?? '')]))}${[...(d.shipped.open?.discovered ?? []), ...(d.shipped.open?.lastReview ?? [])].length ? `<p>Still open when it was closed: ${[...(d.shipped.open?.discovered ?? []), ...(d.shipped.open?.lastReview ?? [])].map((x) => esc(`${x.id} ${x.severity ?? ''} ${x.summary}`)).join('; ')}</p>` : ''}`) : '',
-    sec('Delivery', d.delivery.completedAt ? `<p>${badge('delivered')} ${esc(d.delivery.completedAt)}</p>${d.delivery.narrowed ? `<p class="warn">Delivered files narrowed from ${esc(d.delivery.narrowed.from)} to ${esc(d.delivery.narrowed.to)}: ${esc(d.delivery.narrowed.reason)}</p>` : ''}${table(['Repo', 'Commit'], d.delivery.repos.map((r) => [esc(r.repo), esc(r.commit ? r.commit.slice(0, 12) : r.skipped ?? '')]))}` : '<p class="muted">not delivered yet</p>'),
+    sec('Delivery', d.delivery.completedAt ? `<p>${badge('delivered')} ${esc(d.delivery.completedAt)}</p>${d.delivery.narrowed ? `<p class="warn">Delivered files narrowed from ${esc(d.delivery.narrowed.from)} to ${esc(d.delivery.narrowed.to)}${d.delivery.narrowed.added ? ` (${esc(d.delivery.narrowed.added)} chosen from the verified captures)` : ''}: ${esc(d.delivery.narrowed.reason)}</p>` : ''}${table(['Repo', 'Commit'], d.delivery.repos.map((r) => [esc(r.repo), esc(r.commit ? r.commit.slice(0, 12) : r.skipped ?? '')]))}` : '<p class="muted">not delivered yet</p>'),
   ].join('\n');
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${esc(d.item)} attempt</title>

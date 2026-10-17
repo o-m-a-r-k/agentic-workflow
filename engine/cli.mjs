@@ -22,7 +22,7 @@ import { reviewDivisionSummary } from './review-groups.mjs';
 import { addLesson, applySnippet, exportPluginLessons, findLesson, isProjectWide, LESSON_FILE, lessonPrompts, lessonWarnings, loadLessons, mergeLessons, mergeSuggestions, moveLesson, recur, relevantLessons, reviewLessons, setLesson, lessonKey, totalRecurrence, mergeableIn, distinctLessons } from './lessons.mjs';
 import { lessonStats } from './learning.mjs';
 import { LinkRefused, changesOf, ledgerEmpty, lostLedgers, rebaseline, releaseAttempt, seal, setVerifyLevel, unlockEvidence, verifyAttempt } from './evidence.mjs';
-import { acceptReview, amendCriteria, closeImplementer, designWarning, gateOrderCheck, batchCreate, batchEject, closeAfterHandoff, deliver, deliveredFiles, exportScreenshots, freezeCriteria, handoff, narrowDelivery, needsShown, nextAction, nextDecision, orphanNext, orphansOf, outsideWarning, recordReview, recordShown, reopen, screenshotsExportDir, shownDraftFile, uncovered, withAttempt } from './lifecycle.mjs';
+import { acceptReview, amendCriteria, closeImplementer, designWarning, gateOrderCheck, batchCreate, batchEject, closeAfterHandoff, deliver, deliveredFiles, deliveryCaptures, RANK_WORDS, verifiedCaptures, exportScreenshots, freezeCriteria, handoff, narrowDelivery, needsShown, nextAction, nextDecision, orphanNext, orphansOf, outsideWarning, recordReview, recordShown, reopen, screenshotsExportDir, shownDraftFile, uncovered, withAttempt } from './lifecycle.mjs';
 import { addDiscovered, channelOf, closeDiscovered, discoveredLine, openDiscovered, rateDiscovered } from './discovered.mjs';
 import { detect, doctor, generatedStatus, refreshGenerated, register, registry, setEnabled, sync, writeDraft } from './onboard.mjs';
 import * as secrets from './secrets.mjs';
@@ -138,8 +138,9 @@ Work
   wf deliver --repin-adapter [COMMIT] --reason "why"
                                     after a delivery adapter fault: read the delivery adapter from the base branch tip (shows, then the owner confirms with \`wf approve\`)
   wf shown --file shown.json        record that every delivered screenshot was shown in the chat, with its caption and anomalies
+  wf delivery list                  every verified capture the handoff can draw from, the ticket's own first, and whether the set holds it
   wf delivery narrow --keep SHA,... | --file keep.json --reason "why" [--dry-run]
-                                    once, before \`wf shown\`: keep only this ticket's files of a delivered set an over-broad glob filled
+                                    once, before \`wf shown\`: choose the delivered set, from the set or from any verified capture (\`wf delivery list\`)
   wf tracker record --event E --capture file.json [--comments file.json] | wf tracker sync (tracker.via: api|cli|files)
   wf tracker record --event E --from-transcript   (tracker.via: connector: the readback from the owner's host transcript)
   wf tracker record --event E --agent-reported --file reported.json [--comment-file posted.md]   (connector, no host record)
@@ -328,7 +329,7 @@ function showBlock(root, s) {
   if (!set.screenshots.length) return `\nSHOW TO OWNER: no screenshots for ${s.item}: ${set.none}\n  (recorded; tell the owner this in the delivery report)`;
   const shown = s.delivery.shown?.screenshots ?? [];
   const n = s.delivery.narrowed;
-  const narrowed = n ? `\n  narrowed from ${n.from} to ${n.to}: ${n.reason} (${n.by}, ${n.at})` : '';
+  const narrowed = n ? `\n  narrowed from ${n.from} to ${n.to}${n.added?.length ? ` (${n.added.length} chosen from the verified captures)` : ''}: ${n.reason} (${n.by}, ${n.at})` : '';
   const rows = set.screenshots.map((f, i) => {
     const cap = shown.find((x) => x.sha256 === f.sha256)?.caption;
     const copy = s.delivery.exported?.files?.find((x) => x.sha256 === f.sha256)?.file;
@@ -340,7 +341,15 @@ function showBlock(root, s) {
   const an = s.delivery.shown && !s.delivery.shown.auto ? s.delivery.shown.anomalies : null;
   const anomalies = an ? `\n  anomalies: ${an.length ? an.map((a) => `${a.observation} [${a.screenshots.join(', ')}] → ${a.cause ? `cause: ${a.cause}` : `follow-up: ${a.followUp}`}`).join('; ') : 'none seen'}` : '';
   const view = `\n  to view them again (also after close): ${exportCommand(root, s)}`;
-  return `\n${head}${narrowed}\n${rows.join('\n')}${anomalies}${view}`;
+  // 0.7.26 (I-182): verified captures of the gates this handoff draws from that are not in its set, said while the set can still change.
+  let others = '';
+  if (needsShown(s) && !n) {
+    try {
+      const out = verifiedCaptures(root, s).filter((f) => f.rank > 2);
+      if (out.length) others = `\n  ${out.length} more verified capture(s) are tagged for other tickets only and are not in this set; \`wf delivery list\` shows them, and \`wf delivery narrow --keep <sha256,...> --reason "why"\` may name any of them`;
+    } catch {}
+  }
+  return `\n${head}${narrowed}\n${rows.join('\n')}${others}${anomalies}${view}`;
 }
 
 function gateText(result) {
@@ -1115,14 +1124,22 @@ async function dispatch(cmd, sub, positional, options) {
       return 0;
     }
     case 'delivery': {
-      if (sub !== 'narrow') throw new WfError('usage: wf delivery narrow --keep <sha256,...> | --file keep.json --reason "why" [--attempt ID]');
+      // 0.7.26 (I-182): every verified capture the handoff can draw from, the ticket's own first, with where each stands.
+      if (sub === 'list') {
+        const s = openState(root, options);
+        const { files, inSet, legacy } = deliveryCaptures(root, s);
+        const rows = files.map((f, i) => `  ${i + 1}. ${inSet(f) ? 'in the set' : 'not in the set'}  ${RANK_WORDS[f.rank]}\n     ${f.title ?? path.basename(f.path)}   sha256 ${f.sha256}\n     step ${f.step ?? 'none'}  source ${f.source ?? f.path}${Array.isArray(f.units) && f.units.length ? `  tagged ${f.units.join(', ')}` : ''}`);
+        print(options, files.length ? `${s.id}: ${files.length} verified capture(s) the handoff can draw from${legacy ? ' (delivered before 0.1.11: only the pending attach action is known)' : ''}, the ticket's own first; \`wf delivery narrow --keep <sha256,...> --reason "why"\` chooses the set from any of them, while the handoff is pending\n${rows.join('\n')}` : `${s.id}: no verified captures`, files);
+        return 0;
+      }
+      if (sub !== 'narrow') throw new WfError('usage: wf delivery list [--attempt ID] | wf delivery narrow --keep <sha256,...> | --file keep.json --reason "why" [--attempt ID]');
       const { state: s, dryRun } = narrowDelivery(root, options);
       if (dryRun) {
-        print(options, `dry run, nothing recorded: ${s.id} would be narrowed from ${dryRun.from} to ${dryRun.to} (${dryRun.dropped} dropped${dryRun.legacy ? '; delivered before 0.1.11: the pending attach action is narrowed, uploads checked by title' : ''}): ${dryRun.reason}\n${dryRun.kept.map((f, i) => `  ${i + 1}. ${f.title}  sha256 ${f.sha256.slice(0, 12)}  ${f.path}`).join('\n')}`, dryRun);
+        print(options, `dry run, nothing recorded: ${s.id} would be narrowed from ${dryRun.from} to ${dryRun.to} (${dryRun.dropped} dropped${dryRun.added ? `, ${dryRun.added} chosen from the verified captures` : ''}${dryRun.legacy ? '; delivered before 0.1.11: the pending attach action is narrowed, uploads checked by title' : ''}): ${dryRun.reason}\n${dryRun.kept.map((f, i) => `  ${i + 1}. ${f.title}  sha256 ${f.sha256.slice(0, 12)}  ${f.path}`).join('\n')}`, dryRun);
         return 0;
       }
       const n = s.delivery.narrowed;
-      print(options, `delivered set of ${s.id} narrowed from ${n.from} to ${n.to}: ${n.reason}${showBlock(root, s)}${n.legacy ? `\n  delivered before 0.1.11: the pending attach action now lists ${n.to} file(s); uploads are checked by title` : ''}\nnext: ${nextAction(root, s)}`, s);
+      print(options, `delivered set of ${s.id} narrowed from ${n.from} to ${n.to}${n.added?.length ? ` (${n.added.length} chosen from the verified captures)` : ''}: ${n.reason}${showBlock(root, s)}${n.legacy ? `\n  delivered before 0.1.11: the pending attach action now lists ${n.to} file(s); uploads are checked by title` : ''}\nnext: ${nextAction(root, s)}`, s);
       return 0;
     }
     case 'shown': {
