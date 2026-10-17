@@ -25,8 +25,22 @@ export async function loadTrackerAdapter(root, cfg, state) {
   if (kind === 'none') return null;
   const file = kind.startsWith('.') ? (state ? adapterFileAtCommit(root, state, state.adapterBase, kind) : path.resolve(root, '.workflow', kind)) : path.join(BUILTIN, `${kind}.mjs`);
   if (!fs.existsSync(file)) throw new WfError(`tracker adapter \`${kind}\` not found at ${file}`);
-  return (await import(pathToFileURL(file).href)).default;
+  const adapter = (await import(pathToFileURL(file).href)).default;
+  if (adapter?.screenshots !== undefined && !SCREENSHOT_MODES.includes(adapter.screenshots)) throw new WfError(`tracker adapter \`${kind}\`: screenshots: ${JSON.stringify(adapter.screenshots)} is not one of ${SCREENSHOT_MODES.join(', ')}`);
+  return adapter;
 }
+
+// How an adapter's tracker shows the delivered screenshots (0.7.27, I-189), declared in its default export as `screenshots`:
+// `embedded` (the default) puts each one in the delivered comment as an image of its upload; `attachments` attaches them as
+// files and the comment lists each with its caption in plain words; `attachments-only` attaches them and the comment lists
+// nothing. Named failure (field): a tracker with no inline images, whose screenshots are attachments on comments of their
+// own, could not be delivered to: the comment was rendered with an image and a placeholder per screenshot and the readback
+// refused any comment without them.
+export const SCREENSHOT_MODES = ['embedded', 'attachments', 'attachments-only'];
+export const screenshotMode = (adapter) => (SCREENSHOT_MODES.includes(adapter?.screenshots) ? adapter.screenshots : 'embedded');
+// The mode the delivered comment is written for: the one the pending comment action was queued with.
+const commentMode = (state) => state?.tracker?.pending?.find((a) => a.event === 'delivered' && a.op === 'comment' && a.rendered === 'delivered')?.screenshots ?? 'embedded';
+const attached = (mode) => mode !== 'embedded';
 
 // Named failure: a chat page id (a 32-character UUID) was admitted as the ticket item, worktrees were provisioned and a
 // planner ran, and only the admission readback then refused it because the tracker named the ticket by its own
@@ -195,14 +209,14 @@ export const limitItemsText = (state, { cfg = null, ...options } = {}) => {
 // substitutes it itself. Linear signs the url when the comment is read.
 export const assetPlaceholder = (title) => `{assetUrl:${title}}`;
 
-function screenshotSection(state, assets = {}) {
+function screenshotSection(state, assets = {}, mode = 'embedded') {
   const set = state.delivery?.screenshots?.screenshots ?? [];
-  if (!set.length) return '';
+  if (!set.length || mode === 'attachments-only') return '';
   const shown = state.delivery.shown?.screenshots ?? [];
-  const rows = set.map((f, i) => {
-    const caption = shown.find((x) => x.sha256 === f.sha256)?.caption ?? f.proposed;
-    return `**${i + 1}. ${caption}**\n![${f.title}](${assets[f.title] ?? assetPlaceholder(f.title)})`;
-  });
+  const caption = (f) => shown.find((x) => x.sha256 === f.sha256)?.caption ?? f.proposed;
+  // Attached as files, not embedded: each file with its caption, in the order of the set (the tracker shows the files themselves).
+  if (mode === 'attachments') return `Screenshots (attached to the ticket):\n\n${set.map((f, i) => `${i + 1}. File: ${f.title}\n   Caption: ${caption(f)}`).join('\n')}`;
+  const rows = set.map((f, i) => `**${i + 1}. ${caption(f)}**\n![${f.title}](${assets[f.title] ?? assetPlaceholder(f.title)})`);
   return `Screenshots:\n\n${rows.join('\n\n')}`;
 }
 
@@ -241,7 +255,7 @@ export function deliveredComment(root, cfg, state, assets = {}) {
   if (!key || !templateRef(cfg, key, state)) return null;
   const summary = state.delivery?.summary?.text ?? null;
   const limitsText = knownLimits(state, { load: (id) => loadState(root, id) });
-  const vars = { id: state.item, url: '', uatScope: uatScope(state) || '- No user-visible change to check in the product.', summary: summary ?? '', screenshots: screenshotSection(state, assets), limits: limitsText ? `Known limits and follow-ups:\n${limitsText}` : '' };
+  const vars = { id: state.item, url: '', uatScope: uatScope(state) || '- No user-visible change to check in the product.', summary: summary ?? '', screenshots: screenshotSection(state, assets, commentMode(state)), limits: limitsText ? `Known limits and follow-ups:\n${limitsText}` : '' };
   const rendered = renderTemplate(root, cfg, key, vars, state);
   const tpl = rendered.template;
   let body = rendered.body.replace(/\s+$/, '');
@@ -368,7 +382,7 @@ export function trackerActions(root, cfg, state, event, extra = {}) {
     } else if (step.comment) {
       // The delivered comment is rendered from the ledger when it is shown or posted (summary, captions, asset urls).
       if (event === 'delivered' && templateRef(cfg, step.comment, state)) {
-        actions.push({ op: 'comment', templateKey: step.comment, rendered: 'delivered', body: null, reuseExisting: true });
+        actions.push({ op: 'comment', templateKey: step.comment, rendered: 'delivered', body: null, reuseExisting: true, ...(attached(extra.screenshotsMode) ? { screenshots: extra.screenshotsMode } : {}) });
         continue;
       }
       const rendered = renderTemplate(root, cfg, step.comment, vars);
@@ -528,6 +542,8 @@ async function recordAgentReported(root, cfg, state, options, event, pending) {
   }
   let comment = null;
   const extra = [];
+  // 0.7.27 (I-189): how this adapter shows screenshots; attached, they are not embedded in the comment.
+  const shotMode = pending.find((x) => x.op === 'comment' && x.rendered === 'delivered')?.screenshots ?? 'embedded';
   for (const a of pending) {
     if (a.op === 'setStatus' && ![a.status, ...(a.unless ?? [])].includes(r.status)) problems.push(`status is \`${r.status ?? '(none)'}\`, expected \`${a.status}\``);
     if (a.op === 'comment') {
@@ -563,7 +579,7 @@ async function recordAgentReported(root, cfg, state, options, event, pending) {
         const refs = imageRefs(body);
         const listed = Array.isArray(r.attachments) ? r.attachments : [];
         const noImage = [];
-        for (const f of state.delivery.screenshots?.screenshots ?? []) {
+        for (const f of attached(shotMode) ? [] : state.delivery.screenshots?.screenshots ?? []) {
           const asset = listed.filter((x) => x.title === f.title || x.filename === f.title).map((x) => String(x.assetUrl ?? x.url ?? '').split('?')[0]).find((u) => /^https:\/\/\S+$/.test(u));
           if (!asset) noImage.push(`${f.title}: the report gives no \`assetUrl\` (https) for its upload`);
           else if (!refs.some((x) => x.path === asset)) noImage.push(`${f.title}: no \`![${f.title}](${asset})\` in the comment`);
@@ -585,7 +601,7 @@ async function recordAgentReported(root, cfg, state, options, event, pending) {
         const caption = shown?.screenshots?.find((x) => x.sha256 === f.sha256)?.caption ?? null;
         const named = listed.filter((x) => x.title === title || x.filename === title);
         if (!named.length) problems.push(`${title}: not among the reported attachments`);
-        else if (caption && !named.some((x) => String(x.subtitle ?? '').trim() === caption)) problems.push(`${title}: reported without the subtitle "${caption}"`);
+        else if (caption && !named.some((x) => String(x.subtitle ?? '').trim() === caption || (shotMode === 'attachments' && !String(x.subtitle ?? '').trim()))) problems.push(`${title}: reported without the subtitle "${caption}"`);
       }
     }
   }
@@ -680,6 +696,9 @@ export async function recordTracker(root, cfg, state, options) {
     }
   }
   const verifiedAttachments = new Map();
+  // 0.7.27 (I-189): how this adapter shows screenshots; attached, they are not embedded in the comment, and with `attachments`
+  // the comment lists each caption, so an attachment that carries none of its own is not refused for it.
+  const shotMode = pending.find((x) => x.op === 'comment' && x.rendered === 'delivered')?.screenshots ?? 'embedded';
   // Attachments are checked first: the comment must embed each verified upload by its asset.
   const ordered = [...pending].sort((x, y) => (x.op === 'attach' ? -1 : 0) - (y.op === 'attach' ? -1 : 0));
   for (const a of ordered) {
@@ -717,7 +736,7 @@ export async function recordTracker(root, cfg, state, options) {
           problems.push(`the posted comment is not the one \`wf\` rendered (summary sha256 ${expected.summary ? sha256(expected.summary).slice(0, 12) : 'none'}); first difference at line ${at + 1}: expected ${JSON.stringify(want[at] ?? '(end)')}, posted ${JSON.stringify(got[at] ?? '(end)')}. Post ${commentFile(root, state.id)} unchanged, with each {assetUrl:<title>} replaced by that upload's assetUrl; when a comment is already posted, edit that comment to it in place (an edited comment counts), so the ticket keeps one`);
         }
         // Screenshots must be visible on the ticket: an attachment alone shows only as "added N links".
-        if (a.rendered === 'delivered') {
+        if (a.rendered === 'delivered' && !attached(shotMode)) {
           const refs = imageRefs(match.body);
           const notEmbedded = [];
           for (const f of state.delivery.screenshots?.screenshots ?? []) {
@@ -746,7 +765,7 @@ export async function recordTracker(root, cfg, state, options) {
           const caption = shown?.screenshots?.find((x) => x.sha256 === f.sha256)?.caption ?? null;
           const named = issue.attachments.filter((x) => x.title === title || x.filename === title);
           const uploads = named.filter((x) => adapter.isUpload(x));
-          const exact = caption ? uploads.filter((x) => String(x.subtitle ?? '').trim() === caption) : uploads;
+          const exact = caption ? uploads.filter((x) => String(x.subtitle ?? '').trim() === caption || (shotMode === 'attachments' && !String(x.subtitle ?? '').trim())) : uploads;
           if (!named.length) missing.push(`${title} (${f.path}): no attachment with this title`);
           else if (!uploads.length) missing.push(`${title} (${f.path}): attached as a link, not an uploaded file (${named[0].url ?? 'no url in the capture'})`);
           else if (!exact.length) missing.push(`${title} (${f.path}): uploaded, but no attachment of it has the subtitle "${caption}" (an earlier attempt's file with the same name does not count)`);
@@ -835,9 +854,12 @@ export async function trackerModeChecks(root, cfg, { loadCatalog: catalog, readS
   let adapter = null;
   try {
     adapter = await loadTrackerAdapter(root, cfg, null);
-  } catch {}
+  } catch (error) {
+    if (/ screenshots: /.test(String(error?.message))) out.push({ fail: true, key: 'tracker screenshots', problem: error.message, fix: 'declare `screenshots` as embedded, attachments or attachments-only in the tracker adapter\'s default export, or leave it out' });
+  }
   const combo = `${cfg.tracker.kind}/${cfg.tracker.via}`;
   if (VERIFIABLE[combo]) out.push({ info: true, check: `tracker ${combo}`, problem: VERIFIABLE[combo] });
+  if (attached(screenshotMode(adapter))) out.push({ info: true, plain: true, check: 'tracker screenshots', problem: `the adapter shows screenshots as attachments (\`screenshots: ${adapter.screenshots}\`): ${adapter.screenshots === 'attachments' ? 'the delivered comment lists each file and its caption' : 'the delivered comment lists none'}, and no image is embedded` });
   for (const line of routeLines(cfg.tracker)) out.push({ info: true, plain: true, check: 'tracker status routing', problem: line });
   if (cfg.tracker.via === 'connector') {
     const s = detectOwner();

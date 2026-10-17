@@ -27,7 +27,7 @@ import { canonical as canonicalPath, isInside, touchesEvidence } from './paths.m
 import { changedForStep, deliveryOrder, impact, inside, packageOf } from './topology.mjs';
 import { findSkill } from './skills.mjs';
 import { outsidePlan, outsideVerdicts, scopeFiles } from './scope.mjs';
-import { commentFile, emitTrackerEvent, hasTicket, needsSummary, ownItem, recordSummary, writeDeliveredComment } from './tracker.mjs';
+import { commentFile, emitTrackerEvent, hasTicket, loadTrackerAdapter, needsSummary, ownItem, recordSummary, screenshotMode, writeDeliveredComment } from './tracker.mjs';
 import { designChecks, designVerdicts, requiredSkills, reviewDocumentProblems, reviewRules, ruleVerdicts, skillFiles, writeRuleDocuments } from './rules.mjs';
 import { expectOf, expectProblems, PLAN_EXPECT, ROLE_EXPECT } from './expectations.mjs';
 import { obligationSince } from './versions.mjs';
@@ -2237,11 +2237,14 @@ export async function deliver(root, options) {
   }
   append(root, state.id, 'delivered', { order }, actor(options));
   state = loadState(root, state.id);
-  finishDelivered(root, cfg, state);
+  // 0.7.27 (I-189): how the tracker adapter shows screenshots (embedded in the comment, or attached to the ticket) is queued with the comment.
+  const shotsOf = async (s) => (cfg.tracker.kind === 'none' ? 'embedded' : screenshotMode(await loadTrackerAdapter(root, cfg, s).catch(() => null)));
+  finishDelivered(root, cfg, state, await shotsOf(state));
   if (state.batch) {
     for (const member of state.batch.members) {
       append(root, member, 'batch.member.delivered', { batch: state.id }, actor(options));
-      finishDelivered(root, cfg, loadState(root, member));
+      const m = loadState(root, member);
+      finishDelivered(root, cfg, m, await shotsOf(m));
     }
   }
   return { state: loadState(root, state.id) };
@@ -2436,7 +2439,7 @@ export function safeWrite(root, file, content) {
 }
 export const safeWriteJson = (root, file, value) => safeWrite(root, file, `${JSON.stringify(value, null, 2)}\n`);
 
-function finishDelivered(root, cfg, state) {
+function finishDelivered(root, cfg, state, screenshotsMode = 'embedded') {
   noteCourse(root, cfg, state);
   if (state.lane !== 'batch') {
     const set = deliveredSet(root, state);
@@ -2448,7 +2451,7 @@ function finishDelivered(root, cfg, state) {
     state = loadState(root, state.id);
   }
   const set = state.delivery.screenshots?.screenshots ?? [];
-  const actions = !hasTicket(state) ? [] : emitTrackerEvent(root, cfg, state.id, 'delivered', { screenshots: set });
+  const actions = !hasTicket(state) ? [] : emitTrackerEvent(root, cfg, state.id, 'delivered', { screenshots: set, screenshotsMode });
   if (actions.some((a) => a.rendered === 'delivered')) writeDeliveredComment(root, cfg, loadState(root, state.id));
   if (!actions.length && !needsShown(state) && !owesLesson(loadState(root, state.id))) {
     append(root, state.id, 'closed', { reason: cfg.tracker.kind === 'none' ? 'no tracker' : !hasTicket(state) ? 'no ticket: no tracker handoff' : 'no tracker actions configured' }, null);
@@ -3160,7 +3163,7 @@ function nextStep(root, state) {
   }
   if (state.tracker.pending.length) {
     const ev = state.tracker.pending[0].event;
-    const comment = (a) => (a.rendered !== 'delivered' ? 'post the comment (body in `wf status --json`)' : state.delivery.summary ? `post the comment in ${commentFile(root, state.id)} unchanged, each {assetUrl:<title>} replaced by that upload's assetUrl, so every screenshot shows as an image on the ticket (an attachment alone is only a link row)` : 'record the owner\'s summary (`wf summary --file <summary.md>`), then post the comment it renders');
+    const comment = (a) => (a.rendered !== 'delivered' ? 'post the comment (body in `wf status --json`)' : state.delivery.summary ? (a.screenshots ? `post the comment in ${commentFile(root, state.id)} unchanged${a.screenshots === 'attachments' ? ' (it lists each screenshot with its caption)' : ''}: this tracker's adapter shows the screenshots as attachments, so they are attached to the ticket as files, not embedded in the comment` : `post the comment in ${commentFile(root, state.id)} unchanged, each {assetUrl:<title>} replaced by that upload's assetUrl, so every screenshot shows as an image on the ticket (an attachment alone is only a link row)`) : 'record the owner\'s summary (`wf summary --file <summary.md>`), then post the comment it renders');
     const ops = state.tracker.pending.filter((a) => a.event === ev).map((a) => (a.op === 'setStatus' ? `set status to "${a.status}"${a.route ? ` (the ticket's label "${a.route.label}" routes it there instead of "${a.route.default}"; the project chose that in its adapter)` : ''}` : a.op === 'comment' ? comment(a) : a.op === 'attach' ? `upload and attach ${a.files.length} screenshot(s) as files (title = the name, subtitle = its caption; listed under "delivered screenshots"), keeping each assetUrl` : a.op)).join(', ');
     const raw = ev === 'delivered' ? 'save the RAW get_issue and list_comments results unchanged (never rebuilt or abridged)' : 'save the readback';
     if (cfg?.tracker?.via === 'connector') return `${state.phase === 'handoff-pending' ? '' : `${phaseAction(root, cfg, state)}${holdNote}. Pending `}tracker (${ev}): through the connector: ${ops}; then read the issue${state.tracker.pending.some((a) => a.event === ev && a.op === 'comment') ? ' and its comments' : ''} back with the connector and run \`wf tracker record --event ${ev} --from-transcript\` (the readback as the host recorded it). Without a host transcript: \`--capture <saved tool result>\`, or \`--agent-reported --file reported.json${state.tracker.pending.some((a) => a.event === ev && a.op === 'comment') ? ' --comment-file <posted text>' : ''}\``;
