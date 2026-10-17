@@ -37,7 +37,9 @@ Release notes, newest first, then every fix that came from a failure in the work
     checked by the review that follows the test run anyway, with no extra review round; that review is told the pass was
     built, which items it fixed and where, since it is the only review the pass gets;
   - when you say "fix all", the agent records it once (`wf scope fix-all`), and only with your own words: the workflow
-    checks they are in one of your messages in that session (or you run it in your own terminal and type yes). You are not
+    checks they are in one of your messages in that session, also the one that started the ticket ("implement ENG-1 and
+    fix all findings") or one that names it, but not words about another ticket (or you run it in your own terminal and
+    type yes). You are not
     asked about each item again, also for items your project lets the agent decide, and if you later want one left out,
     you say so and only that one is asked.
 - **A fix stays as small as the problem; a redesign goes back to planning (I-208, D46).** Named failure: a reviewer
@@ -62,7 +64,8 @@ Release notes, newest first, then every fix that came from a failure in the work
   name its test files, and a member runs the ones its change adds or edits. When a suite fails whose test file the delivery does
   not edit, `wf resume` names it with the way to ask you, and you get one question: set it aside for this delivery, or fix
   it here. The question says only what the workflow checked (the test file is not edited) and lists the files the change
-  edits that the tests read, since a change to the code a test exercises can be what fails it; the agent's reason is shown
+  edits that the tests read (in every repository they read, leaving out documentation and files the step ignores), and
+  any other repository the change edits, since a change to the code a test exercises can be what fails it; the agent's reason is shown
   as the agent's. Set aside, the test run passes on it and the delivered comment says it was set aside and what was not
   checked.
 - **An amendment file that is not there, or a survey put in the wrong place, gets a plain answer (I-213, D48).** Named
@@ -1764,11 +1767,21 @@ A second adversarial pass over the integrated 0.5.0 branch, with scenarios in `s
 
 | Item | Failure fixed | Fixed in | Scenario test |
 | --- | --- | --- | --- |
+| [I-213](improvements/I-213.md) | wf criteria amend crashed on a survey placed outside impact | 0.7.28 | `scenarios/fix-0728b.test.mjs` |
+| [I-212](improvements/I-212.md) | Deferred heavy steps hide a ticket's own e2e specs until the batch gate | 0.7.28 | `scenarios/fix-0728b.test.mjs` |
+| [I-211](improvements/I-211.md) | A divided review can be started as a plain reviewer and is never recorded | 0.7.28 | `scenarios/fix-0728b.test.mjs` |
+| [I-210](improvements/I-210.md) | The round boundary never changes course: no strategist in 47 rounds | 0.7.28 | `scenarios/course-signals.test.mjs` |
+| [I-209](improvements/I-209.md) | Finding history (cause, not place) never reaches attempts admitted before 0.7.27 | 0.7.28 | `scenarios/fix-0728b.test.mjs` |
+| [I-208](improvements/I-208.md) | Implementers 'fix the class' with redesigns that introduce new defects | 0.7.28 | `scenarios/course-signals.test.mjs` |
+| [I-207](improvements/I-207.md) | A low finding or a not-caused left item opens its own fix round | 0.7.28 | `scenarios/planned-pass.test.mjs` |
+| [I-203](improvements/I-203.md) | A '?' the agent appends to a legacy question, or a panel offering a legacy decision's frame labels, costs an extra agent command | 0.7.28 | `scenarios/approve-question.test.mjs` |
+| [I-202](improvements/I-202.md) | Explain mismatched question-panel option labels instead of reporting no answer | 0.7.28 | `scenarios/approve-question.test.mjs` |
 | [I-196](improvements/I-196.md) | Delivery has no deployment step: a label route can only set the final status at merge, before the deployment is confirmed and the fix tested | 0.7.27 | `scenarios/deployment-confirmation.test.mjs` |
 | [I-193](improvements/I-193.md) | Improvement list says 'fixed in X' before X is published or installed | 0.7.27 | `scenarios/improve.test.mjs` |
 | [I-192](improvements/I-192.md) | Shipped task closure cannot recognize explicit owner chat authorization | 0.7.27 | `scenarios/approve-question.test.mjs` |
 | [I-191](improvements/I-191.md) | Fix and review rounds work one finding at a time, so a cause that spans places recurs round after round | 0.7.27 | `scenarios/recurring-cause.test.mjs` |
 | [I-190](improvements/I-190.md) | TS ticket completion conflicts with never-Done delivery instruction | 0.7.27 | `scenarios/tracker-status-routing.test.mjs` |
+| [I-189](improvements/I-189.md) | Notion adapter writes delivery comments into the ticket description | 0.7.27 | `scenarios/tracker-attachments.test.mjs` |
 | [I-188](improvements/I-188.md) | Support retracting a discovered defect invalidated by product clarification | 0.7.27 | `scenarios/discovered.test.mjs` |
 | [I-187](improvements/I-187.md) | Reuse unused approved validation correction across an identical base merge | 0.7.27 | `scenarios/validation-correction.test.mjs` |
 | [I-186](improvements/I-186.md) | Withdrawn escalation still blocks corrected strategy recording | 0.7.27 | `scenarios/strategist.test.mjs` |
@@ -1781,6 +1794,7 @@ A second adversarial pass over the integrated 0.5.0 branch, with scenarios in `s
 | [I-179](improvements/I-179.md) | Evidence-only gate repair trapped between clean-review and execution proof requirements | 0.7.23 | `scenarios/supplemental-validation.test.mjs` |
 | [I-178](improvements/I-178.md) | Synthetic delivery batch incorrectly requests tracker implementing lifecycle | 0.7.23 | `scenarios/fix-0721.test.mjs` |
 | [I-177](improvements/I-177.md) | Assembled batch cannot own or settle member observation selected for fix | 0.7.23 | `scenarios/deferral-rule.test.mjs` |
+| [I-174](improvements/I-174.md) | Chat approval reader selects clarification instead of latest explicit yes | 0.7.28 | `scenarios/approve-question.test.mjs` |
 | [I-152](improvements/I-152.md) | A long reviewer's findings are lost when it is stopped | 0.7.12 | `scenarios/fix-074-lifecycle.test.mjs` |
 | [I-150](improvements/I-150.md) | Step passes from another attempt with the same key are not reused | 0.7.12 | `scenarios/gate.test.mjs` |
 | [I-149](improvements/I-149.md) | A gate starts while an implementer is still committing | 0.7.11 | `scenarios/gate.test.mjs` |

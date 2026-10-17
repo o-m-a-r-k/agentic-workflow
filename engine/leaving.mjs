@@ -19,16 +19,17 @@ export { FIX, LEAVE };
 const LEVELS = ['high', 'medium', 'low'];
 
 // `wf scope fix-all` (0.7.28, I-207; proven in the review of 0.7.28, L2): the person's "fix all", recorded once. From an agent's
-// session the words are proven theirs (`personSaid`: verbatim in one of their own messages in this session, written after the
-// attempt was admitted); in the person's own terminal they confirm it by typing yes.
+// session the words are proven theirs (`personSaid`: verbatim in one of their own messages in this session, written since the
+// attempt was admitted, or in the message that started it, or one that names its item); in the person's own terminal they
+// confirm it by typing yes.
 export async function recordFixAll(root, options, { env = process.env, input = process.stdin, output = process.stdout } = {}) {
   const state = openState(root, options);
   if (state.fixAll) return { state, already: true };
   const words = typeof options['person-said'] === 'string' ? options['person-said'].trim() : '';
   if (underAgent(env)) {
     if (!words) throw new WfError('usage: wf scope fix-all --person-said "<the person\'s words, exactly as they wrote them>"');
-    const said = await personSaid(words, { sinceAt: state.admittedAt, env });
-    if (said.problem) throw refuse(`not recorded: ${said.problem}`, `quote the words of theirs that say to fix every item, exactly as they typed them; when they have not said it, ask them; or they run \`wf scope fix-all --attempt ${state.id}\` in their own terminal`, { id: 'scope:fix-all-quote' });
+    const said = await personSaid(words, { sinceAt: state.admittedAt, item: state.item ?? null, env });
+    if (said.problem) throw refuse(`not recorded: ${said.problem}`, `quote the words of theirs that say to fix every item for this ticket, exactly as they typed them; when they have not said it for this ticket, ask them; or they run \`wf scope fix-all --attempt ${state.id}\` in their own terminal`, { id: 'scope:fix-all-quote' });
     append(root, state.id, 'scope.fixAll', { words: said.quote, message: said.message, said: said.at, via: said.via }, actor(options));
     return { state: loadState(root, state.id), words: said.quote };
   }

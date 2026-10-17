@@ -157,6 +157,39 @@ test("the person's \"fix all\" is recorded once, from their own words: no item i
   assert.doesNotMatch(directed.err, /fix every item/);
 });
 
+// Second review of 0.7.28. Named failure (a review's case): the person's kickoff, "implement PP-1 and fix all findings, do not ask me
+// about leaving any", written a minute before `wf entry`, was refused as words about another ticket, so the agent would have had to
+// ask them again. Their instruction counts when it is the message that started the attempt or names its item; words about another
+// ticket still do not, and the refusal says what the message names.
+test('"fix all" given in the message that started the attempt, or in one naming its item, counts; a message about another ticket does not', () => {
+  const p = singleRepoProject('pp-kickoff', { gate: { steps } }, { 'src/a.txt': LINES, 'src/b.txt': LINES });
+  const file = path.join(p.base, '.home', '.claude', 'projects', 'proj', `${CLAUDE}.jsonl`);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const ago = (s) => new Date(Date.now() - s * 1000).toISOString();
+  const said = (text, secondsAgo) => fs.appendFileSync(file, `${JSON.stringify({ type: 'user', timestamp: ago(secondsAgo), message: { role: 'user', content: text } })}\n`);
+  said('for ENG-9 just fix all of them too', 300);
+  said('fix every finding without asking me, every one', 200);
+  said('and for PP-4 fix all the lows as well', 120);
+  said('implement the ticket and fix all findings, do not ask me about leaving any', 60);
+  const e = ok(wf(p.root, ['entry', '--item', 'PP-3', '--owner', 'o', '--json'])).json();
+  // About another ticket: refused, saying what the message names.
+  const other = wf(p.root, ['scope', 'fix-all', '--person-said', 'just fix all of them', '--attempt', e.id], session);
+  assert.equal(other.code, 75);
+  assert.match(other.err, /before this attempt was admitted .*, in a message that names ENG-9, not PP-3: words about something else/);
+  // Neither the message that started it nor one naming PP-3: refused, saying so.
+  const older = wf(p.root, ['scope', 'fix-all', '--person-said', 'fix every finding without asking me', '--attempt', e.id], session);
+  assert.equal(older.code, 75);
+  assert.match(older.err, /in a message that does not name PP-3 and is not the one that started it \(their last before the admission, at [^)]+\): words about something else/);
+  // The kickoff counts, and the record says why.
+  const kicked = ok(wf(p.root, ['scope', 'fix-all', '--person-said', 'fix all findings, do not ask me about leaving any', '--attempt', e.id], session));
+  assert.match(kicked.out, /the person said to fix every item \("fix all findings, do not ask me about leaving any"\)/);
+  assert.match(JSON.parse(ok(wf(p.root, ['resume', '--attempt', e.id, '--json'])).out).fixAll.via, /the message that started this attempt \(the last before its admission\)/);
+  // A message before the admission that names the attempt's item counts too.
+  const e4 = ok(wf(p.root, ['entry', '--item', 'PP-4', '--owner', 'o', '--json'])).json();
+  ok(wf(p.root, ['scope', 'fix-all', '--person-said', 'for PP-4 fix all the lows as well', '--attempt', e4.id], session));
+  assert.match(JSON.parse(ok(wf(p.root, ['resume', '--attempt', e4.id, '--json'])).out).fixAll.via, /written before the admission, naming PP-4/);
+});
+
 // Review of 0.7.28 (L3): "fix all" covers a level the project lets the owner decide too, and the person has a terminal route.
 test('"fix all" also stops the owner deferring an item its policy delegates; the person records it in their own terminal by typing yes', async () => {
   const p = singleRepoProject('pp-fixall-owner', { gate: { steps }, leaving: { low: 'owner' } }, { 'src/a.txt': LINES, 'src/b.txt': LINES });

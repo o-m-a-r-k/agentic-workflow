@@ -471,10 +471,17 @@ function recordReading(root, state, d, options, { reading, theirs, after, last, 
 const holdsAny = (theirs, quote) => theirs.some((a) => holds(a.answer, quote));
 
 // Words an agent records as the person's standing answer outside a decision (`wf scope fix-all`, review of 0.7.28, L2), proven as a
-// reading is (D41): verbatim in one of the person's own messages in the calling session, written at or after `sinceAt`. Returns
-// { quote, message, at, via } or { problem }. Named failure (a review's case): "fix all" was recorded on the agent's word alone,
-// while its effect (no item is asked about again) stands for the rest of the attempt.
-export async function personSaid(quote, { sinceAt = null, env = process.env } = {}) {
+// reading is (D41): verbatim in one of the person's own messages in the calling session. Returns { quote, message, at, via } or
+// { problem }. Named failure (a review's case): "fix all" was recorded on the agent's word alone, while its effect (no item is asked
+// about again) stands for the rest of the attempt.
+// Which message counts (second review of 0.7.28): one written since the attempt was admitted (`sinceAt`); before it, the person's
+// last message before the admission (the one that started this attempt: "implement ENG-1 and fix all findings"), or one that names
+// the attempt's item. Named failure: the person's kickoff instruction, written a minute before `wf entry`, was refused as "words
+// about another ticket", which would have made the agent ask them again. A message before the admission that is neither is about
+// something else, and the refusal says which.
+const ITEM_LIKE = /(?<![\p{L}\p{N}_-])[A-Z][A-Z0-9]*-\d+(?![\p{N}])/gu;
+const namesItem = (text, item) => Boolean(item) && new RegExp(`(?<![\\p{L}\\p{N}_-])${String(item).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{N}])`, 'iu').test(String(text ?? ''));
+export async function personSaid(quote, { sinceAt = null, item = null, env = process.env } = {}) {
   const caller = detectOwner(env);
   const host = caller ? findHost(caller.runtime) : null;
   const read = optional(host, 'questionAnswers');
@@ -485,13 +492,21 @@ export async function personSaid(quote, { sinceAt = null, env = process.env } = 
   const theirs = [...(await read(t.file)), ...(chat ? await chat(t.file) : [])].filter((a) => typeof a.answer === 'string' && a.answer.trim());
   const q = holdsAny(theirs, quote) ? quote : unwrap(quote) ?? quote;
   const clip = (x) => String(x).trim().replace(/\s+/g, ' ').slice(0, 300);
+  const time = (a) => Date.parse(a.at) || 0;
+  const latest = (xs) => [...xs].sort((x, y) => time(x) - time(y)).at(-1) ?? null;
   const holding = theirs.filter((a) => holds(a.answer, q));
   if (!holding.length) return { problem: `"${clip(quote)}" is in no message of the person's in this session (what they typed in the chat or answered in the question panel, as the harness recorded it; never your own text, a tool's output, a note the harness adds or a sub-agent's thread)` };
   const since = Date.parse(sinceAt ?? '') || 0;
-  const fresh = holding.filter((a) => (Date.parse(a.at) || 0) >= since);
-  if (!fresh.length) return { problem: `the person wrote "${clip(quote)}" before this attempt was admitted (${sinceAt}): words about another ticket` };
-  const m = [...fresh].sort((x, y) => (Date.parse(x.at) || 0) - (Date.parse(y.at) || 0)).at(-1);
-  return { quote: String(q).trim().slice(0, 500), message: String(m.answer).trim().slice(0, 2000), at: m.at ?? null, via: `${m.channel === 'chat' ? 'chat' : 'question-panel'}, read by the agent (${host.label}, host-recorded)` };
+  const done = (m, rule) => ({ quote: String(q).trim().slice(0, 500), message: String(m.answer).trim().slice(0, 2000), at: m.at ?? null, via: `${m.channel === 'chat' ? 'chat' : 'question-panel'}, read by the agent (${host.label}, host-recorded)${rule ? `; ${rule}` : ''}` });
+  const fresh = latest(holding.filter((a) => time(a) >= since));
+  if (fresh) return done(fresh, null);
+  const named = latest(holding.filter((a) => namesItem(a.answer, item)));
+  if (named) return done(named, `written before the admission, naming ${item}`);
+  const kickoff = latest(theirs.filter((a) => time(a) < since));
+  if (kickoff && holding.some((a) => a.at === kickoff.at && a.answer === kickoff.answer)) return done(kickoff, 'the message that started this attempt (the last before its admission)');
+  const m = latest(holding);
+  const others = [...new Set([...String(m.answer).matchAll(ITEM_LIKE)].map((x) => x[0]))].filter((x) => !namesItem(x, item));
+  return { problem: `the person wrote "${clip(quote)}" at ${m.at ?? 'an unknown time'}, before this attempt was admitted (${sinceAt}), in a message ${others.length ? `that names ${others.join(', ')}${item ? `, not ${item}` : ''}` : `that does not name ${item ?? 'this ticket'} and is not the one that started it (their last before the admission${kickoff ? `, at ${kickoff.at}` : ''})`}: words about something else` };
 }
 
 // Whether this process runs under an agent runtime (the terminal route of a person's own command is refused there).

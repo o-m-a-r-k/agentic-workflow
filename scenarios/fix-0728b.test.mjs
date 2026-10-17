@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { closureFile, commitIn, criteriaFile, goodClosure, ok, singleRepoProject, stages, wf } from './helpers.mjs';
+import { closureFile, commitIn, criteriaFile, goodClosure, makeRepo, ok, singleRepoProject, stages, tmp, wf, yaml } from './helpers.mjs';
 import { runner } from './strategist-fixtures.mjs';
 
 const LINES = 'l1\nl2\nl3\nl4\nl5\nl6\n';
@@ -131,7 +131,7 @@ test('I-212: the person sets aside a failing suite the delivery does not edit, t
   assert.equal(d.kind, 'override-gate');
   // Review of 0.7.28 (M1): the question says only what the engine checked. This change edits src/app.txt, which the step reads:
   // the suite may fail because of it, so the question names it, and the agent's reason is given as the agent's.
-  assert.match(d.plain, /Should ENG-214 ship with the test suite test\/c\.service\.e2e-spec\.ts \(e2e\) set aside for this delivery, instead of more repair rounds\? It failed in the gate\. What the engine checked: this change does not edit the test file\. What it did not check: whether the code the suite exercises changed; this change edits 1 file\(s\) the step reads: src\/app\.txt\. The agent's reason: it fails on the base branch too\./);
+  assert.match(d.plain, /Should ENG-214 ship with the test suite test\/c\.service\.e2e-spec\.ts \(e2e\) set aside for this delivery, instead of more repair rounds\? It failed in the gate\. What the engine checked: this change does not edit the test file\. What it did not check: whether the code the suite exercises changed; this change edits 1 file\(s\) the step reads: app:src\/app\.txt\. The agent's reason: it fails on the base branch too\./);
   assert.doesNotMatch(d.plain, /does not touch/);
   const g2 = gate(p, e.id);
   assert.equal(g2.code, 0, g2.err);
@@ -148,4 +148,40 @@ test('I-212: a suite the delivery changes is its own to fix, never set aside', (
   const refused = wf(p.root, ['gate', 'quarantine', '--step', 'e2e', '--suite', 'test/c.service.e2e-spec.ts', '--reason', 'flaky', '--attempt', e.id]);
   assert.equal(refused.code, 75);
   assert.match(refused.err, /test\/c\.service\.e2e-spec\.ts is changed by this delivery \(app:test\/c\.service\.e2e-spec\.ts\): its failure is this delivery's to fix/);
+});
+
+// Review of 0.7.28 (M1 a, b): the files the question names as read by the step are the gate's own reading (inputs, less ignores and
+// docs-only files), in the step's repo and every repo it declares (`alsoInputs`); a repo of the attempt it does not declare is named
+// apart. Named failure (a review's case): a README was named as read, and an api change that broke a portal suite was not named.
+test('I-212: the quarantine question names what the step reads as the gate reads it, across the repos it declares, and names a changed repo it does not declare', () => {
+  const base = tmp('i212-repos');
+  const root = path.join(base, 'proj');
+  fs.mkdirSync(root);
+  const step = (id, extra = {}) => ({ ...e2e, id, ignores: ['src/notes/**'], ...extra });
+  const cfg = { version: 1, enabled: true, name: 'i212-repos', adapterRepo: 'app', repos: [{ name: 'app', path: 'app', base: 'main', packages: [{ path: '.', docsOnly: ['**/*.md'] }] }, { name: 'api', path: 'api', base: 'main', packages: [{ path: '.', docsOnly: ['**/*.md'] }] }], lanes: ['quick', 'standard', 'batch'], gate: { steps: [unit, step('e2e'), step('e2e-api', { alsoInputs: ['api'] })] } };
+  makeRepo(path.join(root, 'app'), { '.gitignore': '.wf-evidence/\n.wf-worktrees/\n', '.workflow/project.yaml': yaml(cfg), ...files('c bad, before this ticket\n'), 'README.md': 'app\n', 'src/notes/n.txt': 'n\n' });
+  makeRepo(path.join(root, 'api'), { 'src/svc.txt': 'svc\n', 'README.md': 'api\n' });
+  fs.symlinkSync(path.join('app', '.workflow'), path.join(root, '.workflow'));
+  const e = ok(wf(root, ['entry', '--item', 'ENG-216', '--owner', 'o', '--json'])).json();
+  ok(wf(root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id]));
+  ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id]));
+  ok(wf(root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
+  commitIn(e.repos.app.worktree, { 'src/app.txt': 'app 2\n', 'README.md': 'app, documented\n', 'src/notes/n.txt': 'n 2\n' });
+  commitIn(e.repos.api.worktree, { 'src/svc.txt': 'svc 2\n', 'README.md': 'api, documented\n' });
+  ok(wf(root, ['handoff', 'close', '--agent', 'i', '--attempt', e.id]));
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', e.id]));
+  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r')), '--attempt', e.id]));
+  assert.equal(wf(root, ['gate', '--attempt', e.id, '--json']).code, 1);
+  const plainOf = (stepId) => {
+    assert.equal(wf(root, ['gate', 'quarantine', '--step', stepId, '--suite', 'test/c.service.e2e-spec.ts', '--reason', 'it fails on the base branch too', '--attempt', e.id], { ownerSilent: true }).code, 75);
+    return JSON.parse(ok(wf(root, ['resume', '--attempt', e.id, '--json'])).out).decisions.find((x) => x.key === `quarantine:${e.id}:${stepId}:test/c.service.e2e-spec.ts`).plain;
+  };
+  // The step reads app only: its README and ignored notes are not named; the api change is named as a repo it does not declare.
+  const own = plainOf('e2e');
+  assert.match(own, /this change edits 1 file\(s\) the step reads: app:src\/app\.txt\. This change also edits 1 file\(s\) in api, which the step does not declare it reads \(`alsoInputs`\); a suite that drives that repo can fail because of it\./);
+  assert.doesNotMatch(own, /README|notes/);
+  // The step declares api: its change is listed with the step's own.
+  const both = plainOf('e2e-api');
+  assert.match(both, /this change edits 2 file\(s\) the step reads: app:src\/app\.txt, api:src\/svc\.txt\./);
+  assert.doesNotMatch(both, /README|does not declare/);
 });
