@@ -43,8 +43,10 @@ const ROLE_TOOLS = { planner: ['Read', 'Grep', 'Glob', 'Bash'], reviewer: ['Read
 
 // A fresh role through `claude --print`: its stream-json events carry the session id (`system` `init`) and the end of the
 // turn (`result`); the assistant's text reaches the owner as `assistant` events.
-function buildLaunch(h, { body, requestedSession }) {
-  const args = ['--print', '--verbose', '--output-format', 'stream-json', '--session-id', requestedSession, '--agent', h.agentType, '--agents', JSON.stringify({ [h.agentType]: { description: `Frozen workflow ${h.role}`, prompt: body, ...(ROLE_TOOLS[h.role] ? { tools: ROLE_TOOLS[h.role] } : {}) } }), '--permission-mode', 'dontAsk', '--allowedTools', ...(ROLE_TOOLS[h.role] ?? ['Read', 'Write', 'Edit', 'Grep', 'Glob']).filter((t) => t !== 'Bash'), 'Bash(wf *)'];
+// `resume` (0.7.30, I-153): the session of a launch the model's capacity ended, continued under the same id (`--resume`
+// keeps it unless `--fork-session` is given), with the same agent, tools, model and effort.
+function buildLaunch(h, { body, requestedSession, resume = null }) {
+  const args = ['--print', '--verbose', '--output-format', 'stream-json', ...(resume ? ['--resume', resume] : ['--session-id', requestedSession]), '--agent', h.agentType, '--agents', JSON.stringify({ [h.agentType]: { description: `Frozen workflow ${h.role}`, prompt: body, ...(ROLE_TOOLS[h.role] ? { tools: ROLE_TOOLS[h.role] } : {}) } }), '--permission-mode', 'dontAsk', '--allowedTools', ...(ROLE_TOOLS[h.role] ?? ['Read', 'Write', 'Edit', 'Grep', 'Glob']).filter((t) => t !== 'Bash'), 'Bash(wf *)'];
   if (h.model) args.push('--model', h.model);
   if (h.effort) args.push('--effort', h.effort);
   return { bin: 'claude', args };
@@ -62,12 +64,23 @@ function classifyResult({ stdout }) {
   return { text: j.is_error ? '' : typeof j.result === 'string' ? j.result : '', costUsd: typeof j.total_cost_usd === 'number' ? j.total_cost_usd : null, model: Object.keys(j.modelUsage ?? {})[0] ?? null };
 }
 
+// 0.7.30 (I-153): the model at capacity, as Claude Code reports it: the API's `overloaded_error` (HTTP 529), in a failed
+// result's text ("API Error: 529 ... overloaded_error", "Repeated 529 Overloaded errors") or an error event.
+const CAPACITY = /overloaded_error|\b529\b|\boverloaded\b/i;
+const capacityIn = (...texts) => texts.some((t) => typeof t === 'string' && CAPACITY.test(t));
+
 function interpretEvent(e) {
   if (e.type === 'system' && e.subtype === 'init') return { started: e.session_id };
-  if (e.type === 'result') return { terminal: { session: e.session_id, success: e.subtype === 'success' && e.is_error === false } };
+  if (e.type === 'result') {
+    const success = e.subtype === 'success' && e.is_error === false;
+    return { terminal: { session: e.session_id, success }, ...(!success && capacityIn(e.result, e.error?.message, e.error?.type, ...(e.errors ?? []).map(String)) ? { capacity: true, error: String(e.result ?? e.error?.message ?? 'overloaded').slice(0, 300) } : {}) };
+  }
   if (e.type === 'turn.failed') return { failed: true };
   // An error event may be passing (a reconnect, a retried request): it fails the launch only if no turn completes after it.
-  if (e.type === 'error') return { error: String(e.message ?? e.error?.message ?? e.error ?? 'error').slice(0, 300) };
+  if (e.type === 'error') {
+    const error = String(e.message ?? e.error?.message ?? e.error ?? 'error').slice(0, 300);
+    return { error, ...(capacityIn(error, e.error?.type) ? { capacity: true } : {}) };
+  }
   return {};
 }
 

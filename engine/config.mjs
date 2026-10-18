@@ -575,12 +575,24 @@ export function loadConfigAtCommit(root, cfg, commit) {
   return readAdapter(root, adapterLocation(root, cfg), commit);
 }
 
-// The adapter that judges an attempt: committed at its admission base (or `commit`, a later pin of the same repo),
-// located from its admission record. Never falls back to the working copy.
-export function trustedAdapter(root, state, commit = state?.adapterBase) {
+// The commit an attempt reads its adapter at: the adapter committed on the adapter repo's base branch as the attempt last
+// followed it (engine/adapter-follow.mjs, `adapter.followed`), else its admission base. `adapterBase` stays the admission
+// commit: where the follow starts and what a supplemental validation descends from.
+export const adapterPin = (state) => state?.adapterPin ?? state?.adapterBase ?? null;
+
+// 0.7.30 (I-201, D62): an attempt's repo admitted with its own target (`wf entry --target <repo>=<branch>`) is based on and
+// delivered to that branch: wherever the attempt reads a repo's `base`, it is that branch.
+export function withTargets(cfg, state) {
+  if (!state?.repos || !Object.values(state.repos).some((r) => r?.target)) return cfg;
+  return { ...cfg, repos: cfg.repos.map((r) => (state.repos[r.name]?.target ? { ...r, base: state.repos[r.name].target } : r)) };
+}
+
+// The adapter that judges an attempt: committed on its base branch at its pin (or `commit`, another commit of the same
+// repo), located from its admission record. Never falls back to the working copy.
+export function trustedAdapter(root, state, commit = adapterPin(state)) {
   const loc = attemptAdapter(root, state);
   if (!commit) throw refuse(`${state.id} has no adapter commit to read`);
-  return readAdapter(root, loc, commit);
+  return withTargets(readAdapter(root, loc, commit), state);
 }
 
 // Materialises an adapter file (step plugin, delivery or tracker adapter) exactly as committed at `commit`,

@@ -28,9 +28,12 @@ The scenarios run the real `wf` CLI against temporary git repositories with bare
 macOS, on every push and pull request and weekly. A red CI is fixed first, from its root cause; a Linux-only failure
 is real (see [AGENTS.md](AGENTS.md)).
 
-GitHub's macOS job runs one scenario file at a time so competing Git-heavy fixture setup cannot consume the strict
-stop-process deadline. Scenarios still run their own concurrent gate and review processes. Linux uses Node's default
-file concurrency, and the local verifier retains its three platform/user legs.
+GitHub CI runs the suite in shards (0.7.30): three macOS jobs and two Linux jobs, each `node --test --test-shard=<i>/<n>`,
+which gives a shard every n-th scenario file in sorted order, so every file runs once per OS. A macOS shard runs three
+files at a time (one per core of the runner), a Linux shard Node's default file concurrency. Named cost: the single macOS
+job grew from 23 to past 30 minutes; per-file times measured on the last runs put each macOS shard at 8 to 13 minutes and
+each Linux shard near 8, under a 30-minute limit per shard. Scenarios still run their own concurrent gate and review
+processes, and the local verifier retains its three platform/user legs.
 
 Expected times on a 16-core laptop that is mostly idle: about 50 seconds for the host leg alone (it was 80), about two
 minutes for `npm run verify` (it was over three; each leg prints its own time and how many test files it ran at a time), from a few

@@ -4,8 +4,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { closureFile, commitIn, criteriaFile, goodClosure, ok, OUT_OF_ORDER, sh, singleRepoProject, state, toAccepted, wf } from './helpers.mjs';
 
-// Project delivery adapters (merge requests): waiting for the merge, the states that refuse or wait, and the documented
-// recovery from a broken adapter. Split from delivery.test.mjs so the two run side by side (each file runs its tests
+// Project delivery adapters (merge requests): waiting for the merge, the states that refuse or wait, and the recovery from a
+// broken adapter (since 0.7.30 the attempt follows its base branch's adapter, so the pushed fix reaches it). Split from delivery.test.mjs so the two run side by side (each file runs its tests
 // one after the other; the suite's wall time was that file's).
 
 const steps = [{ id: 'unit', repo: 'app', run: 'true', inputs: ['src/**'] }];
@@ -100,7 +100,8 @@ const brokenAdapter = `export default { integrate(ctx) { return { url: 'https://
 const fixedAdapter = `import { execFileSync } from 'node:child_process';
 export default {
   integrate(ctx) { return { url: 'https://git.example.test/mr/3' }; },
-  observe(ctx) { execFileSync('git', ['push', '-q', 'origin', 'HEAD:refs/heads/main'], { cwd: ctx.worktree }); return { state: 'integrated' }; },
+  // The base branch holds the fix commit by now: a merge request is merged on top of it.
+  observe(ctx) { execFileSync('git', ['pull', '-q', '--no-rebase', '--no-edit', 'origin', 'main'], { cwd: ctx.worktree }); execFileSync('git', ['push', '-q', 'origin', 'HEAD:refs/heads/main'], { cwd: ctx.worktree }); return { state: 'integrated' }; },
   readback() { return { ok: true }; },
 };`;
 function recoverFromBrokenAdapter(name, { baseMerge }) {
@@ -123,35 +124,22 @@ function recoverFromBrokenAdapter(name, { baseMerge }) {
   const r = wf(root, ['deliver', '--attempt', id]);
   assert.notEqual(r.code, 0);
   assert.match(r.err, /the delivery adapter reported an unknown state "merged"/);
-  assert.match(r.err, /this attempt reads its delivery adapter as committed at [0-9a-f]{10}, so a fix committed on the base branch does not reach it by itself\. Once the fixed adapter is committed and pushed on the base branch, the owner re-pins this attempt's delivery adapter to it: `wf deliver --repin-adapter --reason "<why>"` shows what changes and asks for the owner's confirmation \(docs\/lifecycle\.md, "Recovering from an adapter fault"\)/);
+  assert.match(r.err, /this attempt reads its delivery adapter as committed on its base branch \(now [0-9a-f]{10}\) and follows it: commit and push the fixed adapter on the base branch, then `wf deliver` again asks the fixed one \(docs\/lifecycle\.md, "Recovering from an adapter fault"\)/);
   assert.doesNotMatch(r.err, /cherry-pick|abandon|wf\/ENG-72|[0-9a-f]{10}\.\./, 'no recipe, branch name or hash range in the refusal');
-  // A fix committed on the base branch alone does not reach this attempt: the same refusal.
+  // 0.7.30 (I-151, D60): the fix committed and pushed on the base branch reaches the attempt by itself; the same command delivers.
   fs.writeFileSync(path.join(root, '.workflow', 'delivery', 'mr.mjs'), fixedAdapter);
   sh(root, 'git add -A && git commit -qm "fix the delivery adapter" && git push -q origin main');
-  assert.match(wf(root, ['deliver', '--attempt', id]).err, /reported an unknown state "merged"/);
-  // The documented recipe. First the delivery record: `wf abandon` accepts the attempt only while no repo is recorded.
-  assert.deepEqual(ok(wf(root, ['status', '--attempt', id, '--json'])).json()[0].delivery.repos, {});
-  assert.match(wf(root, ['abandon', '--reason', 'the delivery adapter was broken', '--attempt', id]).err, /--acknowledge-integration app:merged/);
-  ok(wf(root, ['abandon', '--reason', 'the delivery adapter was broken', '--acknowledge-integration', 'app:merged', '--attempt', id]));
-  const e2 = ok(wf(root, ['entry', '--item', 'ENG-72', '--owner', 'owner-1', '--json'])).json();
-  sh(e2.repos.app.worktree, `git merge --squash wf/${id} && git commit -qm "ENG-72: the change from ${id}"`);
-  ok(wf(root, ['handoff', 'planner', '--agent', 'plan-2', '--attempt', e2.id, '--owner', 'owner-1']));
-  ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e2.id, '--owner', 'owner-1']));
-  ok(wf(root, ['handoff', 'implementer', '--agent', 'impl-2', '--attempt', e2.id, '--owner', 'owner-1']));
-  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', e2.id]));
-  ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev-2', '--attempt', e2.id, '--owner', 'owner-1']));
-  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('rev-2')), '--attempt', e2.id]));
-  ok(wf(root, ['accept', '--attempt', e2.id, '--owner', 'owner-1']));
-  ok(wf(root, ['deliver', '--attempt', e2.id]));
-  assert.ok(state(root, e2.id).delivery.completedAt, 'delivered');
+  const d = ok(wf(root, ['deliver', '--attempt', id]));
+  assert.match(d.out, /adapter followed origin\/main from [0-9a-f]{10} to [0-9a-f]{10} \(\.workflow\/delivery\/mr\.mjs\)/);
+  assert.ok(state(root, id).delivery.completedAt, 'delivered');
   assert.equal(sh(base, `git --git-dir=${remote} show main:src/a.txt`), 'b');
   if (baseMerge) assert.equal(sh(base, `git --git-dir=${remote} show main:src/other.txt`), 'o2');
 }
 
-test('a broken delivery adapter: the refusal states the facts, and the documented recovery delivers', () => {
+test('a broken delivery adapter: the refusal states the facts, and the fix pushed on the base branch delivers', () => {
   recoverFromBrokenAdapter('mr-broken', { baseMerge: false });
 });
 
-test('a broken delivery adapter after `wf base merge`: the documented recovery (merge --squash) still delivers', () => {
+test('a broken delivery adapter after `wf base merge`: the fix pushed on the base branch still delivers', () => {
   recoverFromBrokenAdapter('mr-broken-merged', { baseMerge: true });
 });

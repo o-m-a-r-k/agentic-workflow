@@ -5,6 +5,7 @@ import { readRegular } from '../evidence.mjs';
 import { sha256 } from '../util.mjs';
 import { LABEL, assistantTurns, readTranscript, subagentIndex, transcriptFile } from './claude-store.mjs';
 import { isPlainSessionId, readCapped } from './safe-file.mjs';
+import { RESUME_PROMPT } from './resume.mjs';
 
 // How the owner starts the agent a handoff names, in words: the agent type, the name, and only the printed line.
 export const howToStart = (h) => `start it as agent type \`${h.agentType ?? 'the one `wf handoff` printed'}\`, named \`${h.agent}\` (the Agent tool's name), with only the printed line as its prompt`;
@@ -22,10 +23,14 @@ function verifyLaunch(h, home) {
   const transcript = isPlainSessionId(h.session) ? transcriptFile(h.session, { home }) : { problem: `the owner's session id is not a plain id; no transcript is read` };
   if (transcript.problem) return mismatch(transcript.problem);
   const entries = readCapped(transcript.file).toString('utf8').split('\n').flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } });
+  const textOf = (e) => (typeof e.message.content === 'string' ? e.message.content : e.message.content.filter((b) => b.type === 'text').map((b) => b.text).join('\n'));
   const prompts = entries.filter((e) => e.type === 'user' && !e.isMeta && (typeof e.message?.content === 'string' || (Array.isArray(e.message?.content) && e.message.content.some((b) => b.type === 'text') && !e.message.content.some((b) => b.type === 'tool_result'))));
-  if (prompts.length !== 1) return mismatch('the native Claude role has no unique fresh start prompt or was resumed');
-  const first = prompts[0], content = first.message.content;
-  const text = typeof content === 'string' ? content : content.filter((b) => b.type === 'text').map((b) => b.text).join('\n');
+  // 0.7.30 (I-153): the engine's own resume prompt after the model was at capacity is accepted as often as the ledger records
+  // a resume; any other later prompt is a resumed or steered role.
+  const later = prompts.slice(1);
+  if (!prompts.length || later.some((e) => textOf(e) !== RESUME_PROMPT) || later.length > (l.resumes ?? 0)) return mismatch('the native Claude role has no unique fresh start prompt or was resumed');
+  const first = prompts[0];
+  const text = textOf(first);
   if (first.sessionId !== h.session || first.isSidechain !== false || first.entrypoint !== 'sdk-cli' || text !== h.startPrompt) return mismatch('the native Claude transcript is not the recorded fresh role start');
   const at = Date.parse(first.timestamp);
   if (!Number.isFinite(at) || at < Date.parse(h.at) || at > Date.now() + 1000) return mismatch('the native Claude start predates its handoff or has no valid timestamp');

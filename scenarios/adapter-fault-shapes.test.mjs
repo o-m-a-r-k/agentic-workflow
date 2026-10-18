@@ -3,12 +3,13 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { closureFile, ok, OUT_OF_ORDER, sh, singleRepoProject, state, toAccepted, wf } from './helpers.mjs';
-import { accepted, brokenAdapter, ledger, multiRepo, pushFix, repin, steps } from './adapter-fault-fixtures.mjs';
+import { accepted, brokenAdapter, followFix, ledger, multiRepo, pushFix, steps } from './adapter-fault-fixtures.mjs';
 
 // I-22: adapter-fault recovery for the remaining shapes of attempt: several repos with the unchanged one recorded as
-// skipped, the quick lane and a batch (the rest, and what I-20 and I-21 are, in adapter-fault.test.mjs).
+// skipped, the quick lane and a batch (the rest, and what I-20 and I-21 are, in adapter-fault.test.mjs). Since 0.7.30 (I-151)
+// the recovery is the fixed adapter pushed on the base branch: the attempt follows it by itself.
 
-test('I-22: several repos, the unchanged one recorded as skipped before the fault: abandon accepts it (nothing was pushed) and the re-pin also delivers', () => {
+test('I-22: several repos, the unchanged one recorded as skipped before the fault: abandon accepts it (nothing was pushed) and the pushed fix also delivers', () => {
   const { base, root } = multiRepo('repin-skipped', brokenAdapter);
   const e = ok(wf(root, ['entry', '--item', 'ENG-95', '--owner', 'o', '--json'])).json();
   // Only web changes; api (first in the delivery order) is recorded as skipped, then web faults.
@@ -16,7 +17,8 @@ test('I-22: several repos, the unchanged one recorded as skipped before the faul
   assert.match(wf(root, ['deliver', '--attempt', e.id]).err, /web: the delivery adapter reported an unknown state "merged"/);
   assert.equal(state(root, e.id).delivery.repos.api.skipped, 'no changes');
   const tip = pushFix(path.join(root, 'api'));
-  const s = repin(root, e.id, tip, { delivered: 'api skipped \\(no changes\\)', left: 'web' });
+  const s = followFix(root, e.id, tip);
+  assert.equal(s.delivery.repos.api.skipped, 'no changes', 'the repo recorded before keeps its record');
   assert.ok(s.delivery.completedAt);
   assert.equal(sh(base, `git --git-dir=${path.join(root, 'web')}.origin.git show main:src/w.txt`), 'web');
   // The other recovery for this case: abandon is accepted when every recorded repo was skipped.
@@ -35,7 +37,7 @@ test('I-22: several repos, the unchanged one recorded as skipped before the faul
   assert.deepEqual(ledger(p2.root, e2.id).find((x) => x.type === 'abandoned').data.integrationsClosed, ['web:merged']);
 });
 
-test('I-22: quick lane: a broken adapter refuses; the re-pin delivers', () => {
+test('I-22: quick lane: a broken adapter refuses; the pushed fix delivers', () => {
   const { base, root, remote } = singleRepoProject('repin-quick', { delivery: { kind: './delivery/mr.mjs' }, gate: { steps } }, { '.workflow/delivery/mr.mjs': brokenAdapter });
   const e = ok(wf(root, ['entry', '--owner', 'o', '--json'])).json();
   assert.equal(e.lane, 'quick');
@@ -43,12 +45,12 @@ test('I-22: quick lane: a broken adapter refuses; the re-pin delivers', () => {
   assert.match(wf(root, ['deliver', '--attempt', e.id]).err, /reported an unknown state "merged"/);
   const tip = pushFix(root);
   const moved = `${remote}.moved`;
-  const s = repin(root, e.id, tip, { left: 'app', failFirst: () => (fs.renameSync(remote, moved), () => fs.renameSync(moved, remote)) });
+  const s = followFix(root, e.id, tip, { failFirst: () => (fs.renameSync(remote, moved), () => fs.renameSync(moved, remote)) });
   assert.ok(s.delivery.completedAt);
   assert.equal(sh(base, `git --git-dir=${remote} show main:src/a.txt`), 'quick');
 });
 
-test('I-22: batch: a broken adapter refuses the batch; members cannot re-pin; the batch re-pin delivers every member', () => {
+test('I-22: batch: a broken adapter refuses the batch; members cannot re-pin; the pushed fix delivers every member', () => {
   const heavy = [{ id: 'unit', repo: 'app', run: 'true', inputs: ['src/**'] }, { id: 'e2e', repo: 'app', run: 'true', tier: 'heavy' }];
   const { base, root, remote } = singleRepoProject('repin-batch', { delivery: { kind: './delivery/mr.mjs' }, gate: { steps: heavy } }, { '.workflow/delivery/mr.mjs': brokenAdapter, 'src/b.txt': 'b\n' });
   const m1 = toAccepted(root, base, { item: 'ENG-97', change: { 'src/a.txt': 'one\n' }, extraEntry: ['--defer-heavy'] });
@@ -61,7 +63,7 @@ test('I-22: batch: a broken adapter refuses the batch; members cannot re-pin; th
   assert.match(wf(root, ['deliver', '--attempt', b.id]).err, /reported an unknown state "merged"/);
   const tip = pushFix(root);
   assert.match(wf(root, ['deliver', '--attempt', m1.id, '--repin-adapter', tip.slice(0, 12), '--reason', 'x']).err, /is a member of BATCH-1; deliver the batch instead/);
-  const s = repin(root, b.id, tip, { left: 'app' });
+  const s = followFix(root, b.id, tip);
   assert.ok(s.delivery.completedAt);
   assert.equal(sh(base, `git --git-dir=${remote} show main:src/a.txt`), 'one');
   assert.equal(sh(base, `git --git-dir=${remote} show main:src/b.txt`), 'two');

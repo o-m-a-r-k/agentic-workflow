@@ -2,35 +2,38 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { commitIn, ok, singleRepoProject, state, wf, yaml, sh } from './helpers.mjs';
 
-test('I-44: doctor reports the attempt pin and refresh imports only committed execution settings', () => {
+// 0.7.30 (I-151, D60): the attempt follows its base branch's adapter, models included, so a model committed and pushed there
+// reaches the attempt's next handoff with no refresh; `wf models refresh` stays for a tip the attempt has not taken yet.
+test('I-44, I-151: doctor reports the attempt pin; a model committed on the base branch reaches the next handoff by itself; overrides are refused', () => {
   const initial = { classes: { review: { codex: {} }, planning: { codex: { model: null } } }, gate: { steps: [{ id: 'unit', repo: 'app', run: 'true' }] } };
   const { root } = singleRepoProject('runtime-refresh', initial);
   const id = ok(wf(root, ['entry', '--item', 'ENG-81', '--json'])).json().id;
   const admission = state(root, id).adapterBase;
-  const cfg = { version: 1, enabled: true, name: 'runtime-refresh', repos: [{ name: 'app', path: '.', base: 'main' }], ...initial,
-    classes: { planning: { use: 'Plan the work', codex: { model: 'future-planner', effort: 'high' } }, review: { codex: { model: 'future-reviewer', effort: 'high' } }, full: { codex: { model: 'future-implementer', effort: 'xhigh' } } },
-    roles: { planner: { class: 'planning' } }, gate: { steps: [{ id: 'unsafe', repo: 'app', run: 'false' }] }
-  };
-  commitIn(root, { '.workflow/project.yaml': yaml(cfg) });
-  sh(root, 'git push -q origin main');
   const before = wf(root, ['doctor', '--runtime', 'codex', '--no-steps', '--attempt', id, '--json']);
   assert.equal(before.code, 1, 'current configuration must not conceal the missing attempt model');
-  assert.match(before.out, /models refresh/);
-  assert.match(ok(wf(root, ['handoff', 'planner', '--agent', 'missing', '--runtime', 'codex', '--attempt', id])).err, /cannot launch/);
+  assert.match(before.out, /commit the model on the base branch/);
+  const cfg = { version: 1, enabled: true, name: 'runtime-refresh', repos: [{ name: 'app', path: '.', base: 'main' }], ...initial,
+    classes: { planning: { use: 'Plan the work', codex: { model: 'future-planner', effort: 'high' } }, review: { codex: { model: 'future-reviewer', effort: 'high' } }, full: { codex: { model: 'future-implementer', effort: 'xhigh' } } },
+    roles: { planner: { class: 'planning' } }, gate: { steps: [{ id: 'unit', repo: 'app', run: 'true' }] }
+  };
+  commitIn(root, { '.workflow/project.yaml': yaml(cfg) });
+  assert.match(ok(wf(root, ['handoff', 'planner', '--agent', 'missing', '--runtime', 'codex', '--attempt', id])).err, /cannot launch/, 'a commit not pushed is not read');
   assert.equal(wf(root, ['handoff', 'run', '--agent', 'missing', '--attempt', id]).code, 75);
-  ok(wf(root, ['models', 'refresh', '--attempt', id]));
-  assert.equal(state(root, id).adapterBase, admission);
-  assert.equal(state(root, id).runtimeAdapterBase, sh(root, 'git rev-parse HEAD'));
+  sh(root, 'git push -q origin main');
+  ok(wf(root, ['doctor', '--runtime', 'codex', '--no-steps', '--attempt', id]));
+  const s = state(root, id);
+  assert.equal(s.adapterBase, admission);
+  assert.equal(s.adapterPin, sh(root, 'git rev-parse HEAD'));
   const h = ok(wf(root, ['handoff', 'planner', '--agent', 'planner-new', '--runtime', 'codex', '--attempt', id, '--json'])).json();
   assert.equal(h.model, 'future-planner');
   assert.equal(h.effort, 'high');
   assert.equal(h.class, 'planning', 'admission class semantics stay frozen (0.7.22: the planner\'s own class)');
-  ok(wf(root, ['doctor', '--runtime', 'codex', '--no-steps', '--attempt', id]));
+  assert.equal(ok(wf(root, ['models', 'refresh', '--attempt', id, '--json'])).json().changed, false, 'nothing left to refresh');
   assert.equal(wf(root, ['models', 'refresh', '--model', 'arbitrary', '--attempt', id]).code, 75);
   assert.equal(wf(root, ['handoff', 'planner', '--model', 'arbitrary', '--agent', 'bad', '--attempt', id]).code, 75);
 });
 
-test('I-44: refresh pins future launches, keeps old handoffs immutable and retains frozen rules', async () => {
+test('I-44, I-151: a handoff keeps the execution settings it was made with; later handoffs take the adapter the attempt follows, its role appendix included', async () => {
   const fs = await import('node:fs');
   const path = await import('node:path');
   const { trustedAdapter } = await import('../engine/config.mjs');
@@ -39,17 +42,17 @@ test('I-44: refresh pins future launches, keeps old handoffs immutable and retai
   const id = ok(wf(root, ['entry', '--item', 'ENG-83', '--json'])).json().id;
   ok(wf(root, ['handoff', 'planner', '--agent', 'old', '--runtime', 'codex', '--attempt', id]));
   const original = state(root, id).handoffs[0];
-  const frozen = trustedAdapter(root, state(root, id));
+  const admitted = trustedAdapter(root, state(root, id));
   const cfg = { version: 1, enabled: true, name: 'runtime-handoff-pin', repos: [{ name: 'app', path: '.', base: 'main' }], ...initial,
     classes: { planning: { use: 'Different plan instructions must not be imported', codex: { model: 'new-planner', effort: 'high' } }, review: { codex: { model: 'new-reviewer', effort: 'high' } } },
     roles: { planner: { class: 'planning', appendix: 'new.md' } },
     gate: { steps: [{ id: 'unsafe', repo: 'app', run: 'false' }] }, tracker: { kind: 'none', statuses: { ready: 'untrusted' } }, review: { requireScreenshots: false },
   };
-  commitIn(root, { '.workflow/project.yaml': yaml(cfg), '.workflow/new.md': 'Untrusted newer role instructions.' });
+  commitIn(root, { '.workflow/project.yaml': yaml(cfg), '.workflow/new.md': 'Newer role instructions committed on the base branch.' });
   sh(root, 'git push -q origin main');
-  ok(wf(root, ['models', 'refresh', '--attempt', id]));
   assert.deepEqual(state(root, id).handoffs[0], original);
-  assert.deepEqual(trustedAdapter(root, state(root, id)), frozen);
+  assert.notDeepEqual(trustedAdapter(root, state(root, id)), admitted, 'the attempt reads the adapter its base branch holds now');
+  assert.equal(trustedAdapter(root, state(root, id)).roles.planner.appendix, 'new.md');
   ok(wf(root, ['handoff', 'planner', '--agent', 'new', '--runtime', 'codex', '--attempt', id]));
   const bin = path.join(base, 'bin');
   fs.mkdirSync(bin);
@@ -71,7 +74,7 @@ test('I-44: refresh pins future launches, keeps old handoffs immutable and retai
   const args = JSON.parse(fs.readFileSync(probe));
   assert.ok(args.includes('new-planner'));
   assert.ok(args.includes('model_reasoning_effort="high"'));
-  assert.ok(!args.some(a => a.includes('Different plan instructions') || a.includes('Untrusted newer role')));
+  assert.ok(args.some((a) => a.includes('Newer role instructions committed on the base branch.')), 'the role appendix the base branch holds');
   assert.equal(wf(root, ['handoff', 'run', '--agent', 'new', '--model', 'arbitrary', '--attempt', id], { env }).code, 75);
   assert.equal(state(root, id).handoffs[1].launch.status, 'completed');
 });

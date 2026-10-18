@@ -4,7 +4,7 @@ import { detectOwner, findHost, hostIds, hostLabels, optional } from './hosts/in
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { adapterFileAtCommit, loadConfigAtCommit, trustedAdapter } from './config.mjs';
+import { adapterFileAtCommit, adapterPin, loadConfigAtCommit, trustedAdapter } from './config.mjs';
 import { append, attemptDir, listAttempts, loadState, recordedTogether } from './ledger.mjs';
 import { loadCatalog, readSecret } from './secrets.mjs';
 import { WfError, canonical, hashFile, now, readJson, refuse, sha256, writeImmutable } from './util.mjs';
@@ -23,7 +23,7 @@ const BUILTIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'a
 export async function loadTrackerAdapter(root, cfg, state) {
   const kind = cfg.tracker.kind;
   if (kind === 'none') return null;
-  const file = kind.startsWith('.') ? (state ? adapterFileAtCommit(root, state, state.adapterBase, kind) : path.resolve(root, '.workflow', kind)) : path.join(BUILTIN, `${kind}.mjs`);
+  const file = kind.startsWith('.') ? (state ? adapterFileAtCommit(root, state, adapterPin(state), kind) : path.resolve(root, '.workflow', kind)) : path.join(BUILTIN, `${kind}.mjs`);
   if (!fs.existsSync(file)) throw new WfError(`tracker adapter \`${kind}\` not found at ${file}`);
   const adapter = (await import(pathToFileURL(file).href)).default;
   if (adapter?.screenshots !== undefined && !SCREENSHOT_MODES.includes(adapter.screenshots)) throw new WfError(`tracker adapter \`${kind}\`: screenshots: ${JSON.stringify(adapter.screenshots)} is not one of ${SCREENSHOT_MODES.join(', ')}`);
@@ -249,7 +249,9 @@ function deliveredKey(cfg) {
 // tickets through the quick lane, the engine read the lane as "no ticket", and those tickets never moved to In progress or
 // In UAT and never got the tester's comment.
 export const ownItem = (state) => (typeof state.autoItem === 'boolean' ? state.autoItem : /^QF-\d+$/.test(String(state.item ?? '')));
-export const hasTicket = (state) => state.lane !== 'batch' && !ownItem(state);
+// 0.7.30 (I-201, D62): a port carries another attempt's change of the same ticket to another branch; the ticket's status and
+// comments are its source's, so a port moves none of them.
+export const hasTicket = (state) => state.lane !== 'batch' && !ownItem(state) && !state.portOf;
 
 export function needsSummary(cfg, state) {
   if (cfg.tracker.kind === 'none' || !hasTicket(state)) return false;
@@ -849,15 +851,15 @@ export async function recordTracker(root, cfg, state, options) {
   return loadState(root, state.id);
 }
 
-// Doctor: the tracker mode and what it costs. api: the key must be there. agent (connector): the readback is only what
-// the agent saved, so the engine cannot prove it is the tracker's raw answer; say so and how to switch.
+// Doctor: the tracker mode and how its readback is proven. api: the key must be there. connector: the agent acts through its
+// connector, and the readback is host-recorded where the owner's harness keeps the tool result in its transcript.
 // What wf can verify for each kind x via, said by `wf doctor` and the docs.
 export const VERIFIABLE = {
   'linear/api': 'the engine posts, uploads and reads back itself through the API: status, comment body, every attachment (title, caption) and its embedding are checked on the tracker\'s own answer; uploaded bytes are trusted (no hash from the tracker)',
   'linear/connector': 'the agent acts through its connector; the readback is host-recorded where the host keeps a transcript (`wf tracker record --from-transcript`: the tracker\'s answer as ' + hostLabels() + ' recorded it, checked like an API readback), else a saved tool-result file, else agent-reported (`--agent-reported`: checked as reported, recorded unverified)',
   'github/cli': 'the engine calls the GitHub REST API through your `gh` login: labels (status), the comment body and release assets (name, caption label, size) are read back from GitHub itself; asset bytes are checked by size, not hash',
   'github/api': 'as github/cli, with a token from `wf secrets` instead of your `gh` login',
-  'github/connector': 'agent-reported: no host-recorded readback for GitHub connectors yet; for a verified handoff use `cli` (your `gh` login) or `api`',
+  'github/connector': 'the agent acts through its connector; the readback is agent-reported (checked as reported, recorded unverified): no host-recorded readback is read for GitHub connectors yet',
   'files/files': 'the engine does every action on the ticket files in the repo and reads them back: status, comment, attachments (each by sha256); anyone who can edit the repo can edit a ticket, and git history is the audit trail',
 };
 
@@ -908,12 +910,16 @@ export async function trackerModeChecks(root, cfg, { loadCatalog: catalog, readS
   if (VERIFIABLE[combo]) out.push({ info: true, check: `tracker ${combo}`, problem: VERIFIABLE[combo] });
   if (attached(screenshotMode(adapter))) out.push({ info: true, plain: true, check: 'tracker screenshots', problem: `the adapter shows screenshots as attachments (\`screenshots: ${adapter.screenshots}\`): ${adapter.screenshots === 'attachments' ? 'the delivered comment lists each file and its caption' : 'the delivered comment lists none'}, and no image is embedded` });
   for (const line of routeLines(cfg.tracker)) out.push({ info: true, plain: true, check: 'tracker status routing', problem: line });
+  // 0.7.30 (D63). Named failure (field): doctor warned that a connector-driven tracker was "agent-driven ... agent-reported,
+  // unverified" and offered `wf tracker mode api`, for projects that chose the connector on purpose. Sessions relayed the
+  // warning to the person as something to fix, again and again, after the person had said to use the connector. It is a
+  // standing choice of the project: doctor says how its readback is proven, as information, and suggests no other route.
   if (cfg.tracker.via === 'connector') {
     const s = detectOwner();
     const owning = findHost(s?.runtime);
     const store = optional(owning, 'storeDir')?.(home()) ?? null;
-    const level = !adapter?.connectorTools ? 'agent-reported (this adapter names no connector tools)' : store && fs.existsSync(store) ? `host-recorded (${owning.label} transcripts at ${store}; run the connector actions, then \`wf tracker record --event <e> --from-transcript\`)` : `agent-reported in this shell (no ${hostLabels()} session); host-recorded when the owner runs wf from ${hostLabels()}`;
-    out.push({ info: true, check: 'tracker readback level', problem: level });
+    const level = !adapter?.connectorTools ? 'agent-reported: this adapter names no connector tools, so no transcript is read' : store && fs.existsSync(store) ? `host-recorded: ${owning.label} keeps each connector result in its transcripts (${store}); run the connector actions, then \`wf tracker record --event <e> --from-transcript\` takes the tracker's answer from there` : `host-recorded when the owner runs wf from ${hostLabels()} (the tracker's answer is read from the session transcript the harness keeps); from this shell, with no such session, it is agent-reported`;
+    out.push({ info: true, plain: true, check: 'tracker readback', problem: `the agent's connector acts on the tracker (the project's choice); its readback is ${level}` });
   }
   out.push(...endpointNotices(cfg));
   if (cfg.tracker.kind === 'github') {
@@ -935,9 +941,6 @@ export async function trackerModeChecks(root, cfg, { loadCatalog: catalog, readS
     const entry = catalog(root).find((k) => k.key === keyName);
     if (!entry) out.push({ fail: true, key: keyName, problem: `tracker.via is api but ${keyName} is not catalogued in .workflow/secrets.yaml`, fix: `add { key: ${keyName}, kind: provided, required: true, purpose: "${cfg.tracker.kind} API key" } to .workflow/secrets.yaml, then the owner runs \`wf secrets guide ${keyName}\` in their own terminal` });
     else if (!secret(root, cfg, entry)) out.push({ fail: true, key: keyName, problem: `tracker.via is api but ${keyName} is not set`, fix: `the owner runs \`wf secrets guide ${keyName}\` in their own terminal` });
-  } else if (adapter?.api || adapter?.cli) {
-    const better = adapter.cli ? 'cli' : 'api';
-    out.push({ check: 'tracker mode', problem: `the ${cfg.tracker.kind} tracker is driven by the agent's connector: convenient, but the handoff is agent-reported (recorded "agent-reported, unverified"), so wf cannot prove the status, the comment or the attachments are the tracker's own answer`, fix: `let the engine reach it: \`wf tracker mode ${better}\`${better === 'api' ? ` (then the owner runs \`wf secrets guide ${keyName}\`)` : ' (uses your `gh` login)'}` });
   }
   return out;
 }

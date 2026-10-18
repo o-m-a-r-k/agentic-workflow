@@ -1,4 +1,4 @@
-import { attemptAdapter, trustedAdapter, adapterFileAtCommit } from './config.mjs';
+import { adapterPin, attemptAdapter, trustedAdapter, adapterFileAtCommit } from './config.mjs';
 import { actor, openState, treeHashes } from './attempt.mjs';
 import { append, listAttempts, loadState } from './ledger.mjs';
 import { loadCatalog } from './secrets.mjs';
@@ -11,7 +11,7 @@ import fs from 'node:fs';
 // only be run outside sealed evidence, or by replacing the frozen adapter.
 // Additions never replace admission rules, step definitions, or their plugins.
 export const validationDigest = (state) => state.validations?.length ? hashValue(state.validations) : null;
-export const validationCommit = (state, id) => state.validations?.find((v) => v.steps.some((s) => s.id === id))?.commit ?? state.adapterBase;
+export const validationCommit = (state, id) => state.validations?.find((v) => v.steps.some((s) => s.id === id))?.commit ?? adapterPin(state);
 export const validationIds = (state) => (state.validations ?? []).flatMap((v) => v.steps.map((s) => s.id));
 
 export function gateAdapter(root, state) {
@@ -34,7 +34,11 @@ export function gateAdapter(root, state) {
       // (found reproducing I-204): a member admitted with --defer-heavy that corrected a heavy admission check deferred it, while
       // its gate required every registered or corrected check to pass, so no gate of that member could pass short of `--full`.
       if (at >= 0) {
-        if (!wasAdmission) throw refuse('supplemental validation no longer matches its recorded committed definition');
+        // 0.7.30 (I-151, D60): the attempt follows its base branch's adapter, and the project may since have committed a step
+        // of the id this attempt registered (often the registration itself, delivered). The attempt's own check keeps its
+        // pin and runs in that place. Named failure (found building the follow): the collision refused every gate of the
+        // attempt as "no longer matches". A step of that id the attempt was admitted with still refuses, as before.
+        if (!wasAdmission && (adapterPin(state) === state.adapterBase || trustedAdapter(root, state, state.adapterBase).gate.steps.some((s) => s.id === step.id))) throw refuse('supplemental validation no longer matches its recorded committed definition');
         steps[at] = { ...step, deferrable: false };
       } else steps.push({ ...step, deferrable: false });
     }
@@ -110,7 +114,7 @@ export function carriedValidations(root, batch, members) {
         continue;
       }
       const decision = (m.validationCorrections ?? []).filter((c) => (c.steps ?? []).some((s) => s.id === x.step.id)).at(-1);
-      byId.set(x.step.id, { ...record, correctedFrom: [{ id: x.step.id, commit: batch.adapterBase, definition: own, admission: true }], ...(decision?.decision ? { approvedIn: { attempt: x.member, decision: decision.decision } } : decision?.approvedIn ? { approvedIn: decision.approvedIn } : {}) });
+      byId.set(x.step.id, { ...record, correctedFrom: [{ id: x.step.id, commit: adapterPin(batch), definition: own, admission: true }], ...(decision?.decision ? { approvedIn: { attempt: x.member, decision: decision.decision } } : decision?.approvedIn ? { approvedIn: decision.approvedIn } : {}) });
       continue;
     }
     if (own) {
@@ -277,10 +281,10 @@ async function registerValidation(root, options, correcting) {
     if (!own?.worktree) throw refuse('the admission adapter repo must belong to this attempt');
     const commit = git(own.worktree, ['rev-parse', 'HEAD']);
     if (git(own.worktree, ['merge-base', state.adapterBase, commit]) !== state.adapterBase) throw refuse('supplemental adapter must descend from the admission commit');
-    const pinOf = (id) => registered.find((r) => r.id === id)?.commit ?? state.adapterBase;
+    const pinOf = (id) => registered.find((r) => r.id === id)?.commit ?? adapterPin(state);
     if (correcting) for (const pin of new Set(ids.map(pinOf))) {
       if (pin === commit) throw refuse(`the adapter repo is still at ${pin.slice(0, 10)}, where ${ids.filter((id) => pinOf(id) === pin).join(', ')} is already pinned: commit the corrected definition or plugin first`, undefined, { id: 'validation:correct-unchanged' });
-      if (git(own.worktree, ['merge-base', pin, commit], { allowFail: true }) !== pin) throw refuse(`the corrected definition must descend from the commit it is pinned at (${pin.slice(0, 10)}); a correction moves a pin forward, never sideways or back`, undefined, { id: 'validation:correct-not-descendant' });
+      if (git(own.worktree, ['merge-base', pin, commit], { allowFail: true }) !== pin) throw refuse(`the corrected definition must descend from the commit it is pinned at (${pin.slice(0, 10)}); a correction moves a pin forward, never sideways or back`, pin === adapterPin(state) && pin !== state.adapterBase ? `this attempt follows its base branch's adapter, now at ${pin.slice(0, 10)}: \`wf base merge\` brings it into the worktree, then commit the correction on top` : undefined, { id: 'validation:correct-not-descendant' });
     }
     const candidate = trustedAdapter(root, state, commit);
     let catalog = [];

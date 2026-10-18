@@ -9,12 +9,15 @@ import { ok, rawReadback, singleRepoProject, state, tmp, wf, yaml } from './help
 
 const statuses = { started: 'In Progress', delivered: 'Ready for UAT', done: 'Done' };
 
-test('doctor states the tracker mode trade-off; api mode needs its key; the readback says where it came from', () => {
-  // Connector mode: a warning naming the gap and the one-line switch.
+// 0.7.30 (D63). Named failure (field): doctor warned that a connector-driven tracker was agent-driven and unverified and
+// offered the API route; projects that chose the connector on purpose had sessions relay it to the person as a fault, again
+// and again. Connector mode is reported as information: how its readback is proven, and no other route suggested.
+test('doctor states how each tracker mode is read back; connector mode is information, never a warning or a switch; api mode needs its key', () => {
   const a = singleRepoProject('mode-agent', { tracker: { kind: 'linear', statuses } });
   const d = wf(a.root, ['doctor', '--no-steps']);
-  assert.match(d.out, /warning: tracker mode[\s\S]*agent-reported[\s\S]*`wf tracker mode api`[\s\S]*`wf secrets guide LINEAR_API_KEY`/);
-  assert.match(d.out, /tracker readback level\n {4}verifiable: agent-reported/);
+  assert.doesNotMatch(d.out, /warning: tracker/);
+  assert.doesNotMatch(d.out, /wf tracker mode|wf secrets guide|LINEAR_API_KEY/, 'nothing suggests another route or a key');
+  assert.match(d.out, /tracker readback\n {4}the agent's connector acts on the tracker \(the project's choice\); its readback is host-recorded when the owner runs wf from [^\n]*\(the tracker's answer is read from the session transcript the harness keeps\)/);
   assert.match(d.out, /connectors: tracker linear\/connector/);
   // Api mode without the key catalogued, then catalogued but not set: doctor fails with the exact command.
   const b = singleRepoProject('mode-api', { tracker: { kind: 'linear', via: 'api', statuses } });
@@ -42,7 +45,7 @@ test('a connector readback is labelled agent-reported unless it is the host\'s o
   fs.writeFileSync(saved, JSON.stringify({ issue: { identifier: item, description: 'd', state: { name: 'In Progress' } } }));
   ok(wf(root, ['tracker', 'record', '--event', 'admitted', '--capture', saved, '--attempt', e.id]));
   assert.equal(state(root, e.id).tracker.done[0].provenance, 'agent-reported, unverified');
-  assert.match(ok(wf(root, ['status', '--attempt', e.id])).out, /tracker admitted: readback agent-reported, unverified \(an engine route verifies it: `wf tracker mode api\|cli\|files`\)/);
+  assert.match(ok(wf(root, ['status', '--attempt', e.id])).out, /tracker admitted: readback agent-reported, unverified \(recorded from the owner's session transcript instead, it is host-recorded: `wf tracker record --event admitted --from-transcript`\)/);
   // The host's tool-result files (Claude Code saves long tool results there), given as issue and comments.
   const home = tmp('home');
   const results = path.join(home, '.claude', 'projects', 'p', 's', 'tool-results');

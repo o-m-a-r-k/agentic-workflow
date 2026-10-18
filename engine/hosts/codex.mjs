@@ -69,11 +69,14 @@ async function connectorCalls(file, tools) {
 
 // A fresh role through `codex exec --json`: `thread.started` carries the session id, `turn.completed` the end of the turn,
 // and completed `agent_message` items the assistant's text.
-function buildLaunch(h, { root, body, nonGitRoot }) {
+// `resume` (0.7.30, I-153): the thread of a launch the model's capacity ended, continued with `codex exec resume <id>`, with
+// the same sandbox, instructions, model and effort.
+function buildLaunch(h, { root, body, nonGitRoot, resume = null }) {
   const args = ['exec', '--json', '--cd', root, '--sandbox', 'workspace-write', '-c', `developer_instructions=${JSON.stringify(body)}`];
   if (nonGitRoot) args.push('--skip-git-repo-check');
   if (h.model) args.push('--model', h.model);
   if (h.effort) args.push('-c', `model_reasoning_effort=${JSON.stringify(h.effort)}`);
+  if (resume) args.push('resume', resume);
   args.push('-');
   return { bin: 'codex', args };
 }
@@ -89,12 +92,21 @@ function classifyLaunch({ prompt, model, effort, dir }) {
 }
 const classifyResult = ({ outFile }) => ({ text: fs.readFileSync(outFile, 'utf8') });
 
+// 0.7.30 (I-153): the model at capacity, as Codex reports it in a failed turn or an error event (`server_overloaded`, its
+// spelling `server_is_overloaded`, or the words). Named failure (audit of role launches): seven launches ended this way and
+// were replaced by fresh handoffs; four had made no edit.
+const CAPACITY = /server_overloaded|server_is_overloaded|\boverloaded\b|\bat capacity\b/i;
+const capacityIn = (...texts) => texts.some((t) => typeof t === 'string' && CAPACITY.test(t));
+
 function interpretEvent(e) {
   if (e.type === 'thread.started') return { started: e.thread_id };
   if (e.type === 'turn.completed') return { terminal: { success: true } };
-  if (e.type === 'turn.failed') return { failed: true };
+  if (e.type === 'turn.failed') return { failed: true, ...(capacityIn(e.error?.message, e.error?.code, e.message) ? { capacity: true, error: String(e.error?.message ?? e.message ?? 'server_overloaded').slice(0, 300) } : {}) };
   // An error event may be passing (a reconnect, a retried request): it fails the launch only if no turn completes after it.
-  if (e.type === 'error') return { error: String(e.message ?? e.error?.message ?? e.error ?? 'error').slice(0, 300) };
+  if (e.type === 'error') {
+    const error = String(e.message ?? e.error?.message ?? e.error ?? 'error').slice(0, 300);
+    return { error, ...(capacityIn(error, e.error?.code) ? { capacity: true } : {}) };
+  }
   return {};
 }
 

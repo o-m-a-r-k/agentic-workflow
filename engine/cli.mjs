@@ -33,6 +33,8 @@ import { ENGINE_VERSION, WfError, compareVersions, parseArgs, parseVersion, refu
 import { afterAnswer, approveFromQuestion, approveHint, approveInTerminal, correctionHint, decisionLine, optionLines, pendingDecisions, plainLabel, questionFor, withdrawDecision } from './approve.mjs';
 import { logRefusal, readRefusals, refusalCounts } from './refusals.mjs';
 import { recordStrategy, settleRoundQuestions, signalsReport, signalsText } from './strategy.mjs';
+import { followAdapter, followLines } from './adapter-follow.mjs';
+import { addTargets, admitPorts, portLines, targetLines } from './targets.mjs';
 import { courseLines, pastEstimates } from './signals.mjs';
 import { splitCommand } from './split.mjs';
 import { deploymentLine } from './deployment-step.mjs';
@@ -52,8 +54,14 @@ Onboarding
 
 Work
   wf entry [--item ID] [--lane quick|standard] [--intent implementation|analysis] [--repos a,b] [--defer-heavy] [--issue-file F]
+           [--target R=BRANCH] [--also-target R=BRANCH] [--port ATTEMPT --target R=BRANCH]
                                     --defer-heavy: its heavy steps run once in a batch's gate; only attempts admitted with it
                                     join \`wf batch create\` (decide before implementing: it is set at admission)
+                                    --target: the repo is based on and delivered to BRANCH, not its configured base
+                                    --also-target: also delivered to BRANCH, by a port \`wf deliver\` admits once this delivery is done
+                                    --port: carry ATTEMPT's accepted change (its own commits, its criteria) to the --target branch
+  wf target add R=BRANCH --reason "why" [--attempt ID]
+                                    deliver this attempt to BRANCH too (a port, admitted once its own delivery is complete)
   wf plan --file plan.yaml | --from-agent PLANNER_ID
                                     freeze acceptance criteria and the plan (--from-agent: the planner's last YAML block)
   wf plan --check --file plan.yaml   the planner's dry run: every check wf plan runs, nothing recorded
@@ -244,6 +252,12 @@ function summary(root, s, { base = null, resume = false } = {}) {
   const lines = [`${s.id}  ${s.item}  lane=${s.lane}  intent=${s.intent}  phase=${s.phase}`, `  owner: ${s.owner}`];
   for (const [name, r] of Object.entries(s.repos)) lines.push(`  ${name}: ${r.worktree} (base ${r.base.slice(0, 10)})`);
   if (base) lines.push(...baseLines(base));
+  // 0.7.30 (I-151, D60): the adapter the attempt follows on its base branch, and a tip it could not take.
+  if (isOpen(s)) lines.push(...followLines(s));
+  // 0.7.30 (I-201, D62): its own target, the port it is, and the branches it is also delivered to.
+  try {
+    lines.push(...targetLines(root, s));
+  } catch {}
   if (s.activeHold) lines.push(`  HOLD: ${s.activeHold.reason}`);
   lines.push(...unansweredLines(s));
   try {
@@ -317,7 +331,8 @@ function summary(root, s, { base = null, resume = false } = {}) {
   };
   if (s.lastGate) lines.push(`  last gate: ${ended(s.lastGate)} (${s.lastGate.runId})`);
   for (const t of s.tracker.done) if (t.provenance === 'host-recorded') lines.push(`  tracker ${t.event}: readback host-recorded (the tracker's answer as the ${findHost(t.host?.runtime)?.label ?? 'harness'} host wrote it in the owner's transcript, not the agent; a process running as the same user could edit that file)`);
-  for (const t of s.tracker.done) if (t.provenance === 'agent-reported, unverified') lines.push(`  tracker ${t.event}: readback agent-reported, unverified (an engine route verifies it: \`wf tracker mode api|cli|files\`)`);
+  // 0.7.30 (D63): how a readback is proven, never a nudge to another tracker route the project did not choose.
+  for (const t of s.tracker.done) if (t.provenance === 'agent-reported, unverified') lines.push(`  tracker ${t.event}: readback agent-reported, unverified (recorded from the owner's session transcript instead, it is host-recorded: \`wf tracker record --event ${t.event} --from-transcript\`)`);
   if (s.checks?.length) lines.push(`  last check: ${ended(s.checks.at(-1))} (${s.checks.at(-1).runId}; light steps only, never counts as the gate)`);
   if (s.flaky?.length) lines.push(`  flaky: ${[...new Set(s.flaky.map((f) => `${f.step}${f.suites?.length ? ` (${f.suites.join(', ')})` : ''}`))].join(', ')} failed and then passed with the same inputs`);
   if (s.criteria && isOpen(s) && !s.accepted) {
@@ -1175,8 +1190,11 @@ async function dispatch(cmd, sub, positional, options) {
       const deferrals = [after, ...(after.batch?.members ?? []).map((m) => loadState(root, m))].flatMap((st) => (st.discovered ?? []).filter((x) => x.status === 'deferred').map((x) => ({ ...x, id: st.id === after.id ? x.id : `${st.id}:${x.id}` }))).map((x) => `\n  ${x.id} deferred (${x.deferred.source?.provenance ?? 'recorded'}${x.deferred.source?.file ? `, ${x.deferred.source.file}:${x.deferred.source.line}` : ''}): ${x.summary}\n    taken as the owner's decision: "${x.deferred.decision}"\n    channel: ${channelOf(x)}`).join('');
       // I-20: a repo delivered while its adapter reported another state after the merge, as the owner acknowledged it.
       const postMerge = Object.values(after.delivery.repos).filter((d) => d.acknowledged).map((d) => `\n  ${d.repo}: on ${d.target} while the delivery adapter reported ${d.adapterState}${d.observed?.evidence ? ` (${d.observed.evidence})` : ''}; acknowledged by the owner as ${d.acknowledged}`).join('');
-      const repins = (after.adapterRepins ?? []).map((x) => `\n  delivery adapter re-pinned from ${x.from.slice(0, 10)} to ${x.to.slice(0, 10)}: ${x.reason}`).join('');
-      print(options, `delivered ${after.id}: ${Object.values(after.delivery.repos).map((d) => `${d.repo}${d.commit ? `@${d.commit.slice(0, 10)}` : ' (no changes)'}${d.adapterState && d.adapterState !== 'integrated' ? ` [adapter: ${d.adapterState}]` : ''}`).join(', ')}${postMerge ? `\nnot a clean adapter delivery (show this to the owner):${postMerge}` : ''}${repins}${api}${deferrals ? `\ndeferred issues (show these to the owner: this is what was taken as their decision):${deferrals}` : ''}${showBlock(root, after)}${members}${comment}\nnext: ${nextAction(root, after)}`, after);
+      // 0.7.30 (I-151, D60): each adapter the attempt took from its base branch, said with the delivery as a re-pin is.
+      const repins = [...(after.adapterFollows ?? []).map((x) => `\n  adapter followed ${x.ref} from ${x.from.slice(0, 10)} to ${x.to.slice(0, 10)} (${x.changed.join(', ')})${x.delivery?.mode === 'kept' ? `; the delivery kept \`${x.delivery.from}\` (the base branch names \`${x.delivery.to}\`)` : ''}`), ...(after.adapterRepins ?? []).map((x) => `\n  delivery adapter re-pinned from ${x.from.slice(0, 10)} to ${x.to.slice(0, 10)}: ${x.reason}`)].join('');
+      // 0.7.30 (I-201, D62): each branch the attempt is also delivered to gets its port once this delivery is complete.
+      const ports = portLines(after, await admitPorts(root, after, options, entry));
+      print(options, `delivered ${after.id}: ${Object.values(after.delivery.repos).map((d) => `${d.repo}${d.commit ? `@${d.commit.slice(0, 10)}` : ' (no changes)'}${d.target && after.repos[d.repo]?.target ? ` -> ${d.target}` : ''}${d.adapterState && d.adapterState !== 'integrated' ? ` [adapter: ${d.adapterState}]` : ''}`).join(', ')}${postMerge ? `\nnot a clean adapter delivery (show this to the owner):${postMerge}` : ''}${repins}${ports}${api}${deferrals ? `\ndeferred issues (show these to the owner: this is what was taken as their decision):${deferrals}` : ''}${showBlock(root, after)}${members}${comment}\nnext: ${nextAction(root, after)}`, after);
       return 0;
     }
     case 'tracker': {
@@ -1316,6 +1334,13 @@ async function dispatch(cmd, sub, positional, options) {
       if (!options.items || options.items === true) throw new WfError('usage: wf split --items <ids> --reason "why" [--attempt ID] (ids: work items, criteria, observations as reviewer:F1, discovered issues)');
       const r = splitCommand(root, s, options);
       print(options, `${r.id}: ${r.siblings.map((x) => x.id).join(', ')} created beside ${s.id} in ${r.batch} (delivered together)\n  moved: ${Object.entries(r.moved).filter(([, v]) => v.length).map(([k, v]) => `${k} ${v.join(', ')}`).join('; ') || 'nothing'}\n  each sibling carries its criteria from the plan; start its implementer: \`wf handoff implementer --attempt ${r.siblings[0].id} --agent <id>\`\n  once every member is accepted: \`wf batch create --members ${[s.id, ...r.siblings.map((x) => x.id)].join(',')}\`\nnext: ${nextAction(root, r.state)}`, { split: r.id, batch: r.batch, siblings: r.siblings.map((x) => x.id), moved: r.moved });
+      return 0;
+    }
+    // 0.7.30 (I-201, D62): another branch this attempt is delivered to, by a port admitted once its own delivery is complete.
+    case 'target': {
+      if (sub !== 'add') throw new WfError('usage: wf target add <repo>=<branch>[,...] --reason "why" [--attempt <id>]');
+      const s = addTargets(root, openState(root, options), positional[0], { reason: options.reason, by: actorOf(options) });
+      print(options, `${s.id} is also delivered to ${s.alsoTargets.map((t) => `${t.repo} -> ${t.branch}`).join(', ')}: ${s.delivery.completedAt ? `\`wf entry --item ${s.item} --port ${s.id} --target <repo>=<branch>\` admits each port` : 'each port is admitted by `wf deliver` once this delivery is complete'}`, s);
       return 0;
     }
     case 'hold': {
@@ -1609,7 +1634,8 @@ async function dispatch(cmd, sub, positional, options) {
           const s = loadState(root, id);
           if (!isOpen(s)) return [];
           openEvidence(root, id);
-          return [settleRoundQuestions(root, s)];
+          // 0.7.30 (I-151, D60): as `openState` does, each listed attempt takes its base branch's adapter where it safely can.
+          return [followAdapter(root, settleRoundQuestions(root, s))];
         } catch (error) {
           damaged.push({ id, damaged: String(error.message ?? error).split('\n').filter(Boolean).slice(0, 2).join(' ') });
           return [];

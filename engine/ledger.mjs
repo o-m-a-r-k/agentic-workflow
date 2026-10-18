@@ -162,6 +162,16 @@ export function reduce(entries) {
     adapterBase: null,
     adapter: null,
     deliveryAdapterBase: null,
+    // 0.7.30 (I-151, D60): the commit the attempt reads its adapter at once it followed the base branch (null: its admission
+    // base), every follow, and the latest tip it could not take with why (engine/adapter-follow.mjs).
+    adapterPin: null,
+    adapterFollows: [],
+    adapterHeld: null,
+    // 0.7.30 (I-201, D62): the attempt this one ports to another branch, what the port applied, and the branches this attempt
+    // is also delivered to (engine/targets.mjs).
+    portOf: null,
+    port: null,
+    alsoTargets: [],
     adapterRepins: [],
     criteria: null,
     // How many criteria the plan froze with: `wf signals` shows the amendments against it.
@@ -260,6 +270,9 @@ export function reduce(entries) {
           batch: d.batch ?? null,
           deferHeavy: d.deferHeavy ?? false,
           reopenedFrom: d.reopenedFrom ?? null,
+          portOf: d.port?.of ?? null,
+          port: d.port ?? null,
+          alsoTargets: (d.alsoTargets ?? []).map((t) => ({ ...t, at: e.at, by: e.actor })),
           issue: d.issue ?? null,
           schemaVersion: d.schemaVersion,
           engineVersion: d.engineVersion,
@@ -394,6 +407,16 @@ export function reduce(entries) {
         if (h?.launch) { h.session = d.session; h.launch = { ...h.launch, session: d.session, status: 'running', startedAt: e.at }; }
         break;
       }
+      // 0.7.30 (I-153): a launch the model's capacity ended, resumed (its session continued, or started again when none had
+      // begun): the new process, running again, no longer failed.
+      case 'agent.launch.resumed': {
+        const h = s.handoffs.find((h) => h.bundle === d.handoff);
+        if (h?.launch) {
+          const { failure, exitCode, finishedAt, ...kept } = h.launch;
+          h.launch = { ...kept, pid: d.pid, out: d.out ?? kept.out, err: d.err ?? kept.err, spawnedAt: e.at, status: h.session ? 'running' : 'starting', resumes: d.resume ?? (kept.resumes ?? 0) + 1 };
+        }
+        break;
+      }
       case 'agent.launch.finished': {
         const h = s.handoffs.find((h) => h.bundle === d.handoff);
         if (h?.launch) h.launch = { ...h.launch, status: d.status, exitCode: d.exitCode, finishedAt: e.at, ...(d.failure ? { failure: d.failure } : {}) };
@@ -496,8 +519,29 @@ export function reduce(entries) {
       case 'repo.integrating':
         s.delivery.integrating[d.repo] = { ...d, at: e.at };
         break;
+      // 0.7.30 (I-151, D60): the attempt took the adapter committed on its base branch. The engine that writes the event decides
+      // what the delivery reads (a delivery started under another adapter kind keeps its pin), whether the execution pin moves
+      // with it and whether the acceptance is withdrawn, so an older ledger folds as it did.
+      case 'adapter.followed':
+        s.adapterPin = d.to;
+        s.adapterHeld = null;
+        s.adapterFollows.push({ ...d, at: e.at });
+        s.deliveryAdapterBase = d.delivery?.mode === 'kept' ? d.delivery.pin : null;
+        if (d.runtime === true) s.runtimeAdapterBase = null;
+        if (d.withdrewAcceptance === true) {
+          s.accepted = null;
+          s.phase = 'implementing';
+        }
+        break;
+      case 'targets.added':
+        for (const t of d.targets ?? []) s.alsoTargets.push({ ...t, reason: d.reason ?? null, at: e.at, by: e.actor });
+        break;
+      case 'adapter.notFollowed':
+        s.adapterHeld = { tip: d.tip, ref: d.ref, why: d.why, at: e.at };
+        break;
       // I-21: the owner re-pinned the delivery adapter of an attempt that has not delivered everything to the adapter now
-      // committed on the base branch. Only delivery reads it; the gate, review and tracker stay on the admission pin.
+      // committed on the base branch. Only delivery reads it. Since 0.7.30 the attempt follows its base branch by itself
+      // (above); a re-pin is left for a delivery whose adapter kind changed half way.
       case 'adapter.repinned':
         s.deliveryAdapterBase = d.to;
         s.adapterRepins.push({ from: d.from, to: d.to, reason: d.reason, changed: d.changed ?? [], delivered: d.delivered ?? {}, at: e.at, by: e.actor });

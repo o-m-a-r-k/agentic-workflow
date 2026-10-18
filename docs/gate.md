@@ -220,9 +220,10 @@ wf validation add --steps http-proof,browser-proof --criteria C2,C3 --reason "Re
 
 Registration requires a clean committed product tree, frozen criteria, an admitted adapter repo and no active role
 or gate. It records the adapter commit, exact selected definitions, criterion references, reason and permitted
-existing secret-key bindings in the ledger. Existing IDs cannot be replaced; the admission adapter pin never moves.
-All admission checks, rules, roles, environment allowlists, secret stores, concurrency limits and delivery targets
-remain frozen. Only existing catalogued keys may acquire a new binding through the committed secret catalog.
+existing secret-key bindings in the ledger. Existing IDs cannot be replaced, and a registration moves no other pin: the
+rest of the adapter is the one the attempt follows on its base branch (0.7.30, D60), and a step the base branch later
+defines under a registered id leaves the registered one running in its place. Only existing catalogued keys may acquire a
+new binding through the committed secret catalog.
 
 Registration clears prior acceptance and invalidates the old gate. Obtain a fresh code-review round before the
 next full gate. Review each added definition and its single-file plugin at the recorded commit, not a later edited

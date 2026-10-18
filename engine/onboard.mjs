@@ -805,7 +805,8 @@ export async function doctor(root, { runSteps = true, runtime = detectOwner()?.r
         const check = id + ' ' + role + ' execution model (pin ' + settings.runtimeAdapterBase.slice(0, 12) + ')';
         if (settings.model) report.config.push({ ok: true, runtime, check, note: settings.model + (settings.effort ? ' / ' + settings.effort : '') });
         else {
-          const issue = { runtime, check, problem: 'the attempt has no pinned model for this role, even if the current adapter does', fix: '`wf models refresh --attempt ' + id + '`, then create a fresh handoff' };
+          // 0.7.30 (I-151, D60): the attempt follows its base branch's adapter, so the model committed and pushed there reaches it.
+          const issue = { runtime, check, problem: 'the attempt has no pinned model for this role at the adapter it reads, even if the working copy has one', fix: 'commit the model on the base branch and push it (the attempt follows it), then create a fresh handoff' };
           if (hostFor(runtime).spawnMode === 'engine-only') bad('config', issue); // A launch by the engine requires a model.
           else report.warnings.push({ ...issue, ok: true, warn: true }); // An owner-started role may inherit the host's model.
         }

@@ -30,13 +30,26 @@ if (${JSON.stringify(mode === 'host-init')}) { console.error('Error: failed to i
 const counter = ${JSON.stringify(path.join(base, 'counter'))};
 const n = fs.existsSync(counter) ? Number(fs.readFileSync(counter,'utf8')) + 1 : 0;
 fs.writeFileSync(counter,String(n));
-const sid = '${SID}'.slice(0,-4) + String(n).padStart(4,'0');
+const resuming = args.includes('resume');
+const sid = resuming ? args[args.indexOf('resume') + 1] : '${SID}'.slice(0,-4) + String(n).padStart(4,'0');
 fs.writeFileSync(${JSON.stringify(path.join(base, 'spawn.json'))}, JSON.stringify({args,prompt,parent:process.env.CODEX_THREAD_ID??null,wfVersion:spawnSync('wf',['--version'],{encoding:'utf8'}).stdout.trim()}));
+fs.appendFileSync(${JSON.stringify(path.join(base, 'spawns.log'))}, JSON.stringify(args.slice(-3)) + '\\n');
 const file = path.join(${JSON.stringify(host)},'.codex','sessions','2026','10','08','rollout-test-'+sid+'.jsonl');
 fs.mkdirSync(path.dirname(file),{recursive:true});
 const at = new Date().toISOString(), line=(x)=>JSON.stringify({timestamp:at,...x});
 const actual = prompt + ${JSON.stringify(mode === 'steered' ? ' Focus only on one file.' : '')};
-fs.writeFileSync(file,[line({type:'session_meta',payload:{id:sid,timestamp:at,originator:'codex_exec',source:'exec',cwd:${JSON.stringify(root)}}}),line({type:'response_item',payload:{type:'message',role:'user',internal_chat_message_metadata_passthrough:{content_item_kinds:['agents_md.instructions','environments.environment_context']},content:[{type:'input_text',text:'# AGENTS.md instructions fixture'},{type:'input_text',text:'<environment_context>fixture</environment_context>'}]}}),line({type:'response_item',payload:{type:'message',role:'user',internal_chat_message_metadata_passthrough:{content_item_kinds:['user.text']},content:[{type:'input_text',text:actual}]}}),line({type:'response_item',payload:{type:'message',role:'assistant',content:[{type:'output_text',text:${JSON.stringify('```yaml\n' + yaml(planDoc({ plan: 'Change a.', criteria: [{ id: 'C1', text: 'a changes' }] })) + '\n```')}}]}})].join('\\n')+'\\n');
+const said = line({type:'response_item',payload:{type:'message',role:'user',internal_chat_message_metadata_passthrough:{content_item_kinds:['user.text']},content:[{type:'input_text',text:actual}]}});
+const answer = line({type:'response_item',payload:{type:'message',role:'assistant',content:[{type:'output_text',text:${JSON.stringify('```yaml\n' + yaml(planDoc({ plan: 'Change a.', criteria: [{ id: 'C1', text: 'a changes' }] })) + '\n```')}}]}});
+// 0.7.30 (I-153): the model at capacity, as Codex reports it, after the session and its prompt are written; 'capacity' once,
+// 'capacity-persist' until the room file exists. A resume adds its prompt to the same session.
+const atCapacity = (${JSON.stringify(mode === 'capacity')} && !resuming) || (${JSON.stringify(mode === 'capacity-persist')} && !fs.existsSync(${JSON.stringify(path.join(base, 'room'))}));
+if (resuming && fs.existsSync(file)) fs.appendFileSync(file,[said,...(atCapacity ? [] : [answer])].join('\\n')+'\\n');
+else fs.writeFileSync(file,[line({type:'session_meta',payload:{id:sid,timestamp:at,originator:'codex_exec',source:'exec',cwd:${JSON.stringify(root)}}}),line({type:'response_item',payload:{type:'message',role:'user',internal_chat_message_metadata_passthrough:{content_item_kinds:['agents_md.instructions','environments.environment_context']},content:[{type:'input_text',text:'# AGENTS.md instructions fixture'},{type:'input_text',text:'<environment_context>fixture</environment_context>'}]}}),said,...(atCapacity ? [] : [answer])].join('\\n')+'\\n');
+if (atCapacity) {
+  console.log(JSON.stringify({type:'thread.started',thread_id:sid}));
+  console.log(JSON.stringify({type:'turn.failed',error:{message:'stream error: server_overloaded: the model is at capacity; retry later'}}));
+  process.exit(1);
+}
 if (${JSON.stringify(mode === 'closure-writer')}) {
   const body = JSON.parse(args.find(a => a.startsWith('developer_instructions=')).slice('developer_instructions='.length));
   if (!body.includes('fs.writeFile') || !body.includes('apply_patch') || body.includes('with the Write tool, not a Bash heredoc')) {
@@ -123,6 +136,63 @@ test('a passing error before a completed turn is a completed launch; a launch wi
     assert.deepEqual(state(root, id).handoffs.at(-1).launch.failure, { kind: 'exited', detail: 'no completed turn' }, 'why it ended is in the ledger');
     assert.equal(wf(root, ['plan', '--from-agent', 'p', '--attempt', id], { env }).code, 75);
   }
+});
+
+// 0.7.30 (I-153). Named failure (audit of role launches): seven launches failed because the model was at capacity
+// (`server_overloaded`) and were replaced by fresh handoffs; four had made no edit. The launch is resumed in its own session.
+test('I-153: a launch the model\'s capacity ended is resumed in its own session, with the same model and instructions, and completes', () => {
+  const { base, root, id, env } = prepared('capacity');
+  const r = wf(root, ['handoff', 'run', '--agent', 'p', '--attempt', id, '--json'], { env });
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.err, /the model is at capacity \(stream error: server_overloaded[^)]*\); resuming session \S+ now \(resume 1\)/);
+  const h = state(root, id).handoffs.at(-1);
+  assert.equal(h.launch.status, 'completed');
+  assert.equal(h.launch.resumes, 1);
+  assert.equal(h.session, SID, 'the same session, not a fresh one');
+  const resumed = JSON.parse(fs.readFileSync(path.join(base, 'spawn.json'), 'utf8'));
+  assert.deepEqual(resumed.args.slice(-3), ['resume', SID, '-']);
+  assert.ok(resumed.args.includes('future-model') && resumed.args.some((a) => a.startsWith('developer_instructions=') && a.includes('You are the planner')));
+  assert.match(resumed.prompt, /model was at capacity[\s\S]*Continue from where you stopped/);
+  assert.deepEqual(readLedger(root, id).filter((e) => e.type.startsWith('agent.launch.')).map((e) => e.type), ['agent.launch.requested', 'agent.launch.spawned', 'agent.launch.started', 'agent.launch.resumed', 'agent.launch.finished']);
+  ok(wf(root, ['plan', '--from-agent', 'p', '--attempt', id], { env }));
+});
+
+test('I-153: past the owner\'s return point a launch at capacity is kept, said so, and `wf handoff run` resumes it in its session', () => {
+  const { base, root, id, env } = prepared('capacity-persist');
+  const r = wf(root, ['handoff', 'run', '--agent', 'p', '--attempt', id, '--minutes', '0.1', '--json'], { env });
+  assert.equal(r.code, 1);
+  assert.match(r.err, /Codex planner p stopped: the model is at capacity \(stream error: server_overloaded[^)]*\) after 1 resume\(s\); its session is kept: `wf handoff run --agent p --attempt \S+` resumes it when the model has room \(no fresh handoff\)/);
+  let h = state(root, id).handoffs.at(-1);
+  assert.equal(h.launch.status, 'failed');
+  assert.equal(h.launch.failure.kind, 'capacity');
+  fs.writeFileSync(path.join(base, 'room'), 'yes');
+  const again = ok(wf(root, ['handoff', 'run', '--agent', 'p', '--attempt', id, '--json'], { env }));
+  assert.equal(again.json().status, 'completed');
+  h = state(root, id).handoffs.at(-1);
+  assert.equal(h.launch.status, 'completed');
+  assert.equal(h.launch.resumes, 2);
+  assert.equal(h.session, SID);
+  assert.deepEqual(fs.readFileSync(path.join(base, 'spawns.log'), 'utf8').trim().split('\n').map((l) => JSON.parse(l).slice(0, 2)), [['-c', 'model_reasoning_effort="max"'], ['resume', SID], ['resume', SID]]);
+  ok(wf(root, ['plan', '--from-agent', 'p', '--attempt', id], { env }));
+});
+
+test('I-153: each harness names its own capacity signal, never a completed turn or another error, and resumes its own session', async () => {
+  const claude = (await import('../engine/hosts/claude.mjs')).default;
+  const codex = (await import('../engine/hosts/codex.mjs')).default;
+  const result = (text, failed = true) => claude.interpretEvent({ type: 'result', subtype: 'success', is_error: failed, session_id: 's', result: text });
+  assert.equal(result('API Error: Repeated 529 Overloaded errors').capacity, true);
+  assert.equal(result('API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}').capacity, true);
+  assert.equal(result('Prompt is too long').capacity, undefined);
+  assert.equal(result('the queue was overloaded, now fixed', false).capacity, undefined, 'a completed turn is never capacity');
+  assert.equal(claude.interpretEvent({ type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } }).capacity, true);
+  assert.equal(codex.interpretEvent({ type: 'turn.failed', error: { message: 'stream error: server_overloaded' } }).capacity, true);
+  assert.equal(codex.interpretEvent({ type: 'error', message: 'unexpected status 503: server_is_overloaded' }).capacity, true);
+  assert.equal(codex.interpretEvent({ type: 'turn.failed', error: { message: 'context window exceeded' } }).capacity, undefined);
+  const h = { role: 'planner', agentType: 'wf-planner', model: 'm', effort: 'high' };
+  const c = claude.buildLaunch(h, { body: 'b', requestedSession: 'req', resume: 'sess' }).args;
+  assert.equal(c[c.indexOf('--resume') + 1], 'sess');
+  assert.ok(!c.includes('--session-id') && c.includes('wf-planner') && c.includes('m'));
+  assert.deepEqual(codex.buildLaunch(h, { root: '/r', body: 'b', resume: 'thread' }).args.slice(-3), ['resume', 'thread', '-']);
 });
 
 test('start is visible before a quiet child finishes and cancellation records failure', { timeout: 15_000 }, async () => {

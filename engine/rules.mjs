@@ -1,7 +1,7 @@
 import { mkdirStateDirectory } from './state-folders.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
-import { adapterLocation, attemptAdapter, repoDir } from './config.mjs';
+import { adapterLocation, adapterPin, attemptAdapter, repoDir } from './config.mjs';
 import { screenshots } from './gate.mjs';
 import { attemptDir } from './ledger.mjs';
 import { findSkill } from './skills.mjs';
@@ -46,7 +46,7 @@ export function docAt(root, repo, commit, doc) {
 
 const commitFor = (root, cfg, state, repo) => {
   if (!repo) return null;
-  if (repo.name === adapterRepoName(root, cfg, state)) return state.adapterBase;
+  if (repo.name === adapterRepoName(root, cfg, state)) return adapterPin(state);
   return state.repos[repo.name]?.base ?? null;
 };
 
