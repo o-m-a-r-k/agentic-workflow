@@ -141,11 +141,13 @@ function holding(state, w) {
 // Findings and discovered issues that do not block and are still open, with what the owner and the pass need of each, less
 // those a pass already holds. A low one included: the person's rule fixes it unless they let it leave, and it joins a pass
 // that happens anyway, never a round of its own.
-export function outstanding(state) {
+// 0.7.30 (I-173, D51): `bookkeeping` adds the open bookkeeping entries (an implementer's lint or fixture fixes) for a fix round's
+// `alsoFix`: the implementer makes them. The course leaves them out: they open no pass and keep no delivery waiting.
+export function outstanding(state, { bookkeeping = false } = {}) {
   const held = new Set(passItemsOf(state).filter((w) => holding(state, w)).flatMap((w) => w.items));
   // A finding already recorded fixed waits for a reviewer to verify it, not for another pass.
   const found = state.review ? observations(state).filter((f) => !dispositionOf(state, f.ref)).map((f) => ({ ref: f.ref, kind: 'finding', level: placementLevel(state, f), severity: f.severity ?? null, family: f.family ?? null, summary: String(f.summary ?? '').slice(0, 300), where: f.evidence ?? null })) : [];
-  const issues = openDiscovered(state).filter((d) => d.kind !== 'bookkeeping' && !d.claim).map((d) => ({ ref: d.id, kind: 'discovered', level: discoveredLevel(d), severity: d.severity ?? null, family: d.family ?? null, summary: String(d.summary ?? '').slice(0, 300), where: d.where ?? null, blockedBy: d.blockedBy ?? null }));
+  const issues = openDiscovered(state).filter((d) => (bookkeeping || d.kind !== 'bookkeeping') && !d.claim).map((d) => ({ ref: d.id, kind: 'discovered', level: discoveredLevel(d), severity: d.severity ?? null, family: d.family ?? null, summary: String(d.summary ?? '').slice(0, 300), where: d.where ?? null, blockedBy: d.blockedBy ?? null }));
   return [...found, ...issues].filter((x) => !held.has(x.ref));
 }
 

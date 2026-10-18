@@ -128,7 +128,16 @@ export { recordedTogether };
 // top-level keys were dropped from the frozen plan and never reached the implementers. Plan sections may sit under
 // `plan:` (a mapping, or plain text for the summary) or at the top level beside `criteria` and `work`, as the planner
 // template writes them; any other top-level key is refused with this list. The sections themselves are open.
-export const PLAN_SECTIONS = ['summary', 'contract', 'anchors', 'tests', 'doNotRun', 'externalServices', 'agentSplit', 'expect'];
+export const PLAN_SECTIONS = ['summary', 'contract', 'anchors', 'tests', 'doNotRun', 'externalServices', 'agentSplit', 'beyondAsked', 'expect'];
+// 0.7.30 (I-159, D54): what the plan adds beyond what the person asked (`beyondAsked: [{ what, why }]`), said where the plan is
+// frozen so the owner tells the person, and handed to implementers and reviewers in the plan. Named failure (field): a hotfix
+// asked as "fast, with the existing inbox" was planned with a new ledger, a migration, retry backoff and retention (180 minutes
+// nobody asked for), seen only when the person read the plan. The engine judges nothing in it: it is the planner's account.
+export const beyondAskedLine = (plan) => {
+  const list = plan && typeof plan === 'object' ? plan.beyondAsked : null;
+  const items = Array.isArray(list) ? list : list ? [list] : [];
+  return items.length ? `beyond what was asked (tell the person): ${items.map((b) => (b && typeof b === 'object' ? `${b.what ?? JSON.stringify(b)}${b.why ? ` (${b.why})` : ''}` : String(b))).join('; ')}` : null;
+};
 // `survey` and `impact` (I-26) are the two stages of the impact analysis: top-level only, survey before the design,
 // impact after it (engine/impact.mjs).
 const PLAN_FILE_KEYS = ['survey', 'plan', 'criteria', 'work', ...PLAN_SECTIONS, 'impact', 'disagreements'];
@@ -570,6 +579,14 @@ export function amendCriteria(root, options) {
     if (state.repos[name]) throw refuse(`${name} is already in ${state.id}`);
     if (work?.length && !work.some((w) => w.repos.includes(name))) throw refuse(`no work item covers the added repo ${name}`, `add a work item with \`repos: [${name}]\` (and the criteria it builds) to the amendment file, so an implementer is handed the change there`);
   }
+  // 0.7.30 (I-165, D52): a criterion an amendment adds is named by a work item, when the plan groups its criteria into work items
+  // (a planned pass names findings, never a criterion). Named failure (field): an amendment added a calendar criterion while
+  // the work item that would build it kept its older list; the implementer handed that item built only the finding it was
+  // handed and reported nothing left, and the owner caught the unbuilt criterion before the review. The plan is one record:
+  // the amendment that adds a criterion restates `work` with it. Admitted from 0.7.30 (D7).
+  const grouped = (work ?? []).filter((w) => !Array.isArray(w.items));
+  const unowned = grouped.length ? changes.added.filter((id) => !grouped.some((w) => w.criteria.includes(id))) : [];
+  if (unowned.length && obligationSince(state, '0.7.30')) throw refuse(`the amendment adds ${unowned.join(', ')}, which no work item names (work items: ${grouped.map((w) => `${w.id} [${w.criteria.join(', ')}]`).join('; ')}): an implementer handed a work item builds that item's criteria`, `restate \`work\` in the amendment file with ${unowned.join(', ')} in the work item that builds it (or a new work item for it), so the plan names who builds every criterion`, { id: 'amend:criterion-no-work' });
   // I-26, named failure: amendments added endpoints, error codes and a financial write path mid-ticket with no impact
   // analysis; six findings over five review rounds were consumers, contracts and tests of the added items. An amendment
   // that adds or changes criteria, work items or repos owes an impact update (`impact` in the amendment file, or
@@ -816,15 +833,26 @@ export function handoff(root, role, options) {
     // unread (independent review of 0.7.12: the next delta started at the partial round's tree and the rest went unread).
     const finished = (state.reviews ?? []).findLast((r) => !r.partial);
     deltaFrom = finished?.tree ?? state.review?.tree ?? state.review?.handoffTree ?? {};
-    deltaInfo = { since: {}, diff: {}, changed: {}, lines: deltaLines(state, deltaFrom) };
+    deltaInfo = { since: {}, diff: {}, changed: {}, baseMerged: {}, lines: deltaLines(state, deltaFrom) };
     for (const [name, r] of Object.entries(state.repos)) {
       const from = sinceOf(r, deltaFrom[name]);
       deltaInfo.since[name] = from;
       const baseSha = git(r.worktree, ['merge-base', r.baseRef ?? r.base, 'HEAD'], { allowFail: true }) || r.base;
       deltaInfo.diff[name] = `git -C ${r.worktree} diff ${from ?? baseSha} HEAD`;
-      // The attempt's own files changed since then: files a base merge brought in are not this attempt's change.
-      deltaInfo.changed[name] = from ? git(r.worktree, ['diff', '--name-only', `${from}..HEAD`]).split('\n').filter((f) => f && (changed[name] ?? []).includes(f)) : changed[name];
+      // The attempt's own files changed since then (`changed`): files a base merge brought in are not this attempt's change.
+      // 0.7.30 (I-167, D53): they are in `delta.diff`, so they are listed apart (`baseMerged`: files the base gained since the
+      // last reviewed tree that the attempt does not change), and the two lists are every file of the diff. Named failure
+      // (field): after a base merge the bundle listed six files and its diff command showed forty-one; the reviewer recorded the
+      // discrepancy instead of reviewing. A file the attempt changed back to the base text since then stays in `changed`.
+      const inDiff = from ? git(r.worktree, ['diff', '--name-only', `${from}..HEAD`]).split('\n').filter(Boolean) : null;
+      const baseThen = from ? git(r.worktree, ['merge-base', r.baseRef ?? r.base, from], { allowFail: true }) : null;
+      const gained = baseThen && baseThen !== baseSha ? new Set(git(r.worktree, ['diff', '--name-only', `${baseThen}..${baseSha}`], { allowFail: true }).split('\n').filter(Boolean)) : new Set();
+      const own = new Set(changed[name] ?? []);
+      const merged = (inDiff ?? []).filter((f) => gained.has(f) && !own.has(f));
+      deltaInfo.changed[name] = inDiff ? inDiff.filter((f) => !merged.includes(f)) : changed[name];
+      if (merged.length) deltaInfo.baseMerged[name] = merged;
     }
+    if (!Object.keys(deltaInfo.baseMerged).length) delete deltaInfo.baseMerged;
   }
   // 0.7.22 (D28): a planning panel's seat and stage. Drafts are handed one seat per agent, blind; the merge goes to seat 1's
   // class and each confirmation to another seat's, never to the agent that merged.
@@ -886,12 +914,20 @@ export function handoff(root, role, options) {
   const passIds = role === 'implementer' ? new Set(work ? (Array.isArray(work.items) ? [work.id] : []) : (covers ?? []).filter((id) => passItemsOf(state).some((w) => w.id === id))) : new Set();
   const itemDetail = (ref) => {
     const f = observations(state).find((x) => x.ref === ref) ?? earlierOpenFindings(state, null).find((x) => `${x.round}:${x.id}` === ref);
-    if (f) return { ref, kind: 'finding', severity: f.severity ?? null, family: f.family ?? null, summary: f.summary ?? '', evidence: f.evidence ?? null, ...(statedFixOf(f) ? { fix: statedFixOf(f) } : {}) };
+    if (f) return { ref, kind: 'finding', severity: f.severity ?? null, family: f.family ?? null, summary: f.summary ?? '', evidence: f.evidence ?? null, ...(f.stillOpen ? { stillOpen: f.stillOpen } : {}), ...(statedFixOf(f) ? { fix: statedFixOf(f) } : {}) };
     const d = (state.discovered ?? []).find((x) => x.id === ref);
-    return d ? { ref, kind: 'discovered', status: d.status, severity: d.severity ?? null, family: d.family ?? null, summary: d.summary ?? '', where: d.where ?? null } : { ref, kind: 'unknown' };
+    return d ? { ref, kind: 'discovered', status: d.status, severity: d.severity ?? null, family: d.family ?? null, summary: d.summary ?? '', where: d.where ?? null, ...(d.kind === 'bookkeeping' ? { bookkeeping: true } : {}) } : { ref, kind: 'unknown' };
   };
   const passItems = passIds.size ? passItemsOf(state).filter((w) => passIds.has(w.id)).map((w) => ({ work: w.id, why: w.why ?? null, items: w.items.map(itemDetail) })) : null;
-  const alsoFix = repairNow ? outstanding(state).map((x) => ({ ...itemDetail(x.ref), ...(x.blockedBy ? { blockedBy: x.blockedBy } : {}) })) : [];
+  // 0.7.30 (I-173, D51): an open bookkeeping entry (an implementer's lint or fixture fix) is the implementer's to make, so it
+  // joins the fix round as well; it still opens no pass and no round of its own (the course reads `outstanding` without it).
+  const alsoFix = repairNow ? outstanding(state, { bookkeeping: true }).map((x) => ({ ...itemDetail(x.ref), ...(x.blockedBy ? { blockedBy: x.blockedBy } : {}) })) : [];
+  // 0.7.30 (I-162, I-173, D51): what the last gate or check showed failing, for the implementer that repairs it.
+  const failedGateNow = role === 'implementer' && (state.lastGate?.status === 'failed' || failedStepsOf(state.lastGate).length > 0) ? failedGateFor(state, trusted) : undefined;
+  const checkFailed = role === 'implementer' ? failedCheckOf(state) : null;
+  const failedCheckNow = checkFailed ? failedRunFor(state, trusted, checkFailed) : undefined;
+  // 0.7.30 (I-168, D51): scope a recorded round did not reach, for the implementer as for the next reviewer.
+  const unreached = ['reviewer', 'implementer'].includes(role) ? unreachedSince(state) : [];
   // 0.7.28 (I-208): what the reviewers said the fixes handed here take, when every finding handed states it: an implementer
   // expecting far more is shown to the owner as a course signal (engine/course.mjs).
   const handedFindings = [...(repair ?? []).flatMap((g) => g.findings ?? []).map((f) => ({ ref: `${f.round}:${f.id}`, fix: statedFixOf(f) })), ...(passItems ?? []).flatMap((p) => p.items).filter((x) => x.kind === 'finding').map((x) => ({ ref: x.ref, fix: x.fix ?? null }))];
@@ -960,7 +996,8 @@ export function handoff(root, role, options) {
     // implementer fixes the open ones; the reviewer gives each a verdict.
     // Only defects still open or deferred: a fixed one is history, and an implementer's own lint or fixture fix
     // (`--kind bookkeeping`) is never a reviewer's verdict item.
-    discovered: ['implementer', 'reviewer'].includes(role) ? reviewerDiscovered(state.discovered, state) : undefined,
+    // 0.7.30 (I-173, D51): an implementer also gets the open bookkeeping entries, which are its own to fix (a reviewer never).
+    discovered: ['implementer', 'reviewer'].includes(role) ? reviewerDiscovered(state.discovered, state, { bookkeeping: role === 'implementer' }) : undefined,
     // I-42: unresolved historical observations require a current-tree reviewer verdict.
     // A full round judges every historical report; a delta round the ones no recorded round has judged yet.
     historicalReports: role !== 'reviewer' ? undefined : mode === 'full' ? historicalReports : historicalReports.filter((h) => !historicalJudged(state).has(h.id)).length ? historicalReports.filter((h) => !historicalJudged(state).has(h.id)) : undefined,
@@ -979,7 +1016,10 @@ export function handoff(root, role, options) {
     followUps: role === 'reviewer' ? followUpsOf(state) : undefined,
     // Named failure (I-69): scope an earlier recorded round said it did not reach (`notReached`) reached no later reader, so
     // the next reviewer could not know what was never looked at. Coverage, not findings: a full round stays blind.
-    unreachedBefore: role === 'reviewer' && unreachedSince(state).length ? { note: `Scope an earlier recorded round said it did not reach, and no complete full audit has covered since; ${obligationSince(state, '0.7.4') ? (unreachedSince(state).some((x) => x.covered) ? 'an evidence round that mapped every criterion and opened every new screenshot still counted as the audit, and the others did not' : 'none of these rounds counted as an audit') : 'on this attempt (admitted before 0.7.4) a full round that named such scope still counted as its audit'}. It adds to your goal and narrows nothing: what an earlier reviewer did not reach was not cleared.`, rounds: unreachedSince(state) } : undefined,
+    // 0.7.30 (I-168, D51): an implementer is handed it too. Named failure (field): a code review named a native verification it did
+    // not reach; after `wf base merge` the implementer handed next had no word of it and reran checks that already passed.
+    unreachedBefore: role === 'reviewer' && unreached.length ? { note: `Scope an earlier recorded round said it did not reach, and no complete full audit has covered since; ${obligationSince(state, '0.7.4') ? (unreached.some((x) => x.covered) ? 'an evidence round that mapped every criterion and opened every new screenshot still counted as the audit, and the others did not' : 'none of these rounds counted as an audit') : 'on this attempt (admitted before 0.7.4) a full round that named such scope still counted as its audit'}. It adds to your goal and narrows nothing: what an earlier reviewer did not reach was not cleared.`, rounds: unreached }
+      : role === 'implementer' && unreached.length ? { note: 'Scope an earlier recorded review round said it did not reach, and no complete full audit has covered since: what it names is not verified by any review, whatever passed elsewhere. Where it falls within your criteria it is part of your goal, and your report says what you did about it.', rounds: unreached } : undefined,
     mode: role === 'reviewer' ? mode : undefined,
     // A repair handoff: the open findings that block, grouped by family.
     repair: role === 'implementer' ? repair ?? undefined : undefined,
@@ -991,7 +1031,10 @@ export function handoff(root, role, options) {
     // Review of 0.7.28 (L1): a planned pass built since the last review, its items and the commits recorded for them.
     passBuilt: role === 'reviewer' && passesSince(state).length ? passesSince(state) : undefined,
     // I-118: a repair after a failed gate is handed what failed and the fastest proof of a fix.
-    failedGate: role === 'implementer' && state.lastGate?.status === 'failed' ? failedGateFor(state, trusted) : undefined,
+    // 0.7.30 (I-162, D51): also a gate stopped after a step failed (with the stop's class and reason).
+    failedGate: failedGateNow,
+    // 0.7.30 (I-173, D51): the last `wf check`, when a step of it failed and no gate ran since.
+    failedCheck: failedCheckNow,
     impact: impact(trusted, changed),
     // I-26: the planner's survey and impact map with every addendum. For the reviewer, the inventory to sample and the
     // callers of symbols the final diff declares or edits that no listed file covers: each needs a verdict.
@@ -1083,6 +1126,13 @@ export function handoff(root, role, options) {
   if (role === 'reviewer' && mode === 'delta' && bundle.supplementalValidation.length) bundle.instructions += ` \`supplementalValidation\` lists the checks registered, corrected or carried from a batch member since the last reviewed round (${bundle.supplementalValidation.flatMap((v) => v.steps.map((x) => x.id)).join(', ')}): the gate runs each at its pinned commit, so judge its definition and plugin as committed there, not a later copy, and give your verdict on each in \`validationChecked: [{ "id", "commit", "verdict": "complies" | "finding", "evidence", "finding" }]\`; a defect in one is a finding.`;
   if (role === 'reviewer' && bundle.validationsNotCarried) bundle.instructions += ` \`validationsNotCarried\` lists checks a member registered or corrected that this batch does not carry, each with why (${bundle.validationsNotCarried.map((x) => `${x.id} of ${x.member}`).join(', ')}): for those steps the batch's gate follows its own admission adapter, the base's rule, so judge whether the member's criteria still rest on what they proved.`;
   if (role === 'reviewer' && bundle.acceptanceRefused) bundle.instructions += ` \`acceptanceRefused\` lists why \`wf accept\` refused the last evidence round (${bundle.acceptanceRefused.reviewer}'s): your closure must not repeat them. A citation it names is corrected in your own \`criteria\`: each evidence entry cites one artifact exactly as the bundle lists it, and a criterion several screenshots show gets one entry per screenshot, with the same \`id\`.`;
+  // 0.7.30 (D51, D53): what a repair is handed beyond the findings, and which files of a delta are the attempt's own.
+  if (role === 'implementer' && bundle.failedGate) bundle.instructions += ` \`failedGate\` holds the facts of the last gate${bundle.failedGate.status === 'stopped' ? ', stopped after these steps failed (its `stop` says why)' : ''}: what failed, each failing step's log and, where it names no test, the end of its output.`;
+  if (role === 'implementer' && bundle.failedCheck) bundle.instructions += ' `failedCheck` holds the facts of the last `wf check`, which failed: what failed, each failing step\'s log and, where it names no test, the end of its output. Fix what it shows at its cause.';
+  if (role === 'implementer' && (bundle.discovered ?? []).some((d) => d.kind === 'bookkeeping')) bundle.instructions += ` \`discovered\` lists the open bookkeeping entries too (lint or fixture fixes, ${bundle.discovered.filter((d) => d.kind === 'bookkeeping').map((d) => `${d.id}${d.blockedBy ? ` of ${d.blockedBy}` : ''}`).join(', ')}): fix them with your change and name each in your report.`;
+  if (role === 'implementer' && bundle.unreachedBefore) bundle.instructions += ' `unreachedBefore` lists scope a recorded review round said it did not reach: nothing has verified it, whatever passed elsewhere.';
+  if (role === 'implementer' && (bundle.repair ?? []).some((g) => g.findings.some((f) => f.stillOpen))) bundle.instructions += ' A finding with `stillOpen` was found still open by a later round: `stillOpen.evidence` is that round\'s evidence (the latest place and reproduction), beside the finding as first raised.';
+  if (role === 'reviewer' && bundle.delta?.baseMerged) bundle.instructions += ` \`delta.diff\` runs from the last reviewed tree, so it includes what \`wf base merge\` brought in: \`delta.changed\` lists this attempt's own files in it, and \`delta.baseMerged\` the files only the base merge brought in (${Object.entries(bundle.delta.baseMerged).map(([repo, files]) => `${repo}: ${files.join(', ')}`).join('; ')}), another change's code: context, not this attempt's change.`;
   if (role === 'reviewer' && bundle.impactMap) bundle.instructions += ' Impact discovery under impactMap.derived is textual, not structurally resolved consumer analysis, and bounded (its `incomplete` and `symbolsTruncated` say how far it got): a hit is a lead to judge against the real imports and behaviour, and a missing hit is no proof of coverage.';
   if (role === 'reviewer') {
     const problems = reviewDocumentProblems(bundle, ruleDocs);
@@ -1204,7 +1254,7 @@ export function familiesOf(findings) {
   for (const f of findings) {
     const key = typeof f.family === 'string' && f.family.trim() ? f.family.trim() : null;
     const group = by.get(key ?? `${f.round}:${f.id}`) ?? { family: key, findings: [] };
-    group.findings.push({ ref: `${f.round}:${f.id}`, round: f.round, id: f.id, severity: f.severity ?? null, summary: f.summary ?? '', evidence: f.evidence ?? null, work: f.work ?? null, ...(f.fix ? { fix: f.fix } : {}) });
+    group.findings.push({ ref: `${f.round}:${f.id}`, round: f.round, id: f.id, severity: f.severity ?? null, summary: f.summary ?? '', evidence: f.evidence ?? null, ...(f.stillOpen ? { stillOpen: f.stillOpen } : {}), work: f.work ?? null, ...(f.fix ? { fix: f.fix } : {}) });
     by.set(key ?? `${f.round}:${f.id}`, group);
   }
   return [...by.values()];
@@ -1302,7 +1352,7 @@ export function earlierOpenFindings(state, currentHandoff) {
   return openAcrossRounds(state, currentHandoff).flatMap((f) => {
     const d = dispositionOf(state, f.ref);
     if (d && d.choice !== 'fixed') return [];
-    return [{ round: f.round, id: f.id, severity: f.severity ?? null, placement: placementLevel(state, f), summary: f.summary ?? '', evidence: f.evidence ?? null, work: f.work ?? null, family: f.family ?? null, blocks: f.classified.blocks, ...(statedFixOf(f) ? { fix: statedFixOf(f) } : {}), ...(d ? { claimedFixed: { repo: d.repo, commit: d.commit } } : {}) }];
+    return [{ round: f.round, id: f.id, severity: f.severity ?? null, placement: placementLevel(state, f), summary: f.summary ?? '', evidence: f.evidence ?? null, ...(f.stillOpen ? { stillOpen: f.stillOpen } : {}), work: f.work ?? null, family: f.family ?? null, blocks: f.classified.blocks, ...(statedFixOf(f) ? { fix: statedFixOf(f) } : {}), ...(d ? { claimedFixed: { repo: d.repo, commit: d.commit } } : {}) }];
   });
 }
 
@@ -2696,8 +2746,20 @@ export function deliveredFiles(state) {
 // each failing e2e" after a gate with 55 failures knew none of this; it proved every fix by rerunning whole suites (15 and
 // 18 minutes each, eight times: 68 of its 113 minutes were waits), and 50 of the failures, in files the change never
 // touched, came from the test environment's state. Every failure is fixed in the attempt (the person's rule).
-export function failedGateFor(state, cfg) {
-  const g = state.lastGate;
+// 0.7.30 (I-162, D51): a gate stopped after a step failed has shown that failure, so it is handed too, with the stop.
+// Named failure (field): a full gate failed an HTTP step and the owner then stopped it for the tree change the repair needed;
+// the next implementer was handed no `failedGate` (only a `failed` gate fed it), and the owner rebuilt the cause by hand.
+// (I-173, D51) A failed `wf check` is handed the same way (`failedCheck`), and each failing step carries its log and, when it
+// names no test, the last lines of its output: a lint failure names no test, and those lines are its cause.
+export const failedStepsOf = (run) => (['failed', 'stopped'].includes(run?.status) ? (run.steps ?? []).filter((s) => s.status === 'failed') : []);
+export const failedGateFor = (state, cfg) => failedRunFor(state, cfg, state.lastGate);
+// The last `wf check`, when a step of it failed and no gate ran after it (a gate runs the light steps as well).
+export function failedCheckOf(state) {
+  const c = (state.checks ?? []).at(-1);
+  if (!c || !failedStepsOf(c).length) return null;
+  return state.lastGate && String(state.lastGate.at) > String(c.at) ? null : c;
+}
+export function failedRunFor(state, cfg, g) {
   const changed = [...new Set(Object.values(g.changed ?? {}).flat())];
   const untouched = (f) => !changed.some((c) => c === f || c.endsWith(`/${f}`) || f.endsWith(`/${c}`));
   const steps = (g.steps ?? []).filter((s) => s.status === 'failed').map((s) => {
@@ -2716,9 +2778,12 @@ export function failedGateFor(state, cfg) {
       failedSuites: suites,
       rerunsOnlyFailed: rerunsOnlyFailed(def),
       failingFilesNotChanged: files.filter(untouched),
+      ...(s.log ? { log: s.log } : {}),
+      ...(!tests.length && s.failures?.tail?.length ? { outputTail: s.failures.tail } : {}),
     };
   });
-  return { runId: g.runId, tree: g.tree ?? null, onCurrentTree: canonical(g.tree ?? {}) === canonical(treeHashes(state)), steps };
+  const stop = g.status === 'stopped' ? g.stop ?? (state.stops ?? []).filter((x) => x.runId === g.runId).map((x) => ({ class: x.class ?? null, reason: x.reason ?? null })).at(-1) ?? null : null;
+  return { runId: g.runId, status: g.status, ...(stop ? { stop } : {}), ...(g.repos ? { repos: g.repos } : {}), tree: g.tree ?? null, onCurrentTree: canonical(g.tree ?? {}) === canonical(treeHashes(state)), steps };
 }
 
 // One answer for every caller (engine/paths.mjs): any project's evidence, as written or as the OS resolves it, or below
@@ -3529,7 +3594,9 @@ function phaseStep(root, cfg, state) {
     const stop = state.stops.at(-1);
     // A gate stopped for a finding or a tree change is not resumed: the tree changes first, and a code review comes
     // before the next gate (I-27). An owner's decision (or a stop recorded before classes existed) resumes it.
-    if (['major-finding', 'tree-change'].includes(stop.class)) return `gate stopped (${stop.class}: ${stop.reason}); fix and commit through the implementer that did that work, then the code review of the new tree: hand it to a fresh reviewer (\`wf handoff reviewer --agent <new id>\`); the gate runs once a round comes back clean`;
+    // 0.7.30 (I-162, D51): the steps that failed before the stop reach the repair, and the owner is told so.
+    const failedBefore = failedStepsOf(state.lastGate).map((x) => x.id);
+    if (['major-finding', 'tree-change'].includes(stop.class)) return `gate stopped (${stop.class}: ${stop.reason}); fix and commit through the implementer that did that work${failedBefore.length ? ` (its bundle carries \`failedGate\`: the steps that failed before the stop (${failedBefore.join(', ')}))` : ''}, then the code review of the new tree: hand it to a fresh reviewer (\`wf handoff reviewer --agent <new id>\`); the gate runs once a round comes back clean`;
     return `gate stopped (${stop.class ? `${stop.class}: ` : ''}${stop.reason}); run \`wf gate\` to continue with finished steps carried`;
   }
   // A panel planning this attempt (its first plan, or a plan replaced whole after an upgrade) says its next step.

@@ -22,7 +22,7 @@ import { reviewDivisionSummary } from './review-groups.mjs';
 import { addLesson, applySnippet, exportPluginLessons, findLesson, isProjectWide, LESSON_FILE, lessonPrompts, lessonWarnings, loadLessons, mergeLessons, mergeSuggestions, moveLesson, recur, relevantLessons, reviewLessons, setLesson, lessonKey, totalRecurrence, mergeableIn, distinctLessons } from './lessons.mjs';
 import { lessonStats } from './learning.mjs';
 import { LinkRefused, changesOf, ledgerEmpty, lostLedgers, rebaseline, releaseAttempt, seal, setVerifyLevel, unlockEvidence, verifyAttempt } from './evidence.mjs';
-import { acceptReview, amendCriteria, closeImplementer, designWarning, leftNotes, gateOrderCheck, batchCreate, batchEject, closeAfterHandoff, deliver, deliveredFiles, deliveryCaptures, RANK_WORDS, verifiedCaptures, exportScreenshots, freezeCriteria, handoff, narrowDelivery, needsShown, nextAction, nextDecision, orphanNext, orphansOf, outsideWarning, recordReview, recordShown, reopen, screenshotsExportDir, shownDraftFile, uncovered, withAttempt } from './lifecycle.mjs';
+import { acceptReview, amendCriteria, beyondAskedLine, closeImplementer, designWarning, leftNotes, gateOrderCheck, batchCreate, batchEject, closeAfterHandoff, deliver, deliveredFiles, deliveryCaptures, RANK_WORDS, verifiedCaptures, exportScreenshots, freezeCriteria, handoff, narrowDelivery, needsShown, nextAction, nextDecision, orphanNext, orphansOf, outsideWarning, recordReview, recordShown, reopen, screenshotsExportDir, shownDraftFile, uncovered, withAttempt } from './lifecycle.mjs';
 import { addDiscovered, channelOf, closeDiscovered, discoveredLine, openDiscovered, rateDiscovered } from './discovered.mjs';
 import { detect, doctor, generatedStatus, refreshGenerated, register, registry, setEnabled, sync, writeDraft } from './onboard.mjs';
 import * as secrets from './secrets.mjs';
@@ -795,7 +795,8 @@ async function dispatch(cmd, sub, positional, options) {
       }
       const loose = uncovered(s);
       const sections = s.plan && typeof s.plan === 'object' ? Object.keys(s.plan) : [];
-      print(options, `criteria frozen (${s.criteria.length}): ${s.criteria.map((c) => c.id).join(', ')}\nplan sections: ${sections.join(', ') || 'none'}${s.planSource?.transcript ? ` (from ${s.planSource.agent}'s transcript)` : ''}${s.work ? `\nwork items (${s.work.length}): ${s.work.map((w) => `${w.id} [${w.class}] ${w.criteria.join(',')}`).join('; ')}` : ''}${loose.length ? `\nnote: no work item covers ${loose.join(', ')}` : ''}\nnext: ${nextAction(root, s)}`, s);
+      const beyond = beyondAskedLine(s.plan);
+      print(options, `criteria frozen (${s.criteria.length}): ${s.criteria.map((c) => c.id).join(', ')}\nplan sections: ${sections.join(', ') || 'none'}${s.planSource?.transcript ? ` (from ${s.planSource.agent}'s transcript)` : ''}${beyond ? `\n${beyond}` : ''}${s.work ? `\nwork items (${s.work.length}): ${s.work.map((w) => `${w.id} [${w.class}] ${w.criteria.join(',')}`).join('; ')}` : ''}${loose.length ? `\nnote: no work item covers ${loose.join(', ')}` : ''}\nnext: ${nextAction(root, s)}`, s);
       return 0;
     }
     case 'impact': {

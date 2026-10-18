@@ -350,11 +350,20 @@ export function openAcrossRounds(state, exceptRound = null) {
     if (key === exceptRound) continue;
     for (const p of r.closure.priorFindings ?? []) {
       const ref = refOf(p.round, p.id);
-      if (settled(p) && p.evidence) open.delete(ref);
+      if (settled(p) && p.evidence) {
+        open.delete(ref);
+        continue;
+      }
+      // 0.7.30 (I-166, D51): a later round that verifies a finding still open gives its evidence (the place the cause still
+      // lives, a new reproduction); the latest is kept beside the finding as raised (`stillOpen`), whose identity and words
+      // stay as they were. Named failure (field): a delta round kept a high finding open with a newly reproduced failure, and the
+      // next fix round was handed only the finding as first raised, about a case already fixed, so the implementer read it as
+      // fixed and asked for context.
+      if (open.has(ref) && !settled(p) && text(p.evidence)) open.set(ref, { ...open.get(ref), stillOpen: { by: reviewerOf(r), round: r.handoff ? String(r.handoff).replace(/^.*\//, '').replace(/\.json$/, '') : null, at: r.at ?? null, evidence: text(p.evidence) } });
       // A later, independent reviewer may re-rate a finding it verifies still open: the latest rating decides where it may
       // go, and a finding re-rated low stops blocking unless it cites a criterion or an invariant. Named failure (second
       // final review of 0.7.0): the work owed was set by one reviewer's self-rated severity, and models rate differently.
-      else if (open.has(ref) && severityLevel(p.severity)) {
+      if (open.has(ref) && severityLevel(p.severity)) {
         const f = open.get(ref);
         const level = placementOf({ severity: p.severity }, f.classified.criterion ? [f.classified.criterion] : [], f.classified.invariant ?? '').placement;
         // Re-rated low, it stops opening rounds; where it may go keeps the higher of the two ratings, so a disagreement
@@ -442,7 +451,10 @@ export const lastReviewSeenAt = (state) => {
 };
 // 0.7.27 (I-188): an entry closed as not a defect is shown to the next round once, as a fixed one is, so the claim can be raised
 // again as a finding if it holds after all.
-export const reviewerDiscovered = (entries, state = null) => {
+// 0.7.30 (I-173, D51): `bookkeeping` also keeps every open bookkeeping entry, for the implementer whose fix it is. Named failure
+// (field): a failed check's two lint lines were recorded as bookkeeping blocked by a work item, and the implementer handed that
+// item again was not told of them; it reran the whole check instead of fixing the two lines.
+export const reviewerDiscovered = (entries, state = null, { bookkeeping = false } = {}) => {
   const lastReview = lastReviewSeenAt(state);
-  return (entries ?? []).filter((d) => (!isBookkeeping(d) || (d.status === 'open' && d.claim)) && !(state && legacyWaived(state, d)) && (d.status !== 'fixed' || (state && (!lastReview || (d.fixed?.at && d.fixed.at > lastReview)))) && (d.status !== 'not-a-defect' || (state && (!lastReview || (d.notADefect?.at && d.notADefect.at > lastReview))))).map((d) => (d.status === 'fixed' ? { ...d, fixedSinceReview: true } : d.status === 'not-a-defect' ? { ...d, notADefectSinceReview: true } : d.claim ? { ...d, claimedFixed: { repo: d.claim.repo, commit: d.claim.commit, note: 'fixed by a commit made before it was recorded; the reviewer checks that commit and gives `discovered: [{ "id": "' + d.id + '", "verdict": "fixed" | "open", "evidence": "<file:line>" }]`, and its `fixed` closes the entry' } } : d));
+  return (entries ?? []).filter((d) => (!isBookkeeping(d) || (d.status === 'open' && (d.claim || bookkeeping))) && !(state && legacyWaived(state, d)) && (d.status !== 'fixed' || (state && (!lastReview || (d.fixed?.at && d.fixed.at > lastReview)))) && (d.status !== 'not-a-defect' || (state && (!lastReview || (d.notADefect?.at && d.notADefect.at > lastReview))))).map((d) => (d.status === 'fixed' ? { ...d, fixedSinceReview: true } : d.status === 'not-a-defect' ? { ...d, notADefectSinceReview: true } : d.claim ? { ...d, claimedFixed: { repo: d.claim.repo, commit: d.claim.commit, note: 'fixed by a commit made before it was recorded; the reviewer checks that commit and gives `discovered: [{ "id": "' + d.id + '", "verdict": "fixed" | "open", "evidence": "<file:line>" }]`, and its `fixed` closes the entry' } } : d));
 };

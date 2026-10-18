@@ -166,6 +166,8 @@ export function findingHistory(state, { fixes = [] } = {}) {
     const status = open.has(e.ref) ? (d ? 'claimed-fixed' : 'open') : reopenedBy(e) ? 'reopened' : waivedRef(state, e.ref) ? 'waived' : d ? d.choice : last && settled({ status: last.status }) ? last.status : e.own && settled({ status: e.own }) ? e.own : 'closed';
     const fix = fixes.find((x) => refOf(x.round, x.id) === e.ref) ?? (d?.choice === 'fixed' ? d : null);
     const verified = [...e.verdicts].reverse().find((v) => settled({ status: v.status }) && text(v.evidence));
+    // 0.7.30 (I-166, D51): a finding a later round found still open shows that round's evidence too (only a settled one did).
+    const latest = e.verdicts.at(-1) && !settled({ status: e.verdicts.at(-1).status }) && text(e.verdicts.at(-1).evidence) ? e.verdicts.at(-1) : null;
     return {
       ref: e.ref,
       ...(e.family ? { family: e.family } : {}),
@@ -174,6 +176,7 @@ export function findingHistory(state, { fixes = [] } = {}) {
       status,
       ...(fix ? { fix: { repo: fix.repo ?? null, commit: String(fix.commit ?? '').slice(0, 10) } } : {}),
       ...(verified && status !== 'open' ? { verifiedBy: verified.round, evidence: clip(verified.evidence, 160) } : {}),
+      ...(latest && ['open', 'claimed-fixed', 'reopened'].includes(status) ? { stillOpen: { by: latest.round, evidence: clip(latest.evidence, 160) } } : {}),
       ...(label.has(e.ref) ? { cause: label.get(e.ref) } : {}),
       ...(e.sameCauseAs.length ? { sameCauseAs: e.sameCauseAs } : {}),
       // A label match with an earlier finding marked fixed: a possible shared cause, apart from a confirmed `cause`.

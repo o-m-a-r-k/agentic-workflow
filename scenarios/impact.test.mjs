@@ -32,6 +32,8 @@ const design = () => ({ expect: FIXTURE_EXPECT, plan: { summary: 'renderTable ta
 const change = (extra = {}) => ({ id: 'I1', element: 'renderTable(rows, pager)', kind: 'symbol', cites: ['C1'], covers: ['S-a', 'S-b', 'P-error'], consumers: { query: 'Q-consumers', hits: 2 }, flows: [{ flow: 'next page', failure: 'a failed next keeps the rows', query: 'Q-consumers', hits: 2 }], contracts: [], suites: [{ suite: 'unit', query: 'Q-consumers', hits: 2 }], work: ['W1'], ...extra });
 const impact = (extra = {}) => ({ changes: [change(extra)] });
 const goodPlan = () => ({ survey: survey(), ...design(), impact: impact() });
+// The plan's work item, restated by an amendment that adds C2 (D52: a criterion an amendment adds is named by a work item).
+const withC2 = [{ ...design().work[0], criteria: ['C1', 'C2'] }];
 
 function admitted(name, config = {}) {
   const p = singleRepoProject(name, { gate: { steps }, ...config }, FILES);
@@ -151,7 +153,8 @@ test('I-26: a scope-adding amendment owes an impact update that the implementer 
   const a = admitted('impact-amend');
   ok(a.plan(goodPlan()));
   const amend = (doc) => wf(a.root, ['criteria', 'amend', '--file', a.file(doc, 'amend'), '--reason', 'an endpoint joins', '--attempt', a.id]);
-  const owed = ok(amend({ criteria: [{ id: 'C2', text: 'the list endpoint returns the total', uat: 'total matches' }] }));
+  // 0.7.30 (D52): a criterion an amendment adds is named by a work item, so the amendment restates W1 with it.
+  const owed = ok(amend({ criteria: [{ id: 'C2', text: 'the list endpoint returns the total', uat: 'total matches' }], work: withC2 }));
   assert.match(owed.out, /impact owed: this amendment adds scope/);
   // The handoff is not refused; the bundle says what is owed and carries no stop.
   const first = ok(wf(a.root, ['handoff', 'implementer', '--work', 'W1', '--agent', 'i0', '--attempt', a.id]));
@@ -194,7 +197,7 @@ const closure = (reviewer, extra = {}) => ({ reviewer, findings: [], criteria: [
 test('I-26: an owed impact update stops nothing downstream: the next step is not a repair, and the gate, review and acceptance go through', () => {
   const a = admitted('impact-owed-flow');
   ok(a.plan(goodPlan()));
-  ok(wf(a.root, ['criteria', 'amend', '--file', a.file({ criteria: [{ id: 'C2', text: 'the list endpoint returns the total', uat: 'total matches' }] }, 'amend'), '--reason', 'an endpoint joins', '--attempt', a.id]));
+  ok(wf(a.root, ['criteria', 'amend', '--file', a.file({ criteria: [{ id: 'C2', text: 'the list endpoint returns the total', uat: 'total matches' }], work: withC2 }, 'amend'), '--reason', 'an endpoint joins', '--attempt', a.id]));
   assert.equal(state(a.root, a.id).impact.owed.amendment, 1, 'the update is owed');
   ok(wf(a.root, ['handoff', 'implementer', '--work', 'W1', '--agent', 'impl-1', '--attempt', a.id]));
   commitIn(a.wt, { 'src/table.js': 'export function renderTable(rows, pager) {\n  return pager ? rows : rows;\n}\n' });

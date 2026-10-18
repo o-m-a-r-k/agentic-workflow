@@ -66,7 +66,7 @@ test('wf plan keeps the planner\'s top-level sections, refuses unknown keys, and
   ok(wf(root, ['handoff', 'planner', '--agent', 'p', '--attempt', id]));
   const unknown = wf(root, ['plan', '--file', planFile(base, { plan: 's', contracts: 'typo', criteria: [{ id: 'C1', text: 'a' }] }), '--attempt', id]);
   assert.equal(unknown.code, 1);
-  assert.match(unknown.err, /unknown top-level key\(s\) in the plan file: contracts; known keys: survey, plan, criteria, work, summary, contract, anchors, tests, doNotRun, externalServices, agentSplit, expect, impact/);
+  assert.match(unknown.err, /unknown top-level key\(s\) in the plan file: contracts; known keys: survey, plan, criteria, work, summary, contract, anchors, tests, doNotRun, externalServices, agentSplit, beyondAsked, expect, impact/);
   assert.match(wf(root, ['plan', '--file', planFile(base, { plan: { contract: 'x' }, contract: 'y', criteria: [{ id: 'C1', text: 'a' }] }), '--attempt', id]).err, /`contract` is given both at the top level and under `plan`/);
   const doc = { plan: { summary: 'Change a.', tests: { run: ['jest a'] } }, contract: 'GET /a', anchors: ['src/a.txt:1'], doNotRun: ['e2e'], externalServices: 'none', agentSplit: 'one', expect: FIXTURE_EXPECT, criteria: [{ id: 'C1', text: 'a changes' }] };
   const r = ok(wf(root, ['plan', '--file', planFile(base, planDoc(doc)), '--attempt', id]));
