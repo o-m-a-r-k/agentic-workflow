@@ -20,6 +20,7 @@ import { ADAPTER_DIR, adapterFileAtCommit, agentTypeFor, attemptAdapter, declare
 import { focusedSkips, gateBusy, gatePassedForCurrentTree, gateRunningRefusal, screenshots, withReviewLock } from './gate.mjs';
 import { append, attemptDir, evidenceRoot, keptFiles, listAttempts, loadState, openEvidence, recordedTogether } from './ledger.mjs';
 import { assertUnchanged, readEvidenceFile, seal } from './evidence.mjs';
+import { runImages, runsText, runsWithImages } from './run-screenshots.mjs';
 import { implementerAcks, learnFromReview, lessonPrompts, lessonVerdicts, owesLesson, recur, relevantLessons } from './lessons.mjs';
 import { noteLearned, pastCourse, personFixed } from './learning.mjs';
 import { computeSignals, filesSignal } from './signals.mjs';
@@ -2584,16 +2585,17 @@ function titlesOf(files) {
   });
 }
 
-// The heavy steps a quick fix's gate did not run (gate.mjs: the quick lane runs light steps only), for the reviewer and the
-// delivered evidence. Named failure (independent review of 0.7.13): the evidence review was handed only the steps that ran.
-export const notRunOf = (state) => (state.lastGate?.steps ?? []).filter((s) => s.status === 'skipped' && s.skippedBy === 'quick-lane').map((s) => ({ step: s.id, tier: s.tier, reason: s.reason, lastResult: s.lastResult ?? null }));
+// The heavy steps a quick fix's gate did not run (gate.mjs: the quick lane runs light steps only), or that the person's decision
+// left out (0.7.30, I-158: `wf gate light-only`), for the reviewer and the delivered evidence. Named failure (independent review
+// of 0.7.13): the evidence review was handed only the steps that ran.
+export const notRunOf = (state) => (state.lastGate?.steps ?? []).filter((s) => s.status === 'skipped' && ['quick-lane', 'person'].includes(s.skippedBy)).map((s) => ({ step: s.id, tier: s.tier, reason: s.reason, lastResult: s.lastResult ?? null }));
 
 // Why an attempt delivers no screenshots, per step, from the gate's expanded globs and the reviewer's verdicts.
 export function noScreenshotsReason(root, state) {
   const src = state.delivery.viaBatch ? loadState(root, state.delivery.viaBatch) : state;
   const steps = evidenceSteps(root, src);
   const notRun = notRunOf(src).map((x) => x.step);
-  if (!steps.length) return notRun.length ? `the quick fix's gate ran light steps only and did not run ${notRun.join(', ')}, so it collected no screenshots` : 'no gate step declares `artifacts`, so the gate collected no screenshots';
+  if (!steps.length) return notRun.length ? `${src.lane === 'quick' ? 'the quick fix\'s gate ran light steps only' : 'the gate ran light steps only, by the person\'s decision'} and did not run ${notRun.join(', ')}, so it collected no screenshots` : 'no gate step declares `artifacts`, so the gate collected no screenshots';
   const verdicts = [...(state.accepted?.noEvidence ?? []), ...(src.accepted?.noEvidence ?? [])];
   return steps.map((st) => {
     const v = verdicts.find((x) => x.step === st.step);
@@ -2734,10 +2736,12 @@ export function safeFileName(title) {
 // What the gate collected for the reviewer (one file per sha256), titled as the delivered set is titled.
 export function gateFiles(state) {
   const seen = new Set();
-  const files = screenshots(state).filter((a) => !seen.has(a.sha256) && seen.add(a.sha256));
+  return withTitles(screenshots(state).filter((a) => !seen.has(a.sha256) && seen.add(a.sha256)));
+}
+const withTitles = (files) => {
   const titles = titlesOf(files);
   return files.map((a, n) => ({ path: a.path, sha256: a.sha256, title: titles[n] }));
-}
+};
 
 // Test seams: called just before a source is opened and just before a destination is created.
 export const exportSeams = { beforeSourceOpen: null, beforeDestOpen: null };
@@ -2749,9 +2753,18 @@ export const exportSeams = { beforeSourceOpen: null, beforeDestOpen: null };
 // location is checked after creation; each source is opened without following a symlink, read once, and its sha256
 // checked on the bytes that are written; each destination is created exclusively without following a symlink and
 // written through its descriptor; the directory's identity is checked before every file and at the end.
-export function exportScreenshots(root, state, to = null, { gate = false } = {}) {
-  const files = gate ? gateFiles(state) : deliveredFiles(state);
-  if (!files.length) throw refuse(gate ? `the last gate of ${state.id} collected no screenshots` : `no delivered screenshots for ${state.item}${state.delivery.screenshots?.none ? `: ${state.delivery.screenshots.none}` : state.delivery.completedAt ? '' : ' (not delivered yet)'}`);
+//
+// 0.7.30 (I-198, I-160, D55): `run` exports the images of one named run or import (engine/run-screenshots.mjs) for diagnosis,
+// through the same checks; and a refusal for an empty set names the runs and imports that hold images, so the route is never
+// guessed. Named failure: a failed step's screenshots were listed by `wf evidence list` while `--gate` said there were none.
+export function exportScreenshots(root, state, to = null, { gate = false, run = undefined } = {}) {
+  const named = run !== undefined ? runImages(root, state, run) : null;
+  const files = named ? withTitles(named.files) : gate ? gateFiles(state) : deliveredFiles(state);
+  const elsewhere = () => {
+    const runs = runsWithImages(root, state);
+    return runs.length ? `; images are recorded in: ${runsText(runs)} (\`wf export screenshots --run <run id> --attempt ${state.id}\`)` : '';
+  };
+  if (!files.length) throw refuse(named ? `${named.label} of ${state.id} holds no image` : gate ? `${state.lastGate ? `the last gate of ${state.id} collected no screenshots` : `no gate has run on ${state.id}`}${elsewhere()}` : `no delivered screenshots for ${state.item}${state.delivery.screenshots?.none ? `: ${state.delivery.screenshots.none}` : state.delivery.completedAt ? '' : ' (not delivered yet)'}`);
   const parent = canonicalPath(String(to ?? screenshotsExportDir(root, state.id)));
   const outside = 'export outside .wf-evidence/ (checked where the folder really points): the evidence is written only by `wf`';
   if (underEvidence(root, parent)) throw refuse(outside);
@@ -2770,7 +2783,7 @@ export function exportScreenshots(root, state, to = null, { gate = false } = {})
   }
   if (problems.length) throw refuse(`screenshots not exported:\n  - ${problems.join('\n  - ')}`);
   mkdirStateDirectory(parent, { recursive: true });
-  const dir = fs.mkdtempSync(path.join(parent, `${gate ? 'gate' : 'screenshots'}-`));
+  const dir = fs.mkdtempSync(path.join(parent, `${named ? 'run' : gate ? 'gate' : 'screenshots'}-`));
   const dirReal = fs.realpathSync.native(dir);
   if (underEvidence(root, dir) || underEvidence(root, dirReal) || isInside(dir, attemptDir(root, state.id))) {
     fs.rmdirSync(dir);
@@ -2838,8 +2851,8 @@ export function exportScreenshots(root, state, to = null, { gate = false } = {})
   }
   if (!same()) problems.push(`${dir}: the export folder was replaced or moved during the export`);
   if (problems.length) throw refuse(`screenshots not exported:\n  - ${problems.join('\n  - ')}`);
-  if (!gate) append(root, state.id, 'screenshots.exported', { dir, files: out }, null);
-  return { dir, files: out };
+  if (!gate && !named) append(root, state.id, 'screenshots.exported', { dir, files: out }, null);
+  return { dir, files: out, ...(named ? { run: named.run, label: named.label, imported: named.imported } : {}) };
 }
 
 function closeExport(root, state) {

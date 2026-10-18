@@ -468,6 +468,14 @@ export function recordedFileProblem(root, id, abs) {
   return hashBuf(r.bytes) === m.sha256 ? null : `${rel}: content differs from its recorded sha256`;
 }
 
+// 0.7.30 (I-198): the recorded files under `prefix` (a folder of the attempt, relative to it, ending in `/`), each with the
+// sha256 the manifest holds for it: what an export of one run reads, and checks each file's bytes against.
+export function recordedUnder(root, id, prefix) {
+  const out = [];
+  for (const [rel, m] of loadLedgerLite(root, id).manifest) if (rel.startsWith(prefix)) out.push({ rel, path: path.join(attemptDirOf(root, id), ...rel.split('/')), sha256: m.sha256 });
+  return out.sort((a, b) => a.rel.localeCompare(b.rel));
+}
+
 // One no-follow read and what became of it: { state: 'ok', read } | { state: 'missing' } (ENOENT at the open) | { state: 'unsafe' }
 // (a link, a folder, a file with another name, any other failure to open or read). Callers that must tell "gone" from
 // "there but not readable" use this and never look at the path a second time.

@@ -207,7 +207,8 @@ test('I-113: a check waiting for a full lease says which lease, who holds it and
     await until('the first check to hold the slot', () => fs.existsSync(path.join(leasesOf(f), 'docker.1')) && /start\s+stack/.test(a.text()));
     b = startWf(f, ['check', '--attempt', second.id]);
     await until('the second check to say it waits', () => /waiting\s+stack/.test(b.text()));
-    assert.match(b.text(), new RegExp(`waiting\\s+stack\\s+for lease docker \\(1 slot\\(s\\), all held\\): held by pid ${a.child.pid} \\(${first.id.replace('.', '\\.')} step stack\\) since \\d\\d:\\d\\d:\\d\\dZ\\. To allow more at once, raise \`gate\\.leases\\.docker\` in the project's \\.workflow/project\\.yaml`));
+    // 0.7.30 (I-157): with its place among the machine's live waiters.
+    assert.match(b.text(), new RegExp(`waiting\\s+stack\\s+for lease docker \\(1 slot\\(s\\), all held\\): held by pid ${a.child.pid} \\(${first.id.replace('.', '\\.')} step stack\\) since \\d\\d:\\d\\d:\\d\\dZ; place 1 of 1 waiting \\(the live run waiting longest goes next\\)\\. To allow more at once, raise \`gate\\.leases\\.docker\` in the project's \\.workflow/project\\.yaml`));
 
     // `wf status` and `wf resume` name the lease and its holder where they used to say only "waiting for a lease".
     await until('the wait in the progress file', () => /waiting: stack/.test(wf(f.root, ['status', '--attempt', second.id]).out));

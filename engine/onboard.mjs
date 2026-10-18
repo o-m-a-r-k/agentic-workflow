@@ -863,6 +863,13 @@ export async function doctor(root, { runSteps = true, runtime = detectOwner()?.r
   for (const w of modelWarnings(root, cfg, runtime)) report.warnings.push({ ok: true, warn: true, check: w.check, problem: w.problem, fix: w.fix });
   for (const w of staticArtifactWarnings(cfg)) report.warnings.push({ ok: true, warn: true, ...w });
   for (const w of suiteRerunWarnings(cfg)) report.warnings.push({ ok: true, warn: true, ...w });
+  // 0.7.30 (I-155): a plugin step with no route to prepare its dependencies before the first commit.
+  if (adapterBase) {
+    try {
+      const { prepareRouteWarnings } = await import('./gate.mjs');
+      for (const w of await prepareRouteWarnings(root, loadConfigAtCommit(root, cfg, adapterBase), adapterBase)) report.warnings.push({ ok: true, warn: true, ...w });
+    } catch {}
+  }
   if (adapterBase) {
     try {
       for (const w of ruleWarnings(root, loadConfigAtCommit(root, cfg, adapterBase), adapterBase)) report.warnings.push({ ok: true, warn: true, ...w });

@@ -115,8 +115,10 @@ Work
   wf gate quarantine --step ID --suite FILE --reason "why"
                                     a suite that failed in the last gate and that the delivery does not change: the person
                                     decides whether it is set aside for this delivery (one question)
+  wf gate light-only --reason "why"   the person decides whether this delivery goes without its full test run: the gate
+                                    then runs the light steps, and the delivered comment names the heavy ones left out
   wf run --lease NAME -- CMD...     run a command holding a machine-wide lease (docker, browser...)
-  wf run --step ID                  run that gate step's declared \`prepare\` command with the secrets the step uses
+  wf run --step ID                  run that gate step's declared \`prepare\` command (or its plugin's \`prepare\`) with the secrets the step uses
   wf base [merge] [--repo R]        how far each base moved; merge merges it into the worktrees
   wf stop --class major-finding|tree-change|owner-decision --reason "why"
                                     stop a running gate; records the class and the minutes discarded
@@ -209,8 +211,8 @@ Status
   wf evidence release [--attempt ID | --closed | --older-than DAYS] [--dry-run]
                                     delete closed attempts' evidence through the engine (protection lifted, tombstone kept)
   wf export [--out FILE] [--json]   one self-contained page for the attempt (a view of the evidence)
-  wf export screenshots [--gate] [--to DIR]
-                                    copy the delivered (or, --gate, the last gate's) screenshots out of the evidence
+  wf export screenshots [--gate | --run RUN] [--to DIR]
+                                    copy the delivered (or, --gate, the last gate's; --run, one run's or import-<n>'s) screenshots out of the evidence
 
 Common options: --attempt ID, --json, --owner ID`;
 
@@ -1025,6 +1027,13 @@ async function dispatch(cmd, sub, positional, options) {
         print(options, `${r.suite} of ${r.step} is set aside for ${s.id} (${r.decision}): the next \`wf gate\` counts ${r.step} passed while it is that step's only failure, and the delivered comment says the suite was not proven. next: ${nextAction(root, loadState(root, s.id))}`, r);
         return 0;
       }
+      // 0.7.30 (I-158, D58): the person's decision to deliver without the full test run.
+      if (cmd === 'gate' && sub === 'light-only') {
+        const { lightOnly } = await import('./gate.mjs');
+        const r = await lightOnly(root, s, options);
+        print(options, `${s.id} leaves out ${r.leftOut.join(', ')} by the person's decision (${r.decision}): the next \`wf gate\` runs the light steps only${r.stillRun.length ? ` (and ${r.stillRun.join(', ')})` : ''} and counts for delivery; the evidence reviewer is told what did not run and the delivered comment says so. next: ${nextAction(root, loadState(root, s.id))}`, r);
+        return 0;
+      }
       const check = cmd === 'check';
       const repos = check && options.repo ? String(options.repo).split(',') : null;
       // Before the run: an unplanned change is amended into the criteria (or fixed) before the review, not after.
@@ -1053,7 +1062,7 @@ async function dispatch(cmd, sub, positional, options) {
     }
     case 'run': {
       const step = typeof options.step === 'string' ? options.step : null;
-      if ((options.step !== undefined && !step) || (!step && (!options.lease || options.lease === true)) || (options.lease === true) || (!step && !options._.length)) throw new WfError('usage: wf run --lease <name> -- <command...>   or   wf run --step <gate step id> [--lease <name>] (runs the step\'s declared `prepare`)');
+      if ((options.step !== undefined && !step) || (!step && (!options.lease || options.lease === true)) || (options.lease === true) || (!step && !options._.length)) throw new WfError('usage: wf run --lease <name> -- <command...>   or   wf run --step <gate step id> [--lease <name>] (runs the step\'s declared `prepare`, or its plugin\'s)');
       if (step) return await runPrepared(root, openState(root, options), step, options._, { lease: options.lease ? String(options.lease) : null });
       const cfg = loadConfig(root);
       return await runWithLease(cfg, String(options.lease), options._, { root });
@@ -1068,11 +1077,14 @@ async function dispatch(cmd, sub, positional, options) {
     case 'export': {
       const s = openState(root, options);
       if (sub === 'screenshots') {
-        const r = exportScreenshots(root, s, options.to && options.to !== true ? options.to : null, { gate: options.gate === true });
-        print(options, `copied ${r.files.length} ${options.gate ? 'gate' : 'delivered'} screenshot(s) of ${s.id} to ${r.dir} (each sha256-checked; view them with the Read tool):\n${r.files.map((f) => `  ${f.file}${path.basename(f.file) !== f.title ? `  (${f.title})` : ''}`).join('\n')}`, r);
+        const r = exportScreenshots(root, s, options.to && options.to !== true ? options.to : null, { gate: options.gate === true, ...(options.run !== undefined ? { run: options.run } : {}) });
+        const listed = r.files.map((f) => `  ${f.file}${path.basename(f.file) !== f.title ? `  (${f.title})` : ''}`).join('\n');
+        // 0.7.30 (I-198, I-160): a run's or an import's copies say where they came from, and that they are not the gate's acceptance.
+        if (r.run) print(options, `copied ${r.files.length} screenshot(s) of ${r.label} of ${s.id} to ${r.dir} (each sha256-checked against the evidence record; view them with the Read tool):\n${listed}\n${r.imported ? 'imported captures: not a gate\'s evidence until a gate passes on the tree they were made on' : 'copies for diagnosis: the run\'s outcome stands as recorded, and only the delivered set is shown to the person'}`, r);
+        else print(options, `copied ${r.files.length} ${options.gate ? 'gate' : 'delivered'} screenshot(s) of ${s.id} to ${r.dir} (each sha256-checked; view them with the Read tool):\n${listed}`, r);
         return 0;
       }
-      if (sub) throw new WfError('usage: wf export [--out FILE] [--json] | wf export screenshots [--gate] [--to DIR]');
+      if (sub) throw new WfError('usage: wf export [--out FILE] [--json] | wf export screenshots [--gate | --run <run id | import-<n>>] [--to DIR]');
       const r = exportAttempt(root, s, { out: options.out ?? null, json: options.json === true });
       append(root, s.id, 'exported', { file: r.file, json: options.json === true }, null);
       if (options.json) {
@@ -1522,7 +1534,7 @@ async function dispatch(cmd, sub, positional, options) {
         const groups = new Map();
         for (const f of r.files) groups.set(f.kind, [...(groups.get(f.kind) ?? []), f]);
         const text = [...groups].map(([k, fs]) => `${k} (${fs.length}):\n${fs.map((f) => `  ${f.path}${f.size !== null ? `  ${f.size} B` : ''}\n    ${f.file}`).join('\n')}`).join('\n');
-        const shots = groups.has('screenshot') ? `\nscreenshots: copy them out with \`wf export screenshots --gate --attempt ${s.id} --to <folder>\` and view the copies` : '';
+        const shots = groups.has('screenshot') ? `\nscreenshots: copy them out with \`wf export screenshots --gate --attempt ${s.id} --to <folder>\` and view the copies (the last gate's collected set; \`--run <run id>\` copies every image of one run, failed, stopped or interrupted ones too, the run id being the folder under gate/; \`--run import-<n>\` an import's)` : '';
         print(options, `${r.files.length ? text : `no evidence files${options.kind ? ` of kind ${options.kind}` : ''} in ${s.id}`}${shots}\nread a text file: \`wf evidence show <path> --attempt ${s.id}\`, or the Read tool on the full path`, r);
         return 0;
       }

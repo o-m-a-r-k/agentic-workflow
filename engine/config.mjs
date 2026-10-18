@@ -351,11 +351,19 @@ function normalize(raw, source) {
       if (!Array.isArray(s.specs) || !s.specs.length || s.specs.some((g) => typeof g !== 'string' || !g.trim())) fail(`step \`${s.id}\`: specs must be a list of globs naming the step's spec files`);
       else if (!s.select || s.plugin) fail(`step \`${s.id}\`: specs needs \`run\` with \`select\` (how the runner takes spec files, with \`{suites}\`), so a run can be limited to some of them`);
     }
+    // 0.7.30 (I-134, D59): which of the step's spec files a change can affect, for a standard attempt to run only those.
+    if (s.affects !== undefined) {
+      const globs = (g) => Array.isArray(g) && g.length && g.every((x) => typeof x === 'string' && x.trim());
+      if (!Array.isArray(s.affects) || !s.affects.length || s.affects.some((a) => !a || typeof a !== 'object' || !globs(a.paths) || !globs(a.specs))) fail(`step \`${s.id}\`: affects must be a list of { paths: [globs], specs: [globs] }: the package files a change can be in, and the spec files (of \`specs\`) such a change can affect`);
+      else if (!s.specs?.length) fail(`step \`${s.id}\`: affects needs \`specs\` (the step's spec files) and \`run\` with \`select\`, so a run can take only some of them`);
+    }
     if (s.alsoInputs !== undefined) {
       if (!Array.isArray(s.alsoInputs)) fail(`step \`${s.id}\`: alsoInputs must be a list of repo names`);
       else for (const r of s.alsoInputs) if (!repoNames.has(r)) fail(`step \`${s.id}\`: alsoInputs names unknown repo \`${r}\``);
     }
   }
+  // 0.7.30 (I-163, D56): `needs` names the steps whose output a step consumes; the gate starts it only after they finished.
+  gateNeedsProblems(cfg.gate.steps).forEach(fail);
   if (typeof cfg.review.integrationCheck !== 'boolean') fail('`review.integrationCheck` must be true or false');
   if (!Array.isArray(cfg.quality) || cfg.quality.some((q) => typeof q !== 'string' || !q.trim())) fail('`quality` is a list of standing goals, each a non-empty sentence');
   // Review rules: documents a reviewer reads when the change touches the paths they govern (engine/rules.mjs).
@@ -523,6 +531,38 @@ function readAdapter(root, loc, commit) {
   if (!text) throw refuse(`adapter not found at ${loc.repo.name}@${String(commit).slice(0, 10)}:${file}`, 'commit .workflow/ to the base branch before admitting work');
   const where = `${loc.repo.name}@${String(commit).slice(0, 10)}:${file}`;
   return checkAdapter(root, parseConfig(text, where), loc, where);
+}
+
+// 0.7.30 (I-163, D56): each `needs` is a list of other steps of the gate, and no steps need each other in a cycle (the gate
+// would wait forever). Also run on a gate a ticket's registered checks extended (engine/validation.mjs adds steps to it).
+export function gateNeedsProblems(steps) {
+  const out = [];
+  const ids = new Set(steps.map((s) => s.id));
+  for (const s of steps) {
+    if (s.needs === undefined) continue;
+    if (!Array.isArray(s.needs) || s.needs.some((n) => typeof n !== 'string' || !n)) out.push(`step \`${s.id}\`: needs must be a list of step ids (the steps whose output it consumes)`);
+    else for (const n of s.needs) if (n === s.id) out.push(`step \`${s.id}\`: needs names the step itself`);
+    else if (!ids.has(n)) out.push(`step \`${s.id}\`: needs names unknown step \`${n}\``);
+  }
+  if (out.length) return out;
+  const needsOf = new Map(steps.map((s) => [s.id, s.needs ?? []]));
+  const state = new Map();
+  const cycle = (id, trail) => {
+    if (state.get(id) === 'done') return null;
+    if (state.get(id) === 'open') return [...trail.slice(trail.indexOf(id)), id];
+    state.set(id, 'open');
+    for (const n of needsOf.get(id) ?? []) {
+      const c = cycle(n, [...trail, id]);
+      if (c) return c;
+    }
+    state.set(id, 'done');
+    return null;
+  };
+  for (const s of steps) {
+    const c = cycle(s.id, []);
+    if (c) return [`gate steps need each other in a cycle: ${c.join(' → ')} (\`needs\` names the steps whose output a step consumes; one of them must not need the other)`];
+  }
+  return out;
 }
 
 // Before admission (entry, doctor): the adapter committed at `commit`, located from the working tree.

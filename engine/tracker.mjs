@@ -161,6 +161,8 @@ export function limitItems(state, { load = null } = {}) {
   for (const a of state.delivery?.shown?.anomalies ?? []) if (a.followUp) add(null, `Follow-up: ${a.observation} (${a.followUp})`);
   // 0.7.28 (I-212): a suite the person set aside in the gate this delivery passed is named: it was not proven.
   for (const st of state.lastGate?.status === 'passed' ? state.lastGate.steps ?? [] : []) for (const q of st.quarantined ?? []) add(`quarantine:${st.id}:${q}`, `Not proven by the checks: the test suite ${q} failed and was set aside by your decision; this change does not edit that test file, and whether the code it exercises changed was not checked.`);
+  // 0.7.30 (I-158, D58): a heavy step the person's decision left out of the gate this delivery passed did not run for it.
+  for (const st of state.lastGate?.status === 'passed' ? state.lastGate.steps ?? [] : []) if (st.status === 'skipped' && st.skippedBy === 'person') add(`light-only:${st.id}`, `Not proven by the checks: the test step ${st.id} did not run for this delivery, by your decision to deliver without the full test run.`);
   // An item closed as fixed after the last review was not verified by any reviewer (0.7.8: information, not a stop).
   const lastReviewAt = lastReviewSeenAt(state) ?? '';
   for (const d of state.discovered ?? []) if (d.status === 'fixed' && d.kind !== 'bookkeeping' && !d.fixed?.verifiedBy && d.fixed?.at > lastReviewAt) add(d.id, `Fixed after the last review, not verified by a reviewer: ${wording(state, d.id, d.summary)}.`);

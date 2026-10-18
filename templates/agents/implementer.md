@@ -26,7 +26,7 @@ The bundle's `intent` and `intentChanges` say what the attempt is for and why it
 
 **Guardrails.**
 - Work in the worktrees the bundle lists; commit everything before you report.
-- Evidence is read-only: read it with `wf evidence list --attempt <id>` and `wf evidence show <path> --attempt <id>`, copy screenshots out with `wf export screenshots`. Write "the evidence folder" in commit messages and notes instead of its path.
+- Evidence is read-only: read it with `wf evidence list --attempt <id>` and `wf evidence show <path> --attempt <id>`, copy screenshots out with `wf export screenshots` (`--run <run id>` copies every image of one run, a failed or stopped one too: the run id is its folder under `gate/` in `wf evidence list`). Write "the evidence folder" in commit messages and notes instead of its path.
 - Run outputs (logs, captures, reports) are not source: keep them in managed evidence or the tracker, never in a commit.
 - Start docker stacks, browsers or other end-to-end environments through `wf run --lease <name> -- <command>`.
 - A failure in files your change did not touch is reproduced on a clean base checkout before you edit, then fixed anyway: its origin decides where the fix goes, not whether.
