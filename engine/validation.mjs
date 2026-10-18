@@ -1,4 +1,4 @@
-import { adapterPin, attemptAdapter, trustedAdapter, adapterFileAtCommit } from './config.mjs';
+import { CONFIG_FILE, adapterPin, attemptAdapter, trustedAdapter, adapterFileAtCommit } from './config.mjs';
 import { actor, openState, treeHashes } from './attempt.mjs';
 import { append, listAttempts, loadState } from './ledger.mjs';
 import { loadCatalog } from './secrets.mjs';
@@ -278,7 +278,7 @@ async function registerValidation(root, options, correcting) {
     if (Object.values(trees).some((t) => t.includes('+dirty'))) throw refuse('commit the product tree and validation adapter before registering validation');
     const adapter = attemptAdapter(root, state);
     const own = state.repos[adapter.repo.name];
-    if (!own?.worktree) throw refuse('the admission adapter repo must belong to this attempt');
+    if (!own?.worktree) throw refuse('the admission adapter repo must belong to this attempt', `the project's adapter lives in ${adapter.repo.name}, which this attempt does not hold: \`wf criteria amend --file <amendment> --reason "<why>" --add-repo ${adapter.repo.name} --attempt ${state.id}\` brings its worktree into the attempt (0.7.32, D73); commit the step there, then register it`);
     const commit = git(own.worktree, ['rev-parse', 'HEAD']);
     if (git(own.worktree, ['merge-base', state.adapterBase, commit]) !== state.adapterBase) throw refuse('supplemental adapter must descend from the admission commit');
     const pinOf = (id) => registered.find((r) => r.id === id)?.commit ?? adapterPin(state);
@@ -293,7 +293,10 @@ async function registerValidation(root, options, correcting) {
     const existing = loadCatalog(root);
     const steps = ids.map((id) => {
       const step = candidate.gate.steps.find((s) => s.id === id);
-      if (!step) throw refuse(`supplemental step ${id} is not committed in the attempt adapter`);
+      // 0.7.32 (D73). Named failure (field): this refusal named no route while the session rules said "never change the workflow
+      // from a ticket"; a finding waiting for the proof stayed open 37 minutes, a strategist escalated it, and the person had to
+      // answer before the step was registered. The route is this ticket's own: the project's adapter, never the plugin.
+      if (!step) throw refuse(`supplemental step ${id} is not committed in the attempt adapter`, `commit its definition (the step under \`gate.steps\` in ${adapter.relative}/${CONFIG_FILE}, and its plugin if it has one) in this attempt's worktree of ${adapter.repo.name} (${own.worktree}), then run \`wf validation add --steps ${ids.join(',')} --criteria <ids> --reason "<why>" --attempt ${state.id}\` again. This is the project's adapter, not the workflow: proof a ticket adds is additive by design, and nothing else in that commit becomes a rule this attempt is judged by (the gate runs only the registered steps from it)`, { id: 'validation:not-committed' });
       const repo = frozen.repos.find((r) => r.name === step.repo);
       if (!repo || !state.repos[step.repo] || (step.package && !repo.packages.some((p) => p.path === step.package || p.name === step.package))) throw refuse(`supplemental step ${id} must use an admitted repo and package`);
       if ((step.alsoInputs ?? []).some((r) => !state.repos[r] || !frozen.repos.some((x) => x.name === r))) throw refuse(`supplemental step ${id} reads a repo outside the attempt`);

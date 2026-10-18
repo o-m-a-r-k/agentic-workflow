@@ -7,7 +7,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { attemptDir } from './ledger.mjs';
+import { attemptDir, evidenceRoot } from './ledger.mjs';
 import { listableOf } from './evidence.mjs';
 import { recordedFileProblem } from './evidence.mjs';
 import { isInside } from './paths.mjs';
@@ -83,7 +83,12 @@ export function showEvidence(root, state, rel, { offset, length, maxSize } = {})
   const dir = fs.realpathSync.native(attemptFolder(root, state));
   // Named failure I-45: native roles receive absolute bundle/rule paths, but the sanctioned reader rejected them.
   if (rel.split(/[\\/]/).includes('..')) throw refuse(`${rel}: give a path inside this attempt's evidence, relative to it, as \`wf evidence list --attempt ${state.id}\` prints it`);
-  const abs = path.isAbsolute(rel) ? path.resolve(rel) : path.join(dir, rel);
+  // 0.7.32 (D77). Named failure (field, 78 refusals): reviewers passed a bundle path relative to the project root
+  // (`.wf-evidence/attempts/<id>/handoffs/NN-reviewer.json`), read as relative to the attempt's folder and refused as missing. A
+  // relative path that starts at the project's evidence folder resolves there (where that folder really is); the checks below
+  // still keep the read inside this attempt.
+  const fromRoot = !path.isAbsolute(rel) && path.normalize(rel).split(/[\\/]/)[0] === path.basename(evidenceRoot(root));
+  const abs = path.isAbsolute(rel) ? path.resolve(rel) : fromRoot ? path.join(fs.realpathSync.native(evidenceRoot(root)), ...path.normalize(rel).split(/[\\/]/).slice(1)) : path.join(dir, rel);
   if (!abs.startsWith(dir + path.sep)) throw refuse('give an evidence file inside the selected attempt; cross-attempt and outside reads are refused');
   let parent;
   try {

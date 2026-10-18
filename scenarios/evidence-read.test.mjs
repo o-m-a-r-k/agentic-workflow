@@ -116,3 +116,21 @@ test('I-45: native roles can read an absolute handed path only inside their sele
   assert.equal(wf(root, ['evidence', 'show', '/etc/hosts', '--attempt', a]).code, 75);
   assert.equal(wf(root, ['evidence', 'show', h.bundle + '/../01-planner.json', '--attempt', a]).code, 75);
 });
+
+// 0.7.32 (D77). Named failure (field, 78 refusals): reviewers passed bundle paths relative to the project root
+// (`.wf-evidence/attempts/<id>/handoffs/NN-reviewer.json`), which `wf evidence show` read as relative to the attempt's folder and
+// refused as missing. Such a path resolves against the project's evidence folder; the inside-the-attempt check then applies.
+test('D77: a path relative to the project root resolves; one into another attempt is still refused', () => {
+  const { root } = singleRepoProject('root-relative-evidence');
+  const a = ok(wf(root, ['entry', '--item', 'ENG-86', '--json'])).json().id;
+  const h = ok(wf(root, ['handoff', 'planner', '--agent', 'p', '--attempt', a, '--json'])).json();
+  const rel = path.relative(fs.realpathSync(root), fs.realpathSync(h.bundle));
+  assert.match(rel, /^\.wf-evidence\/attempts\/ENG-86\.1\/handoffs\//);
+  for (const given of [rel, `./${rel}`]) assert.equal(JSON.parse(ok(wf(root, ['evidence', 'show', given, '--attempt', a])).out).agent, 'p', given);
+  assert.equal(ok(wf(root, ['evidence', 'inspect', rel, '--attempt', a, '--pointer', '/agent'])).json().text, 'p');
+  const b = ok(wf(root, ['entry', '--item', 'ENG-87', '--json'])).json().id;
+  const cross = wf(root, ['evidence', 'show', rel, '--attempt', b]);
+  assert.equal(cross.code, 75);
+  assert.match(cross.err, /cross-attempt and outside reads are refused/);
+  assert.equal(wf(root, ['evidence', 'show', `.wf-evidence/attempts/${b}/../${a}/ledger.jsonl`, '--attempt', b]).code, 75);
+});

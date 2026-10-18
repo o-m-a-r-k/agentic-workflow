@@ -248,3 +248,23 @@ test('0.7.29 (I-206): a check registered after the last reviewed round reaches t
   assert.deepEqual(two.supplementalValidation, [], 'a round handed after it has nothing new');
   assert.doesNotMatch(two.instructions, /`supplementalValidation` lists the checks/);
 });
+
+// 0.7.32 (D73). Named failure (field): `wf validation add` refused "supplemental step X is not committed in the attempt adapter"
+// and named no route, while the session rules said "never change the workflow from a ticket"; a finding ("no final-tree proof")
+// stayed open 37 minutes, a strategist escalated it to the person, and the person had to answer before the proof was registered.
+// The refusal names the route; the step committed there registers, runs at that commit, and nothing else of that commit (here
+// the attempt's adapter drops the frozen `unit` step) becomes a rule the attempt is judged by.
+test('D73: a step not committed in the attempt adapter is refused with the route; committed there, it registers and runs beside every frozen step', () => {
+  const f = fixture('supplemental-route');
+  const escape = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const refused = add(f);
+  assert.equal(refused.code, 75);
+  assert.match(refused.err, /supplemental step http is not committed in the attempt adapter/);
+  assert.match(refused.err, new RegExp(`commit its definition \\(the step under \`gate\\.steps\` in \\.workflow/project\\.yaml, and its plugin if it has one\\) in this attempt's worktree of app \\(${escape(fs.realpathSync(f.wt))}\\), then run \`wf validation add --steps http --criteria <ids> --reason "<why>" --attempt ${escape(f.e.id)}\` again`));
+  assert.match(refused.err, /This is the project's adapter, not the workflow: proof a ticket adds is additive by design, and nothing else in that commit becomes a rule this attempt is judged by/);
+  candidate(f, { id: 'http', repo: 'app', run: 'true' });
+  ok(add(f));
+  review(f, 'code');
+  const run = ok(wf(f.root, ['gate', '--attempt', f.e.id, '--json'])).json();
+  assert.deepEqual(run.steps.map((s) => `${s.id}:${s.status}`).sort(), ['http:passed', 'unit:passed']);
+});
