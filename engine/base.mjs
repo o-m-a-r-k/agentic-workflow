@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { actor, branchName, changedFiles, openState, uncommitted } from './attempt.mjs';
-import { adapterPin, loadConfig, trustedAdapter } from './config.mjs';
+import { adapterPin, loadConfig, trustedAdapter, withTargets } from './config.mjs';
 import { liveGate } from './gate.mjs';
 import { append, listAttempts, loadState } from './ledger.mjs';
 import { packageOf } from './topology.mjs';
@@ -52,7 +52,8 @@ function deliveredHeads(root) {
 }
 
 export function baseStatus(root, state, { fetch = true } = {}) {
-  const cfg = loadConfig(root);
+  // 0.7.30 (I-201): a repo admitted with its own target is compared with that branch.
+  const cfg = withTargets(loadConfig(root), state);
   const out = [];
   let delivered = null; // every attempt's delivered commits, read once, on the first repo whose base moved (I-119)
   for (const [name, r] of Object.entries(state.repos)) {

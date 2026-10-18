@@ -16,6 +16,7 @@ import { rerunsOnlyFailed, sessionRules } from './onboard.mjs';
 import { policyOf, RULE, RULE_SHORT } from './leaving.mjs';
 import { detectOwner, findHost, fragment, hostChoice, isHost, lastFencedYaml, optional } from './hosts/index.mjs';
 import { defaultRuntime } from './runtime-policy.mjs';
+import { portApplied } from './targets.mjs';
 import { ADAPTER_DIR, adapterFileAtCommit, adapterPin, agentTypeFor, attemptAdapter, declared, loadConfig, repoDir, roleClass, trustedAdapter } from './config.mjs';
 import { focusedSkips, gateBusy, gatePassedForCurrentTree, gateRunningRefusal, screenshots, withReviewLock } from './gate.mjs';
 import { append, attemptDir, evidenceRoot, keptFiles, listAttempts, loadState, openEvidence, recordedTogether } from './ledger.mjs';
@@ -720,7 +721,8 @@ export function handoff(root, role, options) {
   if (role === 'reviewer') {
     const busy = gateBusy(root, state);
     if (busy) throw gateRunningRefusal(state, busy);
-    if (state.lane !== 'batch' && !state.handoffs.some((h) => h.role === 'implementer')) throw refuse('nothing to review yet: hand the work to an implementer first (`wf handoff implementer --agent <id>`)');
+    // 0.7.30 (I-201): a port whose commits all applied holds its change already, as a batch does.
+    if (state.lane !== 'batch' && !portApplied(state) && !state.handoffs.some((h) => h.role === 'implementer')) throw refuse('nothing to review yet: hand the work to an implementer first (`wf handoff implementer --agent <id>`)');
     // Tracked changes only: a finished gate leaves untracked reports, and those are never the change.
     const dirty = Object.entries(treeHashes(state)).filter(([, t]) => t.includes('+dirty')).map(([n]) => n);
     if (dirty.length) throw refuse(`commit the change before the review (the reviewer reads the committed diff): uncommitted changes in ${dirty.join(', ')}`);
@@ -3349,7 +3351,7 @@ export function nextDecision(root, state) {
   const unstarted = unstartedWork(state);
   if (unstarted.length) return result('implementation', 'owner', 'work items have not started', { guidance: guidance });
   if (openImplementersOf(root, state).length) return result('implementation', 'owner', 'the owner must close settled implementer handoffs');
-  if (!state.handoffs.some((h) => h.role === 'implementer')) return result('implementation', 'owner', 'implementation has not started');
+  if (!portApplied(state) && !state.handoffs.some((h) => h.role === 'implementer')) return result('implementation', 'owner', 'implementation has not started');
   // 0.7.28 (I-207): an open discovered issue no longer opens a round before the review. It joins the fix round that happens
   // anyway, or the one planned pass of what does not block (below); delivery still waits for every one.
   if (Object.values(tree).some((t) => t.includes('+dirty')) || Object.keys(state.repos).every((n) => !changedFiles(state, n).length)) return result('implementation', 'owner', 'a committed change is required');
@@ -3559,7 +3561,7 @@ function phaseStep(root, cfg, state) {
     const open = unstartedWork(state);
     if (open.length) return routed(`start the implementers for the open work items (agent type in brackets; never general-purpose): ${open.map((w) => `${w.id} class ${w.class} [${agentTypeFor(cfg, 'implementer', w.class)}] \`wf handoff implementer --work ${w.id} --agent <id>\``).join('; ')}; one implementer handed without \`--work\` covers them all`);
   }
-  if (state.lane !== 'batch' && !state.handoffs.some((h) => h.role === 'implementer')) return routed(`start the implementer: \`wf handoff implementer --agent <id>\` [${agentTypeFor(cfg, 'implementer')}]`);
+  if (state.lane !== 'batch' && !portApplied(state) && !state.handoffs.some((h) => h.role === 'implementer')) return routed(`start the implementer: \`wf handoff implementer --agent <id>\` [${agentTypeFor(cfg, 'implementer')}]`);
   // 0.7.28 (I-207): an open discovered issue is no next step of its own before the review: it joins the fix round that happens
   // anyway, or the one planned pass of what does not block (below). One claimed fixed is verified by that next reviewer.
   // 0.7.26 (I-183, review): an acceptance that names another tree than the worktrees hold (adapter delivery) stands for nothing now.

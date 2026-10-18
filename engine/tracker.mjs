@@ -247,7 +247,9 @@ function deliveredKey(cfg) {
 // tickets through the quick lane, the engine read the lane as "no ticket", and those tickets never moved to In progress or
 // In UAT and never got the tester's comment.
 export const ownItem = (state) => (typeof state.autoItem === 'boolean' ? state.autoItem : /^QF-\d+$/.test(String(state.item ?? '')));
-export const hasTicket = (state) => state.lane !== 'batch' && !ownItem(state);
+// 0.7.30 (I-201, D62): a port carries another attempt's change of the same ticket to another branch; the ticket's status and
+// comments are its source's, so a port moves none of them.
+export const hasTicket = (state) => state.lane !== 'batch' && !ownItem(state) && !state.portOf;
 
 export function needsSummary(cfg, state) {
   if (cfg.tracker.kind === 'none' || !hasTicket(state)) return false;

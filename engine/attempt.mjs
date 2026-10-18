@@ -14,6 +14,7 @@ import { requireYes } from './approve.mjs';
 import { FRAMES } from './asking.mjs';
 import { settleRoundQuestions } from './strategy.mjs';
 import { followAdapter } from './adapter-follow.mjs';
+import { applyCommits, attemptTargets, ownCommits, parseTargets, portSource, targetsKey } from './targets.mjs';
 import { detectOwner, ownerRuntime, ownerString } from './hosts/index.mjs';
 import { noteAttempt } from './refusals.mjs';
 import { WfError, assertEngine, assertPlainGit, assertSafeId, canonical as canonicalValue, git, hashFile, refuse, run, sha256 } from './util.mjs';
@@ -216,6 +217,13 @@ export function provision(root, cfg, repo, dir) {
 }
 
 export function entry(root, options) {
+  // 0.7.30 (I-201): a port is of its source's item (and lane), unless named.
+  if (options.port !== undefined && options.port !== true && !options.item) {
+    try {
+      const src = loadState(root, String(options.port));
+      options = { ...options, item: src.item, autoItem: src.autoItem, lane: options.lane ?? (src.lane === 'quick' ? 'quick' : 'standard') };
+    } catch {}
+  }
   const cfg = loadConfig(root);
   if (!cfg.enabled) throw refuse('the workflow is disabled for this project', 'run `wf enable`');
   assertEngine(cfg);
@@ -236,16 +244,23 @@ export function entry(root, options) {
   if (lane === 'quick' && !item) item = `QF-${nextNumber(root, 'QF')}`;
   const owner = actor(options);
 
-  // A sibling attempt (`wf split`) works part of the same item beside its parent.
+  const wanted = options.repos ? String(options.repos).split(',') : cfg.repos.map((r) => r.name);
+  for (const name of wanted) if (!cfg.repos.find((r) => r.name === name)) throw new WfError(`unknown repo \`${name}\``);
+  // 0.7.30 (I-201, D62): a repo's own target branch, a port of another attempt's change to it, and the targets this attempt is
+  // also delivered to (each by a port, admitted by `wf deliver` once this delivery is complete). engine/targets.mjs.
+  const source = options.port !== undefined ? portSource(root, options.port, item) : null;
+  const targets = Object.fromEntries(Object.entries(parseTargets(options.target, wanted)).filter(([name, branch]) => source || branch !== cfg.repos.find((r) => r.name === name).base));
+  const alsoTargets = Object.entries(parseTargets(options['also-target'], wanted, '--also-target')).map(([repo, branch]) => ({ repo, branch, reason: null }));
+  if (source && !Object.keys(targets).length) throw refuse('--port needs --target <repo>=<branch>: the branch the change is carried to', null, { id: 'targets:port-no-target' });
+  if (source) for (const [name, branch] of Object.entries(targets)) if ((source.repos[name]?.target ?? cfg.repos.find((r) => r.name === name).base) === branch) throw refuse(`--port: ${source.id} is already delivered to ${name} -> ${branch}`, null, { id: 'targets:port-same' });
+  if (alsoTargets.length && (options.deferHeavy === true || options.sibling)) throw refuse('--also-target: a batch member is delivered with its batch; port it once the batch is delivered (`wf entry --port <member> --target <repo>=<branch>`)', null, { id: 'targets:batch' });
+  // A sibling attempt (`wf split`) works part of the same item beside its parent; a port (another target) beside its source.
   if (!options.sibling) {
     for (const id of listAttempts(root)) {
       const s = loadState(root, id);
-      if (s.item === item && OPEN(s)) throw refuse(`${item} already has an open attempt ${id} owned by ${s.owner}`, `continue it, or take it over with \`wf adopt --attempt ${id}\``);
+      if (s.item === item && OPEN(s) && targetsKey(attemptTargets(s)) === targetsKey(targets)) throw refuse(`${item} already has an open attempt ${id} owned by ${s.owner}`, `continue it, or take it over with \`wf adopt --attempt ${id}\`${Object.keys(targets).length ? '' : '; the same item on another branch is admitted with `--target <repo>=<branch>`'}`);
     }
   }
-
-  const wanted = options.repos ? String(options.repos).split(',') : cfg.repos.map((r) => r.name);
-  for (const name of wanted) if (!cfg.repos.find((r) => r.name === name)) throw new WfError(`unknown repo \`${name}\``);
   const id = assertSafeId(options.id ?? nextAttemptId(root, item), 'attempt id');
   // Validate everything before creating anything: the adapter must be on the base the gate will trust.
   const { repo: adapterRepo } = adapterLocation(root, cfg);
@@ -253,8 +268,11 @@ export function entry(root, options) {
   for (const name of new Set([...wanted, adapterRepo.name])) {
     const repo = cfg.repos.find((r) => r.name === name);
     assertPlainGit(repoDir(root, repo));
-    const ref = baseRef(repoDir(root, repo), repo);
-    bases[name] = { ref, commit: git(repoDir(root, repo), ['rev-parse', ref]) };
+    const branch = targets[name] ?? repo.base;
+    const ref = baseRef(repoDir(root, repo), { ...repo, base: branch });
+    const commit = git(repoDir(root, repo), ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], { allowFail: true });
+    if (!commit) throw refuse(`branch ${branch} does not exist in ${name}${targets[name] ? ' (its --target)' : ''}`, targets[name] ? `create and push ${branch} in ${name} first, or name an existing branch` : undefined, { id: 'entry:no-branch' });
+    bases[name] = { ref, commit };
   }
   const adapterBase = bases[adapterRepo.name].commit;
   // Where the adapter lives, recorded now: every later read of the adapter at base is located from this record only.
@@ -283,7 +301,7 @@ export function entry(root, options) {
       run('git', ['worktree', 'add', '--quiet', '-b', branchName(id), wt, bases[name].commit], { cwd: dir });
       made.push({ dir, wt });
       const provisioned = provision(root, cfg, repo, wt);
-      repos[name] = { base: bases[name].commit, baseRef: bases[name].ref, branch: branchName(id), worktree: wt, provisioned, provisionedUntracked: untrackedSnapshot(wt) };
+      repos[name] = { base: bases[name].commit, baseRef: bases[name].ref, branch: branchName(id), worktree: wt, provisioned, provisionedUntracked: untrackedSnapshot(wt), ...(targets[name] ? { target: targets[name] } : {}) };
     }
   } catch (error) {
     for (const m of made.reverse()) {
@@ -294,6 +312,16 @@ export function entry(root, options) {
     throw error;
   }
 
+  // A port carries its source's own commits onto the target; the first that does not apply stops it, aborted and recorded.
+  let port = null;
+  if (source) {
+    port = { of: source.id, repos: {} };
+    for (const name of wanted) {
+      if (!source.repos[name]) continue;
+      const { head, commits } = ownCommits(root, cfg, source, name);
+      port.repos[name] = { head, commits, ...applyCommits(repos[name].worktree, commits) };
+    }
+  }
   const originRuntime = detectOwner()?.runtime ?? ownerRuntime(owner);
   // Named failure (I-109): the copy of the issue file was written into the evidence, and the attempt entered in the ledger, with no
   // transaction around them, and the copy was recorded in the manifest only when the process ended (after the tracker's admission
@@ -310,9 +338,11 @@ export function entry(root, options) {
       writeNoFollow(dest, fs.readFileSync(src), { exclusive: true }); // never through a link planted at the destination
       issue = { file: dest, sha256: hashFile(dest) };
     }
-    createAttempt(root, id, { id, item, lane, intent, autoItem, repos, adapterBase, adapter, issue, originRuntime, reopenedFrom: options.reopenedFrom ?? null, deferHeavy: options.deferHeavy === true || options.deferHeavy === 'true' }, owner);
+    createAttempt(root, id, { id, item, lane, intent, autoItem, repos, adapterBase, adapter, issue, originRuntime, reopenedFrom: options.reopenedFrom ?? null, deferHeavy: options.deferHeavy === true || options.deferHeavy === 'true', ...(port ? { port } : {}), ...(alsoTargets.length ? { alsoTargets } : {}) }, owner);
+    // A port is judged by the criteria its source froze (and its impact map), as a split's sibling is.
+    if (source?.criteria) append(root, id, 'criteria.frozen', { criteria: source.criteria, plan: source.plan ?? null, source: { port: source.id }, ...(source.impact ? { impact: { survey: source.impact.survey, impact: source.impact.impact, results: source.impact.results ?? {}, addenda: source.impact.addenda ?? [] } } : {}) }, owner);
   });
-  if (hasTicket({ lane, item, autoItem }) && intent === 'implementation' && !options.sibling) emitTrackerEvent(root, cfg, id, 'admitted');
+  if (hasTicket({ lane, item, autoItem, portOf: port?.of ?? null }) && intent === 'implementation' && !options.sibling) emitTrackerEvent(root, cfg, id, 'admitted');
   return loadState(root, id);
 }
 

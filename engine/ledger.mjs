@@ -167,6 +167,11 @@ export function reduce(entries) {
     adapterPin: null,
     adapterFollows: [],
     adapterHeld: null,
+    // 0.7.30 (I-201, D62): the attempt this one ports to another branch, what the port applied, and the branches this attempt
+    // is also delivered to (engine/targets.mjs).
+    portOf: null,
+    port: null,
+    alsoTargets: [],
     adapterRepins: [],
     criteria: null,
     // How many criteria the plan froze with: `wf signals` shows the amendments against it.
@@ -265,6 +270,9 @@ export function reduce(entries) {
           batch: d.batch ?? null,
           deferHeavy: d.deferHeavy ?? false,
           reopenedFrom: d.reopenedFrom ?? null,
+          portOf: d.port?.of ?? null,
+          port: d.port ?? null,
+          alsoTargets: (d.alsoTargets ?? []).map((t) => ({ ...t, at: e.at, by: e.actor })),
           issue: d.issue ?? null,
           schemaVersion: d.schemaVersion,
           engineVersion: d.engineVersion,
@@ -524,6 +532,9 @@ export function reduce(entries) {
           s.accepted = null;
           s.phase = 'implementing';
         }
+        break;
+      case 'targets.added':
+        for (const t of d.targets ?? []) s.alsoTargets.push({ ...t, reason: d.reason ?? null, at: e.at, by: e.actor });
         break;
       case 'adapter.notFollowed':
         s.adapterHeld = { tip: d.tip, ref: d.ref, why: d.why, at: e.at };
