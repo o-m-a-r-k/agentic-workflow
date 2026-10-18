@@ -11,7 +11,7 @@ import path from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { actor, addRepoWorktree, baseRef, branchName, onTarget, changedFiles, cleanupWorktrees, entry, missingWorktrees, openState, treeHashes, worktreeDir } from './attempt.mjs';
 import { channelOf, discoveredVerdicts, headsNow, nonissueVerdicts, openDiscovered, seamVerdicts, unacknowledged, reportsForReview, reportedIssueVerdicts } from './discovered.mjs';
-import { isDiscoveredRef, itemOpen, premiseCloseNotes, premiseNote, premiseOpen, premiseRef, premiseReports, premisesForReveal, premisesForReview, premiseStep } from './premise.mjs';
+import { isDiscoveredRef, itemOpen, personHeld, premiseCloseNotes, premiseNote, premiseOpen, premiseRef, premiseReports, premisesForReveal, premisesForReview, premisesHeldByPerson, premiseStep } from './premise.mjs';
 import { productDecisionsFor } from './product-decisions.mjs';
 import { executionSettings, rejectModelOverrides } from './models.mjs';
 import { rerunsOnlyFailed, sessionRules } from './onboard.mjs';
@@ -39,7 +39,7 @@ import { obligationSince } from './versions.mjs';
 import { deploymentAfterHandoff, deploymentNext } from './deployment-step.mjs';
 import { analysisFor, analysisStep, latestAnalysis } from './analysis.mjs';
 import { requireOwnerDecision, strategistHandoff, strategistWaiting, strategyApplies, strategyHold } from './strategy.mjs';
-import { consolidationOwed, consolidationStep, courseSignals, courseStep, outstanding, passesSince, passItemsOf, passReady, passStep, unanswered } from './course.mjs';
+import { consolidationOwed, consolidationStep, courseSignals, courseStep, criteriaChangedSince, outstanding, passesSince, passItemsOf, passReady, passStep, unanswered } from './course.mjs';
 import { approveHint, decisionFor, labelOf, requireYes } from './approve.mjs';
 import { FRAMES } from './asking.mjs';
 import { home, startPromptFor, verifyAgent } from './provenance.mjs';
@@ -926,8 +926,11 @@ export function handoff(root, role, options) {
   // 0.7.31 (I-217, D64): an item a pass names again whose premise an implementer reported does not hold says so: nothing is built for
   // it until a reviewer or the person settles it.
   const premised = new Map(role === 'implementer' ? premiseOpen(state).map((p) => [p.ref, { by: p.agent, why: p.why, evidence: p.evidence ?? [] }]) : []);
+  // 0.7.32 (I-222, D71): an item whose premise an implementer reported failed and the person decided holds goes back to the fix
+  // round with their answer (`premiseHeld`): what the implementer reported, the decision and the person's words.
+  const heldByPerson = new Map(role === 'implementer' ? premisesHeldByPerson(state).map((p) => [p.ref, { reportedBy: p.reportedBy, why: p.why, decision: p.decision, words: p.words }]) : []);
   const itemDetail = (ref) => {
-    const premise = premised.has(ref) ? { premiseFailed: premised.get(ref) } : {};
+    const premise = premised.has(ref) ? { premiseFailed: premised.get(ref) } : heldByPerson.has(ref) ? { premiseHeld: heldByPerson.get(ref) } : {};
     const f = observations(state).find((x) => x.ref === ref) ?? earlierOpenFindings(state, null).find((x) => `${x.round}:${x.id}` === ref);
     if (f) return { ref, kind: 'finding', severity: f.severity ?? null, family: f.family ?? null, summary: f.summary ?? '', evidence: f.evidence ?? null, ...(f.stillOpen ? { stillOpen: f.stillOpen } : {}), ...(statedFixOf(f) ? { fix: statedFixOf(f) } : {}), ...premise };
     const d = (state.discovered ?? []).find((x) => x.id === ref);
@@ -1068,7 +1071,7 @@ export function handoff(root, role, options) {
     mode: role === 'reviewer' ? mode : undefined,
     // A repair handoff: the open findings that block, grouped by family.
     // Review of 0.7.31 (L2): a finding whose premise an implementer reported does not hold, handed again beside others, says so.
-    repair: role === 'implementer' && repair ? repair.map((g) => ({ ...g, findings: g.findings.map((f) => (premised.has(`${f.round}:${f.id}`) ? { ...f, premiseFailed: premised.get(`${f.round}:${f.id}`) } : f)) })) : undefined,
+    repair: role === 'implementer' && repair ? repair.map((g) => ({ ...g, findings: g.findings.map((f) => (premised.has(`${f.round}:${f.id}`) ? { ...f, premiseFailed: premised.get(`${f.round}:${f.id}`) } : heldByPerson.has(`${f.round}:${f.id}`) ? { ...f, premiseHeld: heldByPerson.get(`${f.round}:${f.id}`) } : f)) })) : undefined,
     findingHistory: historyNow ? findingHistory(state, { fixes: fixesSoFar }) : undefined,
     recurringCauses: recurring.length ? recurring : undefined,
     possibleRecurrences: historyNow && familyRecurrences(state).length ? familyRecurrences(state) : undefined,
@@ -1175,6 +1178,8 @@ export function handoff(root, role, options) {
   if (role === 'reviewer' && bundle.premiseFailed) bundle.instructions += ` \`premiseFailed\` lists items an implementer did not build because their premise does not hold in production (${bundle.premiseFailed.map((x) => x.ref).join(', ')}), each with what it checked: judge the premise, not only the code. When it does not hold, give \`verified-nonissue\` with your evidence and a rationale that says so (for a discovered issue in \`discovered\`, which closes it; for a finding in \`priorFindings\`); when it holds after all, give \`open\` with what you found (it goes back to be fixed). A fact that contradicts a premise is a finding about the premise, never an argument that a change is safe.`;
   const marked = role === 'implementer' ? [...(bundle.repair ?? []).flatMap((g) => g.findings), ...(bundle.alsoFix ?? []), ...(bundle.passItems ?? []).flatMap((x) => x.items)].filter((x) => x.premiseFailed).map((x) => x.ref ?? `${x.round}:${x.id}`) : [];
   if (marked.length) bundle.instructions += ` An item marked \`premiseFailed\` (${marked.join(', ')}) was reported by an implementer to rest on a premise that does not hold in production, with its evidence: build nothing for it until a reviewer or the person settles it, and say in your report what you found about the premise if you looked.`;
+  const heldMarked = role === 'implementer' ? [...(bundle.repair ?? []).flatMap((g) => g.findings), ...(bundle.alsoFix ?? []), ...(bundle.passItems ?? []).flatMap((x) => x.items)].filter((x) => x.premiseHeld).map((x) => x.ref ?? `${x.round}:${x.id}`) : [];
+  if (heldMarked.length) bundle.instructions += ` An item marked \`premiseHeld\` (${heldMarked.join(', ')}) was reported by an implementer to rest on a premise that does not hold, and the person decided it holds (\`premiseHeld\` has their decision and their words): build its fix. When what you find contradicts their answer, build nothing for it and say so in your report with the evidence (\`premiseFailed\`); the owner then brings it back to them, and you never decide it yourself.`;
   if (role === 'implementer' && bundle.ownerContext) bundle.instructions += ' `ownerContext` is what the owner carried to you (the person\'s words, a decision, what research found): context to verify, not facts. A premise it states (nothing writes this field, no wrong data exists) is checked like any other, and a fact you find that contradicts the work you were handed is a stop and a question in your report, never a reason the change is safe.';
   if (role === 'reviewer' && bundle.passBuilt) bundle.instructions += ` A planned pass was built since the last review, with no code-review round of its own (${bundle.passBuilt.map((x) => `${x.work}: ${x.items.map((i) => i.ref).join(', ')}`).join('; ')}): \`passBuilt\` lists its items, the commits recorded for each and the implementer's range. Its code is in your diff and this round is the one review it gets: review it as you review the rest, and verify each item at its cause (a finding in \`priorFindings\`; a discovered issue closed as fixed: raise a finding when its fix does not hold).`;
   if (role === 'reviewer' && mode === 'delta' && bundle.supplementalValidation.length) bundle.instructions += ` \`supplementalValidation\` lists the checks registered, corrected or carried from a batch member since the last reviewed round (${bundle.supplementalValidation.flatMap((v) => v.steps.map((x) => x.id)).join(', ')}): the gate runs each at its pinned commit, so judge its definition and plugin as committed there, not a later copy, and give your verdict on each in \`validationChecked: [{ "id", "commit", "verdict": "complies" | "finding", "evidence", "finding" }]\`; a defect in one is a finding.`;
@@ -1435,27 +1440,37 @@ function followUpsOf(state) {
   return (state.scopeDecisions ?? []).filter((d) => ['ticketed', 'moved', 'deferred'].includes(d.choice)).flatMap((d) => (d.keys ?? []).map((ref) => ({ ref, went: d.choice, ticket: d.ticket?.url ?? null, sibling: d.sibling ?? null, reason: d.reason ?? null, summary: open.get(ref)?.summary ?? d.summaries?.[ref] ?? null, severity: open.get(ref)?.severity ?? null })));
 }
 
+// A round handed the gate's evidence: an evidence review (handoffs before 0.7 carry no round, only the gate they were handed).
+const gateHanded = (h) => Boolean(h) && (h.round === 'evidence-review' || (!h.round && Boolean(h.gate)));
+
 // 0.7.23 (I-179), named failure (field): an evidence review raised a blocking finding ("the required browser check was never
 // run in the gate"), the owner registered the missing step, and the next code review honestly kept the finding open with
 // evidence (a check that has not run cannot be verified). The gate order then waited for the verification only the gate's own
-// run could make possible, and only the person's override got through. A finding is not waited for, by the gate order alone, when an
-// evidence-review round raised it on a criterion, a supplemental validation for that criterion was registered (or corrected)
-// after that round, and the latest round judged it still open with evidence. It stays an earlier blocking finding: acceptance
-// and the next reviewer's handoff still need a later round to verify it.
+// run could make possible, and only the person's override got through. It stays an earlier blocking finding: acceptance and the
+// next reviewer's handoff still need a later round to verify it.
+// 0.7.32 (I-222, D69), named failure (field): that exit needed the finding to cite a criterion and a check registered for that
+// criterion after it. An evidence review raised a layout finding (its proof is the gate's screenshots) beside a missing-proof
+// finding; the code reviews after the fix kept both open with evidence, as they honestly must (a code review is handed no gate
+// output), and the step registered named other criteria, so the gate was refused after every code review and the person was asked
+// to override the order (in one project's ledgers 25 code-review rounds on nine attempts kept an evidence finding open, and the gate
+// was refused for it at four). Whatever it cites and whether or not a
+// check was registered, a blocking finding an evidence round raised that the latest round, handed no gate, kept open with
+// evidence awaits the gate's own proof. A finding a code-review round raised still holds the gate (I-27: only what a code review
+// cannot verify passes the order), and so does one an evidence round found still open in the gate's own output.
 function awaitsItsProof(state, review, f) {
-  const criterion = f.classified?.criterion;
-  if (!criterion) return false;
+  const keptBy = (state.handoffs ?? []).find((h) => h.bundle === review.handoff);
+  if (!keptBy || gateHanded(keptBy)) return false;
   const kept = (review.closure.priorFindings ?? []).find((p) => `${p.round}:${p.id}` === f.ref);
-  if (!kept || kept.status !== 'open' || !kept.evidence) return false;
+  if (!kept || kept.status !== 'open' || !String(kept.evidence ?? '').trim()) return false;
   const raised = (state.reviews ?? []).find((r) => (r.closure?.reviewer ?? r.reviewer) === f.round && (r.closure?.findings ?? []).some((x) => x.id === f.id));
-  const handed = raised && (state.handoffs ?? []).find((h) => h.bundle === raised.handoff);
-  if (!handed || !(handed.round === 'evidence-review' || (!handed.round && handed.gate))) return false;
-  return (state.validations ?? []).some((v) => v.at > raised.at && (v.criteria ?? []).includes(criterion));
+  return gateHanded(raised && (state.handoffs ?? []).find((h) => h.bundle === raised.handoff));
 }
 
 // The earlier rounds' blocking findings a round must have verified. `forGate`: the gate order's question only, which does
 // not wait for a finding that awaits the proof the gate itself runs (awaitsItsProof): the gate, and the evidence review after it,
 // which is the round that verifies it. The next step reads it the same way until a round written after the gate has judged it.
+// The same holds when the code review was owed for a check registered or corrected after the evidence review (0.7.32, I-222,
+// D69): reviewing the step's definition is that round's work, and the evidence findings it cannot verify wait for the gate.
 function unverifiedPrior(state, review, { forGate = false } = {}) {
   const required = earlierBlocking(state, roundKey(review));
   const verified = new Map((review.closure.priorFindings ?? []).map((p) => [`${p.round}:${p.id}`, p]));
@@ -1466,6 +1481,14 @@ function unverifiedPrior(state, review, { forGate = false } = {}) {
     return !v || !settled(v.status) || !v.evidence;
   }).map((f) => ({ round: f.round, id: f.id, severity: f.severity ?? null, summary: f.summary ?? '', evidence: f.evidence ?? null, work: f.work ?? null, family: f.family ?? null }));
 }
+
+// The earlier findings the gate order does not wait for because they await the gate's own proof (awaitsItsProof), as refs; the
+// next step names them so a round that kept them open is not read as a clean one (0.7.32, I-222, D69).
+function awaitingTheGate(state, review) {
+  const held = new Set(unverifiedPrior(state, review, { forGate: true }).map((f) => `${f.round}:${f.id}`));
+  return unverifiedPrior(state, review).map((f) => `${f.round}:${f.id}`).filter((ref) => !held.has(ref));
+}
+const awaitingText = (refs, gateRun) => `the code review on this tree left open only what the gate's own run proves (${refs.join(', ')}: an evidence review raised ${refs.length > 1 ? 'them' : 'it'}, and a code review is handed no gate output): ${gateRun}; the evidence review after it verifies ${refs.length > 1 ? 'them' : 'it'}`;
 
 // The handoff id used by telemetry events: the bundle's file name (`05-implementer`).
 export const handoffId = (bundle) => (bundle ? path.basename(String(bundle), '.json') : null);
@@ -1608,7 +1631,7 @@ export function closeImplementer(root, options) {
   const after = loadState(root, state.id);
   // 0.7.31 (I-217, D64): what the close says about each premise the report says does not hold.
   const contested = new Map(premiseReports(after).map((p) => [p.ref, p.contested]));
-  const premises = (report.value?.premiseFailed ?? []).map((p) => ({ ...p, agent, known: itemOpen(after, p.ref), contested: contested.get(p.ref) ?? null }));
+  const premises = (report.value?.premiseFailed ?? []).map((p) => ({ ...p, agent, known: itemOpen(after, p.ref), contested: contested.get(p.ref) ?? null, held: personHeld(after, premiseRef(p.ref)) }));
   return { state: after, handoff: open.handoff, outcome, commits, children, linked: placed.filter((x) => x.linked).map((x) => ({ id: x.linked, status: x.status })), unknownIds: placed.filter((x) => x.unknownId).map((x) => ({ named: x.unknownId, recorded: x.recorded })), premises };
 }
 
@@ -1926,18 +1949,40 @@ function reviewCovers(state, r) {
 // handed after that review left (each closed done): the evidence review after the gate is a delta that verifies every fix
 // and the new evidence in one round. Named failure (second final review of 0.7.0): each post-gate fix cost a code-review
 // delta, a gate and an evidence delta, and only the person could merge the two reviews (I-27's order rule).
+// 0.7.32 (I-222, D70), named failure (field): bookkeeping switched that route off. A strategist's `consolidate` restated the
+// evidence findings as one fix item (an amendment that changed no criterion), a later amendment corrected only the plan's
+// expectation, and the fix went to a code review that could not verify the evidence findings; the gate was then refused after it
+// (D69) until the person overrode the order. Of 16 evidence-fix cycles in one project's ledgers, 5 took the direct route. Readiness
+// is judged by the tree and the findings: what the evidence review left to fix (the blocking findings it raised, and the earlier
+// ones it kept open with evidence), every implementer handed after it closed, the tree what the last of them left, and no scope
+// added since: an amendment counts only when it adds, changes or drops a criterion (as for a planned pass), or adds a repo. An
+// implementer closed `stopped` counts only when no later implementer of the same work (or of all of it) closed done after it.
+// A check registered or corrected after the latest review round: its definition is reviewed in a code round before the gate.
+// 0.7.32 (I-222, D70), named failure (field, two attempts): a check registered after an evidence review, then the fix; `wf resume`
+// named the gate by the direct route while `wf gate` refused it for the review the check owes, a next step the order refuses.
+// The direct routes (an evidence review's fixes, a built pass) read the same fact, so the next step is that code review.
+function validationSinceReview(state, r = state.review) {
+  const at = state.validations?.at(-1)?.at;
+  return Boolean(at && (!r || String(r.at) <= String(at)));
+}
+function keptOpenBy(state, r) {
+  const kept = new Set((r.closure?.priorFindings ?? []).filter((p) => p?.status === 'open' && String(p.evidence ?? '').trim()).map((p) => `${p.round}:${p.id}`));
+  return earlierBlocking(state, roundKey(r)).filter((f) => kept.has(f.ref));
+}
 export function evidenceFixReady(state) {
   const r = state.review;
   if (!r) return false;
-  const h = (state.handoffs ?? []).find((x) => x.bundle === r.handoff);
-  if (!h || !(h.round === 'evidence-review' || (!h.round && h.gate))) return false;
-  // Only to fix what that review raised: it found blocking findings, and no scope was added since (verification of the
-  // second final review: new scope went to the gate without a code review).
-  if (!blockingIn(state, r).length) return false;
-  if ((state.criteriaAmendments ?? []).some((a) => a.at > r.at)) return false;
+  if (!gateHanded((state.handoffs ?? []).find((x) => x.bundle === r.handoff))) return false;
+  // Only to fix what that review left: it found blocking findings or kept earlier ones open, and no scope was added since
+  // (verification of the second final review: new scope went to the gate without a code review).
+  if (!blockingIn(state, r).length && !keptOpenBy(state, r).length) return false;
+  if (criteriaChangedSince(state, r.at) || (state.addedRepos ?? []).some((x) => String(x.at) > String(r.at)) || validationSinceReview(state, r)) return false;
   const after = (state.implementers ?? []).filter((x) => x.openedAt > r.at);
-  if (!after.length || after.some((x) => !x.closedAt || x.outcome !== 'done')) return false;
+  if (!after.length || after.some((x) => !x.closedAt)) return false;
+  const finishedLater = (x) => after.some((y) => y !== x && y.outcome === 'done' && String(y.openedAt) > String(x.openedAt) && String(y.closedAt) > String(x.closedAt) && (!y.work || y.work === x.work));
+  if (after.some((x) => x.outcome !== 'done' && !finishedLater(x))) return false;
   const last = [...after].sort((a, b) => String(a.closedAt).localeCompare(String(b.closedAt))).at(-1);
+  if (last.outcome !== 'done') return false;
   try {
     const heads = treeHashes(state);
     return Object.entries(heads).every(([repo, t]) => !String(t).includes('+dirty') && String(t).split('+')[0] === String(last.closedHeads?.[repo] ?? '').split('+')[0]);
@@ -1951,8 +1996,7 @@ export function gateOrderProblems(state) {
   const busy = reviewInFlight(state);
   if (busy) problems.push(`reviewer ${busy.agent} was handed this tree and has recorded no closure: review and gate never run side by side; wait for its closure`);
   const r = state.review;
-  const addedAt = state.validations?.at(-1)?.at;
-  if (addedAt && (!r || r.at <= addedAt)) problems.push('required supplemental validation was added or corrected after the last code review: run a fresh code review before the gate');
+  if (validationSinceReview(state)) problems.push('required supplemental validation was added or corrected after the last code review: run a fresh code review before the gate');
   if (!r || !reviewCovers(state, r)) {
     if (!busy && !evidenceFixReady(state) && !passBuilt(state)) problems.push(`no review round covers the current tree: run the code review first (\`wf handoff reviewer --agent <new id>\`); the gate runs once a round on this tree comes back clean`);
     return problems;
@@ -2029,9 +2073,12 @@ const reviewedAfterGate = (r) => r.gateEvidenceInspected ?? true;
 const openFindings = (r, state) => blockingIn(state ?? {}, r);
 // 0.7.31 (I-217, D64): the open blocking findings of a review when every one of them has a premise an implementer reported does not
 // hold and nothing has settled since (their refs), or null.
+// 0.7.32 (I-222, D71): with the earlier blocking findings the round kept open. Named failure (an audit of 0.7.31): a finding whose
+// premise a reviewer found holds, kept open by that round, and an implementer then found it does not: the step named the person's
+// decision and then told the owner to hand a fresh reviewer to verify it, a reviewer who is never handed a contested premise.
 function premiseBlocked(state, r) {
   if (!r) return null;
-  const open = openFindings(r, state).map((f) => `${r.closure?.reviewer ?? r.reviewer}:${f.id}`);
+  const open = [...openFindings(r, state).map((f) => `${r.closure?.reviewer ?? r.reviewer}:${f.id}`), ...unverifiedPrior(state, r).map((f) => `${f.round}:${f.id}`)];
   const premised = new Set(premiseOpen(state).map((p) => p.ref));
   return open.length && open.every((ref) => premised.has(ref)) ? open : null;
 }
@@ -2497,7 +2544,8 @@ export async function deliver(root, options) {
     const head = landed.head;
     // Only the exact commit that was accepted and gated counts as a recovered delivery.
     if (head !== state.accepted.heads?.[name] || head !== state.lastGate?.tree?.[name]) {
-      throw refuse(`${name}: ${head.slice(0, 10)} is already on ${repo.remote}/${repo.base} but is not the accepted, gated commit; it was pushed outside wf`, 'review and gate the pushed change in a new attempt (`wf reopen`)');
+      // 0.7.32 (I-222, D72): the route that exists. `wf reopen` reopens a delivered or shipped attempt, and this one is neither.
+      throw refuse(`${name}: ${head.slice(0, 10)} is already on ${repo.remote}/${repo.base} but is not the accepted, gated commit; it was pushed outside wf`, `it is this attempt's own commit, so review, gate and accept it here: \`wf resume --attempt ${state.id}\` names the code review of the tree as it is, then the gate and the evidence review; once \`wf accept\` names ${head.slice(0, 10)}, \`wf deliver\` records it as delivered without pushing again. Or, when the person decides it ships as it is, \`wf close --shipped --reason "<why>" --attempt ${state.id}\` asks them; a fix after that is a new attempt (\`wf reopen --item ${state.item ?? '<item>'}\`)`, { id: 'deliver:pushed-outside' });
     }
     if (!adapter) {
       append(root, state.id, 'repo.delivered', { repo: name, commit: head, target: landed.target, recovered: true }, actor(options));
@@ -3449,11 +3497,28 @@ export function movedSinceAcceptance(state) {
   const now = treeHashes(state);
   return Object.keys(state.repos).filter((n) => !state.delivery.repos[n] && state.accepted.heads?.[n] && now[n] !== state.accepted.heads[n] && changedFiles(state, n).length > 0).map((n) => ({ repo: n, accepted: state.accepted.heads[n], tree: now[n] }));
 }
+// 0.7.32 (I-222, D72): push-main delivers the HEAD it finds and merges the base itself, so a base merge leaves its acceptance
+// standing; a change to the ticket's own diff since the acceptance does not. Named failure (an audit of 0.7.31): a commit made after
+// the acceptance and pushed outside the workflow; `wf resume` said "deliver", `wf deliver` refused it and named `wf reopen`, which
+// refuses an attempt that was never delivered. The next steps are now the review, the gate and the acceptance of the tree as it is.
+// The repos whose worktree HEAD moved after the acceptance and is already on the target branch: a commit pushed outside the
+// workflow, which `wf deliver` refuses as not the accepted, gated commit. Its diff against the base reads empty now (the base holds
+// it), so it is found by ancestry, on the refs as last fetched.
+function pushedOutside(state) {
+  if (!state.accepted || state.delivery.completedAt) return [];
+  const tree = treeHashes(state);
+  return Object.entries(state.repos).filter(([n, r]) => !state.delivery.repos[n] && state.accepted.heads?.[n] && !String(tree[n]).includes('+dirty') && tree[n] !== state.accepted.heads[n] && tree[n] !== r.base && run('git', ['merge-base', '--is-ancestor', 'HEAD', r.baseRef ?? r.base], { cwd: r.worktree, allowFail: true }).status === 0).map(([n]) => ({ repo: n, accepted: state.accepted.heads[n], tree: tree[n], pushed: true }));
+}
 function acceptanceMoved(root, state) {
   if (!state.accepted || state.batchOf || state.delivery.completedAt) return [];
   try {
-    if (trustedAdapter(root, state, deliveryPin(state)).delivery.kind === 'push-main') return [];
-    return movedSinceAcceptance(state);
+    const pushed = pushedOutside(state);
+    const others = (moved) => [...moved.filter((m) => !pushed.some((x) => x.repo === m.repo)), ...pushed];
+    if (trustedAdapter(root, state, deliveryPin(state)).delivery.kind === 'push-main') {
+      const now = patchIds(state);
+      return others(movedSinceAcceptance(state).filter((m) => state.accepted.patch?.[m.repo] && now[m.repo] !== state.accepted.patch[m.repo]));
+    }
+    return others(movedSinceAcceptance(state));
   } catch {
     return [];
   }
@@ -3489,7 +3554,7 @@ export function nextDecision(root, state) {
   // An acceptance that names another tree than the one in the worktrees is no acceptance of this one (adapter delivery): the next
   // steps are the ones of an attempt not yet accepted, and the text says why.
   const moved = acceptanceMoved(root, state);
-  const movedNote = moved.length ? `the acceptance names ${moved.map((m) => `${m.repo} ${m.accepted.slice(0, 10)} but its tree is ${m.tree.slice(0, 10)}`).join(', ')} (a base merged by hand, or a commit made after it): ` : '';
+  const movedNote = moved.length ? `the acceptance names ${moved.map((m) => `${m.repo} ${m.accepted.slice(0, 10)} but its tree is ${m.tree.slice(0, 10)}${m.pushed ? ', already pushed to its target outside wf' : ''}`).join(', ')} (${moved.some((m) => m.pushed) ? 'review, gate and accept it here, and `wf deliver` records it as delivered without pushing again; or the person closes it as shipped, `wf close --shipped`' : 'a base merged by hand, or a commit made after it'}): ` : '';
   // 0.7.28 (I-210): a next step that hands an implementer or a new code-review round goes to the strategist first while a course
   // signal stands that no strategist has answered (engine/course.mjs). A gate, an evidence review, the acceptance and delivery are
   // not held for it: the course is about work still to be handed.
@@ -3556,7 +3621,7 @@ export function nextDecision(root, state) {
   if (!portApplied(state) && !state.handoffs.some((h) => h.role === 'implementer')) return result('implementation', 'owner', 'implementation has not started');
   // 0.7.28 (I-207): an open discovered issue no longer opens a round before the review. It joins the fix round that happens
   // anyway, or the one planned pass of what does not block (below); delivery still waits for every one.
-  if (Object.values(tree).some((t) => t.includes('+dirty')) || Object.keys(state.repos).every((n) => !changedFiles(state, n).length)) return result('implementation', 'owner', 'a committed change is required');
+  if (Object.values(tree).some((t) => t.includes('+dirty')) || Object.keys(state.repos).every((n) => !changedFiles(state, n).length && !moved.some((m) => m.repo === n && m.pushed))) return result('implementation', 'owner', 'a committed change is required');
   if (gateBusy(root, state)) return result('gate', 'blocked', 'a gate is already running');
   const h = state.handoffs.filter((h) => h.role === 'reviewer').at(-1);
   const group = currentReviewGroup(state);
@@ -3599,7 +3664,8 @@ export function nextDecision(root, state) {
   if (!passed.ok && due.length) return result('pass', 'owner', `${due.length} item(s) that do not block wait for one planned pass`, { outstanding: due.map((x) => x.ref) });
   if (!passed.ok) {
     const blockers = gateOrderProblems(state);
-    return blockers.length ? result('gate', 'owner', blockers.join('; ')) : result('gate', 'ready', null, { guidance: canonical(r.tree ?? r.handoffTree) === canonical(tree) ? guidance : withAttempt(root, state, 'clean code review covers this change: run one `wf gate`; then the evidence review') });
+    const awaiting = awaitingTheGate(state, r);
+    return blockers.length ? result('gate', 'owner', blockers.join('; ')) : result('gate', 'ready', null, { guidance: canonical(r.tree ?? r.handoffTree) === canonical(tree) ? guidance : withAttempt(root, state, awaiting.length ? awaitingText(awaiting, 'run one `wf gate`') : 'clean code review covers this change: run one `wf gate`; then the evidence review'), ...(awaiting.length ? { awaitingGate: awaiting } : {}) });
   }
   if (!reviewedAfterGate(r)) return result('review', 'ready', null, { round: 'evidence-review' });
   // 0.7.26 (I-183). Named failure: a base merge that left the reviewed change alone kept the round "covering" the moved tree, so
@@ -3637,6 +3703,7 @@ export function courseOpen(root, state) {
 // blocks, no criterion changed) and the tree is what the last of them left.
 export function passBuilt(state) {
   if (!passReady(state, { blockingOpen: state.review ? blockingIn(state, state.review).length + earlierBlocking(state, null).length : 0 })) return false;
+  if (validationSinceReview(state)) return false;
   const after = (state.implementers ?? []).filter((x) => x.openedAt > state.review.at);
   const last = [...after].sort((a, b) => String(a.closedAt).localeCompare(String(b.closedAt))).at(-1);
   try {
@@ -3819,7 +3886,8 @@ function phaseStep(root, cfg, state) {
   const focused = g?.status === 'passed' && onTree(g.tree) ? focusedSkips(g) : [];
   const gateRun = focused.length ? `the last gate was focused (skipped ${focused.join(', ')}): run one \`wf gate\` without --focused` : 'run one `wf gate` (never edit the worktrees or hand a reviewer the tree while it runs)';
   const noGate = 'no gate until a code-review round on this tree comes back clean';
-  const uncommittedWork = Object.values(tree).some((t) => t.includes('+dirty')) || Object.keys(state.repos).every((n) => !changedFiles(state, n).length);
+  const pushedNow = state.accepted ? pushedOutside(state) : [];
+  const uncommittedWork = Object.values(tree).some((t) => t.includes('+dirty')) || Object.keys(state.repos).every((n) => !changedFiles(state, n).length && !pushedNow.some((m) => m.repo === n));
   if (uncommittedWork) return routed(`commit the change, then the code review: hand to ${fresh}; ${noGate}`);
   const inFlight = reviewInFlight(state);
   const group = currentReviewGroup(state);
@@ -3880,6 +3948,8 @@ function phaseStep(root, cfg, state) {
   // 0.7.28 (I-207): what does not block (observations and discovered issues, a low one included) is one planned pass, built by one
   // implementer and verified by the evidence review after the gate, never a round each.
   if (!pass.ok && joining.length) return routed(`clean code review on this tree. ${passStep(joining, state.id, state.fixAll)}; ${RULE_SHORT}`);
+  const awaiting = !pass.ok ? awaitingTheGate(state, r) : [];
+  if (awaiting.length) return awaitingText(awaiting, gateRun);
   if (!pass.ok) return onTree(r.tree ?? r.handoffTree) ? `clean code review on this tree: ${gateRun}; then the evidence review` : `clean code review covers this change: ${gateRun}; then the evidence review`;
   // 0.7.26 (I-183): a base merge moved the tree and left the reviewed change alone: `wf accept` wants a closure written for this tree.
   if (!onTree(r.tree ?? r.handoffTree)) return `evidence review: the gate passed on this tree (a base merged in moved it; the reviewed change is the same), so hand to ${fresh} to inspect the gate evidence (logs and screenshots)`;

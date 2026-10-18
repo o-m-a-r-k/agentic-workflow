@@ -20,6 +20,7 @@ import { personSaid, underAgent } from './approve.mjs';
 import { productAsk } from './asking.mjs';
 import { projectItemIds } from './leaving.mjs';
 import { WfError, refuse } from './util.mjs';
+import { isDiscoveredRef, premiseOpen, premiseRef } from './premise.mjs';
 
 const text = (v) => (typeof v === 'string' ? v.trim().replace(/\s+/g, ' ') : '');
 const FIELDS = [
@@ -29,7 +30,7 @@ const FIELDS = [
   ['notChecked', 'not-checked', 'what you did not check ("nothing" only when nothing was left)'],
   ['choice', 'choice', 'the option the person chose, as you offered it (or other)'],
 ];
-export const DECIDE_USAGE = 'wf decide --question "<as asked>" --options "<option 1> | <option 2>" --recommend "<what you recommended and why>" --basis "<what you traced, with the evidence>" --not-checked "<what you did not check>" --choice "<the option they chose, or other>" --quote "<their words, exactly as they typed them>" [--attempt ID] (or --file <decision.json> with question, options, recommend, basis, notChecked, choice, quote)';
+export const DECIDE_USAGE = 'wf decide --question "<as asked>" --options "<option 1> | <option 2>" --recommend "<what you recommended and why>" --basis "<what you traced, with the evidence>" --not-checked "<what you did not check>" --choice "<the option they chose, or other>" --quote "<their words, exactly as they typed them>" [--item <finding round:id or discovered id> --premise holds] [--attempt ID] (or --file <decision.json> with question, options, recommend, basis, notChecked, choice, quote, item, premise)';
 // Review of 0.7.31 (M2). Named failure (the incident behind D65): the question's two options both built the change, and a record of
 // the question, the recommendation and the answer alone would not show it. The options offered are part of the record, and the
 // choice is one of them (or `other`: words that choose none, kept as the person's, D41).
@@ -54,10 +55,28 @@ function fieldsOf(options) {
   const missing = FIELDS.filter(([key]) => !out[key]).map(([, flag, what]) => `--${flag} (${what})`);
   if (out.options.length < 2) missing.push('--options (the options you offered, at least two, separated by "|")');
   if (missing.length) throw new WfError(`not recorded: ${missing.join('; ')}`, { hint: DECIDE_USAGE });
+  out.item = text(typeof options.item === 'string' ? options.item : doc.item);
+  out.premise = text(typeof options.premise === 'string' ? options.premise : doc.premise).toLowerCase();
   const picked = out.options.find((o) => same(o, out.choice));
   if (!picked && !same(out.choice, 'other')) throw refuse(`not recorded: "${out.choice}" is not one of the options offered (${out.options.map((o) => `"${o}"`).join(' | ')})`, 'give the option they chose exactly as you offered it, or `--choice other` when their words choose none of them (their words are recorded as theirs)', { id: 'decide:choice' });
   out.choice = picked ?? 'other';
   return out;
+}
+
+// 0.7.32 (I-222, D71): a decision that answers whether the premise of an item an implementer reported failed holds names the item
+// (`--item`) and the answer (`--premise holds`). It settles the premise: the item goes back to the fix round with the person's
+// words. "It does not hold" closes a reported item as not a defect, which is the person's reserved decision (D38): it is asked
+// and recorded on D38's question, never through this record (D65 grants no reserved decision).
+function premiseOf(state, f) {
+  if (!f.item && !f.premise) return null;
+  if (!f.item || !f.premise) throw new WfError('--item and --premise go together: the item whose premise the person answered (a finding `<round>:<id>` or a discovered id) and `--premise holds`', { hint: DECIDE_USAGE });
+  const ref = premiseRef(f.item);
+  const open = premiseOpen(state);
+  if (!open.some((p) => p.ref === ref)) throw refuse(`not recorded: ${ref} is not an item whose premise an implementer reported failed and nothing has settled (${open.map((p) => p.ref).join(', ') || 'none open'})`, '`--item` names an open premise `wf resume` lists; record any other decision without it', { id: 'decide:item' });
+  const kind = isDiscoveredRef(ref) ? 'discovered' : 'finding';
+  if (['fails', 'does not hold', 'does-not-hold', 'not', 'no'].includes(f.premise)) throw refuse(`not recorded: that ${ref}'s premise does not hold closes it as not a defect, which is the person's decision on its own question (D38)`, `\`${kind === 'discovered' ? `wf discovered close ${ref} --not-a-defect` : `wf scope not-a-defect --finding ${ref}`} --reason "<why it is not a defect>" --attempt ${state.id}\` asks it; when they already said so in their own words, record those words as their answer to it (\`wf approve <id> --choice yes --quote "<their words>"\`), never ask again`, { id: 'decide:premise-fails' });
+  if (f.premise !== 'holds') throw new WfError(`--premise ${f.premise}: the answer this records is \`holds\` (the item is a defect after all); "does not hold" is the not-a-defect question`, { hint: DECIDE_USAGE });
+  return { item: ref, premise: 'holds' };
 }
 
 // `wf decide ...`: record the decision; from an agent's session the person's words are proven theirs.
@@ -65,6 +84,7 @@ export async function recordProductDecision(root, options, { env = process.env, 
   const state = openState(root, options);
   if (['done', 'abandoned'].includes(state.phase)) throw refuse(`${state.id} is ${state.phase}: a decision for its product is recorded on the attempt that builds it`, null, { id: 'decide:closed' });
   const f = fieldsOf(options);
+  const premise = premiseOf(state, f);
   const id = `PD${(state.productDecisions ?? []).length + 1}`;
   const plain = productAsk(f);
   let said;
@@ -81,7 +101,7 @@ export async function recordProductDecision(root, options, { env = process.env, 
     if (typed.toLowerCase() !== 'yes') throw refuse('not recorded: the answer was not yes', null, { id: 'decide:terminal' });
     said = { quote: f.quote || f.choice, via: 'terminal' };
   }
-  append(root, state.id, 'product.decided', { id, question: f.question.slice(0, 2000), options: f.options.map((o) => o.slice(0, 300)), recommend: f.recommend.slice(0, 2000), basis: f.basis.slice(0, 4000), notChecked: f.notChecked.slice(0, 2000), choice: f.choice.slice(0, 500), plain: plain.slice(0, 8000), ...said }, actor(options));
+  append(root, state.id, 'product.decided', { id, question: f.question.slice(0, 2000), options: f.options.map((o) => o.slice(0, 300)), recommend: f.recommend.slice(0, 2000), basis: f.basis.slice(0, 4000), notChecked: f.notChecked.slice(0, 2000), choice: f.choice.slice(0, 500), plain: plain.slice(0, 8000), ...(premise ?? {}), ...said }, actor(options));
   return { state: loadState(root, state.id), id };
 }
 
@@ -107,6 +127,7 @@ export function productDecisionsFor(state, role) {
     id: d.id, at: d.at, question: d.question, options: d.options ?? [],
     ...(role === 'reviewer' ? {} : { recommend: d.recommend, basis: d.basis }),
     notChecked: d.notChecked, choice: d.choice,
+    ...(d.item ? { item: d.item, premise: d.premise } : {}),
     ...(role === 'reviewer' ? {} : { quote: d.quote }),
     ...(d.withdrawn ? { withdrawn: { reason: d.withdrawn.reason, at: d.withdrawn.at } } : {}),
   }));
@@ -115,4 +136,4 @@ export function productDecisionsFor(state, role) {
 // The lines `wf resume` and `wf status` show.
 export const productDecisionLines = (state) => (state.productDecisions ?? []).map((d) => (d.withdrawn
   ? `  product decision ${d.id} (withdrawn: ${d.withdrawn.reason}): "${d.question}" was answered "${d.choice}"; ask the person again with what changed`
-  : `  product decision ${d.id}: "${d.question}"${d.options?.length ? ` (options: ${d.options.map((o) => `"${o}"`).join(' | ')})` : ''} -> "${d.choice}" (their words: "${d.quote}"), ${d.via ?? 'recorded'}; recommended: ${d.recommend}; rests on: ${d.basis}; not checked: ${d.notChecked}`));
+  : `  product decision ${d.id}: "${d.question}"${d.options?.length ? ` (options: ${d.options.map((o) => `"${o}"`).join(' | ')})` : ''} -> "${d.choice}" (their words: "${d.quote}"), ${d.via ?? 'recorded'}${d.item ? `; the premise of ${d.item} ${d.premise}: it goes back to the fix round` : ''}; recommended: ${d.recommend}; rests on: ${d.basis}; not checked: ${d.notChecked}`));

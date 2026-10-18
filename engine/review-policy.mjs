@@ -313,6 +313,8 @@ export function classifyFinding(state, f) {
 export const refOf = (round, id) => `${round}:${id}`;
 // A finding the owner approved waiving (`wf approve`, kind waive-finding, key `<round>:<id>`).
 export const waivedRef = (state, ref) => (state.decisions ?? []).filter((d) => d.kind === 'waive-finding' && d.key === ref).at(-1)?.approved?.choice === 'yes' || (state.scopeDecisions ?? []).some((d) => d.choice === 'waived' && (d.keys ?? []).includes(ref));
+// A finding the person's answer closed as not a defect (`wf scope not-a-defect`, D71): settled, like a reviewer's verified-nonissue.
+export const notADefectRef = (state, ref) => (state.scopeDecisions ?? []).some((d) => d.choice === 'not-a-defect' && (d.keys ?? []).includes(ref));
 // A finding ticketed (`wf scope ticket`), moved to a sibling attempt (`wf scope move`) or recorded fixed by the owner with
 // the attempt's commit (`wf scope fixed`, observations only).
 // A `fixed` claim that a later reviewer found still open is undone (second final review of 0.7.0: the reviewer's `open` was
@@ -379,7 +381,7 @@ export function openAcrossRounds(state, exceptRound = null) {
     for (const f of r.closure.findings ?? []) {
       const ref = refOf(reviewerOf(r), f.id);
       if (settled(f)) open.delete(ref);
-      else if (!waivedRef(state, ref) && !legacyWaived(state, f)) open.set(ref, { ...f, round: reviewerOf(r), ref, classified: classifyFinding(state, f) });
+      else if (!waivedRef(state, ref) && !legacyWaived(state, f) && !notADefectRef(state, ref)) open.set(ref, { ...f, round: reviewerOf(r), ref, classified: classifyFinding(state, f) });
     }
   }
   return [...open.values()];
@@ -403,7 +405,7 @@ export function findingSummary(state, ref) {
 // One that went to a sibling attempt or a ticket (a move the owner approved) no longer holds this attempt.
 export const blockingIn = (state, review) => (review?.closure?.findings ?? []).filter((f) => {
   const ref = refOf(reviewerOf(review), f.id);
-  return !settled(f) && !waivedRef(state, ref) && !legacyWaived(state, f) && !dispositionOf(state, ref) && classifyFinding(state, f).blocks;
+  return !settled(f) && !waivedRef(state, ref) && !legacyWaived(state, f) && !notADefectRef(state, ref) && !dispositionOf(state, ref) && classifyFinding(state, f).blocks;
 });
 
 // Open findings of the latest recorded review that block the gate and acceptance.

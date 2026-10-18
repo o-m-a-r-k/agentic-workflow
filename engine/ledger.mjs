@@ -321,6 +321,7 @@ export function reduce(entries) {
       case 'scope.fixed':
       case 'scope.waived':
       case 'scope.deferred':
+      case 'scope.notADefect': // 0.7.32 (D71): a finding closed as not a defect by the person's answer
         s.scopeDecisions.push({ ...d, at: e.at });
         break;
       // 0.7.28 (I-207): the person's "fix all", recorded once (engine/cli.mjs `wf scope fix-all`).

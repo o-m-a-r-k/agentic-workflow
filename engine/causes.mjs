@@ -8,7 +8,7 @@
 // that findings across rounds shared a cause. This module reads what the rounds already recorded, and nothing more: a
 // reviewer's `sameCauseAs` on a finding links it to the earlier (or sibling) findings it shares a cause with. Information
 // for the roles and the owner; no check here refuses anything.
-import { dispositionOf, openAcrossRounds, recordedRoundsOf, settled, waivedRef } from './review-policy.mjs';
+import { dispositionOf, notADefectRef, openAcrossRounds, recordedRoundsOf, settled, waivedRef } from './review-policy.mjs';
 
 const reviewerOf = (r) => r.closure?.reviewer ?? r.reviewer;
 export const refOf = (round, id) => `${round}:${id}`;
@@ -163,7 +163,7 @@ export function findingHistory(state, { fixes = [] } = {}) {
   return [...by.values()].map((e) => {
     const d = dispositionOf(state, e.ref);
     const last = e.verdicts.at(-1) ?? null;
-    const status = open.has(e.ref) ? (d ? 'claimed-fixed' : 'open') : reopenedBy(e) ? 'reopened' : waivedRef(state, e.ref) ? 'waived' : d ? d.choice : last && settled({ status: last.status }) ? last.status : e.own && settled({ status: e.own }) ? e.own : 'closed';
+    const status = open.has(e.ref) ? (d ? 'claimed-fixed' : 'open') : reopenedBy(e) ? 'reopened' : waivedRef(state, e.ref) ? 'waived' : notADefectRef(state, e.ref) ? 'not-a-defect' : d ? d.choice : last && settled({ status: last.status }) ? last.status : e.own && settled({ status: e.own }) ? e.own : 'closed';
     const fix = fixes.find((x) => refOf(x.round, x.id) === e.ref) ?? (d?.choice === 'fixed' ? d : null);
     const verified = [...e.verdicts].reverse().find((v) => settled({ status: v.status }) && text(v.evidence));
     // 0.7.30 (I-166, D51): a finding a later round found still open shows that round's evidence too (only a settled one did).

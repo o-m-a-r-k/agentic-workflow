@@ -285,6 +285,42 @@ export function waiveFinding(root, options) {
   });
 }
 
+// 0.7.32 (I-222, D71): a review finding that was never a defect closes as "not a defect", as a discovered issue does (D38): by an
+// independent reviewer's `verified-nonissue`, or by the person's answer to the one question whether it is a defect at all (kind
+// move-out-of-batch, key `nonissue:<ref>`, one per finding). Named failure (an audit of 0.7.31): an implementer and a reviewer
+// disagreed on whether a finding's premise holds, the person was to decide, and a finding had no closure their "it is not a defect"
+// could reach: `wf decide` only recorded it, and `wf scope waive` would list a defect nobody holds as accepted. Their "no" keeps it
+// open: it goes back to the fix round (engine/premise.mjs `personHeld`). The finding and its claim stay in the record beside the
+// reason; the delivered comment lists nothing for it.
+export function closeFindingNotDefect(root, options) {
+  const opened = openState(root, options);
+  return withEvidenceTransaction(root, opened.id, () => {
+    const state = loadState(root, opened.id);
+    const refs = [...new Set(String(options.finding ?? '').split(',').map((x) => x.trim()).filter(Boolean))];
+    if (!refs.length) throw new WfError('usage: wf scope not-a-defect --finding <round:id>[,...] --reason "<why it is not a defect>" [--person-directed "<their words>"]');
+    const reason = text(options.reason);
+    if (!reason) throw refuse('--reason says why it is not a defect (what the code is for, what the product intends)', 'pass `--reason "<why it is not a defect>"`; the finding stays in the record beside it. If the person told you so, add their words with `--person-directed "<their words>"`', { id: 'scope:not-a-defect-reason' });
+    const directed = text(options['person-directed']).slice(0, 500) || null;
+    const findings = refs.map((ref) => find(state, ref));
+    const moved = findings.filter((f) => dispositionOf(state, f.ref));
+    if (moved.length) throw refuse(`${moved.map((f) => `${f.ref} (${dispositionOf(state, f.ref).choice})`).join(', ')} already went somewhere: a finding that left the delivery or was recorded fixed is not closed again`, null, { id: 'scope:not-a-defect-placed' });
+    const decided = {};
+    const standing = [];
+    for (const f of findings) {
+      try {
+        decided[f.ref] = requireYes(root, state, { kind: 'move-out-of-batch', key: `nonissue:${f.ref}`, summary: `close ${state.id}:${f.ref} as not a defect: ${f.summary ?? ''} (${reason})`, what: `closing ${f.ref} as not a defect`, frame: FRAMES.notDefect({ item: state.item, rated: `Rated ${f.severity ?? 'unrated'} by reviewer ${f.round}.`, directed }), items: [f.ref], options }).decision;
+      } catch (error) {
+        if (error.code !== 75) throw error;
+        standing.push(error);
+      }
+    }
+    if (standing.length === 1) throw standing[0];
+    if (standing.length) throw refuse(standing.map((e) => e.message).join('\n'), standing.map((e) => e.hint).filter(Boolean).join('\n\n'), { id: standing[0].refusalId ?? 'approve:move-out-of-batch' });
+    for (const f of findings) append(root, state.id, 'scope.notADefect', { keys: [f.ref], choice: 'not-a-defect', reason, decision: decided[f.ref], ...(directed ? { personDirected: directed } : {}) }, actor(options));
+    return loadState(root, state.id);
+  });
+}
+
 // What a finding blocks for: the frozen criterion or the critical invariant it names (null for anything else).
 const basisOf = (f) => (f?.classified?.criterion ? `criterion ${f.classified.criterion}` : f?.classified?.invariant ? `invariant ${f.classified.invariant}` : null);
 

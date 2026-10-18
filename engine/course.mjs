@@ -16,7 +16,7 @@ import { implementerOf } from './introduced.mjs';
 import { familyRecurrenceLine, familyRecurrences, recurrenceLine, recurringCauses } from './causes.mjs';
 import { dispositionOf, findingSummary, observations, placementLevel, recordedRoundsOf } from './review-policy.mjs';
 import { openDiscovered, discoveredLevel } from './discovered.mjs';
-import { premiseOpen } from './premise.mjs';
+import { premiseOpen, premiseRef, premisesHeldByPerson } from './premise.mjs';
 import { readStatement } from './expectations.mjs';
 import { handedRounds, reachLine } from './signals.mjs';
 import path from 'node:path';
@@ -136,9 +136,12 @@ export const courseStep = (open, agentType, running = []) => `the course needs t
 // Work items that are a planned pass: an amendment's `pass`, naming the findings and discovered issues it fixes.
 export const passItemsOf = (state) => (state.work ?? []).filter((w) => Array.isArray(w.items) && w.items.length);
 
+// The implementers handed a pass work item: by its id, or one handed without `--work` that covered it.
+const passImplementers = (state, w) => (state.implementers ?? []).filter((x) => x.work === w.id || (!x.work && (state.handoffs ?? []).some((h) => h.role === 'implementer' && idOf(h.bundle) === x.handoff && (h.covers ?? []).includes(w.id))));
+
 // Whether a pass work item still holds its items: not yet built, being built, or built and not yet seen by a review.
 function holding(state, w) {
-  const impls = (state.implementers ?? []).filter((x) => x.work === w.id || (!x.work && (state.handoffs ?? []).some((h) => h.role === 'implementer' && idOf(h.bundle) === x.handoff && (h.covers ?? []).includes(w.id))));
+  const impls = passImplementers(state, w);
   if (!impls.length) return true;
   if (impls.some((x) => !x.closedAt)) return true;
   const closed = impls.map((x) => x.closedAt).sort().at(-1);
@@ -153,8 +156,12 @@ function holding(state, w) {
 // 0.7.31 (I-217, D64): an item whose premise an implementer reported does not hold in production is no pass's and no fix round's
 // until a reviewer or the person settles it (engine/premise.mjs): handing it again would build what the trace showed has no reason
 // to exist. It still keeps the delivery waiting.
+// 0.7.32 (I-222, D71): an item the person said is a defect after a pass's implementer reported its premise failed is no longer that
+// pass's (it built nothing for it): it is outstanding again, for the next pass or fix round, with the person's answer.
 export function outstanding(state, { bookkeeping = false } = {}) {
-  const held = new Set([...passItemsOf(state).filter((w) => holding(state, w)).flatMap((w) => w.items), ...premiseOpen(state).map((p) => p.ref)]);
+  const back = new Map(premisesHeldByPerson(state).map((p) => [p.ref, p.at]));
+  const builtNothing = (w, ref) => back.has(ref) && passImplementers(state, w).some((x) => (state.implementerReports ?? []).some((r) => r.handoff === x.handoff && String(r.at) <= String(back.get(ref)) && (r.premiseFailed ?? []).some((f) => premiseRef(f?.ref) === ref)));
+  const held = new Set([...passItemsOf(state).filter((w) => holding(state, w)).flatMap((w) => w.items.filter((ref) => !builtNothing(w, ref))), ...premiseOpen(state).map((p) => p.ref)]);
   // A finding already recorded fixed waits for a reviewer to verify it, not for another pass.
   const found = state.review ? observations(state).filter((f) => !dispositionOf(state, f.ref)).map((f) => ({ ref: f.ref, kind: 'finding', level: placementLevel(state, f), severity: f.severity ?? null, family: f.family ?? null, summary: String(f.summary ?? '').slice(0, 300), where: f.evidence ?? null })) : [];
   const issues = openDiscovered(state).filter((d) => (bookkeeping || d.kind !== 'bookkeeping') && !d.claim).map((d) => ({ ref: d.id, kind: 'discovered', level: discoveredLevel(d), severity: d.severity ?? null, family: d.family ?? null, summary: String(d.summary ?? '').slice(0, 300), where: d.where ?? null, blockedBy: d.blockedBy ?? null }));
@@ -168,10 +175,15 @@ export const passStep = (items, attempt, fixAll = null) => `${fixAll ? `the pers
 // The pass was built and nothing else changed: every implementer handed since the last review built a planned pass and closed
 // done, no criterion changed since, and that review left nothing blocking. Then the gate runs without a code review of its own
 // and the evidence review after it verifies the pass (as D2 has it for an evidence review's fixes).
+// An amendment recorded after `at` that added, changed or dropped a criterion: scope that needs a review of its own. A restatement
+// of the same criteria as work items or a pass (a strategist's `consolidate`), an expectation or a bookkeeping correction changes
+// none (0.7.32, I-222, D70: the evidence review's direct route to the gate reads it too).
+export const criteriaChangedSince = (state, at) => (state.criteriaAmendments ?? []).some((a) => String(a.at) > String(at) && (a.changes?.added?.length || a.changes?.changed?.length || a.changes?.dropped?.length));
+
 export function passReady(state, { blockingOpen = 0 } = {}) {
   const r = state.review;
   if (!r || blockingOpen) return false;
-  if ((state.criteriaAmendments ?? []).some((a) => a.at > r.at && (a.changes?.added?.length || a.changes?.changed?.length || a.changes?.dropped?.length))) return false;
+  if (criteriaChangedSince(state, r.at)) return false;
   const after = (state.implementers ?? []).filter((x) => x.openedAt > r.at);
   if (!after.length || after.some((x) => !x.closedAt || x.outcome !== 'done')) return false;
   const passes = new Set(passItemsOf(state).map((w) => w.id));

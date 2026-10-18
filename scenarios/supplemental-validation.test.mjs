@@ -191,7 +191,9 @@ test('0.7.23 (I-179): the gate runs, with no override and no decision, when the 
   ok(wf(f.root, ['accept', '--attempt', f.e.id]));
 });
 
-test('0.7.23 (I-179): the gate still waits when no step was registered, when the step is for another criterion, and when a code-review round raised the finding', () => {
+// 0.7.32 (I-222, D69): an evidence finding the code review kept open awaits the gate whatever it cites and whether or not a step
+// was registered (scenarios/deadlocks-0732.test.mjs); what still waits is a finding a code-review round raised.
+test('0.7.23 (I-179), as 0.7.32 (D69) has it: the gate runs when no step was registered and when the step is for another criterion, and still waits when a code-review round raised the finding', () => {
   const waits = (f, why) => {
     const refused = wf(f.root, ['gate', '--attempt', f.e.id]);
     assert.equal(refused.code, 75, why);
@@ -200,15 +202,20 @@ test('0.7.23 (I-179): the gate still waits when no step was registered, when the
     assert.equal(s.decision.kind, 'repair', `${why}: the next step is the verification`);
     assert.match(s.next, /must verify 1 earlier-round finding\(s\)/, why);
   };
-  // No registration: the fix was a commit, and the code review could not verify it either.
+  const runs = (f, why) => {
+    assert.deepEqual([state(f.root, f.e.id).decision.kind, state(f.root, f.e.id).decision.status], ['gate', 'ready'], why);
+    ok(wf(f.root, ['gate', '--attempt', f.e.id]));
+    assert.deepEqual(state(f.root, f.e.id).gateOverrides ?? [], [], why);
+  };
+  // No registration: the fix was a commit, and the code review could not verify it either; the evidence review after the gate does.
   const none = fixture('supplemental-evidence-none');
   review(none, 'code-0');
   ok(wf(none.root, ['gate', '--attempt', none.e.id]));
   review(none, 'evidence-1', { findings: [WANT] });
   commitIn(none.wt, { 'src/a.txt': 'attempted fix\n' });
   review(none, 'code-2', STILL('evidence-1'));
-  waits(none, 'no registration');
-  // A step registered for another criterion proves nothing about this finding.
+  runs(none, 'no registration');
+  // A step registered for another criterion: the code review reviewed its definition, and could not verify the finding either.
   const other = fixture('supplemental-evidence-other', {}, undefined, [{ id: 'C1', text: 'a changes', uat: false }, { id: 'C2', text: 'b changes', uat: false }]);
   review(other, 'code-0', { criteria: mapped });
   ok(wf(other.root, ['gate', '--attempt', other.e.id]));
@@ -216,7 +223,7 @@ test('0.7.23 (I-179): the gate still waits when no step was registered, when the
   candidate(other, { id: 'http', repo: 'app', run: 'true' });
   ok(wf(other.root, ['validation', 'add', '--steps', 'http', '--criteria', 'C2', '--reason', 'Required real execution', '--attempt', other.e.id]));
   review(other, 'code-2', { criteria: mapped, ...STILL('evidence-1') });
-  waits(other, 'a step for another criterion');
+  runs(other, 'a step for another criterion');
   // A finding a code-review round raised: the step was registered after it, but no gate has judged it yet, and a code review is the round that raised it.
   const code = fixture('supplemental-evidence-code');
   review(code, 'code-1', { findings: [WANT] });

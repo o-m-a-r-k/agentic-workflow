@@ -2,7 +2,7 @@ import { addValidation, correctValidation } from './validation.mjs';
 import { captureWarning } from './captures.mjs';
 import { defaultHostId, detectOwner, findHost, fragment, hostChoice, hostIds, hostLabels, hostNames } from './hosts/index.mjs';
 import { mkdirStateDirectory } from './state-folders.mjs';
-import { completeScopeTicket, deferFindings, moveOut, recordFixed, scopeRows, waiveFinding } from './scope-decisions.mjs';
+import { closeFindingNotDefect, completeScopeTicket, deferFindings, moveOut, recordFixed, scopeRows, waiveFinding } from './scope-decisions.mjs';
 import { observations, unreachedOf } from './review-policy.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -147,13 +147,17 @@ Work
                                     finding; --same-as: a finding raised again about a gap the person already accepted in A<n>
   wf scope move --finding REVIEWER:F1 --sibling ATTEMPT
                                     hand a finding on code this attempt did not change to a sibling attempt of the batch
+  wf scope not-a-defect --finding REVIEWER:F1[,REVIEWER:F2] --reason "why it is not a defect" [--person-directed "<their words>"]
+                                    a finding that was never a defect closes as not one: the person's answer, one question per
+                                    finding (their "no" sends it back to the fix round); the delivered comment lists nothing
   wf scope fix-all --person-said "<their words>"
                                     the person's "fix all", recorded once: no item is asked about leaving again
   wf decide --question "<as asked>" --options "<option 1> | <option 2>" --recommend "<what and why>"
             --basis "<what was traced, with the evidence>" --not-checked "<what was not>" --choice "<the option they chose>"
-            --quote "<their words>" [--file F.json]
+            --quote "<their words>" [--item REVIEWER:F1|D1 --premise holds] [--file F.json]
                                     record a product or design decision the person made outside the engine (the panel or the
-                                    chat): a record, never a gate; their words proven theirs; shown in resume and every later bundle
+                                    chat): a record, never a gate; their words proven theirs; shown in resume and every later bundle;
+                                    --item/--premise holds: their answer that a reported item's premise holds sends it back to be fixed
   wf decide withdraw PD1 --reason "<what changed>"
                                     the analysis changed the picture: the decision stands withdrawn, and the person is asked again
   wf review --closure file.json     record the reviewer's closure
@@ -919,6 +923,7 @@ async function dispatch(cmd, sub, positional, options) {
       if (sub === 'ticket') { const r = completeScopeTicket(root, options); print(options, 'follow-up ticket readback recorded; run wf resume', r); return 0; }
       if (sub === 'fixed') { const r = recordFixed(root, options); const note = r.scopeDecisions.at(-1)?.notInCitedFile; print(options, `${options.finding} recorded fixed${note ? ` (the commit does not change the file ${note.join(', ')} cites${note.length > 1 ? '' : 's'}; the next reviewer verifies it)` : ''}; the next reviewer is handed it to verify; run wf resume`, r); return 0; }
       if (sub === 'waive') { const r = waiveFinding(root, options); print(options, `${options.finding} waived by the person's decision; run wf resume`, r); return 0; }
+      if (sub === 'not-a-defect') { const r = closeFindingNotDefect(root, options); print(options, `${options.finding} closed as not a defect by the person's answer ("${options.reason}"); the finding stays in the record beside it, and the delivered comment lists nothing for it\nnext: ${nextAction(root, r)}`, r.scopeDecisions.filter((d) => d.choice === 'not-a-defect')); return 0; }
       if (sub === 'defer') { const r = deferFindings(root, options); print(options, `${options.finding} deferred; the delivered comment lists it as a known issue; run wf resume`, r); return 0; }
       if (sub === 'move') {
         const refs = String(options.finding ?? '').split(',').map((x) => x.trim()).filter(Boolean);
@@ -940,7 +945,7 @@ async function dispatch(cmd, sub, positional, options) {
         print(options, `recorded on ${s.id}: the person said to fix every item ("${r.words}"; ${r.state.fixAll.via ?? 'recorded'}). No item is asked about leaving again unless they say so (then \`--person-directed "<their words>"\` asks that item); every item that does not block joins the next planned pass, never a round of its own. next: ${nextAction(root, r.state)}`, r.state.fixAll);
         return 0;
       }
-      throw new WfError('usage: wf scope list|ticket|move|fixed|defer|waive|fix-all');
+      throw new WfError('usage: wf scope list|ticket|move|fixed|defer|waive|not-a-defect|fix-all');
     }
     // 0.7.31 (I-217, D65): a product or design decision asked outside the engine, recorded with its basis and the person's words.
     case 'decide': {
@@ -954,7 +959,7 @@ async function dispatch(cmd, sub, positional, options) {
       if (sub) throw new WfError(`usage: wf decide --question ... --choice ... --quote ... | wf decide withdraw <PD id> --reason "<what changed>"`);
       const r = await recordProductDecision(root, options);
       const d = r.state.productDecisions.find((x) => x.id === r.id);
-      print(options, `product decision ${d.id} recorded on ${r.state.id}: "${d.question}" (options: ${(d.options ?? []).map((o) => `"${o}"`).join(' | ')}) -> "${d.choice}" (their words: "${d.quote}"; ${d.via}). It rests on: ${d.basis}; not checked: ${d.notChecked}. Tell the person what you recorded, from which words; later roles are handed it as \`decisions\`, and when what you find changes the picture, withdraw it (\`wf decide withdraw ${d.id} --reason "<what changed>"\`) and ask them again\nnext: ${nextAction(root, r.state)}`, d);
+      print(options, `product decision ${d.id} recorded on ${r.state.id}: "${d.question}" (options: ${(d.options ?? []).map((o) => `"${o}"`).join(' | ')}) -> "${d.choice}" (their words: "${d.quote}"; ${d.via}). It rests on: ${d.basis}; not checked: ${d.notChecked}.${d.item ? ` The premise of ${d.item} holds by their answer: it goes back to the fix round, and its implementer is handed their words.` : ''} Tell the person what you recorded, from which words; later roles are handed it as \`decisions\`, and when what you find changes the picture, withdraw it (\`wf decide withdraw ${d.id} --reason "<what changed>"\`) and ask them again\nnext: ${nextAction(root, r.state)}`, d);
       return 0;
     }
     case 'discovered': {
