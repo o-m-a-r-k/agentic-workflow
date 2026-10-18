@@ -1,4 +1,4 @@
-import { addValidation, correctValidation, correctionQuestionSteps, sharedCorrections } from './validation.mjs';
+import { addValidation, correctValidation, correctionQuestionSteps } from './validation.mjs';
 import { captureWarning } from './captures.mjs';
 import { defaultHostId, detectOwner, findHost, fragment, hostChoice, hostIds, hostLabels, hostNames } from './hosts/index.mjs';
 import { mkdirStateDirectory } from './state-folders.mjs';
@@ -890,7 +890,7 @@ async function dispatch(cmd, sub, positional, options) {
       const last = sub === 'correct' ? s.validationCorrections?.at(-1) : null;
       const admitted = (last?.from ?? []).filter((x) => x.admission).map((x) => x.id);
       print(options, admitted.length
-        ? `admission check ${admitted.join(', ')} corrected at ${String(last.commit).slice(0, 10)} (the original stays in the record, pinned at ${[...new Set(last.from.filter((x) => x.admission).map((x) => String(x.commit).slice(0, 10)))].join(', ')}); no question to the person: the review that follows judges the correction (its bundle has the admission original, the previous correction and the corrected definition, decoded), then the full gate${last.decision ? `; recorded under the person's answer ${last.decision}` : ''}. ${((others) => (others.length ? `${others.map((o) => o.attempt).join(', ')} ${others.length > 1 ? 'have' : 'has'} corrected ${[...new Set(others.flatMap((o) => o.steps))].join(', ')} too: ` : ''))(sharedCorrections(root, s, admitted))}when the defect is in the check itself, not this ticket's intended behaviour, fix it once on the base branch of the adapter's repo instead: every live attempt follows the adapter there (D60), and no ticket needs its own correction`
+        ? `admission check ${admitted.join(', ')} corrected at ${String(last.commit).slice(0, 10)} (the original stays in the record, pinned at ${[...new Set(last.from.filter((x) => x.admission).map((x) => String(x.commit).slice(0, 10)))].join(', ')}); no question to the person: the review that follows judges the correction (its bundle has the admission original, the previous correction and the corrected definition, decoded), then the full gate${last.decision ? `; recorded under the person's answer ${last.decision}` : ''}. ${((others) => (others.length ? `${others.map((o) => o.attempt).join(', ')} ${others.length > 1 ? 'have' : 'has'} corrected ${[...new Set(others.flatMap((o) => o.steps))].join(', ')} too: ` : ''))(last.sharedWith ?? [])}when the defect is in the check itself, not this ticket's intended behaviour, fix it once on the base branch of the adapter's repo instead: every live attempt follows the adapter there (D60), and no ticket needs its own correction`
         : `required supplemental validation ${sub === 'correct' ? 'corrected' : 'registered'}; admission checks unchanged; fresh code review and full gate required`, s.validations.at(-1));
       return 0;
     }

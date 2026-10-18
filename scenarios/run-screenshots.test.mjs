@@ -301,3 +301,26 @@ test('D75 review: after a re-run that did not satisfy the finding, the adapter f
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('ev-3', { screenshotsInspected: [shot.sha256], priorFindings: [{ round: 'ev-1', id: 'F1', status: 'fixed', evidence: `the re-run collected ${shot.source}` }] })), '--attempt', e.id]));
   ok(wf(root, ['accept', '--attempt', e.id]));
 });
+
+// Review of 0.7.32 (L1): open re-run findings on two steps, one already re-run at this adapter and one not, fell between the two
+// routes and went to a fix round with nothing to build. The step not yet re-run is re-run; the spent one waits for the adapter route.
+test('D75 review: of re-run findings on two steps, the one not yet re-run at this adapter is re-run; the spent one then takes the adapter route', () => {
+  const WRONG = { id: 'e2e', repo: 'app', tier: 'heavy', run: 'rm -rf e2e/.evidence/eng-222; mkdir -p e2e/.evidence/eng-222 && printf home > e2e/.evidence/eng-222/home.png', inputs: ['src/**'], artifacts: ['e2e/.evidence/{itemLower}/**/*.jpg'] };
+  const LATE = { id: 'shots', repo: 'app', tier: 'heavy', run: 'n=$(cat "$WF_ROOT/../shots-runs" 2>/dev/null || echo 0); echo $((n+1)) > "$WF_ROOT/../shots-runs"; rm -rf e2e/.evidence/shots; mkdir -p e2e/.evidence/shots/eng-222; if [ "$n" -gt 0 ]; then printf "s-$n" > e2e/.evidence/shots/eng-222/list.png; fi', inputs: ['src/**'], artifacts: ['e2e/.evidence/shots/{itemLower}/**/*.png'] };
+  const { base, root, e } = evidenceFinding('rerun-split', [WRONG, LATE]);
+  ok(wf(root, ['gate', '--attempt', e.id]));
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'ev-2', '--attempt', e.id]));
+  const F2 = { id: 'F2', severity: 'high', criterion: 'C1', step: 'shots', rerun: true, summary: 'the list screen capture was never taken', evidence: 'gate shots: no file matched e2e/.evidence/shots/eng-222/**/*.png' };
+  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('ev-2', { findings: [F2], priorFindings: [{ round: 'ev-1', id: 'F1', status: 'open', evidence: 'the re-run of e2e collected nothing again' }] })), '--attempt', e.id]));
+  const s = state(root, e.id);
+  assert.deepEqual([s.decision.kind, s.decision.status], ['gate', 'ready'], 'shots is re-run, not a fix round');
+  assert.match(s.next, /it re-runs shots whole on this unchanged tree/);
+  assert.match(s.next, /ev-1:F1 names a step this adapter already re-ran for it, so no fix round is handed it/);
+  const run = ok(wf(root, ['gate', '--attempt', e.id, '--json'])).json();
+  assert.deepEqual(run.rerunFor, [{ step: 'shots', findings: ['ev-2:F2'] }]);
+  assert.equal(run.steps.find((x) => x.id === 'shots').artifacts.length, 1);
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'ev-3', '--attempt', e.id]));
+  const shot = state(root, e.id).lastGate.steps.find((x) => x.id === 'shots').artifacts[0];
+  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('ev-3', { screenshotsInspected: [shot.sha256], priorFindings: [{ round: 'ev-1', id: 'F1', status: 'open', evidence: 'e2e still collects nothing' }, { round: 'ev-2', id: 'F2', status: 'fixed', evidence: `the re-run collected ${shot.source}` }] })), '--attempt', e.id]));
+  assert.equal(state(root, e.id).decision.kind, 'adapter', 'the spent one now takes the adapter route');
+});

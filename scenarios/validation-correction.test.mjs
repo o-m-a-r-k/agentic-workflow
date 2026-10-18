@@ -362,23 +362,53 @@ test('0.7.32 (D78): the reviewer is handed the admission original, the previous 
   assert.match(bundle.instructions, /never from the correction's `reason`/);
 });
 
-test('0.7.32 (D78): files the corrected plugin reads outside the adapter folder are recorded with the correction, handed to the reviewer, and a later change to one asks a verdict again', () => {
+// Review of 0.7.32 (M1): the files a plugin loads were guessed from path-like strings in it, which missed the common forms; a step
+// declares them (`reads`), the correction pins them, and an undeclared load is the reviewer's to judge from the decoded code.
+const HARNESS_PLUGIN = "import path from 'node:path'; import fs from 'node:fs';\nexport default {async run(ctx){ const dir = `${ctx.dir}/front/fixtures`; ctx.log(fs.readFileSync(path.join(dir, 'harness'), 'utf8')); return {status:'passed'} }};";
+const READS_CFG = (reads) => yaml({ version: 1, enabled: true, name: 'fixture', repos: [{ name: 'app', path: '.', base: 'main' }], gate: { steps: [{ id: 'unit', repo: 'app', plugin: 'steps/unit.mjs', inputs: ['src/**'], ...(reads ? { reads } : {}) }] } });
+test('0.7.32 (D78, review M1): the files a step declares its plugin loads are pinned with the correction, handed to the reviewer, and a later change to one asks a verdict again', () => {
   const f = plugged('validation-correct-reads');
-  const harness = `export default {async run(ctx){const fs = await import('node:fs'); ctx.log(fs.readFileSync(ctx.dir + '/front/fixtures/harness.jsx', 'utf8')); return {status:'passed'}}}; // reads front/fixtures/harness.jsx`;
-  commitIn(f.wt, { '.workflow/steps/unit.mjs': harness, 'front/fixtures/harness.jsx': 'cy.contains("Day 1")\n' });
+  commitIn(f.wt, { '.workflow/project.yaml': READS_CFG(['front/fixtures/**']), '.workflow/steps/unit.mjs': HARNESS_PLUGIN, 'front/fixtures/harness': 'cy.contains("Day 1")\n' });
   ok(wf(f.root, ['validation', 'correct', '--steps', 'unit', '--reason', 'the spec moved to a harness', '--attempt', f.e.id], { ownerSilent: true }));
   const s = state(f.root, f.e.id);
-  assert.deepEqual(s.validationCorrections[0].reads.map((x) => [x.step, x.path]), [['unit', 'front/fixtures/harness.jsx']]);
+  assert.deepEqual(s.validationCorrections[0].reads.map((x) => [x.step, x.declared, x.files.map((y) => y.path)]), [['unit', ['front/fixtures/**'], ['front/fixtures/harness']]], 'pinned from the declaration, not guessed from the code');
   const [c] = handReviewer(f, 'code-1').admissionCorrections;
-  assert.deepEqual(c.reads.map((x) => [x.path, x.now === x.atCorrection]), [['front/fixtures/harness.jsx', true]]);
+  assert.deepEqual(c.reads.files.map((x) => [x.path, x.now === x.atCorrection]), [['front/fixtures/harness', true]]);
   ok(wf(f.root, ['review', '--closure', closureFile(f.base, goodClosure('code-1', { validationChecked: verdictOn(f, 'complies') })), '--attempt', f.e.id]));
   assert.equal(state(f.root, f.e.id).decision.kind, 'gate', 'judged');
-  // A product commit edits the harness: the check changed with no correction, and the next round judges it again.
-  commitIn(f.wt, { 'front/fixtures/harness.jsx': 'cy.contains("1")\n' });
+  // A product commit edits the harness: the check changed with no correction, and the next round judges it again; a file added
+  // under the declared folder counts too.
+  commitIn(f.wt, { 'front/fixtures/harness': 'cy.contains("1")\n', 'front/fixtures/more.js': 'x\n' });
   const [again] = handReviewer(f, 'code-2').admissionCorrections;
-  assert.equal(again.reads[0].now === again.reads[0].atCorrection, false);
-  assert.match(again.reads[0].diff, /diff [0-9a-f]{40} HEAD -- front\/fixtures\/harness\.jsx$/);
+  assert.deepEqual(again.reads.files.map((x) => [x.path, x.atCorrection === x.now, Boolean(x.diff)]), [['front/fixtures/harness', false, true], ['front/fixtures/more.js', false, true]]);
   assert.equal(wf(f.root, ['review', '--closure', closureFile(f.base, goodClosure('code-2', { criteria: [] })), '--attempt', f.e.id]).code, 75, 'no verdict on the changed harness, no closure');
+});
+
+test('0.7.32 (D78, review M1): a declared read that matches no file is refused; an undeclared load is the reviewer\'s to judge, with the paths that look loaded as a hint only', () => {
+  const f = plugged('validation-correct-reads-undeclared');
+  commitIn(f.wt, { '.workflow/project.yaml': READS_CFG(['front/missing/**']), '.workflow/steps/unit.mjs': HARNESS_PLUGIN, 'front/fixtures/harness': 'cy.contains("Day 1")\n' });
+  const refused = wf(f.root, ['validation', 'correct', '--steps', 'unit', '--reason', 'moved', '--attempt', f.e.id], { ownerSilent: true });
+  assert.equal(refused.code, 75);
+  assert.match(refused.err, /unit declares `reads` `front\/missing\/\*\*`, which matches no file in app/);
+  // Declaring nothing: nothing is pinned, and the reviewer judges the load from the code.
+  commitIn(f.wt, { '.workflow/project.yaml': READS_CFG(null) });
+  ok(wf(f.root, ['validation', 'correct', '--steps', 'unit', '--reason', 'moved', '--attempt', f.e.id], { ownerSilent: true }));
+  assert.equal(state(f.root, f.e.id).validationCorrections[0].reads, undefined);
+  const bundle = handReviewer(f, 'code-1');
+  assert.ok(bundle.admissionCorrections[0].looksLoaded.some((x) => /front\/fixtures/.test(x)), 'a hint from the template literal');
+  assert.match(bundle.instructions, /Whether the plugin loads anything it does not declare is yours to judge from the decoded code .*: an undeclared load is a blocking finding\. `looksLoaded` lists path-like strings found in the decoded plugin, a hint only, never a record/);
+});
+
+// Review of 0.7.32 (M2): a `finding` verdict naming a low finding sent the weakening down the path of items that do not block.
+test('0.7.32 (D78, review M2): a finding verdict on a correction names a finding that blocks', () => {
+  const f = fixture('validation-correct-low-verdict');
+  commitIn(f.wt, { '.workflow/project.yaml': ADMISSION_CFG('true') });
+  ok(wf(f.root, ['validation', 'correct', '--steps', 'unit', '--reason', 'the check failed', '--attempt', f.e.id], { ownerSilent: true }));
+  handReviewer(f, 'code-1');
+  const low = { id: 'F1', severity: 'low', summary: 'the corrected check runs `true`', status: 'open', evidence: '.workflow/project.yaml:1' };
+  const refused = wf(f.root, ['review', '--closure', closureFile(f.base, goodClosure('code-1', { findings: [low], validationChecked: verdictOn(f, 'finding', { finding: 'F1' }) })), '--attempt', f.e.id]);
+  assert.equal(refused.code, 75);
+  assert.match(refused.err, /the verdict on unit names F1, which does not block .*: a coverage loss in a check frozen at admission is a blocking finding/);
 });
 
 test('0.7.32 (D78): an admission check another open attempt corrected too names fixing it once on the adapter\'s base branch, in the correction and in the next step', () => {
@@ -395,5 +425,6 @@ test('0.7.32 (D78): an admission check another open attempt corrected too names 
   const second = ok(wf(f.root, ['validation', 'correct', '--steps', 'unit', '--reason', 'the same defect', '--attempt', e2.id], { ownerSilent: true }));
   assert.match(second.out + second.err, new RegExp(`${f.e.id.replace('.', '\\.')} has corrected unit too: when the defect is in the check itself`));
   assert.equal((state(f.root, e2.id).decisions ?? []).length, 0, 'no question in either attempt');
+  assert.deepEqual(state(f.root, e2.id).validationCorrections[0].sharedWith, [{ attempt: f.e.id, steps: ['unit'] }], 'recorded once, read by every next step');
   assert.match(state(f.root, e2.id).next, new RegExp(`the admission check unit is corrected here and in ${f.e.id.replace('.', '\\.')} too: when the defect is in the check itself \\(not this ticket's intended behaviour\\), fix it once on the base branch of app, which every live attempt follows \\(D60\\)`));
 });

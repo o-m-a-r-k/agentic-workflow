@@ -394,6 +394,8 @@ function normalize(raw, source) {
       if (!Array.isArray(s.affects) || !s.affects.length || s.affects.some((a) => !a || typeof a !== 'object' || !globs(a.paths) || !globs(a.specs))) fail(`step \`${s.id}\`: affects must be a list of { paths: [globs], specs: [globs] }: the package files a change can be in, and the spec files (of \`specs\`) such a change can affect`);
       else if (!s.specs?.length) fail(`step \`${s.id}\`: affects needs \`specs\` (the step's spec files) and \`run\` with \`select\`, so a run can take only some of them`);
     }
+    // 0.7.32 (D78): the files a step's plugin loads outside the adapter folder, pinned with a correction of the step.
+    if (s.reads !== undefined && (!Array.isArray(s.reads) || !s.reads.length || s.reads.some((g) => typeof g !== 'string' || !g.trim() || g.startsWith('/') || g.split('/').includes('..')))) fail(`step \`${s.id}\`: reads must be a list of paths or globs relative to the step's repo (the files its plugin loads outside the adapter folder)`);
     if (s.alsoInputs !== undefined) {
       if (!Array.isArray(s.alsoInputs)) fail(`step \`${s.id}\`: alsoInputs must be a list of repo names`);
       else for (const r of s.alsoInputs) if (!repoNames.has(r)) fail(`step \`${s.id}\`: alsoInputs names unknown repo \`${r}\``);

@@ -411,3 +411,23 @@ test('0.7.32 review (D72): a worktree reset to the current base after the accept
   sh(wt, `git reset -q --keep ${accepted}`);
   assert.equal(state(root, id).decision.kind, 'delivery');
 });
+
+// Review of 0.7.32 (D72): base commits merged into the branch by hand before the push are read as the attempt's own; the reviewer is
+// handed the commits of that range, those that came in through a merge marked, so it can tell other tickets' work from this one's.
+test('0.7.32 review (D72): the reviewer of a pushed commit is handed its range, with the commits a hand merge brought from the base marked', async () => {
+  const { toAccepted, sh } = await import('./helpers.mjs');
+  const { base, root } = singleRepoProject('d72-range', { gate: { steps: [{ id: 'u', repo: 'app', run: 'true', inputs: ['src/**'] }] } });
+  const { id, wt } = toAccepted(root, base, { item: 'RF-11' });
+  commitIn(root, { 'src/other.txt': 'another ticket\n' }, 'another ticket on main');
+  sh(root, 'git push -q origin HEAD:refs/heads/main');
+  const other = sh(root, 'git rev-parse HEAD').trim();
+  sh(wt, 'git fetch -q origin && git merge -q --no-edit origin/main');
+  commitIn(wt, { 'src/a.txt': 'pushed by hand\n' }, 'my change after the acceptance');
+  sh(wt, 'git push -q origin HEAD:refs/heads/main');
+  const handed = ok(wf(root, ['handoff', 'reviewer', '--agent', 'rx', '--attempt', id]));
+  const bundle = JSON.parse(fs.readFileSync(handed.out.match(/^Read (\S+)/m)[1], 'utf8'));
+  const commits = bundle.pushedRange.app.commits;
+  assert.deepEqual(commits.filter((c) => c.merged).map((c) => c.sha), [other], 'the other ticket\'s commit is marked as merged in');
+  assert.ok(commits.some((c) => !c.merged && c.subject === 'my change after the acceptance'));
+  assert.match(bundle.instructions, /a commit marked `merged` came in through a merge, not on the branch's own line: another ticket's work on the base/);
+});

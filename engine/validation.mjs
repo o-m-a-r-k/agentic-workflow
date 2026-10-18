@@ -2,7 +2,7 @@ import { CONFIG_FILE, adapterPin, attemptAdapter, decodeEscapes, trustedAdapter,
 import { actor, openState, treeHashes } from './attempt.mjs';
 import { append, listAttempts, loadState } from './ledger.mjs';
 import { loadCatalog } from './secrets.mjs';
-import { canonical, git, hashFile, hashValue, refuse, YAML } from './util.mjs';
+import { canonical, git, globToRegExp, hashFile, hashValue, refuse, YAML } from './util.mjs';
 import { approveHint, decisionFor, labelOf } from './approve.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -197,11 +197,32 @@ function standingAnswer(state, d) {
 // with this reason when the correction runs again, and `wf resume` says so meanwhile instead of telling the agent to ask it.
 // 0.7.32 (D78), named failure (classification of 25 field corrections): two corrections moved test code out of the pinned plugin into
 // the product tree (a fixture harness the plugin loads), and the correction's identity covered only the plugin file, so later edits
-// to that harness were ordinary product commits no review of the correction saw. The files the corrected plugin names in the
-// adapter repo outside the adapter folder (paths in its decoded text that exist at the corrected commit) are recorded with the
-// correction (`reads`: path and blob); the reviewer is handed them, and a change to one after the round that judged it asks a
-// verdict again (engine/lifecycle.mjs correctionsToJudge).
-export function pluginReads(root, state, commit, definition) {
+// to that harness were ordinary product commits no review of the correction saw. A step declares the files its plugin loads outside
+// the adapter folder in its definition (`reads`: paths or globs relative to the step's repo); a correction pins them: each entry
+// must match a file at the correction's tree (refused otherwise), and every file matched is recorded with its blob. A change to one
+// asks the reviewer's verdict again (engine/lifecycle.mjs correctionsToJudge). Whether the plugin loads anything it does not declare
+// is the reviewer's judgement, from the decoded code; an undeclared load is a blocking finding. Review of 0.7.32 (M1): the first form
+// guessed the reads from path-like strings in the plugin, which missed `ctx.dir + '/front/…'`, `path.join(ctx.dir, 'front', …)`,
+// template literals, imports without an extension and directories; a guess is no rule, so it is only a hint for the reviewer now
+// (`looksLoaded`).
+export function declaredReadsAt(state, step, commit) {
+  const declared = Array.isArray(step?.definition?.reads) ? step.definition.reads : [];
+  if (!declared.length) return null;
+  const dir = state.repos[step.definition.repo]?.worktree;
+  const all = dir ? git(dir, ['ls-tree', '-r', '--name-only', commit], { allowFail: true }).split('\n').filter(Boolean) : [];
+  const files = [];
+  const unmatched = [];
+  for (const g of declared) {
+    const re = globToRegExp(String(g).replace(/\/$/, '/**'));
+    const hit = all.filter((f) => f === g || re.test(f) || f.startsWith(`${String(g).replace(/\/$/, '')}/`));
+    if (!hit.length) unmatched.push(g);
+    for (const f of hit) if (!files.some((x) => x.path === f)) files.push({ path: f, blob: git(dir, ['rev-parse', `${commit}:${f}`], { allowFail: true }) });
+  }
+  return { step: step.id, repo: step.definition.repo, declared, files, unmatched };
+}
+
+// Paths that look loaded in a plugin's decoded text: a hint listed to the reviewer, never a record and never enforced.
+export function looksLoaded(root, state, commit, definition) {
   if (!definition?.plugin) return [];
   let text;
   try {
@@ -209,20 +230,13 @@ export function pluginReads(root, state, commit, definition) {
   } catch {
     return [];
   }
-  const loc = attemptAdapter(root, state);
-  const dir = state.repos[loc.repo.name]?.worktree;
-  if (!dir) return [];
-  const folder = (loc.relative || '').split(path.sep).join('/');
-  const out = new Map();
-  for (const m of text.matchAll(/(?:^|[\s'"`(=,:])((?:\.\.?\/)?[A-Za-z0-9_@.-]+(?:\/[A-Za-z0-9_@.[\]-]+)+\.[A-Za-z0-9]+)/g)) {
-    const raw = m[1].replace(/^\.\//, '');
-    const rel = path.posix.normalize(folder && raw.startsWith('../') ? path.posix.join(folder, raw) : raw);
-    if (rel.startsWith('../') || (folder && (rel === folder || rel.startsWith(`${folder}/`))) || out.has(rel)) continue;
-    const blob = git(dir, ['rev-parse', '--verify', '--quiet', `${commit}:${rel}`], { allowFail: true });
-    if (blob) out.set(rel, blob);
-    if (out.size >= 50) break;
+  const out = new Set();
+  for (const m of text.matchAll(/['"`/]((?:\.\.?\/)?[A-Za-z0-9_@.-]+(?:\/[A-Za-z0-9_@.*[\]{}$-]+)+)/g)) out.add(m[1].replace(/^\.\//, ''));
+  for (const m of text.matchAll(/path\.(?:join|resolve)\(([^)]*)\)/g)) {
+    const parts = [...m[1].matchAll(/['"`]([^'"`]+)['"`]/g)].map((x) => x[1]);
+    if (parts.length) out.add(parts.join('/').replace(/\/+/g, '/').replace(/^\//, ''));
   }
-  return [...out].map(([file, blob]) => ({ path: file, blob }));
+  return [...out].slice(0, 50);
 }
 
 // The other open attempts of the project that corrected the same admission check: one defect frozen into a check shared by every
@@ -332,8 +346,11 @@ async function registerValidation(root, options, correcting) {
       // Both pins stay in the ledger: what the step was, and what it is now.
       const current = (id) => state.validations.flatMap((v) => v.steps).find((s) => s.id === id)?.definition;
       const from = ids.map((id) => (admission.includes(id) ? { id, commit: pinOf(id), definition: current(id) ?? base.gate.steps.find((s) => s.id === id), admission: true } : { id, commit: pinOf(id), definition: current(id) }));
-      const reads = admission.flatMap((id) => pluginReads(root, state, commit, steps.find((x) => x.id === id)?.definition).map((r) => ({ step: id, ...r })));
-      append(root, state.id, 'validation.corrected', { commit, steps, criteria, reason: String(options.reason), tree: trees, from, ...(decision ? { decision } : {}), ...(admission.length ? { judgedBy: 'reviewer', ...(reads.length ? { reads } : {}) } : {}) }, actor(options));
+      const reads = admission.map((id) => declaredReadsAt(state, steps.find((x) => x.id === id), trees[steps.find((x) => x.id === id)?.definition?.repo]?.split('+')[0] ?? commit)).filter(Boolean);
+      const missing = reads.filter((x) => x.unmatched.length);
+      if (missing.length) throw refuse(`${missing.map((x) => `${x.step} declares \`reads\` ${x.unmatched.map((g) => `\`${g}\``).join(', ')}, which ${x.unmatched.length > 1 ? 'match' : 'matches'} no file in ${x.repo}`).join('; ')}`, 'a step\'s `reads` lists the files its plugin loads outside the adapter folder (paths or globs relative to the step\'s repo), as committed: fix the path, or commit the file', { id: 'validation:reads-unmatched' });
+      const shared = admission.length ? sharedCorrections(root, state, admission) : [];
+      append(root, state.id, 'validation.corrected', { commit, steps, criteria, reason: String(options.reason), tree: trees, from, ...(decision ? { decision } : {}), ...(admission.length ? { judgedBy: 'reviewer', ...(reads.length ? { reads: reads.map(({ unmatched, ...x }) => x) } : {}), ...(shared.length ? { sharedWith: shared } : {}) } : {}) }, actor(options));
     } else append(root, state.id, 'validation.added', { commit, steps, criteria, reason: String(options.reason), tree: trees }, actor(options));
     return loadState(root, state.id);
   });

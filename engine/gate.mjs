@@ -66,7 +66,7 @@ function stepInputs(state, step, repo, pkg, skipFolder = null) {
 // change to which screenshots count as the ticket's made a 25-minute e2e step look new, though its result could not change.
 // `needs` (0.7.30, I-163) only orders steps within a run, and `affects` (0.7.30, I-134) only chooses which specs a run takes: a
 // run of chosen specs has a key of its own (planGate), so neither can make a recorded pass mean something else.
-export const RESULT_NEUTRAL = ['workers', 'shards', 'artifacts', 'tier', 'lease', 'deferrable', 'when', 'component', 'ignores', 'prepare', 'specs', 'needs', 'affects'];
+export const RESULT_NEUTRAL = ['workers', 'shards', 'artifacts', 'tier', 'lease', 'deferrable', 'when', 'component', 'ignores', 'prepare', 'specs', 'needs', 'affects', 'reads'];
 function pluginHashOf(root, state, step) {
   return step.plugin ? hashFile(adapterFileAtCommit(root, state, validationCommit(state, step.id), step.plugin)) : null;
 }
@@ -451,15 +451,24 @@ function rerunFindings(state) {
 }
 // A step the gate the review judged had already re-run for these findings, at the adapter pin the attempt still reads: a re-run at
 // that pin would collect the same evidence again.
-const reranAtPin = (state, x, id) => (x.judged.rerunFor ?? []).some((y) => y.step === id) && (x.judged.adapterBase ?? null) === adapterPin(state);
+// Review of 0.7.32 (L1): any gate on this tree at this pin that re-ran the step before the latest review, not only the one that
+// review judged (a later re-run of another step is judged by a later review); a re-run after it is the route being taken (`ran`).
+const reranAtPin = (state, x, id) => (state.gates ?? []).some((g) => String(g.at ?? '') < String(x.r.at ?? '') && (g.rerunFor ?? []).some((y) => y.step === id) && (g.adapterBase ?? null) === adapterPin(state) && canonical(g.tree) === canonical(x.tree));
 
+// Review of 0.7.32 (L1): per step. Findings that name several steps, only some of them re-run at this pin, fell between the two
+// routes (the re-run route needed none re-run, the adapter route all). The steps not yet re-run at this pin are re-run (`steps`,
+// `forStep`); the findings of the spent ones (`spentRefs`) wait for the adapter route, and no fix round is handed them meanwhile.
 export function rerunRoute(state) {
   const x = rerunFindings(state);
-  if (!x || x.steps.some((id) => reranAtPin(state, x, id))) return null;
-  const { r, tree, judged, steps, forStep } = x;
+  if (!x) return null;
+  const steps = x.steps.filter((id) => !reranAtPin(state, x, id));
+  if (!steps.length) return null;
+  const { r, tree, judged } = x;
+  const forStep = x.forStep.filter((y) => steps.includes(y.step));
   const g = state.lastGate;
   const ran = Boolean(g && g.runId !== judged.runId && g.status === 'passed' && String(g.at ?? '') > String(r.at ?? '') && canonical(g.tree) === canonical(tree) && steps.every((id) => (g.rerunFor ?? []).some((y) => y.step === id)));
-  return { refs: forStep.flatMap((y) => y.findings), steps, forStep, ran };
+  const refs = forStep.flatMap((y) => y.findings);
+  return { refs, steps, forStep, ran, spentRefs: x.forStep.filter((y) => !steps.includes(y.step)).flatMap((y) => y.findings).filter((ref) => !refs.includes(ref)) };
 }
 
 // Review of 0.7.32 (D75), named failure (a review's case): an evidence finding whose cure is outside the ticket (a capture glob in
@@ -471,7 +480,8 @@ export function rerunRoute(state) {
 export function rerunSpent(state) {
   const x = rerunFindings(state);
   if (!x || !x.steps.every((id) => reranAtPin(state, x, id))) return null;
-  return { refs: x.forStep.flatMap((y) => y.findings), steps: x.steps, gate: x.judged.runId };
+  const reran = (state.gates ?? []).filter((g) => String(g.at ?? '') < String(x.r.at ?? '') && x.steps.some((id) => (g.rerunFor ?? []).some((y) => y.step === id)) && canonical(g.tree) === canonical(x.tree));
+  return { refs: x.forStep.flatMap((y) => y.findings), steps: x.steps, gate: [...new Set(reran.map((g) => g.runId))].join(', ') || x.judged.runId };
 }
 
 // 0.7.30 (I-134, D59). Named failure (field): a one-line change reran the whole 1,200-test end-to-end step (27 to 40 minutes); the
