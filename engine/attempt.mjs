@@ -13,6 +13,7 @@ import { adoptNeedsApproval } from './owner.mjs';
 import { requireYes } from './approve.mjs';
 import { FRAMES } from './asking.mjs';
 import { settleRoundQuestions } from './strategy.mjs';
+import { followAdapter } from './adapter-follow.mjs';
 import { detectOwner, ownerRuntime, ownerString } from './hosts/index.mjs';
 import { noteAttempt } from './refusals.mjs';
 import { WfError, assertEngine, assertPlainGit, assertSafeId, canonical as canonicalValue, git, hashFile, refuse, run, sha256 } from './util.mjs';
@@ -115,7 +116,8 @@ export function openState(root, options) {
   const state = loadState(root, id);
   assertSchema(state);
   // 0.7.29 (I-214): a round question an earlier release opened before it was due is withdrawn before anything reads the attempt.
-  return settleRoundQuestions(root, state);
+  // 0.7.30 (I-151, D60): the attempt takes the adapter committed on its base branch, where it safely can, before anything reads it.
+  return followAdapter(root, settleRoundQuestions(root, state));
 }
 
 function nextNumber(root, prefix) {
@@ -390,7 +392,7 @@ export function abandon(root, options) {
   const landed = recorded.filter((d) => !(d.skipped && !d.commit));
   if (landed.length) {
     const list = recorded.map((d) => (d.skipped ? `${d.repo} skipped (${d.skipped}; nothing pushed)` : `${d.repo} delivered (${String(d.commit ?? '').slice(0, 10)} on ${d.target ?? 'its target'})`)).join('; ');
-    throw refuse(`${state.id} is partly delivered: ${list}; a delivered repo cannot be taken back, so the attempt is finished, not abandoned`, `\`wf deliver\` delivers the remaining repos; when every change is already on its target branch (merged outside the workflow), \`wf close --shipped --reason "<why>"\` closes it under the owner's decision; after a delivery adapter fault, commit the fixed adapter on the base branch and re-pin this attempt to it: \`wf deliver --repin-adapter --reason "<why>"\` (docs/lifecycle.md, "Recovering from an adapter fault")`);
+    throw refuse(`${state.id} is partly delivered: ${list}; a delivered repo cannot be taken back, so the attempt is finished, not abandoned`, `\`wf deliver\` delivers the remaining repos; when every change is already on its target branch (merged outside the workflow), \`wf close --shipped --reason "<why>"\` closes it under the owner's decision; after a delivery adapter fault, commit and push the fixed adapter on the base branch: the attempt follows it, and the next \`wf deliver\` delivers the rest (docs/lifecycle.md, "Recovering from an adapter fault")`);
   }
   // Named failure (0.5.0 integration review): abandon looked only at `repo.delivered`. A delivery adapter that had already
   // merged the change (a post-merge state the owner had not acknowledged) or left it awaiting merge records only

@@ -4,7 +4,7 @@ import { detectOwner, findHost, hostIds, hostLabels, optional } from './hosts/in
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { adapterFileAtCommit, loadConfigAtCommit, trustedAdapter } from './config.mjs';
+import { adapterFileAtCommit, adapterPin, loadConfigAtCommit, trustedAdapter } from './config.mjs';
 import { append, attemptDir, listAttempts, loadState, recordedTogether } from './ledger.mjs';
 import { loadCatalog, readSecret } from './secrets.mjs';
 import { WfError, canonical, hashFile, now, readJson, refuse, sha256, writeImmutable } from './util.mjs';
@@ -23,7 +23,7 @@ const BUILTIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'a
 export async function loadTrackerAdapter(root, cfg, state) {
   const kind = cfg.tracker.kind;
   if (kind === 'none') return null;
-  const file = kind.startsWith('.') ? (state ? adapterFileAtCommit(root, state, state.adapterBase, kind) : path.resolve(root, '.workflow', kind)) : path.join(BUILTIN, `${kind}.mjs`);
+  const file = kind.startsWith('.') ? (state ? adapterFileAtCommit(root, state, adapterPin(state), kind) : path.resolve(root, '.workflow', kind)) : path.join(BUILTIN, `${kind}.mjs`);
   if (!fs.existsSync(file)) throw new WfError(`tracker adapter \`${kind}\` not found at ${file}`);
   const adapter = (await import(pathToFileURL(file).href)).default;
   if (adapter?.screenshots !== undefined && !SCREENSHOT_MODES.includes(adapter.screenshots)) throw new WfError(`tracker adapter \`${kind}\`: screenshots: ${JSON.stringify(adapter.screenshots)} is not one of ${SCREENSHOT_MODES.join(', ')}`);

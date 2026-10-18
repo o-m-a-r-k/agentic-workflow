@@ -1,5 +1,6 @@
-// Fixtures shared by the adapter-fault scenarios (I-20, I-21, I-22): adapters that fault, the fix, the documented
-// re-pin and an accepted attempt. adapter-fault.test.mjs covers single-repo and partly delivered attempts,
+// Fixtures shared by the adapter-fault scenarios (I-20, I-21, I-22): adapters that fault, the fix, the recovery (the attempt
+// follows its base branch's adapter since 0.7.30; the re-pin stays for a delivery adapter kind that changed half way) and an
+// accepted attempt. adapter-fault.test.mjs covers single-repo and partly delivered attempts,
 // adapter-fault-shapes.test.mjs the skipped repo, the quick lane and a batch; two files so they run side by side.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -51,40 +52,56 @@ export function pushFix(dir, rel = '.workflow/delivery/mr.mjs') {
   return sh(dir, 'git rev-parse HEAD');
 }
 
-// The documented recovery: the refusal without a commit shows what changes; the owner's confirmation is the tip typed
-// back; it is recorded with both pins and the reason.
-export function repin(root, id, tip, { delivered = 'nothing yet', left, failFirst = null }) {
+// The recovery since 0.7.30 (I-151, D60): the fixed adapter, committed and pushed on the base branch, is taken by the attempt
+// itself, and the next `wf deliver` asks it. Recorded once (`adapter.followed`), with no re-pin and no question to the person.
+export function followFix(root, id, tip, { failFirst = null } = {}) {
+  const deliver = () => wf(root, ['deliver', '--attempt', id]);
+  if (failFirst) {
+    // A later step fails after the adapter was taken: the same command delivers once it can, and the follow is recorded once.
+    const restore = failFirst();
+    assert.notEqual(deliver().code, 0);
+    assert.equal(state(root, id).adapterPin, tip, 'taken before the step that failed');
+    restore();
+  }
+  const d = ok(deliver());
+  const taken = ledger(root, id).filter((e) => e.type === 'adapter.followed');
+  assert.equal(taken.length, 1);
+  assert.equal(taken[0].data.to, tip);
+  assert.equal(taken[0].data.delivery.mode, 'followed');
+  assert.deepEqual(taken[0].data.changed, ['.workflow/delivery/mr.mjs']);
+  assert.equal(ledger(root, id).filter((e) => e.type === 'adapter.repinned' || (e.type.startsWith('decision.') && /^repin:/.test(String(e.data?.key ?? '')))).length, 0, 'no re-pin and no question');
+  assert.match(d.out, new RegExp(`adapter followed origin/main from [0-9a-f]{10} to ${tip.slice(0, 10)} \\(\\.workflow/delivery/mr\\.mjs\\)`));
+  return state(root, id);
+}
+
+// The re-pin, left for a delivery that started under one adapter kind while the base branch now names another (the follow
+// keeps the kind it started with): the refusal without a commit shows what changes; the owner's confirmation is the tip
+// typed back; it is recorded with both pins and the reason.
+export function repin(root, id, tip, { delivered = 'nothing yet', left, kinds = ['./delivery/mr.mjs', './delivery/mr.mjs'], files = '\\.workflow/delivery/mr\\.mjs' }) {
+  const kept = state(root, id).deliveryAdapterBase;
   const preview = wf(root, ['deliver', '--attempt', id, '--repin-adapter', '--reason', 'the delivery adapter reported an undocumented state']);
   assert.equal(preview.code, 75, preview.err);
-  assert.match(preview.err, new RegExp(`from: \\S+@[0-9a-f]{10} \\(delivery kind ./delivery/mr.mjs\\)\\n  to:   \\S+@${tip.slice(0, 10)}, the tip of origin/main`));
-  assert.match(preview.err, /adapter files that differ: \.workflow\/delivery\/mr\.mjs/);
+  assert.match(preview.err, new RegExp(`from: \\S+@[0-9a-f]{10} \\(delivery kind ${kinds[0].replace(/\./g, '\\.')}\\)\\n  to:   \\S+@${tip.slice(0, 10)}, the tip of origin/main`));
+  assert.match(preview.err, new RegExp(`\\(delivery kind ${kinds[1].replace(/\./g, '\\.')}\\)`));
+  assert.match(preview.err, new RegExp(`adapter files that differ: ${files}`));
   assert.match(preview.err, new RegExp(`recorded so far: ${delivered}`));
   assert.match(preview.err, new RegExp(`still to deliver: ${left}`));
-  assert.match(preview.err, /the gate, the review and the tracker stay on the admission pin/);
+  assert.match(preview.err, /only the delivery moves: the rest of the attempt follows its base branch's adapter by itself/);
   assert.match(preview.err, new RegExp(`\`wf deliver --repin-adapter ${tip.slice(0, 12)} --reason "<why>"\``));
   assert.match(wf(root, ['deliver', '--attempt', id, '--repin-adapter', 'deadbeef00', '--reason', 'x']).err, new RegExp(`deadbeef00 is not the tip of origin/main \\(${tip.slice(0, 10)}\\)`));
   assert.match(wf(root, ['deliver', '--attempt', id, '--repin-adapter', tip.slice(0, 12)]).err, /--reason is required/);
-  assert.equal(state(root, id).deliveryAdapterBase, null, 'nothing re-pinned by a refused try');
+  assert.equal(state(root, id).deliveryAdapterBase, kept, 'nothing re-pinned by a refused try');
   const before = state(root, id).adapterBase;
-  const confirm = () => wf(root, ['deliver', '--attempt', id, '--repin-adapter', tip.slice(0, 12), '--reason', 'the delivery adapter reported an undocumented state']);
-  if (failFirst) {
-    // A later step fails after the re-pin was recorded: the same command is accepted again (not refused as "already at
-    // the tip"), and the re-pin is recorded once.
-    const restore = failFirst();
-    assert.notEqual(confirm().code, 0);
-    assert.equal(state(root, id).deliveryAdapterBase, tip);
-    restore();
-  }
-  const d = ok(confirm());
+  const d = ok(wf(root, ['deliver', '--attempt', id, '--repin-adapter', tip.slice(0, 12), '--reason', 'the delivery adapter reported an undocumented state']));
   assert.equal(ledger(root, id).filter((e) => e.type === 'adapter.repinned').length, 1);
   const s = state(root, id);
   assert.equal(s.deliveryAdapterBase, tip, 'delivery reads the adapter at the base tip');
-  assert.equal(s.adapterBase, before, 'the admission pin (gate, review, tracker) is unchanged');
+  assert.equal(s.adapterBase, before, 'the admission commit is unchanged');
   const rec = ledger(root, id).find((e) => e.type === 'adapter.repinned');
-  assert.equal(rec.data.from, before);
+  assert.equal(rec.data.from, kept);
   assert.equal(rec.data.to, tip);
   assert.equal(rec.data.reason, 'the delivery adapter reported an undocumented state');
-  assert.match(d.out, new RegExp(`delivery adapter re-pinned from ${before.slice(0, 10)} to ${tip.slice(0, 10)}`));
+  assert.match(d.out, new RegExp(`delivery adapter re-pinned from ${kept.slice(0, 10)} to ${tip.slice(0, 10)}`));
   return s;
 }
 

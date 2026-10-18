@@ -15,7 +15,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { repoDir, trustedAdapter } from './config.mjs';
+import { adapterPin, repoDir, trustedAdapter } from './config.mjs';
 import { WfError, YAML, assertPlainGit, git, gitEnv, globProblem, matchesAny, refuse } from './util.mjs';
 
 export const IMPACT_DEFAULTS = { requiredFor: ['full'], maxFileBytes: 2 * 1024 * 1024, maxScanBytes: 512 * 1024 * 1024, regexTimeoutMs: 20000 };
@@ -87,7 +87,7 @@ export function validateQueryShape(q, cfg) {
 const trustedCache = new Map();
 function trustedConfig(root, cfg, state) {
   if (!state?.id) throw refuse('impact queries run only for an attempt (`--attempt <id>`), with the adapter at its base');
-  const key = `${root}\0${state.id}\0${state.adapterBase}`;
+  const key = `${root}\0${state.id}\0${adapterPin(state)}`;
   if (!trustedCache.has(key)) trustedCache.set(key, trustedAdapter(root, state));
   return trustedCache.get(key);
 }

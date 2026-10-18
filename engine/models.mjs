@@ -1,11 +1,13 @@
 // Named failure I-44: doctor inspected live models while an adopted attempt launched with its admission settings.
-// Only execution model/effort settings may advance; role classes, instructions and every judgement stay at admission.
+// A handoff keeps the execution settings it was made with. Since 0.7.30 (I-151, D60) the attempt follows its base branch's
+// adapter by itself (engine/adapter-follow.mjs), models included; `wf models refresh` takes the base tip's execution settings
+// alone, for a tip the attempt has not followed yet (one it could not take, or one not fetched when it last read the attempt).
 import { actor, baseRef, openState } from './attempt.mjs';
-import { attemptAdapter, declared, roleClass, trustedAdapter } from './config.mjs';
+import { adapterPin, attemptAdapter, declared, roleClass, trustedAdapter } from './config.mjs';
 import { append, loadState } from './ledger.mjs';
 import { git, refuse } from './util.mjs';
 
-export function executionSettings(root, state, role, cls, runtime, commit = state.runtimeAdapterBase ?? state.adapterBase) {
+export function executionSettings(root, state, role, cls, runtime, commit = state.runtimeAdapterBase ?? adapterPin(state)) {
   const source = trustedAdapter(root, state, commit);
   // A strategist's model decision names a work class for the role's next handoffs (0.7.0); the class still pins the models.
   const chosen = state.strategy?.classFor?.[role];
@@ -32,8 +34,8 @@ export function refreshModels(root, options) {
   const tip = git(dir, ['rev-parse', ref]);
   if (git(dir, ['merge-base', state.adapterBase, tip]) !== state.adapterBase) throw refuse('execution settings must come from a descendant of the admission adapter on its base branch');
   trustedAdapter(root, state, tip);
-  if (tip === (state.runtimeAdapterBase ?? state.adapterBase)) return { state, from: tip, to: tip, changed: false };
+  if (tip === (state.runtimeAdapterBase ?? adapterPin(state))) return { state, from: tip, to: tip, changed: false };
   // Bookkeeping since 0.7.0 (engine/owner.mjs): the settings come from the committed adapter base, the caller is the actor.
-  append(root, state.id, 'models.refreshed', { from: state.runtimeAdapterBase ?? state.adapterBase, to: tip, ref }, actor(options));
-  return { state: loadState(root, state.id), from: state.runtimeAdapterBase ?? state.adapterBase, to: tip, changed: true };
+  append(root, state.id, 'models.refreshed', { from: state.runtimeAdapterBase ?? adapterPin(state), to: tip, ref }, actor(options));
+  return { state: loadState(root, state.id), from: state.runtimeAdapterBase ?? adapterPin(state), to: tip, changed: true };
 }

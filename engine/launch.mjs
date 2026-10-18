@@ -11,7 +11,7 @@ import { canonical as canonicalPath } from './paths.mjs';
 import { executionSettings, rejectModelOverrides } from './models.mjs';
 import { actor, openState, treeHashes } from './attempt.mjs';
 import { assertRuntimeLaunch } from './runtime-policy.mjs';
-import { adapterFileAtCommit, trustedAdapter } from './config.mjs';
+import { adapterFileAtCommit, adapterPin, trustedAdapter } from './config.mjs';
 import { append, loadState, recordedTogether } from './ledger.mjs';
 import { readRegular, seal } from './evidence.mjs';
 import { reviewDocumentProblems } from './rules.mjs';
@@ -52,7 +52,7 @@ export async function runRole(root, options) {
   }
   const cfg = trustedAdapter(root, state);
   const appendix = cfg.roles?.[h.role]?.appendix;
-  const extra = appendix ? fs.readFileSync(adapterFileAtCommit(root, state, state.adapterBase, appendix), 'utf8') : '';
+  const extra = appendix ? fs.readFileSync(adapterFileAtCommit(root, state, adapterPin(state), appendix), 'utf8') : '';
   const body = roleInstructions(cfg, h.role, h.class, extra, host);
   // Named failure I-46: registered multi-repo projects intentionally have no parent Git repo.
   // Bypass only a harness's Git-root prerequisite, after checking every recorded worktree; keep the sandbox.

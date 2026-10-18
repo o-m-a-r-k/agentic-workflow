@@ -16,7 +16,7 @@ import { rerunsOnlyFailed, sessionRules } from './onboard.mjs';
 import { policyOf, RULE, RULE_SHORT } from './leaving.mjs';
 import { detectOwner, findHost, fragment, hostChoice, isHost, lastFencedYaml, optional } from './hosts/index.mjs';
 import { defaultRuntime } from './runtime-policy.mjs';
-import { ADAPTER_DIR, adapterFileAtCommit, agentTypeFor, attemptAdapter, declared, loadConfig, repoDir, roleClass, trustedAdapter } from './config.mjs';
+import { ADAPTER_DIR, adapterFileAtCommit, adapterPin, agentTypeFor, attemptAdapter, declared, loadConfig, repoDir, roleClass, trustedAdapter } from './config.mjs';
 import { focusedSkips, gateBusy, gatePassedForCurrentTree, gateRunningRefusal, screenshots, withReviewLock } from './gate.mjs';
 import { append, attemptDir, evidenceRoot, keptFiles, listAttempts, loadState, openEvidence, recordedTogether } from './ledger.mjs';
 import { assertUnchanged, readEvidenceFile, seal } from './evidence.mjs';
@@ -2111,8 +2111,10 @@ export function acceptReview(root, options) {
 // The states an adapter's `observe` reports (docs/DESIGN.md). Only the pending ones wait.
 const ADAPTER_STATES = ['integrated', 'awaiting-merge', 'ci-running', 'ci-failed', 'rejected'];
 const PENDING = ['awaiting-merge', 'ci-running'];
-// The commit the delivery adapter is read at: the admission pin, or the owner's re-pin (I-21). Only delivery reads it.
-export const deliveryPin = (state) => state.deliveryAdapterBase ?? state.adapterBase;
+// The commit the delivery adapter is read at: the attempt's pin (its admission base, or the base branch's adapter it followed
+// since: 0.7.30, I-151), or where a delivery started under another adapter kind keeps it (the follow's `kept`, or the owner's
+// re-pin: I-21). Only delivery reads it.
+export const deliveryPin = (state) => state.deliveryAdapterBase ?? adapterPin(state);
 
 export async function loadDeliveryAdapter(root, cfg, state) {
   const trusted = trustedAdapter(root, state, deliveryPin(state));
@@ -2149,9 +2151,13 @@ function postMerge(root, state, options, name, landed, observed, integrated) {
     return { ...adapterResult(integrated), repo: name, commit: landed.head, target: landed.target, adapterState: stateLabel(observed), observed: observed ?? null, acknowledged: label, ...(approval ? { decision: approval.decision } : {}) };
   }
   const url = integrated?.url ? ` (${integrated.url})` : '';
-  throw refuse(`not delivered: ${name}: ${landed.head.slice(0, 10)} is already on ${landed.target}, but the delivery adapter reports ${describeState(observed)} after the merge${url}${observed?.evidence ? `: ${observed.evidence}` : ''}; being on the target branch alone does not count as a clean delivery`, `show this to the owner: the change is on ${landed.target} and the adapter says ${stateLabel(observed)}. ${stateLabel(observed) === 'ci-failed' ? 'Read that CI run. ' : ''}Once the owner has seen it and decides the delivery stands (anything to fix goes into a new attempt, \`wf reopen\`), \`wf deliver --acknowledge-adapter-state ${label}\` records it and shows it with the delivery${['ci-failed', 'rejected'].includes(observed?.state) ? '; a failed check also needs the owner to confirm it with \`wf approve\`' : ''}. An adapter that reports a wrong state is fixed on the base branch, then \`wf deliver --repin-adapter --reason "<why>"\``);
+  throw refuse(`not delivered: ${name}: ${landed.head.slice(0, 10)} is already on ${landed.target}, but the delivery adapter reports ${describeState(observed)} after the merge${url}${observed?.evidence ? `: ${observed.evidence}` : ''}; being on the target branch alone does not count as a clean delivery`, `show this to the owner: the change is on ${landed.target} and the adapter says ${stateLabel(observed)}. ${stateLabel(observed) === 'ci-failed' ? 'Read that CI run. ' : ''}Once the owner has seen it and decides the delivery stands (anything to fix goes into a new attempt, \`wf reopen\`), \`wf deliver --acknowledge-adapter-state ${label}\` records it and shows it with the delivery${['ci-failed', 'rejected'].includes(observed?.state) ? '; a failed check also needs the owner to confirm it with \`wf approve\`' : ''}. An adapter that reports a wrong state is fixed, committed and pushed on the base branch; the attempt follows its base branch's adapter, so the next \`wf deliver\` asks the fixed one (0.7.30)`);
 }
 
+// 0.7.30 (I-151, D60): an attempt follows its base branch's adapter by itself (engine/adapter-follow.mjs), so a fixed delivery
+// adapter of the same kind reaches it at the next command with no re-pin and no question. The re-pin stays for the one case
+// the follow does not take: a delivery that started under one adapter kind while the base branch now names another (the
+// follow's `kept`), and a tip the follow could not take that the person still wants read.
 // I-21. Named failure: an attempt is pinned to the adapter as committed at its admission; when the delivery adapter
 // faulted after another repo of the same attempt was delivered, every `wf deliver` refused, `wf abandon` refused because
 // the attempt was partly delivered, and the fixed adapter on the base branch never reached it. `wf deliver
@@ -2159,7 +2165,7 @@ function postMerge(root, state, options, name, landed, observed, integrated) {
 // adapter lives on (never the working tree), only forward along that branch, only while something is still to deliver.
 // Without the commit it refuses and shows the owner what changes (old and new pin, the adapter files that differ, what is
 // already delivered); the owner's confirmation is that commit typed back. Recorded in the ledger (`adapter.repinned`)
-// with both pins and the reason. The gate, the review and the tracker stay on the admission pin.
+// with both pins and the reason. Only the delivery reads the re-pin; the rest of the attempt follows its base branch (0.7.30).
 function repinAdapter(root, cfg, state, options) {
   const want = typeof options['repin-adapter'] === 'string' ? options['repin-adapter'].trim() : '';
   const reason = typeof options.reason === 'string' ? options.reason.trim() : '';
@@ -2184,7 +2190,7 @@ function repinAdapter(root, cfg, state, options) {
   const remoteUrl = (git(dir, ['remote', 'get-url', repo.remote], { allowFail: true }) || 'no remote (the local branch)').replace(/\/\/[^/@\s]*@/, '//');
   // Run again after a later step refused: the re-pin an earlier try recorded is accepted again.
   if (want.length >= 7 && tip.startsWith(want) && pinned === tip && state.adapterRepins.some((x) => x.to === tip)) return state;
-  if (tip === pinned) throw refuse(`not re-pinned: the delivery adapter of ${state.id} is already read at the tip of ${ref} (${tip.slice(0, 10)})`, `commit and push the fixed adapter on ${repo.base} in ${repo.name} first`);
+  if (tip === pinned) throw refuse(`not re-pinned: the delivery adapter of ${state.id} is already read at the tip of ${ref} (${tip.slice(0, 10)})${state.deliveryAdapterBase ? '' : ': the attempt follows its base branch\'s adapter by itself'}`, `commit and push the fixed adapter on ${repo.base} in ${repo.name}; the next \`wf deliver\` takes it`);
   if (run('git', ['merge-base', '--is-ancestor', pinned, tip], { cwd: dir, allowFail: true }).status !== 0) throw refuse(`not re-pinned: ${ref} (${tip.slice(0, 10)}) does not contain the current pin ${pinned.slice(0, 10)}; the adapter is re-pinned only forward along the base branch`);
   let kinds;
   try {
@@ -2201,7 +2207,7 @@ function repinAdapter(root, cfg, state, options) {
   if (want.length < 7 || !tip.startsWith(want) || !reason) {
     const done = Object.entries(delivered).map(([n, v]) => `${n} ${v}`).join('; ') || 'nothing yet';
     const left = Object.keys(state.repos).filter((n) => !delivered[n]).join(', ');
-    throw refuse(`not re-pinned${want && !tip.startsWith(want) ? `: ${want} is not the tip of ${ref} (${tip.slice(0, 10)})` : ''}${!reason ? ': --reason is required' : ''}. Re-pinning ${state.id}'s delivery adapter:\n  from: ${repo.name}@${pinned.slice(0, 10)} (delivery kind ${kinds.from})\n  to:   ${repo.name}@${tip.slice(0, 10)}, the tip of ${ref}, fetched from ${remoteUrl} (delivery kind ${kinds.to})\n  adapter files that differ: ${changed.join(', ') || 'none'}\n  recorded so far: ${done}\n  still to deliver: ${left}\n  the gate, the review and the tracker stay on the admission pin ${state.adapterBase.slice(0, 10)}`, `show this to the owner, then \`wf deliver --repin-adapter ${tip.slice(0, 12)} --reason "<why>"\` asks the owner to confirm the re-pin with \`wf approve\``);
+    throw refuse(`not re-pinned${want && !tip.startsWith(want) ? `: ${want} is not the tip of ${ref} (${tip.slice(0, 10)})` : ''}${!reason ? ': --reason is required' : ''}. Re-pinning ${state.id}'s delivery adapter:\n  from: ${repo.name}@${pinned.slice(0, 10)} (delivery kind ${kinds.from})\n  to:   ${repo.name}@${tip.slice(0, 10)}, the tip of ${ref}, fetched from ${remoteUrl} (delivery kind ${kinds.to})\n  adapter files that differ: ${changed.join(', ') || 'none'}\n  recorded so far: ${done}\n  still to deliver: ${left}\n  only the delivery moves: the rest of the attempt follows its base branch's adapter by itself (now ${adapterPin(state).slice(0, 10)})`, `show this to the owner, then \`wf deliver --repin-adapter ${tip.slice(0, 12)} --reason "<why>"\` asks the owner to confirm the re-pin with \`wf approve\``);
   }
   // 0.7.0: a re-pin changes which delivery checks run, so it is reserved (kind override-gate): the person confirms it.
   const approval = requireYes(root, state, { kind: 'override-gate', key: `repin:${state.id}:${tip}`, summary: `re-pin the delivery adapter of ${state.id} from ${pinned.slice(0, 10)} to ${tip.slice(0, 10)} (${reason})`, what: `re-pinning the delivery adapter of ${state.id} to ${tip.slice(0, 12)}`, frame: FRAMES.repin({ item: state.item, tip: tip.slice(0, 10) }), options });
@@ -2438,7 +2444,7 @@ export async function deliver(root, options) {
           // so a rejected delivery, a failed CI, a typo or no state at all exited 0 and read as success. Only a pending state
           // (`awaiting-merge`, `ci-running`) waits; `rejected` and `ci-failed` refuse with what to do; anything else refuses
           // as an adapter that does not report a documented state (docs/DESIGN.md).
-          if (!PENDING.includes(observed?.state) && !['rejected', 'ci-failed'].includes(observed?.state)) throw refuse(`not delivered: ${name}: the delivery adapter reported ${describeState(observed)}; it must report one of ${ADAPTER_STATES.join(', ')}`, `this attempt reads its delivery adapter as committed at ${deliveryPin(state).slice(0, 10)}, so a fix committed on the base branch does not reach it by itself. Once the fixed adapter is committed and pushed on the base branch, the owner re-pins this attempt's delivery adapter to it: \`wf deliver --repin-adapter --reason "<why>"\` shows what changes and asks for the owner's confirmation (docs/lifecycle.md, "Recovering from an adapter fault")`);
+          if (!PENDING.includes(observed?.state) && !['rejected', 'ci-failed'].includes(observed?.state)) throw refuse(`not delivered: ${name}: the delivery adapter reported ${describeState(observed)}; it must report one of ${ADAPTER_STATES.join(', ')}`, state.deliveryAdapterBase ? `this delivery started under the adapter committed at ${deliveryPin(state).slice(0, 10)} and keeps it, because the base branch now names another delivery adapter kind; \`wf deliver --repin-adapter --reason "<why>"\` shows what changes and asks for the owner's confirmation (docs/lifecycle.md, "Recovering from an adapter fault")` : `this attempt reads its delivery adapter as committed on its base branch (now ${deliveryPin(state).slice(0, 10)}) and follows it: commit and push the fixed adapter on the base branch, then \`wf deliver\` again asks the fixed one (docs/lifecycle.md, "Recovering from an adapter fault")`);
           if (observed.state === 'rejected' || observed.state === 'ci-failed') throw refuse(`not delivered: ${name}: the delivery adapter reports ${observed.state}${integrated.url ? ` (${integrated.url})` : ''}${observed.evidence ? `: ${observed.evidence}` : ''}`, observed.state === 'rejected' ? 'the change was rejected where it is integrated: find out why, fix it through the implementer (a new gate and review follow), or abandon the attempt; then `wf deliver` again' : 'its CI failed where it is integrated: read that CI run, fix the cause through the implementer, gate it, then `wf deliver` again');
           if (!state.tracker.done.some((d) => d.event === 'integrating')) emitTrackerEvent(root, cfg, state.id, 'integrating', { url: integrated.url ?? '' });
           return { state: loadState(root, state.id), waiting: { repo: name, ...observed, url: integrated.url } };

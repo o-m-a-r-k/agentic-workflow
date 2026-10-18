@@ -94,11 +94,12 @@ const bundleBytes = (bundle) => {
 // a later command: adopting an old attempt's files into the manifest made a 6-minute abandoned attempt report 4,403
 // minutes. Manifest upkeep (`evidence.*`), lessons and waivers a later attempt files on an earlier one
 // (`lesson.recorded`, `lesson.recurred`, `lesson.acknowledged`, `authority.spent`, `discovered.acknowledged`), a models
-// refresh and exports of the attempt's pages or screenshots can all be written days after the work.
+// refresh, the attempt taking its base branch's adapter (0.7.30: written by whichever command next lists it) and exports
+// of the attempt's pages or screenshots can all be written days after the work.
 export const BOOKKEEPING_EVENTS = new Set([
   'evidence.baseline', 'evidence.recorded', 'evidence.rebaselined',
   'lesson.recorded', 'lesson.recurred', 'lesson.acknowledged', 'authority.spent', 'discovered.acknowledged',
-  'models.refreshed', 'exported', 'screenshots.exported',
+  'models.refreshed', 'adapter.followed', 'adapter.notFollowed', 'exported', 'screenshots.exported',
 ]);
 export const isActivity = (entry) => !BOOKKEEPING_EVENTS.has(entry.type);
 const settledStatus = (st) => ['fixed', 'verified-nonissue'].includes(st);

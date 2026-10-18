@@ -530,9 +530,14 @@ export function loadConfigAtCommit(root, cfg, commit) {
   return readAdapter(root, adapterLocation(root, cfg), commit);
 }
 
-// The adapter that judges an attempt: committed at its admission base (or `commit`, a later pin of the same repo),
-// located from its admission record. Never falls back to the working copy.
-export function trustedAdapter(root, state, commit = state?.adapterBase) {
+// The commit an attempt reads its adapter at: the adapter committed on the adapter repo's base branch as the attempt last
+// followed it (engine/adapter-follow.mjs, `adapter.followed`), else its admission base. `adapterBase` stays the admission
+// commit: where the follow starts and what a supplemental validation descends from.
+export const adapterPin = (state) => state?.adapterPin ?? state?.adapterBase ?? null;
+
+// The adapter that judges an attempt: committed on its base branch at its pin (or `commit`, another commit of the same
+// repo), located from its admission record. Never falls back to the working copy.
+export function trustedAdapter(root, state, commit = adapterPin(state)) {
   const loc = attemptAdapter(root, state);
   if (!commit) throw refuse(`${state.id} has no adapter commit to read`);
   return readAdapter(root, loc, commit);

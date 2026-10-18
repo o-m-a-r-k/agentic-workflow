@@ -3,14 +3,17 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { closureFile, commitIn, criteriaFile, goodClosure, ok, OUT_OF_ORDER, sh, singleRepoProject, state, toAccepted, wf } from './helpers.mjs';
-import { accepted, brokenAdapter, fixedAdapter, multiRepo, observedCalls, pushFix, repin, scriptedAdapter, steps } from './adapter-fault-fixtures.mjs';
+import { accepted, brokenAdapter, fixedAdapter, followFix, multiRepo, observedCalls, pushFix, repin, scriptedAdapter, steps } from './adapter-fault-fixtures.mjs';
+import { yaml } from './helpers.mjs';
 
 // I-20, I-21, I-22: what `wf deliver` does when a delivery adapter faults, for every shape of attempt.
 // - I-20: an adapter that pushed straight to the target branch and then reports anything but `integrated` is asked again
 //   on the next `wf deliver`; a non-integrated state after the merge is shown and counts only once the owner acknowledges
 //   that repo and that state; the state is recorded with the delivery and printed in its output.
-// - I-21: `wf deliver --repin-adapter <commit> --reason` re-reads the delivery adapter from the tip of the base branch
-//   (never the working tree), after the owner saw what changes; recorded with the old and new pin.
+// - I-21: the fixed adapter, committed and pushed on the base branch, reaches the attempt: since 0.7.30 (I-151, D60) the attempt
+//   follows its base branch's adapter by itself (never the working tree or an unpushed commit). `wf deliver --repin-adapter
+//   <commit> --reason` stays for a delivery that started under one adapter kind while the base branch now names another,
+//   after the owner saw what changes; recorded with the old and new pin.
 // - I-22: the recovery is proven for a single repo, a merged base, several repos with one delivered or skipped, the quick
 //   lane and a batch; `wf abandon` names the case.
 // The skipped repo, the quick lane and the batch are in adapter-fault-shapes.test.mjs; fixtures in adapter-fault-fixtures.mjs.
@@ -66,7 +69,7 @@ test('I-22: an adapter fault after the change merged into the base (no state, or
   const r = wf(root, ['deliver', '--attempt', id]);
   assert.match(r.err, /is already on origin\/main, but the delivery adapter reports no state after the merge/);
   assert.match(r.err, /`wf deliver --acknowledge-adapter-state app:none`/);
-  assert.match(r.err, /An adapter that reports a wrong state is fixed on the base branch, then `wf deliver --repin-adapter --reason "<why>"`/);
+  assert.match(r.err, /An adapter that reports a wrong state is fixed, committed and pushed on the base branch; the attempt follows its base branch's adapter, so the next `wf deliver` asks the fixed one/);
   fs.writeFileSync(path.join(base, 'observe.state'), 'merged');
   assert.match(wf(root, ['deliver', '--attempt', id, '--acknowledge-adapter-state', 'app:none']).err, /reports an unknown state "merged" after the merge/);
   ok(wf(root, ['deliver', '--attempt', id, '--acknowledge-adapter-state', 'app:merged']));
@@ -74,7 +77,7 @@ test('I-22: an adapter fault after the change merged into the base (no state, or
   assert.equal(sh(base, `git --git-dir=${remote} show main:src/a.txt`), 'b');
 });
 
-test('I-21/I-22: a broken adapter, single repo after `wf base merge`: a fix only in the working tree or only committed locally does not count; the re-pin delivers', () => {
+test('I-21/I-22: a broken adapter, single repo after `wf base merge`: a fix only in the working tree, only committed locally or on a rewritten base does not count; the pushed fix is taken by the next deliver', () => {
   const { base, root, remote } = singleRepoProject('repin-single', { delivery: { kind: './delivery/mr.mjs' }, gate: { steps } }, { '.workflow/delivery/mr.mjs': brokenAdapter, 'src/other.txt': 'o\n' });
   const e = ok(wf(root, ['entry', '--item', 'ENG-93', '--owner', 'o', '--json'])).json();
   ok(wf(root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id]));
@@ -87,23 +90,24 @@ test('I-21/I-22: a broken adapter, single repo after `wf base merge`: a fix only
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'r', '--attempt', e.id]));
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r')), '--attempt', e.id]));
   ok(wf(root, ['accept', '--attempt', e.id]));
-  assert.match(wf(root, ['deliver', '--attempt', e.id]).err, /reported an unknown state "merged"[\s\S]*wf deliver --repin-adapter --reason/);
-  // The trust rule: the working tree's adapter, and a commit not on the remote base branch, are never read.
+  assert.match(wf(root, ['deliver', '--attempt', e.id]).err, /reported an unknown state "merged"[\s\S]*commit and push the fixed adapter on the base branch, then `wf deliver` again asks the fixed one/);
+  // The trust rule: the working tree's adapter, a commit not on the remote base branch and a rewritten base are never read.
   fs.writeFileSync(path.join(root, '.workflow', 'delivery', 'mr.mjs'), fixedAdapter);
-  assert.match(wf(root, ['deliver', '--attempt', e.id, '--repin-adapter', '--reason', 'x']).err, /not re-pinned: the adapter files at the tip of origin\/main \([0-9a-f]{10}\) are the same as at the current pin/);
+  assert.match(wf(root, ['deliver', '--attempt', e.id]).err, /reported an unknown state "merged"/);
   sh(root, 'git add -A && git commit -qm "fix, not pushed"');
-  assert.match(wf(root, ['deliver', '--attempt', e.id, '--repin-adapter', '--reason', 'x']).err, /are the same as at the current pin[\s\S]*a fix only in the working tree, or committed but not pushed, is never read/);
-  // A rewritten base branch (its tip does not contain the current pin) is refused.
+  assert.match(wf(root, ['deliver', '--attempt', e.id]).err, /reported an unknown state "merged"/);
+  assert.equal(state(root, e.id).adapterPin, null);
   sh(root, 'git checkout -q --orphan rewritten && git commit -qm rewritten && git push -q -f origin rewritten:main && git checkout -q main');
-  assert.match(wf(root, ['deliver', '--attempt', e.id, '--repin-adapter', '--reason', 'x']).err, /not re-pinned: origin\/main \([0-9a-f]{10}\) does not contain the current pin [0-9a-f]{10}; the adapter is re-pinned only forward along the base branch/);
+  assert.match(ok(wf(root, ['status', '--attempt', e.id])).out, /adapter: origin\/main \([0-9a-f]{10}\) is not taken: origin\/main \([0-9a-f]{10}\) does not contain the pin [0-9a-f]{10}: the adapter is followed only forward along the base branch/);
+  assert.equal(state(root, e.id).adapterPin, null);
   sh(root, 'git push -q -f origin main');
   const tip = sh(root, 'git rev-parse HEAD');
-  const s = repin(root, e.id, tip, { left: 'app' });
+  const s = followFix(root, e.id, tip);
   assert.ok(s.delivery.completedAt);
   assert.equal(sh(base, `git --git-dir=${remote} show main:src/a.txt`), 'b');
   assert.equal(sh(base, `git --git-dir=${remote} show main:src/other.txt`), 'o2');
 });
-test('I-21/I-22: several repos, one delivered, then the adapter faults: abandon names the case; the re-pin delivers the rest', () => {
+test('I-21/I-22: several repos, one delivered, then the adapter faults: abandon names the case; when the base branch now names another delivery kind the delivery keeps its own, and the re-pin delivers the rest', () => {
   const { base, root } = multiRepo('repin-multi', scriptedAdapter);
   // api (delivered first) is pushed and integrated; web is not pushed and the adapter reports an undocumented state.
   fs.writeFileSync(path.join(base, 'push.web'), 'no');
@@ -117,9 +121,19 @@ test('I-21/I-22: several repos, one delivered, then the adapter faults: abandon 
   const a = wf(root, ['abandon', '--reason', 'x', '--attempt', e.id]);
   assert.equal(a.code, 75);
   assert.match(a.err, /ENG-94\.1 is partly delivered: api delivered \([0-9a-f]{10} on origin\/main\); a delivered repo cannot be taken back/);
-  assert.match(a.err, /`wf deliver --repin-adapter --reason "<why>"`/);
-  const tip = pushFix(path.join(root, 'api'));
-  const s = repin(root, e.id, tip, { delivered: 'api delivered [0-9a-f]{10}', left: 'web' });
+  assert.match(a.err, /commit and push the fixed adapter on the base branch: the attempt follows it, and the next `wf deliver` delivers the rest/);
+  // The project moves its delivery to push-main meanwhile: the attempt takes the rest of the adapter, and its delivery, started
+  // under the merge-request adapter, keeps that one (a different module would not know the integration in flight).
+  const api = path.join(root, 'api');
+  sh(api, 'git checkout -q main && git pull -q --ff-only origin main');
+  const cfg = JSON.parse(fs.readFileSync(path.join(api, '.workflow', 'project.yaml'), 'utf8'));
+  fs.writeFileSync(path.join(api, '.workflow', 'project.yaml'), yaml({ ...cfg, delivery: { kind: 'push-main' } }));
+  sh(api, 'git commit -qam "deliver by push" && git push -q origin main');
+  const tip = sh(api, 'git rev-parse HEAD');
+  const kept = wf(root, ['deliver', '--attempt', e.id]);
+  assert.match(kept.err, /web: the delivery adapter reported an unknown state "merged"[\s\S]*this delivery started under the adapter committed at [0-9a-f]{10} and keeps it, because the base branch now names another delivery adapter kind; `wf deliver --repin-adapter --reason "<why>"`/);
+  assert.equal(state(root, e.id).adapterPin, tip);
+  const s = repin(root, e.id, tip, { delivered: 'api delivered [0-9a-f]{10}', left: 'web', kinds: ['./delivery/mr.mjs', 'push-main'], files: '\\.workflow/project\\.yaml' });
   assert.ok(s.delivery.completedAt);
   assert.equal(sh(base, `git --git-dir=${path.join(root, 'web')}.origin.git show main:src/w.txt`), 'web');
   assert.equal(s.delivery.repos.api.adapterState, 'integrated', 'the repo delivered before the re-pin keeps its record');

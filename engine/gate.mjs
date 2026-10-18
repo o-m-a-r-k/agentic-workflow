@@ -5,7 +5,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
-import { adapterFileAtCommit, attemptAdapter, expandArtifactGlob, loadConfig, repoDir, trustedAdapter } from './config.mjs';
+import { adapterFileAtCommit, adapterPin, attemptAdapter, expandArtifactGlob, loadConfig, repoDir, trustedAdapter } from './config.mjs';
+import { adapterMovedSince } from './adapter-follow.mjs';
 import { changedFiles, treeHash, treeHashes, uncommitted, untrackedSnapshot } from './attempt.mjs';
 import { chooseShards, chooseWorkers } from './machine.mjs';
 import { oneSuitePerId, readJUnitFiles, readPlaywrightSuites } from './junit.mjs';
@@ -61,7 +62,7 @@ function stepInputs(state, step, repo, pkg, skipFolder = null) {
 // when it is planned (`when`, `component`, `ignores`) and `prepare` (run by `wf prepare` only, never by the gate). Named
 // failure (audit of 51 attempts; one ticket's correction of its evidence glob): the whole definition was hashed, so a
 // change to which screenshots count as the ticket's made a 25-minute e2e step look new, though its result could not change.
-const RESULT_NEUTRAL = ['workers', 'shards', 'artifacts', 'tier', 'lease', 'deferrable', 'when', 'component', 'ignores', 'prepare', 'specs'];
+export const RESULT_NEUTRAL = ['workers', 'shards', 'artifacts', 'tier', 'lease', 'deferrable', 'when', 'component', 'ignores', 'prepare', 'specs'];
 function pluginHashOf(root, state, step) {
   return step.plugin ? hashFile(adapterFileAtCommit(root, state, validationCommit(state, step.id), step.plugin)) : null;
 }
@@ -1493,7 +1494,7 @@ async function executeRun(root, state, plan, live, run) {
   const producedUntracked = {};
   for (const [name, r] of Object.entries(state.repos)) producedUntracked[name] = untrackedSnapshot(r.worktree);
   say(`${status} (${runId})`);
-  const record = { runId, status, producedUntracked, changed: plan.changed, full: plan.full, focused: plan.focused, check: plan.check || undefined, repos: plan.repos ?? undefined, rerunFailed: plan.rerunFailed ?? undefined, adapterBase: state.adapterBase, validationDigest: validationDigest(state), tree: plan.tree, impact: plan.impact, unchecked: plan.unchecked, ...(Object.keys(leaseCapacity).length ? { leaseCapacity } : {}), ...(leaseWaits.size ? { leaseWaitSeconds: Math.max(...[...leaseWaits.values()].map((w) => w.seconds)) } : {}), ...(ownerStop ? { stop: { class: ownerStop.class, reason: ownerStop.reason } } : {}), ...(fatal ? { error: ctx.redact(String(fatal.message ?? fatal)) } : {}), steps: results, finishedAt: now() };
+  const record = { runId, status, producedUntracked, changed: plan.changed, full: plan.full, focused: plan.focused, check: plan.check || undefined, repos: plan.repos ?? undefined, rerunFailed: plan.rerunFailed ?? undefined, adapterBase: adapterPin(state), validationDigest: validationDigest(state), tree: plan.tree, impact: plan.impact, unchecked: plan.unchecked, ...(Object.keys(leaseCapacity).length ? { leaseCapacity } : {}), ...(leaseWaits.size ? { leaseWaitSeconds: Math.max(...[...leaseWaits.values()].map((w) => w.seconds)) } : {}), ...(ownerStop ? { stop: { class: ownerStop.class, reason: ownerStop.reason } } : {}), ...(fatal ? { error: ctx.redact(String(fatal.message ?? fatal)) } : {}), steps: results, finishedAt: now() };
   writeImmutable(path.join(runDir, 'result.json'), `${JSON.stringify(record, null, 2)}\n`);
   // Recorded before the run is: once it is finished, an unrecorded file in its folder is an extra file.
   await retryWhileLocked(() => {
@@ -1683,6 +1684,10 @@ export function gatePassedForCurrentTree(state) {
   if ((g.validationDigest ?? null) !== validationDigest(state)) return { ok: false, reason: 'required supplemental validation changed after the last passing gate' };
   const missing = validationIds(state).filter((id) => !g.steps.some((s) => s.id === id && ['passed', 'reused'].includes(s.status)));
   if (missing.length) return { ok: false, reason: `required supplemental validation did not pass: ${missing.join(', ')}` };
+  // 0.7.30 (I-151, D60): a gate counts at the adapter it ran under; a move of the adapter since that changed what it ran (or
+  // what this tree may need) leaves it standing no longer.
+  const moved = adapterMovedSince(state, g);
+  if (moved) return { ok: false, reason: moved };
   const skipped = focusedSkips(g);
   if (skipped.length) return { ok: false, reason: `the last gate was focused and skipped ${skipped.join(', ')}; run \`wf gate\` without --focused` };
   if (canonical(treeHashes(state)) !== canonical(g.tree)) return { ok: false, reason: 'the code changed after the last passing gate' };

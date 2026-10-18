@@ -162,6 +162,11 @@ export function reduce(entries) {
     adapterBase: null,
     adapter: null,
     deliveryAdapterBase: null,
+    // 0.7.30 (I-151, D60): the commit the attempt reads its adapter at once it followed the base branch (null: its admission
+    // base), every follow, and the latest tip it could not take with why (engine/adapter-follow.mjs).
+    adapterPin: null,
+    adapterFollows: [],
+    adapterHeld: null,
     adapterRepins: [],
     criteria: null,
     // How many criteria the plan froze with: `wf signals` shows the amendments against it.
@@ -496,8 +501,26 @@ export function reduce(entries) {
       case 'repo.integrating':
         s.delivery.integrating[d.repo] = { ...d, at: e.at };
         break;
+      // 0.7.30 (I-151, D60): the attempt took the adapter committed on its base branch. The engine that writes the event decides
+      // what the delivery reads (a delivery started under another adapter kind keeps its pin), whether the execution pin moves
+      // with it and whether the acceptance is withdrawn, so an older ledger folds as it did.
+      case 'adapter.followed':
+        s.adapterPin = d.to;
+        s.adapterHeld = null;
+        s.adapterFollows.push({ ...d, at: e.at });
+        s.deliveryAdapterBase = d.delivery?.mode === 'kept' ? d.delivery.pin : null;
+        if (d.runtime === true) s.runtimeAdapterBase = null;
+        if (d.withdrewAcceptance === true) {
+          s.accepted = null;
+          s.phase = 'implementing';
+        }
+        break;
+      case 'adapter.notFollowed':
+        s.adapterHeld = { tip: d.tip, ref: d.ref, why: d.why, at: e.at };
+        break;
       // I-21: the owner re-pinned the delivery adapter of an attempt that has not delivered everything to the adapter now
-      // committed on the base branch. Only delivery reads it; the gate, review and tracker stay on the admission pin.
+      // committed on the base branch. Only delivery reads it. Since 0.7.30 the attempt follows its base branch by itself
+      // (above); a re-pin is left for a delivery whose adapter kind changed half way.
       case 'adapter.repinned':
         s.deliveryAdapterBase = d.to;
         s.adapterRepins.push({ from: d.from, to: d.to, reason: d.reason, changed: d.changed ?? [], delivered: d.delivered ?? {}, at: e.at, by: e.actor });

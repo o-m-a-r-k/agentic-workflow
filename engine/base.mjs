@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { actor, branchName, changedFiles, openState, uncommitted } from './attempt.mjs';
-import { loadConfig, trustedAdapter } from './config.mjs';
+import { adapterPin, loadConfig, trustedAdapter } from './config.mjs';
 import { liveGate } from './gate.mjs';
 import { append, listAttempts, loadState } from './ledger.mjs';
 import { packageOf } from './topology.mjs';
@@ -123,11 +123,12 @@ export function baseMerge(root, options) {
   const state = openState(root, options);
   if (['done', 'abandoned'].includes(state.phase)) throw refuse(`${state.id} is ${state.phase}`);
   if (state.delivery.completedAt) throw refuse(`${state.id} is already delivered; nothing is left to merge the base into`, '`wf resume` says what is left (the tracker handoff)', { id: 'base:delivered' });
-  // The delivery adapter as the attempt reads it (the admission pin, or the owner's re-pin): only the built-in push-main merges the base itself.
+  // The delivery adapter as the attempt reads it (its pin, which follows the base branch since 0.7.30, or where a delivery
+  // started under another kind keeps it): only the built-in push-main merges the base itself.
   // Named failure (review of 0.7.26): an adapter that could not be read was taken for push-main, a guess about which rule applies.
   let viaAdapter;
   try {
-    viaAdapter = trustedAdapter(root, state, state.deliveryAdapterBase ?? state.adapterBase).delivery.kind !== 'push-main';
+    viaAdapter = trustedAdapter(root, state, state.deliveryAdapterBase ?? adapterPin(state)).delivery.kind !== 'push-main';
   } catch (error) {
     throw refuse(`the delivery adapter of ${state.id} cannot be read, so it is not known whether the base is merged at delivery: ${String(error?.message ?? error).split('\n')[0]}`, 'fix what the message names (the adapter is read as committed at the attempt\'s pin), then `wf base merge` again', { id: 'base:adapter-unreadable' });
   }

@@ -33,6 +33,7 @@ import { ENGINE_VERSION, WfError, compareVersions, parseArgs, parseVersion, refu
 import { afterAnswer, approveFromQuestion, approveHint, approveInTerminal, correctionHint, decisionLine, optionLines, pendingDecisions, plainLabel, questionFor, withdrawDecision } from './approve.mjs';
 import { logRefusal, readRefusals, refusalCounts } from './refusals.mjs';
 import { recordStrategy, settleRoundQuestions, signalsReport, signalsText } from './strategy.mjs';
+import { followAdapter, followLines } from './adapter-follow.mjs';
 import { courseLines, pastEstimates } from './signals.mjs';
 import { splitCommand } from './split.mjs';
 import { deploymentLine } from './deployment-step.mjs';
@@ -242,6 +243,8 @@ function summary(root, s, { base = null, resume = false } = {}) {
   const lines = [`${s.id}  ${s.item}  lane=${s.lane}  intent=${s.intent}  phase=${s.phase}`, `  owner: ${s.owner}`];
   for (const [name, r] of Object.entries(s.repos)) lines.push(`  ${name}: ${r.worktree} (base ${r.base.slice(0, 10)})`);
   if (base) lines.push(...baseLines(base));
+  // 0.7.30 (I-151, D60): the adapter the attempt follows on its base branch, and a tip it could not take.
+  if (isOpen(s)) lines.push(...followLines(s));
   if (s.activeHold) lines.push(`  HOLD: ${s.activeHold.reason}`);
   lines.push(...unansweredLines(s));
   try {
@@ -1162,7 +1165,8 @@ async function dispatch(cmd, sub, positional, options) {
       const deferrals = [after, ...(after.batch?.members ?? []).map((m) => loadState(root, m))].flatMap((st) => (st.discovered ?? []).filter((x) => x.status === 'deferred').map((x) => ({ ...x, id: st.id === after.id ? x.id : `${st.id}:${x.id}` }))).map((x) => `\n  ${x.id} deferred (${x.deferred.source?.provenance ?? 'recorded'}${x.deferred.source?.file ? `, ${x.deferred.source.file}:${x.deferred.source.line}` : ''}): ${x.summary}\n    taken as the owner's decision: "${x.deferred.decision}"\n    channel: ${channelOf(x)}`).join('');
       // I-20: a repo delivered while its adapter reported another state after the merge, as the owner acknowledged it.
       const postMerge = Object.values(after.delivery.repos).filter((d) => d.acknowledged).map((d) => `\n  ${d.repo}: on ${d.target} while the delivery adapter reported ${d.adapterState}${d.observed?.evidence ? ` (${d.observed.evidence})` : ''}; acknowledged by the owner as ${d.acknowledged}`).join('');
-      const repins = (after.adapterRepins ?? []).map((x) => `\n  delivery adapter re-pinned from ${x.from.slice(0, 10)} to ${x.to.slice(0, 10)}: ${x.reason}`).join('');
+      // 0.7.30 (I-151, D60): each adapter the attempt took from its base branch, said with the delivery as a re-pin is.
+      const repins = [...(after.adapterFollows ?? []).map((x) => `\n  adapter followed ${x.ref} from ${x.from.slice(0, 10)} to ${x.to.slice(0, 10)} (${x.changed.join(', ')})${x.delivery?.mode === 'kept' ? `; the delivery kept \`${x.delivery.from}\` (the base branch names \`${x.delivery.to}\`)` : ''}`), ...(after.adapterRepins ?? []).map((x) => `\n  delivery adapter re-pinned from ${x.from.slice(0, 10)} to ${x.to.slice(0, 10)}: ${x.reason}`)].join('');
       print(options, `delivered ${after.id}: ${Object.values(after.delivery.repos).map((d) => `${d.repo}${d.commit ? `@${d.commit.slice(0, 10)}` : ' (no changes)'}${d.adapterState && d.adapterState !== 'integrated' ? ` [adapter: ${d.adapterState}]` : ''}`).join(', ')}${postMerge ? `\nnot a clean adapter delivery (show this to the owner):${postMerge}` : ''}${repins}${api}${deferrals ? `\ndeferred issues (show these to the owner: this is what was taken as their decision):${deferrals}` : ''}${showBlock(root, after)}${members}${comment}\nnext: ${nextAction(root, after)}`, after);
       return 0;
     }
@@ -1596,7 +1600,8 @@ async function dispatch(cmd, sub, positional, options) {
           const s = loadState(root, id);
           if (!isOpen(s)) return [];
           openEvidence(root, id);
-          return [settleRoundQuestions(root, s)];
+          // 0.7.30 (I-151, D60): as `openState` does, each listed attempt takes its base branch's adapter where it safely can.
+          return [followAdapter(root, settleRoundQuestions(root, s))];
         } catch (error) {
           damaged.push({ id, damaged: String(error.message ?? error).split('\n').filter(Boolean).slice(0, 2).join(' ') });
           return [];
