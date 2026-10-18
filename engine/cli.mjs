@@ -1169,7 +1169,7 @@ async function dispatch(cmd, sub, positional, options) {
     }
     case 'review': {
       if (sub === 'parts') {
-        const { currentReviewGroup } = await import('./review-groups.mjs');
+        const { currentReviewGroup, stalledMembers, stalledText, waitingText } = await import('./review-groups.mjs');
         const s = openState(root, options), group = currentReviewGroup(s);
         if (!group) throw refuse('no current parallel review group');
         const required = group.members.filter(h => h.reviewGroup.slot !== 'integration');
@@ -1179,7 +1179,11 @@ async function dispatch(cmd, sub, positional, options) {
         // reviewer that reads its parts and finds no scoped reviewer was ever launched was not started by `wf handoff run`: it stops.
         const integration = group.members.find(h => h.reviewGroup.slot === 'integration');
         if (parts.every(p => !p) && required.every(h => !h.launch)) throw refuse(`the scoped reviewers of ${group.id} (${required.map(h => h.agent).join(', ')}) were never launched: this divided review was started outside \`wf handoff run\`, and nothing it reviews can be recorded`, `stop now and tell the owner: a divided review starts only with \`wf handoff run --agent ${integration?.agent ?? '<integration>'} --attempt ${s.id}\`, which launches the scoped reviewers and then the integration`, { id: 'review:group-plain-start' });
-        if (parts.some(p => !p)) throw refuse('scoped reports are incomplete; integration can inspect its own code while waiting');
+        // 0.7.32 (D76). Named failure (field): a scoped member's launch ended without a part and the integration reviewer was told
+        // only "incomplete", 169 times over 89 minutes, then six hours of silence. A member whose part will never come stops it.
+        const stalled = stalledMembers(s, group);
+        if (stalled.length) throw refuse(`no part will come from ${stalledText(stalled)}: the integration review of ${group.id} can never be recorded`, `stop now and tell the owner, who stops this integration reviewer (\`wf handoff stop --agent ${integration?.agent ?? '<integration>'} --attempt ${s.id}\`, or where it runs when it was started outside \`wf handoff run\`), then a fresh divided review: \`wf handoff reviewer --agent <new id> --attempt ${s.id}\` and the \`wf handoff run\` line it prints`, { id: 'review:group-member-ended' });
+        if (parts.some(p => !p)) throw refuse(`scoped reports are incomplete (${required.filter((h, i) => !parts[i]).map(waitingText).join('; ')}); integration can inspect its own code while waiting`, undefined, { id: 'review:group-incomplete' });
         print({ ...options, json: true }, null, parts.map(p => ({ agent: p.closure.reviewer, sha256: p.raw.sha256, file: p.raw.path ?? p.raw.file, closure: p.closure, provenance: p.provenance })));
         return 0;
       }

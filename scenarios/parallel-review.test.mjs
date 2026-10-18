@@ -321,3 +321,49 @@ console.log(JSON.stringify({type:'turn.completed'}));
   assert.equal(s.gates.length, 0); assert.equal(s.next.includes('gate'), true);
   ok(wf(p.root, ['verify', '--attempt', p.id]));
 });
+
+// 0.7.32 (D76). Named failure (field): the integration reviewer of a divided review waited for parts that would never come: a
+// scoped member's launch had ended without recording one, `wf review parts` said only "scoped reports are incomplete" (169 times
+// over 89 minutes), then six hours of silence. 0.7.28 (I-211) covered a group none of whose members was launched. A member whose
+// launch failed, or whose process ended without a part, is named: the integration reviewer is told to stop, and the owner's next
+// step stops it (`wf handoff stop`) and hands a fresh group.
+test('D76: a scoped member whose launch failed or ended without a part stops the integration and names the fresh group', () => {
+  const p = ready({ handoffReviewer: false, runtime: 'codex' }), bin = path.join(p.base, 'bin'), host = path.join(p.base, '.home');
+  const id = p.id.replace('.', '\\.');
+  ok(wf(p.root, ['handoff', 'close', '--agent', 'impl', '--attempt', p.id]));
+  // S1's launch fails at once; S2's process completes its turn without recording a part.
+  const script = `#!/usr/bin/env node
+import fs from 'node:fs'; import path from 'node:path'; import {randomUUID} from 'node:crypto';
+const prompt=fs.readFileSync(0,'utf8'),bundle=JSON.parse(fs.readFileSync(prompt.slice(5,-29),'utf8')),sid=randomUUID(),at=new Date().toISOString();
+const transcript=path.join(${JSON.stringify(host)},'.codex','sessions','2026','10','11','rollout-'+sid+'.jsonl');
+fs.mkdirSync(path.dirname(transcript),{recursive:true});
+fs.writeFileSync(transcript,[{timestamp:at,type:'session_meta',payload:{id:sid,originator:'codex_exec',source:'exec'}},{timestamp:at,type:'response_item',payload:{type:'message',role:'user',content:[{type:'input_text',text:prompt}]}}].map(JSON.stringify).join('\\n')+'\\n');
+console.log(JSON.stringify({type:'thread.started',thread_id:sid}));
+if(bundle.reviewGroup?.slot==='S1'){console.error('fixture: the role crashed');process.exit(1);}
+console.log(JSON.stringify({type:'turn.completed'}));
+`;
+  write(bin, 'codex', script); fs.chmodSync(path.join(bin, 'codex'), 0o755);
+  const env = { CODEX_THREAD_ID: state(p.root, p.id).owner.split(':').slice(1).join(':'), WF_HOME: host, PATH: bin + path.delimiter + process.env.PATH };
+  ok(wf(p.root, ['handoff', 'reviewer', '--agent', 'grp', '--attempt', p.id, '--json'], { env }));
+  assert.equal(wf(p.root, ['handoff', 'run', '--agent', 'grp-S1', '--attempt', p.id], { env }).code, 1);
+  ok(wf(p.root, ['handoff', 'run', '--agent', 'grp-S2', '--attempt', p.id], { env }));
+  const s = state(p.root, p.id);
+  assert.deepEqual(s.handoffs.filter((h) => h.reviewGroup).map((h) => [h.agent, h.launch?.status ?? null]), [['grp-S1', 'failed'], ['grp-S2', 'completed'], ['grp', null]]);
+  assert.equal((s.reviewParts ?? []).length, 0);
+  // The integration reviewer (started some other way) reads its parts and is told no part will come, and to stop.
+  const parts = wf(p.root, ['review', 'parts', '--attempt', p.id]);
+  assert.equal(parts.code, 75);
+  assert.match(parts.err, /no part will come from grp-S1 \(S1: its launch failed\) and grp-S2 \(S2: its process ended without recording a part\): the integration review of review-\d+ can never be recorded/);
+  assert.match(parts.err, /stop now and tell the owner/);
+  assert.match(parts.err, new RegExp(`\`wf handoff stop --agent grp --attempt ${id}\`[^\\n]*then a fresh divided review: \`wf handoff reviewer --agent <new id> --attempt ${id}\``));
+  // The owner's next step says the same: stop the integration reviewer, then the fresh group.
+  assert.match(s.next, /review group review-\d+ cannot finish: no part will come from grp-S1 \(S1: its launch failed\) and grp-S2/);
+  assert.match(s.next, new RegExp(`stop its integration reviewer grp \\(\`wf handoff stop --agent grp --attempt ${id}\`; one started outside \`wf handoff run\` is stopped where it runs\\), then hand a fresh divided review`));
+  const decision = ok(wf(p.root, ['advance', '--once', '--attempt', p.id, '--json'], { env })).json().decision;
+  assert.equal(decision.status, 'owner');
+  assert.match(decision.guidance, new RegExp(`\`wf handoff stop --agent grp --attempt ${id}\``));
+  // The fresh group is handed on the same tree, and the stalled one is no longer the next step.
+  const fresh = ok(wf(p.root, ['handoff', 'reviewer', '--agent', 'grp2', '--attempt', p.id, '--json'], { env })).json();
+  assert.equal(fresh.members?.length, 3);
+  assert.doesNotMatch(state(p.root, p.id).next, /cannot finish/);
+});

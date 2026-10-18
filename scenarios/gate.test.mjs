@@ -565,3 +565,28 @@ test('a step that runs a script in the workflow folder reruns when it changes; w
   assert.equal(globsCovered(['shots/**/x/*.png'], ['shots/*/x/*.png']), false, 'widened: deeper files were never collected');
   assert.equal(globsCovered(['shots/**/*.png'], ['shots/t-1/**/*.png']), false);
 });
+
+// 0.7.32 (D74). Named failure (field, 17 refusals): `wf check` refused untracked tool output (an Xcode package configuration folder)
+// as "commit changes before the check", while the reviewer handoff counts only tracked changes; nothing said why an untracked
+// path blocks a check or what to do with it. It still blocks: the check runs the worktree as it is, and in the same field records an
+// untracked new source file was part of the change. The refusal names each untracked path, why it blocks, and the routes.
+test('D74: `wf check` names the untracked paths that block it, why, and what to do with each; an ignored one no longer blocks', () => {
+  const steps = [{ id: 'unit', repo: 'app', run: 'true', inputs: ['src/**'] }];
+  const { base, root } = singleRepoProject('check-untracked', { gate: { steps } }, { 'App.xcworkspace/xcshareddata/swiftpm/Package.resolved': '{}\n' });
+  const e = admitted(root, base, 'ENG-232');
+  commitIn(e.repos.app.worktree, { 'src/a.txt': 'b\n' });
+  write(e.repos.app.worktree, 'App.xcworkspace/xcshareddata/swiftpm/configuration/x.plist', 'tool output\n');
+  const r = wf(root, ['check', '--attempt', e.id]);
+  assert.equal(r.code, 75);
+  assert.match(r.err, /commit changes before the check: app \(\?\? App\.xcworkspace\/xcshareddata\/swiftpm\/configuration\/\)/);
+  assert.match(r.err, /untracked, so in no commit, yet the check would run with it in the worktree and its result would not be the committed tree's \(a review counts only tracked changes: it reads the committed diff\): app: App\.xcworkspace\/xcshareddata\/swiftpm\/configuration\/\. For each: commit it when it belongs to the change, delete it when it is a tool's output, or have its repo ignore it with a committed `\.gitignore` entry/);
+  // A tracked change alone says nothing about untracked paths.
+  fs.rmSync(path.join(e.repos.app.worktree, 'App.xcworkspace/xcshareddata/swiftpm/configuration'), { recursive: true });
+  write(e.repos.app.worktree, 'src/a.txt', 'edited\n');
+  assert.doesNotMatch(wf(root, ['check', '--attempt', e.id]).err, /untracked/);
+  sh(e.repos.app.worktree, 'git checkout -- src/a.txt');
+  // The tool output the repo ignores no longer blocks.
+  commitIn(e.repos.app.worktree, { '.gitignore': '.wf-evidence/\n.wf-worktrees/\n**/xcshareddata/swiftpm/configuration/\n' });
+  write(e.repos.app.worktree, 'App.xcworkspace/xcshareddata/swiftpm/configuration/x.plist', 'tool output\n');
+  ok(wf(root, ['check', '--attempt', e.id]));
+});

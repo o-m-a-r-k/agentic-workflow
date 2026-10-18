@@ -4,7 +4,7 @@ import { captureWarning, capturingSteps } from './captures.mjs';
 import { mkdirStateDirectory } from './state-folders.mjs';
 import { blockingIn, classifyFinding, closureMissingGuidance, deltaLines, dispositionOf, earlierBlocking, observations, openAcrossRounds, placementLevel, reviewerDiscovered, roundMode, severityLevel, sinceOf, stampClosure, stripStamp, unreachedOf, unreachedSince } from './review-policy.mjs';
 import { observationLines } from './scope-decisions.mjs';
-import { GROUP_INSTRUCTIONS, assignedVerdicts, changedWeights, currentReviewGroup, divideReview, findingIds, impactCatalog, isCurrentReviewer, mergeParts, reviewSnapshot, reviewDivisionOptions } from './review-groups.mjs';
+import { GROUP_INSTRUCTIONS, assignedVerdicts, changedWeights, currentReviewGroup, divideReview, findingIds, impactCatalog, isCurrentReviewer, mergeParts, reviewSnapshot, reviewDivisionOptions, stalledGroupStep, stalledMembers, stalledText } from './review-groups.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -20,7 +20,7 @@ import { detectOwner, findHost, fragment, hostChoice, isHost, lastFencedYaml, op
 import { defaultRuntime } from './runtime-policy.mjs';
 import { portApplied } from './targets.mjs';
 import { ADAPTER_DIR, adapterFileAtCommit, adapterPin, agentTypeFor, attemptAdapter, declared, loadConfig, repoDir, roleClass, trustedAdapter } from './config.mjs';
-import { focusedSkips, gateBusy, gatePassedForCurrentTree, gateRunningRefusal, screenshots, withReviewLock } from './gate.mjs';
+import { focusedSkips, gateBusy, gatePassedForCurrentTree, gateRunningRefusal, rerunRoute, screenshots, withReviewLock } from './gate.mjs';
 import { append, attemptDir, evidenceRoot, keptFiles, listAttempts, loadState, openEvidence, recordedTogether } from './ledger.mjs';
 import { assertUnchanged, readEvidenceFile, seal } from './evidence.mjs';
 import { runImages, runsText, runsWithImages } from './run-screenshots.mjs';
@@ -1365,7 +1365,7 @@ function sweepsForReviewer(root, cfg, state) {
 export function artifactsByStep(state, cfg) {
   const changed = state.lastGate?.changed ?? {};
   return (state.lastGate?.steps ?? []).filter((s) => s.artifactGlobs?.length).map((s) => {
-    const globs = s.artifactGlobs.map((g) => ({ glob: g.glob, expanded: g.expanded, files: g.files.map((f) => ({ source: f.source, path: f.path, sha256: f.sha256, kind: f.kind, ...(f.width ? { width: f.width, height: f.height } : {}) })) }));
+    const globs = s.artifactGlobs.map((g) => ({ glob: g.glob, expanded: g.expanded, files: g.files.map((f) => ({ source: f.source, path: f.path, sha256: f.sha256, kind: f.kind, ...(f.width ? { width: f.width, height: f.height } : {}), ...(f.carriedFrom ? { carriedFrom: f.carriedFrom } : {}) })) }));
     const none = globs.every((g) => !g.files.length);
     const changedHere = cfg ? changedForStep(cfg, s.id, s.repo, changed) : [];
     const uncovered = none && changedHere.length > 0;
@@ -1991,6 +1991,9 @@ export function evidenceFixReady(state) {
   }
 }
 
+// 0.7.32 (D75): the next step for evidence findings only a re-run of their gate step satisfies (engine/gate.mjs rerunRoute).
+const rerunStep = (route) => `the evidence review's finding${route.refs.length > 1 ? 's' : ''} ${route.refs.join(', ')} ${route.refs.length > 1 ? 'name' : 'names'} gate step ${route.steps.join(', ')} and ${route.refs.length > 1 ? 'say' : 'says'} only a re-run satisfies ${route.refs.length > 1 ? 'them' : 'it'}: run one \`wf gate\`; it re-runs ${route.steps.join(', ')} whole on this unchanged tree (no commit, no override), and the evidence review after it verifies the finding${route.refs.length > 1 ? 's' : ''}`;
+
 export function gateOrderProblems(state) {
   const problems = [];
   const busy = reviewInFlight(state);
@@ -2001,7 +2004,9 @@ export function gateOrderProblems(state) {
     if (!busy && !evidenceFixReady(state) && !passBuilt(state)) problems.push(`no review round covers the current tree: run the code review first (\`wf handoff reviewer --agent <new id>\`); the gate runs once a round on this tree comes back clean`);
     return problems;
   }
-  const open = openFindings(r, state);
+  // 0.7.32 (D75): findings only a re-run of their gate step satisfies are what the next gate is for (engine/gate.mjs rerunRoute).
+  const recollect = rerunRoute(state);
+  const open = recollect && !recollect.ran ? [] : openFindings(r, state);
   if (open.length) problems.push(`the latest review round (${r.closure.reviewer}) has open findings (${open.map((f) => f.id).join(', ')}): fix them through the implementer, commit, and run the next code-review round until one comes back clean`);
   const toVerify = unverifiedPrior(state, r, { forGate: true });
   if (toVerify.length) problems.push(`the latest review round (${r.closure.reviewer}) has not verified ${toVerify.length} earlier-round finding(s) (${toVerify.map((f) => `${f.round}:${f.id}`).join(', ')})`);
@@ -3628,6 +3633,9 @@ export function nextDecision(root, state) {
   if (group && !(state.reviews ?? []).some(r => r.handoff === group.integration.bundle)) {
     const members = group.members.map(m => ({ agent: m.agent, slot: m.reviewGroup.slot, runtime: m.runtime,
       status: m.launch?.status ?? 'unlaunched', recorded: (state.reviewParts ?? []).some(p => p.handoff === m.bundle) }));
+    // 0.7.32 (D76): a member whose part will never come ends the group, whatever of it still runs (engine/review-groups.mjs).
+    const stalled = stalledMembers(state, group);
+    if (stalled.length) return result('review', 'owner', `review group ${group.id} cannot finish: no part will come from ${stalledText(stalled)}`, { group: group.id, members, guidance: stalledGroupStep(state, group, stalled) });
     if (members.some(m => ['starting', 'running'].includes(m.status))) return result('review', 'blocked', 'review group runtime outcome is pending or liveness is unknown; retain the original handle', { group: group.id, members });
     if (members.some(m => m.status === 'failed' || (m.slot !== 'integration' && m.status === 'completed' && !m.recorded))) return result('review', 'owner', 'review group has a failed or incomplete member; diagnose before a fresh group', { group: group.id, members });
   }
@@ -3657,6 +3665,10 @@ export function nextDecision(root, state) {
   // (and it built nothing for them), the next step is a verdict on that premise, never another fix round for the same findings.
   const premisedOnly = premiseBlocked(state, r);
   if (premisedOnly) return result('premise', 'owner', `every open finding rests on a premise reported not to hold (${premisedOnly.join(', ')})`, { premises: premisedOnly });
+  // 0.7.32 (D75): the evidence review's open findings only a re-run of their gate step satisfies: one gate on this unchanged tree,
+  // which re-runs it, then the evidence review that verifies them.
+  const recollect = r ? rerunRoute(state) : null;
+  if (recollect && !unverifiedPrior(state, r, { forGate: true }).length) return recollect.ran ? result('review', 'ready', null, { round: 'evidence-review' }) : result('gate', 'ready', null, { guidance: withAttempt(root, state, rerunStep(recollect)) });
   // A verification a reviewer still owes hands no new work, so the course does not route it (0.7.28).
   if (r && (openFindings(r, state).length || unverifiedPrior(state, r, { forGate: !(passed.ok && reviewedAfterGate(r)) }).length)) return result('repair', 'owner', 'review findings or earlier-finding verification remain open', openFindings(r, state).length ? {} : { course: false });
   // 0.7.28 (I-207): what does not block is fixed in one planned pass before the gate, never a round each.
@@ -3893,6 +3905,9 @@ function phaseStep(root, cfg, state) {
   const group = currentReviewGroup(state);
   if (inFlight && group) {
     const members = group.members.map(m => `${m.agent}: ${m.launch?.status ?? 'unlaunched'}${state.reviewParts.some(p => p.handoff === m.bundle) ? ', part recorded' : ''}`);
+    // 0.7.32 (D76): a member whose part will never come ends the group: stop its integration reviewer, then a fresh group.
+    const stalled = stalledMembers(state, group);
+    if (stalled.length) return stalledGroupStep(state, group, stalled);
     // 0.7.28 (I-211): with no member launched, nothing is running for this review, whatever the owner started by hand.
     if (group.members.every(m => !m.launch) && !state.reviewParts.some(p => group.members.some(m => m.bundle === p.handoff))) return `review group ${group.id} was never launched (${members.join('; ')}): nothing is running for it. A divided review starts only with \`wf handoff run --agent ${group.integration.agent} --attempt ${state.id}\`, which launches the scoped reviewers and then the integration; a reviewer started from a bundle's prompt records nothing, so stop it (never wait for it) and run that line; no gate until integration records the complete review`;
     return `review group ${group.id}: ${members.join('; ')}; retain its original execution handle; if none launched, run \`wf handoff run --agent ${group.integration.agent}\`; no gate until integration records the complete review`;
@@ -3940,6 +3955,9 @@ function phaseStep(root, cfg, state) {
   // 0.7.31 (I-217, D64): findings whose premise was reported not to hold get a verdict on it, never another fix round.
   const premisedOnly = premiseBlocked(state, r);
   if (premisedOnly) return premiseStep(state, premisedOnly);
+  // 0.7.32 (D75): an evidence finding only a re-run of its gate step satisfies: one gate on this unchanged tree, then the evidence review.
+  const recollect = rerunRoute(state);
+  if (recollect && !unverifiedPrior(state, r, { forGate: true }).length) return recollect.ran ? `evidence review: the gate re-ran ${recollect.steps.join(', ')} on this unchanged tree for ${recollect.refs.join(', ')}, so hand to ${fresh} to verify ${recollect.refs.length > 1 ? 'them' : 'it'} with the new evidence` : rerunStep(recollect);
   if (open.length) return routed(`fix the open findings (${open.map((f) => (f.work ? `${f.id} in ${f.work}` : f.id)).join(', ')}): hand them to the implementer that did that work as a fix round (\`wf handoff implementer --agent <its id>${open.some((f) => f.work) ? ' --work <item>' : ''}\`, then continue it with the printed line), so its report and the defect history are recorded${joining.length ? `; the ${joining.length} item(s) that do not block (${joining.map((x) => x.ref).join(', ')}) join this same pass (its bundle lists them under \`alsoFix\`), never a round of their own` : ''}; then the next code-review round: hand to ${fresh}; ${noGate}`);
   const toVerify = unverifiedPrior(state, r, { forGate: !(pass.ok && reviewedAfterGate(r)) });
   if (toVerify.length) return `reviewer ${r.closure.reviewer} must verify ${toVerify.length} earlier-round finding(s) (${toVerify.map((f) => `${f.round}:${f.id}`).join(', ')}): it adds \`priorFindings\` to its closure and runs \`wf review --closure <its file>\` again; if it is gone, hand to ${fresh}; ${noGate}`;

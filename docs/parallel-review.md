@@ -20,6 +20,13 @@ A divided review starts only through `wf handoff run --agent <integration> --att
 prints that line and no reviewer prompt, the integration reviewer's first step is `wf review parts`, which refuses a group
 none of whose scoped reviewers was launched (`review:group-plain-start`), and `wf resume` says nothing runs for such a group
 (0.7.28, I-211, D48: a divided review started as a plain reviewer created no sub-reviews, and the owner polled 80 minutes).
+A group one of whose scoped reviewers will never record a part (its launch failed, other than one the model's capacity
+stopped, which `wf handoff run` resumes in its own session, or its process ended without recording one) can never be
+integrated: `wf review parts` names each such member and tells the integration reviewer to stop
+(`review:group-member-ended`), and the owner's next step stops the integration reviewer (`wf handoff stop --agent
+<integration>`, and any scoped reviewer still running) and hands a fresh divided review. While a member is only still
+running, `wf review parts` says what each missing one is doing (0.7.32, D76: a member's launch ended without a part, and the
+integration reviewer was refused 169 times over 89 minutes, then waited six hours).
 
 When parallel review is selected, the default is two scoped reviewers plus integration. `--reviewers 3` permits
 three scoped reviewers without any activation flag. The existing `--parallel` flag remains a compatibility alias

@@ -21,6 +21,7 @@ import { canonical as canonicalPath } from './paths.mjs';
 import { WfError, assertEngine, canonical, git, globToRegExp, hashFile, hashValue, isPidAlive, matchesAny, now, refuse, run, sha256, shellQuote, writeImmutable, writeJson } from './util.mjs';
 import { appendStreamNoFollow, ownGateRun, prepareWrite, readRegular, seal, writeNoFollow } from './evidence.mjs';
 import { imageSize } from './image-size.mjs';
+import { blockingIn } from './review-policy.mjs';
 
 const gateDir = (root, id) => path.join(attemptDir(root, id), 'gate');
 const lockFile = (root, id) => path.join(gateDir(root, id), 'gate.lock');
@@ -219,8 +220,12 @@ export async function planGate(root, state, options = {}) {
   }
   const steps = [];
   const units = artifactUnits(root, state);
+  // 0.7.32 (D75): a step the evidence review's open findings name for a re-run runs whole on this tree (rerunRoute, below).
+  const recollect = options.check ? null : rerunRoute(state);
+  const forcedSteps = recollect && !recollect.ran ? recollect.forStep : [];
   for (const step of cfg.gate.steps) {
     const entry = { id: step.id, repo: step.repo, package: step.package ?? null, tier: step.tier ?? 'light' };
+    const forced = forcedSteps.find((x) => x.step === step.id) ?? null;
     if (!state.repos[step.repo]) {
       steps.push({ ...entry, decision: 'skip', reason: `repo ${step.repo} is not part of this attempt` });
       continue;
@@ -233,7 +238,7 @@ export async function planGate(root, state, options = {}) {
     const notCovered = uncovered[`${repo.name}|${pkg.path}`] ?? [];
     const component = cfg.components.find((c) => c.repo === repo.name && (c.package ?? '.') === pkg.path) ?? (step.component ? cfg.components.find((c) => c.id === step.component) : null);
     const isDependent = Boolean(component && imp.dependents.includes(component.id));
-    const mustRun = validationIds(state).includes(step.id) || full || infraChanged || isDependent || notCovered.length > 0;
+    const mustRun = validationIds(state).includes(step.id) || full || infraChanged || isDependent || notCovered.length > 0 || Boolean(forced);
     // A change in a repo the step also reads keeps it from being skipped; reuse then depends on that repo's tree.
     const alsoChanged = (step.alsoInputs ?? []).flatMap((name) => {
       const other = cfg.repos.find((r) => r.name === name);
@@ -268,7 +273,7 @@ export async function planGate(root, state, options = {}) {
     // 28, in the batch gate, and no reviewer saw its screenshots before then. A member runs the spec files its own change adds or
     // edits (the step's `specs`, run through its `select`); the whole step still runs in the batch gate.
     let ownSpecs = null;
-    if (!full && state.deferHeavy && entry.tier === 'heavy' && step.deferrable !== false) {
+    if (!full && !forced && state.deferHeavy && entry.tier === 'heavy' && step.deferrable !== false) {
       ownSpecs = step.specs?.length && step.select && !step.plugin ? pkgChanged.map((f) => rel(f, pkg.path)).filter((f) => matchesAny(f, step.specs) && fs.existsSync(path.join(dir, f))) : [];
       if (!ownSpecs.length) {
         steps.push({ ...entry, decision: 'defer', reason: 'batch member: heavy steps run in the batch gate' });
@@ -279,7 +284,7 @@ export async function planGate(root, state, options = {}) {
     // and `affects`); any doubt runs the whole step.
     let affected = null;
     let whole = null;
-    if (!ownSpecs && !full && state.lane === 'standard' && !state.deferHeavy && entry.tier === 'heavy' && step.affects?.length) {
+    if (!ownSpecs && !full && !forced && state.lane === 'standard' && !state.deferHeavy && entry.tier === 'heavy' && step.affects?.length) {
       const doubt = validationIds(state).includes(step.id) ? 'it is a check the ticket froze as its own' : infraChanged ? 'shared infrastructure changed' : isDependent ? 'it depends on a changed contract' : notCovered.length ? `${notCovered[0]} is outside every step's inputs` : alsoChanged.length ? `${alsoChanged[0]} changed in a repo it also reads` : null;
       const picked = doubt ? { whole: doubt } : affectedSpecs(state, step, repo, pkg, dir, pkgChanged);
       if (picked.specs) affected = picked.specs;
@@ -300,7 +305,7 @@ export async function planGate(root, state, options = {}) {
     // Hashed the old way only when no pass matches today's key (a reuse records today's key, so this happens once).
     const inputsBefore = inputs ? { hash: inputs.legacyHash } : inputs;
     const legacyKey = (s) => (!inputsBefore || also.unreadable.length ? null : hashValue(also.trees ? { inputs: inputsBefore.hash, runner: legacyRunnerIdentity(root, state, step, (s.artifactGlobs ?? []).map((g) => g.glob)), also: also.trees } : { inputs: inputsBefore.hash, runner: legacyRunnerIdentity(root, state, step, (s.artifactGlobs ?? []).map((g) => g.glob)) }));
-    let prior = findReuse(state, step.id, key, recordedBefore ? legacyKey : null);
+    let prior = forced ? null : findReuse(state, step.id, key, recordedBefore ? legacyKey : null);
     // Which of the recorded run's files are this ticket's evidence now: its expanded globs must cover today's, or it reruns.
     const expandedNow = (step.artifacts ?? []).map((glob) => ({ glob, expanded: expandArtifactGlob(glob, units) }));
     let reselect = null;
@@ -330,7 +335,7 @@ export async function planGate(root, state, options = {}) {
     // Review of 0.7.30 (I-163): a step another step `needs` leaves its output in the worktree it ran in; one reused from
     // another attempt never ran in this one, and its consumer failed its precondition. It is never taken from another attempt.
     const needed = cfg.gate.steps.some((x) => (x.needs ?? []).includes(step.id));
-    if (!prior && key && !ownSpecs && !affected && !needed && !step.artifacts?.length && !options.rerunFailed?.includes(step.id)) {
+    if (!prior && !forced && key && !ownSpecs && !affected && !needed && !step.artifacts?.length && !options.rerunFailed?.includes(step.id)) {
       // The key a pass recorded before 0.7.11 would have here (hashed the old way once, and only if such a pass exists).
       let legacy;
       const legacyAcross = () => {
@@ -371,7 +376,7 @@ export async function planGate(root, state, options = {}) {
     // fixes, not ones that take hours"; the independent review stays, and its bundle lists what did not run. A gate that
     // skips them counts for acceptance and delivery. The plugin sets the default; a project's adapter may run every step in
     // its quick fixes (`gate.quickLane: full`).
-    if (!prior && !full && state.lane === 'quick' && (cfg.gate.quickLane ?? 'light') === 'light' && entry.tier === 'heavy' && !validationIds(state).includes(step.id)) {
+    if (!prior && !forced && !full && state.lane === 'quick' && (cfg.gate.quickLane ?? 'light') === 'light' && entry.tier === 'heavy' && !validationIds(state).includes(step.id)) {
       const last = allGateSteps(state).filter((s) => s.id === step.id && ['passed', 'reused', 'failed'].includes(s.status)).at(-1) ?? null;
       if (last?.status !== 'failed') {
         steps.push({ ...entry, decision: 'skip', skippedBy: 'quick-lane', reason: 'a quick fix runs light steps only (`wf gate --full` runs this one too)', lastResult: last ? { status: last.status, runId: last.runId } : null });
@@ -381,7 +386,7 @@ export async function planGate(root, state, options = {}) {
     // 0.7.30 (I-158, D58): the person decided to deliver without the full test run (`wf gate light-only`). A heavy step is left
     // out as in a quick fix, on the same terms: an identical pass is still reused, and one that failed in this attempt, or that
     // the ticket froze as its own check, still runs (a known failure is never left out into a pass). `--full` runs it.
-    const personal = !prior && !full && entry.tier === 'heavy' ? lightOnlyDecision(state) : null;
+    const personal = !prior && !forced && !full && entry.tier === 'heavy' ? lightOnlyDecision(state) : null;
     if (personal && !validationIds(state).includes(step.id)) {
       const last = allGateSteps(state).filter((s) => s.id === step.id && ['passed', 'reused', 'failed'].includes(s.status)).at(-1) ?? null;
       if (last?.status !== 'failed') {
@@ -400,7 +405,8 @@ export async function planGate(root, state, options = {}) {
       decision: prior ? 'reuse' : 'run',
       ...(ownSpecs ? { ownSpecs } : {}),
       ...(affected ? { affectedSpecs: affected } : {}),
-      reason: ownSpecs && !prior ? `batch member: only the spec files this change adds or edits (${ownSpecs.join(', ')}); the whole step runs in the batch gate` : affected && !prior ? `only the spec files this change can affect, by the step's \`affects\` rule (${affected.length}): ${affected.join(', ')}; \`wf gate --full\` runs the whole step` : prior ? `same inputs and runner as ${prior.runId}${fromAttempt ? ` in ${fromAttempt}` : ''}` : outside.length ? `changed file(s) outside this step's inputs since its last pass: ${outside.slice(0, 3).join(', ')}${outside.length > 3 ? '…' : ''}` : notCovered.length ? `changed file(s) outside every step's inputs: ${notCovered.slice(0, 3).join(', ')}${notCovered.length > 3 ? '…' : ''}` : also.unreadable.length ? `cannot read the tree of ${also.unreadable.join(', ')} (alsoInputs): always runs` : key ? (isDependent ? 'dependent of a changed contract' : infraChanged ? 'shared infrastructure changed' : also.trees ? 'inputs or a repo in alsoInputs changed, or never passed' : 'inputs changed or never passed') : 'no `inputs` declared: always runs',
+      ...(forced ? { rerunFor: forced.findings } : {}),
+      reason: forced ? `re-run for the evidence review's finding${forced.findings.length > 1 ? 's' : ''} ${forced.findings.join(', ')} on this unchanged tree (${forced.findings.length > 1 ? 'they name' : 'it names'} this step and say${forced.findings.length > 1 ? '' : 's'} only a re-run satisfies ${forced.findings.length > 1 ? 'them' : 'it'}): the whole step runs, nothing reused` : ownSpecs && !prior ? `batch member: only the spec files this change adds or edits (${ownSpecs.join(', ')}); the whole step runs in the batch gate` : affected && !prior ? `only the spec files this change can affect, by the step's \`affects\` rule (${affected.length}): ${affected.join(', ')}; \`wf gate --full\` runs the whole step` : prior ? `same inputs and runner as ${prior.runId}${fromAttempt ? ` in ${fromAttempt}` : ''}` : outside.length ? `changed file(s) outside this step's inputs since its last pass: ${outside.slice(0, 3).join(', ')}${outside.length > 3 ? '…' : ''}` : notCovered.length ? `changed file(s) outside every step's inputs: ${notCovered.slice(0, 3).join(', ')}${notCovered.length > 3 ? '…' : ''}` : also.unreadable.length ? `cannot read the tree of ${also.unreadable.join(', ')} (alsoInputs): always runs` : key ? (isDependent ? 'dependent of a changed contract' : infraChanged ? 'shared infrastructure changed' : also.trees ? 'inputs or a repo in alsoInputs changed, or never passed' : 'inputs changed or never passed') : 'no `inputs` declared: always runs',
       ...(whole && !prior ? { wholeBecause: whole } : {}),
       reusedFrom: prior?.runId ?? null,
       // The record itself travels with the plan: the other attempt's ledger is not read again when the gate runs.
@@ -411,7 +417,36 @@ export async function planGate(root, state, options = {}) {
     const last = steps.at(-1);
     if (last.wholeBecause) last.reason = `${last.reason}; the whole step runs: ${last.wholeBecause}`;
   }
-  return { cfg, live, changed, impact: imp, full, adapterTouched, focused, check: Boolean(options.check), repos: options.check && options.repos ? [...options.repos] : null, rerunFailed: options.rerunFailed ?? null, steps, unchecked, tree: treeHashes(state) };
+  const rerunFor = steps.filter((x) => x.decision === 'run' && x.rerunFor).map((x) => ({ step: x.id, findings: x.rerunFor }));
+  return { cfg, live, changed, impact: imp, full, adapterTouched, focused, check: Boolean(options.check), repos: options.check && options.repos ? [...options.repos] : null, rerunFailed: options.rerunFailed ?? null, ...(rerunFor.length ? { rerunFor } : {}), steps, unchecked, tree: treeHashes(state) };
+}
+
+// 0.7.32 (D75). Named failure (field, I-221): nothing re-collected a gate's evidence on an unchanged tree. `--rerun-failed` refuses
+// when the last gate passed, a gate reuses every step whose key is unchanged, and the gate order waits for the evidence review's
+// open findings, so a finding only a re-run of a step could satisfy (its captures were never collected, nothing in the code was
+// wrong) took a dummy commit or the person's override. The latest review is an evidence review recorded on this exact tree, every
+// finding it left open that blocks names a gate step (`step`) and says only a re-run satisfies it (`rerun: true`), each such step
+// produced evidence in the gate that review judged, and that gate was not itself a re-run of it (the route is offered once: a
+// finding a re-run did not satisfy goes to the implementer like any other). Then the next gate re-runs those steps whole on the
+// unchanged tree, and the evidence review after it verifies the findings. `ran`: the gate after that review did so.
+export function rerunRoute(state) {
+  const r = state.review;
+  if (!r?.closure || !(r.closure.findings ?? []).some((f) => f?.rerun === true)) return null;
+  const h = (state.handoffs ?? []).find((x) => x.bundle === r.handoff);
+  if (!h || !(h.round === 'evidence-review' || (!h.round && h.gate))) return null;
+  const tree = treeHashes(state);
+  if (canonical(r.tree ?? r.handoffTree) !== canonical(tree)) return null;
+  if ((state.criteriaAmendments ?? []).some((a) => a.at > r.at)) return null;
+  const open = blockingIn(state, r);
+  if (!open.length || open.some((f) => f.rerun !== true || typeof f.step !== 'string')) return null;
+  const judged = (state.gates ?? []).find((g) => g.runId === h.gate);
+  const steps = [...new Set(open.map((f) => f.step))];
+  if (!judged || steps.some((id) => !judged.steps?.some((x) => x.id === id && ['passed', 'reused'].includes(x.status)) || (judged.rerunFor ?? []).some((x) => x.step === id))) return null;
+  const reviewer = r.closure.reviewer ?? r.reviewer;
+  const forStep = steps.map((step) => ({ step, findings: open.filter((f) => f.step === step).map((f) => `${reviewer}:${f.id}`) }));
+  const g = state.lastGate;
+  const ran = Boolean(g && g.runId !== judged.runId && g.status === 'passed' && String(g.at ?? '') > String(r.at ?? '') && canonical(g.tree) === canonical(tree) && steps.every((id) => (g.rerunFor ?? []).some((x) => x.step === id)));
+  return { refs: forStep.flatMap((x) => x.findings), steps, forStep, ran };
 }
 
 // 0.7.30 (I-134, D59). Named failure (field): a one-line change reran the whole 1,200-test end-to-end step (27 to 40 minutes); the
@@ -704,6 +739,32 @@ function collectArtifacts(step, dir, destDir, since, units) {
   return { artifacts: out, artifactGlobs: globs };
 }
 
+// 0.7.32 (D75). Named failure (field, I-221): a passing gate reran only the 2 suites that had failed in the run before it and carried
+// 1251 tests from that run, but none of its 170 screenshots, so the end-to-end step showed as uncovered for the evidence review and
+// the reviewer opened the earlier run's files by hand. A run that carries suites from an earlier run carries that run's captures
+// with them: each one this run did not write again (by its path in the package) and today's globs still select, read without
+// following a link and checked against its recorded sha256 (one that is missing or differs is left out and the step's log says
+// so), kept where it was sealed and recorded with the run it came from (`carriedFrom`), and listed under the glob it matches, so
+// the evidence review is handed it as this gate's evidence. A capture names no suite, so the earlier run's captures of a suite
+// this run reran are carried too when this run did not write them again; `carriedFrom` says which run each one shows.
+function carryCaptures(earlier, result, { step, units, note }) {
+  const globsNow = (step.artifacts ?? []).map((glob) => ({ glob, expanded: expandArtifactGlob(glob, units) }));
+  const taken = new Set(result.artifacts.map((a) => a.source).filter(Boolean));
+  for (const a of earlier.artifacts ?? []) {
+    if (!a?.source || taken.has(a.source) || !globsNow.some((g) => matchesAny(a.source, g.expanded))) continue;
+    const from = a.carriedFrom ?? earlier.runId;
+    const read = a.path ? readRegular(a.path) : null;
+    if (!read || sha256(read.bytes) !== a.sha256) {
+      note(`capture ${a.source} of run ${from} (carried with its suites) is missing or differs from its recorded sha256: not carried`);
+      continue;
+    }
+    const carried = { ...a, units: units.filter((u) => globsNow.some((g) => matchesAny(a.source, expandArtifactGlob(g.glob, [u])))).map((u) => u.attempt), carriedFrom: from };
+    result.artifacts.push(carried);
+    taken.add(a.source);
+    for (const g of result.artifactGlobs ?? []) if (matchesAny(a.source, g.expanded)) g.files.push(carried);
+  }
+}
+
 // Suite-level reuse is allowed only when nothing but the suite files themselves changed since the prior run.
 function priorFileHashes(prior) {
   if (prior?.fileHashes) return prior.fileHashes;
@@ -852,7 +913,7 @@ async function executeStep(root, cfg, state, planned, ctx) {
   // A batch member's own specs (I-212) are what this run runs; nothing an earlier whole run passed is carried into it.
   // The spec files a standard attempt's change can affect (I-134) are likewise all this run runs.
   const onlySpecs = planned.ownSpecs?.length ? planned.ownSpecs : planned.affectedSpecs?.length ? planned.affectedSpecs : null;
-  const rerun = onlySpecs ?? (step.select ? suitesToRerun(prior, planned, { listsEverySuite: Boolean(step.report?.playwright) }) : null);
+  const rerun = onlySpecs ?? (step.select && !planned.rerunFor ? suitesToRerun(prior, planned, { listsEverySuite: Boolean(step.report?.playwright) }) : null);
   const vars = { workers: workers.n, shards: shards.n, evidence: scratch };
   vars.select = rerun ? substitute(step.select, { suites: rerun.map(shellQuote).join(' ') }) : '';
   // The report files present before the run, by signature: only a report this run wrote or rewrote is read after it (one an
@@ -870,6 +931,8 @@ async function executeStep(root, cfg, state, planned, ctx) {
   const reportsBefore = new Map(reportGlobs.flatMap((p) => globFiles(planned.dir, substitute(p, vars))).map((f) => [f, reportSignature(f)]));
   let result;
   let returned = [];
+  // The earlier run whose suites this run carried (0.7.32, D75): its captures come with them, below.
+  let carriedRun = null;
   if (step.plugin) {
     const mod = (await import(pathToFileURL(adapterFileAtCommit(root, state, validationCommit(state, step.id), step.plugin)).href)).default;
     const pctx = { root, attempt: state.id, step, dir: planned.dir, worktrees: Object.fromEntries(Object.entries(state.repos).map(([k, v]) => [k, v.worktree])), changed: ctx.changedSinceBase, evidenceDir: scratch, workers: workers.n, env, log: (s) => writeNoFollow(logFile, ctx.redact(`${s}\n`), { append: true }) };
@@ -924,6 +987,7 @@ async function executeStep(root, cfg, state, planned, ctx) {
       const requested = (s) => rerun.includes(s.file ?? s.id);
       unreported = prior.suites.filter((s) => requested(s) && !reported(s)).map((s) => ({ ...s, status: 'not-run', carried: undefined }));
       suites = [...prior.suites.filter((s) => !reported(s) && !requested(s)).map((s) => ({ ...s, carried: true })), ...unreported, ...fresh.values()];
+      if (suites.some((s) => s.carried)) carriedRun = prior;
     }
     const interrupted = codes.some((c) => c.signal);
     // Independent review of 0.7.6: a run whose exit code was swallowed (`|| true`, a wrapper) passed with a test that never
@@ -953,6 +1017,7 @@ async function executeStep(root, cfg, state, planned, ctx) {
   if (step.plugin && result.status === 'failed') result.failures = stepFailures({ log: logFile, suites: result.suites, redact: ctx.redact });
   result.artifacts.push(...collected.artifacts);
   result.artifactGlobs = collected.artifactGlobs;
+  if (carriedRun) carryCaptures(carriedRun, result, { step, units, note: (line) => writeNoFollow(logFile, ctx.redact(`${line}\n`), { append: true }) });
   let fileHashesRef = null;
   if (planned.fileHashes) {
     const f = path.join(evidenceDir, 'inputs.json');
@@ -1287,7 +1352,10 @@ export async function runPrepared(root, state, stepId, command, { lease = null }
     process.stdout.write(`step ${step.id} needs no preparation (its plugin says \`prepare: false\`)\n`);
     return 0;
   }
-  if (!declared && typeof plugin?.prepare !== 'function') throw refuse(`step \`${step.id}\` declares no \`prepare\` command${step.plugin ? ' and its plugin has no `prepare`' : ''}`, step.plugin ? 'add `prepare(ctx)` to the plugin\'s default export (it installs what the step needs into the worktree; committed with the plugin), or `prepare: "<install command>"` to the step, in the committed adapter' : 'add `prepare: "<install command>"` to the step in the committed adapter', { id: 'run:no-prepare' });
+  // 0.7.32 (D74). Named failure (field, I-219, I-220): three refusals here told the implementer to add `prepare` to the plugin, which
+  // a ticket cannot do (its own adapter change is never what it runs, D60), while the texts named this command for the runs
+  // before the first commit. The refusal says what to do meanwhile and where a preparation route comes from.
+  if (!declared && typeof plugin?.prepare !== 'function') throw refuse(`step \`${step.id}\` declares no \`prepare\` command${step.plugin ? ' and its plugin has no `prepare`' : ''}`, `meanwhile, install and test with the package's own commands (what its manifest or README names), or commit and run \`wf check\`, which runs the light steps on the committed tree with their secrets; say in your report that this step has no preparation route. A preparation route is ${step.plugin ? '`prepare(ctx)` on the default export of the step\'s plugin (or `prepare: "<install command>"` on the step)' : '`prepare: "<install command>"` on the step'}, and only the project's adapter adds one, committed on its base branch outside this ticket (the attempt follows it there); a ticket's own change to the adapter is never what it runs`, { id: 'run:no-prepare' });
   const missing = missingFor(root, cfg, step.id, validationCatalog(root, state, step.id));
   if (missing.length) throw refuse(`secrets missing for step ${step.id}: ${missing.join(', ')}`, 'run `wf secrets guide` in your terminal');
   const { dir } = stepPackage(cfg, state, step);
@@ -1410,7 +1478,16 @@ export async function runGate(root, state, options = {}) {
   assertEngine(trustedAdapter(root, state));
   // `wf check` needs only the repos it checks to be committed; a gate needs every repo.
   const dirty = Object.fromEntries(Object.entries(uncommitted(state)).filter(([r]) => !options.check || !options.repos || options.repos.includes(r)));
-  if (Object.keys(dirty).length) throw refuse(`commit changes before the ${options.check ? 'check' : 'gate'}: ${Object.entries(dirty).map(([r, l]) => `${r} (${l.slice(0, 5).join('; ')}${l.length > 5 ? `; +${l.length - 5} more` : ''})`).join(', ')}`);
+  // 0.7.32 (D74). Named failure (field, 17 refusals): untracked tool output (an IDE's package configuration folder) refused `wf check`
+  // with no word on why, while the reviewer handoff counts only tracked changes. An untracked path still blocks a run (the run reads
+  // the worktree as it is; in the same records an untracked new source file was part of the change), and the refusal names each
+  // one, why, and what to do with it.
+  if (Object.keys(dirty).length) {
+    const what = options.check ? 'check' : 'gate';
+    const untracked = Object.entries(dirty).map(([r, l]) => [r, l.filter((x) => x.startsWith('?? ')).map((x) => x.slice(3))]).filter(([, l]) => l.length);
+    const n = untracked.flatMap(([, l]) => l).length;
+    throw refuse(`commit changes before the ${what}: ${Object.entries(dirty).map(([r, l]) => `${r} (${l.slice(0, 5).join('; ')}${l.length > 5 ? `; +${l.length - 5} more` : ''})`).join(', ')}`, untracked.length ? `untracked, so in no commit, yet the ${what} would run with ${n > 1 ? 'them' : 'it'} in the worktree and its result would not be the committed tree's (a review counts only tracked changes: it reads the committed diff): ${untracked.map(([r, l]) => `${r}: ${l.join(', ')}`).join('; ')}. For each: commit it when it belongs to the change, delete it when it is a tool's output, or have its repo ignore it with a committed \`.gitignore\` entry` : undefined, { id: 'gate:uncommitted' });
+  }
   // Named failure (I-92): after the owner stopped a check because the tree is about to change (remaining admitted fixes), the same
   // check was started again on the unchanged tree, queued behind an unrelated stack and ran for nothing. From 0.7.0 it waits for
   // a new commit.
@@ -1824,7 +1901,7 @@ async function executeRun(root, state, plan, live, run) {
   const producedUntracked = {};
   for (const [name, r] of Object.entries(state.repos)) producedUntracked[name] = untrackedSnapshot(r.worktree);
   say(`${status} (${runId})`);
-  const record = { runId, status, producedUntracked, changed: plan.changed, full: plan.full, focused: plan.focused, check: plan.check || undefined, repos: plan.repos ?? undefined, rerunFailed: plan.rerunFailed ?? undefined, adapterBase: adapterPin(state), validationDigest: validationDigest(state), tree: plan.tree, impact: plan.impact, unchecked: plan.unchecked, ...(Object.keys(leaseCapacity).length ? { leaseCapacity } : {}), ...(leaseWaits.size ? { leaseWaitSeconds: Math.max(...[...leaseWaits.values()].map((w) => w.seconds)) } : {}), ...(ownerStop ? { stop: { class: ownerStop.class, reason: ownerStop.reason } } : {}), ...(fatal ? { error: ctx.redact(String(fatal.message ?? fatal)) } : {}), steps: results, finishedAt: now() };
+  const record = { runId, status, producedUntracked, changed: plan.changed, full: plan.full, focused: plan.focused, check: plan.check || undefined, repos: plan.repos ?? undefined, rerunFailed: plan.rerunFailed ?? undefined, ...(plan.rerunFor ? { rerunFor: plan.rerunFor } : {}), adapterBase: adapterPin(state), validationDigest: validationDigest(state), tree: plan.tree, impact: plan.impact, unchecked: plan.unchecked, ...(Object.keys(leaseCapacity).length ? { leaseCapacity } : {}), ...(leaseWaits.size ? { leaseWaitSeconds: Math.max(...[...leaseWaits.values()].map((w) => w.seconds)) } : {}), ...(ownerStop ? { stop: { class: ownerStop.class, reason: ownerStop.reason } } : {}), ...(fatal ? { error: ctx.redact(String(fatal.message ?? fatal)) } : {}), steps: results, finishedAt: now() };
   writeImmutable(path.join(runDir, 'result.json'), `${JSON.stringify(record, null, 2)}\n`);
   // Recorded before the run is: once it is finished, an unrecorded file in its folder is an extra file.
   await retryWhileLocked(() => {

@@ -365,6 +365,33 @@ export function currentReviewGroup(state) {
   return { id: latest.reviewGroup.id, integration: latest, members: state.handoffs.filter(h => h.reviewGroup?.id === latest.reviewGroup.id) };
 }
 
+// 0.7.32 (D76). Named failure (field): the integration reviewer of a divided review waited for parts that would never come, a
+// scoped member's launch having ended without recording one: `wf review parts` said only that the reports were incomplete, 169
+// times over 89 minutes, then nothing happened for six hours. 0.7.28 (I-211) covered a group none of whose members was launched.
+// The scoped members whose part will never come: a launch recorded failed (a crash, an interrupt, the owner's stop; not one the
+// model's capacity stopped, which `wf handoff run` resumes in its own session) or a process that ended without recording a part.
+// Their group can never be integrated: a fresh group is the way on.
+export function stalledMembers(state, group) {
+  const parts = state.reviewParts ?? [];
+  return group.members
+    .filter(h => h.reviewGroup.slot !== 'integration' && h.launch && !parts.some(p => p.handoff === h.bundle))
+    .filter(h => h.launch.status === 'completed' || (h.launch.status === 'failed' && !(h.launch.failure?.kind === 'capacity' && !h.launch.settled)))
+    .map(h => ({ agent: h.agent, slot: h.reviewGroup.slot, why: h.launch.status === 'completed' ? 'its process ended without recording a part' : h.launch.failure?.kind === 'stopped' ? 'it was stopped' : 'its launch failed' }));
+}
+
+const andList = xs => (xs.length < 2 ? xs.join('') : `${xs.slice(0, -1).join(', ')} and ${xs.at(-1)}`);
+export const stalledText = stalled => andList(stalled.map(m => `${m.agent} (${m.slot}: ${m.why})`));
+
+// What a scoped member that has no part yet is doing, for the integration reviewer that waits for it.
+export const waitingText = (h) => `${h.agent} (${h.reviewGroup.slot}): ${!h.launch ? 'not launched' : h.launch.status === 'failed' && h.launch.failure?.kind === 'capacity' ? 'stopped at the model\'s capacity, to be resumed by the owner' : h.launch.status}`;
+
+// The owner's way on from a group that cannot finish: stop what of it still runs (its integration reviewer first), then a fresh group.
+export function stalledGroupStep(state, group, stalled) {
+  const running = group.members.filter(h => h.reviewGroup.slot !== 'integration' && ['starting', 'running'].includes(h.launch?.status));
+  const integration = group.integration.agent;
+  return `review group ${group.id} cannot finish: no part will come from ${stalledText(stalled)}; stop its integration reviewer ${integration} (\`wf handoff stop --agent ${integration} --attempt ${state.id}\`; one started outside \`wf handoff run\` is stopped where it runs)${running.length ? ` and its scoped reviewers still running (${running.map(h => `\`wf handoff stop --agent ${h.agent} --attempt ${state.id}\``).join(', ')})` : ''}, then hand a fresh divided review: \`wf handoff reviewer --agent <new id> --attempt ${state.id}\`, started only with the \`wf handoff run\` line it prints; no gate until an integration records the complete review`;
+}
+
 // `repeats`: a row may name an id more than once (0.7.29, I-154: a criterion several artifacts prove has one evidence entry each).
 export function assignedVerdicts(expected, rows, key, label, { repeats = false } = {}) {
   const ids = new Set(expected), seen = new Set();
@@ -409,5 +436,5 @@ export function mergeParts(group, parts, input) {
 
 export const GROUP_INSTRUCTIONS = `This review is divided by the change's recorded flows so it finishes sooner; reviewGroup.mode says your part. Every reviewer uses the frozen reviewer class, reads the shared rules and skills, and may inspect any source and report any defect it finds.
 Scoped reviewer. Your goal: the truth about your assigned flows, the files in primaryFiles with their unchanged consumers and failure paths. Never judge a producer without its consumer: follow a seam into division.integration.interfaces when it crosses. Record your findings (criteria: [] — the integration reviewer owns the criteria) with wf review --closure <reviewClosureFile>; your closure is a part and never authorizes a gate or acceptance.
-Integration reviewer. Before anything else run wf review parts --attempt <attempt>: if it says the scoped reviewers were never launched, you were started outside wf handoff run and nothing you review can be recorded, so stop and say so. Your goal: the combined result is right. The crossing interfaces in division.integration.interfaces hold on both sides, the shared invariants hold, and the scoped reports are right: read them (wf review parts --attempt <attempt>) critically, verify what they claim, add what they missed, and never resolve a disagreement by voting. You give the criteria evidence and the gate-evidence checks (screenshots inspected, anomalies). The engine merges the parts' findings into your closure and decides what blocks; earlier rounds' findings are shown after the combined closure is recorded.
+Integration reviewer. Before anything else run wf review parts --attempt <attempt>: if it says the scoped reviewers were never launched, you were started outside wf handoff run and nothing you review can be recorded, so stop and say so. If it says no part will come from a scoped reviewer (its launch failed, or it ended without recording a part), your review can never be recorded either: stop and say so; the owner hands a fresh group. Your goal: the combined result is right. The crossing interfaces in division.integration.interfaces hold on both sides, the shared invariants hold, and the scoped reports are right: read them (wf review parts --attempt <attempt>) critically, verify what they claim, add what they missed, and never resolve a disagreement by voting. You give the criteria evidence and the gate-evidence checks (screenshots inspected, anomalies). The engine merges the parts' findings into your closure and decides what blocks; earlier rounds' findings are shown after the combined closure is recorded.
 impactMap.catalog holds the latest value of every recorded entry; its history is in impactMap.history.`;
