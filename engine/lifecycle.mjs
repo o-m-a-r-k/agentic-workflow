@@ -956,7 +956,7 @@ export function handoff(root, role, options) {
   // the work item's own) name an open finding or discovered issue was handed that item: the course judges what it reached as it
   // judges an `alsoFix` item. Named gap (a review): a work item handed again to fix a recorded issue carried no `fixes` on its
   // handoff, so the course could not see that path at all. Measured on one project's ledgers (third review of 0.7.31): 67 such
-  // re-handoffs, none firing once an amendment that re-planned the work item counts as its plan (engine/signals.mjs).
+  // re-handoffs, none firing once the files an amendment restating the item explains count as its plan (engine/signals.mjs).
   const namedRefs = role === 'implementer' && !repairNow && !passItems && (state.reviews ?? []).length
     ? [...new Set([ownerContext, ...(work && !plannedFirst.includes(work.id) ? [work.why, work.summary, work.text] : [])].filter((x) => typeof x === 'string').join(' ').match(/(?<![\w-])(?:D\d+|[\w.-]+:[A-Za-z]+\d+)(?![\w])/g) ?? [])].map(premiseRef).filter((ref) => itemOpen(state, ref))
     : [];

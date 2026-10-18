@@ -144,12 +144,45 @@ function itemFiles(state, ref) {
   return { files: out, dirs };
 }
 const touches = (cfg, located, repo, file) => located.some((l) => l === file || l === rootOf(cfg, repo, file) || (cfg?.repos ?? []).some((r) => rootOf(cfg, r.name, l) === rootOf(cfg, repo, file)));
-// The amendments that restated this handoff's work item after its last build (the previous implementer handed it) and before this
-// handoff, each with its words and the contract scope it states.
+// The amendments that restated this handoff's work item after its last build and before this handoff, each with its words, the
+// contract scope it states and the changes of its impact addendum that are for the item (`planned`: each with its kind and the
+// files its contract queries found). Fourth review of 0.7.31: "its last build" ends when that build's implementer closed (an
+// amendment that lands while it is still open was built against, so it is not since); an item never built before starts at nothing.
 function amendedSinceLastBuild(state, h) {
-  if (!h.work) return [];
-  const last = (state.handoffs ?? []).filter((x) => x.role === 'implementer' && x.at < h.at && (x.work === h.work || (x.covers ?? []).includes(h.work))).at(-1)?.at ?? '';
-  return (state.workAmended?.[h.work] ?? []).filter((a) => a.at > last && a.at <= h.at).map((a) => ({ ...a, scope: state.criteriaAmendments?.[a.amendment - 1]?.scope ?? null }));
+  if (!h?.work) return [];
+  const previous = (state.handoffs ?? []).filter((x) => x.role === 'implementer' && x.at < h.at && (x.work === h.work || (x.covers ?? []).includes(h.work))).at(-1);
+  const last = previous ? (state.implementers ?? []).find((y) => y.handoff === idOf(previous.bundle))?.closedAt ?? h.at : '';
+  const w = (state.work ?? []).find((x) => x.id === h.work);
+  return (state.workAmended?.[h.work] ?? []).filter((a) => a.at > last && a.at <= h.at).map((a) => {
+    const addendum = (state.impact?.addenda ?? []).find((x) => x.amendment === a.amendment);
+    const results = { ...(state.impact?.results ?? {}), ...Object.assign({}, ...(state.impact?.addenda ?? []).map((x) => x.results ?? {})) };
+    const forItem = (Array.isArray(addendum?.changes) ? addendum.changes : []).filter((c) => [c.work].flat().includes(h.work) || [c.cites].flat().some((x) => (a.criteria ?? w?.criteria ?? []).includes(x)));
+    // The files the change's own queries found (its contracts, consumers, flows and suites), and any it lists itself.
+    const filesOf = (c) => [...[c.contracts].flat(), c.consumers, ...[c.flows].flat(), ...[c.suites].flat()].filter((x) => x && typeof x === 'object').flatMap((x) => [...(Array.isArray(x.files) ? x.files : []), ...(results[x.query]?.files ?? [])]).map((f) => String(f).replace(/^[\w.-]+:/, ''));
+    return { ...a, scope: state.criteriaAmendments?.[a.amendment - 1]?.scope ?? null, planned: forItem.map((c) => ({ kind: c.kind ?? null, files: filesOf(c) })) };
+  });
+}
+// Fourth review of 0.7.31: whether an amendment's `scope` explains a changed contract file. With the endpoints or error codes it
+// names, a file is explained when it is its component's own spec (the spec carries every endpoint) or shares at least two
+// distinctive words with a name (`PUT /api/v1/resource-management/demands/:demandId/required-skills` and
+// `resource-management/controllers/demand-required-skill.controller.ts`); the names were recorded and only their count was read,
+// so one amendment's endpoint explained another endpoint's controller. A scope that states only counts explains every contract file.
+const GENERIC = new Set(['api', 'v1', 'v2', 'v3', 'src', 'http', 'https', 'get', 'put', 'post', 'patch', 'delete', 'controller', 'dto', 'ts', 'js', 'mjs', 'json', 'yaml', 'yml', 'response', 'request', 'id', 'existing', 'the', 'and', 'for', 'with', 'index', 'module', 'service', 'lib', 'app', 'route', 'endpoint', 'meaning']);
+const words = (t) => new Set(String(t ?? '').replace(/([a-z0-9])([A-Z])/g, '$1 $2').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean).map((x) => (x.length > 3 && x.endsWith('s') ? x.slice(0, -1) : x)).filter((x) => x.length > 1 && !GENERIC.has(x)));
+function scopeExplains(cfg, a, f) {
+  if (!(Number(a.scope?.endpoints) > 0 || Number(a.scope?.errorCodes) > 0)) return false;
+  const names = a.scope?.names ?? [];
+  if (!names.length) return true;
+  const isSpec = (cfg?.components ?? []).some((c) => (c.provides ?? []).some((p) => p.spec && rootOf(cfg, f.repo, f.file).endsWith(p.spec)));
+  if (isSpec) return true;
+  const fw = words(f.file);
+  return names.some((n) => { const nw = words(n); return [...fw].filter((x) => nw.has(x)).length >= 2; });
+}
+// The implementer handoffs open at the same time as this one in a repo it changed (their commits cannot be told apart).
+function overlappingHandoffs(state, impl, repos) {
+  const overlap = (a, b) => String(a.openedAt) < String(b.closedAt ?? '9') && String(b.openedAt) < String(a.closedAt ?? '9');
+  const reposOf = (x) => (state.work ?? []).find((w) => w.id === x.work)?.repos ?? Object.keys(state.repos ?? {});
+  return (state.implementers ?? []).filter((x) => x !== impl && overlap(x, impl) && reposOf(x).some((n) => repos.includes(n))).map((x) => (state.handoffs ?? []).find((y) => y.role === 'implementer' && idOf(y.bundle) === x.handoff)).filter(Boolean);
 }
 function ownChanges(state, impl, repos) {
   const changed = {};
@@ -186,31 +219,46 @@ export function reachOf(state, cfg, h) {
   }
   const migrationsAll = Object.entries(changed).flatMap(([repo, files]) => files.filter(isMigration).map((file) => ({ repo, file })));
   if (!perFile.length && !migrationsAll.length) return null;
-  const handed = [...(h.fixes.repair ?? []), ...(h.fixes.alsoFix ?? []), ...(h.fixes.pass ?? []), ...(h.fixes.named ?? [])];
-  const items = handed.map((ref) => itemFiles(state, ref));
+  // Fourth review of 0.7.31: implementers open at once in a repo this round changed share what explains a file (their commits cannot
+  // be told apart, so a file one of them was handed or planned is explained for both; named case: a work item handed again for named
+  // items, beside another whose amendment stated the endpoint its commit changed).
+  const sources = [h, ...overlappingHandoffs(state, impl, Object.keys(changed))];
+  const items = sources.flatMap((x) => handedItems(x.fixes).map((ref) => itemFiles(state, ref)));
   const located = items.flatMap((x) => x.files);
-  const spec = (c, f) => (cfg?.components ?? []).some((x) => x.id === c && (x.provides ?? []).some((p) => p.spec && rootOf(cfg, f.repo, f.file).endsWith(p.spec)));
+  const dirs = items.flatMap((x) => x.dirs);
   // Third review of 0.7.31: a re-handoff of a work item an amendment restated since its last build is planned work for what the
-  // amendment says it changes: the contract when it states endpoints or error codes (`scope`), or names the file; a migration when
-  // it names its path or folder. Named case (a review's): an owner restated a work item 31 seconds before handing it again, stating
-  // the new response DTO of one endpoint; the controller and DTO it changed were that plan, not a reach. Items it names whose fix
-  // the amendment does not state are still judged.
-  const amended = amendedSinceLastBuild(state, h);
+  // amendment says it changes, file by file: a contract file when the amendment states endpoints or error codes (`scope`), names
+  // the file, or carries an impact addendum whose change for the item crosses a contract its queries find in that file; a migration
+  // when it names its path or folder, or its addendum's change for the item is a migration or finds that file. Named case (a
+  // review's): an owner restated a work item 31 seconds before handing it again, stating the new response DTO of one endpoint.
+  // Fourth review: a criterion changed under `impact: { unchanged }` (a reworded acceptance check) plans nothing, so the
+  // criterion route goes only through the addendum's changes; items the amendment names but does not plan are still judged.
+  const amended = sources.flatMap((x) => amendedSinceLastBuild(state, x));
   const amendedFiles = amended.flatMap((a) => [...String(a.why).matchAll(PATHS)].map((m) => m[1]));
   const amendedDirs = amended.flatMap((a) => [...String(a.why).matchAll(MIGRATION_DIRS)].map((m) => m[1]));
-  // The amendment also re-planned the work item when it added or changed one of its criteria: the plan's goals for it moved, and
-  // what it builds toward them is planned (a second named case: an amendment changed the contract criterion of a work item and
-  // handed its API files to another, 20 seconds before the item was handed again).
-  const replanned = amended.some((a) => (a.replanned ?? []).length > 0);
-  const statesContract = replanned || amended.some((a) => Number(a.scope?.endpoints) > 0 || Number(a.scope?.errorCodes) > 0);
-  const direct = perFile.filter((f) => touches(cfg, located, f.repo, f.file));
+  const planned = amended.flatMap((a) => a.planned);
+  const plannedFiles = planned.flatMap((c) => c.files);
+  const plannedMigration = planned.some((c) => /migration/i.test(String(c.kind ?? '')));
+  const spec = (c, f) => (cfg?.components ?? []).some((x) => x.id === c && (x.provides ?? []).some((p) => p.spec && rootOf(cfg, f.repo, f.file).endsWith(p.spec)));
+  // What explains each contract file, and through which round (this one, or one open beside it): kept for the measurement.
+  const reasonOf = (f) => {
+    for (const x of sources) {
+      const who = x === h ? 'own' : `beside:${x.agent}`;
+      if (handedItems(x.fixes).some((ref) => touches(cfg, itemFiles(state, ref).files, f.repo, f.file))) return `${who}:located`;
+      const am = amendedSinceLastBuild(state, x);
+      if (am.some((a) => scopeExplains(cfg, a, f))) return `${who}:scope`;
+      if (am.some((a) => touches(cfg, [...String(a.why).matchAll(PATHS)].map((m) => m[1]), f.repo, f.file))) return `${who}:named-path`;
+      if (am.some((a) => a.planned.some((c) => touches(cfg, c.files, f.repo, f.file)))) return `${who}:addendum`;
+    }
+    return null;
+  };
+  const direct = perFile.filter((f) => touches(cfg, located, f.repo, f.file) || amended.some((a) => scopeExplains(cfg, a, f)) || touches(cfg, amendedFiles, f.repo, f.file) || touches(cfg, plannedFiles, f.repo, f.file));
   const covered = perFile.filter((f) => direct.includes(f) || f.components.some((c) => spec(c, f) && direct.some((d) => d.components.includes(c))));
-  const byAmendment = (f) => statesContract || touches(cfg, amendedFiles, f.repo, f.file);
-  const contracts = [...new Set(perFile.filter((f) => !covered.includes(f) && !byAmendment(f)).map((f) => f.file))];
-  const dirs = items.flatMap((x) => x.dirs);
+  const explained = covered.map((f) => ({ file: f.file, by: reasonOf(f) ?? 'spec-follows' }));
+  const contracts = [...new Set(perFile.filter((f) => !covered.includes(f)).map((f) => f.file))];
   // Third review of 0.7.31: a folder is found in any case (the pattern that reads it ignores case), so it is compared the same way.
   const underNamedDir = (m, ds = dirs) => ds.some((d) => [d, ...(cfg?.repos ?? []).map((r) => rootOf(cfg, r.name, d))].some((c) => rootOf(cfg, m.repo, m.file).toLowerCase().startsWith(c.toLowerCase())));
-  const migrations = migrationsAll.filter((m) => !replanned && !touches(cfg, located, m.repo, m.file) && !underNamedDir(m) && !touches(cfg, amendedFiles, m.repo, m.file) && !underNamedDir(m, amendedDirs)).map((m) => m.file);
+  const migrations = migrationsAll.filter((m) => !plannedMigration && !touches(cfg, located, m.repo, m.file) && !underNamedDir(m) && !touches(cfg, amendedFiles, m.repo, m.file) && !underNamedDir(m, amendedDirs) && !touches(cfg, plannedFiles, m.repo, m.file)).map((m) => m.file);
   // The files this attempt's own earlier commits (from its base to this handoff) already changed: a surface the plan's work opened.
   const earlier = new Set(Object.entries(ownChanges(state, { heads: Object.fromEntries(Object.entries(state.repos ?? {}).map(([n, r]) => [n, r.base])), closedAt: true, closedHeads: impl.heads }, repos)).flatMap(([repo, files]) => files.map((f) => `${repo}:${f}`)));
   const fresh = (repo, file) => !earlier.has(`${repo}:${file}`);
@@ -221,7 +269,7 @@ export function reachOf(state, cfg, h) {
   const nonBlocking = new Set([...(h.fixes.alsoFix ?? []), ...(h.fixes.pass ?? []), ...(h.fixes.named ?? [])]);
   const unboundedNonBlocking = (h.fixes.unbounded ?? []).filter((ref) => nonBlocking.has(ref));
   const keep = (f) => unboundedNonBlocking.length || fresh(repoOf(f), f);
-  return { impl, repos, changed, unboundedNonBlocking, all: { contracts: [...new Set(perFile.map((f) => f.file))], migrations: migrationsAll.map((m) => m.file) }, contracts: contracts.filter(keep), migrations: migrations.filter(keep) };
+  return { impl, repos, changed, unboundedNonBlocking, explained, all: { contracts: [...new Set(perFile.map((f) => f.file))], migrations: migrationsAll.map((m) => m.file) }, contracts: contracts.filter(keep), migrations: migrations.filter(keep) };
 }
 // What a round was handed besides planned work (second review of 0.7.31): a round that builds planned work and also fixes findings
 // or items is judged by those; one that only builds planned work is the plan's.

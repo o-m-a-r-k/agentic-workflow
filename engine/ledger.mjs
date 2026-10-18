@@ -333,7 +333,7 @@ export function reduce(entries) {
         // course can tell a re-handoff of amended work (planned by the amendment) from one nobody planned (engine/signals.mjs).
         for (const w of d.work ?? []) {
           const before = (s.work ?? []).find((x) => x.id === w.id);
-          if (!before || JSON.stringify(before) !== JSON.stringify(w)) (s.workAmended[w.id] ??= []).push({ at: e.at, amendment: s.criteriaAmendments.length + 1, why: [w.why, w.summary, w.text].filter((x) => typeof x === 'string').join(' '), criteria: Array.isArray(w.criteria) ? w.criteria : [], replanned: [...(d.changes?.added ?? []), ...(d.changes?.changed ?? [])].filter((c) => (w.criteria ?? []).includes(c)) });
+          if (!before || JSON.stringify(before) !== JSON.stringify(w)) (s.workAmended[w.id] ??= []).push({ at: e.at, amendment: s.criteriaAmendments.length + 1, why: [w.why, w.summary, w.text].filter((x) => typeof x === 'string').join(' '), criteria: Array.isArray(w.criteria) ? w.criteria : [] });
         }
         if (d.work) s.work = d.work;
         for (const w of d.work ?? []) s.workIntroduced[w.id] ??= e.at;
@@ -511,7 +511,7 @@ export function reduce(entries) {
         s.scopeChanges.push({ ...d, at: e.at });
         // Third review of 0.7.31: what the amendment says it changes in the contract (`scope.endpoints`, `scope.errorCodes`).
         const a = s.criteriaAmendments[(d.amendment ?? 0) - 1];
-        if (a) a.scope = { endpoints: d.endpoints ?? null, errorCodes: d.errorCodes ?? null, stated: d.stated ?? null };
+        if (a) a.scope = { endpoints: d.endpoints ?? null, errorCodes: d.errorCodes ?? null, names: [...(d.stated?.endpoints ?? []), ...(d.stated?.errorCodes ?? [])] };
         break;
       }
       case 'subagents.attributed':

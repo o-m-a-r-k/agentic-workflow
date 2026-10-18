@@ -70,8 +70,9 @@ Release notes, newest first, then every fix that came from a failure in the work
     what nothing handed to that round explains: not on planned work being built, not where a reviewer's finding pointed at
     that file or the reviewer's suggested fix named it, and, for a round fixing only blocking problems, not on a file the
     ticket's own planned work had already changed. A round that builds planned work and also fixes problems is judged
-    by the fixes, and a piece of work handed again to fix a named problem is judged as a fix of that problem, unless you
-    or the agent re-planned that piece of work first (its goals or its contract restated). A suggested fix explains a new
+    by the fixes, and a piece of work handed again to fix a named problem is judged as a fix of that problem, except for
+    what a re-plan of that piece of work stated: the endpoints it changes, the files it names, or the planned changes it
+    lists (rewording an acceptance check explains nothing). A suggested fix explains a new
     migration only when it names where it goes, never by the word "migration" alone. Measured again on the same records,
     counting only rounds that finished: 1 of 229, the due-date change that started this release, and none of the 67
     pieces of work handed again to fix a named problem. When two implementers work in one repository at once, it names
