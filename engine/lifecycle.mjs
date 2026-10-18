@@ -11,7 +11,7 @@ import path from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { actor, addRepoWorktree, baseRef, branchName, onTarget, changedFiles, cleanupWorktrees, entry, missingWorktrees, openState, treeHashes, worktreeDir } from './attempt.mjs';
 import { channelOf, discoveredVerdicts, headsNow, nonissueVerdicts, openDiscovered, seamVerdicts, unacknowledged, reportsForReview, reportedIssueVerdicts } from './discovered.mjs';
-import { itemOpen, premiseCloseNotes, premiseNote, premiseOpen, premiseRef, premiseReports, premisesForReveal, premisesForReview, premiseStep } from './premise.mjs';
+import { isDiscoveredRef, itemOpen, premiseCloseNotes, premiseNote, premiseOpen, premiseRef, premiseReports, premisesForReveal, premisesForReview, premiseStep } from './premise.mjs';
 import { productDecisionsFor } from './product-decisions.mjs';
 import { executionSettings, rejectModelOverrides } from './models.mjs';
 import { rerunsOnlyFailed, sessionRules } from './onboard.mjs';
@@ -952,13 +952,21 @@ export function handoff(root, role, options) {
   // Review of 0.7.31 (M3): `planned` names the planned work items this implementer builds for the first time (handed after a review,
   // such a build is no fix round: its reach is the plan's, and the course does not count it).
   const plannedFirst = role === 'implementer' ? [...(work && !Array.isArray(work.items) && unstartedWork(state).some((w) => w.id === work.id) ? [work.id] : []), ...(covers ?? []).filter((id) => !passItemsOf(state).some((w) => w.id === id))] : [];
+  // Second review of 0.7.31: a work item handed again after a review, as no fix round and no pass, whose words (the owner's context,
+  // the work item's own) name an open finding or discovered issue was handed that item: the course judges what it reached as it
+  // judges an `alsoFix` item. Named case (a review's measurement): "W2 bounded completion: fix D596" changed four controllers and a
+  // migration with no `fixes` on its handoff, so the course never saw it.
+  const namedRefs = role === 'implementer' && !repairNow && !passItems && (state.reviews ?? []).length
+    ? [...new Set([ownerContext, ...(work && !plannedFirst.includes(work.id) ? [work.why, work.summary, work.text] : [])].filter((x) => typeof x === 'string').join(' ').match(/(?<![\w-])(?:D\d+|[\w.-]+:[A-Za-z]+\d+)(?![\w])/g) ?? [])].map(premiseRef).filter((ref) => itemOpen(state, ref))
+    : [];
   const fixesHanded = (() => {
-    if (!repairNow && !passItems && !(plannedFirst.length && (state.reviews ?? []).length)) return null;
+    if (!repairNow && !passItems && !namedRefs.length && !(plannedFirst.length && (state.reviews ?? []).length)) return null;
     const repairRefs = (repair ?? []).flatMap((g) => g.findings ?? []).map((f) => ({ ref: `${f.round}:${f.id}`, fix: statedFixOf(f) }));
     const also = alsoFix.map((x) => ({ ref: x.ref, fix: x.fix ?? null }));
     const pass = (passItems ?? []).flatMap((p) => p.items).map((x) => ({ ref: x.ref, fix: x.fix ?? null }));
-    const unbounded = [...repairRefs, ...also, ...pass].filter((x) => typeof x.fix?.minutes !== 'number').map((x) => x.ref);
-    return { ...(plannedFirst.length ? { planned: plannedFirst } : {}), ...(repairRefs.length ? { repair: repairRefs.map((x) => x.ref) } : {}), ...(also.length ? { alsoFix: also.map((x) => x.ref) } : {}), ...(pass.length ? { pass: pass.map((x) => x.ref) } : {}), ...(unbounded.length ? { unbounded } : {}) };
+    const named = namedRefs.map((ref) => ({ ref, fix: isDiscoveredRef(ref) ? null : statedFixOf(observations(state).find((f) => f.ref === ref) ?? earlierOpenFindings(state, null).find((f) => `${f.round}:${f.id}` === ref) ?? {}) }));
+    const unbounded = [...repairRefs, ...also, ...pass, ...named].filter((x) => typeof x.fix?.minutes !== 'number').map((x) => x.ref);
+    return { ...(plannedFirst.length ? { planned: plannedFirst } : {}), ...(repairRefs.length ? { repair: repairRefs.map((x) => x.ref) } : {}), ...(also.length ? { alsoFix: also.map((x) => x.ref) } : {}), ...(pass.length ? { pass: pass.map((x) => x.ref) } : {}), ...(named.length ? { named: named.map((x) => x.ref) } : {}), ...(unbounded.length ? { unbounded } : {}) };
   })();
   // The agent type's role file changed after the owner's session loaded it (I-15): an agent started by type runs the old
   // role, so its bundle (read first) points it at the current file. A plugin update reaches the next role with no restart and

@@ -69,9 +69,13 @@ Release notes, newest first, then every fix that came from a failure in the work
     project's records, mostly planned work updating an API description along with an endpoint change. It now fires only on
     what nothing handed to that round explains: not on planned work being built, not where a reviewer's finding pointed at
     that file or the reviewer's suggested fix named it, and, for a round fixing only blocking problems, not on a file the
-    ticket's own planned work had already changed. Measured again on the same records: 1 of 279 rounds, and that one is
-    the due-date change that started this release. When two implementers work in one repository at once, it names both
-    rather than blaming one, and a notes file in a migrations folder no longer counts as a migration.
+    ticket's own planned work had already changed. A round that builds planned work and also fixes problems is judged
+    by the fixes, and a piece of work handed again to fix a named problem is judged as a fix of that problem. A suggested
+    fix explains a new migration only when it names where it goes, never by the word "migration" alone. Measured again on
+    the same records: 3 of 280 rounds, the due-date change that started this release and two pieces of work handed again
+    to fix a recorded problem that changed API controllers. When two implementers work in one repository at once, it
+    names both rather than blaming one, and a notes file or the index file in a migrations folder no longer counts as a
+    migration.
   - `wf decide` records the options you were offered, and the choice has to be one of them, so a later reader sees when
     every option built the same change. A reviewer is given your decision, the options and what was not checked, never the
     agent's recommendation or its reasons.

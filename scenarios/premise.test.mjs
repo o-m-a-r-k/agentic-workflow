@@ -395,3 +395,73 @@ test('review of 0.7.31 (L4): after a planned pass, the full evidence review is h
   record(p, goodClosure('r2', { priorFindings: [{ round: 'r1', id: 'F1', status: 'verified-nonissue', evidence: 'src/a.txt:2', rationale: 'the premise behind the fix does not hold in production paths', premise: 'does not hold: no production route serves the page' }] }));
   assert.equal(resume(p).decision.kind, 'accept');
 });
+
+// ---- Second review of 0.7.31 ----
+
+// A fix round handed only F1 (with the reviewer's stated fix), whose commits add `files`.
+function fixRoundWith(p, fix, files) {
+  ok(wf(p.root, ['handoff', 'implementer', '--agent', 'i1', '--attempt', p.id]));
+  commitIn(p.wt, { 'src/a.txt': LINES.replace('l2', 'L2') }, 'C1');
+  ok(wf(p.root, ['handoff', 'close', '--agent', 'i1', '--attempt', p.id]));
+  ok(wf(p.root, ['handoff', 'reviewer', '--agent', 'r1', '--attempt', p.id]));
+  record(p, goodClosure('r1', { findings: [blocking('F1', 'src/a.txt:2', { fix })] }));
+  ok(wf(p.root, ['handoff', 'implementer', '--agent', 'i1', '--attempt', p.id]));
+  commitIn(p.wt, files, 'fix F1');
+  writeReport(p.root, p.id, 'i1', { approach: 'the stated fix', expect: { minutes: 30 } });
+  ok(wf(p.root, ['handoff', 'close', '--agent', 'i1', '--attempt', p.id]));
+  return ok(wf(p.root, ['signals', '--attempt', p.id, '--json'])).json().reach;
+}
+
+test('second review of 0.7.31: a stated fix explains a migration only by naming its path, and an index file under a migrations folder is no migration', () => {
+  // "no migration is needed" names no migration: the one the round adds is reached from nothing handed.
+  const a = project('pm-mig-word');
+  const word = fixRoundWith(a, { what: 'round the total once; no migration is needed', minutes: 30 }, { 'src/a.txt': LINES.replace('l2', 'L2 rounded'), 'db/migrations/003_total.sql': 'alter table invoice add column total_rounded numeric;\n' });
+  assert.deepEqual(word.map((x) => x.migrations), [['db/migrations/003_total.sql']]);
+  // A stated fix that names the migrations folder explains the migration added there.
+  const b = project('pm-mig-path');
+  assert.deepEqual(fixRoundWith(b, { what: 'store the rounded total: a new migration in db/migrations/ and the service change', minutes: 40 }, { 'src/a.txt': LINES.replace('l2', 'L2 rounded'), 'db/migrations/003_total.sql': 'alter table invoice add column total_rounded numeric;\n' }), []);
+  // The folder's index (a barrel that lists the migrations) is not a migration.
+  const c = project('pm-mig-barrel');
+  assert.deepEqual(fixRoundWith(c, { what: 'round the total once', minutes: 30 }, { 'src/a.txt': LINES.replace('l2', 'L2 rounded'), 'db/migrations/index.ts': 'export const migrations = [];\n' }), []);
+});
+
+test('second review of 0.7.31: a round that builds planned work and also fixes findings is judged by what it fixes', () => {
+  const p = twoItems('pm-reach-mixed');
+  ok(wf(p.root, ['handoff', 'implementer', '--agent', 'iA', '--work', 'W1', '--attempt', p.id]));
+  commitIn(p.wt, { 'src/a.txt': LINES.replace('l2', 'L2') }, 'W1');
+  writeReport(p.root, p.id, 'iA', { left: [DUE] });
+  ok(wf(p.root, ['handoff', 'close', '--agent', 'iA', '--attempt', p.id]));
+  ok(wf(p.root, ['check', '--attempt', p.id]));
+  ok(wf(p.root, ['handoff', 'reviewer', '--agent', 'r1', '--attempt', p.id]));
+  record(p, goodClosure('r1', { findings: [blocking('F1', 'src/a.txt:2', { fix: { what: 'round once', minutes: 20 } })], criteria: [{ id: 'C1', evidence: { kind: 'output', ref: 'log 1' } }, { id: 'C2', evidence: { kind: 'not-applicable', reason: 'not built yet' } }] }));
+  // Handed without --work: W2's first build, F1's fix and D1 beside it, in one round.
+  ok(wf(p.root, ['handoff', 'implementer', '--agent', 'iB', '--attempt', p.id]));
+  assert.deepEqual(resume(p).handoffs.at(-1).fixes, { planned: ['W2'], repair: ['r1:F1'], alsoFix: ['D1'], unbounded: ['D1'] });
+  commitIn(p.wt, { 'src/a.txt': LINES.replace('l2', 'L2 rounded'), 'src/b.txt': LINES.replace('l2', 'L2'), 'openapi.json': '{"paths":{"/b":{"dueDate":"date"}}}\n' }, 'W2, F1 and the due date');
+  ok(wf(p.root, ['handoff', 'close', '--agent', 'iB', '--attempt', p.id]));
+  const s = resume(p);
+  assert.equal(s.decision.kind, 'strategy');
+  assert.deepEqual(s.decision.courseSignals.map((x) => x.id), ['reach']);
+  assert.match(s.next, /the fix round of implementer iB changed the contract openapi\.json/);
+});
+
+test('second review of 0.7.31: a work item handed again with words naming an open item is judged as handed that item', () => {
+  const p = twoItems('pm-reach-named');
+  ok(wf(p.root, ['handoff', 'implementer', '--agent', 'iA', '--work', 'W1', '--attempt', p.id]));
+  ok(wf(p.root, ['handoff', 'implementer', '--agent', 'iB', '--work', 'W2', '--attempt', p.id]));
+  commitIn(p.wt, { 'src/a.txt': LINES.replace('l2', 'L2'), 'src/b.txt': LINES.replace('l2', 'L2') }, 'W1 and W2');
+  writeReport(p.root, p.id, 'iB', { left: [DUE] });
+  ok(wf(p.root, ['handoff', 'close', '--agent', 'iA', '--attempt', p.id]));
+  ok(wf(p.root, ['handoff', 'close', '--agent', 'iB', '--attempt', p.id]));
+  ok(wf(p.root, ['check', '--attempt', p.id]));
+  ok(wf(p.root, ['handoff', 'reviewer', '--agent', 'r1', '--attempt', p.id]));
+  record(p, goodClosure('r1', { criteria: [{ id: 'C1', evidence: { kind: 'output', ref: 'log 1' } }, { id: 'C2', evidence: { kind: 'output', ref: 'log 2' } }] }));
+  // W2 handed again, its context naming D1: no fix round, no pass, but D1 is what it was handed.
+  ok(wf(p.root, ['handoff', 'implementer', '--agent', 'iB', '--work', 'W2', '--context', 'W2 bounded completion: fix D1', '--attempt', p.id]));
+  assert.deepEqual(resume(p).handoffs.at(-1).fixes, { named: ['D1'], unbounded: ['D1'] });
+  commitIn(p.wt, { 'src/b.txt': LINES.replace('l3', 'L3 as a date'), 'openapi.json': '{"paths":{"/b":{"dueDate":"date"}}}\n' }, 'D1');
+  ok(wf(p.root, ['handoff', 'close', '--agent', 'iB', '--attempt', p.id]));
+  const reach = ok(wf(p.root, ['signals', '--attempt', p.id, '--json'])).json().reach;
+  assert.deepEqual(reach.map((x) => [x.agent, x.contracts]), [['iB', ['openapi.json']]]);
+  assert.match(ok(wf(p.root, ['signals', '--attempt', p.id])).out, /handed D1, with 1 handed item with no stated fix \(unbounded\): D1/);
+});
