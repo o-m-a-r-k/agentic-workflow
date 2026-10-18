@@ -92,11 +92,11 @@ test('a correction invalidates acceptance and keeps the admission checks as they
 
 test('a correction keeps every registration obligation: a registered step, a new commit that descends from the pin, a committed tree, closed roles, a reason', () => {
   const f = registered('validation-correct-refusals');
-  // An admission step is corrected only by the person's decision (I-125, 0.7.8); a step nobody registered is registered
-  // with `add`.
+  // An admission step defined exactly as pinned has nothing to correct (0.7.32, D78: no person screens it any more); a step
+  // nobody registered is registered with `add`.
   const admission = wf(f.root, ['validation', 'correct', '--steps', 'unit', '--reason', 'r', '--attempt', f.e.id], { ownerSilent: true });
   assert.equal(admission.code, 75);
-  assert.match(admission.err, /correct the admission check unit to its definition committed at/);
+  assert.match(admission.err, /unit is defined at [0-9a-f]{10} exactly as pinned \(the step and its plugin\): there is nothing to correct/);
   assert.match(correct(f, ['--steps', 'ghost', '--reason', 'r']).err, /neither a registered supplemental validation step nor an admission step/);
   // No reason.
   assert.match(correct(f, ['--steps', 'http']).err, /needs --reason/);
@@ -130,91 +130,101 @@ test('a correction is limited to the criteria the attempt froze and to existing 
   ok(correct(f));
 });
 
-test('a check frozen at admission that is itself wrong is corrected with the person\'s yes; the gate runs the correction after a fresh review (I-125)', () => {
+// 0.7.32 (D78), the person's words: "why should it come to me? we have an agent designed just for that in the workflow right?" A
+// correction of an admission check was the person's decision (I-125, D37): 20 questions on 10 attempts in four days, 7 on one ticket,
+// while a fresh independent review and the full gate followed anyway. That review now judges it: it is handed both definitions
+// (the original pin and the corrected one, the step, its plugin code, and the adapter's diff between them) and gives its verdict on
+// each corrected admission step; a closure without one is refused, and no verdict means no acceptance.
+const ADMISSION_CFG = (run) => yaml({ version: 1, enabled: true, name: 'fixture', repos: [{ name: 'app', path: '.', base: 'main' }], gate: { steps: [{ id: 'unit', repo: 'app', run, inputs: ['src/**'] }] } });
+const verdictOn = (f, verdict, extra = {}) => { const c = state(f.root, f.e.id).validationCorrections.at(-1); return [{ id: 'unit', commit: c.commit, verdict, evidence: 'the original and corrected definitions compared: every case and assertion is kept', ...extra }]; };
+const handReviewer = (f, agent) => JSON.parse(fs.readFileSync(ok(wf(f.root, ['handoff', 'reviewer', '--agent', agent, '--attempt', f.e.id])).out.match(/^Read (\S+)/m)[1], 'utf8'));
+
+test('0.7.32 (D78): a check frozen at admission is corrected with no question to the person; the review that follows is handed both definitions and judges it, and the gate runs the correction (I-125)', () => {
   const f = fixture('validation-correct-admission');
   const admission = state(f.root, f.e.id).adapterBase;
-  commitIn(f.wt, { '.workflow/project.yaml': yaml({ version: 1, enabled: true, name: 'fixture', repos: [{ name: 'app', path: '.', base: 'main' }], gate: { steps: [{ id: 'unit', repo: 'app', run: 'test -f src/a.txt && echo corrected-admission-check', inputs: ['src/**'] }] } }) });
-  const asked = wf(f.root, ['validation', 'correct', '--steps', 'unit', '--reason', 'it read a failed request as empty data', '--attempt', f.e.id], { ownerSilent: true });
-  assert.equal(asked.code, 75, 'changing a check frozen at admission is the person\'s decision');
-  ok(correct(f, ['--steps', 'unit', '--reason', 'it read a failed request as empty data']));
+  commitIn(f.wt, { '.workflow/project.yaml': ADMISSION_CFG('test -f src/a.txt && echo corrected-admission-check') });
+  const done = wf(f.root, ['validation', 'correct', '--steps', 'unit', '--reason', 'it read a failed request as empty data', '--attempt', f.e.id], { ownerSilent: true });
+  assert.equal(done.code, 0, done.err);
+  assert.match(done.out + done.err, /no question to the person: the review that follows judges the correction/);
   const s = state(f.root, f.e.id);
+  assert.deepEqual((s.decisions ?? []).filter((d) => d.kind === 'override-gate'), [], 'nothing is asked');
   assert.equal(s.adapterBase, admission, 'the admission adapter itself is untouched');
   assert.deepEqual(s.validationCorrections[0].from.map((x) => [x.id, x.commit, x.admission]), [['unit', admission, true]], 'the original stays in the record');
   assert.equal(s.validationCorrections[0].from[0].definition.run, 'test -f src/a.txt');
-  review(f, 'code-1');
+  assert.equal(s.validationCorrections[0].judgedBy, 'reviewer');
+  // The fresh code review is handed both definitions and the adapter's diff between the pins.
+  const bundle = handReviewer(f, 'code-1');
+  const [c] = bundle.admissionCorrections;
+  assert.deepEqual([c.id, c.original.commit, c.original.definition.run, c.corrected.commit, c.corrected.definition.run], ['unit', admission, 'test -f src/a.txt', s.validationCorrections[0].commit, 'test -f src/a.txt && echo corrected-admission-check']);
+  assert.match(c.diff, new RegExp(`diff ${admission} ${s.validationCorrections[0].commit} -- \\.workflow`));
+  assert.deepEqual(c.files, ['.workflow/project.yaml']);
+  assert.match(bundle.instructions, /`admissionCorrections` lists checks frozen at admission that this attempt corrected \(unit\)/);
+  assert.match(bundle.instructions, /coverage is kept when every test case and assertion survives and only expectations the frozen criteria deliberately change are updated; selectors, waits and paths are plumbing/);
+  assert.match(bundle.instructions, /A loss against the admission original \(a case or assertion removed, skipped or loosened, an expectation weakened, a timeout raised to hide a failure\) is a blocking finding/);
+  // A closure with no verdict on the correction is refused; one with it is recorded.
+  const none = wf(f.root, ['review', '--closure', closureFile(f.base, goodClosure('code-1')), '--attempt', f.e.id]);
+  assert.equal(none.code, 75);
+  assert.match(none.err, /the admission check unit was corrected at [0-9a-f]{10} and this round gives no verdict on it/);
+  ok(wf(f.root, ['review', '--closure', closureFile(f.base, goodClosure('code-1', { validationChecked: verdictOn(f, 'complies') })), '--attempt', f.e.id]));
   const run = ok(wf(f.root, ['gate', '--attempt', f.e.id, '--json'])).json();
   assert.match(logOf(run, 'unit'), /corrected-admission-check/);
   assert.deepEqual(run.steps.map((x) => x.id), ['unit'], 'it runs in place of the original, once');
-  // The correction was itself wrong: a second one is still the person's decision, and the gate runs it (review of 0.7.8: a
-  // second correction skipped the person and left the gate refusing for good).
-  commitIn(f.wt, { '.workflow/project.yaml': yaml({ version: 1, enabled: true, name: 'fixture', repos: [{ name: 'app', path: '.', base: 'main' }], gate: { steps: [{ id: 'unit', repo: 'app', run: 'test -f src/a.txt && echo corrected-twice', inputs: ['src/**'] }] } }) });
-  const second = wf(f.root, ['validation', 'correct', '--steps', 'unit', '--reason', 'the first correction missed a case', '--attempt', f.e.id], { ownerSilent: true });
-  assert.equal(second.code, 75, 'the second correction asks the person too');
-  ok(correct(f, ['--steps', 'unit', '--reason', 'the first correction missed a case']));
-  assert.deepEqual(state(f.root, f.e.id).validationCorrections.map((c) => c.from[0].admission), [true, true]);
-  review(f, 'code-2');
-  assert.match(logOf(ok(wf(f.root, ['gate', '--attempt', f.e.id, '--json'])).json(), 'unit'), /corrected-twice/);
+  // The evidence review has nothing more to judge on it, and the attempt is accepted.
+  const ev = handReviewer(f, 'evidence-2');
+  assert.equal(ev.admissionCorrections, undefined, 'judged once');
+  ok(wf(f.root, ['review', '--closure', closureFile(f.base, goodClosure('evidence-2')), '--attempt', f.e.id]));
+  ok(wf(f.root, ['accept', '--attempt', f.e.id]));
+  // A second correction of the same step is judged again, still with no question.
+  commitIn(f.wt, { '.workflow/project.yaml': ADMISSION_CFG('test -f src/a.txt && echo corrected-twice') });
+  ok(wf(f.root, ['validation', 'correct', '--steps', 'unit', '--reason', 'the first correction missed a case', '--attempt', f.e.id], { ownerSilent: true }));
+  assert.deepEqual(state(f.root, f.e.id).validationCorrections.map((x) => x.from[0].admission), [true, true]);
+  const [again] = handReviewer(f, 'code-3').admissionCorrections;
+  assert.deepEqual([again.original.definition.run, again.previous.definition.run, again.corrected.definition.run], ['test -f src/a.txt', 'test -f src/a.txt && echo corrected-admission-check', 'test -f src/a.txt && echo corrected-twice'], 'both baselines: the admission original and the previous correction');
 });
 
-
-// 0.7.15, named failure (audit of one project's tickets): two admission checks were corrected seven times across five
-// parallel tickets, and the person was asked each time, waiting 28 to 147 minutes to answer the same question.
-test('a correction of an admission check the person approved in one attempt is taken in another without asking again; a different one still asks', () => {
-  const f = fixture('validation-correct-shared');
-  const cfg = (run) => yaml({ version: 1, enabled: true, name: 'fixture', repos: [{ name: 'app', path: '.', base: 'main' }], gate: { steps: [{ id: 'unit', repo: 'app', run, inputs: ['src/**'] }] } });
-  commitIn(f.wt, { '.workflow/project.yaml': cfg('test -f src/a.txt && echo corrected') });
-  ok(correct(f, ['--steps', 'unit', '--reason', 'it read a failed request as empty data']));
-  const e2 = ok(wf(f.root, ['entry', '--item', 'ENG-2', '--json'])).json();
-  ok(wf(f.root, ['handoff', 'planner', '--agent', 'planner2', '--attempt', e2.id]));
-  ok(wf(f.root, ['plan', '--file', criteriaFile(f.base), '--attempt', e2.id]));
-  ok(wf(f.root, ['handoff', 'implementer', '--agent', 'impl2', '--attempt', e2.id]));
-  commitIn(e2.repos.app.worktree, { 'src/a.txt': 'changed too\n', '.workflow/project.yaml': cfg('test -f src/a.txt && echo corrected') });
-  ok(wf(f.root, ['handoff', 'close', '--agent', 'impl2', '--attempt', e2.id]));
-  const taken = wf(f.root, ['validation', 'correct', '--steps', 'unit', '--reason', 'the same defect', '--attempt', e2.id, '--json'], { ownerSilent: true });
-  assert.equal(taken.code, 0, taken.err);
-  const s2 = state(f.root, e2.id);
-  assert.equal(s2.validationCorrections[0].approvedIn.attempt, f.e.id, 'the person\'s earlier yes is recorded as the approval');
-  assert.equal((s2.decisions ?? []).filter((d) => d.kind === 'override-gate').length, 0, 'no new question');
-  commitIn(e2.repos.app.worktree, { '.workflow/project.yaml': cfg('test -f src/a.txt && echo another-correction') });
-  const asked = wf(f.root, ['validation', 'correct', '--steps', 'unit', '--reason', 'a different change', '--attempt', e2.id], { ownerSilent: true });
-  assert.equal(asked.code, 75, 'a correction the person has not approved anywhere asks');
+test('0.7.32 (D78): a correction that weakens the check is a blocking finding the ticket fixes; a verdict must name a finding of the closure, and with no verdict the attempt is not accepted', async () => {
+  const f = fixture('validation-correct-weakened');
+  commitIn(f.wt, { '.workflow/project.yaml': ADMISSION_CFG('true') });
+  ok(wf(f.root, ['validation', 'correct', '--steps', 'unit', '--reason', 'the check failed', '--attempt', f.e.id], { ownerSilent: true }));
+  handReviewer(f, 'code-1');
+  const unnamed = wf(f.root, ['review', '--closure', closureFile(f.base, goodClosure('code-1', { validationChecked: verdictOn(f, 'finding', { evidence: 'the check no longer tests anything' }) })), '--attempt', f.e.id]);
+  assert.equal(unnamed.code, 75);
+  assert.match(unnamed.err, /the verdict on unit is a finding: name it \(`finding`: the id of a finding of this closure, which says what the correction weakened\)/);
+  const weakened = { id: 'F1', severity: 'high', criterion: 'C1', summary: 'the corrected unit check runs `true`: its assertion that src/a.txt exists is gone', status: 'open', evidence: '.workflow/project.yaml:1 the run command no longer checks the file' };
+  ok(wf(f.root, ['review', '--closure', closureFile(f.base, goodClosure('code-1', { findings: [weakened], validationChecked: verdictOn(f, 'finding', { evidence: 'the assertion was removed', finding: 'F1' }) })), '--attempt', f.e.id]));
+  assert.equal(state(f.root, f.e.id).decision.kind, 'repair', 'the ticket fixes it, like any blocking finding');
+  assert.equal(wf(f.root, ['gate', '--attempt', f.e.id], { ownerSilent: true }).code, 75);
+  // No verdict, no acceptance: the engine's own reading of the rounds since the correction.
+  const { loadState } = await import('../engine/ledger.mjs');
+  const { correctionsToJudge } = await import('../engine/lifecycle.mjs');
+  const st = loadState(f.root, f.e.id);
+  assert.deepEqual(correctionsToJudge(f.root, st).map((x) => x.id), [], 'judged by code-1');
+  const unjudged = { ...st, reviews: st.reviews.map((r) => ({ ...r, closure: { ...r.closure, validationChecked: [] } })) };
+  assert.deepEqual(correctionsToJudge(f.root, unjudged).map((x) => x.id), ['unit']);
 });
 
-// Independent review of 0.7.15: an approval counts only while it stands. A correction the person later replaced because it
-// was itself wrong is not taken again, and a `no` the person gave to the same correction anywhere asks again.
-test('a replaced correction or one the person refused is never taken from another attempt', () => {
-  const f = fixture('validation-correct-standing');
-  const cfg = (run) => yaml({ version: 1, enabled: true, name: 'fixture', repos: [{ name: 'app', path: '.', base: 'main' }], gate: { steps: [{ id: 'unit', repo: 'app', run, inputs: ['src/**'] }] } });
-  const X = 'test -f src/a.txt && echo x', Y = 'test -f src/a.txt && echo y', Z = 'test -f src/a.txt && echo z';
-  const another = (item) => {
-    const e = ok(wf(f.root, ['entry', '--item', item, '--json'])).json();
-    ok(wf(f.root, ['handoff', 'planner', '--agent', `p-${item}`, '--attempt', e.id]));
-    ok(wf(f.root, ['plan', '--file', criteriaFile(f.base), '--attempt', e.id]));
-    ok(wf(f.root, ['handoff', 'implementer', '--agent', `i-${item}`, '--attempt', e.id]));
-    commitIn(e.repos.app.worktree, { 'src/a.txt': `${item}\n` });
-    ok(wf(f.root, ['handoff', 'close', '--agent', `i-${item}`, '--attempt', e.id]));
-    return e;
+// In-flight attempts (D78): a question an earlier release opened is no longer asked. It is withdrawn, with the reason, when the
+// correction runs again; an answer the person already gave stays as recorded.
+test('0.7.32 (D78): a pending correction question is withdrawn with its reason when the correction runs again; an approved one is recorded as the approval', async () => {
+  const { append } = await import('../engine/ledger.mjs');
+  const asked = (name) => {
+    const g = fixture(name);
+    commitIn(g.wt, { '.workflow/project.yaml': ADMISSION_CFG(FIXED) });
+    const at = sh(g.wt, 'git rev-parse HEAD');
+    append(g.root, g.e.id, 'decision.created', { id: 'A1', kind: 'override-gate', key: `correct-admission:unit:${at}`, summary: `correct the admission check unit to its definition committed at ${at.slice(0, 10)}: it read a failed request as empty data (the original stays in the record; a fresh review and the full gate follow)`, choices: ['yes', 'no'] }, 'human:scenario');
+    return g;
   };
-  const tryCorrect = (e, run) => {
-    commitIn(e.repos.app.worktree, { '.workflow/project.yaml': cfg(run) });
-    return wf(f.root, ['validation', 'correct', '--steps', 'unit', '--reason', 'correct it', '--attempt', e.id], { ownerSilent: true });
-  };
-  commitIn(f.wt, { '.workflow/project.yaml': cfg(X) });
-  ok(correct(f, ['--steps', 'unit', '--reason', 'first fix']));
-  commitIn(f.wt, { '.workflow/project.yaml': cfg(Y) });
-  ok(correct(f, ['--steps', 'unit', '--reason', 'the first fix was itself wrong']));
-  assert.equal(tryCorrect(another('ENG-3'), X).code, 75, 'the correction the person replaced asks again');
-  const c = another('ENG-4');
-  const refused = tryCorrect(c, Z);
-  assert.equal(refused.code, 75);
-  approveAsOwner(f.root, c.id, refused.err.match(/wf approve (A\d+)/)[1], 'no');
-  assert.equal(tryCorrect(another('ENG-5'), Z).code, 75, 'a correction the person refused elsewhere asks again');
-  assert.equal(tryCorrect(another('ENG-6'), Y).code, 0, 'the standing approval is still taken');
-  // An approval taken from another attempt stands only while the one it rests on does: once the person replaces Y in the
-  // attempt that approved it, the attempt that took Y no longer lends it out.
-  commitIn(f.wt, { '.workflow/project.yaml': cfg(Z.replace('z', 'w')) });
-  ok(correct(f, ['--steps', 'unit', '--reason', 'Y was wrong too']));
-  assert.equal(tryCorrect(another('ENG-7'), Y).code, 75, 'a chained approval of a replaced correction asks again');
+  const pending = asked('validation-correct-pending-withdrawn');
+  assert.match(ok(wf(pending.root, ['resume', '--attempt', pending.e.id])).out, /A1 \(correcting the admission check unit\) is no longer asked: since 0\.7\.32 the reviewer judges corrections; run `wf validation correct --steps unit --reason "<why>" --attempt ENG-1\.1` again/);
+  ok(wf(pending.root, ['validation', 'correct', ...REASON, '--attempt', pending.e.id], { ownerSilent: true }));
+  const p = state(pending.root, pending.e.id);
+  assert.match(p.decisions[0].withdrawn.reason, /the reviewer judges corrections since 0\.7\.32/);
+  assert.equal(p.validationCorrections[0].decision, undefined);
+  const yes = asked('validation-correct-approved-kept');
+  approveAsOwner(yes.root, yes.e.id, 'A1', 'yes');
+  ok(wf(yes.root, ['validation', 'correct', ...REASON, '--attempt', yes.e.id], { ownerSilent: true }));
+  const y = state(yes.root, yes.e.id);
+  assert.deepEqual([y.validationCorrections[0].decision, y.decisions[0].withdrawn ?? null], ['A1', null], 'the person\'s yes stays as recorded');
 });
 
 // 0.7.11, named failure (one ticket, audit of 51 attempts): a correction that only scoped a step's evidence glob to the ticket
@@ -291,82 +301,99 @@ const baseMerge = (f, file = 'docs/upstream.txt') => {
 };
 const askedDecisions = (f) => (state(f.root, f.e.id).decisions ?? []).filter((d) => d.kind === 'override-gate');
 
-test('0.7.27 (I-187): an approved correction not yet applied holds across a base merge that leaves its definitions alone; changed definitions ask again', () => {
-  const f = fixture('validation-correct-merge');
-  commitIn(f.wt, { '.workflow/project.yaml': ADMISSION(FIXED) });
-  const asked = wf(f.root, ['validation', 'correct', ...REASON, '--attempt', f.e.id], { ownerSilent: true });
-  assert.equal(asked.code, 75);
-  const [d] = askedDecisions(f);
-  approveAsOwner(f.root, f.e.id, d.id, 'yes');
-  // The base moves on and is merged in: HEAD is another commit, the step definitions are the ones the person approved.
-  const before = sh(f.wt, 'git rev-parse HEAD');
-  baseMerge(f);
-  assert.notEqual(sh(f.wt, 'git rev-parse HEAD'), before);
-  const done = wf(f.root, ['validation', 'correct', ...REASON, '--attempt', f.e.id, '--json'], { ownerSilent: true });
-  assert.equal(done.code, 0, `the answer the person gave holds: ${done.err}`);
-  const s = state(f.root, f.e.id);
-  assert.equal(askedDecisions(f).length, 1, 'no second question for the same definitions');
-  assert.equal(s.validationCorrections[0].decision, d.id, 'the correction is recorded under the person\'s answer');
-  assert.ok(s.decisions[0].spent, 'and uses it up');
-  assert.equal(s.validations[0].commit, sh(f.wt, 'git rev-parse HEAD'), 'the corrected step is pinned at the merged HEAD');
-
-  // A change to the definitions the person approved is another question.
-  const g = fixture('validation-correct-merge-changed');
-  commitIn(g.wt, { '.workflow/project.yaml': ADMISSION(FIXED) });
-  assert.equal(wf(g.root, ['validation', 'correct', ...REASON, '--attempt', g.e.id], { ownerSilent: true }).code, 75);
-  approveAsOwner(g.root, g.e.id, askedDecisions(g)[0].id, 'yes');
-  baseMerge(g);
-  commitIn(g.wt, { '.workflow/project.yaml': ADMISSION(`${FIXED} && echo and-one-more-thing`) });
-  const again = wf(g.root, ['validation', 'correct', ...REASON, '--attempt', g.e.id], { ownerSilent: true });
-  assert.equal(again.code, 75, 'other definitions than the ones the person approved ask again');
-  assert.equal(askedDecisions(g).length, 2);
-  assert.ok(!askedDecisions(g)[0].spent, 'the earlier answer is not used up by a correction it did not approve');
-});
-
-test('0.7.27 (I-187): a declined correction stands across a base merge, and a question an earlier release asked under its commit is the same question while the definitions are', async () => {
-  // Declined: the same definitions are not asked about again after the merge.
+// 0.7.27 (I-187), as 0.7.32 (D78) has it: nothing is asked any more, but an answer the person gave to the same correction stands.
+test('0.7.27 (I-187), as 0.7.32 has it: a correction the person declined stands across a base merge; other definitions are recorded with no question', () => {
   const f = fixture('validation-correct-merge-declined');
   commitIn(f.wt, { '.workflow/project.yaml': ADMISSION(FIXED) });
-  assert.equal(wf(f.root, ['validation', 'correct', ...REASON, '--attempt', f.e.id], { ownerSilent: true }).code, 75);
-  approveAsOwner(f.root, f.e.id, askedDecisions(f)[0].id, 'no');
-  baseMerge(f);
-  const declined = wf(f.root, ['validation', 'correct', ...REASON, '--attempt', f.e.id], { ownerSilent: true });
-  assert.equal(declined.code, 75);
-  assert.match(declined.err, /correcting the admission check unit: the person answered A1 "Keep the original step"/);
-  assert.equal(askedDecisions(f).length, 1, 'a no stands: it is not asked again');
+  const at = sh(f.wt, 'git rev-parse HEAD');
+  return import('../engine/ledger.mjs').then(({ append }) => {
+    append(f.root, f.e.id, 'decision.created', { id: 'A1', kind: 'override-gate', key: `correct-admission:unit:${at}`, summary: 'correct the admission check unit', choices: ['yes', 'no'] }, 'human:scenario');
+    approveAsOwner(f.root, f.e.id, 'A1', 'no');
+    baseMerge(f);
+    const declined = wf(f.root, ['validation', 'correct', ...REASON, '--attempt', f.e.id], { ownerSilent: true });
+    assert.equal(declined.code, 75);
+    assert.match(declined.err, /correcting the admission check: the person answered A1 "no"/);
+    assert.equal(askedDecisions(f).length, 1, 'a no stands: it is not asked again');
+    commitIn(f.wt, { '.workflow/project.yaml': ADMISSION(`${FIXED} && echo changed-since`) });
+    ok(wf(f.root, ['validation', 'correct', ...REASON, '--attempt', f.e.id], { ownerSilent: true }));
+    assert.equal(askedDecisions(f).length, 1, 'other definitions are no question either');
+  });
+});
 
-  // Asked by 0.7.26 and earlier, whose key named the commit it was asked at.
-  const { append } = await import('../engine/ledger.mjs');
-  const legacy = (name, answer) => {
-    const g = fixture(name);
-    commitIn(g.wt, { '.workflow/project.yaml': ADMISSION(FIXED) });
-    const asked = sh(g.wt, 'git rev-parse HEAD');
-    append(g.root, g.e.id, 'decision.created', { id: 'A1', kind: 'override-gate', key: `correct-admission:unit:${asked}`, summary: `correct the admission check unit to its definition committed at ${asked.slice(0, 10)}: it read a failed request as empty data (the original stays in the record; a fresh review and the full gate follow)`, choices: ['yes', 'no'] }, 'human:scenario');
-    if (answer) approveAsOwner(g.root, g.e.id, 'A1', answer);
-    baseMerge(g);
-    return g;
-  };
-  const pending = legacy('validation-correct-legacy-pending', null);
-  const stillPending = wf(pending.root, ['validation', 'correct', ...REASON, '--attempt', pending.e.id], { ownerSilent: true });
-  assert.equal(stillPending.code, 75);
-  assert.match(stillPending.err, /\(A1: correct the admission check unit/);
-  assert.equal(askedDecisions(pending).length, 1, 'the pending question is asked as it is, not a second one');
+// 0.7.32 (D78), from a classification of 25 field corrections: none removed coverage frozen at admission, but four loosened what the
+// same attempt had added in an earlier correction (an Arabic "Day 1" check reduced to a bare "1", added checks removed, an exact text
+// check made "page contains", a 20 s timeout raised to 60 s), the specs were JSON-escaped strings inside the plugin, so a plain diff
+// was one long line, and the summaries the person approved named none of it. The reviewer compares the corrected definition with the
+// admission original and with the previous correction, from decoded copies.
+const specPlugin = (assertion, timeout = 20000) => `export default {async run(ctx){const spec = ${JSON.stringify(`it("shows the first day", () => {\n  cy.contains(${JSON.stringify(assertion)}, { timeout: ${timeout} })\n})`)}; ctx.log(spec); return {status:'passed'}}};`;
+const PLUGGED = (file = 'steps/unit.mjs') => yaml({ version: 1, enabled: true, name: 'fixture', repos: [{ name: 'app', path: '.', base: 'main' }], gate: { steps: [{ id: 'unit', repo: 'app', plugin: file, inputs: ['src/**'] }] } });
+function plugged(name) {
+  const config = { gate: { steps: [{ id: 'unit', repo: 'app', plugin: 'steps/unit.mjs', inputs: ['src/**'] }] } };
+  const f = singleRepoProject(name, config, { '.workflow/steps/unit.mjs': specPlugin('Monday') });
+  const e = ok(wf(f.root, ['entry', '--item', 'ENG-1', '--json'])).json();
+  ok(wf(f.root, ['handoff', 'planner', '--agent', 'planner', '--attempt', e.id]));
+  ok(wf(f.root, ['plan', '--file', criteriaFile(f.base), '--attempt', e.id]));
+  ok(wf(f.root, ['handoff', 'implementer', '--agent', 'impl', '--attempt', e.id]));
+  commitIn(e.repos.app.worktree, { 'src/a.txt': 'changed\n' });
+  ok(wf(f.root, ['handoff', 'close', '--agent', 'impl', '--attempt', e.id]));
+  return { ...f, e, wt: e.repos.app.worktree, config };
+}
 
-  const no = legacy('validation-correct-legacy-no', 'no');
-  assert.match(wf(no.root, ['validation', 'correct', ...REASON, '--attempt', no.e.id], { ownerSilent: true }).err, /the person answered A1 "no"/);
-  assert.equal(askedDecisions(no).length, 1);
+test('0.7.32 (D78): the reviewer is handed the admission original, the previous correction and the corrected definition, each decoded, with the decoded diffs', () => {
+  const f = plugged('validation-correct-baselines');
+  commitIn(f.wt, { '.workflow/steps/unit.mjs': specPlugin('Day 1') });
+  ok(wf(f.root, ['validation', 'correct', '--steps', 'unit', '--reason', 'the day is labelled Day 1', '--attempt', f.e.id], { ownerSilent: true }));
+  const first = handReviewer(f, 'code-1');
+  assert.equal(first.admissionCorrections[0].previous, null, 'a first correction has the admission original only');
+  ok(wf(f.root, ['review', '--closure', closureFile(f.base, goodClosure('code-1', { validationChecked: verdictOn(f, 'complies') })), '--attempt', f.e.id]));
+  // A second correction loosens what the first added.
+  commitIn(f.wt, { '.workflow/steps/unit.mjs': specPlugin('1', 60000) });
+  ok(wf(f.root, ['validation', 'correct', '--steps', 'unit', '--reason', 'the label moved', '--attempt', f.e.id], { ownerSilent: true }));
+  const [c] = handReviewer(f, 'code-2').admissionCorrections;
+  assert.deepEqual([c.original.definition.plugin, c.previous.commit !== c.original.commit, c.corrected.commit !== c.previous.commit], ['steps/unit.mjs', true, true]);
+  const decoded = (v) => fs.readFileSync(v.plugin.decoded, 'utf8');
+  assert.match(decoded(c.original), /^ {2}cy\.contains\("Monday", \{ timeout: 20000 \}\)$/m, 'the embedded spec reads line by line');
+  assert.match(decoded(c.previous), /^ {2}cy\.contains\("Day 1", \{ timeout: 20000 \}\)$/m);
+  assert.match(decoded(c.corrected), /^ {2}cy\.contains\("1", \{ timeout: 60000 \}\)$/m);
+  assert.match(c.decodedDiff.fromOriginal, /^git diff --no-index -- \S+\.decoded\.txt \S+\.decoded\.txt$/);
+  assert.match(c.decodedDiff.fromPrevious, /^git diff --no-index -- \S+\.decoded\.txt \S+\.decoded\.txt$/);
+  const bundle = JSON.parse(fs.readFileSync(fs.readdirSync(`${f.root}/.wf-evidence/attempts/${f.e.id}/handoffs`).filter((x) => x.endsWith('-reviewer.json')).map((x) => `${f.root}/.wf-evidence/attempts/${f.e.id}/handoffs/${x}`).sort().at(-1), 'utf8'));
+  assert.match(bundle.instructions, /A loss against the previous correction \(an assertion it added loosened, a check it added removed, a timeout on a case raised\) is a blocking finding too, unless it is tied to a criterion that is still proven another way/);
+  assert.match(bundle.instructions, /never from the correction's `reason`/);
+});
 
-  const yes = legacy('validation-correct-legacy-yes', 'yes');
-  const taken = wf(yes.root, ['validation', 'correct', ...REASON, '--attempt', yes.e.id, '--json'], { ownerSilent: true });
-  assert.equal(taken.code, 0, taken.err);
-  const s = state(yes.root, yes.e.id);
-  assert.equal(askedDecisions(yes).length, 1, 'the yes the person gave to the question as it was asked is taken after the merge');
-  assert.equal(s.validationCorrections[0].decision, 'A1');
-  assert.ok(s.decisions[0].spent);
+test('0.7.32 (D78): files the corrected plugin reads outside the adapter folder are recorded with the correction, handed to the reviewer, and a later change to one asks a verdict again', () => {
+  const f = plugged('validation-correct-reads');
+  const harness = `export default {async run(ctx){const fs = await import('node:fs'); ctx.log(fs.readFileSync(ctx.dir + '/front/fixtures/harness.jsx', 'utf8')); return {status:'passed'}}}; // reads front/fixtures/harness.jsx`;
+  commitIn(f.wt, { '.workflow/steps/unit.mjs': harness, 'front/fixtures/harness.jsx': 'cy.contains("Day 1")\n' });
+  ok(wf(f.root, ['validation', 'correct', '--steps', 'unit', '--reason', 'the spec moved to a harness', '--attempt', f.e.id], { ownerSilent: true }));
+  const s = state(f.root, f.e.id);
+  assert.deepEqual(s.validationCorrections[0].reads.map((x) => [x.step, x.path]), [['unit', 'front/fixtures/harness.jsx']]);
+  const [c] = handReviewer(f, 'code-1').admissionCorrections;
+  assert.deepEqual(c.reads.map((x) => [x.path, x.now === x.atCorrection]), [['front/fixtures/harness.jsx', true]]);
+  ok(wf(f.root, ['review', '--closure', closureFile(f.base, goodClosure('code-1', { validationChecked: verdictOn(f, 'complies') })), '--attempt', f.e.id]));
+  assert.equal(state(f.root, f.e.id).decision.kind, 'gate', 'judged');
+  // A product commit edits the harness: the check changed with no correction, and the next round judges it again.
+  commitIn(f.wt, { 'front/fixtures/harness.jsx': 'cy.contains("1")\n' });
+  const [again] = handReviewer(f, 'code-2').admissionCorrections;
+  assert.equal(again.reads[0].now === again.reads[0].atCorrection, false);
+  assert.match(again.reads[0].diff, /diff [0-9a-f]{40} HEAD -- front\/fixtures\/harness\.jsx$/);
+  assert.equal(wf(f.root, ['review', '--closure', closureFile(f.base, goodClosure('code-2', { criteria: [] })), '--attempt', f.e.id]).code, 75, 'no verdict on the changed harness, no closure');
+});
 
-  // The definitions changed after the earlier question: that is another question.
-  const changed = legacy('validation-correct-legacy-changed', 'yes');
-  commitIn(changed.wt, { '.workflow/project.yaml': ADMISSION(`${FIXED} && echo changed-since`) });
-  assert.equal(wf(changed.root, ['validation', 'correct', ...REASON, '--attempt', changed.e.id], { ownerSilent: true }).code, 75);
-  assert.equal(askedDecisions(changed).length, 2);
+test('0.7.32 (D78): an admission check another open attempt corrected too names fixing it once on the adapter\'s base branch, in the correction and in the next step', () => {
+  const f = fixture('validation-correct-shared');
+  commitIn(f.wt, { '.workflow/project.yaml': ADMISSION_CFG('test -f src/a.txt && echo corrected') });
+  const first = ok(wf(f.root, ['validation', 'correct', '--steps', 'unit', '--reason', 'it read a failed request as empty data', '--attempt', f.e.id], { ownerSilent: true }));
+  assert.match(first.out + first.err, /when the defect is in the check itself, not this ticket's intended behaviour, fix it once on the base branch of the adapter's repo instead: every live attempt follows the adapter there \(D60\)/);
+  const e2 = ok(wf(f.root, ['entry', '--item', 'ENG-2', '--json'])).json();
+  ok(wf(f.root, ['handoff', 'planner', '--agent', 'planner2', '--attempt', e2.id]));
+  ok(wf(f.root, ['plan', '--file', criteriaFile(f.base), '--attempt', e2.id]));
+  ok(wf(f.root, ['handoff', 'implementer', '--agent', 'impl2', '--attempt', e2.id]));
+  commitIn(e2.repos.app.worktree, { 'src/a.txt': 'changed too\n', '.workflow/project.yaml': ADMISSION_CFG('test -f src/a.txt && echo corrected') });
+  ok(wf(f.root, ['handoff', 'close', '--agent', 'impl2', '--attempt', e2.id]));
+  const second = ok(wf(f.root, ['validation', 'correct', '--steps', 'unit', '--reason', 'the same defect', '--attempt', e2.id], { ownerSilent: true }));
+  assert.match(second.out + second.err, new RegExp(`${f.e.id.replace('.', '\\.')} has corrected unit too: when the defect is in the check itself`));
+  assert.equal((state(f.root, e2.id).decisions ?? []).length, 0, 'no question in either attempt');
+  assert.match(state(f.root, e2.id).next, new RegExp(`the admission check unit is corrected here and in ${f.e.id.replace('.', '\\.')} too: when the defect is in the check itself \\(not this ticket's intended behaviour\\), fix it once on the base branch of app, which every live attempt follows \\(D60\\)`));
 });

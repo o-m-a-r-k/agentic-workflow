@@ -12,7 +12,7 @@ const bundleOf = (r) => JSON.parse(fs.readFileSync(r.json().bundle ?? r.json().f
 const batchClosure = (base, reviewer) => closureFile(base, { reviewer, findings: [], criteria: [{ id: 'B1', evidence: { kind: 'output', ref: 'batch gate' } }], screenshotsInspected: [], anomalies: 'none seen' });
 
 // An accepted member admitted with --defer-heavy that registered `check` (committed in its adapter, with `files`) on its own tree;
-// with `correct`, `check` replaces the admission step of its id (the person's decision, which the scripted owner approves).
+// with `correct`, `check` replaces the admission step of its id, which the member's reviewer judges (0.7.32, D78: no question).
 function memberWithCheck(p, item, change, check, files = {}, { correct = false } = {}) {
   const e = ok(wf(p.root, ['entry', '--item', item, '--owner', 'o', '--json', '--defer-heavy'])).json();
   ok(wf(p.root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id]));
@@ -25,7 +25,8 @@ function memberWithCheck(p, item, change, check, files = {}, { correct = false }
   if (correct) ok(wf(p.root, ['validation', 'correct', '--steps', check.id, '--reason', 'it read a failed request as empty data', '--attempt', e.id]));
   else ok(wf(p.root, ['validation', 'add', '--steps', check.id, '--criteria', 'C1', '--reason', 'the flow needs a real HTTP and browser check', '--attempt', e.id]));
   ok(wf(p.root, ['handoff', 'reviewer', '--agent', 'r0', '--attempt', e.id]));
-  ok(wf(p.root, ['review', '--closure', closureFile(p.base, goodClosure('r0')), '--attempt', e.id]));
+  const verdicts = correct ? [{ id: check.id, commit: state(p.root, e.id).validationCorrections.at(-1).commit, verdict: 'complies', evidence: 'every case and assertion of the original kept' }] : [];
+  ok(wf(p.root, ['review', '--closure', closureFile(p.base, goodClosure('r0', verdicts.length ? { validationChecked: verdicts } : {})), '--attempt', e.id]));
   const gate = ok(wf(p.root, ['gate', '--attempt', e.id, '--json'])).json();
   const shots = gate.steps.flatMap((s) => s.artifacts ?? []).filter((a) => a.kind === 'screenshot').map((a) => a.sha256);
   ok(wf(p.root, ['handoff', 'reviewer', '--agent', 'r1', '--attempt', e.id]));
@@ -81,19 +82,19 @@ test('I-204: members that registered one check differently are refused before th
 
 // A member corrected a heavy admission step with the person's yes: its own gate runs the correction (it deferred it, then failed
 // for it), and the batch runs the corrected definition on the combined tree, not the one the person found wrong.
-test('I-204: an admission step a member corrected runs in its own gate and in the batch as corrected, on the member\'s approval', () => {
+test('I-204: an admission step a member corrected runs in its own gate and in the batch as corrected, as the member\'s reviewer judged it', () => {
   const p = project('i204-correction');
   const fixed = { id: 'e2e', repo: 'app', run: 'echo corrected-e2e', tier: 'heavy' };
   const m1 = memberWithCheck(p, 'ENG-209', { 'src/a.txt': 'one\n' }, fixed, {}, { correct: true });
   // A corrected check runs where a registered one does: in the member's own gate, which otherwise deferred it and then failed
   // for the check it required.
   assert.equal(m1.gate.steps.find((s) => s.id === 'e2e').status, 'passed', 'the member ran its corrected check');
-  const decision = state(p.root, m1.id).validationCorrections.at(-1).decision;
-  assert.ok(decision, 'the person approved the correction');
+  const correction = state(p.root, m1.id).validationCorrections.at(-1);
+  assert.deepEqual([correction.decision, correction.judgedBy], [undefined, 'reviewer'], 'the member\'s reviewer judged the correction; the person was not asked');
   const m2 = toAccepted(p.root, p.base, { item: 'ENG-210', change: { 'src/b.txt': 'two\n' }, extraEntry: ['--defer-heavy'] });
   ok(wf(p.root, ['batch', 'create', '--members', `${m1.id},${m2.id}`, '--owner', 'o']));
   const b = state(p.root, 'BATCH-1');
-  assert.deepEqual(b.validations.map((v) => [v.steps[0].id, v.commit, v.correctedFrom?.map((x) => [x.id, x.admission]), v.approvedIn]), [['e2e', m1.pin, [['e2e', true]], { attempt: m1.id, decision }]]);
+  assert.deepEqual(b.validations.map((v) => [v.steps[0].id, v.commit, v.correctedFrom?.map((x) => [x.id, x.admission]), v.approvedIn]), [['e2e', m1.pin, [['e2e', true]], undefined]]);
   ok(wf(p.root, ['handoff', 'reviewer', '--agent', 'rb0', '--attempt', b.id]));
   ok(wf(p.root, ['review', '--closure', batchClosure(p.base, 'rb0'), '--attempt', b.id]));
   const run = ok(wf(p.root, ['gate', '--attempt', b.id, '--json'])).json();

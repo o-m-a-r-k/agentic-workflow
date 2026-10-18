@@ -605,6 +605,34 @@ export function trustedAdapter(root, state, commit = adapterPin(state)) {
 // written to a fresh name without following links, then renamed over the old copy (a rename replaces a link, never
 // follows it).
 const COMMIT_ID = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
+// 0.7.32 (D78): text with its string escapes decoded (\\n, \\t, \\", \\u00e9 and the like, to three levels), for reading only. Named
+// failure (classification of 25 field corrections): the end-to-end specs and harnesses a step's plugin runs are embedded in it as
+// JSON-escaped strings, so a plain diff of a correction showed one 6 KB changed line and the loosening inside it went unseen.
+export function decodeEscapes(text) {
+  let out = String(text);
+  for (let i = 0; i < 3; i++) {
+    const next = out.replace(/\\(u[0-9a-fA-F]{4}|n|r|t|"|'|`|\\|\/)/g, (m, c) => (c === 'n' ? '\n' : c === 'r' ? '' : c === 't' ? '\t' : c[0] === 'u' ? String.fromCharCode(parseInt(c.slice(1), 16)) : c));
+    if (next === out) break;
+    out = next;
+  }
+  return out;
+}
+
+// The decoded copy of an adapter file at a commit, written beside its materialised copy (never run; a reviewer reads and diffs it).
+export function adapterDecodedAtCommit(root, state, commit, rel) {
+  const dest = adapterFileAtCommit(root, state, commit, rel);
+  const decoded = `${dest}.decoded.txt`;
+  const tmp = `${decoded}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+  const fd = fs.openSync(tmp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW ?? 0), 0o644);
+  try {
+    fs.writeSync(fd, decodeEscapes(fs.readFileSync(dest, 'utf8')));
+  } finally {
+    fs.closeSync(fd);
+  }
+  fs.renameSync(tmp, decoded);
+  return decoded;
+}
+
 export function adapterFileAtCommit(root, state, commit, rel) {
   if (!COMMIT_ID.test(String(commit))) throw new WfError(`not a commit id: \`${String(commit).slice(0, 80)}\``);
   const { repo, relative } = attemptAdapter(root, state);

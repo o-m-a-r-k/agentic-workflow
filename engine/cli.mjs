@@ -1,4 +1,4 @@
-import { addValidation, correctValidation } from './validation.mjs';
+import { addValidation, correctValidation, correctionQuestionSteps, sharedCorrections } from './validation.mjs';
 import { captureWarning } from './captures.mjs';
 import { defaultHostId, detectOwner, findHost, fragment, hostChoice, hostIds, hostLabels, hostNames } from './hosts/index.mjs';
 import { mkdirStateDirectory } from './state-folders.mjs';
@@ -254,7 +254,7 @@ const print = (options, human, data) => {
 // 0.7.27 (I-192): a question the person has not answered is named where the owner reads what is next, with the form that asks
 // it (an escalation is asked by the next step itself). Named failure (field): the agent reported a pending closure as
 // "Remaining: workflow closure and cleanup", in its own words, and never asked it; the person's answer to that status was refused.
-const unansweredLines = (s) => (['done', 'abandoned'].includes(s.phase) ? [] : pendingDecisions(s).filter((x) => x.kind !== 'escalation').map((d) => `  waiting on the person: ${d.id} is not answered. Ask it in your reply (a mention in your own words, such as what remains, does not ask it): quote "${questionFor(s, d)}" exactly with its options (${optionLines(d)}) and ask nothing else in that message; after they answer, ${afterAnswer(s, d)}`));
+const unansweredLines = (s) => (['done', 'abandoned'].includes(s.phase) ? [] : pendingDecisions(s).filter((x) => x.kind !== 'escalation').map((d) => correctionQuestionSteps(d) ? `  ${d.id} (correcting the admission check ${correctionQuestionSteps(d).join(', ')}) is no longer asked: since 0.7.32 the reviewer judges corrections; run \`wf validation correct --steps ${correctionQuestionSteps(d).join(',')} --reason "<why>" --attempt ${s.id}\` again, which withdraws it, and the review that follows gives its verdict on the correction` : `  waiting on the person: ${d.id} is not answered. Ask it in your reply (a mention in your own words, such as what remains, does not ask it): quote "${questionFor(s, d)}" exactly with its options (${optionLines(d)}) and ask nothing else in that message; after they answer, ${afterAnswer(s, d)}`));
 
 // An open attempt whose worktree folder is gone is shown as orphaned with its missing paths (orphansOf, orphanNext in
 // lifecycle.mjs, where every next line is decided).
@@ -886,8 +886,12 @@ async function dispatch(cmd, sub, positional, options) {
     case 'validation': {
       if (sub !== 'add' && sub !== 'correct') throw new WfError('usage: wf validation add --steps IDs --criteria IDs --reason why | wf validation correct --steps IDs --reason why [--criteria IDs]');
       const s = await (sub === 'correct' ? correctValidation : addValidation)(root, options);
-      const taken = sub === 'correct' ? s.validationCorrections?.at(-1)?.approvedIn : null;
-      print(options, `required supplemental validation ${sub === 'correct' ? 'corrected' : 'registered'}; admission checks unchanged; fresh code review and full gate required${taken ? `\nno question asked: the person approved this same correction in ${taken.attempt} (${taken.decision}${taken.at ? `, ${taken.at}` : ''}); tell them it was taken on that answer` : ''}`, s.validations.at(-1));
+      // 0.7.32 (D78): an admission check corrected is judged by the review that follows, never asked of the person.
+      const last = sub === 'correct' ? s.validationCorrections?.at(-1) : null;
+      const admitted = (last?.from ?? []).filter((x) => x.admission).map((x) => x.id);
+      print(options, admitted.length
+        ? `admission check ${admitted.join(', ')} corrected at ${String(last.commit).slice(0, 10)} (the original stays in the record, pinned at ${[...new Set(last.from.filter((x) => x.admission).map((x) => String(x.commit).slice(0, 10)))].join(', ')}); no question to the person: the review that follows judges the correction (its bundle has the admission original, the previous correction and the corrected definition, decoded), then the full gate${last.decision ? `; recorded under the person's answer ${last.decision}` : ''}. ${((others) => (others.length ? `${others.map((o) => o.attempt).join(', ')} ${others.length > 1 ? 'have' : 'has'} corrected ${[...new Set(others.flatMap((o) => o.steps))].join(', ')} too: ` : ''))(sharedCorrections(root, s, admitted))}when the defect is in the check itself, not this ticket's intended behaviour, fix it once on the base branch of the adapter's repo instead: every live attempt follows the adapter there (D60), and no ticket needs its own correction`
+        : `required supplemental validation ${sub === 'correct' ? 'corrected' : 'registered'}; admission checks unchanged; fresh code review and full gate required`, s.validations.at(-1));
       return 0;
     }
     case 'captures': {

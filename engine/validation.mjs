@@ -1,11 +1,11 @@
-import { CONFIG_FILE, adapterPin, attemptAdapter, trustedAdapter, adapterFileAtCommit } from './config.mjs';
+import { CONFIG_FILE, adapterPin, attemptAdapter, decodeEscapes, trustedAdapter, adapterFileAtCommit } from './config.mjs';
 import { actor, openState, treeHashes } from './attempt.mjs';
 import { append, listAttempts, loadState } from './ledger.mjs';
 import { loadCatalog } from './secrets.mjs';
 import { canonical, git, hashFile, hashValue, refuse, YAML } from './util.mjs';
-import { approveHint, decisionFor, labelOf, requireYes } from './approve.mjs';
-import { FRAMES } from './asking.mjs';
+import { approveHint, decisionFor, labelOf } from './approve.mjs';
 import fs from 'node:fs';
+import path from 'node:path';
 
 // Named failure: required HTTP/browser proof discovered after admission could
 // only be run outside sealed evidence, or by replacing the frozen adapter.
@@ -193,59 +193,60 @@ function standingAnswer(state, d) {
   return d.id;
 }
 
-// The person's yes to this exact correction in another attempt of the project: the same admission steps corrected to the
-// same definitions and plugin code. Named failure (audit of one project's tickets): two admission checks were corrected
-// seven times across five parallel tickets, and each time the person was asked again and waited 28 to 147 minutes to
-// answer the same question. The approval counts once for the project; the attempt still gets the fresh review and the gate.
-// It counts only while it stands (independent review of 0.7.15): the correction is that attempt's latest of those steps (one
-// the person replaced, because it was itself wrong, is not taken again), and a `no` the person gave to the same correction in
-// any attempt, this one included, asks again.
-function approvedElsewhere(root, state, steps, commit, ids, admission) {
-  const want = steps.map((s) => correctionIdentity(root, state, commit, s));
-  if (want.some((w) => !w)) return null;
-  const same = (have) => have.every(Boolean) && canonical([...have].sort()) === canonical([...want].sort());
-  const attempts = new Map();
-  for (const id of listAttempts(root)) {
-    try {
-      attempts.set(id, id === state.id ? state : loadState(root, id));
-    } catch {}
+// 0.7.32 (D78): a question an earlier release asked about a correction (pending, not answered) is no longer asked: it is withdrawn
+// with this reason when the correction runs again, and `wf resume` says so meanwhile instead of telling the agent to ask it.
+// 0.7.32 (D78), named failure (classification of 25 field corrections): two corrections moved test code out of the pinned plugin into
+// the product tree (a fixture harness the plugin loads), and the correction's identity covered only the plugin file, so later edits
+// to that harness were ordinary product commits no review of the correction saw. The files the corrected plugin names in the
+// adapter repo outside the adapter folder (paths in its decoded text that exist at the corrected commit) are recorded with the
+// correction (`reads`: path and blob); the reviewer is handed them, and a change to one after the round that judged it asks a
+// verdict again (engine/lifecycle.mjs correctionsToJudge).
+export function pluginReads(root, state, commit, definition) {
+  if (!definition?.plugin) return [];
+  let text;
+  try {
+    text = decodeEscapes(fs.readFileSync(adapterFileAtCommit(root, state, commit, definition.plugin), 'utf8'));
+  } catch {
+    return [];
   }
-  // A non-yes answer to the same admission correction, anywhere, asks again. The question names the admission steps only
-  // (its key), so they are what is compared; one whose definitions cannot be read any more is taken as the same, and asks.
-  const wantAdmission = admissionIdentities(root, state, commit, steps, admission);
-  const asked = admissionIdentity(wantAdmission);
-  for (const a of attempts.values()) {
-    for (const d of a.decisions ?? []) {
-      const m = d.kind === 'override-gate' ? KEY.exec(String(d.key)) : null;
-      if (!m || !d.approved || d.approved.choice === 'yes' || !sameIds(m[1].split(','), admission)) continue;
-      // Asked by this release: the key holds the identity of what was asked.
-      if (m[3]) {
-        if (m[3] === asked) return null;
-        continue;
-      }
-      const have = identitiesAt(root, a, m[2], m[1].split(','));
-      if (!have || canonical([...have].sort()) === canonical([...wantAdmission].sort())) return null;
-    }
+  const loc = attemptAdapter(root, state);
+  const dir = state.repos[loc.repo.name]?.worktree;
+  if (!dir) return [];
+  const folder = (loc.relative || '').split(path.sep).join('/');
+  const out = new Map();
+  for (const m of text.matchAll(/(?:^|[\s'"`(=,:])((?:\.\.?\/)?[A-Za-z0-9_@.-]+(?:\/[A-Za-z0-9_@.[\]-]+)+\.[A-Za-z0-9]+)/g)) {
+    const raw = m[1].replace(/^\.\//, '');
+    const rel = path.posix.normalize(folder && raw.startsWith('../') ? path.posix.join(folder, raw) : raw);
+    if (rel.startsWith('../') || (folder && (rel === folder || rel.startsWith(`${folder}/`))) || out.has(rel)) continue;
+    const blob = git(dir, ['rev-parse', '--verify', '--quiet', `${commit}:${rel}`], { allowFail: true });
+    if (blob) out.set(rel, blob);
+    if (out.size >= 50) break;
   }
-  // An approval stands while the correction it approved is still its attempt's latest of those steps; one taken on another
-  // attempt's approval stands only while that one does (independent review of 0.7.15: a chained approval outlived the
-  // correction the person had since replaced).
-  const stands = (attemptId, depth = 0) => {
-    const other = attempts.get(attemptId);
-    if (!other || depth > 10) return null;
-    const latest = (other.validationCorrections ?? []).filter((c) => (c.steps ?? []).some((x) => ids.includes(x.id))).at(-1);
-    if (!latest || !sameIds((latest.steps ?? []).map((x) => x.id), ids) || !same((latest.steps ?? []).map((x) => correctionIdentity(root, other, latest.commit, x)))) return null;
-    const d = latest.decision ? (other.decisions ?? []).find((x) => x.id === latest.decision) : null;
-    if (d?.approved?.choice === 'yes') return { attempt: other.id, decision: d.id, at: d.approved.at ?? latest.at };
-    return latest.approvedIn ? stands(latest.approvedIn.attempt, depth + 1) : null;
-  };
-  for (const id of attempts.keys()) {
-    if (id === state.id) continue;
-    const approval = stands(id);
-    if (approval) return approval;
-  }
-  return null;
+  return [...out].map(([file, blob]) => ({ path: file, blob }));
 }
+
+// The other open attempts of the project that corrected the same admission check: one defect frozen into a check shared by every
+// ticket is fixed once on the adapter's base branch, which every live attempt follows (D60). Named failure (the same
+// classification): seven parallel tickets each corrected one check that asserted a failed request shows the empty state.
+export function sharedCorrections(root, state, ids) {
+  const out = [];
+  for (const id of listAttempts(root)) {
+    if (id === state.id) continue;
+    let other;
+    try {
+      other = loadState(root, id);
+    } catch {
+      continue;
+    }
+    if (['done', 'abandoned'].includes(other.phase)) continue;
+    const same = ids.filter((step) => (other.validationCorrections ?? []).some((c) => (c.from ?? []).some((f) => f.admission && f.id === step)));
+    if (same.length) out.push({ attempt: id, steps: same });
+  }
+  return out;
+}
+
+export const CORRECTION_WITHDRAWN = 'the reviewer judges corrections since 0.7.32: no question to the person; the review that follows the correction gives its verdict on it';
+export const correctionQuestionSteps = (d) => (d?.kind === 'override-gate' ? KEY.exec(String(d.key ?? ''))?.[1]?.split(',') ?? null : null);
 
 async function registerValidation(root, options, correcting) {
   const { withReviewLock } = await import('./gate.mjs');
@@ -306,21 +307,33 @@ async function registerValidation(root, options, correcting) {
       return { id, definition: step, secretKeys };
     });
     if (correcting) {
-      // Changing a check frozen at admission is the person's decision (kind override-gate); the original stays in the ledger.
-      const earlier = admission.length ? approvedElsewhere(root, state, steps, commit, ids, admission) : null;
+      // 0.7.32 (D78), the person's words: "why should it come to me? we have an agent designed just for that in the workflow right?"
+      // Named failure (field): correcting a check frozen at admission was the person's decision (I-125, D37), asked 20 times on 10
+      // attempts in four days (7 on one ticket), while a fresh independent review and the full gate followed anyway. That review
+      // now judges the correction: it is handed both definitions (`admissionCorrections` in its bundle) and gives its verdict on
+      // each, a weakening is a blocking finding the ticket fixes (or the person waives), and no verdict means no acceptance. The
+      // original stays in the record, both pins are recorded, and the pin moves forward only (D11b). An answer the person already
+      // gave to this exact correction stands as recorded: a yes is the record's approval, another answer is followed.
       let decision = null;
-      if (!earlier && admission.length) {
+      if (admission.length) {
+        // With no person to screen it, a correction that changes nothing in the step's definition or plugin is refused.
+        const same = admission.filter((id) => { const pin = pinOf(id); const before = state.validations.flatMap((v) => v.steps).find((x) => x.id === id)?.definition ?? base.gate.steps.find((x) => x.id === id); const now = steps.find((x) => x.id === id); const a = correctionIdentity(root, state, pin, { id, definition: before }); return Boolean(a) && a === correctionIdentity(root, state, commit, now); });
+        if (same.length) throw refuse(`${same.join(', ')} ${same.length > 1 ? 'are' : 'is'} defined at ${commit.slice(0, 10)} exactly as pinned (the step and its plugin): there is nothing to correct`, 'commit the corrected definition or plugin first', { id: 'validation:correct-unchanged' });
         const wantAdmission = admissionIdentities(root, state, commit, steps, admission);
         const key = correctionKey(admission, admissionIdentity(wantAdmission), commit);
-        // 0.7.27 (I-187): the key holds what is asked, not the commit that holds it; a question an earlier release asked under its
-        // commit is this one while the definitions are the same (the current key's own answer, if any, is read first).
-        const before = key.includes(':identity-') && !decisionFor(state, 'override-gate', key) ? askedUnderCommit(root, state, admission, wantAdmission) : null;
-        decision = before ? standingAnswer(state, before) : requireYes(root, state, { kind: 'override-gate', key, summary: `correct the admission check ${admission.join(', ')} to its definition committed at ${commit.slice(0, 10)}: ${String(options.reason)} (the original stays in the record; a fresh review and the full gate follow)`, what: `correcting the admission check ${admission.join(', ')}`, frame: FRAMES.correctCheck({ item: state.item }), options }).decision;
+        const own = decisionFor(state, 'override-gate', key) ?? (key.includes(':identity-') ? askedUnderCommit(root, state, admission, wantAdmission) : null);
+        if (own?.approved && !own.spent) decision = standingAnswer(state, own);
+        // A question an earlier release opened about these steps, not answered, is withdrawn with the reason.
+        for (const d of state.decisions ?? []) {
+          const of = correctionQuestionSteps(d);
+          if (of && !d.approved && !d.withdrawn && of.some((id) => admission.includes(id))) append(root, state.id, 'decision.withdrawn', { id: d.id, reason: CORRECTION_WITHDRAWN }, actor(options));
+        }
       }
       // Both pins stay in the ledger: what the step was, and what it is now.
       const current = (id) => state.validations.flatMap((v) => v.steps).find((s) => s.id === id)?.definition;
       const from = ids.map((id) => (admission.includes(id) ? { id, commit: pinOf(id), definition: current(id) ?? base.gate.steps.find((s) => s.id === id), admission: true } : { id, commit: pinOf(id), definition: current(id) }));
-      append(root, state.id, 'validation.corrected', { commit, steps, criteria, reason: String(options.reason), tree: trees, from, ...(decision ? { decision } : {}), ...(earlier ? { approvedIn: earlier } : {}) }, actor(options));
+      const reads = admission.flatMap((id) => pluginReads(root, state, commit, steps.find((x) => x.id === id)?.definition).map((r) => ({ step: id, ...r })));
+      append(root, state.id, 'validation.corrected', { commit, steps, criteria, reason: String(options.reason), tree: trees, from, ...(decision ? { decision } : {}), ...(admission.length ? { judgedBy: 'reviewer', ...(reads.length ? { reads } : {}) } : {}) }, actor(options));
     } else append(root, state.id, 'validation.added', { commit, steps, criteria, reason: String(options.reason), tree: trees }, actor(options));
     return loadState(root, state.id);
   });

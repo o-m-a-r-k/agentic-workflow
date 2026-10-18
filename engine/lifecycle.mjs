@@ -1,5 +1,5 @@
 import { STAGE_GOAL, panelActive, panelStage, plannerClassFor, plannerPanel } from './panel.mjs';
-import { batchValidationConflicts, carriedValidations, gateAdapter } from './validation.mjs';
+import { batchValidationConflicts, carriedValidations, gateAdapter, sharedCorrections } from './validation.mjs';
 import { captureWarning, capturingSteps } from './captures.mjs';
 import { mkdirStateDirectory } from './state-folders.mjs';
 import { blockingIn, classifyFinding, closureMissingGuidance, deltaLines, dispositionOf, earlierBlocking, observations, openAcrossRounds, placementLevel, reviewerDiscovered, roundMode, severityLevel, sinceOf, stampClosure, stripStamp, unreachedOf, unreachedSince } from './review-policy.mjs';
@@ -19,7 +19,7 @@ import { policyOf, RULE, RULE_SHORT } from './leaving.mjs';
 import { detectOwner, findHost, fragment, hostChoice, isHost, lastFencedYaml, optional } from './hosts/index.mjs';
 import { defaultRuntime } from './runtime-policy.mjs';
 import { portApplied } from './targets.mjs';
-import { ADAPTER_DIR, adapterFileAtCommit, adapterPin, agentTypeFor, attemptAdapter, declared, loadConfig, repoDir, roleClass, trustedAdapter } from './config.mjs';
+import { ADAPTER_DIR, adapterDecodedAtCommit, adapterFileAtCommit, adapterPin, agentTypeFor, attemptAdapter, declared, loadConfig, repoDir, roleClass, trustedAdapter } from './config.mjs';
 import { focusedSkips, gateBusy, gatePassedForCurrentTree, gateRunningRefusal, rerunRoute, rerunSpent, screenshots, withReviewLock } from './gate.mjs';
 import { append, attemptDir, evidenceRoot, keptFiles, listAttempts, loadState, openEvidence, recordedTogether } from './ledger.mjs';
 import { assertUnchanged, readEvidenceFile, seal } from './evidence.mjs';
@@ -1106,6 +1106,7 @@ export function handoff(root, role, options) {
     // delta round's bundle, which carried corrections only; its reviewer kept a finding that the required proof was not
     // registered. A delta round is handed every check registered, corrected or carried since the last recorded round.
     supplementalValidation: mode === 'delta' ? validationsSince(state) : state.validations ?? [],
+    admissionCorrections: role === 'reviewer' && correctionsToJudge(root, state).length ? correctionsToJudge(root, state) : undefined,
     // 0.7.29 (I-154): why `wf accept` refused the last evidence round, for the evidence review that follows it. A full round
     // is blind to earlier findings, so it is handed only the reasons about the closure's own evidence.
     acceptanceRefused: role === 'reviewer' && gateNow?.ok ? acceptanceRefusedFor(state, mode) : undefined,
@@ -1178,6 +1179,8 @@ export function handoff(root, role, options) {
   if (role === 'reviewer' && bundle.premiseFailed) bundle.instructions += ` \`premiseFailed\` lists items an implementer did not build because their premise does not hold in production (${bundle.premiseFailed.map((x) => x.ref).join(', ')}), each with what it checked: judge the premise, not only the code. When it does not hold, give \`verified-nonissue\` with your evidence and a rationale that says so (for a discovered issue in \`discovered\`, which closes it; for a finding in \`priorFindings\`); when it holds after all, give \`open\` with what you found (it goes back to be fixed). A fact that contradicts a premise is a finding about the premise, never an argument that a change is safe.`;
   const marked = role === 'implementer' ? [...(bundle.repair ?? []).flatMap((g) => g.findings), ...(bundle.alsoFix ?? []), ...(bundle.passItems ?? []).flatMap((x) => x.items)].filter((x) => x.premiseFailed).map((x) => x.ref ?? `${x.round}:${x.id}`) : [];
   if (marked.length) bundle.instructions += ` An item marked \`premiseFailed\` (${marked.join(', ')}) was reported by an implementer to rest on a premise that does not hold in production, with its evidence: build nothing for it until a reviewer or the person settles it, and say in your report what you found about the premise if you looked.`;
+  // 0.7.32 (D78): the reviewer judges a correction of an admission check; the person is not asked.
+  if (role === 'reviewer' && bundle.admissionCorrections) bundle.instructions += ` \`admissionCorrections\` lists checks frozen at admission that this attempt corrected (${bundle.admissionCorrections.map((c) => c.id).join(', ')}). The person is not asked about a correction: you judge it, from the code, never from the correction's \`reason\`. Each entry has the admission original (\`original\`), the previous correction when there was one (\`previous\`) and the corrected definition (\`corrected\`): the step's definition and its plugin as committed at each, with a decoded copy (\`plugin.decoded\`: the specs and harnesses a plugin embeds as escaped strings, line by line) and the decoded diffs (\`decodedDiff\`), plus the adapter's diff between the pins (\`diff\`, \`files\`); read the decoded text, since a plain diff of a plugin can be one long changed line. Compare the corrected definition with both: coverage is kept when every test case and assertion survives and only expectations the frozen criteria deliberately change are updated; selectors, waits and paths are plumbing, judged as such. A loss against the admission original (a case or assertion removed, skipped or loosened, an expectation weakened, a timeout raised to hide a failure) is a blocking finding. A loss against the previous correction (an assertion it added loosened, a check it added removed, a timeout on a case raised) is a blocking finding too, unless it is tied to a criterion that is still proven another way, which your evidence states. Test code moved out of the plugin into another file is no longer pinned with the check: \`reads\` lists the files the corrected plugin names outside the adapter folder, with any change since the correction (\`diff\`); judge them as part of the check, and a move to a file \`reads\` does not list is a blocking finding. Raise a blocking finding citing the criterion the check proves, and the ticket fixes it (only the person's waiver lets it stand). When the correction fixes a defect in the check itself rather than this ticket's intended behaviour, say so in your evidence: such a defect is fixed once on the adapter's base branch, which every live attempt follows. Give your verdict on each in \`validationChecked: [{ "id", "commit": <the corrected pin>, "verdict": "complies" | "finding", "evidence", "finding": <its id> }]\`; a closure without one is refused, and the attempt is not accepted until a round has judged it.`;
   // Review of 0.7.32 (D69): a code round is told what keeping an evidence finding open means, and what to do when the code shows the
   // defect still there: its own finding holds the gate, the evidence finding kept open does not.
   const fromEvidence = role === 'reviewer' && !gateNow?.ok ? (bundle.openFindings ?? []).filter((f) => f.blocks && gateHanded((state.handoffs ?? []).find((h) => h.bundle === (state.reviews ?? []).find((r) => (r.closure?.reviewer ?? r.reviewer) === f.round)?.handoff))).map((f) => `${f.round}:${f.id}`) : [];
@@ -1819,6 +1822,9 @@ export function recordReview(root, options) {
   // handed a passing gate cites its screenshots; a partial round is never accepted.
   // Review of 0.7.32 (D75): a finding's `rerun` and `step` name a step of the gate this round judged, so the re-run route never stops
   // applying silently.
+  // 0.7.32 (D78): the verdict on each admission correction the round was handed, while the reviewer can still give it.
+  const cv = !partial ? correctionVerdictProblems(handed, closure) : [];
+  if (cv.length) throw refuse(`closure refused: a correction of an admission check is judged by this round:\n  - ${cv.join('\n  - ')}`, 'compare the original and the corrected definition (`admissionCorrections` in your bundle): coverage kept is `complies`; a removed, skipped or loosened case or assertion, a weakened expectation or a timeout raised to hide a failure is a blocking finding, and the verdict names it', { id: 'review:correction-verdict' });
   const rv0 = !partial ? rerunFindingProblems(state, reviewerHandoff, closure) : [];
   if (rv0.length) throw refuse(`closure refused: a finding's re-run is not one the gate can make:\n  - ${rv0.join('\n  - ')}`, 'a finding only a re-run of a gate step satisfies names that step exactly as the gate lists it (`"step": "<step id>", "rerun": true`); a finding that needs a code change has no `rerun`, and a code-review round, handed no gate, never asks for one', { id: 'review:rerun-step' });
   const sv = !partial && handed.gate?.passedOnThisTree === true ? screenshotRefProblems(state, closure) : [];
@@ -2117,6 +2123,97 @@ const EVIDENCE_KINDS = new Set(['test', 'screenshot', 'output', 'not-applicable'
 // accept` refused it once the reviewer had finished, and the next reviewer, told nothing, did the same: a whole evidence round
 // each time. `wf review` and `wf accept` run this one check, so the reviewer corrects the citation while it is still at work.
 // A criterion several screenshots show cites each in its own entry (the same `id`, one `ref` each).
+// 0.7.32 (D78): the admission checks this attempt corrected that no recorded round has judged yet, each with what the reviewer compares:
+// the admission original (the step as frozen at admission), the previous correction when there was one, and the corrected
+// definition; for each, its plugin as committed and a copy with its string escapes decoded (the specs a plugin embeds as escaped
+// strings are read line by line, never through the correction's own summary), and the decoded diffs between them; the adapter's
+// diff between the pins; and the files the plugin names outside the adapter folder (`reads`, engine/validation.mjs), with any change
+// to them since. Only the latest correction of a step counts (an earlier one no longer runs), and only one recorded since 0.7.32
+// (`judgedBy: 'reviewer'`): an earlier one was the person's decision and stays as it was recorded. A round judges a correction with a
+// verdict on its step at its pin in `validationChecked` (`complies`, or `finding` naming a finding of that closure), on a tree where
+// the files the plugin reads are what they are now.
+const judgedAt = (r, id, commit) => (r.closure?.validationChecked ?? []).some((v) => v?.id === id && v.commit === commit && ['complies', 'finding'].includes(v.verdict) && String(v.evidence ?? '').trim());
+export function correctionsToJudge(root, state) {
+  const corrections = (state.validationCorrections ?? []).filter((c) => (c.from ?? []).some((f) => f.admission));
+  if (!corrections.length) return [];
+  let loc = null;
+  try {
+    loc = attemptAdapter(root, state);
+  } catch {}
+  const dir = loc ? state.repos[loc.repo.name]?.worktree ?? repoDir(root, loc.repo) : null;
+  const rel = loc?.relative || '.';
+  const blobAt = (tree, file) => (dir && tree ? git(dir, ['rev-parse', '--verify', '--quiet', `${String(tree).split('+')[0]}:${file}`], { allowFail: true }) || null : null);
+  const version = (commit, definition) => {
+    if (!definition) return null;
+    const out = { commit, definition };
+    if (definition.plugin) {
+      try {
+        out.plugin = { path: definition.plugin, file: adapterFileAtCommit(root, state, commit, definition.plugin), decoded: adapterDecodedAtCommit(root, state, commit, definition.plugin) };
+      } catch {
+        out.plugin = { path: definition.plugin, file: null, decoded: null };
+      }
+    }
+    return out;
+  };
+  const decodedDiff = (x, y) => (x?.plugin?.decoded && y?.plugin?.decoded ? `git diff --no-index -- ${x.plugin.decoded} ${y.plugin.decoded}` : null);
+  const out = [];
+  const ids = [...new Set(corrections.flatMap((c) => c.from.filter((f) => f.admission).map((f) => f.id)))];
+  for (const id of ids) {
+    const of = corrections.filter((c) => c.from.some((f) => f.admission && f.id === id));
+    const c = of.at(-1);
+    if (c.judgedBy !== 'reviewer') continue;
+    const reads = (c.reads ?? []).filter((x) => x.step === id);
+    const head = loc ? treeHashes(state)[loc.repo.name] : null;
+    const now = reads.map((x) => ({ ...x, now: blobAt(head, x.path) }));
+    const readsSame = (tree) => now.every((x) => blobAt(tree, x.path) === x.now);
+    if ((state.reviews ?? []).some((r) => String(r.at) > String(c.at) && judgedAt(r, id, c.commit) && readsSame(loc ? (r.tree ?? r.handoffTree)?.[loc.repo.name] : null))) continue;
+    const admission = of[0].from.find((f) => f.id === id);
+    const before = c.from.find((f) => f.id === id);
+    const original = version(admission.commit, admission.definition ?? null);
+    const previous = of.length > 1 ? version(before.commit, before.definition ?? null) : null;
+    const corrected = version(c.commit, (c.steps ?? []).find((x) => x.id === id)?.definition ?? null);
+    let files = [];
+    if (dir) files = git(dir, ['diff', '--name-only', admission.commit, c.commit, '--', rel], { allowFail: true }).split('\n').filter(Boolean);
+    out.push({
+      id, reason: c.reason ?? null, at: c.at, original, previous, corrected,
+      diff: dir ? `git -C ${dir} diff ${admission.commit} ${c.commit} -- ${rel}` : null,
+      files,
+      decodedDiff: { fromOriginal: decodedDiff(original, corrected), ...(previous ? { fromPrevious: decodedDiff(previous, corrected) } : {}) },
+      ...(now.length ? { reads: now.map((x) => ({ path: x.path, atCorrection: x.blob, now: x.now, ...(x.now !== x.blob && dir ? { diff: `git -C ${dir} diff ${c.commit} HEAD -- ${x.path}` } : {}) })) } : {}),
+    });
+  }
+  return out;
+}
+
+// 0.7.32 (D78), named failure (classification of 25 field corrections): one defect frozen into an admission check (it asserted that a
+// failed request shows the empty state) was corrected separately by seven parallel tickets. When other open attempts corrected the
+// same admission check, the next step says to fix it once on the adapter's base branch, which every live attempt follows (D60).
+function sharedCorrectionNote(root, state) {
+  const ids = [...new Set((state.validationCorrections ?? []).flatMap((c) => (c.from ?? []).filter((f) => f.admission).map((f) => f.id)))];
+  if (!ids.length) return null;
+  let others = [];
+  try {
+    others = sharedCorrections(root, state, ids);
+  } catch {
+    return null;
+  }
+  if (!others.length) return null;
+  const steps = [...new Set(others.flatMap((o) => o.steps))];
+  return `the admission check ${steps.join(', ')} is corrected here and in ${others.map((o) => o.attempt).join(', ')} too: when the defect is in the check itself (not this ticket's intended behaviour), fix it once on the base branch of ${state.adapter?.repo ?? 'the adapter repo'}, which every live attempt follows (D60), instead of a correction in each`;
+}
+
+// What a closure owes the corrections its bundle handed it: a verdict on each, and a `finding` verdict names one of its findings.
+export function correctionVerdictProblems(handed, closure) {
+  const problems = [];
+  const findings = new Set((Array.isArray(closure?.findings) ? closure.findings : []).map((f) => f?.id));
+  for (const c of handed?.admissionCorrections ?? []) {
+    const v = (Array.isArray(closure?.validationChecked) ? closure.validationChecked : []).find((x) => x?.id === c.id && x.commit === c.corrected.commit);
+    if (!v || !['complies', 'finding'].includes(v.verdict) || !String(v.evidence ?? '').trim()) problems.push(`the admission check ${c.id} was corrected at ${String(c.corrected.commit).slice(0, 10)} and this round gives no verdict on it: add \`validationChecked: [{ "id": "${c.id}", "commit": "${c.corrected.commit}", "verdict": "complies" | "finding", "evidence": "<what you compared>", "finding": "<id, for a finding>" }]\``);
+    else if (v.verdict === 'finding' && !findings.has(v.finding)) problems.push(`the verdict on ${c.id} is a finding: name it (\`finding\`: the id of a finding of this closure, which says what the correction weakened)`);
+  }
+  return problems;
+}
+
 // Review of 0.7.32 (D75), named failure (a review's probe): `rerun: true` with no `step`, or a `step` the judged gate does not have, made
 // the re-run route return nothing and `wf review` recorded the closure, so the finding went to an implementer with nothing to build.
 // The steps named are those of the gate the round was handed; one that produced no evidence there (skipped, deferred) cannot be
@@ -2219,6 +2316,8 @@ export function acceptReview(root, options) {
   if (authorsOf(root, state).has(r.closure.reviewer)) problems.push(`reviewer ${r.closure.reviewer} also planned, wrote or owns this change`);
   // I-152: a round the engine kept from a reviewer that did not finish holds what it found, never an acceptance.
   if (r.partial) problems.push(`the latest round (${r.closure.reviewer}) ended before its reviewer finished; its findings are kept, and only a round that finishes is accepted: ${openFindings(r, state).length ? 'repair the findings it kept that block, then hand' : 'hand'} a fresh reviewer (\`wf handoff reviewer --agent <new id> --attempt ${state.id}\`)`);
+  // 0.7.32 (D78): no reviewer verdict on a correction of an admission check, no acceptance.
+  for (const c of correctionsToJudge(root, state)) problems.push(`the admission check ${c.id} was corrected at ${String(c.corrected.commit).slice(0, 10)} and no review round since has judged the correction: hand a fresh reviewer (\`wf handoff reviewer --agent <new id> --attempt ${state.id}\`); its bundle carries both definitions and asks its verdict`);
   // Only a finding that blocks holds acceptance; an observation is fixed, ticketed or moved before delivery.
   const blocking = new Set(openFindings(r, state).map((f) => f.id));
   for (const f of r.closure.findings) {
@@ -3635,6 +3734,9 @@ export function nextDecision(root, state) {
     // its own words, such as the gate after a planned pass, does not go through the text that carries it).
     const pn = kind !== 'premise' && out.status !== 'blocked' && out.status !== 'complete' && !String(out.guidance ?? '').includes('premise reported failed') ? premiseNote(state) : null;
     if (pn) out.guidance = `${pn}; then ${out.guidance}`;
+    // 0.7.32 (D78): an admission check other open attempts corrected too is fixed once, on the adapter's base branch (D60).
+    const sc = out.status !== 'blocked' && out.status !== 'complete' ? sharedCorrectionNote(root, state) : null;
+    if (sc) out.guidance = `${sc}; then ${out.guidance}`;
     return movedNote && out.status !== 'blocked' && out.status !== 'complete' ? { ...out, guidance: `${movedNote}${out.guidance}` } : out;
   };
   if (['done', 'abandoned'].includes(state.phase)) return result('complete', 'complete');
@@ -3745,6 +3847,8 @@ export function nextDecision(root, state) {
   // answer) before the acceptance; it is never handed to another pass.
   const premise = premiseOpen(state);
   if (premise.length) return result('premise', 'owner', `the premise of ${premise.map((p) => p.ref).join(', ')} was reported not to hold and is not settled`, { premises: premise.map((p) => p.ref) });
+  // 0.7.32 (D78): a correction of an admission check no round has judged is judged before the acceptance.
+  if (correctionsToJudge(root, state).length) return result('review', 'ready', null, { round: 'evidence-review' });
   return result('accept', 'ready');
 }
 
@@ -4034,5 +4138,7 @@ function phaseStep(root, cfg, state) {
   // 0.7.31 (I-217, D64): a premise an implementer reported failed is settled before the acceptance.
   const premise = premiseStep(state);
   if (premise) return premise;
+  const toJudge = correctionsToJudge(root, state);
+  if (toJudge.length) return `evidence review: no round has judged the correction of the admission check ${toJudge.map((c) => c.id).join(', ')}, so hand to ${fresh}; its bundle carries both definitions and asks its verdict (\`wf accept\` would refuse)`;
   return 'accept the review: `wf accept`';
 }
