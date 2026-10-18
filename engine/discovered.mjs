@@ -6,7 +6,7 @@
 // or is found not to be a defect at all (0.7.27, I-188: an independent reviewer's verdict, or the person's decision);
 // delivery refuses an open one and the reviewer gives each a verdict.
 import { isBookkeeping, legacyWaived, severityLevel } from './review-policy.mjs';
-import { actor, openState } from './attempt.mjs';
+import { actor, changeBase, openState } from './attempt.mjs';
 import { append, loadState } from './ledger.mjs';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -61,7 +61,7 @@ export function ticketCommit(state, sha, repo) {
     const wt = state.repos[name].worktree;
     const full = git(wt, ['rev-parse', '--verify', '--quiet', `${sha}^{commit}`], { allowFail: true });
     if (!full) continue;
-    const start = git(wt, ['merge-base', state.repos[name].baseRef ?? state.repos[name].base, 'HEAD'], { allowFail: true }) || state.repos[name].base;
+    const start = git(wt, ['merge-base', changeBase(state, name), 'HEAD'], { allowFail: true }) || state.repos[name].base;
     const inHead = run('git', ['merge-base', '--is-ancestor', full, 'HEAD'], { cwd: wt, allowFail: true }).status === 0;
     const inBase = run('git', ['merge-base', '--is-ancestor', full, start], { cwd: wt, allowFail: true }).status === 0;
     if (inHead && !inBase) found.push({ repo: name, commit: full });

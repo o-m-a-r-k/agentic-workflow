@@ -682,9 +682,32 @@ function removeTree(dir, expected) {
   return clean;
 }
 
+// 0.7.32 (D72, review of 0.7.32). Named failure (review repro): a commit of an accepted attempt pushed to its target outside the
+// workflow is on the fetched base, so every diff against that base read empty: the gate skipped each step ("no changes in this
+// repo") and recorded a pass, the reviewer was handed the pushed file as another change's (`baseMerged`), and the commit was
+// accepted and recorded delivered untested and unattributed. Such a repo (accepted, not recorded for the delivery, its HEAD past
+// the accepted commit and descending from it, and on the fetched base) is read against the last base the attempt recorded: the
+// latest one `wf base merge` brought in, else its admission base. A worktree reset to the current base no longer holds the
+// accepted commit, so it is not one (review of 0.7.32: it was read as pushed).
+export function pushedRepo(state, name) {
+  const r = state.repos?.[name];
+  const accepted = state.accepted?.heads?.[name];
+  if (!r?.worktree || !r.baseRef || !accepted || state.delivery?.completedAt || state.delivery?.repos?.[name] || state.delivery?.integrating?.[name]) return false;
+  const head = git(r.worktree, ['rev-parse', 'HEAD'], { allowFail: true });
+  if (!head || head === String(accepted).split('+')[0] || head === r.base) return false;
+  const ancestor = (a, b) => run('git', ['merge-base', '--is-ancestor', a, b], { cwd: r.worktree, allowFail: true }).status === 0;
+  return ancestor(String(accepted).split('+')[0], 'HEAD') && ancestor('HEAD', r.baseRef);
+}
+// What the attempt's own change in a repo is read against: its base ref, or for a pushed repo (above) the last base it recorded.
+export function changeBase(state, name) {
+  const r = state.repos[name];
+  if (!pushedRepo(state, name)) return r.baseRef ?? r.base;
+  return (state.baseMerges ?? []).filter((m) => m.repo === name && m.to).at(-1)?.to ?? r.base;
+}
+
 export function changedFiles(state, name) {
   const r = state.repos[name];
-  const out = git(r.worktree, ['diff', '--name-only', `${r.baseRef ?? r.base}...HEAD`]);
+  const out = git(r.worktree, ['diff', '--name-only', `${changeBase(state, name)}...HEAD`]);
   return out ? out.split('\n') : [];
 }
 

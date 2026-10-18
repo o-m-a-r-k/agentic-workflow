@@ -21,7 +21,7 @@ import { canonical as canonicalPath } from './paths.mjs';
 import { WfError, assertEngine, canonical, git, globToRegExp, hashFile, hashValue, isPidAlive, matchesAny, now, refuse, run, sha256, shellQuote, writeImmutable, writeJson } from './util.mjs';
 import { appendStreamNoFollow, ownGateRun, prepareWrite, readRegular, seal, writeNoFollow } from './evidence.mjs';
 import { imageSize } from './image-size.mjs';
-import { blockingIn } from './review-policy.mjs';
+import { blockingIn, earlierBlocking } from './review-policy.mjs';
 
 const gateDir = (root, id) => path.join(attemptDir(root, id), 'gate');
 const lockFile = (root, id) => path.join(gateDir(root, id), 'gate.lock');
@@ -429,24 +429,49 @@ export async function planGate(root, state, options = {}) {
 // produced evidence in the gate that review judged, and that gate was not itself a re-run of it (the route is offered once: a
 // finding a re-run did not satisfy goes to the implementer like any other). Then the next gate re-runs those steps whole on the
 // unchanged tree, and the evidence review after it verifies the findings. `ran`: the gate after that review did so.
-export function rerunRoute(state) {
+// Review of 0.7.32 (D75): the findings a re-run is for, read once for both routes below. The open blocking findings of the latest
+// review, an evidence review recorded on this tree, are its own and the earlier ones it kept open with evidence; each names its gate
+// step and says only a re-run satisfies it, and each step produced evidence in the gate that review judged.
+function rerunFindings(state) {
   const r = state.review;
-  if (!r?.closure || !(r.closure.findings ?? []).some((f) => f?.rerun === true)) return null;
+  if (!r?.closure) return null;
   const h = (state.handoffs ?? []).find((x) => x.bundle === r.handoff);
   if (!h || !(h.round === 'evidence-review' || (!h.round && h.gate))) return null;
   const tree = treeHashes(state);
   if (canonical(r.tree ?? r.handoffTree) !== canonical(tree)) return null;
   if ((state.criteriaAmendments ?? []).some((a) => a.at > r.at)) return null;
-  const open = blockingIn(state, r);
+  const reviewer = r.closure.reviewer ?? r.reviewer;
+  const keptRefs = new Set((r.closure.priorFindings ?? []).filter((p) => p?.status === 'open' && String(p.evidence ?? '').trim()).map((p) => `${p.round}:${p.id}`));
+  const open = [...blockingIn(state, r).map((f) => ({ ...f, ref: `${reviewer}:${f.id}` })), ...earlierBlocking(state, r.handoff ?? `reviewer:${r.reviewer}`).filter((f) => keptRefs.has(f.ref))];
   if (!open.length || open.some((f) => f.rerun !== true || typeof f.step !== 'string')) return null;
   const judged = (state.gates ?? []).find((g) => g.runId === h.gate);
   const steps = [...new Set(open.map((f) => f.step))];
-  if (!judged || steps.some((id) => !judged.steps?.some((x) => x.id === id && ['passed', 'reused'].includes(x.status)) || (judged.rerunFor ?? []).some((x) => x.step === id))) return null;
-  const reviewer = r.closure.reviewer ?? r.reviewer;
-  const forStep = steps.map((step) => ({ step, findings: open.filter((f) => f.step === step).map((f) => `${reviewer}:${f.id}`) }));
+  if (!judged || steps.some((id) => !judged.steps?.some((x) => x.id === id && ['passed', 'reused'].includes(x.status)))) return null;
+  return { r, tree, judged, open, steps, forStep: steps.map((step) => ({ step, findings: open.filter((f) => f.step === step).map((f) => f.ref) })) };
+}
+// A step the gate the review judged had already re-run for these findings, at the adapter pin the attempt still reads: a re-run at
+// that pin would collect the same evidence again.
+const reranAtPin = (state, x, id) => (x.judged.rerunFor ?? []).some((y) => y.step === id) && (x.judged.adapterBase ?? null) === adapterPin(state);
+
+export function rerunRoute(state) {
+  const x = rerunFindings(state);
+  if (!x || x.steps.some((id) => reranAtPin(state, x, id))) return null;
+  const { r, tree, judged, steps, forStep } = x;
   const g = state.lastGate;
-  const ran = Boolean(g && g.runId !== judged.runId && g.status === 'passed' && String(g.at ?? '') > String(r.at ?? '') && canonical(g.tree) === canonical(tree) && steps.every((id) => (g.rerunFor ?? []).some((x) => x.step === id)));
-  return { refs: forStep.flatMap((x) => x.findings), steps, forStep, ran };
+  const ran = Boolean(g && g.runId !== judged.runId && g.status === 'passed' && String(g.at ?? '') > String(r.at ?? '') && canonical(g.tree) === canonical(tree) && steps.every((id) => (g.rerunFor ?? []).some((y) => y.step === id)));
+  return { refs: forStep.flatMap((y) => y.findings), steps, forStep, ran };
+}
+
+// Review of 0.7.32 (D75), named failure (a review's case): an evidence finding whose cure is outside the ticket (a capture glob in
+// the project's adapter on its base branch) looped after the once-only re-run: the evidence review kept it open, the next step
+// handed an implementer with nothing to build, the gate reused, and the next evidence review repeated it. When the gate the latest
+// evidence review judged was itself the re-run of every step its open findings name, on this tree, at the adapter pin the attempt
+// still reads, neither a fix round nor another gate here can change what that step collects: the route is the adapter on its base
+// branch, which the attempt follows (D60). Once the pin moves, the re-run route above is offered again at the new pin.
+export function rerunSpent(state) {
+  const x = rerunFindings(state);
+  if (!x || !x.steps.every((id) => reranAtPin(state, x, id))) return null;
+  return { refs: x.forStep.flatMap((y) => y.findings), steps: x.steps, gate: x.judged.runId };
 }
 
 // 0.7.30 (I-134, D59). Named failure (field): a one-line change reran the whole 1,200-test end-to-end step (27 to 40 minutes); the

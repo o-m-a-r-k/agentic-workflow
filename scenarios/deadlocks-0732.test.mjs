@@ -21,16 +21,20 @@ function fixture(name) {
   const f = singleRepoProject(name, config, { 'src/a.txt': 'l1\nl2\nl3\n' });
   const e = ok(wf(f.root, ['entry', '--item', 'ENG-1', '--json'])).json();
   ok(wf(f.root, ['handoff', 'planner', '--agent', 'planner', '--attempt', e.id]));
-  ok(wf(f.root, ['plan', '--file', criteriaFile(f.base, CRITERIA), '--attempt', e.id]));
+  // A plan that predicts enough rounds, files and minutes that no course signal routes these flows through the strategist.
+  const plan = path.join(f.base, 'plan.json');
+  fs.writeFileSync(plan, JSON.stringify(planDoc({ plan: 'change a', criteria: CRITERIA, expect: { files: 10, rounds: 10, minutes: 900 } })));
+  ok(wf(f.root, ['plan', '--file', plan, '--attempt', e.id]));
   ok(wf(f.root, ['handoff', 'implementer', '--agent', 'impl', '--attempt', e.id]));
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'L1\nl2\nl3\n' });
   ok(wf(f.root, ['handoff', 'close', '--agent', 'impl', '--attempt', e.id]));
   return { ...f, e, id: e.id, wt: e.repos.app.worktree };
 }
 function review(f, agent, extra = {}) {
-  ok(wf(f.root, ['handoff', 'reviewer', '--agent', agent, '--attempt', f.id]));
+  const handed = ok(wf(f.root, ['handoff', 'reviewer', '--agent', agent, '--attempt', f.id]));
   const validationChecked = state(f.root, f.id).validations.flatMap((v) => v.steps.map((s) => ({ id: s.id, commit: v.commit, verdict: 'complies', evidence: 'pinned definition inspected' })));
   ok(wf(f.root, ['review', '--closure', closureFile(f.base, goodClosure(agent, { criteria: mapped, validationChecked, ...extra })), '--attempt', f.id]));
+  return JSON.parse(fs.readFileSync(handed.out.match(/^Read (\S+)/m)[1], 'utf8'));
 }
 const fixRound = (f, agent, content, extra = []) => {
   ok(wf(f.root, ['handoff', 'implementer', '--agent', agent, '--attempt', f.id, ...extra]));
@@ -59,7 +63,10 @@ test('0.7.32 (I-222, D69): an evidence finding the code review after its fix kee
   reword(f);
   fixRound(f, 'impl', 'L1 fixed\nl2\nl3\n');
   assert.equal(state(f.root, f.id).decision.round, 'code-review');
-  review(f, 'code-2', { criteria: [], priorFindings: keptOpen('evidence-1', 'F1', 'F2') });
+  const code2 = review(f, 'code-2', { criteria: [], priorFindings: keptOpen('evidence-1', 'F1', 'F2') });
+  // Review of 0.7.32: the code round is told what keeping them open means, and to raise what the code shows still broken.
+  assert.match(code2.instructions, /evidence-1:F1, evidence-1:F2 were raised by an evidence review, and this code-review round is handed no gate output/);
+  assert.match(code2.instructions, /One the code shows still broken you raise as your own finding, citing the criterion it fails or the line where the defect lives, with `sameCauseAs/);
   const before = state(f.root, f.id);
   assert.deepEqual([before.decision.kind, before.decision.status], ['gate', 'ready'], 'the gate is next, not another code review or a repair');
   assert.match(before.next, /left open only what the gate's own run proves \(evidence-1:F1, evidence-1:F2: an evidence review raised them/);
@@ -170,6 +177,38 @@ test('0.7.32 (I-222, D70): the route still needs a code review after a criterion
   commitIn(stopped.wt, { 'src/a.txt': 'L1 half\nl2\nl3\n' }, 'half a fix');
   ok(wf(stopped.root, ['handoff', 'close', '--agent', 'impl-a', '--outcome', 'stopped', '--attempt', stopped.id]));
   codeReview(stopped, 'a stopped implementer nobody finished');
+});
+
+// Review of 0.7.32 (Fable, MEDIUM): an amendment that adds a work item (new code, a new endpoint) changes no criterion, and the D70
+// route sent its code to the gate with no code review, the hole the second final review of 0.7.0 closed.
+test('0.7.32 review (D70): an amendment that adds a work item since the evidence review is scope: its code goes through a code review, never straight to the gate', () => {
+  const f = fixture('d70-new-work');
+  evidenceRaised(f, [LAYOUT]);
+  ok(wf(f.root, ['criteria', 'amend', '--file', amendFile(f.base, [{ id: 'C2', text: 'b changes', uat: false }], { work: [{ id: 'W2', criteria: ['C2'], repos: ['app'], why: 'a new endpoint serves b' }] }), '--reason', 'a new endpoint for b', '--attempt', f.id]));
+  assert.deepEqual(state(f.root, f.id).criteriaAmendments.at(-1).changes, { changed: [], added: [], dropped: [] }, 'no criterion changed');
+  fixRound(f, 'impl-w2', 'L1 fixed\nl2\nl3\nendpoint\n', ['--work', 'W2']);
+  const s = state(f.root, f.id);
+  assert.deepEqual([s.decision.kind, s.decision.round], ['review', 'code-review']);
+  assert.equal(wf(f.root, ['gate', '--attempt', f.id], { ownerSilent: true }).code, 75);
+});
+
+// Review of 0.7.32 (open item of D69): a planned pass built after a code review that kept an evidence finding open was sent to another
+// code review, because the pass's route counted that finding as blocking although the gate order does not wait for it.
+test('0.7.32 review (D69): a planned pass built while an evidence finding awaits the gate goes to the gate, with no code review of its own', () => {
+  const f = fixture('d69-pass');
+  evidenceRaised(f, [LAYOUT]);
+  reword(f);
+  fixRound(f, 'impl', 'L1 fixed\nl2\nl3\n');
+  const O1 = { id: 'O1', severity: 'low', summary: 'O1: the label reads oddly', status: 'open', evidence: 'src/a.txt:2' };
+  review(f, 'code-2', { criteria: [], findings: [O1], priorFindings: keptOpen('evidence-1', 'F1') });
+  assert.equal(state(f.root, f.id).decision.kind, 'pass');
+  ok(wf(f.root, ['criteria', 'amend', '--file', closureFile(f.base, { pass: [{ items: ['code-2:O1'], why: 'the label', repos: ['app'] }], expect: { minutes: 20, rounds: 1 } }), '--reason', 'one planned pass', '--attempt', f.id]));
+  ok(wf(f.root, ['handoff', 'implementer', '--agent', 'impl-p', '--work', 'P1', '--attempt', f.id]));
+  commitIn(f.wt, { 'src/a.txt': 'L1 fixed\nL2 reads well\nl3\n' }, 'the label');
+  ok(wf(f.root, ['handoff', 'close', '--agent', 'impl-p', '--attempt', f.id]));
+  const s = state(f.root, f.id);
+  assert.deepEqual([s.decision.kind, s.decision.status], ['gate', 'ready'], 'the pass goes to the gate; the evidence review after it verifies the pass and F1');
+  assert.equal(wf(f.root, ['gate', '--attempt', f.id], { ownerSilent: true }).code, 0);
 });
 
 // Named failure (field, two attempts): a check registered after an evidence review, then the fix: `wf resume` named the gate by the
@@ -334,14 +373,41 @@ test('0.7.32 (I-222, D72): a commit pushed outside the workflow after the accept
   const s = state(root, id);
   assert.deepEqual([s.decision.kind, s.decision.round], ['review', 'code-review'], 'not "deliver" again');
   assert.match(s.next, /the acceptance names/);
-  ok(wf(root, ['handoff', 'reviewer', '--agent', 'rx', '--attempt', id]));
+  // Review of 0.7.32 (Fable, HIGH): the base now holds the pushed commit, so a diff against it read empty: the reviewer was handed
+  // the pushed file as another change's and the gate skipped every step. The attempt's own change is read against the base it
+  // last recorded, so the pushed code is attributed to it, reviewed and tested.
+  const handed = ok(wf(root, ['handoff', 'reviewer', '--agent', 'rx', '--attempt', id]));
+  const rx = JSON.parse(fs.readFileSync(handed.out.match(/^Read (\S+)/m)[1], 'utf8'));
+  assert.deepEqual([rx.round, rx.delta?.changed?.app, rx.delta?.baseMerged], ['code-review', ['src/a.txt'], undefined], 'the pushed file is the attempt\'s own change');
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('rx', { criteria: [] })), '--attempt', id]));
   assert.equal(state(root, id).decision.kind, 'gate');
-  ok(wf(root, ['gate', '--attempt', id]));
+  const run = ok(wf(root, ['gate', '--attempt', id, '--json'])).json();
+  assert.equal(run.steps.find((x) => x.id === 'u').status, 'passed', 'the step ran on the pushed code');
+  assert.deepEqual(state(root, id).lastGate.changed, { app: ['src/a.txt'] });
   ok(wf(root, ['handoff', 'reviewer', '--agent', 'ry', '--attempt', id]));
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('ry')), '--attempt', id]));
   ok(wf(root, ['accept', '--attempt', id]));
   assert.equal(state(root, id).decision.kind, 'delivery');
   ok(wf(root, ['deliver', '--attempt', id]));
   assert.deepEqual([state(root, id).delivery.repos.app.commit, state(root, id).delivery.repos.app.recovered], [head, true]);
+});
+
+test('0.7.32 review (D72): a worktree reset to the current base after the acceptance is not read as a commit pushed outside the workflow', async () => {
+  const { toAccepted, sh } = await import('./helpers.mjs');
+  const { base, root } = singleRepoProject('d72-reset', { gate: { steps: [{ id: 'u', repo: 'app', run: 'true', inputs: ['src/**'] }] } });
+  const { id, wt } = toAccepted(root, base, { item: 'RF-10' });
+  const accepted = state(root, id).accepted.heads.app;
+  // Someone else's change lands on main, and the worktree is reset to it: the accepted commit is no longer in it.
+  commitIn(root, { 'src/other.txt': 'another ticket\n' }, 'another ticket');
+  sh(root, 'git push -q origin HEAD:refs/heads/main');
+  sh(wt, 'git fetch -q origin && git reset -q --hard origin/main');
+  const s = state(root, id);
+  assert.doesNotMatch(s.next, /already pushed to its target outside wf/);
+  const refused = wf(root, ['deliver', '--attempt', id]);
+  assert.equal(refused.code, 75);
+  assert.doesNotMatch(refused.err, /review, gate and accept it here/);
+  assert.match(refused.err, new RegExp(`does not hold the accepted commit ${accepted.slice(0, 10)}`));
+  // The route it names works: the accepted commit put back, the delivery goes on.
+  sh(wt, `git reset -q --keep ${accepted}`);
+  assert.equal(state(root, id).decision.kind, 'delivery');
 });

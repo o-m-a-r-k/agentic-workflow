@@ -181,8 +181,9 @@ test('D75: a passing rerun carries the captures of the suites it carried, sha256
 // re-runs that step whole; the evidence review after it verifies the finding. It is offered once: a finding that a re-run did not
 // satisfy goes to the implementer like any other.
 const FLAKY_CAPTURE = { id: 'e2e', repo: 'app', tier: 'heavy', run: 'n=$(cat "$WF_ROOT/../e2e-runs" 2>/dev/null || echo 0); echo $((n+1)) > "$WF_ROOT/../e2e-runs"; rm -rf e2e/.evidence; mkdir -p e2e/.evidence/eng-222; if [ "$n" -gt 0 ]; then printf "shot-$n" > e2e/.evidence/eng-222/home.png; fi', inputs: ['src/**'], artifacts: ['e2e/.evidence/{itemLower}/**/*.png'] };
-function evidenceFinding(name) {
-  const { base, root } = singleRepoProject(name, { gate: { steps: [FLAKY_CAPTURE] } }, { '.gitignore': '.wf-evidence/\n.wf-worktrees/\ne2e/.evidence/\n' });
+const RERUN_FINDING = { id: 'F1', severity: 'high', criterion: 'C1', step: 'e2e', rerun: true, summary: 'the e2e step collected no capture of the home screen: its capture did not run, nothing in the change is wrong', evidence: 'gate e2e: no file matched e2e/.evidence/eng-222/**/*.png' };
+function evidenceHanded(name, steps = [FLAKY_CAPTURE]) {
+  const { base, root } = singleRepoProject(name, { gate: { steps } }, { '.gitignore': '.wf-evidence/\n.wf-worktrees/\ne2e/.evidence/\n' });
   const e = admitted(root, base, 'ENG-222');
   commitIn(e.repos.app.worktree, { 'src/a.txt': 'b\n' });
   ok(wf(root, ['handoff', 'close', '--agent', 'i', '--attempt', e.id]));
@@ -192,9 +193,12 @@ function evidenceFinding(name) {
   assert.equal(first.steps[0].artifacts.length, 0, 'the first run collected no capture');
   const hand = ok(wf(root, ['handoff', 'reviewer', '--agent', 'ev-1', '--attempt', e.id, '--json'])).json();
   assert.equal(JSON.parse(fs.readFileSync(hand.bundle, 'utf8')).gate.artifacts[0].uncovered, true);
-  const finding = { id: 'F1', severity: 'high', criterion: 'C1', step: 'e2e', rerun: true, summary: 'the e2e step collected no capture of the home screen: its capture did not run, nothing in the change is wrong', evidence: 'gate e2e: no file matched e2e/.evidence/eng-222/**/*.png' };
-  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('ev-1', { findings: [finding] })), '--attempt', e.id]));
   return { base, root, e, first };
+}
+function evidenceFinding(name, steps) {
+  const x = evidenceHanded(name, steps);
+  ok(wf(x.root, ['review', '--closure', closureFile(x.base, goodClosure('ev-1', { findings: [RERUN_FINDING] })), '--attempt', x.e.id]));
+  return x;
 }
 
 test('D75: an evidence finding only a re-run satisfies sends the next step to one gate on the unchanged tree, which re-runs its step; the evidence review after it accepts', () => {
@@ -221,7 +225,10 @@ test('D75: an evidence finding only a re-run satisfies sends the next step to on
   ok(wf(root, ['accept', '--attempt', e.id]));
 });
 
-test('D75: the re-run route is offered once: a finding raised again on the re-run\'s evidence, or kept open after it, goes to the implementer, and the gate waits for it', () => {
+// Review of 0.7.32: what follows a re-run that did not satisfy the finding is no fix round (the finding says nothing in the code is
+// wrong, so an implementer had nothing to build, the gate reused and the next evidence review repeated it): the next step names the
+// adapter on its base branch, which the attempt follows (D60), and the gate still waits.
+test('D75: the re-run route is offered once per adapter: a finding raised again on the re-run\'s evidence, or kept open after it, names the adapter on its base branch, and the gate waits for it', () => {
   for (const kept of [false, true]) {
     const { base, root, e } = evidenceFinding(`rerun-once-${kept}`);
     ok(wf(root, ['gate', '--attempt', e.id]));
@@ -232,9 +239,65 @@ test('D75: the re-run route is offered once: a finding raised again on the re-ru
     const closure = kept ? { priorFindings: [{ round: 'ev-1', id: 'F1', status: 'open', evidence: 'the capture shows the old screen' }] } : { findings: [again], priorFindings: [{ round: 'ev-1', id: 'F1', status: 'fixed', evidence: `the re-run collected ${shot.source}` }] };
     ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('ev-2', { screenshotsInspected: [shot.sha256], ...closure })), '--attempt', e.id]));
     const s = state(root, e.id);
-    // A repair (through the strategist when the course has signals), never another re-run gate.
-    assert.ok(['repair', 'strategy'].includes(s.decision.kind), `kept=${kept}: ${s.decision.kind}`);
-    assert.doesNotMatch(s.next, /only a re-run satisfies it/);
+    // Neither another re-run gate at this adapter nor a fix round with nothing to build: the adapter on its base branch.
+    assert.equal(s.decision.kind, 'adapter', `kept=${kept}`);
+    assert.match(s.next, /re-ran e2e on this unchanged tree for ev-\d:F\d, and the evidence review after it still finds it open/);
+    assert.match(s.next, /The cure is outside this tree\. When it is the step itself \(how it runs, what its capture globs select\) in the project's adapter, change it on the base branch of app/);
+    assert.doesNotMatch(s.next, /only a re-run satisfies it|fix the open findings/);
     assert.equal(wf(root, ['gate', '--attempt', e.id]).code, 75);
   }
+});
+
+// Review of 0.7.32 (Fable, LOW): a finding's `rerun` and `step` were not checked. `rerun: true` with no step, or a step the judged gate
+// does not have, made the re-run route silently not apply, and `wf review` recorded the closure. They are refused while the reviewer
+// can still correct them, naming the gate's steps.
+test('D75 review: `wf review` refuses a re-run finding with no step, a step the judged gate does not have, and a re-run on a round handed no gate', () => {
+  const { base, root, e } = evidenceHanded('rerun-validated');
+  const record = (findings, agent = 'ev-1') => wf(root, ['review', '--closure', closureFile(base, goodClosure(agent, { findings })), '--attempt', e.id]);
+  const noStep = record([{ ...RERUN_FINDING, step: undefined }]);
+  assert.equal(noStep.code, 75);
+  assert.match(noStep.err, /finding F1: `rerun: true` needs `step`, the gate step whose re-run satisfies it \(e2e\)/);
+  const unknown = record([{ ...RERUN_FINDING, step: 'browser' }]);
+  assert.equal(unknown.code, 75);
+  assert.match(unknown.err, /finding F1: step `browser` is no step of the gate this round judged \(e2e\)/);
+  assert.equal(state(root, e.id).review.closure.reviewer, 'code-0', 'nothing was recorded');
+  ok(record([RERUN_FINDING]));
+  // A code-review round is handed no gate: it has no step to re-run.
+  const p = evidenceHanded('rerun-code-round');
+  ok(wf(p.root, ['review', '--closure', closureFile(p.base, goodClosure('ev-1')), '--attempt', p.e.id]));
+  commitIn(p.e.repos.app.worktree, { 'src/a.txt': 'c\n' });
+  ok(wf(p.root, ['handoff', 'reviewer', '--agent', 'code-2', '--attempt', p.e.id]));
+  const code = wf(p.root, ['review', '--closure', closureFile(p.base, goodClosure('code-2', { criteria: [], findings: [RERUN_FINDING] })), '--attempt', p.e.id]);
+  assert.equal(code.code, 75);
+  assert.match(code.err, /finding F1: `rerun` asks for a re-run of a gate step, and this round was handed no gate/);
+});
+
+// Review of 0.7.32 (D75): the route the step names works. A capture glob in the project's adapter selects nothing the step writes;
+// the re-run cannot help and the evidence review keeps the finding open. The glob is fixed on main, the attempt follows it (D60),
+// and the re-run is offered again at the new adapter: it collects the capture, and the evidence review after it accepts.
+test('D75 review: after a re-run that did not satisfy the finding, the adapter fixed on its base branch is followed and the re-run is offered again', async () => {
+  const { sh } = await import('./helpers.mjs');
+  const WRONG_GLOB = { id: 'e2e', repo: 'app', tier: 'heavy', run: 'rm -rf e2e/.evidence; mkdir -p e2e/.evidence/eng-222 && printf home > e2e/.evidence/eng-222/home.png', inputs: ['src/**'], artifacts: ['e2e/.evidence/{itemLower}/**/*.jpg'] };
+  const { base, root, e } = evidenceFinding('rerun-adapter', [WRONG_GLOB]);
+  ok(wf(root, ['gate', '--attempt', e.id]));
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'ev-2', '--attempt', e.id]));
+  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('ev-2', { priorFindings: [{ round: 'ev-1', id: 'F1', status: 'open', evidence: 'the re-run collected nothing again: the step writes home.png and the glob selects *.jpg' }] })), '--attempt', e.id]));
+  assert.equal(state(root, e.id).decision.kind, 'adapter');
+  // The project's adapter is fixed on main, outside the ticket.
+  const file = path.join(root, '.workflow', 'project.yaml');
+  const cfg = JSON.parse(fs.readFileSync(file, 'utf8'));
+  cfg.gate.steps[0].artifacts = ['e2e/.evidence/{itemLower}/**/*.png'];
+  commitIn(root, { '.workflow/project.yaml': JSON.stringify(cfg, null, 2) }, 'e2e: capture the png the step writes');
+  sh(root, 'git push -q origin HEAD:refs/heads/main');
+  const s = state(root, e.id);
+  assert.equal((s.adapterFollows ?? []).length, 1, 'the attempt followed the adapter');
+  assert.deepEqual([s.decision.kind, s.decision.status], ['gate', 'ready']);
+  assert.match(s.next, /the evidence review's finding ev-1:F1 names gate step e2e and says only a re-run satisfies it/);
+  const run = ok(wf(root, ['gate', '--attempt', e.id, '--json'])).json();
+  assert.equal(run.steps.find((x) => x.id === 'e2e').artifacts.length, 1, 'the re-run at the new adapter collected the capture');
+  assert.equal(state(root, e.id).decision.kind, 'review');
+  const hand = ok(wf(root, ['handoff', 'reviewer', '--agent', 'ev-3', '--attempt', e.id, '--json'])).json();
+  const shot = JSON.parse(fs.readFileSync(hand.bundle, 'utf8')).gate.screenshots[0];
+  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('ev-3', { screenshotsInspected: [shot.sha256], priorFindings: [{ round: 'ev-1', id: 'F1', status: 'fixed', evidence: `the re-run collected ${shot.source}` }] })), '--attempt', e.id]));
+  ok(wf(root, ['accept', '--attempt', e.id]));
 });

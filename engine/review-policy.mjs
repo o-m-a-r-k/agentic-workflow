@@ -15,6 +15,7 @@
 import fs from 'node:fs';
 import { git, hashValue, run } from './util.mjs';
 import { gatePassedForCurrentTree } from './gate.mjs';
+import { changeBase } from './attempt.mjs';
 import { obligationSince } from './versions.mjs';
 
 // 'moved': a finding `wf split` handed to a sibling attempt of the batch (the sibling carries the obligation).
@@ -144,7 +145,7 @@ const diffRanges = (worktree, range) => rangesFromDiff(git(worktree, ['-c', 'cor
 // everywhere else).
 export function changedLines(state) {
   const out = {};
-  for (const [name, r] of Object.entries(state.repos ?? {})) if (r.worktree) out[name] = diffRanges(r.worktree, `${r.baseRef ?? r.base}...HEAD`);
+  for (const [name, r] of Object.entries(state.repos ?? {})) if (r.worktree) out[name] = diffRanges(r.worktree, `${changeBase(state, name)}...HEAD`);
   return out;
 }
 
@@ -166,10 +167,10 @@ export function deltaLines(state, since) {
   for (const [name, r] of Object.entries(state.repos ?? {})) {
     if (!r.worktree) continue;
     const from = sinceOf(r, since?.[name]);
-    const raw = diffRanges(r.worktree, from ? `${from}..HEAD` : `${r.baseRef ?? r.base}...HEAD`);
+    const raw = diffRanges(r.worktree, from ? `${from}..HEAD` : `${changeBase(state, name)}...HEAD`);
     // Narrowed only when a base merge moved the merge-base since then: otherwise every line changed since is the attempt's
     // own, a revert to the base text included (verification of the second final review).
-    const base = r.baseRef ?? r.base;
+    const base = changeBase(state, name);
     const moved = from && git(r.worktree, ['merge-base', base, from], { allowFail: true }) !== git(r.worktree, ['merge-base', base, 'HEAD'], { allowFail: true });
     out[name] = moved ? intersectFiles(raw, own[name] ?? {}) : raw;
   }

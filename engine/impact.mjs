@@ -16,6 +16,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { adapterPin, repoDir, trustedAdapter } from './config.mjs';
+import { changeBase } from './attempt.mjs';
 import { WfError, YAML, assertPlainGit, git, gitEnv, globProblem, matchesAny, refuse } from './util.mjs';
 
 export const IMPACT_DEFAULTS = { requiredFor: ['full'], maxFileBytes: 2 * 1024 * 1024, maxScanBytes: 512 * 1024 * 1024, regexTimeoutMs: 20000 };
@@ -540,7 +541,7 @@ export function deriveFromDiff(root, cfg, state, { limit = 100, queryResults = n
     documentation = documentationMatcher(null);
   }
   for (const [name, r] of Object.entries(state.repos ?? {})) {
-    const base = git(r.worktree, ['merge-base', r.baseRef ?? r.base, 'HEAD'], { allowFail: true }) || r.base;
+    const base = git(r.worktree, ['merge-base', changeBase(state, name), 'HEAD'], { allowFail: true }) || r.base;
     for (const f of git(r.worktree, ['diff', '--name-only', base, 'HEAD']).split('\n').filter(Boolean)) changed.add(`${name}:${f}`);
     const diff = git(r.worktree, ['diff', '-U0', '--no-color', base, 'HEAD'], { allowFail: true }) ?? '';
     let oldFile = null, newFile = null;

@@ -4,6 +4,7 @@ import path from 'node:path';
 import { adapterLocation, adapterPin, attemptAdapter, repoDir } from './config.mjs';
 import { screenshots } from './gate.mjs';
 import { attemptDir } from './ledger.mjs';
+import { changeBase } from './attempt.mjs';
 import { findSkill } from './skills.mjs';
 import { YAML, git, matchesAny, refuse, sha256 } from './util.mjs';
 import { prepareWrite, readRegular, writeNoFollow } from './evidence.mjs';
@@ -221,7 +222,7 @@ export function designChecks(root, trusted, state) {
   const hits = [];
   for (const [repo, r] of Object.entries(state.repos)) {
     if (!r.worktree || !fs.existsSync(r.worktree)) continue;
-    const base = git(r.worktree, ['merge-base', r.baseRef ?? r.base, 'HEAD'], { allowFail: true }) || r.base;
+    const base = git(r.worktree, ['merge-base', changeBase(state, repo), 'HEAD'], { allowFail: true }) || r.base;
     const added = addedLines(r.worktree, base);
     for (const rule of ds.rules ?? []) {
       if (rule.repo && rule.repo !== repo) continue;

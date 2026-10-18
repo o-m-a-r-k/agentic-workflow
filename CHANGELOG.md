@@ -44,6 +44,15 @@ Release notes, newest first, then every fix that came from a failure in the work
   accepted in the same attempt (the next step names each), after which the delivery records it as delivered without pushing
   again; or you decide it shipped as it is. The next step says the same, also when a commit was made after the acceptance and not
   pushed.
+- **Review of this release: the pushed code is now really reviewed and tested (D69, D70, D72).** A review of this release found
+  that the route above reviewed and tested nothing: once the main branch held the pushed commit, the change looked empty, so the
+  test run skipped every check and the reviewer was shown the pushed code as someone else's. The pushed code is now read as the
+  ticket's own until it is accepted, so its checks run and the reviewer reviews it. A ticket whose code was reset to the main branch
+  is no longer mistaken for one pushed by hand: the delivery says to put the accepted code back. Also: new work added to a ticket
+  after the final review (a new piece of work in the plan, even with the same requirements) goes through a code review again before
+  the test run, as it did before this release; a code review that sees a problem from the final review still in the code raises it
+  as its own problem, which holds the test run; and a planned batch of small fixes built while such a problem waits for the test run
+  goes to the test run, as other batches do.
 
 - **A ticket may register the proof it needs, and is told how (I-220, D73).** Named failure: `wf validation add` refused "supplemental
   step X is not committed in the attempt adapter" and said nothing more, while the rules every agent reads said "never change the
@@ -72,7 +81,11 @@ Release notes, newest first, then every fix that came from a failure in the work
   the open finding held the gate back, so the only ways on were a commit made for nothing or asking you to override. Now an evidence
   reviewer can say a finding is cured only by running a step again (its screenshots were never taken, nothing in the code is wrong);
   the next step is then one gate on the same tree, which runs that step again in full, and the evidence review after it checks the
-  finding. This is offered once: if the new run does not cure it, it is fixed like any other finding.
+  finding. This is offered once for each version of the project's checks: if the new run does not cure it either, the next step no
+  longer hands an implementer something with nothing to build; it says the cure is in the check itself (for example which
+  screenshots it collects), fixed in the project's own setup on its main branch, which the ticket then follows by itself, and the
+  run is offered again after that. A finding in the code is raised as an ordinary finding and fixed like any other. A reviewer that
+  names a step the run does not have, or asks for a run again without naming the step, is told so while it can still correct it.
 - **A divided review that can never finish says so (D76).** Named failure: the reviewer that combines a divided review asked for its
   parts 169 times over 89 minutes and then waited six hours, because one of the reviewers it waited for had ended without recording
   its part. Now that reviewer is told no part will come and to stop, and the next step stops it and starts a fresh divided review.
