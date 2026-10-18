@@ -104,6 +104,7 @@ export function addTargets(root, state, value, { reason, by }) {
 
 // The additional targets of an attempt with the port that delivers each (null while none is admitted).
 export function portsOf(root, state) {
+  if (!(state.alsoTargets ?? []).length) return [];
   const ports = listAttempts(root).flatMap((id) => {
     try {
       const s = loadState(root, id);

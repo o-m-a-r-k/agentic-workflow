@@ -32,7 +32,7 @@
 // again; when it is the same evidence, `wf accept` takes the review already recorded.
 import fs from 'node:fs';
 import path from 'node:path';
-import { adapterFileAtCommit, adapterPin, attemptAdapter, repoDir, trustedAdapter } from './config.mjs';
+import { adapterPin, attemptAdapter, repoDir, trustedAdapter } from './config.mjs';
 import { append, loadState, recordedTogether } from './ledger.mjs';
 import { assertEngine, canonical, git, run } from './util.mjs';
 import { changedFiles } from './attempt.mjs';
@@ -198,13 +198,8 @@ export function followPlan(root, state) {
   const kindFrom = trustedAdapter(root, state, deliveryFrom).delivery.kind;
   const kindTo = after.delivery.kind;
   const mode = started && kindFrom !== kindTo ? 'kept' : 'followed';
-  if (mode === 'followed' && kindTo !== 'push-main') {
-    try {
-      adapterFileAtCommit(root, state, tip, kindTo);
-    } catch (error) {
-      return held(`the delivery adapter \`${kindTo}\` is not committed at ${ref} (${short(tip)}): ${String(error?.message ?? error).split('\n')[0]}`);
-    }
-  }
+  // Read from git, never written out: a command that only lists the attempt writes nothing into the evidence folder.
+  if (mode === 'followed' && kindTo !== 'push-main' && pluginBlob(dir, tip, loc.relative || '.', kindTo) === 'missing') return held(`the delivery adapter \`${kindTo}\` is not committed at ${ref} (${short(tip)})`);
   const gate = gateChanges(state, dir, loc.relative || '.', before, from, after, tip);
   const g = state.lastGate;
   // An acceptance stands on a gate that counted when it was given (`wf accept` refuses otherwise), so only this move can
