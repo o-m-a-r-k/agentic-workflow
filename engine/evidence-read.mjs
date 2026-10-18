@@ -3,7 +3,7 @@
 // and never parses shell), and they split commands or switched tools by trial. These commands write nothing of their
 // own (opening the attempt runs the usual evidence verification, as every `wf` command does); the attempt folder and
 // each file are refused when they are links, each file is opened with O_NOFOLLOW and must have one name, only paths
-// inside this attempt's evidence are read, and at most MAX_SHOW_BYTES are read. Images are not printed: `wf export screenshots` copies them out, sha256-checked.
+// inside this attempt's evidence are read, and at most MAX_SHOW_BYTES are read. Images are not printed: `wf export screenshots` copies them out, sha256-checked (`--run <id>` the images of one run or import, I-198).
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -13,7 +13,7 @@ import { recordedFileProblem } from './evidence.mjs';
 import { isInside } from './paths.mjs';
 import { WfError, refuse } from './util.mjs';
 
-const IMAGE = /\.(png|jpe?g|webp|gif|bmp|tiff?)$/i;
+export const IMAGE = /\.(png|jpe?g|webp|gif|bmp|tiff?)$/i;
 export const MAX_SHOW_BYTES = 4 * 1024 * 1024;
 
 // The kind of an evidence file, from its path inside the attempt folder.
@@ -54,6 +54,13 @@ function attemptFolder(root, state) {
   return dir;
 }
 
+// The export that reads an evidence image (I-198): its run's (`gate/<run id>/…`) or its import's (`captures/import-<n>/…`), else
+// the last gate's set.
+function imageRoute(rel, state) {
+  const run = /^gate\/([\w.-]+)\//.exec(rel)?.[1] ?? /^captures\/(import-\d+)\//.exec(rel)?.[1] ?? null;
+  return run ? `\`wf export screenshots --run ${run} --attempt ${state.id} --to <folder>\` (every image of that run or import, sha256-checked)` : `\`wf export screenshots --gate --attempt ${state.id} --to <folder>\` (the gate's set; without --gate, the delivered set)`;
+}
+
 export function listEvidence(root, state, { kind = null } = {}) {
   const dir = attemptFolder(root, state);
   const files = [];
@@ -85,7 +92,9 @@ export function showEvidence(root, state, rel, { offset, length, maxSize } = {})
     throw refuse(`${rel}: no such evidence file in ${state.id}`);
   }
   if (!(parent === dir || isInside(parent, dir))) throw refuse(`${rel}: give a path inside this attempt's evidence, relative to it`);
-  if (IMAGE.test(rel)) throw refuse(`${rel} is an image: copy it out with \`wf export screenshots --gate --attempt ${state.id} --to <folder>\` (the gate's set; without --gate, the delivered set) and view the copy with the Read tool`);
+  // 0.7.30 (I-198): an image goes to the export of the run or import it belongs to, which reads it whatever that run's outcome
+  // (failed, stopped, interrupted, or an import made before any gate); `--gate` reads only the last gate's collected set.
+  if (IMAGE.test(rel)) throw refuse(`${rel} is an image: copy it out with ${imageRoute(path.relative(dir, abs).split(path.sep).join('/'), state)} and view the copy with the Read tool`);
   const st = fs.lstatSync(abs, { throwIfNoEntry: false });
   if (!st) throw refuse(`${rel}: no such evidence file in ${state.id}`);
   if (st.isSymbolicLink() || !st.isFile()) throw refuse(`${rel} is not a regular file; nothing is read through it`);

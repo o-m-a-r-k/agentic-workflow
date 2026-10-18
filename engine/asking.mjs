@@ -215,6 +215,12 @@ export const FRAMES = {
     labels: { yes: 'Use the corrected step', no: 'Keep the original step' },
     then: { yes: 'the corrected step replaces it (the original stays in the record); a fresh code review and the full test run follow', no: 'the original step stays' },
   }),
+  // 0.7.30 (I-158, D58): delivering without the full test run; the engine states what ran on this code and what would not.
+  lightOnly: ({ item, leftOut = [], proven = [], stillRun = [], reason = '' }) => ({
+    question: `Should ${item} be delivered without its full test run? Not proven for this delivery: ${leftOut.join(', ') || 'the heavy test steps'} would not run. Proven on this code so far: ${proven.length ? `${proven.join(', ')} passed` : 'nothing yet'}.${stillRun.length ? ` Still run before delivery: ${stillRun.join(', ')}.` : ''}${reason ? ` The agent's reason: ${String(reason).replace(/[.\s]+$/, '')}.` : ''}`,
+    labels: { yes: 'Deliver without the full tests', no: 'Run the full tests first' },
+    then: { yes: `the gate runs the light checks and leaves out ${leftOut.join(', ') || 'the heavy test steps'}; it counts for delivery, the reviewer is told what did not run, and the delivered comment says so`, no: 'the full test run happens before delivery, as usual' },
+  }),
   owner: ({ rounds }) => ({
     question: `This ticket has been through ${rounds} review round${rounds === 1 ? '' : 's'} and the reviews keep finding problems. How should it go on?`,
   }),
@@ -229,6 +235,7 @@ const FRAME_KEYS = [
   ['override-gate', 'deployment-close:', 'closeUndeployed'],
   ['override-gate', 'abandon:', 'abandonIntegration'],
   ['override-gate', 'gate:', 'gateOrder'],
+  ['override-gate', 'light-only:', 'lightOnly'],
   ['override-gate', 'acknowledge:', 'acknowledge'],
   ['override-gate', 'repin:', 'repin'],
   ['override-gate', 'correct-admission:', 'correctCheck'],

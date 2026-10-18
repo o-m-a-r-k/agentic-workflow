@@ -46,7 +46,9 @@ test('I-16: `wf evidence list` lists an attempt\'s evidence by kind; `wf evidenc
 
   assert.match(ok(wf(root, ['evidence', 'show', log.path, '--attempt', e.id])).out, /step-output-line/);
   assert.match(ok(wf(root, ['evidence', 'show', 'ledger.jsonl', '--attempt', e.id])).out, /"type":"admitted"/);
-  assert.match(wf(root, ['evidence', 'show', shot.path, '--attempt', e.id]).err, /is an image: copy it out with `wf export screenshots --gate --attempt ENG-760\.1/);
+  // 0.7.30 (I-198): an image is sent to the export of the run it belongs to.
+  const runOfShot = /^gate\/([^/]+)\//.exec(shot.path)[1];
+  assert.match(wf(root, ['evidence', 'show', shot.path, '--attempt', e.id]).err, new RegExp(`is an image: copy it out with \`wf export screenshots --run ${runOfShot} --attempt ENG-760\\.1`));
   for (const bad of ['../../x', '/etc/hosts', path.join(root, 'src', 'a.txt'), 'nope.txt']) assert.notEqual(wf(root, ['evidence', 'show', bad, '--attempt', e.id]).code, 0, bad);
   assert.match(wf(root, ['evidence', 'show', '../../x', '--attempt', e.id]).err, /a path inside this attempt's evidence, relative to it/);
   assert.match(wf(root, ['evidence', 'show', '--attempt', e.id]).err, /usage: wf evidence show <path>/);

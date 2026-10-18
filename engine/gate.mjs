@@ -1,5 +1,6 @@
 import { gateAdapter, validationCommit, validationDigest, validationIds, validationCatalog } from './validation.mjs';
 import { requireYes } from './approve.mjs';
+import { FRAMES } from './asking.mjs';
 import { mkdirStateDirectory } from './state-folders.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -61,7 +62,9 @@ function stepInputs(state, step, repo, pkg, skipFolder = null) {
 // when it is planned (`when`, `component`, `ignores`) and `prepare` (run by `wf prepare` only, never by the gate). Named
 // failure (audit of 51 attempts; one ticket's correction of its evidence glob): the whole definition was hashed, so a
 // change to which screenshots count as the ticket's made a 25-minute e2e step look new, though its result could not change.
-const RESULT_NEUTRAL = ['workers', 'shards', 'artifacts', 'tier', 'lease', 'deferrable', 'when', 'component', 'ignores', 'prepare', 'specs'];
+// `needs` (0.7.30, I-163) only orders steps within a run, and `affects` (0.7.30, I-134) only chooses which specs a run takes: a
+// run of chosen specs has a key of its own (planGate), so neither can make a recorded pass mean something else.
+const RESULT_NEUTRAL = ['workers', 'shards', 'artifacts', 'tier', 'lease', 'deferrable', 'when', 'component', 'ignores', 'prepare', 'specs', 'needs', 'affects'];
 function pluginHashOf(root, state, step) {
   return step.plugin ? hashFile(adapterFileAtCommit(root, state, validationCommit(state, step.id), step.plugin)) : null;
 }
@@ -271,14 +274,25 @@ export async function planGate(root, state, options = {}) {
         continue;
       }
     }
+    // 0.7.30 (I-134, D59): a standard attempt runs only the spec files its change can affect, when the step says which (`specs`
+    // and `affects`); any doubt runs the whole step.
+    let affected = null;
+    let whole = null;
+    if (!ownSpecs && !full && state.lane === 'standard' && !state.deferHeavy && entry.tier === 'heavy' && step.affects?.length) {
+      const doubt = validationIds(state).includes(step.id) ? 'it is a check the ticket froze as its own' : infraChanged ? 'shared infrastructure changed' : isDependent ? 'it depends on a changed contract' : notCovered.length ? `${notCovered[0]} is outside every step's inputs` : alsoChanged.length ? `${alsoChanged[0]} changed in a repo it also reads` : null;
+      const picked = doubt ? { whole: doubt } : affectedSpecs(state, step, repo, pkg, dir, pkgChanged);
+      if (picked.specs) affected = picked.specs;
+      else whole = picked.whole;
+    }
     chooseWorkers(step);
     chooseShards(step);
     const inputs = stepInputs(state, step, repo, pkg, namesOwnFolder(step, pkg) ? null : { repo: adapterRepo.name, folder: adapterRel });
     const runner = runnerIdentity(root, live, state, step);
     const also = alsoInputTrees(root, cfg, state, step);
     const keyOf = (r) => (!inputs || also.unreadable.length ? null : hashValue(also.trees ? { inputs: inputs.hash, runner: r, also: also.trees } : { inputs: inputs.hash, runner: r }));
-    // A run of the member's own specs proves those specs only: its key is its own, so it never stands for the whole step.
-    const key = ownSpecs && keyOf(runner) ? hashValue({ step: keyOf(runner), ownSpecs }) : keyOf(runner);
+    // A run of the member's own specs proves those specs only: its key is its own, so it never stands for the whole step. So
+    // does a run of the specs a change can affect (I-134).
+    const key = ownSpecs && keyOf(runner) ? hashValue({ step: keyOf(runner), ownSpecs }) : affected && keyOf(runner) ? hashValue({ step: keyOf(runner), affectedSpecs: affected }) : keyOf(runner);
     // A pass recorded before 0.7.11 was keyed on the whole definition and on inputs that counted the workflow folder: it is
     // matched on those terms, so an upgrade reruns nothing that 0.7.10 would have reused.
     const recordedBefore = allGateSteps(state).some((s) => s.id === step.id && !s.resultIdentity && ['passed', 'reused'].includes(s.status));
@@ -312,7 +326,7 @@ export async function planGate(root, state, options = {}) {
     // and says where it came from. Only for a step that keeps no evidence files, which are this ticket's own. Named
     // failure (I-150, audit of 51 attempts): 163 reruns had a key another attempt had already passed.
     let fromAttempt = null;
-    if (!prior && key && !ownSpecs && !step.artifacts?.length && !options.rerunFailed?.includes(step.id)) {
+    if (!prior && key && !ownSpecs && !affected && !step.artifacts?.length && !options.rerunFailed?.includes(step.id)) {
       // The key a pass recorded before 0.7.11 would have here (hashed the old way once, and only if such a pass exists).
       let legacy;
       const legacyAcross = () => {
@@ -360,6 +374,17 @@ export async function planGate(root, state, options = {}) {
         continue;
       }
     }
+    // 0.7.30 (I-158, D58): the person decided to deliver without the full test run (`wf gate light-only`). A heavy step is left
+    // out as in a quick fix, on the same terms: an identical pass is still reused, and one that failed in this attempt, or that
+    // the ticket froze as its own check, still runs (a known failure is never left out into a pass). `--full` runs it.
+    const personal = !prior && !full && entry.tier === 'heavy' ? lightOnlyDecision(state) : null;
+    if (personal && !validationIds(state).includes(step.id)) {
+      const last = allGateSteps(state).filter((s) => s.id === step.id && ['passed', 'reused', 'failed'].includes(s.status)).at(-1) ?? null;
+      if (last?.status !== 'failed') {
+        steps.push({ ...entry, decision: 'skip', skippedBy: 'person', personDecision: personal.id, reason: `left out by the person's decision (${personal.id}): delivered without the full test run (\`wf gate --full\` runs it)`, lastResult: last ? { status: last.status, runId: last.runId } : null });
+        continue;
+      }
+    }
     steps.push({
       ...entry,
       dir,
@@ -370,15 +395,50 @@ export async function planGate(root, state, options = {}) {
       alsoInputs: also.trees ?? undefined,
       decision: prior ? 'reuse' : 'run',
       ...(ownSpecs ? { ownSpecs } : {}),
-      reason: ownSpecs && !prior ? `batch member: only the spec files this change adds or edits (${ownSpecs.join(', ')}); the whole step runs in the batch gate` : prior ? `same inputs and runner as ${prior.runId}${fromAttempt ? ` in ${fromAttempt}` : ''}` : outside.length ? `changed file(s) outside this step's inputs since its last pass: ${outside.slice(0, 3).join(', ')}${outside.length > 3 ? '…' : ''}` : notCovered.length ? `changed file(s) outside every step's inputs: ${notCovered.slice(0, 3).join(', ')}${notCovered.length > 3 ? '…' : ''}` : also.unreadable.length ? `cannot read the tree of ${also.unreadable.join(', ')} (alsoInputs): always runs` : key ? (isDependent ? 'dependent of a changed contract' : infraChanged ? 'shared infrastructure changed' : also.trees ? 'inputs or a repo in alsoInputs changed, or never passed' : 'inputs changed or never passed') : 'no `inputs` declared: always runs',
+      ...(affected ? { affectedSpecs: affected } : {}),
+      reason: ownSpecs && !prior ? `batch member: only the spec files this change adds or edits (${ownSpecs.join(', ')}); the whole step runs in the batch gate` : affected && !prior ? `only the spec files this change can affect, by the step's \`affects\` rule (${affected.length}): ${affected.join(', ')}; \`wf gate --full\` runs the whole step` : prior ? `same inputs and runner as ${prior.runId}${fromAttempt ? ` in ${fromAttempt}` : ''}` : outside.length ? `changed file(s) outside this step's inputs since its last pass: ${outside.slice(0, 3).join(', ')}${outside.length > 3 ? '…' : ''}` : notCovered.length ? `changed file(s) outside every step's inputs: ${notCovered.slice(0, 3).join(', ')}${notCovered.length > 3 ? '…' : ''}` : also.unreadable.length ? `cannot read the tree of ${also.unreadable.join(', ')} (alsoInputs): always runs` : key ? (isDependent ? 'dependent of a changed contract' : infraChanged ? 'shared infrastructure changed' : also.trees ? 'inputs or a repo in alsoInputs changed, or never passed' : 'inputs changed or never passed') : 'no `inputs` declared: always runs',
+      ...(whole && !prior ? { wholeBecause: whole } : {}),
       reusedFrom: prior?.runId ?? null,
       // The record itself travels with the plan: the other attempt's ledger is not read again when the gate runs.
       ...(fromAttempt ? { reusedFromAttempt: fromAttempt, sourceRecord: prior } : {}),
       ...(prior && reselect ? { reselect } : {}),
       missingSecrets: missingFor(root, cfg, step.id, validationCatalog(root, state, step.id)),
     });
+    const last = steps.at(-1);
+    if (last.wholeBecause) last.reason = `${last.reason}; the whole step runs: ${last.wholeBecause}`;
   }
   return { cfg, live, changed, impact: imp, full, adapterTouched, focused, check: Boolean(options.check), repos: options.check && options.repos ? [...options.repos] : null, rerunFailed: options.rerunFailed ?? null, steps, unchecked, tree: treeHashes(state) };
+}
+
+// 0.7.30 (I-134, D59). Named failure (field): a one-line change reran the whole 1,200-test end-to-end step (27 to 40 minutes); the
+// gate could not run only the specs related to the touched modules, so its cost did not scale with the change and unrelated
+// flaky specs blocked small fixes. The spec files a change can affect, by the step's `affects` rule: every file of the change
+// that the step reads is a spec file itself (it runs) or is in the `paths` of a rule (the rule's `specs` run); one that no rule
+// accounts for, or a selection that comes out empty, runs the whole step ({ whole: why }). A suite that did not pass in the
+// step's last run in this attempt runs with them, so a known failure is never left out into a pass.
+function affectedSpecs(state, step, repo, pkg, dir, pkgChanged) {
+  const reads = (r) => !matchesAny(r, pkg.docsOnly) && matchesAny(r, step.inputs ?? ['**']) && !matchesAny(r, step.ignores ?? []);
+  const changed = pkgChanged.map((f) => rel(f, pkg.path)).filter(reads);
+  if (!changed.length) return { whole: 'no file it reads changed' };
+  const specFiles = trackedFiles(state.repos[repo.name].worktree).filter((f) => inside(f, pkg.path)).map((f) => rel(f, pkg.path)).filter((f) => matchesAny(f, step.specs));
+  const picked = new Set();
+  for (const f of changed) {
+    if (matchesAny(f, step.specs)) {
+      if (fs.existsSync(path.join(dir, f))) picked.add(f);
+      continue;
+    }
+    const rules = step.affects.filter((a) => matchesAny(f, a.paths));
+    if (!rules.length) return { whole: `no \`affects\` rule covers ${f}` };
+    for (const a of rules) for (const s of specFiles) if (matchesAny(s, a.specs)) picked.add(s);
+  }
+  const last = allGateSteps(state).filter((s) => s.id === step.id && ['passed', 'failed'].includes(s.status)).at(-1);
+  if (last?.status === 'failed') {
+    const open = (last.suites ?? []).filter((x) => x.status !== 'passed');
+    if (!open.length || open.some((x) => !x.file)) return { whole: 'it failed in its last run and its failing suites are not all known by file' };
+    for (const x of open) if (fs.existsSync(path.join(dir, x.file))) picked.add(x.file);
+  }
+  if (!picked.size) return { whole: 'the `affects` rule picks no spec file for this change' };
+  return { specs: [...picked].sort() };
 }
 
 function substitute(text, vars, quote = false) {
@@ -543,6 +603,40 @@ export function quarantineSuite(root, state, options) {
   };
   const approval = requireYes(root, state, { kind: 'override-gate', key: `quarantine:${state.id}:${stepId}:${suite}`, summary: `set aside ${suite} of ${stepId} for this delivery: the change does not edit the test file${read.length ? ` and edits ${read.length} file(s) the step reads` : ' nor any other file the step reads'}${undeclared.length ? `; it also edits ${undeclared.map(([name]) => name).join(', ')}, which the step does not declare` : ''} (the agent's reason: ${reason})`, what: `setting aside ${suite} of ${stepId}`, frame: setAsideFrame, options });
   return { decision: approval.decision, step: stepId, suite };
+}
+
+// 0.7.30 (I-158, D58): the person's answered decision to deliver this attempt without the full test run, or null.
+export const lightOnlyDecision = (state) => (state.decisions ?? []).find((d) => d.kind === 'override-gate' && d.key === `light-only:${state.id}` && d.approved?.choice === 'yes' && !d.withdrawn) ?? null;
+
+// `wf gate light-only --reason "<why>"`: the person's one decision to deliver without the full test run. Named failure (field):
+// the person said "skip the full gate but do the review"; the engine had decisions to run the gate out of order and to correct a
+// frozen check, but none for this, so their choice could not be recorded without working around the gate's acceptance. The
+// question says what would not run, what passed on this code so far and what still runs; the gate then leaves the heavy steps
+// out (planGate) and counts, the evidence reviewer is handed what did not run (`notRun`), and the delivered comment says so.
+// The light steps still run: they take minutes, and the gate's record is what acceptance and delivery read (as in a quick fix,
+// D23).
+export async function lightOnly(root, state, options) {
+  const reason = typeof options.reason === 'string' ? options.reason.trim() : '';
+  if (!reason) throw new WfError('usage: wf gate light-only --reason "<why: the person\'s words when they asked for it>"');
+  const cfg = gateAdapter(root, state);
+  if (state.lane === 'quick' && (cfg.gate.quickLane ?? 'light') === 'light') throw refuse(`a quick fix's gate already runs the light steps only: ${state.id} needs no decision for it`, 'run `wf gate`', { id: 'gate:light-only-quick' });
+  const plan = await planGate(root, state, {});
+  const frozen = validationIds(state);
+  const lastOf = (id) => allGateSteps(state).filter((s) => s.id === id && ['passed', 'reused', 'failed'].includes(s.status)).at(-1)?.status ?? null;
+  // What the plan would do without the decision: a step it already leaves out by this decision counts as one that would run.
+  const wouldRun = plan.steps.filter((s) => s.tier === 'heavy' && (s.decision === 'run' || s.skippedBy === 'person'));
+  const failed = wouldRun.filter((s) => lastOf(s.id) === 'failed').map((s) => s.id);
+  const own = wouldRun.filter((s) => frozen.includes(s.id) && !failed.includes(s.id)).map((s) => s.id);
+  const leftOut = wouldRun.map((s) => s.id).filter((id) => !failed.includes(id) && !own.includes(id));
+  if (!leftOut.length) {
+    const why = [failed.length ? `failed in this attempt (${failed.join(', ')})` : '', own.length ? `is a check the ticket froze as its own (${own.join(', ')})` : ''].filter(Boolean).join(' or ');
+    throw refuse(`nothing to leave out: ${why ? `every heavy step of ${state.id} that would run ${why}; a known failure is never left out into a pass` : `no heavy step of ${state.id} would run on this code`}`, 'run `wf gate`', { id: 'gate:light-only-nothing' });
+  }
+  const tree = canonical(treeHashes(state));
+  const proven = [...new Set([...state.gates, ...(state.checks ?? [])].filter((g) => canonical(g.tree ?? {}) === tree).flatMap((g) => g.steps ?? []).filter((s) => ['passed', 'reused'].includes(s.status)).map((s) => s.id))];
+  const stillRun = [...plan.steps.filter((s) => s.tier !== 'heavy' && s.decision === 'run').map((s) => s.id), ...failed.map((id) => `${id} (it failed in this attempt)`), ...own.map((id) => `${id} (the ticket's own check)`)];
+  const approval = requireYes(root, state, { kind: 'override-gate', key: `light-only:${state.id}`, summary: `deliver ${state.item ?? state.id} without the full test run: ${leftOut.join(', ')} would not run${proven.length ? `; passed on this code: ${proven.join(', ')}` : '; nothing has passed on this code yet'} (the agent's reason: ${reason})`, what: 'delivering without the full test run', frame: FRAMES.lightOnly({ item: state.item ?? state.id, leftOut, proven, stillRun, reason }), options });
+  return { decision: approval.decision, leftOut, stillRun };
 }
 
 // Whose evidence a gate collects: the attempt itself, and for a batch every member (their heavy steps run here).
@@ -732,7 +826,9 @@ async function executeStep(root, cfg, state, planned, ctx) {
   const prior = allGateSteps(state).filter((s) => s.id === step.id && s.status !== 'reused' && s.suites).at(-1);
   // Playwright's JSON report names every test it found, run or not; a JUnit report names only the suites that ran.
   // A batch member's own specs (I-212) are what this run runs; nothing an earlier whole run passed is carried into it.
-  const rerun = planned.ownSpecs?.length ? planned.ownSpecs : step.select ? suitesToRerun(prior, planned, { listsEverySuite: Boolean(step.report?.playwright) }) : null;
+  // The spec files a standard attempt's change can affect (I-134) are likewise all this run runs.
+  const onlySpecs = planned.ownSpecs?.length ? planned.ownSpecs : planned.affectedSpecs?.length ? planned.affectedSpecs : null;
+  const rerun = onlySpecs ?? (step.select ? suitesToRerun(prior, planned, { listsEverySuite: Boolean(step.report?.playwright) }) : null);
   const vars = { workers: workers.n, shards: shards.n, evidence: scratch };
   vars.select = rerun ? substitute(step.select, { suites: rerun.map(shellQuote).join(' ') }) : '';
   // The report files present before the run, by signature: only a report this run wrote or rewrote is read after it (one an
@@ -798,7 +894,7 @@ async function executeStep(root, cfg, state, planned, ctx) {
     // stays as `not-run`, rerun the next time, and the step does not pass (independent review of 0.7.6: it was dropped, so a
     // later gate went green without it). Suites it was not asked to rerun are carried.
     let unreported = [];
-    if (rerun && prior?.suites && !planned.ownSpecs?.length) {
+    if (rerun && prior?.suites && !onlySpecs) {
       const fresh = new Map(suites.map((s) => [s.id, s]));
       const reported = (s) => fresh.has(s.id) || (s.file && [...fresh.values()].some((x) => x.file === s.file));
       const requested = (s) => rerun.includes(s.file ?? s.id);
@@ -853,6 +949,7 @@ async function executeStep(root, cfg, state, planned, ctx) {
     ...result,
     rerunSuites: rerun,
     ...(planned.ownSpecs?.length ? { ownSpecs: planned.ownSpecs } : {}),
+    ...(planned.affectedSpecs?.length ? { affectedSpecs: planned.affectedSpecs } : {}),
     workers,
     shards,
     durationMs: Date.now() - started,
@@ -952,11 +1049,89 @@ const describeHolder = (h) => {
   return `pid ${h.pid}${what ? ` (${what})` : ' (no details recorded)'}${h.since ? ` since ${h.since.slice(11, 19)}Z` : ''}`;
 };
 const LEASE_REREAD_MS = 2000;
-// What a lease wait says after the lease's name: who holds the slots, and how capacity is raised (the project's current config,
-// read again while waiting).
-export function leaseWaitText(name, holders = leaseHolders(name)) {
+// What a lease wait says after the lease's name: who holds the slots, the waiting run's place among the live waiters (when it is
+// known), and how capacity is raised (the project's current config, read again while waiting).
+export function leaseWaitText(name, holders = leaseHolders(name), queue = null) {
   const by = holders.length ? `held by ${holders.map(describeHolder).join(', ')}` : 'held by a process that has just let go';
-  return `${by}. To allow more at once, raise \`gate.leases.${name}\` in the project's .workflow/project.yaml (a waiting run reads it again every ${LEASE_REREAD_MS / 1000} seconds)`;
+  const place = queue?.place ? `; place ${queue.place} of ${queue.of} waiting (the live run waiting longest goes next)` : '';
+  return `${by}${place}. To allow more at once, raise \`gate.leases.${name}\` in the project's .workflow/project.yaml (a waiting run reads it again every ${LEASE_REREAD_MS / 1000} seconds)`;
+}
+
+// ---- Fair admission among live waiters (0.7.30, I-157, D57) ----
+// Named failure (field): a small focused proof waited more than 35 minutes for the Docker lease while other live runs kept
+// taking it. Every waiting run polled (a gate every 500 ms, `wf run` every second) and whichever asked first after a slot freed
+// took it. Now a waiting run marks itself beside the lease's slots (`docker.wait.<pid>.<tag>`: since when it waits, and what it
+// is) every time it asks, and a free slot goes to the live waiters in the order they began to wait: a run takes one only when
+// fewer live runs than there are free slots have waited longer. The mark is no queue and no reservation (principle 8): a mark
+// whose process is gone is skipped and removed, one not refreshed for WAITER_FRESH_MS (its run stopped asking, or the pid was
+// reused) counts for nothing, and a run that takes its slot, or stops waiting, removes its own. A `wf` older than this one
+// takes a free slot as before; slots are still taken only through the exclusive create in `takeMachineLease`.
+const WAITER_FRESH_MS = 20000;
+const escapeRe = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const waiterFileOf = (name, tag, pid = process.pid) => path.join(leasesDir(), `${leaseBase(name)}.wait.${pid}.${hashValue(String(tag)).slice(0, 12)}`);
+function noteWaiter(name, tag, since, who = null) {
+  const file = waiterFileOf(name, tag);
+  try {
+    mkdirStateDirectory(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({ pid: process.pid, tag: String(tag), since, ...(who ?? {}) }));
+  } catch {}
+  return file;
+}
+const dropWaiter = (file) => {
+  try {
+    fs.rmSync(file, { force: true });
+  } catch {}
+};
+// The live runs waiting for a lease, the one waiting longest first.
+export function leaseWaiters(name) {
+  const dir = leasesDir();
+  let names = [];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return [];
+  }
+  const re = new RegExp(`^${escapeRe(leaseBase(name))}\\.wait\\.(\\d+)\\.([0-9a-f]{12})$`);
+  const out = [];
+  for (const n of names) {
+    const m = re.exec(n);
+    if (!m) continue;
+    const file = path.join(dir, n);
+    const pid = Number(m[1]);
+    if (!isPidAlive(pid)) {
+      dropWaiter(file);
+      continue;
+    }
+    let st;
+    let w;
+    try {
+      st = fs.statSync(file);
+      w = JSON.parse(fs.readFileSync(file, 'utf8'));
+    } catch {
+      continue;
+    }
+    if (Date.now() - st.mtimeMs > WAITER_FRESH_MS || w?.pid !== pid || !Number.isFinite(Date.parse(w.since))) continue;
+    out.push({ pid, file, since: w.since, tag: w.tag ?? null, attempt: w.attempt ?? null, step: w.step ?? null, command: w.command ?? null });
+  }
+  return out.sort((a, b) => Date.parse(a.since) - Date.parse(b.since) || a.pid - b.pid || a.file.localeCompare(b.file));
+}
+// A waiting run's place among the live waiters (1 = goes next), or null when it holds none.
+export function waiterPlace(name, tag, pid = process.pid) {
+  const all = leaseWaiters(name);
+  const at = all.findIndex((w) => w.file === waiterFileOf(name, tag, pid));
+  return at >= 0 ? { place: at + 1, of: all.length } : null;
+}
+// Takes a slot for a waiting run when its turn has come: { slot, file, place, of, free }. `me` is { tag, since }: the same tag and
+// first `since` every time the same run asks, so its place is kept while it keeps asking.
+function takeFairLease(name, capacity, who, me) {
+  const file = noteWaiter(name, me.tag, me.since, who);
+  const free = capacity - leaseHolders(name).length;
+  const all = leaseWaiters(name);
+  const at = all.findIndex((w) => w.file === file);
+  const place = at >= 0 ? at : all.length;
+  const slot = free > 0 && place < free ? takeMachineLease(name, capacity, who) : null;
+  if (slot) dropWaiter(file);
+  return { slot, file, place: place + 1, of: Math.max(all.length, place + 1), free };
 }
 // Named failure (I-88): lease capacity is an operational fact of this machine, not part of a frozen test definition: it is read
 // from the project's current config (the owner's checkout; a ticket cannot change it), again every few seconds, and `first` is
@@ -975,28 +1150,45 @@ function leaseConfigReader(root, first) {
   };
 }
 
+// The slot of a machine-wide lease for a `wf run` (a command, or a step's preparation), once it is this run's turn; null when no
+// lease is named. Named failure (I-88, residual): capacity was read once, so a lease raised in the project's config while this
+// command waited never reached it (docker.1 held, `gate.leases.docker` raised to 2, and `wf run --lease docker` kept waiting).
+// The waiting loop reads the project's current config again, as a waiting gate step does.
+async function waitForLease(cfg, name, who, { log = process.stderr, root = null } = {}) {
+  if (!name) return null;
+  const configured = root ? leaseConfigReader(root, cfg.gate.leases) : () => cfg.gate.leases ?? {};
+  const capacityNow = () => configured()[name] ?? 1;
+  let capacity = capacityNow();
+  // 0.7.30 (I-157): the slot goes to the live run that waited longest; this run says its place when it waits and as it moves up.
+  const me = { tag: 'wf run', since: now() };
+  let turn = takeFairLease(name, capacity, who, me);
+  let slot = turn.slot;
+  const dropOnExit = () => turn.file && dropWaiter(turn.file);
+  if (!slot) process.once('exit', dropOnExit);
+  if (!slot) log.write(`wf run: waiting for a \`${name}\` lease (${capacity} slot(s), ${turn.free > 0 ? 'a free one goes to a run that has waited longer' : 'all held'}): ${leaseWaitText(name, undefined, turn)}\n`);
+  let place = turn.place;
+  while (!slot) {
+    await new Promise((r) => setTimeout(r, 1000));
+    const capNow = capacityNow();
+    if (capNow !== capacity) {
+      log.write(`wf run: lease \`${name}\` now allows ${capNow} slot(s) (it was ${capacity}), from the project config\n`);
+      capacity = capNow;
+    }
+    turn = takeFairLease(name, capacity, who, me);
+    slot = turn.slot;
+    if (!slot && turn.place !== place) log.write(`wf run: place ${turn.place} of ${turn.of} waiting for the \`${name}\` lease\n`);
+    place = turn.place;
+  }
+  process.off('exit', dropOnExit);
+  dropOnExit();
+  return slot;
+}
+
 // `wf run --lease <name> -- <cmd>`: an implementer's docker or end-to-end stack takes the same machine-wide slot a gate
 // step would, so concurrent attempts cannot start more stacks than `gate.leases` allows. Named failure: stacks started
 // outside the `docker: 1` lease overloaded the machine. The slot is held by this process and freed when it exits.
 export async function runWithLease(cfg, name, command, { log = process.stderr, cwd, env, redact, root = null } = {}) {
-  // Named failure (I-88, residual): capacity was read once, so a lease raised in the project's config while this command waited
-  // never reached it (docker.1 held, `gate.leases.docker` raised to 2, and `wf run --lease docker` kept waiting). The waiting
-  // loop reads the project's current config again, as a waiting gate step does.
-  const configured = root ? leaseConfigReader(root, cfg.gate.leases) : () => cfg.gate.leases ?? {};
-  const capacityNow = () => configured()[name] ?? 1;
-  const who = { command: path.basename(String(command?.[0] ?? '')) };
-  let capacity = name ? capacityNow() : 0;
-  let slot = name ? takeMachineLease(name, capacity, who) : null;
-  if (name && !slot) log.write(`wf run: waiting for a \`${name}\` lease (${capacity} slot(s), all held): ${leaseWaitText(name)}\n`);
-  while (name && !slot) {
-    await new Promise((r) => setTimeout(r, 1000));
-    const now = capacityNow();
-    if (now !== capacity) {
-      log.write(`wf run: lease \`${name}\` now allows ${now} slot(s) (it was ${capacity}), from the project config\n`);
-      capacity = now;
-    }
-    slot = takeMachineLease(name, capacity, who);
-  }
+  const slot = await waitForLease(cfg, name, { command: path.basename(String(command?.[0] ?? '')) }, { log, root });
   try {
     return await new Promise((resolve) => {
       const child = spawn(command[0], command.slice(1), { cwd, env, stdio: redact ? ['inherit', 'pipe', 'pipe'] : 'inherit' });
@@ -1062,13 +1254,63 @@ export async function runPrepared(root, state, stepId, command, { lease = null }
   const step = cfg.gate.steps.find((x) => x.id === stepId);
   if (!step) throw refuse(`no gate step \`${stepId}\` in the adapter this attempt was admitted under (steps: ${cfg.gate.steps.map((x) => x.id).join(', ')})`, 'name the step whose `usedBy` secrets the command needs');
   if (command?.length) throw refuse('`wf run --step` runs only the step\'s declared `prepare` command; a command given here never receives the step\'s secrets', 'declare it as `prepare:` on the step in .workflow/project.yaml (committed), then run `wf run --step <id>`', { id: 'run:arbitrary-command' });
-  if (typeof step.prepare !== 'string' || !step.prepare.trim()) throw refuse(`step \`${step.id}\` declares no \`prepare\` command`, 'add `prepare: "<install command>"` to the step in the committed adapter', { id: 'run:no-prepare' });
-  command = ['sh', '-c', step.prepare];
+  // 0.7.30 (I-155, D59): a plugin step prepares through its plugin's own `prepare(ctx)`, committed at the attempt's base like its
+  // `run`. Named failure (field): a runtime plugin provisioned its isolated private dependencies only inside a check or a gate,
+  // the step declared no `prepare` command, and `wf check` refuses uncommitted work: lint before the first commit could not run.
+  const declared = typeof step.prepare === 'string' && step.prepare.trim() ? step.prepare : null;
+  const plugin = !declared && step.plugin ? await stepPlugin(root, state, step) : null;
+  if (plugin?.prepare === false) {
+    process.stdout.write(`step ${step.id} needs no preparation (its plugin says \`prepare: false\`)\n`);
+    return 0;
+  }
+  if (!declared && typeof plugin?.prepare !== 'function') throw refuse(`step \`${step.id}\` declares no \`prepare\` command${step.plugin ? ' and its plugin has no `prepare`' : ''}`, step.plugin ? 'add `prepare(ctx)` to the plugin\'s default export (it installs what the step needs into the worktree; committed with the plugin), or `prepare: "<install command>"` to the step, in the committed adapter' : 'add `prepare: "<install command>"` to the step in the committed adapter', { id: 'run:no-prepare' });
   const missing = missingFor(root, cfg, step.id, validationCatalog(root, state, step.id));
   if (missing.length) throw refuse(`secrets missing for step ${step.id}: ${missing.join(', ')}`, 'run `wf secrets guide` in your terminal');
   const { dir } = stepPackage(cfg, state, step);
   const env = projectEnv(cfg, { ...stepEnv(root, cfg, step.id, validationCatalog(root, state, step.id)), WF_ROOT: root, WF_ATTEMPT: state.id, WF_ITEM: String(state.item ?? state.id) });
-  return runWithLease(loadConfig(root), lease ?? step.lease ?? null, command, { cwd: dir, env, redact: redactor(root, cfg), root });
+  const redact = redactor(root, cfg);
+  if (declared) return runWithLease(loadConfig(root), lease ?? step.lease ?? null, ['sh', '-c', declared], { cwd: dir, env, redact, root });
+  // The plugin runs in this process, as in a gate: it is handed the step's filtered environment (`ctx.env`, the step's secrets
+  // with it), never an evidence path, and what it logs is masked on its way out.
+  const slot = await waitForLease(loadConfig(root), lease ?? step.lease ?? null, { command: `prepare ${step.id}` }, { root });
+  try {
+    const pctx = { root, attempt: state.id, step, dir, worktrees: Object.fromEntries(Object.entries(state.repos).map(([k, v]) => [k, v.worktree])), env, log: (line) => process.stdout.write(redact(`${line}\n`)) };
+    const r = await plugin.prepare(pctx);
+    if (r?.status === 'failed') {
+      process.stderr.write(`wf run: step ${step.id}: its plugin's prepare reported failed\n`);
+      return 1;
+    }
+    return 0;
+  } catch (error) {
+    process.stderr.write(redact(`wf run: step ${step.id}: its plugin's prepare threw: ${error?.message ?? error}\n`));
+    return 1;
+  } finally {
+    if (slot) releaseMachineLease(slot);
+  }
+}
+
+// A step's plugin module as committed for the attempt (the copy a gate runs).
+async function stepPlugin(root, state, step) {
+  return (await import(pathToFileURL(adapterFileAtCommit(root, state, validationCommit(state, step.id), step.plugin)).href)).default;
+}
+
+// `wf doctor` (0.7.30, I-155): a plugin step with no preparation route. Named failure: a runtime plugin provisioned its isolated
+// dependencies only inside a check or gate, and nothing said so before an implementer needed them before its first commit. Doctor
+// cannot see what a plugin installs, so a plugin with nothing to prepare says so (`prepare: false` on its default export); a step
+// with a `prepare` command, or whose plugin exports `prepare(ctx)`, has its route. Read from the adapter committed at `commit`.
+export async function prepareRouteWarnings(root, cfg, commit) {
+  const out = [];
+  for (const step of cfg.gate.steps.filter((s) => s.plugin && !(typeof s.prepare === 'string' && s.prepare.trim()))) {
+    let mod;
+    try {
+      mod = await stepPlugin(root, { id: 'doctor', adapterBase: commit, validations: [] }, step);
+    } catch {
+      continue;
+    }
+    if (mod?.prepare === false || typeof mod?.prepare === 'function') continue;
+    out.push({ check: `preparation of step ${step.id}`, problem: `a plugin step with no preparation route: \`wf run --step ${step.id}\` cannot prepare its dependencies before the first commit, and \`wf check\` refuses uncommitted work; if its plugin installs anything when it runs (a runtime with private or isolated dependencies), an implementer cannot lint or test before committing`, fix: `export \`prepare(ctx)\` from the plugin's default export (it installs into \`ctx.dir\` with the step's secrets in \`ctx.env\`; \`wf run --step ${step.id}\` runs it), or say it needs none with \`prepare: false\` there; commit it on the adapter base branch` });
+  }
+  return out;
 }
 
 // A pid in the lock belongs to us only if it is still a `wf` process (pids are reused after a crash). When the host
@@ -1217,7 +1459,7 @@ const killGroups = (pids) => {
 // lease slots it took and drops its signal handlers. The next gate still harvests what a killed runner left (`harvest`), but a
 // stray process no longer outlives the runner that started it.
 async function execute(root, state, plan, live = null) {
-  const run = { children: new Set(), machine: new Map(), handlers: [] };
+  const run = { children: new Set(), machine: new Map(), handlers: [], waiters: new Map() };
   try {
     return await executeRun(root, state, plan, live, run);
   } catch (error) {
@@ -1225,6 +1467,7 @@ async function execute(root, state, plan, live = null) {
     throw error;
   } finally {
     for (const slot of run.machine.values()) releaseMachineLease(slot);
+    for (const file of run.waiters.values()) dropWaiter(file);
     for (const [signal, handler] of run.handlers) process.off(signal, handler);
   }
 }
@@ -1260,8 +1503,9 @@ async function executeRun(root, state, plan, live, run) {
   };
   const results = [];
   const runningNow = new Map(); // step id -> start time
-  const waiting = new Map(); // step id -> { lease, capacity, since }: queued behind a full lease (shown by `wf status`)
-  const saveProgress = () => writeJson(progressFile(root, state.id, runId), { runId, pid: process.pid, steps: results, running: [...runningNow].map(([id, at]) => ({ id, startedAt: new Date(at).toISOString() })), waiting: [...waiting].map(([id, w]) => ({ id, lease: w.lease, capacity: w.capacity, since: new Date(w.since).toISOString() })) });
+  const waiting = new Map(); // step id -> { lease, capacity, since, place }: queued behind a full lease (shown by `wf status`)
+  const waiterTag = (id) => `${runId}:${id}`; // what names a step's mark among the machine's lease waiters (I-157)
+  const saveProgress = () => writeJson(progressFile(root, state.id, runId), { runId, pid: process.pid, steps: results, running: [...runningNow].map(([id, at]) => ({ id, startedAt: new Date(at).toISOString() })), waiting: [...waiting].map(([id, w]) => ({ id, lease: w.lease, capacity: w.capacity, since: new Date(w.since).toISOString(), tag: waiterTag(id) })) });
   const say = (line) => live?.write(`wf ${plan.check ? 'check' : 'gate'}: ${line}\n`);
   let stopping = false;
   let fatal = null; // the first error that escaped the scheduler (I-91); the run ends as failed, nothing it started keeps running
@@ -1372,24 +1616,75 @@ async function executeRun(root, state, plan, live, run) {
   // for a lease". The wait names the lease, who holds its slots and how capacity is raised, once when it begins (again when
   // the capacity it waits on changes), and `progress.json` carries it for `wf status` and `wf resume`.
   let waitingChanged = false;
-  const noteWaiting = (p, lease, capacity) => {
+  // 0.7.30 (I-157): the step's place among the machine's live waiters is said when it begins to wait and whenever it moves.
+  const noteWaiting = (p, lease, capacity, since, turn = null) => {
     const was = waiting.get(p.id);
-    if (was && was.lease === lease && was.capacity === capacity) return;
-    waiting.set(p.id, { lease, capacity, since: was?.since ?? Date.now() });
+    if (was && was.lease === lease && was.capacity === capacity && was.place === (turn?.place ?? null)) return;
+    waiting.set(p.id, { lease, capacity, since, place: turn?.place ?? null });
     waitingChanged = true;
-    say(`waiting  ${p.id}  for lease ${lease} (${capacity} slot(s), all held): ${leaseWaitText(lease)}`);
+    say(`waiting  ${p.id}  for lease ${lease} (${capacity} slot(s), all held): ${leaseWaitText(lease, undefined, turn)}`);
+  };
+  // 0.7.30 (I-163, D56). Named failure (field): a full gate started browser-only proof steps while the Docker-leased steps that
+  // prepare their isolated dependencies waited for capacity; one consumer failed its dependency precondition in 0.2 seconds just
+  // after its producer started, which later passed. The first startable step was taken, so a blocked lease reordered steps. A
+  // step that names the steps whose output it consumes (`needs`) starts only after each of them that runs in this run has
+  // finished; one whose producer failed, was interrupted or never started is not started, with why. A producer this run does
+  // not run (reused, skipped) left its output in an earlier run, or has none to give: nothing waits for it.
+  const inRun = new Set(queue.map((p) => p.id));
+  const ended = new Map(); // step id -> how it ended in this run (or `not-started` for one that never will)
+  const blocked = [];
+  const needsOf = (p) => (plan.cfg.gate.steps.find((x) => x.id === p.id).needs ?? []).filter((n) => inRun.has(n) && n !== p.id);
+  const pendingNeeds = (p) => needsOf(p).filter((n) => !ended.has(n));
+  const toldAfter = new Set();
+  const notStart = (p, reason) => {
+    queue.splice(queue.indexOf(p), 1);
+    ended.set(p.id, 'not-started');
+    blocked.push({ id: p.id, repo: p.repo, tier: p.tier, status: 'not-started', reason, runId });
+    say(`${'not-started'.padEnd(8)} ${p.id}  ${reason}`);
+  };
+  const ENDED_WELL = ['passed', 'reused', 'skipped'];
+  const pruneBlocked = () => {
+    for (let changed = true; changed; ) {
+      changed = false;
+      for (const p of [...queue]) {
+        const bad = needsOf(p).find((n) => ended.has(n) && !ENDED_WELL.includes(ended.get(n)));
+        if (!bad) continue;
+        const how = ended.get(bad);
+        notStart(p, `needs ${bad}, which ${how === 'not-started' ? 'did not start' : how === 'interrupted' ? 'was interrupted' : how}: it was not started`);
+        changed = true;
+      }
+    }
   };
   // Leases are machine-wide: two gates on one machine (other attempts or projects) never share a docker slot.
   const canStart = (p) => {
+    const pending = pendingNeeds(p);
+    if (pending.length) {
+      if (!toldAfter.has(p.id)) {
+        toldAfter.add(p.id);
+        say(`after    ${p.id}  waits for ${pending.join(', ')} (it needs ${pending.length > 1 ? 'their' : 'its'} output)`);
+      }
+      return false;
+    }
     const lease = leaseOf(p);
     if (!lease) return true;
     const capacity = capacityOf(lease);
-    const slot = (held[lease] ?? 0) >= capacity ? null : takeMachineLease(lease, capacity, { attempt: state.id, step: p.id, run: runId });
-    if (!slot) {
-      noteWaiting(p, lease, capacity);
+    // 0.7.30 (I-157, D57): a free slot goes to the live run waiting longest, this step's place kept from when it began to wait.
+    // When this run already holds every slot, the step still marks its place (it can only go after one of its own steps).
+    const who = { attempt: state.id, step: p.id, run: runId };
+    const since = waiting.get(p.id)?.since ?? Date.now();
+    const me = { tag: waiterTag(p.id), since: new Date(since).toISOString() };
+    let turn = null;
+    if ((held[lease] ?? 0) >= capacity) run.waiters.set(p.id, noteWaiter(lease, me.tag, me.since, who));
+    else {
+      turn = takeFairLease(lease, capacity, who, me);
+      if (turn.slot) run.waiters.delete(p.id);
+      else run.waiters.set(p.id, turn.file);
+    }
+    if (!turn?.slot) {
+      noteWaiting(p, lease, capacity, since, turn);
       return false;
     }
-    machine.set(p.id, slot);
+    machine.set(p.id, turn.slot);
     return true;
   };
   await new Promise((resolve) => {
@@ -1398,6 +1693,7 @@ async function executeRun(root, state, plan, live, run) {
     let starting = null;
     const pump = () => {
       try {
+        pruneBlocked();
         while (!stopping && active.size < max) {
           const idx = queue.findIndex(canStart);
           if (idx < 0) break;
@@ -1436,6 +1732,7 @@ async function executeRun(root, state, plan, live, run) {
                   final = { ...final, status: 'failed', error: `the step finished ${r.status} but recording it failed: ${error.message}` };
                 }
                 results.push(final);
+                ended.set(p.id, final.status);
                 pushed = true;
                 // The live view is not the step's result: a progress file that cannot be written ends the run, not this step.
                 guarded(saveProgress);
@@ -1456,6 +1753,15 @@ async function executeRun(root, state, plan, live, run) {
           waitingChanged = false;
           saveProgress();
         }
+        // A step that cannot ask for its lease now (every job slot of this run is busy) holds no place among the machine's
+        // waiters until it asks again (I-157): it keeps the time it began to wait, but a free slot never sits idle for it.
+        if (active.size >= max) for (const [id, file] of [...run.waiters]) {
+          dropWaiter(file);
+          run.waiters.delete(id);
+        }
+        // Nothing runs and every queued step waits for another queued step: they need each other (a registered check can
+        // extend the gate after the adapter's own cycle check), so none of them can start.
+        if (active.size === 0 && !stopping && queue.length && queue.every((p) => pendingNeeds(p).length)) for (const p of [...queue]) notStart(p, `needs ${pendingNeeds(p).join(', ')}, which need it in turn (a cycle): it was not started`);
         if (active.size === 0 && (queue.length === 0 || stopping)) return resolve();
         // A step waiting for a lease another gate holds: look again shortly.
         if (queue.length && !stopping) setTimeout(pump, 500);
@@ -1482,6 +1788,7 @@ async function executeRun(root, state, plan, live, run) {
   for (const slot of machine.values()) releaseMachineLease(slot);
   machine.clear();
   for (const [signal, handler] of run.handlers) process.off(signal, handler);
+  results.push(...blocked);
   for (const p of queue) results.push({ id: p.id, repo: p.repo, tier: p.tier, status: 'not-started', runId });
 
   const bad = results.filter((r) => ['failed', 'interrupted', 'not-started'].includes(r.status) || (!plan.check && validationIds(state).includes(r.id) && !['passed', 'reused'].includes(r.status)));
@@ -1561,7 +1868,10 @@ export function liveGate(root, state) {
     // redacted as it runs). Named failure: an owner waiting on a 27-minute end-to-end step could not tell test 200 from 1,100.
     running: (progress.running ?? []).map((r) => ({ id: r.id, seconds: Math.round((at - Date.parse(r.startedAt)) / 1000), ...lastRunOf(state, r.id), ...latestLogLine(path.join(gateDir(root, state.id), lock.runId, r.id, 'output.log')) })),
     // Steps queued behind a full lease (I-113), with the lease's current holders read now.
-    waiting: (progress.waiting ?? []).map((w) => ({ id: w.id, lease: w.lease, capacity: w.capacity, seconds: Math.round((at - Date.parse(w.since)) / 1000), text: leaseWaitText(w.lease) })),
+    waiting: (progress.waiting ?? []).map((w) => {
+      const queue = w.tag ? waiterPlace(w.lease, w.tag, lock.pid) : null;
+      return { id: w.id, lease: w.lease, capacity: w.capacity, seconds: Math.round((at - Date.parse(w.since)) / 1000), ...(queue ? { place: queue.place, of: queue.of } : {}), text: leaseWaitText(w.lease, undefined, queue) };
+    }),
     finished: (progress.steps ?? []).map((r) => ({ id: r.id, status: r.status, seconds: r.durationMs !== undefined && r.status !== 'reused' ? Math.round(r.durationMs / 1000) : null })),
   };
 }
