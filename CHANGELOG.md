@@ -2031,6 +2031,9 @@ A second adversarial pass over the integrated 0.5.0 branch, with scenarios in `s
 
 | Item | Failure fixed | Fixed in | Scenario test |
 | --- | --- | --- | --- |
+| [I-217](improvements/I-217.md) | A fix was recommended and built without tracing what the data feeds; it was reverted after the person approved it | 0.7.31 | `scenarios/premise.test.mjs` |
+| [I-216](improvements/I-216.md) | Analysis resume names an implementer which read-only intent refuses | 0.7.31 | `scenarios/analysis-route.test.mjs` |
+| [I-215](improvements/I-215.md) | Show pinned tracker operation instructions during connector handoff | 0.7.31 | `scenarios/tracker-operations.test.mjs` |
 | [I-214](improvements/I-214.md) | Continuation approval at round17 blocks again after only three handed rounds | 0.7.29 | `scenarios/strategist.test.mjs` |
 | [I-213](improvements/I-213.md) | wf criteria amend crashed on a survey placed outside impact | 0.7.28 | `scenarios/fix-0728b.test.mjs` |
 | [I-212](improvements/I-212.md) | Deferred heavy steps hide a ticket's own e2e specs until the batch gate | 0.7.28 | `scenarios/fix-0728b.test.mjs` |
