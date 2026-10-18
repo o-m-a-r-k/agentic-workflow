@@ -47,6 +47,11 @@ test('I-198: the failed-case screenshots of a named failed run export, sha256-ch
     assert.equal(fs.readFileSync(f.file, 'utf8'), f.title === 'case-a.png' ? 'fail-a' : 'fail-b');
   }
   assert.equal(out.run, runId);
+  // The implementer handed the repair is told the route, named with the failed run.
+  ok(wf(root, ['handoff', 'close', '--agent', 'i', '--attempt', e.id]));
+  const repair = ok(wf(root, ['handoff', 'implementer', '--agent', 'i2', '--attempt', e.id]));
+  const bundle = JSON.parse(fs.readFileSync((repair.out.match(/bundle: (\S+)/) ?? repair.out.match(/^Read (\S+)/m))[1], 'utf8'));
+  assert.equal(bundle.failedGate.screenshots, `\`wf export screenshots --run ${runId} --attempt ENG-198.1 --to <folder>\` copies every image this run recorded, failure captures included, sha256-checked`);
   const human = ok(wf(root, ['export', 'screenshots', '--run', runId, '--attempt', e.id, '--to', to])).out;
   assert.match(human, new RegExp(`copied 2 screenshot\\(s\\) of gate run ${runId} \\(failed\\) of ENG-198\\.1 to \\S+ \\(each sha256-checked against the evidence record; view them with the Read tool\\)`));
   // A later gate passes; the failed run is still named and exported, the export is not recorded as the delivered set.

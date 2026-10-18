@@ -2720,7 +2720,8 @@ export function failedGateFor(state, cfg) {
       failingFilesNotChanged: files.filter(untouched),
     };
   });
-  return { runId: g.runId, tree: g.tree ?? null, onCurrentTree: canonical(g.tree ?? {}) === canonical(treeHashes(state)), steps };
+  // 0.7.30 (I-198): how to look at what the failed run captured (its failure screenshots too), named with the run.
+  return { runId: g.runId, tree: g.tree ?? null, onCurrentTree: canonical(g.tree ?? {}) === canonical(treeHashes(state)), steps, screenshots: `\`wf export screenshots --run ${g.runId} --attempt ${state.id} --to <folder>\` copies every image this run recorded, failure captures included, sha256-checked` };
 }
 
 // One answer for every caller (engine/paths.mjs): any project's evidence, as written or as the OS resolves it, or below
