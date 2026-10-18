@@ -27,9 +27,14 @@ const FIELDS = [
   ['recommend', 'recommend', 'what you recommended and why'],
   ['basis', 'basis', 'what the recommendation rests on: what you traced (who writes the data in production, who reads it, the business process and external systems that depend on it, what happens when it is absent) and the evidence (path:line)'],
   ['notChecked', 'not-checked', 'what you did not check ("nothing" only when nothing was left)'],
-  ['choice', 'choice', 'the option the person chose, as you offered it'],
+  ['choice', 'choice', 'the option the person chose, as you offered it (or other)'],
 ];
-export const DECIDE_USAGE = 'wf decide --question "<as asked>" --recommend "<what you recommended and why>" --basis "<what you traced, with the evidence>" --not-checked "<what you did not check>" --choice "<the option they chose>" --quote "<their words, exactly as they typed them>" [--attempt ID] (or --file <decision.json> with question, recommend, basis, notChecked, choice, quote)';
+export const DECIDE_USAGE = 'wf decide --question "<as asked>" --options "<option 1> | <option 2>" --recommend "<what you recommended and why>" --basis "<what you traced, with the evidence>" --not-checked "<what you did not check>" --choice "<the option they chose, or other>" --quote "<their words, exactly as they typed them>" [--attempt ID] (or --file <decision.json> with question, options, recommend, basis, notChecked, choice, quote)';
+// Review of 0.7.31 (M2). Named failure (the incident behind D65): the question's two options both built the change, and a record of
+// the question, the recommendation and the answer alone would not show it. The options offered are part of the record, and the
+// choice is one of them (or `other`: words that choose none, kept as the person's, D41).
+const optionsOf = (v) => (Array.isArray(v) ? v : typeof v === 'string' ? v.split('|') : []).map((x) => text(String(x ?? ''))).filter(Boolean).slice(0, 10);
+const same = (a, b) => text(a).toLowerCase() === text(b).toLowerCase();
 
 // The decision's fields from `--file` (JSON) and the flags (a flag wins).
 function fieldsOf(options) {
@@ -45,8 +50,13 @@ function fieldsOf(options) {
   const out = {};
   for (const [key, flag] of FIELDS) out[key] = text(typeof options[flag] === 'string' ? options[flag] : doc[key] ?? doc[flag]);
   out.quote = typeof options.quote === 'string' ? options.quote.trim() : typeof doc.quote === 'string' ? doc.quote.trim() : '';
-  const missing = FIELDS.filter(([key]) => !out[key]);
-  if (missing.length) throw new WfError(`not recorded: ${missing.map(([, flag, what]) => `--${flag} (${what})`).join('; ')}`, { hint: DECIDE_USAGE });
+  out.options = optionsOf(typeof options.options === 'string' ? options.options : doc.options);
+  const missing = FIELDS.filter(([key]) => !out[key]).map(([, flag, what]) => `--${flag} (${what})`);
+  if (out.options.length < 2) missing.push('--options (the options you offered, at least two, separated by "|")');
+  if (missing.length) throw new WfError(`not recorded: ${missing.join('; ')}`, { hint: DECIDE_USAGE });
+  const picked = out.options.find((o) => same(o, out.choice));
+  if (!picked && !same(out.choice, 'other')) throw refuse(`not recorded: "${out.choice}" is not one of the options offered (${out.options.map((o) => `"${o}"`).join(' | ')})`, 'give the option they chose exactly as you offered it, or `--choice other` when their words choose none of them (their words are recorded as theirs)', { id: 'decide:choice' });
+  out.choice = picked ?? 'other';
   return out;
 }
 
@@ -71,7 +81,7 @@ export async function recordProductDecision(root, options, { env = process.env, 
     if (typed.toLowerCase() !== 'yes') throw refuse('not recorded: the answer was not yes', null, { id: 'decide:terminal' });
     said = { quote: f.quote || f.choice, via: 'terminal' };
   }
-  append(root, state.id, 'product.decided', { id, question: f.question.slice(0, 2000), recommend: f.recommend.slice(0, 2000), basis: f.basis.slice(0, 4000), notChecked: f.notChecked.slice(0, 2000), choice: f.choice.slice(0, 500), plain: plain.slice(0, 8000), ...said }, actor(options));
+  append(root, state.id, 'product.decided', { id, question: f.question.slice(0, 2000), options: f.options.map((o) => o.slice(0, 300)), recommend: f.recommend.slice(0, 2000), basis: f.basis.slice(0, 4000), notChecked: f.notChecked.slice(0, 2000), choice: f.choice.slice(0, 500), plain: plain.slice(0, 8000), ...said }, actor(options));
   return { state: loadState(root, state.id), id };
 }
 
@@ -87,12 +97,16 @@ export function withdrawProductDecision(root, id, options) {
   return loadState(root, state.id);
 }
 
-// What a role's bundle carries: every decision with its basis; a blind reviewer without the person's words.
+// What a role's bundle carries: every decision with what it rested on. Review of 0.7.31 (L5): a reviewer gets only the question,
+// the options, the choice and what was not checked: the incident was a reviewer absorbing the owner's framing, so neither the
+// owner's recommendation nor its basis, nor the person's words, reach it.
 export function productDecisionsFor(state, role) {
   const all = state.productDecisions ?? [];
   if (!all.length) return undefined;
   return all.map((d) => ({
-    id: d.id, at: d.at, question: d.question, recommend: d.recommend, basis: d.basis, notChecked: d.notChecked, choice: d.choice,
+    id: d.id, at: d.at, question: d.question, options: d.options ?? [],
+    ...(role === 'reviewer' ? {} : { recommend: d.recommend, basis: d.basis }),
+    notChecked: d.notChecked, choice: d.choice,
     ...(role === 'reviewer' ? {} : { quote: d.quote }),
     ...(d.withdrawn ? { withdrawn: { reason: d.withdrawn.reason, at: d.withdrawn.at } } : {}),
   }));
@@ -101,4 +115,4 @@ export function productDecisionsFor(state, role) {
 // The lines `wf resume` and `wf status` show.
 export const productDecisionLines = (state) => (state.productDecisions ?? []).map((d) => (d.withdrawn
   ? `  product decision ${d.id} (withdrawn: ${d.withdrawn.reason}): "${d.question}" was answered "${d.choice}"; ask the person again with what changed`
-  : `  product decision ${d.id}: "${d.question}" -> "${d.choice}" (their words: "${d.quote}"), ${d.via ?? 'recorded'}; recommended: ${d.recommend}; rests on: ${d.basis}; not checked: ${d.notChecked}`));
+  : `  product decision ${d.id}: "${d.question}"${d.options?.length ? ` (options: ${d.options.map((o) => `"${o}"`).join(' | ')})` : ''} -> "${d.choice}" (their words: "${d.quote}"), ${d.via ?? 'recorded'}; recommended: ${d.recommend}; rests on: ${d.basis}; not checked: ${d.notChecked}`));

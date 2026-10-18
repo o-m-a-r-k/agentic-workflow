@@ -126,6 +126,19 @@ test('a reviewer judges the premise of a fix as well as the fix: one that does n
   const f1 = pass.findingHistory.find((h) => h.ref === 'r1:F1');
   assert.equal(f1.status, 'verified-nonissue');
   assert.match(f1.premise, /does not hold: no production path computes this total/, 'the history carries the premise line of the verdict that settled it');
+  // Review of 0.7.31 (L3): a premise line on a discovered verdict is kept with the issue, and the next implementer reads it.
+  assert.deepEqual(resume(p).discovered.find((x) => x.id === 'D1').premises.map((x) => [x.reviewer, x.verdict]), [['r2', 'open']]);
+  assert.match(pass.passItems[0].items[0].premises[0].premise, /holds: the nightly import writes the due date/);
+  // Review of 0.7.31 (L6): an implementer that again finds D1's premise false after a reviewer found it holds is not sent to another
+  // reviewer: the person decides.
+  writeReport(p.root, p.id, 'i3', { approach: 'traced the import', expect: { minutes: 10 }, premiseFailed: [{ ref: 'D1', why: 'the nightly import is switched off in production', evidence: ['src/b.txt:5 reads a flag that is off'] }] });
+  ok(wf(p.root, ['handoff', 'close', '--agent', 'i3', '--attempt', p.id]));
+  const contested = resume(p);
+  assert.match(contested.next, /D1 \(i3: the nightly import is switched off in production[^)]*\): reviewer r2 found its premise holds and an implementer found it does not: the person decides/);
+  assert.match(contested.next, /`wf discovered close D1 --not-a-defect --reason "<why>"/);
+  assert.doesNotMatch(contested.next, /the next reviewer is handed/);
+  const r3 = bundleOf(ok(wf(p.root, ['handoff', 'reviewer', '--agent', 'r3', '--attempt', p.id])));
+  assert.equal(r3.premiseFailed, undefined, 'not handed to another reviewer');
 });
 
 // The person's words are proven theirs (D41), as a reading of an answer is.
@@ -140,7 +153,7 @@ const session = { env: { CLAUDE_CODE_SESSION_ID: CLAUDE } };
 
 test('a product decision asked outside the engine is recorded with its question, recommendation, basis and the person\'s own words, shown in resume and handed to later roles', () => {
   const p = project('pm-decide');
-  const asked = ['--question', 'Should the due date show only the date on every page?', '--recommend', 'Only the date: it is a calendar day, not an instant', '--basis', 'traced the two pages that show it (src/a.txt:2, src/b.txt:3)'];
+  const asked = ['--question', 'Should the due date show only the date on every page?', '--options', 'Only the date | The date and the time', '--recommend', 'Only the date: it is a calendar day, not an instant', '--basis', 'traced the two pages that show it (src/a.txt:2, src/b.txt:3)'];
   const decide = (extra) => wf(p.root, ['decide', ...asked, '--not-checked', 'who writes the due date in production; what reads it besides the two pages', ...extra, '--attempt', p.id], session);
   // What was not checked is part of the record: without it nothing is recorded.
   const bare = wf(p.root, ['decide', ...asked, '--choice', 'Only the date', '--quote', 'only the date please', '--attempt', p.id], session);
@@ -152,6 +165,13 @@ test('a product decision asked outside the engine is recorded with its question,
   assert.equal(unproven.code, 75);
   assert.match(unproven.err, /not recorded: "only the date please" is in no message of the person's in this session/);
   personWrites(p, 'ok, only the date please, on both pages', 2000);
+  // Review of 0.7.31 (M2): the options offered are part of the record, and the choice is one of them.
+  const offered = wf(p.root, ['decide', ...asked.filter((x, i) => asked[i - 1] !== '--options' && x !== '--options'), '--not-checked', 'who writes it', '--choice', 'Only the date', '--quote', 'only the date please', '--attempt', p.id], session);
+  assert.equal(offered.code, 1);
+  assert.match(offered.err, /--options/);
+  const outside = decide(['--choice', 'Neither', '--quote', 'only the date please']);
+  assert.equal(outside.code, 75);
+  assert.match(outside.err, /"Neither" is not one of the options offered \("Only the date" \| "The date and the time"\)/);
   const rec = ok(decide(['--choice', 'Only the date', '--quote', 'only the date please']));
   assert.match(rec.out, /product decision PD1 recorded on PM-1\.1/);
   const s = resume(p);
@@ -159,12 +179,14 @@ test('a product decision asked outside the engine is recorded with its question,
   assert.deepEqual([pd.id, pd.choice, pd.quote], ['PD1', 'Only the date', 'only the date please']);
   assert.match(pd.notChecked, /who writes the due date in production/);
   assert.match(pd.via, /^chat, read by the agent/);
+  assert.deepEqual(pd.options, ['Only the date', 'The date and the time']);
+  assert.match(pd.plain, /Should the due date show only the date on every page\? The options: \(1\) Only the date; \(2\) The date and the time\./);
   const text = ok(wf(p.root, ['resume', '--attempt', p.id])).out;
-  assert.match(text, /product decision PD1: "Should the due date show only the date on every page\?" -> "Only the date" \(their words: "only the date please"\)/);
+  assert.match(text, /product decision PD1: "Should the due date show only the date on every page\?" \(options: "Only the date" \| "The date and the time"\) -> "Only the date" \(their words: "only the date please"\)/);
   assert.match(text, /not checked: who writes the due date in production/);
   // The same record from a file: what the agent asked, word for word.
   const file = path.join(p.base, 'decision.json');
-  fs.writeFileSync(file, JSON.stringify({ question: 'Should the reminder go out on the due day?', recommend: 'Yes, on the due day', basis: 'traced the reminder job (src/a.txt:4)', notChecked: 'the time zone it runs in', choice: 'Yes, on the due day', quote: 'only the date please' }));
+  fs.writeFileSync(file, JSON.stringify({ question: 'Should the reminder go out on the due day?', options: ['Yes, on the due day', 'No, a day before'], recommend: 'Yes, on the due day', basis: 'traced the reminder job (src/a.txt:4)', notChecked: 'the time zone it runs in', choice: 'Yes, on the due day', quote: 'only the date please' }));
   assert.match(ok(wf(p.root, ['decide', '--file', file, '--attempt', p.id], session)).out, /product decision PD2 recorded/);
   // Later roles are handed it: the implementer with the person's words, a blind reviewer without them.
   const impl = bundleOf(ok(wf(p.root, ['handoff', 'implementer', '--agent', 'i1', '--attempt', p.id])));
@@ -174,7 +196,9 @@ test('a product decision asked outside the engine is recorded with its question,
   ok(wf(p.root, ['handoff', 'close', '--agent', 'i1', '--attempt', p.id]));
   const rev = bundleOf(ok(wf(p.root, ['handoff', 'reviewer', '--agent', 'r1', '--attempt', p.id])));
   assert.equal(rev.decisions[0].id, 'PD1');
-  assert.equal(rev.decisions[0].quote, undefined, 'a blind reviewer gets the decision and its basis, not the words');
+  assert.equal(rev.decisions[0].quote, undefined, 'a blind reviewer gets the decision, not the person\'s words');
+  // Review of 0.7.31 (L5): nor the owner's framing: the question, the options, the choice and what was not checked.
+  assert.deepEqual(Object.keys(rev.decisions[0]).sort(), ['at', 'choice', 'id', 'notChecked', 'options', 'question']);
   // The analysis changes the picture: the decision is withdrawn with what changed, and says so where it was shown.
   ok(wf(p.root, ['decide', 'withdraw', 'PD1', '--reason', 'the trace found nothing writes the due date in production', '--attempt', p.id]));
   assert.match(resume(p).productDecisions[0].withdrawn.reason, /nothing writes the due date/);
@@ -261,4 +285,113 @@ test('a planned pass whose own commits add a migration makes the strategist the 
   assert.equal(s.decision.kind, 'strategy', 'not the gate: the pass reached a critical boundary');
   assert.deepEqual(s.decision.courseSignals.map((x) => x.id), ['reach']);
   assert.match(s.next, /the planned pass of implementer i2 added or changed a migration \(db\/migrations\/002_due_date\.sql\)/);
+});
+
+// ---- Review of 0.7.31 ----
+
+// M3. Named failure (a review's measurement): `reach` fired on 35 of 155 implementer rounds handed after a first review in one
+// project's ledgers (an upper bound), mostly planned work regenerating an API baseline with a controller or DTO edit. The named
+// failure is a change nobody planned: a contract or a migration reached from an item with no stated fix, or beyond the fixes stated.
+test('review of 0.7.31 (M3): a contract change where a handed finding is located sends no course signal, and neither does a migration under docs', () => {
+  const p = project('pm-reach-covered', API, { 'openapi.json': '{"paths":{}}\n' });
+  built(p, { 'src/a.txt': LINES.replace('l2', 'L2'), 'openapi.json': '{"paths":{"/a":{}}}\n' });
+  record(p, goodClosure('r1', { findings: [blocking('F1', 'openapi.json:1', { summary: 'F1: the response lacks the due date field', fix: { what: 'add dueDate to the /a response in openapi.json', minutes: 20 } })] }));
+  ok(wf(p.root, ['handoff', 'implementer', '--agent', 'i1', '--attempt', p.id]));
+  commitIn(p.wt, { 'openapi.json': '{"paths":{"/a":{"dueDate":"date"}}}\n', 'docs/migrations/notes.md': 'how the due date moved\n' }, 'fix F1');
+  writeReport(p.root, p.id, 'i1', { approach: 'add the field', expect: { minutes: 20 } });
+  ok(wf(p.root, ['handoff', 'close', '--agent', 'i1', '--attempt', p.id]));
+  const s = resume(p);
+  assert.equal(s.decision.kind, 'review', 'the finding is located on the contract it changed: the delta review is next');
+  assert.equal(ok(wf(p.root, ['signals', '--attempt', p.id, '--json'])).json().reach.length, 0);
+});
+
+test('review of 0.7.31 (M3): a fix round handed only blocking findings that adjusts a contract its own planned work opened sends no course signal', () => {
+  const p = project('pm-reach-own-surface', API, { 'openapi.json': '{"paths":{}}\n' });
+  ok(wf(p.root, ['handoff', 'implementer', '--agent', 'i1', '--attempt', p.id]));
+  commitIn(p.wt, { 'src/a.txt': LINES.replace('l2', 'L2'), 'openapi.json': '{"paths":{"/a":{}}}\n' }, 'C1 with its endpoint');
+  ok(wf(p.root, ['handoff', 'close', '--agent', 'i1', '--attempt', p.id]));
+  ok(wf(p.root, ['handoff', 'reviewer', '--agent', 'r1', '--attempt', p.id]));
+  record(p, goodClosure('r1', { findings: [blocking('F1', 'src/a.txt:2', { fix: { what: 'round the total once', minutes: 30 } })] }));
+  ok(wf(p.root, ['handoff', 'implementer', '--agent', 'i1', '--attempt', p.id]));
+  commitIn(p.wt, { 'src/a.txt': LINES.replace('l2', 'L2 rounded'), 'openapi.json': '{"paths":{"/a":{"total":"rounded"}}}\n' }, 'fix F1');
+  writeReport(p.root, p.id, 'i1', { approach: 'round once', expect: { minutes: 30 } });
+  ok(wf(p.root, ['handoff', 'close', '--agent', 'i1', '--attempt', p.id]));
+  assert.equal(resume(p).decision.kind, 'review');
+  assert.equal(ok(wf(p.root, ['signals', '--attempt', p.id, '--json'])).json().reach.length, 0);
+});
+
+const C2 = [{ id: 'C1', text: 'a changes', uat: 'a shows the new text' }, { id: 'C2', text: 'b changes', uat: 'b shows the new text' }];
+const WORK = [{ id: 'W1', criteria: ['C1'], repos: ['app'], class: 'full', why: 'a' }, { id: 'W2', criteria: ['C2'], repos: ['app'], class: 'full', why: 'b' }];
+function twoItems(name) {
+  const p = singleRepoProject(name, { gate: { steps }, ...API }, { 'src/a.txt': LINES, 'src/b.txt': LINES, 'openapi.json': '{"paths":{}}\n' });
+  const e = ok(wf(p.root, ['entry', '--item', 'PM-3', '--owner', 'o', '--json'])).json();
+  ok(wf(p.root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id]));
+  const plan = path.join(p.base, 'plan.json');
+  fs.writeFileSync(plan, JSON.stringify(planDoc({ plan: { summary: 'change a and b', expect: EXPECT, anchors: ['src/a.txt', 'src/b.txt'] }, criteria: C2, work: WORK })));
+  ok(wf(p.root, ['plan', '--file', plan, '--attempt', e.id]));
+  return { ...p, id: e.id, wt: e.repos.app.worktree };
+}
+
+test('review of 0.7.31 (M3, L1): the first build of planned work handed after a review is no signal; two fix rounds open at once are named together, once', () => {
+  const p = twoItems('pm-reach-parallel');
+  ok(wf(p.root, ['handoff', 'implementer', '--agent', 'iA', '--work', 'W1', '--attempt', p.id]));
+  commitIn(p.wt, { 'src/a.txt': LINES.replace('l2', 'L2') }, 'W1');
+  ok(wf(p.root, ['handoff', 'close', '--agent', 'iA', '--attempt', p.id]));
+  ok(wf(p.root, ['check', '--attempt', p.id]));
+  ok(wf(p.root, ['handoff', 'reviewer', '--agent', 'r1', '--attempt', p.id]));
+  record(p, goodClosure('r1', { findings: [blocking('F1', 'src/a.txt:2', { work: 'W1', fix: { what: 'round once', minutes: 20 } })], criteria: [{ id: 'C1', evidence: { kind: 'output', ref: 'log 1' } }, { id: 'C2', evidence: { kind: 'not-applicable', reason: 'not built yet' } }] }));
+  // W2 is built for the first time after the review: its reach is the plan's.
+  ok(wf(p.root, ['handoff', 'implementer', '--agent', 'iB', '--work', 'W2', '--attempt', p.id]));
+  assert.deepEqual(resume(p).handoffs.at(-1).fixes?.planned, ['W2']);
+  // F1's fix round is handed while iB works: both open at once in the one repo.
+  ok(wf(p.root, ['handoff', 'implementer', '--agent', 'iA', '--work', 'W1', '--attempt', p.id]));
+  commitIn(p.wt, { 'src/b.txt': LINES.replace('l2', 'L2'), 'openapi.json': '{"paths":{"/b":{}}}\n' }, 'W2 with its endpoint');
+  commitIn(p.wt, { 'src/a.txt': LINES.replace('l2', 'L2 rounded') }, 'fix F1');
+  ok(wf(p.root, ['handoff', 'close', '--agent', 'iB', '--attempt', p.id]));
+  writeReport(p.root, p.id, 'iA', { approach: 'round once', expect: { minutes: 20 } });
+  ok(wf(p.root, ['handoff', 'close', '--agent', 'iA', '--attempt', p.id]));
+  const sig = ok(wf(p.root, ['signals', '--attempt', p.id, '--json'])).json();
+  assert.equal(sig.reach.length, 1, 'one change, said once');
+  assert.match(ok(wf(p.root, ['signals', '--attempt', p.id])).out, /the rounds of implementers iA and iB, open at once in app \(their commits cannot be told apart\), changed the contract openapi\.json/);
+});
+
+test('review of 0.7.31 (L2): a blocking finding whose premise was reported failed is marked when a fix round hands it again beside others', () => {
+  const p = project('pm-mixed');
+  built(p);
+  record(p, goodClosure('r1', { findings: [blocking('F1', 'src/a.txt:2'), blocking('F2', 'src/a.txt:5')] }));
+  ok(wf(p.root, ['handoff', 'implementer', '--agent', 'i1', '--attempt', p.id]));
+  writeReport(p.root, p.id, 'i1', { approach: 'traced F1; ran out of time on F2', expect: { minutes: 30 }, premiseFailed: [{ ref: 'r1:F1', why: 'the total is computed only for an export no production path runs', evidence: ['src/a.txt:2'] }] });
+  ok(wf(p.root, ['handoff', 'close', '--agent', 'i1', '--attempt', p.id]));
+  assert.equal(resume(p).decision.kind, 'repair', 'F2 still needs its fix round');
+  const b = bundleOf(ok(wf(p.root, ['handoff', 'implementer', '--agent', 'i1', '--attempt', p.id])));
+  const handed = b.repair.flatMap((g) => g.findings);
+  assert.deepEqual(handed.map((f) => [f.ref, f.premiseFailed?.by ?? null]), [['r1:F1', 'i1'], ['r1:F2', null]]);
+  assert.match(b.instructions, /marked `premiseFailed`/);
+});
+
+test('review of 0.7.31 (L4): after a planned pass, the full evidence review is handed a finding\'s failed premise with its evidence once its blind closure is recorded', () => {
+  const p = project('pm-reveal');
+  built(p);
+  record(p, goodClosure('r1', { findings: [low('F1', 'src/a.txt:2')] }));
+  ok(amend(p, { pass: [{ items: ['r1:F1', 'D1'], why: 'the label and the due date', repos: ['app'] }], expect: { minutes: 30, rounds: 1 } }));
+  ok(wf(p.root, ['handoff', 'implementer', '--agent', 'i2', '--work', 'P1', '--attempt', p.id]));
+  commitIn(p.wt, { 'src/b.txt': LINES.replace('l3', 'L3 as a date') }, 'the due date');
+  const sha = sh(p.wt, 'git rev-parse HEAD').trim();
+  writeReport(p.root, p.id, 'i2', { approach: 'the date; traced the label', expect: { minutes: 20 }, premiseFailed: [{ ref: 'r1:F1', why: 'the label is shown only on a page no production route serves', evidence: ['src/a.txt:2 is reached only from a spec'] }] });
+  ok(wf(p.root, ['handoff', 'close', '--agent', 'i2', '--attempt', p.id]));
+  ok(wf(p.root, ['discovered', 'close', 'D1', '--fixed', sha, '--attempt', p.id]));
+  const s = resume(p);
+  assert.equal(s.decision.kind, 'gate');
+  assert.match(s.next, /r1:F1 \(i2: the label is shown only on a page no production route serves[^)]*\)[^;]*: [^;]*the next reviewer is handed it \(a full round once its blind closure is recorded\)/);
+  ok(wf(p.root, ['gate', '--attempt', p.id]));
+  const ev = bundleOf(ok(wf(p.root, ['handoff', 'reviewer', '--agent', 'r2', '--attempt', p.id])));
+  assert.equal(ev.mode, 'full');
+  assert.equal(ev.premiseFailed, undefined, 'a blind round is not shown an earlier finding');
+  const blind = record(p, goodClosure('r2'));
+  assert.match(blind.out, /1 premise\(s\) reported failed to judge \(r1:F1\), with the implementer.s evidence/);
+  const reveal = JSON.parse(fs.readFileSync(blind.out.match(/: (\S+prior-findings-\S+\.json)/)[1], 'utf8'));
+  assert.deepEqual(reveal.premiseFailed.map((x) => [x.ref, x.reportedBy]), [['r1:F1', 'i2']]);
+  assert.match(reveal.premiseFailed[0].evidence.join(' '), /reached only from a spec/);
+  record(p, goodClosure('r2', { priorFindings: [{ round: 'r1', id: 'F1', status: 'verified-nonissue', evidence: 'src/a.txt:2', rationale: 'the premise behind the fix does not hold in production paths', premise: 'does not hold: no production route serves the page' }] }));
+  assert.equal(resume(p).decision.kind, 'accept');
 });

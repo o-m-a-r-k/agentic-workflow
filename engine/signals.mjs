@@ -90,49 +90,133 @@ export function filesSignal(state, cfg) {
   return { changed, planned: planned || null, perRepo };
 }
 
-// 0.7.31 (I-217, D64): what a fix round's or a planned pass's own commits reached: a contract surface (`impact.contractsChanged`
-// for the files they changed) or a critical boundary the engine can see by path (a migration). Named failure (field): a low item
-// handed under `alsoFix`, with no fix any reviewer had stated, became a reshape of four API DTOs and a new failure path in a fix
-// round; the implementer-estimate signal could not see it (the item states no fix, and 120 minutes against the stated 60 is exactly
-// twice, not more). The first build of the planned work is not counted: its reach is the plan's. Each implementer handed as a fix
-// round or a pass carries what it was handed (`fixes` on its handoff); its own commits are the first-parent, non-merge commits
-// from its handoff's heads to its close (or to HEAD while it works), so a base merged in is not counted as its reach.
-const isMigration = (f) => kindsOf(f).has('migration');
+// 0.7.31 (I-217, D64): what a fix round's or a planned pass's own commits reached that nothing it was handed accounts for: a
+// contract surface (`impact.contractsChanged` for the files they changed) or a critical boundary the engine can see by path (a
+// migration). Named failure (field): a low item handed under `alsoFix`, with no fix any reviewer had stated, became a reshape of four
+// API DTOs and a new failure path in a fix round; the implementer-estimate signal could not see it (the item states no fix, and 120
+// minutes against the stated 60 is exactly twice, not more). Each implementer handed after a review carries what it was handed
+// (`fixes` on its handoff); its own commits are the first-parent, non-merge commits from its handoff's heads to its close (or to
+// HEAD while it works), so a base merged in is not counted as its reach.
+// Review of 0.7.31 (M3). Named cost (a review's measurement on one project's ledgers): counting every contract change of a round
+// handed after a first review fired on 35 of 155 rounds (an upper bound: old handoffs carry no `fixes`), mostly planned work
+// regenerating an API baseline with a controller or DTO edit, and fixes located on the contract they changed. The signal is the
+// unplanned reach only: a round that builds planned work for the first time is not counted (its reach is the plan's); a changed
+// contract file is accounted for when a handed item is located on it or its stated fix names it, and a component's own spec
+// (`provides`) follows a change to another of its contract files that is accounted for; a migration is accounted for when a handed
+// item is located on one or its stated fix names a migration. A round handed no non-blocking item without a stated fix is also
+// allowed the contract files and migrations this attempt's own earlier commits already changed (the plan's surface, adjusted). What
+// is left (a contract or a migration reached from an item located elsewhere, or from one with no location or stated fix) is the
+// named failure. Measured on the same ledgers: 1 of 279 rounds handed after a first review, and that one is the named failure.
+// Review of 0.7.31 (L7): a documentation or test file is never a migration (`docs/migration/notes.md` read as one).
+// Review of 0.7.31 (L1): implementers open at once in a repo cannot be told apart by their commits: the line names them together,
+// once, never one of them alone.
+const isMigration = (f) => {
+  const k = kindsOf(f);
+  return k.has('migration') && !k.has('docs') && !k.has('test');
+};
+const repoPath = (cfg, name) => String(cfg?.repos?.find((r) => r.name === name)?.path ?? '.').replace(/^\.\/?$/, '').replace(/\/$/, '');
+const rootOf = (cfg, name, file) => (repoPath(cfg, name) ? `${repoPath(cfg, name)}/${file}` : file);
+const PATHS = /([A-Za-z0-9_@.][\w@.\-/]*\.[A-Za-z0-9]+)(?::\d+)?/g;
+// The files a handed item is about: its located evidence (`path:line`, `file`, `where`) and the paths its stated fix names.
+function itemFiles(state, ref) {
+  const out = [];
+  const add = (v) => { if (typeof v === 'string') for (const m of v.matchAll(PATHS)) out.push(m[1]); };
+  if (/^D\d+$/.test(ref)) {
+    const d = (state.discovered ?? []).find((x) => x.id === ref);
+    add(d?.where);
+    return { files: out, fixWords: '' };
+  }
+  let f = null;
+  for (const r of state.reviews ?? []) for (const x of r.closure?.findings ?? []) if (`${r.closure?.reviewer ?? r.reviewer}:${x.id}` === ref) f = x;
+  if (!f) return { files: out, fixWords: '' };
+  add(f.file); add(f.evidence); add(f.location); add(f.where); add(f.fix?.what);
+  return { files: out, fixWords: typeof f.fix?.what === 'string' ? f.fix.what : '' };
+}
+const touches = (cfg, located, repo, file) => located.some((l) => l === file || l === rootOf(cfg, repo, file) || (cfg?.repos ?? []).some((r) => rootOf(cfg, r.name, l) === rootOf(cfg, repo, file)));
+function ownChanges(state, impl, repos) {
+  const changed = {};
+  for (const name of repos) {
+    const r = state.repos?.[name];
+    const from = String(impl.heads?.[name] ?? '').split('+')[0];
+    const to = impl.closedAt ? String(impl.closedHeads?.[name] ?? '').split('+')[0] : 'HEAD';
+    if (!r || !from || !to || from === to || !r.worktree || !fs.existsSync(r.worktree)) continue;
+    let files = [];
+    try {
+      files = [...new Set(git(r.worktree, ['log', '--first-parent', '--no-merges', '--format=', '--name-only', `${from}..${to}`], { allowFail: true }).split('\n').map((x) => x.trim()).filter(Boolean))];
+    } catch {}
+    if (files.length) changed[name] = files;
+  }
+  return changed;
+}
+// What one handoff's own commits reached that nothing it was handed accounts for (for the signal, and for measuring it).
+export function reachOf(state, cfg, h) {
+  const impl = (state.implementers ?? []).find((x) => x.handoff === idOf(h.bundle));
+  if (!impl || impl.outcome === 'stopped' || !h.fixes) return null;
+  const work = (state.work ?? []).find((w) => w.id === h.work);
+  const repos = work?.repos?.length ? work.repos.filter((n) => state.repos?.[n]) : Object.keys(state.repos ?? {});
+  const changed = ownChanges(state, impl, repos);
+  if (!Object.keys(changed).length) return null;
+  const perFile = [];
+  for (const [repo, files] of Object.entries(changed)) {
+    for (const file of files) {
+      let hit = [];
+      try {
+        hit = cfg ? impact(cfg, { [repo]: [file] }).contractsChanged : [];
+      } catch {}
+      if (hit.length) perFile.push({ repo, file, components: [...new Set(hit.map((c) => c.component))], contracts: [...new Set(hit.map((c) => c.contract))] });
+    }
+  }
+  const migrationsAll = Object.entries(changed).flatMap(([repo, files]) => files.filter(isMigration).map((file) => ({ repo, file })));
+  if (!perFile.length && !migrationsAll.length) return null;
+  const handed = [...(h.fixes.repair ?? []), ...(h.fixes.alsoFix ?? []), ...(h.fixes.pass ?? [])];
+  const items = handed.map((ref) => itemFiles(state, ref));
+  const located = items.flatMap((x) => x.files);
+  const spec = (c, f) => (cfg?.components ?? []).some((x) => x.id === c && (x.provides ?? []).some((p) => p.spec && rootOf(cfg, f.repo, f.file).endsWith(p.spec)));
+  const direct = perFile.filter((f) => touches(cfg, located, f.repo, f.file));
+  const covered = perFile.filter((f) => direct.includes(f) || f.components.some((c) => spec(c, f) && direct.some((d) => d.components.includes(c))));
+  const contracts = [...new Set(perFile.filter((f) => !covered.includes(f)).map((f) => f.file))];
+  const migrationNamed = items.some((x) => /migration/i.test(x.fixWords)) || located.some(isMigration);
+  const migrations = migrationNamed ? [] : migrationsAll.map((m) => m.file);
+  // The files this attempt's own earlier commits (from its base to this handoff) already changed: a surface the plan's work opened.
+  const earlier = new Set(Object.entries(ownChanges(state, { heads: Object.fromEntries(Object.entries(state.repos ?? {}).map(([n, r]) => [n, r.base])), closedAt: true, closedHeads: impl.heads }, repos)).flatMap(([repo, files]) => files.map((f) => `${repo}:${f}`)));
+  const fresh = (repo, file) => !earlier.has(`${repo}:${file}`);
+  const repoOf = (file) => Object.entries(changed).find(([, files]) => files.includes(file))?.[0];
+  // A round handed only findings that block (or items whose fix a reviewer stated) that edits a contract file or a migration this
+  // attempt's own work already opened is adjusting the planned surface; one handed a non-blocking item with no stated fix gets no
+  // such allowance (the named failure: what that item reached is nobody's plan).
+  const nonBlocking = new Set([...(h.fixes.alsoFix ?? []), ...(h.fixes.pass ?? [])]);
+  const unboundedNonBlocking = (h.fixes.unbounded ?? []).filter((ref) => nonBlocking.has(ref));
+  const keep = (f) => unboundedNonBlocking.length || fresh(repoOf(f), f);
+  return { impl, repos, changed, unboundedNonBlocking, all: { contracts: [...new Set(perFile.map((f) => f.file))], migrations: migrationsAll.map((m) => m.file) }, contracts: contracts.filter(keep), migrations: migrations.filter(keep) };
+}
 export function reachSignal(state, cfg) {
   const out = [];
-  for (const h of (state.handoffs ?? []).filter((x) => x.role === 'implementer' && x.fixes)) {
-    const impl = (state.implementers ?? []).find((x) => x.handoff === idOf(h.bundle));
-    if (!impl || impl.outcome === 'stopped') continue;
-    const changed = {};
-    for (const [name, r] of Object.entries(state.repos ?? {})) {
-      const from = String(impl.heads?.[name] ?? '').split('+')[0];
-      const to = impl.closedAt ? String(impl.closedHeads?.[name] ?? '').split('+')[0] : 'HEAD';
-      if (!from || !to || from === to || !r.worktree || !fs.existsSync(r.worktree)) continue;
-      let files = [];
-      try {
-        files = [...new Set(git(r.worktree, ['log', '--first-parent', '--no-merges', '--format=', '--name-only', `${from}..${to}`], { allowFail: true }).split('\n').map((x) => x.trim()).filter(Boolean))];
-      } catch {}
-      if (files.length) changed[name] = files;
-    }
-    if (!Object.keys(changed).length) continue;
-    let contracts = [];
-    try {
-      contracts = cfg ? [...new Set(impact(cfg, changed).contractsChanged.map((c) => c.contract))] : [];
-    } catch {}
-    const migrations = Object.values(changed).flat().filter(isMigration);
-    if (!contracts.length && !migrations.length) continue;
-    out.push({ handoff: h.bundle, agent: h.agent, kind: h.fixes.pass ? 'pass' : 'fix', contracts, migrations, fixes: h.fixes, at: impl.closedAt ?? null });
+  const impls = state.implementers ?? [];
+  const overlap = (a, b) => String(a.openedAt) < String(b.closedAt ?? '9') && String(b.openedAt) < String(a.closedAt ?? '9');
+  for (const h of (state.handoffs ?? []).filter((x) => x.role === 'implementer' && x.fixes && !(x.fixes.planned ?? []).length)) {
+    const r = reachOf(state, cfg, h);
+    if (!r || (!r.contracts.length && !r.migrations.length)) continue;
+    const reposOf = (x) => {
+      const w = (state.work ?? []).find((y) => y.id === x.work);
+      return w?.repos?.length ? w.repos : Object.keys(state.repos ?? {});
+    };
+    const together = impls.filter((x) => x !== r.impl && overlap(x, r.impl) && reposOf(x).some((n) => Object.keys(r.changed).includes(n))).map((x) => x.agent);
+    const agents = [...new Set([h.agent, ...together])];
+    const same = out.find((o) => o.agents.length > 1 && o.agents.join() === [...agents].sort().join() && o.contracts.join() === r.contracts.join() && o.migrations.join() === r.migrations.join());
+    if (same) continue;
+    out.push({ handoff: h.bundle, agent: h.agent, agents: agents.length > 1 ? [...agents].sort() : [h.agent], repos: Object.keys(r.changed), kind: h.fixes.pass ? 'pass' : 'fix', contracts: r.contracts, migrations: r.migrations, fixes: h.fixes, at: r.impl.closedAt ?? null });
   }
   return out;
 }
 
-// What the owner and the strategist read about one: what it changed, what it was handed and which handed items no reviewer stated
-// a fix for (their size bounded by nobody).
+// What the owner and the strategist read about one: what it changed that nothing handed accounts for, what it was handed and which
+// handed items no reviewer stated a fix for (their size bounded by nobody).
 export const reachLine = (r) => {
   const what = [r.contracts.length ? `changed the contract ${r.contracts.join(', ')}` : '', r.migrations.length ? `added or changed a migration (${r.migrations.join(', ')})` : ''].filter(Boolean).join(' and ');
   const handed = [...(r.fixes.repair ?? []), ...(r.fixes.alsoFix ?? []), ...(r.fixes.pass ?? [])];
   const unbounded = r.fixes.unbounded ?? [];
-  return `the ${r.kind === 'pass' ? 'planned pass' : 'fix round'} of implementer ${r.agent} ${what}, handed ${handed.join(', ') || 'nothing named'}${unbounded.length ? `, with ${unbounded.length} handed item${unbounded.length > 1 ? 's' : ''} with no stated fix (unbounded): ${unbounded.join(', ')}` : ''}: a contract change, a new failure path or a migration is a re-plan, never built in a fix round or a pass; the strategist decides whether it stands (\`continue\`), is re-planned (\`consolidate\`) or goes back`;
+  const who = (r.agents ?? [r.agent]).length > 1 ? `the rounds of implementers ${r.agents.join(' and ')}, open at once in ${r.repos.join(', ')} (their commits cannot be told apart),` : `the ${r.kind === 'pass' ? 'planned pass' : 'fix round'} of implementer ${r.agent}`;
+  return `${who} ${what}, where no handed item is located and no stated fix names it; handed ${handed.join(', ') || 'nothing named'}${unbounded.length ? `, with ${unbounded.length} handed item${unbounded.length > 1 ? 's' : ''} with no stated fix (unbounded): ${unbounded.join(', ')}` : ''}: a contract change, a new failure path or a migration is a re-plan, never built in a fix round or a pass; the strategist decides whether it stands (\`continue\`), is re-planned (\`consolidate\`) or goes back`;
 };
 
 function bundleSignal(state) {

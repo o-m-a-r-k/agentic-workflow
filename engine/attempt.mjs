@@ -259,6 +259,13 @@ export function entry(root, options) {
   // A sibling attempt (`wf split`) works part of the same item beside its parent; a port (another target) beside its source.
   // 0.7.31 (I-216, D67): an analysis beside an open attempt of its item (the premise of a fix traced before the fix round): it
   // changes, delivers and moves nothing, and what it records reaches that attempt's next implementers (engine/analysis.mjs).
+  // Review of 0.7.31 (M1): a second analysis beside an open one is refused too (it would be a second record of one investigation).
+  if (!options.sibling && intent === 'analysis') {
+    for (const id of listAttempts(root)) {
+      const s = loadState(root, id);
+      if (s.item === item && OPEN(s) && s.intent === 'analysis' && targetsKey(attemptTargets(s)) === targetsKey(targets)) throw refuse(`${item} already has an open analysis ${id} owned by ${s.owner}`, `continue it (record what it finds with \`wf analysis record --attempt ${id}\`), or close it first: \`wf analysis close --attempt ${id} --reason "<what follows>"\``, { id: 'entry:analysis-beside-analysis' });
+    }
+  }
   if (!options.sibling && intent !== 'analysis') {
     for (const id of listAttempts(root)) {
       const s = loadState(root, id);
@@ -495,6 +502,11 @@ export function setIntent(root, options, to) {
   if (!OPEN(state)) throw refuse(`${state.id} is ${state.phase}; its intent is final`, 'admit a new attempt with `wf entry` (or `wf reopen` for a delivered item)', { id: 'intent:closed' });
   if (state.intent === 'implementation') return { state, changed: false };
   if (!reason) throw new WfError('--reason "why this analysis is now to be implemented" is required');
+  // Review of 0.7.31 (M1). Named failure (a review's repro): an analysis admitted beside an open attempt of its item (D67) and then
+  // upgraded made two open implementations of one item, the second with its tracker admission pending; `wf entry` refuses that
+  // and the upgrade did not check it. An analysis beside an open attempt is closed once recorded, and what it found reaches that one.
+  const beside = listAttempts(root).filter((id) => id !== state.id).map((id) => loadState(root, id)).find((s) => s.item === state.item && OPEN(s) && targetsKey(attemptTargets(s)) === targetsKey(attemptTargets(state)));
+  if (beside) throw refuse(`${state.item} already has an open attempt ${beside.id} owned by ${beside.owner}: upgrading ${state.id} would make a second implementation of it`, `record what ${state.id} found (\`wf analysis record --attempt ${state.id}\`) and close it (\`wf analysis close --attempt ${state.id} --reason "<what follows>"\`): ${beside.id}'s next planner and implementers are given it${beside.intent === 'analysis' ? `; ${beside.id} is an analysis too: close one of them first` : ''}`, { id: 'intent:open-beside' });
   append(root, state.id, 'intent.changed', { from: state.intent, to, reason }, actor(options));
   if (hasTicket(state)) emitTrackerEvent(root, loadConfig(root), state.id, 'admitted');
   return { state: loadState(root, state.id), changed: true };

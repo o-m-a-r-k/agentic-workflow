@@ -161,3 +161,23 @@ test('I-216: an analysis is admitted beside an open attempt of its item, and wha
   assert.match(beside.err, new RegExp(`ENG-8 already has an open attempt ${a.id.replace('.', '\\.')}`));
   assert.match(beside.err, /ENG-8\.1 is an analysis: `wf intent implementation --attempt ENG-8\.1 --reason "<the person's words>"` implements it in place, or `wf analysis close --attempt ENG-8\.1 --reason "<what follows>"` once it is recorded/);
 });
+
+// Review of 0.7.31 (M1). Named failure (a review's repro): `wf entry ENG-9`, then `wf entry ENG-9 --intent analysis` (allowed beside
+// it), then `wf intent implementation --attempt ENG-9.2` made two open implementation attempts of one item, the second with its
+// tracker admission pending. An analysis beside an open attempt is closed when it is recorded, never implemented beside it; and a
+// second analysis is not admitted beside an open one.
+test('review of 0.7.31 (M1): an analysis beside an open attempt is not upgraded into a second implementation, and a second analysis is not admitted beside an open one', () => {
+  const f = singleRepoProject('analysis-upgrade-beside', { gate: { steps }, tracker });
+  ok(wf(f.root, ['entry', '--item', 'ENG-9', '--json']));
+  const an = ok(wf(f.root, ['entry', '--item', 'ENG-9', '--intent', 'analysis', '--json'])).json();
+  const up = wf(f.root, ['intent', 'implementation', '--attempt', an.id, '--reason', 'implement it']);
+  assert.equal(up.code, 75);
+  assert.match(up.err, /ENG-9 already has an open attempt ENG-9\.1/);
+  assert.match(up.err, /`wf analysis close --attempt ENG-9\.2 --reason "<what follows>"`/);
+  const s = state(f.root, an.id);
+  assert.equal(s.intent, 'analysis');
+  assert.deepEqual(s.tracker.pending, [], 'no admission is queued for a second implementation');
+  const second = wf(f.root, ['entry', '--item', 'ENG-9', '--intent', 'analysis', '--json']);
+  assert.equal(second.code, 75);
+  assert.match(second.err, /ENG-9 already has an open analysis ENG-9\.2/);
+});

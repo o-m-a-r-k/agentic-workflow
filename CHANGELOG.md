@@ -64,6 +64,23 @@ Release notes, newest first, then every fix that came from a failure in the work
   own instructions for that step, word for word, followed by the workflow's wording of what the step carries (the status,
   the comment, the screenshots). An adapter that gives no instructions leaves the wording as it was; the built-in Linear
   adapter's instructions are shown too.
+- **Review of 0.7.31: fewer false alarms, and the gaps a review found closed (D64, D65, D67).**
+  - The check that a fix reached a contract or a migration fired too often. A review counted 35 of 155 fix rounds in one
+    project's records, mostly planned work updating an API description along with an endpoint change. It now fires only on
+    what nothing handed to that round explains: not on planned work being built, not where a reviewer's finding pointed at
+    that file or the reviewer's suggested fix named it, and, for a round fixing only blocking problems, not on a file the
+    ticket's own planned work had already changed. Measured again on the same records: 1 of 279 rounds, and that one is
+    the due-date change that started this release. When two implementers work in one repository at once, it names both
+    rather than blaming one, and a notes file in a migrations folder no longer counts as a migration.
+  - `wf decide` records the options you were offered, and the choice has to be one of them, so a later reader sees when
+    every option built the same change. A reviewer is given your decision, the options and what was not checked, never the
+    agent's recommendation or its reasons.
+  - What a reviewer finds about a fix's premise is kept with the problem it judged. A finding whose premise an implementer
+    found false reaches the evidence review after a planned pass, with the implementer's evidence, and is marked when it is
+    handed again beside other fixes. When a reviewer and an implementer disagree on whether a premise holds, you decide it,
+    not a third agent.
+  - An analysis run beside a ticket already being built can no longer be turned into a second implementation of the same
+    ticket, and only one analysis of a ticket is open at a time.
 
 ## 0.7.30 - Live attempts follow the adapter on main; repair and review are handed every fact; fair test slots; screenshots of any run
 

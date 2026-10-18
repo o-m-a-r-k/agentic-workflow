@@ -646,6 +646,12 @@ export function reduce(entries) {
       case 'discovered.added':
         s.discovered.push({ id: d.id, summary: d.summary, kind: d.kind ?? 'defect', severity: d.severity ?? null, invariant: d.invariant ?? null, scope: d.scope ?? null, where: d.where ?? null, foundBy: d.foundBy ?? null, ...(d.family ? { family: d.family } : {}), blockedBy: d.blockedBy ?? null, anchor: d.anchor ?? null, ...(d.movedFrom ? { movedFrom: d.movedFrom } : {}), ...(d.raisedOn ? { raisedOn: d.raisedOn } : {}), at: e.at, by: e.actor, status: 'open', fixed: null, deferred: null });
         break;
+      // Review of 0.7.31 (L3): a reviewer's line on the premise behind an issue, whatever its verdict.
+      case 'discovered.premise': {
+        const x = s.discovered.find((y) => y.id === d.id);
+        if (x) (x.premises ??= []).push({ reviewer: d.reviewer ?? null, verdict: d.verdict ?? null, premise: d.premise, evidence: d.evidence ?? null, at: e.at });
+        break;
+      }
       case 'discovered.rated': {
         const x = s.discovered.find((y) => y.id === d.id);
         if (x) {

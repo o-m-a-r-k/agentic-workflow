@@ -110,8 +110,10 @@ export function composeAsk(ask, frame, choices, { items = [], itemNoun = 'proble
 // 0.7.31 (I-217, D65): a product or design question the owner agent asked the person outside the engine (`wf decide`), as the person
 // read it: the question, the recommendation, what it rests on (what was traced and the evidence) and what was not checked, in the
 // shape every question takes (D29), so the record shows what the person said yes to and on what ground.
-export function productAsk({ question, recommend, basis, notChecked }) {
-  return [sentence(question), `Recommended: ${sentence(recommend)}`, `What it rests on: ${sentence(basis)}`, `Not checked: ${sentence(notChecked)}`].join(' ');
+// Review of 0.7.31 (M2): with the options offered, so a question whose options all build the same change shows it.
+export function productAsk({ question, options = [], recommend, basis, notChecked }) {
+  const listed = options.length ? `The options: ${options.map((o, i) => `(${i + 1}) ${text(o).replace(/[.\s]+$/, '')}`).join('; ')}.` : '';
+  return [sentence(question), listed, `Recommended: ${sentence(recommend)}`, `What it rests on: ${sentence(basis)}`, `Not checked: ${sentence(notChecked)}`].filter(Boolean).join(' ');
 }
 
 // The refusal that asks the agent to write the question first: what the person will be asked (the engine's sentence and

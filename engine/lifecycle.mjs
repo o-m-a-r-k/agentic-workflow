@@ -11,7 +11,7 @@ import path from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { actor, addRepoWorktree, baseRef, branchName, onTarget, changedFiles, cleanupWorktrees, entry, missingWorktrees, openState, treeHashes, worktreeDir } from './attempt.mjs';
 import { channelOf, discoveredVerdicts, headsNow, nonissueVerdicts, openDiscovered, seamVerdicts, unacknowledged, reportsForReview, reportedIssueVerdicts } from './discovered.mjs';
-import { itemOpen, premiseCloseNotes, premiseNote, premiseOpen, premiseRef, premisesForReview, premiseStep } from './premise.mjs';
+import { itemOpen, premiseCloseNotes, premiseNote, premiseOpen, premiseRef, premiseReports, premisesForReveal, premisesForReview, premiseStep } from './premise.mjs';
 import { productDecisionsFor } from './product-decisions.mjs';
 import { executionSettings, rejectModelOverrides } from './models.mjs';
 import { rerunsOnlyFailed, sessionRules } from './onboard.mjs';
@@ -931,7 +931,7 @@ export function handoff(root, role, options) {
     const f = observations(state).find((x) => x.ref === ref) ?? earlierOpenFindings(state, null).find((x) => `${x.round}:${x.id}` === ref);
     if (f) return { ref, kind: 'finding', severity: f.severity ?? null, family: f.family ?? null, summary: f.summary ?? '', evidence: f.evidence ?? null, ...(f.stillOpen ? { stillOpen: f.stillOpen } : {}), ...(statedFixOf(f) ? { fix: statedFixOf(f) } : {}), ...premise };
     const d = (state.discovered ?? []).find((x) => x.id === ref);
-    return d ? { ref, kind: 'discovered', status: d.status, severity: d.severity ?? null, family: d.family ?? null, summary: d.summary ?? '', where: d.where ?? null, ...(d.kind === 'bookkeeping' ? { bookkeeping: true } : {}), ...premise } : { ref, kind: 'unknown' };
+    return d ? { ref, kind: 'discovered', status: d.status, severity: d.severity ?? null, family: d.family ?? null, summary: d.summary ?? '', where: d.where ?? null, ...(d.kind === 'bookkeeping' ? { bookkeeping: true } : {}), ...(d.premises?.length ? { premises: d.premises } : {}), ...premise } : { ref, kind: 'unknown' };
   };
   const passItems = passIds.size ? passItemsOf(state).filter((w) => passIds.has(w.id)).map((w) => ({ work: w.id, why: w.why ?? null, items: w.items.map(itemDetail) })) : null;
   // 0.7.30 (I-173, D51): an open bookkeeping entry (an implementer's lint or fixture fix) is the implementer's to make, so it
@@ -949,13 +949,16 @@ export function handoff(root, role, options) {
   const statedFix = handedFindings.length && handedFindings.every((x) => typeof x.fix?.minutes === 'number') ? { minutes: handedFindings.reduce((n, x) => n + x.fix.minutes, 0), findings: handedFindings.map((x) => ({ ref: x.ref, what: x.fix.what ?? '(no words)', minutes: x.fix.minutes })) } : null;
   // 0.7.31 (I-217, D64): what a fix round or a planned pass was handed, and which of it no reviewer stated a fix for (unbounded), so
   // the course can tell what its own commits reached (engine/signals.mjs `reachSignal`).
+  // Review of 0.7.31 (M3): `planned` names the planned work items this implementer builds for the first time (handed after a review,
+  // such a build is no fix round: its reach is the plan's, and the course does not count it).
+  const plannedFirst = role === 'implementer' ? [...(work && !Array.isArray(work.items) && unstartedWork(state).some((w) => w.id === work.id) ? [work.id] : []), ...(covers ?? []).filter((id) => !passItemsOf(state).some((w) => w.id === id))] : [];
   const fixesHanded = (() => {
-    if (!repairNow && !passItems) return null;
+    if (!repairNow && !passItems && !(plannedFirst.length && (state.reviews ?? []).length)) return null;
     const repairRefs = (repair ?? []).flatMap((g) => g.findings ?? []).map((f) => ({ ref: `${f.round}:${f.id}`, fix: statedFixOf(f) }));
     const also = alsoFix.map((x) => ({ ref: x.ref, fix: x.fix ?? null }));
     const pass = (passItems ?? []).flatMap((p) => p.items).map((x) => ({ ref: x.ref, fix: x.fix ?? null }));
     const unbounded = [...repairRefs, ...also, ...pass].filter((x) => typeof x.fix?.minutes !== 'number').map((x) => x.ref);
-    return { ...(repairRefs.length ? { repair: repairRefs.map((x) => x.ref) } : {}), ...(also.length ? { alsoFix: also.map((x) => x.ref) } : {}), ...(pass.length ? { pass: pass.map((x) => x.ref) } : {}), ...(unbounded.length ? { unbounded } : {}) };
+    return { ...(plannedFirst.length ? { planned: plannedFirst } : {}), ...(repairRefs.length ? { repair: repairRefs.map((x) => x.ref) } : {}), ...(also.length ? { alsoFix: also.map((x) => x.ref) } : {}), ...(pass.length ? { pass: pass.map((x) => x.ref) } : {}), ...(unbounded.length ? { unbounded } : {}) };
   })();
   // The agent type's role file changed after the owner's session loaded it (I-15): an agent started by type runs the old
   // role, so its bundle (read first) points it at the current file. A plugin update reaches the next role with no restart and
@@ -1055,7 +1058,8 @@ export function handoff(root, role, options) {
       : role === 'implementer' && unreached.length ? { note: 'Scope an earlier recorded review round said it did not reach, and no complete full audit has covered since: what it names is not verified by any review, whatever passed elsewhere. Where it falls within your criteria it is part of your goal, and your report says what you did about it.', rounds: unreached } : undefined,
     mode: role === 'reviewer' ? mode : undefined,
     // A repair handoff: the open findings that block, grouped by family.
-    repair: role === 'implementer' ? repair ?? undefined : undefined,
+    // Review of 0.7.31 (L2): a finding whose premise an implementer reported does not hold, handed again beside others, says so.
+    repair: role === 'implementer' && repair ? repair.map((g) => ({ ...g, findings: g.findings.map((f) => (premised.has(`${f.round}:${f.id}`) ? { ...f, premiseFailed: premised.get(`${f.round}:${f.id}`) } : f)) })) : undefined,
     findingHistory: historyNow ? findingHistory(state, { fixes: fixesSoFar }) : undefined,
     recurringCauses: recurring.length ? recurring : undefined,
     possibleRecurrences: historyNow && familyRecurrences(state).length ? familyRecurrences(state) : undefined,
@@ -1160,6 +1164,8 @@ export function handoff(root, role, options) {
   if (role === 'reviewer' && (bundle.discovered ?? []).some((d) => d.status === 'open' || d.notADefectSinceReview)) bundle.instructions += ' A discovered issue you judge not to be a defect at all (the code does what the product intends, or the claim misread it) is settled by your verdict, which closes it: `discovered: [{ "id": "D3", "verdict": "verified-nonissue", "evidence": "<file:line you checked>", "rationale": "<why it is not a defect, in terms of what the product is for>" }]`; the claim stays in the record beside your reason. One marked `notADefectSinceReview` was closed that way (' + closedBy + '): raise a finding if the claim holds after all.';
   // 0.7.31 (I-217, D64): the premises an implementer reported failed, for this reviewer's verdict.
   if (role === 'reviewer' && bundle.premiseFailed) bundle.instructions += ` \`premiseFailed\` lists items an implementer did not build because their premise does not hold in production (${bundle.premiseFailed.map((x) => x.ref).join(', ')}), each with what it checked: judge the premise, not only the code. When it does not hold, give \`verified-nonissue\` with your evidence and a rationale that says so (for a discovered issue in \`discovered\`, which closes it; for a finding in \`priorFindings\`); when it holds after all, give \`open\` with what you found (it goes back to be fixed). A fact that contradicts a premise is a finding about the premise, never an argument that a change is safe.`;
+  const marked = role === 'implementer' ? [...(bundle.repair ?? []).flatMap((g) => g.findings), ...(bundle.alsoFix ?? []), ...(bundle.passItems ?? []).flatMap((x) => x.items)].filter((x) => x.premiseFailed).map((x) => x.ref ?? `${x.round}:${x.id}`) : [];
+  if (marked.length) bundle.instructions += ` An item marked \`premiseFailed\` (${marked.join(', ')}) was reported by an implementer to rest on a premise that does not hold in production, with its evidence: build nothing for it until a reviewer or the person settles it, and say in your report what you found about the premise if you looked.`;
   if (role === 'implementer' && bundle.ownerContext) bundle.instructions += ' `ownerContext` is what the owner carried to you (the person\'s words, a decision, what research found): context to verify, not facts. A premise it states (nothing writes this field, no wrong data exists) is checked like any other, and a fact you find that contradicts the work you were handed is a stop and a question in your report, never a reason the change is safe.';
   if (role === 'reviewer' && bundle.passBuilt) bundle.instructions += ` A planned pass was built since the last review, with no code-review round of its own (${bundle.passBuilt.map((x) => `${x.work}: ${x.items.map((i) => i.ref).join(', ')}`).join('; ')}): \`passBuilt\` lists its items, the commits recorded for each and the implementer's range. Its code is in your diff and this round is the one review it gets: review it as you review the rest, and verify each item at its cause (a finding in \`priorFindings\`; a discovered issue closed as fixed: raise a finding when its fix does not hold).`;
   if (role === 'reviewer' && mode === 'delta' && bundle.supplementalValidation.length) bundle.instructions += ` \`supplementalValidation\` lists the checks registered, corrected or carried from a batch member since the last reviewed round (${bundle.supplementalValidation.flatMap((v) => v.steps.map((x) => x.id)).join(', ')}): the gate runs each at its pinned commit, so judge its definition and plugin as committed there, not a later copy, and give your verdict on each in \`validationChecked: [{ "id", "commit", "verdict": "complies" | "finding", "evidence", "finding" }]\`; a defect in one is a finding.`;
@@ -1592,7 +1598,8 @@ export function closeImplementer(root, options) {
   append(root, state.id, 'implementer.closed', { handoff: open.handoff, agent, outcome, heads, commits, ...(options.closedBy === 'engine' ? { closedBy: 'engine' } : {}) }, actor(options));
   const after = loadState(root, state.id);
   // 0.7.31 (I-217, D64): what the close says about each premise the report says does not hold.
-  const premises = (report.value?.premiseFailed ?? []).map((p) => ({ ...p, agent, known: itemOpen(after, p.ref) }));
+  const contested = new Map(premiseReports(after).map((p) => [p.ref, p.contested]));
+  const premises = (report.value?.premiseFailed ?? []).map((p) => ({ ...p, agent, known: itemOpen(after, p.ref), contested: contested.get(p.ref) ?? null }));
   return { state: after, handoff: open.handoff, outcome, commits, children, linked: placed.filter((x) => x.linked).map((x) => ({ id: x.linked, status: x.status })), unknownIds: placed.filter((x) => x.unknownId).map((x) => ({ named: x.unknownId, recorded: x.recorded })), premises };
 }
 
@@ -1840,6 +1847,13 @@ export function recordReview(root, options) {
     const v = (Array.isArray(closure.discovered) ? closure.discovered : []).find((x) => x?.id === d.id);
     if (v?.verdict === 'fixed' && String(v.evidence ?? '').trim()) append(root, state.id, 'discovered.closed', { id: d.id, outcome: 'fixed', repo: d.claim.repo, commit: d.claim.commit, evidence: String(v.evidence).trim(), beforeRecord: true, verifiedBy: { reviewer: closure.reviewer ?? null, round, evidence: String(v.evidence).trim(), ...(options.partial ? { partial: true } : {}) } }, null);
   }
+  // Review of 0.7.31 (L3): what a reviewer found about the premise behind an issue (`premise` on its `discovered` verdict, whatever
+  // the verdict) is kept with the issue, so the next implementer and reviewer read it; it was in the closure file only.
+  for (const v of Array.isArray(closure.discovered) ? closure.discovered : []) {
+    const id = premiseRef(v?.id);
+    if (typeof v?.premise !== 'string' || !v.premise.trim() || !(state.discovered ?? []).some((d) => d.id === id)) continue;
+    append(root, state.id, 'discovered.premise', { id, verdict: String(v.verdict ?? '').slice(0, 40), premise: v.premise.trim().slice(0, 1000), evidence: String(v.evidence ?? '').trim().slice(0, 500), reviewer: closure.reviewer ?? null, round }, null);
+  }
   // 0.7.27 (I-188): the issues this reviewer found not to be defects close on its verdict (an issue closed meanwhile stays as it is).
   for (const v of nv.verdicts) {
     if (loadState(root, state.id).discovered.find((d) => d.id === v.id)?.status !== 'open') continue;
@@ -1847,13 +1861,16 @@ export function recordReview(root, options) {
   }
   const after = loadState(root, state.id);
   const toVerify = delta ? [] : unverifiedPrior(after, after.review);
+  // Review of 0.7.31 (L4): a full round is shown the findings whose premise an implementer reported does not hold, with its evidence,
+  // once its blind closure is recorded (only its own first record: a second one adds the verdicts).
+  const premisesNow = delta || recorded ? [] : premisesForReveal(after);
   let reveal = null;
-  if (toVerify.length) {
+  if (toVerify.length || premisesNow.length) {
     reveal = path.join(root, '.wf-worktrees', state.id, '_review', `prior-findings-${tag}.json`);
-    safeWriteJson(root, reveal, { note: 'Findings earlier review rounds left open. Check each against the current code; add priorFindings to your closure.', findings: toVerify });
+    safeWriteJson(root, reveal, { note: `Findings earlier review rounds left open. Check each against the current code; add priorFindings to your closure.${premisesNow.length ? ' `premiseFailed` lists findings an implementer built nothing for because their premise does not hold in production, with what it checked: judge each premise in `priorFindings` (`verified-nonissue` with your evidence and rationale when it does not hold, `open` with what you found when it does), with a `premise` line.' : ''}`, findings: toVerify, ...(premisesNow.length ? { premiseFailed: premisesNow } : {}) });
   }
   seal(append, { root, id: state.id });
-  return { state: after, reveal, toVerify, droppedLinks };
+  return { state: after, reveal, toVerify, premises: premisesNow, droppedLinks };
   });
 }
 
