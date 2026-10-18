@@ -399,6 +399,16 @@ export function reduce(entries) {
         if (h?.launch) { h.session = d.session; h.launch = { ...h.launch, session: d.session, status: 'running', startedAt: e.at }; }
         break;
       }
+      // 0.7.30 (I-153): a launch the model's capacity ended, resumed (its session continued, or started again when none had
+      // begun): the new process, running again, no longer failed.
+      case 'agent.launch.resumed': {
+        const h = s.handoffs.find((h) => h.bundle === d.handoff);
+        if (h?.launch) {
+          const { failure, exitCode, finishedAt, ...kept } = h.launch;
+          h.launch = { ...kept, pid: d.pid, out: d.out ?? kept.out, err: d.err ?? kept.err, spawnedAt: e.at, status: h.session ? 'running' : 'starting', resumes: d.resume ?? (kept.resumes ?? 0) + 1 };
+        }
+        break;
+      }
       case 'agent.launch.finished': {
         const h = s.handoffs.find((h) => h.bundle === d.handoff);
         if (h?.launch) h.launch = { ...h.launch, status: d.status, exitCode: d.exitCode, finishedAt: e.at, ...(d.failure ? { failure: d.failure } : {}) };

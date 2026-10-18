@@ -3364,6 +3364,8 @@ export function nextDecision(root, state) {
   }
   // A blind closure can be recorded before same-round prior-finding verification finishes.
   if (h?.launch && ['starting', 'running'].includes(h.launch.status)) return result('review', 'blocked', 'runtime outcome is pending or liveness is unknown; recover the original handle, never duplicate it', { handoff: h.bundle, runtime: h.runtime });
+  // 0.7.30 (I-153): a round the model's capacity ended is resumed, never replaced by a fresh handoff.
+  if (h?.launch?.status === 'failed' && h.launch.failure?.kind === 'capacity') return result('review', 'owner', `reviewer ${h.agent} stopped because the model was at capacity; resume it`, { handoff: h.bundle, guidance: `\`wf handoff run --agent ${h.agent} --attempt ${state.id}\` resumes its session when the model has room; no fresh handoff` });
   if (h?.launch?.status === 'failed') return result('review', 'owner', 'role launch failed; diagnose before a fresh handoff', { handoff: h.bundle, guidance: `reviewer ${h.agent} launch failed; create a fresh reviewer handoff after diagnosis; no review is running` });
   const recorded = h && (state.reviews ?? []).filter((r) => r.handoff === h.bundle).at(-1);
   const refused = h && (state.reviewsRefused ?? []).some((r) => r.handoff === h.bundle);
@@ -3597,6 +3599,7 @@ function phaseStep(root, cfg, state) {
       if (!inFlight.model) return 'reviewer ' + inFlight.agent + ' has not launched: its attempt execution pin has no ' + findHost(inFlight.runtime).name + ' model; run \x60wf models refresh --attempt ' + state.id + '\x60, then create a fresh reviewer handoff';
       return 'reviewer ' + inFlight.agent + ' is ready but has not launched: \x60wf handoff run --agent ' + inFlight.agent + ' --attempt ' + state.id + '\x60';
     }
+    if (inFlight.launch.status === 'failed' && inFlight.launch.failure?.kind === 'capacity') return 'reviewer ' + inFlight.agent + ' stopped because the model was at capacity: \x60wf handoff run --agent ' + inFlight.agent + ' --attempt ' + state.id + '\x60 resumes its session (no fresh handoff)';
     if (inFlight.launch.status === 'failed') return 'reviewer ' + inFlight.agent + ' launch failed; create a fresh reviewer handoff and run it; no review is running';
     if (inFlight.launch.status === 'completed') return closureMissingGuidance(state, inFlight);
     // 0.7.0: the launcher hands control back once a role passes its own estimate; the role keeps running.

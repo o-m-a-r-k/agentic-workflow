@@ -4,6 +4,7 @@ import { readRegular } from '../evidence.mjs';
 import { sha256 } from '../util.mjs';
 import { codexTranscript } from './codex-transcript.mjs';
 import { readCapped } from './safe-file.mjs';
+import { RESUME_PROMPT } from './resume.mjs';
 
 export function codexEntries(file) {
   const raw = readCapped(file).toString('utf8').split('\n').flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } });
@@ -40,9 +41,12 @@ export function verifyRole(handoff, { home }) {
     if (!Array.isArray(p.content) || p.content.some((b) => b?.type !== 'input_text' || typeof b.text !== 'string')) return [{ timestamp: e.timestamp, text: null }];
     return [{ timestamp: e.timestamp, text: p.content.map((b) => b.text).join('') }];
   });
-  // Hosts that write both layouts duplicate the same prompt; a later turn still refuses a resumed/steered round.
+  // Hosts that write both layouts duplicate the same prompt; a later turn still refuses a resumed/steered round. The engine's
+  // own resume prompt after the model was at capacity (0.7.30, I-153) is accepted as often as the ledger records a resume.
   const prompt = prompts[0];
-  if (!prompt || prompt.text !== handoff.startPrompt || prompts.some((p) => p.text !== prompt.text || p.timestamp !== prompt.timestamp)) return mismatch('the Codex start prompt was not exactly the printed line or its session was resumed');
+  const later = prompts.filter((p) => !(p.text === prompt?.text && p.timestamp === prompt?.timestamp));
+  const resumed = later.filter((p) => p.text === RESUME_PROMPT).length;
+  if (!prompt || prompt.text !== handoff.startPrompt || later.some((p) => p.text !== RESUME_PROMPT) || resumed > (launch.resumes ?? 0)) return mismatch('the Codex start prompt was not exactly the printed line or its session was resumed');
   const at = Date.parse(prompt.timestamp), admitted = Date.parse(handoff.at);
   if (!Number.isFinite(at) || !Number.isFinite(admitted) || at < admitted || at > Date.now() + 1000) return mismatch('the Codex role start prompt predates its handoff, is in the future or has no timestamp');
   return { status: 'verified', transcript: transcript.file, identity: 'engine-launched', entries };

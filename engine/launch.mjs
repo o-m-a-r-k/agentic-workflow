@@ -24,6 +24,7 @@ import { isPlainSessionId } from './hosts/safe-file.mjs';
 import { endProcessTree, leftOver, stillTheRole } from './process-tree.mjs';
 import { WfError, assertPlainGit, canonical, git, refuse, sha256, withFileLock, writeJson } from './util.mjs';
 import { readStatement } from './expectations.mjs';
+import { RESUME_PROMPT } from './hosts/resume.mjs';
 
 export async function runRole(root, options) {
   rejectModelOverrides(options);
@@ -37,7 +38,9 @@ export async function runRole(root, options) {
   if (state.activeHold) throw refuse(`this attempt is on hold: ${state.activeHold.reason}`);
   if (h.role === 'reviewer' && !isCurrentReviewer(state, h)) throw refuse('only the current reviewer handoff or its frozen group members can be launched');
   if (h.reviewGroup && h.reviewGroup.snapshot !== reviewSnapshot(state)) throw refuse('review group obligations changed before launch; create a fresh group');
-  if (h.tree && canonical(treeHashes(state)) !== canonical(h.tree)) throw refuse('the handed tree changed before launch; create a fresh handoff');
+  // 0.7.30 (I-153): a launch the model's capacity ended is resumed, not launched again: the role itself changed the tree.
+  const resumable = h.launch?.status === 'failed' && h.launch.failure?.kind === 'capacity';
+  if (!resumable && h.tree && canonical(treeHashes(state)) !== canonical(h.tree)) throw refuse('the handed tree changed before launch; create a fresh handoff');
   // Named failure: the shared launcher accidentally prohibited inherited implementer/tester models.
   if (['planner', 'reviewer'].includes(h.role) && !h.model) throw refuse('this handoff pins no runtime model; run `wf models refresh --attempt <id>`, then create a fresh handoff');
   const expected = executionSettings(root, state, h.role, h.class, runtime, h.runtimeAdapterBase ?? state.adapterBase);
@@ -66,6 +69,7 @@ export async function runRole(root, options) {
       if (fs.realpathSync(top) !== fs.realpathSync(repo.worktree)) throw refuse('a recorded role worktree is not a Git repository root');
     }
   }
+  if (resumable) return resumeLaunch(root, state, h, { host, runtime, label, options });
   const file = h.bundle.replace(/\.json$/, '.launch.json');
   const requestedSession = host.requestedSession?.() ?? null;
   const receipt = { runtime, requestedSession, handoff: h.bundle, agentType: h.agentType, prompt: h.startPrompt, model: h.model, effort: h.effort, runtimeAdapterBase: expected.runtimeAdapterBase, sourceClass: expected.sourceClass, developerInstructions: body, cwd: root, sandbox: host.sandbox, skipGitRepoCheck: nonGitRoot };
@@ -81,10 +85,7 @@ export async function runRole(root, options) {
     });
   });
   seal(append);
-  const env = { ...process.env };
-  // I-41: the launched role must call this engine, even when the user's global wf still points to an older plugin.
-  env.PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin') + path.delimiter + (env.PATH ?? '');
-  for (const name of launchEnvDeletes()) delete env[name];
+  const env = launchEnv();
   const launch = host.buildLaunch(h, { root, body, requestedSession, nonGitRoot });
   // 0.7.0: the role runs in its own process group with its output in files outside the evidence, so the owner is never
   // trapped in this call: it returns when the role finishes, or when the role passes the estimate it stated itself, and
@@ -124,7 +125,69 @@ export async function runRole(root, options) {
   }
   // `--detach` (0.7.22): return once the role has started, so an owner starts two roles that run at the same time (a
   // planning panel's drafts); `wf handoff wait` follows each to its end.
-  return follow(root, state.id, h, { host, runtime, label, requestedSession, child, io, ownerMinutes, releaseEarly, detach: options.detach === true });
+  return follow(root, state.id, h, { host, runtime, label, requestedSession, child, io, ownerMinutes, releaseEarly, detach: options.detach === true, relaunch: { body, nonGitRoot } });
+}
+
+// I-41: the launched role must call this engine, even when the user's global wf still points to an older plugin.
+function launchEnv() {
+  const env = { ...process.env };
+  env.PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin') + path.delimiter + (env.PATH ?? '');
+  for (const name of launchEnvDeletes()) delete env[name];
+  return env;
+}
+
+// 0.7.30 (I-153). Named failure (audit of role launches): seven launches failed because the model was at capacity (Codex's
+// `server_overloaded`) and were replaced by fresh handoffs; four had made no edit, and the others' work was taken over by a
+// role that had to find it again. The host recognises its own capacity signal (`interpretEvent` -> `capacity`); the launch is
+// resumed: its session continued (`buildLaunch(..., { resume })`), or started again when none had begun, with the same
+// instructions, model and effort, after a wait that grows (now, then 1, 2, 4, 8 and every 10 minutes) for as long as the
+// harness keeps reporting capacity, within the call while the owner's return point (`--minutes`, the role's own estimate)
+// allows. Past it, the launch is recorded failed with kind `capacity`, and `wf handoff run` on that handoff resumes it.
+const CAPACITY_WAITS_S = [0, 60, 120, 240, 480, 600];
+
+function respawn(root, h, host, io, { session, requestedSession, body, nonGitRoot }) {
+  const launch = host.buildLaunch(h, { root, body, requestedSession, nonGitRoot, resume: session ?? null });
+  fs.mkdirSync(path.dirname(io.out), { recursive: true });
+  fs.writeFileSync(io.prompt, session ? RESUME_PROMPT : h.startPrompt, { mode: 0o600 });
+  const fds = [fs.openSync(io.prompt, 'r'), fs.openSync(io.out, 'a', 0o600), fs.openSync(io.err, 'a', 0o600)];
+  try {
+    return spawn(launch.bin, launch.args, { cwd: root, env: launchEnv(), stdio: fds, detached: true });
+  } finally {
+    for (const fd of fds) fs.closeSync(fd);
+  }
+}
+const spawnedOrError = (child) => new Promise((resolve) => { child.once('spawn', () => resolve(null)); child.once('error', (e) => resolve(e.message)); });
+
+// The instructions the launch was given, from its protected receipt: a resumed role continues under the same ones.
+function launchedBody(h) {
+  try {
+    const r = readRegular(h.bundle.replace(/\.json$/, '.launch.json'));
+    return r ? JSON.parse(r.bytes.toString('utf8')) : null;
+  } catch {
+    return null;
+  }
+}
+
+// `wf handoff run` on a launch recorded failed at capacity: the same session continues (or the launch starts again when no
+// session had begun), recorded as resumed, and followed from where its event stream ended.
+async function resumeLaunch(root, state, h, { host, runtime, label, options }) {
+  const receipt = launchedBody(h);
+  if (!receipt?.developerInstructions) throw refuse(`${h.agent}'s launch receipt cannot be read, so it is not resumed`, `create a fresh handoff: \`wf handoff ${h.role} --agent <new id> --attempt ${state.id}\``, { id: 'launch:resume-receipt' });
+  const io = { ...runnerFiles(root, state.id, h), ...(h.launch.out ? { out: h.launch.out, err: h.launch.err } : {}) };
+  let offset = 0;
+  try {
+    offset = fs.statSync(io.out).size;
+  } catch {}
+  const session = h.session ?? null;
+  const child = respawn(root, h, host, io, { session, requestedSession: h.launch.requestedSession ?? null, body: receipt.developerInstructions, nonGitRoot: receipt.skipGitRepoCheck === true });
+  const failed = await spawnedOrError(child);
+  if (failed) throw refuse(`${label} ${h.role} ${h.agent} could not be resumed: ${failed}`);
+  const resume = (h.launch.resumes ?? 0) + 1;
+  append(root, state.id, 'agent.launch.resumed', { handoff: h.bundle, pid: child.pid, out: io.out, err: io.err, reason: 'capacity', resume, session }, `engine:${runtime}`);
+  seal(append);
+  process.stderr.write(`${label} ${h.role} ${h.agent}: resuming ${session ? `session ${session}` : 'the launch'} after the model was at capacity (resume ${resume})\n`);
+  const ownerMinutes = options.minutes === undefined ? null : Number(options.minutes);
+  return follow(root, state.id, loadState(root, state.id).handoffs.find((x) => x.bundle === h.bundle), { host, runtime, label, requestedSession: h.launch.requestedSession ?? null, child, io, ownerMinutes, offset, relaunch: { body: receipt.developerInstructions, nonGitRoot: receipt.skipGitRepoCheck === true } });
 }
 
 // Where an engine-launched role's start prompt, event stream and error output live (outside the evidence).
@@ -146,15 +209,19 @@ const alive = (pid) => {
 // Returns when the process has ended, or (still running) once `untilMinutes` have passed since this call, or once it has
 // passed the estimate it stated itself (`expect.minutes` in its report or closure file) when no `untilMinutes` is given.
 // Nothing is decided from the estimate: the role keeps running and the owner judges (D9).
-async function follow(root, id, h, { host, runtime, label, requestedSession, child = null, io, untilMinutes = null, ownerMinutes = null, releaseEarly = () => false, detach = false }) {
+async function follow(root, id, h, { host, runtime, label, requestedSession, child = null, io, untilMinutes = null, ownerMinutes = null, releaseEarly = () => false, detach = false, offset = 0, relaunch = null }) {
   const progress = roleProgress(h, { runtime: label });
-  const pid = child?.pid ?? h.launch?.pid ?? null;
+  // Both move when a launch the model's capacity ended is resumed (0.7.30, I-153).
+  let pid = child?.pid ?? h.launch?.pid ?? null;
   const exited = () => (child ? child.exitCode !== null || child.signalCode !== null : !pid || !alive(pid));
   let exitCode = null;
   let exitSignal = null;
-  if (child) child.once('exit', (code, signal) => { exitCode = code ?? 1; exitSignal = signal ?? null; });
+  const watchExit = (c) => c.once('exit', (code, signal) => { exitCode = code ?? 1; exitSignal = signal ?? null; });
+  if (child) watchExit(child);
   let session = loadState(root, id).handoffs.find((x) => x.bundle === h.bundle)?.session ?? null;
-  let completed = false, problem = null, lastError = null, offset = 0, rest = '';
+  let completed = false, problem = null, lastError = null, rest = '';
+  // The model at capacity, as the harness reported it, with no turn completed after it (I-153), and how often resumed.
+  let capacity = false, resumes = h.launch?.resumes ?? 0, stopped = false;
   if (session) progress.start(session);
   const startedAt = Date.parse(h.launch?.requestedAt ?? '') || Date.now();
   const followedFrom = Date.now();
@@ -164,7 +231,7 @@ async function follow(root, id, h, { host, runtime, label, requestedSession, chi
   // verified (engine/process-tree.mjs, bounded); what is left is said, never waited for.
   let ending = null, stillRunning = null;
   const endTree = () => { ending ??= endProcessTree(pid).then((ended) => { if (ended.left.length) stillRunning = ended; }); };
-  const interrupted = () => { problem = 'the role launch was interrupted'; if (pid) endTree(); };
+  const interrupted = () => { stopped = true; problem = 'the role launch was interrupted'; if (pid) endTree(); };
   process.on('SIGINT', interrupted);
   process.on('SIGTERM', interrupted);
   if (releaseEarly()) interrupted();
@@ -210,6 +277,12 @@ async function follow(root, id, h, { host, runtime, label, requestedSession, chi
     const m = estimate();
     return m !== null && (followedFrom - startedAt) / 60000 > m ? m : null;
   })();
+  // When this call would hand control back to the owner (the `over` test below), or null when it follows the role to its end.
+  const returnAt = () => {
+    if (untilMinutes !== null) return followedFrom + untilMinutes * 60000;
+    const m = estimate();
+    return m !== null && m !== passedAtStart ? startedAt + m * 60000 : null;
+  };
   let returned = null;
   try {
     for (;;) {
@@ -233,11 +306,43 @@ async function follow(root, id, h, { host, runtime, label, requestedSession, chi
           if (seen.terminal.session !== undefined && (completed || seen.terminal.session !== session)) throw new Error(`${label} supplied an invalid terminal result`);
           completed = seen.terminal.success;
           if (!completed && seen.terminal.session !== undefined) problem = `${label} reported a failed turn`;
+          if (completed) capacity = false;
         }
+        if (seen.capacity) capacity = true;
         if (seen.failed) problem = `${label} reported a failed turn`;
         // Named failure (audit of role launches): four roles that finished cleanly were recorded failed, because one passing
         // error event set the failure for good. It counts only if no turn completes after it.
         if (seen.error) lastError = seen.error;
+      }
+      // 0.7.30 (I-153): the role ended because the model was at capacity: resume it here, after a growing wait, while the
+      // owner's return point allows; past it, the launch is recorded failed with kind `capacity` and `wf handoff run` resumes it.
+      if (done && !completed && capacity && !stopped && !stillRunning && relaunch) {
+        const wait = CAPACITY_WAITS_S[Math.min(resumes, CAPACITY_WAITS_S.length - 1)] * 1000;
+        const until = returnAt();
+        if (until === null || Date.now() + wait <= until) {
+          process.stderr.write(`${label} ${h.role} ${h.agent}: the model is at capacity (${lastError ?? 'reported by the harness'}); resuming ${session ? `session ${session}` : 'the launch'} ${wait ? `in ${Math.round(wait / 60000)} min` : 'now'} (resume ${resumes + 1})\n`);
+          const resumeAt = Date.now() + wait;
+          while (!stopped && Date.now() < resumeAt) await new Promise((r) => setTimeout(r, Math.min(250, resumeAt - Date.now())));
+          if (stopped) break;
+          const next = respawn(root, h, host, io, { session, requestedSession, body: relaunch.body, nonGitRoot: relaunch.nonGitRoot });
+          const failed = await spawnedOrError(next);
+          if (failed) {
+            problem = `${label} could not be resumed after the model was at capacity: ${failed}`;
+            break;
+          }
+          resumes += 1;
+          child = next;
+          pid = next.pid;
+          exitCode = null;
+          exitSignal = null;
+          watchExit(next);
+          problem = null;
+          lastError = null;
+          capacity = false;
+          append(root, id, 'agent.launch.resumed', { handoff: h.bundle, pid, out: io.out, err: io.err, reason: 'capacity', resume: resumes, session }, `engine:${runtime}`);
+          seal(append);
+          continue;
+        }
       }
       if (done || stillRunning) break;
       if (problem) { await new Promise((r) => setTimeout(r, 100)); continue; }
@@ -288,16 +393,18 @@ async function follow(root, id, h, { host, runtime, label, requestedSession, chi
   const diagnosis = !session && !success && !problem ? host.diagnoseLaunch?.({ stderr }) ?? null : null;
   // Why a launch did not succeed, in the ledger. Named failure (audit of role launches): 30 failed launches carried only
   // "exit 1"; telling an owner's stop from a model at capacity from a crash took reading transcripts by hand.
-  const failure = diagnosis ? { kind: diagnosis.kind, detail: diagnosis.detail } : success ? null : { kind: problem === 'the role launch was interrupted' ? 'interrupted' : !session ? 'no-session' : !completed && /failed turn|reported an error/.test(problem ?? '') ? 'failed-turn' : 'exited', detail: String(problem ?? (stderr.trim().split('\n').slice(-3).join(' ') || 'no completed turn')).slice(-500), ...(exitSignal ? { signal: exitSignal } : {}) };
+  // 0.7.30 (I-153): `capacity` when the harness's last word was that the model was at capacity (a resumable launch).
+  const failure = diagnosis ? { kind: diagnosis.kind, detail: diagnosis.detail } : success ? null : { kind: problem === 'the role launch was interrupted' ? 'interrupted' : capacity && !completed ? 'capacity' : !session ? 'no-session' : !completed && /failed turn|reported an error/.test(problem ?? '') ? 'failed-turn' : 'exited', detail: String((capacity && lastError) || problem || (stderr.trim().split('\n').slice(-3).join(' ') || 'no completed turn')).slice(-500), ...(exitSignal ? { signal: exitSignal } : {}), ...(resumes ? { resumes } : {}) };
   if (!['completed', 'failed'].includes(loadState(root, id).handoffs.find((x) => x.bundle === h.bundle)?.launch?.status)) {
     append(root, id, 'agent.launch.finished', { handoff: h.bundle, status: success ? 'completed' : 'failed', exitCode: code, ...(failure ? { failure } : {}) }, `engine:${runtime}`);
     seal(append);
   }
-  if (!success) process.stderr.write(`${label} role failed: ${problem ?? (stderr.trim() || 'no completed turn')}\n`);
+  if (!success) process.stderr.write(failure?.kind === 'capacity' ? `${label} ${h.role} ${h.agent} stopped: the model is at capacity (${failure.detail})${resumes ? ` after ${resumes} resume(s)` : ''}; its session is kept: \`wf handoff run --agent ${h.agent} --attempt ${id}\` resumes it when the model has room (no fresh handoff)\n` : `${label} role failed: ${problem ?? (stderr.trim() || 'no completed turn')}\n`);
   if (diagnosis) process.stderr.write(`${diagnosis.advice}\n`);
   if (success && h.role === 'reviewer' && !h.reviewGroup) await reviewerEnded(root, id, h, label);
   if (success && h.role === 'implementer') await implementerEnded(root, id, h, label);
-  if (!success && h.role === 'reviewer' && !h.reviewGroup) await reviewerPartial(root, id, h, label, failure?.kind ?? 'failed');
+  // A round the model's capacity ended is resumed, not kept as partial.
+  if (!success && h.role === 'reviewer' && !h.reviewGroup && failure?.kind !== 'capacity') await reviewerPartial(root, id, h, label, failure?.kind ?? 'failed');
   return { agent: h.agent, session, status: success ? 'completed' : 'failed', exitCode: success ? 0 : code || 1 };
 }
 
@@ -402,7 +509,8 @@ export async function waitRole(root, options) {
   // on an interrupt (independent review of 0.7.9). `wf handoff stop` records it, signalling nothing.
   if (h.launch.pid && !stillTheRole(h.launch.pid, h.launch.spawnedAt)) throw refuse(`${h.agent}'s process ended; pid ${h.launch.pid} is another process now, so it is not followed`, `record it with \`wf handoff stop --agent ${h.agent} --attempt ${state.id}\` (it signals nothing), then hand a fresh role`, { id: 'launch:pid-reused' });
   const io = { ...runnerFiles(root, state.id, h), ...(h.launch.out ? { out: h.launch.out, err: h.launch.err } : {}) };
-  return follow(root, state.id, h, { host, runtime: h.runtime, label: host.name, requestedSession: h.launch.requestedSession ?? null, io, untilMinutes: minutes });
+  const receipt = launchedBody(h);
+  return follow(root, state.id, h, { host, runtime: h.runtime, label: host.name, requestedSession: h.launch.requestedSession ?? null, io, untilMinutes: minutes, relaunch: receipt?.developerInstructions ? { body: receipt.developerInstructions, nonGitRoot: receipt.skipGitRepoCheck === true } : null });
 }
 
 // `wf handoff stop --agent X`: ends a launched role's whole process tree and, once they are observed gone, records the
