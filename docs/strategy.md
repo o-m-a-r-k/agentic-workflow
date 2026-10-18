@@ -69,7 +69,7 @@ amendment's `--reason`). The owner skill says this in goal terms.
 
 ## Course signals: the strategist as the next step (0.7.28, D44)
 
-Six signals are not the owner's to judge away. Named failure: in a three-ticket batch (47 review rounds against 11 planned)
+Seven signals are not the owner's to judge away (six from 0.7.28, `reach` from 0.7.31, D64). Named failure: in a three-ticket batch (47 review rounds against 11 planned)
 the owner wrote "converging, not calling the strategist" six times and handed no strategist while files ran two to four
 times the plan and the criteria were amended upward four times. `engine/course.mjs` names them:
 
@@ -81,11 +81,14 @@ times the plan and the criteria were amended upward four times. `engine/course.m
 | `recurring` | a cause came back after a fix (a reviewer's `sameCauseAs`, or the family of a finding already marked fixed) |
 | `regression` | the latest round's findings sit on lines the fix round before it wrote (`git blame`) |
 | `divergence`, `replan` | an implementer expects more than twice the fix the reviewers stated for what it was handed (`fix: { what, minutes }` on each finding), by more than the plan's minutes per review round, or its report asks for a re-plan |
+| `reach` | a fix round's or a planned pass's own commits (first-parent, no merges, from its handoff to its close) changed a contract surface (a file the components' `provides` or `dependsOn` contracts name) or added or changed a migration; the line names what it was handed and which handed items no reviewer stated a fix for (unbounded) |
 
 While one stands that no strategist decision answered, a next step that hands an implementer or a new code-review round
 is the strategist's handoff (`wf resume` and `wf advance` say `strategy`, with the signals and no "continue" offered beside
 them; its bundle carries them as `courseSignals`, with the `outstanding` items for a pass). A gate, an evidence review, a
-verification a reviewer owes, the acceptance and delivery are not held. Nothing is refused: a handoff made past it prints a
+verification a reviewer owes, the acceptance and delivery are not held, with one exception: the gate after a planned pass or after an
+evidence review's fixes, which no code review precedes, waits for the strategist on `reach` (nothing else looks at what that work
+reached before a gate is spent on it). Nothing is refused: a handoff made past it prints a
 note. A decision answers the signals it saw (`course` on the recorded decision), and its action drives the next step:
 `consolidate` (one planned pass for all remaining work, with an expectation), `split`, or `continue` with a new `expect`,
 which is what the course is compared with from then on. It applies to every attempt in flight; `roles.strategist: false` or

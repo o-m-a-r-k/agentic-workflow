@@ -187,13 +187,19 @@ test('the implementer\'s example report is recorded at `wf handoff close`: what 
   const named = report.left.find((l) => l.discoveredId);
   assert.ok(named, 'the example shows an item that names an issue already in the ledger');
   ok(wf(ctx.root, ['discovered', 'add', '--summary', named.what, '--severity', named.severity, '--where', named.where, '--found-by', agent, '--attempt', a.id]));
+  // 0.7.31 (I-217): the example's `premiseFailed` names an issue the implementer was handed (D2) and built nothing for.
+  const failed = report.premiseFailed?.[0];
+  assert.ok(failed, 'the example shows an item whose premise does not hold');
+  ok(wf(ctx.root, ['discovered', 'add', '--summary', 'the due date shows a clock time on the invoice page', '--severity', 'low', '--found-by', 'rev-0', '--attempt', a.id]));
+  assert.equal(failed.ref, 'D2');
   fs.mkdirSync(path.dirname(reportFileOf(ctx.root, a.id, agent)), { recursive: true });
   fs.writeFileSync(reportFileOf(ctx.root, a.id, agent), JSON.stringify(report));
-  ok(wf(ctx.root, ['handoff', 'close', '--agent', agent, '--attempt', a.id]));
+  const closed = ok(wf(ctx.root, ['handoff', 'close', '--agent', agent, '--attempt', a.id]));
+  assert.match(closed.out, new RegExp(`${agent} reports that the premise of D2 does not hold in production`));
   const state = ok(wf(ctx.root, ['resume', '--attempt', a.id, '--json'])).json();
-  assert.equal(state.discovered.length, report.left.length, 'every item it left is one discovered issue: the item that names D1 is D1, not another');
+  assert.equal(state.discovered.length, report.left.length + 1, 'every item it left is one discovered issue: the item that names D1 is D1, not another');
   assert.equal(state.discovered.filter((d) => d.summary.includes(named.what)).length, 1, 'the named issue is not recorded twice');
-  const [, first, second] = state.discovered;
+  const [, , first, second] = state.discovered;
   assert.match(first.summary, /the export page sums one page only/);
   assert.equal(first.severity, 'medium');
   assert.match(second.summary, /another tenant's rows/);
@@ -203,6 +209,9 @@ test('the implementer\'s example report is recorded at `wf handoff close`: what 
   assert.deepEqual(recorded.expect, report.expect);
   assert.equal(recorded.ran.length, report.ran.length);
   assert.equal(recorded.proofs.length, report.proofs.length);
+  assert.deepEqual(recorded.premises.map((x) => [x.ref, x.holds, x.checked.length]), report.premises.map((x) => [x.ref, x.holds, x.checked.length]));
+  assert.deepEqual(recorded.premiseFailed.map((x) => [x.ref, x.evidence.length]), [[failed.ref, failed.evidence.length]]);
+  assert.match(state.next, /premise reported failed: D2/, 'the item is routed, not handed to another pass');
 });
 
 // ---- The planner's plan ----
@@ -229,8 +238,8 @@ test('the planner\'s example plan is frozen by `wf plan`, its `hits` being the c
   const draft = path.join(p.base, 'draft-plan.yaml');
   fs.writeFileSync(draft, text.replace(/<n>/g, '0'));
   const counts = Object.fromEntries(ok(wf(p.root, ['impact', 'run', '--file', draft, '--attempt', e.id, '--json'])).json().map((q) => [q.id, q.hits]));
-  assert.deepEqual(Object.keys(counts).sort(), ['Q1', 'Q2'], 'the example defines the two queries its entries name');
-  assert.ok(counts.Q1 > 0 && counts.Q2 > 0, 'the fixture holds hits for both queries');
+  assert.deepEqual(Object.keys(counts).sort(), ['Q1', 'Q2', 'Q3'], 'the example defines the three queries its entries name');
+  assert.ok(counts.Q1 > 0 && counts.Q2 > 0 && counts.Q3 > 0, 'the fixture holds hits for every query');
   // `hits: <n>` follows `query: Qx` (or `id: Qx` in a query's own definition) in the same entry.
   const filled = text.replace(/\b(query|id): (Q\d+)([^{}]*?)hits: <n>/g, (_, key, id, between) => `${key}: ${id}${between}hits: ${counts[id]}`);
   assert.doesNotMatch(filled, /<n>/, 'every placeholder is filled');
@@ -241,6 +250,8 @@ test('the planner\'s example plan is frozen by `wf plan`, its `hits` being the c
   assert.deepEqual(state.criteria.map((c) => c.id), ['C1']);
   assert.deepEqual(state.work.map((w) => w.id), ['W1']);
   assert.ok(state.impact?.impact?.changes?.length, 'the impact map is recorded with the plan');
+  // 0.7.31 (I-217): who writes the data is surveyed beside who reads it, a query the engine re-ran.
+  assert.deepEqual(state.impact.survey.producers.map((x) => [x.id, x.hits]), [['S5', counts.Q3]]);
 
   // The numbers are the engine's: the example with a count the engine does not return is refused, so `hits` is not decoration.
   const q = ok(wf(p.root, ['entry', '--item', 'ENG-905', '--owner', 'o', '--json'])).json();

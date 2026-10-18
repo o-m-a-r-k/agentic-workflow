@@ -38,6 +38,7 @@ import { addTargets, admitPorts, portLines, targetLines } from './targets.mjs';
 import { courseLines, pastEstimates } from './signals.mjs';
 import { splitCommand } from './split.mjs';
 import { deploymentLine } from './deployment-step.mjs';
+import { productDecisionLines } from './product-decisions.mjs';
 
 const help = () => `wf ${ENGINE_VERSION} — agentic-workflow
 
@@ -79,7 +80,9 @@ Work
                                     the claim and the reason stay in the record, the delivered comment does not list it
   wf handoff planner|implementer|reviewer|tester --agent ID [--work W1] [--sweep F] [--session SID] [--runtime ${hostChoice()}]
                                     --sweep (optional): a fix handoff names a pattern sweep per family of open findings
-                                    --context "<text>" | --context-file F (planner): what the person asked, carried in its bundle
+                                    --context "<text>" | --context-file F (planner, implementer): what the person asked or what the
+                                    owner carries (a decision, what research found), recorded with the handoff and in its bundle;
+                                    a reviewer is started blind and takes none
   wf handoff wait --agent ID [--minutes N]
                                     follow a launched role again to its end; N: return after that many more minutes from now
   wf handoff stop --agent ID [--reason "why"]
@@ -145,6 +148,12 @@ Work
                                     hand a finding on code this attempt did not change to a sibling attempt of the batch
   wf scope fix-all --person-said "<their words>"
                                     the person's "fix all", recorded once: no item is asked about leaving again
+  wf decide --question "<as asked>" --recommend "<what and why>" --basis "<what was traced, with the evidence>"
+            --not-checked "<what was not>" --choice "<the option they chose>" --quote "<their words>" [--file F.json]
+                                    record a product or design decision the person made outside the engine (the panel or the
+                                    chat): a record, never a gate; their words proven theirs; shown in resume and every later bundle
+  wf decide withdraw PD1 --reason "<what changed>"
+                                    the analysis changed the picture: the decision stands withdrawn, and the person is asked again
   wf review --closure file.json     record the reviewer's closure
   wf handoff reviewer --agent ID [--single] [--reviewers 2|3] [--division FILE]
                                     automatically divide large separable flows; --single keeps one reviewer
@@ -260,6 +269,8 @@ function summary(root, s, { base = null, resume = false } = {}) {
   } catch {}
   if (s.activeHold) lines.push(`  HOLD: ${s.activeHold.reason}`);
   lines.push(...unansweredLines(s));
+  // 0.7.31 (I-217, D65): the product decisions the person made outside the engine, with what each rests on.
+  lines.push(...productDecisionLines(s));
   try {
     const all = loadLessons(root, { state: s });
     const lessonFiles = Object.keys(s.repos).flatMap((r) => {
@@ -918,6 +929,21 @@ async function dispatch(cmd, sub, positional, options) {
         return 0;
       }
       throw new WfError('usage: wf scope list|ticket|move|fixed|defer|waive|fix-all');
+    }
+    // 0.7.31 (I-217, D65): a product or design decision asked outside the engine, recorded with its basis and the person's words.
+    case 'decide': {
+      const { recordProductDecision, withdrawProductDecision } = await import('./product-decisions.mjs');
+      if (sub === 'withdraw') {
+        const id = positional[0];
+        const st = withdrawProductDecision(root, id, options);
+        print(options, `product decision ${id} withdrawn on ${st.id} ("${options.reason}"): ask the person again, with what changed, before anything is built on it\nnext: ${nextAction(root, st)}`, st.productDecisions.find((x) => x.id === id));
+        return 0;
+      }
+      if (sub) throw new WfError(`usage: wf decide --question ... --choice ... --quote ... | wf decide withdraw <PD id> --reason "<what changed>"`);
+      const r = await recordProductDecision(root, options);
+      const d = r.state.productDecisions.find((x) => x.id === r.id);
+      print(options, `product decision ${d.id} recorded on ${r.state.id}: "${d.question}" -> "${d.choice}" (their words: "${d.quote}"; ${d.via}). It rests on: ${d.basis}; not checked: ${d.notChecked}. Tell the person what you recorded, from which words; later roles are handed it as \`decisions\`, and when what you find changes the picture, withdraw it (\`wf decide withdraw ${d.id} --reason "<what changed>"\`) and ask them again\nnext: ${nextAction(root, r.state)}`, d);
+      return 0;
     }
     case 'discovered': {
       // I-18: the discovered-issue ledger. Any role records what it finds; only the owner defers (a confirmed decision).

@@ -157,6 +157,8 @@ export function reduce(entries) {
     repos: {},
     addedRepos: [],
     discovered: [],
+    // 0.7.31 (I-217, D65): product decisions the person made outside the engine (`wf decide`), with their basis and words.
+    productDecisions: [],
     implementerReports: [],
     scopeDecisions: [],
     adapterBase: null,
@@ -479,8 +481,16 @@ export function reduce(entries) {
       case 'implementer.opened':
         s.implementers.push({ handoff: d.handoff, agent: d.agent, work: d.work ?? null, heads: d.heads ?? null, openedAt: e.at, closedAt: null, outcome: null });
         break;
+      case 'product.decided':
+        s.productDecisions.push({ ...d, at: e.at, by: e.actor });
+        break;
+      case 'product.withdrawn': {
+        const x = s.productDecisions.find((y) => y.id === d.id);
+        if (x) x.withdrawn = { reason: d.reason, at: e.at, by: e.actor };
+        break;
+      }
       case 'implementer.report':
-        (s.implementerReports ??= []).push({ handoff: d.handoff, agent: d.agent, at: e.at, summary: d.summary, approach: d.approach, expect: expectOf(d.expect), ran: d.ran, proofs: d.proofs, left: d.left, ...(d.replan ? { replan: d.replan } : {}) });
+        (s.implementerReports ??= []).push({ handoff: d.handoff, agent: d.agent, at: e.at, summary: d.summary, approach: d.approach, expect: expectOf(d.expect), ran: d.ran, proofs: d.proofs, left: d.left, ...(d.replan ? { replan: d.replan } : {}), ...(d.premises ? { premises: d.premises } : {}), ...(d.premiseFailed ? { premiseFailed: d.premiseFailed } : {}) });
         break;
       case 'implementer.closed': {
         const x = s.implementers.filter((y) => y.agent === d.agent && !y.closedAt).at(-1);
@@ -718,7 +728,7 @@ export function reduce(entries) {
       // The strategist's recorded decision (engine/strategy.mjs): the action, its prediction and why it was handed.
       case 'strategy.decided': {
         const id = d.id ?? `S${s.strategy.decisions.length + 1}`;
-        s.strategy.decisions.push({ id, at: e.at, by: e.actor, action: d.action, rationale: d.rationale, prediction: d.prediction ?? null, items: d.items ?? [], split: d.split ?? null, model: d.model ?? null, strategist: d.strategist ?? null, handoff: d.handoff ?? null, handedBecause: d.handedBecause ?? null, escalation: d.escalation ?? null, roundsAtDecision: d.roundsAtDecision ?? null, signals: d.signals ?? null, ...(d.course ? { course: d.course } : {}), ...(d.expect ? { expect: d.expect } : {}) });
+        s.strategy.decisions.push({ id, at: e.at, by: e.actor, action: d.action, rationale: d.rationale, prediction: d.prediction ?? null, items: d.items ?? [], split: d.split ?? null, model: d.model ?? null, strategist: d.strategist ?? null, handoff: d.handoff ?? null, handedBecause: d.handedBecause ?? null, escalation: d.escalation ?? null, roundsAtDecision: d.roundsAtDecision ?? null, signals: d.signals ?? null, ...(d.course ? { course: d.course } : {}), ...(d.expect ? { expect: d.expect } : {}), ...(d.premise ? { premise: d.premise } : {}) });
         // 0.7.28 (I-210): a strategist's own expectation (continue with a new expectation) is what the course is compared with next.
         if (expectOf(d.expect)) {
           s.expect = { ...(s.expect ?? {}), ...expectOf(d.expect) };

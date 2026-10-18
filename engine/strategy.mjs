@@ -36,6 +36,8 @@ import { pastCourse } from './learning.mjs';
 import { performSplit, resolveSplitItems } from './split.mjs';
 import { obligationSince } from './versions.mjs';
 import { courseSignals, outstanding, unanswered } from './course.mjs';
+import { premiseOpen } from './premise.mjs';
+import { productDecisionsFor } from './product-decisions.mjs';
 import { expectOf, expectProblems, PLAN_EXPECT } from './expectations.mjs';
 import { detectOwner, hostChoice, isHost } from './hosts/index.mjs';
 import { WfError, assertSafeId, readJson, refuse, writeJson } from './util.mjs';
@@ -450,6 +452,10 @@ export function strategistHandoff(root, state, options) {
     courseSignals: unanswered(state, courseSignals(state, signals)).map(({ id, line }) => ({ id, line })),
     // 0.7.28 (I-207): what does not block and is still open, for one planned pass (`consolidate`).
     outstanding: outstanding(state),
+    // 0.7.31 (I-217, D64, D65): items whose premise an implementer reported does not hold (settled by a reviewer or the person, never
+    // planned into a pass meanwhile), and the product decisions the person made, with what each rests on.
+    premiseFailed: premiseOpen(state).length ? premiseOpen(state).map((p) => ({ ref: p.ref, kind: p.kind, reportedBy: p.agent, why: p.why, evidence: p.evidence ?? [] })) : undefined,
+    decisions: productDecisionsFor(state, 'strategist'),
     // Without the roles' shell commands (`sessions[].shell`): the bundle is kept as evidence.
     signals: { ...signals, sessions: (signals.sessions ?? []).map(({ shell, ...rest }) => rest) },
     // The comparison the owner agent made, as `wf resume` shows it: the plan's expectation, each implementer's and reviewer's
@@ -476,7 +482,7 @@ export function strategistHandoff(root, state, options) {
     // The person's rule for what may leave the delivery (D17, 2026-10-14).
     severityRule: ruleText(policyOf(cfg)),
     severityScale: { projectExamples: cfg.severity ?? null, leaving: policyOf(cfg) },
-    earlierDecisions: state.strategy.decisions.map((d) => ({ id: d.id, at: d.at, action: d.action, rationale: d.rationale, handedBecause: d.handedBecause ?? null, prediction: d.prediction, outcome: predictionStatus(state, d, signals, nowMs) })),
+    earlierDecisions: state.strategy.decisions.map((d) => ({ id: d.id, at: d.at, action: d.action, rationale: d.rationale, ...(d.premise ? { premise: d.premise } : {}), handedBecause: d.handedBecause ?? null, prediction: d.prediction, outcome: predictionStatus(state, d, signals, nowMs) })),
     invariants: cfg.invariants ? path.resolve(root, ADAPTER_DIR, cfg.invariants) : null,
     roleAppendix: appendix && fs.existsSync(appendix) ? appendix : null,
     // Outside .wf-evidence/: the strategist writes it, `wf strategy record` copies it into the evidence.
@@ -493,8 +499,9 @@ export function strategistHandoff(root, state, options) {
       options: 'action escalate: 2 or 3 of { "label": "<plain words>", "then": "<what happens next>", "settles": [{ "ref": "<open finding or discovered id this option decides>", "what": "<what it is, one plain line>" }] (optional: each is shown to the person and not asked again) }',
       recommend: 'action escalate: { "label": "<one of the labels>", "why": "<one line>" }, or { "label": null, "why": "<what it depends on>" }',
       expect: 'optional, any action: { files: <the whole change>, rounds: <from now>, minutes: <from now> }: the expectation the course is compared with from now on (`continue` with a new expectation; a consolidation states the pass it plans)',
+      premise: 'cluster and consolidate (any action may): { shared: "<the premise the findings or the pass rest on>", traced: "<what was traced: who writes the data in production, who reads it, what depends on it, what happens when it is absent>", notTraced: "<what was not>" }; a shared premise nobody traced is an analysis before a fix round',
     },
-    instructions: `You are the strategist. You were handed because the course diverged from what was predicted: \`courseSignals\` is what the engine saw that no strategist has answered (files past twice the plan, rounds past it, criteria amended upward, a cause that keeps coming back, a fix whose own lines were where the next defects were found, an implementer whose expectation is far above the fix the reviewers stated, or one that asks for a re-plan), and \`handedBecause\` what the owner saw. Your decision answers those signals and drives the next step: \`consolidate\` restates all remaining work (the open findings, \`outstanding\`, unstarted work) as one planned pass with an expectation, never scope added piecemeal; \`split\` moves part of it to a sibling attempt; \`continue\` says why the numbers are explained and states the new \`expect\` the course is compared with from now on. Read \`course\` (the expectations beside what happened), the signals and the earlier decisions; choose one action; give a prediction the engine can check. Contraction is allowed and expected when work keeps growing. A finding that blocks is never waived here (that is the owner's \`wf approve\`), and nothing the change caused leaves the delivery batch without the owner's approval. Write the closure file named in \`strategyClosureFile\`, then run \`wf strategy record --closure <that file> --attempt ${state.id}\`.${streak >= 2 ? ' Two of your earlier predictions were missed: the only action the engine accepts now is `escalate`.' : ''}`,
+    instructions: `You are the strategist. You were handed because the course diverged from what was predicted: \`courseSignals\` is what the engine saw that no strategist has answered (files past twice the plan, rounds past it, criteria amended upward, a cause that keeps coming back, a fix whose own lines were where the next defects were found, an implementer whose expectation is far above the fix the reviewers stated, one that asks for a re-plan, or a fix round or planned pass whose own commits changed a contract or a migration), and \`handedBecause\` what the owner saw. Your decision answers those signals and drives the next step: \`consolidate\` restates all remaining work (the open findings, \`outstanding\`, unstarted work) as one planned pass with an expectation, never scope added piecemeal; \`split\` moves part of it to a sibling attempt; \`continue\` says why the numbers are explained and states the new \`expect\` the course is compared with from now on. Read \`course\` (the expectations beside what happened), the signals and the earlier decisions; choose one action; give a prediction the engine can check. A \`cluster\` or \`consolidate\` names the premise the findings or the pass share (\`premise: { shared, traced, notTraced }\`): who writes the data in production, who reads it, what depends on it and what happens when it is absent, and what was not traced; a shared premise nobody traced is an analysis before a fix round, never a fix round on a finding's own framing. Contraction is allowed and expected when work keeps growing. A finding that blocks is never waived here (that is the owner's \`wf approve\`), and nothing the change caused leaves the delivery batch without the owner's approval. Write the closure file named in \`strategyClosureFile\`, then run \`wf strategy record --closure <that file> --attempt ${state.id}\`.${streak >= 2 ? ' Two of your earlier predictions were missed: the only action the engine accepts now is `escalate`.' : ''}`,
   };
   mkdirStateDirectory(path.dirname(closureFile), { recursive: true });
   const startPrompt = startPromptFor(file);
@@ -511,7 +518,16 @@ export function strategistHandoff(root, state, options) {
 
 // ---- `wf strategy record` ----
 
-const KEYS = ['strategist', 'action', 'rationale', 'prediction', 'items', 'split', 'model', 'options', 'question', 'recommend', 'expect'];
+const KEYS = ['strategist', 'action', 'rationale', 'prediction', 'items', 'split', 'model', 'options', 'question', 'recommend', 'expect', 'premise'];
+// 0.7.31 (I-217, D64): the premise a decision rests on (a cluster's or a consolidation's shared premise, what was traced and what
+// was not), recorded with it, read leniently: a string or { shared, traced, notTraced }. Never a reason to refuse a closure.
+const premiseOf = (v) => {
+  const t = (x, n) => (typeof x === 'string' && x.trim() ? x.trim().slice(0, n) : null);
+  if (typeof v === 'string') return t(v, 2000) ? { shared: t(v, 2000) } : null;
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
+  const out = { shared: t(v.shared, 1000), traced: t(v.traced, 2000), notTraced: t(v.notTraced, 2000) };
+  return out.shared || out.traced || out.notTraced ? Object.fromEntries(Object.entries(out).filter(([, x]) => x)) : null;
+};
 const TOKEN = /^[a-z0-9][a-z0-9-]{0,39}$/;
 // An option the person reads: plain words, not an identifier.
 const plainLabel = (v) => typeof v === 'string' && v.trim().length >= 3 && v.trim().length <= 80 && !TOKEN.test(v.trim()) && !/\(recommended\)\s*$/i.test(v);
@@ -706,6 +722,7 @@ export function recordStrategy(root, options) {
     // 0.7.28 (I-210): the course signals this decision answers (engine/course.mjs), and the expectation it states.
     course: courseSignals(state, signals).map((x) => x.key),
     ...(expectOf(closure.expect) ? { expect: expectOf(closure.expect) } : {}),
+    ...(premiseOf(closure.premise) ? { premise: premiseOf(closure.premise) } : {}),
     signals: { rounds: signals.rounds.map((r) => ({ n: r.n, blocking: r.blocking, findings: r.findings })), roundsSinceDecrease: signals.roundsSinceDecrease, blockingOpen: signals.blockingOpen, observationsOpen: signals.observationsOpen.length, amendments: signals.amendments, changedFiles: signals.files.changed, plannedFiles: signals.files.planned, bundleBytes: signals.bundle.bytes, wallMinutes: signals.wallMinutes},
   }, actor(options));
   return { state: loadState(root, state.id), decision: loadState(root, state.id).strategy.decisions.at(-1), split: splitResult, escalation };

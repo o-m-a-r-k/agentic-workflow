@@ -18,7 +18,9 @@ import { blockingOpen, blockingSeries, earlierBlocking, observations, placementL
 import { expectOf, readStatement } from './expectations.mjs';
 import { planPaths, scopeFiles, scopeNoise } from './scope.mjs';
 import { findHost, optional, ownerString } from './hosts/index.mjs';
-import { canonical } from './util.mjs';
+import { canonical, git } from './util.mjs';
+import { impact } from './topology.mjs';
+import { kindsOf } from './file-kinds.mjs';
 import { readLedger } from './ledger.mjs';
 
 export const SIGNALS_SCHEMA = 'agentic-workflow/signals@1';
@@ -87,6 +89,51 @@ export function filesSignal(state, cfg) {
   const planned = state.plan ? planPaths(state.plan, scopeFiles(state)).length : 0;
   return { changed, planned: planned || null, perRepo };
 }
+
+// 0.7.31 (I-217, D64): what a fix round's or a planned pass's own commits reached: a contract surface (`impact.contractsChanged`
+// for the files they changed) or a critical boundary the engine can see by path (a migration). Named failure (field): a low item
+// handed under `alsoFix`, with no fix any reviewer had stated, became a reshape of four API DTOs and a new failure path in a fix
+// round; the implementer-estimate signal could not see it (the item states no fix, and 120 minutes against the stated 60 is exactly
+// twice, not more). The first build of the planned work is not counted: its reach is the plan's. Each implementer handed as a fix
+// round or a pass carries what it was handed (`fixes` on its handoff); its own commits are the first-parent, non-merge commits
+// from its handoff's heads to its close (or to HEAD while it works), so a base merged in is not counted as its reach.
+const isMigration = (f) => kindsOf(f).has('migration');
+export function reachSignal(state, cfg) {
+  const out = [];
+  for (const h of (state.handoffs ?? []).filter((x) => x.role === 'implementer' && x.fixes)) {
+    const impl = (state.implementers ?? []).find((x) => x.handoff === idOf(h.bundle));
+    if (!impl || impl.outcome === 'stopped') continue;
+    const changed = {};
+    for (const [name, r] of Object.entries(state.repos ?? {})) {
+      const from = String(impl.heads?.[name] ?? '').split('+')[0];
+      const to = impl.closedAt ? String(impl.closedHeads?.[name] ?? '').split('+')[0] : 'HEAD';
+      if (!from || !to || from === to || !r.worktree || !fs.existsSync(r.worktree)) continue;
+      let files = [];
+      try {
+        files = [...new Set(git(r.worktree, ['log', '--first-parent', '--no-merges', '--format=', '--name-only', `${from}..${to}`], { allowFail: true }).split('\n').map((x) => x.trim()).filter(Boolean))];
+      } catch {}
+      if (files.length) changed[name] = files;
+    }
+    if (!Object.keys(changed).length) continue;
+    let contracts = [];
+    try {
+      contracts = cfg ? [...new Set(impact(cfg, changed).contractsChanged.map((c) => c.contract))] : [];
+    } catch {}
+    const migrations = Object.values(changed).flat().filter(isMigration);
+    if (!contracts.length && !migrations.length) continue;
+    out.push({ handoff: h.bundle, agent: h.agent, kind: h.fixes.pass ? 'pass' : 'fix', contracts, migrations, fixes: h.fixes, at: impl.closedAt ?? null });
+  }
+  return out;
+}
+
+// What the owner and the strategist read about one: what it changed, what it was handed and which handed items no reviewer stated
+// a fix for (their size bounded by nobody).
+export const reachLine = (r) => {
+  const what = [r.contracts.length ? `changed the contract ${r.contracts.join(', ')}` : '', r.migrations.length ? `added or changed a migration (${r.migrations.join(', ')})` : ''].filter(Boolean).join(' and ');
+  const handed = [...(r.fixes.repair ?? []), ...(r.fixes.alsoFix ?? []), ...(r.fixes.pass ?? [])];
+  const unbounded = r.fixes.unbounded ?? [];
+  return `the ${r.kind === 'pass' ? 'planned pass' : 'fix round'} of implementer ${r.agent} ${what}, handed ${handed.join(', ') || 'nothing named'}${unbounded.length ? `, with ${unbounded.length} handed item${unbounded.length > 1 ? 's' : ''} with no stated fix (unbounded): ${unbounded.join(', ')}` : ''}: a contract change, a new failure path or a migration is a re-plan, never built in a fix round or a pass; the strategist decides whether it stands (\`continue\`), is re-planned (\`consolidate\`) or goes back`;
+};
 
 function bundleSignal(state) {
   const h = state.handoffs.filter((x) => x.role === 'reviewer').at(-1);
@@ -295,6 +342,8 @@ export function computeSignals(root, state, { nowMs = Date.now(), cfg = null, ho
       return { at: last.at, amendment: last.amendment, minutes: round1(Math.max(0, (end - Date.parse(last.at)) / 60000)), rounds: (state.reviews ?? []).filter((r) => r.at > last.at).length };
     })(),
     files: filesSignal(state, cfg),
+    // 0.7.31 (I-217, D64): what fix rounds and planned passes reached (a contract, a migration).
+    reach: reachSignal(state, cfg),
     bundle: bundleSignal(state),
     implementers: implementersSignal(state, nowMs, sessions, home),
     longestQuietMinutes: longestQuiet(root, state, nowMs),
@@ -352,6 +401,7 @@ export function courseLines(sig, { predictions = [], shell = true } = {}) {
     `${line('minutes since admission', sig.wallMinutes === null ? 'n/a' : Math.round(sig.wallMinutes), total.minutes, '', sig.replan ? null : 'minutes')}${typeof sig.longestQuietMinutes === 'number' && sig.longestQuietMinutes >= 1 ? `; the longest stretch with nothing recorded was ${Math.round(sig.longestQuietMinutes)} min` : ''}`,
   ];
   if (sig.replan) out.push(`since the re-plan (amendment ${sig.replan.amendment}): ${Math.round(sig.replan.minutes)} minutes and ${sig.replan.rounds} review round(s); it expected ${e.minutes ?? 'n/a'} minutes and ${e.rounds ?? 'n/a'} round(s)${past(sig.replan.minutes, e.minutes) || past(sig.replan.rounds, e.rounds)}`);
+  for (const r of sig.reach ?? []) out.push(reachLine(r));
   for (const r of sig.recurringCauses ?? []) out.push(recurrenceLine(r));
   for (const r of sig.familyRecurrences ?? []) out.push(familyRecurrenceLine(r));
   // A pattern found one place at a time is a class to fix in one sweep (lessons of one attempt: about 35 of 67 discovered

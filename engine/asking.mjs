@@ -107,6 +107,13 @@ export function composeAsk(ask, frame, choices, { items = [], itemNoun = 'proble
   return { plain, labels, then: frame.then ?? null, recommend: pick ? { choice: pick, why: text(ask.recommend.why) } : null, context: text(ask.context), ...(tech ? { technical: tech } : {}), ...(items.length ? { items: Object.fromEntries(items.map((x) => [x.ref, { what: text(x.what), ...(x.fix ? { fix: text(x.fix) } : {}) }])) } : {}) };
 }
 
+// 0.7.31 (I-217, D65): a product or design question the owner agent asked the person outside the engine (`wf decide`), as the person
+// read it: the question, the recommendation, what it rests on (what was traced and the evidence) and what was not checked, in the
+// shape every question takes (D29), so the record shows what the person said yes to and on what ground.
+export function productAsk({ question, recommend, basis, notChecked }) {
+  return [sentence(question), `Recommended: ${sentence(recommend)}`, `What it rests on: ${sentence(basis)}`, `Not checked: ${sentence(notChecked)}`].join(' ');
+}
+
 // The refusal that asks the agent to write the question first: what the person will be asked (the engine's sentence and
 // choices), the facts behind it, and what is missing.
 export function askFirst(what, frame, choices, problems, facts, { items = [] } = {}) {

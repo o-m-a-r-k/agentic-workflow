@@ -22,7 +22,11 @@ export const IMPACT_DEFAULTS = { requiredFor: ['full'], maxFileBytes: 2 * 1024 *
 // One row per affected component: each column is a behaviour the change can break. A value may be `none` or `n/a`, but
 // it must be stated: a column left out is a behaviour nobody looked at.
 export const COMPONENT_COLUMNS = ['endpoint', 'limit', 'writePaths', 'paging', 'empty', 'loading', 'error', 'permission', 'mobile', 'rtl', 'publicApi', 'sorting', 'reorder', 'clientTotals', 'rawEnums', 'tests'];
-const SURVEY_LISTS = ['components', 'consumers', 'flows', 'patterns'];
+// 0.7.31 (I-217, D64): `producers`, who writes the data the change is about (in production paths), beside who reads it. Named
+// failure (field): a fix for how a field was shown was designed from its readers alone; nothing in production wrote the field, and
+// nobody had looked. A producer is a query the engine re-runs, like every survey entry, and may say what happens when the data is
+// absent (`absent`); a producer query with no hit is that fact on record, not an inference.
+const SURVEY_LISTS = ['components', 'consumers', 'producers', 'flows', 'patterns'];
 export const DESIGN_KEYS = ['plan', 'summary', 'contract', 'anchors', 'tests', 'doNotRun', 'externalServices', 'agentSplit', 'criteria', 'work'];
 const KINDS = ['literal', 'regex'];
 
@@ -283,7 +287,7 @@ const hasFile = (r, file) => r.files.includes(file) || r.files.some((f) => f.sli
 function validateSurvey(survey, results, known, problems) {
   const ids = new Set();
   if (!survey || typeof survey !== 'object' || Array.isArray(survey)) {
-    problems.push('`survey` must be a mapping { queries, components, consumers, flows, patterns }');
+    problems.push('`survey` must be a mapping { queries, components, consumers, producers, flows, patterns }');
     return ids;
   }
   for (const k of SURVEY_LISTS) if (survey[k] !== undefined && !Array.isArray(survey[k])) problems.push(`survey.${k} must be a list`);
@@ -306,7 +310,7 @@ function validateSurvey(survey, results, known, problems) {
           if (!text(e?.flow)) problems.push(`${where}: needs \`flow\` (the end-to-end path)`);
           if (!text(e?.failure)) problems.push(`${where}: needs \`failure\` (what the user sees when a step of the flow fails)`);
         }
-        if (k === 'consumers' && !text(e?.symbol)) problems.push(`${where}: needs \`symbol\``);
+        if (['consumers', 'producers'].includes(k) && !text(e?.symbol)) problems.push(`${where}: needs \`symbol\``);
       }
     });
   }

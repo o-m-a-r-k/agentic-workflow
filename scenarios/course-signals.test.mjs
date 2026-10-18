@@ -106,7 +106,7 @@ test('an implementer whose expectation is far above the fix the reviewer stated,
   const b = JSON.parse(fs.readFileSync(h.bundle, 'utf8'));
   assert.deepEqual(b.repair[0].findings[0].fix, { what: 'compute the fingerprint before the provider call', minutes: 20 });
   assert.match(b.instructions, /Fix with the smallest change that removes the assumption, wherever it lives/);
-  assert.match(b.instructions, /A fix that needs a migration, a new state or a new endpoint is not yours to build in a fix round: it is a re-plan request/);
+  assert.match(b.instructions, /A fix that needs a migration, a new state, a new endpoint, a contract change \(a DTO, a route, an error code\) or a new failure path is not yours to build in a fix round or a planned pass: it is a re-plan request/);
   // Review of 0.7.28 (L4a): past twice the stated fix but within one round of the plan (600 min over 6 rounds) is two estimates'
   // noise, not a redesign: no signal.
   writeReport(p.root, p.id, 'i1', { approach: 'move the fingerprint up', expect: { minutes: 41 } });

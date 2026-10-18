@@ -16,8 +16,9 @@ import { implementerOf } from './introduced.mjs';
 import { familyRecurrenceLine, familyRecurrences, recurrenceLine, recurringCauses } from './causes.mjs';
 import { dispositionOf, findingSummary, observations, placementLevel, recordedRoundsOf } from './review-policy.mjs';
 import { openDiscovered, discoveredLevel } from './discovered.mjs';
+import { premiseOpen } from './premise.mjs';
 import { readStatement } from './expectations.mjs';
-import { handedRounds } from './signals.mjs';
+import { handedRounds, reachLine } from './signals.mjs';
 import path from 'node:path';
 
 const idOf = (bundle) => (bundle ? path.basename(String(bundle), '.json') : null);
@@ -101,6 +102,12 @@ export function courseSignals(state, sig) {
     if (typeof stated === 'number' && stated > 0 && typeof rep.minutes === 'number' && rep.minutes > TWICE * stated && rep.minutes - stated > roundMinutes(state)) out.push({ id: 'divergence', key: `divergence:${h.bundle}`, at: rep.at ?? h.at, line: `implementer ${h.agent} expects ${rep.minutes} min for findings whose reviewers stated a fix of ${stated} min in all (${(h.statedFix.findings ?? []).map((x) => `${x.ref}: ${x.what}`).join('; ')}): an approach far larger than the fix asked for` });
     if (rep.replan) out.push({ id: 'replan', key: `replan:${h.bundle}`, at: rep.at ?? h.at, line: `implementer ${h.agent} asks for a re-plan: ${rep.replan.why}${rep.replan.needs?.length ? ` (it needs ${rep.replan.needs.join(', ')})` : ''}` });
   }
+  // 0.7.31 (I-217, D64): a fix round or a planned pass whose own commits changed a contract surface or a migration (measured in
+  // engine/signals.mjs `reachSignal`). Named failure (field): a low item with no stated fix became four reshaped API DTOs and a new
+  // failure path in a fix round; the estimate signal could not see it (no stated fix for the item; 120 minutes against 60 is exactly
+  // twice). The factor stays "more than twice": the person's, and the overrun came from the unbounded item, which no factor on the
+  // stated fix could bound; this signal watches what the work did instead. Answered by a strategist decision that saw it (by key).
+  for (const r of sig?.reach ?? []) out.push({ id: 'reach', key: `reach:${r.handoff}`, at: null, line: reachLine(r) });
   return out;
 }
 
@@ -143,8 +150,11 @@ function holding(state, w) {
 // that happens anyway, never a round of its own.
 // 0.7.30 (I-173, D51): `bookkeeping` adds the open bookkeeping entries (an implementer's lint or fixture fixes) for a fix round's
 // `alsoFix`: the implementer makes them. The course leaves them out: they open no pass and keep no delivery waiting.
+// 0.7.31 (I-217, D64): an item whose premise an implementer reported does not hold in production is no pass's and no fix round's
+// until a reviewer or the person settles it (engine/premise.mjs): handing it again would build what the trace showed has no reason
+// to exist. It still keeps the delivery waiting.
 export function outstanding(state, { bookkeeping = false } = {}) {
-  const held = new Set(passItemsOf(state).filter((w) => holding(state, w)).flatMap((w) => w.items));
+  const held = new Set([...passItemsOf(state).filter((w) => holding(state, w)).flatMap((w) => w.items), ...premiseOpen(state).map((p) => p.ref)]);
   // A finding already recorded fixed waits for a reviewer to verify it, not for another pass.
   const found = state.review ? observations(state).filter((f) => !dispositionOf(state, f.ref)).map((f) => ({ ref: f.ref, kind: 'finding', level: placementLevel(state, f), severity: f.severity ?? null, family: f.family ?? null, summary: String(f.summary ?? '').slice(0, 300), where: f.evidence ?? null })) : [];
   const issues = openDiscovered(state).filter((d) => (bookkeeping || d.kind !== 'bookkeeping') && !d.claim).map((d) => ({ ref: d.id, kind: 'discovered', level: discoveredLevel(d), severity: d.severity ?? null, family: d.family ?? null, summary: String(d.summary ?? '').slice(0, 300), where: d.where ?? null, blockedBy: d.blockedBy ?? null }));

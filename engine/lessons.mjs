@@ -18,6 +18,7 @@ import { acceptedTreeStands } from './attempt.mjs';
 import { append, listAttempts, loadState, readLedger } from './ledger.mjs';
 import { formatLesson, lessonStyle } from './lessons-format.mjs';
 import { componentsOf } from './topology.mjs';
+import { FILE_KINDS, kindsOf } from './file-kinds.mjs';
 import { WfError, YAML, git, matchesAny, now, refuse } from './util.mjs';
 import { obligationSince } from './versions.mjs';
 import { recordedRoundsOf, refOf } from './review-policy.mjs';
@@ -525,21 +526,8 @@ function ticketText(state) {
 
 const label = (l) => (l.status === 'enforced' ? `enforced by ${l.mechanism?.kind}${l.mechanism?.ref ? ` (${l.mechanism.ref})` : ''}` : 'advisory (proposed: no mechanism enforces it yet)');
 
-// File kinds a lesson may declare (`kinds: [ui, test]`), from the file's path alone. A file can be of several kinds.
-export const FILE_KINDS = ['ui', 'test', 'migration', 'docs', 'script', 'config', 'source'];
-export function kindsOf(file) {
-  const f = String(file).toLowerCase();
-  const base = f.split('/').at(-1);
-  const out = new Set();
-  if (/\.(test|spec|e2e)\.[a-z0-9]+$/.test(f) || /(^|\/)(__tests__|tests?|e2e|specs?|fixtures?)\//.test(f)) out.add('test');
-  if (/(^|\/)migrations?\//.test(f) || /\.migration\.[a-z0-9]+$/.test(f)) out.add('migration');
-  if (/\.(md|mdx|rst|adoc|txt)$/.test(f) || /(^|\/)docs?\//.test(f)) out.add('docs');
-  if (/\.(sh|bash|zsh|ps1)$/.test(f) || /(^|\/)(scripts?|bin)\//.test(f)) out.add('script');
-  if (/^(dockerfile.*|.*\.dockerfile|(docker-)?compose[^/]*\.ya?ml|package\.json|tsconfig[^/]*\.json|\.env.*|makefile)$/.test(base) || /\.(ya?ml|toml|ini|conf)$/.test(f)) out.add('config');
-  if (/\.(tsx|jsx|vue|svelte|css|scss|sass|less|html?)$/.test(f) || /(^|\/)(components?|pages|views|app|styles?)\//.test(f) && /\.(tsx|jsx|ts|js)$/.test(f)) out.add('ui');
-  if (/\.(ts|js|mjs|cjs|py|go|rb|java|kt|rs|cs|php|swift|scala|ex|exs)$/.test(f) && !out.has('test') && !out.has('migration')) out.add('source');
-  return out;
-}
+// File kinds a lesson may declare (`kinds: [ui, test]`): engine/file-kinds.mjs (0.7.31: the course reads a migration from it too).
+export { FILE_KINDS, kindsOf };
 
 // What a lesson declares about where it applies, in words.
 const declaredScope = (l) => [l.repo ? `repo ${l.repo}` : null, l.components.length ? `components ${l.components.join(', ')}` : null, l.paths.length ? `paths ${l.paths.join(', ')}` : null, l.kinds.length ? `kinds ${l.kinds.join(', ')}` : null].filter(Boolean);

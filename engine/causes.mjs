@@ -33,7 +33,7 @@ function ledgerOf(state) {
     }
   });
   rounds.forEach((r, index) => {
-    for (const p of r.closure?.priorFindings ?? []) by.get(refOf(p?.round, p?.id))?.verdicts.push({ index, round: reviewerOf(r), status: p.status, evidence: p.evidence ?? null });
+    for (const p of r.closure?.priorFindings ?? []) by.get(refOf(p?.round, p?.id))?.verdicts.push({ index, round: reviewerOf(r), status: p.status, evidence: p.evidence ?? null, ...(text(p.premise) ? { premise: p.premise } : {}) });
   });
   return by;
 }
@@ -168,6 +168,7 @@ export function findingHistory(state, { fixes = [] } = {}) {
     const verified = [...e.verdicts].reverse().find((v) => settled({ status: v.status }) && text(v.evidence));
     // 0.7.30 (I-166, D51): a finding a later round found still open shows that round's evidence too (only a settled one did).
     const latest = e.verdicts.at(-1) && !settled({ status: e.verdicts.at(-1).status }) && text(e.verdicts.at(-1).evidence) ? e.verdicts.at(-1) : null;
+    const premised = [...e.verdicts].reverse().find((v) => text(v.premise)) ?? null;
     return {
       ref: e.ref,
       ...(e.family ? { family: e.family } : {}),
@@ -177,6 +178,8 @@ export function findingHistory(state, { fixes = [] } = {}) {
       ...(fix ? { fix: { repo: fix.repo ?? null, commit: String(fix.commit ?? '').slice(0, 10) } } : {}),
       ...(verified && status !== 'open' ? { verifiedBy: verified.round, evidence: clip(verified.evidence, 160) } : {}),
       ...(latest && ['open', 'claimed-fixed', 'reopened'].includes(status) ? { stillOpen: { by: latest.round, evidence: clip(latest.evidence, 160) } } : {}),
+      // 0.7.31 (I-217, D64): what the latest reviewer that judged the premise behind the fix found (`premise` on its verdict).
+      ...(premised ? { premise: clip(premised.premise, 240), premiseBy: premised.round } : {}),
       ...(label.has(e.ref) ? { cause: label.get(e.ref) } : {}),
       ...(e.sameCauseAs.length ? { sameCauseAs: e.sameCauseAs } : {}),
       // A label match with an earlier finding marked fixed: a possible shared cause, apart from a confirmed `cause`.

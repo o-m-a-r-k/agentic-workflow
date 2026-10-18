@@ -23,7 +23,7 @@ const LEVELS = ['high', 'medium', 'low'];
 // other attempts (an attempt id is `<item>.<n>`), the ticket prefixes those items and this one use, and the adapter's
 // `tracker.itemPattern` (which `wf entry` enforces with or without a tracker). The engine's own numbers (`QF-<n>` for a quick fix without a ticket, a batch's) are ids, never
 // ticket prefixes.
-function projectItemIds(root, state) {
+export function projectItemIds(root, state) {
   let cfg = null;
   try {
     cfg = loadConfig(root);

@@ -246,7 +246,9 @@ test('I-127: a planner after an upgrade knows why, its plan replaces the analysi
   assert.equal(s.plansFrozen, 2);
   ok(wf(f.root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
   assert.match(wf(f.root, ['plan', '--file', criteriaFile(f.base), '--attempt', e.id]).err, /criteria are already frozen/, 'once implementation started, never again');
-  assert.match(wf(f.root, ['handoff', 'implementer', '--agent', 'i2', '--attempt', e.id, '--context', 'x']).err, /--context is for a planner handoff/);
+  // 0.7.31 (I-217, D66): an implementer takes the owner's context too, recorded with its handoff and in its bundle.
+  const i2 = ok(wf(f.root, ['handoff', 'implementer', '--agent', 'i2', '--attempt', e.id, '--context', 'x', '--json'])).json();
+  assert.equal(JSON.parse(fs.readFileSync(i2.bundle, 'utf8')).ownerContext, 'x');
 });
 
 // Named failure (I-120): after an upgrade, once implementation had started, the plan's "no code, no delivery" narrative stayed
