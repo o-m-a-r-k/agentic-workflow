@@ -143,7 +143,17 @@ function itemFiles(state, ref) {
   add(f.file); add(f.evidence); add(f.location); add(f.where); add(f.fix?.what);
   return { files: out, dirs };
 }
-const touches = (cfg, located, repo, file) => located.some((l) => l === file || l === rootOf(cfg, repo, file) || (cfg?.repos ?? []).some((r) => rootOf(cfg, r.name, l) === rootOf(cfg, repo, file)));
+// Fifth review of 0.7.31: an entry written `<repo>:<path>` (as a query's files are) names that repo's file only; the prefix was
+// stripped, so a portal file explained the api file of the same path.
+const qualified = (cfg, l) => {
+  const m = /^([\w.-]+):(.+)$/.exec(l);
+  return m && (cfg?.repos ?? []).some((r) => r.name === m[1]) ? { repo: m[1], file: m[2] } : null;
+};
+const touches = (cfg, located, repo, file) => located.some((l) => {
+  const q = qualified(cfg, l);
+  if (q) return q.repo === repo && q.file === file;
+  return l === file || l === rootOf(cfg, repo, file) || (cfg?.repos ?? []).some((r) => rootOf(cfg, r.name, l) === rootOf(cfg, repo, file));
+});
 // The amendments that restated this handoff's work item after its last build and before this handoff, each with its words, the
 // contract scope it states and the changes of its impact addendum that are for the item (`planned`: each with its kind and the
 // files its contract queries found). Fourth review of 0.7.31: "its last build" ends when that build's implementer closed (an
@@ -158,7 +168,7 @@ function amendedSinceLastBuild(state, h) {
     const results = { ...(state.impact?.results ?? {}), ...Object.assign({}, ...(state.impact?.addenda ?? []).map((x) => x.results ?? {})) };
     const forItem = (Array.isArray(addendum?.changes) ? addendum.changes : []).filter((c) => [c.work].flat().includes(h.work) || [c.cites].flat().some((x) => (a.criteria ?? w?.criteria ?? []).includes(x)));
     // The files the change's own queries found (its contracts, consumers, flows and suites), and any it lists itself.
-    const filesOf = (c) => [...[c.contracts].flat(), c.consumers, ...[c.flows].flat(), ...[c.suites].flat()].filter((x) => x && typeof x === 'object').flatMap((x) => [...(Array.isArray(x.files) ? x.files : []), ...(results[x.query]?.files ?? [])]).map((f) => String(f).replace(/^[\w.-]+:/, ''));
+    const filesOf = (c) => [...[c.contracts].flat(), c.consumers, ...[c.flows].flat(), ...[c.suites].flat()].filter((x) => x && typeof x === 'object').flatMap((x) => [...(Array.isArray(x.files) ? x.files : []), ...(results[x.query]?.files ?? [])]).map(String);
     return { ...a, scope: state.criteriaAmendments?.[a.amendment - 1]?.scope ?? null, planned: forItem.map((c) => ({ kind: c.kind ?? null, files: filesOf(c) })) };
   });
 }
@@ -167,15 +177,25 @@ function amendedSinceLastBuild(state, h) {
 // distinctive words with a name (`PUT /api/v1/resource-management/demands/:demandId/required-skills` and
 // `resource-management/controllers/demand-required-skill.controller.ts`); the names were recorded and only their count was read,
 // so one amendment's endpoint explained another endpoint's controller. A scope that states only counts explains every contract file.
+// Fifth review of 0.7.31: whether a changed file is the spec its own component provides (the component whose repo and package hold
+// it), never another component's spec that happens to end the same way.
+function ownSpec(cfg, f) {
+  const root = rootOf(cfg, f.repo, f.file);
+  const pkg = (c) => String(c.package ?? '.').replace(/^\.\/?$/, '').replace(/\/$/, '');
+  const holds = (c) => c.repo === f.repo && (!pkg(c) || f.file === pkg(c) || f.file.startsWith(`${pkg(c)}/`));
+  const own = (cfg?.components ?? []).filter(holds).sort((a, b) => pkg(b).length - pkg(a).length)[0];
+  return own && (own.provides ?? []).some((p) => p.spec && rootOf(cfg, f.repo, [pkg(own), p.spec].filter(Boolean).join('/')) === root) ? own.id : null;
+}
 const GENERIC = new Set(['api', 'v1', 'v2', 'v3', 'src', 'http', 'https', 'get', 'put', 'post', 'patch', 'delete', 'controller', 'dto', 'ts', 'js', 'mjs', 'json', 'yaml', 'yml', 'response', 'request', 'id', 'existing', 'the', 'and', 'for', 'with', 'index', 'module', 'service', 'lib', 'app', 'route', 'endpoint', 'meaning']);
 const words = (t) => new Set(String(t ?? '').replace(/([a-z0-9])([A-Z])/g, '$1 $2').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean).map((x) => (x.length > 3 && x.endsWith('s') ? x.slice(0, -1) : x)).filter((x) => x.length > 1 && !GENERIC.has(x)));
 function scopeExplains(cfg, a, f) {
   if (!(Number(a.scope?.endpoints) > 0 || Number(a.scope?.errorCodes) > 0)) return false;
   const names = a.scope?.names ?? [];
   if (!names.length) return true;
-  const isSpec = (cfg?.components ?? []).some((c) => (c.provides ?? []).some((p) => p.spec && rootOf(cfg, f.repo, f.file).endsWith(p.spec)));
-  if (isSpec) return true;
-  const fw = words(f.file);
+  if (ownSpec(cfg, f)) return true;
+  // Fifth review of 0.7.31: the words are the file's own name, never its folders (a two-word module folder, `resource-management`,
+  // supplied both words, so one endpoint of a module explained 109 of a project's 415 contract files).
+  const fw = words(path.basename(f.file));
   return names.some((n) => { const nw = words(n); return [...fw].filter((x) => nw.has(x)).length >= 2; });
 }
 // The implementer handoffs open at the same time as this one in a repo it changed (their commits cannot be told apart).
@@ -239,7 +259,7 @@ export function reachOf(state, cfg, h) {
   const planned = amended.flatMap((a) => a.planned);
   const plannedFiles = planned.flatMap((c) => c.files);
   const plannedMigration = planned.some((c) => /migration/i.test(String(c.kind ?? '')));
-  const spec = (c, f) => (cfg?.components ?? []).some((x) => x.id === c && (x.provides ?? []).some((p) => p.spec && rootOf(cfg, f.repo, f.file).endsWith(p.spec)));
+  const spec = (c, f) => ownSpec(cfg, f) === c;
   // What explains each contract file, and through which round (this one, or one open beside it): kept for the measurement.
   const reasonOf = (f) => {
     for (const x of sources) {

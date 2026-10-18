@@ -12,7 +12,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { closureFile, commitIn, goodClosure, ok, planDoc, sh, singleRepoProject, wf, writeReport } from './helpers.mjs';
+import { closureFile, commitIn, goodClosure, makeRepo, ok, planDoc, sh, singleRepoProject, tmp, wf, writeReport } from './helpers.mjs';
+import { reachOf } from '../engine/signals.mjs';
+import { parseConfig } from '../engine/config.mjs';
 
 const steps = [{ id: 'unit', repo: 'app', run: 'true' }];
 const LINES = 'l1\nl2\nl3\nl4\nl5\nl6\n';
@@ -562,8 +564,8 @@ test('fourth review of 0.7.31: an amendment that lands while the item\'s last bu
 
 test('fourth review of 0.7.31: an amendment\'s stated endpoints explain only the contract files they name', () => {
   const DTO = { components: [...API.components, { id: 'web', kind: 'web', repo: 'app', dependsOn: [{ component: 'api', via: 'http', contract: 'src/**/dto/**' }] }] };
-  const run = (name, endpoint) => {
-    const p = singleRepoProject(name, { gate: { steps }, ...DTO }, { 'src/a.txt': LINES, 'src/b.txt': LINES, 'openapi.json': '{"paths":{}}\n', 'src/billing/dto/due.dto.ts': 'export class DueDto {}\n' });
+  const run = (name, endpoint, dto = 'src/billing/dto/due-date.dto.ts') => {
+    const p = singleRepoProject(name, { gate: { steps }, ...DTO }, { 'src/a.txt': LINES, 'src/b.txt': LINES, 'openapi.json': '{"paths":{}}\n', [dto]: 'export class DueDto {}\n' });
     const e = ok(wf(p.root, ['entry', '--item', 'PM-4', '--owner', 'o', '--json'])).json();
     ok(wf(p.root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id]));
     const plan = path.join(p.base, 'plan.json');
@@ -581,10 +583,53 @@ test('fourth review of 0.7.31: an amendment\'s stated endpoints explain only the
     record(q, goodClosure('r1', { criteria: [{ id: 'C1', evidence: { kind: 'output', ref: 'log 1' } }, { id: 'C2', evidence: { kind: 'output', ref: 'log 2' } }] }));
     amendW(q, { work: restated, scope: { endpoints: [endpoint] }, impact: { unchanged: 'the same module' } });
     ok(wf(q.root, ['handoff', 'implementer', '--agent', 'iB', '--work', 'W2', '--attempt', q.id]));
-    commitIn(q.wt, { 'src/billing/dto/due.dto.ts': 'export class DueDto { dueDate!: string }\n' }, 'D1');
+    commitIn(q.wt, { [dto]: 'export class DueDto { dueDate!: string }\n' }, 'D1');
     ok(wf(q.root, ['handoff', 'close', '--agent', 'iB', '--attempt', q.id]));
     return ok(wf(q.root, ['signals', '--attempt', q.id, '--json'])).json().reach.map((x) => x.contracts);
   };
   assert.deepEqual(run('pm-scope-named', 'PATCH /api/v1/billing/due-dates'), [], 'the stated endpoint names the DTO it changed');
-  assert.deepEqual(run('pm-scope-other', 'GET /api/v1/invoices/uninvoiced'), [['src/billing/dto/due.dto.ts']], 'another endpoint explains nothing here');
+  assert.deepEqual(run('pm-scope-other', 'GET /api/v1/invoices/uninvoiced'), [['src/billing/dto/due-date.dto.ts']], 'another endpoint explains nothing here');
+  // Fifth review of 0.7.31: the words are the file's own name, not its folders: a two-word module folder supplied both words, so one
+  // endpoint of a module explained every contract file in it.
+  assert.deepEqual(run('pm-scope-module', 'PUT /api/v1/resource-management/demands/:demandId/required-skills', 'src/resource-management/dto/resource-allocation.dto.ts'), [['src/resource-management/dto/resource-allocation.dto.ts']]);
+});
+
+// Fifth review of 0.7.31: what explains a file is read with its repo, and a spec is a component's own. Read through `reachOf` on two
+// real repos and a recorded state (a two-repo attempt with an addendum and an amendment's scope).
+function twoRepoReach({ planned = [], scope = null, changed, components }) {
+  const base = tmp('pm-two-repos');
+  const api = makeRepo(path.join(base, 'api'), { 'src/a.txt': LINES }).dir;
+  const portal = makeRepo(path.join(base, 'portal'), { 'src/a.txt': LINES }).dir;
+  const head = (dir) => sh(dir, 'git rev-parse HEAD').trim();
+  const from = { api: head(api), portal: head(portal) };
+  commitIn(api, changed, 'the re-handoff');
+  const cfg = parseConfig(JSON.stringify({ version: 1, enabled: true, name: 'two', repos: [{ name: 'api', path: 'api', base: 'main' }, { name: 'portal', path: 'portal', base: 'main' }], components }), 'two.yaml');
+  const at = (s) => `2026-01-01T00:00:${String(s).padStart(2, '0')}.000Z`;
+  const state = {
+    repos: { api: { worktree: api, base: from.api }, portal: { worktree: portal, base: from.portal } },
+    work: [{ id: 'W2', criteria: ['C2'], repos: ['api', 'portal'] }],
+    handoffs: [{ role: 'implementer', agent: 'iB', bundle: '/h/01-implementer.json', at: at(1), work: 'W2' }, { role: 'implementer', agent: 'iB', bundle: '/h/02-implementer.json', at: at(5), work: 'W2', fixes: { named: ['D1'], unbounded: ['D1'] } }],
+    implementers: [{ handoff: '01-implementer', agent: 'iB', work: 'W2', heads: from, closedHeads: from, openedAt: at(1), closedAt: at(2), outcome: 'done' }, { handoff: '02-implementer', agent: 'iB', work: 'W2', heads: from, closedHeads: { api: head(api), portal: from.portal }, openedAt: at(5), closedAt: at(9), outcome: 'done' }],
+    workAmended: { W2: [{ at: at(3), amendment: 1, why: 'fix D1', criteria: ['C2'] }] },
+    criteriaAmendments: [{ at: at(3), scope }],
+    impact: { results: {}, addenda: planned.length ? [{ amendment: 1, changes: planned, results: {} }] : [] },
+    discovered: [{ id: 'D1', status: 'open', where: 'portal/src/a.txt:1' }],
+    reviews: [],
+  };
+  return reachOf(state, cfg, state.handoffs[1]);
+}
+
+test('fifth review of 0.7.31: a planned file is read with its repo, and a spec explains a stated endpoint only for its own component', () => {
+  const dto = [{ id: 'api', kind: 'service', repo: 'api', provides: [{ contract: 'http', spec: 'openapi.json' }] }, { id: 'portal', kind: 'web', repo: 'portal', dependsOn: [{ component: 'api', via: 'http', contract: 'api/src/**/dto/**' }] }];
+  // The addendum's change for W2 found portal's file of the same path: it plans nothing in the api.
+  const portalOnly = twoRepoReach({ components: dto, changed: { 'src/shared/dto/due.dto.ts': 'export class DueDto {}\n' }, planned: [{ work: ['W2'], kind: 'dto', contracts: [{ query: 'Q', files: ['portal:src/shared/dto/due.dto.ts'] }] }] });
+  assert.deepEqual(portalOnly.contracts, ['src/shared/dto/due.dto.ts']);
+  const apiToo = twoRepoReach({ components: dto, changed: { 'src/shared/dto/due.dto.ts': 'export class DueDto {}\n' }, planned: [{ work: ['W2'], kind: 'dto', contracts: [{ query: 'Q', files: ['api:src/shared/dto/due.dto.ts'] }] }] });
+  assert.deepEqual(apiToo.contracts, [], 'the api file it found is planned');
+  // A vendored copy of another component's spec is not the changed file's own component's spec.
+  const vendored = [{ id: 'api', kind: 'service', repo: 'api', provides: [{ contract: 'http', spec: 'openapi.json' }] }, { id: 'admin', kind: 'web', repo: 'api', package: 'admin', dependsOn: [{ component: 'api', via: 'http', contract: 'api/admin/vendor/openapi.json' }] }];
+  const copy = twoRepoReach({ components: vendored, changed: { 'admin/vendor/openapi.json': '{"paths":{"/b":{}}}\n' }, scope: { endpoints: 1, errorCodes: 0, names: ['GET /b'] } });
+  assert.deepEqual(copy.contracts, ['admin/vendor/openapi.json']);
+  const own = twoRepoReach({ components: vendored, changed: { 'openapi.json': '{"paths":{"/b":{}}}\n' }, scope: { endpoints: 1, errorCodes: 0, names: ['GET /b'] } });
+  assert.deepEqual(own.contracts, [], 'the api\'s own spec carries the endpoint it states');
 });
