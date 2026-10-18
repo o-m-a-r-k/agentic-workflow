@@ -168,7 +168,7 @@ test('I-153: past the owner\'s return point a launch at capacity is kept, said s
   // Review of 0.7.30: every role stopped at capacity is named where the owner reads what is next, not only a reviewer (an
   // owner told nothing hands a fresh one, the I-153 failure).
   const next = state(root, id);
-  assert.match(next.next, /^planner p stopped because the model was at capacity: `wf handoff run --agent p --attempt \S+` resumes its session when the model has room; no fresh handoff/);
+  assert.match(next.next, /^planner p stopped because the model was at capacity: `wf handoff run --agent p --attempt \S+` resumes its session when the model has room; no fresh handoff; if its work was finished another way, `wf handoff close --agent p --attempt \S+` settles it/);
   assert.equal(next.decision.kind, 'resume');
   fs.writeFileSync(path.join(base, 'room'), 'yes');
   const again = ok(wf(root, ['handoff', 'run', '--agent', 'p', '--attempt', id, '--json'], { env }));
@@ -179,6 +179,19 @@ test('I-153: past the owner\'s return point a launch at capacity is kept, said s
   assert.equal(h.session, SID);
   assert.deepEqual(fs.readFileSync(path.join(base, 'spawns.log'), 'utf8').trim().split('\n').map((l) => JSON.parse(l).slice(0, 2)), [['-c', 'model_reasoning_effort="max"'], ['resume', SID], ['resume', SID]]);
   ok(wf(root, ['plan', '--from-agent', 'p', '--attempt', id], { env }));
+});
+
+// Second review of 0.7.30: a launch stopped at capacity whose work the owner finished another way could only be resumed or
+// replaced; `wf handoff close` settles it, and the next step moves on.
+test('I-153: `wf handoff close` settles a launch stopped at capacity; it is no longer the next step and is not resumed', () => {
+  const { root, id, env } = prepared('capacity-persist');
+  assert.equal(wf(root, ['handoff', 'run', '--agent', 'p', '--attempt', id, '--minutes', '0.1', '--json'], { env }).code, 1);
+  const closed = ok(wf(root, ['handoff', 'close', '--agent', 'p', '--attempt', id]));
+  assert.match(closed.out, /planner p settled on \S+: its launch stopped at capacity and will not be resumed/);
+  const s = state(root, id);
+  assert.notEqual(s.decision.kind, 'resume');
+  assert.ok(s.handoffs.at(-1).launch.settled);
+  assert.match(wf(root, ['handoff', 'run', '--agent', 'p', '--attempt', id], { env }).err, /already launched; create a fresh handoff/);
 });
 
 test('I-153: each harness names its own capacity signal, never a completed turn or another error, and resumes its own session', async () => {

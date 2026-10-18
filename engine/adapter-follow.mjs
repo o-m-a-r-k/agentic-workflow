@@ -34,7 +34,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { adapterPin, attemptAdapter, repoDir, trustedAdapter } from './config.mjs';
 import { append, loadState, recordedTogether } from './ledger.mjs';
-import { assertEngine, canonical, git, run } from './util.mjs';
+import { assertEngine, canonical, git, hashValue, run } from './util.mjs';
 import { liveGate, RESULT_NEUTRAL } from './gate.mjs';
 import { validationIds } from './validation.mjs';
 
@@ -147,16 +147,63 @@ function atPin(root, state, loc, from) {
   return pinned.get(key);
 }
 
+// The change a commit makes to a file: the lines it removes and adds, without context or line numbers, so the same change made
+// on another base, cherry-picked, rebased or pushed by hand reads the same.
+function changeOf(cwd, commit, file) {
+  const diff = git(cwd, ['diff', '-U0', '--no-color', '--no-ext-diff', `${commit}^`, commit, '--', file], { allowFail: true }) || '';
+  const lines = diff.split('\n').filter((l) => /^[+-]/.test(l) && !/^(\+\+\+|---)( |$)/.test(l));
+  return lines.length ? hashValue(lines) : null;
+}
+// The commits `args` select that touch some of `paths`, each with the files of `paths` it touches. Merges are left out.
+function commitsIn(cwd, args, paths) {
+  const out = git(cwd, ['log', '--no-merges', '--format=@%H', '--name-only', ...args, '--', ...paths], { allowFail: true }) || '';
+  const list = [];
+  for (const l of out.split('\n')) {
+    if (l.startsWith('@')) list.push({ commit: l.slice(1), files: [] });
+    else if (l.trim() && list.length) list.at(-1).files.push(l.trim());
+  }
+  return list;
+}
+
+// What the attempt authored in the files it follows, not recorded yet: each file's change in each of its commits that the base
+// branch does not hold (`HEAD --not <tip>`). Second review of 0.7.30. Named failure: its change was read from its branch's
+// first-parent line, so base commits a hand fast-forward or a `git pull --rebase` brought in counted as its own, and main's
+// adapter change was held for good as "this attempt's own change". A base commit is on the base branch, so it is never here;
+// the record (`adapter.authored`) keeps a change once the base branch holds it too (a hand push, a merge of the branch).
+function authoredNow(state, loc, tip, paths) {
+  const own = state.repos[loc.repo.name];
+  if (!own?.worktree || !fs.existsSync(own.worktree) || !tip) return [];
+  const known = new Set((state.adapterAuthored ?? []).map((a) => `${a.file}\0${a.change}`));
+  const out = [];
+  for (const c of commitsIn(own.worktree, ['HEAD', '--not', tip], paths)) {
+    for (const file of c.files) {
+      const change = changeOf(own.worktree, c.commit, file);
+      if (!change || known.has(`${file}\0${change}`)) continue;
+      known.add(`${file}\0${change}`);
+      out.push({ file, change, commit: c.commit });
+    }
+  }
+  return out;
+}
+
 // What following the base branch would do now: null (nothing to take), { held } (a tip that cannot be taken, and why) or
-// { data } (the follow to record). Reads git and the committed adapter only; writes nothing.
+// { data } (the follow to record), with `authored`: the attempt's own changes to the files it follows not recorded yet. Reads
+// git and the committed adapter only; writes nothing.
 export function followPlan(root, state) {
   if (!state?.adapterBase || ['done', 'abandoned'].includes(state.phase)) return null;
   const loc = attemptAdapter(root, state);
   const from = adapterPin(state);
-  const { cfg: before, repo, ref } = atPin(root, state, loc, from);
-  if (!repo) return null;
+  const pinned = atPin(root, state, loc, from);
+  if (!pinned.repo) return null;
+  const tip = git(loc.dir, ['rev-parse', '--verify', '--quiet', `${pinned.ref}^{commit}`], { allowFail: true });
+  const authored = authoredNow(state, loc, tip, followedPaths(loc, [pinned.cfg]));
+  const plan = decide(root, state, { loc, from, pinned, tip, authored: [...(state.adapterAuthored ?? []), ...authored] });
+  return authored.length ? { ...(plan ?? {}), authored } : plan;
+}
+
+function decide(root, state, { loc, from, pinned, tip, authored }) {
+  const { cfg: before, ref } = pinned;
   const dir = loc.dir;
-  const tip = git(dir, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], { allowFail: true });
   // An attempt whose own change to its rules reached the base branch keeps its pin for good (review of 0.7.30).
   if (!tip || tip === from || state.adapterHeld?.tip === tip || state.adapterOwnHeld) return null;
   const held = (why, extra = {}) => ({ held: { tip, ref, why, ...extra } });
@@ -180,18 +227,21 @@ export function followPlan(root, state) {
     const b = after.repos.find((r) => r.name === name);
     if (!b || realDir(root, b) !== realDir(root, a)) return held(`the adapter at ${ref} (${short(tip)}) ${b ? `lists repo \`${name}\` at another folder (${b.path})` : `no longer lists repo \`${name}\``}, which this attempt works in`);
   }
-  // An attempt is never judged by its own change to its rules: once the base branch holds a file of the followed set exactly
-  // as this attempt changed it (its delivery, or a merge outside the workflow), the attempt keeps the pin it has, for good
-  // (`own` on the record). Review of 0.7.30: "its change" was the diff against the merge base, which a base merge empties, and
-  // the hold lasted for that tip only, so the next push that touched the adapter folder handed the attempt its own loosened
-  // adapter. Its change is now the files its own commits touched: on its branch's first-parent line since admission, merges
-  // left out, so a base merged in (by `wf base merge` or by hand) brings none of the base's commits into it.
-  const own = state.repos[loc.repo.name];
-  if (own?.worktree && fs.existsSync(own.worktree)) {
-    const merged = (state.baseMerges ?? []).filter((m) => m.repo === loc.repo.name && m.to).map((m) => m.to);
-    const mine = new Set(git(own.worktree, ['log', '--first-parent', '--no-merges', '--format=', '--name-only', 'HEAD', '--not', own.base, ...merged], { allowFail: true }).split('\n').filter(Boolean));
+  // An attempt is never judged by its own change to its rules: once the base branch holds a change this attempt authored to a
+  // file it follows (the same change in a commit since the pin: its delivery, a hand push, a cherry-pick, a merge outside the
+  // workflow), or that file exactly as the attempt has it, the attempt keeps the pin it has, for good (`own` on the record).
+  // Review of 0.7.30: "its change" was the diff against the merge base, which a base merge empties, and the hold lasted for that
+  // tip only. Second review: then it was the files on its first-parent line, which counted base commits a hand fast-forward or a
+  // rebase brought in. It is now what the attempt authored (`authoredNow`, recorded as `adapter.authored`).
+  if (authored.length) {
+    const files = new Set(authored.map((a) => a.file));
+    const mine = new Set(authored.map((a) => `${a.file}\0${a.change}`));
+    const ownFiles = changed.filter((f) => files.has(f));
+    const byChange = ownFiles.length ? commitsIn(dir, [`${from}..${tip}`], ownFiles).flatMap((c) => c.files.filter((f) => mine.has(`${f}\0${changeOf(dir, c.commit, f)}`))) : [];
+    const own = state.repos[loc.repo.name];
     const blob = (cwd, commit, f) => git(cwd, ['rev-parse', '--verify', '--quiet', `${commit}:${f}`], { allowFail: true }) || null;
-    const same = changed.filter((f) => mine.has(f) && blob(dir, tip, f) === blob(own.worktree, 'HEAD', f));
+    const byContent = own?.worktree && fs.existsSync(own.worktree) ? ownFiles.filter((f) => blob(dir, tip, f) === blob(own.worktree, 'HEAD', f)) : [];
+    const same = [...new Set([...byChange, ...byContent])].sort();
     if (same.length) return held(`the base branch now holds this attempt's own change to ${same.join(', ')}; an attempt is never judged by its own change to its rules`, { own: same });
   }
   // Once a delivery has started, its adapter kind stays (a different module would not know the integration in flight).
@@ -223,10 +273,9 @@ export function followPlan(root, state) {
 // Takes the base branch's adapter when it can (see the top of this file). Never fails the command that reads the attempt:
 // a follow that cannot be computed now is tried again by the next command.
 export function followAdapter(root, state) {
-  if (!state?.adapterBase || ['done', 'abandoned'].includes(state.phase) || state.activeHold) return state;
+  if (!state?.adapterBase || ['done', 'abandoned'].includes(state.phase)) return state;
   let plan;
   try {
-    if (liveGate(root, state)) return state;
     plan = followPlan(root, state);
   } catch {
     return state;
@@ -235,6 +284,14 @@ export function followAdapter(root, state) {
   let wrote = false;
   recordedTogether(root, state.id, () => {
     const current = loadState(root, state.id);
+    // What the attempt authored is kept whatever else holds (a hold or a running gate stops the follow, not the record).
+    const known = new Set((current.adapterAuthored ?? []).map((a) => `${a.file}\0${a.change}`));
+    const fresh = (plan.authored ?? []).filter((a) => !known.has(`${a.file}\0${a.change}`));
+    if (fresh.length) {
+      append(root, state.id, 'adapter.authored', { changes: fresh }, null);
+      wrote = true;
+    }
+    if (!plan.held && !plan.data) return;
     // Read again inside the transaction: a hold or a gate that started meanwhile wins.
     if (adapterPin(current) !== adapterPin(state) || current.activeHold || liveGate(root, current)) return;
     if (plan.held) {
@@ -247,7 +304,7 @@ export function followAdapter(root, state) {
 }
 
 // One line for `wf status` and `wf resume`: what the attempt follows, the latest move and a tip it could not take.
-export function followLines(state) {
+export function followLines(state, root = null) {
   const lines = [];
   const last = (state.adapterFollows ?? []).at(-1);
   if (last) {
@@ -255,6 +312,13 @@ export function followLines(state) {
     const parts = [g.rerun?.length && `steps changed: ${g.rerun.join(', ')}`, g.added?.length && `steps added: ${g.added.join(', ')}`, g.removed?.length && `steps removed: ${g.removed.join(', ')}`].filter(Boolean);
     lines.push(`  adapter: follows ${last.ref}; took ${short(last.to)} (${last.changed.slice(0, 4).join(', ')}${last.changed.length > 4 ? `, +${last.changed.length - 4} more` : ''})${parts.length ? `; ${parts.join('; ')}` : ''}${last.delivery?.mode === 'kept' ? `; the delivery started under \`${last.delivery.from}\` and keeps it (the base branch now names \`${last.delivery.to}\`)` : ''}${last.withdrewAcceptance ? '; the acceptance was withdrawn: gate and accept again (the evidence review already recorded counts when the evidence is the same)' : ''}`);
   }
-  if (state.adapterHeld) lines.push(`  adapter: ${state.adapterHeld.ref} (${short(state.adapterHeld.tip)}) is not taken: ${state.adapterHeld.why}; this attempt keeps ${short(adapterPin(state))}`);
+  // Second review of 0.7.30: an attempt that keeps its pin for good says where the base branch is now, beside the reason.
+  if (state.adapterOwnHeld && state.adapterHeld) {
+    let now = null;
+    try {
+      if (root) now = git(attemptAdapter(root, state).dir, ['rev-parse', '--verify', '--quiet', `${state.adapterHeld.ref}^{commit}`], { allowFail: true }) || null;
+    } catch {}
+    lines.push(`  adapter: ${state.adapterHeld.ref} is now ${short(now ?? state.adapterHeld.tip)}; this attempt keeps ${short(adapterPin(state))} for good: the base branch held this attempt's own change to ${state.adapterOwnHeld.paths.join(', ')} at ${short(state.adapterOwnHeld.tip)}, and an attempt is never judged by its own change to its rules`);
+  } else if (state.adapterHeld) lines.push(`  adapter: ${state.adapterHeld.ref} (${short(state.adapterHeld.tip)}) is not taken: ${state.adapterHeld.why}; this attempt keeps ${short(adapterPin(state))}`);
   return lines;
 }

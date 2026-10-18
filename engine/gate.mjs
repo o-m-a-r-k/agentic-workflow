@@ -428,15 +428,20 @@ function affectedSpecs(state, step, repo, pkg, dir, pkgChanged) {
   const picked = new Set();
   // Review of 0.7.30: a changed file that matches `specs` was taken to affect only itself; under a broad `specs` glob a helper
   // the specs import is such a file, and the specs importing it were left out of a gate that counted. A spec-matching file a
-  // rule's `paths` cover adds that rule's specs too; one no rule covers is in doubt when another spec file names it (its path
-  // without the extension, as an import would), and the whole step runs.
+  // rule's `paths` cover adds that rule's specs too; one no rule covers runs alone only when no other spec file mentions its name
+  // (its file name, or that name without its extension; for an `index` file its folder's name), else the whole step runs. Second
+  // review of 0.7.30: matching only `folder/name` missed a helper imported as `'../utils'`, a barrel imported by its folder and a
+  // fixture read with `path.join(..., 'fixtures', 'data.json')`. A word that many specs use errs toward the whole step.
   let texts = null;
+  const escape = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const namedBy = (f) => {
     texts ??= new Map(specFiles.map((x) => { try { return [x, fs.readFileSync(path.join(dir, x), 'utf8')]; } catch { return [x, '']; } }));
-    const stem = path.posix.basename(f).replace(/\.[^.]+$/, '');
-    const parent = path.posix.basename(path.posix.dirname(f));
-    const needle = parent && parent !== '.' ? `${parent}/${stem}` : stem;
-    return specFiles.filter((x) => x !== f && texts.get(x).includes(needle));
+    const file = path.posix.basename(f);
+    const stem = file.replace(/\.[^.]+$/, '');
+    const names = stem === 'index' ? [path.posix.basename(path.posix.dirname(f))].filter((n) => n && n !== '.') : [...new Set([file, stem])];
+    if (!names.length) return [];
+    const re = new RegExp(`(^|[^A-Za-z0-9_])(${names.map(escape).join('|')})(?![A-Za-z0-9_])`);
+    return specFiles.filter((x) => x !== f && re.test(texts.get(x)));
   };
   for (const f of changed) {
     const rules = step.affects.filter((a) => matchesAny(f, a.paths));

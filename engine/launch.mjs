@@ -39,7 +39,7 @@ export async function runRole(root, options) {
   if (h.role === 'reviewer' && !isCurrentReviewer(state, h)) throw refuse('only the current reviewer handoff or its frozen group members can be launched');
   if (h.reviewGroup && h.reviewGroup.snapshot !== reviewSnapshot(state)) throw refuse('review group obligations changed before launch; create a fresh group');
   // 0.7.30 (I-153): a launch the model's capacity ended is resumed, not launched again: the role itself changed the tree.
-  const resumable = h.launch?.status === 'failed' && h.launch.failure?.kind === 'capacity';
+  const resumable = h.launch?.status === 'failed' && h.launch.failure?.kind === 'capacity' && !h.launch.settled;
   if (!resumable && h.tree && canonical(treeHashes(state)) !== canonical(h.tree)) throw refuse('the handed tree changed before launch; create a fresh handoff');
   // Named failure: the shared launcher accidentally prohibited inherited implementer/tester models.
   if (['planner', 'reviewer'].includes(h.role) && !h.model) throw refuse('this handoff pins no runtime model; run `wf models refresh --attempt <id>`, then create a fresh handoff');

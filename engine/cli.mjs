@@ -22,7 +22,7 @@ import { reviewDivisionSummary } from './review-groups.mjs';
 import { addLesson, applySnippet, exportPluginLessons, findLesson, isProjectWide, LESSON_FILE, lessonPrompts, lessonWarnings, loadLessons, mergeLessons, mergeSuggestions, moveLesson, recur, relevantLessons, reviewLessons, setLesson, lessonKey, totalRecurrence, mergeableIn, distinctLessons } from './lessons.mjs';
 import { lessonStats } from './learning.mjs';
 import { LinkRefused, changesOf, ledgerEmpty, lostLedgers, rebaseline, releaseAttempt, seal, setVerifyLevel, unlockEvidence, verifyAttempt } from './evidence.mjs';
-import { acceptReview, amendCriteria, beyondAskedLine, closeImplementer, designWarning, leftNotes, gateOrderCheck, batchCreate, batchEject, closeAfterHandoff, deliver, deliveredFiles, deliveryCaptures, RANK_WORDS, verifiedCaptures, exportScreenshots, freezeCriteria, handoff, narrowDelivery, needsShown, nextAction, nextDecision, orphanNext, orphansOf, outsideWarning, recordReview, recordShown, reopen, screenshotsExportDir, shownDraftFile, uncovered, withAttempt } from './lifecycle.mjs';
+import { acceptReview, amendCriteria, beyondAskedLine, closeImplementer, settleCapacity, designWarning, leftNotes, gateOrderCheck, batchCreate, batchEject, closeAfterHandoff, deliver, deliveredFiles, deliveryCaptures, RANK_WORDS, verifiedCaptures, exportScreenshots, freezeCriteria, handoff, narrowDelivery, needsShown, nextAction, nextDecision, orphanNext, orphansOf, outsideWarning, recordReview, recordShown, reopen, screenshotsExportDir, shownDraftFile, uncovered, withAttempt } from './lifecycle.mjs';
 import { addDiscovered, channelOf, closeDiscovered, discoveredLine, openDiscovered, rateDiscovered } from './discovered.mjs';
 import { detect, doctor, generatedStatus, refreshGenerated, register, registry, setEnabled, sync, writeDraft } from './onboard.mjs';
 import * as secrets from './secrets.mjs';
@@ -253,7 +253,7 @@ function summary(root, s, { base = null, resume = false } = {}) {
   for (const [name, r] of Object.entries(s.repos)) lines.push(`  ${name}: ${r.worktree} (base ${r.base.slice(0, 10)})`);
   if (base) lines.push(...baseLines(base));
   // 0.7.30 (I-151, D60): the adapter the attempt follows on its base branch, and a tip it could not take.
-  if (isOpen(s)) lines.push(...followLines(s));
+  if (isOpen(s)) lines.push(...followLines(s, root));
   // 0.7.30 (I-201, D62): its own target, the port it is, and the branches it is also delivered to.
   try {
     lines.push(...targetLines(root, s));
@@ -975,6 +975,12 @@ async function dispatch(cmd, sub, positional, options) {
         return result.exitCode;
       }
       if (sub === 'close') {
+        // Second review of 0.7.30 (I-153): a launch stopped at capacity whose work was finished another way is settled here.
+        const settled = settleCapacity(root, options);
+        if (settled) {
+          print(options, `${settled.role} ${settled.agent} settled on ${settled.state.id}: its launch stopped at capacity and will not be resumed${settled.closed ? ` (implementer closed, ${settled.closed.outcome})` : ''}. next: ${nextAction(root, settled.state)}`, settled.state);
+          return 0;
+        }
         const c = closeImplementer(root, options);
         print(options, `implementer ${options.agent} closed (${c.outcome}) on ${c.state.id}; commits since its handoff: ${Object.entries(c.commits).map(([k, v]) => `${k} ${v ?? '?'}`).join(', ')}${c.children.length ? `; ${c.children.length} sub-agent(s) attributed to ${c.handoff}` : ''}${leftNotes(c, c.state.id).map((l) => `\n  ${l}`).join('')}${c.state.implementers.some((x) => !x.closedAt) ? `\n  still open: ${c.state.implementers.filter((x) => !x.closedAt).map((x) => x.agent).join(', ')}` : '\n  every implementer is closed: the tree is settled for a review'}`, { handoff: c.handoff, outcome: c.outcome, commits: c.commits, children: c.children, linked: c.linked, unknownIds: c.unknownIds });
         return 0;

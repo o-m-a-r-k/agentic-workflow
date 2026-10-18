@@ -3380,7 +3380,20 @@ function acceptanceMoved(root, state) {
 export function stoppedAtCapacity(state) {
   const latest = new Map();
   for (const h of state.handoffs ?? []) latest.set(`${h.role}\0${h.panel?.seat ?? ''}`, h);
-  return [...latest.values()].filter((h) => h.launch?.status === 'failed' && h.launch.failure?.kind === 'capacity');
+  return [...latest.values()].filter((h) => h.launch?.status === 'failed' && h.launch.failure?.kind === 'capacity' && !h.launch.settled);
+}
+
+// Second review of 0.7.30 (I-153): `wf handoff close --agent <id>` on a launch stopped at capacity whose work the owner finished
+// another way settles it: it is no longer the next step and is not resumed. An implementer is closed as `wf handoff close`
+// closes one; another role's launch is recorded settled (`agent.launch.settled`). Named failure (review): the only exits were a
+// resume or a fresh handoff, since `wf handoff stop` refuses a failed launch and `wf handoff close` left the launch as it was.
+export function settleCapacity(root, options) {
+  const state = openState(root, options);
+  const h = state.handoffs.filter((x) => x.agent === String(options.agent ?? '')).at(-1);
+  if (!h || h.launch?.status !== 'failed' || h.launch.failure?.kind !== 'capacity' || h.launch.settled) return null;
+  const closed = h.role === 'implementer' && (state.implementers ?? []).some((x) => x.agent === h.agent && !x.closedAt) ? closeImplementer(root, { ...options, outcome: options.outcome ?? 'stopped' }) : null;
+  append(root, state.id, 'agent.launch.settled', { handoff: h.bundle, reason: 'stopped at capacity; finished another way' }, actor(options));
+  return { state: loadState(root, state.id), role: h.role, agent: h.agent, closed };
 }
 
 export function nextDecision(root, state) {
@@ -3432,7 +3445,7 @@ export function nextDecision(root, state) {
   if (held) return result('strategy', 'owner', held.owner ? held.owner.summary : held.escalation.withdrawn ? `the strategist's escalation ${held.escalation.id} was withdrawn and no decision has superseded it` : held.escalation.approved ? `the strategist's escalation ${held.escalation.id} was answered in the person's own words` : `the strategist's escalation ${held.escalation.id} awaits the owner`, { guidance: withAttempt(root, state, `${held.guidance}${waiting ? `. ${waitingText(waiting)}` : ''}`), escalation: held.escalation?.id ?? null, ...(waiting ? { handoff: waiting.bundle } : {}) });
   if (waiting) return result('strategy', 'owner', `strategist ${waiting.agent} was handed and has recorded no decision`, { guidance: withAttempt(root, state, waitingText(waiting)), handoff: waiting.bundle });
   const atCapacity = stoppedAtCapacity(state);
-  if (atCapacity.length) return result('resume', 'owner', `${atCapacity.map((h) => `${h.role} ${h.agent}`).join(', ')} stopped because the model was at capacity`, { course: false, handoff: atCapacity[0].bundle, guidance: atCapacity.map((h) => `${h.role} ${h.agent} stopped because the model was at capacity: \`wf handoff run --agent ${h.agent} --attempt ${state.id}\` resumes its session when the model has room; no fresh handoff`).join('; ') });
+  if (atCapacity.length) return result('resume', 'owner', `${atCapacity.map((h) => `${h.role} ${h.agent}`).join(', ')} stopped because the model was at capacity`, { course: false, handoff: atCapacity[0].bundle, guidance: atCapacity.map((h) => `${h.role} ${h.agent} stopped because the model was at capacity: \`wf handoff run --agent ${h.agent} --attempt ${state.id}\` resumes its session when the model has room; no fresh handoff; if its work was finished another way, \`wf handoff close --agent ${h.agent} --attempt ${state.id}\` settles it`).join('; ') });
   if (state.intent !== 'implementation' || state.lane === 'batch' || (state.batchOf && !state.batchPending)) return result('owner', 'owner', 'this trial advances standalone implementation attempts only');
   if (!state.criteria) return result('plan', 'owner', 'criteria must be frozen by the owner');
   const recordedLate = lateInRecordedRepos(state);

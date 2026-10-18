@@ -113,3 +113,25 @@ test('I-134: a helper under a broad `specs` glob adds the specs of the rule that
   assert.equal(g2.code, 0, g2.err);
   assert.deepEqual(g2.data.steps.find((x) => x.id === 'e2e').affectedSpecs, ['test/auth/login.e2e-spec.ts', 'test/helpers/session.ts']);
 });
+
+// Second review of 0.7.30: only the `folder/name` import shape was caught, so a helper at the specs root imported as
+// `'../utils'`, a barrel `index.ts` imported by its folder, and a fixture read with `path.join(..., 'fixtures', 'data.json')`
+// still narrowed the run to the helper alone. A changed spec-matching file no rule covers runs alone only when no other spec
+// file mentions its name (an `index` file: its folder's); otherwise the whole step runs.
+test('I-134: a helper imported by a relative path, a barrel and a fixture under `specs` each run the whole step', () => {
+  const broad = { ...e2e, specs: ['test/**'] };
+  const cases = [
+    ['root-helper', { 'test/utils.ts': 'export const u = 1;\n', 'test/auth/login.e2e-spec.ts': "import { u } from '../utils';\n" }, 'test/utils.ts', /test\/utils\.ts matches `specs`, no `affects` rule covers it, and other spec files name it \(test\/auth\/login\.e2e-spec\.ts\)/],
+    ['barrel', { 'test/helpers/index.ts': 'export * from "./session";\n', 'test/auth/login.e2e-spec.ts': "import { s } from '../helpers';\n" }, 'test/helpers/index.ts', /test\/helpers\/index\.ts matches `specs`, no `affects` rule covers it, and other spec files name it \(test\/auth\/login\.e2e-spec\.ts\)/],
+    ['fixture', { 'test/fixtures/data.json': '{}\n', 'test/home.e2e-spec.ts': "const f = path.join(__dirname, 'fixtures', 'data.json');\n" }, 'test/fixtures/data.json', /test\/fixtures\/data\.json matches `specs`, no `affects` rule covers it, and other spec files name it \(test\/home\.e2e-spec\.ts\)/],
+  ];
+  for (const [name, extra, changed, why] of cases) {
+    const p = singleRepoProject(`affected-specs-${name}`, { gate: { steps: [unit, broad] } }, { ...files, ...extra });
+    const e = reviewed(p, `ENG-1${name.length}`, { [changed]: 'changed\n' });
+    const g = gate(p, e.id);
+    assert.equal(g.code, 0, g.err);
+    const step = g.data.steps.find((x) => x.id === 'e2e');
+    assert.equal(step.affectedSpecs, undefined, `${name}: not the helper alone`);
+    assert.match(step.reason, why);
+  }
+});

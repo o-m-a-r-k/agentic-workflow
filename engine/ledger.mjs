@@ -168,6 +168,8 @@ export function reduce(entries) {
     adapterFollows: [],
     adapterHeld: null,
     adapterOwnHeld: null,
+    // Second review of 0.7.30: each change the attempt authored to a file it follows ({ file, change, commit }).
+    adapterAuthored: [],
     // 0.7.30 (I-201, D62): the attempt this one ports to another branch, what the port applied, and the branches this attempt
     // is also delivered to (engine/targets.mjs).
     portOf: null,
@@ -418,6 +420,12 @@ export function reduce(entries) {
         }
         break;
       }
+      // Second review of 0.7.30 (I-153): a launch stopped at capacity that the owner settled with `wf handoff close`.
+      case 'agent.launch.settled': {
+        const h = s.handoffs.find((h) => h.bundle === d.handoff);
+        if (h?.launch) h.launch = { ...h.launch, settled: { at: e.at, by: e.actor, reason: d.reason ?? null } };
+        break;
+      }
       case 'agent.launch.finished': {
         const h = s.handoffs.find((h) => h.bundle === d.handoff);
         if (h?.launch) h.launch = { ...h.launch, status: d.status, exitCode: d.exitCode, finishedAt: e.at, ...(d.failure ? { failure: d.failure } : {}) };
@@ -536,6 +544,9 @@ export function reduce(entries) {
         break;
       case 'targets.added':
         for (const t of d.targets ?? []) s.alsoTargets.push({ ...t, reason: d.reason ?? null, at: e.at, by: e.actor });
+        break;
+      case 'adapter.authored':
+        for (const c of d.changes ?? []) if (!s.adapterAuthored.some((a) => a.file === c.file && a.change === c.change)) s.adapterAuthored.push({ ...c, at: e.at });
         break;
       case 'adapter.notFollowed':
         s.adapterHeld = { tip: d.tip, ref: d.ref, why: d.why, at: e.at };

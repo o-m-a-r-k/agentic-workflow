@@ -18,7 +18,9 @@ Release notes, newest first, then every fix that came from a failure in the work
     without a new review when the evidence comes out the same;
   - settings a ticket cannot take (they need a newer workflow version, drop one of its repositories, or are the ticket's own
     change to its rules) are not taken, and `wf status` says why once. A ticket whose own change to its rules reached main
-    never takes the settings on main again while it is open, also after merging main in;
+    never takes the settings on main again while it is open, also after merging main in, and `wf status` says where main is
+    now. Its own change is what it authored: main's commits that came into it by `git pull`, a fast-forward or a rebase are
+    never taken for its own;
   - a ticket whose delivery has started keeps its approval when main changes a test step it ran; that step runs again
     before the rest is delivered;
   - pausing a ticket (`wf hold`) is recorded before anything else, so its settings never move under the pause;
@@ -41,7 +43,8 @@ Release notes, newest first, then every fix that came from a failure in the work
   session with the same instructions: at once, then after a few minutes, then every ten minutes while the model stays busy.
   If the agent's caller set a time to hand back control and the model is still busy then, the role is kept, the agent is told
   it was capacity, and running it again resumes the same session; nothing is started from scratch. Whatever the role, the
-  next step the agent reads names it and the command that resumes it, so it is never replaced by a fresh one.
+  next step the agent reads names it and the command that resumes it, so it is never replaced by a fresh one; when its work
+  was finished another way, `wf handoff close` settles it.
 - **A change can go to another branch, and to more than one (I-201, D62).** Named failure: a ticket was approved for
   master, and you asked for it on staging too ("commit and push straight to staging and master"). The workflow knew one
   target branch per repository, so the change was applied to staging by hand outside it; it conflicted, its checks failed,
@@ -102,7 +105,7 @@ Release notes, newest first, then every fix that came from a failure in the work
   reads is a spec file or lies in a rule's paths, a standard attempt runs only those specs (with any suite that failed in the
   step's last run), records them as `affectedSpecs` under a key of its own, and the gate counts. A changed file under `specs`
   that a rule covers adds that rule's specs too. Any doubt (a file no rule covers, a spec-matching file no rule covers that
-  other specs name, as a helper they use would be, shared infrastructure, a changed contract, a change in another repo the step reads, an empty selection, `--full`, a
+  other specs mention by name, as a helper, a barrel or a fixture they use would be, shared infrastructure, a changed contract, a change in another repo the step reads, an empty selection, `--full`, a
   batch) runs the whole step and says why.
 
 - **A repair starts from what already failed (I-162, I-173, I-166, I-168, D51).** Four field cases, one shape: the workflow had

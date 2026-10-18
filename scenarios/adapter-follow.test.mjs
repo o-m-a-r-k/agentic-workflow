@@ -114,17 +114,44 @@ test('I-151: an attempt is never judged by its own change to its rules, even onc
   fs.writeFileSync(adapterFile(root), loosened);
   sh(root, 'git commit -qam "drop lint (merged by hand)" && git push -q origin main');
   const out = ok(wf(root, ['status', '--attempt', e.id])).out;
-  assert.match(out, /is not taken: the base branch now holds this attempt's own change to \.workflow\/project\.yaml; an attempt is never judged by its own change to its rules/);
+  assert.match(out, /this attempt keeps [0-9a-f]{10} for good: the base branch held this attempt's own change to \.workflow\/project\.yaml at [0-9a-f]{10}, and an attempt is never judged by its own change to its rules/);
   assert.equal(state(root, e.id).adapterPin, null);
   // Review of 0.7.30: the hold lasted only for that tip, and `wf base merge` took the file out of the attempt's diff, so the
   // next push to main that touched the adapter folder handed the attempt its own loosened adapter. It keeps its pin for good.
   ok(wf(root, ['base', 'merge', '--attempt', e.id]));
   commitIn(root, { '.workflow/notes.md': 'a note\n' }, 'an unrelated adapter note');
   sh(root, 'git push -q origin main');
-  ok(wf(root, ['status', '--attempt', e.id]));
+  const later = ok(wf(root, ['status', '--attempt', e.id])).out;
   assert.equal(state(root, e.id).adapterPin, null, 'never judged by its own change, also after a base merge and a later push');
   assert.equal(follows(root, e.id).length, 0);
   assert.equal(held(root, e.id).length, 1, 'said once');
+  // Second review of 0.7.30: the line names where the base branch is now, not only the tip first held.
+  assert.match(later, new RegExp(`adapter: origin/main is now ${sh(root, 'git rev-parse HEAD').slice(0, 10)}; this attempt keeps [0-9a-f]{10} for good: the base branch held this attempt's own change to \\.workflow/project\\.yaml at [0-9a-f]{10}`));
+});
+
+// Second review of 0.7.30. Named failure: the attempt's own change was read from its branch's first-parent line, so base commits
+// that reached it by a hand fast-forward (`git pull` with no commits of its own) or by `git pull --rebase` counted as its own;
+// main's adapter change was held as "this attempt's own change", and the attempt kept a stale adapter for good, the failure
+// I-151 exists to remove. Its own change is what it authored: commits on its branch that the base branch does not hold, kept by
+// the change they make, so a hand push, a base merge, a fast-forward or a rebase neither hides it nor adds the base's to it.
+test('I-151: base commits that reached the attempt by a hand fast-forward or a rebase are never its own change', () => {
+  const ff = project('follow-ff');
+  const a = ok(wf(ff.root, ['entry', '--item', 'ENG-309', '--owner', 'o', '--json'])).json();
+  fs.writeFileSync(adapterFile(ff.root), yaml(config('follow-ff', { gate: { steps: [steps[0]] } })));
+  sh(ff.root, 'git commit -qam "lint retired on main" && git push -q origin main');
+  sh(a.repos.app.worktree, 'git fetch -q origin main && git merge -q --ff-only origin/main');
+  ok(wf(ff.root, ['status', '--attempt', a.id]));
+  assert.equal(state(ff.root, a.id).adapterPin, sh(ff.root, 'git rev-parse HEAD'), 'followed after a hand fast-forward');
+  assert.equal(state(ff.root, a.id).adapterOwnHeld, null);
+  const rb = project('follow-rebase');
+  const b = ok(wf(rb.root, ['entry', '--item', 'ENG-310', '--owner', 'o', '--json'])).json();
+  commitIn(b.repos.app.worktree, { 'src/a.txt': 'b\n' }, 'work');
+  fs.writeFileSync(adapterFile(rb.root), yaml(config('follow-rebase', { gate: { steps: [steps[0]] } })));
+  sh(rb.root, 'git commit -qam "lint retired on main" && git push -q origin main');
+  sh(b.repos.app.worktree, 'git pull -q --rebase origin main');
+  ok(wf(rb.root, ['status', '--attempt', b.id]));
+  assert.equal(state(rb.root, b.id).adapterPin, sh(rb.root, 'git rev-parse HEAD'), 'followed after a rebase');
+  assert.equal(state(rb.root, b.id).adapterOwnHeld, null);
 });
 
 // Review of 0.7.30: the own change is read from the attempt's own commits, so a base merged in before the change reached the
@@ -141,7 +168,7 @@ test('I-151: the attempt\'s own change is found from its own commits, whatever b
   // Merged before any command read the attempt (a hold makes `wf base merge` the first to see it, then the follow comes later).
   sh(e.repos.app.worktree, 'git fetch -q origin main && git merge -q --no-edit origin/main');
   const out = ok(wf(root, ['status', '--attempt', e.id])).out;
-  assert.match(out, /is not taken: the base branch now holds this attempt's own change to \.workflow\/project\.yaml/);
+  assert.match(out, /for good: the base branch held this attempt's own change to \.workflow\/project\.yaml/);
   assert.equal(state(root, e.id).adapterPin, null);
 });
 
