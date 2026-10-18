@@ -15,6 +15,9 @@ import { screenshots } from './gate.mjs';
 import { findingSummary, lastReviewSeenAt, unreachedSince } from './review-policy.mjs';
 import { cliEnv, scrub } from './scrub.mjs';
 import { routeLines, routedStatus, statusFor, ticketLabels } from './status-route.mjs';
+import linearAdapter from '../adapters/tracker/linear.mjs';
+import githubAdapter from '../adapters/tracker/github.mjs';
+import filesAdapter from '../adapters/tracker/files.mjs';
 
 const BUILTIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'adapters', 'tracker');
 
@@ -28,6 +31,52 @@ export async function loadTrackerAdapter(root, cfg, state) {
   const adapter = (await import(pathToFileURL(file).href)).default;
   if (adapter?.screenshots !== undefined && !SCREENSHOT_MODES.includes(adapter.screenshots)) throw new WfError(`tracker adapter \`${kind}\`: screenshots: ${JSON.stringify(adapter.screenshots)} is not one of ${SCREENSHOT_MODES.join(', ')}`);
   return adapter;
+}
+
+// 0.7.31 (I-215, D68): through the connector the agent performs each tracker step, and the adapter's own `operations` say how
+// (`{ readIssue, setStatus, comment, attach, readBack }`, plain text). Named failure (field): `wf shown` and `wf resume` told the
+// owner to post image Markdown in a comment while the project's pinned adapter said, in its operations, to add a native page
+// section with uploaded image blocks; following the generic line produced a comment without images. The next action now says
+// the adapter's words for each pending step, verbatim and first. The next step is computed synchronously, so a project adapter
+// (the file at the attempt's pin) is read in a child process, once per process; a built-in adapter is imported here. An adapter
+// that performs its own declared engine route (`via: api|cli|files` with that route's `perform`, as GitHub's `cli`) describes
+// what the engine does in `operations`, not what an agent does, and gives no connector instructions.
+const BUILTIN_ADAPTERS = { linear: linearAdapter, github: githubAdapter, files: filesAdapter };
+const STEP_OPERATION = { read: 'readIssue', setStatus: 'setStatus', comment: 'comment', attach: 'attach', readback: 'readBack' };
+const OPERATION_KEYS = ['readIssue', 'setStatus', 'comment', 'attach', 'readBack'];
+const OWN_ROUTES = ['api', 'cli', 'files'];
+const describeAdapter = (a) => ({ operations: a?.operations ?? null, performsOwnRoute: OWN_ROUTES.includes(a?.via) && typeof a?.[a.via]?.perform === 'function' });
+const DESCRIBE_CHILD = `import(process.argv[1]).then((m) => { const a = (m && m.default) || {}; const via = typeof a.via === 'string' ? a.via : null; process.stdout.write(JSON.stringify({ operations: a.operations && typeof a.operations === 'object' ? a.operations : null, performsOwnRoute: ${JSON.stringify(OWN_ROUTES)}.includes(via) && typeof (a[via] && a[via].perform) === 'function' })); }, (e) => { process.stderr.write(String((e && e.message) || e)); process.exit(1); });`;
+function agentOperations(d) {
+  if (!d || d.performsOwnRoute || !d.operations || typeof d.operations !== 'object') return null;
+  const out = Object.fromEntries(OPERATION_KEYS.filter((k) => typeof d.operations[k] === 'string' && d.operations[k].trim()).map((k) => [k, d.operations[k].trim()]));
+  return Object.keys(out).length ? out : null;
+}
+const operationsRead = new Map();
+export function connectorOperations(root, cfg, state) {
+  const kind = cfg?.tracker?.kind;
+  if (cfg?.tracker?.via !== 'connector' || typeof kind !== 'string' || kind === 'none') return null;
+  if (!kind.startsWith('.')) return agentOperations(describeAdapter(BUILTIN_ADAPTERS[kind]));
+  const key = `${root}\0${adapterPin(state)}\0${kind}`;
+  if (!operationsRead.has(key)) {
+    let ops = null;
+    try {
+      const file = adapterFileAtCommit(root, state, adapterPin(state), kind);
+      const r = spawnSync(process.execPath, ['--input-type=module', '-e', DESCRIBE_CHILD, pathToFileURL(file).href], { cwd: root, encoding: 'utf8', timeout: 15000 });
+      if (r.status === 0) ops = agentOperations(JSON.parse(r.stdout));
+    } catch {}
+    operationsRead.set(key, ops);
+  }
+  return operationsRead.get(key);
+}
+// The adapter's words for the pending steps of one event (and the read back every connector step ends with), or null when it gives
+// none: the next action then says the workflow's generic wording alone (engine/lifecycle.mjs, nextStep).
+export function adapterStepsLine(root, cfg, state, actions) {
+  const ops = connectorOperations(root, cfg, state);
+  if (!ops) return null;
+  const keys = [...new Set([...actions.map((a) => STEP_OPERATION[a.op]), 'readBack'])].filter((k) => k && ops[k]);
+  if (!keys.length) return null;
+  return `your tracker adapter's own instructions for ${keys.length > 1 ? 'these steps' : 'this step'}, verbatim (follow them for how each is done; the workflow's wording after them says what each carries): ${keys.map((k) => `${k}: "${ops[k]}"`).join('; ')}`;
 }
 
 // How an adapter's tracker shows the delivered screenshots (0.7.27, I-189), declared in its default export as `screenshots`:
