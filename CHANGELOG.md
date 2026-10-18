@@ -1970,8 +1970,10 @@ A second adversarial pass over the integrated 0.5.0 branch, with scenarios in `s
 | [I-204](improvements/I-204.md) | Batch creation drops member supplemental proof registrations | 0.7.29 | `scenarios/batch-validation.test.mjs` |
 | [I-203](improvements/I-203.md) | A '?' the agent appends to a legacy question, or a panel offering a legacy decision's frame labels, costs an extra agent command | 0.7.28 | `scenarios/approve-question.test.mjs` |
 | [I-202](improvements/I-202.md) | Explain mismatched question-panel option labels instead of reporting no answer | 0.7.28 | `scenarios/approve-question.test.mjs` |
+| [I-201](improvements/I-201.md) | Support delivery to an additional divergent target branch | 0.7.30 | `scenarios/delivery-targets.test.mjs` |
 | [I-200](improvements/I-200.md) | Carry unresolved critical observations in implementer goal context | 0.7.28 | `scenarios/planned-pass.test.mjs` |
 | [I-199](improvements/I-199.md) | Export interrupted-gate screenshots listed in evidence inventory |  |  |
+| [I-198](improvements/I-198.md) | Export failed-step screenshots for implementer diagnosis | 0.7.30 | `scenarios/run-screenshots.test.mjs` |
 | [I-197](improvements/I-197.md) | Reject malformed screenshot references when recording review and retain acceptance refusals |  |  |
 | [I-196](improvements/I-196.md) | Delivery has no deployment step: a label route can only set the final status at merge, before the deployment is confirmed and the fix tested | 0.7.27 | `scenarios/deployment-confirmation.test.mjs` |
 | [I-195](improvements/I-195.md) | Frozen client steps lack pre-commit dependency preparation |  |  |
@@ -1995,15 +1997,29 @@ A second adversarial pass over the integrated 0.5.0 branch, with scenarios in `s
 | [I-177](improvements/I-177.md) | Assembled batch cannot own or settle member observation selected for fix | 0.7.23 | `scenarios/deferral-rule.test.mjs` |
 | [I-175](improvements/I-175.md) | Reviewer closures repeatedly serialize multiple screenshot hashes as one artifact ref |  |  |
 | [I-174](improvements/I-174.md) | Chat approval reader selects clarification instead of latest explicit yes | 0.7.28 | `scenarios/approve-question.test.mjs` |
+| [I-173](improvements/I-173.md) | Repair handoff omits newly recorded bookkeeping cause | 0.7.30 | `scenarios/fix-0730c.test.mjs` |
 | [I-172](improvements/I-172.md) | Installed screenshot exporter still refuses overlapping suite titles | 0.7.20 | `scenarios/fix-0720.test.mjs` |
 | [I-171](improvements/I-171.md) | Native Codex shell snapshot restores an older global wf despite engine PATH |  |  |
 | [I-170](improvements/I-170.md) | Screenshot export refuses repeated titles from multiple gate suites | 0.7.20 | `scenarios/fix-0720.test.mjs` |
 | [I-169](improvements/I-169.md) | Reconcile a defect recorded after its same-handoff repair with independent proof | 0.7.19 | `scenarios/fix-0719.test.mjs` |
+| [I-168](improvements/I-168.md) | Preserve unreached review obligations across a clean base merge | 0.7.30 | `scenarios/fix-0730c.test.mjs` |
+| [I-167](improvements/I-167.md) | Delta review bundle underreports files introduced by baseline merge | 0.7.30 | `scenarios/fix-0730c.test.mjs` |
+| [I-166](improvements/I-166.md) | Carry latest retained-finding reproduction into repair handoffs | 0.7.30 | `scenarios/fix-0730c.test.mjs` |
+| [I-165](improvements/I-165.md) | Use one authoritative work plan after amendments | 0.7.30 | `scenarios/fix-0730c.test.mjs` |
 | [I-164](improvements/I-164.md) | Disambiguate screenshot exports from overlapping gate steps | 0.7.20 | `scenarios/fix-0720.test.mjs` |
+| [I-163](improvements/I-163.md) | Order proof consumers after isolated dependency producers | 0.7.30 | `scenarios/step-order.test.mjs` |
+| [I-162](improvements/I-162.md) | Retain stopped gate failure details in repair handoffs | 0.7.30 | `scenarios/fix-0730c.test.mjs` |
 | [I-161](improvements/I-161.md) | Gate screenshot export collides across required steps | 0.7.20 | `scenarios/fix-0720.test.mjs` |
+| [I-160](improvements/I-160.md) | Export imported current-tree diagnostic captures before a full gate or delivery | 0.7.30 | `scenarios/run-screenshots.test.mjs` |
+| [I-159](improvements/I-159.md) | Hotfix planning added an unrequested notification lifecycle | 0.7.30 | `scenarios/fix-0730c.test.mjs` |
+| [I-158](improvements/I-158.md) | Provide a recorded owner decision for explicitly skipping a full gate | 0.7.30 | `scenarios/gate-light-only.test.mjs` |
+| [I-157](improvements/I-157.md) | Bound shared runtime lease waits with fair queuing | 0.7.30 | `scenarios/lease-fairness.test.mjs` |
 | [I-156](improvements/I-156.md) | Investigate starvation of long-waiting runtime lease requests |  |  |
+| [I-155](improvements/I-155.md) | Frozen runtime onboarding should provide a supported pre-commit dependency preparation route | 0.7.30 | `scenarios/prepare-route.test.mjs` |
 | [I-154](improvements/I-154.md) | Validate screenshot references when recording a review | 0.7.29 | `scenarios/evidence.test.mjs` |
+| [I-153](improvements/I-153.md) | A model at capacity fails a launch that could resume | 0.7.30 | `scenarios/codex-run.test.mjs` |
 | [I-152](improvements/I-152.md) | A long reviewer's findings are lost when it is stopped | 0.7.12 | `scenarios/fix-074-lifecycle.test.mjs` |
+| [I-151](improvements/I-151.md) | Live attempts keep the adapter they were admitted with | 0.7.30 | `scenarios/adapter-follow.test.mjs` |
 | [I-150](improvements/I-150.md) | Step passes from another attempt with the same key are not reused | 0.7.12 | `scenarios/gate.test.mjs` |
 | [I-149](improvements/I-149.md) | A gate starts while an implementer is still committing | 0.7.11 | `scenarios/gate.test.mjs` |
 | [I-148](improvements/I-148.md) | Launch failures are unrecorded, a passing error is latched, and machine sleep reads as a stall | 0.7.11 | `scenarios/codex-run.test.mjs` |
@@ -2020,6 +2036,7 @@ A second adversarial pass over the integrated 0.5.0 branch, with scenarios in `s
 | [I-137](improvements/I-137.md) | Owner must advance completed native handoffs before reporting elapsed estimates | 0.7.12 | `scenarios/fix-0712.test.mjs` |
 | [I-136](improvements/I-136.md) | Any app-code change reruns a whole e2e step: the gate cannot tell which suites a change reaches |  |  |
 | [I-135](improvements/I-135.md) | Show a visible approval brief when the question panel is unavailable | 0.7.10 | `scenarios/approve-question.test.mjs` |
+| [I-134](improvements/I-134.md) | Scope e2e gate steps to the specs a diff can affect | 0.7.30 | `scenarios/affected-specs.test.mjs` |
 | [I-133](improvements/I-133.md) | Post-evidence repair handoff repeats full review instead of delta | 0.7.10 | `scenarios/review-rounds.test.mjs` |
 | [I-132](improvements/I-132.md) | Evidence review rejects priorFindings update after accepted blind closure | 0.7.10 | `scenarios/review-rounds.test.mjs` |
 | [I-131](improvements/I-131.md) | Scenario runs write refusals into the person's own refusal log | 0.7.9 | `scenarios/learning.test.mjs` |
