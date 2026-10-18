@@ -183,8 +183,12 @@ function ownSpec(cfg, f) {
   const root = rootOf(cfg, f.repo, f.file);
   const pkg = (c) => String(c.package ?? '.').replace(/^\.\/?$/, '').replace(/\/$/, '');
   const holds = (c) => c.repo === f.repo && (!pkg(c) || f.file === pkg(c) || f.file.startsWith(`${pkg(c)}/`));
-  const own = (cfg?.components ?? []).filter(holds).sort((a, b) => pkg(b).length - pkg(a).length)[0];
-  return own && (own.provides ?? []).some((p) => p.spec && rootOf(cfg, f.repo, [pkg(own), p.spec].filter(Boolean).join('/')) === root) ? own.id : null;
+  // Sixth review of 0.7.31: every component tied at the longest package holding the file is a candidate (two packageless components
+  // of one repo both hold its root; keeping the first declared lost the api's own spec when a web component came first).
+  const holding = (cfg?.components ?? []).filter(holds);
+  const longest = Math.max(-1, ...holding.map((c) => pkg(c).length));
+  const own = holding.filter((c) => pkg(c).length === longest).find((c) => (c.provides ?? []).some((p) => p.spec && rootOf(cfg, f.repo, [pkg(c), p.spec].filter(Boolean).join('/')) === root));
+  return own ? own.id : null;
 }
 const GENERIC = new Set(['api', 'v1', 'v2', 'v3', 'src', 'http', 'https', 'get', 'put', 'post', 'patch', 'delete', 'controller', 'dto', 'ts', 'js', 'mjs', 'json', 'yaml', 'yml', 'response', 'request', 'id', 'existing', 'the', 'and', 'for', 'with', 'index', 'module', 'service', 'lib', 'app', 'route', 'endpoint', 'meaning']);
 const words = (t) => new Set(String(t ?? '').replace(/([a-z0-9])([A-Z])/g, '$1 $2').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean).map((x) => (x.length > 3 && x.endsWith('s') ? x.slice(0, -1) : x)).filter((x) => x.length > 1 && !GENERIC.has(x)));

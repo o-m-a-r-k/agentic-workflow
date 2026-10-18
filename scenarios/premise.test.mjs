@@ -632,4 +632,8 @@ test('fifth review of 0.7.31: a planned file is read with its repo, and a spec e
   assert.deepEqual(copy.contracts, ['admin/vendor/openapi.json']);
   const own = twoRepoReach({ components: vendored, changed: { 'openapi.json': '{"paths":{"/b":{}}}\n' }, scope: { endpoints: 1, errorCodes: 0, names: ['GET /b'] } });
   assert.deepEqual(own.contracts, [], 'the api\'s own spec carries the endpoint it states');
+  // Sixth review of 0.7.31: two components hold the repo root (web declared first, packageless both): the api's spec is still its own.
+  const shared = [{ id: 'web', kind: 'web', repo: 'api', dependsOn: [{ component: 'api', via: 'http', contract: 'api/openapi.json' }] }, { id: 'api', kind: 'service', repo: 'api', provides: [{ contract: 'http', spec: 'openapi.json' }] }];
+  const tied = twoRepoReach({ components: shared, changed: { 'openapi.json': '{"paths":{"/b":{}}}\n' }, scope: { endpoints: 1, errorCodes: 0, names: ['GET /b'] } });
+  assert.deepEqual(tied.contracts, [], 'among components tied at the longest package, the one whose spec it is counts');
 });
