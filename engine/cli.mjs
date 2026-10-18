@@ -318,7 +318,8 @@ function summary(root, s, { base = null, resume = false } = {}) {
   };
   if (s.lastGate) lines.push(`  last gate: ${ended(s.lastGate)} (${s.lastGate.runId})`);
   for (const t of s.tracker.done) if (t.provenance === 'host-recorded') lines.push(`  tracker ${t.event}: readback host-recorded (the tracker's answer as the ${findHost(t.host?.runtime)?.label ?? 'harness'} host wrote it in the owner's transcript, not the agent; a process running as the same user could edit that file)`);
-  for (const t of s.tracker.done) if (t.provenance === 'agent-reported, unverified') lines.push(`  tracker ${t.event}: readback agent-reported, unverified (an engine route verifies it: \`wf tracker mode api|cli|files\`)`);
+  // 0.7.30 (D63): how a readback is proven, never a nudge to another tracker route the project did not choose.
+  for (const t of s.tracker.done) if (t.provenance === 'agent-reported, unverified') lines.push(`  tracker ${t.event}: readback agent-reported, unverified (recorded from the owner's session transcript instead, it is host-recorded: \`wf tracker record --event ${t.event} --from-transcript\`)`);
   if (s.checks?.length) lines.push(`  last check: ${ended(s.checks.at(-1))} (${s.checks.at(-1).runId}; light steps only, never counts as the gate)`);
   if (s.flaky?.length) lines.push(`  flaky: ${[...new Set(s.flaky.map((f) => `${f.step}${f.suites?.length ? ` (${f.suites.join(', ')})` : ''}`))].join(', ')} failed and then passed with the same inputs`);
   if (s.criteria && isOpen(s) && !s.accepted) {
