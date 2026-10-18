@@ -35,6 +35,7 @@ import { designChecks, designVerdicts, requiredSkills, reviewDocumentProblems, r
 import { expectOf, expectProblems, PLAN_EXPECT, ROLE_EXPECT } from './expectations.mjs';
 import { obligationSince } from './versions.mjs';
 import { deploymentAfterHandoff, deploymentNext } from './deployment-step.mjs';
+import { analysisFor, analysisStep, latestAnalysis } from './analysis.mjs';
 import { requireOwnerDecision, strategistHandoff, strategistWaiting, strategyApplies, strategyHold } from './strategy.mjs';
 import { consolidationOwed, consolidationStep, courseSignals, courseStep, outstanding, passesSince, passItemsOf, passReady, passStep, unanswered } from './course.mjs';
 import { approveHint, decisionFor, labelOf, requireYes } from './approve.mjs';
@@ -725,7 +726,8 @@ export function handoff(root, role, options) {
   const preferred = defaultRuntime(state);
   const runtime = options.runtime ?? preferred ?? detectOwner()?.runtime;
   if (!isHost(runtime)) throw refuse(`choose --runtime ${hostChoice(' or ')}: this attempt has no recorded owning runtime`);
-  if (state.intent === 'analysis' && role !== 'planner') throw refuse('analysis attempts are read-only; only a planner handoff is allowed');
+  // 0.7.31 (I-216, D67): the refusal names the analysis route (engine/analysis.mjs).
+  if (state.intent === 'analysis' && role !== 'planner') throw refuse('analysis attempts are read-only; only a planner handoff is allowed', 'carry out the investigation read-only and record what it found with `wf analysis record --file <analysis.yaml>` (`wf resume` names each step); to implement it, `wf intent implementation --reason "<the person\'s words>"` first');
   if (role === 'implementer' && !state.criteria) throw refuse('freeze criteria first: `wf plan --file <criteria>`');
   if (role === 'tester' && !cfg.roles?.tester) throw refuse('this project has no tester role configured');
   // Order of work (I-27): code-review rounds run to clean with no gate, then one gate on that tree, then the evidence
@@ -966,6 +968,10 @@ export function handoff(root, role, options) {
     bases: Object.fromEntries(Object.entries(state.repos).map(([k, v]) => [k, git(v.worktree, ['merge-base', v.baseRef ?? v.base, 'HEAD'], { allowFail: true }) || v.base])),
     // What the planner (and every role) reads first: the issue as captured at entry and from the tracker.
     issue: { file: state.issue?.file ?? null, trackerCaptures: state.tracker.done.map((d) => d.capture?.path).filter(Boolean) },
+    // 0.7.31 (I-216, D67): the analysis recorded for this item (a planner: this attempt's once upgraded, or the latest another attempt
+    // of the item recorded; an implementer: one recorded beside this attempt since it was admitted): what it found, with its
+    // evidence, and what it did not trace.
+    analysis: ['planner', 'implementer'].includes(role) ? analysisFor(root, state, role) : undefined,
     // I-127: what this attempt is for now, and why it changed: a planner handed after an analysis attempt was upgraded to
     // implementation plans the implementation (and, before the first implementer, its plan replaces the analysis one).
     intent: ['planner', 'implementer', 'reviewer'].includes(role) ? state.intent : undefined,
@@ -1129,6 +1135,10 @@ export function handoff(root, role, options) {
   if (role === 'reviewer' && mode === 'delta' && bundle.supplementalValidation.length) bundle.instructions += ` \`supplementalValidation\` lists the checks registered, corrected or carried from a batch member since the last reviewed round (${bundle.supplementalValidation.flatMap((v) => v.steps.map((x) => x.id)).join(', ')}): the gate runs each at its pinned commit, so judge its definition and plugin as committed there, not a later copy, and give your verdict on each in \`validationChecked: [{ "id", "commit", "verdict": "complies" | "finding", "evidence", "finding" }]\`; a defect in one is a finding.`;
   if (role === 'reviewer' && bundle.validationsNotCarried) bundle.instructions += ` \`validationsNotCarried\` lists checks a member registered or corrected that this batch does not carry, each with why (${bundle.validationsNotCarried.map((x) => `${x.id} of ${x.member}`).join(', ')}): for those steps the batch's gate follows its own admission adapter, the base's rule, so judge whether the member's criteria still rest on what they proved.`;
   if (role === 'reviewer' && bundle.acceptanceRefused) bundle.instructions += ` \`acceptanceRefused\` lists why \`wf accept\` refused the last evidence round (${bundle.acceptanceRefused.reviewer}'s): your closure must not repeat them. A citation it names is corrected in your own \`criteria\`: each evidence entry cites one artifact exactly as the bundle lists it, and a criterion several screenshots show gets one entry per screenshot, with the same \`id\`.`;
+  // 0.7.31 (I-216, D67): a planner of an analysis plans the investigation; a planner of what follows an analysis is given it.
+  if (role === 'planner' && state.intent === 'analysis') bundle.instructions += ' This attempt is an analysis: plan the investigation. The criteria are the questions it answers, the work items its read-only steps (what to read, run or ask, and where); nothing is implemented or delivered, and the owner records what the investigation found, with the evidence for each answer (`wf analysis record`).';
+  if (role === 'planner' && bundle.analysis) bundle.instructions += ` \`analysis\` is what the analysis of this item (${bundle.analysis.attempt}, ${bundle.analysis.id}) found: an answer with its evidence per question, other findings, what it traced and did not trace (\`notTraced\`), and its recommendation. Plan from what it found; what it did not trace is unknown until your survey or the plan verifies it.`;
+  if (role === 'implementer' && bundle.analysis) bundle.instructions += ` \`analysis\` is what an analysis of this item (${bundle.analysis.attempt}, ${bundle.analysis.id}) found since this attempt began: an answer with its evidence per question, what it traced and did not trace (\`notTraced\`), and its recommendation. Build on what it found; what it did not trace is unknown, so verify what your change rests on there before you rely on it.`;
   // 0.7.30 (D51, D53): what a repair is handed beyond the findings, and which files of a delta are the attempt's own.
   if (role === 'implementer' && bundle.failedGate) bundle.instructions += ` \`failedGate\` holds the facts of the last gate${bundle.failedGate.status === 'stopped' ? ', stopped after these steps failed (its `stop` says why)' : ''}: what failed, each failing step's log and, where it names no test, the end of its output.`;
   if (role === 'implementer' && bundle.failedCheck) bundle.instructions += ' `failedCheck` holds the facts of the last `wf check`, which failed: what failed, each failing step\'s log and, where it names no test, the end of its output. Fix what it shows at its cause.';
@@ -3446,8 +3456,13 @@ export function nextDecision(root, state) {
   if (waiting) return result('strategy', 'owner', `strategist ${waiting.agent} was handed and has recorded no decision`, { guidance: withAttempt(root, state, waitingText(waiting)), handoff: waiting.bundle });
   const atCapacity = stoppedAtCapacity(state);
   if (atCapacity.length) return result('resume', 'owner', `${atCapacity.map((h) => `${h.role} ${h.agent}`).join(', ')} stopped because the model was at capacity`, { course: false, handoff: atCapacity[0].bundle, guidance: atCapacity.map((h) => `${h.role} ${h.agent} stopped because the model was at capacity: \`wf handoff run --agent ${h.agent} --attempt ${state.id}\` resumes its session when the model has room; no fresh handoff; if its work was finished another way, \`wf handoff close --agent ${h.agent} --attempt ${state.id}\` settles it`).join('; ') });
+  // 0.7.31 (I-216, D67): an analysis attempt plans, records what its investigation found, and is upgraded or closed; never an
+  // implementer, a gate or a review (engine/analysis.mjs).
+  if (state.intent === 'analysis') return result('analysis', 'owner', !state.criteria ? 'the investigation is not planned yet' : latestAnalysis(state) ? 'the analysis is recorded; what follows is the person\'s decision' : 'the investigation is not recorded yet');
   if (state.intent !== 'implementation' || state.lane === 'batch' || (state.batchOf && !state.batchPending)) return result('owner', 'owner', 'this trial advances standalone implementation attempts only');
   if (!state.criteria) return result('plan', 'owner', 'criteria must be frozen by the owner');
+  // 0.7.31 (I-216): an attempt upgraded from analysis plans the implementation before any implementer is handed.
+  if (replanAfterUpgrade(state)) return result('plan', 'owner', 'the frozen plan was written for the analysis this attempt was upgraded from');
   const recordedLate = lateInRecordedRepos(state);
   if (recordedLate.length) return result('repair', 'owner', recordedLate.join('; '), { course: false, guidance: `${recordedLate.join('; ')}: a repo recorded for a delivery is not delivered again, so that change belongs to a new attempt (\`wf entry\`) and this attempt's worktree has to hold what was recorded` });
   if (state.accepted && !moved.length) return result('delivery', 'owner', 'accepted; delivery and presentation remain with the owning chat');
@@ -3562,7 +3577,7 @@ function legacyNextAction(root, state) {
 
 function nextStep(root, state) {
   const cfg = loadConfig(root);
-  if (state.phase === 'done') return state.shipped ? `nothing: closed as shipped outside the workflow (${state.shipped.at}, decision ${state.shipped.decision ?? 'none'}), without its acceptance` : 'nothing: this attempt is closed';
+  if (state.phase === 'done') return state.shipped ? `nothing: closed as shipped outside the workflow (${state.shipped.at}, decision ${state.shipped.decision ?? 'none'}), without its acceptance` : state.analysisClosed ? `nothing: the analysis is closed (${state.analysisClosed.reason}); what it found: \`wf analysis show --attempt ${state.id}\`` : 'nothing: this attempt is closed';
   // 0.7.27 (D42): the deployment confirmation the delivery waits for comes after the delivered handoff, before the lesson.
   const deploying = state.phase === 'handoff-pending' && !state.tracker.pending.length && !needsShown(state) ? deploymentNext(root, state) : null;
   if (deploying) return deploying;
@@ -3654,6 +3669,18 @@ function phaseStep(root, cfg, state) {
   if (!state.criteria) {
     if (needsPlanner(cfg, state) && !state.handoffs.some((h) => h.role === 'planner')) return 'start the planner: `wf handoff planner --agent <id>`';
     return 'freeze the criteria: `wf plan --file <criteria.yaml>`';
+  }
+  // 0.7.31 (I-216, D67): an analysis attempt never hands an implementer: its investigation is recorded, then it is upgraded or
+  // closed (engine/analysis.mjs).
+  if (state.intent === 'analysis') return analysisStep(state);
+  // 0.7.31 (I-216): upgraded from an analysis after its plan was frozen, with no implementer handed yet. That plan was written for
+  // the investigation (a planner plans one for an analysis), so a fresh planner plans the implementation, given the analysis.
+  // Named failure: the next step named implementers for the analysis plan's investigation work items.
+  if (replanAfterUpgrade(state)) {
+    const upgradedAt = (state.intentChanges ?? []).filter((c) => c.to === 'implementation').at(-1)?.at ?? '';
+    const planner = (state.handoffs ?? []).filter((h) => h.role === 'planner' && String(h.at ?? '') >= upgradedAt).at(-1);
+    if (planner) return `record planner ${planner.agent}'s implementation plan when it reports: \`wf plan --from-agent ${planner.agent}\` (it replaces the analysis plan whole); then the implementers`;
+    return `this attempt was upgraded to implementation after its plan was frozen, and that plan was written for the analysis: hand a fresh planner for the implementation (\`wf handoff planner --agent <new id>\` [${agentTypeFor(cfg, 'planner')}]; its bundle says why the intent changed${latestAnalysis(state) ? ' and carries the recorded analysis' : ''}); its plan, recorded with \`wf plan --from-agent <id>\`, replaces the analysis plan whole, and the implementers start on it`;
   }
   // 0.7.28 (I-210): a step that hands an implementer or a new code-review round goes to the strategist first while a course signal
   // stands that no strategist has answered (engine/course.mjs), as `nextDecision` routes it.

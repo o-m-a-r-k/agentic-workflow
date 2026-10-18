@@ -211,7 +211,7 @@ test('every wf command an agent-facing text names exists, and no text asks the p
     ...fs.readdirSync(path.join(ROOT, 'templates', 'agents')).map((f) => `templates/agents/${f}`),
     ...fs.readdirSync(path.join(ROOT, 'skills')).map((d) => `skills/${d}/SKILL.md`).filter((f) => fs.existsSync(path.join(ROOT, f))),
   ];
-  const engineStrings = ['engine/lifecycle.mjs', 'engine/strategy.mjs', 'engine/discovered.mjs', 'engine/scope-decisions.mjs', 'engine/cli.mjs'];
+  const engineStrings = ['engine/lifecycle.mjs', 'engine/strategy.mjs', 'engine/discovered.mjs', 'engine/scope-decisions.mjs', 'engine/cli.mjs', 'engine/analysis.mjs'];
   const problems = [];
   const dead = [/start(?:s)? (?:a|their) message with/i, /message starts with/i, /`override </, /`release </, /`defer [^`\s]+:[^`\s]+`/];
   const check = (file, text) => {

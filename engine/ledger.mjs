@@ -148,6 +148,9 @@ export function reduce(entries) {
     intent: null,
     // `wf intent implementation`: an analysis attempt upgraded in place (from, to, reason).
     intentChanges: [],
+    // 0.7.31 (I-216, D67): what an analysis attempt found (`wf analysis record`, the latest last) and its close (engine/analysis.mjs).
+    analyses: [],
+    analysisClosed: null,
     owner: null,
     originRuntime: null,
     runtimePreference: null,
@@ -793,6 +796,15 @@ export function reduce(entries) {
       case 'abandoned':
         s.abandoned = { reason: d.reason, at: e.at };
         s.phase = 'abandoned';
+        break;
+      // 0.7.31 (I-216, D67): an analysis attempt's findings, and its close once what follows is decided.
+      case 'analysis.recorded':
+        s.analyses.push({ ...d, at: e.at, by: e.actor });
+        break;
+      case 'analysis.closed':
+        s.analysisClosed = { reason: d.reason, analysis: d.analysis ?? null, at: e.at, by: e.actor };
+        s.closedAt = e.at;
+        s.phase = 'done';
         break;
       // I-116: closed as it shipped, outside the workflow's acceptance (the person's decision); its hold ends with it.
       case 'shipped.closed':
