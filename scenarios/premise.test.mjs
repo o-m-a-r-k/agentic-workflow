@@ -420,9 +420,12 @@ test('second review of 0.7.31: a stated fix explains a migration only by naming 
   // A stated fix that names the migrations folder explains the migration added there.
   const b = project('pm-mig-path');
   assert.deepEqual(fixRoundWith(b, { what: 'store the rounded total: a new migration in db/migrations/ and the service change', minutes: 40 }, { 'src/a.txt': LINES.replace('l2', 'L2 rounded'), 'db/migrations/003_total.sql': 'alter table invoice add column total_rounded numeric;\n' }), []);
-  // The folder's index (a barrel that lists the migrations) is not a migration.
+  // The folder's index (a barrel that lists the migrations), and its type declarations, are not migrations.
   const c = project('pm-mig-barrel');
-  assert.deepEqual(fixRoundWith(c, { what: 'round the total once', minutes: 30 }, { 'src/a.txt': LINES.replace('l2', 'L2 rounded'), 'db/migrations/index.ts': 'export const migrations = [];\n' }), []);
+  assert.deepEqual(fixRoundWith(c, { what: 'round the total once', minutes: 30 }, { 'src/a.txt': LINES.replace('l2', 'L2 rounded'), 'db/migrations/index.ts': 'export const migrations = [];\n', 'db/migrations/index.d.ts': 'export declare const migrations: string[];\n' }), []);
+  // Third review of 0.7.31: a folder named in another case is the same folder.
+  const d = project('pm-mig-case');
+  assert.deepEqual(fixRoundWith(d, { what: 'store the rounded total: a new migration in DB/Migrations/', minutes: 40 }, { 'src/a.txt': LINES.replace('l2', 'L2 rounded'), 'db/migrations/003_total.sql': 'alter table invoice add column total_rounded numeric;\n' }), []);
 });
 
 test('second review of 0.7.31: a round that builds planned work and also fixes findings is judged by what it fixes', () => {
@@ -463,5 +466,52 @@ test('second review of 0.7.31: a work item handed again with words naming an ope
   ok(wf(p.root, ['handoff', 'close', '--agent', 'iB', '--attempt', p.id]));
   const reach = ok(wf(p.root, ['signals', '--attempt', p.id, '--json'])).json().reach;
   assert.deepEqual(reach.map((x) => [x.agent, x.contracts]), [['iB', ['openapi.json']]]);
-  assert.match(ok(wf(p.root, ['signals', '--attempt', p.id])).out, /handed D1, with 1 handed item with no stated fix \(unbounded\): D1/);
+  const text = ok(wf(p.root, ['signals', '--attempt', p.id])).out;
+  assert.match(text, /handed D1, with 1 handed item with no stated fix \(unbounded\): D1/);
+  // Third review of 0.7.31: it is a re-handoff of the work item, not a fix round, and the line says so.
+  assert.match(text, /the re-handoff of work item W2 to implementer iB changed the contract openapi\.json/);
+});
+
+test('third review of 0.7.31: a work item whose definition an amendment restated since its last build, stating the contract change, is planned work for it', () => {
+  const p = twoItems('pm-reach-amended');
+  ok(wf(p.root, ['handoff', 'implementer', '--agent', 'iA', '--work', 'W1', '--attempt', p.id]));
+  ok(wf(p.root, ['handoff', 'implementer', '--agent', 'iB', '--work', 'W2', '--attempt', p.id]));
+  commitIn(p.wt, { 'src/a.txt': LINES.replace('l2', 'L2'), 'src/b.txt': LINES.replace('l2', 'L2') }, 'W1 and W2');
+  writeReport(p.root, p.id, 'iB', { left: [DUE] });
+  ok(wf(p.root, ['handoff', 'close', '--agent', 'iA', '--attempt', p.id]));
+  ok(wf(p.root, ['handoff', 'close', '--agent', 'iB', '--attempt', p.id]));
+  ok(wf(p.root, ['check', '--attempt', p.id]));
+  ok(wf(p.root, ['handoff', 'reviewer', '--agent', 'r1', '--attempt', p.id]));
+  record(p, goodClosure('r1', { criteria: [{ id: 'C1', evidence: { kind: 'output', ref: 'log 1' } }, { id: 'C2', evidence: { kind: 'output', ref: 'log 2' } }] }));
+  // The owner restates W2 with the accepted contract: the /b response carries the due date as a date (D1).
+  const work = [WORK[0], { ...WORK[1], why: 'b, and fix D1: the /b response sends dueDate as a date under this accepted contract' }];
+  ok(wf(p.root, ['criteria', 'amend', '--file', closureFile(p.base, { work, scope: { endpoints: ['GET /b'] }, impact: { unchanged: 'the same module' } }), '--reason', 'accept the /b contract for D1', '--attempt', p.id]));
+  ok(wf(p.root, ['handoff', 'implementer', '--agent', 'iB', '--work', 'W2', '--attempt', p.id]));
+  assert.deepEqual(resume(p).handoffs.at(-1).fixes, { named: ['D1'], unbounded: ['D1'] }, 'D1 is still what it was handed');
+  commitIn(p.wt, { 'src/b.txt': LINES.replace('l3', 'L3 as a date'), 'openapi.json': '{"paths":{"/b":{"dueDate":"date"}}}\n' }, 'D1 under the accepted contract');
+  ok(wf(p.root, ['handoff', 'close', '--agent', 'iB', '--attempt', p.id]));
+  assert.deepEqual(ok(wf(p.root, ['signals', '--attempt', p.id, '--json'])).json().reach, [], 'the amendment planned that contract change');
+});
+
+test('third review of 0.7.31: an amendment that changes a criterion of a work item re-plans it; restating its words alone does not', () => {
+  const run = (name, amendment) => {
+    const p = twoItems(name);
+    ok(wf(p.root, ['handoff', 'implementer', '--agent', 'iA', '--work', 'W1', '--attempt', p.id]));
+    ok(wf(p.root, ['handoff', 'implementer', '--agent', 'iB', '--work', 'W2', '--attempt', p.id]));
+    commitIn(p.wt, { 'src/a.txt': LINES.replace('l2', 'L2'), 'src/b.txt': LINES.replace('l2', 'L2') }, 'W1 and W2');
+    writeReport(p.root, p.id, 'iB', { left: [DUE] });
+    ok(wf(p.root, ['handoff', 'close', '--agent', 'iA', '--attempt', p.id]));
+    ok(wf(p.root, ['handoff', 'close', '--agent', 'iB', '--attempt', p.id]));
+    ok(wf(p.root, ['check', '--attempt', p.id]));
+    ok(wf(p.root, ['handoff', 'reviewer', '--agent', 'r1', '--attempt', p.id]));
+    record(p, goodClosure('r1', { criteria: [{ id: 'C1', evidence: { kind: 'output', ref: 'log 1' } }, { id: 'C2', evidence: { kind: 'output', ref: 'log 2' } }] }));
+    ok(wf(p.root, ['criteria', 'amend', '--file', closureFile(p.base, { ...amendment, impact: { unchanged: 'the same module' } }), '--reason', 'restate W2 for D1', '--attempt', p.id]));
+    ok(wf(p.root, ['handoff', 'implementer', '--agent', 'iB', '--work', 'W2', '--attempt', p.id]));
+    commitIn(p.wt, { 'src/b.txt': LINES.replace('l3', 'L3 as a date'), 'openapi.json': '{"paths":{"/b":{"dueDate":"date"}}}\n' }, 'D1');
+    ok(wf(p.root, ['handoff', 'close', '--agent', 'iB', '--attempt', p.id]));
+    return ok(wf(p.root, ['signals', '--attempt', p.id, '--json'])).json().reach;
+  };
+  const restated = [WORK[0], { ...WORK[1], why: 'b, and fix D1' }];
+  assert.deepEqual(run('pm-reach-replanned', { work: restated, criteria: [{ id: 'C2', text: 'b changes, and its response sends the due date as a date', uat: 'b shows a date' }] }), [], 'the criterion it builds toward changed: planned');
+  assert.equal(run('pm-reach-reworded', { work: restated }).length, 1, 'new words naming D1, no new goal and no stated contract: still judged');
 });

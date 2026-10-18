@@ -107,7 +107,9 @@ export function filesSignal(state, cfg) {
 // "no migration is needed", explained every migration of the round). A round handed no non-blocking item without a stated fix is also
 // allowed the contract files and migrations this attempt's own earlier commits already changed (the plan's surface, adjusted). What
 // is left (a contract or a migration reached from an item located elsewhere, or from one with no location or stated fix) is the
-// named failure. Measured on the same ledgers: 1 of 279 rounds handed after a first review, and that one is the named failure.
+// named failure. Measured on the same ledgers (third review of 0.7.31: only handoffs whose implementer closed with its heads,
+// since one never closed is measured by the engine against its own worktree, which is gone): 1 of 229 rounds handed after a first
+// review fires, and that one is the named failure; 51 more never closed and cannot be measured from the main checkouts.
 // Review of 0.7.31 (L7): a documentation or test file is never a migration (`docs/migration/notes.md` read as one).
 // Review of 0.7.31 (L1): implementers open at once in a repo cannot be told apart by their commits: the line names them together,
 // once, never one of them alone.
@@ -142,6 +144,13 @@ function itemFiles(state, ref) {
   return { files: out, dirs };
 }
 const touches = (cfg, located, repo, file) => located.some((l) => l === file || l === rootOf(cfg, repo, file) || (cfg?.repos ?? []).some((r) => rootOf(cfg, r.name, l) === rootOf(cfg, repo, file)));
+// The amendments that restated this handoff's work item after its last build (the previous implementer handed it) and before this
+// handoff, each with its words and the contract scope it states.
+function amendedSinceLastBuild(state, h) {
+  if (!h.work) return [];
+  const last = (state.handoffs ?? []).filter((x) => x.role === 'implementer' && x.at < h.at && (x.work === h.work || (x.covers ?? []).includes(h.work))).at(-1)?.at ?? '';
+  return (state.workAmended?.[h.work] ?? []).filter((a) => a.at > last && a.at <= h.at).map((a) => ({ ...a, scope: state.criteriaAmendments?.[a.amendment - 1]?.scope ?? null }));
+}
 function ownChanges(state, impl, repos) {
   const changed = {};
   for (const name of repos) {
@@ -181,12 +190,27 @@ export function reachOf(state, cfg, h) {
   const items = handed.map((ref) => itemFiles(state, ref));
   const located = items.flatMap((x) => x.files);
   const spec = (c, f) => (cfg?.components ?? []).some((x) => x.id === c && (x.provides ?? []).some((p) => p.spec && rootOf(cfg, f.repo, f.file).endsWith(p.spec)));
+  // Third review of 0.7.31: a re-handoff of a work item an amendment restated since its last build is planned work for what the
+  // amendment says it changes: the contract when it states endpoints or error codes (`scope`), or names the file; a migration when
+  // it names its path or folder. Named case (a review's): an owner restated a work item 31 seconds before handing it again, stating
+  // the new response DTO of one endpoint; the controller and DTO it changed were that plan, not a reach. Items it names whose fix
+  // the amendment does not state are still judged.
+  const amended = amendedSinceLastBuild(state, h);
+  const amendedFiles = amended.flatMap((a) => [...String(a.why).matchAll(PATHS)].map((m) => m[1]));
+  const amendedDirs = amended.flatMap((a) => [...String(a.why).matchAll(MIGRATION_DIRS)].map((m) => m[1]));
+  // The amendment also re-planned the work item when it added or changed one of its criteria: the plan's goals for it moved, and
+  // what it builds toward them is planned (a second named case: an amendment changed the contract criterion of a work item and
+  // handed its API files to another, 20 seconds before the item was handed again).
+  const replanned = amended.some((a) => (a.replanned ?? []).length > 0);
+  const statesContract = replanned || amended.some((a) => Number(a.scope?.endpoints) > 0 || Number(a.scope?.errorCodes) > 0);
   const direct = perFile.filter((f) => touches(cfg, located, f.repo, f.file));
   const covered = perFile.filter((f) => direct.includes(f) || f.components.some((c) => spec(c, f) && direct.some((d) => d.components.includes(c))));
-  const contracts = [...new Set(perFile.filter((f) => !covered.includes(f)).map((f) => f.file))];
+  const byAmendment = (f) => statesContract || touches(cfg, amendedFiles, f.repo, f.file);
+  const contracts = [...new Set(perFile.filter((f) => !covered.includes(f) && !byAmendment(f)).map((f) => f.file))];
   const dirs = items.flatMap((x) => x.dirs);
-  const underNamedDir = (m) => dirs.some((d) => [d, ...(cfg?.repos ?? []).map((r) => rootOf(cfg, r.name, d))].some((c) => rootOf(cfg, m.repo, m.file).startsWith(c)));
-  const migrations = migrationsAll.filter((m) => !touches(cfg, located, m.repo, m.file) && !underNamedDir(m)).map((m) => m.file);
+  // Third review of 0.7.31: a folder is found in any case (the pattern that reads it ignores case), so it is compared the same way.
+  const underNamedDir = (m, ds = dirs) => ds.some((d) => [d, ...(cfg?.repos ?? []).map((r) => rootOf(cfg, r.name, d))].some((c) => rootOf(cfg, m.repo, m.file).toLowerCase().startsWith(c.toLowerCase())));
+  const migrations = migrationsAll.filter((m) => !replanned && !touches(cfg, located, m.repo, m.file) && !underNamedDir(m) && !touches(cfg, amendedFiles, m.repo, m.file) && !underNamedDir(m, amendedDirs)).map((m) => m.file);
   // The files this attempt's own earlier commits (from its base to this handoff) already changed: a surface the plan's work opened.
   const earlier = new Set(Object.entries(ownChanges(state, { heads: Object.fromEntries(Object.entries(state.repos ?? {}).map(([n, r]) => [n, r.base])), closedAt: true, closedHeads: impl.heads }, repos)).flatMap(([repo, files]) => files.map((f) => `${repo}:${f}`)));
   const fresh = (repo, file) => !earlier.has(`${repo}:${file}`);
@@ -217,7 +241,7 @@ export function reachSignal(state, cfg) {
     const agents = [...new Set([h.agent, ...together])];
     const same = out.find((o) => o.agents.length > 1 && o.agents.join() === [...agents].sort().join() && o.contracts.join() === r.contracts.join() && o.migrations.join() === r.migrations.join());
     if (same) continue;
-    out.push({ handoff: h.bundle, agent: h.agent, agents: agents.length > 1 ? [...agents].sort() : [h.agent], repos: Object.keys(r.changed), kind: h.fixes.pass ? 'pass' : 'fix', contracts: r.contracts, migrations: r.migrations, fixes: h.fixes, at: r.impl.closedAt ?? null });
+    out.push({ handoff: h.bundle, agent: h.agent, agents: agents.length > 1 ? [...agents].sort() : [h.agent], repos: Object.keys(r.changed), kind: h.fixes.pass ? 'pass' : h.fixes.repair?.length || h.fixes.alsoFix?.length ? 'fix' : 'rehandoff', work: h.work ?? null, contracts: r.contracts, migrations: r.migrations, fixes: h.fixes, at: r.impl.closedAt ?? null });
   }
   return out;
 }
@@ -228,7 +252,8 @@ export const reachLine = (r) => {
   const what = [r.contracts.length ? `changed the contract ${r.contracts.join(', ')}` : '', r.migrations.length ? `added or changed a migration (${r.migrations.join(', ')})` : ''].filter(Boolean).join(' and ');
   const handed = handedItems(r.fixes);
   const unbounded = r.fixes.unbounded ?? [];
-  const who = (r.agents ?? [r.agent]).length > 1 ? `the rounds of implementers ${r.agents.join(' and ')}, open at once in ${r.repos.join(', ')} (their commits cannot be told apart),` : `the ${r.kind === 'pass' ? 'planned pass' : 'fix round'} of implementer ${r.agent}`;
+  // Third review of 0.7.31: a work item handed again for the items its words name is a re-handoff, never "the fix round".
+  const who = (r.agents ?? [r.agent]).length > 1 ? `the rounds of implementers ${r.agents.join(' and ')}, open at once in ${r.repos.join(', ')} (their commits cannot be told apart),` : r.kind === 'rehandoff' ? `the re-handoff of work item ${r.work ?? '(none)'} to implementer ${r.agent}` : `the ${r.kind === 'pass' ? 'planned pass' : 'fix round'} of implementer ${r.agent}`;
   return `${who} ${what}, where no handed item is located and no stated fix names it; handed ${handed.join(', ') || 'nothing named'}${unbounded.length ? `, with ${unbounded.length} handed item${unbounded.length > 1 ? 's' : ''} with no stated fix (unbounded): ${unbounded.join(', ')}` : ''}: a contract change, a new failure path or a migration is a re-plan, never built in a fix round or a pass; the strategist decides whether it stands (\`continue\`), is re-planned (\`consolidate\`) or goes back`;
 };
 

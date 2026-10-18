@@ -197,6 +197,7 @@ export function reduce(entries) {
     // When each work item id first appeared (the plan's or an amendment's): an unscoped implementer handed before 0.7.0
     // covers the items that existed when it was handed (`unstartedWork`, engine/lifecycle.mjs).
     workIntroduced: {},
+    workAmended: {},
     roles: { planner: [], implementer: [], reviewer: [], tester: [], strategist: [] },
     handoffs: [],
     gates: [],
@@ -328,6 +329,12 @@ export function reduce(entries) {
         break;
       case 'criteria.amended':
         s.criteria = d.criteria;
+        // Third review of 0.7.31: each work item an amendment restated (its definition changed), when and in what words, so the
+        // course can tell a re-handoff of amended work (planned by the amendment) from one nobody planned (engine/signals.mjs).
+        for (const w of d.work ?? []) {
+          const before = (s.work ?? []).find((x) => x.id === w.id);
+          if (!before || JSON.stringify(before) !== JSON.stringify(w)) (s.workAmended[w.id] ??= []).push({ at: e.at, amendment: s.criteriaAmendments.length + 1, why: [w.why, w.summary, w.text].filter((x) => typeof x === 'string').join(' '), criteria: Array.isArray(w.criteria) ? w.criteria : [], replanned: [...(d.changes?.added ?? []), ...(d.changes?.changed ?? [])].filter((c) => (w.criteria ?? []).includes(c)) });
+        }
         if (d.work) s.work = d.work;
         for (const w of d.work ?? []) s.workIntroduced[w.id] ??= e.at;
         s.criteriaAmendments.push({ at: e.at, reason: d.reason, by: e.actor, changes: d.changes ?? null, impact: d.impact ? true : d.impactOwed ? 'owed' : null, engine: d.engine ?? null, ...(d.withdrewAcceptance === true ? { withdrewAcceptance: true } : {}) });
@@ -500,9 +507,13 @@ export function reduce(entries) {
         if (x) Object.assign(x, { closedAt: e.at, outcome: d.outcome ?? 'done', closedHeads: d.heads ?? null, commits: d.commits ?? null, ...(d.closedBy ? { closedBy: d.closedBy } : {}) });
         break;
       }
-      case 'scope.changed':
+      case 'scope.changed': {
         s.scopeChanges.push({ ...d, at: e.at });
+        // Third review of 0.7.31: what the amendment says it changes in the contract (`scope.endpoints`, `scope.errorCodes`).
+        const a = s.criteriaAmendments[(d.amendment ?? 0) - 1];
+        if (a) a.scope = { endpoints: d.endpoints ?? null, errorCodes: d.errorCodes ?? null, stated: d.stated ?? null };
         break;
+      }
       case 'subagents.attributed':
         for (const c of d.children ?? []) if (!s.subagents.some((y) => y.agentId === c.agentId)) s.subagents.push({ ...c, parentHandoff: d.handoff, at: e.at });
         break;
