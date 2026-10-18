@@ -257,10 +257,12 @@ export function entry(root, options) {
   if (source) for (const [name, branch] of Object.entries(targets)) if ((source.repos[name]?.target ?? cfg.repos.find((r) => r.name === name).base) === branch) throw refuse(`--port: ${source.id} is already delivered to ${name} -> ${branch}`, null, { id: 'targets:port-same' });
   if (alsoTargets.length && (options.deferHeavy === true || options.sibling)) throw refuse('--also-target: a batch member is delivered with its batch; port it once the batch is delivered (`wf entry --port <member> --target <repo>=<branch>`)', null, { id: 'targets:batch' });
   // A sibling attempt (`wf split`) works part of the same item beside its parent; a port (another target) beside its source.
-  if (!options.sibling) {
+  // 0.7.31 (I-216, D67): an analysis beside an open attempt of its item (the premise of a fix traced before the fix round): it
+  // changes, delivers and moves nothing, and what it records reaches that attempt's next implementers (engine/analysis.mjs).
+  if (!options.sibling && intent !== 'analysis') {
     for (const id of listAttempts(root)) {
       const s = loadState(root, id);
-      if (s.item === item && OPEN(s) && targetsKey(attemptTargets(s)) === targetsKey(targets)) throw refuse(`${item} already has an open attempt ${id} owned by ${s.owner}`, `continue it, or take it over with \`wf adopt --attempt ${id}\`${Object.keys(targets).length ? '' : '; the same item on another branch is admitted with `--target <repo>=<branch>`'}`);
+      if (s.item === item && OPEN(s) && targetsKey(attemptTargets(s)) === targetsKey(targets)) throw refuse(`${item} already has an open attempt ${id} owned by ${s.owner}`, `continue it, or take it over with \`wf adopt --attempt ${id}\`${s.intent === 'analysis' ? `; ${id} is an analysis: \`wf intent implementation --attempt ${id} --reason "<the person's words>"\` implements it in place, or \`wf analysis close --attempt ${id} --reason "<what follows>"\` once it is recorded` : ''}${Object.keys(targets).length ? '' : '; the same item on another branch is admitted with `--target <repo>=<branch>`'}`);
     }
   }
   const id = assertSafeId(options.id ?? nextAttemptId(root, item), 'attempt id');

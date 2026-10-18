@@ -39,6 +39,7 @@ import { courseLines, pastEstimates } from './signals.mjs';
 import { splitCommand } from './split.mjs';
 import { deploymentLine } from './deployment-step.mjs';
 import { productDecisionLines } from './product-decisions.mjs';
+import { analysisLine, analysisText, closeAnalysis, latestAnalysis, recordAnalysis } from './analysis.mjs';
 
 const help = () => `wf ${ENGINE_VERSION} — agentic-workflow
 
@@ -187,6 +188,13 @@ Work
                                     close --retire --reason "..." retires a check that caught nothing; review lists refusal ids and who cites them
   wf intent implementation --attempt ID --reason "why"
                                     upgrade an analysis attempt in place once the owner asks for the implementation
+  wf analysis record --file analysis.yaml
+                                    an analysis attempt: what the investigation found, an answer with its evidence per frozen
+                                    criterion ({ summary, criteria: [{ id, answer, evidence: [{ kind, ref, result }] } | { id,
+                                    unanswered }], findings, traced, notTraced, recommendation })
+  wf analysis show [--all] [--json]   what the analysis found, for the person or a ticket (also once it is closed)
+  wf analysis close --reason "what follows"
+                                    finish an analysis with a recorded record; the planner of the item's next attempt is given it
   wf unlock --attempt ID            remove the evidence lock of an attempt whose owner process is gone (a live owner is refused)
   wf hold --reason "why" | wf release   (release asks the owner to confirm with \`wf approve\`)
   wf decisions [--all]              the owner's reserved decisions on the attempt, pending first
@@ -361,11 +369,14 @@ function summary(root, s, { base = null, resume = false } = {}) {
   if (s.phase === 'handoff-pending' && s.tracker.pending.some((a) => a.rendered === 'delivered')) lines.push(`  delivered comment: ${s.delivery.summary ? commentFile(root, s.id) : 'needs the owner\'s summary: `wf summary --file <summary.md>`'}`);
   // 0.7.27 (D42): the deployment confirmation the delivery waits for, as it stands.
   if (s.deployment?.owed) lines.push(`  ${deploymentLine(s)}`);
+  // 0.7.31 (I-216, D67): what an analysis attempt recorded, and its close.
+  if (latestAnalysis(s)) lines.push(`  ${analysisLine(s)}`);
   if (resume) {
     const last = s.exports?.filter((x) => !x.json).at(-1)?.file ?? (fs.existsSync(exportFile(root, s.id)) ? exportFile(root, s.id) : null);
     lines.push(`  export: ${last ?? 'none yet'}${last ? '' : ' (`wf export` writes one page for this attempt)'}`);
     const p = s.plan && typeof s.plan === 'object' ? s.plan : s.plan ? { summary: s.plan } : null;
-    const missing = p ? ['contract', 'anchors'].filter((k) => p[k] === undefined) : [];
+    // An analysis hands no implementer (0.7.31, I-216): its plan owes neither section.
+    const missing = p && s.intent !== 'analysis' ? ['contract', 'anchors'].filter((k) => p[k] === undefined) : [];
     if (missing.length) lines.push(`  warning: the frozen plan has no ${missing.join(' or ')} section, so implementers have none to follow`);
   }
   let past = [];
@@ -1336,6 +1347,26 @@ async function dispatch(cmd, sub, positional, options) {
     case 'intent': {
       const r = setIntent(root, options, sub);
       print(options, r.changed ? `${r.state.id} is now an implementation attempt (was analysis; recorded with the reason).\n${summary(root, r.state)}` : `${r.state.id} is already an implementation attempt`, r.state);
+      return 0;
+    }
+    // 0.7.31 (I-216, D67): an analysis attempt's findings, shown and closed (engine/analysis.mjs).
+    case 'analysis': {
+      if (!['record', 'show', 'close'].includes(sub)) throw new WfError('usage: wf analysis record --file <analysis.yaml> | wf analysis show [--all] [--json] | wf analysis close --reason "<what follows>" [--attempt ID]');
+      if (sub === 'record') {
+        const s = recordAnalysis(root, options);
+        const a = latestAnalysis(s);
+        print(options, `${s.id}: analysis ${a.id} recorded (${a.criteria.length} question(s) answered or marked unanswered${a.findings.length ? `, ${a.findings.length} other finding(s)` : ''}).\nnext: ${nextAction(root, s)}`, a);
+        return 0;
+      }
+      if (sub === 'close') {
+        const s = closeAnalysis(root, options);
+        print(options, `${s.id}: analysis closed (${s.analysisClosed.reason}); its worktrees are removed and its branch kept. What it found: \`wf analysis show --attempt ${s.id}\`; the planner of ${s.item}'s next attempt, and the next implementers of one already open, are given it.`, s);
+        return 0;
+      }
+      const s = openState(root, options);
+      const list = options.all ? s.analyses ?? [] : [latestAnalysis(s)].filter(Boolean);
+      if (!list.length) throw refuse(`${s.id} has no recorded analysis${s.intent === 'analysis' ? '' : ` (it is an ${s.intent} attempt)`}`, s.intent === 'analysis' ? '`wf resume` says what records it' : null, { id: 'analysis:none' });
+      print(options, list.map((a) => analysisText(s, a)).join('\n\n'), options.all ? list : list[0]);
       return 0;
     }
     case 'unlock': {

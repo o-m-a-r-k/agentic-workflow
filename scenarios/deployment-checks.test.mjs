@@ -32,7 +32,8 @@ test('0.7.27 (I-196): tested where possible: a recorded reason it could not be t
   assert.ok(t.out.includes(`tracker (deployed): post this comment unchanged:\n${body.trimEnd().replace(/^(?=.)/gm, '    ')}\n  then set status to "Done"`), t.out);
   const pending = state(c.root, a.id).tracker.pending.filter((x) => x.event === 'deployed');
   assert.deepEqual(pending.map((x) => [x.op, x.status ?? x.body ?? null]), [['comment', body], ['setStatus', 'Done'], ['readback', null]]);
-  assert.match(resume(c, a.id), /tracker \(deployed\): through the connector: post the comment `wf status --json` shows under tracker\.pending \(its `body`\) unchanged, set status to "Done"/);
+  // 0.7.31 (I-215, D68): the Linear adapter's own words for each step come first, then the workflow's.
+  assert.match(resume(c, a.id), /tracker \(deployed\): through the connector: your tracker adapter's own instructions for these steps, verbatim [^\n]*comment: "Linear save_comment with the body `wf` gives for this step [^\n]*\. The workflow's wording: post the comment `wf status --json` shows under tracker\.pending \(its `body`\) unchanged, set status to "Done"/);
   // Idempotent: the settled step is not recorded again, nor closed without, while its tracker step waits.
   assert.match(wf(c.root, ['deployment', 'tested', '--observed', 'again', '--attempt', a.id]).err, /deployment step is already settled \(confirmed, and the fix not testable there\)/);
   assert.match(wf(c.root, ['deployment', 'close', '--reason', 'x', '--attempt', a.id]).err, /already settled/);
