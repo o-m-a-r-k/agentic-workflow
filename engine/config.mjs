@@ -162,6 +162,43 @@ export function expandArtifactGlob(glob, units) {
   return [...new Set(units.map((u) => glob.replace(/\{(\w+)\}/g, (m, k) => vars(u)[k] ?? m)))];
 }
 
+// 0.7.30 (I-163, D56): each `needs` is a list of other steps of the gate, and no steps need each other in a cycle (the gate
+// would wait forever). A cycle that a ticket's registered check brings in is ended by the gate's scheduler (engine/gate.mjs).
+export function gateNeedsProblems(steps) {
+  const out = [];
+  const ids = new Set(steps.map((s) => s.id));
+  for (const s of steps) {
+    if (s.needs === undefined) continue;
+    if (!Array.isArray(s.needs) || s.needs.some((n) => typeof n !== 'string' || !n)) {
+      out.push(`step \`${s.id}\`: needs must be a list of step ids (the steps whose output it consumes)`);
+      continue;
+    }
+    for (const n of s.needs) {
+      if (n === s.id) out.push(`step \`${s.id}\`: needs names the step itself`);
+      else if (!ids.has(n)) out.push(`step \`${s.id}\`: needs names unknown step \`${n}\``);
+    }
+  }
+  if (out.length) return out;
+  const needsOf = new Map(steps.map((s) => [s.id, s.needs ?? []]));
+  const state = new Map();
+  const cycle = (id, trail) => {
+    if (state.get(id) === 'done') return null;
+    if (state.get(id) === 'open') return [...trail.slice(trail.indexOf(id)), id];
+    state.set(id, 'open');
+    for (const n of needsOf.get(id) ?? []) {
+      const c = cycle(n, [...trail, id]);
+      if (c) return c;
+    }
+    state.set(id, 'done');
+    return null;
+  };
+  for (const s of steps) {
+    const c = cycle(s.id, []);
+    if (c) return [`gate steps need each other in a cycle: ${c.join(' → ')} (\`needs\` names the steps whose output a step consumes; one of them must not need the other)`];
+  }
+  return out;
+}
+
 function normalize(raw, source) {
   const errors = [];
   const fail = (m) => errors.push(m);
@@ -531,38 +568,6 @@ function readAdapter(root, loc, commit) {
   if (!text) throw refuse(`adapter not found at ${loc.repo.name}@${String(commit).slice(0, 10)}:${file}`, 'commit .workflow/ to the base branch before admitting work');
   const where = `${loc.repo.name}@${String(commit).slice(0, 10)}:${file}`;
   return checkAdapter(root, parseConfig(text, where), loc, where);
-}
-
-// 0.7.30 (I-163, D56): each `needs` is a list of other steps of the gate, and no steps need each other in a cycle (the gate
-// would wait forever). Also run on a gate a ticket's registered checks extended (engine/validation.mjs adds steps to it).
-export function gateNeedsProblems(steps) {
-  const out = [];
-  const ids = new Set(steps.map((s) => s.id));
-  for (const s of steps) {
-    if (s.needs === undefined) continue;
-    if (!Array.isArray(s.needs) || s.needs.some((n) => typeof n !== 'string' || !n)) out.push(`step \`${s.id}\`: needs must be a list of step ids (the steps whose output it consumes)`);
-    else for (const n of s.needs) if (n === s.id) out.push(`step \`${s.id}\`: needs names the step itself`);
-    else if (!ids.has(n)) out.push(`step \`${s.id}\`: needs names unknown step \`${n}\``);
-  }
-  if (out.length) return out;
-  const needsOf = new Map(steps.map((s) => [s.id, s.needs ?? []]));
-  const state = new Map();
-  const cycle = (id, trail) => {
-    if (state.get(id) === 'done') return null;
-    if (state.get(id) === 'open') return [...trail.slice(trail.indexOf(id)), id];
-    state.set(id, 'open');
-    for (const n of needsOf.get(id) ?? []) {
-      const c = cycle(n, [...trail, id]);
-      if (c) return c;
-    }
-    state.set(id, 'done');
-    return null;
-  };
-  for (const s of steps) {
-    const c = cycle(s.id, []);
-    if (c) return [`gate steps need each other in a cycle: ${c.join(' → ')} (\`needs\` names the steps whose output a step consumes; one of them must not need the other)`];
-  }
-  return out;
 }
 
 // Before admission (entry, doctor): the adapter committed at `commit`, located from the working tree.
