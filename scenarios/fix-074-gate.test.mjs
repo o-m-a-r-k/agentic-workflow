@@ -343,11 +343,15 @@ test('I-91: a lease slot that vanishes or cannot be read is waited for, not an e
     await sleep(1500);
     assert.equal(r.child.exitCode, null, `the runner is alive and waiting, not crashed:\n${r.text()}`);
     assert.deepEqual([...watch.seen].filter((pid) => !alive(pid)), [], 'and the step it started is running');
-    fs.rmSync(slot);
-    fs.mkdirSync(slot); // a folder where a slot file should be: EISDIR on read
+    // A folder where a slot file should be (EISDIR on read), swapped in by one rename so the slot is never free in between: a
+    // waiting runner takes a freed slot at once (0.7.30, D57), which a remove-then-create would let it do.
+    const folder = path.join(f.base, 'a-folder');
+    fs.mkdirSync(folder, { recursive: true });
+    fs.symlinkSync(folder, `${slot}.next`);
+    fs.renameSync(`${slot}.next`, slot);
     await sleep(1500);
     assert.equal(r.child.exitCode, null, `still waiting, not crashed:\n${r.text()}`);
-    fs.rmdirSync(slot);
+    fs.rmSync(slot);
     fs.rmSync(holdFile(f));
     assert.equal(await Promise.race([r.ended, sleep(20000).then(() => 'timeout')]), 0, r.text());
     assert.equal(state(f.root, e.id).checks.at(-1).status, 'passed');

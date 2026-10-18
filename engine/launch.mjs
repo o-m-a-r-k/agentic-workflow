@@ -136,7 +136,7 @@ function launchEnv() {
   return env;
 }
 
-// 0.7.30 (I-153). Named failure (audit of role launches): seven launches failed because the model was at capacity (Codex's
+// 0.7.30 (I-153). Named failure (audit of role launches): seven launches failed because the model was at capacity (a harness's
 // `server_overloaded`) and were replaced by fresh handoffs; four had made no edit, and the others' work was taken over by a
 // role that had to find it again. The host recognises its own capacity signal (`interpretEvent` -> `capacity`); the launch is
 // resumed: its session continued (`buildLaunch(..., { resume })`), or started again when none had begun, with the same
