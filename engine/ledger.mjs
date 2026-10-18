@@ -167,6 +167,7 @@ export function reduce(entries) {
     adapterPin: null,
     adapterFollows: [],
     adapterHeld: null,
+    adapterOwnHeld: null,
     // 0.7.30 (I-201, D62): the attempt this one ports to another branch, what the port applied, and the branches this attempt
     // is also delivered to (engine/targets.mjs).
     portOf: null,
@@ -538,6 +539,8 @@ export function reduce(entries) {
         break;
       case 'adapter.notFollowed':
         s.adapterHeld = { tip: d.tip, ref: d.ref, why: d.why, at: e.at };
+        // Review of 0.7.30: the attempt's own change on the base branch holds its pin for good.
+        if (Array.isArray(d.own) && d.own.length) s.adapterOwnHeld = { paths: d.own, tip: d.tip, at: e.at };
         break;
       // I-21: the owner re-pinned the delivery adapter of an attempt that has not delivered everything to the adapter now
       // committed on the base branch. Only delivery reads it. Since 0.7.30 the attempt follows its base branch by itself

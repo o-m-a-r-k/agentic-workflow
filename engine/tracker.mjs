@@ -63,6 +63,8 @@ const DEFAULT_EVENTS = {
   // confirmed running where it deploys and the fix was tested there (or why not is recorded), a comment in product language, then
   // the status `statuses.deployed` (routed by `statusByLabel.deployed`), read back.
   deployed: [{ comment: 'deployedComment' }, { setStatus: 'deployed' }, 'readback'],
+  // Review of 0.7.30 (I-201, D62): a port delivered to another branch says so on its ticket in one line, read back, and sets no status.
+  ported: [{ comment: 'portedComment' }, 'readback'],
   reopened: [{ setStatus: 'started' }],
 };
 
@@ -75,8 +77,11 @@ export const DEFAULT_DELIVERED_TEMPLATE = '{id} is ready for UAT.\n\nUAT scope:\
 // 0.7.27 (D42): the comment of the `deployed` event when the project names none (`tracker.deployedComment`); `{tested}` is the
 // owner's line on the test there, or why it could not be tested, in product words.
 export const DEFAULT_DEPLOYED_TEMPLATE = '{id} is live in {where}.\n\n{tested}\n';
+// Review of 0.7.30 (D62): the line a delivered port posts when the project names none (`tracker.portedComment`); `{branch}` is
+// the branch (or branches) the port delivered to.
+export const DEFAULT_PORTED_TEMPLATE = '{id} is also delivered to {branch}.\n';
 const hasShots = (state) => (state.delivery?.screenshots ? state.delivery.screenshots.screenshots.length : screenshots(state).length) > 0;
-const templateRef = (cfg, key, state = null) => cfg.tracker[key] ?? (key === 'deployedComment' ? DEFAULT_DEPLOYED_TEMPLATE : state && key === deliveredKey(cfg) && hasShots(state) ? DEFAULT_DELIVERED_TEMPLATE : null);
+const templateRef = (cfg, key, state = null) => cfg.tracker[key] ?? (key === 'deployedComment' ? DEFAULT_DEPLOYED_TEMPLATE : key === 'portedComment' ? DEFAULT_PORTED_TEMPLATE : state && key === deliveredKey(cfg) && hasShots(state) ? DEFAULT_DELIVERED_TEMPLATE : null);
 
 function renderTemplate(root, cfg, key, vars, state = null) {
   const ref = templateRef(cfg, key, state);
@@ -252,6 +257,8 @@ export const ownItem = (state) => (typeof state.autoItem === 'boolean' ? state.a
 // 0.7.30 (I-201, D62): a port carries another attempt's change of the same ticket to another branch; the ticket's status and
 // comments are its source's, so a port moves none of them.
 export const hasTicket = (state) => state.lane !== 'batch' && !ownItem(state) && !state.portOf;
+// Review of 0.7.30 (D62): a port of a ticket the source worked, which says on that ticket where else the change went (`ported`).
+export const portTicket = (state) => Boolean(state.portOf) && state.lane !== 'batch' && !ownItem(state);
 
 export function needsSummary(cfg, state) {
   if (cfg.tracker.kind === 'none' || !hasTicket(state)) return false;
@@ -401,7 +408,7 @@ export function trackerActions(root, cfg, state, event, extra = {}) {
       const rendered = renderTemplate(root, cfg, step.comment, vars);
       // 0.7.27 (D42): the `deployed` comment is rendered once, from the ledger, and read back as rendered (`exact`), like the
       // delivered one: a comment holding only its fixed lines (the built-in template has none) proves nothing was posted.
-      if (rendered) actions.push({ op: 'comment', templateKey: step.comment, body: rendered.body, reuseExisting: true, ...(event === 'deployed' ? { exact: true } : {}) });
+      if (rendered) actions.push({ op: 'comment', templateKey: step.comment, body: rendered.body, reuseExisting: true, ...(['deployed', 'ported'].includes(event) ? { exact: true } : {}) });
     } else if (step.attach === 'screenshots') {
       // The delivered set: each file uploaded (never a link) as an attachment titled `title`, its subtitle the caption
       // the owner gives it in `wf shown`.
@@ -422,7 +429,8 @@ const expectedStatus = (cfg, a, labels) => statusFor(cfg.tracker, a, labels);
 export function emitTrackerEvent(root, cfg, id, event, extra = {}) {
   const state = loadState(root, id);
   // 0.7.23 (I-178): whatever the caller, an attempt that works no ticket (a batch, a numbered quick fix) queues no tracker step.
-  if (!hasTicket(state)) return [];
+  // A port queues its one line only (review of 0.7.30, D62).
+  if (!hasTicket(state) && !(event === 'ported' && portTicket(state))) return [];
   const actions = trackerActions(root, cfg, state, event, extra);
   if (actions.length) append(root, id, 'tracker.pending', { event, actions }, null);
   return actions;

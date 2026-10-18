@@ -30,7 +30,7 @@ import { canonical as canonicalPath, isInside, touchesEvidence } from './paths.m
 import { changedForStep, deliveryOrder, impact, inside, packageOf } from './topology.mjs';
 import { findSkill } from './skills.mjs';
 import { outsidePlan, outsideVerdicts, scopeFiles } from './scope.mjs';
-import { commentFile, emitTrackerEvent, hasTicket, loadTrackerAdapter, needsSummary, ownItem, recordSummary, screenshotMode, writeDeliveredComment } from './tracker.mjs';
+import { commentFile, emitTrackerEvent, hasTicket, loadTrackerAdapter, needsSummary, ownItem, portTicket, recordSummary, screenshotMode, writeDeliveredComment } from './tracker.mjs';
 import { designChecks, designVerdicts, requiredSkills, reviewDocumentProblems, reviewRules, ruleVerdicts, skillFiles, writeRuleDocuments } from './rules.mjs';
 import { expectOf, expectProblems, PLAN_EXPECT, ROLE_EXPECT } from './expectations.mjs';
 import { obligationSince } from './versions.mjs';
@@ -2728,7 +2728,8 @@ async function finishDelivered(root, cfg, state, screenshotsMode = 'embedded') {
     state = loadState(root, state.id);
   }
   const set = state.delivery.screenshots?.screenshots ?? [];
-  const actions = !hasTicket(state) ? [] : emitTrackerEvent(root, cfg, state.id, 'delivered', { screenshots: set, screenshotsMode });
+  // Review of 0.7.30 (D62): a port says on its ticket which other branch has the change; the ticket's status stays its source's.
+  const actions = hasTicket(state) ? emitTrackerEvent(root, cfg, state.id, 'delivered', { screenshots: set, screenshotsMode }) : portTicket(state) ? emitTrackerEvent(root, cfg, state.id, 'ported', { branch: [...new Set(Object.values(state.repos).map((r) => r.target).filter(Boolean))].join(', ') }) : [];
   if (actions.some((a) => a.rendered === 'delivered')) writeDeliveredComment(root, cfg, loadState(root, state.id));
   if (!actions.length && !needsShown(state)) {
     // 0.7.27 (D42): when the project's delivery waits for the deployment, it closes once that is confirmed (closeAfterHandoff).
@@ -3373,6 +3374,15 @@ function acceptanceMoved(root, state) {
   }
 }
 
+// Review of 0.7.30 (I-153): the latest handoff of each role whose launch the model's capacity ended and that no later handoff of
+// that role replaced. Named failure (found in review): only a reviewer so stopped was named in `wf resume`; an implementer or
+// a planner got a line on stderr at the time, so its owner could hand a fresh one, the failure I-153 removes.
+export function stoppedAtCapacity(state) {
+  const latest = new Map();
+  for (const h of state.handoffs ?? []) latest.set(`${h.role}\0${h.panel?.seat ?? ''}`, h);
+  return [...latest.values()].filter((h) => h.launch?.status === 'failed' && h.launch.failure?.kind === 'capacity');
+}
+
 export function nextDecision(root, state) {
   const gone = orphansOf(state);
   if (gone.length) return { kind: 'orphaned', status: 'blocked', actor: 'owner', attempt: state.id, owner: state.owner, tree: null, guidance: orphanNext(root, state, gone), blockers: [`worktree missing: ${gone.map((m) => m.worktree).join(', ')}`], orphaned: gone };
@@ -3421,6 +3431,8 @@ export function nextDecision(root, state) {
   // its escalation; the next step spoke only of the round question.
   if (held) return result('strategy', 'owner', held.owner ? held.owner.summary : held.escalation.withdrawn ? `the strategist's escalation ${held.escalation.id} was withdrawn and no decision has superseded it` : held.escalation.approved ? `the strategist's escalation ${held.escalation.id} was answered in the person's own words` : `the strategist's escalation ${held.escalation.id} awaits the owner`, { guidance: withAttempt(root, state, `${held.guidance}${waiting ? `. ${waitingText(waiting)}` : ''}`), escalation: held.escalation?.id ?? null, ...(waiting ? { handoff: waiting.bundle } : {}) });
   if (waiting) return result('strategy', 'owner', `strategist ${waiting.agent} was handed and has recorded no decision`, { guidance: withAttempt(root, state, waitingText(waiting)), handoff: waiting.bundle });
+  const atCapacity = stoppedAtCapacity(state);
+  if (atCapacity.length) return result('resume', 'owner', `${atCapacity.map((h) => `${h.role} ${h.agent}`).join(', ')} stopped because the model was at capacity`, { course: false, handoff: atCapacity[0].bundle, guidance: atCapacity.map((h) => `${h.role} ${h.agent} stopped because the model was at capacity: \`wf handoff run --agent ${h.agent} --attempt ${state.id}\` resumes its session when the model has room; no fresh handoff`).join('; ') });
   if (state.intent !== 'implementation' || state.lane === 'batch' || (state.batchOf && !state.batchPending)) return result('owner', 'owner', 'this trial advances standalone implementation attempts only');
   if (!state.criteria) return result('plan', 'owner', 'criteria must be frozen by the owner');
   const recordedLate = lateInRecordedRepos(state);
@@ -3445,8 +3457,6 @@ export function nextDecision(root, state) {
   }
   // A blind closure can be recorded before same-round prior-finding verification finishes.
   if (h?.launch && ['starting', 'running'].includes(h.launch.status)) return result('review', 'blocked', 'runtime outcome is pending or liveness is unknown; recover the original handle, never duplicate it', { handoff: h.bundle, runtime: h.runtime });
-  // 0.7.30 (I-153): a round the model's capacity ended is resumed, never replaced by a fresh handoff.
-  if (h?.launch?.status === 'failed' && h.launch.failure?.kind === 'capacity') return result('review', 'owner', `reviewer ${h.agent} stopped because the model was at capacity; resume it`, { handoff: h.bundle, guidance: `\`wf handoff run --agent ${h.agent} --attempt ${state.id}\` resumes its session when the model has room; no fresh handoff` });
   if (h?.launch?.status === 'failed') return result('review', 'owner', 'role launch failed; diagnose before a fresh handoff', { handoff: h.bundle, guidance: `reviewer ${h.agent} launch failed; create a fresh reviewer handoff after diagnosis; no review is running` });
   const recorded = h && (state.reviews ?? []).filter((r) => r.handoff === h.bundle).at(-1);
   const refused = h && (state.reviewsRefused ?? []).some((r) => r.handoff === h.bundle);

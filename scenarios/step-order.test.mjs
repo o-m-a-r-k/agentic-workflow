@@ -71,3 +71,22 @@ test('I-163: `needs` names steps of the gate, never itself, and no cycle', () =>
     assert.match(r.err, msg);
   }
 });
+
+// Review of 0.7.30: a producer passed in another attempt of the project (same key) was reused here, so it never ran in this
+// worktree, and the consumer that needs its output failed its precondition. A step another step needs is never taken from
+// another attempt; within this attempt its earlier run left its output in this worktree.
+test('I-163: a step another step needs is not reused from another attempt: it runs here, and its consumer finds its output', () => {
+  const steps = [{ id: 'producer', repo: 'app', run: 'mkdir -p .prepared && touch .prepared/deps', inputs: ['**'] }, consumer({ needs: ['producer'] })];
+  const { base, root } = project('step-order-across', steps);
+  const a = admitted(root, base, 'ENG-2');
+  commitIn(a.repos.app.worktree, { 'src/a.txt': 'same change\n' });
+  ok(wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', a.id]));
+  const b = admitted(root, base, 'ENG-3');
+  commitIn(b.repos.app.worktree, { 'src/a.txt': 'same change\n' });
+  const r = wf(root, ['gate', ...OUT_OF_ORDER, '--attempt', b.id, '--json']);
+  assert.equal(r.code, 0, r.err);
+  const run = r.json();
+  assert.equal(run.steps.find((s) => s.id === 'producer').status, 'passed', 'it ran in this worktree');
+  assert.equal(run.steps.find((s) => s.id === 'producer').reusedFromAttempt, undefined);
+  assert.equal(run.steps.find((s) => s.id === 'consumer').status, 'passed');
+});

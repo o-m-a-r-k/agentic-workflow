@@ -36,7 +36,9 @@ test('I-158: the person decides once to deliver without the full test run, told 
   assert.match(asked.out, /ENG-158\.1 leaves out e2e by the person's decision \(A\d+\): the next `wf gate` runs the light steps only/);
   const d = resume(p, e.id).decisions.find((x) => x.key === `light-only:${e.id}`);
   assert.equal(d.kind, 'override-gate');
-  assert.match(d.plain, /^Should ENG-158 be delivered without its full test run\? Not proven for this delivery: e2e would not run\. Proven on this code so far: unit passed\. The agent's reason: the person asked to skip the full test run and keep the review\./);
+  // Review of 0.7.30: the answer is bound to the attempt, so the question says it covers the rest of the delivery, later fixes
+  // included (it read "Proven on this code so far", while later commits kept skipping the heavy steps).
+  assert.match(d.plain, /^Should ENG-158 be delivered without its full test run\? Your answer covers the rest of this delivery, later fixes included: e2e would not run on any of it\. Proven on the code as it is now: unit passed\. The agent's reason: the person asked to skip the full test run and keep the review\./);
   assert.deepEqual(d.labels, { yes: 'Deliver without the full tests', no: 'Run the full tests first' });
   // The gate leaves e2e out, counts, and the evidence reviewer is told what did not run.
   const g = JSON.parse(ok(wf(p.root, ['gate', '--attempt', e.id, '--json'])).out);
@@ -70,7 +72,7 @@ test('I-158: a heavy step that failed in this attempt still runs, and the questi
   commitIn(t.repos.app.worktree, { 'src/b.txt': 'more\n' });
   ok(wf(two.root, ['gate', 'light-only', '--reason', 'skip the long one', '--attempt', t.id]));
   const plain = resume(two, t.id).decisions.find((x) => x.key === `light-only:${t.id}`).plain;
-  assert.match(plain, /Not proven for this delivery: e2e-b would not run\. Proven on this code so far: nothing yet\. Still run before delivery: unit, e2e \(it failed in this attempt\)\./);
+  assert.match(plain, /Your answer covers the rest of this delivery, later fixes included: e2e-b would not run on any of it\. Proven on the code as it is now: nothing yet\. Still run before delivery: unit, e2e \(it failed in this attempt\)\./);
   const quick = singleRepoProject('light-only-quick', { gate: { steps: [unit, e2e()] } });
   const q = ok(wf(quick.root, ['entry', '--item', 'ENG-160', '--lane', 'quick', '--owner', 'o', '--json'])).json();
   const r = wf(quick.root, ['gate', 'light-only', '--reason', 'skip it', '--attempt', q.id]);

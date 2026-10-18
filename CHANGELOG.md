@@ -17,7 +17,11 @@ Release notes, newest first, then every fix that came from a failure in the work
     that was added, or one that may now apply. Everything else is reused, and a ticket already approved is approved again
     without a new review when the evidence comes out the same;
   - settings a ticket cannot take (they need a newer workflow version, drop one of its repositories, or are the ticket's own
-    change to its rules) are not taken, and `wf status` says why once;
+    change to its rules) are not taken, and `wf status` says why once. A ticket whose own change to its rules reached main
+    never takes the settings on main again while it is open, also after merging main in;
+  - a ticket whose delivery has started keeps its approval when main changes a test step it ran; that step runs again
+    before the rest is delivered;
+  - pausing a ticket (`wf hold`) is recorded before anything else, so its settings never move under the pause;
   - a delivery adapter fixed on main reaches a stuck delivery at the next `wf deliver`; the recovery command that asked you
     (`wf deliver --repin-adapter`) is left for a delivery whose kind of adapter changed half way.
 - **Doctor no longer warns about a tracker you reach through the agent's connector (D63).** Named failure: `wf doctor`
@@ -36,7 +40,8 @@ Release notes, newest first, then every fix that came from a failure in the work
   work had to be found again. Now, when the agent's harness reports the model at capacity, the workflow resumes the same
   session with the same instructions: at once, then after a few minutes, then every ten minutes while the model stays busy.
   If the agent's caller set a time to hand back control and the model is still busy then, the role is kept, the agent is told
-  it was capacity, and running it again resumes the same session; nothing is started from scratch.
+  it was capacity, and running it again resumes the same session; nothing is started from scratch. Whatever the role, the
+  next step the agent reads names it and the command that resumes it, so it is never replaced by a fresh one.
 - **A change can go to another branch, and to more than one (I-201, D62).** Named failure: a ticket was approved for
   master, and you asked for it on staging too ("commit and push straight to staging and master"). The workflow knew one
   target branch per repository, so the change was applied to staging by hand outside it; it conflicted, its checks failed,
@@ -46,8 +51,8 @@ Release notes, newest first, then every fix that came from a failure in the work
   - a ticket can name more branches its change goes to, when it starts (`--also-target`) or later
     (`wf target add <repo>=<branch> --reason "<why>"`, with your words when you asked). Once its own delivery is done, the
     workflow starts a port for each branch: the same change, carried over commit by commit, checked against the same
-    acceptance criteria, then tested, reviewed, approved and delivered like any ticket. A port does not move the ticket's
-    status;
+    acceptance criteria, then tested, reviewed, approved and delivered like any ticket. Once delivered, a port adds one line
+    to the ticket ("ENG-1 is also delivered to staging.") and leaves its status where the first delivery put it;
   - when part of the change does not apply to the other branch, nothing is hidden: the port stops at that commit, says which
     files conflict and how much is left, and an implementer carries the rest over before the review.
 
@@ -69,7 +74,8 @@ Release notes, newest first, then every fix that came from a failure in the work
   proof steps while the Docker-leased steps that prepare their dependencies waited for capacity; a consumer failed in 0.2
   seconds because what it needed did not exist yet, and its producer later passed. A step now names the steps it consumes in
   `needs`: the gate starts it only after they finished in the same run, and one whose producer failed is recorded as not
-  started, with why. The adapter is refused when `needs` names an unknown step, the step itself, or a cycle.
+  started, with why. A step another step needs always runs in the ticket's own worktree, never taken from another ticket's
+  pass, so what it prepares is there. The adapter is refused when `needs` names an unknown step, the step itself, or a cycle.
 - **A freed lease goes to the run that has waited longest, and every waiting run sees its place (I-157, D57).** Named
   failure: a small focused proof waited more than 35 minutes for the Docker lease while other live runs kept taking it,
   because whichever run asked first after a slot freed took it. Each waiting run (a gate step, `wf run --lease`, a step's
@@ -79,7 +85,8 @@ Release notes, newest first, then every fix that came from a failure in the work
   refreshed for 20 seconds counts for nothing.
 - **Delivering without the full test run is the person's one decision (I-158, D58).** Named failure: the person said "skip the
   full gate but do the review", and no recorded decision existed for it. `wf gate light-only --reason "<why>"` asks them in one
-  plain question that names the heavy steps that would not run, what passed on this code so far and what still runs. Answered
+  plain question that says the answer covers the rest of this delivery, later fixes included, names the heavy steps that would
+  not run on any of it, what passed on the code as it is now and what still runs. Answered
   yes, the gate runs the light steps and leaves the heavy ones out (one that failed in this attempt, or the ticket's own check,
   still runs; `wf gate --full` runs them all), the gate counts for delivery, the evidence reviewer is told what did not run,
   and the delivered comment says each step did not run by the person's decision.
@@ -93,8 +100,9 @@ Release notes, newest first, then every fix that came from a failure in the work
   one-line change reran a whole 1,200-test end-to-end step (27 to 40 minutes), and unrelated flaky specs blocked small fixes. A
   heavy step with `specs` may declare `affects: [{ paths: [<globs>], specs: [<globs>] }]`; when every changed file the step
   reads is a spec file or lies in a rule's paths, a standard attempt runs only those specs (with any suite that failed in the
-  step's last run), records them as `affectedSpecs` under a key of its own, and the gate counts. Any doubt (a file no rule
-  covers, shared infrastructure, a changed contract, a change in another repo the step reads, an empty selection, `--full`, a
+  step's last run), records them as `affectedSpecs` under a key of its own, and the gate counts. A changed file under `specs`
+  that a rule covers adds that rule's specs too. Any doubt (a file no rule covers, a spec-matching file no rule covers that
+  other specs name, as a helper they use would be, shared infrastructure, a changed contract, a change in another repo the step reads, an empty selection, `--full`, a
   batch) runs the whole step and says why.
 
 - **A repair starts from what already failed (I-162, I-173, I-166, I-168, D51).** Four field cases, one shape: the workflow had

@@ -116,6 +116,77 @@ test('I-151: an attempt is never judged by its own change to its rules, even onc
   const out = ok(wf(root, ['status', '--attempt', e.id])).out;
   assert.match(out, /is not taken: the base branch now holds this attempt's own change to \.workflow\/project\.yaml; an attempt is never judged by its own change to its rules/);
   assert.equal(state(root, e.id).adapterPin, null);
+  // Review of 0.7.30: the hold lasted only for that tip, and `wf base merge` took the file out of the attempt's diff, so the
+  // next push to main that touched the adapter folder handed the attempt its own loosened adapter. It keeps its pin for good.
+  ok(wf(root, ['base', 'merge', '--attempt', e.id]));
+  commitIn(root, { '.workflow/notes.md': 'a note\n' }, 'an unrelated adapter note');
+  sh(root, 'git push -q origin main');
+  ok(wf(root, ['status', '--attempt', e.id]));
+  assert.equal(state(root, e.id).adapterPin, null, 'never judged by its own change, also after a base merge and a later push');
+  assert.equal(follows(root, e.id).length, 0);
+  assert.equal(held(root, e.id).length, 1, 'said once');
+});
+
+// Review of 0.7.30: the own change is read from the attempt's own commits, so a base merged in before the change reached the
+// base branch does not hide it either.
+test('I-151: the attempt\'s own change is found from its own commits, whatever base was merged into it', () => {
+  const { root } = project('follow-own-merged');
+  const e = ok(wf(root, ['entry', '--item', 'ENG-306', '--owner', 'o', '--json'])).json();
+  const loosened = yaml(config('follow-own-merged', { gate: { steps: [steps[0]] } }));
+  commitIn(e.repos.app.worktree, { '.workflow/project.yaml': loosened, 'src/a.txt': 'b\n' }, 'drop lint');
+  fs.writeFileSync(adapterFile(root), loosened);
+  sh(root, 'git commit -qam "drop lint (merged by hand)"');
+  commitIn(root, { 'src/other.txt': 'o\n' }, 'unrelated');
+  sh(root, 'git push -q origin main');
+  // Merged before any command read the attempt (a hold makes `wf base merge` the first to see it, then the follow comes later).
+  sh(e.repos.app.worktree, 'git fetch -q origin main && git merge -q --no-edit origin/main');
+  const out = ok(wf(root, ['status', '--attempt', e.id])).out;
+  assert.match(out, /is not taken: the base branch now holds this attempt's own change to \.workflow\/project\.yaml/);
+  assert.equal(state(root, e.id).adapterPin, null);
+});
+
+// Review of 0.7.30: a hold is recorded before anything else reads the attempt, so the pin cannot move under it.
+test('I-151: `wf hold` records the hold without taking the base branch\'s adapter first', () => {
+  const { root } = project('follow-hold');
+  const e = ok(wf(root, ['entry', '--item', 'ENG-307', '--owner', 'o', '--json'])).json();
+  fs.writeFileSync(adapterFile(root), yaml(config('follow-hold', { gate: { steps: [steps[0]] } })));
+  sh(root, 'git commit -qam "lint retired" && git push -q origin main');
+  ok(wf(root, ['hold', '--reason', 'the person: wait', '--attempt', e.id]));
+  ok(wf(root, ['status', '--attempt', e.id]));
+  assert.equal(follows(root, e.id).length, 0, 'nothing moves under a hold');
+  assert.equal(state(root, e.id).adapterPin, null);
+});
+
+// Review of 0.7.30: withdrawing the acceptance of an attempt whose delivery had started sent it back to "implementing" with a
+// repo already delivered. A started delivery keeps its acceptance; the gate runs again before the rest is delivered.
+test('I-151: a move that touches the gate of a partly delivered attempt keeps its acceptance and its phase; the gate runs again before the rest is delivered', async () => {
+  const { accepted, multiRepo, scriptedAdapter } = await import('./adapter-fault-fixtures.mjs');
+  const { base, root } = multiRepo('follow-partly', scriptedAdapter);
+  fs.writeFileSync(path.join(base, 'push.web'), 'no');
+  fs.writeFileSync(path.join(base, 'observe.web.state'), 'awaiting-merge');
+  const e = ok(wf(root, ['entry', '--item', 'ENG-308', '--owner', 'o', '--json'])).json();
+  accepted(root, base, e.id, [[e.repos.api.worktree, { 'src/a.txt': 'api\n' }], [e.repos.web.worktree, { 'src/w.txt': 'web\n' }]]);
+  assert.match(ok(wf(root, ['deliver', '--attempt', e.id])).out, /web: awaiting-merge/);
+  const before = state(root, e.id);
+  assert.ok(before.delivery.repos.api);
+  const api = path.join(root, 'api');
+  sh(api, 'git checkout -q main && git pull -q --ff-only origin main');
+  const cfg = JSON.parse(fs.readFileSync(path.join(api, '.workflow', 'project.yaml'), 'utf8'));
+  cfg.gate.steps = cfg.gate.steps.map((x) => (x.id === 'web-unit' ? { ...x, run: 'true # stricter' } : x));
+  fs.writeFileSync(path.join(api, '.workflow', 'project.yaml'), yaml(cfg));
+  sh(api, 'git commit -qam "web-unit: stricter" && git push -q origin main');
+  const s = state(root, e.id);
+  const [f] = follows(root, e.id);
+  assert.deepEqual(f.data.gate.rerun, ['web-unit']);
+  assert.equal(f.data.withdrewAcceptance, undefined);
+  assert.ok(s.accepted, 'the acceptance stands');
+  assert.equal(s.phase, before.phase);
+  assert.match(wf(root, ['deliver', '--attempt', e.id]).err, /delivery needs a passing gate on the current code: the adapter on origin\/main moved/);
+  ok(wf(root, ['gate', '--attempt', e.id]));
+  fs.writeFileSync(path.join(base, 'push.web'), 'yes');
+  fs.writeFileSync(path.join(base, 'observe.web.state'), 'integrated');
+  ok(wf(root, ['deliver', '--attempt', e.id]));
+  assert.ok(state(root, e.id).delivery.completedAt);
 });
 
 // Named failure (found building the follow): a step the attempt registered for itself (`wf validation add`) that the project

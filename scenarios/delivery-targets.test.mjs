@@ -93,3 +93,27 @@ test('I-201: a target added after admission is recorded with its reason; a commi
   assert.equal(sh(port.repos.app.worktree, 'git status --porcelain'), '', 'the worktree is left clean, on staging');
   assert.match(wf(root, ['entry', '--port', 'ENG-404.1', '--target', 'app=staging', '--owner', 'o']).err, /--port: no attempt `ENG-404\.1`/);
 });
+
+// Review of 0.7.30 (D62): a port posted nothing on the ticket, so the ticket showed only the first branch. A delivered port
+// posts one product-language line naming the branch, read back, and leaves the ticket's status where its source put it.
+test('I-201: a delivered port says on the ticket which other branch has the change, and leaves its status alone', async () => {
+  const fsm = (await import('node:fs')).default;
+  const pathm = (await import('node:path')).default;
+  const statuses = { started: 'In Progress', delivered: 'Ready for UAT', done: 'Done' };
+  const p = singleRepoProject('target-ticket', { gate: { steps }, tracker: { kind: 'files', statuses } }, { 'tickets/ENG-405.md': '---\n{"id":"ENG-405","title":"Fix the total","status":"Todo","labels":[]}\n---\nThe total is wrong.\n' });
+  sh(p.root, 'git checkout -q -b staging');
+  commitIn(p.root, { 'src/s.txt': 'staging only\n' }, 'staging: its own change');
+  sh(p.root, 'git push -q origin staging && git checkout -q main');
+  const { id } = toAccepted(p.root, p.base, { item: 'ENG-405', extraEntry: ['--also-target', 'app=staging'] });
+  ok(wf(p.root, ['deliver', '--attempt', id]));
+  const ticket = pathm.join(p.root, 'tickets', 'ENG-405.md');
+  assert.match(fsm.readFileSync(ticket, 'utf8'), /^status: Ready for UAT$/m);
+  const port = state(p.root, 'ENG-405.2');
+  reviewAndAccept(p.root, p.base, port.id, 't');
+  const d = ok(wf(p.root, ['deliver', '--attempt', port.id]));
+  assert.match(d.out, /tracker: ported performed on the ticket files and read back; attempt closed/);
+  const text = fsm.readFileSync(ticket, 'utf8');
+  assert.match(text, /<!-- wf:comment id=c-\d+ at=\S+ -->\nENG-405 is also delivered to staging\.\n<!-- \/wf:comment -->/);
+  assert.match(text, /^status: Ready for UAT$/m, 'the status is the one the first delivery set');
+  assert.equal(state(p.root, port.id).phase, 'done');
+});

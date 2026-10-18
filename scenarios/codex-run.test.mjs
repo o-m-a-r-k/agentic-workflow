@@ -165,6 +165,11 @@ test('I-153: past the owner\'s return point a launch at capacity is kept, said s
   let h = state(root, id).handoffs.at(-1);
   assert.equal(h.launch.status, 'failed');
   assert.equal(h.launch.failure.kind, 'capacity');
+  // Review of 0.7.30: every role stopped at capacity is named where the owner reads what is next, not only a reviewer (an
+  // owner told nothing hands a fresh one, the I-153 failure).
+  const next = state(root, id);
+  assert.match(next.next, /^planner p stopped because the model was at capacity: `wf handoff run --agent p --attempt \S+` resumes its session when the model has room; no fresh handoff/);
+  assert.equal(next.decision.kind, 'resume');
   fs.writeFileSync(path.join(base, 'room'), 'yes');
   const again = ok(wf(root, ['handoff', 'run', '--agent', 'p', '--attempt', id, '--json'], { env }));
   assert.equal(again.json().status, 'completed');

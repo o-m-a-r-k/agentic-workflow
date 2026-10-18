@@ -92,3 +92,24 @@ test('I-134: `affects` is a list of { paths, specs } on a step that declares its
     assert.match(r.err, msg);
   }
 });
+
+// Review of 0.7.30: a changed file that matches `specs` was taken to affect only itself. Under a broad `specs` glob a helper
+// the specs import is such a file, and the specs that import it were left out of a gate that counted. A spec-matching file
+// that a rule's `paths` cover adds that rule's specs; one no rule covers and that other spec files name is in doubt, and the
+// whole step runs.
+test('I-134: a helper under a broad `specs` glob adds the specs of the rule that covers it, and runs the whole step when no rule does', () => {
+  const broad = { ...e2e, specs: ['test/**'] };
+  const helper = { 'test/helpers/session.ts': 'export const session = 1;\n', 'test/auth/login.e2e-spec.ts': "import { session } from '../helpers/session';\n" };
+  const p = singleRepoProject('affected-specs-helper', { gate: { steps: [unit, broad] } }, { ...files, ...helper });
+  const e = reviewed(p, 'ENG-136', { 'test/helpers/session.ts': 'export const session = 2;\n' });
+  const g = gate(p, e.id);
+  assert.equal(g.code, 0, g.err);
+  const step = g.data.steps.find((x) => x.id === 'e2e');
+  assert.equal(step.affectedSpecs, undefined, 'not the helper alone');
+  assert.match(step.reason, /the whole step runs: test\/helpers\/session\.ts matches `specs`, no `affects` rule covers it, and other spec files name it \(test\/auth\/login\.e2e-spec\.ts\): it may be a helper they use/);
+  const covered = singleRepoProject('affected-specs-helper-rule', { gate: { steps: [unit, { ...broad, affects: [...affects, { paths: ['test/helpers/**'], specs: ['test/auth/**'] }] }] } }, { ...files, ...helper });
+  const e2 = reviewed(covered, 'ENG-137', { 'test/helpers/session.ts': 'export const session = 2;\n' });
+  const g2 = gate(covered, e2.id);
+  assert.equal(g2.code, 0, g2.err);
+  assert.deepEqual(g2.data.steps.find((x) => x.id === 'e2e').affectedSpecs, ['test/auth/login.e2e-spec.ts', 'test/helpers/session.ts']);
+});

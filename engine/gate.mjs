@@ -327,7 +327,10 @@ export async function planGate(root, state, options = {}) {
     // and says where it came from. Only for a step that keeps no evidence files, which are this ticket's own. Named
     // failure (I-150, audit of 51 attempts): 163 reruns had a key another attempt had already passed.
     let fromAttempt = null;
-    if (!prior && key && !ownSpecs && !affected && !step.artifacts?.length && !options.rerunFailed?.includes(step.id)) {
+    // Review of 0.7.30 (I-163): a step another step `needs` leaves its output in the worktree it ran in; one reused from
+    // another attempt never ran in this one, and its consumer failed its precondition. It is never taken from another attempt.
+    const needed = cfg.gate.steps.some((x) => (x.needs ?? []).includes(step.id));
+    if (!prior && key && !ownSpecs && !affected && !needed && !step.artifacts?.length && !options.rerunFailed?.includes(step.id)) {
       // The key a pass recorded before 0.7.11 would have here (hashed the old way once, and only if such a pass exists).
       let legacy;
       const legacyAcross = () => {
@@ -423,13 +426,28 @@ function affectedSpecs(state, step, repo, pkg, dir, pkgChanged) {
   if (!changed.length) return { whole: 'no file it reads changed' };
   const specFiles = trackedFiles(state.repos[repo.name].worktree).filter((f) => inside(f, pkg.path)).map((f) => rel(f, pkg.path)).filter((f) => matchesAny(f, step.specs));
   const picked = new Set();
+  // Review of 0.7.30: a changed file that matches `specs` was taken to affect only itself; under a broad `specs` glob a helper
+  // the specs import is such a file, and the specs importing it were left out of a gate that counted. A spec-matching file a
+  // rule's `paths` cover adds that rule's specs too; one no rule covers is in doubt when another spec file names it (its path
+  // without the extension, as an import would), and the whole step runs.
+  let texts = null;
+  const namedBy = (f) => {
+    texts ??= new Map(specFiles.map((x) => { try { return [x, fs.readFileSync(path.join(dir, x), 'utf8')]; } catch { return [x, '']; } }));
+    const stem = path.posix.basename(f).replace(/\.[^.]+$/, '');
+    const parent = path.posix.basename(path.posix.dirname(f));
+    const needle = parent && parent !== '.' ? `${parent}/${stem}` : stem;
+    return specFiles.filter((x) => x !== f && texts.get(x).includes(needle));
+  };
   for (const f of changed) {
+    const rules = step.affects.filter((a) => matchesAny(f, a.paths));
     if (matchesAny(f, step.specs)) {
       if (fs.existsSync(path.join(dir, f))) picked.add(f);
-      continue;
-    }
-    const rules = step.affects.filter((a) => matchesAny(f, a.paths));
-    if (!rules.length) return { whole: `no \`affects\` rule covers ${f}` };
+      if (!rules.length) {
+        const users = namedBy(f);
+        if (users.length) return { whole: `${f} matches \`specs\`, no \`affects\` rule covers it, and other spec files name it (${users.slice(0, 5).join(', ')}${users.length > 5 ? ', ...' : ''}): it may be a helper they use` };
+        continue;
+      }
+    } else if (!rules.length) return { whole: `no \`affects\` rule covers ${f}` };
     for (const a of rules) for (const s of specFiles) if (matchesAny(s, a.specs)) picked.add(s);
   }
   const last = allGateSteps(state).filter((s) => s.id === step.id && ['passed', 'failed'].includes(s.status)).at(-1);

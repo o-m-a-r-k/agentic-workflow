@@ -111,14 +111,16 @@ export function attemptForName(root, name) {
   return open[0] ?? mine.map(([id]) => id).sort((a, b) => n(a) - n(b)).at(-1);
 }
 
-export function openState(root, options) {
+export function openState(root, options, { follow = true } = {}) {
   const id = resolveAttempt(root, options);
   openEvidence(root, id);
   const state = loadState(root, id);
   assertSchema(state);
   // 0.7.29 (I-214): a round question an earlier release opened before it was due is withdrawn before anything reads the attempt.
-  // 0.7.30 (I-151, D60): the attempt takes the adapter committed on its base branch, where it safely can, before anything reads it.
-  return followAdapter(root, settleRoundQuestions(root, state));
+  // 0.7.30 (I-151, D60): the attempt takes the adapter committed on its base branch, where it safely can, before anything reads it
+  // (not for `wf hold`, which is recorded first, so the pin cannot move under the person's hold).
+  const settled = settleRoundQuestions(root, state);
+  return follow ? followAdapter(root, settled) : settled;
 }
 
 function nextNumber(root, prefix) {
@@ -497,7 +499,7 @@ export function setIntent(root, options, to) {
 }
 
 export function hold(root, options) {
-  const state = openState(root, options);
+  const state = openState(root, options, { follow: false });
   if (!options.reason) throw new WfError('--reason is required');
   // A hold vetoes a delivery; a closed attempt has none left to veto (independent review of 0.7.5).
   if (['done', 'abandoned'].includes(state.phase)) throw refuse(`${state.id} is already ${state.phase}; a hold applies to an open attempt`);

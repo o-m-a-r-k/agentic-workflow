@@ -14,7 +14,8 @@
 //   `wf deliver` admits by itself once the attempt's own delivery is complete. A port carries the source's own commits
 //   (cherry-picked, base merges left out), its frozen criteria and impact map, and is gated, reviewed, accepted and delivered
 //   like any attempt. A commit that does not apply is not hidden: the cherry-pick is aborted, the port keeps the commits that
-//   applied, and the commit and its conflicting files are recorded and shown with what to do. A port moves no ticket status.
+//   applied, and the commit and its conflicting files are recorded and shown with what to do. A port moves no ticket status;
+//   once delivered it says on the ticket, in one line, which branch it delivered to (tracker event `ported`, review of 0.7.30).
 import { branchName } from './attempt.mjs';
 import { repoDir } from './config.mjs';
 import { append, listAttempts, loadState } from './ledger.mjs';
@@ -128,7 +129,7 @@ export function targetLines(root, state) {
   if (Object.keys(own).length) lines.push(`  delivered to: ${Object.entries(own).map(([n, b]) => `${n} -> ${b}`).join(', ')} (its own target, not the repo's base)`);
   if (state.portOf) {
     const c = Object.entries(state.port?.repos ?? {}).filter(([, p]) => p.conflict);
-    lines.push(`  port of ${state.portOf}: ${Object.entries(state.port?.repos ?? {}).map(([n, p]) => `${n} ${p.applied.length} of ${p.commits.length} commit(s) applied`).join(', ') || 'no commits'}; no ticket status moves for a port`);
+    lines.push(`  port of ${state.portOf}: ${Object.entries(state.port?.repos ?? {}).map(([n, p]) => `${n} ${p.applied.length} of ${p.commits.length} commit(s) applied`).join(', ') || 'no commits'}; no ticket status moves for a port (it says on the ticket where it delivered)`);
     for (const [n, p] of c) lines.push(`  PORT CONFLICT in ${n}: ${p.conflict.commit.slice(0, 10)} "${p.conflict.subject}" does not apply to ${state.repos[n]?.target}${p.conflict.files.length ? ` (${p.conflict.files.join(', ')})` : ''}; ${p.conflict.left} commit(s) left: an implementer ports them by hand against the frozen criteria (\`git cherry-pick -x ${p.conflict.commit.slice(0, 12)}\` and on, resolving each), then the review and the gate as usual`);
   }
   for (const t of portsOf(root, state)) lines.push(`  also to deliver: ${t.repo} -> ${t.branch} (${t.reason ?? 'recorded at admission'}): ${t.port ? `ported by ${t.port.id} (${t.port.phase})` : state.delivery?.completedAt ? `\`wf entry --item ${state.item} --port ${state.id} --target ${t.repo}=${t.branch}\` admits its port` : 'its port is admitted by `wf deliver` once this delivery is complete'}`);

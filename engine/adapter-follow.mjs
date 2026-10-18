@@ -35,7 +35,6 @@ import path from 'node:path';
 import { adapterPin, attemptAdapter, repoDir, trustedAdapter } from './config.mjs';
 import { append, loadState, recordedTogether } from './ledger.mjs';
 import { assertEngine, canonical, git, run } from './util.mjs';
-import { changedFiles } from './attempt.mjs';
 import { liveGate, RESULT_NEUTRAL } from './gate.mjs';
 import { validationIds } from './validation.mjs';
 
@@ -158,8 +157,9 @@ export function followPlan(root, state) {
   if (!repo) return null;
   const dir = loc.dir;
   const tip = git(dir, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], { allowFail: true });
-  if (!tip || tip === from || state.adapterHeld?.tip === tip) return null;
-  const held = (why) => ({ held: { tip, ref, why } });
+  // An attempt whose own change to its rules reached the base branch keeps its pin for good (review of 0.7.30).
+  if (!tip || tip === from || state.adapterHeld?.tip === tip || state.adapterOwnHeld) return null;
+  const held = (why, extra = {}) => ({ held: { tip, ref, why, ...extra } });
   if (run('git', ['merge-base', '--is-ancestor', from, tip], { cwd: dir, allowFail: true }).status !== 0) return held(`${ref} (${short(tip)}) does not contain the pin ${short(from)}: the adapter is followed only forward along the base branch`);
   const first = followedPaths(loc, [before]);
   const quick = git(dir, ['diff', '--name-only', from, tip, '--', ...first]).split('\n').filter(Boolean);
@@ -181,16 +181,18 @@ export function followPlan(root, state) {
     if (!b || realDir(root, b) !== realDir(root, a)) return held(`the adapter at ${ref} (${short(tip)}) ${b ? `lists repo \`${name}\` at another folder (${b.path})` : `no longer lists repo \`${name}\``}, which this attempt works in`);
   }
   // An attempt is never judged by its own change to its rules: once the base branch holds a file of the followed set exactly
-  // as this attempt changed it (its delivery, or a merge outside the workflow), the attempt keeps the pin it has.
+  // as this attempt changed it (its delivery, or a merge outside the workflow), the attempt keeps the pin it has, for good
+  // (`own` on the record). Review of 0.7.30: "its change" was the diff against the merge base, which a base merge empties, and
+  // the hold lasted for that tip only, so the next push that touched the adapter folder handed the attempt its own loosened
+  // adapter. Its change is now the files its own commits touched: on its branch's first-parent line since admission, merges
+  // left out, so a base merged in (by `wf base merge` or by hand) brings none of the base's commits into it.
   const own = state.repos[loc.repo.name];
   if (own?.worktree && fs.existsSync(own.worktree)) {
-    let mine = [];
-    try {
-      mine = changedFiles(state, loc.repo.name);
-    } catch {}
+    const merged = (state.baseMerges ?? []).filter((m) => m.repo === loc.repo.name && m.to).map((m) => m.to);
+    const mine = new Set(git(own.worktree, ['log', '--first-parent', '--no-merges', '--format=', '--name-only', 'HEAD', '--not', own.base, ...merged], { allowFail: true }).split('\n').filter(Boolean));
     const blob = (cwd, commit, f) => git(cwd, ['rev-parse', '--verify', '--quiet', `${commit}:${f}`], { allowFail: true }) || null;
-    const same = changed.filter((f) => mine.includes(f) && blob(dir, tip, f) === blob(own.worktree, 'HEAD', f));
-    if (same.length) return held(`the base branch now holds this attempt's own change to ${same.join(', ')}; an attempt is never judged by its own change to its rules`);
+    const same = changed.filter((f) => mine.has(f) && blob(dir, tip, f) === blob(own.worktree, 'HEAD', f));
+    if (same.length) return held(`the base branch now holds this attempt's own change to ${same.join(', ')}; an attempt is never judged by its own change to its rules`, { own: same });
   }
   // Once a delivery has started, its adapter kind stays (a different module would not know the integration in flight).
   const started = Object.keys(state.delivery?.repos ?? {}).length > 0 || Object.keys(state.delivery?.integrating ?? {}).length > 0;
@@ -203,8 +205,9 @@ export function followPlan(root, state) {
   const gate = gateChanges(state, dir, loc.relative || '.', before, from, after, tip);
   const g = state.lastGate;
   // An acceptance stands on a gate that counted when it was given (`wf accept` refuses otherwise), so only this move can
-  // take that gate's proof away.
-  const withdrew = Boolean(state.accepted) && !state.delivery?.completedAt && g?.status === 'passed' && anyOf(touching(gate, g));
+  // take that gate's proof away. Review of 0.7.30: a delivery that has started keeps its acceptance (withdrawing it sent an
+  // attempt with a repo already delivered back to "implementing"); the stale gate still runs again before the rest is delivered.
+  const withdrew = Boolean(state.accepted) && !started && g?.status === 'passed' && anyOf(touching(gate, g));
   const commits = git(dir, ['log', '--format=%H%x09%s', `${from}..${tip}`, '--', ...paths], { allowFail: true }).split('\n').filter(Boolean).map((l) => ({ commit: l.slice(0, 40), subject: l.slice(41) }));
   const runtime = Boolean(state.runtimeAdapterBase) && run('git', ['merge-base', '--is-ancestor', state.runtimeAdapterBase, tip], { cwd: dir, allowFail: true }).status === 0;
   return {
@@ -232,7 +235,8 @@ export function followAdapter(root, state) {
   let wrote = false;
   recordedTogether(root, state.id, () => {
     const current = loadState(root, state.id);
-    if (adapterPin(current) !== adapterPin(state) || current.activeHold) return;
+    // Read again inside the transaction: a hold or a gate that started meanwhile wins.
+    if (adapterPin(current) !== adapterPin(state) || current.activeHold || liveGate(root, current)) return;
     if (plan.held) {
       if (current.adapterHeld?.tip === plan.held.tip) return;
       append(root, state.id, 'adapter.notFollowed', plan.held, null);

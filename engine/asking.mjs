@@ -217,9 +217,11 @@ export const FRAMES = {
   }),
   // 0.7.30 (I-158, D58): delivering without the full test run; the engine states what ran on this code and what would not.
   lightOnly: ({ item, leftOut = [], proven = [], stillRun = [], reason = '' }) => ({
-    question: `Should ${item} be delivered without its full test run? Not proven for this delivery: ${leftOut.join(', ') || 'the heavy test steps'} would not run. Proven on this code so far: ${proven.length ? `${proven.join(', ')} passed` : 'nothing yet'}.${stillRun.length ? ` Still run before delivery: ${stillRun.join(', ')}.` : ''}${reason ? ` The agent's reason: ${String(reason).replace(/[.\s]+$/, '')}.` : ''}`,
+    // Review of 0.7.30: the decision is bound to the attempt, not to the code it was asked on, so the question says the answer
+    // covers the rest of the delivery, later fixes included (it read "Proven on this code so far").
+    question: `Should ${item} be delivered without its full test run? Your answer covers the rest of this delivery, later fixes included: ${leftOut.join(', ') || 'the heavy test steps'} would not run on any of it. Proven on the code as it is now: ${proven.length ? `${proven.join(', ')} passed` : 'nothing yet'}.${stillRun.length ? ` Still run before delivery: ${stillRun.join(', ')}.` : ''}${reason ? ` The agent's reason: ${String(reason).replace(/[.\s]+$/, '')}.` : ''}`,
     labels: { yes: 'Deliver without the full tests', no: 'Run the full tests first' },
-    then: { yes: `the gate runs the light checks and leaves out ${leftOut.join(', ') || 'the heavy test steps'}; it counts for delivery, the reviewer is told what did not run, and the delivered comment says so`, no: 'the full test run happens before delivery, as usual' },
+    then: { yes: `every gate of this delivery, also after later fixes, runs the light checks and leaves out ${leftOut.join(', ') || 'the heavy test steps'}; it counts for delivery, the reviewer is told what did not run, and the delivered comment says so`, no: 'the full test run happens before delivery, as usual' },
   }),
   owner: ({ rounds }) => ({
     question: `This ticket has been through ${rounds} review round${rounds === 1 ? '' : 's'} and the reviews keep finding problems. How should it go on?`,
