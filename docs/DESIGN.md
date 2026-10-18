@@ -126,7 +126,7 @@ agentic-workflow/
 | Repos | repo = git root; one task worktree per repo per attempt; per-repo base branch | repos, each with `packages` (path, `sharedInfra`, `docsOnly`), base branch, provisioning |
 | Components | impact across components, delivery order, briefs | components, kinds, `provides` / `dependsOn` contracts |
 | Provisioning | prepares each worktree before any role starts | `clone` paths (copy-on-write), `fingerprint` lockfiles, `install`, `copyIgnored`, `onWorktreeCreate` |
-| Adapter trust | gate plan reads the adapter at the adapter repo's base commit recorded at admission, never the ticket worktree; touching `.workflow/**` forces the full gate | which repo holds `.workflow/` |
+| Adapter trust | gate plan reads the adapter committed on the adapter repo's base branch as the attempt follows it (its admission commit until a later one is taken, D60), never the ticket worktree or the working copy; a step whose inputs name `.workflow/**` sees a change there | which repo holds `.workflow/` |
 | Manifest | append-only ledger per attempt, schema-versioned, guarded against hand edits | — |
 | Lanes | `quick`, `standard`, `batch`; `focused` as a gate option | enabled lanes, focused-eligible paths |
 | Criteria | frozen before implementation (planner's plan, or owner-written from the issue); changes only via `wf criteria amend --reason`, merged by id (drops need an explicit `dropped: true` + reason), shown to the reviewer | — |
