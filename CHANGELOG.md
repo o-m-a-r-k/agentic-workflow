@@ -2132,6 +2132,11 @@ A second adversarial pass over the integrated 0.5.0 branch, with scenarios in `s
 
 | Item | Failure fixed | Fixed in | Scenario test |
 | --- | --- | --- | --- |
+| [I-222](improvements/I-222.md) | Open visual evidence finding prevents the gate needed to review it | 0.7.32 | `scenarios/deadlocks-0732.test.mjs` |
+| [I-221](improvements/I-221.md) | A passing gate that reruns failed suites should carry the earlier run's screenshots | 0.7.32 | `scenarios/run-screenshots.test.mjs` |
+| [I-220](improvements/I-220.md) | Required report regressions have no committed supplemental validation route | 0.7.32 | `scenarios/supplemental-validation.test.mjs` |
+| [I-219](improvements/I-219.md) | Frozen <project> runtime has no dependency preparation entry point | 0.7.32 | `scenarios/prepare-route.test.mjs` |
+| [I-218](improvements/I-218.md) | Analysis resume recommends forbidden implementer handoff | 0.7.31 | `scenarios/analysis-route.test.mjs` |
 | [I-217](improvements/I-217.md) | A fix was recommended and built without tracing what the data feeds; it was reverted after the person approved it | 0.7.31 | `scenarios/premise.test.mjs` |
 | [I-216](improvements/I-216.md) | Analysis resume names an implementer which read-only intent refuses | 0.7.31 | `scenarios/analysis-route.test.mjs` |
 | [I-215](improvements/I-215.md) | Show pinned tracker operation instructions during connector handoff | 0.7.31 | `scenarios/tracker-operations.test.mjs` |
