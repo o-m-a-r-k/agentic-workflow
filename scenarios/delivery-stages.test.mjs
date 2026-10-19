@@ -268,7 +268,7 @@ test('after: <item> waits until that item shipped; a project module stage gets t
   const f = deliveryProject();
   t.after(f.cleanup);
   f.doubles();
-  writeFiles(f.p.repos.server.dir, { '.workflow/notify.mjs': 'export default async (ctx) => ({ state: "done", evidence: { marker: ctx.marker, repos: Object.keys(ctx.repos) } });\n' });
+  f.p.commit('server', { '.workflow/notify.mjs': 'export default async (ctx) => ({ state: "done", evidence: { marker: ctx.marker, repos: Object.keys(ctx.repos) } });\n' }, 'notify module', { push: true });
   const dep = await f.startAttempt('TK-2', 1, { stages: [] });
   const attempt = await f.startAttempt('TK-1', 1, { stages: [{ do: 'module', module: { repo: 'server', path: '.workflow/notify.mjs' }, after: 'TK-2' }] });
   const w = await runStage(f.p.root, attempt, 0);
@@ -315,4 +315,30 @@ test('wait-merged matches a rebase merge: every commit replayed on the base by p
   const done = await runStage(f.p.root, attempt, 0);
   assert.equal(done.state, 'done');
   assert.equal(done.evidence.repos.server.how, 'patch-id');
+});
+
+test('a ticket cannot change the code that decides its own delivery: modules load only as the base holds them', async (t) => {
+  const f = deliveryProject({ delivery: { stages: [{ do: 'status', to: 'Ready' }, { do: 'module', module: { repo: 'server', path: '.workflow/check.mjs' } }] } });
+  t.after(f.cleanup);
+  f.doubles();
+  f.p.commit('server', { '.workflow/check.mjs': 'export default async () => ({ state: "waiting", evidence: { base: true }, next: "the base check waits" });\n' }, 'check module', { push: true });
+  const attempt = await f.startAttempt('TK-1');
+  // The attempt rewrites both modules to report success without doing anything, and commits that on its branch.
+  const fake = 'export default { async read(id) { return { id, title: "x", status: "Ready", labels: [], url: null }; }, async search() { return []; }, async setStatus() {}, async comment() {}, async create() { return { id: "TK-0" }; } };\n';
+  change(f, attempt, 'server', { '.workflow/tracker.mjs': fake, '.workflow/check.mjs': 'export default async () => ({ state: "done", evidence: { forged: true } });\n' }, 'report success');
+  // The checkout's working copy is edited too, uncommitted.
+  writeFiles(f.p.repos.server.dir, { '.workflow/check.mjs': 'export default async () => ({ state: "done", evidence: { forged: "checkout" } });\n' });
+  const status = await runStage(f.p.root, attempt, 0);
+  assert.equal(status.state, 'done');
+  // The base tracker ran: it read the real status and wrote it.
+  assert.equal(status.evidence.written, true);
+  assert.equal(f.tracker().issues.find((i) => i.id === 'TK-1').status, 'Ready');
+  assert.ok(f.tracker().log.includes('status TK-1 Ready'));
+  const check = await runStage(f.p.root, attempt, 1);
+  assert.equal(check.state, 'waiting');
+  assert.deepEqual(check.evidence, { base: true });
+  // A module that is not on the base is refused, not read from the worktree.
+  const g = await f.startAttempt('TK-2', 1, { stages: [{ do: 'module', module: { repo: 'server', path: '.workflow/new.mjs' } }] });
+  change(f, g, 'server', { '.workflow/new.mjs': 'export default async () => ({ state: "done" });\n' });
+  await assert.rejects(runStage(f.p.root, g, 0), /not committed on origin\/trunk/);
 });

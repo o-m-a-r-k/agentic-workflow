@@ -14,7 +14,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { WfError, attemptDir, attemptState, callerSession, connectorCalls, loadAdapter, marker, worktreeDir } from './contract.mjs';
+import crypto from 'node:crypto';
+import { WfError, attemptDir, attemptState, callerSession, connectorCalls, loadAdapter, marker, userDir } from './contract.mjs';
 import { filesTracker } from '../adapters/tracker/files.mjs';
 
 // Ids become folder and branch names: the same allowlist as the files tracker.
@@ -39,14 +40,40 @@ export function git(cwd, args, { allowFail = false, input } = {}) {
   return allowFail ? r : r.stdout.trim();
 }
 
-// A project module `{ repo, path }`: the file in the attempt's worktree of that repo when it is there, else in the repo's
-// checkout.
-export async function loadModule(root, adapter, ref, attempt = null) {
+// A project module `{ repo, path }`, loaded only as committed at the repo's fetched base, never from an attempt's
+// worktree or the checkout's working files: a ticket cannot change the code that decides its own delivery (mark itself
+// merged, skip a confirmation, write to the tracker). A ticket's change to a module ships through delivery and takes
+// effect after it lands. The committed bytes are copied to a content-addressed cache in the user folder and imported
+// from there, so the import is exactly what the base holds. `attempt` is accepted for the call sites and not used.
+const fetchedBases = new Set();
+export function baseRefOf(dir, spec) {
+  const remote = spec.remote ?? 'origin';
+  if (!git(dir, ['remote']).split('\n').includes(remote)) return spec.base;
+  const key = `${dir}\0${remote}\0${spec.base}`;
+  if (!fetchedBases.has(key)) {
+    git(dir, ['fetch', '--quiet', remote, `+refs/heads/${spec.base}:refs/remotes/${remote}/${spec.base}`], { allowFail: true });
+    fetchedBases.add(key);
+  }
+  return `${remote}/${spec.base}`;
+}
+export async function loadModule(root, adapter, ref, attempt = null) { // eslint-disable-line no-unused-vars
   const spec = adapter.repos.find((r) => r.name === ref?.repo);
   if (!spec) throw new WfError(`module ${JSON.stringify(ref)}: no repo named \`${ref?.repo}\` in the adapter`);
-  const inWorktree = attempt ? path.join(worktreeDir(root, attempt, spec.name), ref.path) : null;
-  const file = inWorktree && fs.existsSync(inWorktree) ? inWorktree : path.join(root, spec.path, ref.path);
-  if (!fs.existsSync(file)) throw new WfError(`module ${ref.repo}/${ref.path} not found at ${file}`);
+  const rel = path.posix.normalize(String(ref.path ?? '').replaceAll('\\', '/'));
+  if (!rel || rel.startsWith('../') || rel === '..' || path.posix.isAbsolute(rel)) throw new WfError(`module ${ref.repo}/${ref.path}: the path must be inside the repo`);
+  const dir = path.join(root, spec.path);
+  const baseRef = baseRefOf(dir, spec);
+  const shown = git(dir, ['show', `${baseRef}:${rel}`], { allowFail: true });
+  if (shown.status !== 0) throw new WfError(`module ${ref.repo}/${rel} is not committed on ${baseRef}: project modules are loaded only as the base holds them`);
+  const bytes = shown.stdout;
+  const cache = path.join(userDir(), 'modules');
+  fs.mkdirSync(cache, { recursive: true });
+  const file = path.join(cache, `${crypto.createHash('sha256').update(bytes).digest('hex')}.mjs`);
+  if (!fs.existsSync(file)) {
+    const tmp = `${file}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, bytes);
+    fs.renameSync(tmp, file);
+  }
   return import(pathToFileURL(file).href);
 }
 

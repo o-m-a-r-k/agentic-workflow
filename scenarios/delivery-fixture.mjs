@@ -71,7 +71,11 @@ export function deliveryProject({ ticketing = {}, delivery = {}, issues, unreada
   raw.delivery = { ...raw.delivery, ...delivery };
   const adapter = normalised(raw, p.root);
   const trackerFile = path.join(p.tmp, 'tracker.json');
+  // Project modules load only as committed on the base: the tracker module is committed and pushed there.
   writeTrackerModule(p.repos.server.dir, '.workflow/tracker.mjs', trackerFile, { issues, unreadable });
+  p.commit('server', {}, 'tracker module', { push: true });
+  // The module cache lives in the user folder: the project's own, never the person's.
+  process.env.WF_USER_DIR = p.env.WF_USER_DIR;
   const ledger = memLedger();
   const state = () => JSON.parse(fs.readFileSync(trackerFile, 'utf8'));
   // Start an attempt: a worktree per repo on `wf/<attempt>` at its base, and attempt.started with the stage snapshot.
