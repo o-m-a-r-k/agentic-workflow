@@ -29,6 +29,11 @@ test('append: catalogue, required fields, first event, chain', async (t) => {
   assert.deepEqual(lines.map((l) => l.type), ['attempt.started', 'hold']);
   await append(p.root, 'TK-1.1', 'attempt.closed', { outcome: 'abandoned', reason: 'x' }, actor);
   await assert.rejects(append(p.root, 'TK-1.1', 'attempt.closed', { outcome: 'abandoned', reason: 'x' }, actor), /already closed/);
+  // L3: nothing follows the close, whatever the event.
+  for (const [type, data] of [['hold', { reason: 'late', quote: 'late' }], ['stage', { index: 0, do: 'land', state: 'done' }], ['decision.answered', { id: 'D1', choice: 'x', quote: 'x', via: 'turn', session: null }]]) {
+    await assert.rejects(append(p.root, 'TK-1.1', type, data, actor), new RegExp(`TK-1.1 is already closed \\(abandoned at .+\\); its ledger takes no ${type.replace('.', '\\.')} after attempt.closed`));
+  }
+  assert.deepEqual(ledgerLines(p.root, 'TK-1.1').map((l) => l.type), ['attempt.started', 'hold', 'attempt.closed']);
 });
 
 test('readEvents: a hand edit breaks the chain; unknown attempts are named', async (t) => {
@@ -96,8 +101,9 @@ test('attemptState: the schema 2 fold', async (t) => {
   await a('stage', { index: 0, do: 'land', state: 'waiting' });
   await a('landing', { batch: 'L1', repo: 'server', attempts: [id], result: 'landed', sha: 'b'.repeat(40) });
   await a('stage', { index: 0, do: 'land', state: 'done' });
-  await a('attempt.closed', { outcome: 'shipped', reason: 'landed' });
+  await a('attempt.closed', { outcome: 'shipped', reason: 'landed', outsideStages: true });
   const s = await attemptState(p.root, id);
+  assert.equal(s.outsideStages, true, 'a close by patch-id with the stages not done is recorded (D16)');
   assert.equal(s.schema, 2);
   assert.equal(s.owner.id, 's-owner');
   assert.equal(s.criteria.hash, 'h1');

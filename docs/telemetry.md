@@ -6,7 +6,7 @@ Every closed ticket writes one row. Learning changes the workflow only through p
 
 ## The ledger
 
-Each attempt's ledger is `.wf-evidence/attempts/<id>/ledger.jsonl`: one event per line, hash-chained, written only through the engine. Schema 2 events: `attempt.started` (with the stage snapshot), `criteria.set` (with its hash), `test.run`, `screens.captured`, `handoff`, `review.recorded` (with coverage), `finding.filed`, `decision.asked`, `decision.answered`, `hold`, `release`, `base.updated`, `stage`, `landing`, `attempt.closed`. Schema 1 (0.7) ledgers stay readable.
+Each attempt's ledger is `.wf-evidence/attempts/<id>/ledger.jsonl`: one event per line, hash-chained, written only through the engine. Schema 2 events: `attempt.started` (with the stage snapshot), `criteria.set` (with its hash), `test.run`, `screens.captured`, `handoff`, `review.recorded` (with coverage), `finding.filed`, `decision.asked`, `decision.answered`, `hold`, `release`, `base.updated`, `stage`, `landing`, `attempt.closed`. Schema 1 (0.7) ledgers stay readable. A ledger takes no event after `attempt.closed`: an append to a closed attempt is refused, naming the attempt and when it closed.
 
 ## The per-ticket row
 
@@ -14,6 +14,7 @@ Each attempt's ledger is `.wf-evidence/attempts/<id>/ledger.jsonl`: one event pe
 
 | Field | Definition |
 |---|---|
+| `outcome`, `outsideStages` | How the attempt closed; `outsideStages` is `true` when it closed as shipped by patch-id with its delivery stages not done (D16), `null` while it is open. |
 | `wallMin`, `activeMin` | From start to close. Active time is the union of gaps of 30 minutes or less between activity (ledger events and transcript turns). |
 | `unexplainedGaps[]` | Gaps over 30 minutes with no event and no pending decision. |
 | `personWaitMin`, `holdMin`, `stageWaitMin{}` | Time waiting on the person's decisions, time under hold, and time per stage. |
@@ -27,7 +28,7 @@ Each attempt's ledger is `.wf-evidence/attempts/<id>/ledger.jsonl`: one event pe
 
 0.7 ledgers map onto the same row (the first terminal event is the end; batch members roll up into their tickets), so 0.7 and 0.8 compare on the same fields.
 
-`wf report` shows medians per project and per engine version, and lists commits on the base that no attempt covers.
+`wf report` shows medians per project and per engine version, and lists commits on the base that no attempt covers. It rebuilds every closed ticket's row and rewrites the telemetry file with them, so a row that `wf close` wrote is replaced, and `rework` (empty until 48 hours after delivery) is filled in on the first report after that.
 
 ## Proposals
 
@@ -35,7 +36,7 @@ Every change of shape needs a measured proposal, whatever its source. A proposal
 
 - `source`: `telemetry`, `incident` or `person`;
 - `scope`: `project` or `plugin`;
-- `change`, and `replaces` (required: what it takes the place of);
+- `change`, and `replaces` (required: what it takes the place of; for a plugin proposal, the name of something the budget counts in the plugin now: a refusal id, a command, an event type, an adapter key or a counted text, or the proposal is refused);
 - `metric` and `guard`: row fields;
 - `expires` and `status`.
 
@@ -49,6 +50,6 @@ The rules:
 
 ## The budget
 
-A change is rule-shaped when it adds a refusal id, a command, an adapter key, an event type, or words in a text agents read (role texts, skills, the session rules, the risk checklist). `budget.json` in the plugin holds the counts; `scripts/release.mjs` counts the release commit against `budget.json` on main, and a net increase fails the release unless a kept or active plugin proposal committed under `proposals/` accounts for it. A replacement (one refusal for another) is rule-shaped but no increase. Each role text also stays under its word limit.
+A change is rule-shaped when it adds a refusal id, a command, an adapter key, an event type, or words in a text agents read (role texts, skills, the session rules, the risk checklist). `budget.json` in the plugin holds the counts; `scripts/release.mjs` counts the release commit against `budget.json` on main (the first 0.8 release, with none on main, against its own), and a net increase fails the release unless a kept or active plugin proposal committed under `proposals/` accounts for it. A replacement (one refusal for another) is rule-shaped but no increase. Each role text also stays under its word limit.
 
 A project's adapter has its own budget (`budget.adapter`: rules, risk areas, modules, operation words); `wf doctor` reports it, and a net increase needs a project proposal.

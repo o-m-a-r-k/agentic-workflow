@@ -42,7 +42,7 @@ screens:
   sentinel: ["/", "/projects", "/invoices/new"]
   langs: [{ lang: <code>, dir: <ltr|rtl> }]               # each language and direction the project ships
   viewports: [390, 1440]
-  capture: "node web/scripts/capture.mjs --out {out} --viewport {viewport} --lang {lang} {routes}"
+  capture: { module: { repo: web, path: scripts/capture.mjs } }   # or { run: "<command>" }, which runs as the attempt has it
 review: { diffRead: before }           # or after
 risk:                                  # proposed by the scan, confirmed by the person; `risk: none` is explicit
   - { id: <area>, paths: ["<area>/**"], reason: "<the facts the scan found>", tests: ["<its tests>/**"] }
@@ -93,15 +93,15 @@ delivery:
 | Key | What it says |
 | --- | --- |
 | `version`, `name`, `root` | Schema 2; the project's name; its root (user-folder copy only). |
-| `requires` | `connectors`, `tools` and `skills` the project needs; `wf doctor` and `wf sync` check them. |
-| `repos[]` | `name`, `path`, `base`, `remote` (default `origin`), `provision` (what a new worktree clones, copies and installs), `tests.fast` and `tests.full` (a command or a module, with an optional counted `lock`), `kinds` (which paths are tests and which are neither tests nor product, for the diff and the row). |
+| `requires` | `connectors`, `tools` (plain command names) and `skills` the project needs; `wf doctor` and `wf sync` check them. |
+| `repos[]` | `name`, `path`, `base` (an attempt may start from another branch with `wf start --base`, and keeps that base), `remote` (default `origin`), `provision` (what a new worktree clones, copies and installs), `tests.fast` and `tests.full` (a command or a module, with an optional counted `lock`), `kinds` (which paths are tests and which are neither tests nor product, for the diff and the row). |
 | `components[]` | Consumers of changed contracts: a component in `repo` that `dependsOn` the files a `contract` glob names. |
 | `invariants` | The project's invariants file; reviewers get it and the session rules quote it. |
 | `rules[]` | Documents to read for changes under `paths`. |
-| `screens` | How screens are picked and captured: a `routes` module, `shared` paths that add the `sentinel` set, `langs`, `viewports` and the `capture` command with `{out}`, `{viewport}`, `{lang}`, `{dir}` and `{routes}`. |
+| `screens` | How screens are picked and captured: a `routes` module, `shared` paths that add the `sentinel` set, `langs`, `viewports` and `capture`: either `{ module: { repo, path } }`, loaded as the base holds it with `ctx.cwd` set to the attempt folder, or `{ run: "<command>" }` with `{out}`, `{viewport}`, `{lang}`, `{dir}` and `{routes}`, run from the attempt folder as the attempt has it, so the ticket under review can change it (prefer the module). Screens are required when `capture` and `shared` or `sentinel` are set, even with no `routes`; `wf doctor` warns when `routes` is unset. |
 | `review.diffRead` | `before` or `after`: whether the person's diff-read on a risk path comes before or after the merge. |
 | `risk` | Risk areas with `paths`, the `reason` the scan found and the `tests` that guard them; or `none`. |
-| `ticketing` | `tracker` (a name, a module or `files`), `via` (`connector`, `module`, `files`), `idPattern`, `take` (the status set at start), `followUps` (`file`, `digest` or `off`) and `operations` (the adapter's own words for each connector step). |
+| `ticketing` | `tracker` (a name, which with `via: connector` is only a label in the operation texts; a module; or `files`), `via` (`connector`, `module`, `files`), `idPattern`, `take` (the status set at start), `followUps` (`file`, `digest` or `off`) and `operations` (the adapter's own words for each connector step, keyed by the engine's operations: `read`, `search`, `fileFollowUp`, `setStatus`, `comment`, `mergeRequest`). One attempt can run without the tracker: `wf start --no-tracker`. |
 | `delivery` | `landing` (`direct` or `queue`), `order`, `authority` (who pushes, opens merge requests and merges) and `stages` ([delivery-and-tracker.md](delivery-and-tracker.md)). |
 | `models` | A model per role: `planner`, `implementer`, `reviewer`, `secondReviewer`, `tester`, `drafter`. |
 | `budget.adapter` | Limits on the adapter's rules, risk areas, modules and operation words; `wf doctor` reports the counts. |
@@ -111,4 +111,4 @@ Keys schema 2 dropped (lanes, classes, panel, strategy, impact, leaving, severit
 
 ## Secrets
 
-Secrets are catalogued in `.workflow/secrets.yaml` (a list of keys with `usedBy` and `purpose`) and filled by the person with `wf secrets guide` in their own terminal ([onboarding.md](onboarding.md#secrets)).
+Secrets are catalogued in `secrets.yaml` beside the adapter (`.workflow/secrets.yaml` in the repo, or next to the user-folder adapter), a list of keys with `usedBy` and `purpose`, and filled by the person with `wf secrets guide` in their own terminal ([onboarding.md](onboarding.md#secrets)).

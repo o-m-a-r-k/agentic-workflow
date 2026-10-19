@@ -147,10 +147,14 @@ test('incidents become proposals only once they recur; person proposals skip dra
     const person = await propose(c.p.root, draft({ source: 'person', metric: 'testMin', change: 'Keep the full suite under an hour.' }));
     assert.equal(person.baseline.n, 0);
     // Plugin proposals: one per release, never applied in the project, listed for the maintainer.
-    const g = await propose(c.p.root, draft({ source: 'person', scope: 'plugin', metric: 'fixRounds', change: 'Plugin change.', adds: { refusals: ['x:y'] } }));
+    // L4: a plugin proposal replaces something the budget counts in the plugin now, by its name; free text is refused.
+    await assert.rejects(propose(c.p.root, draft({ source: 'person', scope: 'plugin', metric: 'fixRounds', change: 'Plugin change.', replaces: 'the rule on reading order' })), /`replaces` of a plugin proposal must name something the budget counts.*`the rule on reading order` is none of them/s);
+    await assert.rejects(propose(c.p.root, draft({ source: 'person', scope: 'plugin', metric: 'fixRounds', change: 'Plugin change.', replaces: 'merge:not-a-refusal' })), /`merge:not-a-refusal` is none of them/);
+    const g = await propose(c.p.root, draft({ source: 'person', scope: 'plugin', metric: 'fixRounds', change: 'Plugin change.', replaces: 'merge:waiver', adds: { refusals: ['x:y'] } }));
+    assert.equal(g.replaces, 'merge:waiver');
     assert.equal(g.status, 'proposed');
     assert.equal(g.project, null);
-    await assert.rejects(propose(c.p.root, draft({ source: 'person', scope: 'plugin', metric: 'reviews', change: 'Second plugin change.' })), /one plugin proposal per release/);
+    await assert.rejects(propose(c.p.root, draft({ source: 'person', scope: 'plugin', metric: 'reviews', change: 'Second plugin change.', replaces: 'templates/session-rules.md' })), /one plugin proposal per release/);
     const plugin = await learn(ctx, { _: [], flags: { plugin: true } });
     assert.match(plugin.text, /Plugin change\./);
     assert.doesNotMatch(fs.readFileSync(learnedFile('sample'), 'utf8'), /Plugin change/);

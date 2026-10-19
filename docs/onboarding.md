@@ -26,13 +26,13 @@ Registers the project in the person's registry (`~/.agentic-workflow/registry.js
 
 ## Migrating from 0.7
 
-`wf init --from-07` is an onboarding run seeded from the schema 1 adapter: tests, tracker and delivery modules become `{ repo, path }` modules, statuses and labels become stages, per-ticket validation steps are dropped by name, `quality` moves into the invariants, and every dropped key is printed. It refuses to finish while `screens.capture` is unset (it offers the command seeded from the old step that collected screenshots) and while `risk` is unconfirmed. `wf migrate attempts` and `wf migrate material` are described in the [0.8.0 release notes](releases/v0.8.0.md#migrating-from-07).
+`wf init --from-07` is an onboarding run seeded from the schema 1 adapter: tests, tracker and delivery modules become `{ repo, path }` modules, statuses and labels become stages, per-ticket validation steps are dropped by name, `quality` moves into the invariants, and every dropped key is printed. It refuses to finish while `screens.capture` is unset (it offers the command seeded from the old step that collected screenshots) and while `risk` is unconfirmed. It imports each project module from the base and checks its default export for its kind, and says plainly when one cannot be used as it is: a 0.7 test runner runs no tests until it is rewritten for the 0.8 runner contract (printed), and a 0.7 delivery module becomes `merge-request` and `wait-merged` with the merge left to the person until it is rewritten as a `module` stage. `idPattern` is built from the item prefixes in the old attempt folders, and `requires.tools` keeps plain command names, listing what it dropped. The work this leaves the person is in the [0.8.0 release notes](releases/v0.8.0.md#migrating-from-07). `wf migrate attempts` and `wf migrate material` are described in the [0.8.0 release notes](releases/v0.8.0.md#migrating-from-07).
 
 ## Secrets
 
 Agents never see, type, print or move a secret value.
 
-- The catalogue is `.workflow/secrets.yaml`: `keys: [{ key, purpose, usedBy, required, format, verify }]`. Values live in the repo's `.env.local` (gitignored) or the macOS keychain.
+- The catalogue is `secrets.yaml` beside the adapter (`.workflow/secrets.yaml` in a repo, or next to the user-folder adapter): `keys: [{ key, purpose, usedBy, required, format, verify }]`. Values live in the repo's `.env.local` (gitignored) or the macOS keychain.
 - `wf secrets check` lists each key with `filled`, `missing` or `invalid`, never a value; `wf doctor` does the same.
 - `wf secrets guide` asks the person for each missing value with hidden input. It runs only in their own terminal.
 - A key whose `usedBy` names `provision:<repo>` reaches that repo's `provision.install` when a worktree is provisioned, and nothing else (D14). A missing one refuses `wf start`; a failed install with a secret prints none of its output.

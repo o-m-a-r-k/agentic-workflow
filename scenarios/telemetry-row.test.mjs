@@ -7,6 +7,7 @@ import path from 'node:path';
 import { makeProject, git, withDoubles } from './helpers/index.mjs';
 import { append, row, blameToAttempt, recordRefusal, commandHandler, ledgerFile } from '../engine/contract.mjs';
 import { setClock } from '../engine/ledger.mjs';
+import { writeRow } from '../engine/telemetry.mjs';
 import { normalisedAdapter, commitAt, futureStart, at, wt } from './telemetry-support.mjs';
 
 const owner = { runtime: 'claude', id: 'owner-1' };
@@ -99,6 +100,7 @@ test('row: every field of a 0.8 attempt, from the ledger, git and transcripts', 
     const r = await row(p.root, s.id);
     assert.equal(r.schema, 'wf-ticket@1');
     assert.deepEqual([r.project, r.item, r.attempt, r.engine, r.outcome], ['sample', 'TK-1', 'TK-1.1', '0.8.0', 'shipped']);
+    assert.equal(r.outsideStages, false, 'closed through its stages');
     assert.equal(r.wallMin, 275);
     assert.equal(r.activeMin, 122);
     assert.deepEqual(r.unexplainedGaps.map((g) => g.min), [35, 53]);
@@ -118,6 +120,24 @@ test('row: every field of a 0.8 attempt, from the ledger, git and transcripts', 
     assert.deepEqual(r.rework, { lines: 1, share: 0.2, commits: 1 });
     assert.deepEqual(r.tokens, { input: 100, output: 20, cacheRead: 5, cacheWrite: 1 });
     assert.equal(r.cost, 0.5);
+  });
+});
+
+test('row: a ticket closed as shipped outside its delivery stages says so (D16); an open one says nothing yet', async (t) => {
+  const p = makeProject();
+  t.after(p.cleanup);
+  withUserDir(p, t);
+  const startedData = (item) => ({ item, n: 1, repos: {}, stages: [{ do: 'land' }], adapter: 'h', engine: '0.8.0' });
+  await append(p.root, 'TK-3.1', 'attempt.started', startedData('TK-3'), owner);
+  await append(p.root, 'TK-4.1', 'attempt.started', startedData('TK-4'), owner);
+  await append(p.root, 'TK-4.1', 'attempt.closed', { outcome: 'shipped', reason: 'every commit is on the base (patch-id)', outsideStages: true }, owner);
+  await withDoubles({ ...doubles(p), changedFiles: async () => { throw new Error('no worktree'); } }, async () => {
+    assert.equal((await row(p.root, 'TK-3.1')).outsideStages, null);
+    const closed = await row(p.root, 'TK-4.1');
+    assert.deepEqual([closed.outcome, closed.outsideStages], ['shipped', true]);
+    const { row: stored, file } = await writeRow(p.root, 'TK-4.1');
+    assert.equal(stored.outsideStages, true);
+    assert.equal(JSON.parse(fs.readFileSync(file, 'utf8').trim().split('\n').at(-1)).outsideStages, true);
   });
 });
 

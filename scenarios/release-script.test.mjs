@@ -55,7 +55,8 @@ test('the release dry run prints every step from local facts, names what each ch
   has(`origin/release/${version} must equal dev/${version} (locally at ${sha})`);
   has(`package.json, .claude-plugin/plugin.json, .codex-plugin/plugin.json at that commit say ${version}; docs/releases/v${version}.md exists there`);
   has(`node scripts/ci-passed.mjs ${sha}`);
-  has('no improvement history file (improvements/) left uncommitted in any worktree of this repository');
+  // 0.8.0 (L13): the improvement history left the shipped tree (it stays in git), so the release checks no improvements/ folder.
+  assert.ok(!out.includes('improvements/'), 'the plan names no improvements/ folder');
   has('the budget: the rule-shaped counts at that commit (refusals, commands, events, adapter keys, words) against budget.json on origin/main');
   // 2. privacy
   has(`denylist: ${denylist}\n`);
@@ -146,10 +147,42 @@ test('the release stops at its check when the rule-shaped counts grow past the r
   assert.equal(sh(repo, 'git rev-parse refs/remotes/origin/main'), mainBefore, 'nothing was pushed to main');
 
   // A kept plugin proposal committed in the release accounts for it: the check passes and the run goes on to the next step.
-  write(repo, 'proposals/extra-check.json', JSON.stringify({ id: 'P1', scope: 'plugin', source: 'incident', status: 'kept', change: 'an added check', replaces: 'nothing', metric: 'rework.share', guard: 'activeMin', adds: { refusals: ['merge:extra'] } }));
+  write(repo, 'proposals/extra-check.json', JSON.stringify({ id: 'P1', scope: 'plugin', source: 'incident', status: 'kept', change: 'an added check', replaces: 'merge:untested', metric: 'rework.share', guard: 'activeMin', adds: { refusals: ['merge:extra'] } }));
   const covered = release();
   assert.match(covered.stdout, /budget: refusals 20, commands \d+, events \d+, adapter keys \d+, words \d+; against origin\/main \(rule-shaped changes, each accounted for\)/);
   assert.match(covered.stdout, /CI passed on/);
   assert.match(covered.stderr, /stopped at step 2 \(privacy\)/);
   assert.equal(sh(repo, 'git rev-parse refs/remotes/origin/main'), mainBefore, 'nothing was pushed to main');
+});
+
+test('the changelog reads the improvement history from git once improvements/ has left the shipped tree (0.8.0, L13)', () => {
+  const repo = path.join(tmp('changelog'), 'plugin');
+  const script = fs.readFileSync(path.join(import.meta.dirname, '..', 'scripts', 'changelog.mjs'), 'utf8');
+  makeRepo(repo, {
+    'scripts/changelog.mjs': script,
+    'docs/releases/v0.9.0.md': '## 0.9.0 - first\n',
+    'docs/releases/v0.10.0.md': '## 0.10.0 - second\n',
+    'improvements/README.md': '# history\n',
+    'improvements/I-1.md': '# I-1: a review read a stale tree\n\n**Fixed in:** 0.9.0\n**Test:** scenarios/a.test.mjs (the case)\n',
+    'improvements/I-2.md': '# I-2: a hold was lifted by an agent\n\n**Fixed in:** 0.10.0\n**Test:** scenarios/b.test.mjs\n',
+  });
+  const run = () => spawnSync(process.execPath, ['scripts/changelog.mjs'], { cwd: repo, encoding: 'utf8' });
+  const before = run();
+  assert.equal(before.status, 0, before.stderr);
+  const expected = fs.readFileSync(path.join(repo, 'CHANGELOG.md'), 'utf8');
+  assert.match(expected, /## 0\.10\.0 - second\n\n## 0\.9\.0 - first/);
+  assert.match(expected, /\| \[I-2\]\(improvements\/I-2\.md\) \| a hold was lifted by an agent \| 0\.10\.0 \| scenarios\/b\.test\.mjs \|\n\| \[I-1\]/);
+  // The folder leaves the tree, not yet committed: the history is read from HEAD.
+  sh(repo, 'git rm -rq improvements');
+  fs.rmSync(path.join(repo, 'CHANGELOG.md'));
+  const staged = run();
+  assert.equal(staged.status, 0, staged.stderr);
+  assert.equal(fs.readFileSync(path.join(repo, 'CHANGELOG.md'), 'utf8'), expected, 'the same changelog, read from HEAD');
+  // Committed, and a later commit touches something else: read from the tree before the removal.
+  sh(repo, 'git commit -qm "archive the improvement history" && echo x > other && git add other && git commit -qm later');
+  fs.rmSync(path.join(repo, 'CHANGELOG.md'));
+  const after = run();
+  assert.equal(after.status, 0, after.stderr);
+  assert.match(after.stdout, /2 release\(s\), 2 improvement\(s\)/);
+  assert.equal(fs.readFileSync(path.join(repo, 'CHANGELOG.md'), 'utf8'), expected, 'the same changelog, read from git');
 });

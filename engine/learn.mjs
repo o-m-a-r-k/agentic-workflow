@@ -15,7 +15,7 @@
 // The release script calls `checkRelease`: the five rule-shaped counts of the plugin tree against budget.json.
 import fs from 'node:fs';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { CONTRACT_VERSION, WfError, adapterBudget, loadAdapter, userDir } from './contract.mjs';
 import { nowMs } from './ledger.mjs';
 import { REPORT_METRICS, emptyRow, median, metricValue, projectName, projectRows } from './telemetry.mjs';
@@ -28,6 +28,9 @@ const JUDGE_DAYS = 21;
 const KEEP_DAYS = 90;
 const BLOCK_DAYS = 60;
 const DAY = 86400000;
+
+// The plugin this engine belongs to: a plugin proposal's `replaces` names one of its counted names.
+const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 const SOURCES = ['telemetry', 'incident', 'person'];
 const SCOPES = ['project', 'plugin'];
@@ -131,6 +134,21 @@ function validAdds(adds) {
   return null;
 }
 
+// A plugin proposal replaces something the budget counts (L4): a refusal id, a command, an event type, an adapter key or
+// a counted text, by its name in the plugin tree as it is now. Free text there would let every plugin change claim to
+// replace something and still grow the plugin. Returns the problem, or null.
+async function notCounted(name) {
+  let counts;
+  try {
+    counts = await countRuleShapes(PLUGIN_ROOT, JSON.parse(fs.readFileSync(path.join(PLUGIN_ROOT, 'budget.json'), 'utf8')));
+  } catch (error) {
+    return `the plugin's counted names cannot be read (${error.message}), so \`replaces\` cannot be checked`;
+  }
+  const named = [...KINDS.flatMap((k) => counts[k] ?? []), ...Object.keys(counts.words.texts)];
+  if (named.includes(name)) return null;
+  return `\`replaces\` of a plugin proposal must name something the budget counts in the plugin now (a refusal id, command, event type, adapter key or counted text); \`${name}\` is none of them`;
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Incidents
 // ---------------------------------------------------------------------------------------------------------------------
@@ -162,6 +180,10 @@ export async function propose(root, draft) {
   const addsProblem = validAdds(d.adds);
   if (addsProblem) problems.push(addsProblem);
   if (d.scope === 'project' && !root) problems.push('a project proposal needs the project');
+  if (d.scope === 'plugin' && typeof d.replaces === 'string' && d.replaces.trim()) {
+    const missing = await notCounted(d.replaces.trim());
+    if (missing) problems.push(missing);
+  }
   if (problems.length) throw new WfError(`proposal refused:\n  - ${problems.join('\n  - ')}`);
 
   const now = nowMs();

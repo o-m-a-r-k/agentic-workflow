@@ -89,7 +89,9 @@ export async function append(root, attempt, type, data, actor = null) {
     const entries = fs.existsSync(file) ? readFile(root, attempt) : [];
     if (!entries.length && type !== 'attempt.started') throw new WfError(`${attempt} has no ledger yet: its first event must be attempt.started, not ${type}`);
     if (entries.length && type === 'attempt.started') throw new WfError(`${attempt} already started (its ledger has ${entries.length} entries)`);
-    if (type === 'attempt.closed' && entries.some((e) => e.type === 'attempt.closed')) throw new WfError(`${attempt} is already closed`);
+    // Nothing follows the close (L3): an event after it would change a row, a digest or a delivery of a ticket that ended.
+    const closed = entries.find((e) => e.type === 'attempt.closed');
+    if (closed) throw new WfError(`${attempt} is already closed (${closed.data?.outcome ?? 'closed'} at ${closed.at}); its ledger takes no ${type} after attempt.closed`, { hint: 'a closed attempt stays closed: `wf start` opens the next attempt of the item' });
     const last = entries.at(-1) ?? null;
     const entry = { seq: (last?.seq ?? 0) + 1, at: nowIso(), type, actor: actor ?? null, data: JSON.parse(JSON.stringify(data)), prev: last?.hash ?? null, schema: SCHEMA };
     entry.hash = entryHash(entry);
@@ -178,7 +180,7 @@ const findingId = (f) => (typeof f === 'string' ? f : f?.id ?? null);
 function fold2(id, entries) {
   const s = {
     id, item: splitId(id).item, n: splitId(id).n, schema: 2, open: true, outcome: null, owner: null, engine: null, adapter: null,
-    startedAt: entries[0]?.at ?? null, closedAt: null, closeReason: null, closedRow: null, patchIds: null,
+    startedAt: entries[0]?.at ?? null, closedAt: null, closeReason: null, closedRow: null, patchIds: null, outsideStages: null,
     repos: {}, stages: [], criteria: { list: [], areas: [], hash: null, history: [] },
     tests: [], screens: [], handoffs: [], reviews: [], findings: {}, decisions: {}, hold: null, holds: [],
     stageResults: {}, stageEvents: [], landings: [], baseUpdates: [], filings: [],
@@ -257,7 +259,7 @@ function fold2(id, entries) {
         s.landings.push({ ...d, at: e.at });
         break;
       case 'attempt.closed':
-        Object.assign(s, { open: false, outcome: d.outcome, closeReason: d.reason, closedAt: e.at, closedRow: d.row ?? null, patchIds: d.patchIds ?? null });
+        Object.assign(s, { open: false, outcome: d.outcome, closeReason: d.reason, closedAt: e.at, closedRow: d.row ?? null, patchIds: d.patchIds ?? null, outsideStages: d.outsideStages === true });
         break;
       default:
         break;

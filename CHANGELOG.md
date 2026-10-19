@@ -29,69 +29,136 @@ existed before the ticket, so screenshots are also a regression net).
 
 - **One flow** (D91): `wf start`, `wf criteria`, implement, `wf test fast`, `wf screens`, `wf review`, fix rounds,
   `wf deliver`, `wf close`. There are no lanes, batch lane, analysis attempts, planning panel or strategist, and no
-  attempt waits for another unless the project says so. `wf status` names one next command per attempt.
+  attempt waits for another unless the project says so. `wf status` names one next command per attempt, says "reviewer
+  <seat> running since N min" while a review runs, and, like `wf resume`, ends with the number of open questions and the
+  hint `wf digest`.
+- **Starting an attempt** (D101): `wf start <item>` takes three options. `--base <branch>` starts from a branch other
+  than the adapter's base; the base is recorded per repo, and every later base read (the risk test's merge-base,
+  landing, delivery, telemetry) takes the attempt's recorded base. `--repos <names>` starts on some of the project's
+  repos only. `--no-tracker` starts work that has no ticket: the attempt records `ticketing: none` and makes no
+  tracker call.
+- **Roles get their texts** (D102): `wf handoff <role>` prints the role's text with the project's learned notes, and
+  returns it as `data.prompt`; the work skill tells the owner to launch the role with exactly that text.
 - **Whole-diff reviews** (D93): `wf review` launches fresh reviewers whose whole prompt is a small bundle (the diff, the
   criteria, the invariants, the rules for the touched paths, the consumers of changed contracts, the screenshots) while
-  the fast tests run on the same tree. A review is refused unless the reviewer's transcript shows it read every product
-  file in the diff. Large changes split by area. There is no round cap; a ticket stops for the person only when it makes
-  no progress.
+  the fast tests run on the same tree. It waits until every seat is done or failed and the tests have ended
+  (`--no-wait` returns at once), and the work skill runs `wf review`, `wf land` and `wf test` in the background, so
+  nobody polls. A review is refused unless the reviewer's transcript shows it read every product file in the diff. Large
+  changes split by area. There is no round cap; a ticket stops for the person only when it makes no progress.
+- **A review proves where it came from** (D5): the reviewed tree is taken from the reviewer's launch, never from the
+  recording command, and must be HEAD (`review:tree`). The review file must be the reviewer's own: its transcript holds a
+  write to that path with the same content hash, or the review is its final message. When the reviewer ends without
+  writing the file, the supervisor writes its final message there. A Codex reviewer's output is read from its first `{`
+  to its last `}`. The repos' heads are part of the `handoff`, `screens.captured` and `review.recorded` events, so
+  every later check reads them from the hash-chained ledger.
 - **Three finding classes** (D92): `goal` and `regression` block at any severity; `other` is filed, digested or listed,
   as the project chooses, and is refused on a line the attempt wrote. The severity-leaving rules, per-item questions and
   discovered issues are gone.
 - **A risk tier from the project** (D94): risk paths come from onboarding, with reasons citing files; a change on one
   needs a test that fails on the merge-base, a second reviewer on another model, the risk checklist and the person's
-  diff-read.
-- **The person's decisions** (D95): a short reserved list, answered only by the person's own turn right after the
-  question, or in the question panel; one daily digest (`wf digest`).
+  diff-read. Merge-base runs are matched by the merge-base tree they ran on, not by time.
+- **The person's decisions** (D95): a short reserved list, answered only by the person's own typed turn or in the
+  question panel. A reply counts on one of two facts, never on how short it is: it is the first person turn after a
+  message that showed this question and no other open one, or it contains the decision's id (`D3`) or one of its refs
+  (`F3`) as the engine printed them. `--choice` is refused when the quote is exactly another option. One daily digest
+  (`wf digest`).
 - **Delivery is the project's** (D96, D97): stages (`land`, `push`, `merge-request`, `wait-merged`,
   `confirm-deployed`, `deploy`, `status`, `comment`, `module`), each repo's part separately, idempotent tracker writes,
   merge requests matched by patch-id, and a landing queue for projects with no CI. The merge facts refuse unreviewed
-  edits after the review and merges of foreign branches.
+  edits after the review and merges of foreign branches. A `push` stage onto the base needs a passing `full` run on
+  the tip tree, from the landing queue or CI (`merge:untested`).
+- **Connector trackers** (D63): a tracker named by a string with `via: connector` is a label in the operation texts,
+  never a built-in driver. A connector step counts only from the owner's transcript, from a call made after the stage
+  was first asked with a result that is no error: a follow-up's input carries the marker and the title and its result
+  the new id (so filing through a connector needs `ticketing.idPattern`); a status change's result shows the new
+  status. Labels are read from the result of the owner's read call; `wf deliver --labels` is refused. The adapter's
+  `ticketing.operations` keys and the engine's operations are one list (`read`, `search`, `fileFollowUp`,
+  `setStatus`, `comment`, `mergeRequest`).
+- **Secrets stay out of what is written** (D103): `engine/scrub.mjs` is back. Prefixed tokens, bearer tokens,
+  credentials in query strings and catalogued secret values are masked in finding `what` and `why` when recorded, in
+  comment and follow-up bodies when posted, and in digest lines. The secrets catalogue is read beside the adapter, in
+  the user folder or the repo.
+- **Screens:** a capture is refused when its width differs from the viewport (`screens:width`) or when its bytes equal
+  another image's, the same route included (`screens:dup`). A page whose `lang` or `dir` differs from the requested one
+  is recorded as `mismatch: {requested, page}` and listed for the reviewer. Screens are required when `capture` and
+  `shared` or `sentinel` are set, even with no routes, and `wf doctor` warns when routes are unset.
+  `screens.capture` is either `{ run: "<command>" }` or `{ module: { repo, path } }` (see the known limits).
 - **Tests:** each repo's `fast` and `full`, a command or a module loaded from the fetched base, with a counted,
   machine-wide lock. Gate reuse, selection, quarantine, leases and per-ticket proof steps are gone.
 - **Onboarding sets policy and can be re-run** (D100): `wf init` scans the repos, proposes each key with reasons, and
   writes only what the person confirms; hand edits are kept unless confirmed. The adapter may live in the user folder,
-  so nothing in product repos is required (D99).
+  so nothing in product repos is required (D99). A user-folder adapter is committed to its own history only when its
+  content changed.
+- **Hosts from outside the engine** (D8): host modules in `<user folder>/hosts/*.mjs` (or `WF_HOSTS`) load with the
+  built-in ones, so the supervisor launches reviewers through them too.
 - **Telemetry and learning** (D98): one row per ticket, `wf report` medians per engine version, proposals judged against
   each project's baseline band, and a hard budget on refusal ids, commands, adapter keys, event types and words in the
   texts agents read. `scripts/release.mjs` fails a release that grows past it unless a committed proposal accounts for
-  the increase.
+  the increase. A plugin proposal's `replaces` must name something the budget counts in the plugin now. A ledger takes
+  no event after `attempt.closed`. `wf report` rewrites the telemetry file and refreshes rework on every run.
+- **Closing work that shipped outside the workflow** (D16): `wf close` closes as shipped when every commit is on the
+  base by patch-id, commit by commit or as one squashed diff, even with delivery stages not done. It records
+  `outsideStages: true` in `attempt.closed` and in the telemetry row, and the digest shows it. A "shipped" close with
+  no commits is refused.
 - **Removed:** the evidence manifest and anchor, the guard hook, the strategist, lessons and the improvement inbox, the
   gate family, `wf export`, the bundled trackers for specific vendors, and the hello-ticket demo (the end-to-end
   scenarios replace it). 19 refusal ids replace more than 300; the engine went from about 30,000 lines in 97 modules to
-  about 10,000 in 43.
+  about 10,000 in 43. The improvement history (`improvements/`) left the shipped tree; it stays in git, and
+  `node scripts/changelog.mjs` reads it from there.
 - **Install:** `wf install` is gone; `node scripts/install.mjs` links `~/.local/bin/wf` to the copy it is run from.
+
+### The budget of this release
+
+The release check counts the release commit against `budget.json` on main. 0.7 had no `budget.json`, so this first 0.8
+release is checked against its own: its counts are the baseline every later release is measured against.
 
 ### Migrating from 0.7
 
 1. **The adapter:** run `wf init --from-07` in the project. It is an onboarding run seeded from the 0.7 adapter: tests,
    tracker and delivery modules become `{ repo, path }` modules, statuses and labels become stages, per-ticket
-   validation steps are dropped, `quality` moves into the invariants, and every dropped key is printed. It will not
-   finish until `screens.capture` and `risk` are set; confirm the keys with `--confirm`.
-2. **Open attempts:** run `wf migrate attempts` (`--dry-run` first shows what it would do). Held attempts are skipped and
+   validation steps are dropped, `quality` moves into the invariants, and every dropped key is printed.
+   - `ticketing.idPattern` is built from the item prefixes found in the old attempt folders (a quick-fix prefix
+     included), and a tracker module's `normalise` export is optional.
+   - `requires.tools` keeps plain command names only; anything else is dropped and listed.
+   - It will not finish until `screens.capture` and `risk` are set; confirm the keys with `--confirm`.
+2. **Project modules (tests, tracker, delivery):** `wf init --from-07` imports each module as the base holds it, checks
+   its default export against its kind, and says plainly when one cannot be used as it is. A 0.7 module was written
+   against 0.7's contracts, so plan this work:
+   - **A test runner module** runs no tests until you rewrite it. The report says "no tests run until <module> is
+     rewritten for the 0.8 runner contract" and prints the contract: `export default async (ctx) => ({ pass, log })`,
+     where `ctx` holds `repo`, `kind`, `attempt`, `cwd` (the tree to test) and `env`; `pass` is `true` only for a
+     green run, and `log` is the output to keep.
+   - **A delivery module** becomes `merge-request` then `wait-merged`, with `authority.mergeRequest` and
+     `authority.merge` set to `person`, and the report says the module needs rewriting. To keep delivering through it,
+     rewrite it to the `module` stage contract, `export default async (ctx) => ({ state, evidence, next })`, where
+     `ctx` holds `root`, `attempt`, `item`, `stage`, `marker` and `repos` (per repo: `dir`, `branch`, `base`, `remote`,
+     `tip`) and `state` is `done`, `waiting`, `pending` or `skipped`; then put a `module` stage in `delivery.stages`.
+   - **A tracker module** needs a default function export (the driver: `read`, `search`, `create`, `setStatus`,
+     `comment`, and optionally `normalise`).
+3. **Open attempts:** run `wf migrate attempts` (`--dry-run` first shows what it would do). Held attempts are skipped and
    listed for you. Every other open attempt is closed as superseded with its branches kept, or as shipped when its
-   commits are already on the base (by patch-id). For each one it prints the item, the branch, the unmerged commits and
-   the last review state. Tracker statuses are left untouched. Old ledgers stay readable, and attempt numbers continue
-   after them.
-3. **Workflow material in product repos:** 0.8 reads none of it. `wf migrate material` lists the tracked files under
+   commits are already on the base (by patch-id). An attempt's base is read from its 0.7 ledger (`baseRef`, without the
+   remote), else from the repo's base. For each one it prints the item, the branch, the unmerged commits and the last
+   review state. Tracker statuses are left untouched. Old ledgers stay readable, and attempt numbers continue after
+   them.
+4. **Workflow material in product repos:** 0.8 reads none of it. `wf migrate material` lists the tracked files under
    `.workflow/` that the new adapter does not reference, and the product code that imports from `.workflow/`. Remove it
    with **one ticket per repo**, run through 0.8, which also fixes the product code that imports it.
-4. **Instruction files:** `wf doctor` lists lines of the project's instruction files that name removed commands or
+5. **Instruction files:** `wf doctor` lists lines of the project's instruction files that name removed commands or
    flags.
 
 ### Known limits
 
-- **A screens capture command runs from the attempt folder.** Test runners, the routes module and tracker and delivery
-  modules load as the fetched base holds them, so a ticket cannot change the code that judges it; the capture command is
-  a shell command and runs as the attempt has it. Captures stay guarded by the width and duplicate checks, and the
-  reviewer opens every image.
+- **A screens capture given as `run` runs as the attempt has it.** Test runners, the routes module and tracker and
+  delivery modules load as the fetched base holds them, so a ticket cannot change the code that judges it. A capture
+  given as `{ module: { repo, path } }` loads the same way, with `ctx.cwd` set to the attempt folder. A capture given as
+  `{ run }` is a shell command run from the attempt folder, so the ticket under review can change it; captures stay
+  guarded by the width and duplicate checks, and the reviewer opens every image. Prefer the module form.
 - **A base module resolves within its top-level folder.** A project module is extracted from the base with its whole
   top-level folder (all of `.workflow/` for `.workflow/steps/unit.mjs`), so `../` imports inside that folder work; an
   import that reaches outside it does not resolve. Installed packages resolve through the checkout's `node_modules`.
-- **A terminal `wf approve` no longer counts as an answer.** The person answers in the session, right after the
-  question, or in the question panel; an answer typed as a command at a terminal is not their turn.
-- **A harness registered from outside the engine** is recognised and read (its sessions, the files they read, their
-  usage), but reviewers are launched only through the hosts built into `engine/hosts/`.
+- **A terminal `wf approve` no longer counts as an answer.** The person answers in the session or in the question
+  panel; an answer typed as a command at a terminal is not their turn.
 
 ## 0.7.35 - A reviewer can read the adapter snapshots its bundle hands it, and a read survives a worktree removed under it
 

@@ -16,12 +16,12 @@ agentic-workflow runs software changes with Claude Code and Codex. Each ticket g
 | --- | --- |
 | A review that sampled the change | Recording a review while a product file in the diff is missing from the reviewer's transcript (`review:coverage`) |
 | The author reviews its own change | A review from a session that implemented, or that `wf` did not launch (`review:independent`) |
-| A review of an older tree | A review whose tree is not HEAD (`review:tree`); a merge with anything but git's automatic base merge changed since the reviewed tree (`merge:unreviewed`) |
+| A review of an older tree | A review whose launch tree is not HEAD (`review:tree`); a merge with anything but git's automatic base merge changed since the reviewed tree (`merge:unreviewed`) |
 | A repair that broke something | `other` on a line this attempt wrote (`finding:other-own`); merging with a `goal` or `regression` finding open, at any severity (`merge:open`) |
 | A test that asserts nothing on a risky change | On a risk path: a merge without a test that fails on the merge-base, a second reviewer on another model and the person's diff-read (`merge:risk`) |
 | Cropped or stuck screenshots | A capture narrower than its viewport (`screens:width`), or the same bytes as another screen (`screens:dup`) |
-| Pushing to main with no CI run | A landed tree without a passing `full` run (`merge:untested`) |
-| An agent answering for the person | An answer that is not the person's own turn, right after the question (`answer:not-person`) |
+| Pushing to main with no CI run | A tree landed or pushed onto the base without a passing `full` run (`merge:untested`) |
+| An agent answering for the person | An answer that is not the person's own typed turn: the first after the message that showed this question alone, or one naming its id or ref (`answer:not-person`) |
 | Fix rounds that go nowhere | Another fix round after a review that reopened a fixed finding or did not lower the blocker count, until the person decides (`fix:no-progress`) |
 
 Nineteen refusals in all, each a fact check with a named failure ([the list](docs/design-0.8.md#refusals-each-a-fact-check)).
@@ -61,10 +61,10 @@ flowchart LR
   R -. goal / regression .-> I
 ```
 
-1. **Start:** `wf start <item>` normalises the ticket id, fetches, and makes one worktree per repo at the tip of its base.
+1. **Start:** `wf start <item>` normalises the ticket id, fetches, and makes one worktree per repo at the tip of its base (`--base <branch>` for another base, recorded for the attempt; `--repos` for some repos only; `--no-tracker` for work with no ticket).
 2. **Criteria:** a planner (or the owner, for a small fix) writes 1 to 6 checkable criteria; edits are recorded with their hash.
 3. **Implement:** the implementer runs `wf test fast` and `wf screens` (the screens the change reaches, plus a sentinel set when shared code changed), then commits.
-4. **Review:** `wf review` launches fresh reviewers with a bundle as their whole prompt (the diff, the criteria, the invariants, the rules for the touched paths, the consumers of changed contracts, the screenshots) while the fast tests run on the same tree. A risk change adds a second reviewer on another model and the risk checklist.
+4. **Review:** `wf review` (run in the background; it waits for every reviewer and the tests) launches fresh reviewers with a bundle as their whole prompt (the diff, the criteria, the invariants, the rules for the touched paths, the consumers of changed contracts, the screenshots) while the fast tests run on the same tree. A risk change adds a second reviewer on another model and the risk checklist.
 5. **Fix rounds** run only for open `goal` or `regression` findings. `other` findings are filed in the tracker, put in the person's daily digest, or listed, as the project chooses.
 6. **Deliver:** `wf deliver` runs the stages the attempt started with: landing (directly, or through the landing queue for projects without CI), pushes, merge requests per repo matched by patch-id, statuses and comments with markers, a deployment confirmation.
 7. **Close:** `wf close` writes the telemetry row, removes the worktrees and keeps the branches.
