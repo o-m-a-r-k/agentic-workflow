@@ -287,7 +287,7 @@ screens:
   capture: "node web/scripts/capture.mjs --out {out} --viewport {viewport} --lang {lang} {routes}"
 review: { diffRead: before }           # or after: a project setting from onboarding
 risk:                                   # proposed by the onboarding scan, confirmed by the person; `risk: none` is explicit
-  - { id: money, paths: ["api/src/billing/**", "api/src/payroll/**"], tests: ["api/test/billing/**"] }
+  - { id: <name the scan proposed>, paths: ["<area>/**"], reason: "<the facts the scan found>", tests: ["<its tests>/**"] }
 ticketing:
   tracker: linear
   via: connector
@@ -352,7 +352,7 @@ The queue never holds a ticket for one that is not ready, so it is a merge train
 
 The steps:
 
-1. `scan.mjs` reads the repos as facts: directory and module names, schema and migration folders, money and payroll code (currency types, rounding, payroll, invoice, tax), auth and permission code, outbound HTTP clients and webhook handlers, mobile apps, CI files and test scripts.
+1. `scan.mjs` reads the repos as facts, with no domain vocabulary of the plugin's own: directory and module names, schema and migration folders, decimal and currency types and rounding code, auth and permission code, outbound HTTP clients, webhook handlers and queue consumers, mobile apps, CI files and test scripts, and the project's own documents (its instruction files and invariants, which name what it treats as critical). Risk is judged by what a mistake costs, generically: money computed or moved, writes to external systems that cannot be undone, data deleted or migrated, access granted; the project's own words name the areas. The plugin ships no domain list.
 2. A cheap model drafts the policy from the scan. It gives every risk path a reason that cites the files the scan found.
 3. The person confirms or edits the draft.
 
