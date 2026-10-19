@@ -107,7 +107,7 @@ test('a question never shown, or shown with another open question, is not answer
   });
 });
 
-test('the question panel answers (Claude Code and Codex); a Codex person turn answers; the terminal is the person', async (t) => {
+test('the question panel answers (Claude Code and Codex); a Codex person turn answers; a terminal command does not', async (t) => {
   const { p, run, chat, ctx } = await setup(t);
   await run(async () => {
     const d1 = (await ask(p.root, 'TK-1.1', Q)).id;
@@ -126,10 +126,10 @@ test('the question panel answers (Claude Code and Codex); a Codex person turn an
     const r = await approve(ctx({ CODEX_THREAD_ID: 'thread-owner-1' }), { _: [d3], flags: { attempt: 'TK-1.1', choice: 'redo', quote: 'Redo it on a clean branch' } });
     assert.equal(r.data.answer.session.runtime, 'codex');
 
+    // A command line is not an answer, at a terminal either: an agent can run it as well as the person.
     const q4 = { kind: 'deploy', question: 'Deploy to production now?', options: ['deploy', 'wait'], refs: ['stage:3'], blocking: true };
     const d4 = (await ask(p.root, 'TK-1.1', q4)).id;
-    const t4 = await approve(ctx({ PATH: process.env.PATH }), { _: [d4], flags: { choice: 'wait' } });
-    assert.equal(t4.data.answer.session.runtime, 'terminal');
+    await assert.rejects(approve(ctx({ PATH: process.env.PATH }), { _: [d4], flags: { choice: 'deploy', quote: 'deploy' } }), refusedWith('answer:not-person'));
   });
 });
 
@@ -144,5 +144,36 @@ test('project-level decisions (no attempt) and `wf approve` finding the attempt 
     chat('a7770000-0000-4000-8000-000000000011').say(`${Q.question} Options: waive | fix`).advance(1).human('fix').write();
     const r = await approve(ctx(), { _: ['approve', w.id], flags: { 'from-question': true } });
     assert.equal(r.data.attempt, 'TK-1.1');
+  });
+});
+
+test('a hand-appended answer line breaks the ledger chain and is rejected (project-level decisions included)', async (t) => {
+  const { p, run } = await setup(t);
+  await run(async () => {
+    const { id } = await ask(p.root, null, { kind: 'deploy', question: 'Deploy every waiting change to production?', options: ['deploy', 'wait'], refs: ['production'], blocking: true });
+    const lines = (await import('node:fs')).default;
+    const file = (await import('../engine/contract.mjs')).ledgerFile(p.root, 'wf-project');
+    assert.ok(lines.existsSync(file), 'project-level decisions live in a chained ledger');
+    lines.appendFileSync(file, `${JSON.stringify({ seq: 99, at: new Date().toISOString(), type: 'decision.answered', actor: null, data: { id, choice: 'deploy', quote: 'deploy', via: 'turn', session: { runtime: 'claude', id: 'x' } }, schema: 2 })}\n`);
+    await assert.rejects(answered(p.root, id), /hash chain broken/);
+  });
+});
+
+test('a recorded answer is checked again at use: a quote the person never typed does not hold', async (t) => {
+  const { p, run, chat, ledger } = await setup(t);
+  await run(async () => {
+    const q = { kind: 'deploy', question: 'Deploy TK-1 to production now?', options: ['deploy', 'wait'], refs: ['stage:2'], blocking: true };
+    const { id } = await ask(p.root, 'TK-1.1', q);
+    const tr = chat('a8880000-0000-4000-8000-000000000012').say(`${q.question} Options: deploy | wait`).advance(1).human('wait');
+    tr.write();
+    const turnAt = tr.lines().at(-1).timestamp;
+    // A well-formed, chained entry an agent could append through the ledger itself, naming a real turn but not its words.
+    await ledger.append(p.root, 'TK-1.1', 'decision.answered', { id, choice: 'deploy', quote: 'deploy', via: 'turn', session: tr.session, turnAt }, null);
+    const a = await answered(p.root, id, { attempt: 'TK-1.1' });
+    assert.equal(a.choice, 'wait'); // the forged answer does not hold; the person's own words are recorded instead
+    assert.equal(a.quote, 'wait');
+    // A recorded answer whose session no longer shows the turn does not hold either.
+    await ledger.append(p.root, 'TK-1.1', 'decision.answered', { id, choice: 'deploy', quote: 'deploy', via: 'turn', session: { runtime: 'claude', id: 'b9990000-0000-4000-8000-000000000013' }, turnAt }, null);
+    assert.equal((await answered(p.root, id, { attempt: 'TK-1.1' })).choice, 'wait');
   });
 });

@@ -224,9 +224,12 @@ export function projectTranscripts(root, home, sinceMs = 0) {
   return out;
 }
 
-// A fresh reviewer: `codex exec --json` with the prompt on stdin, read-only; its thread id arrives as `thread.started`.
-const launch = ({ model, cwd }) => ({ bin: 'codex', args: ['exec', '--json', '--cd', cwd, '--sandbox', 'read-only', '--skip-git-repo-check', ...(model ? ['--model', model] : []), '-'], session: null, cwd });
-const resume = ({ model, cwd, session }) => ({ bin: 'codex', args: ['exec', '--json', '--cd', cwd, '--sandbox', 'read-only', '--skip-git-repo-check', ...(model ? ['--model', model] : []), 'resume', session, '-'], session, cwd });
+// A fresh reviewer: `codex exec --json` with the prompt on stdin in a read-only sandbox, so the reviewer writes nothing;
+// Codex itself writes the reviewer's last message to the closure file (`--output-last-message`). Its thread id arrives
+// as `thread.started`.
+const common = ({ model, cwd, closure }) => ['exec', '--json', '--cd', cwd, '--sandbox', 'read-only', '--skip-git-repo-check', '--output-last-message', closure, ...(model ? ['--model', model] : [])];
+const launch = (o) => ({ bin: 'codex', args: [...common(o), '-'], session: null, cwd: o.cwd });
+const resume = (o) => ({ bin: 'codex', args: [...common(o), 'resume', o.session, '-'], session: o.session, cwd: o.cwd });
 
 const CAPACITY = /server_overloaded|server_is_overloaded|\boverloaded\b|\bat capacity\b/i;
 function event(e) {

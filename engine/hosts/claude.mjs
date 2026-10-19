@@ -119,15 +119,19 @@ export function projectTranscripts(root, home, sinceMs = 0) {
   return out;
 }
 
-// A fresh reviewer: `claude --print` with the prompt on stdin, its session id chosen here, read-only tools plus `wf`.
-function launch({ model, cwd }) {
+// A fresh reviewer: `claude --print` with the prompt on stdin, its session id chosen here. It reads, and writes only its
+// closure file: `Write(//<absolute path>)` is Claude Code's rule for that one absolute path; every other write, edit and
+// command is denied (`dontAsk` refuses what is not allowed), `wf` included.
+const tools = (closure) => ['Read', 'Grep', 'Glob', `Write(/${closure})`, 'Bash(git diff:*)', 'Bash(git show:*)', 'Bash(git log:*)'];
+const disallowed = ['Edit', 'MultiEdit', 'NotebookEdit', 'Agent', 'Task'];
+function launch({ model, cwd, closure }) {
   const session = randomUUID();
-  const args = ['--print', '--verbose', '--output-format', 'stream-json', '--session-id', session, '--permission-mode', 'dontAsk', '--allowedTools', 'Read', 'Grep', 'Glob', 'Write', 'Bash(wf *)', 'Bash(git diff *)', 'Bash(git show *)', 'Bash(git log *)'];
+  const args = ['--print', '--verbose', '--output-format', 'stream-json', '--session-id', session, '--permission-mode', 'dontAsk', '--allowedTools', ...tools(closure), '--disallowedTools', ...disallowed];
   if (model) args.push('--model', model);
   return { bin: 'claude', args, session, cwd };
 }
-function resume({ model, cwd, session }) {
-  const args = ['--print', '--verbose', '--output-format', 'stream-json', '--resume', session, '--permission-mode', 'dontAsk', '--allowedTools', 'Read', 'Grep', 'Glob', 'Write', 'Bash(wf *)', 'Bash(git diff *)', 'Bash(git show *)', 'Bash(git log *)'];
+function resume({ model, cwd, session, closure }) {
+  const args = ['--print', '--verbose', '--output-format', 'stream-json', '--resume', session, '--permission-mode', 'dontAsk', '--allowedTools', ...tools(closure), '--disallowedTools', ...disallowed];
   if (model) args.push('--model', model);
   return { bin: 'claude', args, session, cwd };
 }

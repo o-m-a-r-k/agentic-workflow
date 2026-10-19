@@ -5,7 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { WfError, listAttempts, loadAdapter, readEvents, userDir } from './contract.mjs';
-import { decisionsOf } from './decisions.mjs';
+import { PROJECT_LEDGER, decisionsOf, stillHolds } from './decisions.mjs';
 
 const clip = (s, n = 200) => (String(s).length > n ? `${String(s).slice(0, n - 1)}…` : String(s));
 
@@ -33,11 +33,13 @@ export async function digest(root, opts = {}) {
   const since = opts.since ? Date.parse(opts.since) : 0;
   const items = [];
   const question = (d, item) => ({ kind: d.kind === 'diff-read' ? 'diff-read' : 'decision', attempt: d.attempt, item, id: d.id, decision: d.kind, blocking: d.blocking, question: d.question, options: d.options, refs: d.refs, at: d.askedAt });
-  for (const d of (await decisionsOf(root, null)).values()) if (!d.answer) items.push(question(d, null));
+  const open = (d) => !d.answer || !stillHolds(d, d.answer); // an answer the transcript no longer shows is not one
+  for (const d of (await decisionsOf(root, null)).values()) if (open(d)) items.push(question(d, null));
   for (const attempt of await listAttempts(root)) {
+    if (attempt === PROJECT_LEDGER) continue;
     const f = await attemptFacts(root, attempt);
     if (!f || f.closed) continue;
-    for (const d of (await decisionsOf(root, attempt)).values()) if (!d.answer) items.push(question(d, f.item));
+    for (const d of (await decisionsOf(root, attempt)).values()) if (open(d)) items.push(question(d, f.item));
     for (const s of f.stages.values()) {
       if (s.do === 'wait-merged' && s.state === 'waiting') items.push({ kind: 'merge', attempt, item: f.item, repo: s.repo ?? null, evidence: s.evidence ?? null, next: s.next ?? null, at: s.at });
     }

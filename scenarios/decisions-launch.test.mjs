@@ -90,6 +90,11 @@ test('launchReviewer (Claude Code): the bundle is the whole prompt, the handoff 
   assert.equal(run.input, bundle.prompt);
   assert.equal(run.session, null); // the launcher's session variable is not passed on
   assert.deepEqual([run.args[run.args.indexOf('--model') + 1], run.args.includes('--agents')], ['model-b', false]);
+  // It writes only its closure file: no bare Write, no edit tool, no `wf`.
+  assert.ok(path.isAbsolute(r.closure));
+  const allowed = run.args.slice(run.args.indexOf('--allowedTools') + 1, run.args.indexOf('--disallowedTools'));
+  assert.deepEqual(allowed.filter((a) => /^(Write|Edit|MultiEdit|NotebookEdit)\b/.test(a)), [`Write(/${r.closure})`]);
+  assert.ok(!allowed.some((a) => /^Bash(\((wf|\*)|$)/.test(a)));
   assert.deepEqual(await filesRead(r.session, { home: p.home }), [process.env.READ_FILE]);
 });
 
@@ -111,6 +116,10 @@ test('launchReviewer resumes the same session while the host reports the model a
   const codexRuns = log().filter((x) => x.kind === 'codex');
   assert.equal(codexRuns.length, 2);
   assert.ok(codexRuns[1].args.includes('resume'));
+  for (const run of codexRuns) {
+    assert.equal(run.args[run.args.indexOf('--sandbox') + 1], 'read-only');
+    assert.equal(run.args[run.args.indexOf('--output-last-message') + 1], c.closure);
+  }
 });
 
 test('launchReviewer refuses a bundle with no prompt, and reports a host that cannot start', async (t) => {

@@ -3,21 +3,34 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { ledgerFile } from '../engine/contract.mjs';
+import { canonicalJson, ledgerFile } from '../engine/contract.mjs';
 
-// append / readEvents / listAttempts over `<root>/.wf-evidence/attempts/<id>/ledger.jsonl`, schema 2 entries.
+// append / readEvents / listAttempts over `<root>/.wf-evidence/attempts/<id>/ledger.jsonl`, schema 2 entries, hash-chained
+// as stream 5's ledger is: a read refuses a line whose `prev` or `hash` does not follow.
+const hashOf = (e) => {
+  const { hash, ...rest } = e;
+  return crypto.createHash('sha256').update(canonicalJson(rest)).digest('hex');
+};
 export function fileLedger() {
   const read = (root, attempt) => {
     const f = ledgerFile(root, attempt);
     if (!fs.existsSync(f)) throw new Error(`unknown attempt ${attempt}`);
-    return fs.readFileSync(f, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    let prev = null;
+    return fs.readFileSync(f, 'utf8').split('\n').filter(Boolean).map((l, i) => {
+      const e = JSON.parse(l);
+      if (e.prev !== prev || e.hash !== hashOf(e)) throw new Error(`${f}: hash chain broken at entry ${i + 1}`);
+      prev = e.hash;
+      return e;
+    });
   };
   return {
     append: async (root, attempt, type, data, actor) => {
       const f = ledgerFile(root, attempt);
       fs.mkdirSync(path.dirname(f), { recursive: true });
-      const seq = fs.existsSync(f) ? read(root, attempt).length + 1 : 1;
-      const e = { seq, at: new Date().toISOString(), type, actor: actor ?? null, data, prev: null, hash: String(seq), schema: 2 };
+      const before = fs.existsSync(f) ? read(root, attempt) : [];
+      if (!before.length && type !== 'attempt.started') throw new Error(`${attempt}: the first event must be attempt.started`);
+      const e = { seq: before.length + 1, at: new Date().toISOString(), type, actor: actor ?? null, data: JSON.parse(JSON.stringify(data)), prev: before.at(-1)?.hash ?? null, schema: 2 };
+      e.hash = hashOf(e);
       fs.appendFileSync(f, `${JSON.stringify(e)}\n`);
       return e;
     },

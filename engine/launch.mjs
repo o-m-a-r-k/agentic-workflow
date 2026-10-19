@@ -18,6 +18,7 @@ const WAITS_S = [0, 60, 120, 240, 480, 600];
 function launchEnv() {
   const env = { ...process.env, PATH: `${PLUGIN_BIN}${path.delimiter}${process.env.PATH ?? ''}` };
   for (const k of sessionVariables()) delete env[k];
+  env.AI_AGENT = 'wf-reviewer'; // an agent, never mistaken for the person at a terminal
   return env;
 }
 
@@ -44,7 +45,9 @@ export async function launchReviewer(root, attempt, bundle, opts = {}) {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const dir = path.join(attemptDir(root, attempt), 'reviews', `launch-${String(bundle.seat ?? 'whole').replace(/[^A-Za-z0-9-]/g, '-')}-r${bundle.round ?? 1}-${stamp}`);
   fs.mkdirSync(dir, { recursive: true });
-  const spec = { host: host.id, model, cwd, prompt: path.join(dir, 'prompt.txt'), out: path.join(dir, 'events.jsonl'), err: path.join(dir, 'stderr.log'), status: path.join(dir, 'status.json') };
+  // The one file the reviewer may write: its review (findings and verified blockers), at a path fixed before launch.
+  const closure = opts.closure ? path.resolve(opts.closure) : path.join(dir, 'review.json');
+  const spec = { host: host.id, model, cwd, closure, prompt: path.join(dir, 'prompt.txt'), out: path.join(dir, 'events.jsonl'), err: path.join(dir, 'stderr.log'), status: path.join(dir, 'status.json') };
   fs.writeFileSync(spec.prompt, bundle.prompt, { mode: 0o600 });
   writeJson(path.join(dir, 'spec.json'), spec);
   const sup = spawn(process.execPath, [SELF, '--supervise', path.join(dir, 'spec.json')], { cwd, env: launchEnv(), detached: true, stdio: 'ignore' });
@@ -66,13 +69,13 @@ export async function launchReviewer(root, attempt, bundle, opts = {}) {
   if (!status.session) throw new WfError(`the ${host.label} reviewer could not be launched: ${status.error ?? 'it ended before it started a session'} (${spec.err})`);
   const session = { runtime: host.id, id: status.session };
   await append(root, attempt, 'handoff', { role: 'reviewer', session, launchedBy: 'wf', seat: bundle.seat ?? 'whole', model, tree: bundle.tree ?? null, round: bundle.round ?? 1 }, callerSession(process.env));
-  return { session, launchedAt: status.startedAt };
+  return { session, launchedAt: status.startedAt, closure };
 }
 
 // ---- The supervisor ----
 
 function runOnce(host, spec, resumeSession, onEvent) {
-  const l = resumeSession ? host.resume({ model: spec.model, cwd: spec.cwd, session: resumeSession }) : host.launch({ model: spec.model, cwd: spec.cwd });
+  const l = resumeSession ? host.resume({ model: spec.model, cwd: spec.cwd, closure: spec.closure, session: resumeSession }) : host.launch({ model: spec.model, cwd: spec.cwd, closure: spec.closure });
   return new Promise((resolve) => {
     const err = fs.openSync(spec.err, 'a');
     let child;

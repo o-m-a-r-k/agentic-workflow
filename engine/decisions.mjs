@@ -12,33 +12,27 @@
 // by itself; anything else is recorded by `wf approve --choice --quote`, whose quote must be in a turn the rule accepts.
 import fs from 'node:fs';
 import path from 'node:path';
-import { DECISION_KINDS, WfError, append, attemptDir, listAttempts, readEvents, refusal } from './contract.mjs';
-import { callerSession, projectSessions, underAgent } from './hosts/index.mjs';
+import { CONTRACT_VERSION, DECISION_KINDS, WfError, append, attemptDir, hostHome, ledgerFile, listAttempts, readEvents, refusal } from './contract.mjs';
+import { callerSession, findHost, projectSessions } from './hosts/index.mjs';
 
-const PROJECT_LOG = (root) => path.join(root, '.wf-evidence', 'decisions.jsonl');
 const record = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
 
-// ---- Storage: the attempt's ledger, or the project's decision log for a question about no one attempt ----
+// ---- Storage: the attempt's ledger, or the project ledger for a question about no one attempt ----
+// Both go through stream 5's hash-chained ledger (`append`, `readEvents`), so a hand-written line breaks the chain and
+// every read refuses it. The project ledger is the ledger of the reserved id PROJECT_LEDGER, opened by its own
+// `attempt.started` (item PROJECT_LEDGER, n 0, no repos and no stages) the first time a project-level question is asked.
+export const PROJECT_LEDGER = 'wf-project';
+const ledgerId = (attempt) => attempt ?? PROJECT_LEDGER;
 
 async function entries(root, attempt) {
-  if (attempt) return readEvents(root, attempt);
-  const file = PROJECT_LOG(root);
-  if (!fs.existsSync(file)) return [];
-  return fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).flatMap((l) => {
-    try {
-      return [JSON.parse(l)];
-    } catch {
-      return [];
-    }
-  });
+  if (!attempt && !fs.existsSync(ledgerFile(root, PROJECT_LEDGER))) return []; // no project-level question yet
+  return readEvents(root, ledgerId(attempt)); // throws on a broken chain
 }
 async function write(root, attempt, type, data, actor) {
-  if (attempt) return append(root, attempt, type, data, actor);
-  const file = PROJECT_LOG(root);
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const entry = { at: new Date().toISOString(), type, actor, data };
-  fs.appendFileSync(file, `${JSON.stringify(entry)}\n`);
-  return entry;
+  if (!attempt && !fs.existsSync(ledgerFile(root, PROJECT_LEDGER))) {
+    await append(root, PROJECT_LEDGER, 'attempt.started', { item: PROJECT_LEDGER, n: 0, repos: {}, stages: [], adapter: null, engine: CONTRACT_VERSION, from: 'project decisions' }, actor);
+  }
+  return append(root, ledgerId(attempt), type, data, actor);
 }
 
 // The decisions of an attempt (or of the project): id → { id, kind, question, options, refs, blocking, askedAt, answer }.
@@ -80,7 +74,7 @@ export async function ask(root, attempt, q) {
   const options = Array.isArray(q.options) ? q.options.map((o) => String(o).trim()) : [];
   if (!options.length || options.some((o) => !o) || new Set(options.map(norm)).size !== options.length) throw new WfError('a decision needs its options, each a distinct non-empty label');
   const refs = Array.isArray(q.refs) ? q.refs.map(String) : [];
-  const lock = attempt ? path.join(attemptDir(root, attempt), 'decisions', '.lock') : `${PROJECT_LOG(root)}.lock`;
+  const lock = path.join(attemptDir(root, ledgerId(attempt)), 'decisions', '.lock');
   return locked(lock, async () => {
     const known = await decisionsOf(root, attempt);
     // Never asked twice: the same kind about the same things (or, with no refs, the same question) is the same decision.
@@ -115,10 +109,13 @@ export function isBare(text, d) {
 // The turns that may answer `d`: for each message that showed its question (at or after it was asked), the first person
 // turn after it, in every session of the project. `others`: the questions of the project's other open decisions.
 export function candidates(root, d, others = [], opts = {}) {
+  return candidatesIn(projectSessions(root, { home: opts.home, since: d.askedAt }), d, others);
+}
+function candidatesIn(sessions, d, others) {
   const asked = Date.parse(d.askedAt);
   const out = [];
   const facts = { sessions: 0, shown: 0 };
-  for (const s of projectSessions(root, { home: opts.home, since: d.askedAt })) {
+  for (const s of sessions) {
     facts.sessions += 1;
     let message = []; // what the agent said since its last tool call: the message a reply answers
     let shown = false;
@@ -165,19 +162,40 @@ async function find(root, id, attempt) {
 }
 
 async function recordAnswer(root, d, answer, actor) {
-  const data = { id: d.id, choice: answer.choice, quote: answer.quote, via: answer.via, session: answer.session };
+  // turnAt: when the person's turn was written, so the answer can be checked against the transcript again at use.
+  const data = { id: d.id, choice: answer.choice, quote: answer.quote, via: answer.via, session: answer.session, turnAt: answer.turnAt };
   const entry = await write(root, d.attempt, 'decision.answered', data, actor);
   return { ...data, at: entry?.at ?? new Date().toISOString() };
 }
 
-// The recorded answer, or the first turn the rule accepts that is exactly an option (recorded now); null otherwise.
+// A recorded answer, checked again against the host's transcript when it is used: its session still holds a person turn
+// the rule accepts, written at `turnAt`, whose words contain the quote. A chained ledger line alone is not an answer:
+// whoever can run `wf` can also append one. Only that one session's transcript is read.
+// (Named failure, security review of 0.8 stream 4: a hand-appended `decision.answered` forged a production deploy.)
+export function stillHolds(d, answer, opts = {}) {
+  const host = findHost(answer?.session?.runtime);
+  if (!host || typeof answer.session.id !== 'string' || typeof answer.turnAt !== 'string' || typeof answer.quote !== 'string' || !answer.quote.trim()) return false;
+  if (answer.choice !== 'other' && !d.options.includes(answer.choice)) return false;
+  let file;
+  try {
+    file = host.transcript(answer.session.id, opts.home ?? hostHome());
+  } catch {
+    return false;
+  }
+  if (!file) return false;
+  const { list } = candidatesIn([{ session: answer.session, ...host.timeline(file) }], d, []);
+  return list.some((c) => c.via === answer.via && c.at === answer.turnAt && norm(c.text).includes(norm(answer.quote)) && (c.immediate || !isBare(c.text, d)));
+}
+
+// The recorded answer that still holds, or the first turn the rule accepts that is exactly an option (recorded now);
+// null otherwise. Every reserved kind is re-checked here, at the moment a gate asks.
 export async function answered(root, id, opts = {}) {
   const d = await find(root, id, opts.attempt);
-  if (d.answer) return { id: d.id, choice: d.answer.choice, quote: d.answer.quote, via: d.answer.via, session: d.answer.session, at: d.answer.at };
+  if (d.answer && stillHolds(d, d.answer, opts)) return { id: d.id, choice: d.answer.choice, quote: d.answer.quote, via: d.answer.via, session: d.answer.session, at: d.answer.at };
   const { list } = candidates(root, d, await openQuestions(root, d.attempt, d.id), opts);
   const c = list.find((x) => x.immediate && optionOf(x.text, d.options));
   if (!c) return null;
-  return recordAnswer(root, d, { choice: optionOf(c.text, d.options), quote: c.text, via: c.via, session: c.session }, null);
+  return recordAnswer(root, d, { choice: optionOf(c.text, d.options), quote: c.text, via: c.via, session: c.session, turnAt: c.at }, null);
 }
 
 // ---- wf approve ----
@@ -192,6 +210,7 @@ async function locate(root, id, attempt) {
   const project = (await decisionsOf(root, null)).get(id);
   if (project) hits.push(project);
   for (const a of await listAttempts(root)) {
+    if (a === PROJECT_LEDGER) continue;
     let d;
     try {
       d = (await decisionsOf(root, a)).get(id);
@@ -234,21 +253,16 @@ export async function cmdApprove(ctx, args) {
   if (!/^D\d+$/.test(String(id ?? ''))) throw new WfError('usage: wf approve <D-id> [--attempt <id>] (--from-question | --choice <option|other> --quote "<their exact words>")');
   const attempt = typeof flag(args, 'attempt') === 'string' ? flag(args, 'attempt') : null;
   const d = await locate(ctx.root, id, attempt);
-  if (d.answer) throw new WfError(`${d.id} is already answered: ${d.answer.choice} ("${clip(d.answer.quote)}"); a decision is never asked twice`);
+  if (d.answer && stillHolds(d, d.answer)) throw new WfError(`${d.id} is already answered: ${d.answer.choice} ("${clip(d.answer.quote)}"); a decision is never asked twice`);
   const fromQuestion = flag(args, 'from-question') === true;
   const choice = flag(args, 'choice');
   const quote = flag(args, 'quote');
   if (!fromQuestion && typeof choice !== 'string') throw new WfError('name the answer: --from-question, or --choice <option|other> --quote "<their exact words>"');
   if (typeof choice === 'string' && choice !== 'other' && !d.options.includes(choice)) throw new WfError(`\`${choice}\` is not an option of ${d.id}; its options are ${d.options.join(' | ')} (or other)`);
-  const env = ctx.env ?? process.env;
-  const actor = ctx.actor ?? callerSession(env);
-  const done = (a) => ({ text: `Recorded ${d.id}: ${a.choice}, from "${clip(a.quote)}" (${a.via === 'panel' ? 'the question panel' : 'their turn'}${a.session?.runtime === 'terminal' ? ' at the terminal' : `, ${a.session.runtime} session ${a.session.id}`}).`, data: { decision: d.id, attempt: d.attempt, answer: a } });
-
-  // The person at their own terminal: their command is their turn.
-  if (!actor && !underAgent(env)) {
-    if (typeof choice !== 'string') throw new WfError(`at your terminal, name your answer: wf approve ${d.id} --choice <${d.options.join('|')}|other>`);
-    return done(await recordAnswer(ctx.root, d, { choice, quote: typeof quote === 'string' && quote.trim() ? quote : choice, via: 'turn', session: { runtime: 'terminal', id: 'person' } }, null));
-  }
+  // Every caller, a terminal included, is held to the transcript: an answer is the person's turn in a session of the
+  // project (or the question panel), never a command line, which an agent can run as well as the person.
+  const actor = ctx.actor ?? callerSession(ctx.env ?? process.env);
+  const done = (a) => ({ text: `Recorded ${d.id}: ${a.choice}, from "${clip(a.quote)}" (${a.via === 'panel' ? 'the question panel' : 'their turn'}, ${a.session.runtime} session ${a.session.id}).`, data: { decision: d.id, attempt: d.attempt, answer: a } });
   if (fromQuestion) {
     const a = await answered(ctx.root, d.id, { attempt: d.attempt ?? undefined });
     if (a) return done(a);
@@ -258,7 +272,7 @@ export async function cmdApprove(ctx, args) {
   const found = candidates(ctx.root, d, await openQuestions(ctx.root, d.attempt, d.id));
   const c = found.list.find((x) => norm(x.text).includes(norm(quote)) && (x.immediate || !isBare(x.text, d)));
   if (!c) throw why(d, quote, found);
-  return done(await recordAnswer(ctx.root, d, { choice, quote: quote.trim(), via: c.via, session: c.session }, actor));
+  return done(await recordAnswer(ctx.root, d, { choice, quote: quote.trim(), via: c.via, session: c.session, turnAt: c.at }, actor));
 }
 
 export const implements08 = { ask, answered, cmdApprove };
