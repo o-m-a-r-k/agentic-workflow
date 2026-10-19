@@ -7,6 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { YAML } from '../engine/util.mjs';
 import { commitIn, criteriaFile, FIXTURE_EXPECT, impactAddendum, makeRepo, ok, sh, singleRepoProject, state, tmp, wf, yaml } from './helpers.mjs';
 
 const bundleOf = (r) => JSON.parse(fs.readFileSync(r.out.match(/^Read (\S+)/m)?.[1] ?? r.out.match(/bundle: (\S+)/)[1], 'utf8'));
@@ -111,4 +112,28 @@ test('I-231: the dry runs record no engine bookkeeping either: an unobserved han
   assert.equal(fs.readFileSync(ledger, 'utf8'), before, 'byte-identical: no base.observed, nothing else');
   ok(wf(root, ['status', '--attempt', e.id]));
   assert.match(fs.readFileSync(ledger, 'utf8'), /"type":"base\.observed"/, 'an ordinary read records the bookkeeping');
+});
+
+// Review of 0.7.34 (A): the dry runs validate against the adapter the recorded command would. The recorded amendment follows the
+// adapter committed on the base first (D60); a dry run that skipped the follow judged by the pinned adapter, and could pass where the
+// record was refused, or the other way round. It follows in memory and records nothing.
+test('I-231: the dry run follows the base\'s adapter in memory: the same verdict as the recorded amendment, and the ledger byte-identical', () => {
+  const { base, root, id } = frozen('amend-check-follow');
+  // The base branch's adapter now caps what an impact query may read (`impact.maxScanBytes`), below what this addendum's queries read.
+  sh(root, 'git checkout -q main');
+  const adapter = path.join(root, '.workflow', 'project.yaml');
+  fs.writeFileSync(adapter, yaml({ ...YAML.parse(fs.readFileSync(adapter, 'utf8')), impact: { maxScanBytes: 1 } }));
+  sh(root, 'git add -A && git commit -q -m "cap impact scans" && git push -q origin main');
+  const criteria = [{ id: 'C2', text: 'the list shows a total', uat: 'the total matches' }];
+  const file = write(base, { criteria, impact: impactAddendum(criteria, null), expect: FIXTURE_EXPECT });
+  const ledger = path.join(root, '.wf-evidence', 'attempts', id, 'ledger.jsonl');
+  const before = fs.readFileSync(ledger, 'utf8');
+  const dry = wf(root, ['criteria', 'amend', '--check', '--file', file, '--attempt', id]);
+  assert.equal(fs.readFileSync(ledger, 'utf8'), before, 'the dry run followed nothing into the ledger');
+  const real = wf(root, ['criteria', 'amend', '--file', file, '--reason', 'r', '--attempt', id]);
+  assert.match(fs.readFileSync(ledger, 'utf8'), /"type":"adapter\.followed"/, 'the recorded command follows the base\'s adapter first');
+  assert.equal(real.code, 75, real.err);
+  assert.match(real.err, /reads more than 1 bytes/);
+  assert.equal(dry.code, real.code, `the dry run gives the recorded amendment's verdict: ${dry.out}${dry.err}`);
+  assert.equal(dry.err.replace(/^warning:.*\n/gm, ''), real.err.replace(/^warning:.*\n/gm, ''));
 });

@@ -33,7 +33,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { adapterPin, attemptAdapter, repoDir, trustedAdapter } from './config.mjs';
-import { append, loadState, recordedTogether } from './ledger.mjs';
+import { append, loadState, readLedger, recordedTogether, reduce } from './ledger.mjs';
 import { assertEngine, canonical, git, hashValue, run } from './util.mjs';
 import { liveGate, RESULT_NEUTRAL } from './gate.mjs';
 import { validationIds } from './validation.mjs';
@@ -301,6 +301,34 @@ export function followAdapter(root, state) {
     wrote = true;
   });
   return wrote ? loadState(root, state.id) : state;
+}
+
+// Review of 0.7.34 (A): the follow a dry run sees, computed and folded in memory, never appended. A dry run (`wf criteria amend
+// --check`, `wf plan --check`) validates against the adapter the recorded command would: that command follows the adapter
+// committed on the base first (D60). Named failure (review): with the follow skipped, a dry run judged by the pinned adapter could
+// pass where the record was refused, or the other way round.
+export function followAdapterInMemory(root, state) {
+  if (!state?.adapterBase || ['done', 'abandoned'].includes(state.phase)) return state;
+  let plan;
+  try {
+    plan = followPlan(root, state);
+  } catch {
+    return state;
+  }
+  if (!plan) return state;
+  const at = new Date().toISOString();
+  const extra = [];
+  const known = new Set((state.adapterAuthored ?? []).map((a) => `${a.file}\0${a.change}`));
+  const fresh = (plan.authored ?? []).filter((a) => !known.has(`${a.file}\0${a.change}`));
+  if (fresh.length) extra.push({ type: 'adapter.authored', at, actor: null, data: { changes: fresh } });
+  if (plan.data && !state.activeHold && !liveGate(root, state)) extra.push({ type: 'adapter.followed', at, actor: null, data: plan.data });
+  else if (plan.held && state.adapterHeld?.tip !== plan.held.tip) extra.push({ type: 'adapter.notFollowed', at, actor: null, data: plan.held });
+  if (!extra.length) return state;
+  try {
+    return reduce([...readLedger(root, state.id), ...extra]);
+  } catch {
+    return state;
+  }
 }
 
 // One line for `wf status` and `wf resume`: what the attempt follows, the latest move and a tip it could not take.

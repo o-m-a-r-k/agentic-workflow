@@ -200,8 +200,8 @@ test('an evidence review of a gated tree is not held by an unanswered course sig
 });
 
 // Seam with I-233, on the real engine: a base merged by hand is observed (`base.observed`) and numbered with `wf base merge`'s by
-// the ledger's one counter; the merge round it owes shows its mode; and a course signal never holds that merge round (the gate
-// waits for it, so holding it would leave the attempt no way on).
+// the ledger's one counter; the merge round it owes shows its mode; and that merge round is not held by a course signal, as the
+// evidence review is not (D86; the round count and an escalation still hold them).
 const seven = (edits = {}) => `${Array.from({ length: 7 }, (_, i) => edits[i + 1] ?? `l${i + 1}`).join('\n')}\n`;
 const baseCommit = (root, files, msg) => {
   sh(root, 'git checkout -q main && git pull -q --ff-only origin main');
