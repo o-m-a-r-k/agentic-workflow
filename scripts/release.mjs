@@ -129,7 +129,6 @@ function plan(f) {
       `git fetch --prune origin   (in ${f.main ?? '<no checkout of main>'})`,
       `origin/${f.releaseBranch} must equal ${f.dev} (${f.devSha ? `locally at ${f.devSha}` : 'no such local branch'})`,
       `${VERSION_FILES.join(', ')} at that commit say ${f.version}; ${f.notes} exists there; origin/main is an ancestor of it`,
-      'no improvement history file (improvements/) left uncommitted in any worktree of this repository',
       `the budget: the rule-shaped counts at that commit (refusals, commands, events, adapter keys, words) against budget.json on origin/main (the release's own when main has none); a net increase no kept or active proposal in proposals/*.json accounts for stops here`,
       `node scripts/ci-passed.mjs ${sha}`,
       `run again after the cleanup (no release branch, origin/main holding a commit whose version files say ${f.version}): the release is said to have landed, and the steps after skip what is done`,
@@ -234,11 +233,6 @@ const STEPS = {
       if (v !== f.version) throw new Stop(`${file} at ${s.sha.slice(0, 10)} says ${v ?? 'nothing'}, not ${f.version}`);
     }
     if (call('git', ['cat-file', '-e', `${s.sha}:${f.notes}`], { cwd: f.main, quiet: true, allowFail: true }).status !== 0) throw new Stop(`${f.notes} is not in ${s.sha.slice(0, 10)}`);
-    // 0.7.34. Named failure: `wf improve close` wrote an improvement's history into the checkout of main, it was never committed, and
-    // thirteen releases shipped without it. An improvement history file that no commit holds, or that a worktree changed and did not
-    // commit, in any worktree of this repository, stops the release: it belongs in it (review of 0.7.34, L9: tracked and modified too).
-    const stray = [...new Set([f.main, ...f.worktrees.map((w) => w.path)])].filter((d) => fs.existsSync(d)).flatMap((d) => (git(d, ['status', '--porcelain', '--', 'improvements/']) || '').split('\n').filter(Boolean).map((x) => `${d}: ${x.trim()}`));
-    if (stray.length) throw new Stop(`improvement history not committed (new or changed); commit it in the release (dev branch) and run CI on that:\n    ${stray.join('\n    ')}`);
     const onMain = git(f.main, ['rev-parse', 'refs/remotes/origin/main']);
     if (onMain !== s.sha && call('git', ['merge-base', '--is-ancestor', onMain, s.sha], { cwd: f.main, quiet: true, allowFail: true }).status !== 0) throw new Stop(`origin/main (${onMain.slice(0, 10)}) is not an ancestor of ${s.sha.slice(0, 10)}: main cannot fast-forward; rebase the release on main and run CI again`);
     say(`  ${VERSION_FILES.join(', ')} say ${f.version}; ${f.notes} is there; origin/main ${onMain === s.sha ? 'is already there' : `(${onMain.slice(0, 10)}) fast-forwards to it`}`);

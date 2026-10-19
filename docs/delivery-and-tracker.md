@@ -11,7 +11,7 @@ Ticketing and delivery are the project's (D96). The adapter names its tracker an
 | Stage | What it does |
 | --- | --- |
 | `land` | Lands the attempt on the base: directly, or through the landing queue (below). |
-| `push` | Pushes each repo's part. With `authority.push: agent` the engine pushes once per repo, in order; otherwise it waits for the person's push to appear on the remote. |
+| `push` | Pushes each repo's part. With `authority.push: agent` the engine pushes once per repo, in order; otherwise it waits for the person's push to appear on the remote. A push onto the base needs a passing `full` run on the tip tree, from the landing queue or CI (`merge:untested`). |
 | `merge-request` | Opens a merge request per repo (`repos:`), each against its own base, and records the commit per repo. |
 | `wait-merged` | Waits until each repo's commits are on its base, by ancestry or by patch-id, so a squash or rebase merge counts. The project's CI and reviewers decide the merge. |
 | `confirm-deployed` | Waits for the person to confirm the change runs where it deploys (`where:`), read-only, then test it there. |
@@ -20,7 +20,7 @@ Ticketing and delivery are the project's (D96). The adapter names its tracker an
 | `comment` | Posts a comment. |
 | `module` | Runs a project module (`{ repo, path }`), loaded as the base holds it, with the stage's marker and repos. |
 
-- `when: { labels: [...] }` runs a stage only for a ticket carrying one of the labels. A label the engine could not read is `pending`, never false, and the stage waits for it.
+- `when: { labels: [...] }` runs a stage only for a ticket carrying one of the labels. A label the engine could not read is `pending`, never false, and the stage waits for it. Through a connector, labels are read from the result of the owner's read call in the transcript; `wf deliver --labels` is refused.
 - `after: <item>` waits until that item has shipped: the only cross-ticket wait (D97).
 - Every comment and filed ticket carries an idempotency marker (`wf:<attempt>:stage-<n>`), and the engine searches for it before writing, so a rerun after a lost result writes nothing twice.
 - Under a hold no stage runs (`hold`).
@@ -48,10 +48,16 @@ Before anything lands, two facts are checked against the last reviewed tree (D97
 
 `ticketing.via` says who performs each tracker operation:
 
-- **`connector`:** the owner agent performs it through its host's connector, in the adapter's own words (`ticketing.operations`, D68), and the engine reads the result back from the owner's transcript: a tool call whose input carries the operation's marker (or, for a status, the item and the status). Until then the step is `pending` and `wf status` prints what to do.
+- **`connector`:** the owner agent performs it through its host's connector, in the adapter's own words (`ticketing.operations`, D68), and the engine reads the result back from the owner's transcript. A `ticketing.tracker` given as a string is then a label in those words, never a built-in driver. An operation counts only when all of these hold:
+  - the call was made after the stage was first asked;
+  - its result is present and is not an error;
+  - for a follow-up, the input carries the marker and the title, and the result shows the new id (filing a follow-up through a connector needs `ticketing.idPattern`, to recognise that id);
+  - for a status change, the result shows the new status.
+
+  Until then the step is `pending` and `wf status` prints what to do. The operations, and so the keys of `ticketing.operations`, are one list (`TRACKER_OPERATIONS` in `engine/contract.mjs`): `read`, `search`, `fileFollowUp`, `setStatus`, `comment` and `mergeRequest`.
 - **`module`:** the engine calls the project's tracker module (`ticketing.tracker: { module: { repo, path } }`), which exports a driver: `read`, `search`, `create`, `setStatus`, `comment`, and optionally `normalise`.
 - **`files`:** the built-in files tracker. Each ticket is `<root>/tickets/<id>.md` with YAML frontmatter (`id`, `title`, `status`, `labels`) and the description as its body; comments are appended between marker lines. Ids are an allowlist checked before any file is touched, and nothing is read or written through a link.
-- **`none`:** no tracker.
+- **`none`:** no tracker. `wf start --no-tracker <item>` records `ticketing: none` for one attempt of a project that has a tracker.
 
 The plugin ships no vendor tracker. `ticketing.idPattern` and the tracker's `normalise` turn a raw id (any case, inside a URL) into one id, so attempt numbers continue across spellings.
 

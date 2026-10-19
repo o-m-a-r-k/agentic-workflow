@@ -58,12 +58,12 @@ Each scenario runs the engine, or the real `wf` CLI, against temporary git repos
 
 | File | What it proves |
 | --- | --- |
-| `telemetry-ledger` | Schema 2 events, the hash chain, 0.7 ledgers readable. |
-| `telemetry-row` | Every row field from the ledger, git and transcripts; blame to the attempt; `wf report`. |
+| `telemetry-ledger` | Schema 2 events, the hash chain, 0.7 ledgers readable, no event after `attempt.closed`. |
+| `telemetry-row` | Every row field from the ledger, git and transcripts, `outsideStages` included; blame to the attempt; `wf report`. |
 | `telemetry-legacy07` | 0.7 ledgers roll up onto the same row, batches included. |
-| `learn-proposals` | The baseline band, judging, expiry, revert on missing data, the re-proposal block, the adapter budget. |
+| `learn-proposals` | The baseline band, judging, expiry, revert on missing data, the re-proposal block, the adapter budget, a plugin proposal's `replaces` naming a counted name. |
 | `learn-release` | The release check: counts by name, words by total, role length, proposals that account for an increase. |
-| `release-script` | The release dry run, and the check step stopping on a budget increase until a committed proposal accounts for it. |
+| `release-script` | The release dry run, the check step stopping on a budget increase until a committed proposal accounts for it, and the changelog read from git once `improvements/` left the tree. |
 
 ## Configuration, onboarding and migration
 

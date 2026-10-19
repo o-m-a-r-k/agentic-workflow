@@ -44,11 +44,11 @@ GH_TOKEN=<the repository owner's token> node scripts/release.mjs <version>
 
 Before it: the dev branch (`dev/<version>`, or `--dev <branch>`) holds the release with the three version files
 (`package.json`, `.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`) and `docs/releases/v<version>.md`
-(`node scripts/changelog.mjs` then regenerates `CHANGELOG.md`), and is pushed to `release/<version>`, where CI ran the
+(`node scripts/changelog.mjs` then regenerates `CHANGELOG.md`; it reads the improvement history from git, so run it in a full clone), and is pushed to `release/<version>`, where CI ran the
 whole suite and passed. The steps, each printing what it ran and what it saw:
 
 1. **check**: `origin/release/<version>` equals the local dev head; the version files and the notes are in it; main
-   fast-forwards to it; no improvement history file is left uncommitted; **the budget**: the release commit's
+   fast-forwards to it; **the budget**: the release commit's
    rule-shaped counts (refusal ids, commands, event types, adapter keys, words in the texts agents read) against
    `budget.json` on main, where a net increase stops the release unless a kept or active proposal committed under
    `proposals/` accounts for it (D98); CI passed on the commit.
@@ -112,7 +112,7 @@ hosts and are never run by the suite.
 ## Security-sensitive paths
 
 Changes to `hooks/`, `engine/hosts/`, `engine/ledger.mjs`, `engine/decisions.mjs`, `engine/base-module.mjs`,
-`engine/secrets.mjs`, `engine/env.mjs`, `engine/cli.mjs`, `adapters/`, `scenarios/` and `.github/` are reviewed by the
+`engine/secrets.mjs`, `engine/scrub.mjs`, `engine/env.mjs`, `engine/cli.mjs`, `adapters/`, `scenarios/` and `.github/` are reviewed by the
 maintainer (see `.github/CODEOWNERS`). Report vulnerabilities privately: see [SECURITY.md](SECURITY.md).
 
 ## Pull requests

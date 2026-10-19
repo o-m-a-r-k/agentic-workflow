@@ -181,7 +181,7 @@ export const REPORT_METRICS = ['wallMin', 'activeMin', 'unexplainedGaps', 'perso
 
 export function emptyRow() {
   return {
-    schema: ROW_SCHEMA, project: null, item: null, attempt: null, engine: null, outcome: null,
+    schema: ROW_SCHEMA, project: null, item: null, attempt: null, engine: null, outcome: null, outsideStages: null,
     start: null, end: null, wallMin: null, activeMin: null, unexplainedGaps: null, personWaitMin: null, holdMin: null, stageWaitMin: null,
     reviews: null, blockingReviews: null, emptyReviews: null, fixRounds: null, coverage: null,
     testRuns: null, testMin: null, landing: null, diff: null, findings: null, introducedByRepair: null,
@@ -290,6 +290,8 @@ async function row2(root, attemptId, state, entries) {
   const start = t(state.startedAt);
   const end = state.closedAt ? t(state.closedAt) : t(entries.at(-1).at);
   Object.assign(r, { project: name, item: state.item, attempt: attemptId, engine: state.engine, outcome: state.outcome, start: state.startedAt, end: new Date(end).toISOString(), wallMin: minutes(end - start) });
+  // D16: a close by patch-id with the delivery stages not done shipped outside the workflow; `attempt.closed` records it.
+  r.outsideStages = state.open ? null : state.outsideStages === true;
 
   // Waits and the intervals that explain idle time.
   const decisions = Object.values(state.decisions).filter((d) => d.askedAt && d.blocking !== false);
