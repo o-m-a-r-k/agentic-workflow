@@ -1,125 +1,154 @@
-// The host layer: everything the workflow knows about the harness that runs its agents (Claude Code, Codex, a future
-// one) lives behind this folder. A harness is an execution detail (docs/DESIGN.md, the host adapter layer): the
-// lifecycle, strategy, gate, ledger and review policy never name one. They ask this registry, which hands back the
-// adapter for a runtime id the ledger or the caller supplied.
-//
-// An adapter is one module in this folder with a default export of the same flat shape (below). Required fields identify
-// the harness and say how its roles start; every function that reads the harness's own records (transcripts, usage,
-// role files) is optional, and a missing one degrades to "unknown" rather than failing (`optional(adapter, name)`).
-// Adapter functions return data (identity, launch arguments, measurements, plan text, tracker readback). None returns
-// an authority verdict: who may decide what is the ledger's and the owner's business (engine/owner.mjs).
-//
-//   id, name, label                      'claude', 'Claude', 'Claude Code': the runtime id stored in ledgers and the words used for it
-//   spawnMode                            'owner-native' (the owner starts a role by agent type) or 'engine-only' (`wf handoff run`)
-//   sessionEnv, markerEnv, envPrefixes   environment names of its sessions, and prefixes of its credentials
-//   detect(env)                          -> { session } | null          (omitted: the harness can launch roles but never own an attempt)
-//   classDefaults                        per work class defaults ({ full: { effort }, ... })
-//   classifierDefaults                   the learning classifier's { model, effort } (engine/learning.mjs)
-//   classifyLaunch({ prompt, model, effort, dir }) -> { bin, args, input, outFile? }   optional: one tool-less labelling turn
-//   classifyResult({ stdout, outFile })  -> { text, costUsd?, model? }                optional: that turn's answer
-//
-// A harness is added by writing one module here and listing it in `builtin()` below; `registerHost` adds one at run time
-// (the plug-in scenario registers a throwaway harness this way, touching no engine file).
-import { refuse, setUpgradeCommands } from '../util.mjs';
-export { descendants, lastFencedYaml, lastModel } from './turns.mjs';
+// The hosts: everything the engine knows about the agent harnesses (Claude Code, Codex) lives behind this folder. Each
+// host module reads its own transcript layout into the same items (engine/hosts/claude.mjs, `timeline`), and every
+// reader here works on those items, so a reader is written once for every host.
+import fs from 'node:fs';
+import path from 'node:path';
+import { hostHome } from '../contract.mjs';
 import claude from './claude.mjs';
 import codex from './codex.mjs';
+import { shellReads } from './shell-reads.mjs';
+import { toolMatches } from './tool-calls.mjs';
 
-// Harnesses with their own adapter, in the order they are consulted (the first whose session variable is set owns the
-// session). Evaluated on first use so an adapter module that imports engine code cannot meet this file half-loaded.
-const builtin = () => [claude, codex];
+const registry = new Map([claude, codex].map((h) => [h.id, h]));
+// Variables agent runtimes set without a host module here: a process under one is an agent, never the person.
+const AGENT_MARKERS = ['AI_AGENT', 'GROK_SESSION_ID'];
 
-let registry = null;
-function hosts() {
-  registry ??= new Map(builtin().map((a) => [a.id, a]));
-  return registry;
-}
-
-// Agent runtimes the engine recognises by the session variable they set, without an adapter: a session of one is never
-// mistaken for a person (`wf approve` refuses under it, its credentials stay out of project commands), but it can
-// neither own an attempt nor run a role. A registered adapter with the same id replaces its entry.
-const RECOGNISED = [{ id: 'grok', sessionEnv: ['GROK_SESSION_ID'], markerEnv: [], envPrefixes: ['GROK_', 'XAI_'], detect: (env) => (env.GROK_SESSION_ID ? { session: env.GROK_SESSION_ID } : null) }];
-// Set by agent runtimes in general rather than by one: never a person's own shell.
-const GENERIC_AGENT_ENV = ['AI_AGENT'];
-
-const recognised = () => RECOGNISED.filter((r) => !hosts().has(r.id));
-const known = () => [...hosts().values(), ...recognised()];
-
-export const hostIds = () => [...hosts().keys()];
-// The runtime a command assumes when it runs outside every harness session: the first registered.
-export const defaultHostId = () => hostIds()[0];
-// `claude|codex`, `claude or codex`: the ids for usage and refusal text.
-export const hostChoice = (separator = '|') => hostIds().join(separator);
-// `Claude or Codex`: the harness names for prose.
-export const hostNames = (separator = ' or ') => [...hosts().values()].map((h) => h.name).join(separator);
-// `Claude Code or Codex`: the harness labels for prose.
-export const hostLabels = (separator = ' or ') => [...hosts().values()].map((h) => h.label).join(separator);
-export const findHost = (id) => hosts().get(String(id ?? '')) ?? null;
-export function hostFor(id) {
-  const host = findHost(id);
-  if (!host) throw refuse(`unknown runtime \`${id}\`: use ${hostChoice(' or ')}`);
+export const hostIds = () => [...registry.keys()];
+export const findHost = (id) => registry.get(String(id ?? '')) ?? null;
+export const optional = (host, name) => (typeof host?.[name] === 'function' ? host[name].bind(host) : null);
+export function registerHost(host) {
+  if (!host || !/^[a-z][a-z0-9-]*$/.test(String(host.id))) throw new Error('a host needs an id of lowercase letters, digits and dashes');
+  registry.set(host.id, host);
   return host;
 }
-export const isHost = (id) => findHost(id) !== null;
+export const unregisterHost = (id) => registry.delete(id);
 
-export function registerHost(adapter) {
-  if (!adapter || typeof adapter.id !== 'string' || !/^[a-z][a-z0-9-]*$/.test(adapter.id)) throw new Error('a host adapter needs an id of lowercase letters, digits and dashes');
-  hosts().set(adapter.id, adapter);
-  return adapter;
-}
-export function unregisterHost(id) {
-  hosts().delete(id);
-}
+// Prefixes of agent-runtime credentials and session ids: project commands never receive them (engine/env.mjs).
+export const credentialPrefixes = () => [...registry.values()].flatMap((h) => h.envPrefixes ?? []);
+// Variables removed from a launched role's environment, so it is never mistaken for its launcher.
+export const sessionVariables = () => [...new Set([...[...registry.values()].flatMap((h) => [...(h.sessionEnv ?? []), ...(h.markerEnv ?? [])]), ...AGENT_MARKERS])];
 
-// Sentences an adapter supplies for the texts the engine prints; the neutral wording when it supplies none.
-const FRAGMENTS = {
-  toolCompatibility: 'Use the file reader and writer your host provides.',
-  closureWriter: 'your file writer',
-  staleRole: (agentType) => `A session reads agent files when it starts, so an agent of type ${agentType} started from this session is started with the old instructions; its bundle points it at the current file, which it reads first, so no restart is needed for its instructions; a change to its tools still needs the session restarted.`,
-  howToStart: (h) => `start it as agent type \`${h.agentType ?? 'the one `wf handoff` printed'}\`, named \`${h.agent}\`, with only the printed line as its prompt`,
-  // How a question panel takes its options (0.7.28, I-202): each is the option's label alone, so the panel offers exactly the
-  // decision's options and the person's pick binds by itself (engine/approve.mjs).
-  panelOptions: 'each option is its label alone (the recommended one may end with " (Recommended)"); what follows a label goes in the option\'s description, or in the question\'s text when the panel has none',
-};
-export function fragment(host, name, ...args) {
-  const text = host?.fragments?.[name] ?? FRAGMENTS[name];
-  return typeof text === 'function' ? text(...args) : text;
-}
-
-// A function an adapter may omit; null when it does (the "missing" behaviour of its capability).
-export const optional = (host, name) => (typeof host?.[name] === 'function' ? host[name].bind(host) : null);
-
-// ---- Who is calling ----
-
-// The harness session this process runs under: { runtime, session }, or null for a person's own shell.
-export function detectOwner(env = process.env) {
-  for (const host of known()) {
-    const found = host.detect?.(env);
-    if (found?.session) return { runtime: host.id, session: found.session };
+// The session running this process; null at a plain terminal.
+export function callerSession(env = process.env) {
+  for (const h of registry.values()) {
+    const id = h.detect?.(env);
+    if (id) return { runtime: h.id, id: String(id) };
   }
   return null;
 }
+// Whether an agent runtime runs this process, with or without a session id the engine can read.
+export const underAgent = (env = process.env) => sessionVariables().some((k) => env[k]);
 
-// Owner strings are `<runtime>:<session id>`; the grammar lives here and nowhere else.
-export const ownerString = (runtime, session) => `${runtime}:${session}`;
-const ownerPrefix = () => new RegExp(`^(${hostIds().map((id) => id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')}):`);
-// The runtime an owner or actor string names (`claude:SID` -> `claude`), or null for a person and for any other prefix.
-export const ownerRuntime = (owner) => ownerPrefix().exec(String(owner ?? ''))?.[1] ?? null;
-// { runtime, session } for a session owner with a non-empty session id, else null.
-export function parseOwner(owner) {
-  const m = new RegExp(`${ownerPrefix().source}(.+)$`).exec(String(owner ?? ''));
-  return m ? { runtime: m[1], session: m[2] } : null;
+const homeOf = (opts) => opts?.home ?? hostHome();
+function itemsOf(session, opts) {
+  const host = findHost(session?.runtime);
+  if (!host || typeof session?.id !== 'string') return null;
+  try {
+    const file = host.transcript(session.id, homeOf(opts));
+    return file ? host.timeline(file) : null;
+  } catch {
+    return null;
+  }
 }
 
-// Environment names that mean an agent runtime runs this command (`wf approve` refuses under any of them).
-export function agentEnvNames() {
-  const names = (hs) => hs.flatMap((h) => [...(h.sessionEnv ?? []), ...(h.markerEnv ?? [])]);
-  return [...new Set([...names([...hosts().values()]), ...GENERIC_AGENT_ENV, ...names(recognised())])];
-}
-// Names removed from the environment of a role the engine launches, so the role is never mistaken for its launcher.
-export const launchEnvDeletes = () => [...known().flatMap((h) => h.sessionEnv ?? []), ...GENERIC_AGENT_ENV];
-// Prefixes of agent-runtime credentials and session ids: project commands never receive them unless the adapter names them.
-export const credentialPrefixes = () => known().flatMap((h) => h.envPrefixes ?? []);
+const FILE_TOOLS = new Set(['Read', 'NotebookRead', 'read_file', 'view_image']);
 
-// The update command of each harness's plugin manager, for the hint when the engine is older than a project's pin.
-setUpgradeCommands(() => known().map((h) => h.fragments?.pluginUpdate).filter(Boolean));
+// The files a session read: its file reader's targets (a failed read is left out) and the files its shell commands
+// printed (a file the shell reported missing is left out). Absolute paths, in order, each once. null: no readable
+// transcript.
+export function filesRead(session, opts = {}) {
+  const t = itemsOf(session, opts);
+  if (!t) return null;
+  const calls = new Map();
+  const results = new Map();
+  for (const it of t.items) {
+    if (it.type === 'call') calls.set(it.id, it);
+    else if (it.type === 'result' && calls.has(it.id)) results.set(it.id, it);
+  }
+  const out = new Set();
+  for (const c of calls.values()) {
+    const r = results.get(c.id);
+    if (!r) continue; // never answered: interrupted before it read anything
+    const base = c.cwd ?? t.cwd ?? '/';
+    if (c.shell !== undefined && c.shell !== null) {
+      for (const p of shellReads(c.shell, base)) if (!r.text.includes(`${path.basename(p)}: No such file`)) out.add(p);
+      continue;
+    }
+    const target = FILE_TOOLS.has(c.name) ? c.input.file_path ?? c.input.notebook_path ?? c.input.path : null;
+    if (!r.error && typeof target === 'string' && target) out.add(path.resolve(base, target));
+  }
+  return [...out];
+}
+
+const HUMAN = new Set(['person', 'act', 'panel']);
+const real = (m) => (m && !String(m).startsWith('<') ? m : null);
+
+// Turn times (human or not), token use, cost and model of a session.
+export function sessionActivity(session, opts = {}) {
+  const t = itemsOf(session, opts);
+  if (!t) return null;
+  const turns = [];
+  const requests = new Map();
+  let total = null;
+  let model = null;
+  for (const it of t.items) {
+    if (it.at) {
+      if (turns.at(-1)?.at === it.at) turns.at(-1).human ||= HUMAN.has(it.type);
+      else turns.push({ at: it.at, human: HUMAN.has(it.type) });
+    }
+    if (it.type === 'usage') {
+      const prev = requests.get(it.key);
+      if (!prev || it.output >= prev.output) requests.set(it.key, it); // one request over several lines counts once
+    }
+    if (it.type === 'total') total = it; // a running total per session
+    model = real(it.model) ?? model;
+  }
+  const tokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  for (const r of total ? [total] : requests.values()) for (const k of Object.keys(tokens)) tokens[k] += r[k] ?? 0;
+  return { turns, tokens, cost: null, model };
+}
+
+// Connector calls, matched by tool-name suffix, with the result as the host stored it. `name`: the full tool name.
+export function connectorCalls(session, tools, opts = {}) {
+  const t = itemsOf(session, opts);
+  if (!t) return [];
+  const since = opts.since ? Date.parse(opts.since) : null;
+  const calls = new Map();
+  for (const it of t.items) {
+    if (it.type === 'call') {
+      // An empty list, or an empty suffix, matches every call; `tool` is then the full name the call went to.
+      const all = !tools?.length || tools.includes('');
+      const tool = all ? it.name : tools.find((w) => toolMatches(it.name, w));
+      if (tool && (since === null || Date.parse(it.at) >= since)) calls.set(it.id, { tool, name: it.name, input: it.input, result: null, at: it.at });
+    } else if (it.type === 'result' && calls.has(it.id)) calls.get(it.id).result = it.text;
+  }
+  return [...calls.values()];
+}
+
+// Every session of the project, of any host, written to at or after `since`, with its items: those whose recorded
+// working folder is the project root or a folder under it.
+export function projectSessions(root, { home, since } = {}) {
+  const sinceMs = since ? Date.parse(since) : 0;
+  let realRoot = root;
+  try {
+    realRoot = fs.realpathSync(root);
+  } catch {}
+  const within = (cwd) => typeof cwd === 'string' && [root, realRoot].some((r) => path.resolve(cwd) === r || path.resolve(cwd).startsWith(r + path.sep));
+  const out = [];
+  for (const host of registry.values()) {
+    for (const { session, file } of host.projectTranscripts?.(root, home ?? hostHome(), sinceMs) ?? []) {
+      try {
+        const t = host.timeline(file);
+        if (within(t.cwd)) out.push({ session, file, ...t });
+      } catch {}
+    }
+  }
+  return out;
+}
+
+export const implements08 = {
+  filesRead: async (session, opts) => filesRead(session, opts),
+  callerSession: async (env) => callerSession(env),
+  sessionActivity: async (session, opts) => sessionActivity(session, opts),
+  connectorCalls: async (session, tools, opts) => connectorCalls(session, tools, opts),
+};
