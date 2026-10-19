@@ -5,6 +5,8 @@ import path from 'node:path';
 import { ok, sh, singleRepoProject, state, toAccepted, wf } from './helpers.mjs';
 import { ledger, steps } from './adapter-fault-fixtures.mjs';
 import { headOf, integrations, mrAdapter, reconcile } from './base-merge-in-flight-fixtures.mjs';
+import { loadState } from '../engine/ledger.mjs';
+import { limitItems } from '../engine/tracker.mjs';
 
 // 0.7.26 (I-183). Named failure (field): a merge request awaited its merge (the adapter's `observe` said
 // `awaiting-merge`) while the base branch moved on by dozens of commits. `wf base merge` refused ("already being
@@ -54,14 +56,14 @@ test('I-183: the base moved while the merge request awaits its merge: wf base me
   assert.match(s.next, /wf gate/);
   assert.equal(s.decision.kind, 'gate');
 
-  // The ticket's own change is untouched, so the code review still covers it: the gate, then the evidence review, then accept.
-  // 0.7.26 (I-183): after the gate on the moved tree the text, like the decision, names the evidence review (it said "code review:
-  // hand to a fresh reviewer ... no gate until a code-review round comes back clean" while the decision named the evidence review).
+  // The ticket's own change is untouched, so the code review still covers it: the gate, then accept.
+  // 0.7.34 (I-233, M1): the merge touched none of the ticket's files, and the gate on the merged tree collected nothing new to
+  // inspect, so the evidence round stands and the acceptance is recorded again for the merged commit (no evidence review).
   const afterGate = [];
-  assert.deepEqual(reconcile(root, base, id, 'rev-again', (step, s2) => { if (step === 'gate') afterGate.push(s2); }), ['gate', 'evidence-review']);
+  assert.deepEqual(reconcile(root, base, id, 'rev-again', (step, s2) => { if (step === 'gate') afterGate.push(s2); }), ['gate']);
   assert.equal(afterGate.length, 1);
-  assert.equal(afterGate[0].decision.round, 'evidence-review');
-  assert.match(afterGate[0].next, /^evidence review: the gate passed on this tree/);
+  assert.equal(afterGate[0].decision.kind, 'accept');
+  assert.match(afterGate[0].next, /^accept the review: `wf accept` \(the evidence round stands: since it, only base merges that left this change as it was moved the tree \(base:1\)/);
   assert.doesNotMatch(afterGate[0].next, /code review: hand to|no gate until/);
   s = state(root, id);
   assert.equal(s.accepted.heads.app, merged, 'the acceptance now names the reconciled commit');
@@ -82,7 +84,10 @@ test('I-183: the base moved while the merge request awaits its merge: wf base me
   assert.equal(sh(base, `git --git-dir=${remote} show main:src/other.txt`), 'o2');
 });
 
-test('I-183: a base merge that changes the lines around the ticket\'s own change needs a code review again, not only the gate', () => {
+// 0.7.34 (I-233): this case asked for a code review (I-183): the base's edit sat within the diff context of the ticket's hunk, so the
+// ticket's change read as new. It is the same change: the merge is a `context` merge, the gate runs on the merged tree, and the
+// acceptance is recorded again with the evidence round; the delivered comment says no reviewer looked at where the two meet.
+test('I-233: a base merge that changes the lines around the ticket\'s own change owes the gate only, and the delivered comment names it', () => {
   const lines = (n) => Array.from({ length: 7 }, (_, i) => `l${i + 1}`).map((l, i) => (i + 1 === n ? `${l}-changed` : l)).join('\n') + '\n';
   const { base, root } = singleRepoProject('mr-base-touch', { delivery: { kind: './delivery/mr.mjs' }, gate: { steps } }, { '.workflow/delivery/mr.mjs': mrAdapter, 'src/m.txt': lines(0) });
   const { id } = toAccepted(root, base, { item: 'ENG-184', change: { 'src/m.txt': lines(2) } });
@@ -91,10 +96,16 @@ test('I-183: a base merge that changes the lines around the ticket\'s own change
   sh(root, `printf '${lines(5).replace(/\n/g, '\\n')}' > src/m.txt && git commit -qam 'base change near the hunk' && git push -q origin main`);
   const m = ok(wf(root, ['base', 'merge', '--attempt', id]));
   assert.match(m.out, /the acceptance is withdrawn/);
+  assert.match(m.out, /owes: base:1 changed files this ticket also changes \(src\/m\.txt\) and left the ticket's own change as it was: no review round is owed/);
+  const ev = ledger(root, id).filter((e) => e.type === 'base.merged').at(-1).data;
+  assert.deepEqual([ev.class, ev.touched, ev.resolved, ev.ownSame], ['context', ['src/m.txt'], [], true]);
   const s = state(root, id);
   assert.equal(s.accepted, null);
-  assert.equal(s.decision.kind, 'review');
-  assert.equal(s.decision.round, 'code-review', 'the reviewed change is not the change the merge request would carry now');
+  assert.equal(s.decision.kind, 'gate', 'the reviewed change is the change the merge request carries now');
+  assert.deepEqual(reconcile(root, base, id, 'rev-touch'), ['gate']);
+  const acc = ledger(root, id).filter((e) => e.type === 'review.accepted').at(-1).data;
+  assert.deepEqual(acc.acrossMerges.map((x) => [x.id, x.class]), [['base:1', 'context']]);
+  assert.equal(limitItems(loadState(root, id)).filter((x) => /other work merged in from the base branch also changed a file this change edits/.test(x.line)).length, 1);
 });
 
 test('I-183: the merge request was merged and the base moved on: wf base merge leaves the landed branch alone and wf deliver records the delivery', () => {
@@ -135,11 +146,11 @@ test('I-183: an accepted attempt that base-merges before any deliver, through a 
   assert.equal(ledger(root, id).filter((e) => e.type === 'base.merged').at(-1).data.withdrewAcceptance, true);
   let s = state(root, id);
   assert.equal(s.accepted, null);
-  assert.equal(s.decision.kind, 'gate', 'the ticket\'s own lines are untouched: the gate, then the evidence review');
+  assert.equal(s.decision.kind, 'gate', 'the ticket\'s own lines are untouched: the gate, then the acceptance (0.7.34, I-233)');
   const early = wf(root, ['deliver', '--attempt', id]);
   assert.equal(early.code, 75);
   assert.match(early.err, /review not accepted/);
-  assert.deepEqual(reconcile(root, base, id, 'rev-early'), ['gate', 'evidence-review']);
+  assert.deepEqual(reconcile(root, base, id, 'rev-early'), ['gate']);
   assert.equal(state(root, id).accepted.heads.app, merged);
   assert.match(ok(wf(root, ['deliver', '--attempt', id])).out, /app: awaiting-merge/);
   assert.deepEqual(integrations(root), [`app ${merged}`], 'the request was opened for the reviewed, reconciled commit only');

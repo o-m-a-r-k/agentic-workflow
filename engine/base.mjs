@@ -3,6 +3,8 @@ import { spawnSync } from 'node:child_process';
 import { actor, branchName, changedFiles, openState, uncommitted } from './attempt.mjs';
 import { adapterPin, loadConfig, trustedAdapter, withTargets } from './config.mjs';
 import { liveGate } from './gate.mjs';
+import { reviewInFlight } from './lifecycle.mjs';
+import { recordedFacts } from './merges.mjs';
 import { append, listAttempts, loadState } from './ledger.mjs';
 import { packageOf } from './topology.mjs';
 import { git, gitEnv, matchesAny, refuse, run } from './util.mjs';
@@ -96,6 +98,16 @@ export function baseMovedForDelivery(root, state) {
   return baseStatus(root, { ...state, repos: Object.fromEntries(open.map((n) => [n, state.repos[n]])) }, { fetch: false }).filter((e) => e.commits && !e.landed);
 }
 
+// 0.7.34 (I-233): what one base merge owes, in plain words, from its class (engine/merges.mjs).
+export function owedLine(m) {
+  if (!m?.class) return null;
+  const id = m.n ? `base:${m.n}` : 'this merge';
+  if (m.class === 'none') return `${id} changed none of this ticket's files and resolved nothing: no review is owed for it`;
+  if (m.class === 'context') return `${id} changed files this ticket also changes (${list(m.touched)}) and left the ticket's own change as it was: no review round is owed; the next reviewer handed, for whatever reason, judges these base edits (it is listed under \`baseMerge\` in its bundle)`;
+  const why = m.resolved === null ? 'git here cannot compute its automatic merge, so the whole merge counts as resolved' : m.resolved?.length ? `it differs from git's automatic merge in ${list(m.resolved)}` : 'the ticket\'s own change differs after it';
+  return `${id} changed this ticket's change (${why}): one merge review judges it before the gate (\`wf resume\` names it)`;
+}
+
 const list = (files) => `${files.slice(0, 5).join(', ')}${files.length > 5 ? ` (+${files.length - 5} more)` : ''}`;
 
 export function baseLines(entries) {
@@ -135,6 +147,9 @@ export function baseMerge(root, options) {
   }
   if (!viaAdapter && Object.keys(state.delivery.repos).length) throw refuse(`${state.id} is already being delivered; \`wf deliver\` merges the base itself`, 'it merges the base into each repo still to deliver and refuses with what to do when that conflicts; a repo already recorded is not touched', { id: 'base:delivering' });
   if (liveGate(root, state)) throw refuse('a gate is running on these worktrees; wait for it or `wf stop` it first');
+  // 0.7.34 (I-233): a review is bound to the tree it was handed, so a merge under a reviewer at work would end its round
+  // ("the worktree changed during the review round"). The base comes in once, right before the gate.
+  const reviewing = reviewInFlight(state);
   const dirty = uncommitted(state);
   if (Object.keys(dirty).length) throw refuse(`commit or remove uncommitted changes before merging the base: ${Object.entries(dirty).map(([r, l]) => `${r} (${l.slice(0, 3).join('; ')})`).join(', ')}`);
   const names = options.repo ? [String(options.repo)] : Object.keys(state.repos);
@@ -149,6 +164,7 @@ export function baseMerge(root, options) {
   const started = Object.keys(state.delivery.repos).length > 0 || Object.keys(state.delivery.integrating ?? {}).length > 0;
   const withdraws = viaAdapter && Boolean(state.accepted);
   const results = settled.map((n) => ({ repo: n, settled: how(recorded(n)) }));
+  let numbered = state.baseCount ?? (state.baseMerges ?? []).length;
   for (const entry of baseStatus(root, { ...state, repos: Object.fromEntries(open.map((n) => [n, state.repos[n]])) })) {
     if (entry.landed) {
       results.push({ repo: entry.repo, landed: true, ref: entry.ref });
@@ -164,6 +180,7 @@ export function baseMerge(root, options) {
       results.push({ repo: entry.repo, upToDate: true, note: entry.note });
       continue;
     }
+    if (reviewing) throw refuse(`reviewer ${reviewing.agent} was handed this tree and has recorded no closure`, 'wait for its closure; the merge goes right before the gate', { id: 'base:review-in-flight' });
     const wt = state.repos[entry.repo].worktree;
     const before = git(wt, ['rev-parse', 'HEAD']);
     const merge = run('git', ['merge', '--no-edit', '-m', `Merge ${entry.ref} into ${branchName(state.id)}`, entry.tip], { cwd: wt, allowFail: true });
@@ -171,12 +188,15 @@ export function baseMerge(root, options) {
       const conflicts = git(wt, ['diff', '--name-only', '--diff-filter=U'], { allowFail: true }).split('\n').filter(Boolean);
       run('git', ['merge', '--abort'], { cwd: wt, allowFail: true });
       const done = results.filter((x) => x.headAfter).map((x) => x.repo);
-      throw refuse(`merging ${entry.ref} into ${entry.repo} conflicts${conflicts.length ? ` in ${list(conflicts)}` : ''}; the merge was aborted and ${entry.repo} is unchanged${done.length ? ` (already merged: ${done.join(', ')})` : ''}`, `have the implementer of the overlapping work merge ${entry.ref} in ${wt}, resolve and commit; then \`wf gate\` and a fresh reviewer${viaAdapter && state.accepted ? '. The acceptance names the commit the delivery adapter integrates, so it has to be redone: `wf deliver` refuses until the merged tree is gated, reviewed and accepted again' : ''}`);
+      throw refuse(`merging ${entry.ref} into ${entry.repo} conflicts${conflicts.length ? ` in ${list(conflicts)}` : ''}; the merge was aborted and ${entry.repo} is unchanged${done.length ? ` (already merged: ${done.join(', ')})` : ''}`, `have the implementer of the overlapping work merge ${entry.ref} in ${wt} (\`git merge ${entry.ref}\`: a merge commit, never a squash or a rebase onto the base, so the engine can tell the base's work from this ticket's), resolve and commit; the resolution is then judged in one merge review before the gate (\`wf resume\` names it)${viaAdapter && state.accepted ? '. The acceptance names the commit the delivery adapter integrates, so it has to be redone: `wf deliver` refuses until the merged tree is gated, reviewed and accepted again' : ''}`);
     }
     const after = git(wt, ['rev-parse', 'HEAD']);
-    const data = { repo: entry.repo, ref: entry.ref, from: entry.own, to: entry.tip, commits: entry.commits, files: entry.files, overlap: entry.overlap, infra: entry.infra, headBefore: before, headAfter: after, note: entry.note, ...(withdraws && before !== after ? { withdrewAcceptance: true } : {}) };
+    // 0.7.34 (I-233): what the merge did to this ticket's change, read from git (engine/merges.mjs). `resolved` is computed
+    // here too: a pre-merge-commit hook or a merge driver can change the result of a merge that reported no conflict.
+    const facts = before !== after ? recordedFacts(wt, after) : {};
+    const data = { repo: entry.repo, ref: entry.ref, from: entry.own, to: entry.tip, commits: entry.commits, files: entry.files, overlap: entry.overlap, infra: entry.infra, headBefore: before, headAfter: after, note: entry.note, ...facts, ...(withdraws && before !== after ? { withdrewAcceptance: true } : {}) };
     append(root, state.id, 'base.merged', data, actor(options));
-    results.push(data);
+    results.push({ ...data, n: (numbered += 1) });
   }
   return { state: loadState(root, state.id), results, withdrewAcceptance: withdraws && results.some((x) => x.withdrewAcceptance), started };
 }

@@ -14,6 +14,7 @@ import { requireYes } from './approve.mjs';
 import { FRAMES } from './asking.mjs';
 import { settleRoundQuestions } from './strategy.mjs';
 import { followAdapter } from './adapter-follow.mjs';
+import { observeBaseMerges } from './merges.mjs';
 import { applyCommits, attemptTargets, ownCommits, parseTargets, portSource, targetsKey } from './targets.mjs';
 import { detectOwner, ownerRuntime, ownerString } from './hosts/index.mjs';
 import { noteAttempt } from './refusals.mjs';
@@ -120,7 +121,8 @@ export function openState(root, options, { follow = true } = {}) {
   // 0.7.30 (I-151, D60): the attempt takes the adapter committed on its base branch, where it safely can, before anything reads it
   // (not for `wf hold`, which is recorded first, so the pin cannot move under the person's hold).
   const settled = settleRoundQuestions(root, state);
-  return follow ? followAdapter(root, settled) : settled;
+  // 0.7.34 (I-233): a base merge made by hand is classified once, when a command first sees it (engine/merges.mjs).
+  return follow ? observeBaseMerges(root, followAdapter(root, settled)) : settled;
 }
 
 function nextNumber(root, prefix) {
@@ -702,7 +704,11 @@ export function pushedRepo(state, name) {
 export function changeBase(state, name) {
   const r = state.repos[name];
   if (!pushedRepo(state, name)) return r.baseRef ?? r.base;
-  return (state.baseMerges ?? []).filter((m) => m.repo === name && m.to).at(-1)?.to ?? r.base;
+  // 0.7.34 (I-233, M4): a base merge made by hand and classified (`base.observed`) is a base the attempt recorded too, when the
+  // accepted commit holds it; one made after the acceptance is part of the pushed range, whose commits are marked as the base's (D81).
+  const accepted = String(state.accepted?.heads?.[name] ?? '').split('+')[0];
+  const held = (m) => !m.observed || (accepted && run('git', ['merge-base', '--is-ancestor', m.merge, accepted], { cwd: r.worktree, allowFail: true }).status === 0);
+  return [...(state.baseMerges ?? []), ...(state.baseObserved ?? []).map((m) => ({ ...m, observed: true }))].filter((m) => m.repo === name && m.to && held(m)).sort((a, b) => String(a.at).localeCompare(String(b.at))).at(-1)?.to ?? r.base;
 }
 
 export function changedFiles(state, name) {

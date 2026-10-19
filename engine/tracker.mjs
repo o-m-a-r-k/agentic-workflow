@@ -212,6 +212,10 @@ export function limitItems(state, { load = null } = {}) {
   // Named failure (I-69): a review named scope it did not reach (`notReached`) and nothing the tester reads said so. Every
   // round since the last complete full audit counts: a delta round does not go back over an earlier round's gaps.
   for (const u of unreachedSince(state)) u.notReached.forEach((n, i) => add(`${u.round ?? u.reviewer ?? 'review'}:U${i + 1}`, `Not checked by review: ${wording(state, `${u.round ?? u.reviewer ?? 'review'}:U${i + 1}`, n)}.`));
+  // 0.7.34 (I-233): a base merge whose edits in this change's files no review judged (one after the acceptance, or one an
+  // acceptance carried across, engine/merges.mjs): the tester reads where other work met this change.
+  const judgedMerges = new Set((state.reviews ?? []).flatMap((r) => (Array.isArray(r.closure?.baseMerges) ? r.closure.baseMerges : []).flatMap((a) => [a?.id, a?.merge]).filter(Boolean)));
+  for (const m of [...(state.baseMerges ?? []), ...(state.baseObserved ?? [])]) if (m.class === 'context' && !judgedMerges.has(`base:${m.n}`) && !judgedMerges.has(m.merge ?? m.headAfter)) add(null, `Not checked by review: other work merged in from the base branch also changed ${(m.touched ?? []).length === 1 ? 'a file' : `${(m.touched ?? []).length} files`} this change edits; the checks ran on the combined result, and no reviewer looked at where the two meet.`);
   for (const a of state.delivery?.shown?.anomalies ?? []) if (a.followUp) add(null, `Follow-up: ${a.observation} (${a.followUp})`);
   // 0.7.28 (I-212): a suite the person set aside in the gate this delivery passed is named: it was not proven.
   for (const st of state.lastGate?.status === 'passed' ? state.lastGate.steps ?? [] : []) for (const q of st.quarantined ?? []) add(`quarantine:${st.id}:${q}`, `Not proven by the checks: the test suite ${q} failed and was set aside by your decision; this change does not edit that test file, and whether the code it exercises changed was not checked.`);
