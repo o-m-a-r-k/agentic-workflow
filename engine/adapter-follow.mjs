@@ -284,6 +284,9 @@ export function followAdapter(root, state) {
   let wrote = false;
   recordedTogether(root, state.id, () => {
     const current = loadState(root, state.id);
+    // 0.7.35 (review of D90): the attempt may have closed since `state` was read (a `wf status` racing the `wf shown` that closes it):
+    // a closed attempt follows nothing and records nothing.
+    if (['done', 'abandoned'].includes(current.phase)) return;
     // What the attempt authored is kept whatever else holds (a hold or a running gate stops the follow, not the record).
     const known = new Set((current.adapterAuthored ?? []).map((a) => `${a.file}\0${a.change}`));
     const fresh = (plan.authored ?? []).filter((a) => !known.has(`${a.file}\0${a.change}`));

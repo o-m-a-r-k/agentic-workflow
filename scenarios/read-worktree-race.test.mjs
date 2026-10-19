@@ -11,7 +11,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { WF, closureFile, commitIn, criteriaFile, goodClosure, ok, OUT_OF_ORDER, singleRepoProject, summaryFile, wf, yaml } from './helpers.mjs';
+import { run } from '../engine/util.mjs';
+import { followAdapter } from '../engine/adapter-follow.mjs';
+import { loadState, readLedger } from '../engine/ledger.mjs';
+import { WF, closureFile, sh, commitIn, criteriaFile, goodClosure, ok, OUT_OF_ORDER, singleRepoProject, summaryFile, wf, yaml } from './helpers.mjs';
 
 const ENGINE = path.resolve(import.meta.dirname, '..', 'engine');
 const READER = `import cp from 'node:child_process';
@@ -19,7 +22,17 @@ import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 const [,, root, id, reader, sentinel, concurrent, frame] = process.argv;
 const original = cp.spawnSync;
+// 'phantom': every tree hash git call into the worktree fails as if its folder were gone, while the folder stays (so it is never
+// seen orphaned): a worktree that stays missing. Each one the next step of \`wf status\` makes (one per try) is counted.
+const phantom = new Set();
+const exists = fs.existsSync;
+fs.existsSync = function (p) { return phantom.has(String(p)) && /\\bat run \\(/.test(new Error().stack) ? false : exists.call(this, p); };
 cp.spawnSync = function (cmd, args, opts = {}) {
+  if (concurrent === 'phantom' && cmd === 'git' && String(opts.cwd ?? '').includes('/.wf-worktrees/' + id + '/') && /\\btreeHash \\(/.test(new Error().stack)) {
+    if (/\\bat nextAction \\(/.test(new Error().stack) && /\\bat summary \\(/.test(new Error().stack)) fs.appendFileSync(sentinel, 'x');
+    phantom.add(String(opts.cwd));
+    return { error: Object.assign(new Error('spawnSync git ENOENT'), { code: 'ENOENT' }), status: null, stdout: '', stderr: '' };
+  }
   if (cmd === 'git' && !fs.existsSync(sentinel) && String(opts.cwd ?? '').includes('/.wf-worktrees/' + id + '/') && /\\btreeHash \\(/.test(new Error().stack) && new RegExp(frame).test(new Error().stack)) {
     fs.writeFileSync(sentinel, '');
     if (concurrent === 'remove') fs.rmSync(opts.cwd, { recursive: true, force: true });
@@ -63,6 +76,7 @@ function delivered(name) {
     const r = spawnSync(process.execPath, [reader, f.root, e.id, cmd, sentinel, concurrent, frame], { encoding: 'utf8' });
     assert.ok(fs.existsSync(sentinel), `${cmd}: the reader reached a git call into the worktree`);
     const text = fs.readFileSync(sentinel, 'utf8');
+    if (concurrent === 'phantom') return { code: r.status, out: r.stdout, err: r.stderr, tries: text.length };
     return { code: r.status, out: r.stdout, err: r.stderr, concurrent: text ? JSON.parse(text) : null };
   };
   return { f, e, shown, read };
@@ -92,4 +106,42 @@ test('0.7.35 (D90): a read whose worktree is removed under it while the attempt 
   }
   // A write is not read again: the missing folder still stops it.
   assert.notEqual(wf(f.root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id]).code, 0);
+});
+
+// Review of 0.7.35 (D90): no cap on the restarts, a progress condition. A worktree that stays missing restarts the read once (the
+// first time it is seen missing), never again; the error is then reported as it is.
+test('0.7.35 (D90): a worktree that stays missing restarts a read once, then the read reports the error', () => {
+  const { read } = delivered('race-phantom');
+  const r = read('status', 'phantom');
+  assert.equal(r.tries, 2, 'one try, then one restart for the newly missing worktree, then no more');
+  assert.notEqual(r.code, 0);
+  assert.match(r.err, /worktree missing: \S+\/\.wf-worktrees\/ENG-400\.1\/app \(git was not run there\)/);
+});
+
+test('0.7.35 (D90): only a folder under .wf-worktrees/ is a missing worktree; any other missing folder is named for what it is', () => {
+  const at = (dir) => { try { run('git', ['status'], { cwd: dir }); } catch (error) { return error; } return null; };
+  const gone = path.join(path.sep, 'nonexistent-wf-d90', 'repo');
+  const repo = at(gone);
+  assert.equal(repo.message, `repo folder missing: ${gone} (git was not run there)`);
+  assert.equal(repo.worktreeMissing, undefined, 'a missing repo folder never restarts a read');
+  const worktree = path.join(path.sep, 'nonexistent-wf-d90', '.wf-worktrees', 'ENG-1.1', 'app');
+  const w = at(worktree);
+  assert.equal(w.message, `worktree missing: ${worktree} (git was not run there)`);
+  assert.deepEqual(w.worktreeMissing, [worktree]);
+});
+
+// Review of 0.7.35 (D90), pre-existing: `followAdapter` re-read the attempt inside its transaction but not its phase, so a read that
+// opened the attempt while it was open (a `wf status` racing the `wf shown` that closes it) appended `adapter.followed` to it closed.
+test('0.7.35 (D90): an adapter follow planned on an open attempt records nothing once the attempt has closed', () => {
+  const steps = [{ id: 'unit', repo: 'app', run: 'true', inputs: ['src/**'] }];
+  const f = singleRepoProject('follow-closed', { gate: { steps } });
+  const e = ok(wf(f.root, ['entry', '--item', 'ENG-1', '--owner', 'o', '--json'])).json();
+  const stale = loadState(f.root, e.id);
+  ok(wf(f.root, ['abandon', '--reason', 'superseded', '--attempt', e.id]));
+  const before = readLedger(f.root, e.id).length;
+  fs.writeFileSync(path.join(f.root, '.workflow', 'project.yaml'), yaml({ version: 1, enabled: true, name: 'follow-closed', repos: [{ name: 'app', path: '.', base: 'main' }], lanes: ['quick', 'standard', 'batch'], gate: { steps: [{ ...steps[0], run: 'true # stricter' }] } }));
+  sh(f.root, 'git commit -qam "unit: stricter" && git push -q origin main');
+  followAdapter(f.root, stale);
+  const after = readLedger(f.root, e.id);
+  assert.deepEqual(after.slice(before).map((x) => x.type), [], 'nothing is appended to the closed attempt');
 });

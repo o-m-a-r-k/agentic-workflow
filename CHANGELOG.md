@@ -18,7 +18,8 @@ Release notes, newest first, then every fix that came from a failure in the work
   macOS shard): a `wf status` waiting for the evidence lock while `wf deliver` wrote ran on after `wf shown` had closed the attempt
   and removed its worktree, and failed with "worktree missing". `wf status`, `wf resume` and `wf signals` now start again when a
   worktree disappears under them, and report the attempt as closed, or as orphaned when it is still open. Commands that change
-  something still stop on a missing worktree.
+  something still stop on a missing worktree. A read can no longer record an adapter follow on an attempt that closed while it
+  read.
 
 ## 0.7.34 - The strategist steps back and fixes the flow, a base merge costs at most one look, and a re-plan can be checked before it is handed back
 

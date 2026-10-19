@@ -167,8 +167,12 @@ export function run(cmd, args, { cwd, env, allowFail = false, input, sensitive =
   const result = spawnSync(cmd, args, { cwd, env: cmd === 'git' ? gitEnv(base) : base, encoding: 'utf8', input, maxBuffer: 256 * 1024 * 1024 });
   // Named failure: a missing working directory made spawn report ENOENT for the command ("git failed to start"), which sent
   // people looking for git. The folder is the problem; say so.
-  // 0.7.35 (D90): the error names the folder, so a read command can tell a worktree removed under it from any other failure.
-  if (result.error?.code === 'ENOENT' && cwd && !fs.existsSync(cwd)) throw Object.assign(new WfError(`worktree missing: ${cwd} (${cmd} was not run there)`), { worktreeMissing: cwd });
+  // 0.7.35 (D90): a folder under `.wf-worktrees/` is an attempt's worktree, and the error carries it, so a read command can tell a
+  // worktree removed under it from any other failure; any other folder (a repo's own checkout) is named for what it is.
+  if (result.error?.code === 'ENOENT' && cwd && !fs.existsSync(cwd)) {
+    if (path.resolve(cwd).split(path.sep).includes('.wf-worktrees')) throw Object.assign(new WfError(`worktree missing: ${cwd} (${cmd} was not run there)`), { worktreeMissing: [path.resolve(cwd)] });
+    throw new WfError(`repo folder missing: ${cwd} (${cmd} was not run there)`);
+  }
   if (result.error) throw new WfError(`${cmd} failed to start: ${result.error.message}`);
   if (result.status !== 0 && !allowFail) {
     if (sensitive) throw new WfError(`${cmd} failed (exit ${result.status})`);

@@ -455,12 +455,13 @@ const READ_AGAIN = new Set(['status', 'resume', 'signals']);
 // A read whose attempt lost a worktree while it was being read (a git call that failed into the missing folder may have been caught
 // on the way) starts again: the attempt is opened afresh from the ledger, so one closed by the command that removed the folder is
 // reported closed, and one still open is reported orphaned from its first line. `missingAtStart`: the orphaned worktrees each attempt
-// had when the read began.
-const orphanKey = (s) => orphansOf(s).map((m) => `${m.repo}:${m.worktree}`).sort().join('|');
+// had when the read began; the error carries the worktrees that went missing since.
+const orphanDirs = (s) => orphansOf(s).map((m) => path.resolve(m.worktree));
 function settledRead(states, missingAtStart) {
-  for (const s of states) if (orphanKey(s) !== missingAtStart.get(s.id)) throw Object.assign(new WfError(`a worktree of ${s.id} was removed while it was read`), { worktreeMissing: true });
+  const gone = states.flatMap((s) => orphanDirs(s).filter((d) => !missingAtStart.get(s.id).includes(d)));
+  if (gone.length) throw Object.assign(new WfError(`worktree missing: ${gone.join(', ')} (removed while it was read)`), { worktreeMissing: gone });
 }
-const missingNow = (states) => new Map(states.map((s) => [s.id, orphanKey(s)]));
+const missingNow = (states) => new Map(states.map((s) => [s.id, orphanDirs(s)]));
 
 export async function main(argv) {
   // `wf run --lease docker -- <command...>`: everything after `--` is the command, untouched.
@@ -494,12 +495,17 @@ export async function main(argv) {
     // its git calls after `wf shown` had closed the attempt and removed its worktree, and failed with "worktree missing" for an
     // attempt that was simply closed. A read that finds a worktree gone under it opens the attempt again from the ledger and reports
     // what it is now (closed, or orphaned, which every read already reports without a git call into the folder); a write still
-    // refuses as it did.
-    for (let tries = 0; ; tries++) {
+    // refuses as it did. Review of 0.7.35: no cap on the restarts, a progress condition instead. A read starts again only when the
+    // error names a worktree not seen missing on an earlier try; the worktrees seen missing only grow and are finite, so the loop
+    // ends by itself, and a folder that stays missing restarts nothing.
+    const seenMissing = new Set();
+    for (;;) {
       try {
         return await dispatch(cmd, sub && !sub.startsWith('--') ? sub : null, positional, { ...options, _: passthrough });
       } catch (error) {
-        if (!(READ_AGAIN.has(cmd) && error instanceof WfError && error.worktreeMissing && tries < 3)) throw error;
+        const fresh = READ_AGAIN.has(cmd) && error instanceof WfError && Array.isArray(error.worktreeMissing) ? error.worktreeMissing.filter((d) => !seenMissing.has(d)) : [];
+        if (!fresh.length) throw error;
+        for (const d of fresh) seenMissing.add(d);
       }
     }
   } catch (error) {
@@ -1765,7 +1771,10 @@ async function dispatch(cmd, sub, positional, options) {
           // 0.7.30 (I-151, D60): as `openState` does, each listed attempt takes its base branch's adapter where it safely can.
           return [followAdapter(root, settleRoundQuestions(root, s))];
         } catch (error) {
-          // A worktree removed while the listing read it is not damage: the whole read starts again (`READ_AGAIN`).
+          // A worktree removed while the listing read it is not damage: the whole read starts again (`READ_AGAIN`), and the next try
+          // lists it as orphaned or leaves it out as closed. This escape is believed unreachable for a folder that stays missing:
+          // `followAdapter` and every other git call in this block catch their own failures, and an orphan makes no git call into its
+          // folder; were one to escape, the progress condition in `main` lets it through as the error on the next try.
           if (error?.worktreeMissing) throw error;
           damaged.push({ id, damaged: String(error.message ?? error).split('\n').filter(Boolean).slice(0, 2).join(' ') });
           return [];
