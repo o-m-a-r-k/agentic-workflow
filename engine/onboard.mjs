@@ -1,940 +1,734 @@
-import { panelClasses, plannerClassFor, plannerPanel } from './panel.mjs';
-import { mkdirStateDirectory, stateFolderWarnings } from './state-folders.mjs';
-import { executionSettings } from './models.mjs';
-import { defaultHostId, detectOwner, findHost, fragment, hostChoice, hostFor, hostIds, hostLabels, isHost, optional } from './hosts/index.mjs';
-import { isGeneratedRoleFile } from './hosts/role-files.mjs';
-import { ruleWarnings } from './rules.mjs';
-import { protectionLayers } from './evidence.mjs';
+// Onboarding (design-0.8 section 5, stream 7): the project's policy, proposed from the scan, confirmed by the person, and
+// written only here. Re-runnable: a re-run shows a per-key diff, hand edits first, and writes only what is confirmed; a run
+// with nothing to change writes nothing. The engine never calls a model: a draft (from the onboard skill) is an input.
+//
+// Also the handlers `wf doctor`, `wf init` (alias onboard), `wf sync` and `wf secrets`.
+import crypto from 'node:crypto';
 import fs from 'node:fs';
-import os from 'node:os';
-import { spawnSync } from 'node:child_process';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { ADAPTER_DIR, ARTIFACT_PLACEHOLDERS, CONFIG_FILE, adapterLocation, agentTypeFor, declared, findRoot, loadConfig, loadConfigAtCommit, placeholdersIn, repoDir, roleClass, trustedAdapter } from './config.mjs';
-import { listAttempts, loadState } from './ledger.mjs';
-import { openState, provision, untrackedFiles } from './attempt.mjs';
-import { projectEnv } from './env.mjs';
-import { chooseWorkers } from './machine.mjs';
-import { loadCatalog, missingFor, readSecret, redactor, status as secretsStatus, stepEnv } from './secrets.mjs';
-import { openCount } from './improve.mjs';
-import { trackerModeChecks } from './tracker.mjs';
-import { deploymentDoctor } from './deployment-step.mjs';
-import { findSkill } from './skills.mjs';
-import { report } from './telemetry.mjs';
-import { packageOfStep } from './topology.mjs';
-import { ENGINE_VERSION, WfError, YAML, enginePinProblem, git, refuse, run, shellQuote } from './util.mjs';
+import { spawnSync } from 'node:child_process';
+import { createRequire } from 'node:module';
+import {
+  COMMANDS, COMMAND_ALIASES, CONTRACT_VERSION, POLICY_KEYS, WfError, adapterBudget, canonicalJson, checkAdapter, listAttempts,
+  loadAdapter, readEvents, scan, userDir,
+} from './contract.mjs';
+import { isInstructionDoc, repoFiles } from './scan.mjs';
+import { matchesAny } from './util.mjs';
 
-const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const exists = (...p) => fs.existsSync(path.join(...p));
-const readJsonSafe = (f) => {
+const require = createRequire(import.meta.url);
+const YAML = require('./vendor/yaml/dist/index.js');
+
+const sha = (s) => crypto.createHash('sha256').update(s).digest('hex');
+export const policyHash = (value) => sha(canonicalJson(value ?? null));
+const clip = (s, n = 160) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+const show = (v) => (v === null || v === undefined ? 'unset' : clip(typeof v === 'string' ? v : JSON.stringify(v)));
+const same = (a, b) => canonicalJson(a ?? null) === canonicalJson(b ?? null);
+const SCREEN_KEYS = ['routes', 'shared', 'sentinel', 'langs', 'viewports', 'capture'];
+const COST = { money: 'money computed', external: 'writes to external systems', data: 'data migrated', access: 'access granted' };
+
+// The shape `wf init --draft <file>` reads (JSON or YAML): any subset of the policy keys, adapter-shaped.
+export const DRAFT_SHAPE = `{
+  "risk": [{ "id": "<area>", "paths": ["<repo>/<dir>/**"], "reason": "<what a mistake costs, citing scanned files>", "tests": ["<repo>/<tests>/**"] }] or "none",
+  "review": { "diffRead": "before" | "after" },
+  "delivery": { "stages": [{ "do": "land" }, { "do": "status", "to": "<status>" }] },
+  "ticketing": { "operations": { "<operation>": "<plain words>" } },
+  "tests": { "<repo>": { "fast": { "run": "<command>" }, "full": { "run": "<command>" } } },
+  "screens": { "capture": "<command with {out} {viewport} {lang} {routes}>", "routes": { "repo": "<repo>", "path": "<file>" }, "shared": [], "sentinel": [], "langs": [{ "lang": "<code>", "dir": "ltr" }], "viewports": [<width>] }
+}`;
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Where the adapter lives (only this stream writes it)
+// ---------------------------------------------------------------------------------------------------------------------
+
+const expandHome = (p, env) => (typeof p === 'string' && p.startsWith('~') ? path.join(env.HOME ?? process.env.HOME ?? '', p.slice(1)) : p);
+const real = (p) => {
   try {
-    return JSON.parse(fs.readFileSync(f, 'utf8'));
+    return fs.realpathSync(p);
   } catch {
-    return null;
+    return path.resolve(p);
+  }
+};
+const readYaml = (file) => {
+  let text;
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+  try {
+    return YAML.parse(text) ?? {};
+  } catch (error) {
+    throw new WfError(`${file}: not readable YAML: ${error.message}`);
   }
 };
 
-// ---------- registry of enabled projects (for `wf status --all`) ----------
-const registryFile = () => path.join(process.env.WF_CONFIG_HOME ?? path.join(os.homedir(), '.config', 'agentic-workflow'), 'projects.json');
-export function registry() {
-  return readJsonSafe(registryFile()) ?? { projects: [] };
-}
-export function register(root, enabled) {
-  const r = registry();
-  r.projects = r.projects.filter((p) => p.root !== root);
-  if (enabled) r.projects.push({ root, registeredAt: new Date().toISOString() });
-  mkdirStateDirectory(path.dirname(registryFile()), { recursive: true });
-  fs.writeFileSync(registryFile(), `${JSON.stringify(r, null, 2)}\n`);
-}
-
-// ---------- detection ----------
-function isGitRoot(dir) {
-  return exists(dir, '.git');
-}
-
-function defaultBranch(dir) {
-  const head = git(dir, ['symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD'], { allowFail: true });
-  if (head) return head.replace('refs/remotes/origin/', '');
-  return git(dir, ['branch', '--show-current'], { allowFail: true }) || 'main';
-}
-
-// Where the tasks live, when the repo says so: a `tickets/` folder of frontmatter tickets drafts the files tracker; a
-// GitHub origin is only named (whether its issues are the tracker is the owner's answer).
-const DEFAULT_STATUSES = { started: 'In Progress', delivered: 'Ready for UAT', done: 'Done' };
-function trackerFor(root, repos) {
-  const tickets = path.join(root, 'tickets');
-  const st = fs.lstatSync(tickets, { throwIfNoEntry: false });
-  if (st?.isDirectory() && fs.readdirSync(tickets).some((f) => f.endsWith('.md') && fs.readFileSync(path.join(tickets, f), 'utf8').startsWith('---\n'))) {
-    return { tracker: { kind: 'files', via: 'files', folder: 'tickets', statuses: DEFAULT_STATUSES }, note: 'tracker: tickets/ holds frontmatter tickets, drafted as `tracker.kind: files` (the engine writes and reads them back itself)' };
-  }
-  const remote = git(path.join(root, repos[0].path), ['remote', 'get-url', 'origin'], { allowFail: true }) ?? '';
-  const m = /github\.com[-\w]*[:/]([\w.-]+\/[\w.-]+?)(?:\.git)?$/.exec(remote.trim());
-  if (m) return { tracker: { kind: 'none' }, note: `tracker: origin is GitHub (${m[1]}). If its issues are your tasks: \`tracker: { kind: github, repo: ${m[1]}, via: cli }\` (your \`gh\` login) or \`via: api\` (a GITHUB_TOKEN in \`wf secrets\`); a Linear team: \`kind: linear\`; tickets in the repo: \`kind: files\`` };
-  return { tracker: { kind: 'none' }, note: null };
-}
-
-function packageManager(dir) {
-  if (exists(dir, 'yarn.lock')) return 'yarn';
-  if (exists(dir, 'pnpm-lock.yaml')) return 'pnpm';
-  if (exists(dir, 'bun.lock') || exists(dir, 'bun.lockb')) return 'bun';
-  if (exists(dir, 'package-lock.json')) return 'npm';
-  return exists(dir, 'package.json') ? 'npm' : null;
-}
-
-const MANIFESTS = ['package.json', 'composer.json', 'pyproject.toml', 'go.mod', 'build.gradle', 'build.gradle.kts', 'Cargo.toml', 'Gemfile'];
-const SKIP = new Set(['node_modules', 'vendor', '.git', 'dist', 'build', '.next', 'Pods', '.wf-worktrees', '.wf-evidence', 'coverage', 'tmp', 'var']);
-
-function findPackages(repoPath) {
+// The adapter file of a root: `<root>/.workflow/project.yaml`, or a user-folder adapter whose `root:` is this root.
+export function locate(root, env = process.env) {
+  const repoFile = path.join(root, '.workflow', 'project.yaml');
   const found = [];
-  const walk = (dir, depth) => {
-    if (depth > 2) return;
-    const rel = path.relative(repoPath, dir) || '.';
-    if (MANIFESTS.some((m) => exists(dir, m)) || fs.readdirSync(dir).some((f) => f.endsWith('.xcodeproj'))) found.push(rel);
-    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-      if (e.isDirectory() && !SKIP.has(e.name) && !e.name.startsWith('.')) walk(path.join(dir, e.name), depth + 1);
-    }
+  if (fs.existsSync(repoFile)) found.push({ file: repoFile, location: 'repo' });
+  const dir = path.join(userDir(env), 'projects');
+  for (const f of fs.existsSync(dir) ? fs.readdirSync(dir).filter((x) => /\.ya?ml$/.test(x)) : []) {
+    const raw = readYaml(path.join(dir, f));
+    if (raw?.root && real(expandHome(raw.root, env)) === real(root)) found.push({ file: path.join(dir, f), location: 'user' });
+  }
+  if (found.length > 1) throw new WfError(`two adapters for ${root}: ${found.map((x) => x.file).join(' and ')}; keep one`);
+  return found[0] ? { ...found[0], raw: readYaml(found[0].file) } : null;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Policy values: one canonical form per POLICY_KEYS key, read from a raw adapter (or a normalised one)
+// ---------------------------------------------------------------------------------------------------------------------
+
+const normRisk = (r) => ({ id: r.id, paths: r.paths ?? [], reason: r.reason ?? '', tests: r.tests ?? [] });
+const normTest = (t) => (t ? { ...(t.run ? { run: t.run } : {}), ...(t.module ? { module: { repo: t.module.repo, path: t.module.path } } : {}), ...(t.lock ? { lock: { name: t.lock.name, count: t.lock.count ?? 1 } } : {}) } : null);
+export function policyOf(raw) {
+  const risk = raw?.risk === 'none' ? 'none' : Array.isArray(raw?.risk) ? raw.risk.map(normRisk)
+    : raw?.risk && typeof raw.risk === 'object' && 'confirmed' in raw.risk ? (raw.risk.confirmed ? (raw.risk.paths.length ? raw.risk.paths.map(normRisk) : 'none') : null) : null;
+  return {
+    risk,
+    'review.diffRead': raw?.review?.diffRead ?? null,
+    'delivery.stages': raw?.delivery?.stages ?? null,
+    'ticketing.operations': raw?.ticketing?.operations ?? {},
+    tests: Object.fromEntries((raw?.repos ?? []).map((r) => [r.name, { fast: normTest(r.tests?.fast), full: normTest(r.tests?.full) }])),
+    screens: Object.fromEntries(SCREEN_KEYS.map((k) => [k, raw?.screens?.[k] ?? null])),
   };
-  walk(repoPath, 0);
-  // Monorepo: the nested packages plus the root (root lockfile, root config and root scripts belong to it).
-  const nested = found.filter((p) => p !== '.');
-  return nested.length && found.includes('.') ? ['.', ...nested] : nested.length ? nested : ['.'];
 }
+const topOf = (key) => POLICY_KEYS.find((k) => key === k || key.startsWith(`${k}.`));
 
-function isWorkspaceRoot(dir) {
-  const pkg = readJsonSafe(path.join(dir, 'package.json'));
-  return Boolean(pkg?.workspaces) || ['pnpm-workspace.yaml', 'lerna.json', 'nx.json', 'turbo.json'].some((f) => exists(dir, f));
+// The raw adapter behind a normalised one (its file), so hashes compare what onboarding wrote with what is there now.
+function rawOf(current) {
+  if (!current) return null;
+  const file = current.source?.file;
+  if (file && fs.existsSync(file)) return readYaml(file);
+  return current;
 }
-
-// A browser test runner and the folder its tests live in (relative to the package). The drafted `artifacts` glob is
-// the ticket's own folder under it: the 0.1.9 draft's `test-results/**/*.png` matched every screenshot the suite wrote,
-// which a real ticket had to inspect 1,300 of. Other runners draft no artifacts.
-function uiRunner(dir, pkg) {
-  const deps = { ...(pkg?.dependencies ?? {}), ...(pkg?.devDependencies ?? {}) };
-  const configured = (names, key) => {
-    for (const f of names) {
-      const file = path.join(dir, f);
-      if (!fs.existsSync(file)) continue;
-      const m = fs.readFileSync(file, 'utf8').match(new RegExp(`${key}\\s*:\\s*['"\`]([^'"\`]+)['"\`]`));
-      if (m) return path.posix.normalize(m[1].replace(/\\/g, '/')).replace(/^\.\//, '').replace(/\/$/, '');
-    }
-    return null;
-  };
-  const firstDir = (dirs, fallback) => dirs.find((d) => exists(dir, d)) ?? fallback;
-  if (deps['@playwright/test'] || deps.playwright) {
-    const testDir = configured(['playwright.config.ts', 'playwright.config.js', 'playwright.config.mjs', 'playwright.config.cjs'], 'testDir');
-    return { name: 'playwright', dir: testDir && testDir !== '.' && !testDir.startsWith('..') ? testDir : firstDir(['e2e', 'tests/e2e', 'tests'], 'e2e') };
-  }
-  if (deps.cypress) return { name: 'cypress', dir: 'cypress' };
-  return null;
-}
-
-function stepsFor(repoName, repoPath, pkgPath, sources) {
-  const dir = path.join(repoPath, pkgPath);
-  const steps = [];
-  const id = (s) => `${pkgPath === '.' ? repoName : path.basename(pkgPath)}-${s}`;
-  const add = (s, source) => {
-    steps.push({ repo: repoName, ...(pkgPath === '.' ? {} : { package: pkgPath }), ...s });
-    sources.push({ step: s.id, source });
-  };
-  const pkg = readJsonSafe(path.join(dir, 'package.json'));
-  if (pkg?.scripts) {
-    const pm = packageManager(dir) ?? 'npm';
-    const runner = pm === 'npm' ? 'npm run' : pm;
-    const has = (n) => pkg.scripts[n] !== undefined;
-    // Everything in the package counts as input; docs-only changes are skipped through `docsOnly`, and any change a
-    // narrower list would miss still forces the step to run.
-    const inputs = ['**'];
-    if (has('lint')) add({ id: id('lint'), run: `${runner} lint`, inputs, tier: 'light' }, `${pkgPath}/package.json scripts.lint`);
-    if (has('typecheck')) add({ id: id('typecheck'), run: `${runner} typecheck`, inputs, tier: 'light' }, `${pkgPath}/package.json scripts.typecheck`);
-    if (has('test')) {
-      const jest = /jest/.test(pkg.scripts.test) || pkg.devDependencies?.jest || pkg.dependencies?.jest;
-      const vitest = /vitest/.test(pkg.scripts.test) || pkg.devDependencies?.vitest;
-      const s = { id: id('unit'), run: `${runner} test`, inputs, tier: 'light' };
-      if (jest) Object.assign(s, { run: `${runner} test -- --maxWorkers={workers}`, workers: { auto: true, min: 2, max: 8, perWorkerGiB: 2 } });
-      if (vitest) Object.assign(s, { run: `${runner} test -- --reporter=default --reporter=junit --outputFile.junit={evidence}/junit.xml`, report: { junit: '{evidence}/junit.xml' } });
-      add(s, `${pkgPath}/package.json scripts.test`);
-    }
-    for (const n of ['test:e2e', 'e2e']) {
-      if (has(n)) {
-        const ui = uiRunner(dir, pkg);
-        add({ id: id('e2e'), run: `${runner} ${n}`, tier: 'heavy', ...(ui ? { lease: 'browser', artifacts: [`${ui.dir}/.evidence/{itemLower}/**/*.png`] } : { lease: 'docker' }) }, `${pkgPath}/package.json scripts.${n}${ui ? ` (${ui.name}, tests in ${ui.dir}/)` : ''}`);
-        break;
-      }
-    }
-    if (has('build') && !has('test')) add({ id: id('build'), run: `${runner} build`, inputs, tier: 'light' }, `${pkgPath}/package.json scripts.build`);
-  }
-  if (exists(dir, 'composer.json')) {
-    if (exists(dir, 'phpstan.neon') || exists(dir, 'phpstan.dist.neon') || exists(dir, 'phpstan.neon.dist')) add({ id: id('phpstan'), run: 'vendor/bin/phpstan analyse --no-progress', inputs: ['src/**'], tier: 'light' }, `${pkgPath}/phpstan config`);
-    if (exists(dir, 'phpunit.xml') || exists(dir, 'phpunit.xml.dist')) add({ id: id('phpunit'), run: 'vendor/bin/phpunit --log-junit {evidence}/phpunit.xml', report: { junit: '{evidence}/phpunit.xml' }, inputs: ['src/**', 'tests/**', 'config/**'], tier: 'light' }, `${pkgPath}/phpunit.xml`);
-    if (exists(dir, 'codeception.yml')) add({ id: id('codecept'), run: 'vendor/bin/codecept run --xml', report: { junit: 'tests/_output/report.xml' }, tier: 'heavy', lease: 'docker' }, `${pkgPath}/codeception.yml`);
-  }
-  if (exists(dir, 'pyproject.toml') && (exists(dir, 'tests') || /pytest/.test(fs.readFileSync(path.join(dir, 'pyproject.toml'), 'utf8')))) add({ id: id('pytest'), run: 'pytest --junitxml={evidence}/pytest.xml', report: { junit: '{evidence}/pytest.xml' }, inputs: ['**/*.py'], tier: 'light' }, `${pkgPath}/pyproject.toml`);
-  if (exists(dir, 'go.mod')) add({ id: id('go-test'), run: 'go test ./...', inputs: ['**/*.go', 'go.mod', 'go.sum'], tier: 'light' }, `${pkgPath}/go.mod`);
-  if (exists(dir, 'gradlew')) add({ id: id('gradle-test'), run: './gradlew test', report: { junit: '**/build/test-results/**/*.xml' }, tier: 'heavy' }, `${pkgPath}/gradlew`);
-  const xcode = fs.readdirSync(dir).find((f) => f.endsWith('.xcworkspace') || f.endsWith('.xcodeproj'));
-  if (xcode) add({ id: id('xcode-test'), run: `xcodebuild test -${xcode.endsWith('.xcworkspace') ? 'workspace' : 'project'} ${xcode} -scheme CHANGE_ME -destination 'platform=iOS Simulator,name=iPhone 16'`, tier: 'heavy', lease: 'simulator' }, `${pkgPath}/${xcode} (scheme must be set)`);
-  return steps;
-}
-
-function componentsFor(repoName, repoPath, pkgPath) {
-  const dir = path.join(repoPath, pkgPath);
-  const name = pkgPath === '.' ? repoName : path.basename(pkgPath);
-  const pkg = readJsonSafe(path.join(dir, 'package.json'));
-  const deps = { ...(pkg?.dependencies ?? {}), ...(pkg?.devDependencies ?? {}) };
-  let kind = 'library';
-  if (fs.readdirSync(dir).some((f) => f.endsWith('.xcodeproj'))) kind = 'mobile-ios';
-  else if (exists(dir, 'app', 'src', 'main', 'AndroidManifest.xml') || exists(dir, 'AndroidManifest.xml')) kind = 'mobile-android';
-  else if (deps['@nestjs/core'] || deps.express || deps.fastify || deps.koa || exists(dir, 'composer.json') || exists(dir, 'go.mod') || exists(dir, 'manage.py')) kind = 'service';
-  else if (deps.next || deps.react || deps.vue || deps.svelte || deps['@angular/core']) kind = 'web';
-  const specs = [];
-  const walk = (d, depth) => {
-    if (depth > 3) return;
-    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
-      if (e.isDirectory() && !SKIP.has(e.name) && !e.name.startsWith('.')) walk(path.join(d, e.name), depth + 1);
-      else if (/^(openapi|swagger)[\w.-]*\.(json|ya?ml)$/i.test(e.name) || /\.proto$/.test(e.name) || /^schema\.graphql$/.test(e.name)) specs.push(path.relative(dir, path.join(d, e.name)));
-    }
-  };
-  walk(dir, 0);
-  return { id: name, kind, repo: repoName, ...(pkgPath === '.' ? {} : { package: pkgPath }), ...(specs.length ? { provides: specs.map((s) => ({ contract: s.endsWith('.proto') ? 'grpc' : s.endsWith('.graphql') ? 'graphql' : 'http', spec: s })) } : {}) };
-}
-
-const GENERATED = /(JWT|SESSION|COOKIE|ENCRYPTION|APP|SIGNING|CSRF)_?(SECRET|KEY)$/i;
-const SECRETISH = /(SECRET|TOKEN|PASSWORD|PASS|API_?KEY|PRIVATE|CREDENTIAL|DSN|_KEY)$/i;
-
-function secretsFor(repoName, repoPath) {
-  const out = [];
-  for (const f of ['.env.example', '.env.sample', '.env.dist', '.env.template']) {
-    const file = path.join(repoPath, f);
-    if (!fs.existsSync(file)) continue;
-    for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
-      const m = line.match(/^\s*([A-Z][A-Z0-9_]*)\s*=\s*(.*)$/);
-      if (!m || !SECRETISH.test(m[1])) continue;
-      out.push({ key: m[1], repo: repoName, kind: GENERATED.test(m[1]) ? 'generated' : 'provided', purpose: '', detectedIn: `${repoName}/${f}` });
-    }
-    break;
-  }
-  return out;
-}
-
-export function detect(root) {
-  const repos = [];
-  if (isGitRoot(root)) repos.push({ name: path.basename(root), path: '.' });
-  else {
-    for (const e of fs.readdirSync(root, { withFileTypes: true })) {
-      if (e.isDirectory() && !e.name.startsWith('.') && isGitRoot(path.join(root, e.name))) repos.push({ name: e.name, path: e.name });
-    }
-  }
-  if (!repos.length) throw new WfError(`no git repository at ${root} or in its direct subfolders`);
-  const sources = [];
-  const steps = [];
-  const components = [];
-  const secrets = [];
-  const compose = [];
-  for (const r of repos) {
-    const rp = path.join(root, r.path);
-    r.base = defaultBranch(rp);
-    const pkgs = findPackages(rp);
-    const monorepo = isWorkspaceRoot(rp);
-    r.sharedInfra = monorepo ? ['package.json', 'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'tsconfig*.json', '.eslintrc*', 'eslint.config.*'].filter((f) => f.includes('*') || exists(rp, f)) : [];
-    r.packages = pkgs.map((p) => {
-      const dir = path.join(rp, p);
-      const lock = ['yarn.lock', 'pnpm-lock.yaml', 'package-lock.json', 'composer.lock', 'Gemfile.lock', 'poetry.lock', 'go.sum'].filter((l) => exists(dir, l)).map((l) => (p === '.' ? l : `${p}/${l}`));
-      return { path: p, sharedInfra: [...lock.map((l) => (p === '.' ? l : path.basename(l))), ...['package.json', 'composer.json', 'docker-compose.yml', 'docker-compose.yaml', 'compose.yaml'].filter((f) => exists(dir, f))], docsOnly: ['**/*.md', 'docs/**'] };
-    });
-    const clone = [];
-    const fingerprint = [];
-    const installs = [];
-    for (const p of pkgs) {
-      const dir = path.join(rp, p);
-      const pre = p === '.' ? '' : `${p}/`;
-      const pm = packageManager(dir);
-      if (pm) {
-        clone.push(`${pre}node_modules`);
-        const lock = { yarn: 'yarn.lock', pnpm: 'pnpm-lock.yaml', npm: 'package-lock.json', bun: 'bun.lock' }[pm];
-        const locked = exists(dir, lock);
-        if (locked) fingerprint.push(`${pre}${lock}`);
-        // In a package-manager monorepo (npm/pnpm/yarn workspaces) the root install covers every package.
-        if (!(monorepo && p !== '.')) {
-          const cmd = locked ? { yarn: 'yarn install --immutable', pnpm: 'pnpm install --frozen-lockfile', npm: 'npm ci', bun: 'bun install --frozen-lockfile' }[pm] : { yarn: 'yarn install', pnpm: 'pnpm install', npm: 'npm install', bun: 'bun install' }[pm];
-          installs.push(p === '.' ? cmd : `(cd ${shellQuote(p)} && ${cmd})`);
-        }
-      }
-      if (exists(dir, 'composer.json')) {
-        clone.push(`${pre}vendor`);
-        if (exists(dir, 'composer.lock')) fingerprint.push(`${pre}composer.lock`);
-        installs.push(`(cd ${shellQuote(p)} && composer install --no-interaction)`);
-      }
-      if (exists(dir, 'Podfile')) {
-        clone.push(`${pre}Pods`);
-        if (exists(dir, 'Podfile.lock')) fingerprint.push(`${pre}Podfile.lock`);
-        installs.push(`(cd ${shellQuote(p)} && pod install)`);
-      }
-      steps.push(...stepsFor(r.name, rp, p, sources));
-      if (!(monorepo && p === '.')) components.push(componentsFor(r.name, rp, p));
-      for (const f of ['docker-compose.yml', 'docker-compose.yaml', 'compose.yaml']) if (exists(dir, f)) compose.push(`${r.name}/${pre}${f}`);
-    }
-    const ignored = ['.env.local', '.env'].filter((f) => exists(rp, f));
-    r.provision = { clone, fingerprint, install: installs.length ? installs.join(' && ') : null, copyIgnored: ignored };
-    secrets.push(...secretsFor(r.name, rp));
-  }
-  if (new Set(components.map((c) => c.id)).size !== components.length) components.forEach((c) => (c.id = `${c.repo}-${c.id}`));
-  // Monorepo packages that depend on each other: a change in the provider re-runs the consumer's steps.
-  for (const c of components) {
-    const repo = repos.find((r) => r.name === c.repo);
-    const pkg = readJsonSafe(path.join(root, repo.path, c.package ?? '.', 'package.json'));
-    const deps = Object.keys({ ...(pkg?.dependencies ?? {}), ...(pkg?.devDependencies ?? {}), ...(pkg?.peerDependencies ?? {}) });
-    for (const other of components) {
-      if (other === c || other.repo !== c.repo) continue;
-      const name = readJsonSafe(path.join(root, repo.path, other.package ?? '.', 'package.json'))?.name;
-      if (name && deps.includes(name)) (c.dependsOn ??= []).push({ component: other.id, via: 'package', contract: path.posix.join(repo.path, other.package ?? '.', '**') });
-    }
-  }
-  // A key counts as used by a step whose command names it ($KEY, ${KEY} or the bare name).
-  for (const k of secrets) k.usedBy = steps.filter((s) => s.run && new RegExp(`(^|[^A-Za-z0-9_])${k.key}([^A-Za-z0-9_]|$)`).test(s.run)).map((s) => s.id);
-  // Said once per draft that collects captures: the glob only works if the tests write there.
-  const notes = steps.some((st) => st.artifacts?.length) ? [`${steps.filter((st) => st.artifacts?.length).map((st) => `${st.id}: ${st.artifacts.join(', ')}`).join('; ')}. UI tests must write each ticket's captures there; WF_ITEMS lists the tickets of the run.`] : [];
-  const tracked = trackerFor(root, repos);
-  if (tracked.note) notes.push(tracked.note);
-  return { root, repos, steps, components, secrets, compose, sources, notes, tracker: tracked.tracker, agentsMd: repos.map((r) => ({ repo: r.name, exists: exists(root, r.path, 'AGENTS.md') })), quality: qualityDraft(root, repos) };
-}
-
-// A first quality bar drawn from what the project already documents: its design system, its repos' contract, its
-// invariants. The person confirms or rewrites it when onboarding (the onboard skill asks), and later corrections add to
-// it. Named failure (final review of 0.7.0): a project had no `quality:`, so the quality bar reached no role and defects that
-// pre-dated a ticket arrived as late review findings instead of planned targets.
-const DESIGN_DOCS = ['DESIGN_SYSTEM.md', 'DESIGN-SYSTEM.md', 'design-system.md', 'docs/DESIGN_SYSTEM.md', 'docs/design-system.md'];
-function qualityDraft(root, repos) {
-  const out = [];
-  const docs = repos.flatMap((r) => DESIGN_DOCS.filter((d) => fs.existsSync(path.join(root, r.path, d))).map((d) => path.posix.join(r.path === '.' ? '' : r.path, d)));
-  if (docs.length) out.push(`Every screen this change ships or screenshots is correct at phone, tablet and desktop widths, follows ${docs.join(' and ')} and uses its components; a visible defect on such a screen is a finding even when it pre-dates the ticket.`);
-  if (repos.length > 1) out.push(`The ${repos.map((r) => r.name).join(', ')} repositories stay one matched contract: routes, data shapes, permissions, errors and their semantics change together on every side.`);
-  out.push('The invariants in AGENTS.invariants.md hold; a change that touches one proves it with a test.');
-  return out;
-}
-
-export function writeDraft(root, detected, { force = false } = {}) {
-  const dir = path.join(root, ADAPTER_DIR);
-  const file = path.join(dir, CONFIG_FILE);
-  if (fs.existsSync(file) && !force) throw refuse(`${file} already exists`, 'pass --force to overwrite, or edit it directly');
-  const multi = detected.repos.length > 1 || detected.repos[0].path !== '.';
-  // Multi-repo project: the adapter lives in the first repo (so the gate can read it at a base commit) and the
-  // project root links to it.
-  const adapterHome = multi ? path.join(root, detected.repos[0].path, ADAPTER_DIR) : dir;
-  if (multi) {
-    if (fs.existsSync(path.join(adapterHome, CONFIG_FILE)) && !force) throw refuse(`${path.join(adapterHome, CONFIG_FILE)} already exists`, 'pass --force to overwrite, or edit it directly');
-    mkdirStateDirectory(adapterHome, { recursive: true });
-    if (!fs.existsSync(dir)) fs.symlinkSync(path.relative(root, adapterHome), dir);
-  }
-  const draft = {
-    version: 1,
-    enabled: false,
-    name: path.basename(root),
-    engine: '0.x',
-    ...(multi ? { adapterRepo: detected.repos[0].name } : {}),
-    repos: detected.repos.map((r) => ({ name: r.name, path: r.path, base: r.base, ...(r.sharedInfra?.length ? { sharedInfra: r.sharedInfra } : {}), packages: r.packages, provision: r.provision })),
-    components: detected.components,
-    lanes: ['quick', 'standard'],
-    tracker: detected.tracker ?? { kind: 'none' },
-    delivery: { kind: 'push-main' },
-    gate: { maxParallelSteps: 2, leases: { docker: 1, browser: 1, simulator: 1 }, steps: detected.steps },
-    invariants: 'AGENTS.invariants.md',
-    // The project's quality bar: standing goals every planner turns into targets and every reviewer judges against.
-    quality: detected.quality ?? [],
-  };
-  mkdirStateDirectory(dir, { recursive: true });
-  const header = `# agentic-workflow adapter, drafted by \`wf init\` on ${new Date().toISOString().slice(0, 10)}.\n# Review every value, then run \`wf doctor\` and \`wf enable\`.\n`;
-  fs.writeFileSync(file, header + YAML.stringify(draft, { lineWidth: 0, aliasDuplicateObjects: false }));
-  // Only keys a detected step references are drafted: cataloguing every .env.example key as `provided` made
-  // `wf secrets guide` ask for secrets no step uses. The rest are named in a comment.
-  const used = detected.secrets.filter((k) => k.usedBy?.length);
-  const skipped = detected.secrets.filter((k) => !k.usedBy?.length).map((k) => k.key);
-  if (used.length && !fs.existsSync(path.join(dir, 'secrets.yaml'))) {
-    fs.writeFileSync(path.join(dir, 'secrets.yaml'), `# Names only. Values are entered with \`wf secrets guide\` and never committed.\n${skipped.length ? `# Not catalogued (no detected step uses them): ${skipped.join(', ')}\n` : ''}${YAML.stringify({ keys: used.map(({ detectedIn, ...k }) => ({ ...k, obtain: { url: '', steps: [] } })) })}`);
-  }
-  if (!fs.existsSync(path.join(dir, 'AGENTS.invariants.md'))) {
-    fs.writeFileSync(path.join(dir, 'AGENTS.invariants.md'), '# Project invariants\n\nRules every agent must keep in this project (security, data, contracts, product stage).\n\n- Product stage: pre-launch | live (choose one and say what it means for compatibility)\n');
-  }
-  if (multi) return file; // evidence and worktrees live at the project root, outside every repo
-  const ignoreTarget = path.join(root, '.gitignore');
-  const ignore = fs.existsSync(ignoreTarget) ? fs.readFileSync(ignoreTarget, 'utf8') : '';
-  const add = ['.wf-evidence/', '.wf-worktrees/'].filter((l) => !ignore.split('\n').includes(l));
-  if (add.length) fs.writeFileSync(ignoreTarget, `${ignore}${ignore && !ignore.endsWith('\n') ? '\n' : ''}${add.join('\n')}\n`);
-  return file;
-}
-
-// ---------- sync: role agents, vendored skills; the removal of an older release's AGENTS.md block ----------
-const BEGIN = '<!-- agentic-workflow:begin -->';
-const END = '<!-- agentic-workflow:end -->';
-
-export function instructionFiles(root, cfg) {
-  if (cfg.instructionFiles) return cfg.instructionFiles.map((f) => path.resolve(root, f));
-  if (cfg.repos.length === 1 && cfg.repos[0].path === '.') return [path.join(root, 'AGENTS.md')];
-  return cfg.repos.map((r) => path.join(repoDir(root, r), 'AGENTS.md'));
-}
-
-// The standing rules every session in an enabled project starts with (0.7.24, D30): the plugin's text with the project's
-// adapter facts and invariants, given by the plugin's SessionStart and SubagentStart hooks (hooks/session-rules.mjs) and in
-// every role bundle, never written into the project's files.
-export function sessionRules(root, cfg) {
-  const tpl = fs.readFileSync(path.join(PLUGIN_ROOT, 'templates', 'session-rules.md'), 'utf8');
-  // The adapter's invariants are the project's own text, carried as written (they change with the project, not the plugin).
-  const file = cfg.invariants ? path.join(root, ADAPTER_DIR, cfg.invariants) : null;
-  const invariants = file && fs.existsSync(file) ? `\nThe project's critical invariants (\`${path.join(ADAPTER_DIR, cfg.invariants)}\`):\n\n${fs.readFileSync(file, 'utf8').trim()}` : '';
-  return tpl
-    .replace('{project}', cfg.name)
-    .replace('{lanes}', cfg.lanes.join(', '))
-    .replace('{tracker}', cfg.tracker.kind)
-    .replace('{delivery}', cfg.delivery.kind)
-    .replace('{invariants}', invariants)
-    .trim();
-}
-// A block an earlier release wrote into an instruction file (between the markers, outside any code fence), removed by
-// `wf sync` (D30). Only the block and the blank lines at its seam change: the authored text keeps every byte, its line
-// endings included (independent review of 0.7.24: a whole-file clean-up collapsed blank lines inside a code fence and
-// rewrote CRLF endings). Markers quoted inside a fence are text, not a block.
-function blockAt(text) {
-  const lines = text.split('\n');
-  let fenced = false;
-  let at = 0;
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (/^\s*(```|~~~)/.test(line)) fenced = !fenced;
-    else if (!fenced && line.trim() === BEGIN) {
-      // Its END is a line of its own after it, outside any fence, before any other BEGIN; without one the block is damaged
-      // and nothing is touched (independent review of 0.7.24: a BEGIN with no END took the authored text up to the next
-      // block's END with it).
-      let inner = false;
-      let pos = at + line.length + 1;
-      for (let k = i + 1; k < lines.length; k++) {
-        const l = lines[k];
-        if (/^\s*(```|~~~)/.test(l)) inner = !inner;
-        else if (!inner && l.trim() === BEGIN) return null;
-        else if (!inner && l.replace(/\r$/, '').trim() === END) return { start: at, end: pos + l.replace(/\r$/, '').length };
-        pos += l.length + 1;
-      }
-      return null;
-    }
-    at += line.length + 1;
-  }
-  return null;
-}
-const hasBlock = (text) => Boolean(blockAt(text));
-function withoutBlock(text) {
-  let out = text;
-  for (let b = blockAt(out); b; b = blockAt(out)) {
-    const eol = out.includes('\r\n') ? '\r\n' : '\n';
-    const before = out.slice(0, b.start).replace(/(\r?\n)+$/, '');
-    const after = out.slice(b.end).replace(/^(\r?\n)+/, '');
-    out = !before ? after : !after ? `${before}${eol}` : `${before}${eol}${eol}${after}`;
-  }
-  return out;
-}
-
-export function removeBlock(file) {
-  if (!fs.existsSync(file)) return false;
-  const text = fs.readFileSync(file, 'utf8');
-  if (!hasBlock(text)) return false; // never guess at a damaged block
-  const next = withoutBlock(text);
-  if (next.trim()) fs.writeFileSync(file, next);
-  else fs.rmSync(file);
-  return true;
-}
-
-// One agent per role, and one implementer per class (`wf-implementer` is the implementer role's class).
-export function roleAgents(cfg) {
-  const out = [];
-  for (const role of ['planner', 'implementer', 'reviewer', ...(cfg.roles?.strategist === false ? [] : ['strategist']), ...(cfg.roles?.tester ? ['tester'] : [])]) {
-    // One planner agent per class a planning panel seats (0.7.22).
-    if (role === 'planner' && cfg.roles?.planner !== false) {
-      const lead = roleClass(cfg, 'planner');
-      // An attempt admitted before 0.7.22 plans at `review` when the adapter names no planner class (D7): its agent too.
-      const legacy = cfg.roles?.planner?.class ? [] : ['review'];
-      for (const cls of [...new Set([lead, ...panelClasses(cfg, hostIds()), ...legacy])].filter((c) => cfg.classes[c])) out.push({ role, cls, name: agentTypeFor(cfg, role, cls) });
-      continue;
-    }
-    if (role !== 'implementer') {
-      out.push({ role, cls: roleClass(cfg, role), name: agentTypeFor(cfg, role) });
-      continue;
-    }
-    const base = roleClass(cfg, 'implementer');
-    for (const cls of [base, ...Object.keys(cfg.classes).filter((c) => c !== base)]) out.push({ role, cls, name: agentTypeFor(cfg, role, cls) });
-  }
-  return out;
-}
-
-// The role template, the class instructions and the project's additions: what a generated role file and a freshly launched
-// role both carry. `host` (an adapter id or adapter) fills the harness-specific sentences: the tools it has for writing
-// the closure and for reading, so a role file names only tools its own harness exposes.
-export function roleInstructions(cfg, role, cls, appendixText = '', host = null) {
-  const adapter = typeof host === 'string' ? findHost(host) : host;
-  let tpl = fs.readFileSync(path.join(PLUGIN_ROOT, 'templates', 'agents', `${role}.md`), 'utf8');
-  tpl = tpl.replace(/\{host\.(\w+)\}/g, (_, name) => fragment(adapter, name));
-  const appendix = appendixText ? `\n\n## Project additions\n\n${appendixText.trim()}\n` : '';
-  const classList = role === 'planner' ? `\n\n## Work classes in this project\n\n${Object.entries(cfg.classes).map(([n, c]) => `- \`${n}\` (agent ${agentTypeFor(cfg, 'implementer', n)}): ${c.use.trim()}`).join('\n')}` : '';
-  // Named failure I-75: shared role instructions demanded one harness's tools in another's native sessions.
-  const tools = `\n\n## Host tool compatibility\n\nUse the tools actually exposed by your host; never assume a tool from another harness exists. ${fragment(adapter, 'toolCompatibility')} Read the documents your work depends on far enough to apply what bears on it, and say what you did not reach rather than claiming it. Export screenshots with \`wf export screenshots --gate --attempt <id> --to <folder outside the repo>\` before viewing copies. Preserve all role restrictions on writes, commands, evidence paths and review scope. Report a concrete missing capability only after checking these supported alternatives.`;
-  return `${tpl.replace(/^---[\s\S]*?---\n/, '').trim()}${tools}${classList}\n\nYou run as work class \`${cls}\`: ${cfg.classes[cls].use.trim()}${appendix ? '' : '\n'}${appendix}`;
-}
-
-// Named failure (I-15): a role file `wf sync` changed does not reach agents started from a session that was already
-// running (a harness reads agent files when a session starts). Role files are written only when their content
-// changes, so a file's mtime says when the role last changed, and each changed one is reported (`sync.changedRoles`).
-function writeIfChanged(file, content, changed) {
-  let before = null;
-  try {
-    before = fs.readFileSync(file, 'utf8');
-  } catch {}
-  if (before === content) return;
-  mkdirStateDirectory(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, content);
-  changed.push({ file, created: before === null });
-}
-
-// One generated role file: what `wf sync` writes for a role of a class on a runtime.
-function roleFileOf(root, cfg, host, runtime, { role, cls, name }) {
-  const tpl = fs.readFileSync(path.join(PLUGIN_ROOT, 'templates', 'agents', `${role}.md`), 'utf8');
-  const rc = cfg.roles?.[role] ?? {};
-  const { effort, model } = declared(cfg, cls, runtime);
-  const description = `${tpl.match(/^description: (.*)$/m)?.[1] ?? role} Class ${cls}: ${cfg.classes[cls].use}`.replace(/\s+/g, ' ').trim();
-  const body = roleInstructions(cfg, role, cls, rc.appendix && fs.existsSync(path.join(root, ADAPTER_DIR, rc.appendix)) ? fs.readFileSync(path.join(root, ADAPTER_DIR, rc.appendix), 'utf8') : '', host);
-  return host.roleFile({ root, role, name, description, model, effort, body });
-}
-function roleFileContents(root, cfg) {
-  const out = [];
-  for (const runtime of hostIds()) {
-    const host = hostFor(runtime);
-    if (!host.roleFile) continue;
-    for (const a of roleAgents(cfg)) out.push(roleFileOf(root, cfg, host, runtime, a));
-  }
-  return out;
-}
-
-export function sync(root) {
-  const cfg = loadConfig(root);
-  const written = [];
-  const changedRoles = [];
-  written.changedRoles = changedRoles;
-  // 0.7.24 (D30): the plugin writes nothing into the project's instruction files; a block an earlier release wrote is removed
-  // (the session rules come from the plugin's SessionStart hook).
-  written.blocksRemoved = [];
-  for (const f of instructionFiles(root, cfg)) if (removeBlock(f)) {
-    written.push(f);
-    written.blocksRemoved.push(f);
-  }
-  const agents = roleAgents(cfg);
-  for (const runtime of hostIds()) {
-    const host = hostFor(runtime);
-    // A harness whose roles are only ever launched by the engine has no role files: the receipt carries the instructions.
-    if (!host.roleFile) continue;
-    const ours = new Set();
-    for (const { role, cls, name } of agents) {
-      // Role templates live under templates/ so the plugin does not register them as agents in every project.
-      const { file, content } = roleFileOf(root, cfg, host, runtime, { role, cls, name });
-      writeIfChanged(file, content, changedRoles);
-      ours.add(file);
-      written.push(file);
-    }
-    // Generated agents this sync no longer produces (a removed class, a harness's older file format) would still be offered
-    // to the owner with stale settings; only files carrying the generated marker are removed.
-    const dir = path.join(root, host.agentsDir);
-    for (const f of fs.existsSync(dir) ? fs.readdirSync(dir) : []) {
-      const p = path.join(dir, f);
-      if (!/^wf-.*\.(md|toml)$/.test(f) || ours.has(p)) continue;
-      const text = fs.readFileSync(p, 'utf8');
-      if (isGeneratedRoleFile(text)) {
-        fs.rmSync(p);
-        changedRoles.push({ file: p, removed: true });
-      }
-    }
-    for (const s of cfg.requires.skills ?? []) {
-      if (!s.vendor) continue;
-      const src = path.resolve(root, ADAPTER_DIR, s.vendor.replace(/^\.workflow\//, ''));
-      if (!fs.existsSync(src)) continue;
-      const dest = path.join(root, host.skillsDir, s.name);
-      // Replace only copies this command made; a same-named skill someone else installed is left alone.
-      if (fs.existsSync(dest) && !fs.existsSync(path.join(dest, '.wf-vendored'))) throw refuse(`${dest} exists and was not installed by \`wf sync\`; rename the skill or remove that folder yourself`);
-      fs.rmSync(dest, { recursive: true, force: true });
-      fs.cpSync(src, dest, { recursive: true });
-      fs.writeFileSync(path.join(dest, '.wf-vendored'), `${s.vendor}\n`);
-      written.push(dest);
-    }
-  }
-  return written;
-}
-
-// The files `wf sync` generates (the AGENTS.md block, each runtime's role files) that differ from what the installed plugin
-// would write now, each with whether git tracks it. Named failure (0.7.10): two projects' AGENTS.md carried a rule three
-// releases old ("medium is your judgement") because the block was refreshed only by a `wf sync` nobody ran, and an agent
-// escalated the contradiction to the person.
-// Whether git tracks the file. A folder outside every repository (a multi-repo workspace root) tracks nothing.
-const tracked = (file) => {
-  const inRepo = spawnSync('git', ['rev-parse', '--is-inside-work-tree'], { cwd: path.dirname(file), encoding: 'utf8' });
-  if (inRepo.status !== 0) return false;
-  const r = spawnSync('git', ['ls-files', '--error-unmatch', path.basename(file)], { cwd: path.dirname(file), encoding: 'utf8' });
-  return r.status === 0;
+export const handEditedKeys = (raw) => {
+  const cur = policyOf(raw);
+  const stored = raw?.onboarded?.hashes ?? {};
+  return POLICY_KEYS.filter((k) => stored[k] && stored[k] !== policyHash(cur[k]));
 };
-export function generatedStatus(root) {
-  const cfg = loadConfig(root);
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Risk from facts: what a mistake costs, per area; areas are the project's own folders
+// ---------------------------------------------------------------------------------------------------------------------
+
+const factFile = (p) => p.replace(/:\d+$/, '');
+const docLines = (facts, kinds) => facts.repos.flatMap((r) => r.facts.filter((f) => kinds.includes(f.kind) && /:\d+$/.test(f.path)));
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const wordIn = (name, text) => name.length >= 3 && new RegExp(`\\b${escapeRe(name.replace(/s$/i, ''))}s?\\b`, 'i').test(text);
+
+// Tests for an area: test files under it or named after it; else the repo's test folders; else where its tests would go.
+function testGlobs(repo, area, name) {
+  const prefix = repo.path === '.' ? '' : `${repo.path}/`;
+  const own = repo.tests.filter((t) => t.startsWith(`${area}/`) || t.split('/').slice(0, -1).includes(name) || path.basename(t).toLowerCase().startsWith(name.toLowerCase()));
+  const dirs = [...new Set(own.map((t) => path.posix.dirname(t)))];
+  if (own.length && dirs.length <= 3) return dirs.map((d) => `${d}/**`);
+  const roots = [...new Set(repo.tests.map((t) => {
+    const segs = t.slice(prefix.length).split('/');
+    const i = segs.findIndex((s) => /^(tests?|__tests__|specs?|e2e)$/i.test(s));
+    return i >= 0 ? `${prefix}${segs.slice(0, i + 1).join('/')}` : null;
+  }).filter(Boolean))];
+  return roots.length ? roots.slice(0, 3).map((d) => `${d}/**`) : [`${area}/**/*.{test,spec}.*`];
+}
+
+/** Risk areas from the scan, ranked: named by the project's documents first, then by how many kinds of cost they carry. */
+export function riskFromFacts(facts) {
+  const lines = docLines(facts, ['invariants-doc', 'instruction-doc']);
+  const invariantLines = docLines(facts, ['invariants-doc']);
+  const areas = new Map();
+  const areaFor = (repo, area) => {
+    if (!areas.has(area)) areas.set(area, { repo, area, name: area.split('/').pop(), costs: new Map(), rounding: null });
+    return areas.get(area);
+  };
+  for (const repo of facts.repos) {
+    for (const f of repo.facts) {
+      if (!f.area) continue;
+      if (f.kind === 'rounding') areaFor(repo, f.area).rounding ??= f;
+      const cost = { 'decimal-type': 'money', 'currency-type': 'money', 'webhook-handler': 'external', 'queue-consumer': 'external', migration: 'data', auth: 'access', permission: 'access', 'outbound-client': f.writes ? 'external' : null }[f.kind];
+      if (!cost) continue;
+      const a = areaFor(repo, f.area);
+      if (!a.costs.has(cost)) a.costs.set(cost, []);
+      a.costs.get(cost).push(f);
+    }
+    // A module the project's invariants name, even with no cost fact of its own.
+    for (const m of repo.modules) {
+      const area = repo.path === '.' ? m : `${repo.path}/${m}`;
+      if (!areas.has(area) && invariantLines.some((l) => wordIn(area.split('/').pop(), l.evidence))) areaFor(repo, area);
+    }
+  }
   const out = [];
-  // A block an earlier release wrote is stale by definition (D30): its removal is the pending change.
-  for (const f of instructionFiles(root, cfg)) {
-    const text = fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : '';
-    if (hasBlock(text)) out.push({ file: f, kind: 'block', content: withoutBlock(text), tracked: tracked(f) });
+  for (const a of areas.values()) {
+    const named = lines.find((l) => wordIn(a.name, l.evidence)) ?? null;
+    if (a.rounding && a.costs.has('money')) a.costs.get('money').push(a.rounding);
+    if (!a.costs.size && !named) continue;
+    const cites = [...a.costs.entries()].map(([cost, xs]) => `${COST[cost]}: ${[...new Set(xs.map((f) => `${f.kind} ${f.path}`))].slice(0, 3).join(', ')}`);
+    if (named) cites.push(`named in ${named.path}: "${clip(named.evidence, 90)}"`);
+    if (!a.costs.size) cites.unshift(`files: ${a.repo.files.filter((f) => f.startsWith(`${a.area}/`)).slice(0, 3).join(', ')}`);
+    const files = [...a.costs.values()].flat().map((f) => factFile(f.path));
+    out.push({ id: a.name, area: a.area, rank: [named ? 1 : 0, a.costs.size, files.length], files, entry: { id: a.name, paths: [`${a.area}/**`], reason: cites.join('; '), tests: testGlobs(a.repo, a.area, a.name) } });
   }
-  for (const { file, content } of roleFileContents(root, cfg)) {
-    let before = null;
-    try {
-      before = fs.readFileSync(file, 'utf8');
-    } catch {}
-    // Only a role file that exists and that `wf sync` generated is kept current: a missing one is not created here, and one a
-    // person wrote is not theirs to lose.
-    if (before !== null && before !== content && isGeneratedRoleFile(before)) out.push({ file, kind: 'role', content, tracked: tracked(file) });
-  }
+  out.sort((x, y) => y.rank[0] - x.rank[0] || y.rank[1] - x.rank[1] || y.rank[2] - x.rank[2] || x.area.localeCompare(y.area));
+  const ids = new Map();
+  for (const x of out) ids.set(x.id, (ids.get(x.id) ?? 0) + 1);
+  for (const x of out) if (ids.get(x.id) > 1) x.entry.id = x.id = x.area.replace(/[^\w-]+/g, '-');
   return out;
 }
-// Writes the generated files that are stale and that git does not track (a role file at an untracked workspace root): what
-// the plugin generates follows the installed plugin by itself. A tracked one is the project's to commit: reported, never
-// written behind its back.
-export function refreshGenerated(root) {
-  let stale = [];
+
+// A draft's risk entry must guard files that exist and give a reason that cites a scanned file.
+function draftRiskProblems(list, facts) {
+  const files = facts.repos.flatMap((r) => r.files);
+  const problems = [];
+  for (const r of list) {
+    if (!r?.id || !Array.isArray(r.paths) || !r.paths.length) {
+      problems.push(`risk entry ${JSON.stringify(r?.id ?? r)} needs an id and paths`);
+      continue;
+    }
+    if (!files.some((f) => matchesAny(f, r.paths))) problems.push(`risk \`${r.id}\`: its paths (${r.paths.join(', ')}) match no file in the scan, so they guard nothing`);
+    const cited = String(r.reason ?? '').match(/[\w.@-]+(?:\/[\w.@-]+)+/g) ?? [];
+    if (!cited.some((c) => files.includes(c.replace(/:\d+$/, '')) || files.some((f) => f.startsWith(`${c.replace(/\/$/, '')}/`)))) problems.push(`risk \`${r.id}\`: its reason cites no scanned file (name the files the scan found)`);
+  }
+  return problems;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// proposePolicy
+// ---------------------------------------------------------------------------------------------------------------------
+
+// A policy shape from an adapter-shaped draft: only the keys it sets.
+function draftPolicy(draft) {
+  if (!draft) return {};
+  const out = {};
+  if (draft.risk !== undefined) out.risk = draft.risk === 'none' ? 'none' : (draft.risk ?? []).map(normRisk);
+  if (draft.review?.diffRead !== undefined) out['review.diffRead'] = draft.review.diffRead;
+  if (draft.delivery?.stages !== undefined) out['delivery.stages'] = draft.delivery.stages;
+  if (draft.ticketing?.operations !== undefined) out['ticketing.operations'] = draft.ticketing.operations;
+  const tests = draft.tests ?? (Array.isArray(draft.repos) ? Object.fromEntries(draft.repos.filter((r) => r.tests).map((r) => [r.name, r.tests])) : null);
+  if (tests && Object.keys(tests).length) out.tests = Object.fromEntries(Object.entries(tests).map(([k, v]) => [k, { fast: normTest(v?.fast), full: normTest(v?.full) }]));
+  if (draft.screens) out.screens = draft.screens;
+  return out;
+}
+
+function testsFromFacts(repo) {
+  const scripts = repo.facts.filter((f) => f.kind === 'test-script' && f.command);
+  const pick = (names) => names.map((n) => scripts.find((s) => s.name === n)).filter(Boolean);
+  const fast = pick(['lint', 'typecheck', 'type-check', 'types', 'test', 'test:unit', 'unit']);
+  const slow = pick(['test:e2e', 'e2e', 'test:integration', 'integration', 'verify']).filter((s) => !fast.includes(s));
+  const spec = (xs) => (xs.length ? { run: xs.map((s) => s.command).join(' && ') } : null);
+  return { value: { fast: spec(fast), full: spec([...fast, ...slow]) }, cites: [...fast, ...slow].map((s) => `${s.path} ${s.evidence}`) };
+}
+
+/** proposePolicy(facts, current, draft?) → PolicyDiff (engine/contract.mjs), plus `overBudget`: risk areas not proposed
+ * because the adapter's risk budget is full. Hand-edited keys come first, marked, and are never part of `--confirm all`. */
+export async function proposePolicy(facts, current, draft) {
+  const raw = rawOf(current);
+  const cur = policyOf(raw);
+  const handEdited = new Set(handEditedKeys(raw));
+  const want = draftPolicy(draft);
+  const changes = [];
+  const change = (key, from, to, reason) => {
+    if (!same(from, to)) changes.push({ key, from: from ?? null, to: to ?? null, reason, handEdited: handEdited.has(topOf(key)) });
+  };
+
+  // risk
+  let overBudget = [];
+  if (want.risk !== undefined) {
+    if (want.risk !== 'none') {
+      const problems = draftRiskProblems(want.risk, facts);
+      if (problems.length) throw new WfError(`the draft's risk paths are refused:\n- ${problems.join('\n- ')}`);
+    }
+    if (want.risk === 'none' || !Array.isArray(cur.risk)) change('risk', cur.risk, want.risk, want.risk === 'none' ? 'the draft finds nothing whose mistake costs money, external writes, data or access' : `the draft's risk paths: ${want.risk.map((r) => `${r.id} (${r.reason})`).join('; ')}`);
+    else {
+      for (const r of want.risk) change(`risk.${r.id}`, cur.risk.find((x) => x.id === r.id), r, r.reason);
+      for (const r of cur.risk) if (!want.risk.some((x) => x.id === r.id)) change(`risk.${r.id}`, r, null, 'the draft drops it');
+    }
+  } else {
+    const found = riskFromFacts(facts);
+    const curList = Array.isArray(cur.risk) ? cur.risk : [];
+    const files = facts.repos.flatMap((r) => r.files);
+    const covered = (x) => curList.some((r) => x.files.some((f) => matchesAny(f, r.paths)) || matchesAny(`${x.area}/x`, r.paths));
+    let fresh = found.filter((x) => !covered(x) && !curList.some((r) => r.id === x.id));
+    const limit = raw?.budget?.adapter?.risk;
+    if (Number.isInteger(limit) && curList.length + fresh.length > limit) {
+      const room = Math.max(0, limit - curList.length);
+      overBudget = fresh.slice(room).map((x) => ({ id: x.id, paths: x.entry.paths, reason: x.entry.reason }));
+      fresh = fresh.slice(0, room);
+    }
+    if (cur.risk === null && !found.length) change('risk', null, 'none', 'the scan found no decimal or currency code, external writes, migrations or access code, and no area the project\'s documents name');
+    for (const x of fresh) change(`risk.${x.id}`, null, x.entry, x.entry.reason);
+    for (const r of curList) if (!files.some((f) => matchesAny(f, r.paths))) change(`risk.${r.id}`, r, null, `its paths (${r.paths.join(', ')}) match no file now`);
+  }
+
+  // review.diffRead, delivery.stages
+  const pick = (key, fallback, why) => change(key, cur[key], want[key] !== undefined ? want[key] : cur[key] ?? fallback, want[key] !== undefined ? 'from the draft' : why);
+  pick('review.diffRead', 'before', 'not set: the person reads a risk diff before it merges (`after` merges first and keeps the revert)');
+  pick('delivery.stages', [{ do: 'land' }], 'not set: each repo\'s part lands on its base');
+
+  // ticketing.operations, per operation
+  const ops = want['ticketing.operations'];
+  if (ops) for (const op of new Set([...Object.keys(cur['ticketing.operations']), ...Object.keys(ops)])) change(`ticketing.operations.${op}`, cur['ticketing.operations'][op], ops[op] ?? null, 'from the draft');
+
+  // tests, per repo
+  for (const repo of facts.repos) {
+    const from = cur.tests[repo.name] ?? null;
+    if (want.tests?.[repo.name]) change(`tests.${repo.name}`, from, want.tests[repo.name], want.tests.reasons?.[repo.name] ?? 'from the draft');
+    else if (!from?.fast && !from?.full) {
+      const t = testsFromFacts(repo);
+      if (t.value.fast || t.value.full) change(`tests.${repo.name}`, from, t.value, `the repo's own scripts: ${t.cites.slice(0, 4).join('; ')}`);
+    }
+  }
+  for (const [name, t] of Object.entries(want.tests ?? {})) if (!facts.repos.some((r) => r.name === name)) change(`tests.${name}`, cur.tests[name] ?? null, t, 'from the draft');
+
+  // screens, per setting
+  for (const k of SCREEN_KEYS) if (want.screens && k in want.screens) change(`screens.${k}`, cur.screens[k], want.screens[k], want.screens.reasons?.[k] ?? 'from the draft');
+
+  // A hand edit with no proposed change is still shown, so it is never adopted or overwritten silently.
+  for (const k of handEdited) if (!changes.some((c) => topOf(c.key) === k)) changes.push({ key: k, from: cur[k], to: cur[k], reason: 'edited by hand since onboarding wrote it; confirm the key to keep it as the onboarded value', handEdited: true });
+  changes.sort((a, b) => Number(b.handEdited) - Number(a.handEdited));
+  const unchanged = POLICY_KEYS.filter((k) => !changes.some((c) => topOf(c.key) === k));
+  return { changes, unchanged, overBudget };
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// writeAdapter
+// ---------------------------------------------------------------------------------------------------------------------
+
+function applyChange(js, c) {
+  const top = topOf(c.key);
+  const sub = c.key.slice(top.length + 1);
+  if (top === 'risk') {
+    if (!sub) {
+      js.risk = c.to;
+      return;
+    }
+    const list = Array.isArray(js.risk) ? js.risk : [];
+    const i = list.findIndex((r) => r.id === sub);
+    if (c.to === null) {
+      if (i >= 0) list.splice(i, 1);
+    } else if (i >= 0) list[i] = c.to;
+    else list.push(c.to);
+    js.risk = list.length ? list : 'none';
+  } else if (top === 'tests') {
+    const repo = (js.repos ?? []).find((r) => r.name === sub);
+    if (!repo) throw new WfError(`tests.${sub}: no repo named \`${sub}\` in the adapter`);
+    repo.tests = Object.fromEntries(Object.entries(c.to ?? {}).filter(([, v]) => v));
+  } else {
+    const keys = [...top.split('.'), ...(sub ? [sub] : [])];
+    let o = js;
+    for (const k of keys.slice(0, -1)) o = o[k] ??= {};
+    if (c.to === null || c.to === undefined) delete o[keys.at(-1)];
+    else o[keys.at(-1)] = c.to;
+  }
+}
+
+// The confirmed changes of a diff: exact keys, a top key for all of its parts, or `all` for every change not edited by hand.
+export function confirmedChanges(diff, confirmed) {
+  const keys = [].concat(confirmed ?? []).flatMap((k) => String(k).split(',')).map((k) => k.trim()).filter(Boolean);
+  const unknown = keys.filter((k) => k !== 'all' && !diff.changes.some((c) => c.key === k || c.key.startsWith(`${k}.`)));
+  if (unknown.length) throw new WfError(`no proposed change for ${unknown.map((k) => `\`${k}\``).join(', ')}; the proposed keys are: ${diff.changes.map((c) => c.key).join(', ') || 'none'}`);
+  return diff.changes.filter((c) => keys.some((k) => (k === 'all' ? !c.handEdited : c.key === k || c.key.startsWith(`${k}.`))));
+}
+
+function commitUserFolder(file, message) {
+  const dir = path.dirname(file);
+  const g = (args) => spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
+  if (!fs.existsSync(path.join(dir, '.git'))) g(['init', '--quiet']);
+  g(['add', '--', path.basename(file)]);
+  g(['-c', 'user.name=agentic-workflow', '-c', 'user.email=agentic-workflow@localhost', 'commit', '--quiet', '-m', message, '--', path.basename(file)]);
+}
+
+// What a finished onboarding must hold: `risk` confirmed; with `screens.capture`, a capture command writing to {out}.
+const unfinished = (js, finish) => finish.filter((k) => (k === 'risk' ? js.risk !== 'none' && !Array.isArray(js.risk) : k === 'screens.capture' ? !/\{out\}/.test(js.screens?.capture ?? '') : false));
+
+/** writeAdapter(root, diff, confirmed, { location?, finish?, env? }) → { written, file, keys }. `diff.seed` is the raw
+ * adapter started from when there is none yet (or when it replaces a 0.7 one). `finish`: keys the result must hold
+ * (`risk`, `screens.capture`); while one is unset the write is refused and nothing is written. The result passes
+ * checkAdapter and the adapter budget, or nothing is written. */
+export async function writeAdapter(root, diff, confirmed, { location, finish = [], env = process.env } = {}) {
+  const found = locate(root, env);
+  const replacing = !found || found.raw?.version !== 2;
+  if (found && found.raw?.version !== 2 && !diff.seed) throw new WfError(`${found.file} is a 0.7 adapter`, { hint: 'run `wf init --from-07`' });
+  const before = replacing ? null : found.raw;
+  const js = structuredClone(before ?? diff.seed ?? null);
+  if (!js) throw new WfError('no adapter yet and no seed in the diff to start one');
+  const picked = confirmedChanges(diff, confirmed);
+  for (const c of picked) applyChange(js, c);
+  const keys = picked.map((c) => c.key);
+
+  const missing = unfinished(js, finish);
+  if (missing.length) throw new WfError(`onboarding cannot finish: ${missing.map((k) => (k === 'risk' ? '`risk` is unconfirmed (confirm the proposed areas, or `risk: none`)' : '`screens.capture` is unset or does not write to {out}')).join('; ')}; nothing written`);
+
+  // Hashes: every policy key a confirmed change touched, and on a new adapter every key it holds.
+  const pol = policyOf(js);
+  const empty = policyOf({});
+  const hashes = { ...(before?.onboarded?.hashes ?? {}) };
+  const touched = new Set(picked.map((c) => topOf(c.key)));
+  for (const k of POLICY_KEYS) if (touched.has(k) || (replacing && !same(pol[k], empty[k]))) hashes[k] = policyHash(pol[k]);
+  const { onboarded: _o, ...restNew } = js;
+  const { onboarded: _p, ...restOld } = before ?? {};
+  if (!replacing && same(restNew, restOld) && same(hashes, before?.onboarded?.hashes ?? {})) return { written: false, file: found.file, keys: [] };
+  js.onboarded = { at: new Date().toISOString(), engine: CONTRACT_VERSION, hashes };
+
+  const where = location ?? found?.location ?? 'repo';
+  if (where === 'user') js.root ??= root;
+  const problems = await checkAdapter(js, { location: where });
+  if (problems.length) throw new WfError(`the adapter would be invalid; nothing written:\n- ${problems.join('\n- ')}`);
+  const file = found && found.location === where ? found.file : where === 'user' ? path.join(userDir(env), 'projects', `${js.name}.yaml`) : path.join(root, '.workflow', 'project.yaml');
+  if (found && found.file !== file) throw new WfError(`the adapter is at ${found.file}; moving it to the ${where} folder is not done by onboarding`, { hint: 'move the file yourself, then re-run `wf init`' });
+  const beforeBudget = before ? await adapterBudget(await loadAdapter(root, { env })).catch(() => null) : null;
+  const oldText = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null;
+  const put = (obj) => {
+    let text;
+    if (!replacing && oldText !== null) {
+      // Edit in place, so the person's comments and order survive.
+      const doc = YAML.parseDocument(oldText);
+      const now = doc.toJSON() ?? {};
+      for (const [k, v] of Object.entries(obj)) if (!same(now[k], v)) doc.set(k, v);
+      for (const k of Object.keys(now)) if (!(k in obj)) doc.delete(k);
+      text = doc.toString();
+    } else text = YAML.stringify(obj);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, text);
+  };
+  const restore = () => (oldText === null ? fs.rmSync(file, { force: true }) : fs.writeFileSync(file, oldText));
+  put(js);
   try {
-    stale = generatedStatus(root);
-  } catch {
-    return { refreshed: [], trackedStale: [] };
+    const budget = await adapterBudget(await loadAdapter(root, { env }));
+    if (!js.budget?.adapter) {
+      // The first onboarding sets the project's budget to what it wrote; growth from here needs a proposal.
+      js.budget = { ...(js.budget ?? {}), adapter: { ...budget.counts } };
+      put(js);
+    } else if (budget.over.length) {
+      const grew = budget.over.filter((k) => !beforeBudget || budget.counts[k] > beforeBudget.counts[k]);
+      if (grew.length) throw new WfError(`over the adapter budget (${grew.map((k) => `${k} ${budget.counts[k]} > ${budget.limits[k]}`).join(', ')}); nothing written`, { hint: 'a net increase needs a project proposal (`wf learn`), or confirm fewer keys' });
+    }
+  } catch (error) {
+    restore();
+    throw error;
   }
-  const refreshed = [];
-  for (const s of stale.filter((x) => !x.tracked)) {
-    try {
-      mkdirStateDirectory(path.dirname(s.file), { recursive: true });
-      fs.writeFileSync(s.file, s.content);
-      refreshed.push(s.file);
-    } catch {}
-  }
-  return { refreshed, trackedStale: stale.filter((x) => x.tracked).map((x) => x.file) };
+  if (where === 'user') commitUserFolder(file, `onboarding: ${keys.join(', ') || 'new adapter'}`);
+  return { written: true, file, keys };
 }
 
-export function setEnabled(root, enabled) {
-  const file = path.join(root, ADAPTER_DIR, CONFIG_FILE);
-  const text = fs.readFileSync(file, 'utf8');
-  // Edit the one line so comments and layout survive; fall back to a rewrite only when no line exists.
-  let next;
-  if (/^enabled:\s*(true|false)\s*$/m.test(text)) next = text.replace(/^enabled:\s*(true|false)\s*$/m, `enabled: ${enabled}`);
-  else if (/"enabled"\s*:\s*(true|false)/.test(text)) next = text.replace(/"enabled"\s*:\s*(true|false)/, `"enabled": ${enabled}`);
-  else next = YAML.stringify({ ...YAML.parse(text), enabled });
-  fs.writeFileSync(file, next);
-  const cfg = loadConfig(root);
-  if (enabled) sync(root);
-  else for (const f of instructionFiles(root, cfg)) removeBlock(f);
-  register(root, enabled);
-  return cfg;
+// ---------------------------------------------------------------------------------------------------------------------
+// wf init
+// ---------------------------------------------------------------------------------------------------------------------
+
+const flagList = (v) => (v === undefined ? [] : [].concat(v).filter((x) => x !== true));
+function readDraft(file, cwd) {
+  const f = path.resolve(cwd, file);
+  if (!fs.existsSync(f)) throw new WfError(`--draft ${file}: no such file`);
+  const text = fs.readFileSync(f, 'utf8');
+  try {
+    return /\.json$/i.test(f) ? JSON.parse(text) : YAML.parse(text);
+  } catch (error) {
+    throw new WfError(`--draft ${file}: ${error.message}`, { hint: `the draft is JSON or YAML of this shape:\n${DRAFT_SHAPE}` });
+  }
 }
 
-// ---------- doctor ----------
+function git(cwd, args) {
+  const r = spawnSync('git', args, { cwd, encoding: 'utf8' });
+  return r.status === 0 ? r.stdout.trim() : null;
+}
 
-// The most recent full gate of any attempt, and what each `artifacts` glob matched in it. A glob with no placeholder
-// matches whatever the whole suite wrote, so every other ticket's screenshots became required evidence: a real ticket
-// was refused with 1,300 unrelated screenshots. Warned when such a glob matched files and the ticket changed nothing
-// under the glob's directory (the matches cannot be this ticket's own files).
-export function artifactReport(root, cfg) {
-  let last = null;
-  for (const id of listAttempts(root)) {
-    let st;
+// The base of a repo: its remote's default branch, else the checked-out branch (facts from git).
+function baseOf(dir) {
+  const head = git(dir, ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD']);
+  return head ? head.replace(/^origin\//, '') : git(dir, ['branch', '--show-current']) || null;
+}
+
+// The test-file globs of a repo for `kinds.tests`, from the test files the scan found (relative to the repo).
+export function testKinds(repo) {
+  const prefix = repo.path === '.' ? '' : `${repo.path}/`;
+  return [...new Set(repo.tests.map((t) => {
+    const rel = t.slice(prefix.length);
+    const segs = rel.split('/');
+    const i = segs.findIndex((s) => /^(tests?|__tests__|specs?|e2e)$/i.test(s));
+    if (i >= 0) return `${segs.slice(0, i + 1).join('/')}/**`;
+    const m = /[._-](test|spec)(\.[a-z]+)$/i.exec(rel);
+    return m ? `**/*${m[0]}` : null;
+  }).filter(Boolean))].sort();
+}
+
+function freshSeed(root, facts) {
+  const ci = facts.repos.some((r) => r.facts.some((f) => f.kind === 'ci-file'));
+  const inv = facts.repos.flatMap((r) => r.facts.filter((f) => f.kind === 'invariants-doc' && !/:\d+$/.test(f.path)));
+  return {
+    version: 2,
+    name: path.basename(root).replace(/^[^A-Za-z0-9]+/, '').replace(/[^A-Za-z0-9._-]+/g, '-') || 'project',
+    repos: facts.repos.map((r) => ({ name: r.name, path: r.path, base: baseOf(path.resolve(root, r.path)), kinds: { tests: testKinds(r), other: ['**/*.md'] } })),
+    ...(inv.length === 1 ? { invariants: inv[0].path } : {}),
+    delivery: { landing: ci ? 'direct' : 'queue', order: facts.repos.map((r) => r.name) },
+  };
+}
+
+export function renderDiff(name, diff, extra = []) {
+  const out = [];
+  const hand = diff.changes.filter((c) => c.handEdited);
+  const rest = diff.changes.filter((c) => !c.handEdited);
+  out.push(`Onboarding ${name}: ${rest.length} proposed change${rest.length === 1 ? '' : 's'}${hand.length ? `, ${hand.length} hand-edited` : ''}.`);
+  if (hand.length) {
+    out.push('', 'Edited by hand since onboarding wrote them (kept unless you confirm the key):');
+    for (const c of hand) out.push(`  ${c.key}: now ${show(c.from)}${same(c.from, c.to) ? '' : `\n    proposed: ${show(c.to)}`}`, `    why: ${c.reason}`);
+  }
+  if (rest.length) {
+    out.push('', 'Proposed:');
+    for (const c of rest) out.push(`  ${c.key}: ${show(c.from)} → ${show(c.to)}`, `    why: ${c.reason}`);
+  }
+  if (diff.overBudget?.length) out.push('', `Not proposed, over the adapter's risk budget: ${diff.overBudget.map((x) => x.id).join(', ')}`);
+  if (diff.unchanged.length) out.push('', `Unchanged: ${diff.unchanged.join(', ')}`);
+  return [...out, ...extra].join('\n');
+}
+
+export async function cmdInit(ctx, args) {
+  const f = args.flags ?? {};
+  const env = ctx.env ?? process.env;
+  const root = real(ctx.root ?? ctx.cwd);
+  const from07 = Boolean(f['from-07']);
+  const draft = typeof f.draft === 'string' ? readDraft(f.draft, ctx.cwd) : null;
+  const confirm = flagList(f.confirm);
+  const location = f.location === undefined ? undefined : String(f.location);
+  if (location && !['user', 'repo'].includes(location)) throw new WfError('--location is `user` or `repo`');
+  const found = locate(root, env);
+  let current = null;
+  let migration = null;
+  if (from07) {
+    if (!found || found.raw?.version !== 1) throw new WfError(`--from-07: no 0.7 adapter at ${found?.file ?? path.join(root, '.workflow', 'project.yaml')}`);
+    const { from07: convert } = await import('./migrate.mjs');
+    migration = await convert(root, found.raw, { env });
+  } else if (found && found.raw?.version !== 2) throw new WfError(`${found.file} is a 0.7 adapter`, { hint: 'run `wf init --from-07`' });
+  else if (found) current = await loadAdapter(root, { env });
+
+  const facts = await scan(root, { repos: (current?.repos ?? migration?.seed.repos)?.map((r) => ({ name: r.name, path: r.path })) });
+  const merged = migration ? { ...migration.draft, ...(draft ?? {}), screens: { ...migration.draft.screens, ...(draft?.screens ?? {}) } } : draft;
+  const diff = await proposePolicy(facts, current, merged);
+  if (!current) {
+    diff.seed = migration?.seed ?? freshSeed(root, facts);
+    for (const r of diff.seed.repos ?? []) {
+      const scanned = facts.repos.find((x) => x.name === r.name);
+      if (scanned && !r.kinds?.tests?.length) r.kinds = { ...(r.kinds ?? {}), tests: testKinds(scanned), other: r.kinds?.other ?? ['**/*.md'] };
+    }
+  }
+  const extra = migration ? migration.report() : [];
+  const name = current?.name ?? diff.seed?.name ?? path.basename(root);
+  const data = { diff, draftShape: DRAFT_SHAPE, facts: { root, repos: facts.repos.map((r) => ({ name: r.name, path: r.path, modules: r.modules, facts: r.facts.map(({ kind, path: p, evidence }) => ({ kind, path: p, evidence })) })) }, ...(migration ? { migration: migration.data } : {}) };
+  if (!confirm.length) {
+    if (!diff.changes.length) return { text: `${renderDiff(name, diff, extra)}\n\nNothing to change; nothing written.`, data };
+    const how = [
+      'Nothing written.',
+      'To refine it, have a model draft the policy from the facts (`wf init --json` prints them) and pass it back with `--draft <file>`, JSON or YAML of this shape (any subset):',
+      DRAFT_SHAPE,
+      'To write, confirm keys: `wf init --confirm <key>` (repeatable; a top key takes all of its parts; `--confirm all` takes every change not edited by hand). Pass the same `--draft` again when confirming.',
+    ];
+    return { text: `${renderDiff(name, diff, extra)}\n\n${how.join('\n')}`, data };
+  }
+  const finish = migration ? ['risk', 'screens.capture'] : ['risk'];
+  const res = await writeAdapter(root, diff, confirm, { location, finish, env });
+  const after = res.written && migration ? await migration.afterWrite(res) : [];
+  data.written = res;
+  return { text: `${renderDiff(name, diff, extra)}\n\n${res.written ? `Wrote ${res.file}: ${res.keys.join(', ') || 'the adapter'}.` : 'Nothing to change; nothing written.'}${after.length ? `\n${after.join('\n')}` : ''}`, data };
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// wf doctor
+// ---------------------------------------------------------------------------------------------------------------------
+
+// Lines of the project's instruction files that name a command 0.8 does not have, or a 0.7 flag or lane.
+export function staleInstructionLines(root, files) {
+  const known = new Set([...Object.keys(COMMANDS), ...Object.keys(COMMAND_ALIASES)]);
+  const out = [];
+  for (const rel of files) {
+    let text;
     try {
-      st = loadState(root, id);
+      text = fs.readFileSync(path.join(root, rel), 'utf8');
     } catch {
       continue;
     }
-    const g = st.lastGate;
-    if (g && (g.steps ?? []).some((x) => x.artifactGlobs?.length) && (!last || String(g.finishedAt ?? g.at) > String(last.gate.finishedAt ?? last.gate.at))) last = { state: st, gate: g };
-  }
-  if (!last) return { counts: [], warnings: [] };
-  const counts = [];
-  const warnings = [];
-  for (const step of last.gate.steps.filter((x) => x.artifactGlobs?.length)) {
-    const pkgPath = packageOfStep(cfg, step.id, step.repo)?.path ?? '.';
-    const changed = last.gate.changed?.[step.repo] ?? [];
-    for (const g of step.artifactGlobs) {
-      counts.push(`${step.id}: ${g.glob} matched ${g.files.length}`);
-      if (placeholdersIn(g.glob).length || !g.files.length) continue;
-      const parts = g.glob.split('/');
-      const fixed = parts.slice(0, parts.findIndex((p) => /[*?{[]/.test(p))).join('/');
-      const dir = path.posix.join(pkgPath, fixed);
-      if (changed.some((f) => dir === '.' || f === dir || f.startsWith(`${dir}/`))) continue;
-      warnings.push({ check: `artifacts of step ${step.id}`, problem: `\`${g.glob}\` has no ${ARTIFACT_PLACEHOLDERS.map((p) => `{${p}}`).join('/')} placeholder and matched ${g.files.length} file(s) in the last gate (${last.state.id}, ${last.gate.runId}), though that ticket changed nothing under ${dir}/: every screenshot the suite writes becomes evidence the reviewer must inspect (a real ticket was refused with 1,300 unrelated screenshots)`, fix: 'have the UI tests write each ticket\'s evidence under a ticket folder and point the glob there, e.g. `e2e/.evidence/{itemLower}/**/*.png`' });
-    }
-  }
-  return { from: `${last.state.id} ${last.gate.runId}`, counts, warnings };
-}
-
-// Read from the adapter, so it shows before any gate has run: a glob without a placeholder collects every capture the
-// suite writes, and each one becomes evidence for every ticket.
-export function staticArtifactWarnings(cfg) {
-  const out = [];
-  for (const step of cfg.gate.steps) {
-    for (const g of step.artifacts ?? []) {
-      if (placeholdersIn(g).length) continue;
-      out.push({ check: `artifacts of step ${step.id}`, problem: `\`${g}\` has no ${ARTIFACT_PLACEHOLDERS.map((p) => `{${p}}`).join('/')} placeholder: every file the suite writes under it is evidence the reviewer must inspect for every ticket, not just this ticket's`, fix: 'have the UI tests write each ticket\'s captures under a ticket folder (the gate passes WF_ITEM and WF_ITEMS) and point the glob there, e.g. `e2e/.evidence/{itemLower}/**/*.png`' });
-    }
+    text.split('\n').forEach((line, i) => {
+      const words = [...line.matchAll(/`wf\s+([a-z][a-z-]*)|\bwf\s+([a-z][a-z-]*)/g)].map((m) => m[1] ?? m[2]).filter((w) => !known.has(w));
+      const flags = line.match(/--intent\s+analysis|--defer-heavy|--lane\b|\blanes?\s*:|\b(quick|standard|batch)\s+lane\b/g) ?? [];
+      if (words.length || flags.length) out.push({ file: rel, line: i + 1, names: [...new Set([...words.map((w) => `wf ${w}`), ...flags])], text: clip(line.trim(), 120) });
+    });
   }
   return out;
 }
 
-// A heavy step that cannot rerun only its failed suites: a repair proven on it reruns all of it (0.7.6, I-118: an 18-minute
-// suite rerun whole eight times to prove small fixes). A fact for the project's owner, never a refusal: the gate reruns
-// only failed suites when a step declares a suite report (`report.junit`, or `report.playwright` for Playwright's JSON
-// reporter) and how its runner takes files (`select`, with `{select}` in `run`).
-export function suiteRerunWarnings(cfg) {
-  return cfg.gate.steps.filter((s) => s.tier === 'heavy' && !s.plugin && !rerunsOnlyFailed(s)).map((s) => ({
-    check: `suite reruns of step ${s.id}`,
-    problem: `step ${s.id} reruns whole after a failure (it has ${[s.select ? null : 'no `select`', s.report?.junit || s.report?.playwright ? null : 'no suite report', s.select && !String(s.run ?? '').includes('{select}') ? 'no `{select}` in `run`' : null, s.inputs?.length ? null : 'no `inputs`'].filter(Boolean).join(', ')}); if it runs test suites, the gate cannot rerun only the ones that failed`,
-    fix: 'docs/gate.md, "Suite-level reruns", describes what lets the gate rerun only the failed suites of a step',
-  }));
+function instructionFiles(root, repos) {
+  const out = new Set();
+  for (const r of repos?.length ? repos : [{ path: '.' }]) {
+    const dir = path.resolve(root, r.path);
+    if (!fs.existsSync(dir)) continue;
+    const prefix = r.path === '.' ? '' : `${r.path}/`;
+    for (const f of repoFiles(dir)) if (isInstructionDoc(f)) out.add(`${prefix}${f}`);
+  }
+  for (const f of ['AGENTS.md', 'CLAUDE.md']) if (fs.existsSync(path.join(root, f))) out.add(f);
+  return [...out].sort();
 }
 
-// Whether the gate can rerun only a step's failed suites: it names its suites (a JUnit or Playwright report), how its runner
-// takes files (`select`, used in `run`), and its inputs (the file hashes that tell a changed suite from an unchanged one); a
-// plugin step supplies its own suites and ignores both.
-export const rerunsOnlyFailed = (s) => Boolean(!s?.plugin && s?.select && (s.report?.junit || s.report?.playwright) && String(s.run ?? '').includes('{select}') && s.inputs?.length);
+const TERMINAL07 = ['closed', 'abandoned', 'analysis.closed', 'shipped.closed', 'attempt.closed'];
 
-// A step whose command reads a sibling repo (`../web`, `$WF_ROOT/web`, the attempt's `web` worktree) but does not list
-// it in `alsoInputs` is reused after that repo changes: a passing end-to-end run was reused against old API code.
-export function siblingWarnings(root, cfg) {
-  const out = [];
-  for (const step of cfg.gate.steps) {
-    if (!step.run) continue;
-    const repo = cfg.repos.find((r) => r.name === step.repo);
-    if (!repo) continue;
-    const pkg = step.package ? repo.packages.find((p) => p.path === step.package || p.name === step.package) : repo.packages[0];
-    const from = path.join(repoDir(root, repo), pkg?.path ?? '.');
-    for (const other of cfg.repos) {
-      if (other.name === repo.name || (step.alsoInputs ?? []).includes(other.name)) continue;
-      const otherDir = repoDir(root, other);
-      const rel = path.relative(from, otherDir).split(path.sep).join('/');
-      const fromRoot = path.relative(root, otherDir).split(path.sep).join('/');
-      const refs = [
-        rel.startsWith('..') ? rel : null,
-        fromRoot && !fromRoot.startsWith('..') ? `WF_ROOT}/${fromRoot}` : null,
-        fromRoot && !fromRoot.startsWith('..') ? `WF_ROOT/${fromRoot}` : null,
-        `WF_ATTEMPT/${other.name}`,
-        `WF_ATTEMPT}/${other.name}`,
-      ].filter(Boolean);
-      const hit = refs.find((r) => new RegExp(`${r.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w.-])`).test(step.run));
-      if (hit) out.push({ check: `step ${step.id} reads repo ${other.name}`, problem: `its command references ${hit.replace(/^WF_/, '$WF_')} but \`alsoInputs\` does not list ${other.name}, so a pass is reused after ${other.name} changes`, fix: `add \`alsoInputs: [${other.name}]\` to step ${step.id}` });
+export async function cmdDoctor(ctx) {
+  const env = ctx.env ?? process.env;
+  const root = real(ctx.root ?? ctx.cwd);
+  const checks = [];
+  const add = (level, check, detail, fix = null) => checks.push({ level, check, detail, fix });
+  let found = null;
+  try {
+    found = locate(root, env);
+    if (!found) add('fail', 'adapter', `no adapter for ${root}`, 'run `wf init`');
+  } catch (error) {
+    add('fail', 'adapter', error.message);
+  }
+  let adapter = null;
+  if (found && found.raw?.version !== 2) add('fail', 'adapter', `${found.file} is a 0.7 adapter`, 'run `wf init --from-07`');
+  else if (found) {
+    try {
+      adapter = await loadAdapter(root, { env });
+      add('ok', 'adapter', `${found.file} (${found.location})`);
+    } catch (error) {
+      add('fail', 'adapter', error.message, 'fix the adapter, or re-run `wf init`');
     }
   }
-  return out;
-}
-
-// Agents whose class pins no model inherit the owner session's: an effort comparison was confounded when the session
-// model changed mid-attempt. Warned only when an attempt actually shows more than one model.
-export function modelWarnings(root, cfg, runtime = detectOwner()?.runtime ?? defaultHostId()) {
-  // Every class a role runs at pins a model (a pinned review class alone does not stop implementers inheriting).
-  const used = ['planner', 'reviewer', 'implementer', ...(cfg.roles?.tester ? ['tester'] : [])].map((r) => cfg.classes[roleClass(cfg, r)]);
-  const pinned = used.every((c) => c?.[runtime]?.model);
-  if (pinned) return [];
-  let rows = [];
-  try {
-    rows = report([root], { home: process.env.WF_HOME ?? os.homedir() });
-  } catch {
-    return [];
+  if (adapter) {
+    if (!adapter.risk?.confirmed) add('fail', 'risk', 'risk paths are unconfirmed', 'run `wf init` and confirm the proposed areas (or `risk: none`)');
+    else add('ok', 'risk', adapter.risk.paths.length ? adapter.risk.paths.map((r) => r.id).join(', ') : 'none (confirmed)');
+    const edited = handEditedKeys(found.raw);
+    if (edited.length) add('warn', 'hand edits', `edited by hand since onboarding wrote them: ${edited.join(', ')}`, 're-run `wf init` to review them; confirming a key keeps it');
+    try {
+      const b = await adapterBudget(adapter);
+      const line = Object.entries(b.counts).map(([k, v]) => `${k} ${v}/${b.limits?.[k] ?? '-'}`).join(', ');
+      if (b.over.length) add('fail', 'adapter budget', `over on ${b.over.join(', ')} (${line})`, 'a net increase needs a project proposal (`wf learn`)');
+      else add('ok', 'adapter budget', line);
+    } catch (error) {
+      add('fail', 'adapter budget', error.message);
+    }
+    for (const r of adapter.repos) {
+      const dir = path.resolve(root, r.path);
+      if (!fs.existsSync(dir)) {
+        add('fail', `repo ${r.name}`, `${dir} does not exist`);
+        continue;
+      }
+      const remote = r.remote ?? 'origin';
+      if (git(dir, ['rev-parse', '--verify', '--quiet', `refs/remotes/${remote}/${r.base}`]) === null && git(dir, ['rev-parse', '--verify', '--quiet', `refs/heads/${r.base}`]) === null) add('fail', `repo ${r.name}`, `base \`${r.base}\` is neither ${remote}/${r.base} nor a local branch`, `git -C ${r.path} fetch ${remote}`);
+      if (!r.tests?.fast && !r.tests?.full) add('warn', `repo ${r.name}`, 'no tests set', 're-run `wf init`');
+    }
+    try {
+      const { moduleProblems, moduleRefsOf } = await import('./migrate.mjs');
+      for (const m of moduleProblems(root, adapter.repos, moduleRefsOf(adapter))) add('fail', m.what, `${m.module} ${m.problem}`);
+    } catch (error) {
+      add('warn', 'modules', `not checked: ${error.message}`);
+    }
+    if (adapter.invariants && !fs.existsSync(path.resolve(root, adapter.invariants))) add('fail', 'invariants', `${adapter.invariants} does not exist`);
+    if (!adapter.screens?.capture) add('warn', 'screens', '`screens.capture` is unset: no screens are captured', 're-run `wf init` with the capture command');
+    for (const t of adapter.requires?.tools ?? []) if (spawnSync('sh', ['-c', 'command -v "$1"', 'sh', String(t)]).status !== 0) add('fail', 'tools', `\`${t}\` is not on PATH`);
   }
-  return rows
-    .filter((r) => r.observedModels.length > 1)
-    .map((r) => ({ check: `models in ${r.id}`, problem: `agents ran on ${r.observedModels.join(', ')} and a class a role runs at pins no ${runtime} model, so its agents inherit the owner session's model`, fix: `pin \`classes.<name>.${runtime}.model\` in .workflow/project.yaml` }));
+  for (const s of staleInstructionLines(root, instructionFiles(root, adapter?.repos ?? found?.raw?.repos))) add('warn', 'instruction files', `${s.file}:${s.line} names ${s.names.join(', ')}: ${s.text}`, 'reword or remove the line: 0.8 has no such command');
+  try {
+    const { productImports } = await import('./migrate.mjs');
+    const imports = productImports(root, adapter?.repos ?? found?.raw?.repos ?? []);
+    if (imports.length) add('warn', 'workflow material', `${imports.length} line${imports.length === 1 ? '' : 's'} of product code import from .workflow/ (first: ${imports[0].at})`, 'see `wf migrate material`');
+  } catch (error) {
+    add('warn', 'workflow material', `not checked: ${error.message}`);
+  }
+  try {
+    const open07 = [];
+    for (const id of await listAttempts(root)) {
+      const ev = await readEvents(root, id);
+      if (ev.length && !ev.some((e) => e.schema === 2) && !ev.some((e) => TERMINAL07.includes(e.type))) open07.push(id);
+    }
+    if (open07.length) add('warn', '0.7 attempts', `open: ${open07.join(', ')}`, 'run `wf migrate attempts`');
+  } catch (error) {
+    add('warn', '0.7 attempts', `not checked: ${error.message}`);
+  }
+  try {
+    const { rows } = await secretsStatus(root, adapter);
+    const missing = rows.filter((r) => r.needed && r.state !== 'filled').map((r) => r.key);
+    if (rows.length) add(missing.length ? 'fail' : 'ok', 'secrets', missing.length ? `missing or invalid: ${missing.join(', ')}` : `${rows.length} catalogued, all filled`, missing.length ? 'run `wf secrets guide` in your own terminal' : null);
+  } catch (error) {
+    add('warn', 'secrets', `not checked: ${error.message}`);
+  }
+  const mark = { ok: '✓', warn: '!', fail: '✗' };
+  const text = checks.map((c) => `${mark[c.level]} ${c.check}: ${c.detail}${c.fix ? `\n    fix: ${c.fix}` : ''}`).join('\n');
+  return { text, data: { checks }, exitCode: checks.some((c) => c.level === 'fail') ? 1 : 0 };
 }
 
-export async function doctor(root, { runSteps = true, runtime = detectOwner()?.runtime ?? defaultHostId(), attempt = null } = {}) {
-  if (!isHost(runtime)) throw new WfError(`--runtime must be ${hostChoice(' or ')}`);
-  // Which evidence protection layers this machine provides (informational; a missing flag never fails doctor).
-  const report = { config: [], tools: [], secrets: [], skills: [], connectors: [], steps: [], warnings: [], protection: protectionLayers(root).map((l) => ({ ok: true, warn: !l.active, check: l.layer, note: l.detail ?? (l.active ? 'on' : 'off') })), ok: true };
-  report.warnings.push(...stateFolderWarnings(root).map(w => ({ ok: true, warn: true, ...w })));
-  // No quality bar: the roles get no standing quality goals (final review of 0.7.0). Information, never a failure.
+// ---------------------------------------------------------------------------------------------------------------------
+// wf sync: (re-)register the project in the person's registry and check the skills it requires
+// ---------------------------------------------------------------------------------------------------------------------
+
+export const registryFile = (env = process.env) => path.join(userDir(env), 'registry.json');
+export async function cmdSync(ctx) {
+  const env = ctx.env ?? process.env;
+  const root = real(ctx.root ?? ctx.cwd);
+  const found = locate(root, env);
+  if (!found) throw new WfError(`no adapter for ${root}`, { hint: 'run `wf init`' });
+  if (found.raw?.version !== 2) throw new WfError(`${found.file} is a 0.7 adapter`, { hint: 'run `wf init --from-07`' });
+  const adapter = await loadAdapter(root, { env });
+  const file = registryFile(env);
+  let reg = { projects: [] };
   try {
-    const q = loadConfig(root).quality ?? [];
-    if (!q.length) report.warnings.push({ ok: true, warn: true, check: 'quality bar', problem: 'the adapter states no `quality:` goals, so planners, implementers and reviewers get no standing quality bar', fix: 'add a few sentences under `quality:` in .workflow/project.yaml (what done means in this project beyond each ticket: design system, contracts, invariants), commit them on the adapter base branch, then `wf sync`' });
+    reg = JSON.parse(fs.readFileSync(file, 'utf8'));
   } catch {}
-  const bad = (section, item) => {
-    report[section].push({ ...item, ok: false });
-    report.ok = false;
-  };
-  let cfg;
-  try {
-    cfg = loadConfig(root);
-    report.config.push({ ok: true, check: 'project.yaml is valid' });
-  } catch (error) {
-    bad('config', { check: 'project.yaml', problem: error.message });
-    return report;
+  const entry = { name: adapter.name, root, file: found.file, location: found.location };
+  const prior = reg.projects.find((p) => p.root === root);
+  const changed = !prior || !same({ ...prior, at: undefined }, entry);
+  if (changed) {
+    reg.projects = [...reg.projects.filter((p) => p.root !== root), { ...entry, at: new Date().toISOString() }].sort((a, b) => a.name.localeCompare(b.name));
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, `${JSON.stringify(reg, null, 2)}\n`);
   }
-  let adapterBase = null;
-  try {
-    const { repo } = adapterLocation(root, cfg);
-    const dir = repoDir(root, repo);
-    const hasRemote = git(dir, ['remote']).split('\n').includes(repo.remote);
-    if (hasRemote) run('git', ['fetch', '--quiet', repo.remote, repo.base], { cwd: dir, allowFail: true });
-    const ref = hasRemote && git(dir, ['rev-parse', '--verify', '--quiet', `${repo.remote}/${repo.base}`], { allowFail: true }) ? `${repo.remote}/${repo.base}` : repo.base;
-    adapterBase = git(dir, ['rev-parse', ref], { allowFail: true }) || null;
-    if (adapterBase) {
-      loadConfigAtCommit(root, cfg, adapterBase);
-      report.config.push({ ok: true, check: `adapter committed on ${repo.name} ${ref}` });
-    } else bad('config', { check: 'adapter at base', problem: `branch ${repo.base} not found in ${repo.name}` });
-  } catch (error) {
-    bad('config', { check: 'adapter at base', problem: error.message.split('\n')[0], fix: 'commit .workflow/ on the base branch of the adapter repo and push it; the gate trusts only the adapter on the base it starts from' });
-    adapterBase = null;
-  }
-  // The harness's installed copy of this plugin (hooks, skills) against this engine (final review of 0.7.0).
-  {
-    const installed = optional(hostFor(runtime), 'installedPluginVersion')?.(process.env.WF_HOME ?? os.homedir()) ?? null;
-    if (installed && installed !== ENGINE_VERSION) report.warnings.push({ ok: true, warn: true, check: `${hostFor(runtime).name} plugin version`, note: `${hostFor(runtime).name} has agentic-workflow ${installed} installed while wf is ${ENGINE_VERSION}: its hooks and skills are older or newer than this engine; update the plugin in ${hostFor(runtime).name} and restart its sessions` });
-  }
-  // Named failure I-36: one harness's model pins concealed another's inheritance; check the selected/owning runtime instead.
-  for (const [role, cls] of [...(cfg.roles?.planner === false ? [] : [...new Set(plannerPanel(cfg, runtime))].map((c) => ['planner', c])), ['reviewer', roleClass(cfg, 'reviewer')]]) {
-    const { model } = declared(cfg, cls, runtime);
-    if (model) report.config.push({ ok: true, runtime, check: `${role} model: ${model} (class ${cls})` });
-    else bad('config', { check: `${role} model`, runtime, problem: `the ${role} role runs at class \`${cls}\`, which pins no ${hostFor(runtime).name} model, so its agent inherits whatever model the owner's session runs`, fix: `set \`classes.${cls}.${runtime}.model\` (the strongest model you use), or \`roles.${role}.class: review\` (the plugin's planning and review class), in .workflow/project.yaml; then \`wf sync\`` });
-  }
-  // I-44: current setup checks never conceal the actual execution pin of an open attempt.
-  const ids = attempt ? [attempt] : listAttempts(root);
-  for (const id of ids) {
+  const lines = [`${changed ? 'Registered' : 'Already registered'}: ${adapter.name} at ${root}.`];
+  const skills = adapter.requires?.skills ?? [];
+  const runtime = ctx.actor?.runtime ?? null;
+  if (skills.length && !runtime) lines.push(`Required skills not checked at a plain terminal: ${skills.join(', ')}`);
+  else if (skills.length) {
     try {
-      const st = openState(root, { attempt: id });
-      if (['done', 'abandoned'].includes(st.phase)) continue;
-      for (const role of ['planner', 'reviewer']) {
-        const trusted = trustedAdapter(root, st);
-        if (role === 'planner' && trusted.roles?.planner === false) continue;
-        const settings = executionSettings(root, st, role, role === 'planner' ? (st.strategy?.classFor?.planner && trusted.classes?.[st.strategy.classFor.planner] ? st.strategy.classFor.planner : plannerClassFor(trusted, st)) : roleClass(trusted, role), runtime);
-        const check = id + ' ' + role + ' execution model (pin ' + settings.runtimeAdapterBase.slice(0, 12) + ')';
-        if (settings.model) report.config.push({ ok: true, runtime, check, note: settings.model + (settings.effort ? ' / ' + settings.effort : '') });
-        else {
-          // 0.7.30 (I-151, D60): the attempt follows its base branch's adapter, so the model committed and pushed there reaches it.
-          const issue = { runtime, check, problem: 'the attempt has no pinned model for this role at the adapter it reads, even if the working copy has one', fix: 'commit the model on the base branch and push it (the attempt follows it), then create a fresh handoff' };
-          if (hostFor(runtime).spawnMode === 'engine-only') bad('config', issue); // A launch by the engine requires a model.
-          else report.warnings.push({ ...issue, ok: true, warn: true }); // An owner-started role may inherit the host's model.
-        }
+      const { findSkill } = await import('./skills.mjs');
+      for (const s of skills) {
+        const where = findSkill(root, s, runtime);
+        lines.push(`Skill ${s}: ${where ? 'found' : `not found for ${runtime}`}`);
       }
-    } catch (error) { bad('config', { check: id + ' execution settings', problem: error.message }); }
-  }
-  const pin = enginePinProblem(cfg.engine);
-  if (pin) bad('config', { check: 'engine version', problem: pin, fix: `upgrade agentic-workflow to ${cfg.engine} or change the pin (\`wf entry\` and \`wf gate\` refuse until then)` });
-  else if (cfg.engine) report.config.push({ ok: true, check: `engine ${ENGINE_VERSION} satisfies the pin ${cfg.engine}` });
-  for (const t of cfg.requires.tools ?? []) {
-    const r = run('sh', ['-c', t.check ?? `command -v ${t.name}`], { allowFail: true, env: projectEnv(cfg) });
-    const have = (r.stdout + r.stderr).match(/(\d+)(?:\.(\d+))?/);
-    const want = String(t.version ?? '').match(/^>=\s*(\d+)(?:\.(\d+))?/);
-    const tooOld = want && have && (Number(have[1]) < Number(want[1]) || (Number(have[1]) === Number(want[1]) && Number(have[2] ?? 0) < Number(want[2] ?? 0)));
-    if (r.status === 0 && tooOld) bad('tools', { tool: t.name, problem: `version ${have[0]} is older than ${t.version}`, fix: t.install ?? `upgrade ${t.name}` });
-    else if (r.status === 0) report.tools.push({ ok: true, tool: t.name });
-    else bad('tools', { tool: t.name, problem: `\`${t.check}\` failed`, fix: t.install ?? `install ${t.name}` });
-  }
-  for (const s of secretsStatus(root, cfg)) {
-    if (s.state === 'filled') report.secrets.push({ ok: true, key: s.key });
-    else if (!s.needed) report.secrets.push({ ok: true, key: s.key, note: `${s.state}; not needed by any step (set \`usedBy\` in secrets.yaml if a step reads it)` });
-    else bad('secrets', { key: s.key, problem: s.state, fix: s.kind === 'generated' || s.kind === 'test' ? 'run `wf secrets init`' : `run \`wf secrets guide ${s.key}\` in your terminal` });
-  }
-  for (const s of cfg.requires.skills ?? []) {
-    const hashes = {};
-    for (const runtime of s.runtimes ?? hostIds().filter((id) => hostFor(id).findSkill)) {
-      const found = findSkill(root, s.name, runtime);
-      if (!found) bad('skills', { skill: s.name, runtime, problem: 'not available to this runtime', fix: s.vendor ? 'run `wf sync`' : `install ${s.name} for ${runtime}` });
-      else if (found.broken) bad('skills', { skill: s.name, runtime, problem: `installed but does not load: ${found.broken}`, fix: found.broken });
-      else {
-        hashes[runtime] = found.sha256;
-        report.skills.push({ ok: true, skill: s.name, runtime, note: `${found.source}: ${found.path} (sha256 ${found.sha256.slice(0, 12)})` });
-      }
-    }
-    // Different copies per runtime mean reviewers on different runtimes apply different checklists.
-    if (new Set(Object.values(hashes)).size > 1) report.skills.push({ ok: true, skill: s.name, note: `copies differ between runtimes (${Object.entries(hashes).map(([r, h]) => `${r} ${h.slice(0, 12)}`).join(', ')}); vendor it into .workflow/skills/ for one version everywhere` });
-  }
-  for (const c of cfg.requires.connectors ?? []) report.connectors.push({ ok: true, connector: c.name, note: `not checkable from the CLI: the agent confirms ${c.name} with one read-only call` });
-  // How wf talks to the tracker: api (verifiable readback) or the agent's connector (agent-reported readback).
-  for (const t of await trackerModeChecks(root, cfg, { loadCatalog, readSecret })) {
-    if (t.info) report.connectors.push({ ok: true, connector: t.check, note: t.plain ? t.problem : `verifiable: ${t.problem}` });
-    else if (t.fail) bad('secrets', { key: t.key, problem: t.problem, fix: t.fix });
-    else report.warnings.push({ ok: true, warn: true, check: t.check, problem: t.problem, fix: t.fix });
-  }
-  // 0.7.27 (I-196, D42): the deployment confirmation after the merge, and a status set at its end with no step (or the reverse).
-  for (const t of await deploymentDoctor(root, cfg)) {
-    if (t.info) report.config.push({ ok: true, check: t.check, note: t.problem });
-    else if (t.fail) bad('config', { check: t.check, problem: t.problem, fix: t.fix });
-    else report.warnings.push({ ok: true, warn: true, check: t.check, problem: t.problem, fix: t.fix });
-  }
-  const inbox = openCount();
-  if (inbox) report.warnings.push({ ok: true, warn: true, check: 'plugin improvements', problem: `${inbox} open plugin improvement(s) in your inbox`, fix: '`wf improve next` in a plugin maintainer session' });
-  // Warnings never fail doctor: each names a setup that let a stale or confounded result through.
-  for (const w of siblingWarnings(root, cfg)) report.warnings.push({ ok: true, warn: true, check: w.check, problem: w.problem, fix: w.fix });
-  for (const w of modelWarnings(root, cfg, runtime)) report.warnings.push({ ok: true, warn: true, check: w.check, problem: w.problem, fix: w.fix });
-  for (const w of staticArtifactWarnings(cfg)) report.warnings.push({ ok: true, warn: true, ...w });
-  for (const w of suiteRerunWarnings(cfg)) report.warnings.push({ ok: true, warn: true, ...w });
-  // 0.7.30 (I-155): a plugin step with no route to prepare its dependencies before the first commit.
-  if (adapterBase) {
-    try {
-      const { prepareRouteWarnings } = await import('./gate.mjs');
-      for (const w of await prepareRouteWarnings(root, loadConfigAtCommit(root, cfg, adapterBase), adapterBase)) report.warnings.push({ ok: true, warn: true, ...w });
-    } catch {}
-  }
-  if (adapterBase) {
-    try {
-      for (const w of ruleWarnings(root, loadConfigAtCommit(root, cfg, adapterBase), adapterBase)) report.warnings.push({ ok: true, warn: true, ...w });
-    } catch {}
-  }
-  const art = artifactReport(root, cfg);
-  if (art.counts.length) report.config.push({ ok: true, check: `artifacts matched in the last gate (${art.from})`, note: art.counts.join('\n    ') });
-  for (const w of art.warnings) report.warnings.push({ ok: true, warn: true, ...w });
-  if (runSteps && adapterBase) {
-    const id = `_doctor-${Date.now()}`;
-    const trusted = loadConfigAtCommit(root, cfg, adapterBase);
-    const made = [];
-    try {
-      for (const repo of trusted.repos) {
-        const dir = repoDir(root, repo);
-        const wt = path.join(root, '.wf-worktrees', id, repo.name);
-        mkdirStateDirectory(path.dirname(wt), { recursive: true });
-        const rref = git(dir, ['rev-parse', '--verify', '--quiet', `${repo.remote}/${repo.base}`], { allowFail: true }) ? `${repo.remote}/${repo.base}` : repo.base;
-        run('git', ['worktree', 'add', '--quiet', '--detach', wt, rref], { cwd: dir });
-        made.push({ dir, wt, repo: repo.name });
-        provision(root, trusted, repo, wt);
-        made.at(-1).before = new Set(untrackedFiles(wt));
-      }
-      for (const step of trusted.gate.steps.filter((s) => (s.tier ?? 'light') === 'light')) {
-        if (!step.run) {
-          report.steps.push({ ok: true, step: step.id, note: 'plugin step: not run by doctor' });
-          continue;
-        }
-        const missing = missingFor(root, trusted, step.id);
-        if (missing.length) {
-          bad('steps', { step: step.id, problem: `needs secrets ${missing.join(', ')}`, fix: 'wf secrets guide' });
-          continue;
-        }
-        const repo = trusted.repos.find((r) => r.name === step.repo);
-        const pkg = step.package ? repo.packages.find((p) => p.path === step.package || p.name === step.package) : repo.packages[0];
-        const cwd = path.join(root, '.wf-worktrees', id, repo.name, pkg?.path ?? '.');
-        const evidence = path.join(root, '.wf-evidence', 'doctor', id, step.id);
-        mkdirStateDirectory(evidence, { recursive: true });
-        const command = step.run.replace(/\{workers\}/g, String(chooseWorkers(step).n)).replace(/\{evidence\}/g, shellQuote(evidence)).replace(/\{(select|suites)\}/g, '').replace(/\{shards?\}/g, '1');
-        if (!fs.existsSync(cwd)) {
-          bad('steps', { step: step.id, kind: 'config', problem: `directory ${path.relative(root, cwd)} does not exist at ${repo.base}` });
-          continue;
-        }
-        const r = run('sh', ['-c', command], { cwd, allowFail: true, env: projectEnv(trusted, { ...stepEnv(root, trusted, step.id), WF_ROOT: root, WF_EVIDENCE: evidence }) });
-        const redact = redactor(root, trusted);
-        fs.writeFileSync(path.join(evidence, 'output.log'), redact(`${r.stdout}\n${r.stderr}`));
-        if (r.status === 0) report.steps.push({ ok: true, step: step.id });
-        else {
-          const configError = r.status === 127 || /command not found|not found:|No such file or directory|Missing script/i.test(r.stderr + r.stdout);
-          bad('steps', { step: step.id, kind: configError ? 'config' : 'red-baseline', problem: `exit ${r.status}`, log: path.join(evidence, 'output.log'), fix: configError ? 'fix the command or path in project.yaml' : 'tests already fail on a clean base: fix them as the first quick fix' });
-        }
-      }
-      // Files light steps leave untracked on a clean base (caches, reports) make every worktree look changed and get
-      // in the way of the gate's uncommitted-change check: they belong in .gitignore.
-      for (const m of made) {
-        const left = untrackedFiles(m.wt).filter((f) => !m.before.has(f));
-        if (left.length) report.warnings.push({ ok: true, warn: true, check: `untracked files in ${m.repo}`, problem: `light steps left ${left.length} untracked path(s) on a clean base: ${left.slice(0, 8).join(', ')}${left.length > 8 ? ' …' : ''}`, fix: `add to ${m.repo}/.gitignore:\n      ${left.map((f) => `/${f}`).join('\n      ')}`, gitignore: left.map((f) => `/${f}`) });
-      }
-    } finally {
-      for (const m of made) run('git', ['worktree', 'remove', '--force', m.wt], { cwd: m.dir, allowFail: true });
-      fs.rmSync(path.join(root, '.wf-worktrees', id), { recursive: true, force: true });
+    } catch (error) {
+      lines.push(`Required skills not checked: ${error.message}`);
     }
   }
-  return report;
+  return { text: lines.join('\n'), data: { registered: entry, changed } };
 }
 
-export { findRoot };
+// ---------------------------------------------------------------------------------------------------------------------
+// wf secrets guide|check: names and states only; no value is ever printed
+// ---------------------------------------------------------------------------------------------------------------------
+
+function secretsCfg(root, adapter) {
+  const catalog = readYaml(path.join(root, '.workflow', 'secrets.yaml'));
+  const top = catalog && !Array.isArray(catalog) ? catalog : {};
+  return { name: adapter?.name ?? path.basename(root), repos: adapter?.repos ?? [{ name: path.basename(root), path: '.' }], secrets: { store: top.store ?? 'env-file', ...(top.file ? { file: top.file } : {}) } };
+}
+async function secretsStatus(root, adapter) {
+  if (!fs.existsSync(path.join(root, '.workflow', 'secrets.yaml'))) return { rows: [] };
+  const secrets = await import('./secrets.mjs');
+  return { rows: secrets.status(root, secretsCfg(root, adapter)) };
+}
+
+export async function cmdSecrets(ctx, args) {
+  const env = ctx.env ?? process.env;
+  const root = real(ctx.root ?? ctx.cwd);
+  const [sub = 'check', key] = (args._ ?? []).filter((x) => x !== 'secrets');
+  const adapter = locate(root, env)?.raw?.version === 2 ? await loadAdapter(root, { env }) : null;
+  if (sub === 'check') {
+    const { rows } = await secretsStatus(root, adapter);
+    if (!rows.length) return { text: 'No secrets catalogued (.workflow/secrets.yaml).', data: { rows } };
+    const missing = rows.filter((r) => r.needed && r.state !== 'filled');
+    return { text: rows.map((r) => `${r.state === 'filled' ? '✓' : '✗'} ${r.key}: ${r.state}${r.needed ? '' : ' (no step needs it)'}`).join('\n'), data: { rows }, exitCode: missing.length ? 1 : 0 };
+  }
+  if (sub === 'guide') {
+    if (!process.stdin.isTTY) throw new WfError('`wf secrets guide` asks for values with hidden input: run it in your own terminal');
+    const secrets = await import('./secrets.mjs');
+    await secrets.guide(root, secretsCfg(root, adapter), key);
+    return { text: '' };
+  }
+  throw new WfError(`wf secrets ${sub}: the subcommands are guide and check`);
+}
+
+export const implements08 = { proposePolicy, writeAdapter, cmdDoctor, cmdInit, cmdSync, cmdSecrets };
