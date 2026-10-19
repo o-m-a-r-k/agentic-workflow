@@ -8,9 +8,7 @@
 //   since the last reviewed commit, by D87's merge-tree comparison) and `merge:foreign` (a merge commit whose merged
 //   parent is not on the base).
 import fs from 'node:fs';
-import path from 'node:path';
-import { attemptDir, attemptState, canonicalJson, loadAdapter } from './contract.mjs';
-import { mkdirStateDirectory } from './state-folders.mjs';
+import { attemptState, canonicalJson, loadAdapter } from './contract.mjs';
 import { git, matchesAny, run, sha256 } from './util.mjs';
 
 export const remoteOf = (spec) => spec?.remote || 'origin';
@@ -59,8 +57,10 @@ export function dirtyRepos(state) {
   return out;
 }
 
+// The repo's adapter spec with the attempt's recorded base (`wf start --base`): every base read of an attempt goes here.
 export function specOf(adapter, name, r) {
-  return repoSpec(adapter, name) ?? { name, path: name, base: r?.base, remote: 'origin', kinds: { tests: [], other: [] } };
+  const spec = repoSpec(adapter, name) ?? { name, path: name, base: r?.base, remote: 'origin', kinds: { tests: [], other: [] } };
+  return r?.base ? { ...spec, base: r.base } : spec;
 }
 
 export function baseOf(state, adapter, name) {
@@ -74,8 +74,8 @@ export function mergeBaseOf(state, adapter, name) {
   return (ref && git(r.worktree, ['merge-base', 'HEAD', ref], { allowFail: true })) || r.baseSha;
 }
 
-// The attempt's tree: sha256 over each repo's committed tree object, 16 hex. The heads behind it are kept in
-// <attempt>/trees/<tree>.json, so a recorded tree can be walked back to commits (the merge facts).
+// The attempt's tree: sha256 over each repo's committed tree object, 16 hex, and the heads behind it. Events that record
+// a tree (handoff, screens, reviews) carry the heads too, so the merge facts read the reviewed commits from the ledger.
 export function treeOf(root, attempt, state) {
   const trees = {};
   const heads = {};
@@ -84,22 +84,7 @@ export function treeOf(root, attempt, state) {
     heads[name] = git(r.worktree, ['rev-parse', 'HEAD']);
     trees[name] = git(r.worktree, ['rev-parse', 'HEAD^{tree}']);
   }
-  const tree = sha256(canonicalJson(trees)).slice(0, 16);
-  const file = path.join(attemptDir(root, attempt), 'trees', `${tree}.json`);
-  if (!fs.existsSync(file)) {
-    mkdirStateDirectory(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, JSON.stringify({ tree, heads, trees }, null, 2));
-  }
-  return { tree, heads };
-}
-
-// The heads a recorded tree stood for, or null when this machine never computed it.
-export function headsOfTree(root, attempt, tree) {
-  try {
-    return JSON.parse(fs.readFileSync(path.join(attemptDir(root, attempt), 'trees', `${tree}.json`), 'utf8')).heads ?? null;
-  } catch {
-    return null;
-  }
+  return { tree: sha256(canonicalJson(trees)).slice(0, 16), heads };
 }
 
 // ChangedFile[] of one repo between two commits.
@@ -123,7 +108,8 @@ export function changedOf(root, attempt, state, adapter) {
     if (!fs.existsSync(r.worktree)) continue;
     files.push(...diffFiles(r.worktree, specOf(adapter, name, r), mergeBaseOf(state, adapter, name)));
   }
-  return { tree: treeOf(root, attempt, state).tree, files };
+  const { tree, heads } = treeOf(root, attempt, state);
+  return { tree, heads, files };
 }
 
 async function changedFiles(root, attempt) {

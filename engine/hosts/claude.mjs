@@ -4,7 +4,6 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { findSkill } from './claude-skills.mjs';
-import { markdownRole } from './role-files.mjs';
 import { firstEntry, isSafeName, readEntries, settleTranscript } from './safe-file.mjs';
 import { textOf } from './tool-calls.mjs';
 
@@ -158,10 +157,8 @@ export default {
   markerEnv: ['CLAUDECODE'],
   envPrefixes: ['CLAUDE_CODE_', 'CLAUDECODE', 'ANTHROPIC_'],
   detect: (env) => (env.CLAUDE_CODE_SESSION_ID ? env.CLAUDE_CODE_SESSION_ID : null),
-  agentsDir: '.claude/agents',
   skillsDir: '.claude/skills',
   findSkill,
-  roleFile: ({ root, name, description, model, effort, tools, body }) => ({ file: path.join(root, '.claude', 'agents', `${name}.md`), content: markdownRole({ name, description, model, effort, tools, body }) }),
   transcript,
   projectTranscripts,
   timeline,

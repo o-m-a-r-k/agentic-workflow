@@ -93,6 +93,7 @@ export async function land(root, ready, { onWait } = {}) {
       fetchBase(checkout, spec);
       const members = [];
       for (const a of inRepo) {
+        if ((states.get(a).repos[repo].base ?? spec.base) !== spec.base) { result.failed.push({ attempt: a, repo, reason: `its base is ${states.get(a).repos[repo].base}, not ${spec.base}: deliver it with a push or merge-request stage`, log: null }); blocked.set(a, `its ${repo} part did not land`); continue; }
         if (!touches(checkout, spec, states.get(a).repos[repo].branch)) continue;
         if (blocked.has(a)) result.failed.push({ attempt: a, repo, reason: blocked.get(a), log: null });
         else members.push(a);

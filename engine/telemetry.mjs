@@ -244,7 +244,7 @@ async function reworkOf(root, state, adapter, deliveredAt) {
     if (!spec) continue;
     const cwd = path.join(root, spec.path);
     if (!fs.existsSync(cwd)) continue;
-    const base = baseRef(cwd, spec);
+    const base = baseRef(cwd, { ...spec, base: r.base ?? spec.base });
     const branch = r.branch ?? branchName(state.id);
     if (!base || !refExists(cwd, branch)) continue;
     const lastBase = [r.baseSha, ...(state.baseUpdates ?? []).filter((u) => u.repo === repo).map((u) => u.to)].filter(Boolean).at(-1);

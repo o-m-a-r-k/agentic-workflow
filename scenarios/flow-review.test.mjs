@@ -5,10 +5,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { canonicalJson, setDoubles } from '../engine/contract.mjs';
-import { ledgerLines, reviewerTranscript } from './helpers/index.mjs';
+import { ledgerLines, reviewerTranscript, transcript } from './helpers/index.mjs';
 import { sha256 } from '../engine/util.mjs';
 import doubles, { answer } from './flow-doubles.mjs';
-import { attempt, commitWt, flow, read, review, setup, started } from './flow-fixture.mjs';
+import { attempt, commitWt, flow, read, review, reviewerWrote, setup, started } from './flow-fixture.mjs';
 
 const finding = (location, cls, severity = 'medium', what = 'wrong') => ({ location, class: cls, severity, what, why: 'it matters' });
 
@@ -91,7 +91,7 @@ test('bundle: above the split size the review splits by area; a risk change abov
   }
 });
 
-test('record: review:tree, review:independent (not launched; implementer), review:coverage from the transcript; unverified without one', async () => {
+test('record: review:independent (not launched; implementer), review:coverage from the transcript; unverified without one', async () => {
   const p = setup();
   try {
     const s = await started(p);
@@ -102,24 +102,79 @@ test('record: review:tree, review:independent (not launched; implementer), revie
     const files = b.productFiles.map((f) => path.join(p.wt(s.id, 'client'), f.slice('client/'.length)));
     reviewerTranscript({ home: p.home, cwd: p.root, files, skip: [files[0]], session: session.id });
     const input = { session, seat: 'whole', tree, findings: [], verified: [] };
-    await assert.rejects(flow.recordReview(p.root, s.id, { ...input, tree: 'deadbeef' }), (e) => e.refusalId === 'review:tree');
     await assert.rejects(flow.recordReview(p.root, s.id, { ...input, session: { runtime: 'claude', id: 'self' } }), (e) => e.refusalId === 'review:independent');
     await assert.rejects(flow.recordReview(p.root, s.id, input), (e) => e.refusalId === 'review:coverage' && /1 of 2/.test(e.message));
     reviewerTranscript({ home: p.home, cwd: p.root, files, session: session.id });
     const r = await flow.recordReview(p.root, s.id, input);
     assert.equal(r.coverage, 'complete');
+    // The review records the heads it stands for, in the ledger.
+    assert.deepEqual(ledgerLines(p.root, s.id).find((e) => e.type === 'review.recorded').data.heads, b.heads);
     // An implementer's session cannot review.
     const ctx = { cwd: p.root, root: p.root, env: process.env, actor: null, json: false };
     await flow.cmdHandoff(ctx, { _: ['implementer'], flags: { attempt: s.id, session: 'claude:impl-1' } });
-    const b2 = { ...b, seat: 'second' };
     await doubles.append(p.root, s.id, 'handoff', { role: 'reviewer', session: { runtime: 'claude', id: 'impl-1' }, launchedBy: 'wf', seat: 'second', tree, round: 1 }, null);
-    await assert.rejects(flow.recordReview(p.root, s.id, { ...input, seat: b2.seat, session: { runtime: 'claude', id: 'impl-1' } }), (e) => e.refusalId === 'review:independent' && /implementer/.test(e.message));
+    await assert.rejects(flow.recordReview(p.root, s.id, { ...input, seat: 'second', session: { runtime: 'claude', id: 'impl-1' } }), (e) => e.refusalId === 'review:independent' && /implementer/.test(e.message));
     await assert.rejects(flow.cmdHandoff(ctx, { _: ['reviewer'], flags: { attempt: s.id, session: 'x' } }), (e) => e.refusalId === 'review:independent');
     // No readable transcript: coverage is recorded as unverified.
     process.env.WF_TEST_NO_TRANSCRIPT = '1';
     const { session: s3 } = await doubles.launchReviewer(p.root, s.id, b);
     const r3 = await flow.recordReview(p.root, s.id, { ...input, session: s3 });
     assert.equal(r3.coverage, 'unverified');
+  } finally {
+    p.done();
+  }
+});
+
+test('record: the reviewed tree is the one wf launched the reviewer on; a review file or --session cannot name HEAD instead (review:tree)', async () => {
+  const p = setup();
+  try {
+    const s = await started(p);
+    commitWt(p, s.id, 'client', { 'src/pages/items.mjs': 'export const page = "/items/";\n' });
+    const { bundles } = await flow.bundle(p.root, s.id);
+    const b = bundles[0];
+    const { session } = await doubles.launchReviewer(p.root, s.id, b);
+    // The implementer commits after the launch: the reviewer saw the old tree.
+    commitWt(p, s.id, 'client', { 'src/pages/items.mjs': 'export const page = "unreviewed";\n' });
+    const { tree: now } = await flow.bundle(p.root, s.id);
+    const file = path.join(p.tmp, 'claims-head.json');
+    reviewerWrote(p, session.id, { files: [path.join(p.wt(s.id, 'client'), 'src/pages/items.mjs')], output: file, review: { tree: now, seat: 'whole', findings: [], verified: [] } });
+    const ctx = { cwd: p.root, root: p.root, env: process.env, actor: null, json: false };
+    await assert.rejects(flow.cmdReview(ctx, { _: [], flags: { attempt: s.id, record: file, session: `claude:${session.id}` } }), (e) => e.refusalId === 'review:tree' && e.message.includes(`launched on tree ${b.tree}`));
+    await assert.rejects(flow.recordReview(p.root, s.id, { session, seat: 'whole', tree: now, findings: [], verified: [] }), (e) => e.refusalId === 'review:tree');
+    assert.equal(ledgerLines(p.root, s.id).filter((e) => e.type === 'review.recorded').length, 0);
+  } finally {
+    p.done();
+  }
+});
+
+test('record: the review file must be the reviewer\'s own output: its transcript\'s write of these bytes, or its final message\'s JSON', async () => {
+  const p = setup();
+  try {
+    const s = await started(p);
+    commitWt(p, s.id, 'client', { 'src/pages/items.mjs': 'export const page = "/items/";\n' });
+    const ctx = { cwd: p.root, root: p.root, env: process.env, actor: null, json: false };
+    await flow.cmdReview(ctx, { _: [], flags: { attempt: s.id } });
+    const h = ledgerLines(p.root, s.id).find((e) => e.type === 'handoff');
+    const dir = path.join(p.root, '.wf-evidence', 'attempts', s.id, 'reviews');
+    const b = JSON.parse(read(path.join(dir, fs.readdirSync(dir).find((d) => d.startsWith('r1-')), 'bundle-whole.json')));
+    const files = [path.join(p.wt(s.id, 'client'), 'src/pages/items.mjs')];
+    const blocker = { findings: [finding('client/src/pages/items.mjs:1', 'goal', 'low')], verified: [] };
+    // Someone else writes the file: the reviewer's transcript shows no write of it.
+    reviewerTranscript({ home: p.home, cwd: p.root, files, session: h.data.session.id });
+    fs.writeFileSync(b.output, JSON.stringify({ findings: [], verified: [] }));
+    const rec = (extra = {}) => flow.cmdReview(ctx, { _: [], flags: { attempt: s.id, record: b.output, ...extra } });
+    await assert.rejects(rec(), (e) => e.refusalId === 'review:independent' && /own output/.test(e.message));
+    // The reviewer wrote a blocker; the file was then edited to drop it.
+    reviewerWrote(p, h.data.session.id, { files, output: b.output, review: blocker });
+    fs.writeFileSync(b.output, JSON.stringify({ findings: [], verified: [] }));
+    await assert.rejects(rec(), (e) => e.refusalId === 'review:independent');
+    // A reviewer that gives its JSON as its final message: the file holding that JSON is its own.
+    const t = transcript({ home: p.home, cwd: p.root, session: h.data.session.id });
+    for (const f of files) t.read(f);
+    t.say(`Here is my review:\n${JSON.stringify(blocker)}`).write();
+    fs.writeFileSync(b.output, JSON.stringify(blocker, null, 2));
+    const r = await rec();
+    assert.equal(r.data.blockers, 1);
   } finally {
     p.done();
   }
@@ -154,8 +209,7 @@ test('the reviewer writes findings and verified where its prompt says; --record 
     const h = ledgerLines(p.root, s.id).find((e) => e.type === 'handoff');
     const bundleFile = fs.readdirSync(path.join(p.root, '.wf-evidence', 'attempts', s.id, 'reviews')).map((d) => path.join(p.root, '.wf-evidence', 'attempts', s.id, 'reviews', d, 'bundle-whole.json'))[0];
     const b = JSON.parse(read(bundleFile));
-    reviewerTranscript({ home: p.home, cwd: p.root, files: [path.join(p.wt(s.id, 'client'), 'src/pages/items.mjs')], session: h.data.session.id });
-    fs.writeFileSync(b.output, JSON.stringify({ findings: [finding('client/src/pages/items.mjs:1', 'goal', 'low')], verified: [] }));
+    reviewerWrote(p, h.data.session.id, { files: [path.join(p.wt(s.id, 'client'), 'src/pages/items.mjs')], output: b.output, review: { findings: [finding('client/src/pages/items.mjs:1', 'goal', 'low')], verified: [] } });
     const r = await flow.cmdReview(ctx, { _: [], flags: { attempt: s.id, record: b.output } });
     assert.equal(r.data.blockers, 1);
     assert.equal(r.data.findings[0].id, 'F1');

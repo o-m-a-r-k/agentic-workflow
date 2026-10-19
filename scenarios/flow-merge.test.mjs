@@ -22,13 +22,15 @@ test('merge:unreviewed: a commit after the review is refused; an automatic base 
     const wt = p.wt(s.id, 'client');
     git(wt, ['fetch', '--quiet', 'origin']);
     git(wt, ['merge', '--quiet', '--no-edit', 'origin/stable']);
+    assert.deepEqual((await flow.mergeFacts(p.root, s.id, { repo: 'client' })).map((f) => f.fact), ['fast'], 'the merged tree has no fast run yet');
+    await doubles.runTests(p.root, s.id, 'client', 'fast');
     assert.deepEqual(await flow.mergeFacts(p.root, s.id, { repo: 'client' }), []);
     // A merge whose result differs from git's own is unreviewed.
     p.pushElsewhere('client', { 'src/third.mjs': 'export const third = 1;\n' });
     git(wt, ['fetch', '--quiet', 'origin']);
     git(wt, ['merge', '--quiet', '--no-commit', 'origin/stable']);
     p.commit('client', { 'src/pages/items.mjs': 'export const page = "edited in the merge";\n' }, 'merge with an edit', { cwd: wt });
-    const facts = await flow.mergeFacts(p.root, s.id, { repo: 'client' });
+    const facts = (await flow.mergeFacts(p.root, s.id, { repo: 'client' })).filter((f) => f.fact !== 'fast');
     assert.deepEqual(ids(facts), ['merge:unreviewed']);
     assert.match(facts[0].message, /differs from git's automatic merge/);
     // A plain commit after the review is too.

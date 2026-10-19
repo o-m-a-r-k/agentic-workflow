@@ -74,12 +74,13 @@ test('from 0.7: init --from-07 and migrate attempts, then a ticket on the migrat
     t.human('Implement TK-5.').toolCall('mcp__board__add_comment', { issue: 'TK-5', body: `Open the notes list: the notes are in title order.\n\n${mark}` }, 'comment added');
     t.write();
     assert.match(wf(p, ['deliver'], as).out, /1 status: pending — .*Item TK-5 to "Testing"/);
-    t.toolCall('mcp__board__set_status', { issue: 'TK-5', status: 'Testing' }, 'status set').write();
+    t.toolCall('mcp__board__set_status', { issue: 'TK-5', status: 'Testing' }, 'status set to Testing').write();
     const d4 = wf(p, ['deliver'], as);
     assert.match(d4.out, /1 status: done/);
     assert.match(d4.out, /2 status: pending — .*report its labels/);
-    // The labels the owner read: not Urgent, so the label-filtered stages are skipped.
-    assert.match(wf(p, ['deliver', '--labels', 'Minor'], as).out, /delivered: every stage is done/);
+    // The labels the owner read through its connector: not Urgent, so the label-filtered stages are skipped.
+    t.toolCall('mcp__board__get_issue', { issue: 'TK-5' }, JSON.stringify({ id: 'TK-5', labels: ['Minor'] })).write();
+    assert.match(wf(p, ['deliver'], as).out, /delivered: every stage is done/);
     assert.deepEqual(events(p, 'TK-5.2', 'stage').filter((e) => e.data.index >= 2).map((e) => e.data.state), ['pending', 'skipped', 'skipped', 'skipped']);
 
     assert.match(wf(p, ['close'], as).out, /TK-5\.2 closed \(shipped\)/);

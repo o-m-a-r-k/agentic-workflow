@@ -33,12 +33,18 @@ export function parseArgv(argv) {
   return { _, flags };
 }
 
+// Flags a command takes beyond what its one-line description names.
+const MORE = {
+  start: '--repos a,b: only these repos; --base <branch> or <repo>=<branch>,..: start from another base; --no-tracker <id>: work with no tracker item',
+  review: '--no-wait: return once the reviewers are launched (by default it waits until each is done or failed)',
+};
+
 export function help() {
   const width = Math.max(...Object.keys(COMMANDS).map((k) => k.length));
   return [
     `wf ${ENGINE_VERSION}: one flow per ticket. \`wf status\` names the next command.`,
     '',
-    ...Object.entries(COMMANDS).map(([name, c]) => `  ${name.padEnd(width)}  ${c.does.replace(/^\S+\s*/, '')}`),
+    ...Object.entries(COMMANDS).flatMap(([name, c]) => [`  ${name.padEnd(width)}  ${c.does.replace(/^\S+\s*/, '')}`, ...(MORE[name] ? [`  ${''.padEnd(width)}    ${MORE[name]}`] : [])]),
     '',
     `Aliases: ${Object.entries(COMMAND_ALIASES).map(([a, b]) => `${a} = ${b}`).join(', ')}. Every command takes --json.`,
   ].join('\n');

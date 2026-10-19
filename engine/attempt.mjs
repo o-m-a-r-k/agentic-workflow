@@ -197,10 +197,12 @@ export async function provision(root, adapter, spec, wt) {
   return report;
 }
 
-async function startAttempt(root, rawItem, { actor = null, repos = null } = {}) {
+// `bases`: { <repo>: <branch> } or { '*': <branch> } from `--base`. `noTracker`: the item is not a tracker id; the attempt
+// records `ticketing: none`, sets no tracker status and snapshots no stage that needs the tracker.
+async function startAttempt(root, rawItem, { actor = null, repos = null, bases = null, noTracker = false } = {}) {
   const adapter = await loadAdapter(root);
   // `item` names attempts, folders and branches (it may be an older spelling found in a ledger); `canonical` is the tracker's.
-  const { item } = await normaliseId(root, String(rawItem ?? ''));
+  const item = noTracker ? String(rawItem ?? '').trim() : (await normaliseId(root, String(rawItem ?? ''))).item;
   assertSafeId(item, 'item');
   const ids = await listAttempts(root, { item });
   for (const id of ids) {
@@ -212,7 +214,13 @@ async function startAttempt(root, rawItem, { actor = null, repos = null } = {}) 
     }
   }
   const wanted = repos?.length ? repos : adapter.repos.map((r) => r.name);
-  for (const name of wanted) if (!adapter.repos.some((r) => r.name === name)) throw new WfError(`unknown repo \`${name}\` (repos: ${adapter.repos.map((r) => r.name).join(', ')})`);
+  for (const name of [...wanted, ...Object.keys(bases ?? {}).filter((k) => k !== '*')]) if (!adapter.repos.some((r) => r.name === name)) throw new WfError(`unknown repo \`${name}\` (repos: ${adapter.repos.map((r) => r.name).join(', ')})`);
+  for (const b of Object.values(bases ?? {})) if (run('git', ['check-ref-format', '--branch', b], { cwd: root, allowFail: true }).status !== 0) throw new WfError(`--base: \`${b}\` is not a branch name`);
+  // The attempt's own base per repo: every base read of the attempt takes it from `attempt.started`.
+  const specFor = (name) => {
+    const spec = adapter.repos.find((r) => r.name === name);
+    return { ...spec, base: bases?.[name] ?? bases?.['*'] ?? spec.base };
+  };
   const n = Math.max(0, ...usedNumbers(root, adapter, item, ids)) + 1;
   const id = attemptId(item, n);
   const branch = branchName(id);
@@ -220,7 +228,7 @@ async function startAttempt(root, rawItem, { actor = null, repos = null } = {}) 
   // Fetch every repo first: nothing is created unless every base could be fetched.
   const tips = {};
   for (const name of wanted) {
-    const spec = adapter.repos.find((r) => r.name === name);
+    const spec = specFor(name);
     const dir = path.join(root, spec.path);
     if (!fs.existsSync(dir)) throw new WfError(`repo ${name} is not checked out at ${dir}`);
     assertPlainGit(dir);
@@ -237,7 +245,7 @@ async function startAttempt(root, rawItem, { actor = null, repos = null } = {}) 
   const provisioned = {};
   try {
     for (const name of wanted) {
-      const spec = adapter.repos.find((r) => r.name === name);
+      const spec = specFor(name);
       const dir = path.join(root, spec.path);
       const wt = worktreeDir(root, id, name);
       mkdirStateDirectory(path.dirname(wt), { recursive: true });
@@ -247,10 +255,11 @@ async function startAttempt(root, rawItem, { actor = null, repos = null } = {}) 
       recorded[name] = { branch, base: spec.base, baseSha: tips[name], worktree: wt };
     }
     const from = ids.length ? ids[ids.length - 1] : null;
+    const stages = (adapter.delivery?.stages ?? []).filter((st) => !noTracker || (!['status', 'comment'].includes(st.do) && !st.when?.labels));
     await append(root, id, 'attempt.started', {
-      item, n, repos: recorded, stages: adapter.delivery?.stages ?? [],
+      item, n, repos: recorded, stages,
       adapter: { file: adapter.source?.file ?? null, hash: adapter.source?.hash ?? null }, engine: ENGINE_VERSION,
-      ...(from ? { from } : {}),
+      ...(from ? { from } : {}), ...(noTracker ? { ticketing: 'none' } : {}),
     }, actor);
   } catch (error) {
     for (const m of made.reverse()) {
@@ -263,7 +272,7 @@ async function startAttempt(root, rawItem, { actor = null, repos = null } = {}) 
 
   // The tracker's "taken" status, as stage -1 (stream 3). A failure here leaves the attempt started and says so.
   let take = null;
-  if (adapter.ticketing?.take?.status) {
+  if (adapter.ticketing?.take?.status && !noTracker) {
     try {
       take = await runStage(root, id, { do: 'status', to: adapter.ticketing.take.status, status: adapter.ticketing.take.status });
     } catch (error) {
@@ -277,12 +286,28 @@ async function start(root, rawItem, opts = {}) {
   return (await startAttempt(root, rawItem, opts)).state;
 }
 
+// `--base <branch>` (every repo) or `--base <repo>=<branch>,...`.
+export function basesFlag(value) {
+  if (!value) return null;
+  const out = {};
+  for (const part of value.split(',').map((x) => x.trim()).filter(Boolean)) {
+    const i = part.indexOf('=');
+    if (i > 0) out[part.slice(0, i)] = part.slice(i + 1);
+    else out['*'] = part;
+  }
+  return out;
+}
+
 async function cmdStart(ctx, args) {
   const root = projectRoot(ctx);
-  const raw = args._[0];
-  if (!raw) throw new WfError('wf start <item>: the tracker\'s id of the work is required');
+  // `--no-tracker <id>` takes the id as its value.
+  const nt = args.flags['no-tracker'];
+  const noTracker = nt !== undefined;
+  const raw = args._[0] ?? (typeof nt === 'string' ? nt : null);
+  if (!raw) throw new WfError('wf start <item> [--repos a,b] [--base <branch>|<repo>=<branch>,..] [--no-tracker]: the id of the work is required');
   const repos = flagText(args, 'repos')?.split(',').map((s) => s.trim()).filter(Boolean) ?? null;
-  const { state, take, provisioned, tips } = await startAttempt(root, raw, { actor: ctx.actor, repos });
+  const bases = basesFlag(flagText(args, 'base'));
+  const { state, take, provisioned, tips } = await startAttempt(root, raw, { actor: ctx.actor, repos, bases, noTracker });
   const lines = [`started ${state.id} from fresh bases:`];
   for (const [name, r] of Object.entries(state.repos)) {
     const p = provisioned[name];
@@ -290,6 +315,7 @@ async function cmdStart(ctx, args) {
     lines.push(`  ${name}: ${r.worktree} (branch ${r.branch} at ${r.base} ${String(tips[name]).slice(0, 10)})${extra.length ? `; ${extra.join('; ')}` : ''}`);
   }
   if (take) lines.push(take.state === 'failed' ? `tracker status not set: ${take.error}` : take.state === 'pending' ? `tracker status: do this now: ${take.next}` : `tracker status: ${take.state}`);
+  if (noTracker) lines.push('no tracker: no status is set and nothing is filed for this attempt');
   lines.push(`next: wf criteria --file <criteria file> --attempt ${state.id}`);
   return { text: lines.join('\n'), data: { attempt: state.id, item: state.item, repos: state.repos, take } };
 }
@@ -348,13 +374,27 @@ export function patchFacts(root, state, adapter, name) {
   const commits = git(cwd, ['rev-list', '--first-parent', '--no-merges', `${fork}..${head}`]).split('\n').filter(Boolean);
   if (!commits.length) return { commits: 0, unshipped: [], patchIds: [] };
   const cherry = base ? git(cwd, ['cherry', base, head, fork], { allowFail: true }).split('\n').filter(Boolean) : [];
-  const unshipped = cherry.filter((l) => l.startsWith('+ ')).map((l) => l.slice(2));
+  let unshipped = cherry.filter((l) => l.startsWith('+ ')).map((l) => l.slice(2));
+  // A squashed landing: one commit on the base carries the attempt's whole change.
+  if (base && unshipped.length && squashedOnBase(cwd, base, head)) unshipped = [];
   const patch = run('git', ['log', '-p', '--first-parent', '--no-merges', '--format=commit %H', `${fork}..${head}`], { cwd }).stdout;
   const ids = run('git', ['patch-id', '--stable'], { cwd, input: patch, allowFail: true }).stdout.split('\n').filter(Boolean).map((l) => {
     const [pid, commit] = l.split(' ');
     return { repo: name, commit, patchId: pid };
   });
   return { commits: commits.length, unshipped: base ? unshipped : commits, patchIds: ids };
+}
+
+const patchIdOf = (cwd, patch) => run('git', ['patch-id', '--stable'], { cwd, input: patch, allowFail: true }).stdout.split('\n').filter(Boolean).map((l) => l.split(' '));
+
+// Whether a commit on the base since the attempt's merge-base has the patch-id of the attempt's whole diff.
+function squashedOnBase(cwd, base, head) {
+  const mb = git(cwd, ['merge-base', base, head], { allowFail: true });
+  if (!mb) return false;
+  const whole = patchIdOf(cwd, run('git', ['diff', '--no-color', mb, head], { cwd, allowFail: true }).stdout)[0]?.[0];
+  if (!whole) return false;
+  const onBase = run('git', ['log', '-p', '--no-merges', '--format=commit %H', `${mb}..${base}`], { cwd, allowFail: true }).stdout;
+  return patchIdOf(cwd, onBase).some(([pid]) => pid === whole);
 }
 
 function stagesDone(state, events) {
@@ -367,9 +407,9 @@ function stagesDone(state, events) {
 
 // The telemetry row, built by stream 5 while the worktrees still exist (it reads their diff), with the outcome closing it;
 // it is kept in `attempt.closed` so the row survives the worktrees.
-async function buildRow(root, id, outcome) {
+async function buildRow(root, id, outcome, extra = {}) {
   try {
-    return { row: { ...(await row(root, id)), outcome }, error: null };
+    return { row: { ...(await row(root, id)), outcome, ...extra }, error: null };
   } catch (error) {
     return { row: null, error: error.message };
   }
@@ -416,10 +456,14 @@ async function closeWith(ctx, args, outcome) {
   }
   let reason;
   let patchIds;
+  let outsideStages = false;
   if (outcome === 'shipped') {
     const facts = Object.keys(state.repos).map((n) => ({ repo: n, ...patchFacts(root, state, adapter, n) }));
+    if (!facts.some((f) => f.commits)) throw new WfError(`${id} has no commits, so nothing of it shipped`, { hint: `\`wf abandon --attempt ${id} --reason "<why>"\` closes work that will not ship` });
     patchIds = facts.flatMap((f) => f.patchIds);
     const byStages = stagesDone(state, events);
+    // Shipped by patch-id with its stages not done: the change reached the base outside the delivery stages (D16).
+    outsideStages = !byStages;
     const unshipped = facts.filter((f) => f.unshipped.length);
     if (!byStages && unshipped.length) {
       throw new WfError(`${id} is not shipped: its delivery stages are not done, and ${unshipped.map((f) => `${f.unshipped.length} commit(s) of ${f.repo}`).join(', ')} are not on the base by patch-id`, { hint: '`wf deliver` runs the next stage; `wf abandon --reason "<why>"` closes work that will not ship' });
@@ -428,14 +472,15 @@ async function closeWith(ctx, args, outcome) {
   } else {
     reason = flagText(args, 'reason', { required: true });
   }
-  const built = await buildRow(root, id, outcome);
-  await append(root, id, 'attempt.closed', { outcome, reason, ...(patchIds?.length ? { patchIds } : {}), ...(built.row ? { row: built.row } : {}) }, ctx.actor);
+  const extra = outsideStages ? { outsideStages: true } : {};
+  const built = await buildRow(root, id, outcome, extra);
+  await append(root, id, 'attempt.closed', { outcome, reason, ...extra, ...(patchIds?.length ? { patchIds } : {}), ...(built.row ? { row: built.row } : {}) }, ctx.actor);
   const telemetry = await storeRow(root, id);
   const left = removeWorktrees(root, adapter, state);
   const branches = Object.values(state.repos).map((r) => r.branch);
   return {
-    text: `${id} closed (${outcome}): ${reason}. Worktrees removed${left.length ? `, except: ${left.join('; ')}` : ''}; branches kept (${[...new Set(branches)].join(', ')}). ${telemetry}.`,
-    data: { attempt: id, outcome, reason, patchIds: patchIds ?? [], left },
+    text: `${id} closed (${outcome}${outsideStages ? ', outside its delivery stages' : ''}): ${reason}. Worktrees removed${left.length ? `, except: ${left.join('; ')}` : ''}; branches kept (${[...new Set(branches)].join(', ')}). ${telemetry}.`,
+    data: { attempt: id, outcome, reason, outsideStages, patchIds: patchIds ?? [], left },
   };
 }
 

@@ -6,7 +6,6 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { findSkill } from './codex-skills.mjs';
 import { codexTranscript } from './codex-transcript.mjs';
-import { tomlRole } from './role-files.mjs';
 import { firstEntry, readEntries } from './safe-file.mjs';
 import { parseArgs, textOf } from './tool-calls.mjs';
 
@@ -265,10 +264,8 @@ export default {
   markerEnv: ['CODEX_SANDBOX'],
   envPrefixes: ['CODEX_', 'OPENAI_'],
   detect: (env) => (env.CODEX_THREAD_ID ? env.CODEX_THREAD_ID : null),
-  agentsDir: '.codex/agents',
   skillsDir: '.agents/skills',
   findSkill,
-  roleFile: ({ root, name, description, model, effort, body }) => ({ file: path.join(root, '.codex', 'agents', `${name}.toml`), content: tomlRole({ name, description, model, effort, body }) }),
   transcript,
   projectTranscripts,
   timeline,

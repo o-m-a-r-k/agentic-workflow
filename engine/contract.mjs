@@ -376,8 +376,9 @@ export const EVENTS = Object.freeze({
   stage: { stream: 3, required: ['index', 'do', 'state'], optional: ['repo', 'evidence', 'next', 'waitedMin', 'marker'] },
   // Written to every attempt in the batch. result: landed|failed|returned (returned: bisect found this one).
   landing: { stream: 2, required: ['batch', 'repo', 'attempts', 'result'], optional: ['sha', 'full', 'bisects', 'log'] },
-  // outcome: shipped|abandoned|superseded. shipped by patch-id carries patchIds.
-  'attempt.closed': { stream: 1, required: ['outcome', 'reason'], optional: ['patchIds', 'row'] },
+  // outcome: shipped|abandoned|superseded. shipped by patch-id carries patchIds; outsideStages: true when its delivery
+  // stages were not done (D16), also on the row.
+  'attempt.closed': { stream: 1, required: ['outcome', 'reason'], optional: ['patchIds', 'outsideStages', 'row'] },
 });
 
 // Reserved decisions (design section 2). Each kind's owner asks it through `ask` (stream 4).
