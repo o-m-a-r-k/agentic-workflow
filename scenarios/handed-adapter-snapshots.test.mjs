@@ -26,7 +26,7 @@ const correct = (f, e, marker) => {
   commitIn(e.repos.app.worktree, { '.workflow/steps/unit.mjs': PLUGIN(marker) });
   ok(wf(f.root, ['validation', 'correct', '--steps', 'unit', '--reason', `now ${marker}`, '--attempt', e.id], { ownerSilent: true }));
   const bundle = JSON.parse(fs.readFileSync(ok(wf(f.root, ['handoff', 'reviewer', '--agent', `code-${e.id}`, '--attempt', e.id])).out.match(/^Read (\S+)/m)[1], 'utf8'));
-  return bundle.admissionCorrections[0];
+  return Object.assign(bundle.admissionCorrections[0], { bundle });
 };
 const show = (f, file, id, extra = []) => wf(f.root, ['evidence', 'show', file, '--attempt', id, ...extra]);
 
@@ -34,7 +34,13 @@ test('0.7.35 (I-235): a reviewer reads the adapter snapshots its bundle handed w
   const f = singleRepoProject('handed-snapshots', { gate: { steps: [step] } }, { '.workflow/steps/unit.mjs': PLUGIN('admitted') });
   const e = attempt(f, 'ENG-1');
   const c = correct(f, e, 'corrected');
-  for (const v of [c.original, c.corrected]) for (const file of [v.plugin.file, v.plugin.decoded]) assert.ok(file.startsWith(path.join(f.root, '.wf-evidence', 'adapters', v.commit) + path.sep), file);
+  for (const v of [c.original, c.corrected]) for (const file of [v.plugin.file, v.plugin.decoded]) {
+    assert.ok(file.startsWith(path.join(f.root, '.wf-evidence', 'adapters', v.commit) + path.sep), file);
+    assert.equal(fs.statSync(file).mode & 0o777, 0o444, `${file} is written read-only`);
+  }
+  // The bundle names the route to read them.
+  assert.match(c.bundle.instructions, /Read each copy with `wf evidence show <plugin\.decoded> --attempt ENG-1\.1`/);
+  assert.match(c.bundle.instructions, /`wf evidence list --kind adapter --attempt ENG-1\.1` lists every copy you were handed/);
 
   // Each handed path, as the bundle names it, reads: the plugin as committed, the decoded copy line by line.
   const raw = ok(show(f, c.corrected.plugin.file, e.id)).out;
@@ -66,10 +72,19 @@ test('0.7.35 (I-235): a reviewer reads the adapter snapshots its bundle handed w
   const changed = show(f, c.corrected.plugin.decoded, e.id);
   assert.equal(changed.code, 75);
   assert.match(changed.err, /is not the adapter as committed at [0-9a-f]{10}; nothing is read from it/);
-  assert.match(changed.err, /`git -C \S+ show [0-9a-f]{40}:\.workflow\/steps\/unit\.mjs` prints it as committed/);
+  assert.match(changed.err, /`git -C \S+ show [0-9a-f]{40}:\.workflow\/steps\/unit\.mjs` prints the plugin as committed \(the copy here drops its final newline, and the decoded copy expands its string escapes\)/);
   fs.writeFileSync(c.corrected.plugin.decoded, kept);
   ok(show(f, c.corrected.plugin.decoded, e.id));
   assert.equal(ok(wf(f.root, ['verify', '--attempt', e.id])).code, 0, 'nothing was written');
+  // A handed snapshot whose commit folder is gone is still known as handed, and said to be gone, with the way to read it from git.
+  fs.rmSync(path.dirname(c.corrected.plugin.file), { recursive: true, force: true });
+  for (const [file, decodedNote] of [[c.corrected.plugin.file, false], [c.corrected.plugin.decoded, true]]) {
+    const gone = show(f, file, e.id);
+    assert.equal(gone.code, 75);
+    assert.match(gone.err, /: handed by handoffs\/\d+-reviewer\.json, but no longer on disk/);
+    assert.match(gone.err, /`git -C \S+ show [0-9a-f]{40}:\.workflow\/steps\/unit\.mjs` prints the plugin as committed \(the copy here drops its final newline/);
+    assert.equal(/the decoded copy expands its string escapes/.test(gone.err), decodedNote);
+  }
 });
 
 test('0.7.35 (I-235): a snapshot no bundle of this attempt handed stays refused, from another attempt and from the same folder', () => {

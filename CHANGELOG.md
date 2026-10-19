@@ -11,7 +11,8 @@ Release notes, newest first, then every fix that came from a failure in the work
   files from git themselves. Now a snapshot reads when a reviewer bundle of the same attempt names it, and only then: the file must
   be where the workflow writes that plugin at that commit, and its bytes must be the committed text (expanded, for the decoded copy),
   else nothing is read and the refusal gives the `git show` command that prints it as committed. `wf evidence list --kind adapter`
-  lists each handed snapshot once, with the bundle and correction that handed it. Another attempt's snapshot, or any other file in
+  lists each handed snapshot once, with the bundle and correction that handed it, and the reviewer's instructions name both commands.
+  The workflow now writes these copies read-only. Another attempt's snapshot, or any other file in
   that folder, stays refused (`evidence:adapter-not-handed`), and every other attempt's evidence stays a cross-attempt read.
 
 ## 0.7.34 - The strategist steps back and fixes the flow, a base merge costs at most one look, and a re-plan can be checked before it is handed back
@@ -2265,6 +2266,7 @@ A second adversarial pass over the integrated 0.5.0 branch, with scenarios in `s
 
 | Item | Failure fixed | Fixed in | Scenario test |
 | --- | --- | --- | --- |
+| [I-235](improvements/I-235.md) | Reviewer evidence reader rejects handed shared adapter snapshots | 0.7.35 | `scenarios/handed-adapter-snapshots.test.mjs` |
 | [I-234](improvements/I-234.md) | Course signals fired without a strategist being handed for ten rounds | 0.7.34 | `scenarios/strategy-diagnosis.test.mjs` |
 | [I-233](improvements/I-233.md) | A base merge forced by the gate reopens review, so 'reconcile the base once' cannot be followed | 0.7.34 | `scenarios/base-merge-classes.test.mjs` |
 | [I-232](improvements/I-232.md) | The strategist picks an action but never diagnoses why the ticket loops or corrects the flow | 0.7.34 | `scenarios/strategy-diagnosis.test.mjs` |

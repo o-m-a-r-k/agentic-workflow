@@ -92,7 +92,8 @@ function handedSnapshots(root, state) {
   const listable = listableOf(root, state.id);
   let names = [];
   try {
-    names = fs.readdirSync(path.join(dir, 'handoffs')).filter((n) => /-reviewer\.json$/.test(n)).sort();
+    // In handoff order, numerically (a bundle numbered 100 comes after 99): the first bundle to hand a snapshot is the one listed.
+    names = fs.readdirSync(path.join(dir, 'handoffs')).filter((n) => /^\d+-reviewer\.json$/.test(n)).sort((a, b) => parseInt(a, 10) - parseInt(b, 10) || a.localeCompare(b));
   } catch {
     return [];
   }
@@ -123,19 +124,27 @@ function handedSnapshots(root, state) {
 }
 
 // A path with its folder resolved (links on the way taken), the file's own name kept: two spellings of one file compare equal, and a
-// link at the file itself is still seen (and refused) by the no-follow open.
+// link at the file itself is still seen (and refused) by the no-follow open. A folder that is gone is resolved from its nearest
+// existing ancestor (as the evidence guard's `real()` does), so a handed snapshot whose commit folder was removed is still known as
+// handed, and said to be gone.
 function placeOf(file) {
-  try {
-    return path.join(fs.realpathSync.native(path.dirname(file)), path.basename(file));
-  } catch {
-    return null;
+  const rest = [path.basename(file)];
+  let cur = path.dirname(file);
+  for (;;) {
+    try {
+      return path.join(fs.realpathSync.native(cur), ...rest);
+    } catch {
+      const parent = path.dirname(cur);
+      if (parent === cur) return path.resolve(file);
+      rest.unshift(path.basename(cur));
+      cur = parent;
+    }
   }
 }
 
 // The handed snapshot `abs` names, with the bytes it must hold; null when no bundle of this attempt handed it.
 function handedSnapshot(root, state, abs) {
   const at = placeOf(abs);
-  if (!at) return null;
   for (const h of handedSnapshots(root, state)) {
     if (placeOf(h.named) !== at) continue;
     let snap;
@@ -145,7 +154,9 @@ function handedSnapshot(root, state, abs) {
       throw refuse(`${abs}: handed by ${h.handoff}, but ${h.plugin} at ${h.commit.slice(0, 10)} cannot be read from git (${error.message}); nothing is read`);
     }
     if (placeOf(h.decoded ? snap.decoded : snap.dest) !== at) continue;
-    return { ...h, expected: Buffer.from(h.decoded ? decodeEscapes(snap.text) : snap.text, 'utf8'), show: `git -C ${snap.dir} show ${h.commit}:${snap.file}` };
+    // `git` trims what it prints, so the copy the engine writes (and runs) has no final newline; the hint says so.
+    const show = `\`git -C ${snap.dir} show ${h.commit}:${snap.file}\` prints the plugin as committed (the copy here drops its final newline${h.decoded ? ', and the decoded copy expands its string escapes' : ''})`;
+    return { ...h, expected: Buffer.from(h.decoded ? decodeEscapes(snap.text) : snap.text, 'utf8'), show };
   }
   return null;
 }
@@ -171,13 +182,13 @@ export function showEvidence(root, state, rel, { offset, length, maxSize } = {})
   const abs = path.isAbsolute(rel) ? path.resolve(rel) : fromRoot ? path.join(fs.realpathSync.native(evidenceRoot(root)), ...path.normalize(rel).split(/[\\/]/).slice(1)) : path.join(dir, rel);
   if (!abs.startsWith(dir + path.sep)) {
     const adapters = path.join(fs.realpathSync.native(evidenceRoot(root)), 'adapters') + path.sep;
+    if (!placeOf(abs).startsWith(adapters)) throw refuse('give an evidence file inside the selected attempt; cross-attempt and outside reads are refused');
     const snapshot = handedSnapshot(root, state, abs);
     if (snapshot) {
-      if (!fs.lstatSync(abs, { throwIfNoEntry: false })) throw refuse(`${rel}: handed by ${snapshot.handoff}, but no longer on disk`, `\`${snapshot.show}\` prints the plugin as committed${snapshot.decoded ? ' (the decoded copy expands its string escapes)' : ''}`);
+      if (!fs.lstatSync(abs, { throwIfNoEntry: false })) throw refuse(`${rel}: handed by ${snapshot.handoff}, but no longer on disk`, snapshot.show);
       return readText(abs, rel, { start, limit, paged, maxSize, expected: snapshot.expected, mismatch: `${rel} is not the adapter as committed at ${snapshot.commit.slice(0, 10)}; nothing is read from it`, show: snapshot.show });
     }
-    if ((placeOf(abs) ?? abs).startsWith(adapters)) throw refuse(`${rel}: an adapter snapshot no reviewer bundle of ${state.id} handed; only the snapshots its bundles name are read here`, `\`wf evidence list --kind adapter --attempt ${state.id}\` lists them`, { id: 'evidence:adapter-not-handed' });
-    throw refuse('give an evidence file inside the selected attempt; cross-attempt and outside reads are refused');
+    throw refuse(`${rel}: an adapter snapshot no reviewer bundle of ${state.id} handed; only the snapshots its bundles name are read here`, `\`wf evidence list --kind adapter --attempt ${state.id}\` lists them`, { id: 'evidence:adapter-not-handed' });
   }
   let parent;
   try {
@@ -212,19 +223,21 @@ function readText(abs, rel, { start, limit, paged, maxSize, expected, mismatch, 
     const fst = fs.fstatSync(fd);
     if (!fst.isFile() || fst.nlink > 1) throw refuse(`${rel} is not a regular file with one name; nothing is read through it`);
     if (maxSize !== undefined && fst.size > maxSize) throw refuse('structured evidence exceeds the 64 MiB inspection limit');
+    // A handed snapshot is read whole once and compared; the page is then served from those verified bytes, never read again.
+    let whole = null;
     if (expected) {
-      const whole = fst.size === expected.length ? Buffer.alloc(fst.size) : null;
+      whole = fst.size === expected.length ? Buffer.alloc(fst.size) : null;
       let got = 0;
       while (whole && got < whole.length) {
         const k = fs.readSync(fd, whole, got, whole.length - got, got);
         if (!k) break;
         got += k;
       }
-      if (!whole || got !== whole.length || !whole.equals(expected)) throw refuse(mismatch, `\`${show}\` prints it as committed`);
+      if (!whole || got !== whole.length || !whole.equals(expected)) throw refuse(mismatch, show);
     }
     if (start > fst.size) throw new WfError('evidence page offset is past end of file');
-    const buf = Buffer.alloc(Math.min(fst.size - start, limit));
-    let n = 0;
+    const buf = whole ? whole.subarray(start, start + Math.min(fst.size - start, limit)) : Buffer.alloc(Math.min(fst.size - start, limit));
+    let n = whole ? buf.length : 0;
     while (n < buf.length) {
       const k = fs.readSync(fd, buf, n, buf.length - n, start + n);
       if (!k) break;
@@ -247,6 +260,11 @@ function readText(abs, rel, { start, limit, paged, maxSize, expected, mismatch, 
     catch { throw refuse(`${rel} is not valid UTF-8`); }
     const hash = crypto.createHash('sha256'), scratch = Buffer.alloc(65536);
     let at = 0;
+    if (whole) {
+      if (whole.includes(0)) throw refuse(`${rel} is binary; it is not printed`);
+      hash.update(whole);
+      at = fst.size;
+    }
     while (at < fst.size) {
       const k = fs.readSync(fd, scratch, 0, Math.min(scratch.length, fst.size - at), at);
       if (!k) throw refuse('evidence file changed during page read');

@@ -621,11 +621,12 @@ export function decodeEscapes(text) {
 }
 
 // The decoded copy of an adapter file at a commit, written beside its materialised copy (never run; a reviewer reads and diffs it).
+// Both copies are written read-only (0.7.35, I-235): a reviewer is handed them, and `wf evidence show` serves only the committed bytes.
 export function adapterDecodedAtCommit(root, state, commit, rel) {
   const dest = adapterFileAtCommit(root, state, commit, rel);
   const decoded = `${dest}.decoded.txt`;
   const tmp = `${decoded}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
-  const fd = fs.openSync(tmp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW ?? 0), 0o644);
+  const fd = fs.openSync(tmp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW ?? 0), 0o444);
   try {
     fs.writeSync(fd, decodeEscapes(fs.readFileSync(dest, 'utf8')));
   } finally {
@@ -658,7 +659,7 @@ export function adapterFileAtCommit(root, state, commit, rel) {
   const realRoot = fs.realpathSync(root);
   if (fs.realpathSync(dir) !== path.join(realRoot, '.wf-evidence', 'adapters', commit)) throw new WfError(`${dir} is not a real folder inside the project (a link on its path); adapter code is not written through it`);
   const tmp = `${dest}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
-  const fd = fs.openSync(tmp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW ?? 0), 0o644);
+  const fd = fs.openSync(tmp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW ?? 0), 0o444);
   try {
     fs.writeSync(fd, text);
   } finally {
