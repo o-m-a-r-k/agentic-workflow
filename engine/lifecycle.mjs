@@ -308,7 +308,7 @@ export function freezeCriteria(root, options) {
   // planners could only amend criteria (an amendment carries no plan), so their implementation plans never reached a
   // bundle and they wrote documentation plans again. Until the first implementer is handed, the plan of an attempt upgraded
   // after it was frozen is replaced whole by `wf plan`.
-  if (state.criteria && !replanAfterUpgrade(state)) throw refuse('criteria are already frozen', `change them with \`wf criteria amend --file <f> --reason <why>\`${(state.intentChanges ?? []).length ? '; a plan is replaced whole only after an upgrade to implementation and before the first implementer' : ''}`);
+  if (state.criteria && !replanAfterUpgrade(state)) throw refuse('criteria are already frozen', `${options.check ? `check an amendment of them without recording it with \`wf criteria amend --check --file <f> --attempt ${state.id}\` (every check the amendment meets, nothing recorded); ` : ''}change them with \`wf criteria amend --file <f> --reason <why>\`${(state.intentChanges ?? []).length ? '; a plan is replaced whole only after an upgrade to implementation and before the first implementer' : ''}`);
   if (typeof options.file !== 'string' && typeof options['from-agent'] !== 'string') throw new WfError('--file <plan.yaml|json> or --from-agent <planner agent id> is required');
   if (typeof options.file === 'string' && typeof options['from-agent'] === 'string') throw new WfError('pass --file or --from-agent, not both');
   let fromAgent = null, fileText = null, doc, plan, work, impactRecord;
@@ -553,8 +553,13 @@ function droppedFields(state, doc) {
 }
 export function amendCriteria(root, options) {
   const state = openState(root, options);
-  if (!state.criteria) throw refuse('criteria are not frozen yet; use `wf plan`');
-  if (!options.reason || options.reason === true) throw new WfError('--reason is required (say why the criteria change)');
+  if (!state.criteria) throw refuse(`criteria are not frozen yet; use \`wf plan\`${options.check ? ' (`wf plan --check --file <f>` checks a plan without recording it)' : ''}`);
+  // 0.7.34 (I-230, I-231): `--check` is the dry run of this command, for the read-only planner of a re-plan. Named failure (field):
+  // `wf plan --check` refused frozen criteria, and the amendment's schema errors (an impact `contracts` entry naming no query)
+  // surfaced only when the owner recorded it, after the planner had handed back, costing another planner handoff. Every check
+  // below runs; nothing is recorded, no worktree is added and no reason is needed (the owner states it when recording).
+  const check = options.check === true;
+  if (!check && (!options.reason || options.reason === true)) throw new WfError('--reason is required (say why the criteria change)');
   const amendText = readOnce(options.file);
   const doc = parseStructured(options.file, amendText);
   // Named failure (I-127): an amendment carrying only `plan.summary` was accepted, changed nothing and reached no bundle, so
@@ -607,14 +612,6 @@ export function amendCriteria(root, options) {
   const owedScope = { addedCriteria: changes.added, changedCriteria: changes.changed, addedRepos: addRepos, work: doc.work ? true : false };
   const addsScope = changes.added.length || changes.changed.length || addRepos.length || Boolean(doc.work);
   const impactOwed = impactApplies && addsScope && !impactAddendum ? owedScope : null;
-  const from = path.resolve(String(options.file));
-  const added = [];
-  const repoEntries = [];
-  for (const name of addRepos) {
-    const entryOf = addRepoWorktree(root, cfg, state, name);
-    repoEntries.push({ repo: name, entry: entryOf, reason: String(options.reason) });
-    added.push({ repo: name, worktree: entryOf.worktree, base: entryOf.base });
-  }
   // Named failure (I-107): an amendment on an accepted attempt added a criterion and left the acceptance standing, so
   // `wf deliver` shipped it with no evidence mapped to it (`wf accept` would have refused). An amendment that adds or
   // changes a criterion, or adds a repo, withdraws the acceptance, as a supplemental validation does: the attempt is
@@ -626,6 +623,15 @@ export function amendCriteria(root, options) {
   const reopensScope = Boolean(changes.added.length || changes.changed.length || addRepos.length);
   const acceptedNow = Boolean(state.accepted) && !state.delivery.completedAt && !['handoff-pending', 'done', 'abandoned'].includes(state.phase);
   const withdrewAcceptance = reopensScope && acceptedNow && !semverLt(ENGINE_VERSION, '0.7.4');
+  if (check) return { checked: true, changes, criteria: criteria.map((c) => c.id), work: (work ?? []).map((w) => w.id), impact: impactAddendum ? (impactAddendum.unchanged ? 'unchanged' : 'addendum') : null, impactOwed, addRepos, plan: restated ? Object.keys(restated) : [], expect: Boolean(expectOf(stated)), pass: pass.items.map((w) => ({ id: w.id, items: w.items })), withdrawsAcceptance: withdrewAcceptance, left: pass.left };
+  const from = path.resolve(String(options.file));
+  const added = [];
+  const repoEntries = [];
+  for (const name of addRepos) {
+    const entryOf = addRepoWorktree(root, cfg, state, name);
+    repoEntries.push({ repo: name, entry: entryOf, reason: String(options.reason) });
+    added.push({ repo: name, worktree: entryOf.worktree, base: entryOf.base });
+  }
   recordedTogether(root, state.id, () => {
     // The added repos are recorded with the amendment, in one transaction (independent review of 0.7.4: a repo recorded
     // before the amendment left it added with the acceptance standing when the command stopped in between).
@@ -1198,6 +1204,9 @@ export function handoff(root, role, options) {
   if (role === 'reviewer' && bundle.validationsNotCarried) bundle.instructions += ` \`validationsNotCarried\` lists checks a member registered or corrected that this batch does not carry, each with why (${bundle.validationsNotCarried.map((x) => `${x.id} of ${x.member}`).join(', ')}): for those steps the batch's gate follows its own admission adapter, the base's rule, so judge whether the member's criteria still rest on what they proved.`;
   if (role === 'reviewer' && bundle.acceptanceRefused) bundle.instructions += ` \`acceptanceRefused\` lists why \`wf accept\` refused the last evidence round (${bundle.acceptanceRefused.reviewer}'s): your closure must not repeat them. A citation it names is corrected in your own \`criteria\`: each evidence entry cites one artifact exactly as the bundle lists it, and a criterion several screenshots show gets one entry per screenshot, with the same \`id\`.`;
   // 0.7.31 (I-216, D67): a planner of an analysis plans the investigation; a planner of what follows an analysis is given it.
+  // 0.7.34 (I-230, I-231): a planner of frozen criteria writes an amendment, which `wf plan --check` refuses to judge; it is told the
+  // amendment's own dry run, so its schema errors are fixed before it reports, not after the owner records it.
+  if (role === 'planner' && state.criteria && !replanAfterUpgrade(state)) bundle.instructions += ` The criteria of ${state.id} are frozen: your re-plan is recorded as one amendment (\`wf criteria amend\`), not with \`wf plan\`. Check it yourself before you report: save the amendment to a file outside the worktree and run \`wf criteria amend --check --file <f> --attempt ${state.id}\`; it runs every check the amendment meets when the owner records it (its impact addendum's queries re-run) and records nothing. Fix what it names, then report.`;
   if (role === 'planner' && state.intent === 'analysis') bundle.instructions += ' This attempt is an analysis: plan the investigation. The criteria are the questions it answers, the work items its read-only steps (what to read, run or ask, and where); nothing is implemented or delivered, and the owner records what the investigation found, with the evidence for each answer (`wf analysis record`).';
   if (role === 'planner' && bundle.analysis) bundle.instructions += ` \`analysis\` is what the analysis of this item (${bundle.analysis.attempt}, ${bundle.analysis.id}) found: an answer with its evidence per question, other findings, what it traced and did not trace (\`notTraced\`), and its recommendation. Plan from what it found; what it did not trace is unknown until your survey or the plan verifies it.`;
   if (role === 'implementer' && bundle.analysis) bundle.instructions += ` \`analysis\` is what an analysis of this item (${bundle.analysis.attempt}, ${bundle.analysis.id}) found since this attempt began: an answer with its evidence per question, what it traced and did not trace (\`notTraced\`), and its recommendation. Build on what it found; what it did not trace is unknown, so verify what your change rests on there before you rely on it.`;

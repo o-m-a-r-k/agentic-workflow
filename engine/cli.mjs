@@ -68,6 +68,8 @@ Work
                                     freeze acceptance criteria and the plan (--from-agent: the planner's last YAML block)
   wf plan --check --file plan.yaml   the planner's dry run: every check wf plan runs, nothing recorded
   wf criteria amend --file f --reason "why" [--add-repo R]   (\`pass: [{ items, why, repos }]\` plans one pass of what does not block)
+  wf criteria amend --check --file f [--add-repo R]
+                                    the dry run of an amendment (a re-plan of frozen criteria): every check it meets, nothing recorded
                                     --add-repo: a fix needs another repo; its worktree joins the attempt with the work items
                                     added scope without \`impact\` is shown to the next implementer as consumers to find
   wf discovered add --summary "..." [--severity high|medium|low] [--invariant "<which>"] [--kind defect|bookkeeping] [--where file:line] [--found-by ID] [--blocked-by W] | list
@@ -905,7 +907,24 @@ async function dispatch(cmd, sub, positional, options) {
       return 0;
     }
     case 'criteria': {
-      if (sub !== 'amend') throw new WfError('usage: wf criteria amend --file f --reason "why"');
+      if (sub !== 'amend') throw new WfError('usage: wf criteria amend --file f --reason "why" | wf criteria amend --check --file f');
+      if (options.check) {
+        // 0.7.34 (I-230, I-231): the amendment's dry run, for the planner of a re-plan; the same code path, nothing recorded.
+        const r = amendCriteria(root, options);
+        const list = (ids) => ids.join(', ') || 'none';
+        const lines = [
+          `criteria would be (${r.criteria.length}): ${list(r.criteria)}; changed: ${list(r.changes.changed)}; added: ${list(r.changes.added)}; dropped: ${list(r.changes.dropped.map((d) => `${d.id} (${d.reason})`))}`,
+          ...(r.work.length ? [`work items: ${list(r.work)}`] : []),
+          ...(r.plan.length ? [`plan sections restated: ${list(r.plan)}`] : []),
+          ...r.pass.map((w) => `planned pass ${w.id}: ${w.items.join(', ')}`),
+          ...r.addRepos.map((x) => `repo ${x} would be added (its worktree is created when the amendment is recorded)`),
+          r.impact === 'addendum' ? 'the impact addendum checks out (queries re-run)' : r.impact === 'unchanged' ? 'impact: unchanged, as the amendment states' : r.impactOwed ? 'impact owed: this amendment adds scope without an impact addendum; the next implementer would be told to find its consumers (add `impact` to record it)' : null,
+          r.withdrawsAcceptance ? 'recording it withdraws the acceptance: a fresh review maps the criteria again' : null,
+          ...(r.left.length ? [`not in this pass: ${r.left.join(', ')}`] : []),
+        ].filter(Boolean);
+        print(options, `the amendment would be recorded: ${lines.join('\n  ')}\n  nothing was recorded; the owner records it with \`wf criteria amend --file <f> --reason "<why>"\``, r);
+        return 0;
+      }
       const { state: s, changes, added, impactOwed, restrictions, pass = [] } = amendCriteria(root, options);
       const list = (ids) => ids.join(', ') || 'none';
       // A withdrawn acceptance is the outcome of the command (I-107), so it is printed with it, not as a warning.
