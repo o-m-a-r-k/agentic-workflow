@@ -2,7 +2,9 @@
 // Steps used to receive the owner's whole environment, session tokens included. They now get an open list of
 // toolchain variables, the adapter's `gate.env.pass`, the engine's WF_* variables and the catalogued secrets a
 // step lists. Agent-runtime variables are never passed unless the adapter names them itself.
-import { credentialPrefixes } from './hosts/index.mjs';
+// A namespace import: a host registry without `credentialPrefixes` leaves nothing guarded, and nothing guarded is passed
+// unless the adapter lists it, so the allow list alone still keeps agent-runtime variables out.
+import * as hosts from './hosts/index.mjs';
 
 // Exact names, or prefixes ending in `*`. Open list: a project adds what it needs with `gate.env.pass`.
 export const BASE_ENV = [
@@ -33,7 +35,7 @@ export function projectEnv(cfg, extra = {}, source = process.env) {
   const pass = passList(cfg);
   // Agent-runtime credentials and session ids (the prefixes each host adapter declares). Passed only when the adapter
   // lists the name or a prefix starting with one of these, so a broad entry such as `C*` never leaks them.
-  const guardedPrefixes = credentialPrefixes();
+  const guardedPrefixes = typeof hosts.credentialPrefixes === 'function' ? hosts.credentialPrefixes() : [];
   const out = {};
   for (const [name, value] of Object.entries(source)) {
     if (value === undefined) continue;
