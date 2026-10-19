@@ -4,9 +4,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ledgerLines } from './helpers/index.mjs';
 import { answer, attempt, commitWt, flow, review, setup, started } from './flow-fixture.mjs';
-import { setDoubles } from '../engine/contract.mjs';
-import { foldEntries } from '../engine/ledger.mjs';
-import { foldFindings } from '../engine/findings.mjs';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { clearDoubles, ledgerFile, setDoubles } from '../engine/contract.mjs';
+import { append as realAppend, foldEntries, readEvents as realRead } from '../engine/ledger.mjs';
+import { foldFindings, refilePending } from '../engine/findings.mjs';
+import { append as doublesAppend } from './flow-doubles.mjs';
 
 const finding = (location, cls, severity = 'medium', what = 'wrong') => ({ location, class: cls, severity, what, why: 'it matters' });
 const ctx = (p) => ({ cwd: p.root, root: p.root, env: process.env, actor: null, json: false });
@@ -104,12 +108,13 @@ test('a waiver of a blocking finding goes to the person; waived, it no longer bl
   }
 });
 
-test('follow-ups through a connector complete: the next review record, wf status and wf deliver read each one back', async () => {
+test('follow-ups through a connector complete: the next review record and wf deliver read each one back; wf status and wf resume write nothing', async () => {
   const p = setup({ overrides: { ticketing: { via: 'connector', tracker: 'board', idPattern: '^TK-\\d+$', followUps: { mode: 'file' } } } });
   const calls = [];
   // The real tracker files the follow-ups; the owner's connector calls are the transcript's.
   setDoubles({ fileFollowUp: undefined, connectorCalls: async (session) => (session?.id === 'owner-1' ? calls : []) });
   const created = (id, what, ticket) => calls.push({ tool: 'mcp__board__create_issue', input: { title: what, description: `${what}\n\nwf:${id}` }, result: `Created ${ticket}`, at: new Date(Date.now() + 1000).toISOString() });
+  const ledger = (id) => fs.readFileSync(ledgerFile(p.root, id), 'utf8');
   try {
     const s = await started(p);
     commitWt(p, s.id, 'client', { 'src/pages/items.mjs': 'export const page = 1;\n' });
@@ -119,28 +124,72 @@ test('follow-ups through a connector complete: the next review record, wf status
     const filed = () => ledgerLines(p.root, s.id).filter((e) => e.type === 'finding.filed').map((e) => [e.data.finding, e.data.state, e.data.ticket ?? null]);
     assert.deepEqual(filed(), [['F1', 'pending', null], ['F2', 'pending', null], ['F3', 'pending', null]]);
     let st = await flow.cmdStatus(ctx(p), { _: [], flags: {} });
-    assert.match(st.text, /F1 is not filed yet: Search the tracker for the marker first/);
+    assert.match(st.text, /F1 is not filed yet: Search the tracker for the marker first.*the next wf review --record or wf deliver reads it back/);
     // The next review record reads F1 back.
     created(`${s.id}:finding:F1`, whats[0], 'TK-41');
     commitWt(p, s.id, 'client', { 'src/pages/items.mjs': 'export const page = 2;\n' });
     const second = await review(p, s.id);
     assert.deepEqual(second.out.whole.pending.map((x) => x.finding), ['F2', 'F3']);
     assert.deepEqual(filed().slice(3), [['F1', 'done', 'TK-41']]);
-    // wf status reads F2 back.
+    // F2 is filed through the connector, but wf status and wf resume only report it as pending: the ledger is unchanged.
     created(`${s.id}:finding:F2`, whats[1], 'TK-42');
+    const before = ledger(s.id);
     st = await flow.cmdStatus(ctx(p), { _: [], flags: {} });
-    assert.doesNotMatch(st.text, /F2 is not filed yet/);
+    assert.match(st.text, /F2 is not filed yet/);
     assert.match(st.text, /F3 is not filed yet/);
-    assert.deepEqual(filed().slice(4), [['F2', 'done', 'TK-42']]);
-    // wf deliver reads F3 back.
+    const res = await flow.cmdResume(ctx(p), { _: [], flags: {} });
+    assert.match(res.text, /F2 is not filed yet/);
+    assert.equal(ledger(s.id), before, 'wf status and wf resume append nothing');
+    // wf deliver reads F2 and F3 back.
     created(`${s.id}:finding:F3`, whats[2], 'TK-43');
     const { cmdDeliver } = await import('../engine/delivery.mjs');
     await cmdDeliver(ctx(p), { _: [s.id], flags: {} });
-    assert.deepEqual(filed().slice(5), [['F3', 'done', 'TK-43']]);
+    assert.deepEqual(filed().slice(4), [['F2', 'done', 'TK-42'], ['F3', 'done', 'TK-43']]);
     const { nextStep } = await import('../engine/flow.mjs');
     assert.equal((await nextStep(p.root, s.id)).followUps, undefined, 'nothing is pending');
   } finally {
     p.done();
+  }
+});
+
+test('wf status writes nothing while the tracker status set at start is pending; it names it and points to wf deliver', async () => {
+  const p = setup({ overrides: { screens: undefined, ticketing: { via: 'connector', tracker: 'board', idPattern: '^TK-\\d+$', take: { status: 'Started' }, followUps: { mode: 'off' } } } });
+  try {
+    const s = await started(p);
+    await doublesAppend(p.root, s.id, 'stage', { index: -1, do: 'status', state: 'pending', next: 'Set the status' }, null);
+    commitWt(p, s.id, 'client', { 'src/pages/items.mjs': 'export const page = 1;\n' });
+    await review(p, s.id);
+    const before = fs.readFileSync(ledgerFile(p.root, s.id), 'utf8');
+    const st = await flow.cmdStatus(ctx(p), { _: [], flags: {} });
+    assert.match(st.text, /next: wf deliver --attempt .*\n\s+why: the tracker status set at start is pending: first do this: Set the status/);
+    await flow.cmdResume(ctx(p), { _: [], flags: {} });
+    assert.equal(fs.readFileSync(ledgerFile(p.root, s.id), 'utf8'), before, 'status and resume append nothing');
+  } finally {
+    p.done();
+  }
+});
+
+test('two re-files at once append one completion: the ledger lock re-reads the last finding.filed', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wf-refile-'));
+  clearDoubles();
+  const id = 'TK-9.1';
+  try {
+    await realAppend(root, id, 'attempt.started', { item: 'TK-9', n: 1, repos: {}, stages: [], adapter: 'x', engine: 'x' }, null);
+    const f = { id: 'F1', location: 'client/src/a.mjs:1', what: 'old bug', why: 'it matters', severity: 'low', class: 'other' };
+    await realAppend(root, id, 'review.recorded', { review: 1, round: 1, seat: 'all', tree: 't', session: null, coverage: 'complete', findings: [f], verified: [], blockers: 0 }, null);
+    await realAppend(root, id, 'finding.filed', { finding: 'F1', mode: 'file', state: 'pending', marker: `wf:${id}:finding:F1` }, null);
+    let asked = 0;
+    // Each run sees F1 pending and the tracker finds it filed; the second waits so both are past their first read.
+    setDoubles({ fileFollowUp: async () => (asked++, await new Promise((r) => setTimeout(r, 20)), { state: 'done', value: { id: 'TK-50' } }) });
+    const [a, b] = await Promise.all([refilePending(root, id), refilePending(root, id)]);
+    assert.equal(asked, 2, 'both runs read the tracker');
+    assert.equal(a.appended.length + b.appended.length, 1);
+    const done = (await realRead(root, id)).filter((e) => e.type === 'finding.filed' && e.data.state === 'done');
+    assert.equal(done.length, 1);
+    assert.equal(done[0].data.ticket, 'TK-50');
+  } finally {
+    clearDoubles();
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });
 

@@ -74,6 +74,18 @@ existed before the ticket, so screenshots are also a regression net).
   status. Labels are read from the result of the owner's read call; `wf deliver --labels` is refused. The adapter's
   `ticketing.operations` keys and the engine's operations are one list (`read`, `search`, `fileFollowUp`,
   `setStatus`, `comment`, `mergeRequest`).
+- **Follow-ups and the start status are read back, not by `wf status`:** a follow-up filed through a connector is
+  read back from the owner's transcript at the next `wf review --record` and at `wf deliver`, and the tracker status
+  set at start is read back at `wf deliver`. `wf status` and `wf resume` only list what is still pending and write
+  nothing. Two read-backs at once record a follow-up as filed once.
+- **Delivery waits for the start status:** while the tracker status set at start is not done, `wf deliver` asks for it
+  again and runs no other stage, so a later status is never overwritten by it.
+- **`wf start --base` is refused when the stages hold `land`:** a `land` stage lands on the adapter's base, so an
+  attempt started from another branch could not be delivered by it. The refusal names the stage kinds that deliver to
+  another base.
+- **Reviews whose files cannot be traced are marked:** when the host keeps no readable transcript to show the reviewer
+  wrote the review file, the review is still recorded, as unverified, and you see that at your diff-read and in the
+  digest.
 - **Secrets stay out of what is written** (D103): `engine/scrub.mjs` is back. Prefixed tokens, bearer tokens,
   credentials in query strings and catalogued secret values are masked in finding `what` and `why` when recorded, in
   comment and follow-up bodies when posted, and in digest lines. The secrets catalogue is read beside the adapter, in

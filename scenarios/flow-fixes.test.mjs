@@ -237,7 +237,61 @@ test('a reviewer whose launch supervisor died is failed: status says so, and wf 
   }
 });
 
-test('the fast fact is the run on the worktree\'s files; files HEAD lacks are named, with what to do', async () => {
+test('supervisor liveness: an unreadable ps is unknown, not alive; the start time matches within 2 seconds', async () => {
+  const { processSeams } = await import('../engine/process-tree.mjs');
+  const { supervisorAlive } = await import('../engine/flow.mjs');
+  const saved = { ...processSeams };
+  const at = '2026-01-01T00:00:10.000Z';
+  const t = Date.parse(at);
+  try {
+    processSeams.kill = () => true;
+    processSeams.startedAt = () => null;
+    assert.equal(supervisorAlive(4242, at), null, 'no start time: unknown');
+    assert.equal(supervisorAlive(4242, undefined), null, 'no recorded start: unknown');
+    processSeams.startedAt = () => t - 1500;
+    assert.equal(supervisorAlive(4242, at), true);
+    processSeams.startedAt = () => t + 2000;
+    assert.equal(supervisorAlive(4242, at), true);
+    processSeams.startedAt = () => t - 3000;
+    assert.equal(supervisorAlive(4242, at), false, 'started 3 s before: the pid was given to another process');
+    processSeams.startedAt = () => t + 2500;
+    assert.equal(supervisorAlive(4242, at), false);
+    processSeams.kill = () => {
+      throw Object.assign(new Error('no such process'), { code: 'ESRCH' });
+    };
+    processSeams.startedAt = () => null;
+    assert.equal(supervisorAlive(4242, at), false, 'a pid that does not exist is gone, ps or not');
+  } finally {
+    Object.assign(processSeams, saved);
+  }
+});
+
+test('a reviewer whose supervisor wf cannot see is reported as such and not waited for', async () => {
+  const p = setup({ overrides: { screens: undefined } });
+  const { processSeams } = await import('../engine/process-tree.mjs');
+  const saved = { ...processSeams };
+  try {
+    const s = await started(p);
+    commitWt(p, s.id, 'client', { 'src/pages/items.mjs': 'export const page = "/items/";\n' });
+    const { bundles } = await flow.bundle(p.root, s.id);
+    const { session } = await doubles.launchReviewer(p.root, s.id, bundles[0]);
+    await doubles.runTests(p.root, s.id, 'client', 'fast');
+    launchRecord(p, s.id, session, { state: 'running', startedAt: new Date().toISOString(), pid: process.pid, pidAt: new Date().toISOString() });
+    processSeams.startedAt = () => null;
+    const st = await flow.cmdStatus(ctxOf(p), args([], {}));
+    assert.match(st.text, new RegExp(`reviewer whole running since \\d+ min \\(wf cannot tell whether its launch supervisor \\(pid ${process.pid}\\) still runs`));
+    const prev = process.env.WF_TEST;
+    process.env.WF_TEST = '1';
+    const r = await Promise.race([flow.cmdReview(ctxOf(p), args([], { attempt: s.id })), new Promise((_, no) => setTimeout(() => no(new Error('wf review waited for a reviewer whose supervisor it cannot see')), 5000))]);
+    process.env.WF_TEST = prev;
+    assert.match(r.text, /reviewer whole: running since .*wf cannot tell/);
+  } finally {
+    Object.assign(processSeams, saved);
+    p.done();
+  }
+});
+
+test('the fast fact is the run on the worktree\'s files; untracked files and uncommitted changes are named, each with what to do', async () => {
   const p = setup({ overrides: { screens: undefined } });
   try {
     const s = await started(p);
@@ -253,14 +307,25 @@ test('the fast fact is the run on the worktree\'s files; files HEAD lacks are na
     await doubles.append(p.root, s.id, 'test.run', { repo: 'client', kind: 'fast', tree: workingTree(wt), pass: true, exitCode: 0, ms: 1, source: 'attempt' }, null);
     const [fact] = await flow.mergeFacts(p.root, s.id);
     assert.equal(fact.id, 'merge:untested');
-    assert.match(fact.message, /they passed on the worktree's files, not on HEAD's\); the worktree has files HEAD lacks: scratch\.log/);
-    assert.match(fact.hint, /commit scratch\.log or ignore them \(\.gitignore\)/);
+    assert.match(fact.message, /they passed on the worktree's files, not on HEAD's\); untracked files HEAD lacks: scratch\.log$/);
+    assert.match(fact.hint, /^in client, commit scratch\.log or \.gitignore them; then `wf test fast --repo client/);
+    assert.doesNotMatch(fact.hint, /uncommitted/);
     const { nextStep } = await import('../engine/flow.mjs');
     const step = await nextStep(p.root, s.id);
     assert.match(step.command, /^wf handoff implementer/);
     assert.match(step.why, /scratch\.log/);
-    // Clean again: the run on HEAD's tree is the fact.
+    // A tracked file with uncommitted changes the tests ran with: named as uncommitted changes, to commit.
     fs.rmSync(path.join(wt, 'scratch.log'));
+    fs.writeFileSync(path.join(wt, 'src/pages/items.mjs'), 'export const page = 2;\n');
+    await doubles.append(p.root, s.id, 'test.run', { repo: 'client', kind: 'fast', tree: workingTree(wt), pass: true, exitCode: 0, ms: 1, source: 'attempt' }, null);
+    const [changed] = await flow.mergeFacts(p.root, s.id);
+    assert.equal(changed.id, 'merge:untested');
+    assert.match(changed.message, /not on HEAD's\); uncommitted changes in src\/pages\/items\.mjs$/);
+    assert.match(changed.hint, /^in client, uncommitted changes in src\/pages\/items\.mjs: commit them; then `wf test fast/);
+    assert.doesNotMatch(changed.hint, /gitignore/);
+    assert.match((await nextStep(p.root, s.id)).command, /^wf handoff implementer/);
+    // Clean again: the run on HEAD's tree is the fact.
+    git(wt, ['checkout', '--', 'src/pages/items.mjs']);
     await doubles.runTests(p.root, s.id, 'client', 'fast');
     assert.deepEqual(await flow.mergeFacts(p.root, s.id), []);
   } finally {

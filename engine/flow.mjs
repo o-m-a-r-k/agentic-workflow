@@ -11,7 +11,7 @@ import {
   listAttempts, loadAdapter, readEvents, refusal, runTests, userDir,
 } from './contract.mjs';
 import { baseOf, changedOf, dirtyRepos, foreignMerges, mergeBaseOf, rootPath, specOf, unreviewedCommits } from './base.mjs';
-import { assertFindings, blockersOf, fileOther, foldFindings, nextFindingNumber, pendingLines, refilePending, refuseOtherOwn } from './findings.mjs';
+import { assertFindings, blockersOf, fileOther, foldFindings, nextFindingNumber, pendingFollowUps, pendingLines, refilePending, refuseOtherOwn } from './findings.mjs';
 import { PROJECT_LEDGER, decisionsOf, flagText, holdOf, itemHistory, projectRoot, resolveAttempt, schema2, sessionFlag } from './attempt.mjs';
 import { docAtBase, ruleDocs } from './rules.mjs';
 import { writtenBy } from './hosts/index.mjs';
@@ -19,7 +19,7 @@ import { scrub, secretValues } from './scrub.mjs';
 import { mkdirStateDirectory } from './state-folders.mjs';
 import { YAML, git, matchesAny, sha256 } from './util.mjs';
 import { workingTree } from './tests.mjs';
-import { stillTheRole } from './process-tree.mjs';
+import { processSeams } from './process-tree.mjs';
 
 const PLUGIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 // Above about 1,500 product lines one reviewer reads shallowly (design section 2): the review splits by area.
@@ -351,14 +351,20 @@ const real = (p) => {
   }
 };
 
-// Whether the launch supervisor `pid` (started at `at`) still runs: a pid the system gave to another process since is gone.
-function supervisorAlive(pid, at) {
+// Whether the launch supervisor `pid` (started at `at`) still runs: true, false, or null when this host cannot tell (it
+// lets wf signal the pid but `ps` gives no start time). A pid the system gave to another process since is gone: `ps`
+// reports whole seconds and the supervisor records `at` as it starts, so its own start is within 2 seconds of it.
+export function supervisorAlive(pid, at) {
   try {
-    process.kill(pid, 0);
+    processSeams.kill(pid, 0);
   } catch (error) {
     if (error.code !== 'EPERM') return false;
   }
-  return stillTheRole(pid, at);
+  const launched = Date.parse(at ?? '');
+  if (!Number.isFinite(launched)) return null;
+  const started = processSeams.startedAt(pid);
+  if (started === null) return null;
+  return Math.abs(started - launched) <= 2000;
 }
 
 // What wf's launch supervisor recorded for a reviewer session (`reviews/launch-*/`): { state, startedAt, endedAt, error,
@@ -372,8 +378,10 @@ export function launchRecord(root, attempt, session) {
       const status = JSON.parse(fs.readFileSync(path.join(dir, d, 'status.json'), 'utf8'));
       const spec = JSON.parse(fs.readFileSync(path.join(dir, d, 'spec.json'), 'utf8'));
       if (status.session !== session.id || spec.host !== session.runtime) continue;
-      if (!['done', 'failed'].includes(status.state) && status.pid && !supervisorAlive(status.pid, status.pidAt)) {
-        return { ...status, state: 'failed', error: `its launch supervisor (pid ${status.pid}) is no longer running, so the reviewer will never finish`, closure: spec.closure };
+      if (!['done', 'failed'].includes(status.state) && status.pid) {
+        const alive = supervisorAlive(status.pid, status.pidAt);
+        if (alive === false) return { ...status, state: 'failed', error: `its launch supervisor (pid ${status.pid}) is no longer running, so the reviewer will never finish`, closure: spec.closure };
+        if (alive === null) return { ...status, liveness: 'unknown', note: `wf cannot tell whether its launch supervisor (pid ${status.pid}) still runs: this host gives no start time for it`, closure: spec.closure };
       }
       return { ...status, closure: spec.closure };
     } catch {}
@@ -565,19 +573,26 @@ async function factsOf(L, { repo = null, landedTree = null } = {}) {
   const { tree, files } = changedOf(root, attempt, state, adapter);
   // The fast tests are green on HEAD in every changed repo that has them (a fact of the ledger: the last fast run on
   // the repo's HEAD tree passed).
-  // A run records the files it ran on (tests `workingTree`): HEAD's tree when the worktree is clean. Files HEAD lacks
-  // (untracked, or uncommitted) make it another tree: the run then stands for no commit, and the hint names them.
+  // A run records the files it ran on (tests `workingTree`): HEAD's tree when the worktree is clean. Files that differ
+  // from HEAD (`git diff --name-only` of the two trees) make it another tree: the run then stands for no commit, and the
+  // hint names them: untracked ones are committed or ignored, tracked ones with uncommitted changes are committed.
   for (const n of names.filter((x) => files.some((f) => f.repo === x) && specOf(adapter, x, state.repos[x]).tests?.fast)) {
     const now = testedTree(state, n);
     const run = L.events.filter((e) => e.type === 'test.run' && e.data.kind === 'fast' && e.data.repo === n && e.data.tree === now).at(-1)?.data;
     const head = repoTree(state, n);
     if (run?.pass && now === head) continue;
-    const extra = now === head ? [] : git(state.repos[n].worktree, ['diff', '--name-only', head, now], { allowFail: true }).split('\n').filter(Boolean);
+    const wt = state.repos[n].worktree;
+    const extra = now === head ? [] : git(wt, ['diff', '--name-only', head, now], { allowFail: true }).split('\n').filter(Boolean);
+    const others = new Set(extra.length ? git(wt, ['ls-files', '--others', '--exclude-standard', '--', ...extra], { allowFail: true }).split('\n').filter(Boolean) : []);
+    const untracked = extra.filter((f) => others.has(f));
+    const uncommitted = extra.filter((f) => !others.has(f));
     const said = run ? (run.pass ? 'they passed on the worktree\'s files, not on HEAD\'s' : 'they fail') : 'no run on this tree';
+    const parts = [...(untracked.length ? [`untracked files HEAD lacks: ${untracked.join(', ')}`] : []), ...(uncommitted.length ? [`uncommitted changes in ${uncommitted.join(', ')}`] : [])];
+    const todo = [...(untracked.length ? [`commit ${untracked.join(', ')} or .gitignore them`] : []), ...(uncommitted.length ? [`uncommitted changes in ${uncommitted.join(', ')}: commit them`] : [])];
     problems.push({
-      id: 'merge:untested', fact: 'fast', repo: n, untracked: extra,
-      message: `${n}: the fast tests are not green on HEAD (${said})${extra.length ? `; the worktree has files HEAD lacks: ${extra.join(', ')}` : ''}`,
-      ...(extra.length ? { hint: `in ${n}, commit ${extra.join(', ')} or ignore them (.gitignore), then \`wf test fast --repo ${n} --attempt ${attempt}\`` } : {}),
+      id: 'merge:untested', fact: 'fast', repo: n, untracked, uncommitted,
+      message: `${n}: the fast tests are not green on HEAD (${said})${parts.length ? `; ${parts.join('; ')}` : ''}`,
+      ...(todo.length ? { hint: `in ${n}, ${todo.join('; ')}; then \`wf test fast --repo ${n} --attempt ${attempt}\`` } : {}),
     });
   }
   if (landedTree) {
@@ -625,16 +640,12 @@ function screensNeeded(L, files) {
 const approveCmd = (d, attempt) => `wf approve ${d.id} --attempt ${attempt} --choice "<${d.options.join(' | ')}>" --quote "<the person's words>"`;
 const blockingOpen = (L) => L.decisions.filter((d) => d.attempt === L.attempt && !d.answer && DECISION_KINDS[d.kind]?.blocking);
 
-// The one next command of an attempt, and why; `followUps`: those still pending through a connector, read back here
-// first. The attempt is loaded once (`L`: the caller's load, when it holds one).
+// The one next command of an attempt, and why; `followUps`: those still pending through a connector, from the ledger.
+// It writes nothing: `wf review --record` and `wf deliver` read pending follow-ups and the start's tracker status back.
+// The attempt is loaded once (`L`: the caller's load, when it holds one).
 export async function nextStep(root, attempt, L = null) {
   L ??= await load(root, attempt);
-  let followUps = [];
-  if (L.state.open && !holdOf(L.events)) {
-    const r = await refilePending(root, attempt, L.events);
-    if (r.appended.length) Object.assign(L, foldFindings(L.history, L.waived));
-    followUps = r.pending;
-  }
+  const followUps = L.state.open && !holdOf(L.events) ? pendingFollowUps(L.events).map(({ finding, operation }) => ({ finding, operation })) : [];
   const step = await stepOf(root, attempt, L);
   return followUps.length ? { ...step, followUps } : step;
 }
@@ -665,7 +676,7 @@ async function stepOf(root, attempt, L) {
   const launches = reviewerLaunches(L.history).filter((h) => h.attempt === attempt && h.tree === tree);
   const unrecorded = launches.filter((h) => !recorded.some((r) => r.tree === tree && r.seat === h.seat)).map((h) => ({ ...h, run: launchRecord(root, attempt, h.session) }));
   const running = unrecorded.filter((h) => h.run && !['done', 'failed'].includes(h.run.state));
-  if (running.length) return { command: `wf review ${A}`, why: running.map((h) => `reviewer ${h.seat} running since ${minutesSince(h.run.startedAt)} min`).join('; ') + '; `wf review` waits for it' };
+  if (running.length) return { command: `wf review ${A}`, why: running.map((h) => `reviewer ${h.seat} running since ${minutesSince(h.run.startedAt)} min${h.run.note ? ` (${h.run.note})` : ''}`).join('; ') + '; `wf review` waits for it' };
   const failedRuns = unrecorded.filter((h) => h.run?.state === 'failed');
   if (failedRuns.length) return { command: `wf review ${A}`, why: `reviewer ${failedRuns.map((h) => `${h.seat} failed (${h.run.error ?? 'no result'})`).join('; ')}; \`wf review\` launches it again` };
   if (unrecorded.length) return { command: `wf review --record <review file> ${A}`, why: `reviewer seat(s) ${unrecorded.map((h) => h.seat).join(', ')} launched on this tree; record each review when it is written (its prompt names the file)` };
@@ -686,7 +697,7 @@ async function stepOf(root, attempt, L) {
   if (open.length) return { command: approveCmd(open[0], attempt), why: `ask the person, in these words: ${open[0].question}` };
   if (problems.length) {
     const p = problems[0];
-    const command = p.fact === 'fast' ? (p.untracked?.length ? handoff : `wf test fast --repo ${p.repo} ${A}`) : p.id === 'merge:unreviewed' ? `wf review ${A}` : handoff;
+    const command = p.fact === 'fast' ? (p.untracked?.length || p.uncommitted?.length ? handoff : `wf test fast --repo ${p.repo} ${A}`) : p.id === 'merge:unreviewed' ? `wf review ${A}` : handoff;
     return { command, why: p.hint ? `${p.message}; ${p.hint}` : p.message };
   }
   const stages = L.state.stages ?? [];
@@ -853,7 +864,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function waitForReviewers(root, id, sessions) {
   for (;;) {
     const runs = sessions.map((s) => launchRecord(root, id, s));
-    if (runs.every((r) => !r || ['done', 'failed'].includes(r.state))) return runs;
+    // A run whose supervisor wf cannot see is not waited for: its line says so.
+    if (runs.every((r) => !r || ['done', 'failed'].includes(r.state) || r.liveness === 'unknown')) return runs;
     await sleep(process.env.WF_TEST === '1' ? 100 : 2000);
   }
 }
@@ -863,7 +875,7 @@ function reviewerLines(root, id, launched) {
     const run = launchRecord(root, id, h.session);
     const file = run?.closure ?? h.output;
     if (run?.state === 'failed') return `  reviewer ${h.seat}: failed: ${run.error ?? 'it ended without a result'}; \`wf review --attempt ${id}\` launches it again`;
-    if (run && run.state !== 'done') return `  reviewer ${h.seat}: running since ${minutesSince(run.startedAt)} min; it writes ${file}`;
+    if (run && run.state !== 'done') return `  reviewer ${h.seat}: running since ${minutesSince(run.startedAt)} min${run.note ? ` (${run.note})` : ''}; it writes ${file}`;
     return `  reviewer ${h.seat}: ${run ? 'done' : 'launched'}; record it: wf review --record ${file ?? '<review file>'} --attempt ${id}`;
   });
 }

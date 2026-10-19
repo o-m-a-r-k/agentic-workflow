@@ -115,6 +115,7 @@ export async function fileOther(root, attempt, f, adapter, { noTracker = false }
     ticket: res?.state === 'done' ? res.value?.id ?? null : null,
     duplicateOf: res?.state === 'done' ? res.value?.duplicateOf ?? null : null,
     priority,
+    ...(res?.state === 'pending' && res.operation ? { operation: res.operation } : {}),
   };
   if (priority) {
     await ask(root, attempt, {
@@ -128,28 +129,40 @@ export async function fileOther(root, attempt, f, adapter, { noTracker = false }
   return { data, pending: res?.state === 'pending' ? res.operation ?? null : null };
 }
 
-// Follow-ups still pending through a connector are asked again, with their first-ask time (the at of their first
-// `finding.filed`); one that completed appends `finding.filed` done. `events`: the attempt's, when the caller holds them
-// (appended entries are pushed onto it). Returns { appended, pending: [{ finding, operation, error? }] }.
-export async function refilePending(root, attempt, events = null) {
-  events ??= await readEvents(root, attempt);
-  const out = { appended: [], pending: [] };
-  if (events.some((e) => e.type === 'attempt.closed')) return out;
-  const found = new Map();
+// The follow-ups still pending, from the ledger alone: an `other` finding whose last `finding.filed` is pending. Returns
+// [{ finding, operation, d, first }] (d: that last payload; first: the at of its first `finding.filed`). Reads nothing else.
+export function pendingFollowUps(events) {
+  if (events.some((e) => e.type === 'attempt.closed')) return [];
+  const found = new Set();
   const first = new Map();
   const last = new Map();
   for (const e of events) {
-    if (e.type === 'review.recorded') for (const f of e.data.findings ?? []) found.set(f.id, f);
+    if (e.type === 'review.recorded') for (const f of e.data.findings ?? []) found.add(f.id);
     else if (e.type === 'finding.filed') {
       if (!first.has(e.data.finding)) first.set(e.data.finding, e.at);
       last.set(e.data.finding, e.data);
     }
   }
-  for (const [id, d] of last) {
-    if (d.state !== 'pending' || !found.has(id)) continue;
+  return [...last].filter(([id, d]) => d.state === 'pending' && found.has(id)).map(([id, d]) => ({ finding: id, operation: d.operation ?? null, d, first: first.get(id) }));
+}
+
+const lastFiledDone = (entries, id) => entries.filter((e) => e.type === 'finding.filed' && e.data.finding === id).at(-1)?.data.state === 'done';
+
+// Follow-ups still pending through a connector are asked again, with their first-ask time (the at of their first
+// `finding.filed`); one that completed appends `finding.filed` done. Only `wf review --record` and `wf deliver` run it:
+// `wf status` and `wf resume` list the pending ones from the ledger and write nothing. The completion is appended under
+// the ledger lock only when the finding's last `finding.filed` is not already done, so two runs at once append one.
+// `events`: the attempt's, when the caller holds them (appended entries are pushed onto it).
+// Returns { appended, pending: [{ finding, operation, error? }] }.
+export async function refilePending(root, attempt, events = null) {
+  events ??= await readEvents(root, attempt);
+  const out = { appended: [], pending: [] };
+  const found = new Map();
+  for (const e of events) if (e.type === 'review.recorded') for (const f of e.data.findings ?? []) found.set(f.id, f);
+  for (const { finding: id, d, first } of pendingFollowUps(events)) {
     let res;
     try {
-      res = await fileFollowUp(root, attempt, found.get(id), { since: first.get(id) });
+      res = await fileFollowUp(root, attempt, found.get(id), { since: first });
     } catch (error) {
       out.pending.push({ finding: id, operation: null, error: error.message });
       continue;
@@ -158,7 +171,9 @@ export async function refilePending(root, attempt, events = null) {
       out.pending.push({ finding: id, operation: res?.operation ?? null });
       continue;
     }
-    const entry = await append(root, attempt, 'finding.filed', { ...d, state: 'done', ticket: res.value?.id ?? null, duplicateOf: res.value?.duplicateOf ?? null }, null);
+    const { operation: _, ...rest } = d;
+    const entry = await append(root, attempt, 'finding.filed', { ...rest, state: 'done', ticket: res.value?.id ?? null, duplicateOf: res.value?.duplicateOf ?? null }, null, { unless: (entries) => lastFiledDone(entries, id) });
+    if (!entry) continue; // another run appended it first
     events.push(entry);
     out.appended.push(entry);
   }
@@ -166,7 +181,7 @@ export async function refilePending(root, attempt, events = null) {
 }
 
 // The lines that tell the owner what a pending follow-up still needs.
-export const pendingLines = (pending, indent = '  ') => pending.map((p) => `${indent}${p.finding} is not filed yet: ${p.error ? `the tracker refused it: ${p.error}` : `${p.operation ?? 'file it through the tracker connector'}; any wf status, wf review --record or wf deliver reads it back`}`);
+export const pendingLines = (pending, indent = '  ') => pending.map((p) => `${indent}${p.finding} is not filed yet: ${p.error ? `the tracker refused it: ${p.error}` : `${p.operation ?? 'file it through the tracker connector'}; the next wf review --record or wf deliver reads it back`}`);
 
 export function assertFindings(findings, repos) {
   const problems = (findings ?? []).flatMap((f, i) => checkFinding(f, repos, i));

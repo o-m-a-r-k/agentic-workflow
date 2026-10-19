@@ -25,11 +25,12 @@ const now = () => {
   return new Date(clock).toISOString();
 };
 
-export async function append(root, attempt, type, data, actor) {
+export async function append(root, attempt, type, data, actor, { unless = null } = {}) {
   const spec = EVENTS[type];
   if (!spec) throw new WfError(`unknown event ${type}`);
   for (const k of spec.required) if (!(k in data)) throw new WfError(`${type}: missing ${k}`);
   const lines = read(root, attempt) ?? [];
+  if (unless?.(lines)) return null;
   if (!lines.length && type !== 'attempt.started') throw new WfError(`first event of ${attempt} must be attempt.started`);
   const prev = lines.at(-1)?.hash ?? null;
   const e = { seq: lines.length + 1, at: now(), type, actor: actor ?? null, data, prev, schema: 2 };

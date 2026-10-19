@@ -27,20 +27,6 @@ function processStart(pid) {
   return Number.isFinite(at) ? at : null;
 }
 
-// Whether `pid` is still the process launched at `spawnedAt` (ISO): a process that started well after it holds a pid the
-// system gave out again. Named failure (independent review of 0.7.9): a stale launch record's pid, reused by another
-// process that leads its own group (a shell job, a daemon), would have made that group "the role" and killed it. While a
-// group of the old pid still had members the system could not have reused the pid, so a reused leader means the role's
-// group is gone. Unknown (no start time, no record) counts as the same process, as before.
-export function stillTheRole(pid, spawnedAt) {
-  const launched = Date.parse(spawnedAt ?? '');
-  if (!Number.isFinite(launched)) return true;
-  const started = processSeams.startedAt(pid);
-  if (started === null) return true;
-  // `ps` reports whole seconds; the spawn is recorded right after the process starts.
-  return started <= launched + 30_000 && started >= launched - 30_000;
-}
-
 // Every process as { ppid, pgid, zombie } by pid, or null when this host does not let us list them (a sandbox can forbid
 // `ps`). A zombie has died and waits for its parent to collect it: it is gone.
 function processTable() {

@@ -73,8 +73,8 @@ export async function readEvents(root, attempt) {
   return readFile(root, attempt).map((e) => structuredClone(e));
 }
 
-/** Append one schema 2 event, serialised per attempt. */
-export async function append(root, attempt, type, data, actor = null) {
+/** Append one schema 2 event, serialised per attempt. `unless(entries)`, run under the lock, skips it (returns null). */
+export async function append(root, attempt, type, data, actor = null, { unless = null } = {}) {
   assertId(attempt);
   // Doubles replace other streams in tests only. A process carrying WF_DOUBLES outside a test would write facts a double
   // invented into a real ledger.
@@ -91,6 +91,7 @@ export async function append(root, attempt, type, data, actor = null) {
     if (entries.length && type === 'attempt.started') throw new WfError(`${attempt} already started (its ledger has ${entries.length} entries)`);
     // Nothing follows the close (L3): an event after it would change a row, a digest or a delivery of a ticket that ended.
     const closed = entries.find((e) => e.type === 'attempt.closed');
+    if (unless?.(entries)) return null;
     if (closed) throw new WfError(`${attempt} is already closed (${closed.data?.outcome ?? 'closed'} at ${closed.at}); its ledger takes no ${type} after attempt.closed`, { hint: 'a closed attempt stays closed: `wf start` opens the next attempt of the item' });
     const last = entries.at(-1) ?? null;
     const entry = { seq: (last?.seq ?? 0) + 1, at: nowIso(), type, actor: actor ?? null, data: JSON.parse(JSON.stringify(data)), prev: last?.hash ?? null, schema: SCHEMA };

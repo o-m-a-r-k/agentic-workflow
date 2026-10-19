@@ -143,8 +143,10 @@ export function settleClosure(closure, finalText) {
 async function supervise(specFile) {
   const spec = readJson(specFile);
   const host = findHost(spec.host);
-  // pid: this supervisor, so a reader knows a run whose supervisor died before it ended will never end (failed).
-  const status = { state: 'starting', session: null, startedAt: null, resumes: 0, pid: process.pid, pidAt: new Date().toISOString() };
+  // pid: this supervisor, so a reader knows a run whose supervisor died before it ended will never end (failed). pidAt:
+  // when this process started (not when it got here), so the reader's 2-second match with `ps` holds however slow the
+  // imports were.
+  const status = { state: 'starting', session: null, startedAt: null, resumes: 0, pid: process.pid, pidAt: new Date(Date.now() - process.uptime() * 1000).toISOString() };
   const save = () => writeJson(spec.status, status);
   const onEvent = ({ started }) => {
     if (started && !status.session) {

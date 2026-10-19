@@ -368,7 +368,7 @@ export const EVENTS = Object.freeze({
   // review file is the reviewer's own, from its transcript: 'verified'|'unverified' (no readable transcript).
   'review.recorded': { stream: 1, required: ['review', 'round', 'seat', 'tree', 'session', 'coverage', 'findings', 'verified', 'blockers'], optional: ['heads', 'model', 'filesRead', 'unread', 'provenance'] },
   // mode: file|digest|off. state: done|pending. ticket: the filed id, or null (pending, digest, off, or a duplicate found).
-  'finding.filed': { stream: 1, required: ['finding', 'mode', 'state', 'marker'], optional: ['ticket', 'duplicateOf', 'priority'] },
+  'finding.filed': { stream: 1, required: ['finding', 'mode', 'state', 'marker'], optional: ['ticket', 'duplicateOf', 'priority', 'operation'] },
   // Question fields plus id ('D<n>' per attempt).
   'decision.asked': { stream: 4, required: ['id', 'kind', 'question', 'options', 'refs', 'blocking'], optional: [] },
   // Answer fields. Only written when the answer rule holds. turnAt: when the person's turn was written, so the answer is
@@ -587,9 +587,10 @@ export const connectorCalls = seam(4, 'hosts/index.mjs', 'connectorCalls', '(ses
 // ---- Stream 5: ledger, telemetry, learning ----------------------------------------------------------------------------
 
 /** Append a schema 2 event. Throws WfError for a type outside EVENTS or a missing required field. Hash-chained,
- * serialised per attempt. The first event of a new attempt must be `attempt.started`.
- * @type {(root: string, attempt: string, type: keyof typeof EVENTS, data: object, actor: Session|null) => Promise<LedgerEntry>} */
-export const append = seam(5, 'ledger.mjs', 'append', '(root, attempt, type, data, actor) → LedgerEntry');
+ * serialised per attempt. The first event of a new attempt must be `attempt.started`. `unless(entries)`, run under the
+ * lock on the entries already written, skips the append (returns null) when it is true.
+ * @type {(root: string, attempt: string, type: keyof typeof EVENTS, data: object, actor: Session|null, opts?: { unless?: (entries: LedgerEntry[]) => boolean }) => Promise<LedgerEntry|null>} */
+export const append = seam(5, 'ledger.mjs', 'append', '(root, attempt, type, data, actor, { unless? }) → LedgerEntry|null');
 
 /** Every entry of an attempt's ledger, schema 1 or 2, chain checked. Throws WfError for an unknown attempt or a broken chain.
  * @type {(root: string, attempt: string) => Promise<LedgerEntry[]>} */
