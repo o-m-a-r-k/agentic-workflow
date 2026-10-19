@@ -266,3 +266,7 @@ export async function scan(root, { repos } = {}) {
 }
 
 export const implements08 = { scan };
+
+// The scan's library lists (named failure: lists of library and framework names grow one project at a time until the
+// generic scan carries every project's stack). scenarios/onboard-library-cap.test.mjs caps their size.
+export const LIBRARY_LISTS = Object.freeze({ SKIP_DIRS, CONTAINERS, CONTENT, PATHS, WRITE_CALL, MIGRATION_DIR, TEST_SCRIPT, CRITICAL_LINE, CODE, LOCKFILES });

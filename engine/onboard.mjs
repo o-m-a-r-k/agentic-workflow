@@ -12,6 +12,7 @@ import {
   COMMANDS, COMMAND_ALIASES, CONTRACT_VERSION, POLICY_KEYS, WfError, adapterBudget, canonicalJson, checkAdapter, listAttempts,
   loadAdapter, readEvents, scan, userDir,
 } from './contract.mjs';
+import { SECRETS_SUFFIX, secretsCatalogFile } from './config.mjs';
 import { isInstructionDoc, repoFiles } from './scan.mjs';
 import { stateFolderWarnings } from './state-folders.mjs';
 import { matchesAny } from './util.mjs';
@@ -34,7 +35,7 @@ export const DRAFT_SHAPE = `{
   "delivery": { "stages": [{ "do": "land" }, { "do": "status", "to": "<status>" }] },
   "ticketing": { "operations": { "<operation>": "<plain words>" } },
   "tests": { "<repo>": { "fast": { "run": "<command>" }, "full": { "run": "<command>" } } },
-  "screens": { "capture": "<command with {out} {viewport} {lang} {routes}>", "routes": { "repo": "<repo>", "path": "<file>" }, "shared": [], "sentinel": [], "langs": [{ "lang": "<code>", "dir": "ltr" }], "viewports": [<width>] }
+  "screens": { "capture": { "run": "<command with {out} {viewport} {lang} {routes}>" } or { "module": { "repo": "<repo>", "path": "<file>" } }, "routes": { "repo": "<repo>", "path": "<file>" }, "shared": [], "sentinel": [], "langs": [{ "lang": "<code>", "dir": "ltr" }], "viewports": [<width>] }
 }`;
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -70,7 +71,7 @@ export function locate(root, env = process.env) {
   const found = [];
   if (fs.existsSync(repoFile)) found.push({ file: repoFile, location: 'repo' });
   const dir = path.join(userDir(env), 'projects');
-  for (const f of fs.existsSync(dir) ? fs.readdirSync(dir).filter((x) => /\.ya?ml$/.test(x)) : []) {
+  for (const f of fs.existsSync(dir) ? fs.readdirSync(dir).filter((x) => /\.ya?ml$/.test(x) && !x.endsWith(SECRETS_SUFFIX)) : []) {
     const raw = readYaml(path.join(dir, f));
     if (raw?.root && real(expandHome(raw.root, env)) === real(root)) found.push({ file: path.join(dir, f), location: 'user' });
   }
@@ -339,8 +340,10 @@ function commitUserFolder(file, message) {
   g(['-c', 'user.name=agentic-workflow', '-c', 'user.email=agentic-workflow@localhost', 'commit', '--quiet', '-m', message, '--', path.basename(file)]);
 }
 
-// What a finished onboarding must hold: `risk` confirmed; with `screens.capture`, a capture command writing to {out}.
-const unfinished = (js, finish) => finish.filter((k) => (k === 'risk' ? js.risk !== 'none' && !Array.isArray(js.risk) : k === 'screens.capture' ? !/\{out\}/.test(js.screens?.capture ?? '') : false));
+// What a finished onboarding must hold: `risk` confirmed; with `screens.capture`, a capture module or a command writing
+// to {out}.
+const captureSet = (c) => Boolean(c?.module) || /\{out\}/.test(typeof c === 'string' ? c : c?.run ?? '');
+const unfinished = (js, finish) => finish.filter((k) => (k === 'risk' ? js.risk !== 'none' && !Array.isArray(js.risk) : k === 'screens.capture' ? !captureSet(js.screens?.capture) : false));
 
 /** writeAdapter(root, diff, confirmed, { location?, finish?, env? }) → { written, file, keys }. `diff.seed` is the raw
  * adapter started from when there is none yet (or when it replaces a 0.7 one). `finish`: keys the result must hold
@@ -358,7 +361,7 @@ export async function writeAdapter(root, diff, confirmed, { location, finish = [
   const keys = picked.map((c) => c.key);
 
   const missing = unfinished(js, finish);
-  if (missing.length) throw new WfError(`onboarding cannot finish: ${missing.map((k) => (k === 'risk' ? '`risk` is unconfirmed (confirm the proposed areas, or `risk: none`)' : '`screens.capture` is unset or does not write to {out}')).join('; ')}; nothing written`);
+  if (missing.length) throw new WfError(`onboarding cannot finish: ${missing.map((k) => (k === 'risk' ? '`risk` is unconfirmed (confirm the proposed areas, or `risk: none`)' : '`screens.capture` is unset, or its command does not write to {out}')).join('; ')}; nothing written`);
 
   // Hashes: every policy key a confirmed change touched, and on a new adapter every key it holds.
   const pol = policyOf(js);
@@ -618,7 +621,7 @@ export async function cmdDoctor(ctx) {
     }
     try {
       const { moduleProblems, moduleRefsOf } = await import('./migrate.mjs');
-      for (const m of moduleProblems(root, adapter.repos, moduleRefsOf(adapter))) add('fail', m.what, `${m.module} ${m.problem}`);
+      for (const m of await moduleProblems(root, adapter.repos, moduleRefsOf(adapter))) add('fail', m.what, `${m.module} ${m.problem}`);
     } catch (error) {
       add('warn', 'modules', `not checked: ${error.message}`);
     }
@@ -705,13 +708,15 @@ export async function cmdSync(ctx) {
 // wf secrets guide|check: names and states only; no value is ever printed
 // ---------------------------------------------------------------------------------------------------------------------
 
+// The catalogue beside the adapter (config.mjs secretsCatalogFile): the repo copy's `.workflow/`, or the user folder.
 function secretsCfg(root, adapter) {
-  const catalog = readYaml(path.join(root, '.workflow', 'secrets.yaml'));
+  const catalogFile = secretsCatalogFile(adapter, root);
+  const catalog = readYaml(catalogFile);
   const top = catalog && !Array.isArray(catalog) ? catalog : {};
-  return { name: adapter?.name ?? path.basename(root), repos: adapter?.repos ?? [{ name: path.basename(root), path: '.' }], secrets: { store: top.store ?? 'env-file', ...(top.file ? { file: top.file } : {}) } };
+  return { name: adapter?.name ?? path.basename(root), catalogFile, repos: adapter?.repos ?? [{ name: path.basename(root), path: '.' }], secrets: { store: top.store ?? 'env-file', ...(top.file ? { file: top.file } : {}) } };
 }
 async function secretsStatus(root, adapter) {
-  if (!fs.existsSync(path.join(root, '.workflow', 'secrets.yaml'))) return { rows: [] };
+  if (!fs.existsSync(secretsCatalogFile(adapter, root))) return { rows: [] };
   const secrets = await import('./secrets.mjs');
   return { rows: secrets.status(root, secretsCfg(root, adapter)) };
 }
@@ -723,7 +728,7 @@ export async function cmdSecrets(ctx, args) {
   const adapter = locate(root, env)?.raw?.version === 2 ? await loadAdapter(root, { env }) : null;
   if (sub === 'check') {
     const { rows } = await secretsStatus(root, adapter);
-    if (!rows.length) return { text: 'No secrets catalogued (.workflow/secrets.yaml).', data: { rows } };
+    if (!rows.length) return { text: `No secrets catalogued (${secretsCatalogFile(adapter, root)}).`, data: { rows } };
     const missing = rows.filter((r) => r.needed && r.state !== 'filled');
     return { text: rows.map((r) => `${r.state === 'filled' ? '✓' : '✗'} ${r.key}: ${r.state}${r.needed ? '' : ' (no step needs it)'}`).join('\n'), data: { rows }, exitCode: missing.length ? 1 : 0 };
   }

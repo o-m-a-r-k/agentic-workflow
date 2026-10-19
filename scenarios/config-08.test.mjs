@@ -176,7 +176,7 @@ test('loadAdapter: an invalid adapter throws one error listing every problem wit
 test('adapterBudget: rules, risk paths, distinct modules and operation words against budget.adapter', async (t) => {
   const p = makeProject({ overrides: {
     rules: [{ paths: ['client/src/**'], read: ['client/README.md'] }],
-    ticketing: { tracker: { module: { repo: 'server', path: '.workflow/tracker.mjs' } }, via: 'connector', operations: { search: 'Search open issues for the text.', readBack: 'Read the issue back.' } },
+    ticketing: { tracker: { module: { repo: 'server', path: '.workflow/tracker.mjs' } }, via: 'connector', operations: { search: 'Search open issues for the text.', read: 'Read the issue back.' } },
     delivery: { stages: [{ do: 'module', module: { repo: 'server', path: '.workflow/tracker.mjs' } }, { do: 'module', module: { repo: 'client', path: 'deliver.mjs' } }] },
     budget: { adapter: { rules: 1, risk: 0, modules: 4, operationWords: 5 } },
   } });

@@ -12,13 +12,24 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { POLICY_KEYS, WfError, userDir } from './contract.mjs';
+import * as contract from './contract.mjs';
+
+const { POLICY_KEYS, WfError, userDir } = contract;
+// The one list of tracker operations (M8), shared with the engine's tracker steps. The fallback is the same list, for a
+// tree where contract.mjs does not export it yet; it goes at the merge.
+const OPERATIONS = contract.TRACKER_OPERATIONS ?? ['read', 'search', 'fileFollowUp', 'setStatus', 'comment', 'mergeRequest'];
 
 const require = createRequire(import.meta.url);
 const YAML = require('./vendor/yaml/dist/index.js');
 
 export const ADAPTER_DIR = '.workflow';
 export const CONFIG_FILE = 'project.yaml';
+
+// The secrets catalogue lives beside the adapter: `<root>/.workflow/secrets.yaml` for a repo copy, and
+// `<userDir>/projects/<name>.secrets.yaml` for a user-folder copy (named failure: a user-folder project had no place for
+// its catalogue, so `wf secrets` and the redactor saw none). A project with no adapter yet uses the repo place.
+export const SECRETS_SUFFIX = '.secrets.yaml';
+export const secretsCatalogFile = (adapter, root = adapter?.root) => (adapter?.source?.location === 'user' ? path.join(path.dirname(adapter.source.file), `${path.basename(adapter.source.file, '.yaml')}${SECRETS_SUFFIX}`) : path.join(root, ADAPTER_DIR, 'secrets.yaml'));
 
 // A repo's checkout folder (the kept secrets module reads it).
 export const repoDir = (root, repo) => path.resolve(root, repo.path);
@@ -77,7 +88,7 @@ function userCopies(env) {
   const dir = userProjects(env);
   if (!fs.existsSync(dir)) return [];
   const out = [];
-  for (const f of fs.readdirSync(dir).filter((n) => n.endsWith('.yaml')).sort()) {
+  for (const f of fs.readdirSync(dir).filter((n) => n.endsWith('.yaml') && !n.endsWith(SECRETS_SUFFIX)).sort()) {
     const file = path.join(dir, f);
     const raw = parseYaml(fs.readFileSync(file, 'utf8'), file);
     if (typeof raw.root !== 'string' || !raw.root.trim()) throw new WfError(`${file} has no \`root:\`; a user-folder adapter names its project folder`, { hint: 'add `root: <the project folder>` to it, or move it out of the projects folder' });
@@ -117,7 +128,6 @@ const DROPPED = {
 const NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const STAGE_KINDS = ['land', 'push', 'merge-request', 'wait-merged', 'confirm-deployed', 'deploy', 'status', 'comment', 'module'];
 const STAGE_KEYS = ['do', 'branch', 'to', 'comment', 'repos', 'where', 'when', 'after', 'module'];
-const OPERATIONS = ['fileFollowUp', 'search', 'readIssue', 'setStatus', 'comment', 'attach', 'readBack'];
 const MODEL_ROLES = ['planner', 'implementer', 'reviewer', 'secondReviewer', 'tester', 'drafter'];
 const CAPTURE_PLACEHOLDERS = ['out', 'viewport', 'lang', 'dir', 'routes'];
 const BUDGET_KEYS = ['rules', 'risk', 'modules', 'operationWords'];
@@ -292,8 +302,15 @@ function problemsOf(raw, { location } = {}) {
       if (!Array.isArray(s.viewports) || !s.viewports.length) c.add('screens.viewports', 'must list at least one width');
       else s.viewports.forEach((v, i) => (Number.isInteger(v) && v > 0) || c.add(`screens.viewports[${i}]`, 'must be a width in pixels'));
     }
-    if ('capture' in s && s.capture !== null && c.str(s.capture, 'screens.capture')) {
-      for (const [, p] of s.capture.matchAll(/\{(\w+)\}/g)) if (!CAPTURE_PLACEHOLDERS.includes(p)) c.add('screens.capture', `unknown placeholder {${p}} (known: ${CAPTURE_PLACEHOLDERS.map((x) => `{${x}}`).join(' ')})`);
+    // A command (`{ run }`, or a plain string meaning the same) or a module (`{ module: { repo, path } }`).
+    if ('capture' in s && s.capture !== null) {
+      const run = typeof s.capture === 'string' ? s.capture : isObj(s.capture) && 'run' in s.capture ? s.capture.run : null;
+      if (isObj(s.capture) && c.obj(s.capture, 'screens.capture', ['run', 'module']) && ('run' in s.capture) === ('module' in s.capture)) c.add('screens.capture', 'needs exactly one of `run` and `module`');
+      else if (isObj(s.capture) && 'module' in s.capture) checkModule(c, s.capture.module, 'screens.capture.module', repoNames);
+      else if (!isObj(s.capture) && typeof s.capture !== 'string') c.add('screens.capture', 'must be { run: <command> } or { module: { repo, path } }');
+      if (run !== null && c.str(run, typeof s.capture === 'string' ? 'screens.capture' : 'screens.capture.run')) {
+        for (const [, p] of run.matchAll(/\{(\w+)\}/g)) if (!CAPTURE_PLACEHOLDERS.includes(p)) c.add('screens.capture', `unknown placeholder {${p}} (known: ${CAPTURE_PLACEHOLDERS.map((x) => `{${x}}`).join(' ')})`);
+      }
     }
   }
   if ('review' in raw && c.obj(raw.review, 'review', ['diffRead']) && 'diffRead' in raw.review) c.oneOf(raw.review.diffRead, 'review.diffRead', ['before', 'after']);
@@ -384,6 +401,8 @@ function problemsOf(raw, { location } = {}) {
 // ---- Normalising ------------------------------------------------------------------------------------------------------
 
 const list = (v) => (Array.isArray(v) ? [...v] : []);
+// screens.capture normalised: `{ run }` (a plain string is a command), `{ module: { repo, path } }`, or null.
+const captureOf = (v) => (v == null ? null : typeof v === 'string' ? { run: v } : v.module ? { module: { repo: v.module.repo, path: v.module.path } } : { run: v.run });
 const testSpec = (v) => (v ? { ...(v.run ? { run: v.run } : { module: { ...v.module } }), ...(v.lock ? { lock: { ...v.lock } } : {}) } : null);
 
 function normalise(raw, root, source) {
@@ -411,7 +430,7 @@ function normalise(raw, root, source) {
     components: list(raw.components).map((m) => ({ id: m.id, repo: m.repo, dependsOn: m.dependsOn.map((x) => ({ contract: x.contract })) })),
     invariants: raw.invariants ?? null,
     rules: list(raw.rules).map((r) => ({ paths: [...r.paths], read: [...r.read] })),
-    screens: { routes: s.routes ? { ...s.routes } : null, shared: list(s.shared), sentinel: list(s.sentinel), langs: list(s.langs).map((l) => ({ lang: l.lang, dir: l.dir })), viewports: list(s.viewports), capture: s.capture ?? null },
+    screens: { routes: s.routes ? { ...s.routes } : null, shared: list(s.shared), sentinel: list(s.sentinel), langs: list(s.langs).map((l) => ({ lang: l.lang, dir: l.dir })), viewports: list(s.viewports), capture: captureOf(s.capture) },
     review: { diffRead: raw.review?.diffRead ?? 'before' },
     risk: raw.risk === 'none' ? { confirmed: true, paths: [] } : Array.isArray(raw.risk) ? { confirmed: true, paths: raw.risk.map((r) => ({ id: r.id, paths: [...r.paths], reason: r.reason, tests: [...r.tests] })) } : { confirmed: false, paths: [] },
     ticketing: {
@@ -445,19 +464,27 @@ function gitIn(dir, args) {
 }
 // The user folder's projects are a git repo of their own. A version of an adapter the history does not hold yet (a hand
 // edit, or the first read) is committed when it is read, so the history holds every version that judged an attempt and
-// onboarding can show a hand edit against it.
-function keepHistory(file) {
+// onboarding can show a hand edit against it. The hash of the last version committed is kept in `.git/wf-read/<name>`,
+// so a read of an unchanged adapter spawns no git (every `wf` command reads it).
+function keepHistory(file, text) {
   const dir = path.dirname(file);
-  if (!fs.existsSync(path.join(dir, '.git'))) gitIn(dir, ['init', '--quiet']);
   const name = path.basename(file);
-  if (!gitIn(dir, ['status', '--porcelain', '--', name]).trim()) return;
-  try {
-    gitIn(dir, ['add', '--', name]);
-    gitIn(dir, ['commit', '--quiet', '-m', `${name} as read`, '--', name]);
-  } catch (e) {
-    // Parallel attempts read the same adapter: another process holding the index lock is committing this version.
-    if (!/index\.lock/.test(e.message)) throw e;
+  const mark = path.join(dir, '.git', 'wf-read', name);
+  const hash = sha256(text);
+  if (fs.existsSync(mark) && fs.readFileSync(mark, 'utf8') === hash) return;
+  if (!fs.existsSync(path.join(dir, '.git'))) gitIn(dir, ['init', '--quiet']);
+  if (gitIn(dir, ['status', '--porcelain', '--', name]).trim()) {
+    try {
+      gitIn(dir, ['add', '--', name]);
+      gitIn(dir, ['commit', '--quiet', '-m', `${name} as read`, '--', name]);
+    } catch (e) {
+      // Parallel attempts read the same adapter: another process holding the index lock is committing this version.
+      if (!/index\.lock/.test(e.message)) throw e;
+      return;
+    }
   }
+  fs.mkdirSync(path.dirname(mark), { recursive: true });
+  fs.writeFileSync(mark, hash);
 }
 
 // ---- Loading ----------------------------------------------------------------------------------------------------------
@@ -485,7 +512,7 @@ export async function loadAdapter(root, { env = process.env } = {}) {
   if (location === 'user' && isStr(raw.name) && `${raw.name}.yaml` !== path.basename(file)) problems.push(`name: \`${raw.name}\` must match the file name ${path.basename(file)}`);
   if (location === 'repo' && isStr(raw.root) && real(expandHome(raw.root, env)) !== dir) problems.push(`root: \`${raw.root}\` is not ${dir}, the folder this adapter was found in`);
   if (problems.length) throw new WfError(`${file}:\n  - ${problems.join('\n  - ')}`, { hint: 'fix the adapter, or re-run `wf init`' });
-  if (location === 'user') keepHistory(file);
+  if (location === 'user') keepHistory(file, text);
   return normalise(raw, dir, { file, location, hash: sha256(text) });
 }
 
@@ -495,6 +522,7 @@ function moduleRefs(a) {
   const refs = [];
   for (const r of a.repos) for (const k of ['fast', 'full']) if (r.tests[k]?.module) refs.push(r.tests[k].module);
   if (a.screens.routes) refs.push(a.screens.routes);
+  if (a.screens.capture?.module) refs.push(a.screens.capture.module);
   if (a.ticketing.tracker?.module) refs.push(a.ticketing.tracker.module);
   for (const s of a.delivery.stages) if (s.module) refs.push(s.module);
   return refs;
