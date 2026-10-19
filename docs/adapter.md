@@ -45,7 +45,7 @@ roles:
   implementer: { class: full, appendix: .workflow/roles/implementer.md }
   reviewer:    { class: review, appendix: .workflow/roles/reviewer.md }
 strategy:
-  reviewRoundsEscalate: 10   # review rounds handed (recorded or not) before the person decides how to continue (the default); the one number the engine stops for
+  reviewRoundsEscalate: 10   # review rounds handed (recorded or not) at which the strategist decides first how to continue (the default; the person is asked when it escalates, 0.7.33); the one number the engine stops for
 impact:                      # the planner's two-stage impact analysis (lifecycle.md, "Impact analysis")
   requiredFor: [full]        # classes whose work needs a survey and an impact map; [] turns the requirement off
   maxFileBytes: 2097152      # a larger file is skipped by every query (and listed)
@@ -111,7 +111,7 @@ A step without `inputs` reruns every gate (no reuse). A passing result is reused
 
 `wf doctor` warns (never fails) when a `run` command references a sibling repo (`../web`, `$WF_ROOT/web`, `$WF_ATTEMPT/web`) that `alsoInputs` does not list: a portal end-to-end pass was reused against old API code. `alsoInputs: [repo, ...]` names other repos a step reads, for example an end-to-end step in one repo that builds a sibling repo's service from its worktree. The step's reuse key then also covers each listed repo's tree (HEAD plus a hash of tracked changes, the same as the gate's tree binding: the attempt's worktree when the repo is in the attempt, else its main checkout), so any change there reruns the step, and a non-docs change there keeps the step from being skipped as "no changes in this repo". A listed repo whose tree cannot be read makes the step always run (fail closed).
 
-`reads: [path or glob, ...]` (0.7.32, D78) declares the files a step's plugin loads outside the adapter folder, relative to the step's repo (a harness or fixture the plugin reads). It changes no result (a step is not rerun for it); when the step is a check frozen at admission and a ticket corrects it, the correction pins every file the entries match (one that matches nothing refuses the correction), and a later change to one asks the reviewer to judge the correction again. A load the plugin does not declare is the reviewer's to find, as a blocking finding.
+`reads: [path or glob, ...]` (0.7.32, D78) declares the files a step's plugin loads outside the adapter folder, relative to the step's repo (a harness or fixture the plugin reads). It changes no result (a step is not rerun for it); when the step is a check frozen at admission and a ticket corrects it, the correction pins every file the entries match (one that matches nothing refuses the correction), and a later change to one asks the reviewer to judge the correction again. What a declared file loads in turn is part of the check too (a support file a harness imports, the spec folder a runner the plugin starts picks up): declare a glob over the folder (`front/cypress/**`) rather than each file (0.7.33, D80). A load the plugin or a declared file does not declare is the reviewer's to find, as a blocking finding. A correction that drops the declaration or narrows a glob is recorded, not refused: each file an earlier pin covered and the corrected one does not (`readsDropped`) is handed to the reviewer, who judges it as a coverage loss (0.7.33, D79).
 
 ## Delivery adapter contract
 

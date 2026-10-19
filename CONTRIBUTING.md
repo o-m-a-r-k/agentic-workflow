@@ -52,6 +52,46 @@ engine starts.
 - Some tests wait on purpose (a gate step that sleeps until it is stopped, a lease another gate holds, a terminal
   that types after two seconds): the property they prove takes that time. Do not shorten them to win time.
 
+## Releasing (maintainer)
+
+A release is one command once CI is green on the release branch (D83):
+
+```bash
+node scripts/release.mjs 0.7.33 --dry-run   # the plan, from what is known locally: nothing is fetched, pushed, created or installed
+GH_TOKEN=<the repository owner's token> node scripts/release.mjs 0.7.33
+```
+
+Before it: the dev branch (`dev/<version>`, or name it with `--dev <branch>`) holds the release with the three version files and
+`docs/releases/v<version>.md`, and is pushed to `release/<version>`, where CI ran the whole suite and passed. The steps, each
+printing what it ran and what it saw:
+
+1. **check**: `git fetch`; `origin/release/<version>` equals the local dev head; the version files and the notes are in it; main
+   fast-forwards to it; CI passed on it (`scripts/ci-passed.mjs`).
+2. **privacy**: `scenarios/privacy.test.mjs` runs (never skips) at that commit with the denylist (`WF_PRIVACY_DENYLIST`, the
+   settings' `privacyDenylist`, or `~/.agentic-workflow/privacy-denylist`); every commit of the range is scanned too: message,
+   author, committer and each added line. A hit names the commit and line, never the name.
+3. **main**: in the checkout of main, `git merge --ff-only origin/release/<version>` and `git push origin main`.
+4. **github**: `gh release create v<version> --target <full sha> --title <version> --notes-file docs/releases/v<version>.md`,
+   with `GH_TOKEN` from the environment (never printed).
+5. **install**: `git fetch --tags`, `git archive v<version>` into `~/.local/share/agentic-workflow/releases/<version>`, then
+   `node bin/wf install` there.
+6. **hosts**: `claude plugin marketplace update` and `plugin update`; `codex plugin marketplace upgrade` and `plugin add`. A host
+   whose CLI is not on PATH is skipped, and the output says so.
+7. **sync**: `wf sync` in each project the settings name.
+8. **cleanup**: the remote release branch is deleted; with `worktreeFolder` set, this version's dev worktrees under it and their
+   branches are removed (`git branch -d`: merged only; a worktree with uncommitted changes stops the run; the one the command runs
+   in is left, with the commands to remove it).
+
+The run stops at the first failure and says what it left done and what not; a step already done is seen and skipped, so running
+the same command again after the fix goes on. The settings live outside the repository, in `~/.agentic-workflow/release.json`
+(or `WF_RELEASE_CONFIG`, or `--config <file>`), every field optional:
+
+```json
+{ "syncRoots": ["<a project root>"], "worktreeFolder": "<the folder of the dev worktrees>", "privacyDenylist": "<the denylist file>" }
+```
+
+`scenarios/release-script.test.mjs` tests the dry run only; the steps talk to GitHub and the hosts and are never run by the suite.
+
 ## Every fix names its failure and ships its test
 
 - A change that fixes something cites the **named failure** it fixes, in the commit message and in a comment next to

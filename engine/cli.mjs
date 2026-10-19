@@ -100,7 +100,7 @@ Work
                                     sibling attempt in the same batch (delivered together; \`wf batch create\` assembles it)
   wf signals [--json]               what the plan, the implementers and the reviewers expected beside what happened (files,
                                     rounds, minutes, each running role's elapsed time and last activity), rounds, findings,
-                                    amendments, bundle size and the owner's round escalation (adapter \`strategy:\` block)
+                                    amendments, bundle size and the round count, where the strategist decides first (adapter \`strategy:\` block)
   wf models refresh --attempt ID    pin execution model/effort settings from the committed adapter base
   wf advance --once|--until-owner [--runtime ${hostChoice()}] [--max-steps N] [--single] [--reviewers 2|3]
                                     optional foreground review/gate runner; stops for owner decisions
@@ -142,7 +142,7 @@ Work
                                     an observation this attempt fixed; the next reviewer verifies it
   wf scope defer --finding REVIEWER:F1[,D3] [--reason "why it waits"] [--ask FILE.json] [--person-directed "<their words>"]
                                     low observations and discovered issues left for later; one short question per item
-  wf scope waive --finding REVIEWER:F1[,REVIEWER:F2] [--reason "why"] [--ask FILE.json] [--same-as A<n>]
+  wf scope waive --finding REVIEWER:F1[,REVIEWER:F2] [--reason "why"] [--ask FILE.json] [--same-as A<n>] [--person-said "<their words>"]
                                     blocking findings set aside: the person's decision (\`wf approve\`), one question per
                                     finding; --same-as: a finding raised again about a gap the person already accepted in A<n>
   wf scope move --finding REVIEWER:F1 --sibling ATTEMPT
@@ -889,8 +889,10 @@ async function dispatch(cmd, sub, positional, options) {
       // 0.7.32 (D78): an admission check corrected is judged by the review that follows, never asked of the person.
       const last = sub === 'correct' ? s.validationCorrections?.at(-1) : null;
       const admitted = (last?.from ?? []).filter((x) => x.admission).map((x) => x.id);
+      // 0.7.33 (I-223): a file an earlier pin covered and the corrected `reads` does not is said here, as the reviewer is handed it.
+      const dropped = [...new Set((last?.readsDropped ?? []).map((x) => x.step))].map((step) => `the corrected \`reads\` of ${step} no longer covers ${(last.readsDropped ?? []).filter((x) => x.step === step).map((x) => `${x.files.map((f) => f.path).join(', ')}, which ${x.against === 'original' ? 'the admission original' : 'the previous correction'} covered`).join(', and ')}`);
       print(options, admitted.length
-        ? `admission check ${admitted.join(', ')} corrected at ${String(last.commit).slice(0, 10)} (the original stays in the record, pinned at ${[...new Set(last.from.filter((x) => x.admission).map((x) => String(x.commit).slice(0, 10)))].join(', ')}); no question to the person: the review that follows judges the correction (its bundle has the admission original, the previous correction and the corrected definition, decoded), then the full gate${last.decision ? `; recorded under the person's answer ${last.decision}` : ''}. ${((others) => (others.length ? `${others.map((o) => o.attempt).join(', ')} ${others.length > 1 ? 'have' : 'has'} corrected ${[...new Set(others.flatMap((o) => o.steps))].join(', ')} too: ` : ''))(last.sharedWith ?? [])}when the defect is in the check itself, not this ticket's intended behaviour, fix it once on the base branch of the adapter's repo instead: every live attempt follows the adapter there (D60), and no ticket needs its own correction`
+        ? `admission check ${admitted.join(', ')} corrected at ${String(last.commit).slice(0, 10)} (the original stays in the record, pinned at ${[...new Set(last.from.filter((x) => x.admission).map((x) => String(x.commit).slice(0, 10)))].join(', ')}); no question to the person: the review that follows judges the correction (its bundle has the admission original, the previous correction and the corrected definition, decoded), then the full gate${last.decision ? `; recorded under the person's answer ${last.decision}` : ''}. ${dropped.length ? `${dropped.join('; ')}: the review that follows judges it as a coverage loss unless the test code it held is now in the plugin or in a declared file. ` : ''}${((others) => (others.length ? `${others.map((o) => o.attempt).join(', ')} ${others.length > 1 ? 'have' : 'has'} corrected ${[...new Set(others.flatMap((o) => o.steps))].join(', ')} too: ` : ''))(last.sharedWith ?? [])}when the defect is in the check itself, not this ticket's intended behaviour, fix it once on the base branch of the adapter's repo instead: every live attempt follows the adapter there (D60), and no ticket needs its own correction`
         : `required supplemental validation ${sub === 'correct' ? 'corrected' : 'registered'}; admission checks unchanged; fresh code review and full gate required`, s.validations.at(-1));
       return 0;
     }
@@ -926,7 +928,7 @@ async function dispatch(cmd, sub, positional, options) {
       }
       if (sub === 'ticket') { const r = completeScopeTicket(root, options); print(options, 'follow-up ticket readback recorded; run wf resume', r); return 0; }
       if (sub === 'fixed') { const r = recordFixed(root, options); const note = r.scopeDecisions.at(-1)?.notInCitedFile; print(options, `${options.finding} recorded fixed${note ? ` (the commit does not change the file ${note.join(', ')} cites${note.length > 1 ? '' : 's'}; the next reviewer verifies it)` : ''}; the next reviewer is handed it to verify; run wf resume`, r); return 0; }
-      if (sub === 'waive') { const r = waiveFinding(root, options); print(options, `${options.finding} waived by the person's decision; run wf resume`, r); return 0; }
+      if (sub === 'waive') { const r = await waiveFinding(root, options); print(options, `${options.finding} waived by the person's decision${options['person-said'] !== undefined ? ' (their own words, recorded with each finding; nothing was asked)' : ''}; run wf resume`, r); return 0; }
       if (sub === 'not-a-defect') { const r = closeFindingNotDefect(root, options); print(options, `${options.finding} closed as not a defect by the person's answer ("${options.reason}"); the finding stays in the record beside it, and the delivered comment lists nothing for it\nnext: ${nextAction(root, r)}`, r.scopeDecisions.filter((d) => d.choice === 'not-a-defect')); return 0; }
       if (sub === 'defer') { const r = deferFindings(root, options); print(options, `${options.finding} deferred; the delivered comment lists it as a known issue; run wf resume`, r); return 0; }
       if (sub === 'move') {

@@ -207,7 +207,7 @@ export function limitItems(state, { load = null } = {}) {
   // A finding the person accepted without a fix (0.7.23): the tester reads what was accepted. Named failure: six findings the
   // person waived (no proof that recording works on a real phone) were in no line of the delivered comment.
   // A finding recorded as the same gap as one the person accepted (`sameAs`) reads as that one's plain line.
-  for (const d of state.scopeDecisions ?? []) if (d.choice === 'waived') for (const k of d.keys ?? []) add(k, `Accepted without a fix: ${ownLine(state, k) ?? (d.sameAs && plainFor(state, d.under, d.sameAs) ? firstSentence(plainFor(state, d.under, d.sameAs)) : wording(state, k, findingSummary(state, k), d.decision ?? d.under))}.${directedBy(state, d.under)}`);
+  for (const d of state.scopeDecisions ?? []) if (d.choice === 'waived') for (const k of d.keys ?? []) add(k, `Accepted without a fix: ${ownLine(state, k) ?? (d.sameAs && plainFor(state, d.under, d.sameAs) ? firstSentence(plainFor(state, d.under, d.sameAs)) : wording(state, k, findingSummary(state, k), d.decision ?? d.under))}.${d.personSaid ? ` Accepted at the person's direction: "${d.personSaid.quote}".` : directedBy(state, d.under)}`);
   for (const d of state.scopeDecisions ?? []) if (d.choice === 'deferred') for (const k of d.keys ?? []) add(k, `Known issue: ${wording(state, k, d.summaries?.[k] ?? findingSummary(state, k), d.decisionFor?.[k])}.${directedBy(state, d.decisionFor?.[k])}`);
   // Named failure (I-69): a review named scope it did not reach (`notReached`) and nothing the tester reads said so. Every
   // round since the last complete full audit counts: a delta round does not go back over an earlier round's gaps.

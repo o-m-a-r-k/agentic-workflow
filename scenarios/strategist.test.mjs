@@ -150,16 +150,15 @@ test('an attempt admitted before 0.7.0 is held by the round escalation and by a 
   assert.equal(sig.engineVersion, '0.6.9');
   assert.equal(sig.strategy.applies, true, 'the checkpoint applies whatever release admitted the attempt');
   assert.equal(sig.strategy.escalation.firing.id, 'rounds-escalation');
-  assert.deepEqual([sig.strategy.escalation.nextAt, sig.strategy.escalation.lastAnswer], [2, null], 'due at 2 handed rounds, nobody has answered');
-  assert.equal(old.state(root, a.id).decision.kind, 'strategy', 'wf resume names the person\'s decision before any handoff is tried');
-  assert.match(old.state(root, a.id).decision.guidance, /This is the person's decision: bring them the brief/);
+  assert.deepEqual([sig.strategy.escalation.nextAt, sig.strategy.escalation.settledBy], [2, null], 'due at 2 handed rounds, nothing has settled it');
+  assert.equal(old.state(root, a.id).decision.kind, 'strategy', 'wf resume names the strategist\'s decision before any handoff is tried');
+  assert.match(old.state(root, a.id).decision.guidance, /at the round count the strategist decides first/);
   const held = old.run(root, ['handoff', 'reviewer', '--agent', 'rev-more', '--attempt', a.id, '--owner', a.owner], { ownerSilent: true });
   assert.equal(held.code, 75);
-  assert.match(held.err, /2 review rounds handed; the owner decides how to continue \(A1\); no reviewer starts until the owner decides/);
-  assert.ok(refusalRows(root).some((x) => x.id === 'strategy:owner-escalation'));
+  assert.match(held.err, /2 review rounds handed; the strategist decides first how to continue; no reviewer starts until it decides/);
+  assert.ok(refusalRows(root).some((x) => x.id === 'strategy:round-count'));
   assert.doesNotMatch(ok(old.run(root, ['signals', '--attempt', a.id])).out, /does not apply to this attempt/);
-  // The person answers; the work goes on; a strategist's escalation holds the attempt as well.
-  ok(old.run(root, ['handoff', 'reviewer', '--agent', 'rev-more', '--attempt', a.id, '--owner', a.owner]));
+  // The strategist decides at the count and escalates: its question holds the attempt.
   const h = ok(old.run(root, ['handoff', 'strategist', '--agent', 'strat-old', '--attempt', a.id, '--reason', 'the same finding keeps coming back', '--json'])).json();
   const esc = strategistClosure(base, h.bundle, { strategist: 'strat-old', action: 'escalate', rationale: 'The same finding came back.', prediction: { signal: 'blockingLatest <= 0', by: 20 }, question: 'The same problem came back. Should it be fixed in this ticket?', options: [{ label: 'Fix it here', then: 'one more fix round' }, { label: 'List it as known', then: 'it ships listed' }], recommend: { label: 'Fix it here', why: 'it blocks' } });
   ok(old.run(root, ['strategy', 'record', '--closure', esc.file, '--attempt', a.id]));
@@ -277,46 +276,51 @@ test('a split decision performs the split: a sibling in the same batch carries t
 });
 
 
-test('ten review rounds are the owner\'s decision: continue gives another ten, stop holds the attempt', async () => {
-  // Named failure: one ticket ran 47 rounds before anyone stepped back. the person: "make it 10 and then raise it to me".
-  // The scenario lowers the count to 2 to stay short.
+// 0.7.33 (I-229, D84), the person's rule: at the round count the strategist decides first, and the person is asked only when it
+// escalates. Named failure (field): the round question at 20 was withdrawn when the person held the attempt; they lifted the hold
+// with a direction, the strategist decided to consolidate, and two minutes later the engine asked the same round question again,
+// recommending what the person had said. The person: "why is the strategist not reviewing this first".
+test('0.7.33 (I-229, D84): at the round count the strategist decides first and nobody is asked; its decision, or the person\'s own direction since the count, settles it and the count restarts from there; a question the agent withdrew settles nothing', () => {
   const ctx = project('owner-rounds', { strategy: { reviewRoundsEscalate: 2 } });
   const a = started(v7, ctx, { item: 'ENG-790' });
-  const { root } = ctx;
+  const { root, base } = ctx;
   reviewRound(v7, ctx, a, { findings: 1 });
   reviewRound(v7, ctx, a, { findings: 1 });
   const sig = v7.signals(root, a.id);
   assert.equal(sig.strategy.escalation.firing.id, 'rounds-escalation');
-  assert.deepEqual([sig.strategy.escalation.nextAt, sig.strategy.escalation.lastAnswer], [2, null], 'due at 2 handed rounds, nobody has answered');
-  assert.match(v7.state(root, a.id).decision.guidance, /This is the person's decision: bring them the brief/);
-  // The next handoff opens the decision; no strategist is involved.
+  assert.equal(sig.strategy.escalation.firing.summary, '2 review rounds handed; the strategist decides first how to continue');
+  const step = v7.state(root, a.id).decision;
+  assert.equal(step.kind, 'strategy');
+  assert.match(step.guidance, /at the round count the strategist decides first\. Hand it with the count as the reason .*the person is asked only when it escalates/);
   const refused = v7.run(root, ['handoff', 'reviewer', '--agent', 'rev-x', '--attempt', a.id, '--owner', a.owner], { ownerSilent: true });
   assert.equal(refused.code, 75);
-  assert.match(refused.err, /2 review rounds handed; the owner decides how to continue \(A1\); no reviewer starts until the owner decides/);
-  assert.match(ok(v7.run(root, ['decisions', '--attempt', a.id])).out, /A1 {2}escalation {2}pending \(continue \| split \| deliver-core \| hold \| stop\)/);
-  const { approveInTerminal } = await import('../engine/approve.mjs');
-  const answer = (id, choice) => inProcess(root, async () => {
-    const input = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => {} });
-    const output = Object.assign(new PassThrough(), { isTTY: true, columns: 80 });
-    const pending = approveInTerminal(root, id, { attempt: a.id }, { input, output, env: {} });
-    setImmediate(() => input.write(`${choice}\n`));
-    return pending;
-  });
-  await answer('A1', 'continue');
-  // Continue: another two rounds before the owner is asked again. The count is the rounds handed, recorded or not: the
-  // second of these is a reviewer that was handed the tree and never recorded a closure (a dead session), and it counts.
-  reviewRound(v7, ctx, a, { findings: 1, tag: 'c1' });
-  ok(v7.run(root, ['handoff', 'reviewer', '--agent', 'rev-dead', '--attempt', a.id, '--owner', a.owner]));
-  const counted = v7.signals(root, a.id);
-  assert.deepEqual([counted.rounds.length, counted.roundsHanded], [3, 4], 'three recorded, four handed');
-  const again = v7.run(root, ['handoff', 'reviewer', '--agent', 'rev-y', '--attempt', a.id, '--owner', a.owner], { ownerSilent: true });
-  assert.match(again.err, /4 review rounds handed; the owner decides how to continue \(A2\)/);
-  await answer('A2', 'stop');
-  // Stop: the attempt is held in the owner's words; only he lifts it.
-  const held = v7.run(root, ['handoff', 'reviewer', '--agent', 'rev-z', '--attempt', a.id, '--owner', a.owner], { ownerSilent: true });
-  assert.equal(held.code, 75);
-  assert.match(held.err, /the owner chose stop at A2/);
-  assert.match(v7.state(root, a.id).activeHold.reason, /the owner chose stop at the escalation A2/);
+  assert.match(refused.err, /2 review rounds handed; the strategist decides first how to continue; no reviewer starts until it decides/);
+  assert.ok(refusalRows(root).some((x) => x.id === 'strategy:round-count'));
+  assert.deepEqual(v7.state(root, a.id).decisions ?? [], [], 'no question to the person');
+  // A round question the agent withdrew (an earlier release asked it) settles nothing.
+  append(root, a.id, 'decision.created', { id: 'A1', kind: 'escalation', key: 'tripwire:rounds-escalation:rounds:2', summary: '2 review rounds handed; the owner decides how to continue: continue | split | deliver-core | hold | stop', choices: ['continue', 'split', 'deliver-core', 'hold', 'stop'] }, null);
+  ok(v7.run(root, ['decisions', 'withdraw', 'A1', '--attempt', a.id, '--reason', 'the agent judged it stale']));
+  assert.equal(v7.run(root, ['handoff', 'reviewer', '--agent', 'rev-x2', '--attempt', a.id, '--owner', a.owner], { ownerSilent: true }).code, 75, 'still unsettled');
+  // The strategist decides: the count is settled and restarts from its decision.
+  const h = ok(v7.run(root, ['handoff', 'strategist', '--agent', 'strat-count', '--attempt', a.id, '--reason', '2 review rounds handed', '--json'])).json();
+  const sb = JSON.parse(fs.readFileSync(h.bundle, 'utf8'));
+  assert.equal(sb.roundCount, '2 review rounds handed');
+  assert.match(sb.instructions, /You were handed at the round count \(2 review rounds handed\): you decide first how the ticket goes on, and any decision you record settles the count; the person is asked only when you escalate/);
+  const closure = strategistClosure(base, h.bundle, { strategist: 'strat-count', action: 'consolidate', rationale: 'The same defect family keeps coming back; one fix covers it.', prediction: { signal: 'blockingLatest <= 0', by: 4 }, items: [] });
+  ok(v7.run(root, ['strategy', 'record', '--closure', closure.file, '--attempt', a.id]));
+  const after = v7.signals(root, a.id).strategy.escalation;
+  assert.deepEqual([after.firing, after.nextAt, after.settledBy?.by, after.settledBy?.rounds], [null, 4, 'strategist', 2]);
+  assert.deepEqual((v7.state(root, a.id).decisions ?? []).filter((d) => !d.withdrawn), [], 'still nobody was asked');
+  reviewRound(v7, ctx, a, { findings: 1 });
+  reviewRound(v7, ctx, a, { findings: 1 });
+  assert.match(v7.run(root, ['handoff', 'reviewer', '--agent', 'rev-y', '--attempt', a.id, '--owner', a.owner], { ownerSilent: true }).err, /4 review rounds handed; the strategist decides first/);
+  // The person holds the attempt and lifts the hold (their own decision, `wf approve`): their direction settles the count.
+  ok(v7.run(root, ['hold', '--reason', 'step back: why so many rounds', '--attempt', a.id]));
+  ok(v7.run(root, ['release', '--attempt', a.id]));
+  const lifted = v7.signals(root, a.id).strategy.escalation;
+  assert.deepEqual([lifted.firing, lifted.nextAt, lifted.settledBy?.by], [null, 6, 'lifted']);
+  assert.match(ok(v7.run(root, ['signals', '--attempt', a.id])).out, /round count: every 2 handed rounds the strategist decides first, counted from what last settled it; next at 6 handed rounds \(the person lifted the hold \(A\d+\) at 4\)/);
+  ok(v7.run(root, ['handoff', 'reviewer', '--agent', 'rev-z', '--attempt', a.id, '--owner', a.owner]));
 });
 
 // 0.7.29 (I-214), named failure (field): an attempt an earlier release let run past ten rounds unasked (I-185) was asked the round
@@ -336,70 +340,69 @@ const handRound = (ctx, a, agent) => {
   return wf(ctx.root, ['handoff', 'reviewer', '--agent', agent, '--attempt', a.id, '--owner', a.owner], { ownerSilent: true });
 };
 
-test('the round question comes back as many rounds after the person answered it, not at the next multiple: answered at 17, the next is at 27', () => {
+// A round question as an earlier release asked it (since 0.7.33 the engine asks none: the strategist decides at the count).
+const legacyQuestion = (ctx, a, id, at, summary = `${at} review rounds handed; the owner decides how to continue: continue | split | deliver-core | hold | stop`) => append(ctx.root, a.id, 'decision.created', { id, kind: 'escalation', key: `tripwire:rounds-escalation:rounds:${at}`, summary, choices: ['continue', 'split', 'deliver-core', 'hold', 'stop'] }, null);
+const COUNT = (n) => new RegExp(`${n} review rounds handed; the strategist decides first how to continue; no (reviewer|implementer) starts until it decides`);
+
+test('a round question an earlier release asked is the person\'s to answer, and the count comes back as many rounds after their answer, not at the next multiple: answered at 17, due again at 27, where the strategist decides', () => {
   const ctx = project('anchored-rounds');
   const a = started(current, ctx, { item: 'ENG-746' });
   const { root } = ctx;
   earlierRounds(ctx, a, 17);
+  legacyQuestion(ctx, a, 'A1', 10, '17 review rounds handed; the owner decides how to continue: continue | split | deliver-core | hold | stop');
   const asked = handRound(ctx, a, 'rev-17');
   assert.equal(asked.code, 75);
-  assert.match(asked.err, /17 review rounds handed; the owner decides how to continue \(A1\)/);
+  assert.match(asked.err, /\(A1\); no reviewer starts until the person answers it or the strategist decides/);
   approveAsOwner(root, a.id, 'A1', 'continue');
   for (const n of [18, 19, 20]) ok(handRound(ctx, a, `rev-${n}`));
-  // 20 handed, three after the answer: the person is not asked again, and the implementer starts.
+  // 20 handed, three after the answer: nothing holds the attempt, and the implementer starts.
   const sig = current.state(root, a.id);
   assert.notEqual(sig.decision.kind, 'strategy', `nothing holds the attempt at 20 rounds: ${sig.decision.guidance}`);
   const impl = wf(root, ['handoff', 'implementer', '--agent', 'impl-after-answer', '--attempt', a.id, '--owner', a.owner], { ownerSilent: true });
   assert.equal(impl.code, 0, `the implementer is handed three rounds after the answer, got ${impl.code}: ${impl.err}`);
   const signals = ok(wf(root, ['signals', '--attempt', a.id, '--json'])).json();
-  assert.deepEqual(signals.strategy.escalation, { everyRounds: 10, nextAt: 27, lastAnswer: { id: 'A1', choice: 'continue', rounds: 17 }, firing: null });
-  assert.match(ok(wf(root, ['signals', '--attempt', a.id])).out, /owner escalation: every 10 handed rounds, counted from the person's latest answer; next at 27 handed rounds \(A1 answered continue at 17\)/);
+  assert.deepEqual(signals.strategy.escalation, { everyRounds: 10, nextAt: 27, lastAnswer: { id: 'A1', choice: 'continue', rounds: 17 }, settledBy: { id: 'A1', by: 'answer', rounds: 17, what: 'the person answered A1 (continue)' }, firing: null });
+  assert.match(ok(wf(root, ['signals', '--attempt', a.id])).out, /round count: every 10 handed rounds the strategist decides first, counted from what last settled it; next at 27 handed rounds \(the person answered A1 \(continue\) at 17\)/);
   for (const n of [21, 22, 23, 24, 25, 26, 27]) ok(handRound(ctx, a, `rev-${n}`));
-  // Ten rounds after the answer, the question comes back, once.
+  // Ten rounds after the answer the count is due again, and the strategist decides: nobody is asked.
   const again = handRound(ctx, a, 'rev-28');
   assert.equal(again.code, 75);
-  assert.match(again.err, /27 review rounds handed; the owner decides how to continue \(A2\)/);
-  assert.deepEqual(stateOf(root, a.id).decisions.map((d) => [d.id, d.key]), [['A1', 'tripwire:rounds-escalation:rounds:10'], ['A2', 'tripwire:rounds-escalation:rounds:27']]);
+  assert.match(again.err, COUNT(27));
+  assert.deepEqual(stateOf(root, a.id).decisions.map((d) => d.id), ['A1']);
 });
 
-test('a round question an earlier release opened before it was due again is withdrawn by the engine with why, never asked; the next one comes as many rounds after the answer', () => {
+test('a round question an earlier release opened before it was due again is withdrawn by the engine with why, never asked; a strategist\'s decision settles the count as an answer does', () => {
   const ctx = project('anchored-pending', { strategy: { reviewRoundsEscalate: 4 } });
   const a = started(current, ctx, { item: 'ENG-747' });
-  const { root } = ctx;
+  const { root, base } = ctx;
   earlierRounds(ctx, a, 5);
-  const asked = handRound(ctx, a, 'rev-5');
-  assert.match(asked.err, /5 review rounds handed; the owner decides how to continue \(A1\)/);
+  legacyQuestion(ctx, a, 'A1', 4);
+  assert.match(handRound(ctx, a, 'rev-5').err, /\(A1\)/);
   approveAsOwner(root, a.id, 'A1', 'continue');
   for (const n of [6, 7, 8]) ok(handRound(ctx, a, `rev-${n}`));
   // At 8 handed rounds the earlier release opened the question again (its key was the next multiple of 4); nobody answered it.
-  const earlier = stateOf(root, a.id).decisions.find((d) => d.id === 'A1');
-  const earlyQuestion = (id, at) => append(root, a.id, 'decision.created', { id, kind: 'escalation', key: `tripwire:rounds-escalation:rounds:${at}`, summary: `${at} review rounds handed; the owner decides how to continue: continue | split | deliver-core | hold | stop`, choices: earlier.choices, ...(earlier.labels ? { labels: earlier.labels } : {}), ...(earlier.then ? { then: earlier.then } : {}) }, null);
-  earlyQuestion('A2', 8);
-  // The question is not due (the person answered at 5; it comes back at 9). The first command that opens the attempt, here the list
-  // of every open attempt, withdraws it, saying why, before anything lists it or tells the agent to ask it.
+  legacyQuestion(ctx, a, 'A2', 8);
+  // The question is not due (the person answered at 5; the count comes back at 9). The first command that opens the attempt, here the
+  // list of every open attempt, withdraws it, saying why, before anything lists it or tells the agent to ask it.
   assert.doesNotMatch(ok(wf(root, ['status'])).out, /A2/);
   const a2 = loadState(root, a.id).decisions.find((d) => d.id === 'A2');
   assert.ok(a2.withdrawn, 'the early question is withdrawn as soon as a command opens the attempt');
-  assert.match(a2.withdrawn.reason, /the person answered A1 \(continue\) at 5 handed rounds; the round question comes back at 9/);
+  assert.match(a2.withdrawn.reason, /the person answered A1 \(continue\) at 5 handed rounds; the round count comes back at 9 handed rounds, counted from that: this question is not due and is not asked/);
   assert.equal(a2.withdrawn.by, null, 'the engine withdrew it');
-  assert.doesNotMatch(ok(wf(root, ['decisions', '--attempt', a.id])).out, /A2 {2}escalation {2}pending/);
   assert.notEqual(stateOf(root, a.id).decision.kind, 'strategy', 'nothing holds the attempt');
   ok(handRound(ctx, a, 'rev-9'));
-  // At 9, four rounds after the answer, the question comes back once, as a new question.
-  const again = handRound(ctx, a, 'rev-10');
-  assert.equal(again.code, 75);
-  assert.match(again.err, /9 review rounds handed; the owner decides how to continue \(A3\)/);
-  assert.deepEqual(stateOf(root, a.id).decisions.filter((d) => !d.approved && !d.withdrawn).map((d) => [d.id, d.key]), [['A3', 'tripwire:rounds-escalation:rounds:9']]);
-  // Answered at 9, it comes back at 13. At 12 the earlier release opened it again: the attempt's own commands withdraw it too
-  // (here the list of its decisions), and no answer to it is taken.
-  approveAsOwner(root, a.id, 'A3', 'continue');
+  // At 9 the count is due: the strategist decides, and its decision settles it (due again at 13).
+  assert.match(handRound(ctx, a, 'rev-10').err, COUNT(9));
+  const h = ok(wf(root, ['handoff', 'strategist', '--agent', 'strat-9', '--attempt', a.id, '--reason', '9 review rounds handed', '--json'])).json();
+  ok(wf(root, ['strategy', 'record', '--closure', strategistClosure(base, h.bundle, { strategist: 'strat-9', action: 'continue', rationale: 'Each round fixes what the last one found.', prediction: { signal: 'blockingLatest <= 0', by: 20 } }).file, '--attempt', a.id]));
   for (const n of [10, 11, 12]) ok(handRound(ctx, a, `rev-${n}a`));
-  earlyQuestion('A4', 12);
-  assert.doesNotMatch(ok(wf(root, ['decisions', '--attempt', a.id])).out, /A4/);
-  assert.match(loadState(root, a.id).decisions.find((d) => d.id === 'A4').withdrawn?.reason ?? '', /the person answered A3 \(continue\) at 9 handed rounds; the round question comes back at 13/);
-  assert.match(wf(root, ['approve', 'A4', '--choice', 'continue', '--attempt', a.id], { ownerSilent: true }).err, /A4 was withdrawn/);
+  // An early question opened at 12 is withdrawn against the strategist's decision, and no answer to it is taken.
+  legacyQuestion(ctx, a, 'A3', 12);
+  assert.doesNotMatch(ok(wf(root, ['decisions', '--attempt', a.id])).out, /A3 {2}escalation {2}pending/);
+  assert.match(loadState(root, a.id).decisions.find((d) => d.id === 'A3').withdrawn?.reason ?? '', /the strategist decided continue \(S1\) at 9 handed rounds; the round count comes back at 13 handed rounds/);
+  assert.match(wf(root, ['approve', 'A3', '--choice', 'continue', '--attempt', a.id], { ownerSilent: true }).err, /A3 was withdrawn/);
   ok(handRound(ctx, a, 'rev-13a'));
-  assert.match(handRound(ctx, a, 'rev-14a').err, /13 review rounds handed; the owner decides how to continue \(A5\)/);
+  assert.match(handRound(ctx, a, 'rev-14a').err, COUNT(13));
 });
 
 // Review of 0.7.29: two commands that opened the attempt at once each read it before either withdrew an early question, and each
@@ -410,11 +413,10 @@ test('an early round question is withdrawn once when two commands read the attem
   const a = started(current, ctx, { item: 'ENG-749' });
   const { root } = ctx;
   earlierRounds(ctx, a, 5);
-  assert.match(handRound(ctx, a, 'rev-5').err, /5 review rounds handed; the owner decides how to continue \(A1\)/);
+  legacyQuestion(ctx, a, 'A1', 4);
   approveAsOwner(root, a.id, 'A1', 'continue');
   for (const n of [6, 7, 8]) ok(handRound(ctx, a, `rev-${n}`));
-  const earlier = stateOf(root, a.id).decisions.find((d) => d.id === 'A1');
-  append(root, a.id, 'decision.created', { id: 'A2', kind: 'escalation', key: 'tripwire:rounds-escalation:rounds:8', summary: '8 review rounds handed; the owner decides how to continue: continue | split | deliver-core | hold | stop', choices: earlier.choices }, null);
+  legacyQuestion(ctx, a, 'A2', 8);
   const withdrawals = () => readLedger(root, a.id).filter((e) => e.type === 'decision.withdrawn').map((e) => e.data.id);
   // Both read the attempt while A2 was open; the second appends nothing once the first has withdrawn it.
   await inProcess(root, () => {
@@ -424,8 +426,9 @@ test('an early round question is withdrawn once when two commands read the attem
   });
   assert.deepEqual(withdrawals(), ['A2'], 'one withdrawal');
   ok(handRound(ctx, a, 'rev-9'));
-  // At 9, four rounds after the answer, the question is due and asked (A3).
-  assert.match(handRound(ctx, a, 'rev-10').err, /9 review rounds handed; the owner decides how to continue \(A3\)/);
+  // At 9, four rounds after the answer, a question an earlier release asked at the count is the person's and stays open.
+  legacyQuestion(ctx, a, 'A3', 9);
+  assert.match(handRound(ctx, a, 'rev-10').err, /\(A3\)/);
   // The adapter cannot be read for a moment (its folder moved): the defaults would say the question is not due until 10.
   const adapter = path.join(root, '.workflow');
   fs.renameSync(adapter, `${adapter}.moved`);
@@ -444,15 +447,14 @@ test('a round question an earlier release opened and nobody has answered yet sta
   const { root } = ctx;
   // The earlier release let 9 rounds pass unasked, then opened the first question keyed to the multiple it was at (8); it is pending.
   earlierRounds(ctx, a, 9);
-  append(root, a.id, 'decision.created', { id: 'A1', kind: 'escalation', key: 'tripwire:rounds-escalation:rounds:8', summary: '9 review rounds handed; the owner decides how to continue: continue | split | deliver-core | hold | stop', choices: ['continue', 'split', 'deliver-core', 'hold', 'stop'] }, null);
+  legacyQuestion(ctx, a, 'A1', 8, '9 review rounds handed; the owner decides how to continue: continue | split | deliver-core | hold | stop');
   const held = handRound(ctx, a, 'rev-9');
   assert.equal(held.code, 75);
   assert.match(held.err, /9 review rounds handed; the owner decides how to continue \(A1\)/);
   assert.deepEqual(stateOf(root, a.id).decisions.map((d) => [d.id, Boolean(d.withdrawn)]), [['A1', false]], 'no second question');
   approveAsOwner(root, a.id, 'A1', 'continue');
   for (const n of [10, 11, 12, 13]) ok(handRound(ctx, a, `rev-${n}`));
-  const again = handRound(ctx, a, 'rev-14');
-  assert.match(again.err, /13 review rounds handed; the owner decides how to continue \(A2\)/);
+  assert.match(handRound(ctx, a, 'rev-14').err, COUNT(13));
 });
 
 // 0.7.11, named failure: a strategist's escalation reached the person as its own rationale with options like
@@ -619,7 +621,8 @@ test('an escalation the person answered in their own words is not a decision: re
 // not decided. The hold's guidance named only the round question and the next step hid the waiting strategist; once the person
 // answered the round question, the next handoff asked the withdrawn strategist question afresh, verbatim, and the strategist's
 // decision was then refused behind it: the person was asked about the same stop twice, once with a question already judged wrong.
-test('with the round escalation due and a withdrawn strategist escalation, the waiting strategist is named beside the hold, and the withdrawn question is not asked again while its replacement is undecided', () => {
+// 0.7.33 (I-229, D84): the strategist's escalation at the round count settles the count; what holds is its own question.
+test('with a withdrawn strategist escalation at the round count, the waiting strategist is named beside the hold, and the withdrawn question is not asked again while its replacement is undecided', () => {
   const ctx = project('both-holds', { strategy: { reviewRoundsEscalate: 2 } });
   const a = started(now, ctx, { item: 'ENG-744' });
   const { root, base } = ctx;
@@ -629,20 +632,13 @@ test('with the round escalation due and a withdrawn strategist escalation, the w
   withdrawn(ctx, a, 'A1');
   const corrected = handedStrategist(ctx, a, 'strat-2', { action: 'continue', rationale: 'The course is sound; the question was wrong.' });
   const decisions = () => stateOf(root, a.id).decisions;
-  // The next step names the person's round question and the waiting strategist, and says the strategist's decision comes first.
+  // The next step names the withdrawn question and the waiting strategist; no round question is asked (the escalation settled the count).
   const held = stateOf(root, a.id).decision;
   assert.equal(held.kind, 'strategy');
-  assert.match(held.guidance, /2 review rounds handed; the owner decides how to continue/);
+  assert.doesNotMatch(held.guidance, /review rounds handed/);
   assert.match(held.guidance, /Strategist strat-2 was handed/);
   assert.match(held.guidance, /A1 was withdrawn/);
-  assert.match(held.guidance, /record its decision first[^.]*supersedes the withdrawn question/);
-  // The person is asked the round question; the withdrawn strategist question is not asked beside it.
-  const asked = wf(root, ['handoff', 'reviewer', '--agent', 'rev-x', '--attempt', a.id, '--owner', a.owner], { ownerSilent: true });
-  assert.equal(asked.code, 75);
-  const round = asked.err.match(/wf approve (A\d+)/)[1];
-  assert.deepEqual(decisions().map((d) => d.id), ['A1', round]);
-  approveAsOwner(root, a.id, round, 'continue');
-  // Answered, the next handoff does not ask the withdrawn question afresh while strat-2 has not decided: it says so.
+  // The next handoff does not ask the withdrawn question afresh while strat-2 has not decided: it says so.
   const before = decisions().length;
   const waiting = wf(root, ['handoff', 'reviewer', '--agent', 'rev-y', '--attempt', a.id, '--owner', a.owner], { ownerSilent: true });
   assert.equal(waiting.code, 75);
@@ -660,7 +656,7 @@ test('with the round escalation due and a withdrawn strategist escalation, the w
 // strategist handed since, the guidance was silent about the withdrawn question; once the person answered the round question,
 // the next handoff asked the withdrawn question again as it was, a question already judged wrong, and the person was asked it
 // twice. The guidance now says to hand a strategist and record its decision first, and the handoff that asks it again names the way.
-test('with the round question due and a withdrawn strategist escalation and no strategist handed since, the guidance and the re-asking handoff name the way out', () => {
+test('with a withdrawn strategist escalation at the round count and no strategist handed since, the guidance and the re-asking handoff name the way out', () => {
   const ctx = project('both-holds-alone', { strategy: { reviewRoundsEscalate: 2 } });
   const a = started(now, ctx, { item: 'ENG-745' });
   const { root } = ctx;
@@ -669,14 +665,9 @@ test('with the round question due and a withdrawn strategist escalation and no s
   ok(wf(root, ['strategy', 'record', '--closure', escalated(ctx, a, 'strat-1').file, '--attempt', a.id]));
   withdrawn(ctx, a, 'A1');
   const held = stateOf(root, a.id).decision.guidance;
-  assert.match(held, /2 review rounds handed; the owner decides how to continue/);
-  assert.match(held, /The strategist's escalation A1 was withdrawn \(the second option promised more than it does[^)]*\) and no strategist has been handed since: hand one and record its decision before the next handoff, or A1's question is asked again as it was/);
+  assert.match(held, /the strategist's escalation A1 was withdrawn \(the second option promised more than it does[^)]*\) and nobody can answer it/);
   assert.match(held, /wf handoff strategist --agent <id>[\s\S]*wf strategy record/);
-  // The person answers the round question.
-  const asked = wf(root, ['handoff', 'reviewer', '--agent', 'rev-x', '--attempt', a.id, '--owner', a.owner], { ownerSilent: true });
-  const round = asked.err.match(/wf approve (A\d+)/)[1];
-  approveAsOwner(root, a.id, round, 'continue');
-  // The next handoff would ask the withdrawn question again as it was: the refusal says so and names the way out.
+  // The next handoff asks the withdrawn question again as it was: the refusal says so and names the way out.
   const again = wf(root, ['handoff', 'reviewer', '--agent', 'rev-y', '--attempt', a.id, '--owner', a.owner], { ownerSilent: true });
   assert.equal(again.code, 75);
   const fresh = again.err.match(/wf approve (A\d+)/)[1];

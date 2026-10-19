@@ -429,5 +429,39 @@ test('0.7.32 review (D72): the reviewer of a pushed commit is handed its range, 
   const commits = bundle.pushedRange.app.commits;
   assert.deepEqual(commits.filter((c) => c.merged).map((c) => c.sha), [other], 'the other ticket\'s commit is marked as merged in');
   assert.ok(commits.some((c) => !c.merged && c.subject === 'my change after the acceptance'));
-  assert.match(bundle.instructions, /a commit marked `merged` came in through a merge, not on the branch's own line: another ticket's work on the base/);
+  assert.match(bundle.instructions, /it came in through a merge \(`merged`, not on the branch's own line\)/);
+});
+
+// 0.7.33 (I-225, D81), named failure (a review's probe of D72): after a hand push, another ticket landing on main and `git merge
+// --ff-only` in the worktree, the other ticket's commit read `merged: false`, on the branch's own line, as this attempt's. A commit the
+// fetched base held before this worktree did, or one with the same patch as a commit the base held before this worktree had it (a
+// cherry-pick from the base), is now marked as the base's with the fact that shows it; one without a mark is not proven the ticket's.
+test('0.7.33 (I-225, D81): in a pushed range, a commit the fetched base held before this worktree did is marked as the base\'s, and so is a cherry-pick of one, each with its fact; this ticket\'s own commits are not', async () => {
+  const { toAccepted, sh } = await import('./helpers.mjs');
+  const { base, root } = singleRepoProject('d72-ff', { gate: { steps: [{ id: 'u', repo: 'app', run: 'true', inputs: ['src/**'] }] } });
+  const { id, wt } = toAccepted(root, base, { item: 'RF-12' });
+  const t0 = Math.floor(Date.now() / 1000);
+  const at = (dt, cmd) => `export GIT_COMMITTER_DATE="@${t0 + dt} +0000" GIT_AUTHOR_DATE="@${t0 + dt} +0000"; ${cmd}`;
+  // Another ticket's fix lands on main; this worktree cherry-picks it a minute later, commits its own change, merges main by hand and pushes.
+  commitIn(root, { 'src/fix.txt': 'a shared fix\n' }, 'another ticket\'s fix on main');
+  sh(root, 'git push -q origin HEAD:refs/heads/main');
+  const fix = sh(root, 'git rev-parse HEAD');
+  sh(wt, at(60, `git fetch -q origin && git cherry-pick ${fix} >/dev/null`));
+  const picked = sh(wt, 'git rev-parse HEAD');
+  sh(wt, at(61, "printf 'pushed by hand\\n' > src/a.txt && git commit -q -am 'my change after the acceptance'"));
+  const mine = sh(wt, 'git rev-parse HEAD');
+  sh(wt, at(62, 'git merge -q --no-edit origin/main && git push -q origin HEAD:refs/heads/main'));
+  // A third ticket lands after the push, and the worktree is fast-forwarded to it.
+  sh(root, at(70, "git merge -q --ff-only origin/main && printf 'another ticket\\n' > src/other.txt && git add -A && git commit -q -m 'another ticket on main' && git push -q origin HEAD:refs/heads/main"));
+  const other = sh(root, 'git rev-parse HEAD');
+  sh(wt, at(120, 'git fetch -q origin && git merge -q --ff-only origin/main'));
+  const handed = ok(wf(root, ['handoff', 'reviewer', '--agent', 'rx', '--attempt', id]));
+  const bundle = JSON.parse(fs.readFileSync(handed.out.match(/^Read (\S+)/m)[1], 'utf8'));
+  const by = (sha) => bundle.pushedRange.app.commits.find((c) => c.sha === sha);
+  assert.deepEqual([by(other).merged, by(fix).merged, by(picked).merged, by(mine).merged], [false, true, false, false]);
+  assert.match(by(other).base, /^the fetched base \(origin\/main\) held it at \S+, before this worktree did \(\S+\)$/, 'the fast-forwarded commit');
+  assert.match(by(fix).base, /^came in through a merge/);
+  assert.match(by(picked).base, new RegExp(`^the same patch as ${fix.slice(0, 10)}, which the fetched base \\(origin/main\\) held at \\S+, before this worktree had this commit \\(\\S+\\)$`), 'the cherry-pick');
+  assert.equal(by(mine).base, false, 'this ticket\'s own pushed commit');
+  assert.match(bundle.instructions, /A commit with `base` set is the base's, by the fact it states.*One without it is not proven this ticket's/);
 });

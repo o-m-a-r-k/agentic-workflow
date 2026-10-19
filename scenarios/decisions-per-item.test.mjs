@@ -197,40 +197,27 @@ function answeredInWords(base, question, words, tool, choices) {
   ].map((l) => JSON.stringify(l)).join('\n') + '\n');
 }
 
-test('an escalation answered in the person\'s own words stays open: words never act as a choice', async () => {
+// Since 0.7.33 (I-229, D84) the engine asks no round question; one an earlier release asked and the person answered in words that
+// choose no option settles nothing: the strategist decides, handed their words.
+test('a round question answered in the person\'s own words settles nothing: words never act as a choice, and the strategist is handed them', async () => {
   const { project: proj, runner: rn, started, reviewRound } = await import('./strategist-fixtures.mjs');
+  const { append } = await import('../engine/ledger.mjs');
   const r = rn('0.7.8');
   const ctx = proj('pi-escalate', { strategy: { reviewRoundsEscalate: 1 } });
   const a = started(r, ctx, { item: 'ENG-990' });
   reviewRound(r, ctx, a, { findings: 1 });
-  // 0.7.23 (D29): the owner writes the brief and a recommendation into the question before it is asked.
-  const unasked = r.run(ctx.root, ['handoff', 'implementer', '--agent', 'impl-2', '--attempt', a.id, '--owner', a.owner], unworded);
-  assert.match(unasked.err, /not asked yet: how ENG-990\.1 goes on after 1 review round/);
-  const held = r.run(ctx.root, ['handoff', 'implementer', '--agent', 'impl-2', '--attempt', a.id, '--owner', a.owner, '--ask', askFile(ctx.root, [], { recommend: { choice: 'Keep going as now', why: 'the last round found one small issue' } })], silent);
-  assert.equal(held.code, 75);
-  const id = held.err.match(/wf approve (A\d+)/)[1];
-  assert.match(r.state(ctx.root, a.id).decisions.find((x) => x.id === id).plain, /^This ticket has been through 1 review round and the reviews keep finding problems\. How should it go on\? The scripted owner explains .* Recommended: "Keep going as now", because the last round found one small issue\.$/);
-  const d = r.state(ctx.root, a.id).decisions.find((x) => x.id === id);
+  append(ctx.root, a.id, 'decision.created', { id: 'A1', kind: 'escalation', key: 'tripwire:rounds-escalation:rounds:1', summary: '1 review rounds handed; the owner decides how to continue: continue | split | deliver-core | hold | stop', choices: ['continue', 'split', 'deliver-core', 'hold', 'stop'], plain: 'This ticket has been through 1 review round and the reviews keep finding problems. How should it go on?' }, 'human:scenario');
+  const d = r.state(ctx.root, a.id).decisions.find((x) => x.id === 'A1');
   const words = 'this is going nowhere; park it for now';
-  answeredInWords(ctx.base, `${a.id} ${d.id}: ${d.plain ?? d.summary}`, words, 'toolu_pi_escalate', d.choices.map((c) => d.labels?.[c] ?? c));
-  assert.equal(r.run(ctx.root, ['approve', id, '--from-question', '--attempt', a.id], { env: { CLAUDE_CODE_SESSION_ID: CLAUDE }, ...silent }).code, 75, 'words that are no option are the agent\'s to read (0.7.27, D41)');
-  ok(r.run(ctx.root, ['approve', id, '--from-question', '--attempt', a.id, '--choice', 'other', '--quote', words], { env: { CLAUDE_CODE_SESSION_ID: CLAUDE }, ...silent }));
-  assert.match(r.state(ctx.root, a.id).next, /answered in the person's own words, "this is going nowhere; park it for now": follow that/, 'resume says what happened, not "answer the old question"');
-  assert.match(r.run(ctx.root, ['approve', id, '--choice', 'stop', '--attempt', a.id], silent).err, /already decided/);
-  const unwordedRun = r.run(ctx.root, ['handoff', 'implementer', '--agent', 'impl-2', '--attempt', a.id, '--owner', a.owner], unworded);
-  assert.equal(unwordedRun.code, 75, 'the words did not let the work continue');
-  assert.match(unwordedRun.err, /in their own words, "this is going nowhere; park it for now": follow them/);
-  const again = r.run(ctx.root, ['handoff', 'implementer', '--agent', 'impl-2', '--attempt', a.id, '--owner', a.owner, '--ask', askFile(ctx.root)], silent);
-  assert.equal(again.code, 75, 'the words did not let the work continue');
-  assert.match(again.err, /in their own words, "this is going nowhere; park it for now": follow them/);
-  const fresh = again.err.match(/wf approve (A\d+)/)[1];
-  assert.notEqual(fresh, id, 'the escalation is asked again with its choices');
-  // A withdrawn question is not an answer either: it cannot be approved, and the next handoff asks afresh.
-  ok(r.run(ctx.root, ['decisions', 'withdraw', fresh, '--reason', 'reworded the brief', '--attempt', a.id]));
-  assert.match(r.run(ctx.root, ['approve', fresh, '--choice', 'continue', '--attempt', a.id], silent).err, /was withdrawn/);
-  const third = r.run(ctx.root, ['handoff', 'implementer', '--agent', 'impl-2', '--attempt', a.id, '--owner', a.owner, '--ask', askFile(ctx.root)], silent);
-  assert.equal(third.code, 75, 'still held');
-  assert.notEqual(third.err.match(/wf approve (A\d+)/)[1], fresh);
+  answeredInWords(ctx.base, `${a.id} ${d.id}: ${d.plain}`, words, 'toolu_pi_escalate', d.choices);
+  assert.equal(r.run(ctx.root, ['approve', 'A1', '--from-question', '--attempt', a.id], { env: { CLAUDE_CODE_SESSION_ID: CLAUDE }, ...silent }).code, 75, 'words that are no option are the agent\'s to read (0.7.27, D41)');
+  ok(r.run(ctx.root, ['approve', 'A1', '--from-question', '--attempt', a.id, '--choice', 'other', '--quote', words], { env: { CLAUDE_CODE_SESSION_ID: CLAUDE }, ...silent }));
+  assert.match(r.run(ctx.root, ['approve', 'A1', '--choice', 'stop', '--attempt', a.id], silent).err, /already decided/);
+  assert.match(r.state(ctx.root, a.id).next, /The person answered A1 in their own words, "this is going nowhere; park it for now": hand them to the strategist/);
+  const held = r.run(ctx.root, ['handoff', 'implementer', '--agent', 'impl-2', '--attempt', a.id, '--owner', a.owner], silent);
+  assert.equal(held.code, 75, 'the words did not let the work continue');
+  assert.match(held.err, /the strategist decides first how to continue; no implementer starts until it decides; the person answered A1 in their own words, "this is going nowhere; park it for now": hand them to it/);
+  assert.deepEqual(r.state(ctx.root, a.id).decisions.map((x) => x.id), ['A1'], 'no question is asked again');
 });
 
 
@@ -258,4 +245,40 @@ test('a medium or high item the person directs out of the ticket leaves on their
   assert.match(knownLimits(st), /- Known issue: Totals on the old export page count only the first page\. Left out at the person's direction: "leave the old export as it is"\./);
   // The owner's wording at delivery comes before the line the person was asked with.
   assert.match(knownLimits({ ...st, delivery: { ...st.delivery, summary: { lines: { 'r1:F3': 'Old export totals cover one page' } } } }), /- Known issue: Old export totals cover one page\. Left out at the person's direction/);
+});
+
+// 0.7.33 (I-228, D85), named failure (field): the person forbade a production configuration change, handed it to the client,
+// acknowledged the ticket comment and then said to stop reporting it, it is closed; two later high findings repeated it, `wf scope
+// defer` with their words refuses a blocking finding, and `wf scope waive` asked them the decision they had already made. Their
+// words, proven theirs, are recorded as the waiver of each finding named, with no question; the findings' severity stays.
+test('0.7.33 (I-228, D85): the person\'s explicit disposition, proven theirs, waives the blocking findings that repeat it with no question; severity and history stay, the tester reads their words', () => {
+  const p = singleRepoProject('pi-person-said', { gate: { steps: [{ id: 'unit', repo: 'app', run: 'true' }] } }, { 'src/a.txt': LINES });
+  const e = ok(wf(p.root, ['entry', '--item', 'PI-2', '--owner', 'o', '--json'])).json();
+  ok(wf(p.root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id]));
+  ok(wf(p.root, ['plan', '--file', criteriaFile(p.base), '--attempt', e.id]));
+  ok(wf(p.root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
+  commitIn(e.repos.app.worktree, { 'src/a.txt': LINES.replace('l2', 'L2') });
+  ok(wf(p.root, ['handoff', 'close', '--agent', 'i', '--attempt', e.id]));
+  ok(wf(p.root, ['handoff', 'reviewer', '--agent', 'r1', '--attempt', e.id]));
+  const dup = (id) => ({ id, severity: 'high', criterion: 'C1', summary: `${id}: the production configuration still holds the old value`, status: 'open', evidence: 'src/a.txt:2' });
+  ok(wf(p.root, ['review', '--closure', closureFile(p.base, goodClosure('r1', { findings: [dup('F1'), dup('F2')] })), '--attempt', e.id]));
+  // The person's own chat message, as the harness records it.
+  const file = path.join(p.base, '.home', '.claude', 'projects', 'proj', `${CLAUDE}.jsonl`);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.appendFileSync(file, `${[{ type: 'assistant', timestamp: at(500), message: { role: 'assistant', content: [{ type: 'text', text: 'The production value is still old. Change it?' }] } }, { type: 'user', timestamp: at(1000), message: { role: 'user', content: 'do not touch the production configuration, the client owns it. stop reporting this, it is closed' } }].map((l) => JSON.stringify(l)).join('\n')}\n`);
+  const session = { env: { CLAUDE_CODE_SESSION_ID: CLAUDE }, ...silent };
+  const why = ['--reason', 'both repeat the production configuration the person handed to the client'];
+  const unproven = wf(p.root, ['scope', 'waive', '--finding', 'r1:F1,r1:F2', '--person-said', 'waive them', ...why, '--attempt', e.id], session);
+  assert.equal(unproven.code, 75);
+  assert.match(unproven.err, /not waived: "waive them" is in no message of the person's in this session/);
+  const done = wf(p.root, ['scope', 'waive', '--finding', 'r1:F1,r1:F2', '--person-said', 'stop reporting this, it is closed', ...why, '--attempt', e.id], session);
+  assert.equal(done.code, 0, done.err);
+  assert.match(done.out, /waived by the person's decision \(their own words, recorded with each finding; nothing was asked\)/);
+  const s = state(p.root, e.id);
+  assert.deepEqual(s.decisions ?? [], [], 'no question was asked');
+  const waived = s.scopeDecisions.filter((d) => d.choice === 'waived');
+  assert.deepEqual(waived.map((d) => [d.keys[0], d.personSaid.quote, /^chat, read by the agent/.test(d.personSaid.via)]), [['r1:F1', 'stop reporting this, it is closed', true], ['r1:F2', 'stop reporting this, it is closed', true]]);
+  assert.deepEqual(s.reviews.at(-1).closure.findings.map((f) => f.severity), ['high', 'high'], 'the findings keep their severity');
+  assert.match(knownLimits(s), /Accepted without a fix: .*Accepted at the person's direction: "stop reporting this, it is closed"\./);
+  assert.notEqual(s.decision.kind, 'repair', 'nothing blocks the attempt any more');
 });

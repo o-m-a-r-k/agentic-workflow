@@ -1,11 +1,12 @@
 import { CONFIG_FILE, adapterPin, attemptAdapter, decodeEscapes, trustedAdapter, adapterFileAtCommit } from './config.mjs';
 import { actor, openState, treeHashes } from './attempt.mjs';
-import { append, listAttempts, loadState } from './ledger.mjs';
+import { append, attemptDir, listAttempts, loadState } from './ledger.mjs';
 import { loadCatalog } from './secrets.mjs';
-import { canonical, git, globToRegExp, hashFile, hashValue, refuse, YAML } from './util.mjs';
+import { canonical, git, gitEnv, globToRegExp, hashFile, hashValue, refuse, run, YAML } from './util.mjs';
 import { approveHint, decisionFor, labelOf } from './approve.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 
 // Named failure: required HTTP/browser proof discovered after admission could
 // only be run outside sealed evidence, or by replacing the frozen adapter.
@@ -209,34 +210,279 @@ export function declaredReadsAt(state, step, commit) {
   const declared = Array.isArray(step?.definition?.reads) ? step.definition.reads : [];
   if (!declared.length) return null;
   const dir = state.repos[step.definition.repo]?.worktree;
-  const all = dir ? git(dir, ['ls-tree', '-r', '--name-only', commit], { allowFail: true }).split('\n').filter(Boolean) : [];
+  const tree = dir && commit ? treeEntries(dir, commit) : new Map();
   const files = [];
   const unmatched = [];
   for (const g of declared) {
-    const re = globToRegExp(String(g).replace(/\/$/, '/**'));
-    const hit = all.filter((f) => f === g || re.test(f) || f.startsWith(`${String(g).replace(/\/$/, '')}/`));
-    if (!hit.length) unmatched.push(g);
-    for (const f of hit) if (!files.some((x) => x.path === f)) files.push({ path: f, blob: git(dir, ['rev-parse', `${commit}:${f}`], { allowFail: true }) });
+    let hit = false;
+    for (const [f, x] of tree) {
+      if (!readMatches(g, f)) continue;
+      hit = true;
+      if (!files.some((y) => y.path === f)) files.push({ path: f, blob: x.blob });
+    }
+    if (!hit) unmatched.push(g);
   }
   return { step: step.id, repo: step.definition.repo, declared, files, unmatched };
 }
 
-// Paths that look loaded in a plugin's decoded text: a hint listed to the reviewer, never a record and never enforced.
-export function looksLoaded(root, state, commit, definition) {
-  if (!definition?.plugin) return [];
-  let text;
-  try {
-    text = decodeEscapes(fs.readFileSync(adapterFileAtCommit(root, state, commit, definition.plugin), 'utf8'));
-  } catch {
-    return [];
+// Whether a declared `reads` entry (a path, a folder or a glob relative to the step's repo) covers a file.
+export const readMatches = (g, f) => {
+  const s = String(g);
+  const dir = s.replace(/\/$/, '');
+  return f === s || f.startsWith(`${dir}/`) || globToRegExp(s.replace(/\/$/, '/**')).test(f);
+};
+
+// 0.7.33 (I-227). Named cost (review of 0.7.32): the declared reads ran `git rev-parse <commit>:<file>` once per file they matched,
+// about a second for 300 files on each correction and each reviewer handoff and a quarter of one on `wf resume`. A tree's files and
+// their blobs come from one `git ls-tree -r -z`; a commit's tree never changes, so the last few listings are kept for the process.
+const TREES = new Map();
+export function treeEntries(dir, commit) {
+  const key = `${dir}\0${commit}`;
+  const kept = TREES.get(key);
+  if (kept) return kept;
+  const out = new Map();
+  const r = run('git', ['ls-tree', '-r', '-z', '--full-tree', String(commit)], { cwd: dir, allowFail: true });
+  if (r.status === 0) {
+    for (const rec of r.stdout.split('\0')) {
+      const tab = rec.indexOf('\t');
+      if (tab < 0) continue;
+      const [mode, type, blob] = rec.slice(0, tab).split(' ');
+      out.set(rec.slice(tab + 1), { mode, type, blob });
+    }
   }
-  const out = new Set();
-  for (const m of text.matchAll(/['"`/]((?:\.\.?\/)?[A-Za-z0-9_@.-]+(?:\/[A-Za-z0-9_@.*[\]{}$-]+)+)/g)) out.add(m[1].replace(/^\.\//, ''));
+  TREES.set(key, out);
+  if (TREES.size > 8) TREES.delete(TREES.keys().next().value);
+  return out;
+}
+
+// The text of blobs, read in one `git cat-file --batch`; a binary one (a NUL in its first 8000 bytes, as git judges it) is left out.
+function blobTexts(dir, blobs) {
+  const out = new Map();
+  const want = [...new Set(blobs.filter(Boolean))];
+  if (!want.length) return out;
+  const r = spawnSync('git', ['cat-file', '--batch'], { cwd: dir, env: gitEnv(), input: `${want.join('\n')}\n`, maxBuffer: 256 * 1024 * 1024 });
+  if (r.status !== 0 || !r.stdout) return out;
+  const buf = r.stdout;
+  let i = 0;
+  while (i < buf.length) {
+    const nl = buf.indexOf(0x0a, i);
+    if (nl < 0) break;
+    const [sha, type, size] = buf.subarray(i, nl).toString('utf8').split(' ');
+    if (size === undefined) {
+      i = nl + 1;
+      continue;
+    }
+    const body = buf.subarray(nl + 1, nl + 1 + Number(size));
+    if (type === 'blob' && !body.subarray(0, 8000).includes(0)) out.set(sha, body.toString('utf8'));
+    i = nl + 1 + Number(size) + 1;
+  }
+  return out;
+}
+
+// Path-like strings in code: quoted relative specifiers (`'../support/commands.js'`, `'./days'`), quoted or template paths with a
+// folder (`${ctx.dir}/front/fixtures`, where `${…}` stands for any one name), and the string parts of `path.join` and `path.resolve`.
+function pathHints(text) {
+  const out = [];
+  const add = (spec) => {
+    const s = spec.replace(/\$\{[^}]*\}/g, '*').replace(/\/+/g, '/');
+    const relative = /^\.{1,2}\//.test(s);
+    if (s && !out.some((x) => x.spec === s)) out.push({ spec: relative ? s : s.replace(/^\//, ''), relative });
+  };
+  for (const m of text.matchAll(/['"`](\.{1,2}\/[^'"`\s]*)['"`]/g)) add(m[1]);
+  for (const m of text.matchAll(/['"`/]((?:\.\.?\/)?[A-Za-z0-9_@.-]+(?:\/[A-Za-z0-9_@.*[\]{}$-]+)+)/g)) add(m[1]);
   for (const m of text.matchAll(/path\.(?:join|resolve)\(([^)]*)\)/g)) {
     const parts = [...m[1].matchAll(/['"`]([^'"`]+)['"`]/g)].map((x) => x[1]);
-    if (parts.length) out.add(parts.join('/').replace(/\/+/g, '/').replace(/^\//, ''));
+    if (parts.length) add(parts.join('/'));
   }
-  return [...out].slice(0, 50);
+  return out;
+}
+
+// The files of a sorted list a path names: itself, itself with an extension (an import without one), the files under it (a folder),
+// or the files a glob matches.
+function filesNamed(sorted, set, p) {
+  if (/[*?[{]/.test(p)) {
+    const re = globToRegExp(p);
+    return sorted.filter((f) => re.test(f));
+  }
+  if (set.has(p)) return [p];
+  const under = (prefix) => {
+    let lo = 0;
+    let hi = sorted.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (sorted[mid] < prefix) lo = mid + 1;
+      else hi = mid;
+    }
+    const hits = [];
+    for (let i = lo; i < sorted.length && sorted[i].startsWith(prefix); i++) hits.push(sorted[i]);
+    return hits;
+  };
+  const withExtension = under(`${p}.`).filter((f) => !f.slice(p.length + 1).includes('/'));
+  return withExtension.length ? withExtension : under(`${p}/`);
+}
+
+// Paths the decoded plugin, and the files the step declares, look like they load: a hint listed to the reviewer, never a record and
+// never enforced. 0.7.33 (I-224, I-227). Named failures (review of 0.7.32): the hint scanned the plugin only, so a declared harness that
+// imports `../support/commands.js` named nothing; and its entries were raw strings (`front/fixtures` beside a declared
+// `front/fixtures/**`, a package name, the declared files themselves). Each hint is now resolved in the step's repo as the tree is
+// (`tree`): a relative one against the folder of the file it is in, another against the repo and the step's package; a hint that names
+// no file is dropped, and one is listed only when it names a file the declared `reads` does not cover and that is not in the adapter
+// folder (pinned with the adapter itself). Each entry is `{ path, from }`: the repo path, and the file it was found in (`plugin`).
+export function looksLoaded(root, state, { commit, tree, definition }) {
+  const repo = definition?.repo;
+  const wt = repo ? state.repos[repo]?.worktree : null;
+  const at = String(tree ?? '').split('+')[0];
+  if (!wt || !at) return [];
+  const entries = treeEntries(wt, at);
+  const sorted = [...entries.keys()].sort();
+  const set = new Set(sorted);
+  const declared = Array.isArray(definition.reads) ? definition.reads : [];
+  const covered = (f) => declared.some((g) => readMatches(g, f));
+  let adapterDir = null;
+  let pkgPath = '';
+  try {
+    const loc = attemptAdapter(root, state);
+    if (loc.repo.name === repo) adapterDir = (loc.relative || '').split(path.sep).join('/') || null;
+    const r = trustedAdapter(root, state, commit).repos.find((x) => x.name === repo);
+    const pkg = definition.package ? r?.packages?.find((p) => p.name === definition.package || p.path === definition.package) : r?.packages?.[0];
+    pkgPath = pkg?.path && pkg.path !== '.' ? pkg.path : '';
+  } catch {}
+  const inAdapter = (f) => Boolean(adapterDir) && (f === adapterDir || f.startsWith(`${adapterDir}/`));
+  const sources = [];
+  if (definition.plugin) {
+    try {
+      sources.push({ from: 'plugin', dir: adapterDir ? path.posix.dirname(path.posix.join(adapterDir, definition.plugin)) : null, text: decodeEscapes(fs.readFileSync(adapterFileAtCommit(root, state, commit, definition.plugin), 'utf8')) });
+    } catch {}
+  }
+  const own = sorted.filter(covered);
+  const texts = blobTexts(wt, own.map((f) => entries.get(f)?.blob));
+  for (const f of own) {
+    const text = texts.get(entries.get(f)?.blob);
+    if (text !== undefined) sources.push({ from: f, dir: path.posix.dirname(f), text: decodeEscapes(text) });
+  }
+  const out = [];
+  for (const s of sources) {
+    for (const h of pathHints(s.text)) {
+      const bases = h.relative ? (s.dir !== null ? [path.posix.join(s.dir, h.spec)] : []) : [h.spec, ...(pkgPath ? [path.posix.join(pkgPath, h.spec)] : [])];
+      for (const b of bases) {
+        const p = path.posix.normalize(b).replace(/\/$/, '');
+        if (!p || p === '.' || p.startsWith('../') || p === '..' || path.posix.isAbsolute(p)) continue;
+        const named = filesNamed(sorted, set, p);
+        if (!named.length) continue;
+        const outside = named.filter((f) => !covered(f) && !inAdapter(f) && f !== s.from);
+        const shown = outside.length === 1 && named.length === 1 ? outside[0] : p;
+        if (outside.length && !out.some((x) => x.path === shown)) out.push({ path: shown, from: s.from });
+        break;
+      }
+    }
+  }
+  return out;
+}
+
+// 0.7.33 (I-223): the files the earlier pins of an admission step covered through its declared `reads`: the admission original's
+// declaration matched at the attempt's admission base, and the previous correction's pinned files. A correction's own pin is compared
+// with both, as the reviewer compares its definition with both.
+function earlierReads(state, id, admissionDefinition) {
+  const of = (state.validationCorrections ?? []).filter((c) => (c.from ?? []).some((f) => f.admission && f.id === id));
+  const original = of.length ? of[0].from.find((f) => f.id === id)?.definition : admissionDefinition;
+  const out = [];
+  const at = state.repos[original?.repo]?.base;
+  const x = original && at ? declaredReadsAt(state, { id, definition: original }, at) : null;
+  if (x?.files.length) out.push({ against: 'original', repo: x.repo, declared: x.declared, files: x.files, at });
+  const prev = of.at(-1);
+  const rec = (prev?.reads ?? []).find((r) => r.step === id);
+  if (rec?.files?.length) out.push({ against: 'previous', repo: rec.repo, declared: rec.declared, files: rec.files, at: String(prev.tree?.[rec.repo] ?? prev.commit).split('+')[0] });
+  return out;
+}
+
+// Each file an earlier pin covered that the corrected pin does not hold, and why: its path is no longer declared, or it is declared
+// and no longer in the tree.
+const droppedFrom = (earlier, pinned) => earlier.files.filter((f) => !(pinned?.repo === earlier.repo && pinned.files.some((x) => x.path === f.path))).map((f) => ({ path: f.path, blob: f.blob, why: pinned?.repo === earlier.repo && pinned.declared.some((g) => readMatches(g, f.path)) ? 'no longer in the tree' : 'no longer declared' }));
+
+// 0.7.33 (I-226): which admission checks an attempt corrected, and whether it is still open, read from its ledger's own entries without
+// folding it. Named failure (review of 0.7.32): the note that another open attempt corrected the same check was computed once, by the
+// later attempt, and stored on its correction (`sharedWith`): the earlier attempt never named the later one, and an attempt that had
+// closed stayed named. Named cost behind that design (review of 0.7.32, M3): folding every attempt's ledger for every next step took
+// about a second with eleven attempts. The index is a small file per attempt in the project's scratch folder, extended from the bytes
+// its ledger gained since (a ledger only grows, and the first new entry must continue the indexed chain, else it is read again from the
+// start), and only the entries it needs are parsed: `validation.corrected` and the four that close an attempt (an attempt never
+// reopens: `wf reopen` admits a new one). It is derived from the ledger and never decides anything: a ledger that cannot be read has
+// no index (null), and an index that cannot be written is rebuilt next time.
+const CLOSING = new Set(['closed', 'abandoned', 'analysis.closed', 'shipped.closed']);
+const INDEXED = /"type":"(?:validation\.corrected|closed|abandoned|analysis\.closed|shipped\.closed)"/;
+export function correctionIndex(root, id) {
+  const ledger = path.join(attemptDir(root, id), 'ledger.jsonl');
+  let size;
+  try {
+    size = fs.statSync(ledger).size;
+  } catch {
+    return null;
+  }
+  const scratch = path.join(root, '.wf-worktrees');
+  const file = path.join(scratch, '_corrections', `${id}.json`);
+  let cached = null;
+  try {
+    cached = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {}
+  if (cached?.v !== 1 || !Number.isInteger(cached.offset) || cached.offset > size || !Array.isArray(cached.steps)) cached = null;
+  if (cached && cached.offset === size) return cached;
+  const scan = (idx) => {
+    const fd = fs.openSync(ledger, 'r');
+    try {
+      let pos = idx.offset;
+      let carry = Buffer.alloc(0);
+      let first = idx.offset > 0;
+      let lastLine = null;
+      while (pos < size) {
+        const chunk = Buffer.alloc(Math.min(8 * 1024 * 1024, size - pos));
+        const n = fs.readSync(fd, chunk, 0, chunk.length, pos);
+        if (!n) break;
+        pos += n;
+        const data = carry.length ? Buffer.concat([carry, chunk.subarray(0, n)]) : chunk.subarray(0, n);
+        // Complete lines only: an entry being appended right now is read next time.
+        const end = data.lastIndexOf(0x0a) + 1;
+        carry = Buffer.from(data.subarray(end));
+        if (!end) continue;
+        idx.offset += end;
+        for (const line of data.subarray(0, end).toString('utf8').split('\n')) {
+          if (!line) continue;
+          lastLine = line;
+          const head = line.slice(0, 160);
+          if (!first && !(head.includes('"type":"') ? INDEXED.test(head) : INDEXED.test(line))) continue;
+          const e = JSON.parse(line);
+          if (first) {
+            if (e.prev !== idx.last) return false;
+            first = false;
+          }
+          if (e.type === 'validation.corrected') for (const f of e.data?.from ?? []) if (f?.admission && !idx.steps.includes(f.id)) idx.steps.push(f.id);
+          if (CLOSING.has(e.type)) idx.open = false;
+        }
+      }
+      if (lastLine !== null) idx.last = JSON.parse(lastLine).hash ?? null;
+      return true;
+    } finally {
+      fs.closeSync(fd);
+    }
+  };
+  let idx = cached ? { ...cached, steps: [...cached.steps] } : null;
+  try {
+    if (!idx || !scan(idx)) {
+      idx = { v: 1, offset: 0, last: null, open: true, steps: [] };
+      scan(idx);
+    }
+  } catch {
+    return null;
+  }
+  try {
+    const st = fs.lstatSync(scratch, { throwIfNoEntry: false });
+    if (st?.isDirectory() && !st.isSymbolicLink()) {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      const tmp = `${file}.${process.pid}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(idx));
+      fs.renameSync(tmp, file);
+    }
+  } catch {}
+  return idx;
 }
 
 // The other open attempts of the project that corrected the same admission check: one defect frozen into a check shared by every
@@ -246,14 +492,9 @@ export function sharedCorrections(root, state, ids) {
   const out = [];
   for (const id of listAttempts(root)) {
     if (id === state.id) continue;
-    let other;
-    try {
-      other = loadState(root, id);
-    } catch {
-      continue;
-    }
-    if (['done', 'abandoned'].includes(other.phase)) continue;
-    const same = ids.filter((step) => (other.validationCorrections ?? []).some((c) => (c.from ?? []).some((f) => f.admission && f.id === step)));
+    const idx = correctionIndex(root, id);
+    if (!idx?.open) continue;
+    const same = ids.filter((step) => idx.steps.includes(step));
     if (same.length) out.push({ attempt: id, steps: same });
   }
   return out;
@@ -346,11 +587,20 @@ async function registerValidation(root, options, correcting) {
       // Both pins stay in the ledger: what the step was, and what it is now.
       const current = (id) => state.validations.flatMap((v) => v.steps).find((s) => s.id === id)?.definition;
       const from = ids.map((id) => (admission.includes(id) ? { id, commit: pinOf(id), definition: current(id) ?? base.gate.steps.find((s) => s.id === id), admission: true } : { id, commit: pinOf(id), definition: current(id) }));
-      const reads = admission.map((id) => declaredReadsAt(state, steps.find((x) => x.id === id), trees[steps.find((x) => x.id === id)?.definition?.repo]?.split('+')[0] ?? commit)).filter(Boolean);
+      const treeOf = (repo) => trees[repo]?.split('+')[0] ?? commit;
+      const pins = admission.map((id) => { const now = steps.find((x) => x.id === id); return { id, pinned: declaredReadsAt(state, now, treeOf(now.definition.repo)) }; });
+      const reads = pins.map((x) => x.pinned).filter(Boolean);
       const missing = reads.filter((x) => x.unmatched.length);
       if (missing.length) throw refuse(`${missing.map((x) => `${x.step} declares \`reads\` ${x.unmatched.map((g) => `\`${g}\``).join(', ')}, which ${x.unmatched.length > 1 ? 'match' : 'matches'} no file in ${x.repo}`).join('; ')}`, 'a step\'s `reads` lists the files its plugin loads outside the adapter folder (paths or globs relative to the step\'s repo), as committed: fix the path, or commit the file', { id: 'validation:reads-unmatched' });
+      // 0.7.33 (I-223). Named failure (review of 0.7.32): a correction that dropped the step's `reads`, or narrowed a glob, was accepted
+      // and pinned nothing, and the reviewer, told that paths are plumbing, saw only two definitions that differ in one line. A file an
+      // earlier pin covered (the admission original's declaration, the previous correction's pin) that the corrected pin no longer holds
+      // is a fact, recorded with the correction (`readsDropped`) and handed to the reviewer as a coverage loss to judge. It is not
+      // refused: the correction's verdict is owed before acceptance anyway, and a refusal would also stop a harness inlined back into
+      // the plugin or renamed, whose only way on would then be a new override.
+      const readsDropped = pins.flatMap(({ id, pinned }) => earlierReads(state, id, from.find((f) => f.id === id)?.definition).map((earlier) => ({ step: id, repo: earlier.repo, against: earlier.against, at: earlier.at, files: droppedFrom(earlier, pinned) })).filter((x) => x.files.length));
       const shared = admission.length ? sharedCorrections(root, state, admission) : [];
-      append(root, state.id, 'validation.corrected', { commit, steps, criteria, reason: String(options.reason), tree: trees, from, ...(decision ? { decision } : {}), ...(admission.length ? { judgedBy: 'reviewer', ...(reads.length ? { reads: reads.map(({ unmatched, ...x }) => x) } : {}), ...(shared.length ? { sharedWith: shared } : {}) } : {}) }, actor(options));
+      append(root, state.id, 'validation.corrected', { commit, steps, criteria, reason: String(options.reason), tree: trees, from, ...(decision ? { decision } : {}), ...(admission.length ? { judgedBy: 'reviewer', ...(reads.length ? { reads: reads.map(({ unmatched, ...x }) => x) } : {}), ...(readsDropped.length ? { readsDropped } : {}), ...(shared.length ? { sharedWith: shared } : {}) } : {}) }, actor(options));
     } else append(root, state.id, 'validation.added', { commit, steps, criteria, reason: String(options.reason), tree: trees }, actor(options));
     return loadState(root, state.id);
   });

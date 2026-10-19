@@ -271,7 +271,7 @@ function normalize(raw, source) {
     strategy: { ...STRATEGY_DEFAULTS },
     repos: [],
   };
-  // The owner escalation: an unknown key or a non-positive number would silently leave the 10-round stop unwatched.
+  // The round count (the strategist decides first at it, 0.7.33): an unknown key or a non-positive number would silently leave the 10-round stop unwatched.
   if (raw.strategy !== undefined && raw.strategy !== null) {
     if (typeof raw.strategy !== 'object' || Array.isArray(raw.strategy)) fail(`\`strategy\` must be a mapping of strategy values (known: ${Object.keys(STRATEGY_DEFAULTS).join(', ')})`);
     else {

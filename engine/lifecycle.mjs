@@ -1,5 +1,5 @@
 import { STAGE_GOAL, panelActive, panelStage, plannerClassFor, plannerPanel } from './panel.mjs';
-import { batchValidationConflicts, carriedValidations, declaredReadsAt, gateAdapter, looksLoaded } from './validation.mjs';
+import { batchValidationConflicts, carriedValidations, declaredReadsAt, gateAdapter, looksLoaded, sharedCorrections } from './validation.mjs';
 import { captureWarning, capturingSteps } from './captures.mjs';
 import { mkdirStateDirectory } from './state-folders.mjs';
 import { blockingIn, classifyFinding, closureMissingGuidance, deltaLines, dispositionOf, earlierBlocking, observations, openAcrossRounds, placementLevel, reviewerDiscovered, roundMode, severityLevel, sinceOf, stampClosure, stripStamp, unreachedOf, unreachedSince } from './review-policy.mjs';
@@ -722,8 +722,8 @@ export function handoff(root, role, options) {
   const cfg = trusted;
   const roles = ['planner', 'implementer', 'reviewer', 'tester', 'strategist'];
   if (!roles.includes(role)) throw new WfError(`role must be one of ${roles.join(', ')}`);
-  // 0.7.0 (D3): the strategist's bundle is built in engine/strategy.mjs; no implementer or reviewer starts while the
-  // person's round escalation or a strategist's escalation awaits their decision.
+  // 0.7.0 (D3): the strategist's bundle is built in engine/strategy.mjs; no implementer or reviewer starts while the round count
+  // awaits the strategist's decision (0.7.33, D84) or a strategist's escalation awaits the person's.
   if (role === 'strategist') return strategistHandoff(root, state, options);
   if (['implementer', 'reviewer'].includes(role)) requireOwnerDecision(root, state, role, options);
   if (!options.agent) throw new WfError('--agent <identity of the agent you are starting> is required');
@@ -1182,9 +1182,10 @@ export function handoff(root, role, options) {
   if (role === 'reviewer' && bundle.premiseFailed) bundle.instructions += ` \`premiseFailed\` lists items an implementer did not build because their premise does not hold in production (${bundle.premiseFailed.map((x) => x.ref).join(', ')}), each with what it checked: judge the premise, not only the code. When it does not hold, give \`verified-nonissue\` with your evidence and a rationale that says so (for a discovered issue in \`discovered\`, which closes it; for a finding in \`priorFindings\`); when it holds after all, give \`open\` with what you found (it goes back to be fixed). A fact that contradicts a premise is a finding about the premise, never an argument that a change is safe.`;
   const marked = role === 'implementer' ? [...(bundle.repair ?? []).flatMap((g) => g.findings), ...(bundle.alsoFix ?? []), ...(bundle.passItems ?? []).flatMap((x) => x.items)].filter((x) => x.premiseFailed).map((x) => x.ref ?? `${x.round}:${x.id}`) : [];
   if (marked.length) bundle.instructions += ` An item marked \`premiseFailed\` (${marked.join(', ')}) was reported by an implementer to rest on a premise that does not hold in production, with its evidence: build nothing for it until a reviewer or the person settles it, and say in your report what you found about the premise if you looked.`;
-  if (role === 'reviewer' && bundle.pushedRange) bundle.instructions += ` \`pushedRange\` lists the commits of ${Object.keys(bundle.pushedRange).join(', ')} that were pushed to the target outside the workflow and are read as this attempt's change, from the last base it recorded (\`from\`); a commit marked \`merged\` came in through a merge, not on the branch's own line: another ticket's work on the base, which you judge as context, not as this ticket's change.`;
+  // 0.7.33 (I-225): a commit is marked as the base's by the fact that shows it, and an unmarked one is said to be unproven, not the ticket's.
+  if (role === 'reviewer' && bundle.pushedRange) bundle.instructions += ` \`pushedRange\` lists the commits of ${Object.keys(bundle.pushedRange).join(', ')} that were pushed to the target outside the workflow and are read as this attempt's change, from the last base it recorded (\`from\`). A commit with \`base\` set is the base's, by the fact it states: it came in through a merge (\`merged\`, not on the branch's own line), the fetched base held it before this worktree did (a fast-forward, a pull or a rebase brought it), or it has the same patch as a commit the fetched base held before this worktree had it (a cherry-pick from the base). That is another change's work, which you judge as context, not as this ticket's change. One without it is not proven this ticket's: the range runs from the last base the attempt recorded, so another change's commit is in it whenever git kept no fact that tells them apart (a reflog that expired, a commit made in another clone); judge by its content which change it belongs to.`;
   // 0.7.32 (D78): the reviewer judges a correction of an admission check; the person is not asked.
-  if (role === 'reviewer' && bundle.admissionCorrections) bundle.instructions += ` \`admissionCorrections\` lists checks frozen at admission that this attempt corrected (${bundle.admissionCorrections.map((c) => c.id).join(', ')}). The person is not asked about a correction: you judge it, from the code, never from the correction's \`reason\`. Each entry has the admission original (\`original\`), the previous correction when there was one (\`previous\`) and the corrected definition (\`corrected\`): the step's definition and its plugin as committed at each, with a decoded copy (\`plugin.decoded\`: the specs and harnesses a plugin embeds as escaped strings, line by line) and the decoded diffs (\`decodedDiff\`), plus the adapter's diff between the pins (\`diff\`, \`files\`); read the decoded text, since a plain diff of a plugin can be one long changed line. Compare the corrected definition with both: coverage is kept when every test case and assertion survives and only expectations the frozen criteria deliberately change are updated; selectors, waits and paths are plumbing, judged as such. A loss against the admission original (a case or assertion removed, skipped or loosened, an expectation weakened, a timeout raised to hide a failure) is a blocking finding. A loss against the previous correction (an assertion it added loosened, a check it added removed, a timeout on a case raised) is a blocking finding too, unless it is tied to a criterion that is still proven another way, which your evidence states. Test code moved out of the plugin into another file is pinned with the check only when the step declares it: \`reads\` lists the files the step declares its plugin loads outside the adapter folder (its definition's \`reads\`, pinned with the correction), with any change since (\`diff\`); judge them as part of the check. Whether the plugin loads anything it does not declare is yours to judge from the decoded code (\`ctx.dir + '/front/…'\`, \`path.join(ctx.dir, 'front', …)\`, template literals, imports without an extension, directories and globs): an undeclared load is a blocking finding. \`looksLoaded\` lists path-like strings found in the decoded plugin, a hint only, never a record. Raise a blocking finding citing the criterion the check proves, and the ticket fixes it (only the person's waiver lets it stand). When the correction fixes a defect in the check itself rather than this ticket's intended behaviour, say so in your evidence: such a defect is fixed once on the adapter's base branch, which every live attempt follows. Give your verdict on each in \`validationChecked: [{ "id", "commit": <the corrected pin>, "verdict": "complies" | "finding", "evidence", "finding": <its id> }]\`; a closure without one is refused, and the attempt is not accepted until a round has judged it.`;
+  if (role === 'reviewer' && bundle.admissionCorrections) bundle.instructions += ` \`admissionCorrections\` lists checks frozen at admission that this attempt corrected (${bundle.admissionCorrections.map((c) => c.id).join(', ')}). The person is not asked about a correction: you judge it, from the code, never from the correction's \`reason\`. Each entry has the admission original (\`original\`), the previous correction when there was one (\`previous\`) and the corrected definition (\`corrected\`): the step's definition and its plugin as committed at each, with a decoded copy (\`plugin.decoded\`: the specs and harnesses a plugin embeds as escaped strings, line by line) and the decoded diffs (\`decodedDiff\`), plus the adapter's diff between the pins (\`diff\`, \`files\`); read the decoded text, since a plain diff of a plugin can be one long changed line. Compare the corrected definition with both: coverage is kept when every test case and assertion survives and only expectations the frozen criteria deliberately change are updated; selectors, waits and paths are plumbing, judged as such. A loss against the admission original (a case or assertion removed, skipped or loosened, an expectation weakened, a timeout raised to hide a failure) is a blocking finding. A loss against the previous correction (an assertion it added loosened, a check it added removed, a timeout on a case raised) is a blocking finding too, unless it is tied to a criterion that is still proven another way, which your evidence states. Test code moved out of the plugin into another file is pinned with the check only when the step declares it: \`reads\` lists the files the step declares its plugin loads outside the adapter folder (its definition's \`reads\`, pinned with the correction), with any change since (\`diff\`); judge them as part of the check, and with them what they load in turn: what a declared file itself imports or requires (\`../support/commands.js\`), and the spec tree a runner the plugin starts picks up (its spec pattern, its support and config files). Whether the plugin, or a file it declares, loads anything the declaration does not cover is yours to judge from the decoded code (\`ctx.dir + '/front/…'\`, \`path.join(ctx.dir, 'front', …)\`, template literals, imports without an extension, directories and globs): an undeclared load is a blocking finding, and the project declares a wider glob (\`front/cypress/**\`) rather than each file. \`looksLoaded\` lists what the decoded plugin and the declared files look like they load, resolved to files and folders of the step's repo and listed only when the declaration does not cover them (\`from\`: the file it was found in): a hint only, never a record. \`readsDropped\` lists files an earlier pin of the check covered (the admission original's declared \`reads\`, or the previous correction's) that the corrected pin no longer holds, each with why (no longer declared, or no longer in the tree) and how to read it as it was pinned (\`show\`): a fact the engine recorded, which you judge as a coverage loss, a loss unless the decoded code shows the test code it held now in the plugin or in a declared file. Raise a blocking finding citing the criterion the check proves, and the ticket fixes it (only the person's waiver lets it stand). When the correction fixes a defect in the check itself rather than this ticket's intended behaviour, say so in your evidence: such a defect is fixed once on the adapter's base branch, which every live attempt follows. Give your verdict on each in \`validationChecked: [{ "id", "commit": <the corrected pin>, "verdict": "complies" | "finding", "evidence", "finding": <its id> }]\`; a closure without one is refused, and the attempt is not accepted until a round has judged it.`;
   // Review of 0.7.32 (D69): a code round is told what keeping an evidence finding open means, and what to do when the code shows the
   // defect still there: its own finding holds the gate, the evidence finding kept open does not.
   const fromEvidence = role === 'reviewer' && !gateNow?.ok ? (bundle.openFindings ?? []).filter((f) => f.blocks && gateHanded((state.handoffs ?? []).find((h) => h.bundle === (state.reviews ?? []).find((r) => (r.closure?.reviewer ?? r.reviewer) === f.round)?.handoff))).map((f) => `${f.round}:${f.id}`) : [];
@@ -2139,10 +2140,69 @@ function pushedRangeOf(state) {
     if (!pushedRepo(state, name)) continue;
     const from = changeBase(state, name);
     const own = new Set(git(r.worktree, ['rev-list', '--first-parent', `${from}..HEAD`], { allowFail: true }).split('\n').filter(Boolean));
-    const commits = git(r.worktree, ['log', '--reverse', '--format=%H %s', `${from}..HEAD`], { allowFail: true }).split('\n').filter(Boolean).map((line) => ({ sha: line.slice(0, 40), subject: line.slice(41, 200), merged: !own.has(line.slice(0, 40)) }));
+    const commits = git(r.worktree, ['log', '--reverse', '--format=%H %s', `${from}..HEAD`], { allowFail: true }).split('\n').filter(Boolean).map((line) => ({ sha: line.slice(0, 40), subject: line.slice(41, 200), merged: !own.has(line.slice(0, 40)) })).map((c) => ({ ...c, base: c.merged ? "came in through a merge (not on the branch's own first-parent line)" : false }));
+    markFromBase(r, from, commits.filter((c) => !c.base));
     out[name] = { from, commits };
   }
   return Object.keys(out).length ? out : undefined;
+}
+
+// 0.7.33 (I-225). Named failure (a review's probe of D72): after a hand push, another ticket landing on the base and `git merge
+// --ff-only` in the worktree, the other ticket's commit was on the branch's own first-parent line, read `merged: false` and was listed
+// as this attempt's. What tells them apart is a fact git keeps: when the fetched base (the remote-tracking ref's reflog) and this
+// worktree (its HEAD's reflog) each first held the commit. The attempt's own commit is made here and reaches the base when it is
+// pushed; a commit of the base that came in by a fast-forward, a pull or a rebase was on the fetched base first. A commit with the same
+// patch as one the fetched base held before this worktree had the commit (a cherry-pick from the base) is the base's too. A tie (the
+// same second) or a reflog that no longer holds the commit proves nothing: the commit stays unmarked, and the reviewer is told an
+// unmarked commit is not proven this ticket's. One `git rev-list --parents` over every reflog entry gives the graph; the patch ids are
+// computed only when an unmarked commit is left.
+function markFromBase(r, from, targets) {
+  if (!targets.length || !r.baseRef) return;
+  const reflog = (ref) => git(r.worktree, ['reflog', 'show', '--date=unix', '--format=%H %gd', ref], { allowFail: true }).split('\n').map((line) => /^([0-9a-f]{40}) .*@\{(\d+)\}$/.exec(line)).filter(Boolean).map((m) => ({ sha: m[1], t: Number(m[2]) }));
+  const baseLog = reflog(r.baseRef);
+  const headLog = reflog('HEAD');
+  if (!baseLog.length || !headLog.length) return;
+  const tips = [...new Set([...baseLog, ...headLog].map((e) => e.sha))];
+  const listed = run('git', ['rev-list', '--parents', '--ignore-missing', '--stdin'], { cwd: r.worktree, input: `${tips.join('\n')}\n^${from}\n`, allowFail: true });
+  if (listed.status !== 0) return;
+  const parents = new Map(listed.stdout.split('\n').filter(Boolean).map((line) => { const [c, ...p] = line.split(' '); return [c, p]; }));
+  // The earliest time a log's entries held each commit: entries in time order, each walked down to what an earlier one already held.
+  const held = (log) => {
+    const at = new Map();
+    for (const e of [...log].sort((a, b) => a.t - b.t)) {
+      const stack = [e.sha];
+      while (stack.length) {
+        const c = stack.pop();
+        if (at.has(c) || !parents.has(c)) continue;
+        at.set(c, e.t);
+        stack.push(...parents.get(c));
+      }
+    }
+    return at;
+  };
+  const onBase = held(baseLog);
+  const onHead = held(headLog);
+  const when = (t) => new Date(t * 1000).toISOString();
+  for (const c of targets) {
+    const b = onBase.get(c.sha);
+    const h = onHead.get(c.sha);
+    if (b !== undefined && h !== undefined && b < h) c.base = `the fetched base (${r.baseRef}) held it at ${when(b)}, before this worktree did (${when(h)})`;
+  }
+  const left = targets.filter((c) => !c.base && onHead.has(c.sha) && (parents.get(c.sha) ?? []).length === 1);
+  if (!left.length) return;
+  const latest = Math.max(...left.map((c) => onHead.get(c.sha)));
+  const earlier = [...onBase].filter(([c, t]) => t < latest && (parents.get(c) ?? []).length === 1).map(([c]) => c);
+  const shas = [...new Set([...left.map((c) => c.sha), ...earlier])];
+  const patch = run('git', ['diff-tree', '--stdin', '-p', '--no-color', '--no-ext-diff'], { cwd: r.worktree, input: `${shas.join('\n')}\n`, allowFail: true });
+  if (patch.status !== 0 || !patch.stdout) return;
+  const ids = run('git', ['patch-id', '--stable'], { cwd: r.worktree, input: patch.stdout, allowFail: true });
+  const byCommit = new Map(ids.stdout.split('\n').filter(Boolean).map((line) => { const [p, c] = line.split(' '); return [c, p]; }));
+  for (const c of left) {
+    const p = byCommit.get(c.sha);
+    const h = onHead.get(c.sha);
+    const same = p ? earlier.find((d) => d !== c.sha && byCommit.get(d) === p && onBase.get(d) < h) : null;
+    if (same) c.base = `the same patch as ${same.slice(0, 10)}, which the fetched base (${r.baseRef}) held at ${when(onBase.get(same))}, before this worktree had this commit (${when(h)})`;
+  }
 }
 
 // 0.7.32 (D78): the admission checks this attempt corrected that no recorded round has judged yet, each with what the reviewer compares:
@@ -2164,7 +2224,8 @@ export function correctionsToJudge(root, state) {
   } catch {}
   const dir = loc ? state.repos[loc.repo.name]?.worktree ?? repoDir(root, loc.repo) : null;
   const rel = loc?.relative || '.';
-  const blobAt = (tree, file) => (dir && tree ? git(dir, ['rev-parse', '--verify', '--quiet', `${String(tree).split('+')[0]}:${file}`], { allowFail: true }) || null : null);
+  let trees = null;
+  const treesNow = () => (trees ??= treeHashes(state));
   const version = (commit, definition) => {
     if (!definition) return null;
     const out = { commit, definition };
@@ -2196,7 +2257,7 @@ export function correctionsToJudge(root, state) {
     const declared = (c.reads ?? []).find((x) => x.step === id && Array.isArray(x.declared)) ?? null;
     const readsRepo = declared ? state.repos[declared.repo] : null;
     const snapshot = (sha) => (declared && readsRepo?.worktree && sha ? canonical((declaredReadsAt(state, { id, definition: { repo: declared.repo, reads: declared.declared } }, String(sha).split('+')[0])?.files ?? []).map((f) => [f.path, f.blob])) : null);
-    const readsNow = declared ? snapshot(treeHashes(state)[declared.repo]) : null;
+    const readsNow = declared ? snapshot(treesNow()[declared.repo]) : null;
     const readsSame = (tree) => !declared || snapshot(tree?.[declared.repo]) === readsNow;
     if ((state.reviews ?? []).some((r) => String(r.at) > String(c.at) && judgedAt(r, id, c.commit) && readsSame(r.tree ?? r.handoffTree))) continue;
     const admission = of[0].from.find((f) => f.id === id);
@@ -2212,7 +2273,10 @@ export function correctionsToJudge(root, state) {
       files,
       decodedDiff: { fromOriginal: decodedDiff(original, corrected), ...(previous ? { fromPrevious: decodedDiff(previous, corrected) } : {}) },
       ...(declared ? { reads: readsOf(declared, readsNow, c) } : {}),
-      looksLoaded: looksLoaded(root, state, c.commit, corrected?.definition),
+      // 0.7.33 (I-223): the files an earlier pin covered (the admission original's declaration, the previous correction's pin) that the
+      // corrected pin no longer holds, each with how to read it as it was pinned.
+      ...((c.readsDropped ?? []).some((x) => x.step === id) ? { readsDropped: c.readsDropped.filter((x) => x.step === id).map(({ step, ...x }) => ({ ...x, files: x.files.map((f) => ({ ...f, ...(state.repos[x.repo]?.worktree && f.blob ? { show: `git -C ${state.repos[x.repo].worktree} cat-file -p ${f.blob}` } : {}) })) })) } : {}),
+      looksLoaded: looksLoaded(root, state, { commit: c.commit, tree: treesNow()[corrected?.definition?.repo], definition: corrected?.definition }),
     });
   }
   return out;
@@ -2221,10 +2285,14 @@ export function correctionsToJudge(root, state) {
 // 0.7.32 (D78), named failure (classification of 25 field corrections): one defect frozen into an admission check (it asserted that a
 // failed request shows the empty state) was corrected separately by seven parallel tickets. When other open attempts corrected the
 // same admission check, the next step says to fix it once on the adapter's base branch, which every live attempt follows (D60).
-// Review of 0.7.32 (M3): read from the correction's record (`sharedWith`, computed once when the correction is recorded), never by
-// loading every attempt's ledger on each next step (11 attempts cost about a second per command).
+// Review of 0.7.32 (M3): never by loading every attempt's ledger on each next step (11 attempts cost about a second per command).
+// 0.7.33 (I-226): read from the open attempts' own corrections through their indexes (engine/validation.mjs `correctionIndex`), not
+// from this attempt's record (`sharedWith`, which only the later attempt held, and which kept naming an attempt that had closed): every
+// open attempt that corrected the step names the others, and one that closed drops out. Only an attempt that corrected an admission
+// check reads them.
 function sharedCorrectionNote(root, state) {
-  const others = (state.validationCorrections ?? []).flatMap((c) => c.sharedWith ?? []);
+  const mine = [...new Set((state.validationCorrections ?? []).flatMap((c) => (c.from ?? []).filter((f) => f.admission).map((f) => f.id)))];
+  const others = mine.length ? sharedCorrections(root, state, mine) : [];
   if (!others.length) return null;
   const attempts = [...new Set(others.map((o) => o.attempt))];
   const steps = [...new Set(others.flatMap((o) => o.steps))];
@@ -3772,8 +3840,8 @@ export function nextDecision(root, state) {
   };
   if (['done', 'abandoned'].includes(state.phase)) return result('complete', 'complete');
   if (state.activeHold) return result('hold', 'blocked', state.activeHold.reason, { guidance: `on hold: ${state.activeHold.reason}; only the owner lifts it. Pending sequence after release: ${guidance}` });
-  // 0.7.0 (D3): the person's round escalation and a strategist's escalation stop the course until they decide (attempts
-  // admitted at 0.7.0+); a strategist the owner agent handed is waited for.
+  // 0.7.0 (D3): the round count and a strategist's escalation stop the course until they are settled (0.7.33, D84: at the count the
+  // strategist decides first; the person decides a strategist's escalation); a strategist the owner agent handed is waited for.
   const held = strategyHold(root, state);
   const waiting = strategistWaiting(state);
   const waitingText = (w) => {

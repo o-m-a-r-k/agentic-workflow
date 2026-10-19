@@ -395,8 +395,9 @@ test('0.7.32 (D78, review M1): a declared read that matches no file is refused; 
   ok(wf(f.root, ['validation', 'correct', '--steps', 'unit', '--reason', 'moved', '--attempt', f.e.id], { ownerSilent: true }));
   assert.equal(state(f.root, f.e.id).validationCorrections[0].reads, undefined);
   const bundle = handReviewer(f, 'code-1');
-  assert.ok(bundle.admissionCorrections[0].looksLoaded.some((x) => /front\/fixtures/.test(x)), 'a hint from the template literal');
-  assert.match(bundle.instructions, /Whether the plugin loads anything it does not declare is yours to judge from the decoded code .*: an undeclared load is a blocking finding\. `looksLoaded` lists path-like strings found in the decoded plugin, a hint only, never a record/);
+  // 0.7.33 (I-227): the hint is resolved to the repo's files and lists only what the declaration does not cover (here: nothing is declared).
+  assert.deepEqual(bundle.admissionCorrections[0].looksLoaded, [{ path: 'front/fixtures/harness', from: 'plugin' }], 'a hint from the template literal');
+  assert.match(bundle.instructions, /Whether the plugin, or a file it declares, loads anything the declaration does not cover is yours to judge from the decoded code .*: an undeclared load is a blocking finding, and the project declares a wider glob .*`looksLoaded` lists what the decoded plugin and the declared files look like they load, .*a hint only, never a record/);
 });
 
 // Review of 0.7.32 (M2): a `finding` verdict naming a low finding sent the weakening down the path of items that do not block.

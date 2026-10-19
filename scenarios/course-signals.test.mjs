@@ -138,17 +138,19 @@ test('a project that switched the strategist off gets no course step', () => {
   assert.equal(resume(p).decision.kind, 'review');
 });
 
-test('the round escalation offers to hold for a product or legal answer, and choosing it holds the ticket in those words', async () => {
+// Since 0.7.33 (I-229, D84) the engine asks no round question (the strategist decides at the count); one an earlier release asked
+// keeps its choices, and its `hold` still holds the ticket in those words.
+test('a round question an earlier release asked offers to hold for a product or legal answer, and choosing it holds the ticket in those words', async () => {
   const p = project('cs-hold', { files: 10, rounds: 6, minutes: 600 }, { strategy: { reviewRoundsEscalate: 1 } });
   implement(p, 'i1', { 'src/a.txt': LINES.replace('l2', 'L2') });
   ok(wf(p.root, ['handoff', 'reviewer', '--agent', 'r1', '--attempt', p.id]));
   record(p, goodClosure('r1', { findings: [blocking('F1', 'src/a.txt:2')] }));
+  const { append } = await import('../engine/ledger.mjs');
+  append(p.root, p.id, 'decision.created', { id: 'A1', kind: 'escalation', key: 'tripwire:rounds-escalation:rounds:1', summary: '1 review rounds handed; the owner decides how to continue: continue | split | deliver-core | hold | stop', choices: ['continue', 'split', 'deliver-core', 'hold', 'stop'], labels: { continue: 'Keep going as now', split: 'Split off the rest as its own ticket', 'deliver-core': 'Ship what the criteria need now', hold: 'It needs a product or legal answer first: hold', stop: 'Stop this ticket' } }, 'human:scenario');
   const asked = wf(p.root, ['handoff', 'implementer', '--agent', 'i1', '--attempt', p.id], { ownerSilent: true });
   assert.equal(asked.code, 75);
+  assert.match(asked.err, /\(A1\); no implementer starts until the person answers it or the strategist decides/);
   const d = resume(p).decisions.find((x) => x.kind === 'escalation');
-  assert.deepEqual(d.choices, ['continue', 'split', 'deliver-core', 'hold', 'stop']);
-  assert.equal(d.labels.hold, 'It needs a product or legal answer first: hold');
-  assert.match(d.then.hold, /the ticket is held until you give that answer and lift the hold/);
   const { approveInTerminal } = await import('../engine/approve.mjs');
   await inProcess(p.root, async () => {
     const input = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => {} });

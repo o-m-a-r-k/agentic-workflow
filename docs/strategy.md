@@ -135,7 +135,7 @@ and that has not decided is waited for (`wf resume` says `strategy`); no handoff
 
 Three things, none of them a number the engine picked:
 
-- the person's own round escalation (below), the one number left, adapter-configurable (`strategy: { reviewRoundsEscalate }`);
+- the round count (below), the one number left, adapter-configurable (`strategy: { reviewRoundsEscalate }`): at it the strategist decides first (0.7.33, D84);
 - a strategist's escalation awaiting the person's `wf approve` (when the owner withdraws it with `wf decisions withdraw`, it holds the handoffs until a strategist's decision is recorded, which supersedes it (the next implementer or reviewer handoff asks the question again only when no strategist handed after the withdrawal is still to decide); `wf resume` names both, and the waiting strategist beside the person's round question when that is due too (with none handed since, that one is to be handed and to decide before the next handoff, or the withdrawn question is asked again as it was; the handoff that asks it again names the way out), and a question answered in the person's own words is followed or withdrawn first);
 - the strategist's own rule above.
 
@@ -154,21 +154,26 @@ delivered with the parent; ejecting a member of a split batch needs the person's
 not code: a work item that already has an implementer cannot move, and a finding on a line the attempt changed stays
 in this attempt (a sibling starts from the base and has no such line; fix it here).
 
-## The owner's escalation
+## The round count
 
-The round escalation is answered by the person, not the strategist. At 10 handed review rounds (recorded or not: a round
-whose reviewer died still cost a round) the next implementer or reviewer handoff opens a reserved decision (`wf approve <id>`, kind escalation). Named failure: one ticket ran 47 review
-rounds before anyone stepped back, and an automatic stop at round 3 was too early. The owner agent brings the person the
-brief from `wf signals`: rounds, blocking findings per round, the families that keep coming back, changed files against what
-the plan expected, amendments, with 2-3 options and a recommendation. Choices: `continue` (another 10 rounds before asking
-again), `split` (unstarted work items, observations and discovered issues move to a sibling attempt; code already built
-stays), `deliver-core` (what the criteria need and what blocks stays; every other finding or discovered issue recorded before the
-answer may be ticketed under this one decision, never one raised after it), `hold` ("It needs a product or legal answer first:
-hold": the attempt is held in those words until the person lifts it; 0.7.28, after an escalation whose answer was a product
-question stayed open 390 minutes overnight with no option for it), `stop` (the attempt is held in the person's words). Batch attempts count too.
+At 10 handed review rounds (recorded or not: a round whose reviewer died still cost a round) no implementer or reviewer starts
+until the course is settled again. Named failure: one ticket ran 47 review rounds before anyone stepped back, and an automatic stop
+at round 3 was too early. The person's first rule was "make it 10 and then raise it to me"; since 0.7.33 (I-229, D84) their rule is
+that the strategist decides first. Named failure (field): the round question at 20 was withdrawn when the person held the attempt to
+rethink it; they lifted the hold with a direction, the strategist decided to consolidate, and two minutes later the engine asked the
+same round question again, recommending what the person had said ("why is the strategist not reviewing this first").
 
-The next question comes as many rounds after the person's answer, whatever they chose: it is due at the handed round count
-at which they answered plus 10, never at the next multiple of 10 (0.7.29, I-214). Named failure (field): the person answered
+So at the count the owner agent hands the strategist with the count as the reason (its bundle says `roundCount`) and records its
+decision. Any decision settles the count, which comes back 10 handed rounds after it; the person is asked only when the strategist
+escalates (and two of its predictions missed in a row still force that). What the person directs after the count was reached
+settles it as well: a hold they lifted (`wf release`, confirmed by them), a product decision they made (`wf decide`), or their
+answer to a round question an earlier release asked. A question the agent withdrew settles nothing. `wf resume`, the refusal of the
+next handoff (`strategy:round-count`) and `wf signals` (`settledBy`) say which applies. A round question an earlier release asked
+and the person has not answered stays theirs (its choices are on it: `continue`, `split`, `deliver-core`, `hold`, `stop`); a
+strategist's decision settles it too, and it is then withdrawn with that reason.
+
+The count comes back as many rounds after what settled it, whatever that chose: it is due at the handed round count at which it
+was settled plus 10, never at the next multiple of 10 (0.7.29, I-214). Named failure (field): the person answered
 "Keep going as now" at 17 handed rounds, on an attempt an earlier release had let run past 10 unasked, and at 20 the next
 implementer handoff asked the same question again, three rounds later. The count at which they answered is read from the
 ledger (the rounds handed by the time of the answer), so an attempt in flight replays the same way. A round question already
