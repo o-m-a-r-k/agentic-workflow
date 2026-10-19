@@ -103,7 +103,7 @@ delivery:
 | `risk` | Risk areas with `paths`, the `reason` the scan found and the `tests` that guard them; or `none`. |
 | `ticketing` | `tracker` (a name, which with `via: connector` is only a label in the operation texts; a module; or `files`), `via` (`connector`, `module`, `files`), `idPattern`, `take` (the status set at start), `followUps` (`file`, `digest` or `off`) and `operations` (the adapter's own words for each connector step, keyed by the engine's operations: `read`, `search`, `fileFollowUp`, `setStatus`, `comment`, `mergeRequest`). One attempt can run without the tracker: `wf start --no-tracker`. |
 | `delivery` | `landing` (`direct` or `queue`), `order`, `authority` (who pushes, opens merge requests and merges) and `stages` ([delivery-and-tracker.md](delivery-and-tracker.md)). |
-| `models` | A model per role: `planner`, `implementer`, `reviewer`, `secondReviewer`, `tester`, `drafter`. |
+| `models` | A model per role: `planner`, `implementer`, `reviewer`, `secondReviewer`, `drafter`. |
 | `budget.adapter` | Limits on the adapter's rules, risk areas, modules and operation words; `wf doctor` reports the counts. |
 | `onboarded` | Written by `wf init`: when, by which engine, and the hash of each key it wrote, so a hand edit is seen. |
 

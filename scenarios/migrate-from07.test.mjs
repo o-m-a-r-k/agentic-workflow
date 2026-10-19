@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { checkAdapter, commandHandler } from '../engine/contract.mjs';
 import { clearDoubles, ctxFor, ledgerDoubles, makeModuleProject, readAdapter, useDoubles, useUserDir } from './onboard-fixture.mjs';
-import { git } from './helpers/index.mjs';
+import { git, writeLegacyLedgers } from './helpers/index.mjs';
 
 const init = (p, flags = {}) => commandHandler('init')(ctxFor(p), { _: [], flags });
 const captureDraft = (p) => {
@@ -55,6 +55,24 @@ test('--from-07 shows the seeded conversion, every dropped key, per-ticket steps
     assert.match(r.text, /requires\.tools\.emulator: checked by `xcrun simctl list`, not by its name/);
     assert.match(r.text, /requires\.tools\.docker compose: not a plain command name/);
     assert.deepEqual(r.data.diff.seed.repos.map((x) => [x.name, x.base]), [['core', 'trunk'], ['panel', 'release'], ['handset', 'dev']]);
+  } finally {
+    restore();
+    clearDoubles();
+    p.cleanup();
+  }
+});
+
+test('--from-07 names the items of old attempts the derived idPattern refuses (a UUID), with the two ways to start them', async () => {
+  const p = makeModuleProject();
+  const uuid = '7c9e6679-7425-40de-944b-e07fc1f90ae7';
+  writeLegacyLedgers(p.root, { [`${uuid}.1`]: [['2026-01-06T09:00:00.000Z', 'admitted', { id: `${uuid}.1`, item: uuid, lane: 'quick', repos: {} }], ['2026-01-06T10:00:00.000Z', 'closed', { reason: 'delivered' }]] });
+  useDoubles(ledgerDoubles());
+  const restore = useUserDir(p);
+  try {
+    const r = await init(p, { 'from-07': true });
+    assert.equal(r.data.diff.seed.ticketing.idPattern, '^(?:QF|TK)-\\d+$');
+    assert.deepEqual(r.data.migration.offPattern, [uuid]);
+    assert.match(r.text, new RegExp(`does not match: wf start refuses them as they are\\. Start one with \`wf start --no-tracker <id>\`, or give the tracker module a \`normalise\` export[^\\n]*\\n  ${uuid}`));
   } finally {
     restore();
     clearDoubles();

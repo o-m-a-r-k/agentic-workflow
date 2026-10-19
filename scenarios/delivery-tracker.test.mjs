@@ -107,6 +107,9 @@ test('fileFollowUp through a connector: pending in the adapter\'s words, then re
   assert.equal(pending.marker, m);
   assert.ok(fs.readFileSync(pending.details.bodyFile, 'utf8').includes(m));
   assert.equal(pending.details.team, 'T1');
+  // The flow records the pending follow-up; its time is the first ask, from the ledger (no side file).
+  await f.ledger.append(f.p.root, attempt, 'finding.filed', { finding: 'F3', mode: 'file', state: 'pending', marker: m }, null);
+  assert.ok(!fs.readdirSync(path.dirname(pending.details.bodyFile)).some((x) => x.endsWith('.asked')));
   // The engine wrote nothing to the tracker itself.
   assert.deepEqual(f.tracker().log, []);
   const title = 'The list header overlaps the filter row';

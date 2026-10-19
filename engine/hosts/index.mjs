@@ -215,10 +215,11 @@ const samePath = (a, b) => {
 // Whether `file` came from `session`, as a fact of that session's transcript: its last successful write to that path
 // (Claude Code's Write tool) has the file's exact content, or its final message's JSON (jsonSpan) equals the file's
 // JSON. The second is how a reviewer whose host writes its last message (Codex `--output-last-message`, or the launch
-// supervisor) produces the file. False when the session has no readable transcript or the file is missing.
+// supervisor) produces the file. False when the file is missing or the transcript shows neither; null when the session
+// has no readable transcript (nothing to check against).
 export function writtenBy(session, file, opts = {}) {
   const t = itemsOf(session, opts);
-  if (!t) return false;
+  if (!t) return null;
   let content;
   try {
     content = fs.readFileSync(file);

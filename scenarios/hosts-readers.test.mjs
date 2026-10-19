@@ -122,7 +122,8 @@ test('writtenBy: a review file came from the session that wrote it (same content
   other.say('No review.').write();
   fs.writeFileSync(file, body);
   assert.equal(writtenBy(other.session, file, { home: p.home }), false);
-  assert.equal(writtenBy({ runtime: 'claude', id: '55555555-0000-4000-8000-000000000099' }, file, { home: p.home }), false);
+  // No readable transcript: nothing to check against (null, not false).
+  assert.equal(writtenBy({ runtime: 'claude', id: '55555555-0000-4000-8000-000000000099' }, file, { home: p.home }), null);
 
   // Codex: the host writes the last message; the file's JSON equals the JSON in that message.
   const c = codexRollout({ home: p.home, cwd: p.root, source: 'exec', originator: 'codex_exec' }).say('Looking.').say('Review:\n```json\n{ "findings": [{ "id": "F1" }] }\n```');

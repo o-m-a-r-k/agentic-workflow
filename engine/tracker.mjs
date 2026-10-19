@@ -15,7 +15,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { TRACKER_OPERATIONS, WfError, attemptDir, attemptState, callerSession, connectorCalls, loadAdapter, marker } from './contract.mjs';
+import { TRACKER_OPERATIONS, WfError, attemptDir, attemptState, callerSession, connectorCalls, loadAdapter, marker, readEvents } from './contract.mjs';
 import { filesTracker } from '../adapters/tracker/files.mjs';
 import { importBaseModule } from './base-module.mjs';
 import { scrub, secretValues } from './scrub.mjs';
@@ -227,9 +227,10 @@ const titleOf = (f) => String(f.what ?? '').split('\n')[0].trim().slice(0, 120) 
 /**
  * File one `other` finding per `ticketing.followUps` (contract fileFollowUp). Opt-in: only mode `file` files. The team,
  * status and label come from the adapter; the item's own labels are never copied. Searches the marker first (already
- * filed), then open issues with the same title (a duplicate), then creates.
+ * filed), then open issues with the same title (a duplicate), then creates. Through a connector it is pending until the
+ * owner's call shows the new issue; `opts.since` is the first-ask time (default: the first `finding.filed` of it).
  */
-export async function fileFollowUp(root, attempt, finding) {
+export async function fileFollowUp(root, attempt, finding, opts = {}) {
   const adapter = await loadAdapter(root);
   const fu = adapter.ticketing?.followUps ?? { mode: 'off' };
   if (fu.mode !== 'file') return { state: 'done', value: null };
@@ -265,10 +266,9 @@ export async function fileFollowUp(root, attempt, finding) {
   fs.mkdirSync(dir, { recursive: true });
   const bodyFile = path.join(dir, `${finding.id}.md`);
   fs.writeFileSync(bodyFile, `${body}\n`);
-  // The first time this follow-up was asked: only the owner's calls since then count.
-  const askedFile = path.join(dir, `${finding.id}.asked`);
-  const since = fs.existsSync(askedFile) ? fs.readFileSync(askedFile, 'utf8').trim() : null;
-  if (!since) fs.writeFileSync(askedFile, `${new Date().toISOString()}\n`);
+  // The first time this follow-up was asked (the time of its first `finding.filed`): only the owner's calls since then
+  // count. None yet: it is asked now, the first time.
+  const since = opts.since !== undefined ? opts.since : (await readEvents(root, attempt).catch(() => [])).find((e) => e.type === 'finding.filed' && e.data?.finding === finding.id)?.at ?? null;
   const item = await canonicalItem(root, adapter, state.item, tr);
   const newId = (c) => idsIn(c.result, pattern).find((x) => x !== item) ?? null;
   const r = await connectorStep(root, attempt, {

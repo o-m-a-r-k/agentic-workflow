@@ -223,6 +223,12 @@ async function startAttempt(root, rawItem, { actor = null, repos = null, bases =
     const spec = adapter.repos.find((r) => r.name === name);
     return { ...spec, base: bases?.[name] ?? bases?.['*'] ?? spec.base };
   };
+  // A `land` stage lands on the adapter's base: work started from another base would land there.
+  const stages = (adapter.delivery?.stages ?? []).filter((st) => !noTracker || (!['status', 'comment'].includes(st.do) && !st.when?.labels));
+  const offBase = wanted.filter((name) => specFor(name).base !== adapter.repos.find((r) => r.name === name).base);
+  if (offBase.length && stages.some((st) => st.do === 'land')) {
+    throw new WfError(`--base: the delivery stages land on the adapter's base, so work started from ${offBase.map((name) => `${specFor(name).base} in ${name}`).join(', ')} would land on ${offBase.map((name) => adapter.repos.find((r) => r.name === name).base).join(', ')}`, { hint: 'another base is delivered by merge-request, push (with its branch) or module stages: start it in a project whose delivery stages are those, or start without --base' });
+  }
   const n = Math.max(0, ...usedNumbers(root, adapter, item, ids)) + 1;
   const id = attemptId(item, n);
   const branch = branchName(id);
@@ -257,7 +263,6 @@ async function startAttempt(root, rawItem, { actor = null, repos = null, bases =
       recorded[name] = { branch, base: spec.base, baseSha: tips[name], worktree: wt };
     }
     const from = ids.length ? ids[ids.length - 1] : null;
-    const stages = (adapter.delivery?.stages ?? []).filter((st) => !noTracker || (!['status', 'comment'].includes(st.do) && !st.when?.labels));
     await append(root, id, 'attempt.started', {
       item, n, repos: recorded, stages,
       adapter: { file: adapter.source?.file ?? null, hash: adapter.source?.hash ?? null }, engine: ENGINE_VERSION,

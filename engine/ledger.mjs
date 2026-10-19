@@ -227,9 +227,10 @@ function fold2(id, entries) {
         break;
       }
       case 'finding.filed': {
+        // The last event of a finding wins: a pending follow-up is replaced by the one that says done.
         const fid = findingId(d.finding);
-        s.filings.push({ ...d, finding: fid, at: e.at });
-        if (fid) setFinding(fid, 'filed', s.findings[fid]?.review ?? null, e.at);
+        s.filings = [...s.filings.filter((x) => !fid || x.finding !== fid), { ...d, finding: fid, at: e.at }];
+        if (fid && d.state === 'done') setFinding(fid, 'filed', s.findings[fid]?.review ?? null, e.at);
         break;
       }
       case 'decision.asked':

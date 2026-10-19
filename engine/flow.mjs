@@ -11,13 +11,15 @@ import {
   listAttempts, loadAdapter, readEvents, refusal, runTests, userDir,
 } from './contract.mjs';
 import { baseOf, changedOf, dirtyRepos, foreignMerges, mergeBaseOf, rootPath, specOf, unreviewedCommits } from './base.mjs';
-import { assertFindings, blockersOf, fileOther, foldFindings, nextFindingNumber, refuseOtherOwn } from './findings.mjs';
+import { assertFindings, blockersOf, fileOther, foldFindings, nextFindingNumber, pendingLines, refilePending, refuseOtherOwn } from './findings.mjs';
 import { PROJECT_LEDGER, decisionsOf, flagText, holdOf, itemHistory, projectRoot, resolveAttempt, schema2, sessionFlag } from './attempt.mjs';
 import { docAtBase, ruleDocs } from './rules.mjs';
 import { writtenBy } from './hosts/index.mjs';
 import { scrub, secretValues } from './scrub.mjs';
 import { mkdirStateDirectory } from './state-folders.mjs';
 import { YAML, git, matchesAny, sha256 } from './util.mjs';
+import { workingTree } from './tests.mjs';
+import { stillTheRole } from './process-tree.mjs';
 
 const PLUGIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 // Above about 1,500 product lines one reviewer reads shallowly (design section 2): the review splits by area.
@@ -41,7 +43,7 @@ async function load(root, attempt) {
   const events = history.find((h) => h.id === attempt)?.events ?? [];
   const decisions = await decisionsOf(root, history);
   const waived = new Set(decisions.filter((d) => d.kind === 'waiver' && d.answer?.choice === CHOICES.waiver.yes).flatMap((d) => d.refs));
-  return { root, attempt, state, adapter, history, events, decisions, ...foldFindings(history, waived) };
+  return { root, attempt, state, adapter, history, events, decisions, waived, ...foldFindings(history, waived) };
 }
 
 const criteriaOf = (events) => [...events].reverse().find((e) => e.type === 'criteria.set')?.data ?? null;
@@ -51,7 +53,12 @@ const reviewerLaunches = (history) => allEvents(history).filter((e) => e.type ==
 // test.run records each repo's git tree (stream 2); screens may record either that or the attempt's tree.
 const repoTree = (state, repo) => git(state.repos[repo].worktree, ['rev-parse', 'HEAD^{tree}']);
 // A risk-base run counts for the tree it ran on and the merge-base it ran at (when the run records it), never by time.
-const riskBaseRan = (L, repo) => L.events.filter((e) => e.type === 'test.run' && e.data.kind === 'risk-base' && e.data.repo === repo && e.data.tree === repoTree(L.state, repo) && (!e.data.mergeBase || e.data.mergeBase === mergeBaseOf(L.state, L.adapter, repo)));
+// Test runs record the files they ran on (tests `workingTree`), so a run is matched to the worktree's files now.
+const testedTree = (state, repo) => workingTree(state.repos[repo].worktree);
+const riskBaseRan = (L, repo) => {
+  const tree = testedTree(L.state, repo);
+  return L.events.filter((e) => e.type === 'test.run' && e.data.kind === 'risk-base' && e.data.repo === repo && e.data.tree === tree && (!e.data.mergeBase || e.data.mergeBase === mergeBaseOf(L.state, L.adapter, repo)));
+};
 const sameSession = (a, b) => Boolean(a && b) && a.id === b.id && (a.runtime ?? null) === (b.runtime ?? null);
 
 // The review round of a tree, counted per item across attempts: the round already given to this tree, else the next.
@@ -344,8 +351,19 @@ const real = (p) => {
   }
 };
 
+// Whether the launch supervisor `pid` (started at `at`) still runs: a pid the system gave to another process since is gone.
+function supervisorAlive(pid, at) {
+  try {
+    process.kill(pid, 0);
+  } catch (error) {
+    if (error.code !== 'EPERM') return false;
+  }
+  return stillTheRole(pid, at);
+}
+
 // What wf's launch supervisor recorded for a reviewer session (`reviews/launch-*/`): { state, startedAt, endedAt, error,
-// closure }, or null when wf holds no record of it here.
+// closure }, or null when wf holds no record of it here. A run whose supervisor (`pid`) is gone before it ended is failed:
+// nothing will ever finish it.
 export function launchRecord(root, attempt, session) {
   const dir = path.join(attemptDir(root, attempt), 'reviews');
   if (!session?.id || !fs.existsSync(dir)) return null;
@@ -353,7 +371,11 @@ export function launchRecord(root, attempt, session) {
     try {
       const status = JSON.parse(fs.readFileSync(path.join(dir, d, 'status.json'), 'utf8'));
       const spec = JSON.parse(fs.readFileSync(path.join(dir, d, 'spec.json'), 'utf8'));
-      if (status.session === session.id && spec.host === session.runtime) return { ...status, closure: spec.closure };
+      if (status.session !== session.id || spec.host !== session.runtime) continue;
+      if (!['done', 'failed'].includes(status.state) && status.pid && !supervisorAlive(status.pid, status.pidAt)) {
+        return { ...status, state: 'failed', error: `its launch supervisor (pid ${status.pid}) is no longer running, so the reviewer will never finish`, closure: spec.closure };
+      }
+      return { ...status, closure: spec.closure };
     } catch {}
   }
   return null;
@@ -379,7 +401,11 @@ async function recordReview(root, attempt, input) {
   if (launch.attempt !== attempt || launch.tree !== tree) throw refusal('review:tree', `the reviewer was launched on tree ${launch.tree}${launch.attempt !== attempt ? ` of ${launch.attempt}` : ''}, but HEAD is tree ${tree}`, '`wf review` launches fresh reviewers on HEAD');
   // The review file is the reviewer's own output, as a fact of its transcript (its last write of the file, or its final
   // message's JSON). Named failure: a review file anyone could write was recorded as the independent reviewer's.
-  if (input.file && !writtenBy(session, input.file)) throw refusal('review:independent', `${input.file} is not reviewer ${session.runtime}:${session.id}'s own output: its transcript shows neither a write of these bytes nor this JSON as its final message`, 'record the file the reviewer wrote, unedited');
+  // A host with no readable transcript cannot show it: provenance is then `unverified`, shown at the diff-read and in the
+  // digest, as coverage is.
+  const wrote = input.file ? writtenBy(session, input.file) : undefined;
+  if (wrote === false) throw refusal('review:independent', `${input.file} is not reviewer ${session.runtime}:${session.id}'s own output: its transcript shows neither a write of these bytes nor this JSON as its final message`, 'record the file the reviewer wrote, unedited');
+  const provenance = wrote === null ? 'unverified' : wrote ? 'verified' : null;
 
   const saved = savedBundle(root, attempt, tree, seat);
   const required = saved?.productFiles ?? files.filter((f) => f.kind === 'product' && f.status !== 'D').map((f) => `${f.repo}/${f.path}`);
@@ -408,21 +434,22 @@ async function recordReview(root, attempt, input) {
   const findings = input.findings.map((f) => ({ id: `F${n++}`, location: f.location, what: scrub(f.what, { secrets }), why: scrub(f.why, { secrets }), severity: f.severity, class: f.class }));
   const round = roundOf(L.history, tree);
   const review = reviewsOf(L.events).length + 1;
-  const data = { review, round, seat, tree, heads, session, coverage, findings, verified, blockers: 0, ...(saved?.model ?? launched[0].model ? { model: saved?.model ?? launched[0].model } : {}), ...(Array.isArray(read) ? { filesRead: read.length } : {}), ...(unread.length ? { unread } : {}) };
+  const data = { review, round, seat, tree, heads, session, coverage, ...(provenance ? { provenance } : {}), findings, verified, blockers: 0, ...(saved?.model ?? launched[0].model ? { model: saved?.model ?? launched[0].model } : {}), ...(Array.isArray(read) ? { filesRead: read.length } : {}), ...(unread.length ? { unread } : {}) };
   const after = foldFindings([...L.history.filter((h) => h.id !== attempt), { id: attempt, events: [...L.events, { type: 'review.recorded', data, at: new Date().toISOString() }] }]);
   const waivedIds = new Set(Object.values(L.findings).filter((f) => f.status === 'waived').map((f) => f.id));
   data.blockers = blockersOf(after.findings).filter((f) => !waivedIds.has(f.id)).length;
   await append(root, attempt, 'review.recorded', data, session);
 
-  const pending = [];
+  // Follow-ups of earlier reviews still pending through a connector are read back first.
+  const pending = (await refilePending(root, attempt)).pending;
   for (const f of findings.filter((x) => x.class === 'other')) {
     const { data: filed, pending: op } = await fileOther(root, attempt, f, adapter, { noTracker: L.events.find((e) => e.type === 'attempt.started')?.data.ticketing === 'none' });
     await append(root, attempt, 'finding.filed', filed, null);
-    if (op) pending.push({ finding: f.id, operation: op });
+    if (filed.state === 'pending') pending.push({ finding: f.id, operation: op });
   }
   const np = await noProgress(root, state.item);
   if (np.stop && !np.decision) await askNoProgress(root, attempt, np);
-  return { review, seat, findings, blockers: data.blockers, coverage, pending };
+  return { review, seat, findings, blockers: data.blockers, coverage, provenance, pending };
 }
 
 // --- no progress -------------------------------------------------------------------------------------------------------
@@ -489,8 +516,10 @@ const restored = (events, d) => {
 async function askOnce(L, q) {
   const same = L.decisions.find((d) => d.attempt === L.attempt && d.kind === q.kind && canonicalJson(d.refs) === canonicalJson(q.refs) && d.answer);
   if (same) return same;
-  const { id } = await ask(L.root, L.attempt, q);
-  return L.decisions.find((d) => d.attempt === L.attempt && d.id === id) ?? { id, answer: null };
+  const { id, shownAt } = await ask(L.root, L.attempt, q);
+  let d = L.decisions.find((x) => x.attempt === L.attempt && x.id === id);
+  if (!d) L.decisions.push((d = { ...q, id, attempt: L.attempt, askedAt: shownAt ?? null, answer: null }));
+  return d;
 }
 
 async function factsOf(L, { repo = null, landedTree = null } = {}) {
@@ -536,9 +565,20 @@ async function factsOf(L, { repo = null, landedTree = null } = {}) {
   const { tree, files } = changedOf(root, attempt, state, adapter);
   // The fast tests are green on HEAD in every changed repo that has them (a fact of the ledger: the last fast run on
   // the repo's HEAD tree passed).
+  // A run records the files it ran on (tests `workingTree`): HEAD's tree when the worktree is clean. Files HEAD lacks
+  // (untracked, or uncommitted) make it another tree: the run then stands for no commit, and the hint names them.
   for (const n of names.filter((x) => files.some((f) => f.repo === x) && specOf(adapter, x, state.repos[x]).tests?.fast)) {
-    const run = L.events.filter((e) => e.type === 'test.run' && e.data.kind === 'fast' && e.data.repo === n && e.data.tree === repoTree(state, n)).at(-1)?.data;
-    if (!run?.pass) problems.push({ id: 'merge:untested', fact: 'fast', repo: n, message: `${n}: the fast tests are not green on HEAD (${run ? 'they fail' : 'no run on this tree'})` });
+    const now = testedTree(state, n);
+    const run = L.events.filter((e) => e.type === 'test.run' && e.data.kind === 'fast' && e.data.repo === n && e.data.tree === now).at(-1)?.data;
+    const head = repoTree(state, n);
+    if (run?.pass && now === head) continue;
+    const extra = now === head ? [] : git(state.repos[n].worktree, ['diff', '--name-only', head, now], { allowFail: true }).split('\n').filter(Boolean);
+    const said = run ? (run.pass ? 'they passed on the worktree\'s files, not on HEAD\'s' : 'they fail') : 'no run on this tree';
+    problems.push({
+      id: 'merge:untested', fact: 'fast', repo: n, untracked: extra,
+      message: `${n}: the fast tests are not green on HEAD (${said})${extra.length ? `; the worktree has files HEAD lacks: ${extra.join(', ')}` : ''}`,
+      ...(extra.length ? { hint: `in ${n}, commit ${extra.join(', ')} or ignore them (.gitignore), then \`wf test fast --repo ${n} --attempt ${attempt}\`` } : {}),
+    });
   }
   if (landedTree) {
     const passed = L.events.some((e) => e.type === 'test.run' && e.data.kind === 'full' && e.data.pass && e.data.tree === landedTree && (!repo || e.data.repo === repo));
@@ -549,9 +589,10 @@ async function factsOf(L, { repo = null, landedTree = null } = {}) {
     const missing = risk.missing.map((m) => m.what);
     if (last && !blockers.length) {
       const unverified = reviews.some((r) => r.tree === last.tree && r.coverage === 'unverified');
+      const untraced = reviews.some((r) => r.tree === last.tree && r.provenance === 'unverified');
       const d = await askOnce(L, {
         kind: 'diff-read',
-        question: `${attempt} touches risk path(s) ${risk.touched.map((r) => r.id).join(', ')}. Read the diff (${path.join(reviewsDir(root, attempt, last.round, last.tree), 'diff-whole.patch')}) and approve it?${unverified ? ' The reviewers\' reads could not be verified from their transcripts.' : ''}`,
+        question: `${attempt} touches risk path(s) ${risk.touched.map((r) => r.id).join(', ')}. Read the diff (${path.join(reviewsDir(root, attempt, last.round, last.tree), 'diff-whole.patch')}) and approve it?${unverified ? ' The reviewers\' reads could not be verified from their transcripts.' : ''}${untraced ? ' The review files could not be traced to their reviewers from transcripts.' : ''}`,
         options: [CHOICES.diffRead.yes, CHOICES.diffRead.no],
         refs: [`tree:${last.tree}`],
         blocking: true,
@@ -584,9 +625,21 @@ function screensNeeded(L, files) {
 const approveCmd = (d, attempt) => `wf approve ${d.id} --attempt ${attempt} --choice "<${d.options.join(' | ')}>" --quote "<the person's words>"`;
 const blockingOpen = (L) => L.decisions.filter((d) => d.attempt === L.attempt && !d.answer && DECISION_KINDS[d.kind]?.blocking);
 
-// The one next command of an attempt, and why.
-export async function nextStep(root, attempt) {
-  let L = await load(root, attempt);
+// The one next command of an attempt, and why; `followUps`: those still pending through a connector, read back here
+// first. The attempt is loaded once (`L`: the caller's load, when it holds one).
+export async function nextStep(root, attempt, L = null) {
+  L ??= await load(root, attempt);
+  let followUps = [];
+  if (L.state.open && !holdOf(L.events)) {
+    const r = await refilePending(root, attempt, L.events);
+    if (r.appended.length) Object.assign(L, foldFindings(L.history, L.waived));
+    followUps = r.pending;
+  }
+  const step = await stepOf(root, attempt, L);
+  return followUps.length ? { ...step, followUps } : step;
+}
+
+async function stepOf(root, attempt, L) {
   const A = `--attempt ${attempt}`;
   const handoff = `wf handoff implementer --session <runtime:session> ${A}`;
   if (!L.state.open) return { command: null, why: `closed (${L.state.outcome})` };
@@ -599,7 +652,10 @@ export async function nextStep(root, attempt) {
   const dirty = Object.keys(dirtyRepos(L.state));
   const note = dirty.length ? ` (uncommitted changes in ${dirty.join(', ')})` : '';
   if (!files.length) return { command: handoff, why: `nothing is committed yet${note}` };
-  const lastRun = (repo) => L.events.filter((e) => e.type === 'test.run' && e.data.kind === 'fast' && e.data.repo === repo && e.data.tree === repoTree(L.state, repo)).pop()?.data;
+  const lastRun = (repo) => {
+    const t = testedTree(L.state, repo);
+    return L.events.filter((e) => e.type === 'test.run' && e.data.kind === 'fast' && e.data.repo === repo && e.data.tree === t).pop()?.data;
+  };
   const failing = [...new Set(files.map((f) => f.repo))].filter((r) => lastRun(r)?.pass === false);
   if (failing.length) return { command: handoff, why: `fast tests fail on this tree in ${failing.join(', ')}${note}` };
   if (screensNeeded(L, files) && !L.events.some((e) => e.type === 'screens.captured' && !(e.data.refused ?? []).length && [tree, ...Object.keys(L.state.repos).map((r) => repoTree(L.state, r))].includes(e.data.tree))) {
@@ -625,18 +681,19 @@ export async function nextStep(root, attempt) {
   const risk = riskMissing(L, tree, files, last?.tree ?? tree);
   const miss = risk.missing[0];
   if (miss) return { command: miss.command === 'handoff' ? handoff : miss.command === 'review' ? `wf review ${A}` : `${miss.command} ${A}`, why: `risk path(s) ${risk.touched.map((r) => r.id).join(', ')}: missing ${miss.what}` };
-  const problems = await factsOf(L);
-  L = await load(root, attempt); // the facts may have asked the person something
+  const problems = await factsOf(L); // a question the facts asked joins L.decisions
   open = blockingOpen(L);
   if (open.length) return { command: approveCmd(open[0], attempt), why: `ask the person, in these words: ${open[0].question}` };
   if (problems.length) {
     const p = problems[0];
-    const command = p.fact === 'fast' ? `wf test fast --repo ${p.repo} ${A}` : p.id === 'merge:unreviewed' ? `wf review ${A}` : handoff;
-    return { command, why: p.message };
+    const command = p.fact === 'fast' ? (p.untracked?.length ? handoff : `wf test fast --repo ${p.repo} ${A}`) : p.id === 'merge:unreviewed' ? `wf review ${A}` : handoff;
+    return { command, why: p.hint ? `${p.message}; ${p.hint}` : p.message };
   }
   const stages = L.state.stages ?? [];
   const results = new Map();
-  for (const e of L.events) if (e.type === 'stage' && e.data.index >= 0) results.set(e.data.index, e.data);
+  for (const e of L.events) if (e.type === 'stage') results.set(e.data.index, e.data);
+  const take = results.get(-1);
+  if (take && !['done', 'skipped'].includes(take.state)) return { command: `wf deliver ${A}`, why: `the tracker status set at start is ${take.state}${take.next ? `: first do this: ${take.next}` : ''}` };
   const i = stages.findIndex((_, k) => !['done', 'skipped'].includes(results.get(k)?.state));
   if (i < 0) return { command: `wf close ${A}`, why: stages.length ? 'every delivery stage is done' : 'no delivery stages: close once the change is on the base' };
   const r = results.get(i);
@@ -670,7 +727,7 @@ async function cmdStatus(ctx, args) {
   const ids = await openAttempts(ctx, args);
   for (const id of ids) rows.push({ attempt: id, ...(await nextStep(root, id)) });
   const q = await questionsLine(root, ids);
-  const text = rows.length ? [...rows.map((r) => `${r.attempt}\n  next: ${r.command}\n  why: ${r.why}`), q.line].join('\n') : 'no open attempts; `wf start <item>` starts one';
+  const text = rows.length ? [...rows.map((r) => [`${r.attempt}`, `  next: ${r.command}`, `  why: ${r.why}`, ...pendingLines(r.followUps ?? [])].join('\n')), q.line].join('\n') : 'no open attempts; `wf start <item>` starts one';
   return { text, data: { attempts: rows, openQuestions: q.open } };
 }
 
@@ -683,11 +740,11 @@ async function cmdResume(ctx, args) {
   const data = [];
   for (const id of ids) {
     const L = await load(root, id);
+    const step = await nextStep(root, id, L);
     const crit = criteriaOf(L.events);
     const reviews = reviewsOf(L.events);
     const blockers = blockersOf(L.findings);
     const pending = L.decisions.filter((d) => d.attempt === id && !d.answer);
-    const step = await nextStep(root, id);
     const lines = [`${id} (item ${L.state.item})`];
     for (const [n, r] of Object.entries(L.state.repos)) lines.push(`  ${n}: ${r.worktree} (${r.branch}, from ${r.base} ${String(r.baseSha).slice(0, 10)})`);
     lines.push(`  criteria: ${crit ? crit.criteria.map((c) => `${c.id} ${c.text}`).join('; ') : 'none yet'}`);
@@ -697,9 +754,9 @@ async function cmdResume(ctx, args) {
     if (changed.length) lines.push(`  class or severity changed: ${changed.map((f) => `${f.id} ${f.changes.map((c) => `${c.field} ${c.from} -> ${c.to}`).join(', ')}`).join('; ')}`);
     const hold = holdOf(L.events);
     if (hold) lines.push(`  held: "${hold.reason}"`);
-    lines.push(`  next: ${step.command}`, `  why: ${step.why}`);
+    lines.push(`  next: ${step.command}`, `  why: ${step.why}`, ...pendingLines(step.followUps ?? []));
     out.push(lines.join('\n'));
-    data.push({ attempt: id, item: L.state.item, next: step.command, why: step.why, blockers: blockers.map((f) => f.id), decisions: pending.map((d) => d.id) });
+    data.push({ attempt: id, item: L.state.item, next: step.command, why: step.why, blockers: blockers.map((f) => f.id), decisions: pending.map((d) => d.id), followUps: step.followUps ?? [] });
   }
   const q = await questionsLine(root, ids);
   return { text: [...out, q.line].join('\n\n'), data: { attempts: data, openQuestions: q.open } };
@@ -782,9 +839,10 @@ async function recordFromFile(ctx, args, root, id) {
     session = cands[0].session;
   }
   const r = await recordReview(root, id, { session, file, findings: raw.findings ?? [], verified: raw.verified ?? [] });
-  const lines = [`review ${r.review} recorded on ${id} (seat ${r.seat}, coverage ${r.coverage}): ${r.findings.length} finding(s), ${r.blockers} open blocker(s)`];
+  const lines = [`review ${r.review} recorded on ${id} (seat ${r.seat}, coverage ${r.coverage}${r.provenance === 'unverified' ? ', provenance unverified' : ''}): ${r.findings.length} finding(s), ${r.blockers} open blocker(s)`];
   for (const f of r.findings) lines.push(`  ${f.id} ${f.class} ${f.severity} ${f.location}: ${f.what}`);
-  for (const p of r.pending) lines.push(`  ${p.finding} is filed through the tracker connector: ${p.operation}`);
+  if (r.provenance === 'unverified') lines.push('  provenance unverified: the host keeps no readable transcript to show the reviewer wrote this file; the person sees it at the diff-read and in the digest');
+  lines.push(...pendingLines(r.pending));
   return { text: lines.join('\n'), data: r };
 }
 
@@ -839,7 +897,11 @@ async function cmdReview(ctx, args) {
   }
   const { files } = changedOf(root, id, L.state, L.adapter);
   const repos = [...new Set(files.map((f) => f.repo))];
-  const ran = (repo, kind) => (kind === 'risk-base' ? riskBaseRan(L, repo).length > 0 : L.events.some((e) => e.type === 'test.run' && e.data.repo === repo && e.data.kind === kind && e.data.tree === repoTree(L.state, repo)));
+  const ran = (repo, kind) => {
+    if (kind === 'risk-base') return riskBaseRan(L, repo).length > 0;
+    const t = testedTree(L.state, repo);
+    return L.events.some((e) => e.type === 'test.run' && e.data.repo === repo && e.data.kind === kind && e.data.tree === t);
+  };
   const tests = repos.filter((r) => !ran(r, 'fast')).map((r) => ({ repo: r, kind: 'fast' }));
   for (const r of [...new Set(riskOf(L.adapter, files).tests.map((f) => f.repo))]) if (!ran(r, 'risk-base')) tests.push({ repo: r, kind: 'risk-base' });
   // Reviewers and tests run at once on the same tree; by default this waits until every reviewer is done or failed.

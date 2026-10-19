@@ -22,13 +22,22 @@ async function attemptFacts(root, attempt) {
   const findings = new Map();
   const stages = new Map();
   const filed = [];
+  const untraced = [];
   for (const e of events) {
-    if (e.type === 'review.recorded') for (const f of e.data.findings ?? []) findings.set(f.id, f);
+    if (e.type === 'review.recorded') {
+      for (const f of e.data.findings ?? []) findings.set(f.id, f);
+      if (e.data.provenance === 'unverified') untraced.push({ review: e.data.review, seat: e.data.seat, tree: e.data.tree, session: e.data.session, at: e.at });
+    }
     else if (e.type === 'stage') stages.set(e.data.index, { ...e.data, at: e.at });
-    else if (e.type === 'finding.filed') filed.push({ ...e.data, at: e.at });
+    else if (e.type === 'finding.filed') {
+      const key = (x) => (typeof x === 'string' ? x : x?.id);
+      const i = filed.findIndex((x) => key(x.finding) === key(e.data.finding)); // the last event of a finding wins
+      if (i >= 0) filed.splice(i, 1);
+      filed.push({ ...e.data, at: e.at });
+    }
   }
   const closed = events.find((e) => e.type === 'attempt.closed') ?? null;
-  return { item: started.data.item, closed: Boolean(closed), closedEvent: closed, findings, stages, filed };
+  return { item: started.data.item, closed: Boolean(closed), closedEvent: closed, findings, stages, filed, untraced };
 }
 
 export async function digest(root, opts = {}) {
@@ -51,6 +60,7 @@ export async function digest(root, opts = {}) {
     for (const s of f.stages.values()) {
       if (s.do === 'wait-merged' && s.state === 'waiting') items.push({ kind: 'merge', attempt, item: f.item, repo: s.repo ?? null, evidence: s.evidence ?? null, next: s.next ?? null, at: s.at });
     }
+    for (const r of f.untraced) if (Date.parse(r.at) >= since) items.push({ kind: 'untraced', attempt, item: f.item, review: r.review, seat: r.seat, tree: r.tree, session: r.session ? `${r.session.runtime}:${r.session.id}` : null, at: r.at });
     for (const x of f.filed) {
       if (x.mode !== 'digest' || x.priority || Date.parse(x.at) < since) continue;
       const finding = typeof x.finding === 'string' ? f.findings.get(x.finding) ?? { id: x.finding } : x.finding;
@@ -83,6 +93,7 @@ function render(items) {
   section('Diff-reads', of('diff-read'), (i) => `${where(i)} ${i.id}: ${i.question} Options: ${i.options.join(' | ')}`);
   section('Merges waiting for your click', of('merge'), (i) => `${where(i)}${i.repo ? ` ${i.repo}` : ''}: ${clip(i.next ?? (typeof i.evidence === 'string' ? i.evidence : JSON.stringify(i.evidence)))}`);
   section('Closed outside its stages', of('outside'), (i) => `${where(i)}: closed ${i.outcome ?? 'shipped'} by its patch-ids, without its delivery stages${i.reason ? ` (${clip(i.reason)})` : ''}`);
+  section('Reviews not traced to their reviewer (no readable transcript)', of('untraced'), (i) => `${where(i)} review ${i.review} (seat ${i.seat}${i.session ? `, ${i.session}` : ''}): wf could not check that the reviewer wrote its file`);
   section('Found outside the goal', of('finding'), (i) => `${where(i)} ${i.id}${i.severity ? ` (${i.severity})` : ''}${i.location ? ` ${i.location}` : ''}: ${clip(i.what ?? '')}`);
   return lines.length ? lines.join('\n').trim() : 'Nothing waits on you.';
 }

@@ -28,7 +28,7 @@ Every ticket goes through one flow. There are no lanes, batch lane, analysis att
 
 | # | Step | Who | What the engine records or checks |
 |---|---|---|---|
-| 1 | `wf start <item>` | owner | Normalises the item id through the tracker. Continues attempt numbers from old ledgers and branches. Fetches, then creates one worktree per repo at the fetched tip of each repo's base (the adapter's, or `--base`, recorded per attempt; every base read of the attempt uses it). `--no-tracker` records `ticketing: none`. Provisions the worktrees. Snapshots the delivery stage list. Never merges staging or sibling branches. |
+| 1 | `wf start <item>` | owner | Normalises the item id through the tracker. Continues attempt numbers from old ledgers and branches. Fetches, then creates one worktree per repo at the fetched tip of each repo's base (the adapter's, or `--base`, recorded per attempt; every base read of the attempt uses it; `--base` is refused while the stage list holds `land`, which lands on the adapter's base). `--no-tracker` records `ticketing: none`. Provisions the worktrees. Snapshots the delivery stage list. Never merges staging or sibling branches. |
 | 2 | `wf criteria --file` | planner (owner for a small fix) | 1–6 plain criteria and the touched areas, hashed. Edits are allowed and recorded. |
 | 3 | Implement | implementer | Nothing. |
 | 4 | `wf test fast` | implementer | Runs the repo's `fast` tests. The caller runs it as a host background command, which notifies on completion, so nobody polls (the engine has no notifier). Records exit code, minutes and tree hash. |
@@ -51,9 +51,11 @@ Every ticket goes through one flow. There are no lanes, batch lane, analysis att
 - the screenshot paths;
 - the risk checklist, when a risk path is touched.
 
-Above about 1,500 product lines per reviewer, the engine splits the review by area. Each area reviewer also gets the list of shared files and the consumers. The tester's role text says that tests must assert state or output, never call counts.
+Above about 1,500 product lines per reviewer, the engine splits the review by area. Each area reviewer also gets the list of shared files and the consumers. The implementer's and the reviewer's role texts say that tests must assert state or output, never call counts.
 
 **Reviewer coverage.** The reviewer is launched through `wf`, so the engine knows its session. Recording is refused while product files in the diff do not appear among the files the reviewer's transcript read. Named failure: the first review sampled files for about 8 minutes. A host without readable transcripts records coverage as `unverified` and shows it to the person at the diff-read.
+
+**Review file provenance.** The review file is the reviewer's own: its transcript holds a write of those bytes, or the review is its final message. A transcript that shows neither is refused (`review:independent`). A host without readable transcripts records provenance as `unverified`, the way coverage is: the person sees it at the diff-read and in the digest.
 
 **Screens.** Screens are picked from the reverse imports of the changed UI files, mapped to routes by the adapter's `screens.routes`. When a changed file matches `screens.shared` (shared components, global styles), the project's fixed `screens.sentinel` set is also captured, in every listed language and direction at the narrow viewport. A capture is refused when its width differs from the requested viewport (named failure I-117: cropped screens passed) or when its bytes duplicate another capture of a different screen (named failure: a stuck page passed as several screens).
 
@@ -112,7 +114,7 @@ This applies from day one. Named failure: 283 of 304 recorded "owner decisions" 
 | `start:open` | The item already has an open or held attempt. | Id collision (D11c). |
 | `criteria:max` | More than 6 criteria. | 131 amendments over 13 criteria. |
 | `review:tree` | The recorded review's tree is not HEAD. | Stale reviews (principle 3). |
-| `review:independent` | The reviewer's session implemented, or `wf` did not launch it. | Steered or self review. |
+| `review:independent` | The reviewer's session implemented, or `wf` did not launch it, or its transcript contradicts the review file. | Steered or self review. |
 | `review:coverage` | Product files in the diff are unread by the reviewer. | 8-minute sampled first review. |
 | `review:size` | The product diff is above the split size for one reviewer. | Shallow reviews of large diffs. |
 | `finding:other-own` | `other` on a line this attempt wrote. | 41% of later defects came from repairs. |

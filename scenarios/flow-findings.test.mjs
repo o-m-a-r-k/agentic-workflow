@@ -4,6 +4,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ledgerLines } from './helpers/index.mjs';
 import { answer, attempt, commitWt, flow, review, setup, started } from './flow-fixture.mjs';
+import { setDoubles } from '../engine/contract.mjs';
+import { foldEntries } from '../engine/ledger.mjs';
+import { foldFindings } from '../engine/findings.mjs';
 
 const finding = (location, cls, severity = 'medium', what = 'wrong') => ({ location, class: cls, severity, what, why: 'it matters' });
 const ctx = (p) => ({ cwd: p.root, root: p.root, env: process.env, actor: null, json: false });
@@ -99,4 +102,61 @@ test('a waiver of a blocking finding goes to the person; waived, it no longer bl
   } finally {
     p.done();
   }
+});
+
+test('follow-ups through a connector complete: the next review record, wf status and wf deliver read each one back', async () => {
+  const p = setup({ overrides: { ticketing: { via: 'connector', tracker: 'board', idPattern: '^TK-\\d+$', followUps: { mode: 'file' } } } });
+  const calls = [];
+  // The real tracker files the follow-ups; the owner's connector calls are the transcript's.
+  setDoubles({ fileFollowUp: undefined, connectorCalls: async (session) => (session?.id === 'owner-1' ? calls : []) });
+  const created = (id, what, ticket) => calls.push({ tool: 'mcp__board__create_issue', input: { title: what, description: `${what}\n\nwf:${id}` }, result: `Created ${ticket}`, at: new Date(Date.now() + 1000).toISOString() });
+  try {
+    const s = await started(p);
+    commitWt(p, s.id, 'client', { 'src/pages/items.mjs': 'export const page = 1;\n' });
+    const whats = ['old button bug', 'old button label', 'old button colour'];
+    const { out } = await review(p, s.id, { all: { findings: whats.map((w) => finding('client/src/common/button.mjs:1', 'other', 'low', w)) } });
+    assert.deepEqual(out.whole.pending.map((x) => x.finding), ['F1', 'F2', 'F3']);
+    const filed = () => ledgerLines(p.root, s.id).filter((e) => e.type === 'finding.filed').map((e) => [e.data.finding, e.data.state, e.data.ticket ?? null]);
+    assert.deepEqual(filed(), [['F1', 'pending', null], ['F2', 'pending', null], ['F3', 'pending', null]]);
+    let st = await flow.cmdStatus(ctx(p), { _: [], flags: {} });
+    assert.match(st.text, /F1 is not filed yet: Search the tracker for the marker first/);
+    // The next review record reads F1 back.
+    created(`${s.id}:finding:F1`, whats[0], 'TK-41');
+    commitWt(p, s.id, 'client', { 'src/pages/items.mjs': 'export const page = 2;\n' });
+    const second = await review(p, s.id);
+    assert.deepEqual(second.out.whole.pending.map((x) => x.finding), ['F2', 'F3']);
+    assert.deepEqual(filed().slice(3), [['F1', 'done', 'TK-41']]);
+    // wf status reads F2 back.
+    created(`${s.id}:finding:F2`, whats[1], 'TK-42');
+    st = await flow.cmdStatus(ctx(p), { _: [], flags: {} });
+    assert.doesNotMatch(st.text, /F2 is not filed yet/);
+    assert.match(st.text, /F3 is not filed yet/);
+    assert.deepEqual(filed().slice(4), [['F2', 'done', 'TK-42']]);
+    // wf deliver reads F3 back.
+    created(`${s.id}:finding:F3`, whats[2], 'TK-43');
+    const { cmdDeliver } = await import('../engine/delivery.mjs');
+    await cmdDeliver(ctx(p), { _: [s.id], flags: {} });
+    assert.deepEqual(filed().slice(5), [['F3', 'done', 'TK-43']]);
+    const { nextStep } = await import('../engine/flow.mjs');
+    assert.equal((await nextStep(p.root, s.id)).followUps, undefined, 'nothing is pending');
+  } finally {
+    p.done();
+  }
+});
+
+test('the fold: the last finding.filed of a finding wins (pending, then done, counts once)', () => {
+  const at = (n) => `2026-01-01T00:0${n}:00.000Z`;
+  const e = (n, type, data) => ({ seq: n, at: at(n), type, actor: null, data, schema: 2 });
+  const events = [
+    e(1, 'attempt.started', { item: 'TK-1', n: 1, repos: {}, stages: [], adapter: {}, engine: '0.8.0' }),
+    e(2, 'review.recorded', { review: 1, round: 1, seat: 'whole', tree: 't', session: { runtime: 'claude', id: 'r' }, coverage: 'complete', findings: [{ id: 'F1', location: 'server/a.mjs:1', class: 'other', severity: 'low', what: 'w', why: 'y' }], verified: [], blockers: 0 }),
+    e(3, 'finding.filed', { finding: 'F1', mode: 'file', state: 'pending', marker: 'm' }),
+  ];
+  assert.equal(foldEntries('TK-1.1', events).findings.F1.status, 'open');
+  assert.equal(foldFindings([{ id: 'TK-1.1', events }]).findings.F1.status, 'open');
+  events.push(e(4, 'finding.filed', { finding: 'F1', mode: 'file', state: 'done', marker: 'm', ticket: 'TK-9' }));
+  const s = foldEntries('TK-1.1', events);
+  assert.equal(s.findings.F1.status, 'filed');
+  assert.deepEqual(s.filings.map((f) => [f.finding, f.state, f.ticket]), [['F1', 'done', 'TK-9']]);
+  assert.equal(foldFindings([{ id: 'TK-1.1', events }]).findings.F1.status, 'filed');
 });

@@ -167,6 +167,12 @@ test('checkAdapter: dropped and unknown keys, stage kinds and modules, all probl
   for (const k of POLICY_KEYS) assert.deepEqual(await checkAdapter({ ...good, onboarded: { at: null, engine: null, hashes: { [k]: 'a'.repeat(64) } } }), [], k);
 });
 
+test('models: a model per role that runs; there is no tester role', async () => {
+  const good = adapterFor({ root: '/x' });
+  assert.deepEqual(await checkAdapter({ ...good, models: { planner: 'm', implementer: 'm', reviewer: 'm', secondReviewer: 'm', drafter: 'm' } }), []);
+  assert.ok((await checkAdapter({ ...good, models: { tester: 'm' } })).some((x) => /^models\.tester: unknown key/.test(x)));
+});
+
 test('loadAdapter: an invalid adapter throws one error listing every problem with the file', async (t) => {
   const p = makeProject({ overrides: { lanes: ['quick'], review: { diffRead: 'never' } } });
   t.after(p.cleanup);

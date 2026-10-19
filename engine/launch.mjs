@@ -143,7 +143,8 @@ export function settleClosure(closure, finalText) {
 async function supervise(specFile) {
   const spec = readJson(specFile);
   const host = findHost(spec.host);
-  const status = { state: 'starting', session: null, startedAt: null, resumes: 0 };
+  // pid: this supervisor, so a reader knows a run whose supervisor died before it ended will never end (failed).
+  const status = { state: 'starting', session: null, startedAt: null, resumes: 0, pid: process.pid, pidAt: new Date().toISOString() };
   const save = () => writeJson(spec.status, status);
   const onEvent = ({ started }) => {
     if (started && !status.session) {

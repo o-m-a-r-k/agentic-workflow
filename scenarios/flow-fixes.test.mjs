@@ -8,7 +8,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { git, ledgerLines, reviewerTranscript, runWf } from './helpers/index.mjs';
 import doubles from './flow-doubles.mjs';
-import { attempt, commitWt, flow, setup, started } from './flow-fixture.mjs';
+import { spawnSync } from 'node:child_process';
+import { attempt, commitWt, flow, review, reviewerWrote, setup, started } from './flow-fixture.mjs';
 import { attemptState } from '../engine/contract.mjs';
 
 const ctxOf = (p) => ({ cwd: p.root, root: p.root, env: { ...process.env }, actor: { runtime: 'claude', id: 'owner-1' }, json: false });
@@ -25,8 +26,24 @@ function launchRecord(p, id, session, status) {
   return write;
 }
 
-test('start --base: the attempt starts from that branch, records it, and every base read of the attempt uses it', async () => {
+test('start --base: refused while the stages hold a `land` (it lands on the adapter base), naming the kinds that deliver another base', async () => {
   const p = setup();
+  try {
+    const dir = p.repos.server.dir;
+    git(dir, ['checkout', '--quiet', '-b', 'side']);
+    git(dir, ['push', '--quiet', 'origin', 'side']);
+    git(dir, ['checkout', '--quiet', 'trunk']);
+    await assert.rejects(attempt.cmdStart(ctxOf(p), args(['TK-4'], { base: 'server=side' })), (e) => /stages land on the adapter's base, so work started from side in server would land on trunk/.test(e.message) && /merge-request, push \(with its branch\) or module/.test(e.hint));
+    assert.ok(!fs.existsSync(path.join(p.root, '.wf-worktrees', 'TK-4.1')), 'nothing was created');
+    // The adapter's own base is no other base.
+    assert.equal((await attempt.cmdStart(ctxOf(p), args(['TK-4'], { base: 'server=trunk' }))).data.attempt, 'TK-4.1');
+  } finally {
+    p.done();
+  }
+});
+
+test('start --base: the attempt starts from that branch, records it, and every base read of the attempt uses it', async () => {
+  const p = setup({ overrides: { delivery: { landing: 'direct', order: ['server', 'client'], stages: [{ do: 'merge-request' }, { do: 'wait-merged' }] } } });
   try {
     const dir = p.repos.server.dir;
     git(dir, ['checkout', '--quiet', '-b', 'side']);
@@ -189,6 +206,139 @@ test('merge facts: fast tests green on HEAD in each changed repo (merge:untested
     await doubles.runTests(p.root, s.id, 'client', 'fast');
     facts = await flow.mergeFacts(p.root, s.id);
     assert.deepEqual(facts, []);
+  } finally {
+    p.done();
+  }
+});
+
+test('a reviewer whose launch supervisor died is failed: status says so, and wf review launches it again instead of waiting', async () => {
+  const p = setup({ overrides: { screens: undefined } });
+  try {
+    const s = await started(p);
+    commitWt(p, s.id, 'client', { 'src/pages/items.mjs': 'export const page = "/items/";\n' });
+    const { bundles } = await flow.bundle(p.root, s.id);
+    const { session } = await doubles.launchReviewer(p.root, s.id, bundles[0]);
+    await doubles.runTests(p.root, s.id, 'client', 'fast');
+    // A live supervisor: still running.
+    launchRecord(p, s.id, session, { state: 'running', startedAt: new Date().toISOString(), pid: process.pid });
+    assert.match((await flow.cmdStatus(ctxOf(p), args([], {}))).text, /reviewer whole running since/);
+    // Its supervisor is gone (a pid that exited), the run never ended.
+    const dead = spawnSync(process.execPath, ['-e', '0']).pid;
+    launchRecord(p, s.id, session, { state: 'running', startedAt: new Date().toISOString(), pid: dead, pidAt: new Date().toISOString() });
+    const st = await flow.cmdStatus(ctxOf(p), args([], {}));
+    assert.match(st.text, new RegExp(`reviewer whole failed \\(its launch supervisor \\(pid ${dead}\\) is no longer running`));
+    const prev = process.env.WF_TEST;
+    process.env.WF_TEST = '1';
+    const r = await Promise.race([flow.cmdReview(ctxOf(p), args([], { attempt: s.id })), new Promise((_, no) => setTimeout(() => no(new Error('wf review waited for a dead reviewer')), 5000))]);
+    process.env.WF_TEST = prev;
+    assert.match(r.text, /reviewer whole: launched claude:rev-/);
+  } finally {
+    p.done();
+  }
+});
+
+test('the fast fact is the run on the worktree\'s files; files HEAD lacks are named, with what to do', async () => {
+  const p = setup({ overrides: { screens: undefined } });
+  try {
+    const s = await started(p);
+    commitWt(p, s.id, 'client', { 'src/pages/items.mjs': 'export const page = 1;\n' });
+    const { tree, bundles } = await flow.bundle(p.root, s.id);
+    const { session } = await doubles.launchReviewer(p.root, s.id, bundles[0]);
+    reviewerTranscript({ home: p.home, cwd: p.root, files: [path.join(p.wt(s.id, 'client'), 'src/pages/items.mjs')], session: session.id });
+    await flow.recordReview(p.root, s.id, { session, tree, findings: [], verified: [] });
+    // An untracked file the tests ran with: the run (as `wf test` records it) is on the worktree's files.
+    const wt = p.wt(s.id, 'client');
+    fs.writeFileSync(path.join(wt, 'scratch.log'), 'left over\n');
+    const { workingTree } = await import('../engine/tests.mjs');
+    await doubles.append(p.root, s.id, 'test.run', { repo: 'client', kind: 'fast', tree: workingTree(wt), pass: true, exitCode: 0, ms: 1, source: 'attempt' }, null);
+    const [fact] = await flow.mergeFacts(p.root, s.id);
+    assert.equal(fact.id, 'merge:untested');
+    assert.match(fact.message, /they passed on the worktree's files, not on HEAD's\); the worktree has files HEAD lacks: scratch\.log/);
+    assert.match(fact.hint, /commit scratch\.log or ignore them \(\.gitignore\)/);
+    const { nextStep } = await import('../engine/flow.mjs');
+    const step = await nextStep(p.root, s.id);
+    assert.match(step.command, /^wf handoff implementer/);
+    assert.match(step.why, /scratch\.log/);
+    // Clean again: the run on HEAD's tree is the fact.
+    fs.rmSync(path.join(wt, 'scratch.log'));
+    await doubles.runTests(p.root, s.id, 'client', 'fast');
+    assert.deepEqual(await flow.mergeFacts(p.root, s.id), []);
+  } finally {
+    p.done();
+  }
+});
+
+test('provenance: with no readable transcript the review is recorded unverified, shown at the diff-read and in the digest', async () => {
+  const p = setup();
+  try {
+    const s = await started(p);
+    commitWt(p, s.id, 'server', { 'src/core/sum.mjs': 'export const sum = (xs) => xs.reduce((a, b) => a + b, 0);\n// edge\n', 'test/sum.spec.mjs': '// asserts\n' });
+    const { bundles } = await flow.bundle(p.root, s.id);
+    assert.deepEqual(bundles.map((b) => b.seat), ['whole', 'second']);
+    process.env.WF_TEST_NO_TRANSCRIPT = '1';
+    for (const b of bundles) {
+      const { session } = await doubles.launchReviewer(p.root, s.id, b);
+      fs.writeFileSync(b.output, JSON.stringify({ findings: [], verified: [] }));
+      const r = await flow.cmdReview(ctxOf(p), args([], { attempt: s.id, record: b.output, session: `${session.runtime}:${session.id}` }));
+      assert.match(r.text, /coverage unverified, provenance unverified\)/);
+    }
+    const recorded = ledgerLines(p.root, s.id).filter((e) => e.type === 'review.recorded');
+    assert.deepEqual(recorded.map((e) => e.data.provenance), ['unverified', 'unverified']);
+    await flow.mergeFacts(p.root, s.id);
+    const ask = ledgerLines(p.root, s.id).find((e) => e.type === 'decision.asked' && e.data.kind === 'diff-read');
+    assert.match(ask.data.question, /The review files could not be traced to their reviewers from transcripts\./);
+    const { digest } = await import('../engine/digest.mjs');
+    const d = await digest(p.root);
+    assert.match(d.text, /Reviews not traced to their reviewer \(no readable transcript\) \(2\):/);
+    // A readable transcript that contradicts the file is still refused.
+    delete process.env.WF_TEST_NO_TRANSCRIPT;
+    commitWt(p, s.id, 'server', { 'src/core/sum.mjs': 'export const sum = (xs) => xs.reduce((a, b) => a + b, 0);\n// edge 2\n' });
+    const next = await flow.bundle(p.root, s.id);
+    const { session } = await doubles.launchReviewer(p.root, s.id, next.bundles[0]);
+    reviewerWrote(p, session.id, { files: next.bundles[0].productFiles.map((f) => path.join(p.wt(s.id, 'server'), f.slice('server/'.length))), output: next.bundles[0].output, review: { findings: [], verified: [] } });
+    fs.writeFileSync(next.bundles[0].output, JSON.stringify({ findings: [{ location: 'server/src/core/sum.mjs:1', class: 'goal', severity: 'low', what: 'added later', why: 'by someone else' }], verified: [] }));
+    await assert.rejects(flow.cmdReview(ctxOf(p), args([], { attempt: s.id, record: next.bundles[0].output, session: `${session.runtime}:${session.id}` })), (e) => e.refusalId === 'review:independent');
+  } finally {
+    delete process.env.WF_TEST_NO_TRANSCRIPT;
+    p.done();
+  }
+});
+
+test('resume loads the attempt once and lists a question its next step just asked (the diff-read) among those waiting', async () => {
+  const p = setup({ overrides: { screens: undefined } });
+  try {
+    const s = await started(p);
+    commitWt(p, s.id, 'server', { 'src/core/sum.mjs': 'export const sum = (xs) => xs.reduce((a, b) => a + b, 0);\n// edge\n', 'test/sum.spec.mjs': '// asserts\n' });
+    await review(p, s.id);
+    await doubles.runTests(p.root, s.id, 'server', 'risk-base');
+    const r = await flow.cmdResume(ctxOf(p), args([], { attempt: s.id }));
+    assert.match(r.text, /next: wf approve D1 /);
+    assert.match(r.text, /questions waiting for the person: D1 "TK-1\.1 touches risk path\(s\) sums\. Read the diff/);
+    assert.deepEqual(r.data.attempts[0].decisions, ['D1']);
+  } finally {
+    p.done();
+  }
+});
+
+test('deliver asks the tracker status set at start again while it is pending, and runs no stage before it is done', async () => {
+  const p = setup({ overrides: { screens: undefined, ticketing: { via: 'connector', tracker: 'board', idPattern: '^TK-\\d+$', take: { status: 'Started' }, followUps: { mode: 'off' } }, delivery: { landing: 'direct', order: ['server', 'client'], stages: [{ do: 'status', to: 'Ready' }] } } });
+  try {
+    const s = await started(p);
+    // The take was asked at start and is pending: the owner has not set the status yet.
+    await doubles.append(p.root, s.id, 'stage', { index: -1, do: 'status', state: 'pending', next: 'Set the status' }, null);
+    const calls = [];
+    const { setDoubles } = await import('../engine/contract.mjs');
+    setDoubles({ connectorCalls: async (session) => (session?.id === 'owner-1' ? calls : []) });
+    const { cmdDeliver } = await import('../engine/delivery.mjs');
+    const stages = () => ledgerLines(p.root, s.id).filter((e) => e.type === 'stage').map((e) => [e.data.index, e.data.state]);
+    const first = await cmdDeliver(ctxOf(p), args([s.id], {}));
+    assert.match(first.text, /^-1 status: pending — .*Item TK-1 to "Started"/m);
+    assert.equal(first.data.delivered, false);
+    assert.ok(!stages().some(([i]) => i === 0), 'no stage ran before the take is done');
+    calls.push({ tool: 'mcp__board__update_issue', input: { id: 'TK-1', status: 'Started' }, result: 'TK-1 is now Started', at: new Date(Date.now() + 1000).toISOString() });
+    const second = await cmdDeliver(ctxOf(p), args([s.id], {}));
+    assert.match(second.text, /^-1 status: done$/m);
+    assert.deepEqual(stages().slice(-2), [[-1, 'done'], [0, 'pending']]);
   } finally {
     p.done();
   }

@@ -18,6 +18,7 @@ import {
   marker, mergeFacts, readEvents, refusal, worktreeDir,
 } from './contract.mjs';
 import { scrub, secretValues } from './scrub.mjs';
+import { pendingLines, refilePending } from './findings.mjs';
 import { canonicalItem, connectorStep, git, loadModule, rejectedText, trackerOf, wordsFor } from './tracker.mjs';
 
 export const STAGE_KINDS = ['land', 'push', 'merge-request', 'wait-merged', 'confirm-deployed', 'deploy', 'status', 'comment', 'module'];
@@ -208,7 +209,7 @@ async function afterGate(ctx) {
 // run of its own. The fast tests not green on HEAD (`fact: 'fast'`) refuse on every stage.
 function refuseOnMergeFacts(problems, { untested = true } = {}) {
   const blocking = untested ? problems : problems.filter((p) => !(p.id === 'merge:untested' && p.fact !== 'fast'));
-  if (blocking.length) throw refusal(blocking[0].id, blocking.map((p) => p.message).join('; '));
+  if (blocking.length) throw refusal(blocking[0].id, blocking.map((p) => p.message).join('; '), blocking.find((p) => p.hint)?.hint ?? null);
 }
 
 async function stageLand(ctx) {
@@ -509,6 +510,21 @@ export async function cmdDeliver(ctx, args = { _: [], flags: {} }) {
   const only = flag(args, 'stage');
   const indexes = only !== undefined ? [Number(only)] : stages.map((_, i) => i);
   if (indexes.some((i) => !Number.isInteger(i) || i < 0 || i >= stages.length)) throw new WfError(`--stage must be 0..${stages.length - 1}`);
+  // Follow-ups pending through a connector, and the tracker status set at start (stage -1) while it is unsettled, are
+  // read back first; delivery waits for that status, so a later status is never overwritten by it.
+  const followUps = state.hold ? [] : (await refilePending(ctx.root, attempt)).pending;
+  const tail = pendingLines(followUps, '');
+  const before = [];
+  const takeTo = (await loadAdapter(ctx.root)).ticketing?.take?.status;
+  const taken = state.stageResults?.[-1];
+  if (taken && !settled(taken) && takeTo && !state.hold) {
+    const t = await runStage(ctx.root, attempt, { do: 'status', to: takeTo }, opts);
+    before.push(`-1 status: ${t.state}${t.next ? ` — ${t.next}` : ''}`);
+    if (!settled(t)) {
+      const next = t.next ?? `the tracker status set at start (${takeTo}) is ${t.state}`;
+      return { text: [`${attempt}`, ...before, ...tail].join('\n'), data: { attempt, take: t, results: [], delivered: false, next, followUps }, exitCode: 0 };
+    }
+  }
   const results = [];
   for (const i of indexes) {
     const r = await runStage(ctx.root, attempt, i, opts);
@@ -520,7 +536,7 @@ export async function cmdDeliver(ctx, args = { _: [], flags: {} }) {
   const delivered = results.length === stages.length && results.every(settled) && only === undefined;
   const lines = results.map((r) => `${r.index} ${r.do}: ${r.state}${r.next ? ` — ${r.next}` : ''}`);
   const next = delivered ? 'delivered: every stage is done; wf close' : last?.next ?? null;
-  return { text: [`${attempt}`, ...lines, ...(next && next !== last?.next ? [next] : [])].join('\n'), data: { attempt, results, delivered, next }, exitCode: 0 };
+  return { text: [`${attempt}`, ...before, ...lines, ...(next && next !== last?.next ? [next] : []), ...tail].join('\n'), data: { attempt, results, delivered, next, followUps }, exitCode: 0 };
 }
 
 export const implements08 = { runStage, cmdDeliver };

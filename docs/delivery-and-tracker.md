@@ -54,8 +54,8 @@ Before anything lands, two facts are checked against the last reviewed tree (D97
   - for a follow-up, the input carries the marker and the title, and the result shows the new id (filing a follow-up through a connector needs `ticketing.idPattern`, to recognise that id);
   - for a status change, the result shows the new status.
 
-  Until then the step is `pending` and `wf status` prints what to do. The operations, and so the keys of `ticketing.operations`, are one list (`TRACKER_OPERATIONS` in `engine/contract.mjs`): `read`, `search`, `fileFollowUp`, `setStatus`, `comment` and `mergeRequest`.
-- **`module`:** the engine calls the project's tracker module (`ticketing.tracker: { module: { repo, path } }`), which exports a driver: `read`, `search`, `create`, `setStatus`, `comment`, and optionally `normalise`.
+  Until then the step is `pending` and `wf status` prints what to do. A pending follow-up is read back at every `wf status`, `wf resume`, `wf review --record` and `wf deliver`, counting calls since its first `finding.filed`; the status set at start (`ticketing.take`) is asked again by `wf deliver`, which runs no other stage until it is done. The operations, and so the keys of `ticketing.operations`, are one list (`TRACKER_OPERATIONS` in `engine/contract.mjs`): `read`, `search`, `fileFollowUp`, `setStatus`, `comment` and `mergeRequest`.
+- **`module`:** the engine calls the project's tracker module (`ticketing.tracker: { module: { repo, path } }`), which exports a driver: `read`, `search`, `create`, `setStatus`, `comment`, and optionally `normalise`. Through a connector a tracker module needs no driver methods: it exports `operations` (named, or on its default object), the owner's words.
 - **`files`:** the built-in files tracker. Each ticket is `<root>/tickets/<id>.md` with YAML frontmatter (`id`, `title`, `status`, `labels`) and the description as its body; comments are appended between marker lines. Ids are an allowlist checked before any file is touched, and nothing is read or written through a link.
 - **`none`:** no tracker. `wf start --no-tracker <item>` records `ticketing: none` for one attempt of a project that has a tracker.
 

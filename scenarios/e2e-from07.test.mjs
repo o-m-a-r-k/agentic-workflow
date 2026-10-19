@@ -59,9 +59,16 @@ test('from 0.7: init --from-07 and migrate attempts, then a ticket on the migrat
     await waitFor(review);
     assert.match(wf(p, ['review', '--record', review], as).out, /review 1 recorded .*coverage complete.*0 open blocker/);
 
+    // Delivery waits for the tracker status set at start, which the owner sets through its connector.
+    const t = transcript({ home: p.home, cwd: p.root, session: owner, start: new Date().toISOString() });
+    const d0 = wf(p, ['deliver'], as);
+    assert.match(d0.out, /-1 status: pending — .*Item TK-5 to "Doing"/);
+    assert.doesNotMatch(d0.out, /0 merge-request/);
+    t.human('Implement TK-5.').toolCall('mcp__board__set_status', { issue: 'TK-5', status: 'Doing' }, 'status set to Doing').write();
     // Delivery: the 0.7 delivery module became a merge request the person opens and merges; the engine matches the
     // merge by patch-id. The tracker stages go through the owner's connector.
     const d1 = wf(p, ['deliver'], as);
+    assert.match(d1.out, /^-1 status: done$/m);
     assert.match(d1.out, /0 merge-request: done — the person opens a merge request in core/);
     assert.match(d1.out, /1 wait-merged: waiting/);
     git(wt('core'), ['push', '--quiet', 'origin', 'HEAD:trunk']);
@@ -74,8 +81,7 @@ test('from 0.7: init --from-07 and migrate attempts, then a ticket on the migrat
     const mark = 'wf:TK-5.2:stage-2:comment';
     assert.match(d2.out, new RegExp(`2 status: pending — .*must end with "${mark}"`));
     // The owner performs the operations through its connector; the engine reads them back from its transcript.
-    const t = transcript({ home: p.home, cwd: p.root, session: owner, start: new Date().toISOString() });
-    t.human('Implement TK-5.').toolCall('mcp__board__add_comment', { issue: 'TK-5', body: `Open the notes list: the notes are in title order.\n\n${mark}` }, 'comment added');
+    t.at(new Date().toISOString()).toolCall('mcp__board__add_comment', { issue: 'TK-5', body: `Open the notes list: the notes are in title order.\n\n${mark}` }, 'comment added');
     t.write();
     assert.match(wf(p, ['deliver'], as).out, /2 status: pending — .*Item TK-5 to "Testing"/);
     t.toolCall('mcp__board__set_status', { issue: 'TK-5', status: 'Testing' }, 'status set to Testing').write();

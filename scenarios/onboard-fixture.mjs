@@ -107,9 +107,16 @@ export const MODULES_07 = {
   '.workflow/tracker/board.mjs': 'export default {\n  normalize: (raw) => raw,\n  rawProblems: () => [],\n  isUpload: () => false,\n};\n',
 };
 
+// A tracker module as a project that files through a connector writes it: the owner's words for each operation, beside
+// helpers of its own, and no driver methods (the engine calls none through a connector).
+export const CONNECTOR_TRACKER = {
+  '.workflow/tracker/board.mjs': 'export default {\n  operations: {\n    fileFollowUp: "Create one issue on the board with this title and body; read its id back.",\n    setStatus: "Move the issue to the named column.",\n  },\n  normalize: (raw) => raw,\n  rawProblems: () => [],\n};\n',
+};
+
 // `modules07`: the project's modules in their real 0.7 shapes (MODULES_07) instead of the minimal ones.
-export function makeModuleProject({ modules07 = false } = {}) {
-  const repos = modules07 ? MODULE_REPOS.map((r) => (r.name === 'core' ? { ...r, files: { ...r.files, ...MODULES_07 } } : r)) : MODULE_REPOS;
+// `core`: files of the core repo that replace the fixture's own.
+export function makeModuleProject({ modules07 = false, core = {} } = {}) {
+  const repos = MODULE_REPOS.map((r) => (r.name === 'core' ? { ...r, files: { ...r.files, ...(modules07 ? MODULES_07 : {}), ...core } } : r));
   const p = makeProject({ name: 'modular', repos, adapter: false });
   fs.mkdirSync(path.join(p.repos.core.dir, '.workflow'), { recursive: true });
   fs.writeFileSync(path.join(p.repos.core.dir, '.workflow', 'project.yaml'), YAML.stringify(ADAPTER_07));

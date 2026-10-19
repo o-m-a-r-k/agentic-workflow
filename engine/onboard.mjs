@@ -621,7 +621,7 @@ export async function cmdDoctor(ctx) {
     }
     try {
       const { moduleProblems, moduleRefsOf } = await import('./migrate.mjs');
-      for (const m of await moduleProblems(root, adapter.repos, moduleRefsOf(adapter))) add('fail', m.what, `${m.module} ${m.problem}`);
+      for (const m of await moduleProblems(root, adapter.repos, moduleRefsOf(adapter), { via: adapter.ticketing?.via ?? 'module' })) add('fail', m.what, `${m.module} ${m.problem}`);
     } catch (error) {
       add('warn', 'modules', `not checked: ${error.message}`);
     }

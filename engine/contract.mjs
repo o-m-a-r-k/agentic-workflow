@@ -64,7 +64,7 @@ export const REFUSALS = Object.freeze({
   'start:open': { stream: 1, when: 'the item already has an open or held attempt' },
   'criteria:max': { stream: 1, when: 'more than 6 criteria' },
   'review:tree': { stream: 1, when: 'the recorded review\'s tree is not HEAD' },
-  'review:independent': { stream: 1, when: 'the reviewer\'s session implemented, or wf did not launch it' },
+  'review:independent': { stream: 1, when: 'the reviewer\'s session implemented, or wf did not launch it, or its transcript contradicts the review file' },
   'review:coverage': { stream: 1, when: 'product files in the diff are unread by the reviewer' },
   'review:size': { stream: 1, when: 'the product diff is above the split size for one reviewer (or a risk change above it)' },
   'finding:other-own': { stream: 1, when: '`other` on a line this attempt wrote' },
@@ -176,7 +176,7 @@ export const marker = (attempt, stage) => `wf:${attempt}:${stage}`;
  *   plain string tracker names a built-in tracker of stream 3, or, with `via: connector`, only labels the connector.
  * @property {{ landing: 'queue'|'direct', order: string[], authority: { push: 'agent'|'person', mergeRequest: 'agent'|'person',
  *   merge: 'agent'|'person' }, stages: Stage[] }} delivery   order defaults to the repos' order.
- * @property {Record<string, string>} models   one model per role (planner, implementer, reviewer, secondReviewer, tester,
+ * @property {Record<string, string>} models   one model per role (planner, implementer, reviewer, secondReviewer,
  *   drafter); a missing role uses the host's default.
  * @property {{ adapter: { rules: number, risk: number, modules: number, operationWords: number } }} budget
  * @property {{ at: string|null, engine: string|null, hashes: Record<string, string> }} onboarded   written by stream 7
@@ -361,11 +361,12 @@ export const EVENTS = Object.freeze({
   // images: ScreenImage[]. tree: the attempt's tree hash over all repos. heads: { <repo>: sha } behind the tree (also on
   // handoff and review.recorded): the merge facts read the reviewed commits from the ledger.
   'screens.captured': { stream: 2, required: ['tree', 'images'], optional: ['routes', 'refused', 'heads'] },
-  // role: planner|implementer|reviewer|tester. launchedBy: 'wf' (stream 4 launched it) | 'owner'. A reviewer is always 'wf'.
+  // role: planner|implementer|reviewer. launchedBy: 'wf' (stream 4 launched it) | 'owner'. A reviewer is always 'wf'.
   handoff: { stream: 1, required: ['role', 'session', 'launchedBy'], optional: ['seat', 'model', 'tree', 'heads', 'round'] },
   // review: 1.. per attempt. findings: Finding[] (ids assigned). verified: [{ id, status }]. blockers: open goal+regression
-  // after this review. coverage: 'complete'|'unverified' (a host with no readable transcript).
-  'review.recorded': { stream: 1, required: ['review', 'round', 'seat', 'tree', 'session', 'coverage', 'findings', 'verified', 'blockers'], optional: ['heads', 'model', 'filesRead', 'unread'] },
+  // after this review. coverage: 'complete'|'unverified' (a host with no readable transcript). provenance: whether the
+  // review file is the reviewer's own, from its transcript: 'verified'|'unverified' (no readable transcript).
+  'review.recorded': { stream: 1, required: ['review', 'round', 'seat', 'tree', 'session', 'coverage', 'findings', 'verified', 'blockers'], optional: ['heads', 'model', 'filesRead', 'unread', 'provenance'] },
   // mode: file|digest|off. state: done|pending. ticket: the filed id, or null (pending, digest, off, or a duplicate found).
   'finding.filed': { stream: 1, required: ['finding', 'mode', 'state', 'marker'], optional: ['ticket', 'duplicateOf', 'priority'] },
   // Question fields plus id ('D<n>' per attempt).
@@ -533,8 +534,10 @@ export const search = seam(3, 'tracker.mjs', 'search', '(root, { text?, marker? 
 
 /** File one `other` finding per `ticketing.followUps` after searching for a duplicate and for its marker
  * (`marker(attempt, 'finding:<id>')`). mode digest/off files nothing and returns value null.
- * @type {(root: string, attempt: string, finding: Finding) => Promise<TrackerResult>} value: { id: string|null, duplicateOf: string|null } */
-export const fileFollowUp = seam(3, 'tracker.mjs', 'fileFollowUp', '(root, attempt, Finding) → TrackerResult<{ id, duplicateOf }>');
+ * Through a connector it is pending until the owner's call shows the new issue; since: the first-ask time (default: the
+ * first `finding.filed` of the finding).
+ * @type {(root: string, attempt: string, finding: Finding, opts?: { since?: string|null }) => Promise<TrackerResult>} value: { id: string|null, duplicateOf: string|null } */
+export const fileFollowUp = seam(3, 'tracker.mjs', 'fileFollowUp', '(root, attempt, Finding, { since? }) → TrackerResult<{ id, duplicateOf }>');
 
 /** Run one delivery stage: an index into the attempt's snapshot, or a Stage (start's `take`, index -1). Appends `stage`.
  * Refuses `hold`, `stage:deploy`. A `land` stage calls mergeFacts (1) and, with `landing: queue`, waits for a `landing`

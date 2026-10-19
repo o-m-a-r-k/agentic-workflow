@@ -7,7 +7,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { WfError, append, listAttempts, loadAdapter, readEvents } from './contract.mjs';
+import { TRACKER_OPERATIONS, WfError, append, listAttempts, loadAdapter, readEvents } from './contract.mjs';
 import { importBaseModule, moduleFolder } from './base-module.mjs';
 import { repoFiles } from './scan.mjs';
 
@@ -77,9 +77,17 @@ export const MODULE_CONTRACTS = {
   capture: 'export default async (ctx) => ..., called with ctx.cwd set to the attempt folder (docs/adapter.md, `screens.capture`)',
 };
 const shapeOf = (v) => (v === undefined ? 'no default export' : v === null ? 'a default export of null' : Array.isArray(v) ? 'an array' : typeof v === 'object' ? `an object (${Object.keys(v).join(', ') || 'no keys'})` : `a ${typeof v}`);
-// The default export's shape problem for the module's kind, or null when it is usable as is.
-export function exportProblem(kind, def) {
+// The export's shape problem for the module's kind, or null when it is usable as is. `via` is the adapter's
+// `ticketing.via`: the engine calls a tracker's driver methods only with `via: module`; through a connector the module
+// gives the owner its `operations` words, as a named export or on the default object.
+export function exportProblem(kind, def, { via = 'module', operations } = {}) {
   if (typeof def === 'function') return null;
+  if (kind === 'tracker' && via === 'connector') {
+    const ops = operations ?? (def && typeof def === 'object' ? def.operations : undefined);
+    if (ops && typeof ops === 'object' && !Array.isArray(ops)) return null;
+    return `exports ${shapeOf(def)} by default and no \`operations\`: with \`ticketing.via: connector\` the module gives the owner its words for each operation. Export \`operations\` (named, or on the default object), keyed by ${TRACKER_OPERATIONS.join(', ')}`;
+  }
+  if (kind === 'tracker' && via !== 'module') return null; // files and none call no project driver
   if (kind === 'tracker' && def && typeof def === 'object') {
     const missing = DRIVER_METHODS.filter((m) => typeof def[m] !== 'function');
     if (!missing.length) return null;
@@ -91,8 +99,8 @@ export function exportProblem(kind, def) {
 /** Problems of each module as it would load (engine/base-module.mjs, the shared loader): not committed on its repo's
  * fetched base; importing (itself or a helper in its folder) a file outside its top-level folder in the repo, which does
  * not resolve because only that folder is extracted at the base (a module at the repo's root extracts the whole repo);
- * failing to load; or a default export whose shape its kind cannot call. */
-export async function moduleProblems(root, repos, refs, { fetch = true } = {}) {
+ * failing to load; or exports its kind cannot use (`via`: the adapter's `ticketing.via`). */
+export async function moduleProblems(root, repos, refs, { fetch = true, via = 'module' } = {}) {
   const out = [];
   const seen = new Set();
   for (const m of refs) {
@@ -133,7 +141,7 @@ export async function moduleProblems(root, repos, refs, { fetch = true } = {}) {
       out.push({ what: m.what, module: key, problem: `does not load from ${ref}: ${String(e?.message ?? e).split('\n')[0]}` });
       continue;
     }
-    const problem = exportProblem(m.kind, mod.default);
+    const problem = exportProblem(m.kind, mod.default, { via, operations: mod.operations });
     if (problem) out.push({ what: m.what, module: key, problem, contract: MODULE_CONTRACTS[m.kind] });
   }
   return out;
@@ -254,7 +262,8 @@ export async function from07(root, raw, { env = process.env } = {}) {
   // (`<prefix>-<n>.<attempt>`, such as the 0.7 quick-fix items), so no earlier kind of item is refused after migration.
   const tr = raw.tracker ?? {};
   const esc = (x) => String(x).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const prefixes = [...new Set([...(tr.idPrefix ? [String(tr.idPrefix)] : []), ...(await listAttempts(root).catch(() => [])).map((id) => /^([A-Za-z][A-Za-z0-9_]*)-\d+\.\d+$/.exec(id)?.[1]).filter(Boolean)])].sort().map(esc);
+  const oldIds = (await listAttempts(root).catch(() => [])).filter((id) => /\.\d+$/.test(id));
+  const prefixes = [...new Set([...(tr.idPrefix ? [String(tr.idPrefix)] : []), ...oldIds.map((id) => /^([A-Za-z][A-Za-z0-9_]*)-\d+\.\d+$/.exec(id)?.[1]).filter(Boolean)])].sort().map(esc);
   const kind = tr.kind ?? 'none';
   const ticketing = {
     tracker: isMod(kind) ? { module: mod(kind) } : kind,
@@ -264,6 +273,8 @@ export async function from07(root, raw, { env = process.env } = {}) {
     followUps: { mode: 'off', ...(tr.team ? { team: String(tr.team) } : {}) },
   };
   if (kind === 'none') delete ticketing.tracker;
+  // Items of old attempts the derived pattern does not take (a UUID, say): `wf start <id>` would refuse them.
+  const offPattern = ticketing.idPattern ? [...new Set(oldIds.map((id) => id.replace(/\.\d+$/, '')))].filter((item) => !new RegExp(ticketing.idPattern).test(item)).sort() : [];
   for (const k of Object.keys(tr)) if (!['kind', 'via', 'idPrefix', 'statuses', 'statusByLabel', 'team'].includes(k)) drop(`tracker.${k}`, /Comment$/.test(k) ? 'the owner writes each comment of its kind in product language' : 'not part of 0.8 ticketing');
   if (tr.statuses?.done) drop('tracker.statuses.done', 'Done is set by a stage or by the person');
   const status = (event, comment, when) => {
@@ -326,8 +337,8 @@ export async function from07(root, raw, { env = process.env } = {}) {
     screens: capture ? { capture: { run: capture.value }, reasons: { capture: `seeded from the 0.7 step \`${capture.step}\`, which collected ${[].concat(capture.artifacts).join(', ')}; edit it to write each screen to {out} for {viewport} {lang} {routes}` } } : {},
   };
   const imports = productImports(root, repos);
-  const modules = await moduleProblems(root, seedRepos, moduleRefsOf({ repos: seedRepos.map((r) => ({ ...r, tests: tests[r.name] })), ticketing, delivery: { stages } }));
-  const data = { dropped, notes, perTicketSteps: droppedSteps, imports, modules, quality, invariants, capture, runners: [...runners], deliveryModule };
+  const modules = await moduleProblems(root, seedRepos, moduleRefsOf({ repos: seedRepos.map((r) => ({ ...r, tests: tests[r.name] })), ticketing, delivery: { stages } }), { via: ticketing.via });
+  const data = { dropped, notes, perTicketSteps: droppedSteps, offPattern, imports, modules, quality, invariants, capture, runners: [...runners], deliveryModule };
 
   const report = () => {
     const out = [];
@@ -337,6 +348,7 @@ export async function from07(root, raw, { env = process.env } = {}) {
     if (notes.length) out.push('', 'Notes:', ...notes.map((n) => `  ${n}`));
     if (!capture) out.push('', '`screens.capture` has no 0.7 step to seed it: pass it with `--draft` (it must write to {out}).');
     for (const r of runners) out.push('', `No tests run until ${r} is rewritten for the 0.8 runner contract:`, `  ${MODULE_CONTRACTS.tests}`);
+    if (offPattern.length) out.push('', `Items of earlier attempts that ticketing.idPattern (${ticketing.idPattern}) does not match: wf start refuses them as they are. Start one with \`wf start --no-tracker <id>\`, or give the tracker module a \`normalise\` export that maps it to a tracker id:`, ...offPattern.map((i) => `  ${i}`));
     if (modules.length) out.push('', 'Modules that cannot run as named (each loads only as committed on its repo\'s base, from its own folder):', ...modules.map((m) => `  ${m.what}: ${m.module} ${m.problem}`));
     if (imports.length) out.push('', `Product code importing .workflow/ (removing the material breaks these; one removal ticket per repo fixes them):`, ...imports.map((i) => `  ${i.at}: ${i.text}`));
     return out;

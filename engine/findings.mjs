@@ -8,7 +8,7 @@
 //
 // Finding ids (`F<n>`) are unique per item across its attempts, and the status of each is folded from the item's
 // reviews: a reviewer's `verified` marks a listed finding fixed or open; open after fixed is a reopen.
-import { WfError, ask, blameToAttempt, fileFollowUp, marker, parseLocation, refusal } from './contract.mjs';
+import { WfError, append, ask, blameToAttempt, fileFollowUp, marker, parseLocation, readEvents, refusal } from './contract.mjs';
 import { rootPath } from './base.mjs';
 import { matchesAny } from './util.mjs';
 
@@ -75,8 +75,9 @@ export function foldFindings(history, waived = new Set()) {
         r.seats.push(d.seat);
         rounds.set(d.round, r);
       } else if (e.type === 'finding.filed') {
+        // The last event of a finding wins: pending until a later one says done.
         const f = findings[e.data.finding];
-        if (f && f.class === 'other' && e.data.state === 'done') f.status = 'filed';
+        if (f && f.class === 'other') f.status = e.data.state === 'done' ? 'filed' : f.status === 'filed' ? 'open' : f.status;
       }
     }
   }
@@ -126,6 +127,46 @@ export async function fileOther(root, attempt, f, adapter, { noTracker = false }
   }
   return { data, pending: res?.state === 'pending' ? res.operation ?? null : null };
 }
+
+// Follow-ups still pending through a connector are asked again, with their first-ask time (the at of their first
+// `finding.filed`); one that completed appends `finding.filed` done. `events`: the attempt's, when the caller holds them
+// (appended entries are pushed onto it). Returns { appended, pending: [{ finding, operation, error? }] }.
+export async function refilePending(root, attempt, events = null) {
+  events ??= await readEvents(root, attempt);
+  const out = { appended: [], pending: [] };
+  if (events.some((e) => e.type === 'attempt.closed')) return out;
+  const found = new Map();
+  const first = new Map();
+  const last = new Map();
+  for (const e of events) {
+    if (e.type === 'review.recorded') for (const f of e.data.findings ?? []) found.set(f.id, f);
+    else if (e.type === 'finding.filed') {
+      if (!first.has(e.data.finding)) first.set(e.data.finding, e.at);
+      last.set(e.data.finding, e.data);
+    }
+  }
+  for (const [id, d] of last) {
+    if (d.state !== 'pending' || !found.has(id)) continue;
+    let res;
+    try {
+      res = await fileFollowUp(root, attempt, found.get(id), { since: first.get(id) });
+    } catch (error) {
+      out.pending.push({ finding: id, operation: null, error: error.message });
+      continue;
+    }
+    if (res?.state !== 'done') {
+      out.pending.push({ finding: id, operation: res?.operation ?? null });
+      continue;
+    }
+    const entry = await append(root, attempt, 'finding.filed', { ...d, state: 'done', ticket: res.value?.id ?? null, duplicateOf: res.value?.duplicateOf ?? null }, null);
+    events.push(entry);
+    out.appended.push(entry);
+  }
+  return out;
+}
+
+// The lines that tell the owner what a pending follow-up still needs.
+export const pendingLines = (pending, indent = '  ') => pending.map((p) => `${indent}${p.finding} is not filed yet: ${p.error ? `the tracker refused it: ${p.error}` : `${p.operation ?? 'file it through the tracker connector'}; any wf status, wf review --record or wf deliver reads it back`}`);
 
 export function assertFindings(findings, repos) {
   const problems = (findings ?? []).flatMap((f, i) => checkFinding(f, repos, i));
