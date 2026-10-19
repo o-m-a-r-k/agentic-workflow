@@ -24,7 +24,7 @@ import { pathToFileURL } from 'node:url';
 import { WfError, append, attemptDir, changedFiles, loadAdapter, refusal, worktreeDir } from './contract.mjs';
 import { projectEnv } from './env.mjs';
 import { imageSize } from './image-size.mjs';
-import { attemptOf, git, mkdirs, stamp } from './tests.mjs';
+import { attemptOf, baseModule, git, mkdirs, stamp } from './tests.mjs';
 import { matchesAny } from './util.mjs';
 
 const CODE = /\.(?:[cm]?[jt]sx?|vue|svelte|astro|css|scss|sass|less)$/;
@@ -161,10 +161,9 @@ export async function pickScreens(root, attempt, adapter, changed) {
   for (const f of rootRel) reached.add(f);
   let routes = [];
   if (s.routes) {
-    const base = worktreeDir(root, attempt, s.routes.repo);
-    const file = path.join(fs.existsSync(base) ? base : path.join(root, prefixOf(adapter, s.routes.repo)), s.routes.path);
-    if (!fs.existsSync(file)) throw new WfError(`screens.routes module ${s.routes.repo}/${s.routes.path} does not exist (${file})`);
-    const mod = await import(`${pathToFileURL(file).href}?t=${Date.now()}`);
+    // From the fetched base, not the worktree: a ticket does not choose which of its screens are seen.
+    const file = baseModule(root, adapter, s.routes, 'screens.routes module');
+    const mod = await import(pathToFileURL(file).href);
     if (typeof mod.default !== 'function') throw new WfError(`screens.routes module ${s.routes.repo}/${s.routes.path} has no default export function`);
     const got = await mod.default([...reached].sort());
     if (!Array.isArray(got)) throw new WfError(`screens.routes module ${s.routes.repo}/${s.routes.path} returned ${typeof got}, not a list of routes`);

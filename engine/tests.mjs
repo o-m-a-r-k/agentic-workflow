@@ -189,20 +189,18 @@ export function testSpec(adapter, repo, kind) {
   return spec;
 }
 
-// Run one spec in `cwd`, writing its output to `log`. A module spec is `{ repo, path }`, resolved in `moduleDirs[repo]`.
-// Returns { pass, exitCode, ms }. Never throws for a failing test; throws WfError when the spec cannot start.
-export async function execute({ spec, cwd, log, env, ctx, moduleDirs }) {
+// Run one spec in `cwd`, writing its output to `log`. A module spec is `{ repo, path }`, loaded from the repo's fetched
+// base (baseModule), never from the tree it judges. Returns { pass, exitCode, ms }. Never throws for a failing test;
+// throws WfError when the spec cannot start.
+export async function execute({ spec, cwd, log, env, ctx, root, adapter }) {
   fs.mkdirSync(path.dirname(log), { recursive: true });
   const t0 = Date.now();
   if (spec.module) {
-    const base = moduleDirs?.[spec.module.repo];
-    if (!base) throw new WfError(`test module repo \`${spec.module.repo}\` has no folder here`);
-    const file = path.join(base, spec.module.path);
-    if (!fs.existsSync(file)) throw new WfError(`test module ${spec.module.repo}/${spec.module.path} does not exist (${file})`);
+    const file = baseModule(root, adapter, spec.module, 'test module');
     let pass = false;
     let text = '';
     try {
-      const mod = await import(`${pathToFileURL(file).href}?t=${Date.now()}`);
+      const mod = await import(pathToFileURL(file).href);
       if (typeof mod.default !== 'function') throw new WfError(`test module ${spec.module.repo}/${spec.module.path} has no default export function`);
       const r = await mod.default({ ...ctx, cwd, env });
       pass = r?.pass === true;
@@ -310,7 +308,7 @@ export async function runTests(root, attempt, repo, kind, { cwd, source = 'attem
     const lock = await acquireLock(spec.lock, { root, attempt, repo, kind }, { onWait });
     let result;
     try {
-      result = await execute({ spec, cwd: runDir, log, env, ctx: { repo, kind, attempt }, moduleDirs: { ...moduleDirsOf(root, attempt, adapter), [repo]: own.dir } });
+      result = await execute({ spec, cwd: runDir, log, env, ctx: { repo, kind, attempt }, root, adapter });
     } finally {
       releaseLock(lock);
     }
@@ -327,14 +325,32 @@ export async function runTests(root, attempt, repo, kind, { cwd, source = 'attem
   }
 }
 
-// Module folders by repo name: the attempt's worktrees when they exist, else the repos' checkouts.
-export function moduleDirsOf(root, attempt, adapter) {
-  const out = {};
-  for (const r of adapter.repos) {
-    const wt = attempt ? worktreeDir(root, attempt, r.name) : null;
-    out[r.name] = wt && fs.existsSync(wt) ? wt : path.join(root, r.path);
+// The file to import for a project module (`{ repo, path }`: a test runner, the screens routes module), read from the
+// repo's fetched base (`refs/remotes/<remote>/<base>`) into a content-addressed cache in the user folder.
+//
+// Named failure (0.7: "a ticket cannot remove its own checks"): resolved in the attempt's worktree, a ticket could
+// change the runner that judges it, for example to one that always reports a pass. The code the runner executes (the
+// tests, the app) is still the ticket's own, from the worktree. A module is loaded alone: its relative imports of other
+// project files are not available from the cache.
+export function baseModule(root, adapter, ref, what = 'module') {
+  const spec = repoSpec(adapter, ref.repo);
+  const checkout = path.join(root, spec.path);
+  const upstream = `refs/remotes/${spec.remote ?? 'origin'}/${spec.base}`;
+  const rel = path.posix.normalize(String(ref.path)).replace(/^\/+/, '');
+  if (rel.startsWith('..')) throw new WfError(`${what} ${ref.repo}/${ref.path} is outside its repo`);
+  const r = spawnSync('git', ['show', `${upstream}:${rel}`], { cwd: checkout, maxBuffer: 64 * 1024 * 1024 });
+  if (r.error || r.status !== 0) throw new WfError(`${what} ${ref.repo}/${rel} is not on ${upstream} (${String(r.stderr || r.error?.message || '').trim()})`, { hint: 'A module the engine runs is read from the fetched base: land it there first.' });
+  const hash = crypto.createHash('sha256').update(r.stdout).digest('hex');
+  const ext = path.posix.extname(rel) || '.mjs';
+  const dir = path.join(userDir(), 'modules');
+  const file = path.join(dir, `${hash}${ext}`);
+  if (!fs.existsSync(file)) {
+    fs.mkdirSync(dir, { recursive: true });
+    const tmp = `${file}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, r.stdout);
+    fs.renameSync(tmp, file);
   }
-  return out;
+  return file;
 }
 
 // ---- the command ----------------------------------------------------------------------------------------------------

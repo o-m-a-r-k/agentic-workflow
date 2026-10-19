@@ -46,16 +46,51 @@ test('a failing command is recorded as failed with its exit code', async () => {
   }
 });
 
-test('a module test is resolved in the attempt worktree of its repo and called with the run context', async () => {
+test('a module test is loaded from its repo\'s fetched base and called with the run context', async () => {
   const p = fixture({ repoOverrides: { server: { tests: { full: { module: { repo: 'client', path: 'steps/suite.mjs' } } } } } });
   try {
     useDoubles(p);
+    p.commit('client', { 'steps/suite.mjs': 'export default async (ctx) => ({ pass: false, log: `ctx ${ctx.kind} ${ctx.repo} ${ctx.attempt} ${ctx.cwd}` });\n' }, 'runner', { push: true });
     startAttempt(p, 'TK-2.1');
-    change(p, 'TK-2.1', 'client', { 'steps/suite.mjs': 'export default async (ctx) => ({ pass: false, log: `ctx ${ctx.kind} ${ctx.repo} ${ctx.attempt} ${ctx.cwd}` });\n' });
     const r = await runTests(p.root, 'TK-2.1', 'server', 'full');
     assert.equal(r.pass, false);
     assert.equal(r.exitCode, null);
     assert.equal(read(r.log), `ctx full server TK-2.1 ${worktreeDir(p.root, 'TK-2.1', 'server')}`);
+  } finally {
+    done(p);
+  }
+});
+
+test('an attempt that edits its runner module to always pass is still judged by the base runner, and fails', async () => {
+  const p = fixture({ repoOverrides: { server: { tests: { fast: { module: { repo: 'server', path: 'steps/runner.mjs' } } } } } });
+  try {
+    useDoubles(p);
+    // The base runner executes the ticket's own test file from the worktree.
+    p.commit('server', { 'steps/runner.mjs': 'import { spawnSync } from "node:child_process";\nexport default async (ctx) => { const r = spawnSync(process.execPath, ["test/sum.spec.mjs"], { cwd: ctx.cwd, encoding: "utf8" }); return { pass: r.status === 0, log: "base runner " + r.stderr }; };\n' }, 'runner', { push: true });
+    startAttempt(p, 'TK-6.1');
+    change(p, 'TK-6.1', 'server', {
+      'test/sum.spec.mjs': 'console.error("ticket test fails"); process.exit(1);\n',
+      'steps/runner.mjs': 'export default async () => ({ pass: true, log: "tampered runner" });\n',
+    });
+    const r = await runTests(p.root, 'TK-6.1', 'server', 'fast');
+    assert.equal(r.pass, false);
+    assert.match(read(r.log), /^base runner ticket test fails/);
+    assert.equal(eventsOf(p, 'test.run', 'TK-6.1')[0].pass, false);
+    // The module ran from the content-addressed cache in the user folder.
+    assert.equal(fs.readdirSync(path.join(p.env.WF_USER_DIR, 'modules')).filter((f) => /^[0-9a-f]{64}\.mjs$/.test(f)).length, 1);
+  } finally {
+    done(p);
+  }
+});
+
+test('a runner module missing from the base is an error naming the base', async () => {
+  const p = fixture({ repoOverrides: { server: { tests: { fast: { module: { repo: 'server', path: 'steps/new.mjs' } } } } } });
+  try {
+    useDoubles(p);
+    startAttempt(p, 'TK-7.1');
+    change(p, 'TK-7.1', 'server', { 'steps/new.mjs': 'export default async () => ({ pass: true });\n' });
+    await assert.rejects(runTests(p.root, 'TK-7.1', 'server', 'fast'), /steps\/new\.mjs is not on refs\/remotes\/origin\/trunk/);
+    assert.equal(eventsOf(p, 'test.run').length, 0);
   } finally {
     done(p);
   }

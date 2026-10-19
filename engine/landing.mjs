@@ -13,7 +13,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { WfError, append, attemptState, listAttempts, loadAdapter, mergeFacts } from './contract.mjs';
-import { acquireLock, execute, git, mkdirs, moduleDirsOf, provisionFrom, releaseLock, repoSpec, stamp, testEnv, workingTree } from './tests.mjs';
+import { acquireLock, execute, git, mkdirs, provisionFrom, releaseLock, repoSpec, stamp, testEnv, workingTree } from './tests.mjs';
 
 const upstreamOf = (spec) => `refs/remotes/${spec.remote ?? 'origin'}/${spec.base}`;
 
@@ -163,7 +163,7 @@ async function landRepo({ root, adapter, spec, checkout, repo, members, states, 
           const lock = await acquireLock(spec.tests.full.lock, { root, attempt: batch, repo, kind: 'full' });
           let r;
           try {
-            r = await execute({ spec: spec.tests.full, cwd: dir, log, env, ctx: { repo, kind: 'full', attempt: null }, moduleDirs: { ...moduleDirsOf(root, null, adapter), [repo]: dir } });
+            r = await execute({ spec: spec.tests.full, cwd: dir, log, env, ctx: { repo, kind: 'full', attempt: null }, root, adapter });
           } finally {
             releaseLock(lock);
           }
