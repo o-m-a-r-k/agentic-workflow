@@ -8,8 +8,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { attemptDir, evidenceRoot } from './ledger.mjs';
-import { listableOf } from './evidence.mjs';
-import { recordedFileProblem } from './evidence.mjs';
+import { listableOf, readRegular, recordedFileProblem } from './evidence.mjs';
+import { adapterSnapshot, decodeEscapes } from './config.mjs';
 import { isInside } from './paths.mjs';
 import { WfError, refuse } from './util.mjs';
 
@@ -67,7 +67,87 @@ export function listEvidence(root, state, { kind = null } = {}) {
   walk(dir, '', files);
   const listable = listableOf(root, state.id);
   const shown = files.filter((f) => listable(f.path));
+  // 0.7.35 (I-235): the adapter snapshots this attempt's reviewer bundles handed, listed as `.wf-evidence/adapters/…` (readable with
+  // `wf evidence show` and `inspect`), each once, with the bundle and correction that handed it.
+  const seen = new Set();
+  for (const h of handedSnapshots(root, state)) {
+    if (seen.has(h.named)) continue;
+    seen.add(h.named);
+    const st = fs.lstatSync(h.named, { throwIfNoEntry: false });
+    shown.push({ path: path.relative(root, h.named).split(path.sep).join('/'), file: h.named, kind: 'adapter', size: st?.isFile() ? st.size : null, handedBy: h.handoff, step: h.step, version: h.version, decoded: h.decoded, commit: h.commit });
+  }
   return { attempt: state.id, dir, files: kind ? shown.filter((f) => f.kind === kind) : shown };
+}
+
+// 0.7.35 (I-235). Named failure (field, three reviews on two attempts): since 0.7.32 (D78) a reviewer judging an admission-check
+// correction is handed the adapter plugin at the admission original, the previous correction and the corrected pin, each with a decoded
+// copy, under the shared `.wf-evidence/adapters/<commit>/`; `wf evidence show|inspect` refused them as cross-attempt reads and `list`
+// had none, so reviewers rebuilt them from git. Access follows from the hand-over: a snapshot is readable when a recorded, unchanged
+// reviewer bundle of this attempt names it (`admissionCorrections[].original|previous|corrected.plugin.file|decoded`), where the
+// engine writes that plugin at that commit, and its bytes are the committed text (decoded for the decoded copy). The folder is not
+// recorded evidence (the engine rewrites a copy on every load), so the check against git is what makes the read the committed bytes.
+// Anything else in that folder, and every other attempt's evidence, stays refused.
+function handedSnapshots(root, state) {
+  const dir = attemptDir(root, state.id);
+  const listable = listableOf(root, state.id);
+  let names = [];
+  try {
+    names = fs.readdirSync(path.join(dir, 'handoffs')).filter((n) => /-reviewer\.json$/.test(n)).sort();
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const name of names) {
+    const rel = `handoffs/${name}`;
+    const abs = path.join(dir, 'handoffs', name);
+    if (!listable(rel) || recordedFileProblem(root, state.id, abs)) continue;
+    const read = readRegular(abs);
+    if (!read) continue;
+    let bundle;
+    try {
+      bundle = JSON.parse(read.bytes.toString('utf8'));
+    } catch {
+      continue;
+    }
+    if (bundle?.attempt !== state.id || bundle.role !== 'reviewer' || !Array.isArray(bundle.admissionCorrections)) continue;
+    for (const c of bundle.admissionCorrections)
+      for (const version of ['original', 'previous', 'corrected']) {
+        const v = c?.[version];
+        const plugin = v?.plugin;
+        if (!plugin || typeof plugin.path !== 'string' || typeof v.commit !== 'string') continue;
+        for (const [field, decoded] of [['file', false], ['decoded', true]])
+          if (typeof plugin[field] === 'string' && path.isAbsolute(plugin[field])) out.push({ named: path.resolve(plugin[field]), commit: v.commit, plugin: plugin.path, decoded, step: c.id ?? null, version, handoff: rel });
+      }
+  }
+  return out;
+}
+
+// A path with its folder resolved (links on the way taken), the file's own name kept: two spellings of one file compare equal, and a
+// link at the file itself is still seen (and refused) by the no-follow open.
+function placeOf(file) {
+  try {
+    return path.join(fs.realpathSync.native(path.dirname(file)), path.basename(file));
+  } catch {
+    return null;
+  }
+}
+
+// The handed snapshot `abs` names, with the bytes it must hold; null when no bundle of this attempt handed it.
+function handedSnapshot(root, state, abs) {
+  const at = placeOf(abs);
+  if (!at) return null;
+  for (const h of handedSnapshots(root, state)) {
+    if (placeOf(h.named) !== at) continue;
+    let snap;
+    try {
+      snap = adapterSnapshot(root, state, h.commit, h.plugin);
+    } catch (error) {
+      throw refuse(`${abs}: handed by ${h.handoff}, but ${h.plugin} at ${h.commit.slice(0, 10)} cannot be read from git (${error.message}); nothing is read`);
+    }
+    if (placeOf(h.decoded ? snap.decoded : snap.dest) !== at) continue;
+    return { ...h, expected: Buffer.from(h.decoded ? decodeEscapes(snap.text) : snap.text, 'utf8'), show: `git -C ${snap.dir} show ${h.commit}:${snap.file}` };
+  }
+  return null;
 }
 
 // Named failure I-80: shell-only roles could never read beyond the first 4 MiB of a handed bundle.
@@ -89,7 +169,16 @@ export function showEvidence(root, state, rel, { offset, length, maxSize } = {})
   // still keep the read inside this attempt.
   const fromRoot = !path.isAbsolute(rel) && path.normalize(rel).split(/[\\/]/)[0] === path.basename(evidenceRoot(root));
   const abs = path.isAbsolute(rel) ? path.resolve(rel) : fromRoot ? path.join(fs.realpathSync.native(evidenceRoot(root)), ...path.normalize(rel).split(/[\\/]/).slice(1)) : path.join(dir, rel);
-  if (!abs.startsWith(dir + path.sep)) throw refuse('give an evidence file inside the selected attempt; cross-attempt and outside reads are refused');
+  if (!abs.startsWith(dir + path.sep)) {
+    const adapters = path.join(fs.realpathSync.native(evidenceRoot(root)), 'adapters') + path.sep;
+    const snapshot = handedSnapshot(root, state, abs);
+    if (snapshot) {
+      if (!fs.lstatSync(abs, { throwIfNoEntry: false })) throw refuse(`${rel}: handed by ${snapshot.handoff}, but no longer on disk`, `\`${snapshot.show}\` prints the plugin as committed${snapshot.decoded ? ' (the decoded copy expands its string escapes)' : ''}`);
+      return readText(abs, rel, { start, limit, paged, maxSize, expected: snapshot.expected, mismatch: `${rel} is not the adapter as committed at ${snapshot.commit.slice(0, 10)}; nothing is read from it`, show: snapshot.show });
+    }
+    if ((placeOf(abs) ?? abs).startsWith(adapters)) throw refuse(`${rel}: an adapter snapshot no reviewer bundle of ${state.id} handed; only the snapshots its bundles name are read here`, `\`wf evidence list --kind adapter --attempt ${state.id}\` lists them`, { id: 'evidence:adapter-not-handed' });
+    throw refuse('give an evidence file inside the selected attempt; cross-attempt and outside reads are refused');
+  }
   let parent;
   try {
     parent = fs.realpathSync.native(path.dirname(abs));
@@ -107,6 +196,12 @@ export function showEvidence(root, state, rel, { offset, length, maxSize } = {})
   if (!listableOf(root, state.id)(path.relative(dir, abs).split(path.sep).join('/'))) throw refuse(`${rel}: not recorded yet; a wf command may still be writing it`, 'try again in a moment', { id: 'evidence:unrecorded' });
   const changed = recordedFileProblem(root, state.id, abs);
   if (changed) throw refuse(`${changed}; nothing is read from it`, `\`wf verify --attempt ${state.id}\` lists every difference`);
+  return readText(abs, rel, { start, limit, paged, maxSize });
+}
+
+// One bounded, no-follow read of a text file. `expected`: the bytes a handed adapter snapshot must hold (I-235), checked on the open
+// file before anything is returned.
+function readText(abs, rel, { start, limit, paged, maxSize, expected, mismatch, show }) {
   let fd;
   try {
     fd = fs.openSync(abs, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | (fs.constants.O_NONBLOCK ?? 0));
@@ -117,6 +212,16 @@ export function showEvidence(root, state, rel, { offset, length, maxSize } = {})
     const fst = fs.fstatSync(fd);
     if (!fst.isFile() || fst.nlink > 1) throw refuse(`${rel} is not a regular file with one name; nothing is read through it`);
     if (maxSize !== undefined && fst.size > maxSize) throw refuse('structured evidence exceeds the 64 MiB inspection limit');
+    if (expected) {
+      const whole = fst.size === expected.length ? Buffer.alloc(fst.size) : null;
+      let got = 0;
+      while (whole && got < whole.length) {
+        const k = fs.readSync(fd, whole, got, whole.length - got, got);
+        if (!k) break;
+        got += k;
+      }
+      if (!whole || got !== whole.length || !whole.equals(expected)) throw refuse(mismatch, `\`${show}\` prints it as committed`);
+    }
     if (start > fst.size) throw new WfError('evidence page offset is past end of file');
     const buf = Buffer.alloc(Math.min(fst.size - start, limit));
     let n = 0;

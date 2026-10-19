@@ -635,7 +635,9 @@ export function adapterDecodedAtCommit(root, state, commit, rel) {
   return decoded;
 }
 
-export function adapterFileAtCommit(root, state, commit, rel) {
+// The copy of an adapter file at a commit: where it is written (`dest`, its decoded copy beside it) and the committed text. Reads
+// git only, writes nothing; `adapterFileAtCommit` writes it, and 0.7.35 (I-235) `wf evidence show` checks a handed copy against it.
+export function adapterSnapshot(root, state, commit, rel) {
   if (!COMMIT_ID.test(String(commit))) throw new WfError(`not a commit id: \`${String(commit).slice(0, 80)}\``);
   const { repo, relative } = attemptAdapter(root, state);
   assertPlainGit(repoDir(root, repo));
@@ -644,12 +646,17 @@ export function adapterFileAtCommit(root, state, commit, rel) {
   if (path.posix.isAbsolute(file) || file === '..' || file.startsWith('../') || (base && file !== base && !file.startsWith(`${base}/`))) throw new WfError(`adapter file \`${rel}\` is outside the adapter folder`);
   const text = git(repoDir(root, repo), ['show', `${commit}:${file}`], { allowFail: true });
   if (!text) throw new WfError(`${rel} is not committed in ${repo.name}@${commit.slice(0, 10)}`, { hint: 'commit adapter code to the base branch; the engine only runs the committed copy' });
+  const dest = path.join(root, '.wf-evidence', 'adapters', commit, `${hashValue(file).slice(0, 12)}-${path.basename(file)}`);
+  return { repo: repo.name, dir: repoDir(root, repo), file, text, dest, decoded: `${dest}.decoded.txt` };
+}
+
+export function adapterFileAtCommit(root, state, commit, rel) {
+  const { text, dest } = adapterSnapshot(root, state, commit, rel);
   // Rewritten on every load, so a modified copy is never run.
-  const dir = path.join(root, '.wf-evidence', 'adapters', commit);
+  const dir = path.dirname(dest);
   mkdirStateDirectory(dir, { recursive: true });
   const realRoot = fs.realpathSync(root);
   if (fs.realpathSync(dir) !== path.join(realRoot, '.wf-evidence', 'adapters', commit)) throw new WfError(`${dir} is not a real folder inside the project (a link on its path); adapter code is not written through it`);
-  const dest = path.join(dir, `${hashValue(file).slice(0, 12)}-${path.basename(file)}`);
   const tmp = `${dest}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
   const fd = fs.openSync(tmp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW ?? 0), 0o644);
   try {

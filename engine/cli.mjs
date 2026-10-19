@@ -1657,7 +1657,7 @@ async function dispatch(cmd, sub, positional, options) {
         const r = listEvidence(root, s, { kind: typeof options.kind === 'string' ? options.kind : null });
         const groups = new Map();
         for (const f of r.files) groups.set(f.kind, [...(groups.get(f.kind) ?? []), f]);
-        const text = [...groups].map(([k, fs]) => `${k} (${fs.length}):\n${fs.map((f) => `  ${f.path}${f.size !== null ? `  ${f.size} B` : ''}\n    ${f.file}`).join('\n')}`).join('\n');
+        const text = [...groups].map(([k, fs]) => `${k} (${fs.length}):\n${fs.map((f) => `  ${f.path}${f.size !== null ? `  ${f.size} B` : f.kind === 'adapter' ? '  (not on disk)' : ''}${f.handedBy ? `  (${f.step} ${f.version}${f.decoded ? ', decoded' : ''}, handed by ${f.handedBy})` : ''}\n    ${f.file}`).join('\n')}`).join('\n');
         const shots = groups.has('screenshot') ? `\nscreenshots: copy them out with \`wf export screenshots --gate --attempt ${s.id} --to <folder>\` and view the copies (the last gate's collected set; \`--run <run id>\` copies every image of one run, failed, stopped or interrupted ones too, the run id being the folder under gate/; \`--run import-<n>\` an import's)` : '';
         print(options, `${r.files.length ? text : `no evidence files${options.kind ? ` of kind ${options.kind}` : ''} in ${s.id}`}${shots}\nread a text file: \`wf evidence show <path> --attempt ${s.id}\`, or the Read tool on the full path`, r);
         return 0;
