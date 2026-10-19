@@ -55,6 +55,24 @@ test('start: numbers continue after old ledgers and wf/<item>.<n> branches; an o
   }
 });
 
+test('close as shipped fails closed when the worktree is gone: proven from the wf/<attempt> branch, refused without it', async () => {
+  const p = setup();
+  try {
+    const s = await started(p, 'TK-9');
+    commitWt(p, s.id, 'server', { 'src/core/sum.mjs': 'export const sum = () => 0;\n' }, 'unshipped change');
+    // Deleting the worktree must not make the unshipped commit disappear from the proof.
+    git(p.repos.server.dir, ['worktree', 'remove', '--force', p.wt(s.id, 'server')]);
+    await assert.rejects(attempt.cmdClose(ctxOf(p), args([], { attempt: s.id })), /not shipped: .*1 commit\(s\) of server are not on the base/);
+    assert.equal((await attemptState(p.root, s.id)).open, true);
+    // Neither the worktree nor the branch: nothing proves what the attempt wrote, so it is refused.
+    git(p.repos.server.dir, ['branch', '-D', `wf/${s.id}`]);
+    await assert.rejects(attempt.cmdClose(ctxOf(p), args([], { attempt: s.id })), /cannot be proven shipped in server: its worktree .* is gone and its branch wf\/TK-9\.1 is not in/);
+    assert.equal((await attemptState(p.root, s.id)).open, true);
+  } finally {
+    p.done();
+  }
+});
+
 test('close: refused under a hold; refused while not shipped; shipped by patch-id once the commits are on the base', async () => {
   const p = setup();
   try {

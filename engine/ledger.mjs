@@ -9,7 +9,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { EVENTS, SCHEMA, WfError, attemptDir, canonicalJson, ledgerFile } from './contract.mjs';
+import { EVENTS, PROJECT_LEDGER, SCHEMA, WfError, attemptDir, canonicalJson, ledgerFile } from './contract.mjs';
 import { mkdirStateDirectory } from './state-folders.mjs';
 import { withFileLock } from './util.mjs';
 
@@ -105,7 +105,9 @@ export function splitId(id) {
   return m ? { item: m[1], n: Number(m[2]) } : { item: id, n: 0 };
 }
 
-/** Attempt ids in the project (schema 1 and 2), optionally of one item, in attempt-number order. */
+/** Attempt ids in the project (schema 1 and 2), optionally of one item, in attempt-number order. The project ledger of
+ * stream 4's project-level decisions (PROJECT_LEDGER) is not an attempt and is never listed. A schema-1 ledger belongs
+ * to an item by its folder name or by the item its `admitted` entry recorded (0.7 could name an attempt by `--id`). */
 export async function listAttempts(root, { item } = {}) {
   let names = [];
   try {
@@ -113,10 +115,30 @@ export async function listAttempts(root, { item } = {}) {
   } catch {
     return [];
   }
-  const keyed = names.filter((d) => SAFE_ID.test(d) && fs.existsSync(ledgerFile(root, d))).map((id) => ({ id, ...splitId(id) }));
-  const chosen = keyed.filter((x) => item === undefined || x.item === item);
+  const keyed = names.filter((d) => d !== PROJECT_LEDGER && SAFE_ID.test(d) && fs.existsSync(ledgerFile(root, d))).map((id) => ({ id, ...splitId(id) }));
+  const chosen = keyed.filter((x) => item === undefined || x.item === item || admittedItem(root, x.id) === item);
   chosen.sort((a, b) => (a.item < b.item ? -1 : a.item > b.item ? 1 : a.n - b.n));
   return chosen.map((x) => x.id);
+}
+
+// The item a schema-1 ledger's first entry (`admitted`) recorded, or null (a schema 2 ledger, or none recorded). Only the
+// first line is read; the chain is checked when the ledger itself is read.
+function admittedItem(root, id) {
+  try {
+    const fd = fs.openSync(ledgerFile(root, id), 'r');
+    let first;
+    try {
+      const buf = Buffer.alloc(64 * 1024);
+      const n = fs.readSync(fd, buf, 0, buf.length, 0);
+      first = buf.subarray(0, n).toString('utf8').split('\n')[0];
+    } finally {
+      fs.closeSync(fd);
+    }
+    const e = JSON.parse(first);
+    return e.schema === undefined && e.type === 'admitted' && typeof e.data?.item === 'string' ? e.data.item : null;
+  } catch {
+    return null;
+  }
 }
 
 // 0.7's terminal events. The first one ends the attempt; anything after it is not part of the ticket.

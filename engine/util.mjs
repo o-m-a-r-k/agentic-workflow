@@ -1,6 +1,5 @@
 import { mkdirStateDirectory } from './state-folders.mjs';
 import crypto from 'node:crypto';
-import { prepareWrite, writeNoFollow } from './evidence.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -107,8 +106,39 @@ export function readJson(file) {
   }
 }
 
+// Writes exactly this file: a link or a file with a second name is refused, and the data lands by rename, so a reader
+// never sees half of it. `exclusive` creates the file and refuses one that exists.
+export function writeNoFollow(file, data, { exclusive = false, mode = 0o644 } = {}) {
+  const { O_WRONLY, O_CREAT, O_EXCL, O_NOFOLLOW } = fs.constants;
+  const bytes = typeof data === 'string' ? data : Buffer.from(data);
+  const put = (target) => {
+    let fd;
+    try {
+      fd = fs.openSync(target, O_WRONLY | O_NOFOLLOW | O_CREAT | O_EXCL, mode);
+    } catch (error) {
+      if (error.code === 'ELOOP') throw new WfError(`${file} is a symlink; not written through`, { code: 75 });
+      throw error;
+    }
+    try {
+      fs.writeSync(fd, bytes);
+    } finally {
+      fs.closeSync(fd);
+    }
+  };
+  if (exclusive) return put(file);
+  const st = fs.lstatSync(file, { throwIfNoEntry: false });
+  if (st && (!st.isFile() || st.nlink > 1)) throw new WfError(`${file} is ${st.isSymbolicLink() ? 'a symlink' : st.isFile() ? 'a hard link' : 'not a regular file'}; not written through`, { code: 75 });
+  const tmp = path.join(path.dirname(file), `.${path.basename(file)}.wf-${process.pid}-${crypto.randomBytes(4).toString('hex')}`);
+  put(tmp);
+  try {
+    fs.renameSync(tmp, file);
+  } catch (error) {
+    fs.rmSync(tmp, { force: true });
+    throw error;
+  }
+}
+
 export function writeJson(file, value) {
-  prepareWrite(file);
   mkdirStateDirectory(path.dirname(file), { recursive: true });
   writeNoFollow(file, `${JSON.stringify(value, null, 2)}\n`);
 }
@@ -128,7 +158,6 @@ export function writeImmutable(file, content) {
     if (!same) throw new WfError(`immutable evidence already exists with different content: ${file}`);
     return file;
   }
-  prepareWrite(file);
   mkdirStateDirectory(path.dirname(file), { recursive: true });
   writeNoFollow(file, content, { mode: 0o444, exclusive: true });
   return file;

@@ -9,17 +9,17 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {
-  WfError, answered, append, ask, attemptId, attemptState, branchName, listAttempts, loadAdapter, normaliseId, readEvents,
-  refusal, row, runStage, userDir, worktreeDir,
+  PROJECT_LEDGER, WfError, answered, append, ask, attemptId, attemptState, branchName, listAttempts, loadAdapter, normaliseId, readEvents,
+  refusal, row, runStage, worktreeDir, writeRow,
 } from './contract.mjs';
-import { baseOf, dirtyRepos, fetchBase, specOf } from './base.mjs';
+import { baseRef, dirtyRepos, fetchBase, specOf } from './base.mjs';
 import { mkdirStateDirectory } from './state-folders.mjs';
 import { ENGINE_VERSION, assertPlainGit, assertSafeId, git, hashFile, run } from './util.mjs';
 
 // --- shared reads (used by flow.mjs too) -------------------------------------------------------------------------------
 
-// Stream 4's reserved ledger of project-level decisions: not an attempt.
-export const PROJECT_LEDGER = 'wf-project';
+// Stream 4's reserved ledger of project-level decisions: not an attempt (listAttempts never lists it).
+export { PROJECT_LEDGER };
 
 export const schema2 = (events) => events.filter((e) => e.schema === 2);
 
@@ -324,18 +324,32 @@ async function cmdRelease(ctx, args) {
 
 // --- close, abandon ----------------------------------------------------------------------------------------------------
 
-// The patch-ids of an attempt's own commits in one repo, and whether each is on the base (`git cherry`).
-function patchFacts(state, adapter, name) {
+// The patch-ids of an attempt's own commits in one repo, and whether each is on the base (`git cherry`). Read from the
+// attempt's worktree, or, when the worktree is gone, from its branch `wf/<attempt>` in the repo's checkout. Fails closed:
+// with neither, nothing proves what the attempt wrote, so it is refused (named failure: a removed worktree let an
+// unshipped attempt close as shipped, because the repo was skipped).
+export function patchFacts(root, state, adapter, name) {
   const r = state.repos[name];
-  const base = baseOf(state, adapter, name);
+  const spec = specOf(adapter, name, r);
+  let cwd = r.worktree;
+  let head = 'HEAD';
+  if (!fs.existsSync(cwd)) {
+    const checkout = path.join(root, spec.path);
+    const branch = r.branch || branchName(state.id);
+    const tip = fs.existsSync(checkout) ? git(checkout, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}^{commit}`], { allowFail: true }) : '';
+    if (!tip) throw new WfError(`${state.id} cannot be proven shipped in ${name}: its worktree ${r.worktree} is gone and its branch ${branch} is not in ${checkout}, so what the attempt wrote cannot be compared with the base`, { hint: `restore the branch ${branch} (or the worktree), or close the work as not shipped: \`wf abandon --attempt ${state.id} --reason "<why>"\`` });
+    cwd = checkout;
+    head = tip;
+  }
+  const base = baseRef(cwd, spec, null);
   // The attempt's own commits: the first-parent line since the commit it started from (base merges excluded).
   const fork = r.baseSha;
-  const commits = git(r.worktree, ['rev-list', '--first-parent', '--no-merges', `${fork}..HEAD`]).split('\n').filter(Boolean);
+  const commits = git(cwd, ['rev-list', '--first-parent', '--no-merges', `${fork}..${head}`]).split('\n').filter(Boolean);
   if (!commits.length) return { commits: 0, unshipped: [], patchIds: [] };
-  const cherry = base ? git(r.worktree, ['cherry', base, 'HEAD', fork], { allowFail: true }).split('\n').filter(Boolean) : [];
+  const cherry = base ? git(cwd, ['cherry', base, head, fork], { allowFail: true }).split('\n').filter(Boolean) : [];
   const unshipped = cherry.filter((l) => l.startsWith('+ ')).map((l) => l.slice(2));
-  const patch = run('git', ['log', '-p', '--first-parent', '--no-merges', '--format=commit %H', `${fork}..HEAD`], { cwd: r.worktree }).stdout;
-  const ids = run('git', ['patch-id', '--stable'], { cwd: r.worktree, input: patch, allowFail: true }).stdout.split('\n').filter(Boolean).map((l) => {
+  const patch = run('git', ['log', '-p', '--first-parent', '--no-merges', '--format=commit %H', `${fork}..${head}`], { cwd }).stdout;
+  const ids = run('git', ['patch-id', '--stable'], { cwd, input: patch, allowFail: true }).stdout.split('\n').filter(Boolean).map((l) => {
     const [pid, commit] = l.split(' ');
     return { repo: name, commit, patchId: pid };
   });
@@ -350,7 +364,8 @@ function stagesDone(state, events) {
   return stages.every((_, i) => ['done', 'skipped'].includes(last.get(i)));
 }
 
-// The telemetry row, built by stream 5 while the worktrees still exist (it reads their diff), with the outcome closing it.
+// The telemetry row, built by stream 5 while the worktrees still exist (it reads their diff), with the outcome closing it;
+// it is kept in `attempt.closed` so the row survives the worktrees.
 async function buildRow(root, id, outcome) {
   try {
     return { row: { ...(await row(root, id)), outcome }, error: null };
@@ -359,13 +374,10 @@ async function buildRow(root, id, outcome) {
   }
 }
 
-function writeRow(ctx, adapter, built) {
-  if (!built.row) return `telemetry row not written: ${built.error}`;
+// Stream 5 writes the telemetry file (its only writer).
+async function storeRow(root, id) {
   try {
-    const r = built.row;
-    const file = path.join(userDir(ctx.env), 'telemetry', `${adapter.name}.jsonl`);
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.appendFileSync(file, `${JSON.stringify(r)}\n`);
+    const { file } = await writeRow(root, id);
     return `telemetry row written to ${file}`;
   } catch (error) {
     return `telemetry row not written: ${error.message}`;
@@ -403,7 +415,7 @@ async function closeWith(ctx, args, outcome) {
   let reason;
   let patchIds;
   if (outcome === 'shipped') {
-    const facts = Object.keys(state.repos).filter((n) => fs.existsSync(state.repos[n].worktree)).map((n) => ({ repo: n, ...patchFacts(state, adapter, n) }));
+    const facts = Object.keys(state.repos).map((n) => ({ repo: n, ...patchFacts(root, state, adapter, n) }));
     patchIds = facts.flatMap((f) => f.patchIds);
     const byStages = stagesDone(state, events);
     const unshipped = facts.filter((f) => f.unshipped.length);
@@ -416,7 +428,7 @@ async function closeWith(ctx, args, outcome) {
   }
   const built = await buildRow(root, id, outcome);
   await append(root, id, 'attempt.closed', { outcome, reason, ...(patchIds?.length ? { patchIds } : {}), ...(built.row ? { row: built.row } : {}) }, ctx.actor);
-  const telemetry = writeRow(ctx, adapter, built);
+  const telemetry = await storeRow(root, id);
   const left = removeWorktrees(root, adapter, state);
   const branches = Object.values(state.repos).map((r) => r.branch);
   return {

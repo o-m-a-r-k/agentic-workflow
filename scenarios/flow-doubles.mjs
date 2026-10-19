@@ -197,7 +197,16 @@ export async function row(root, attempt) {
   return { schema: 'wf-ticket@1', attempt, item: s.item, outcome: s.outcome };
 }
 
+// Stream 5 writes the telemetry file; this double appends the row where stream 5 would.
+export async function writeRow(root, attempt) {
+  const r = await row(root, attempt);
+  const file = path.join(process.env.WF_USER_DIR, 'telemetry', `${(await loadAdapter(root)).name}.jsonl`);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.appendFileSync(file, `${JSON.stringify(r)}\n`);
+  return { row: r, file };
+}
+
 export default {
   append, readEvents, listAttempts, attemptState, findProject, loadAdapter, normaliseId, runStage, ask, answered, callerSession,
-  filesRead, launchReviewer, runTests, blameToAttempt, fileFollowUp, search, recordRefusal, row,
+  filesRead, launchReviewer, runTests, blameToAttempt, fileFollowUp, search, recordRefusal, row, writeRow,
 };

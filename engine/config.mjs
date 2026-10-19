@@ -121,6 +121,18 @@ const OPERATIONS = ['fileFollowUp', 'search', 'readIssue', 'setStatus', 'comment
 const MODEL_ROLES = ['planner', 'implementer', 'reviewer', 'secondReviewer', 'tester', 'drafter'];
 const CAPTURE_PLACEHOLDERS = ['out', 'viewport', 'lang', 'dir', 'routes'];
 const BUDGET_KEYS = ['rules', 'risk', 'modules', 'operationWords'];
+const REPO_KEYS = ['name', 'path', 'base', 'remote', 'provision', 'tests', 'kinds'];
+const SCREENS_KEYS = ['routes', 'shared', 'sentinel', 'langs', 'viewports', 'capture'];
+const TICKETING_KEYS = ['tracker', 'via', 'idPattern', 'take', 'followUps', 'operations'];
+const DELIVERY_KEYS = ['landing', 'order', 'authority', 'stages'];
+
+// Every adapter key, as the release check counts them against budget.json (design section 8): a new key is rule-shaped.
+// Sections are listed by their own keys (`screens.capture`), except those whose value is one setting or a list.
+export const ADAPTER_KEYS = Object.freeze([
+  'version', 'name', 'root', 'requires', 'repos', ...REPO_KEYS.map((k) => `repos.${k}`), 'components', 'invariants', 'rules',
+  ...SCREENS_KEYS.map((k) => `screens.${k}`), 'review.diffRead', 'risk', ...TICKETING_KEYS.map((k) => `ticketing.${k}`),
+  ...DELIVERY_KEYS.map((k) => `delivery.${k}`), 'models', 'budget.adapter', 'onboarded',
+]);
 
 const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const isStr = (v) => typeof v === 'string' && v.trim() !== '';
@@ -170,7 +182,7 @@ function checkTestSpec(c, v, where, repoNames) {
 }
 
 function checkRepo(c, r, where, repoNames) {
-  if (!c.obj(r, where, ['name', 'path', 'base', 'remote', 'provision', 'tests', 'kinds'])) return;
+  if (!c.obj(r, where, REPO_KEYS)) return;
   // A repo name is the first segment of a finding's location (`<repo>/<path>:<line>`), so it holds no slash.
   if (c.str(r.name, `${where}.name`) && !NAME.test(r.name)) c.add(`${where}.name`, `\`${r.name}\` must be letters, digits, dot, dash or underscore`);
   c.rel(r.path, `${where}.path`);
@@ -263,7 +275,7 @@ function problemsOf(raw, { location } = {}) {
     });
   }
 
-  if ('screens' in raw && c.obj(raw.screens, 'screens', ['routes', 'shared', 'sentinel', 'langs', 'viewports', 'capture'])) {
+  if ('screens' in raw && c.obj(raw.screens, 'screens', SCREENS_KEYS)) {
     const s = raw.screens;
     if ('routes' in s && s.routes !== null) checkModule(c, s.routes, 'screens.routes', repoNames);
     if ('shared' in s) c.strs(s.shared, 'screens.shared');
@@ -305,7 +317,7 @@ function problemsOf(raw, { location } = {}) {
     }
   }
 
-  if ('ticketing' in raw && c.obj(raw.ticketing, 'ticketing', ['tracker', 'via', 'idPattern', 'take', 'followUps', 'operations'])) {
+  if ('ticketing' in raw && c.obj(raw.ticketing, 'ticketing', TICKETING_KEYS)) {
     const t = raw.ticketing;
     if ('tracker' in t && t.tracker !== null) {
       if (isObj(t.tracker)) {
@@ -329,7 +341,7 @@ function problemsOf(raw, { location } = {}) {
     if ('operations' in t && c.obj(t.operations, 'ticketing.operations', OPERATIONS)) for (const [k, v] of Object.entries(t.operations)) c.str(v, `ticketing.operations.${k}`);
   }
 
-  if ('delivery' in raw && c.obj(raw.delivery, 'delivery', ['landing', 'order', 'authority', 'stages'])) {
+  if ('delivery' in raw && c.obj(raw.delivery, 'delivery', DELIVERY_KEYS)) {
     const d = raw.delivery;
     if ('landing' in d) c.oneOf(d.landing, 'delivery.landing', ['queue', 'direct']);
     if ('order' in d && c.strs(d.order, 'delivery.order')) {

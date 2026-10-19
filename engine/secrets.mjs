@@ -3,7 +3,6 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { repoDir } from './config.mjs';
 import { projectEnv } from './env.mjs';
 import { WfError, YAML, refuse, run } from './util.mjs';
 
@@ -23,6 +22,8 @@ export function loadCatalog(root) {
 
 // Needed: a gate step lists it in `usedBy`, or the catalog marks it `required: true`.
 export const isNeeded = (e) => e.usedBy.length > 0 || e.required === true;
+
+const repoDir = (root, repo) => path.resolve(root, repo.path);
 
 const envFileFor = (root, cfg, entry) => {
   const repo = cfg.repos.find((r) => r.name === (entry.repo ?? cfg.repos[0].name));

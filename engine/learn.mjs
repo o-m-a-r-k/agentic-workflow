@@ -451,11 +451,32 @@ export function classifyRuleShapes(before, after) {
 
 const ROLE_TEXTS = ['templates/agents/**', 'skills/**/SKILL.md'];
 
+// The plugin's committed proposals: `<plugin>/proposals/*.json`, one proposal per file (the maintainer commits a plugin
+// proposal there when it is accepted, so the release check reads the same proposals on every machine).
+export function pluginProposals(pluginRoot) {
+  const dir = path.join(pluginRoot, 'proposals');
+  let names = [];
+  try {
+    names = fs.readdirSync(dir).filter((f) => f.endsWith('.json')).sort();
+  } catch {
+    return [];
+  }
+  return names.map((f) => {
+    try {
+      return { ...JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')), file: `proposals/${f}` };
+    } catch (error) {
+      throw new WfError(`proposals/${f} is not valid JSON: ${error.message}`);
+    }
+  });
+}
+
 /** The release check: the tree's five counts against budget.json. Any net increase fails unless a kept or active plugin
  * proposal accounts for it (its `adds`); a role text over `words.roleMax` fails; an uncounted kind fails.
- * proposals: plugin proposals (default: none). Returns { ok, counts, classification, problems }. */
-export async function checkRelease({ pluginRoot, budget, proposals = [], adapterKeys } = {}) {
+ * proposals: plugin proposals (default: the committed ones under `<plugin>/proposals/`). Returns { ok, counts,
+ * classification, problems }. */
+export async function checkRelease({ pluginRoot, budget, proposals, adapterKeys } = {}) {
   if (!pluginRoot) throw new WfError('checkRelease needs the plugin root');
+  proposals ??= pluginProposals(pluginRoot);
   const b = budget ?? JSON.parse(fs.readFileSync(path.join(pluginRoot, 'budget.json'), 'utf8'));
   const counts = await countRuleShapes(pluginRoot, b, { adapterKeys });
   const classification = classifyRuleShapes({ ...b, words: b.words?.total ?? 0 }, { ...counts, words: counts.words.total });

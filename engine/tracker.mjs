@@ -12,10 +12,10 @@
 // Every write carries an idempotency marker (`wf:<attempt>:<stage>`), and the engine searches for it before writing.
 import fs from 'node:fs';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { WfError, attemptDir, attemptState, callerSession, connectorCalls, loadAdapter, marker, userDir } from './contract.mjs';
+import { WfError, attemptDir, attemptState, callerSession, connectorCalls, loadAdapter, marker } from './contract.mjs';
 import { filesTracker } from '../adapters/tracker/files.mjs';
+import { importBaseModule } from './base-module.mjs';
 
 // Ids become folder and branch names: the same allowlist as the files tracker.
 const SAFE_ID = /^[A-Za-z0-9_](?:[A-Za-z0-9_.-]{0,62}[A-Za-z0-9_])?$/;
@@ -39,52 +39,11 @@ export function git(cwd, args, { allowFail = false, input } = {}) {
   return allowFail ? r : r.stdout.trim();
 }
 
-// A project module `{ repo, path }`, loaded only as committed at the repo's fetched base, never from an attempt's
-// worktree or the checkout's working files: a ticket cannot change the code that decides its own delivery (mark itself
-// merged, skip a confirmation, write to the tracker). A ticket's change to a module ships through delivery and takes
-// effect after it lands. The module's folder as committed is extracted to `<userDir>/modules/<tree sha>/` and the
-// module imported from there, so it and the sibling files it imports are exactly what the base holds. `attempt` is
-// accepted for the call sites and not used.
-const fetchedBases = new Set();
-export function baseRefOf(dir, spec) {
-  const remote = spec.remote ?? 'origin';
-  if (!git(dir, ['remote']).split('\n').includes(remote)) return spec.base;
-  const key = `${dir}\0${remote}\0${spec.base}`;
-  if (!fetchedBases.has(key)) {
-    git(dir, ['fetch', '--quiet', remote, `+refs/heads/${spec.base}:refs/remotes/${remote}/${spec.base}`], { allowFail: true });
-    fetchedBases.add(key);
-  }
-  return `refs/remotes/${remote}/${spec.base}`;
-}
+// A project module `{ repo, path }` (a tracker or delivery module), loaded only as the repo's fetched base holds it
+// (engine/base-module.mjs, the shared loader): a ticket cannot change the code that decides its own delivery (mark itself
+// merged, skip a confirmation, write to the tracker). `attempt` is accepted for the call sites and not used.
 export async function loadModule(root, adapter, ref, attempt = null) { // eslint-disable-line no-unused-vars
-  const spec = adapter.repos.find((r) => r.name === ref?.repo);
-  if (!spec) throw new WfError(`module ${JSON.stringify(ref)}: no repo named \`${ref?.repo}\` in the adapter`);
-  const rel = path.posix.normalize(String(ref.path ?? '').replaceAll('\\', '/'));
-  if (!rel || rel.startsWith('../') || rel === '..' || path.posix.isAbsolute(rel)) throw new WfError(`module ${ref.repo}/${ref.path}: the path must be inside the repo`);
-  const dir = path.join(root, spec.path);
-  const baseRef = baseRefOf(dir, spec);
-  // The module's whole folder at the base, keyed by that folder's tree sha, so its sibling helpers import as committed.
-  if (git(dir, ['cat-file', '-e', `${baseRef}:${rel}`], { allowFail: true }).status !== 0) throw new WfError(`module ${ref.repo}/${rel} is not committed on ${baseRef}: project modules are loaded only as the base holds them`);
-  const folder = path.posix.dirname(rel);
-  const tree = git(dir, ['rev-parse', folder === '.' ? `${baseRef}^{tree}` : `${baseRef}:${folder}`]);
-  const cache = path.join(userDir(), 'modules');
-  const target = path.join(cache, tree);
-  if (!fs.existsSync(target)) {
-    fs.mkdirSync(cache, { recursive: true });
-    const tmp = fs.mkdtempSync(path.join(cache, `.${tree}-`));
-    const archive = spawnSync('git', ['archive', '--format=tar', baseRef, ...(folder === '.' ? [] : [folder])], { cwd: dir, env: gitEnv(), maxBuffer: 1024 * 1024 * 1024 });
-    if (archive.status !== 0) throw new WfError(`git archive of ${ref.repo}/${folder} at ${baseRef} failed: ${String(archive.stderr).trim()}`);
-    const untar = spawnSync('tar', ['-x', '-f', '-', '-C', tmp], { input: archive.stdout });
-    if (untar.status !== 0) throw new WfError(`extracting ${ref.repo}/${folder} at ${baseRef} failed: ${String(untar.stderr).trim()}`);
-    try {
-      fs.renameSync(tmp, target);
-    } catch (e) {
-      fs.rmSync(tmp, { recursive: true, force: true }); // another process extracted the same tree first
-      if (!fs.existsSync(target)) throw e;
-    }
-  }
-  const file = path.join(target, ...rel.split('/'));
-  return import(pathToFileURL(file).href);
+  return importBaseModule(root, adapter, ref, { what: 'module' });
 }
 
 /**

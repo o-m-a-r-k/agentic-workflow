@@ -112,6 +112,9 @@ export const worktreeDir = (root, attempt, repo) => path.join(root, '.wf-worktre
 // `wf/<item>.<n>` (abandoned and superseded attempts included).
 export const attemptId = (item, n) => `${item}.${n}`;
 export const branchName = (attempt) => `wf/${attempt}`;
+// The ledger of project-level decisions (stream 4's `ask` with no attempt). It is not an attempt: listAttempts never lists
+// it, and telemetry never rows it.
+export const PROJECT_LEDGER = 'wf-project';
 // A finding's location: `<repo>/<path>:<line>`, path relative to the repo, line in the attempt's tree.
 export const parseLocation = (loc) => {
   const m = /^([^/]+)\/(.+):(\d+)$/.exec(String(loc));
@@ -360,8 +363,9 @@ export const EVENTS = Object.freeze({
   'finding.filed': { stream: 1, required: ['finding', 'mode', 'state', 'marker'], optional: ['ticket', 'duplicateOf', 'priority'] },
   // Question fields plus id ('D<n>' per attempt).
   'decision.asked': { stream: 4, required: ['id', 'kind', 'question', 'options', 'refs', 'blocking'], optional: [] },
-  // Answer fields. Only written when the answer rule holds.
-  'decision.answered': { stream: 4, required: ['id', 'choice', 'quote', 'via', 'session'], optional: [] },
+  // Answer fields. Only written when the answer rule holds. turnAt: when the person's turn was written, so the answer is
+  // checked against the transcript again at use.
+  'decision.answered': { stream: 4, required: ['id', 'choice', 'quote', 'via', 'session'], optional: ['turnAt'] },
   // The person's words. A hold is recorded at once on their request.
   hold: { stream: 1, required: ['reason', 'quote'], optional: [] },
   // decision: the answered 'release' decision id.
@@ -416,10 +420,11 @@ export function setDoubles(map) {
 export function clearDoubles() {
   doubles.clear();
 }
+// WF_DOUBLES is honoured only in a test run (WF_TEST=1): production never loads doubled facts.
 async function doubleOf(name) {
   if (doubles.has(name)) return doubles.get(name);
   const file = process.env.WF_DOUBLES;
-  if (!file) return null;
+  if (!file || process.env.WF_TEST !== '1') return null;
   envDoubles ??= import(pathToFileURL(path.resolve(file)).href).then((m) => m.default ?? {});
   const map = await envDoubles;
   return typeof map[name] === 'function' ? map[name] : null;
@@ -594,6 +599,11 @@ export const row = seam(5, 'telemetry.mjs', 'row', '(root, attempt) → TicketRo
 /** Whether a line of the attempt's tree was written by this attempt's commits (git blame against the merge-base).
  * @type {(root: string, attempt: string, location: string) => Promise<{ own: boolean, commit: string|null }>} */
 export const blameToAttempt = seam(5, 'introduced.mjs', 'blameToAttempt', '(root, attempt, "<repo>/<path>:<line>") → { own, commit }');
+
+/** Write an attempt's telemetry row into `<userDir>/telemetry/<project>.jsonl`, replacing an earlier row of that attempt
+ * (`wf close` calls it once the attempt is closed, while its worktrees still exist). Stream 5 is the file's only writer.
+ * @type {(root: string, attempt: string) => Promise<{ row: TicketRow, file: string }>} */
+export const writeRow = seam(5, 'telemetry.mjs', 'writeRow', '(root, attempt) → { row, file }');
 
 /** Count one refusal (the cli calls it for every refusal it prints).
  * @type {(root: string|null, attempt: string|null, id: string) => Promise<void>} */

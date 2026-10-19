@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { WfError, append, listAttempts, loadAdapter, readEvents } from './contract.mjs';
+import { moduleFolder } from './base-module.mjs';
 import { repoFiles } from './scan.mjs';
 
 const TERMINAL = ['closed', 'abandoned', 'analysis.closed', 'shipped.closed', 'attempt.closed'];
@@ -63,8 +64,9 @@ export function moduleRefsOf(a) {
   ];
 }
 
-/** Problems of each module as it would load: not committed on its repo's fetched base, or importing (itself or a helper in
- * its folder) a file outside its own folder, which does not resolve when only that folder is extracted at the base. */
+/** Problems of each module as it would load (engine/base-module.mjs, the shared loader): not committed on its repo's
+ * fetched base, or importing (itself or a helper in its folder) a file outside its top-level folder in the repo, which does
+ * not resolve because only that folder is extracted at the base. A module at the repo's root extracts the whole repo. */
 export function moduleProblems(root, repos, refs, { fetch = true } = {}) {
   const out = [];
   const seen = new Set();
@@ -85,13 +87,14 @@ export function moduleProblems(root, repos, refs, { fetch = true } = {}) {
       out.push({ what: m.what, module: key, problem: `is not committed on ${ref}, so it cannot load: commit and push it to ${repo.base}` });
       continue;
     }
-    const folder = path.posix.dirname(m.path);
-    const listed = git(dir, ['ls-tree', '-r', '--name-only', ref, '--', folder === '.' ? '.' : folder]);
+    const folder = moduleFolder(m.path);
+    if (!folder) continue;
+    const listed = git(dir, ['ls-tree', '-r', '--name-only', ref, '--', folder]);
     for (const f of listed.ok ? listed.out.split('\n').filter((x) => /\.(m?[jt]s|c[jt]s)$/.test(x)) : []) {
       const text = git(dir, ['show', `${ref}:${f}`]).out;
       for (const [, spec] of text.matchAll(REL_IMPORT)) {
         const target = path.posix.normalize(path.posix.join(path.posix.dirname(f), spec));
-        if (folder !== '.' && !target.startsWith(`${folder}/`)) out.push({ what: m.what, module: key, problem: `${f} imports ${spec}, outside the module's folder ${folder}/, which will not resolve` });
+        if (!target.startsWith(`${folder}/`)) out.push({ what: m.what, module: key, problem: `${f} imports ${spec}, outside the module's folder ${folder}/, which will not resolve` });
       }
     }
   }

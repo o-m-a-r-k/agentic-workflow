@@ -434,6 +434,28 @@ export async function projectRows(root) {
   return { project: name, rows, problems, file };
 }
 
+// One attempt's row, written into the telemetry file in place of an earlier row of the same attempt (`wf close`). The
+// file lands by rename, so a reader never sees half of it.
+export async function writeRow(root, attempt) {
+  const r = await row(root, attempt);
+  const file = telemetryFile(r.project);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  let kept = [];
+  try {
+    kept = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).filter((line) => {
+      try {
+        return JSON.parse(line).attempt !== attempt;
+      } catch {
+        return true;
+      }
+    });
+  } catch {}
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, [...kept, JSON.stringify(r)].join('\n') + '\n');
+  fs.renameSync(tmp, file);
+  return { row: r, file };
+}
+
 const minor = (v) => (/^(\d+\.\d+)/.exec(String(v ?? ''))?.[1] ?? 'unknown');
 
 // Commits on each repo's base, since the first attempt started, that no attempt's branch holds (by sha or patch-id).
@@ -513,4 +535,4 @@ export async function cmdReport(ctx) {
 }
 
 export { splitId };
-export const implements08 = { row, cmdReport };
+export const implements08 = { row, writeRow, cmdReport };

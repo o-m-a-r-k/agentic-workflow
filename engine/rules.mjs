@@ -1,267 +1,41 @@
-import { mkdirStateDirectory } from './state-folders.mjs';
+// Project rules (design section 2, "Review bundle"): the documents a reviewer reads for the paths a change touches.
+// The adapter's `rules: [{ paths, read }]` maps root-relative globs to root-relative documents. A document is read as
+// the attempt's base holds it, never as its worktree does: a ticket cannot loosen the rules or the invariants it is
+// judged by. Read only; nothing here writes outside the bundle folder it is given.
 import fs from 'node:fs';
 import path from 'node:path';
-import { adapterLocation, adapterPin, attemptAdapter, repoDir } from './config.mjs';
-import { screenshots } from './gate.mjs';
-import { attemptDir } from './ledger.mjs';
-import { changeBase } from './attempt.mjs';
-import { findSkill } from './skills.mjs';
-import { YAML, git, matchesAny, refuse, sha256 } from './util.mjs';
-import { prepareWrite, readRegular, writeNoFollow } from './evidence.mjs';
+import { git, matchesAny, run } from './util.mjs';
 
-// Review rules: project documents (design system, coding rules) a reviewer must read when the change touches the paths
-// they govern. Named failure: in eleven review rounds no reviewer read any of the project's rule documents, and the
-// required skill was only checked as installed. The list is a pure function of the adapter at the attempt's base and
-// the changed files, the same for every reviewer, so it steers no one: it adds to the review and never narrows it.
-
-// Rule files with frontmatter declare the paths they govern in frontmatter: `paths: [globs]` (a list, or one string).
-export function frontmatterPaths(text) {
-  const m = String(text ?? '').match(/^---\r?\n([\s\S]*?)\r?\n---/);
-  if (!m) return null;
-  let fm;
-  try {
-    fm = YAML.parse(m[1]);
-  } catch {
-    return null;
-  }
-  const p = fm?.paths ?? fm?.globs;
-  if (typeof p === 'string') return p.split(',').map((x) => x.trim()).filter(Boolean);
-  return Array.isArray(p) ? p.map(String).filter(Boolean) : null;
+// The documents that govern any of the given root-relative paths, in the adapter's order, each once.
+export function ruleDocs(adapter, rootPaths) {
+  return [...new Set((adapter.rules ?? []).filter((r) => rootPaths.some((f) => matchesAny(f, r.paths ?? []))).flatMap((r) => r.read ?? []))];
 }
 
-// The repo a rule's documents live in (and whose changed files it governs when it names one), and the commit to read
-// them at: the attempt's adapter base for the adapter repo, the repo's admission base otherwise.
-// For an attempt, the adapter repo is the one its admission recorded (never located through the working tree).
-const adapterRepoName = (root, cfg, state) => (state ? attemptAdapter(root, state).repo.name : adapterLocation(root, cfg).repo.name);
-function ruleRepo(root, cfg, rule, state = null) {
-  if (rule.repo) return cfg.repos.find((r) => r.name === rule.repo) ?? null;
-  const name = adapterRepoName(root, cfg, state);
-  return cfg.repos.find((r) => r.name === name) ?? null;
+// The repo that holds a root-relative path (the longest matching repo path), or null when it is outside every repo.
+export function repoOfPath(adapter, rel) {
+  return [...adapter.repos].sort((a, b) => b.path.length - a.path.length).find((r) => r.path === '.' || rel === r.path || rel.startsWith(`${r.path.replace(/\/+$/, '')}/`)) ?? null;
 }
 
-export function docAt(root, repo, commit, doc) {
-  if (!repo || !commit) return null;
-  const text = git(repoDir(root, repo), ['show', `${commit}:${path.posix.normalize(doc)}`], { allowFail: true });
-  return text || null;
-}
-
-const commitFor = (root, cfg, state, repo) => {
-  if (!repo) return null;
-  if (repo.name === adapterRepoName(root, cfg, state)) return adapterPin(state);
-  return state.repos[repo.name]?.base ?? null;
-};
-
-// Rules that apply to this change: each with the trusted copies of its documents (written from the base commit into
-// the attempt's evidence), the changed files it matched, and whether the ticket itself changed one of its documents.
-// Named failure: applicable documents missing at the frozen base silently removed review obligations.
-// Refuse before a reviewer is created; an unrelated missing rule remains only a doctor warning.
-export function reviewRules(root, trusted, state, changed, pending) {
-  const multi = Object.keys(changed).length > 1;
-  const out = [];
-  const applicable = [];
-  const problems = [];
-  for (const rule of trusted.review?.rules ?? []) {
-    const repo = ruleRepo(root, trusted, rule, state);
-    const commit = commitFor(root, trusted, state, repo);
-    const docs = rule.read.map((doc) => ({ doc, text: docAt(root, repo, commit, doc) }));
-    const paths = rule.paths ?? frontmatterPaths(docs.find((d) => d.text)?.text) ?? null;
-    const scope = rule.repo ? { [rule.repo]: changed[rule.repo] ?? [] } : changed;
-    const matched = Object.entries(scope).flatMap(([r, files]) => files.filter((f) => !paths || matchesAny(f, paths)).map((f) => (multi ? `${r}/${f}` : f)));
-    if (!matched.length) continue;
-    const missing = docs.filter((d) => !d.text).map((d) => d.doc);
-    if (missing.length) problems.push(`review rule ${rule.id}: required document(s) unavailable at the frozen base: ${missing.join(', ')}`);
-    applicable.push({ rule, repo, docs, paths, matched });
+// One project document as the attempt's base holds it, copied to `<dir>/base/<rel>`; returns that file, or null when
+// the base does not hold it. A path inside a repo is read at the attempt's base commit for that repo (or the repo's
+// fetched base when the attempt does not hold the repo); a path outside every repo is read from the project root.
+export function docAtBase(root, state, adapter, rel, dir) {
+  const spec = repoOfPath(adapter, rel);
+  if (!spec) {
+    const f = path.resolve(root, rel);
+    return fs.existsSync(f) ? f : null;
   }
-  if (problems.length) throw refuse(`review readiness refused:\n  - ${problems.join('\n  - ')}`, 'restore the required documents in the project base; a ticket worktree copy cannot replace the frozen policy');
-  for (const { rule, repo, docs, paths, matched } of applicable) {
-    const read = [];
-    const worktreeCopies = {};
-    for (const d of docs.filter((x) => x.text)) {
-      const file = path.join(attemptDir(root, state.id), 'rules', `${sha256(d.text).slice(0, 12)}-${path.posix.basename(d.doc)}`);
-      // Named failure (I-109): the copy was written here, while the bundle was still being built and before the handoff was
-      // recorded, so a `wf status` run at that moment was refused with "extra file (not written by wf)", and a handoff
-      // refused afterwards left the copy behind. The caller writes `pending` (`writeRuleDocuments`) inside the transaction that
-      // records the handoff; there is no write here (a write at once, for a caller with no `pending`, was reachable by none).
-      if (!pending.some((p) => p.file === file)) pending.push({ file, text: d.text });
-      read.push(file);
-      // The worktree copy counts as read only when the ticket did not change it (then it is the same document).
-      const wt = repo && state.repos[repo.name]?.worktree;
-      if (wt && !(changed[repo.name] ?? []).includes(d.doc)) worktreeCopies[file] = path.join(wt, d.doc);
-    }
-    const docChangedByTicket = Boolean(repo && rule.read.some((doc) => (changed[repo.name] ?? []).includes(path.posix.normalize(doc))));
-    out.push({ id: rule.id, read, docs: rule.read, matched, paths, docChangedByTicket, missing: docs.filter((x) => !x.text).map((x) => x.doc), worktreeCopies });
-  }
+  const inRepo = spec.path === '.' ? rel : rel.slice(spec.path.replace(/\/+$/, '').length + 1);
+  const own = state?.repos?.[spec.name];
+  const cwd = own?.worktree && fs.existsSync(own.worktree) ? own.worktree : path.join(root, spec.path);
+  if (!fs.existsSync(cwd)) return null;
+  const at = (ref) => git(cwd, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], { allowFail: true }) || null;
+  const commit = own?.baseSha ?? at(`${spec.remote || 'origin'}/${spec.base}`) ?? at(spec.base);
+  if (!commit) return null;
+  const r = run('git', ['show', `${commit}:${inRepo}`], { cwd, allowFail: true });
+  if (r.status !== 0) return null;
+  const out = path.join(dir, 'base', rel);
+  fs.mkdirSync(path.dirname(out), { recursive: true });
+  fs.writeFileSync(out, r.stdout);
   return out;
-}
-
-// Writes the trusted copies `reviewRules` collected (a copy already on disk is the same bytes: its name carries its hash).
-// Called inside the evidence transaction that records the handoff, before it is sealed.
-export function writeRuleDocument({ file, text }) {
-  if (fs.existsSync(file)) return;
-  prepareWrite(file);
-  mkdirStateDirectory(path.dirname(file), { recursive: true });
-  writeNoFollow(file, text);
-}
-export const writeRuleDocuments = (pending) => { for (const doc of pending) writeRuleDocument(doc); };
-
-// Named failure: unavailable handed documents were discovered only after an expensive review.
-// Check the exact handed files, never substitute a ticket's edited copy for a frozen rule document.
-// `pending`: rule documents collected but not yet written (`reviewRules`), judged from the text the handoff will write.
-export function reviewDocumentProblems(bundle, pending = []) {
-  const documents = [
-    ...(bundle.rules ?? []).flatMap((r) => r.read.map((file) => ({ label: `rule ${r.id}`, file }))),
-    ...(bundle.skills ?? []).map((s) => ({ label: `skill ${s.name}`, file: s.file })),
-    ...(bundle.invariants ? [{ label: 'invariants', file: bundle.invariants }] : []),
-    ...(bundle.roleAppendix ? [{ label: 'role appendix', file: bundle.roleAppendix }] : []),
-  ];
-  const problems = [];
-  for (const { label, file } of documents) {
-    try {
-      if (typeof file !== 'string' || !path.isAbsolute(file)) throw new Error('no absolute handed path');
-      const waiting = pending.find((p) => p.file === file);
-      const data = waiting ? { bytes: Buffer.from(waiting.text) } : readRegular(file);
-      if (!data || !data.bytes.length || data.bytes.length > 4 * 1024 * 1024) throw new Error('missing, unreadable, linked, empty or larger than 4 MiB');
-      new TextDecoder('utf-8', { fatal: true }).decode(data.bytes);
-    } catch (error) {
-      problems.push(`${label}: required document unavailable: ${file ?? '(no file)'} (${error.message})`);
-    }
-  }
-  return problems;
-}
-
-// Skills this role needs for this round: always without `when`; `visual` when the gate collected screenshots;
-// `{ paths }` when a changed file (in any repo) matches, so a review before the gate needs it too.
-export function requiredSkills(cfg, role, state, changed) {
-  const files = Object.values(changed ?? {}).flat();
-  const visual = screenshots(state).length > 0;
-  return (cfg.requires.skills ?? []).filter((s) => (s.roles ?? []).includes(role)).filter((s) => {
-    if (s.when === undefined || s.when === null) return true;
-    if (s.when === 'visual') return visual;
-    if (Array.isArray(s.when?.paths)) return files.some((f) => matchesAny(f, s.when.paths));
-    return false;
-  });
-}
-
-export function skillFiles(root, skills, runtime) {
-  return skills.map((s) => ({ name: s.name, file: findSkill(root, s.name, runtime)?.path ?? null }));
-}
-
-// A rule verdict per applicable rule: `{ rule, verdict: complies|finding|not-applicable, evidence }`, with one line of
-// evidence; a `finding` verdict names a finding of the same closure.
-const VERDICTS = new Set(['complies', 'finding', 'not-applicable']);
-export function ruleVerdicts(rules, closure) {
-  const entries = Array.isArray(closure?.rules) ? closure.rules : [];
-  const findings = new Set((closure?.findings ?? []).map((f) => f.id));
-  const problems = [];
-  const verdicts = [];
-  for (const r of rules ?? []) {
-    const e = entries.find((x) => x?.rule === r.id);
-    if (!e) problems.push(`rule ${r.id}: no verdict (it governs ${r.matched.length} changed file(s): ${r.matched.slice(0, 5).join(', ')}${r.matched.length > 5 ? ' …' : ''})`);
-    else if (!VERDICTS.has(e.verdict)) problems.push(`rule ${r.id}: verdict must be complies, finding or not-applicable, not \`${e.verdict}\``);
-    else if (!String(e.evidence ?? '').trim()) problems.push(`rule ${r.id}: ${e.verdict} needs evidence (file:line or the document's section)`);
-    else if (e.verdict === 'finding' && !findings.has(e.finding ?? e.evidence)) problems.push(`rule ${r.id}: a finding verdict names a finding id of this closure in \`finding\` (known: ${[...findings].join(', ') || 'none'})`);
-    else verdicts.push({ rule: r.id, verdict: e.verdict, evidence: String(e.evidence), finding: e.verdict === 'finding' ? e.finding ?? e.evidence : null, docChangedByTicket: r.docChangedByTicket });
-  }
-  return { problems, verdicts };
-}
-
-// Doctor: rule documents absent at the adapter base, and rules that govern every change (no paths, no frontmatter).
-export function ruleWarnings(root, cfg, commit) {
-  const out = [];
-  for (const rule of cfg.review?.rules ?? []) {
-    const repo = ruleRepo(root, cfg, rule);
-    const at = repo && repo.name === adapterLocation(root, cfg).repo.name ? commit : repo ? git(repoDir(root, repo), ['rev-parse', repo.base], { allowFail: true }) : null;
-    const docs = rule.read.map((doc) => ({ doc, text: docAt(root, repo, at, doc) }));
-    const missing = docs.filter((d) => !d.text).map((d) => d.doc);
-    if (missing.length) out.push({ check: `review rule ${rule.id}`, problem: `document(s) not committed on the base: ${missing.join(', ')}; a reviewer cannot be asked to read them, so they are skipped`, fix: 'commit the documents on the base branch, or fix the paths under `review.rules[].read`' });
-    if (!rule.paths && !frontmatterPaths(docs.find((d) => d.text)?.text)) out.push({ check: `review rule ${rule.id}`, problem: 'no `paths` and no `paths:` frontmatter in its first document: it applies to every change', fix: 'add `paths: [globs]` to the rule or to the document\'s frontmatter, unless every change should be judged against it' });
-  }
-  return out;
-}
-
-// ---- Design system checks over the attempt's added lines ----
-// Named failure: a UI ticket shipped a hand-rolled <table> instead of the project's shared table component, and data
-// tables without the shared pagination, after a blind review whose prompt only implied "follow the design system".
-// The adapter's `designSystem.rules` are run over the lines this attempt added (adapter at base): a `forbidPattern`
-// hit is an added line that matches it; a `pattern` + `requireWith` hit is the first added line matching `pattern` in a
-// file whose committed text lacks one of the `requireWith` patterns. Each hit is put in the reviewer's bundle and
-// needs a verdict in the closure (`designHits`): `justified` with evidence, or `finding` naming a finding.
-
-// Added lines per changed file, from the committed diff against the attempt's base: { file: [{ line, text }] }.
-export function addedLines(worktree, base) {
-  const diff = git(worktree, ['diff', '-U0', '--no-color', '--no-ext-diff', base, 'HEAD'], { allowFail: true });
-  const out = {};
-  let file = null;
-  let n = 0;
-  for (const l of String(diff ?? '').split('\n')) {
-    if (l.startsWith('+++ ')) {
-      file = l === '+++ /dev/null' ? null : l.slice(4).replace(/^b\//, '');
-      continue;
-    }
-    const h = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(l);
-    if (h) {
-      n = Number(h[1]);
-      continue;
-    }
-    if (!file || l.startsWith('---')) continue;
-    if (l.startsWith('+')) {
-      (out[file] ??= []).push({ line: n, text: l.slice(1) });
-      n += 1;
-    }
-  }
-  return out;
-}
-
-const asList = (v) => (v === undefined || v === null ? [] : Array.isArray(v) ? v : [v]);
-
-export function designChecks(root, trusted, state) {
-  const ds = trusted.designSystem;
-  if (!ds) return null;
-  const rules = (ds.rules ?? []).map((r) => ({ id: r.id, description: r.description, read: asList(r.read), kind: r.forbidPattern !== undefined ? 'forbid' : 'requireWith', paths: r.paths ?? null, except: r.except ?? null }));
-  const multi = Object.keys(state.repos).length > 1;
-  const hits = [];
-  for (const [repo, r] of Object.entries(state.repos)) {
-    if (!r.worktree || !fs.existsSync(r.worktree)) continue;
-    const base = git(r.worktree, ['merge-base', changeBase(state, repo), 'HEAD'], { allowFail: true }) || r.base;
-    const added = addedLines(r.worktree, base);
-    for (const rule of ds.rules ?? []) {
-      if (rule.repo && rule.repo !== repo) continue;
-      const trigger = new RegExp(rule.forbidPattern ?? rule.pattern);
-      for (const [file, lines] of Object.entries(added)) {
-        if (rule.paths && !matchesAny(file, rule.paths)) continue;
-        if (rule.except && matchesAny(file, rule.except)) continue;
-        let missing = [];
-        if (rule.requireWith) {
-          const text = git(r.worktree, ['show', `HEAD:${file}`], { allowFail: true }) ?? '';
-          missing = rule.requireWith.filter((x) => !new RegExp(x).test(text));
-          if (!missing.length) continue;
-        }
-        for (const l of lines) {
-          if (!trigger.test(l.text)) continue;
-          const where = `${multi ? `${repo}/` : ''}${file}:${l.line}`;
-          hits.push({ id: `${rule.id}@${where}`, rule: rule.id, description: rule.description, repo, file, line: l.line, text: l.text.trim().slice(0, 200), ...(missing.length ? { missing } : {}) });
-          if (rule.requireWith) break; // one hit per file: the file lacks the required companion
-        }
-      }
-    }
-  }
-  return { components: ds.components ?? [], rules, hits };
-}
-
-// A verdict per hit: `{ id, verdict: justified|finding, evidence, finding }`.
-export function designVerdicts(hits, closure) {
-  const entries = Array.isArray(closure?.designHits) ? closure.designHits : [];
-  const findings = new Set((closure?.findings ?? []).map((f) => f.id));
-  const problems = [];
-  const verdicts = [];
-  for (const h of hits ?? []) {
-    const e = entries.find((x) => x?.id === h.id);
-    const label = `${h.id} (${h.description}: \`${h.text}\`${h.missing ? `; the file has no ${h.missing.join(', ')}` : ''})`;
-    if (!e) problems.push(`design check ${label}: no verdict`);
-    else if (!['justified', 'finding'].includes(e.verdict)) problems.push(`design check ${h.id}: verdict must be justified or finding, not \`${e.verdict}\``);
-    else if (!String(e.evidence ?? '').trim()) problems.push(`design check ${h.id}: ${e.verdict} needs evidence (why the exception holds, or what is wrong)`);
-    else if (e.verdict === 'finding' && !findings.has(e.finding)) problems.push(`design check ${h.id}: a finding verdict names a finding id of this closure in \`finding\` (known: ${[...findings].join(', ') || 'none'})`);
-    else verdicts.push({ id: h.id, rule: h.rule, verdict: e.verdict, evidence: String(e.evidence), finding: e.verdict === 'finding' ? e.finding : null });
-  }
-  return { problems, verdicts };
 }

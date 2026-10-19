@@ -4,7 +4,6 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { canonical } from './paths.mjs';
 import { WfError } from './util.mjs';
 
 export const STATE_FOLDERS = ['.wf-evidence', '.workflow-evidence', '.wf-worktrees', '.workflow-maintenance'];
@@ -49,7 +48,7 @@ export function ensureGitStateExcludes(root) {
   const commonResult = gitCall(root, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
   if (commonResult.status !== 0) throw refused('cannot locate the common Git directory for local state excludes');
   const common = fs.realpathSync(commonResult.stdout.trim()), info = path.join(common, 'info'), file = path.join(info, 'exclude');
-  if (canonical(file) !== file) throw refused('Git exclude path is a link; state ignores were not written through it');
+  if (fs.lstatSync(file, { throwIfNoEntry: false })?.isSymbolicLink() || fs.lstatSync(info, { throwIfNoEntry: false })?.isSymbolicLink()) throw refused('Git exclude path is a link; state ignores were not written through it');
   realDirectory(info);
   fs.mkdirSync(info, { recursive: true });
   const fd = fs.openSync(file, fs.constants.O_RDWR | fs.constants.O_CREAT | fs.constants.O_APPEND | fs.constants.O_NOFOLLOW, 0o644);

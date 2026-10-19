@@ -77,7 +77,7 @@ test('an attempt that edits its runner module to always pass is still judged by 
     assert.match(read(r.log), /^base runner ticket test fails/);
     assert.equal(eventsOf(p, 'test.run', 'TK-6.1')[0].pass, false);
     // The module ran from the content-addressed cache in the user folder.
-    assert.equal(fs.readdirSync(path.join(p.env.WF_USER_DIR, 'modules')).filter((f) => /^[0-9a-f]{40}$/.test(f)).length, 1);
+    assert.equal(fs.readdirSync(path.join(p.env.WF_USER_DIR, 'modules')).filter((f) => /^[0-9a-f]{40}-[0-9a-f]{12}$/.test(f)).length, 1);
   } finally {
     done(p);
   }
@@ -111,7 +111,7 @@ test('a runner module missing from the base is an error naming the base', async 
     useDoubles(p);
     startAttempt(p, 'TK-7.1');
     change(p, 'TK-7.1', 'server', { 'steps/new.mjs': 'export default async () => ({ pass: true });\n' });
-    await assert.rejects(runTests(p.root, 'TK-7.1', 'server', 'fast'), /steps\/new\.mjs is not on refs\/remotes\/origin\/trunk/);
+    await assert.rejects(runTests(p.root, 'TK-7.1', 'server', 'fast'), /steps\/new\.mjs is not committed on refs\/remotes\/origin\/trunk/);
     assert.equal(eventsOf(p, 'test.run').length, 0);
   } finally {
     done(p);

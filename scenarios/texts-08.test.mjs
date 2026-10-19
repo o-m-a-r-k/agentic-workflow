@@ -6,11 +6,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { COMMANDS, COMMAND_ALIASES } from '../engine/contract.mjs';
+import { textWords } from '../engine/learn.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const BUDGET = JSON.parse(fs.readFileSync(path.join(ROOT, 'budget.json'), 'utf8'));
 const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
-const words = (text) => text.split(/\s+/).filter(Boolean).length;
+// The release check's own count (engine/learn.mjs), so this test and the release agree on every text.
+const words = (text, file = 'x.md') => textWords(file, text);
 const AGENTS = fs.readdirSync(path.join(ROOT, 'templates', 'agents')).map((f) => `templates/agents/${f}`);
 const SKILLS = fs.readdirSync(path.join(ROOT, 'skills')).map((d) => `skills/${d}/SKILL.md`);
 const TEXTS = [...AGENTS, ...SKILLS, 'templates/session-rules.md', 'templates/risk-checklist.md'];

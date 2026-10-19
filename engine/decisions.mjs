@@ -12,7 +12,7 @@
 // by itself; anything else is recorded by `wf approve --choice --quote`, whose quote must be in a turn the rule accepts.
 import fs from 'node:fs';
 import path from 'node:path';
-import { CONTRACT_VERSION, DECISION_KINDS, WfError, append, attemptDir, hostHome, ledgerFile, listAttempts, readEvents, refusal } from './contract.mjs';
+import { CONTRACT_VERSION, DECISION_KINDS, PROJECT_LEDGER, WfError, append, attemptDir, hostHome, ledgerFile, listAttempts, readEvents, refusal } from './contract.mjs';
 import { callerSession, findHost, projectSessions } from './hosts/index.mjs';
 
 const record = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
@@ -21,7 +21,7 @@ const record = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
 // Both go through stream 5's hash-chained ledger (`append`, `readEvents`), so a hand-written line breaks the chain and
 // every read refuses it. The project ledger is the ledger of the reserved id PROJECT_LEDGER, opened by its own
 // `attempt.started` (item PROJECT_LEDGER, n 0, no repos and no stages) the first time a project-level question is asked.
-export const PROJECT_LEDGER = 'wf-project';
+export { PROJECT_LEDGER };
 const ledgerId = (attempt) => attempt ?? PROJECT_LEDGER;
 
 async function entries(root, attempt) {

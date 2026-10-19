@@ -10,11 +10,12 @@ import {
   DECISION_KINDS, WfError, append, ask, attemptDir, attemptState, canonicalJson, filesRead, launchReviewer, listAttempts,
   loadAdapter, readEvents, refusal, runTests, userDir,
 } from './contract.mjs';
-import { baseOf, baseRef, changedOf, dirtyRepos, foreignMerges, headsOfTree, mergeBaseOf, rootPath, specOf, unreviewedCommits } from './base.mjs';
+import { baseOf, changedOf, dirtyRepos, foreignMerges, headsOfTree, mergeBaseOf, rootPath, specOf, unreviewedCommits } from './base.mjs';
 import { assertFindings, blockersOf, fileOther, foldFindings, nextFindingNumber, refuseOtherOwn } from './findings.mjs';
 import { PROJECT_LEDGER, decisionsOf, flagText, holdOf, itemHistory, projectRoot, resolveAttempt, schema2, sessionFlag } from './attempt.mjs';
+import { docAtBase, ruleDocs } from './rules.mjs';
 import { mkdirStateDirectory } from './state-folders.mjs';
-import { YAML, git, matchesAny, run, sha256 } from './util.mjs';
+import { YAML, git, matchesAny, sha256 } from './util.mjs';
 
 const PLUGIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 // Above about 1,500 product lines one reviewer reads shallowly (design section 2): the review splits by area.
@@ -163,31 +164,9 @@ function consumersOf(root, state, adapter, files) {
   return [...out].sort();
 }
 
-// A project document as the base holds it, never as the attempt's worktree does: a ticket cannot loosen the rules or the
-// invariants it is judged by. A path inside a repo is read at the attempt's base commit (or the fetched base of a repo the
-// attempt does not hold) and copied into the bundle folder; a path outside every repo is read from the project root.
-function fromBase(root, state, adapter, rel, dir) {
-  const spec = [...adapter.repos].sort((a, b) => b.path.length - a.path.length).find((r) => r.path === '.' || rel === r.path || rel.startsWith(`${r.path.replace(/\/+$/, '')}/`));
-  if (!spec) {
-    const f = path.resolve(root, rel);
-    return fs.existsSync(f) ? f : null;
-  }
-  const inRepo = spec.path === '.' ? rel : rel.slice(spec.path.replace(/\/+$/, '').length + 1);
-  const cwd = state.repos[spec.name]?.worktree ?? path.join(root, spec.path);
-  if (!fs.existsSync(cwd)) return null;
-  const commit = state.repos[spec.name]?.baseSha ?? baseRef(cwd, spec);
-  if (!commit) return null;
-  const r = run('git', ['show', `${commit}:${inRepo}`], { cwd, allowFail: true });
-  if (r.status !== 0) return null;
-  const out = path.join(dir, 'base', rel);
-  fs.mkdirSync(path.dirname(out), { recursive: true });
-  fs.writeFileSync(out, r.stdout);
-  return out;
-}
-
 function rulesFor(root, adapter, state, files, dir) {
   const roots = files.map((f) => rootPath(specOf(adapter, f.repo, state.repos[f.repo]), f.path));
-  return [...new Set((adapter.rules ?? []).filter((r) => roots.some((f) => matchesAny(f, r.paths ?? []))).flatMap((r) => r.read ?? []))].map((f) => fromBase(root, state, adapter, f, dir)).filter(Boolean);
+  return ruleDocs(adapter, roots).map((f) => docAtBase(root, state, adapter, f, dir)).filter(Boolean);
 }
 
 // Areas for a split: product files grouped by repo and leading folders, a group above the limit split one folder deeper,
@@ -282,7 +261,7 @@ async function bundle(root, attempt) {
   const cdiff = criteriaDiffSinceReview(L.events);
   const criteriaDiff = cdiff ? path.join(dir, 'criteria-diff.md') : null;
   if (cdiff) fs.writeFileSync(criteriaDiff, `${cdiff}\n`);
-  const invariants = adapter.invariants ? fromBase(root, state, adapter, adapter.invariants, dir) : null;
+  const invariants = adapter.invariants ? docAtBase(root, state, adapter, adapter.invariants, dir) : null;
   const rules = rulesFor(root, adapter, state, files, dir);
   const consumers = consumersOf(root, state, adapter, files);
   const screenTrees = [tree, ...Object.keys(state.repos).map((r) => repoTree(state, r))];

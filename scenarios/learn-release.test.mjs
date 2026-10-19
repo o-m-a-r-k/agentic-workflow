@@ -1,6 +1,7 @@
 // Stream 5: the release check scripts/release.mjs calls. Rule-shaped changes are facts of the tree (refusal ids,
-// commands, adapter keys, event types, words in role, skill, hook and session-rules texts); a net increase over
-// budget.json fails unless a kept or active plugin proposal accounts for it.
+// commands, adapter keys, event types, words in the texts agents read: role, skill, session-rules and risk-checklist
+// templates; hook code is not counted); a net increase over budget.json fails unless a kept or active plugin proposal
+// accounts for it.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -26,7 +27,7 @@ function tree(t, { contract = (s) => s, roleWords = 100, keys = BUDGET.adapterKe
   fs.writeFileSync(path.join(dir, 'hooks', 'session-rules.mjs'), '// a comment with many words that are not counted\nconsole.log("read the rules first");\n');
   return dir;
 }
-const budget = { ...BUDGET, words: { ...BUDGET.words, total: 105 } };
+const budget = { ...BUDGET, words: { ...BUDGET.words, total: 101 } };
 const addRefusal = (s) => s.replace("'answer:not-person': {", "'merge:extra': { stream: 1, when: 'x' },\n  'answer:not-person': {");
 
 test('the tree at the budget passes; counts are by name and words by total', async (t) => {
@@ -34,7 +35,7 @@ test('the tree at the budget passes; counts are by name and words by total', asy
   assert.deepEqual(r.problems, []);
   assert.equal(r.ok, true);
   assert.equal(r.counts.refusals.length, 19);
-  assert.equal(r.counts.words.total, 104);
+  assert.equal(r.counts.words.total, 100); // the hook's code and its string literals are not counted
   assert.equal(r.classification.ruleShaped, false);
 });
 
@@ -57,7 +58,7 @@ test('a replacement is rule-shaped but no net increase; words and role length ar
   assert.deepEqual(r.classification.refusals, { added: ['merge:extra'], removed: ['criteria:max'], net: 0 });
   const long = await checkRelease({ pluginRoot: tree(t, { roleWords: 160 }), budget });
   assert.equal(long.ok, false);
-  assert.ok(long.problems.some((p) => /words: 164 against 105/.test(p)));
+  assert.ok(long.problems.some((p) => /words: 160 against 101/.test(p)));
   assert.ok(long.problems.some((p) => /reviewer\.md: 160 words, over the 150-word role limit/.test(p)));
   const covered = await checkRelease({ pluginRoot: tree(t, { roleWords: 140 }), budget, proposals: [{ scope: 'plugin', status: 'kept', adds: { words: 40 } }] });
   assert.equal(covered.ok, true, covered.problems.join('\n'));

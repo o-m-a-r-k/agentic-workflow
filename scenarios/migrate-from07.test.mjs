@@ -26,7 +26,8 @@ test('--from-07 shows the seeded conversion, every dropped key, per-ticket steps
     assert.deepEqual(r.data.migration.perTicketSteps.map((s) => s.id), ['tk7-proof']);
     assert.match(r.text, /Per-ticket steps dropped: tk7-proof/);
     assert.match(r.text, /core\/test\/support\/capture\.mjs:1: import \{ shoot \} from "\.\.\/\.\.\/\.workflow\/browser\/shots\.mjs"/);
-    assert.match(r.text, /core\/\.workflow\/steps\/runner\.mjs .*imports \.\.\/browser\/shots\.mjs, outside the module's folder/);
+    // The shared loader extracts the module's top-level folder (all of `.workflow/`), so a sibling import resolves.
+    assert.doesNotMatch(r.text, /runner\.mjs .*imports \.\.\/browser\/shots\.mjs/);
     // Seeded: tests through the module with the container lock, the tracker and delivery modules, statuses as stages.
     const ch = Object.fromEntries(r.data.diff.changes.map((c) => [c.key, c.to]));
     assert.deepEqual(ch['tests.core'].fast, { module: { repo: 'core', path: '.workflow/steps/runner.mjs' }, lock: { name: 'containers', count: 2 } });
