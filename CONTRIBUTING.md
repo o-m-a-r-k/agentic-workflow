@@ -52,6 +52,25 @@ engine starts.
 - Some tests wait on purpose (a gate step that sleeps until it is stopped, a lease another gate holds, a terminal
   that types after two seconds): the property they prove takes that time. Do not shorten them to win time.
 
+## Building a release (maintainer)
+
+Every release carries every open improvement. What keeps it fast is the order of the work, not fewer fixes:
+
+1. **Investigate first**: each item's failure is traced in the code and in the ledger that showed it, before anything is built.
+2. **A rule change gets a design review before it is built**: a change to what the workflow asks the person, refuses or lets
+   through is reviewed as a design (its failure modes, its backstop, ledgers of earlier releases) before any code. Named failure
+   (0.7.33): a redesign built first had a backstop that did not bind, found only by the review after the build.
+3. **Builders work in parallel, one per area**: items that touch separate modules go to separate builders at once; no two builders
+   edit the same file. Named failure (0.7.33): one builder took seven items in a row, 58 minutes.
+4. **One review, one consolidated fix pass, one re-check**: the review gives every finding at every severity in one list; all are
+   fixed in one planned pass; a second round on the same feature is a re-design, not another patch.
+5. **Tests**: run the scenario files a change touches, and when a change removes or changes a behaviour, every scenario file that
+   names its messages, ids or commands, wherever it is. Named failure (0.7.33): a test in an untouched file relied on a removed
+   question and failed only in CI. The whole suite runs in CI, never on the maintainer's machine.
+6. **Settle the tree, then CI once**: re-check findings fixed, improvements closed (`wf improve close`, their history files
+   committed in the release), privacy checked, then push the release branch and run CI exactly once. Named failure (0.7.33): CI
+   was started before the re-check and again before the closures, two runs cancelled.
+
 ## Releasing (maintainer)
 
 A release is one command once CI is green on the release branch (D83):
@@ -90,7 +109,8 @@ the same command again after the fix goes on. The settings live outside the repo
 { "syncRoots": ["<a project root>"], "worktreeFolder": "<the folder of the dev worktrees>", "privacyDenylist": "<the denylist file>" }
 ```
 
-`scenarios/release-script.test.mjs` tests the dry run only; the steps talk to GitHub and the hosts and are never run by the suite.
+The check stops when an improvement history file (`improvements/`) sits uncommitted in any worktree of the repository: it
+belongs in the release. `scenarios/release-script.test.mjs` tests the dry run only; the steps talk to GitHub and the hosts and are never run by the suite.
 
 ## Every fix names its failure and ships its test
 

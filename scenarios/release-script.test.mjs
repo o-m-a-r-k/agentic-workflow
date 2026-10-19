@@ -53,6 +53,7 @@ test('the release dry run prints every step from local facts, names what each ch
   has(`origin/release/${version} must equal dev/${version} (locally at ${sha})`);
   has(`package.json, .claude-plugin/plugin.json, .codex-plugin/plugin.json at that commit say ${version}; docs/releases/v${version}.md exists there`);
   has(`node scripts/ci-passed.mjs ${sha}`);
+  has('no improvement history file (improvements/) left uncommitted in any worktree of this repository');
   // 2. privacy
   has(`denylist: ${denylist}\n`);
   has('WF_PRIVACY_DENYLIST=<denylist> node --test scenarios/privacy.test.mjs there (it must run, not skip)');
