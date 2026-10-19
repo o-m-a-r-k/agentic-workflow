@@ -1,7 +1,8 @@
 // End to end, the real `wf` with no doubles: a 0.7 project (schema-1 adapter, modules under `.workflow/`, 0.7 ledgers
 // with a batch, a held and an open attempt) is migrated with `wf init --from-07` and `wf migrate attempts`, then one
 // ticket runs on the migrated adapter: its tests are the old module, its tracker is reached through the owner's
-// connector (read back from the owner's transcript), and its delivery is the project's module.
+// connector (read back from the owner's transcript), and its 0.7 delivery module became a merge request the person
+// opens and merges.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
@@ -10,8 +11,6 @@ import path from 'node:path';
 import { git, transcript, YAML } from './helpers/index.mjs';
 import { makeModuleProject } from './onboard-fixture.mjs';
 import { events, fakeReviewerHost, reviewFiles, waitFor, wf } from './e2e-support.mjs';
-
-const REVIEW_REQUEST = 'import { spawnSync } from "node:child_process";\nexport default async ({ repos }) => {\n  const accepted = {};\n  for (const [name, r] of Object.entries(repos)) {\n    const ahead = spawnSync("git", ["rev-list", "--count", `${r.remote}/${r.base}..${r.tip}`], { cwd: r.dir, encoding: "utf8" });\n    if (ahead.stdout.trim() === "0") continue;\n    const p = spawnSync("git", ["push", "--quiet", r.remote, `${r.tip}:refs/heads/${r.base}`], { cwd: r.dir, encoding: "utf8" });\n    if (p.status !== 0) return { state: "waiting", next: p.stderr };\n    accepted[name] = { accepted: r.tip };\n  }\n  return { state: "done", evidence: { repos: accepted } };\n};\n';
 
 test('from 0.7: init --from-07 and migrate attempts, then a ticket on the migrated adapter through connector and module', async () => {
   const p = makeModuleProject();
@@ -40,8 +39,8 @@ test('from 0.7: init --from-07 and migrate attempts, then a ticket on the migrat
     // Nor can the agent close the held 0.7 attempt around the person's hold.
     assert.match(wf(p, ['abandon', '--attempt', 'TK-4.1', '--reason', 'tidy up'], { code: 75, ...as }).err, /refused \(hold\): TK-4\.1 is held by the person \("stop everything"\)/);
 
-    // The project commits its migrated adapter and a working delivery module on the base.
-    p.commit('core', { '.workflow/delivery/review-request.mjs': REVIEW_REQUEST }, 'adapter 0.8', { push: true });
+    // The project commits its migrated adapter on the base.
+    p.commit('core', {}, 'adapter 0.8', { push: true });
 
     const started = wf(p, ['start', 'TK-5'], as);
     assert.match(started.out, /started TK-5\.2/);
@@ -60,28 +59,33 @@ test('from 0.7: init --from-07 and migrate attempts, then a ticket on the migrat
     await waitFor(review);
     assert.match(wf(p, ['review', '--record', review], as).out, /review 1 recorded .*coverage complete.*0 open blocker/);
 
-    // Delivery: the project's module pushes the change; the tracker stages go through the owner's connector.
+    // Delivery: the 0.7 delivery module became a merge request the person opens and merges; the engine matches the
+    // merge by patch-id. The tracker stages go through the owner's connector.
     const d1 = wf(p, ['deliver'], as);
-    assert.match(d1.out, /0 module: done/);
+    assert.match(d1.out, /0 merge-request: done — the person opens a merge request in core/);
+    assert.match(d1.out, /1 wait-merged: waiting/);
+    git(wt('core'), ['push', '--quiet', 'origin', 'HEAD:trunk']);
+    const d1b = wf(p, ['deliver'], as);
+    assert.match(d1b.out, /1 wait-merged: done/);
     git(p.repos.core.dir, ['fetch', '--quiet', 'origin']);
     assert.match(git(p.repos.core.dir, ['show', 'origin/trunk:src/modules/notes/list.mjs']), /localeCompare/);
-    fs.writeFileSync(/to (\S+comments\/uat\.md)/.exec(d1.out)[1], 'Open the notes list: the notes are in title order.\n');
+    fs.writeFileSync(/to (\S+comments\/uat\.md)/.exec(d1b.out)[1], 'Open the notes list: the notes are in title order.\n');
     const d2 = wf(p, ['deliver'], as);
-    const mark = 'wf:TK-5.2:stage-1:comment';
-    assert.match(d2.out, new RegExp(`1 status: pending — .*must end with "${mark}"`));
+    const mark = 'wf:TK-5.2:stage-2:comment';
+    assert.match(d2.out, new RegExp(`2 status: pending — .*must end with "${mark}"`));
     // The owner performs the operations through its connector; the engine reads them back from its transcript.
     const t = transcript({ home: p.home, cwd: p.root, session: owner, start: new Date().toISOString() });
     t.human('Implement TK-5.').toolCall('mcp__board__add_comment', { issue: 'TK-5', body: `Open the notes list: the notes are in title order.\n\n${mark}` }, 'comment added');
     t.write();
-    assert.match(wf(p, ['deliver'], as).out, /1 status: pending — .*Item TK-5 to "Testing"/);
+    assert.match(wf(p, ['deliver'], as).out, /2 status: pending — .*Item TK-5 to "Testing"/);
     t.toolCall('mcp__board__set_status', { issue: 'TK-5', status: 'Testing' }, 'status set to Testing').write();
     const d4 = wf(p, ['deliver'], as);
-    assert.match(d4.out, /1 status: done/);
-    assert.match(d4.out, /2 status: pending — .*report its labels/);
+    assert.match(d4.out, /2 status: done/);
+    assert.match(d4.out, /3 status: pending — .*labels/);
     // The labels the owner read through its connector: not Urgent, so the label-filtered stages are skipped.
-    t.toolCall('mcp__board__get_issue', { issue: 'TK-5' }, JSON.stringify({ id: 'TK-5', labels: ['Minor'] })).write();
+    t.at(new Date(Date.now() + 1000).toISOString()).toolCall('mcp__board__get_issue', { issue: 'TK-5' }, JSON.stringify({ id: 'TK-5', labels: ['Minor'] })).write();
     assert.match(wf(p, ['deliver'], as).out, /delivered: every stage is done/);
-    assert.deepEqual(events(p, 'TK-5.2', 'stage').filter((e) => e.data.index >= 2).map((e) => e.data.state), ['pending', 'skipped', 'skipped', 'skipped']);
+    assert.deepEqual(events(p, 'TK-5.2', 'stage').filter((e) => e.data.index >= 3).map((e) => e.data.state), ['pending', 'skipped', 'skipped', 'skipped']);
 
     assert.match(wf(p, ['close'], as).out, /TK-5\.2 closed \(shipped\)/);
     const rows = fs.readFileSync(path.join(p.env.WF_USER_DIR, 'telemetry', 'modular.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
