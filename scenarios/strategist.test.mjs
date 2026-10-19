@@ -323,6 +323,41 @@ test('0.7.33 (I-229, D84): at the round count the strategist decides first and n
   ok(v7.run(root, ['handoff', 'reviewer', '--agent', 'rev-z', '--attempt', a.id, '--owner', a.owner]));
 });
 
+// Review of 0.7.33 (H3, M5, L7). H3 is a design guard with no field case yet: with the strategist deciding at the count, a prediction
+// judged only after the next count could never be missed in time, so two counts in a row could pass without reaching the person.
+// M5: a hold placed before the count and a product decision say nothing about how the course goes on, so neither settles it.
+test('0.7.33 review (H3, M5): at the round count a prediction is judged by the next count; a hold placed before the count and a product decision settle nothing', () => {
+  const ctx = project('count-guards', { strategy: { reviewRoundsEscalate: 2 } });
+  const a = started(v7, ctx, { item: 'ENG-791' });
+  const { root, base } = ctx;
+  reviewRound(v7, ctx, a, { findings: 1 });
+  // A hold placed before the count, lifted after it was reached.
+  ok(v7.run(root, ['hold', '--reason', 'waiting on a product answer', '--attempt', a.id]));
+  reviewRound(v7, ctx, a, { findings: 1 });
+  ok(v7.run(root, ['release', '--attempt', a.id]));
+  // A product decision recorded after the count was reached.
+  append(root, a.id, 'product.decided', { id: 'PD1', question: 'Which label?', options: ['Day 1', '1'], recommend: 'Day 1', basis: 'the copy deck', notChecked: 'nothing', choice: 'Day 1', plain: 'Which label?', quote: 'Day 1', via: 'terminal' }, 'human:scenario');
+  const sig = v7.signals(root, a.id).strategy.escalation;
+  assert.equal(sig.firing?.id, 'rounds-escalation', 'neither settles the count');
+  assert.equal(sig.settledBy, null);
+  // The strategist's prediction must be judged by the next count: 2 recorded rounds now, so by round 4 at the latest.
+  const h = ok(v7.run(root, ['handoff', 'strategist', '--agent', 'strat-g', '--attempt', a.id, '--reason', '2 review rounds handed', '--json'])).json();
+  const late = strategistClosure(base, h.bundle, { strategist: 'strat-g', action: 'continue', rationale: 'Each round fixes the last.', prediction: { signal: 'blockingLatest <= 0', by: 9 } });
+  const refused = v7.run(root, ['strategy', 'record', '--closure', late.file, '--attempt', a.id], { ownerSilent: true });
+  assert.equal(refused.code, 75);
+  assert.match(refused.err, /at the round count a prediction is judged by the next count: `prediction.by` must name a review round no later than 4 \(2 recorded now, the next count 2 rounds on\), not 9/);
+  assert.ok(refusalRows(root).some((x) => x.id === 'strategy:prediction-past-count'));
+  const inTime = strategistClosure(base, h.bundle, { strategist: 'strat-g', action: 'continue', rationale: 'Each round fixes the last.', prediction: { signal: 'blockingLatest <= 0', by: 4 } });
+  ok(v7.run(root, ['strategy', 'record', '--closure', inTime.file, '--attempt', a.id]));
+  reviewRound(v7, ctx, a, { findings: 1 });
+  reviewRound(v7, ctx, a, { findings: 1 });
+  // At the next count the prediction has been judged: missed, which counts toward the escalation the person gets.
+  const at4 = v7.signals(root, a.id).strategy;
+  assert.equal(at4.escalation.firing?.id, 'rounds-escalation');
+  assert.equal(at4.decisions.at(-1).prediction_status.status, 'missed');
+  assert.equal(at4.missedPredictionsInARow, 1);
+});
+
 // 0.7.29 (I-214), named failure (field): an attempt an earlier release let run past ten rounds unasked (I-185) was asked the round
 // question at 17 handed rounds, and the person answered "Keep going as now", whose promise is another ten rounds before asking
 // again. At 20 the next implementer handoff asked the same question again, three rounds later: the next question was keyed to the
@@ -394,7 +429,7 @@ test('a round question an earlier release opened before it was due again is with
   // At 9 the count is due: the strategist decides, and its decision settles it (due again at 13).
   assert.match(handRound(ctx, a, 'rev-10').err, COUNT(9));
   const h = ok(wf(root, ['handoff', 'strategist', '--agent', 'strat-9', '--attempt', a.id, '--reason', '9 review rounds handed', '--json'])).json();
-  ok(wf(root, ['strategy', 'record', '--closure', strategistClosure(base, h.bundle, { strategist: 'strat-9', action: 'continue', rationale: 'Each round fixes what the last one found.', prediction: { signal: 'blockingLatest <= 0', by: 20 } }).file, '--attempt', a.id]));
+  ok(wf(root, ['strategy', 'record', '--closure', strategistClosure(base, h.bundle, { strategist: 'strat-9', action: 'continue', rationale: 'Each round fixes what the last one found.', prediction: { signal: 'blockingLatest <= 0', by: 4 } }).file, '--attempt', a.id]));
   for (const n of [10, 11, 12]) ok(handRound(ctx, a, `rev-${n}a`));
   // An early question opened at 12 is withdrawn against the strategist's decision, and no answer to it is taken.
   legacyQuestion(ctx, a, 'A3', 12);

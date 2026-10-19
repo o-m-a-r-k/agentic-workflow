@@ -237,6 +237,10 @@ export const readMatches = (g, f) => {
 // their blobs come from one `git ls-tree -r -z`; a commit's tree never changes, so the last few listings are kept for the process.
 const TREES = new Map();
 export function treeEntries(dir, commit) {
+  // Review of 0.7.33 (L3): only a commit id names one tree for good; anything else (a ref, HEAD) is resolved first.
+  const sha = /^[0-9a-f]{40}([0-9a-f]{24})?$/.test(String(commit)) ? String(commit) : git(dir, ['rev-parse', '--verify', '--quiet', `${commit}^{commit}`], { allowFail: true });
+  if (!sha) return new Map();
+  commit = sha;
   const key = `${dir}\0${commit}`;
   const kept = TREES.get(key);
   if (kept) return kept;
@@ -409,6 +413,28 @@ const droppedFrom = (earlier, pinned) => earlier.files.filter((f) => !(pinned?.r
 // reopens: `wf reopen` admits a new one). It is derived from the ledger and never decides anything: a ledger that cannot be read has
 // no index (null), and an index that cannot be written is rebuilt next time.
 const CLOSING = new Set(['closed', 'abandoned', 'analysis.closed', 'shipped.closed']);
+// The hash of a ledger's last entry, read from its end (growing the read until the line is whole), or null.
+function lastHash(file, size) {
+  if (!size) return null;
+  const fd = fs.openSync(file, 'r');
+  try {
+    for (let want = Math.min(size, 64 * 1024); ; want = Math.min(size, want * 4)) {
+      const buf = Buffer.alloc(want);
+      fs.readSync(fd, buf, 0, want, size - want);
+      const text = buf.toString('utf8').replace(/\n$/, '');
+      const nl = text.lastIndexOf('\n');
+      if (nl >= 0 || want === size) {
+        try {
+          return JSON.parse(text.slice(nl + 1)).hash ?? null;
+        } catch {
+          return null;
+        }
+      }
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+}
 const INDEXED = /"type":"(?:validation\.corrected|closed|abandoned|analysis\.closed|shipped\.closed)"/;
 export function correctionIndex(root, id) {
   const ledger = path.join(attemptDir(root, id), 'ledger.jsonl');
@@ -425,7 +451,11 @@ export function correctionIndex(root, id) {
     cached = JSON.parse(fs.readFileSync(file, 'utf8'));
   } catch {}
   if (cached?.v !== 1 || !Number.isInteger(cached.offset) || cached.offset > size || !Array.isArray(cached.steps)) cached = null;
-  if (cached && cached.offset === size) return cached;
+  // Review of 0.7.33 (L2): a ledger of the same size is the indexed one only when its last entry is the one indexed.
+  if (cached && cached.offset === size) {
+    if (lastHash(ledger, size) === cached.last) return cached;
+    cached = null;
+  }
   const scan = (idx) => {
     const fd = fs.openSync(ledger, 'r');
     try {

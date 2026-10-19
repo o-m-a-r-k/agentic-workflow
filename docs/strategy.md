@@ -92,7 +92,7 @@ reached before a gate is spent on it). Nothing is refused: a handoff made past i
 note. A decision answers the signals it saw (`course` on the recorded decision), and its action drives the next step:
 `consolidate` (one planned pass for all remaining work, with an expectation), `split`, or `continue` with a new `expect`,
 which is what the course is compared with from then on. It applies to every attempt in flight; `roles.strategist: false` or
-`strategy.enabled: false` turns it off with the round escalation.
+`strategy.enabled: false` turns it off with the round count.
 
 ## The strategist
 
@@ -140,7 +140,7 @@ Three things, none of them a number the engine picked:
 - the strategist's own rule above.
 
 Everything else the engine checks is a fact: the tree, evidence, reviewer independence, the gate, approvals and the combined-tree
-check. `strategy: { enabled: false }` or `roles: { strategist: false }` turns the round escalation off for a project. Both
+check. `strategy: { enabled: false }` or `roles: { strategist: false }` turns the round count off for a project. Both
 stops are the person's own and apply to every implementation attempt still being worked, whichever release admitted it (D34);
 the obligations a release adds to a handoff apply only to attempts admitted from it (D7).
 
@@ -156,7 +156,7 @@ in this attempt (a sibling starts from the base and has no such line; fix it her
 
 ## The round count
 
-At 10 handed review rounds (recorded or not: a round whose reviewer died still cost a round) no implementer or reviewer starts
+At the project's round count (`strategy.reviewRoundsEscalate`, 10 by default) of handed review rounds (recorded or not: a round whose reviewer died still cost a round) no implementer or reviewer starts
 until the course is settled again. Named failure: one ticket ran 47 review rounds before anyone stepped back, and an automatic stop
 at round 3 was too early. The person's first rule was "make it 10 and then raise it to me"; since 0.7.33 (I-229, D84) their rule is
 that the strategist decides first. Named failure (field): the round question at 20 was withdrawn when the person held the attempt to
@@ -164,10 +164,13 @@ rethink it; they lifted the hold with a direction, the strategist decided to con
 same round question again, recommending what the person had said ("why is the strategist not reviewing this first").
 
 So at the count the owner agent hands the strategist with the count as the reason (its bundle says `roundCount`) and records its
-decision. Any decision settles the count, which comes back 10 handed rounds after it; the person is asked only when the strategist
-escalates (and two of its predictions missed in a row still force that). What the person directs after the count was reached
-settles it as well: a hold they lifted (`wf release`, confirmed by them), a product decision they made (`wf decide`), or their
-answer to a round question an earlier release asked. A question the agent withdrew settles nothing. `wf resume`, the refusal of the
+decision. Any decision settles the count, which comes back as many handed rounds after it; the person is asked only when the
+strategist escalates, and two of its predictions missed in a row still force that: a decision recorded at the count predicts by the
+next count at the latest (`prediction.by` no later than the rounds recorded plus the count, `strategy:prediction-past-count`), so
+two counts in a row that do not hold reach the person (review of 0.7.33, H3: a design guard, no field case yet). The person's own
+stop at the count settles it as well: a hold they placed after the count was reached and lifted (`wf release`, confirmed by them),
+or their answer to the round question an earlier release asked for that count (or answered after it was reached). A product
+decision (`wf decide`) answers a product question, not the course, and settles nothing; nor does a question the agent withdrew. `wf resume`, the refusal of the
 next handoff (`strategy:round-count`) and `wf signals` (`settledBy`) say which applies. A round question an earlier release asked
 and the person has not answered stays theirs (its choices are on it: `continue`, `split`, `deliver-core`, `hold`, `stop`); a
 strategist's decision settles it too, and it is then withdrawn with that reason.

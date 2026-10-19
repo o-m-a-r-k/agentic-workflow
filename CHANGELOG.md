@@ -12,8 +12,11 @@ Release notes, newest first, then every fix that came from a failure in the work
   - every 10 handed review rounds, no implementer or reviewer starts until the strategist has decided how the ticket goes on; the
     workflow asks you nothing at the count, and the strategist is told it decides first;
   - you are asked only when the strategist escalates (two of its predictions missed in a row still force that);
-  - what you direct after the count was reached settles it too: a hold you lifted, a product decision you made with `wf decide`,
-    or your answer to a round question an earlier release asked; a question the agent withdrew settles nothing;
+  - your own stop at the count settles it too: a hold you placed after the count was reached and then lifted, or your answer to
+    a round question an earlier release asked; a product decision (`wf decide`) answers a product question, not how the ticket
+    goes on, and settles nothing, nor does a question the agent withdrew;
+  - the strategist's prediction is judged by the next count at the latest, so two counts in a row whose predictions do not hold
+    come to you (a guard from the review of this release; no ticket has shown it yet);
   - the count starts again from whatever settled it; replayed on the ticket above, your lifted hold settles it and the next count
     is at 30 rounds;
   - a round question an earlier release asked you and you have not answered stays yours to answer; if the strategist decides
@@ -23,8 +26,9 @@ Release notes, newest first, then every fix that came from a failure in the work
   leaving them out was refused because they block, and waiving them asked you the decision you had already made. Now the agent
   records your own words as the waiver of each finding they cover (`wf scope waive --person-said`), after the workflow has found
   those words in one of your messages about this ticket; nothing is asked, each finding keeps its severity and history, and the
-  delivered comment says it was accepted at your direction, in your words. Discovered issues keep their own route (one question
-  each, with your words shown back to you).
+  delivered comment says it was accepted at your direction, in your words. The same works for an issue found during the work
+  (`wf discovered close --deferred --person-said`). Your words never override your own answer: an item whose own question you
+  answered "no" is refused, and so are words older than your answer.
 - **A corrected test check that drops files it loads is judged as a loss (I-223, D79).** Named failure (review of 0.7.32): a
   correction could remove the files a check declares it loads, or narrow them, and nothing was recorded. Now each file the earlier
   version covered and the corrected one does not is recorded with the correction, said when it is made, and handed to the reviewer
@@ -35,10 +39,11 @@ Release notes, newest first, then every fix that came from a failure in the work
   imports and the spec folder a runner picks up are part of the check (the project declares a wider folder for them), and the
   hint it gets lists those files, as real paths, only when the declaration does not cover them.
 - **A commit that came from the main branch is told apart from the ticket's own (I-225, D81).** Named failure (review of 0.7.32):
-  after a hand push and a fast-forward to another ticket's later work, that work read as this ticket's. Now a commit the main branch
-  had before this ticket's copy did, or one that is the same change as such a commit (a cherry-pick), is marked as the main
-  branch's with the fact that shows it; the reviewer is told an unmarked commit is not proven the ticket's. Everything is still
-  tested.
+  after a hand push and a fast-forward to another ticket's later work, that work read as this ticket's. Now a commit the ticket's
+  copy of the code took in from the main branch (by a merge, a pull, a rebase, a reset or a checkout, as git recorded it, not by the
+  clock), or the same change as such a commit (a cherry-pick), is marked as the main branch's with the fact that shows it; a commit
+  made in the ticket's copy is never marked, and the reviewer is told an unmarked commit is not proven the ticket's. Everything is
+  still tested.
 - **Tickets that corrected the same check each name the others (I-226, D82).** Named failure (review of 0.7.32): only the later
   ticket named the earlier one, and a closed ticket stayed named. Now every open ticket that corrected the same check names the
   others in its next step, and one that closed drops out, without slowing every command down.
@@ -46,8 +51,9 @@ Release notes, newest first, then every fix that came from a failure in the work
   each review handoff; one listing per version of the code now.
 - **The maintainer's release is one command (D83).** `node scripts/release.mjs <version>` runs the checks, the privacy scan of the
   release's files and commit messages, the merge, the GitHub release, the install, both hosts' plugin updates, each project's
-  sync and the cleanup, stops at the first failure with what it left done, and continues when run again; `--dry-run` prints the
-  plan and changes nothing.
+  sync and the cleanup, stops at the first failure with what it left done, and continues when run again (also after the cleanup,
+  when the release already landed); a privacy hit names the file, commit and line, never the name; `--dry-run` prints the plan and
+  changes nothing.
 
 ## 0.7.32 - No more stuck tickets that only your override could free
 

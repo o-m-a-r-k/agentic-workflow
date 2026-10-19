@@ -73,7 +73,7 @@ Work
   wf discovered add --summary "..." [--severity high|medium|low] [--invariant "<which>"] [--kind defect|bookkeeping] [--where file:line] [--found-by ID] [--blocked-by W] | list
   wf discovered rate D1 --severity high|medium|low [--reason "why"]
                                     correct a rating (lowering records its reason; an invariant issue stays high)
-  wf discovered close D1[,D2] --fixed SHA | --deferred [--reason "why"] [--person-directed "<their words>"]
+  wf discovered close D1[,D2] --fixed SHA | --deferred [--reason "why"] [--person-directed "<their words>" | --person-said "<their words>"]
                                     by default only a low issue may wait, with the person's answer (one question per item)
   wf discovered close D1[,D2] --not-a-defect --reason "why it is not a defect" [--person-directed "<their words>"]
                                     it was never a defect: the person decides (one question per item), unless the project's \`leaving:\`
@@ -976,7 +976,7 @@ async function dispatch(cmd, sub, positional, options) {
         return 0;
       }
       if (sub === 'close') {
-        const r = closeDiscovered(root, positional[0], options);
+        const r = await closeDiscovered(root, positional[0], options);
         const ds = r.ids.map((id) => r.state.discovered.find((x) => x.id === id));
         const fixedLine = (d) => `${d.id} fixed in ${r.repo}@${r.commit.slice(0, 10)}${d.fixed?.verifiedBy ? ` (made before it was recorded; verified by reviewer ${d.fixed.verifiedBy.reviewer})` : ''}`;
         const claimLines = (r.claimed ?? []).map((id) => `${id}: ${r.repo}@${r.commit.slice(0, 10)} was made before ${id} was recorded, so a reviewer verifies it: hand a reviewer (\`wf handoff reviewer --agent <id>\`); its bundle asks it to verify ${id}, and its \`fixed\` verdict closes ${id}. No question for the person.`);

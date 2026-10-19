@@ -1183,7 +1183,7 @@ export function handoff(root, role, options) {
   const marked = role === 'implementer' ? [...(bundle.repair ?? []).flatMap((g) => g.findings), ...(bundle.alsoFix ?? []), ...(bundle.passItems ?? []).flatMap((x) => x.items)].filter((x) => x.premiseFailed).map((x) => x.ref ?? `${x.round}:${x.id}`) : [];
   if (marked.length) bundle.instructions += ` An item marked \`premiseFailed\` (${marked.join(', ')}) was reported by an implementer to rest on a premise that does not hold in production, with its evidence: build nothing for it until a reviewer or the person settles it, and say in your report what you found about the premise if you looked.`;
   // 0.7.33 (I-225): a commit is marked as the base's by the fact that shows it, and an unmarked one is said to be unproven, not the ticket's.
-  if (role === 'reviewer' && bundle.pushedRange) bundle.instructions += ` \`pushedRange\` lists the commits of ${Object.keys(bundle.pushedRange).join(', ')} that were pushed to the target outside the workflow and are read as this attempt's change, from the last base it recorded (\`from\`). A commit with \`base\` set is the base's, by the fact it states: it came in through a merge (\`merged\`, not on the branch's own line), the fetched base held it before this worktree did (a fast-forward, a pull or a rebase brought it), or it has the same patch as a commit the fetched base held before this worktree had it (a cherry-pick from the base). That is another change's work, which you judge as context, not as this ticket's change. One without it is not proven this ticket's: the range runs from the last base the attempt recorded, so another change's commit is in it whenever git kept no fact that tells them apart (a reflog that expired, a commit made in another clone); judge by its content which change it belongs to.`;
+  if (role === 'reviewer' && bundle.pushedRange) bundle.instructions += ` \`pushedRange\` lists the commits of ${Object.keys(bundle.pushedRange).join(', ')} that were pushed to the target outside the workflow and are read as this attempt's change, from the last base it recorded (\`from\`). A commit with \`base\` set is the base's, by the fact it states: it came in through a merge (\`merged\`, not on the branch's own line), this worktree first held it through a merge, a pull, a rebase, a reset or a checkout that brought it in from a fetched base that held it already (its reflog's action, not the clock), or it has the same patch as a commit the fetched base held by the time this worktree first held it (a cherry-pick from the base). A commit this worktree made (its first reflog entry a commit or a cherry-pick) is never marked. That is another change's work, which you judge as context, not as this ticket's change. One without it is not proven this ticket's: the range runs from the last base the attempt recorded, so another change's commit is in it whenever git kept no fact that tells them apart (a reflog that expired, a worktree provisioned again, a commit made in another clone); judge by its content which change it belongs to.`;
   // 0.7.32 (D78): the reviewer judges a correction of an admission check; the person is not asked.
   if (role === 'reviewer' && bundle.admissionCorrections) bundle.instructions += ` \`admissionCorrections\` lists checks frozen at admission that this attempt corrected (${bundle.admissionCorrections.map((c) => c.id).join(', ')}). The person is not asked about a correction: you judge it, from the code, never from the correction's \`reason\`. Each entry has the admission original (\`original\`), the previous correction when there was one (\`previous\`) and the corrected definition (\`corrected\`): the step's definition and its plugin as committed at each, with a decoded copy (\`plugin.decoded\`: the specs and harnesses a plugin embeds as escaped strings, line by line) and the decoded diffs (\`decodedDiff\`), plus the adapter's diff between the pins (\`diff\`, \`files\`); read the decoded text, since a plain diff of a plugin can be one long changed line. Compare the corrected definition with both: coverage is kept when every test case and assertion survives and only expectations the frozen criteria deliberately change are updated; selectors, waits and paths are plumbing, judged as such. A loss against the admission original (a case or assertion removed, skipped or loosened, an expectation weakened, a timeout raised to hide a failure) is a blocking finding. A loss against the previous correction (an assertion it added loosened, a check it added removed, a timeout on a case raised) is a blocking finding too, unless it is tied to a criterion that is still proven another way, which your evidence states. Test code moved out of the plugin into another file is pinned with the check only when the step declares it: \`reads\` lists the files the step declares its plugin loads outside the adapter folder (its definition's \`reads\`, pinned with the correction), with any change since (\`diff\`); judge them as part of the check, and with them what they load in turn: what a declared file itself imports or requires (\`../support/commands.js\`), and the spec tree a runner the plugin starts picks up (its spec pattern, its support and config files). Whether the plugin, or a file it declares, loads anything the declaration does not cover is yours to judge from the decoded code (\`ctx.dir + '/front/…'\`, \`path.join(ctx.dir, 'front', …)\`, template literals, imports without an extension, directories and globs): an undeclared load is a blocking finding, and the project declares a wider glob (\`front/cypress/**\`) rather than each file. \`looksLoaded\` lists what the decoded plugin and the declared files look like they load, resolved to files and folders of the step's repo and listed only when the declaration does not cover them (\`from\`: the file it was found in): a hint only, never a record. \`readsDropped\` lists files an earlier pin of the check covered (the admission original's declared \`reads\`, or the previous correction's) that the corrected pin no longer holds, each with why (no longer declared, or no longer in the tree) and how to read it as it was pinned (\`show\`): a fact the engine recorded, which you judge as a coverage loss, a loss unless the decoded code shows the test code it held now in the plugin or in a declared file. Raise a blocking finding citing the criterion the check proves, and the ticket fixes it (only the person's waiver lets it stand). When the correction fixes a defect in the check itself rather than this ticket's intended behaviour, say so in your evidence: such a defect is fixed once on the adapter's base branch, which every live attempt follows. Give your verdict on each in \`validationChecked: [{ "id", "commit": <the corrected pin>, "verdict": "complies" | "finding", "evidence", "finding": <its id> }]\`; a closure without one is refused, and the attempt is not accepted until a round has judged it.`;
   // Review of 0.7.32 (D69): a code round is told what keeping an evidence finding open means, and what to do when the code shows the
@@ -2149,49 +2149,62 @@ function pushedRangeOf(state) {
 
 // 0.7.33 (I-225). Named failure (a review's probe of D72): after a hand push, another ticket landing on the base and `git merge
 // --ff-only` in the worktree, the other ticket's commit was on the branch's own first-parent line, read `merged: false` and was listed
-// as this attempt's. What tells them apart is a fact git keeps: when the fetched base (the remote-tracking ref's reflog) and this
-// worktree (its HEAD's reflog) each first held the commit. The attempt's own commit is made here and reaches the base when it is
-// pushed; a commit of the base that came in by a fast-forward, a pull or a rebase was on the fetched base first. A commit with the same
-// patch as one the fetched base held before this worktree had the commit (a cherry-pick from the base) is the base's too. A tie (the
-// same second) or a reflog that no longer holds the commit proves nothing: the commit stays unmarked, and the reviewer is told an
-// unmarked commit is not proven this ticket's. One `git rev-list --parents` over every reflog entry gives the graph; the patch ids are
-// computed only when an unmarked commit is left.
+// as this attempt's. What tells them apart is what git recorded when this worktree's HEAD first held the commit (its reflog entry's
+// action), not when: review of 0.7.33 (H1, M1) found ordering by timestamps wrong when the worktree is provisioned again (its reflog
+// starts with the ticket's own pushed commit already on the base), when a pull fetches and merges in the same second, and when the
+// clock steps back. A commit is the base's only when the first HEAD entry that holds it brought it in (a merge, a pull, a rebase, a
+// reset or a checkout), that entry is not the worktree's first one, and the base ref's reflog held the commit by then. A first entry
+// that made the commit here (`commit`, `commit (amend)`, `commit (merge)`, `cherry-pick`) makes it the worktree's own, whatever the
+// times; a commit the worktree's first entry already held proves nothing. A commit with the same patch as one the base ref held by
+// the time this worktree first held it (a cherry-pick from the base) is marked the base's too. Anything else stays unmarked, and the
+// reviewer is told an unmarked commit is not proven this ticket's. One `git rev-list --parents` over every reflog entry gives the graph;
+// the patch ids are computed only when an unmarked commit is left.
+const BROUGHT = /^(merge|pull|rebase|reset|checkout)\b/;
+const MADE = /^(commit|cherry-pick)\b/;
 function markFromBase(r, from, targets) {
   if (!targets.length || !r.baseRef) return;
-  const reflog = (ref) => git(r.worktree, ['reflog', 'show', '--date=unix', '--format=%H %gd', ref], { allowFail: true }).split('\n').map((line) => /^([0-9a-f]{40}) .*@\{(\d+)\}$/.exec(line)).filter(Boolean).map((m) => ({ sha: m[1], t: Number(m[2]) }));
+  // Oldest first (`git reflog` lists newest first); the order of entries, not their times, says which came first in this worktree.
+  const reflog = (ref) => git(r.worktree, ['reflog', 'show', '--date=unix', '--format=%H%x09%gd%x09%gs', ref], { allowFail: true }).split('\n').map((line) => /^([0-9a-f]{40})\t.*@\{(\d+)\}\t(.*)$/.exec(line)).filter(Boolean).map((m) => ({ sha: m[1], t: Number(m[2]), action: m[3] })).reverse();
   const baseLog = reflog(r.baseRef);
   const headLog = reflog('HEAD');
-  if (!baseLog.length || !headLog.length) return;
+  if (!baseLog.length || headLog.length < 2) return;
   const tips = [...new Set([...baseLog, ...headLog].map((e) => e.sha))];
   const listed = run('git', ['rev-list', '--parents', '--ignore-missing', '--stdin'], { cwd: r.worktree, input: `${tips.join('\n')}\n^${from}\n`, allowFail: true });
   if (listed.status !== 0) return;
   const parents = new Map(listed.stdout.split('\n').filter(Boolean).map((line) => { const [c, ...p] = line.split(' '); return [c, p]; }));
-  // The earliest time a log's entries held each commit: entries in time order, each walked down to what an earlier one already held.
-  const held = (log) => {
+  // The first entry (in the log's own order) that held each commit, walked down to what an earlier entry already held.
+  const firstHolder = (log) => {
     const at = new Map();
-    for (const e of [...log].sort((a, b) => a.t - b.t)) {
+    log.forEach((e, index) => {
       const stack = [e.sha];
       while (stack.length) {
         const c = stack.pop();
         if (at.has(c) || !parents.has(c)) continue;
-        at.set(c, e.t);
+        at.set(c, { ...e, index });
         stack.push(...parents.get(c));
       }
-    }
+    });
     return at;
   };
-  const onBase = held(baseLog);
-  const onHead = held(headLog);
+  const onBase = firstHolder(baseLog);
+  const onHead = firstHolder(headLog);
   const when = (t) => new Date(t * 1000).toISOString();
+  // The base held it by the time of the HEAD entry: its first base entry is not later (the same second counts: the action says which
+  // way it came).
+  const baseBy = (sha, entry) => {
+    const b = onBase.get(sha);
+    return b && b.t <= entry.t ? b : null;
+  };
   for (const c of targets) {
-    const b = onBase.get(c.sha);
     const h = onHead.get(c.sha);
-    if (b !== undefined && h !== undefined && b < h) c.base = `the fetched base (${r.baseRef}) held it at ${when(b)}, before this worktree did (${when(h)})`;
+    if (!h || h.index === 0 || MADE.test(h.action) || !BROUGHT.test(h.action)) continue;
+    const b = baseBy(c.sha, h);
+    if (b) c.base = `this worktree first held it through "${h.action.split(':')[0]}" (${when(h.t)}), and the fetched base (${r.baseRef}) held it already (${when(b.t)})`;
   }
-  const left = targets.filter((c) => !c.base && onHead.has(c.sha) && (parents.get(c.sha) ?? []).length === 1);
+  const left = targets.filter((c) => !c.base && onHead.get(c.sha)?.index > 0 && (parents.get(c.sha) ?? []).length === 1);
   if (!left.length) return;
-  const latest = Math.max(...left.map((c) => onHead.get(c.sha)));
-  const earlier = [...onBase].filter(([c, t]) => t < latest && (parents.get(c) ?? []).length === 1).map(([c]) => c);
+  const latest = Math.max(...left.map((c) => onHead.get(c.sha).t));
+  const earlier = [...onBase].filter(([c, b]) => b.t <= latest && (parents.get(c) ?? []).length === 1).map(([c]) => c);
   const shas = [...new Set([...left.map((c) => c.sha), ...earlier])];
   const patch = run('git', ['diff-tree', '--stdin', '-p', '--no-color', '--no-ext-diff'], { cwd: r.worktree, input: `${shas.join('\n')}\n`, allowFail: true });
   if (patch.status !== 0 || !patch.stdout) return;
@@ -2200,8 +2213,8 @@ function markFromBase(r, from, targets) {
   for (const c of left) {
     const p = byCommit.get(c.sha);
     const h = onHead.get(c.sha);
-    const same = p ? earlier.find((d) => d !== c.sha && byCommit.get(d) === p && onBase.get(d) < h) : null;
-    if (same) c.base = `the same patch as ${same.slice(0, 10)}, which the fetched base (${r.baseRef}) held at ${when(onBase.get(same))}, before this worktree had this commit (${when(h)})`;
+    const same = p ? earlier.find((d) => d !== c.sha && byCommit.get(d) === p && baseBy(d, h)) : null;
+    if (same) c.base = `the same patch as ${same.slice(0, 10)}, which the fetched base (${r.baseRef}) held (${when(onBase.get(same).t)}) by the time this worktree first held this commit (${when(h.t)})`;
   }
 }
 

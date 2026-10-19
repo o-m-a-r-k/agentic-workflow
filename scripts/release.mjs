@@ -124,6 +124,7 @@ function plan(f) {
       `origin/${f.releaseBranch} must equal ${f.dev} (${f.devSha ? `locally at ${f.devSha}` : 'no such local branch'})`,
       `${VERSION_FILES.join(', ')} at that commit say ${f.version}; ${f.notes} exists there; origin/main is an ancestor of it`,
       `node scripts/ci-passed.mjs ${sha}`,
+      `run again after the cleanup (no release branch, origin/main holding a commit whose version files say ${f.version}): the release is said to have landed, and the steps after skip what is done`,
     ] },
     { id: 'privacy', title: 'nothing private in the release', lines: [
       `denylist: ${f.denylist}${fs.existsSync(f.denylist) ? '' : ' (missing: this step will stop)'}`,
@@ -142,7 +143,7 @@ function plan(f) {
     ] },
     { id: 'install', title: 'the release installed here', lines: [
       `git fetch --tags origin; ${f.tag} must name ${sha}`,
-      `git archive ${f.tag} | tar -x -C ${f.dest}${fs.existsSync(f.dest) ? '   (exists: reused when its package.json says the same version)' : ''}`,
+      `git archive ${f.tag} | tar -x -C ${f.dest}${fs.existsSync(f.dest) ? '   (exists: reused only when its bin/wf runs and says the same version)' : ''}`,
       `node bin/wf install   (in ${f.dest}); its wf --version must say ${f.version}`,
     ] },
     { id: 'hosts', title: 'the hosts\' plugins updated', lines: Object.entries(HOSTS).flatMap(([h, cmds]) => (f.hosts[h] ? cmds.map((c) => [h, ...c].join(' ')) : [`${h}: not found on PATH: skipped`])) },
@@ -165,7 +166,18 @@ function denyPatterns(file) {
 const STEPS = {
   check(f, s) {
     if (!f.main) throw new Stop('no checkout of main in this repository (`git worktree list` shows none): check main out somewhere first');
-    call('git', ['fetch', '--prune', 'origin'], { cwd: f.main });
+    call('git', ['fetch', '--prune', '--tags', 'origin'], { cwd: f.main });
+    // Review of 0.7.33 (M3): run again after the cleanup, the release branch and the dev branch are gone; when the release already
+    // landed (its tag, else origin/main, holds a commit whose version files say this version) the run says so and goes on, and the
+    // steps after see what is done.
+    const versionsAt = (sha) => VERSION_FILES.every((file) => { try { return JSON.parse(git(f.main, ['show', `${sha}:${file}`])).version === f.version; } catch { return false; } });
+    const landed = [git(f.main, ['rev-parse', '--verify', '--quiet', `refs/tags/${f.tag}^{commit}`]), git(f.main, ['rev-parse', 'refs/remotes/origin/main'])].find((x) => x && versionsAt(x) && call('git', ['merge-base', '--is-ancestor', x, 'refs/remotes/origin/main'], { cwd: f.main, quiet: true, allowFail: true }).status === 0);
+    if (landed && !git(f.main, ['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${f.releaseBranch}`])) {
+      s.sha = landed;
+      s.landed = true;
+      say(`  ${f.version} already landed: origin/main holds ${landed} and its version files say ${f.version}; the release branch is gone`);
+      return `${f.version} already landed at ${landed.slice(0, 10)}`;
+    }
     const release = git(f.main, ['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${f.releaseBranch}`]);
     if (!release) throw new Stop(`origin has no branch ${f.releaseBranch}: push ${f.dev} to it (\`git push origin ${f.dev}:${f.releaseBranch}\`) and run CI on it`);
     if (!f.devSha) throw new Stop(`no local branch ${f.dev} (name the dev branch with --dev)`);
@@ -198,10 +210,10 @@ const STEPS = {
     const wt = path.join(tmp, 'tree');
     try {
       call('git', ['worktree', 'add', '--quiet', '--detach', wt, s.sha], { cwd: f.main });
-      const r = call('node', ['--test', 'scenarios/privacy.test.mjs'], { cwd: wt, env: { ...process.env, WF_PRIVACY_DENYLIST: f.denylist }, allowFail: true });
+      const r = call('node', ['--test', '--test-reporter=tap', 'scenarios/privacy.test.mjs'], { cwd: wt, env: { ...process.env, WF_PRIVACY_DENYLIST: f.denylist }, allowFail: true });
       const out = `${r.stdout}${r.stderr}`;
-      if (r.status !== 0) throw new Stop(`scenarios/privacy.test.mjs failed on ${s.sha.slice(0, 10)}: ${out.split('\n').filter((l) => /matches|fail/.test(l)).slice(0, 10).join('\n    ')}`);
-      if (!/^(?:ℹ|#) pass 1$/m.test(out) || !/^(?:ℹ|#) skipped 0$/m.test(out)) throw new Stop('scenarios/privacy.test.mjs did not run its check (skipped): the denylist was not read');
+      if (r.status !== 0) throw new Stop(`scenarios/privacy.test.mjs failed on ${s.sha.slice(0, 10)}: ${out.split('\n').filter((l) => /matches denylist entry/.test(l)).slice(0, 20).join('\n    ') || 'see its output'}`);
+      if (!/^# pass 1$/m.test(out) || !/^# skipped 0$/m.test(out)) throw new Stop('scenarios/privacy.test.mjs did not run its check (skipped): the denylist was not read');
       say('  the tracked files at the release commit hold no denylisted name');
     } finally {
       call('git', ['worktree', 'remove', '--force', wt], { cwd: f.main, quiet: true, allowFail: true });
@@ -209,13 +221,12 @@ const STEPS = {
     }
     const range = `refs/remotes/origin/main..${s.sha}`;
     const hits = [];
-    const entry = (re) => `denylist entry ${patterns.indexOf(re) + 1}`;
     const log = git(f.main, ['log', '--format=%x01%H%x02%an <%ae>%x02%cn <%ce>%x02%B', range]);
     for (const rec of log.split('\x01').filter(Boolean)) {
       const [sha, author, committer, message] = rec.split('\x02');
       for (const re of patterns) {
-        if (re.test(author) || re.test(committer)) hits.push(`${sha.slice(0, 10)} author or committer (${entry(re)})`);
-        if (re.test(message ?? '')) hits.push(`${sha.slice(0, 10)} commit message (${entry(re)})`);
+        if (re.test(author) || re.test(committer)) hits.push(`${sha.slice(0, 10)} author or committer`);
+        if (re.test(message ?? '')) hits.push(`${sha.slice(0, 10)} commit message`);
       }
     }
     let commit = '';
@@ -227,10 +238,11 @@ const STEPS = {
       else if (line.startsWith('@@')) n = Number(/\+(\d+)/.exec(line)?.[1] ?? 0) - 1;
       else if (line.startsWith('+')) {
         n += 1;
-        for (const re of patterns) if (re.test(line.slice(1))) hits.push(`${commit} ${file}:${n} added (${entry(re)})`);
+        if (patterns.some((re) => re.test(line.slice(1)))) hits.push(`${commit} ${file}:${n} added`);
       } else if (!line.startsWith('-')) n += 1;
     }
-    if (hits.length) throw new Stop(`the release range holds denylisted names (history is public once pushed: rewrite it before the release):\n    ${hits.join('\n    ')}`);
+    // Review of 0.7.33 (M2): a hit names the commit, the path and the line, never the name (this output is logged).
+    if (hits.length) throw new Stop(`the release range holds denylisted names (history is public once pushed: rewrite it before the release):\n    ${[...new Set(hits)].join('\n    ')}`);
     const count = log.split('\x01').filter(Boolean).length;
     say(`  ${count} commit(s) of origin/main..${s.sha.slice(0, 10)}: messages, identities and added lines hold no denylisted name`);
     return `privacy: tracked files and ${count} commit(s) clean`;
@@ -239,6 +251,10 @@ const STEPS = {
     const remote = () => git(f.main, ['ls-remote', 'origin', 'refs/heads/main']).split(/\s/)[0];
     const now = remote();
     say(`  origin's main is at ${now || '(none)'}`);
+    if (s.landed && now && call('git', ['merge-base', '--is-ancestor', s.sha, now], { cwd: f.main, quiet: true, allowFail: true }).status === 0) {
+      say(`  origin's main already holds ${s.sha.slice(0, 10)}: skipped`);
+      return `main already holds ${s.sha.slice(0, 10)}`;
+    }
     if (now === s.sha) {
       if (git(f.main, ['rev-parse', 'HEAD']) !== s.sha) call('git', ['merge', '--ff-only', '--quiet', s.sha], { cwd: f.main });
       say('  already there: skipped');
@@ -279,16 +295,11 @@ const STEPS = {
     call('git', ['fetch', '--tags', 'origin'], { cwd: f.main });
     const at = git(f.main, ['rev-parse', '--verify', '--quiet', `${f.tag}^{commit}`]);
     if (at !== s.sha) throw new Stop(`the local tag ${f.tag} names ${at || 'nothing'}, not ${s.sha}`);
-    const pkg = path.join(f.dest, 'package.json');
+    // Review of 0.7.33 (L5): an extracted release is reused only when its own wf runs and says this version.
+    const versionIn = (dir) => (fs.existsSync(path.join(dir, 'bin', 'wf')) ? String(call('node', ['bin/wf', '--version'], { cwd: dir, quiet: true, allowFail: true, env: { ...process.env, WF_NO_FORWARD: '1' } }).stdout ?? '').trim() : null);
     if (fs.existsSync(f.dest) && fs.readdirSync(f.dest).length) {
-      const v = (() => {
-        try {
-          return JSON.parse(fs.readFileSync(pkg, 'utf8')).version;
-        } catch {
-          return null;
-        }
-      })();
-      if (v !== f.version) throw new Stop(`${f.dest} exists and holds ${v ? `version ${v}` : 'something else'}: move it aside first`);
+      const v = versionIn(f.dest);
+      if (v !== f.version) throw new Stop(`${f.dest} exists and ${v ? `its wf says ${v}` : 'holds no wf that runs'}: move it aside first`);
       say(`  ${f.dest} already holds ${f.version}: reused`);
     } else {
       fs.mkdirSync(f.dest, { recursive: true });

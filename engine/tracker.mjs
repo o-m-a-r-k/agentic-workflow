@@ -203,7 +203,7 @@ export function limitItems(state, { load = null } = {}) {
   for (const c of state.criteria ?? []) if (typeof c.finalHandoff === 'string' && c.finalHandoff.trim()) add(null, c.finalHandoff.trim());
   for (const a of state.criteriaAmendments ?? []) for (const d of a.changes?.dropped ?? []) add(null, `Not delivered: ${d.reason}`);
   // What is still known to be wrong (I-18), with the person's words when they directed it out of the ticket (I-142).
-  for (const d of state.discovered ?? []) if (d.status === 'deferred') add(d.id, `Known issue: ${wording(state, d.id, d.summary, d.deferred?.source?.decision)}.${directedBy(state, d.deferred?.source?.decision)}`);
+  for (const d of state.discovered ?? []) if (d.status === 'deferred') add(d.id, `Known issue: ${wording(state, d.id, d.summary, d.deferred?.source?.decision)}.${d.deferred?.source?.provenance === 'person-said' ? ` Accepted at the person's direction: "${d.deferred.source.quote}".` : directedBy(state, d.deferred?.source?.decision)}`);
   // A finding the person accepted without a fix (0.7.23): the tester reads what was accepted. Named failure: six findings the
   // person waived (no proof that recording works on a real phone) were in no line of the delivered comment.
   // A finding recorded as the same gap as one the person accepted (`sameAs`) reads as that one's plain line.

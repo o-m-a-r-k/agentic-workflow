@@ -94,7 +94,9 @@ export function escalationDue(state, c = STRATEGY_DEFAULTS) {
   for (;;) {
     const reached = reachedAt(state, at);
     if (!reached) break;
-    const i = marks.findIndex((m, k) => k >= next && (m.by === 'answer' || String(m.at) >= String(reached)));
+    // Review of 0.7.33 (L1, M5): an answer settles the firing its question was keyed to, or one reached before it was given; a lifted
+    // hold settles only a firing reached before the hold was placed (the person stopped the course at the count, then gave it).
+    const i = marks.findIndex((m, k) => k >= next && (m.by === 'answer' ? m.keyed === at || String(m.at) >= String(reached) : String(m.at) >= String(reached) && (m.by !== 'lifted' || String(m.holdAt ?? '') >= String(reached))));
     if (i < 0) break;
     next = i + 1;
     settled = { ...marks[i], rounds: Math.max(marks[i].keyed ?? 0, handedRounds(state, marks[i].at)) };
@@ -114,16 +116,16 @@ function reachedAt(state, n) {
 }
 
 // What settles a firing of the round count, in time order (0.7.33, I-229): a strategist's recorded decision, the person's answer
-// to a round question, a hold the person lifted (their `wf approve` of it), and a product decision they made (`wf decide`, proven
-// theirs, not withdrawn). Never a question the agent withdrew.
+// to a round question, and a hold the person placed after the count was reached and then lifted (their `wf approve` of it). Never a
+// question the agent withdrew. Review of 0.7.33 (M5): a product decision (`wf decide`) answers a product question, not how the
+// course goes on, so it settles nothing; nor does a hold placed before the count, whose lifting says nothing about the count.
 function settlements(state) {
   const out = [];
   for (const d of state.strategy?.decisions ?? []) out.push({ at: d.at, by: 'strategist', id: d.id, what: `the strategist decided ${d.action} (${d.id})` });
   for (const d of state.decisions ?? []) {
     if (isOwnerQuestion(d) && chose(d)) out.push({ at: d.approved.at, by: 'answer', id: d.id, keyed: keyedRound(d), what: `the person answered ${d.id} (${d.approved.choice})` });
-    else if (d.kind === 'lift-hold' && d.approved?.choice === 'yes') out.push({ at: d.approved.at, by: 'lifted', id: d.id, what: `the person lifted the hold (${d.id}${d.approved.quote ? `: "${d.approved.quote}"` : ''})` });
+    else if (d.kind === 'lift-hold' && d.approved?.choice === 'yes') out.push({ at: d.approved.at, by: 'lifted', id: d.id, holdAt: String(d.key ?? '').slice(`release:${state.id}:`.length) || null, what: `the person lifted the hold (${d.id}${d.approved.quote ? `: "${d.approved.quote}"` : ''})` });
   }
-  for (const d of state.productDecisions ?? []) if (!d.withdrawn) out.push({ at: d.at, by: 'decided', id: d.id, what: `the person decided ${d.id} (${d.choice})` });
   return out.filter((m) => m.at).sort((x, y) => String(x.at).localeCompare(String(y.at)));
 }
 
@@ -313,7 +315,7 @@ export function strategyHold(root, state) {
     // 0.7.33 (I-229, D84): at the count the strategist decides first; the person is asked only when it escalates. A round question an
     // earlier release asked that they answered in words that choose no option is no settlement: their words go to the strategist.
     const words = pending?.approved?.words ? ` The person answered ${pending.id} in their own words, "${pending.approved.words}": hand them to the strategist (\`--context\` or its reason); they settle nothing by themselves.` : '';
-    const guidance = `${owner.summary}:${words} at the round count the strategist decides first. Hand it with the count as the reason (\`wf handoff strategist --agent <id> --reason "${owner.summary.split(';')[0]}"\`) and record its decision (\`wf strategy record --closure <file> --attempt ${state.id}\`): any decision settles the count, which restarts from it (due again after ${c.reviewRoundsEscalate} more handed rounds); the person is asked only when it escalates (and after two of its predictions missed in a row it must). A direction the person gave since the count was reached settles it too (a hold they lifted, their \`wf decide\`). No implementer or reviewer starts until then.`;
+    const guidance = `${owner.summary}:${words} at the round count the strategist decides first. Hand it with the count as the reason (\`wf handoff strategist --agent <id> --reason "${owner.summary.split(';')[0]}"\`) and record its decision (\`wf strategy record --closure <file> --attempt ${state.id}\`): any decision settles the count, which restarts from it (due again after ${c.reviewRoundsEscalate} more handed rounds); the person is asked only when it escalates (and after two of its predictions missed in a row it must). A hold the person placed after the count was reached and lifted settles it too. No implementer or reviewer starts until then.`;
     return { owner, ownerPending: null, ownerDecisionWords: pending?.approved?.words ? { id: pending.id, words: pending.approved.words } : null, escalation, guidance: `${guidance}${waitingNote(state, escalation)}` };
   }
   return { owner: null, ownerPending: null, escalation, guidance: escalationGuidance(state, escalation) };
@@ -713,6 +715,17 @@ export function recordStrategy(root, options) {
   const signals = computeSignals(root, state, { cfg: adapterOf(root, state), nowMs });
   // The strategist's own rule, about its own predictions: two missed in a row and its next decision asks the owner.
   if (missedStreak(state, signals, nowMs) >= 2 && closure.action !== 'escalate') throw refuse(`${state.id}: the last two strategist predictions were missed, so the next decision is answered only by \`escalate\` (to the owner), not \`${closure.action}\``, 'write a closure with action escalate and 2 or 3 options for the owner', { id: 'strategy:escalate-required' });
+  // Review of 0.7.33 (H3), a design guard with no field case yet: at the round count the strategist decides instead of the person, and
+  // the backstop is its own rule (two missed predictions make its next decision an escalation). A prediction judged only after the next
+  // count cannot be missed by then, so the count could come back twice and never reach the person. Recorded while the count is due, a
+  // decision's prediction names a review round no later than the next count (the rounds recorded now plus the count); a time cannot
+  // be matched to a count, so it is refused there.
+  const countC = adapterOf(root, state)?.strategy ?? STRATEGY_DEFAULTS;
+  if (closure.action !== 'escalate' && roundsEscalation(state, countC)) {
+    const limit = signals.rounds.length + countC.reviewRoundsEscalate;
+    const by = closure.prediction?.by;
+    if (!Number.isInteger(by) || by > limit) throw refuse(`at the round count a prediction is judged by the next count: \`prediction.by\` must name a review round no later than ${limit} (${signals.rounds.length} recorded now, the next count ${countC.reviewRoundsEscalate} rounds on)${Number.isInteger(by) ? `, not ${by}` : ', not a time'}`, 'a prediction the next count cannot miss is not a prediction: name the round by which your decision shows its effect, and if it misses twice your next decision is an escalation to the person', { id: 'strategy:prediction-past-count' });
+  }
   // Checked before anything is applied.
   let moved = null;
   if (closure.action === 'split') moved = resolveSplitItems(root, state, closure.split.items);

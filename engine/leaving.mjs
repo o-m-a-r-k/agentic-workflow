@@ -63,6 +63,25 @@ export async function recordFixAll(root, options, { env = process.env, input = p
   append(root, state.id, 'scope.fixAll', { words: words || 'fix all (typed in their own terminal)', via: 'terminal' }, actor(options));
   return { state: loadState(root, state.id), words: words || 'fix all' };
 }
+// 0.7.33 (I-228, D85): the person's own words, proven theirs, as their disposition of items a review or an implementer raised again
+// after they had decided it (`wf scope waive --person-said`, `wf discovered close --deferred --person-said`). `items` are
+// `{ ref, kind, key, yes }`: the question each item would be asked under and the choice that lets it go. Review of 0.7.33 (H2): the
+// words never override an answer the person gave to that item's own question: one answered anything but an unused yes refuses, and
+// so do words older than that answer. Returns the proof `{ quote, message, at, via }`.
+export async function provenDisposition(root, state, options, items, { env = process.env, usage }) {
+  const words = typeof options['person-said'] === 'string' ? options['person-said'].trim() : '';
+  if (!words || typeof options.reason !== 'string' || !options.reason.trim()) throw new WfError(usage);
+  if (!underAgent(env)) throw refuse('`--person-said` proves words from an agent session that records the person\'s messages; in your own terminal, run the command without it and answer its question', null, { id: 'scope:waive-person-said' });
+  const proven = await personSaid(words, { sinceAt: state.admittedAt, item: state.item ?? null, attempt: state.id, ids: projectItemIds(root, state), env });
+  if (proven.problem) throw refuse(`not recorded: ${proven.problem}`, 'quote the words of theirs that dispose of these items for this ticket, exactly as they typed them; when they have not said it for this ticket, ask them (run the command without `--person-said`)', { id: 'scope:waive-person-said' });
+  const answered = items.map((x) => ({ x, d: decisionFor(state, x.kind, x.key) })).filter(({ d }) => d?.approved);
+  const overridden = answered.filter(({ x, d }) => d.approved.choice !== x.yes || d.spent);
+  if (overridden.length) throw refuse(`not recorded: ${overridden.map(({ x, d }) => `the person answered ${d.id} about ${x.ref} ${d.approved.words ? `in their own words, "${d.approved.words}"` : `"${d.labels?.[d.approved.choice] ?? d.approved.choice}"`}${d.spent ? ' (already used)' : ''}`).join('; ')}: their answer to the item's own question stands, and words quoted from elsewhere do not override it`, 'follow their answer; if something changed since, withdraw it with what changed (`wf decisions withdraw <id> --reason "..."`) and ask again', { id: 'scope:waive-answered' });
+  const older = answered.filter(({ d }) => proven.at && d.approved.at && Date.parse(proven.at) < Date.parse(d.approved.at));
+  if (older.length) throw refuse(`not recorded: the quoted message (${proven.at}) is older than the person's answer to ${older.map(({ x, d }) => `${x.ref} (${d.id}, ${d.approved.at})`).join(', ')}: their later answer is what stands`, null, { id: 'scope:waive-answered' });
+  return { quote: proven.quote, message: proven.message, at: proven.at, via: proven.via };
+}
+
 export const DEFAULT_POLICY = { high: 'never', medium: 'never', low: 'person' };
 export const policyOf = (cfg) => ({ ...DEFAULT_POLICY, ...(cfg?.leaving ?? {}) });
 

@@ -270,7 +270,7 @@ test('0.7.33 (I-228, D85): the person\'s explicit disposition, proven theirs, wa
   const why = ['--reason', 'both repeat the production configuration the person handed to the client'];
   const unproven = wf(p.root, ['scope', 'waive', '--finding', 'r1:F1,r1:F2', '--person-said', 'waive them', ...why, '--attempt', e.id], session);
   assert.equal(unproven.code, 75);
-  assert.match(unproven.err, /not waived: "waive them" is in no message of the person's in this session/);
+  assert.match(unproven.err, /not recorded: "waive them" is in no message of the person's in this session/);
   const done = wf(p.root, ['scope', 'waive', '--finding', 'r1:F1,r1:F2', '--person-said', 'stop reporting this, it is closed', ...why, '--attempt', e.id], session);
   assert.equal(done.code, 0, done.err);
   assert.match(done.out, /waived by the person's decision \(their own words, recorded with each finding; nothing was asked\)/);
@@ -281,4 +281,50 @@ test('0.7.33 (I-228, D85): the person\'s explicit disposition, proven theirs, wa
   assert.deepEqual(s.reviews.at(-1).closure.findings.map((f) => f.severity), ['high', 'high'], 'the findings keep their severity');
   assert.match(knownLimits(s), /Accepted without a fix: .*Accepted at the person's direction: "stop reporting this, it is closed"\./);
   assert.notEqual(s.decision.kind, 'repair', 'nothing blocks the attempt any more');
+});
+
+// Review of 0.7.33 (H2, M4): the person's words never override the answer they gave to an item's own question, and words older than
+// that answer are not their latest; discovered issues they disposed of leave the same way, with no question.
+test('0.7.33 review (H2, M4): words quoted from the person do not override their own answer to an item, nor stand when older than it; a discovered issue they disposed of leaves in their words', () => {
+  const p = singleRepoProject('pi-person-said-no', { gate: { steps: [{ id: 'unit', repo: 'app', run: 'true' }] } }, { 'src/a.txt': LINES });
+  const e = ok(wf(p.root, ['entry', '--item', 'PI-3', '--owner', 'o', '--json'])).json();
+  ok(wf(p.root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id]));
+  ok(wf(p.root, ['plan', '--file', criteriaFile(p.base), '--attempt', e.id]));
+  ok(wf(p.root, ['handoff', 'implementer', '--agent', 'i', '--attempt', e.id]));
+  commitIn(e.repos.app.worktree, { 'src/a.txt': LINES.replace('l2', 'L2') });
+  ok(wf(p.root, ['handoff', 'close', '--agent', 'i', '--attempt', e.id]));
+  ok(wf(p.root, ['handoff', 'reviewer', '--agent', 'r1', '--attempt', e.id]));
+  const dup = (id) => ({ id, severity: 'high', criterion: 'C1', summary: `${id}: the production configuration still holds the old value`, status: 'open', evidence: 'src/a.txt:2' });
+  ok(wf(p.root, ['review', '--closure', closureFile(p.base, goodClosure('r1', { findings: [dup('F1'), dup('F2')] })), '--attempt', e.id]));
+  ok(wf(p.root, ['discovered', 'add', '--summary', 'the production configuration still holds the old value', '--severity', 'high', '--attempt', e.id], silent));
+  // Their message, written before they answered the items' own questions.
+  const file = path.join(p.base, '.home', '.claude', 'projects', 'proj', `${CLAUDE}.jsonl`);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.appendFileSync(file, `${[{ type: 'assistant', timestamp: at(-2500), message: { role: 'assistant', content: [{ type: 'text', text: 'Change the production value?' }] } }, { type: 'user', timestamp: at(-2000), message: { role: 'user', content: 'the client owns that configuration, stop reporting it' } }].map((l) => JSON.stringify(l)).join('\n')}\n`);
+  const askOne = (ref) => {
+    const r = wf(p.root, ['scope', 'waive', '--finding', ref, '--ask', askFile(p.root, [ref]), '--attempt', e.id], silent);
+    return r.err.match(/wf approve (A\d+)/)[1];
+  };
+  approveAsOwner(p.root, e.id, askOne('r1:F1'), 'no');
+  approveAsOwner(p.root, e.id, askOne('r1:F2'), 'yes');
+  const session = { env: { CLAUDE_CODE_SESSION_ID: CLAUDE }, ...silent };
+  const said = (args) => wf(p.root, [...args, '--person-said', 'stop reporting it', '--reason', 'the person handed it to the client', '--attempt', e.id], session);
+  const no = said(['scope', 'waive', '--finding', 'r1:F1']);
+  assert.equal(no.code, 75);
+  assert.match(no.err, /not recorded: the person answered A1 about r1:F1 "[^"]+": their answer to the item's own question stands/);
+  const older = said(['scope', 'waive', '--finding', 'r1:F2']);
+  assert.equal(older.code, 75);
+  assert.match(older.err, /not recorded: the quoted message \(\S+\) is older than the person's answer to r1:F2 \(A2, \S+\): their later answer is what stands/);
+  const ids = () => fs.readFileSync(path.join(p.root, '..', 'refusals.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l).id);
+  assert.deepEqual(ids().slice(-2), ['scope:waive-answered', 'scope:waive-answered']);
+  assert.deepEqual(state(p.root, e.id).scopeDecisions.filter((d) => d.choice === 'waived' && d.personSaid), [], 'nothing waived on their words');
+  // The discovered issue they disposed of: no question, their words recorded, its severity kept.
+  const before = (state(p.root, e.id).decisions ?? []).length;
+  const disc = said(['discovered', 'close', 'D1', '--deferred']);
+  assert.equal(disc.code, 0, disc.err);
+  const s = state(p.root, e.id);
+  const d1 = s.discovered.find((x) => x.id === 'D1');
+  assert.deepEqual([d1.status, d1.severity, d1.deferred.source.provenance, d1.deferred.source.quote], ['deferred', 'high', 'person-said', 'stop reporting it']);
+  assert.equal((s.decisions ?? []).length, before, 'no question was asked');
+  assert.match(knownLimits(s), /Known issue: .*Accepted at the person's direction: "stop reporting it"\./);
 });

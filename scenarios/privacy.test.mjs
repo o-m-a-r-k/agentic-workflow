@@ -12,6 +12,7 @@ const repo = path.resolve(import.meta.dirname, '..');
 const listFile = process.env.WF_PRIVACY_DENYLIST ?? path.join(repo, '.privacy-denylist');
 
 test('no tracked file contains a denylisted name', { skip: !fs.existsSync(listFile) && `no denylist (${listFile}); create it locally to run this check` }, () => {
+  // Review of 0.7.33 (M2): a hit names the file and the denylist line number, never the name itself (the output is logged).
   const patterns = fs.readFileSync(listFile, 'utf8').split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#')).map((l) => {
     const m = /^\/(.+)\/$/.exec(l);
     return m ? new RegExp(m[1], 'i') : new RegExp(`\\b${l.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
@@ -25,7 +26,7 @@ test('no tracked file contains a denylisted name', { skip: !fs.existsSync(listFi
     const p = path.join(repo, f);
     if (!fs.existsSync(p) || fs.lstatSync(p).isSymbolicLink()) continue;
     const text = fs.readFileSync(p, 'utf8');
-    for (const re of patterns) if (re.test(text) || re.test(f)) hits.push(`${f} matches ${re}`);
+    patterns.forEach((re, i) => { if (re.test(text) || re.test(f)) hits.push(`${f} matches denylist entry ${i + 1}`); });
   }
   assert.deepEqual(hits, [], `denylisted names in tracked files:\n${hits.join('\n')}`);
 });

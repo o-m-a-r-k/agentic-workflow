@@ -459,9 +459,43 @@ test('0.7.33 (I-225, D81): in a pushed range, a commit the fetched base held bef
   const bundle = JSON.parse(fs.readFileSync(handed.out.match(/^Read (\S+)/m)[1], 'utf8'));
   const by = (sha) => bundle.pushedRange.app.commits.find((c) => c.sha === sha);
   assert.deepEqual([by(other).merged, by(fix).merged, by(picked).merged, by(mine).merged], [false, true, false, false]);
-  assert.match(by(other).base, /^the fetched base \(origin\/main\) held it at \S+, before this worktree did \(\S+\)$/, 'the fast-forwarded commit');
+  assert.match(by(other).base, /^this worktree first held it through "merge origin\/main" \(\S+\), and the fetched base \(origin\/main\) held it already \(\S+\)$/, 'the fast-forwarded commit');
   assert.match(by(fix).base, /^came in through a merge/);
-  assert.match(by(picked).base, new RegExp(`^the same patch as ${fix.slice(0, 10)}, which the fetched base \\(origin/main\\) held at \\S+, before this worktree had this commit \\(\\S+\\)$`), 'the cherry-pick');
+  assert.match(by(picked).base, new RegExp(`^the same patch as ${fix.slice(0, 10)}, which the fetched base \\(origin/main\\) held \\(\\S+\\) by the time this worktree first held this commit \\(\\S+\\)$`), 'the cherry-pick');
   assert.equal(by(mine).base, false, 'this ticket\'s own pushed commit');
   assert.match(bundle.instructions, /A commit with `base` set is the base's, by the fact it states.*One without it is not proven this ticket's/);
+});
+
+// Review of 0.7.33 (H1, M1): ordering by timestamps marked the ticket's own pushed commit as the base's once the worktree was provisioned
+// again (its reflog then starts with that commit already on the base), left a same-second pull unmarked, and marked a commit made here
+// as the base's when the clock stepped back. The reflog entry's action decides: what was made here is the worktree's own, what a merge,
+// pull, rebase, reset or checkout brought in is the base's when the base held it, and what the worktree's first entry held proves nothing.
+test('0.7.33 review (H1, M1): a commit made here stays the ticket\'s whatever the clock says, a same-second pull is marked the base\'s, and a worktree provisioned again proves nothing', async () => {
+  const { toAccepted, sh } = await import('./helpers.mjs');
+  const { base, root } = singleRepoProject('d72-actions', { gate: { steps: [{ id: 'u', repo: 'app', run: 'true', inputs: ['src/**'] }] } });
+  const { id, wt } = toAccepted(root, base, { item: 'RF-13' });
+  const t0 = Math.floor(Date.now() / 1000);
+  const at = (dt, cmd) => `export GIT_COMMITTER_DATE="@${t0 + dt} +0000" GIT_AUTHOR_DATE="@${t0 + dt} +0000"; ${cmd}`;
+  // The ticket's own commit, then the clock steps back before it is pushed.
+  sh(wt, at(100, "printf 'mine\\n' > src/a.txt && git commit -q -am 'my change after the acceptance'"));
+  const mine = sh(wt, 'git rev-parse HEAD');
+  sh(wt, at(50, 'git push -q origin HEAD:refs/heads/main'));
+  // Another ticket lands, and the worktree pulls it within the same second.
+  sh(root, at(200, "git merge -q --ff-only origin/main && printf 'other\\n' > src/other.txt && git add -A && git commit -q -m 'another ticket' && git push -q origin HEAD:refs/heads/main"));
+  const other = sh(root, 'git rev-parse HEAD');
+  sh(wt, at(200, 'git pull -q --ff-only origin main'));
+  const range = (agent) => {
+    const handed = ok(wf(root, ['handoff', 'reviewer', '--agent', agent, '--attempt', id]));
+    const bundle = JSON.parse(fs.readFileSync(handed.out.match(/^Read (\S+)/m)[1], 'utf8'));
+    return (sha) => bundle.pushedRange.app.commits.find((c) => c.sha === sha);
+  };
+  const by = range('ra');
+  assert.equal(by(mine).base, false, 'made here, whatever the clock says');
+  assert.match(String(by(other).base), /^this worktree first held it through "pull [^"]*origin main" /, 'the same-second pull');
+  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('ra', { criteria: [] })), '--attempt', id]));
+  // The worktree is provisioned again: its reflog starts with both commits, and that proves nothing.
+  const branch = sh(wt, 'git rev-parse --abbrev-ref HEAD');
+  sh(root, `git worktree remove --force ${JSON.stringify(wt)} && ${at(300, `git worktree add -q ${JSON.stringify(wt)} ${branch}`)}`);
+  const again = range('rb');
+  assert.deepEqual([again(mine).base, again(other).base], [false, false]);
 });

@@ -10,12 +10,12 @@
 import path from 'node:path';
 import { actor, openState } from './attempt.mjs';
 import { append, attemptDir, loadState, recordedTogether } from './ledger.mjs';
-import { chose, createDecision, decisionFor, optionLines, panelNote, personSaid, questionFor, READ_LINE, requireYes, settledBy, SHOW_TEXT, underAgent } from './approve.mjs';
+import { chose, createDecision, decisionFor, optionLines, panelNote, questionFor, READ_LINE, requireYes, settledBy, SHOW_TEXT } from './approve.mjs';
 import { FRAMES, askFirst, askProblems, composeAsk, itemAsk, itemWords, readAsk } from './asking.mjs';
 import { readRegular, withEvidenceTransaction } from './evidence.mjs';
 import { blockingIn, dispositionOf, findingByRef, locationsOf, observations, openAcrossRounds, placementLevel } from './review-policy.mjs';
 import { discoveredLevel, headsNow, ticketCommit } from './discovered.mjs';
-import { discoveredRating, leavingDecisions, policyOf, projectItemIds } from './leaving.mjs';
+import { discoveredRating, leavingDecisions, policyOf, provenDisposition } from './leaving.mjs';
 import { trustedAdapter } from './config.mjs';
 import { git, run } from './util.mjs';
 import { hashFile, refuse, WfError, writeImmutable } from './util.mjs';
@@ -229,12 +229,8 @@ export async function waiveFinding(root, options, { env = process.env } = {}) {
   const opened = openState(root, options);
   let said = null;
   if (options['person-said'] !== undefined) {
-    const words = typeof options['person-said'] === 'string' ? options['person-said'].trim() : '';
-    if (!words || typeof options.reason !== 'string' || !options.reason.trim()) throw new WfError('usage: wf scope waive --finding <round:id>[,...] --person-said "<the person\'s words, exactly as they wrote them>" --reason "<how their words cover these findings>"');
-    if (!underAgent(env)) throw refuse('`--person-said` proves words from an agent session that records the person\'s messages; in your own terminal, run `wf scope waive` without it and answer its question', null, { id: 'scope:waive-person-said' });
-    const proven = await personSaid(words, { sinceAt: opened.admittedAt, item: opened.item ?? null, attempt: opened.id, ids: projectItemIds(root, opened), env });
-    if (proven.problem) throw refuse(`not waived: ${proven.problem}`, 'quote the words of theirs that dispose of these findings for this ticket, exactly as they typed them; when they have not said it for this ticket, ask them (`wf scope waive` without `--person-said`)', { id: 'scope:waive-person-said' });
-    said = { quote: proven.quote, message: proven.message, at: proven.at, via: proven.via };
+    const refs = [...new Set(String(options.finding ?? '').split(',').map((x) => x.trim()).filter(Boolean))];
+    said = await provenDisposition(root, opened, options, refs.map((ref) => ({ ref, kind: 'waive-finding', key: ref, yes: 'yes' })), { env, usage: 'usage: wf scope waive --finding <round:id>[,...] --person-said "<the person\'s words, exactly as they wrote them>" --reason "<how their words cover these findings>"' });
   }
   return withEvidenceTransaction(root, opened.id, () => {
     let state = loadState(root, opened.id);
@@ -259,6 +255,8 @@ export async function waiveFinding(root, options, { env = process.env } = {}) {
       // answer (`under`, not `decision`, which would spend it).
       if (said) {
         append(root, state.id, 'scope.waived', { keys: [f.ref], choice: 'waived', reason, personSaid: said }, actor(options));
+        const pending = decisionFor(state, 'waive-finding', f.ref);
+        if (pending && !pending.approved) append(root, state.id, 'decision.withdrawn', { id: pending.id, reason: `settled by the person's own words, "${said.quote}"` }, actor(options));
         continue;
       }
       const by = settledBy(state, f.ref);

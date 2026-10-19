@@ -15,7 +15,9 @@ import { findHost, optional } from './hosts/index.mjs';
 import { WfError, git, refuse, run } from './util.mjs';
 import { requireYes } from './approve.mjs';
 import { FRAMES, PERSON_RULE } from './asking.mjs';
-import { DEFAULT_POLICY, discoveredRating, leavingDecisions, policyOf, ratedText } from './leaving.mjs';
+import { DEFAULT_POLICY, discoveredRating, leavingDecisions, policyOf, provenDisposition, ratedText } from './leaving.mjs';
+import { LEAVE } from './asking.mjs';
+import { decisionFor } from './approve.mjs';
 import { trustedAdapter } from './config.mjs';
 
 const text = (v) => (typeof v === 'string' ? v.trim() : '');
@@ -79,7 +81,7 @@ export const discoveredLevel = (d) => (text(d?.invariant) ? 'high' : severityLev
 
 // `wf discovered close D1[,D2] --fixed <commit> | --deferred --reason "..." | --not-a-defect --reason "..."`: several issues
 // under one command, and the high ones under one decision of the person (second final review of 0.7.0: one approval per id).
-export function closeDiscovered(root, idArg, options) {
+export async function closeDiscovered(root, idArg, options, { env = process.env } = {}) {
   const state = openState(root, options);
   const ids = [...new Set(String(idArg ?? '').split(',').map((x) => x.trim()).filter(Boolean))];
   const entries = ids.map((id) => {
@@ -134,6 +136,17 @@ export function closeDiscovered(root, idArg, options) {
   // and earlier let a medium one wait on the owner agent's reason and a low one freely). Named failure (0.7.0): the
   // owner-phrase grammar refused real deferrals after the person had said yes.
   const reason = text(options.reason);
+  // 0.7.33 (I-228, D85; review of 0.7.33, M4): the person's own words, proven theirs, let an issue they already disposed of leave
+  // with no question, as `wf scope waive --person-said` does for a finding; an answer they gave to its own question stands.
+  if (options['person-said'] !== undefined) {
+    const said = await provenDisposition(root, state, options, entries.map((e) => ({ ref: e.id, kind: 'move-out-of-batch', key: `leave:${e.id}`, yes: LEAVE })), { env, usage: 'usage: wf discovered close D1[,D2] --deferred --person-said "<the person\'s words, exactly as they wrote them>" --reason "<how their words cover these issues>"' });
+    for (const e of entries) {
+      append(root, state.id, 'discovered.closed', { id: e.id, outcome: 'deferred', decision: `accepted at the person's direction: "${said.quote}"`, source: { provenance: 'person-said', ...said }, reason, attributedTo: text(options.by) || null }, actor(options));
+      const pending = decisionFor(state, 'move-out-of-batch', `leave:${e.id}`);
+      if (pending && !pending.approved) append(root, state.id, 'decision.withdrawn', { id: pending.id, reason: `settled by the person's own words, "${said.quote}"` }, actor(options));
+    }
+    return { state: loadState(root, state.id), outcome: 'deferred', ids };
+  }
   const decided = leavingDecisions(root, state, entries.map((e) => ({ ref: e.id, level: discoveredLevel(e), blocks: false, severity: e.severity ?? null, summary: e.summary, raisedAt: e.at ?? null, ...discoveredRating(e) })), { verb: 'deferred', reason, options, policy: policyOf(trustedAdapter(root, state)) });
   for (const e of entries) {
     const id = decided[e.id];

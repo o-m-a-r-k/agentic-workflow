@@ -133,7 +133,7 @@ To get names from Playwright's JSON reporter, write it into the scratch folder a
 
 ### `strategy.decided` and `strategy.tripwire`
 
-Written by the strategist role and the owner's round escalation (0.7.0): a decision the strategist recorded, and the round escalation (`tripwire: rounds-escalation`) the engine refused a handoff on. `wf report` reads them from the raw ledger entries and only counts them: `strategyDecisions`, `strategyTripwires`, and `tripwiresFired` (the distinct tripwire names, read from the entry's `tripwire`, `name`, `id`, `signal` or `kind`). A ledger without them, from an older engine, counts zero.
+Written by the strategist role and the round count (0.7.0; since 0.7.33 the strategist decides first at it, D84): a decision the strategist recorded, and the round count (`tripwire: rounds-escalation`) the engine refused a handoff on. `wf report` reads them from the raw ledger entries and only counts them: `strategyDecisions`, `strategyTripwires`, and `tripwiresFired` (the distinct tripwire names, read from the entry's `tripwire`, `name`, `id`, `signal` or `kind`). A ledger without them, from an older engine, counts zero.
 
 ### Bookkeeping entries
 
