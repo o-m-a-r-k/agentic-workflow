@@ -13,6 +13,12 @@
 // already deleted) is said and skipped, so running the command again after a fix goes on from where it stopped. `--dry-run` prints
 // the plan from what is known locally and changes nothing: no fetch, no push, no `gh`, no host command.
 //
+// The budget (D98): the rule-shaped counts of the release commit (refusal ids, commands, event types, adapter keys, words in the
+// texts agents read) against budget.json as origin/main holds it (the last release's counts; the release's own budget.json when
+// main has none yet). A net increase that no kept or active proposal committed in the release's proposals/*.json accounts for stops
+// the release at its check step. Named failure: the workflow grew to 90 decisions and more than 300 refusals, a rule after each
+// incident, and nothing counted them.
+//
 // The maintainer's own settings live outside the repository, in `~/.agentic-workflow/release.json` (or WF_RELEASE_CONFIG, or
 // --config): { "syncRoots": ["<a project root>", ...], "worktreeFolder": "<the folder of the dev worktrees>",
 // "privacyDenylist": "<the denylist file>" }. Every field is optional; the denylist defaults to WF_PRIVACY_DENYLIST, then to
@@ -21,7 +27,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const SCRIPTS = path.dirname(fileURLToPath(import.meta.url));
 const PLUGIN = 'agentic-workflow';
@@ -124,6 +130,7 @@ function plan(f) {
       `origin/${f.releaseBranch} must equal ${f.dev} (${f.devSha ? `locally at ${f.devSha}` : 'no such local branch'})`,
       `${VERSION_FILES.join(', ')} at that commit say ${f.version}; ${f.notes} exists there; origin/main is an ancestor of it`,
       'no improvement history file (improvements/) left uncommitted in any worktree of this repository',
+      `the budget: the rule-shaped counts at that commit (refusals, commands, events, adapter keys, words) against budget.json on origin/main (the release's own when main has none); a net increase no kept or active proposal in proposals/*.json accounts for stops here`,
       `node scripts/ci-passed.mjs ${sha}`,
       `run again after the cleanup (no release branch, origin/main holding a commit whose version files say ${f.version}): the release is said to have landed, and the steps after skip what is done`,
     ] },
@@ -145,7 +152,7 @@ function plan(f) {
     { id: 'install', title: 'the release installed here', lines: [
       `git fetch --tags origin; ${f.tag} must name ${sha}`,
       `git archive ${f.tag} | tar -x -C ${f.dest}${fs.existsSync(f.dest) ? '   (exists: reused only when its bin/wf runs and says the same version)' : ''}`,
-      `node bin/wf install   (in ${f.dest}); its wf --version must say ${f.version}`,
+      `node scripts/install.mjs   (in ${f.dest}: links ~/.local/bin/wf to its bin/wf); its wf --version must say ${f.version}`,
     ] },
     { id: 'hosts', title: 'the hosts\' plugins updated', lines: Object.entries(HOSTS).flatMap(([h, cmds]) => (f.hosts[h] ? cmds.map((c) => [h, ...c].join(' ')) : [`${h}: not found on PATH: skipped`])) },
     { id: 'sync', title: 'each project synced', lines: f.syncRoots.length ? f.syncRoots.map((r) => `node ${path.join(f.dest, 'bin', 'wf')} sync   (in ${r}${fs.existsSync(r) ? '' : ': missing, this step will stop'})`) : [`no syncRoots in ${f.configFile}: skipped`] },
@@ -164,8 +171,38 @@ function denyPatterns(file) {
   });
 }
 
+// The release commit's rule-shaped counts against the released budget, judged by the release's own engine (engine/learn.mjs,
+// checkRelease) in a temporary worktree of that commit. Returns what it saw; throws Stop on a net increase no proposal covers.
+async function budget(f, sha) {
+  const tmp = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'wf-release-budget-'));
+  const wt = path.join(tmp, 'tree');
+  try {
+    call('git', ['worktree', 'add', '--quiet', '--detach', wt, sha], { cwd: f.main, quiet: true });
+    const learn = path.join(wt, 'engine', 'learn.mjs');
+    if (!fs.existsSync(learn)) throw new Stop(`engine/learn.mjs is not in ${sha.slice(0, 10)}: the release cannot count its rule-shaped changes`);
+    const released = git(f.main, ['show', 'refs/remotes/origin/main:budget.json']);
+    let base = null;
+    if (released) {
+      try {
+        base = JSON.parse(released);
+      } catch (e) {
+        throw new Stop(`budget.json on origin/main is not JSON: ${e.message}`);
+      }
+    }
+    const { checkRelease } = await import(pathToFileURL(learn).href);
+    const r = await checkRelease({ pluginRoot: wt, ...(base ? { budget: base } : {}) });
+    const c = r.classification;
+    const counts = `refusals ${r.counts.refusals.length}, commands ${r.counts.commands.length}, events ${r.counts.events.length}, adapter keys ${r.counts.adapterKeys?.length ?? 'not listed'}, words ${r.counts.words.total}`;
+    if (!r.ok) throw new Stop(`the release grows the plugin beyond its budget (${base ? 'budget.json on origin/main' : `budget.json in ${sha.slice(0, 10)}`}) and no kept or active proposal in proposals/*.json accounts for it:\n    ${r.problems.join('\n    ')}\n  replace something, or commit the accepted plugin proposal under proposals/ in the release`);
+    return `${counts}; against ${base ? 'origin/main' : 'its own budget.json'}${c.ruleShaped ? ' (rule-shaped changes, each accounted for)' : ', no rule-shaped change'}`;
+  } finally {
+    call('git', ['worktree', 'remove', '--force', wt], { cwd: f.main, quiet: true, allowFail: true });
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
 const STEPS = {
-  check(f, s) {
+  async check(f, s) {
     if (!f.main) throw new Stop('no checkout of main in this repository (`git worktree list` shows none): check main out somewhere first');
     call('git', ['fetch', '--prune', '--tags', 'origin'], { cwd: f.main });
     // Review of 0.7.33 (M3): run again after the cleanup, the release branch and the dev branch are gone; when the release already
@@ -205,6 +242,7 @@ const STEPS = {
     const onMain = git(f.main, ['rev-parse', 'refs/remotes/origin/main']);
     if (onMain !== s.sha && call('git', ['merge-base', '--is-ancestor', onMain, s.sha], { cwd: f.main, quiet: true, allowFail: true }).status !== 0) throw new Stop(`origin/main (${onMain.slice(0, 10)}) is not an ancestor of ${s.sha.slice(0, 10)}: main cannot fast-forward; rebase the release on main and run CI again`);
     say(`  ${VERSION_FILES.join(', ')} say ${f.version}; ${f.notes} is there; origin/main ${onMain === s.sha ? 'is already there' : `(${onMain.slice(0, 10)}) fast-forwards to it`}`);
+    say(`  budget: ${await budget(f, s.sha)}`);
     call('node', [path.join(SCRIPTS, 'ci-passed.mjs'), s.sha], { cwd: f.main });
     say(`  CI passed on ${s.sha.slice(0, 10)}`);
     return `origin/${f.releaseBranch} = ${f.dev} = ${s.sha.slice(0, 10)}, versions ${f.version}, CI green`;
@@ -314,7 +352,7 @@ const STEPS = {
       const tar = call('git', ['archive', '--format=tar', f.tag], { cwd: f.main, quiet: true, binary: true });
       call('tar', ['-x', '-C', f.dest], { input: tar.stdout, quiet: true });
     }
-    const linked = call('node', ['bin/wf', 'install'], { cwd: f.dest });
+    const linked = call('node', ['scripts/install.mjs'], { cwd: f.dest });
     say(`  ${String(linked.stdout).trim()}`);
     const v = String(call('node', ['bin/wf', '--version'], { cwd: f.dest, quiet: true, env: { ...process.env, WF_NO_FORWARD: '1' } }).stdout).trim();
     if (v !== f.version) throw new Stop(`the installed wf says ${v}, not ${f.version}`);
@@ -384,7 +422,7 @@ const STEPS = {
   },
 };
 
-function main() {
+async function main() {
   let o;
   let f;
   try {
@@ -410,7 +448,7 @@ function main() {
   for (const [i, step] of steps.entries()) {
     say(`== ${i + 1}/${steps.length} ${step.id}: ${step.title}`);
     try {
-      done.push(`${step.id}: ${STEPS[step.id](f, s)}`);
+      done.push(`${step.id}: ${await STEPS[step.id](f, s)}`);
     } catch (e) {
       const why = e instanceof Stop ? e.message : e.stack;
       process.stderr.write(`\nrelease ${f.version} stopped at step ${i + 1} (${step.id}): ${why}\n`);
@@ -423,4 +461,4 @@ function main() {
   return 0;
 }
 
-process.exitCode = main();
+process.exitCode = await main();

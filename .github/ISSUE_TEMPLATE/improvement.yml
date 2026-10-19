@@ -1,15 +1,15 @@
 name: Workflow improvement
-description: Something in the workflow itself went wrong or wasted time (the engine, a template, a skill, the guard, tracker handling, onboarding, docs)
+description: Something in the workflow itself went wrong or wasted time (the engine, a role text, a skill, tracker handling, onboarding, docs)
 labels: [improvement]
 body:
   - type: markdown
     attributes:
-      value: "If you use wf, `wf improve show <id>` prints an item from your own inbox you can paste here. Leave out project, company and person names, ticket ids, paths, emails and URLs."
+      value: "Leave out project, company and person names, ticket ids, paths, emails and URLs. If a `wf report` metric shows it, name the metric."
   - type: dropdown
     id: class
     attributes:
       label: Class
-      options: [engine, template, skill, guard, tracker, onboarding, docs, other]
+      options: [engine, text, skill, tracker, delivery, onboarding, docs, other]
     validations: { required: true }
   - type: textarea
     id: failure

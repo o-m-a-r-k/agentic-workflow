@@ -1,9 +1,9 @@
 // I-117: a runner labelled its desktop captures 1440 px wide but wrote 1280 px images (its window stayed smaller), cropping
-// the right of every screen; the gate passed and the reviewer, handed no size, saw a plausible picture. Every screenshot
-// now carries its measured width and height, from the gate, a plugin step or an import.
+// the right of every screen; the gate passed and the reviewer, handed no size, saw a plausible picture. Every capture now
+// carries its measured width and height, read from the image's own header (`wf screens` refuses a width that is not the
+// viewport's: scenarios/screens-capture.test.mjs).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { commitIn, ok, OUT_OF_ORDER, singleRepoProject, wf } from './helpers.mjs';
 import { imageSize } from '../engine/image-size.mjs';
 
 const u32 = (n) => [(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255];
@@ -23,12 +23,3 @@ test('the size of PNG, JPEG, GIF and WebP screenshots is read from their headers
   assert.equal(imageSize(png(1280, 800).subarray(0, 20)), null, 'cut short');
 });
 
-test('a gate screenshot carries its measured size in its evidence record (the record the reviewer\'s bundle lists)', () => {
-  const write = `node -e "const fs=require('fs');fs.mkdirSync('shots',{recursive:true});fs.writeFileSync('shots/desktop.png',Buffer.from('${png(1280, 800).toString('base64')}','base64'))"`;
-  const p = singleRepoProject('image-size', { gate: { steps: [{ id: 'ui', repo: 'app', run: write, artifacts: ['shots/*.png'] }] } }, { '.gitignore': '.wf-evidence/\n.wf-worktrees/\nshots/\n' });
-  const e = ok(wf(p.root, ['entry', '--item', 'IS-1', '--owner', 'o', '--json'])).json();
-  commitIn(e.repos.app.worktree, { 'src/a.txt': 'b\n' });
-  const g = JSON.parse(ok(wf(p.root, ['gate', ...OUT_OF_ORDER, '--attempt', e.id, '--json'])).out);
-  const shot = g.steps[0].artifacts[0];
-  assert.deepEqual([shot.kind, shot.width, shot.height], ['screenshot', 1280, 800]);
-});

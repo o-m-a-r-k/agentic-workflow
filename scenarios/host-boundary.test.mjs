@@ -10,27 +10,33 @@ import path from 'node:path';
 const engine = path.join(import.meta.dirname, '..', 'engine');
 const NAMES = /claude|codex|grok/i;
 
-// Persisted values that must stay readable are the only reason to name a harness outside engine/hosts/. Today none is
-// needed: a stored `runtime` string is looked up in the registry, never compared with a literal. Add an entry here
-// (file -> why) only for a value an old ledger can hold that no adapter could answer for.
-const ALLOWED = {};
+// A stored `runtime` string is looked up in the registry, never compared with a literal. The lines allowed here name a
+// file, not a harness: the instruction documents a project keeps (its own facts, read by the onboarding scan and listed
+// by doctor), whichever harness reads them. Add an entry (file -> the line it allows, and why) only for such a fact.
+const ALLOWED = {
+  'scan.mjs': { line: /export const isInstructionDoc = /, why: 'the names of the instruction documents a project keeps' },
+  'onboard.mjs': { line: /for \(const f of \['AGENTS\.md', 'CLAUDE\.md'\]\)/, why: 'the instruction documents at a project root' },
+};
 
 test('no engine module outside engine/hosts/ names a harness', () => {
   const files = fs.readdirSync(engine).filter((f) => f.endsWith('.mjs'));
-  assert.ok(files.length > 30, 'the engine modules were found');
+  assert.ok(files.length > 20, 'the engine modules were found');
   const found = [];
   for (const file of files) {
-    if (ALLOWED[file]) continue;
     fs.readFileSync(path.join(engine, file), 'utf8').split('\n').forEach((line, i) => {
-      if (NAMES.test(line)) found.push(`engine/${file}:${i + 1}: ${line.trim().slice(0, 100)}`);
+      if (NAMES.test(line) && !ALLOWED[file]?.line.test(line)) found.push(`engine/${file}:${i + 1}: ${line.trim().slice(0, 100)}`);
     });
   }
   assert.deepEqual(found, [], 'a harness name outside engine/hosts/:\n  ' + found.join('\n  '));
 });
 
-test('every harness the engine knows has its adapter in engine/hosts/, with the capabilities it launches roles by', () => {
+test('every harness the engine knows has its module in engine/hosts/, with the capabilities the engine uses', async () => {
   const hosts = path.join(engine, 'hosts');
-  for (const id of ['claude', 'codex']) assert.ok(fs.existsSync(path.join(hosts, `${id}.mjs`)), `${id}.mjs`);
   const index = fs.readFileSync(path.join(hosts, 'index.mjs'), 'utf8');
-  assert.match(index, /const builtin = \(\) => \[claude, codex\]/, 'the registry lists the built-in harnesses on one line');
+  assert.match(index, /const registry = new Map\(\[claude, codex\]\.map/, 'the registry lists the built-in harnesses on one line');
+  for (const id of ['claude', 'codex']) {
+    const host = (await import(path.join(hosts, `${id}.mjs`))).default;
+    assert.equal(host.id, id);
+    for (const fn of ['detect', 'transcript', 'timeline', 'launch', 'resume', 'event']) assert.equal(typeof host[fn], 'function', `${id}.${fn}`);
+  }
 });

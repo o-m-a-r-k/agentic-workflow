@@ -1,13 +1,15 @@
 // 0.7.33 (D83): the maintainer's release is one command (scripts/release.mjs). Named failure: a release was some fifteen commands
 // typed by hand after CI, and a step that depends on remembering it (the privacy scan of the range's commit messages, a host's plugin
-// update) is the one that slips. Only its dry run is tested here: the plan it prints from what is known locally, and that it runs
-// nothing (no fetch, no push, no `gh`, no host command, nothing installed). The steps themselves talk to GitHub and the hosts.
+// update) is the one that slips. Its dry run is tested here: the plan it prints from what is known locally, and that it runs nothing
+// (no fetch, no push, no `gh`, no host command, nothing installed). Its check step is run for real on a copy of the plugin with a fake
+// `gh`, for the budget (0.8.0, D98): a net growth of the rule-shaped counts that no committed proposal accounts for stops the release
+// before anything is pushed. The steps after it talk to GitHub and the hosts and are never run here.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { makeRepo, sh, tmp, write } from './helpers.mjs';
+import { makeRepo, sh, tmp, write } from './plain-repo.mjs';
 
 const SCRIPT = path.join(import.meta.dirname, '..', 'scripts', 'release.mjs');
 const manifest = (version) => JSON.stringify({ name: 'agentic-workflow', version, repository: { type: 'git', url: 'https://github.com/example-owner/agentic-workflow.git' } });
@@ -54,6 +56,7 @@ test('the release dry run prints every step from local facts, names what each ch
   has(`package.json, .claude-plugin/plugin.json, .codex-plugin/plugin.json at that commit say ${version}; docs/releases/v${version}.md exists there`);
   has(`node scripts/ci-passed.mjs ${sha}`);
   has('no improvement history file (improvements/) left uncommitted in any worktree of this repository');
+  has('the budget: the rule-shaped counts at that commit (refusals, commands, events, adapter keys, words) against budget.json on origin/main');
   // 2. privacy
   has(`denylist: ${denylist}\n`);
   has('WF_PRIVACY_DENYLIST=<denylist> node --test scenarios/privacy.test.mjs there (it must run, not skip)');
@@ -68,7 +71,7 @@ test('the release dry run prints every step from local facts, names what each ch
   // 5. install
   const dest = path.join(homeDir, '.local', 'share', 'agentic-workflow', 'releases', version);
   has(`git archive v${version} | tar -x -C ${dest}`);
-  has(`node bin/wf install   (in ${dest}); its wf --version must say ${version}`);
+  has(`node scripts/install.mjs   (in ${dest}: links ~/.local/bin/wf to its bin/wf); its wf --version must say ${version}`);
   // 6. hosts: a host whose CLI is absent is skipped and said
   has('claude plugin marketplace update agentic-workflow\n');
   has('claude plugin update agentic-workflow@agentic-workflow\n');
@@ -96,4 +99,57 @@ test('the release dry run prints every step from local facts, names what each ch
   const wrong = spawnSync(process.execPath, [SCRIPT, 'next', '--dry-run'], { cwd: repo, encoding: 'utf8', env: { PATH: bin, HOME: homeDir } });
   assert.equal(wrong.status, 2);
   assert.match(wrong.stderr, /usage: node scripts\/release\.mjs <version/);
+});
+
+// A copy of this plugin's engine, texts and budget as a plugin repo of its own: main holds the released budget, dev/<version> the release.
+const PLUGIN = path.join(import.meta.dirname, '..');
+function pluginRepo(base, version) {
+  const repo = path.join(base, 'plugin');
+  const files = { 'package.json': manifest('0.9.0'), '.claude-plugin/plugin.json': JSON.stringify({ version: '0.9.0' }), '.codex-plugin/plugin.json': JSON.stringify({ version: '0.9.0' }) };
+  makeRepo(repo, files);
+  for (const dir of ['engine', 'templates', 'skills']) fs.cpSync(path.join(PLUGIN, dir), path.join(repo, dir), { recursive: true });
+  fs.copyFileSync(path.join(PLUGIN, 'budget.json'), path.join(repo, 'budget.json'));
+  sh(repo, 'git add -A && git commit -q -m "0.9.0" && git push -q origin main');
+  sh(repo, `git checkout -q -b dev/${version}`);
+  for (const f of ['package.json', '.claude-plugin/plugin.json', '.codex-plugin/plugin.json']) write(repo, f, f === 'package.json' ? manifest(version) : JSON.stringify({ version }));
+  write(repo, `docs/releases/v${version}.md`, `## ${version} - a release\n`);
+  return repo;
+}
+
+test('the release stops at its check when the rule-shaped counts grow past the released budget, until a committed proposal accounts for it', () => {
+  const base = tmp('release-budget');
+  const version = '0.9.1';
+  const repo = pluginRepo(base, version);
+  // The release adds a refusal id to the contract.
+  const contract = path.join(repo, 'engine', 'contract.mjs');
+  const text = fs.readFileSync(contract, 'utf8');
+  assert.ok(text.includes("'answer:not-person': {"), 'the contract lists its refusals by id');
+  fs.writeFileSync(contract, text.replace("'answer:not-person': {", "'merge:extra': { stream: 1, when: 'an added check' },\n  'answer:not-person': {"));
+  const release = () => {
+    sh(repo, `git add -A && git commit -q -m "release ${version}" && git push -q -f origin dev/${version}:release/${version}`);
+    return spawnSync(process.execPath, [SCRIPT, version, '--config', path.join(base, 'none.json'), '--repo', repo], { cwd: repo, encoding: 'utf8', env: { PATH: bin, HOME: path.join(base, 'home') } });
+  };
+  // PATH: git, and a `gh` that says CI passed on any commit.
+  const bin = path.join(base, 'bin');
+  fs.mkdirSync(bin);
+  fs.symlinkSync(sh(base, 'command -v git'), path.join(bin, 'git'));
+  fs.symlinkSync(process.execPath, path.join(bin, 'node'));
+  fs.writeFileSync(path.join(bin, 'gh'), '#!/bin/sh\necho \'[{"conclusion":"success","status":"completed","databaseId":1}]\'\n', { mode: 0o755 });
+  // main was checked out in the repo itself: the release runs from a separate checkout of main.
+  sh(repo, `git worktree add -q ${JSON.stringify(path.join(base, 'main'))} main`);
+  const mainBefore = sh(repo, 'git rev-parse refs/remotes/origin/main');
+
+  const grown = release();
+  assert.equal(grown.status, 1, grown.stdout + grown.stderr);
+  assert.match(grown.stderr, /stopped at step 1 \(check\): the release grows the plugin beyond its budget \(budget\.json on origin\/main\)/);
+  assert.match(grown.stderr, /refusals: 1 more than budget\.json \(merge:extra added\); no kept or active proposal accounts for merge:extra/);
+  assert.equal(sh(repo, 'git rev-parse refs/remotes/origin/main'), mainBefore, 'nothing was pushed to main');
+
+  // A kept plugin proposal committed in the release accounts for it: the check passes and the run goes on to the next step.
+  write(repo, 'proposals/extra-check.json', JSON.stringify({ id: 'P1', scope: 'plugin', source: 'incident', status: 'kept', change: 'an added check', replaces: 'nothing', metric: 'rework.share', guard: 'activeMin', adds: { refusals: ['merge:extra'] } }));
+  const covered = release();
+  assert.match(covered.stdout, /budget: refusals 20, commands \d+, events \d+, adapter keys \d+, words \d+; against origin\/main \(rule-shaped changes, each accounted for\)/);
+  assert.match(covered.stdout, /CI passed on/);
+  assert.match(covered.stderr, /stopped at step 2 \(privacy\)/);
+  assert.equal(sh(repo, 'git rev-parse refs/remotes/origin/main'), mainBefore, 'nothing was pushed to main');
 });

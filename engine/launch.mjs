@@ -7,7 +7,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { WfError, append, attemptDir, worktreeDir } from './contract.mjs';
-import { callerSession, findHost, sessionVariables } from './hosts/index.mjs';
+import { callerSession, findHost, hostIds, sessionVariables } from './hosts/index.mjs';
 
 const SELF = fileURLToPath(import.meta.url);
 const PLUGIN_BIN = path.resolve(path.dirname(SELF), '..', 'bin');
@@ -36,9 +36,10 @@ const writeJson = (file, value) => {
 
 export async function launchReviewer(root, attempt, bundle, opts = {}) {
   if (typeof bundle?.prompt !== 'string' || !bundle.prompt.trim()) throw new WfError('the review bundle has no prompt; a reviewer is launched with the bundle as its whole prompt');
-  // The caller's own host runs the reviewer when it can launch one; otherwise the first host that can.
+  // The caller's own host runs the reviewer when it can launch one; otherwise the first registered host that can.
   const caller = findHost(opts.runtime ?? callerSession(process.env)?.runtime);
-  const host = caller?.launch ? caller : findHost('claude');
+  const host = caller?.launch ? caller : hostIds().map(findHost).find((h) => h.launch);
+  if (!host) throw new WfError('no registered host can launch a reviewer');
   const model = opts.model ?? bundle.model ?? null;
   const worktrees = path.dirname(worktreeDir(root, attempt, 'x'));
   const cwd = fs.existsSync(worktrees) ? worktrees : root;
@@ -55,7 +56,7 @@ export async function launchReviewer(root, attempt, bundle, opts = {}) {
   sup.once('exit', () => { exited = true; });
   sup.once('error', () => { exited = true; });
   sup.unref();
-  // Launched means the host has a session for it (Codex names its thread only once started).
+  // Launched means the host has a session for it (a host may name its session only once the run has started).
   let status = null;
   for (;;) {
     status = readJson(spec.status);

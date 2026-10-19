@@ -1,132 +1,101 @@
 # agentic-workflow
 
-**Your agent says the tests passed. wf makes it prove it.**
+**One flow per ticket for coding agents: fresh worktrees, independent reviewers that read the whole change, and your own delivery.**
 
 [![version](https://img.shields.io/github/package-json/v/o-m-a-r-k/agentic-workflow)](CHANGELOG.md)
 [![CI](https://github.com/o-m-a-r-k/agentic-workflow/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/o-m-a-r-k/agentic-workflow/actions/workflows/ci.yml)
 [![license](https://img.shields.io/github/license/o-m-a-r-k/agentic-workflow)](LICENSE)
 
-Coding agents are fast; checking what they report is the slow part. agentic-workflow is a delivery workflow for Claude Code and Codex, and every "done" it reports comes with a receipt: a hash-chained ledger of which tree the gate ran on and which steps it reused, who reviewed the change (never its author, checked from the ledger's agent names), what they found, and the tracker's own readback of the handoff. The `wf` CLI is the only thing that writes that record; agents can say anything, and wf accepts only what its engine recorded.
+agentic-workflow runs software changes with Claude Code and Codex. Each ticket gets its own git worktrees from a fresh base, one to six plain criteria, an implementer, and reviewers that `wf` launches itself, so it knows they did not write the change and can check from their transcripts that they read every changed file. Delivery follows the project's own stages: a push to main, a merge request per repo, a tracker status, a deploy confirmation. A hash-chained ledger records each step, and each closed ticket writes a telemetry row that every later change to the workflow is measured against.
 
-> **Status: v0.7, early.** The engine, CLI, onboarding, three lanes and three built-in trackers (Linear, GitHub Issues, tickets as files) are covered by scenario tests on real git repositories, run on macOS and Linux in CI (the badge above). It has not been proven on a production project yet; expect rough edges and breaking changes before 1.0. [Changelog](CHANGELOG.md) · [design](docs/DESIGN.md).
+> **Status: v0.8, early.** 0.8 is a smaller core, rebuilt from measurements of fifty real tickets ([what changed and why](docs/releases/v0.8.0.md)). It is covered by scenario tests on real git repositories, run on macOS and Linux in CI. Expect rough edges and breaking changes before 1.0. [Changelog](CHANGELOG.md) · [design](docs/design-0.8.md).
 
-## See it
+## What it checks
 
-![A real wf run: no gate before a clean code review, the implementer refused as its own reviewer, a review finding fixed, one gate, the evidence review, delivery and the ticket readback](docs/assets/demo.svg)
+| Failure | What `wf` refuses |
+| --- | --- |
+| A review that sampled the change | Recording a review while a product file in the diff is missing from the reviewer's transcript (`review:coverage`) |
+| The author reviews its own change | A review from a session that implemented, or that `wf` did not launch (`review:independent`) |
+| A review of an older tree | A review whose tree is not HEAD (`review:tree`); a merge with anything but git's automatic base merge changed since the reviewed tree (`merge:unreviewed`) |
+| A repair that broke something | `other` on a line this attempt wrote (`finding:other-own`); merging with a `goal` or `regression` finding open, at any severity (`merge:open`) |
+| A test that asserts nothing on a risky change | On a risk path: a merge without a test that fails on the merge-base, a second reviewer on another model and the person's diff-read (`merge:risk`) |
+| Cropped or stuck screenshots | A capture narrower than its viewport (`screens:width`), or the same bytes as another screen (`screens:dup`) |
+| Pushing to main with no CI run | A landed tree without a passing `full` run (`merge:untested`) |
+| An agent answering for the person | An answer that is not the person's own turn, right after the question (`answer:not-person`) |
+| Fix rounds that go nowhere | Another fix round after a review that reopened a fixed finding or did not lower the blocker count, until the person decides (`fix:no-progress`) |
 
-The recording is real `wf` output from [`examples/hello-ticket`](examples/hello-ticket/) ([plain text](docs/assets/demo.txt)); run it yourself with the command under [Try it](#try-it-in-5-minutes).
-
-## The problem
-
-An agent's report is a claim. The failures that cost the most time are the ones a claim hides:
-
-- the agent says the tests pass, but they never ran on the code being shipped;
-- the agent that wrote the change also reviews it, or a reviewer is steered to look away;
-- "delivered" means pushed, while the ticket still says In Progress and nobody looked at the screenshots.
-
-wf turns each of these into something the engine checks and refuses.
-
-## What wf checks
-
-| Failure | What wf refuses | Evidence it keeps |
-| --- | --- | --- |
-| Tests "passed" but never ran on this code | `wf accept` and `wf deliver` without a passing full gate on the current tree (a `--focused` or older pass does not count) | Each step's log and JUnit results, bound to the tree hash |
-| The author reviews its own change | `wf handoff reviewer` for the owner, planner, an implementer or an earlier round's reviewer; the ledger's names decide, the engine reads no transcript | The handoff, the bundle the reviewer got, the closure as written, provenance status |
-| Criteria bent to fit the code | Changes to frozen criteria without `wf criteria amend --reason` | The raw plan and every amendment with its reason |
-| Gates rerun everything, or reuse a stale pass | Reuse when a step's inputs, runner or a sibling repo it reads (`alsoInputs`) changed | Per-step reuse keys and the run each result came from |
-| Screenshots nobody looked at | Acceptance until a recorded review lists the sha256 of every capture (an unchanged capture is not inspected twice); the handoff until the owner captions each one (`wf shown`) | The delivered set, the owner's captions and the anomalies seen |
-| "Delivered" while the ticket says In Progress | Closing the attempt until the tracker's readback shows the status, the rendered comment and every screenshot | The raw tracker capture, or the engine's own readback |
-| Evidence edited after the fact | Any command on an attempt whose files, ledger chain or anchor differ from what the engine recorded | A hash-chained ledger and a manifest of every evidence file, verified at every use |
+Nineteen refusals in all, each a fact check with a named failure ([the list](docs/design-0.8.md#refusals-each-a-fact-check)).
 
 ## Install
 
-Requires Node.js 20+ and git, on macOS or Linux (it needs `sh`, `git` and `ps`); Windows is not supported.
+Requires Node.js 20+ and git, on macOS or Linux; Windows is not supported.
 
 ```bash
 claude plugin marketplace add o-m-a-r-k/agentic-workflow
 claude plugin install agentic-workflow@agentic-workflow
-# put the wf CLI on your PATH, once (the plugin is cached under a versioned folder)
-node "$(ls -d ~/.claude/plugins/cache/agentic-workflow/agentic-workflow/*/ | tail -1)bin/wf" install
+# put wf on your PATH, once (the plugin is cached under a versioned folder)
+node "$(ls -d ~/.claude/plugins/cache/agentic-workflow/agentic-workflow/*/ | tail -1)scripts/install.mjs"
 ```
 
-For Codex, or without a plugin system: clone this repository and run `node bin/wf install`; `wf sync` writes the role agents for both runtimes into each project.
+For Codex, or without a plugin system: clone this repository and run `node scripts/install.mjs` in it.
 
-## Try it in 5 minutes
+## Onboard a project
 
 ```bash
-git clone https://github.com/o-m-a-r-k/agentic-workflow && cd agentic-workflow
-bash examples/hello-ticket/demo.sh
+cd my-project
+wf init                 # scans the repos and proposes the adapter, key by key, with reasons; writes nothing
+wf init --confirm all   # writes what you confirm (or confirm keys one by one); re-run any time to re-evaluate
+wf doctor
 ```
 
-No install, key, model or network needed: a tiny library with two tickets as files and `node --test` as the gate, run in a temporary folder that is removed afterwards (`KEEP=1` keeps it). You should see the gate refuse the first implementation (`exit 1: refused`), the implementer refused as its own reviewer (`exit 75: refused`), a fresh review, `delivered HT-1.1`, and the ticket file at `status: Ready for UAT` with the rendered comment. Plain shell stands in for the agents. Then onboard your own project:
+Or ask your agent to "onboard this project to agentic-workflow". The scan proposes the risk paths, the `fast`/`full` test split, the screens settings, the ticketing and the delivery stages; you confirm or edit each. The adapter lives in `.workflow/project.yaml` in a repo, or in `~/.agentic-workflow/projects/<name>.yaml`, so nothing has to be committed in the product repos. [Onboarding](docs/onboarding.md) · [adapter](docs/adapter.md).
 
-```bash
-cd my-project && wf init      # drafts .workflow/ from what it finds (disabled); review it
-git add .workflow && git commit -m "Add agentic-workflow adapter" && git push
-wf doctor && wf enable        # proves the steps on a clean checkout of the base first
-```
-
-Or ask your agent to "onboard this project to agentic-workflow".
+Coming from 0.7: `wf init --from-07`, then `wf migrate attempts` ([migration](docs/releases/v0.8.0.md#migrating-from-07)).
 
 ## How it works
 
 ```mermaid
 flowchart LR
-  E["wf entry<br/>worktrees"] --> P["plan<br/>criteria frozen"] --> I["implement<br/>committed"]
-  I --> R["review<br/>a fresh agent"] --> G["gate<br/>bound to the tree"]
-  G --> A["wf accept"] --> D["wf deliver"] --> T["tracker handoff<br/>read back"]
-  R -. findings .-> I
-  G -. fails .-> I
+  S["wf start<br/>fresh worktrees"] --> C["wf criteria<br/>1–6, hashed"] --> I["implement<br/>wf test fast · wf screens"]
+  I --> R["wf review<br/>reviewers ∥ fast tests"] --> D["wf deliver<br/>the project's stages"] --> X["wf close<br/>telemetry row"]
+  R -. goal / regression .-> I
 ```
 
-1. **Admit:** `wf entry` opens an attempt with one git worktree per repo and moves the ticket to In Progress.
-2. **Plan:** a read-only planner's criteria are frozen before any code exists.
-3. **Implement:** implementers commit in the worktrees, one per work item if needed.
-4. **Review:** a newly started agent, given one line, reviews the committed change against the criteria.
-5. **Gate:** your own test commands run; unchanged steps are reused, and the result is tied to the exact tree.
-6. **Accept and deliver:** only a passing gate and a clean closure on the current tree open delivery (a push to main, or a PR through a delivery adapter).
-7. **Hand off:** the ticket gets the status, a comment rendered from your summary and the captioned screenshots; the attempt closes only when the readback confirms them.
+1. **Start:** `wf start <item>` normalises the ticket id, fetches, and makes one worktree per repo at the tip of its base.
+2. **Criteria:** a planner (or the owner, for a small fix) writes 1 to 6 checkable criteria; edits are recorded with their hash.
+3. **Implement:** the implementer runs `wf test fast` and `wf screens` (the screens the change reaches, plus a sentinel set when shared code changed), then commits.
+4. **Review:** `wf review` launches fresh reviewers with a bundle as their whole prompt (the diff, the criteria, the invariants, the rules for the touched paths, the consumers of changed contracts, the screenshots) while the fast tests run on the same tree. A risk change adds a second reviewer on another model and the risk checklist.
+5. **Fix rounds** run only for open `goal` or `regression` findings. `other` findings are filed in the tracker, put in the person's daily digest, or listed, as the project chooses.
+6. **Deliver:** `wf deliver` runs the stages the attempt started with: landing (directly, or through the landing queue for projects without CI), pushes, merge requests per repo matched by patch-id, statuses and comments with markers, a deployment confirmation.
+7. **Close:** `wf close` writes the telemetry row, removes the worktrees and keeps the branches.
 
-Lanes (quick, standard, batch), roles, work classes and the gate are described in the [docs](#docs).
+`wf status` names one next command per attempt. The person's decisions (a deploy, a waiver, a loosened criterion, the risk diff-read, a foreign merge, the no-progress stop) are asked once, in plain words, and collected in `wf digest`.
 
 ## Trust model, in short
 
-- **Enforced:** the ledger and its chain, gate results bound to the tree and the adapter committed at base, frozen criteria, reviewer independence, acceptance only on the current tree, the tracker readback.
-- **Relies on you:** agent names are what the owner supplies, and a reviewer must be a newly started agent given only the printed line; the engine checks the ledger names (not the owner, planner, an implementer or an earlier reviewer) and does not read the prompt a runtime gives it.
-- **Does not stop:** a determined process running as your user can rewrite everything consistently. wf catches mistakes, not attacks. [Full trust model](docs/trust-model.md).
+- **Checked:** the ledger's hash chain, the tree each test run and review was on, the reviewer's independence and coverage from the host's transcripts, the merge facts, the tracker's readback, the person's answers from their own turns.
+- **Not stopped:** a process running as your user that sets out to rewrite everything consistently. wf catches mistakes, not attacks ([D6](docs/DESIGN.md#decisions-that-survive)).
 
-## How it compares, and when not to use it
+## When not to use it
 
-- **A bare agent loop** reports what it did; nothing records it. wf adds the record and the refusals, and costs a few extra commands per ticket.
-- **Spec and methodology kits** guide what the agent does; wf checks what it did. They combine: a kit's skills can be required per role (`requires.skills`).
-- **CI** checks a pushed commit. wf checks before the push: the claim, the reviewer and the ticket. Its gates run on your machine, so it works without CI and can sit in front of it.
-
-Don't use it for:
-
-- Windows.
-- Work outside git.
-- Throwaway scripts where a review round costs more than a mistake.
+- Windows, or work outside git.
+- Throwaway scripts where a review costs more than a mistake.
 - A hard security boundary against a hostile agent.
-- A tracker other than Linear, GitHub Issues or files, unless you are willing to write a small adapter.
 - A hosted dashboard: wf is a local CLI and files.
 
 ## Docs
 
 | Page | What is in it |
 | --- | --- |
-| [Concepts](docs/concepts.md) | Terms, how the parts fit together, principles |
-| [Lifecycle](docs/lifecycle.md) | Every step and command, lanes, roles and handoffs, work classes |
-| [Strategy](docs/strategy.md) | Predictions, signals, the strategist and `wf split`: how the owner agent judges an attempt's course and changes one that stops converging |
-| [Gate and evidence](docs/gate.md) | Step fields, per-ticket evidence, reuse, scope, review rules, design-system checks, evidence integrity, the guard hook |
-| [Delivery and tracker](docs/delivery-and-tracker.md) | Delivery adapters, trackers (kind × via, what each can verify), the delivered comment, screenshots |
-| [Onboarding and secrets](docs/onboarding.md) | Install details, repos and components, `wf init`, engine pin, secrets |
-| [Adapter schema](docs/adapter.md) | `.workflow/project.yaml` with a full example, the step plugin contract |
-| [Lessons and improvements](docs/lessons-and-improvements.md) | How a project learns from corrections, and how workflow findings reach the plugin ([design](docs/LESSONS.md)) |
-| [Trust model](docs/trust-model.md) | What is enforced, what relies on you, what is not stopped |
-| [Telemetry](docs/telemetry.md) | What `wf report` measures (measurement only) |
-| [Scenarios](docs/SCENARIOS.md) | The demo and every behaviour scenario |
-| [Design](docs/DESIGN.md) | The full design and its open questions |
+| [Concepts](docs/concepts.md) | Terms, how the parts fit, principles |
+| [Adapter](docs/adapter.md) | The schema 2 adapter, with two full examples |
+| [Onboarding and secrets](docs/onboarding.md) | `wf init`, re-running it, `wf doctor`, secrets |
+| [Delivery and tracker](docs/delivery-and-tracker.md) | Stages, the landing queue, ticketing through a connector, a module or files |
+| [Telemetry and learning](docs/telemetry.md) | The per-ticket row, `wf report`, proposals and the budget |
+| [Local state](docs/state-folders.md) | The state folders and cloud sync |
+| [Scenarios](docs/SCENARIOS.md) | Every behaviour scenario |
+| [Design register](docs/DESIGN.md) | The decisions and why; [the 0.8 design](docs/design-0.8.md) |
 
 ## Contributing, security, license
 
-Contributions are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md) (every fix comes with a scenario test; `npm run verify` runs the suite on your machine and in a Linux container). Report security issues privately as described in [SECURITY.md](SECURITY.md). [MIT](LICENSE).
+Contributions are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md) (every fix names its failure and ships a scenario test). Report security issues privately as described in [SECURITY.md](SECURITY.md). [MIT](LICENSE).

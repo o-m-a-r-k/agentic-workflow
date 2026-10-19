@@ -1,143 +1,114 @@
-# Adapter schema
+# The project adapter (schema 2)
 
 [Back to the README](../README.md) · [Docs map](../README.md#docs)
 
-A project opts in with a committed `.workflow/` folder: `project.yaml` (below), `secrets.yaml` (key names only, never values), `AGENTS.invariants.md`, and any step plugins, role appendices or tracker adapters it names. `wf init` drafts it; `wf doctor` validates it; the engine reads it as committed at each attempt's base. Step fields: [gate.md](gate.md#gate-step-fields). Trackers: [delivery-and-tracker.md](delivery-and-tracker.md#where-tasks-live-and-how-wf-reaches-them). Work classes and roles: [lifecycle.md](lifecycle.md#work-classes).
+The adapter is the project's settings. `wf init` writes it from a scan of the repos and the person's confirmation ([onboarding.md](onboarding.md)); a hand edit is allowed, and a later `wf init` shows it before changing anything.
 
-## Example
+## Where it lives
+
+- In a repo, as `.workflow/project.yaml`; or
+- in the user folder, as `~/.agentic-workflow/projects/<name>.yaml`, with an explicit `root:`. The engine keeps that folder in a git repository of its own, so every version that judged an attempt is kept.
+
+Both at once is refused, naming both files. Module paths are always `{ repo: <name>, path: <file> }`, and a module loads as the repo's fetched base holds it, never from an attempt's worktree: a ticket cannot change the code that judges or delivers it.
+
+## A push-to-main project with no CI
 
 ```yaml
-# .workflow/project.yaml
-version: 1
-enabled: true
-engine: ">=0.1.10"          # or "0.x" (same major); wf entry and wf gate refuse an older engine
+version: 2
 name: example
-repos:                       # git roots
-  - name: backend
-    path: backend
+root: ~/src/example                    # only in the user-folder copy
+repos:
+  - name: api
+    path: api
     base: main
-    packages:
-      - { path: ., sharedInfra: [package.json, yarn.lock, "docker-compose*.yml"], docsOnly: ["docs/**", "**/*.md"] }
     provision: { clone: [node_modules], fingerprint: [yarn.lock], install: yarn install --immutable, copyIgnored: [.env.local] }
-  - name: frontend
-    path: frontend
+    tests:
+      fast: { run: "yarn lint && yarn typecheck && yarn test" }
+      full: { run: "bash scripts/gate.sh all", lock: { name: docker, count: 1 } }   # machine-wide, across projects
+    kinds: { tests: ["test/**", "**/*.spec.ts"], other: ["docs/**", "**/*.md"] }
+  - name: web
+    path: web
     base: main
-    packages:
-      - { path: ., sharedInfra: [package.json, yarn.lock], docsOnly: ["**/*.md"] }
-    provision: { clone: [node_modules], fingerprint: [yarn.lock], install: yarn install --immutable }
-adapterRepo: backend           # the repo whose committed .workflow/ judges each attempt; a root .workflow may only link to <that repo>/.workflow
-instructionFiles: [backend/AGENTS.md, frontend/AGENTS.md]   # where releases before 0.7.24 wrote their block; `wf sync` removes it
-components: [...]
-delivery: { kind: push-main }
-# Optional (0.7.27): the delivery goes on after the merge until the merged change is confirmed running where it deploys and the
-# fix is tested there, for every ticket or only for labelled ones; then the `deployed` status (delivery-and-tracker.md).
-#   delivery.deployment: { labels: ["Hotfix"], where: production }   and   tracker.statuses.deployed: Done
-tracker: { kind: linear, itemPattern: '^ENG-\d+$', statuses: { started: In Progress, delivered: Ready for UAT, done: Done } }
-# Optional (0.7.27): a step's status by the ticket's labels, the person's choice; no step sets Done unless the adapter says so
-# (or the person asks the agent for it in the conversation).
-#   tracker.statusByLabel: { delivered: { "Self-serve": Done } }
-lanes: [quick, standard, batch]
-classes:                     # merged over the plugin's full/light/review defaults by name; open list
-  light: { use: "Screens on a frozen API contract, translations, fixtures.", claude: { effort: low }, codex: { effort: low } }
-  review: { claude: { model: opus, effort: high } }   # the default: planning and review on the strongest model
-roles:
-  planner:     { lanes: [standard], class: planning, panel: [planning, review], appendix: .workflow/roles/planner.md }
-  implementer: { class: full, appendix: .workflow/roles/implementer.md }
-  reviewer:    { class: review, appendix: .workflow/roles/reviewer.md }
-strategy:
-  reviewRoundsEscalate: 10   # review rounds handed (recorded or not) at which the strategist decides first how to continue (the default; the person is asked when it escalates, 0.7.33); the one number the engine stops for
-impact:                      # the planner's two-stage impact analysis (lifecycle.md, "Impact analysis")
-  requiredFor: [full]        # classes whose work needs a survey and an impact map; [] turns the requirement off
-  maxFileBytes: 2097152      # a larger file is skipped by every query (and listed)
-  maxScanBytes: 536870912    # a query that reads more is refused: narrow its paths
-  regexTimeoutMs: 20000      # a regex query that runs longer is stopped and refused
-gate:
-  maxParallelSteps: 2
-  leases: { docker: 1, browser: 1 }
-  # quickLane: full          # a quick fix's gate runs light steps only (the plugin's default, `light`); `full` runs heavy steps too
-  steps:
-    - { id: backend-lint, repo: backend, run: yarn lint, inputs: ["src/**", "test/**"], tier: light }
-    - id: backend-unit
-      repo: backend
-      run: yarn jest --maxWorkers={workers} {select}
-      select: "--runTestsByPath {suites}"
-      report: { junit: junit.xml }
-      workers: { auto: true, min: 2, max: 8, perWorkerGiB: 2 }
-      inputs: ["src/**", "test/**"]
-      tier: light
-    - { id: backend-e2e, repo: backend, plugin: ./steps/e2e.mjs, tier: heavy, deferrable: true, lease: docker }
-    - { id: web-e2e, repo: frontend, run: "npx playwright test --workers={workers} --reporter=junit", report: { junit: results.xml }, workers: { auto: true, min: 2, max: 8, perWorkerGiB: 1 }, tier: heavy, lease: browser, alsoInputs: [backend] }
-invariants: .workflow/AGENTS.invariants.md
-# Optional (0.7.8, D18). Who lets an unfixed finding or discovered issue of each level leave a delivery: never (fixed here
-# or in a sibling attempt of the batch), person (one short question per item) or owner (the owner agent's recorded reason).
-# The same policy says who may close a discovered issue as not a defect (`wf discovered close --not-a-defect`): the person, unless
-# the level is `owner`; an independent reviewer's `verified-nonissue` verdict closes one at any level (0.7.27).
-# Default: high never, medium never, low person.
-leaving: { high: never, medium: never, low: person }
-# Optional: the project's own examples added to each level of the one severity scale every role reads (bundle
-# `severityScale.projectExamples`). Words, not floors: the rating stays the rater's judgement.
-severity:
-  high: ["anything that changes a customer's invoice, tax document or payment"]
-  low: ["wording on an internal admin screen"]
-# Optional (0.7.9, D19). Project learning: the classifier labels which lessons an attempt's findings repeat. Its model and
-# effort per runtime override the host's (Claude haiku, Codex gpt-6-luna, both low); `enabled: false` turns it off.
-learning: { classifier: { claude: { model: haiku, effort: low }, codex: { model: gpt-6-luna, effort: low } } }
-requires: { skills: [], connectors: [linear], tools: [{ name: docker, check: "docker info" }] }
+    tests:
+      fast: { run: "yarn lint && yarn test" }
+      full: { run: "yarn test:e2e", lock: { name: docker, count: 1 } }
+components:                            # consumers of changed contracts, listed in the review bundle
+  - { id: web, repo: web, dependsOn: [{ contract: "api/src/**/*.controller.ts" }, { contract: "api/src/**/dto/**" }] }
+invariants: api/.workflow/AGENTS.invariants.md
+rules: [{ paths: ["web/src/**"], read: [web/DESIGN_SYSTEM.md] }]
+screens:
+  routes: { repo: web, path: scripts/routes-of.mjs }      # changed files -> routes
+  shared: ["web/src/common/**", "web/src/styles/**"]
+  sentinel: ["/", "/projects", "/invoices/new"]
+  langs: [{ lang: <code>, dir: <ltr|rtl> }]               # each language and direction the project ships
+  viewports: [390, 1440]
+  capture: "node web/scripts/capture.mjs --out {out} --viewport {viewport} --lang {lang} {routes}"
+review: { diffRead: before }           # or after
+risk:                                  # proposed by the scan, confirmed by the person; `risk: none` is explicit
+  - { id: <area>, paths: ["<area>/**"], reason: "<the facts the scan found>", tests: ["<its tests>/**"] }
+ticketing:
+  tracker: <the tracker, through its connector>
+  via: connector
+  idPattern: '^ENG-\d+$'
+  take: { status: In Progress }
+  followUps: { mode: file, team: ENG, status: Backlog, label: found-in-review }
+  operations: { fileFollowUp: "Create an issue in team ENG ...; read it back.", search: "Search open issues for ..." }
+delivery:
+  landing: queue
+  order: [api, web]                    # each repo's part lands separately, in this order
+  stages:
+    - { do: land, branch: main }
+    - { do: status, to: Ready for UAT, comment: uat }
+budget: { adapter: { rules: 4, risk: 3, modules: 1, operationWords: 120 } }
 ```
 
-**Provisioning and secrets.** `provision` prepares each new worktree before any role starts: `clone` paths (copy-on-write), `copyIgnored` files, `fingerprint` lockfiles, `install` (run when a fingerprint file differs or a cloned path is missing) and `onWorktreeCreate`. The install runs with the project environment ([the step environment](gate.md#step-environment)) and **no secrets by default**. An install that needs one, such as a private registry's token, receives exactly the catalogued keys that list `provision:<repo>` in `usedBy`, the way a gate step lists its id:
+## A merge-request project whose tests, tracker and delivery are its own modules
 
 ```yaml
-# .workflow/secrets.yaml (names only)
-keys:
-  - { key: REGISTRY_TOKEN, kind: provided, usedBy: ["provision:backend"], purpose: "private package registry" }
+repos:
+  - name: app
+    path: app
+    base: master
+    tests:
+      fast: { module: { repo: app, path: .workflow/steps/unit.mjs } }
+      full: { module: { repo: app, path: .workflow/steps/e2e.mjs }, lock: { name: browser, count: 1 } }
+  - { name: mobile, path: mobile, base: dev, tests: { fast: { run: "npm test" } } }
+ticketing:
+  tracker: { module: { repo: app, path: .workflow/tracker/pages.mjs } }
+  via: module
+  followUps: { mode: off }
+delivery:
+  authority: { push: agent, mergeRequest: agent, merge: person }
+  order: [app, mobile]
+  stages:
+    - { do: merge-request, repos: [app, mobile] }   # each against its own base
+    - { do: wait-merged }                           # matched by patch-id
+    - { do: status, to: In UAT, comment: uat }
+    - { do: confirm-deployed, where: production, when: { labels: [Hotfix] } }
+    - { do: status, to: Done, when: { labels: [Hotfix] }, comment: deployed }
 ```
 
-Only that repo's `install` gets the key, wherever it runs (`wf entry`, `wf criteria amend --add-repo`, `wf doctor`), and nothing else does (not another repo's install, not `onWorktreeCreate`, not a step; a gate step's id may not start with `provision:`), the key counts as needed, so `wf secrets guide` asks for it, and `wf entry` refuses before the install runs when it is not filled (`secrets missing for provisioning of backend: REGISTRY_TOKEN`; the worktree it made is rolled back). A failing install prints its output with every catalogued value masked. A key with an empty `usedBy` still reaches nothing. (I-111; chosen as the narrowest form mirroring `usedBy`: a per-repo name, no blanket "all provisioning" and no way to receive every secret.)
+## Keys
 
-**`docsOnly`.** A package's `docsOnly` globs (relative to the package) name files that are not product code: the gate does not rerun a step for them, the scope checks do not call them unplanned, and the reviewer's symbol scan of the final diff takes no declarations from them. A review division leaves them out too, besides the files that are documentation by type (prose and licence files): [parallel review](parallel-review.md#division). A folder name alone makes nothing documentation: a `docs` folder of assets is named here.
+| Key | What it says |
+| --- | --- |
+| `version`, `name`, `root` | Schema 2; the project's name; its root (user-folder copy only). |
+| `requires` | `connectors`, `tools` and `skills` the project needs; `wf doctor` and `wf sync` check them. |
+| `repos[]` | `name`, `path`, `base`, `remote` (default `origin`), `provision` (what a new worktree clones, copies and installs), `tests.fast` and `tests.full` (a command or a module, with an optional counted `lock`), `kinds` (which paths are tests and which are neither tests nor product, for the diff and the row). |
+| `components[]` | Consumers of changed contracts: a component in `repo` that `dependsOn` the files a `contract` glob names. |
+| `invariants` | The project's invariants file; reviewers get it and the session rules quote it. |
+| `rules[]` | Documents to read for changes under `paths`. |
+| `screens` | How screens are picked and captured: a `routes` module, `shared` paths that add the `sentinel` set, `langs`, `viewports` and the `capture` command with `{out}`, `{viewport}`, `{lang}`, `{dir}` and `{routes}`. |
+| `review.diffRead` | `before` or `after`: whether the person's diff-read on a risk path comes before or after the merge. |
+| `risk` | Risk areas with `paths`, the `reason` the scan found and the `tests` that guard them; or `none`. |
+| `ticketing` | `tracker` (a name, a module or `files`), `via` (`connector`, `module`, `files`), `idPattern`, `take` (the status set at start), `followUps` (`file`, `digest` or `off`) and `operations` (the adapter's own words for each connector step). |
+| `delivery` | `landing` (`direct` or `queue`), `order`, `authority` (who pushes, opens merge requests and merges) and `stages` ([delivery-and-tracker.md](delivery-and-tracker.md)). |
+| `models` | A model per role: `planner`, `implementer`, `reviewer`, `secondReviewer`, `tester`, `drafter`. |
+| `budget.adapter` | Limits on the adapter's rules, risk areas, modules and operation words; `wf doctor` reports the counts. |
+| `onboarded` | Written by `wf init`: when, by which engine, and the hash of each key it wrote, so a hand edit is seen. |
 
-**Planning and review classes.** The planner defaults to the `planning` class (from 0.7.22: Claude `fable`, Codex `gpt-6-astra`, high effort) and the reviewer to the `review` class (Claude `opus`, high effort).
+Keys schema 2 dropped (lanes, classes, panel, strategy, impact, leaving, severity, gate, quality, designSystem and the rest) are named as dropped, with where they went, when an adapter still has them. A schema 1 adapter is refused with `wf init --from-07`.
 
-**The planning panel (0.7.22).** `roles.planner.panel` lists the planner seats as classes, each pinning its model and effort per runtime. By default the planner's class leads and a second seat follows: Claude's second seat is the `review` class (another model: Fable and Opus), Codex's repeats the lead's (Astra twice). The seats draft the plan blind and at the same time; seat 1 merges the drafts and lists every point they differ on with what it chose (`disagreements`); the other seats agree or object point by point, and an objection goes back to the merge; the agreement freezes the merged plan. `panel: [<class>]` (one seat) plans with a single planner as before. Attempts admitted before 0.7.22 keep the planning they started with.
+## Secrets
 
- `wf doctor` fails when either role resolves to a class with no model for the selected runtime (`claude.model` or `codex.model`) (the planner is skipped when `roles.planner: false`): set the model on that class, or point the role back at `review`. Override `classes.review.claude.model` or `classes.review.codex.model` with an exact model id to pin a version. Doctor detects the current agent runtime; outside one it defaults to Claude. Select explicitly with `wf doctor --runtime codex` or `--runtime claude`. On Codex only the `planning` class has a default model (`gpt-6-astra`, from 0.7.22); pin the others, choosing the strongest model available to your account.
-
-**`impact`.** `requiredFor` lists the work classes whose plans must carry the survey and impact map (default `[full]`: a plan with any `full` work item, or with no work items while the implementer role is `full`); only lanes with a planner are checked. The byte caps bound what the engine's own query runner reads; queries never run through a shell. Details: [lifecycle.md](lifecycle.md#impact-analysis).
-
-`wf gate --focused` (allowed only when every changed file matches `focused`) skips heavy steps and records `focused: true` and each skipped step's `skippedBy: focused`. It is repair proof only: accept and delivery need a passing gate on the current tree that skipped no step because of `--focused`. Steps skipped by `when.paths`, docs-only changes, a plugin's own `plan`, or deferred to a batch do not make a gate partial.
-
-A step without `inputs` reruns every gate (no reuse). A passing result is reused only when every file changed in the package since that pass is in the step's `inputs`, its `ignores` (files the step provably does not depend on) or the package's `docsOnly`; otherwise the step reruns. A changed file that no step's `inputs` covers forces every step of its package to run (fail closed); a changed file in a package with no steps is listed as unchecked in the gate result. Files under the repo's `sharedInfra` (root lockfiles, shared config) force all of the repo's steps to run.
-
-`wf doctor` warns (never fails) when a `run` command references a sibling repo (`../web`, `$WF_ROOT/web`, `$WF_ATTEMPT/web`) that `alsoInputs` does not list: a portal end-to-end pass was reused against old API code. `alsoInputs: [repo, ...]` names other repos a step reads, for example an end-to-end step in one repo that builds a sibling repo's service from its worktree. The step's reuse key then also covers each listed repo's tree (HEAD plus a hash of tracked changes, the same as the gate's tree binding: the attempt's worktree when the repo is in the attempt, else its main checkout), so any change there reruns the step, and a non-docs change there keeps the step from being skipped as "no changes in this repo". A listed repo whose tree cannot be read makes the step always run (fail closed).
-
-`reads: [path or glob, ...]` (0.7.32, D78) declares the files a step's plugin loads outside the adapter folder, relative to the step's repo (a harness or fixture the plugin reads). It changes no result (a step is not rerun for it); when the step is a check frozen at admission and a ticket corrects it, the correction pins every file the entries match (one that matches nothing refuses the correction), and a later change to one asks the reviewer to judge the correction again. What a declared file loads in turn is part of the check too (a support file a harness imports, the spec folder a runner the plugin starts picks up): declare a glob over the folder (`front/cypress/**`) rather than each file (0.7.33, D80). A load the plugin or a declared file does not declare is the reviewer's to find, as a blocking finding. A correction that drops the declaration or narrows a glob is recorded, not refused: each file an earlier pin covered and the corrected one does not (`readsDropped`) is handed to the reviewer, who judges it as a coverage loss (0.7.33, D79).
-
-## Delivery adapter contract
-
-`delivery.kind` is `push-main` (built in) or a project file (`./delivery/<name>.mjs`, read as committed at the attempt's delivery pin) whose default export has `integrate(ctx)`, `observe(ctx)` and `readback(ctx)` ([delivery-and-tracker.md](delivery-and-tracker.md)), and, optionally (0.7.27), `deployment(ctx)`: for a project whose delivery waits for the deployment (`delivery.deployment`), the project's own read-only check that the merged change runs where it deploys, called once per delivered repo by `wf deployment check`, returning `{ state: 'deployed' | 'deploying' | 'failed' | 'unknown', evidence }`; `ctx` carries the delivered `commit` (a batch member's is its batch's, with `batch` naming it), its `target`, `where`, the repo and the adapter's own fields recorded at delivery. The step itself (`delivery.deployment`) is policy, read from the project's config with its routes; only this code is read at the pin. Without it the agent's recorded observation stands ([the deployment confirmation](delivery-and-tracker.md#the-deployment-confirmation-after-the-merge)).
-
-## Step plugin contract
-
-```js
-export default {
-  plan(ctx)    // → { run: boolean, reason, inputs: string[], runnerIdentity: string }
-  run(ctx)     // → { status, suites: [{ id, inputsHash, status, durationMs }], artifacts: [] }
-               //   interrupted: { status: 'interrupted', suites: [...finished only] }
-  cleanup(ctx) // called on stop and dead-runner harvest; frees containers, leases
-}
-```
-
-The engine owns suite merging, reuse eligibility (same `runnerIdentity` + same suite `inputsHash`) and harvest. Worker counts are not part of the reuse fingerprint.
-
-Artifacts (0.7.0, I-100): a plugin writes captures into its scratch folder (`ctx.evidenceDir`) or its own package folder and returns them as `artifacts: [{ path, kind: 'screenshot', units? }]`; `units` names the attempts or items a capture belongs to (`["ENG-12"]`), and a batch member's handoff takes the captures tagged for its attempt id or its item, with the ones its own criteria cite and the ones every unit shares. The engine copies each into the run's managed evidence and records the sealed copy, so `wf export screenshots --gate`, the evidence review and delivery read it. A returned path anywhere else, a symlink or a missing file fails the step. A plugin is never handed, and never writes to, the evidence folder itself.
-
-A project whose adapter has no step with `artifacts` or a plugin cannot collect captures at all (0.7.0, I-94): the planner is told in `captureRoutes`, `wf plan` warns when a criterion needs screenshots, and the owner brings in captures made by hand on the committed tree with `wf captures import` ([the gate's captures](gate.md#captures-the-gate-cannot-collect-070-i-94)).
-
-## Execution settings on existing attempts
-
-Since 0.7.30 (I-151, D60) an open attempt follows the adapter committed on its adapter repo's base branch: what you commit and push there (a gate step, a rule, a model, the `leaving:` policy, the `severity:` examples, the `learning:` settings, a delivery or tracker setting) reaches the attempts already running at their next command, recorded in each attempt's ledger, with no question to anyone ([trust model](trust-model.md#what-is-enforced-and-what-is-not)). The working copy and a commit not pushed reach none. An attempt keeps its frozen criteria, the checks it registered or corrected, the classes its work was handed at and, once its delivery started, its delivery adapter kind; a passed gate reruns only the steps the change touched. `wf status` and `wf resume` show what an attempt took (`adapter: follows origin/main; took ...`) and a tip it could not take, with why.
-
-`wf models refresh --attempt <id>` records the current committed tip of the adapter repo's configured base as the execution pin alone, for a tip the attempt has not taken yet. Refreshing is bookkeeping: the owner agent records it as itself (0.7.0). A ticket config, uncommitted edit, arbitrary model/effort flag, unrelated commit or moved adapter location cannot provide execution settings.
-
-Future handoffs resolve model and effort from the execution pin: implementers keep their frozen work class, and other roles use their class mapping at the execution pin solely to select model/effort. Existing handoffs retain their own execution pin; new settings reach a fresh handoff. `wf doctor --runtime codex --attempt <id>` reports the attempt pin as well as the current setup. Resume distinguishes unlaunched, running, failed and completed native reviewers.
+Secrets are catalogued in `.workflow/secrets.yaml` (a list of keys with `usedBy` and `purpose`) and filled by the person with `wf secrets guide` in their own terminal ([onboarding.md](onboarding.md#secrets)).

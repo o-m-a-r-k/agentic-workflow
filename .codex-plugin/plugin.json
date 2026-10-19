@@ -1,7 +1,7 @@
 {
   "name": "agentic-workflow",
-  "version": "0.7.35",
-  "description": "Delivery workflow for AI coding agents: isolated worktrees, evidence-based gates, independent review, tracker handoff.",
+  "version": "0.8.0",
+  "description": "One flow per ticket for AI coding agents: fresh worktrees, independent whole-diff reviews, the project's own delivery stages, measured learning.",
   "author": {
     "name": "o-m-a-r-k"
   },

@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { makeRepo, sh, tmp, write } from './helpers.mjs';
+import { makeRepo, sh, tmp, write } from './plain-repo.mjs';
 import { verifyLayout } from '../scripts/verify-layout.mjs';
 
 function playContainer(dir, hide) {

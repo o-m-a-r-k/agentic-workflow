@@ -4,7 +4,24 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { ICLOUD_IGNORE, STATE_FOLDERS, ensureGitStateExcludes, mkdirStateDirectory, stateFolderSeams, stateFolderWarnings } from '../engine/state-folders.mjs';
-import { makeRepo, ok, sh, singleRepoProject, tmp, wf } from './helpers.mjs';
+import { makeRepo, sh, tmp } from './plain-repo.mjs';
+import { gitEnv, makeProject, runWf, writeFiles } from './helpers/index.mjs';
+
+// A one-repo project whose tickets are files, so `wf start` runs with no doubles.
+function project() {
+  const p = makeProject({
+    name: 'folders',
+    repos: [{ name: 'app', base: 'trunk', files: { 'src/a.mjs': 'export const a = 1;\n', 'README.md': '# app\n' } }],
+    overrides: {
+      repos: [{ name: 'app', path: 'app', base: 'trunk', tests: { fast: { run: 'node -e "process.exit(0)"' } }, kinds: { tests: ['test/**'], other: ['**/*.md'] } }],
+      risk: 'none',
+      ticketing: { tracker: 'files', via: 'files', idPattern: '^TK-\\d+$' },
+      delivery: { landing: 'direct', stages: [{ do: 'land' }] },
+    },
+  });
+  writeFiles(p.root, { 'tickets/TK-1.md': '---\nid: TK-1\ntitle: A ticket\nstatus: Todo\n---\nBody.\n' });
+  return p;
+}
 
 test('new state roots are marked with no-follow before recursive children and first payload writes', () => {
   const root = tmp('state-order'), marked = [];
@@ -59,19 +76,23 @@ test('state roots actually receive the native macOS ignore attribute', { skip: p
 });
 
 test('CLI marking failures produce a workflow refusal and leave no worktree payload', () => {
-  const { root } = singleRepoProject('state-cli-failure', { gate: { steps: [] } });
-  const env = { ...process.env };
-  for (const key of ['CODEX_THREAD_ID', 'CLAUDE_CODE_SESSION_ID', 'CLAUDECODE', 'GROK_SESSION_ID', 'AI_AGENT']) delete env[key];
-  const script = `import { main } from ${JSON.stringify(new URL('../engine/cli.mjs', import.meta.url).href)};
-    import { stateFolderSeams } from ${JSON.stringify(new URL('../engine/state-folders.mjs', import.meta.url).href)};
-    stateFolderSeams.platform = 'darwin';
-    stateFolderSeams.xattr = () => ({status: 1, stderr: 'attribute unavailable'});
-    process.exitCode = await main(['entry', '--root', ${JSON.stringify(root)}, '--lane', 'quick', '--owner', 'fixture-owner']);`;
-  const r = spawnSync(process.execPath, ['--input-type=module', '-e', script], { cwd: root, env, encoding: 'utf8' });
-  assert.equal(r.status, 75, r.stdout + r.stderr);
-  assert.match(r.stderr, /wf entry: cannot set the iCloud ignore attribute/);
-  assert.doesNotMatch(r.stderr, /at .*\.mjs:/);
-  assert.equal(fs.existsSync(path.join(root, STATE_FOLDERS[2])), false);
+  const p = project();
+  try {
+    const env = { ...gitEnv(), ...p.env };
+    for (const key of ['CODEX_THREAD_ID', 'CLAUDE_CODE_SESSION_ID', 'CLAUDECODE', 'GROK_SESSION_ID', 'AI_AGENT']) delete env[key];
+    const script = `import { main } from ${JSON.stringify(new URL('../engine/cli.mjs', import.meta.url).href)};
+      import { stateFolderSeams } from ${JSON.stringify(new URL('../engine/state-folders.mjs', import.meta.url).href)};
+      stateFolderSeams.platform = 'darwin';
+      stateFolderSeams.xattr = () => ({status: 1, stderr: 'attribute unavailable'});
+      process.exitCode = await main(['start', 'TK-1']);`;
+    const r = spawnSync(process.execPath, ['--input-type=module', '-e', script], { cwd: p.root, env, encoding: 'utf8' });
+    assert.equal(r.status, 75, r.stdout + r.stderr);
+    assert.match(r.stderr, /wf start: refused: cannot set the iCloud ignore attribute/);
+    assert.doesNotMatch(r.stderr, /at .*\.mjs:/);
+    assert.equal(fs.existsSync(path.join(p.root, '.wf-worktrees')), false);
+  } finally {
+    p.cleanup();
+  }
 });
 
 test('Git state excludes preserve existing ignores, work in linked worktrees and never touch tracked files', () => {
@@ -123,13 +144,17 @@ test('conflict diagnostics recognize numbered and UUID copies and never read lin
   for (const name of STATE_FOLDERS) assert.equal(fs.readFileSync(path.join(root, name + ' 2', 'data'), 'utf8'), 'preserve');
 });
 
-test('doctor emits conflict and empty-evidence warnings in JSON even with step execution disabled', () => {
-  const { root } = singleRepoProject('state-doctor', { gate: { steps: [] } });
-  const folder = STATE_FOLDERS[0];
-  fs.mkdirSync(path.join(root, folder));
-  fs.mkdirSync(path.join(root, folder + ' 2')); fs.writeFileSync(path.join(root, folder + ' 2', 'data'), 'preserve');
-  const report = ok(wf(root, ['doctor', '--no-steps', '--json'])).json();
-  assert.ok(report.warnings.some(w => w.warn && w.check === 'state folder conflict copies: ' + folder));
-  assert.ok(report.warnings.some(w => w.warn && w.check === 'empty evidence folder: ' + folder));
-  assert.equal(fs.readFileSync(path.join(root, folder + ' 2', 'data'), 'utf8'), 'preserve');
+test('doctor warns about conflict copies and an empty evidence folder, and changes none of them', () => {
+  const p = project();
+  try {
+    const folder = STATE_FOLDERS[0];
+    fs.mkdirSync(path.join(p.root, folder));
+    fs.mkdirSync(path.join(p.root, folder + ' 2')); fs.writeFileSync(path.join(p.root, folder + ' 2', 'data'), 'preserve');
+    const checks = runWf(p, ['doctor', '--json']).json().checks;
+    assert.ok(checks.some(c => c.level === 'warn' && c.check === 'state folder conflict copies: ' + folder), JSON.stringify(checks));
+    assert.ok(checks.some(c => c.level === 'warn' && c.check === 'empty evidence folder: ' + folder));
+    assert.equal(fs.readFileSync(path.join(p.root, folder + ' 2', 'data'), 'utf8'), 'preserve');
+  } finally {
+    p.cleanup();
+  }
 });

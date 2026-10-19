@@ -1,78 +1,105 @@
-// A new harness plugs in by adding one adapter: a throwaway `grok` adapter is registered from outside the engine, a fake
-// `grok` binary stands in for the program, and `wf handoff run` launches a planner through it. No engine file changes.
-// What the adapter supplies (argv, how its events read, its labels) is all the engine learns about the harness.
+// A new harness plugs in by adding one host module (D8): a throwaway `grok` host is registered from outside the engine, with
+// its own session variable, credential prefix and transcript layout. With no engine file changed, the engine knows its
+// sessions (the caller of a command, recorded on the ledger), reads what they read and did, and keeps its credentials out of
+// project commands. Without the module the same session is a plain terminal.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { ok, singleRepoProject, state, wf, write } from './helpers.mjs';
+import { spawnSync } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
+import { gitEnv, makeProject, runWf, writeFiles } from './helpers/index.mjs';
+import { callerSession, filesRead, findHost, registerHost, sessionActivity, sessionVariables, unregisterHost } from '../engine/hosts/index.mjs';
+import { projectEnv } from '../engine/env.mjs';
 
 const WRAPPER = path.join(import.meta.dirname, 'host-plugin-wf.mjs');
+const SESSION = 'grok-session-0001';
 
-const ADAPTER = `export default {
-  id: 'grok', name: 'Grok', label: 'Grok CLI', spawnMode: 'engine-only',
+// The host module. Its transcripts are `<home>/.grok/sessions/<id>.json`: { cwd, events: [{ at, kind, ... }] }.
+const HOST = `import fs from 'node:fs';
+import path from 'node:path';
+export default {
+  id: 'grok', name: 'Grok', label: 'Grok CLI',
   sessionEnv: ['GROK_TEST_SESSION'], markerEnv: [], envPrefixes: ['GROK_TEST_'],
-  classDefaults: {}, sandbox: 'grok-sandbox', needsGitRoot: false,
-  detect: (env) => (env.GROK_TEST_SESSION ? { session: env.GROK_TEST_SESSION } : null),
-  buildLaunch: (h, { body }) => ({ bin: 'grok', args: ['run', '--system', body, ...(h.model ? ['--model', h.model] : [])] }),
-  interpretEvent: (e) => (e.kind === 'session' ? { started: e.id } : e.kind === 'finish' ? { terminal: { success: e.ok === true } } : e.kind === 'crash' ? { failed: true } : {}),
-  roleReport: (e) => (e.kind === 'say' ? e.text : null),
+  detect: (env) => env.GROK_TEST_SESSION || null,
+  transcript: (id, home) => { const f = path.join(home, '.grok', 'sessions', id + '.json'); return fs.existsSync(f) ? f : null; },
+  timeline(file) {
+    const t = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const items = [];
+    for (const [i, e] of t.events.entries()) {
+      if (e.kind === 'read') items.push({ type: 'call', at: e.at, id: 'c' + i, name: 'Read', input: { file_path: e.file }, cwd: t.cwd }, { type: 'result', at: e.at, id: 'c' + i, text: e.ok ? 'contents' : 'no such file', error: !e.ok });
+      if (e.kind === 'person') items.push({ type: 'person', at: e.at, text: e.text });
+      if (e.kind === 'usage') items.push({ type: 'usage', at: e.at, key: 'r' + i, model: e.model, input: e.input, output: e.output });
+    }
+    return { cwd: t.cwd, items };
+  },
 };
 `;
 
-const SESSION = 'grok-session-0001';
-
-function prepared(mode = 'ok') {
-  const p = singleRepoProject('host-plugin', { classes: { review: { grok: { model: 'grok-test-model', effort: 'high' } }, planning: { grok: { model: 'grok-test-model', effort: 'high' } } }, gate: { steps: [] } });
-  const dir = path.join(p.base, 'fake-bin');
-  write(dir, 'grok', `#!/usr/bin/env node
-import fs from 'node:fs';
-const prompt = fs.readFileSync(0, 'utf8');
-fs.writeFileSync(${JSON.stringify(path.join(p.base, 'spawn.json'))}, JSON.stringify({ args: process.argv.slice(2), prompt }));
-console.log(JSON.stringify({ kind: 'session', id: ${JSON.stringify(SESSION)} }));
-console.log(JSON.stringify({ kind: 'say', text: 'Reading the bundle now.' }));
-${mode === 'crash' ? "console.log(JSON.stringify({ kind: 'crash' }));" : "console.log(JSON.stringify({ kind: 'finish', ok: true }));"}
-`);
-  fs.chmodSync(path.join(dir, 'grok'), 0o755);
-  const adapter = path.join(p.base, 'grok-adapter.mjs');
-  fs.writeFileSync(adapter, ADAPTER);
-  const env = { PATH: dir + path.delimiter + process.env.PATH, WF_TEST_HOST_ADAPTER: adapter };
-  const run = (args) => wf(p.root, args, { env, bin: WRAPPER, preserveRuntime: true });
-  const id = ok(run(['entry', '--item', 'ENG-90', '--owner', 'plain:person', '--json'])).json().id;
-  ok(run(['handoff', 'planner', '--agent', 'p', '--runtime', 'grok', '--attempt', id]));
-  return { ...p, id, env, run };
+function hostModule(dir) {
+  const file = path.join(dir, 'grok-host.mjs');
+  fs.writeFileSync(file, HOST);
+  return file;
 }
 
-test('a harness the engine has never heard of launches a role through its adapter alone', () => {
-  const { base, root, id, run } = prepared();
-  const r = ok(run(['handoff', 'run', '--agent', 'p', '--attempt', id]));
-  assert.match(r.out, /Native p: completed \(grok-session-0001\)/);
-  assert.match(r.err, /Grok planner p: session grok-session-0001 started; configured grok-test-model\/high/, 'the progress line uses the adapter\'s name');
-  assert.match(r.err, /Grok planner p: agent report \(unverified\): Reading the bundle now\./);
-  const h = state(root, id).handoffs.at(-1);
-  assert.equal(h.runtime, 'grok');
-  assert.equal(h.session, SESSION);
-  assert.equal(h.launch.status, 'completed');
-  const launched = JSON.parse(fs.readFileSync(path.join(base, 'spawn.json'), 'utf8'));
-  assert.equal(launched.prompt, h.startPrompt, 'the frozen start line is what the harness receives');
-  assert.deepEqual([launched.args[0], launched.args[1] === '--system', launched.args.slice(-2)], ['run', true, ['--model', 'grok-test-model']]);
-  const receipt = JSON.parse(fs.readFileSync(h.bundle.replace(/\.json$/, '.launch.json'), 'utf8'));
-  assert.equal(receipt.runtime, 'grok');
-  assert.equal(receipt.sandbox, 'grok-sandbox');
+test('a registered host is read like a built-in one: its caller session, files read, turns and usage; its credentials stay out of project commands', async (t) => {
+  const p = makeProject({ adapter: false });
+  t.after(() => {
+    unregisterHost('grok');
+    p.cleanup();
+  });
+  const env = { GROK_TEST_SESSION: SESSION, GROK_TEST_TOKEN: 'not-a-real-token', PATH: process.env.PATH };
+  assert.equal(callerSession(env), null, 'unknown before its module is registered');
+  registerHost((await import(pathToFileURL(hostModule(p.tmp)).href)).default);
+  assert.equal(findHost('grok').label, 'Grok CLI');
+  assert.deepEqual(callerSession(env), { runtime: 'grok', id: SESSION });
+  assert.ok(sessionVariables().includes('GROK_TEST_SESSION'), 'a launched role never inherits its session variable');
+  const file = path.join(p.root, 'server', 'src', 'core', 'sum.mjs');
+  writeFiles(path.join(p.home, '.grok', 'sessions'), {
+    [`${SESSION}.json`]: JSON.stringify({ cwd: p.root, events: [
+      { at: '2026-01-05T09:00:00.000Z', kind: 'person', text: 'review it' },
+      { at: '2026-01-05T09:01:00.000Z', kind: 'read', file, ok: true },
+      { at: '2026-01-05T09:02:00.000Z', kind: 'read', file: path.join(p.root, 'missing.mjs'), ok: false },
+      { at: '2026-01-05T09:03:00.000Z', kind: 'usage', model: 'grok-test-model', input: 100, output: 20 },
+    ] }),
+  });
+  const session = { runtime: 'grok', id: SESSION };
+  assert.deepEqual(filesRead(session, { home: p.home }), [file], 'a failed read is not a read');
+  const act = sessionActivity(session, { home: p.home });
+  assert.deepEqual([act.turns.length, act.turns[0].human, act.tokens.input, act.tokens.output, act.model], [4, true, 100, 20, 'grok-test-model']);
+  assert.equal(filesRead({ runtime: 'grok', id: 'no-such-session' }, { home: p.home }), null);
+  const passed = projectEnv(null, {}, env);
+  assert.equal(passed.GROK_TEST_TOKEN, undefined, 'its credential prefix never reaches a project command');
+  assert.equal(passed.PATH, process.env.PATH);
 });
 
-test('a failed turn the adapter reports is a failed launch, named for the harness', () => {
-  const { root, id, run } = prepared('crash');
-  const r = run(['handoff', 'run', '--agent', 'p', '--attempt', id]);
-  assert.notEqual(r.code, 0);
-  assert.match(r.err, /Grok role failed: Grok reported a failed turn/);
-  assert.equal(state(root, id).handoffs.at(-1).launch.status, 'failed');
-});
-
-test('without the adapter the same runtime is refused, naming the harnesses the engine knows', () => {
-  const p = singleRepoProject('host-plugin-unknown', { gate: { steps: [] } });
-  const id = ok(wf(p.root, ['entry', '--item', 'ENG-91', '--owner', 'plain:person', '--json'])).json().id;
-  const r = wf(p.root, ['handoff', 'planner', '--agent', 'p', '--runtime', 'grok', '--attempt', id], { preserveRuntime: true });
-  assert.equal(r.code, 75);
-  assert.match(r.err, /claude or codex/);
+test('through the real cli, a command run from the registered host\'s session records that session as its actor; without the module it is a terminal', () => {
+  const p = makeProject({
+    name: 'plug',
+    repos: [{ name: 'app', base: 'trunk', files: { 'src/a.mjs': 'export const a = 1;\n', 'README.md': '# app\n' } }],
+    overrides: {
+      repos: [{ name: 'app', path: 'app', base: 'trunk', tests: { fast: { run: 'node -e "process.exit(0)"' } }, kinds: { tests: ['test/**'], other: ['**/*.md'] } }],
+      risk: 'none',
+      ticketing: { tracker: 'files', via: 'files', idPattern: '^TK-\\d+$' },
+      delivery: { landing: 'direct', stages: [{ do: 'land' }] },
+    },
+  });
+  try {
+    writeFiles(p.root, { 'tickets/TK-1.md': '---\nid: TK-1\ntitle: A ticket\nstatus: Todo\n---\nBody.\n' });
+    const started = runWf(p, ['start', 'TK-1']);
+    assert.equal(started.code, 0, started.err);
+    const env = { ...gitEnv(), ...p.env, GROK_TEST_SESSION: SESSION, WF_TEST_HOST_ADAPTER: hostModule(p.tmp) };
+    for (const k of ['CLAUDE_CODE_SESSION_ID', 'CLAUDECODE', 'CODEX_THREAD_ID', 'CODEX_SANDBOX', 'AI_AGENT', 'GROK_SESSION_ID']) delete env[k];
+    const held = spawnSync(process.execPath, [WRAPPER, 'hold', '--reason', 'wait for the person', '--attempt', 'TK-1.1'], { cwd: p.root, env, encoding: 'utf8' });
+    assert.equal(held.status, 0, held.stderr);
+    const plain = runWf(p, ['hold', '--reason', 'still waiting', '--attempt', 'TK-1.1'], { env: { GROK_TEST_SESSION: SESSION } });
+    assert.equal(plain.code, 0, plain.err);
+    const ledger = fs.readFileSync(path.join(p.root, '.wf-evidence', 'attempts', 'TK-1.1', 'ledger.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    const holds = ledger.filter((e) => e.type === 'hold');
+    assert.deepEqual(holds[0].actor, { runtime: 'grok', id: SESSION });
+    // The plain wf does not know the host: the same variable is no session.
+    assert.equal(holds[1].actor, null);
+  } finally {
+    p.cleanup();
+  }
 });

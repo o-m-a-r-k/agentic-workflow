@@ -9,21 +9,19 @@ Security tab). Include steps to reproduce and the affected version. You will get
 
 In scope, most of all:
 
-- the evidence guard hook (`hooks/guard-evidence.mjs`): a file-tool input (Edit, Write, MultiEdit, NotebookEdit, a native
-  `apply_patch`) that writes to a project's evidence without being refused. Shell text is not judged (agents are fallible,
-  not adversarial); a write made through a shell is caught afterwards by the evidence checks below;
-- evidence protection and verification (`engine/evidence.mjs`): a change to evidence that the next `wf` command does
-  not refuse, or an engine write that follows a link out of the evidence;
-- path handling (`engine/paths.mjs`, every path option of the CLI, lessons, improvements): a path that resolves
-  somewhere other than where it was checked;
-- export (`wf export`, `wf export screenshots`): a copy that writes outside its folder or reads through a link;
-- anything that exposes secret values to an agent or a log, lets a change bypass the gate or review, or runs commands
-  outside the project.
+- anything that exposes a secret value to an agent, a log or a project command that does not list it, or passes an
+  agent runtime's credentials to a project command (`engine/secrets.mjs`, `engine/env.mjs`);
+- a path or id that resolves somewhere other than where it was checked, or a write that follows a link out of the
+  project's state folders or the tickets folder (`adapters/tracker/files.mjs`, `engine/state-folders.mjs`);
+- a project module that loads from an attempt's worktree instead of the fetched base (`engine/base-module.mjs`), so a
+  ticket could change the code that judges or delivers it;
+- an answer recorded as the person's that the person did not give (`engine/decisions.mjs`, `engine/hosts/`);
+- a change to a ledger that the next read does not refuse (`engine/ledger.mjs`);
+- anything that lets a change bypass review or the merge facts, or runs commands outside the project.
 
 ## What is and is not a security boundary
 
-agentic-workflow is **defense in depth against a careless or mistaken agent**, not a sandbox and not a boundary
-against a determined process running as the same user. Such a process can lift the protection, rewrite evidence, the
-ledger, its chain and its anchor consistently; nothing local can prove otherwise. Reports that need that capability are
-welcome as hardening ideas, not as vulnerabilities. See "Evidence integrity" in the [README](README.md) and "Trust
-model" in [docs/DESIGN.md](docs/DESIGN.md).
+agentic-workflow catches the mistakes of a careless or mistaken agent; it is not a sandbox and not a boundary against
+a determined process running as the same user (D6 in [docs/DESIGN.md](docs/DESIGN.md)). Such a process can rewrite a
+ledger and its chain consistently; nothing local can prove otherwise. Reports that need that capability are welcome as
+hardening ideas, not as vulnerabilities.

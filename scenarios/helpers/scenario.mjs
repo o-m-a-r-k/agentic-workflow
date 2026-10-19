@@ -1,5 +1,4 @@
-// Scenario helpers for 0.8 tests. They import only engine/contract.mjs and node, never a 0.7 module or the 0.7
-// scenarios/helpers.mjs, so they survive stream 8's deletion.
+// Scenario helpers for 0.8 tests. They import only engine/contract.mjs and node.
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';

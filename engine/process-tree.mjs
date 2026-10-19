@@ -42,7 +42,7 @@ export function stillTheRole(pid, spawnedAt) {
 }
 
 // Every process as { ppid, pgid, zombie } by pid, or null when this host does not let us list them (a sandbox can forbid
-// `ps`; see processCommand in engine/gate.mjs). A zombie has died and waits for its parent to collect it: it is gone.
+// `ps`). A zombie has died and waits for its parent to collect it: it is gone.
 function processTable() {
   const r = spawnSync('ps', ['-A', '-o', 'pid=,ppid=,pgid=,stat='], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
   if (r.error || r.status !== 0) return null;

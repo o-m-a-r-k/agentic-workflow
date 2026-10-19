@@ -1,7 +1,7 @@
 // Finding a Codex session's transcript. Named failure I-34: desktop resumes write suffixed rollouts; filename-only lookup
 // reads the abandoned initial file. Codex's threads index chooses its active rollout. Read it without writing, then
 // validate the path and the recorded id. No newest-file heuristic and no caller-supplied authority text. A same-user
-// forger can edit this host store too (docs/trust-model.md).
+// forger can edit this host store too, which is outside the threat model (D6 in docs/DESIGN.md).
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';

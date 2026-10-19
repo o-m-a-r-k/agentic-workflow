@@ -6,7 +6,7 @@
   "plugins": [
     {
       "name": "agentic-workflow",
-      "description": "Isolated worktrees, evidence-based gates, independent review and tracker handoff, with per-project adapters.",
+      "description": "Fresh worktrees, independent whole-diff reviews and the project's own delivery stages, with per-project adapters.",
       "source": "./",
       "category": "development"
     }

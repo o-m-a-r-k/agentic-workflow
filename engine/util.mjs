@@ -13,39 +13,6 @@ export const YAML = require('./vendor/yaml/dist/index.js');
 // stayed at 0.1.2 through four releases, so the ledger recorded a version nothing could be checked against.
 export const ENGINE_VERSION = require('../package.json').version;
 
-// `x.y.z` as numbers, missing parts 0; null when it is not a version.
-export function parseVersion(v) {
-  const m = String(v ?? '').trim().match(/^(\d+)(?:\.(\d+))?(?:\.(\d+))?$/);
-  return m ? [Number(m[1]), Number(m[2] ?? 0), Number(m[3] ?? 0)] : null;
-}
-export function compareVersions(a, b) {
-  const x = parseVersion(a);
-  const y = parseVersion(b);
-  for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] < y[i] ? -1 : 1;
-  return 0;
-}
-
-// The adapter's `engine:` pin: `N.x` (same major) or `>=x.y.z` (at least that release). Returns why the installed
-// engine does not satisfy it, or null. The pin was only checked by `wf doctor`, major only, so a project that needed a
-// newer engine's behaviour ran tickets on an older one without a word.
-export const ENGINE_PIN = /^(?:\d+\.x|>=\s*\d+(?:\.\d+){0,2})$/;
-export function enginePinProblem(pin, installed = ENGINE_VERSION) {
-  if (pin === null || pin === undefined) return null;
-  const p = String(pin).trim();
-  if (/^\d+\.x$/.test(p)) return p.split('.')[0] === String(parseVersion(installed)[0]) ? null : `the project pins engine ${p}; installed is ${installed}`;
-  const min = p.match(/^>=\s*(.+)$/)?.[1];
-  if (min && parseVersion(min)) return compareVersions(installed, min) >= 0 ? null : `the project needs engine ${p}; installed is ${installed}`;
-  return `the engine pin \`${p}\` is not \`N.x\` or \`>=x.y.z\``;
-}
-// The commands that update the plugin through a harness's own plugin manager; the host layer registers them.
-let upgradeCommands = () => [];
-export const setUpgradeCommands = (fn) => { upgradeCommands = fn; };
-export function assertEngine(cfg, installed = ENGINE_VERSION) {
-  const problem = enginePinProblem(cfg?.engine, installed);
-  if (problem) throw refuse(problem, `upgrade the plugin (${upgradeCommands().map((c) => `\`${c}\`, `).join('')}or \`git pull\` in a clone and \`node bin/wf install\`), or change \`engine:\` in .workflow/project.yaml`);
-}
-export const SCHEMA_VERSION = 1;
-
 // Exit codes: 1 usage/config error, 2 invalid override, 75 refusal (state does not allow the action).
 export class WfError extends Error {
   constructor(message, { code = 1, hint } = {}) {
@@ -69,14 +36,6 @@ function callSiteId() {
   return m ? `${m[1]}:${m[2]}` : 'unknown';
 }
 
-// a < b for dotted versions (prerelease suffixes ignored).
-export function semverLt(a, b) {
-  const pa = String(a).split(/[.-]/).slice(0, 3).map(Number);
-  const pb = String(b).split(/[.-]/).slice(0, 3).map(Number);
-  for (let i = 0; i < 3; i++) if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) < (pb[i] || 0);
-  return false;
-}
-
 export function canonical(value) {
   // As JSON writes it: an undefined array element is stored as null, so it must hash as null, or the entry no longer
   // verifies once read back (a component without an id put `undefined` in `impact.touched` and broke the chain).
@@ -92,7 +51,6 @@ export function canonical(value) {
 }
 
 export const sha256 = (data) => crypto.createHash('sha256').update(data).digest('hex');
-export const hashValue = (value) => sha256(typeof value === 'string' ? value : canonical(value));
 export const hashFile = (file) => sha256(fs.readFileSync(file));
 
 export const now = () => new Date().toISOString();
@@ -141,26 +99,6 @@ export function writeNoFollow(file, data, { exclusive = false, mode = 0o644 } = 
 export function writeJson(file, value) {
   mkdirStateDirectory(path.dirname(file), { recursive: true });
   writeNoFollow(file, `${JSON.stringify(value, null, 2)}\n`);
-}
-
-// Write-once: refuses to overwrite different content.
-export function writeImmutable(file, content) {
-  const st = fs.lstatSync(file, { throwIfNoEntry: false });
-  if (st && !st.isFile()) throw new WfError(`${file} is ${st.isSymbolicLink() ? 'a symlink' : 'not a regular file'}; nothing is read or written through it`, { code: 75 });
-  if (st) {
-    const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
-    let same;
-    try {
-      same = fs.readFileSync(fd, 'utf8') === content;
-    } finally {
-      fs.closeSync(fd);
-    }
-    if (!same) throw new WfError(`immutable evidence already exists with different content: ${file}`);
-    return file;
-  }
-  mkdirStateDirectory(path.dirname(file), { recursive: true });
-  writeNoFollow(file, content, { mode: 0o444, exclusive: true });
-  return file;
 }
 
 // Named failure (0.5.0 adversarial review): engine git calls inherited the environment and the repo's settings, so
@@ -304,15 +242,6 @@ export function globToRegExp(glob) {
   globCache.set(glob, compiled);
   return compiled;
 }
-// Why a glob cannot be used (it expands into too many alternatives), or null.
-export function globProblem(glob) {
-  try {
-    expandBraces(String(glob));
-    return null;
-  } catch (error) {
-    return error.message;
-  }
-}
 export const matchesAny = (file, globs = []) => globs.some((g) => globToRegExp(g).test(file));
 
 // `--opt=value` and `--opt value` give the same key; a repeated option is reported (`repeated`) so a caller can refuse
@@ -346,9 +275,6 @@ export function isPidAlive(pid) {
     return error.code === 'EPERM';
   }
 }
-
-// Single-quote a value for sh.
-export const shellQuote = (v) => `'${String(v).replace(/'/g, `'\\''`)}'`;
 
 // Ids end up in paths and branch names.
 export function assertSafeId(value, what = 'id') {

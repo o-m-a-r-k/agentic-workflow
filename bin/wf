@@ -7,8 +7,8 @@ import { fileURLToPath } from 'node:url';
 // A copy of wf older than the installed release runs the installed one instead (0.7.19). Named failure: an owner session
 // copied the plugin's engine into a temporary folder to use a release early, then ran that copy for two days and six
 // releases, so every later fix missed it (approving in the chat among them) and its owner reached for changing the
-// workflow itself. The installed release is the one `wf install` linked into ~/.local/bin; a copy that is not older, or
-// `WF_NO_FORWARD`, runs as it is, and `wf install` always runs as it is (choosing which copy is linked is its purpose, a
+// workflow itself. The installed release is the one `node scripts/install.mjs` linked into ~/.local/bin; a copy that is not
+// older, or `WF_NO_FORWARD`, runs as it is (choosing which copy is linked is the install script's purpose, a
 // rollback included).
 const here = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const versionOf = (dir) => {
@@ -26,7 +26,7 @@ const newer = (a, b) => {
   return false;
 };
 function installed() {
-  if (process.env.WF_NO_FORWARD || !process.env.HOME || process.argv[2] === 'install') return null;
+  if (process.env.WF_NO_FORWARD || !process.env.HOME) return null;
   let target;
   try {
     target = path.dirname(path.dirname(fs.realpathSync(path.join(process.env.HOME, '.local', 'bin', 'wf'))));

@@ -13,6 +13,7 @@ import {
   loadAdapter, readEvents, scan, userDir,
 } from './contract.mjs';
 import { isInstructionDoc, repoFiles } from './scan.mjs';
+import { stateFolderWarnings } from './state-folders.mjs';
 import { matchesAny } from './util.mjs';
 
 const require = createRequire(import.meta.url);
@@ -650,6 +651,8 @@ export async function cmdDoctor(ctx) {
   } catch (error) {
     add('warn', 'secrets', `not checked: ${error.message}`);
   }
+  // Named failure: cloud sync conflict copies left the evidence folder empty while a sibling copy held the ledgers.
+  for (const w of stateFolderWarnings(root)) add('warn', w.check, w.problem, w.fix ?? null);
   const mark = { ok: '✓', warn: '!', fail: '✗' };
   const text = checks.map((c) => `${mark[c.level]} ${c.check}: ${c.detail}${c.fix ? `\n    fix: ${c.fix}` : ''}`).join('\n');
   return { text, data: { checks }, exitCode: checks.some((c) => c.level === 'fail') ? 1 : 0 };

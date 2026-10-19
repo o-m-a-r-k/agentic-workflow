@@ -99,7 +99,7 @@ export function refusal(id, message, hint = null) {
 // (`telemetry/<project>.jsonl`), proposals (`proposals/<project>.jsonl`), the digest, the machine-wide test locks
 // (`locks/`). WF_USER_DIR moves it (scenarios point it into a temporary folder).
 export const userDir = (env = process.env) => env.WF_USER_DIR || path.join(os.homedir(), '.agentic-workflow');
-// The home folder host transcripts are read under (`<hostHome>/.claude/projects/...`). WF_HOST_HOME moves it.
+// The home folder host transcripts are read under (each host's own store below it, engine/hosts/). WF_HOST_HOME moves it.
 export const hostHome = (env = process.env) => env.WF_HOST_HOME || os.homedir();
 // Per-project state, the same place 0.7 used, so old ledgers stay readable and attempt numbers continue:
 //   <root>/.wf-evidence/attempts/<attempt>/ledger.jsonl   (stream 5 writes it; nothing else does)
@@ -128,7 +128,7 @@ export const marker = (attempt, stage) => `wf:${attempt}:${stage}`;
 // ---------------------------------------------------------------------------------------------------------------------
 
 /**
- * @typedef {{ runtime: string, id: string }} Session   runtime: a host name stream 4 registers (`claude`, `codex`, ...).
+ * @typedef {{ runtime: string, id: string }} Session   runtime: the id of a host registered in engine/hosts/.
  * @typedef {{ repo: string, path: string }} ModuleRef    resolved in the attempt's worktree of `repo` (or the repo's
  *   checkout when there is no attempt).
  * @typedef {{ run?: string, module?: ModuleRef, lock?: { name: string, count: number } }} TestSpec
