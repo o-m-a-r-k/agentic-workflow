@@ -277,6 +277,7 @@ async function postComment(ctx, kind, m) {
   const evidence = { comment: kind, marker: m };
   if (tr.driver && (await tr.driver.search({ marker: m })).length) return { state: 'done', evidence: { ...evidence, written: false }, next: null };
   if (!fs.existsSync(file) || !fs.readFileSync(file, 'utf8').trim()) {
+    fs.mkdirSync(path.dirname(file), { recursive: true }); // the folder the owner writes the comment into
     return { state: 'pending', evidence, next: `write the ${kind} comment for ${ctx.item} in product words (what to test; no file paths, commits or hashes) to ${file}; then wf deliver ${ctx.attempt}` };
   }
   const body = `${fs.readFileSync(file, 'utf8').trim()}\n\n${m}`;

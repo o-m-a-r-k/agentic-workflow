@@ -611,6 +611,7 @@ async function openAttempts(ctx, args) {
 
 async function cmdStatus(ctx, args) {
   const root = projectRoot(ctx);
+  await loadAdapter(root); // an adapter that cannot be read (a schema-1 one names `wf init --from-07`) is said first
   const rows = [];
   for (const id of await openAttempts(ctx, args)) rows.push({ attempt: id, ...(await nextStep(root, id)) });
   const text = rows.length ? rows.map((r) => `${r.attempt}\n  next: ${r.command}\n  why: ${r.why}`).join('\n') : 'no open attempts; `wf start <item>` starts one';
@@ -619,6 +620,7 @@ async function cmdStatus(ctx, args) {
 
 async function cmdResume(ctx, args) {
   const root = projectRoot(ctx);
+  await loadAdapter(root);
   const ids = await openAttempts(ctx, args);
   if (!ids.length) return { text: 'no open attempts; `wf start <item>` starts one', data: { attempts: [] } };
   const out = [];

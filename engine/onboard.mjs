@@ -378,7 +378,9 @@ export async function writeAdapter(root, diff, confirmed, { location, finish = [
   if (found && found.file !== file) throw new WfError(`the adapter is at ${found.file}; moving it to the ${where} folder is not done by onboarding`, { hint: 'move the file yourself, then re-run `wf init`' });
   const beforeBudget = before ? await adapterBudget(await loadAdapter(root, { env })).catch(() => null) : null;
   const oldText = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null;
-  const put = (obj) => {
+  const put = (value) => {
+    // A copy with no shared objects, so the YAML holds no anchors or aliases the person would have to read through.
+    const obj = JSON.parse(JSON.stringify(value));
     let text;
     if (!replacing && oldText !== null) {
       // Edit in place, so the person's comments and order survive.

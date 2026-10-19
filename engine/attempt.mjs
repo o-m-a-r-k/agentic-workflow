@@ -206,8 +206,9 @@ async function startAttempt(root, rawItem, { actor = null, repos = null } = {}) 
   for (const id of ids) {
     const s = await attemptState(root, id);
     if (s.open) {
-      const held = s.schema === 2 ? holdOf(schema2(await readEvents(root, id))) : null;
-      throw refusal('start:open', `${item} already has an ${held ? `attempt held by the person ("${held.reason}")` : 'open attempt'}: ${id}`, held ? 'only the person lifts the hold (`wf release` on their answer)' : `continue it (\`wf resume --attempt ${id}\`), or close it first (\`wf abandon --attempt ${id} --reason "<why>"\`)`);
+      const held = s.schema === 2 ? holdOf(schema2(await readEvents(root, id))) : s.hold ?? null;
+      const hint = held ? 'only the person lifts the hold (`wf release` on their answer)' : s.schema === 1 ? `it is a 0.7 attempt: \`wf migrate attempts\` closes it as superseded or shipped` : `continue it (\`wf resume --attempt ${id}\`), or close it first (\`wf abandon --attempt ${id} --reason "<why>"\`)`;
+      throw refusal('start:open', `${item} already has an ${held ? `attempt held by the person ("${held.reason}")` : 'open attempt'}: ${id}`, hint);
     }
   }
   const wanted = repos?.length ? repos : adapter.repos.map((r) => r.name);
@@ -311,8 +312,8 @@ export const RELEASE = { lift: 'lift the hold', keep: 'keep the hold' };
 async function cmdRelease(ctx, args) {
   const root = projectRoot(ctx);
   const id = await resolveAttempt(ctx, args);
-  const events = schema2(await readEvents(root, id));
-  const hold = holdOf(events);
+  // Every hold and release of the ledger, a 0.7 attempt's included: a held 0.7 attempt is lifted the same way.
+  const hold = holdOf(await readEvents(root, id));
   if (!hold) throw new WfError(`${id} is not held`);
   const q = await ask(root, id, { kind: 'release', question: `Lift the hold on ${id} ("${hold.reason}")?`, options: [RELEASE.lift, RELEASE.keep], refs: [`hold:${hold.at}`], blocking: true });
   const answer = await answered(root, q.id, { attempt: id });
@@ -405,8 +406,9 @@ async function closeWith(ctx, args, outcome) {
   const adapter = await loadAdapter(root);
   const state = await attemptState(root, id);
   if (!state.open) throw new WfError(`${id} is already closed (${state.outcome})`);
-  const events = schema2(await readEvents(root, id));
-  const hold = holdOf(events);
+  const all = await readEvents(root, id);
+  const events = schema2(all);
+  const hold = holdOf(all); // a 0.7 attempt's hold counts too: migration leaves held attempts to the person
   if (hold) throw refusal('hold', `${id} is held by the person ("${hold.reason}")`, 'only the person lifts the hold (`wf release` on their answer)');
   const dirty = dirtyRepos(state);
   if (Object.keys(dirty).length && !(outcome === 'abandoned' && args.flags.discard === true)) {
