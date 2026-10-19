@@ -14,7 +14,6 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import crypto from 'node:crypto';
 import { WfError, attemptDir, attemptState, callerSession, connectorCalls, loadAdapter, marker, userDir } from './contract.mjs';
 import { filesTracker } from '../adapters/tracker/files.mjs';
 
@@ -43,8 +42,9 @@ export function git(cwd, args, { allowFail = false, input } = {}) {
 // A project module `{ repo, path }`, loaded only as committed at the repo's fetched base, never from an attempt's
 // worktree or the checkout's working files: a ticket cannot change the code that decides its own delivery (mark itself
 // merged, skip a confirmation, write to the tracker). A ticket's change to a module ships through delivery and takes
-// effect after it lands. The committed bytes are copied to a content-addressed cache in the user folder and imported
-// from there, so the import is exactly what the base holds. `attempt` is accepted for the call sites and not used.
+// effect after it lands. The module's folder as committed is extracted to `<userDir>/modules/<tree sha>/` and the
+// module imported from there, so it and the sibling files it imports are exactly what the base holds. `attempt` is
+// accepted for the call sites and not used.
 const fetchedBases = new Set();
 export function baseRefOf(dir, spec) {
   const remote = spec.remote ?? 'origin';
@@ -54,7 +54,7 @@ export function baseRefOf(dir, spec) {
     git(dir, ['fetch', '--quiet', remote, `+refs/heads/${spec.base}:refs/remotes/${remote}/${spec.base}`], { allowFail: true });
     fetchedBases.add(key);
   }
-  return `${remote}/${spec.base}`;
+  return `refs/remotes/${remote}/${spec.base}`;
 }
 export async function loadModule(root, adapter, ref, attempt = null) { // eslint-disable-line no-unused-vars
   const spec = adapter.repos.find((r) => r.name === ref?.repo);
@@ -63,17 +63,27 @@ export async function loadModule(root, adapter, ref, attempt = null) { // eslint
   if (!rel || rel.startsWith('../') || rel === '..' || path.posix.isAbsolute(rel)) throw new WfError(`module ${ref.repo}/${ref.path}: the path must be inside the repo`);
   const dir = path.join(root, spec.path);
   const baseRef = baseRefOf(dir, spec);
-  const shown = git(dir, ['show', `${baseRef}:${rel}`], { allowFail: true });
-  if (shown.status !== 0) throw new WfError(`module ${ref.repo}/${rel} is not committed on ${baseRef}: project modules are loaded only as the base holds them`);
-  const bytes = shown.stdout;
+  // The module's whole folder at the base, keyed by that folder's tree sha, so its sibling helpers import as committed.
+  if (git(dir, ['cat-file', '-e', `${baseRef}:${rel}`], { allowFail: true }).status !== 0) throw new WfError(`module ${ref.repo}/${rel} is not committed on ${baseRef}: project modules are loaded only as the base holds them`);
+  const folder = path.posix.dirname(rel);
+  const tree = git(dir, ['rev-parse', folder === '.' ? `${baseRef}^{tree}` : `${baseRef}:${folder}`]);
   const cache = path.join(userDir(), 'modules');
-  fs.mkdirSync(cache, { recursive: true });
-  const file = path.join(cache, `${crypto.createHash('sha256').update(bytes).digest('hex')}.mjs`);
-  if (!fs.existsSync(file)) {
-    const tmp = `${file}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, bytes);
-    fs.renameSync(tmp, file);
+  const target = path.join(cache, tree);
+  if (!fs.existsSync(target)) {
+    fs.mkdirSync(cache, { recursive: true });
+    const tmp = fs.mkdtempSync(path.join(cache, `.${tree}-`));
+    const archive = spawnSync('git', ['archive', '--format=tar', baseRef, ...(folder === '.' ? [] : [folder])], { cwd: dir, env: gitEnv(), maxBuffer: 1024 * 1024 * 1024 });
+    if (archive.status !== 0) throw new WfError(`git archive of ${ref.repo}/${folder} at ${baseRef} failed: ${String(archive.stderr).trim()}`);
+    const untar = spawnSync('tar', ['-x', '-f', '-', '-C', tmp], { input: archive.stdout });
+    if (untar.status !== 0) throw new WfError(`extracting ${ref.repo}/${folder} at ${baseRef} failed: ${String(untar.stderr).trim()}`);
+    try {
+      fs.renameSync(tmp, target);
+    } catch (e) {
+      fs.rmSync(tmp, { recursive: true, force: true }); // another process extracted the same tree first
+      if (!fs.existsSync(target)) throw e;
+    }
   }
+  const file = path.join(target, ...rel.split('/'));
   return import(pathToFileURL(file).href);
 }
 

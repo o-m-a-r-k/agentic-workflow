@@ -340,5 +340,21 @@ test('a ticket cannot change the code that decides its own delivery: modules loa
   // A module that is not on the base is refused, not read from the worktree.
   const g = await f.startAttempt('TK-2', 1, { stages: [{ do: 'module', module: { repo: 'server', path: '.workflow/new.mjs' } }] });
   change(f, g, 'server', { '.workflow/new.mjs': 'export default async () => ({ state: "done" });\n' });
-  await assert.rejects(runStage(f.p.root, g, 0), /not committed on origin\/trunk/);
+  await assert.rejects(runStage(f.p.root, g, 0), /not committed on refs\/remotes\/origin\/trunk/);
+});
+
+test('a base module imports its sibling helpers as the base holds them', async (t) => {
+  const f = deliveryProject({ delivery: { stages: [{ do: 'module', module: { repo: 'server', path: '.workflow/delivery/check.mjs' } }] } });
+  t.after(f.cleanup);
+  f.doubles();
+  f.p.commit('server', {
+    '.workflow/delivery/check.mjs': 'import { verdict } from "./helper.mjs";\nexport default async () => ({ state: verdict(), evidence: { helper: "base" } });\n',
+    '.workflow/delivery/helper.mjs': 'export const verdict = () => "waiting";\n',
+  }, 'delivery module with a helper', { push: true });
+  const attempt = await f.startAttempt('TK-1');
+  // The attempt changes only the helper; the base's helper is still the one imported.
+  change(f, attempt, 'server', { '.workflow/delivery/helper.mjs': 'export const verdict = () => "done";\n' });
+  const r = await runStage(f.p.root, attempt, 0);
+  assert.equal(r.state, 'waiting');
+  assert.deepEqual(r.evidence, { helper: 'base' });
 });
