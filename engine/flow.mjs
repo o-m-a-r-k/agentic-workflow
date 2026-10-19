@@ -12,7 +12,7 @@ import {
 } from './contract.mjs';
 import { baseOf, baseRef, changedOf, dirtyRepos, foreignMerges, headsOfTree, mergeBaseOf, rootPath, specOf, unreviewedCommits } from './base.mjs';
 import { assertFindings, blockersOf, fileOther, foldFindings, nextFindingNumber, refuseOtherOwn } from './findings.mjs';
-import { decisionsOf, flagText, holdOf, itemHistory, projectRoot, resolveAttempt, schema2, sessionFlag } from './attempt.mjs';
+import { PROJECT_LEDGER, decisionsOf, flagText, holdOf, itemHistory, projectRoot, resolveAttempt, schema2, sessionFlag } from './attempt.mjs';
 import { mkdirStateDirectory } from './state-folders.mjs';
 import { YAML, git, matchesAny, run, sha256 } from './util.mjs';
 
@@ -328,7 +328,7 @@ async function bundle(root, attempt) {
       blockers.length ? list('Verify these open findings first (status fixed or open), then re-read the whole change', blockers.map((f) => `${f.id} ${f.class} ${f.severity} ${f.location}: ${f.what}`)) : null,
       fixed.length ? list('Earlier findings marked fixed (mark one `open` in verified if it is back)', fixed.map((f) => `${f.id} ${f.location}: ${f.what}`)) : null,
       changes.length ? list('Findings whose class or severity changed', changes.map((f) => `${f.id}: ${f.changes.map((c) => `${c.field} ${c.from} -> ${c.to}`).join(', ')}`)) : null,
-      `Write your review as JSON to ${output}: {"findings": [...], "verified": [{"id": "F1", "status": "fixed"}]}.`,
+      `Write your review as JSON to ${output}: {"findings": [...], "verified": [{"id": "F1", "status": "fixed"}]}. If you cannot write files, give that JSON as your final message.`,
     ].filter((x) => x !== null && x !== '').join('\n');
     const b = {
       seat: s.seat, attempt, tree, round, prompt, files: files_, verify: blockers.map((f) => f.id), productFiles,
@@ -623,7 +623,7 @@ async function openAttempts(ctx, args) {
   const root = projectRoot(ctx);
   if (args.flags.attempt) return [await resolveAttempt(ctx, args)];
   const out = [];
-  for (const id of await listAttempts(root)) {
+  for (const id of (await listAttempts(root)).filter((x) => x !== PROJECT_LEDGER)) {
     const s = await attemptState(root, id);
     if (s.open && s.schema === 2) out.push(id);
   }
@@ -775,7 +775,8 @@ async function cmdReview(ctx, args) {
   for (const r of [...new Set(riskOf(L.adapter, files).tests.map((f) => f.repo))]) if (!ran(r, 'risk-base')) tests.push({ repo: r, kind: 'risk-base' });
   // Reviewers and tests run at once on the same tree.
   const jobs = [
-    ...todo.map((b) => launchReviewer(root, id, b, b.model ? { model: b.model } : {}).then((x) => ({ seat: b.seat, ...x, output: b.output }))),
+    // The closure is the file the bundle's prompt names, so the reviewer writes (or its final message is saved) there.
+    ...todo.map((b) => launchReviewer(root, id, b, { closure: b.output, ...(b.model ? { model: b.model } : {}) }).then((x) => ({ seat: b.seat, ...x, output: x.closure ?? b.output }))),
     ...tests.map((t) => runTests(root, id, t.repo, t.kind).then((x) => ({ test: t, ...x }))),
   ];
   const results = await Promise.allSettled(jobs);

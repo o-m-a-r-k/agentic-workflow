@@ -18,6 +18,9 @@ import { ENGINE_VERSION, assertPlainGit, assertSafeId, git, hashFile, run } from
 
 // --- shared reads (used by flow.mjs too) -------------------------------------------------------------------------------
 
+// Stream 4's reserved ledger of project-level decisions: not an attempt.
+export const PROJECT_LEDGER = 'wf-project';
+
 export const schema2 = (events) => events.filter((e) => e.schema === 2);
 
 // The hold in force, from the attempt's own hold/release events: { reason, quote, at } or null.
@@ -63,7 +66,7 @@ export function projectRoot(ctx) {
 // worktree holds the current folder, else the only open attempt.
 export async function resolveAttempt(ctx, args) {
   const root = projectRoot(ctx);
-  const all = await listAttempts(root);
+  const all = (await listAttempts(root)).filter((id) => id !== PROJECT_LEDGER);
   const flag = args.flags?.attempt;
   const openOf = async (ids) => {
     const out = [];

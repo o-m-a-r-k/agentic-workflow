@@ -86,3 +86,10 @@ test('the flow through the cli: status names one next command at every step; a r
     p.done();
   }
 });
+
+test('arguments: subcommands stay in `_`; flags reach handlers by name, repeated ones as a list', async () => {
+  const { parseArgv } = await import('../engine/cli.mjs');
+  assert.deepEqual(parseArgv(['attempts', '--dry-run']), { _: ['attempts'], flags: { 'dry-run': true } });
+  assert.deepEqual(parseArgv(['--from-07', '--confirm', 'risk', '--confirm', 'tests', '--location=user']), { _: [], flags: { 'from-07': true, confirm: ['risk', 'tests'], location: 'user' } });
+  assert.deepEqual(parseArgv(['guide', 'KEY']), { _: ['guide', 'KEY'], flags: {} });
+});
