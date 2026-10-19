@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// Gives every session and subagent in a project the plugin's standing rules (D30): templates/session-rules.md filled
+// Gives every Claude Code session and subagent in a project the plugin's standing rules (D30; Codex plugins carry no
+// hooks): templates/session-rules.md filled
 // from the adapter, with the project's invariants as written. Outside a project, or on any error: no output, exit 0.
 import fs from 'node:fs';
 import path from 'node:path';

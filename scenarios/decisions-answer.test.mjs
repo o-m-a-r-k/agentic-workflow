@@ -1,6 +1,7 @@
 // Stream 4: reserved decisions and the answer rule (design section 2, "Answers"): a notification, a late "yes", injected
 // content and tool results never answer; the first person turn after a message that showed the question does; the
 // question panel does; a decision is never asked twice.
+import fs from 'node:fs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { makeProject, transcript, withDoubles, ledgerLines } from './helpers/index.mjs';
@@ -74,7 +75,7 @@ test('a late "yes" does not count; the same "yes" right after the question does'
   await run(async () => {
     const { id } = await ask(p.root, 'TK-1.1', Q);
     chat('a3330000-0000-4000-8000-000000000003').say(`${Q.question} Options: waive | fix`).read('/x/a.mjs').say('Meanwhile the tests pass.').advance(40).human('yes').write();
-    await assert.rejects(approve(ctx(), { _: [id], flags: { choice: 'waive', quote: 'yes' } }), (e) => e.refusalId === 'answer:not-person' && /names nothing/.test(e.message));
+    await assert.rejects(approve(ctx(), { _: [id], flags: { choice: 'waive', quote: 'yes' } }), (e) => e.refusalId === 'answer:not-person' && /names neither D1 nor its refs/.test(e.message));
     chat('a3330000-0000-4000-8000-000000000004').say(`${Q.question} Options: waive | fix`).advance(1).human('yes').write();
     const r = await approve(ctx(), { _: [id], flags: { choice: 'waive', quote: 'yes' } });
     assert.match(r.text, /Recorded D1: waive/);
@@ -175,5 +176,45 @@ test('a recorded answer is checked again at use: a quote the person never typed 
     // A recorded answer whose session no longer shows the turn does not hold either.
     await ledger.append(p.root, 'TK-1.1', 'decision.answered', { id, choice: 'deploy', quote: 'deploy', via: 'turn', session: { runtime: 'claude', id: 'b9990000-0000-4000-8000-000000000013' }, turnAt }, null);
     assert.equal((await answered(p.root, id, { attempt: 'TK-1.1' })).choice, 'wait');
+  });
+});
+
+test('a later reply counts only by naming the id or a ref as an exact token: shared words with the question do not', async (t) => {
+  const { p, run, chat, ctx } = await setup(t);
+  await run(async () => {
+    const { id } = await ask(p.root, 'TK-1.1', Q);
+    // Words of the question ("spacing", "list", "screen") but neither D1 nor F3, and not right after the question.
+    chat('a9990000-0000-4000-8000-000000000020').say(`${Q.question} Options: waive | fix`).read('/x/a.mjs').say('Anything else?').advance(3).human('the spacing on the list screen is fine, waive').write();
+    await assert.rejects(approve(ctx(), { _: [id], flags: { choice: 'waive', quote: 'the spacing on the list screen is fine' } }), refusedWith('answer:not-person'));
+    // "F30" and "D10" are not F3 or D1.
+    chat('a9990000-0000-4000-8000-000000000021').say(`${Q.question} Options: waive | fix`).read('/x/a.mjs').say('Anything else?').advance(3).human('waive F30 and D10').write();
+    await assert.rejects(approve(ctx(), { _: [id], flags: { choice: 'waive', quote: 'waive F30' } }), refusedWith('answer:not-person'));
+    chat('a9990000-0000-4000-8000-000000000022').say(`${Q.question} Options: waive | fix`).read('/x/a.mjs').say('Anything else?').advance(3).human('d1: waive it').write();
+    const r = await approve(ctx(), { _: [id], flags: { choice: 'waive', quote: 'waive it' } });
+    assert.equal(r.data.answer.choice, 'waive');
+  });
+});
+
+test('--choice is refused when the quote is exactly a different option', async (t) => {
+  const { p, run, chat, ctx } = await setup(t);
+  await run(async () => {
+    const { id } = await ask(p.root, 'TK-1.1', Q);
+    chat('a9990000-0000-4000-8000-000000000023').say(`${Q.question} Options: waive | fix`).advance(1).human('Fix.').write();
+    await assert.rejects(approve(ctx(), { _: [id], flags: { choice: 'waive', quote: 'Fix.' } }), /exactly the option `fix`/);
+    await assert.rejects(approve(ctx(), { _: [id], flags: { choice: 'other', quote: 'fix' } }), /exactly the option `fix`/);
+    assert.equal((await approve(ctx(), { _: [id], flags: { choice: 'fix', quote: 'Fix.' } })).data.answer.choice, 'fix');
+  });
+});
+
+test('a transcript whose mtime reads a little before the question (a coarse file clock) still answers it', async (t) => {
+  const { p, run, chat } = await setup(t);
+  await run(async () => {
+    const { id, shownAt } = await ask(p.root, 'TK-1.1', Q);
+    const file = chat('a9990000-0000-4000-8000-000000000024').say(`${Q.question} Options: waive | fix`).advance(1).human('fix').write();
+    // Linux stamps mtimes from the kernel tick, milliseconds behind the clock a process reads; some file systems keep
+    // whole seconds. Written right after the question, the file can look older than it.
+    const before = new Date(Date.parse(shownAt) - 1000);
+    fs.utimesSync(file, before, before);
+    assert.equal((await answered(p.root, id, { attempt: 'TK-1.1' }))?.choice, 'fix');
   });
 });

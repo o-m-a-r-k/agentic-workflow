@@ -42,7 +42,7 @@ flowchart LR
 
 - **Plugin:** the engine and the `wf` CLI. It knows no framework, tracker, language or company.
 - **Adapter:** the project's settings, schema 2 ([adapter.md](adapter.md)). It lives in a repo (`.workflow/project.yaml`) or in the user folder; `wf init` writes it.
-- **Session rules:** the plugin's SessionStart and SubagentStart hooks give every session in a project the workflow's standing rules, filled from its adapter and invariants. The workflow writes nothing into the project's own instruction files.
+- **Session rules:** the plugin's SessionStart and SubagentStart hooks give every Claude Code session in a project the workflow's standing rules, filled from its adapter and invariants. Codex plugins carry no hooks, so Codex sessions do not get them. The workflow writes nothing into the project's own instruction files.
 - **Hosts:** everything about Claude Code and Codex lives in `engine/hosts/`: how a session is recognised, how a reviewer is launched and resumed, and how its transcript is read.
 
 ## Principles

@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { findSkill } from './claude-skills.mjs';
 import { markdownRole } from './role-files.mjs';
-import { isSafeName, readEntries, settleTranscript } from './safe-file.mjs';
+import { firstEntry, isSafeName, readEntries, settleTranscript } from './safe-file.mjs';
 import { textOf } from './tool-calls.mjs';
 
 const encode = (cwd) => cwd.replace(/[^A-Za-z0-9]/g, '-');
@@ -88,6 +88,9 @@ export function timeline(file) {
   return { cwd, items };
 }
 
+// The session's working folder, from its first entries only (the same line `timeline` takes it from).
+export const cwdOf = (file) => firstEntry(file, (e) => (record(e) && !e.isSidechain && typeof e.cwd === 'string' ? e.cwd : null));
+
 // The one transcript of a session, or null.
 export function transcript(id, home) {
   if (!isSafeName(id)) return null;
@@ -142,7 +145,7 @@ function event(e) {
   if (e.type === 'system' && e.subtype === 'init') return { started: e.session_id };
   if (e.type === 'result') {
     const ok = e.subtype === 'success' && e.is_error === false;
-    return { ended: { ok, session: e.session_id ?? null }, capacity: !ok && CAPACITY.test(`${e.result ?? ''} ${e.error?.message ?? ''} ${e.error?.type ?? ''}`) };
+    return { ended: { ok, session: e.session_id ?? null }, text: typeof e.result === 'string' ? e.result : null, capacity: !ok && CAPACITY.test(`${e.result ?? ''} ${e.error?.message ?? ''} ${e.error?.type ?? ''}`) };
   }
   return {};
 }
@@ -162,6 +165,7 @@ export default {
   transcript,
   projectTranscripts,
   timeline,
+  cwdOf,
   launch,
   resume,
   event,

@@ -31,10 +31,11 @@ process.stdin.on('end', () => {
     const line = (o) => JSON.stringify({ sessionId: sid, cwd, timestamp: now, entrypoint: 'sdk-cli', ...o });
     fs.appendFileSync(path.join(dir, sid + '.jsonl'), [line({ type: 'user', message: { role: 'user', content: input } }), line({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'Read', input: { file_path: process.env.READ_FILE } }] } }), line({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'x' }] } })].join('\\n') + '\\n');
     console.log(JSON.stringify({ type: 'system', subtype: 'init', session_id: sid }));
-    console.log(JSON.stringify(left > 0 ? { type: 'result', subtype: 'error_during_execution', is_error: true, result: 'API Error: 529 overloaded_error' } : { type: 'result', subtype: 'success', is_error: false, session_id: sid }));
+    console.log(JSON.stringify(left > 0 ? { type: 'result', subtype: 'error_during_execution', is_error: true, result: 'API Error: 529 overloaded_error' } : { type: 'result', subtype: 'success', is_error: false, session_id: sid, result: process.env.FAKE_RESULT ?? 'Done.' }));
     process.exit(left > 0 ? 1 : 0);
   }
   const id = val('resume') ?? '0f0f0f0f-1111-4222-8333-444455556666';
+  if (process.env.FAKE_LAST && !(left > 0)) fs.writeFileSync(val('--output-last-message'), process.env.FAKE_LAST);
   console.log(JSON.stringify({ type: 'thread.started', thread_id: id }));
   console.log(JSON.stringify(left > 0 ? { type: 'turn.failed', error: { message: 'server_overloaded' } } : { type: 'turn.completed' }));
   process.exit(left > 0 ? 1 : 0);
@@ -130,4 +131,33 @@ test('launchReviewer refuses a bundle with no prompt, and reports a host that ca
     process.env.PATH = path.join(p.tmp, 'fakebin');
     await assert.rejects(launchReviewer(p.root, 'TK-1.1', bundle), /could not be launched/);
   });
+});
+
+test('the supervisor writes the reviewer\'s final message to an absent review file, and keeps only the JSON of a host-written one', async (t) => {
+  const { p, L } = await setup(t);
+  process.env.FAKE_RESULT = 'Here is my review:\n```json\n{ "findings": [], "verified": [] }\n```\nThat is all.';
+  const r = await withDoubles(L, () => launchReviewer(p.root, 'TK-1.1', bundle));
+  await until(() => statusOf(p)?.state === 'done');
+  assert.deepEqual(JSON.parse(fs.readFileSync(r.closure, 'utf8')), { findings: [], verified: [] });
+
+  // A review the reviewer wrote itself is left as it is.
+  delete process.env.FAKE_RESULT;
+  process.env.FAKE_LAST = 'Summary first.\n{ "findings": [{ "id": "F1", "what": "x {y}" }], "verified": [] }\nThanks.';
+  const c = await withDoubles(L, () => launchReviewer(p.root, 'TK-1.1', { ...bundle, round: 2 }, { runtime: 'codex' }));
+  await until(() => statusOf(p)?.state === 'done');
+  assert.deepEqual(JSON.parse(fs.readFileSync(c.closure, 'utf8')), { findings: [{ id: 'F1', what: 'x {y}' }], verified: [] });
+});
+
+test('a review file already written as JSON is never rewritten; a final message with no text writes nothing', async (t) => {
+  const { p, L } = await setup(t);
+  const closure = path.join(p.tmp, 'own-review.json');
+  fs.writeFileSync(closure, '{"findings":[]}');
+  process.env.FAKE_RESULT = '{ "findings": [{ "id": "F9" }] }';
+  await withDoubles(L, () => launchReviewer(p.root, 'TK-1.1', bundle, { closure }));
+  await until(() => statusOf(p)?.state === 'done');
+  assert.equal(fs.readFileSync(closure, 'utf8'), '{"findings":[]}');
+  process.env.FAKE_RESULT = '';
+  const r = await withDoubles(L, () => launchReviewer(p.root, 'TK-1.1', { ...bundle, round: 3 }));
+  await until(() => statusOf(p)?.state === 'done');
+  assert.ok(!fs.existsSync(r.closure));
 });

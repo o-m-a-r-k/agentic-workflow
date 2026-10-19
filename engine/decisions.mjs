@@ -6,8 +6,9 @@
 //     injected content never do;
 //   - it is the first person turn after a message that showed the question (its words, quoted), in any session of the
 //     project, at or after the time the question was asked;
-//   - a bare reply ("yes", "ok", an option's word alone, words that name nothing of the question) counts only when the
-//     message right before it, after its last tool call, showed this question and no other open one.
+//   - it counts on one of two facts: it is the first person turn after a message (since the last tool call) that showed
+//     this question and no other open one; or its words hold, as an exact token, the decision's id (`D3`) or one of the
+//     refs the engine printed with it (`F3`).
 // The engine reads only these facts. Whether words choose an option is the reader's judgement: an exact option is recorded
 // by itself; anything else is recorded by `wf approve --choice --quote`, whose quote must be in a turn the rule accepts.
 import fs from 'node:fs';
@@ -96,15 +97,16 @@ const shows = (text, question) => norm(text).includes(norm(question));
 const bareOption = (s) => norm(s).replace(/\s*\(recommended\)$/, '').replace(/[.!?,;:]+$/, '').trim();
 const optionOf = (text, options) => options.find((o) => bareOption(o) === bareOption(text)) ?? null;
 
-// Words that name nothing on their own.
-const FILLER = new Set(['the', 'and', 'for', 'you', 'this', 'that', 'with', 'yes', 'yeah', 'yep', 'yup', 'sure', 'okay', 'please', 'thanks', 'thank', 'fine', 'good', 'great', 'go', 'ahead', 'do', 'it', 'its', 'ok', 'no', 'nope', 'not', 'lets', 'let', 'agreed', 'agree', 'approve', 'approved', 'proceed', 'can', 'will', 'should', 'just', 'one', 'that', 'sounds', 'right', 'correct']);
-const words = (s) => norm(s).split(/[^a-z0-9]+/).filter((w) => w.length >= 2 && !FILLER.has(w));
-// A reply that does not name what it answers: an option alone, or no word of the question, its options, its refs or id.
-export function isBare(text, d) {
-  if (optionOf(text, d.options)) return true;
-  const named = new Set([...words(d.question), ...d.options.flatMap(words), ...d.refs.map((r) => r.toLowerCase()), d.id.toLowerCase()]);
-  return !words(text).some((w) => named.has(w));
+// The exact tokens of a text: runs of letters, digits, `_`, `-`, `:` and `.`, without trailing punctuation, compared
+// without case. `D3` is a token of "D3: fix", never of "D30".
+const tokens = (s) => new Set(String(s ?? '').toLowerCase().split(/[^a-z0-9_:.-]+/).map((t) => t.replace(/[.:-]+$/, '')).filter(Boolean));
+// Whether a reply names the decision itself: its id or one of its refs, as an exact token.
+export function namesDecision(text, d) {
+  const have = tokens(text);
+  return [d.id, ...d.refs].some((r) => have.has(String(r).toLowerCase()));
 }
+// A turn the rule accepts for `d`.
+const accepted = (c, d) => c.immediate || namesDecision(c.text, d);
 
 // The turns that may answer `d`: for each message that showed its question (at or after it was asked), the first person
 // turn after it, in every session of the project. `others`: the questions of the project's other open decisions.
@@ -184,7 +186,7 @@ export function stillHolds(d, answer, opts = {}) {
   }
   if (!file) return false;
   const { list } = candidatesIn([{ session: answer.session, ...host.timeline(file) }], d, []);
-  return list.some((c) => c.via === answer.via && c.at === answer.turnAt && norm(c.text).includes(norm(answer.quote)) && (c.immediate || !isBare(c.text, d)));
+  return list.some((c) => c.via === answer.via && c.at === answer.turnAt && norm(c.text).includes(norm(answer.quote)) && accepted(c, d));
 }
 
 // The recorded answer that still holds, or the first turn the rule accepts that is exactly an option (recorded now);
@@ -238,7 +240,7 @@ function why(d, quote, found) {
   if (!matching.length) {
     return refusal('answer:not-person', `"${clip(quote)}" is not in the first person turn after ${d.id}'s question was shown${list.length ? `; those turns say: ${list.map((c) => `"${clip(c.text)}"`).join('; ')}` : ''}. Only words the person typed (or chose in the question panel) answer it: not a notification, a tool result or injected text.`, `Quote their own words, or ask again — ${asAsked(d)}`);
   }
-  return refusal('answer:not-person', `"${clip(quote)}" names nothing of ${d.id} and was not their reply right after its question (another message came between, or it showed another open question too).`, `Ask again — ${asAsked(d)}`);
+  return refusal('answer:not-person', `"${clip(quote)}" names neither ${d.id} nor ${d.refs.length ? `its refs (${d.refs.join(', ')})` : 'a ref'} and was not their reply right after its question (another message came between, or it showed another open question too).`, `Ask again — ${asAsked(d)}`);
 }
 
 const positional = (args) => (args._?.[0] === 'approve' ? args._.slice(1) : args._ ?? []);
@@ -269,8 +271,11 @@ export async function cmdApprove(ctx, args) {
     throw why(d, null, candidates(ctx.root, d, await openQuestions(ctx.root, d.attempt, d.id)));
   }
   if (typeof quote !== 'string' || !quote.trim()) throw new WfError('--quote takes the person\'s exact words');
+  // Their words are exactly one option: that option is the answer, never another reading of it.
+  const said = optionOf(quote, d.options);
+  if (said && said !== choice) throw new WfError(`"${clip(quote.trim())}" is exactly the option \`${said}\` of ${d.id}, not \`${choice}\`; record it with --choice ${said}, or --from-question`);
   const found = candidates(ctx.root, d, await openQuestions(ctx.root, d.attempt, d.id));
-  const c = found.list.find((x) => norm(x.text).includes(norm(quote)) && (x.immediate || !isBare(x.text, d)));
+  const c = found.list.find((x) => norm(x.text).includes(norm(quote)) && accepted(x, d));
   if (!c) throw why(d, quote, found);
   return done(await recordAnswer(ctx.root, d, { choice, quote: quote.trim(), via: c.via, session: c.session, turnAt: c.at }, actor));
 }

@@ -7,7 +7,7 @@ import path from 'node:path';
 import { findSkill } from './codex-skills.mjs';
 import { codexTranscript } from './codex-transcript.mjs';
 import { tomlRole } from './role-files.mjs';
-import { readEntries } from './safe-file.mjs';
+import { firstEntry, readEntries } from './safe-file.mjs';
 import { parseArgs, textOf } from './tool-calls.mjs';
 
 const record = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
@@ -191,10 +191,27 @@ export function timeline(file) {
       const w = wrapped.has(p.call_id) ? wrappedResult(p.output) : null;
       const text = w ? w.text : textOf(record(p.output) ? p.output.content ?? p.output : p.output);
       const exit = /"exit_code"\s*:\s*(\d+)|Process exited with code (\d+)|Exit code: (\d+)/.exec(text);
-      items.push({ type: 'result', at, id: p.call_id, text, error: w ? w.error : Boolean(exit && Number(exit[1] ?? exit[2] ?? exit[3]) !== 0) });
+      // A failed call: the wrapped connector's isError, a structured output's `success: false`, or a non-zero exit.
+      const failed = w ? w.error : (record(p.output) && p.output.success === false) || Boolean(exit && Number(exit[1] ?? exit[2] ?? exit[3]) !== 0);
+      items.push({ type: 'result', at, id: p.call_id, text, error: failed });
     }
   }
   return { cwd, items };
+}
+
+// The session's working folder, from its first entries only (the line `timeline` takes it from: the first
+// session_meta's, else the first turn_context's).
+export function cwdOf(file) {
+  let meta = false;
+  return firstEntry(file, (e) => {
+    if (!record(e) || !record(e.payload)) return null;
+    if (e.type === 'session_meta') {
+      if (meta) return null;
+      meta = true;
+      return typeof e.payload.cwd === 'string' ? e.payload.cwd : null;
+    }
+    return e.type === 'turn_context' && typeof e.payload.cwd === 'string' ? e.payload.cwd : null;
+  });
 }
 
 export function transcript(id, home) {
@@ -234,6 +251,7 @@ const resume = (o) => ({ bin: 'codex', args: [...common(o), 'resume', o.session,
 const CAPACITY = /server_overloaded|server_is_overloaded|\boverloaded\b|\bat capacity\b/i;
 function event(e) {
   if (e.type === 'thread.started') return { started: e.thread_id };
+  if (e.type === 'item.completed' && e.item?.type === 'agent_message' && typeof e.item.text === 'string') return { text: e.item.text };
   if (e.type === 'turn.completed') return { ended: { ok: true } };
   if (e.type === 'turn.failed') return { ended: { ok: false }, capacity: CAPACITY.test(`${e.error?.message ?? ''} ${e.error?.code ?? ''} ${e.message ?? ''}`) };
   return {};
@@ -254,6 +272,7 @@ export default {
   transcript,
   projectTranscripts,
   timeline,
+  cwdOf,
   launch,
   resume,
   event,

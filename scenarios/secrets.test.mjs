@@ -88,3 +88,21 @@ test('agent-runtime credentials and session ids never reach a project command; t
   const source = { PATH: '/bin', HOME: '/h', WF_ROOT: '/r', ANTHROPIC_API_KEY: 'x', CLAUDE_CODE_SESSION_ID: 's', CODEX_THREAD_ID: 't', OPENAI_API_KEY: 'y', SOME_SERVICE_TOKEN: 'z' };
   assert.deepEqual(projectEnv(null, { REGISTRY_TOKEN: VALUE }, source), { PATH: '/bin', HOME: '/h', WF_ROOT: '/r', REGISTRY_TOKEN: VALUE });
 });
+
+test('scrub masks catalogued values, prefixed and bearer tokens, auth headers and query credentials; hashes stay; scrubbing twice changes nothing', async () => {
+  const { scrub, secretValues } = await import('../engine/scrub.mjs');
+  const hash = 'a'.repeat(64);
+  const text = `value ${VALUE} at https://x.test/f?X-Amz-Signature=abc123&size=2 Authorization: token zzz999yyy Bearer abcdefghijklmnop1234 ghp_0123456789abcdefghij xoxb-0123456789-abc sha ${hash}`;
+  const out = scrub(text, { secrets: [VALUE, 'short'] });
+  for (const leak of [VALUE, 'abc123', 'zzz999yyy', 'abcdefghijklmnop1234', 'ghp_0123456789abcdefghij', 'xoxb-0123456789-abc']) assert.ok(!out.includes(leak), `${leak} leaked: ${out}`);
+  assert.ok(out.includes(hash) && out.includes('&size=2'));
+  assert.equal(scrub(out, { secrets: [VALUE] }), out);
+  assert.equal(scrub('a short word', { secrets: ['short'] }), 'a short word');
+  const p = project({ install: 'true' });
+  try {
+    assert.deepEqual(secretValues(p.root, { name: 'keys', repos: [{ name: 'app', path: 'app' }] }).sort(), [OTHER, VALUE].sort());
+    assert.deepEqual(secretValues(p.tmp, null), []);
+  } finally {
+    p.cleanup();
+  }
+});

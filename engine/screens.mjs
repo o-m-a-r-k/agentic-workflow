@@ -8,13 +8,20 @@
 //   direction the adapter lists, at the narrowest viewport.
 // Routed screens are captured at every viewport, once per direction the project ships.
 //
-// The capture command is the project's (`screens.capture`). It is run once per viewport and language with the
-// placeholders {out} {viewport} {lang} {dir} {routes}, and writes `{out}/manifest.json`: `[{ route, file, lang, dir }]`,
-// file relative to {out}, lang and dir read from the rendered page's root element (the page's own, not the requested).
+// The capture is the project's (`screens.capture`, as loadAdapter gives it): `{ run }`, a shell command run from the
+// attempt folder once per viewport and language with the placeholders {out} {viewport} {lang} {dir} {routes}; or
+// `{ module: { repo, path } }`, a module loaded as the repo's fetched base holds it (engine/base-module.mjs), whose
+// default export is called once per viewport and language with `{ cwd, root, attempt, env, out, viewport, lang, dir,
+// routes }`, `cwd` the attempt folder. Either writes `{out}/manifest.json`: `[{ route, file, lang, dir }]` (a module may
+// return that list instead), file relative to {out}, lang and dir read from the rendered page's root element (the
+// page's own, not the requested). A `run` command can be changed by the ticket it captures; a module cannot.
 //
 // Refusals:
 // - screens:width: an image's width is not the requested viewport (I-117: cropped screens passed).
-// - screens:dup: an image's bytes equal those of another screen (a stuck page passed as several screens).
+// - screens:dup: two images have the same bytes, the same route at another viewport or language included (a stuck page
+//   passed as several screens).
+// A page whose own lang or dir differs from the requested one is recorded on its image as `mismatch` and named with any
+// refusal.
 // Captures stay in the attempt's state folder: they belong to one run, never to a shared gate.
 import fs from 'node:fs';
 import path from 'node:path';
@@ -214,7 +221,9 @@ const tail = (file) => (fs.existsSync(file) ? fs.readFileSync(file, 'utf8').slic
 export async function capture(root, attempt) {
   const adapter = await loadAdapter(root);
   const s = adapter.screens;
-  if (!s?.capture) throw new WfError('screens.capture is not set: the adapter names no capture command', { hint: 'Run `wf init` to set the screens settings.' });
+  const how = typeof s?.capture === 'string' ? { run: s.capture } : s?.capture ?? null;
+  if (!how?.run && !how?.module) throw new WfError('screens.capture is not set: the adapter names no capture command or module', { hint: 'Run `wf init` to set the screens settings.' });
+  const mod = how.module ? await captureModule(root, adapter, how.module) : null;
   const { tree, files } = await changedFiles(root, attempt);
   const { picks, routes } = await pickScreens(root, attempt, adapter, files);
   const runDir = mkdirs(path.join(attemptDir(root, attempt), 'screens', stamp()));
@@ -229,13 +238,24 @@ export async function capture(root, attempt) {
   for (const job of jobs.values()) {
     const out = mkdirs(path.join(runDir, `${job.viewport}-${job.lang ?? 'default'}`));
     const wanted = [...new Set(job.picks.map((p) => p.route))];
-    const command = fillCommand(s.capture, { out, viewport: job.viewport, lang: job.lang, dir: job.dir, routes: wanted });
-    const log = path.join(out, 'capture.log');
     const env = projectEnv(null, { WF_ROOT: root, WF_ATTEMPT: attempt, WF_SCREENS_OUT: out, WF_VIEWPORT: String(job.viewport), WF_LANG: job.lang ?? '', WF_DIR: job.dir ?? '' });
-    const fd = fs.openSync(log, 'w');
-    const r = spawnSync('sh', ['-c', command], { cwd: fs.existsSync(cwd) ? cwd : root, env, stdio: ['ignore', fd, fd] });
-    fs.closeSync(fd);
-    if (r.error || r.status !== 0) throw new WfError(`the capture command failed (exit ${r.status ?? r.error?.message}) at ${job.viewport}px${job.lang ? `, ${job.lang}` : ''}: ${command}\n${tail(log)}`);
+    const where = `${job.viewport}px${job.lang ? `, ${job.lang}` : ''}`;
+    if (mod) {
+      let got;
+      try {
+        got = await mod.fn({ cwd: fs.existsSync(cwd) ? cwd : root, root, attempt, env, out, viewport: job.viewport, lang: job.lang, dir: job.dir, routes: wanted });
+      } catch (e) {
+        throw new WfError(`the capture module ${mod.name} failed at ${where}: ${e?.message ?? e}`);
+      }
+      if (Array.isArray(got)) fs.writeFileSync(path.join(out, 'manifest.json'), JSON.stringify(got));
+    } else {
+      const command = fillCommand(how.run, { out, viewport: job.viewport, lang: job.lang, dir: job.dir, routes: wanted });
+      const log = path.join(out, 'capture.log');
+      const fd = fs.openSync(log, 'w');
+      const r = spawnSync('sh', ['-c', command], { cwd: fs.existsSync(cwd) ? cwd : root, env, stdio: ['ignore', fd, fd] });
+      fs.closeSync(fd);
+      if (r.error || r.status !== 0) throw new WfError(`the capture command failed (exit ${r.status ?? r.error?.message}) at ${where}: ${command}\n${tail(log)}`);
+    }
     const manifest = readManifest(out);
     for (const p of job.picks) {
       const entry = manifest.find((m) => String(m?.route) === p.route);
@@ -245,12 +265,14 @@ export async function capture(root, attempt) {
       if (!fs.existsSync(file)) throw new WfError(`manifest image ${file} does not exist`);
       const bytes = fs.readFileSync(file);
       const size = imageSize(bytes);
+      const lang = typeof entry.lang === 'string' && entry.lang ? entry.lang : null;
+      const dir = entry.dir === 'ltr' || entry.dir === 'rtl' ? entry.dir : null;
+      const mismatch = (p.lang && lang !== p.lang) || (p.dir && dir !== p.dir) ? { requested: { lang: p.lang, dir: p.dir }, page: { lang, dir } } : null;
       images.push({
-        route: p.route, viewport: p.viewport,
-        lang: typeof entry.lang === 'string' && entry.lang ? entry.lang : null,
-        dir: entry.dir === 'ltr' || entry.dir === 'rtl' ? entry.dir : null,
+        route: p.route, viewport: p.viewport, lang, dir,
         width: size?.width ?? 0, height: size?.height ?? 0,
         file, sha256: crypto.createHash('sha256').update(bytes).digest('hex'), sentinel: p.sentinel,
+        ...(mismatch ? { mismatch } : {}),
       });
     }
   }
@@ -258,20 +280,34 @@ export async function capture(root, attempt) {
   for (const img of images) {
     if (img.width !== img.viewport) refused.push({ id: 'screens:width', file: img.file, message: `${img.route} at ${img.viewport}px${img.lang ? ` (${img.lang})` : ''} is ${img.width ? `${img.width}px` : 'of unreadable width'} wide` });
   }
+  // Any two images with the same bytes: the same route at another viewport or language as well (a page that did not
+  // take the requested width or language is as stuck as one that did not change route).
   const bySha = new Map();
   for (const img of images) {
     const first = bySha.get(img.sha256);
-    if (first && first.route !== img.route) refused.push({ id: 'screens:dup', file: img.file, message: `${img.route} at ${img.viewport}px${img.lang ? ` (${img.lang})` : ''} has the same bytes as ${first.route} at ${first.viewport}px${first.lang ? ` (${first.lang})` : ''}` });
-    else if (!first) bySha.set(img.sha256, img);
+    if (first) refused.push({ id: 'screens:dup', file: img.file, message: `${img.route} at ${img.viewport}px${img.lang ? ` (${img.lang})` : ''} has the same bytes as ${first.route} at ${first.viewport}px${first.lang ? ` (${first.lang})` : ''}` });
+    else bySha.set(img.sha256, img);
   }
   await append(root, attempt, 'screens.captured', { tree, images, routes, ...(refused.length ? { refused } : {}) }, null);
   if (refused.length) {
     const hint = refused[0].id === 'screens:width'
       ? 'Capture at the requested viewport width with a device pixel ratio of 1, then run `wf screens` again.'
       : 'The page did not change between screens (still loading, an error page, a redirect): fix the capture, then run `wf screens` again.';
-    throw refusal(refused[0].id, `screens refused: ${refused.map((x) => `${x.id}: ${x.message}`).join('; ')}`, hint);
+    const mismatched = images.filter((i) => i.mismatch).map(mismatchText);
+    throw refusal(refused[0].id, `screens refused: ${refused.map((x) => `${x.id}: ${x.message}`).join('; ')}${mismatched.length ? `. The page did not show the requested language or direction: ${mismatched.join('; ')}` : ''}`, hint);
   }
   return images;
+}
+
+const mismatchText = (i) => `${i.route} at ${i.viewport}px asked ${i.mismatch.requested.lang ?? '-'} ${i.mismatch.requested.dir ?? '-'}, the page is ${i.mismatch.page.lang ?? '-'} ${i.mismatch.page.dir ?? '-'}`;
+
+// The capture module's default export, loaded from the fetched base (never from the ticket's worktree).
+async function captureModule(root, adapter, ref) {
+  const name = `${ref.repo}/${ref.path}`;
+  const file = baseModule(root, adapter, ref, 'screens.capture module');
+  const mod = await import(pathToFileURL(file).href);
+  if (typeof mod.default !== 'function') throw new WfError(`screens.capture module ${name} has no default export function`);
+  return { name, fn: mod.default };
 }
 
 // wf screens [--attempt a]
@@ -280,7 +316,7 @@ export async function cmdScreens(ctx, args) {
   const attempt = attemptOf(ctx, args);
   const images = await capture(ctx.root, attempt);
   const text = images.length
-    ? images.map((i) => `${i.route} ${i.viewport}px ${i.lang ?? '-'} ${i.dir ?? '-'} ${i.width}x${i.height}${i.sentinel ? ' (sentinel)' : ''}: ${i.file}`).join('\n')
+    ? images.map((i) => `${i.route} ${i.viewport}px ${i.lang ?? '-'} ${i.dir ?? '-'} ${i.width}x${i.height}${i.sentinel ? ' (sentinel)' : ''}${i.mismatch ? ` (asked ${i.mismatch.requested.lang ?? '-'} ${i.mismatch.requested.dir ?? '-'})` : ''}: ${i.file}`).join('\n')
     : 'No screen is reached by this change.';
   return { text, data: { attempt, images } };
 }

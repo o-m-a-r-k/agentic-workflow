@@ -46,7 +46,7 @@ Principles 5 (fast gates by reuse) and 7 (base movement is not a reset) are reti
 | D26 | **The person may answer in the chat,** under the answer rule (D95). |
 | D27 | **An older copy of `wf` runs the installed one.** The installed release is the copy `node scripts/install.mjs` linked into `~/.local/bin`; agents run `wf` from their PATH and never change the plugin from a ticket. |
 | D29 | **Plain questions, never asked twice.** Each question says what is decided, in plain words, with plain choices; an answer stands. |
-| D30 | **Standing rules reach sessions from the plugin.** The SessionStart and SubagentStart hooks give every session in a project the session rules, filled from its adapter and invariants. A project's instruction files are its own. |
+| D30 | **Standing rules reach sessions from the plugin.** The SessionStart and SubagentStart hooks give every Claude Code session in a project the session rules, filled from its adapter and invariants. Codex plugins carry no hooks, so this is Claude Code only. A project's instruction files are its own. |
 | D34 | **The person's own stops apply to every attempt in flight.** The no-progress stop (D93) is the person's, whichever release started the attempt. |
 | D39, D40 | **Status routing by label and screenshot handling are stages** (D96): `when: { labels }` filters a stage, and a tracker module says how it takes images. |
 | D41 | **The agent reads the person's answer; the engine proves the words are theirs,** under the answer rule (D95). |
