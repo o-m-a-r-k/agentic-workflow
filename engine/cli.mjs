@@ -450,6 +450,18 @@ function gateText(result) {
   return `${head}${result.recovered ? `\n  recovered ${result.recovered.carried} finished step(s) from run ${result.recovered.runId} (runner died)` : ''}${impLine}\n${rows.join('\n')}`;
 }
 
+// The read commands that start again when a worktree is removed under them (D90): they print only once they are done.
+const READ_AGAIN = new Set(['status', 'resume', 'signals']);
+// A read whose attempt lost a worktree while it was being read (a git call that failed into the missing folder may have been caught
+// on the way) starts again: the attempt is opened afresh from the ledger, so one closed by the command that removed the folder is
+// reported closed, and one still open is reported orphaned from its first line. `missingAtStart`: the orphaned worktrees each attempt
+// had when the read began.
+const orphanKey = (s) => orphansOf(s).map((m) => `${m.repo}:${m.worktree}`).sort().join('|');
+function settledRead(states, missingAtStart) {
+  for (const s of states) if (orphanKey(s) !== missingAtStart.get(s.id)) throw Object.assign(new WfError(`a worktree of ${s.id} was removed while it was read`), { worktreeMissing: true });
+}
+const missingNow = (states) => new Map(states.map((s) => [s.id, orphanKey(s)]));
+
 export async function main(argv) {
   // `wf run --lease docker -- <command...>`: everything after `--` is the command, untouched.
   const dd = argv.indexOf('--');
@@ -478,7 +490,18 @@ export async function main(argv) {
   // this process wrote when it ends is only the safety net.
   setVerifyLevel(FULL_VERIFY.has(cmd) ? 'full' : 'quick');
   try {
-    return await dispatch(cmd, sub && !sub.startsWith('--') ? sub : null, positional, { ...options, _: passthrough });
+    // 0.7.35 (D90). Named failure (CI, one macOS shard): a `wf status` queued behind the evidence lock while `wf deliver` wrote ran
+    // its git calls after `wf shown` had closed the attempt and removed its worktree, and failed with "worktree missing" for an
+    // attempt that was simply closed. A read that finds a worktree gone under it opens the attempt again from the ledger and reports
+    // what it is now (closed, or orphaned, which every read already reports without a git call into the folder); a write still
+    // refuses as it did.
+    for (let tries = 0; ; tries++) {
+      try {
+        return await dispatch(cmd, sub && !sub.startsWith('--') ? sub : null, positional, { ...options, _: passthrough });
+      } catch (error) {
+        if (!(READ_AGAIN.has(cmd) && error instanceof WfError && error.worktreeMissing && tries < 3)) throw error;
+      }
+    }
   } catch (error) {
     if (error instanceof LinkRefused) {
       process.stderr.write(`wf ${cmd}: refused: ${error.message}\n  → a symlink or odd entry sits in the evidence or its anchor; \`wf verify --attempt <id>\` lists them, and nothing was changed through it\n`);
@@ -1411,7 +1434,10 @@ async function dispatch(cmd, sub, positional, options) {
       return 0;
     }
     case 'signals': {
-      const report = signalsReport(root, openState(root, options));
+      const opened = openState(root, options);
+      const missing = missingNow([opened]);
+      const report = signalsReport(root, opened);
+      settledRead([opened], missing);
       print(options, signalsText(report), report);
       return 0;
     }
@@ -1716,8 +1742,12 @@ async function dispatch(cmd, sub, positional, options) {
       const named = options.attempt ? null : sub ?? positional[0] ?? null;
       const s = openState(root, named ? { ...options, attempt: attemptForName(root, named) } : options);
       const gone = orphansOf(s);
+      const missing = missingNow([s]);
       const base = isOpen(s) && !gone.length ? safeBase(root, s) : null;
-      print(options, summary(root, s, { base, resume: true }), { ...s, next: nextAction(root, s), decision: gone.length ? null : nextDecision(root, s), liveGate: liveGate(root, s), base, ...(gone.length ? { orphaned: gone } : {}) });
+      const text = summary(root, s, { base, resume: true });
+      const data = { ...s, next: nextAction(root, s), decision: gone.length ? null : nextDecision(root, s), liveGate: liveGate(root, s), base, ...(gone.length ? { orphaned: gone } : {}) };
+      settledRead([s], missing);
+      print(options, text, data);
       return 0;
     }
     case 'status': {
@@ -1735,13 +1765,17 @@ async function dispatch(cmd, sub, positional, options) {
           // 0.7.30 (I-151, D60): as `openState` does, each listed attempt takes its base branch's adapter where it safely can.
           return [followAdapter(root, settleRoundQuestions(root, s))];
         } catch (error) {
+          // A worktree removed while the listing read it is not damage: the whole read starts again (`READ_AGAIN`).
+          if (error?.worktreeMissing) throw error;
           damaged.push({ id, damaged: String(error.message ?? error).split('\n').filter(Boolean).slice(0, 2).join(' ') });
           return [];
         }
       });
+      const missing = missingNow(states);
       const rows = states.map((s) => ({ s, base: isOpen(s) && !orphansOf(s).length ? safeBase(root, s) : null }));
       const damagedText = damaged.map((d) => `${d.id}  DAMAGED: ${d.damaged}\n  next: \`wf verify --attempt ${d.id}\` says what changed; the evidence is never repaired by hand`);
       const text = [...rows.map(({ s, base }) => summary(root, s, { base })), ...damagedText].join('\n\n');
+      settledRead(states, missing);
       if (options.json && damaged.length) {
         print(options, '', [...rows.map(({ s, base }) => ({ ...s, next: nextAction(root, s), base, ...(orphansOf(s).length ? { orphaned: orphansOf(s) } : {}) })), ...damaged]);
         return 0;
