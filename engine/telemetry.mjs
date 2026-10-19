@@ -99,7 +99,7 @@ const bundleBytes = (bundle) => {
 export const BOOKKEEPING_EVENTS = new Set([
   'evidence.baseline', 'evidence.recorded', 'evidence.rebaselined',
   'lesson.recorded', 'lesson.recurred', 'lesson.acknowledged', 'authority.spent', 'discovered.acknowledged',
-  'models.refreshed', 'adapter.followed', 'adapter.notFollowed', 'adapter.authored', 'exported', 'screenshots.exported',
+  'models.refreshed', 'adapter.followed', 'adapter.notFollowed', 'adapter.authored', 'base.observed', 'exported', 'screenshots.exported',
 ]);
 export const isActivity = (entry) => !BOOKKEEPING_EVENTS.has(entry.type);
 const settledStatus = (st) => ['fixed', 'verified-nonissue'].includes(st);

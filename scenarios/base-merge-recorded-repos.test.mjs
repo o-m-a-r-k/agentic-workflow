@@ -32,7 +32,7 @@ test('I-183: a repo whose request the person merged and that is not recorded yet
   assert.match(m.out, /web: merged origin\/main/);
   assert.match(m.out, /api: left as it is \(its change is already on origin\/main/);
   assert.equal(headOf(wt('api')), apiHead);
-  assert.deepEqual(reconcile(root, base, e.id, 'rev-landed'), ['gate', 'evidence-review']);
+  assert.deepEqual(reconcile(root, base, e.id, 'rev-landed'), ['gate']); // 0.7.34 (I-233, M1)
   // api is recorded from its request, then web's is integrated on the reconciled tree.
   fs.writeFileSync(path.join(root, '..', 'merged.api'), '');
   assert.match(ok(wf(root, ['deliver', '--attempt', e.id])).out, /web: awaiting-merge/);

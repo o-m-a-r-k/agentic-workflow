@@ -208,6 +208,10 @@ export function reduce(entries) {
     reviews: [],
     reviewParts: [],
     baseMerges: [],
+    // 0.7.34 (I-233): base merges made by hand, classified when a command first saw them (`base.observed`), and the number the
+    // next base merge of either list takes (`base:<n>`, in ledger order).
+    baseObserved: [],
+    baseCount: 0,
     accepted: null,
     holds: [],
     delivery: { repos: {}, integrating: {}, completedAt: null },
@@ -526,7 +530,7 @@ export function reduce(entries) {
         s.reviews.push({ reviewer: d.closure?.reviewer ?? null, mode: d.mode ?? null, at: e.at, reviewerModel: d.reviewerModel ?? null, handoff: d.handoff ?? null, covered: d.covered ?? null, ...(d.discoveredHanded ? { discoveredHanded: d.discoveredHanded } : {}), ...(d.recordedBy ? { recordedBy: d.recordedBy } : {}), ...(d.partial ? { partial: true } : {}), revealed: d.revealed ?? false, closure: withMoved(s, d.closure), provenance: d.provenance ?? null, identity: d.identity ?? null, reads: d.reads ?? null, raw: d.raw ?? null, tree: d.tree });
         break;
       case 'base.merged':
-        s.baseMerges.push({ ...d, at: e.at });
+        s.baseMerges.push({ ...d, at: e.at, n: (s.baseCount += 1) });
         // 0.7.26 (I-183): a base merged into an attempt whose delivery had started moved the commit the acceptance names (the one
         // the pending integration was opened for), so the engine that writes the event decides and records it
         // (`withdrewAcceptance`), as an amendment does (I-107): folding an older ledger changes nothing.
@@ -535,6 +539,17 @@ export function reduce(entries) {
           s.phase = 'implementing';
         }
         break;
+      // 0.7.34 (I-233): a base merge the engine classified when it first saw it (made by hand, or recorded by `wf base merge`
+      // before its facts were): the facts join the recorded merge, or the merge is listed as one the attempt holds.
+      case 'base.observed': {
+        const known = [...s.baseMerges, ...s.baseObserved].find((m) => m.repo === d.repo && (m.merge === d.merge || m.headAfter === d.merge));
+        if (known) {
+          const { repo: _r, ref: _f, from: _a, to: _b, ...facts } = d;
+          Object.assign(known, facts, { observedAt: e.at });
+        }
+        else s.baseObserved.push({ ...d, at: e.at, n: (s.baseCount += 1) });
+        break;
+      }
       case 'review.accepted':
         s.accepted = { ...d, at: e.at };
         s.phase = 'accepted';

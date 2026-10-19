@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { ok, sh, singleRepoProject, state, toAccepted, wf } from './helpers.mjs';
-import { steps } from './adapter-fault-fixtures.mjs';
+import { ledger, steps } from './adapter-fault-fixtures.mjs';
 import { headOf, integrations, mrAdapter, reconcile } from './base-merge-in-flight-fixtures.mjs';
 
 // 0.7.26 (I-183), the guards around a base merge for a delivery through an adapter: see base-merge-in-flight.test.mjs for the
@@ -35,7 +35,9 @@ test('I-183: a base merged by hand into an accepted attempt delivered through an
   assert.match(refused.err, /review, gate and accept the tree as it is/);
   assert.ok(integrations(root).every((x) => x === `app ${reviewed}`), 'integrate was not called on the new tree');
 
-  assert.deepEqual(reconcile(root, base, id, 'rev-hand'), ['gate', 'evidence-review']);
+  // 0.7.34 (I-233, M1, M4): the hand merge is classified once (`base.observed`); it left the change as it was, so the gate and the acceptance.
+  assert.deepEqual(reconcile(root, base, id, 'rev-hand'), ['gate']);
+  assert.equal(ledger(root, id).filter((e) => e.type === 'base.observed').length, 1);
   assert.equal(state(root, id).accepted.heads.app, merged);
   assert.match(ok(wf(root, ['deliver', '--attempt', id])).out, /app: awaiting-merge/);
   assert.equal(integrations(root).at(-1), `app ${merged}`);

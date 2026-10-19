@@ -234,7 +234,9 @@ test('wf base merge records the merge, notes overlapping files and says the gate
   const m = ok(wf(root, ['base', 'merge', '--attempt', id]));
   assert.match(m.out, /app: merged origin\/main \(1 commit\(s\), 2 file\(s\)\); HEAD \w{10} -> \w{10}/);
   assert.match(m.out, /note: the merge brought in changes to files this ticket also changes: src\/m\.txt/);
-  assert.match(m.out, /HEAD changed: the gate and the review are bound to the tree, so neither counts for the merged tree/);
+  // 0.7.34 (I-233): the output says what the merge owes (here: a `context` merge, no review round of its own).
+  assert.match(m.out, /HEAD changed: the gate and the review are bound to the tree; a merge that leaves this ticket's change as it was keeps its review/);
+  assert.match(m.out, /owes: base:1 changed files this ticket also changes \(src\/m\.txt\)/);
   assert.equal(fs.readFileSync(path.join(wt, 'src/m.txt'), 'utf8'), 'one\n2\n3\n4\nfive\n');
   const s = state(root, id);
   assert.equal(s.baseMerges.length, 1);

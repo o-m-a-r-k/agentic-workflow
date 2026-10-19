@@ -36,6 +36,7 @@ import { adapterStepsLine, commentFile, emitTrackerEvent, hasTicket, loadTracker
 import { designChecks, designVerdicts, requiredSkills, reviewDocumentProblems, reviewRules, ruleVerdicts, skillFiles, writeRuleDocuments } from './rules.mjs';
 import { expectOf, expectProblems, PLAN_EXPECT, ROLE_EXPECT } from './expectations.mjs';
 import { obligationSince } from './versions.mjs';
+import { baseAhead, baseMergeSection, baseWorkIn, baseWorkLines, mergeId, mergeOnlyPath, recordedFacts, throughMerges } from './merges.mjs';
 import { deploymentAfterHandoff, deploymentNext } from './deployment-step.mjs';
 import { analysisFor, analysisStep, latestAnalysis } from './analysis.mjs';
 import { correctionsInForce } from './diagnosis.mjs';
@@ -792,6 +793,9 @@ export function handoff(root, role, options) {
     if (integrationCheckOwed(cfg, state)) throw refuse(`the combined tree of ${state.work.length} work items has no passing \`wf check\`: review is never the first place the parts meet`, `run \`wf check --attempt ${state.id}\` and fix what it finds through the implementers, then hand the reviewer`, { id: 'review:integration-check' });
     gateNow = gatePassedForCurrentTree(state);
     mode = roundMode(state, { evidence: gateNow.ok });
+    // 0.7.34 (I-233): when only base merges moved the tree since the latest round, and one of them changed the ticket's change (a
+    // resolution, an edit in the merge, or the change itself differs), the round judges that merge and nothing else: `merge`.
+    if (mode === 'delta' && !gateNow.ok && mergeRoundOwed(state)) mode = 'merge';
   }
   if (role === 'implementer' && state.roles.reviewer.includes(agent)) throw refuse(`${agent} reviewed this attempt and cannot implement it`);
   if (options.sweep !== undefined && role !== 'implementer') throw new WfError('--sweep applies to implementer handoffs only');
@@ -846,7 +850,7 @@ export function handoff(root, role, options) {
   // attempt's whole diff.
   let deltaInfo = null;
   let deltaFrom = null;
-  if (role === 'reviewer' && mode === 'delta') {
+  if (role === 'reviewer' && isDeltaMode(mode)) {
     // From the last round that finished: a partial round (I-152) stopped part-way, so what came before its tree may be
     // unread (independent review of 0.7.12: the next delta started at the partial round's tree and the rest went unread).
     const finished = (state.reviews ?? []).findLast((r) => !r.partial);
@@ -908,7 +912,7 @@ export function handoff(root, role, options) {
   // A provider other than the owner's is a recorded choice (bookkeeping since 0.7.0), not an authority claim.
   const runtimeAuthority = preferred && runtime !== preferred ? { runtime, from: preferred, by: actor(options) } : null;
 
-  const selected = ['planner', 'implementer', 'reviewer'].includes(role) && !(role === 'reviewer' && mode === 'delta') ? relevantLessons(root, role, state, changed, { work }) : null;
+  const selected = ['planner', 'implementer', 'reviewer'].includes(role) && !(role === 'reviewer' && isDeltaMode(mode)) ? relevantLessons(root, role, state, changed, { work }) : null;
   const ownerContext = contextOf(role, options);
   // I-120: the first implementer closes the window in which a fresh planner's plan replaces the analysis plan whole.
   if (role === 'implementer' && replanAfterUpgrade(state)) process.stderr.write(`warning: ${state.id} was upgraded to implementation after its plan was frozen, and this first implementer closes the window in which \`wf plan\` replaces that plan whole; after it, restate plan sections with \`wf criteria amend\` (\`plan\` in the amendment file)\n`);
@@ -1033,9 +1037,12 @@ export function handoff(root, role, options) {
     // gets the decision and its basis, not the person's words.
     decisions: ['planner', 'implementer', 'reviewer'].includes(role) ? productDecisionsFor(state, role) : undefined,
     criteria: state.criteria,
+    // 0.7.34 (I-233): the base merges since the last recorded round that changed the ticket's files or its change, with the
+    // commands that show what each did; the closure answers each in `baseMerges` (engine/merges.mjs).
+    baseMerge: role === 'reviewer' ? baseMergeSection(state, deltaFrom ?? (state.reviews ?? []).findLast((x) => !x.partial)?.tree ?? {}) ?? undefined : undefined,
     // The planner's `expect` is a prediction for the owner and the strategist to compare, not a target: an implementer or a
     // reviewer reading it would build or judge toward a number.
-    plan: role === 'reviewer' && mode === 'delta' ? undefined : ['implementer', 'reviewer'].includes(role) && state.plan ? Object.fromEntries(Object.entries(state.plan).filter(([k]) => k !== 'expect')) : state.plan,
+    plan: role === 'reviewer' && isDeltaMode(mode) ? undefined : ['implementer', 'reviewer'].includes(role) && state.plan ? Object.fromEntries(Object.entries(state.plan).filter(([k]) => k !== 'expect')) : state.plan,
     workItems: state.work,
     // The planner assigns each work item a class from these texts.
     classes: role === 'planner' ? Object.fromEntries(Object.entries(cfg.classes).map(([n, c]) => [n, { use: c.use, agentType: agentTypeFor(cfg, 'implementer', n) }])) : undefined,
@@ -1067,7 +1074,7 @@ export function handoff(root, role, options) {
     delta: deltaInfo ?? undefined,
     // Delta round: the findings still open, handed up front (no second submission after a blind closure). Observations are
     // handed too, so a reviewer can settle one that was fixed; one the owner recorded fixed carries the commit.
-    openFindings: role === 'reviewer' && mode === 'delta' ? markCauses(state, earlierOpenFindings(state, null)) : undefined,
+    openFindings: role === 'reviewer' && isDeltaMode(mode) ? markCauses(state, earlierOpenFindings(state, null)) : undefined,
     // Findings that left this delivery (a follow-up ticket, a sibling attempt) and why: a reviewer raises one again as a
     // finding when it should not have left (final review of 0.7.0: the evidence reviewer never saw them).
     followUps: role === 'reviewer' ? followUpsOf(state) : undefined,
@@ -1114,7 +1121,7 @@ export function handoff(root, role, options) {
     // 0.7.29 (I-206), named failure (field): six checks registered on a batch before its next review were missing from that
     // delta round's bundle, which carried corrections only; its reviewer kept a finding that the required proof was not
     // registered. A delta round is handed every check registered, corrected or carried since the last recorded round.
-    supplementalValidation: mode === 'delta' ? validationsSince(state) : state.validations ?? [],
+    supplementalValidation: isDeltaMode(mode) ? validationsSince(state) : state.validations ?? [],
     admissionCorrections: role === 'reviewer' && toJudgeNow.length ? toJudgeNow : undefined,
     pushedRange: role === 'reviewer' ? pushedRangeOf(state) : undefined,
     // 0.7.29 (I-154): why `wf accept` refused the last evidence round, for the evidence review that follows it. A full round
@@ -1153,7 +1160,7 @@ export function handoff(root, role, options) {
     skills: role === 'reviewer' && mode === 'full' ? skillFiles(root, requiredSkills(trusted, role, state, changed), runtime) : undefined,
     // Changed files no plan anchor or test path names (docs-only, ignored and evidence files left out): context for the
     // reviewer, who judges whether each serves the goal.
-    outsidePlan: state.criteria && !(role === 'reviewer' && mode === 'delta') ? outsidePlan(state.plan, changed, trusted, scopeFiles(state)) : null,
+    outsidePlan: state.criteria && !(role === 'reviewer' && isDeltaMode(mode)) ? outsidePlan(state.plan, changed, trusted, scopeFiles(state)) : null,
     // 0.7.0: information, not a stop. Named failure (I-25) behind the old refusal: consumers were found one at a time.
     impactOwed: role === 'implementer' && state.impact?.owed ? { amendment: state.impact.owed.amendment, reason: state.impact.owed.reason, note: 'this amendment added scope without an impact map: find the consumers and flows it reaches as you build, and report them' } : undefined,
     // The implementer's definition of done: these light steps pass for its repos (`wf check`). Never counts as a gate.
@@ -1172,7 +1179,7 @@ export function handoff(root, role, options) {
     instructions: {
       planner: 'Your goal: targets an implementer can build and a person can check, complete enough that no consumer or flow surprises anyone later; the quality bar (`qualityBar`) turned into targets for this ticket.',
       implementer: `Your goal: ${repairNow ? 'no review finds this problem again, anywhere, and ' : ''}the criteria you were handed hold on the whole combined tree, and nothing you touched regresses.${repairNow ? ' This is a fix round. `repair` holds the findings open now and `findingHistory` every earlier finding with where it stands and the fix recorded for it (findings a reviewer linked as one cause share a `cause`; `recurringCauses` names a cause that came back after a fix, and `possibleRecurrences` a family that came back after a fix, which may or may not share one): for each finding name the assumption or rule behind it, find every place that relies on it, fix them all and prove the class with one proof.' : ''}${repairNow || passItems ? `${REPLAN_RULE}${PREMISE_RULE}` : ''}${repairNow && alsoFix.length ? ' `alsoFix` holds what does not block and is still open: fix it in this same pass (it never opens a round of its own).' : ''}${passItems ? ' This is a planned pass: `passItems` holds the findings and discovered issues it fixes, grouped as the plan grouped them; fix each at its cause, and say in your report which you fixed with which commit.' : ''}${historyNow && !repairNow ? ' `findingHistory` lists every finding of the attempt so far, where it stands and the fix recorded for it: an assumption already fixed in one place may live in another.' : ''} Early in your work write your report to \`implementerReportFile\` with your \`approach\` and \`expect: { minutes }\` (how long you expect to take), and complete it before you finish.`,
-      reviewer: mode === 'delta' ? (gateNow.ok ? REVIEWER_EVIDENCE_DELTA : REVIEWER_DELTA) : REVIEWER_FULL,
+      reviewer: mode === 'merge' ? REVIEWER_MERGE : mode === 'delta' ? (gateNow.ok ? REVIEWER_EVIDENCE_DELTA : REVIEWER_DELTA) : REVIEWER_FULL,
       tester: 'Write requirement expectations from the issue before reading the implementation, then map each to gate tests.',
     }[role],
   };
@@ -1208,7 +1215,7 @@ export function handoff(root, role, options) {
   if (heldMarked.length) bundle.instructions += ` An item marked \`premiseHeld\` (${heldMarked.join(', ')}) was reported by an implementer to rest on a premise that does not hold, and the person decided it holds (\`premiseHeld\` has their decision and their words): build its fix. When what you find contradicts their answer, build nothing for it and say so in your report with the evidence (\`premiseFailed\`); the owner then brings it back to them, and you never decide it yourself.`;
   if (role === 'implementer' && bundle.ownerContext) bundle.instructions += ' `ownerContext` is what the owner carried to you (the person\'s words, a decision, what research found): context to verify, not facts. A premise it states (nothing writes this field, no wrong data exists) is checked like any other, and a fact you find that contradicts the work you were handed is a stop and a question in your report, never a reason the change is safe.';
   if (role === 'reviewer' && bundle.passBuilt) bundle.instructions += ` A planned pass was built since the last review, with no code-review round of its own (${bundle.passBuilt.map((x) => `${x.work}: ${x.items.map((i) => i.ref).join(', ')}`).join('; ')}): \`passBuilt\` lists its items, the commits recorded for each and the implementer's range. Its code is in your diff and this round is the one review it gets: review it as you review the rest, and verify each item at its cause (a finding in \`priorFindings\`; a discovered issue closed as fixed: raise a finding when its fix does not hold).`;
-  if (role === 'reviewer' && mode === 'delta' && bundle.supplementalValidation.length) bundle.instructions += ` \`supplementalValidation\` lists the checks registered, corrected or carried from a batch member since the last reviewed round (${bundle.supplementalValidation.flatMap((v) => v.steps.map((x) => x.id)).join(', ')}): the gate runs each at its pinned commit, so judge its definition and plugin as committed there, not a later copy, and give your verdict on each in \`validationChecked: [{ "id", "commit", "verdict": "complies" | "finding", "evidence", "finding" }]\`; a defect in one is a finding.`;
+  if (role === 'reviewer' && isDeltaMode(mode) && bundle.supplementalValidation.length) bundle.instructions += ` \`supplementalValidation\` lists the checks registered, corrected or carried from a batch member since the last reviewed round (${bundle.supplementalValidation.flatMap((v) => v.steps.map((x) => x.id)).join(', ')}): the gate runs each at its pinned commit, so judge its definition and plugin as committed there, not a later copy, and give your verdict on each in \`validationChecked: [{ "id", "commit", "verdict": "complies" | "finding", "evidence", "finding" }]\`; a defect in one is a finding.`;
   if (role === 'reviewer' && bundle.validationsNotCarried) bundle.instructions += ` \`validationsNotCarried\` lists checks a member registered or corrected that this batch does not carry, each with why (${bundle.validationsNotCarried.map((x) => `${x.id} of ${x.member}`).join(', ')}): for those steps the batch's gate follows its own admission adapter, the base's rule, so judge whether the member's criteria still rest on what they proved.`;
   if (role === 'reviewer' && bundle.acceptanceRefused) bundle.instructions += ` \`acceptanceRefused\` lists why \`wf accept\` refused the last evidence round (${bundle.acceptanceRefused.reviewer}'s): your closure must not repeat them. A citation it names is corrected in your own \`criteria\`: each evidence entry cites one artifact exactly as the bundle lists it, and a criterion several screenshots show gets one entry per screenshot, with the same \`id\`.`;
   // 0.7.31 (I-216, D67): a planner of an analysis plans the investigation; a planner of what follows an analysis is given it.
@@ -1224,6 +1231,7 @@ export function handoff(root, role, options) {
   if (role === 'implementer' && (bundle.discovered ?? []).some((d) => d.kind === 'bookkeeping')) bundle.instructions += ` \`discovered\` lists the open bookkeeping entries too (lint or fixture fixes, ${bundle.discovered.filter((d) => d.kind === 'bookkeeping').map((d) => `${d.id}${d.blockedBy ? ` of ${d.blockedBy}` : ''}`).join(', ')}): fix them with your change and name each in your report.`;
   if (role === 'implementer' && bundle.unreachedBefore) bundle.instructions += ' `unreachedBefore` lists scope a recorded review round said it did not reach: nothing has verified it, whatever passed elsewhere.';
   if (role === 'implementer' && (bundle.repair ?? []).some((g) => g.findings.some((f) => f.stillOpen))) bundle.instructions += ' A finding with `stillOpen` was found still open by a later round: `stillOpen.evidence` is that round\'s evidence (the latest place and reproduction), beside the finding as first raised.';
+  if (role === 'reviewer' && bundle.baseMerge) bundle.instructions += ` \`baseMerge\` lists the base merges since the last recorded round that changed this ticket's files or its change (${bundle.baseMerge.map((m) => `${m.id}: ${m.class}`).join('; ')}); each has the commands that show what it did. A \`context\` merge left the ticket's change as it was: judge whether the base's edits in these files (\`commands.baseEdits\`) interact with this change. A \`changed\` merge also has its resolution or the change before and after. Answer each in \`baseMerges: [{ "id": "base:1", "findings": ["F2"] }]\`, naming the findings you raised about it (an empty list: no interaction seen); a finding on the base's own lines blocks only by a criterion or an invariant.`;
   if (role === 'reviewer' && bundle.delta?.baseMerged) bundle.instructions += ` \`delta.diff\` runs from the last reviewed tree, so it includes what \`wf base merge\` brought in: \`delta.changed\` lists this attempt's own files in it, and \`delta.baseMerged\` the files only the base merge brought in (${Object.entries(bundle.delta.baseMerged).map(([repo, files]) => `${repo}: ${files.join(', ')}`).join('; ')}), another change's code: context, not this attempt's change.`;
   if (role === 'reviewer' && bundle.impactMap) bundle.instructions += ' Impact discovery under impactMap.derived is textual, not structurally resolved consumer analysis, and bounded (its `incomplete` and `symbolsTruncated` say how far it got): a hit is a lead to judge against the real imports and behaviour, and a missing hit is no proof of coverage.';
   if (role === 'reviewer') {
@@ -1341,6 +1349,8 @@ const REPLAN_RULE = ' Fix with the smallest change that removes the assumption, 
 const PREMISE_RULE = ' Before you build a fix for a finding or an item, know whether its premise holds in production: who writes the data in production paths, who reads it, which business process and external systems depend on it, and what the system does when it is absent. Your report says, for each one you fix, whether its premise holds and what you checked (`premises: [{ ref, holds, checked: ["path:line ..."] }]`). When it does not hold (never written, never reached, disabled, refused on the base), build nothing for it and report `premiseFailed: [{ ref, why, evidence: ["path:line ..."] }]`: the owner routes it to a reviewer\'s verdict, the person or an analysis. That fact is a stop and a question, never an argument that a change is safe.';
 const REVIEWER_FULL = 'This is a full review of the whole change, blind. Your goal: the truth about whether it meets its goals (the frozen criteria, `qualityBar`, the invariants) and what it broke. Judge the cause, not the place: when you find where one wrong assumption lives, look for every other place that relies on it, and name the assumption in the finding. A change built for a finding or a discovered item is judged on its premise too: what it presumes about production (who writes the data, whether the path is reached, whether the feature is on) is checked, and a search that finds no production writer is reported, never silence and never a reason the change is safe. Findings of yours that share a cause say so: `sameCauseAs: ["<your agent id>:<id>"]`; the findings of earlier rounds are shown to you once your blind closure is recorded, and a link to one is added when you record the closure again with their verdicts. When `gate.passedOnThisTree` is true this is the evidence review: open every screenshot under `gate.screenshots` (exactly the files `gate.artifacts` lists) and record the sha256 of each one you viewed in `screenshotsInspected`; compare captures of the same state and record `anomalies` ("none seen", or each with the cause you found); a step marked `uncovered` needs `noEvidence: [{ step, reason }]` or a finding; `gate.notRun` lists the heavy steps the gate of a quick fix did not run: judge whether the change needs what they would have proven, and raise a finding where a criterion rests on them. When it is false, judge the diff and list no screenshots. Rules, skills, lessons, design-system hits, discovered issues, seams, supplemental validations, implementer reports and files outside the plan in this bundle are context for your judgement: cite them in findings; no verdict form is owed. Every finding is located (`path:line`) and rated honestly on the one scale (`severity`: high = a user, a tenant or the business is harmed or blocked: wrong or lost data, a broken flow, security, money, a visible defect on a primary screen; medium = degraded but usable; low = polish: wording, spacing, naming, style; a tenant, authorization or money defect is always high), and states, where you can see it, the narrowest change that removes it and roughly how long it takes (`fix: { what, minutes }`): an implementer who expects far more is shown to the owner, and a fix needing a migration, a new state, a new endpoint, a contract change or a new failure path is re-planned, not improvised. The rating decides two things: a finding rated low never opens a round, and an unfixed medium or high one is fixed in this delivery (a low one leaves only with a yes from the person). `followUps` lists findings that already left this delivery: raise one again as a finding if it should not have. The engine decides what blocks: a frozen criterion the change fails (`criterion`), a regression on a line this attempt changed, a critical invariant (`invariant`), or a finding that cites none of these in a full round. Everything else is an observation. Early in your work write your plan into the closure file (`scope`: what you will cover; `expect: { minutes }`: how long you expect it to take) with `findings` and `criteria` lists from the start, writing each finding into the file as soon as you have it (if your session ends early, what you wrote is kept as a partial round), and say what you did not reach in `notReached`; end with a recorded closure (`wf review --closure`), since a round with none counts toward nothing, and a closure that names unreached scope is not counted as the full audit (`unreachedBefore` in a bundle lists scope earlier rounds did not reach). Write the closure to `reviewClosureFile`: { reviewer, scope, expect, findings: [{ id, severity, summary, status, evidence, work, family, criterion, invariant, sameCauseAs, fix }], criteria: [{ id, evidence: { kind: test|screenshot|output|not-applicable|dropped-with-reason, ref, reason } }], screenshotsInspected, anomalies, noEvidence, notReached }; each evidence entry cites one artifact exactly as the bundle lists it (a criterion several screenshots prove gets one entry per screenshot, with the same id).';
 const REVIEWER_EVIDENCE_DELTA = 'This is the evidence review of a tree a gate passed on, as a delta: an earlier evidence review audited the whole change, so your scope is the diff since the last reviewed tree (`delta`), the findings still open (`openFindings`) and this gate\'s evidence. Your goal: every frozen criterion is proven by this gate\'s evidence, and the changes since the last review fix what they set out to fix and break nothing. Judge the cause, not the place: a finding fixed where it showed up while the same cause remains elsewhere is not fixed: give it `status: open` in `priorFindings`, with the other place (`path:line`) as its evidence and the shared assumption named. A new finding that shares its cause with an earlier one, or with another of yours, says so: `sameCauseAs: ["<round>:<id>"]` (the reviewer id that raised it, a colon, its id; `openFindings` lists them, and a `cause` on one marks findings already linked). A new finding states, where you can see it, the narrowest change that removes it and roughly how long it takes (`fix: { what, minutes }`). Map every frozen criterion to its evidence in `criteria`. Open every screenshot under `gate.screenshots` that is not marked `inspectedBefore` (an earlier review saw those exact bytes; look again at any you judge useful) and record the sha256 of each one you viewed in `screenshotsInspected`; compare captures of the same state and record `anomalies` ("none seen", or each with the cause you found); a step marked `uncovered` needs `noEvidence: [{ step, reason }]` or a finding; `gate.notRun` lists the heavy steps the gate of a quick fix did not run: judge whether the change needs what they would have proven, and raise a finding where a criterion rests on them. Verify the open findings against the current code: `priorFindings: [{ round, id, status: fixed|verified-nonissue|open, evidence, severity, premise }]`, every one that blocks and every observation you can settle (one with `claimedFixed` names the commit said to fix it); give `severity` when you rate one differently from its reviewer. Judge the premise behind each fix as well as the fix (what the finding presumes about production: the data written there, the path reached, the feature on) and say what you found in `premise` ("holds: ..." or "does not hold: ..."); a premise that does not hold in production paths is `verified-nonissue` with your evidence and a rationale, and a search that finds no production writer is a finding about the premise, never silence. A defect outside the changed lines is an observation (report it located, with its `severity` and a `family` where it repeats), never a blocker unless it fails a frozen criterion (`criterion`) or breaks a critical invariant (`invariant`). `followUps` lists findings that left this delivery: raise one again as a finding if it should not have. Early in your work write your plan into the closure file (`scope`; `expect: { minutes }`) and say what you did not reach in `notReached`; end with a recorded closure (`wf review --closure`). Write the closure to `reviewClosureFile`: { reviewer, scope, expect, findings, priorFindings, criteria: [{ id, evidence: { kind: test|screenshot|output|not-applicable|dropped-with-reason, ref, reason } }], screenshotsInspected, anomalies, noEvidence, notReached }; each evidence entry cites one artifact exactly as the bundle lists it (a criterion several screenshots prove gets one entry per screenshot, with the same id).';
+// 0.7.34 (I-233): a round that judges only what base merges did to the ticket's change.
+const REVIEWER_MERGE = 'This is a merge review: since the last reviewed tree only the base branch was merged in, and at least one merge changed this ticket\'s change. Your scope is `baseMerge` and nothing else: for each merge, the resolution (`commands.resolution`: where the committed merge differs from git\'s own automatic merge, code this ticket wrote), the change before and after it when they differ (`commands.changeBefore`, `commands.changeAfter`), and the base\'s edits in this ticket\'s files (`commands.baseEdits`: other work, already reviewed in its own ticket). Your goal: the resolution keeps both sides\' intent and the criteria still hold, and nothing the base brought in breaks this change where they meet. Earlier rounds judged the rest of the change; do not review it again. Answer every merge in `baseMerges` and every finding still open under `openFindings` in `priorFindings`.';
 const REVIEWER_DELTA = 'This is a delta review: the diff since the last reviewed tree (`delta`: the diff commands, the changed files and their line ranges) and the findings still open (`openFindings`, each with whether it blocks). Your goal: whether the changes since then fix what they set out to fix and break nothing. Judge the cause, not the place: a finding fixed where it showed up while the same cause remains elsewhere is not fixed: give it `status: open` in `priorFindings`, with the other place (`path:line`) as its evidence and the shared assumption named. A new finding that shares its cause with an earlier one, or with another of yours, says so: `sameCauseAs: ["<round>:<id>"]` (the reviewer id that raised it, a colon, its id; `openFindings` lists them, and a `cause` on one marks findings already linked). A new finding states, where you can see it, the narrowest change that removes it and roughly how long it takes (`fix: { what, minutes }`). Verify the open findings against the current code: `priorFindings: [{ round, id, status: fixed|verified-nonissue|open, evidence, severity, premise }]`, every one that blocks and every observation you can settle (one with `claimedFixed` names the commit said to fix it); give `severity` when you rate one differently from its reviewer. Judge the premise behind each fix as well as the fix (what the finding presumes about production: the data written there, the path reached, the feature on) and say what you found in `premise` ("holds: ..." or "does not hold: ..."); a premise that does not hold in production paths is `verified-nonissue` with your evidence and a rationale, and a search that finds no production writer is a finding about the premise, never silence. A discovered issue marked `fixedSinceReview` was closed as fixed on the word of the owner or implementer: if the fix does not hold, raise it as a finding. A defect you notice outside the changed lines is an observation (report it located, with its `severity` and a `family` where it repeats), never a blocker unless it fails a frozen criterion (`criterion`) or breaks a critical invariant (`invariant`). When the bundle has `sweeps`, a family proof (a command and the result it must give) is evidence: run it. Early in your work write your plan into the closure file (`scope`: what you will cover; `expect: { minutes }`: how long you expect it to take) with `findings` and `criteria` lists from the start, writing each finding into the file as soon as you have it (if your session ends early, what you wrote is kept as a partial round), and say what you did not reach in `notReached`; end with a recorded closure (`wf review --closure`). Write the closure to `reviewClosureFile` with `criteria: []`.';
 
 // Findings grouped by `family` (a stable key a reviewer gives a defect pattern); a finding with none is its own group.
@@ -1846,13 +1856,18 @@ export function recordReview(root, options) {
   // applying silently.
   const rv0 = !partial ? rerunFindingProblems(state, reviewerHandoff, closure) : [];
   if (rv0.length) throw refuse(`closure refused: a finding's re-run is not one the gate can make:\n  - ${rv0.join('\n  - ')}`, 'a finding only a re-run of a gate step satisfies names that step exactly as the gate lists it (`"step": "<step id>", "rerun": true`); a finding that needs a code change has no `rerun`, and a code-review round, handed no gate, never asks for one', { id: 'review:rerun-step' });
+  // 0.7.34 (I-233): every base merge the bundle handed is answered, naming the findings raised about it (facts only: the engine
+  // never judges what the reviewer says of a merge).
+  const mv = baseMergeAnswerProblems(handed.baseMerge ?? [], closure);
+  if (mv.length && partial) unfinished.push(`verdicts on the base merge(s) ${(handed.baseMerge ?? []).map((m) => m.id).join(', ')}`);
+  else if (mv.length) throw refuse(`closure refused: the base merges your bundle lists under \`baseMerge\` are not all answered:\n  - ${mv.join('\n  - ')}`, 'add `baseMerges: [{ "id": "base:<n>", "findings": [<ids of your findings about that merge>] }]` with one entry per merge listed under `baseMerge` (an empty list: no interaction seen), then `wf review --closure <file>` again', { id: 'review:base-merges' });
   const sv = !partial && handed.gate?.passedOnThisTree === true ? screenshotRefProblems(state, closure) : [];
   if (sv.length) throw refuse(`closure refused: a screenshot citation is not one artifact the gate collected:\n  - ${sv.join('\n  - ')}`, 'each criterion evidence entry cites one artifact exactly as `gate.screenshots` lists it (its `sha256` or `source`); a criterion several screenshots show gets one entry per screenshot, with the same `id`; then `wf review --closure <file>` again', { id: 'review:screenshot-ref' });
   // Commit, then reveal: the first closure of a full round is blind. Earlier rounds' findings are shown only after it is
   // recorded, and a later closure of the same round may only add their verification. A delta round is handed them up
   // front (`openFindings`), so it answers them in the one closure.
   const round = reviewerHandoff.bundle;
-  const delta = mode === 'delta';
+  const delta = isDeltaMode(mode);
   if (delta) {
     const owed = earlierBlocking(state, round).filter((f) => !(closure.priorFindings ?? []).some((p) => p?.round === f.round && p?.id === f.id && ['fixed', 'verified-nonissue', 'open'].includes(p.status) && String(p.evidence ?? '').trim()));
     if (owed.length && partial) unfinished.push(`verdicts on the open finding(s) ${owed.map((f) => f.ref).join(', ')}`);
@@ -1862,7 +1877,7 @@ export function recordReview(root, options) {
   if (unfinished.length) closure = { ...closure, notReached: [...unreachedOf(closure), `not reached before it ended: ${unfinished.join('; ')}`] };
   // The engine classifies every finding against the tree and round it was recorded on (engine/review-policy.mjs); the
   // reviewer's own `classified` field is replaced.
-  closure = stampClosure(state, closure, { mode, since: reviewerHandoff.deltaFrom ?? null });
+  closure = stampClosure(state, closure, { mode: isDeltaMode(mode) ? 'delta' : mode, since: reviewerHandoff.deltaFrom ?? null });
   // 0.7.32 (D78): the verdict on each admission correction the round was handed, while the reviewer can still give it; read on the
   // stamped closure, so a `finding` verdict names a finding that blocks (review of 0.7.32, M2: one naming a low finding sent the
   // weakening down the path of items that do not block, and the gate ran).
@@ -1966,7 +1981,12 @@ const onlyRepos = (ids, names) => Object.fromEntries(Object.entries(ids ?? {}).f
 // merged in without touching it keeps the reviewed change).
 function reviewCovers(state, r) {
   const t = r.tree ?? r.handoffTree;
-  if (t && canonical(t) === canonical(treeHashes(state))) return true;
+  const now = treeHashes(state);
+  if (t && canonical(t) === canonical(now)) return true;
+  // 0.7.34 (I-233): a tree that moved only by base merges that left the ticket's change as it was (classes `none` and
+  // `context`, engine/merges.mjs) keeps the round. Named failure (field): whether a merge reopened review hung on the 3-line
+  // diff context around the ticket's hunks; a `context` merge is judged by the next reviewer handed, never by a round of its own.
+  if (t && throughMerges(state, t, now).ok) return true;
   const reviewed = r.handoffPatch ?? null;
   if (!reviewed) return false;
   try {
@@ -1999,6 +2019,68 @@ function reviewCovers(state, r) {
 // 0.7.32 (I-222, D70), named failure (field, two attempts): a check registered after an evidence review, then the fix; `wf resume`
 // named the gate by the direct route while `wf gate` refused it for the review the check owes, a next step the order refuses.
 // The direct routes (an evidence review's fixes, a built pass) read the same fact, so the next step is that code review.
+// The tree is what an implementer left (`closedHeads`), or that followed by base merges only (0.7.34, I-233): a base merged in after
+// the fix does not switch the direct routes off. Named failure (design review of I-233): a merge after the implementers of an
+// evidence fix sent the fix to a code review instead of the gate. A merge that changed the ticket's change (`changed`) is judged
+// on these routes by the evidence review after the gate, whose bundle lists it under `baseMerge`.
+// What is missing from a closure's answers on the base merges it was handed (`baseMerges`).
+function baseMergeAnswerProblems(handed, closure) {
+  if (!handed.length) return [];
+  const answers = Array.isArray(closure?.baseMerges) ? closure.baseMerges : [];
+  const ids = new Set((closure?.findings ?? []).map((f) => f?.id));
+  const out = [];
+  for (const m of handed) {
+    const a = answers.find((x) => x?.id === m.id || (x?.merge && x.merge === m.merge));
+    if (!a) out.push(`${m.id} (${m.repo}, ${m.class}) has no entry`);
+    else if (!Array.isArray(a.findings)) out.push(`${m.id}: \`findings\` is a list of your finding ids (empty when you saw no interaction)`);
+    else for (const f of a.findings) if (!ids.has(f)) out.push(`${m.id} names ${f}, which is not one of this closure's findings`);
+  }
+  return out;
+}
+// 0.7.34 (I-233, M1): an evidence round stays the acceptance's round on a tree that moved from its own only by base merges that left
+// the ticket's change as it was (`none`, `context`), once the gate passed on the new tree and every screenshot of that gate was
+// inspected by some round (a re-run that collected nothing new adds nothing to look at, as push-main already accepts a base merge
+// with the gate run again). The acceptance is then recorded for the new HEAD with the same round, so the commit an adapter integrates
+// is still the one the acceptance names (D31). A `changed` merge, or a gate that collected a screenshot no round inspected, needs the
+// evidence review. The `context` merges it passed are listed in the delivered comment as not judged by review. { merges } or null.
+function acceptedAcross(state, r) {
+  const t = r?.tree ?? r?.handoffTree;
+  if (!t || r.partial || !reviewedAfterGate(r) || !('gateEvidenceInspected' in r ? r.gateEvidenceInspected : true)) return null;
+  const now = treeHashes(state);
+  if (canonical(t) === canonical(now)) return null;
+  const path = throughMerges(state, t, now);
+  if (!path.ok || !gatePassedForCurrentTree(state).ok) return null;
+  const inspected = inspectedEver(state);
+  if (screenshots(state).some((a) => !inspected.has(a.sha256))) return null;
+  return { merges: path.merges };
+}
+// A delta round, or a merge round (0.7.34, I-233), which is a delta whose scope is the merges since the last reviewed tree.
+const isDeltaMode = (mode) => mode === 'delta' || mode === 'merge';
+// Whether the round owed now is a merge round: only base merges since the latest round, at least one of them `changed`, and no other
+// reason for a code review (a check registered or corrected, a criterion changed).
+function mergeRoundOwed(state) {
+  const r = state.review;
+  const t = r?.tree ?? r?.handoffTree;
+  if (!r || !t || r.partial || validationSinceReview(state) || criteriaChangedSince(state, r.at)) return false;
+  try {
+    return !reviewCovers(state, r) && throughMerges(state, t, treeHashes(state), { allow: ['none', 'context', 'changed'] }).ok;
+  } catch {
+    return false;
+  }
+}
+function leftBy(state, heads, closed) {
+  return Object.entries(heads).every(([repo, t]) => {
+    if (String(t).includes('+dirty')) return false;
+    const was = String(closed?.[repo] ?? '').split('+')[0];
+    const is = String(t).split('+')[0];
+    if (is === was) return true;
+    try {
+      return Boolean(was) && mergeOnlyPath(state, repo, was, is) !== null;
+    } catch {
+      return false;
+    }
+  });
+}
 function validationSinceReview(state, r = state.review) {
   const at = state.validations?.at(-1)?.at;
   return Boolean(at && (!r || String(r.at) <= String(at)));
@@ -2026,8 +2108,7 @@ export function evidenceFixReady(state) {
   const last = [...after].sort((a, b) => String(a.closedAt).localeCompare(String(b.closedAt))).at(-1);
   if (last.outcome !== 'done') return false;
   try {
-    const heads = treeHashes(state);
-    return Object.entries(heads).every(([repo, t]) => !String(t).includes('+dirty') && String(t).split('+')[0] === String(last.closedHeads?.[repo] ?? '').split('+')[0]);
+    return leftBy(state, treeHashes(state), last.closedHeads);
   } catch {
     return false;
   }
@@ -2059,9 +2140,11 @@ export function gateOrderProblems(state) {
   // 0.7.32 (D75): findings only a re-run of their gate step satisfies are what the next gate is for (engine/gate.mjs rerunRoute).
   const recollect = rerunRoute(state);
   const open = recollect && !recollect.ran ? [] : openFindings(r, state);
-  if (open.length) problems.push(`the latest review round (${r.closure.reviewer}) has open findings (${open.map((f) => f.id).join(', ')}): fix them through the implementer, commit, and run the next code-review round until one comes back clean`);
+  // 0.7.34 (I-233, L2): a merge round is named as one, so its findings read as what the merge review raised.
+  const latest = r.mode === 'merge' ? `the latest review round, a merge review (${r.closure.reviewer}),` : `the latest review round (${r.closure.reviewer})`;
+  if (open.length) problems.push(`${latest} has open findings (${open.map((f) => f.id).join(', ')}): fix them through the implementer, commit, and run the next code-review round until one comes back clean`);
   const toVerify = beyondRoute(unverifiedPrior(state, r, { forGate: true }), recollect && !recollect.ran ? recollect : null);
-  if (toVerify.length) problems.push(`the latest review round (${r.closure.reviewer}) has not verified ${toVerify.length} earlier-round finding(s) (${toVerify.map((f) => `${f.round}:${f.id}`).join(', ')})`);
+  if (toVerify.length) problems.push(`${latest} has not verified ${toVerify.length} earlier-round finding(s) (${toVerify.map((f) => `${f.round}:${f.id}`).join(', ')})`);
   return problems;
 }
 
@@ -2536,7 +2619,8 @@ export function acceptReview(root, options) {
   if (!g.ok) problems.push(`gate: ${g.reason}; run \`wf gate\``);
   const fresh = 'hand it to a fresh reviewer: `wf handoff reviewer --agent <new id>`, start it with only the printed line, then `wf review --closure <file>`';
   const reviewedTree = r.tree ?? r.handoffTree;
-  if (canonical(treeHashes(state)) !== canonical(reviewedTree)) problems.push(`no closure for the current tree: the code changed after the last review; ${fresh}`);
+  const across = acceptedAcross(state, r);
+  if (canonical(treeHashes(state)) !== canonical(reviewedTree) && !across) problems.push(`no closure for the current tree: the code changed after the last review; ${fresh}`);
   else if (g.ok && !reviewedAfterGate(r)) problems.push(`the closure was written before a passing gate on this tree, so no reviewer has inspected the gate evidence; for the evidence pass ${fresh}`);
   // Verdicts a reviewer chose to give are recorded with the acceptance (and a lesson verdict `finding` counts as a
   // recurrence); none is required (0.7.0, goals not forms).
@@ -2558,7 +2642,7 @@ export function acceptReview(root, options) {
   // Nothing verified when this command opened the attempt may have changed while it decided.
   const moved = assertUnchanged(root, state.id);
   if (moved.length) throw refuse(`review not accepted: the evidence changed while it was checked:\n  - ${moved.slice(0, 10).join('\n  - ')}`);
-  append(root, state.id, 'review.accepted', { reviewer: r.closure.reviewer, patch: patchIds(state), heads: treeHashes(state), gate: state.lastGate.runId, ...(verdicts.length ? { noEvidence: verdicts } : {}), ...(rv.verdicts.length ? { rules: rv.verdicts } : {}), ...(ov.verdicts.length ? { outsidePlan: ov.verdicts } : {}), ...(dv.verdicts.length ? { designHits: dv.verdicts } : {}), ...(lv.verdicts.length ? { lessons: lv.verdicts } : {}), ...(xv.verdicts.length ? { discovered: xv.verdicts } : {}), ...(sv.verdicts.length ? { seams: sv.verdicts } : {}), ...(hv.verdicts.length ? { reportedIssues: hv.verdicts } : {}) }, actor(options));
+  append(root, state.id, 'review.accepted', { reviewer: r.closure.reviewer, patch: patchIds(state), heads: treeHashes(state), gate: state.lastGate.runId, ...(across?.merges?.length ? { acrossMerges: across.merges.map((m) => ({ id: mergeId(m), repo: m.repo, merge: m.merge ?? m.headAfter, class: m.class })) } : {}), ...(verdicts.length ? { noEvidence: verdicts } : {}), ...(rv.verdicts.length ? { rules: rv.verdicts } : {}), ...(ov.verdicts.length ? { outsidePlan: ov.verdicts } : {}), ...(dv.verdicts.length ? { designHits: dv.verdicts } : {}), ...(lv.verdicts.length ? { lessons: lv.verdicts } : {}), ...(xv.verdicts.length ? { discovered: xv.verdicts } : {}), ...(sv.verdicts.length ? { seams: sv.verdicts } : {}), ...(hv.verdicts.length ? { reportedIssues: hv.verdicts } : {}) }, actor(options));
   // A lesson the change did not comply with recurred: its mechanism failed (once per lesson per attempt).
   const already = new Set((state.lessons?.recurred ?? []).map((x) => x.id));
   for (const v of lv.verdicts) if (v.verdict === 'finding' && !already.has(v.lesson)) recur(root, v.lesson, state.id, actor(options), `review finding ${v.finding}`);
@@ -2706,9 +2790,22 @@ function pushMain(root, state, repo) {
       throw refuse(`${repo.base} moved and conflicts with this change in ${repo.name}; resolve by merging ${repo.remote}/${repo.base} in the worktree, then rerun the gate`);
     }
     mainAdvance = { from: ownBase, to: remoteHead, delta: delta.length, overlap, infra };
+    // 0.7.34 (I-233, M3): the delivery's own merge is recorded with its facts like any base merge (engine/merges.mjs): what it
+    // touched of this ticket's files, whether it differs from git's automatic merge (a hook can change a merge that reported no
+    // conflict), and whether the ticket's change is the same.
+    const merged = git(wt, ['rev-parse', 'HEAD']);
+    const facts = recordedFacts(wt, merged);
+    append(root, state.id, 'base.merged', { repo: repo.name, ref: `${repo.remote}/${repo.base}`, from: ownBase, to: remoteHead, commits: Number(git(wt, ['rev-list', '--count', `${ownBase}..${remoteHead}`])), files: delta.length, overlap, infra, headBefore: git(wt, ['rev-parse', 'HEAD^1']), headAfter: merged, note: null, delivery: true, ...facts }, null);
+    if (facts.class === 'changed') {
+      append(root, state.id, 'gate.reopened', { repo: repo.name, mainAdvance }, null);
+      throw refuse(`${repo.base} moved and its merge into ${repo.name} changed this ticket's change (${facts.resolved === null ? 'git here cannot compute the automatic merge' : facts.resolved.length ? `the merge differs from git's automatic merge in ${facts.resolved.slice(0, 5).join(', ')}` : 'the change differs after it'}); merged into the worktree`, 'one merge review judges what the merge changed (`wf resume` names it: `wf handoff reviewer --agent <new id>`), then `wf gate`, then `wf accept` and `wf deliver`');
+    }
     if (overlap.length || infra.length) {
       append(root, state.id, 'gate.reopened', { repo: repo.name, mainAdvance }, null);
-      throw refuse(`${repo.base} moved and touches ${[...overlap, ...infra].slice(0, 5).join(', ')}${overlap.length + infra.length > 5 ? '…' : ''}; merged into the worktree. ${overlap.length ? 'The change itself moved: hand it to a fresh reviewer for the code review first, then `wf gate`, then the evidence review, before `wf deliver`' : 'Rerun `wf gate`, then `wf deliver`'}`);
+      // 0.7.34 (I-233, M6): the base's work in this ticket's files, told plainly so whoever tests the delivery knows where to look;
+      // it left the ticket's change as it was, so no review is owed and the acceptance stands: the gate runs on the merged tree.
+      const work = overlap.length ? baseWorkLines(baseWorkIn(root, wt, repo.name, ownBase, remoteHead, overlap)) : [];
+      throw refuse(`${repo.base} moved and touches ${[...overlap, ...infra].slice(0, 5).join(', ')}${overlap.length + infra.length > 5 ? '…' : ''}; merged into the worktree.${overlap.length ? ` It left this ticket's change as it was; other work changed these files of it, which no review judges after the acceptance, so test where they meet:\n  - ${work.join('\n  - ')}\n` : ' '}Rerun \`wf gate\` on the merged tree, then \`wf deliver\``);
     }
   }
   run('git', ['push', '--quiet', repo.remote, `HEAD:refs/heads/${repo.base}`], { cwd: wt });
@@ -2854,7 +2951,7 @@ export async function deliver(root, options) {
   state = loadState(root, state.id);
   // Repos already delivered are on the target branch; compare only what is still to deliver.
   const now = patchIds(state);
-  const changedAfter = Object.keys(state.repos).filter((r) => !state.delivery.repos[r] && now[r] !== state.accepted.patch[r]);
+  const changedAfter = Object.keys(state.repos).filter((r) => !state.delivery.repos[r] && now[r] !== state.accepted.patch[r] && !mergedOnlySinceAcceptance(state, r));
   if (changedAfter.length) throw refuse(`the change was modified after acceptance (${changedAfter.join(', ')}); gate and review it again`);
   // 0.7.26 (I-183, review of 0.7.26). Named failure: the base merged by hand in the worktree (or after `wf base merge` aborted on a
   // conflict) moved HEAD with the acceptance standing; the adapter was handed the new HEAD while the acceptance named the old
@@ -3773,6 +3870,18 @@ export function lateInRecordedRepos(state) {
 
 // 0.7.26 (I-183, review of 0.7.26): the repos still to deliver whose tree is not the one the acceptance names (a base merged by
 // hand, a commit made after it). `acceptanceMoved` is that for an adapter delivery, the only kind that goes by the accepted commit.
+// 0.7.34 (I-233): a repo whose tree moved after the acceptance only by base merges that left the ticket's change as it was (`none`,
+// `context`): its change is the accepted one, whatever its bytes now read (the diff context and line numbers moved with the base).
+// With push-main the acceptance stands across such a merge, as it did when the merge touched none of the ticket's files.
+function mergedOnlySinceAcceptance(state, repo) {
+  const was = state.accepted?.heads?.[repo];
+  if (!was) return false;
+  try {
+    return throughMerges(state, { [repo]: was }, { [repo]: treeHashes(state)[repo] }).ok;
+  } catch {
+    return false;
+  }
+}
 export function movedSinceAcceptance(state) {
   if (!state.accepted || state.delivery.completedAt) return [];
   const now = treeHashes(state);
@@ -3797,7 +3906,7 @@ function acceptanceMoved(root, state) {
     const others = (moved) => [...moved.filter((m) => !pushed.some((x) => x.repo === m.repo)), ...pushed];
     if (trustedAdapter(root, state, deliveryPin(state)).delivery.kind === 'push-main') {
       const now = patchIds(state);
-      return others(movedSinceAcceptance(state).filter((m) => state.accepted.patch?.[m.repo] && now[m.repo] !== state.accepted.patch[m.repo]));
+      return others(movedSinceAcceptance(state).filter((m) => state.accepted.patch?.[m.repo] && now[m.repo] !== state.accepted.patch[m.repo] && !mergedOnlySinceAcceptance(state, m.repo)));
     }
     return others(movedSinceAcceptance(state));
   } catch {
@@ -3930,6 +4039,7 @@ export function nextDecision(root, state) {
     return result('review', 'owner', 'process completed but a valid closure is missing', { handoff: h.bundle, guidance: withAttempt(root, state, closureMissingGuidance(state, h)) });
   }
   const r = state.review;
+  if (state.lastGate?.status === 'stopped' && state.stops.at(-1)?.class === 'tree-change' && canonical(state.lastGate.tree) === canonical(tree) && baseAhead(state).length) return result('repair', 'owner', 'gate stopped as a tree change while the base had moved: when the stop was for the base, `wf base merge` and then the gate (a merge that leaves the change as it was owes no review); otherwise repair and a fresh review', { guidance: guidance });
   if (state.lastGate?.status === 'stopped' && ['major-finding', 'tree-change'].includes(state.stops.at(-1)?.class) && canonical(state.lastGate.tree) === canonical(tree)) return result('repair', 'owner', 'gate stopped for a defect or tree change; repair and fresh review are required', { guidance: guidance });
   if (state.lastGate?.status === 'failed' && canonical(state.lastGate.tree) === canonical(tree)) return result('repair', 'owner', 'the normal gate failed; diagnose before continuing');
   // The combined-tree check comes before the review it guards: the next step names it, not the handoff's refusal (the
@@ -3938,7 +4048,7 @@ export function nextDecision(root, state) {
   // 0.7.28 (I-207): the planned pass was built and nothing else changed: the gate, and the evidence review after it verifies it.
   if ((!r || !reviewCovers(state, r)) && passBuilt(state) && !gatePassedForCurrentTree(state).ok) return result('gate', 'ready', null, { course: 'reach', guidance: withAttempt(root, state, PASS_GATE) });
   if ((!r || !reviewCovers(state, r)) && integrationCheckOwed(trustedAdapter(root, state), state)) return result('check', 'owner', `the combined tree of ${state.work.length} work items needs a passing \`wf check\` before its code review`, { guidance: `run \`wf check --attempt ${state.id}\` on the combined tree and fix what it finds through the implementers; then the code review` });
-  if (!r || !reviewCovers(state, r)) return result('review', 'ready', null, { round: 'code-review' });
+  if (!r || !reviewCovers(state, r)) return result('review', 'ready', null, { round: 'code-review', ...(mergeRoundOwed(state) ? { mode: 'merge' } : {}) });
   const passed = gatePassedForCurrentTree(state);
   // 0.7.31 (I-217, D64): when every finding still blocking was reported by an implementer as resting on a premise that does not hold
   // (and it built nothing for them), the next step is a verdict on that premise, never another fix round for the same findings.
@@ -3965,7 +4075,7 @@ export function nextDecision(root, state) {
   // 0.7.26 (I-183). Named failure: a base merge that left the reviewed change alone kept the round "covering" the moved tree, so
   // the decision (and `wf advance`) named the acceptance after the gate, and `wf accept` refused: it wants a closure written for
   // the tree as it is. The round that inspects the new gate's evidence on this tree comes first.
-  if (canonical(r.tree ?? r.handoffTree) !== canonical(tree)) return result('review', 'ready', null, { round: 'evidence-review' });
+  if (canonical(r.tree ?? r.handoffTree) !== canonical(tree) && !acceptedAcross(state, r)) return result('review', 'ready', null, { round: 'evidence-review' });
   // Named failure (I-107): criteria an amendment added or re-worded after this round was handed are mapped by no round, and
   // `wf accept` refuses; the next step is a reviewer, not the acceptance.
   const late = criteriaAfterReview(state, r);
@@ -4006,7 +4116,7 @@ export function passBuilt(state) {
   const after = (state.implementers ?? []).filter((x) => x.openedAt > state.review.at);
   const last = [...after].sort((a, b) => String(a.closedAt).localeCompare(String(b.closedAt))).at(-1);
   try {
-    return Object.entries(treeHashes(state)).every(([repo, t]) => !String(t).includes('+dirty') && String(t).split('+')[0] === String(last.closedHeads?.[repo] ?? '').split('+')[0]);
+    return leftBy(state, treeHashes(state), last.closedHeads);
   } catch {
     return false;
   }
@@ -4121,6 +4231,11 @@ function phaseStep(root, cfg, state) {
     // before the next gate (I-27). An owner's decision (or a stop recorded before classes existed) resumes it.
     // 0.7.30 (I-162, D51): the steps that failed before the stop reach the repair, and the owner is told so.
     const failedBefore = failedStepsOf(state.lastGate).map((x) => x.id);
+    // 0.7.34 (I-233, M5): a stop recorded as a tree change while the base had moved may be a stop for the base itself. The engine
+    // cannot read why (it never reads the reason's words), so it names both routes: the merge, which says what it owes (one that
+    // leaves this change as it was owes no review, and the gate then runs on the merged tree), or the repair.
+    const ahead = stop.class === 'tree-change' ? baseAhead(state) : [];
+    if (ahead.length) return `gate stopped (${stop.class}: ${stop.reason}); the base moved (${ahead.map((a) => `${a.repo}: +${a.commits} commit(s)`).join('; ')}): when the stop was for that, \`wf base merge\` (it says what the merge owes; one that leaves this change as it was owes no review), then \`wf gate\` on the merged tree; base movement alone is no reason to stop a gate. When the stop was for a defect, fix and commit through the implementer that did that work, then the code review of the new tree (\`wf handoff reviewer --agent <new id>\`)`;
     if (['major-finding', 'tree-change'].includes(stop.class)) return `gate stopped (${stop.class}: ${stop.reason}); fix and commit through the implementer that did that work${failedBefore.length ? ` (its bundle carries \`failedGate\`: the steps that failed before the stop (${failedBefore.join(', ')}))` : ''}, then the code review of the new tree: hand it to a fresh reviewer (\`wf handoff reviewer --agent <new id>\`); the gate runs once a round comes back clean`;
     return `gate stopped (${stop.class ? `${stop.class}: ` : ''}${stop.reason}); run \`wf gate\` to continue with finished steps carried`;
   }
@@ -4236,6 +4351,8 @@ function phaseStep(root, cfg, state) {
     if (evidenceFixReady(state) && !pass.ok) return reachRouted(`the evidence review's findings are fixed by the implementers handed after it: ${gateRun}; the evidence review after it verifies the fixes and the new evidence`);
     if (passBuilt(state) && !pass.ok) return reachRouted(`${PASS_GATE.replace('run one `wf gate`', gateRun)}`);
   }
+  // 0.7.34 (I-233): only base merges since the latest round, one of them changing this ticket's change: a merge review of just those.
+  if (!covered && mergeRoundOwed(state)) return routed(`merge review: only base merges came in since the last reviewed tree, and one of them changed this ticket's change (a resolution, an edit in the merge, or the change itself differs): hand to ${fresh}; its bundle is a \`merge\` round that judges those merges and nothing else; ${noGate}`);
   if (!covered) return routed(integrationCheckOwed(cfg, state) ? `the combined tree of ${state.work.length} work items needs a passing \`wf check --attempt ${state.id}\` first (fix what it finds through the implementers); then the code review: hand to ${fresh}; ${noGate}` : `code review: hand to ${fresh}; ${noGate}`);
   const open = openFindings(r, state);
   const joining = outstanding(state);
@@ -4259,7 +4376,7 @@ function phaseStep(root, cfg, state) {
   if (awaiting.length) return awaitingText(awaiting, gateRun);
   if (!pass.ok) return onTree(r.tree ?? r.handoffTree) ? `clean code review on this tree: ${gateRun}; then the evidence review` : `clean code review covers this change: ${gateRun}; then the evidence review`;
   // 0.7.26 (I-183): a base merge moved the tree and left the reviewed change alone: `wf accept` wants a closure written for this tree.
-  if (!onTree(r.tree ?? r.handoffTree)) return `evidence review: the gate passed on this tree (a base merged in moved it; the reviewed change is the same), so hand to ${fresh} to inspect the gate evidence (logs and screenshots)`;
+  if (!onTree(r.tree ?? r.handoffTree) && !acceptedAcross(state, r)) return `evidence review: the gate passed on this tree (a base merged in moved it; the reviewed change is the same), so hand to ${fresh} to inspect the gate evidence (logs and screenshots)`;
   if (!reviewedAfterGate(r)) return `evidence review: the gate passed on the reviewed tree, so hand to ${fresh} to inspect the gate evidence (logs and screenshots)`;
   const late = criteriaAfterReview(state, r);
   if (late.added.length || late.changed.length) return `evidence review: ${[...late.added, ...late.changed].join(', ')} ${late.added.length + late.changed.length === 1 ? 'was' : 'were'} added or re-worded by an amendment after the last review round was handed, so no round mapped ${late.added.length + late.changed.length === 1 ? 'it' : 'them'} to this gate's evidence (\`wf accept\` would refuse): hand to ${fresh}; it maps every criterion`;
@@ -4269,5 +4386,7 @@ function phaseStep(root, cfg, state) {
   if (premise) return premise;
   const toJudge = correctionsToJudge(root, state);
   if (toJudge.length) return `evidence review: no round has judged the correction of the admission check ${toJudge.map((c) => c.id).join(', ')}, so hand to ${fresh}; its bundle carries both definitions and asks its verdict (\`wf accept\` would refuse)`;
+  const across = acceptedAcross(state, r);
+  if (across) return `accept the review: \`wf accept\` (the evidence round stands: since it, only base merges that left this change as it was moved the tree (${across.merges.map(mergeId).join(', ')}), the gate passed on the merged tree and collected nothing no round has inspected)`;
   return 'accept the review: `wf accept`';
 }

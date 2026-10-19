@@ -54,7 +54,8 @@ for (const [shape, x] of Object.entries(SHAPES)) {
     // Gate, review, accept again. The merge left the ticket's lines alone, so the code review still covers the change: a repo
     // recorded as delivered cannot change, and its diff no longer showing (its change is on the target) is not a change to review.
     const merged = headOf(wt(x.pending));
-    assert.deepEqual(reconcile(root, base, e.id, 'rev-again'), ['gate', 'evidence-review']);
+    // 0.7.34 (I-233, M1): the gate on the merged tree collected nothing new to inspect, so the evidence round stands.
+    assert.deepEqual(reconcile(root, base, e.id, 'rev-again'), ['gate']);
     const before = integrations(root).length;
     assert.match(ok(wf(root, ['deliver', '--attempt', e.id])).out, new RegExp(`${x.pending}: awaiting-merge`));
     assert.deepEqual(integrations(root).slice(before), [`${x.pending} ${merged}`], 'only the waiting repo was integrated again');
