@@ -2253,6 +2253,11 @@ A second adversarial pass over the integrated 0.5.0 branch, with scenarios in `s
 
 | Item | Failure fixed | Fixed in | Scenario test |
 | --- | --- | --- | --- |
+| [I-234](improvements/I-234.md) | Course signals fired without a strategist being handed for ten rounds | 0.7.34 | `scenarios/strategy-diagnosis.test.mjs` |
+| [I-233](improvements/I-233.md) | A base merge forced by the gate reopens review, so 'reconcile the base once' cannot be followed | 0.7.34 | `scenarios/base-merge-classes.test.mjs` |
+| [I-232](improvements/I-232.md) | The strategist picks an action but never diagnoses why the ticket loops or corrects the flow | 0.7.34 | `scenarios/strategy-diagnosis.test.mjs` |
+| [I-231](improvements/I-231.md) | Frozen-plan amendment lacks a supported dry-run path | 0.7.34 | `scenarios/amend-check.test.mjs` |
+| [I-230](improvements/I-230.md) | Read-only replan check refuses frozen criteria | 0.7.34 | `scenarios/amend-check.test.mjs` |
 | [I-229](improvements/I-229.md) | Round question asked after the strategist planned and the person gave the course | 0.7.33 | `scenarios/strategist.test.mjs` |
 | [I-228](improvements/I-228.md) | Support recording an already acknowledged client-owned configuration handoff without asking it again | 0.7.33 | `scenarios/decisions-per-item.test.mjs` |
 | [I-227](improvements/I-227.md) | declaredReadsAt runs git rev-parse per file | 0.7.33 | `scenarios/correction-reads.test.mjs` |
