@@ -176,6 +176,7 @@ const STEPS = {
       s.sha = landed;
       s.landed = true;
       say(`  ${f.version} already landed: origin/main holds ${landed} and its version files say ${f.version}; the release branch is gone`);
+      if (f.devSha && f.devSha !== landed) say(`  warning: ${f.dev} is at ${f.devSha}, not the landed ${landed}: a change made after the landing is not in this release; push it to ${f.releaseBranch} and release a new version`);
       return `${f.version} already landed at ${landed.slice(0, 10)}`;
     }
     const release = git(f.main, ['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${f.releaseBranch}`]);
