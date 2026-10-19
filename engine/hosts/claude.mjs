@@ -1,213 +1,164 @@
-// Claude Code as a host adapter: the one place the workflow learns what Claude Code is.
+// Claude Code as a host: where its transcripts are, what their lines mean, and how a reviewer is launched.
+// Transcripts: <home>/.claude/projects/<cwd with every non-alphanumeric as '-'>/<session>.jsonl, one JSON object per line.
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { howToStart, verifyRole } from './claude-agent.mjs';
-import { LABEL, assistantTurns, childAgents, claudeUsage, claudeUsageOf, handoffFiles, readTranscript, sessionModel, subagentIndex, subagentModel, subagentTranscripts, transcriptFile } from './claude-store.mjs';
 import { findSkill } from './claude-skills.mjs';
-import { roleChangedSinceSessionStart } from './claude-stale.mjs';
 import { markdownRole } from './role-files.mjs';
-import { readLines } from './safe-file.mjs';
-import { claudeChatAnswers, claudeQuestionAnswers } from './questions.mjs';
-import { genericFileTargets, shellRunsOf, tailLines, textOf, toolOf } from './tool-calls.mjs';
-import { lastModel } from './turns.mjs';
+import { isSafeName, readEntries, settleTranscript } from './safe-file.mjs';
+import { textOf } from './tool-calls.mjs';
 
-// The tracker's own answer as Claude Code recorded it: an assistant line holds `{ type: 'tool_use', id, name, input }`
-// blocks and a user line the `{ type: 'tool_result', tool_use_id, content, is_error }` that answers one.
-async function connectorCalls(file, tools) {
-  const calls = new Map();
-  await readLines(file, (line, n) => {
-    if (!line.includes('mcp__') && !line.includes('tool_result')) return;
-    let e;
-    try {
-      e = JSON.parse(line);
-    } catch {
-      return;
-    }
-    const content = e?.message?.content;
-    if (!Array.isArray(content)) return;
-    for (const b of content) {
-      if (b?.type === 'tool_use' && typeof b.name === 'string' && tools.includes(toolOf(b.name))) calls.set(b.id, { tool: toolOf(b.name), name: b.name, input: b.input ?? {}, calledAt: e.timestamp ?? null, line: n });
-      else if (b?.type === 'tool_result' && calls.has(b.tool_use_id)) Object.assign(calls.get(b.tool_use_id), { result: textOf(b.content), error: b.is_error === true, at: e.timestamp ?? null, resultLine: n });
-    }
-  });
-  return [...calls.values()];
+const encode = (cwd) => cwd.replace(/[^A-Za-z0-9]/g, '-');
+const store = (home) => path.join(home, '.claude', 'projects');
+const folders = (dir) => {
+  try {
+    return fs.readdirSync(dir, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => path.join(dir, e.name));
+  } catch {
+    return [];
+  }
+};
+
+// Lines the harness writes into the person's place: task notices, reminders, command echoes, interrupt markers.
+const HARNESS = /^<(task-notification|system-reminder|local-command-stdout|local-command-stderr|local-command-caveat|command-message|command-name|user-prompt-submit-hook)\b|^\[Request interrupted by user/;
+const strip = (t) => t.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').replace(/<pasted_content\b[^>]*>[\s\S]*?<\/pasted_content>/g, '').trim();
+
+// A user line: { text } when the person typed words, { act: true } when they acted without words, null when the
+// harness wrote it (meta lines, compaction summaries, tool results, notices).
+function personOf(e) {
+  if (e.isMeta || e.isCompactSummary || e.isVisibleInTranscriptOnly) return null;
+  const c = e.message?.content;
+  if (Array.isArray(c) && c.some((b) => b?.type === 'tool_result')) return null;
+  const blocks = typeof c === 'string' ? [c] : Array.isArray(c) ? c.filter((b) => b?.type === 'text' && typeof b.text === 'string').map((b) => b.text) : [];
+  const kept = blocks.map((b) => b.trim()).filter((b) => b && !HARNESS.test(b));
+  if (!kept.length) return Array.isArray(c) && c.some((b) => b?.type === 'image') ? { act: true } : null;
+  let text = strip(kept.join('\n'));
+  const quote = /^<!--\s*reply\s+\d+\s*-->[ \t]*\n(?:>.*(?:\n|$))*/.exec(text); // a reply to a quoted message
+  if (quote) text = text.slice(quote[0].length).trim();
+  return !text || text.startsWith('<') ? { act: true } : { text };
 }
 
-// Tools each generated Claude role may use (the implementer gets every tool). Every tool a role's instructions name
-// must be here. Named failure (0.3.3, a live round): the reviewer was told to write its closure with the Write tool,
-// which its list lacked, so it could not record the closure and the round was lost. The reviewer's Write is for its
-// closure file only: `wf review` refuses a closure when the worktree changed during the round.
-// The strategist reads the attempt and writes one closure file (`wf strategy record` copies it into the evidence).
-const ROLE_TOOLS = { planner: ['Read', 'Grep', 'Glob', 'Bash'], reviewer: ['Read', 'Grep', 'Glob', 'Bash', 'Write', 'Skill'], tester: ['Read', 'Grep', 'Glob', 'Bash'], strategist: ['Read', 'Grep', 'Glob', 'Bash', 'Write'] };
+const record = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
+const labels = (options) => (Array.isArray(options) ? options.map((o) => (typeof o === 'string' ? o : o?.label)).filter((l) => typeof l === 'string') : []);
 
-// A fresh role through `claude --print`: its stream-json events carry the session id (`system` `init`) and the end of the
-// turn (`result`); the assistant's text reaches the owner as `assistant` events.
-// `resume` (0.7.30, I-153): the session of a launch the model's capacity ended, continued under the same id (`--resume`
-// keeps it unless `--fork-session` is given), with the same agent, tools, model and effort.
-function buildLaunch(h, { body, requestedSession, resume = null }) {
-  const args = ['--print', '--verbose', '--output-format', 'stream-json', ...(resume ? ['--resume', resume] : ['--session-id', requestedSession]), '--agent', h.agentType, '--agents', JSON.stringify({ [h.agentType]: { description: `Frozen workflow ${h.role}`, prompt: body, ...(ROLE_TOOLS[h.role] ? { tools: ROLE_TOOLS[h.role] } : {}) } }), '--permission-mode', 'dontAsk', '--allowedTools', ...(ROLE_TOOLS[h.role] ?? ['Read', 'Write', 'Edit', 'Grep', 'Glob']).filter((t) => t !== 'Bash'), 'Bash(wf *)'];
-  if (h.model) args.push('--model', h.model);
-  if (h.effort) args.push('--effort', h.effort);
-  return { bin: 'claude', args };
+// The session as host-neutral items, in order (engine/hosts/index.mjs reads them):
+//   say {text} · ask {id, questions:[{text, options}]} · call {id, name, input, cwd} · result {id, text, error}
+//   person {text} · act · panel {id, answers:{question: answer}} · usage {key, model, input, output, cacheRead, cacheWrite}
+// Sub-agent (sidechain) lines are left out: what a session did is what its own turns did.
+export function timeline(file) {
+  const items = [];
+  let cwd = null;
+  for (const e of readEntries(file)) {
+    if (!record(e) || e.isSidechain) continue;
+    cwd ??= typeof e.cwd === 'string' ? e.cwd : null;
+    const at = typeof e.timestamp === 'string' ? e.timestamp : null;
+    const content = e.message?.content;
+    if (e.type === 'assistant') {
+      if (Array.isArray(content)) {
+        for (const b of content) {
+          if (b?.type === 'text' && typeof b.text === 'string' && b.text.trim()) items.push({ type: 'say', at, text: b.text });
+          else if (b?.type === 'tool_use' && b.name === 'AskUserQuestion' && Array.isArray(b.input?.questions)) items.push({ type: 'ask', at, id: b.id, questions: b.input.questions.filter((q) => typeof q?.question === 'string').map((q) => ({ text: q.question, options: labels(q.options) })) });
+          else if (b?.type === 'tool_use') items.push({ type: 'call', at, id: b.id, name: String(b.name), input: record(b.input) ? b.input : {}, cwd: e.cwd ?? cwd, shell: b.name === 'Bash' ? b.input?.command : undefined });
+        }
+      } else if (typeof content === 'string' && content.trim()) items.push({ type: 'say', at, text: content });
+      const u = e.message?.usage;
+      if (u) items.push({ type: 'usage', at, key: e.requestId ?? e.message?.id ?? e.uuid, model: e.message?.model ?? null, input: u.input_tokens ?? 0, output: u.output_tokens ?? 0, cacheRead: u.cache_read_input_tokens ?? 0, cacheWrite: u.cache_creation_input_tokens ?? 0 });
+      continue;
+    }
+    if (e.type === 'attachment') {
+      const a = e.attachment;
+      if (a?.type === 'queued_command' && a.origin?.kind === 'human' && (a.commandMode ?? 'prompt') === 'prompt' && typeof a.prompt === 'string') {
+        const text = strip(a.prompt);
+        if (text && !text.startsWith('<')) items.push({ type: 'person', at, text });
+      }
+      continue;
+    }
+    if (e.type !== 'user') continue;
+    if (Array.isArray(content) && content.some((b) => b?.type === 'tool_result')) {
+      for (const b of content.filter((x) => x?.type === 'tool_result')) {
+        if (record(e.toolUseResult?.answers)) items.push({ type: 'panel', at, id: b.tool_use_id, answers: e.toolUseResult.answers });
+        else items.push({ type: 'result', at, id: b.tool_use_id, text: textOf(b.content), error: b.is_error === true });
+      }
+      continue;
+    }
+    // A `claude --print` session (an entrypoint of the SDK): its user line is the launcher's prompt, never the person.
+    const p = /sdk/.test(String(e.entrypoint ?? '')) ? null : personOf(e);
+    if (p?.text) items.push({ type: 'person', at, text: p.text });
+    else if (p?.act) items.push({ type: 'act', at });
+  }
+  return { cwd, items };
 }
 
-// The classifier (engine/learning.mjs): one `claude --print` turn with no tools and no session kept, answering in text.
-function classifyLaunch({ prompt, model, effort }) {
-  const args = ['--print', '--output-format', 'json', '--tools', '', '--no-session-persistence', '--strict-mcp-config'];
+// The one transcript of a session, or null.
+export function transcript(id, home) {
+  if (!isSafeName(id)) return null;
+  const base = store(home);
+  let baseReal;
+  try {
+    baseReal = fs.realpathSync.native(base);
+  } catch {
+    return null;
+  }
+  const found = settleTranscript({ runtime: 'claude', session: id, candidates: folders(base).map((d) => path.join(d, `${id}.jsonl`)), base, baseReal });
+  return found.file ?? null;
+}
+
+// Transcripts whose folder is the project root or a folder under it, written to at or after `sinceMs`.
+export function projectTranscripts(root, home, sinceMs = 0) {
+  const prefix = encode(root);
+  const out = [];
+  for (const dir of folders(store(home))) {
+    const name = path.basename(dir);
+    if (name !== prefix && !name.startsWith(`${prefix}-`)) continue;
+    for (const f of fs.readdirSync(dir)) {
+      if (!f.endsWith('.jsonl')) continue;
+      const file = path.join(dir, f);
+      const st = fs.lstatSync(file);
+      if (st.isFile() && st.mtimeMs >= sinceMs) out.push({ session: { runtime: 'claude', id: f.slice(0, -6) }, file });
+    }
+  }
+  return out;
+}
+
+// A fresh reviewer: `claude --print` with the prompt on stdin, its session id chosen here, read-only tools plus `wf`.
+function launch({ model, cwd }) {
+  const session = randomUUID();
+  const args = ['--print', '--verbose', '--output-format', 'stream-json', '--session-id', session, '--permission-mode', 'dontAsk', '--allowedTools', 'Read', 'Grep', 'Glob', 'Write', 'Bash(wf *)', 'Bash(git diff *)', 'Bash(git show *)', 'Bash(git log *)'];
   if (model) args.push('--model', model);
-  if (effort) args.push('--effort', effort);
-  return { bin: 'claude', args, input: prompt };
+  return { bin: 'claude', args, session, cwd };
 }
-function classifyResult({ stdout }) {
-  const j = JSON.parse(stdout);
-  return { text: j.is_error ? '' : typeof j.result === 'string' ? j.result : '', costUsd: typeof j.total_cost_usd === 'number' ? j.total_cost_usd : null, model: Object.keys(j.modelUsage ?? {})[0] ?? null };
+function resume({ model, cwd, session }) {
+  const args = ['--print', '--verbose', '--output-format', 'stream-json', '--resume', session, '--permission-mode', 'dontAsk', '--allowedTools', 'Read', 'Grep', 'Glob', 'Write', 'Bash(wf *)', 'Bash(git diff *)', 'Bash(git show *)', 'Bash(git log *)'];
+  if (model) args.push('--model', model);
+  return { bin: 'claude', args, session, cwd };
 }
 
-// 0.7.30 (I-153): the model at capacity, as Claude Code reports it: the API's `overloaded_error` (HTTP 529), in a failed
-// result's text ("API Error: 529 ... overloaded_error", "Repeated 529 Overloaded errors") or an error event.
+// The model at capacity, as Claude Code reports it: the API's overloaded error (HTTP 529).
 const CAPACITY = /overloaded_error|\b529\b|\boverloaded\b/i;
-const capacityIn = (...texts) => texts.some((t) => typeof t === 'string' && CAPACITY.test(t));
-
-function interpretEvent(e) {
+function event(e) {
   if (e.type === 'system' && e.subtype === 'init') return { started: e.session_id };
   if (e.type === 'result') {
-    const success = e.subtype === 'success' && e.is_error === false;
-    return { terminal: { session: e.session_id, success }, ...(!success && capacityIn(e.result, e.error?.message, e.error?.type, ...(e.errors ?? []).map(String)) ? { capacity: true, error: String(e.result ?? e.error?.message ?? 'overloaded').slice(0, 300) } : {}) };
-  }
-  if (e.type === 'turn.failed') return { failed: true };
-  // An error event may be passing (a reconnect, a retried request): it fails the launch only if no turn completes after it.
-  if (e.type === 'error') {
-    const error = String(e.message ?? e.error?.message ?? e.error ?? 'error').slice(0, 300);
-    return { error, ...(capacityIn(error, e.error?.type) ? { capacity: true } : {}) };
+    const ok = e.subtype === 'success' && e.is_error === false;
+    return { ended: { ok, session: e.session_id ?? null }, capacity: !ok && CAPACITY.test(`${e.result ?? ''} ${e.error?.message ?? ''} ${e.error?.type ?? ''}`) };
   }
   return {};
 }
 
-// Relay only completed assistant text, never reasoning, tools or terminal result payloads.
-const roleReport = (event) => (event.type === 'assistant' && Array.isArray(event.message?.content) ? event.message.content.filter((block) => block.type === 'text' && typeof block.text === 'string').map((block) => block.text).join(' ') : null);
-
 export default {
   id: 'claude',
   name: 'Claude',
-  label: LABEL,
-  spawnMode: 'owner-native',
-  sessionEnv: ['CLAUDE_CODE_SESSION_ID', 'CLAUDECODE'],
-  markerEnv: [],
+  label: 'Claude Code',
+  sessionEnv: ['CLAUDE_CODE_SESSION_ID'],
+  markerEnv: ['CLAUDECODE'],
   envPrefixes: ['CLAUDE_CODE_', 'CLAUDECODE', 'ANTHROPIC_'],
-  // The strongest model for planning and review (a class that pins none inherits the owner session's), and an effort for
-  // the implementer classes. Unmeasured starting points: a project's `classes` override them.
-  classDefaults: { full: { effort: 'high' }, light: { effort: 'low' }, review: { model: 'opus', effort: 'high' }, planning: { model: 'fable', effort: 'high' } },
-  // The planning panel's second seat (0.7.22): another model than the lead's, so the two plans differ in more than wording.
-  panelSecond: 'review',
-  // The classifier labels items with given choices and does no reasoning: the fast, cheap model. A project's
-  // `learning.classifier.claude` overrides it.
-  classifierDefaults: { model: 'haiku', effort: 'low' },
+  detect: (env) => (env.CLAUDE_CODE_SESSION_ID ? env.CLAUDE_CODE_SESSION_ID : null),
   agentsDir: '.claude/agents',
   skillsDir: '.claude/skills',
-  fragments: {
-    howToStart,
-    // What the role instructions say about the tools this harness exposes.
-    toolCompatibility: 'Claude Code reads text and images with Read, loads skills with Skill and writes the permitted files with Write; structured handoff JSON is inspected with `wf evidence inspect` (never one full-output dump) and text inside the selected attempt is read with `wf evidence show <path> --attempt <id>`. Read a required skill through its exact handed file when Skill is unavailable.',
-    closureWriter: 'the Write tool',
-    panelOptions: 'in `AskUserQuestion` each option\'s `label` is its label alone (the recommended one may end with " (Recommended)") and what follows it goes in its `description`',
-    staleRole: (agentType) => `Claude Code reads agent files when a session starts, so an agent of type ${agentType} started from this session is started with the old instructions; its bundle points it at the current file, which it reads first, so no restart is needed for its instructions; a change to its tools (the \`tools:\` line) still needs this session restarted (\`claude --resume\` keeps the conversation).`,
-    restartHint: '`claude --resume` keeps the conversation',
-    pluginUpdate: 'claude plugin update agentic-workflow@agentic-workflow',
-  },
-  // The agent file `wf sync` writes for a role: markdown with a tool list (the implementer gets every tool).
-  roleFile({ root, role, name, description, model, effort, body }) {
-    return { file: path.join(root, '.claude', 'agents', `${name}.md`), content: markdownRole({ name, description, model, effort, tools: ROLE_TOOLS[role], body }) };
-  },
-  // The file targets of a file tool's payload (the guard keeps agents out of the evidence folder).
-  fileTargets: (data) => (data?.tool_input && typeof data.tool_input === 'object' ? { targets: genericFileTargets(data.tool_input) } : null),
   findSkill,
-  roleStale: roleChangedSinceSessionStart,
-  sandbox: 'native-permissions',
-  needsGitRoot: false,
-  requestedSession: () => randomUUID(),
-  buildLaunch,
-  classifyLaunch,
-  classifyResult,
-  interpretEvent,
-  roleReport,
-  roleTools: ROLE_TOOLS,
-  detect: (env) => (env.CLAUDE_CODE_SESSION_ID ? { session: env.CLAUDE_CODE_SESSION_ID } : null),
-
-  // ---- Transcripts ----
-  storeDir: (home) => path.join(home, '.claude', 'projects'),
-  transcriptFile,
-  connectorCalls,
-  // The person's answers to the session's question panel (AskUserQuestion), as Claude Code recorded them.
-  questionAnswers: claudeQuestionAnswers,
-  chatAnswers: claudeChatAnswers,
-  // Long tool results Claude Code keeps beside the session: ~/.claude/projects/<project>/<session>/tool-results/.
-  isSavedToolResult: (file, { home }) => Boolean(home) && String(file).startsWith(path.join(home, '.claude', 'projects') + path.sep) && String(file).split(path.sep).includes('tool-results'),
-
-  // ---- Roles ----
-  verifyRole,
-  // A role the owner started with the Agent tool: its last turns and model, found by the name it was started under.
-  roleOutput(handoff, { home, check }) {
-    let found = subagentTranscripts(home, handoff.agent, handoff.agentType ?? null, handoff.at ?? null);
-    // A planner started without a name, identified by its start line (verifyRole, I-14).
-    if (!found.length && check.status === 'verified' && check.identity === 'unnamed') found = [{ file: check.transcript, agentType: handoff.agentType ?? null }];
-    if (!found.length) return { problem: `no ${LABEL} subagent transcript named \`${handoff.agent}\`${handoff.agentType ? ` (agent type ${handoff.agentType})` : ''} written after its handoff under ${path.join(home, '.claude', 'projects')}` };
-    const raw = readTranscript(found[0].file);
-    const entries = assistantTurns(raw);
-    return { entries, model: lastModel(entries), agentType: found[0].agentType, file: found[0].file };
-  },
-  // The shell commands a role's transcript shows: Bash tool calls answered by their tool results.
-  shellRuns: (file) => shellRunsOf(tailLines(file), {
-    call: (e) => (Array.isArray(e.message?.content) ? e.message.content.filter((x) => x?.type === 'tool_use' && x.name === 'Bash').map((x) => ({ id: x.id, command: x.input?.command })) : []),
-    result: (e) => (Array.isArray(e.message?.content) ? e.message.content.filter((x) => x?.type === 'tool_result').map((x) => x.tool_use_id) : []),
-  }),
-  // When the role was last active: the sub-agent file Claude Code wrote under the name the owner started it with.
-  roleActivity(handoff, { home }) {
-    const t = subagentTranscripts(home, handoff.agent, handoff.agentType ?? null, handoff.at)[0];
-    return t ? { file: t.file, mtime: t.mtime } : null;
-  },
-  // The model a role ran on, and the model the owner's own session runs on (what an unpinned role inherits).
-  roleModel: (handoff, { home }) => subagentModel(home, handoff.agent, handoff.agentType, handoff.at),
-  ownerModel: (session, { home }) => sessionModel(home, session),
-  // The sub-agents a role started, at any depth.
-  children: (handoff, { home }) => childAgents(home, handoff.agent, handoff.agentType, handoff.at),
-  // ---- Usage ----
-  // Tokens, models and time a session spent; a role the owner started has no session id of its own, so its sub-agent
-  // files (found by name and agent type, since the attempt began) stand in.
-  // The agentic-workflow plugin version the harness has installed (its hooks and skills), or null when it cannot tell.
-  // Named failure (final review of 0.7.0): the installed plugin was 0.6.3 while the CLI was 0.6.6, so sessions ran an older
-  // guard hook and work skill against a newer engine.
-  installedPluginVersion: (home) => {
-    try {
-      const d = JSON.parse(fs.readFileSync(path.join(home, '.claude', 'plugins', 'installed_plugins.json'), 'utf8'));
-      const rows = Object.entries(d.plugins ?? d).filter(([k]) => k.startsWith('agentic-workflow@')).flatMap(([, v]) => (Array.isArray(v) ? v : [v]));
-      return rows.map((r) => r?.version).filter((v) => typeof v === 'string').sort().at(-1) ?? null;
-    } catch {
-      return null;
-    }
-  },
-  usage: (session, home) => claudeUsage(session, home),
-  agentIndex: (home) => subagentIndex(home),
-  usageByName(handoff, { index, since }) {
-    const files = handoffFiles(handoff, index, since);
-    if (!files.length) return null;
-    const usage = claudeUsageOf(files.map((x) => x.file));
-    usage.agentType = files[0].agentType;
-    return { usage, agentIds: files.map((x) => x.agentId) };
-  },
-  agentUsage: (agent) => claudeUsageOf([agent.file]),
-  // The last thing a role said, for attempts that predate the structured implementer report.
-  finalReport(handoff, { home }) {
-    let found = [];
-    try {
-      found = subagentTranscripts(home, handoff.agent, handoff.agentType ?? null, handoff.at);
-    } catch {}
-    if (!found.length) return null;
-    const turns = assistantTurns(readTranscript(found[0].file));
-    for (let i = turns.length - 1; i >= 0; i--) {
-      const text = turns[i].texts.join('\n');
-      if (text.trim()) return { text, at: turns[i].at };
-    }
-    return { text: '', at: null };
-  },
+  roleFile: ({ root, name, description, model, effort, tools, body }) => ({ file: path.join(root, '.claude', 'agents', `${name}.md`), content: markdownRole({ name, description, model, effort, tools, body }) }),
+  transcript,
+  projectTranscripts,
+  timeline,
+  launch,
+  resume,
+  event,
 };

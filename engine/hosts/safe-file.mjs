@@ -5,7 +5,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
-import { refuse } from '../util.mjs';
 
 // A plain session id: what a harness writes for a session and what is safe to put in a path or a query.
 export const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9-]{7,63}$/;
@@ -57,26 +56,6 @@ export function openRegular(file) {
   return { fd, stat };
 }
 
-// The whole of a transcript, for readers that parse it all: refused over the cap (at most 256 MiB).
-export function readCapped(file) {
-  const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
-  try {
-    const st = fs.fstatSync(fd);
-    if (!st.isFile() || st.nlink > 1) throw refuse(`${file} is not a regular file with one name; the owner's transcript is not read`);
-    if (st.size > Math.min(maxTranscriptBytes(), 256 * 1024 * 1024)) throw refuse(`${file} is ${st.size} bytes, over the ${Math.min(maxTranscriptBytes(), 256 * 1024 * 1024)}-byte cap for owner turns (WF_TRANSCRIPT_MAX_BYTES)`);
-    const buf = Buffer.alloc(st.size);
-    let n = 0;
-    while (n < buf.length) {
-      const r = fs.readSync(fd, buf, n, buf.length - n, n);
-      if (!r) break;
-      n += r;
-    }
-    return buf.subarray(0, n);
-  } finally {
-    fs.closeSync(fd);
-  }
-}
-
 // Calls `onLine(line, number)` for every line of a transcript, read from a file opened without following a link and
 // capped at the size limit (the numbers count every line, including the ones the caller skips).
 export async function readLines(file, onLine) {
@@ -88,4 +67,29 @@ export async function readLines(file, onLine) {
   const rl = readline.createInterface({ input: fs.createReadStream(null, { fd, end: Math.min(stat.size, maxTranscriptBytes()) - 1 }), crlfDelay: Infinity });
   let n = 0;
   for await (const line of rl) onLine(line, ++n);
+}
+
+// Every JSON line of a transcript, read whole from a file opened without following a link, up to the size cap.
+export function readEntries(file) {
+  const { fd, stat } = openRegular(file);
+  try {
+    const length = Math.min(stat.size, maxTranscriptBytes());
+    const buf = Buffer.alloc(length);
+    let n = 0;
+    while (n < length) {
+      const r = fs.readSync(fd, buf, n, length - n, n);
+      if (!r) break;
+      n += r;
+    }
+    const out = [];
+    for (const line of buf.subarray(0, n).toString('utf8').split('\n')) {
+      if (!line.trim()) continue;
+      try {
+        out.push(JSON.parse(line));
+      } catch {}
+    }
+    return out;
+  } finally {
+    fs.closeSync(fd);
+  }
 }

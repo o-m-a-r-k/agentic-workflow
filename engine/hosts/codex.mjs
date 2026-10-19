@@ -1,208 +1,257 @@
-// Codex as a host adapter: the one place the workflow learns what Codex is.
+// Codex as a host: where its transcripts are, what their lines mean, and how a reviewer is launched.
+// Transcripts ("rollouts"): <home>/.codex/sessions/YYYY/MM/DD/rollout-<time>-<thread id>.jsonl (archived ones under
+// archived_sessions/), lines `{ timestamp, type, payload }`: `session_meta` first, then `turn_context`, `response_item`
+// (messages, tool calls and their outputs) and `event_msg` (token counts, notices).
 import fs from 'node:fs';
 import path from 'node:path';
-import { verifyRole } from './codex-agent.mjs';
-import { patchTargets, wrappedConnectorCall, wrappedConnectorResult } from './codex-tool.mjs';
 import { findSkill } from './codex-skills.mjs';
 import { codexTranscript } from './codex-transcript.mjs';
-import { codexUsage } from './codex-usage.mjs';
 import { tomlRole } from './role-files.mjs';
-import { readLines } from './safe-file.mjs';
-import { codexChatAnswers, codexQuestionAnswers } from './questions.mjs';
-import { parseArgs, shellRunsOf, tailLines, textOf, toolOf } from './tool-calls.mjs';
+import { readEntries } from './safe-file.mjs';
+import { parseArgs, textOf } from './tool-calls.mjs';
 
-// What a Codex `exec` script ran, as the owner reads it: the shell command it passed to `exec_command`, or the tool it
-// called (`tools.wait(...)`), or the start of the script.
-function codexCommand(input) {
-  const cmd = /exec_command\(\s*\{\s*"?cmd"?\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(input);
-  if (cmd) {
-    try {
-      return JSON.parse(`"${cmd[1]}"`);
-    } catch {
-      return cmd[1];
-    }
-  }
-  const tool = /tools\.([A-Za-z0-9_]+)\(/.exec(input);
-  return tool ? `${tool[1]}(…)` : input.trim().slice(0, 200);
+const record = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
+const labels = (options) => (Array.isArray(options) ? options.map((o) => (typeof o === 'string' ? o : o?.label)).filter((l) => typeof l === 'string') : []);
+
+// What the harness adds in the person's place: instruction files, environment context, plugin notes, page context.
+const WRAPPERS = ['plugins.recommendations', 'agents_md.instructions', 'environments.environment_context'];
+const HARNESS = /^<(environment_context|user_instructions|permissions|turn_aborted|user_shell_command|subagent_notification|external_codex_apps_[a-z_]+|codex_apps_[a-z_]+)\b|^# AGENTS\.md instructions/;
+function personOf(p) {
+  const kinds = p.internal_chat_message_metadata_passthrough?.content_item_kinds;
+  if (Array.isArray(kinds) && kinds.length && kinds.every((k) => WRAPPERS.includes(k) || String(k).startsWith('additional_content.'))) return null;
+  const blocks = p.content.filter((b) => b?.type === 'input_text' && typeof b.text === 'string').map((b) => b.text.trim()).filter(Boolean);
+  if (!blocks.length) return p.content.some((b) => b?.type === 'input_image') ? { act: true } : null;
+  const kept = blocks.filter((b) => !HARNESS.test(b));
+  if (!kept.length) return null;
+  const text = kept.join('\n').trim();
+  return text.startsWith('<') ? { act: true } : { text };
 }
 
-const LABEL = 'Codex';
+// The question panel's reply: a user message that is exactly `<send_user_message_question_reply>[rows]</...>`, each row
+// naming its call by `questionItemId` `[tool, callId, index]`.
+function panelOf(text) {
+  const m = /^\s*<send_user_message_question_reply>\s*([\s\S]*?)\s*<\/send_user_message_question_reply>\s*$/.exec(text);
+  if (!m) return null;
+  let rows;
+  try {
+    rows = JSON.parse(m[1]);
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const row of Array.isArray(rows) ? rows : []) {
+    try {
+      const [, callId] = JSON.parse(row.questionItemId);
+      if (typeof callId === 'string' && typeof row.question === 'string' && typeof row.answer === 'string') out.push({ id: callId, question: row.question, answer: row.answer });
+    } catch {}
+  }
+  return out;
+}
 
-// Named failure I-40: the native Codex connector adds linear_ to tools the adapter registers without that prefix.
-const registeredTool = (full, tools) => {
-  const tool = toolOf(full);
-  return tools.includes(tool) ? tool : tool?.startsWith('linear_') && tools.includes(tool.slice(7)) ? tool.slice(7) : null;
+const QUESTION_TOOLS = new Set(['request_user_input', 'request_user_input_async']);
+const SHELL_TOOLS = new Set(['shell', 'exec_command', 'local_shell', 'container.exec']);
+const plain = (name) => String(name ?? '').replace(/^functions\./, '');
+const jsonString = (s) => {
+  try {
+    return JSON.parse(`"${s}"`);
+  } catch {
+    return s;
+  }
 };
 
-// The tracker's own answer as Codex recorded it: `response_item` lines with `payload.type` `function_call`
-// (`namespace`, `name`, `arguments` JSON text, `call_id`) answered by `function_call_output` (`call_id`, `output`), or a
-// single literal connector call wrapped in `exec` (`custom_tool_call` and its output).
-async function connectorCalls(file, tools) {
-  const calls = new Map();
-  await readLines(file, (line, n) => {
-    if (!line.includes('mcp__') && !line.includes('function_call_output') && !line.includes('custom_tool_call_output')) return;
-    let e;
-    try {
-      e = JSON.parse(line);
-    } catch {
-      return;
+// Reads a literal object argument as data (never evaluates it): `{ key: "v", n: 1 }`. Null for anything else.
+function literal(source) {
+  const lex = /\s+|"(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*'|[A-Za-z_$][A-Za-z0-9_$]*|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?|[{}[\],:]/y;
+  const tokens = [];
+  let at = 0;
+  while (at < source.length) {
+    lex.lastIndex = at;
+    const m = lex.exec(source);
+    if (!m) return null;
+    at = lex.lastIndex;
+    let t = m[0];
+    if (/^\s+$/.test(t)) continue;
+    if (t.startsWith("'")) t = JSON.stringify(t.slice(1, -1).replace(/\\'/g, "'"));
+    else if (/^[A-Za-z_$]/.test(t) && !['true', 'false', 'null'].includes(t)) {
+      if (!/^\s*:/.test(source.slice(at))) return null;
+      t = JSON.stringify(t);
     }
-    const p = e?.payload;
-    if (e?.type !== 'response_item' || !p) return;
-    if (p.type === 'function_call') {
-      const ns = String(p.namespace ?? '');
-      const full = ns ? (ns.endsWith('__') ? `${ns}${p.name}` : `${ns}__${p.name}`) : String(p.name ?? '');
-      const tool = registeredTool(full, tools);
-      if (tool) calls.set(p.call_id, { tool, name: full, input: parseArgs(p.arguments), calledAt: e.timestamp ?? null, line: n });
-    } else if (p.type === 'function_call_output' && calls.has(p.call_id)) Object.assign(calls.get(p.call_id), { result: textOf(p.output), error: false, at: e.timestamp ?? null, resultLine: n });
-    else if (p.type === 'custom_tool_call') {
-      const call = wrappedConnectorCall(p);
-      const tool = call && registeredTool(call.name, tools);
-      if (tool) calls.set(p.call_id, { ...call, tool, wrapped: true, calledAt: e.timestamp ?? null, line: n });
-    } else if (p.type === 'custom_tool_call_output' && calls.get(p.call_id)?.wrapped) {
-      const result = wrappedConnectorResult(p.output);
-      if (result) Object.assign(calls.get(p.call_id), { ...result, at: e.timestamp ?? null, resultLine: n });
-    }
-  });
-  return [...calls.values()];
-}
-
-// A fresh role through `codex exec --json`: `thread.started` carries the session id, `turn.completed` the end of the turn,
-// and completed `agent_message` items the assistant's text.
-// `resume` (0.7.30, I-153): the thread of a launch the model's capacity ended, continued with `codex exec resume <id>`, with
-// the same sandbox, instructions, model and effort.
-function buildLaunch(h, { root, body, nonGitRoot, resume = null }) {
-  const args = ['exec', '--json', '--cd', root, '--sandbox', 'workspace-write', '-c', `developer_instructions=${JSON.stringify(body)}`];
-  if (nonGitRoot) args.push('--skip-git-repo-check');
-  if (h.model) args.push('--model', h.model);
-  if (h.effort) args.push('-c', `model_reasoning_effort=${JSON.stringify(h.effort)}`);
-  if (resume) args.push('resume', resume);
-  args.push('-');
-  return { bin: 'codex', args };
-}
-
-// The classifier (engine/learning.mjs): one read-only `codex exec` turn, no session kept; its last message is the answer.
-function classifyLaunch({ prompt, model, effort, dir }) {
-  const outFile = path.join(dir, 'answer.txt');
-  const args = ['exec', '--skip-git-repo-check', '--ephemeral', '--sandbox', 'read-only', '--output-last-message', outFile];
-  if (model) args.push('--model', model);
-  if (effort) args.push('-c', `model_reasoning_effort=${JSON.stringify(effort)}`);
-  args.push('-');
-  return { bin: 'codex', args, input: prompt, outFile };
-}
-const classifyResult = ({ outFile }) => ({ text: fs.readFileSync(outFile, 'utf8') });
-
-// 0.7.30 (I-153): the model at capacity, as Codex reports it in a failed turn or an error event (`server_overloaded`, its
-// spelling `server_is_overloaded`, or the words). Named failure (audit of role launches): seven launches ended this way and
-// were replaced by fresh handoffs; four had made no edit.
-const CAPACITY = /server_overloaded|server_is_overloaded|\boverloaded\b|\bat capacity\b/i;
-const capacityIn = (...texts) => texts.some((t) => typeof t === 'string' && CAPACITY.test(t));
-
-function interpretEvent(e) {
-  if (e.type === 'thread.started') return { started: e.thread_id };
-  if (e.type === 'turn.completed') return { terminal: { success: true } };
-  if (e.type === 'turn.failed') return { failed: true, ...(capacityIn(e.error?.message, e.error?.code, e.message) ? { capacity: true, error: String(e.error?.message ?? e.message ?? 'server_overloaded').slice(0, 300) } : {}) };
-  // An error event may be passing (a reconnect, a retried request): it fails the launch only if no turn completes after it.
-  if (e.type === 'error') {
-    const error = String(e.message ?? e.error?.message ?? e.error ?? 'error').slice(0, 300);
-    return { error, ...(capacityIn(error, e.error?.code) ? { capacity: true } : {}) };
+    tokens.push(t);
   }
-  return {};
+  try {
+    const v = JSON.parse(tokens.join(''));
+    return record(v) ? v : null;
+  } catch {
+    return null;
+  }
 }
 
-const roleReport = (event) => (event.type === 'item.completed' && event.item?.type === 'agent_message' ? event.item.text : null);
+// A script run through the `exec` tool: one literal connector call printed whole (`text(await tools.mcp__x__y({...}))`)
+// is a connector call; `tools.exec_command({ cmd: "...", workdir: "..." })` calls are shell commands.
+function scriptCalls(input) {
+  const source = String(input).replace(/^\s*\/\/ @exec:[^\n]*\n/, '').trim();
+  const connector = /^text\(\s*await\s+tools\.(mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_]+)\(\s*(\{[\s\S]*\})\s*\)\s*\)\s*;?$/.exec(source);
+  if (connector) {
+    const args = literal(connector[2]);
+    return args ? [{ name: connector[1], input: args, wrapped: true }] : [];
+  }
+  const out = [];
+  for (const m of source.matchAll(/exec_command\(\s*\{([^}]*)\}/g)) {
+    const cmd = /"?cmd"?\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(m[1]);
+    const workdir = /"?workdir"?\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(m[1]);
+    if (cmd) out.push({ name: 'exec_command', input: { cmd: jsonString(cmd[1]), ...(workdir ? { workdir: jsonString(workdir[1]) } : {}) }, shell: jsonString(cmd[1]), workdir: workdir ? jsonString(workdir[1]) : null });
+  }
+  return out;
+}
+// The output of a wrapped connector call: the script's banner, then the connector's JSON result.
+function wrappedResult(output) {
+  if (!Array.isArray(output) || output.length !== 2 || !/^Script completed\n/.test(output[0]?.text ?? '')) return null;
+  try {
+    const r = JSON.parse(output[1].text);
+    return Array.isArray(r?.content) ? { text: r.content.map((b) => b?.text ?? '').join(''), error: r.isError === true } : null;
+  } catch {
+    return null;
+  }
+}
 
-// Named failure I-47: a parent sandbox can block host initialization before any native session starts.
-// Diagnose only the observed permission signature; never change or retry the child's sandbox here.
-function diagnoseLaunch({ stderr }) {
-  const m = /failed to initialize in-process app-server client:\s*(Operation not permitted|Permission denied)(?: \(os error \d+\))?/.exec(stderr);
-  return m ? { kind: 'host-initialization-permission', detail: m[0], advice: 'Native Codex host initialization was denied before a session started. Create a fresh handoff, then use approved host execution with access to the native runtime and session store. Retain the child sandbox (workspace-write); do not bypass a rejected approval or reuse this failed handoff.' } : null;
+// The session as host-neutral items (the same shapes as engine/hosts/claude.mjs). Person turns only in an interactive
+// session: a `codex exec` run's user message is its launcher's prompt, and a sub-agent's "user" is its parent agent.
+export function timeline(file) {
+  const items = [];
+  let cwd = null;
+  let meta = false;
+  let interactive = false;
+  let model = null;
+  const wrapped = new Set();
+  for (const e of readEntries(file)) {
+    if (!record(e)) continue;
+    const at = typeof e.timestamp === 'string' ? e.timestamp : null;
+    const p = e.payload;
+    if (e.type === 'session_meta' && record(p)) {
+      if (!meta) {
+        interactive = ['cli', 'vscode'].includes(p.source) && p.originator !== 'codex_exec' && !p.parent_thread_id;
+        cwd = typeof p.cwd === 'string' ? p.cwd : null;
+      }
+      meta = true;
+      continue;
+    }
+    if (e.type === 'turn_context' && record(p)) {
+      if (typeof p.model === 'string') model = p.model;
+      if (typeof p.cwd === 'string') cwd ??= p.cwd;
+      continue;
+    }
+    if (e.type === 'event_msg' && p?.type === 'token_count' && record(p.info?.total_token_usage)) {
+      const t = p.info.total_token_usage;
+      items.push({ type: 'total', at, model, input: Math.max(0, (t.input_tokens ?? 0) - (t.cached_input_tokens ?? 0)), output: t.output_tokens ?? 0, cacheRead: t.cached_input_tokens ?? 0, cacheWrite: t.cache_write_input_tokens ?? 0 });
+      continue;
+    }
+    if (e.type !== 'response_item' || !record(p)) continue;
+    if (p.type === 'message' && Array.isArray(p.content)) {
+      if (p.role === 'assistant') {
+        for (const b of p.content) if (b?.type === 'output_text' && typeof b.text === 'string' && b.text.trim()) items.push({ type: 'say', at, text: b.text, model });
+        continue;
+      }
+      if (p.role !== 'user' || !interactive) continue;
+      const text = p.content.filter((b) => b?.type === 'input_text').map((b) => b.text ?? '').join('\n');
+      const panel = panelOf(text);
+      if (panel) {
+        const byCall = new Map();
+        for (const r of panel) (byCall.get(r.id) ?? byCall.set(r.id, {}).get(r.id))[r.question] = r.answer;
+        for (const [id, answers] of byCall) items.push({ type: 'panel', at, id, answers });
+        continue;
+      }
+      const person = personOf(p);
+      if (person?.text) items.push({ type: 'person', at, text: person.text });
+      else if (person?.act) items.push({ type: 'act', at });
+      continue;
+    }
+    if (p.type === 'function_call' || p.type === 'local_shell_call') {
+      const ns = String(p.namespace ?? '');
+      const name = ns ? (ns.endsWith('__') ? `${ns}${p.name}` : `${ns}__${p.name}`) : plain(p.name ?? p.type);
+      const args = p.type === 'local_shell_call' ? { command: p.action?.command, workdir: p.action?.working_directory } : parseArgs(p.arguments);
+      if (QUESTION_TOOLS.has(plain(p.name))) {
+        const field = plain(p.name) === 'request_user_input_async' ? 'title' : 'question';
+        items.push({ type: 'ask', at, id: p.call_id, questions: (Array.isArray(args.questions) ? args.questions : []).filter((q) => typeof q?.[field] === 'string').map((q) => ({ text: q[field], options: labels(q.options) })) });
+        continue;
+      }
+      const shell = SHELL_TOOLS.has(plain(p.name)) || p.type === 'local_shell_call' ? args.cmd ?? args.command : undefined;
+      items.push({ type: 'call', at, id: p.call_id, name, input: args, cwd: args.workdir ?? cwd, shell });
+      continue;
+    }
+    if (p.type === 'custom_tool_call') {
+      if (['exec', 'functions.exec'].includes(p.name) && typeof p.input === 'string') {
+        const calls = scriptCalls(p.input);
+        if (calls.length === 1 && calls[0].wrapped) wrapped.add(p.call_id);
+        for (const c of calls) items.push({ type: 'call', at, id: p.call_id, name: c.name, input: c.input, cwd: c.workdir ?? cwd, shell: c.shell });
+        if (!calls.length) items.push({ type: 'call', at, id: p.call_id, name: p.name, input: { script: p.input }, cwd });
+      } else items.push({ type: 'call', at, id: p.call_id, name: plain(p.name), input: { input: p.input }, cwd });
+      continue;
+    }
+    if (p.type === 'function_call_output' || p.type === 'custom_tool_call_output') {
+      const w = wrapped.has(p.call_id) ? wrappedResult(p.output) : null;
+      const text = w ? w.text : textOf(record(p.output) ? p.output.content ?? p.output : p.output);
+      const exit = /"exit_code"\s*:\s*(\d+)|Process exited with code (\d+)|Exit code: (\d+)/.exec(text);
+      items.push({ type: 'result', at, id: p.call_id, text, error: w ? w.error : Boolean(exit && Number(exit[1] ?? exit[2] ?? exit[3]) !== 0) });
+    }
+  }
+  return { cwd, items };
+}
+
+export function transcript(id, home) {
+  const found = codexTranscript(id, { home });
+  return found.file ?? null;
+}
+
+// Rollouts whose session started in the project root or a folder under it, written to at or after `sinceMs`.
+export function projectTranscripts(root, home, sinceMs = 0) {
+  const out = [];
+  const walk = (dir, depth) => {
+    let entries = [];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {}
+    for (const e of entries) {
+      const file = path.join(dir, e.name);
+      if (e.isDirectory() && depth < 3) walk(file, depth + 1);
+      else if (e.isFile() && /^rollout-.*\.jsonl$/.test(e.name) && fs.statSync(file).mtimeMs >= sinceMs) {
+        const id = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i.exec(e.name)?.[1];
+        if (id) out.push({ session: { runtime: 'codex', id }, file });
+      }
+    }
+  };
+  for (const top of ['sessions', 'archived_sessions']) walk(path.join(home, '.codex', top), 0);
+  void root; // the caller keeps the rollouts whose recorded cwd is in the project
+  return out;
+}
+
+// A fresh reviewer: `codex exec --json` with the prompt on stdin, read-only; its thread id arrives as `thread.started`.
+const launch = ({ model, cwd }) => ({ bin: 'codex', args: ['exec', '--json', '--cd', cwd, '--sandbox', 'read-only', '--skip-git-repo-check', ...(model ? ['--model', model] : []), '-'], session: null, cwd });
+const resume = ({ model, cwd, session }) => ({ bin: 'codex', args: ['exec', '--json', '--cd', cwd, '--sandbox', 'read-only', '--skip-git-repo-check', ...(model ? ['--model', model] : []), 'resume', session, '-'], session, cwd });
+
+const CAPACITY = /server_overloaded|server_is_overloaded|\boverloaded\b|\bat capacity\b/i;
+function event(e) {
+  if (e.type === 'thread.started') return { started: e.thread_id };
+  if (e.type === 'turn.completed') return { ended: { ok: true } };
+  if (e.type === 'turn.failed') return { ended: { ok: false }, capacity: CAPACITY.test(`${e.error?.message ?? ''} ${e.error?.code ?? ''} ${e.message ?? ''}`) };
+  return {};
 }
 
 export default {
   id: 'codex',
   name: 'Codex',
-  label: LABEL,
-  spawnMode: 'engine-only',
+  label: 'Codex',
   sessionEnv: ['CODEX_THREAD_ID'],
   markerEnv: ['CODEX_SANDBOX'],
   envPrefixes: ['CODEX_', 'OPENAI_'],
-  // Codex takes the model and effort its own configuration names unless a project's `classes` pin them.
-  classDefaults: { planning: { model: 'gpt-6-astra', effort: 'high' } },
-  // The classifier labels items with given choices and does no reasoning: the fast, cheap model. A project's
-  // `learning.classifier.codex` overrides it.
-  classifierDefaults: { model: 'gpt-6-luna', effort: 'low' },
+  detect: (env) => (env.CODEX_THREAD_ID ? env.CODEX_THREAD_ID : null),
   agentsDir: '.codex/agents',
   skillsDir: '.agents/skills',
-  fragments: {
-    toolCompatibility: 'Codex inspects structured handoff JSON with `wf evidence inspect` (never one full-output dump), reads text inside the selected attempt with `wf evidence show <path> --attempt <id>` (`--offset`/`--length` for a long file) and views exported image copies with `view_image`. Read a required skill through its exact handed file.',
-    closureWriter: 'Node `fs.writeFile` or `apply_patch`',
-    // Named failure (0.7.28, I-202): the options of `request_user_input_async` are plain strings, and an agent wrote each label
-    // with its description into one ("Use the corrected step (Recommended): the corrected step replaces it …").
-    panelOptions: '`request_user_input_async` takes each option as one plain string: write the label alone in it (the recommended one may end with " (Recommended)"), never the label with what follows it; what follows each label goes in the question\'s text',
-  },
-  // Codex loads custom agents from TOML files in .codex/agents/.
-  // The tool calls a role's session shows, each answered by its output (by call id). Codex records a shell run as a
-  // `custom_tool_call` named `exec` whose input is a script calling `tools.exec_command({cmd: "..."})` (a wait, a sleep or
-  // any other tool the same way), answered by `custom_tool_call_output`; older sessions used a `function_call`. Named failure
-  // (independent review of 0.7.14): only the older shape was read, so every real Codex session showed no runs at all.
-  shellRuns: (file) => shellRunsOf(tailLines(file), {
-    call: (e) => {
-      const p = e.type === 'response_item' ? e.payload : null;
-      if (p?.type === 'custom_tool_call' && typeof p.input === 'string') {
-        // The sessions a script polls: `write_stdin({session_id: N})`, or a list it maps over (`[N, M].map(session_id =>
-        // tools.write_stdin({session_id, ...}))`). A poll whose sessions cannot be read is a wait on earlier commands.
-        const polls = /write_stdin\(/.test(p.input);
-        let waits = [...p.input.matchAll(/write_stdin\(\s*\{[^}]*?session_id"?\s*:\s*(\d+)/g)].map((m) => Number(m[1]));
-        if (polls && !waits.length) waits = (/\[\s*(\d+(?:\s*,\s*\d+)*)\s*\]\s*\.map\(/.exec(p.input)?.[1] ?? '').split(',').filter(Boolean).map(Number);
-        if (polls && !waits.length) waits = ['earlier'];
-        return [{ id: p.call_id, command: codexCommand(p.input), waitsOn: waits }];
-      }
-      if (p?.type === 'function_call') {
-        const a = parseArgs(p.arguments);
-        return [{ id: p.call_id, command: Array.isArray(a.command) ? a.command.join(' ') : a.command ?? a.cmd ?? p.name ?? '' }];
-      }
-      return [];
-    },
-    result: (e) => {
-      if (e.type !== 'response_item' || !['custom_tool_call_output', 'function_call_output'].includes(e.payload?.type)) return [];
-      // A command still running when it yields announces its session: `{"session_id": N, ...}` with no exit code.
-      const text = Array.isArray(e.payload.output) ? e.payload.output.map((b) => b?.text ?? '').join('\n') : String(e.payload.output ?? '');
-      const yielded = /"session_id"\s*:\s*(\d+)/.exec(text);
-      return [{ id: e.payload.call_id, session: yielded && !/"exit_code"\s*:/.test(text) ? Number(yielded[1]) : null }];
-    },
-  }),
-  roleFile({ root, name, description, model, effort, body }) {
-    return { file: path.join(root, '.codex', 'agents', `${name}.toml`), content: tomlRole({ name, description, model, effort, body }) };
-  },
-  // Codex sends native file patches in tool_input.command, with tool_name apply_patch (named failure I-43): only that
-  // file-edit protocol is parsed; a shell command is never read as a patch.
-  fileTargets(data) {
-    if (data?.tool_name !== 'apply_patch' || !data.tool_input || typeof data.tool_input !== 'object') return null;
-    try { return { targets: patchTargets(data.tool_input.command), fileEdit: true }; } catch (error) { return { malformed: String(error?.message || 'unreadable patch') }; }
-  },
   findSkill,
-  sandbox: 'workspace-write',
-  // Codex refuses to start outside a Git repository unless told to; a registered multi-repo project has no parent repo
-  // (named failure I-46), so the launcher checks every recorded worktree itself first.
-  needsGitRoot: true,
-  buildLaunch,
-  classifyLaunch,
-  classifyResult,
-  interpretEvent,
-  roleReport,
-  diagnoseLaunch,
-  detect: (env) => (env.CODEX_THREAD_ID ? { session: env.CODEX_THREAD_ID } : null),
-
-  // ---- Transcripts ----
-  storeDir: (home) => path.join(home, '.codex'),
-  transcriptFile: (session, options) => codexTranscript(session, { ...options, label: LABEL }),
-  connectorCalls,
-  // The person's answers to the session's question panel (request_user_input), bound to the call each names.
-  questionAnswers: codexQuestionAnswers,
-  chatAnswers: codexChatAnswers,
-
-  // ---- Roles ----
-  verifyRole,
-  usage: (session, home) => codexUsage(session, home),
+  roleFile: ({ root, name, description, model, effort, body }) => ({ file: path.join(root, '.codex', 'agents', `${name}.toml`), content: tomlRole({ name, description, model, effort, body }) }),
+  transcript,
+  projectTranscripts,
+  timeline,
+  launch,
+  resume,
+  event,
 };
