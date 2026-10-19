@@ -114,15 +114,37 @@ test('when: labels — matched runs, unmatched is skipped, unreadable is pending
   assert.equal((await runStage(f.p.root, a3, 0)).state, 'done');
 });
 
-test('when: labels through a connector — pending until the owner reports them', async (t) => {
-  const f = deliveryProject({ ticketing: { via: 'connector', operations: { read: 'Read the page and its tags.' } }, delivery: { stages: [{ do: 'confirm-deployed', where: 'production', when: { labels: ['hotfix'] } }] } });
+// A time after every ledger event of the in-memory ledger (its clock starts 2026-01-05T09:00Z).
+const later = (min = 0) => new Date(Date.parse('2026-01-06T00:00:00.000Z') + min * 60000).toISOString();
+
+test('when: labels through a connector — read from the result of the owner\'s read call, never from a report', async (t) => {
+  const f = deliveryProject({ ticketing: { via: 'connector', operations: { read: 'Read the page and its tags.' } }, delivery: { stages: [{ do: 'confirm-deployed', where: 'production', when: { labels: ['hotfix'] } }, { do: 'confirm-deployed', where: 'staging', when: { labels: ['other'] } }] } });
   t.after(f.cleanup);
-  f.doubles();
-  const attempt = await f.startAttempt('TK-1');
+  const owner = { runtime: 'claude', id: 'o-l' };
+  let calls = [{ tool: 'mcp__t__get', input: { id: 'TK-1' }, result: JSON.stringify({ id: 'TK-1', labels: ['other'] }), at: '2026-01-01T00:00:00.000Z' }];
+  f.doubles({ connectorCalls: async () => calls });
+  const attempt = await f.startAttempt('TK-1', 1, { owner });
   const r = await runStage(f.p.root, attempt, 0);
   assert.equal(r.state, 'pending');
-  assert.match(r.next, /^Read the page and its tags\. \(TK-1\), then report its labels: wf deliver TK-1\.1 --labels/);
-  assert.equal((await runStage(f.p.root, attempt, 0, { labels: ['other'] })).state, 'skipped');
+  assert.match(r.next, /^Read the page and its tags\. \(TK-1\); its labels are read from that call's result\. Then wf deliver TK-1\.1$/);
+  // A read made before the stage was asked does not count; nor does a result with no labels, or an error.
+  assert.equal((await runStage(f.p.root, attempt, 0)).state, 'pending');
+  calls.push({ tool: 'mcp__t__get', input: { id: 'TK-1' }, result: 'TK-1: The title (hotfix)', at: later(1) });
+  calls.push({ tool: 'mcp__t__get', input: { id: 'TK-1' }, result: JSON.stringify({ id: 'TK-1', labels: ['hotfix'] }), error: true, at: later(2) });
+  const no = await runStage(f.p.root, attempt, 0);
+  assert.equal(no.state, 'pending');
+  assert.match(no.next, /not counted: mcp__t__get at .*: its result carries no `labels` of the item; mcp__t__get at .*: its result is an error/);
+  // A search result with several issues: the one naming the item, labels as objects.
+  calls.push({ tool: 'mcp__t__get', input: { query: 'TK-1' }, result: `Found:\n${JSON.stringify({ issues: [{ id: 'TK-2', labels: [{ name: 'hotfix' }] }, { id: 'TK-1', labels: { nodes: [{ name: 'other' }] } }] })}`, at: later(3) });
+  const skipped = await runStage(f.p.root, attempt, 0);
+  assert.equal(skipped.state, 'skipped');
+  assert.deepEqual(skipped.evidence.labelsRead, { labels: ['other'], tool: 'mcp__t__get', at: later(3) });
+  // The next stage reuses the read: no second read asked.
+  const second = await runStage(f.p.root, attempt, 1);
+  assert.equal(second.state, 'pending');
+  assert.match(second.next, /^confirm the merged change runs in staging/);
+  // wf deliver takes no reported labels.
+  await assert.rejects(commandHandler('deliver')({ root: f.p.root }, { _: [attempt], flags: { labels: 'hotfix' } }), /takes no --labels/);
 });
 
 test('the take runs as stage -1: { status } is a status stage, recorded with index -1', async (t) => {
@@ -146,8 +168,19 @@ test('status through a connector: pending in the adapter\'s words, done once the
   const r = await runStage(f.p.root, attempt, 0);
   assert.equal(r.state, 'pending');
   assert.match(r.next, /^Move the page to the status\. Item TK-1 to "In Review"/);
-  calls = [{ tool: 'mcp__t__update', input: { id: 'TK-1', status: 'In Review' }, result: 'ok', at: 'x' }];
-  assert.equal((await runStage(f.p.root, attempt, 0)).state, 'done');
+  // Not counted: a call made before the stage was asked, an error, a result that does not show the status.
+  calls = [
+    { tool: 'mcp__t__update', input: { id: 'TK-1', status: 'In Review' }, result: 'Status: In Review', at: '2026-01-01T00:00:00.000Z' },
+    { tool: 'mcp__t__update', input: { id: 'TK-1', status: 'In Review' }, result: 'Status: In Review', error: true, at: later(1) },
+    { tool: 'mcp__t__update', input: { id: 'TK-1', status: 'In Review' }, result: 'ok', at: later(2) },
+  ];
+  const still = await runStage(f.p.root, attempt, 0);
+  assert.equal(still.state, 'pending');
+  assert.match(still.next, /not counted: .*its result is an error; .*its result does not show the status "In Review"/);
+  calls.push({ tool: 'mcp__t__update', input: { id: 'TK-1', status: 'In Review' }, result: '{"id":"TK-1","state":{"name":"In review"}}', at: later(3) });
+  const done = await runStage(f.p.root, attempt, 0);
+  assert.equal(done.state, 'done');
+  assert.equal(done.evidence.call.at, later(3));
   assert.deepEqual(f.tracker().log, []);
 });
 
@@ -201,8 +234,13 @@ test('push: the person\'s authority waits for the fact; the agent\'s pushes once
   facts = [{ id: 'merge:open', message: 'F1 is open' }];
   await assert.rejects(runStage(f.p.root, g, 0), (e) => e.refusalId === 'merge:open');
   assert.ok(factCalls[0].landedTree && factCalls[0].repo === 'server');
+  // No passing full run on the tip's tree refuses a push onto the base (only a land stage leaves it to the landing run).
   facts = [{ id: 'merge:untested', message: 'no full run' }];
+  await assert.rejects(runStage(f.p.root, g, 0), (e) => e.refusalId === 'merge:untested');
+  assert.notEqual(git(f.p.repos.server.origin, ['rev-parse', 'trunk']), git(worktreeDir(f.p.root, g, 'server'), ['rev-parse', 'HEAD']));
+  facts = [];
   assert.equal((await runStage(f.p.root, g, 0)).state, 'done');
+  assert.equal(git(f.p.repos.server.origin, ['rev-parse', 'trunk']), git(worktreeDir(f.p.root, g, 'server'), ['rev-parse', 'HEAD']));
 });
 
 test('merge request per repo against its own base, then wait-merged by ancestry or by patch-id', async (t) => {
@@ -221,7 +259,13 @@ test('merge request per repo against its own base, then wait-merged by ancestry 
   assert.match(mr.next, /server: wf\/TK-1\.1 into trunk; client: wf\/TK-1\.1 into stable/);
   assert.deepEqual([mr.evidence.repos.server.accepted, mr.evidence.repos.client.accepted], [s2, c1]);
   assert.equal(mr.evidence.repos.client.base, 'stable');
-  calls = [{ tool: 'Bash', input: { command: `open request --body "${marker(attempt, 'stage-0')}"` }, result: 'opened', at: 'x' }];
+  // A call made before the stage was first asked, or one that failed, does not count.
+  calls = [
+    { tool: 'Bash', input: { command: `open request --body "${marker(attempt, 'stage-0')}"` }, result: 'opened', at: '2026-01-01T00:00:00.000Z' },
+    { tool: 'Bash', input: { command: `open request --body "${marker(attempt, 'stage-0')}"` }, result: 'denied', error: true, at: later(0) },
+  ];
+  assert.equal((await runStage(f.p.root, attempt, 0)).state, 'pending');
+  calls.push({ tool: 'Bash', input: { command: `open request --body "${marker(attempt, 'stage-0')}"` }, result: 'opened', at: later(1) });
   assert.equal((await runStage(f.p.root, attempt, 0)).state, 'done');
 
   assert.equal((await runStage(f.p.root, attempt, 1)).state, 'waiting');
@@ -254,7 +298,8 @@ test('land with the queue waits for this attempt\'s landing event; a merge fact 
   change(f, attempt, 'server', { 'src/a.mjs': 'a\n' });
   facts = [{ id: 'merge:waiver', message: 'D2 is unanswered' }];
   await assert.rejects(runStage(f.p.root, attempt, 0), (e) => e.refusalId === 'merge:waiver');
-  facts = [];
+  // merge:untested is the landing run's to supply: a land stage does not refuse on it.
+  facts = [{ id: 'merge:untested', message: 'no full run yet' }];
   const w = await runStage(f.p.root, attempt, 0);
   assert.equal(w.state, 'waiting');
   assert.deepEqual(w.evidence.queued, ['server']);

@@ -6,14 +6,16 @@
 //   files      the engine calls the built-in files tracker (`<root>/tickets/<id>.md`);
 //   connector  the owner agent performs the operation through its host's connector, in the words of
 //              `ticketing.operations` (merged over the module's own `operations` export when the tracker is a module),
-//              and the engine reads the result back from the owner's transcript (D68): a tool call whose input carries
-//              the operation's marker (or, for a status, the item and the status);
+//              and the engine reads the result back from the owner's transcript (D68): a tool call made since the step
+//              was first asked, whose input carries the operation's marker (or, for a status, the item and the status)
+//              and whose result is no error and shows the outcome (a create: a new id; a status: the new status). A
+//              plain string `ticketing.tracker` only names the connector's tracker;
 //   none       no tracker.
 // Every write carries an idempotency marker (`wf:<attempt>:<stage>`), and the engine searches for it before writing.
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { WfError, attemptDir, attemptState, callerSession, connectorCalls, loadAdapter, marker } from './contract.mjs';
+import { TRACKER_OPERATIONS, WfError, attemptDir, attemptState, callerSession, connectorCalls, loadAdapter, marker } from './contract.mjs';
 import { filesTracker } from '../adapters/tracker/files.mjs';
 import { importBaseModule } from './base-module.mjs';
 
@@ -22,14 +24,15 @@ const SAFE_ID = /^[A-Za-z0-9_](?:[A-Za-z0-9_.-]{0,62}[A-Za-z0-9_])?$/;
 const BUILTIN = { files: (root) => filesTracker(root) };
 
 // The generic words for a connector operation the adapter gives none for.
-const GENERIC = {
+const GENERIC = Object.freeze({
   read: 'Read the issue, with its status and labels.',
   search: 'Search the tracker.',
   fileFollowUp: 'Search the tracker for the marker first; when no issue carries it, create one issue with this title and body.',
   setStatus: 'Set the issue\'s status.',
   comment: 'Search the issue\'s comments for the marker first; when none carries it, add this comment.',
   mergeRequest: 'Open a merge request.',
-};
+});
+for (const op of TRACKER_OPERATIONS) if (!GENERIC[op]) throw new Error(`tracker: no generic words for operation ${op}`);
 
 export const gitEnv = (env = process.env) => ({ ...env, GIT_NO_REPLACE_OBJECTS: '1', GIT_GRAFT_FILE: '/dev/null' });
 export function git(cwd, args, { allowFail = false, input } = {}) {
@@ -59,7 +62,8 @@ export async function trackerOf(root, adapter, { attempt = null } = {}) {
   if (mod) {
     const d = mod.default;
     driver = typeof d === 'function' ? await d({ root, adapter }) : d ?? null;
-  } else if (typeof t.tracker === 'string') {
+  } else if (typeof t.tracker === 'string' && via !== 'connector') {
+    // Through a connector a string is the tracker's name only (a 0.7 `kind`): the owner's connector reaches it.
     if (!BUILTIN[t.tracker]) throw new WfError(`ticketing.tracker \`${t.tracker}\` is not a built-in tracker (built in: ${Object.keys(BUILTIN).join(', ')}); a project brings its own as { module: { repo, path } }`);
     driver = BUILTIN[t.tracker](root);
   } else if (via === 'files') driver = BUILTIN.files(root);
@@ -88,26 +92,37 @@ async function sessionFor(root, attempt) {
 
 /**
  * A connector operation: done when a tool call in the owner's transcript carries `match` (every string in it, in the
- * call's input), else pending with the adapter's words. Tool names are matched by suffix; the empty suffix reads every
- * call, since the adapter names connectors, not tool names.
+ * call's input), returned a result that is no error, and passes `accept(call)` (the result shows the outcome); else
+ * pending with the adapter's words. `since`: when the step was first asked; only calls at or after it count, so a call
+ * made for an earlier step or attempt never completes this one. `since: null` means the step is asked now for the first
+ * time: nothing is read. Tool names are matched by suffix; the empty suffix reads every call, since the adapter names
+ * connectors, not tool names. A pending result lists the matching calls that were not accepted, and why.
  */
-export async function connectorStep(root, attempt, { op, tr, match, details = {}, mark = null }) {
+export async function connectorStep(root, attempt, { op, tr, match, details = {}, mark = null, since, accept = null }) {
+  const pending = (rejected = []) => ({ state: 'pending', operation: wordsFor(tr, op), marker: mark, details, ...(rejected.length ? { rejected } : {}) });
+  if (since === null) return pending();
   const session = await sessionFor(root, attempt);
-  if (session) {
-    const calls = await connectorCalls(session, ['']);
-    const want = [].concat(match).filter(Boolean).map(String);
-    const found = want.length ? calls.find((c) => {
-      const input = JSON.stringify(c.input ?? {});
-      return want.every((w) => input.includes(w) || input.includes(JSON.stringify(w).slice(1, -1)));
-    }) : null;
-    if (found) return { state: 'done', value: found };
+  const want = [].concat(match).filter(Boolean).map(String);
+  if (!session || !want.length) return pending();
+  const from = since ? Date.parse(since) : null;
+  const calls = (await connectorCalls(session, [''], since ? { since } : {})).filter((c) => from === null || Date.parse(c.at) >= from);
+  const rejected = [];
+  for (const c of calls) {
+    const input = JSON.stringify(c.input ?? {});
+    if (!want.every((w) => input.includes(w) || input.includes(JSON.stringify(w).slice(1, -1)))) continue;
+    const why = c.error === true ? 'its result is an error' : c.result == null || !String(c.result).trim() ? 'it has no result' : accept ? accept(c) : null;
+    if (!why) return { state: 'done', value: c };
+    rejected.push({ tool: c.tool, at: c.at, why });
   }
-  return { state: 'pending', operation: wordsFor(tr, op), marker: mark, details };
+  return pending(rejected);
 }
+
+// Why a pending connector step's matching calls did not count, for the owner: '' when none matched.
+export const rejectedText = (r) => (r.rejected?.length ? ` (not counted: ${r.rejected.map((x) => `${x.tool} at ${x.at}: ${x.why}`).join('; ')})` : '');
 
 // A tracker id pattern without its anchors, to find ids inside a URL or a tool result.
 const unanchored = (p) => p.replace(/^\^/, '').replace(/\$$/, '');
-const idsIn = (text, pattern) => (pattern ? [...String(text ?? '').matchAll(new RegExp(unanchored(pattern), 'g'))].map((m) => m[0]) : []);
+export const idsIn = (text, pattern) => (pattern ? [...String(text ?? '').matchAll(new RegExp(unanchored(pattern), 'g'))].map((m) => m[0]) : []);
 
 // The generic normalisation, with no tracker: the raw id trimmed, then upper- and lower-cased, then each id the pattern
 // finds inside it (a tracker URL); the first that matches the whole pattern. No pattern: the trimmed id.
@@ -241,15 +256,24 @@ export async function fileFollowUp(root, attempt, finding) {
     const { id } = await tr.driver.create(fields);
     return { state: 'done', value: { id, duplicateOf: null } };
   }
+  const pattern = adapter.ticketing?.idPattern ?? null;
+  if (!pattern) throw new WfError('ticketing.followUps.mode is file through a connector, but ticketing.idPattern is unset: the engine cannot read the new issue\'s id back from the connector\'s result');
   const dir = path.join(attemptDir(root, attempt), 'followups');
   fs.mkdirSync(dir, { recursive: true });
   const bodyFile = path.join(dir, `${finding.id}.md`);
   fs.writeFileSync(bodyFile, `${body}\n`);
-  const r = await connectorStep(root, attempt, { op: 'fileFollowUp', tr, match: m, mark: m, details: { ...fields, body: undefined, bodyFile } });
-  if (r.state !== 'done') return r;
+  // The first time this follow-up was asked: only the owner's calls since then count.
+  const askedFile = path.join(dir, `${finding.id}.asked`);
+  const since = fs.existsSync(askedFile) ? fs.readFileSync(askedFile, 'utf8').trim() : null;
+  if (!since) fs.writeFileSync(askedFile, `${new Date().toISOString()}\n`);
   const item = await canonicalItem(root, adapter, state.item, tr);
-  const id = idsIn(r.value.result, adapter.ticketing?.idPattern).find((x) => x !== item) ?? null;
-  return { state: 'done', value: { id, duplicateOf: null } };
+  const newId = (c) => idsIn(c.result, pattern).find((x) => x !== item) ?? null;
+  const r = await connectorStep(root, attempt, {
+    op: 'fileFollowUp', tr, match: [m, title], mark: m, since, details: { ...fields, body: undefined, bodyFile },
+    accept: (c) => (newId(c) ? null : 'its result shows no new issue id'),
+  });
+  if (r.state !== 'done') return r;
+  return { state: 'done', value: { id: newId(r.value), duplicateOf: null } };
 }
 
 export const implements08 = { normaliseId, search, fileFollowUp };
