@@ -34,3 +34,10 @@ test('session rules: filled from the adapter with the invariants as written; not
   const r = spawnSync(process.execPath, [path.join(HOOKS, 'session-rules.mjs')], { input: JSON.stringify({ cwd: p.tmp, hook_event_name: 'SessionStart' }), encoding: 'utf8', env: { ...process.env, ...p.env } });
   assert.deepEqual([r.status, r.stdout], [0, '']);
 });
+
+test('the session rules are Claude Code only, and the docs say so: the Codex plugin carries no hooks', () => {
+  const plugin = path.resolve(HOOKS, '..');
+  const codex = JSON.parse(fs.readFileSync(path.join(plugin, '.codex-plugin', 'plugin.json'), 'utf8'));
+  assert.equal(codex.hooks, undefined);
+  for (const doc of ['docs/concepts.md', 'docs/DESIGN.md']) assert.match(fs.readFileSync(path.join(plugin, doc), 'utf8'), /Codex plugins carry no hooks/);
+});

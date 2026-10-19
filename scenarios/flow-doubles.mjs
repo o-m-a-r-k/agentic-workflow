@@ -157,7 +157,7 @@ export async function filesRead(session) {
 let launches = 0;
 export async function launchReviewer(root, attempt, bundle, { model } = {}) {
   const session = { runtime: 'claude', id: `rev-${process.pid}-${++launches}-${bundle.seat.replace(/[^A-Za-z0-9]/g, '-')}` };
-  await append(root, attempt, 'handoff', { role: 'reviewer', session, launchedBy: 'wf', seat: bundle.seat, tree: bundle.tree, round: bundle.round, ...(model ? { model } : {}) }, null);
+  await append(root, attempt, 'handoff', { role: 'reviewer', session, launchedBy: 'wf', seat: bundle.seat, tree: bundle.tree, heads: bundle.heads, round: bundle.round, ...(model ? { model } : {}) }, null);
   return { session, launchedAt: new Date().toISOString() };
 }
 

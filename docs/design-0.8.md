@@ -28,16 +28,16 @@ Every ticket goes through one flow. There are no lanes, batch lane, analysis att
 
 | # | Step | Who | What the engine records or checks |
 |---|---|---|---|
-| 1 | `wf start <item>` | owner | Normalises the item id through the tracker. Continues attempt numbers from old ledgers and branches. Fetches, then creates one worktree per repo at the fetched tip of each repo's base. Provisions the worktrees. Snapshots the delivery stage list. Never merges staging or sibling branches. |
+| 1 | `wf start <item>` | owner | Normalises the item id through the tracker. Continues attempt numbers from old ledgers and branches. Fetches, then creates one worktree per repo at the fetched tip of each repo's base (the adapter's, or `--base`, recorded per attempt; every base read of the attempt uses it). `--no-tracker` records `ticketing: none`. Provisions the worktrees. Snapshots the delivery stage list. Never merges staging or sibling branches. |
 | 2 | `wf criteria --file` | planner (owner for a small fix) | 1–6 plain criteria and the touched areas, hashed. Edits are allowed and recorded. |
 | 3 | Implement | implementer | Nothing. |
-| 4 | `wf test fast` | implementer | Runs the repo's `fast` tests in the background and notifies on completion, so nobody polls. Records exit code, minutes and tree hash. |
+| 4 | `wf test fast` | implementer | Runs the repo's `fast` tests. The caller runs it as a host background command, which notifies on completion, so nobody polls (the engine has no notifier). Records exit code, minutes and tree hash. |
 | 5 | `wf screens` | implementer | Picks screens by facts (below), captures them, and records each image with its tree, viewport, `lang`, `dir`, pixel size and hash. |
-| 6 | `wf review` | engine launches a fresh reviewer | The bundle is the reviewer's entire prompt (below). The review runs **in parallel** with `wf test fast` on the same tree hash. On a risk path, a second reviewer on a different model reviews the whole diff at the same time. |
+| 6 | `wf review` | engine launches a fresh reviewer | The bundle is the reviewer's entire prompt (below). The review runs **in parallel** with `wf test fast` on the same tree hash. On a risk path, a second reviewer on a different model reviews the whole diff at the same time. It waits until each reviewer is done or failed (`--no-wait` returns at launch); the caller runs it in the background. |
 | 7 | Fix round, then the next review | implementer, then fresh reviewers | Only on a blocker. The next reviewer gets the whole diff again, with "verify these blockers, then re-read the whole change", and the criteria diff since the last review. |
 | 8 | Findings outside the goal | engine and owner | Filed per the project's ticketing (below). |
 | 9 | Landing | engine, the project's CI, the person | Through the project's delivery stages (section 5). Each repo's part is delivered separately by default, in the adapter's `order:`. |
-| 10 | `wf close` | owner | Writes the telemetry row. Removes the worktrees and keeps the branches. |
+| 10 | `wf close` | owner | Writes the telemetry row. Removes the worktrees and keeps the branches. A close with no commits is refused; one proven by patch-id (per commit, or the whole diff for a squash) with its stages not done records `outsideStages`, shown in the row and the digest. |
 
 `wf status` always names exactly one next command per attempt.
 
@@ -69,11 +69,11 @@ The engine refuses `other` on a finding whose `path:line` blames to this attempt
 
 - `file`: a ticket is filed automatically.
 - `digest`: the finding goes into the person's daily digest.
-- `off`: the finding is listed in the delivered comment only.
+- `off`: nothing is filed; the finding stays in the attempt's ledger.
 
 An `other` finding rated high, or on a risk path, goes to the person as a priority question in the digest. It does not hold the ticket.
 
-**Fix rounds.** Fix rounds are counted per item, across abandon and restart. A severity or class change on an earlier finding is shown to the next reviewer and to the person. There is no round cap. A ticket stops and comes to the person only on **no progress**: the same finding reopens after a fix, or a review leaves the number of open blockers no lower than the review before it. Both are facts in the ledger (finding ids, blocker counts per review). The person then decides how to go on.
+**Fix rounds.** Fix rounds are counted per item, across abandon and restart. A severity or class change on an earlier finding is shown to the next reviewer and in `wf resume`. There is no round cap. A ticket stops and comes to the person only on **no progress**: the same finding reopens after a fix, or a review leaves the number of open blockers no lower than the review before it. Both are facts in the ledger (finding ids, blocker counts per review). The person then decides how to go on.
 
 **Criteria.** An edit after a blocker that loosens or drops the criterion the blocker cites counts as a waiver. It goes to the person. Named failure: 131 amendments grew one ticket's criteria.
 
@@ -330,7 +330,7 @@ delivery:
     - { do: status, to: Done, when: { labels: [Hotfix] }, comment: deployed }
 ```
 
-**Stages.** The stage kinds are `land`, `push`, `merge-request`, `wait-merged`, `confirm-deployed`, `deploy` (always reserved), `status`, `comment` and `module`. `when:` filters a stage by labels. A label the engine could not read is `pending`, never false, and the stage waits for it. `after: <item>` is the only cross-ticket wait. Every comment and filed ticket carries an idempotency marker (`wf:<attempt>:<stage>`), and the engine searches for the marker before writing. When the person's own merge click deploys, that click is the deploy decision. Telemetry records the time spent waiting in each stage.
+**Stages.** The stage kinds are `land`, `push`, `merge-request`, `wait-merged`, `confirm-deployed`, `deploy` (always reserved), `status`, `comment` and `module`. `when:` filters a stage by labels. A label the engine could not read is `pending`, never false, and the stage waits for it. `after: <item>` is the only cross-ticket wait. Every comment and filed ticket carries an idempotency marker (`wf:<attempt>:<stage>`), and the engine searches for the marker before writing. A `deploy` stage always asks the person; a project whose merge deploys leaves the merge to the person (`authority.merge: person`) and lists no `deploy` stage. Telemetry records the time spent waiting in each stage.
 
 **Landing queue** (`delivery.landing: queue`, for projects with no CI where the full suite takes 40–70 minutes):
 

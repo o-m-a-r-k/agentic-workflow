@@ -7,13 +7,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  DECISION_KINDS, WfError, append, ask, attemptDir, attemptState, canonicalJson, filesRead, launchReviewer, listAttempts,
-  loadAdapter, readEvents, refusal, runTests, userDir,
+  DECISION_KINDS, WfError, append, ask, attemptDir, attemptState, canonicalJson, filesRead, launchReviewer,
+  listAttempts, loadAdapter, readEvents, refusal, runTests, userDir,
 } from './contract.mjs';
-import { baseOf, changedOf, dirtyRepos, foreignMerges, headsOfTree, mergeBaseOf, rootPath, specOf, unreviewedCommits } from './base.mjs';
+import { baseOf, changedOf, dirtyRepos, foreignMerges, mergeBaseOf, rootPath, specOf, unreviewedCommits } from './base.mjs';
 import { assertFindings, blockersOf, fileOther, foldFindings, nextFindingNumber, refuseOtherOwn } from './findings.mjs';
 import { PROJECT_LEDGER, decisionsOf, flagText, holdOf, itemHistory, projectRoot, resolveAttempt, schema2, sessionFlag } from './attempt.mjs';
 import { docAtBase, ruleDocs } from './rules.mjs';
+import { writtenBy } from './hosts/index.mjs';
+import { scrub, secretValues } from './scrub.mjs';
 import { mkdirStateDirectory } from './state-folders.mjs';
 import { YAML, git, matchesAny, sha256 } from './util.mjs';
 
@@ -48,7 +50,8 @@ const allEvents = (history) => history.flatMap((h) => h.events.map((e) => ({ ...
 const reviewerLaunches = (history) => allEvents(history).filter((e) => e.type === 'handoff' && e.data.role === 'reviewer' && e.data.launchedBy === 'wf').map((e) => ({ ...e.data, attempt: e.attempt }));
 // test.run records each repo's git tree (stream 2); screens may record either that or the attempt's tree.
 const repoTree = (state, repo) => git(state.repos[repo].worktree, ['rev-parse', 'HEAD^{tree}']);
-const headTime = (state, repo) => git(state.repos[repo].worktree, ['log', '-1', '--format=%cI', 'HEAD']);
+// A risk-base run counts for the tree it ran on and the merge-base it ran at (when the run records it), never by time.
+const riskBaseRan = (L, repo) => L.events.filter((e) => e.type === 'test.run' && e.data.kind === 'risk-base' && e.data.repo === repo && e.data.tree === repoTree(L.state, repo) && (!e.data.mergeBase || e.data.mergeBase === mergeBaseOf(L.state, L.adapter, repo)));
 const sameSession = (a, b) => Boolean(a && b) && a.id === b.id && (a.runtime ?? null) === (b.runtime ?? null);
 
 // The review round of a tree, counted per item across attempts: the round already given to this tree, else the next.
@@ -137,13 +140,8 @@ async function setCriteria(root, attempt, input, { actor = null } = {}) {
 
 // --- bundle ------------------------------------------------------------------------------------------------------------
 
-const roleText = () => {
-  try {
-    return fs.readFileSync(path.join(PLUGIN, 'templates', 'agents', 'reviewer.md'), 'utf8').replace(/^---\n[\s\S]*?\n---\n/, '').trim();
-  } catch {
-    return 'You did not write this change. Read every product file in the diff. Do not fix.';
-  }
-};
+// A role's text as the plugin ships it, frontmatter stripped: the whole of what the role is told about its job.
+export const roleText = (role = 'reviewer') => fs.readFileSync(path.join(PLUGIN, 'templates', 'agents', `${role}.md`), 'utf8').replace(/^---\n[\s\S]*?\n---\n/, '').trim();
 
 // Consumers of changed contracts: for each component whose `dependsOn` contract globs match a changed file, the files of
 // its repo that name the changed file's stem (`items` for `items.controller.ts`), by path or as a word in the text.
@@ -243,7 +241,7 @@ async function bundle(root, attempt) {
   if (Object.keys(dirty).length) throw new WfError(`uncommitted changes in ${Object.keys(dirty).join(', ')}: a review reads commits only`, { hint: 'the implementer commits them, then `wf review`' });
   const crit = criteriaOf(L.events);
   if (!crit) throw new WfError(`${attempt} has no criteria`, { hint: `\`wf criteria --file <f> --attempt ${attempt}\`` });
-  const { tree, files } = changedOf(root, attempt, state, adapter);
+  const { tree, heads, files } = changedOf(root, attempt, state, adapter);
   const product = files.filter((f) => f.kind === 'product');
   const tests = files.filter((f) => f.kind === 'tests');
   if (!product.length && !tests.length) throw new WfError(`${attempt} has no committed change to review`);
@@ -265,7 +263,10 @@ async function bundle(root, attempt) {
   const rules = rulesFor(root, adapter, state, files, dir);
   const consumers = consumersOf(root, state, adapter, files);
   const screenTrees = [tree, ...Object.keys(state.repos).map((r) => repoTree(state, r))];
-  const screens = [...L.events].reverse().find((e) => e.type === 'screens.captured' && !(e.data.refused ?? []).length && screenTrees.includes(e.data.tree))?.data.images.map((i) => i.file) ?? [];
+  const images = [...L.events].reverse().find((e) => e.type === 'screens.captured' && !(e.data.refused ?? []).length && screenTrees.includes(e.data.tree))?.data.images ?? [];
+  const screens = images.map((i) => i.file);
+  // A page that did not show the requested language or direction: the reviewer judges it.
+  const mismatched = images.filter((i) => i.mismatch).map((i) => `${i.file}: asked ${i.mismatch.requested?.lang ?? '-'} ${i.mismatch.requested?.dir ?? '-'}, the page is ${i.mismatch.page?.lang ?? '-'} ${i.mismatch.page?.dir ?? '-'}`);
   const learned = learnedFile(adapter);
   const riskChecklist = risk.touched.length ? path.join(PLUGIN, 'templates', 'risk-checklist.md') : null;
   const blockers = blockersOf(L.findings);
@@ -301,16 +302,17 @@ async function bundle(root, attempt) {
       list('Project rules for the touched paths', rules),
       list('Consumers of changed contracts (check each still works)', consumers),
       screens.length ? list('Screenshots (open every one)', screens) : 'Screenshots: none were captured for this tree.',
+      list('Screenshots whose page language or direction differs from the one asked (judge each)', mismatched),
       riskChecklist ? `Risk checklist (risk paths ${risk.touched.map((r) => r.id).join(', ')}): ${riskChecklist}` : null,
       list('Product files you must read in full (your reads are checked)', productFiles.map((f) => path.join(state.repos[f.split('/')[0]].worktree, f.slice(f.indexOf('/') + 1)))),
       list('Other changed files, reviewed by other seats', sharedFiles),
       blockers.length ? list('Verify these open findings first (status fixed or open), then re-read the whole change', blockers.map((f) => `${f.id} ${f.class} ${f.severity} ${f.location}: ${f.what}`)) : null,
       fixed.length ? list('Earlier findings marked fixed (mark one `open` in verified if it is back)', fixed.map((f) => `${f.id} ${f.location}: ${f.what}`)) : null,
       changes.length ? list('Findings whose class or severity changed', changes.map((f) => `${f.id}: ${f.changes.map((c) => `${c.field} ${c.from} -> ${c.to}`).join(', ')}`)) : null,
-      `Write your review as JSON to ${output}: {"findings": [...], "verified": [{"id": "F1", "status": "fixed"}]}. If you cannot write files, give that JSON as your final message.`,
+      `Write your review as JSON to ${output}: {"findings": [...], "verified": [{"id": "F1", "status": "fixed"}]}, in one write with your file tool. If you cannot write files, give that JSON as your final message.`,
     ].filter((x) => x !== null && x !== '').join('\n');
     const b = {
-      seat: s.seat, attempt, tree, round, prompt, files: files_, verify: blockers.map((f) => f.id), productFiles,
+      seat: s.seat, attempt, tree, heads, round, prompt, files: files_, verify: blockers.map((f) => f.id), productFiles,
       productLines: s.files.reduce((n, f) => n + f.added + f.removed, 0),
       model: (s.seat === 'second' ? adapter.models?.secondReviewer : adapter.models?.reviewer) ?? null,
       output,
@@ -342,20 +344,42 @@ const real = (p) => {
   }
 };
 
+// What wf's launch supervisor recorded for a reviewer session (`reviews/launch-*/`): { state, startedAt, endedAt, error,
+// closure }, or null when wf holds no record of it here.
+export function launchRecord(root, attempt, session) {
+  const dir = path.join(attemptDir(root, attempt), 'reviews');
+  if (!session?.id || !fs.existsSync(dir)) return null;
+  for (const d of fs.readdirSync(dir).filter((x) => x.startsWith('launch-'))) {
+    try {
+      const status = JSON.parse(fs.readFileSync(path.join(dir, d, 'status.json'), 'utf8'));
+      const spec = JSON.parse(fs.readFileSync(path.join(dir, d, 'spec.json'), 'utf8'));
+      if (status.session === session.id && spec.host === session.runtime) return { ...status, closure: spec.closure };
+    } catch {}
+  }
+  return null;
+}
+
 async function recordReview(root, attempt, input) {
   const L = await load(root, attempt);
   const { state, adapter } = L;
   if (!state.open) throw new WfError(`${attempt} is closed`);
-  const seat = input?.seat ?? 'whole';
   const session = input?.session;
   if (!session?.id) throw new WfError('the review names no reviewer session');
-  const { tree, files } = changedOf(root, attempt, state, adapter);
-  if (input.tree !== tree) throw refusal('review:tree', `the review is of tree ${input.tree}, but HEAD is tree ${tree}`, '`wf review` launches fresh reviewers on HEAD');
 
   const launched = reviewerLaunches(L.history).filter((h) => sameSession(h.session, session));
   if (!launched.length) throw refusal('review:independent', `session ${session.runtime}:${session.id} was not launched by wf as a reviewer of ${state.item}`, '`wf review` launches reviewers; record their output');
   const implemented = allEvents(L.history).filter((e) => e.type === 'handoff' && e.data.role !== 'reviewer' && sameSession(e.data.session, session));
   if (implemented.length || sameSession(state.owner, session)) throw refusal('review:independent', `session ${session.id} also worked on ${state.item} (${implemented.length ? implemented.map((e) => e.data.role).join(', ') : 'owner'})`, '`wf review` launches a fresh reviewer');
+
+  // The reviewed tree and seat are the ones wf launched this reviewer on, never what a review file or a flag says.
+  const launch = launched.at(-1);
+  const seat = launch.seat ?? 'whole';
+  if (input.seat && input.seat !== seat) throw new WfError(`reviewer ${session.id} was launched for seat ${seat}, not ${input.seat}`);
+  const { tree, heads, files } = changedOf(root, attempt, state, adapter);
+  if (launch.attempt !== attempt || launch.tree !== tree) throw refusal('review:tree', `the reviewer was launched on tree ${launch.tree}${launch.attempt !== attempt ? ` of ${launch.attempt}` : ''}, but HEAD is tree ${tree}`, '`wf review` launches fresh reviewers on HEAD');
+  // The review file is the reviewer's own output, as a fact of its transcript (its last write of the file, or its final
+  // message's JSON). Named failure: a review file anyone could write was recorded as the independent reviewer's.
+  if (input.file && !writtenBy(session, input.file)) throw refusal('review:independent', `${input.file} is not reviewer ${session.runtime}:${session.id}'s own output: its transcript shows neither a write of these bytes nor this JSON as its final message`, 'record the file the reviewer wrote, unedited');
 
   const saved = savedBundle(root, attempt, tree, seat);
   const required = saved?.productFiles ?? files.filter((f) => f.kind === 'product' && f.status !== 'D').map((f) => `${f.repo}/${f.path}`);
@@ -380,10 +404,11 @@ async function recordReview(root, attempt, input) {
     if (!['fixed', 'open'].includes(v.status)) throw new WfError(`verified ${v.id}: status \`${v.status}\` is not fixed or open`);
   }
   let n = nextFindingNumber(L.findings);
-  const findings = input.findings.map((f) => ({ id: `F${n++}`, location: f.location, what: f.what, why: f.why, severity: f.severity, class: f.class }));
+  const secrets = secretValues(root, adapter);
+  const findings = input.findings.map((f) => ({ id: `F${n++}`, location: f.location, what: scrub(f.what, { secrets }), why: scrub(f.why, { secrets }), severity: f.severity, class: f.class }));
   const round = roundOf(L.history, tree);
   const review = reviewsOf(L.events).length + 1;
-  const data = { review, round, seat, tree, session, coverage, findings, verified, blockers: 0, ...(saved?.model ?? launched[0].model ? { model: saved?.model ?? launched[0].model } : {}), ...(Array.isArray(read) ? { filesRead: read.length } : {}), ...(unread.length ? { unread } : {}) };
+  const data = { review, round, seat, tree, heads, session, coverage, findings, verified, blockers: 0, ...(saved?.model ?? launched[0].model ? { model: saved?.model ?? launched[0].model } : {}), ...(Array.isArray(read) ? { filesRead: read.length } : {}), ...(unread.length ? { unread } : {}) };
   const after = foldFindings([...L.history.filter((h) => h.id !== attempt), { id: attempt, events: [...L.events, { type: 'review.recorded', data, at: new Date().toISOString() }] }]);
   const waivedIds = new Set(Object.values(L.findings).filter((f) => f.status === 'waived').map((f) => f.id));
   data.blockers = blockersOf(after.findings).filter((f) => !waivedIds.has(f.id)).length;
@@ -391,13 +416,13 @@ async function recordReview(root, attempt, input) {
 
   const pending = [];
   for (const f of findings.filter((x) => x.class === 'other')) {
-    const { data: filed, pending: op } = await fileOther(root, attempt, f, adapter);
+    const { data: filed, pending: op } = await fileOther(root, attempt, f, adapter, { noTracker: L.events.find((e) => e.type === 'attempt.started')?.data.ticketing === 'none' });
     await append(root, attempt, 'finding.filed', filed, null);
     if (op) pending.push({ finding: f.id, operation: op });
   }
   const np = await noProgress(root, state.item);
   if (np.stop && !np.decision) await askNoProgress(root, attempt, np);
-  return { review, findings, blockers: data.blockers, coverage, pending };
+  return { review, seat, findings, blockers: data.blockers, coverage, pending };
 }
 
 // --- no progress -------------------------------------------------------------------------------------------------------
@@ -441,10 +466,7 @@ function riskMissing(L, tree, files, reviewedTree) {
   const missing = [];
   if (!risk.tests.length) missing.push({ what: `a test added or changed under the risk tests of ${risk.touched.map((r) => r.id).join(', ')}`, command: 'handoff' });
   for (const repo of [...new Set(risk.tests.map((f) => f.repo))]) {
-    // A risk-base run records the merge-base tree it ran on, so it counts when it ran after the repo's last commit.
-    const since = Date.parse(headTime(L.state, repo));
-    const runs = L.events.filter((e) => e.type === 'test.run' && e.data.kind === 'risk-base' && e.data.repo === repo && Date.parse(e.at) >= since);
-    const last = runs[runs.length - 1]?.data;
+    const last = riskBaseRan(L, repo).at(-1)?.data;
     if (!last) missing.push({ what: `the risk tests of ${repo} run on the merge-base`, command: `wf test risk-base --repo ${repo}` });
     else if (last.pass) missing.push({ what: `risk tests of ${repo} that fail on the merge-base (they passed there, so they assert nothing about the change)`, command: 'handoff' });
   }
@@ -488,7 +510,7 @@ async function factsOf(L, { repo = null, landedTree = null } = {}) {
   const last = reviews[reviews.length - 1] ?? null;
   if (!last) push('merge:unreviewed', 'no review is recorded for this attempt');
   else {
-    const heads = headsOfTree(root, attempt, last.tree);
+    const heads = last.heads ?? null;
     for (const n of names) {
       const head = git(state.repos[n].worktree, ['rev-parse', 'HEAD']);
       if (!heads?.[n]) {
@@ -511,11 +533,17 @@ async function factsOf(L, { repo = null, landedTree = null } = {}) {
       if (d.answer?.choice !== CHOICES.foreign.yes) push('merge:foreign', `${n}: merge ${m.sha.slice(0, 10)} brings in ${m.parent.slice(0, 10)}, not on the base${m.branches.length ? ` (on ${m.branches.join(', ')})` : ''} (${d.id}${d.answer ? `: ${d.answer.choice}` : ', unanswered'})`);
     }
   }
+  const { tree, files } = changedOf(root, attempt, state, adapter);
+  // The fast tests are green on HEAD in every changed repo that has them (a fact of the ledger: the last fast run on
+  // the repo's HEAD tree passed).
+  for (const n of names.filter((x) => files.some((f) => f.repo === x) && specOf(adapter, x, state.repos[x]).tests?.fast)) {
+    const run = L.events.filter((e) => e.type === 'test.run' && e.data.kind === 'fast' && e.data.repo === n && e.data.tree === repoTree(state, n)).at(-1)?.data;
+    if (!run?.pass) problems.push({ id: 'merge:untested', fact: 'fast', repo: n, message: `${n}: the fast tests are not green on HEAD (${run ? 'they fail' : 'no run on this tree'})` });
+  }
   if (landedTree) {
     const passed = L.events.some((e) => e.type === 'test.run' && e.data.kind === 'full' && e.data.pass && e.data.tree === landedTree && (!repo || e.data.repo === repo));
     if (!passed) push('merge:untested', `no passing full run on the landed tree ${landedTree}`);
   }
-  const { tree, files } = changedOf(root, attempt, state, adapter);
   const risk = riskMissing(L, tree, files, last?.tree ?? tree);
   if (risk.touched.length) {
     const missing = risk.missing.map((m) => m.what);
@@ -541,6 +569,18 @@ async function mergeFacts(root, attempt, opts = {}) {
 
 // --- status ------------------------------------------------------------------------------------------------------------
 
+const minutesSince = (iso) => Math.max(0, Math.round((Date.now() - Date.parse(iso ?? '')) / 60000)) || 0;
+
+// Screens are due when capture is set and the change reaches a routed repo's product files, or a `shared` file (whose
+// sentinel screens are captured even with no routes).
+function screensNeeded(L, files) {
+  const sc = L.adapter.screens;
+  if (!sc?.capture) return false;
+  const product = files.filter((f) => f.kind === 'product');
+  if (sc.routes?.repo && product.some((f) => f.repo === sc.routes.repo)) return true;
+  return Boolean(sc.sentinel?.length) && product.some((f) => matchesAny(rootPath(specOf(L.adapter, f.repo, L.state.repos[f.repo]), f.path), sc.shared ?? []));
+}
+
 const approveCmd = (d, attempt) => `wf approve ${d.id} --attempt ${attempt} --choice "<${d.options.join(' | ')}>" --quote "<the person's words>"`;
 const blockingOpen = (L) => L.decisions.filter((d) => d.attempt === L.attempt && !d.answer && DECISION_KINDS[d.kind]?.blocking);
 
@@ -562,18 +602,21 @@ export async function nextStep(root, attempt) {
   const lastRun = (repo) => L.events.filter((e) => e.type === 'test.run' && e.data.kind === 'fast' && e.data.repo === repo && e.data.tree === repoTree(L.state, repo)).pop()?.data;
   const failing = [...new Set(files.map((f) => f.repo))].filter((r) => lastRun(r)?.pass === false);
   if (failing.length) return { command: handoff, why: `fast tests fail on this tree in ${failing.join(', ')}${note}` };
-  const sc = L.adapter.screens;
-  if (sc?.capture && sc.routes?.repo && files.some((f) => f.repo === sc.routes.repo && f.kind === 'product') && !L.events.some((e) => e.type === 'screens.captured' && !(e.data.refused ?? []).length && [tree, repoTree(L.state, sc.routes.repo)].includes(e.data.tree))) {
+  if (screensNeeded(L, files) && !L.events.some((e) => e.type === 'screens.captured' && !(e.data.refused ?? []).length && [tree, ...Object.keys(L.state.repos).map((r) => repoTree(L.state, r))].includes(e.data.tree))) {
     return { command: `wf screens ${A}`, why: 'the change touches screens and none are captured for this tree' };
   }
   const recorded = reviewsOf(L.events);
   const launches = reviewerLaunches(L.history).filter((h) => h.attempt === attempt && h.tree === tree);
-  const unrecorded = launches.filter((h) => !recorded.some((r) => r.tree === tree && r.seat === h.seat));
+  const unrecorded = launches.filter((h) => !recorded.some((r) => r.tree === tree && r.seat === h.seat)).map((h) => ({ ...h, run: launchRecord(root, attempt, h.session) }));
+  const running = unrecorded.filter((h) => h.run && !['done', 'failed'].includes(h.run.state));
+  if (running.length) return { command: `wf review ${A}`, why: running.map((h) => `reviewer ${h.seat} running since ${minutesSince(h.run.startedAt)} min`).join('; ') + '; `wf review` waits for it' };
+  const failedRuns = unrecorded.filter((h) => h.run?.state === 'failed');
+  if (failedRuns.length) return { command: `wf review ${A}`, why: `reviewer ${failedRuns.map((h) => `${h.seat} failed (${h.run.error ?? 'no result'})`).join('; ')}; \`wf review\` launches it again` };
   if (unrecorded.length) return { command: `wf review --record <review file> ${A}`, why: `reviewer seat(s) ${unrecorded.map((h) => h.seat).join(', ')} launched on this tree; record each review when it is written (its prompt names the file)` };
   const last = recorded[recorded.length - 1];
   let reviewed = recorded.some((r) => r.tree === tree);
   if (!reviewed && last) {
-    const heads = headsOfTree(root, attempt, last.tree);
+    const heads = last.heads ?? null;
     reviewed = Boolean(heads) && Object.keys(L.state.repos).every((n) => heads[n] && unreviewedCommits(L.state.repos[n].worktree, heads[n], git(L.state.repos[n].worktree, ['rev-parse', 'HEAD']), baseOf(L.state, L.adapter, n)).length === 0);
   }
   if (!reviewed) return { command: `wf review ${A}`, why: `this tree (${tree}) is not reviewed${note}` };
@@ -582,11 +625,15 @@ export async function nextStep(root, attempt) {
   const risk = riskMissing(L, tree, files, last?.tree ?? tree);
   const miss = risk.missing[0];
   if (miss) return { command: miss.command === 'handoff' ? handoff : miss.command === 'review' ? `wf review ${A}` : `${miss.command} ${A}`, why: `risk path(s) ${risk.touched.map((r) => r.id).join(', ')}: missing ${miss.what}` };
-  const problems = (await factsOf(L)).filter((p) => p.id !== 'merge:untested');
+  const problems = await factsOf(L);
   L = await load(root, attempt); // the facts may have asked the person something
   open = blockingOpen(L);
   if (open.length) return { command: approveCmd(open[0], attempt), why: `ask the person, in these words: ${open[0].question}` };
-  if (problems.length) return { command: problems[0].id === 'merge:unreviewed' ? `wf review ${A}` : handoff, why: problems[0].message };
+  if (problems.length) {
+    const p = problems[0];
+    const command = p.fact === 'fast' ? `wf test fast --repo ${p.repo} ${A}` : p.id === 'merge:unreviewed' ? `wf review ${A}` : handoff;
+    return { command, why: p.message };
+  }
   const stages = L.state.stages ?? [];
   const results = new Map();
   for (const e of L.events) if (e.type === 'stage' && e.data.index >= 0) results.set(e.data.index, e.data);
@@ -609,13 +656,22 @@ async function openAttempts(ctx, args) {
   return out;
 }
 
+// The person's open questions in these attempts, as one closing line.
+async function questionsLine(root, ids) {
+  let n = 0;
+  for (const id of ids) n += (await decisionsOf(root, [{ id, events: schema2(await readEvents(root, id)) }])).filter((d) => !d.answer).length;
+  return { open: n, line: `open questions for the person: ${n}${n ? '; `wf digest` lists them' : ''}` };
+}
+
 async function cmdStatus(ctx, args) {
   const root = projectRoot(ctx);
   await loadAdapter(root); // an adapter that cannot be read (a schema-1 one names `wf init --from-07`) is said first
   const rows = [];
-  for (const id of await openAttempts(ctx, args)) rows.push({ attempt: id, ...(await nextStep(root, id)) });
-  const text = rows.length ? rows.map((r) => `${r.attempt}\n  next: ${r.command}\n  why: ${r.why}`).join('\n') : 'no open attempts; `wf start <item>` starts one';
-  return { text, data: { attempts: rows } };
+  const ids = await openAttempts(ctx, args);
+  for (const id of ids) rows.push({ attempt: id, ...(await nextStep(root, id)) });
+  const q = await questionsLine(root, ids);
+  const text = rows.length ? [...rows.map((r) => `${r.attempt}\n  next: ${r.command}\n  why: ${r.why}`), q.line].join('\n') : 'no open attempts; `wf start <item>` starts one';
+  return { text, data: { attempts: rows, openQuestions: q.open } };
 }
 
 async function cmdResume(ctx, args) {
@@ -637,13 +693,16 @@ async function cmdResume(ctx, args) {
     lines.push(`  criteria: ${crit ? crit.criteria.map((c) => `${c.id} ${c.text}`).join('; ') : 'none yet'}`);
     lines.push(`  reviews: ${reviews.length}${reviews.length ? `, last round ${reviews[reviews.length - 1].round} on tree ${reviews[reviews.length - 1].tree} (${reviews[reviews.length - 1].coverage})` : ''}; open blockers: ${blockers.map((f) => f.id).join(', ') || 'none'}`);
     if (pending.length) lines.push(`  questions waiting for the person: ${pending.map((d) => `${d.id} "${d.question}" (${d.options.join(' | ')})`).join('; ')}`);
+    const changed = Object.values(L.findings).filter((f) => f.changes.length);
+    if (changed.length) lines.push(`  class or severity changed: ${changed.map((f) => `${f.id} ${f.changes.map((c) => `${c.field} ${c.from} -> ${c.to}`).join(', ')}`).join('; ')}`);
     const hold = holdOf(L.events);
     if (hold) lines.push(`  held: "${hold.reason}"`);
     lines.push(`  next: ${step.command}`, `  why: ${step.why}`);
     out.push(lines.join('\n'));
     data.push({ attempt: id, item: L.state.item, next: step.command, why: step.why, blockers: blockers.map((f) => f.id), decisions: pending.map((d) => d.id) });
   }
-  return { text: out.join('\n\n'), data: { attempts: data } };
+  const q = await questionsLine(root, ids);
+  return { text: [...out, q.line].join('\n\n'), data: { attempts: data, openQuestions: q.open } };
 }
 
 // --- commands ----------------------------------------------------------------------------------------------------------
@@ -679,7 +738,7 @@ async function cmdHandoff(ctx, args) {
   const id = await resolveAttempt(ctx, args);
   const role = args._[0];
   if (role === 'reviewer') throw refusal('review:independent', 'a reviewer is launched by wf, never handed by the owner', '`wf review` launches reviewers with only the bundle');
-  if (!['planner', 'implementer', 'tester'].includes(role)) throw new WfError('wf handoff planner|implementer|tester --session <runtime:id>');
+  if (!['planner', 'implementer'].includes(role)) throw new WfError('wf handoff planner|implementer --session <runtime:id>');
   const session = sessionFlag(flagText(args, 'session', { required: true }), ctx.actor);
   const L = await load(root, id);
   if (!L.state.open) throw new WfError(`${id} is closed`);
@@ -695,39 +754,60 @@ async function cmdHandoff(ctx, args) {
       }
     }
   }
-  const { tree } = changedOf(root, id, L.state, L.adapter);
+  const { tree, heads } = changedOf(root, id, L.state, L.adapter);
   const round = roundOf(L.history, tree);
-  await append(root, id, 'handoff', { role, session, launchedBy: 'owner', tree, round }, ctx.actor);
+  await append(root, id, 'handoff', { role, session, launchedBy: 'owner', tree, heads, round }, ctx.actor);
   const learned = learnedFile(L.adapter);
-  return { text: `${role} ${session.runtime}:${session.id} recorded on ${id} (tree ${tree})${learned ? `\nput this in its prompt: what this project learned: ${learned}` : ''}`, data: { attempt: id, role, session, tree, learned } };
+  const prompt = [
+    roleText(role),
+    '',
+    `Change: ${id} (${L.state.item}). Worktrees: ${Object.entries(L.state.repos).map(([n, r]) => `${n} ${r.worktree}`).join('; ')}.`,
+    learned ? `What this project learned (read it): ${learned}` : null,
+  ].filter((x) => x !== null).join('\n');
+  return { text: `${role} ${session.runtime}:${session.id} recorded on ${id} (tree ${tree}). Launch it with this text as its instructions:\n\n${prompt}`, data: { attempt: id, role, session, tree, learned, prompt } };
 }
 
 async function recordFromFile(ctx, args, root, id) {
   const file = path.resolve(flagText(args, 'record', { required: true }));
   const raw = readInput(file);
-  // The bundle that named this output file gives its seat and tree.
+  // The session is the reviewer wf launched for the bundle that named this file (or --session); its launch gives the
+  // seat and the tree. Nothing the file says about them is read.
   const near = fs.existsSync(path.dirname(file)) ? fs.readdirSync(path.dirname(file)).filter((f) => /^bundle-.*\.json$/.test(f)).map((f) => JSON.parse(fs.readFileSync(path.join(path.dirname(file), f), 'utf8'))).find((b) => path.resolve(b.output ?? '') === file) : null;
-  const seat = raw.seat ?? flagText(args, 'seat') ?? near?.seat ?? 'whole';
-  const tree = raw.tree ?? near?.tree ?? null;
-  let session = raw.session ?? (flagText(args, 'session') ? sessionFlag(flagText(args, 'session'), ctx.actor) : null);
+  let session = flagText(args, 'session') ? sessionFlag(flagText(args, 'session'), ctx.actor) : null;
   if (!session) {
+    if (!near) throw new WfError(`${file} is not a review file a bundle names; pass --session <runtime:id>`);
     const L = await load(root, id);
-    const t = tree ?? changedOf(root, id, L.state, L.adapter).tree;
-    const cands = reviewerLaunches(L.history).filter((h) => h.attempt === id && h.seat === seat && h.tree === t);
-    if (cands.length !== 1) throw new WfError(`${cands.length ? 'several reviewers were' : 'no reviewer was'} launched for seat ${seat} on tree ${t}; pass --session <runtime:id>`);
+    const cands = reviewerLaunches(L.history).filter((h) => h.attempt === id && h.seat === near.seat && h.tree === near.tree);
+    if (cands.length !== 1) throw new WfError(`${cands.length ? 'several reviewers were' : 'no reviewer was'} launched for seat ${near.seat} on tree ${near.tree}; pass --session <runtime:id>`);
     session = cands[0].session;
   }
-  let t = tree;
-  if (!t) {
-    const L = await load(root, id);
-    t = changedOf(root, id, L.state, L.adapter).tree;
-  }
-  const input = { session, seat, tree: t, findings: raw.findings ?? [], verified: raw.verified ?? [] };
-  const r = await recordReview(root, id, input);
-  const lines = [`review ${r.review} recorded on ${id} (seat ${seat}, coverage ${r.coverage}): ${r.findings.length} finding(s), ${r.blockers} open blocker(s)`];
+  const r = await recordReview(root, id, { session, file, findings: raw.findings ?? [], verified: raw.verified ?? [] });
+  const lines = [`review ${r.review} recorded on ${id} (seat ${r.seat}, coverage ${r.coverage}): ${r.findings.length} finding(s), ${r.blockers} open blocker(s)`];
   for (const f of r.findings) lines.push(`  ${f.id} ${f.class} ${f.severity} ${f.location}: ${f.what}`);
   for (const p of r.pending) lines.push(`  ${p.finding} is filed through the tracker connector: ${p.operation}`);
   return { text: lines.join('\n'), data: r };
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Wait until every launched reviewer's run is done or failed (wf's launch record); a session wf holds no record of is
+// not waited for.
+async function waitForReviewers(root, id, sessions) {
+  for (;;) {
+    const runs = sessions.map((s) => launchRecord(root, id, s));
+    if (runs.every((r) => !r || ['done', 'failed'].includes(r.state))) return runs;
+    await sleep(process.env.WF_TEST === '1' ? 100 : 2000);
+  }
+}
+
+function reviewerLines(root, id, launched) {
+  return launched.map((h) => {
+    const run = launchRecord(root, id, h.session);
+    const file = run?.closure ?? h.output;
+    if (run?.state === 'failed') return `  reviewer ${h.seat}: failed: ${run.error ?? 'it ended without a result'}; \`wf review --attempt ${id}\` launches it again`;
+    if (run && run.state !== 'done') return `  reviewer ${h.seat}: running since ${minutesSince(run.startedAt)} min; it writes ${file}`;
+    return `  reviewer ${h.seat}: ${run ? 'done' : 'launched'}; record it: wf review --record ${file ?? '<review file>'} --attempt ${id}`;
+  });
 }
 
 async function cmdReview(ctx, args) {
@@ -742,33 +822,45 @@ async function cmdReview(ctx, args) {
     const q = await ask(root, id, { kind: 'waiver', question: `Waive blocking finding ${f.id} (${f.class}, ${f.severity}) at ${f.location}: ${f.what}?${flagText(args, 'why') ? ` The owner's reason: ${flagText(args, 'why')}` : ''}`, options: [CHOICES.waiver.yes, CHOICES.waiver.no], refs: [f.id], blocking: true });
     return { text: `asked the person (${q.id}) whether to waive ${f.id}; the merge waits for the answer`, data: { decision: q.id } };
   }
+  const wait = args.flags['no-wait'] !== true;
   const hold = holdOf(schema2(await readEvents(root, id)));
   if (hold) throw refusal('hold', `${id} is held by the person ("${hold.reason}")`, 'only the person lifts the hold (`wf release` on their answer)');
   const { tree, bundles } = await bundle(root, id);
   const L = await load(root, id);
-  const launched = reviewerLaunches(L.history).filter((h) => h.attempt === id && h.tree === tree);
+  const recorded = reviewsOf(L.events);
+  // A seat counts as launched unless its run failed with no review recorded: that seat is launched again.
+  const launched = reviewerLaunches(L.history).filter((h) => h.attempt === id && h.tree === tree && (recorded.some((r) => r.tree === tree && r.seat === h.seat) || launchRecord(root, id, h.session)?.state !== 'failed'));
   const todo = bundles.filter((b) => !launched.some((h) => h.seat === b.seat));
-  if (!todo.length) return { text: `reviewers are already launched on tree ${tree} (${launched.map((h) => h.seat).join(', ')}); record each with \`wf review --record <file> --attempt ${id}\``, data: { tree, launched: [] } };
+  if (!todo.length) {
+    const waiting = launched.filter((h) => !recorded.some((r) => r.tree === tree && r.seat === h.seat));
+    if (wait) await waitForReviewers(root, id, waiting.map((h) => h.session));
+    const out = waiting.map((h) => ({ ...h, output: bundles.find((b) => b.seat === h.seat)?.output }));
+    return { text: [`reviewers are already launched on tree ${tree} (${launched.map((h) => h.seat).join(', ')}):`, ...reviewerLines(root, id, out)].join('\n'), data: { tree, launched: [] } };
+  }
   const { files } = changedOf(root, id, L.state, L.adapter);
   const repos = [...new Set(files.map((f) => f.repo))];
-  const ran = (repo, kind) => L.events.some((e) => e.type === 'test.run' && e.data.repo === repo && e.data.kind === kind && (kind === 'risk-base' ? Date.parse(e.at) >= Date.parse(headTime(L.state, repo)) : e.data.tree === repoTree(L.state, repo)));
+  const ran = (repo, kind) => (kind === 'risk-base' ? riskBaseRan(L, repo).length > 0 : L.events.some((e) => e.type === 'test.run' && e.data.repo === repo && e.data.kind === kind && e.data.tree === repoTree(L.state, repo)));
   const tests = repos.filter((r) => !ran(r, 'fast')).map((r) => ({ repo: r, kind: 'fast' }));
   for (const r of [...new Set(riskOf(L.adapter, files).tests.map((f) => f.repo))]) if (!ran(r, 'risk-base')) tests.push({ repo: r, kind: 'risk-base' });
-  // Reviewers and tests run at once on the same tree.
-  const jobs = [
-    // The closure is the file the bundle's prompt names, so the reviewer writes (or its final message is saved) there.
-    ...todo.map((b) => launchReviewer(root, id, b, { closure: b.output, ...(b.model ? { model: b.model } : {}) }).then((x) => ({ seat: b.seat, ...x, output: x.closure ?? b.output }))),
-    ...tests.map((t) => runTests(root, id, t.repo, t.kind).then((x) => ({ test: t, ...x }))),
-  ];
-  const results = await Promise.allSettled(jobs);
+  // Reviewers and tests run at once on the same tree; by default this waits until every reviewer is done or failed.
+  const launches = todo.map((b) => launchReviewer(root, id, b, { closure: b.output, ...(b.model ? { model: b.model } : {}) }).then((x) => ({ seat: b.seat, ...x, output: x.closure ?? b.output })));
+  const reviewersDone = Promise.allSettled(launches).then(async (rs) => {
+    if (wait) await waitForReviewers(root, id, rs.filter((r) => r.status === 'fulfilled').map((r) => r.value.session));
+    return rs;
+  });
+  const [reviewers, testResults] = await Promise.all([reviewersDone, Promise.allSettled(tests.map((t) => runTests(root, id, t.repo, t.kind).then((x) => ({ test: t, ...x }))))]);
   const lines = [`review round on tree ${tree}:`];
-  results.forEach((r, i) => {
-    const job = i < todo.length ? `reviewer ${todo[i].seat}` : `${tests[i - todo.length].kind} tests of ${tests[i - todo.length].repo}`;
+  reviewers.forEach((r, i) => {
+    if (r.status === 'rejected') lines.push(`  reviewer ${todo[i].seat}: failed: ${r.reason?.message ?? r.reason}`);
+    else lines.push(`  reviewer ${todo[i].seat}: launched ${r.value.session.runtime}:${r.value.session.id}; it writes ${r.value.output}`, ...(wait ? reviewerLines(root, id, [{ seat: todo[i].seat, session: r.value.session, output: r.value.output }]) : []));
+  });
+  testResults.forEach((r, i) => {
+    const job = `${tests[i].kind} tests of ${tests[i].repo}`;
     if (r.status === 'rejected') lines.push(`  ${job}: failed: ${r.reason?.message ?? r.reason}`);
-    else if (r.value.session) lines.push(`  ${job}: launched ${r.value.session.runtime}:${r.value.session.id}; it writes ${r.value.output}`);
     else lines.push(`  ${job}: ${r.value.pass ? 'pass' : 'FAIL'}${r.value.log ? ` (${r.value.log})` : ''}`);
   });
-  lines.push(`next: when a reviewer's file is written, wf review --record <file> --attempt ${id}`);
+  if (!wait) lines.push(`next: when a reviewer's file is written, wf review --record <file> --attempt ${id}`);
+  const results = [...reviewers, ...testResults];
   return { text: lines.join('\n'), data: { tree, results: results.map((r) => (r.status === 'fulfilled' ? r.value : { error: String(r.reason?.message ?? r.reason) })) } };
 }
 

@@ -99,12 +99,13 @@ const locationRoot = (adapter, location) => {
 
 // File one `other` finding (stream 3 searches first and files per followUps), and ask the priority question when it is
 // high or on a risk path. Returns the `finding.filed` payload.
-export async function fileOther(root, attempt, f, adapter) {
-  const mode = adapter.ticketing?.followUps?.mode ?? 'off';
+// An attempt started with `--no-tracker` files nothing: its `other` findings stay in the ledger (mode off).
+export async function fileOther(root, attempt, f, adapter, { noTracker = false } = {}) {
+  const mode = noTracker ? 'off' : adapter.ticketing?.followUps?.mode ?? 'off';
   const high = ['high', 'critical'].includes(f.severity);
   const onRisk = riskPathsOf(adapter, locationRoot(adapter, f.location)).length > 0;
   const priority = high || onRisk;
-  const res = await fileFollowUp(root, attempt, f);
+  const res = noTracker ? { state: 'done', value: null } : await fileFollowUp(root, attempt, f);
   const data = {
     finding: f.id,
     mode,

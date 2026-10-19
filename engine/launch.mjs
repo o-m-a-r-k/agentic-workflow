@@ -7,7 +7,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { WfError, append, attemptDir, worktreeDir } from './contract.mjs';
-import { callerSession, findHost, hostIds, sessionVariables } from './hosts/index.mjs';
+import { callerSession, findHost, hostIds, jsonSpan, sessionVariables } from './hosts/index.mjs';
 
 const SELF = fileURLToPath(import.meta.url);
 const PLUGIN_BIN = path.resolve(path.dirname(SELF), '..', 'bin');
@@ -89,6 +89,7 @@ function runOnce(host, spec, resumeSession, onEvent) {
     fs.closeSync(err);
     let ended = null;
     let capacity = false;
+    let text = null;
     let buf = '';
     child.once('error', (error) => resolve({ error: error.message }));
     child.once('spawn', () => {
@@ -109,12 +110,34 @@ function runOnce(host, spec, resumeSession, onEvent) {
         }
         const r = host.event(e);
         if (r.started) onEvent({ started: r.started });
+        if (typeof r.text === 'string') text = r.text;
         if (r.ended) ended = r.ended;
         if (r.capacity) capacity = true;
       }
     });
-    child.once('close', (code) => resolve({ code, ended, capacity }));
+    child.once('close', (code) => resolve({ code, ended, capacity, text }));
   });
+}
+
+// The review file once the reviewer has ended: when the reviewer wrote none, its final message is written there; a file
+// that is not JSON as it stands (a host that writes the last message whole, with a fence or a sentence around the
+// JSON) keeps only its JSON, from the first `{` to the last `}`. recordReview checks the file against the reviewer's
+// transcript (hosts `writtenBy`), so what is written here is only ever the reviewer's own final message.
+export function settleClosure(closure, finalText) {
+  let current = null;
+  try {
+    current = fs.readFileSync(closure, 'utf8');
+  } catch {}
+  if (current === null && (typeof finalText !== 'string' || !finalText.trim())) return;
+  try {
+    if (current !== null) JSON.parse(current);
+    if (current !== null) return; // already JSON
+  } catch {}
+  const json = jsonSpan(current ?? finalText);
+  const body = json !== null ? `${JSON.stringify(json, null, 2)}\n` : current ?? finalText;
+  if (body === current) return;
+  fs.writeFileSync(`${closure}.tmp`, body);
+  fs.renameSync(`${closure}.tmp`, closure);
 }
 
 async function supervise(specFile) {
@@ -136,7 +159,9 @@ async function supervise(specFile) {
       return save();
     }
     if (!(r.capacity && !r.ended?.ok)) {
-      Object.assign(status, { state: r.code === 0 && r.ended?.ok !== false ? 'done' : 'failed', exitCode: r.code, endedAt: new Date().toISOString() });
+      const ok = r.code === 0 && r.ended?.ok !== false;
+      if (ok) settleClosure(spec.closure, r.text);
+      Object.assign(status, { state: ok ? 'done' : 'failed', exitCode: r.code, endedAt: new Date().toISOString() });
       return save();
     }
     status.resumes += 1;

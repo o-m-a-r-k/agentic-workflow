@@ -5,8 +5,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { ledgerLines, runWf, writeDoubles } from './helpers/index.mjs';
-import { commitWt, setup } from './flow-fixture.mjs';
-import { reviewerTranscript } from './helpers/index.mjs';
+import { commitWt, reviewerWrote, setup } from './flow-fixture.mjs';
 
 const T = { WF_TEST: '1' };
 
@@ -66,13 +65,12 @@ test('the flow through the cli: status names one next command at every step; a r
     const bundleDir = path.join(p.root, '.wf-evidence', 'attempts', 'TK-7.1', 'reviews', fs.readdirSync(path.join(p.root, '.wf-evidence', 'attempts', 'TK-7.1', 'reviews'))[0]);
     const b = JSON.parse(fs.readFileSync(path.join(bundleDir, 'bundle-whole.json'), 'utf8'));
     // A coverage refusal: the reviewer read nothing.
-    reviewerTranscript({ home: p.home, cwd: p.root, files: [], session: h.data.session.id });
-    fs.writeFileSync(b.output, JSON.stringify({ findings: [], verified: [] }));
+    reviewerWrote(p, h.data.session.id, { files: [], output: b.output, review: { findings: [], verified: [] } });
     const refused = wf(['review', '--record', b.output]);
     assert.equal(refused.code, 75);
     assert.match(refused.err, /refused \(review:coverage\)/);
     assert.deepEqual(fs.readFileSync(path.join(p.root, '.wf-test-refusals.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l).id), ['review:coverage']);
-    reviewerTranscript({ home: p.home, cwd: p.root, files: [path.join(p.wt('TK-7.1', 'server'), 'src/routes/items.controller.mjs')], session: h.data.session.id });
+    reviewerWrote(p, h.data.session.id, { files: [path.join(p.wt('TK-7.1', 'server'), 'src/routes/items.controller.mjs')], output: b.output, review: { findings: [], verified: [] } });
     const rec = wf(['review', '--record', b.output]);
     assert.equal(rec.code, 0, rec.err);
     assert.match(next(), /^wf deliver --attempt TK-7\.1/);

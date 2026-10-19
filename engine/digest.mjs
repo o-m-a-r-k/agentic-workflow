@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { WfError, listAttempts, loadAdapter, readEvents, userDir } from './contract.mjs';
 import { PROJECT_LEDGER, decisionsOf, stillHolds } from './decisions.mjs';
+import { scrub, secretValues } from './scrub.mjs';
 
 const clip = (s, n = 200) => (String(s).length > n ? `${String(s).slice(0, n - 1)}…` : String(s));
 
@@ -26,7 +27,8 @@ async function attemptFacts(root, attempt) {
     else if (e.type === 'stage') stages.set(e.data.index, { ...e.data, at: e.at });
     else if (e.type === 'finding.filed') filed.push({ ...e.data, at: e.at });
   }
-  return { item: started.data.item, closed: events.some((e) => e.type === 'attempt.closed'), findings, stages, filed };
+  const closed = events.find((e) => e.type === 'attempt.closed') ?? null;
+  return { item: started.data.item, closed: Boolean(closed), closedEvent: closed, findings, stages, filed };
 }
 
 export async function digest(root, opts = {}) {
@@ -38,7 +40,13 @@ export async function digest(root, opts = {}) {
   for (const attempt of await listAttempts(root)) {
     if (attempt === PROJECT_LEDGER) continue;
     const f = await attemptFacts(root, attempt);
-    if (!f || f.closed) continue;
+    if (!f) continue;
+    if (f.closed) {
+      // Closed as shipped by its patch-ids, outside its own stages: said once, in the digest of that day.
+      const c = f.closedEvent;
+      if (c.data?.outsideStages === true && Date.parse(c.at) >= since) items.push({ kind: 'outside', attempt, item: f.item, outcome: c.data.outcome ?? null, reason: c.data.reason ?? null, at: c.at });
+      continue;
+    }
     for (const d of (await decisionsOf(root, attempt)).values()) if (open(d)) items.push(question(d, f.item));
     for (const s of f.stages.values()) {
       if (s.do === 'wait-merged' && s.state === 'waiting') items.push({ kind: 'merge', attempt, item: f.item, repo: s.repo ?? null, evidence: s.evidence ?? null, next: s.next ?? null, at: s.at });
@@ -49,7 +57,15 @@ export async function digest(root, opts = {}) {
       items.push({ kind: 'finding', attempt, item: f.item, id: finding.id, location: finding.location ?? null, severity: finding.severity ?? null, what: finding.what ?? null, why: finding.why ?? null, at: x.at });
     }
   }
-  return { items, text: render(items) };
+  // Nothing a finding, a question or a stage carries leaves here with a credential in it.
+  let adapter = null;
+  try {
+    adapter = await loadAdapter(root);
+  } catch {}
+  const secrets = secretValues(root, adapter);
+  const clean = (v) => (typeof v === 'string' ? scrub(v, { secrets }) : Array.isArray(v) ? v.map(clean) : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, clean(x)])) : v);
+  const safe = items.map(clean);
+  return { items: safe, text: scrub(render(safe), { secrets }) };
 }
 
 function render(items) {
@@ -66,6 +82,7 @@ function render(items) {
   section('Questions for you', of('decision'), (i) => `${where(i)} ${i.id}${i.blocking ? ', holding the ticket' : ''}: ${i.question} Options: ${i.options.join(' | ')}. Answer in the chat, or: ${approve(i)}`);
   section('Diff-reads', of('diff-read'), (i) => `${where(i)} ${i.id}: ${i.question} Options: ${i.options.join(' | ')}`);
   section('Merges waiting for your click', of('merge'), (i) => `${where(i)}${i.repo ? ` ${i.repo}` : ''}: ${clip(i.next ?? (typeof i.evidence === 'string' ? i.evidence : JSON.stringify(i.evidence)))}`);
+  section('Closed outside its stages', of('outside'), (i) => `${where(i)}: closed ${i.outcome ?? 'shipped'} by its patch-ids, without its delivery stages${i.reason ? ` (${clip(i.reason)})` : ''}`);
   section('Found outside the goal', of('finding'), (i) => `${where(i)} ${i.id}${i.severity ? ` (${i.severity})` : ''}${i.location ? ` ${i.location}` : ''}: ${clip(i.what ?? '')}`);
   return lines.length ? lines.join('\n').trim() : 'Nothing waits on you.';
 }

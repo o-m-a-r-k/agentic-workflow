@@ -84,3 +84,112 @@ test('connectorCalls: matched by suffix, with results, on both layouts; since fi
   const cc = await connectorCalls(c.session, ['get_issue', 'save_comment'], { home: p.home });
   assert.deepEqual(cc.map((x) => [x.tool, x.input.id ?? x.input.body, x.result]), [['get_issue', 'TK-2', 'issue TK-2'], ['save_comment', 'y', 'done']]);
 });
+
+test('connectorCalls keeps the host\'s error flag on a failed result (Claude Code and Codex)', async (t) => {
+  const p = makeProject({ adapter: false });
+  t.after(p.cleanup);
+  const tr = transcript({ home: p.home, cwd: p.root, session: '44444444-0000-4000-8000-000000000004' });
+  tr.toolCall('mcp__tracker__save_issue', { title: 'a' }, 'rate limited');
+  tr.lines().at(-1).message.content[0].is_error = true;
+  tr.toolCall('mcp__tracker__save_issue', { title: 'b' }, '{"id":"TK-9"}');
+  tr.write();
+  assert.deepEqual((await connectorCalls(tr.session, ['save_issue'], { home: p.home })).map((c) => [c.input.title, c.error]), [['a', true], ['b', false]]);
+
+  const c = codexRollout({ home: p.home, cwd: p.root })
+    .connector('mcp__tracker__save_issue', { title: 'c' }, { content: 'denied', success: false })
+    .connector('mcp__tracker__save_issue', { title: 'd' }, { content: '{"id":"TK-10"}', success: true });
+  c.write();
+  assert.deepEqual((await connectorCalls(c.session, ['save_issue'], { home: p.home })).map((x) => [x.input.title, x.result, x.error]), [['c', 'denied', true], ['d', '{"id":"TK-10"}', false]]);
+});
+
+test('writtenBy: a review file came from the session that wrote it (same content) or whose final message is its JSON', async (t) => {
+  const p = makeProject({ adapter: false });
+  t.after(p.cleanup);
+  const { writtenBy } = await import('../engine/hosts/index.mjs');
+  const fs = (await import('node:fs')).default;
+  const file = path.join(p.tmp, 'review.json');
+  const body = '{\n  "findings": []\n}\n';
+  const tr = transcript({ home: p.home, cwd: p.root, session: '55555555-0000-4000-8000-000000000005' });
+  tr.toolCall('Write', { file_path: file, content: '{"draft":true}' }).toolCall('Write', { file_path: file, content: body }).say('Written.');
+  tr.write();
+  fs.writeFileSync(file, body);
+  assert.equal(writtenBy(tr.session, file, { home: p.home }), true);
+  fs.writeFileSync(file, '{"findings":[]}'); // same JSON, other bytes: not what it wrote, and its final message is no JSON
+  assert.equal(writtenBy(tr.session, file, { home: p.home }), false);
+  fs.writeFileSync(file, '{"draft":true}'); // an earlier write, overwritten by its last one
+  assert.equal(writtenBy(tr.session, file, { home: p.home }), false);
+  const other = transcript({ home: p.home, cwd: p.root, session: '55555555-0000-4000-8000-000000000006' });
+  other.say('No review.').write();
+  fs.writeFileSync(file, body);
+  assert.equal(writtenBy(other.session, file, { home: p.home }), false);
+  assert.equal(writtenBy({ runtime: 'claude', id: '55555555-0000-4000-8000-000000000099' }, file, { home: p.home }), false);
+
+  // Codex: the host writes the last message; the file's JSON equals the JSON in that message.
+  const c = codexRollout({ home: p.home, cwd: p.root, source: 'exec', originator: 'codex_exec' }).say('Looking.').say('Review:\n```json\n{ "findings": [{ "id": "F1" }] }\n```');
+  c.write();
+  fs.writeFileSync(file, '{"findings":[{"id":"F1"}]}');
+  assert.equal(writtenBy(c.session, file, { home: p.home }), true);
+  fs.writeFileSync(file, '{"findings":[]}');
+  assert.equal(writtenBy(c.session, file, { home: p.home }), false);
+});
+
+test('projectSessions reads a transcript whole only when its first entries put it in the project', async (t) => {
+  const p = makeProject({ adapter: false });
+  t.after(p.cleanup);
+  const hosts = await import('../engine/hosts/index.mjs');
+  const codex = hosts.findHost('codex');
+  const elsewhere = codexRollout({ home: p.home, cwd: path.join(p.tmp, 'another-project') }).human('hello');
+  elsewhere.write();
+  const mine = codexRollout({ home: p.home, cwd: p.root }).human('hi');
+  mine.write();
+  const timeline = codex.timeline;
+  const whole = [];
+  codex.timeline = (file) => {
+    whole.push(file);
+    return timeline(file);
+  };
+  t.after(() => {
+    codex.timeline = timeline;
+  });
+  const found = hosts.projectSessions(p.root, { home: p.home });
+  assert.deepEqual(found.map((s) => s.session.id), [mine.session.id]);
+  assert.equal(whole.length, 1);
+});
+
+test('hosts outside the plugin load from WF_HOSTS (or the user folder) in every process, the launch supervisor included', async (t) => {
+  const p = makeProject({ adapter: false });
+  t.after(p.cleanup);
+  const fs = (await import('node:fs')).default;
+  const { spawnSync } = await import('node:child_process');
+  const engine = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', 'engine');
+  const dir = path.join(p.tmp, 'hosts');
+  fs.mkdirSync(dir);
+  // A host whose reviewer is a node script printing its own event stream.
+  fs.writeFileSync(path.join(dir, 'outside.mjs'), `export default {
+  id: 'outside', label: 'Outside',
+  launch: ({ cwd, closure }) => ({ bin: process.execPath, args: ['-e', 'process.stdin.resume();process.stdin.on("end",()=>{console.log(JSON.stringify({kind:"start",id:"out-1234-5678"}));require("fs").writeFileSync(' + JSON.stringify(closure) + ',"{}");console.log(JSON.stringify({kind:"end"}))})'], session: null, cwd }),
+  event: (e) => (e.kind === 'start' ? { started: e.id } : e.kind === 'end' ? { ended: { ok: true } } : {}),
+};
+`);
+  fs.writeFileSync(path.join(dir, 'broken.mjs'), 'export default { id: "Not A Host" };\n');
+  const env = { ...process.env, WF_HOSTS: dir };
+  const ids = spawnSync(process.execPath, ['--input-type=module', '-e', `const h = await import(${JSON.stringify(path.join(engine, 'hosts', 'index.mjs'))}); console.log(JSON.stringify([h.hostIds(), h.hostProblems.length]));`], { env, encoding: 'utf8' });
+  assert.deepEqual(JSON.parse(ids.stdout), [['claude', 'codex', 'outside'], 1]);
+  assert.match(ids.stderr, /broken\.mjs/);
+  // The user folder is the default place.
+  const userDir = path.join(p.tmp, 'user');
+  fs.mkdirSync(path.join(userDir, 'hosts'), { recursive: true });
+  fs.copyFileSync(path.join(dir, 'outside.mjs'), path.join(userDir, 'hosts', 'outside.mjs'));
+  const fromUser = spawnSync(process.execPath, ['--input-type=module', '-e', `const h = await import(${JSON.stringify(path.join(engine, 'hosts', 'index.mjs'))}); console.log(JSON.stringify(h.hostIds()));`], { env: { ...process.env, WF_HOSTS: '', WF_USER_DIR: userDir }, encoding: 'utf8' });
+  assert.deepEqual(JSON.parse(fromUser.stdout), ['claude', 'codex', 'outside']);
+
+  const run = path.join(p.tmp, 'run');
+  fs.mkdirSync(run);
+  const spec = { host: 'outside', model: null, cwd: p.root, closure: path.join(run, 'review.json'), prompt: path.join(run, 'prompt.txt'), out: path.join(run, 'events.jsonl'), err: path.join(run, 'stderr.log'), status: path.join(run, 'status.json') };
+  fs.writeFileSync(spec.prompt, 'review');
+  fs.writeFileSync(path.join(run, 'spec.json'), JSON.stringify(spec));
+  const sup = spawnSync(process.execPath, [path.join(engine, 'launch.mjs'), '--supervise', path.join(run, 'spec.json')], { env, encoding: 'utf8', timeout: 30000 });
+  assert.equal(sup.status, 0, sup.stderr);
+  const status = JSON.parse(fs.readFileSync(spec.status, 'utf8'));
+  assert.deepEqual([status.state, status.session], ['done', 'out-1234-5678']);
+});

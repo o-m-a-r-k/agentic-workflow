@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { clearDoubles, setDoubles, worktreeDir } from '../engine/contract.mjs';
-import { git, makeProject, reviewerTranscript, writeDoubles } from './helpers/index.mjs';
+import { git, makeProject, reviewerTranscript, transcript, writeDoubles } from './helpers/index.mjs';
 import doubles, { answer } from './flow-doubles.mjs';
 import { implements08 as attempt } from '../engine/attempt.mjs';
 import { implements08 as flow } from '../engine/flow.mjs';
@@ -46,7 +46,21 @@ export async function review(p, id, perSeat = {}) {
     reviewerTranscript({ home: p.home, cwd: p.root, files, skip: seat.skip ?? [], session: session.id });
     out[b.seat] = await flow.recordReview(p.root, id, { session, seat: b.seat, tree, findings: seat.findings ?? [], verified: seat.verified ?? [] });
   }
+  // The fast tests ran on the reviewed tree (`wf review` runs them in parallel).
+  for (const repo of Object.keys((await doubles.attemptState(p.root, id)).repos)) await doubles.runTests(p.root, id, repo, 'fast');
   return { tree, bundles, out };
+}
+
+// A reviewer transcript that read `files` and wrote `review` (an object) to `output` with its file tool, as a real
+// reviewer does; the file is written too. Returns the transcript builder's session.
+export function reviewerWrote(p, session, { files, output, review: body, content = JSON.stringify(body) }) {
+  const t = transcript({ home: p.home, cwd: p.root, session });
+  t.human('Review this change.');
+  for (const f of files) t.advance(1).read(f);
+  t.advance(1).toolCall('Write', { file_path: output, content }, 'File created');
+  t.say('Review written.').write();
+  fs.writeFileSync(output, content);
+  return t;
 }
 
 export const commitWt = (p, id, repo, files, msg = 'change') => p.commit(repo, files, msg, { cwd: p.wt(id, repo) });

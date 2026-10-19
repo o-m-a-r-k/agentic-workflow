@@ -19,6 +19,8 @@ const CLIENT = {
     'tsconfig.json': '{\n  // aliases\n  "compilerOptions": { "baseUrl": ".", "paths": { "@ui/*": ["src/common/*"] }, },\n}\n',
     'scripts/routes-of.mjs': 'export default async (files) => [["pages/items", "/items"], ["pages/settings", "/settings"], ["pages/other", "/other"]].filter(([f]) => files.some((x) => x.includes(f))).map(([, r]) => r);\n',
     'README.md': '# client\n',
+    // A capture module: the same fake images, returned as the manifest; it notes the folder it was given and its own copy.
+    'scripts/capture-mod.mjs': 'import fs from "node:fs";\nimport path from "node:path";\nexport const COPY = "base";\nexport default async ({ cwd, out, viewport, lang, dir, routes }) => {\n  fs.writeFileSync(path.join(out, "ctx.json"), JSON.stringify({ cwd, copy: COPY }));\n  return routes.map((route, i) => {\n    const head = Buffer.alloc(24);\n    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(head, 0);\n    head.writeUInt32BE(13, 8); head.write("IHDR", 12, "ascii"); head.writeUInt32BE(viewport, 16); head.writeUInt32BE(600, 20);\n    fs.writeFileSync(path.join(out, "m-" + i + ".png"), Buffer.concat([head, Buffer.from(route + lang + viewport)]));\n    return { route, file: "m-" + i + ".png", lang, dir };\n  });\n};\n',
   },
 };
 
@@ -38,9 +40,9 @@ const png = (w, h, tag) => {
 };
 const manifest = routes.map((route, i) => {
   const file = 'shot-' + i + '.png';
-  const width = mode === 'narrow' && route === '/items' && viewport > 1000 ? viewport - 160 : viewport;
-  fs.writeFileSync(path.join(out, file), png(width, 800, mode === 'stuck' ? 'same' : route + lang + viewport));
-  return { route, file, lang, dir: mode === 'ltr-only' ? 'ltr' : dir };
+  const width = (mode === 'narrow' || mode === 'narrow-ltr') && route === '/items' && viewport > 1000 ? viewport - 160 : viewport;
+  fs.writeFileSync(path.join(out, file), png(width, 800, mode === 'stuck' ? 'same' : mode === 'per-route' ? route : route + lang + viewport));
+  return { route, file, lang, dir: mode === 'ltr-only' || mode === 'narrow-ltr' ? 'ltr' : dir };
 });
 fs.writeFileSync(path.join(out, 'manifest.json'), JSON.stringify(manifest));
 `;
@@ -159,6 +161,54 @@ test('wf screens lists each image with its viewport, lang, dir and size', async 
     const r = await commandHandler('screens')({ cwd: p.root, root: p.root, env: {}, actor: null, json: false }, { _: [], flags: { attempt: 'TK-5.1' } });
     assert.match(r.text, /^\/other 400px l1 ltr 400x800: /m);
     assert.equal(r.data.images.length, 4);
+  } finally {
+    done(p);
+  }
+});
+
+test('identical bytes for the same route at two viewports or languages are refused with screens:dup', async () => {
+  const p = project();
+  try {
+    process.env.WF_FIXTURE_MODE = 'per-route';
+    change(p, 'TK-5.1', 'client', { 'src/pages/other.mjs': 'export const page = 6;\n' });
+    await assert.rejects(capture(p.root, 'TK-5.1'), (e) => e.refusalId === 'screens:dup' && /\/other at \d+px \(l\d\) has the same bytes as \/other at/.test(e.message));
+  } finally {
+    delete process.env.WF_FIXTURE_MODE;
+    done(p);
+  }
+});
+
+test('a page that ignores the requested direction is recorded as a mismatch and named in the width refusal', async () => {
+  const p = project();
+  try {
+    process.env.WF_FIXTURE_MODE = 'ltr-only';
+    change(p, 'TK-5.1', 'client', { 'src/pages/other.mjs': 'export const page = 7;\n' });
+    const images = await capture(p.root, 'TK-5.1');
+    const rtl = images.filter((i) => i.lang === 'l2');
+    assert.ok(rtl.length > 0);
+    for (const i of rtl) assert.deepEqual(i.mismatch, { requested: { lang: 'l2', dir: 'rtl' }, page: { lang: 'l2', dir: 'ltr' } });
+    assert.ok(images.filter((i) => i.lang === 'l1').every((i) => !i.mismatch));
+    assert.ok(eventsOf(p, 'screens.captured', 'TK-5.1')[0].images.some((i) => i.mismatch));
+
+    process.env.WF_FIXTURE_MODE = 'narrow-ltr';
+    change(p, 'TK-5.1', 'client', { 'src/common/card.mjs': 'export const card = 8;\n' });
+    await assert.rejects(capture(p.root, 'TK-5.1'), (e) => e.refusalId === 'screens:width' && /did not show the requested language or direction: .*asked l2 rtl, the page is l2 ltr/.test(e.message));
+  } finally {
+    delete process.env.WF_FIXTURE_MODE;
+    done(p);
+  }
+});
+
+test('a capture module loads from the fetched base and runs with the attempt folder as its cwd', async () => {
+  const p = project();
+  try {
+    p.adapter.screens.capture = { module: { repo: 'client', path: 'scripts/capture-mod.mjs' } };
+    // The ticket changes the module: the base copy still captures it.
+    change(p, 'TK-5.1', 'client', { 'src/pages/other.mjs': 'export const page = 9;\n', 'scripts/capture-mod.mjs': 'export default async () => { throw new Error("the worktree copy ran"); };\n' });
+    const images = await capture(p.root, 'TK-5.1');
+    assert.deepEqual(images.map(key).sort(), ['/other 1200 l1 ltr', '/other 1200 l2 rtl', '/other 400 l1 ltr', '/other 400 l2 rtl']);
+    const ctx = JSON.parse(fs.readFileSync(path.join(path.dirname(images[0].file), 'ctx.json'), 'utf8'));
+    assert.deepEqual(ctx, { cwd: path.join(p.root, '.wf-worktrees', 'TK-5.1'), copy: 'base' });
   } finally {
     done(p);
   }

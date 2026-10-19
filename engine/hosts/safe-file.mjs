@@ -93,3 +93,41 @@ export function readEntries(file) {
     fs.closeSync(fd);
   }
 }
+
+// The first JSON line of a transcript for which `pick(entry)` returns a value other than null or undefined, read in
+// chunks from the start (opened without following a link) and stopping there: a session's working folder is in its first
+// entries, so finding it never reads the whole file. null when no line gives one.
+export function firstEntry(file, pick) {
+  const { fd, stat } = openRegular(file);
+  try {
+    const end = Math.min(stat.size, maxTranscriptBytes());
+    const chunk = Buffer.alloc(64 * 1024);
+    let pos = 0;
+    let rest = Buffer.alloc(0);
+    const tryLine = (buf) => {
+      const line = buf.toString('utf8');
+      if (!line.trim()) return undefined;
+      try {
+        return pick(JSON.parse(line)) ?? undefined;
+      } catch {
+        return undefined;
+      }
+    };
+    while (pos < end) {
+      const r = fs.readSync(fd, chunk, 0, Math.min(chunk.length, end - pos), pos);
+      if (!r) break;
+      pos += r;
+      let buf = Buffer.concat([rest, chunk.subarray(0, r)]);
+      for (let nl = buf.indexOf(10); nl >= 0; nl = buf.indexOf(10)) {
+        const v = tryLine(buf.subarray(0, nl));
+        if (v !== undefined) return v;
+        buf = buf.subarray(nl + 1);
+      }
+      rest = Buffer.from(buf);
+    }
+    const v = tryLine(rest);
+    return v === undefined ? null : v;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
