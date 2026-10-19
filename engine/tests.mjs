@@ -325,32 +325,61 @@ export async function runTests(root, attempt, repo, kind, { cwd, source = 'attem
   }
 }
 
-// The file to import for a project module (`{ repo, path }`: a test runner, the screens routes module), read from the
-// repo's fetched base (`refs/remotes/<remote>/<base>`) into a content-addressed cache in the user folder.
+// The file to import for a project module (`{ repo, path }`: a test runner, the screens routes module). The module's
+// whole folder is extracted from the repo's fetched base (`refs/remotes/<remote>/<base>`) into
+// `<userDir>/modules/<tree sha>[-<deps>]/`, so its relative imports of files beside or below it work. Bare package
+// imports resolve through a `node_modules` link to the nearest `node_modules` above the module's folder in the repo's
+// checkout (`-<deps>` keys the folder by that target, so two checkouts never share a link).
 //
 // Named failure (0.7: "a ticket cannot remove its own checks"): resolved in the attempt's worktree, a ticket could
 // change the runner that judges it, for example to one that always reports a pass. The code the runner executes (the
-// tests, the app) is still the ticket's own, from the worktree. A module is loaded alone: its relative imports of other
-// project files are not available from the cache.
+// tests, the app) is still the ticket's own, from the worktree.
 export function baseModule(root, adapter, ref, what = 'module') {
   const spec = repoSpec(adapter, ref.repo);
   const checkout = path.join(root, spec.path);
   const upstream = `refs/remotes/${spec.remote ?? 'origin'}/${spec.base}`;
   const rel = path.posix.normalize(String(ref.path)).replace(/^\/+/, '');
   if (rel.startsWith('..')) throw new WfError(`${what} ${ref.repo}/${ref.path} is outside its repo`);
-  const r = spawnSync('git', ['show', `${upstream}:${rel}`], { cwd: checkout, maxBuffer: 64 * 1024 * 1024 });
-  if (r.error || r.status !== 0) throw new WfError(`${what} ${ref.repo}/${rel} is not on ${upstream} (${String(r.stderr || r.error?.message || '').trim()})`, { hint: 'A module the engine runs is read from the fetched base: land it there first.' });
-  const hash = crypto.createHash('sha256').update(r.stdout).digest('hex');
-  const ext = path.posix.extname(rel) || '.mjs';
-  const dir = path.join(userDir(), 'modules');
-  const file = path.join(dir, `${hash}${ext}`);
-  if (!fs.existsSync(file)) {
-    fs.mkdirSync(dir, { recursive: true });
-    const tmp = `${file}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, r.stdout);
-    fs.renameSync(tmp, file);
+  const missing = (r) => new WfError(`${what} ${ref.repo}/${rel} is not on ${upstream} (${String(r.stderr || r.error?.message || '').trim()})`, { hint: 'A module the engine runs is read from the fetched base: land it there first.' });
+  const blob = spawnSync('git', ['cat-file', '-e', `${upstream}:${rel}`], { cwd: checkout, encoding: 'utf8' });
+  if (blob.error || blob.status !== 0) throw missing(blob);
+  const folder = path.posix.dirname(rel) === '.' ? '' : path.posix.dirname(rel);
+  const treeish = `${upstream}:${folder}`;
+  const tree = spawnSync('git', ['rev-parse', treeish], { cwd: checkout, encoding: 'utf8' });
+  if (tree.error || tree.status !== 0) throw missing(tree);
+  let deps = null;
+  for (let d = path.join(checkout, folder); ; d = path.dirname(d)) {
+    if (fs.existsSync(path.join(d, 'node_modules'))) {
+      deps = path.join(d, 'node_modules');
+      break;
+    }
+    if (d === checkout || path.dirname(d) === d) break;
   }
-  return file;
+  const key = `${tree.stdout.trim()}${deps ? `-${crypto.createHash('sha256').update(deps).digest('hex').slice(0, 12)}` : ''}`;
+  const modules = path.join(userDir(), 'modules');
+  const dir = path.join(modules, key);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(modules, { recursive: true });
+    const tmp = `${dir}.${process.pid}.tmp`;
+    fs.rmSync(tmp, { recursive: true, force: true });
+    fs.mkdirSync(tmp);
+    try {
+      const tar = spawnSync('git', ['archive', '--format=tar', treeish], { cwd: checkout, maxBuffer: 1024 * 1024 * 1024 });
+      if (tar.error || tar.status !== 0) throw missing(tar);
+      const x = spawnSync('tar', ['-x', '-f', '-', '-C', tmp], { input: tar.stdout });
+      if (x.error || x.status !== 0) throw new WfError(`could not extract ${ref.repo}/${folder || '.'} from ${upstream}: ${String(x.stderr || x.error?.message).trim()}`);
+      if (deps && !fs.existsSync(path.join(tmp, 'node_modules'))) fs.symlinkSync(deps, path.join(tmp, 'node_modules'), 'dir');
+      try {
+        fs.renameSync(tmp, dir);
+      } catch (e) {
+        // Another run extracted the same tree first: its copy is identical.
+        if (!fs.existsSync(dir)) throw e;
+      }
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  }
+  return path.join(dir, path.posix.basename(rel));
 }
 
 // ---- the command ----------------------------------------------------------------------------------------------------

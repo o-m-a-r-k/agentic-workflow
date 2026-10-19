@@ -535,6 +535,7 @@ Every response below either removes something or goes through section 8.
 | Parallel tickets collide in shared files | `merge:unreviewed` refusals per ticket | `after:` in the project. The engine still does no sequencing. |
 | The coverage check burns reviewer time on generated files | `review:coverage` refusals | A proposal that replaces a coverage path rule by moving those files to `kinds.other`. |
 | Tamper beyond the hash chain | A ledger edit found by `wf report` | Accepted under D6. |
+| A ticket edits the capture script it is judged by | `screens.capture` is a shell command run from the attempt folder, unlike the test and routes modules, which load from the base | Accepted: captures stay guarded by the width and duplicate checks, and the reviewer judges every image. |
 
 ## 12. Build plan
 

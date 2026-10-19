@@ -77,7 +77,29 @@ test('an attempt that edits its runner module to always pass is still judged by 
     assert.match(read(r.log), /^base runner ticket test fails/);
     assert.equal(eventsOf(p, 'test.run', 'TK-6.1')[0].pass, false);
     // The module ran from the content-addressed cache in the user folder.
-    assert.equal(fs.readdirSync(path.join(p.env.WF_USER_DIR, 'modules')).filter((f) => /^[0-9a-f]{64}\.mjs$/.test(f)).length, 1);
+    assert.equal(fs.readdirSync(path.join(p.env.WF_USER_DIR, 'modules')).filter((f) => /^[0-9a-f]{40}$/.test(f)).length, 1);
+  } finally {
+    done(p);
+  }
+});
+
+test('a base runner imports the helpers beside and below it, and the repo\'s installed packages', async () => {
+  const p = fixture({ repoOverrides: { server: { tests: { fast: { module: { repo: 'server', path: 'steps/run/runner.mjs' } } } } } });
+  try {
+    useDoubles(p);
+    p.commit('server', {
+      'steps/run/runner.mjs': 'import { verdict } from "./helper.mjs";\nimport { word } from "./lib/words.mjs";\nimport pkg from "fixture-pkg";\nexport default async () => ({ pass: verdict(), log: `${word} ${pkg}` });\n',
+      'steps/run/helper.mjs': 'export const verdict = () => true;\n',
+      'steps/run/lib/words.mjs': 'export const word = "sibling";\n',
+    }, 'runner', { push: true });
+    // An installed package in the checkout (ignored by git, as node_modules is).
+    fs.mkdirSync(path.join(p.repos.server.dir, 'node_modules', 'fixture-pkg'), { recursive: true });
+    fs.writeFileSync(path.join(p.repos.server.dir, 'node_modules', 'fixture-pkg', 'package.json'), '{"name":"fixture-pkg","type":"module","exports":"./index.js"}');
+    fs.writeFileSync(path.join(p.repos.server.dir, 'node_modules', 'fixture-pkg', 'index.js'), 'export default "package";\n');
+    startAttempt(p, 'TK-8.1');
+    const r = await runTests(p.root, 'TK-8.1', 'server', 'fast');
+    assert.equal(read(r.log), 'sibling package');
+    assert.equal(r.pass, true);
   } finally {
     done(p);
   }
