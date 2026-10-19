@@ -1,182 +1,131 @@
-// Tickets as files in the repo (`tracker.kind: files`, `via: files`). Each ticket is `<folder>/<id>.md` (default
-// folder `tickets/` at the project root): YAML frontmatter (id, title, status, labels) and the description as the body.
-// The engine does every tracker action itself and reads the files back as its own, verifiable readback:
-// - read: the ticket file;
-// - status: the frontmatter `status` rewritten to the configured name (`tracker.statuses`);
-// - comment: appended as a dated section between `<!-- wf:comment -->` markers;
-// - attach: each delivered screenshot copied into `<folder>/<id>/attachments/<title>`, listed with its caption and
-//   sha256 in `attachments.json` there.
-// Ticket ids are an allowlist; the folder and every file must be real (no link is ever followed or written through,
-// no hard link), inside the project and outside the evidence.
+// The built-in files tracker (`ticketing: { tracker: files, via: files }`): each issue is `<root>/tickets/<id>.md`, YAML
+// frontmatter (`id`, `title`, `status`, `labels`, `open`, and `team` on a filed issue) and the description as the body.
+// Comments are appended to the body between `<!-- wf:comment -->` lines, each carrying its marker, so a marker search
+// finds them. It implements the TrackerDriver of engine/contract.mjs; the engine calls it directly.
+//
+// Ids are an allowlist (letters, digits, `-`, `_`, inner dots; at most 64), checked before any filesystem call, so an
+// id can never name a path. The folder and every ticket file must be real: a symbolic link is never read or written
+// through, and a write goes to a temporary file renamed into place.
 import fs from 'node:fs';
 import path from 'node:path';
-import crypto from 'node:crypto';
-import { readRegular, writeNoFollow } from '../../engine/evidence.mjs';
-import { canonical, isInside, touchesEvidence } from '../../engine/paths.mjs';
-import { YAML } from '../../engine/util.mjs';
+import { createRequire } from 'node:module';
 
-// Named finding (0.4.0 review: path traversal): the item id was joined into paths, and folders created, before it
-// was validated. Every entry point now validates the id first, before any filesystem call: ASCII letters, digits,
-// `-`, `_`, and `.` only inside the name (no leading `.` or `-`, no `..`), at most 64 characters; no separator, NUL,
-// look-alike or invisible character can pass. The ticket's paths are then resolved and must lie strictly inside the
-// resolved tickets folder and outside the evidence; on a case-insensitive volume a ticket whose name differs only
-// in case is refused. Attachment titles pass the same kind of allowlist as plain file names.
+const YAML = createRequire(import.meta.url)('../../engine/vendor/yaml/dist/index.js');
 const ID = /^[A-Za-z0-9_](?:[A-Za-z0-9_.-]{0,62}[A-Za-z0-9_])?$/;
-const TITLE = /^[A-Za-z0-9_](?:[A-Za-z0-9_. -]{0,126}[A-Za-z0-9_])?$/;
-export function checkItem(item) {
-  const s = String(item ?? '');
-  if (!ID.test(s) || s.includes('..')) throw new Error(`invalid ticket id ${JSON.stringify(s.slice(0, 80))}: letters, digits, -, _ and inner dots only, at most 64, no path`);
-  return s;
-}
-export function checkTitle(title) {
-  const s = String(title ?? '');
-  if (!TITLE.test(s) || s.includes('..')) throw new Error(`invalid attachment name ${JSON.stringify(s.slice(0, 80))}: a plain file name (letters, digits, space, -, _, inner dots), no path`);
-  return s;
-}
-function ticketPaths(folder, item) {
-  checkItem(item);
-  const real = canonical(folder);
-  const file = path.join(folder, `${item}.md`);
-  const dir = path.join(folder, item);
-  // The folder resolved, the last name kept as is: a link there is never followed (no-follow reads and writes, and
-  // the ticket's folder must be a real folder), so it cannot lead outside.
-  for (const p of [file, dir]) {
-    const c = path.join(real, path.basename(p));
-    if (c === real || path.dirname(c) !== real || path.basename(c) !== path.basename(p)) throw new Error(`ticket ${item}: ${p} resolves outside the tickets folder`);
-    if (touchesEvidence(c)) throw new Error(`ticket ${item}: ${p} is in the evidence`);
-  }
-  const names = fs.readdirSync(folder);
-  const twin = names.find((n) => n !== `${item}.md` && n !== item && [`${item}.md`, item].some((x) => n.toLowerCase() === x.toLowerCase()));
-  if (twin) throw new Error(`ticket ${item}: ${twin} differs only in case; refused (one name per ticket on every volume)`);
-  return { file, dir };
-}
-const sha256 = (b) => crypto.createHash('sha256').update(b).digest('hex');
-const COMMENT = /<!-- wf:comment id=(\S+) at=(\S+) -->\n([\s\S]*?)\n<!-- \/wf:comment -->/g;
+const COMMENT = /<!-- wf:comment at=(\S+) -->\n([\s\S]*?)\n<!-- \/wf:comment -->/g;
 
-function folderOf(root, cfg) {
-  const folder = path.resolve(root, cfg.tracker.folder ?? 'tickets');
-  if (!isInside(canonical(folder), canonical(root))) throw new Error(`tracker.folder ${folder} is outside the project`);
-  if (touchesEvidence(folder)) throw new Error(`tracker.folder ${folder} is in the evidence`);
+export function checkId(id) {
+  const s = String(id ?? '');
+  if (!ID.test(s) || s.includes('..')) throw new Error(`invalid ticket id ${JSON.stringify(s.slice(0, 80))}: letters, digits, -, _ and inner dots only, at most 64`);
+  return s;
+}
+
+function realFolder(folder) {
   const st = fs.lstatSync(folder, { throwIfNoEntry: false });
   if (!st) throw new Error(`the tickets folder ${folder} does not exist`);
-  if (!st.isDirectory()) throw new Error(`${folder} is ${st.isSymbolicLink() ? 'a symlink' : 'not a folder'}; tickets are not read or written through it`);
+  if (!st.isDirectory()) throw new Error(`${folder} is ${st.isSymbolicLink() ? 'a symbolic link' : 'not a folder'}; tickets are not read or written through it`);
   return folder;
 }
 
-function realDir(dir, create) {
-  const st = fs.lstatSync(dir, { throwIfNoEntry: false });
-  if (st && !st.isDirectory()) throw new Error(`${dir} is ${st.isSymbolicLink() ? 'a symlink' : 'not a folder'}; not written through`);
-  if (!st && create) fs.mkdirSync(dir);
-  return dir;
+function fileOf(folder, id) {
+  const file = path.join(folder, `${checkId(id)}.md`);
+  const st = fs.lstatSync(file, { throwIfNoEntry: false });
+  if (st && !st.isFile()) throw new Error(`${file} is not a regular file; not read or written through`);
+  return { file, exists: Boolean(st) };
 }
 
-function readTicket(folder, item) {
-  const { file } = ticketPaths(folder, item);
-  const r = readRegular(file);
-  if (!r) throw new Error(`no ticket ${item}: ${file} is missing, a link or not a regular file with one name`);
-  const text = r.bytes.toString('utf8');
+function parse(file, id) {
+  const text = fs.readFileSync(file, 'utf8');
   const m = /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/.exec(text);
   if (!m) throw new Error(`${file} has no YAML frontmatter (--- id, title, status ---)`);
   const front = YAML.parse(m[1]) ?? {};
-  if (front.id !== undefined && String(front.id) !== item) throw new Error(`${file}: its id \`${front.id}\` differs from its file name`);
-  const body = m[2];
-  const comments = [...body.matchAll(COMMENT)].map((c) => ({ id: c[1], createdAt: c[2], updatedAt: c[2], body: c[3] }));
-  const firstMarker = body.search(/<!-- wf:comment /);
-  const description = (firstMarker < 0 ? body : body.slice(0, firstMarker)).replace(/\n## Comments\s*$/, '').trim();
-  return { file, front, body, comments, description };
+  if (front.id !== undefined && String(front.id) !== id) throw new Error(`${file}: its id \`${front.id}\` differs from its file name`);
+  return { front, body: m[2] };
 }
 
-function readAttachments(folder, item) {
-  const dir = path.join(ticketPaths(folder, item).dir, 'attachments');
-  const st = fs.lstatSync(dir, { throwIfNoEntry: false });
-  if (!st || !st.isDirectory()) return [];
-  const r = readRegular(path.join(dir, 'attachments.json'));
-  const listed = r ? JSON.parse(r.bytes.toString('utf8')) : [];
-  // Each listed file is read back: its bytes' sha256 is what the readback reports (a changed file shows as changed).
-  return listed.map((a) => {
-    let title = null;
-    try {
-      title = checkTitle(a.title);
-    } catch {}
-    const f = title ? readRegular(path.join(dir, title)) : null;
-    return { id: a.title, title: a.title, subtitle: a.subtitle ?? null, url: `${item}/attachments/${title ?? 'invalid-name'}`, sha256: f ? sha256(f.bytes) : null, stored: Boolean(f) };
-  });
+function write(file, front, body) {
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, `---\n${YAML.stringify(front)}---\n${body}`, { flag: 'wx' });
+  fs.renameSync(tmp, file);
 }
 
-function writeTicket(t, front, body) {
-  writeNoFollow(t.file, `---\n${YAML.stringify(front)}---\n${body}`);
-}
+const view = (id, { front, body }) => ({
+  id,
+  title: String(front.title ?? ''),
+  status: front.status ?? null,
+  // A file with no `labels:` key carries none; the files tracker can always read its labels.
+  labels: Array.isArray(front.labels) ? front.labels.map(String) : [],
+  url: `tickets/${id}.md`,
+  body,
+});
 
-const readback = (folder, item) => {
-  const t = readTicket(folder, item);
-  return { issue: { identifier: item, title: t.front.title ?? '', description: t.description, status: t.front.status ?? null, url: path.relative(path.dirname(folder), t.file), labels: t.front.labels ?? [], comments: t.comments, attachments: readAttachments(folder, item) }, via: 'files' };
-};
-
-export default {
-  via: 'files',
-  operations: {
-    readIssue: 'the engine reads tickets/<id>.md',
-    setStatus: 'the engine rewrites the frontmatter status',
-    comment: 'the engine appends the comment to the ticket file',
-    attach: 'the engine copies each screenshot into tickets/<id>/attachments/ with its caption and sha256',
-    readBack: 'the engine reads the files back',
-  },
-  isUpload: (a) => Boolean(a?.stored) && /^[^/]+\/attachments\/[^/]+$/.test(String(a?.url ?? '')),
-  files: {
-    async perform({ root, cfg, item, actions }) {
-      checkItem(item);
-      for (const a of actions) for (const f of a.op === 'attach' ? a.files : []) checkTitle(f.name);
-      const folder = folderOf(root, cfg);
-      const { dir: ticketDir } = ticketPaths(folder, item);
-      const assets = {};
-      const ordered = [...actions].sort((x, y) => (x.op === 'attach' ? -1 : 0) - (y.op === 'attach' ? -1 : 0));
-      for (const a of ordered) {
-        if (a.op === 'attach') {
-          const dir = realDir(path.join(realDir(ticketDir, true), 'attachments'), true);
-          const listFile = path.join(dir, 'attachments.json');
-          const listed = readRegular(listFile);
-          const list = listed ? JSON.parse(listed.bytes.toString('utf8')) : [];
-          for (const f of a.files) {
-            // The bytes the engine read once with its safe reader; this adapter never opens the screenshot's path.
-            const title = f.name;
-            writeNoFollow(path.join(dir, title), f.bytes);
-            const entry = { title, subtitle: f.caption ?? null, sha256: f.sha256 };
-            const i = list.findIndex((x) => x.title === title);
-            if (i >= 0) list[i] = entry;
-            else list.push(entry);
-            assets[title] = `${item}/attachments/${title}`;
-          }
-          writeNoFollow(listFile, `${JSON.stringify(list, null, 2)}\n`);
-        } else if (a.op === 'setStatus') {
-          const t = readTicket(folder, item);
-          if (t.front.status === a.status || (a.unless ?? []).includes(t.front.status)) continue;
-          writeTicket(t, { ...t.front, status: a.status }, t.body);
-        } else if (a.op === 'comment') {
-          if (!a.body) continue;
-          const t = readTicket(folder, item);
-          const body = a.body.replace(/\{assetUrl:([^}]+)\}/g, (m, title) => assets[title] ?? `${item}/attachments/${path.basename(title)}`);
-          if (a.reuseExisting && t.comments.some((c) => c.body.trim() === body.trim())) continue;
-          const at = new Date().toISOString();
-          const head = t.body.includes('\n## Comments') ? '' : '\n\n## Comments\n';
-          writeTicket(t, t.front, `${t.body.replace(/\s*$/, '')}${head}\n<!-- wf:comment id=c-${t.comments.length + 1} at=${at} -->\n${body.trim()}\n<!-- /wf:comment -->\n`);
-        }
-      }
-      return readback(folder, item);
+// The driver over `<root>/tickets`. `folder` overrides it (tests).
+export function filesTracker(root, { folder = path.join(root, 'tickets') } = {}) {
+  const dir = () => realFolder(folder);
+  const all = () => fs.readdirSync(dir()).filter((n) => n.endsWith('.md') && ID.test(n.slice(0, -3))).map((n) => n.slice(0, -3)).sort();
+  const load = (id) => {
+    const { file, exists } = fileOf(dir(), id);
+    return exists ? { file, ...parse(file, id) } : null;
+  };
+  return {
+    async read(id) {
+      const t = load(id);
+      return t ? view(id, t) : null;
     },
-  },
-  normalize(raw) {
-    const issue = raw?.issue ?? raw ?? {};
-    return {
-      id: issue.identifier ?? issue.id,
-      title: issue.title ?? '',
-      description: typeof issue.description === 'string' ? issue.description : '',
-      status: issue.status ?? null,
-      url: issue.url ?? null,
-      updatedAt: null,
-      // The ticket's labels (0.7.27, I-190: the project may route a status by them); absent when the readback has none to give.
-      ...(Array.isArray(issue.labels) ? { labels: issue.labels.map(String) } : {}),
-      comments: (issue.comments ?? []).map((c) => ({ id: c.id, body: c.body ?? '', createdAt: c.createdAt, updatedAt: c.updatedAt ?? c.createdAt })),
-      attachments: (issue.attachments ?? []).map((a) => ({ id: a.id, title: a.title, subtitle: a.subtitle ?? null, filename: a.title, url: a.url, sha256: a.sha256 ?? null, stored: a.stored })),
-    };
-  },
+    async normalise(raw) {
+      const s = String(raw ?? '').trim();
+      if (!ID.test(s)) return null;
+      // The file's own spelling, so `abc-1` and `ABC-1` reach one ticket on every volume.
+      return all().find((id) => id.toLowerCase() === s.toLowerCase()) ?? null;
+    },
+    async search({ text, marker } = {}) {
+      const out = [];
+      for (const id of all()) {
+        const t = load(id);
+        const hit = marker ? t.body.includes(marker) : t.front.open !== false && (String(t.front.title ?? '').includes(text) || t.body.includes(text));
+        if (hit) out.push(view(id, t));
+      }
+      return out;
+    },
+    async create({ title, body, team = null, status = null, label = null, marker }) {
+      if (!marker || !String(body).includes(marker)) throw new Error('create: the body must carry the marker');
+      const ids = all();
+      // The next number after the highest, with that ticket's prefix (`ABC-7` → `ABC-8`); `1` in an empty folder.
+      const nums = ids.map((id) => /^(.*?)(\d+)$/.exec(id)).filter(Boolean).sort((a, b) => Number(b[2]) - Number(a[2]));
+      const id = nums.length ? `${nums[0][1]}${Number(nums[0][2]) + 1}` : '1';
+      const { file, exists } = fileOf(dir(), id);
+      if (exists) throw new Error(`create: ${file} already exists`);
+      const front = { id, title, status, labels: label ? [label] : [], ...(team ? { team } : {}) };
+      write(file, front, `${String(body).trim()}\n`);
+      return { id };
+    },
+    async setStatus(id, status) {
+      const t = load(id);
+      if (!t) throw new Error(`no ticket ${id}`);
+      if (t.front.status !== status) write(t.file, { ...t.front, status }, t.body);
+    },
+    async comment(id, { body, marker }) {
+      if (!marker || !String(body).includes(marker)) throw new Error('comment: the body must carry the marker');
+      const t = load(id);
+      if (!t) throw new Error(`no ticket ${id}`);
+      if (t.body.includes(marker)) return;
+      const head = t.body.includes('\n## Comments') ? '' : '\n\n## Comments\n';
+      write(t.file, t.front, `${t.body.replace(/\s*$/, '')}${head}\n<!-- wf:comment at=${new Date().toISOString()} -->\n${String(body).trim()}\n<!-- /wf:comment -->\n`);
+    },
+    // The comments of a ticket, for tests and readers.
+    async comments(id) {
+      const t = load(id);
+      return t ? [...t.body.matchAll(COMMENT)].map((c) => ({ at: c[1], body: c[2] })) : [];
+    },
+  };
+}
+
+export const operations = {
+  read: 'the engine reads tickets/<id>.md',
+  search: 'the engine searches the ticket files',
+  fileFollowUp: 'the engine writes a new ticket file',
+  setStatus: 'the engine rewrites the frontmatter status',
+  comment: 'the engine appends the comment to the ticket file',
 };
+
+export default filesTracker;
