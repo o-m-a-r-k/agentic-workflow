@@ -236,7 +236,12 @@ test('an unanswered course signal does not hold the merge round a changed base m
   sh(wt, 'git add -A && git commit -q --no-edit');
   const s = state(root, e.id);
   assert.equal(s.decision.mode, 'merge', 'the changed merge owes a merge round');
-  assert.equal(wf(root, ['gate', '--attempt', e.id]).code, 75, 'the gate waits for the merge round');
+  // The step the owner reads names the merge review itself, not the strategist (review of 0.7.34, M3).
+  assert.match(s.next, /^merge review: only base merges came in since the last reviewed tree/);
+  const gateHeld = wf(root, ['gate', '--attempt', e.id]);
+  assert.equal(gateHeld.code, 75, 'the gate waits for the merge round');
+  // And the gate's refusal names what is owed: one merge review (review of 0.7.34, L4).
+  assert.match(gateHeld.err, /no review round covers the current tree: one merge review of the base merge\(s\) first/);
   const loaded = loadState(root, e.id);
   assert.deepEqual([...(loaded.baseMerges ?? []), ...(loaded.baseObserved ?? [])].map((b) => [b.n, b.class]).sort(), [[1, 'none'], [2, 'changed']]);
   // The merge round is handed although the course signal stands, and the gate runs after it.
@@ -251,4 +256,26 @@ test('an unanswered course signal does not hold the merge round a changed base m
   assert.deepEqual(sb.history.events.filter((x) => x.kind === 'base merge').map((x) => [x.ref, /by hand/.test(x.line)]), [['base:1', false], ['base:2', true]]);
   assert.equal(sb.history.rounds.find((r) => r.round === 'mr-905').mode, 'merge');
   ok(record({ root }, { id: e.id }, strategistClosure(base, h.bundle, { ...baseClosure('strat-905'), diagnosis: [{ cause: 'base', what: 'the base changed the line this ticket changes, and the merge was resolved by hand', rounds: ['mr-905'], refs: ['base:2'], correction: { lever: 'base-timing', change: 'take the base in once, right before the final gate' } }], progressed: ['rev0-905', 'rev1-905'], review: [] }).file));
+});
+
+// Review of 0.7.34 (M1, L8): a re-raised finding binds only with a family and a criterion or invariant both stated, and only while it
+// is open: a family alone is a label match nobody confirmed, and a finding recorded already fixed is no cause back.
+test('a finding with only the family of one the diagnosis cited, or one recorded already fixed, holds nothing; one still open with the family and the criterion holds the next round', () => {
+  const ctx = project('reraised-anchor');
+  const a = started({ run: (r, args) => wf(r, args) }, ctx, { item: 'ENG-906', expect: LONG });
+  const { criterion: _cc, ...unanchored } = proof('F2', 'no criterion');
+  round(ctx, a, 'rev-1', [proof('F1', 'first'), unanchored]);
+  const h1 = strategist(ctx, a, 'strat-1');
+  // The diagnosis cites a finding with a criterion and one with the family alone.
+  ok(record(ctx, a, strategistClosure(ctx.base, h1.bundle, { ...baseClosure('strat-1'), diagnosis: [{ cause: 'capability', what: 'the recording proof cannot be made here', rounds: ['rev-1'], refs: ['rev-1:F1', 'rev-1:F2'], correction: { lever: 'person', change: 'the person decides whether to ship without it' } }], progressed: [], review: [] }).file));
+  // The family alone, no criterion: not a re-raise.
+  const { criterion: _c, ...familyOnly } = proof('F1', 'family only');
+  round(ctx, a, 'rev-2', [familyOnly]);
+  ok(wf(ctx.root, ['handoff', 'implementer', '--agent', 'impl-2', '--attempt', a.id, '--owner', a.owner]));
+  // The family and the criterion, recorded already fixed: not open, not a re-raise.
+  round(ctx, a, 'rev-3', [{ ...proof('F1', 'fixed in place'), status: 'fixed', evidence: 'docs/proof.md:1 now carries the proof' }]);
+  ok(wf(ctx.root, ['handoff', 'implementer', '--agent', 'impl-3', '--attempt', a.id, '--owner', a.owner]));
+  // Still open, with both: held.
+  round(ctx, a, 'rev-4', [proof('F1', 'again')]);
+  assert.match(wf(ctx.root, ['handoff', 'implementer', '--agent', 'impl-4', '--attempt', a.id, '--owner', a.owner]).err, /rev-4:F1 was raised after S1, with the family and criterion of rev-1:F1/);
 });

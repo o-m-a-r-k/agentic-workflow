@@ -195,6 +195,38 @@ const ownLine = (state, ref) => {
 // One item's tester wording, never empty: the item's ref when nothing else is recorded.
 const wording = (state, ref, text, decision = null) => ownLine(state, ref) ?? (plainFor(state, decision, ref) ? firstSentence(plainFor(state, decision, ref)) : null) ?? (firstSentence(text) || ref);
 
+// Review of 0.7.34 (M2): a round handed by an engine before 0.7.34 judged the whole change, a merge already in its tree included: it was
+// handed no `baseMerge` list to answer. A `context` merge counts as judged when a round that finished (not partial), handed with no
+// such list, was recorded on a tree whose repo HEAD holds the merge commit. A round handed with the list answers by naming it.
+// Named failure: attempts in flight (one field ledger had six such merges) would read "not checked by review" for merges their
+// reviews had seen.
+const listed = new Map();
+function handedWithList(state, r) {
+  const h = (state.handoffs ?? []).find((x) => x.bundle === r.handoff);
+  if (!h?.bundle) return false;
+  if (!listed.has(h.bundle)) {
+    let has = false;
+    try {
+      has = Array.isArray(readJson(h.bundle)?.baseMerge);
+    } catch {
+      has = false;
+    }
+    listed.set(h.bundle, has);
+  }
+  return listed.get(h.bundle);
+}
+function judgedWhole(state, m) {
+  const sha = m.merge ?? m.headAfter;
+  const wt = state.repos?.[m.repo]?.worktree;
+  if (!sha || !wt || !fs.existsSync(wt)) return false;
+  return (state.reviews ?? []).some((r) => {
+    if (r.partial || handedWithList(state, r)) return false;
+    const head = String(r.tree?.[m.repo] ?? '').split('+')[0];
+    if (!/^[0-9a-f]{7,64}$/.test(head)) return false;
+    return spawnSync('git', ['merge-base', '--is-ancestor', sha, head], { cwd: wt, encoding: 'utf8' }).status === 0;
+  });
+}
+
 // Every item the delivered comment lists, with the ref the owner words it by (`ref: null` for lines already written for the
 // tester: a criterion's `finalHandoff`, a dropped criterion's reason, a screenshot follow-up, a ticket).
 export function limitItems(state, { load = null } = {}) {
@@ -215,7 +247,7 @@ export function limitItems(state, { load = null } = {}) {
   // 0.7.34 (I-233): a base merge whose edits in this change's files no review judged (one after the acceptance, or one an
   // acceptance carried across, engine/merges.mjs): the tester reads where other work met this change.
   const judgedMerges = new Set((state.reviews ?? []).flatMap((r) => (Array.isArray(r.closure?.baseMerges) ? r.closure.baseMerges : []).flatMap((a) => [a?.id, a?.merge]).filter(Boolean)));
-  for (const m of [...(state.baseMerges ?? []), ...(state.baseObserved ?? [])]) if (m.class === 'context' && !judgedMerges.has(`base:${m.n}`) && !judgedMerges.has(m.merge ?? m.headAfter)) add(null, `Not checked by review: other work merged in from the base branch also changed ${(m.touched ?? []).length === 1 ? 'a file' : `${(m.touched ?? []).length} files`} this change edits; the checks ran on the combined result, and no reviewer looked at where the two meet.`);
+  for (const m of [...(state.baseMerges ?? []), ...(state.baseObserved ?? [])]) if (m.class === 'context' && !judgedMerges.has(`base:${m.n}`) && !judgedMerges.has(m.merge ?? m.headAfter) && !judgedWhole(state, m)) add(null, `Not checked by review: other work merged in from the base branch also changed ${(m.touched ?? []).length === 1 ? 'a file' : `${(m.touched ?? []).length} files`} this change edits; the checks ran on the combined result, and no reviewer looked at where the two meet.`);
   for (const a of state.delivery?.shown?.anomalies ?? []) if (a.followUp) add(null, `Follow-up: ${a.observation} (${a.followUp})`);
   // 0.7.28 (I-212): a suite the person set aside in the gate this delivery passed is named: it was not proven.
   for (const st of state.lastGate?.status === 'passed' ? state.lastGate.steps ?? [] : []) for (const q of st.quarantined ?? []) add(`quarantine:${st.id}:${q}`, `Not proven by the checks: the test suite ${q} failed and was set aside by your decision; this change does not edit that test file, and whether the code it exercises changed was not checked.`);

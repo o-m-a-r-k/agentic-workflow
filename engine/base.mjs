@@ -180,7 +180,7 @@ export function baseMerge(root, options) {
       results.push({ repo: entry.repo, upToDate: true, note: entry.note });
       continue;
     }
-    if (reviewing) throw refuse(`reviewer ${reviewing.agent} was handed this tree and has recorded no closure`, 'wait for its closure; the merge goes right before the gate', { id: 'base:review-in-flight' });
+    if (reviewing) throw refuse(`reviewer ${reviewing.agent} was handed this tree and has recorded no closure`, `record its closure file (\`wf review --closure <file> --attempt ${state.id}\`), or hand a fresh reviewer if it is gone (\`wf handoff reviewer --agent <new id>\`); the merge goes right before the gate`, { id: 'base:review-in-flight' });
     const wt = state.repos[entry.repo].worktree;
     const before = git(wt, ['rev-parse', 'HEAD']);
     const merge = run('git', ['merge', '--no-edit', '-m', `Merge ${entry.ref} into ${branchName(state.id)}`, entry.tip], { cwd: wt, allowFail: true });

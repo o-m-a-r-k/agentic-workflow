@@ -112,7 +112,7 @@ test('I-233: wf base merge waits for a reviewer at work: the merge goes right be
   const m = wf(root, ['base', 'merge', '--attempt', e.id]);
   assert.equal(m.code, 75);
   assert.match(m.err, /reviewer r was handed this tree and has recorded no closure/);
-  assert.match(m.err, /wait for its closure; the merge goes right before the gate/);
+  assert.match(m.err, /record its closure file \(`wf review --closure <file> --attempt [^`]+`\), or hand a fresh reviewer if it is gone \(`wf handoff reviewer --agent <new id>`\); the merge goes right before the gate/);
   ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('r')), '--attempt', e.id]));
   ok(wf(root, ['base', 'merge', '--attempt', e.id]));
   assert.equal(state(root, e.id).decision.kind, 'gate');
@@ -189,4 +189,62 @@ test('I-233: a gate stopped as a tree change while the base had moved names the 
   assert.match(ok(wf(root, ['resume', '--attempt', id])).out, /the base moved \(app: \+1 commit\(s\)\): when the stop was for that, `wf base merge`/);
   ok(wf(root, ['base', 'merge', '--attempt', id]));
   assert.equal(state(root, id).decision.kind, 'gate', 'no fresh review for a merge that left the change as it was');
+});
+
+// Review of 0.7.34 (M2): a round handed by an engine before 0.7.34 judged the whole change, a merge already in its tree included; it
+// was handed no `baseMerge` list to answer. Named failure: attempts in flight (one field ledger had six context merges) would read
+// "not checked by review" for merges their reviews had seen. A round handed with the list still answers by naming the merge.
+test('I-233: a context merge counts as judged by a finished round handed no baseMerge list whose tree holds the merge; not by a partial round, one handed the list, or one on a tree before it', () => {
+  const { base, root } = project('bm-earlier-engine');
+  const { id } = reviewed(root, base, 'ENG-2339');
+  const before = String(loadState(root, id).reviews.at(-1).tree.app).split('+')[0];
+  baseCommit(root, { 'src/m.txt': seven({ 4: 'theirs-4' }) }, 'base edit next to the hunk');
+  ok(wf(root, ['base', 'merge', '--attempt', id]));
+  const st = loadState(root, id);
+  const merged = st.baseMerges.at(-1);
+  assert.equal(merged.class, 'context');
+  const head = merged.headAfter;
+  const bundle = (name, extra) => {
+    const f = path.join(base, `${name}.json`);
+    fs.writeFileSync(f, JSON.stringify({ role: 'reviewer', ...extra }));
+    return f;
+  };
+  const withRound = ({ tree, partial = false, list = false }) => {
+    const b = bundle(`b-${Math.random().toString(36).slice(2)}`, list ? { baseMerge: [{ id: `base:${merged.n}` }] } : {});
+    return { ...st, handoffs: [...st.handoffs, { role: 'reviewer', agent: 'old-rev', bundle: b, at: '2099-01-01T00:00:00.000Z' }], reviews: [...st.reviews, { reviewer: 'old-rev', handoff: b, at: '2099-01-01T00:00:01.000Z', tree: { app: tree }, partial, closure: { reviewer: 'old-rev', findings: [] } }] };
+  };
+  const unchecked = (s) => limitItems(s).filter((x) => /no reviewer looked at where the two meet/.test(x.line)).length;
+  assert.equal(unchecked(st), 1, 'no round has seen it yet');
+  assert.equal(unchecked(withRound({ tree: head })), 0, 'an earlier engine\'s finished round on a tree holding the merge judged it');
+  assert.equal(unchecked(withRound({ tree: head, partial: true })), 1, 'a partial round judged nothing whole');
+  assert.equal(unchecked(withRound({ tree: head, list: true })), 1, 'a round handed the list answers by naming it');
+  assert.equal(unchecked(withRound({ tree: before })), 1, 'a round on the tree before the merge never saw it');
+});
+
+// Review of 0.7.34 (L5): a changed merge while the latest round has open blocking findings owes no merge round of its own: the fix
+// round comes first, and its delta round judges the merge with the fix (listed under `baseMerge`). `wf base merge` says so.
+test('I-233: a changed merge on a round with open blocking findings is judged in the fix round\'s delta round, and wf base merge says so', () => {
+  const { base, root } = project('bm-open-findings');
+  const e = ok(wf(root, ['entry', '--item', 'ENG-2340', '--json'])).json();
+  ok(wf(root, ['handoff', 'planner', '--agent', 'plan-2340', '--attempt', e.id]));
+  ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id]));
+  ok(wf(root, ['handoff', 'implementer', '--agent', 'impl-2340', '--attempt', e.id]));
+  const wt = e.repos.app.worktree;
+  commitIn(wt, { 'src/m.txt': seven({ 2: 'mine' }) });
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev0-2340', '--attempt', e.id]));
+  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('rev0-2340', { findings: [{ id: 'F1', severity: 'high', summary: 'line 7 is wrong', status: 'open', evidence: 'src/m.txt:7', criterion: 'C1' }] })), '--attempt', e.id]));
+  // The base makes the ticket's own edit too: the merge leaves the ticket's change different (class changed).
+  baseCommit(root, { 'src/m.txt': seven({ 2: 'mine' }), 'src/other.txt': 'theirs\n' }, 'the same edit landed on the base');
+  const m = ok(wf(root, ['base', 'merge', '--attempt', e.id]));
+  assert.equal(ledger(root, e.id).filter((x) => x.type === 'base.merged').at(-1).data.class, 'changed');
+  assert.match(m.out, /note: the latest review round has open blocking findings, so no merge review of its own is owed: the next delta round, after the fix, judges this merge with the fix/);
+  const s = state(root, e.id);
+  assert.notEqual(s.decision.mode, 'merge', 'the fix round comes first');
+  ok(wf(root, ['handoff', 'implementer', '--agent', 'impl-2340', '--attempt', e.id]));
+  commitIn(wt, { 'src/m.txt': seven({ 2: 'mine', 7: 'fixed' }) });
+  ok(wf(root, ['handoff', 'close', '--agent', 'impl-2340', '--attempt', e.id]));
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev1-2340', '--attempt', e.id]));
+  const b = lastBundle(root, e.id);
+  assert.equal(b.mode ?? ledger(root, e.id).filter((x) => x.type === 'handoff' && x.data.role === 'reviewer').at(-1).data.mode, 'delta');
+  assert.deepEqual(b.baseMerge.map((x) => x.class), ['changed'], 'the delta round judges the merge with the fix');
 });

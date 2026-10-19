@@ -109,7 +109,7 @@ the same command again after the fix goes on. The settings live outside the repo
 { "syncRoots": ["<a project root>"], "worktreeFolder": "<the folder of the dev worktrees>", "privacyDenylist": "<the denylist file>" }
 ```
 
-The check stops when an improvement history file (`improvements/`) sits uncommitted in any worktree of the repository: it
+The check stops when an improvement history file (`improvements/`) is new or changed and not committed in any worktree of the repository (`git status --porcelain`): it
 belongs in the release. `scenarios/release-script.test.mjs` tests the dry run only; the steps talk to GitHub and the hosts and are never run by the suite.
 
 ## Every fix names its failure and ships its test

@@ -13,7 +13,7 @@
 // round count's cadence (D84), the course signals that hand the strategist (engine/course.mjs) and the roles following the
 // corrections. The engine checks facts only: that what a closure cites exists, that it is earlier or later than a decision, that a
 // round handed since the previous decision is accounted for, and that a category equals an earlier one. Agents judge the meaning.
-import { recordedRoundsOf, unreachedOf } from './review-policy.mjs';
+import { dispositionOf, openAcrossRounds, recordedRoundsOf, unreachedOf } from './review-policy.mjs';
 import { sameCauseRefs } from './causes.mjs';
 
 // Why the rounds loop: the category the engine compares (never the words), with the plain meaning every reader sees instead.
@@ -100,8 +100,8 @@ export function refsOf(state) {
   for (const d of state.strategy?.decisions ?? []) put(d.id, d.at, 'strategist decision', `${d.action}: ${String(d.rationale ?? '').split('\n')[0].slice(0, 160)}`);
   for (const d of state.decisions ?? []) put(d.id, d.approved?.at ?? d.createdAt ?? null, 'the person\'s decision', `${d.kind}${d.approved ? `, answered ${d.approved.choice ?? 'in their own words'}` : d.withdrawn ? ', withdrawn' : ', open'}: ${String(d.summary ?? '').slice(0, 160)}`);
   // Base merges recorded by `wf base merge` (and the delivery's), and those merged by hand the engine observed (`base.observed`, I-233),
-  // by the one counter the ledger keeps for both (`n`, in ledger order), so every reader names a merge alike. A ledger folded before
-  // the counter existed numbers them in time order.
+  // by the one counter the ledger keeps for both (`n`): ledger order is the rule, so every reader names a merge alike. The fold
+  // assigns `n` to every merge it reads, old ledgers included; the time order below is only a fallback for a state built without it.
   [...(state.baseMerges ?? []).map((b) => ({ ...b, how: b.delivery ? 'merged at delivery' : 'merged' })), ...(state.baseObserved ?? []).map((b) => ({ ...b, how: 'merged by hand' }))].sort((x, y) => (Number.isInteger(x.n) && Number.isInteger(y.n) ? x.n - y.n : String(x.at).localeCompare(String(y.at)))).forEach((b, i) => put(`base:${Number.isInteger(b.n) ? b.n : i + 1}`, b.at, 'base merge', `${b.repo ?? '?'}: ${b.commits ?? '?'} commit(s) from ${b.ref ?? 'the base'}, ${b.how}`));
   for (const g of state.gates ?? []) if (g.runId) put(`gate:${g.runId}`, g.at, 'gate run', `${g.status ?? 'finished'}`);
   for (const s of state.stops ?? []) if (s.runId) put(`gate:${s.runId}`, s.at, 'gate run', `stopped: ${String(s.reason ?? '').slice(0, 160)}`);
@@ -365,17 +365,24 @@ export function reraised(state) {
     const reviewer = r.closure?.reviewer ?? r.reviewer;
     for (const f of r.closure?.findings ?? []) if (f?.id) findings.set(`${reviewer}:${f.id}`, { ...f, ref: `${reviewer}:${f.id}`, handed: handedAt.get(r.handoff) ?? r.at });
   }
-  const key = (f) => `${text(f.family)}|${text(f.criterion) || text(f.invariant)}`;
+  // Review of 0.7.34 (M1, L8): the family and a criterion or invariant, both stated (a family alone is a label match nobody confirmed,
+  // which never binds), and only a finding still open, as for `recurringCauses`.
+  const anchor = (f) => text(f.criterion) || text(f.invariant);
+  const key = (f) => `${text(f.family)}|${anchor(f)}`;
+  const open = new Set(openAcrossRounds(state).filter((f) => {
+    const x = dispositionOf(state, f.ref);
+    return !x || x.choice === 'fixed';
+  }).map((f) => f.ref));
   const out = [];
   const seen = new Set();
   for (const d of ds) {
     for (const e of d.diagnosis) {
-      const cited = [...(e.refs ?? [])].map((r) => findings.get(r)).filter((f) => f && text(f.family));
+      const cited = [...(e.refs ?? [])].map((r) => findings.get(r)).filter((f) => f && text(f.family) && anchor(f));
       if (!cited.length) continue;
       const keys = new Map();
       for (const f of cited) if (!keys.has(key(f))) keys.set(key(f), f);
       for (const f of findings.values()) {
-        if (seen.has(f.ref) || !later(f.handed, d.at) || sameCauseRefs(f).length || !keys.has(key(f))) continue;
+        if (seen.has(f.ref) || !open.has(f.ref) || !anchor(f) || !text(f.family) || !later(f.handed, d.at) || sameCauseRefs(f).length || !keys.has(key(f))) continue;
         seen.add(f.ref);
         out.push({ again: f.ref, decision: d.id, cause: e.cause, like: keys.get(key(f)).ref });
       }

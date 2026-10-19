@@ -112,11 +112,15 @@ export function attemptForName(root, name) {
   return open[0] ?? mine.map(([id]) => id).sort((a, b) => n(a) - n(b)).at(-1);
 }
 
-export function openState(root, options, { follow = true } = {}) {
+// Review of 0.7.34 (L7): `dryRun` for a command whose contract says it records nothing (`wf criteria amend --check`, `wf plan --check`):
+// no engine bookkeeping either (an early round question withdrawn, the adapter followed, a hand merge classified). Ordinary reads
+// such as `wf status` and `wf resume` may record that bookkeeping (`decision.withdrawn`, `adapter.followed`, `base.observed`).
+export function openState(root, options, { follow = true, dryRun = false } = {}) {
   const id = resolveAttempt(root, options);
   openEvidence(root, id);
   const state = loadState(root, id);
   assertSchema(state);
+  if (dryRun) return state;
   // 0.7.29 (I-214): a round question an earlier release opened before it was due is withdrawn before anything reads the attempt.
   // 0.7.30 (I-151, D60): the attempt takes the adapter committed on its base branch, where it safely can, before anything reads it
   // (not for `wf hold`, which is recorded first, so the pin cannot move under the person's hold).

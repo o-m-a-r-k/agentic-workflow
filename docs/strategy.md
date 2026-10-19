@@ -69,7 +69,7 @@ amendment's `--reason`). The owner skill says this in goal terms.
 
 ## Course signals: the strategist as the next step (0.7.28, D44)
 
-Seven signals are not the owner's to judge away (six from 0.7.28, `reach` from 0.7.31, D64). Named failure: in a three-ticket batch (47 review rounds against 11 planned)
+Eight signals are not the owner's to judge away (six from 0.7.28, `reach` from 0.7.31, D64, `reraised` from 0.7.34, D86). Named failure: in a three-ticket batch (47 review rounds against 11 planned)
 the owner wrote "converging, not calling the strategist" six times and handed no strategist while files ran two to four
 times the plan and the criteria were amended upward four times. `engine/course.mjs` names them:
 
@@ -82,6 +82,7 @@ times the plan and the criteria were amended upward four times. `engine/course.m
 | `regression` | the latest round's findings sit on lines the fix round before it wrote (`git blame`) |
 | `divergence`, `replan` | an implementer expects more than twice the fix the reviewers stated for what it was handed (`fix: { what, minutes }` on each finding), by more than the plan's minutes per review round, or its report asks for a re-plan |
 | `reach` | a fix round's or a planned pass's own commits (first-parent, no merges, from its handoff to its close) changed a contract file (one the components' `provides` or `dependsOn` contracts name) or a migration (never a documentation or test file, nor a migrations folder's index) that nothing it was handed accounts for: no handed item is located on it, no stated fix names it (by its path, or a migration's folder), a component's own spec follows only a covered change to its contract, and, in a round handed no non-blocking item without a stated fix, the attempt's own earlier commits had not already changed it. A round that only builds planned work for the first time is not counted; one that also fixes findings or items is judged by those. A work item handed again after a review whose context or own text names an open finding or discovered issue is judged as handed it (`fixes.named`). Implementers open at once in one repo are named together, once. The line names what was handed and which handed items no reviewer stated a fix for (unbounded). A work item handed again after an amendment that restated it after its last build closed is planned work for the files the amendment explains: a contract file named by the endpoints or error codes its `scope` states (the spec its own component provides, or a file whose own name, not its folders, shares two distinctive words with a name; counts alone explain every contract file), named in its words, or found in its repo by the queries of an impact-addendum change for the item; a migration named by path or folder, or planned by such a change. A criterion reworded under `impact: { unchanged }` explains nothing. Rounds open at once in one repo share what explains a file. Measured on one project's ledgers, counting only handoffs whose implementer closed with its heads: 1 of 229 rounds handed after a first review (the named failure itself, a true positive), against 9 for the first form of the signal; of the 67 work items handed again with words naming an open item, none fires. 51 more rounds never closed and cannot be measured from the main checkouts |
+| `reraised` | a finding still open, raised after a strategist decision, with the family and the criterion (or invariant) of a finding that decision's diagnosis cited, and no `sameCauseAs` (0.7.34, below) |
 
 While one stands that no strategist decision answered, a next step that hands an implementer or a new code-review round
 is the strategist's handoff (`wf resume` and `wf advance` say `strategy`, with the signals and no "continue" offered beside
@@ -103,14 +104,14 @@ unanswered from the sixth round until the first strategist decision, and `regres
 0.7.28 to 0.7.33 both would only have named the strategist as the next step, and the owner could hand the next round anyway.
 
 Four signals now hold the next implementer and code-review round until a strategist decision answers them, as the round count
-does (`strategy:course`); an evidence review of a gated tree, the merge round a `changed` base merge owes (the gate waits for it, so holding it would leave no way on), a gate, the acceptance and delivery go on:
+does (`strategy:course`); the merge round a `changed` base merge owes and the evidence review of a gated tree are not held by a course signal (the round count and an escalation still hold them), and a gate, the acceptance and delivery go on:
 
 | Signal | Why it is a fact, not a threshold |
 | --- | --- |
-| `rounds` | rounds handed past the latest expectation an agent stated (the plan's, a re-plan's, a strategist's `continue`): the agent's own number, never the engine's. Answered by a decision recorded after the round that passed it (one an earlier engine recorded too) or by the person's own direction given after it (their answer to a round question, a hold they lifted) |
+| `rounds` | rounds handed past the latest expectation an agent stated (the plan's, a re-plan's, a strategist's `continue`): the agent's own number, never the engine's. Answered by a decision recorded after the round that passed it (one an earlier engine recorded too) or by the person's own direction given after it (their answer to a round question, a hold they lifted). Deliberately once per expectation: a decision that states no new expectation answers it until one is stated, and the round count still comes back on its own cadence |
 | `regression` | the latest round's findings sit on lines the fix round before it wrote (`git blame`) |
 | `recurring` | a finding a reviewer linked (`sameCauseAs`) to one already marked fixed, or one found open again after being verified fixed. A label match only (`familyRecurrences`) does not hold |
-| `reraised` | a finding raised by a round handed after a strategist decision, with the family and criterion (or invariant) of a finding that decision's diagnosis cited, and no `sameCauseAs`: by the strategist's own grouping, the cause it accounted for came back and no reviewer said so |
+| `reraised` | a finding still open, raised by a round handed after a strategist decision, with the family and the criterion (or invariant) of a finding that decision's diagnosis cited, and no `sameCauseAs`: by the strategist's own grouping, the cause it accounted for came back and no reviewer said so. Both a family and a criterion or invariant are needed: a family alone is a label match nobody confirmed, which never binds |
 
 Size does not hold anything (`files`, `amended`: a large ticket going well crosses those lines too, the D9 failure), nor an
 implementer's estimate or re-plan request (the owner answers those with an amendment), nor `reach` (it already holds the gate after

@@ -396,8 +396,8 @@ export function requireOwnerDecision(root, state, role, options = {}, { mergeRou
 // 0.7.34 (I-234): a course signal that binds (engine/course.mjs `BINDING`: rounds past the attempt's own prediction, a fix whose own
 // lines held the next round's findings, a cause a reviewer linked to one already fixed, a finding a strategist's diagnosis accounted
 // for raised again) and that no strategist decision answered holds the next implementer and code-review round, as the round count
-// does (D84): the strategist decides first. An evidence review (a gate passed on this tree), a merge round (the targeted review a
-// `changed` base merge owes, I-233: the gate waits for it, so holding it would leave no way on), a gate, the acceptance and delivery
+// does (D84): the strategist decides first. The evidence review of a gated tree and the merge round a `changed` base merge owes
+// (I-233) are not held by a course signal (the round count and an escalation still hold them); a gate, the acceptance and delivery
 // go on.
 // Named failure (field): eleven handed rounds with no strategist decision while a fix chain and base drift were visible.
 export function bindingSignals(root, state, role) {

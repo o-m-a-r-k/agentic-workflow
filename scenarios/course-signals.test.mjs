@@ -86,6 +86,8 @@ test('rounds past the plan, a cause that came back and a fix whose own lines wer
   assert.match(s.next, /2 review rounds handed, past the 1 the plan expected/);
   assert.match(s.next, /r2:F1 has the family of r1:F1 \(totals\), which was marked fixed/);
   assert.match(s.next, /round 2 raised 1 finding\(s\) on lines the fix round after round 1 wrote \(r2:F1\): the last fix made new defects/);
+  // 0.7.34 (I-234): these hold the next round, and the step says which round is never held.
+  assert.match(s.next, /until it decides, no implementer and no code-review round starts, except the merge review a changed base merge owes \(an evidence review, a gate, the acceptance and the delivery go on\)/);
   // The strategist consolidates: its decision drives the next step, the one amendment that restates the remaining work.
   ok(strategist(p, 's1', { action: 'consolidate', rationale: 'one assumption about totals lives in several places', expect: { rounds: 1, minutes: 60 } }).record());
   let next = resume(p);

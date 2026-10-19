@@ -198,10 +198,10 @@ const STEPS = {
     }
     if (call('git', ['cat-file', '-e', `${s.sha}:${f.notes}`], { cwd: f.main, quiet: true, allowFail: true }).status !== 0) throw new Stop(`${f.notes} is not in ${s.sha.slice(0, 10)}`);
     // 0.7.34. Named failure: `wf improve close` wrote an improvement's history into the checkout of main, it was never committed, and
-    // thirteen releases shipped without it. An improvement history file that no commit holds, in any worktree of this repository,
-    // stops the release: it belongs in it.
-    const stray = [...new Set([f.main, ...f.worktrees.map((w) => w.path)])].filter((d) => fs.existsSync(d)).flatMap((d) => (git(d, ['ls-files', '--others', '--exclude-standard', '--', 'improvements/']) || '').split('\n').filter(Boolean).map((x) => `${d}: ${x}`));
-    if (stray.length) throw new Stop(`improvement history not in any commit; commit it in the release (dev branch) and run CI on that:\n    ${stray.join('\n    ')}`);
+    // thirteen releases shipped without it. An improvement history file that no commit holds, or that a worktree changed and did not
+    // commit, in any worktree of this repository, stops the release: it belongs in it (review of 0.7.34, L9: tracked and modified too).
+    const stray = [...new Set([f.main, ...f.worktrees.map((w) => w.path)])].filter((d) => fs.existsSync(d)).flatMap((d) => (git(d, ['status', '--porcelain', '--', 'improvements/']) || '').split('\n').filter(Boolean).map((x) => `${d}: ${x.trim()}`));
+    if (stray.length) throw new Stop(`improvement history not committed (new or changed); commit it in the release (dev branch) and run CI on that:\n    ${stray.join('\n    ')}`);
     const onMain = git(f.main, ['rev-parse', 'refs/remotes/origin/main']);
     if (onMain !== s.sha && call('git', ['merge-base', '--is-ancestor', onMain, s.sha], { cwd: f.main, quiet: true, allowFail: true }).status !== 0) throw new Stop(`origin/main (${onMain.slice(0, 10)}) is not an ancestor of ${s.sha.slice(0, 10)}: main cannot fast-forward; rebase the release on main and run CI again`);
     say(`  ${VERSION_FILES.join(', ')} say ${f.version}; ${f.notes} is there; origin/main ${onMain === s.sha ? 'is already there' : `(${onMain.slice(0, 10)}) fast-forwards to it`}`);

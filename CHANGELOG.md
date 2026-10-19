@@ -12,11 +12,12 @@ Release notes, newest first, then every fix that came from a failure in the work
   whether that change was made and whether it worked; a change that did not work is not proposed again for the same cause: the
   strategist picks another or asks you. The changes in force appear in `wf resume` in plain words, and implementers and reviewers
   are handed them.
-- **Signs that a ticket is looping now stop the next round until the strategist decides (I-234, D86).** Named failure: ten
+- **Signs that a ticket is looping now stop the next round until the strategist decides (I-234, D86).** Named failure: eleven
   rounds ran with no strategist while each wording fix caused the next finding. Now, when review rounds run past what the agents
   themselves predicted, when a fix causes the next round's findings, when a reviewer confirms a cause came back, or when a finding
   the strategist already diagnosed is raised again, no implementer or code review starts until the strategist decides. Evidence
-  reviews, merge reviews, the gate and delivery are not held, and a bigger-than-planned change on its own holds nothing.
+  reviews and merge reviews are not held by these signals (the round count and an escalation still hold them), the gate and
+  delivery go on, and a bigger-than-planned change on its own holds nothing.
 - **A base merge costs at most one look at what it changed in the ticket (I-233, D87).** Named failure: the work instructions said
   "merge a moved base before the gate" with no end point; an agent stopped a running gate to merge, and each merge after
   acceptance made the evidence review run again on a tree that differed only by the base. Now each merge is classed from git
@@ -25,12 +26,13 @@ Release notes, newest first, then every fix that came from a failure in the work
   conflict resolution or a merge that moved the change gets one review of just that merge. Merge the base once, right before the
   gate; never stop a gate for it, and never squash or rebase onto the base. `wf base merge` waits for a reviewer at work.
 - **A re-plan can be checked before it is handed back (I-230, I-231, D88).** `wf criteria amend --check --file <f>` runs every
-  check the recorded amendment runs, including the impact addendum's queries, and records nothing. Before, `wf plan --check`
+  check the recorded amendment runs, including the impact addendum's queries, and records nothing, not even engine bookkeeping
+  (`wf plan --check` neither); ordinary reads such as `wf status` and `wf resume` may record that bookkeeping. Before, `wf plan --check`
   refused frozen criteria and form errors surfaced only when the owner recorded the amendment, costing another planner handoff.
 
 - **An improvement's history left uncommitted stops the release.** Named failure: the history of an improvement fixed in 0.7.21
   was written into the checkout of main by `wf improve close` and never committed; thirteen releases shipped without it. It is in
-  this release, and the release script's check now stops when an improvement history file sits uncommitted in any worktree of the
+  this release, and the release script's check now stops when an improvement history file is new or changed and not committed in any worktree of the
   repository, naming each one.
 - **How a release is built is written down (CONTRIBUTING.md, "Building a release").** Named failure (0.7.33, about 2h20 against a
   2-hour aim): one builder took seven items in a row; a rule redesign was built before its design was reviewed; a test in an

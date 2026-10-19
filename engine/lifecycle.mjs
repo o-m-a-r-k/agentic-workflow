@@ -304,7 +304,7 @@ export const replanAfterUpgrade = (state) => Boolean(state.criteria) && (state.i
 export const uncovered = (state) => (state.work ? (state.criteria ?? []).map((c) => c.id).filter((id) => !state.work.some((w) => w.criteria.includes(id))) : []);
 
 export function freezeCriteria(root, options) {
-  const state = openState(root, options);
+  const state = openState(root, options, { dryRun: options.check === true });
   const cfg = trustedAdapter(root, state);
   // Named failure (I-127): an analysis attempt upgraded to implementation kept the plan written for the analysis. Its fresh
   // planners could only amend criteria (an amendment carries no plan), so their implementation plans never reached a
@@ -554,7 +554,7 @@ function droppedFields(state, doc) {
   return rest.filter((k) => k !== 'survey' || canonical(doc.survey ?? null) !== canonical(state.impact?.survey ?? null));
 }
 export function amendCriteria(root, options) {
-  const state = openState(root, options);
+  const state = openState(root, options, { dryRun: options.check === true });
   if (!state.criteria) throw refuse(`criteria are not frozen yet; use \`wf plan\`${options.check ? ' (`wf plan --check --file <f>` checks a plan without recording it)' : ''}`);
   // 0.7.34 (I-230, I-231): `--check` is the dry run of this command, for the read-only planner of a re-plan. Named failure (field):
   // `wf plan --check` refused frozen criteria, and the amendment's schema errors (an impact `contracts` entry naming no query)
@@ -733,8 +733,8 @@ export function handoff(root, role, options) {
   // 0.7.0 (D3): the strategist's bundle is built in engine/strategy.mjs; no implementer or reviewer starts while the round count
   // awaits the strategist's decision (0.7.33, D84) or a strategist's escalation awaits the person's.
   if (role === 'strategist') return strategistHandoff(root, state, options);
-  // 0.7.34 (D86, I-233 x I-234): a merge round (the targeted review a `changed` base merge owes) is never held by a course signal:
-  // the gate waits for it, so holding it would hold the attempt with no way on.
+  // 0.7.34 (D86, I-233 x I-234): a merge round (the targeted review a `changed` base merge owes) is not held by a course signal, as
+  // an evidence review is not; the round count and an escalation still hold it.
   if (['implementer', 'reviewer'].includes(role)) requireOwnerDecision(root, state, role, options, { mergeRound: role === 'reviewer' && mergeRoundOwed(state) });
   if (!options.agent) throw new WfError('--agent <identity of the agent you are starting> is required');
   const agent = String(options.agent);
@@ -2060,10 +2060,13 @@ function acceptedAcross(state, r) {
 const isDeltaMode = (mode) => mode === 'delta' || mode === 'merge';
 // Whether the round owed now is a merge round: only base merges since the latest round, at least one of them `changed`, and no other
 // reason for a code review (a check registered or corrected, a criterion changed).
-function mergeRoundOwed(state) {
+// Review of 0.7.34 (L5): not while the latest round has open blocking findings: the fix round comes first, and its delta round
+// judges the merge with the fix (it is listed under `baseMerge` in that round's bundle).
+export function mergeRoundOwed(state) {
   const r = state.review;
   const t = r?.tree ?? r?.handoffTree;
   if (!r || !t || r.partial || validationSinceReview(state) || criteriaChangedSince(state, r.at)) return false;
+  if (blockingIn(state, r).length) return false;
   try {
     return !reviewCovers(state, r) && throughMerges(state, t, treeHashes(state), { allow: ['none', 'context', 'changed'] }).ok;
   } catch {
@@ -2136,7 +2139,8 @@ export function gateOrderProblems(state) {
   const r = state.review;
   if (validationSinceReview(state)) problems.push('required supplemental validation was added or corrected after the last code review: run a fresh code review before the gate');
   if (!r || !reviewCovers(state, r)) {
-    if (!busy && !evidenceFixReady(state) && !passBuilt(state)) problems.push(`no review round covers the current tree: run the code review first (\`wf handoff reviewer --agent <new id>\`); the gate runs once a round on this tree comes back clean`);
+    // Review of 0.7.34 (L4): when only base merges came in and one changed the ticket's change, what is owed is one merge review.
+    if (!busy && !evidenceFixReady(state) && !passBuilt(state)) problems.push(mergeRoundOwed(state) ? `no review round covers the current tree: one merge review of the base merge(s) first (\`wf handoff reviewer --agent <new id>\`: its bundle is a \`merge\` round that judges those merges and nothing else); the gate runs once it comes back clean` : `no review round covers the current tree: run the code review first (\`wf handoff reviewer --agent <new id>\`); the gate runs once a round on this tree comes back clean`);
     return problems;
   }
   // 0.7.32 (D75): findings only a re-run of their gate step satisfies are what the next gate is for (engine/gate.mjs rerunRoute).
@@ -2213,6 +2217,8 @@ export function reviewAnomalies(gate, closure) {
 const reviewedAfterGate = (r) => r.gateEvidenceInspected ?? true;
 // The open findings of a recorded review that block (engine/review-policy.mjs): observations never open a round.
 const openFindings = (r, state) => blockingIn(state ?? {}, r);
+// Whether the latest recorded round has blocking findings still open (`wf base merge` says where a changed merge is judged then).
+export const blockingOpenNow = (state) => Boolean(state?.review) && blockingIn(state, state.review).length > 0;
 // 0.7.31 (I-217, D64): the open blocking findings of a review when every one of them has a premise an implementer reported does not
 // hold and nothing has settled since (their refs), or null.
 // 0.7.32 (I-222, D71): with the earlier blocking findings the round kept open. Named failure (an audit of 0.7.31): a finding whose
@@ -4356,7 +4362,8 @@ function phaseStep(root, cfg, state) {
     if (passBuilt(state) && !pass.ok) return reachRouted(`${PASS_GATE.replace('run one `wf gate`', gateRun)}`);
   }
   // 0.7.34 (I-233): only base merges since the latest round, one of them changing this ticket's change: a merge review of just those.
-  if (!covered && mergeRoundOwed(state)) return routed(`merge review: only base merges came in since the last reviewed tree, and one of them changed this ticket's change (a resolution, an edit in the merge, or the change itself differs): hand to ${fresh}; its bundle is a \`merge\` round that judges those merges and nothing else; ${noGate}`);
+  // Review of 0.7.34 (M3): not routed to the strategist, as `nextDecision` does not route it: a course signal never holds a merge round.
+  if (!covered && mergeRoundOwed(state)) return (`merge review: only base merges came in since the last reviewed tree, and one of them changed this ticket's change (a resolution, an edit in the merge, or the change itself differs): hand to ${fresh}; its bundle is a \`merge\` round that judges those merges and nothing else; ${noGate}`);
   if (!covered) return routed(integrationCheckOwed(cfg, state) ? `the combined tree of ${state.work.length} work items needs a passing \`wf check --attempt ${state.id}\` first (fix what it finds through the implementers); then the code review: hand to ${fresh}; ${noGate}` : `code review: hand to ${fresh}; ${noGate}`);
   const open = openFindings(r, state);
   const joining = outstanding(state);

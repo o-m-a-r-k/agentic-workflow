@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { criteriaFile, FIXTURE_EXPECT, impactAddendum, makeRepo, ok, singleRepoProject, state, tmp, wf, yaml } from './helpers.mjs';
+import { commitIn, criteriaFile, FIXTURE_EXPECT, impactAddendum, makeRepo, ok, sh, singleRepoProject, state, tmp, wf, yaml } from './helpers.mjs';
 
 const bundleOf = (r) => JSON.parse(fs.readFileSync(r.out.match(/^Read (\S+)/m)?.[1] ?? r.out.match(/bundle: (\S+)/)[1], 'utf8'));
 const write = (base, doc) => {
@@ -87,4 +87,28 @@ test('I-231: `wf criteria amend --check --add-repo` checks the repo it would add
   const s = state(root, e.id);
   assert.deepEqual(Object.keys(s.repos), ['web']);
   assert.equal(fs.existsSync(path.join(root, '.wf-worktrees', e.id, 'api')), false, 'no worktree created');
+});
+
+// Review of 0.7.34 (L7): a dry run records nothing, not even engine bookkeeping. With a base merged by hand that no command has seen
+// yet, `wf criteria amend --check` and `wf plan --check` leave the ledger byte-identical; an ordinary read (`wf status`) may record
+// that bookkeeping (`base.observed`).
+test('I-231: the dry runs record no engine bookkeeping either: an unobserved hand merge stays unobserved until an ordinary read', () => {
+  const { base, root } = singleRepoProject('amend-check-quiet', { gate: { steps: [{ id: 'unit', repo: 'app', run: 'true' }] } });
+  const e = ok(wf(root, ['entry', '--item', 'AC-2', '--owner', 'o', '--json'])).json();
+  ok(wf(root, ['handoff', 'planner', '--agent', 'p', '--attempt', e.id]));
+  ok(wf(root, ['plan', '--file', criteriaFile(base), '--attempt', e.id]));
+  const wt = e.repos.app.worktree;
+  sh(root, 'git checkout -q main');
+  commitIn(root, { 'src/base-only.txt': 'theirs\n' }, 'the base moves');
+  sh(root, 'git push -q origin main');
+  commitIn(wt, { 'src/mine.txt': 'mine\n' }, 'the ticket\'s own commit');
+  sh(wt, 'git fetch -q origin main && git merge -q --no-ff --no-edit origin/main');
+  const ledger = path.join(root, '.wf-evidence', 'attempts', e.id, 'ledger.jsonl');
+  const before = fs.readFileSync(ledger, 'utf8');
+  const criteria = [{ id: 'C2', text: 'the list shows a total', uat: 'the total matches' }];
+  ok(wf(root, ['criteria', 'amend', '--check', '--file', write(base, { criteria, impact: impactAddendum(criteria, null), expect: FIXTURE_EXPECT }), '--attempt', e.id]));
+  assert.equal(wf(root, ['plan', '--check', '--file', criteriaFile(base), '--attempt', e.id]).code, 75);
+  assert.equal(fs.readFileSync(ledger, 'utf8'), before, 'byte-identical: no base.observed, nothing else');
+  ok(wf(root, ['status', '--attempt', e.id]));
+  assert.match(fs.readFileSync(ledger, 'utf8'), /"type":"base\.observed"/, 'an ordinary read records the bookkeeping');
 });
