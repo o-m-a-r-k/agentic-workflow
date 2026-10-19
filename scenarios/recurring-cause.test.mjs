@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { closureFile, commitIn, criteriaFile, goodClosure, ok, sh, singleRepoProject, wf, write } from './helpers.mjs';
+import { decideCourse } from './strategist-fixtures.mjs';
 
 const steps = [{ id: 'unit', repo: 'app', run: 'true' }];
 const LINES = 'l1\nl2\nl3\nl4\nl5\nl6\n';
@@ -77,6 +78,9 @@ test('a finding that shares its cause with a finding already marked fixed is a r
   assert.match(state.decision.guidance, line, 'the next step starts with it');
   assert.match(ok(wf(p.root, ['resume', '--attempt', p.id])).out, line);
   assert.match(ok(wf(p.root, ['status', '--attempt', p.id])).out, line);
+  // Since 0.7.34 (I-234) a confirmed recurrence holds the next fix round until a strategist decides.
+  assert.match(wf(p.root, ['handoff', 'implementer', '--agent', 'held', '--attempt', p.id]).err, /no implementer starts until it decides: the cause of r1:F1 came back in r2:F1/);
+  decideCourse((args) => wf(p.root, args), p.base, p.id, 's-recurring');
   // The next fix round: the whole history, the shared cause marked on both findings, and the recurrence.
   const second = fixRound(p, { 'src/a.txt': CHANGED.replace('L2', 'L2 fixed').replace('L5', 'L5 fixed') }, 'fix the export', 'Fixes-finding: r2:F1');
   const [one, two] = second.findingHistory;
@@ -228,7 +232,8 @@ test('a finding marked fixed in one round and found open again in a later one is
   const line = /r1:F1 was marked fixed and found open again by r3: the last fix covered one place; find the root cause before the next fix round/;
   assert.match(ok(wf(p.root, ['signals', '--attempt', p.id])).out, line);
   assert.match(ok(wf(p.root, ['resume', '--attempt', p.id])).out, line);
-  // A round that verifies it fixed again ends it.
+  // A round that verifies it fixed again ends it (the strategist decides first: the recurrence holds the fix round, 0.7.34).
+  decideCourse((args) => wf(p.root, args), p.base, p.id, 's-reopened');
   fixRound(p, { 'src/a.txt': CHANGED.replace('L2', 'L2 fixed for good') }, 'fix for good', 'Fixes-finding: r1:F1');
   hand(p, 'r4');
   ok(record(p, goodClosure('r4', { criteria: [], priorFindings: [{ round: 'r1', id: 'F1', status: 'fixed', evidence: 'src/a.txt:5 fine' }] })));

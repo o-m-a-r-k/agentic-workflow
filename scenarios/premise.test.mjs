@@ -13,6 +13,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { closureFile, commitIn, goodClosure, makeRepo, ok, planDoc, sh, singleRepoProject, tmp, wf, writeReport } from './helpers.mjs';
+import { minimalDiagnosis } from './strategist-fixtures.mjs';
 import { reachOf } from '../engine/signals.mjs';
 import { parseConfig } from '../engine/config.mjs';
 
@@ -267,7 +268,7 @@ test('a fix round whose own commits change a contract, for an item with no state
   const st = ok(wf(p.root, ['handoff', 'strategist', '--agent', 's1', '--attempt', p.id, '--json'])).json();
   assert.deepEqual(JSON.parse(fs.readFileSync(st.bundle, 'utf8')).courseSignals.map((x) => x.id), ['reach']);
   const f = path.join(p.base, 's1.json');
-  fs.writeFileSync(f, JSON.stringify({ strategist: 's1', action: 'continue', rationale: 'the person asked for the contract change', prediction: { signal: 'blockingLatest <= 1', by: 3 }, expect: { files: 5, rounds: 2, minutes: 120 }, premise: { shared: 'the due date is written in production', traced: 'the two pages that show it', notTraced: 'who writes it' } }));
+  fs.writeFileSync(f, JSON.stringify({ ...minimalDiagnosis(JSON.parse(fs.readFileSync(st.bundle, 'utf8'))), strategist: 's1', action: 'continue', rationale: 'the person asked for the contract change', prediction: { signal: 'blockingLatest <= 1', by: 3 }, expect: { files: 5, rounds: 2, minutes: 120 }, premise: { shared: 'the due date is written in production', traced: 'the two pages that show it', notTraced: 'who writes it' } }));
   ok(wf(p.root, ['strategy', 'record', '--closure', f, '--attempt', p.id]));
   const after = resume(p);
   assert.notEqual(after.decision.kind, 'strategy', 'its decision answers the signal');

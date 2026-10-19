@@ -12,6 +12,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { changedFiles, treeHashes } from './attempt.mjs';
 import { familyRecurrenceLine, familyRecurrences, recurrenceLine, recurringCauses } from './causes.mjs';
+import { causeOverlaps, correctionLines } from './diagnosis.mjs';
 import { ownerTranscript } from './host-record.mjs';
 import { home as hostHome } from './provenance.mjs';
 import { blockingOpen, blockingSeries, earlierBlocking, observations, placementLevel, unreachedOf } from './review-policy.mjs';
@@ -520,6 +521,10 @@ export function computeSignals(root, state, { nowMs = Date.now(), cfg = null, ho
     blockingFindings: blocking.map(blockRef),
     // 0.7.27 (I-191): a finding still open that shares its cause with one already marked fixed (the reviewer's `sameCauseAs`).
     recurringCauses: recurringCauses(state),
+    // 0.7.34 (I-232): the strategist's corrections to how the work runs, each in force or with what became of it, and what two
+    // decisions put under different causes; plain lines.
+    corrections: correctionLines(state),
+    causeOverlaps: causeOverlaps(state),
     // A finding still open with the family of one already marked fixed, no cause confirmed: a possible recurrence.
     familyRecurrences: familyRecurrences(state),
     criteria: { atFreeze: state.criteriaAtFreeze, now: (state.criteria ?? []).length },
@@ -598,6 +603,8 @@ export function courseLines(sig, { predictions = [], shell = true } = {}) {
   for (const r of sig.reach ?? []) out.push(reachLine(r));
   for (const r of sig.recurringCauses ?? []) out.push(recurrenceLine(r));
   for (const r of sig.familyRecurrences ?? []) out.push(familyRecurrenceLine(r));
+  for (const l of sig.corrections ?? []) out.push(l);
+  for (const l of sig.causeOverlaps ?? []) out.push(`${l}: information for the strategist, who judges which reading is right`);
   // A pattern found one place at a time is a class to fix in one sweep (lessons of one attempt: about 35 of 67 discovered
   // issues were callers needing the same new guard, each found and recorded separately).
   // 0.7.27 (I-185): findings an earlier round raised and no round has verified fixed are not shown as zero because the latest

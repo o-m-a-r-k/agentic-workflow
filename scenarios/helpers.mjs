@@ -352,8 +352,10 @@ export function stages(criteria = [{ id: 'C1' }], work = null, n = 'fixture') {
 }
 
 // A plan file in stage order: survey, the design, impact.
-// 0.7.0: a plan states its own prediction (D9); scenarios that are not about it carry a neutral one.
-export const FIXTURE_EXPECT = { files: 2, rounds: 2, minutes: 60 };
+// 0.7.0: a plan states its own prediction (D9); scenarios that are not about it carry a neutral one. Its ten rounds are the round
+// count's: since 0.7.34 (I-234) rounds past the prediction hold the next round until a strategist decides, so a neutral prediction
+// asks for the strategist no earlier than the count does.
+export const FIXTURE_EXPECT = { files: 2, rounds: 10, minutes: 60 };
 export function planDoc(design, { criteria = design.criteria, work = design.work } = {}) {
   const { survey, impact } = stages(criteria, work);
   const stated = design.expect !== undefined || (design.plan && typeof design.plan === 'object' && design.plan.expect !== undefined);

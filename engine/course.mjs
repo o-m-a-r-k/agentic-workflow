@@ -14,6 +14,7 @@
 // split, or continue with a new expectation) is what drives the step after it.
 import { implementerOf } from './introduced.mjs';
 import { familyRecurrenceLine, familyRecurrences, recurrenceLine, recurringCauses } from './causes.mjs';
+import { reraised, reraisedLine } from './diagnosis.mjs';
 import { dispositionOf, findingSummary, observations, placementLevel, recordedRoundsOf } from './review-policy.mjs';
 import { openDiscovered, discoveredLevel } from './discovered.mjs';
 import { premiseOpen, premiseRef, premisesHeldByPerson } from './premise.mjs';
@@ -58,7 +59,11 @@ export function courseSignals(state, sig) {
   const er = latestWith(state, 'rounds');
   if (er) {
     const handed = er.source === 'plan' ? handedRounds(state) : new Set((state.handoffs ?? []).filter((h) => h.role === 'reviewer' && h.at > er.at).map((h) => h.reviewGroup?.id ?? h.bundle)).size;
-    if (handed > er.expect.rounds) out.push({ id: 'rounds', key: `rounds:${er.index}`, at: null, line: `${handed} review rounds handed${er.source === 'plan' ? '' : ' since the latest expectation'}, past the ${er.expect.rounds} ${er.source === 'plan' ? 'the plan' : er.source === 'strategy' ? 'the strategist' : 'the re-plan'} expected` });
+    // 0.7.34 (I-234): when the round past the expectation was handed, so a decision recorded after it (one an earlier engine recorded
+    // without keys too) and the person's own direction given after it (engine/strategy.mjs) answer it.
+    const groups = [];
+    for (const h of [...(state.handoffs ?? [])].filter((x) => x.role === 'reviewer' && (er.source === 'plan' || x.at > er.at)).sort((x, y) => String(x.at).localeCompare(String(y.at)))) if (!groups.some((g) => g.key === (h.reviewGroup?.id ?? h.bundle))) groups.push({ key: h.reviewGroup?.id ?? h.bundle, at: h.at });
+    if (handed > er.expect.rounds) out.push({ id: 'rounds', key: `rounds:${er.index}`, at: groups[er.expect.rounds]?.at ?? null, line: `${handed} review rounds handed${er.source === 'plan' ? '' : ' since the latest expectation'}, past the ${er.expect.rounds} ${er.source === 'plan' ? 'the plan' : er.source === 'strategy' ? 'the strategist' : 'the re-plan'} expected` });
   }
   // Criteria amended upward once implementation started: an amendment that adds criteria, unless it carries out the strategist's
   // own consolidation (recorded after a consolidate decision and before the next implementer was handed).
@@ -75,7 +80,11 @@ export function courseSignals(state, sig) {
   });
   // The same cause across rounds: a confirmed link, or the family of a finding already marked fixed.
   for (const r of recurringCauses(state)) out.push({ id: 'recurring', key: `recurring:${r.again}`, at: null, line: recurrenceLine(r) });
-  for (const r of familyRecurrences(state)) if (!out.some((x) => x.key === `recurring:${r.again}`)) out.push({ id: 'recurring', key: `recurring:${r.again}`, at: null, line: familyRecurrenceLine(r) });
+  // A label match is a possible shared cause, not a confirmed one: shown and handed, never binding (`confirmed: false`).
+  for (const r of familyRecurrences(state)) if (!out.some((x) => x.key === `recurring:${r.again}`)) out.push({ id: 'recurring', key: `recurring:${r.again}`, at: null, confirmed: false, line: familyRecurrenceLine(r) });
+  // 0.7.34 (I-234): a finding raised after a strategist decision with the family and criterion of one that decision's diagnosis cited,
+  // and no reviewer link: by the strategist's own grouping, the cause it accounted for came back.
+  for (const r of reraised(state)) if (!out.some((x) => x.key === `recurring:${r.again}`)) out.push({ id: 'reraised', key: `reraised:${r.again}`, at: null, line: reraisedLine(r) });
   // A fix round whose own lines are where the next round found its defects: the fix made new ones.
   const rounds = recordedRoundsOf(state);
   if (rounds.length >= 2) {
@@ -111,6 +120,19 @@ export function courseSignals(state, sig) {
   return out;
 }
 
+// 0.7.34 (I-234): the signals that hold the next implementer and code-review round until a strategist decides, as the round count
+// does. Named failure (field): between the round count at 10 and the person's hold at 20 one attempt ran eleven handed rounds with no
+// strategist decision while a fix chain (each wording fix causing the next finding, four in a row) and base drift were visible; the
+// owner agent judges the course at each round boundary (D44 named the strategist as its next step) and handed none. Replayed with the
+// signals of today, `rounds` stood unanswered from the sixth round and `regression` fired before rounds 15 and 17; nothing held.
+// Only facts of divergence bind: the attempt's own prediction of rounds passed (an agent's number, never the engine's), a fix whose
+// own lines held the next round's findings (git blame), a cause a reviewer linked to one already fixed, and a finding a strategist's
+// diagnosis already accounted for raised again. Size does not bind (files past twice the plan, criteria amended upward: a large
+// ticket going well crosses those too, D9), nor a label match nobody confirmed, nor an implementer's estimate or re-plan request (the
+// owner answers those with an amendment), nor `reach` (it holds the gate after a planned pass already).
+export const BINDING = new Set(['rounds', 'regression', 'recurring', 'reraised']);
+export const binds = (s) => BINDING.has(s.id) && s.confirmed !== false;
+
 // A signal is answered by a strategist decision that saw it (the keys it records), or, for one with a time, by any decision
 // recorded after it (decisions an earlier engine recorded carry no keys). A re-plan request is answered by an amendment
 // recorded after it too: the re-plan it asked for.
@@ -129,7 +151,7 @@ export function unanswered(state, signals) {
 // the engine saw (its bundle carries the same list as `courseSignals`).
 // Review of 0.7.28 (L5): with an implementer still open, the step says what to do with it: the strategist decides alongside, and a
 // decision that changes the approach stops it first (its work so far is kept in its commits).
-export const courseStep = (open, agentType, running = []) => `the course needs the strategist (the engine's next step, not a judgement call): ${open.map((s) => s.line).join('; ')}. Hand it now: \`wf handoff strategist --agent <new id>\`${agentType ? ` [${agentType}]` : ''} (its bundle carries these signals as \`courseSignals\`; add \`--reason "<your analysis>"\` when you have one), then record its decision (\`wf strategy record --closure <file>\`): one planned pass for all remaining work (\`consolidate\`: a re-plan restating it as work items with a new expectation), a \`split\`, or \`continue\` with a new \`expect\`. Its decision drives the next step${running.length ? `. Implementer ${running.join(', ')} ${running.length > 1 ? 'are' : 'is'} still open: the strategist decides alongside; when its decision changes the approach (a consolidation, a split, a re-plan), stop ${running.length > 1 ? 'them' : 'it'} before the next handoff (\`wf handoff stop --agent <id>\` for one wf launched, then \`wf handoff close --agent <id> --outcome stopped\`; what it committed stays), otherwise let ${running.length > 1 ? 'them' : 'it'} finish and close as usual` : ''}`;
+export const courseStep = (open, agentType, running = []) => `the course needs the strategist (the engine's next step, not a judgement call): ${open.map((s) => s.line).join('; ')}. Hand it now: \`wf handoff strategist --agent <new id>\`${agentType ? ` [${agentType}]` : ''} (its bundle carries these signals as \`courseSignals\`; add \`--reason "<your analysis>"\` when you have one), then record its decision (\`wf strategy record --closure <file>\`): one planned pass for all remaining work (\`consolidate\`: a re-plan restating it as work items with a new expectation), a \`split\`, or \`continue\` with a new \`expect\`. Its decision drives the next step${open.some(binds) ? '; until it decides, no implementer and no code-review round starts (an evidence review, a gate, the acceptance and the delivery go on)' : ''}${running.length ? `. Implementer ${running.join(', ')} ${running.length > 1 ? 'are' : 'is'} still open: the strategist decides alongside; when its decision changes the approach (a consolidation, a split, a re-plan), stop ${running.length > 1 ? 'them' : 'it'} before the next handoff (\`wf handoff stop --agent <id>\` for one wf launched, then \`wf handoff close --agent <id> --outcome stopped\`; what it committed stays), otherwise let ${running.length > 1 ? 'them' : 'it'} finish and close as usual` : ''}`;
 
 // ---- The planned pass (I-207) ----
 

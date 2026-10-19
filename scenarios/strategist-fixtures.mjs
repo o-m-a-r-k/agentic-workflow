@@ -103,10 +103,34 @@ export function jsonl(file, lines) {
   fs.writeFileSync(file, `${lines.map((l) => JSON.stringify(l)).join('\n')}\n`);
 }
 
-// The strategist's closure file for the bundle a handoff printed.
+// The strategist's closure file for the bundle a handoff printed. A test convenience, not what a strategist writes (0.7.34, I-232):
+// a closure that brings no `diagnosis` of its own is given the least one that covers what the bundle owes, so scenarios about
+// something else stay about it: every round to account for as progressed (one that died or did not reach its scope under a "review"
+// entry), and every open correction dropped. `diagnosis: null` leaves the keys out (a closure with none).
+export function minimalDiagnosis(bundle) {
+  const rounds = (bundle.roundsToAccount ?? []);
+  const unfinished = rounds.filter((r) => r.status === 'died' || r.notReached).map((r) => r.round.split(' / ')[0]);
+  return {
+    diagnosis: unfinished.length ? [{ cause: 'review', what: 'some rounds ended unfinished (test convenience)', rounds: unfinished, correction: { lever: 'other', change: 'nothing changes (test convenience)' } }] : [],
+    progressed: rounds.filter((r) => !(r.status === 'died' || r.notReached)).map((r) => r.round.split(' / ')[0]),
+    review: (bundle.openCorrections ?? []).map((c) => ({ correction: c.correction, outcome: 'dropped', why: 'test convenience' })),
+  };
+}
 export function strategistClosure(base, bundleFile, closure) {
   const bundle = JSON.parse(fs.readFileSync(bundleFile, 'utf8'));
   const f = path.join(base, `strategy-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
-  fs.writeFileSync(f, JSON.stringify(closure));
+  const { diagnosis, ...rest } = closure ?? {};
+  const full = closure && typeof closure === 'object' && !Array.isArray(closure) && diagnosis === undefined && bundle.closureSchema?.diagnosis ? { ...minimalDiagnosis(bundle), ...rest } : diagnosis === null ? rest : closure;
+  fs.writeFileSync(f, JSON.stringify(full));
   return { file: f, bundle };
+}
+
+// A test convenience (0.7.34, I-234): a course signal that holds the next round is answered the way the engine asks, by a strategist
+// decision, here one that lets the course go on as it is. `exec(args)` runs `wf` for the scenario's project.
+export function decideCourse(exec, base, attempt, agent) {
+  const h = ok(exec(['handoff', 'strategist', '--agent', agent, '--attempt', attempt, '--json'])).json();
+  const bundle = JSON.parse(fs.readFileSync(h.bundle, 'utf8'));
+  const f = path.join(base, `${agent}-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
+  fs.writeFileSync(f, JSON.stringify({ strategist: agent, action: 'continue', rationale: 'The course goes on as it is (test convenience).', prediction: { signal: 'rounds >= 0', by: (bundle.signals?.rounds?.length ?? 0) + 1 }, ...minimalDiagnosis(bundle) }));
+  ok(exec(['strategy', 'record', '--closure', f, '--attempt', attempt]));
 }

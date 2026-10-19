@@ -13,7 +13,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { closureFile, commitIn, goodClosure, ok, planDoc, singleRepoProject, wf, writeReport } from './helpers.mjs';
-import { inProcess } from './strategist-fixtures.mjs';
+import { inProcess, minimalDiagnosis } from './strategist-fixtures.mjs';
 
 const steps = [{ id: 'unit', repo: 'app', run: 'true' }];
 const LINES = 'l1\nl2\nl3\nl4\nl5\nl6\n';
@@ -40,7 +40,7 @@ const strategist = (p, agent, closure) => {
   const h = ok(wf(p.root, ['handoff', 'strategist', '--agent', agent, '--attempt', p.id, '--json'])).json();
   const bundle = JSON.parse(fs.readFileSync(h.bundle, 'utf8'));
   const f = path.join(p.base, `${agent}.json`);
-  fs.writeFileSync(f, JSON.stringify({ strategist: agent, rationale: 'the numbers are explained', prediction: { signal: 'blockingLatest <= 1', by: 9 }, ...closure }));
+  fs.writeFileSync(f, JSON.stringify({ strategist: agent, rationale: 'the numbers are explained', prediction: { signal: 'blockingLatest <= 1', by: 9 }, ...minimalDiagnosis(bundle), ...closure }));
   return { bundle, record: () => wf(p.root, ['strategy', 'record', '--closure', f, '--attempt', p.id]) };
 };
 

@@ -35,7 +35,11 @@ import { policyOf, ruleText } from './leaving.mjs';
 import { pastCourse } from './learning.mjs';
 import { performSplit, resolveSplitItems } from './split.mjs';
 import { obligationSince } from './versions.mjs';
-import { courseSignals, outstanding, unanswered } from './course.mjs';
+import { binds, courseSignals, outstanding, unanswered } from './course.mjs';
+import { CAUSES, LEVERS, OUTCOMES, causeOverlaps, correctionLines, diagnosisProblems, openCorrections, refsOf, roundsOf, roundsToAccount, sameCourse } from './diagnosis.mjs';
+import { findingHistory } from './causes.mjs';
+import { inboxDir } from './improve.mjs';
+import { gatePassedForCurrentTree } from './gate.mjs';
 import { premiseOpen } from './premise.mjs';
 import { productDecisionsFor } from './product-decisions.mjs';
 import { expectOf, expectProblems, PLAN_EXPECT } from './expectations.mjs';
@@ -365,7 +369,7 @@ function stopChosen(root, state) {
 export function requireOwnerDecision(root, state, role, options = {}) {
   stopChosen(root, state);
   const hold = strategyHold(root, state);
-  if (!hold) return;
+  if (!hold) return requireCourseDecision(root, state, role);
   if (hold.owner) {
     recordEscalation(root, state, hold.owner);
     const pendingOwner = hold.ownerPending;
@@ -387,6 +391,37 @@ export function requireOwnerDecision(root, state, role, options = {}) {
   // Asked again as it was after a withdrawal (the owner judged it wrong): the way out is named where it is asked (review of the release).
   const askedAgain = e.withdrawn ? ` ${esc.id} is the withdrawn question ${e.id} asked again as it was; if it is still wrong, withdraw it (\`wf decisions withdraw ${esc.id} --attempt ${state.id} --reason "<what changed>"\`), hand a strategist (\`wf handoff strategist --agent <id> --reason "..."\`) and record its decision: a recorded decision supersedes the question.` : '';
   throw refuse(`not handed: the strategist escalated ${state.id} (${esc.id}: ${esc.summary}); no ${role} starts until the owner decides${wordsOf(hold.escalation.approved ? hold.escalation : null)}`, askedAgain ? `${approveHint(state, esc)}.${askedAgain}` : approveHint(state, esc), { id: 'strategy:escalated' });
+}
+
+// 0.7.34 (I-234): a course signal that binds (engine/course.mjs `BINDING`: rounds past the attempt's own prediction, a fix whose own
+// lines held the next round's findings, a cause a reviewer linked to one already fixed, a finding a strategist's diagnosis accounted
+// for raised again) and that no strategist decision answered holds the next implementer and code-review round, as the round count
+// does (D84): the strategist decides first. An evidence review (a gate passed on this tree), a gate, the acceptance and delivery go on.
+// Named failure (field): eleven handed rounds with no strategist decision while a fix chain and base drift were visible.
+export function bindingSignals(root, state, role) {
+  if (!worked(state)) return [];
+  const cfg = adapterOf(root, state);
+  if (switchedOff(cfg)) return [];
+  if (role === 'reviewer') {
+    try {
+      if (gatePassedForCurrentTree(state)?.ok) return [];
+    } catch {}
+  }
+  try {
+    // The person's own direction given after a signal fired (their answer to a round question an earlier release asked, a hold
+    // they lifted) gave the course it asks about: it holds nothing then (D84: a course the person gave is followed).
+    const given = settlements(state).filter((m) => m.by !== 'strategist').map((m) => String(m.at));
+    return unanswered(state, courseSignals(state, null)).filter(binds).filter((x) => !(x.at && given.some((t) => t > String(x.at))));
+  } catch {
+    return [];
+  }
+}
+
+function requireCourseDecision(root, state, role) {
+  const open = bindingSignals(root, state, role);
+  if (!open.length) return;
+  const waiting = strategistWaiting(state);
+  throw refuse(`not handed: the course needs the strategist first, and no ${role} starts until it decides: ${open.map((x) => x.line).join('; ')}`, waiting ? `strategist ${waiting.agent} was handed and has recorded no decision: wait for it, then \`wf strategy record --closure <file> --attempt ${state.id}\`` : `\`wf handoff strategist --agent <id> --attempt ${state.id}\` (its bundle carries these as \`courseSignals\`), then \`wf strategy record --closure <file> --attempt ${state.id}\`; any decision it records answers them`, { id: 'strategy:course' });
 }
 
 // ---- `wf signals` ----
@@ -437,6 +472,16 @@ export function signalsText(r) {
 }
 
 // ---- The strategist's handoff ----
+
+// 0.7.34 (I-232): every ref a diagnosis may cite, verbatim: the review rounds, the findings (engine/causes.mjs findingHistory) and
+// the events between them.
+function historyOf(state) {
+  return {
+    rounds: roundsOf(state).map((r) => ({ round: r.agents.join(' / '), ...(r.mode ? { mode: r.mode } : {}), handedAt: r.handedAt, status: r.status, endedAt: r.endedAt, ...(r.notReached.length ? { notReached: r.notReached } : {}) })),
+    findings: findingHistory(state).map((f) => ({ ref: f.ref, ...(f.family ? { family: f.family } : {}), severity: f.severity, status: f.status, summary: f.summary, ...(f.cause ? { cause: f.cause } : {}) })),
+    events: [...refsOf(state).values()].filter((x) => x.kind !== 'finding').sort((x, y) => String(x.at).localeCompare(String(y.at))).map((x) => ({ ref: x.ref, at: x.at, kind: x.kind, line: x.line })),
+  };
+}
 
 const familyGroups = (items) => {
   const out = {};
@@ -533,7 +578,19 @@ export function strategistHandoff(root, state, options) {
     // The person's rule for what may leave the delivery (D17, 2026-10-14).
     severityRule: ruleText(policyOf(cfg)),
     severityScale: { projectExamples: cfg.severity ?? null, leaving: policyOf(cfg) },
-    earlierDecisions: state.strategy.decisions.map((d) => ({ id: d.id, at: d.at, action: d.action, rationale: d.rationale, ...(d.premise ? { premise: d.premise } : {}), handedBecause: d.handedBecause ?? null, prediction: d.prediction, outcome: predictionStatus(state, d, signals, nowMs) })),
+    earlierDecisions: state.strategy.decisions.map((d) => ({ id: d.id, at: d.at, action: d.action, rationale: d.rationale, ...(d.premise ? { premise: d.premise } : {}), ...(d.diagnosis ? { diagnosis: d.diagnosis } : {}), ...(d.review ? { review: d.review } : {}), handedBecause: d.handedBecause ?? null, prediction: d.prediction, outcome: predictionStatus(state, d, signals, nowMs) })),
+    // 0.7.34 (I-232): what your diagnosis cites and accounts for. `history` lists every review round (by reviewer id, with whether it
+    // was recorded, died or is in flight, and what it did not reach), every finding with where it stands, and the events between
+    // them (base merges, gate runs, discovered issues, decisions), each ref exactly as you cite it. `roundsToAccount` are the rounds
+    // recorded or died since the previous decision: each goes in a diagnosis entry's \`rounds\` or in \`progressed\`; rounds in
+    // flight are listed apart and are not yours to account for yet. `openCorrections` are the corrections earlier decisions made that
+    // no decision has closed: you review each. `causeOverlaps` names what earlier decisions put under different causes.
+    history: historyOf(state),
+    roundsToAccount: roundsToAccount(state).map((r) => ({ round: r.agents.join(' / '), status: r.status, ...(r.notReached.length ? { notReached: r.notReached } : {}) })),
+    roundsInFlight: roundsOf(state).filter((r) => r.status === 'in-flight').map((r) => r.agents.join(' / ')),
+    openCorrections: openCorrections(state).map((c) => ({ correction: c.key, since: c.decision, cause: c.cause, about: CAUSES[c.cause], lever: c.lever, change: c.change, reviews: c.reviews.map((r) => ({ decision: r.decision, outcome: r.outcome, ...(r.why ? { why: r.why } : {}) })) })),
+    corrections: correctionLines(state),
+    causeOverlaps: causeOverlaps(state),
     invariants: cfg.invariants ? path.resolve(root, ADAPTER_DIR, cfg.invariants) : null,
     roleAppendix: appendix && fs.existsSync(appendix) ? appendix : null,
     // Outside .wf-evidence/: the strategist writes it, `wf strategy record` copies it into the evidence.
@@ -550,9 +607,14 @@ export function strategistHandoff(root, state, options) {
       options: 'action escalate: 2 or 3 of { "label": "<plain words>", "then": "<what happens next>", "settles": [{ "ref": "<open finding or discovered id this option decides>", "what": "<what it is, one plain line>" }] (optional: each is shown to the person and not asked again) }',
       recommend: 'action escalate: { "label": "<one of the labels>", "why": "<one line>" }, or { "label": null, "why": "<what it depends on>" }',
       expect: 'optional, any action: { files: <the whole change>, rounds: <from now>, minutes: <from now> }: the expectation the course is compared with from now on (`continue` with a new expectation; a consolidation states the pass it plans)',
+      diagnosis: `required: what kept going wrong, one entry per cause (an empty list when nothing did): [{ cause: <${Object.keys(CAUSES).join(' | ')}>, what: "<plain words, no ids>", rounds: [<reviewer ids from history>], refs: [<findings round:id, D<n>, S<n>, A<n>, base:<n>, gate:<runId> from history>], correction: { lever: <${Object.keys(LEVERS).join(' | ')}>, change: "<plain words: what the owner and the roles do differently from now on>" } }] (or \`settledBy: "<S<n> or A<n>>"\` in place of \`correction\` when an earlier decision already deals with it); \`causes\` and \`levers\` say what each means`,
+      progressed: 'required with the diagnosis: the reviewer ids of rounds in `roundsToAccount` that did what they were handed (a round that died or did not reach its scope goes in a diagnosis entry)',
+      review: `required while \`openCorrections\` is not empty: [{ correction: "<S<n>:<cause>>", outcome: <${OUTCOMES.join(' | ')}>, refs: [<what shows it, from after that decision for held and failed>], why: "<plain words; required for not-applied and dropped>", improvement: "<I-<n>, optional: the improvement item for a workflow rule that kept it from being carried out>" }]`,
+      causes: CAUSES,
+      levers: LEVERS,
       premise: 'cluster and consolidate (any action may): { shared: "<the premise the findings or the pass rest on>", traced: "<what was traced: who writes the data in production, who reads it, what depends on it, what happens when it is absent>", notTraced: "<what was not>" }; a shared premise nobody traced is an analysis before a fix round',
     },
-    instructions: `You are the strategist. You were handed because the course diverged from what was predicted: \`courseSignals\` is what the engine saw that no strategist has answered (files past twice the plan, rounds past it, criteria amended upward, a cause that keeps coming back, a fix whose own lines were where the next defects were found, an implementer whose expectation is far above the fix the reviewers stated, one that asks for a re-plan, or a fix round or planned pass whose own commits changed a contract or a migration that nothing it was handed accounts for), and \`handedBecause\` what the owner saw. Your decision answers those signals and drives the next step: \`consolidate\` restates all remaining work (the open findings, \`outstanding\`, unstarted work) as one planned pass with an expectation, never scope added piecemeal; \`split\` moves part of it to a sibling attempt; \`continue\` says why the numbers are explained and states the new \`expect\` the course is compared with from now on. Read \`course\` (the expectations beside what happened), the signals and the earlier decisions; choose one action; give a prediction the engine can check. A \`cluster\` or \`consolidate\` names the premise the findings or the pass share (\`premise: { shared, traced, notTraced }\`): who writes the data in production, who reads it, what depends on it and what happens when it is absent, and what was not traced; a shared premise nobody traced is an analysis before a fix round, never a fix round on a finding's own framing. Contraction is allowed and expected when work keeps growing. A finding that blocks is never waived here (that is the owner's \`wf approve\`), and nothing the change caused leaves the delivery batch without the owner's approval. Write the closure file named in \`strategyClosureFile\`, then run \`wf strategy record --closure <that file> --attempt ${state.id}\`.${streak >= 2 ? ' Two of your earlier predictions were missed: the only action the engine accepts now is `escalate`.' : ''}${roundCount ? ` You were handed at the round count (${roundCount}): you decide first how the ticket goes on, and any decision you record settles the count; the person is asked only when you escalate, so escalate when their decision is needed, and follow a course they already gave (the owner's reason, a hold they lifted, their product decisions).` : ''}`,
+    instructions: `You are the strategist. You were handed because the course diverged from what was predicted: \`courseSignals\` is what the engine saw that no strategist has answered (files past twice the plan, rounds past it, criteria amended upward, a cause that keeps coming back, a fix whose own lines were where the next defects were found, an implementer whose expectation is far above the fix the reviewers stated, one that asks for a re-plan, or a fix round or planned pass whose own commits changed a contract or a migration that nothing it was handed accounts for), and \`handedBecause\` what the owner saw. Your decision answers those signals and drives the next step: \`consolidate\` restates all remaining work (the open findings, \`outstanding\`, unstarted work) as one planned pass with an expectation, never scope added piecemeal; \`split\` moves part of it to a sibling attempt; \`continue\` says why the numbers are explained and states the new \`expect\` the course is compared with from now on. Read \`course\` (the expectations beside what happened), the signals and the earlier decisions; choose one action; give a prediction the engine can check. A \`cluster\` or \`consolidate\` names the premise the findings or the pass share (\`premise: { shared, traced, notTraced }\`): who writes the data in production, who reads it, what depends on it and what happens when it is absent, and what was not traced; a shared premise nobody traced is an analysis before a fix round, never a fix round on a finding's own framing. Contraction is allowed and expected when work keeps growing. A finding that blocks is never waived here (that is the owner's \`wf approve\`), and nothing the change caused leaves the delivery batch without the owner's approval. Before you choose, step back: say what kept going wrong across the rounds (\`diagnosis\`, one entry per cause, citing the rounds and refs in \`history\`), what changes in how the work runs so it does not happen again (its \`correction\`), which rounds since the previous decision did what they were handed (\`progressed\`), and what became of each correction in \`openCorrections\` (\`review\`): a correction that did not hold is never met with the same change again. Write the closure file named in \`strategyClosureFile\`, then run \`wf strategy record --closure <that file> --attempt ${state.id}\`.${streak >= 2 ? ' Two of your earlier predictions were missed: the only action the engine accepts now is `escalate`.' : ''}${roundCount ? ` You were handed at the round count (${roundCount}): you decide first how the ticket goes on, and any decision you record settles the count; the person is asked only when you escalate, so escalate when their decision is needed, and follow a course they already gave (the owner's reason, a hold they lifted, their product decisions).` : ''}`,
   };
   mkdirStateDirectory(path.dirname(closureFile), { recursive: true });
   const startPrompt = startPromptFor(file);
@@ -562,14 +624,14 @@ export function strategistHandoff(root, state, options) {
   // recorded in one transaction, as a reviewer handoff is (`publish` in lifecycle.mjs): a reader sees none of it or all.
   recordedTogether(root, state.id, () => {
     writeJson(file, bundle);
-    append(root, state.id, 'handoff', { role: 'strategist', agent, runtime, session: options.session ?? null, agentType, class: cls, effort, model, sourceClass, runtimeAdapterBase, startPrompt, work: null, bundle: file, reason: handedBecause }, actor(options));
+    append(root, state.id, 'handoff', { role: 'strategist', agent, runtime, session: options.session ?? null, agentType, class: cls, effort, model, sourceClass, runtimeAdapterBase, startPrompt, work: null, bundle: file, reason: handedBecause, owes: ['diagnosis'] }, actor(options));
   });
   return { bundle: file, startPrompt, agentType, agent, roleStale: null, restrictions: [], sweeps: null, class: cls, effort, model, work: null, lessons: null, closureFile, state: loadState(root, state.id) };
 }
 
 // ---- `wf strategy record` ----
 
-const KEYS = ['strategist', 'action', 'rationale', 'prediction', 'items', 'split', 'model', 'options', 'question', 'recommend', 'expect', 'premise'];
+const KEYS = ['strategist', 'action', 'rationale', 'prediction', 'items', 'split', 'model', 'options', 'question', 'recommend', 'expect', 'premise', 'diagnosis', 'progressed', 'review'];
 // 0.7.31 (I-217, D64): the premise a decision rests on (a cluster's or a consolidation's shared premise, what was traced and what
 // was not), recorded with it, read leniently: a string or { shared, traced, notTraced }. Never a reason to refuse a closure.
 const premiseOf = (v) => {
@@ -695,6 +757,13 @@ export function recordStrategy(root, options) {
   const h = state.handoffs.filter((x) => x.role === 'strategist' && x.agent === closure.strategist).at(-1);
   if (!h) throw refuse(`\`${closure.strategist}\` was not handed this attempt as its strategist${state.roles.strategist.length ? ` (strategists: ${state.roles.strategist.join(', ')})` : ''}`, `run \`wf handoff strategist --agent <id>\` and start that agent with the printed line`, { id: 'strategy:no-strategist' });
   if (state.strategy.decisions.some((d) => d.handoff === h.bundle)) throw refuse(`${closure.strategist} already recorded its decision (${state.strategy.decisions.find((d) => d.handoff === h.bundle).id}); a new decision needs a fresh strategist handoff`, null, { id: 'strategy:handoff-used' });
+  // 0.7.34 (I-232): the diagnosis, the rounds that progressed and the review of open corrections, owed by a strategist handed by this
+  // release (`owes` on its handoff: a strategist handed by an earlier one is judged by the bundle it read). Given when not owed, they
+  // are checked and recorded all the same; coverage and the review of open corrections are asked only when owed (review of the design, M7).
+  const owed = (h.owes ?? []).includes('diagnosis');
+  const inbox = (id) => fs.existsSync(path.join(inboxDir(), `${id}.yaml`));
+  const diag = diagnosisProblems(state, closure, { owed, inbox });
+  if (diag.length) throw refuse(`the strategist closure's diagnosis is refused:\n  - ${diag.join('\n  - ')}`, 'the bundle\'s `history`, `roundsToAccount`, `openCorrections` and `closureSchema` show what it cites and owes', { id: 'strategy:diagnosis' });
   const nowMs = Date.now();
   if (closure.action === 'model') {
     const classes = Object.keys(adapterOf(root, state)?.classes ?? {});
@@ -726,6 +795,10 @@ export function recordStrategy(root, options) {
     const by = closure.prediction?.by;
     if (!Number.isInteger(by) || by > limit) throw refuse(`at the round count a prediction is judged by the next count: \`prediction.by\` must name a review round no later than ${limit} (${signals.rounds.length} recorded now, the next count ${countC.reviewRoundsEscalate} rounds on)${Number.isInteger(by) ? `, not ${by}` : ', not a time'}`, 'a prediction the next count cannot miss is not a prediction: name the round by which your decision shows its effect, and if it misses twice your next decision is an escalation to the person', { id: 'strategy:prediction-past-count' });
   }
+  // 0.7.34 (I-232, review of the design H1): the same cause met with the same change after it came back. A design guard with no field
+  // case yet: the field's two decisions carried no correction to compare.
+  const again = sameCourse(state, closure);
+  if (again) throw refuse(`not recorded: ${again}`, 'write a closure whose correction for that cause changes the flow another way, or escalate', { id: 'strategy:same-course' });
   // Checked before anything is applied.
   let moved = null;
   if (closure.action === 'split') moved = resolveSplitItems(root, state, closure.split.items);
@@ -785,9 +858,20 @@ export function recordStrategy(root, options) {
     course: courseSignals(state, signals).map((x) => x.key),
     ...(expectOf(closure.expect) ? { expect: expectOf(closure.expect) } : {}),
     ...(premiseOf(closure.premise) ? { premise: premiseOf(closure.premise) } : {}),
+    ...diagnosisOf(closure),
     signals: { rounds: signals.rounds.map((r) => ({ n: r.n, blocking: r.blocking, findings: r.findings })), roundsSinceDecrease: signals.roundsSinceDecrease, blockingOpen: signals.blockingOpen, observationsOpen: signals.observationsOpen.length, amendments: signals.amendments, changedFiles: signals.files.changed, plannedFiles: signals.files.planned, bundleBytes: signals.bundle.bytes, wallMinutes: signals.wallMinutes},
   }, actor(options));
   return { state: loadState(root, state.id), decision: loadState(root, state.id).strategy.decisions.at(-1), split: splitResult, escalation };
+}
+
+// The diagnosis as recorded: only the keys the engine reads, trimmed (it was checked whole before).
+const strs = (v) => (Array.isArray(v) ? v.map((x) => String(x).trim()).filter(Boolean) : []);
+function diagnosisOf(c) {
+  const out = {};
+  if (Array.isArray(c.diagnosis)) out.diagnosis = c.diagnosis.map((e) => ({ cause: e.cause, what: e.what.trim(), rounds: strs(e.rounds), refs: strs(e.refs), ...(e.correction ? { correction: { lever: e.correction.lever, change: e.correction.change.trim() } } : { settledBy: String(e.settledBy).trim() }) }));
+  if (Array.isArray(c.progressed)) out.progressed = strs(c.progressed);
+  if (Array.isArray(c.review)) out.review = c.review.map((r) => ({ correction: String(r.correction).trim(), outcome: r.outcome, refs: strs(r.refs), ...(typeof r.why === 'string' && r.why.trim() ? { why: r.why.trim() } : {}), ...(r.improvement ? { improvement: String(r.improvement) } : {}) }));
+  return out;
 }
 
 const computeRounds = (state) => new Set((state.reviews ?? []).map((r) => r.handoff ?? `reviewer:${r.reviewer}`)).size;

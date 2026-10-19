@@ -5,6 +5,7 @@ import path from 'node:path';
 import { closureFile, commitIn, ok, reportFileOf, singleRepoProject, wf } from './helpers.mjs';
 import { project, started, strategistClosure } from './strategist-fixtures.mjs';
 import { closureProblems } from '../engine/strategy.mjs';
+import { diagnosisProblems } from '../engine/diagnosis.mjs';
 import { YAML } from '../engine/util.mjs';
 
 // Named failure (second final review of 0.7.0): the engine changed and the texts followed late. The strategist's own example
@@ -68,6 +69,7 @@ function payloads() {
 const KNOWN = {
   strategistClosure: 'templates/agents/strategist.md#json:1',
   strategistActions: 'templates/agents/strategist.md#jsonl:1',
+  strategistDiagnosis: 'templates/agents/strategist.md#json:2',
   reviewerClosure: 'templates/agents/reviewer.md#json:1',
   implementerReport: 'templates/agents/implementer.md#json:1',
   plannerPlan: 'templates/agents/planner.md#yaml:1',
@@ -97,6 +99,19 @@ test('every fenced JSON or YAML payload in the role templates and skills is one 
 });
 
 // ---- The strategist's closure ----
+
+// 0.7.34 (I-232): the diagnosis example passes the engine's check against an attempt that has the rounds, findings and decisions it
+// cites (shape, refs, times, the review of the open correction).
+test('the strategist\'s example diagnosis passes the engine\'s check against an attempt holding what it cites', () => {
+  const ex = JSON.parse(payload('strategistDiagnosis'));
+  const t = (n) => `2026-01-01T00:0${n}:00.000Z`;
+  const rev = (agent, n, findings = []) => ({ hand: { role: 'reviewer', agent, bundle: `b-${agent}`, at: t(n) }, review: { reviewer: agent, handoff: `b-${agent}`, at: t(n), closure: { reviewer: agent, findings: findings.map((id) => ({ id, family: 'f', summary: 's' })) } } });
+  const rounds = [rev('rev-5', 1, ['F1']), rev('rev-6', 2), rev('rev-11', 5), rev('rev-12', 6, ['F1']), rev('rev-14', 7, ['F1'])];
+  const state = { handoffs: rounds.map((r) => r.hand), reviews: rounds.map((r) => r.review), discovered: [], baseMerges: [], gates: [], stops: [],
+    decisions: [{ id: 'A1', kind: 'escalation', createdAt: t(3), approved: { at: t(3), choice: 'accept' } }],
+    strategy: { decisions: [{ id: 'S1', at: t(4), action: 'escalate', diagnosis: [{ cause: 'capability', what: 'x', rounds: ['rev-6'], refs: [], correction: { lever: 'person', change: 'ask the person' } }] }] } };
+  assert.deepEqual(diagnosisProblems(state, { action: 'continue', ...ex }, { owed: true }), []);
+});
 
 test('the strategist\'s example closure is recorded by `wf strategy record`, the keys it lists for each action are accepted, and the strategy page\'s closure passes the same check', () => {
   const ctx = project('payload-strategist');

@@ -5,7 +5,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { knownLimits } from '../engine/tracker.mjs';
 import { approveAsOwner, closureFile, commitIn, criteriaFile, FIXTURE_EXPECT, goodClosure, impactAddendum, impactCheckedFrom, makeRepo, ok, OUT_OF_ORDER, planDoc, reportFileOf, sh, singleRepoProject, state, tmp, toAccepted, WF, wf, writeReport, yaml } from './helpers.mjs';
-import { runner } from './strategist-fixtures.mjs';
+import { minimalDiagnosis, runner } from './strategist-fixtures.mjs';
 import { readLedger } from '../engine/ledger.mjs';
 
 // I-18, named failure: implementers, reviewers and the owner agent noted real defects found during a ticket and parked
@@ -243,9 +243,9 @@ test('I-19: a discovered fix adds a repo and its work items to the running attem
   assert.deepEqual(s.addedRepos.map((x) => [x.repo, x.reason]), [['api', 'D1 needs the api total']]);
   // 0.7.28 (I-210): a criterion added after implementation started is a course signal: the strategist decides before W2 starts.
   assert.match(ok(wf(root, ['resume', '--attempt', id])).out, /next: the course needs the strategist[^\n]*amendment 1 added C2 after implementation started/);
-  ok(wf(root, ['handoff', 'strategist', '--agent', 'strat-1', '--attempt', id]));
+  const sh1 = ok(wf(root, ['handoff', 'strategist', '--agent', 'strat-1', '--attempt', id, '--json'])).json();
   const strat = path.join(base, 'strategy.json');
-  fs.writeFileSync(strat, JSON.stringify({ strategist: 'strat-1', action: 'continue', rationale: 'the api total is the fix D1 needs, one work item', prediction: { signal: 'blockingLatest <= 1', by: 3 } }));
+  fs.writeFileSync(strat, JSON.stringify({ ...minimalDiagnosis(JSON.parse(fs.readFileSync(sh1.bundle, 'utf8'))), strategist: 'strat-1', action: 'continue', rationale: 'the api total is the fix D1 needs, one work item', prediction: { signal: 'blockingLatest <= 1', by: 3 } }));
   ok(wf(root, ['strategy', 'record', '--closure', strat, '--attempt', id]));
   assert.match(ok(wf(root, ['resume', '--attempt', id])).out, /W2 class full .*`wf handoff implementer --work W2/);
 

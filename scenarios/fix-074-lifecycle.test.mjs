@@ -18,6 +18,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { OUT_OF_ORDER, amendFile, closureFile, commitIn, criteriaFile, goodClosure, ok, planDoc, singleRepoProject, tmp, toAccepted, wf, write } from './helpers.mjs';
+import { decideCourse } from './strategist-fixtures.mjs';
 import { loadState } from '../engine/ledger.mjs';
 import { knownLimits } from '../engine/tracker.mjs';
 import { verifyAttempt } from '../engine/evidence.mjs';
@@ -421,6 +422,8 @@ test('I-152: a delta reviewer that dies before its verdicts keeps its findings, 
   const kept = loadState(p.root, id).reviews.find((r) => r.reviewer === 'r2');
   assert.equal(kept.partial, true);
   assert.match(kept.closure.notReached.join(' '), /not reached before it ended: verdicts on the open finding\(s\) r1:F1/);
+  // The kept finding sits on the lines the fix round wrote: the strategist decides before the next fix round (0.7.34, I-234).
+  decideCourse((args) => run(args), p.base, id, 's1');
   ok(run(['handoff', 'implementer', '--agent', 'i3', '--attempt', id]));
   commitIn(wt, { 'src/b.txt': 'b fixed\n' });
   ok(run(['handoff', 'close', '--agent', 'i3', '--attempt', id]));

@@ -313,7 +313,7 @@ const prompt = fs.readFileSync(0, 'utf8');
 const bundle = JSON.parse(fs.readFileSync(prompt.replace(/^Read /, '').replace(/ and follow its instructions\\.$/, ''), 'utf8'));
 fs.writeFileSync(${JSON.stringify(path.join(base, 'args.json'))}, JSON.stringify(args));
 console.log(JSON.stringify({ type: 'thread.started', thread_id: '01a110b4-1637-7a42-b353-d0ad25e60077' }));
-fs.writeFileSync(bundle.strategyClosureFile, JSON.stringify({ strategist: bundle.agent, action: 'continue', rationale: 'The numbers are explained by the plan.', prediction: { signal: 'rounds >= 1', by: 2 } }));
+fs.writeFileSync(bundle.strategyClosureFile, JSON.stringify({ strategist: bundle.agent, action: 'continue', rationale: 'The numbers are explained by the plan.', prediction: { signal: 'rounds >= 1', by: 2 }, diagnosis: [], progressed: (bundle.roundsToAccount ?? []).map((r) => r.round), review: [] }));
 const r = spawnSync('wf', ['strategy', 'record', '--closure', bundle.strategyClosureFile, '--attempt', bundle.attempt], { encoding: 'utf8' });
 if (r.status !== 0) { console.error(r.stderr); process.exit(1); }
 console.log(JSON.stringify({ type: 'turn.completed' }));

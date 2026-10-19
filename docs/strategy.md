@@ -88,11 +88,34 @@ is the strategist's handoff (`wf resume` and `wf advance` say `strategy`, with t
 them; its bundle carries them as `courseSignals`, with the `outstanding` items for a pass). A gate, an evidence review, a
 verification a reviewer owes, the acceptance and delivery are not held, with one exception: the gate after a planned pass or after an
 evidence review's fixes, which no code review precedes, waits for the strategist on `reach` (nothing else looks at what that work
-reached before a gate is spent on it). Nothing is refused: a handoff made past it prints a
-note. A decision answers the signals it saw (`course` on the recorded decision), and its action drives the next step:
+reached before a gate is spent on it). Until 0.7.34 nothing was refused: a handoff made past it printed a
+note; since 0.7.34 four of them hold the next implementer and code-review round (below). A decision answers the signals it saw (`course` on the recorded decision), and its action drives the next step:
 `consolidate` (one planned pass for all remaining work, with an expectation), `split`, or `continue` with a new `expect`,
 which is what the course is compared with from then on. It applies to every attempt in flight; `roles.strategist: false` or
 `strategy.enabled: false` turns it off with the round count.
+
+### Signals that hold the next round (0.7.34, I-234)
+
+Named failure (field): between the round count at 10 and the person's hold at 20, one attempt ran eleven handed rounds with no
+strategist decision, while each wording fix caused the next finding (four in a row) and base drift opened rounds of their own.
+Those rounds ran before 0.7.28 was released, so no course signal existed; replayed with today's signals, `rounds` stood
+unanswered from the sixth round until the first strategist decision, and `regression` fired before rounds 15 and 17. Under
+0.7.28 to 0.7.33 both would only have named the strategist as the next step, and the owner could hand the next round anyway.
+
+Four signals now hold the next implementer and code-review round until a strategist decision answers them, as the round count
+does (`strategy:course`); an evidence review of a gated tree, a gate, the acceptance and delivery go on:
+
+| Signal | Why it is a fact, not a threshold |
+| --- | --- |
+| `rounds` | rounds handed past the latest expectation an agent stated (the plan's, a re-plan's, a strategist's `continue`): the agent's own number, never the engine's. Answered by a decision recorded after the round that passed it (one an earlier engine recorded too) or by the person's own direction given after it (their answer to a round question, a hold they lifted) |
+| `regression` | the latest round's findings sit on lines the fix round before it wrote (`git blame`) |
+| `recurring` | a finding a reviewer linked (`sameCauseAs`) to one already marked fixed, or one found open again after being verified fixed. A label match only (`familyRecurrences`) does not hold |
+| `reraised` | a finding raised by a round handed after a strategist decision, with the family and criterion (or invariant) of a finding that decision's diagnosis cited, and no `sameCauseAs`: by the strategist's own grouping, the cause it accounted for came back and no reviewer said so |
+
+Size does not hold anything (`files`, `amended`: a large ticket going well crosses those lines too, the D9 failure), nor an
+implementer's estimate or re-plan request (the owner answers those with an amendment), nor `reach` (it already holds the gate after
+a planned pass). `roles.strategist: false` or `strategy.enabled: false` turns the hold off with the round count. It applies to every
+attempt being worked: like the round count it replaces the owner's judgement with one strategist decision and reopens nothing.
 
 ## The strategist
 
@@ -126,6 +149,57 @@ ignored.
 | model | `model: { role, class }`: the next handoffs of that role run at that work class of the adapter, with the models and effort it pins |
 | escalate | a reserved decision the person answers: a plain `question`, 2-3 `options` each `{ label, then }` (plain words and what follows), and a `recommend` when there is one (0.7.11; attempts admitted earlier may keep 2-3 short option tokens) |
 
+## The diagnosis and the correction (0.7.34, I-232)
+
+Named failure (field): 23 review rounds. Five evidence reviews in a row asked again for screen-recording proof the local simulator
+cannot make, each under fresh finding ids; then each wording fix caused the next finding, under four family labels; then base
+merges and toolchain drift opened rounds of their own. The two strategist decisions carried an action, a rationale and a
+prediction; the second said "no recurring causes are recorded" and that the base would be taken in once, and it was merged twice
+more. The person: "the strategist should also look at what went wrong and correct course so we don't go into infinite loop".
+
+What this adds makes the decision at each count accountable; on its own it stops nothing. What breaks a loop is the round count's
+cadence, the signals that hold the next round (above) and the roles following the corrections.
+
+A strategist handed from 0.7.34 (its handoff records `owes: ["diagnosis"]`) adds to its closure:
+
+- `diagnosis`: one entry per cause of what kept going wrong (an empty list when nothing did): `cause` (one of `capability`,
+  `assumption`, `regression`, `one-at-a-time`, `base`, `tooling`, `scope`, `review`, `other`; the bundle's `closureSchema.causes`
+  gives each in plain words), `what` in plain words, the review rounds it cost (`rounds`, by reviewer id) and what shows it
+  (`refs`: findings `<round>:<id>`, `D<n>`, `S<n>`, `A<n>`, `base:<n>`, `gate:<runId>`), and either `correction: { lever, change }`
+  (`lever`: `person`, `one-pass`, `root-cause`, `review-scope`, `base-timing`, `repair-tooling`, `routing`, `replan`, `split`,
+  `model`, `other`; `change` in plain words: what the owner and the roles do differently) or `settledBy` (the earlier decision or
+  the person's answer that already deals with it). The lever is the change to how the work runs, apart from the action (the next
+  step): in the field the same action carried different changes, and the refusal below compares the change.
+- `progressed`: the rounds since the previous decision that did what they were handed.
+- `review`: for each correction still open, `outcome` (`held`, `failed`, `not-applied`, `too-early`, `dropped`), `refs`, `why`,
+  and for a correction a workflow rule kept from being carried out, `improvement: "I-<n>"` (an item of the inbox).
+
+The bundle carries what it cites: `history` (every review round with its status and kind, every finding as `findingHistory` shows it,
+every event), `roundsToAccount`, `roundsInFlight`, `openCorrections`, `corrections` and `causeOverlaps`.
+
+`wf strategy record` checks facts only (`strategy:diagnosis`): every cited round and ref exists (an unknown one is named with the
+nearest known one); every round recorded or died since the previous decision (since admission for the first) is in an entry's
+`rounds` or in `progressed`, any member of a divided review covering it, and rounds still in flight are outside it; a round in
+`progressed` neither died nor named scope it did not reach; every open correction is reviewed; `held` and `failed` cite something
+dated after the correction; `failed` comes with an entry for that cause (another lever, `settledBy`) or an escalation; `not-applied`
+and `dropped` say why; what `settledBy` settled is dated before it and nothing cited is after it; a correction reported `held` or
+`too-early` while the diagnosis cites its cause after it is a contradiction. Given by a strategist that does not owe them, these
+keys are checked and recorded all the same; coverage and the review are asked only when owed.
+
+A correction is open until a later decision reports it `held`, `failed` or `dropped`, or makes a new correction for the same cause
+(then it is `superseded`): one correction per cause is in force. `wf resume`, `wf status` and `wf signals` show each in force in plain
+words, how many decisions found it too early to tell, when corrections for that cause were reported not carried out twice or more in
+a row, and each outcome once reported. Implementers and reviewers are handed the corrections in force (`courseCorrections`) and say
+when one cannot be followed. Rounds or refs two decisions put under different causes are shown (`causeOverlaps`), never refused.
+
+**The same course again** (`strategy:same-course`, a design guard with no field case yet: the field's decisions carried no correction
+to compare). Refused when the closure corrects a cause with the same lever as an earlier correction of that cause that came back
+(reported `failed`, or the diagnosis cites the cause after it), unless the action is `escalate`. The lever `other` never counts as
+the same, and a correction reported `not-applied` was never tried, so the same change may be proposed again.
+
+Out of scope: corrections do not cross a `split` (a sibling starts with none), and a strategist's grouping does not feed the
+reviewers' cause groups (`causeGroups`).
+
 A prediction names a signal, a comparison and a number, and a round or time by which it should hold. It is the strategist's
 own: two missed predictions in a row make its next decision an escalation (`predictions.escalateRequired` in the bundle;
 `wf strategy record` refuses anything else, and an escalation starts the count again). A strategist the owner agent handed
@@ -133,11 +207,13 @@ and that has not decided is waited for (`wf resume` says `strategy`); no handoff
 
 ## What stops the engine
 
-Three things, none of them a number the engine picked:
+Four things, none of them a number the engine picked:
 
 - the round count (below), the one number left, adapter-configurable (`strategy: { reviewRoundsEscalate }`): at it the strategist decides first (0.7.33, D84);
 - a strategist's escalation awaiting the person's `wf approve` (when the owner withdraws it with `wf decisions withdraw`, it holds the handoffs until a strategist's decision is recorded, which supersedes it (the next implementer or reviewer handoff asks the question again only when no strategist handed after the withdrawal is still to decide); `wf resume` names both, and the waiting strategist beside the person's round question when that is due too (with none handed since, that one is to be handed and to decide before the next handoff, or the withdrawn question is asked again as it was; the handoff that asks it again names the way out), and a question answered in the person's own words is followed or withdrawn first);
-- the strategist's own rule above.
+- the strategist's own rule above;
+- a course signal that holds the next round (rounds past an agent's own prediction, a regression of the last fix, a confirmed
+  recurring cause, a finding re-raised that a strategist's diagnosis accounted for) until a strategist decides (0.7.34, I-234).
 
 Everything else the engine checks is a fact: the tree, evidence, reviewer independence, the gate, approvals and the combined-tree
 check. `strategy: { enabled: false }` or `roles: { strategist: false }` turns the round count off for a project. Both

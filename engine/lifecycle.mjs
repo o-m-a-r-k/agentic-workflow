@@ -38,6 +38,7 @@ import { expectOf, expectProblems, PLAN_EXPECT, ROLE_EXPECT } from './expectatio
 import { obligationSince } from './versions.mjs';
 import { deploymentAfterHandoff, deploymentNext } from './deployment-step.mjs';
 import { analysisFor, analysisStep, latestAnalysis } from './analysis.mjs';
+import { correctionsInForce } from './diagnosis.mjs';
 import { requireOwnerDecision, strategistHandoff, strategistWaiting, strategyApplies, strategyHold } from './strategy.mjs';
 import { consolidationOwed, consolidationStep, courseSignals, courseStep, criteriaChangedSince, outstanding, passesSince, passItemsOf, passReady, passStep, unanswered } from './course.mjs';
 import { approveHint, decisionFor, labelOf, requireYes } from './approve.mjs';
@@ -1195,6 +1196,13 @@ export function handoff(root, role, options) {
   // Review of 0.7.32 (D69): a code round is told what keeping an evidence finding open means, and what to do when the code shows the
   // defect still there: its own finding holds the gate, the evidence finding kept open does not.
   const fromEvidence = role === 'reviewer' && !gateNow?.ok ? (bundle.openFindings ?? []).filter((f) => f.blocks && gateHanded((state.handoffs ?? []).find((h) => h.bundle === (state.reviews ?? []).find((r) => (r.closure?.reviewer ?? r.reviewer) === f.round)?.handoff))).map((f) => `${f.round}:${f.id}`) : [];
+  // 0.7.34 (I-232): the strategist's corrections to how the work runs, in force now: the role works within them and says when one
+  // cannot be followed, which is what the next strategist reviews.
+  const inForce = ['implementer', 'reviewer'].includes(role) ? correctionsInForce(state) : [];
+  if (inForce.length) {
+    bundle.courseCorrections = inForce;
+    bundle.instructions += ` \`courseCorrections\` is how the strategist changed the way this attempt runs: work within each, and say in your ${role === 'reviewer' ? 'closure' : 'report'} when one cannot be followed and why.`;
+  }
   if (fromEvidence.length) bundle.instructions += ` ${fromEvidence.join(', ')} ${fromEvidence.length > 1 ? 'were' : 'was'} raised by an evidence review, and this code-review round is handed no gate output. One that only that output can prove (a screenshot, a check that runs only in the gate) you keep \`open\` with what you checked: the gate runs anyway and the evidence review after it verifies it. One the code shows still broken you raise as your own finding, citing the criterion it fails or the line where the defect lives, with \`sameCauseAs: ["<round>:<id>"]\`: a finding of yours that blocks holds the gate, which an evidence finding you kept open does not.`;
   const heldMarked = role === 'implementer' ? [...(bundle.repair ?? []).flatMap((g) => g.findings), ...(bundle.alsoFix ?? []), ...(bundle.passItems ?? []).flatMap((x) => x.items)].filter((x) => x.premiseHeld).map((x) => x.ref ?? `${x.round}:${x.id}`) : [];
   if (heldMarked.length) bundle.instructions += ` An item marked \`premiseHeld\` (${heldMarked.join(', ')}) was reported by an implementer to rest on a premise that does not hold, and the person decided it holds (\`premiseHeld\` has their decision and their words): build its fix. When what you find contradicts their answer, build nothing for it and say so in your report with the evidence (\`premiseFailed\`); the owner then brings it back to them, and you never decide it yourself.`;

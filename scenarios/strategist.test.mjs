@@ -18,6 +18,9 @@ import { W, growTo, inProcess, project, reviewRound, runner, started, strategist
 // next decision an escalation.
 
 const v7 = runner('0.7.0');
+// A plan that expects more rounds than these scenarios run: they are about the round count, and rounds past the plan's own
+// prediction hold the next round too (0.7.34, I-234).
+const LONG = { files: 2, rounds: 40, minutes: 600 };
 const old = runner('0.6.9');
 const refusalRows = (root) => {
   const log = path.join(root, '..', 'refusals.jsonl');
@@ -26,10 +29,11 @@ const refusalRows = (root) => {
 
 test('the owner agent hands the strategist when the course diverges; nothing was refused on the way; a delta-review decision sets the next round', async () => {
   const ctx = project('nonconv');
-  const a = started(v7, ctx, { item: 'ENG-700', expect: { files: 2, rounds: 2, minutes: 30 } });
+  const a = started(v7, ctx, { item: 'ENG-700', expect: { files: 2, rounds: 3, minutes: 30 } });
   const { root, base } = ctx;
   // Three recorded rounds with one blocking finding each, then a diff of 40 files against the 2 the plan expected: every
-  // handoff was accepted, and a fourth round is handed on top of it.
+  // handoff was accepted (a diff past the plan holds nothing), and a fourth round is handed on top of it. Rounds past the plan's own
+  // three would hold the next round (0.7.34, I-234): that is scenarios/strategy-diagnosis.test.mjs.
   for (let i = 0; i < 3; i++) reviewRound(v7, ctx, a, { findings: 1 });
   growTo(a, 40);
   reviewRound(v7, ctx, a, { findings: 1 });
@@ -41,10 +45,10 @@ test('the owner agent hands the strategist when the course diverges; nothing was
   // The comparison is where the owner looks; nothing in the engine says the course is wrong.
   const resume = ok(v7.run(root, ['resume', '--attempt', a.id])).out;
   assert.match(resume, /files changed: 40; the plan expected 2 \(past its own estimate\)/);
-  assert.match(resume, /review rounds recorded: 4; the plan expected 2 \(past its own estimate\)/);
+  assert.match(resume, /review rounds recorded: 4; the plan expected 3 \(past its own estimate\)/);
   // ... and the line the owner agent acts on is the strategist's handoff (0.7.28, I-210: the owner judged "converging" six times in
   // a ticket that handed no strategist in 47 rounds), with no "continue" offered beside it; still nothing is refused.
-  assert.match(resume, /next: the course needs the strategist \(the engine's next step, not a judgement call\): 40 files changed, more than twice the 2 the plan expected; 4 review rounds handed, past the 2 the plan expected/);
+  assert.match(resume, /next: the course needs the strategist \(the engine's next step, not a judgement call\): 40 files changed, more than twice the 2 the plan expected; 4 review rounds handed, past the 3 the plan expected/);
   assert.doesNotMatch(resume, /next: past its own estimate/);
   assert.equal(v7.state(root, a.id).decision.kind, 'strategy', 'the strategist is the next step the engine names');
   // The strategist may not be one of the attempt's implementers; a reason is text.
@@ -381,7 +385,7 @@ const COUNT = (n) => new RegExp(`${n} review rounds handed; the strategist decid
 
 test('a round question an earlier release asked is the person\'s to answer, and the count comes back as many rounds after their answer, not at the next multiple: answered at 17, due again at 27, where the strategist decides', () => {
   const ctx = project('anchored-rounds');
-  const a = started(current, ctx, { item: 'ENG-746' });
+  const a = started(current, ctx, { item: 'ENG-746', expect: LONG });
   const { root } = ctx;
   earlierRounds(ctx, a, 17);
   legacyQuestion(ctx, a, 'A1', 10, '17 review rounds handed; the owner decides how to continue: continue | split | deliver-core | hold | stop');
@@ -408,7 +412,7 @@ test('a round question an earlier release asked is the person\'s to answer, and 
 
 test('a round question an earlier release opened before it was due again is withdrawn by the engine with why, never asked; a strategist\'s decision settles the count as an answer does', () => {
   const ctx = project('anchored-pending', { strategy: { reviewRoundsEscalate: 4 } });
-  const a = started(current, ctx, { item: 'ENG-747' });
+  const a = started(current, ctx, { item: 'ENG-747', expect: LONG });
   const { root, base } = ctx;
   earlierRounds(ctx, a, 5);
   legacyQuestion(ctx, a, 'A1', 4);
@@ -445,7 +449,7 @@ test('a round question an earlier release opened before it was due again is with
 // 4, so a question that was due there was withdrawn and the person would be asked it again.
 test('an early round question is withdrawn once when two commands read the attempt before either withdrew it; with the adapter unreadable a question that is due is never withdrawn', async () => {
   const ctx = project('anchored-settle', { strategy: { reviewRoundsEscalate: 4 } });
-  const a = started(current, ctx, { item: 'ENG-749' });
+  const a = started(current, ctx, { item: 'ENG-749', expect: LONG });
   const { root } = ctx;
   earlierRounds(ctx, a, 5);
   legacyQuestion(ctx, a, 'A1', 4);
@@ -478,7 +482,7 @@ test('an early round question is withdrawn once when two commands read the attem
 
 test('a round question an earlier release opened and nobody has answered yet stays the one question, whatever round it was keyed to', () => {
   const ctx = project('anchored-first', { strategy: { reviewRoundsEscalate: 4 } });
-  const a = started(current, ctx, { item: 'ENG-748' });
+  const a = started(current, ctx, { item: 'ENG-748', expect: LONG });
   const { root } = ctx;
   // The earlier release let 9 rounds pass unasked, then opened the first question keyed to the multiple it was at (8); it is pending.
   earlierRounds(ctx, a, 9);
