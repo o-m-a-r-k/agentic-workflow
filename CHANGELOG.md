@@ -66,7 +66,7 @@ existed before the ticket, so screenshots are also a regression net).
   `confirm-deployed`, `deploy`, `status`, `comment`, `module`), each repo's part separately, idempotent tracker writes,
   merge requests matched by patch-id, and a landing queue for projects with no CI. The merge facts refuse unreviewed
   edits after the review and merges of foreign branches. A `push` stage onto the base needs a passing `full` run on
-  the tip tree, from the landing queue or CI (`merge:untested`).
+  the tip tree, from the landing queue or CI, and every stage needs the `fast` tests green on HEAD (`merge:untested`).
 - **Connector trackers** (D63): a tracker named by a string with `via: connector` is a label in the operation texts,
   never a built-in driver. A connector step counts only from the owner's transcript, from a call made after the stage
   was first asked with a result that is no error: a follow-up's input carries the marker and the title and its result
@@ -80,8 +80,8 @@ existed before the ticket, so screenshots are also a regression net).
   the user folder or the repo.
 - **Screens:** a capture is refused when its width differs from the viewport (`screens:width`) or when its bytes equal
   another image's, the same route included (`screens:dup`). A page whose `lang` or `dir` differs from the requested one
-  is recorded as `mismatch: {requested, page}` and listed for the reviewer. Screens are required when `capture` and
-  `shared` or `sentinel` are set, even with no routes, and `wf doctor` warns when routes are unset.
+  is recorded as `mismatch: {requested, page}` and listed for the reviewer. With `capture` set, a change to a `shared`
+  path requires the `sentinel` screens even with no routes, and `wf doctor` warns when routes are unset.
   `screens.capture` is either `{ run: "<command>" }` or `{ module: { repo, path } }` (see the known limits).
 - **Tests:** each repo's `fast` and `full`, a command or a module loaded from the fetched base, with a counted,
   machine-wide lock. Gate reuse, selection, quarantine, leases and per-ticket proof steps are gone.
@@ -2430,238 +2430,238 @@ A second adversarial pass over the integrated 0.5.0 branch, with scenarios in `s
 
 | Item | Failure fixed | Fixed in | Scenario test |
 | --- | --- | --- | --- |
-| [I-235](improvements/I-235.md) | Reviewer evidence reader rejects handed shared adapter snapshots | 0.7.35 | `scenarios/handed-adapter-snapshots.test.mjs` |
-| [I-234](improvements/I-234.md) | Course signals fired without a strategist being handed for ten rounds | 0.7.34 | `scenarios/strategy-diagnosis.test.mjs` |
-| [I-233](improvements/I-233.md) | A base merge forced by the gate reopens review, so 'reconcile the base once' cannot be followed | 0.7.34 | `scenarios/base-merge-classes.test.mjs` |
-| [I-232](improvements/I-232.md) | The strategist picks an action but never diagnoses why the ticket loops or corrects the flow | 0.7.34 | `scenarios/strategy-diagnosis.test.mjs` |
-| [I-231](improvements/I-231.md) | Frozen-plan amendment lacks a supported dry-run path | 0.7.34 | `scenarios/amend-check.test.mjs` |
-| [I-230](improvements/I-230.md) | Read-only replan check refuses frozen criteria | 0.7.34 | `scenarios/amend-check.test.mjs` |
-| [I-229](improvements/I-229.md) | Round question asked after the strategist planned and the person gave the course | 0.7.33 | `scenarios/strategist.test.mjs` |
-| [I-228](improvements/I-228.md) | Support recording an already acknowledged client-owned configuration handoff without asking it again | 0.7.33 | `scenarios/decisions-per-item.test.mjs` |
-| [I-227](improvements/I-227.md) | declaredReadsAt runs git rev-parse per file | 0.7.33 | `scenarios/correction-reads.test.mjs` |
-| [I-226](improvements/I-226.md) | sharedWith on admission corrections is recorded only by the later attempt | 0.7.33 | `scenarios/correction-reads.test.mjs` |
-| [I-225](improvements/I-225.md) | pushedRange marks a fast-forwarded or rebased base commit as the attempt's own | 0.7.33 | `scenarios/deadlocks-0732.test.mjs` |
-| [I-224](improvements/I-224.md) | Transitive loads of a declared harness are invisible to the correction review | 0.7.33 | `scenarios/correction-reads.test.mjs` |
-| [I-223](improvements/I-223.md) | A correction can drop or narrow the admission step's declared reads | 0.7.33 | `scenarios/correction-reads.test.mjs` |
-| [I-222](improvements/I-222.md) | Open visual evidence finding prevents the gate needed to review it | 0.7.32 | `scenarios/deadlocks-0732.test.mjs` |
-| [I-221](improvements/I-221.md) | A passing gate that reruns failed suites should carry the earlier run's screenshots | 0.7.32 | `scenarios/run-screenshots.test.mjs` |
-| [I-220](improvements/I-220.md) | Required report regressions have no committed supplemental validation route | 0.7.32 | `scenarios/supplemental-validation.test.mjs` |
-| [I-219](improvements/I-219.md) | Frozen <project> runtime has no dependency preparation entry point | 0.7.32 | `scenarios/prepare-route.test.mjs` |
-| [I-218](improvements/I-218.md) | Analysis resume recommends forbidden implementer handoff | 0.7.31 | `scenarios/analysis-route.test.mjs` |
-| [I-217](improvements/I-217.md) | A fix was recommended and built without tracing what the data feeds; it was reverted after the person approved it | 0.7.31 | `scenarios/premise.test.mjs` |
-| [I-216](improvements/I-216.md) | Analysis resume names an implementer which read-only intent refuses | 0.7.31 | `scenarios/analysis-route.test.mjs` |
-| [I-215](improvements/I-215.md) | Show pinned tracker operation instructions during connector handoff | 0.7.31 | `scenarios/tracker-operations.test.mjs` |
-| [I-214](improvements/I-214.md) | Continuation approval at round17 blocks again after only three handed rounds | 0.7.29 | `scenarios/strategist.test.mjs` |
-| [I-213](improvements/I-213.md) | wf criteria amend crashed on a survey placed outside impact | 0.7.28 | `scenarios/fix-0728b.test.mjs` |
-| [I-212](improvements/I-212.md) | Deferred heavy steps hide a ticket's own e2e specs until the batch gate | 0.7.28 | `scenarios/fix-0728b.test.mjs` |
-| [I-211](improvements/I-211.md) | A divided review can be started as a plain reviewer and is never recorded | 0.7.28 | `scenarios/fix-0728b.test.mjs` |
-| [I-210](improvements/I-210.md) | The round boundary never changes course: no strategist in 47 rounds | 0.7.28 | `scenarios/course-signals.test.mjs` |
-| [I-209](improvements/I-209.md) | Finding history (cause, not place) never reaches attempts admitted before 0.7.27 | 0.7.28 | `scenarios/fix-0728b.test.mjs` |
-| [I-208](improvements/I-208.md) | Implementers 'fix the class' with redesigns that introduce new defects | 0.7.28 | `scenarios/course-signals.test.mjs` |
-| [I-207](improvements/I-207.md) | A low finding or a not-caused left item opens its own fix round | 0.7.28 | `scenarios/planned-pass.test.mjs` |
-| [I-206](improvements/I-206.md) | Delta reviewer handoff omits newly added supplemental validation | 0.7.29 | `scenarios/supplemental-validation.test.mjs` |
-| [I-205](improvements/I-205.md) | Batch reviewer bundle omits accepted supplemental registrations |  |  |
-| [I-204](improvements/I-204.md) | Batch creation drops member supplemental proof registrations | 0.7.29 | `scenarios/batch-validation.test.mjs` |
-| [I-203](improvements/I-203.md) | A '?' the agent appends to a legacy question, or a panel offering a legacy decision's frame labels, costs an extra agent command | 0.7.28 | `scenarios/approve-question.test.mjs` |
-| [I-202](improvements/I-202.md) | Explain mismatched question-panel option labels instead of reporting no answer | 0.7.28 | `scenarios/approve-question.test.mjs` |
-| [I-201](improvements/I-201.md) | Support delivery to an additional divergent target branch | 0.7.30 | `scenarios/delivery-targets.test.mjs` |
-| [I-200](improvements/I-200.md) | Carry unresolved critical observations in implementer goal context | 0.7.28 | `scenarios/planned-pass.test.mjs` |
-| [I-199](improvements/I-199.md) | Export interrupted-gate screenshots listed in evidence inventory |  |  |
-| [I-198](improvements/I-198.md) | Export failed-step screenshots for implementer diagnosis | 0.7.30 | `scenarios/run-screenshots.test.mjs` |
-| [I-197](improvements/I-197.md) | Reject malformed screenshot references when recording review and retain acceptance refusals |  |  |
-| [I-196](improvements/I-196.md) | Delivery has no deployment step: a label route can only set the final status at merge, before the deployment is confirmed and the fix tested | 0.7.27 | `scenarios/deployment-confirmation.test.mjs` |
-| [I-195](improvements/I-195.md) | Frozen client steps lack pre-commit dependency preparation |  |  |
-| [I-194](improvements/I-194.md) | Batch admission requirement needs actionable guidance | 0.7.29 | `scenarios/batch-validation.test.mjs` |
-| [I-193](improvements/I-193.md) | Improvement list says 'fixed in X' before X is published or installed | 0.7.27 | `scenarios/improve.test.mjs` |
-| [I-192](improvements/I-192.md) | Shipped task closure cannot recognize explicit owner chat authorization | 0.7.27 | `scenarios/approve-question.test.mjs` |
-| [I-191](improvements/I-191.md) | Fix and review rounds work one finding at a time, so a cause that spans places recurs round after round | 0.7.27 | `scenarios/recurring-cause.test.mjs` |
-| [I-190](improvements/I-190.md) | TS ticket completion conflicts with never-Done delivery instruction | 0.7.27 | `scenarios/tracker-status-routing.test.mjs` |
-| [I-189](improvements/I-189.md) | Notion adapter writes delivery comments into the ticket description | 0.7.27 | `scenarios/tracker-attachments.test.mjs` |
-| [I-188](improvements/I-188.md) | Support retracting a discovered defect invalidated by product clarification | 0.7.27 | `scenarios/discovered.test.mjs` |
-| [I-187](improvements/I-187.md) | Reuse unused approved validation correction across an identical base merge | 0.7.27 | `scenarios/validation-correction.test.mjs` |
-| [I-186](improvements/I-186.md) | Withdrawn escalation still blocks corrected strategy recording | 0.7.27 | `scenarios/strategist.test.mjs` |
-| [I-185](improvements/I-185.md) | Review checkpoint does not open while prior proof findings remain unresolved | 0.7.27 | `scenarios/strategist-signals.test.mjs` |
-| [I-184](improvements/I-184.md) | Implementer closure duplicates an explicitly referenced discovered issue | 0.7.27 | `scenarios/discovered.test.mjs` |
-| [I-183](improvements/I-183.md) | Manual delivery awaiting merge blocks base merge while deliver only observes | 0.7.26 | `scenarios/base-merge-in-flight.test.mjs` |
-| [I-182](improvements/I-182.md) | Batch handoff caps screenshot inventory before ticket-specific support captures | 0.7.26 | `scenarios/delivered-captures.test.mjs` |
-| [I-181](improvements/I-181.md) | Abandoning an assembled batch strands its members | 0.7.24 | `scenarios/deferral-rule.test.mjs` |
-| [I-180](improvements/I-180.md) | Gate-order approval repeats after workflow-only base merge and fresh reviewer | 0.7.23 | `scenarios/questions.test.mjs` |
-| [I-179](improvements/I-179.md) | Evidence-only gate repair trapped between clean-review and execution proof requirements | 0.7.23 | `scenarios/supplemental-validation.test.mjs` |
-| [I-178](improvements/I-178.md) | Synthetic delivery batch incorrectly requests tracker implementing lifecycle | 0.7.23 | `scenarios/fix-0721.test.mjs` |
-| [I-177](improvements/I-177.md) | Assembled batch cannot own or settle member observation selected for fix | 0.7.23 | `scenarios/deferral-rule.test.mjs` |
-| [I-176](improvements/I-176.md) | Quick-lane tracked implementation skips started tracker transition | 0.7.21 | `scenarios/fix-0721.test.mjs` |
-| [I-175](improvements/I-175.md) | Reviewer closures repeatedly serialize multiple screenshot hashes as one artifact ref |  |  |
-| [I-174](improvements/I-174.md) | Chat approval reader selects clarification instead of latest explicit yes | 0.7.28 | `scenarios/approve-question.test.mjs` |
-| [I-173](improvements/I-173.md) | Repair handoff omits newly recorded bookkeeping cause | 0.7.30 | `scenarios/fix-0730c.test.mjs` |
-| [I-172](improvements/I-172.md) | Installed screenshot exporter still refuses overlapping suite titles | 0.7.20 | `scenarios/fix-0720.test.mjs` |
-| [I-171](improvements/I-171.md) | Native Codex shell snapshot restores an older global wf despite engine PATH |  |  |
-| [I-170](improvements/I-170.md) | Screenshot export refuses repeated titles from multiple gate suites | 0.7.20 | `scenarios/fix-0720.test.mjs` |
-| [I-169](improvements/I-169.md) | Reconcile a defect recorded after its same-handoff repair with independent proof | 0.7.19 | `scenarios/fix-0719.test.mjs` |
-| [I-168](improvements/I-168.md) | Preserve unreached review obligations across a clean base merge | 0.7.30 | `scenarios/fix-0730c.test.mjs` |
-| [I-167](improvements/I-167.md) | Delta review bundle underreports files introduced by baseline merge | 0.7.30 | `scenarios/fix-0730c.test.mjs` |
-| [I-166](improvements/I-166.md) | Carry latest retained-finding reproduction into repair handoffs | 0.7.30 | `scenarios/fix-0730c.test.mjs` |
-| [I-165](improvements/I-165.md) | Use one authoritative work plan after amendments | 0.7.30 | `scenarios/fix-0730c.test.mjs` |
-| [I-164](improvements/I-164.md) | Disambiguate screenshot exports from overlapping gate steps | 0.7.20 | `scenarios/fix-0720.test.mjs` |
-| [I-163](improvements/I-163.md) | Order proof consumers after isolated dependency producers | 0.7.30 | `scenarios/step-order.test.mjs` |
-| [I-162](improvements/I-162.md) | Retain stopped gate failure details in repair handoffs | 0.7.30 | `scenarios/fix-0730c.test.mjs` |
-| [I-161](improvements/I-161.md) | Gate screenshot export collides across required steps | 0.7.20 | `scenarios/fix-0720.test.mjs` |
-| [I-160](improvements/I-160.md) | Export imported current-tree diagnostic captures before a full gate or delivery | 0.7.30 | `scenarios/run-screenshots.test.mjs` |
-| [I-159](improvements/I-159.md) | Hotfix planning added an unrequested notification lifecycle | 0.7.30 | `scenarios/fix-0730c.test.mjs` |
-| [I-158](improvements/I-158.md) | Provide a recorded owner decision for explicitly skipping a full gate | 0.7.30 | `scenarios/gate-light-only.test.mjs` |
-| [I-157](improvements/I-157.md) | Bound shared runtime lease waits with fair queuing | 0.7.30 | `scenarios/lease-fairness.test.mjs` |
-| [I-156](improvements/I-156.md) | Investigate starvation of long-waiting runtime lease requests |  |  |
-| [I-155](improvements/I-155.md) | Frozen runtime onboarding should provide a supported pre-commit dependency preparation route | 0.7.30 | `scenarios/prepare-route.test.mjs` |
-| [I-154](improvements/I-154.md) | Validate screenshot references when recording a review | 0.7.29 | `scenarios/evidence.test.mjs` |
-| [I-153](improvements/I-153.md) | A model at capacity fails a launch that could resume | 0.7.30 | `scenarios/codex-run.test.mjs` |
-| [I-152](improvements/I-152.md) | A long reviewer's findings are lost when it is stopped | 0.7.12 | `scenarios/fix-074-lifecycle.test.mjs` |
-| [I-151](improvements/I-151.md) | Live attempts keep the adapter they were admitted with | 0.7.30 | `scenarios/adapter-follow.test.mjs` |
-| [I-150](improvements/I-150.md) | Step passes from another attempt with the same key are not reused | 0.7.12 | `scenarios/gate.test.mjs` |
-| [I-149](improvements/I-149.md) | A gate starts while an implementer is still committing | 0.7.11 | `scenarios/gate.test.mjs` |
-| [I-148](improvements/I-148.md) | Launch failures are unrecorded, a passing error is latched, and machine sleep reads as a stall | 0.7.11 | `scenarios/codex-run.test.mjs` |
-| [I-147](improvements/I-147.md) | Rules copied into projects' AGENTS.md go stale between syncs | 0.7.11 | `scenarios/onboarding.test.mjs` |
-| [I-146](improvements/I-146.md) | A strategist's escalation reaches the person as unreadable workflow prose | 0.7.11 | `scenarios/strategist.test.mjs` |
-| [I-145](improvements/I-145.md) | Plans are refused for the form of their impact analysis only after the planner reports | 0.7.11 | `scenarios/plan-check.test.mjs` |
-| [I-144](improvements/I-144.md) | A launched reviewer's written closure is lost, and a briefly dirty tree ends a round | 0.7.11 | `scenarios/fix-074-lifecycle.test.mjs` |
-| [I-143](improvements/I-143.md) | Gate steps rerun when nothing that can change their result changed | 0.7.11 | `scenarios/validation-correction.test.mjs` |
-| [I-142](improvements/I-142.md) | Explicit exclusion of legacy high discovered risks has no reserved disposition route | 0.7.12 | `scenarios/decisions-per-item.test.mjs` |
-| [I-141](improvements/I-141.md) | Evidence lock replacement after a missing no-follow read is mistaken for unreadable ownership | 0.7.12 | `scenarios/fix-0712.test.mjs` |
-| [I-140](improvements/I-140.md) | Native handoff wait uses role age instead of a new wait interval | 0.7.12 | `scenarios/fix-0712.test.mjs` |
-| [I-139](improvements/I-139.md) | Late bookkeeping record has no honest already-fixed reconciliation path | 0.7.12 | `scenarios/fix-0712.test.mjs` |
-| [I-138](improvements/I-138.md) | Legacy selected-step admission markers block every check and correction | 0.7.11 | `scenarios/validation-correction.test.mjs` |
-| [I-137](improvements/I-137.md) | Owner must advance completed native handoffs before reporting elapsed estimates | 0.7.12 | `scenarios/fix-0712.test.mjs` |
-| [I-136](improvements/I-136.md) | Any app-code change reruns a whole e2e step: the gate cannot tell which suites a change reaches |  |  |
-| [I-135](improvements/I-135.md) | Show a visible approval brief when the question panel is unavailable | 0.7.10 | `scenarios/approve-question.test.mjs` |
-| [I-134](improvements/I-134.md) | Scope e2e gate steps to the specs a diff can affect | 0.7.30 | `scenarios/affected-specs.test.mjs` |
-| [I-133](improvements/I-133.md) | Post-evidence repair handoff repeats full review instead of delta | 0.7.10 | `scenarios/review-rounds.test.mjs` |
-| [I-132](improvements/I-132.md) | Evidence review rejects priorFindings update after accepted blind closure | 0.7.10 | `scenarios/review-rounds.test.mjs` |
-| [I-131](improvements/I-131.md) | Scenario runs write refusals into the person's own refusal log | 0.7.9 | `scenarios/learning.test.mjs` |
-| [I-130](improvements/I-130.md) | A recurrence found after acceptance writes the lesson file of the pull-only main checkout | 0.7.9 | `scenarios/lessons.test.mjs` |
-| [I-129](improvements/I-129.md) | Outside-plan warning ignores accepted impact addenda and repository-prefixed anchors | 0.7.9 | `scenarios/scope.test.mjs` |
-| [I-128](improvements/I-128.md) | handoff stop records stopped but leaves native Codex child alive | 0.7.9 | `scenarios/handoff-stop-tree.test.mjs` |
-| [I-127](improvements/I-127.md) | Planner handoff retains analysis-only goals after implementation intent upgrade | 0.7.9 | `scenarios/dead-ends.test.mjs` |
-| [I-126](improvements/I-126.md) | The person could not read or partly answer the leaving question | 0.7.8 | `scenarios/decisions-per-item.test.mjs` |
-| [I-125](improvements/I-125.md) | Frozen admission validator cannot accept a reviewed forward correction | 0.7.8 | `scenarios/validation-correction.test.mjs` |
-| [I-124](improvements/I-124.md) | Scoped implementer closure waits for unrelated dirty repositories | 0.7.8 | `scenarios/decisions-per-item.test.mjs` |
-| [I-123](improvements/I-123.md) | The delivered comment says a finding moved to a sibling that left the delivery | 0.7.8 | `scenarios/decisions-per-item.test.mjs` |
-| [I-122](improvements/I-122.md) | The advance live-child scenario fails once under full-suite load | 0.7.7 | `scenarios/advance.test.mjs` |
-| [I-121](improvements/I-121.md) | The owner agent deferred most findings of a delivery on its own judgement | 0.7.7 | `scenarios/deferral-rule.test.mjs` |
-| [I-120](improvements/I-120.md) | Implementation amendments leave inherited analysis-only plan narrative active | 0.7.10 | `scenarios/dead-ends.test.mjs` |
-| [I-119](improvements/I-119.md) | The base branch can carry changes no gate proved, and nothing says so | 0.7.8 | `scenarios/decisions-per-item.test.mjs` |
-| [I-118](improvements/I-118.md) | A repair after a failed gate reran whole e2e suites to prove each fix | 0.7.6 | `scenarios/focused-repair.test.mjs` |
-| [I-117](improvements/I-117.md) | Verify actual screenshot dimensions before desktop visual acceptance | 0.7.10 | `scenarios/image-size.test.mjs` |
-| [I-116](improvements/I-116.md) | An attempt whose change shipped outside the workflow cannot be closed | 0.7.5 | `scenarios/close-shipped.test.mjs` |
-| [I-115](improvements/I-115.md) | A legacy attempt with one scoped and one unscoped implementer reads as work not started | 0.7.4 | `scenarios/fix-074-lifecycle.test.mjs` |
-| [I-114](improvements/I-114.md) | A planner whose output cannot be read leaves no refusal for the next planner | 0.7.4 | `scenarios/fix-074-lifecycle.test.mjs` |
-| [I-113](improvements/I-113.md) | The reason an owner stopped a check or gate is missing from status and resume | 0.7.4 | `scenarios/fix-074-gate.test.mjs` |
-| [I-112](improvements/I-112.md) | A lesson for a repo the attempt did not admit lands untracked in that repo's main checkout | 0.7.4 | `scenarios/fix-074-lessons.test.mjs` |
-| [I-111](improvements/I-111.md) | Admission-time provisioning runs without the secrets a private install needs | 0.7.4 | `scenarios/fix-074-gate.test.mjs` |
-| [I-110](improvements/I-110.md) | Texts still describe checks 0.7.0 removed | 0.7.4 | `scenarios/fix-074-texts.test.mjs` |
-| [I-109](improvements/I-109.md) | Two evidence writes land outside the evidence transaction | 0.7.4 | `scenarios/fix-074-lifecycle.test.mjs` |
-| [I-108](improvements/I-108.md) | A valid Codex patch with an empty context line is refused as evidence | 0.7.4 | `scenarios/fix-074-lessons.test.mjs` |
-| [I-107](improvements/I-107.md) | A criterion added after acceptance is delivered without evidence | 0.7.4 | `scenarios/fix-074-lifecycle.test.mjs` |
-| [I-106](improvements/I-106.md) | The person could confirm no reserved decision away from the machine | 0.7.3 | `scenarios/approve-question.test.mjs` |
-| [I-105](improvements/I-105.md) | A shell left standing in the evidence folder could run nothing, not even cd out of it | 0.7.3 | `scenarios/guard-regressions.test.mjs` |
-| [I-104](improvements/I-104.md) | wf run from inside the adapter repo of a multi-repo project took that repo for the project | 0.7.2 | `scenarios/delivery.test.mjs` |
-| [I-103](improvements/I-103.md) | A decision taken on an orphaned attempt reported a missing-worktree failure after it was recorded | 0.7.1 | `scenarios/dead-ends.test.mjs` |
-| [I-102](improvements/I-102.md) | Permit audited correction of supplemental validator plugins after review findings | 0.7.0 | `scenarios/validation-correction.test.mjs` |
-| [I-101](improvements/I-101.md) | Recognize contextual adoption authorization from question-panel replies | 0.7.3 | `scenarios/approve-question.test.mjs` |
-| [I-100](improvements/I-100.md) | Rebase plugin artifact paths when harvesting scratch output | 0.7.0 | `scenarios/plugin-artifacts.test.mjs` |
-| [I-99](improvements/I-99.md) | Lesson recording after accepted-tree repairs must use the task worktree | 0.7.4 | `scenarios/fix-074-lessons.test.mjs` |
-| [I-98](improvements/I-98.md) | Lesson writes fall back to main checkout after accepted attempt is amended | 0.7.0 | `scenarios/lessons.test.mjs` |
-| [I-97](improvements/I-97.md) | Do not translate missing proof findings into committed diagnostic bundles | 0.7.4 | `scenarios/fix-074-texts.test.mjs` |
-| [I-96](improvements/I-96.md) | Supplementary validation manifests inflate full-review workload | 0.7.4 | `scenarios/fix-074-lessons.test.mjs` |
-| [I-95](improvements/I-95.md) | Cross-repository lesson IDs can silently hide distinct lessons | 0.7.0 | `scenarios/lesson-identity.test.mjs` |
-| [I-94](improvements/I-94.md) | Validate a visual evidence route before freezing UI criteria | 0.7.0 | `scenarios/capture-route.test.mjs` |
-| [I-93](improvements/I-93.md) | Descriptive desktop scope choices demand repeated approval | 0.6.6 | `scenarios/scope-decisions.test.mjs` |
-| [I-92](improvements/I-92.md) | Expose owner stop reason and do not retry unfinished-tree check after a tree-change stop | 0.7.0 | `scenarios/gate.test.mjs` |
-| [I-91](improvements/I-91.md) | Check step ledger contention crashes the runner before final cleanup | 0.7.4 | `scenarios/fix-074-gate.test.mjs` |
-| [I-90](improvements/I-90.md) | Support required supplemental tree-bound validation evidence | 0.6.5 | `scenarios/supplemental-validation.test.mjs` |
-| [I-89](improvements/I-89.md) | Stopped unlaunched repair handoff consumes owed pattern sweeps | 0.7.4 | `scenarios/fix-074-lifecycle.test.mjs` |
-| [I-88](improvements/I-88.md) | Refresh operational lease capacity without repinning test requirements | 0.7.4 | `scenarios/fix-074-gate.test.mjs` |
-| [I-87](improvements/I-87.md) | Native planner retry loses validation refusal | 0.7.0 | `scenarios/impact.test.mjs` |
-| [I-86](improvements/I-86.md) | Resolve production prerequisites before asking the owner in investigations | 0.7.4 | `scenarios/fix-074-texts.test.mjs` |
-| [I-85](improvements/I-85.md) | Reject admitting a page id as the ticket of a tracker with its own ticket identity | 0.7.0 | `scenarios/lifecycle.test.mjs` |
-| [I-84](improvements/I-84.md) | Native planner replacements need immutable validation feedback | 0.7.0 | `scenarios/impact.test.mjs` |
-| [I-83](improvements/I-83.md) | Review ownership is classified before related flows are grouped | 0.6.4 | `scenarios/review-division-ownership.test.mjs` |
-| [I-82](improvements/I-82.md) | Evidence inspect pagination resolves numeric from as a filesystem path | 0.6.3 | `scenarios/evidence-pagination.test.mjs` |
-| [I-81](improvements/I-81.md) | Native implementer stops on oversized handoff despite complete bounded reader | 0.6.3 | `scenarios/evidence-pagination.test.mjs` |
-| [I-80](improvements/I-80.md) | Native implementer cannot read oversized immutable handoff | 0.6.3 | `scenarios/evidence-pagination.test.mjs` |
-| [I-79](improvements/I-79.md) | Replacement implementer loses stopped handoff sweeps | 0.7.4 | `scenarios/fix-074-lifecycle.test.mjs` |
-| [I-78](improvements/I-78.md) | Verification reports success for a missing selected attempt | 0.7.4 | `scenarios/fix-074-gate.test.mjs` |
-| [I-77](improvements/I-77.md) | Native reviewer stops after a successful complete reference read |  |  |
-| [I-76](improvements/I-76.md) | Stale Codex manifest version prevents installation of released fixes | 0.5.18 | `scenarios/onboarding.test.mjs` |
-| [I-75](improvements/I-75.md) | Claude-only tool instructions stop native Codex review completion | 0.5.17 | `scenarios/codex-runtime-compat.test.mjs`, `scenarios/codex-run.test.mjs` |
-| [I-74](improvements/I-74.md) | Historical runtime origin causes repeated provider approvals after adoption | 0.5.16 | `scenarios/runtime-preservation.test.mjs` |
-| [I-73](improvements/I-73.md) | Filled registry secrets cannot provision dependencies before required precommit validation | 0.7.0 | `scenarios/gate.test.mjs` |
-| [I-72](improvements/I-72.md) | Scope authority ignores a valid earlier answer in a combined desktop reply |  |  |
-| [I-71](improvements/I-71.md) | Native role commentary discarded by progress reporting | 0.5.15 | `scenarios/codex-run.test.mjs` |
-| [I-70](improvements/I-70.md) | Scope question choices omit the required owner decision phrase |  |  |
-| [I-69](improvements/I-69.md) | Native reviewers terminate with unfinished whole-change review and no closure | 0.7.4 | `scenarios/fix-074-lifecycle.test.mjs` |
-| [I-68](improvements/I-68.md) | Align legacy discovered-scope guidance with fixed issue verdicts |  |  |
-| [I-67](improvements/I-67.md) | Owner release authorization from Codex question replies is not recognized | 0.5.13 | `scenarios/trust-0.7.test.mjs` |
-| [I-66](improvements/I-66.md) | Require owner scope decision for unrelated review findings | 0.5.12 | `scenarios/scope-decisions.test.mjs` |
-| [I-65](improvements/I-65.md) | Evidence guard mistakes a JavaScript object spread for a protected path |  |  |
-| [I-64](improvements/I-64.md) | Project-scoped lessons are filtered out without explicit paths | 0.7.0 | `scenarios/lessons.test.mjs` |
-| [I-63](improvements/I-63.md) | Foreground advance rejects a settled unified implementer | 0.7.0 | `scenarios/advance.test.mjs` |
-| [I-62](improvements/I-62.md) | Reviewer treats an indexed design reference as a required full-output receipt and stops with incomplete verdicts |  |  |
-| [I-61](improvements/I-61.md) | Generated AGENTS Markdown reintroduces formatter errors on sync | 0.5.10 | `scenarios/onboarding.test.mjs` |
-| [I-60](improvements/I-60.md) | Reviewer formatter alias mutates the settled source tree | 0.5.10 | `scenarios/codex-run.test.mjs` |
-| [I-59](improvements/I-59.md) | Unchanged role waits produce repetitive liveness messages | 0.5.10 | `scenarios/role-progress.test.mjs` |
-| [I-58](improvements/I-58.md) | Native reviewer applies full-file document receipts to the large JSON handoff | 0.5.9 | `scenarios/review-efficiency.test.mjs` |
-| [I-57](improvements/I-57.md) | Reports conflate unknown review history with wasted work | 0.5.8 | `scenarios/review-diagnostics.test.mjs`, `scenarios/telemetry.test.mjs` |
-| [I-56](improvements/I-56.md) | Missing required documents discovered after reviewer launch | 0.5.8 | `scenarios/review-efficiency.test.mjs`, `scenarios/codex-run.test.mjs` |
-| [I-55](improvements/I-55.md) | Textual impact analysis hides truncation and ambiguous origins | 0.5.8 | `scenarios/review-efficiency.test.mjs` |
-| [I-54](improvements/I-54.md) | Identifier suffix mistaken for an assembled evidence fragment | 0.5.8 | `scenarios/trust-0.7.test.mjs` |
-| [I-53](improvements/I-53.md) | Frozen native reviewer instructions omit supported document reads | 0.5.8 | `scenarios/review-efficiency.test.mjs` |
-| [I-52](improvements/I-52.md) | Quiet native role launches cause duplicate owner transcript monitoring | 0.5.7 | `scenarios/role-progress.test.mjs` |
-| [I-51](improvements/I-51.md) | Quoted search regex is mistaken for an evidence glob outside project scope | 0.5.7 | `scenarios/trust-0.7.test.mjs` |
-| [I-50](improvements/I-50.md) | Concurrent handoff generation exposes transient unrecorded evidence to readers | 0.7.0 | `scenarios/dead-ends.test.mjs` |
-| [I-49](improvements/I-49.md) | Generated lesson YAML fails repository Prettier formatting contract | 0.7.4 | `scenarios/fix-074-lessons.test.mjs` |
-| [I-48](improvements/I-48.md) | Native Codex review guard does not recognize successful Node reader skill access |  |  |
-| [I-47](improvements/I-47.md) | Native Codex launcher diagnostic should identify host sandbox app-server initialization failure | 0.5.6 | `scenarios/codex-run.test.mjs` |
-| [I-46](improvements/I-46.md) | Native Codex launch rejects a configured project root outside Git | 0.5.5 | `scenarios/codex-run.test.mjs` |
-| [I-45](improvements/I-45.md) | Native role evidence reader rejects absolute handed paths | 0.5.5 | `scenarios/evidence-read.test.mjs` |
-| [I-44](improvements/I-44.md) | Adopted attempts cannot launch models configured on a later committed base | 0.5.5 | `scenarios/runtime-models.test.mjs` |
-| [I-43](improvements/I-43.md) | Codex file-edit payloads are judged as shell commands | 0.5.5 | `scenarios/codex-file-guard.test.mjs` |
-| [I-42](improvements/I-42.md) | Historical implementer report scanner blocks review on resolved work and coordination statements | 0.5.4 | `scenarios/report-resolution.test.mjs` |
-| [I-41](improvements/I-41.md) | Codex planner and reviewer prompt provenance cannot be verified | 0.5.3 | `scenarios/codex-run.test.mjs` |
-| [I-40](improvements/I-40.md) | Codex functions-exec connector readbacks are ignored | 0.5.3 | `scenarios/tracker-host-recorded.test.mjs` |
-| [I-39](improvements/I-39.md) | Codex planner import can consume an unrelated Claude transcript | 0.5.3 | `scenarios/field-fixes.test.mjs` |
-| [I-38](improvements/I-38.md) | Codex usage reporting duplicates resumed rollouts and token categories | 0.5.3 | `scenarios/telemetry.test.mjs` |
-| [I-37](improvements/I-37.md) | Codex plugin skills are invisible to workflow skill discovery | 0.5.3 | `scenarios/onboarding.test.mjs` |
-| [I-36](improvements/I-36.md) | Doctor validates Claude models while running in Codex | 0.5.3 | `scenarios/onboarding.test.mjs` |
-| [I-35](improvements/I-35.md) | Codex owner-session commands cannot close completed implementer handoffs | 0.5.3 | `scenarios/trust-0.7.test.mjs` |
-| [I-34](improvements/I-34.md) | Codex transcript lookup ignores the active indexed rollout | 0.5.2 | `scenarios/adoption.test.mjs` |
-| [I-33](improvements/I-33.md) | Adoption rejects combined human requests | 0.5.2 | `scenarios/adoption.test.mjs` |
-| [I-32](improvements/I-32.md) | Verifier failures must retain assertion diagnostics | 0.5.1 | `scenarios/verify-output.test.mjs` |
-| [I-31](improvements/I-31.md) | Adoption should accept the current chat human request | 0.5.1 | `scenarios/adoption.test.mjs` |
-| [I-30](improvements/I-30.md) | Pre-push verification must clear repository-local Git environment | 0.5.1 | `scenarios/pre-push.test.mjs` |
-| [I-29](improvements/I-29.md) | Runtime model settings must not require a plugin release | 0.5.1 | `scenarios/classes.test.mjs` |
-| [I-28](improvements/I-28.md) | npm run verify is slow: three legs in series, helper-only wf processes, the macOS git shim | 0.5.0 | `scenarios/compile-cache.test.mjs` |
-| [I-27](improvements/I-27.md) | Order of work: code review rounds run to clean first, then ONE gate, then the evidence review; engine refuses a gate while a review round has open findings, and refuses reviewer handoffs while a gate runs (supersedes the ordering in I-23) | 0.5.0 | `scenarios/review-order.test.mjs` |
-| [I-26](improvements/I-26.md) | Mandatory impact analysis before planning: query-backed inventory of affected components, flows, contracts and tests; plan refused without it | 0.5.0 | `scenarios/impact.test.mjs` |
-| [I-25](improvements/I-25.md) | Fix handoffs carry a pattern-sweep list; doctor fails without a reviewer model; flag doNotRun that excludes a repo the ticket now touches | 0.5.0 | `scenarios/impact.test.mjs` |
-| [I-24](improvements/I-24.md) | Telemetry gaps: wf report undercounts findings and rounds, no cost, no sub-agents, no review-round or gate-stop events, no failing test names | 0.5.0 | `scenarios/telemetry.test.mjs` |
-| [I-23](improvements/I-23.md) | Review handoff must require a green gate on the tree and no open implementer handoff; record why a gate is stopped | 0.5.0 | `scenarios/review-order.test.mjs` |
-| [I-22](improvements/I-22.md) | Adapter-fault recovery is tested only for a single-repo standard-lane attempt with nothing recorded as delivered | 0.5.0 | `scenarios/adapter-fault.test.mjs`, `scenarios/adapter-fault-shapes.test.mjs` |
-| [I-21](improvements/I-21.md) | No recovery when a delivery adapter fault hits a partly delivered multi-repo attempt | 0.5.0 | `scenarios/adapter-fault.test.mjs` |
-| [I-20](improvements/I-20.md) | A delivery whose adapter observe reports a non-integrated state still counts as delivered on retry when the commit is on the target branch | 0.5.0 | `scenarios/adapter-fault.test.mjs` |
-| [I-19](improvements/I-19.md) | Scope fences must never block a fix: a fix that needs another component or repo extends the attempt | 0.4.4 | `scenarios/discovered.test.mjs` |
-| [I-18](improvements/I-18.md) | Every issue found during a ticket is fixed in that ticket; deferral needs the owner's recorded decision | 0.4.4 | `scenarios/discovered.test.mjs` |
-| [I-17](improvements/I-17.md) | Lessons are injected outside the scope of the change | 0.4.3 | `scenarios/lessons.test.mjs` |
-| [I-16](improvements/I-16.md) | Evidence guard rejects harmless Bash commands that do not touch evidence | 0.4.5 | `scenarios/evidence-read.test.mjs` |
-| [I-15](improvements/I-15.md) | Role agent files are only loaded at session start, so a wf sync that fixes a role does not reach agents started in the same session | 0.4.3 | `scenarios/role-tools.test.mjs` |
-| [I-14](improvements/I-14.md) | Reviewer handoff must print the agent name the review is bound to, and refuse early | 0.4.3 | `scenarios/role-tools.test.mjs` |
-| [I-13](improvements/I-13.md) | Reviewer role lacked the Write tool its instructions require | 0.4.0 | `scenarios/role-tools.test.mjs` |
-| [I-12](improvements/I-12.md) | Investigate anomalies seen in evidence before calling them cosmetic | 0.5.0 | `scenarios/review-anomalies.test.mjs` |
-| [I-11](improvements/I-11.md) | Screenshots must be visible on the ticket, not only attached | 0.5.0 | `scenarios/visible-screenshots.test.mjs` |
-| [I-10](improvements/I-10.md) | Lessons live in the repository they concern and ship with the ticket | 0.3.0 | `scenarios/lessons.test.mjs` |
-| [I-9](improvements/I-9.md) | Tracker access is chosen at onboarding, with the trade-off stated | 0.3.0 | `scenarios/tracker-mode.test.mjs` |
-| [I-8](improvements/I-8.md) | Prior decisions are inputs, not authority | 0.2.0 | `scenarios/lessons.test.mjs` |
-| [I-7](improvements/I-7.md) | Evidence is recorded, protected and verified at every use | 0.1.20, 0.1.21 | `scenarios/integrity.test.mjs` |
-| [I-6](improvements/I-6.md) | The evidence guard and every path check agree with the OS | 0.1.17 to 0.2.1 | `scenarios/guard-regressions.test.mjs` |
-| [I-5](improvements/I-5.md) | Anomalies seen in the screenshots are investigated before the handoff | 0.1.16, 0.2.0 | `scenarios/handoff-quality.test.mjs` |
-| [I-4](improvements/I-4.md) | Tracker readbacks are the raw tool output | 0.1.16 | `scenarios/handoff-quality.test.mjs` |
-| [I-3](improvements/I-3.md) | Delivered screenshots are visible in the ticket, not only attached | 0.1.16 | `scenarios/handoff-quality.test.mjs` |
-| [I-2](improvements/I-2.md) | An over-broad delivered set can be narrowed once, with a reason | 0.1.14, 0.1.15 | `scenarios/screenshots.test.mjs` |
-| [I-1](improvements/I-1.md) | Delivered screenshots are scoped to their own ticket | 0.1.9, 0.1.10 | `scenarios/screenshots.test.mjs` |
+| I-235 | Reviewer evidence reader rejects handed shared adapter snapshots | 0.7.35 | `scenarios/handed-adapter-snapshots.test.mjs` |
+| I-234 | Course signals fired without a strategist being handed for ten rounds | 0.7.34 | `scenarios/strategy-diagnosis.test.mjs` |
+| I-233 | A base merge forced by the gate reopens review, so 'reconcile the base once' cannot be followed | 0.7.34 | `scenarios/base-merge-classes.test.mjs` |
+| I-232 | The strategist picks an action but never diagnoses why the ticket loops or corrects the flow | 0.7.34 | `scenarios/strategy-diagnosis.test.mjs` |
+| I-231 | Frozen-plan amendment lacks a supported dry-run path | 0.7.34 | `scenarios/amend-check.test.mjs` |
+| I-230 | Read-only replan check refuses frozen criteria | 0.7.34 | `scenarios/amend-check.test.mjs` |
+| I-229 | Round question asked after the strategist planned and the person gave the course | 0.7.33 | `scenarios/strategist.test.mjs` |
+| I-228 | Support recording an already acknowledged client-owned configuration handoff without asking it again | 0.7.33 | `scenarios/decisions-per-item.test.mjs` |
+| I-227 | declaredReadsAt runs git rev-parse per file | 0.7.33 | `scenarios/correction-reads.test.mjs` |
+| I-226 | sharedWith on admission corrections is recorded only by the later attempt | 0.7.33 | `scenarios/correction-reads.test.mjs` |
+| I-225 | pushedRange marks a fast-forwarded or rebased base commit as the attempt's own | 0.7.33 | `scenarios/deadlocks-0732.test.mjs` |
+| I-224 | Transitive loads of a declared harness are invisible to the correction review | 0.7.33 | `scenarios/correction-reads.test.mjs` |
+| I-223 | A correction can drop or narrow the admission step's declared reads | 0.7.33 | `scenarios/correction-reads.test.mjs` |
+| I-222 | Open visual evidence finding prevents the gate needed to review it | 0.7.32 | `scenarios/deadlocks-0732.test.mjs` |
+| I-221 | A passing gate that reruns failed suites should carry the earlier run's screenshots | 0.7.32 | `scenarios/run-screenshots.test.mjs` |
+| I-220 | Required report regressions have no committed supplemental validation route | 0.7.32 | `scenarios/supplemental-validation.test.mjs` |
+| I-219 | Frozen <project> runtime has no dependency preparation entry point | 0.7.32 | `scenarios/prepare-route.test.mjs` |
+| I-218 | Analysis resume recommends forbidden implementer handoff | 0.7.31 | `scenarios/analysis-route.test.mjs` |
+| I-217 | A fix was recommended and built without tracing what the data feeds; it was reverted after the person approved it | 0.7.31 | `scenarios/premise.test.mjs` |
+| I-216 | Analysis resume names an implementer which read-only intent refuses | 0.7.31 | `scenarios/analysis-route.test.mjs` |
+| I-215 | Show pinned tracker operation instructions during connector handoff | 0.7.31 | `scenarios/tracker-operations.test.mjs` |
+| I-214 | Continuation approval at round17 blocks again after only three handed rounds | 0.7.29 | `scenarios/strategist.test.mjs` |
+| I-213 | wf criteria amend crashed on a survey placed outside impact | 0.7.28 | `scenarios/fix-0728b.test.mjs` |
+| I-212 | Deferred heavy steps hide a ticket's own e2e specs until the batch gate | 0.7.28 | `scenarios/fix-0728b.test.mjs` |
+| I-211 | A divided review can be started as a plain reviewer and is never recorded | 0.7.28 | `scenarios/fix-0728b.test.mjs` |
+| I-210 | The round boundary never changes course: no strategist in 47 rounds | 0.7.28 | `scenarios/course-signals.test.mjs` |
+| I-209 | Finding history (cause, not place) never reaches attempts admitted before 0.7.27 | 0.7.28 | `scenarios/fix-0728b.test.mjs` |
+| I-208 | Implementers 'fix the class' with redesigns that introduce new defects | 0.7.28 | `scenarios/course-signals.test.mjs` |
+| I-207 | A low finding or a not-caused left item opens its own fix round | 0.7.28 | `scenarios/planned-pass.test.mjs` |
+| I-206 | Delta reviewer handoff omits newly added supplemental validation | 0.7.29 | `scenarios/supplemental-validation.test.mjs` |
+| I-205 | Batch reviewer bundle omits accepted supplemental registrations |  |  |
+| I-204 | Batch creation drops member supplemental proof registrations | 0.7.29 | `scenarios/batch-validation.test.mjs` |
+| I-203 | A '?' the agent appends to a legacy question, or a panel offering a legacy decision's frame labels, costs an extra agent command | 0.7.28 | `scenarios/approve-question.test.mjs` |
+| I-202 | Explain mismatched question-panel option labels instead of reporting no answer | 0.7.28 | `scenarios/approve-question.test.mjs` |
+| I-201 | Support delivery to an additional divergent target branch | 0.7.30 | `scenarios/delivery-targets.test.mjs` |
+| I-200 | Carry unresolved critical observations in implementer goal context | 0.7.28 | `scenarios/planned-pass.test.mjs` |
+| I-199 | Export interrupted-gate screenshots listed in evidence inventory |  |  |
+| I-198 | Export failed-step screenshots for implementer diagnosis | 0.7.30 | `scenarios/run-screenshots.test.mjs` |
+| I-197 | Reject malformed screenshot references when recording review and retain acceptance refusals |  |  |
+| I-196 | Delivery has no deployment step: a label route can only set the final status at merge, before the deployment is confirmed and the fix tested | 0.7.27 | `scenarios/deployment-confirmation.test.mjs` |
+| I-195 | Frozen client steps lack pre-commit dependency preparation |  |  |
+| I-194 | Batch admission requirement needs actionable guidance | 0.7.29 | `scenarios/batch-validation.test.mjs` |
+| I-193 | Improvement list says 'fixed in X' before X is published or installed | 0.7.27 | `scenarios/improve.test.mjs` |
+| I-192 | Shipped task closure cannot recognize explicit owner chat authorization | 0.7.27 | `scenarios/approve-question.test.mjs` |
+| I-191 | Fix and review rounds work one finding at a time, so a cause that spans places recurs round after round | 0.7.27 | `scenarios/recurring-cause.test.mjs` |
+| I-190 | TS ticket completion conflicts with never-Done delivery instruction | 0.7.27 | `scenarios/tracker-status-routing.test.mjs` |
+| I-189 | Notion adapter writes delivery comments into the ticket description | 0.7.27 | `scenarios/tracker-attachments.test.mjs` |
+| I-188 | Support retracting a discovered defect invalidated by product clarification | 0.7.27 | `scenarios/discovered.test.mjs` |
+| I-187 | Reuse unused approved validation correction across an identical base merge | 0.7.27 | `scenarios/validation-correction.test.mjs` |
+| I-186 | Withdrawn escalation still blocks corrected strategy recording | 0.7.27 | `scenarios/strategist.test.mjs` |
+| I-185 | Review checkpoint does not open while prior proof findings remain unresolved | 0.7.27 | `scenarios/strategist-signals.test.mjs` |
+| I-184 | Implementer closure duplicates an explicitly referenced discovered issue | 0.7.27 | `scenarios/discovered.test.mjs` |
+| I-183 | Manual delivery awaiting merge blocks base merge while deliver only observes | 0.7.26 | `scenarios/base-merge-in-flight.test.mjs` |
+| I-182 | Batch handoff caps screenshot inventory before ticket-specific support captures | 0.7.26 | `scenarios/delivered-captures.test.mjs` |
+| I-181 | Abandoning an assembled batch strands its members | 0.7.24 | `scenarios/deferral-rule.test.mjs` |
+| I-180 | Gate-order approval repeats after workflow-only base merge and fresh reviewer | 0.7.23 | `scenarios/questions.test.mjs` |
+| I-179 | Evidence-only gate repair trapped between clean-review and execution proof requirements | 0.7.23 | `scenarios/supplemental-validation.test.mjs` |
+| I-178 | Synthetic delivery batch incorrectly requests tracker implementing lifecycle | 0.7.23 | `scenarios/fix-0721.test.mjs` |
+| I-177 | Assembled batch cannot own or settle member observation selected for fix | 0.7.23 | `scenarios/deferral-rule.test.mjs` |
+| I-176 | Quick-lane tracked implementation skips started tracker transition | 0.7.21 | `scenarios/fix-0721.test.mjs` |
+| I-175 | Reviewer closures repeatedly serialize multiple screenshot hashes as one artifact ref |  |  |
+| I-174 | Chat approval reader selects clarification instead of latest explicit yes | 0.7.28 | `scenarios/approve-question.test.mjs` |
+| I-173 | Repair handoff omits newly recorded bookkeeping cause | 0.7.30 | `scenarios/fix-0730c.test.mjs` |
+| I-172 | Installed screenshot exporter still refuses overlapping suite titles | 0.7.20 | `scenarios/fix-0720.test.mjs` |
+| I-171 | Native Codex shell snapshot restores an older global wf despite engine PATH |  |  |
+| I-170 | Screenshot export refuses repeated titles from multiple gate suites | 0.7.20 | `scenarios/fix-0720.test.mjs` |
+| I-169 | Reconcile a defect recorded after its same-handoff repair with independent proof | 0.7.19 | `scenarios/fix-0719.test.mjs` |
+| I-168 | Preserve unreached review obligations across a clean base merge | 0.7.30 | `scenarios/fix-0730c.test.mjs` |
+| I-167 | Delta review bundle underreports files introduced by baseline merge | 0.7.30 | `scenarios/fix-0730c.test.mjs` |
+| I-166 | Carry latest retained-finding reproduction into repair handoffs | 0.7.30 | `scenarios/fix-0730c.test.mjs` |
+| I-165 | Use one authoritative work plan after amendments | 0.7.30 | `scenarios/fix-0730c.test.mjs` |
+| I-164 | Disambiguate screenshot exports from overlapping gate steps | 0.7.20 | `scenarios/fix-0720.test.mjs` |
+| I-163 | Order proof consumers after isolated dependency producers | 0.7.30 | `scenarios/step-order.test.mjs` |
+| I-162 | Retain stopped gate failure details in repair handoffs | 0.7.30 | `scenarios/fix-0730c.test.mjs` |
+| I-161 | Gate screenshot export collides across required steps | 0.7.20 | `scenarios/fix-0720.test.mjs` |
+| I-160 | Export imported current-tree diagnostic captures before a full gate or delivery | 0.7.30 | `scenarios/run-screenshots.test.mjs` |
+| I-159 | Hotfix planning added an unrequested notification lifecycle | 0.7.30 | `scenarios/fix-0730c.test.mjs` |
+| I-158 | Provide a recorded owner decision for explicitly skipping a full gate | 0.7.30 | `scenarios/gate-light-only.test.mjs` |
+| I-157 | Bound shared runtime lease waits with fair queuing | 0.7.30 | `scenarios/lease-fairness.test.mjs` |
+| I-156 | Investigate starvation of long-waiting runtime lease requests |  |  |
+| I-155 | Frozen runtime onboarding should provide a supported pre-commit dependency preparation route | 0.7.30 | `scenarios/prepare-route.test.mjs` |
+| I-154 | Validate screenshot references when recording a review | 0.7.29 | `scenarios/evidence.test.mjs` |
+| I-153 | A model at capacity fails a launch that could resume | 0.7.30 | `scenarios/codex-run.test.mjs` |
+| I-152 | A long reviewer's findings are lost when it is stopped | 0.7.12 | `scenarios/fix-074-lifecycle.test.mjs` |
+| I-151 | Live attempts keep the adapter they were admitted with | 0.7.30 | `scenarios/adapter-follow.test.mjs` |
+| I-150 | Step passes from another attempt with the same key are not reused | 0.7.12 | `scenarios/gate.test.mjs` |
+| I-149 | A gate starts while an implementer is still committing | 0.7.11 | `scenarios/gate.test.mjs` |
+| I-148 | Launch failures are unrecorded, a passing error is latched, and machine sleep reads as a stall | 0.7.11 | `scenarios/codex-run.test.mjs` |
+| I-147 | Rules copied into projects' AGENTS.md go stale between syncs | 0.7.11 | `scenarios/onboarding.test.mjs` |
+| I-146 | A strategist's escalation reaches the person as unreadable workflow prose | 0.7.11 | `scenarios/strategist.test.mjs` |
+| I-145 | Plans are refused for the form of their impact analysis only after the planner reports | 0.7.11 | `scenarios/plan-check.test.mjs` |
+| I-144 | A launched reviewer's written closure is lost, and a briefly dirty tree ends a round | 0.7.11 | `scenarios/fix-074-lifecycle.test.mjs` |
+| I-143 | Gate steps rerun when nothing that can change their result changed | 0.7.11 | `scenarios/validation-correction.test.mjs` |
+| I-142 | Explicit exclusion of legacy high discovered risks has no reserved disposition route | 0.7.12 | `scenarios/decisions-per-item.test.mjs` |
+| I-141 | Evidence lock replacement after a missing no-follow read is mistaken for unreadable ownership | 0.7.12 | `scenarios/fix-0712.test.mjs` |
+| I-140 | Native handoff wait uses role age instead of a new wait interval | 0.7.12 | `scenarios/fix-0712.test.mjs` |
+| I-139 | Late bookkeeping record has no honest already-fixed reconciliation path | 0.7.12 | `scenarios/fix-0712.test.mjs` |
+| I-138 | Legacy selected-step admission markers block every check and correction | 0.7.11 | `scenarios/validation-correction.test.mjs` |
+| I-137 | Owner must advance completed native handoffs before reporting elapsed estimates | 0.7.12 | `scenarios/fix-0712.test.mjs` |
+| I-136 | Any app-code change reruns a whole e2e step: the gate cannot tell which suites a change reaches |  |  |
+| I-135 | Show a visible approval brief when the question panel is unavailable | 0.7.10 | `scenarios/approve-question.test.mjs` |
+| I-134 | Scope e2e gate steps to the specs a diff can affect | 0.7.30 | `scenarios/affected-specs.test.mjs` |
+| I-133 | Post-evidence repair handoff repeats full review instead of delta | 0.7.10 | `scenarios/review-rounds.test.mjs` |
+| I-132 | Evidence review rejects priorFindings update after accepted blind closure | 0.7.10 | `scenarios/review-rounds.test.mjs` |
+| I-131 | Scenario runs write refusals into the person's own refusal log | 0.7.9 | `scenarios/learning.test.mjs` |
+| I-130 | A recurrence found after acceptance writes the lesson file of the pull-only main checkout | 0.7.9 | `scenarios/lessons.test.mjs` |
+| I-129 | Outside-plan warning ignores accepted impact addenda and repository-prefixed anchors | 0.7.9 | `scenarios/scope.test.mjs` |
+| I-128 | handoff stop records stopped but leaves native Codex child alive | 0.7.9 | `scenarios/handoff-stop-tree.test.mjs` |
+| I-127 | Planner handoff retains analysis-only goals after implementation intent upgrade | 0.7.9 | `scenarios/dead-ends.test.mjs` |
+| I-126 | The person could not read or partly answer the leaving question | 0.7.8 | `scenarios/decisions-per-item.test.mjs` |
+| I-125 | Frozen admission validator cannot accept a reviewed forward correction | 0.7.8 | `scenarios/validation-correction.test.mjs` |
+| I-124 | Scoped implementer closure waits for unrelated dirty repositories | 0.7.8 | `scenarios/decisions-per-item.test.mjs` |
+| I-123 | The delivered comment says a finding moved to a sibling that left the delivery | 0.7.8 | `scenarios/decisions-per-item.test.mjs` |
+| I-122 | The advance live-child scenario fails once under full-suite load | 0.7.7 | `scenarios/advance.test.mjs` |
+| I-121 | The owner agent deferred most findings of a delivery on its own judgement | 0.7.7 | `scenarios/deferral-rule.test.mjs` |
+| I-120 | Implementation amendments leave inherited analysis-only plan narrative active | 0.7.10 | `scenarios/dead-ends.test.mjs` |
+| I-119 | The base branch can carry changes no gate proved, and nothing says so | 0.7.8 | `scenarios/decisions-per-item.test.mjs` |
+| I-118 | A repair after a failed gate reran whole e2e suites to prove each fix | 0.7.6 | `scenarios/focused-repair.test.mjs` |
+| I-117 | Verify actual screenshot dimensions before desktop visual acceptance | 0.7.10 | `scenarios/image-size.test.mjs` |
+| I-116 | An attempt whose change shipped outside the workflow cannot be closed | 0.7.5 | `scenarios/close-shipped.test.mjs` |
+| I-115 | A legacy attempt with one scoped and one unscoped implementer reads as work not started | 0.7.4 | `scenarios/fix-074-lifecycle.test.mjs` |
+| I-114 | A planner whose output cannot be read leaves no refusal for the next planner | 0.7.4 | `scenarios/fix-074-lifecycle.test.mjs` |
+| I-113 | The reason an owner stopped a check or gate is missing from status and resume | 0.7.4 | `scenarios/fix-074-gate.test.mjs` |
+| I-112 | A lesson for a repo the attempt did not admit lands untracked in that repo's main checkout | 0.7.4 | `scenarios/fix-074-lessons.test.mjs` |
+| I-111 | Admission-time provisioning runs without the secrets a private install needs | 0.7.4 | `scenarios/fix-074-gate.test.mjs` |
+| I-110 | Texts still describe checks 0.7.0 removed | 0.7.4 | `scenarios/fix-074-texts.test.mjs` |
+| I-109 | Two evidence writes land outside the evidence transaction | 0.7.4 | `scenarios/fix-074-lifecycle.test.mjs` |
+| I-108 | A valid Codex patch with an empty context line is refused as evidence | 0.7.4 | `scenarios/fix-074-lessons.test.mjs` |
+| I-107 | A criterion added after acceptance is delivered without evidence | 0.7.4 | `scenarios/fix-074-lifecycle.test.mjs` |
+| I-106 | The person could confirm no reserved decision away from the machine | 0.7.3 | `scenarios/approve-question.test.mjs` |
+| I-105 | A shell left standing in the evidence folder could run nothing, not even cd out of it | 0.7.3 | `scenarios/guard-regressions.test.mjs` |
+| I-104 | wf run from inside the adapter repo of a multi-repo project took that repo for the project | 0.7.2 | `scenarios/delivery.test.mjs` |
+| I-103 | A decision taken on an orphaned attempt reported a missing-worktree failure after it was recorded | 0.7.1 | `scenarios/dead-ends.test.mjs` |
+| I-102 | Permit audited correction of supplemental validator plugins after review findings | 0.7.0 | `scenarios/validation-correction.test.mjs` |
+| I-101 | Recognize contextual adoption authorization from question-panel replies | 0.7.3 | `scenarios/approve-question.test.mjs` |
+| I-100 | Rebase plugin artifact paths when harvesting scratch output | 0.7.0 | `scenarios/plugin-artifacts.test.mjs` |
+| I-99 | Lesson recording after accepted-tree repairs must use the task worktree | 0.7.4 | `scenarios/fix-074-lessons.test.mjs` |
+| I-98 | Lesson writes fall back to main checkout after accepted attempt is amended | 0.7.0 | `scenarios/lessons.test.mjs` |
+| I-97 | Do not translate missing proof findings into committed diagnostic bundles | 0.7.4 | `scenarios/fix-074-texts.test.mjs` |
+| I-96 | Supplementary validation manifests inflate full-review workload | 0.7.4 | `scenarios/fix-074-lessons.test.mjs` |
+| I-95 | Cross-repository lesson IDs can silently hide distinct lessons | 0.7.0 | `scenarios/lesson-identity.test.mjs` |
+| I-94 | Validate a visual evidence route before freezing UI criteria | 0.7.0 | `scenarios/capture-route.test.mjs` |
+| I-93 | Descriptive desktop scope choices demand repeated approval | 0.6.6 | `scenarios/scope-decisions.test.mjs` |
+| I-92 | Expose owner stop reason and do not retry unfinished-tree check after a tree-change stop | 0.7.0 | `scenarios/gate.test.mjs` |
+| I-91 | Check step ledger contention crashes the runner before final cleanup | 0.7.4 | `scenarios/fix-074-gate.test.mjs` |
+| I-90 | Support required supplemental tree-bound validation evidence | 0.6.5 | `scenarios/supplemental-validation.test.mjs` |
+| I-89 | Stopped unlaunched repair handoff consumes owed pattern sweeps | 0.7.4 | `scenarios/fix-074-lifecycle.test.mjs` |
+| I-88 | Refresh operational lease capacity without repinning test requirements | 0.7.4 | `scenarios/fix-074-gate.test.mjs` |
+| I-87 | Native planner retry loses validation refusal | 0.7.0 | `scenarios/impact.test.mjs` |
+| I-86 | Resolve production prerequisites before asking the owner in investigations | 0.7.4 | `scenarios/fix-074-texts.test.mjs` |
+| I-85 | Reject admitting a page id as the ticket of a tracker with its own ticket identity | 0.7.0 | `scenarios/lifecycle.test.mjs` |
+| I-84 | Native planner replacements need immutable validation feedback | 0.7.0 | `scenarios/impact.test.mjs` |
+| I-83 | Review ownership is classified before related flows are grouped | 0.6.4 | `scenarios/review-division-ownership.test.mjs` |
+| I-82 | Evidence inspect pagination resolves numeric from as a filesystem path | 0.6.3 | `scenarios/evidence-pagination.test.mjs` |
+| I-81 | Native implementer stops on oversized handoff despite complete bounded reader | 0.6.3 | `scenarios/evidence-pagination.test.mjs` |
+| I-80 | Native implementer cannot read oversized immutable handoff | 0.6.3 | `scenarios/evidence-pagination.test.mjs` |
+| I-79 | Replacement implementer loses stopped handoff sweeps | 0.7.4 | `scenarios/fix-074-lifecycle.test.mjs` |
+| I-78 | Verification reports success for a missing selected attempt | 0.7.4 | `scenarios/fix-074-gate.test.mjs` |
+| I-77 | Native reviewer stops after a successful complete reference read |  |  |
+| I-76 | Stale Codex manifest version prevents installation of released fixes | 0.5.18 | `scenarios/onboarding.test.mjs` |
+| I-75 | Claude-only tool instructions stop native Codex review completion | 0.5.17 | `scenarios/codex-runtime-compat.test.mjs`, `scenarios/codex-run.test.mjs` |
+| I-74 | Historical runtime origin causes repeated provider approvals after adoption | 0.5.16 | `scenarios/runtime-preservation.test.mjs` |
+| I-73 | Filled registry secrets cannot provision dependencies before required precommit validation | 0.7.0 | `scenarios/gate.test.mjs` |
+| I-72 | Scope authority ignores a valid earlier answer in a combined desktop reply |  |  |
+| I-71 | Native role commentary discarded by progress reporting | 0.5.15 | `scenarios/codex-run.test.mjs` |
+| I-70 | Scope question choices omit the required owner decision phrase |  |  |
+| I-69 | Native reviewers terminate with unfinished whole-change review and no closure | 0.7.4 | `scenarios/fix-074-lifecycle.test.mjs` |
+| I-68 | Align legacy discovered-scope guidance with fixed issue verdicts |  |  |
+| I-67 | Owner release authorization from Codex question replies is not recognized | 0.5.13 | `scenarios/trust-0.7.test.mjs` |
+| I-66 | Require owner scope decision for unrelated review findings | 0.5.12 | `scenarios/scope-decisions.test.mjs` |
+| I-65 | Evidence guard mistakes a JavaScript object spread for a protected path |  |  |
+| I-64 | Project-scoped lessons are filtered out without explicit paths | 0.7.0 | `scenarios/lessons.test.mjs` |
+| I-63 | Foreground advance rejects a settled unified implementer | 0.7.0 | `scenarios/advance.test.mjs` |
+| I-62 | Reviewer treats an indexed design reference as a required full-output receipt and stops with incomplete verdicts |  |  |
+| I-61 | Generated AGENTS Markdown reintroduces formatter errors on sync | 0.5.10 | `scenarios/onboarding.test.mjs` |
+| I-60 | Reviewer formatter alias mutates the settled source tree | 0.5.10 | `scenarios/codex-run.test.mjs` |
+| I-59 | Unchanged role waits produce repetitive liveness messages | 0.5.10 | `scenarios/role-progress.test.mjs` |
+| I-58 | Native reviewer applies full-file document receipts to the large JSON handoff | 0.5.9 | `scenarios/review-efficiency.test.mjs` |
+| I-57 | Reports conflate unknown review history with wasted work | 0.5.8 | `scenarios/review-diagnostics.test.mjs`, `scenarios/telemetry.test.mjs` |
+| I-56 | Missing required documents discovered after reviewer launch | 0.5.8 | `scenarios/review-efficiency.test.mjs`, `scenarios/codex-run.test.mjs` |
+| I-55 | Textual impact analysis hides truncation and ambiguous origins | 0.5.8 | `scenarios/review-efficiency.test.mjs` |
+| I-54 | Identifier suffix mistaken for an assembled evidence fragment | 0.5.8 | `scenarios/trust-0.7.test.mjs` |
+| I-53 | Frozen native reviewer instructions omit supported document reads | 0.5.8 | `scenarios/review-efficiency.test.mjs` |
+| I-52 | Quiet native role launches cause duplicate owner transcript monitoring | 0.5.7 | `scenarios/role-progress.test.mjs` |
+| I-51 | Quoted search regex is mistaken for an evidence glob outside project scope | 0.5.7 | `scenarios/trust-0.7.test.mjs` |
+| I-50 | Concurrent handoff generation exposes transient unrecorded evidence to readers | 0.7.0 | `scenarios/dead-ends.test.mjs` |
+| I-49 | Generated lesson YAML fails repository Prettier formatting contract | 0.7.4 | `scenarios/fix-074-lessons.test.mjs` |
+| I-48 | Native Codex review guard does not recognize successful Node reader skill access |  |  |
+| I-47 | Native Codex launcher diagnostic should identify host sandbox app-server initialization failure | 0.5.6 | `scenarios/codex-run.test.mjs` |
+| I-46 | Native Codex launch rejects a configured project root outside Git | 0.5.5 | `scenarios/codex-run.test.mjs` |
+| I-45 | Native role evidence reader rejects absolute handed paths | 0.5.5 | `scenarios/evidence-read.test.mjs` |
+| I-44 | Adopted attempts cannot launch models configured on a later committed base | 0.5.5 | `scenarios/runtime-models.test.mjs` |
+| I-43 | Codex file-edit payloads are judged as shell commands | 0.5.5 | `scenarios/codex-file-guard.test.mjs` |
+| I-42 | Historical implementer report scanner blocks review on resolved work and coordination statements | 0.5.4 | `scenarios/report-resolution.test.mjs` |
+| I-41 | Codex planner and reviewer prompt provenance cannot be verified | 0.5.3 | `scenarios/codex-run.test.mjs` |
+| I-40 | Codex functions-exec connector readbacks are ignored | 0.5.3 | `scenarios/tracker-host-recorded.test.mjs` |
+| I-39 | Codex planner import can consume an unrelated Claude transcript | 0.5.3 | `scenarios/field-fixes.test.mjs` |
+| I-38 | Codex usage reporting duplicates resumed rollouts and token categories | 0.5.3 | `scenarios/telemetry.test.mjs` |
+| I-37 | Codex plugin skills are invisible to workflow skill discovery | 0.5.3 | `scenarios/onboarding.test.mjs` |
+| I-36 | Doctor validates Claude models while running in Codex | 0.5.3 | `scenarios/onboarding.test.mjs` |
+| I-35 | Codex owner-session commands cannot close completed implementer handoffs | 0.5.3 | `scenarios/trust-0.7.test.mjs` |
+| I-34 | Codex transcript lookup ignores the active indexed rollout | 0.5.2 | `scenarios/adoption.test.mjs` |
+| I-33 | Adoption rejects combined human requests | 0.5.2 | `scenarios/adoption.test.mjs` |
+| I-32 | Verifier failures must retain assertion diagnostics | 0.5.1 | `scenarios/verify-output.test.mjs` |
+| I-31 | Adoption should accept the current chat human request | 0.5.1 | `scenarios/adoption.test.mjs` |
+| I-30 | Pre-push verification must clear repository-local Git environment | 0.5.1 | `scenarios/pre-push.test.mjs` |
+| I-29 | Runtime model settings must not require a plugin release | 0.5.1 | `scenarios/classes.test.mjs` |
+| I-28 | npm run verify is slow: three legs in series, helper-only wf processes, the macOS git shim | 0.5.0 | `scenarios/compile-cache.test.mjs` |
+| I-27 | Order of work: code review rounds run to clean first, then ONE gate, then the evidence review; engine refuses a gate while a review round has open findings, and refuses reviewer handoffs while a gate runs (supersedes the ordering in I-23) | 0.5.0 | `scenarios/review-order.test.mjs` |
+| I-26 | Mandatory impact analysis before planning: query-backed inventory of affected components, flows, contracts and tests; plan refused without it | 0.5.0 | `scenarios/impact.test.mjs` |
+| I-25 | Fix handoffs carry a pattern-sweep list; doctor fails without a reviewer model; flag doNotRun that excludes a repo the ticket now touches | 0.5.0 | `scenarios/impact.test.mjs` |
+| I-24 | Telemetry gaps: wf report undercounts findings and rounds, no cost, no sub-agents, no review-round or gate-stop events, no failing test names | 0.5.0 | `scenarios/telemetry.test.mjs` |
+| I-23 | Review handoff must require a green gate on the tree and no open implementer handoff; record why a gate is stopped | 0.5.0 | `scenarios/review-order.test.mjs` |
+| I-22 | Adapter-fault recovery is tested only for a single-repo standard-lane attempt with nothing recorded as delivered | 0.5.0 | `scenarios/adapter-fault.test.mjs`, `scenarios/adapter-fault-shapes.test.mjs` |
+| I-21 | No recovery when a delivery adapter fault hits a partly delivered multi-repo attempt | 0.5.0 | `scenarios/adapter-fault.test.mjs` |
+| I-20 | A delivery whose adapter observe reports a non-integrated state still counts as delivered on retry when the commit is on the target branch | 0.5.0 | `scenarios/adapter-fault.test.mjs` |
+| I-19 | Scope fences must never block a fix: a fix that needs another component or repo extends the attempt | 0.4.4 | `scenarios/discovered.test.mjs` |
+| I-18 | Every issue found during a ticket is fixed in that ticket; deferral needs the owner's recorded decision | 0.4.4 | `scenarios/discovered.test.mjs` |
+| I-17 | Lessons are injected outside the scope of the change | 0.4.3 | `scenarios/lessons.test.mjs` |
+| I-16 | Evidence guard rejects harmless Bash commands that do not touch evidence | 0.4.5 | `scenarios/evidence-read.test.mjs` |
+| I-15 | Role agent files are only loaded at session start, so a wf sync that fixes a role does not reach agents started in the same session | 0.4.3 | `scenarios/role-tools.test.mjs` |
+| I-14 | Reviewer handoff must print the agent name the review is bound to, and refuse early | 0.4.3 | `scenarios/role-tools.test.mjs` |
+| I-13 | Reviewer role lacked the Write tool its instructions require | 0.4.0 | `scenarios/role-tools.test.mjs` |
+| I-12 | Investigate anomalies seen in evidence before calling them cosmetic | 0.5.0 | `scenarios/review-anomalies.test.mjs` |
+| I-11 | Screenshots must be visible on the ticket, not only attached | 0.5.0 | `scenarios/visible-screenshots.test.mjs` |
+| I-10 | Lessons live in the repository they concern and ship with the ticket | 0.3.0 | `scenarios/lessons.test.mjs` |
+| I-9 | Tracker access is chosen at onboarding, with the trade-off stated | 0.3.0 | `scenarios/tracker-mode.test.mjs` |
+| I-8 | Prior decisions are inputs, not authority | 0.2.0 | `scenarios/lessons.test.mjs` |
+| I-7 | Evidence is recorded, protected and verified at every use | 0.1.20, 0.1.21 | `scenarios/integrity.test.mjs` |
+| I-6 | The evidence guard and every path check agree with the OS | 0.1.17 to 0.2.1 | `scenarios/guard-regressions.test.mjs` |
+| I-5 | Anomalies seen in the screenshots are investigated before the handoff | 0.1.16, 0.2.0 | `scenarios/handoff-quality.test.mjs` |
+| I-4 | Tracker readbacks are the raw tool output | 0.1.16 | `scenarios/handoff-quality.test.mjs` |
+| I-3 | Delivered screenshots are visible in the ticket, not only attached | 0.1.16 | `scenarios/handoff-quality.test.mjs` |
+| I-2 | An over-broad delivered set can be narrowed once, with a reason | 0.1.14, 0.1.15 | `scenarios/screenshots.test.mjs` |
+| I-1 | Delivered screenshots are scoped to their own ticket | 0.1.9, 0.1.10 | `scenarios/screenshots.test.mjs` |

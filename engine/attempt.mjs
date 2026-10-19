@@ -182,9 +182,11 @@ export async function provision(root, adapter, spec, wt) {
     const { projectEnv } = await import('./env.mjs');
     let secrets = {};
     // A catalogued secret that lists `provision:<repo>` reaches this repo's install, and nothing else (0.7 I-111).
-    if (fs.existsSync(path.join(root, '.workflow', 'secrets.yaml'))) {
+    const { secretsCatalogFile } = await import('./config.mjs');
+    const catalogFile = secretsCatalogFile(adapter, root);
+    if (fs.existsSync(catalogFile)) {
       const s = await import('./secrets.mjs');
-      const cfg = { name: adapter.name, repos: adapter.repos, secrets: adapter.secrets ?? { store: 'env-file', file: null } };
+      const cfg = { name: adapter.name, catalogFile, repos: adapter.repos, secrets: adapter.secrets ?? { store: 'env-file', file: null } };
       const use = s.provisionUse(spec.name);
       const missing = s.missingFor(root, cfg, use);
       if (missing.length) throw new WfError(`secrets missing for provisioning ${spec.name}: ${missing.join(', ')}`, { hint: 'the person runs `wf secrets guide` in their terminal, then `wf start` again' });

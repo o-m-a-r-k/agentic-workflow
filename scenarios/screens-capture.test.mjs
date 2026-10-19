@@ -80,6 +80,7 @@ test('a shared file reaches its importers (relative and aliased, transitively) a
     assert.deepEqual(ev.routes.sort(), ['/items', '/settings']);
     assert.equal(ev.refused, undefined);
     assert.ok(ev.tree);
+    assert.ok(ev.heads && Object.values(ev.heads).every((h) => /^[0-9a-f]{40}$/.test(h)), 'the heads behind the tree');
   } finally {
     done(p);
   }

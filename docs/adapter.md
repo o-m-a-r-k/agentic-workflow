@@ -39,7 +39,7 @@ rules: [{ paths: ["web/src/**"], read: [web/DESIGN_SYSTEM.md] }]
 screens:
   routes: { repo: web, path: scripts/routes-of.mjs }      # changed files -> routes
   shared: ["web/src/common/**", "web/src/styles/**"]
-  sentinel: ["/", "/projects", "/invoices/new"]
+  sentinel: ["/", "/settings", "/items/new"]
   langs: [{ lang: <code>, dir: <ltr|rtl> }]               # each language and direction the project ships
   viewports: [390, 1440]
   capture: { module: { repo: web, path: scripts/capture.mjs } }   # or { run: "<command>" }, which runs as the attempt has it
@@ -98,7 +98,7 @@ delivery:
 | `components[]` | Consumers of changed contracts: a component in `repo` that `dependsOn` the files a `contract` glob names. |
 | `invariants` | The project's invariants file; reviewers get it and the session rules quote it. |
 | `rules[]` | Documents to read for changes under `paths`. |
-| `screens` | How screens are picked and captured: a `routes` module, `shared` paths that add the `sentinel` set, `langs`, `viewports` and `capture`: either `{ module: { repo, path } }`, loaded as the base holds it with `ctx.cwd` set to the attempt folder, or `{ run: "<command>" }` with `{out}`, `{viewport}`, `{lang}`, `{dir}` and `{routes}`, run from the attempt folder as the attempt has it, so the ticket under review can change it (prefer the module). Screens are required when `capture` and `shared` or `sentinel` are set, even with no `routes`; `wf doctor` warns when `routes` is unset. |
+| `screens` | How screens are picked and captured: a `routes` module, `shared` paths that add the `sentinel` set, `langs`, `viewports` and `capture`: either `{ module: { repo, path } }`, loaded as the base holds it with `ctx.cwd` set to the attempt folder, or `{ run: "<command>" }` with `{out}`, `{viewport}`, `{lang}`, `{dir}` and `{routes}`, run from the attempt folder as the attempt has it, so the ticket under review can change it (prefer the module). With `capture` set, a change to a `shared` path requires the `sentinel` screens even with no `routes`; `wf doctor` warns when `routes` is unset. |
 | `review.diffRead` | `before` or `after`: whether the person's diff-read on a risk path comes before or after the merge. |
 | `risk` | Risk areas with `paths`, the `reason` the scan found and the `tests` that guard them; or `none`. |
 | `ticketing` | `tracker` (a name, which with `via: connector` is only a label in the operation texts; a module; or `files`), `via` (`connector`, `module`, `files`), `idPattern`, `take` (the status set at start), `followUps` (`file`, `digest` or `off`) and `operations` (the adapter's own words for each connector step, keyed by the engine's operations: `read`, `search`, `fileFollowUp`, `setStatus`, `comment`, `mergeRequest`). One attempt can run without the tracker: `wf start --no-tracker`. |

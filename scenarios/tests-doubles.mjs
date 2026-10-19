@@ -75,7 +75,9 @@ function changedFilesOf(p, attempt) {
   const state = p.states.get(attempt);
   const files = [];
   const trees = [];
+  const heads = {};
   for (const [repo, r] of Object.entries(state.repos)) {
+    heads[repo] = git(r.worktree, ['rev-parse', 'HEAD']);
     const mb = git(r.worktree, ['merge-base', 'HEAD', `origin/${r.base}`]);
     for (const line of git(r.worktree, ['diff', '--name-status', mb]).split('\n').filter(Boolean)) {
       const [status, file] = line.split('\t');
@@ -83,7 +85,7 @@ function changedFilesOf(p, attempt) {
     }
     trees.push(git(r.worktree, ['rev-parse', 'HEAD^{tree}']));
   }
-  return { tree: trees.join('+'), files };
+  return { tree: trees.join('+'), heads, files };
 }
 
 // Install the doubles for this project. `mergeFacts`: attempt → Problem[].

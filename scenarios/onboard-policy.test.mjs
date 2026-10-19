@@ -166,6 +166,13 @@ test('doctor names instruction lines with removed commands and the hand edits', 
     assert.doesNotMatch(d.text, /wf status/);
     assert.match(d.text, /hand edits: edited by hand since onboarding wrote them: review\.diffRead/);
     assert.match(d.text, /steps\/runner\.mjs|✓ adapter/);
+    // A capture with no routes module: only a shared path captures screens, and doctor says so.
+    const y = YAML.parse(fs.readFileSync(file, 'utf8'));
+    y.screens = { ...(y.screens ?? {}), capture: { run: 'true {out}' } };
+    delete y.screens.routes;
+    fs.writeFileSync(file, YAML.stringify(y));
+    const d2 = await commandHandler('doctor')(ctxFor(p), { _: [], flags: {} });
+    assert.match(d2.text, /screens: `screens\.routes` is unset/);
   } finally {
     clearDoubles();
     p.cleanup();

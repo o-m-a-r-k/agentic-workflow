@@ -85,6 +85,11 @@ test('fileFollowUp: off and digest file nothing; file searches the marker, then 
   // Another finding with the same title: a duplicate of the open issue, nothing created.
   assert.deepEqual(await fileFollowUp(f.p.root, attempt, otherFinding('F4')), { state: 'done', value: { id: null, duplicateOf: 'TK-4' } });
   assert.equal(f.tracker().log.filter((l) => l.startsWith('create')).length, 1);
+  // A token quoted in a finding is scrubbed from the follow-up's title and body at post.
+  const token = ['ghp', 'Q'.repeat(24)].join('_');
+  const leaked = await fileFollowUp(f.p.root, attempt, { ...otherFinding('F5', `The sync logs ${token}`), why: `it shows ${token}` });
+  const issue = f.tracker().issues.find((i) => i.id === leaked.value.id);
+  assert.ok(issue && !issue.title.includes(token) && !issue.body.includes(token) && issue.body.includes('[secret]'), 'the follow-up is scrubbed at post');
 });
 
 test('fileFollowUp through a connector: pending in the adapter\'s words, then read back from the owner\'s tool call', async (t) => {

@@ -120,7 +120,7 @@ This applies from day one. Named failure: 283 of 304 recorded "owner decisions" 
 | `merge:open` | A `goal` or `regression` finding is open. | The person's findings rule. |
 | `merge:unreviewed` | Anything other than git's automatic merge from main changed since the last reviewed tree. | Unreviewed edits after review; base-merge resolutions (I-233). |
 | `merge:foreign` | A merge commit's second parent is not main, or is reachable from another remote branch. | Staging and sibling merges. |
-| `merge:untested` | No passing `full` run on the landed tree, from the landing queue or CI. | Push-to-main with no CI. |
+| `merge:untested` | The `fast` tests are not green on HEAD, or no passing `full` run on the landed tree, from the landing queue or CI. | Push-to-main with no CI. |
 | `fix:no-progress` | An implementer handoff after a review that reopened a fixed finding or did not lower the blocker count, until the person decides. | The person's stop rule; rounds with blockers flat for 18 rounds. |
 | `merge:risk` | A risk path is touched and a risk test, the merge-base failure or the second review is missing, or the diff-read is missing with `diffRead: before`. | The person's risk tier. |
 | `merge:waiver` | A waiver or a loosened criterion is unanswered. | Reserved decision. |
@@ -281,10 +281,10 @@ rules: [{ paths: ["web/src/**"], read: [web/DESIGN_SYSTEM.md] }]
 screens:
   routes: { repo: web, path: scripts/routes-of.mjs }      # changed files -> routes
   shared: ["web/src/common/**", "web/src/styles/**"]
-  sentinel: ["/", "/projects", "/invoices/new"]
+  sentinel: ["/", "/settings", "/items/new"]
   langs: [{ lang: <code>, dir: <ltr|rtl> }]   # each language and direction the project ships
   viewports: [390, 1440]
-  capture: "node web/scripts/capture.mjs --out {out} --viewport {viewport} --lang {lang} {routes}"
+  capture: { module: { repo: web, path: scripts/capture.mjs } }   # or { run: "<command> --out {out} --viewport {viewport} {routes}" }
 review: { diffRead: before }           # or after: a project setting from onboarding
 risk:                                   # proposed by the onboarding scan, confirmed by the person; `risk: none` is explicit
   - { id: <name the scan proposed>, paths: ["<area>/**"], reason: "<the facts the scan found>", tests: ["<its tests>/**"] }

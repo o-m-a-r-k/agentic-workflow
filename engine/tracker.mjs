@@ -18,6 +18,7 @@ import { spawnSync } from 'node:child_process';
 import { TRACKER_OPERATIONS, WfError, attemptDir, attemptState, callerSession, connectorCalls, loadAdapter, marker } from './contract.mjs';
 import { filesTracker } from '../adapters/tracker/files.mjs';
 import { importBaseModule } from './base-module.mjs';
+import { scrub, secretValues } from './scrub.mjs';
 
 // Ids become folder and branch names: the same allowlist as the files tracker.
 const SAFE_ID = /^[A-Za-z0-9_](?:[A-Za-z0-9_.-]{0,62}[A-Za-z0-9_])?$/;
@@ -236,8 +237,10 @@ export async function fileFollowUp(root, attempt, finding) {
   if (tr.via === 'none') throw new WfError('ticketing.followUps.mode is file, but the project has no tracker (ticketing.via: none)');
   const state = await attemptState(root, attempt);
   const m = marker(attempt, `finding:${finding.id}`);
-  const title = titleOf(finding);
-  const body = [
+  // Scrubbed at post: the follow-up leaves the process.
+  const secrets = secretValues(root, adapter);
+  const title = scrub(titleOf(finding), { secrets });
+  const body = scrub([
     finding.what,
     '',
     `Why it matters: ${finding.why}`,
@@ -246,7 +249,7 @@ export async function fileFollowUp(root, attempt, finding) {
     `Found in review while working on ${state.item}; outside that work.`,
     '',
     m,
-  ].join('\n');
+  ].join('\n'), { secrets });
   const fields = { title, body, ...(fu.team ? { team: fu.team } : {}), ...(fu.status ? { status: fu.status } : {}), ...(fu.label ? { label: fu.label } : {}), marker: m };
   if (tr.driver) {
     const filed = await tr.driver.search({ marker: m });

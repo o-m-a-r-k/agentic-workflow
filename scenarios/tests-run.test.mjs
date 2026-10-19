@@ -187,6 +187,8 @@ test('risk-base runs the fast tests at the merge-base with the changed risk test
     const runs = eventsOf(p, 'test.run');
     assert.deepEqual(runs.map((r) => r.kind), ['fast', 'risk-base']);
     assert.equal(runs[1].tree, runs[0].tree, 'recorded against the attempt tree whose tests were applied');
+    assert.match(runs[1].mergeBase, /^[0-9a-f]{40}$/, 'the merge-base it ran at');
+    assert.equal(runs[0].mergeBase, undefined);
     assert.deepEqual(fs.readdirSync(path.join(p.root, '.wf-evidence', 'attempts', 'TK-3.1', 'tests')).filter((f) => f.startsWith('risk-base-')), [], 'scratch worktree removed');
   } finally {
     done(p);

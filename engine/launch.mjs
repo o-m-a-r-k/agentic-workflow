@@ -69,7 +69,7 @@ export async function launchReviewer(root, attempt, bundle, opts = {}) {
   }
   if (!status.session) throw new WfError(`the ${host.label} reviewer could not be launched: ${status.error ?? 'it ended before it started a session'} (${spec.err})`);
   const session = { runtime: host.id, id: status.session };
-  await append(root, attempt, 'handoff', { role: 'reviewer', session, launchedBy: 'wf', seat: bundle.seat ?? 'whole', model, tree: bundle.tree ?? null, round: bundle.round ?? 1 }, callerSession(process.env));
+  await append(root, attempt, 'handoff', { role: 'reviewer', session, launchedBy: 'wf', seat: bundle.seat ?? 'whole', model, tree: bundle.tree ?? null, ...(bundle.heads ? { heads: bundle.heads } : {}), round: bundle.round ?? 1 }, callerSession(process.env));
   return { session, launchedAt: status.startedAt, closure };
 }
 

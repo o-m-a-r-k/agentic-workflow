@@ -4,6 +4,7 @@
 // left alone: the evidence names files by them.
 import fs from 'node:fs';
 import path from 'node:path';
+import { secretsCatalogFile } from './config.mjs';
 import { loadCatalog, readSecret } from './secrets.mjs';
 import { YAML } from './util.mjs';
 
@@ -23,12 +24,13 @@ export function scrub(text, { secrets = [] } = {}) {
 // value cannot be read.
 export function secretValues(root, adapter) {
   try {
-    const file = path.join(root, '.workflow', 'secrets.yaml');
+    // The catalogue beside the adapter (config.mjs secretsCatalogFile): the repo copy's `.workflow/`, or the user folder.
+    const file = secretsCatalogFile(adapter, root);
     const raw = fs.existsSync(file) ? YAML.parse(fs.readFileSync(file, 'utf8')) : null;
     const top = raw && !Array.isArray(raw) ? raw : {};
     // The store as `wf secrets` reads it (engine/onboard.mjs): the catalogue's own `store` and `file`.
-    const cfg = { name: adapter?.name ?? path.basename(root), repos: adapter?.repos ?? [{ name: path.basename(root), path: '.' }], secrets: adapter?.secrets ?? { store: top.store ?? 'env-file', ...(top.file ? { file: top.file } : {}) } };
-    return loadCatalog(root).map((e) => {
+    const cfg = { name: adapter?.name ?? path.basename(root), catalogFile: file, repos: adapter?.repos ?? [{ name: path.basename(root), path: '.' }], secrets: adapter?.secrets ?? { store: top.store ?? 'env-file', ...(top.file ? { file: top.file } : {}) } };
+    return loadCatalog(root, cfg).map((e) => {
       try {
         return readSecret(root, cfg, e);
       } catch {

@@ -224,7 +224,7 @@ export async function capture(root, attempt) {
   const how = typeof s?.capture === 'string' ? { run: s.capture } : s?.capture ?? null;
   if (!how?.run && !how?.module) throw new WfError('screens.capture is not set: the adapter names no capture command or module', { hint: 'Run `wf init` to set the screens settings.' });
   const mod = how.module ? await captureModule(root, adapter, how.module) : null;
-  const { tree, files } = await changedFiles(root, attempt);
+  const { tree, heads, files } = await changedFiles(root, attempt);
   const { picks, routes } = await pickScreens(root, attempt, adapter, files);
   const runDir = mkdirs(path.join(attemptDir(root, attempt), 'screens', stamp()));
   const cwd = path.join(root, '.wf-worktrees', attempt);
@@ -288,7 +288,7 @@ export async function capture(root, attempt) {
     if (first) refused.push({ id: 'screens:dup', file: img.file, message: `${img.route} at ${img.viewport}px${img.lang ? ` (${img.lang})` : ''} has the same bytes as ${first.route} at ${first.viewport}px${first.lang ? ` (${first.lang})` : ''}` });
     else bySha.set(img.sha256, img);
   }
-  await append(root, attempt, 'screens.captured', { tree, images, routes, ...(refused.length ? { refused } : {}) }, null);
+  await append(root, attempt, 'screens.captured', { tree, images, routes, ...(heads ? { heads } : {}), ...(refused.length ? { refused } : {}) }, null);
   if (refused.length) {
     const hint = refused[0].id === 'screens:width'
       ? 'Capture at the requested viewport width with a device pixel ratio of 1, then run `wf screens` again.'

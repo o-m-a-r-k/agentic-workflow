@@ -627,6 +627,7 @@ export async function cmdDoctor(ctx) {
     }
     if (adapter.invariants && !fs.existsSync(path.resolve(root, adapter.invariants))) add('fail', 'invariants', `${adapter.invariants} does not exist`);
     if (!adapter.screens?.capture) add('warn', 'screens', '`screens.capture` is unset: no screens are captured', 're-run `wf init` with the capture command');
+    else if (!adapter.screens.routes) add('warn', 'screens', '`screens.routes` is unset: only a change to a `shared` path captures screens (the `sentinel` set)', 're-run `wf init` with the routes module');
     for (const t of adapter.requires?.tools ?? []) if (spawnSync('sh', ['-c', 'command -v "$1"', 'sh', String(t)]).status !== 0) add('fail', 'tools', `\`${t}\` is not on PATH`);
   }
   for (const s of staleInstructionLines(root, instructionFiles(root, adapter?.repos ?? found?.raw?.repos))) add('warn', 'instruction files', `${s.file}:${s.line} names ${s.names.join(', ')}: ${s.text}`, 'reword or remove the line: 0.8 has no such command');

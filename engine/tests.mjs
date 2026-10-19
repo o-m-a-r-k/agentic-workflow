@@ -15,6 +15,7 @@ import crypto from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { WfError, append, attemptDir, attemptState, changedFiles, loadAdapter, userDir, worktreeDir } from './contract.mjs';
+import { baseRef, specOf } from './base.mjs';
 import { baseModuleFile } from './base-module.mjs';
 import { projectEnv } from './env.mjs';
 import { endProcessTree } from './process-tree.mjs';
@@ -261,9 +262,12 @@ async function riskBaseTree(root, attempt, adapter, repo, dir) {
   const spec = repoSpec(adapter, repo);
   const tests = await changedRiskTests(root, attempt, adapter, repo);
   if (!tests.length) throw new WfError(`attempt ${attempt} changes no \`risk.tests\` file in \`${repo}\`: a risk change needs a test that fails without it`);
-  const upstream = `refs/remotes/${spec.remote ?? 'origin'}/${spec.base}`;
-  const mb = git(dir, ['merge-base', 'HEAD', upstream], { allowFail: true });
-  if (mb.status !== 0) throw new WfError(`no merge-base between ${attempt}'s \`${repo}\` and ${upstream}: ${mb.err}`);
+  // The attempt's own recorded base (`wf start --base`), read as the merge facts read it (base.mjs), so the run's
+  // recorded merge-base is the one they compare.
+  const r = (await attemptState(root, attempt))?.repos?.[repo];
+  const upstream = baseRef(dir, specOf(adapter, repo, r), r?.baseSha ?? null);
+  const mb = upstream ? git(dir, ['merge-base', 'HEAD', upstream], { allowFail: true }) : { status: 1, err: 'no base ref' };
+  if (mb.status !== 0) throw new WfError(`no merge-base between ${attempt}'s \`${repo}\` and ${upstream ?? 'its base'}: ${mb.err}`);
   const scratch = path.join(mkdirs(path.join(attemptDir(root, attempt), 'tests')), `risk-base-${repo}-${stamp()}`);
   git(dir, ['worktree', 'add', '--detach', '--quiet', scratch, mb.out]);
   const cleanup = () => {
@@ -318,7 +322,7 @@ export async function runTests(root, attempt, repo, kind, { cwd, source = 'attem
       const moved = git(own.dir, ['diff', '--name-only', tree, after], { allowFail: true }).out;
       throw new WfError(`the files of \`${repo}\` changed while its ${kind} tests ran, so the result belongs to no tree; nothing was recorded. Changed: ${moved.split('\n').filter(Boolean).slice(0, 20).join(', ')}`, { hint: 'Ignore files the tests write (.gitignore) or wait for edits to settle, then run the tests again.' });
     }
-    const data = { repo, kind, tree, pass: result.pass, exitCode: result.exitCode, ms: result.ms, source, log, ...(lock ? { lock: { name: lock.name, count: lock.count, waitedMs: lock.waitedMs } } : {}) };
+    const data = { repo, kind, tree, pass: result.pass, exitCode: result.exitCode, ms: result.ms, source, log, ...(scratch ? { mergeBase: scratch.mergeBase } : {}), ...(lock ? { lock: { name: lock.name, count: lock.count, waitedMs: lock.waitedMs } } : {}) };
     await append(root, attempt, 'test.run', data, null);
     return { pass: result.pass, tree, ms: result.ms, exitCode: result.exitCode, log };
   } finally {

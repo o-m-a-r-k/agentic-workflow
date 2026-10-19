@@ -27,7 +27,8 @@ const OWNER = 'claude:00000000-0000-4000-8000-000000000001';
 const day = '2026-01-05';
 const t = (hm) => `${day}T${hm}:00.000Z`;
 
-const admitted = (id, item, lane, at, extra = {}) => [at, 'admitted', { id, item, lane, intent: 'implementation', repos: { server: { branch: `wf/${id}`, base: 'trunk' } }, schemaVersion: 1, engineVersion: '0.7.35', deferHeavy: lane !== 'batch', ...extra }];
+// 0.7's real shape: `base` is the commit the attempt started from, `baseRef` the ref it was read at.
+const admitted = (id, item, lane, at, extra = {}) => [at, 'admitted', { id, item, lane, intent: 'implementation', repos: { server: { branch: `wf/${id}`, base: 'c'.repeat(40), baseRef: 'origin/trunk' } }, schemaVersion: 1, engineVersion: '0.7.35', deferHeavy: lane !== 'batch', ...extra }];
 const criteria = (at, n = 2) => [at, 'criteria.frozen', { criteria: Array.from({ length: n }, (_, i) => ({ id: `C${i + 1}`, text: `criterion ${i + 1}`, uat: false })), plan: null }];
 const handoff = (at, role, agent) => [at, 'handoff', { role, agent, runtime: 'claude', session: null, tree: 'tree0' }];
 const review = (at, findings) => [at, 'review.recorded', { tree: 'tree1', mode: 'full', closure: { reviewer: 'reviewer-1', verdict: findings.length ? 'changes' : 'approve', findings } }];

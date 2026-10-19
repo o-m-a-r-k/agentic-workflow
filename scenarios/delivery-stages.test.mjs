@@ -54,11 +54,14 @@ test('status with a comment: the comment waits for the owner\'s words, is posted
   const first = await runStage(f.p.root, attempt, 0);
   assert.equal(first.state, 'pending');
   assert.match(first.next, /write the uat comment for TK-1 in product words/);
-  writeComment(f, attempt, 'uat', 'Open the items page and add an item.');
+  // A token the owner quoted is scrubbed at post (built at run time: no token-shaped text in the tree).
+  const token = ['ghp', 'Q'.repeat(24)].join('_');
+  writeComment(f, attempt, 'uat', `Open the items page and add an item. ${token}`);
   const done = await runStage(f.p.root, attempt, 0);
   assert.equal(done.state, 'done');
   const m = `${marker(attempt, 'stage-0')}:comment`;
   const issue = f.tracker().issues.find((i) => i.id === 'TK-1');
+  assert.ok(!issue.comments[0].body.includes(token) && issue.comments[0].body.includes('[secret]'), 'the comment is scrubbed at post');
   assert.equal(issue.status, 'Ready');
   assert.deepEqual(issue.comments.map((c) => c.marker), [m]);
   assert.ok(issue.comments[0].body.endsWith(m));
@@ -298,7 +301,10 @@ test('land with the queue waits for this attempt\'s landing event; a merge fact 
   change(f, attempt, 'server', { 'src/a.mjs': 'a\n' });
   facts = [{ id: 'merge:waiver', message: 'D2 is unanswered' }];
   await assert.rejects(runStage(f.p.root, attempt, 0), (e) => e.refusalId === 'merge:waiver');
-  // merge:untested is the landing run's to supply: a land stage does not refuse on it.
+  // The fast tests not green on HEAD refuse a land stage too.
+  facts = [{ id: 'merge:untested', fact: 'fast', repo: 'server', message: 'server: the fast tests are not green on HEAD' }];
+  await assert.rejects(runStage(f.p.root, attempt, 0), (e) => e.refusalId === 'merge:untested');
+  // The full run on the landed tree is the landing run's to supply: a land stage does not refuse on it.
   facts = [{ id: 'merge:untested', message: 'no full run yet' }];
   const w = await runStage(f.p.root, attempt, 0);
   assert.equal(w.state, 'waiting');

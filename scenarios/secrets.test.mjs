@@ -102,6 +102,13 @@ test('scrub masks catalogued values, prefixed and bearer tokens, auth headers an
   try {
     assert.deepEqual(secretValues(p.root, { name: 'keys', repos: [{ name: 'app', path: 'app' }] }).sort(), [OTHER, VALUE].sort());
     assert.deepEqual(secretValues(p.tmp, null), []);
+    // A user-folder adapter: the catalogue beside it is the one read.
+    const userFile = path.join(p.tmp, 'projects', 'keys.yaml');
+    fs.mkdirSync(path.dirname(userFile), { recursive: true });
+    fs.renameSync(path.join(p.root, '.workflow', 'secrets.yaml'), path.join(p.tmp, 'projects', 'keys.secrets.yaml'));
+    const user = { name: 'keys', repos: [{ name: 'app', path: 'app' }], source: { location: 'user', file: userFile } };
+    assert.deepEqual(secretValues(p.root, user).sort(), [OTHER, VALUE].sort());
+    assert.deepEqual(secretValues(p.root, { name: 'keys', repos: user.repos }), [], 'the repo place holds none now');
   } finally {
     p.cleanup();
   }

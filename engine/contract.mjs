@@ -69,11 +69,11 @@ export const REFUSALS = Object.freeze({
   'review:size': { stream: 1, when: 'the product diff is above the split size for one reviewer (or a risk change above it)' },
   'finding:other-own': { stream: 1, when: '`other` on a line this attempt wrote' },
   'screens:width': { stream: 2, when: 'a capture\'s width differs from the requested viewport' },
-  'screens:dup': { stream: 2, when: 'a capture\'s bytes duplicate a capture of a different screen' },
+  'screens:dup': { stream: 2, when: 'two captures have identical bytes' },
   'merge:open': { stream: 1, when: 'a `goal` or `regression` finding is open' },
   'merge:unreviewed': { stream: 1, when: 'anything other than git\'s automatic merge from the base changed since the last reviewed tree' },
   'merge:foreign': { stream: 1, when: 'a merge commit\'s second parent is not the base, or is reachable from another remote branch' },
-  'merge:untested': { stream: 1, when: 'no passing `full` run on the landed tree, from the landing queue or CI' },
+  'merge:untested': { stream: 1, when: 'the fast tests are not green on HEAD, or no passing `full` run on the landed tree (landing queue or CI)' },
   'fix:no-progress': { stream: 1, when: 'an implementer handoff after a review that reopened a fixed finding or did not lower the blocker count, until the person decides' },
   'merge:risk': { stream: 1, when: 'a risk path is touched and a risk test, its merge-base failure or the second review is missing, or the diff-read is missing with diffRead: before' },
   'merge:waiver': { stream: 1, when: 'a waiver or a loosened criterion is unanswered' },
@@ -158,9 +158,10 @@ export const marker = (attempt, stage) => `wf:${attempt}:${stage}`;
  * @property {string|null} invariants  path relative to root
  * @property {{ paths: string[], read: string[] }[]} rules
  * @property {{ routes: ModuleRef|null, shared: string[], sentinel: string[], langs: { lang: string, dir: 'ltr'|'rtl' }[],
- *   viewports: number[], capture: string|null }} screens
- *   routes module default export: `async (changedFiles: string[]) => string[]` (routes). capture placeholders:
- *   {out} {viewport} {lang} {dir} {routes}.
+ *   viewports: number[], capture: { run: string }|{ module: ModuleRef }|null }} screens
+ *   routes module default export: `async (changedFiles: string[]) => string[]` (routes). capture: a plain string is
+ *   normalised to `{ run }`; `run` placeholders: {out} {viewport} {lang} {dir} {routes}. A `module` loads from the base
+ *   (base-module.mjs) with `ctx.cwd` the attempt folder.
  * @property {{ diffRead: 'before'|'after' }} review
  * @property {{ confirmed: boolean, paths: RiskPath[] }} risk   `risk: none` → { confirmed: true, paths: [] };
  *   a missing key → { confirmed: false, paths: [] } (onboarding refuses to finish on it).
@@ -203,7 +204,7 @@ export function canonicalJson(value) {
  * @typedef {{ id: string, location: string, what: string, why: string, severity: Severity, class: FindingClass }} Finding
  *   id: assigned by recordReview (`F<n>`, unique per item across attempts); a reviewer's input omits it. location: see
  *   parseLocation. `goal` and `regression` block the merge at every severity.
- * @typedef {{ seat: 'whole'|'second'|`area:${string}`, attempt: string, tree: string, round: number,
+ * @typedef {{ seat: 'whole'|'second'|`area:${string}`, attempt: string, tree: string, heads: Record<string, string>, round: number,
  *   prompt: string, files: { diff: string, criteria: string, criteriaDiff: string|null, invariants: string|null,
  *   rules: string[], consumers: string[], screens: string[], riskChecklist: string|null, sharedFiles: string[] },
  *   verify: string[], productFiles: string[], productLines: number, model: string|null }} ReviewBundle
@@ -211,7 +212,7 @@ export function canonicalJson(value) {
  *   verifies first on a later round. productFiles: `<repo>/<path>` the coverage check requires read.
  * @typedef {{ session: Session, seat: ReviewBundle['seat'], tree: string,
  *   findings: Omit<Finding, 'id'>[], verified: { id: string, status: 'fixed'|'open' }[] }} ReviewInput
- * @typedef {{ id: keyof typeof REFUSALS, message: string }} Problem   a fact that refuses a merge (mergeFacts).
+ * @typedef {{ id: keyof typeof REFUSALS, message: string, fact?: string, repo?: string }} Problem   a fact that refuses a merge (mergeFacts).
  * @typedef {{ repo: string, path: string, kind: 'product'|'tests'|'other', added: number, removed: number, status: 'A'|'M'|'D'|'R' }} ChangedFile
  */
 
@@ -350,19 +351,21 @@ export function canonicalJson(value) {
 // ---------------------------------------------------------------------------------------------------------------------
 export const EVENTS = Object.freeze({
   // stages: the delivery stage list snapshotted at start. repos: { <name>: { branch, base, baseSha, worktree } }.
-  'attempt.started': { stream: 1, required: ['item', 'n', 'repos', 'stages', 'adapter', 'engine'], optional: ['from'] },
+  // ticketing: 'none' for `wf start --no-tracker`.
+  'attempt.started': { stream: 1, required: ['item', 'n', 'repos', 'stages', 'adapter', 'engine'], optional: ['from', 'ticketing'] },
   // criteria: [{ id: 'C1'.., text }], 1–6. hash: sha256 of canonicalJson(criteria). previous: the prior hash or null.
   // loosened: criterion ids an edit after a blocker loosened or dropped (each also gets a `waiver`/`loosen` decision).
   'criteria.set': { stream: 1, required: ['criteria', 'areas', 'hash', 'previous'], optional: ['loosened', 'diff'] },
-  // kind: TestKind. source: 'attempt'|'landing'|'ci'. log: a file path.
-  'test.run': { stream: 2, required: ['repo', 'kind', 'tree', 'pass', 'exitCode', 'ms', 'source'], optional: ['log', 'lock', 'landing'] },
-  // images: ScreenImage[]. tree: the attempt's tree hash over all repos.
-  'screens.captured': { stream: 2, required: ['tree', 'images'], optional: ['routes', 'refused'] },
+  // kind: TestKind. source: 'attempt'|'landing'|'ci'. log: a file path. mergeBase: the sha a risk-base run ran at.
+  'test.run': { stream: 2, required: ['repo', 'kind', 'tree', 'pass', 'exitCode', 'ms', 'source'], optional: ['log', 'lock', 'landing', 'mergeBase'] },
+  // images: ScreenImage[]. tree: the attempt's tree hash over all repos. heads: { <repo>: sha } behind the tree (also on
+  // handoff and review.recorded): the merge facts read the reviewed commits from the ledger.
+  'screens.captured': { stream: 2, required: ['tree', 'images'], optional: ['routes', 'refused', 'heads'] },
   // role: planner|implementer|reviewer|tester. launchedBy: 'wf' (stream 4 launched it) | 'owner'. A reviewer is always 'wf'.
-  handoff: { stream: 1, required: ['role', 'session', 'launchedBy'], optional: ['seat', 'model', 'tree', 'round'] },
+  handoff: { stream: 1, required: ['role', 'session', 'launchedBy'], optional: ['seat', 'model', 'tree', 'heads', 'round'] },
   // review: 1.. per attempt. findings: Finding[] (ids assigned). verified: [{ id, status }]. blockers: open goal+regression
   // after this review. coverage: 'complete'|'unverified' (a host with no readable transcript).
-  'review.recorded': { stream: 1, required: ['review', 'round', 'seat', 'tree', 'session', 'coverage', 'findings', 'verified', 'blockers'], optional: ['model', 'filesRead', 'unread'] },
+  'review.recorded': { stream: 1, required: ['review', 'round', 'seat', 'tree', 'session', 'coverage', 'findings', 'verified', 'blockers'], optional: ['heads', 'model', 'filesRead', 'unread'] },
   // mode: file|digest|off. state: done|pending. ticket: the filed id, or null (pending, digest, off, or a duplicate found).
   'finding.filed': { stream: 1, required: ['finding', 'mode', 'state', 'marker'], optional: ['ticket', 'duplicateOf', 'priority'] },
   // Question fields plus id ('D<n>' per attempt).
@@ -488,14 +491,15 @@ export const recordReview = seam(1, 'flow.mjs', 'recordReview', '(root, attempt,
 export const noProgress = seam(1, 'flow.mjs', 'noProgress', '(root, item) → { stop, reason, findings, decision }');
 
 /** Every fact that refuses a merge of `repo` (or every repo): merge:open, merge:unreviewed, merge:foreign,
- * merge:untested (when `landedTree` is given, else skipped: the landing run supplies it), merge:risk, merge:waiver, hold.
+ * merge:untested (fact 'fast': the fast tests not green on HEAD, always; the full run on `landedTree` when it is given,
+ * else skipped: the landing run supplies it), merge:risk, merge:waiver, hold.
  * Never throws for a fact; returns them.
  * @type {(root: string, attempt: string, opts?: { repo?: string, landedTree?: string }) => Promise<Problem[]>} */
 export const mergeFacts = seam(1, 'flow.mjs', 'mergeFacts', '(root, attempt, { repo?, landedTree? }) → Problem[]');
 
-/** The attempt's product diff against its merge-base, per repo, classed by `kinds`.
- * @type {(root: string, attempt: string) => Promise<{ tree: string, files: ChangedFile[] }>} */
-export const changedFiles = seam(1, 'base.mjs', 'changedFiles', '(root, attempt) → { tree, files: ChangedFile[] }');
+/** The attempt's product diff against its merge-base, per repo, classed by `kinds`. heads: each repo's HEAD sha.
+ * @type {(root: string, attempt: string) => Promise<{ tree: string, heads: Record<string, string>, files: ChangedFile[] }>} */
+export const changedFiles = seam(1, 'base.mjs', 'changedFiles', '(root, attempt) → { tree, heads, files: ChangedFile[] }');
 
 // ---- Stream 2: tests, screens, landing --------------------------------------------------------------------------------
 
@@ -669,12 +673,12 @@ export const writeAdapter = seam(7, 'onboard.mjs', 'writeAdapter', '(root, Polic
 // ---------------------------------------------------------------------------------------------------------------------
 const C = (stream, module, handler, does) => ({ stream, module, handler, does });
 export const COMMANDS = Object.freeze({
-  start: C(1, 'attempt.mjs', 'cmdStart', 'start <item>: a fresh attempt'),
+  start: C(1, 'attempt.mjs', 'cmdStart', 'start <item> [--repos a,b] [--base <branch>] [--no-tracker]: a fresh attempt'),
   criteria: C(1, 'flow.mjs', 'cmdCriteria', 'criteria --file <f>: set or edit the criteria'),
   test: C(2, 'tests.mjs', 'cmdTest', 'test fast|full [--repo r]: run tests on the attempt tree'),
   screens: C(2, 'screens.mjs', 'cmdScreens', 'screens: pick and capture the touched screens'),
-  review: C(1, 'flow.mjs', 'cmdReview', 'review [--record <f>]: launch reviewers on HEAD (with fast tests in parallel), or record one'),
-  handoff: C(1, 'flow.mjs', 'cmdHandoff', 'handoff <role> --session <s>: record a planner, implementer or tester'),
+  review: C(1, 'flow.mjs', 'cmdReview', 'review [--no-wait] [--record <f>]: launch reviewers on HEAD (with fast tests in parallel) and wait, or record one'),
+  handoff: C(1, 'flow.mjs', 'cmdHandoff', 'handoff planner|implementer --session <s>: record it and print its role text'),
   approve: C(4, 'decisions.mjs', 'cmdApprove', 'approve <decision> --choice <c> --quote "<words>": record the person\'s answer'),
   digest: C(4, 'digest.mjs', 'cmdDigest', 'digest: the person\'s daily digest'),
   hold: C(1, 'attempt.mjs', 'cmdHold', 'hold --reason "<words>": the person\'s veto'),

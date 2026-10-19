@@ -15,9 +15,8 @@ import { createRequire } from 'node:module';
 import * as contract from './contract.mjs';
 
 const { POLICY_KEYS, WfError, userDir } = contract;
-// The one list of tracker operations (M8), shared with the engine's tracker steps. The fallback is the same list, for a
-// tree where contract.mjs does not export it yet; it goes at the merge.
-const OPERATIONS = contract.TRACKER_OPERATIONS ?? ['read', 'search', 'fileFollowUp', 'setStatus', 'comment', 'mergeRequest'];
+// The one list of tracker operations (M8), shared with the engine's tracker steps.
+const OPERATIONS = contract.TRACKER_OPERATIONS;
 
 const require = createRequire(import.meta.url);
 const YAML = require('./vendor/yaml/dist/index.js');

@@ -79,7 +79,8 @@ export async function land(root, ready, { onWait } = {}) {
       blocked.set(a, 'the attempt is not open');
       continue;
     }
-    const problems = (await mergeFacts(root, a)).filter((p) => p.id !== 'merge:untested');
+    // The landing run supplies the full run on the landed tree; fast tests not green on HEAD still block.
+    const problems = (await mergeFacts(root, a)).filter((p) => !(p.id === 'merge:untested' && p.fact !== 'fast'));
     if (problems.length) blocked.set(a, problems.map((p) => `${p.id}: ${p.message}`).join('; '));
   }
   const order = adapter.delivery?.order?.length ? adapter.delivery.order : adapter.repos.map((r) => r.name);

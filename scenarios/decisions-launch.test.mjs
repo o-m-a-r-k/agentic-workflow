@@ -61,7 +61,7 @@ async function setup(t) {
   const log = () => (fs.existsSync(process.env.FAKE_LOG) ? fs.readFileSync(process.env.FAKE_LOG, 'utf8').trim().split('\n').map((l) => JSON.parse(l)) : []);
   return { p, L, log };
 }
-const bundle = { seat: 'whole', attempt: 'TK-1.1', tree: 'tree1', round: 1, prompt: 'You did not write this change. Read every product file in the diff.\nDiff: /x/diff.patch', model: null };
+const bundle = { seat: 'whole', attempt: 'TK-1.1', tree: 'tree1', heads: { server: 'a'.repeat(40) }, round: 1, prompt: 'You did not write this change. Read every product file in the diff.\nDiff: /x/diff.patch', model: null };
 async function until(fn) {
   for (let i = 0; i < 400; i++) {
     const v = fn();
@@ -86,6 +86,7 @@ test('launchReviewer (Claude Code): the bundle is the whole prompt, the handoff 
   assert.equal(r.session.runtime, 'claude');
   const h = ledgerLines(p.root, 'TK-1.1').find((e) => e.type === 'handoff');
   assert.deepEqual([h.data.role, h.data.launchedBy, h.data.session.id, h.data.seat, h.data.model, h.data.tree], ['reviewer', 'wf', r.session.id, 'whole', 'model-b', 'tree1']);
+  assert.deepEqual(h.data.heads, bundle.heads, 'the heads behind the launched tree');
   await until(() => statusOf(p)?.state === 'done');
   const [run] = log();
   assert.equal(run.input, bundle.prompt);

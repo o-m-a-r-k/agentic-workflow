@@ -17,6 +17,7 @@ import {
   WfError, append, answered, ask, attemptDir, attemptState, branchName, canonicalJson, land, listAttempts, loadAdapter,
   marker, mergeFacts, readEvents, refusal, worktreeDir,
 } from './contract.mjs';
+import { scrub, secretValues } from './scrub.mjs';
 import { canonicalItem, connectorStep, git, loadModule, rejectedText, trackerOf, wordsFor } from './tracker.mjs';
 
 export const STAGE_KINDS = ['land', 'push', 'merge-request', 'wait-merged', 'confirm-deployed', 'deploy', 'status', 'comment', 'module'];
@@ -202,10 +203,11 @@ async function afterGate(ctx) {
 
 // ---- stage kinds ------------------------------------------------------------------------------------------------------
 
-// `untested`: whether `merge:untested` refuses too. Only a land stage leaves it out: the landing run (queue) or the direct
-// landing supplies the full run on the landed tree. A push onto the base is a landing with no such run of its own.
+// `untested`: whether the landed-tree `merge:untested` refuses too. Only a land stage leaves it out: the landing run
+// (queue) or the direct landing supplies the full run on the landed tree. A push onto the base is a landing with no such
+// run of its own. The fast tests not green on HEAD (`fact: 'fast'`) refuse on every stage.
 function refuseOnMergeFacts(problems, { untested = true } = {}) {
-  const blocking = untested ? problems : problems.filter((p) => p.id !== 'merge:untested');
+  const blocking = untested ? problems : problems.filter((p) => !(p.id === 'merge:untested' && p.fact !== 'fast'));
   if (blocking.length) throw refusal(blocking[0].id, blocking.map((p) => p.message).join('; '));
 }
 
@@ -327,7 +329,11 @@ async function postComment(ctx, kind, m) {
     fs.mkdirSync(path.dirname(file), { recursive: true }); // the folder the owner writes the comment into
     return { state: 'pending', evidence, next: `write the ${kind} comment for ${ctx.item} in product words (what to test; no file paths, commits or hashes) to ${file}; then wf deliver ${ctx.attempt}` };
   }
-  const body = `${fs.readFileSync(file, 'utf8').trim()}\n\n${m}`;
+  // Scrubbed at post: the comment leaves the process. The connector posts the file, so the file holds the scrubbed text.
+  const text = fs.readFileSync(file, 'utf8').trim();
+  const clean = scrub(text, { secrets: secretValues(ctx.root, ctx.adapter) });
+  if (clean !== text) fs.writeFileSync(file, `${clean}\n`);
+  const body = `${clean}\n\n${m}`;
   if (tr.driver) {
     await tr.driver.comment(ctx.item, { body, marker: m });
     if (!(await tr.driver.search({ marker: m })).length) throw new WfError(`the ${kind} comment on ${ctx.item} does not read back (marker ${m})`);

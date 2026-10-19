@@ -35,7 +35,7 @@ For projects with no CI whose full suite is long (`delivery.landing: queue`):
 3. On green, it pushes them all.
 4. On red, it bisects to the first ticket that turns the stack red, returns that ticket to its implementer with the failing log, and lands the rest.
 
-A base that moves during the run is fetched again and the stack rebuilt and retested: only a tested tree is pushed. A landed tree without a passing `full` run, from the queue or from CI, is refused (`merge:untested`).
+A base that moves during the run is fetched again and the stack rebuilt and retested: only a tested tree is pushed. A landed tree without a passing `full` run, from the queue or from CI, is refused (`merge:untested`), and so is an attempt whose `fast` tests are not green on HEAD.
 
 ## Merge facts
 

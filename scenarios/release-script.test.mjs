@@ -171,7 +171,8 @@ test('the changelog reads the improvement history from git once improvements/ ha
   assert.equal(before.status, 0, before.stderr);
   const expected = fs.readFileSync(path.join(repo, 'CHANGELOG.md'), 'utf8');
   assert.match(expected, /## 0\.10\.0 - second\n\n## 0\.9\.0 - first/);
-  assert.match(expected, /\| \[I-2\]\(improvements\/I-2\.md\) \| a hold was lifted by an agent \| 0\.10\.0 \| scenarios\/b\.test\.mjs \|\n\| \[I-1\]/);
+  assert.match(expected, /\| I-2 \| a hold was lifted by an agent \| 0\.10\.0 \| scenarios\/b\.test\.mjs \|\n\| I-1 \|/);
+  assert.doesNotMatch(expected, /\]\(improvements\//, 'no link into the archived folder');
   // The folder leaves the tree, not yet committed: the history is read from HEAD.
   sh(repo, 'git rm -rq improvements');
   fs.rmSync(path.join(repo, 'CHANGELOG.md'));
