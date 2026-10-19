@@ -1,72 +1,66 @@
-// Which implementer handoff introduced the defects reviewers found (0.7.0). Measurement only; nothing is decided from it.
+// Whether a line of an attempt's tree was written by the attempt's own commits (design-0.8 section 2, the findings rule).
 //
-// Named failure: every defect in one build was found by someone other than its author, after the hand-off, and nothing
-// measured where defects came from, only where they were found. Each located review finding is traced with `git blame`
-// on the tree the reviewer judged to the commit that last touched the cited line, and that commit to the implementer
-// handoff whose commits contain it (between the heads at its handoff and at its close). Harness-neutral: the ledger and
-// git only.
-import { git, run } from './util.mjs';
+// Named failure: repairs created 41% of later defects, and a reviewer could class a defect on a line the attempt wrote
+// as `other`, so it left the ticket. `finding:other-own` (stream 1) refuses that, from this fact: `git blame` of the line
+// on the attempt's tree, and whether the blamed commit is outside every base the attempt started from or merged in.
+// Telemetry uses the same fact for `introducedByRepair`.
 import fs from 'node:fs';
-import { classifyFinding, locationsOf } from './review-policy.mjs';
+import path from 'node:path';
+import { WfError, branchName, loadAdapter, parseLocation, worktreeDir } from './contract.mjs';
+import { attemptState } from './ledger.mjs';
+import { run } from './util.mjs';
 
-const head = (t) => String(t ?? '').split('+')[0] || null;
-const isAncestor = (dir, a, b) => run('git', ['merge-base', '--is-ancestor', a, b], { cwd: dir, allowFail: true }).status === 0;
+const gitOut = (cwd, args) => {
+  const r = run('git', args, { cwd, allowFail: true });
+  return r.status === 0 ? r.stdout.trim() : null;
+};
+const isAncestor = (cwd, a, b) => run('git', ['merge-base', '--is-ancestor', a, b], { cwd, allowFail: true }).status === 0;
 
-// The commit that last changed `file:line` at `commit`, or null.
-function blameLine(dir, commit, file, line) {
-  const out = git(dir, ['blame', '--porcelain', '-L', `${line},${line}`, commit, '--', file], { allowFail: true });
-  const sha = /^([0-9a-f]{40}) /.exec(String(out ?? ''))?.[1] ?? null;
+// Where a repo of the attempt can be read: its worktree (HEAD), or after close the repo's own checkout at the kept branch.
+export async function repoView(root, state, repo) {
+  const wt = state.repos?.[repo]?.worktree ?? worktreeDir(root, state.id, repo);
+  if (fs.existsSync(wt)) return { cwd: wt, ref: 'HEAD' };
+  let dir = null;
+  try {
+    const adapter = await loadAdapter(root);
+    const spec = adapter.repos.find((r) => r.name === repo);
+    if (spec) dir = path.join(root, spec.path);
+  } catch {
+    dir = null;
+  }
+  dir ??= path.join(root, repo);
+  if (!fs.existsSync(dir)) return null;
+  return { cwd: dir, ref: state.repos?.[repo]?.branch ?? branchName(state.id) };
+}
+
+// The bases an attempt's repo started from or merged in (git's automatic merge of the base, `base.updated`).
+export const basesOf = (state, repo) => [state.repos?.[repo]?.baseSha, ...(state.baseUpdates ?? []).filter((u) => u.repo === repo).map((u) => u.to)].filter(Boolean);
+
+// The commit that last changed one line at `ref`, or a WfError saying why it cannot be known.
+export function blameLine(cwd, ref, file, line) {
+  const r = run('git', ['blame', '--porcelain', '-L', `${line},${line}`, ref, '--', file], { cwd, allowFail: true });
+  if (r.status !== 0) throw new WfError(`cannot blame ${file}:${line} at ${ref}: ${(r.stderr || r.stdout).trim().split('\n')[0]}`);
+  const sha = /^([0-9a-f]{40}) /.exec(r.stdout)?.[1] ?? null;
   return sha && !/^0+$/.test(sha) ? sha : null;
 }
 
-// The repo and repo-relative path a cited file names (`repo:path`, `repo/path`, or a path that exists in one repo).
-function resolve(state, cited, commitOf) {
-  const repos = Object.entries(state.repos ?? {});
-  for (const [name, r] of repos) {
-    for (const prefix of [`${name}:`, `${name}/`]) if (cited.startsWith(prefix)) return { repo: name, dir: r.worktree, file: cited.slice(prefix.length) };
-  }
-  for (const [name, r] of repos) {
-    const c = commitOf(name);
-    if (c && r.worktree && fs.existsSync(r.worktree) && run('git', ['cat-file', '-e', `${c}:${cited}`], { cwd: r.worktree, allowFail: true }).status === 0) return { repo: name, dir: r.worktree, file: cited };
-  }
-  return null;
+/** Whether `<repo>/<path>:<line>` of the attempt's tree was written by this attempt's commits. */
+export async function blameToAttempt(root, attempt, location) {
+  const loc = parseLocation(location);
+  if (!loc) throw new WfError(`not a location: \`${location}\`; a finding's location is <repo>/<path>:<line>`);
+  const state = await attemptState(root, attempt);
+  if (state.schema !== 2) throw new WfError(`${attempt} is a 0.7 attempt; its lines are not blamed`);
+  const view = await repoView(root, state, loc.repo);
+  if (!view) throw new WfError(`${attempt} has no repo \`${loc.repo}\` to blame ${location} in`);
+  const bases = basesOf(state, loc.repo);
+  if (!bases.length) throw new WfError(`${attempt} recorded no base commit for ${loc.repo}; ${location} cannot be blamed`);
+  const commit = blameLine(view.cwd, view.ref, loc.path, loc.line);
+  if (!commit) return { own: false, commit: null };
+  const own = !bases.some((b) => isAncestor(view.cwd, commit, b));
+  return { own, commit };
 }
 
-// The implementer record (`state.implementers`) whose commits last wrote the line a located finding of round `r` cites, or null
-// when the finding cites no line, the line predates the attempt, or no implementer's commits hold it. `undefined` when the
-// finding cites no location at all (nothing to trace).
-export function implementerOf(state, r, f) {
-  const loc = locationsOf(f)[0];
-  if (!loc) return undefined;
-  const impl = (state.implementers ?? []).filter((x) => x.heads);
-  const where = resolve(state, loc.file.replace(/^\.\//, ''), (name) => head(r.tree?.[name]));
-  const commit = where ? head(r.tree?.[where.repo]) : null;
-  const sha = where && commit && fs.existsSync(where.dir) ? blameLine(where.dir, commit, where.file, loc.start) : null;
-  return sha ? impl.find((x) => {
-    const from = head(x.heads?.[where.repo]);
-    const to = head(x.closedHeads?.[where.repo]) ?? commit;
-    return from && to && sha !== from && isAncestor(where.dir, from, sha) && isAncestor(where.dir, sha, to);
-  }) ?? null : null;
-}
+// The committer time of a commit (ISO), or null.
+export const commitTime = (cwd, sha) => gitOut(cwd, ['show', '-s', '--format=%cI', sha]);
 
-// { byAgent: { [agent]: { work, blocking, observations } }, unattributed, traced } for the attempt's recorded rounds.
-export function introducedFindings(state, { limit = 200 } = {}) {
-  const byAgent = {};
-  let unattributed = 0, traced = 0;
-  for (const r of state.reviews ?? []) {
-    for (const f of r.closure?.findings ?? []) {
-      if (traced >= limit) break;
-      const who = implementerOf(state, r, f);
-      if (who === undefined) continue;
-      traced++;
-      if (!who) {
-        unattributed++;
-        continue;
-      }
-      const row = (byAgent[who.agent] ??= { work: who.work ?? null, blocking: 0, observations: 0 });
-      if (classifyFinding(state, f).blocks) row.blocking++;
-      else row.observations++;
-    }
-  }
-  return { byAgent, unattributed, traced };
-}
+export const implements08 = { blameToAttempt };
