@@ -154,8 +154,8 @@ function handedSnapshot(root, state, abs) {
       throw refuse(`${abs}: handed by ${h.handoff}, but ${h.plugin} at ${h.commit.slice(0, 10)} cannot be read from git (${error.message}); nothing is read`);
     }
     if (placeOf(h.decoded ? snap.decoded : snap.dest) !== at) continue;
-    // `git` trims what it prints, so the copy the engine writes (and runs) has no final newline; the hint says so.
-    const show = `\`git -C ${snap.dir} show ${h.commit}:${snap.file}\` prints the plugin as committed (the copy here drops its final newline${h.decoded ? ', and the decoded copy expands its string escapes' : ''})`;
+    // `git` trims what it prints, so the copy the engine writes (and runs) has no leading or trailing whitespace; the hint says so.
+    const show = `\`git -C ${snap.dir} show ${h.commit}:${snap.file}\` prints the plugin as committed (the copy here drops its leading and trailing whitespace${h.decoded ? ', and the decoded copy expands its string escapes' : ''})`;
     return { ...h, expected: Buffer.from(h.decoded ? decodeEscapes(snap.text) : snap.text, 'utf8'), show };
   }
   return null;

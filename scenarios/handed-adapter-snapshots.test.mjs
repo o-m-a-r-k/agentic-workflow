@@ -72,7 +72,7 @@ test('0.7.35 (I-235): a reviewer reads the adapter snapshots its bundle handed w
   const changed = show(f, c.corrected.plugin.decoded, e.id);
   assert.equal(changed.code, 75);
   assert.match(changed.err, /is not the adapter as committed at [0-9a-f]{10}; nothing is read from it/);
-  assert.match(changed.err, /`git -C \S+ show [0-9a-f]{40}:\.workflow\/steps\/unit\.mjs` prints the plugin as committed \(the copy here drops its final newline, and the decoded copy expands its string escapes\)/);
+  assert.match(changed.err, /`git -C \S+ show [0-9a-f]{40}:\.workflow\/steps\/unit\.mjs` prints the plugin as committed \(the copy here drops its leading and trailing whitespace, and the decoded copy expands its string escapes\)/);
   fs.writeFileSync(c.corrected.plugin.decoded, kept);
   ok(show(f, c.corrected.plugin.decoded, e.id));
   assert.equal(ok(wf(f.root, ['verify', '--attempt', e.id])).code, 0, 'nothing was written');
@@ -82,7 +82,7 @@ test('0.7.35 (I-235): a reviewer reads the adapter snapshots its bundle handed w
     const gone = show(f, file, e.id);
     assert.equal(gone.code, 75);
     assert.match(gone.err, /: handed by handoffs\/\d+-reviewer\.json, but no longer on disk/);
-    assert.match(gone.err, /`git -C \S+ show [0-9a-f]{40}:\.workflow\/steps\/unit\.mjs` prints the plugin as committed \(the copy here drops its final newline/);
+    assert.match(gone.err, /`git -C \S+ show [0-9a-f]{40}:\.workflow\/steps\/unit\.mjs` prints the plugin as committed \(the copy here drops its leading and trailing whitespace/);
     assert.equal(/the decoded copy expands its string escapes/.test(gone.err), decodedNote);
   }
 });
