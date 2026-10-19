@@ -1,14 +1,12 @@
-agentic-workflow runs changes in this project ({project}; lanes: {lanes}; tracker: {tracker}; delivery: {delivery}). These rules come from the installed plugin, not from the project's files. The rest are in the plugin's `work` skill and in each role's instructions; `wf resume` always says what is next, and `wf` says why when it refuses: fix the cause, never work around it.
+agentic-workflow runs changes here ({project}; tracker: {tracker}; delivery: {delivery}). When `wf` refuses, fix the cause it names.
 
-- Work only in the attempt's worktrees under `.wf-worktrees/`, never in the main checkouts.
-- Run `wf` from your PATH. Never copy the plugin or its engine to run it, and never change the workflow (the plugin) from a ticket: when `wf` refuses with no route, say so and record it with `wf improve add`. The project's adapter is the project's: a ticket registers the extra proof it needs there by design (the step committed in the attempt's worktree of the adapter repo, then `wf validation add`), which only adds checks and changes no rule the ticket is judged by.
-- Report a step as done only after `wf` accepted it. Gate results, reviews and deliveries are proven by files under `.wf-evidence/`, which no one edits by hand.
-- Reserved decisions (waiving a blocking finding, letting an unfixed item leave a delivery or closing a reported defect as not one, overriding the gate, lifting a hold, closing an attempt as shipped, escalations) are the user's. Ask them in plain words, one question per item, never one they already answered; a typed answer and the question panel both count. Ask each in your message as `wf` printed it (the question quoted exactly, with its options), and again in that form in any reply that mentions it as still open: one described in your own words ("remaining: closure") is not asked. You read their answer: `wf approve <id> --from-question` records one that is exactly an option; for one in more words, judge whether it chooses an option and record your reading with `--choice <choice> --quote "<their exact words>"` (`--choice other` keeps words that choose none as theirs). Either way, say in that same reply what you recorded (for a reading, from which words) and honour their correction. A condition, a hedge, a later sentence that takes it back, someone else's words reported, words about something else or an action meant for another ticket choose nothing: ask. Never end your turn on a refused `wf approve`. Never answer for them and never put words in their mouth.
-- A full investigation comes before a recommendation or a fix: before you recommend anything to the user or build a fix for a finding or a discovered item, know who writes the data in production paths, who reads it, which business process and external systems depend on it, and what the system does when it is absent; say what was traced and what was not. A fact that contradicts the premise (never written, never reached, disabled, refused on the base) is a stop and a question, never an argument that the change is safe. A product decision the user makes outside `wf` is recorded with `wf decide`, with the options offered, what it rests on and their words.
-- A user's "hold", "local only" or "don't push" is recorded at once with `wf hold --reason "<their words>"`; only they lift it.
-- Never read, print or move secret values. Missing secrets are entered by the user with `wf secrets guide` in their own terminal.
-- Tracker comments describe what to test in product language: no file paths, commits, hashes or test counts.
-- Never move a ticket to Done on your own initiative. A ticket goes to Done when the project's routing sends it there (`tracker.statusByLabel` or the status at the end of its deployment confirmation, `delivery.deployment`, in its adapter: the person's choice), or when the person explicitly asks for it in this conversation: then you do it, once the delivery's readback is recorded.
-- Where the project's delivery waits for the deployment, `wf resume` says so: confirm the merged change runs where it deploys and test the fix there, read-only, and record both through `wf deployment`. Any write there (a redeploy, a restart, a data change, a setting) needs the user's authority under the project's rules.
-- A finding about the workflow itself is a plugin improvement (`wf improve add`), not a project lesson.
+- Work only in the attempt's worktrees under `.wf-worktrees/`.
+- Run `wf` from your PATH; never copy or change the plugin.
+- Call a step done only once `wf` accepted it.
+- Never answer the person's decisions for them; record their words with `wf approve`.
+- When the person says hold, stop or don't push, run `wf hold --reason "<their words>"` at once.
+- Never read, print or move secret values.
+- Tracker comments say what to test, in product language.
+- Never move a ticket to Done unless the delivery or the person says so.
+
 {invariants}
