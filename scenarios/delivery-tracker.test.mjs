@@ -5,7 +5,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { normaliseId, search, fileFollowUp, ledgerFile, marker } from '../engine/contract.mjs';
+import { normaliseId, search, fileFollowUp, ledgerFile, marker, runStage, TRACKER_OPERATIONS } from '../engine/contract.mjs';
+import { trackerOf, wordsFor } from '../engine/tracker.mjs';
+import { from07 } from '../engine/migrate.mjs';
 import { git } from './helpers/index.mjs';
 import { deliveryProject } from './delivery-fixture.mjs';
 import { filesTracker } from '../adapters/tracker/files.mjs';
@@ -102,8 +104,58 @@ test('fileFollowUp through a connector: pending in the adapter\'s words, then re
   assert.equal(pending.details.team, 'T1');
   // The engine wrote nothing to the tracker itself.
   assert.deepEqual(f.tracker().log, []);
-  calls = [{ tool: 'mcp__tracker__create_issue', input: { team: 'T1', description: `text ${m}` }, result: 'Created TK-9 (for TK-1)', at: '2026-01-05T10:00:00Z' }];
+  const title = 'The list header overlaps the filter row';
+  const soon = (min) => new Date(Date.now() + min * 60000).toISOString();
+  // Not counted: a call made before the follow-up was asked, one without the title, an error, a result with no new id.
+  calls = [
+    { tool: 'mcp__tracker__create_issue', input: { title, description: `text ${m}` }, result: 'Created TK-7', at: '2026-01-01T00:00:00.000Z' },
+    { tool: 'mcp__tracker__create_issue', input: { title: 'Another', description: `text ${m}` }, result: 'Created TK-8', at: soon(1) },
+    { tool: 'mcp__tracker__create_issue', input: { title, description: `text ${m}` }, result: 'Created TK-8', error: true, at: soon(2) },
+    { tool: 'mcp__tracker__create_issue', input: { title, description: `text ${m}` }, result: 'Created (for TK-1)', at: soon(3) },
+  ];
+  const still = await fileFollowUp(f.p.root, attempt, otherFinding());
+  assert.equal(still.state, 'pending');
+  assert.deepEqual(still.rejected.map((r) => r.why), ['its result is an error', 'its result shows no new issue id']);
+  calls.push({ tool: 'mcp__tracker__create_issue', input: { team: 'T1', title, description: `text ${m}` }, result: 'Created TK-9 (for TK-1)', at: soon(4) });
   assert.deepEqual(await fileFollowUp(f.p.root, attempt, otherFinding()), { state: 'done', value: { id: 'TK-9', duplicateOf: null } });
+  // Without an id pattern the new id cannot be read back: refused before the owner is asked to create anything.
+  f.adapter.ticketing.idPattern = null;
+  await assert.rejects(fileFollowUp(f.p.root, attempt, otherFinding('F5', 'Other')), /ticketing\.idPattern is unset/);
+});
+
+test('a 0.7 tracker `kind` migrated to a connector is only its name: every tracker call works through the connector', async (t) => {
+  const f = deliveryProject();
+  t.after(f.cleanup);
+  const { seed } = await from07(f.p.root, { name: 'neutral', repos: [{ name: 'server', path: 'server', base: 'trunk' }], tracker: { kind: 'acme', idPrefix: 'TK', statuses: { started: 'Started' } } });
+  assert.equal(seed.ticketing.tracker, 'acme');
+  assert.equal(seed.ticketing.via, 'connector');
+  Object.assign(f.adapter.ticketing, seed.ticketing);
+  const owner = { runtime: 'claude', id: 'o-07' };
+  let calls = [];
+  f.doubles({ connectorCalls: async () => calls });
+  const tr = await trackerOf(f.p.root, f.adapter);
+  assert.deepEqual([tr.via, tr.driver], ['connector', null]);
+  assert.deepEqual(await normaliseId(f.p.root, 'tk-3'), { item: 'TK-3', verified: false, canonical: 'TK-3' });
+  const attempt = await f.startAttempt('TK-3', 1, { owner });
+  assert.equal((await runStage(f.p.root, attempt, seed.ticketing.take)).state, 'pending');
+  calls = [{ tool: 'mcp__acme__update', input: { id: 'TK-3', status: 'Started' }, result: 'TK-3 is now Started', at: '2026-02-01T00:00:00.000Z' }];
+  assert.equal((await runStage(f.p.root, attempt, seed.ticketing.take)).state, 'done');
+  assert.deepEqual(f.tracker().log, []);
+  // A string tracker that is not a connector's still names a built-in one.
+  f.adapter.ticketing.via = 'module';
+  await assert.rejects(trackerOf(f.p.root, f.adapter), /ticketing\.tracker `acme` is not a built-in tracker/);
+});
+
+test('one operations list: the engine has words for every operation an adapter may name, and the adapter\'s come first', async (t) => {
+  const f = deliveryProject({ ticketing: { via: 'connector', operations: Object.fromEntries(TRACKER_OPERATIONS.map((op) => [op, `Own words for ${op}.`])) } });
+  t.after(f.cleanup);
+  f.doubles();
+  assert.deepEqual([...TRACKER_OPERATIONS].sort(), ['comment', 'fileFollowUp', 'mergeRequest', 'read', 'search', 'setStatus']);
+  const tr = await trackerOf(f.p.root, f.adapter);
+  for (const op of TRACKER_OPERATIONS) {
+    assert.equal(wordsFor(tr, op), `Own words for ${op}.`);
+    assert.ok(wordsFor({ operations: {} }, op), op);
+  }
 });
 
 test('files tracker: tickets as files; create, search, status and comments by marker; ids never name a path', async (t) => {

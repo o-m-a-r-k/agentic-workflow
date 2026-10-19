@@ -171,8 +171,8 @@ export const marker = (attempt, stage) => `wf:${attempt}:${stage}`;
  *   via: `module` → the engine calls the tracker module's TrackerDriver methods; `connector` → the owner agent performs
  *   each operation through its host's connector, in the words of `operations` (merged over the module's own
  *   `operations` export when the tracker is a module), and the engine reads the result back (D68); `files` → a local
- *   folder of issue files; `none` → no tracker. operations: plain text per operation (fileFollowUp, search, readIssue,
- *   setStatus, comment, attach, readBack). A plain string tracker names a built-in tracker of stream 3.
+ *   folder of issue files; `none` → no tracker. operations: plain text per operation, keyed by TRACKER_OPERATIONS. A
+ *   plain string tracker names a built-in tracker of stream 3, or, with `via: connector`, only labels the connector.
  * @property {{ landing: 'queue'|'direct', order: string[], authority: { push: 'agent'|'person', mergeRequest: 'agent'|'person',
  *   merge: 'agent'|'person' }, stages: Stage[] }} delivery   order defaults to the repos' order.
  * @property {Record<string, string>} models   one model per role (planner, implementer, reviewer, secondReviewer, tester,
@@ -181,6 +181,10 @@ export const marker = (attempt, stage) => `wf:${attempt}:${stage}`;
  * @property {{ at: string|null, engine: string|null, hashes: Record<string, string> }} onboarded   written by stream 7
  *   only: the hash of each POLICY_KEYS value as onboarding last wrote it; a current hash that differs is a hand edit.
  */
+
+// The tracker operations: the keys of `ticketing.operations` (config) and the operations the engine asks for (tracker,
+// delivery). One list, so an adapter can name only what the engine reads.
+export const TRACKER_OPERATIONS = Object.freeze(['read', 'search', 'fileFollowUp', 'setStatus', 'comment', 'mergeRequest']);
 
 // The keys onboarding owns (design section 5). A value's hash is sha256 of its canonical JSON (canonicalJson below).
 export const POLICY_KEYS = Object.freeze(['risk', 'review.diffRead', 'delivery.stages', 'ticketing.operations', 'tests', 'screens']);
@@ -571,7 +575,7 @@ export const sessionActivity = seam(4, 'hosts/index.mjs', 'sessionActivity', '(s
 
 /** Connector tool calls in a session (tool name matched by suffix), with input and the result as the host stored it.
  * @type {(session: Session, tools: string[], opts?: { home?: string, since?: string }) => Promise<{ tool: string, input: object, result: string, at: string }[]>} */
-export const connectorCalls = seam(4, 'hosts/index.mjs', 'connectorCalls', '(session, tools, { home?, since? }) → [{ tool, input, result, at }]');
+export const connectorCalls = seam(4, 'hosts/index.mjs', 'connectorCalls', '(session, tools, { home?, since? }) → [{ tool, input, result, error, at }]');
 
 // ---- Stream 5: ledger, telemetry, learning ----------------------------------------------------------------------------
 

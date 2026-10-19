@@ -17,7 +17,7 @@ import {
   WfError, append, answered, ask, attemptDir, attemptState, branchName, canonicalJson, land, listAttempts, loadAdapter,
   marker, mergeFacts, readEvents, refusal, worktreeDir,
 } from './contract.mjs';
-import { canonicalItem, connectorStep, git, loadModule, trackerOf, wordsFor } from './tracker.mjs';
+import { canonicalItem, connectorStep, git, loadModule, rejectedText, trackerOf, wordsFor } from './tracker.mjs';
 
 export const STAGE_KINDS = ['land', 'push', 'merge-request', 'wait-merged', 'confirm-deployed', 'deploy', 'status', 'comment', 'module'];
 const STATES = ['done', 'waiting', 'pending', 'skipped'];
@@ -111,8 +111,48 @@ const authorityOf = (ctx, what) => (ctx.adapter.delivery?.authority?.[what] === 
 
 // ---- tracker reads ----------------------------------------------------------------------------------------------------
 
-// The item's labels: an array, or null when they could not be read. Through a connector the owner reports them
-// (`wf deliver --labels`); a report is kept in the stage's evidence.
+// The `labels` of the one issue in a connector read's result (JSON, or the JSON object inside the text): an array of
+// names, or null when the result carries no such field or more than one issue without naming `item`. Labels are
+// strings or objects with a name (`{ name }`, `{ label }`, `{ title }`), as a list or under `nodes`.
+function labelNames(l) {
+  if (l && !Array.isArray(l) && Array.isArray(l.nodes)) l = l.nodes;
+  if (!Array.isArray(l)) return null;
+  const out = l.map((x) => (typeof x === 'string' ? x : x?.name ?? x?.label ?? x?.title ?? null));
+  return out.every((x) => typeof x === 'string') ? out : null;
+}
+export function labelsInResult(text, item) {
+  const s = String(text ?? '');
+  let v;
+  try {
+    v = JSON.parse(s);
+  } catch {
+    const a = s.indexOf('{');
+    const b = s.lastIndexOf('}');
+    if (a < 0 || b <= a) return null;
+    try {
+      v = JSON.parse(s.slice(a, b + 1));
+    } catch {
+      return null;
+    }
+  }
+  const found = [];
+  const walk = (o, depth) => {
+    if (!o || typeof o !== 'object' || depth > 8) return;
+    if (!Array.isArray(o) && 'labels' in o) {
+      const names = labelNames(o.labels);
+      if (names) found.push({ o, names });
+    }
+    for (const x of Object.values(o)) walk(x, depth + 1);
+  };
+  walk(v, 0);
+  const own = found.filter(({ o }) => Object.values(o).some((x) => typeof x === 'string' && x.toLowerCase() === String(item).toLowerCase()));
+  if (own.length === 1) return own[0].names;
+  return found.length === 1 ? found[0].names : null;
+}
+
+// The item's labels: an array, or null when they could not be read. Through a connector they are read from the result
+// of the owner's read call (input naming the item, made since this stage was first asked), never from a report; a
+// read kept in an earlier stage's evidence of this attempt is reused.
 async function itemLabels(ctx) {
   const tr = await ctx.tracker();
   if (tr.via === 'none') return { labels: [] };
@@ -124,25 +164,29 @@ async function itemLabels(ctx) {
       return { labels: null };
     }
   }
-  if (Array.isArray(ctx.opts.labels)) return { labels: ctx.opts.labels, reported: true };
-  const reports = Object.values(ctx.state.stageResults ?? {}).filter((r) => Array.isArray(r.evidence?.labelsReported)).sort((a, b) => String(a.at).localeCompare(String(b.at)));
-  if (reports.length) return { labels: reports.at(-1).evidence.labelsReported };
-  return { labels: null, connector: true };
+  const reads = Object.values(ctx.state.stageResults ?? {}).filter((r) => r.index !== ctx.index && Array.isArray(r.evidence?.labelsRead?.labels)).sort((a, b) => String(a.at).localeCompare(String(b.at)));
+  if (reads.length) return { labels: reads.at(-1).evidence.labelsRead.labels };
+  const r = await connectorStep(ctx.root, ctx.attempt, {
+    op: 'read', tr, match: ctx.item, since: await firstAsk(ctx),
+    accept: (c) => (labelsInResult(c.result, ctx.item) ? null : 'its result carries no `labels` of the item'),
+  });
+  if (r.state === 'done') return { labels: labelsInResult(r.value.result, ctx.item), read: { tool: r.value.tool, at: r.value.at } };
+  return { labels: null, connector: true, rejected: rejectedText(r) };
 }
 
 async function whenGate(ctx) {
   const want = ctx.stage.when?.labels;
   if (!want?.length) return null;
-  const { labels, reported, connector } = await itemLabels(ctx);
+  const { labels, read, connector, rejected } = await itemLabels(ctx);
   if (labels === null) {
     const tr = await ctx.tracker();
     const evidence = { when: { labels: want, read: 'pending' } };
-    if (connector) return { state: 'pending', evidence, next: `${wordsFor(tr, 'read')} (${ctx.item}), then report its labels: wf deliver ${ctx.attempt} --labels "<label>,<label>"` };
+    if (connector) return { state: 'pending', evidence, next: `${wordsFor(tr, 'read')} (${ctx.item}); its labels are read from that call's result${rejected}. Then wf deliver ${ctx.attempt}` };
     return { state: 'waiting', evidence, next: `the labels of ${ctx.item} could not be read; wf deliver ${ctx.attempt} checks again` };
   }
   const lower = labels.map((l) => String(l).toLowerCase());
   const hit = want.some((w) => lower.includes(String(w).toLowerCase()));
-  const evidence = { when: { labels: want, read: labels }, ...(reported ? { labelsReported: labels } : {}) };
+  const evidence = { when: { labels: want, read: labels }, ...(read ? { labelsRead: { labels, ...read } } : {}) };
   return hit ? { pass: true, evidence } : { state: 'skipped', evidence, next: null };
 }
 
@@ -158,13 +202,15 @@ async function afterGate(ctx) {
 
 // ---- stage kinds ------------------------------------------------------------------------------------------------------
 
-function refuseOnMergeFacts(problems) {
-  const blocking = problems.filter((p) => p.id !== 'merge:untested');
+// `untested`: whether `merge:untested` refuses too. Only a land stage leaves it out: the landing run (queue) or the direct
+// landing supplies the full run on the landed tree. A push onto the base is a landing with no such run of its own.
+function refuseOnMergeFacts(problems, { untested = true } = {}) {
+  const blocking = untested ? problems : problems.filter((p) => p.id !== 'merge:untested');
   if (blocking.length) throw refusal(blocking[0].id, blocking.map((p) => p.message).join('; '));
 }
 
 async function stageLand(ctx) {
-  refuseOnMergeFacts(await mergeFacts(ctx.root, ctx.attempt));
+  refuseOnMergeFacts(await mergeFacts(ctx.root, ctx.attempt), { untested: false });
   const repos = stageRepos(ctx).map((r) => r.name);
   if (ctx.adapter.delivery?.landing === 'direct') {
     const res = await land(ctx.root, [ctx.attempt]);
@@ -198,6 +244,7 @@ async function pushRepo(ctx, r, target, evidence) {
     evidence.repos[r.name] = { accepted: tip, target, pushed: false, by: 'person' };
     return { state: 'waiting', evidence, next: `the person pushes ${r.branch} (${tip.slice(0, 12)}) to ${r.remote}/${target} in ${r.name}; wf deliver ${ctx.attempt} checks again` };
   }
+  // Onto the base: every merge fact, a passing `full` run on the tip's tree included (merge:untested).
   if (target === r.base) refuseOnMergeFacts(await mergeFacts(ctx.root, ctx.attempt, { repo: r.name, landedTree: git(r.dir, ['rev-parse', `${tip}^{tree}`]) }));
   const pushed = git(r.dir, ['push', '--quiet', r.remote, `${tip}:refs/heads/${target}`], { allowFail: true });
   if (pushed.status !== 0) throw new WfError(`push of ${r.name} to ${r.remote}/${target} failed: ${(pushed.stderr || pushed.stdout).trim()}`);
@@ -225,9 +272,9 @@ async function stageMergeRequest(ctx) {
   const what = repos.map((r) => `${r.name}: ${r.branch} into ${r.base}`).join('; ');
   if (authorityOf(ctx, 'mergeRequest') !== 'agent') return { state: 'done', evidence: { ...evidence, by: 'person' }, next: `the person opens a merge request in ${what}` };
   const tr = await ctx.tracker();
-  const r = await connectorStep(ctx.root, ctx.attempt, { op: 'mergeRequest', tr, match: ctx.marker, mark: ctx.marker });
+  const r = await connectorStep(ctx.root, ctx.attempt, { op: 'mergeRequest', tr, match: ctx.marker, mark: ctx.marker, since: await firstAsk(ctx) });
   if (r.state === 'done') return { state: 'done', evidence: { ...evidence, call: { tool: r.value.tool, at: r.value.at } }, next: null };
-  return { state: 'pending', evidence, next: `${r.operation} ${what}, each with "${ctx.marker}" in its description; then wf deliver ${ctx.attempt}` };
+  return { state: 'pending', evidence, next: `${r.operation} ${what}, each with "${ctx.marker}" in its description${rejectedText(r)}; then wf deliver ${ctx.attempt}` };
 }
 
 async function stageWaitMerged(ctx) {
@@ -286,9 +333,9 @@ async function postComment(ctx, kind, m) {
     if (!(await tr.driver.search({ marker: m })).length) throw new WfError(`the ${kind} comment on ${ctx.item} does not read back (marker ${m})`);
     return { state: 'done', evidence: { ...evidence, written: true }, next: null };
   }
-  const r = await connectorStep(ctx.root, ctx.attempt, { op: 'comment', tr, match: m, mark: m });
+  const r = await connectorStep(ctx.root, ctx.attempt, { op: 'comment', tr, match: m, mark: m, since: await firstAsk(ctx) });
   if (r.state === 'done') return { state: 'done', evidence: { ...evidence, call: { tool: r.value.tool, at: r.value.at } }, next: null };
-  return { state: 'pending', evidence, next: `${r.operation} Item ${ctx.item}; the comment is ${file} and must end with "${m}". Then wf deliver ${ctx.attempt}` };
+  return { state: 'pending', evidence, next: `${r.operation} Item ${ctx.item}; the comment is ${file} and must end with "${m}"${rejectedText(r)}. Then wf deliver ${ctx.attempt}` };
 }
 
 async function stageStatus(ctx) {
@@ -311,9 +358,12 @@ async function stageStatus(ctx) {
     if (back?.status !== to) throw new WfError(`${ctx.item} was set to "${to}" but reads back "${back?.status ?? 'nothing'}"`);
     return { state: 'done', evidence: { ...evidence, written: true, from: issue.status }, next: null };
   }
-  const r = await connectorStep(ctx.root, ctx.attempt, { op: 'setStatus', tr, match: [ctx.item, to] });
+  const r = await connectorStep(ctx.root, ctx.attempt, {
+    op: 'setStatus', tr, match: [ctx.item, to], since: await firstAsk(ctx),
+    accept: (c) => (String(c.result).toLowerCase().includes(String(to).toLowerCase()) ? null : `its result does not show the status "${to}"`),
+  });
   if (r.state === 'done') return { state: 'done', evidence: { ...evidence, call: { tool: r.value.tool, at: r.value.at } }, next: null };
-  return { state: 'pending', evidence, next: `${r.operation} Item ${ctx.item} to "${to}"; then wf deliver ${ctx.attempt}` };
+  return { state: 'pending', evidence, next: `${r.operation} Item ${ctx.item} to "${to}"${rejectedText(r)}; then wf deliver ${ctx.attempt}` };
 }
 
 async function stageComment(ctx) {
@@ -348,19 +398,26 @@ const KINDS = {
 
 // ---- runStage ---------------------------------------------------------------------------------------------------------
 
-async function waitedSince(root, attempt, index) {
+// When stage `index` was first recorded unsettled (first asked), or null when it never was.
+async function firstUnsettled(root, attempt, index) {
   let events = [];
   try {
     events = await readEvents(root, attempt);
   } catch {}
-  const first = events.find((e) => e.type === 'stage' && e.data?.index === index && !['done', 'skipped'].includes(e.data?.state));
-  return first ? Math.round((Date.now() - Date.parse(first.at)) / 60000) : 0;
+  return events.find((e) => e.type === 'stage' && e.data?.index === index && !['done', 'skipped'].includes(e.data?.state))?.at ?? null;
+}
+// The stage's first ask time: a connector call counts only when made at or after it (null: asked now, the first time).
+const firstAsk = (ctx) => firstUnsettled(ctx.root, ctx.attempt, ctx.index);
+
+async function waitedSince(root, attempt, index) {
+  const first = await firstUnsettled(root, attempt, index);
+  return first ? Math.round((Date.now() - Date.parse(first)) / 60000) : 0;
 }
 
 /**
  * Run one delivery stage (contract runStage): an index into the attempt's snapshot, or a Stage (start's `ticketing.take`,
  * index -1; `{ status }` is read as `{ do: status, to }`). Appends `stage` when the result changed. A settled stage
- * (done or skipped) is returned as recorded, never run again. opts (cmdDeliver): actor, observed, labels.
+ * (done or skipped) is returned as recorded, never run again. opts (cmdDeliver): actor, observed.
  */
 export async function runStage(root, attempt, stage, opts = {}) {
   const adapter = await loadAdapter(root);
@@ -431,16 +488,15 @@ const flag = (args, k) => {
   return Array.isArray(v) ? v.at(-1) : v;
 };
 
-/** `wf deliver [<attempt>] [--stage <i>] [--observed "<what you saw>"] [--labels "<a>,<b>"]`: run the next stages. */
+/** `wf deliver [<attempt>] [--stage <i>] [--observed "<what you saw>"]`: run the next stages. */
 export async function cmdDeliver(ctx, args = { _: [], flags: {} }) {
   if (!ctx.root) throw new WfError('no project here: wf deliver runs inside a project with an adapter');
+  if (args.flags?.labels !== undefined) throw new WfError('wf deliver takes no --labels: an item\'s labels are read from the tracker (through a connector, from the result of your read call in this session)');
   const attempt = await pickAttempt(ctx.root, args._?.[0] ?? flag(args, 'attempt'));
   const observed = flag(args, 'observed');
-  const labelsFlag = flag(args, 'labels');
   const opts = {
     actor: ctx.actor ?? null,
     observed: typeof observed === 'string' && observed.trim() ? observed.trim() : null,
-    labels: typeof labelsFlag === 'string' ? labelsFlag.split(',').map((s) => s.trim()).filter(Boolean) : null,
   };
   const state = await attemptState(ctx.root, attempt);
   const stages = state.stages ?? [];
