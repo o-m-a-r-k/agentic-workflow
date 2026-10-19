@@ -282,14 +282,14 @@ screens:
   routes: { repo: web, path: scripts/routes-of.mjs }      # changed files -> routes
   shared: ["web/src/common/**", "web/src/styles/**"]
   sentinel: ["/", "/projects", "/invoices/new"]
-  langs: [{ lang: en, dir: ltr }, { lang: ar, dir: rtl }]
+  langs: [{ lang: <code>, dir: <ltr|rtl> }]   # each language and direction the project ships
   viewports: [390, 1440]
   capture: "node web/scripts/capture.mjs --out {out} --viewport {viewport} --lang {lang} {routes}"
 review: { diffRead: before }           # or after: a project setting from onboarding
 risk:                                   # proposed by the onboarding scan, confirmed by the person; `risk: none` is explicit
   - { id: <name the scan proposed>, paths: ["<area>/**"], reason: "<the facts the scan found>", tests: ["<its tests>/**"] }
 ticketing:
-  tracker: linear
+  tracker: <the tracker the project uses, through its connector or a module>
   via: connector
   idPattern: '^ENG-\d+$'
   take: { status: In Progress }
