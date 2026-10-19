@@ -103,7 +103,7 @@ unanswered from the sixth round until the first strategist decision, and `regres
 0.7.28 to 0.7.33 both would only have named the strategist as the next step, and the owner could hand the next round anyway.
 
 Four signals now hold the next implementer and code-review round until a strategist decision answers them, as the round count
-does (`strategy:course`); an evidence review of a gated tree, a gate, the acceptance and delivery go on:
+does (`strategy:course`); an evidence review of a gated tree, the merge round a `changed` base merge owes (the gate waits for it, so holding it would leave no way on), a gate, the acceptance and delivery go on:
 
 | Signal | Why it is a fact, not a threshold |
 | --- | --- |

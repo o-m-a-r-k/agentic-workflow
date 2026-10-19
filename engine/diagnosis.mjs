@@ -99,9 +99,10 @@ export function refsOf(state) {
   for (const d of state.discovered ?? []) put(d.id, d.at, 'discovered', String(d.summary ?? '').slice(0, 200));
   for (const d of state.strategy?.decisions ?? []) put(d.id, d.at, 'strategist decision', `${d.action}: ${String(d.rationale ?? '').split('\n')[0].slice(0, 160)}`);
   for (const d of state.decisions ?? []) put(d.id, d.approved?.at ?? d.createdAt ?? null, 'the person\'s decision', `${d.kind}${d.approved ? `, answered ${d.approved.choice ?? 'in their own words'}` : d.withdrawn ? ', withdrawn' : ', open'}: ${String(d.summary ?? '').slice(0, 160)}`);
-  // Base merges by `wf base merge`, and those merged by hand that the engine observed (`base.observed`, I-233: read when present),
-  // numbered together in time order; the ledger only appends, so a number never changes.
-  [...(state.baseMerges ?? []).map((b) => ({ ...b, how: 'merged' })), ...(state.baseObserved ?? []).map((b) => ({ ...b, how: 'merged by hand' }))].sort((x, y) => String(x.at).localeCompare(String(y.at))).forEach((b, i) => put(`base:${i + 1}`, b.at, 'base merge', `${b.repo ?? '?'}: ${b.commits ?? '?'} commit(s) from ${b.ref ?? 'the base'}, ${b.how}`));
+  // Base merges recorded by `wf base merge` (and the delivery's), and those merged by hand the engine observed (`base.observed`, I-233),
+  // by the one counter the ledger keeps for both (`n`, in ledger order), so every reader names a merge alike. A ledger folded before
+  // the counter existed numbers them in time order.
+  [...(state.baseMerges ?? []).map((b) => ({ ...b, how: b.delivery ? 'merged at delivery' : 'merged' })), ...(state.baseObserved ?? []).map((b) => ({ ...b, how: 'merged by hand' }))].sort((x, y) => (Number.isInteger(x.n) && Number.isInteger(y.n) ? x.n - y.n : String(x.at).localeCompare(String(y.at)))).forEach((b, i) => put(`base:${Number.isInteger(b.n) ? b.n : i + 1}`, b.at, 'base merge', `${b.repo ?? '?'}: ${b.commits ?? '?'} commit(s) from ${b.ref ?? 'the base'}, ${b.how}`));
   for (const g of state.gates ?? []) if (g.runId) put(`gate:${g.runId}`, g.at, 'gate run', `${g.status ?? 'finished'}`);
   for (const s of state.stops ?? []) if (s.runId) put(`gate:${s.runId}`, s.at, 'gate run', `stopped: ${String(s.reason ?? '').slice(0, 160)}`);
   return out;

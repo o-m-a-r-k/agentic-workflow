@@ -733,7 +733,9 @@ export function handoff(root, role, options) {
   // 0.7.0 (D3): the strategist's bundle is built in engine/strategy.mjs; no implementer or reviewer starts while the round count
   // awaits the strategist's decision (0.7.33, D84) or a strategist's escalation awaits the person's.
   if (role === 'strategist') return strategistHandoff(root, state, options);
-  if (['implementer', 'reviewer'].includes(role)) requireOwnerDecision(root, state, role, options);
+  // 0.7.34 (D86, I-233 x I-234): a merge round (the targeted review a `changed` base merge owes) is never held by a course signal:
+  // the gate waits for it, so holding it would hold the attempt with no way on.
+  if (['implementer', 'reviewer'].includes(role)) requireOwnerDecision(root, state, role, options, { mergeRound: role === 'reviewer' && mergeRoundOwed(state) });
   if (!options.agent) throw new WfError('--agent <identity of the agent you are starting> is required');
   const agent = String(options.agent);
   const owner = state.owner;
@@ -3952,7 +3954,9 @@ export function nextDecision(root, state) {
   // 0.7.31 (I-217, D64): the gate a planned pass or an evidence review's fixes go to with no code review of their own (`course:
   // 'reach'`) waits for the strategist only on what that work's own commits reached (a contract, a migration): nothing else reviews
   // that reach before the gate, and the strategist decides whether it stands before a gate is spent on it.
-  const routed = (kind, status, extra) => status !== 'blocked' && extra.course !== false && (extra.course === 'reach' || ['implementation', 'repair', 'pass', 'check'].includes(kind) || (kind === 'review' && extra.round === 'code-review'));
+  const routed = (kind, status, extra) => status !== 'blocked' && extra.course !== false && (extra.course === 'reach' || ['implementation', 'repair', 'pass', 'check'].includes(kind) || (kind === 'review' && extra.round === 'code-review' && extra.mode !== 'merge'));
+  // 0.7.34 (D86): a merge round (the review a `changed` base merge owes before the gate) is not routed to the strategist: the gate
+  // waits for it, and the handoff does not hold it either.
   const result = (kind, status, reason, extra = {}) => {
     const standing = routed(kind, status, extra) ? (courseNow ??= courseOpen(root, state)).filter((x) => extra.course !== 'reach' || x.id === 'reach') : [];
     if (standing.length) return result('strategy', 'owner', `course signals no strategist has answered: ${standing.map((x) => x.id).join(', ')}`, { course: false, courseSignals: standing.map(({ id, key, line }) => ({ id, key, line })) });

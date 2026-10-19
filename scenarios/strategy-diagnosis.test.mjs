@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { closureFile, commitIn, goodClosure, ok, wf } from './helpers.mjs';
+import { closureFile, commitIn, goodClosure, ok, planDoc, sh, singleRepoProject, state, wf } from './helpers.mjs';
 import { append, loadState } from '../engine/ledger.mjs';
 import { inProcess, project, started, strategistClosure } from './strategist-fixtures.mjs';
 
@@ -34,7 +34,7 @@ function round(ctx, a, agent, findings = [], extra = {}) {
 const proof = (id, tag) => ({ id, severity: 'major', summary: `the recording proof is missing (${tag})`, status: 'open', evidence: 'src/a.txt:1', family: 'device-proof', criterion: 'C1' });
 const strategist = (ctx, a, agent, reason = 'the rounds keep asking for the same proof') => ok(wf(ctx.root, ['handoff', 'strategist', '--agent', agent, '--attempt', a.id, '--reason', reason, '--json'])).json();
 const record = (ctx, a, file) => wf(ctx.root, ['strategy', 'record', '--closure', file, '--attempt', a.id]);
-const base = (agent, extra = {}) => ({ strategist: agent, action: 'continue', rationale: 'The rounds re-ask for proof this environment cannot make.', prediction: { signal: 'blockingLatest <= 0', by: 9 }, ...extra });
+const baseClosure = (agent, extra = {}) => ({ strategist: agent, action: 'continue', rationale: 'The rounds re-ask for proof this environment cannot make.', prediction: { signal: 'blockingLatest <= 0', by: 9 }, ...extra });
 
 test('the strategist diagnoses what kept going wrong, cites what exists, accounts for every round, and corrects the flow; its correction reaches the roles', () => {
   const ctx = project('diagnosis');
@@ -49,16 +49,16 @@ test('the strategist diagnoses what kept going wrong, cites what exists, account
   assert.ok(bundle.closureSchema.diagnosis && bundle.closureSchema.causes.capability && bundle.closureSchema.levers.routing);
   assert.match(bundle.instructions, /step back: say what kept going wrong/);
   // No diagnosis: refused (an earlier engine recorded this closure).
-  const none = record(ctx, a, strategistClosure(ctx.base, h.bundle, { ...base('strat-1'), diagnosis: null }).file);
+  const none = record(ctx, a, strategistClosure(ctx.base, h.bundle, { ...baseClosure('strat-1'), diagnosis: null }).file);
   assert.equal(none.code, 75, none.err);
   assert.match(none.err, /`diagnosis` is required/);
   // A ref that does not exist is named with the nearest one that does; a round left out of the account is named.
-  const wrong = record(ctx, a, strategistClosure(ctx.base, h.bundle, { ...base('strat-1'), diagnosis: [{ cause: 'capability', what: 'the reviews keep asking for a recording the simulator cannot make', rounds: ['rev-1'], refs: ['rev-1:F9'], correction: { lever: 'review-scope', change: 'the next rounds state the recording proof as unproven and do not raise it again' } }], progressed: [], review: [] }).file);
+  const wrong = record(ctx, a, strategistClosure(ctx.base, h.bundle, { ...baseClosure('strat-1'), diagnosis: [{ cause: 'capability', what: 'the reviews keep asking for a recording the simulator cannot make', rounds: ['rev-1'], refs: ['rev-1:F9'], correction: { lever: 'review-scope', change: 'the next rounds state the recording proof as unproven and do not raise it again' } }], progressed: [], review: [] }).file);
   assert.equal(wrong.code, 75);
   assert.match(wrong.err, /rev-1:F9 is not a review round, finding, discovered issue, decision, base merge or gate run of this attempt \(nearest: rev-1:F1\)/);
   assert.match(wrong.err, /review round rev-2 \(recorded since the previous decision\) is in no diagnosis entry's `rounds` and not in `progressed`/);
   // A cause outside the vocabulary, two entries for one cause, and neither correction nor settledBy.
-  const shape = record(ctx, a, strategistClosure(ctx.base, h.bundle, { ...base('strat-1'), diagnosis: [{ cause: 'growth', what: 'x', rounds: ['rev-1'] }, { cause: 'capability', what: 'y', rounds: ['rev-2'], correction: { lever: 'pray', change: 'z' } }, { cause: 'capability', what: 'y', rounds: ['rev-2'], settledBy: 'S9' }], progressed: [], review: [] }).file);
+  const shape = record(ctx, a, strategistClosure(ctx.base, h.bundle, { ...baseClosure('strat-1'), diagnosis: [{ cause: 'growth', what: 'x', rounds: ['rev-1'] }, { cause: 'capability', what: 'y', rounds: ['rev-2'], correction: { lever: 'pray', change: 'z' } }, { cause: 'capability', what: 'y', rounds: ['rev-2'], settledBy: 'S9' }], progressed: [], review: [] }).file);
   assert.match(shape.err, /diagnosis\[0\]\.cause must be one of capability, assumption, regression, one-at-a-time, base, tooling, scope, review, other/);
   assert.match(shape.err, /diagnosis\[0\] needs exactly one of `correction/);
   assert.match(shape.err, /diagnosis\[1\]\.correction\.lever must be one of person, one-pass, root-cause, review-scope, base-timing, repair-tooling, routing, replan, split, model, other/);
@@ -66,7 +66,7 @@ test('the strategist diagnoses what kept going wrong, cites what exists, account
   assert.match(shape.err, /diagnosis\[2\]\.settledBy must name an earlier strategist decision/);
   // The diagnosis that holds.
   const diagnosis = [{ cause: 'capability', what: 'the reviews keep asking for a recording the simulator here cannot make', rounds: ['rev-1', 'rev-2'], refs: ['rev-1:F1', 'rev-2:F1'], correction: { lever: 'review-scope', change: 'the next rounds state the recording proof as unproven once and do not raise it again' } }];
-  ok(record(ctx, a, strategistClosure(ctx.base, h.bundle, { ...base('strat-1'), diagnosis, progressed: [], review: [] }).file));
+  ok(record(ctx, a, strategistClosure(ctx.base, h.bundle, { ...baseClosure('strat-1'), diagnosis, progressed: [], review: [] }).file));
   const s1 = loadState(ctx.root, a.id).strategy.decisions[0];
   assert.deepEqual(s1.diagnosis, [{ ...diagnosis[0] }]);
   // The correction in force, in plain words: no cause or lever token reaches the reader.
@@ -86,7 +86,7 @@ test('the next decision reports what became of the correction; the same cause me
   round(ctx, a, 'rev-2', [proof('F1', 'second')]);
   const h1 = strategist(ctx, a, 'strat-1');
   const lever = { lever: 'review-scope', change: 'the next rounds state the recording proof as unproven once and do not raise it again' };
-  ok(record(ctx, a, strategistClosure(ctx.base, h1.bundle, { ...base('strat-1'), diagnosis: [{ cause: 'capability', what: 'reviews keep asking for a recording this environment cannot make', rounds: ['rev-1', 'rev-2'], refs: ['rev-1:F1', 'rev-2:F1'], correction: lever }], progressed: [], review: [] }).file));
+  ok(record(ctx, a, strategistClosure(ctx.base, h1.bundle, { ...baseClosure('strat-1'), diagnosis: [{ cause: 'capability', what: 'reviews keep asking for a recording this environment cannot make', rounds: ['rev-1', 'rev-2'], refs: ['rev-1:F1', 'rev-2:F1'], correction: lever }], progressed: [], review: [] }).file));
   // A round after the correction raises the same proof again, under a fresh id and with no link: the next implementer is held.
   round(ctx, a, 'rev-3', [proof('F1', 'third')]);
   const held = wf(ctx.root, ['handoff', 'implementer', '--agent', 'impl-2', '--attempt', a.id, '--owner', a.owner]);
@@ -97,7 +97,7 @@ test('the next decision reports what became of the correction; the same cause me
   const b2 = JSON.parse(fs.readFileSync(h2.bundle, 'utf8'));
   assert.deepEqual(b2.openCorrections.map((c) => c.correction), ['S1:capability']);
   assert.deepEqual(b2.roundsToAccount.map((r) => r.round), ['rev-3']);
-  const again = (review, entry, extra = {}) => strategistClosure(ctx.base, h2.bundle, { ...base('strat-2'), diagnosis: entry ? [entry] : [], progressed: entry ? [] : ['rev-3'], review, ...extra }).file;
+  const again = (review, entry, extra = {}) => strategistClosure(ctx.base, h2.bundle, { ...baseClosure('strat-2'), diagnosis: entry ? [entry] : [], progressed: entry ? [] : ['rev-3'], review, ...extra }).file;
   const back = { cause: 'capability', what: 'the recording proof was asked for again', rounds: ['rev-3'], refs: ['rev-3:F1'] };
   // The open correction is reviewed.
   assert.match(record(ctx, a, again([], { ...back, correction: { lever: 'person', change: 'ask the person whether to ship without the recording' } })).err, /review: S1:capability .* is open and has no review entry/);
@@ -133,16 +133,16 @@ test('progressed is for rounds that did what they were handed; a round in flight
   const b = JSON.parse(fs.readFileSync(h.bundle, 'utf8'));
   assert.deepEqual(b.roundsToAccount.map((r) => [r.round, r.status]), [['rev-1', 'recorded'], ['rev-2', 'died'], ['rev-3', 'recorded']]);
   assert.deepEqual(b.roundsInFlight, ['rev-4'], 'a round in flight is listed apart and not accounted for yet');
-  const bad = record(ctx, a, strategistClosure(ctx.base, h.bundle, { ...base('strat-1'), diagnosis: [], progressed: ['rev-1', 'rev-2', 'rev-3'], review: [] }).file);
+  const bad = record(ctx, a, strategistClosure(ctx.base, h.bundle, { ...baseClosure('strat-1'), diagnosis: [], progressed: ['rev-1', 'rev-2', 'rev-3'], review: [] }).file);
   assert.match(bad.err, /progressed: rev-2 died before it recorded a closure/);
   assert.match(bad.err, /progressed: rev-3 did not reach part of its scope \(the screenshots: the export refused them\)/);
   // The improvement a workflow rule needs exists in the inbox, when named.
-  ok(record(ctx, a, strategistClosure(ctx.base, h.bundle, { ...base('strat-1'), diagnosis: [{ cause: 'tooling', what: 'the export refuses the screenshots, so reviews end unfinished', rounds: ['rev-2', 'rev-3'], correction: { lever: 'repair-tooling', change: 'repair the export before the next evidence review' } }, { cause: 'capability', what: 'the recording proof cannot be made here', rounds: [], refs: ['rev-1:F1'], correction: { lever: 'other', change: 'look for a device' } }], progressed: ['rev-1'], review: [] }).file));
+  ok(record(ctx, a, strategistClosure(ctx.base, h.bundle, { ...baseClosure('strat-1'), diagnosis: [{ cause: 'tooling', what: 'the export refuses the screenshots, so reviews end unfinished', rounds: ['rev-2', 'rev-3'], correction: { lever: 'repair-tooling', change: 'repair the export before the next evidence review' } }, { cause: 'capability', what: 'the recording proof cannot be made here', rounds: [], refs: ['rev-1:F1'], correction: { lever: 'other', change: 'look for a device' } }], progressed: ['rev-1'], review: [] }).file));
   round(ctx, a, 'rev-5');
   const h2 = strategist(ctx, a, 'strat-2', 'the export is still broken');
   fs.mkdirSync(path.join(ctx.root, '..', '.improvements'), { recursive: true });
   fs.writeFileSync(path.join(ctx.root, '..', '.improvements', 'I-7.yaml'), 'id: I-7\ntitle: the gate requires the current base\n');
-  const second = (improvement, extra = {}) => strategistClosure(ctx.base, h2.bundle, { ...base('strat-2'), diagnosis: [{ cause: 'tooling', what: 'the export still refuses the screenshots', rounds: ['rev-4', 'rev-5'], refs: ['rev-3'], correction: { lever: 'repair-tooling', change: 'repair the export first' } }, { cause: 'capability', what: 'still no device', rounds: [], refs: ['rev-1:F1'], correction: { lever: 'other', change: 'look for a device again' } }, ...(extra.entries ?? [])], progressed: [], review: [{ correction: 'S1:tooling', outcome: 'not-applied', why: 'a workflow rule kept the export from being repaired', ...(improvement ? { improvement } : {}) }, { correction: 'S1:capability', outcome: 'too-early' }] }).file;
+  const second = (improvement, extra = {}) => strategistClosure(ctx.base, h2.bundle, { ...baseClosure('strat-2'), diagnosis: [{ cause: 'tooling', what: 'the export still refuses the screenshots', rounds: ['rev-4', 'rev-5'], refs: ['rev-3'], correction: { lever: 'repair-tooling', change: 'repair the export first' } }, { cause: 'capability', what: 'still no device', rounds: [], refs: ['rev-1:F1'], correction: { lever: 'other', change: 'look for a device again' } }, ...(extra.entries ?? [])], progressed: [], review: [{ correction: 'S1:tooling', outcome: 'not-applied', why: 'a workflow rule kept the export from being repaired', ...(improvement ? { improvement } : {}) }, { correction: 'S1:capability', outcome: 'too-early' }] }).file;
   assert.match(record(ctx, a, second('I-99')).err, /improvement: I-99 is not an item of the improvement inbox/);
   // settledBy names what came after it: the cause is back, not settled.
   assert.match(record(ctx, a, second('I-7', { entries: [{ cause: 'review', what: 'the reviews do not finish', rounds: ['rev-5'], settledBy: 'S1' }] })).err, /diagnosis\[2\]: it says S1 settled it, and cites rev-5 from after S1/);
@@ -153,7 +153,7 @@ test('progressed is for rounds that did what they were handed; a round in flight
   // Each cause has one correction in force: the new one closes the earlier as replaced.
   round(ctx, a, 'rev-6');
   const h3 = strategist(ctx, a, 'strat-3', 'still');
-  ok(record(ctx, a, strategistClosure(ctx.base, h3.bundle, { ...base('strat-3'), diagnosis: [{ cause: 'review', what: 'the rounds before were unfinished', rounds: ['rev-6'], refs: ['rev-3'], correction: { lever: 'review-scope', change: 'review only what the export can show' } }], progressed: [], review: [{ correction: 'S2:tooling', outcome: 'not-applied', why: 'the same rule' }, { correction: 'S2:capability', outcome: 'dropped', why: 'the person accepted the gap' }] }).file));
+  ok(record(ctx, a, strategistClosure(ctx.base, h3.bundle, { ...baseClosure('strat-3'), diagnosis: [{ cause: 'review', what: 'the rounds before were unfinished', rounds: ['rev-6'], refs: ['rev-3'], correction: { lever: 'review-scope', change: 'review only what the export can show' } }], progressed: [], review: [{ correction: 'S2:tooling', outcome: 'not-applied', why: 'the same rule' }, { correction: 'S2:capability', outcome: 'dropped', why: 'the person accepted the gap' }] }).file));
   const resume = ok(wf(ctx.root, ['resume', '--attempt', a.id])).out;
   assert.match(resume, /the strategist's correction in force since S2, for "the gate, the evidence export or the validation fails for reasons outside the product": repair the export first; corrections for this were reported not carried out 2 times in a row/);
   assert.match(resume, /S1's correction for "the gate, the evidence export [^"]*" \(repair the export before the next evidence review\): replaced by a later correction \(S2\)/);
@@ -178,7 +178,7 @@ test('rounds past the attempt\'s own prediction hold the next implementer and co
   await inProcess(ctx.root, () => append(ctx.root, a.id, 'handoff', { role: 'strategist', agent: 'strat-old', runtime: 'claude', bundle: null, reason: 'handed before 0.7.34' }, null));
   const oldBundle = path.join(ctx.base, 'old-bundle.json');
   fs.writeFileSync(oldBundle, JSON.stringify({ attempt: a.id }));
-  const legacy = strategistClosure(ctx.base, oldBundle, { ...base('strat-old'), prediction: { signal: 'blockingLatest <= 0', by: 4 } });
+  const legacy = strategistClosure(ctx.base, oldBundle, { ...baseClosure('strat-old'), prediction: { signal: 'blockingLatest <= 0', by: 4 } });
   ok(record(ctx, a, legacy.file));
   assert.match(fs.readFileSync(path.join(ctx.root, '..', 'refusals.jsonl'), 'utf8'), /"id":"strategy:course"/);
   assert.equal(loadState(ctx.root, a.id).strategy.decisions[0].diagnosis, undefined);
@@ -199,14 +199,56 @@ test('an evidence review of a gated tree is not held by an unanswered course sig
   ok(wf(ctx.root, ['handoff', 'reviewer', '--agent', 'rev-evidence', '--attempt', a.id, '--owner', a.owner]));
 });
 
-// Seam with I-233 (base merges observed by hand, `mode: 'merge'` rounds), read defensively: both shapes of the state.
-test('a base merge observed by hand is citable as base:<n> beside `wf base merge` ones, in time order; a merge round shows its mode and is accounted for like any round', async () => {
-  const { refsOf, roundsOf } = await import('../engine/diagnosis.mjs');
-  const without = { reviews: [], handoffs: [], baseMerges: [{ at: '2026-01-02', repo: 'app', commits: 3 }] };
-  assert.deepEqual([...refsOf(without).keys()], ['base:1']);
-  const withObserved = { ...without, baseObserved: [{ at: '2026-01-01', repo: 'app' }], handoffs: [{ role: 'reviewer', agent: 'rev-m', bundle: 'b-m', at: '2026-01-03', mode: 'merge' }], reviews: [{ reviewer: 'rev-m', handoff: 'b-m', at: '2026-01-04', mode: 'merge', closure: { reviewer: 'rev-m', findings: [] } }] };
-  const refs = refsOf(withObserved);
-  assert.match(refs.get('base:1').line, /merged by hand/);
-  assert.match(refs.get('base:2').line, /3 commit\(s\)/);
-  assert.deepEqual(roundsOf(withObserved).map((r) => [r.agents[0], r.mode, r.status]), [['rev-m', 'merge', 'recorded']]);
+// Seam with I-233, on the real engine: a base merged by hand is observed (`base.observed`) and numbered with `wf base merge`'s by
+// the ledger's one counter; the merge round it owes shows its mode; and a course signal never holds that merge round (the gate
+// waits for it, so holding it would leave the attempt no way on).
+const seven = (edits = {}) => `${Array.from({ length: 7 }, (_, i) => edits[i + 1] ?? `l${i + 1}`).join('\n')}\n`;
+const baseCommit = (root, files, msg) => {
+  sh(root, 'git checkout -q main && git pull -q --ff-only origin main');
+  commitIn(root, files, msg);
+  sh(root, 'git push -q origin main');
+};
+
+test('an unanswered course signal does not hold the merge round a changed base merge owes, and the gate runs after it; the hand merge is citable as base:<n> by the ledger\'s counter and the merge round shows its mode', () => {
+  const { base, root } = singleRepoProject('course-merge', { gate: { steps: [{ id: 'unit', repo: 'app', run: 'true', inputs: ['src/**'] }] } }, { 'src/m.txt': seven(), 'src/other.txt': 'o\n' });
+  const e = ok(wf(root, ['entry', '--item', 'ENG-905', '--json'])).json();
+  const wt = e.repos.app.worktree;
+  ok(wf(root, ['handoff', 'planner', '--agent', 'plan-905', '--attempt', e.id]));
+  const plan = path.join(base, 'plan-905.json');
+  fs.writeFileSync(plan, JSON.stringify(planDoc({ plan: 'change m', expect: { files: 5, rounds: 1, minutes: 60 }, criteria: [{ id: 'C1', text: 'm changes', uat: 'm shows it' }] })));
+  ok(wf(root, ['plan', '--file', plan, '--attempt', e.id]));
+  ok(wf(root, ['handoff', 'implementer', '--agent', 'impl-905', '--attempt', e.id]));
+  commitIn(wt, { 'src/m.txt': seven({ 2: 'mine' }) });
+  ok(wf(root, ['handoff', 'close', '--agent', 'impl-905', '--attempt', e.id]));
+  // A recorded `wf base merge` of an unrelated file first: base:1.
+  baseCommit(root, { 'src/other.txt': 'theirs\n' }, 'unrelated base change');
+  ok(wf(root, ['base', 'merge', '--attempt', e.id]));
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev0-905', '--attempt', e.id]));
+  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('rev0-905')), '--attempt', e.id]));
+  // The second round passes the plan's one: a course signal stands, unanswered.
+  ok(wf(root, ['handoff', 'reviewer', '--agent', 'rev1-905', '--attempt', e.id]));
+  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('rev1-905')), '--attempt', e.id]));
+  assert.match(wf(root, ['handoff', 'implementer', '--agent', 'impl-held', '--attempt', e.id]).err, /no implementer starts until it decides: 2 review rounds handed, past the 1 the plan expected/);
+  // The base changes the ticket's own line; the owner merges it by hand and resolves the conflict: a `changed` merge (base:2).
+  baseCommit(root, { 'src/m.txt': seven({ 2: 'theirs' }) }, 'conflicting base change');
+  sh(wt, 'git fetch -q origin main && (git merge -q --no-edit origin/main || true)');
+  fs.writeFileSync(`${wt}/src/m.txt`, seven({ 2: 'mine+theirs' }));
+  sh(wt, 'git add -A && git commit -q --no-edit');
+  const s = state(root, e.id);
+  assert.equal(s.decision.mode, 'merge', 'the changed merge owes a merge round');
+  assert.equal(wf(root, ['gate', '--attempt', e.id]).code, 75, 'the gate waits for the merge round');
+  const loaded = loadState(root, e.id);
+  assert.deepEqual([...(loaded.baseMerges ?? []), ...(loaded.baseObserved ?? [])].map((b) => [b.n, b.class]).sort(), [[1, 'none'], [2, 'changed']]);
+  // The merge round is handed although the course signal stands, and the gate runs after it.
+  const mr = wf(root, ['handoff', 'reviewer', '--agent', 'mr-905', '--attempt', e.id]);
+  assert.equal(mr.code, 0, `the merge round is not held by the course signal: ${mr.err}`);
+  const bundle = JSON.parse(fs.readFileSync(mr.out.match(/^Read (\S+)/m)[1], 'utf8'));
+  ok(wf(root, ['review', '--closure', closureFile(base, goodClosure('mr-905', { baseMerges: bundle.baseMerge.map((x) => ({ id: x.id, findings: [] })) })), '--attempt', e.id]));
+  ok(wf(root, ['gate', '--attempt', e.id]));
+  // The strategist cites both merges by the ledger's counter and sees the merge round's mode.
+  const h = strategist({ root, base }, { id: e.id }, 'strat-905', 'past the plan, and the base moved');
+  const sb = JSON.parse(fs.readFileSync(h.bundle, 'utf8'));
+  assert.deepEqual(sb.history.events.filter((x) => x.kind === 'base merge').map((x) => [x.ref, /by hand/.test(x.line)]), [['base:1', false], ['base:2', true]]);
+  assert.equal(sb.history.rounds.find((r) => r.round === 'mr-905').mode, 'merge');
+  ok(record({ root }, { id: e.id }, strategistClosure(base, h.bundle, { ...baseClosure('strat-905'), diagnosis: [{ cause: 'base', what: 'the base changed the line this ticket changes, and the merge was resolved by hand', rounds: ['mr-905'], refs: ['base:2'], correction: { lever: 'base-timing', change: 'take the base in once, right before the final gate' } }], progressed: ['rev0-905', 'rev1-905'], review: [] }).file));
 });
