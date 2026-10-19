@@ -9,8 +9,11 @@ import { WfError, YAML, refuse, run } from './util.mjs';
 // Values never leave this module except into a step's environment or the store.
 // Nothing here prints a value.
 
-export function loadCatalog(root) {
-  const file = path.join(root, '.workflow', 'secrets.yaml');
+// The catalogue lives beside the adapter (`cfg.catalogFile`, from config.mjs's secretsCatalogFile); without one, the
+// repo copy's place.
+export const catalogFileOf = (root, cfg) => cfg?.catalogFile ?? path.join(root, '.workflow', 'secrets.yaml');
+export function loadCatalog(root, cfg) {
+  const file = catalogFileOf(root, cfg);
   if (!fs.existsSync(file)) return [];
   const raw = YAML.parse(fs.readFileSync(file, 'utf8')) ?? {};
   const keys = raw.keys ?? raw;
@@ -96,7 +99,7 @@ export function verifySecret(root, cfg, entry, value) {
 }
 
 export function status(root, cfg) {
-  return loadCatalog(root).map((e) => {
+  return loadCatalog(root, cfg).map((e) => {
     const v = readSecret(root, cfg, e);
     return { key: e.key, kind: e.kind, purpose: e.purpose ?? '', usedBy: e.usedBy, needed: isNeeded(e), state: v === null ? 'missing' : checkFormat(e, v).length ? 'invalid' : 'filled', store: cfg.secrets.store };
   });
@@ -112,7 +115,7 @@ function generate(entry) {
 // Fills generated keys and test keys from the project's own example files. Returns names only.
 export function init(root, cfg) {
   const done = [];
-  for (const e of loadCatalog(root)) {
+  for (const e of loadCatalog(root, cfg)) {
     if (readSecret(root, cfg, e) !== null) continue;
     if (e.kind === 'generated') {
       writeSecret(root, cfg, e, generate(e));
@@ -135,7 +138,7 @@ export const provisionUse = (repoName) => `provision:${repoName}`;
 // A step receives only the secrets that list it in `usedBy`. An empty `usedBy` means no step uses the key
 // (doctor reports it that way): the tools read their own files, and injecting a developer's real local
 // values into every step would override the project's test configuration.
-export function stepEnv(root, cfg, stepId, catalog = loadCatalog(root)) {
+export function stepEnv(root, cfg, stepId, catalog = loadCatalog(root, cfg)) {
   const env = {};
   for (const e of catalog) {
     if (!e.usedBy.includes(stepId)) continue;
@@ -145,7 +148,7 @@ export function stepEnv(root, cfg, stepId, catalog = loadCatalog(root)) {
   return env;
 }
 
-export function missingFor(root, cfg, stepId, catalog = loadCatalog(root)) {
+export function missingFor(root, cfg, stepId, catalog = loadCatalog(root, cfg)) {
   return catalog
     .filter((e) => e.required !== false && e.usedBy.includes(stepId))
     .filter((e) => readSecret(root, cfg, e) === null)
@@ -154,7 +157,7 @@ export function missingFor(root, cfg, stepId, catalog = loadCatalog(root)) {
 
 // Masks every catalogued value. Short values (< 6 chars) are not masked to avoid shredding normal output.
 export function redactor(root, cfg) {
-  const values = loadCatalog(root)
+  const values = loadCatalog(root, cfg)
     .map((e) => readSecret(root, cfg, e))
     .filter((v) => v && v.length >= 6)
     .sort((a, b) => b.length - a.length);
@@ -206,8 +209,8 @@ async function readStdin() {
 }
 
 export async function set(root, cfg, key) {
-  const entry = loadCatalog(root).find((e) => e.key === key);
-  if (!entry) throw new WfError(`${key} is not in .workflow/secrets.yaml`, { hint: 'add it to the catalog first so it is masked and checked' });
+  const entry = loadCatalog(root, cfg).find((e) => e.key === key);
+  if (!entry) throw new WfError(`${key} is not in ${catalogFileOf(root, cfg)}`, { hint: 'add it to the catalog first so it is masked and checked' });
   const value = process.stdin.isTTY ? await hiddenPrompt(`${key}: `) : await readStdin();
   if (!value) throw refuse(`${key}: empty value, nothing stored`);
   const problems = checkFormat(entry, value);
@@ -219,7 +222,7 @@ export async function set(root, cfg, key) {
 
 export async function guide(root, cfg, onlyKey) {
   const out = (s = '') => process.stdout.write(`${s}\n`);
-  const all = loadCatalog(root).filter((e) => (onlyKey ? e.key === onlyKey : e.kind === 'provided'));
+  const all = loadCatalog(root, cfg).filter((e) => (onlyKey ? e.key === onlyKey : e.kind === 'provided'));
   const unfilled = (e) => readSecret(root, cfg, e) === null || checkFormat(e, readSecret(root, cfg, e)).length;
   // Only keys a step needs are asked for (or the one key named); the rest are listed once.
   const pending = all.filter((e) => (onlyKey || isNeeded(e)) && unfilled(e));

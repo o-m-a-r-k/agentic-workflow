@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { WfError, append, listAttempts, loadAdapter, readEvents } from './contract.mjs';
-import { moduleFolder } from './base-module.mjs';
+import { importBaseModule, moduleFolder } from './base-module.mjs';
 import { repoFiles } from './scan.mjs';
 
 const TERMINAL = ['closed', 'abandoned', 'analysis.closed', 'shipped.closed', 'attempt.closed'];
@@ -54,20 +54,45 @@ export function productImports(root, repos) {
 
 const REL_IMPORT = /(?:\bfrom\s*|\bimport\s*\(\s*|\brequire\s*\(\s*|^\s*import\s+)['"`](\.{1,2}\/[^'"`]+)['"`]/gm;
 
-/** The modules an adapter (raw or normalised) names: tests, tracker, delivery stages, screens routes. */
+/** The modules an adapter (raw or normalised) names, each with its kind: tests, tracker, delivery stages, screens routes
+ * and capture. */
 export function moduleRefsOf(a) {
   return [
-    ...(a.repos ?? []).flatMap((r) => ['fast', 'full'].map((k) => r.tests?.[k]?.module && { what: `tests.${r.name}.${k}`, ...r.tests[k].module }).filter(Boolean)),
-    ...(a.ticketing?.tracker?.module ? [{ what: 'ticketing.tracker', ...a.ticketing.tracker.module }] : []),
-    ...(a.delivery?.stages ?? []).map((s, i) => s.module && { what: `delivery.stages[${i}]`, ...s.module }).filter(Boolean),
-    ...(a.screens?.routes ? [{ what: 'screens.routes', ...a.screens.routes }] : []),
+    ...(a.repos ?? []).flatMap((r) => ['fast', 'full'].map((k) => r.tests?.[k]?.module && { what: `tests.${r.name}.${k}`, kind: 'tests', ...r.tests[k].module }).filter(Boolean)),
+    ...(a.ticketing?.tracker?.module ? [{ what: 'ticketing.tracker', kind: 'tracker', ...a.ticketing.tracker.module }] : []),
+    ...(a.delivery?.stages ?? []).map((s, i) => s.module && { what: `delivery.stages[${i}]`, kind: 'stage', ...s.module }).filter(Boolean),
+    ...(a.screens?.routes ? [{ what: 'screens.routes', kind: 'routes', ...a.screens.routes }] : []),
+    ...(a.screens?.capture?.module ? [{ what: 'screens.capture', kind: 'capture', ...a.screens.capture.module }] : []),
   ];
 }
 
+// What each kind of module must export by default, as the engine calls it (engine/tests.mjs, delivery.mjs, tracker.mjs,
+// screens.mjs). Printed when a module is not usable as is.
+const DRIVER_METHODS = ['read', 'search', 'create', 'setStatus', 'comment'];
+export const MODULE_CONTRACTS = {
+  tests: 'export default async ({ cwd, env, repo, kind, attempt }) => ({ pass: boolean, log?: string }); cwd is the tree under test, kind is fast, full or risk-base',
+  stage: 'export default async ({ root, attempt, item, index, stage, marker, repos, observed }) => ({ state: \'done\'|\'waiting\'|\'pending\'|\'skipped\', evidence?, next? }); repos maps each repo to { dir, branch, base, remote, tip }',
+  tracker: `export default async ({ root, adapter }) => driver, or the driver itself: an object with ${DRIVER_METHODS.join(', ')} (and optionally normalise)`,
+  routes: 'export default async (changedFiles: string[]) => string[] (the routes those files reach)',
+  capture: 'export default async (ctx) => ..., called with ctx.cwd set to the attempt folder (docs/adapter.md, `screens.capture`)',
+};
+const shapeOf = (v) => (v === undefined ? 'no default export' : v === null ? 'a default export of null' : Array.isArray(v) ? 'an array' : typeof v === 'object' ? `an object (${Object.keys(v).join(', ') || 'no keys'})` : `a ${typeof v}`);
+// The default export's shape problem for the module's kind, or null when it is usable as is.
+export function exportProblem(kind, def) {
+  if (typeof def === 'function') return null;
+  if (kind === 'tracker' && def && typeof def === 'object') {
+    const missing = DRIVER_METHODS.filter((m) => typeof def[m] !== 'function');
+    if (!missing.length) return null;
+    return `exports ${shapeOf(def)} by default, which lacks ${missing.join(', ')}: it is not usable as is. Rewrite it for the 0.8 tracker contract: ${MODULE_CONTRACTS.tracker}`;
+  }
+  return `exports ${shapeOf(def)} by default, not a function: it is not usable as is. Rewrite it for the 0.8 ${kind === 'stage' ? 'delivery stage' : kind} contract: ${MODULE_CONTRACTS[kind]}`;
+}
+
 /** Problems of each module as it would load (engine/base-module.mjs, the shared loader): not committed on its repo's
- * fetched base, or importing (itself or a helper in its folder) a file outside its top-level folder in the repo, which does
- * not resolve because only that folder is extracted at the base. A module at the repo's root extracts the whole repo. */
-export function moduleProblems(root, repos, refs, { fetch = true } = {}) {
+ * fetched base; importing (itself or a helper in its folder) a file outside its top-level folder in the repo, which does
+ * not resolve because only that folder is extracted at the base (a module at the repo's root extracts the whole repo);
+ * failing to load; or a default export whose shape its kind cannot call. */
+export async function moduleProblems(root, repos, refs, { fetch = true } = {}) {
   const out = [];
   const seen = new Set();
   for (const m of refs) {
@@ -87,16 +112,29 @@ export function moduleProblems(root, repos, refs, { fetch = true } = {}) {
       out.push({ what: m.what, module: key, problem: `is not committed on ${ref}, so it cannot load: commit and push it to ${repo.base}` });
       continue;
     }
+    const before = out.length;
     const folder = moduleFolder(m.path);
-    if (!folder) continue;
-    const listed = git(dir, ['ls-tree', '-r', '--name-only', ref, '--', folder]);
-    for (const f of listed.ok ? listed.out.split('\n').filter((x) => /\.(m?[jt]s|c[jt]s)$/.test(x)) : []) {
-      const text = git(dir, ['show', `${ref}:${f}`]).out;
-      for (const [, spec] of text.matchAll(REL_IMPORT)) {
-        const target = path.posix.normalize(path.posix.join(path.posix.dirname(f), spec));
-        if (!target.startsWith(`${folder}/`)) out.push({ what: m.what, module: key, problem: `${f} imports ${spec}, outside the module's folder ${folder}/, which will not resolve` });
+    if (folder) {
+      const listed = git(dir, ['ls-tree', '-r', '--name-only', ref, '--', folder]);
+      for (const f of listed.ok ? listed.out.split('\n').filter((x) => /\.(m?[jt]s|c[jt]s)$/.test(x)) : []) {
+        const text = git(dir, ['show', `${ref}:${f}`]).out;
+        for (const [, spec] of text.matchAll(REL_IMPORT)) {
+          const target = path.posix.normalize(path.posix.join(path.posix.dirname(f), spec));
+          if (!target.startsWith(`${folder}/`)) out.push({ what: m.what, module: key, problem: `${f} imports ${spec}, outside the module's folder ${folder}/, which will not resolve` });
+        }
       }
     }
+    if (out.length > before || !m.kind) continue;
+    // Its default export, loaded from the base as the engine loads it.
+    let mod;
+    try {
+      mod = await importBaseModule(root, { repos }, { repo: m.repo, path: m.path }, { what: m.what });
+    } catch (e) {
+      out.push({ what: m.what, module: key, problem: `does not load from ${ref}: ${String(e?.message ?? e).split('\n')[0]}` });
+      continue;
+    }
+    const problem = exportProblem(m.kind, mod.default);
+    if (problem) out.push({ what: m.what, module: key, problem, contract: MODULE_CONTRACTS[m.kind] });
   }
   return out;
 }
@@ -126,7 +164,7 @@ const ORDER = ['version', 'name', 'root', 'requires', 'repos', 'components', 'in
 export async function from07(root, raw, { env = process.env } = {}) {
   const dropped = [];
   const notes = [];
-  const drop = (key, why) => dropped.push({ key, why });
+  const drop = (key, why) => dropped.some((d) => d.key === key) || dropped.push({ key, why });
   const repos = raw.repos ?? [];
   const adapterRepo = repos.find((r) => r.name === raw.adapterRepo) ?? repos[0];
   if (!adapterRepo) throw new WfError('the 0.7 adapter lists no repos');
@@ -136,7 +174,7 @@ export async function from07(root, raw, { env = process.env } = {}) {
   const isMod = (v) => typeof v === 'string' && v.startsWith('.');
   const perTicket = await perTicketSteps(root);
 
-  for (const [k, why] of Object.entries({ enabled: 'the adapter\'s presence enables a project', engine: 'the installed plugin runs', adapterRepo: 'module paths name their repo', instructionFiles: '`wf doctor` reads the instruction files itself', lanes: 'every ticket goes through one flow', classes: 'only a model per role remains (`models`)', roles: 'role texts are the plugin\'s; the project\'s rules reach roles through `rules`', panel: 'the planning panel is gone', strategy: 'the strategist is gone', impact: 'consumers come from `components`', leaving: 'findings are goal, regression or other', severity: 'findings are goal, regression or other', learning: 'learning is measured', focused: 'no lanes', designSystem: 'design-system checks belong to the repos\' lint', secrets: 'the catalog `.workflow/secrets.yaml` keeps `store` and `file`' })) if (raw[k] !== undefined) drop(k, why);
+  for (const [k, why] of Object.entries({ enabled: 'the adapter\'s presence enables a project', engine: 'the installed plugin runs', adapterRepo: 'module paths name their repo', instructionFiles: '`wf doctor` reads the instruction files itself', lanes: 'every ticket goes through one flow', classes: 'only a model per role remains (`models`)', roles: 'role texts are the plugin\'s; the project\'s rules reach roles through `rules`', panel: 'the planning panel is gone', strategy: 'the strategist is gone', impact: 'consumers come from `components`', leaving: 'findings are goal, regression or other', severity: 'findings are goal, regression or other', learning: 'learning is measured', focused: 'no lanes', designSystem: 'design-system checks belong to the repos\' lint', secrets: 'the catalogue beside the adapter (`wf secrets check` names it) keeps `store` and `file`' })) if (raw[k] !== undefined) drop(k, why);
 
   // repos
   const seedRepos = repos.map((r) => {
@@ -147,9 +185,20 @@ export async function from07(root, raw, { env = process.env } = {}) {
     return { name: r.name, path: r.path, base: r.base, ...(r.remote ? { remote: r.remote } : {}), ...(prov && Object.keys(prov).length ? { provision: prov } : {}), kinds: { tests: [], other: other.length ? other : ['**/*.md'] } };
   });
 
-  // requires: names only
+  // requires: names only. A tool stays only as a plain command name, which `wf doctor` finds with `command -v`; a tool
+  // named by a phrase, a path or a version, or checked by a different command, is dropped and listed.
   const names = (xs) => (xs ?? []).map((x) => (typeof x === 'string' ? x : x?.name)).filter(Boolean);
-  const requires = raw.requires ? Object.fromEntries(['connectors', 'tools', 'skills'].filter((k) => raw.requires[k]?.length).map((k) => [k, names(raw.requires[k])])) : null;
+  const toolDrops = [];
+  const plainTool = (x) => {
+    const name = typeof x === 'string' ? x : x?.name;
+    if (typeof name !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._+-]*$/.test(name)) return toolDrops.push({ tool: String(name ?? JSON.stringify(x)), why: 'not a plain command name' }), false;
+    const check = typeof x === 'object' ? String(x.check ?? '').trim() : '';
+    const runs = check.replace(/^command\s+-v\s+/, '').split(/\s+/)[0];
+    if (check && runs !== name) return toolDrops.push({ tool: name, why: `checked by \`${check}\`, not by its name` }), false;
+    return true;
+  };
+  const requires = raw.requires ? Object.fromEntries(['connectors', 'tools', 'skills'].map((k) => [k, k === 'tools' ? names((raw.requires.tools ?? []).filter(plainTool)) : names(raw.requires[k])]).filter(([, v]) => v.length)) : null;
+  for (const t of toolDrops) drop(`requires.tools.${t.tool}`, `${t.why}; \`requires.tools\` keeps command names that \`command -v\` finds`);
   for (const k of ['connectors', 'tools', 'skills']) if ((raw.requires?.[k] ?? []).some((x) => typeof x === 'object' && Object.keys(x).some((f) => f !== 'name'))) drop(`requires.${k}[].{${[...new Set(raw.requires[k].flatMap((x) => Object.keys(x ?? {}).filter((f) => f !== 'name')))].join(',')}}`, 'only names remain');
 
   // components
@@ -176,11 +225,13 @@ export async function from07(root, raw, { env = process.env } = {}) {
     for (const s of plugins) counts.set(s.plugin, (counts.get(s.plugin) ?? 0) + 1);
     const main = [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
     const extra = Object.keys(plugins[0]).filter((k) => !['id', 'repo', 'plugin', 'lease', 'tier', 'inputs', 'package'].includes(k));
-    notes.push(`tests.${repo}.${kind}: the module ${workflowDir}/${main.replace(/^\.\//, '')} receives { cwd, repo, kind, attempt, env }; the per-step settings of ${list.map((s) => s.id).join(', ')}${extra.length ? ` (${[...new Set(list.flatMap((s) => Object.keys(s)))].filter((k) => !['id', 'repo', 'plugin', 'lease', 'tier'].includes(k)).join(', ')})` : ''} move into it`);
+    notes.push(`tests.${repo}.${kind}: the per-step settings of ${list.map((s) => s.id).join(', ')}${extra.length ? ` (${[...new Set(list.flatMap((s) => Object.keys(s)))].filter((k) => !['id', 'repo', 'plugin', 'lease', 'tier'].includes(k)).join(', ')})` : ''} move into ${workflowDir}/${main.replace(/^\.\//, '')}`);
+    runners.add(path.posix.join(workflowDir, main.replace(/^\.\//, '')));
     for (const s of list) if (s.plugin !== main) drop(`gate.steps.${s.id}`, `runs ${s.plugin}; a test spec takes one module (${main})`);
     return { module: mod(main), ...lock };
   };
   const tests = {};
+  const runners = new Set();
   for (const r of repos) {
     const mine = kept.filter((s) => s.repo === r.name);
     const fast = specFor(r.name, mine.filter((s) => s.tier !== 'heavy'), 'fast');
@@ -199,13 +250,16 @@ export async function from07(root, raw, { env = process.env } = {}) {
     if (cmd) capture = { value: `cd ${where} && ${cmd.replace(/\{\w+\}/g, (m) => (['{out}', '{viewport}', '{lang}', '{dir}', '{routes}'].includes(m) ? m : ''))}`.replace(/\s+/g, ' ').trim(), step: shotStep.id, artifacts: shotStep.artifacts };
   }
 
-  // tracker → ticketing, statuses → stages
+  // tracker → ticketing, statuses → stages. Item ids: the tracker's prefix and every prefix the old attempt folders show
+  // (`<prefix>-<n>.<attempt>`, such as the 0.7 quick-fix items), so no earlier kind of item is refused after migration.
   const tr = raw.tracker ?? {};
+  const esc = (x) => String(x).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const prefixes = [...new Set([...(tr.idPrefix ? [String(tr.idPrefix)] : []), ...(await listAttempts(root).catch(() => [])).map((id) => /^([A-Za-z][A-Za-z0-9_]*)-\d+\.\d+$/.exec(id)?.[1]).filter(Boolean)])].sort().map(esc);
   const kind = tr.kind ?? 'none';
   const ticketing = {
     tracker: isMod(kind) ? { module: mod(kind) } : kind,
     via: tr.via ?? (isMod(kind) ? 'module' : ['none', 'files'].includes(kind) ? kind : 'connector'),
-    ...(tr.idPrefix ? { idPattern: `^${String(tr.idPrefix).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}-\\d+$` } : {}),
+    ...(prefixes.length ? { idPattern: prefixes.length === 1 ? `^${prefixes[0]}-\\d+$` : `^(?:${prefixes.join('|')})-\\d+$` } : {}),
     ...(tr.statuses?.started ? { take: { status: tr.statuses.started } } : {}),
     followUps: { mode: 'off', ...(tr.team ? { team: String(tr.team) } : {}) },
   };
@@ -222,8 +276,11 @@ export async function from07(root, raw, { env = process.env } = {}) {
   const dkind = dl.kind ?? 'push-main';
   const stages = [];
   if (dkind === 'push-main') stages.push({ do: 'land' });
-  else if (isMod(dkind)) stages.push({ do: 'module', module: mod(dkind) });
   else stages.push({ do: 'merge-request' }, { do: 'wait-merged' });
+  // A 0.7 delivery module (an object of integrate, observe and readback) is not a 0.8 stage: delivery becomes a merge
+  // request the person opens and merges, until the module is rewritten for the stage contract.
+  const deliveryModule = isMod(dkind) ? path.posix.join(workflowDir, dkind.replace(/^\.\//, '')) : null;
+  if (deliveryModule) notes.push(`delivery: ${deliveryModule} is a 0.7 delivery module and needs rewriting before 0.8 can run it; until then delivery is a merge request, opened and merged by the person. Rewritten for the stage contract (${MODULE_CONTRACTS.stage}), it goes in as a \`module\` stage`);
   stages.push(...status('delivered', 'uat'));
   if (dl.deployment) {
     const when = dl.deployment.labels?.length ? { labels: dl.deployment.labels } : undefined;
@@ -261,16 +318,16 @@ export async function from07(root, raw, { env = process.env } = {}) {
     ...(invariants ? { invariants } : {}),
     ...(rules.length ? { rules } : {}),
     ticketing,
-    delivery: { landing: dkind === 'push-main' ? 'queue' : 'direct', order: repos.map((r) => r.name) },
+    delivery: { landing: dkind === 'push-main' ? 'queue' : 'direct', order: repos.map((r) => r.name), ...(deliveryModule ? { authority: { mergeRequest: 'person', merge: 'person' } } : {}) },
   };
   const draft = {
     tests,
     delivery: { stages },
-    screens: capture ? { capture: capture.value, reasons: { capture: `seeded from the 0.7 step \`${capture.step}\`, which collected ${[].concat(capture.artifacts).join(', ')}; edit it to write each screen to {out} for {viewport} {lang} {routes}` } } : {},
+    screens: capture ? { capture: { run: capture.value }, reasons: { capture: `seeded from the 0.7 step \`${capture.step}\`, which collected ${[].concat(capture.artifacts).join(', ')}; edit it to write each screen to {out} for {viewport} {lang} {routes}` } } : {},
   };
   const imports = productImports(root, repos);
-  const modules = moduleProblems(root, seedRepos, moduleRefsOf({ repos: seedRepos.map((r) => ({ ...r, tests: tests[r.name] })), ticketing, delivery: { stages } }));
-  const data = { dropped, notes, perTicketSteps: droppedSteps, imports, modules, quality, invariants, capture };
+  const modules = await moduleProblems(root, seedRepos, moduleRefsOf({ repos: seedRepos.map((r) => ({ ...r, tests: tests[r.name] })), ticketing, delivery: { stages } }));
+  const data = { dropped, notes, perTicketSteps: droppedSteps, imports, modules, quality, invariants, capture, runners: [...runners], deliveryModule };
 
   const report = () => {
     const out = [];
@@ -279,7 +336,8 @@ export async function from07(root, raw, { env = process.env } = {}) {
     if (quality.length) out.push('', `\`quality\` (${quality.length} line${quality.length === 1 ? '' : 's'}) moves into ${invariants} when the adapter is written.`);
     if (notes.length) out.push('', 'Notes:', ...notes.map((n) => `  ${n}`));
     if (!capture) out.push('', '`screens.capture` has no 0.7 step to seed it: pass it with `--draft` (it must write to {out}).');
-    if (modules.length) out.push('', 'Modules that will not load as named (each loads only as committed on its repo\'s base, from its own folder):', ...modules.map((m) => `  ${m.what}: ${m.module} ${m.problem}`));
+    for (const r of runners) out.push('', `No tests run until ${r} is rewritten for the 0.8 runner contract:`, `  ${MODULE_CONTRACTS.tests}`);
+    if (modules.length) out.push('', 'Modules that cannot run as named (each loads only as committed on its repo\'s base, from its own folder):', ...modules.map((m) => `  ${m.what}: ${m.module} ${m.problem}`));
     if (imports.length) out.push('', `Product code importing .workflow/ (removing the material breaks these; one removal ticket per repo fixes them):`, ...imports.map((i) => `  ${i.at}: ${i.text}`));
     return out;
   };
@@ -314,6 +372,15 @@ function fold07(events) {
     else if (TERMINAL.includes(e.type)) s.terminal ??= e.type;
   }
   return s;
+}
+// The base branch of a 0.7 attempt's repo. 0.7 recorded `base` as the commit the attempt started from and `baseRef` as the
+// ref it was read at (`<remote>/<branch>`, or the local branch with no remote): the branch is `baseRef` without the remote.
+// Named failure: the sha taken for a branch compared the work with where it started, so work already on the base by
+// cherry-pick or squash counted as unmerged and a shipped attempt closed as superseded.
+export function baseBranch07(r, remote = 'origin') {
+  const ref = typeof r?.baseRef === 'string' ? r.baseRef.replace(/^refs\/remotes\//, '') : null;
+  if (ref) return ref.startsWith(`${remote}/`) ? ref.slice(remote.length + 1) : ref;
+  return typeof r?.base === 'string' && !/^[0-9a-f]{40}$/.test(r.base) ? r.base : null;
 }
 const reviewText = (r) => (!r ? 'no review recorded' : r.accepted ? `accepted (${r.at})` : `${r.verdict ?? 'recorded'}, ${r.open} open finding${r.open === 1 ? '' : 's'} (${r.at})`);
 
@@ -356,7 +423,8 @@ async function migrateAttempts(ctx, { dryRun }) {
     for (const [name, r] of repos) {
       const repo = repoOf(name);
       const dir = path.resolve(root, repo.path);
-      const c = fs.existsSync(dir) ? cherry(dir, repo.remote ?? 'origin', r.base ?? repo.base, r.branch) : null;
+      const remote = repo.remote ?? 'origin';
+      const c = fs.existsSync(dir) ? cherry(dir, remote, baseBranch07(r, remote) ?? repo.base, r.branch) : null;
       per.push({ name, dir, branch: r.branch, ...(c ?? { missing: true }) });
     }
     const counted = per.filter((p) => p.unmerged);

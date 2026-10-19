@@ -10,7 +10,8 @@ import { clearDoubles, ctxFor, ledgerDoubles, makeModuleProject, useDoubles } fr
 import { git, writeLegacyLedgers } from './helpers/index.mjs';
 
 const at = (hm) => `2026-01-06T${hm}:00.000Z`;
-const admitted = (id, item) => [at('09:00'), 'admitted', { id, item, lane: 'standard', repos: { core: { branch: `wf/${id}`, base: 'trunk' } } }];
+// As 0.7 admitted an attempt: `base` is the commit it started from, `baseRef` the remote branch it was read at.
+const admitted = (id, item, base) => [at('09:00'), 'admitted', { id, item, lane: 'standard', repos: { core: { branch: `wf/${id}`, base, baseRef: 'origin/trunk' } } }];
 
 test('migrate attempts: held skipped and listed, open superseded with branches kept, shipped by patch-id', async () => {
   const p = makeModuleProject();
@@ -18,11 +19,13 @@ test('migrate attempts: held skipped and listed, open superseded with branches k
   useDoubles(ledgerDoubles(appended));
   try {
     const core = p.repos.core.dir;
+    const start = git(core, ['rev-parse', 'trunk']).trim();
     // TK-8.1: work not on the base, in a clean worktree.
     const wt8 = path.join(p.root, '.wf-worktrees', 'TK-8.1', 'core');
     git(core, ['worktree', 'add', '--quiet', '-b', 'wf/TK-8.1', wt8, 'trunk']);
     p.commit('core', { 'src/modules/notes/more.mjs': 'export const more = 1;\n' }, 'more notes', { cwd: wt8 });
-    // TK-9.1: its commit reached the base as a cherry-pick (a different sha, the same patch).
+    // TK-9.1: its commit reached the base as a cherry-pick (a different sha, the same patch). Compared with the commit it
+    // started from (0.7's `base`), it would count as unmerged and close as superseded.
     git(core, ['branch', 'wf/TK-9.1', 'trunk']);
     git(core, ['checkout', '--quiet', 'wf/TK-9.1']);
     const sha9 = p.commit('core', { 'src/modules/notes/fix.mjs': 'export const fix = 1;\n' }, 'fix');
@@ -31,8 +34,8 @@ test('migrate attempts: held skipped and listed, open superseded with branches k
     git(core, ['cherry-pick', sha9]);
     git(core, ['push', '--quiet', 'origin', 'trunk']);
     writeLegacyLedgers(p.root, {
-      'TK-8.1': [admitted('TK-8.1', 'TK-8'), [at('10:00'), 'review.recorded', { tree: 't', closure: { verdict: 'changes', findings: [{ id: 'F1', status: 'open' }, { id: 'F2', status: 'fixed' }] } }]],
-      'TK-9.1': [admitted('TK-9.1', 'TK-9'), [at('10:00'), 'review.recorded', { tree: 't', closure: { verdict: 'approve', findings: [] } }], [at('10:10'), 'review.accepted', {}]],
+      'TK-8.1': [admitted('TK-8.1', 'TK-8', start), [at('10:00'), 'review.recorded', { tree: 't', closure: { verdict: 'changes', findings: [{ id: 'F1', status: 'open' }, { id: 'F2', status: 'fixed' }] } }]],
+      'TK-9.1': [admitted('TK-9.1', 'TK-9', start), [at('10:00'), 'review.recorded', { tree: 't', closure: { verdict: 'approve', findings: [] } }], [at('10:10'), 'review.accepted', {}]],
     });
 
     const r = await commandHandler('migrate')(ctxFor(p), { _: ['attempts'], flags: {} });
@@ -81,7 +84,7 @@ test('migrate attempts --dry-run appends nothing and keeps worktrees; a worktree
     const wt = path.join(p.root, '.wf-worktrees', 'TK-8.1', 'core');
     git(core, ['worktree', 'add', '--quiet', '-b', 'wf/TK-8.1', wt, 'trunk']);
     fs.writeFileSync(path.join(wt, 'scratch.txt'), 'unsaved\n');
-    writeLegacyLedgers(p.root, { 'TK-8.1': [admitted('TK-8.1', 'TK-8')] });
+    writeLegacyLedgers(p.root, { 'TK-8.1': [admitted('TK-8.1', 'TK-8', git(core, ['rev-parse', 'trunk']).trim())] });
     const dry = await commandHandler('migrate')(ctxFor(p), { _: ['attempts'], flags: { 'dry-run': true } });
     assert.deepEqual(appended, []);
     assert.match(dry.text, /TK-8\.1 .*would close as superseded.*last review: no review recorded/);

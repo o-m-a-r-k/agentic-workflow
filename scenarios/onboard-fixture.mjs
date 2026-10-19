@@ -54,6 +54,8 @@ export const ADAPTER_07 = {
   engine: '0.x',
   adapterRepo: 'core',
   instructionFiles: ['core/AGENTS.md'],
+  // As 0.7 wrote them: a plain command, a tool checked by another command, a phrase and a versioned entry.
+  requires: { tools: [{ name: 'git' }, { name: 'emulator', check: 'xcrun simctl list', install: 'install the SDK' }, { name: 'docker compose' }, { name: 'node', check: 'node --version', version: '>=20' }] },
   repos: [
     { name: 'core', path: 'core', base: 'trunk', packages: [{ path: '.', sharedInfra: ['package.json'], docsOnly: ['**/*.md'] }], provision: { clone: [], fingerprint: ['package.json'], install: null, copyIgnored: [] } },
     { name: 'panel', path: 'panel', base: 'release', packages: [{ path: '.', docsOnly: ['**/*.md', 'docs/**'] }] },
@@ -86,14 +88,29 @@ export const ADAPTER_07 = {
 const STORY_07 = {
   ...STORY,
   'TK-7.1': [
-    ['2026-01-04T09:00:00.000Z', 'admitted', { id: 'TK-7.1', item: 'TK-7', lane: 'standard', repos: { core: { branch: 'wf/TK-7.1', base: 'trunk' } } }],
+    ['2026-01-04T09:00:00.000Z', 'admitted', { id: 'TK-7.1', item: 'TK-7', lane: 'standard', repos: { core: { branch: 'wf/TK-7.1', base: 'd'.repeat(40), baseRef: 'origin/trunk' } } }],
     ['2026-01-04T09:30:00.000Z', 'validation.added', { commit: 'c'.repeat(40), steps: [{ id: 'tk7-proof', definition: { repo: 'core' } }], criteria: ['C1'], reason: 'proof' }],
     ['2026-01-04T12:00:00.000Z', 'closed', { reason: 'delivered' }],
   ],
+  // QF-3.1: a 0.7 quick fix, an item the tracker never held; its prefix is a second kind of item id.
+  'QF-3.1': [
+    ['2026-01-04T13:00:00.000Z', 'admitted', { id: 'QF-3.1', item: 'QF-3', lane: 'quick', repos: { core: { branch: 'wf/QF-3.1', base: 'e'.repeat(40), baseRef: 'origin/trunk' } } }],
+    ['2026-01-04T14:00:00.000Z', 'closed', { reason: 'delivered' }],
+  ],
 };
 
-export function makeModuleProject() {
-  const p = makeProject({ name: 'modular', repos: MODULE_REPOS, adapter: false });
+// The project modules as 0.7 shaped them: a step plugin that reads 0.7 step context, a delivery module and a tracker
+// module whose default exports are objects of 0.7 hooks.
+export const MODULES_07 = {
+  '.workflow/steps/runner.mjs': 'import { spawnSync } from "node:child_process";\nimport { shoot } from "../browser/shots.mjs";\nexport default {\n  plan: (ctx) => ({ run: ctx.changed.length > 0 }),\n  async run(ctx) {\n    const r = spawnSync("npm", ["run", ...ctx.step.command], { cwd: ctx.worktrees[ctx.step.repo], stdio: "inherit" });\n    return { status: r.status === 0 && shoot ? "passed" : "failed", suites: [] };\n  },\n};\n',
+  '.workflow/delivery/review-request.mjs': 'export default {\n  integrate: async (ctx) => ({ request: `${ctx.repo}:${ctx.branch}` }),\n  observe: async () => ({ merged: false }),\n  readback: async () => ({ ok: true }),\n};\n',
+  '.workflow/tracker/board.mjs': 'export default {\n  normalize: (raw) => raw,\n  rawProblems: () => [],\n  isUpload: () => false,\n};\n',
+};
+
+// `modules07`: the project's modules in their real 0.7 shapes (MODULES_07) instead of the minimal ones.
+export function makeModuleProject({ modules07 = false } = {}) {
+  const repos = modules07 ? MODULE_REPOS.map((r) => (r.name === 'core' ? { ...r, files: { ...r.files, ...MODULES_07 } } : r)) : MODULE_REPOS;
+  const p = makeProject({ name: 'modular', repos, adapter: false });
   fs.mkdirSync(path.join(p.repos.core.dir, '.workflow'), { recursive: true });
   fs.writeFileSync(path.join(p.repos.core.dir, '.workflow', 'project.yaml'), YAML.stringify(ADAPTER_07));
   fs.symlinkSync(path.join(p.repos.core.dir, '.workflow'), path.join(p.root, '.workflow'));
@@ -165,3 +182,11 @@ export { clearDoubles };
 // A CommandContext for in-process handler calls.
 export const ctxFor = (p, over = {}) => ({ cwd: p.root, root: p.root, env: { ...process.env, ...p.env }, actor: null, json: false, ...over });
 export const readAdapter = (file) => YAML.parse(fs.readFileSync(file, 'utf8'));
+
+// Project modules are extracted under the user folder of the process (engine/base-module.mjs reads process.env): point it
+// at the fixture's. Returns the function that restores it.
+export function useUserDir(p) {
+  const before = process.env.WF_USER_DIR;
+  process.env.WF_USER_DIR = p.env.WF_USER_DIR;
+  return () => (before === undefined ? delete process.env.WF_USER_DIR : (process.env.WF_USER_DIR = before));
+}
