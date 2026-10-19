@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { knownLimits } from '../engine/tracker.mjs';
-import { loadState } from '../engine/ledger.mjs';
+import { append, loadState } from '../engine/ledger.mjs';
 import { approveAsOwner, closureFile, commitIn, criteriaFile, goodClosure, ok, sh, singleRepoProject, state, wf, writeReport } from './helpers.mjs';
 
 const steps = [{ id: 'unit', repo: 'app', run: 'true' }];
@@ -119,9 +119,9 @@ test('the person\'s deliver-core answer covers only what was recorded before it 
   // Before the answer a high observation is fixed here (D17), the one exception being the answer itself.
   assert.equal(wf(p.root, ['scope', 'ticket', '--finding', 'r1:F1', '--capture', capture(p, 1), '--attempt', p.id], { ownerSilent: true }).code, 75);
   assert.equal(refusals(p).at(-1).id, 'leave:medium-high');
-  const refused = wf(p.root, ['handoff', 'reviewer', '--agent', 'r-11', '--attempt', p.id], { ownerSilent: true });
-  const id = /wf approve (A\d+)/.exec(refused.err)[1];
-  approveAsOwner(p.root, p.id, id, 'deliver-core');
+  // Since 0.7.33 (D84) the engine asks no round question; `deliver-core` is the answer to one an earlier release asked.
+  append(p.root, p.id, 'decision.created', { id: 'A1', kind: 'escalation', key: 'tripwire:rounds-escalation:rounds:10', summary: '10 review rounds handed; the owner decides how to continue: continue | split | deliver-core | hold | stop', choices: ['continue', 'split', 'deliver-core', 'hold', 'stop'] }, null);
+  approveAsOwner(p.root, p.id, 'A1', 'deliver-core');
   // Raised before the answer: it may leave under it, whatever its severity.
   ok(wf(p.root, ['scope', 'ticket', '--finding', 'r1:F1', '--capture', capture(p, 1), '--attempt', p.id], { ownerSilent: true }));
   hand(p, 'r-11');
