@@ -57,7 +57,7 @@ Claude Code sets each worker's effort from version 2.1.292, and reads `AGENTS.md
 
 ## Coming from 0.x
 
-9.0.0 replaces 0.x entirely. There is no `wf` command, no hooks, and no adapter. Remove the old `wf` link from your PATH, the `wf-*` agent definitions 0.x generated in each project, and the parts of each `AGENTS.md` that describe the `wf` workflow. Then run `onboard` for each project. The 0.x code remains in the git history and its tags.
+0.9.0 replaces 0.8 and earlier entirely. There is no `wf` command, no hooks, and no adapter. Remove the old `wf` link from your PATH, the `wf-*` agent definitions 0.x generated in each project, and the parts of each `AGENTS.md` that describe the `wf` workflow. Then run `onboard` for each project. The earlier code remains in the git history and its tags.
 
 ## License
 
