@@ -1,7 +1,7 @@
 # Plan: <ticket id> <title>
 
 Type: hotfix | bug | enhancement | new feature (simple | complex)
-Revision: 1
+Revision: 1 (what changed since the last revision)
 
 ## Risk
 
@@ -11,10 +11,8 @@ Revision: 1
 
 | Judged by | Level | Reasons and evidence |
 |---|---|---|
-| plan | | Reach: callers, data and users affected (sources). Reversibility: migrations, external writes, deploys (sources). Uncertainty: what is still unknown. |
+| plan | | Reach: callers, data and users affected (sources). Reversibility: what can't be undone, such as migrations and external writes (sources). Uncertainty: what is still unknown. |
 | ground | | |
-
-Approval (high only): the person's words, the time, and where they were given.
 
 ## Goal
 
@@ -46,7 +44,7 @@ The change, per repo and file. Each choice names the constraints it meets and th
 
 > Be aware of: …
 
-The steps in the target environment, as the project defines it. Each one maps to a check in `CHECKS.json`.
+The steps in the target environment, as the project defines it. Each one maps to a check in `CHECKS.json`. A check due after a delivery step names how that step is rolled back if it fails.
 
 ## Out of scope
 

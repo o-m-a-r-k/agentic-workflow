@@ -38,6 +38,8 @@ codex plugin marketplace add o-m-a-r-k/agentic-workflow
 codex plugin add agentic-workflow@agentic-workflow
 ```
 
+Claude Code sets each worker's effort from version 2.1.292, and reads `AGENTS.md` without a `CLAUDE.md` from 2.1.277. Earlier versions still work; workers then run at the session's effort.
+
 ## Use
 
 1. **Onboard a project once:** ask for the `onboard` skill. An agent studies your repos and writes the project definition with you: how delivery works, the environments, read-only data access, what "verified" means, and the ticket statuses. Run it again at any time to re-evaluate. It shows what it would change and writes only what you confirm.
@@ -49,13 +51,13 @@ codex plugin add agentic-workflow@agentic-workflow
 |---|---|
 | The project's rules | each repo's `AGENTS.md` |
 | The project definition | `~/.agents/projects/<project>.md` |
-| A ticket's state | `<project root>/.work/<ticket>/`: `PLAN.md`, `CHECKS.json`, `PROGRESS.md`, `evidence/` and the worktrees. It is excluded through `.git/info/exclude` and never committed. |
+| A ticket's state | `<work>/<ticket>/`, where `work` is set in the project definition: `PLAN.md`, `CHECKS.json`, `PROGRESS.md`, `evidence/` and the worktrees. It is excluded through `.git/info/exclude` and never committed. |
 | Your role models | `~/.agents/workflow.yaml`, which overrides [`defaults.yaml`](skills/deliver/defaults.yaml) |
 | Finished tickets | `~/.agents/records.jsonl`, one line each |
 
 ## Coming from 0.x
 
-9.0.0 replaces 0.x entirely. There is no `wf` command, no hooks, and no adapter. Remove the old `wf` link from your PATH, and run `onboard` for each project. The 0.x code remains in the git history and its tags.
+9.0.0 replaces 0.x entirely. There is no `wf` command, no hooks, and no adapter. Remove the old `wf` link from your PATH, the `wf-*` agent definitions 0.x generated in each project, and the parts of each `AGENTS.md` that describe the `wf` workflow. Then run `onboard` for each project. The 0.x code remains in the git history and its tags.
 
 ## License
 

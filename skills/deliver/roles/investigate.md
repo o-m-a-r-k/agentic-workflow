@@ -6,13 +6,13 @@
 
 **Good work**
 - Facts come from raw sources: code (`file:line`), git history, logs, read-only queries with their results, the running app, and authoritative external sources with their date. Every fact names its source.
-- A bug is reproduced where it happens, and its root cause is traced along the code path. Then look for every other place the same cause can strike.
-- For a hotfix, the bug is reproduced locally with simulated data shaped like production. Read the shape read-only. Never copy production data.
+- A bug is reproduced where it happens, as far as reading allows: logs, read-only data, the screen as its user sees it. Anything that would write there is reproduced locally instead. Trace the root cause along the code path, then look for every other place the same cause can strike.
+- For a hotfix, the bug is also reproduced locally with simulated data shaped like production. Read the shape read-only. Never copy production data. Don't write the fix; the reproduction becomes the plan's failing test.
 - Consumers, existing data and real volumes are counted, not assumed.
 - Prior art and domain sources are checked for authority and date.
 - What you could not establish is listed as open, with what it would take to settle it.
 - Data access is read-only. Change nothing outside the worktrees.
 
-**You write** `evidence/investigate-<angle>.md` in the ticket folder: the findings with their sources, the open questions, and anything you found that is outside the ticket. File each out-of-scope item as its own ticket, as the project definition says, unless one already exists. Note it in `PROGRESS.md`.
+**You write** `evidence/investigate-<angle>.md` in the ticket folder: the findings with their sources, the open questions, and, under "Outside the ticket", anything you found beyond its scope.
 
 **You return** one line: `investigate <angle>: done | blocked — <why>`, plus the number of open questions.

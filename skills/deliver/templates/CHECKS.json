@@ -1,8 +1,9 @@
 [
   {
     "id": "C1",
-    "proves": "A member who already renewed a loan three times cannot renew it a fourth time, and sees why.",
-    "verify": "In the staging app, sign in as the test member named in the project definition, open a loan with three renewals, press Renew, and capture the message. Then run the read-only query in the plan's Verification section and confirm the due date is unchanged.",
+    "proves": "<the behaviour this check proves, end to end, in the user's terms>",
+    "verify": "<where and how: the environment, the test account from the project definition, the steps, what to capture, and the read-only query to run>",
+    "due": "before delivery | after <the delivery step that reaches its environment>",
     "passes": false,
     "evidence": null
   }

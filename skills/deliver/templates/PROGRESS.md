@@ -1,13 +1,18 @@
 # Progress: <ticket id>
 
+Written only by the orchestrator.
+
 Project: <project>
 Type: <type> (named by: the person | the ticket | inferred)
 Started: <time>
+Driven by: <harness> session <id or transcript>, last cycle <time>
 Worktrees: <repo>: <path> on <branch>, from <base> at <sha>
 Step: take | understand | plan | ground | challenge | judge risk | build | review | verify | deliver | clean up
-Waiting for: nothing | the person: <approval | decisions | stalled> | <worker>
+Plan revision: <n>, grounded at <n>
+Approval (high risk only): <the person's words>, <time>, revision <n>
+Waiting for: nothing | the person: <what> | worker: <role, started time> | outside: <what, link>
+Running: none | <worker, heavy run, container, server or database>: <started by, since, how to stop>
 Review rounds: 0
-Heavy run: none | <what>, since <time>
 
 ## Log
 
