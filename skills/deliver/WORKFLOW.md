@@ -39,7 +39,7 @@ The person names the type in the session, unless the project definition says whe
    - *Enhancement:* the current behaviour, with sources; every consumer (other screens, APIs, reports, exports, integrations); the existing data that must keep working; the ticket's open questions.
    - *New feature:* the system it plugs into (architecture, conventions, data model, permissions and tenancy, design system, real data volumes); the domain, from authoritative sources; prior art (competitors, industry practice, libraries).
 
-   Whatever the ticket, find the reach of what the change alters: what uses it, and what elsewhere does the same job and must stay consistent with it, because the same cause or the same change applies there too. Search as far as an inconsistency would realistically show or hurt.
+   Whatever the ticket, find the reach of what the change alters: what uses it, through code, shared data, events or contracts, and what elsewhere does the same job and must stay consistent with it, because the same cause or the same change applies there too. Search as far as an inconsistency would realistically show or hurt. Each part of that reach the change touches is proven still working: by its own tests, which the build runs, or, where none covers the affected path, by a test or check the plan adds.
 
    Investigation ends when the questions the design hinges on are answered, by running something wherever reading can't settle them.
 
