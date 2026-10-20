@@ -1,12 +1,15 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "agentic-workflow",
-  "description": "Delivery workflow for AI coding agents.",
-  "owner": { "name": "o-m-a-r-k", "url": "https://github.com/o-m-a-r-k" },
+  "description": "Deliver tickets with AI coding agents.",
+  "owner": {
+    "name": "o-m-a-r-k",
+    "url": "https://github.com/o-m-a-r-k"
+  },
   "plugins": [
     {
       "name": "agentic-workflow",
-      "description": "Fresh worktrees, independent whole-diff reviews and the project's own delivery stages, with per-project adapters.",
+      "description": "Grounded plans, fresh agents that check each step, and delivery the way each project defines it.",
       "source": "./",
       "category": "development"
     }

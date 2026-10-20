@@ -1,0 +1,22 @@
+# Default model and effort per role and harness. The project definition and ~/.agents/workflow.yaml override these;
+# a role or field left out falls through to the next source, and in the end to the session's own model.
+# Codex models are left to the session, since the models on offer differ by account.
+roles:
+  claude:
+    investigate: { model: sonnet, effort: medium }
+    plan:        { model: opus,   effort: high }
+    ground:      { model: sonnet, effort: high }
+    challenge:   { model: opus,   effort: high }
+    implement:   { model: opus,   effort: medium }
+    review:      { model: opus,   effort: high }
+    verify:      { model: sonnet, effort: medium }
+    deliver:     { model: sonnet, effort: medium }
+  codex:
+    investigate: { effort: medium }
+    plan:        { effort: high }
+    ground:      { effort: high }
+    challenge:   { effort: high }
+    implement:   { effort: medium }
+    review:      { effort: high }
+    verify:      { effort: medium }
+    deliver:     { effort: medium }

@@ -1,19 +1,13 @@
-name: Workflow improvement
-description: Something in the workflow itself went wrong or wasted time (the engine, a role text, a skill, tracker handling, onboarding, docs)
+name: Method improvement
+description: Agents following the method went wrong or wasted effort
 labels: [improvement]
 body:
   - type: markdown
     attributes:
-      value: "Leave out project, company and person names, ticket ids, paths, emails and URLs. If a `wf report` metric shows it, name the metric."
-  - type: dropdown
-    id: class
-    attributes:
-      label: Class
-      options: [engine, text, skill, tracker, delivery, onboarding, docs, other]
-    validations: { required: true }
+      value: "Leave out project, company and person names, ticket ids, paths, emails and URLs."
   - type: textarea
     id: failure
-    attributes: { label: What went wrong, description: "The step or command, what happened and what it cost (a lost round, a wrong refusal, a missed check)." }
+    attributes: { label: What went wrong, description: "The step and role, what the agent did, and what it cost." }
     validations: { required: true }
   - type: textarea
     id: expected
@@ -21,4 +15,4 @@ body:
     validations: { required: true }
   - type: input
     id: version
-    attributes: { label: Plugin version, description: "`wf --version`" }
+    attributes: { label: Plugin version }

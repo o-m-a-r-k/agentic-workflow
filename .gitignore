@@ -1,7 +1,3 @@
-node_modules/
 .DS_Store
-.wf-evidence/
 *.log
-
-# local privacy check list (never committed)
 .privacy-denylist

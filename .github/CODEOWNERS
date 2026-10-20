@@ -1,12 +1,1 @@
-# The maintainer reviews the hooks, the hosts, the ledger, decisions, module loading, secrets, the CLI, the tests and CI.
-/hooks/ @o-m-a-r-k
-/engine/hosts/ @o-m-a-r-k
-/engine/ledger.mjs @o-m-a-r-k
-/engine/decisions.mjs @o-m-a-r-k
-/engine/base-module.mjs @o-m-a-r-k
-/engine/secrets.mjs @o-m-a-r-k
-/engine/env.mjs @o-m-a-r-k
-/engine/cli.mjs @o-m-a-r-k
-/adapters/ @o-m-a-r-k
-/scenarios/ @o-m-a-r-k
-/.github/ @o-m-a-r-k
+* @o-m-a-r-k
