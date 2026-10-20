@@ -14,7 +14,7 @@ description: Write or re-evaluate a project's definition for the deliver skill w
 3. **Fill the gaps.** Whatever the walk needed that the definition didn't say is missing. Fill it from the sources, or ask the person with a recommendation.
 4. **Show the person** what you found, what you proved and what it costs, such as how long proving a change takes. Write only what they confirm, to `~/.agents/projects/<project>.md`.
 
-Authority to act without asking comes only from the person's own words, recorded without widening. An older process's rules move into the project's `AGENTS.md` before it is removed, on every base tickets branch from. Re-run it at any time, the same way. If `~/.agents/workflow.yaml` is missing, create it with `roles: {}` and `heavy_runs: 1`.
+Authority to act without asking comes only from the person's own words, recorded without widening. An older process's rules move into the project's `AGENTS.md` before it is removed, on every base tickets branch from. Re-run it at any time, the same way, reading `~/.agents/records.jsonl` for this project first: what its deliveries kept missing is what the definition or its `AGENTS.md` should make easier to see. If `~/.agents/workflow.yaml` is missing, create it with `roles: {}` and `heavy_runs: 1`.
 
 ## The definition
 

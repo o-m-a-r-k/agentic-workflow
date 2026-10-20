@@ -71,4 +71,4 @@ Each ticket is independent and is delivered when it is ready. Nothing waits for 
 
 ## Learning
 
-The records, the handoffs and the reopened tickets show where the method fails. Learning is its own piece of work, never done inside a ticket or in the installed copy: a change to this method's repository, or to the project's definition or `AGENTS.md`. Fix the wording; never add a rule to the workflow.
+The records, their `missed` lists, the handoffs and the reopened tickets show where the method fails: a kind of miss that repeats, or that only the person or a later ticket caught, points at the wording to improve. Learning is its own piece of work, never done inside a ticket or in the installed copy: a change to this method's repository, or to the project's definition or `AGENTS.md`. Fix the wording; never add a rule to the workflow.
