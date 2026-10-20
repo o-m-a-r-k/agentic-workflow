@@ -10,7 +10,7 @@
 - The risk judgement sits at the top. Ask how much harm the change could do if it were wrong: its reach, its reversibility, and the uncertainty that remains. Give the level, its reasons and the evidence for them.
 - Name a test for each behaviour and each edge case. Tests assert state or output, not how the code reached it. Where possible, write them so they fail before the change.
 - Give the verification steps for the target environment, as the project defines it. A check that only a delivery step can reach, such as a deploy, says which step, and the plan says how to roll that step back if the check fails.
-- Out of scope is stated.
+- Out of scope is stated, including which of the change's users and siblings the ticket leaves alone, and why.
 - A product decision, including a new look nothing settles, becomes a decision memo: the options, shown where they can be seen, the market and competitors, the industry standard, and a recommendation with reasons. Don't decide it yourself.
 - A claim you can't support goes back to investigation as an open question. Don't plan on top of it.
 

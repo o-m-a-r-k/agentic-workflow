@@ -34,10 +34,12 @@ The person names the type in the session, unless the project definition says whe
 1. **Take the ticket.** Choose its delivery target as the project definition says; a hotfix's is the one production is built from. Create the ticket folder `<work>/<ticket>/` from the templates, and inside it a worktree per repo the ticket needs, each branched from that repo's freshly fetched base for the target (the definition's `repos`) and set up as the definition says. If the work folder lies inside a repo, make sure that repo's `.git/info/exclude` lists it. Move the ticket to its `started` status. Then tell the person in one line its type, size, steps and depth, so they can override. Lay out its lanes before work starts: what runs together, what each writes, and where they merge, so investigation, grounding and challenge feed one merge instead of revision after revision.
 
 2. **Understand, and prove the approach.** Send investigators in parallel, one angle each.
-   - *Bug:* reproduce it where it happens, as far as reading allows: logs, read-only data, the screen as its user sees it. Anything that would write there is reproduced locally instead. Find the root cause from logs, data rows and the code path. Then find every other place the same cause can strike.
+   - *Bug:* reproduce it where it happens, as far as reading allows: logs, read-only data, the screen as its user sees it. Anything that would write there is reproduced locally instead. Find the root cause from logs, data rows and the code path.
    - *Hotfix:* as for a bug, and always reproduce it locally with simulated data shaped like production: read the shape read-only and never copy production data. That reproduction becomes the failing test the plan names.
    - *Enhancement:* the current behaviour, with sources; every consumer (other screens, APIs, reports, exports, integrations); the existing data that must keep working; the ticket's open questions.
    - *New feature:* the system it plugs into (architecture, conventions, data model, permissions and tenancy, design system, real data volumes); the domain, from authoritative sources; prior art (competitors, industry practice, libraries).
+
+   Whatever the ticket, find the reach of what the change alters: what uses it, and what elsewhere does the same job and must stay consistent with it, because the same cause or the same change applies there too. Search as far as an inconsistency would realistically show or hurt.
 
    Investigation ends when the questions the design hinges on are answered, by running something wherever reading can't settle them.
 
