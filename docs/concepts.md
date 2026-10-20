@@ -21,7 +21,7 @@ flowchart LR
     U["~/.agentic-workflow<br/>adapters · telemetry · proposals · locks"]
   end
   subgraph Project["Each project"]
-    A["adapter<br/>repos · tests · screens · risk<br/>ticketing · delivery"]
+    A["adapter<br/>repos · tests · screens<br/>ticketing · delivery"]
     W[".wf-worktrees · .wf-evidence<br/>worktrees and ledgers"]
   end
   subgraph Runtimes["Agent hosts"]

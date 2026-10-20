@@ -22,7 +22,7 @@ Each attempt's ledger is `.wf-evidence/attempts/<id>/ledger.jsonl`: one event pe
 | `testRuns.{fast,full}`, `testMin`, `landing.{batches,bisects}` | Test runs and the landing queue. |
 | `diff.{product,tests,other}` | Classed by the adapter's `kinds`. |
 | `findings.{goal,regression,other,filed,digested}`, `introducedByRepair` | Findings by class, and those blamed to a fix round. |
-| `refusals.{count,byId}`, `screens`, `riskTouched` | |
+| `refusals.{count,byId}`, `screens`, `riskTouched` | `riskTouched`: a first reviewer judged it high-risk, or a second review or a merge-base test run happened. |
 | `rework.{lines,share,commits}` | Filled 48 hours after delivery: lines the delivery wrote that a later commit not belonging to this ticket rewrote. |
 | `tokens`, `cost` | From the host transcripts. |
 
@@ -50,6 +50,6 @@ The rules:
 
 ## The budget
 
-A change is rule-shaped when it adds a refusal id, a command, an adapter key, an event type, or words in a text agents read (role texts, skills, the session rules, the risk checklist). `budget.json` in the plugin holds the counts; `scripts/release.mjs` counts the release commit against `budget.json` on main (the first 0.8 release, with none on main, against its own), and a net increase fails the release unless a kept or active plugin proposal committed under `proposals/` accounts for it. A replacement (one refusal for another) is rule-shaped but no increase. Each role text also stays under its word limit.
+A change is rule-shaped when it adds a refusal id, a command, an adapter key, an event type, or words in a text agents read (role texts, skills, the session rules, the risk guidance). `budget.json` in the plugin holds the counts; `scripts/release.mjs` counts the release commit against `budget.json` on main (the first 0.8 release, with none on main, against its own), and a net increase fails the release unless a kept or active plugin proposal committed under `proposals/` accounts for it. A replacement (one refusal for another) is rule-shaped but no increase. Each role text also stays under its word limit.
 
-A project's adapter has its own budget (`budget.adapter`: rules, risk areas, modules, operation words); `wf doctor` reports it, and a net increase needs a project proposal.
+A project's adapter has its own budget (`budget.adapter`: rules, modules, operation words); `wf doctor` reports it, and a net increase needs a project proposal.

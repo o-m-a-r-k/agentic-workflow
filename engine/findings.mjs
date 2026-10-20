@@ -3,14 +3,12 @@
 // Every finding is `goal` (the ticket's work, fixed in the ticket at any severity), `regression` (something this change
 // broke, anywhere) or `other` (anything else). `goal` and `regression` block the merge at every severity. `other` is
 // refused on a line this attempt's commits wrote (named failure: repairs created 41% of later defects), then searched for
-// in the tracker and filed per `ticketing.followUps`; a high one, or one on a risk path, also goes to the person as a
-// priority question in the digest. It never holds the ticket.
+// in the tracker and filed per `ticketing.followUps`; a high or critical one also goes to the person as a priority
+// question in the digest. It never holds the ticket.
 //
 // Finding ids (`F<n>`) are unique per item across its attempts, and the status of each is folded from the item's
 // reviews: a reviewer's `verified` marks a listed finding fixed or open; open after fixed is a reopen.
 import { WfError, append, ask, blameToAttempt, fileFollowUp, marker, parseLocation, readEvents, refusal } from './contract.mjs';
-import { rootPath } from './base.mjs';
-import { matchesAny } from './util.mjs';
 
 export const CLASSES = ['goal', 'regression', 'other'];
 export const SEVERITIES = ['low', 'medium', 'high', 'critical'];
@@ -88,24 +86,13 @@ export function foldFindings(history, waived = new Set()) {
 export const blockersOf = (findings) => Object.values(findings).filter(blocking);
 export const nextFindingNumber = (findings) => Math.max(0, ...Object.keys(findings).map((id) => Number(/^F(\d+)$/.exec(id)?.[1] ?? 0))) + 1;
 
-export function riskPathsOf(adapter, rootFile) {
-  return (adapter.risk?.paths ?? []).filter((r) => matchesAny(rootFile, r.paths ?? []));
-}
-
-const locationRoot = (adapter, location) => {
-  const loc = parseLocation(location);
-  const spec = adapter.repos.find((r) => r.name === loc?.repo);
-  return loc ? rootPath(spec, loc.path) : '';
-};
-
 // File one `other` finding (stream 3 searches first and files per followUps), and ask the priority question when it is
-// high or on a risk path. Returns the `finding.filed` payload.
+// high or critical. Returns the `finding.filed` payload.
 // An attempt started with `--no-tracker` files nothing: its `other` findings stay in the ledger (mode off).
 export async function fileOther(root, attempt, f, adapter, { noTracker = false } = {}) {
   const mode = noTracker ? 'off' : adapter.ticketing?.followUps?.mode ?? 'off';
   const high = ['high', 'critical'].includes(f.severity);
-  const onRisk = riskPathsOf(adapter, locationRoot(adapter, f.location)).length > 0;
-  const priority = high || onRisk;
+  const priority = high;
   const res = noTracker ? { state: 'done', value: null } : await fileFollowUp(root, attempt, f);
   const data = {
     finding: f.id,
@@ -120,7 +107,7 @@ export async function fileOther(root, attempt, f, adapter, { noTracker = false }
   if (priority) {
     await ask(root, attempt, {
       kind: 'priority-other',
-      question: `A finding outside this ticket is ${[high ? f.severity : null, onRisk ? 'on a risk path' : null].filter(Boolean).join(' and ')}: ${f.location}: ${f.what}. ${data.ticket ? `Filed as ${data.ticket}.` : data.duplicateOf ? `Already tracked as ${data.duplicateOf}.` : 'Not filed as a ticket.'} Schedule it?`,
+      question: `A finding outside this ticket is ${f.severity}: ${f.location}: ${f.what}. ${data.ticket ? `Filed as ${data.ticket}.` : data.duplicateOf ? `Already tracked as ${data.duplicateOf}.` : 'Not filed as a ticket.'} Schedule it?`,
       options: ['schedule it', 'leave it'],
       refs: [f.id],
       blocking: false,

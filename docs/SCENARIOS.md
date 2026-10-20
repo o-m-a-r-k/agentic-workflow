@@ -18,9 +18,9 @@ Each scenario runs the engine, or the real `wf` CLI, against temporary git repos
 | File | What it proves |
 | --- | --- |
 | `flow-start` | Worktrees at the fetched tip of each base; ids normalised; stages snapshotted; numbering continues after old ledgers and branches; `start:open`; close as shipped by patch-id, failing closed when the worktree is gone. |
-| `flow-review` | Criteria (at most 6, hashed, edits recorded; `merge:waiver`); the bundle and its contents; the split by area and `review:size`; `review:tree`, `review:independent` and `review:coverage` from the transcript; reviewers launched in parallel with the fast tests. |
+| `flow-review` | Criteria (at most 6, hashed, edits recorded; `merge:waiver`); the bundle and its contents; the split by area; the risk guidance and the second seat a judgement asks for; the shape of `risk` and `met`; `review:tree`, `review:independent` and `review:coverage` from the transcript; reviewers launched in parallel with the fast tests. |
 | `flow-findings` | The three classes and `finding:other-own`; the no-progress stop (a flat blocker count, a reopened finding) across abandon and restart; a waiver goes to the person. |
-| `flow-merge` | `merge:unreviewed`, `merge:foreign`, `merge:untested` and `merge:risk`. |
+| `flow-merge` | `merge:unreviewed`, `merge:foreign`, `merge:untested` and `merge:risk` (each need a reviewer names has its evidence; the diff-read is asked last). |
 | `flow-cli` | Help and usage; `wf status` names one next command at every step; a refusal exits 75 and is counted; `WF_DOUBLES` only under `WF_TEST=1`. |
 
 ## Tests, screens and landing
@@ -70,9 +70,9 @@ Each scenario runs the engine, or the real `wf` CLI, against temporary git repos
 | File | What it proves |
 | --- | --- |
 | `config-08` | Finding the adapter (repo or user folder, never both); its own git history; the normalised shape; every problem listed at once; the adapter budget. |
-| `onboard-scan` | Structural facts per repo; risk areas with reasons citing files; nothing domain-specific in the engine. |
-| `onboard-policy` | The per-key proposal; confirm writes with hashes; a re-run writes nothing; hand edits kept unless confirmed; risk must be confirmed; doctor names stale instruction lines. |
-| `migrate-from07` | `--from-07`: the seeded conversion, every dropped key, the capture command required. `migrate material`. |
+| `onboard-scan` | Project shapes per repo, no code shapes; nothing domain-specific in the engine. |
+| `onboard-policy` | The per-key proposal; confirm writes with hashes; a re-run writes nothing; hand edits kept unless confirmed; no risk is proposed and nothing is required to finish; `screens: none`; doctor notes no screens once and names stale instruction lines. |
+| `migrate-from07` | `--from-07`: the seeded conversion, every dropped key, a capture seeded only when it writes `{out}`, finishing with none. `migrate material`. |
 | `migrate-attempts` | Held attempts skipped and listed; open ones superseded with branches kept; shipped ones by patch-id; `--dry-run`. |
 
 ## The plugin itself

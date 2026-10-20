@@ -13,7 +13,7 @@ import { git, matchesAny, run, sha256 } from './util.mjs';
 
 export const remoteOf = (spec) => spec?.remote || 'origin';
 export const repoSpec = (adapter, name) => adapter.repos.find((r) => r.name === name) ?? null;
-// A repo-relative path as the project root sees it (`<repo path>/<file>`): risk, rules and contract globs use it.
+// A repo-relative path as the project root sees it (`<repo path>/<file>`): rules, screens and contract globs use it.
 export const rootPath = (spec, file) => (spec?.path && spec.path !== '.' ? `${spec.path.replace(/\/+$/, '')}/${file}` : file);
 
 const ok = (cwd, args) => run('git', args, { cwd, allowFail: true }).status === 0;

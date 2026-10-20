@@ -6,7 +6,7 @@
 // - Push-to-main with no CI: a `full` run is the only proof of a landed tree, so the tree it ran on is recorded, never
 //   assumed (merge:untested reads it).
 // - Tests that asserted nothing: `risk-base` runs the repo's `fast` tests at the merge-base with the attempt's changed
-//   risk tests applied; they must fail there.
+//   test files (`kinds.tests`) applied; they must fail there when a reviewer's risk needs a failing test.
 // - Parallel attempts starving one machine: a lock with a count, held across projects, in the user folder.
 import fs from 'node:fs';
 import os from 'node:os';
@@ -20,7 +20,6 @@ import { baseModuleFile } from './base-module.mjs';
 import { projectEnv } from './env.mjs';
 import { endProcessTree } from './process-tree.mjs';
 import { mkdirStateDirectory } from './state-folders.mjs';
-import { matchesAny } from './util.mjs';
 
 export const KINDS = ['fast', 'full', 'risk-base'];
 const LOCK_POLL_MS = 250;
@@ -249,19 +248,17 @@ export async function attemptRepoDir(root, attempt, repo) {
   return { dir, state };
 }
 
-// The project-relative paths of the attempt's changed `risk.tests` files in `repo`.
-async function changedRiskTests(root, attempt, adapter, repo) {
-  const prefix = repoSpec(adapter, repo).path.replace(/\/+$/, '');
-  const globs = adapter.risk.paths.flatMap((r) => r.tests ?? []);
+// The attempt's changed test files (`kinds.tests`) in `repo`.
+async function changedTests(root, attempt, repo) {
   const { files } = await changedFiles(root, attempt);
-  return files.filter((f) => f.repo === repo && matchesAny(`${prefix}/${f.path}`, globs));
+  return files.filter((f) => f.repo === repo && f.kind === 'tests');
 }
 
-// Prepare the merge-base worktree with the attempt's changed risk tests applied. Returns its folder and a cleanup.
+// Prepare the merge-base worktree with the attempt's changed tests applied. Returns its folder and a cleanup.
 async function riskBaseTree(root, attempt, adapter, repo, dir) {
   const spec = repoSpec(adapter, repo);
-  const tests = await changedRiskTests(root, attempt, adapter, repo);
-  if (!tests.length) throw new WfError(`attempt ${attempt} changes no \`risk.tests\` file in \`${repo}\`: a risk change needs a test that fails without it`);
+  const tests = await changedTests(root, attempt, repo);
+  if (!tests.length) throw new WfError(`attempt ${attempt} changes no test file in \`${repo}\` (its \`kinds.tests\`): add a test that fails without the change`);
   // The attempt's own recorded base (`wf start --base`), read as the merge facts read it (base.mjs), so the run's
   // recorded merge-base is the one they compare.
   const r = (await attemptState(root, attempt))?.repos?.[repo];
@@ -379,7 +376,7 @@ export async function cmdTest(ctx, args) {
     ok &&= good;
     results.push({ repo, kind, ...r });
     const min = (r.ms / 60000).toFixed(1);
-    if (kind === 'risk-base') lines.push(r.pass ? `${repo}: the risk tests PASS on the merge-base, so they do not prove the change (${min} min). Log: ${r.log}` : `${repo}: the risk tests fail on the merge-base, as they must (${min} min).`);
+    if (kind === 'risk-base') lines.push(r.pass ? `${repo}: the changed tests PASS on the merge-base, so they do not prove the change (${min} min). Log: ${r.log}` : `${repo}: the changed tests fail on the merge-base, as they must (${min} min).`);
     else lines.push(`${repo}: ${kind} ${r.pass ? 'passed' : `FAILED (exit ${r.exitCode ?? 'n/a'})`} on tree ${r.tree.slice(0, 12)} in ${min} min. Log: ${r.log}`);
   }
   return { text: lines.join('\n'), data: { attempt, results }, exitCode: ok ? 0 : 1 };

@@ -47,10 +47,9 @@ export function adapterFor({ name = 'sample', root, repos = DEFAULT_REPOS, locat
     rules: [],
     ...(second ? { screens: { routes: { repo: second.name, path: 'scripts/routes-of.mjs' }, shared: [`${second.name}/src/common/**`], sentinel: ['/'], langs: [{ lang: 'l1', dir: 'ltr' }, { lang: 'l2', dir: 'rtl' }], viewports: [400, 1200], capture: 'node capture.mjs --out {out} --viewport {viewport} --lang {lang} {routes}' } } : {}),
     review: { diffRead: 'before' },
-    risk: [{ id: 'sums', paths: [`${first.name}/src/core/**`], reason: 'computes values written to storage (fixture)', tests: [`${first.name}/test/**`] }],
     ticketing: { tracker: { module: { repo: first.name, path: '.workflow/tracker.mjs' } }, via: 'module', idPattern: '^TK-\\d+$', take: { status: 'Started' }, followUps: { mode: 'file', status: 'Backlog', label: 'found-in-review' } },
     delivery: { landing: 'queue', order: repos.map((r) => r.name), stages: [{ do: 'land' }, { do: 'status', to: 'Ready', comment: 'uat' }] },
-    budget: { adapter: { rules: 4, risk: 3, modules: 2, operationWords: 120 } },
+    budget: { adapter: { rules: 4, modules: 2, operationWords: 120 } },
     ...overrides,
   };
 }

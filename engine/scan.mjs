@@ -1,8 +1,8 @@
 // The onboarding scan (design-0.8 section 5, stream 7): the repos as structural facts. It never writes.
 //
-// The plugin ships no domain vocabulary. Facts name code shapes only (a decimal type, an outbound client, a migration
-// folder, a CI pipeline file, a test script); the areas they sit in are named by the project's own directories, and what the
-// project treats as critical is read from its own instruction and invariants documents, quoted as written.
+// The plugin ships no domain vocabulary. Facts name project shapes only: a CI pipeline file, a test script, a mobile app,
+// the project's instruction and invariants documents. What a change risks is judged per change by its reviewers, never
+// read from the scan.
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -13,7 +13,6 @@ const YAML = require('./vendor/yaml/dist/index.js');
 
 const MAX_BYTES = 1024 * 1024; // larger files are generated or data; reading them would only slow the scan
 const SKIP_DIRS = new Set(['.git', 'node_modules', 'vendor', 'dist', 'build', '.next', '.wf-worktrees', '.wf-evidence', 'Pods', '.gradle', 'target', 'coverage']);
-const CODE = /\.(m?[jt]sx?|c[jt]s|php|py|rb|go|java|kt|kts|scala|cs|swift|rs|exs?|dart|sql)$/i;
 const LOCKFILES = /(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|composer\.lock|Gemfile\.lock|poetry\.lock|Cargo\.lock|go\.sum)$/;
 
 // A test file: a tests folder anywhere on its path, or a test/spec suffix.
@@ -22,41 +21,7 @@ export const isTestFile = (p) => /(^|\/)(tests?|__tests__|specs?|e2e|cypress|pla
 export const isInstructionDoc = (p) => /(^|\/)(AGENTS|CLAUDE|GEMINI|CONTRIBUTING)\.md$/i.test(p) || /(^|\/)\.(claude|cursor)\/rules\/.+\.mdc?$/i.test(p) || /(^|\/)\.github\/copilot-instructions\.md$/i.test(p);
 export const isInvariantsDoc = (p) => /invariant[^/]*\.(md|txt|ya?ml)$/i.test(p);
 
-// Folders that hold modules rather than being one; the first folder below them names the area.
-const CONTAINERS = new Set(['src', 'source', 'sources', 'app', 'apps', 'lib', 'libs', 'packages', 'modules', 'services', 'internal', 'pkg', 'main', 'java', 'kotlin', 'scala', 'features', 'domains', 'domain', 'com', 'org']);
-export function areaOf(rel) {
-  const segs = rel.split('/').slice(0, -1);
-  const out = [];
-  for (const s of segs) {
-    out.push(s);
-    if (!CONTAINERS.has(s.toLowerCase())) return out.join('/');
-  }
-  return out.length ? out.join('/') : '.';
-}
-
-// Content shapes, one regex per kind. Each names a language, library or storage construct, never a business word.
-const CONTENT = [
-  ['decimal-type', /\b(BigDecimal|Decimal\b|decimal\.Decimal|NUMERIC\s*\(|DECIMAL\s*\(|type:\s*['"](decimal|numeric)['"]|@db\.Decimal|bc(add|sub|mul|div)\s*\(|BigNumber|big\.js|decimal\.js|precision:\s*\d+\s*,\s*scale)/],
-  ['currency-type', /\b(currency(Code)?\s*[:=(]|Currency\b|currency_code|ISO.?4217|minor_?units?|Intl\.NumberFormat\([^)]*currency)/i],
-  ['rounding', /\b(ROUND_HALF\w*|HALF_(EVEN|UP|DOWN)|RoundingMode|setScale\s*\(|toFixed\s*\(|Math\.(round|floor|ceil)\s*\(|round\s*\(\s*[\w.$]+\s*,\s*\d)/],
-  ['auth', /\b(passport|jsonwebtoken|jwt\.(sign|verify)|bcrypt|argon2|AuthGuard|@UseGuards|password_(hash|verify)|Authorization['"]?\s*[:,]\s*[`'"]Bearer|OAuth2?Client|signIn\s*\(|authenticate\s*\()/],
-  ['permission', /\b(hasPermission|hasRole|isGranted|@Roles\s*\(|@PreAuthorize|permission_required|checkPermission|requirePermission|authorize\s*\(|Voter\b|->can\s*\()/],
-  ['outbound-client', /\b(axios|node-fetch|undici|superagent|got\s*\(|HttpService|HttpClient|GuzzleHttp|requests\.(get|post|put|patch|delete)\s*\(|httpx\.|http\.NewRequest|URLSession|OkHttpClient|Retrofit|RestTemplate|WebClient|fetch\s*\(\s*[`'"]https?:)/],
-  ['webhook-handler', /webhook/i],
-  ['queue-consumer', /(@Processor\s*\(|@Process\s*\(|@EventPattern|@MessagePattern|AsMessageHandler|MessageHandlerInterface|@shared_task|@KafkaListener|@RabbitListener|@SqsListener|@Cron\s*\(|cron\.schedule\s*\(|\bnew Worker\s*\(|\.consume\s*\()/],
-  ['schema', /(@Entity\s*\(|ORM\\Entity|#\[ORM\\|CREATE TABLE|createTable\s*\(|Schema::create|models\.Model\b)/i],
-];
-const PATHS = [
-  ['auth', /(^|\/)(auth|authn|authentication|login|sessions?|oauth|sso|jwt|identity)(\/|[._-])/i],
-  ['permission', /(^|\/)(permissions?|roles?|polic(y|ies)|acl|rbac|guards?|voters?|abilit(y|ies))(\/|[._-])/i],
-  ['webhook-handler', /webhook/i],
-  ['queue-consumer', /(^|\/)(consumers?|workers?|jobs|queues?|processors?)\//i],
-  ['schema', /(^|\/)(schema\.prisma|schema\.rb|[^/]+\.entity\.[jt]s)$/i],
-];
-const WRITE_CALL = /\b(post|put|patch|delete)\b|method:\s*['"](POST|PUT|PATCH|DELETE)/i;
-const MIGRATION_DIR = /(^|\/)(migrations?|migrate|alembic)\//i;
 const TEST_SCRIPT = /^(test|tests|unit|lint|typecheck|type-check|types|check|verify|e2e|integration|spec)([:_-].*)?$/i;
-const CRITICAL_LINE = /\b(critical|invariant|never|must|always|boundar(y|ies)|irreversible|idempotent)\b/i;
 
 const clip = (s, n = 140) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 
@@ -204,62 +169,27 @@ function scanRepo(root, repo) {
     return cache.get(f);
   };
   const facts = [];
-  const add = (kind, rel, evidence, area) => facts.push({ kind, path: `${prefix}${rel}`, evidence: clip(evidence), ...(area !== undefined ? { area: area === '.' ? prefix.replace(/\/$/, '') || '.' : `${prefix}${area}` } : {}) });
+  const add = (kind, rel, evidence) => facts.push({ kind, path: `${prefix}${rel}`, evidence: clip(evidence) });
   const tests = [];
-  const migrationDirs = new Map();
-
   for (const f of files) {
     if (LOCKFILES.test(f)) continue;
-    const material = f.startsWith('.workflow/');
     if (isInvariantsDoc(f) || isInstructionDoc(f)) {
-      const kind = isInvariantsDoc(f) ? 'invariants-doc' : 'instruction-doc';
-      const text = read(f) ?? '';
-      const lines = text.split('\n');
-      add(kind, f, lines.find((l) => l.trim())?.trim() ?? '(empty)');
-      lines.forEach((l, i) => {
-        const t = l.trim();
-        if (t && (kind === 'invariants-doc' ? /^([-*]|\d+\.)\s|^#/.test(t) || CRITICAL_LINE.test(t) : CRITICAL_LINE.test(t))) add(kind, `${f}:${i + 1}`, t.replace(/^[-*#\s]+/, ''));
-      });
+      add(isInvariantsDoc(f) ? 'invariants-doc' : 'instruction-doc', f, (read(f) ?? '').split('\n').find((l) => l.trim())?.trim() ?? '(empty)');
       continue;
     }
-    if (material) continue;
+    if (f.startsWith('.workflow/')) continue;
     const ci = ciShape(f, /\.ya?ml$|file$/i.test(f) ? read(f) ?? '' : '');
     if (ci) add('ci-file', f, ci);
-    if (isTestFile(f)) {
-      tests.push(`${prefix}${f}`);
-      continue;
-    }
-    const mdir = MIGRATION_DIR.exec(f);
-    if (mdir) {
-      const d = f.slice(0, mdir.index + mdir[0].length - 1);
-      migrationDirs.set(d, (migrationDirs.get(d) ?? 0) + 1);
-      continue;
-    }
-    if (!CODE.test(f)) continue;
-    const area = areaOf(f);
-    for (const [kind, re] of PATHS) if (re.test(f)) add(kind, f, `path ${f}`, area);
-    const text = read(f);
-    if (!text) continue;
-    const lines = text.split('\n');
-    for (const [kind, re] of CONTENT) {
-      const i = lines.findIndex((l) => re.test(l));
-      if (i < 0) continue;
-      if (facts.some((x) => x.kind === kind && x.path === `${prefix}${f}`)) continue;
-      add(kind, `${f}:${i + 1}`, lines[i].trim(), area);
-      if (kind === 'outbound-client' && WRITE_CALL.test(text)) facts[facts.length - 1].writes = true;
-    }
+    if (isTestFile(f)) tests.push(`${prefix}${f}`);
   }
-  for (const [d, n] of migrationDirs) add('migration', d, `${n} migration file${n === 1 ? '' : 's'} in ${d}/`, d);
   for (const m of mobileFacts(files, read)) add('mobile-app', m.path, m.evidence);
   for (const s of testScripts(dir, files)) facts.push({ kind: 'test-script', path: `${prefix}${s.path}`, evidence: s.evidence, ...(s.command ? { command: s.command, name: s.name } : {}), ...(s.containers ? { containers: true } : {}) });
 
-  const dirs = [...new Set(files.filter((f) => f.includes('/')).map((f) => f.split('/')[0]))].sort();
-  const modules = [...new Set(files.filter((f) => CODE.test(f) && !isTestFile(f) && !f.startsWith('.workflow/')).map(areaOf).filter((a) => a !== '.'))].sort();
-  return { name: repo.name, path: repo.path, dirs, modules, facts, tests, files: files.map((f) => `${prefix}${f}`) };
+  return { name: repo.name, path: repo.path, facts, tests };
 }
 
-/** scan(root, { repos? }) → ScanFacts (engine/contract.mjs). Each repo also carries `tests` (test files) and `files` (every
- * scanned file), both relative to the root, so risk globs and their tests can be checked against what exists. */
+/** scan(root, { repos? }) → ScanFacts (engine/contract.mjs). Each repo also carries `tests`: its test files, relative to
+ * the root, from which onboarding proposes `kinds.tests`. */
 export async function scan(root, { repos } = {}) {
   const list = repos?.length ? repos.map((r) => ({ name: r.name, path: r.path })) : discoverRepos(root);
   return { root, repos: list.map((r) => scanRepo(root, r)) };
@@ -269,4 +199,4 @@ export const implements08 = { scan };
 
 // The scan's library lists (named failure: lists of library and framework names grow one project at a time until the
 // generic scan carries every project's stack). scenarios/onboard-library-cap.test.mjs caps their size.
-export const LIBRARY_LISTS = Object.freeze({ SKIP_DIRS, CONTAINERS, CONTENT, PATHS, WRITE_CALL, MIGRATION_DIR, TEST_SCRIPT, CRITICAL_LINE, CODE, LOCKFILES });
+export const LIBRARY_LISTS = Object.freeze({ SKIP_DIRS, TEST_SCRIPT, LOCKFILES });

@@ -9,7 +9,6 @@ You did not write this change.
 - Check each listed consumer of a changed contract still works.
 - Tests must assert state or output, not call counts.
 - On a later round, verify each listed open finding, then re-read the whole change.
-- Work through any risk checklist.
 - Do not fix.
 
 Each finding has `location` (`repo/path:line`), `what`, `why`, `severity` (low, medium, high, critical) and `class`:
@@ -18,4 +17,4 @@ Each finding has `location` (`repo/path:line`), `what`, `why`, `severity` (low, 
 - `regression`: this change broke it;
 - `other`: anything else, never a line this change wrote.
 
-Write JSON where your prompt says: `findings`, and `verified` as `[{ id, status: fixed|open }]`.
+Write JSON where your prompt says: `findings`, `verified` as `[{ id, status: fixed|open }]`, and `risk` or `met` as it asks.

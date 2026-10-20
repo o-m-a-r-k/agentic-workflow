@@ -15,7 +15,6 @@ function project() {
     name: 'answers',
     repos: [{ name: 'app', base: 'trunk', files: { 'src/a.mjs': 'export const a = 1;\n', 'README.md': '# app\n' } }],
     overrides: {
-      risk: 'none',
       ticketing: { tracker: 'files', via: 'files', idPattern: '^TK-\\d+$' },
       delivery: { landing: 'direct', stages: [{ do: 'land' }] },
     },

@@ -1,6 +1,6 @@
 {
   "name": "agentic-workflow",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "One flow per ticket for AI coding agents: fresh worktrees, independent whole-diff reviews, the project's own delivery stages, measured learning.",
   "author": {
     "name": "o-m-a-r-k"

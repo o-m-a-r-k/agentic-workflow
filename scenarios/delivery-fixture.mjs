@@ -19,7 +19,6 @@ export function normalised(raw, root) {
     rules: [],
     screens: raw.screens ?? null,
     review: raw.review ?? { diffRead: 'before' },
-    risk: { confirmed: true, paths: [] },
     ticketing: { tracker: null, via: 'none', idPattern: null, take: null, followUps: { mode: 'off' }, operations: {}, ...(raw.ticketing ?? {}) },
     delivery: { landing: 'queue', order: raw.repos.map((r) => r.name), authority: { push: 'person', mergeRequest: 'person', merge: 'person' }, stages: [], ...(raw.delivery ?? {}) },
     models: {},

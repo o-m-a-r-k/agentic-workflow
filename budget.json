@@ -1,13 +1,12 @@
 {
-  "version": "0.8.0",
-  "note": "The 0.8.0 counts (docs/design-0.8.md, section 8). scripts/release.mjs counts all five in the tree and fails on any net increase not accounted for by a kept or active proposal. Lists are compared by name; words by total. Words count the texts agents read: role templates, skills, the session-rules template the hook injects and the risk checklist; hook code is not counted. Plugin proposals that account for an increase are committed under proposals/.",
+  "version": "0.8.1",
+  "note": "The 0.8.1 counts (docs/design-0.8.md, section 8). scripts/release.mjs counts all five in the tree and fails on any net increase not accounted for by a kept or active proposal. Lists are compared by name; words by total. Words count the texts agents read: role templates, skills, the session-rules template the hook injects and the risk guidance; hook code is not counted. Plugin proposals that account for an increase are committed under proposals/.",
   "refusals": [
     "start:open",
     "criteria:max",
     "review:tree",
     "review:independent",
     "review:coverage",
-    "review:size",
     "finding:other-own",
     "screens:width",
     "screens:dup",
@@ -87,7 +86,6 @@
     "screens.viewports",
     "screens.capture",
     "review.diffRead",
-    "risk",
     "ticketing.tracker",
     "ticketing.via",
     "ticketing.idPattern",
@@ -103,13 +101,13 @@
     "onboarded"
   ],
   "words": {
-    "total": 799,
+    "total": 797,
     "roleMax": 150,
     "texts": [
       "templates/agents/**",
       "skills/**/SKILL.md",
       "templates/session-rules.md",
-      "templates/risk-checklist.md"
+      "templates/risk.md"
     ]
   }
 }

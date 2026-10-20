@@ -89,8 +89,8 @@ test('config.mjs exports the adapter keys budget.json counts', async () => {
   assert.deepEqual([...ADAPTER_KEYS], budget.adapterKeys);
 });
 
-test('refusal() takes only the 19 ids and makes an exit-75 WfError carrying the id', () => {
-  assert.equal(Object.keys(contract.REFUSALS).length, 19);
+test('refusal() takes only the 18 ids and makes an exit-75 WfError carrying the id', () => {
+  assert.equal(Object.keys(contract.REFUSALS).length, 18);
   const e = contract.refusal('merge:open', 'F3 is open', 'fix it');
   assert.ok(e instanceof contract.WfError);
   assert.equal(e.code, 75);

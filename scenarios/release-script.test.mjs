@@ -149,7 +149,7 @@ test('the release stops at its check when the rule-shaped counts grow past the r
   // A kept plugin proposal committed in the release accounts for it: the check passes and the run goes on to the next step.
   write(repo, 'proposals/extra-check.json', JSON.stringify({ id: 'P1', scope: 'plugin', source: 'incident', status: 'kept', change: 'an added check', replaces: 'merge:untested', metric: 'rework.share', guard: 'activeMin', adds: { refusals: ['merge:extra'] } }));
   const covered = release();
-  assert.match(covered.stdout, /budget: refusals 20, commands \d+, events \d+, adapter keys \d+, words \d+; against origin\/main \(rule-shaped changes, each accounted for\)/);
+  assert.match(covered.stdout, /budget: refusals 19, commands \d+, events \d+, adapter keys \d+, words \d+; against origin\/main \(rule-shaped changes, each accounted for\)/);
   assert.match(covered.stdout, /CI passed on/);
   assert.match(covered.stderr, /stopped at step 2 \(privacy\)/);
   assert.equal(sh(repo, 'git rev-parse refs/remotes/origin/main'), mainBefore, 'nothing was pushed to main');

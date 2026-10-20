@@ -19,14 +19,14 @@ test('init without --confirm shows the proposal, how to hand back a draft, and w
   try {
     const r = await init(p);
     assert.equal(fs.existsSync(path.join(p.root, '.workflow', 'project.yaml')), false);
-    assert.match(r.text, /risk\.tally: unset → .*core\/src\/modules\/tally/);
-    assert.match(r.text, /why: money computed: decimal-type core\/src\/modules\/tally\/total\.mjs:1/);
     assert.match(r.text, /tests\.core: unset → .*npm run lint && npm run test/);
     assert.match(r.text, /--draft <file>/);
     assert.match(r.text, /"diffRead": "before" \| "after"/);
     const keys = r.data.diff.changes.map((c) => c.key);
-    for (const k of ['risk.tally', 'risk.relay', 'risk.access', 'risk.migrations', 'review.diffRead', 'delivery.stages', 'tests.core', 'tests.panel']) assert.ok(keys.includes(k), k);
-    assert.ok(!keys.includes('risk.notes'));
+    for (const k of ['review.diffRead', 'delivery.stages', 'tests.core', 'tests.panel']) assert.ok(keys.includes(k), k);
+    // No risk paths, however much money, external writes or access code the repos hold: reviewers judge each change.
+    assert.ok(!keys.some((k) => k.startsWith('risk')), keys.join(', '));
+    assert.doesNotMatch(r.text, /risk path|money computed|"risk"/);
   } finally {
     clearDoubles();
     p.cleanup();
@@ -43,10 +43,10 @@ test('confirm all writes the adapter with hashes and a budget; a re-run on the u
     const a = readAdapter(file);
     assert.equal(a.version, 2);
     assert.deepEqual(a.repos.map((r) => [r.name, r.base]), [['core', 'trunk'], ['handset', 'dev'], ['panel', 'release']]);
-    assert.deepEqual(a.risk.map((x) => x.id).sort(), ['access', 'migrations', 'relay', 'tally']);
+    assert.equal(a.risk, undefined);
     assert.equal(a.review.diffRead, 'before');
-    assert.equal(a.onboarded.hashes.risk, policyHash(a.risk.map((x) => ({ id: x.id, paths: x.paths, reason: x.reason, tests: x.tests }))));
-    assert.equal(a.budget.adapter.risk, 4);
+    assert.equal(a.onboarded.hashes['review.diffRead'], policyHash('before'));
+    assert.deepEqual(Object.keys(a.budget.adapter).sort(), ['modules', 'operationWords', 'rules']);
     const bytes = fs.readFileSync(file, 'utf8');
     const again = await init(p);
     assert.deepEqual(again.data.diff.changes, []);
@@ -87,18 +87,15 @@ test('a hand-edited key is shown first, kept by `--confirm all`, and adopted onl
   }
 });
 
-test('a draft risk path must guard existing files and cite scanned files; a valid draft is proposed per key', async () => {
+test('a draft is proposed per key; it may say the project has no screens', async () => {
   const p = fresh();
   useDoubles(ledgerDoubles());
   try {
-    const bad = path.join(p.tmp, 'bad.json');
-    fs.writeFileSync(bad, JSON.stringify({ risk: [{ id: 'ghost', paths: ['core/src/nowhere/**'], reason: 'it feels risky', tests: ['core/test/**'] }] }));
-    await assert.rejects(init(p, { draft: bad }), /match no file in the scan[^]*cites no scanned file/);
     const good = path.join(p.tmp, 'good.yaml');
-    fs.writeFileSync(good, YAML.stringify({ risk: [{ id: 'sums', paths: ['core/src/modules/tally/**'], reason: 'computes amounts in core/src/modules/tally/total.mjs', tests: ['core/test/tally/**'] }], review: { diffRead: 'after' } }));
+    fs.writeFileSync(good, YAML.stringify({ screens: 'none', review: { diffRead: 'after' } }));
     const r = await init(p, { draft: good, confirm: ['all'] });
     const a = readAdapter(r.data.written.file);
-    assert.deepEqual(a.risk.map((x) => x.id), ['sums']);
+    assert.equal(a.screens, 'none');
     assert.equal(a.review.diffRead, 'after');
   } finally {
     clearDoubles();
@@ -106,32 +103,31 @@ test('a draft risk path must guard existing files and cite scanned files; a vali
   }
 });
 
-test('a confirm naming no proposed key is refused; the risk budget holds areas back and says which', async () => {
+test('a confirm naming no proposed key is refused', async () => {
   const p = fresh();
   useDoubles(ledgerDoubles());
   try {
     await assert.rejects(init(p, { confirm: ['risk.nope'] }), /no proposed change for `risk\.nope`/);
-    await init(p, { confirm: ['risk.tally', 'review', 'delivery', 'tests'] });
-    const file = path.join(p.root, '.workflow', 'project.yaml');
-    const a = readAdapter(file);
-    assert.deepEqual(a.risk.map((x) => x.id), ['tally']);
-    assert.equal(a.budget.adapter.risk, 1);
-    const r = await init(p);
-    assert.deepEqual(r.data.diff.overBudget.map((x) => x.id).sort(), ['access', 'migrations', 'relay']);
-    assert.match(r.text, /Not proposed, over the adapter's risk budget/);
-    assert.ok(!r.data.diff.changes.some((c) => c.key.startsWith('risk')));
+    assert.equal(fs.existsSync(path.join(p.root, '.workflow', 'project.yaml')), false);
   } finally {
     clearDoubles();
     p.cleanup();
   }
 });
 
-test('onboarding cannot finish while risk is unconfirmed', async () => {
+test('onboarding finishes with what the person confirms: nothing is required, screens included', async () => {
   const p = fresh();
   useDoubles(ledgerDoubles());
   try {
-    await assert.rejects(init(p, { confirm: ['review.diffRead'] }), /`risk` is unconfirmed/);
-    assert.equal(fs.existsSync(path.join(p.root, '.workflow', 'project.yaml')), false);
+    const w = await init(p, { confirm: ['review.diffRead'] });
+    assert.equal(w.data.written.written, true);
+    const a = readAdapter(path.join(p.root, '.workflow', 'project.yaml'));
+    assert.equal(a.screens?.capture, undefined);
+    // Doctor notes it once, as a fact, not a failure.
+    const d = await commandHandler('doctor')(ctxFor(p), { _: [], flags: {} });
+    assert.equal(d.data.checks.filter((c) => c.check === 'screens').length, 1);
+    assert.deepEqual(d.data.checks.find((c) => c.check === 'screens'), { level: 'ok', check: 'screens', detail: 'none: no capture command, so no screens are captured', fix: null });
+    assert.ok(!d.data.checks.some((c) => c.check === 'risk'));
   } finally {
     clearDoubles();
     p.cleanup();

@@ -73,12 +73,39 @@ function roundOf(history, tree) {
   return max + 1;
 }
 
-function riskOf(adapter, files) {
-  const spec = (name) => adapter.repos.find((r) => r.name === name);
-  const paths = adapter.risk?.paths ?? [];
-  const touched = paths.filter((p) => files.some((f) => matchesAny(rootPath(spec(f.repo), f.path), p.paths ?? [])));
-  const tests = files.filter((f) => f.status !== 'D' && touched.some((p) => matchesAny(rootPath(spec(f.repo), f.path), p.tests ?? [])));
-  return { touched, tests };
+// Risk (design section 2, "Risk"): every first seat (whole, area) judges how much harm the change could do if it is
+// wrong and names what it needs to be confident (`risk.needs`). The engine never judges risk: it checks that each need
+// has its evidence. Three needs have evidence the engine reads; any other is free text the second reviewer judges met.
+export const NEEDS = Object.freeze({ second: 'second-review', test: 'failing-test', read: 'diff-read' });
+const KNOWN_NEEDS = Object.values(NEEDS);
+const firstSeat = (seat) => seat !== 'second';
+// The needs of every first-seat judgement of the attempt, on any tree: a later round never drops an earlier need.
+function riskOf(L) {
+  const judged = reviewsOf(L.events).filter((r) => firstSeat(r.seat) && r.risk);
+  const needs = [...new Set(judged.flatMap((r) => r.risk.needs))];
+  const why = [...new Set(judged.filter((r) => r.risk.level === 'high').map((r) => r.risk.why))];
+  return { high: why.length > 0, why, needs, free: needs.filter((n) => !KNOWN_NEEDS.includes(n)) };
+}
+const wantsSecond = (risk) => risk.needs.includes(NEEDS.second) || risk.free.length > 0;
+
+// A reviewer's `risk` (first seats) and `met` (the second seat), checked for shape only.
+function checkRisk(input, seat, saved) {
+  const shape = 'give `risk` as { level: low|high, why: <text>, needs: [second-review|failing-test|diff-read|<text>, ...] }';
+  if (firstSeat(seat)) {
+    const r = input.risk;
+    if (!r || typeof r !== 'object') throw new WfError(`the review gives no risk judgement: ${shape}`);
+    if (!['low', 'high'].includes(r.level)) throw new WfError(`risk.level \`${r.level}\` is not low or high`);
+    if (typeof r.why !== 'string' || !r.why.trim()) throw new WfError('risk.why is empty: say what a mistake here would cost');
+    if (!Array.isArray(r.needs) || r.needs.some((n) => typeof n !== 'string' || !n.trim())) throw new WfError(`risk.needs must be a list of needs: ${shape}`);
+    if (r.level === 'high' && !r.needs.length) throw new WfError('risk.level is high but names no needs: say what would make you confident the change is right');
+    return { risk: { level: r.level, why: r.why.trim(), needs: [...new Set(r.needs.map((n) => n.trim()))] } };
+  }
+  const asked = saved?.needs ?? [];
+  const met = input.met ?? [];
+  if (!Array.isArray(met) || met.some((m) => typeof m?.need !== 'string' || typeof m.met !== 'boolean')) throw new WfError('`met` must be a list of { need, met: true|false, how }');
+  const none = asked.filter((n) => !met.some((m) => m.need === n));
+  if (none.length) throw new WfError(`the second review gives no verdict on: ${none.map((n) => `"${n}"`).join('; ')}`, { hint: 'have the reviewer add each to `met`, then record the review again' });
+  return met.length ? { met: met.map((m) => ({ need: m.need, met: m.met, ...(typeof m.how === 'string' && m.how.trim() ? { how: m.how.trim() } : {}) })) } : {};
 }
 
 // --- criteria ----------------------------------------------------------------------------------------------------------
@@ -253,10 +280,6 @@ async function bundle(root, attempt) {
   const tests = files.filter((f) => f.kind === 'tests');
   if (!product.length && !tests.length) throw new WfError(`${attempt} has no committed change to review`);
   const productLines = product.reduce((n, f) => n + f.added + f.removed, 0);
-  const risk = riskOf(adapter, files);
-  if (risk.touched.length && productLines > SPLIT_LINES) {
-    throw refusal('review:size', `${productLines} product lines touch risk path(s) ${risk.touched.map((r) => r.id).join(', ')}; a risk change above ${SPLIT_LINES} lines is reviewed whole, so it must be split`, 'split the item: deliver the risk part as its own smaller change');
-  }
   const round = roundOf(L.history, tree);
   const dir = reviewsDir(root, attempt, round, tree);
   mkdirStateDirectory(dir, { recursive: true });
@@ -275,7 +298,8 @@ async function bundle(root, attempt) {
   // A page that did not show the requested language or direction: the reviewer judges it.
   const mismatched = images.filter((i) => i.mismatch).map((i) => `${i.file}: asked ${i.mismatch.requested?.lang ?? '-'} ${i.mismatch.requested?.dir ?? '-'}, the page is ${i.mismatch.page?.lang ?? '-'} ${i.mismatch.page?.dir ?? '-'}`);
   const learned = learnedFile(adapter);
-  const riskChecklist = risk.touched.length ? path.join(PLUGIN, 'templates', 'risk-checklist.md') : null;
+  const riskGuide = path.join(PLUGIN, 'templates', 'risk.md');
+  const risk = riskOf(L);
   const blockers = blockersOf(L.findings);
   const fixed = Object.values(L.findings).filter((f) => f.status === 'fixed' && f.class !== 'other');
   const changes = Object.values(L.findings).filter((f) => f.changes.length);
@@ -284,10 +308,10 @@ async function bundle(root, attempt) {
   if (productLines > SPLIT_LINES) {
     const areas = splitAreas(product);
     for (const a of areas) seats.push({ seat: `area:${a.name}`, files: a.files, shared: product.filter((f) => !a.files.includes(f)) });
-  } else {
-    seats.push({ seat: 'whole', files: product, shared: [] });
-    if (risk.touched.length) seats.push({ seat: 'second', files: product, shared: [] });
-  }
+  } else seats.push({ seat: 'whole', files: product, shared: [] });
+  // The second seat, once every first seat on this tree is recorded and their needs ask for it.
+  const recorded = reviewsOf(L.events).filter((r) => r.tree === tree);
+  if (wantsSecond(risk) && seats.every((s) => recorded.some((r) => r.seat === s.seat))) seats.push({ seat: 'second', files: product, shared: [] });
 
   const bundles = seats.map((s) => {
     const name = seatFile(s.seat);
@@ -295,7 +319,8 @@ async function bundle(root, attempt) {
     const output = path.join(dir, `review-${name}.json`);
     const sharedFiles = s.shared.map((f) => path.join(state.repos[f.repo].worktree, f.path));
     const productFiles = s.files.filter((f) => f.status !== 'D').map((f) => `${f.repo}/${f.path}`);
-    const files_ = { diff, criteria: criteriaFile, criteriaDiff, invariants, rules, consumers, screens, riskChecklist, sharedFiles };
+    const first = firstSeat(s.seat);
+    const files_ = { diff, criteria: criteriaFile, criteriaDiff, invariants, rules, consumers, screens, risk: first ? riskGuide : null, sharedFiles };
     const list = (title, xs) => (xs.length ? `${title}:\n${xs.map((x) => `- ${x}`).join('\n')}\n` : '');
     const prompt = [
       roleText(),
@@ -310,16 +335,17 @@ async function bundle(root, attempt) {
       list('Consumers of changed contracts (check each still works)', consumers),
       screens.length ? list('Screenshots (open every one)', screens) : 'Screenshots: none were captured for this tree.',
       list('Screenshots whose page language or direction differs from the one asked (judge each)', mismatched),
-      riskChecklist ? `Risk checklist (risk paths ${risk.touched.map((r) => r.id).join(', ')}): ${riskChecklist}` : null,
+      first ? `Risk (judge it as this says): ${riskGuide}` : `The first reviewers judged this change ${risk.high ? `high-risk: ${risk.why.join('; ')}` : 'low-risk'}. You are the second, independent review of the whole change.`,
+      !first && risk.free.length ? list('Needs to verify (say for each whether this change meets it)', risk.free) : null,
       list('Product files you must read in full (your reads are checked)', productFiles.map((f) => path.join(state.repos[f.split('/')[0]].worktree, f.slice(f.indexOf('/') + 1)))),
       list('Other changed files, reviewed by other seats', sharedFiles),
       blockers.length ? list('Verify these open findings first (status fixed or open), then re-read the whole change', blockers.map((f) => `${f.id} ${f.class} ${f.severity} ${f.location}: ${f.what}`)) : null,
       fixed.length ? list('Earlier findings marked fixed (mark one `open` in verified if it is back)', fixed.map((f) => `${f.id} ${f.location}: ${f.what}`)) : null,
       changes.length ? list('Findings whose class or severity changed', changes.map((f) => `${f.id}: ${f.changes.map((c) => `${c.field} ${c.from} -> ${c.to}`).join(', ')}`)) : null,
-      `Write your review as JSON to ${output}: {"findings": [...], "verified": [{"id": "F1", "status": "fixed"}]}, in one write with your file tool. If you cannot write files, give that JSON as your final message.`,
+      `Write your review as JSON to ${output}: {"findings": [...], "verified": [{"id": "F1", "status": "fixed"}], ${first ? '"risk": {"level": "low|high", "why": "...", "needs": [...]}' : '"met": [{"need": "<a need above>", "met": true, "how": "..."}]'}}, in one write with your file tool. If you cannot write files, give that JSON as your final message.`,
     ].filter((x) => x !== null && x !== '').join('\n');
     const b = {
-      seat: s.seat, attempt, tree, heads, round, prompt, files: files_, verify: blockers.map((f) => f.id), productFiles,
+      seat: s.seat, attempt, tree, heads, round, prompt, files: files_, verify: blockers.map((f) => f.id), productFiles, ...(first ? {} : { needs: risk.free }),
       productLines: s.files.reduce((n, f) => n + f.added + f.removed, 0),
       model: (s.seat === 'second' ? adapter.models?.secondReviewer : adapter.models?.reviewer) ?? null,
       output,
@@ -430,6 +456,7 @@ async function recordReview(root, attempt, input) {
 
   const repos = Object.keys(state.repos);
   assertFindings(input.findings, repos);
+  const judged = checkRisk(input, seat, saved);
   await refuseOtherOwn(root, attempt, input.findings);
   const verified = input.verified ?? [];
   if (!Array.isArray(verified)) throw new WfError('`verified` must be a list of { id, status }');
@@ -442,7 +469,7 @@ async function recordReview(root, attempt, input) {
   const findings = input.findings.map((f) => ({ id: `F${n++}`, location: f.location, what: scrub(f.what, { secrets }), why: scrub(f.why, { secrets }), severity: f.severity, class: f.class }));
   const round = roundOf(L.history, tree);
   const review = reviewsOf(L.events).length + 1;
-  const data = { review, round, seat, tree, heads, session, coverage, ...(provenance ? { provenance } : {}), findings, verified, blockers: 0, ...(saved?.model ?? launched[0].model ? { model: saved?.model ?? launched[0].model } : {}), ...(Array.isArray(read) ? { filesRead: read.length } : {}), ...(unread.length ? { unread } : {}) };
+  const data = { review, round, seat, tree, heads, session, coverage, ...(provenance ? { provenance } : {}), findings, verified, blockers: 0, ...judged, ...(saved?.model ?? launched[0].model ? { model: saved?.model ?? launched[0].model } : {}), ...(Array.isArray(read) ? { filesRead: read.length } : {}), ...(unread.length ? { unread } : {}) };
   const after = foldFindings([...L.history.filter((h) => h.id !== attempt), { id: attempt, events: [...L.events, { type: 'review.recorded', data, at: new Date().toISOString() }] }]);
   const waivedIds = new Set(Object.values(L.findings).filter((f) => f.status === 'waived').map((f) => f.id));
   data.blockers = blockersOf(after.findings).filter((f) => !waivedIds.has(f.id)).length;
@@ -457,7 +484,7 @@ async function recordReview(root, attempt, input) {
   }
   const np = await noProgress(root, state.item);
   if (np.stop && !np.decision) await askNoProgress(root, attempt, np);
-  return { review, seat, findings, blockers: data.blockers, coverage, provenance, pending };
+  return { review, seat, findings, blockers: data.blockers, coverage, provenance, pending, ...judged };
 }
 
 // --- no progress -------------------------------------------------------------------------------------------------------
@@ -495,18 +522,31 @@ function askNoProgress(root, attempt, np) {
 
 // --- merge facts -------------------------------------------------------------------------------------------------------
 
-function riskMissing(L, tree, files, reviewedTree) {
-  const risk = riskOf(L.adapter, files);
-  if (!risk.touched.length) return { touched: [], missing: [] };
+// The needs of the attempt's risk judgements that lack their evidence on the reviewed tree, each with the command that
+// supplies it.
+function riskMissing(L, files, reviewedTree) {
+  const risk = riskOf(L);
   const missing = [];
-  if (!risk.tests.length) missing.push({ what: `a test added or changed under the risk tests of ${risk.touched.map((r) => r.id).join(', ')}`, command: 'handoff' });
-  for (const repo of [...new Set(risk.tests.map((f) => f.repo))]) {
-    const last = riskBaseRan(L, repo).at(-1)?.data;
-    if (!last) missing.push({ what: `the risk tests of ${repo} run on the merge-base`, command: `wf test risk-base --repo ${repo}` });
-    else if (last.pass) missing.push({ what: `risk tests of ${repo} that fail on the merge-base (they passed there, so they assert nothing about the change)`, command: 'handoff' });
+  const second = reviewsOf(L.events).filter((r) => r.tree === reviewedTree && r.seat === 'second').at(-1);
+  if (wantsSecond(risk) && !second) missing.push({ what: risk.needs.includes(NEEDS.second) ? 'the second whole-diff review' : `the second reviewer's verdict on: ${risk.free.join('; ')}`, command: 'review' });
+  else if (second) {
+    for (const n of risk.free) {
+      const v = second.met?.find((m) => m.need === n);
+      if (!v) missing.push({ what: `the second reviewer's verdict on "${n}"`, command: 'review' });
+      else if (!v.met) missing.push({ what: `"${n}", which the second reviewer found unmet${v.how ? ` (${v.how})` : ''}`, command: 'handoff' });
+    }
   }
-  if (!reviewsOf(L.events).some((r) => r.tree === reviewedTree && r.seat === 'second')) missing.push({ what: 'the second whole-diff review', command: 'review' });
-  return { touched: risk.touched, missing };
+  if (risk.needs.includes(NEEDS.test)) {
+    const repos = [...new Set(files.filter((f) => f.kind === 'tests' && f.status !== 'D').map((f) => f.repo))];
+    const runs = repos.map((repo) => ({ repo, last: riskBaseRan(L, repo).at(-1)?.data }));
+    if (!repos.length) missing.push({ what: 'a test that fails without the change (the change has no test file)', command: 'handoff' });
+    else if (!runs.some((r) => r.last && !r.last.pass)) {
+      const notRun = runs.filter((r) => !r.last).map((r) => r.repo);
+      if (notRun.length) missing.push({ what: `the changed tests of ${notRun.join(', ')} run on the merge-base`, command: `wf test risk-base --repo ${notRun[0]}` });
+      else missing.push({ what: 'changed tests that fail on the merge-base (they passed there, so they prove nothing about the change)', command: 'handoff' });
+    }
+  }
+  return { risk, missing };
 }
 
 const restored = (events, d) => {
@@ -599,23 +639,27 @@ async function factsOf(L, { repo = null, landedTree = null } = {}) {
     const passed = L.events.some((e) => e.type === 'test.run' && e.data.kind === 'full' && e.data.pass && e.data.tree === landedTree && (!repo || e.data.repo === repo));
     if (!passed) push('merge:untested', `no passing full run on the landed tree ${landedTree}`);
   }
-  const risk = riskMissing(L, tree, files, last?.tree ?? tree);
-  if (risk.touched.length) {
-    const missing = risk.missing.map((m) => m.what);
-    if (last && !blockers.length) {
-      const unverified = reviews.some((r) => r.tree === last.tree && r.coverage === 'unverified');
-      const untraced = reviews.some((r) => r.tree === last.tree && r.provenance === 'unverified');
-      const d = await askOnce(L, {
-        kind: 'diff-read',
-        question: `${attempt} touches risk path(s) ${risk.touched.map((r) => r.id).join(', ')}. Read the diff (${path.join(reviewsDir(root, attempt, last.round, last.tree), 'diff-whole.patch')}) and approve it?${unverified ? ' The reviewers\' reads could not be verified from their transcripts.' : ''}${untraced ? ' The review files could not be traced to their reviewers from transcripts.' : ''}`,
-        options: [CHOICES.diffRead.yes, CHOICES.diffRead.no],
-        refs: [`tree:${last.tree}`],
-        blocking: true,
-      });
-      if (adapter.review?.diffRead !== 'after' && d.answer?.choice !== CHOICES.diffRead.yes) missing.push(`the person's diff-read (${d.id}${d.answer ? `: ${d.answer.choice}` : ', unanswered'})`);
-    }
-    if (missing.length) push('merge:risk', `risk path(s) ${risk.touched.map((r) => r.id).join(', ')} touched; missing: ${missing.join('; ')}`);
+  const { risk, missing: lacking } = riskMissing(L, files, last?.tree ?? tree);
+  const missing = lacking.map((m) => m.what);
+  // The person reads the diff last: once nothing blocks and every other need has its evidence, so they read what ships.
+  if (risk.needs.includes(NEEDS.read) && (!last || blockers.length || lacking.length)) {
+    if (adapter.review?.diffRead !== 'after') missing.push('the person\'s diff-read (asked once the other needs are met)');
+  } else if (risk.needs.includes(NEEDS.read)) {
+    const unverified = reviews.some((r) => r.tree === last.tree && r.coverage === 'unverified');
+    const untraced = reviews.some((r) => r.tree === last.tree && r.provenance === 'unverified');
+    // The whole product diff: the whole seat's, or the second seat's when the review was split by area.
+    const dir = reviewsDir(root, attempt, last.round, last.tree);
+    const diffFile = ['whole', 'second'].map((x) => path.join(dir, `diff-${seatFile(x)}.patch`)).find((f) => fs.existsSync(f)) ?? dir;
+    const d = await askOnce(L, {
+      kind: 'diff-read',
+      question: `${attempt}: its reviewer asks you to read the diff before it ships${risk.why.length ? ` (${risk.why.join('; ')})` : ''}. Read it (${diffFile}) and approve it?${unverified ? ' The reviewers\' reads could not be verified from their transcripts.' : ''}${untraced ? ' The review files could not be traced to their reviewers from transcripts.' : ''}`,
+      options: [CHOICES.diffRead.yes, CHOICES.diffRead.no],
+      refs: [`tree:${last.tree}`],
+      blocking: true,
+    });
+    if (adapter.review?.diffRead !== 'after' && d.answer?.choice !== CHOICES.diffRead.yes) missing.push(`the person's diff-read (${d.id}${d.answer ? `: ${d.answer.choice}` : ', unanswered'})`);
   }
+  if (missing.length) push('merge:risk', `the reviewers' risk needs lack evidence: ${missing.join('; ')}`);
   return problems;
 }
 
@@ -689,9 +733,8 @@ async function stepOf(root, attempt, L) {
   if (!reviewed) return { command: `wf review ${A}`, why: `this tree (${tree}) is not reviewed${note}` };
   const blockers = blockersOf(L.findings);
   if (blockers.length) return { command: handoff, why: `fix round for open blocker(s) ${blockers.map((f) => f.id).join(', ')}` };
-  const risk = riskMissing(L, tree, files, last?.tree ?? tree);
-  const miss = risk.missing[0];
-  if (miss) return { command: miss.command === 'handoff' ? handoff : miss.command === 'review' ? `wf review ${A}` : `${miss.command} ${A}`, why: `risk path(s) ${risk.touched.map((r) => r.id).join(', ')}: missing ${miss.what}` };
+  const miss = riskMissing(L, files, last?.tree ?? tree).missing[0];
+  if (miss) return { command: miss.command === 'handoff' ? handoff : miss.command === 'review' ? `wf review ${A}` : `${miss.command} ${A}`, why: `the reviewer's risk needs ${miss.what}` };
   const problems = await factsOf(L); // a question the facts asked joins L.decisions
   open = blockingOpen(L);
   if (open.length) return { command: approveCmd(open[0], attempt), why: `ask the person, in these words: ${open[0].question}` };
@@ -849,8 +892,10 @@ async function recordFromFile(ctx, args, root, id) {
     if (cands.length !== 1) throw new WfError(`${cands.length ? 'several reviewers were' : 'no reviewer was'} launched for seat ${near.seat} on tree ${near.tree}; pass --session <runtime:id>`);
     session = cands[0].session;
   }
-  const r = await recordReview(root, id, { session, file, findings: raw.findings ?? [], verified: raw.verified ?? [] });
+  const r = await recordReview(root, id, { session, file, findings: raw.findings ?? [], verified: raw.verified ?? [], risk: raw.risk, met: raw.met });
   const lines = [`review ${r.review} recorded on ${id} (seat ${r.seat}, coverage ${r.coverage}${r.provenance === 'unverified' ? ', provenance unverified' : ''}): ${r.findings.length} finding(s), ${r.blockers} open blocker(s)`];
+  if (r.risk) lines.push(`  risk ${r.risk.level}: ${r.risk.why}${r.risk.needs.length ? `; needs: ${r.risk.needs.join('; ')}` : ''}`);
+  for (const m of r.met ?? []) lines.push(`  ${m.met ? 'met' : 'NOT met'}: ${m.need}${m.how ? ` (${m.how})` : ''}`);
   for (const f of r.findings) lines.push(`  ${f.id} ${f.class} ${f.severity} ${f.location}: ${f.what}`);
   if (r.provenance === 'unverified') lines.push('  provenance unverified: the host keeps no readable transcript to show the reviewer wrote this file; the person sees it at the diff-read and in the digest');
   lines.push(...pendingLines(r.pending));
@@ -915,7 +960,7 @@ async function cmdReview(ctx, args) {
     return L.events.some((e) => e.type === 'test.run' && e.data.repo === repo && e.data.kind === kind && e.data.tree === t);
   };
   const tests = repos.filter((r) => !ran(r, 'fast')).map((r) => ({ repo: r, kind: 'fast' }));
-  for (const r of [...new Set(riskOf(L.adapter, files).tests.map((f) => f.repo))]) if (!ran(r, 'risk-base')) tests.push({ repo: r, kind: 'risk-base' });
+  if (riskOf(L).needs.includes(NEEDS.test)) for (const r of [...new Set(files.filter((f) => f.kind === 'tests' && f.status !== 'D').map((f) => f.repo))]) if (!ran(r, 'risk-base')) tests.push({ repo: r, kind: 'risk-base' });
   // Reviewers and tests run at once on the same tree; by default this waits until every reviewer is done or failed.
   const launches = todo.map((b) => launchReviewer(root, id, b, { closure: b.output, ...(b.model ? { model: b.model } : {}) }).then((x) => ({ seat: b.seat, ...x, output: x.closure ?? b.output })));
   const reviewersDone = Promise.allSettled(launches).then(async (rs) => {

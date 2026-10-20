@@ -169,7 +169,7 @@ test('a slot whose holder process is gone is taken over', async () => {
   }
 });
 
-test('risk-base runs the fast tests at the merge-base with the changed risk tests applied, and records that they fail there', async () => {
+test('risk-base runs the fast tests at the merge-base with the changed test files applied, and records that they fail there', async () => {
   const p = fixture({ repoOverrides: { server: { tests: { fast: { run: 'node test/sum.spec.mjs' } } } } });
   try {
     useDoubles(p);
@@ -195,13 +195,13 @@ test('risk-base runs the fast tests at the merge-base with the changed risk test
   }
 });
 
-test('risk-base without a changed risk test is an error, not a pass', async () => {
+test('risk-base without a changed test file is an error, not a pass', async () => {
   const p = fixture();
   try {
     useDoubles(p);
     startAttempt(p, 'TK-3.1');
     change(p, 'TK-3.1', 'server', { 'src/core/sum.mjs': 'export const sum = () => 0;\n' });
-    await assert.rejects(runTests(p.root, 'TK-3.1', 'server', 'risk-base'), /changes no `risk.tests` file/);
+    await assert.rejects(runTests(p.root, 'TK-3.1', 'server', 'risk-base'), /changes no test file in `server`/);
     assert.equal(eventsOf(p, 'test.run').length, 0);
   } finally {
     done(p);
@@ -232,7 +232,7 @@ test('wf test finds the attempt and repo from the folder it runs in; risk-base s
     assert.equal(fast.exitCode, 0);
     assert.deepEqual(fast.data.results.map((r) => r.repo), ['server']);
     const rb = await handler(ctx, { _: ['risk-base'], flags: {} });
-    assert.equal(rb.exitCode, 1, 'a risk test that passes on the merge-base proves nothing');
+    assert.equal(rb.exitCode, 1, 'a changed test that passes on the merge-base proves nothing');
     assert.match(rb.text, /PASS on the merge-base/);
     const all = await handler({ ...ctx, cwd: p.root }, { _: ['fast'], flags: { attempt: 'TK-4.1' } });
     assert.deepEqual(all.data.results.map((r) => r.repo), ['server', 'client']);

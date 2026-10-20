@@ -26,7 +26,6 @@ function project() {
         tests: { fast: { run: 'node test/run.mjs' }, full: { run: 'node test/run.mjs', lock: { name: 'e2e-push-full', count: 1 } } },
         kinds: { tests: ['test/**'], other: ['**/*.md'] },
       }],
-      risk: 'none',
       ticketing: { tracker: 'files', via: 'files', idPattern: '^TK-\\d+$', take: { status: 'Started' }, followUps: { mode: 'file', status: 'Backlog', label: 'found-in-review' } },
       delivery: { landing: 'direct', stages: [{ do: 'land' }, { do: 'status', to: 'Ready', comment: 'uat' }] },
     },

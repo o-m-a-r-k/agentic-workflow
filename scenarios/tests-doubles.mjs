@@ -5,6 +5,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { EVENTS, clearDoubles, setDoubles, worktreeDir, branchName } from '../engine/contract.mjs';
 import { adapterFor, git, makeProject, writeFiles } from './helpers/index.mjs';
+import { matchesAny } from '../engine/util.mjs';
+
+const TEST_KINDS = ['test/**', '**/*.spec.mjs'];
 
 // The engine's own git calls run with this process's environment: make them deterministic.
 Object.assign(process.env, {
@@ -26,7 +29,6 @@ export function normalise(raw, root) {
     components: raw.components ?? [], invariants: raw.invariants ?? null, rules: raw.rules ?? [],
     screens: { routes: null, shared: [], sentinel: [], langs: [], viewports: [], capture: null, ...(raw.screens ?? {}) },
     review: raw.review ?? { diffRead: 'before' },
-    risk: raw.risk === 'none' ? { confirmed: true, paths: [] } : { confirmed: Array.isArray(raw.risk), paths: Array.isArray(raw.risk) ? raw.risk : [] },
     ticketing: raw.ticketing,
     delivery: { landing: 'direct', order: raw.repos.map((r) => r.name), authority: { push: 'agent', mergeRequest: 'agent', merge: 'agent' }, stages: [], ...(raw.delivery ?? {}) },
     models: {}, budget: raw.budget, onboarded: { at: null, engine: null, hashes: {} },
@@ -81,7 +83,8 @@ function changedFilesOf(p, attempt) {
     const mb = git(r.worktree, ['merge-base', 'HEAD', `origin/${r.base}`]);
     for (const line of git(r.worktree, ['diff', '--name-status', mb]).split('\n').filter(Boolean)) {
       const [status, file] = line.split('\t');
-      files.push({ repo, path: file, kind: 'product', added: 1, removed: 0, status: status[0] });
+      // Classed by the fixture's `kinds.tests`, as base.mjs classes them.
+      files.push({ repo, path: file, kind: matchesAny(file, TEST_KINDS) ? 'tests' : 'product', added: 1, removed: 0, status: status[0] });
     }
     trees.push(git(r.worktree, ['rev-parse', 'HEAD^{tree}']));
   }

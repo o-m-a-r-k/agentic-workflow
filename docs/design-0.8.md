@@ -33,7 +33,7 @@ Every ticket goes through one flow. There are no lanes, batch lane, analysis att
 | 3 | Implement | implementer | Nothing. |
 | 4 | `wf test fast` | implementer | Runs the repo's `fast` tests. The caller runs it as a host background command, which notifies on completion, so nobody polls (the engine has no notifier). Records exit code, minutes and tree hash. |
 | 5 | `wf screens` | implementer | Picks screens by facts (below), captures them, and records each image with its tree, viewport, `lang`, `dir`, pixel size and hash. |
-| 6 | `wf review` | engine launches a fresh reviewer | The bundle is the reviewer's entire prompt (below). The review runs **in parallel** with `wf test fast` on the same tree hash. On a risk path, a second reviewer on a different model reviews the whole diff at the same time. It waits until each reviewer is done or failed (`--no-wait` returns at launch); the caller runs it in the background. |
+| 6 | `wf review` | engine launches a fresh reviewer | The bundle is the reviewer's entire prompt (below). The review runs **in parallel** with `wf test fast` on the same tree hash. When a first reviewer's risk judgement needs a second review, or names a need of its own, the next `wf review` launches a second reviewer on a different model on the whole diff. It waits until each reviewer is done or failed (`--no-wait` returns at launch); the caller runs it in the background. |
 | 7 | Fix round, then the next review | implementer, then fresh reviewers | Only on a blocker. The next reviewer gets the whole diff again, with "verify these blockers, then re-read the whole change", and the criteria diff since the last review. |
 | 8 | Findings outside the goal | engine and owner | Filed per the project's ticketing (below). |
 | 9 | Landing | engine, the project's CI, the person | Through the project's delivery stages (section 5). Each repo's part is delivered separately by default, in the adapter's `order:`. |
@@ -49,7 +49,7 @@ Every ticket goes through one flow. There are no lanes, batch lane, analysis att
 - the project rules for the touched paths;
 - the consumers of changed contracts: the files that the adapter's `components.dependsOn` contract globs map to a changed route or DTO;
 - the screenshot paths;
-- the risk checklist, when a risk path is touched.
+- the risk guidance (`templates/risk.md`), for every first seat; the second seat gets the needs it verifies instead.
 
 Above about 1,500 product lines per reviewer, the engine splits the review by area. Each area reviewer also gets the list of shared files and the consumers. The implementer's and the reviewer's role texts say that tests must assert state or output, never call counts.
 
@@ -73,27 +73,31 @@ The engine refuses `other` on a finding whose `path:line` blames to this attempt
 - `digest`: the finding goes into the person's daily digest.
 - `off`: nothing is filed; the finding stays in the attempt's ledger.
 
-An `other` finding rated high, or on a risk path, goes to the person as a priority question in the digest. It does not hold the ticket.
+An `other` finding rated high or critical goes to the person as a priority question in the digest. It does not hold the ticket.
 
 **Fix rounds.** Fix rounds are counted per item, across abandon and restart. A severity or class change on an earlier finding is shown to the next reviewer and in `wf resume`. There is no round cap. A ticket stops and comes to the person only on **no progress**: the same finding reopens after a fix, or a review leaves the number of open blockers no lower than the review before it. Both are facts in the ledger (finding ids, blocker counts per review). The person then decides how to go on.
 
 **Criteria.** An edit after a blocker that loosens or drops the criterion the blocker cites counts as a waiver. It goes to the person. Named failure: 131 amendments grew one ticket's criteria.
 
-**Higher-risk paths.** A project's risk paths are its own, proposed by onboarding from a scan of the repos and confirmed by the person (section 5). The plugin ships no built-in list. A change that touches a risk path gets four extra checks:
+**Risk (D94, revised in 0.8.1).** There are no risk paths. Every first reviewer (the whole seat, or each area seat above the split size) judges, for the change in front of it, how much harm it could do if it is wrong and what would make it confident it is not. It reasons from what it reads: what the change does, who and what depends on the changed code, how far a mistake would spread and how easily it could be undone, how well the tests cover the behaviour, the project's instructions and invariants, and its own confidence after reading. Money, irreversible external writes, data loss and access are examples in its guidance (`templates/risk.md`), not a checklist.
 
-- a test added or changed under `risk.tests` that **fails on the merge-base** (the engine runs it there; named failure: tests that asserted nothing);
-- the second whole-diff reviewer on a different model, in parallel;
-- the checklist on transactions, rollback, idempotency, external calls and realistic money values;
-- the person's diff-read.
+The reviewer's closure records `risk: { level: low|high, why, needs: [...] }`; a high level names at least one need. `needs` is the reviewer's own proportionate verification for this change. The engine never judges the risk; it checks that each listed need has its evidence:
 
-A risk change above the review size limit must be split.
+| Need | Its evidence |
+|---|---|
+| `second-review` | A review recorded by the `second` seat (a different model, `models.secondReviewer`) on the reviewed tree. |
+| `failing-test` | A `test.run` of kind `risk-base` that failed on the merge-base: the repo's `fast` tests run there with the attempt's changed test files (`kinds.tests`) applied. Named failure: tests that asserted nothing. |
+| `diff-read` | The person's diff-read answer. It is asked once nothing blocks and every other need has its evidence; with `review.diffRead: before` the merge waits for it. |
+| Any other text (a scenario to exercise, a case to check) | The second seat's verdict, `met: [{ need, met, how }]` in its closure. The second seat is launched for it and must give a verdict on each. |
+
+The needs of every first-seat judgement in the attempt stand: a later round never drops an earlier need. A need without its evidence refuses the merge (`merge:risk`). Named failure (0.8.0): the scan-proposed risk paths of a real project covered 130 areas, almost the whole codebase (one matched a whole repo because a lint config named a currency), so nearly every change would have taken the slowest tier, and the person would not maintain or answer path lists.
 
 **Reserved decisions.** These belong to the person:
 
 - a production deploy;
 - waiving a blocking finding of any class or severity;
 - loosening criteria after a blocker;
-- the diff-read on a risk path;
+- the diff-read a reviewer asks for;
 - a merge whose history includes a branch other than main;
 - the no-progress stop.
 
@@ -116,7 +120,6 @@ This applies from day one. Named failure: 283 of 304 recorded "owner decisions" 
 | `review:tree` | The recorded review's tree is not HEAD. | Stale reviews (principle 3). |
 | `review:independent` | The reviewer's session implemented, or `wf` did not launch it, or its transcript contradicts the review file. | Steered or self review. |
 | `review:coverage` | Product files in the diff are unread by the reviewer. | 8-minute sampled first review. |
-| `review:size` | The product diff is above the split size for one reviewer. | Shallow reviews of large diffs. |
 | `finding:other-own` | `other` on a line this attempt wrote. | 41% of later defects came from repairs. |
 | `screens:width` / `screens:dup` | A capture's width does not match, or its bytes duplicate another screen. | I-117; a stuck page. |
 | `merge:open` | A `goal` or `regression` finding is open. | The person's findings rule. |
@@ -124,13 +127,13 @@ This applies from day one. Named failure: 283 of 304 recorded "owner decisions" 
 | `merge:foreign` | A merge commit's second parent is not main, or is reachable from another remote branch. | Staging and sibling merges. |
 | `merge:untested` | The `fast` tests are not green on HEAD, or no passing `full` run on the landed tree, from the landing queue or CI. | Push-to-main with no CI. |
 | `fix:no-progress` | An implementer handoff after a review that reopened a fixed finding or did not lower the blocker count, until the person decides. | The person's stop rule; rounds with blockers flat for 18 rounds. |
-| `merge:risk` | A risk path is touched and a risk test, the merge-base failure or the second review is missing, or the diff-read is missing with `diffRead: before`. | The person's risk tier. |
+| `merge:risk` | A need a first reviewer's `risk` names lacks its evidence: the second review, a test that fails on the merge-base, the second reviewer's verdict that a free-text need is met, or the diff-read with `diffRead: before`. | The person's risk tier. |
 | `merge:waiver` | A waiver or a loosened criterion is unanswered. | Reserved decision. |
 | `stage:deploy` | A production deploy without the person's decision. | Reserved decision. |
 | `hold` | Any delivery step under a hold. | The person's veto. |
 | `answer:not-person` | The answer fails the answer rule above. | 283 of 304. |
 
-That is 19 refusal ids, against more than 300 in 0.7.35.
+That is 18 refusal ids (19 in 0.8.0; 0.8.1 removed `review:size`, which refused a risk change above the split size), against more than 300 in 0.7.35.
 
 ## 3. Engine modules: keep, cut, rewrite
 
@@ -178,7 +181,7 @@ That is 19 refusal ids, against more than 300 in 0.7.35.
 | Digest | +150 | The person's waiting time. |
 | Budget and release counts | +150 | Regrowth. |
 | Migration hard cases | +200 | The module-heavy project. |
-| Onboarding scan and re-run diff | +450 | Per-project risk paths and policy (revision 3). |
+| Onboarding scan and re-run diff | +450 | Per-project policy (revision 3; 0.8.1 removed the risk paths). |
 
 ## 4. DESIGN.md decisions
 
@@ -231,7 +234,7 @@ That is 19 refusal ids, against more than 300 in 0.7.35.
 - **D91:** the flow.
 - **D92:** the three-class findings rule.
 - **D93:** whole-diff reviews in parallel with tests, a split above the size limit, no round cap, and the no-progress stop (the same finding reopens, or the blocker count does not go down).
-- **D94:** the risk tier, with risk paths per project from onboarding and no built-in list.
+- **D94:** the risk tier, judged per change by its first reviewer, whose `risk.needs` the engine checks as facts; no risk paths (revised in 0.8.1).
 - **D95:** reserved decisions, the answer rule and the digest.
 - **D96:** ticketing and delivery are the project's.
 - **D97:** no sequencing, the landing queue, and the merge facts.
@@ -253,7 +256,7 @@ The adapter lives in one of two places:
 
 Having both copies is refused. `requires` (connectors, tools, skills) stays. Module paths are always `{ repo: <name>, path: <file> }`, resolved in the attempt's worktree of that repo.
 
-**Adapter budget.** `doctor` reports the adapter's rules, risk paths, modules and operation words against `budget.adapter`. A net increase needs a project proposal (section 8).
+**Adapter budget.** `doctor` reports the adapter's rules, modules and operation words against `budget.adapter`. A net increase needs a project proposal (section 8).
 
 **A push-to-main project with no CI:**
 
@@ -286,10 +289,8 @@ screens:
   sentinel: ["/", "/settings", "/items/new"]
   langs: [{ lang: <code>, dir: <ltr|rtl> }]   # each language and direction the project ships
   viewports: [390, 1440]
-  capture: { module: { repo: web, path: scripts/capture.mjs } }   # or { run: "<command> --out {out} --viewport {viewport} {routes}" }
+  capture: { module: { repo: web, path: scripts/capture.mjs } }   # or { run: "<command> --out {out} --viewport {viewport} {routes}" }; unset (or `screens: none`): no screens
 review: { diffRead: before }           # or after: a project setting from onboarding
-risk:                                   # proposed by the onboarding scan, confirmed by the person; `risk: none` is explicit
-  - { id: <name the scan proposed>, paths: ["<area>/**"], reason: "<the facts the scan found>", tests: ["<its tests>/**"] }
 ticketing:
   tracker: <the tracker the project uses, through its connector or a module>
   via: connector
@@ -303,7 +304,7 @@ delivery:
   stages:
     - { do: land, branch: main }
     - { do: status, to: Ready for UAT, comment: uat }
-budget: { adapter: { rules: 4, risk: 3, modules: 1, operationWords: 120 } }
+budget: { adapter: { rules: 4, modules: 1, operationWords: 120 } }
 ```
 
 **A merge-request project whose tests, tracker and delivery are its own modules:**
@@ -345,7 +346,6 @@ The queue never holds a ticket for one that is not ready, so it is a merge train
 
 **Onboarding sets the project's policy.** `wf init` (alias `wf onboard`) owns every policy key:
 
-- risk paths;
 - `review.diffRead`;
 - the delivery stages;
 - the ticketing operations;
@@ -354,8 +354,8 @@ The queue never holds a ticket for one that is not ready, so it is a merge train
 
 The steps:
 
-1. `scan.mjs` reads the repos as facts, with no domain vocabulary of the plugin's own: directory and module names, schema and migration folders, decimal and currency types and rounding code, auth and permission code, outbound HTTP clients, webhook handlers and queue consumers, mobile apps, CI files and test scripts, and the project's own documents (its instruction files and invariants, which name what it treats as critical). Risk is judged by what a mistake costs, generically: money computed or moved, writes to external systems that cannot be undone, data deleted or migrated, access granted; the project's own words name the areas. The plugin ships no domain list.
-2. A cheap model drafts the policy from the scan. It gives every risk path a reason that cites the files the scan found.
+1. `scan.mjs` reads the repos as facts, with no domain vocabulary of the plugin's own: CI files, test scripts and test files, mobile apps, and the project's own instruction and invariants documents. It reads no code shapes: what a change risks is judged per change by its reviewers (D94), never proposed as paths.
+2. A cheap model drafts the policy from the scan.
 3. The person confirms or edits the draft.
 
 **Re-running onboarding.** Onboarding can be re-run at any time to re-evaluate the project.
@@ -390,14 +390,14 @@ Each role text is under 150 words. The bundle carries the project's rules.
   - Report anything outside the goal; do not fix it.
   - On a fix round, fix the cause wherever the change depends on it.
   - Tests assert state or output, not call counts.
-  - On a risk path, the new test must fail without the fix.
+  - When a review needs it, add a test that fails without the fix.
 - **Reviewer:**
   - You did not write this change. Read every product file in the diff and the code it depends on, against the criteria, the invariants and the rules.
   - Open every screenshot.
   - Check the listed consumers of changed contracts.
   - Each finding needs `path:line`, what is wrong, why it matters, a severity, and a class: `goal`, `regression` or `other`.
   - On a later round, verify the listed blockers, then re-read the whole change.
-  - With the risk checklist, check transactions, rollback, idempotency, external calls and realistic values.
+  - Judge the risk as the risk guidance says, and give `risk` (first seats) or `met` (the second seat).
   - Do not fix.
 
 Removed from every text: the strategist, evidence rounds, the closure's scope/expect/notReached, the priorFindings, premise and correction forms, baseMerge classes, the workflowRules dump and severity tables.
@@ -443,7 +443,7 @@ The old plugin grew by adding a rule after each incident. In 0.8, every change o
 - an event type;
 - words in a role, skill, hook or session-rules text.
 
-`scripts/release.mjs` counts all five and compares them with `budget.json`, which is committed in the plugin repo and holds the 0.8.0 counts. **Any net increase fails the release** unless a kept or active proposal accounts for it. Bug fixes are classified by the same facts: a fix that adds a refusal is rule-shaped.
+`scripts/release.mjs` counts all five and compares them with `budget.json`, which is committed in the plugin repo and holds the last release's counts (0.8.1 lowered them: one refusal, one adapter key and words fewer). **Any net increase fails the release** unless a kept or active proposal accounts for it. Bug fixes are classified by the same facts: a fix that adds a refusal is rule-shaped.
 
 **A proposal** has these fields:
 
@@ -477,7 +477,7 @@ Migration is prototyped first on the hard case: the project whose tests, tracker
 | What | Path |
 |---|---|
 | Open 0.7 attempts | `wf migrate attempts` skips held attempts and lists them for the person (one is held with "stop everything"). For every other open attempt, it appends `attempt.closed {outcome: superseded}`, removes clean worktrees and keeps the branches. For each attempt it prints the item, the branch, the unmerged commits and the last review state. Work already on its target, detected by patch-id (`git cherry`), is closed as shipped, and its pending tracker step is printed. Tracker statuses are left untouched. |
-| Adapters | Migration of the adapter is an onboarding run seeded from the schema-1 adapter: `wf init --from-07`. It maps tests and tracker and delivery modules to `{ repo, path }` modules, and maps statuses and labels to stages. It drops per-ticket validation steps by name: those that 0.7 ledgers recorded as `validation.added`. It moves `quality` into the invariants. The scan proposes `risk`, using the invariants files as extra evidence. It refuses to finish while `screens.capture` is unset, offering the command seeded from the old step that collected artifacts, and while `risk` is unconfirmed. Every dropped key is printed. The person confirms as in any onboarding run. |
+| Adapters | Migration of the adapter is an onboarding run seeded from the schema-1 adapter: `wf init --from-07`. It maps tests and tracker and delivery modules to `{ repo, path }` modules, and maps statuses and labels to stages. It drops per-ticket validation steps by name: those that 0.7 ledgers recorded as `validation.added`. It moves `quality` into the invariants. It proposes no risk and asks no risk question. Screens are optional: it seeds `screens.capture` from the old step that collected artifacts only when that command writes each screen to `{out}`, and otherwise says why none is proposed; with no capture there are no screens. Every dropped key is printed. The person confirms as in any onboarding run. |
 | Material in product repos | 0.8 reads none of it. `wf migrate material` lists the tracked files under `.workflow/` that the new adapter does not reference. It also greps product code for imports into `.workflow/` (for example a capture helper under a product test folder), because removing those breaks product code. Decided: one removal ticket per repo right after 0.8 ships. Each ticket also fixes the product code that imports the material. |
 | Lessons, improvements | The improvement inbox holds 223 items: 0 open, 209 closed and 14 retired. It is archived. A lesson with recorded recurrences becomes a `proposed` project proposal. |
 | Old ledgers, numbering | They stay in place and remain readable. New attempt numbers continue after the old ones. |
@@ -506,7 +506,7 @@ Migration is prototyped first on the hard case: the project whose tests, tracker
 - the three classes and `finding:other-own`;
 - fix-round counting across restart;
 - the no-progress stop;
-- risk: the test fails on the merge-base, a second reviewer runs, and the diff-read is required;
+- risk: each need a reviewer names has its evidence (a second review and its verdict, a test that fails on the merge-base, the diff-read);
 - screens selection, sentinel, width and duplicate checks;
 - `merge:unreviewed` and `merge:foreign`;
 - the landing queue: batch, bisect, and no wait for an unready ticket;
@@ -520,7 +520,7 @@ Migration is prototyped first on the hard case: the project whose tests, tracker
 - learning: the band, the judge, revert on missing data, expiry and the re-proposal block;
 - the budget failing a release;
 - each migration command, including the module-adapter case and held attempts;
-- onboarding: scan fixtures yield risk paths with reasons; a re-run on an unchanged project writes nothing; a hand-edited key is shown and kept unless confirmed; `--from-07` on the module-adapter fixture.
+- onboarding: the scan proposes no risk and needs no capture; a re-run on an unchanged project writes nothing; a hand-edited key is shown and kept unless confirmed; `--from-07` on the module-adapter fixture.
 
 One end-to-end demo replaces `hello-ticket`.
 
@@ -584,7 +584,7 @@ There are eight streams. Each stream writes only the files it owns. Stream 0 lan
 ## 13. Decided by the person (no open questions remain)
 
 1. **The fix-round stop.** A ticket stops on no progress only: the same finding reopens after a fix, or the blocker count does not go down. There is no round cap (D93).
-2. **Risk paths.** Each project's risk paths are proposed by the onboarding scan with reasons, and the person confirms them. There is no built-in list (D94).
+2. **Risk.** 0.8.0 had each project's risk paths proposed by the onboarding scan and confirmed by the person. On a real project that proposed 130 areas, and the person ruled it out: "For the risks, again, you are being very specific, which will lead to issues". 0.8.1 has the first reviewer judge each change's risk and name its needs; the engine checks only their evidence (D94).
 3. **The growth budget.** It is accepted as a hard budget. The person's rules become proposals with `source: person` (D98).
 4. **When the diff-read happens.** This is a project setting chosen at onboarding. Onboarding sets all project policy, can be re-run at any time to re-evaluate the project, and never drops a manual edit without showing it. Migration from 0.7 is an onboarding run (D100).
 5. **The workflow material in product repos.** One removal ticket per repo right after 0.8 ships, fixing the product imports of it in the same change (D99).

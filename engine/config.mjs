@@ -117,19 +117,20 @@ export async function findProject(cwd, { env = process.env } = {}) {
 
 // ---- Checking ---------------------------------------------------------------------------------------------------------
 
-const TOP = ['version', 'name', 'root', 'requires', 'repos', 'components', 'invariants', 'rules', 'screens', 'review', 'risk', 'ticketing', 'delivery', 'models', 'budget', 'onboarded'];
+const TOP = ['version', 'name', 'root', 'requires', 'repos', 'components', 'invariants', 'rules', 'screens', 'review', 'ticketing', 'delivery', 'models', 'budget', 'onboarded'];
 // Schema 1 keys schema 2 dropped (design section 5), so an old key is named as dropped rather than unknown.
 const DROPPED = {
   enabled: 'onboarding replaces it', engine: 'the installed plugin runs', lanes: 'every ticket goes through one flow', classes: 'only a model per role remains (`models`)', panel: 'the planner panel is gone', strategy: 'the strategist is gone',
   impact: 'consumers come from `components`', leaving: 'findings are goal, regression or other', severity: 'findings are goal, regression or other', learning: 'learning is measured', gate: 'tests are `repos[].tests.fast` and `.full`',
   quality: 'it moved into the invariants file', designSystem: 'it moved to the repos\' lint', adapterRepo: 'the adapter is found by location', instructionFiles: 'the plugin reads none', tracker: 'it is `ticketing`', secrets: 'secrets are catalogued by `wf secrets`', validation: 'per-ticket steps are gone',
+  risk: 'reviewers judge each change\'s risk; there are no risk paths',
 };
 const NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const STAGE_KINDS = ['land', 'push', 'merge-request', 'wait-merged', 'confirm-deployed', 'deploy', 'status', 'comment', 'module'];
 const STAGE_KEYS = ['do', 'branch', 'to', 'comment', 'repos', 'where', 'when', 'after', 'module'];
 const MODEL_ROLES = ['planner', 'implementer', 'reviewer', 'secondReviewer', 'drafter'];
 const CAPTURE_PLACEHOLDERS = ['out', 'viewport', 'lang', 'dir', 'routes'];
-const BUDGET_KEYS = ['rules', 'risk', 'modules', 'operationWords'];
+const BUDGET_KEYS = ['rules', 'modules', 'operationWords'];
 const REPO_KEYS = ['name', 'path', 'base', 'remote', 'provision', 'tests', 'kinds'];
 const SCREENS_KEYS = ['routes', 'shared', 'sentinel', 'langs', 'viewports', 'capture'];
 const TICKETING_KEYS = ['tracker', 'via', 'idPattern', 'take', 'followUps', 'operations'];
@@ -139,7 +140,7 @@ const DELIVERY_KEYS = ['landing', 'order', 'authority', 'stages'];
 // Sections are listed by their own keys (`screens.capture`), except those whose value is one setting or a list.
 export const ADAPTER_KEYS = Object.freeze([
   'version', 'name', 'root', 'requires', 'repos', ...REPO_KEYS.map((k) => `repos.${k}`), 'components', 'invariants', 'rules',
-  ...SCREENS_KEYS.map((k) => `screens.${k}`), 'review.diffRead', 'risk', ...TICKETING_KEYS.map((k) => `ticketing.${k}`),
+  ...SCREENS_KEYS.map((k) => `screens.${k}`), 'review.diffRead', ...TICKETING_KEYS.map((k) => `ticketing.${k}`),
   ...DELIVERY_KEYS.map((k) => `delivery.${k}`), 'models', 'budget.adapter', 'onboarded',
 ]);
 
@@ -284,7 +285,8 @@ function problemsOf(raw, { location } = {}) {
     });
   }
 
-  if ('screens' in raw && c.obj(raw.screens, 'screens', SCREENS_KEYS)) {
+  // `screens: none`: the project has no screens (as an unset capture).
+  if ('screens' in raw && raw.screens !== 'none' && c.obj(raw.screens, 'screens', SCREENS_KEYS)) {
     const s = raw.screens;
     if ('routes' in s && s.routes !== null) checkModule(c, s.routes, 'screens.routes', repoNames);
     if ('shared' in s) c.strs(s.shared, 'screens.shared');
@@ -313,25 +315,6 @@ function problemsOf(raw, { location } = {}) {
     }
   }
   if ('review' in raw && c.obj(raw.review, 'review', ['diffRead']) && 'diffRead' in raw.review) c.oneOf(raw.review.diffRead, 'review.diffRead', ['before', 'after']);
-
-  if ('risk' in raw && raw.risk !== 'none') {
-    if (!Array.isArray(raw.risk)) c.add('risk', 'must be a list of risk paths, or `none`');
-    else {
-      const ids = new Set();
-      raw.risk.forEach((r, i) => {
-        const w = `risk[${i}]`;
-        if (!c.obj(r, w, ['id', 'paths', 'reason', 'tests'])) return;
-        if (c.str(r.id, `${w}.id`)) {
-          if (ids.has(r.id)) c.add(`${w}.id`, `\`${r.id}\` is listed twice`);
-          ids.add(r.id);
-        }
-        c.strs(r.paths, `${w}.paths`, { nonEmpty: true });
-        c.str(r.reason, `${w}.reason`);
-        // A risk change needs a test under these globs that fails on the merge-base; with none listed it never could.
-        c.strs(r.tests, `${w}.tests`, { nonEmpty: true });
-      });
-    }
-  }
 
   if ('ticketing' in raw && c.obj(raw.ticketing, 'ticketing', TICKETING_KEYS)) {
     const t = raw.ticketing;
@@ -414,7 +397,7 @@ function normalise(raw, root, source) {
     tests: { fast: testSpec(r.tests?.fast), full: testSpec(r.tests?.full) },
     kinds: { tests: list(r.kinds?.tests), other: list(r.kinds?.other) },
   }));
-  const s = raw.screens ?? {};
+  const s = raw.screens === 'none' ? {} : raw.screens ?? {};
   const t = raw.ticketing ?? {};
   const d = raw.delivery ?? {};
   const o = raw.onboarded ?? {};
@@ -431,7 +414,6 @@ function normalise(raw, root, source) {
     rules: list(raw.rules).map((r) => ({ paths: [...r.paths], read: [...r.read] })),
     screens: { routes: s.routes ? { ...s.routes } : null, shared: list(s.shared), sentinel: list(s.sentinel), langs: list(s.langs).map((l) => ({ lang: l.lang, dir: l.dir })), viewports: list(s.viewports), capture: captureOf(s.capture) },
     review: { diffRead: raw.review?.diffRead ?? 'before' },
-    risk: raw.risk === 'none' ? { confirmed: true, paths: [] } : Array.isArray(raw.risk) ? { confirmed: true, paths: raw.risk.map((r) => ({ id: r.id, paths: [...r.paths], reason: r.reason, tests: [...r.tests] })) } : { confirmed: false, paths: [] },
     ticketing: {
       tracker: t.tracker == null ? null : isObj(t.tracker) ? { module: { ...t.tracker.module } } : t.tracker,
       via: t.via ?? (t.tracker == null ? 'none' : isObj(t.tracker) ? 'module' : 'connector'),
@@ -529,14 +511,13 @@ function moduleRefs(a) {
 const words = (text) => String(text).split(/\s+/).filter(Boolean).length;
 
 /**
- * The adapter's rules, risk paths, modules (distinct `{ repo, path }` files) and operation words against
+ * The adapter's rules, modules (distinct `{ repo, path }` files) and operation words against
  * `budget.adapter`. `over` names each count above its limit; a limit the adapter does not set holds nothing.
  * @type {(adapter: import('./contract.mjs').Adapter) => Promise<{ counts: object, limits: object, over: string[] }>}
  */
 export async function adapterBudget(adapter) {
   const counts = {
     rules: adapter.rules.length,
-    risk: adapter.risk.paths.length,
     modules: new Set(moduleRefs(adapter).map((m) => `${m.repo}/${m.path}`)).size,
     operationWords: Object.values(adapter.ticketing.operations).reduce((n, t) => n + words(t), 0),
   };

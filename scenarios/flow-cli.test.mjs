@@ -70,7 +70,7 @@ test('the flow through the cli: status names one next command at every step; a r
     assert.equal(refused.code, 75);
     assert.match(refused.err, /refused \(review:coverage\)/);
     assert.deepEqual(fs.readFileSync(path.join(p.root, '.wf-test-refusals.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l).id), ['review:coverage']);
-    reviewerWrote(p, h.data.session.id, { files: [path.join(p.wt('TK-7.1', 'server'), 'src/routes/items.controller.mjs')], output: b.output, review: { findings: [], verified: [] } });
+    reviewerWrote(p, h.data.session.id, { files: [path.join(p.wt('TK-7.1', 'server'), 'src/routes/items.controller.mjs')], output: b.output, review: { findings: [], verified: [], risk: { level: 'low', why: 'a route list', needs: [] } } });
     const rec = wf(['review', '--record', b.output]);
     assert.equal(rec.code, 0, rec.err);
     assert.match(next(), /^wf deliver --attempt TK-7\.1/);
@@ -88,6 +88,6 @@ test('the flow through the cli: status names one next command at every step; a r
 test('arguments: subcommands stay in `_`; flags reach handlers by name, repeated ones as a list', async () => {
   const { parseArgv } = await import('../engine/cli.mjs');
   assert.deepEqual(parseArgv(['attempts', '--dry-run']), { _: ['attempts'], flags: { 'dry-run': true } });
-  assert.deepEqual(parseArgv(['--from-07', '--confirm', 'risk', '--confirm', 'tests', '--location=user']), { _: [], flags: { 'from-07': true, confirm: ['risk', 'tests'], location: 'user' } });
+  assert.deepEqual(parseArgv(['--from-07', '--confirm', 'screens', '--confirm', 'tests', '--location=user']), { _: [], flags: { 'from-07': true, confirm: ['screens', 'tests'], location: 'user' } });
   assert.deepEqual(parseArgv(['guide', 'KEY']), { _: ['guide', 'KEY'], flags: {} });
 });

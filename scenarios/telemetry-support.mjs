@@ -9,7 +9,6 @@ export function normalisedAdapter(p, overrides = {}) {
   return {
     version: 2, name: raw.name, root: p.root,
     repos: raw.repos.map((r) => ({ ...r, remote: 'origin', provision: { clone: [], fingerprint: [], install: null, copyIgnored: [] } })),
-    risk: { confirmed: true, paths: raw.risk },
     budget: raw.budget,
   };
 }

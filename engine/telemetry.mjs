@@ -11,7 +11,7 @@ import { attemptState, foldEntries, isSchema1, listAttempts, nowMs, readEvents, 
 import { blameToAttempt, commitTime, repoView } from './introduced.mjs';
 import { readRefusals, refusalCounts } from './refusals.mjs';
 import { legacyRollup, legacyRow } from './legacy07.mjs';
-import { matchesAny, run } from './util.mjs';
+import { run } from './util.mjs';
 
 export const ROW_SCHEMA = 'wf-ticket@1';
 // Activity closer than this is one stretch of work (design section 7, `activeMin`). The design's number, not a tuning knob.
@@ -361,7 +361,7 @@ async function row2(root, attemptId, state, entries) {
   r.screens = new Set(state.screens.flatMap((x) => (x.images ?? []).map((i) => i.sha256 ?? i.file))).size;
   r.refusals = refusalCounts(readRefusals({ root, attempt: attemptId }));
 
-  // The diff, by kind, and whether it touched a risk path.
+  // The diff, by kind.
   let files = null;
   try {
     files = (await changedFiles(root, attemptId)).files;
@@ -372,10 +372,8 @@ async function row2(root, attemptId, state, entries) {
     r.diff = { product: 0, tests: 0, other: 0 };
     for (const f of files) r.diff[f.kind] = (r.diff[f.kind] ?? 0) + (f.added ?? 0) + (f.removed ?? 0);
   } else r.diff = state.closedRow?.diff ?? null;
-  const riskGlobs = (adapter?.risk?.paths ?? []).flatMap((p) => p.paths);
-  const repoPath = (name) => adapter?.repos.find((x) => x.name === name)?.path ?? name;
-  const touchesRisk = files ? files.some((f) => matchesAny(`${repoPath(f.repo)}/${f.path}`, riskGlobs)) : false;
-  r.riskTouched = touchesRisk || state.reviews.some((x) => x.seat === 'second') || state.tests.some((x) => x.kind === 'risk-base');
+  // Whether a reviewer judged it high-risk, or its risk needs ran (a second review, a merge-base test run).
+  r.riskTouched = state.reviews.some((x) => x.risk?.level === 'high' || x.seat === 'second') || state.tests.some((x) => x.kind === 'risk-base');
 
   // Rework, 48 hours after delivery.
   const landed = state.landings.find((l) => l.result === 'landed');

@@ -77,7 +77,7 @@ test('loadAdapter: the normalised adapter has every key of the contract type, de
   const p = makeProject();
   t.after(p.cleanup);
   const a = await loadAdapter(p.root, { env: p.env });
-  assert.deepEqual(Object.keys(a).sort(), ['budget', 'components', 'delivery', 'invariants', 'models', 'name', 'onboarded', 'repos', 'requires', 'review', 'risk', 'root', 'rules', 'screens', 'source', 'ticketing', 'version'].sort());
+  assert.deepEqual(Object.keys(a).sort(), ['budget', 'components', 'delivery', 'invariants', 'models', 'name', 'onboarded', 'repos', 'requires', 'review', 'root', 'rules', 'screens', 'source', 'ticketing', 'version'].sort());
   assert.equal(a.root, p.root);
   assert.equal(a.source.location, 'repo');
   assert.match(a.source.hash, /^[0-9a-f]{64}$/);
@@ -85,24 +85,23 @@ test('loadAdapter: the normalised adapter has every key of the contract type, de
   assert.equal(a.repos[0].remote, 'origin');
   assert.deepEqual(a.repos[0].provision, { clone: [], fingerprint: [], install: null, copyIgnored: [] });
   assert.deepEqual(a.repos[1].tests.full.lock, { name: 'fixture-suite', count: 1 });
-  assert.deepEqual(a.risk, { confirmed: true, paths: [{ id: 'sums', paths: ['server/src/core/**'], reason: 'computes values written to storage (fixture)', tests: ['server/test/**'] }] });
   assert.deepEqual(a.delivery.order, ['server', 'client']);
   assert.deepEqual(a.delivery.authority, { push: 'agent', mergeRequest: 'agent', merge: 'person' });
   assert.deepEqual(a.onboarded, { at: null, engine: null, hashes: {} });
   assert.deepEqual(a.models, {});
 
-  const bare = makeProject({ overrides: { risk: undefined, review: undefined, ticketing: undefined, delivery: undefined, budget: undefined, screens: undefined, components: undefined } });
+  const bare = makeProject({ overrides: { review: undefined, ticketing: undefined, delivery: undefined, budget: undefined, screens: undefined, components: undefined } });
   t.after(bare.cleanup);
   const b = await loadAdapter(bare.root, { env: bare.env });
-  assert.deepEqual(b.risk, { confirmed: false, paths: [] });
   assert.equal(b.review.diffRead, 'before');
   assert.deepEqual(b.ticketing, { tracker: null, via: 'none', idPattern: null, take: null, followUps: { mode: 'off' }, operations: {} });
   assert.deepEqual(b.delivery, { landing: 'direct', order: ['server', 'client'], authority: { push: 'agent', mergeRequest: 'agent', merge: 'person' }, stages: [] });
   assert.deepEqual(b.screens, { routes: null, shared: [], sentinel: [], langs: [], viewports: [], capture: null });
-  assert.deepEqual(b.budget, { adapter: { rules: null, risk: null, modules: null, operationWords: null } });
-  const none = makeProject({ overrides: { risk: 'none' } });
+  assert.deepEqual(b.budget, { adapter: { rules: null, modules: null, operationWords: null } });
+  // `screens: none` is a project with no screens, as an unset capture.
+  const none = makeProject({ overrides: { screens: 'none' } });
   t.after(none.cleanup);
-  assert.deepEqual((await loadAdapter(none.root, { env: none.env })).risk, { confirmed: true, paths: [] });
+  assert.deepEqual((await loadAdapter(none.root, { env: none.env })).screens, { routes: null, shared: [], sentinel: [], langs: [], viewports: [], capture: null });
 });
 
 test('checkAdapter: the fixture is valid; every adapter key in budget.json is checked; problems name the key', async () => {
@@ -132,7 +131,6 @@ test('checkAdapter: the fixture is valid; every adapter key in budget.json is ch
     'screens.viewports': [{ screens: { viewports: [0] } }, /^screens\.viewports\[0\]:/],
     'screens.capture': [{ screens: { capture: 'cap {out} {size}' } }, /^screens\.capture: unknown placeholder \{size\}/],
     'review.diffRead': [{ review: { diffRead: 'never' } }, /^review\.diffRead:/],
-    risk: [{ risk: [{ id: 'r', paths: ['a/**'], reason: 'x', tests: [] }] }, /^risk\[0\]\.tests:/],
     'ticketing.tracker': [{ ticketing: { tracker: { module: { repo: 'nowhere', path: 't.mjs' } } } }, /^ticketing\.tracker\.module\.repo:/],
     'ticketing.via': [{ ticketing: { via: 'carrier-pigeon' } }, /^ticketing\.via:/],
     'ticketing.idPattern': [{ ticketing: { idPattern: '([' } }, /^ticketing\.idPattern:/],
@@ -159,6 +157,8 @@ test('checkAdapter: dropped and unknown keys, stage kinds and modules, all probl
   const problems = await checkAdapter({ ...good, lanes: ['quick'], strategy: {}, colour: 'blue', delivery: { stages: [{ do: 'teleport' }, { do: 'module' }, { do: 'deploy' }, { do: 'merge-request', repos: ['nowhere'] }] } });
   assert.ok(problems.includes('lanes: dropped in schema 2: every ticket goes through one flow'));
   assert.ok(problems.some((x) => x.startsWith('strategy: dropped')));
+  // Risk paths are gone: reviewers judge each change's risk.
+  assert.ok((await checkAdapter({ ...good, risk: 'none' })).some((x) => /^risk: dropped .*reviewers judge each change's risk/.test(x)));
   assert.ok(problems.includes('colour: unknown key'));
   assert.ok(problems.some((x) => x.startsWith('delivery.stages[0].do: must be one of')));
   assert.ok(problems.some((x) => x.startsWith('delivery.stages[1].module:')));
@@ -179,18 +179,18 @@ test('loadAdapter: an invalid adapter throws one error listing every problem wit
   await assert.rejects(loadAdapter(p.root, { env: p.env }), (e) => e instanceof WfError && e.message.startsWith(p.adapterFile) && /lanes: dropped/.test(e.message) && /review\.diffRead/.test(e.message));
 });
 
-test('adapterBudget: rules, risk paths, distinct modules and operation words against budget.adapter', async (t) => {
+test('adapterBudget: rules, distinct modules and operation words against budget.adapter', async (t) => {
   const p = makeProject({ overrides: {
     rules: [{ paths: ['client/src/**'], read: ['client/README.md'] }],
     ticketing: { tracker: { module: { repo: 'server', path: '.workflow/tracker.mjs' } }, via: 'connector', operations: { search: 'Search open issues for the text.', read: 'Read the issue back.' } },
     delivery: { stages: [{ do: 'module', module: { repo: 'server', path: '.workflow/tracker.mjs' } }, { do: 'module', module: { repo: 'client', path: 'deliver.mjs' } }] },
-    budget: { adapter: { rules: 1, risk: 0, modules: 4, operationWords: 5 } },
+    budget: { adapter: { rules: 0, modules: 4, operationWords: 5 } },
   } });
   t.after(p.cleanup);
   const r = await adapterBudget(await loadAdapter(p.root, { env: p.env }));
-  assert.deepEqual(r.counts, { rules: 1, risk: 1, modules: 3, operationWords: 10 });
-  assert.deepEqual(r.limits, { rules: 1, risk: 0, modules: 4, operationWords: 5 });
-  assert.deepEqual(r.over, ['risk', 'operationWords']);
+  assert.deepEqual(r.counts, { rules: 1, modules: 3, operationWords: 10 });
+  assert.deepEqual(r.limits, { rules: 0, modules: 4, operationWords: 5 });
+  assert.deepEqual(r.over, ['rules', 'operationWords']);
   const unset = makeProject({ overrides: { budget: undefined } });
   t.after(unset.cleanup);
   assert.deepEqual((await adapterBudget(await loadAdapter(unset.root, { env: unset.env }))).over, []);

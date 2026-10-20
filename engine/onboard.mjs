@@ -15,7 +15,6 @@ import {
 import { SECRETS_SUFFIX, secretsCatalogFile } from './config.mjs';
 import { isInstructionDoc, repoFiles } from './scan.mjs';
 import { stateFolderWarnings } from './state-folders.mjs';
-import { matchesAny } from './util.mjs';
 
 const require = createRequire(import.meta.url);
 const YAML = require('./vendor/yaml/dist/index.js');
@@ -26,16 +25,14 @@ const clip = (s, n = 160) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 const show = (v) => (v === null || v === undefined ? 'unset' : clip(typeof v === 'string' ? v : JSON.stringify(v)));
 const same = (a, b) => canonicalJson(a ?? null) === canonicalJson(b ?? null);
 const SCREEN_KEYS = ['routes', 'shared', 'sentinel', 'langs', 'viewports', 'capture'];
-const COST = { money: 'money computed', external: 'writes to external systems', data: 'data migrated', access: 'access granted' };
 
 // The shape `wf init --draft <file>` reads (JSON or YAML): any subset of the policy keys, adapter-shaped.
 export const DRAFT_SHAPE = `{
-  "risk": [{ "id": "<area>", "paths": ["<repo>/<dir>/**"], "reason": "<what a mistake costs, citing scanned files>", "tests": ["<repo>/<tests>/**"] }] or "none",
   "review": { "diffRead": "before" | "after" },
   "delivery": { "stages": [{ "do": "land" }, { "do": "status", "to": "<status>" }] },
   "ticketing": { "operations": { "<operation>": "<plain words>" } },
   "tests": { "<repo>": { "fast": { "run": "<command>" }, "full": { "run": "<command>" } } },
-  "screens": { "capture": { "run": "<command with {out} {viewport} {lang} {routes}>" } or { "module": { "repo": "<repo>", "path": "<file>" } }, "routes": { "repo": "<repo>", "path": "<file>" }, "shared": [], "sentinel": [], "langs": [{ "lang": "<code>", "dir": "ltr" }], "viewports": [<width>] }
+  "screens": "none" or { "capture": { "run": "<command with {out} {viewport} {lang} {routes}>" } or { "module": { "repo": "<repo>", "path": "<file>" } }, "routes": { "repo": "<repo>", "path": "<file>" }, "shared": [], "sentinel": [], "langs": [{ "lang": "<code>", "dir": "ltr" }], "viewports": [<width>] }
 }`;
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -83,18 +80,14 @@ export function locate(root, env = process.env) {
 // Policy values: one canonical form per POLICY_KEYS key, read from a raw adapter (or a normalised one)
 // ---------------------------------------------------------------------------------------------------------------------
 
-const normRisk = (r) => ({ id: r.id, paths: r.paths ?? [], reason: r.reason ?? '', tests: r.tests ?? [] });
 const normTest = (t) => (t ? { ...(t.run ? { run: t.run } : {}), ...(t.module ? { module: { repo: t.module.repo, path: t.module.path } } : {}), ...(t.lock ? { lock: { name: t.lock.name, count: t.lock.count ?? 1 } } : {}) } : null);
 export function policyOf(raw) {
-  const risk = raw?.risk === 'none' ? 'none' : Array.isArray(raw?.risk) ? raw.risk.map(normRisk)
-    : raw?.risk && typeof raw.risk === 'object' && 'confirmed' in raw.risk ? (raw.risk.confirmed ? (raw.risk.paths.length ? raw.risk.paths.map(normRisk) : 'none') : null) : null;
   return {
-    risk,
     'review.diffRead': raw?.review?.diffRead ?? null,
     'delivery.stages': raw?.delivery?.stages ?? null,
     'ticketing.operations': raw?.ticketing?.operations ?? {},
     tests: Object.fromEntries((raw?.repos ?? []).map((r) => [r.name, { fast: normTest(r.tests?.fast), full: normTest(r.tests?.full) }])),
-    screens: Object.fromEntries(SCREEN_KEYS.map((k) => [k, raw?.screens?.[k] ?? null])),
+    screens: raw?.screens === 'none' ? 'none' : Object.fromEntries(SCREEN_KEYS.map((k) => [k, raw?.screens?.[k] ?? null])),
   };
 }
 const topOf = (key) => POLICY_KEYS.find((k) => key === k || key.startsWith(`${k}.`));
@@ -113,88 +106,6 @@ export const handEditedKeys = (raw) => {
 };
 
 // ---------------------------------------------------------------------------------------------------------------------
-// Risk from facts: what a mistake costs, per area; areas are the project's own folders
-// ---------------------------------------------------------------------------------------------------------------------
-
-const factFile = (p) => p.replace(/:\d+$/, '');
-const docLines = (facts, kinds) => facts.repos.flatMap((r) => r.facts.filter((f) => kinds.includes(f.kind) && /:\d+$/.test(f.path)));
-const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-const wordIn = (name, text) => name.length >= 3 && new RegExp(`\\b${escapeRe(name.replace(/s$/i, ''))}s?\\b`, 'i').test(text);
-
-// Tests for an area: test files under it or named after it; else the repo's test folders; else where its tests would go.
-function testGlobs(repo, area, name) {
-  const prefix = repo.path === '.' ? '' : `${repo.path}/`;
-  const own = repo.tests.filter((t) => t.startsWith(`${area}/`) || t.split('/').slice(0, -1).includes(name) || path.basename(t).toLowerCase().startsWith(name.toLowerCase()));
-  const dirs = [...new Set(own.map((t) => path.posix.dirname(t)))];
-  if (own.length && dirs.length <= 3) return dirs.map((d) => `${d}/**`);
-  const roots = [...new Set(repo.tests.map((t) => {
-    const segs = t.slice(prefix.length).split('/');
-    const i = segs.findIndex((s) => /^(tests?|__tests__|specs?|e2e)$/i.test(s));
-    return i >= 0 ? `${prefix}${segs.slice(0, i + 1).join('/')}` : null;
-  }).filter(Boolean))];
-  return roots.length ? roots.slice(0, 3).map((d) => `${d}/**`) : [`${area}/**/*.{test,spec}.*`];
-}
-
-/** Risk areas from the scan, ranked: named by the project's documents first, then by how many kinds of cost they carry. */
-export function riskFromFacts(facts) {
-  const lines = docLines(facts, ['invariants-doc', 'instruction-doc']);
-  const invariantLines = docLines(facts, ['invariants-doc']);
-  const areas = new Map();
-  const areaFor = (repo, area) => {
-    if (!areas.has(area)) areas.set(area, { repo, area, name: area.split('/').pop(), costs: new Map(), rounding: null });
-    return areas.get(area);
-  };
-  for (const repo of facts.repos) {
-    for (const f of repo.facts) {
-      if (!f.area) continue;
-      if (f.kind === 'rounding') areaFor(repo, f.area).rounding ??= f;
-      const cost = { 'decimal-type': 'money', 'currency-type': 'money', 'webhook-handler': 'external', 'queue-consumer': 'external', migration: 'data', auth: 'access', permission: 'access', 'outbound-client': f.writes ? 'external' : null }[f.kind];
-      if (!cost) continue;
-      const a = areaFor(repo, f.area);
-      if (!a.costs.has(cost)) a.costs.set(cost, []);
-      a.costs.get(cost).push(f);
-    }
-    // A module the project's invariants name, even with no cost fact of its own.
-    for (const m of repo.modules) {
-      const area = repo.path === '.' ? m : `${repo.path}/${m}`;
-      if (!areas.has(area) && invariantLines.some((l) => wordIn(area.split('/').pop(), l.evidence))) areaFor(repo, area);
-    }
-  }
-  const out = [];
-  for (const a of areas.values()) {
-    const named = lines.find((l) => wordIn(a.name, l.evidence)) ?? null;
-    if (a.rounding && a.costs.has('money')) a.costs.get('money').push(a.rounding);
-    if (!a.costs.size && !named) continue;
-    const cites = [...a.costs.entries()].map(([cost, xs]) => `${COST[cost]}: ${[...new Set(xs.map((f) => `${f.kind} ${f.path}`))].slice(0, 3).join(', ')}`);
-    if (named) cites.push(`named in ${named.path}: "${clip(named.evidence, 90)}"`);
-    if (!a.costs.size) cites.unshift(`files: ${a.repo.files.filter((f) => f.startsWith(`${a.area}/`)).slice(0, 3).join(', ')}`);
-    const files = [...a.costs.values()].flat().map((f) => factFile(f.path));
-    out.push({ id: a.name, area: a.area, rank: [named ? 1 : 0, a.costs.size, files.length], files, entry: { id: a.name, paths: [`${a.area}/**`], reason: cites.join('; '), tests: testGlobs(a.repo, a.area, a.name) } });
-  }
-  out.sort((x, y) => y.rank[0] - x.rank[0] || y.rank[1] - x.rank[1] || y.rank[2] - x.rank[2] || x.area.localeCompare(y.area));
-  const ids = new Map();
-  for (const x of out) ids.set(x.id, (ids.get(x.id) ?? 0) + 1);
-  for (const x of out) if (ids.get(x.id) > 1) x.entry.id = x.id = x.area.replace(/[^\w-]+/g, '-');
-  return out;
-}
-
-// A draft's risk entry must guard files that exist and give a reason that cites a scanned file.
-function draftRiskProblems(list, facts) {
-  const files = facts.repos.flatMap((r) => r.files);
-  const problems = [];
-  for (const r of list) {
-    if (!r?.id || !Array.isArray(r.paths) || !r.paths.length) {
-      problems.push(`risk entry ${JSON.stringify(r?.id ?? r)} needs an id and paths`);
-      continue;
-    }
-    if (!files.some((f) => matchesAny(f, r.paths))) problems.push(`risk \`${r.id}\`: its paths (${r.paths.join(', ')}) match no file in the scan, so they guard nothing`);
-    const cited = String(r.reason ?? '').match(/[\w.@-]+(?:\/[\w.@-]+)+/g) ?? [];
-    if (!cited.some((c) => files.includes(c.replace(/:\d+$/, '')) || files.some((f) => f.startsWith(`${c.replace(/\/$/, '')}/`)))) problems.push(`risk \`${r.id}\`: its reason cites no scanned file (name the files the scan found)`);
-  }
-  return problems;
-}
-
-// ---------------------------------------------------------------------------------------------------------------------
 // proposePolicy
 // ---------------------------------------------------------------------------------------------------------------------
 
@@ -202,7 +113,6 @@ function draftRiskProblems(list, facts) {
 function draftPolicy(draft) {
   if (!draft) return {};
   const out = {};
-  if (draft.risk !== undefined) out.risk = draft.risk === 'none' ? 'none' : (draft.risk ?? []).map(normRisk);
   if (draft.review?.diffRead !== undefined) out['review.diffRead'] = draft.review.diffRead;
   if (draft.delivery?.stages !== undefined) out['delivery.stages'] = draft.delivery.stages;
   if (draft.ticketing?.operations !== undefined) out['ticketing.operations'] = draft.ticketing.operations;
@@ -221,8 +131,8 @@ function testsFromFacts(repo) {
   return { value: { fast: spec(fast), full: spec([...fast, ...slow]) }, cites: [...fast, ...slow].map((s) => `${s.path} ${s.evidence}`) };
 }
 
-/** proposePolicy(facts, current, draft?) → PolicyDiff (engine/contract.mjs), plus `overBudget`: risk areas not proposed
- * because the adapter's risk budget is full. Hand-edited keys come first, marked, and are never part of `--confirm all`. */
+/** proposePolicy(facts, current, draft?) → PolicyDiff (engine/contract.mjs). Hand-edited keys come first, marked, and are
+ * never part of `--confirm all`. */
 export async function proposePolicy(facts, current, draft) {
   const raw = rawOf(current);
   const cur = policyOf(raw);
@@ -233,38 +143,9 @@ export async function proposePolicy(facts, current, draft) {
     if (!same(from, to)) changes.push({ key, from: from ?? null, to: to ?? null, reason, handEdited: handEdited.has(topOf(key)) });
   };
 
-  // risk
-  let overBudget = [];
-  if (want.risk !== undefined) {
-    if (want.risk !== 'none') {
-      const problems = draftRiskProblems(want.risk, facts);
-      if (problems.length) throw new WfError(`the draft's risk paths are refused:\n- ${problems.join('\n- ')}`);
-    }
-    if (want.risk === 'none' || !Array.isArray(cur.risk)) change('risk', cur.risk, want.risk, want.risk === 'none' ? 'the draft finds nothing whose mistake costs money, external writes, data or access' : `the draft's risk paths: ${want.risk.map((r) => `${r.id} (${r.reason})`).join('; ')}`);
-    else {
-      for (const r of want.risk) change(`risk.${r.id}`, cur.risk.find((x) => x.id === r.id), r, r.reason);
-      for (const r of cur.risk) if (!want.risk.some((x) => x.id === r.id)) change(`risk.${r.id}`, r, null, 'the draft drops it');
-    }
-  } else {
-    const found = riskFromFacts(facts);
-    const curList = Array.isArray(cur.risk) ? cur.risk : [];
-    const files = facts.repos.flatMap((r) => r.files);
-    const covered = (x) => curList.some((r) => x.files.some((f) => matchesAny(f, r.paths)) || matchesAny(`${x.area}/x`, r.paths));
-    let fresh = found.filter((x) => !covered(x) && !curList.some((r) => r.id === x.id));
-    const limit = raw?.budget?.adapter?.risk;
-    if (Number.isInteger(limit) && curList.length + fresh.length > limit) {
-      const room = Math.max(0, limit - curList.length);
-      overBudget = fresh.slice(room).map((x) => ({ id: x.id, paths: x.entry.paths, reason: x.entry.reason }));
-      fresh = fresh.slice(0, room);
-    }
-    if (cur.risk === null && !found.length) change('risk', null, 'none', 'the scan found no decimal or currency code, external writes, migrations or access code, and no area the project\'s documents name');
-    for (const x of fresh) change(`risk.${x.id}`, null, x.entry, x.entry.reason);
-    for (const r of curList) if (!files.some((f) => matchesAny(f, r.paths))) change(`risk.${r.id}`, r, null, `its paths (${r.paths.join(', ')}) match no file now`);
-  }
-
   // review.diffRead, delivery.stages
   const pick = (key, fallback, why) => change(key, cur[key], want[key] !== undefined ? want[key] : cur[key] ?? fallback, want[key] !== undefined ? 'from the draft' : why);
-  pick('review.diffRead', 'before', 'not set: the person reads a risk diff before it merges (`after` merges first and keeps the revert)');
+  pick('review.diffRead', 'before', 'not set: when a reviewer asks for the person\'s diff-read, it comes before the merge (`after` merges first and keeps the revert)');
   pick('delivery.stages', [{ do: 'land' }], 'not set: each repo\'s part lands on its base');
 
   // ticketing.operations, per operation
@@ -283,13 +164,14 @@ export async function proposePolicy(facts, current, draft) {
   for (const [name, t] of Object.entries(want.tests ?? {})) if (!facts.repos.some((r) => r.name === name)) change(`tests.${name}`, cur.tests[name] ?? null, t, 'from the draft');
 
   // screens, per setting
-  for (const k of SCREEN_KEYS) if (want.screens && k in want.screens) change(`screens.${k}`, cur.screens[k], want.screens[k], want.screens.reasons?.[k] ?? 'from the draft');
+  if (want.screens === 'none') change('screens', cur.screens, 'none', 'the draft: the project has no screens');
+  else for (const k of SCREEN_KEYS) if (want.screens && k in want.screens) change(`screens.${k}`, cur.screens === 'none' ? null : cur.screens[k], want.screens[k], want.screens.reasons?.[k] ?? 'from the draft');
 
   // A hand edit with no proposed change is still shown, so it is never adopted or overwritten silently.
   for (const k of handEdited) if (!changes.some((c) => topOf(c.key) === k)) changes.push({ key: k, from: cur[k], to: cur[k], reason: 'edited by hand since onboarding wrote it; confirm the key to keep it as the onboarded value', handEdited: true });
   changes.sort((a, b) => Number(b.handEdited) - Number(a.handEdited));
   const unchanged = POLICY_KEYS.filter((k) => !changes.some((c) => topOf(c.key) === k));
-  return { changes, unchanged, overBudget };
+  return { changes, unchanged };
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -299,24 +181,14 @@ export async function proposePolicy(facts, current, draft) {
 function applyChange(js, c) {
   const top = topOf(c.key);
   const sub = c.key.slice(top.length + 1);
-  if (top === 'risk') {
-    if (!sub) {
-      js.risk = c.to;
-      return;
-    }
-    const list = Array.isArray(js.risk) ? js.risk : [];
-    const i = list.findIndex((r) => r.id === sub);
-    if (c.to === null) {
-      if (i >= 0) list.splice(i, 1);
-    } else if (i >= 0) list[i] = c.to;
-    else list.push(c.to);
-    js.risk = list.length ? list : 'none';
-  } else if (top === 'tests') {
+  if (top === 'screens' && !sub) js.screens = c.to;
+  else if (top === 'tests') {
     const repo = (js.repos ?? []).find((r) => r.name === sub);
     if (!repo) throw new WfError(`tests.${sub}: no repo named \`${sub}\` in the adapter`);
     repo.tests = Object.fromEntries(Object.entries(c.to ?? {}).filter(([, v]) => v));
   } else {
     const keys = [...top.split('.'), ...(sub ? [sub] : [])];
+    if (top === 'screens' && js.screens === 'none') js.screens = {};
     let o = js;
     for (const k of keys.slice(0, -1)) o = o[k] ??= {};
     if (c.to === null || c.to === undefined) delete o[keys.at(-1)];
@@ -340,16 +212,10 @@ function commitUserFolder(file, message) {
   g(['-c', 'user.name=agentic-workflow', '-c', 'user.email=agentic-workflow@localhost', 'commit', '--quiet', '-m', message, '--', path.basename(file)]);
 }
 
-// What a finished onboarding must hold: `risk` confirmed; with `screens.capture`, a capture module or a command writing
-// to {out}.
-const captureSet = (c) => Boolean(c?.module) || /\{out\}/.test(typeof c === 'string' ? c : c?.run ?? '');
-const unfinished = (js, finish) => finish.filter((k) => (k === 'risk' ? js.risk !== 'none' && !Array.isArray(js.risk) : k === 'screens.capture' ? !captureSet(js.screens?.capture) : false));
-
-/** writeAdapter(root, diff, confirmed, { location?, finish?, env? }) → { written, file, keys }. `diff.seed` is the raw
- * adapter started from when there is none yet (or when it replaces a 0.7 one). `finish`: keys the result must hold
- * (`risk`, `screens.capture`); while one is unset the write is refused and nothing is written. The result passes
- * checkAdapter and the adapter budget, or nothing is written. */
-export async function writeAdapter(root, diff, confirmed, { location, finish = [], env = process.env } = {}) {
+/** writeAdapter(root, diff, confirmed, { location?, env? }) → { written, file, keys }. `diff.seed` is the raw adapter
+ * started from when there is none yet (or when it replaces a 0.7 one). The result passes checkAdapter and the adapter
+ * budget, or nothing is written. */
+export async function writeAdapter(root, diff, confirmed, { location, env = process.env } = {}) {
   const found = locate(root, env);
   const replacing = !found || found.raw?.version !== 2;
   if (found && found.raw?.version !== 2 && !diff.seed) throw new WfError(`${found.file} is a 0.7 adapter`, { hint: 'run `wf init --from-07`' });
@@ -359,9 +225,6 @@ export async function writeAdapter(root, diff, confirmed, { location, finish = [
   const picked = confirmedChanges(diff, confirmed);
   for (const c of picked) applyChange(js, c);
   const keys = picked.map((c) => c.key);
-
-  const missing = unfinished(js, finish);
-  if (missing.length) throw new WfError(`onboarding cannot finish: ${missing.map((k) => (k === 'risk' ? '`risk` is unconfirmed (confirm the proposed areas, or `risk: none`)' : '`screens.capture` is unset, or its command does not write to {out}')).join('; ')}; nothing written`);
 
   // Hashes: every policy key a confirmed change touched, and on a new adapter every key it holds.
   const pol = policyOf(js);
@@ -482,7 +345,6 @@ export function renderDiff(name, diff, extra = []) {
     out.push('', 'Proposed:');
     for (const c of rest) out.push(`  ${c.key}: ${show(c.from)} → ${show(c.to)}`, `    why: ${c.reason}`);
   }
-  if (diff.overBudget?.length) out.push('', `Not proposed, over the adapter's risk budget: ${diff.overBudget.map((x) => x.id).join(', ')}`);
   if (diff.unchanged.length) out.push('', `Unchanged: ${diff.unchanged.join(', ')}`);
   return [...out, ...extra].join('\n');
 }
@@ -507,7 +369,8 @@ export async function cmdInit(ctx, args) {
   else if (found) current = await loadAdapter(root, { env });
 
   const facts = await scan(root, { repos: (current?.repos ?? migration?.seed.repos)?.map((r) => ({ name: r.name, path: r.path })) });
-  const merged = migration ? { ...migration.draft, ...(draft ?? {}), screens: { ...migration.draft.screens, ...(draft?.screens ?? {}) } } : draft;
+  const screens = draft?.screens === 'none' ? 'none' : { ...migration?.draft.screens, ...(draft?.screens ?? {}) };
+  const merged = migration ? { ...migration.draft, ...(draft ?? {}), screens } : draft;
   const diff = await proposePolicy(facts, current, merged);
   if (!current) {
     diff.seed = migration?.seed ?? freshSeed(root, facts);
@@ -518,7 +381,7 @@ export async function cmdInit(ctx, args) {
   }
   const extra = migration ? migration.report() : [];
   const name = current?.name ?? diff.seed?.name ?? path.basename(root);
-  const data = { diff, draftShape: DRAFT_SHAPE, facts: { root, repos: facts.repos.map((r) => ({ name: r.name, path: r.path, modules: r.modules, facts: r.facts.map(({ kind, path: p, evidence }) => ({ kind, path: p, evidence })) })) }, ...(migration ? { migration: migration.data } : {}) };
+  const data = { diff, draftShape: DRAFT_SHAPE, facts: { root, repos: facts.repos.map((r) => ({ name: r.name, path: r.path, facts: r.facts.map(({ kind, path: p, evidence }) => ({ kind, path: p, evidence })) })) }, ...(migration ? { migration: migration.data } : {}) };
   if (!confirm.length) {
     if (!diff.changes.length) return { text: `${renderDiff(name, diff, extra)}\n\nNothing to change; nothing written.`, data };
     const how = [
@@ -529,8 +392,7 @@ export async function cmdInit(ctx, args) {
     ];
     return { text: `${renderDiff(name, diff, extra)}\n\n${how.join('\n')}`, data };
   }
-  const finish = migration ? ['risk', 'screens.capture'] : ['risk'];
-  const res = await writeAdapter(root, diff, confirm, { location, finish, env });
+  const res = await writeAdapter(root, diff, confirm, { location, env });
   const after = res.written && migration ? await migration.afterWrite(res) : [];
   data.written = res;
   return { text: `${renderDiff(name, diff, extra)}\n\n${res.written ? `Wrote ${res.file}: ${res.keys.join(', ') || 'the adapter'}.` : 'Nothing to change; nothing written.'}${after.length ? `\n${after.join('\n')}` : ''}`, data };
@@ -597,8 +459,6 @@ export async function cmdDoctor(ctx) {
     }
   }
   if (adapter) {
-    if (!adapter.risk?.confirmed) add('fail', 'risk', 'risk paths are unconfirmed', 'run `wf init` and confirm the proposed areas (or `risk: none`)');
-    else add('ok', 'risk', adapter.risk.paths.length ? adapter.risk.paths.map((r) => r.id).join(', ') : 'none (confirmed)');
     const edited = handEditedKeys(found.raw);
     if (edited.length) add('warn', 'hand edits', `edited by hand since onboarding wrote them: ${edited.join(', ')}`, 're-run `wf init` to review them; confirming a key keeps it');
     try {
@@ -626,7 +486,7 @@ export async function cmdDoctor(ctx) {
       add('warn', 'modules', `not checked: ${error.message}`);
     }
     if (adapter.invariants && !fs.existsSync(path.resolve(root, adapter.invariants))) add('fail', 'invariants', `${adapter.invariants} does not exist`);
-    if (!adapter.screens?.capture) add('warn', 'screens', '`screens.capture` is unset: no screens are captured', 're-run `wf init` with the capture command');
+    if (!adapter.screens?.capture) add('ok', 'screens', 'none: no capture command, so no screens are captured');
     else if (!adapter.screens.routes) add('warn', 'screens', '`screens.routes` is unset: only a change to a `shared` path captures screens (the `sentinel` set)', 're-run `wf init` with the routes module');
     for (const t of adapter.requires?.tools ?? []) if (spawnSync('sh', ['-c', 'command -v "$1"', 'sh', String(t)]).status !== 0) add('fail', 'tools', `\`${t}\` is not on PATH`);
   }

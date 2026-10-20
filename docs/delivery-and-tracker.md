@@ -69,4 +69,4 @@ An `other` finding (D92) is searched for in the tracker first, then handled by `
 - `digest`: it goes into the person's daily digest (`wf digest`);
 - `off`: it is listed in the delivered comment only.
 
-An `other` finding rated high, or on a risk path, also goes to the person as a priority item in the digest. It does not hold the ticket.
+An `other` finding rated high or critical also goes to the person as a priority item in the digest. It does not hold the ticket.

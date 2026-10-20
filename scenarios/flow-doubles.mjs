@@ -87,7 +87,6 @@ export async function loadAdapter(root) {
     components: raw.components ?? [],
     invariants: raw.invariants ?? null,
     rules: raw.rules ?? [],
-    risk: raw.risk === 'none' ? { confirmed: true, paths: [] } : { confirmed: Array.isArray(raw.risk), paths: raw.risk ?? [] },
     models: raw.models ?? {},
     delivery: { landing: 'direct', order: raw.repos.map((r) => r.name), stages: [], ...(raw.delivery ?? {}) },
   };

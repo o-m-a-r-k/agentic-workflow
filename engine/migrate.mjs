@@ -166,7 +166,7 @@ async function perTicketSteps(root) {
   return ids;
 }
 
-const ORDER = ['version', 'name', 'root', 'requires', 'repos', 'components', 'invariants', 'rules', 'screens', 'review', 'risk', 'ticketing', 'delivery', 'models', 'budget'];
+const ORDER = ['version', 'name', 'root', 'requires', 'repos', 'components', 'invariants', 'rules', 'screens', 'review', 'ticketing', 'delivery', 'models', 'budget'];
 
 /** from07(root, raw, { env }) → { seed, draft, data, report(), afterWrite() }. */
 export async function from07(root, raw, { env = process.env } = {}) {
@@ -248,14 +248,17 @@ export async function from07(root, raw, { env = process.env } = {}) {
   }
   if (gate.leases) drop('gate.leases', 'each lease became the `lock` of the tests that used it');
 
-  // screens.capture from the step that collected artifacts
+  // screens.capture from the step that collected artifacts, only when its command writes each screen to {out}: one that
+  // does not would capture nothing. Screens are optional; with no capture there are none.
   const shotStep = kept.find((s) => s.artifacts) ?? steps.find((s) => s.artifacts);
   let capture = null;
+  let unseeded = null;
   if (shotStep) {
     const repo = repos.find((r) => r.name === shotStep.repo) ?? adapterRepo;
     const where = path.posix.join(repo.path, shotStep.package && shotStep.package !== '.' ? shotStep.package : '');
     const cmd = shotStep.run ? shotStep.run.replace(/\s*\{select\}/g, '') : shotStep.plugin ? `node ${path.posix.join(workflowDir, shotStep.plugin.replace(/^\.\//, ''))}` : null;
-    if (cmd) capture = { value: `cd ${where} && ${cmd.replace(/\{\w+\}/g, (m) => (['{out}', '{viewport}', '{lang}', '{dir}', '{routes}'].includes(m) ? m : ''))}`.replace(/\s+/g, ' ').trim(), step: shotStep.id, artifacts: shotStep.artifacts };
+    if (cmd && cmd.includes('{out}')) capture = { value: `cd ${where} && ${cmd.replace(/\{\w+\}/g, (m) => (['{out}', '{viewport}', '{lang}', '{dir}', '{routes}'].includes(m) ? m : ''))}`.replace(/\s+/g, ' ').trim(), step: shotStep.id, artifacts: shotStep.artifacts };
+    else unseeded = shotStep.id;
   }
 
   // tracker → ticketing, statuses → stages. Item ids: the tracker's prefix and every prefix the old attempt folders show
@@ -334,7 +337,7 @@ export async function from07(root, raw, { env = process.env } = {}) {
   const draft = {
     tests,
     delivery: { stages },
-    screens: capture ? { capture: { run: capture.value }, reasons: { capture: `seeded from the 0.7 step \`${capture.step}\`, which collected ${[].concat(capture.artifacts).join(', ')}; edit it to write each screen to {out} for {viewport} {lang} {routes}` } } : {},
+    screens: capture ? { capture: { run: capture.value }, reasons: { capture: `seeded from the 0.7 step \`${capture.step}\`, which collected ${[].concat(capture.artifacts).join(', ')}` } } : {},
   };
   const imports = productImports(root, repos);
   const modules = await moduleProblems(root, seedRepos, moduleRefsOf({ repos: seedRepos.map((r) => ({ ...r, tests: tests[r.name] })), ticketing, delivery: { stages } }), { via: ticketing.via });
@@ -346,7 +349,7 @@ export async function from07(root, raw, { env = process.env } = {}) {
     out.push('', 'Dropped or moved 0.7 keys:', ...dropped.map((d) => `  ${d.key}: ${d.why}`));
     if (quality.length) out.push('', `\`quality\` (${quality.length} line${quality.length === 1 ? '' : 's'}) moves into ${invariants} when the adapter is written.`);
     if (notes.length) out.push('', 'Notes:', ...notes.map((n) => `  ${n}`));
-    if (!capture) out.push('', '`screens.capture` has no 0.7 step to seed it: pass it with `--draft` (it must write to {out}).');
+    if (unseeded) out.push('', `Screens: the 0.7 step \`${unseeded}\` collected screenshots, but its command does not write each one to {out}, so no capture is proposed. With none there are no screens; a draft may set \`screens.capture\` later.`);
     for (const r of runners) out.push('', `No tests run until ${r} is rewritten for the 0.8 runner contract:`, `  ${MODULE_CONTRACTS.tests}`);
     if (offPattern.length) out.push('', `Items of earlier attempts that ticketing.idPattern (${ticketing.idPattern}) does not match: wf start refuses them as they are. Start one with \`wf start --no-tracker <id>\`, or give the tracker module a \`normalise\` export that maps it to a tracker id:`, ...offPattern.map((i) => `  ${i}`));
     if (modules.length) out.push('', 'Modules that cannot run as named (each loads only as committed on its repo\'s base, from its own folder):', ...modules.map((m) => `  ${m.what}: ${m.module} ${m.problem}`));

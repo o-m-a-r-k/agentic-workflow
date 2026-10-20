@@ -166,15 +166,14 @@ export function configDoubles() {
         repos: raw.repos.map((r) => ({ remote: 'origin', tests: { fast: null, full: null }, ...r })),
         rules: raw.rules ?? [], requires: { connectors: [], tools: [], skills: [], ...(raw.requires ?? {}) },
         screens: { routes: null, capture: null, ...(raw.screens ?? {}) },
-        risk: raw.risk === 'none' ? { confirmed: true, paths: [] } : Array.isArray(raw.risk) ? { confirmed: true, paths: raw.risk } : { confirmed: false, paths: [] },
         ticketing: { operations: {}, ...(raw.ticketing ?? {}) },
         delivery: { stages: [], ...(raw.delivery ?? {}) },
-        budget: { adapter: { rules: null, risk: null, modules: null, operationWords: null, ...(raw.budget?.adapter ?? {}) } },
+        budget: { adapter: { rules: null, modules: null, operationWords: null, ...(raw.budget?.adapter ?? {}) } },
         invariants: raw.invariants ?? null,
       };
     },
     adapterBudget: async (a) => {
-      const counts = { rules: a.rules.length, risk: a.risk.paths.length, modules: 0, operationWords: Object.values(a.ticketing.operations).join(' ').split(/\s+/).filter(Boolean).length };
+      const counts = { rules: a.rules.length, modules: 0, operationWords: Object.values(a.ticketing.operations).join(' ').split(/\s+/).filter(Boolean).length };
       const limits = a.budget.adapter;
       return { counts, limits, over: Object.keys(counts).filter((k) => limits[k] !== null && counts[k] > limits[k]) };
     },

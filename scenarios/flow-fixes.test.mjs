@@ -9,7 +9,7 @@ import path from 'node:path';
 import { git, ledgerLines, reviewerTranscript, runWf } from './helpers/index.mjs';
 import doubles from './flow-doubles.mjs';
 import { spawnSync } from 'node:child_process';
-import { attempt, commitWt, flow, review, reviewerWrote, setup, started } from './flow-fixture.mjs';
+import { HIGH, LOW, attempt, commitWt, flow, review, reviewerWrote, setup, started } from './flow-fixture.mjs';
 import { attemptState } from '../engine/contract.mjs';
 
 const ctxOf = (p) => ({ cwd: p.root, root: p.root, env: { ...process.env }, actor: { runtime: 'claude', id: 'owner-1' }, json: false });
@@ -162,14 +162,16 @@ test('risk-base runs count for the tree they ran on, not by time', async () => {
   try {
     const s = await started(p);
     commitWt(p, s.id, 'server', { 'src/core/sum.mjs': 'export const sum = () => 0;\n', 'test/sum.spec.mjs': '// asserts\n' });
-    await doubles.runTests(p.root, s.id, 'server', 'risk-base');
+    await review(p, s.id, { whole: { risk: { ...HIGH, needs: ['failing-test'] } } });
     const missing = async () => (await flow.mergeFacts(p.root, s.id)).find((f) => f.id === 'merge:risk')?.message ?? '';
+    assert.match(await missing(), /the changed tests of server run on the merge-base/);
+    await doubles.runTests(p.root, s.id, 'server', 'risk-base');
     assert.doesNotMatch(await missing(), /run on the merge-base/);
     // A later commit dated in the past: the earlier run is not on this tree.
     const wt = p.wt(s.id, 'server');
     fs.writeFileSync(path.join(wt, 'test/sum.spec.mjs'), '// asserts nothing now\n');
     git(wt, ['commit', '--quiet', '-am', 'old date'], { env: { GIT_COMMITTER_DATE: '2001-01-01T00:00:00Z', GIT_AUTHOR_DATE: '2001-01-01T00:00:00Z' } });
-    assert.match(await missing(), /risk tests of server run on the merge-base/);
+    assert.match(await missing(), /the changed tests of server run on the merge-base/);
   } finally {
     p.done();
   }
@@ -195,7 +197,7 @@ test('merge facts: fast tests green on HEAD in each changed repo (merge:untested
     const { tree, bundles } = await flow.bundle(p.root, s.id);
     const { session } = await doubles.launchReviewer(p.root, s.id, bundles[0]);
     reviewerTranscript({ home: p.home, cwd: p.root, files: [path.join(p.wt(s.id, 'client'), 'src/pages/items.mjs')], session: session.id });
-    await flow.recordReview(p.root, s.id, { session, tree, findings: [], verified: [] });
+    await flow.recordReview(p.root, s.id, { session, tree, findings: [], verified: [], risk: LOW });
     let facts = await flow.mergeFacts(p.root, s.id);
     assert.deepEqual(facts.map((f) => [f.id, f.fact]), [['merge:untested', 'fast']]);
     assert.match((await flow.cmdStatus(ctxOf(p), args([], {}))).text, /next: wf test fast --repo client/);
@@ -299,7 +301,7 @@ test('the fast fact is the run on the worktree\'s files; untracked files and unc
     const { tree, bundles } = await flow.bundle(p.root, s.id);
     const { session } = await doubles.launchReviewer(p.root, s.id, bundles[0]);
     reviewerTranscript({ home: p.home, cwd: p.root, files: [path.join(p.wt(s.id, 'client'), 'src/pages/items.mjs')], session: session.id });
-    await flow.recordReview(p.root, s.id, { session, tree, findings: [], verified: [] });
+    await flow.recordReview(p.root, s.id, { session, tree, findings: [], verified: [], risk: LOW });
     // An untracked file the tests ran with: the run (as `wf test` records it) is on the worktree's files.
     const wt = p.wt(s.id, 'client');
     fs.writeFileSync(path.join(wt, 'scratch.log'), 'left over\n');
@@ -338,12 +340,12 @@ test('provenance: with no readable transcript the review is recorded unverified,
   try {
     const s = await started(p);
     commitWt(p, s.id, 'server', { 'src/core/sum.mjs': 'export const sum = (xs) => xs.reduce((a, b) => a + b, 0);\n// edge\n', 'test/sum.spec.mjs': '// asserts\n' });
-    const { bundles } = await flow.bundle(p.root, s.id);
-    assert.deepEqual(bundles.map((b) => b.seat), ['whole', 'second']);
     process.env.WF_TEST_NO_TRANSCRIPT = '1';
-    for (const b of bundles) {
+    // The whole seat judges it high-risk (a second review, the diff-read); then the second seat is launched.
+    for (const [seat, body] of [['whole', { risk: { ...HIGH, needs: ['second-review', 'diff-read'] } }], ['second', {}]]) {
+      const b = (await flow.bundle(p.root, s.id)).bundles.find((x) => x.seat === seat);
       const { session } = await doubles.launchReviewer(p.root, s.id, b);
-      fs.writeFileSync(b.output, JSON.stringify({ findings: [], verified: [] }));
+      fs.writeFileSync(b.output, JSON.stringify({ findings: [], verified: [], ...body }));
       const r = await flow.cmdReview(ctxOf(p), args([], { attempt: s.id, record: b.output, session: `${session.runtime}:${session.id}` }));
       assert.match(r.text, /coverage unverified, provenance unverified\)/);
     }
@@ -360,7 +362,7 @@ test('provenance: with no readable transcript the review is recorded unverified,
     commitWt(p, s.id, 'server', { 'src/core/sum.mjs': 'export const sum = (xs) => xs.reduce((a, b) => a + b, 0);\n// edge 2\n' });
     const next = await flow.bundle(p.root, s.id);
     const { session } = await doubles.launchReviewer(p.root, s.id, next.bundles[0]);
-    reviewerWrote(p, session.id, { files: next.bundles[0].productFiles.map((f) => path.join(p.wt(s.id, 'server'), f.slice('server/'.length))), output: next.bundles[0].output, review: { findings: [], verified: [] } });
+    reviewerWrote(p, session.id, { files: next.bundles[0].productFiles.map((f) => path.join(p.wt(s.id, 'server'), f.slice('server/'.length))), output: next.bundles[0].output, review: { findings: [], verified: [], risk: LOW } });
     fs.writeFileSync(next.bundles[0].output, JSON.stringify({ findings: [{ location: 'server/src/core/sum.mjs:1', class: 'goal', severity: 'low', what: 'added later', why: 'by someone else' }], verified: [] }));
     await assert.rejects(flow.cmdReview(ctxOf(p), args([], { attempt: s.id, record: next.bundles[0].output, session: `${session.runtime}:${session.id}` })), (e) => e.refusalId === 'review:independent');
   } finally {
@@ -374,11 +376,12 @@ test('resume loads the attempt once and lists a question its next step just aske
   try {
     const s = await started(p);
     commitWt(p, s.id, 'server', { 'src/core/sum.mjs': 'export const sum = (xs) => xs.reduce((a, b) => a + b, 0);\n// edge\n', 'test/sum.spec.mjs': '// asserts\n' });
+    await review(p, s.id, { whole: { risk: HIGH } });
     await review(p, s.id);
     await doubles.runTests(p.root, s.id, 'server', 'risk-base');
     const r = await flow.cmdResume(ctxOf(p), args([], { attempt: s.id }));
     assert.match(r.text, /next: wf approve D1 /);
-    assert.match(r.text, /questions waiting for the person: D1 "TK-1\.1 touches risk path\(s\) sums\. Read the diff/);
+    assert.match(r.text, /questions waiting for the person: D1 "TK-1\.1: its reviewer asks you to read the diff before it ships \(it computes a total others rely on\)\. Read it/);
     assert.deepEqual(r.data.attempts[0].decisions, ['D1']);
   } finally {
     p.done();

@@ -1,5 +1,5 @@
 // Stream 5: the release check scripts/release.mjs calls. Rule-shaped changes are facts of the tree (refusal ids,
-// commands, adapter keys, event types, words in the texts agents read: role, skill, session-rules and risk-checklist
+// commands, adapter keys, event types, words in the texts agents read: role, skill, session-rules and risk guidance
 // templates; hook code is not counted); a net increase over budget.json fails unless a kept or active plugin proposal
 // accounts for it.
 import test from 'node:test';
@@ -34,7 +34,7 @@ test('the tree at the budget passes; counts are by name and words by total', asy
   const r = await checkRelease({ pluginRoot: tree(t), budget });
   assert.deepEqual(r.problems, []);
   assert.equal(r.ok, true);
-  assert.equal(r.counts.refusals.length, 19);
+  assert.equal(r.counts.refusals.length, 18);
   assert.equal(r.counts.words.total, 100); // the hook's code and its string literals are not counted
   assert.equal(r.classification.ruleShaped, false);
 });

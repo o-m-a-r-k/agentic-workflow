@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { clearDoubles, setDoubles, worktreeDir } from '../engine/contract.mjs';
-import { git, makeProject, reviewerTranscript, transcript, writeDoubles } from './helpers/index.mjs';
+import { git, ledgerLines, makeProject, reviewerTranscript, transcript, writeDoubles } from './helpers/index.mjs';
 import doubles, { answer } from './flow-doubles.mjs';
 import { implements08 as attempt } from '../engine/attempt.mjs';
 import { implements08 as flow } from '../engine/flow.mjs';
@@ -34,17 +34,24 @@ export async function started(p, item = 'TK-1', criteria = ['the sum of an empty
   return s;
 }
 
+export const LOW = { level: 'low', why: 'a small change with tests', needs: [] };
+export const HIGH = { level: 'high', why: 'it computes a total others rely on', needs: ['second-review', 'failing-test', 'diff-read'] };
+
 // Launch reviewers through bundle + the launch double, write a transcript that read every product file of the seat, and
 // record the review. Returns the record result per seat.
 export async function review(p, id, perSeat = {}) {
   const { tree, bundles } = await flow.bundle(p.root, id);
   const out = {};
-  for (const b of bundles) {
+  // A seat already recorded on this tree is not reviewed again (the second seat joins once a judgement needs it).
+  const done = ledgerLines(p.root, id).filter((e) => e.type === 'review.recorded' && e.data.tree === tree).map((e) => e.data.seat);
+  for (const b of bundles.filter((x) => !done.includes(x.seat))) {
     const { session } = await doubles.launchReviewer(p.root, id, b);
     const files = b.productFiles.map((f) => path.join(p.wt(id, f.split('/')[0]), f.slice(f.indexOf('/') + 1)));
     const seat = perSeat[b.seat] ?? perSeat.all ?? {};
     reviewerTranscript({ home: p.home, cwd: p.root, files, skip: seat.skip ?? [], session: session.id });
-    out[b.seat] = await flow.recordReview(p.root, id, { session, seat: b.seat, tree, findings: seat.findings ?? [], verified: seat.verified ?? [] });
+    // First seats judge the risk (low with no needs unless the test says otherwise); the second seat gives `met`.
+    const judged = b.seat === 'second' ? { met: seat.met ?? (b.needs ?? []).map((need) => ({ need, met: true })) } : { risk: seat.risk ?? LOW };
+    out[b.seat] = await flow.recordReview(p.root, id, { session, seat: b.seat, tree, findings: seat.findings ?? [], verified: seat.verified ?? [], ...judged });
   }
   // The fast tests ran on the reviewed tree (`wf review` runs them in parallel).
   for (const repo of Object.keys((await doubles.attemptState(p.root, id)).repos)) await doubles.runTests(p.root, id, repo, 'fast');

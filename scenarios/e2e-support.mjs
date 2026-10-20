@@ -50,7 +50,8 @@ process.stdin.on('end', () => {
     lines.push({ type: 'user', sessionId: session, cwd: process.cwd(), timestamp: stamp(), uuid: 'r' + (++n), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: 'file contents' }] } });
   }
   // The review is written with the file tool, as Claude Code does: the transcript carries the write.
-  const content = JSON.stringify({ findings: mine.findings || [], verified: mine.verified || [] }, null, 2);
+  const judged = seat === 'second' ? { met: mine.met || list('Needs to verify').map((need) => ({ need, met: true })) } : { risk: mine.risk || { level: 'low', why: 'a small change with tests', needs: [] } };
+  const content = JSON.stringify({ findings: mine.findings || [], verified: mine.verified || [], ...judged }, null, 2);
   if (output) {
     const id = 'toolu_r' + (++n);
     lines.push({ type: 'assistant', sessionId: session, cwd: process.cwd(), timestamp: stamp(), uuid: 'r' + (++n), message: { role: 'assistant', model: 'fake-model', content: [{ type: 'tool_use', id, name: 'Write', input: { file_path: output, content } }], usage: { input_tokens: 10, output_tokens: 2 } } });

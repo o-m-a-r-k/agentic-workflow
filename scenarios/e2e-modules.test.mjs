@@ -22,7 +22,6 @@ function project() {
         { name: 'client', path: 'client', base: 'stable', tests: { fast: { run: 'node -e "process.exit(0)"' } }, kinds: { tests: ['test/**'], other: ['**/*.md'] } },
       ],
       screens: { routes: { repo: 'client', path: 'scripts/routes-of.mjs' }, shared: [], sentinel: [], langs: [{ lang: 'l1', dir: 'ltr' }], viewports: [400] },
-      risk: 'none',
       delivery: { landing: 'direct', order: ['server', 'client'], stages: [{ do: 'module', module: { repo: 'server', path: '.workflow/delivery/ship.mjs' } }, { do: 'status', to: 'Ready', comment: 'uat' }] },
     },
   });

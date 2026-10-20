@@ -1,5 +1,6 @@
-// Stream 1: criteria (limit, hash, loosening waiver), the bundle (contents, consumers, risk, split by size), and recording
-// a review (tree, independence, coverage from a fixture transcript, unverified coverage).
+// Stream 1: criteria (limit, hash, loosening waiver), the bundle (contents, consumers, the risk guidance, the second seat
+// a risk judgement asks for, split by size), and recording a review (tree, independence, coverage from a fixture
+// transcript, unverified coverage, the risk judgement's shape).
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -8,7 +9,7 @@ import { canonicalJson, setDoubles } from '../engine/contract.mjs';
 import { ledgerLines, reviewerTranscript, transcript } from './helpers/index.mjs';
 import { sha256 } from '../engine/util.mjs';
 import doubles, { answer } from './flow-doubles.mjs';
-import { attempt, commitWt, flow, read, review, reviewerWrote, setup, started } from './flow-fixture.mjs';
+import { HIGH, LOW, attempt, commitWt, flow, read, review, reviewerWrote, setup, started } from './flow-fixture.mjs';
 
 const finding = (location, cls, severity = 'medium', what = 'wrong') => ({ location, class: cls, severity, what, why: 'it matters' });
 
@@ -50,7 +51,7 @@ test('criteria: an edit that changes a criterion an open blocker cites asks the 
   }
 });
 
-test('bundle: the diff, criteria, base copies of rules and invariants, consumers of a changed contract; risk adds a second seat and the checklist', async () => {
+test('bundle: the diff, criteria, base copies of rules and invariants, consumers, the risk guidance; a judgement that needs it adds a second seat', async () => {
   const p = setup({ overrides: { invariants: 'server/INVARIANTS.md', rules: [{ paths: ['server/src/**'], read: ['server/RULES.md'] }] } });
   try {
     p.commit('server', { 'INVARIANTS.md': 'base invariants\n', 'RULES.md': 'base rules\n' }, 'docs', { push: true });
@@ -58,7 +59,8 @@ test('bundle: the diff, criteria, base copies of rules and invariants, consumers
     // The ticket edits the rules it is judged by: the bundle still carries the base's.
     commitWt(p, s.id, 'server', { 'RULES.md': 'anything goes\n', 'src/routes/items.controller.mjs': 'export const routes = ["/items", "/items/:id"];\n', 'src/core/sum.mjs': 'export const sum = (xs) => xs.reduce((a, b) => a + b, 0);\n// edge\n', 'test/sum.spec.mjs': '// spec 2\n' });
     const { tree, bundles } = await flow.bundle(p.root, s.id);
-    assert.deepEqual(bundles.map((b) => b.seat), ['whole', 'second']);
+    // No path makes a change risky: one whole seat, which judges the risk itself.
+    assert.deepEqual(bundles.map((b) => b.seat), ['whole']);
     const b = bundles[0];
     assert.equal(b.tree, tree);
     assert.match(read(b.files.diff), /items\/:id/);
@@ -67,15 +69,26 @@ test('bundle: the diff, criteria, base copies of rules and invariants, consumers
     assert.equal(read(b.files.invariants), 'base invariants\n');
     assert.match(read(b.files.criteria), /C1: the sum of an empty list is zero/);
     assert.ok(b.files.consumers.some((f) => f.endsWith(path.join('client', 'src', 'pages', 'items.mjs'))), b.files.consumers.join(','));
-    assert.ok(b.files.riskChecklist.endsWith(path.join('templates', 'risk-checklist.md')));
+    assert.ok(b.files.risk.endsWith(path.join('templates', 'risk.md')));
+    assert.ok(b.prompt.includes(b.files.risk) && b.prompt.includes('"risk"'), 'the prompt names the risk guidance and asks for `risk`');
     assert.deepEqual(b.productFiles.sort(), ['server/src/core/sum.mjs', 'server/src/routes/items.controller.mjs']);
     assert.ok(b.prompt.includes(b.output), 'the prompt names the output file');
+    // The whole seat judges it high-risk and names a scenario: the second seat is launched to verify it.
+    const scenario = 'an empty list after a filter sums to zero';
+    await review(p, s.id, { whole: { risk: { ...HIGH, needs: ['second-review', scenario] } } });
+    const again = (await flow.bundle(p.root, s.id)).bundles;
+    assert.deepEqual(again.map((x) => x.seat), ['whole', 'second']);
+    const second = again[1];
+    assert.equal(second.files.risk, null);
+    assert.deepEqual(second.needs, [scenario]);
+    assert.ok(second.prompt.includes('Needs to verify') && second.prompt.includes(scenario) && second.prompt.includes('"met"'));
+    assert.match(second.prompt, new RegExp(`high-risk: ${HIGH.why}`));
   } finally {
     p.done();
   }
 });
 
-test('bundle: above the split size the review splits by area; a risk change above it refuses review:size', async () => {
+test('bundle: above the split size the review splits by area; a change is never refused for its size', async () => {
   const p = setup();
   try {
     const s = await started(p);
@@ -85,7 +98,7 @@ test('bundle: above the split size the review splits by area; a risk change abov
     assert.deepEqual(bundles.map((b) => b.seat), ['area:client/src/common', 'area:client/src/pages']);
     assert.ok(bundles[0].files.sharedFiles.some((f) => f.endsWith('a.mjs')));
     commitWt(p, s.id, 'server', { 'src/core/sum.mjs': big(10) });
-    await assert.rejects(flow.bundle(p.root, s.id), (e) => e.refusalId === 'review:size');
+    assert.ok((await flow.bundle(p.root, s.id)).bundles.some((b) => b.productFiles.includes('server/src/core/sum.mjs')));
   } finally {
     p.done();
   }
@@ -101,12 +114,17 @@ test('record: review:independent (not launched; implementer), review:coverage fr
     const { session } = await doubles.launchReviewer(p.root, s.id, b);
     const files = b.productFiles.map((f) => path.join(p.wt(s.id, 'client'), f.slice('client/'.length)));
     reviewerTranscript({ home: p.home, cwd: p.root, files, skip: [files[0]], session: session.id });
-    const input = { session, seat: 'whole', tree, findings: [], verified: [] };
+    const input = { session, seat: 'whole', tree, findings: [], verified: [], risk: LOW };
     await assert.rejects(flow.recordReview(p.root, s.id, { ...input, session: { runtime: 'claude', id: 'self' } }), (e) => e.refusalId === 'review:independent');
     await assert.rejects(flow.recordReview(p.root, s.id, input), (e) => e.refusalId === 'review:coverage' && /1 of 2/.test(e.message));
     reviewerTranscript({ home: p.home, cwd: p.root, files, session: session.id });
+    // A first seat always judges the risk; a high one names what it needs.
+    await assert.rejects(flow.recordReview(p.root, s.id, { ...input, risk: undefined }), /gives no risk judgement/);
+    await assert.rejects(flow.recordReview(p.root, s.id, { ...input, risk: { level: 'medium', why: 'x', needs: [] } }), /not low or high/);
+    await assert.rejects(flow.recordReview(p.root, s.id, { ...input, risk: { level: 'high', why: 'it moves stock', needs: [] } }), /names no needs/);
     const r = await flow.recordReview(p.root, s.id, input);
     assert.equal(r.coverage, 'complete');
+    assert.deepEqual(ledgerLines(p.root, s.id).find((e) => e.type === 'review.recorded').data.risk, LOW);
     // The review records the heads it stands for, in the ledger.
     assert.deepEqual(ledgerLines(p.root, s.id).find((e) => e.type === 'review.recorded').data.heads, b.heads);
     // An implementer's session cannot review.
@@ -158,7 +176,7 @@ test('record: the review file must be the reviewer\'s own output: its transcript
     const dir = path.join(p.root, '.wf-evidence', 'attempts', s.id, 'reviews');
     const b = JSON.parse(read(path.join(dir, fs.readdirSync(dir).find((d) => d.startsWith('r1-')), 'bundle-whole.json')));
     const files = [path.join(p.wt(s.id, 'client'), 'src/pages/items.mjs')];
-    const blocker = { findings: [finding('client/src/pages/items.mjs:1', 'goal', 'low')], verified: [] };
+    const blocker = { findings: [finding('client/src/pages/items.mjs:1', 'goal', 'low')], verified: [], risk: LOW };
     // Someone else writes the file: the reviewer's transcript shows no write of it.
     reviewerTranscript({ home: p.home, cwd: p.root, files, session: h.data.session.id });
     fs.writeFileSync(b.output, JSON.stringify({ findings: [], verified: [] }));
@@ -184,15 +202,24 @@ test('cmdReview launches every seat and the fast tests in parallel on one tree, 
   const p = setup();
   try {
     const s = await started(p);
-    commitWt(p, s.id, 'server', { 'src/core/sum.mjs': '// risk change\n', 'test/sum.spec.mjs': '// new risk test\n' });
+    commitWt(p, s.id, 'server', { 'src/core/sum.mjs': '// a change\n', 'test/sum.spec.mjs': '// new test\n' });
     const ctx = { cwd: p.root, root: p.root, env: process.env, actor: null, json: false };
     const r = await flow.cmdReview(ctx, { _: [], flags: { attempt: s.id } });
     const ev = ledgerLines(p.root, s.id);
-    assert.deepEqual(ev.filter((e) => e.type === 'handoff').map((e) => e.data.seat), ['whole', 'second']);
-    assert.deepEqual(ev.filter((e) => e.type === 'test.run').map((e) => e.data.kind).sort(), ['fast', 'risk-base']);
+    assert.deepEqual(ev.filter((e) => e.type === 'handoff').map((e) => e.data.seat), ['whole']);
+    assert.deepEqual(ev.filter((e) => e.type === 'test.run').map((e) => e.data.kind), ['fast']);
     assert.match(r.text, /wf review --record/);
     const again = await flow.cmdReview(ctx, { _: [], flags: { attempt: s.id } });
     assert.match(again.text, /already launched/);
+    // The whole seat judges it high-risk, needing a second review and a failing test: the next `wf review` launches the
+    // second seat and the merge-base run together.
+    const h = ledgerLines(p.root, s.id).find((e) => e.type === 'handoff');
+    reviewerTranscript({ home: p.home, cwd: p.root, files: [path.join(p.wt(s.id, 'server'), 'src/core/sum.mjs')], session: h.data.session.id });
+    await flow.recordReview(p.root, s.id, { session: h.data.session, findings: [], verified: [], risk: { level: 'high', why: 'a total others rely on', needs: ['second-review', 'failing-test'] } });
+    await flow.cmdReview(ctx, { _: [], flags: { attempt: s.id } });
+    const ev2 = ledgerLines(p.root, s.id);
+    assert.deepEqual(ev2.filter((e) => e.type === 'handoff').map((e) => e.data.seat), ['whole', 'second']);
+    assert.deepEqual(ev2.filter((e) => e.type === 'test.run').map((e) => e.data.kind).sort(), ['fast', 'risk-base']);
     setDoubles(doubles);
   } finally {
     p.done();
@@ -209,7 +236,7 @@ test('the reviewer writes findings and verified where its prompt says; --record 
     const h = ledgerLines(p.root, s.id).find((e) => e.type === 'handoff');
     const bundleFile = fs.readdirSync(path.join(p.root, '.wf-evidence', 'attempts', s.id, 'reviews')).map((d) => path.join(p.root, '.wf-evidence', 'attempts', s.id, 'reviews', d, 'bundle-whole.json'))[0];
     const b = JSON.parse(read(bundleFile));
-    reviewerWrote(p, h.data.session.id, { files: [path.join(p.wt(s.id, 'client'), 'src/pages/items.mjs')], output: b.output, review: { findings: [finding('client/src/pages/items.mjs:1', 'goal', 'low')], verified: [] } });
+    reviewerWrote(p, h.data.session.id, { files: [path.join(p.wt(s.id, 'client'), 'src/pages/items.mjs')], output: b.output, review: { findings: [finding('client/src/pages/items.mjs:1', 'goal', 'low')], verified: [], risk: LOW } });
     const r = await flow.cmdReview(ctx, { _: [], flags: { attempt: s.id, record: b.output } });
     assert.equal(r.data.blockers, 1);
     assert.equal(r.data.findings[0].id, 'F1');

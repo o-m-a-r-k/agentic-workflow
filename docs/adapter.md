@@ -44,8 +44,6 @@ screens:
   viewports: [390, 1440]
   capture: { module: { repo: web, path: scripts/capture.mjs } }   # or { run: "<command>" }, which runs as the attempt has it
 review: { diffRead: before }           # or after
-risk:                                  # proposed by the scan, confirmed by the person; `risk: none` is explicit
-  - { id: <area>, paths: ["<area>/**"], reason: "<the facts the scan found>", tests: ["<its tests>/**"] }
 ticketing:
   tracker: <the tracker, through its connector>
   via: connector
@@ -59,7 +57,7 @@ delivery:
   stages:
     - { do: land, branch: main }
     - { do: status, to: Ready for UAT, comment: uat }
-budget: { adapter: { rules: 4, risk: 3, modules: 1, operationWords: 120 } }
+budget: { adapter: { rules: 4, modules: 1, operationWords: 120 } }
 ```
 
 ## A merge-request project whose tests, tracker and delivery are its own modules
@@ -98,13 +96,12 @@ delivery:
 | `components[]` | Consumers of changed contracts: a component in `repo` that `dependsOn` the files a `contract` glob names. |
 | `invariants` | The project's invariants file; reviewers get it and the session rules quote it. |
 | `rules[]` | Documents to read for changes under `paths`. |
-| `screens` | How screens are picked and captured: a `routes` module, `shared` paths that add the `sentinel` set, `langs`, `viewports` and `capture`: either `{ module: { repo, path } }`, loaded as the base holds it with `ctx.cwd` set to the attempt folder, or `{ run: "<command>" }` with `{out}`, `{viewport}`, `{lang}`, `{dir}` and `{routes}`, run from the attempt folder as the attempt has it, so the ticket under review can change it (prefer the module). With `capture` set, a change to a `shared` path requires the `sentinel` screens even with no `routes`; `wf doctor` warns when `routes` is unset. |
-| `review.diffRead` | `before` or `after`: whether the person's diff-read on a risk path comes before or after the merge. |
-| `risk` | Risk areas with `paths`, the `reason` the scan found and the `tests` that guard them; or `none`. |
+| `screens` | How screens are picked and captured: a `routes` module, `shared` paths that add the `sentinel` set, `langs`, `viewports` and `capture`: either `{ module: { repo, path } }`, loaded as the base holds it with `ctx.cwd` set to the attempt folder, or `{ run: "<command>" }` with `{out}`, `{viewport}`, `{lang}`, `{dir}` and `{routes}`, run from the attempt folder as the attempt has it, so the ticket under review can change it (prefer the module). With `capture` set, a change to a `shared` path requires the `sentinel` screens even with no `routes`; `wf doctor` warns when `routes` is unset. Screens are optional: with `capture` unset, or `screens: none`, there are no screens, and `wf doctor` notes it once. |
+| `review.diffRead` | `before` or `after`: whether the person's diff-read, when a reviewer's `risk.needs` asks for it, comes before or after the merge. There are no risk paths: each change's first reviewer judges its risk ([design](design-0.8.md), D94); a `risk` key is refused as dropped. |
 | `ticketing` | `tracker` (a name, which with `via: connector` is only a label in the operation texts; a module; or `files`), `via` (`connector`, `module`, `files`), `idPattern`, `take` (the status set at start), `followUps` (`file`, `digest` or `off`) and `operations` (the adapter's own words for each connector step, keyed by the engine's operations: `read`, `search`, `fileFollowUp`, `setStatus`, `comment`, `mergeRequest`). One attempt can run without the tracker: `wf start --no-tracker`. |
 | `delivery` | `landing` (`direct` or `queue`), `order`, `authority` (who pushes, opens merge requests and merges) and `stages` ([delivery-and-tracker.md](delivery-and-tracker.md)). |
 | `models` | A model per role: `planner`, `implementer`, `reviewer`, `secondReviewer`, `drafter`. |
-| `budget.adapter` | Limits on the adapter's rules, risk areas, modules and operation words; `wf doctor` reports the counts. |
+| `budget.adapter` | Limits on the adapter's rules, modules and operation words; `wf doctor` reports the counts. |
 | `onboarded` | Written by `wf init`: when, by which engine, and the hash of each key it wrote, so a hand edit is seen. |
 
 Keys schema 2 dropped (lanes, classes, panel, strategy, impact, leaving, severity, gate, quality, designSystem and the rest) are named as dropped, with where they went, when an adapter still has them. A schema 1 adapter is refused with `wf init --from-07`.

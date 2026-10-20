@@ -79,7 +79,6 @@ test('through the real cli, a command run from the registered host\'s session re
     repos: [{ name: 'app', base: 'trunk', files: { 'src/a.mjs': 'export const a = 1;\n', 'README.md': '# app\n' } }],
     overrides: {
       repos: [{ name: 'app', path: 'app', base: 'trunk', tests: { fast: { run: 'node -e "process.exit(0)"' } }, kinds: { tests: ['test/**'], other: ['**/*.md'] } }],
-      risk: 'none',
       ticketing: { tracker: 'files', via: 'files', idPattern: '^TK-\\d+$' },
       delivery: { landing: 'direct', stages: [{ do: 'land' }] },
     },

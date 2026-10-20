@@ -36,7 +36,7 @@ async function story(p) {
   commitAt(tree, { 'src/core/sum.mjs': 'export const sum = (xs) => xs.reduce((a, b) => a + b, 1);\nexport const a = 1;\nexport const b = 1;\n', 'test/sum2.spec.mjs': '// one\n// two\n' }, 'c1', at(T0, 20));
   await a(40, 'test.run', { repo: 'server', kind: 'fast', tree: 't1', pass: true, exitCode: 0, ms: 5 * 60000, source: 'attempt' });
   await a(45, 'handoff', { role: 'reviewer', session: S('r1'), launchedBy: 'wf' });
-  await a(60, 'review.recorded', { review: 1, round: 1, seat: 'whole', tree: 't1', session: S('r1'), coverage: 'complete', findings: [{ id: 'F1', location: 'server/src/core/sum.mjs:1', class: 'goal', severity: 'medium', what: 'w', why: 'y' }], verified: [], blockers: 1 });
+  await a(60, 'review.recorded', { review: 1, round: 1, seat: 'whole', tree: 't1', session: S('r1'), coverage: 'complete', findings: [{ id: 'F1', location: 'server/src/core/sum.mjs:1', class: 'goal', severity: 'medium', what: 'w', why: 'y' }], verified: [], blockers: 1, risk: { level: 'high', why: 'a total others rely on', needs: ['diff-read'] } });
   commitAt(tree, { 'src/core/sum.mjs': 'export const sum = (xs) => xs.reduce((a, b) => a + b, 1);\nexport const a = 2;\nexport const b = 1;\n' }, 'fix1', at(T0, 68));
   await a(70, 'handoff', { role: 'implementer', session: S('impl-2'), launchedBy: 'owner' });
   await a(80, 'handoff', { role: 'reviewer', session: S('r2'), launchedBy: 'wf' });
@@ -116,7 +116,7 @@ test('row: every field of a 0.8 attempt, from the ledger, git and transcripts', 
     assert.equal(r.introducedByRepair, 1, 'F2 sits on a line the first fix round wrote');
     assert.deepEqual(r.refusals, { count: 2, byId: { 'review:coverage': 2 } });
     assert.equal(r.screens, 0);
-    assert.equal(r.riskTouched, true);
+    assert.equal(r.riskTouched, true, 'its first reviewer judged it high-risk');
     assert.deepEqual(r.rework, { lines: 1, share: 0.2, commits: 1 });
     assert.deepEqual(r.tokens, { input: 100, output: 20, cacheRead: 5, cacheWrite: 1 });
     assert.equal(r.cost, 0.5);

@@ -20,7 +20,6 @@ function project({ install, filled = true }) {
     repos: [{ name: 'app', base: 'trunk', files: { 'src/a.mjs': 'export const a = 1;\n', 'README.md': '# app\n', '.gitignore': '.env.local\nnode_modules/\ngot.txt\n' } }],
     overrides: {
       repos: [{ name: 'app', path: 'app', base: 'trunk', provision: { clone: ['node_modules'], install }, tests: { fast: { run: 'node -e "process.exit(0)"' } }, kinds: { tests: ['test/**'], other: ['**/*.md'] } }],
-      risk: 'none',
       ticketing: { tracker: 'files', via: 'files', idPattern: '^TK-\\d+$' },
       delivery: { landing: 'direct', stages: [{ do: 'land' }] },
     },

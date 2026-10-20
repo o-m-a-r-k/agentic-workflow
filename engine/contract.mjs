@@ -29,7 +29,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-export const CONTRACT_VERSION = '0.8.0';
+export const CONTRACT_VERSION = '0.8.1';
 export const SCHEMA = 2;
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -58,7 +58,7 @@ export class NotBuiltError extends Error {
   }
 }
 
-// The 19 refusal ids (design section 2, "Refusals"). Each is a fact check with a named failure; adding one is rule-shaped
+// The 18 refusal ids (design section 2, "Refusals"). Each is a fact check with a named failure; adding one is rule-shaped
 // and counted against budget.json.
 export const REFUSALS = Object.freeze({
   'start:open': { stream: 1, when: 'the item already has an open or held attempt' },
@@ -66,7 +66,6 @@ export const REFUSALS = Object.freeze({
   'review:tree': { stream: 1, when: 'the recorded review\'s tree is not HEAD' },
   'review:independent': { stream: 1, when: 'the reviewer\'s session implemented, or wf did not launch it, or its transcript contradicts the review file' },
   'review:coverage': { stream: 1, when: 'product files in the diff are unread by the reviewer' },
-  'review:size': { stream: 1, when: 'the product diff is above the split size for one reviewer (or a risk change above it)' },
   'finding:other-own': { stream: 1, when: '`other` on a line this attempt wrote' },
   'screens:width': { stream: 2, when: 'a capture\'s width differs from the requested viewport' },
   'screens:dup': { stream: 2, when: 'two captures have identical bytes' },
@@ -75,7 +74,7 @@ export const REFUSALS = Object.freeze({
   'merge:foreign': { stream: 1, when: 'a merge commit\'s second parent is not the base, or is reachable from another remote branch' },
   'merge:untested': { stream: 1, when: 'the fast tests are not green on HEAD, or no passing `full` run on the landed tree (landing queue or CI)' },
   'fix:no-progress': { stream: 1, when: 'an implementer handoff after a review that reopened a fixed finding or did not lower the blocker count, until the person decides' },
-  'merge:risk': { stream: 1, when: 'a risk path is touched and a risk test, its merge-base failure or the second review is missing, or the diff-read is missing with diffRead: before' },
+  'merge:risk': { stream: 1, when: 'a need the first reviewers listed in their `risk` lacks its evidence: the second review, a test that fails on the merge-base, a free-text need the second reviewer found met, or the diff-read with diffRead: before' },
   'merge:waiver': { stream: 1, when: 'a waiver or a loosened criterion is unanswered' },
   'stage:deploy': { stream: 3, when: 'a production deploy without the person\'s decision' },
   hold: { stream: 3, when: 'any delivery step under a hold (stream 1 also refuses start/handoff/review steps that deliver)' },
@@ -144,8 +143,6 @@ export const marker = (attempt, stage) => `wf:${attempt}:${stage}`;
  *   branch?: string, to?: string, comment?: string, repos?: string[], where?: string, when?: StageWhen,
  *   after?: string, module?: ModuleRef }} Stage
  *   `comment` names a comment kind (`uat`, `deployed`, ...) whose text the owner writes; `after` names another item.
- * @typedef {{ id: string, paths: string[], reason: string, tests: string[] }} RiskPath
- *   paths and tests are globs relative to the project root (`<repo path>/...`).
  * @typedef {object} Adapter   the normalised schema 2 adapter, as loadAdapter returns it. Every key below is present
  *   (defaults filled); keys an adapter does not set are null or empty, never missing.
  * @property {2} version
@@ -160,11 +157,9 @@ export const marker = (attempt, stage) => `wf:${attempt}:${stage}`;
  * @property {{ routes: ModuleRef|null, shared: string[], sentinel: string[], langs: { lang: string, dir: 'ltr'|'rtl' }[],
  *   viewports: number[], capture: { run: string }|{ module: ModuleRef }|null }} screens
  *   routes module default export: `async (changedFiles: string[]) => string[]` (routes). capture: a plain string is
- *   normalised to `{ run }`; `run` placeholders: {out} {viewport} {lang} {dir} {routes}. A `module` loads from the base
+ *   normalised to `{ run }`; `screens: none` and an unset capture both mean no screens; `run` placeholders: {out} {viewport} {lang} {dir} {routes}. A `module` loads from the base
  *   (base-module.mjs) with `ctx.cwd` the attempt folder.
  * @property {{ diffRead: 'before'|'after' }} review
- * @property {{ confirmed: boolean, paths: RiskPath[] }} risk   `risk: none` → { confirmed: true, paths: [] };
- *   a missing key → { confirmed: false, paths: [] } (onboarding refuses to finish on it).
  * @property {{ tracker: string|{ module: ModuleRef }, via: 'connector'|'module'|'files'|'none', idPattern: string|null,
  *   take: { status: string }|null,
  *   followUps: { mode: 'file'|'digest'|'off', team?: string, status?: string, label?: string },
@@ -178,7 +173,7 @@ export const marker = (attempt, stage) => `wf:${attempt}:${stage}`;
  *   merge: 'agent'|'person' }, stages: Stage[] }} delivery   order defaults to the repos' order.
  * @property {Record<string, string>} models   one model per role (planner, implementer, reviewer, secondReviewer,
  *   drafter); a missing role uses the host's default.
- * @property {{ adapter: { rules: number, risk: number, modules: number, operationWords: number } }} budget
+ * @property {{ adapter: { rules: number, modules: number, operationWords: number } }} budget
  * @property {{ at: string|null, engine: string|null, hashes: Record<string, string> }} onboarded   written by stream 7
  *   only: the hash of each POLICY_KEYS value as onboarding last wrote it; a current hash that differs is a hand edit.
  */
@@ -188,7 +183,7 @@ export const marker = (attempt, stage) => `wf:${attempt}:${stage}`;
 export const TRACKER_OPERATIONS = Object.freeze(['read', 'search', 'fileFollowUp', 'setStatus', 'comment', 'mergeRequest']);
 
 // The keys onboarding owns (design section 5). A value's hash is sha256 of its canonical JSON (canonicalJson below).
-export const POLICY_KEYS = Object.freeze(['risk', 'review.diffRead', 'delivery.stages', 'ticketing.operations', 'tests', 'screens']);
+export const POLICY_KEYS = Object.freeze(['review.diffRead', 'delivery.stages', 'ticketing.operations', 'tests', 'screens']);
 
 // Canonical JSON: keys sorted, undefined dropped (as JSON writes it), so equal values hash equally in every stream.
 export function canonicalJson(value) {
@@ -206,12 +201,18 @@ export function canonicalJson(value) {
  *   parseLocation. `goal` and `regression` block the merge at every severity.
  * @typedef {{ seat: 'whole'|'second'|`area:${string}`, attempt: string, tree: string, heads: Record<string, string>, round: number,
  *   prompt: string, files: { diff: string, criteria: string, criteriaDiff: string|null, invariants: string|null,
- *   rules: string[], consumers: string[], screens: string[], riskChecklist: string|null, sharedFiles: string[] },
+ *   rules: string[], consumers: string[], screens: string[], risk: string|null, sharedFiles: string[] },
  *   verify: string[], productFiles: string[], productLines: number, model: string|null }} ReviewBundle
  *   prompt: the reviewer's whole prompt (role text + the bundle's paths). verify: ids of open blockers the reviewer
- *   verifies first on a later round. productFiles: `<repo>/<path>` the coverage check requires read.
+ *   verifies first on a later round. productFiles: `<repo>/<path>` the coverage check requires read. files.risk: the
+ *   risk guidance every first seat (whole, area) reads; the `second` seat gets the needs to verify instead.
+ * @typedef {'second-review'|'failing-test'|'diff-read'|string} RiskNeed   what the first reviewer needs before it is
+ *   confident in the change; any other text is a need the second reviewer judges met or not.
+ * @typedef {{ level: 'low'|'high', why: string, needs: RiskNeed[] }} RiskJudgement   every first seat gives one.
  * @typedef {{ session: Session, seat: ReviewBundle['seat'], tree: string,
- *   findings: Omit<Finding, 'id'>[], verified: { id: string, status: 'fixed'|'open' }[] }} ReviewInput
+ *   findings: Omit<Finding, 'id'>[], verified: { id: string, status: 'fixed'|'open' }[], risk?: RiskJudgement,
+ *   met?: { need: string, met: boolean, how?: string }[] }} ReviewInput   risk: required of first seats. met: the second
+ *   seat's verdict on each free-text need.
  * @typedef {{ id: keyof typeof REFUSALS, message: string, fact?: string, repo?: string }} Problem   a fact that refuses a merge (mergeFacts).
  * @typedef {{ repo: string, path: string, kind: 'product'|'tests'|'other', added: number, removed: number, status: 'A'|'M'|'D'|'R' }} ChangedFile
  */
@@ -219,7 +220,7 @@ export function canonicalJson(value) {
 /**
  * Tests, screens, landing.
  * @typedef {'fast'|'full'|'risk-base'} TestKind   risk-base: the repo's `fast` tests run on a worktree at the merge-base
- *   with the attempt's changed `risk.tests` files applied; it must fail (design section 2, "Higher-risk paths").
+ *   with the attempt's changed test files (`kinds.tests`) applied; it must fail (design section 2, "Risk").
  * @typedef {{ pass: boolean, tree: string, ms: number, exitCode: number|null, log: string }} TestResult   log: a file path.
  * @typedef {{ route: string, viewport: number, lang: string|null, dir: 'ltr'|'rtl'|null, width: number, height: number,
  *   file: string, sha256: string, sentinel: boolean }} ScreenImage
@@ -326,10 +327,9 @@ export function canonicalJson(value) {
 
 /**
  * Onboarding.
- * @typedef {'decimal-type'|'currency-type'|'rounding'|'auth'|'permission'|'outbound-client'|'webhook-handler'|
- *   'queue-consumer'|'migration'|'schema'|'mobile-app'|'ci-file'|'test-script'|'instruction-doc'|'invariants-doc'} FactKind
- *   structural facts only: the plugin ships no domain vocabulary; the project's own documents name its areas.
- * @typedef {{ root: string, repos: { name: string, path: string, dirs: string[], modules: string[],
+ * @typedef {'mobile-app'|'ci-file'|'test-script'|'instruction-doc'|'invariants-doc'} FactKind
+ *   structural facts only: the plugin ships no domain vocabulary.
+ * @typedef {{ root: string, repos: { name: string, path: string,
  *   facts: { kind: FactKind, path: string, evidence: string }[] }[] }} ScanFacts
  * @typedef {{ key: string, from: any, to: any, reason: string, handEdited: boolean }} PolicyChange
  *   key: one of POLICY_KEYS (or a dotted key below one). reason cites ScanFacts paths.
@@ -365,8 +365,9 @@ export const EVENTS = Object.freeze({
   handoff: { stream: 1, required: ['role', 'session', 'launchedBy'], optional: ['seat', 'model', 'tree', 'heads', 'round'] },
   // review: 1.. per attempt. findings: Finding[] (ids assigned). verified: [{ id, status }]. blockers: open goal+regression
   // after this review. coverage: 'complete'|'unverified' (a host with no readable transcript). provenance: whether the
-  // review file is the reviewer's own, from its transcript: 'verified'|'unverified' (no readable transcript).
-  'review.recorded': { stream: 1, required: ['review', 'round', 'seat', 'tree', 'session', 'coverage', 'findings', 'verified', 'blockers'], optional: ['heads', 'model', 'filesRead', 'unread', 'provenance'] },
+  // review file is the reviewer's own, from its transcript: 'verified'|'unverified' (no readable transcript). risk: the
+  // first seat's RiskJudgement. met: the second seat's verdict on free-text needs.
+  'review.recorded': { stream: 1, required: ['review', 'round', 'seat', 'tree', 'session', 'coverage', 'findings', 'verified', 'blockers'], optional: ['heads', 'model', 'filesRead', 'unread', 'provenance', 'risk', 'met'] },
   // mode: file|digest|off. state: done|pending. ticket: the filed id, or null (pending, digest, off, or a duplicate found).
   'finding.filed': { stream: 1, required: ['finding', 'mode', 'state', 'marker'], optional: ['ticket', 'duplicateOf', 'priority', 'operation'] },
   // Question fields plus id ('D<n>' per attempt).
@@ -475,8 +476,8 @@ export const start = seam(1, 'attempt.mjs', 'start', '(root, rawItem, { actor, r
  *   => Promise<{ hash: string, loosened: string[], decision: string|null }>} */
 export const setCriteria = seam(1, 'flow.mjs', 'setCriteria', '(root, attempt, { criteria, areas }, { actor }) → { hash, loosened, decision }');
 
-/** The reviewer bundles for HEAD: one `whole` (plus `second` on a risk path), or `area:<name>` bundles above the split
- * size. Refuses `review:size` for a risk change above the size. Writes the bundle files under attemptDir/reviews/.
+/** The reviewer bundles for HEAD: one `whole`, or `area:<name>` bundles above the split size; plus `second` once a first
+ * seat's recorded `risk` needs a second review or a free-text need. Writes the bundle files under attemptDir/reviews/.
  * @type {(root: string, attempt: string) => Promise<{ tree: string, bundles: ReviewBundle[] }>} */
 export const bundle = seam(1, 'flow.mjs', 'bundle', '(root, attempt) → { tree, bundles: ReviewBundle[] }');
 
@@ -648,8 +649,8 @@ export const loadAdapter = seam(6, 'config.mjs', 'loadAdapter', '(root, { env? }
  * @type {(raw: object) => Promise<string[]>} */
 export const checkAdapter = seam(6, 'config.mjs', 'checkAdapter', '(raw) → problems[]');
 
-/** The adapter's rules, risk paths, modules and operation words against `budget.adapter`.
- * @type {(adapter: Adapter) => Promise<{ counts: { rules: number, risk: number, modules: number, operationWords: number },
+/** The adapter's rules, modules and operation words against `budget.adapter`.
+ * @type {(adapter: Adapter) => Promise<{ counts: { rules: number, modules: number, operationWords: number },
  *   limits: Adapter['budget']['adapter'], over: string[] }>} */
 export const adapterBudget = seam(6, 'config.mjs', 'adapterBudget', '(Adapter) → { counts, limits, over }');
 

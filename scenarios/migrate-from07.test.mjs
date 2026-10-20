@@ -44,9 +44,11 @@ test('--from-07 shows the seeded conversion, every dropped key, per-ticket steps
     ]);
     assert.deepEqual(r.data.diff.seed.delivery.authority, { mergeRequest: 'person', merge: 'person' });
     assert.match(r.text, /delivery: core\/\.workflow\/delivery\/review-request\.mjs is a 0\.7 delivery module and needs rewriting/);
-    assert.deepEqual(ch['screens.capture'], { run: 'cd panel && npm run shots' });
-    assert.match(r.text, /seeded from the 0\.7 step `panel-shots`/);
-    assert.ok(ch['risk.tally']);
+    // The 0.7 step's command writes no screen to {out}: no capture is proposed, and there are no screens.
+    assert.equal(ch['screens.capture'], undefined);
+    assert.match(r.text, /the 0\.7 step `panel-shots` collected screenshots, but its command does not write each one to \{out\}, so no capture is proposed/);
+    // Nothing about risk is proposed or asked.
+    assert.ok(!Object.keys(ch).some((k) => k.startsWith('risk')));
     // Item ids: the tracker's prefix and the 0.7 quick-fix prefix the old attempt folders show.
     assert.deepEqual(r.data.diff.seed.ticketing, { tracker: { module: { repo: 'core', path: '.workflow/tracker/board.mjs' } }, via: 'connector', idPattern: '^(?:QF|TK)-\\d+$', take: { status: 'Doing' }, followUps: { mode: 'off' } });
     // requires.tools keeps plain command names; the rest are dropped and listed.
@@ -80,13 +82,24 @@ test('--from-07 names the items of old attempts the derived idPattern refuses (a
   }
 });
 
-test('--from-07 refuses to finish while screens.capture does not write to {out}; with it, the adapter is written and valid', async () => {
+test('--from-07 finishes with no capture (no screens); a draft capture is written; the adapter is valid', async () => {
   const p = makeModuleProject();
   useDoubles(ledgerDoubles());
   const restore = useUserDir(p);
   try {
-    await assert.rejects(init(p, { 'from-07': true, confirm: ['all'] }), /`screens\.capture` is unset, or its command does not write to \{out\}; nothing written/);
-    assert.equal(readAdapter(path.join(p.root, '.workflow', 'project.yaml')).version, 1);
+    // No capture: onboarding still finishes; the project has no screens.
+    const bare = makeModuleProject();
+    const restoreBare = useUserDir(bare);
+    try {
+      const w0 = await init(bare, { 'from-07': true, confirm: ['all'] });
+      assert.equal(w0.data.written.written, true);
+      const a0 = readAdapter(path.join(bare.repos.core.dir, '.workflow', 'project.yaml'));
+      assert.equal(a0.version, 2);
+      assert.equal(a0.screens?.capture, undefined);
+    } finally {
+      restoreBare();
+      bare.cleanup();
+    }
     const draft = captureDraft(p);
     const w = await init(p, { 'from-07': true, draft, confirm: ['all'] });
     assert.equal(w.data.written.written, true);
@@ -97,7 +110,8 @@ test('--from-07 refuses to finish while screens.capture does not write to {out};
     for (const k of ['lanes', 'classes', 'gate', 'tracker', 'quality', 'adapterRepo']) assert.ok(!(k in a), k);
     assert.equal(a.invariants, 'core/.workflow/invariants.md');
     assert.deepEqual(a.rules, [{ paths: ['panel/src/pages/**'], read: ['panel/docs/pages.md'] }]);
-    assert.ok(Array.isArray(a.risk) && a.risk.some((x) => x.id === 'tally'));
+    assert.equal(a.risk, undefined);
+    assert.equal(a.screens.capture, 'cd panel && npm run shots -- --out {out} --width {viewport} --lang {lang} {routes}');
     const inv = fs.readFileSync(path.join(p.repos.core.dir, '.workflow', 'invariants.md'), 'utf8');
     assert.match(inv, /## Quality\n\n- Every page reads well at phone width\.\n- Totals cover the whole set, never one page\.\n/);
     assert.match(w.text, /Moved 2 `quality` lines/);

@@ -4,8 +4,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { LIBRARY_LISTS } from '../engine/scan.mjs';
 
-// The 0.8.0 sizes: entries of a set, alternatives of a pattern, summed over a list of patterns.
-const CAPS = { SKIP_DIRS: 12, CONTAINERS: 21, CONTENT: 101, PATHS: 34, WRITE_CALL: 8, MIGRATION_DIR: 4, TEST_SCRIPT: 12, CRITICAL_LINE: 9, CODE: 16, LOCKFILES: 9 };
+// The 0.8.1 sizes: entries of a set, alternatives of a pattern, summed over a list of patterns. 0.8.1 removed the code
+// shapes the risk proposal read (CONTENT, PATHS, WRITE_CALL, MIGRATION_DIR, CONTAINERS, CRITICAL_LINE, CODE).
+const CAPS = { SKIP_DIRS: 12, TEST_SCRIPT: 12, LOCKFILES: 9 };
 const alternatives = (re) => re.source.split('|').length;
 const size = (v) => (v instanceof Set ? v.size : Array.isArray(v) ? v.reduce((n, [, re]) => n + alternatives(re), 0) : alternatives(v));
 
