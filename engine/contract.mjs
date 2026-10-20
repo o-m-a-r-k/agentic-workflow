@@ -74,7 +74,7 @@ export const REFUSALS = Object.freeze({
   'merge:foreign': { stream: 1, when: 'a merge commit\'s second parent is not the base, or is reachable from another remote branch' },
   'merge:untested': { stream: 1, when: 'the fast tests are not green on HEAD, or no passing `full` run on the landed tree (landing queue or CI)' },
   'fix:no-progress': { stream: 1, when: 'an implementer handoff after a review that reopened a fixed finding or did not lower the blocker count, until the person decides' },
-  'merge:risk': { stream: 1, when: 'a need the first reviewers listed in their `risk` lacks its evidence: the second review, a test that fails on the merge-base, a free-text need the second reviewer found met, or the diff-read with diffRead: before' },
+  'merge:risk': { stream: 1, when: 'a standing need of the first reviewers\' `risk` lacks its evidence: a second review on a model of its own, a test that fails on the merge-base, the second reviewer\'s verdict on a free-text need, or the diff-read with diffRead: before' },
   'merge:waiver': { stream: 1, when: 'a waiver or a loosened criterion is unanswered' },
   'stage:deploy': { stream: 3, when: 'a production deploy without the person\'s decision' },
   hold: { stream: 3, when: 'any delivery step under a hold (stream 1 also refuses start/handoff/review steps that deliver)' },
@@ -199,7 +199,7 @@ export function canonicalJson(value) {
  * @typedef {{ id: string, location: string, what: string, why: string, severity: Severity, class: FindingClass }} Finding
  *   id: assigned by recordReview (`F<n>`, unique per item across attempts); a reviewer's input omits it. location: see
  *   parseLocation. `goal` and `regression` block the merge at every severity.
- * @typedef {{ seat: 'whole'|'second'|`area:${string}`, attempt: string, tree: string, heads: Record<string, string>, round: number,
+ * @typedef {{ seat: 'whole'|'second'|`area:${string}`|`second:${string}`, attempt: string, tree: string, heads: Record<string, string>, round: number,
  *   prompt: string, files: { diff: string, criteria: string, criteriaDiff: string|null, invariants: string|null,
  *   rules: string[], consumers: string[], screens: string[], risk: string|null, sharedFiles: string[] },
  *   verify: string[], productFiles: string[], productLines: number, model: string|null }} ReviewBundle
@@ -208,11 +208,13 @@ export function canonicalJson(value) {
  *   risk guidance every first seat (whole, area) reads; the `second` seat gets the needs to verify instead.
  * @typedef {'second-review'|'failing-test'|'diff-read'|string} RiskNeed   what the first reviewer needs before it is
  *   confident in the change; any other text is a need the second reviewer judges met or not.
- * @typedef {{ level: 'low'|'high', why: string, needs: RiskNeed[] }} RiskJudgement   every first seat gives one.
+ * @typedef {{ level: 'low'|'high', why: string, needs: RiskNeed[], drop?: { need: RiskNeed, why: string }[] }} RiskJudgement
+ *   every first seat whose bundle carried the risk guidance gives one. Needs are normalised (engine/risk.mjs) and stand
+ *   across the item's rounds and attempts; only a `drop` with its reason lowers one.
  * @typedef {{ session: Session, seat: ReviewBundle['seat'], tree: string,
  *   findings: Omit<Finding, 'id'>[], verified: { id: string, status: 'fixed'|'open' }[], risk?: RiskJudgement,
- *   met?: { need: string, met: boolean, how?: string }[] }} ReviewInput   risk: required of first seats. met: the second
- *   seat's verdict on each free-text need.
+ *   met?: { need: string, met: boolean, how?: string }[] }} ReviewInput   risk: required of first seats. met: each second
+ *   seat's verdict on each free-text need; `met: true` needs `how`, `met: false` a `goal` finding that cites the need.
  * @typedef {{ id: keyof typeof REFUSALS, message: string, fact?: string, repo?: string }} Problem   a fact that refuses a merge (mergeFacts).
  * @typedef {{ repo: string, path: string, kind: 'product'|'tests'|'other', added: number, removed: number, status: 'A'|'M'|'D'|'R' }} ChangedFile
  */

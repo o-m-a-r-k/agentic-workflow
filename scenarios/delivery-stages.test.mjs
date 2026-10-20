@@ -409,3 +409,17 @@ test('a base module imports its sibling helpers as the base holds them', async (
   assert.equal(r.state, 'waiting');
   assert.deepEqual(r.evidence, { helper: 'base' });
 });
+
+test('0.8.1 review: the delivered comment carries one line of the reviewer\'s risk judgement and any dropped need', async (t) => {
+  const f = deliveryProject({ delivery: { stages: [{ do: 'status', to: 'Ready', comment: 'uat' }] } });
+  t.after(f.cleanup);
+  f.doubles();
+  const attempt = await f.startAttempt('TK-1');
+  const rev = (review, risk) => f.ledger.append(f.p.root, attempt, 'review.recorded', { review, round: review, seat: 'whole', tree: `t${review}`, session: { runtime: 'claude', id: `r${review}` }, coverage: 'complete', findings: [], verified: [], blockers: 0, risk }, null);
+  await rev(1, { level: 'high', why: 'it moves stock between sites', needs: ['second-review', 'diff-read'] });
+  await rev(2, { level: 'low', why: 'the fix is one guard', needs: [], drop: [{ need: 'diff-read', why: 'the second review read every line' }] });
+  writeComment(f, attempt, 'uat', 'Open the items page and move an item.');
+  assert.equal((await runStage(f.p.root, attempt, 0)).state, 'done');
+  const body = f.tracker().issues.find((i) => i.id === 'TK-1').comments[0].body;
+  assert.match(body, /Open the items page and move an item\.\n\nReviewer's risk: high – it moves stock between sites; dropped: diff-read \(the second review read every line\)\n\n/);
+});

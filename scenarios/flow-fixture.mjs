@@ -10,7 +10,7 @@ import { implements08 as flow } from '../engine/flow.mjs';
 export { answer, attempt, flow };
 export const DOUBLES_FILE = path.join(path.dirname(new URL(import.meta.url).pathname), 'flow-doubles.mjs');
 
-const KNOBS = ['WF_TEST_NO_TRANSCRIPT', 'WF_TEST_RISKBASE_PASS', 'WF_TEST_FAST_FAIL'];
+const KNOBS = ['WF_TEST_NO_TRANSCRIPT', 'WF_TEST_RISKBASE_PASS', 'WF_TEST_FAST_FAIL', 'WF_TEST_ONE_HOST'];
 
 export function setup(opts = {}) {
   const p = makeProject(opts);
@@ -45,12 +45,12 @@ export async function review(p, id, perSeat = {}) {
   // A seat already recorded on this tree is not reviewed again (the second seat joins once a judgement needs it).
   const done = ledgerLines(p.root, id).filter((e) => e.type === 'review.recorded' && e.data.tree === tree).map((e) => e.data.seat);
   for (const b of bundles.filter((x) => !done.includes(x.seat))) {
-    const { session } = await doubles.launchReviewer(p.root, id, b);
+    const { session } = await doubles.launchReviewer(p.root, id, b, { model: b.model, otherHost: b.otherHost });
     const files = b.productFiles.map((f) => path.join(p.wt(id, f.split('/')[0]), f.slice(f.indexOf('/') + 1)));
     const seat = perSeat[b.seat] ?? perSeat.all ?? {};
     reviewerTranscript({ home: p.home, cwd: p.root, files, skip: seat.skip ?? [], session: session.id });
     // First seats judge the risk (low with no needs unless the test says otherwise); the second seat gives `met`.
-    const judged = b.seat === 'second' ? { met: seat.met ?? (b.needs ?? []).map((need) => ({ need, met: true })) } : { risk: seat.risk ?? LOW };
+    const judged = b.seat.startsWith('second') ? { met: seat.met ?? (b.needs ?? []).map((need) => ({ need, met: true, how: 'read the change for it' })) } : { risk: seat.risk ?? LOW };
     out[b.seat] = await flow.recordReview(p.root, id, { session, seat: b.seat, tree, findings: seat.findings ?? [], verified: seat.verified ?? [], ...judged });
   }
   // The fast tests ran on the reviewed tree (`wf review` runs them in parallel).

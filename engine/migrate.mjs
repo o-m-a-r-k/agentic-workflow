@@ -258,7 +258,7 @@ export async function from07(root, raw, { env = process.env } = {}) {
     const where = path.posix.join(repo.path, shotStep.package && shotStep.package !== '.' ? shotStep.package : '');
     const cmd = shotStep.run ? shotStep.run.replace(/\s*\{select\}/g, '') : shotStep.plugin ? `node ${path.posix.join(workflowDir, shotStep.plugin.replace(/^\.\//, ''))}` : null;
     if (cmd && cmd.includes('{out}')) capture = { value: `cd ${where} && ${cmd.replace(/\{\w+\}/g, (m) => (['{out}', '{viewport}', '{lang}', '{dir}', '{routes}'].includes(m) ? m : ''))}`.replace(/\s+/g, ' ').trim(), step: shotStep.id, artifacts: shotStep.artifacts };
-    else unseeded = shotStep.id;
+    else unseeded = { step: shotStep.id, plugin: shotStep.plugin ?? null };
   }
 
   // tracker → ticketing, statuses → stages. Item ids: the tracker's prefix and every prefix the old attempt folders show
@@ -337,19 +337,25 @@ export async function from07(root, raw, { env = process.env } = {}) {
   const draft = {
     tests,
     delivery: { stages },
+    // Why each seeded key is proposed, shown in place of "from the draft".
+    reasons: { tests: 'from the 0.7 gate steps', 'delivery.stages': 'from the 0.7 delivery (tracker statuses and labels)' },
     screens: capture ? { capture: { run: capture.value }, reasons: { capture: `seeded from the 0.7 step \`${capture.step}\`, which collected ${[].concat(capture.artifacts).join(', ')}` } } : {},
   };
   const imports = productImports(root, repos);
   const modules = await moduleProblems(root, seedRepos, moduleRefsOf({ repos: seedRepos.map((r) => ({ ...r, tests: tests[r.name] })), ticketing, delivery: { stages } }), { via: ticketing.via });
   const data = { dropped, notes, perTicketSteps: droppedSteps, offPattern, imports, modules, quality, invariants, capture, runners: [...runners], deliveryModule };
 
+  // Both hosts installed: the second reviewer's default is the other one (launch.mjs `reviewerHosts`).
+  const { reviewerHosts } = await import('./launch.mjs');
+  const secondHost = raw.models?.secondReviewer ? null : reviewerHosts(null).other?.label ?? null;
   const report = () => {
     const out = [];
     if (droppedSteps.length) out.push('', `Per-ticket steps dropped: ${droppedSteps.map((s) => s.id).join(', ')}`);
     out.push('', 'Dropped or moved 0.7 keys:', ...dropped.map((d) => `  ${d.key}: ${d.why}`));
     if (quality.length) out.push('', `\`quality\` (${quality.length} line${quality.length === 1 ? '' : 's'}) moves into ${invariants} when the adapter is written.`);
     if (notes.length) out.push('', 'Notes:', ...notes.map((n) => `  ${n}`));
-    if (unseeded) out.push('', `Screens: the 0.7 step \`${unseeded}\` collected screenshots, but its command does not write each one to {out}, so no capture is proposed. With none there are no screens; a draft may set \`screens.capture\` later.`);
+    if (unseeded) out.push('', `Screens: the 0.7 step \`${unseeded.step}\` collected screenshots, but ${unseeded.plugin ? `it runs as a 0.7 plugin (${unseeded.plugin}), not a command that writes each screen to {out}` : 'its command does not write each one to {out}'}, so no capture is proposed. With none there are no screens; a draft may set \`screens.capture\` later.`);
+    if (secondHost) out.push('', `Second reviews: \`models.secondReviewer\` is unset, so a second review a reviewer asks for runs on ${secondHost}, the other installed host, on its own model.`);
     for (const r of runners) out.push('', `No tests run until ${r} is rewritten for the 0.8 runner contract:`, `  ${MODULE_CONTRACTS.tests}`);
     if (offPattern.length) out.push('', `Items of earlier attempts that ticketing.idPattern (${ticketing.idPattern}) does not match: wf start refuses them as they are. Start one with \`wf start --no-tracker <id>\`, or give the tracker module a \`normalise\` export that maps it to a tracker id:`, ...offPattern.map((i) => `  ${i}`));
     if (modules.length) out.push('', 'Modules that cannot run as named (each loads only as committed on its repo\'s base, from its own folder):', ...modules.map((m) => `  ${m.what}: ${m.module} ${m.problem}`));

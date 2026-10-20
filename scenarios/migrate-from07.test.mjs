@@ -147,3 +147,30 @@ test('migrate material lists unreferenced workflow files per repo and the produc
     p.cleanup();
   }
 });
+
+test('0.8.1 review: --from-07 gives its sources as reasons, says why a plugin screenshot step seeds no capture, and names the second reviewer\'s host', async () => {
+  const p = makeModuleProject();
+  useDoubles(ledgerDoubles());
+  const restore = useUserDir(p);
+  // Both hosts installed (fake commands on PATH): the second reviewer defaults to the other one.
+  const bin = path.join(p.tmp, 'hosts-bin');
+  fs.mkdirSync(bin, { recursive: true });
+  for (const b of ['claude', 'codex']) fs.writeFileSync(path.join(bin, b), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  const PATH = process.env.PATH;
+  process.env.PATH = `${bin}${path.delimiter}${PATH}`;
+  try {
+    const file = path.join(p.repos.core.dir, '.workflow', 'project.yaml');
+    fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace('run: npm run shots {select}', 'plugin: ./browser/shots.mjs'));
+    const r = await init(p, { 'from-07': true });
+    const why = Object.fromEntries(r.data.diff.changes.map((c) => [c.key, c.reason]));
+    assert.equal(why['tests.core'], 'from the 0.7 gate steps');
+    assert.equal(why['delivery.stages'], 'from the 0.7 delivery (tracker statuses and labels)');
+    assert.match(r.text, /the 0\.7 step `panel-shots` collected screenshots, but it runs as a 0\.7 plugin \(\.\/browser\/shots\.mjs\), not a command that writes each screen to \{out\}/);
+    assert.match(r.text, /Second reviews: `models\.secondReviewer` is unset, so a second review a reviewer asks for runs on Codex/);
+  } finally {
+    process.env.PATH = PATH;
+    restore();
+    clearDoubles();
+    p.cleanup();
+  }
+});

@@ -373,7 +373,7 @@ async function row2(root, attemptId, state, entries) {
     for (const f of files) r.diff[f.kind] = (r.diff[f.kind] ?? 0) + (f.added ?? 0) + (f.removed ?? 0);
   } else r.diff = state.closedRow?.diff ?? null;
   // Whether a reviewer judged it high-risk, or its risk needs ran (a second review, a merge-base test run).
-  r.riskTouched = state.reviews.some((x) => x.risk?.level === 'high' || x.seat === 'second') || state.tests.some((x) => x.kind === 'risk-base');
+  r.riskTouched = state.reviews.some((x) => x.risk?.level === 'high' || String(x.seat).startsWith('second')) || state.tests.some((x) => x.kind === 'risk-base');
 
   // Rework, 48 hours after delivery.
   const landed = state.landings.find((l) => l.result === 'landed');

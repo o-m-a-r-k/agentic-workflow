@@ -81,20 +81,23 @@ test('merge:risk: each need the reviewer names has its evidence: the second revi
     await review(p, s.id, { whole: { risk: { ...HIGH, needs: [...HIGH.needs, scenario] } } });
     let risk = (await flow.mergeFacts(p.root, s.id)).find((f) => f.id === 'merge:risk');
     assert.match(risk.message, /the second whole-diff review/);
-    assert.match(risk.message, /a test that fails without the change \(the change has no test file\)/);
+    assert.match(risk.message, /a test that fails without the change \(the change has no file its repo's `kinds.tests` classes as a test\)/);
     assert.match(risk.message, /the person's diff-read/);
     // Status names the step that supplies the first missing need: `wf review` launches the second seat.
     const { nextStep } = await import('../engine/flow.mjs');
     const step = await nextStep(p.root, s.id);
     assert.match(step.command, /^wf review --attempt/);
     assert.match(step.why, /the reviewer's risk needs the second whole-diff review/);
-    // The second reviewer finds the scenario unmet.
-    await review(p, s.id, { second: { met: [{ need: scenario, met: false, how: 'a filtered empty list returns undefined' }] } });
-    risk = (await flow.mergeFacts(p.root, s.id)).find((f) => f.id === 'merge:risk');
-    assert.match(risk.message, /which the second reviewer found unmet \(a filtered empty list returns undefined\)/);
-    // The fix adds a test; the next round's whole seat judges it low, but the earlier needs stand.
+    // The second reviewer finds the scenario unmet: that is a `goal` finding naming it, which blocks as any blocker.
+    const unmet = { location: 'server/src/core/sum.mjs:1', class: 'goal', severity: 'high', what: `unmet need: ${scenario}`, why: 'a filtered empty list returns undefined' };
+    await assert.rejects(review(p, s.id, { second: { met: [{ need: scenario, met: false }] } }), /`met: false` needs a `goal` finding that cites the need/);
+    await review(p, s.id, { second: { met: [{ need: scenario, met: false }], findings: [unmet] } });
+    const facts = await flow.mergeFacts(p.root, s.id);
+    assert.ok(facts.some((f) => f.id === 'merge:open' && /F1/.test(f.message)), JSON.stringify(facts));
+    assert.equal((await nextStep(p.root, s.id)).command.split(' ').slice(0, 3).join(' '), 'wf handoff implementer');
+    // The fix adds a test; the next round's whole seat judges it low and finds F1 fixed, but the earlier needs stand.
     commitWt(p, s.id, 'server', { 'test/sum.spec.mjs': '// asserts the empty sum\n' });
-    await review(p, s.id, { whole: { risk: LOW } });
+    await review(p, s.id, { whole: { risk: LOW, verified: [{ id: 'F1', status: 'fixed' }] } });
     await review(p, s.id);
     process.env.WF_TEST_RISKBASE_PASS = '1';
     await doubles.runTests(p.root, s.id, 'server', 'risk-base');
@@ -106,7 +109,7 @@ test('merge:risk: each need the reviewer names has its evidence: the second revi
     assert.doesNotMatch(risk.message, /passed there|second|unmet/, 'both seats reviewed; the base run failed; the scenario is met');
     assert.match(risk.message, /diff-read/);
     const d = (await doubles.readEvents(p.root, s.id)).filter((e) => e.type === 'decision.asked' && e.data.kind === 'diff-read').pop();
-    assert.match(d.data.question, /its reviewer asks you to read the diff before it ships \(it computes a total others rely on\)/);
+    assert.match(d.data.question, /its reviewer asks you to read the diff before it ships \(Reviewer's risk: high – it computes a total others rely on\)/);
     answer(p.root, s.id, d.data.id, 'approve');
     assert.deepEqual(await flow.mergeFacts(p.root, s.id), []);
   } finally {

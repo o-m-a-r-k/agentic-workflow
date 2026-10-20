@@ -157,8 +157,8 @@ test('checkAdapter: dropped and unknown keys, stage kinds and modules, all probl
   const problems = await checkAdapter({ ...good, lanes: ['quick'], strategy: {}, colour: 'blue', delivery: { stages: [{ do: 'teleport' }, { do: 'module' }, { do: 'deploy' }, { do: 'merge-request', repos: ['nowhere'] }] } });
   assert.ok(problems.includes('lanes: dropped in schema 2: every ticket goes through one flow'));
   assert.ok(problems.some((x) => x.startsWith('strategy: dropped')));
-  // Risk paths are gone: reviewers judge each change's risk.
-  assert.ok((await checkAdapter({ ...good, risk: 'none' })).some((x) => /^risk: dropped .*reviewers judge each change's risk/.test(x)));
+  // A 0.8.0 adapter's `risk` and `budget.adapter.risk` are ignored, never refused (loadAdapter warns; wf init removes them).
+  assert.deepEqual(await checkAdapter({ ...good, risk: [{ id: 'r', paths: ['a/**'], reason: 'x', tests: ['t/**'] }], budget: { adapter: { rules: 4, risk: 3 } } }), []);
   assert.ok(problems.includes('colour: unknown key'));
   assert.ok(problems.some((x) => x.startsWith('delivery.stages[0].do: must be one of')));
   assert.ok(problems.some((x) => x.startsWith('delivery.stages[1].module:')));

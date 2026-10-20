@@ -50,7 +50,7 @@ process.stdin.on('end', () => {
     lines.push({ type: 'user', sessionId: session, cwd: process.cwd(), timestamp: stamp(), uuid: 'r' + (++n), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: 'file contents' }] } });
   }
   // The review is written with the file tool, as Claude Code does: the transcript carries the write.
-  const judged = seat === 'second' ? { met: mine.met || list('Needs to verify').map((need) => ({ need, met: true })) } : { risk: mine.risk || { level: 'low', why: 'a small change with tests', needs: [] } };
+  const judged = seat.startsWith('second') ? { met: mine.met || list('Needs to verify').map((need) => ({ need, met: true, how: 'read the change for it' })) } : { risk: mine.risk || { level: 'low', why: 'a small change with tests', needs: [] } };
   const content = JSON.stringify({ findings: mine.findings || [], verified: mine.verified || [], ...judged }, null, 2);
   if (output) {
     const id = 'toolu_r' + (++n);

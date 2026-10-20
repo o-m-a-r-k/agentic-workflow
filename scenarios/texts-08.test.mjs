@@ -57,7 +57,7 @@ test('the reviewer: whole diff, blockers then the whole change, state not call c
   for (const s of ['state or output', 'fails without your change', '`wf test fast`', '`wf screens`', 'outside the goal']) assert.ok(impl.includes(s), s);
   // Risk is a goal the reviewer reasons to, not a checklist: harm if wrong, what would make it sure, needs in proportion.
   const risk = read('templates/risk.md');
-  for (const s of ['how much harm', 'what depends on it', 'easily it is undone', 'invariants', 'your confidence', 'examples, not a list', '`level` low or high', '`why`', '`needs` in proportion', '`second-review`', '`failing-test`', '`diff-read`', 'scenario']) assert.ok(risk.includes(s), s);
+  for (const s of ['the harm', 'what depends on it', 'easily it is undone', 'invariants', 'your confidence', 'retries', 'partial failures', 'examples, not a list', '`level` low or high', '`why`', '`needs` in proportion', 'spelled exactly', '`second-review`', '`failing-test`, if one can fail before the change', '`diff-read`', "the person's time", 'a check a reviewer can make by reading']) assert.ok(risk.includes(s), s);
 });
 
 test('the work skill: background attempts, no status stops, wf status names the next command, reserved decisions only', () => {

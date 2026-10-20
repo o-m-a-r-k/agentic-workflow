@@ -344,13 +344,15 @@ test('provenance: with no readable transcript the review is recorded unverified,
     // The whole seat judges it high-risk (a second review, the diff-read); then the second seat is launched.
     for (const [seat, body] of [['whole', { risk: { ...HIGH, needs: ['second-review', 'diff-read'] } }], ['second', {}]]) {
       const b = (await flow.bundle(p.root, s.id)).bundles.find((x) => x.seat === seat);
-      const { session } = await doubles.launchReviewer(p.root, s.id, b);
+      const { session } = await doubles.launchReviewer(p.root, s.id, b, { otherHost: b.otherHost });
       fs.writeFileSync(b.output, JSON.stringify({ findings: [], verified: [], ...body }));
       const r = await flow.cmdReview(ctxOf(p), args([], { attempt: s.id, record: b.output, session: `${session.runtime}:${session.id}` }));
       assert.match(r.text, /coverage unverified, provenance unverified\)/);
     }
     const recorded = ledgerLines(p.root, s.id).filter((e) => e.type === 'review.recorded');
     assert.deepEqual(recorded.map((e) => e.data.provenance), ['unverified', 'unverified']);
+    // The diff-read is asked once nothing else refuses the merge: the fast tests are green on HEAD.
+    await doubles.runTests(p.root, s.id, 'server', 'fast');
     await flow.mergeFacts(p.root, s.id);
     const ask = ledgerLines(p.root, s.id).find((e) => e.type === 'decision.asked' && e.data.kind === 'diff-read');
     assert.match(ask.data.question, /The review files could not be traced to their reviewers from transcripts\./);
@@ -381,7 +383,7 @@ test('resume loads the attempt once and lists a question its next step just aske
     await doubles.runTests(p.root, s.id, 'server', 'risk-base');
     const r = await flow.cmdResume(ctxOf(p), args([], { attempt: s.id }));
     assert.match(r.text, /next: wf approve D1 /);
-    assert.match(r.text, /questions waiting for the person: D1 "TK-1\.1: its reviewer asks you to read the diff before it ships \(it computes a total others rely on\)\. Read it/);
+    assert.match(r.text, /questions waiting for the person: D1 "TK-1\.1: its reviewer asks you to read the diff before it ships \(Reviewer's risk: high – it computes a total others rely on\)\. Read it/);
     assert.deepEqual(r.data.attempts[0].decisions, ['D1']);
   } finally {
     p.done();

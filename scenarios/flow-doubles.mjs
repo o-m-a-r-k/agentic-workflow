@@ -155,8 +155,9 @@ export async function filesRead(session) {
 }
 
 let launches = 0;
-export async function launchReviewer(root, attempt, bundle, { model } = {}) {
-  const session = { runtime: 'claude', id: `rev-${process.pid}-${++launches}-${bundle.seat.replace(/[^A-Za-z0-9]/g, '-')}` };
+// `otherHost` (a second seat with no model of its own) runs on another host, unless WF_TEST_ONE_HOST=1 (none installed).
+export async function launchReviewer(root, attempt, bundle, { model, otherHost } = {}) {
+  const session = { runtime: otherHost && process.env.WF_TEST_ONE_HOST !== '1' ? 'codex' : 'claude', id: `rev-${process.pid}-${++launches}-${bundle.seat.replace(/[^A-Za-z0-9]/g, '-')}` };
   await append(root, attempt, 'handoff', { role: 'reviewer', session, launchedBy: 'wf', seat: bundle.seat, tree: bundle.tree, heads: bundle.heads, round: bundle.round, ...(model ? { model } : {}) }, null);
   return { session, launchedAt: new Date().toISOString() };
 }
@@ -166,8 +167,9 @@ export async function runTests(root, attempt, repo, kind) {
   const wt = s.repos[repo].worktree;
   const tree = git(wt, ['rev-parse', 'HEAD^{tree}']);
   const pass = kind === 'risk-base' ? process.env.WF_TEST_RISKBASE_PASS === '1' : !(kind === 'fast' && process.env.WF_TEST_FAST_FAIL === '1');
-  await append(root, attempt, 'test.run', { repo, kind, tree, pass, exitCode: pass ? 0 : 1, ms: 1, source: 'attempt' }, null);
-  return { pass, tree, ms: 1, exitCode: pass ? 0 : 1, log: '' };
+  const log = kind === 'risk-base' ? path.join(root, '.wf-evidence', 'attempts', attempt, 'tests', `risk-base-${repo}.log`) : '';
+  await append(root, attempt, 'test.run', { repo, kind, tree, pass, exitCode: pass ? 0 : 1, ms: 1, source: 'attempt', ...(log ? { log } : {}) }, null);
+  return { pass, tree, ms: 1, exitCode: pass ? 0 : 1, log };
 }
 
 // git blame of one line against the attempt's base commit.

@@ -82,8 +82,25 @@ test('digest: an attempt closed outside its stages (by patch-id) is shown once, 
     await L.append(p.root, 'TK-4.1', 'attempt.closed', { outcome: 'shipped', reason: 'its commits are on the base', outsideStages: true });
     await L.append(p.root, 'TK-5.1', 'attempt.closed', { outcome: 'shipped', reason: 'delivered' });
     const d = await digest(p.root);
-    assert.deepEqual(d.items.map((i) => [i.kind, i.attempt]), [['outside', 'TK-4.1']]);
+    assert.deepEqual(d.items.map((i) => [i.kind, i.attempt]), [['outside', 'TK-4.1'], ['shipped', 'TK-4.1'], ['shipped', 'TK-5.1']]);
+    // Each shipped attempt is one line, with the reviewer's risk judgement (none was recorded here).
+    assert.match(d.text, /Shipped \(2\):\n- TK-4 \(TK-4\.1\): no risk judgement recorded\n- TK-5 \(TK-5\.1\): no risk judgement recorded/);
     assert.match(d.text, /Closed outside its stages \(1\):\n- TK-4 \(TK-4\.1\): closed shipped by its patch-ids/);
     assert.equal((await digest(p.root, { since: new Date(Date.now() + 1000).toISOString() })).items.length, 0);
+  });
+});
+
+test('0.8.1 review: each shipped attempt is one digest line with the reviewer\'s risk judgement and any dropped need', async (t) => {
+  const p = makeProject({ adapter: false });
+  t.after(p.cleanup);
+  const L = fileLedger();
+  await withDoubles({ ...L, loadAdapter: async () => ({ name: 'sample' }) }, async () => {
+    await startAttempt(L, p.root, 'TK-6.1');
+    const base = { round: 1, seat: 'whole', tree: 't', session: { runtime: 'claude', id: 'r1' }, coverage: 'complete', findings: [], verified: [], blockers: 0 };
+    await L.append(p.root, 'TK-6.1', 'review.recorded', { ...base, review: 1, risk: { level: 'high', why: 'it grants access', needs: ['diff-read', 'second-review'] } });
+    await L.append(p.root, 'TK-6.1', 'review.recorded', { ...base, review: 2, round: 2, risk: { level: 'low', why: 'narrowed', needs: [], drop: [{ need: 'diff-read', why: 'the role check is unchanged' }] } });
+    await L.append(p.root, 'TK-6.1', 'attempt.closed', { outcome: 'shipped', reason: 'delivered' });
+    const d = await digest(p.root);
+    assert.match(d.text, /Shipped \(1\):\n- TK-6 \(TK-6\.1\): Reviewer's risk: high – it grants access; dropped: diff-read \(the role check is unchanged\)/);
   });
 });

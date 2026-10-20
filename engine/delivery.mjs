@@ -18,6 +18,7 @@ import {
   marker, mergeFacts, readEvents, refusal, worktreeDir,
 } from './contract.mjs';
 import { scrub, secretValues } from './scrub.mjs';
+import { itemRiskLine } from './risk.mjs';
 import { pendingLines, refilePending } from './findings.mjs';
 import { canonicalItem, connectorStep, git, loadModule, rejectedText, trackerOf, wordsFor } from './tracker.mjs';
 
@@ -331,7 +332,11 @@ async function postComment(ctx, kind, m) {
     return { state: 'pending', evidence, next: `write the ${kind} comment for ${ctx.item} in product words (what to test; no file paths, commits or hashes) to ${file}; then wf deliver ${ctx.attempt}` };
   }
   // Scrubbed at post: the comment leaves the process. The connector posts the file, so the file holds the scrubbed text.
-  const text = fs.readFileSync(file, 'utf8').trim();
+  // The engine adds one line: the reviewer's risk judgement and any need it dropped (D94).
+  const line = await itemRiskLine(ctx.root, ctx.item);
+  const own = fs.readFileSync(file, 'utf8').trim();
+  const text = line && !own.includes("Reviewer's risk:") ? `${own}\n\n${line}` : own;
+  if (text !== own) fs.writeFileSync(file, `${text}\n`);
   const clean = scrub(text, { secrets: secretValues(ctx.root, ctx.adapter) });
   if (clean !== text) fs.writeFileSync(file, `${clean}\n`);
   const body = `${clean}\n\n${m}`;

@@ -7,6 +7,7 @@ import path from 'node:path';
 import { WfError, listAttempts, loadAdapter, readEvents, userDir } from './contract.mjs';
 import { PROJECT_LEDGER, decisionsOf, stillHolds } from './decisions.mjs';
 import { scrub, secretValues } from './scrub.mjs';
+import { itemRiskLine } from './risk.mjs';
 
 const clip = (s, n = 200) => (String(s).length > n ? `${String(s).slice(0, n - 1)}…` : String(s));
 
@@ -54,6 +55,8 @@ export async function digest(root, opts = {}) {
       // Closed as shipped by its patch-ids, outside its own stages: said once, in the digest of that day.
       const c = f.closedEvent;
       if (c.data?.outsideStages === true && Date.parse(c.at) >= since) items.push({ kind: 'outside', attempt, item: f.item, outcome: c.data.outcome ?? null, reason: c.data.reason ?? null, at: c.at });
+      // Each shipped attempt, once, with the reviewer's risk judgement and any dropped need.
+      if (c.data?.outcome === 'shipped' && Date.parse(c.at) >= since) items.push({ kind: 'shipped', attempt, item: f.item, risk: await itemRiskLine(root, f.item), at: c.at });
       continue;
     }
     for (const d of (await decisionsOf(root, attempt)).values()) if (open(d)) items.push(question(d, f.item));
@@ -92,6 +95,7 @@ function render(items) {
   section('Questions for you', of('decision'), (i) => `${where(i)} ${i.id}${i.blocking ? ', holding the ticket' : ''}: ${i.question} Options: ${i.options.join(' | ')}. Answer in the chat, or: ${approve(i)}`);
   section('Diff-reads', of('diff-read'), (i) => `${where(i)} ${i.id}: ${i.question} Options: ${i.options.join(' | ')}`);
   section('Merges waiting for your click', of('merge'), (i) => `${where(i)}${i.repo ? ` ${i.repo}` : ''}: ${clip(i.next ?? (typeof i.evidence === 'string' ? i.evidence : JSON.stringify(i.evidence)))}`);
+  section('Shipped', of('shipped'), (i) => `${where(i)}: ${i.risk ?? 'no risk judgement recorded'}`);
   section('Closed outside its stages', of('outside'), (i) => `${where(i)}: closed ${i.outcome ?? 'shipped'} by its patch-ids, without its delivery stages${i.reason ? ` (${clip(i.reason)})` : ''}`);
   section('Reviews not traced to their reviewer (no readable transcript)', of('untraced'), (i) => `${where(i)} review ${i.review} (seat ${i.seat}${i.session ? `, ${i.session}` : ''}): wf could not check that the reviewer wrote its file`);
   section('Found outside the goal', of('finding'), (i) => `${where(i)} ${i.id}${i.severity ? ` (${i.severity})` : ''}${i.location ? ` ${i.location}` : ''}: ${clip(i.what ?? '')}`);

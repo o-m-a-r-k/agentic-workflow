@@ -23,18 +23,29 @@ risks, again, you are being very specific, which will lead to issues".
   spread and how easily it could be undone, how well the tests cover it, the project's invariants, and its own
   confidence. Money, irreversible external writes, lost data and access are examples in its guidance, not a checklist.
 - Its review records `risk: { level: low|high, why, needs }`. `needs` is its own proportionate verification:
-  `second-review`, `failing-test`, `diff-read`, or a scenario in its own words. A high level names at least one need.
+  `second-review`, `failing-test`, `diff-read`, or a check a reviewer can make by reading, in its own words. Spellings
+  are normalised, so "diff read" or "the person's diff-read" still reach you. A high level names at least one need.
+  `failing-test` is refused for a change whose repos have no `fast` tests.
 - The engine never judges the risk. It checks that each need has its evidence before the merge, and refuses
   `merge:risk` until it does:
-  - `second-review`: a review by the second seat, on a different model, on the reviewed tree. The next `wf review`
-    launches it once the first seats are recorded.
+  - `second-review`: a review by the second seat on a model of its own. With `models.secondReviewer` unset it runs on
+    the other installed host (Claude Code or Codex); a second review on the first reviewer's model does not count, and
+    `wf status` and `wf doctor` say to set `models.secondReviewer`. Above the split size the second review splits by
+    area too.
   - `failing-test`: a `wf test risk-base` run that failed on the merge-base. It runs the repo's `fast` tests there with
-    the attempt's changed test files applied, so no adapter globs are needed.
-  - `diff-read`: your answer. You are asked last, once nothing blocks and every other need has its evidence, so you read
-    what ships. `review.diffRead: after` still lets the merge go first.
-  - any other need: the second reviewer's verdict in its review, `met: [{ need, met, how }]`. It must give one for
-    each; a need it finds unmet goes back to the implementer.
-- A later round never drops a need an earlier round named.
+    the attempt's changed test files applied, so no adapter globs are needed. The engine knows only that it failed;
+    its log goes to the second reviewer and to you, to judge whether it failed for the right reason.
+  - `diff-read`: your answer, on the whole diff with the merge-base log. You are asked last, once nothing else holds
+    the merge and every other need has its evidence, so you read what ships. With `review.diffRead: after` it holds
+    nothing.
+  - any other need: the second reviewer's verdict, `met: [{ need, met, how }]`. A met need says how; an unmet one is a
+    `goal` finding naming it, so it is fixed in a fix round, or you waive it, and rounds that make no progress stop
+    for you, as with any blocker.
+- Needs stand across rounds and across a restarted attempt. A later reviewer sees them with their reasons and lowers
+  one only with `risk.drop: [{ need, why }]`; the drop is printed and shown with the judgement at your diff-read, on
+  one line the engine adds to the delivered tracker comment ("Reviewer's risk: high – why", with any dropped need),
+  and on one digest line per shipped attempt.
+- A review refused for its shape marks its launch failed, so `wf review` launches the seat again.
 
 ### Screens are optional (D100)
 
@@ -48,14 +59,23 @@ with no capture command could not migrate at all.
 - `--from-07` seeds `screens.capture` from the old step that collected screenshots only when its command writes each
   screen to `{out}`. Otherwise it says why none is proposed, instead of proposing a command that would capture nothing.
 
+### Onboarding
+
+- `kinds.tests` is proposed by test-folder name and suffix (`**/__tests__/**`, `**/*.spec.ts`): a few globs per repo,
+  where 0.8.0 proposed one per existing folder (over 500 for one repo) and missed every new folder. Settings for a
+  `test` environment under a config folder are not classed as tests.
+- `--from-07` gives each seeded key's source as its reason (the 0.7 gate steps, the 0.7 delivery), says when a
+  screenshot step runs as a 0.7 plugin, and, with both hosts installed, that second reviews run on the other one.
+
 ### For a 0.8.0 adapter
 
-Delete its `risk` key and `budget.adapter.risk`; `wf doctor` names both. Nothing else changes.
+Its `risk` key and `budget.adapter.risk` are ignored with a warning; nothing refuses them. `wf init` proposes removing
+them, and `wf doctor` names them.
 
 ### The budget of this release
 
 It shrank: refusals 19 to 18 (`review:size` removed), adapter keys 36 to 35 (`risk` removed), words in the texts agents
-read 799 to 797; commands (23) and events (15) are unchanged. The scan's library lists went from ten to three.
+read 799 to 797; commands (23) and events (15) are unchanged. The scan's library lists went from ten (226 entries) to six (56).
 
 ## 0.8.0 - The small core: one flow, whole-diff reviews, the project's own delivery
 

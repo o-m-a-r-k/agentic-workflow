@@ -4,7 +4,7 @@
 // reports the model at capacity (D61), for as long as it keeps reporting it, with growing waits.
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { WfError, append, attemptDir, worktreeDir } from './contract.mjs';
 import { callerSession, findHost, hostIds, jsonSpan, sessionVariables } from './hosts/index.mjs';
@@ -34,11 +34,34 @@ const writeJson = (file, value) => {
   fs.renameSync(`${file}.tmp`, file);
 };
 
+// The host that launches reviewers for a caller on `runtime` (its own when it can, else the first that can), and another
+// installed host for a second reviewer with no model of its own.
+export function reviewerHosts(runtime) {
+  const caller = findHost(runtime);
+  const first = caller?.launch ? caller : hostIds().map(findHost).find((h) => h?.launch) ?? null;
+  return { first, other: otherHosts(first?.id)[0] ?? null };
+}
+
+// The hosts other than `id` that can launch a reviewer here: a launch spec, and its command on PATH.
+export function otherHosts(id) {
+  return hostIds().map(findHost).filter((h) => h && h.id !== id && h.launch && installed(h));
+}
+function installed(host) {
+  try {
+    const bin = host.launch({ model: null, cwd: process.cwd(), closure: null })?.bin;
+    return Boolean(bin) && spawnSync('sh', ['-c', 'command -v "$1"', 'sh', bin], { stdio: 'ignore' }).status === 0;
+  } catch {
+    return false;
+  }
+}
+
 export async function launchReviewer(root, attempt, bundle, opts = {}) {
   if (typeof bundle?.prompt !== 'string' || !bundle.prompt.trim()) throw new WfError('the review bundle has no prompt; a reviewer is launched with the bundle as its whole prompt');
   // The caller's own host runs the reviewer when it can launch one; otherwise the first registered host that can.
-  const caller = findHost(opts.runtime ?? callerSession(process.env)?.runtime);
-  const host = caller?.launch ? caller : hostIds().map(findHost).find((h) => h.launch);
+  const hosts = reviewerHosts(opts.runtime ?? callerSession(process.env)?.runtime);
+  // `otherHost`: a second reviewer with no model of its own runs on another host whose command is installed, so it
+  // reviews on another model; with none, on the usual host (the merge facts then name the missing model).
+  const host = (opts.otherHost && hosts.other) || hosts.first;
   if (!host) throw new WfError('no registered host can launch a reviewer');
   const model = opts.model ?? bundle.model ?? null;
   const worktrees = path.dirname(worktreeDir(root, attempt, 'x'));

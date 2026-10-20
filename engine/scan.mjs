@@ -15,8 +15,17 @@ const MAX_BYTES = 1024 * 1024; // larger files are generated or data; reading th
 const SKIP_DIRS = new Set(['.git', 'node_modules', 'vendor', 'dist', 'build', '.next', '.wf-worktrees', '.wf-evidence', 'Pods', '.gradle', 'target', 'coverage']);
 const LOCKFILES = /(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|composer\.lock|Gemfile\.lock|poetry\.lock|Cargo\.lock|go\.sum)$/;
 
-// A test file: a tests folder anywhere on its path, or a test/spec suffix.
-export const isTestFile = (p) => /(^|\/)(tests?|__tests__|specs?|e2e|cypress|playwright|integration-tests?)\//i.test(p) || /[._-](test|spec)\.[a-z]+$/i.test(p) || /Test\.(php|java|kt|cs|swift)$/.test(p);
+// A test file: a tests folder anywhere on its path, or a test/spec suffix. Settings for an environment named `test`
+// (`config/packages/test/*.yaml`, `config/services_test.yaml`: a settings file under a config folder) are configuration, not tests.
+export const TEST_DIR = /^(tests?|__tests__|specs?|e2e|cypress|playwright|integration-tests?)$/i;
+const CONFIG_DIR = /^(config|configs|conf|settings)$/i;
+const SETTINGS_FILE = /\.(ya?ml|json|xml|pem|key|crt|ini|toml|env|neon|conf|properties)$/i;
+export const isTestConfig = (p) => {
+  const segs = p.split('/').slice(0, -1);
+  const c = segs.findIndex((x) => CONFIG_DIR.test(x));
+  return c >= 0 && SETTINGS_FILE.test(p) && (segs.slice(c + 1).some((x) => TEST_DIR.test(x)) || /[._-](test|spec)\.[a-z]+$/i.test(p));
+};
+export const isTestFile = (p) => !isTestConfig(p) && (p.split('/').slice(0, -1).some((s) => TEST_DIR.test(s)) || /[._-](test|spec)\.[a-z]+$/i.test(p) || /Test\.(php|java|kt|cs|swift)$/.test(p));
 // The project's instruction documents, by the names agent hosts and contributors read.
 export const isInstructionDoc = (p) => /(^|\/)(AGENTS|CLAUDE|GEMINI|CONTRIBUTING)\.md$/i.test(p) || /(^|\/)\.(claude|cursor)\/rules\/.+\.mdc?$/i.test(p) || /(^|\/)\.github\/copilot-instructions\.md$/i.test(p);
 export const isInvariantsDoc = (p) => /invariant[^/]*\.(md|txt|ya?ml)$/i.test(p);
@@ -171,6 +180,7 @@ function scanRepo(root, repo) {
   const facts = [];
   const add = (kind, rel, evidence) => facts.push({ kind, path: `${prefix}${rel}`, evidence: clip(evidence) });
   const tests = [];
+  const configTests = [];
   for (const f of files) {
     if (LOCKFILES.test(f)) continue;
     if (isInvariantsDoc(f) || isInstructionDoc(f)) {
@@ -181,15 +191,16 @@ function scanRepo(root, repo) {
     const ci = ciShape(f, /\.ya?ml$|file$/i.test(f) ? read(f) ?? '' : '');
     if (ci) add('ci-file', f, ci);
     if (isTestFile(f)) tests.push(`${prefix}${f}`);
+    else if (isTestConfig(f)) configTests.push(`${prefix}${f}`);
   }
   for (const m of mobileFacts(files, read)) add('mobile-app', m.path, m.evidence);
   for (const s of testScripts(dir, files)) facts.push({ kind: 'test-script', path: `${prefix}${s.path}`, evidence: s.evidence, ...(s.command ? { command: s.command, name: s.name } : {}), ...(s.containers ? { containers: true } : {}) });
 
-  return { name: repo.name, path: repo.path, facts, tests };
+  return { name: repo.name, path: repo.path, facts, tests, configTests };
 }
 
 /** scan(root, { repos? }) → ScanFacts (engine/contract.mjs). Each repo also carries `tests`: its test files, relative to
- * the root, from which onboarding proposes `kinds.tests`. */
+ * the root, from which onboarding proposes `kinds.tests`, and `configTests`: configuration under a test-named folder. */
 export async function scan(root, { repos } = {}) {
   const list = repos?.length ? repos.map((r) => ({ name: r.name, path: r.path })) : discoverRepos(root);
   return { root, repos: list.map((r) => scanRepo(root, r)) };
@@ -199,4 +210,4 @@ export const implements08 = { scan };
 
 // The scan's library lists (named failure: lists of library and framework names grow one project at a time until the
 // generic scan carries every project's stack). scenarios/onboard-library-cap.test.mjs caps their size.
-export const LIBRARY_LISTS = Object.freeze({ SKIP_DIRS, TEST_SCRIPT, LOCKFILES });
+export const LIBRARY_LISTS = Object.freeze({ SKIP_DIRS, TEST_SCRIPT, LOCKFILES, TEST_DIR, CONFIG_DIR, SETTINGS_FILE });

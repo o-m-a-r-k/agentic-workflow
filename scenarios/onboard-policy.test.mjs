@@ -174,3 +174,48 @@ test('doctor names instruction lines with removed commands and the hand edits', 
     p.cleanup();
   }
 });
+
+test('0.8.1 review: a 0.8.0 adapter\'s `risk` is ignored with a warning, never refused, and wf init removes it', async () => {
+  const p = fresh();
+  useDoubles(ledgerDoubles());
+  try {
+    await init(p, { confirm: ['all'] });
+    const file = path.join(p.root, '.workflow', 'project.yaml');
+    const raw = YAML.parse(fs.readFileSync(file, 'utf8'));
+    raw.risk = [{ id: 'sums', paths: ['core/src/**'], reason: 'x', tests: ['core/test/**'] }];
+    raw.budget.adapter.risk = 1;
+    fs.writeFileSync(file, YAML.stringify(raw));
+    const { loadAdapter } = await import('../engine/contract.mjs');
+    assert.equal((await loadAdapter(p.root, { env: p.env })).name, raw.name);
+    const d = await commandHandler('doctor')(ctxFor(p), { _: [], flags: {} });
+    assert.ok(d.data.checks.some((c) => c.level === 'warn' && /`risk` is ignored/.test(c.detail)));
+    const r = await init(p);
+    assert.deepEqual(r.data.diff.changes.filter((c) => c.key.endsWith('risk')).map((c) => c.key), ['risk', 'budget.adapter.risk']);
+    await init(p, { confirm: ['all'] });
+    const after = readAdapter(file);
+    assert.equal(after.risk, undefined);
+    assert.equal(after.budget.adapter.risk, undefined);
+  } finally {
+    clearDoubles();
+    p.cleanup();
+  }
+});
+
+test('0.8.1 review: doctor names a second reviewer on the first reviewer\'s model', async () => {
+  const p = fresh();
+  useDoubles(ledgerDoubles());
+  try {
+    await init(p, { confirm: ['all'] });
+    const file = path.join(p.root, '.workflow', 'project.yaml');
+    const raw = YAML.parse(fs.readFileSync(file, 'utf8'));
+    raw.models = { reviewer: 'm1', secondReviewer: 'm1' };
+    fs.writeFileSync(file, YAML.stringify(raw));
+    const d = await commandHandler('doctor')(ctxFor(p), { _: [], flags: {} });
+    const c = d.data.checks.find((x) => x.check === 'second reviewer');
+    assert.equal(c.level, 'warn');
+    assert.match(c.detail, /the same model as `models\.reviewer`/);
+  } finally {
+    clearDoubles();
+    p.cleanup();
+  }
+});

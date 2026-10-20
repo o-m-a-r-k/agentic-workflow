@@ -123,9 +123,13 @@ const DROPPED = {
   enabled: 'onboarding replaces it', engine: 'the installed plugin runs', lanes: 'every ticket goes through one flow', classes: 'only a model per role remains (`models`)', panel: 'the planner panel is gone', strategy: 'the strategist is gone',
   impact: 'consumers come from `components`', leaving: 'findings are goal, regression or other', severity: 'findings are goal, regression or other', learning: 'learning is measured', gate: 'tests are `repos[].tests.fast` and `.full`',
   quality: 'it moved into the invariants file', designSystem: 'it moved to the repos\' lint', adapterRepo: 'the adapter is found by location', instructionFiles: 'the plugin reads none', tracker: 'it is `ticketing`', secrets: 'secrets are catalogued by `wf secrets`', validation: 'per-ticket steps are gone',
-  risk: 'reviewers judge each change\'s risk; there are no risk paths',
 };
 const NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+// Keys a 0.8.0 adapter may still hold that 0.8.1 ignores, with a warning (risk is judged per change by reviewers).
+// `wf init` proposes removing them; nothing refuses them.
+export const IGNORED = Object.freeze({ risk: 'reviewers judge each change\'s risk since 0.8.1', 'budget.adapter.risk': 'there are no risk paths to count since 0.8.1' });
+export const ignoredKeys = (raw) => Object.keys(IGNORED).filter((k) => (k === 'risk' ? isObj(raw) && 'risk' in raw : isObj(raw?.budget?.adapter) && 'risk' in raw.budget.adapter));
+const warned = new Set();
 const STAGE_KINDS = ['land', 'push', 'merge-request', 'wait-merged', 'confirm-deployed', 'deploy', 'status', 'comment', 'module'];
 const STAGE_KEYS = ['do', 'branch', 'to', 'comment', 'repos', 'where', 'when', 'after', 'module'];
 const MODEL_ROLES = ['planner', 'implementer', 'reviewer', 'secondReviewer', 'drafter'];
@@ -237,7 +241,7 @@ function problemsOf(raw, { location } = {}) {
   if (!isObj(raw)) return ['the adapter must be a mapping'];
   if (raw.version !== 2) return [`version: must be 2, not ${JSON.stringify(raw.version ?? null)}${raw.version === 1 ? '; a 0.7 adapter is converted by `wf init --from-07`' : ''}`];
   for (const k of Object.keys(raw)) {
-    if (TOP.includes(k)) continue;
+    if (TOP.includes(k) || Object.hasOwn(IGNORED, k)) continue;
     c.add(k, Object.hasOwn(DROPPED, k) ? `dropped in schema 2: ${DROPPED[k]}` : 'unknown key');
   }
   if (c.str(raw.name, 'name') && !NAME.test(raw.name)) c.add('name', `\`${raw.name}\` must be letters, digits, dot, dash or underscore (it names files)`);
@@ -363,8 +367,8 @@ function problemsOf(raw, { location } = {}) {
   }
 
   if ('models' in raw && c.obj(raw.models, 'models', MODEL_ROLES)) for (const [k, v] of Object.entries(raw.models)) c.str(v, `models.${k}`);
-  if ('budget' in raw && c.obj(raw.budget, 'budget', ['adapter']) && 'adapter' in raw.budget && c.obj(raw.budget.adapter, 'budget.adapter', BUDGET_KEYS)) {
-    for (const [k, v] of Object.entries(raw.budget.adapter)) (Number.isInteger(v) && v >= 0) || c.add(`budget.adapter.${k}`, 'must be a whole number, 0 or more');
+  if ('budget' in raw && c.obj(raw.budget, 'budget', ['adapter']) && 'adapter' in raw.budget && c.obj(isObj(raw.budget.adapter) ? Object.fromEntries(Object.entries(raw.budget.adapter).filter(([k]) => k !== 'risk')) : raw.budget.adapter, 'budget.adapter', BUDGET_KEYS)) {
+    for (const [k, v] of Object.entries(raw.budget.adapter).filter(([x]) => x !== 'risk')) (Number.isInteger(v) && v >= 0) || c.add(`budget.adapter.${k}`, 'must be a whole number, 0 or more');
   }
   if ('onboarded' in raw && c.obj(raw.onboarded, 'onboarded', ['at', 'engine', 'hashes'])) {
     const o = raw.onboarded;
@@ -494,6 +498,11 @@ export async function loadAdapter(root, { env = process.env } = {}) {
   if (location === 'repo' && isStr(raw.root) && real(expandHome(raw.root, env)) !== dir) problems.push(`root: \`${raw.root}\` is not ${dir}, the folder this adapter was found in`);
   if (problems.length) throw new WfError(`${file}:\n  - ${problems.join('\n  - ')}`, { hint: 'fix the adapter, or re-run `wf init`' });
   if (location === 'user') keepHistory(file, text);
+  for (const k of ignoredKeys(raw)) {
+    if (warned.has(`${file}:${k}`)) continue;
+    warned.add(`${file}:${k}`);
+    process.stderr.write(`wf: ${file}: \`${k}\` is ignored (${IGNORED[k]}); \`wf init\` removes it\n`);
+  }
   return normalise(raw, dir, { file, location, hash: sha256(text) });
 }
 

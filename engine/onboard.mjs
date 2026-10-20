@@ -12,8 +12,8 @@ import {
   COMMANDS, COMMAND_ALIASES, CONTRACT_VERSION, POLICY_KEYS, WfError, adapterBudget, canonicalJson, checkAdapter, listAttempts,
   loadAdapter, readEvents, scan, userDir,
 } from './contract.mjs';
-import { SECRETS_SUFFIX, secretsCatalogFile } from './config.mjs';
-import { isInstructionDoc, repoFiles } from './scan.mjs';
+import { IGNORED, SECRETS_SUFFIX, ignoredKeys, secretsCatalogFile } from './config.mjs';
+import { TEST_DIR, isInstructionDoc, repoFiles } from './scan.mjs';
 import { stateFolderWarnings } from './state-folders.mjs';
 
 const require = createRequire(import.meta.url);
@@ -144,7 +144,8 @@ export async function proposePolicy(facts, current, draft) {
   };
 
   // review.diffRead, delivery.stages
-  const pick = (key, fallback, why) => change(key, cur[key], want[key] !== undefined ? want[key] : cur[key] ?? fallback, want[key] !== undefined ? 'from the draft' : why);
+  const because = draft?.reasons ?? {};
+  const pick = (key, fallback, why) => change(key, cur[key], want[key] !== undefined ? want[key] : cur[key] ?? fallback, want[key] !== undefined ? because[key] ?? 'from the draft' : why);
   pick('review.diffRead', 'before', 'not set: when a reviewer asks for the person\'s diff-read, it comes before the merge (`after` merges first and keeps the revert)');
   pick('delivery.stages', [{ do: 'land' }], 'not set: each repo\'s part lands on its base');
 
@@ -155,13 +156,15 @@ export async function proposePolicy(facts, current, draft) {
   // tests, per repo
   for (const repo of facts.repos) {
     const from = cur.tests[repo.name] ?? null;
-    if (want.tests?.[repo.name]) change(`tests.${repo.name}`, from, want.tests[repo.name], want.tests.reasons?.[repo.name] ?? 'from the draft');
+    if (want.tests?.[repo.name]) change(`tests.${repo.name}`, from, want.tests[repo.name], because.tests ?? 'from the draft');
     else if (!from?.fast && !from?.full) {
       const t = testsFromFacts(repo);
       if (t.value.fast || t.value.full) change(`tests.${repo.name}`, from, t.value, `the repo's own scripts: ${t.cites.slice(0, 4).join('; ')}`);
     }
   }
-  for (const [name, t] of Object.entries(want.tests ?? {})) if (!facts.repos.some((r) => r.name === name)) change(`tests.${name}`, cur.tests[name] ?? null, t, 'from the draft');
+  for (const [name, t] of Object.entries(want.tests ?? {})) if (!facts.repos.some((r) => r.name === name)) change(`tests.${name}`, cur.tests[name] ?? null, t, because.tests ?? 'from the draft');
+  // Keys a 0.8.0 adapter may hold that 0.8.1 ignores: proposed for removal.
+  for (const k of ignoredKeys(raw)) changes.push({ key: k, from: k === 'risk' ? raw.risk : raw.budget.adapter.risk, to: null, reason: `ignored: ${IGNORED[k]}; this removes it`, handEdited: false });
 
   // screens, per setting
   if (want.screens === 'none') change('screens', cur.screens, 'none', 'the draft: the project has no screens');
@@ -179,6 +182,8 @@ export async function proposePolicy(facts, current, draft) {
 // ---------------------------------------------------------------------------------------------------------------------
 
 function applyChange(js, c) {
+  if (c.key === 'risk') return void delete js.risk;
+  if (c.key === 'budget.adapter.risk') return void delete js.budget?.adapter?.risk;
   const top = topOf(c.key);
   const sub = c.key.slice(top.length + 1);
   if (top === 'screens' && !sub) js.screens = c.to;
@@ -307,15 +312,19 @@ function baseOf(dir) {
   return head ? head.replace(/^origin\//, '') : git(dir, ['branch', '--show-current']) || null;
 }
 
-// The test-file globs of a repo for `kinds.tests`, from the test files the scan found (relative to the repo).
+// The test-file globs of a repo for `kinds.tests`, from the test files the scan found (relative to the repo): one
+// `**/<folder>/**` per test folder name and one `**/*<suffix>` per test suffix, so a new test folder is a test too
+// (named failure: one glob per existing folder, 522 for one repo, missed every new one). A folder name that also holds
+// configuration (`config/<env>/test/`) keeps its own paths instead.
 export function testKinds(repo) {
   const prefix = repo.path === '.' ? '' : `${repo.path}/`;
+  const rel = (p) => p.slice(prefix.length);
+  const configNames = new Set((repo.configTests ?? []).flatMap((p) => rel(p).split('/').slice(0, -1).filter((x) => TEST_DIR.test(x))));
   return [...new Set(repo.tests.map((t) => {
-    const rel = t.slice(prefix.length);
-    const segs = rel.split('/');
-    const i = segs.findIndex((s) => /^(tests?|__tests__|specs?|e2e)$/i.test(s));
-    if (i >= 0) return `${segs.slice(0, i + 1).join('/')}/**`;
-    const m = /[._-](test|spec)(\.[a-z]+)$/i.exec(rel);
+    const segs = rel(t).split('/');
+    const i = segs.slice(0, -1).findIndex((x) => TEST_DIR.test(x));
+    if (i >= 0) return configNames.has(segs[i]) ? `${segs.slice(0, i + 1).join('/')}/**` : `**/${segs[i]}/**`;
+    const m = /[._-](test|spec)(\.[a-z]+)$/i.exec(t) ?? /Test\.(php|java|kt|cs|swift)$/.exec(t);
     return m ? `**/*${m[0]}` : null;
   }).filter(Boolean))].sort();
 }
@@ -370,7 +379,8 @@ export async function cmdInit(ctx, args) {
 
   const facts = await scan(root, { repos: (current?.repos ?? migration?.seed.repos)?.map((r) => ({ name: r.name, path: r.path })) });
   const screens = draft?.screens === 'none' ? 'none' : { ...migration?.draft.screens, ...(draft?.screens ?? {}) };
-  const merged = migration ? { ...migration.draft, ...(draft ?? {}), screens } : draft;
+  const reasons = migration ? Object.fromEntries(Object.entries(migration.draft.reasons ?? {}).filter(([k]) => !(k === 'tests' ? draft?.tests || draft?.repos : k === 'delivery.stages' ? draft?.delivery?.stages : false))) : undefined;
+  const merged = migration ? { ...migration.draft, ...(draft ?? {}), screens, reasons } : draft;
   const diff = await proposePolicy(facts, current, merged);
   if (!current) {
     diff.seed = migration?.seed ?? freshSeed(root, facts);
@@ -459,6 +469,13 @@ export async function cmdDoctor(ctx) {
     }
   }
   if (adapter) {
+    for (const k of ignoredKeys(found.raw)) add('warn', 'adapter', `\`${k}\` is ignored: ${IGNORED[k]}`, 're-run `wf init` and confirm its removal');
+    // The second reviewer runs on a model of its own (D94): `models.secondReviewer`, else another installed host.
+    const { reviewerHosts } = await import('./launch.mjs');
+    const hosts = reviewerHosts(ctx.actor?.runtime);
+    const m = adapter.models ?? {};
+    if (m.secondReviewer && m.secondReviewer === m.reviewer) add('warn', 'second reviewer', `\`models.secondReviewer\` is \`${m.reviewer}\`, the same model as \`models.reviewer\`: a second review on it does not count`, 'set `models.secondReviewer` to a different model');
+    else if (!m.secondReviewer) add(hosts.other ? 'ok' : 'warn', 'second reviewer', hosts.other ? `\`models.secondReviewer\` is unset: second reviews run on ${hosts.other.label}, the other installed host` : `\`models.secondReviewer\` is unset and no other host is installed: a second review would run on the first reviewer's model and not count`, hosts.other ? null : 'set `models.secondReviewer` to a different model');
     const edited = handEditedKeys(found.raw);
     if (edited.length) add('warn', 'hand edits', `edited by hand since onboarding wrote them: ${edited.join(', ')}`, 're-run `wf init` to review them; confirming a key keeps it');
     try {

@@ -35,3 +35,14 @@ test('the fixture is the plugin\'s own: no repo of it is named in the engine', a
     for (const word of ['tally', 'relay', 'trunk', 'TK-']) assert.ok(!text.includes(word), `${f} carries ${word}`);
   }
 });
+
+test('0.8.1 review: kinds.tests are folder-name and suffix globs; settings for a `test` environment are not tests', async () => {
+  const { testKinds } = await import('../engine/onboard.mjs');
+  const { isTestFile } = await import('../engine/scan.mjs');
+  const tests = ['app/src/a/__tests__/x.spec.ts', 'app/src/b/c/__tests__/y.ts', 'app/tests/z.php', 'app/src/config/__tests__/w.ts', 'app/web/k.test.js'];
+  assert.deepEqual(testKinds({ path: 'app', tests, configTests: [] }), ['**/*.test.js', '**/__tests__/**', '**/tests/**']);
+  // A folder name that also holds configuration keeps its own paths.
+  assert.deepEqual(testKinds({ path: 'app', tests: ['app/test/a.php', 'app/lib/test/b.php'], configTests: ['app/config/packages/test/x.yaml'] }), ['lib/test/**', 'test/**']);
+  for (const f of ['config/packages/test/doctrine.yaml', 'config/jwt/test/private.pem', 'config/services_test.yaml']) assert.equal(isTestFile(f), false, f);
+  for (const f of ['src/config/__tests__/load.spec.ts', 'tests/Unit/AThing.php', 'src/a.test.js']) assert.equal(isTestFile(f), true, f);
+});
