@@ -7,7 +7,7 @@ roles:
     plan:        { model: opus,   effort: high }
     ground:      { model: sonnet, effort: high }
     challenge:   { model: opus,   effort: high }
-    implement:   { model: opus,   effort: medium }
+    implement:   { model: sonnet, effort: medium }
     review:      { model: opus,   effort: high }
     verify:      { model: sonnet, effort: medium }
     deliver:     { model: sonnet, effort: medium }
