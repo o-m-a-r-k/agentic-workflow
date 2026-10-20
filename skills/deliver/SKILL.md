@@ -5,7 +5,7 @@ description: Deliver one ticket or several, from investigation and plan to verif
 
 # Deliver
 
-You orchestrate. Workers do the work and write it to the ticket folder. You read the files, decide what comes next, and start workers. Keep the work itself out of your context.
+You orchestrate, in the session the person talks to; never hand orchestration to a sub-agent, because a sub-agent does not receive its own workers' returns. Workers do the work and write it to the ticket folder. You read the files, decide what comes next, and start workers. Keep the work itself out of your context.
 
 **The skill folder** is the folder containing this file: `${CLAUDE_SKILL_DIR}` in Claude Code. In another harness, where that text is not replaced, use the path this file was loaded from.
 
@@ -24,7 +24,7 @@ Take a new ticket (step 1) yourself, from the files in the skill folder's `templ
 
 ## Where things stand
 
-You alone write `PROGRESS.md`. It says, for each ticket, which session drives it, what it is waiting for, and what it has running: a worker, a heavy test run, a container or server, a pipeline or approval outside. Each cycle, check every wait against its source. Something outside is checked again next cycle, not watched. A worker or run started by a session that has ended is gone. Its step starts again with a fresh worker, which may build on the files and commits left behind and says what it kept or discarded. Cleanup stops what the list names.
+You alone write `PROGRESS.md`. It says, for each ticket, which session drives it, what it is waiting for, and what it has running: a worker, a heavy test run, a container or server, a pipeline or approval outside. A cycle runs whenever anything returns or the person writes. Each cycle, check every wait against its source, including workers that have not returned: a worker whose files have not moved for far longer than its step needs is stuck, so stop it and start the step again with a fresh one. Something outside is checked again next cycle, not watched. A worker or run started by a session that has ended is gone. Its step starts again with a fresh worker, which may build on the files and commits left behind and says what it kept or discarded. The tracker is checked the same way: each cycle, confirm in the tracker the definition names now that each ticket shows the status its step calls for, and move it if it doesn't. Cleanup stops what the list names.
 
 When your context grows heavy, or the session may end, make sure `PROGRESS.md` is current. The next cycle resumes from the files, whether the harness compacts this context or the person opens a new session and asks to continue.
 
@@ -34,8 +34,11 @@ Start workers through the harness's own general-purpose sub-agent, all from this
 
 - the full text of its role file, `roles/<role>.md` in the skill folder, quoted as its brief;
 - the paths of the ticket folder, the worktrees, the project definition and `WORKFLOW.md`, and for the delivery worker this session's transcript, where the harness exposes it;
-- its particular job, such as the angle an investigator covers, and whether it may start a heavy run;
-- this, in these words: "You start outside the worktrees. Before you work in a repo, read the `AGENTS.md` of the worktree and of each directory you touch; the harness may not have loaded them. Run every command from inside the worktree, and record the worktree's `HEAD` with every result. Stop what you start, or name it and how to stop it in your return line."
+- that it cannot answer a permission prompt, so it skips any tool that would ask and names what it could not do;
+- its particular job, such as the angle an investigator covers, and how to take a heavy run: start it when a slot is free, otherwise queue it, never skip it;
+- this, in these words: "You start outside the worktrees. Before you work in a repo, read the `AGENTS.md` of the worktree, of each directory you touch, and any instruction file the project definition names; the harness may not have loaded them. Run every command from inside the worktree, and record the worktree's `HEAD` with every result. Stop what you start, or name it and how to stop it in your return line."
+
+The brief adds the ticket's facts; it never narrows the method. Don't tell a worker to skip its own tests, to keep a shared defect local, or to leave a revision ungrounded to save time, and don't decide its findings for it. If time matters, say so; weighing is the worker's job.
 
 Take each role's model and effort, each separately, from the first of these that sets it:
 

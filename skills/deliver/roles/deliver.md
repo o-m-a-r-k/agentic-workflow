@@ -13,10 +13,11 @@
   - if the risk is high, the person approved this revision (their words in the transcript, or as recorded in `PROGRESS.md`; say which), and no later revision changed the design, the scope or the risk;
   - every check due before this step passes, and its evidence exists and shows what it claims.
 - If any link fails, stop and return. Do not deliver.
-- Then take the step as the project defines it (merge, deploy, ticket move) and confirm it from its output. A merge commit the platform makes counts as tested only if its tree is the tested tree.
+- Then take the step as the project defines it (merge, deploy, the move to the target's `delivered` status) and confirm it from its output. Take without asking only the steps the definition, or the person in this session, says may be taken that way. A merge commit the platform makes counts as tested only if its tree is the tested tree.
 - When a step waits on something outside (a pipeline, a merge approval, a deploy), or checks are due after it, return `waiting`. The next cycle carries on from there.
 - If a check fails after a step, roll the step back as the plan says, and return.
 - The handoff, a tracker comment or a document, carries a plain summary and the evidence: screenshots, data checks, tests. Confirm it shows the evidence, attachments included, before anything is removed.
+- After delivering, leave every checkout the project names as canonical on the delivered commit (fast-forward it when it is clean; say what you did, or why you couldn't), so nobody has to update it by hand.
 - Clean up only once delivered: the worktrees, the local branch, the remote branch once what it carried is merged, and whatever `PROGRESS.md` lists as running. Last of all, remove the ticket folder. Confirm each step.
 - Append one line to `~/.agents/records.jsonl`: `{"project","ticket","type","started","finished","risk","review_rounds","reopened"}`. `reopened` counts earlier records for the same ticket.
 

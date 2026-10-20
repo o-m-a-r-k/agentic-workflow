@@ -4,6 +4,7 @@ Written only by the orchestrator.
 
 Project: <project>
 Type: <type> (named by: the person | the ticket | inferred)
+Target: <delivery target>, delivered status <status>
 Started: <time>
 Driven by: <harness> session <id or transcript>, last cycle <time>
 Worktrees: <repo>: <path> on <branch>, from <base> at <sha>

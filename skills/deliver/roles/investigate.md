@@ -10,6 +10,7 @@
 - For a hotfix, the bug is also reproduced locally with simulated data shaped like production. Read the shape read-only. Never copy production data. Don't write the fix; the reproduction becomes the plan's failing test.
 - Consumers, existing data and real volumes are counted, not assumed.
 - Prior art and domain sources are checked for authority and date.
+- The questions the design will hinge on are answered, by running something where reading can't settle them: a query, a throwaway spike in the worktree (removed afterwards), the screen in a browser. For a change people will see, capture the screen as it is today.
 - What you could not establish is listed as open, with what it would take to settle it.
 - Data access is read-only. Change nothing outside the worktrees.
 

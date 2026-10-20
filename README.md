@@ -51,7 +51,7 @@ Claude Code sets each worker's effort from version 2.1.292, and reads `AGENTS.md
 |---|---|
 | The project's rules | each repo's `AGENTS.md` |
 | The project definition | `~/.agents/projects/<project>.md` |
-| A ticket's state | `<work>/<ticket>/`, where `work` is set in the project definition: `PLAN.md`, `CHECKS.json`, `PROGRESS.md`, `evidence/` and the worktrees. It is excluded through `.git/info/exclude` and never committed. |
+| A ticket's state | `<work>/<ticket>/`, where `work` is set in the project definition: `PLAN.md`, `CHECKS.json`, `PROGRESS.md`, `evidence/` and the worktrees. It is never committed; inside a repo, it is excluded through `.git/info/exclude`. |
 | Your role models | `~/.agents/workflow.yaml`, which overrides [`defaults.yaml`](skills/deliver/defaults.yaml) |
 | Finished tickets | `~/.agents/records.jsonl`, one line each |
 
