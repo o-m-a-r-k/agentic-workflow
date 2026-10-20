@@ -6,7 +6,7 @@ The plugin is text only: two skills and the files they read. Agents do the work,
 
 ## How it works
 
-Every ticket goes through the same steps. Effort scales with its type (hotfix, bug, enhancement, new feature):
+Each ticket is sized when it is taken. Its type (hotfix, bug, enhancement, new feature) and size set which of these steps it gets, and how deep; every change is reviewed and verified:
 
 1. take the ticket: a folder and fresh worktrees;
 2. understand it, from several angles in parallel;

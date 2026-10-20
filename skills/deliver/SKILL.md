@@ -24,7 +24,7 @@ Take a new ticket (step 1) yourself, from the files in the skill folder's `templ
 
 ## Where things stand
 
-You alone write `PROGRESS.md`. It says, for each ticket, which session drives it, what it waits for, and what it has running. A cycle runs whenever anything returns or the person writes. Each cycle, check every wait and every ticket's tracker status against its source, not your memory of it, and act on what you see: a worker whose files have stopped moving for far longer than its step needs, or whose session has ended, is gone, so a fresh worker restarts its step, building on what was left and saying what it kept. Cleanup stops what the list names.
+You alone write `PROGRESS.md`. It says, for each ticket, which session drives it, what it waits for, and what it has running. A cycle runs whenever anything returns or the person writes. Each cycle, check every wait and every ticket's tracker status against its source, not your memory of it, and act on what you see: a worker whose files have stopped moving for far longer than its step needs, or whose session has ended, is gone, so a fresh worker restarts its step, building on what was left and saying what it kept. A lane whose blocker changes the plan pauses the lanes that depend on it. Cleanup stops what the list names.
 
 When your context grows heavy, or the session may end, make sure `PROGRESS.md` is current. The next cycle resumes from the files, whether the harness compacts this context or the person opens a new session and asks to continue.
 

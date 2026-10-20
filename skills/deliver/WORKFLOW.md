@@ -4,7 +4,7 @@ The goal: a ticket goes in, and it comes out delivered, with no bugs, no missed 
 
 These ideas carry everything below.
 
-- **Agents check agents.** Confidence comes from a fresh agent checking the work against raw sources: code, git, logs, data, the running app, and for a screen, how it looks beside the screens around it. It never comes from the author's own account of the work.
+- **Agents check agents.** Confidence comes from a fresh agent checking the work against raw sources: code, git, logs, data, the running app, and for a screen, how it looks beside the screens around it, judged strictly and live; a check that saw only a screenshot or the code says so. It never comes from the author's own account of the work.
 - **Grounded.** Every claim names its source: `file:line`, a read-only query and its result, a log line, a screenshot, the ticket, or an authoritative external source with its date. A design choice names the constraints it meets and the alternatives it beats. A claim without a source goes back to investigation, never forward.
 - **Findings are claims too.** Whoever receives a finding checks it before acting on it. A false finding is disputed with evidence, and the next reviewer settles the dispute. Reviewers raise only gaps that affect correctness or the ticket's requirements.
 - **Weigh before acting.** Every gap, finding or failure is weighed by how likely it is at the project's real volumes and what it would cost if it happened. Work goes to what is realistically likely to hurt someone. An unlikely, cheap one is written into the plan as an accepted risk, with its numbers, and not designed around. The aim is a ticket delivered right and fast; depth that doesn't change the outcome is waste.
@@ -18,22 +18,22 @@ The ticket's goal sets the scope: the bug, the feature, and the code the change 
 
 The project's `AGENTS.md` files and the person's own instructions add to this method. Where they ask for more, such as a confirmation before a push or an extra check, they win.
 
-## Ticket types and effort
+## Ticket types and size
 
-The steps are the same for every ticket. What changes is depth: how many angles are investigated, how hard the plan is challenged, how much is verified.
+Type and size together set which steps a ticket gets and how deep. Size is judgement: how much the change touches, whether a contract or data changes, how open its design is. A small ticket skips what it doesn't need; every change is still reviewed and verified.
 
 - **Hotfix:** urgent, in production. Narrow and fast, but proven.
 - **Bug:** in production, not urgent.
 - **Enhancement:** changes behaviour that already exists.
 - **New feature:** simple or complex. A complex one needs architecture, design, several angles and its edge cases worked out.
 
-The person names the type in the session, unless the project definition says where else it comes from. If nobody named it, infer it from the ticket and say which type you took, so the person can correct it.
+The person names the type in the session, unless the project definition says where else it comes from. If nobody named it, infer it from the ticket.
 
 ## The steps
 
-1. **Take the ticket.** Choose its delivery target as the project definition says; a hotfix's is the one production is built from. Create the ticket folder `<work>/<ticket>/` from the templates, and inside it a worktree per repo the ticket needs, each branched from that repo's freshly fetched base for the target (the definition's `repos`) and set up as the definition says. If the work folder lies inside a repo, make sure that repo's `.git/info/exclude` lists it. Move the ticket to its `started` status.
+1. **Take the ticket.** Choose its delivery target as the project definition says; a hotfix's is the one production is built from. Create the ticket folder `<work>/<ticket>/` from the templates, and inside it a worktree per repo the ticket needs, each branched from that repo's freshly fetched base for the target (the definition's `repos`) and set up as the definition says. If the work folder lies inside a repo, make sure that repo's `.git/info/exclude` lists it. Move the ticket to its `started` status. Then tell the person in one line its type, size, steps and depth, so they can override. Lay out its lanes before work starts: what runs together, what each writes, and where they merge, so investigation, grounding and challenge feed one merge instead of revision after revision.
 
-2. **Understand, and prove the approach.** Send several investigators in parallel, one angle each.
+2. **Understand, and prove the approach.** Send investigators in parallel, one angle each.
    - *Bug:* reproduce it where it happens, as far as reading allows: logs, read-only data, the screen as its user sees it. Anything that would write there is reproduced locally instead. Find the root cause from logs, data rows and the code path. Then find every other place the same cause can strike.
    - *Hotfix:* as for a bug, and always reproduce it locally with simulated data shaped like production: read the shape read-only and never copy production data. That reproduction becomes the failing test the plan names.
    - *Enhancement:* the current behaviour, with sources; every consumer (other screens, APIs, reports, exports, integrations); the existing data that must keep working; the ticket's open questions.
@@ -47,7 +47,7 @@ The person names the type in the session, unless the project definition says whe
 
 5. **Judge risk.** How much harm could this change do if it were wrong? The planner and the grounder each judge it from the evidence: reach (callers, data, users), reversibility (can it be undone: migrations, external writes and data changes often can't, while a deploy that a redeploy undoes can) and remaining uncertainty. The result is a level, with reasons and their evidence. If the two disagree, the higher level stands.
    - **Low:** work goes on. The person can read the plan at any time.
-   - **High:** pause for the person's approval and link the plan file, with any grounded decision memos, so the person is asked once. They may have another agent review it first. Record their words, the time and the revision they approved in `PROGRESS.md`. A later revision that changes the design, the scope or the risk needs their approval again.
+   - **High:** pause for the person's approval, asking once: show the plan and any grounded decision memos as a visual page, with whatever the harness offers for that, and link the plan file, which stays the source. They may have another agent review it first. Record their words, the time and the revision they approved in `PROGRESS.md`. A later revision that changes the design, the scope or the risk needs their approval again.
 
 6. **Build.** A fresh implementer takes the plan as its brief. Independent work items run in parallel, each in its own worktree branched from the ticket's branch and merged back in order. Items that share files run one after another. The implementer runs every test it writes or changes, the heavy ones included, and the project's fast suite, before it calls the work done. A new fact goes into the plan with its evidence. If it raises the risk to high, the plan goes back to the person. If the plan turns out wrong at its root, return to planning instead of patching around it.
 
@@ -55,9 +55,9 @@ The person names the type in the session, unless the project definition says whe
 
 8. **Verify** in the target environment, as the project defines it, once, on the commit to be delivered: the real flow in a browser, data checks, screenshots where screens are affected, and the suite the project names for this kind of change. A check in `CHECKS.json` flips to passing only after it has been verified for real, with its evidence. A check whose environment only a delivery step reaches, such as a deploy, is verified right after that step.
 
-9. **Deliver** to the ticket's target, as the project defines it, ending with the ticket at the target's `delivered` status. If the base has moved, first bring the branch up to date the way the project delivers. Before each irreversible step (merge, deploy, ticket move), a fresh delivery agent checks from raw sources that every proof the step rests on belongs to what it would deliver: grounding, tests, review, the person's approval if the risk is high, and the verification due before this step. Then it takes the step and confirms it from its output. A delivery step whose check then fails is rolled back as the plan says, and goes to the person. The handoff (a tracker comment or a document) carries the summary and the evidence: screenshots, data checks, tests.
+9. **Deliver** to the ticket's target, as the project defines it, ending with the ticket at the target's `delivered` status. If the base has moved, first bring the branch up to date the way the project delivers. Before each irreversible step (merge, deploy, ticket move), a fresh delivery agent checks from raw sources that every proof the ticket's size called for belongs to what it would deliver: grounding, tests, review, the person's approval if the risk is high, and the verification due before this step. Then it takes the step and confirms it from its output. A delivery step whose check then fails is rolled back as the plan says, and goes to the person. The handoff (a tracker comment or a document) carries the summary and the evidence: screenshots, data checks, tests.
 
-10. **Clean up**, once delivered, leaving the project as it was apart from the delivery: its canonical checkouts on the delivered commit. Remove the worktrees and the ticket folder. Delete the local branch, and the remote one once what it carried is merged. Stop and remove whatever the ticket started, as `PROGRESS.md` lists it. Confirm each step from its output. Then append one line to `~/.agents/records.jsonl`.
+10. **Clean up**, once delivered, leaving the project as it was apart from the delivery: its canonical checkouts on the delivered commit. Remove the worktrees, the branches once merged, whatever `PROGRESS.md` lists as running, and the ticket folder, confirming each from its output. Then append one line to `~/.agents/records.jsonl`.
 
 ## When work stalls
 
