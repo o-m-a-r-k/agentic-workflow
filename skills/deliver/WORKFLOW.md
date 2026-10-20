@@ -20,7 +20,7 @@ The project's `AGENTS.md` files and the person's own instructions add to this me
 
 ## Ticket types and size
 
-Type and size together set which steps a ticket gets and how deep. Size is judgement: how much the change touches, whether a contract or data changes, how open its design is. A small ticket skips what it doesn't need; every change is still reviewed and verified.
+Type and size together set which steps a ticket gets and how deep. Size is judgement: how much the change touches, whether a contract or data changes, how open its design is. A small ticket goes lighter: fewer angles, a shorter plan, a narrower challenge. Every plan is still grounded, and every change reviewed and verified.
 
 - **Hotfix:** urgent, in production. Narrow and fast, but proven.
 - **Bug:** in production, not urgent.
@@ -55,7 +55,7 @@ The person names the type in the session, unless the project definition says whe
 
 8. **Verify** in the target environment, as the project defines it, once, on the commit to be delivered: the real flow in a browser, data checks, screenshots where screens are affected, and the suite the project names for this kind of change. A check in `CHECKS.json` flips to passing only after it has been verified for real, with its evidence. A check whose environment only a delivery step reaches, such as a deploy, is verified right after that step.
 
-9. **Deliver** to the ticket's target, as the project defines it, ending with the ticket at the target's `delivered` status. If the base has moved, first bring the branch up to date the way the project delivers. Before each irreversible step (merge, deploy, ticket move), a fresh delivery agent checks from raw sources that every proof the ticket's size called for belongs to what it would deliver: grounding, tests, review, the person's approval if the risk is high, and the verification due before this step. Then it takes the step and confirms it from its output. A delivery step whose check then fails is rolled back as the plan says, and goes to the person. The handoff (a tracker comment or a document) carries the summary and the evidence: screenshots, data checks, tests.
+9. **Deliver** to the ticket's target, as the project defines it, ending with the ticket at the target's `delivered` status. If the base has moved, first bring the branch up to date the way the project delivers. Before each irreversible step (merge, deploy, ticket move), a fresh delivery agent checks from raw sources that every proof belongs to what it would deliver: grounding, tests, review, the person's approval if the risk is high, and the verification due before this step. Then it takes the step and confirms it from its output. A delivery step whose check then fails is rolled back as the plan says, and goes to the person. The handoff (a tracker comment or a document) carries the summary and the evidence: screenshots, data checks, tests.
 
 10. **Clean up**, once delivered, leaving the project as it was apart from the delivery: its canonical checkouts on the delivered commit. Remove the worktrees, the branches once merged, whatever `PROGRESS.md` lists as running, and the ticket folder, confirming each from its output. Then append one line to `~/.agents/records.jsonl`.
 
