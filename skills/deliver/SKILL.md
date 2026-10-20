@@ -40,7 +40,7 @@ Start workers through the harness's own general-purpose sub-agent, all from this
 
 The brief adds the ticket's facts; it never narrows the method or decides a worker's findings. If time matters, say so; weighing is the worker's job.
 
-Take each role's model and effort, each separately, from the first of these that sets it:
+Size the model to the work as well: a small ticket's planning doesn't need the deepest model. Take each role's model and effort, each separately, from the first of these that sets it, and lighten them for a small ticket unless a source pins them:
 
 1. the project definition's `roles.<harness>.<role>`;
 2. `~/.agents/workflow.yaml`, `roles.<harness>.<role>`;

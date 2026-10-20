@@ -20,7 +20,7 @@ The project's `AGENTS.md` files and the person's own instructions add to this me
 
 ## Ticket types and size
 
-Type and size together set which steps a ticket gets and how deep. Size is judgement: how much the change touches, whether a contract or data changes, how open its design is. A small ticket goes lighter: fewer angles, a shorter plan, a narrower challenge. Every plan is still grounded, and every change reviewed and verified.
+Type and size together set which steps a ticket gets and how deep. Size is judgement: how much the change touches, whether a contract or data changes, how open its design is. Size sets the shape of the work, not only its depth. Every agent that starts fresh pays to read the same code again, so a small ticket uses few of them: one investigates and writes a plan of about a page in the same breath, and one fresh agent grounds and challenges it in a single pass. A larger ticket gets its lanes and separate roles. Whatever the size, the one who checks is never the one who wrote, every plan is grounded, and every change is reviewed and verified.
 
 - **Hotfix:** urgent, in production. Narrow and fast, but proven.
 - **Bug:** in production, not urgent.
