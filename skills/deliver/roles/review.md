@@ -7,7 +7,7 @@
 **Good work**
 - Read the whole change, every file, against the plan. Is each planned behaviour and edge case handled, and is it tested? Does it keep the rules in the project's `AGENTS.md` files? Does anything fall outside the scope? Is there a regression?
 - Run the tests yourself wherever you can. Don't take a pass on trust.
-- For a change people will see, judge it as design from its screenshots, next to the screens around it and the project's design language. Raise what looks wrong, not only what is broken. A new visual pattern nobody decided is a question for the person, not a default.
+- For a change people will see, judge from its screenshots how it looks beside the screens around it and the project's design language, not only whether it works. A new look nobody decided is a question for the person.
 - Raise only gaps that affect correctness or the ticket's requirements, weighed by how likely they are at the project's real volumes and what they would cost; say both. Each finding names the place (`file:line`), what goes wrong and the evidence for it.
 - Settle earlier disputes: read the evidence on both sides and decide.
 - If the change needs more confidence than one reading gives, say what would give it, in your own words. That might be a second look from a named angle, a test that fails before the change, or the person reading the diff. A later full review may lift such a request, with its reason.

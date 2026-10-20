@@ -42,7 +42,7 @@ Claude Code sets each worker's effort from version 2.1.292, and reads `AGENTS.md
 
 ## Use
 
-1. **Onboard a project once:** ask for the `onboard` skill. An agent studies your repos and writes the project definition with you: how delivery works, the environments, read-only data access, what "verified" means, and the ticket statuses. Run it again at any time to re-evaluate. It shows what it would change and writes only what you confirm.
+1. **Onboard a project once:** ask for the `onboard` skill. An agent describes how your project delivers, from its repos, CI and your words, then proves the description by walking a practice ticket through every safe step, and shows you what it found, what it proved and what proving a change costs. Run it again at any time. It writes only what you confirm.
 2. **Deliver:** ask for the `deliver` skill with one or more tickets and their type, for example "deliver EX-41 and EX-42, both bugs".
 
 ## Where things live

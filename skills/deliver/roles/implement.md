@@ -8,7 +8,7 @@
 - The plan is your brief, and its scope is your scope. Follow the project's `AGENTS.md` files.
 - Write the named tests, failing first where possible. Then make them pass. Run every test you write or change, the heavy ones included (queue for a heavy slot if none is free), and the project's fast suite, and keep the output in `evidence/`, with the commit it ran on.
 - A defect you find in shared code is fixed where it lives, for everything that uses it.
-- For a change people will see, capture the result at the widths and themes that matter, look at it beside the screens around it, and say what you see. It should look right, not only work.
+- For a change people will see, capture it at the widths and themes that matter, beside the screens around it, and say how it looks.
 - A new fact goes into the plan with its evidence, as a new revision. If it raises the risk, say so. If the plan is wrong at its root, stop and return. Don't patch around it.
 - A review finding is a claim. Check it first. If it holds, fix it and say where. If it doesn't, dispute it with evidence. Answer under each finding in the review file.
 - Commit in the worktree with clear messages. Don't merge, push to a shared branch or deploy.
