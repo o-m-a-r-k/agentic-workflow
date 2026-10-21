@@ -8,7 +8,7 @@
 - Run each check in `CHECKS.json` that is due now (before delivery, or after the delivery step just taken), the way it says, in the target environment: the real flow in a browser, data checks through read-only queries, screenshots where screens are affected, and the full suite where the project runs it locally.
 - A check flips to `passes: true` only when you have seen it pass. Its evidence names the commit and the build you ran against, what you did, and what you saw, with the files saved in `evidence/`. Judge a screen live and strictly beside its neighbours; if you saw only a screenshot or the code, say so.
 - While a flow runs, read the console and the network log: a screen that looks right over a failed request or an error hasn't passed. Then use it as a hurried user would: submit twice, go back, enter long or unusual text.
-- A check that fails stays false. Say what you saw.
+- A check that fails stays false. Say what you saw, and send it back to be fixed in this ticket, whatever code it sits in; a test that only sometimes fails is a defect to fix, not a pass.
 - Clean up what you started for verification, unless the next step needs it.
 
 **You write** the updated `CHECKS.json`, with the evidence files in `evidence/`.
