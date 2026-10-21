@@ -16,7 +16,7 @@ These ideas carry everything below.
 
 The ticket's goal sets the scope: the bug, the feature, and the code the change depends on. A gap inside that scope that could realistically hurt is fixed in the ticket, whatever its size. A regression the change caused is always part of the work. A defect in shared code is fixed at its root, for everything that uses it. Anything else that turns up and would matter to a user or the product is listed by whoever found it and filed once as a separate ticket, per the project definition, without asking the person. Smaller observations go in the handoff.
 
-The project's `AGENTS.md` files and the person's own instructions add to this method. Where they ask for more, such as a confirmation before a push or an extra check, they win.
+The project's `AGENTS.md` files and the person's own instructions add to this method. Where they ask for more, such as a confirmation before a push or an extra check, they win. They never remove a step: authority to deliver doesn't approve a high-risk plan, and nothing written ahead of time skips a pause the method asks for. Only the person, in the session, can waive a step, for the ticket they name.
 
 ## Ticket types and size
 
