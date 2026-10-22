@@ -9,6 +9,7 @@ Size: <one line>; steps and depth
 Lanes: <what runs together, what each writes, where they merge>
 Started: <time>
 Driven by: <harness> session <id or transcript>, last cycle <time>
+Profile: <name> | none
 Worktrees: <repo>: <path> on <branch>, from <base> at <sha>
 Step: take | understand | plan | ground | challenge | judge risk | build | review | verify | deliver | clean up
 Plan revision: <n>, grounded at <n>

@@ -9,7 +9,7 @@ The plugin is text only: two skills and the files they read. Agents do the work,
 Each ticket is sized when it is taken. Its type (hotfix, bug, enhancement, new feature) and size set which of these steps it gets, and how deep; every change is reviewed and verified:
 
 1. take the ticket: a folder and fresh worktrees;
-2. understand it, from several angles in parallel;
+2. understand it, from several angles, side by side where the settings allow;
 3. plan it, citing a source for every claim;
 4. ground the plan: a fresh agent checks each claim;
 5. challenge it: assume the plan failed, and ask why;
@@ -54,7 +54,7 @@ Three skills: `deliver`, `onboard`, and `test`, which planning, building and rev
 | The project's rules | each repo's `AGENTS.md` |
 | The project definition | `~/.agents/projects/<project>.md` |
 | A ticket's state | `<work>/<ticket>/`, where `work` is set in the project definition: `PLAN.md`, `CHECKS.json`, `PROGRESS.md`, `evidence/` and the worktrees. It is never committed; inside a repo, it is excluded through `.git/info/exclude`. |
-| Your role models | `~/.agents/workflow.yaml`, which overrides [`defaults.yaml`](skills/deliver/defaults.yaml) |
+| Your settings | `~/.agents/workflow.yaml`: role models over [`defaults.yaml`](skills/deliver/defaults.yaml), how many agents and heavy runs at once, context size, and named profiles such as one for a local model (see the deliver skill's Settings) |
 | Finished tickets | `~/.agents/records.jsonl`, one line each |
 
 ## Coming from 0.x
