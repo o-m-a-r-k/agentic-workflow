@@ -14,7 +14,7 @@ These ideas carry everything below.
 
 ## Scope
 
-The ticket's goal sets the scope: the bug, the feature, and the code the change depends on. A gap inside that scope that could realistically hurt is fixed in the ticket, whatever its size. A regression the change caused is always part of the work. A defect in shared code is fixed at its root, for everything that uses it. Anything else that turns up and would matter to a user or the product is listed by whoever found it and filed once as a separate ticket, per the project definition, without asking the person. Smaller observations go in the handoff.
+The ticket's goal sets the scope: what the ticket delivers, as the ticket states it, never a wider guarantee than it asks for. The code the change depends on is in scope where the change uses it: a gap there that the ticket's own paths would realistically hit is fixed in the ticket, whatever its size. A guarantee the change leans on is named in the plan with where it holds; making it hold everywhere is its own ticket, unless this change breaks it. A regression the change caused is always part of the work. A defect in shared code that the ticket's own paths hit is fixed at its root, for everything that uses it, not patched around in the caller. Anything else that turns up and would matter to a user or the product is listed by whoever found it and filed once as a separate ticket, per the project definition, without asking the person. Smaller observations go in the handoff.
 
 The project's `AGENTS.md` files and the person's own instructions add to this method. Where they ask for more, such as a confirmation before a push or an extra check, they win. They never remove a step: authority to deliver doesn't approve a high-risk plan, and nothing written ahead of time skips a pause the method asks for. Only the person, in the session, can waive a step, for the ticket they name.
 
@@ -39,7 +39,7 @@ The person names the type in the session, unless the project definition says whe
    - *Enhancement:* the current behaviour, with sources; every consumer (other screens, APIs, reports, exports, integrations); the existing data that must keep working; the ticket's open questions.
    - *New feature:* the system it plugs into (architecture, conventions, data model, permissions and tenancy, design system, real data volumes); the domain, from authoritative sources; prior art (competitors, industry practice, libraries).
 
-   Whatever the ticket, find the reach of what the change alters: what uses it, through code, shared data, events or contracts, and what elsewhere does the same job and must stay consistent with it, because the same cause or the same change applies there too. Search as far as an inconsistency would realistically show or hurt. Each part of that reach the change touches is proven still working: by its own tests, which the build runs, or, where none covers the affected path, by a test or check the plan adds.
+   Whatever the ticket, find the reach of what the change alters: what uses it, through code, shared data, events or contracts, and what elsewhere does the same job and must stay consistent with it, because the same cause or the same change applies there too. Search as far as an inconsistency this change would create would realistically show or hurt. Each part of that reach the change touches is proven still working: by its own tests, which the build runs, or, where none covers the affected path, by a test or check the plan adds.
 
    Investigation ends when the questions the design hinges on are answered, by running something wherever reading can't settle them.
 
@@ -63,7 +63,7 @@ The person names the type in the session, unless the project definition says whe
 
 ## When work stalls
 
-A round that leaves the same gap open as the round before it is not progress. Pause for the person with the evidence and the options. Don't loop, and don't guess.
+A round that leaves the same gap open as the round before it, or whose fixes keep opening gaps of their own, is not progress. Pause for the person with the evidence and the options. Don't loop, and don't guess.
 
 ## Several tickets
 

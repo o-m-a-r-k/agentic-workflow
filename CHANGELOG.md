@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.5
+
+A ticket's scope is what it delivers, never a wider guarantee than it asks for. A guarantee the change leans on is named with where it holds; making it hold everywhere is its own ticket, unless the change breaks it. Shared-code defects and the reach search cover what the ticket's own paths hit and the inconsistencies the change would create. The challenger tests the plan against what the ticket asks and what already works, and work counts as stalled when a round's fixes keep opening gaps of their own.
+
 ## 0.9.4
 
 Project and personal instructions can add steps to the method but never remove one. Authority to deliver doesn't approve a high-risk plan; only the person, in the session, can waive a step, for the ticket they name.

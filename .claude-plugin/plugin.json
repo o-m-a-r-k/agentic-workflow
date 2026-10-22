@@ -1,6 +1,6 @@
 {
   "name": "agentic-workflow",
-  "version": "0.9.4",
+  "version": "0.9.5",
   "description": "Deliver tickets with AI coding agents: grounded plans, fresh agents that check each step, and delivery the way each project defines it. Text only, for Claude Code and Codex.",
   "author": {
     "name": "o-m-a-r-k",
