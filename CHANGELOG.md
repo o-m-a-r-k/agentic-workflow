@@ -2,7 +2,7 @@
 
 ## 0.9.6
 
-Screens are judged as their user reads them. The plan names the existing screen of the same kind a new screen follows. The implementer looks at the running screen itself, and review reads the whole design-system sections for what is on it and judges composition: what is found first, grouping, labels and values in the user's words, use of space. Neighbours are screens that do the same kind of job, not the nearest route; fitting every width is not looking right; a new arrangement of existing components is a new look for the person to decide.
+Screens are judged as their user reads them, for any visible change, new or altered, from a whole page to one component; a shared component is judged on the screens that use it. The plan names the existing page, drawer, form or component of the same kind each visible change follows. The implementer looks at the running screen itself, and review reads the whole design-system sections for what is on it and judges composition: what is found first, grouping, labels and values in the user's words, use of space. Neighbours are screens that do the same kind of job, not the nearest route; fitting every width is not looking right; a new arrangement of existing components is a new look for the person to decide.
 
 ## 0.9.5
 
