@@ -9,6 +9,7 @@ roles:
     challenge:   { model: opus,   effort: high }
     implement:   { model: sonnet, effort: medium }
     review:      { model: opus,   effort: high }
+    read:        { model: opus,   effort: high }
     verify:      { model: sonnet, effort: medium }
     deliver:     { model: sonnet, effort: medium }
   codex:
@@ -18,5 +19,6 @@ roles:
     challenge:   { effort: high }
     implement:   { effort: medium }
     review:      { effort: high }
+    read:        { effort: high }
     verify:      { effort: medium }
     deliver:     { effort: medium }

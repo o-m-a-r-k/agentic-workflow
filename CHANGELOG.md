@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.8
+
+Meaning first: what a person sees, a screen or a report, is shaped by who it is for and what they must come away knowing or doing. The plan's new "What people see" section holds that purpose, the user's questions and the reference screen; a new or rejected screen compares two or three directions against those questions, chosen by the planner where the design system settles the look and by the person otherwise. A new `read` role, isolated from code, plan and data, sees only a commit's screenshots and that purpose before each review round on a changed screen, answers the user's questions from the screen alone and lists what it had to work out; review raises what holds as findings, and delivery checks the reader saw the delivered screens. A rejected screen restarts from its purpose, checked with the person before rebuilding. Handoffs open with what the reader must know or do.
+
 ## 0.9.7
 
 Settings for running on a small or local model. `agents_at_once: 1` runs every step and agent one after another, with the orchestrator idle while a worker runs, so the workflow keeps one model call in flight at a time; the method is unchanged, and a slow worker counts as gone only when the harness says it ended. `context_tokens` tells the orchestrator and workers the window to read within. `models: session` runs every role on the session's model. `profiles.<name>` groups settings, active when named in the session or by `AGENTS_WORKFLOW_PROFILE`, and wins over a project's role models. Records carry the profile. The orchestrator reads only the plan parts the next decision needs.

@@ -11,7 +11,7 @@ Started: <time>
 Driven by: <harness> session <id or transcript>, last cycle <time>
 Profile: <name> | none
 Worktrees: <repo>: <path> on <branch>, from <base> at <sha>
-Step: take | understand | plan | ground | challenge | judge risk | build | review | verify | deliver | clean up
+Step: take | understand | plan | ground | challenge | judge risk | build | review (read, review) | verify | deliver | clean up
 Plan revision: <n>, grounded at <n>
 Approval (high risk only): <the person's words>, <time>, revision <n>
 Waiting for: nothing | the person: <what> | worker: <role, started time> | outside: <what, link>

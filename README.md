@@ -2,7 +2,7 @@
 
 You give it a ticket, or a group of tickets, and they get delivered. You see the plan. You are asked only to approve a high-risk plan or to make a product decision, and each decision comes with the options, what the market does, the industry standard and a recommendation.
 
-The plugin is text only: two skills and the files they read. Agents do the work, and fresh agents check it against raw sources (code, git, logs, data, the running app). No scripts or hooks enforce anything. It works in Claude Code and in Codex.
+The plugin is text only: three skills (deliver, onboard, test) and the files they read. Agents do the work, and fresh agents check it against raw sources (code, git, logs, data, the running app). No scripts or hooks enforce anything. It works in Claude Code and in Codex.
 
 ## How it works
 
@@ -15,7 +15,7 @@ Each ticket is sized when it is taken. Its type (hotfix, bug, enhancement, new f
 5. challenge it: assume the plan failed, and ask why;
 6. judge the risk: a high-risk plan waits for your approval;
 7. build;
-8. review;
+8. review, and for a change people will see, a fresh reader who has only the screenshots and their purpose;
 9. verify in the target environment;
 10. deliver, after a fresh agent checks the whole chain;
 11. clean up.

@@ -26,6 +26,14 @@ What the ticket asks for, with the ticket as its source, and how we will know it
 
 What the investigation established. Each fact cites its source: `src/loans/renew.ts:42`, a read-only query and its result, a log line, a screenshot in `evidence/`, or an external source with its date.
 
+## What people see
+
+> Be aware of: …
+
+**For the reader:** who it is for, what they must come away knowing or doing, and the questions they would ask there. The states, widths, languages and data shapes they meet.
+
+**For the build:** the existing page, drawer, form or component of the same kind it follows. For a screen that is new or rejected, the two or three directions compared against those questions, and which one won and why, or the decision memo that asks the person. Leave this section out when nothing people see changes.
+
 ## Design
 
 > Be aware of: …
