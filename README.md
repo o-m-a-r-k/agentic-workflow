@@ -52,10 +52,10 @@ Three skills: `deliver`, `onboard`, and `test`, which planning, building and rev
 | What | Where |
 |---|---|
 | The project's rules | each repo's `AGENTS.md` |
-| The project definition | `~/.agents/projects/<project>.md` |
+| The project definition | `.agents/project.md` in the folder that holds the project's repos, when that folder is versioned (found from the current directory upward, or in a sibling folder); otherwise `~/.agents/projects/<project>.md`; machine-only facts in `~/.agents/projects/<project>.local.md` |
 | A ticket's state | `<work>/<ticket>/`, where `work` is set in the project definition: `PLAN.md`, `CHECKS.json`, `PROGRESS.md`, `evidence/` and the worktrees. It is never committed; inside a repo, it is excluded through `.git/info/exclude`. |
 | Your settings | `~/.agents/workflow.yaml`: role models over [`defaults.yaml`](skills/deliver/defaults.yaml), how many agents and heavy runs at once, context size, and named profiles such as one for a local model (see the deliver skill's Settings) |
-| Finished tickets | `~/.agents/records.jsonl`, one line each |
+| Finished tickets | `~/.agents/records.jsonl`, one line each, where `~/.agents` already exists |
 
 ## Coming from 0.x
 

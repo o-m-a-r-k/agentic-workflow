@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.9
+
+The project definition can live in the project's own versioned folder: `.agents/project.md`, found from the current directory upward or in a sibling folder, with paths relative to it and no `roots`. A personal `<project>.local.md` adds machine-only facts and never removes any. Onboarding writes it there when the folder is versioned, so a checkout in the cloud or on a new machine carries the same definition. Where `~/.agents` does not exist, the report and the record line are skipped and the tracker comment is the record. Screenshots are a named gate: when the change affects what people see, the handoff carries every screenshot of the delivered commit attached in the tracker, read back and matched, before the ticket moves to `delivered`. A definition has a `name`; a repo-held one wins over a personal one, which onboarding retires; the personal `.local.md` may give this machine's paths and never removes a step.
+
 ## 0.9.8
 
 Meaning first: what a person sees, a screen or a report, is shaped by who it is for and what they must come away knowing or doing. The plan's new "What people see" section holds that purpose, the user's questions and the reference screen; a new or rejected screen compares two or three directions against those questions, chosen by the planner where the design system settles the look and by the person otherwise. A new `read` role, isolated from code, plan and data, sees only a commit's screenshots and that purpose before each review round on a changed screen, answers the user's questions from the screen alone and lists what it had to work out; review raises what holds as findings, and delivery checks the reader saw the delivered screens. A rejected screen restarts from its purpose, checked with the person before rebuilding. Handoffs open with what the reader must know or do.
