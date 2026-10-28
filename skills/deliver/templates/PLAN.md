@@ -32,7 +32,7 @@ What the investigation established. Each fact cites its source: `src/loans/renew
 
 **For the reader:** who it is for, what they must come away knowing or doing, and the questions they would ask there. The states, widths, languages and data shapes they meet.
 
-**For the build:** the existing page, drawer, form or component of the same kind it follows. For a screen that is new or rejected, the two or three directions compared against those questions, and which one won and why, or the decision memo that asks the person. Leave this section out when nothing people see changes.
+**For the build:** the existing page, drawer, form or component of the same kind it follows. For a screen that is new or has failed its purpose, the two or three directions compared against those questions, and which one won and why, or the decision memo that asks the person. Leave this section out when nothing people see changes.
 
 ## Design
 

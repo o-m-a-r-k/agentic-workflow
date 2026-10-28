@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.10
+
+A screen that fails its purpose is redesigned as a whole, not mended finding by finding. It fails when the person rejects it, or when its fresh reader leaves one of its user's questions unanswered and review confirms it, even where the screen was built as planned; a question answered only in part counts as unanswered. Review raises that as one finding, not as fixes or questions for the person, and its return line says the screen goes back to the plan, which derives again what it must say, in what order and form, from its user's questions and compares two or three directions before anything is rebuilt. The reviewer's other findings stand. What the reader had to work out on a screen that answers every question is still reviewed item by item. Any question still unanswered after the redesign is the same gap left open.
+
 ## 0.9.9
 
 The project definition can live in the project's own versioned folder: `.agents/project.md`, found from the current directory upward or in a sibling folder, with paths relative to it and no `roots`. A personal `<project>.local.md` adds machine-only facts and never removes any. Onboarding writes it there when the folder is versioned, so a checkout in the cloud or on a new machine carries the same definition. Where `~/.agents` does not exist, the report and the record line are skipped and the tracker comment is the record. Screenshots are a named gate: when the change affects what people see, the handoff carries every screenshot of the delivered commit attached in the tracker, read back and matched, before the ticket moves to `delivered`. A definition has a `name`; a repo-held one wins over a personal one, which onboarding retires; the personal `.local.md` may give this machine's paths and never removes a step.
