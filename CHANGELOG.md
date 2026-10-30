@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.11
+
+What a screen shows or says is a claim like any other, true in every real state that shows it: the grounder checks the plan's words that way and review checks the built ones. A state shown to be unreachable through real use or existing data gets no design of its own, only the guard that keeps it safe.
+
 ## 0.9.10
 
 A screen that fails its purpose is redesigned as a whole, not mended finding by finding. It fails when the person rejects it, or when its fresh reader leaves one of its user's questions unanswered and review confirms it, even where the screen was built as planned; a question answered only in part counts as unanswered. Review raises that as one finding, not as fixes or questions for the person, and its return line says the screen goes back to the plan, which derives again what it must say, in what order and form, from its user's questions and compares two or three directions before anything is rebuilt. The reviewer's other findings stand. What the reader had to work out on a screen that answers every question is still reviewed item by item. Any question still unanswered after the redesign is the same gap left open.
