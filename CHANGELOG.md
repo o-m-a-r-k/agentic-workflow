@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.10.0
+
+A `design` skill holds the goal, principles and practice for anything people see: purpose before layout, visible importance with one focal point, grouping by meaning, like things alike, one clear next step, the common shown and the rare disclosed, the person's words and formats, every real state designed, belonging to the product, and use by everyone. It adds visual craft, a screen whose words and actions agree, one name per thing, and feedback, prevention and recovery. A visible change is proven as a rendered picture before the build, showing the actions and the states that stress it: one for a small change, two or three directions that differ in structure for a new, contested or failed screen; a fresh reader reads the chosen picture before the plan is grounded. Plan, implement, review and verify follow the skill instead of carrying their own design clauses, and onboarding records each project's design system, reference screens and cheapest renderer.
+
 ## 0.9.11
 
 What a screen shows or says is a claim like any other, true in every real state that shows it: the grounder checks the plan's words that way and review checks the built ones. A state shown to be unreachable through real use or existing data gets no design of its own, only the guard that keeps it safe.

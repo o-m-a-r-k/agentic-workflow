@@ -32,7 +32,7 @@ What the investigation established. Each fact cites its source: `src/loans/renew
 
 **For the reader:** who it is for, what they must come away knowing or doing, and the questions they would ask there. The real states it can be in, the widths, languages and data shapes they meet.
 
-**For the build:** the existing page, drawer, form or component of the same kind it follows. For a screen that is new or has failed its purpose, the two or three directions compared against those questions, and which one won and why, or the decision memo that asks the person. Leave this section out when nothing people see changes.
+**For the build:** where the change can alter composition, the product's best existing screens of the same kind it follows. The pictures in `evidence/`, as the `design` skill's Practice describes, which direction won and why, or the decision memo that asks the person. In words, what the chosen picture settles: the focal point, the groups and their names, where actions live and how they rank. The contents follow from these. The reader's file on the chosen picture. Leave this section out when nothing people see changes.
 
 ## Design
 

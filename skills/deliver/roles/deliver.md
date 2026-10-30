@@ -8,7 +8,7 @@
 - If the base has moved since the branch was made, bring the branch up to date the way the project delivers, and return: the new version is proven before you go on.
 - Before each irreversible step, check from raw sources, not from summaries, each proof:
   - the plan was grounded at its current revision (the grounding file names the revision it read);
-  - the tests passed, and the last review read, the exact commit you would deliver, or one with the same tree; where the plan has "What people see", the reader's file the review used names that commit, or an earlier one that changed nothing people see;
+  - the tests passed, and the last review read, the exact commit you would deliver, or one with the same tree; where the plan has "What people see", the reader's file the review used names that commit, or an earlier one that changed nothing people see; and where the plan has a chosen picture, a picture read names the plan revision delivered, or an earlier one with the same picture and purpose, and answered every question;
   - if the risk is high, the person approved this revision (their words in the transcript, or as recorded in `PROGRESS.md`; say which), and no later revision changed the design, the scope or the risk;
   - every check due before this step passes, and its evidence exists and shows what it claims.
 - If any link fails, stop and return. Do not deliver.
