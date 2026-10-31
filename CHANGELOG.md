@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.10.1
+
+What a ticket delivers is the whole feature as its users will meet it, so a defect in it is the ticket's to fix whoever wrote it and however old it is; wrong money, data, permissions or state is never minor or cheap, and whether it can happen is settled in the ticket, not filed as untraced. The orchestrator judges what workers list as outside the ticket before filing it, and filing never makes a ticket smaller; the handoff names each ticket filed and why it lies outside.
+
 ## 0.10.0
 
 A `design` skill holds the goal, principles and practice for anything people see: purpose before layout, visible importance with one focal point, grouping by meaning, like things alike, one clear next step, the common shown and the rare disclosed, the person's words and formats, every real state designed, belonging to the product, and use by everyone. It adds visual craft, a screen whose words and actions agree, one name per thing, and feedback, prevention and recovery. A visible change is proven as a rendered picture before the build, showing the actions and the states that stress it: one for a small change, two or three directions that differ in structure for a new, contested or failed screen; a fresh reader reads the chosen picture before the plan is grounded. Plan, implement, review and verify follow the skill instead of carrying their own design clauses, and onboarding records each project's design system, reference screens and cheapest renderer.

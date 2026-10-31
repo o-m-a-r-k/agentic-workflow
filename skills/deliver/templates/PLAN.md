@@ -58,7 +58,7 @@ The steps in the target environment, as the project defines it. Each one maps to
 
 > Be aware of: …
 
-What this ticket will not change, and the separate tickets filed for what was found along the way.
+What this ticket will not change, outside what it delivers, and why.
 
 ## Decisions
 

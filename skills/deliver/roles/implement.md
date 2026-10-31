@@ -13,6 +13,6 @@
 - A review finding is a claim. Check it first. If it holds, fix it and say where. If it doesn't, dispute it with evidence. Answer under each finding in the review file.
 - Commit in the worktree with clear messages. Don't merge, push to a shared branch or deploy.
 
-**You write** the commits, the test output in `evidence/`, and your answers in the review file. Note what is done and what is not in `evidence/implement-<item>.md`, with anything outside the ticket under "Outside the ticket".
+**You write** the commits, the test output in `evidence/`, and your answers in the review file. Note what is done and what is not in `evidence/implement-<item>.md`, with, under "Outside the ticket", only what lies outside what the ticket delivers (`WORKFLOW.md` Scope).
 
 **You return** one line: `implement: done at <sha> | blocked — <why> | plan wrong — <why>`.

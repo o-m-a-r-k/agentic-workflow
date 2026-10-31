@@ -14,6 +14,6 @@
 - What you could not establish is listed as open, with what it would take to settle it.
 - Data access is read-only. Change nothing outside the worktrees.
 
-**You write** `evidence/investigate-<angle>.md` in the ticket folder: the findings with their sources, the open questions, and, under "Outside the ticket", anything you found beyond its scope.
+**You write** `evidence/investigate-<angle>.md` in the ticket folder: the findings with their sources, the open questions, and, under "Outside the ticket", only what lies outside what the ticket delivers (`WORKFLOW.md` Scope).
 
 **You return** one line: `investigate <angle>: done | blocked — <why>`, plus the number of open questions.
