@@ -1,7 +1,7 @@
 # Plan: <ticket id> <title>
 
 Type: hotfix | bug | enhancement | new feature (simple | complex)
-Revision: 1 (what changed since the last revision)
+Revision: 1
 
 ## Risk
 
@@ -32,7 +32,7 @@ What the investigation established. Each fact cites its source: `src/loans/renew
 
 **For the reader:** who it is for, what they must come away knowing or doing, and the questions they would ask there. The real states it can be in, the widths, languages and data shapes they meet.
 
-**For the build:** where the change can alter composition, the product's best existing screens of the same kind it follows. The pictures in `evidence/`, as the `design` skill's Practice describes, which direction won and why, or the decision memo that asks the person. In words, what the chosen picture settles: the focal point, the groups and their names, where actions live and how they rank. The contents follow from these. The reader's file on the chosen picture. Leave this section out when nothing people see changes.
+**For the build:** where the change can alter an answer its reader would give, the product's best existing screens of the same kind it follows. The pictures in `evidence/`, as the `design` skill's Practice describes, which direction won and why, or the decision memo that asks the person. In words, what the chosen picture settles: the focal point, the groups and their names, where actions live and how they rank. The contents follow from these. The reader's file on the chosen picture. Leave this section out when nothing people see changes.
 
 ## Design
 

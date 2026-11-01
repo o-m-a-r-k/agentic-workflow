@@ -12,7 +12,7 @@
 - Prior art and domain sources are checked for authority and date.
 - The questions the design will hinge on are answered, by running something where reading can't settle them: a query, a throwaway spike in the worktree (removed afterwards), the screen in a browser. For a change people will see, capture the screen as it is today.
 - What you could not establish is listed as open, with what it would take to settle it.
-- Data access is read-only. Change nothing outside the worktrees.
+- Data access is read-only. Change nothing outside the worktrees and the project's local test environments.
 
 **You write** `evidence/investigate-<angle>.md` in the ticket folder: the findings with their sources, the open questions, and, under "Outside the ticket", only what lies outside the ticket's outcome (`WORKFLOW.md` Scope).
 

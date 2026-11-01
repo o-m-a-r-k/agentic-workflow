@@ -5,6 +5,7 @@ Written only by the orchestrator.
 Project: <project>
 Outcome: <what is true for the users once delivered>; seen in: <its most direct evidence>; needed by: <when>
 Where it stands: <what is known about the outcome now, with evidence; what still stands between the users and it>
+Standing instructions: <the person's words, time>, which every plan and memo meets
 Type: <type> (named by: the person | the ticket | inferred)
 Target: <delivery target>, delivered status <status>
 Size: <one line>; steps and depth
@@ -17,7 +18,7 @@ Step: take | understand | plan (picture read) | ground | challenge | judge risk 
 Plan revision: <n>, grounded at <n>
 Approval (high risk only): <the person's words>, <time>, revision <n>
 Waiting for: nothing | the person: <what> | worker: <role, started time> | outside: <what, link>
-Running: none | <worker, heavy run, container, server or database>: <started by, since, how to stop>
+Left behind: none | <worker, run, server, container, volume, database, data or file>: <created by, since, how to remove>
 Review rounds: 0
 
 ## Log
