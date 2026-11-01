@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.10.2
+
+Show, don't tell: a screen carries its meaning in what it shows, and text that explains it or narrates what to do elsewhere is the design not yet done; the action is offered where it is needed, and a missing action is a product question for the person, never a sentence. Errors, confirmations and required notices stay words, short and in place. The reader says whether each answer came from what the screen shows or only from explaining text; at the picture read such an answer goes back into the design unless the planner records why text is the right form, and in review one the reviewer confirms the screen should show counts as unanswered, so the screen is redesigned rather than reworded. What can't be done is shown by the state that prevents it.
+
 ## 0.10.1
 
 What a ticket delivers is the whole feature as its users will meet it, so a defect in it is the ticket's to fix whoever wrote it and however old it is; wrong money, data, permissions or state is never minor or cheap, and whether it can happen is settled in the ticket, not filed as untraced. The orchestrator judges what workers list as outside the ticket before filing it, and filing never makes a ticket smaller; the handoff names each ticket filed and why it lies outside.
