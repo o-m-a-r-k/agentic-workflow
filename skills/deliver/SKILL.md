@@ -5,7 +5,7 @@ description: Deliver one ticket or several, from investigation and plan to verif
 
 # Deliver
 
-You orchestrate, in the session the person talks to, since workers return to it and not to a sub-agent. Workers do the work and write it to the ticket folder. You read the files, decide what comes next, and start workers. Keep the work itself out of your context.
+You orchestrate, in the session the person talks to, since workers return to it and not to a sub-agent. You own each ticket's outcome, as `WORKFLOW.md` "The outcome" describes. Workers do the work and write it to the ticket folder; you read the files, decide the next move and start workers. Keep the work itself out of your context.
 
 **The skill folder** is the folder containing this file: `${CLAUDE_SKILL_DIR}` in Claude Code. In another harness, where that text is not replaced, use the path this file was loaded from.
 
@@ -18,7 +18,7 @@ Read these files fresh, every cycle. Do not rely on what you remember of them.
 3. The user settings, `~/.agents/workflow.yaml`, with the active profile applied (see Settings).
 4. `PROGRESS.md` for every ticket in the definition's `work` folder; `PLAN.md` and `CHECKS.json` for the tickets you drive, the parts the next decision needs.
 
-Then decide the next step for each ticket you were asked to deliver or continue, following `WORKFLOW.md`, and start its workers. Tickets move independently, so start whatever is ready, as many workers at once as `agents_at_once` allows.
+Then, for each ticket you were asked to deliver or continue, compare where the outcome stands with the last cycle: if the last round didn't shorten the distance, re-plan from the outcome rather than repeat the round. Decide the next move following `WORKFLOW.md`, and start its workers. Tickets move independently, so start whatever is ready, as many workers at once as `agents_at_once` allows.
 
 Take a new ticket (step 1) yourself, from the files in the skill folder's `templates/`, and confirm each part from its output.
 
@@ -33,7 +33,7 @@ When your context grows heavy, or the session may end, make sure `PROGRESS.md` i
 Start workers through the harness's own general-purpose sub-agent, all from this session. Start each one fresh, without this session's history: not a fork, and not one of the project's own agent types, because the role file is the whole brief. In Codex, pass `fork_turns: "none"` where the spawn tool offers it. Give each one:
 
 - the full text of its role file, `roles/<role>.md` in the skill folder, quoted as its brief;
-- the paths of the ticket folder, the worktrees, the project definition (and its `.local.md`, if any) and `WORKFLOW.md`, and for the delivery worker this session's transcript, where the harness exposes it. The reader is the exception: copy its screenshots, or the plan's chosen picture, into a folder of their own outside the ticket folder, and give it only that folder, the commit or plan revision they show, the plan's purpose for them (who it is for, what they must know or do, and their questions, nothing more) and the permission-prompt line below. It writes its file in that folder and you move it to `evidence/read-<round>.md` for screenshots of a commit, or to `evidence/read-plan-r<revision>.md` for the chosen picture. It gets no other path and not the worktree sentence, because what it must not see is the point;
+- the paths of the ticket folder, the worktrees, the project definition (and its `.local.md`, if any) and `WORKFLOW.md`, and for the delivery worker this session's transcript, where the harness exposes it. The reader is the exception. Start one on the plan's chosen picture before grounding, and on each commit that changed what people see before its review. Copy its screenshots, or the plan's chosen picture, into a folder of their own outside the ticket folder, and give it only that folder, the commit or plan revision they show, the plan's purpose for them (who it is for, what they must know or do, and their questions, nothing more) and the permission-prompt line below. It writes its file in that folder and you move it to `evidence/read-<round>.md` for screenshots of a commit, or to `evidence/read-plan-r<revision>.md` for the chosen picture. It gets no other path and not the worktree sentence, because what it must not see is the point;
 - that it cannot answer a permission prompt, so it skips any tool that would ask and names what it could not do;
 - its particular job, such as the angle an investigator covers, and how to take a heavy run: start it when a slot is free, otherwise queue it, never skip it;
 - this, in these words: "You start outside the worktrees. Before you work in a repo, read the `AGENTS.md` of the worktree, of each directory you touch, and any instruction file the project definition names; the harness may not have loaded them. Run every command from inside the worktree, and record the worktree's `HEAD` with every result. Stop what you start, or name it and how to stop it in your return line."
@@ -49,7 +49,7 @@ Size the model to the work as well: a small ticket's planning doesn't need the d
 
 `<harness>` is `claude` or `codex`. Pass them when you start the sub-agent where the harness accepts them: in Claude Code, `model` and `effort`; in Codex, the model and reasoning effort the spawn tool offers. Where it doesn't, the worker runs on the session's model.
 
-A worker returns a short status. Record it in `PROGRESS.md` and read the details from the files only when the next decision needs them. Judge each item workers list as outside the ticket against Scope in `WORKFLOW.md` before filing anything: one that lies in what the ticket delivers goes back into the plan as work, whoever wrote it and whatever its age. File once each of the rest that would matter to a user or the product, unless a ticket already exists.
+A worker returns a short status. Record it in `PROGRESS.md` and read the details from the files only when the next decision needs them. Judge each item workers list as outside the ticket against its outcome before filing anything: one that stands between the users and the outcome goes back into the plan as work, whoever wrote it and whatever its age. File once each of the rest that would matter to a user or the product, unless a ticket already exists.
 
 ## Settings
 

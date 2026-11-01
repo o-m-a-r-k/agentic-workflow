@@ -3,6 +3,8 @@
 Written only by the orchestrator.
 
 Project: <project>
+Outcome: <what is true for the users once delivered>; seen in: <its most direct evidence>; needed by: <when>
+Where it stands: <what is known about the outcome now, with evidence; what still stands between the users and it>
 Type: <type> (named by: the person | the ticket | inferred)
 Target: <delivery target>, delivered status <status>
 Size: <one line>; steps and depth

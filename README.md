@@ -6,7 +6,7 @@ The plugin is text only: four skills (deliver, onboard, test, design) and the fi
 
 ## How it works
 
-Each ticket is sized when it is taken. Its type (hotfix, bug, enhancement, new feature) and size set which of these steps it gets, and how deep; every change is reviewed and verified:
+Each ticket starts from its outcome: what is true for its users once it is delivered, and the most direct evidence of it. The orchestrator tracks how far the work is from that outcome and picks each next move by what shortens the distance; its type (hotfix, bug, enhancement, new feature) and size set which of these usual steps it gets, and how deep; every change is reviewed and verified:
 
 1. take the ticket: a folder and fresh worktrees;
 2. understand it, from several angles, side by side where the settings allow;

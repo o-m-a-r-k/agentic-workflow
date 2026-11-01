@@ -14,11 +14,11 @@ Revision: 1 (what changed since the last revision)
 | plan | | Reach: callers, data and users affected (sources). Reversibility: what can't be undone, such as migrations and external writes (sources). Uncertainty: what is still unknown. |
 | ground | | |
 
-## Goal
+## Outcome
 
 > Be aware of: …
 
-What the ticket asks for, with the ticket as its source, and how we will know it is done.
+What is true in the users' world once this is delivered, with the ticket as its source; the most direct evidence of it and where it can be seen; how soon it is needed. Then how this change reaches it, and the evidence that it will.
 
 ## Findings
 
@@ -58,7 +58,7 @@ The steps in the target environment, as the project defines it. Each one maps to
 
 > Be aware of: …
 
-What this ticket will not change, outside what it delivers, and why.
+What this ticket will not change, outside its outcome, and why.
 
 ## Decisions
 
