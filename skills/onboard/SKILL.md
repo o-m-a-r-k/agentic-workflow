@@ -39,7 +39,7 @@ Then a short section per thing a delivering agent does:
 
 - **Set up** a fresh worktree, including what a worker starting there wouldn't find.
 - **Screens**, for a project with any: its design system and where it lives, its best reference screen for each kind of surface, its languages, themes and widths, and the cheapest way to render a throwaway picture from its real components.
-- **Prove** a change: the checks available, what each one covers, how long it takes, and which are heavy (two at once make the machine unusable). A ticket picks the ones that cover what it alters and its reach, and runs a broad suite only when that reach justifies it, unless CI already does.
+- **Prove** a change: the checks available, what each one covers, how long it takes, and which are heavy (two at once make the machine unusable), how a run claims a slot so that no two sessions take the same one, and how to see the heavy runs any session has going. A ticket picks the ones that cover what it alters and its reach, and runs a broad suite only when that reach justifies it, unless CI already does.
 - **Reach** the environments, test accounts (by reference, never secrets) and read-only data; how an agent gets the app running to walk through as its users would, and the browser it drives it with; and how everything a ticket starts, runs included, is found and removed afterwards.
 - **Deliver** to each target, step by step to its delivered status: how each is taken, confirmed and undone, and who may take it without asking, quoted.
 - **Track** tickets: read, file, move, comment, attach.
