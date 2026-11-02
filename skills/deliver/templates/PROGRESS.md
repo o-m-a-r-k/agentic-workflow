@@ -25,6 +25,6 @@ Review rounds: 0
 
 One line per worker status, newest last: time, role, status.
 
-## Filed elsewhere
+## Outside the ticket
 
-Separate tickets filed for findings outside this ticket's scope, with links.
+Separate tickets filed for findings outside this ticket's outcome, with links; for a hotfix, nothing is filed, and each item is held here in one line with its source, for the handoff.

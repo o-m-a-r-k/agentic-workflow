@@ -49,7 +49,7 @@ Size the model to the work as well: a small ticket's planning doesn't need the d
 
 `<harness>` is `claude` or `codex`. Pass them when you start the sub-agent where the harness accepts them: in Claude Code, `model` and `effort`; in Codex, the model and reasoning effort the spawn tool offers. Where it doesn't, the worker runs on the session's model.
 
-A worker returns a short status. Record it in `PROGRESS.md` and read the details from the files only when the next decision needs them. Judge each item workers list as outside the ticket against its outcome before filing anything: one that stands between the users and the outcome goes back into the plan as work, whoever wrote it and whatever its age. File once each of the rest that would matter to a user or the product, unless a ticket already exists.
+A worker returns a short status. Record it in `PROGRESS.md` and read the details from the files only when the next decision needs them. Judge each item workers list as outside the ticket against its outcome before filing anything: one that stands between the users and the outcome goes back into the plan as work, whoever wrote it and whatever its age. File once each of the rest that would matter to a user or the product, unless a ticket already exists; for a hotfix, record each in `PROGRESS.md` under "Outside the ticket" instead (`WORKFLOW.md` Scope).
 
 ## Settings
 
