@@ -18,7 +18,7 @@ Revision: 1
 
 > Be aware of: …
 
-What is true in the users' world once this is delivered, with the ticket as its source; the most direct evidence of it and where it can be seen; how soon it is needed. Then how this change reaches it, and the evidence that it will.
+What is true in the users' world once this is delivered, with the ticket as its source; the most direct evidence of it and where it can be seen; how soon it is needed. Then how this change reaches it, and the evidence that it will. Deliveries: 1 (the users' part): <what it carries>; 2: <what>; or one delivery and why.
 
 ## Findings
 

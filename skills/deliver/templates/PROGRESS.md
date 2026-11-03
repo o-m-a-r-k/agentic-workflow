@@ -4,7 +4,8 @@ Written only by the orchestrator.
 
 Project: <project>
 Outcome: <what is true for the users once delivered>; seen in: <its most direct evidence>; needed by: <when>
-Where it stands: <what is known about the outcome now, with evidence; what still stands between the users and it>
+Where it stands: <what is known about the outcome now, with evidence>; still between the users and it: <item>; <item>
+Deliveries: <n>: <what it carries>: not ready | proven <time> | delivered <where>; one per delivery the plan names
 Standing instructions: <the person's words, time>, which every plan and memo meets
 Type: <type> (named by: the person | the ticket | inferred)
 Target: <delivery target>, delivered status <status>
@@ -27,4 +28,4 @@ One line per worker status, newest last: time, role, status.
 
 ## Outside the ticket
 
-Separate tickets filed for findings outside this ticket's outcome, with links; for a hotfix, nothing is filed, and each item is held here in one line with its source, for the handoff.
+Extras, one line each: what, its source, shown to the person <time>, their choice (file <link> | fix now | fix after delivery | waiting).

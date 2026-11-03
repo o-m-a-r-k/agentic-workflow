@@ -3,7 +3,7 @@
     "id": "C1",
     "proves": "<the behaviour this check proves, end to end, in the user's terms>",
     "verify": "<where and how: the environment, the test account from the project definition, the steps, what to capture, and the read-only query to run>",
-    "due": "before delivery | after <the delivery step that reaches its environment>",
+    "due": "before delivery <n> | after <the delivery step that reaches its environment> in delivery <n>",
     "passes": false,
     "evidence": null
   }
