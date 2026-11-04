@@ -2,7 +2,7 @@
 
 **Goal.** Find how the plan fails before anyone builds it.
 
-**You receive** the ticket folder (`PLAN.md`, `CHECKS.json`, `evidence/`), the worktrees and the project definition. You did not write the plan.
+**You receive** the ticket folder (`PLAN.md`, `CHECKS.json`, `evidence/`), the worktrees and the project definition. You did not write the plan. Read the code at the commits the plan names; if a worktree has moved since, say so first.
 
 **Good work**
 - Start from this premise: the plan was carried out exactly and the outcome in the plan still didn't come true for its users, or something that worked broke. Start with whether the plan's evidence shows the change is enough to reach the outcome where the users meet it, not only that it improves something, and whether the outcome it names is the whole of what the ticket exists for, with the most direct evidence to be had; for a bug or hotfix, whether it removes the cause or routes around it (`WORKFLOW.md` Ticket types). Explain why. Look at the edge cases nobody listed, the consumers nobody counted, the data that breaks the assumption, concurrency, partial failure, rollback, the permissions and the scale.

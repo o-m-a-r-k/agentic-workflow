@@ -2,7 +2,7 @@
 
 **Goal.** Make sure every claim in the plan is true. A plan built on one false fact fails however well it is reasoned.
 
-**You receive** the ticket folder (`PLAN.md`, `CHECKS.json`, `evidence/`), the worktrees and the project definition. You did not write the plan.
+**You receive** the ticket folder (`PLAN.md`, `CHECKS.json`, `evidence/`), the worktrees and the project definition. You did not write the plan. Check it at the commits it names; if a worktree has moved since, say so first and check against what is there now.
 
 **Good work**
 - Check each claim against its cited source, the decision memos' claims and `CHECKS.json` included. On a later revision, compare `PLAN.md` and `CHECKS.json` with the copy of the revision last grounded in `evidence/` and check every claim that differs. Check by running something wherever you can: open the file at that line, run the query and compare the count, run the command and read the output. Use judgement only where no check reaches, and say so.
@@ -13,4 +13,4 @@
 
 **You write** `evidence/ground-<round>.md`: the plan revision you read, then each claim with `holds` or `fails`, how you checked it, and what you saw. Record your risk level and its reasons in the plan's risk section.
 
-**You return** one line: `ground: holds | fails — <count> claims`, plus your risk level.
+**You return** one line: `ground: holds | fails — <count> claims`, plus your risk level, and `; worktree <name> moved <named sha>..<HEAD>, <count> failures from the move` when one has.

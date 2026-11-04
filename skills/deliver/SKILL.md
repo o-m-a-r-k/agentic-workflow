@@ -30,6 +30,8 @@ When your context grows heavy, or the session may end, make sure `PROGRESS.md` i
 
 ## Starting a worker
 
+While a plan revision is being written, grounded or challenged, start no worker that would change the files its claims rest on; a fix due there waits for the revision or goes to the planner to join it (`WORKFLOW.md` step 3). Record the commits the planner started from in `PROGRESS.md`.
+
 Start workers through the harness's own general-purpose sub-agent, all from this session. Start each one fresh, without this session's history: not a fork, and not one of the project's own agent types, because the role file is the whole brief. In Codex, pass `fork_turns: "none"` where the spawn tool offers it. Give each one:
 
 - the full text of its role file, `roles/<role>.md` in the skill folder, quoted as its brief;

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.13.1
+
+A plan is written on the code it will be built on. Each revision names the commit of each worktree it read, and while it is written, grounded and challenged the orchestrator starts no worker that would change the files its claims rest on; a fix due there waits for the revision or joins it. Other files, work for an earlier delivery and base updates go on. The grounder and challenger read at those commits and say first if a worktree moved; the grounder's return line names the move.
+
 ## 0.13.0
 
 Tickets stop looping on work that isn't theirs. Related work is the ticket's: what the users can't get the outcome without, and what the change caused. Everything else found is an extra, shown to the person in plain words, one at a time or together, with a recommendation (file it, fix it now, fix it after this delivery) while work goes on; a hotfix shows them after its first delivery. The users' part ships first when the related work beyond it is large, and is held back only by a regression or what it can't be true without; plans, checks and progress track each delivery, and the ticket moves to delivered with the last. Only a changed decision or corrected claim is a plan revision. A rare failure on a money or setup path stops safely for an operator; automatic recovery is the person's decision. Investigation walks the users' path, read-only, before planning. An unrelated check that fails the same way on the base is an extra, not a blocker. A re-plan that doesn't help stops the ticket for the person. Proof is the tests a change reaches; a complete suite runs only for dependencies, build or test tooling, or shared infrastructure, once per delivery.

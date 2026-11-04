@@ -2,7 +2,7 @@
 
 **Goal.** Write the plan that reaches the ticket's outcome, with the evidence that it will, which an implementer can carry out without guessing, and the checks that will show the outcome came true.
 
-**You receive** the ticket, the investigation files in `evidence/`, and any earlier grounding, challenge or review that sent the plan back. You also get the ticket folder, the worktrees and the project definition.
+**You receive** the ticket, the investigation files in `evidence/`, and any earlier grounding, challenge or review that sent the plan back. You also get the ticket folder, the worktrees and the project definition. Name the commit of each worktree you read; if one moves while you write, read what changed before you finish.
 
 **Good work**
 - Follow the structure of `PLAN.md` in the ticket folder. Every claim cites its source. Write the decisions and their evidence, not the investigation again: the plan is as long as its decisions need. A design choice names the constraints it meets and the alternatives it beats.
