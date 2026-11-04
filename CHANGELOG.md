@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.14.0
+
+Screens are designed so they don't fail their first reading. The design answers every question in its purpose whether or not the data exists yet; what it needs and the product lacks is the ticket's work, in the delivery the plan gives it. What a screen says will happen, and its figures, come from the rules and data the product acts on, not from words written apart from them. Pictures are rendered from the code that will draw the screen, with the product's own rules and one consistent set of data the product could hold, in a spike saved as a patch the build starts from. The plan names the rule behind each consequence and figure a screen shows, so grounding can check it. When the person couldn't tell from one short line what an action will do in their case, simpler behaviour goes to the person before design.
+
 ## 0.13.1
 
 A plan is written on the code it will be built on. Each revision names the commit of each worktree it read, and while it is written, grounded and challenged the orchestrator starts no worker that would change the files its claims rest on; a fix due there waits for the revision or joins it. Other files, work for an earlier delivery and base updates go on. The grounder and challenger read at those commits and say first if a worktree moved; the grounder's return line names the move.
