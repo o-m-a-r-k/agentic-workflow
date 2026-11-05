@@ -71,7 +71,7 @@ The person names the type in the session, unless the project definition says whe
 
 ## Several tickets
 
-Each ticket is independent and is delivered when it is ready. Nothing waits for a shared gate, and a pause for one ticket never pauses another. At most `heavy_runs` heavy test runs run on the machine at a time, counting every heavy run there, whoever started it (from the user settings, 1 if unset); the project definition says which runs are heavy, how one claims a slot and how to see the ones running. The most urgent outcome goes first.
+Each ticket is independent and is delivered when it is ready. Nothing waits for a shared gate, and a pause for one ticket never pauses another. A heavy test run starts when the free memory measured where it will run covers its peak with a margin, after taking off, for every heavy run already going there (whoever started it), what it has yet to reach of its own peak. A run makes itself visible to other sessions before it takes memory, and the measurement is repeated just before it starts; otherwise it waits for room, never skipped. Where runs live in a container VM whose memory the machine backs on demand, both the VM and the machine must cover the run. The project definition says which runs are heavy, the peak of each, the margin, where to measure, how a starting run makes itself visible and how to see the runs going. A heavy run with no recorded peak starts only when no other heavy run is going there, and its measured peak goes into the evidence for the definition. `heavy_runs`, where the user settings set it, is an outer limit on how many run at once. The most urgent outcome goes first.
 
 ## Learning
 

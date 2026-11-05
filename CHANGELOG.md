@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.14.2
+
+Heavy test runs start when measured free memory covers their peak, not by a count. Free memory is taken less what every heavy run already going, whoever started it, has yet to reach of its peak; a run makes itself visible before it takes memory, and both the container VM and the machine must have room. A run with no recorded peak starts only alone. The project definition gives peaks, margin, where to measure and how a run is seen; onboarding measures peaks and no longer writes `heavy_runs: 1`. `heavy_runs`, when set, is only an outer limit.
+
 ## 0.14.1
 
 Screens answer with what they show, not with sentences. Each question in a plan's purpose names the element that answers it (a labelled value, a state, a mark, a control or a link); a sentence needs the reason no element can carry the fact, since a sentence is a claim that can turn false in a state nobody pictured. A request to change a screen's words starts from the question its user couldn't answer. A screen that failed through its words is redone by what it shows; options that differ only in wording are one direction. A question a reader answered only from explaining text is unanswered.
