@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.14.1
+
+Screens answer with what they show, not with sentences. Each question in a plan's purpose names the element that answers it (a labelled value, a state, a mark, a control or a link); a sentence needs the reason no element can carry the fact, since a sentence is a claim that can turn false in a state nobody pictured. A request to change a screen's words starts from the question its user couldn't answer. A screen that failed through its words is redone by what it shows; options that differ only in wording are one direction. A question a reader answered only from explaining text is unanswered.
+
 ## 0.14.0
 
 Screens are designed so they don't fail their first reading. The design answers every question in its purpose whether or not the data exists yet; what it needs and the product lacks is the ticket's work, in the delivery the plan gives it. What a screen says will happen, and its figures, come from the rules and data the product acts on, not from words written apart from them. Pictures are rendered from the code that will draw the screen, with the product's own rules and one consistent set of data the product could hold, in a spike saved as a patch the build starts from. The plan names the rule behind each consequence and figure a screen shows, so grounding can check it. When the person couldn't tell from one short line what an action will do in their case, simpler behaviour goes to the person before design.

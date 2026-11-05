@@ -30,9 +30,9 @@ What the investigation established. Each fact cites its source: `src/loans/renew
 
 > Be aware of: …
 
-**For the reader:** who it is for, what they must come away knowing or doing, and the questions they would ask there. The real states it can be in, the widths, languages and data shapes they meet, and, as a list headed Pictured, the states the `design` skill says earn a picture; the others are named with the picture that shows them.
+**For the reader:** who it is for, what they must come away knowing or doing, and the questions they would ask there, each with the element that answers it (a labelled value, a state, a mark, a control or a link), or the reason no element can and a sentence must. The real states it can be in, the widths, languages and data shapes they meet, and, as a list headed Pictured, the states the `design` skill says earn a picture; the others are named with the picture that shows them.
 
-**For the build:** for each thing the screen says will happen and each figure it shows, the rule it is drawn from (`file:line`, or the spike patch's new rule). where the change can alter an answer its reader would give, the product's best existing screens of the same kind it follows. The pictures in `evidence/`, as the `design` skill's Practice describes, which direction won and why, or the decision memo that asks the person. In words, what the chosen picture settles: the focal point, the groups and their names, where actions live and how they rank. The contents follow from these. The reader's file on the chosen picture. Leave this section out when nothing people see changes.
+**For the build:** for each value, state and figure the screen shows, and any words it must carry, the rule it is drawn from (`file:line`, or the spike patch's new rule). Where the change can alter an answer its reader would give, the product's best existing screens of the same kind it follows. The pictures in `evidence/`, as the `design` skill's Practice describes, which direction won and why, or the decision memo that asks the person. In words, what the chosen picture settles: the focal point, the groups and their names, where actions live and how they rank. The contents follow from these. The reader's file on the chosen picture. Leave this section out when nothing people see changes.
 
 ## Design
 
