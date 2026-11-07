@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.15.0
+
+Screen design rounds are bounded. Each question in a screen's purpose is closed, with its answer and that answer's source listed per real state before design; an open question is broken into closed ones that together answer it in every state, and leaving a part out is the person's decision. Behaviour a screen shows is computed in one place in the product, never assembled by the screen; where that place is missing, building it is related work, and removing a claim or question is the person's decision with its cost. Readers never see the listed answers; the grounder (on a picture) and review (on a build) compare the reader's answers with them by fact, and what the reader worked out is a note. A question that fails twice across reads goes to the person, dropping it among the options. A state no path can produce, shown from the code and grounded, is a stated limit with a guard; missing data is not that evidence.
+
 ## 0.14.2
 
 Heavy test runs start when measured free memory covers their peak, not by a count. Free memory is taken less what every heavy run already going, whoever started it, has yet to reach of its peak; a run makes itself visible before it takes memory, and both the container VM and the machine must have room. A run with no recorded peak starts only alone. The project definition gives peaks, margin, where to measure and how a run is seen; onboarding measures peaks and no longer writes `heavy_runs: 1`. `heavy_runs`, when set, is only an outer limit.
