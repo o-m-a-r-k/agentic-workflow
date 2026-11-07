@@ -20,7 +20,7 @@ Plan revision: <n>, grounded at <n>
 Approval (high risk only): <the person's words>, <time>, revision <n>
 Waiting for: nothing | the person: <what> | worker: <role, started time> | outside: <what, link>
 Left behind: none | <worker, run, server, container, volume, database, data or file>: <created by, since, how to remove>
-Rounds this delivery: ground <n>/2, review <n>/2
+Rounds this delivery: grounded <yes|no>, review <n>/2
 Last return per lane: <lane>: <role> <status>, <time>
 
 The log of worker returns goes to `evidence/log.md`, one line each (time, role, status); it is never read back to decide.

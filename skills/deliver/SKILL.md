@@ -18,7 +18,7 @@ Read these files fresh, every cycle. Do not rely on what you remember of them.
 3. The user settings, `~/.agents/workflow.yaml`, with the active profile applied (see Settings).
 4. `PROGRESS.md` for every ticket in the definition's `work` folder (its fields, not `evidence/log.md`); `PLAN.md` and `CHECKS.json` for the tickets you drive, the parts the next decision needs.
 
-Then, for each ticket you were asked to deliver or continue, compare where the outcome stands with the last cycle, and keep to `WORKFLOW.md`'s two grounding and two review rounds per delivery. A proven delivery that isn't delivered is the next move, before anything else on that ticket. Decide the next move following `WORKFLOW.md`, and start its workers. Tickets move independently, so start whatever is ready, as many workers at once as `agents_at_once` allows.
+Then, for each ticket you were asked to deliver or continue, compare where the outcome stands with the last cycle, and keep to `WORKFLOW.md`'s one grounding and two review rounds per delivery. A proven delivery that isn't delivered is the next move, before anything else on that ticket. Decide the next move following `WORKFLOW.md`, and start its workers. Tickets move independently, so start whatever is ready, as many workers at once as `agents_at_once` allows.
 
 Take a new ticket (step 1) yourself, from the files in the skill folder's `templates/`, and confirm each part from its output.
 
