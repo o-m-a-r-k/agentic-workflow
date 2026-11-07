@@ -155,6 +155,8 @@ test('rounds counts exact names only, allows a third review only for an open Sur
   assert.match(run('rounds', f.t, 'review', '1').stdout, /next: evidence\/review-1-3\.md/);
   rmSync(f.ev('review-1-2.md'));
   write(f.ev('review-1-1.md'), 'Verdict: fix: 2');
+  assert.match(run('rounds', f.t, 'review', '1').stdout, /next: rewrite evidence\/review-1-1\.md \(its verdict and findings disagree; not a new round\)/);
+  write(f.ev('review-1-1.md'), 'Verdict: fix: 2\n### F1 `src/loans/renew.ts:2` off by one\n### F2 `src/loans/renew.ts:4` a label\n');
   write(f.ev('review-1-1-draft.md'), 'notes');
   assert.match(run('rounds', f.t, 'review', '1').stdout, /next: evidence\/review-1-2\.md[\s\S]*ignored, not a round file name: review-1-1-draft\.md/);
   write(f.ev('review-1-2.md'), '**Verdict:** Fix: 1 finding.\n- F1 `src/loans/renew.ts:2` the count is off by one [S1]\n');
@@ -244,7 +246,7 @@ test('links reads only Commit: lines, and stops on a fix verdict, a crash-only r
   write(f.ev('review-1-1.md'), `Commit: catalog@${head.slice(0, 12)}\nVerdict: fix: 1 finding\n- F1 \`src/loans/renew.ts:2\`: off by one\n`);
   assert.match(f.L().stdout, /review verdict \| no \| review-1-1\.md: fix \| implement, then review \|/);
   write(f.ev('review-1-1.md'), `Commit: catalog@${head.slice(0, 12)}\nVerdict: clean\n- F1 \`src/loans/renew.ts:2\`: off by one\n`);
-  assert.match(f.L().stdout, /review verdict \| no \| review-1-1\.md: broken \| the same reviewer rewrites review-1-1\.md/);
+  assert.match(f.L().stdout, /review verdict \| no \| review-1-1\.md: broken \| a fresh reviewer rewrites review-1-1\.md/);
   write(f.ev('review-1-1.md'), `Commit: catalog@${head.slice(0, 12)}\nVerdict: clean\n`);
   writeFileSync(f.ev('proof.jsonl'), '');
   run('proof', f.t, '--in', 'catalog', '--test', 'T1', '--base', '--', 'no-such-runner');
@@ -516,5 +518,37 @@ test('the test_files key and a non-ASCII kind name: a repair within a definition
   f.plan(goodPlan(f.cat).replace('(renewal-count)', '(heure-de-rendez-vous)'));
   f.checks([{ ...goodChecks[0], verify: 'cmd: node test/renew.mjs', expect: 'test passed' }]);
   assert.match(run('plan-shape', f.t, '--definition', f.def).stdout, /S1: the project names an oracle for heure-de-rendez-vous/);
+  f.done();
+});
+
+test('links: states with their widths in brackets, a "no-" screenshot, a bare commit in the reader file, aside judges, and an unearned third review', () => {
+  const f = ticket({ web: true });
+  const head = deliverable(f);
+  f.plan(goodPlan(f.cat, `\n## What people see\nPurpose: renewals left.\nStates: free (390 en ar, 1440 en), taken (1440 en)\n`));
+  write(f.ev('read-1.md'), `Commit read: ${f.cat.sha}\n`);
+  write(f.ev(`screens/free-390-en-${head.slice(0, 10)}.png`), 'png');
+  write(f.ev(`screens/no-taken-1440-en-${head.slice(0, 10)}.png`), 'png');
+  write(f.ev('judge-1-r1.md'), 'Revision: 1');
+  write(f.ev('review-1-2.md'), `Commit: catalog@${head}\nVerdict: clean\n`);
+  write(f.ev('review-1-3.md'), `Commit: catalog@${head}\nVerdict: clean\n`);
+  const r = f.L();
+  assert.match(r.stdout, /screenshot free \| yes/);
+  assert.match(r.stdout, /screenshot taken \| no \| no screenshot whose name holds "taken"/);
+  assert.match(r.stdout, /reader catalog \| yes \| reader read .*screens changed since in catalog\/src\/loans\/renew\.ts/);
+  assert.doesNotMatch(r.stdout, /judge-1-r1\.md/);
+  assert.match(r.stdout, /review 3\/2 \(over the cap/);
+  assert.match(run('rounds', f.t).stdout, /judge 1\/1 \(\+1 moved aside\)/);
+  f.done();
+});
+
+test('plan-shape and checks share one rule for an expect that can\'t fail', () => {
+  const f = ticket();
+  f.plan(goodPlan(f.cat));
+  const oracle = (expect) => [{ ...goodChecks[0], expect }];
+  for (const [expect, can] of [['ok', true], ['/./', false], ['', false], ['0 disagreements', true]]) {
+    f.checks(oracle(expect));
+    assert.equal(/can't fail|can fail/.test(run('plan-shape', f.t).stdout), !can, `plan-shape on "${expect}"`);
+    assert.equal(/can't fail/.test(f.C().stdout), !can, `checks on "${expect}"`);
+  }
   f.done();
 });

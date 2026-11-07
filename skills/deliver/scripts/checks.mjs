@@ -76,10 +76,10 @@ const patch = (r, a, b) => { const t = git(trees[r], 'diff', a, b); try { return
 // since stays within the files the delivery's last review's findings name (F<n> lines) plus tests.
 const reviews = (existsSync(join(dir, 'evidence')) ? readdirSync(join(dir, 'evidence')) : []).filter((f) => (f.match(/^review-(\d+)-(\d+)\.md$/) || [])[1] === String(delivery));
 const lastReview = read(join(dir, 'evidence', reviews.sort((a, b) => +a.split('-')[2].split('.')[0] - +b.split('-')[2].split('.')[0]).at(-1) || '-'));
-const blocks = lastReview.split(/^#+\s*outside the ticket/im)[0].split('\n').reduce((acc, l) => { if (/^[\s>*_-]*F\d+\b/.test(l)) acc.push(l); else if (/^#/.test(l)) acc.push(null); else if (acc.length && acc.at(-1) !== null) acc[acc.length - 1] += `\n${l}`; return acc; }, []).filter(Boolean);
+const blocks = lastReview.split(/^#+\s*outside the ticket/im)[0].split('\n').reduce((acc, l) => { if (/^[\s>#*_-]*F\d+\b/.test(l)) acc.push(l); else if (/^#/.test(l)) acc.push(null); else if (acc.length && acc.at(-1) !== null) acc[acc.length - 1] += `\n${l}`; return acc; }, []).filter(Boolean);
 const named = blocks.flatMap((b) => [...b.matchAll(/([^\s`'"()]+\.\w+):\d+/g)].map((m) => m[1]));
 // Test files: the definition's test_files globs, or a default across common languages.
-const globs = setting('test_files').length ? setting('test_files') : ['**/test/**', '**/tests/**', '**/__tests__/**', '**/spec/**', '**/*.test.*', '**/*.spec.*', '**/*_test.*', '**/test_*.py', '**/*_spec.rb', '**/*Test.*', '**/*Tests.*'];
+const globs = setting('test_files').length ? setting('test_files') : ['**/test/**', '**/tests/**', '**/__tests__/**', '**/spec/**', '**/*.test.*', '**/*.spec.*', '**/*_test.*', '**/*_tests.*', '**/test_*.*', '**/tests.*', '**/*_spec.rb', '**/*Test.*', '**/*Tests.*'];
 const testRx = globs.map((g) => new RegExp(`^${g.replace(/[.+^$()|[\]\\]/g, '\\$&').replace(/\*\*\//g, '\u0000').replace(/\*\*/g, '.*').replace(/\*/g, '[^/]*').replace(/\u0000/g, '(?:.*/)?')}$`));
 const isTest = (f) => testRx.some((rx) => rx.test(f));
 // On Windows a runner such as npm is a .cmd file, which Node starts only through cmd.exe; checks has already refused
@@ -115,7 +115,11 @@ const matches = (out, expect) => {
   const rx = String(expect).match(/^\/(.*)\/([a-z]*)$/s);
   return rx ? new RegExp(rx[1], rx[2]).test(out) : out.includes(String(expect).trim());
 };
-const trivial = (expect) => { try { return !String(expect ?? '').trim() || ['', 'x', 'ok'].some((o) => matches(o, expect)); } catch { return true; } };
+// An expect that can't fail (the same rule as plan-shape): empty, or a /regex/ matching "", "x" or "ok".
+const trivial = (e) => {
+  const rx = String(e ?? '').match(/^\/(.*)\/([a-z]*)$/s);
+  try { return !String(e ?? '').trim() || (!!rx && ['', 'x', 'ok'].some((o) => new RegExp(rx[1], rx[2]).test(o))); } catch { return true; }
+};
 mkdirSync(join(dir, 'evidence', 'checks'), { recursive: true });
 
 const results = [];

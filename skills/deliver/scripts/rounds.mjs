@@ -30,9 +30,14 @@ const verdict = (t) => {
 };
 // A third review is the narrow one: for an open [S<n>] finding of review 2 (found with the verdict and its F<n> lines
 // together), or for a diff after review that links reported (its table names review-<n>-3).
-const blocksOf = (t) => t.split(/^#+\s*outside the ticket/im)[0].split('\n').reduce((acc, l) => { if (/^[\s>*_-]*F\d+\b/.test(l)) acc.push(l); else if (/^#/.test(l)) acc.push(null); else if (acc.length && acc.at(-1) !== null) acc[acc.length - 1] += `\n${l}`; return acc; }, []).filter(Boolean);
+const blocksOf = (t) => t.split(/^#+\s*outside the ticket/im)[0].split('\n').reduce((acc, l) => { if (/^[\s>#*_-]*F\d+\b/.test(l)) acc.push(l); else if (/^#/.test(l)) acc.push(null); else if (acc.length && acc.at(-1) !== null) acc[acc.length - 1] += `\n${l}`; return acc; }, []).filter(Boolean);
 const openSurface = (t) => (verdict(t) !== 'clean' && blocksOf(t).length ? [...new Set(blocksOf(t).flatMap((b) => b.match(/\[(?:S\d+|surface)\]/gi) || []))] : []);
 const narrow = (d) => openSurface(read(join(evidence, `review-${d}-2.md`))).length > 0 || new RegExp(`\\| review-${d}-3\\b`).test(read(join(evidence, `links-${d}.md`)));
+// A review file whose verdict and F<n> findings disagree (or has neither) is rewritten in place, by a fresh worker.
+const broken = (t) => {
+  const v = verdict(t), n = blocksOf(t).length, said = +((t.match(/^[\s>#*_-]*verdict.*?(\d+)\s+(?:\w+\s+){0,3}findings?/im) || [])[1] || 0);
+  return (said && said !== n) || !((v === 'clean' && !n) || ((v === 'fix' || !v) && n));
+};
 const capOf = (k, d) => (k !== 'review' ? 1 : narrow(d) ? 3 : 2);
 // A judge file moved aside after "plan wrong" is named judge-<n>-r<revision>.md; a third re-plan holds the ticket.
 const aside = (d) => names.filter((f) => new RegExp(`^judge-${d}-r\\d+\\.md$`).test(f));
@@ -50,7 +55,7 @@ for (const d of [...deliveries].sort((a, b) => a - b)) {
   const parts = ['judge', 'read', 'review'].map((k) => {
     const n = of(k, d).length, cap = capOf(k, d);
     if (n > cap || (n && listed && !listed.includes(d))) over = true;
-    return `${k} ${n}/${cap}${n > cap ? ' over' : ''}`;
+    return `${k} ${n}/${cap}${n > cap ? ' over' : ''}${k === 'judge' && aside(d).length ? ` (+${aside(d).length} moved aside)` : ''}`;
   });
   lines.push(`delivery ${d}: ${parts.join(', ')}${listed && !listed.includes(d) ? " (not in the plan's Deliveries)" : ''}`);
 }
@@ -60,7 +65,9 @@ lines.push(`plan revision ${revision}`);
 let result = over ? 'over' : 'ok';
 if (kind) {
   const have = of(kind, delivery), cap = capOf(kind, delivery);
-  if (listed && !listed.includes(delivery)) result = `refused: delivery ${delivery} is not in the plan's Deliveries (${listed.join(', ') || 'none'})`;
+  const lastReview = kind === 'review' && have.length ? have.sort((a, b) => +a.match(exact.review)[2] - +b.match(exact.review)[2]).at(-1) : null;
+  if (lastReview && broken(read(join(evidence, lastReview)))) result = `next: rewrite evidence/${lastReview} (its verdict and findings disagree; not a new round)`;
+  else if (listed && !listed.includes(delivery)) result = `refused: delivery ${delivery} is not in the plan's Deliveries (${listed.join(', ') || 'none'})`;
   else if (kind === 'judge' && aside(delivery).length >= 2) result = `refused: a third re-plan (${aside(delivery).join(', ')} moved aside); the ticket is held and the person gets one message with the evidence`;
   else if (have.length >= cap) result = `refused: ${have.map((f) => `evidence/${f}`).join(', ')} exist${have.length === 1 ? 's' : ''} (cap ${cap})`;
   else if (kind === 'review' && have.length === 2 && cap === 3) result = `next: evidence/review-${delivery}-3.md, reading only ${openSurface(read(join(evidence, `review-${delivery}-2.md`))).join(', ') || 'the diff links reported'}`;

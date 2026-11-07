@@ -158,6 +158,7 @@ try {
   fails.push(`CHECKS.json: ${e.message}`);
   checks = [];
 }
+// An expect that can't fail (the same rule as checks): empty, or a /regex/ matching "", "x" or "ok".
 const trivial = (e) => {
   const rx = String(e ?? '').match(/^\/(.*)\/([a-z]*)$/s);
   try { return !String(e ?? '').trim() || (!!rx && ['', 'x', 'ok'].some((o) => new RegExp(rx[1], rx[2]).test(o))); } catch { return true; }

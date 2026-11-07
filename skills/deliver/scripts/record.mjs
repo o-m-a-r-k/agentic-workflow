@@ -37,7 +37,7 @@ const perDelivery = (k) => {
 const verdict = (t) => { const v = ((t.match(/^[\s>#*_-]*verdict[\s*_`]*:[\s*_`]*(.+)$/im) || [])[1] || '').replace(/[*_`]/g, '').trim().toLowerCase(); return /^fix\w*:?\s*0\b/.test(v) ? 'clean' : (v.match(/^(clean|fix|build|approval)/) || [])[1] || ''; };
 // A third review is the narrow one: for an open [S<n>] finding of review 2 (found with the verdict and its F<n> lines
 // together), or for a diff after review that links reported (its table names review-<n>-3).
-const blocksOf = (t) => t.split(/^#+\s*outside the ticket/im)[0].split('\n').reduce((acc, l) => { if (/^[\s>*_-]*F\d+\b/.test(l)) acc.push(l); else if (/^#/.test(l)) acc.push(null); else if (acc.length && acc.at(-1) !== null) acc[acc.length - 1] += `\n${l}`; return acc; }, []).filter(Boolean);
+const blocksOf = (t) => t.split(/^#+\s*outside the ticket/im)[0].split('\n').reduce((acc, l) => { if (/^[\s>#*_-]*F\d+\b/.test(l)) acc.push(l); else if (/^#/.test(l)) acc.push(null); else if (acc.length && acc.at(-1) !== null) acc[acc.length - 1] += `\n${l}`; return acc; }, []).filter(Boolean);
 const openSurface = (t) => (verdict(t) !== 'clean' && blocksOf(t).length ? [...new Set(blocksOf(t).flatMap((b) => b.match(/\[(?:S\d+|surface)\]/gi) || []))] : []);
 const narrow = (d) => openSurface(read(join(ev, `review-${d}-2.md`))).length > 0 || new RegExp(`\\| review-${d}-3\\b`).test(read(join(ev, `links-${d}.md`)));
 const cap = (k, d) => (k !== 'review' ? 1 : narrow(d) ? 3 : 2);
