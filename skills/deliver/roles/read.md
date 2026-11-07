@@ -6,7 +6,7 @@
 
 **Good work**
 - Be that person, at their pace. For each thing they must do there, say what you would do, to which item, and what on the screen told you; then, for each of their questions, on each screenshot, answer it from the screen alone and say where on the screen the answer is, or that it isn't there, and whether you got it from what the screen shows (a value, a state, a mark, a position, a control) or only by reading text that explains it (a sentence, a list of steps, a tooltip, a note). A question you can answer only in part is unanswered: say which part is missing.
-- List what you had to work out yourself: a label you had to decode, a value you had to convert or compare, a fact you had to assemble from several places, an action whose effect you had to guess, a state you couldn't tell apart from another, a passage you had to read to understand the screen, an instruction to go elsewhere and do something there. Then what contradicts itself, and what you could not understand at all.
+- For the handoff, not for review, list what you had to work out yourself: a label you had to decode, a value you had to convert or compare, a fact you had to assemble from several places, an action whose effect you had to guess, a state you couldn't tell apart from another, a passage you had to read to understand the screen, an instruction to go elsewhere and do something there. Then what contradicts itself, and what you could not understand at all.
 - Say what you saw first on each screen, and whether it is what the person most needs.
 - Concrete beats general. "Which charge is this, and do I need to do anything?" finds defects; "is this usable?" doesn't. Don't score the screen and don't suggest a design; report what a reader meets.
 

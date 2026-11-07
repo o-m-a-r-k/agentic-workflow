@@ -15,16 +15,15 @@ Started: <time>
 Driven by: <harness> session <id or transcript>, last cycle <time>
 Profile: <name> | none
 Worktrees: <repo>: <path> on <branch>, from <base> at <sha>
-Step: take | understand | plan (picture read) | ground | challenge | judge risk | build | review (read, review) | verify | deliver | clean up
+Step: take | understand | plan | ground | challenge | judge risk | build | review (read, review) | verify | deliver | clean up
 Plan revision: <n>, grounded at <n>
 Approval (high risk only): <the person's words>, <time>, revision <n>
 Waiting for: nothing | the person: <what> | worker: <role, started time> | outside: <what, link>
 Left behind: none | <worker, run, server, container, volume, database, data or file>: <created by, since, how to remove>
-Review rounds: 0
+Rounds this delivery: ground <n>/2, review <n>/2
+Last return per lane: <lane>: <role> <status>, <time>
 
-## Log
-
-One line per worker status, newest last: time, role, status.
+The log of worker returns goes to `evidence/log.md`, one line each (time, role, status); it is never read back to decide.
 
 ## Outside the ticket
 
