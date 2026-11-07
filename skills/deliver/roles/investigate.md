@@ -1,20 +1,19 @@
 # Role: investigate
 
-**Goal.** Establish the facts about one angle of the ticket, so that the plan can be built on facts and not on guesses.
+**Goal.** Establish the facts about one angle of the ticket, so the plan is built on facts, not guesses.
 
-**You receive** the ticket, your angle, the ticket folder, the worktrees and the project definition. The project definition says how to reach the environments, logs and read-only data.
+**You receive** the ticket, your angle, the ticket folder, the worktrees and the project definition, which says how to reach the environments, logs and read-only data. For a small ticket you may also plan it: then read `roles/plan.md` too.
 
 **Good work**
-- Whatever the ticket, walk the users' path where they meet it first (`WORKFLOW.md` step 2), reading only. Name every access you lacked in one list.
-- Facts come from raw sources: code (`file:line`), git history, logs, read-only queries with their results, the running app, and authoritative external sources with their date. Every fact names its source.
-- A bug is reproduced where it happens, as far as reading allows: logs, read-only data, the screen as its user sees it. Anything that would write there is reproduced locally instead. Trace the root cause along the code path: compare where it fails with where the same path works and explain the difference; where it once worked, find the change that broke it from history (bisect where history doesn't say) and what it altered; and when more than one cause fits, run the check that tells them apart. A cause that restates the symptom, or stops at bad input or a person's mistake, isn't the root; ask what let it through.
-- For a bug or hotfix, read the failure where it happens first: the users' own timings, logs, traces and read-only queries are the outcome's evidence, and the cause is found from them. Where something would write there, reproduce it locally with data shaped like production, its shape read read-only and never copied. The reproduction counts only if it fails the way the users' failure does; say whether it does, with both measurements, and where it once worked, the same measurement on the version before the change that broke it. Don't write the fix; the reproduction becomes the plan's failing test.
-- Find the reach of what the change alters: what uses it, through code, shared data, events or contracts, and what elsewhere does the same job and must stay consistent with it. Search as far as an inconsistency this change would create would realistically show or hurt. Consumers, siblings, existing data and real volumes are counted, not assumed.
-- Prior art and domain sources are checked for authority and date.
-- The questions the design will hinge on are answered, by running something where reading can't settle them: a query, a throwaway spike in the worktree (removed afterwards), the screen in a browser. For a change people will see, capture the screen as it is today.
-- What you could not establish is listed as open, with what it would take to settle it.
+- Walk the users' path where they meet it first, reading only. Name every access you lacked in one list.
+- Facts come from raw sources: code (`file:line` at a named commit), git history, logs, read-only queries with their results, the running app, and authoritative external sources with their date.
+- For a bug or hotfix, read the failure where it happens first: the users' timings, logs, traces and read-only data. Where something would write there, reproduce it locally with data shaped like production, never copied from it. The reproduction counts only if it fails the way the users' failure does; say whether it does, with both measurements. Trace the root cause along the code path: compare where it fails with where the same path works; where it once worked, find the change that broke it from history. A cause that restates the symptom, or stops at bad input or a person's mistake, isn't the root. Don't write the fix; the reproduction becomes the plan's failing test.
+- Find the reach: what uses what the change alters, through code, shared data, events or contracts, and what elsewhere does the same job. Consumers, siblings, existing data and real volumes are counted, not assumed.
+- List every money figure shown, write and permission outcome the change touches, for the Surface.
+- The questions the design hinges on are answered by running something where reading can't settle them: a query, a throwaway spike in the worktree (removed afterwards), the screen in a browser. For a change people will see, capture the screen as it is today.
+- What you could not establish is listed open, with what would settle it. One pass; nobody investigates the angle again.
 - Data access is read-only. Change nothing outside the worktrees and the project's local test environments.
 
-**You write** `evidence/investigate-<angle>.md` in the ticket folder: the findings with their sources, the open questions, and, under "Outside the ticket", only what lies outside the ticket's outcome (`WORKFLOW.md` Scope).
+**You write** `evidence/investigate-<angle>.md`: the findings with sources, the Surface candidates, the open questions, and under "Outside the ticket" only what lies outside the outcome, wrong money, data or permissions reachable now marked `[surface]`.
 
 **You return** one line: `investigate <angle>: done | blocked — <why>`, plus the number of open questions.

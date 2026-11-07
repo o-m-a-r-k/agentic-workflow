@@ -1,55 +1,63 @@
 # Plan: <ticket id> <title>
 
-Type: hotfix | bug | enhancement | new feature (simple | complex)
 Revision: 1
-
-## Risk
-
-**Level: low | high**
-
-| Judged by | Level | Reasons and evidence |
-|---|---|---|
-| plan | | Reach: callers, data and users affected (sources). Reversibility: what can't be undone, such as migrations and external writes (sources). Uncertainty: what is still unknown. |
-| ground | | |
+Risk: low | high
+Read at: <repo>@<sha>, <repo>@<sha>
 
 ## Outcome
 
-What is true in the users' world once this is delivered, with the ticket as its source; the most direct evidence of it and where it can be seen; how soon it is needed. Then how this change reaches it, and the evidence that it will. Deliveries: 1 (the users' part): <what it carries>; 2: <what>; or one delivery and why.
+What is true in the users' world once this is delivered (the ticket as source), its most direct evidence, how soon; how this change reaches it.
 
-## Findings
+## Deliveries
 
-What the investigation established. Each fact cites its source: `src/loans/renew.ts:42`, a read-only query and its result, a log line, a screenshot in `evidence/`, or an external source with its date.
+1. The users' part: <what it carries>; ships alone, or why not.
+2. <the rest, when large>
 
-## What people see
+## Surface
 
-**Purpose:** who it is for, what they must come away knowing or doing, and their few questions. The states, widths and languages the screenshots will show.
+- S1: <money figure shown, write or permission outcome>: <where users meet it>; equals <its source of truth>; paths `src/loans/renew.ts:42`
+- S2: not touched: <why, with its source>
 
-**Design:** the product's best existing screens of the same kind it follows. For a new or rejected screen, the directions as pictures in `evidence/`, which one won and why, or the decision memo that asks the person. Leave this section out when nothing people see changes.
+## Risk
 
-## Design
-
-The change, per repo and file. Each choice names the constraints it meets and the alternatives it beats, with sources. Work items that can run in parallel are marked as such. Items that share files are ordered.
-
-## Tests
-
-| Behaviour or edge case | Test (file › name) | Asserts | Fails before the change? |
-|---|---|---|---|
-| A renewal past the limit is refused | `renew.test.ts › refuses the fourth renewal` | the response is 409 and the due date is unchanged | yes |
-
-## Verification
-
-The steps in the target environment, as the project defines it. Each one maps to a check in `CHECKS.json`. A check due after a delivery step names how that step is rolled back if it fails.
-
-## Out of scope
-
-What this ticket will not change, outside its outcome, and why.
+| By | Level | Reach, reversibility, uncertainty (sources) |
+|---|---|---|
+| plan | | |
+| judge | | |
 
 ## Decisions
 
 ### D1: <question>
 
-- **Options:** A, B, C, each with its cost and consequences.
-- **Market:** what competitors do, with sources and dates.
-- **Industry standard:** with sources.
-- **Recommendation:** the option, and why.
-- **Decided:** the person's answer, the time, and where they gave it.
+- Choice: <what>
+- Source: `src/loans/renew.ts:42` `if (loan.renewals >= limit)`
+- Beats: <the alternative>, because <why>
+
+## Reach
+
+- <consumer or sibling>: `path:line`; covered by <T<n> | C<n> | an existing test, named>
+
+## Tests
+
+| ID | Behaviour or edge case | Test (file › name) | Asserts | Fails before |
+|---|---|---|---|---|
+| T1 | A renewal past the limit is refused | `src/loans/renew.test.ts › refuses the fourth renewal` | 409, the due date unchanged | yes |
+
+## What people see
+
+Purpose: who it is for, what they must come away knowing or doing.
+Questions: their five to eight questions, in the order they bring them.
+States: <state>, <state>
+
+Screenshots are named `<state>@<commit>`; a state is a short slug.
+Follows: the product's best existing screen of the same kind.
+
+Leave this section out when nothing people see changes.
+
+## Memos
+
+### M1: <product question>
+
+- Options: each with what the users or the business get, and its cost.
+- Recommendation: <option>, because <why>.
+- Decided: open | <the person's answer, time>

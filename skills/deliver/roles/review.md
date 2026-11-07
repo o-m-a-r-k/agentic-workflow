@@ -2,19 +2,25 @@
 
 **Goal.** Decide whether this exact change reaches the ticket's outcome as the plan says, and does nothing it shouldn't.
 
-**You receive** the ticket folder (`PLAN.md`, `CHECKS.json`, earlier reviews and their answers, `evidence/`), the worktrees and the commit to review. You did not write the change.
+**You receive** the ticket folder (`PLAN.md`, `CHECKS.json`, `evidence/` with the reader's file and earlier reviews), the worktrees, the commit to review, the delivery number, the project definition and the skill folder. You did not write the change. Scripts run as `node <skill folder>/scripts/<name>.mjs`.
 
-**Good work**
-- Read the whole change, every file, against the plan. In a later round, read the fixes and what they reach against the earlier findings; a finding in code an earlier round already read says why that round couldn't see it. Is each planned behaviour and edge case handled, and is it tested? Does it keep the rules in the project's `AGENTS.md` files? Does anything fall outside the scope or change behaviour the plan doesn't name? For a bug or hotfix, does it remove the cause or route around it? Does the change reach every user and sibling the plan includes, and did the plan miss one where an inconsistency this change creates would hurt? Is there a regression?
-- Run the tests yourself wherever you can. Don't take a pass on trust.
-- For any change people will see, new or altered, from a whole page to one component, judge each running screen it reaches (for a shared component, the screens that use it) as the plugin's `design` skill describes: against its goal and each of its principles, the direction the plan chose, if any, the whole of each design-system section that governs what is on the screen, and the product's best screens of the same kind, an operator's or internal screen as strictly as a customer's. Every label and value is also checked true in each state it is shown in. Each finding names the principle it breaks. A defect the change didn't cause and the outcome doesn't need is an extra, even on the same screen. If you saw only a screenshot or the code, say so; never present that as a live check. Read the reader's file and check each question it could not answer against the screens; one that holds is a finding the implementer fixes, like any other.
-- A defect the change caused, or one the users can't get the outcome without even when it was there before (for a bug or hotfix, only on its cause path: `WORKFLOW.md` Ticket types), is a finding; anything else goes under "Outside the ticket" (`WORKFLOW.md` Scope).
-- Raise only gaps that affect correctness, the ticket's requirements or the project's rules, its design system included, weighed by how likely they are at the project's real volumes and what they would cost; say both. Each finding names the place (`file:line`), what goes wrong and the evidence for it: the input or state that triggers it, and why the guards already there (a type, a check in the caller, the framework) don't stop it. If you can't name both, it isn't a finding yet.
-- Judge the tests by the plugin's `test` skill: does each catch a failure that matters, at the cheapest level that can see it, and did the change leave redundant tests behind?
-- Read edits to existing tests as closely as the code. A test deleted, skipped, loosened or changed to match new output is a finding unless the plan says that behaviour changed.
-- Settle earlier disputes: read the evidence on both sides and decide.
-- If the change needs more confidence than one reading gives, say what would give it, in your own words. That might be a second look from a named angle, a test that fails before the change, or the person reading the diff. A later full review may lift such a request, with its reason.
+**First** run `rounds <ticket folder> review <delivery>`. If it refuses, write nothing and return `review: refused — <the files that exist>`. Its `next:` line names your file and round.
 
-**You write** `evidence/review-<round>.md`: the commit you read, the findings, your rulings on disputes, any request for more confidence, and, under "Outside the ticket", what you found beyond its scope.
+**Answer each item yes or no, with the evidence that decided it.** Read the whole diff in round 1; in round 2, the fixes and what they reach. Run the tests through `proof` wherever you can, the oracles through `checks`, and the screen in the running app; never take a pass on trust. If you saw only a screenshot or the code, say so.
 
-**You return** one line: `review <sha>: clean | <count> findings | needs <request>`.
+1. The outcome is reached on this commit (the test or walk named).
+2. Every tests row went red on base and green here (from `evidence/proof.jsonl`); the missing ones named.
+3. No existing test deleted, skipped, loosened or rewritten to match output, unless the plan names the behaviour change.
+4. Every Surface line is right through every real path and pictured state: the oracle output attached, the paths read named. No other money, data, permission or state is wrong through a real path.
+5. Reach: the named tests ran on this tree (proof lines).
+6. The project's rules and design system hold (breaches with `file:line`); each shown label and value is true in each pictured state.
+7. Nothing outside the plan changed behaviour.
+8. Each reader "no" is confirmed on the running screen or refuted with where the answer is; for a bug or hotfix the cause is removed.
+
+A finding names `file:line`, the input or state that triggers it, and why the guards already there (a type, a caller's check, the framework) don't stop it; without all three it isn't a finding yet. A defect the change didn't cause and the outcome doesn't need is an extra. Settle earlier disputes from the evidence on both sides. Round 2 adds no finding in code round 1 read without saying why round 1 couldn't see it.
+
+**Verdict:** `clean` | `fix: <findings>`. There is no other value.
+
+**You write** the file `rounds` named (`evidence/review-<delivery>-<round>.md`): first line `Commit: <repo>@<sha>` for each worktree you read, then a line `Verdict: clean` or `Verdict: fix: <count>`, the eight answers with evidence, the findings, your rulings, and under "Outside the ticket" what lies beyond the scope, wrong money, data or permissions reachable now marked `[surface]`.
+
+**You return** one line: `review <sha>: clean | fix: <count> findings`.

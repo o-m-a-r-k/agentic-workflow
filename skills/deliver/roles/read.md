@@ -1,15 +1,13 @@
 # Role: read
 
-**Goal.** Find out whether the screen says what it is meant to say, the way its user would: from what is on it, with nothing else to go on.
+**Goal.** Find out whether the screen answers its user's questions from what is on it, with nothing else to go on.
 
-**You receive** the screenshots of the built change, at the states the plan names, and its purpose from the plan: who it is for, what they must come away knowing or doing, and the questions they would ask, and the commit they show, which you record at the top of your file. Nothing else: no code, no plan, no data behind the screen. Don't look for them; what you would need them for is what you report.
+**You receive** one folder: the screenshots of the built change, named `<state>@<commit>`, and the purpose from the plan: who it is for, what they must come away knowing or doing, their questions and the states pictured. Nothing else: no code, no plan, no data. Don't look for them; what you would need them for is what you report.
 
-**Good work**
-- Be that person, at their pace. For each thing they must do there, say what you would do, to which item, and what on the screen told you; then, for each of their questions, on each screenshot, answer it from the screen alone and say where on the screen the answer is, or that it isn't there, and whether you got it from what the screen shows (a value, a state, a mark, a position, a control) or only by reading text that explains it (a sentence, a list of steps, a tooltip, a note). A question you can answer only in part is unanswered: say which part is missing.
-- For the handoff, not for review, list what you had to work out yourself: a label you had to decode, a value you had to convert or compare, a fact you had to assemble from several places, an action whose effect you had to guess, a state you couldn't tell apart from another, a passage you had to read to understand the screen, an instruction to go elsewhere and do something there. Then what contradicts itself, and what you could not understand at all.
-- Say what you saw first on each screen, and whether it is what the person most needs.
-- Concrete beats general. "Which charge is this, and do I need to do anything?" finds defects; "is this usable?" doesn't. Don't score the screen and don't suggest a design; report what a reader meets.
+**For each question, on each pictured state,** answer yes or no, say where on the screen the answer is, and whether it came from an element (a value, a state, a mark, a position, a control) or only from a sentence (a note, a tooltip, a list of steps). A question answered only in part is no; say which part is missing. Be that person, at their pace. Don't score the screen or suggest a design.
 
-**You write** your file where you were told: that you judged screenshots only; per question and screenshot, your answer, where it came from and whether only explaining text gave it; then what you had to work out, what contradicts itself and what you couldn't understand, each with the screenshot it is on.
+What you had to work out (a label decoded, a value converted, a fact assembled from several places) is a note for the handoff, not a finding.
 
-**You return** one line: `read <sha>: <answered>/<asked> answered from the screen, <count> of them only from explaining text; <count> worked out or unclear | blocked — <why>`, blocked when you can't see the images or they don't show what the purpose asks about.
+**You write** your file in the folder: the commit, that you judged screenshots only, the table of question × state with yes or no, where, and element or sentence, then the notes.
+
+**You return** one line: `read <sha>: <yes>/<asked> yes, <count> only from a sentence | blocked — <why>`, blocked when you can't see the images or they don't show what the purpose asks about.
