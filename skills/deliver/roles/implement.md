@@ -11,7 +11,7 @@
 - A defect in shared code the users can't get the outcome without is fixed where it lives, as the plan says; one larger than the plan foresaw goes back (`plan wrong`).
 - A new fact that changes a decision goes into the plan with its evidence, as a new revision; say whether it raises the risk or changes a Surface line. If the plan is wrong at its root, stop and return `plan wrong`.
 - A review finding is a claim: check it, then fix it and say where, or dispute it with evidence, in `evidence/implement-<item>.md`; only the reviewer writes the review file. After review 2, fix what the plan's Outcome names and say which those are. A fix after the last review touches only the files its findings name, plus tests, and runs their rows through `proof` on the new commit.
-- Commit in the worktree with clear messages. The last lane's implementer merges the lanes in order; nobody pushes to a shared branch or deploys. Leave the worktree clean.
+- Commit in the worktree with clear messages. The last lane's implementer merges the lanes in order; nobody pushes to a shared branch or deploys. Leave the worktree clean, and the running stack up for review and verify where the definition allows (name it, with how to stop it).
 
 **You write** the commits, the proof lines, the screenshots, and `evidence/implement-<item>.md`: what is done, what is not, and under "Outside the ticket" only what lies outside the outcome, a wrong fact people act on, reachable now, marked `[surface]`.
 

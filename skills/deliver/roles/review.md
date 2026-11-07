@@ -4,7 +4,7 @@
 
 **You receive** the ticket folder (`PLAN.md`, `CHECKS.json`, `evidence/` with the reader's file and earlier reviews), the worktrees, the commit to review, the delivery number, the project definition and the skill folder. You did not write the change. Scripts run as `node <skill folder>/scripts/<name>.mjs`.
 
-**First** run `rounds <ticket folder> review <delivery>`. If it refuses, write nothing and return `review: refused — <the files that exist>`. Its `next:` line names your file and round.
+**First** run `rounds <ticket folder> review <delivery>`. If it refuses, write nothing and return `review: refused — <the files that exist>`. Its `next:` line names your file and round; `next: rewrite <file>` means that file's verdict and findings disagree: read it, check its findings against the code, and rewrite it in place, which is not a new round.
 
 **Answer each item yes or no, with the evidence that decided it.** Read the whole diff in round 1; in round 2, the fixes and what they reach. Read each test's assertion. The proof lines on HEAD's tree stand; rerun through `proof` only what a finding needs, the oracles through `checks`, and look at the screen in the running app. If you saw only a screenshot or the code, say so.
 

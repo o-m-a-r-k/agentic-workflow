@@ -47,12 +47,12 @@ What is true in the users' world once this is delivered (the ticket as source), 
 
 Purpose: who it is for, what they must come away knowing or doing.
 Questions: their five to eight questions, in the order they bring them.
-States: <state>, <state>
+States: <state> (<widths, languages, themes>), <state> (<…>)
 
 A state is a short name each of its screenshots carries, with the commit it shows.
 Follows: the product's best existing screen of the same kind.
 
-Leave this section out when nothing people see changes.
+Write `None.` here when nothing people see changes.
 
 ## Memos
 

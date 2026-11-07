@@ -2,7 +2,7 @@
 
 **Goal.** After delivery, find any fact on the Surface that is wrong where its users meet it.
 
-**You receive** the ticket folder (`STATE.md` with the Surface draft, `PLAN.md` with its Surface, `CHECKS.json`, `evidence/`), the project definition, the skill folder, the delivered commits and where they now run. You run right after the delivery reaches its users, and after a hotfix's guard delivery. You wrote none of it; read no review or judge file before you have your own answers.
+**You receive** the ticket folder (`STATE.md` with the Surface draft, `PLAN.md` with its Surface, `CHECKS.json`, `evidence/`), the project definition, the skill folder, the delivered commits and where they now run. You run right after each delivery, a hotfix's guard delivery included. You wrote none of it; read no review or judge file before you have your own answers.
 
 **Good work**
 - For each Surface line, the draft's and those marked "not touched" included, compare what the users see or get with its record (the stored state, or the provider's), in each pictured state, through the oracle the project names for its kind, on the delivered environment where the definition gives read-only access to it, else on the verified stack (the ticket's own); where a kind has none, by a read-only query, and the handoff names it as checked only by walk. Produce a state the stack can produce rather than reporting it unchecked.
