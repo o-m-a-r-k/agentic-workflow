@@ -47,7 +47,7 @@ jobs:
           node-version: 22
 
       - name: script tests
-        run: node --test test/
+        run: node --test test/*.test.mjs
 
       - name: claude plugin validate
         run: |

@@ -49,7 +49,7 @@ const line = {
   started: field(state, 'Started') || null,
   first_delivered: delivered[0] || null,
   finished: new Date().toISOString(),
-  risk: ['low', 'high'].includes(field(plan, 'Risk')) ? field(plan, 'Risk') : null,
+  risk: field(plan, 'Risk') === 'high' || /\|\s*high\s*\|/i.test(section(plan, 'Risk')) ? 'high' : field(plan, 'Risk') === 'low' ? 'low' : null,
   plan_revisions: +field(plan, 'Revision') || 0,
   judge_rounds: count('judge'),
   read_rounds: count('read'),
@@ -58,7 +58,7 @@ const line = {
   reopened: earlier.filter((r) => r.project === project && r.ticket === ticket).length,
   surface_lines: section(plan, 'Surface').split('\n').filter((l) => /^- S\d+:/.test(l) && !/not touched/i.test(l)).length,
   surface_extras: section(state, 'Outside the ticket').split('\n').filter((l) => /^- \[surface\]/i.test(l)).length,
-  cold_audit: audit ? +(field(audit, 'Findings') || 0) : null,
+  cold_audit: audit ? parseInt(field(audit, 'Findings'), 10) || 0 : null,
   missed,
   profile: profile && profile !== 'none' ? profile : null,
 };

@@ -32,6 +32,7 @@ if (!state) fails.push('STATE.md is missing');
 if (!/^\d+$/.test(field(plan, 'Revision'))) fails.push('Revision: is not a number');
 const risk = field(plan, 'Risk');
 if (!['low', 'high'].includes(risk)) fails.push(`Risk: "${risk}" is not low or high`);
+if (risk === 'low' && /\|\s*high\s*\|/i.test(section(plan, 'Risk'))) fails.push('Risk: low, but the Risk table says high; the higher stands');
 const type = field(state, 'Type').toLowerCase();
 if (!/^(hotfix|bug|enhancement|new feature)\b/.test(type)) fails.push(`STATE.md Type: "${type}" is not hotfix, bug, enhancement or new feature`);
 
@@ -66,11 +67,13 @@ const lines = (h) => {
   return (cache[key] ??= text().replace(/\n$/, '').split('\n'));
 };
 const norm = (s) => s.replace(/\s+/g, ' ').trim();
-const isCite = (s) => /^[\w@.\/-]+\.\w+:\d+(-\d+)?$/.test(s);
+// A citation is `<path>:<line>[-<line>]` whose path has a / or a . and isn't a number or an address.
+const PATH = '(?=[^\\s`:]*[/.])(?!\\d[\\d.]*:)[\\w@./\\[\\]()+-]+';
+const isCite = (s) => new RegExp(`^${PATH}:\\d+(-\\d+)?$`).test(s);
 
 // Every `path:line` resolves; a backtick snippet right after one is on those lines.
 let cites = 0;
-const cite = /`([\w@.\/-]+\.\w+):(\d+)(?:-(\d+))?`/g;
+const cite = new RegExp(`\`(${PATH}):(\\d+)(?:-(\\d+))?\``, 'g');
 for (let m; (m = cite.exec(plan)); ) {
   cites++;
   const ref = m[0].slice(1, -1);
@@ -83,7 +86,7 @@ for (let m; (m = cite.exec(plan)); ) {
 }
 
 // Decisions name a source and the alternative they beat; memos carry a recommendation.
-const has = (block, k) => new RegExp(`^-[ \\t]*\\**${k}:?\\**:?[ \\t]*\\S`, 'm').test(block);
+const has = (block, k) => new RegExp(`^-[ \\t]*\\**${k}:\\**[ \\t]*\\S`, 'm').test(block);
 const decisions = section(plan, 'Decisions').split(/^### /m).slice(1);
 for (const d of decisions) for (const k of ['Source', 'Beats']) if (!has(d, k)) fails.push(`${d.split(/[:\s]/)[0]}: no ${k}`);
 for (const d of section(plan, 'Memos').split(/^### /m).slice(1)) if (!has(d, 'Recommendation')) fails.push(`${d.split(/[:\s]/)[0]}: no Recommendation`);
@@ -127,7 +130,8 @@ for (const c of checks) {
   if (c.passes !== false) fails.push(`${id}: passes is not false`);
 }
 
-const hash = createHash('sha256').update(surface.join('\n')).digest('hex').slice(0, 12);
+// The hash leaves out the backtick spans (citations, code), so a moved line number doesn't ask for approval again.
+const hash = createHash('sha256').update(surface.map((l) => l.replace(/`[^`]*`/g, '').replace(/\s+/g, ' ').trim()).join('\n')).digest('hex').slice(0, 12);
 const words = plan.split(/\s+/).filter(Boolean).length;
 const out = [
   `plan-shape: ${fails.length ? `fail ${fails.length}` : 'pass'}`,
