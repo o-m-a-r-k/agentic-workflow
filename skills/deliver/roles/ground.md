@@ -6,9 +6,9 @@
 
 **Good work**
 - Check each claim against its cited source, the decision memos' claims and `CHECKS.json` included. On a later revision, compare `PLAN.md` and `CHECKS.json` with the copy of the revision last grounded in `evidence/` and check every claim that differs. Check by running something wherever you can: open the file at that line, run the query and compare the count, run the command and read the output. Use judgement only where no check reaches, and say so.
-- A claim with no source, or with a source that says something else, fails. Words the plan puts in front of people are claims about every real state that shows them.
+- A claim with no source, or with a source that says something else, fails.
 - External sources are checked for authority and date.
-- Where the plan has a chosen picture, compare each answer in the reader's file on it with the answer the plan lists for that question in that state, by the fact it gives (a value by its kind and source, not its wording); a different or missing fact is that question failed: record it with the revision. Check that the closed questions together answer each open question they replace, in every real state, and that each state the plan calls unreachable has code showing no path produces it.
+- The plan's own prose being stale or imprecise is a note, never a failed claim. A claim fails when the behaviour, money, data or permissions it states are not what the code does.
 - Judge the risk yourself from the evidence: reach, reversibility and remaining uncertainty. Your judgement and the planner's are recorded side by side. If they differ, the higher one stands.
 - Raise only what affects correctness or the ticket's requirements.
 

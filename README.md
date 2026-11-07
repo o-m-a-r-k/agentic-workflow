@@ -10,12 +10,12 @@ Each ticket starts from its outcome: what is true for its users once it is deliv
 
 1. take the ticket: a folder and fresh worktrees;
 2. understand it, from several angles, side by side where the settings allow;
-3. plan it, citing a source for every claim, and for a change people will see, render it as a picture that a fresh reader reads before building;
+3. plan it short, citing a source for every claim, and for a new screen show two or three directions as pictures;
 4. ground the plan: a fresh agent checks each claim;
 5. challenge it: assume the plan failed, and ask why;
 6. judge the risk: a high-risk plan waits for your approval;
 7. build;
-8. review, and for a change people will see, a fresh reader who has only the screenshots and their purpose;
+8. review, and for a change people will see, one fresh reader who has only the screenshots and their purpose; at most two fix rounds;
 9. verify in the target environment;
 10. deliver, after a fresh agent checks the whole chain;
 11. clean up.
