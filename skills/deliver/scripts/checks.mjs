@@ -10,10 +10,11 @@
 //     "in" (default: the first in STATE.md). {worktree} and {ticket} in the command become those folders' paths.
 //     It passes when it exits 0, its output holds expect (or matches it, written /regex/flags), and its output matches
 //     none of the definition's nothing_ran patterns (a runner's "no tests found").
-//   verify "walk: <steps>": passes when passes is true and its evidence file names that worktree's HEAD (or the same
-//     change on a moved base) and holds a "seen:" line.
+//   verify "walk: <steps>": passes when passes is true and its evidence file holds a "seen:" line and names a commit
+//     that is HEAD, the same change on a moved base, or one whose diff to HEAD stays within the last review's
+//     findings' files plus tests.
 // Writes evidence/checks.json (one line per check) and evidence/checks/<id>.log. Exit 0 when every due check passes.
-import { readFileSync, existsSync, writeFileSync, mkdirSync, realpathSync } from 'node:fs';
+import { readFileSync, existsSync, writeFileSync, mkdirSync, realpathSync, readdirSync } from 'node:fs';
 import { join, resolve, dirname, basename } from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 
@@ -71,9 +72,18 @@ for (const m of state.matchAll(/^Worktree ([\w.-]+):[ \t]*(\S+)(?:.*?\bfrom (\S+
 }
 // The same change on a moved base: the diff from where each commit meets the base is the same patch.
 const patch = (r, a, b) => { const t = git(trees[r], 'diff', a, b); try { return t ? execFileSync('git', ['patch-id', '--stable'], { cwd: trees[r], input: t + '\n', encoding: 'utf8' }).split(' ')[0] : ''; } catch { return ''; } };
+// A walk at commit c still shows HEAD's behaviour when c is HEAD, the same change on a moved base, or when the diff
+// since stays within the files the delivery's last review's findings name (F<n> lines) plus tests.
+const reviews = (existsSync(join(dir, 'evidence')) ? readdirSync(join(dir, 'evidence')) : []).filter((f) => (f.match(/^review-(\d+)-(\d+)\.md$/) || [])[1] === String(delivery));
+const lastReview = read(join(dir, 'evidence', reviews.sort((a, b) => +a.split('-')[2].split('.')[0] - +b.split('-')[2].split('.')[0]).at(-1) || '-'));
+const named = lastReview.split(/^#+\s*outside the ticket/im)[0].split('\n').filter((l) => /^[\s>*_#-]*F\d+\b/.test(l)).map((l) => (l.match(/([\w@.\/\[\]()+-]+\.\w+):\d+/) || [])[1]).filter(Boolean);
+const isTest = (f) => /(^|\/)(tests?|__tests__|spec)\//.test(f) || /\.(test|spec)\.\w+$/.test(f);
 const sameChange = (r, c) => {
   if (heads[r]?.startsWith(c)) return true;
-  if (!baseRef[r] || git(trees[r], 'cat-file', '-e', `${c}^{commit}`) === null) return false;
+  if (git(trees[r], 'cat-file', '-e', `${c}^{commit}`) === null) return false;
+  const diff = git(trees[r], 'diff', '--name-only', c, 'HEAD');
+  if (diff !== null && git(trees[r], 'merge-base', '--is-ancestor', c, 'HEAD') !== null && diff.split('\n').filter(Boolean).every((f) => isTest(f) || named.some((x) => f === x || f.endsWith(`/${x}`)))) return true;
+  if (!baseRef[r]) return false;
   const p1 = patch(r, git(trees[r], 'merge-base', c, baseRef[r]), c);
   return !!p1 && p1 === patch(r, git(trees[r], 'merge-base', 'HEAD', baseRef[r]), 'HEAD');
 };

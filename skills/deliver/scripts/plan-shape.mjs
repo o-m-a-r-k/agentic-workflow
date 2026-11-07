@@ -1,14 +1,24 @@
 #!/usr/bin/env node
 // plan-shape: does PLAN.md have the shape the plan judge needs, and does every citation resolve at the commits it names?
-// Usage: node plan-shape.mjs <ticket-folder>
-// Reads PLAN.md, CHECKS.json, STATE.md and git. Writes evidence/plan-shape.md. Exit 0 when every item holds, 1 otherwise.
+// Usage: node plan-shape.mjs <ticket-folder> [--definition <project definition> [--definition <its .local.md>]]
+// Reads PLAN.md, CHECKS.json, STATE.md, git, and the definition's `oracles` and `surface_kinds`.
+// Writes evidence/plan-shape.md. Exit 0 when every item holds, 1 otherwise.
 import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, resolve, basename } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 
-const dir = resolve(process.argv[2] || '.');
+const args = process.argv.slice(2);
+const dir = resolve(args[0] || '.');
 const read = (p) => (existsSync(p) ? readFileSync(p, 'utf8') : '');
+// From the definitions' front matter: a list (`[a, b]` or `- a` lines) or a map (indented `key: value` lines).
+const fms = args.flatMap((a, i) => (a === '--definition' ? [(read(resolve(args[i + 1])).match(/^---\n([\s\S]*?)\n---/) || [])[1] || ''] : []));
+const block = (fm, key) => fm.match(new RegExp(`^${key}:[ \\t]*(.*)$((?:\\n[ \\t]+\\S.*)*)`, 'm'));
+const listOf = (key) => fms.map((fm) => { const m = block(fm, key); if (!m) return null; const v = m[1].replace(/(^|\s+)#.*$/, '').trim(); return (v.startsWith('[') ? v.slice(1, v.lastIndexOf(']')).split(',') : m[2].split('\n').map((l) => l.replace(/^\s*-\s*/, ''))).map((x) => x.trim()).filter(Boolean); }).find(Boolean) || [];
+const mapOf = (key) => fms.map((fm) => { const m = block(fm, key); return m && Object.fromEntries(m[2].split('\n').map((l) => l.match(/^\s+([\w.-]+):\s*(.+)$/)).filter(Boolean).map((x) => [x[1], x[2].trim()])); }).find((x) => x && Object.keys(x).length) || {};
+const oracles = mapOf('oracles');
+const critical = listOf('surface_kinds');
+const kinds = [...new Set([...critical, ...Object.keys(oracles)])];
 const field = (t, k) => (t.match(new RegExp(`^${k}:[ \\t]*(.*)$`, 'm')) || [])[1]?.trim() ?? '';
 const section = (t, name) => {
   const s = t.split(/^## /m).find((c) => c.split('\n')[0].trim() === name);
@@ -117,9 +127,17 @@ for (const l of rows) {
 }
 
 // Surface: every draft line kept, every touched line covered by a check with an expect.
-const surface = section(plan, 'Surface').split('\n').filter((l) => /^- S\d+:/.test(l)).map((l) => l.trim());
-const ids = surface.map((l) => l.match(/^- (S\d+)/)[1]);
-for (const m of section(state, 'Surface').matchAll(/^- (S\d+):/gm))
+// A line: `- S<n> (<kind>): <fact>: <where>; equals <its record>`, or `- S<n> (<kind>): not touched: <why>`.
+const LINE = /^- (S\d+)(?: \(([^)]+)\))?:[ \t]*(.*)$/;
+const surface = section(plan, 'Surface').split('\n').filter((l) => LINE.test(l)).map((l) => l.trim());
+const ids = surface.map((l) => l.match(LINE)[1]);
+const kindOf = (l) => (l.match(LINE)[2] || '').trim().toLowerCase();
+const untouched = (l) => /^not touched\b/i.test(l.match(LINE)[3]);
+for (const l of surface) {
+  if (!kindOf(l)) fails.push(`${l.match(LINE)[1]}: no kind; write "- ${l.match(LINE)[1]} (<kind>): …"`);
+  else if (kinds.length && !kinds.includes(kindOf(l))) fails.push(`${l.match(LINE)[1]}: kind "${kindOf(l)}" is not one the definition names (${kinds.join(', ')})`);
+}
+for (const m of section(state, 'Surface').matchAll(/^- (S\d+)\b/gm))
   if (!ids.includes(m[1])) fails.push(`${m[1]}: in STATE.md's Surface draft but not in the plan's Surface (keep it, or mark it "not touched" with its source)`);
 let checks = [];
 try {
@@ -133,11 +151,16 @@ const trivial = (e) => {
   const rx = String(e ?? '').match(/^\/(.*)\/([a-z]*)$/s);
   try { return !String(e ?? '').trim() || (!!rx && ['', 'x', 'ok'].some((o) => new RegExp(rx[1], rx[2]).test(o))); } catch { return true; }
 };
+const prefix = (cmd) => cmd.split(/\s+/).filter((w, i, a) => !a.slice(0, i + 1).some((x) => /[{<]/.test(x))).join(' ');
 for (const l of surface) {
-  if (/^- S\d+:[ \t]*not touched\b/i.test(l)) continue;
-  const id = l.match(/^- (S\d+)/)[1];
-  if (!checks.some((c) => (c.surface || []).includes(id) && !trivial(c.expect))) fails.push(`${id}: no check in CHECKS.json names it with an expect that can fail`);
+  if (untouched(l)) continue;
+  const id = l.match(LINE)[1], mine = checks.filter((c) => (c.surface || []).includes(id) && !trivial(c.expect));
+  if (!mine.length) fails.push(`${id}: no check in CHECKS.json names it with an expect that can fail`);
+  const o = oracles[kindOf(l)];
+  if (o && mine.length && !mine.some((c) => String(c.verify).slice(4).trim().startsWith(prefix(o))))
+    fails.push(`${id}: the project names an oracle for ${kindOf(l)} (${prefix(o)}), and no check of this line runs it`);
 }
+const missingKinds = critical.filter((k) => !surface.some((l) => kindOf(l) === k));
 for (const c of checks) {
   const id = c.id || 'a check';
   for (const k of ['id', 'proves', 'verify', 'due']) if (!String(c[k] ?? '').trim()) fails.push(`${id}: no ${k}`);
@@ -149,11 +172,12 @@ for (const c of checks) {
 
 // The hash covers what approval is of: each line's id, whether it is touched, and what it must equal; not wording.
 const equals = (l) => ((l.replace(/`[^`]*`/g, '').match(/\bequals\b([^;]*)/i) || [])[1] || '').replace(/\s+/g, ' ').trim().toLowerCase();
-const key = (l) => `${l.match(/^- (S\d+)/)[1]}|${/^- S\d+:[ \t]*not touched\b/i.test(l) ? 'not touched' : 'touched'}|${equals(l)}`;
+const key = (l) => `${l.match(LINE)[1]}|${kindOf(l)}|${untouched(l) ? 'not touched' : 'touched'}|${equals(l)}`;
 const hash = createHash('sha256').update(surface.map(key).join('\n')).digest('hex').slice(0, 12);
 // For the judge: a kept draft line whose source of truth or touched state changed.
-const pairs = [...section(state, 'Surface').matchAll(/^- (S\d+):.*$/gm)].flatMap((m) => {
-  const p = surface.find((l) => l.startsWith(`- ${m[1]}:`));
+const pairs = [...section(state, 'Surface').matchAll(/^- (S\d+)\b.*$/gm)].flatMap((m) => {
+  const p = surface.find((l) => l.match(LINE)[1] === m[1]);
+  if (!LINE.test(m[0].trim())) return [];
   return p && key(p) !== key(m[0].trim()) ? [`- ${m[1]} draft: ${m[0].slice(2).trim()}`, `  ${m[1]} plan:  ${p.slice(2)}`] : [];
 });
 const words = plan.split(/\s+/).filter(Boolean).length;
@@ -162,6 +186,7 @@ const out = [
   `revision ${(field(plan, 'Revision').match(/^\d+/) || ['?'])[0]}, risk ${risk || '?'}, ${words} words, ${decisions.length} decisions, ${cites} citations, ${rows.length} tests rows, ${checks.length} checks, surface ${hash}`,
   ...fails.map((f) => `- ${f}`),
   ...(pairs.length ? ['', 'Surface lines whose meaning changed from the draft (for the judge):', ...pairs] : []),
+  ...(missingKinds.length ? ['', `Critical kinds with no Surface line (for the judge: does the change show or write one?): ${missingKinds.join(', ')}`] : []),
 ].join('\n');
 mkdirSync(join(dir, 'evidence'), { recursive: true });
 writeFileSync(join(dir, 'evidence', 'plan-shape.md'), out + '\n');

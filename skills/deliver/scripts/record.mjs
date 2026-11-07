@@ -32,8 +32,12 @@ const perDelivery = (k) => {
   for (const f of names) { const m = f.match(exact[k]); if (m) by[m[1]] = (by[m[1]] || 0) + 1; }
   return by;
 };
-const caps = { judge: 1, read: 1, review: 3 }; // a third review only reads a Surface fix; rounds refuses it otherwise
-const over = Object.keys(caps).some((k) => Object.values(perDelivery(k)).some((n) => n > caps[k]));
+// Caps as rounds counts them: a third review only when review-<d>-2 left a [S<n>] finding open; a round file for a
+// delivery the plan doesn't list is over too.
+const verdict = (t) => { const v = ((t.match(/^[\s>#*_-]*verdict[\s*_`]*:[\s*_`]*(.+)$/im) || [])[1] || '').replace(/[*_`]/g, '').trim().toLowerCase(); return /^fix\w*:?\s*0\b/.test(v) ? 'clean' : (v.match(/^(clean|fix|build|approval)/) || [])[1] || ''; };
+const cap = (k, d) => { if (k !== 'review') return 1; const t = read(join(ev, `review-${d}-2.md`)); return verdict(t) === 'fix' && /\[(?:S\d+|surface)\]/i.test(t.split(/^#+\s*outside the ticket/im)[0]) ? 3 : 2; };
+const listed = (section(plan, 'Deliveries').match(/^\s*\d+\./gm) || []).map((x) => x.trim().slice(0, -1));
+const over = ['judge', 'read', 'review'].some((k) => Object.entries(perDelivery(k)).some(([d, n]) => n > cap(k, d) || (listed.length && !listed.includes(d))));
 const type = (field(state, 'Type').toLowerCase().match(/^(hotfix|bug|enhancement|new feature)/) || [])[1] || null;
 const delivered = [...state.matchAll(/^Delivery \d+:.*\bdelivered (\S+)/gm)].map((m) => m[1].replace(/[,;]$/, '')).sort();
 const audit = read(join(ev, 'audit.md'));
@@ -57,9 +61,10 @@ const line = {
   review_rounds: count('review'),
   rounds_over: over,
   reopened: earlier.filter((r) => r.project === project && r.ticket === ticket).length,
-  surface_lines: section(plan, 'Surface').split('\n').filter((l) => /^- S\d+:/.test(l) && !/not touched/i.test(l)).length,
-  surface_not_touched: section(plan, 'Surface').split('\n').filter((l) => /^- S\d+:[ \t]*not touched\b/i.test(l)).length,
-  surface_draft: section(state, 'Surface').split('\n').filter((l) => /^- S\d+:/.test(l)).length,
+  surface_lines: section(plan, 'Surface').split('\n').filter((l) => /^- S\d+\b/.test(l) && !/^[^:]*:[ \t]*not touched\b/i.test(l)).length,
+  surface_not_touched: section(plan, 'Surface').split('\n').filter((l) => /^- S\d+\b[^:]*:[ \t]*not touched\b/i.test(l)).length,
+  surface_kinds: [...new Set([...section(plan, 'Surface').matchAll(/^- S\d+ \(([^)]+)\)/gm)].map((m) => m[1].trim().toLowerCase()))],
+  surface_draft: section(state, 'Surface').split('\n').filter((l) => /^- S\d+\b/.test(l)).length,
   surface_extras: section(state, 'Outside the ticket').split('\n').filter((l) => /^- \[surface\]/i.test(l)).length,
   cold_audit: audit ? parseInt(field(audit, 'Findings'), 10) || 0 : null,
   missed,

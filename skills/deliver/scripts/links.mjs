@@ -36,6 +36,7 @@ function list(text, key) {
   return items.map((s) => s.replace(/\s+#.*$/, '').trim().replace(/^['"]|['"]$/g, '')).filter(Boolean);
 }
 const setting = (key) => vals('--definition').map((p) => list(read(resolve(p)), key)).find(Boolean);
+const oracleKinds = vals('--definition').flatMap((p) => { const fm = (read(resolve(p)).match(/^---\n([\s\S]*?)\n---/) || [])[1] || ''; const m = fm.match(/^oracles:[ \t]*\n((?:[ \t]+\S.*\n?)*)/m); return m ? [...m[1].matchAll(/^[ \t]+([\w.-]+):/gm)].map((x) => x[1].toLowerCase()) : []; });
 const screenPaths = setting('screen_paths');
 const nothingRan = setting('nothing_ran') || [];
 const matches = (out, p) => { const rx = p.match(/^\/(.*)\/([a-z]*)$/s); return rx ? new RegExp(rx[1], rx[2]).test(out) : out.includes(p); };
@@ -97,7 +98,8 @@ else {
   const text = read(join(ev, last)), n = +last.match(exact.review)[2], v = verdict(text);
   const openS = v === 'fix' ? [...new Set(findings(text).match(/\[(?:S\d+|surface)\]/gi) || [])] : [];
   const ok = v === 'clean' || (v === 'fix' && n >= 2 && !openS.length);
-  const next = openS.length ? (n < 2 ? 'implement, then review' : n === 2 ? `implement, then review-${d}-3 on ${openS.join(', ')}` : 'the person') : 'implement, then review';
+  // After review 3 an open Surface finding holds the delivery: it is reported in the handoff as not delivered, never offered to be dropped.
+  const next = openS.length ? (n < 2 ? 'implement, then review' : n === 2 ? `implement, then review-${d}-3 on ${openS.join(', ')}` : 'none: held, reported in the handoff as not delivered') : 'implement, then review';
   row('review verdict', ok, `${last}: ${v || 'no Verdict: line'}${openS.length ? `; open Surface findings ${openS.join(', ')}` : ok && v === 'fix' ? ' (open findings go to the handoff)' : ''}`, v ? next : 'review');
   const commitLines = text.split('\n').filter((l) => /^[\s>*_-]*commit/i.test(l)).join('\n');
   const named = (t, r) => [...t.matchAll(new RegExp(`${r.replace(/[.]/g, '\\.')}@([0-9a-f]{7,40})`, 'g'))].map((m) => m[1]);
@@ -174,10 +176,13 @@ if (seen) {
 }
 
 // High risk (the higher of the header and the Risk table): approved at a revision, on the Surface as it stands.
-const surface = section(plan, 'Surface').split('\n').filter((l) => /^- S\d+:/.test(l)).map((l) => l.trim());
+const LINE = /^- (S\d+)(?: \(([^)]+)\))?:[ \t]*(.*)$/;
+const surface = section(plan, 'Surface').split('\n').filter((l) => LINE.test(l)).map((l) => l.trim());
 const equals = (l) => ((l.replace(/`[^`]*`/g, '').match(/\bequals\b([^;]*)/i) || [])[1] || '').replace(/\s+/g, ' ').trim().toLowerCase();
-const key = (l) => `${l.match(/^- (S\d+)/)[1]}|${/^- S\d+:[ \t]*not touched\b/i.test(l) ? 'not touched' : 'touched'}|${equals(l)}`;
+const key = (l) => { const m = l.match(LINE); return `${m[1]}|${(m[2] || '').trim().toLowerCase()}|${/^not touched\b/i.test(m[3]) ? 'not touched' : 'touched'}|${equals(l)}`; };
 const hash = createHash('sha256').update(surface.map(key).join('\n')).digest('hex').slice(0, 12);
+const noOracle = [...new Set(surface.map((l) => l.match(LINE)).filter((m) => !/^not touched\b/i.test(m[3])).map((m) => (m[2] || '').trim().toLowerCase()).filter((k) => !oracleKinds.includes(k)))];
+if (noOracle.length) rows.push({ link: 'oracles', ok: true, detail: `no oracle for ${noOracle.map((k) => k || '(no kind)').join(', ')}: no cold audit compares these, and the handoff says so`, worker: '' });
 if (field(plan, 'Risk') === 'high' || /\|\s*high\s*\|/i.test(section(plan, 'Risk'))) {
   const a = field(state, 'Approval');
   const ok = /revision \d+/.test(a) && a.includes(`surface ${hash}`);

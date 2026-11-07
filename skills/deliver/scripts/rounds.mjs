@@ -43,7 +43,7 @@ let over = false;
 for (const d of [...deliveries].sort((a, b) => a - b)) {
   const parts = ['judge', 'read', 'review'].map((k) => {
     const n = of(k, d).length, cap = capOf(k, d);
-    if (n > cap) over = true;
+    if (n > cap || (n && listed && !listed.includes(d))) over = true;
     return `${k} ${n}/${cap}${n > cap ? ' over' : ''}`;
   });
   lines.push(`delivery ${d}: ${parts.join(', ')}${listed && !listed.includes(d) ? " (not in the plan's Deliveries)" : ''}`);
@@ -56,8 +56,8 @@ if (kind) {
   const have = of(kind, delivery), cap = capOf(kind, delivery);
   if (listed && !listed.includes(delivery)) result = `refused: delivery ${delivery} is not in the plan's Deliveries (${listed.join(', ') || 'none'})`;
   else if (have.length >= cap) result = `refused: ${have.map((f) => `evidence/${f}`).join(', ')} exist${have.length === 1 ? 's' : ''} (cap ${cap})`;
-  else if (kind === 'review' && have.length === 2) result = `next: evidence/review-${delivery}-3.md, reading only the fix of ${openSurface(read(join(evidence, `review-${delivery}-2.md`))).join(', ')}`;
-  else result = `next: evidence/${kind}-${delivery}${kind === 'review' ? `-${have.length + 1}` : ''}.md`;
+  else if (kind === 'review' && have.length === 2 && cap === 3) result = `next: evidence/review-${delivery}-3.md, reading only the fix of ${openSurface(read(join(evidence, `review-${delivery}-2.md`))).join(', ')}`;
+  else result = `next: evidence/${kind}-${delivery}${kind === 'review' ? `-${Math.max(0, ...have.map((f) => +f.match(exact.review)[2])) + 1}` : ''}.md`;
 }
 const out = [`rounds: ${result}`, ...lines].join('\n');
 mkdirSync(evidence, { recursive: true });
