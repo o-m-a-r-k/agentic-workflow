@@ -76,8 +76,21 @@ const patch = (r, a, b) => { const t = git(trees[r], 'diff', a, b); try { return
 // since stays within the files the delivery's last review's findings name (F<n> lines) plus tests.
 const reviews = (existsSync(join(dir, 'evidence')) ? readdirSync(join(dir, 'evidence')) : []).filter((f) => (f.match(/^review-(\d+)-(\d+)\.md$/) || [])[1] === String(delivery));
 const lastReview = read(join(dir, 'evidence', reviews.sort((a, b) => +a.split('-')[2].split('.')[0] - +b.split('-')[2].split('.')[0]).at(-1) || '-'));
-const named = lastReview.split(/^#+\s*outside the ticket/im)[0].split('\n').filter((l) => /^[\s>*_#-]*F\d+\b/.test(l)).map((l) => (l.match(/([\w@.\/\[\]()+-]+\.\w+):\d+/) || [])[1]).filter(Boolean);
-const isTest = (f) => /(^|\/)(tests?|__tests__|spec)\//.test(f) || /\.(test|spec)\.\w+$/.test(f);
+const blocks = lastReview.split(/^#+\s*outside the ticket/im)[0].split('\n').reduce((acc, l) => { if (/^[\s>*_-]*F\d+\b/.test(l)) acc.push(l); else if (/^#/.test(l)) acc.push(null); else if (acc.length && acc.at(-1) !== null) acc[acc.length - 1] += `\n${l}`; return acc; }, []).filter(Boolean);
+const named = blocks.flatMap((b) => [...b.matchAll(/([^\s`'"()]+\.\w+):\d+/g)].map((m) => m[1]));
+// Test files: the definition's test_files globs, or a default across common languages.
+const globs = setting('test_files').length ? setting('test_files') : ['**/test/**', '**/tests/**', '**/__tests__/**', '**/spec/**', '**/*.test.*', '**/*.spec.*', '**/*_test.*', '**/test_*.py', '**/*_spec.rb', '**/*Test.*', '**/*Tests.*'];
+const testRx = globs.map((g) => new RegExp(`^${g.replace(/[.+^$()|[\]\\]/g, '\\$&').replace(/\*\*\//g, '\u0000').replace(/\*\*/g, '.*').replace(/\*/g, '[^/]*').replace(/\u0000/g, '(?:.*/)?')}$`));
+const isTest = (f) => testRx.some((rx) => rx.test(f));
+// On Windows a runner such as npm is a .cmd file, which Node starts only through cmd.exe; checks has already refused
+// shell operators in the words.
+const winArgv = (argv) => {
+  if (process.platform !== 'win32' || /[\\/]|\.\w+$/.test(argv[0])) return argv;
+  for (const dir of (process.env.PATH || '').split(';')) for (const e of (process.env.PATHEXT || '.EXE;.CMD;.BAT').split(';'))
+    if (dir && existsSync(join(dir, argv[0] + e))) return /\.(cmd|bat)$/i.test(e) ? [process.env.ComSpec || 'cmd.exe', '/d', '/c', ...argv] : [join(dir, argv[0] + e), ...argv.slice(1)];
+  return argv;
+};
+
 const sameChange = (r, c) => {
   if (heads[r]?.startsWith(c)) return true;
   if (git(trees[r], 'cat-file', '-e', `${c}^{commit}`) === null) return false;
@@ -123,7 +136,8 @@ for (const c of checks) {
       const cwd = own.length ? defDir : trees[repo];
       if (own.some((w) => !existsSync(resolve(defDir, w)))) { results.push(Object.assign(r, { ok: false, reason: `${own.join(' ')} is not in the definition's folder ${defDir}` })); continue; }
       const sub = argv.map((a) => a.replaceAll('{worktree}', trees[repo]).replaceAll('{ticket}', dir));
-      const run = spawnSync(sub[0], sub.slice(1), { cwd, encoding: 'utf8', maxBuffer: 1 << 28, timeout: 3600000, env: { ...process.env, CHECK_WORKTREE: trees[repo], CHECK_TICKET: dir } });
+      const w = winArgv(sub);
+      const run = spawnSync(w[0], w.slice(1), { cwd, encoding: 'utf8', maxBuffer: 1 << 28, timeout: 3600000, env: { ...process.env, CHECK_WORKTREE: trees[repo], CHECK_TICKET: dir } });
       const out = `${run.stdout || ''}${run.stderr || ''}${run.error ? run.error.message : ''}`;
       const empty = nothingRan.find((p) => matches(out, p));
       const ok = run.status === 0 && matches(out, c.expect) && !empty;

@@ -48,7 +48,16 @@ try {
 }
 const head = git(['rev-parse', 'HEAD']);
 
-const run = spawnSync(command[0], command.slice(1), { cwd, encoding: 'utf8', maxBuffer: 1 << 28 });
+// On Windows a runner such as npm is a .cmd file, which Node starts only through cmd.exe; checks has already refused
+// shell operators in the words.
+const winArgv = (argv) => {
+  if (process.platform !== 'win32' || /[\\/]|\.\w+$/.test(argv[0])) return argv;
+  for (const dir of (process.env.PATH || '').split(';')) for (const e of (process.env.PATHEXT || '.EXE;.CMD;.BAT').split(';'))
+    if (dir && existsSync(join(dir, argv[0] + e))) return /\.(cmd|bat)$/i.test(e) ? [process.env.ComSpec || 'cmd.exe', '/d', '/c', ...argv] : [join(dir, argv[0] + e), ...argv.slice(1)];
+  return argv;
+};
+const argv = winArgv(command);
+const run = spawnSync(argv[0], argv.slice(1), { cwd, encoding: 'utf8', maxBuffer: 1 << 28 });
 const output = `${run.stdout || ''}${run.stderr || ''}${run.error ? `\n${run.error.message}` : ''}`;
 const exit = run.error ? null : typeof run.status === 'number' ? run.status : null; // null: it never ran, or a signal ended it
 const tail = output.replace(/\n$/, '').split('\n').slice(-40).join('\n');

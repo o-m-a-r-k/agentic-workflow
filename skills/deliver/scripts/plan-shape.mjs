@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // plan-shape: does PLAN.md have the shape the plan judge needs, and does every citation resolve at the commits it names?
 // Usage: node plan-shape.mjs <ticket-folder> [--definition <project definition> [--definition <its .local.md>]]
+//        node plan-shape.mjs <ticket-folder> --print reader|memos
 // Reads PLAN.md, CHECKS.json, STATE.md, git, and the definition's `oracles` and `surface_kinds`.
 // Writes evidence/plan-shape.md. Exit 0 when every item holds, 1 otherwise.
 import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
@@ -15,7 +16,7 @@ const read = (p) => (existsSync(p) ? readFileSync(p, 'utf8') : '');
 const fms = args.flatMap((a, i) => (a === '--definition' ? [(read(resolve(args[i + 1])).match(/^---\n([\s\S]*?)\n---/) || [])[1] || ''] : []));
 const block = (fm, key) => fm.match(new RegExp(`^${key}:[ \\t]*(.*)$((?:\\n[ \\t]+\\S.*)*)`, 'm'));
 const listOf = (key) => fms.map((fm) => { const m = block(fm, key); if (!m) return null; const v = m[1].replace(/(^|\s+)#.*$/, '').trim(); return (v.startsWith('[') ? v.slice(1, v.lastIndexOf(']')).split(',') : m[2].split('\n').map((l) => l.replace(/^\s*-\s*/, ''))).map((x) => x.trim()).filter(Boolean); }).find(Boolean) || [];
-const mapOf = (key) => fms.map((fm) => { const m = block(fm, key); return m && Object.fromEntries(m[2].split('\n').map((l) => l.match(/^\s+([\w.-]+):\s*(.+)$/)).filter(Boolean).map((x) => [x[1], x[2].trim()])); }).find((x) => x && Object.keys(x).length) || {};
+const mapOf = (key) => fms.map((fm) => { const m = block(fm, key); return m && Object.fromEntries(m[2].split('\n').map((l) => l.match(/^\s+([^\s:]+):\s*(.+)$/)).filter(Boolean).map((x) => [x[1], x[2].trim()])); }).find((x) => x && Object.keys(x).length) || {};
 const oracles = mapOf('oracles');
 const critical = listOf('surface_kinds');
 const kinds = [...new Set([...critical, ...Object.keys(oracles)])];
@@ -34,6 +35,15 @@ const git = (cwd, ...a) => {
 
 const plan = read(join(dir, 'PLAN.md'));
 const state = read(join(dir, 'STATE.md'));
+// --print reader|memos: the plan's "What people see" (the sealed reader's purpose) or its memos, word for word, so the
+// orchestrator copies them without reading the plan.
+const print = args.includes('--print') ? args[args.indexOf('--print') + 1] : null;
+if (print) {
+  const name = { reader: 'What people see', memos: 'Memos' }[print];
+  if (!name) { console.error('--print takes reader or memos'); process.exit(2); }
+  console.log(section(plan, name).trim() || `(no ${name} section)`);
+  process.exit(0);
+}
 const fails = [];
 if (!plan) fails.push('PLAN.md is missing');
 if (!state) fails.push('STATE.md is missing');
@@ -132,10 +142,11 @@ const LINE = /^- (S\d+)(?: \(([^)]+)\))?:[ \t]*(.*)$/;
 const surface = section(plan, 'Surface').split('\n').filter((l) => LINE.test(l)).map((l) => l.trim());
 const ids = surface.map((l) => l.match(LINE)[1]);
 const kindOf = (l) => (l.match(LINE)[2] || '').trim().toLowerCase();
+const unknownKinds = [];
 const untouched = (l) => /^not touched\b/i.test(l.match(LINE)[3]);
 for (const l of surface) {
   if (!kindOf(l)) fails.push(`${l.match(LINE)[1]}: no kind; write "- ${l.match(LINE)[1]} (<kind>): …"`);
-  else if (kinds.length && !kinds.includes(kindOf(l))) fails.push(`${l.match(LINE)[1]}: kind "${kindOf(l)}" is not one the definition names (${kinds.join(', ')})`);
+  else if (kinds.length && !kinds.includes(kindOf(l))) unknownKinds.push(`${l.match(LINE)[1]} (${kindOf(l)})`);
 }
 for (const m of section(state, 'Surface').matchAll(/^- (S\d+)\b/gm))
   if (!ids.includes(m[1])) fails.push(`${m[1]}: in STATE.md's Surface draft but not in the plan's Surface (keep it, or mark it "not touched" with its source)`);
@@ -187,6 +198,7 @@ const out = [
   ...fails.map((f) => `- ${f}`),
   ...(pairs.length ? ['', 'Surface lines whose meaning changed from the draft (for the judge):', ...pairs] : []),
   ...(missingKinds.length ? ['', `Critical kinds with no Surface line (for the judge: does the change show or write one?): ${missingKinds.join(', ')}`] : []),
+  ...(unknownKinds.length ? ['', `Kinds the definition doesn't name (for the judge): ${unknownKinds.join(', ')}; it names ${kinds.join(', ')}`] : []),
 ].join('\n');
 mkdirSync(join(dir, 'evidence'), { recursive: true });
 writeFileSync(join(dir, 'evidence', 'plan-shape.md'), out + '\n');

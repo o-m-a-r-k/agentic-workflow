@@ -21,15 +21,21 @@ const evidence = join(dir, 'evidence');
 const names = existsSync(evidence) ? readdirSync(evidence) : [];
 const exact = { judge: /^judge-(\d+)\.md$/, read: /^read-(\d+)\.md$/, review: /^review-(\d+)-(\d+)\.md$/ };
 const of = (k, d) => names.filter((f) => (f.match(exact[k]) || [])[1] === String(d)).sort();
-const ignored = names.filter((f) => /^(judge|read|review)-/.test(f) && !Object.values(exact).some((r) => r.test(f)));
+const ignored = names.filter((f) => /^(judge|read|review)-/.test(f) && !Object.values(exact).some((r) => r.test(f)) && !/^judge-\d+-r\d+\.md$/.test(f));
 // A verdict line as models write it, "**Verdict:** Fix: 2 findings." -> "fix"; "fix: 0" -> "clean".
 const verdict = (t) => {
   const v = ((t.match(/^[\s>#*_-]*verdict[\s*_`]*:[\s*_`]*(.+)$/im) || [])[1] || '').replace(/[*_`]/g, '').trim().toLowerCase();
   const k = (v.match(/^(clean|fix|build|approval)/) || [])[1] || '';
   return k === 'fix' && /^fix\w*:?\s*0\b/.test(v) ? 'clean' : k;
 };
-const openSurface = (t) => (verdict(t) === 'fix' ? [...new Set(t.split(/^#+\s*outside the ticket/im)[0].match(/\[(?:S\d+|surface)\]/gi) || [])] : []);
-const capOf = (k, d) => (k !== 'review' ? 1 : openSurface(read(join(evidence, `review-${d}-2.md`))).length ? 3 : 2);
+// A third review is the narrow one: for an open [S<n>] finding of review 2 (found with the verdict and its F<n> lines
+// together), or for a diff after review that links reported (its table names review-<n>-3).
+const blocksOf = (t) => t.split(/^#+\s*outside the ticket/im)[0].split('\n').reduce((acc, l) => { if (/^[\s>*_-]*F\d+\b/.test(l)) acc.push(l); else if (/^#/.test(l)) acc.push(null); else if (acc.length && acc.at(-1) !== null) acc[acc.length - 1] += `\n${l}`; return acc; }, []).filter(Boolean);
+const openSurface = (t) => (verdict(t) !== 'clean' && blocksOf(t).length ? [...new Set(blocksOf(t).flatMap((b) => b.match(/\[(?:S\d+|surface)\]/gi) || []))] : []);
+const narrow = (d) => openSurface(read(join(evidence, `review-${d}-2.md`))).length > 0 || new RegExp(`\\| review-${d}-3\\b`).test(read(join(evidence, `links-${d}.md`)));
+const capOf = (k, d) => (k !== 'review' ? 1 : narrow(d) ? 3 : 2);
+// A judge file moved aside after "plan wrong" is named judge-<n>-r<revision>.md; a third re-plan holds the ticket.
+const aside = (d) => names.filter((f) => new RegExp(`^judge-${d}-r\\d+\\.md$`).test(f));
 
 const plan = read(join(dir, 'PLAN.md'));
 const revision = (plan.match(/^Revision:[ \t]*(\d+)/m) || [])[1] || '0';
@@ -55,8 +61,9 @@ let result = over ? 'over' : 'ok';
 if (kind) {
   const have = of(kind, delivery), cap = capOf(kind, delivery);
   if (listed && !listed.includes(delivery)) result = `refused: delivery ${delivery} is not in the plan's Deliveries (${listed.join(', ') || 'none'})`;
+  else if (kind === 'judge' && aside(delivery).length >= 2) result = `refused: a third re-plan (${aside(delivery).join(', ')} moved aside); the ticket is held and the person gets one message with the evidence`;
   else if (have.length >= cap) result = `refused: ${have.map((f) => `evidence/${f}`).join(', ')} exist${have.length === 1 ? 's' : ''} (cap ${cap})`;
-  else if (kind === 'review' && have.length === 2 && cap === 3) result = `next: evidence/review-${delivery}-3.md, reading only the fix of ${openSurface(read(join(evidence, `review-${delivery}-2.md`))).join(', ')}`;
+  else if (kind === 'review' && have.length === 2 && cap === 3) result = `next: evidence/review-${delivery}-3.md, reading only ${openSurface(read(join(evidence, `review-${delivery}-2.md`))).join(', ') || 'the diff links reported'}`;
   else result = `next: evidence/${kind}-${delivery}${kind === 'review' ? `-${Math.max(0, ...have.map((f) => +f.match(exact.review)[2])) + 1}` : ''}.md`;
 }
 const out = [`rounds: ${result}`, ...lines].join('\n');

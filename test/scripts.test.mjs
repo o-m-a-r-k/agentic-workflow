@@ -72,10 +72,10 @@ Read at: catalog@${cat.sha.slice(0, 12)}
 - Beats: a check in the page, which a job would skip
 
 ## Tests
-| ID | Behaviour | Test (file › name) | Asserts | Fails before |
-|---|---|---|---|---|
-| T1 | A fourth renewal is refused | \`test/renew.mjs › refuses the fourth renewal\` | throws, count unchanged | yes |
-| T2 | The page shows the count | (new) \`loan.test.ts › shows the count\` | the count | no |
+| ID | Behaviour | Test (file › name) | Asserts | Fails before | Delivery |
+|---|---|---|---|---|---|
+| T1 | A fourth renewal is refused | \`test/renew.mjs › refuses the fourth renewal\` | throws, count unchanged | yes | 1 |
+| T2 | The page shows the count | (new) \`loan.test.ts › shows the count\` | the count | no | 2 |
 ${extra}`;
 const goodChecks = [{ id: 'C1', proves: 'the count shown equals the stored count', surface: ['S1'], verify: 'cmd: node ./catalog/scripts/oracle.mjs --stack {worktree}', in: 'catalog', expect: '0 disagreements', due: 'before delivery 1', passes: false, evidence: null }];
 
@@ -86,7 +86,7 @@ function deliverable(f, review = 'Verdict: clean') {
   const head = commit(f.cat.path, 'fix');
   f.plan(goodPlan(f.cat));
   f.checks(goodChecks);
-  write(f.ev('judge-1.md'), '**Verdict:** build\n');
+  write(f.ev('judge-1.md'), 'Revision: 2\n**Verdict:** build\n');
   write(f.ev('review-1-1.md'), `Commit: catalog@${head.slice(0, 12)}\n${review}\n`);
   run('proof', f.t, '--in', 'catalog', '--test', 'T1', '--', process.execPath, 'test/renew.mjs');
   assert.equal(f.C().status, 0);
@@ -158,7 +158,7 @@ test('rounds counts exact names only, allows a third review only for an open Sur
   write(f.ev('review-1-1-draft.md'), 'notes');
   assert.match(run('rounds', f.t, 'review', '1').stdout, /next: evidence\/review-1-2\.md[\s\S]*ignored, not a round file name: review-1-1-draft\.md/);
   write(f.ev('review-1-2.md'), '**Verdict:** Fix: 1 finding.\n- F1 `src/loans/renew.ts:2` the count is off by one [S1]\n');
-  assert.match(run('rounds', f.t, 'review', '1').stdout, /next: evidence\/review-1-3\.md, reading only the fix of \[S1\]/);
+  assert.match(run('rounds', f.t, 'review', '1').stdout, /next: evidence\/review-1-3\.md, reading only \[S1\]/);
   write(f.ev('review-1-3.md'), 'Verdict: clean');
   assert.match(run('rounds', f.t, 'review', '1').stdout, /refused: .*review-1-3\.md exist \(cap 3\)/);
   write(f.ev('review-1-2.md'), 'Verdict: fix: 1\n- F1 a label [no surface]\n\n## Outside the ticket\n- [S1] elsewhere\n');
@@ -216,7 +216,11 @@ test('checks: oracles run from the definition folder, the allow-list is a prefix
   f.done();
 });
 
-test('links passes a delivery whose proof chain holds, whatever form its verdict lines take', () => {
+test('links passes a delivery whose proof chain holds, whatever form its verdict lines take; a verdict that miscounts its findings is broken', () => {
+  const g = ticket();
+  deliverable(g, 'Verdict: clean on correctness; 1 low wording finding');
+  assert.match(g.L().stdout, /review verdict \| no \| review-1-1\.md: broken/);
+  g.done();
   for (const v of ['Verdict: clean', 'Verdict: Clean.', 'Verdict: **clean**', '**Verdict:** clean', 'Verdict: `clean`', 'Verdict: CLEAN (no findings)', 'Verdict: fix: 0 findings']) {
     const f = ticket();
     deliverable(f, v);
@@ -224,7 +228,7 @@ test('links passes a delivery whose proof chain holds, whatever form its verdict
     const r = f.L();
     assert.equal(r.status, 0, `${v}\n${r.stdout}`);
     assert.match(r.stdout, /ignored files \| yes \| not round files, not read: review-1-1-notes\.md/);
-    assert.match(r.stdout, /oracles \| yes \| no oracle for renewal-count: no cold audit compares these, and the handoff says so/);
+    assert.match(r.stdout, /oracles \| yes \| no oracle for renewal-count: checked only by walk, as the handoff says/);
     f.done();
   }
 });
@@ -237,8 +241,10 @@ test('links reads only Commit: lines, and stops on a fix verdict, a crash-only r
   write(f.ev('review-1-1.md'), `Commit: catalog@${head.slice(0, 12)}\nThe worktree has since moved to catalog@${moved}, which I did not read.\nVerdict: clean\n`);
   assert.match(f.L().stdout, /catalog reviewed \| no \| commits since .* touch files no finding names: src\/loans\/other\.ts \| review \|/);
   git(f.cat.path, 'reset', '-q', '--hard', head);
-  write(f.ev('review-1-1.md'), `Commit: catalog@${head.slice(0, 12)}\nVerdict: fix: 1 finding\n`);
+  write(f.ev('review-1-1.md'), `Commit: catalog@${head.slice(0, 12)}\nVerdict: fix: 1 finding\n- F1 \`src/loans/renew.ts:2\`: off by one\n`);
   assert.match(f.L().stdout, /review verdict \| no \| review-1-1\.md: fix \| implement, then review \|/);
+  write(f.ev('review-1-1.md'), `Commit: catalog@${head.slice(0, 12)}\nVerdict: clean\n- F1 \`src/loans/renew.ts:2\`: off by one\n`);
+  assert.match(f.L().stdout, /review verdict \| no \| review-1-1\.md: broken \| the same reviewer rewrites review-1-1\.md/);
   write(f.ev('review-1-1.md'), `Commit: catalog@${head.slice(0, 12)}\nVerdict: clean\n`);
   writeFileSync(f.ev('proof.jsonl'), '');
   run('proof', f.t, '--in', 'catalog', '--test', 'T1', '--base', '--', 'no-such-runner');
@@ -259,21 +265,21 @@ test('links reads only Commit: lines, and stops on a fix verdict, a crash-only r
 
 test('links: an open [S<n>] finding after review 2 needs review 3; a commit after review stands only within its findings, rows green', () => {
   const f = ticket();
-  const head = deliverable(f, 'Verdict: fix: 1');
+  const head = deliverable(f, 'Verdict: fix: 1\n- F1 `src/loans/renew.ts:2`: off by one');
   write(f.ev('review-1-2.md'), `Commit: catalog@${head.slice(0, 12)}\n**Verdict:** fix: 2\n- F1 [S1] \`src/loans/renew.ts:2\` a renewed loan shows one too many\n- F2 \`src/loans/renew.ts:4\` a label\n`);
   assert.match(f.L().stdout, /review verdict \| no \| .*open Surface findings \[S1\] \| implement, then review-1-3 on \[S1\] \|/);
   edit(join(f.cat.path, 'src/loans/renew.ts'), 'loan.renewals += 1;', 'loan.renewals += 1; // checked');
   write(join(f.cat.path, 'test/renew.mjs'), RENEW_CHECK.replace('1 test', 'one test'));
-  commit(f.cat.path, 'fix S1');
+  const fixS1 = commit(f.cat.path, 'fix S1');
   run('proof', f.t, '--in', 'catalog', '--test', 'T1', '--', process.execPath, 'test/renew.mjs');
   f.C();
-  write(f.ev('review-1-3.md'), `Commit: catalog@${head.slice(0, 12)}\nVerdict: clean\n- F1 [S1] \`src/loans/renew.ts:5\`: fixed, the count is right\n`);
+  write(f.ev('review-1-3.md'), `Commit: catalog@${fixS1}\nVerdict: clean\nRead only the fix of F1 [S1]: the count is right.\n`);
   const ok = f.L();
   assert.equal(ok.status, 0, ok.stdout);
-  assert.match(ok.stdout, /catalog reviewed \| yes \| review-1-3\.md names .*stays within its findings and tests/);
+  assert.match(ok.stdout, /catalog reviewed \| yes \| review-1-3\.md names HEAD/);
   assert.match(ok.stdout, /review 3\/3/);
   write(f.ev('review-1-3.md'), `Commit: catalog@${head.slice(0, 12)}\nVerdict: fix: 1\n- F1 [S1] \`src/loans/renew.ts:5\`: still one too many\n`);
-  assert.match(f.L().stdout, /review verdict \| no \| .*\[S1\] \| none: held, reported in the handoff as not delivered \|/);
+  assert.match(f.L().stdout, /review verdict \| no \| .*open Surface findings F1 \| none: held, reported in the handoff as not delivered \|/);
   f.done();
 });
 
@@ -399,7 +405,8 @@ test('a booking fact flows end to end: an appointment time on the Surface, its o
   assert.match(r.stdout, /S1: the project names an oracle for appointment-time \(node \.\/tools\/time-check\.mjs --stack\), and no check of this line runs it/);
   assert.match(r.stdout, /Critical kinds with no Surface line .*: availability/);
   f.plan(booking.replace('(appointment-time)', '(time)'));
-  assert.match(run('plan-shape', f.t, ...D).stdout, /S1: kind "time" is not one the definition names \(appointment-time, availability\)/);
+  assert.match(run('plan-shape', f.t, ...D).stdout, /Kinds the definition doesn't name \(for the judge\): S1 \(time\); it names appointment-time, availability/);
+  assert.match(run('plan-shape', f.t, '--print', 'reader').stdout, /no What people see section/);
   f.plan(booking);
   const oracle = { ...goodChecks[0], verify: 'cmd: node ./tools/time-check.mjs --stack {worktree} spec.json', expect: '0 disagreements' };
   f.checks([oracle]);
@@ -409,11 +416,105 @@ test('a booking fact flows end to end: an appointment time on the Surface, its o
   edit(join(f.cat.path, 'src/loans/renew.ts'), '>=', '>= 0 +');
   const head = commit(f.cat.path, 'fix');
   run('proof', f.t, '--in', 'catalog', '--test', 'T1', '--', process.execPath, 'test/renew.mjs');
-  write(f.ev('judge-1.md'), 'Verdict: build\n');
+  write(f.ev('judge-1.md'), 'Revision: 2\nVerdict: build\n');
   write(f.ev('review-1-1.md'), `Commit: catalog@${head}\nVerdict: clean\n`);
   assert.match(run('checks', f.t, '--delivery', '1', ...D).stdout, /C1 \[S1\]: pass/);
   r = run('links', f.t, '--delivery', '1', ...D);
   assert.equal(r.status, 0, r.stdout);
   assert.doesNotMatch(r.stdout, /no oracle for/);
+  f.done();
+});
+
+test('links: a diff after review 2 goes to a narrow review 3, and after it any further change holds the delivery', () => {
+  const f = ticket();
+  const head = deliverable(f, 'Verdict: fix: 1\n- F1 `src/loans/renew.ts:4`: a label');
+  write(f.ev('review-1-2.md'), `Commit: catalog@${head.slice(0, 12)}\nVerdict: clean\n`);
+  write(join(f.cat.path, 'src/loans/other.ts'), 'a defect verify found\n');
+  const v1 = commit(f.cat.path, 'verify-found fix');
+  run('proof', f.t, '--in', 'catalog', '--test', 'T1', '--', process.execPath, 'test/renew.mjs');
+  f.C();
+  assert.match(f.L().stdout, /catalog reviewed \| no \| .*other\.ts \| review-1-3 \(narrow: reads the diff since/);
+  assert.match(run('rounds', f.t, 'review', '1').stdout, /next: evidence\/review-1-3\.md, reading only the diff links reported/);
+  write(f.ev('review-1-3.md'), `Commit: catalog@${v1}\nVerdict: clean\n`);
+  assert.equal(f.L().status, 0);
+  write(join(f.cat.path, 'src/loans/third.ts'), 'x\n');
+  commit(f.cat.path, 'yet another');
+  run('proof', f.t, '--in', 'catalog', '--test', 'T1', '--', process.execPath, 'test/renew.mjs');
+  f.C();
+  assert.match(f.L().stdout, /catalog reviewed \| no \| .*third\.ts \| none: held, reported in the handoff as not delivered \|/);
+  f.done();
+});
+
+test('links: the judge must have judged this revision; a re-plan moves it aside, a third is refused; its high risk needs approval; a pending memo is open', () => {
+  const f = ticket();
+  deliverable(f);
+  f.plan(goodPlan(f.cat).replace('Revision: 2', 'Revision: 3'));
+  assert.match(f.L().stdout, /plan judged \| no \| judge-1\.md judged revision 2, the plan is 3/);
+  writeFileSync(f.ev('judge-1-r2.md'), readFileSync(f.ev('judge-1.md')));
+  rmSync(f.ev('judge-1.md'));
+  assert.match(run('rounds', f.t, 'judge', '1').stdout, /next: evidence\/judge-1\.md/);
+  write(f.ev('judge-1-r3.md'), 'Revision: 3');
+  assert.match(run('rounds', f.t, 'judge', '1').stdout, /refused: a third re-plan/);
+  rmSync(f.ev('judge-1-r3.md'));
+  write(f.ev('judge-1.md'), 'Revision: 3\nRisk: high\nVerdict: build\n');
+  const r = f.L();
+  assert.match(r.stdout, /plan judged \| yes/);
+  assert.match(r.stdout, /approval \| no/);
+  f.plan(goodPlan(f.cat).replace('Revision: 2', 'Revision: 3') + '\n## Memos\n### M1: Fee?\n- Due: before delivery 1\n- Recommendation: yes\n- Decided: pending\n');
+  assert.match(f.L().stdout, /memos decided \| no \| open: M1/);
+  const rec = join(f.root, 'r.jsonl');
+  run('record', f.t, '--records', rec);
+  assert.equal(JSON.parse(readFileSync(rec, 'utf8')).judge_rounds, 2);
+  f.done();
+});
+
+test('links: every due tests row is green on HEAD, a later delivery\'s row is not due, and "None." means no screen rows', () => {
+  const f = ticket();
+  deliverable(f);
+  f.plan(goodPlan(f.cat).replace('| no | 2 |', '| no | 1 |') + '\n## What people see\nNone.\n');
+  const r = f.L();
+  assert.match(r.stdout, /T2 green \| no \| no passing proof on HEAD's tree/);
+  assert.doesNotMatch(r.stdout, /\| read \|/);
+  f.plan(goodPlan(f.cat));
+  assert.doesNotMatch(f.L().stdout, /T2/);
+  f.done();
+});
+
+test('links: states match spaced, dashed or underscored names, "empty" does not take "non-empty", a repo outside screen_paths counts as screens, and a reader of older screens is reported', () => {
+  const f = ticket({ web: true });
+  const head = deliverable(f);
+  f.plan(goodPlan(f.cat, `\n## What people see\nPurpose: a member sees renewals left.\nStates: limit reached, empty\n`));
+  write(f.ev('read-1.md'), `read catalog@${head}`);
+  write(f.ev(`screens/limit_reached-390-${head.slice(0, 10)}.png`), 'png');
+  write(f.ev(`screens/non-empty-390-${head.slice(0, 10)}.png`), 'png');
+  let r = f.L();
+  assert.match(r.stdout, /screenshot limit reached \| yes/);
+  assert.match(r.stdout, /screenshot empty \| no \| no screenshot whose name holds "empty"/);
+  write(f.ev(`screens/empty-390-${head.slice(0, 10)}.png`), 'png');
+  write(join(f.cat.path, 'src/loans/renew.test.ts'), RENEW_TEST + '// more\n');
+  const c2 = commit(f.cat.path, 'a test after the screenshots');
+  write(f.ev('review-1-1.md'), `Commit: catalog@${c2}\nVerdict: clean\n`);
+  run('proof', f.t, '--in', 'catalog', '--test', 'T1', '--', process.execPath, 'test/renew.mjs');
+  f.C();
+  r = f.L();
+  assert.match(r.stdout, /screenshot empty \| no \| retake: .*catalog\/src\/loans\/renew\.test\.ts/);
+  assert.match(r.stdout, /reader catalog \| yes \| reader read .*screens changed since in catalog\/src\/loans\/renew\.test\.ts/);
+  write(f.def, readFileSync(f.def, 'utf8').replace('  - web/messages', '  - web/messages\n  - "!catalog"'));
+  assert.match(f.L().stdout, /screenshot empty \| yes/);
+  f.done();
+});
+
+test('the test_files key and a non-ASCII kind name: a repair within a definition\'s own test pattern keeps the walk; the kind keeps its oracle', () => {
+  const f = ticket();
+  const head = deliverable(f, 'Verdict: fix: 1\n- F1 `src/loans/renew.ts:4`: a label');
+  write(f.def, readFileSync(f.def, 'utf8').replace('---\n', '---\ntest_files: ["checks/**"]\n').replace(/\n---\n$/, '\noracles:\n  heure-de-rendez-vous: node ./catalog/scripts/oracle.mjs --stack {worktree}\n---\n'));
+  write(f.ev('walk.md'), `walked at catalog@${head.slice(0, 9)}\nseen: refused\n`);
+  f.checks([{ ...goodChecks[0], id: 'C5', surface: [], verify: 'walk: renew four times', passes: true, evidence: 'evidence/walk.md' }]);
+  write(join(f.cat.path, 'checks/renew.check.js'), 'x\n');
+  commit(f.cat.path, 'a test in the project\'s own place');
+  assert.match(f.C().stdout, /C5: pass/);
+  f.plan(goodPlan(f.cat).replace('(renewal-count)', '(heure-de-rendez-vous)'));
+  f.checks([{ ...goodChecks[0], verify: 'cmd: node test/renew.mjs', expect: 'test passed' }]);
+  assert.match(run('plan-shape', f.t, '--definition', f.def).stdout, /S1: the project names an oracle for heure-de-rendez-vous/);
   f.done();
 });

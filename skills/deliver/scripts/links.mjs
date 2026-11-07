@@ -36,7 +36,7 @@ function list(text, key) {
   return items.map((s) => s.replace(/\s+#.*$/, '').trim().replace(/^['"]|['"]$/g, '')).filter(Boolean);
 }
 const setting = (key) => vals('--definition').map((p) => list(read(resolve(p)), key)).find(Boolean);
-const oracleKinds = vals('--definition').flatMap((p) => { const fm = (read(resolve(p)).match(/^---\n([\s\S]*?)\n---/) || [])[1] || ''; const m = fm.match(/^oracles:[ \t]*\n((?:[ \t]+\S.*\n?)*)/m); return m ? [...m[1].matchAll(/^[ \t]+([\w.-]+):/gm)].map((x) => x[1].toLowerCase()) : []; });
+const oracleKinds = vals('--definition').flatMap((p) => { const fm = (read(resolve(p)).match(/^---\n([\s\S]*?)\n---/) || [])[1] || ''; const m = fm.match(/^oracles:[ \t]*\n((?:[ \t]+\S.*\n?)*)/m); return m ? [...m[1].matchAll(/^[ \t]+([^\s:]+):/gm)].map((x) => x[1].toLowerCase()) : []; });
 const screenPaths = setting('screen_paths');
 const nothingRan = setting('nothing_ran') || [];
 const matches = (out, p) => { const rx = p.match(/^\/(.*)\/([a-z]*)$/s); return rx ? new RegExp(rx[1], rx[2]).test(out) : out.includes(p); };
@@ -67,6 +67,19 @@ const verdict = (t) => {
   return k === 'fix' && /^fix\w*:?\s*0\b/.test(v) ? 'clean' : k;
 };
 const findings = (t) => t.split(/^#+\s*outside the ticket/im)[0];
+// A review's findings: blocks from an F<n> line to the next F<n> line or heading. Its state comes from the verdict line
+// and the findings together; when they disagree, or there is no verdict and no finding, the file is broken.
+const blocks = (t) => findings(t).split('\n').reduce((acc, l) => { if (/^[\s>*_-]*F\d+\b/.test(l)) acc.push(l); else if (/^#/.test(l)) acc.push(null); else if (acc.length && acc.at(-1) !== null) acc[acc.length - 1] += `\n${l}`; return acc; }, []).filter(Boolean);
+const reviewState = (t) => {
+  const v = verdict(t), n = blocks(t).length, said = +((t.match(/^[\s>#*_-]*verdict.*?(\d+)\s+(?:\w+\s+){0,3}findings?/im) || [])[1] || 0);
+  if (said && said !== n) return 'broken';
+  return v === 'clean' && !n ? 'clean' : (v === 'fix' || !v) && n ? 'fix' : 'broken';
+};
+const filesOf = (bs) => bs.flatMap((b) => [...b.matchAll(/([^\s`'"()]+\.\w+):\d+/g)].map((m) => m[1]));
+// Test files: the definition's test_files globs, or a default across common languages.
+const globs = setting('test_files') || ['**/test/**', '**/tests/**', '**/__tests__/**', '**/spec/**', '**/*.test.*', '**/*.spec.*', '**/*_test.*', '**/test_*.py', '**/*_spec.rb', '**/*Test.*', '**/*Tests.*'];
+const glob = (g) => new RegExp(`^${g.replace(/[.+^$()|[\]\\]/g, '\\$&').replace(/\*\*\//g, '\u0000').replace(/\*\*/g, '.*').replace(/\*/g, '[^/]*').replace(/\u0000/g, '(?:.*/)?')}$`);
+const testRx = globs.map(glob);
 // The same change on a moved base: the diff from where each commit meets the base is the same patch.
 const patch = (r, a, b) => { const t = git(trees[r], 'diff', a, b); try { return t ? execFileSync('git', ['patch-id', '--stable'], { cwd: trees[r], input: t + '\n', encoding: 'utf8' }).split(' ')[0] : ''; } catch { return ''; } };
 const rebased = (r, s) => {
@@ -74,37 +87,44 @@ const rebased = (r, s) => {
   const p1 = patch(r, git(trees[r], 'merge-base', s, baseRef[r]), s);
   return !!p1 && p1 === patch(r, git(trees[r], 'merge-base', 'HEAD', baseRef[r]), 'HEAD');
 };
-const testsRows = section(plan, 'Tests').split('\n').filter((x) => /^\|\s*T\d+\s*\|/.test(x)).map((l) => l.split('|').slice(1, -1).map((s) => s.trim()));
+// Tests rows due by this delivery (the Delivery column; empty means every delivery).
+const testsRows = section(plan, 'Tests').split('\n').filter((x) => /^\|\s*T\d+\s*\|/.test(x)).map((l) => l.split('|').slice(1, -1).map((s) => s.trim())).filter((c) => !/\d/.test(c[5] || '') || +c[5].match(/\d+/)[0] <= d);
 const rowFile = (c) => (c[2] || '').replace(/`/g, '').split('›')[0].trim();
-const isTest = (f) => /(^|\/)(tests?|__tests__|spec)\//.test(f) || /\.(test|spec)\.\w+$/.test(f) || testsRows.some((c) => rowFile(c) && (f === rowFile(c) || f.endsWith(`/${rowFile(c)}`)));
+const isTest = (f) => testRx.some((rx) => rx.test(f)) || testsRows.some((c) => rowFile(c) && (f === rowFile(c) || f.endsWith(`/${rowFile(c)}`)));
+const screenTouched = (r, c) => { if (screenPaths?.includes(`!${r}`)) return []; const diff = (git(trees[r], 'diff', '--name-only', c, 'HEAD') || '').split('\n').filter(Boolean).map((x) => `${r}/${x}`); return screenPaths?.some((p) => p.startsWith(`${r}/`)) ? diff.filter((x) => screenPaths.some((p) => x === p || x.startsWith(p.replace(/\/?$/, '/')))) : diff; };
 
 if (!Object.keys(trees).length) row('worktrees', false, 'STATE.md names no existing "Worktree <repo>: <path>"', 'the orchestrator');
 for (const r of Object.keys(trees)) {
   const dirty = git(trees[r], 'status', '--porcelain');
   row(`${r} clean`, dirty === '', dirty === null ? 'not a git worktree' : dirty ? `uncommitted: ${dirty.split('\n').length} paths` : `HEAD ${heads[r]?.slice(0, 12)}`, 'implement');
 }
-const judge = of('judge', d)[0];
-row('plan judged', !!judge && !!verdict(read(join(ev, judge))), judge ? `${judge}: ${verdict(read(join(ev, judge))) || 'no Verdict: line'}` : `no judge-${d}.md`, 'judge');
-const open = section(plan, 'Memos').split(/^### /m).slice(1).filter((m) => +(m.match(/^-[ \t]*\**Due:\**[ \t]*before delivery (\d+)/m) || [0, d])[1] <= d && !/^-[ \t]*\**Decided:\**[ \t]*(?!open\b)\S/im.test(m));
+// The plan judged at its current revision, by this delivery's judge or an earlier one (a later delivery on an
+// unchanged plan needs no new judge).
+const revision = (t) => (t.match(/revision[\s:*_]*r?(\d+)/i) || t.match(/\br(\d+)\b/) || [])[1];
+const judges = names.filter((f) => (f.match(exact.judge) || [99, 99])[1] <= d && exact.judge.test(f));
+const judge = judges.filter((f) => revision(read(join(ev, f))) === revision(plan)).at(-1);
+const judgeText = judge || judges.length ? read(join(ev, judge || judges.at(-1))) : '';
+row('plan judged', !!judge && !!verdict(judgeText), judge ? `${judge}: ${verdict(judgeText) || 'no Verdict: line'}, revision ${revision(plan)}` : judges.length ? `${judges.join(', ')} ${revision(judgeText) ? `judged revision ${revision(judgeText)}, the plan is ${revision(plan)}; after "plan wrong", move it aside and judge again` : 'names no Revision: line; the judge adds it'}` : `no judge-${d}.md`, 'judge');
+const open = section(plan, 'Memos').split(/^### /m).slice(1).filter((m) => +(m.match(/^-[ \t]*\**Due:\**[ \t]*before delivery (\d+)/m) || [0, d])[1] <= d && !/^-[ \t]*\**Decided:\**[ \t]*(?!(open|pending|undecided|tbd)\b)\S/im.test(m));
 if (open.length) row('memos decided', false, `open: ${open.map((m) => m.split(/[:\s]/)[0]).join(', ')}`, 'the person');
 
-// The last review: clean, or round 2 with no open [S<n>] finding (the rest goes to the handoff), or a round 3 that
-// read the Surface fix. It names each changed worktree's HEAD in its Commit: lines, or the same change on a moved base,
-// or an earlier commit whose diff since stays within the files its findings name plus tests, those rows green on HEAD.
+// The last review: clean; round 2 with no open [S<n>] finding (the rest goes to the handoff); or round 3, the narrow
+// review of an open [S<n>] fix or of a diff after review that links reported, whose findings all count as Surface.
+// Each changed worktree's HEAD is named in its Commit: lines, or the same change on a moved base, or a commit whose
+// diff since stays within the files its findings name plus tests. Past round 3, anything open holds the delivery.
+const HELD = 'none: held, reported in the handoff as not delivered';
 const reviews = of('review', d).sort((a, b) => +a.match(exact.review)[2] - +b.match(exact.review)[2]);
 const last = reviews.at(-1);
 if (!last) row('reviewed', false, `no review-${d}-<round>.md`, 'review');
 else {
-  const text = read(join(ev, last)), n = +last.match(exact.review)[2], v = verdict(text);
-  const openS = v === 'fix' ? [...new Set(findings(text).match(/\[(?:S\d+|surface)\]/gi) || [])] : [];
-  const ok = v === 'clean' || (v === 'fix' && n >= 2 && !openS.length);
-  // After review 3 an open Surface finding holds the delivery: it is reported in the handoff as not delivered, never offered to be dropped.
-  const next = openS.length ? (n < 2 ? 'implement, then review' : n === 2 ? `implement, then review-${d}-3 on ${openS.join(', ')}` : 'none: held, reported in the handoff as not delivered') : 'implement, then review';
-  row('review verdict', ok, `${last}: ${v || 'no Verdict: line'}${openS.length ? `; open Surface findings ${openS.join(', ')}` : ok && v === 'fix' ? ' (open findings go to the handoff)' : ''}`, v ? next : 'review');
+  const text = read(join(ev, last)), n = +last.match(exact.review)[2], st = reviewState(text), bs = blocks(text);
+  const openS = st === 'fix' ? (n >= 3 ? bs.map((b) => b.match(/F\d+/)[0]) : [...new Set(bs.flatMap((b) => b.match(/\[(?:S\d+|surface)\]/gi) || []))]) : [];
+  const ok = st === 'clean' || (st === 'fix' && n === 2 && !openS.length);
+  const next = st === 'broken' ? `the same reviewer rewrites ${last} (verdict and F<n> findings disagree or are missing; no new round)` : n < 2 ? 'implement, then review' : n === 2 ? `implement, then review-${d}-3 on ${openS.join(', ')}` : HELD;
+  row('review verdict', ok, `${last}: ${st}${openS.length ? `; open Surface findings ${openS.join(', ')}` : ok && st === 'fix' ? ' (open findings go to the handoff)' : ''}`, next);
   const commitLines = text.split('\n').filter((l) => /^[\s>*_-]*commit/i.test(l)).join('\n');
   const named = (t, r) => [...t.matchAll(new RegExp(`${r.replace(/[.]/g, '\\.')}@([0-9a-f]{7,40})`, 'g'))].map((m) => m[1]);
-  // Each finding starts with F<n> and its file:line; those files are where a fix after the review may go.
-  const files = findings(text).split('\n').filter((l) => /^[\s>*_#-]*F\d+\b/.test(l)).map((l) => (l.match(/([\w@.\/\[\]()+-]+\.\w+):\d+/) || [])[1]).filter(Boolean);
+  const files = filesOf(bs);
   for (const r of Object.keys(trees)) {
     if (bases[r] && heads[r]?.startsWith(bases[r])) continue;
     const shas = named(commitLines, r);
@@ -113,25 +133,21 @@ else {
     if (!shas.length) { row(`${r} reviewed`, false, `${last} has no Commit: line naming ${r}@<sha>`, 'review'); continue; }
     const diff = (git(trees[r], 'diff', '--name-only', shas.at(-1), 'HEAD') || '').split('\n').filter(Boolean);
     const outside = diff.filter((f) => !isTest(f) && !files.some((x) => f === x || f.endsWith(`/${x}`) || x.endsWith(`/${f}`) || x === `${r}/${f}`));
-    const affected = testsRows.filter((c) => diff.some((f) => rowFile(c) && (f === rowFile(c) || f.endsWith(`/${rowFile(c)}`))));
-    const red = affected.filter((c) => !proofs.some((p) => p.test === c[0] && !p.base && p.exit === 0 && onHead(p, r) && ranSomething(p)));
-    const anyGreen = proofs.some((p) => p.test && !p.base && p.exit === 0 && onHead(p, r) && ranSomething(p));
-    const why = outside.length ? `commits since ${shas.at(-1).slice(0, 12)} touch files no finding names: ${outside.slice(0, 3).join(', ')}` : red.length ? `rows not green on HEAD: ${red.map((c) => c[0]).join(', ')}` : !anyGreen ? 'no tests-row proof on HEAD' : '';
-    row(`${r} reviewed`, !why, why || `${last} names ${shas.at(-1).slice(0, 12)}; the diff since stays within its findings and tests, green on HEAD`, 'review');
+    row(`${r} reviewed`, !outside.length, outside.length ? `commits since ${shas.at(-1).slice(0, 12)} touch files no finding names: ${outside.slice(0, 3).join(', ')}` : `${last} names ${shas.at(-1).slice(0, 12)}; the diff since stays within its findings and tests`, n < 2 ? 'review' : n === 2 ? `review-${d}-3 (narrow: reads the diff since ${shas.at(-1).slice(0, 12)})` : HELD);
   }
 }
 const ignored = names.filter((f) => /^(judge|read|review)-/.test(f) && !Object.values(exact).some((x) => x.test(f)));
 if (ignored.length) rows.push({ link: 'ignored files', ok: true, detail: `not round files, not read: ${ignored.join(', ')}`, worker: '' });
 
-// Each tests row that fails before the change: the same command red on the base, green on HEAD's tree, and each
-// having run something.
+// Every tests row due by this delivery is green on HEAD's tree, having run something; a row that fails before the
+// change also went red on the base with the same command.
 for (const c of testsRows) {
-  if (!/^yes\b/i.test(c[4] || '')) continue;
   const mine = proofs.filter((p) => p.test === c[0] && ranSomething(p));
   const green = mine.filter((p) => !p.base && p.exit === 0 && Object.keys(trees).some((r) => onHead(p, r)));
+  const before = /^yes\b/i.test(c[4] || '');
   const red = mine.filter((p) => p.base && typeof p.exit === 'number' && p.exit !== 0 && green.some((g) => g.command === p.command && g.worktree === p.worktree));
   const lastLine = (red[0]?.log || '').trim().split('\n').at(-1)?.slice(0, 80);
-  row(`${c[0]} red then green`, red.length > 0 && green.length > 0, `${green.length ? "green on HEAD's tree" : "no passing proof on HEAD's tree"}; ${red.length ? `red on base, same command (last line: ${lastLine})` : 'no failing base run of the same command'}`, 'implement');
+  row(before ? `${c[0]} red then green` : `${c[0]} green`, green.length > 0 && (!before || red.length > 0), `${green.length ? "green on HEAD's tree" : "no passing proof on HEAD's tree"}${before ? `; ${red.length ? `red on base, same command (last line: ${lastLine})` : 'no failing base run of the same command'}` : ''}`, 'implement');
 }
 
 // checks ran for this delivery at these HEADs and passed (with --final, including those due after its steps).
@@ -151,21 +167,28 @@ for (const w of [...new Set((setting('checks_allow') || []).flatMap((a) => a.spl
 
 // A plan with "What people see": a reader's file, and a screenshot of each state at a commit whose screens are HEAD's.
 // A screenshot is any file whose name holds the state's name and a commit (7 to 40 hex characters).
+// A state's name matches a file name with its words joined by spaces, dashes or underscores; a file goes to the
+// longest state name it matches, so "empty" doesn't take "non-empty". "None" means nothing people see changes.
 const seen = section(plan, 'What people see').trim();
-if (seen) {
-  row('read', of('read', d).length > 0, of('read', d).join(', ') || `no read-${d}.md`, 'read');
+if (seen && !/^none\b/i.test(seen)) {
+  const readFile = of('read', d)[0];
+  row('read', !!readFile, readFile || `no read-${d}.md`, 'read');
+  if (readFile) for (const [r, c] of [...read(join(ev, readFile)).matchAll(/([\w.-]+)@([0-9a-f]{7,40})/g)].map((m) => [m[1], m[2]]).filter(([r]) => trees[r])) {
+    const t = heads[r].startsWith(c) ? [] : screenTouched(r, c);
+    if (t.length) rows.push({ link: `reader ${r}`, ok: true, detail: `reader read ${c.slice(0, 12)}; screens changed since in ${t.slice(0, 3).join(', ')} (in the handoff)`, worker: '' });
+  }
   const states = field(seen, 'States').split(',').map((s) => s.trim()).filter(Boolean);
   if (!states.length) row('states', false, 'What people see has no "States: <state>, <state>" line', 'plan');
+  const rx = (s) => new RegExp(`(^|[^\\p{L}\\p{N}])(?<!(?:^|[^\\p{L}])(?:non|not)[\\s_-])${s.split(/[\s_-]+/).map((w) => w.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')).join('[\\s_-]+')}(?=[^\\p{L}\\p{N}]|$)`, 'iu');
+  const owner = (f) => states.filter((s) => rx(s).test(basename(f))).sort((a, b) => b.length - a.length)[0];
   for (const s of states) {
-    const has = new RegExp(`(^|[^a-z0-9])${s.replace(/[^\w-]/g, '\\$&')}([^a-z0-9]|$)`, 'i');
     let why = `no screenshot whose name holds "${s}" and a commit`;
-    for (const f of names.filter((x) => has.test(basename(x)))) {
+    for (const f of names.filter((x) => owner(x) === s)) {
       for (const c of basename(f).match(/(?<![0-9a-f])[0-9a-f]{7,40}(?![0-9a-f])/gi) || []) {
         const r = Object.keys(trees).find((k) => git(trees[k], 'cat-file', '-e', `${c}^{commit}`) !== null);
         if (!r) continue;
         if (heads[r].startsWith(c.toLowerCase())) { why = ''; break; }
-        if (!screenPaths) { why = `${f} is not ${r} HEAD, and the definition names no screen_paths`; continue; }
-        const touched = (git(trees[r], 'diff', '--name-only', c, 'HEAD') || '').split('\n').filter(Boolean).map((x) => `${r}/${x}`).filter((x) => screenPaths.some((p) => x === p || x.startsWith(p.replace(/\/?$/, '/'))));
+        const touched = screenTouched(r, c);
         if (!touched.length) { why = ''; break; }
         why = `retake: ${c.slice(0, 12)}..HEAD touches ${touched.slice(0, 3).join(', ')}`;
       }
@@ -182,8 +205,8 @@ const equals = (l) => ((l.replace(/`[^`]*`/g, '').match(/\bequals\b([^;]*)/i) ||
 const key = (l) => { const m = l.match(LINE); return `${m[1]}|${(m[2] || '').trim().toLowerCase()}|${/^not touched\b/i.test(m[3]) ? 'not touched' : 'touched'}|${equals(l)}`; };
 const hash = createHash('sha256').update(surface.map(key).join('\n')).digest('hex').slice(0, 12);
 const noOracle = [...new Set(surface.map((l) => l.match(LINE)).filter((m) => !/^not touched\b/i.test(m[3])).map((m) => (m[2] || '').trim().toLowerCase()).filter((k) => !oracleKinds.includes(k)))];
-if (noOracle.length) rows.push({ link: 'oracles', ok: true, detail: `no oracle for ${noOracle.map((k) => k || '(no kind)').join(', ')}: no cold audit compares these, and the handoff says so`, worker: '' });
-if (field(plan, 'Risk') === 'high' || /\|\s*high\s*\|/i.test(section(plan, 'Risk'))) {
+if (noOracle.length) rows.push({ link: 'oracles', ok: true, detail: `no oracle for ${noOracle.map((k) => k || '(no kind)').join(', ')}: checked only by walk, as the handoff says`, worker: '' });
+if (field(plan, 'Risk') === 'high' || /\|\s*high\s*\|/i.test(section(plan, 'Risk')) || verdict(judgeText) === 'approval' || /^[\s*_-]*risk[\s*_]*:[\s*_]*high/im.test(judgeText)) {
   const a = field(state, 'Approval');
   const ok = /revision \d+/.test(a) && a.includes(`surface ${hash}`);
   row('approval', ok, ok ? a : `Approval "${a || 'none'}" does not hold a revision and surface ${hash}`, 'the person');
@@ -191,7 +214,7 @@ if (field(plan, 'Risk') === 'high' || /\|\s*high\s*\|/i.test(section(plan, 'Risk
 
 // Round counts: reported, never a stop.
 const r2 = read(join(ev, `review-${d}-2.md`));
-const cap = verdict(r2) === 'fix' && /\[(?:S\d+|surface)\]/i.test(findings(r2)) ? 3 : 2;
+const cap = (reviewState(r2) === 'fix' && /\[(?:S\d+|surface)\]/i.test(findings(r2))) || rows.some((r) => r.worker.startsWith(`review-${d}-3`)) || reviews.length === 3 ? 3 : 2;
 const counts = ['judge', 'read', 'review'].map((k) => `${k} ${of(k, d).length}/${k === 'review' ? cap : 1}`);
 const over = of('judge', d).length > 1 || of('read', d).length > 1 || reviews.length > cap;
 const broken = rows.filter((r) => !r.ok);
