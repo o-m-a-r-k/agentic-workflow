@@ -1,24 +1,25 @@
 # agentic-workflow
 
-You give it a ticket, or a group of tickets, and they get delivered. You see the plan. You are asked only to approve a high-risk plan or to make a product decision, and each decision comes with the options, what the market does, the industry standard and a recommendation.
+You give it a ticket, or a group of tickets, and they get delivered. You see the plan. You get one message per ticket: the product decisions, each with its options and a recommendation, and, for a high-risk change, the outcome and the money, writes and permissions it touches to approve.
 
-The plugin is text only: four skills (deliver, onboard, test, design) and the files they read. Agents do the work, and fresh agents check it against raw sources (code, git, logs, data, the running app). No scripts or hooks enforce anything. It works in Claude Code and in Codex.
+The plugin is four skills (deliver, onboard, test, design), the files they read, and six small Node scripts with no dependencies. Agents do the work and judge its meaning; fresh agents check it against raw sources (code, git, logs, data, the running app). The scripts count, match and compare: they check that a plan's citations resolve, count review rounds, record test runs, run the allow-listed checks and confirm every link before delivery. None of them decides what the work is, and no hook enforces anything. It works in Claude Code and in Codex.
 
 ## How it works
 
 Each ticket starts from its outcome: what is true for its users once it is delivered, and the most direct evidence of it. The orchestrator tracks how far the work is from that outcome and picks each next move by what shortens the distance; its type (hotfix, bug, enhancement, new feature) and size set which of these usual steps it gets, and how deep; every change is reviewed and verified:
 
-1. take the ticket: a folder and fresh worktrees;
-2. understand it, from several angles, side by side where the settings allow;
-3. plan it short, citing a source for every claim, and for a new screen show two or three directions as pictures;
-4. ground the plan: a fresh agent checks each claim;
-5. challenge it: assume the plan failed, and ask why;
-6. judge the risk: a high-risk plan waits for your approval;
-7. build;
-8. review, and for a change people will see, one fresh reader who has only the screenshots and their purpose; at most two fix rounds;
+1. take the ticket: a folder, fresh worktrees, and a first list of the money, writes and permissions it touches (its Surface);
+2. understand it, one pass per angle;
+3. plan it short: decisions with sources, a test table, the Surface with a runnable check per line;
+4. one fresh judge answers eight questions about the plan, once;
+5. one message to you: product decisions, and approval of a high-risk outcome and Surface;
+6. build, each test shown red before the change and green after;
+7. for a screen, one fresh reader who has only the screenshots and their purpose;
+8. review against eight questions, at most two rounds;
 9. verify in the target environment;
-10. deliver, after a fresh agent checks the whole chain;
-11. clean up.
+10. deliver, once a script confirms every link from proof to commit;
+11. a cold audit of the Surface where users meet it;
+12. record and clean up.
 
 The full method is [`skills/deliver/WORKFLOW.md`](skills/deliver/WORKFLOW.md). It takes a few minutes to read.
 
@@ -38,7 +39,7 @@ codex plugin marketplace add o-m-a-r-k/agentic-workflow
 codex plugin add agentic-workflow@agentic-workflow
 ```
 
-Claude Code sets each worker's effort from version 2.1.292, and reads `AGENTS.md` without a `CLAUDE.md` from 2.1.277. Earlier versions still work; workers then run at the session's effort.
+Claude Code sets each worker's effort from version 2.1.292, and reads `AGENTS.md` without a `CLAUDE.md` from 2.1.277. Earlier versions still work; workers then run at the session's effort. The scripts need Node.js 20 or later on the machine the agents run on.
 
 ## Use
 
@@ -53,9 +54,10 @@ Four skills: `deliver`, `onboard`, `test`, which planning, building and review f
 |---|---|
 | The project's rules | each repo's `AGENTS.md` |
 | The project definition | `.agents/project.md` in the folder that holds the project's repos, when that folder is versioned (found from the current directory upward, or in a sibling folder); otherwise `~/.agents/projects/<project>.md`; machine-only facts in `~/.agents/projects/<project>.local.md` |
-| A ticket's state | `<work>/<ticket>/`, where `work` is set in the project definition: `PLAN.md`, `CHECKS.json`, `PROGRESS.md`, `evidence/` and the worktrees. It is never committed; inside a repo, it is excluded through `.git/info/exclude`. |
+| A ticket's state | `<work>/<ticket>/`, where `work` is set in the project definition: `PLAN.md`, `CHECKS.json`, `STATE.md`, `evidence/` and the worktrees. It is never committed; inside a repo, it is excluded through `.git/info/exclude`. |
 | Your settings | `~/.agents/workflow.yaml`: role models over [`defaults.yaml`](skills/deliver/defaults.yaml), how many agents and heavy runs at once, context size, and named profiles such as one for a local model (see the deliver skill's Settings) |
-| Finished tickets | `~/.agents/records.jsonl`, one line each, where `~/.agents` already exists |
+| Finished tickets | `~/.agents/records.jsonl`, one line each, written by the `record` script, where `~/.agents` already exists |
+| The scripts | `skills/deliver/scripts/`, run as `node <skill folder>/scripts/<name>.mjs`; tests in `test/`, run with `node --test test/*.test.mjs` |
 
 ## Coming from 0.x
 
