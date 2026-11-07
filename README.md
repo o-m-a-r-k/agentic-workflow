@@ -1,6 +1,6 @@
 # agentic-workflow
 
-You give it a ticket, or a group of tickets, and they get delivered. You see the plan. You get one message per ticket: the product decisions, each with its options and a recommendation, and, for a high-risk change, the outcome and the money, writes and permissions it touches to approve.
+You give it a ticket, or a group of tickets, and they get delivered. You see the plan. You get one message per ticket: the product decisions, each with its options and a recommendation, and, for a high-risk change, the outcome and the facts people act on that it shows or writes, to approve.
 
 The plugin is four skills (deliver, onboard, test, design), the files they read, and six small Node scripts with no dependencies. Agents do the work and judge its meaning; fresh agents check it against raw sources (code, git, logs, data, the running app). The scripts count, match and compare: they check that a plan's citations resolve, count review rounds, record test runs, run the allow-listed checks and confirm every link before delivery. None of them decides what the work is, and no hook enforces anything. It works in Claude Code and in Codex.
 
@@ -8,7 +8,7 @@ The plugin is four skills (deliver, onboard, test, design), the files they read,
 
 Each ticket starts from its outcome: what is true for its users once it is delivered, and the most direct evidence of it. The orchestrator tracks how far the work is from that outcome and picks each next move by what shortens the distance; its type (hotfix, bug, enhancement, new feature) and size set which of these usual steps it gets, and how deep; every change is reviewed and verified:
 
-1. take the ticket: a folder, fresh worktrees, and a first list of the money, writes and permissions it touches (its Surface);
+1. take the ticket: a folder, fresh worktrees, and a first list of the facts its users act on that it shows or writes, such as amounts, appointment times or who may do what (its Surface);
 2. understand it, one pass per angle;
 3. plan it short: decisions with sources, a test table, the Surface with a runnable check per line;
 4. one fresh judge answers eight questions about the plan, once;

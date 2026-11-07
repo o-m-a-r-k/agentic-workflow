@@ -30,11 +30,14 @@ statuses:
   delivered: { staging: Ready for review, production: Released }
 ticket_type: session              # or where else it comes from
 roles: {}                         # optional: <harness>.<role>: { model, effort }
-checks_allow: [npm test, npx vitest run, ./tools/read-db.sh, node ./tools/money-check.mjs, node ./tools/permission-matrix.mjs]
+checks_allow: [npm test, npx vitest run, ./tools/read-db.sh, node ./tools/fact-check.mjs, node ./tools/access-matrix.mjs]
 nothing_ran: [No tests found, /^0 passing/m]
 screen_paths: [web/src/pages, web/src/components, web/messages]
-money_oracle: node ./tools/money-check.mjs --stack {worktree} <spec.json>
-permission_oracle: node ./tools/permission-matrix.mjs --stack {worktree} <spec.json>
+surface_kinds: [due-date, fee, availability, access]
+oracles:
+  due-date: node ./tools/fact-check.mjs --kind due-date --stack {worktree}
+  fee: node ./tools/fact-check.mjs --kind fee --stack {worktree}
+  access: node ./tools/access-matrix.mjs --stack {worktree}
 ---
 ```
 
@@ -42,18 +45,20 @@ This is the repo-held form: paths are relative to the folder that holds `.agents
 
 The deliver skill's scripts read these front-matter keys, each a list as `[a, b]` or as `- a` lines:
 
-- `checks_allow`: the command prefixes a check's `cmd:` may start with, word for word (`npm test` allows `npm test -- renew`, never `npm exec`); `checks` runs nothing else, and never through a shell. A word starting `./`, `../` or `/` is a file from the definition's folder: that command runs there, so an oracle is never taken from the branch under test, and `links` stops a delivery whose branch changed it. Every other command runs inside the check's worktree. `{worktree}` and `{ticket}` in a command become those folders' paths.
-- `nothing_ran`: what each runner prints when it ran no test (plain text, or `/regex/flags`). A run whose output matches one fails, whatever its exit code, in `checks` and in the test rows `links` reads.
-- `screen_paths`: `<repo>/<path>` prefixes of the screen source and locale files. A screenshot taken at an earlier commit stands while the diff since touches none of them.
+- `checks_allow`: the command prefixes a check's `cmd:` may start with, word for word (`npm test` allows `npm test -- renew`, never `npm exec`); nothing else runs, never through a shell. A word starting `./`, `../` or `/` is a file in the definition's folder and runs from there, never from the branch under test; other commands run in the check's worktree. `{worktree}` and `{ticket}` become those folders' paths.
+- `nothing_ran`: what each runner prints when it ran no test (text or `/regex/flags`); such a run fails whatever its exit code.
+- `screen_paths`: `<repo>/<path>` prefixes of the screen source and locale files; a screenshot from an earlier commit stands while the diff since touches none.
+- `surface_kinds`: the kinds of fact users act on that must never be wrong. A Surface line's kind is one of these or of `oracles`; `plan-shape` lists those a Surface leaves out, for the judge.
+- `oracles`: a map, one indented `<kind>: <command>` line per kind that has one, each command also on `checks_allow`. A Surface line of that kind must have a check that runs it, and the cold audit runs for it; a kind with none is stated in the handoff.
 
-`money_oracle` and `permission_oracle` name the oracles (one line each, also on `checks_allow`); where neither is set, no cold audit runs. A screenshot is any file under `evidence/` whose name holds the state's name from the plan's `States:` line and the commit it shows (7 to 40 hex characters), so the project's own naming works, for example `limit-reached-390-en-light-<sha>.png`.
+A screenshot is any file under `evidence/` whose name holds the state's name from the plan's `States:` line and the commit it shows (7 to 40 hex characters), such as `limit-reached-390-en-light-<sha>.png`.
 
 Then a short section per thing a delivering agent does:
 
 - **Set up** a fresh worktree, including what a worker starting there wouldn't find.
 - **Screens**, for a project with any: its design system and where it lives, its best reference screen for each kind of surface, its languages, themes and widths, and the cheapest way to render a picture from its real components and the product's own rules, including how a screen's render calls rules that live in another repository before their endpoint exists.
 - **Prove** a change: the checks available, what each one covers, how long it takes, and which are heavy, the memory each peaks at and the margin to keep, where free memory is measured (the machine, and the container VM and its size where runs live there), how a starting run makes itself visible to other sessions before it takes memory, and how to see the heavy runs any session has going. A ticket picks the ones that cover what it alters and its reach, and runs a broad suite only when that reach justifies it, unless CI already does.
-- **Check** money and permissions: the project's oracles, each a read-only command on `checks_allow` that plans call from `CHECKS.json` with an `expect`. A workable form: `<oracle> --stack <worktree> <spec.json>`, the spec naming the states and figures or routes to compare, printing every disagreement, and exiting 0 when all agree, 1 on a disagreement or a value it couldn't read, 2 on a bad spec. A money oracle prints every disagreement between a figure the screen shows in a given state, the stored record (through the read-only query command) and the payment provider's test-mode record. A permission matrix runs each touched route against each role and tenant and prints every outcome that differs from the expected allow, deny or not-found, from the rules the project's `AGENTS.md` states. Name how each is run, what it covers and how long it takes; where one doesn't exist yet, writing it is the person's decision, with a recommendation.
+- **Check** the facts users act on. Ask the person which facts their users act on that must never be wrong (an amount owed, an appointment time, a slot's availability, a stock level, who may see or do what) and how each is read from its record (the stored state, a provider's record, the rules the `AGENTS.md` states). Those are `surface_kinds`. An oracle for a kind compares what the product shows or writes in a given state with that record, read apart from the code that shows it; a workable form is `<command> --stack <worktree> <spec.json>`, the spec naming the states and facts to compare, printing every disagreement, and exiting 0 when all agree, 1 on a disagreement or a value it couldn't read, 2 on a bad spec. Name how each runs, what it covers and how long it takes; where a kind has none yet, writing one is the person's decision, with a recommendation.
 - **Reach** the environments, test accounts (by reference, never secrets) and read-only data; how an agent gets the app running to walk through as its users would, and the browser it drives it with; and how everything a ticket starts, runs included, is found and removed afterwards.
 - **Deliver** to each target, step by step to its delivered status: how each is taken, confirmed and undone, and who may take it without asking, quoted.
 - **Track** tickets: read, file, move, comment, attach.

@@ -15,8 +15,8 @@ What is true in the users' world once this is delivered (the ticket as source), 
 
 ## Surface
 
-- S1: <money figure shown, write or permission outcome>: <where users meet it>; equals <its source of truth>; paths `src/loans/renew.ts:42`
-- S2: not touched: <why, with its source>
+- S1 (<kind>): <fact shown or written>: <where users meet it>; equals <its record>; paths `src/loans/renew.ts:42`
+- S2 (<kind>): not touched: <why, with its source>
 
 ## Risk
 

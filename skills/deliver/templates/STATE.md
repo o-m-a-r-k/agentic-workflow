@@ -24,9 +24,9 @@ Last return: <lane>: <role> <status>, <time>
 
 ## Surface
 
-- S1: <money figure shown, write or permission outcome>: <where users meet it>; equals <the stored state or provider record it must match>
+- S1 (<kind>): <fact shown or written>: <where users meet it>; equals <its record: the stored state or the provider's>
 
 ## Outside the ticket
 
-- [surface] <wrong money, data or permission reachable now>, <source>: hotfix <ticket> opened <time>, told <time>; starts after delivery <n> | now | vetoed <time> | tracker refused: <why>
+- [surface] <a wrong fact people act on, reachable now>, <source>: hotfix <ticket> opened <time>, told <time>; starts after delivery <n> | now | vetoed <time> | tracker refused: <why>
 - <other extra>, <source>, <who meets it, what fixing takes>: file <link> | fix now | fix after delivery | in the handoff
