@@ -28,5 +28,5 @@ Last return: <lane>: <role> <status>, <time>
 
 ## Outside the ticket
 
-- [surface] <wrong money, data or permission reachable now>, <source>: hotfix <ticket> started <time> | vetoed <time>
+- [surface] <wrong money, data or permission reachable now>, <source>: hotfix <ticket> opened <time>, told <time>; starts after delivery <n> | now | vetoed <time> | tracker refused: <why>
 - <other extra>, <source>, <who meets it, what fixing takes>: file <link> | fix now | fix after delivery | in the handoff

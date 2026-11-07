@@ -49,7 +49,7 @@ Purpose: who it is for, what they must come away knowing or doing.
 Questions: their five to eight questions, in the order they bring them.
 States: <state>, <state>
 
-Screenshots are named `<state>@<commit>`; a state is a short slug.
+A state is a short name each of its screenshots carries, with the commit it shows.
 Follows: the product's best existing screen of the same kind.
 
 Leave this section out when nothing people see changes.
@@ -58,6 +58,7 @@ Leave this section out when nothing people see changes.
 
 ### M1: <product question>
 
+- Due: before delivery <n>
 - Options: each with what the users or the business get, and its cost.
 - Recommendation: <option>, because <why>.
 - Decided: open | <the person's answer, time>

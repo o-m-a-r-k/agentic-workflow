@@ -8,6 +8,6 @@
     "expect": "<text the output holds, or /regex/; for a walk, what must be seen>",
     "due": "before delivery <n> | after <the delivery step that reaches its environment> in delivery <n>",
     "passes": false,
-    "evidence": null
+    "evidence": "null until verified; then the path of a file in evidence/ (the run's log, or for a walk a file naming the commit with a seen: line)"
   }
 ]

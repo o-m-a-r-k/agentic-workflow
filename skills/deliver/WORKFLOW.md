@@ -15,9 +15,9 @@ Everything else in this method serves this section.
 
 ## The Surface
 
-The Surface lists, one line each, every money figure shown, every write and every permission outcome the change touches: where its users meet it and the stored state or provider record it must equal. It is drafted when the ticket is taken (`STATE.md`) and finalised in the plan; a draft line the plan drops is marked "not touched" with its source. Each line has a check in `CHECKS.json` with an `expect`, usually one of the project's oracles (a money oracle comparing the shown figures with the stored state and the provider; a permission matrix of route, role and tenant against the expected outcome). The Surface is what the person approves on a high-risk ticket, what review item 4 and verification prove, and what the cold audit compares after delivery.
+The Surface lists, one line each, every money figure shown, every write and every permission outcome the change touches: where its users meet it and the stored state or provider record it must equal. It is drafted when the ticket is taken (`STATE.md`), possibly empty, and finalised in the plan; a draft line the plan drops is marked "not touched" with its source, and the plan judge judges that claim like any other. Each line has a check in `CHECKS.json` whose `expect` would fail on the wrong state, with a truth read apart from the code that shows the figure: usually one of the project's oracles (a money oracle comparing the shown figures with the stored state and the provider; a permission matrix of route, role and tenant against the expected outcome), run from the project definition's folder, never from the branch under test. The Surface is what the person approves on a high-risk ticket, what review item 4 and verification prove, and what the cold audit compares after delivery.
 
-Approval is asked again only when a Surface line changes: `plan-shape` prints the Surface's hash, the approval records it, and `links` compares them. Nothing on the Surface, and nothing the outcome names, is ever dropped, limited, cut or delivered as a stated limit; no verdict or question form in this method offers that.
+Approval is asked again only when a Surface line is added or removed, turns touched or not touched, or changes what it must equal; wording is not a change. `plan-shape` prints the hash of those, the approval records it, and `links` compares them. Nothing on the Surface, and nothing the outcome names, is ever dropped, limited, cut or delivered as a stated limit; no verdict or question form in this method offers that.
 
 ## How the work is trusted
 
@@ -25,7 +25,7 @@ Approval is asked again only when a Surface line changes: `plan-shape` prints th
   - `plan-shape`: the plan's fields, citations, decisions, tests rows, Surface and checks are in shape, every `path:line` resolves at the commits it names;
   - `rounds`: how many judge, read and review files each delivery has, and whether one more may start;
   - `proof`: runs a command in a worktree and records its tree, exit and output in `evidence/proof.jsonl`;
-  - `checks`: runs the checks whose command is on the project's allow-list and compares their output with `expect`; the walks need evidence naming HEAD;
+  - `checks`: runs the checks whose command starts with an entry of the project's allow-list, never through a shell, and compares their output with `expect`; a run that executed nothing fails; a walk needs an evidence file naming the commit and what was seen;
   - `links`: whether each link between the proof and what would be delivered holds, and which worker a broken one needs;
   - `record`: the ticket's record line, from its files.
 - **Agents check agents.** A fresh agent checks the work against raw sources: code, git, logs, data, the running app; confidence never comes from the author's own account. A judge answers each rubric item yes or no with the evidence that decided it; an item without evidence is no. A judge runs once per version of its object, on a different model or effort than the author where the harness allows, and never again on the same version.
@@ -40,7 +40,7 @@ Approval is asked again only when a Surface line changes: `plan-shape` prints th
 
 The outcome as its users meet it, whatever they can't get it without and whatever the change caused or broke are the ticket's, fixed in it at their root. Everything else found on the way is extra, recorded under "Outside the ticket" in `STATE.md`:
 
-- **A Surface extra,** wrong money, data or permissions reachable by users now, opens a hotfix at once: the orchestrator starts it as its own ticket and tells the person, who can veto it.
+- **A Surface extra,** wrong money, data or permissions reachable by users now, opens a hotfix ticket at once and the person is told at once; it starts after the current delivery unless they say now, and they can veto it. Where the tracker refuses the ticket, it is written in `STATE.md` and the handoff.
 - **Every other extra** goes into the handoff, the Surface's kinds first, each in plain words (what is wrong, who meets it, what fixing it would take) with a recommendation to file it, fix it now or after this delivery.
 
 The project's `AGENTS.md` files and the person's own instructions add to this method; where they ask for more, they win. They never remove a step: authority to deliver doesn't approve a high-risk plan. Only the person, of their own accord in the session, can waive a step, for the ticket they name; never ask them to.
@@ -54,7 +54,7 @@ The type is one of four. The person names it in the session, unless the project 
 - **Enhancement:** behaviour that exists changes as asked, and everything that relies on it keeps working.
 - **New feature:** its users can do the new thing, correctly, in every real state.
 
-Every fresh agent pays to read the same code again, so a small ticket uses few: a backend bug or hotfix is investigated and planned by one worker and has no reader, six agents in all. Whatever the size, the one who checks is never the one who wrote, every plan is judged and every change is reviewed and verified.
+Every fresh agent pays to read the same code again, so a small ticket uses few: a backend bug or hotfix is investigated and planned by one worker and has no reader, and the worker that delivers it records and cleans: six agents with one review. Whatever the size, the one who checks is never the one who wrote, every plan is judged and every change is reviewed and verified.
 
 ## The steps
 
@@ -72,17 +72,17 @@ Every fresh agent pays to read the same code again, so a small ticket uses few: 
 
 7. **Read** (screens only). One fresh reader per delivery, on the built screenshots (the orchestrator runs `rounds` for it, since it sees nothing else), answers the purpose's five to eight questions for each pictured state: yes or no, where on the screen, from an element or only from a sentence (`roles/read.md`). Its "no"s go to review.
 
-8. **Review.** A fresh judge reads the whole change against the review rubric (`roles/review.md`), running the tests, the oracles and the screen; at most two rounds per delivery, `rounds` first each time, one implementer between them, and round 2 reads the fixes. After round 2, Surface items and anything the outcome names that are still open are fixed by one implementer with a test and proven by `proof` and `links`; everything else goes into the handoff as findings. There is no third review and no question to the person.
+8. **Review.** A fresh judge reads the whole change against the review rubric (`roles/review.md`), running the tests, the oracles and the screen; at most two rounds per delivery, `rounds` first each time, one implementer between them, and round 2 reads the fixes. A finding on a Surface line carries `[S<n>]`. After round 2, anything the outcome names that is still open is fixed by one implementer with a test; an open `[S<n>]` finding's fix then gets a third, narrow review that reads only that fix, so a money fix never ships unjudged. Everything else goes into the handoff as findings, with no question to the person. A commit after the last review stands only if it touches just the files that review's findings name, plus tests, with those rows green on HEAD.
 
 9. **Verify** on the final tree, in the target environment as the project defines it: each check as written, `checks` for the runnable ones, the walks through the product's real paths, screenshots of the named states, and the tests the reach covers (a complete suite only where the reach can't be named, once per delivery). Every check due is true with an evidence file naming HEAD. A check that fails on that commit is this ticket's to fix, unless it fails the same way on the base and the outcome doesn't need it, which is an extra.
 
 10. **Deliver.** `links` first: a broken link stops the delivery and its table names the worker to start. Then a fresh delivery worker brings the branch up to date where the project's way needs it, takes each irreversible step (merge, deploy, ticket move) after `links` holds at that commit, confirms each from its output, has the checks due after a step verified (`checks --after`) before the last one (`links --final`), and looks for the outcome where it lives. The handoff opens with the outcome and the evidence it is now true, pastes the `links` table, carries the screenshots read back from the tracker, and lists the extras.
 
-11. **Cold audit.** For every ticket with a non-empty Surface, once the delivery is where its users meet it, one fresh agent compares every figure, action and permission outcome on the Surface with the stored records and the running stack, through the oracles (`roles/audit.md`). A confirmed wrong-money or permission finding opens a hotfix at once.
+11. **Cold audit.** Where the Surface draft had any line and the project definition names an oracle, once the last delivery is where its users meet it, one fresh agent compares every figure, action and permission outcome on the Surface with the stored records and the running stack, through the oracles (`roles/audit.md`). A confirmed wrong-money or permission finding opens a hotfix as Scope says.
 
-12. **Record and clean,** after the last delivery: the delivery worker writes `evidence/missed.md`, runs `record`, and removes the worktrees, merged branches, what `STATE.md` lists as left behind, what the project's way of finding leftovers shows, and last the ticket folder, each confirmed from its output.
+12. **Record and clean,** after the last delivery and its audit: the delivery worker (the one that delivered, where no audit runs) writes `evidence/missed.md`, runs `record`, and removes the worktrees, merged branches, what `STATE.md` lists as left behind, what the project's way of finding leftovers shows, and last the ticket folder, each confirmed from its output.
 
-Rounds per delivery: one judge, one reader, two reviews, counted by `rounds` from the evidence file names. A judge past its cap refuses itself; an overrun is reported in the `links` table, the handoff and the record.
+Rounds per delivery: one judge, one reader, two reviews and the narrow third, counted by `rounds` from the exact evidence file names (`judge-<n>.md`, `read-<n>.md`, `review-<n>-<round>.md`). A judge past its cap refuses itself; an overrun is reported in the `links` table, the handoff and the record.
 
 ## Several tickets
 
