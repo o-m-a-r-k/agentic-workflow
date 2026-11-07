@@ -3,14 +3,18 @@
 // Usage: node checks.mjs <ticket-folder> --delivery <n> [--after] --definition <project definition> [--definition <its .local.md>]
 // A check is due when its due is "before delivery <n>", a Surface check also when due before an earlier one, and with
 // --after (run once the delivery's steps are taken) also when due "after <step> in delivery <n>".
-//   verify "cmd: <command>": run without a shell, in the worktree named by "in" (default: the first in STATE.md), only
-//     when its words start with an entry of the definition's checks_allow ("npm test" allows "npm test -- renew", not
-//     "npm exec"); it passes when it exits 0 and its output holds expect
-//     (or matches it, when expect is written /regex/flags).
-//   verify "walk: <steps>": passes when passes is true and its evidence file exists and names that worktree's HEAD.
-// Writes evidence/checks.json. Exit 0 when every due check passes, 1 otherwise.
+//   verify "cmd: <command>": run without a shell, only when its words start with an entry of the definition's
+//     checks_allow ("npm test" allows "npm test -- renew", not "npm exec"). An entry with a word starting ./ ../ or /
+//     names a file from the definition's folder (an oracle) and runs from there, never from the branch under test; any
+//     other runs in the worktree named by
+//     "in" (default: the first in STATE.md). {worktree} and {ticket} in the command become those folders' paths.
+//     It passes when it exits 0, its output holds expect (or matches it, written /regex/flags), and its output matches
+//     none of the definition's nothing_ran patterns (a runner's "no tests found").
+//   verify "walk: <steps>": passes when passes is true and its evidence file names that worktree's HEAD (or the same
+//     change on a moved base) and holds a "seen:" line.
+// Writes evidence/checks.json (one line per check) and evidence/checks/<id>.log. Exit 0 when every due check passes.
 import { readFileSync, existsSync, writeFileSync, mkdirSync, realpathSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join, resolve, dirname, basename } from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 
 const args = process.argv.slice(2);
@@ -19,12 +23,12 @@ const vals = (k) => args.flatMap((a, i) => (a === k ? [args[i + 1]] : []));
 const delivery = +vals('--delivery')[0];
 const after = args.includes('--after');
 if (!delivery) {
-  console.error('usage: node checks.mjs <ticket-folder> --delivery <n> --definition <file> [--definition <file>]');
+  console.error('usage: node checks.mjs <ticket-folder> --delivery <n> [--after] --definition <file> [--definition <file>]');
   process.exit(2);
 }
 const read = (p) => (existsSync(p) ? readFileSync(p, 'utf8') : '');
 
-// checks_allow from the definition's front matter, as [a, b] or a block list; the first definition that sets it wins.
+// A front-matter list, as [a, b] or a block list; the first definition that sets it wins.
 function list(text, key) {
   const fm = (text.match(/^---\n([\s\S]*?)\n---/) || [])[1] || '';
   const m = fm.match(new RegExp(`^${key}:[ \\t]*(.*)$((?:\\n[ \\t]+- .*)*)`, 'm'));
@@ -33,8 +37,11 @@ function list(text, key) {
   const items = v.startsWith('[') ? v.slice(1, v.lastIndexOf(']')).split(',') : m[2].split('\n').map((l) => l.replace(/^\s*-\s*/, ''));
   return items.map((s) => s.replace(/\s+#.*$/, '').trim().replace(/^['"]|['"]$/g, '')).filter(Boolean);
 }
-const allow = vals('--definition').map((p) => list(read(resolve(p)), 'checks_allow')).find(Boolean) || [];
-
+const defs = vals('--definition').map((p) => resolve(p));
+const setting = (key) => defs.map((p) => list(read(p), key)).find(Boolean) || [];
+const allow = setting('checks_allow');
+const nothingRan = setting('nothing_ran');
+const defDir = defs[0] ? (basename(dirname(defs[0])) === '.agents' ? dirname(dirname(defs[0])) : dirname(defs[0])) : dir;
 // A command split like a shell would, quotes only; anything that needs a shell is refused.
 function split(s) {
   const out = [];
@@ -52,12 +59,24 @@ function split(s) {
 }
 
 const state = read(join(dir, 'STATE.md'));
-const trees = {};
-for (const m of state.matchAll(/^Worktree ([\w.-]+):[ \t]*(\S+)/gm)) if (existsSync(resolve(dir, m[2]))) trees[m[1]] = realpathSync(resolve(dir, m[2]));
-const heads = {};
-for (const [r, p] of Object.entries(trees)) {
-  try { heads[r] = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: p, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { heads[r] = null; }
+const git = (cwd, ...a) => {
+  try { return execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 1 << 28 }).trim(); } catch { return null; }
+};
+const trees = {}, baseRef = {}, heads = {};
+for (const m of state.matchAll(/^Worktree ([\w.-]+):[ \t]*(\S+)(?:.*?\bfrom (\S+))?/gm)) {
+  if (!existsSync(resolve(dir, m[2]))) continue;
+  const p = (trees[m[1]] = realpathSync(resolve(dir, m[2])));
+  heads[m[1]] = git(p, 'rev-parse', 'HEAD');
+  baseRef[m[1]] = m[3] ? [`origin/${m[3]}`, m[3]].find((b) => git(p, 'rev-parse', '--verify', '-q', b)) : null;
 }
+// The same change on a moved base: the diff from where each commit meets the base is the same patch.
+const patch = (r, a, b) => { const t = git(trees[r], 'diff', a, b); try { return t ? execFileSync('git', ['patch-id', '--stable'], { cwd: trees[r], input: t + '\n', encoding: 'utf8' }).split(' ')[0] : ''; } catch { return ''; } };
+const sameChange = (r, c) => {
+  if (heads[r]?.startsWith(c)) return true;
+  if (!baseRef[r] || git(trees[r], 'cat-file', '-e', `${c}^{commit}`) === null) return false;
+  const p1 = patch(r, git(trees[r], 'merge-base', c, baseRef[r]), c);
+  return !!p1 && p1 === patch(r, git(trees[r], 'merge-base', 'HEAD', baseRef[r]), 'HEAD');
+};
 let checks;
 try {
   checks = JSON.parse(read(join(dir, 'CHECKS.json')));
@@ -73,6 +92,8 @@ const matches = (out, expect) => {
   const rx = String(expect).match(/^\/(.*)\/([a-z]*)$/s);
   return rx ? new RegExp(rx[1], rx[2]).test(out) : out.includes(String(expect).trim());
 };
+const trivial = (expect) => { try { return !String(expect ?? '').trim() || ['', 'x', 'ok'].some((o) => matches(o, expect)); } catch { return true; } };
+mkdirSync(join(dir, 'evidence', 'checks'), { recursive: true });
 
 const results = [];
 for (const c of checks) {
@@ -85,28 +106,37 @@ for (const c of checks) {
     r.command = c.verify.slice(4).trim();
     if (!argv || !argv.length) Object.assign(r, { ok: false, reason: 'not a plain command: no shell operators, pipes or variables' });
     else if (!allow.some((a) => a.split(/\s+/).every((w, i) => argv[i] === w))) Object.assign(r, { ok: false, reason: `"${argv.slice(0, 2).join(' ')}" does not start with an entry of checks_allow; it is a walk` });
+    else if (trivial(c.expect)) Object.assign(r, { ok: false, reason: "expect is empty or matches anything, so the check can't fail" });
     else {
-      const run = spawnSync(argv[0], argv.slice(1), { cwd: trees[repo], encoding: 'utf8', maxBuffer: 1 << 28, timeout: 3600000 });
+      const entry = allow.find((a) => a.split(/\s+/).every((w, i) => argv[i] === w));
+      const own = entry.split(/\s+/).filter((w) => /^(\.{1,2})?\//.test(w));
+      const cwd = own.length ? defDir : trees[repo];
+      if (own.some((w) => !existsSync(resolve(defDir, w)))) { results.push(Object.assign(r, { ok: false, reason: `${own.join(' ')} is not in the definition's folder ${defDir}` })); continue; }
+      const sub = argv.map((a) => a.replaceAll('{worktree}', trees[repo]).replaceAll('{ticket}', dir));
+      const run = spawnSync(sub[0], sub.slice(1), { cwd, encoding: 'utf8', maxBuffer: 1 << 28, timeout: 3600000, env: { ...process.env, CHECK_WORKTREE: trees[repo], CHECK_TICKET: dir } });
       const out = `${run.stdout || ''}${run.stderr || ''}${run.error ? run.error.message : ''}`;
-      const ok = run.status === 0 && matches(out, c.expect ?? '');
-      Object.assign(r, { ok, exit: run.status, head: heads[repo], output: out.replace(/\n$/, '').split('\n').slice(-20).join('\n') });
-      if (!ok) r.reason = run.error ? `did not run: ${run.error.message}` : run.status !== 0 ? `exit ${run.status ?? run.signal}` : `output does not hold expect "${c.expect}"`;
+      const empty = nothingRan.find((p) => matches(out, p));
+      const ok = run.status === 0 && matches(out, c.expect) && !empty;
+      writeFileSync(join(dir, 'evidence', 'checks', `${c.id}.log`), `$ ${sub.join(' ')}\n(in ${cwd}, ${repo} HEAD ${heads[repo]})\n${out}\nexit ${run.status ?? run.signal}\n`);
+      Object.assign(r, { ok, exit: run.status, head: heads[repo], log: `evidence/checks/${c.id}.log` });
+      if (!ok) r.reason = run.error ? `did not run: ${run.error.message}` : run.status !== 0 ? `exit ${run.status ?? run.signal}` : empty ? `ran nothing ("${empty}")` : `output does not hold expect "${c.expect}"`;
     }
   } else {
-    const head7 = (heads[repo] || '').slice(0, 7);
-    const ev = c.evidence ? read(join(dir, c.evidence)) : '';
+    const ev = c.evidence && !/\s/.test(c.evidence) ? read(join(dir, c.evidence)) : '';
+    const named = (ev.match(/\b[0-9a-f]{7,40}\b/g) || []).find((h) => sameChange(repo, h));
     if (c.passes !== true) Object.assign(r, { ok: false, reason: 'passes is not true' });
-    else if (!ev) Object.assign(r, { ok: false, reason: `evidence file ${c.evidence || '(none)'} is missing` });
-    else if (!head7 || !ev.includes(head7)) Object.assign(r, { ok: false, reason: `evidence does not name ${repo} HEAD ${head7}` });
+    else if (!ev) Object.assign(r, { ok: false, reason: `evidence "${c.evidence || ''}" is not a file in the ticket folder` });
+    else if (!named) Object.assign(r, { ok: false, reason: `evidence names neither ${repo} HEAD ${heads[repo]?.slice(0, 12)} nor the same change on an earlier base` });
+    else if (!/^\W*seen:/im.test(ev)) Object.assign(r, { ok: false, reason: 'evidence has no "seen:" line saying what was seen' });
     else Object.assign(r, { ok: true, head: heads[repo] });
   }
   results.push(r);
 }
 
 const ok = results.every((r) => r.ok);
-mkdirSync(join(dir, 'evidence'), { recursive: true });
-writeFileSync(join(dir, 'evidence', 'checks.json'), JSON.stringify({ delivery, after, ok, heads, results }, null, 2) + '\n');
+for (const r of results) r.line = `${r.id}${r.surface.length ? ` [${r.surface.join(', ')}]` : ''}: ${r.ok ? 'pass' : `fail: ${r.reason}`}`;
+writeFileSync(join(dir, 'evidence', 'checks.json'), JSON.stringify({ delivery, after, ok, heads, results: results.map(({ id, ok, line, log }) => ({ id, ok, line, log })) }, null, 2) + '\n');
 console.log(`checks: ${ok ? 'pass' : 'fail'} (${results.filter((r) => r.ok).length}/${results.length} due for delivery ${delivery})`);
-for (const r of results) console.log(`- ${r.id}${r.surface.length ? ` [${r.surface.join(', ')}]` : ''}: ${r.ok ? 'pass' : `fail: ${r.reason}`}`);
+for (const r of results) console.log(`- ${r.line}`);
 if (!allow.length && checks.some((c) => due(c) && /^cmd:/.test(c.verify))) console.log('- no checks_allow in the project definition');
 process.exit(ok ? 0 : 1);

@@ -25,13 +25,14 @@ if (!state) {
 }
 const ev = join(dir, 'evidence');
 const names = existsSync(ev) ? readdirSync(ev) : [];
-const count = (k) => names.filter((f) => new RegExp(`^${k}-\\d+(?:[^0-9]|$)`).test(f)).length;
+const exact = { judge: /^judge-(\d+)\.md$/, read: /^read-(\d+)\.md$/, review: /^review-(\d+)-\d+\.md$/ };
+const count = (k) => names.filter((f) => exact[k].test(f)).length;
 const perDelivery = (k) => {
   const by = {};
-  for (const f of names) { const m = f.match(new RegExp(`^${k}-(\\d+)(?:[^0-9]|$)`)); if (m) by[m[1]] = (by[m[1]] || 0) + 1; }
+  for (const f of names) { const m = f.match(exact[k]); if (m) by[m[1]] = (by[m[1]] || 0) + 1; }
   return by;
 };
-const caps = { judge: 1, read: 1, review: 2 };
+const caps = { judge: 1, read: 1, review: 3 }; // a third review only reads a Surface fix; rounds refuses it otherwise
 const over = Object.keys(caps).some((k) => Object.values(perDelivery(k)).some((n) => n > caps[k]));
 const type = (field(state, 'Type').toLowerCase().match(/^(hotfix|bug|enhancement|new feature)/) || [])[1] || null;
 const delivered = [...state.matchAll(/^Delivery \d+:.*\bdelivered (\S+)/gm)].map((m) => m[1].replace(/[,;]$/, '')).sort();
@@ -57,6 +58,8 @@ const line = {
   rounds_over: over,
   reopened: earlier.filter((r) => r.project === project && r.ticket === ticket).length,
   surface_lines: section(plan, 'Surface').split('\n').filter((l) => /^- S\d+:/.test(l) && !/not touched/i.test(l)).length,
+  surface_not_touched: section(plan, 'Surface').split('\n').filter((l) => /^- S\d+:[ \t]*not touched\b/i.test(l)).length,
+  surface_draft: section(state, 'Surface').split('\n').filter((l) => /^- S\d+:/.test(l)).length,
   surface_extras: section(state, 'Outside the ticket').split('\n').filter((l) => /^- \[surface\]/i.test(l)).length,
   cold_audit: audit ? parseInt(field(audit, 'Findings'), 10) || 0 : null,
   missed,

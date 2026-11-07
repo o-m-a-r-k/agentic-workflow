@@ -49,14 +49,16 @@ if (!Object.keys(at).length) fails.push('Read at: names no <repo>@<sha>');
 const files = {};
 for (const [r, sha] of Object.entries(at)) files[r] = (git(trees[r], 'ls-tree', '-r', '--name-only', sha) || '').split('\n').filter(Boolean);
 
-// A path resolves to one file: <repo>/<path>, a repo-relative path, or a bare basename; anything else fails with candidates.
+// A path resolves to one file: <repo>/<path>, a repo-relative path, or the end of one path (a basename, or
+// utils/x.ts for src/modules/a/utils/x.ts); more than one match fails with the candidates.
 function locate(p) {
   if (p.startsWith('evidence/')) return existsSync(join(dir, p)) ? { local: p } : { err: 'missing from the ticket folder' };
   const [first, ...rest] = p.split('/');
-  if (files[first]?.includes(rest.join('/'))) return { repo: first, path: rest.join('/') };
   const repos = Object.keys(files);
-  let hits = repos.flatMap((r) => files[r].filter((f) => f === p).map((f) => ({ repo: r, path: f })));
-  if (!hits.length && !p.includes('/')) hits = repos.flatMap((r) => files[r].filter((f) => basename(f) === p).map((f) => ({ repo: r, path: f })));
+  const where = (test) => repos.flatMap((r) => files[r].filter(test).map((f) => ({ repo: r, path: f })));
+  let hits = where((f) => f === p);
+  if (files[first]?.includes(rest.join('/'))) hits = [{ repo: first, path: rest.join('/') }, ...hits.filter((h) => h.repo !== first)];
+  if (!hits.length) hits = where((f) => f.endsWith(`/${p}`));
   if (hits.length === 1) return hits[0];
   return { err: hits.length ? `ambiguous, candidates: ${hits.map((h) => `${h.repo}/${h.path}`).join(', ')}` : 'missing at the commits in Read at' };
 }
@@ -88,8 +90,19 @@ for (let m; (m = cite.exec(plan)); ) {
 // Decisions name a source and the alternative they beat; memos carry a recommendation.
 const has = (block, k) => new RegExp(`^-[ \\t]*\\**${k}:\\**[ \\t]*\\S`, 'm').test(block);
 const decisions = section(plan, 'Decisions').split(/^### /m).slice(1);
-for (const d of decisions) for (const k of ['Source', 'Beats']) if (!has(d, k)) fails.push(`${d.split(/[:\s]/)[0]}: no ${k}`);
-for (const d of section(plan, 'Memos').split(/^### /m).slice(1)) if (!has(d, 'Recommendation')) fails.push(`${d.split(/[:\s]/)[0]}: no Recommendation`);
+for (const d of decisions) {
+  for (const k of ['Source', 'Beats']) if (!has(d, k)) fails.push(`${d.split(/[:\s]/)[0]}: no ${k}`);
+  const src = (d.match(/^-[ \t]*\**Source:\**(.*)$/m) || [])[1] || '';
+  if (has(d, 'Source') && !(cite.test(src) || /evidence\/\S+|https?:\/\/\S+.*\d{4}-\d{2}-\d{2}|\b(query|sql)\b/i.test(src)))
+    fails.push(`${d.split(/[:\s]/)[0]}: Source names no \`path:line\`, evidence file, query or dated URL`);
+  cite.lastIndex = 0;
+}
+for (const d of section(plan, 'Memos').split(/^### /m).slice(1)) {
+  if (!has(d, 'Recommendation')) fails.push(`${d.split(/[:\s]/)[0]}: no Recommendation`);
+  if (!/^-[ \t]*\**Due:\**[ \t]*before delivery \d+/m.test(d)) fails.push(`${d.split(/[:\s]/)[0]}: no "Due: before delivery <n>"`);
+}
+const listed = section(plan, 'Deliveries').match(/^\s*\d+\./gm) || [];
+if (!listed.length) fails.push('Deliveries: lists no "1." line');
 
 // Tests rows: an id, a file that exists or "(new)", and whether it fails before the change.
 const rows = section(plan, 'Tests').split('\n').filter((l) => l.trim().startsWith('|')).slice(2);
@@ -116,27 +129,39 @@ try {
   fails.push(`CHECKS.json: ${e.message}`);
   checks = [];
 }
+const trivial = (e) => {
+  const rx = String(e ?? '').match(/^\/(.*)\/([a-z]*)$/s);
+  try { return !String(e ?? '').trim() || (!!rx && ['', 'x', 'ok'].some((o) => new RegExp(rx[1], rx[2]).test(o))); } catch { return true; }
+};
 for (const l of surface) {
   if (/^- S\d+:[ \t]*not touched\b/i.test(l)) continue;
   const id = l.match(/^- (S\d+)/)[1];
-  if (!checks.some((c) => (c.surface || []).includes(id) && String(c.expect ?? '').trim())) fails.push(`${id}: no check in CHECKS.json names it with an expect`);
+  if (!checks.some((c) => (c.surface || []).includes(id) && !trivial(c.expect))) fails.push(`${id}: no check in CHECKS.json names it with an expect that can fail`);
 }
 for (const c of checks) {
   const id = c.id || 'a check';
   for (const k of ['id', 'proves', 'verify', 'due']) if (!String(c[k] ?? '').trim()) fails.push(`${id}: no ${k}`);
   if (c.verify && !/^(cmd|walk):/.test(c.verify)) fails.push(`${id}: verify starts with neither "cmd:" nor "walk:"`);
-  if (/^cmd:/.test(c.verify || '') && !String(c.expect ?? '').trim()) fails.push(`${id}: a cmd check has no expect`);
+  if (/^cmd:/.test(c.verify || '') && trivial(c.expect)) fails.push(`${id}: expect is empty or matches anything, so the check can't fail`);
   if (c.due && !/^(before delivery \d+|after .+ in delivery \d+)$/.test(c.due)) fails.push(`${id}: due is neither "before delivery <n>" nor "after <step> in delivery <n>"`);
   if (c.passes !== false) fails.push(`${id}: passes is not false`);
 }
 
-// The hash leaves out the backtick spans (citations, code), so a moved line number doesn't ask for approval again.
-const hash = createHash('sha256').update(surface.map((l) => l.replace(/`[^`]*`/g, '').replace(/\s+/g, ' ').trim()).join('\n')).digest('hex').slice(0, 12);
+// The hash covers what approval is of: each line's id, whether it is touched, and what it must equal; not wording.
+const equals = (l) => ((l.replace(/`[^`]*`/g, '').match(/\bequals\b([^;]*)/i) || [])[1] || '').replace(/\s+/g, ' ').trim().toLowerCase();
+const key = (l) => `${l.match(/^- (S\d+)/)[1]}|${/^- S\d+:[ \t]*not touched\b/i.test(l) ? 'not touched' : 'touched'}|${equals(l)}`;
+const hash = createHash('sha256').update(surface.map(key).join('\n')).digest('hex').slice(0, 12);
+// For the judge: a kept draft line whose source of truth or touched state changed.
+const pairs = [...section(state, 'Surface').matchAll(/^- (S\d+):.*$/gm)].flatMap((m) => {
+  const p = surface.find((l) => l.startsWith(`- ${m[1]}:`));
+  return p && key(p) !== key(m[0].trim()) ? [`- ${m[1]} draft: ${m[0].slice(2).trim()}`, `  ${m[1]} plan:  ${p.slice(2)}`] : [];
+});
 const words = plan.split(/\s+/).filter(Boolean).length;
 const out = [
   `plan-shape: ${fails.length ? `fail ${fails.length}` : 'pass'}`,
-  `revision ${field(plan, 'Revision') || '?'}, risk ${risk || '?'}, ${words} words, ${decisions.length} decisions, ${cites} citations, ${rows.length} tests rows, ${checks.length} checks, surface ${hash}`,
+  `revision ${(field(plan, 'Revision').match(/^\d+/) || ['?'])[0]}, risk ${risk || '?'}, ${words} words, ${decisions.length} decisions, ${cites} citations, ${rows.length} tests rows, ${checks.length} checks, surface ${hash}`,
   ...fails.map((f) => `- ${f}`),
+  ...(pairs.length ? ['', 'Surface lines whose meaning changed from the draft (for the judge):', ...pairs] : []),
 ].join('\n');
 mkdirSync(join(dir, 'evidence'), { recursive: true });
 writeFileSync(join(dir, 'evidence', 'plan-shape.md'), out + '\n');

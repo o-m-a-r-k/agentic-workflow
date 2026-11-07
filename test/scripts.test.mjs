@@ -13,11 +13,16 @@ const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example
 const git = (cwd, ...a) => execFileSync('git', a, { cwd, env, encoding: 'utf8' }).trim();
 const run = (name, ...a) => spawnSync(process.execPath, [join(scripts, `${name}.mjs`), ...a], { env, encoding: 'utf8' });
 const write = (p, t) => { mkdirSync(dirname(p), { recursive: true }); writeFileSync(p, t); };
+const edit = (p, from, to) => writeFileSync(p, readFileSync(p, 'utf8').replace(from, to));
+const commit = (p, msg) => { git(p, 'add', '-A'); git(p, 'commit', '-qm', msg); return git(p, 'rev-parse', 'HEAD'); };
 
 const RENEW = ['export function renew(loan, limit) {', '  if (loan.renewals >= limit) {', "    throw new Error('limit');", '  }', '  loan.renewals += 1;', '  return loan;', '}', ''].join('\n');
 const RENEW_TEST = "import { renew } from './renew.ts';\n// refuses the fourth renewal\n";
+const RENEW_CHECK = "import { readFileSync } from 'node:fs';\nconsole.log('1 test passed');\nprocess.exit(readFileSync('src/loans/renew.ts', 'utf8').includes('>= limit)') ? 1 : 0);\n";
+const ORACLE = (says) => `console.log(${JSON.stringify(says)});\n`;
 
-// A ticket folder with one worktree ("catalog"), optionally a second ("web").
+// A ticket folder with one worktree ("catalog"), optionally a second ("web"), and a project definition whose folder
+// holds a canonical copy of the catalog's oracle.
 function ticket({ web = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'aw-test-'));
   const t = join(root, 'EX-1');
@@ -26,24 +31,26 @@ function ticket({ web = false } = {}) {
     mkdirSync(p, { recursive: true });
     git(p, 'init', '-q', '-b', 'main');
     for (const [f, c] of Object.entries(files)) write(join(p, f), c);
-    git(p, 'add', '-A');
-    git(p, 'commit', '-qm', 'base');
-    return { path: p, sha: git(p, 'rev-parse', 'HEAD') };
+    return { path: p, sha: commit(p, 'base') };
   };
-  const cat = repo('catalog', { 'src/loans/renew.ts': RENEW, 'src/loans/renew.test.ts': RENEW_TEST, 'test/pass.mjs': "console.log('0 disagreements')\n", 'test/renew.mjs': "import { readFileSync } from 'node:fs';\nprocess.exit(readFileSync('src/loans/renew.ts', 'utf8').includes('>= limit)') ? 1 : 0);\n", 'test/fail.mjs': 'process.exit(3)\n' });
+  const cat = repo('catalog', { 'src/loans/renew.ts': RENEW, 'src/loans/renew.test.ts': RENEW_TEST, 'scripts/oracle.mjs': ORACLE('0 disagreements'), 'test/renew.mjs': RENEW_CHECK, 'test/none.mjs': "console.log('No tests found')\n" });
   const w = web ? repo('web', { 'src/loans/renew.ts': RENEW, 'src/pages/loan.tsx': 'export const Loan = () => null;\n', 'messages/en.json': '{}\n' }) : null;
+  write(join(root, 'catalog', 'scripts', 'oracle.mjs'), ORACLE('0 disagreements'));
   const state = (extra = '') => write(join(t, 'STATE.md'), [
     '# State: EX-1', '', 'Project: library-app', 'Ticket: EX-1', 'Type: bug (named by: the person)', 'Started: 2026-01-05T09:00Z', 'Profile: none',
     `Worktree catalog: catalog on fix/EX-1, from main at ${cat.sha}`,
     ...(w ? [`Worktree web: web on fix/EX-1, from main at ${w.sha}`] : []),
-    'Delivery 1: the refusal: delivered 2026-01-05T15:00Z main', extra, '', '## Surface', '- S1: renewal count: loan page; equals loans.renewals', '', '## Outside the ticket', '- [surface] a late fee shown twice, src/fees.ts: hotfix EX-2 started', '- a typo, page footer: file EX-3', '',
+    'Delivery 1: the refusal: delivered 2026-01-05T15:00Z main', extra, '', '## Surface', '- S1: renewal count: loan page; equals loans.renewals', '', '## Outside the ticket', '- [surface] a late fee shown twice, src/fees.ts: hotfix EX-2 opened', '- a typo, page footer: file EX-3', '',
   ].join('\n'));
   state();
   const plan = (body) => write(join(t, 'PLAN.md'), body);
   const checks = (list) => write(join(t, 'CHECKS.json'), JSON.stringify(list, null, 2));
   const def = join(root, 'project.md');
-  write(def, '---\nname: library-app\nchecks_allow: [node]   # runners\nscreen_paths:\n  - web/src/pages\n  - web/messages\n---\n');
-  return { root, t, cat, w, state, plan, checks, def, done: () => rmSync(root, { recursive: true, force: true }) };
+  write(def, '---\nname: library-app\nchecks_allow: [node test/renew.mjs, node test/none.mjs, node ./catalog/scripts/oracle.mjs]   # runners\nnothing_ran: [No tests found, /^0 passing/m]\nscreen_paths:\n  - web/src/pages\n  - web/messages\n---\n');
+  const L = (...more) => run('links', f.t, '--delivery', '1', ...more, '--definition', def);
+  const C = (...more) => run('checks', f.t, '--delivery', '1', ...more, '--definition', def);
+  const f = { root, t, cat, w, state, plan, checks, def, L, C, ev: (n) => join(t, 'evidence', n), done: () => rmSync(root, { recursive: true, force: true }) };
+  return f;
 }
 
 const goodPlan = (cat, extra = '') => `# Plan: EX-1 A fourth renewal is refused
@@ -52,83 +59,120 @@ Revision: 2
 Risk: low
 Read at: catalog@${cat.sha.slice(0, 12)}
 
+## Deliveries
+1. The refusal; ships alone.
+
 ## Surface
 - S1: renewal count: loan page; equals loans.renewals; \`src/loans/renew.ts:5\` \`loan.renewals += 1\`
 
 ## Decisions
 ### D1: Where the limit is enforced
 - Choice: in renew()
-- Source: \`renew.ts:2\` \`if (loan.renewals >= limit)\`
+- Source: \`loans/renew.ts:2\` \`if (loan.renewals >= limit)\`
 - Beats: a check in the page, which a job would skip
 
 ## Tests
 | ID | Behaviour | Test (file › name) | Asserts | Fails before |
 |---|---|---|---|---|
-| T1 | A fourth renewal is refused | \`src/loans/renew.test.ts › refuses the fourth renewal\` | throws, count unchanged | yes |
+| T1 | A fourth renewal is refused | \`test/renew.mjs › refuses the fourth renewal\` | throws, count unchanged | yes |
 | T2 | The page shows the count | (new) \`loan.test.ts › shows the count\` | the count | no |
 ${extra}`;
-const goodChecks = [{ id: 'C1', proves: 'the count shown equals the stored count', surface: ['S1'], verify: 'cmd: node test/pass.mjs', in: 'catalog', expect: '0 disagreements', due: 'before delivery 1', passes: false, evidence: null }];
+const goodChecks = [{ id: 'C1', proves: 'the count shown equals the stored count', surface: ['S1'], verify: 'cmd: node ./catalog/scripts/oracle.mjs --stack {worktree}', in: 'catalog', expect: '0 disagreements', due: 'before delivery 1', passes: false, evidence: null }];
 
-test('plan-shape passes a plan whose citations resolve and whose Surface has checks', () => {
+// A delivery whose links all hold: judged, red then green with one command, reviewed at HEAD, checks passed.
+function deliverable(f, review = 'Verdict: clean') {
+  run('proof', f.t, '--in', 'catalog', '--test', 'T1', '--base', '--', process.execPath, 'test/renew.mjs');
+  edit(join(f.cat.path, 'src/loans/renew.ts'), '>=', '>= 0 +');
+  const head = commit(f.cat.path, 'fix');
+  f.plan(goodPlan(f.cat));
+  f.checks(goodChecks);
+  write(f.ev('judge-1.md'), '**Verdict:** build\n');
+  write(f.ev('review-1-1.md'), `Commit: catalog@${head.slice(0, 12)}\n${review}\n`);
+  run('proof', f.t, '--in', 'catalog', '--test', 'T1', '--', process.execPath, 'test/renew.mjs');
+  assert.equal(f.C().status, 0);
+  return head;
+}
+
+test('plan-shape passes a plan whose citations resolve, a partial path included', () => {
   const f = ticket();
   f.plan(goodPlan(f.cat));
   f.checks(goodChecks);
   const r = run('plan-shape', f.t);
   assert.equal(r.status, 0, r.stdout);
-  assert.match(r.stdout, /plan-shape: pass/);
-  assert.match(r.stdout, /1 decisions, 2 citations, 2 tests rows, 1 checks, surface [0-9a-f]{12}/);
+  assert.match(r.stdout, /revision 2, risk low, \d+ words, 1 decisions, 2 citations, 2 tests rows, 1 checks, surface [0-9a-f]{12}/);
   assert.ok(existsSync(join(f.t, 'evidence', 'plan-shape.md')));
   f.done();
 });
 
-test('plan-shape fails past-EOF, missing, wrong-snippet, medium risk, no Beats, an uncovered Surface line and a dropped draft line', () => {
+test('plan-shape fails drifted citations, a prose source, a trivial expect, a memo with no due, and a dropped draft line', () => {
   const f = ticket();
-  f.plan(goodPlan(f.cat, '\nSee `renew.ts:99` and `src/loans/gone.ts:1` and `renew.ts:3` `return null` and `app/[id]/page.tsx:3`, not `127.0.0.1:5432`.\n')
-    .replace('Risk: low', 'Risk: medium').replace('- Beats: a check in the page, which a job would skip\n', '').replace('- S1:', '- S9:'));
-  f.checks([{ ...goodChecks[0], surface: [] }]);
+  f.plan(goodPlan(f.cat, '\nSee `renew.ts:99`, `src/loans/gone.ts:1`, `renew.ts:3` `return null` and `app/[id]/page.tsx:3`, not `127.0.0.1:5432`.\n\n## Memos\n### M1: Show the fee?\n- Recommendation: yes\n- Decided: open\n')
+    .replace('Risk: low', 'Risk: medium').replace('- Beats: a check in the page, which a job would skip\n', '').replace('- S1:', '- S9:')
+    .replace(/- Source: .*/, '- Source: the investigation and the ticket'));
+  f.checks([{ ...goodChecks[0], surface: [] }, { ...goodChecks[0], id: 'C2', surface: ['S9'], expect: '/.*/s' }]);
   const r = run('plan-shape', f.t);
   assert.equal(r.status, 1);
-  for (const want of [/app\/\[id\]\/page\.tsx:3: missing/, /renew\.ts:99: past the end/, /gone\.ts:1: missing/, /renew\.ts:3: `return null` is not on those lines/, /Risk: "medium"/, /D1: no Beats/, /S9: no check/, /S1: in STATE\.md's Surface draft/])
+  for (const want of [/app\/\[id\]\/page\.tsx:3: missing/, /renew\.ts:99: past the end/, /gone\.ts:1: missing/, /renew\.ts:3: `return null` is not on those lines/, /Risk: "medium"/, /D1: no Beats/, /D1: Source names no/, /C2: expect is empty or matches anything/, /S9: no check/, /S1: in STATE\.md's Surface draft/, /M1: no "Due: before delivery <n>"/])
     assert.match(r.stdout, want);
   assert.doesNotMatch(r.stdout, /127\.0\.0\.1/);
-  f.plan(goodPlan(f.cat).replace(/- Source: .*/, '- Source:'));
-  assert.match(run('plan-shape', f.t).stdout, /D1: no Source/);
+  f.plan(goodPlan(f.cat).replace(/## Deliveries\n1\..*\n/, '## Deliveries\nall at once\n'));
+  f.checks(goodChecks);
+  assert.match(run('plan-shape', f.t).stdout, /Deliveries: lists no "1\." line/);
   f.done();
 });
 
-test('plan-shape names both candidates for a basename present in two repos', () => {
+test('plan-shape: a basename or a repo-prefixed path that two repos hold is ambiguous', () => {
   const f = ticket({ web: true });
-  f.plan(goodPlan(f.cat).replace(/Read at: .*/, `Read at: catalog@${f.cat.sha}, web@${f.w.sha}`));
+  write(join(f.cat.path, 'web/src/loans/renew.ts'), RENEW);
+  const sha = commit(f.cat.path, 'nested web folder');
+  f.plan(goodPlan(f.cat, '\nAlso `web/src/loans/renew.ts:2`.\n').replace(/Read at: .*/, `Read at: catalog@${sha}, web@${f.w.sha}`));
   f.checks(goodChecks);
   const r = run('plan-shape', f.t);
   assert.equal(r.status, 1);
-  assert.match(r.stdout, /renew\.ts:2: ambiguous, candidates: catalog\/src\/loans\/renew\.ts, web\/src\/loans\/renew\.ts/);
+  assert.match(r.stdout, /loans\/renew\.ts:2: ambiguous/);
+  assert.match(r.stdout, /web\/src\/loans\/renew\.ts:2: ambiguous, candidates: web\/src\/loans\/renew\.ts, catalog\/web\/src\/loans\/renew\.ts/);
   f.done();
 });
 
-test('rounds refuses a third review and counts a renamed review file', () => {
+test('the Surface hash ignores wording and citations, changes with what a line must equal, and plan-shape shows the drift', () => {
   const f = ticket();
-  write(join(f.t, 'evidence', 'judge-1.md'), 'x');
+  f.checks(goodChecks);
+  const hash = (body) => { f.plan(body); return run('plan-shape', f.t).stdout.match(/surface ([0-9a-f]{12})/)[1]; };
+  const base = hash(goodPlan(f.cat));
+  assert.equal(hash(goodPlan(f.cat).replace('renewal count: loan page', 'the renewal count (the stored count): loan page').replace(':5`', ':6`')), base);
+  const plan = goodPlan(f.cat).replace('equals loans.renewals', 'equals the renewals shown last week');
+  assert.notEqual(hash(plan), base);
+  assert.match(run('plan-shape', f.t).stdout, /S1 draft: S1: renewal count: loan page; equals loans\.renewals\n  S1 plan:  S1: renewal count: loan page; equals the renewals shown last week/);
+  f.done();
+});
+
+test('rounds counts exact names only, allows a third review only for an open Surface finding, and refuses an unplanned delivery', () => {
+  const f = ticket();
+  f.plan(goodPlan(f.cat));
+  write(f.ev('judge-1.md'), 'x');
   assert.equal(run('rounds', f.t, 'review', '1').status, 0);
-  write(join(f.t, 'evidence', 'review-1-1.md'), 'x');
-  write(join(f.t, 'evidence', 'review-1-final.md'), 'x');
-  const r = run('rounds', f.t, 'review', '1');
-  assert.equal(r.status, 1);
-  assert.match(r.stdout, /refused: evidence\/review-1-1\.md, evidence\/review-1-final\.md exist \(cap 2\)/);
-  assert.equal(run('rounds', f.t, 'judge', '1').status, 1);
-  assert.equal(run('rounds', f.t, 'judge', '2').status, 0);
-  assert.match(run('rounds', f.t).stdout, /delivery 1: judge 1\/1, read 0\/1, review 2\/2/);
+  write(f.ev('review-1-1.md'), 'Verdict: fix: 2');
+  write(f.ev('review-1-1-draft.md'), 'notes');
+  assert.match(run('rounds', f.t, 'review', '1').stdout, /next: evidence\/review-1-2\.md[\s\S]*ignored, not a round file name: review-1-1-draft\.md/);
+  write(f.ev('review-1-2.md'), '**Verdict:** Fix: 1 finding.\n- F1 `src/loans/renew.ts:2` the count is off by one [S1]\n');
+  assert.match(run('rounds', f.t, 'review', '1').stdout, /next: evidence\/review-1-3\.md, reading only the fix of \[S1\]/);
+  write(f.ev('review-1-3.md'), 'Verdict: clean');
+  assert.match(run('rounds', f.t, 'review', '1').stdout, /refused: .*review-1-3\.md exist \(cap 3\)/);
+  write(f.ev('review-1-2.md'), 'Verdict: fix: 1\n- F1 a label [no surface]\n\n## Outside the ticket\n- [S1] elsewhere\n');
+  assert.equal(run('rounds', f.t, 'review', '1').status, 1);
+  assert.match(run('rounds', f.t).stdout, /delivery 1: judge 1\/1, read 0\/1, review 3\/2 over/);
+  assert.match(run('rounds', f.t, 'judge', '2').stdout, /refused: delivery 2 is not in the plan's Deliveries \(1\)/);
   f.done();
 });
 
-test('proof records the exit and the working tree, untracked files included', () => {
+test('proof records the exit and the working tree, untracked files included, and a command that never ran', () => {
   const f = ticket();
-  const r1 = run('proof', f.t, '--in', 'catalog', '--test', 'T1', '--base', '--', process.execPath, 'test/fail.mjs');
-  assert.equal(r1.status, 0);
+  run('proof', f.t, '--in', 'catalog', '--test', 'T1', '--base', '--', process.execPath, 'test/renew.mjs');
   write(join(f.cat.path, 'src/loans/new.ts'), 'x\n');
-  run('proof', f.t, '--in', 'catalog', '--test', 'T1', '--', process.execPath, 'test/pass.mjs');
-  const [a, b] = readFileSync(join(f.t, 'evidence', 'proof.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
-  assert.deepEqual([a.base, a.exit, b.base, b.exit], [true, 3, false, 0]);
+  run('proof', f.t, '--in', 'catalog', '--test', 'T1', '--', 'no-such-runner');
+  const [a, b] = readFileSync(f.ev('proof.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.deepEqual([a.base, a.exit, b.base, b.exit], [true, 1, false, null]);
+  assert.match(b.error, /ENOENT/);
   assert.equal(a.tree, git(f.cat.path, 'rev-parse', 'HEAD^{tree}'));
   assert.notEqual(b.tree, a.tree);
   assert.equal(git(f.cat.path, 'status', '--porcelain'), '?? src/loans/new.ts');
@@ -136,165 +180,175 @@ test('proof records the exit and the working tree, untracked files included', ()
   f.done();
 });
 
-test('checks runs allow-listed commands without a shell and fails the rest', () => {
+test('checks: oracles run from the definition folder, the allow-list is a prefix, nothing-ran and trivial expects fail, output goes to a log', () => {
   const f = ticket();
-  const list = [
-    goodChecks[0],
-    { ...goodChecks[0], id: 'C2', verify: 'cmd: sh -c true' },
-    { ...goodChecks[0], id: 'C3', verify: 'cmd: node test/pass.mjs; rm -rf /' },
-    { ...goodChecks[0], id: 'C4', verify: 'cmd: node test/pass.mjs', expect: '/^2 disagreements/m' },
-    { ...goodChecks[0], id: 'C5', surface: [], verify: 'walk: renew three times on the loan page', passes: true, evidence: 'evidence/walk.md' },
-    { ...goodChecks[0], id: 'C6', verify: 'walk: x', due: 'before delivery 2' },
-  ];
-  f.checks(list);
-  write(join(f.t, 'evidence', 'walk.md'), `walked at catalog@${f.cat.sha.slice(0, 7)}\n`);
-  const r = run('checks', f.t, '--delivery', '1', '--definition', f.def);
+  write(join(f.cat.path, 'scripts/oracle.mjs'), ORACLE('rigged: 0 disagreements'));
+  commit(f.cat.path, 'the branch edits its oracle');
+  const walk = { ...goodChecks[0], id: 'C5', surface: [], verify: 'walk: renew three times on the loan page', passes: true, evidence: 'evidence/walk.md' };
+  f.checks([
+    { ...goodChecks[0], expect: '/^0 disagreements/m' },
+    { ...goodChecks[0], id: 'C2', verify: 'cmd: node -e 1' },
+    { ...goodChecks[0], id: 'C3', verify: 'cmd: node test/renew.mjs; rm -rf /' },
+    { ...goodChecks[0], id: 'C4', verify: 'cmd: node test/none.mjs', expect: '/./' },
+    { ...goodChecks[0], id: 'C6', verify: 'cmd: node test/none.mjs', expect: 'tests' },
+    walk,
+    { ...walk, id: 'C7', evidence: 'walked it and it was fine' },
+    { ...goodChecks[0], id: 'C8', verify: 'walk: x', due: 'before delivery 2' },
+  ]);
+  write(f.ev('walk.md'), `walked at catalog@${git(f.cat.path, 'rev-parse', 'HEAD').slice(0, 9)}\nseen: three renewals, the fourth refused\n`);
+  const r = f.C();
   assert.equal(r.status, 1);
-  assert.match(r.stdout, /C1 \[S1\]: pass/);
-  assert.match(r.stdout, /C2 \[S1\]: fail: "sh -c" does not start with an entry of checks_allow/);
-  assert.match(r.stdout, /C3 \[S1\]: fail: not a plain command/);
-  assert.match(r.stdout, /C4 \[S1\]: fail: output does not hold expect/);
-  assert.match(r.stdout, /C5: pass/);
-  assert.doesNotMatch(r.stdout, /C6/);
-  f.checks([goodChecks[0], list[4]]);
-  assert.equal(run('checks', f.t, '--delivery', '1', '--definition', f.def).status, 0);
-  f.checks([goodChecks[0], { ...list[4], id: 'C7', surface: ['S1'], passes: false, due: 'before delivery 1' }]);
-  assert.match(run('checks', f.t, '--delivery', '2', '--definition', f.def).stdout, /C7 \[S1\]: fail: passes is not true/);
+  for (const want of [/C1 \[S1\]: pass/, /C2 \[S1\]: fail: "node -e" does not start with an entry of checks_allow/, /C3 \[S1\]: fail: not a plain command/, /C4 \[S1\]: fail: expect is empty or matches anything/, /C6 \[S1\]: fail: ran nothing \("No tests found"\)/, /C5: pass/, /C7: fail: evidence "walked it and it was fine" is not a file/])
+    assert.match(r.stdout, want);
+  assert.doesNotMatch(r.stdout, /C8/);
+  const json = JSON.parse(readFileSync(f.ev('checks.json'), 'utf8'));
+  assert.deepEqual(Object.keys(json.results[0]).sort(), ['id', 'line', 'log', 'ok']);
+  assert.match(readFileSync(f.ev('checks/C1.log'), 'utf8'), new RegExp(`--stack ${realpathSync(f.cat.path).replace(/[/.]/g, '\\$&')}`));
+  write(f.ev('walk.md'), `walked at catalog@${git(f.cat.path, 'rev-parse', 'HEAD').slice(0, 9)}\n`);
+  f.checks([walk]);
+  assert.match(f.C().stdout, /C5: fail: evidence has no "seen:" line/);
+  rmSync(join(f.root, 'catalog'), { recursive: true });
+  f.checks([goodChecks[0]]);
+  assert.match(f.C().stdout, /C1 \[S1\]: fail: \.\/catalog\/scripts\/oracle\.mjs is not in the definition's folder/);
   f.done();
 });
 
-// A delivery whose links all hold: judged, reviewed at HEAD, red then green, checks passed.
-function deliverable(f) {
-  run('proof', f.t, '--in', 'catalog', '--test', 'T1', '--base', '--', process.execPath, 'test/renew.mjs');
-  writeFileSync(join(f.cat.path, 'src/loans/renew.ts'), RENEW.replace('>=', '>= 0 +'));
-  git(f.cat.path, 'commit', '-qam', 'fix');
-  const head = git(f.cat.path, 'rev-parse', 'HEAD');
+test('links passes a delivery whose proof chain holds, whatever form its verdict lines take', () => {
+  for (const v of ['Verdict: clean', 'Verdict: Clean.', 'Verdict: **clean**', '**Verdict:** clean', 'Verdict: `clean`', 'Verdict: CLEAN (no findings)', 'Verdict: fix: 0 findings']) {
+    const f = ticket();
+    deliverable(f, v);
+    const r = f.L();
+    assert.equal(r.status, 0, `${v}\n${r.stdout}`);
+    f.done();
+  }
+});
+
+test('links reads only Commit: lines, and stops on a fix verdict, a crash-only red, a nothing-ran green, a high risk in the table, an open memo due now, and an after-step check', () => {
+  const f = ticket();
+  const head = deliverable(f);
+  write(join(f.cat.path, 'src/loans/other.ts'), 'x\n');
+  const moved = commit(f.cat.path, 'unreviewed');
+  write(f.ev('review-1-1.md'), `Commit: catalog@${head.slice(0, 12)}\nThe worktree has since moved to catalog@${moved}, which I did not read.\nVerdict: clean\n`);
+  assert.match(f.L().stdout, /catalog reviewed \| no \| commits since .* touch files no finding names: src\/loans\/other\.ts \| review \|/);
+  git(f.cat.path, 'reset', '-q', '--hard', head);
+  write(f.ev('review-1-1.md'), `Commit: catalog@${head.slice(0, 12)}\nVerdict: fix: 1 finding\n`);
+  assert.match(f.L().stdout, /review verdict \| no \| review-1-1\.md: fix \| implement, then review \|/);
+  write(f.ev('review-1-1.md'), `Commit: catalog@${head.slice(0, 12)}\nVerdict: clean\n`);
+  writeFileSync(f.ev('proof.jsonl'), '');
+  run('proof', f.t, '--in', 'catalog', '--test', 'T1', '--base', '--', 'no-such-runner');
+  run('proof', f.t, '--in', 'catalog', '--test', 'T1', '--', 'no-such-runner');
+  run('proof', f.t, '--in', 'catalog', '--test', 'T1', '--', process.execPath, 'test/none.mjs');
+  assert.match(f.L().stdout, /T1 red then green \| no \| no passing proof on HEAD's tree; no failing base run/);
+  f.plan(goodPlan(f.cat) + '\n## Risk\n| By | Level | Why |\n|---|---|---|\n| judge | high | reach |\n\n## Memos\n### M1: Show the fee?\n- Due: before delivery 1\n- Recommendation: yes\n- Decided: open\n### M2: Badge colour\n- Due: before delivery 2\n- Recommendation: grey\n- Decided: open\n');
+  const r = f.L();
+  assert.match(r.stdout, /approval \| no/);
+  assert.match(r.stdout, /memos decided \| no \| open: M1 \|/);
   f.plan(goodPlan(f.cat));
-  f.checks(goodChecks);
-  write(join(f.t, 'evidence', 'judge-1.md'), 'Verdict: build\n');
-  write(join(f.t, 'evidence', 'review-1-1.md'), `Commit: catalog@${head.slice(0, 12)}\nVerdict: clean\n`);
-  run('proof', f.t, '--in', 'catalog', '--test', 'T1', '--', process.execPath, 'test/renew.mjs');
-  assert.equal(run('checks', f.t, '--delivery', '1', '--definition', f.def).status, 0);
-  return head;
-}
-
-test('links passes a delivery whose proof chain holds, and names the worker for each broken link', () => {
-  const f = ticket();
-  deliverable(f);
-  const ok = run('links', f.t, '--delivery', '1', '--definition', f.def);
-  assert.equal(ok.status, 0, ok.stdout);
-  assert.ok(existsSync(join(f.t, 'evidence', 'links-1.md')));
-  writeFileSync(join(f.cat.path, 'src/loans/renew.ts'), RENEW);
-  git(f.cat.path, 'commit', '-qam', 'after review');
-  const r = run('links', f.t, '--delivery', '1', '--definition', f.def);
-  assert.equal(r.status, 1);
-  assert.match(r.stdout, /catalog reviewed \| no .* \| review \|/);
-  assert.match(r.stdout, /T1 red then green \| no \| no passing proof on HEAD's tree; .* \| implement \|/);
-  assert.match(r.stdout, /checks \| no \| checks\.json is for another delivery or HEAD \| verify \|/);
+  f.checks([...goodChecks, { ...goodChecks[0], id: 'C2', verify: 'walk: the count after deploy', due: 'after deploy to staging in delivery 1' }]);
+  f.C();
+  assert.match(f.L('--final').stdout, /checks \| no \| checks due after this delivery's steps have not run/);
+  assert.match(f.C('--after').stdout, /C2 \[S1\]: fail: passes is not true/);
   f.done();
 });
 
-test('links rejects a proof line from another worktree, and asks for approval again when the Surface changed', () => {
+test('links: an open [S<n>] finding after review 2 needs review 3; a commit after review stands only within its findings, rows green', () => {
+  const f = ticket();
+  const head = deliverable(f, 'Verdict: fix: 1');
+  write(f.ev('review-1-2.md'), `Commit: catalog@${head.slice(0, 12)}\n**Verdict:** fix: 2\n- F1 [S1] \`src/loans/renew.ts:2\` a renewed loan shows one too many\n- F2 \`src/loans/renew.ts:4\` a label\n`);
+  assert.match(f.L().stdout, /review verdict \| no \| .*open Surface findings \[S1\] \| implement, then review-1-3 on \[S1\] \|/);
+  edit(join(f.cat.path, 'src/loans/renew.ts'), 'loan.renewals += 1;', 'loan.renewals += 1; // checked');
+  write(join(f.cat.path, 'test/renew.mjs'), RENEW_CHECK.replace('1 test', 'one test'));
+  commit(f.cat.path, 'fix S1');
+  run('proof', f.t, '--in', 'catalog', '--test', 'T1', '--', process.execPath, 'test/renew.mjs');
+  f.C();
+  write(f.ev('review-1-3.md'), `Commit: catalog@${head.slice(0, 12)}\nVerdict: clean\n- F1 [S1] \`src/loans/renew.ts:5\`: fixed, the count is right\n`);
+  const ok = f.L();
+  assert.equal(ok.status, 0, ok.stdout);
+  assert.match(ok.stdout, /catalog reviewed \| yes \| review-1-3\.md names .*stays within its findings and tests/);
+  assert.match(ok.stdout, /review 3\/3/);
+  f.done();
+});
+
+test('links rejects a proof from another worktree, and asks for approval again only when what a Surface line must equal changes', () => {
   const f = ticket({ web: true });
   deliverable(f);
-  const lines = readFileSync(join(f.t, 'evidence', 'proof.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
-  writeFileSync(join(f.t, 'evidence', 'proof.jsonl'), lines.map((l) => JSON.stringify(l.base ? l : { ...l, worktree: realpathSync(f.w.path) })).join('\n') + '\n');
+  const lines = readFileSync(f.ev('proof.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  writeFileSync(f.ev('proof.jsonl'), lines.map((l) => JSON.stringify(l.base ? l : { ...l, worktree: realpathSync(f.w.path) })).join('\n') + '\n');
   f.plan(goodPlan(f.cat).replace('Risk: low', 'Risk: high'));
-  f.state('Approval: "go ahead", 2026-01-05T10:00Z, revision 2, surface 000000000000');
-  assert.equal(run('checks', f.t, '--delivery', '1', '--definition', f.def).status, 0);
-  const r = run('links', f.t, '--delivery', '1', '--definition', f.def);
-  assert.equal(r.status, 1);
+  f.checks(goodChecks);
+  const hash = run('plan-shape', f.t).stdout.match(/surface ([0-9a-f]{12})/)[1];
+  f.state(`Approval: "go ahead", 2026-01-05T10:00Z, revision 2, surface ${hash}`);
+  f.C();
+  let r = f.L();
   assert.match(r.stdout, /T1 red then green \| no/);
-  assert.match(r.stdout, /approval \| no .* \| the person \|/);
+  assert.match(r.stdout, /approval \| yes/);
+  f.plan(goodPlan(f.cat).replace('Risk: low', 'Risk: high').replace('renewal count:', 'the renewal count, as stored:'));
+  assert.match(f.L().stdout, /approval \| yes/);
+  f.plan(goodPlan(f.cat).replace('Risk: low', 'Risk: high').replace('equals loans.renewals', 'equals the page total'));
+  assert.match(f.L().stdout, /approval \| no .* \| the person \|/);
   f.done();
 });
 
-test('links: a screenshot stands while the diff since its commit touches no screen path; a third review is reported, not a stop', () => {
+test('links: a screenshot named the project\'s way stands while no screen path changed since its commit; a branch change to an oracle stops', () => {
   const f = ticket({ web: true });
   const head = deliverable(f);
-  const seen = `\n## What people see\nPurpose: a member sees how many renewals are left.\nStates: limit-reached, empty\n`;
-  f.plan(goodPlan(f.cat, seen));
+  f.plan(goodPlan(f.cat, `\n## What people see\nPurpose: a member sees how many renewals are left.\nStates: limit-reached, empty\n`));
   const old = f.w.sha;
-  write(join(f.t, 'evidence', 'read-1.md'), `read web@${old}`);
-  write(join(f.t, 'evidence', 'screens', `limit-reached@${old.slice(0, 10)}.png`), 'png');
-  write(join(f.t, 'evidence', 'screens', `empty@${head.slice(0, 10)}-narrow.png`), 'png');
+  write(f.ev('read-1.md'), `read web@${old}`);
+  write(f.ev(`screens/limit-reached-390-en-light-${old.slice(0, 10)}.png`), 'png');
+  write(f.ev(`screens/d1-empty-1440-ar-${head.slice(0, 10)}.png`), 'png');
   write(join(f.w.path, 'src/api.ts'), 'x\n');
-  git(f.w.path, 'add', '-A');
-  git(f.w.path, 'commit', '-qm', 'api only');
-  write(join(f.t, 'evidence', 'review-1-1.md'), `catalog@${head} web@${git(f.w.path, 'rev-parse', 'HEAD')}\nVerdict: fix: 1\n`);
-  write(join(f.t, 'evidence', 'review-1-2.md'), `catalog@${head} web@${git(f.w.path, 'rev-parse', 'HEAD')}\nVerdict: fix: 1\n`);
-  write(join(f.t, 'evidence', 'review-1-3.md'), `catalog@${head} web@${git(f.w.path, 'rev-parse', 'HEAD')}\nVerdict: clean\n`);
-  assert.equal(run('checks', f.t, '--delivery', '1', '--definition', f.def).status, 0);
-  const ok = run('links', f.t, '--delivery', '1', '--definition', f.def);
+  const w1 = commit(f.w.path, 'api only');
+  write(f.ev('review-1-1.md'), `Commit: catalog@${head} web@${w1}\nVerdict: clean\n`);
+  f.C();
+  const ok = f.L();
   assert.equal(ok.status, 0, ok.stdout);
-  assert.match(ok.stdout, /review 3\/2 \(over the cap: reported/);
   write(join(f.w.path, 'messages/en.json'), '{"left": "left"}\n');
-  git(f.w.path, 'commit', '-qam', 'words');
-  write(join(f.t, 'evidence', 'review-1-3.md'), `catalog@${head} web@${git(f.w.path, 'rev-parse', 'HEAD')}\nVerdict: clean\n`);
-  run('checks', f.t, '--delivery', '1', '--definition', f.def);
-  const r = run('links', f.t, '--delivery', '1', '--definition', f.def);
-  assert.equal(r.status, 1);
-  assert.match(r.stdout, /screenshot limit-reached \| no \| retake: .*touches web\/messages\/en\.json \| verify \|/);
+  const w2 = commit(f.w.path, 'words');
+  write(f.ev('review-1-1.md'), `Commit: catalog@${head} web@${w2}\nVerdict: clean\n`);
+  f.C();
+  assert.match(f.L().stdout, /screenshot limit-reached \| no \| retake: .*touches web\/messages\/en\.json \| verify \|/);
+  write(join(f.cat.path, 'scripts/oracle.mjs'), ORACLE('0 disagreements always'));
+  const c2 = commit(f.cat.path, 'loosen the oracle');
+  write(f.ev('review-1-1.md'), `Commit: catalog@${c2} web@${w2}\nVerdict: clean\n`);
+  assert.match(f.L().stdout, /oracle \.\/catalog\/scripts\/oracle\.mjs \| no \| changed on the branch: scripts\/oracle\.mjs/);
+  f.done();
+});
+
+test('a base update that leaves the change the same keeps the review and the walks', () => {
+  const f = ticket();
+  git(f.cat.path, 'branch', 'upstream');
+  edit(join(f.t, 'STATE.md'), 'from main at', 'from upstream at');
+  const head = deliverable(f);
+  write(f.ev('walk.md'), `walked at catalog@${head.slice(0, 9)}\nseen: the fourth renewal refused\n`);
+  git(f.cat.path, 'checkout', '-q', 'upstream');
+  write(join(f.cat.path, 'docs/notes.md'), 'unrelated\n');
+  commit(f.cat.path, 'base moves');
+  git(f.cat.path, 'checkout', '-q', 'main');
+  git(f.cat.path, 'rebase', '-q', 'upstream');
+  assert.notEqual(git(f.cat.path, 'rev-parse', 'HEAD'), head);
+  f.checks([{ ...goodChecks[0], id: 'C5', surface: [], verify: 'walk: renew four times', passes: true, evidence: 'evidence/walk.md' }]);
+  assert.match(f.C().stdout, /C5: pass/);
+  const r = f.L();
+  assert.match(r.stdout, /catalog reviewed \| yes \| review-1-1\.md names the same change on the earlier base/);
+  assert.match(r.stdout, /T1 red then green \| no/);
   f.done();
 });
 
 test('record writes the counts from the files and counts earlier records as reopenings', () => {
   const f = ticket();
-  f.plan(goodPlan(f.cat).replace('Risk: low', 'Risk: high'));
-  for (const n of ['judge-1.md', 'review-1-1.md', 'review-1-2.md', 'read-1.md']) write(join(f.t, 'evidence', n), 'x');
-  write(join(f.t, 'evidence', 'audit.md'), 'Findings: 1\n');
-  write(join(f.t, 'evidence', 'missed.md'), '- the count was off by one on a renewed loan (review)\n');
+  f.plan(goodPlan(f.cat).replace('Risk: low', 'Risk: high').replace('## Decisions', '- S2: not touched: fees, `src/fees.ts:1`\n\n## Decisions'));
+  for (const n of ['judge-1.md', 'review-1-1.md', 'review-1-2.md', 'review-1-2-notes.md', 'read-1.md']) write(f.ev(n), 'x');
+  write(f.ev('audit.md'), 'Findings: 1 confirmed\n');
+  write(f.ev('missed.md'), '- the count was off by one on a renewed loan (review)\n');
   const records = join(f.root, 'records.jsonl');
   writeFileSync(records, JSON.stringify({ project: 'library-app', ticket: 'EX-1' }) + '\n');
   assert.equal(run('record', f.t, '--records', records).status, 0);
   const line = JSON.parse(readFileSync(records, 'utf8').trim().split('\n').at(-1));
   assert.deepEqual(
-    [line.type, line.risk, line.plan_revisions, line.judge_rounds, line.read_rounds, line.review_rounds, line.rounds_over, line.reopened, line.surface_lines, line.surface_extras, line.cold_audit, line.first_delivered, line.profile],
-    ['bug', 'high', 2, 1, 1, 2, false, 1, 1, 1, 1, '2026-01-05T15:00Z', null],
+    [line.type, line.risk, line.plan_revisions, line.judge_rounds, line.read_rounds, line.review_rounds, line.rounds_over, line.reopened, line.surface_lines, line.surface_not_touched, line.surface_draft, line.surface_extras, line.cold_audit, line.first_delivered, line.profile],
+    ['bug', 'high', 2, 1, 1, 2, false, 1, 1, 1, 1, 1, 1, '2026-01-05T15:00Z', null],
   );
   assert.deepEqual(line.missed, ['the count was off by one on a renewed loan (review)']);
-  f.done();
-});
-
-test('links stops on a round-1 fix verdict, a red and a green that ran different commands, a high risk in the table, an open memo, and an after-step check not yet run', () => {
-  const f = ticket();
-  deliverable(f);
-  const L = () => run('links', f.t, '--delivery', '1', '--final', '--definition', f.def);
-  writeFileSync(join(f.t, 'evidence', 'review-1-1.md'), readFileSync(join(f.t, 'evidence', 'review-1-1.md'), 'utf8').replace('Verdict: clean', 'Verdict: fix: 1 finding'));
-  assert.match(L().stdout, /review verdict \| no \| review-1-1\.md: fix: 1 finding \| implement, then review \|/);
-  writeFileSync(join(f.t, 'evidence', 'review-1-2.md'), readFileSync(join(f.t, 'evidence', 'review-1-1.md'), 'utf8'));
-  assert.match(L().stdout, /review verdict \| yes .*open findings go to the handoff/);
-  writeFileSync(join(f.t, 'evidence', 'proof.jsonl'), '');
-  run('proof', f.t, '--in', 'catalog', '--test', 'T1', '--base', '--', 'no-such-runner');
-  run('proof', f.t, '--in', 'catalog', '--test', 'T1', '--base', '--', process.execPath, 'test/fail.mjs');
-  run('proof', f.t, '--in', 'catalog', '--test', 'T1', '--', 'true');
-  assert.match(L().stdout, /T1 red then green \| no \| green on HEAD's tree; no failing base run of the same command/);
-  f.plan(goodPlan(f.cat).replace('| plan | |', '| plan | |') + '\n## Risk\n| By | Level | Why |\n|---|---|---|\n| judge | high | reach |\n\n## Memos\n### M1: Show the fee?\n- Recommendation: yes\n- Decided: open\n');
-  const r = L();
-  assert.match(r.stdout, /approval \| no/);
-  assert.match(r.stdout, /memos decided \| no \| open: M1/);
-  f.plan(goodPlan(f.cat));
-  f.checks([...goodChecks, { ...goodChecks[0], id: 'C2', surface: ['S1'], verify: 'walk: the count after deploy', due: 'after deploy to staging in delivery 1', passes: false }]);
-  run('checks', f.t, '--delivery', '1', '--definition', f.def);
-  assert.match(L().stdout, /checks \| no \| checks due after this delivery's steps have not run/);
-  assert.match(run('checks', f.t, '--delivery', '1', '--after', '--definition', f.def).stdout, /C2 \[S1\]: fail: passes is not true/);
-  f.done();
-});
-
-test('links keeps a review across a base update that leaves the change the same', () => {
-  const f = ticket();
-  git(f.cat.path, 'branch', 'upstream');
-  writeFileSync(join(f.t, 'STATE.md'), readFileSync(join(f.t, 'STATE.md'), 'utf8').replace('from main at', 'from upstream at'));
-  const head = deliverable(f);
-  git(f.cat.path, 'checkout', '-q', 'upstream');
-  write(join(f.cat.path, 'docs/notes.md'), 'unrelated\n');
-  git(f.cat.path, 'add', '-A');
-  git(f.cat.path, 'commit', '-qm', 'base moves');
-  git(f.cat.path, 'checkout', '-q', 'main');
-  git(f.cat.path, 'rebase', '-q', 'upstream');
-  assert.notEqual(git(f.cat.path, 'rev-parse', 'HEAD'), head);
-  const r = run('links', f.t, '--delivery', '1', '--definition', f.def);
-  assert.match(r.stdout, /catalog reviewed \| yes \| review-1-1\.md names the same change on the earlier base/);
-  assert.match(r.stdout, /T1 red then green \| no/);
   f.done();
 });
