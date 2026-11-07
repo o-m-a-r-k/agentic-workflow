@@ -11,8 +11,7 @@ Started: <ISO time>
 Driven by: <harness> session <id>, last cycle <time>
 Profile: <name> | none
 Worktree <repo>: <path from this folder> on <branch>, from <base> at <sha>
-Delivery 1: <what it carries>: not ready | proven <time> | delivered <ISO time> <where>
-Step: take | understand | plan | judge | person | build | read | review | verify | deliver | audit | record and clean
+Delivery 1: <what it carries>: step <understand | plan | judge | person | build | read | review | verify | deliver | audit | clean> | held <why> | proven <time> | delivered <ISO time> <where>
 Plan: revision <n>; plan-shape <pass | fail n>; surface <hash>
 Rounds: <the delivery's line `rounds` printed>
 Approval: none | <the person's words>, <time>, revision <n>, surface <hash>

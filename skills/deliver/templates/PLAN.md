@@ -39,9 +39,9 @@ What is true in the users' world once this is delivered (the ticket as source), 
 
 ## Tests
 
-| ID | Behaviour or edge case | Test (file › name) | Asserts | Fails before |
-|---|---|---|---|---|
-| T1 | A renewal past the limit is refused | `src/loans/renew.test.ts › refuses the fourth renewal` | 409, the due date unchanged | yes |
+| ID | Behaviour or edge case | Test (file › name) | Asserts | Fails before | Delivery |
+|---|---|---|---|---|---|
+| T1 | A renewal past the limit is refused | `src/loans/renew.test.ts › refuses the fourth renewal` | 409, the due date unchanged | yes | 1 |
 
 ## What people see
 
