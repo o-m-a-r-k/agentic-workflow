@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.16.2
+
+From parallel tickets sharing one machine.
+
+- **`checks --only <id,...>` reruns just those commands** and keeps the others' results, when the last run was the same delivery on the same commits and the kept commands, with any oracle file they name, are unchanged; otherwise it runs nothing and exits 2. Walks are always re-read. Nobody merges results by hand.
+- **A `checks` run belongs to its ticket.** It holds `evidence/checks.run` while it runs, a ticket has one run at a time, and `checks <folder> --stop` ends that run and its command's process group, giving the command's own teardown a minute, and ends a command left by a run that was killed outright. A run that doesn't finish leaves no results. Workers no longer need to find a run by matching process names, which reached other tickets' runs.
+
 ## 0.16.1
 
 From the first tickets run on 0.16.0.

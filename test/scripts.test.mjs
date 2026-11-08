@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, realpathSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const scripts = join(dirname(fileURLToPath(import.meta.url)), '..', 'skills', 'deliver', 'scripts');
@@ -207,7 +207,7 @@ test('checks: oracles run from the definition folder, the allow-list is a prefix
     assert.match(r.stdout, want);
   assert.doesNotMatch(r.stdout, /C8/);
   const json = JSON.parse(readFileSync(f.ev('checks.json'), 'utf8'));
-  assert.deepEqual(Object.keys(json.results[0]).sort(), ['id', 'line', 'log', 'ok']);
+  assert.deepEqual(Object.keys(json.results[0]).sort(), ['id', 'line', 'log', 'ok', 'spec']);
   assert.match(readFileSync(f.ev('checks/C1.log'), 'utf8'), new RegExp(`--stack ${realpathSync(f.cat.path).replace(/[/.]/g, '\\$&')}`));
   write(f.ev('walk.md'), `walked at catalog@${git(f.cat.path, 'rev-parse', 'HEAD').slice(0, 9)}\n`);
   f.checks([walk]);
@@ -574,3 +574,94 @@ test('links needs the definition, and a delivery after a delivered one needs tha
   assert.deepEqual([line.cold_audit, line.audits_missing], [2, [2]]);
   f.done();
 });
+
+test('checks --only reruns the named command, keeps the others, and refuses when a kept result would not stand', () => {
+  const f = ticket();
+  write(join(f.cat.path, 'test/renew.mjs'), "import { appendFileSync } from 'node:fs';\nappendFileSync(process.env.CHECK_TICKET + '/renew.ran', 'x');\nconsole.log('renew done');\n");
+  write(join(f.cat.path, 'test/none.mjs'), "import { appendFileSync } from 'node:fs';\nappendFileSync(process.env.CHECK_TICKET + '/none.ran', 'x');\nconsole.log('none done');\n");
+  commit(f.cat.path, 'two commands');
+  const ran = (n) => (existsSync(join(f.t, `${n}.ran`)) ? readFileSync(join(f.t, `${n}.ran`), 'utf8').length : 0);
+  const a = { id: 'C1', surface: [], due: 'before delivery 1', verify: 'cmd: node test/renew.mjs', expect: 'renew done' };
+  const b = { ...a, id: 'C2', verify: 'cmd: node test/none.mjs', expect: 'wrong' };
+  f.checks([a, b]);
+  assert.equal(f.C('--only', 'C2').status, 2, 'no whole run yet');
+  assert.equal(ran('none'), 0);
+  assert.equal(f.C().status, 1);
+  f.checks([a, { ...b, expect: 'none done' }]);
+  assert.equal(f.C('--only', 'C1').status, 2, 'C2 changed since its result, and is not named');
+  const r = f.C('--only', 'C2');
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /checks: pass \(2\/2 due for delivery 1, reran C2\)/);
+  assert.deepEqual([ran('renew'), ran('none')], [1, 2]);
+  assert.equal(JSON.parse(readFileSync(f.ev('checks.json'), 'utf8')).ok, true);
+  assert.equal(f.C('--only', 'C9').status, 2, 'not due');
+  write(join(f.cat.path, 'later.txt'), 'x');
+  commit(f.cat.path, 'the tree moves');
+  assert.equal(f.C('--only', 'C2').status, 2, 'kept results are from another commit');
+  assert.equal(ran('none'), 2);
+  f.done();
+});
+
+test('checks --stop ends its own ticket\'s run and the command it started; a stopped run writes nothing and a ticket has one run', async () => {
+  const f = ticket();
+  const other = ticket();
+  const SLOW = "import { spawn } from 'node:child_process';\nimport { writeFileSync } from 'node:fs';\nconst c = spawn('sleep', ['120'], { stdio: 'inherit' });\nwriteFileSync(process.env.CHECK_TICKET + '/sleep.pid', String(c.pid));\nc.on('close', () => process.exit(0));\n";
+  for (const x of [f, other]) { write(join(x.cat.path, 'test/renew.mjs'), SLOW); commit(x.cat.path, 'slow'); x.checks([{ id: 'C1', surface: [], due: 'before delivery 1', verify: 'cmd: node test/renew.mjs', expect: 'never' }]); }
+  const start = (x) => spawn(process.execPath, [join(scripts, 'checks.mjs'), x.t, '--delivery', '1', '--definition', x.def], { env, stdio: 'ignore' });
+  const closed = (p) => new Promise((done) => p.on('close', (code, signal) => done(code ?? signal)));
+  const pidOf = async (x) => { for (let i = 0; i < 100 && !existsSync(join(x.t, 'sleep.pid')); i++) await new Promise((d) => setTimeout(d, 100)); return +readFileSync(join(x.t, 'sleep.pid'), 'utf8'); };
+  const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  const [p, q] = [start(f), start(other)];
+  const [pc, qc] = [closed(p), closed(q)];
+  const [sleep, otherSleep] = [await pidOf(f), await pidOf(other)];
+  assert.equal(f.C().status, 2, 'a second run on the ticket is refused');
+  assert.ok(existsSync(f.ev('checks.run')), 'the refused run leaves the holder in place');
+  assert.match(run('checks', f.t, '--stop').stdout, /stopped run/);
+  assert.equal(await pc, 143);
+  assert.equal(alive(sleep), false);
+  assert.equal(existsSync(f.ev('checks.run')), false);
+  assert.equal(existsSync(f.ev('checks.json')), false);
+  assert.ok(alive(otherSleep), 'the other ticket keeps running');
+  assert.match(run('checks', f.t, '--stop').stdout, /no run in progress/);
+  run('checks', other.t, '--stop');
+  await qc;
+  write(join(f.cat.path, 'test/renew.mjs'), "console.log('quick');\n");
+  commit(f.cat.path, 'quick');
+  write(f.ev('checks.run'), '999999\n');
+  assert.equal(f.C().status, 1, 'a file left by a crashed run does not hold the ticket');
+  f.done(); other.done();
+}, { timeout: 60000 });
+
+test('checks: a command that cannot start does not hide the next from --stop; a changed oracle is not kept; an unfinished run leaves no result; --stop refuses a wrong folder and ends what a killed run left', async () => {
+  const f = ticket();
+  const SLOW = "import { spawn } from 'node:child_process';\nimport { writeFileSync } from 'node:fs';\nconst c = spawn('sleep', ['120'], { stdio: 'inherit' });\nwriteFileSync(process.env.CHECK_TICKET + '/sleep.pid', String(c.pid));\nc.on('close', () => process.exit(0));\n";
+  write(join(f.cat.path, 'test/renew.mjs'), SLOW);
+  write(join(f.cat.path, 'test/none.mjs'), "console.log('none done');\n");
+  commit(f.cat.path, 'commands');
+  write(join(f.root, 'catalog/scripts/oracle.mjs'), "console.log('agree');\n");
+  const base = { surface: [], due: 'before delivery 1' };
+  const gone = { ...base, id: 'C0', verify: 'cmd: node ./catalog/scripts/oracle.mjs', expect: 'agree' };
+  const quick = { ...base, id: 'C1', verify: 'cmd: node test/none.mjs', expect: 'none done' };
+  f.checks([gone, quick]);
+  assert.equal(f.C().status, 0);
+  write(join(f.root, 'catalog/scripts/oracle.mjs'), "console.log('agree'); process.exit(1);\n");
+  assert.equal(f.C('--only', 'C1').status, 2, 'the oracle changed since its kept result');
+  assert.equal(run('checks', join(f.t, 'nope'), '--stop').status, 2);
+  // Started with no group of its own surviving: the runner is killed outright, the command stays.
+  rmSync(join(f.t, 'sleep.pid'), { force: true });
+  f.checks([quick, { ...base, id: 'C2', verify: 'cmd: node test/renew.mjs', expect: 'never' }]);
+  const pidOf = async () => { for (let i = 0; i < 100 && !existsSync(join(f.t, 'sleep.pid')); i++) await new Promise((d) => setTimeout(d, 100)); return +readFileSync(join(f.t, 'sleep.pid'), 'utf8'); };
+  const p = spawn(process.execPath, [join(scripts, 'checks.mjs'), f.t, '--delivery', '1', '--definition', f.def], { env, stdio: 'ignore' });
+  const closed = new Promise((d) => p.on('close', d));
+  const sleep = await pidOf();
+  assert.equal(existsSync(f.ev('checks.json')), false, 'replacing logs voids the last result');
+  p.kill('SIGKILL');
+  await closed;
+  const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  assert.ok(alive(sleep));
+  assert.match(run('checks', f.t, '--stop').stdout, /ended the command a killed run left/);
+  for (let i = 0; i < 50 && alive(sleep); i++) await new Promise((d) => setTimeout(d, 100));
+  assert.equal(alive(sleep), false);
+  assert.equal(existsSync(f.ev('checks.run')), false);
+  f.done();
+}, { timeout: 60000 });
