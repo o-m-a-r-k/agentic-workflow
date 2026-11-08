@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.16.1
+
+From the first tickets run on 0.16.0.
+
+- **Extras are shown before they become tickets.** An extra (a defect outside the ticket) is a finding like any other: it names the state that triggers it and shows it by running it. One the project's environments can't show is a lead in the handoff with what would show it, and opens no ticket. Investigate, implement, judge, review and the `STATE.md` template write it that way.
+- **No check asks for a clean run of what already fails on the base.** The investigator runs a whole suite the plan will rely on once on the base and lists what fails; the planner's check runs what the change must make true (the suites it touches, or the runner's exclusion of the base failures), and the base failures go under "Outside the ticket".
+- **No ticket waits open on an outside party.** A remaining delivery that can only wait for an outside party's answer or elapsed time (never the person's own memo or approval) becomes a follow-up ticket with its plan and its branch, listed first in the handoff as work not done, and the ticket moves to its delivered status; with nothing delivered yet, the ticket is held and the person told.
+- **The cold audit always runs, one file per delivery.** The auditor writes `evidence/audit-<n>.md` and records and cleans after the last one. `links` shows a broken `audit <k>` row for any other delivered delivery without one (wait for a running auditor rather than start another); `record` sums the findings and lists `audits_missing`. A 0.16.0 folder's `audit.md` is renamed on migration.
+- **`links` requires `--definition`.** Without it, it exits 2 instead of reporting the project's oracle kinds as missing.
+
 ## 0.16.0
 
 Tickets terminate in a fixed number of agent rounds, and wrong money, data and permissions are caught by comparing facts rather than by more rounds. Agents judge meaning; six small scripts count, match and compare, and none decides what the work is.

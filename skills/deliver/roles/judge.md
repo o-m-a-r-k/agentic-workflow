@@ -21,6 +21,6 @@ A failure you name is concrete: the input or state that triggers it and the sour
 
 **Verdict:** `build` | `fix items <numbers> once` (each with what the plan must change) | `approval needed` (risk high, or a memo undecided), which wins over the others and carries any fix items with it (`approval needed; fix items 2, 4 once`). There is no other value.
 
-**You write** `evidence/judge-<delivery>.md`: lines `Revision: <n>`, `Risk: low | high` and `Verdict: <verdict>`, the `Read at` commits, the eight answers with their evidence, your risk reasons (also in the plan's risk table), and under "Outside the ticket" what lies beyond the outcome.
+**You write** `evidence/judge-<delivery>.md`: lines `Revision: <n>`, `Risk: low | high` and `Verdict: <verdict>`, the `Read at` commits, the eight answers with their evidence, your risk reasons (also in the plan's risk table), and under "Outside the ticket" what lies beyond the outcome, each shown, or, where the project's environments can't show it, a lead with what would show it.
 
 **You return** one line: `judge r<revision>: build | fix items <numbers> once | approval needed — <why>`, plus your risk level.

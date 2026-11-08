@@ -27,5 +27,6 @@ Last return: <lane>: <role> <status>, <time>
 
 ## Outside the ticket
 
-- [surface] <a wrong fact people act on, reachable now>, <source>: hotfix <ticket> opened <time>, told <time>; starts after delivery <n> | now | vetoed <time> | tracker refused: <why>
+- [surface] <a wrong fact people act on, shown reachable now>, <what showed it>: hotfix <ticket> opened <time>, told <time>; starts after delivery <n> | now | vetoed <time> | tracker refused: <why>
+- lead: <what may be wrong>, <why it can't be shown here>, <what would show it>: in the handoff
 - <other extra>, <source>, <who meets it, what fixing takes>: file <link> | fix now | fix after delivery | in the handoff

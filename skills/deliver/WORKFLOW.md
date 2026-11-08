@@ -32,9 +32,9 @@ Approval is asked again only when a Surface line is added or removed, turns touc
 
 ## Scope
 
-The outcome as its users meet it, whatever they can't get it without and whatever the change caused or broke are the ticket's, fixed in it at their root. Everything else found on the way is extra, recorded under "Outside the ticket" in `STATE.md`:
+The outcome as its users meet it, whatever they can't get it without and whatever the change caused or broke are the ticket's, fixed in it at their root. Everything else found on the way is extra, recorded under "Outside the ticket" in `STATE.md`. An extra is a finding like any other: it names the state that triggers it and shows it by running it (a failing test, a query, the screen), the same as a review finding. One that can't be shown in the project's environments is a lead: it goes into the handoff with what would show it, and opens no ticket.
 
-- **A Surface extra,** a wrong fact people act on, reachable by users now, opens a hotfix ticket at once and the person is told at once; it starts after the current delivery unless they say now, and they can veto it. Where the tracker refuses the ticket, it is written in `STATE.md` and the handoff.
+- **A Surface extra,** a wrong fact people act on, shown reachable by users now, opens a hotfix ticket at once and the person is told at once; it starts after the current delivery unless they say now, and they can veto it. Where the tracker refuses the ticket, it is written in `STATE.md` and the handoff.
 - **A change to an oracle** is the ticket's when its outcome needs it; any other is its own ticket.
 - **Every other extra** goes into the handoff, the Surface's kinds first, each in plain words (what is wrong, who meets it, what fixing it would take) with a recommendation to file it, fix it now or after this delivery.
 
@@ -49,7 +49,7 @@ The type is one of four. The person names it in the session, unless the project 
 - **Enhancement:** behaviour that exists changes as asked, and everything that relies on it keeps working.
 - **New feature:** its users can do the new thing, correctly, in every real state.
 
-A small ticket uses few agents: a backend bug or hotfix is investigated and planned by one worker and has no reader, and the worker that delivers it records and cleans: six agents with one review, seven with an audit. Whatever the size, the one who checks is never the one who wrote, every plan is judged and every change is reviewed and verified.
+A small ticket uses few agents: a backend bug or hotfix is investigated and planned by one worker and has no reader, and the worker that delivers it records and cleans: seven agents with one review and the audit. Whatever the size, the one who checks is never the one who wrote, every plan is judged and every change is reviewed and verified.
 
 ## The steps
 
@@ -71,11 +71,11 @@ A small ticket uses few agents: a backend bug or hotfix is investigated and plan
 
 9. **Verify** on the final tree, in the target environment as the project defines it (`roles/verify.md`): each check as written, `checks` for the runnable ones, the walks through the product's real paths, screenshots of the named states, and the tests the reach covers. Every check due is true with an evidence file naming HEAD. A check that fails on that commit is this ticket's to fix, as a diff after review, unless it fails the same way on the base and the outcome doesn't need it, which is an extra.
 
-10. **Deliver.** `links` first: a broken link stops the delivery and names the worker to start; a held delivery still gets its handoff. Then a fresh delivery worker (`roles/deliver.md`) brings the branch up to date where needed, takes each irreversible step after `links` holds at that commit, confirms each from its output, and looks for the outcome where it lives. The handoff opens with the outcome and the evidence it is now true, pastes the `links` table, attaches the screenshots where the definition says, and lists the extras.
+10. **Deliver.** `links` first: a broken link stops the delivery and names the worker to start; a held delivery still gets its handoff. Then a fresh delivery worker (`roles/deliver.md`) brings the branch up to date where needed, takes each irreversible step after `links` holds at that commit, confirms each from its output, and looks for the outcome where it lives. The handoff opens with the outcome and the evidence it is now true, pastes the `links` table, attaches the screenshots where the definition says, and lists the extras. A remaining delivery that can only wait for what nobody in the session can produce (an outside party's answer, elapsed time; never the person's own memo or approval, which are asked) doesn't keep the ticket open: once every other delivery is delivered, the delivery worker opens a follow-up ticket carrying that delivery's plan, its branch if built (clean leaves it) and what it waits for, the handoff lists it first as work not done, and the ticket moves to its delivered status. If nothing is delivered yet, the ticket is held and the person told. Where the tracker refuses the follow-up, it goes in `STATE.md` and the handoff.
 
-11. **Cold audit.** Right after each delivery, a hotfix's guard delivery included, one fresh agent compares every fact on the Surface with its record, through the oracle for its kind (`roles/audit.md`). A kind with no oracle is named in the handoff as checked only by walk; a confirmed wrong fact opens a hotfix as Scope says.
+11. **Cold audit.** Right after each delivery, a hotfix's guard delivery included, one fresh agent compares every fact on the Surface with its record, through the oracle for its kind (`roles/audit.md`). A kind with no oracle is named in the handoff as checked only by walk; a confirmed wrong fact opens a hotfix as Scope says. `links` for the next delivery and `record` report a delivered delivery with no audit.
 
-12. **Record and clean,** after the last delivery and its audit, by the auditor, or by the delivery worker where no audit runs: `evidence/missed.md`, `record`, and removing what the ticket left (`roles/deliver.md`), the ticket folder last.
+12. **Record and clean,** after the last delivery and its audit, by the auditor: `evidence/missed.md`, `record`, and removing what the ticket left (`roles/deliver.md`), the ticket folder last.
 
 Rounds per delivery: one judge per revision, one reader, two reviews and the narrow third, counted by `rounds` from the exact evidence file names (`judge-<n>.md`, `read-<n>.md`, `review-<n>-<round>.md`). A judge past its cap refuses itself; an overrun is reported in the `links` table, the handoff and the record.
 

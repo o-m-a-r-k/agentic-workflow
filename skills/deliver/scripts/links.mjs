@@ -18,6 +18,10 @@ if (!d) {
   console.error('usage: node links.mjs <ticket-folder> --delivery <n> [--final] --definition <file> [--definition <file>]');
   process.exit(2);
 }
+if (!vals('--definition').length) {
+  console.error('links: --definition <project definition> is required: its oracles, screen_paths and nothing_ran decide rows');
+  process.exit(2);
+}
 const read = (p) => (existsSync(p) ? readFileSync(p, 'utf8') : '');
 const field = (t, k) => (t.match(new RegExp(`^${k}:[ \\t]*(.*)$`, 'm')) || [])[1]?.trim() ?? '';
 const section = (t, name) => {
@@ -200,6 +204,12 @@ if (seen && !/^none\b/i.test(seen)) {
     }
     row(`screenshot ${s}`, !why, why || 'shows what HEAD shows', 'verify');
   }
+}
+
+// Every other delivered delivery has its cold audit.
+for (const m of state.matchAll(/^Delivery (\d+):.*(?<!not )\bdelivered \d{4}-\d\d-\d\d/gm)) {
+  const k = +m[1];
+  if (k !== d) row(`audit ${k}`, names.includes(`audit-${k}.md`), names.includes(`audit-${k}.md`) ? `audit-${k}.md` : `delivery ${k} is delivered and has no evidence/audit-${k}.md`, 'audit');
 }
 
 // High risk (the higher of the header and the Risk table): approved at a revision, on the Surface as it stands.

@@ -355,7 +355,7 @@ test('record writes the counts from the files and counts earlier records as reop
   const f = ticket();
   f.plan(goodPlan(f.cat).replace('Risk: low', 'Risk: high').replace('## Decisions', '- S2 (fee): not touched: fees, `src/fees.ts:1`\n\n## Decisions'));
   for (const n of ['judge-1.md', 'review-1-1.md', 'review-1-2.md', 'review-1-2-notes.md', 'read-1.md']) write(f.ev(n), 'x');
-  write(f.ev('audit.md'), 'Findings: 1 confirmed\n');
+  write(f.ev('audit-1.md'), 'Findings: 1 confirmed\n');
   write(f.ev('missed.md'), '- the count was off by one on a renewed loan (review)\n');
   const records = join(f.root, 'records.jsonl');
   writeFileSync(records, JSON.stringify({ project: 'library-app', ticket: 'EX-1' }) + '\n');
@@ -366,6 +366,7 @@ test('record writes the counts from the files and counts earlier records as reop
     ['bug', 'high', 2, 1, 1, 2, false, 1, 1, 1, 1, 1, 1, '2026-01-05T15:00Z', null],
   );
   assert.deepEqual(line.missed, ['the count was off by one on a renewed loan (review)']);
+  assert.deepEqual(line.audits_missing, []);
   assert.deepEqual(line.surface_kinds, ['renewal-count', 'fee']);
   write(f.ev('judge-2.md'), 'a second judge, named as another delivery');
   run('record', f.t, '--records', records);
@@ -550,5 +551,26 @@ test('plan-shape and checks share one rule for an expect that can\'t fail', () =
     assert.equal(/can't fail|can fail/.test(run('plan-shape', f.t).stdout), !can, `plan-shape on "${expect}"`);
     assert.equal(/can't fail/.test(f.C().stdout), !can, `checks on "${expect}"`);
   }
+  f.done();
+});
+
+test('links needs the definition, and a delivery after a delivered one needs that one\'s audit; record sums audits and names the missing', () => {
+  const f = ticket();
+  deliverable(f);
+  assert.equal(run('links', f.t, '--delivery', '1').status, 2);
+  f.state('Delivery 2: the page: step deliver');
+  f.plan(goodPlan(f.cat).replace('1. The refusal; ships alone.', '1. The refusal; ships alone.\n2. The page.'));
+  const L2 = () => run('links', f.t, '--delivery', '2', '--definition', f.def);
+  assert.match(L2().stdout, /\| audit 1 \| no \| delivery 1 is delivered and has no evidence\/audit-1\.md \| audit \|/);
+  write(f.ev('audit-1.md'), 'Findings: 2\n');
+  assert.match(L2().stdout, /\| audit 1 \| yes \| audit-1\.md \|/);
+  f.state('Delivery 2: the page: step deliver\nDelivery 3: the report: delivered 2026-01-06T09:00Z main\nDelivery 4: the export: not delivered 2026-01-06 yet');
+  assert.match(L2().stdout, /\| audit 3 \| no \|/);
+  assert.doesNotMatch(L2().stdout, /\| audit 4 \|/);
+  f.state('Delivery 2: the page: delivered 2026-01-06T10:00Z main');
+  const records = join(f.root, 'records.jsonl');
+  run('record', f.t, '--records', records);
+  const line = JSON.parse(readFileSync(records, 'utf8').trim().split('\n').at(-1));
+  assert.deepEqual([line.cold_audit, line.audits_missing], [2, [2]]);
   f.done();
 });

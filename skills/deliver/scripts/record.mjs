@@ -2,7 +2,7 @@
 // record: writes the ticket's record line from its files, so no count is typed by hand.
 // Usage: node record.mjs <ticket-folder> [--records <file>]
 // The records file defaults to ~/.agents/records.jsonl, used only when ~/.agents exists; otherwise the line is printed only.
-// Reads STATE.md, PLAN.md, evidence/ file names, evidence/audit.md ("Findings: <n>"), evidence/missed.md ("- " lines)
+// Reads STATE.md, PLAN.md, evidence/ file names, evidence/audit-<n>.md ("Findings: <n>", summed; audits_missing lists delivered deliveries with none), evidence/missed.md ("- " lines)
 // and the earlier records. Appends one line. Exit 0 once written or printed.
 import { readFileSync, existsSync, readdirSync, appendFileSync } from 'node:fs';
 import { join, resolve, basename } from 'node:path';
@@ -45,7 +45,8 @@ const listed = (section(plan, 'Deliveries').match(/^\s*\d+\./gm) || []).map((x) 
 const over = ['judge', 'read', 'review'].some((k) => Object.entries(perDelivery(k)).some(([d, n]) => n > cap(k, d) || (listed.length && !listed.includes(d))));
 const type = (field(state, 'Type').toLowerCase().match(/^(hotfix|bug|enhancement|new feature)/) || [])[1] || null;
 const delivered = [...state.matchAll(/^Delivery \d+:.*\bdelivered (\S+)/gm)].map((m) => m[1].replace(/[,;]$/, '')).sort();
-const audit = read(join(ev, 'audit.md'));
+const audits = names.filter((f) => /^audit(?:-\d+)?\.md$/.test(f)).map((f) => read(join(ev, f)));
+const deliveredNos = [...state.matchAll(/^Delivery (\d+):.*(?<!not )\bdelivered \d{4}-\d\d-\d\d/gm)].map((m) => +m[1]);
 const missed = existsSync(join(ev, 'missed.md')) ? read(join(ev, 'missed.md')).split('\n').filter((l) => /^- /.test(l)).map((l) => l.slice(2).trim()) : null;
 const project = field(state, 'Project') || null;
 const ticket = field(state, 'Ticket') || basename(dir);
@@ -71,7 +72,8 @@ const line = {
   surface_kinds: [...new Set([...section(plan, 'Surface').matchAll(/^- S\d+ \(([^)]+)\)/gm)].map((m) => m[1].trim().toLowerCase()))],
   surface_draft: section(state, 'Surface').split('\n').filter((l) => /^- S\d+\b/.test(l)).length,
   surface_extras: section(state, 'Outside the ticket').split('\n').filter((l) => /^- \[surface\]/i.test(l)).length,
-  cold_audit: audit ? parseInt(field(audit, 'Findings'), 10) || 0 : null,
+  cold_audit: audits.length ? audits.reduce((n, a) => n + (parseInt(field(a, 'Findings'), 10) || 0), 0) : null,
+  audits_missing: deliveredNos.filter((k) => !names.includes(`audit-${k}.md`)),
   missed,
   profile: profile && profile !== 'none' ? profile : null,
 };

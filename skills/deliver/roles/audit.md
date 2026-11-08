@@ -9,8 +9,8 @@
 - A finding is confirmed by its evidence: the shown value or outcome, the stored or provider value, and where each was read. A disagreement you can't confirm is listed open, with what would confirm it.
 - Data access is read-only; anything that would write runs locally or on the project's test environment.
 
-- After the last delivery's audit, record and clean as `roles/deliver.md`'s last bullet says.
+- After the last delivery's audit, write your `audit-<n>.md` first, then record and clean as `roles/deliver.md`'s last bullet says.
 
-**You write** `evidence/audit.md`: a line `Findings: <confirmed count>`, then each Surface line with what you compared and what you saw, each confirmed finding marked `[surface]` with its evidence, and the open ones.
+**You write** `evidence/audit-<n>.md` for delivery `n`: a line `Findings: <confirmed count>`, then each Surface line with what you compared and what you saw, each confirmed finding marked `[surface]` with its evidence, and the open ones.
 
 **You return** one line: `audit: <confirmed> confirmed, <open> open`.

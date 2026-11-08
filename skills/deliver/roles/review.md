@@ -21,6 +21,6 @@ A finding starts `F<n>` and its `file:line`, carries `[S<n>]` when it touches a 
 
 **Verdict:** `clean` | `fix: <count>`, the count of `F<n>` findings below. There is no other value.
 
-**You write** the file `rounds` named (`evidence/review-<delivery>-<round>.md`): first a line `Commit: <repo>@<sha>` for each worktree you read (only these lines say what you read), then `Verdict: clean` or `Verdict: fix: <count>`, the eight answers with evidence, the findings under `## Findings`, your rulings, and under a `## Outside the ticket` heading what lies beyond the scope, a wrong fact people act on, reachable now, marked `[surface]`.
+**You write** the file `rounds` named (`evidence/review-<delivery>-<round>.md`): first a line `Commit: <repo>@<sha>` for each worktree you read (only these lines say what you read), then `Verdict: clean` or `Verdict: fix: <count>`, the eight answers with evidence, the findings under `## Findings`, your rulings, and under a `## Outside the ticket` heading what lies beyond the scope, a wrong fact people act on, shown reachable now, marked `[surface]`; one that can't be shown in the project's environments is a lead with what would show it.
 
 **You return** one line: `review <sha>: clean | fix: <count> findings`.
