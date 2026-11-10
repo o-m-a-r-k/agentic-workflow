@@ -31,6 +31,8 @@ const section = (t, name) => {
 const git = (cwd, ...a) => {
   try { return execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 1 << 28 }).trim(); } catch { return null; }
 };
+// A repository is its shared git folder, so every worktree and lane of it is the same repository.
+const repoOf = (w) => { const c = existsSync(w) && git(w, 'rev-parse', '--git-common-dir'); return c ? realpathSync(resolve(w, c)) : w; };
 function list(text, key) {
   const fm = (text.match(/^---\n([\s\S]*?)\n---/) || [])[1] || '';
   const m = fm.match(new RegExp(`^${key}:[ \\t]*(.*)$((?:\\n[ \\t]+- .*)*)`, 'm'));
@@ -48,7 +50,7 @@ const matches = (out, p) => { const rx = p.match(/^\/(.*)\/([a-z]*)$/s); return 
 const state = read(join(dir, 'STATE.md')), plan = read(join(dir, 'PLAN.md'));
 const ev = join(dir, 'evidence');
 const names = existsSync(ev) ? readdirSync(ev, { recursive: true }).map(String) : [];
-const trees = {}, bases = {}, baseRef = {}, heads = {}, headTrees = {};
+const trees = {}, bases = {}, baseRef = {}, heads = {}, headTrees = {}, repos = {};
 for (const m of state.matchAll(/^Worktree ([\w.-]+):[ \t]*(\S+)(?:.*?\bfrom (\S+))?.*?(?:at ([0-9a-f]{7,40}))?[ \t]*$/gm)) {
   if (!existsSync(resolve(dir, m[2]))) continue;
   const p = (trees[m[1]] = realpathSync(resolve(dir, m[2])));
@@ -56,11 +58,14 @@ for (const m of state.matchAll(/^Worktree ([\w.-]+):[ \t]*(\S+)(?:.*?\bfrom (\S+
   baseRef[m[1]] = m[3] ? [`origin/${m[3]}`, m[3]].find((b) => git(p, 'rev-parse', '--verify', '-q', b)) : null;
   heads[m[1]] = git(p, 'rev-parse', 'HEAD');
   headTrees[m[1]] = git(p, 'rev-parse', 'HEAD^{tree}');
+  repos[m[1]] = repoOf(p);
 }
 // The previous links table: a narrow third review it named stays earned.
 const earlier = read(join(ev, `links-${d}.md`));
 const proofs = read(join(ev, 'proof.jsonl')).split('\n').filter(Boolean).flatMap((l) => { try { return [JSON.parse(l)]; } catch { return []; } });
-const onHead = (p, r) => trees[r] === p.worktree && headTrees[r] === p.tree;
+// A line from before the repository was recorded whose worktree is gone counts as the repository STATE names it by.
+const repoOfLine = (p) => p.repository || (existsSync(p.worktree || '') ? repoOf(p.worktree) : repos[p.in] || p.worktree);
+const onHead = (p, r) => repoOfLine(p) === repos[r] && headTrees[r] === p.tree;
 const ranSomething = (p) => !nothingRan.some((x) => matches(p.log || '', x));
 const rows = [];
 const row = (link, ok, detail, worker = '') => rows.push({ link, ok, detail, worker: ok ? '' : worker });
@@ -146,14 +151,39 @@ const ignored = names.filter((f) => /^(judge|read|review)-/.test(f) && !Object.v
 if (ignored.length) rows.push({ link: 'ignored files', ok: true, detail: `not round files, not read: ${ignored.join(', ')}`, worker: '' });
 
 // Every tests row due by this delivery is green on HEAD's tree, having run something; a row that fails before the
-// change also went red on the base with the same command.
+// change also went red on the base with the same words in the same repository. A broken row says which link is
+// missing and the words to run; rows the same words prove are run once, listed under "Run" below the table.
+const same = (a, b) => repoOfLine(a) === repoOfLine(b) && (a.argv && b.argv ? JSON.stringify(a.argv) === JSON.stringify(b.argv) : a.command === b.command);
+const quote = (w) => (/^[\w@%+=:,./-]+$/.test(w) ? w : `'${w.replace(/'/g, `'\\''`)}'`);
+const runs = new Map();
+// A Run line: on HEAD unless marked --base; a line recorded before exact words were kept is printed as its text.
+const due = (p, id, onBase = false, r = Object.keys(trees).find((k) => k === p.in && repos[k] === repoOfLine(p)) || Object.keys(trees).find((k) => repos[k] === repoOfLine(p))) => {
+  if (!r) return `; ${p.in} is not a worktree STATE.md names`;
+  const k = `${r} ${onBase} ${p.argv ? JSON.stringify(p.argv) : p.command}`;
+  runs.set(k, { r, p, onBase, ids: [...(runs.get(k)?.ids || []), id] });
+  return `; run the words below${onBase ? ' with --base, on the base tree with only the test applied' : ''}`;
+};
 for (const c of testsRows) {
   const mine = proofs.filter((p) => p.test === c[0] && ranSomething(p));
   const green = mine.filter((p) => !p.base && p.exit === 0 && Object.keys(trees).some((r) => onHead(p, r)));
   const before = /^yes\b/i.test(c[4] || '');
-  const red = mine.filter((p) => p.base && typeof p.exit === 'number' && p.exit !== 0 && green.some((g) => g.command === p.command && g.worktree === p.worktree));
-  const lastLine = (red[0]?.log || '').trim().split('\n').at(-1)?.slice(0, 80);
-  row(before ? `${c[0]} red then green` : `${c[0]} green`, green.length > 0 && (!before || red.length > 0), `${green.length ? "green on HEAD's tree" : "no passing proof on HEAD's tree"}${before ? `; ${red.length ? `red on base, same command (last line: ${lastLine})` : 'no failing base run of the same command'}` : ''}`, 'implement');
+  const reds = mine.filter((p) => p.base && typeof p.exit === 'number' && p.exit !== 0);
+  const red = reds.filter((p) => green.some((g) => same(g, p)));
+  const ok = green.length > 0 && (!before || red.length > 0);
+  let why;
+  if (ok) why = `green on HEAD's tree${before ? `; red on base, same words (last line: ${(red[0].log || '').trim().split('\n').at(-1)?.slice(0, 80)})` : ''}`;
+  else if (!mine.length) why = `no proof line names ${c[0]}: run its test with --test ${c[0]} (one command proving several rows names them all)`;
+  else if (before && !reds.length) why = `no failing base run: run its test with --base on the base tree with only the test applied, then the same words on HEAD`;
+  else if (!green.length) {
+    const greens = mine.filter((p) => !p.base && p.exit === 0);
+    const dirty = Object.keys(trees).some((r) => repos[r] === repoOfLine(mine.at(-1)) && git(trees[r], 'status', '--porcelain'));
+    why = `${greens.length ? 'green only on an earlier tree' : 'never green'}${dirty ? ' (the worktree has uncommitted or untracked files, so no run there is on HEAD\'s tree until they are committed or removed)' : ''}${due(reds.at(-1) || mine.at(-1), c[0])}`;
+  } else {
+    // A red with the green's words in another repository (a clone) can't pair: run it again in this repository.
+    const elsewhere = reds.find((p) => green.some((g) => (g.argv && p.argv ? JSON.stringify(g.argv) === JSON.stringify(p.argv) : g.command === p.command)));
+    why = elsewhere ? `green on HEAD's tree; the base red ran in another repository (${elsewhere.worktree})${due(green.at(-1), c[0], true)}` : `green on HEAD's tree; the base red ran other words${due(reds.at(-1), c[0])}, so red and green share them`;
+  }
+  row(before ? `${c[0]} red then green` : `${c[0]} green`, ok, why, 'implement');
 }
 
 // checks ran for this delivery at these HEADs and passed (with --final, including those due after its steps).
@@ -238,6 +268,7 @@ const out = [
   '| Link | Holds | Detail | Start |',
   '|---|---|---|---|',
   ...rows.map((r) => `| ${r.link} | ${r.ok ? 'yes' : 'no'} | ${String(r.detail).replace(/\|/g, '/')} | ${r.worker} |`),
+  ...(runs.size ? ['', 'Run (each once, on HEAD unless it says --base; heavy ones when there is room):', ...[...runs.values()].map(({ r, p, onBase, ids }) => { const w = p.argv ? p.argv.map(quote).join(' ') : p.command; const out = (p.argv || p.command.split(' ')).some((x) => /(^|\/)evidence\/|^\/tmp\/|^\/private\/|\.log$/.test(x)); return `- proof ${quote(dir)} --in ${r} --test ${ids.join(',')}${onBase ? ' --base' : ''} -- ${w}${p.argv ? '' : '   (recorded as text before exact words were kept: group the words as the runner needs)'}${out ? '   (names an output path: remove it so this run does not overwrite another)' : ''}`; })] : []),
 ].join('\n');
 mkdirSync(ev, { recursive: true });
 writeFileSync(join(ev, `links-${d}.md`), out + '\n');

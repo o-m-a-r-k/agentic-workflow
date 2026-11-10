@@ -252,7 +252,7 @@ test('links reads only Commit: lines, and stops on a fix verdict, a crash-only r
   run('proof', f.t, '--in', 'catalog', '--test', 'T1', '--base', '--', 'no-such-runner');
   run('proof', f.t, '--in', 'catalog', '--test', 'T1', '--', 'no-such-runner');
   run('proof', f.t, '--in', 'catalog', '--test', 'T1', '--', process.execPath, 'test/none.mjs');
-  assert.match(f.L().stdout, /T1 red then green \| no \| no passing proof on HEAD's tree; no failing base run/);
+  assert.match(f.L().stdout, /T1 red then green \| no \| no failing base run: run its test with --base/);
   f.plan(goodPlan(f.cat) + '\n## Risk\n| By | Level | Why |\n|---|---|---|\n| judge | high | reach |\n\n## Memos\n### M1: Show the fee?\n- Due: before delivery 1\n- Recommendation: yes\n- Decided: open\n### M2: Badge colour\n- Due: before delivery 2\n- Recommendation: grey\n- Decided: open\n');
   const r = f.L();
   assert.match(r.stdout, /approval \| no/);
@@ -285,11 +285,11 @@ test('links: an open [S<n>] finding after review 2 needs review 3; a commit afte
   f.done();
 });
 
-test('links rejects a proof from another worktree, and asks for approval again only when what a Surface line must equal changes', () => {
+test('links rejects a proof from another repository, and asks for approval again only when what a Surface line must equal changes', () => {
   const f = ticket({ web: true });
   deliverable(f);
   const lines = readFileSync(f.ev('proof.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
-  writeFileSync(f.ev('proof.jsonl'), lines.map((l) => JSON.stringify(l.base ? l : { ...l, worktree: realpathSync(f.w.path) })).join('\n') + '\n');
+  writeFileSync(f.ev('proof.jsonl'), lines.map((l) => JSON.stringify(l.base ? l : { ...l, worktree: realpathSync(f.w.path), repository: realpathSync(join(f.w.path, '.git')) })).join('\n') + '\n');
   f.plan(goodPlan(f.cat).replace('Risk: low', 'Risk: high'));
   f.checks(goodChecks);
   const hash = run('plan-shape', f.t).stdout.match(/surface ([0-9a-f]{12})/)[1];
@@ -471,12 +471,104 @@ test('links: the judge must have judged this revision; a re-plan moves it aside,
   f.done();
 });
 
+test('proof names several rows with one run; links names why a row is refused and lists the words to run, once per command', () => {
+  const f = ticket();
+  deliverable(f);
+  const plan2 = goodPlan(f.cat).replace('| T2 | The page shows the count | (new) `loan.test.ts › shows the count` | the count | no | 2 |', '| T2 | The count is unchanged | `test/renew.mjs › keeps the count` | count unchanged | yes | 1 |');
+  f.plan(plan2);
+  // One command proves T1 and T2: a line for each, with its exact words and repository.
+  writeFileSync(f.ev('proof.jsonl'), '');
+  const words = [process.execPath, 'test/renew.mjs'];
+  git(f.cat.path, 'checkout', '-q', 'HEAD~1');
+  run('proof', f.t, '--in', 'catalog', '--test', 'T1,T2', '--base', '--', ...words);
+  git(f.cat.path, 'checkout', '-q', '-');
+  run('proof', f.t, '--in', 'catalog', '--test', 'T1,T2', '--', ...words);
+  const lines = readFileSync(f.ev('proof.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.deepEqual(lines.map((l) => l.test), ['T1', 'T2', 'T1', 'T2']);
+  assert.deepEqual(lines[0].argv, words);
+  assert.equal(lines[0].repository, realpathSync(join(f.cat.path, '.git')));
+  f.C();
+  assert.match(f.L().stdout, /T2 red then green \| yes \| green on HEAD's tree; red on base, same words/);
+  // A later commit: both rows are green only on an earlier tree, and one listed command proves them again.
+  write(join(f.cat.path, 'README.md'), 'renewals\n');
+  const head = commit(f.cat.path, 'docs');
+  write(f.ev('review-1-1.md'), `Commit: catalog@${head.slice(0, 12)}\nVerdict: clean\n`);
+  f.C();
+  let out = f.L().stdout;
+  assert.match(out, /T1 red then green \| no \| green only on an earlier tree; run the words below/);
+  const listed = out.split('\n').filter((l) => l.startsWith('- proof '));
+  assert.equal(listed.length, 1);
+  assert.match(listed[0], /--in catalog --test T1,T2 -- \S+ test\/renew\.mjs$/);
+  run('proof', f.t, '--in', 'catalog', '--test', 'T1,T2', '--', ...words);
+  out = f.L().stdout;
+  assert.match(out, /T1 red then green \| yes/);
+  assert.doesNotMatch(out, /^Run/m);
+  // A red run with other words than the green: the red's words are listed, so both run the same.
+  git(f.cat.path, 'checkout', '-q', f.cat.sha);
+  run('proof', f.t, '--in', 'catalog', '--test', 'T1', '--base', '--', process.execPath, './test/renew.mjs');
+  git(f.cat.path, 'checkout', '-q', '-');
+  writeFileSync(f.ev('proof.jsonl'), readFileSync(f.ev('proof.jsonl'), 'utf8').split('\n').filter((l) => !(l.includes('"T1"') && l.includes('"base":true') && !l.includes('./test'))).join('\n'));
+  out = f.L().stdout;
+  assert.match(out, /T1 red then green \| no \| green on HEAD's tree; the base red ran other words; run the words below/);
+  assert.match(out, /- proof \S+ --in catalog --test T1 -- \S+ \.\/test\/renew\.mjs$/m);
+  assert.match(out, /^Run \(each once, on HEAD unless it says --base/m);
+  // Untracked files in the worktree: no run there can be on HEAD's tree, and the row says so.
+  write(join(f.cat.path, 'shot.png'), 'x');
+  writeFileSync(f.ev('proof.jsonl'), readFileSync(f.ev('proof.jsonl'), 'utf8').split('\n').filter((l) => !(l.includes('"T1"') && l.includes('"base":false'))).join('\n') + '\n');
+  run('proof', f.t, '--in', 'catalog', '--test', 'T1', '--', process.execPath, './test/renew.mjs');
+  assert.match(f.L().stdout, /T1 red then green \| no \| green only on an earlier tree \(the worktree has uncommitted or untracked files/);
+  f.done();
+});
+
+test('links pairs runs by repository: a red in another worktree of the same repo counts, and so does a worktree STATE moved', () => {
+  const f = ticket();
+  const fixed = deliverable(f);
+  // The base red ran in a second checkout of the same repository.
+  const side = join(f.root, 'side');
+  git(f.cat.path, 'worktree', 'add', '-q', '--detach', side, f.cat.sha);
+  f.state(`Worktree side: ${side}`);
+  writeFileSync(f.ev('proof.jsonl'), readFileSync(f.ev('proof.jsonl'), 'utf8').split('\n').filter((l) => !l.includes('"base":true')).join('\n'));
+  run('proof', f.t, '--in', 'side', '--test', 'T1', '--base', '--', process.execPath, 'test/renew.mjs');
+  assert.match(f.L().stdout, /T1 red then green \| yes \| green on HEAD's tree; red on base, same words/);
+  // STATE now points catalog at another worktree of the same repository on the same commit: the green still holds.
+  const moved = join(f.root, 'moved');
+  git(f.cat.path, 'worktree', 'add', '-q', '--detach', moved, fixed);
+  edit(join(f.t, 'STATE.md'), /Worktree catalog: catalog/, `Worktree catalog: ${moved}`);
+  assert.match(f.L().stdout, /T1 red then green \| yes/);
+  f.done();
+});
+
+test('links: a red in a separate clone is named and listed as a base run here; an old line is printed as recorded; an output path is flagged', () => {
+  const f = ticket();
+  deliverable(f);
+  // The base red ran in a clone: same words, another repository.
+  const clone = join(f.root, 'basecopy');
+  git(f.root, 'clone', '-q', f.cat.path, clone);
+  git(clone, 'checkout', '-q', f.cat.sha);
+  f.state(`Worktree basecopy: ${clone}`);
+  writeFileSync(f.ev('proof.jsonl'), readFileSync(f.ev('proof.jsonl'), 'utf8').split('\n').filter((l) => !l.includes('"base":true')).join('\n'));
+  run('proof', f.t, '--in', 'basecopy', '--test', 'T1', '--base', '--', process.execPath, 'test/renew.mjs');
+  let out = f.L().stdout;
+  assert.match(out, /T1 red then green \| no \| green on HEAD's tree; the base red ran in another repository \(.*basecopy\); run the words below with --base/);
+  assert.match(out, /- proof \S+ --in catalog --test T1 --base -- \S+ test\/renew\.mjs$/m);
+  f.done();
+  // Lines from before exact words were kept: the red's text is printed as recorded, for the worker to group.
+  const g = ticket();
+  deliverable(g);
+  const old = readFileSync(g.ev('proof.jsonl'), 'utf8').trim().split('\n').map(JSON.parse).map(({ argv, repository, ...l }) => ({ ...l, command: `${l.command} -g says what to fix --reports evidence/red`, tree: l.base ? l.tree : 'old' }));
+  writeFileSync(g.ev('proof.jsonl'), old.map((l) => JSON.stringify(l)).join('\n') + '\n');
+  out = g.L().stdout;
+  assert.match(out, /T1 red then green \| no \| green only on an earlier tree; run the words below/);
+  assert.match(out, /--test T1 -- \S+ test\/renew\.mjs -g says what to fix --reports evidence\/red {3}\(recorded as text before exact words were kept: group the words as the runner needs\) {3}\(names an output path/);
+  g.done();
+});
+
 test('links: every due tests row is green on HEAD, a later delivery\'s row is not due, and "None." means no screen rows', () => {
   const f = ticket();
   deliverable(f);
   f.plan(goodPlan(f.cat).replace('| no | 2 |', '| no | 1 |') + '\n## What people see\nNone.\n');
   const r = f.L();
-  assert.match(r.stdout, /T2 green \| no \| no passing proof on HEAD's tree/);
+  assert.match(r.stdout, /T2 green \| no \| no proof line names T2: run its test with --test T2/);
   assert.doesNotMatch(r.stdout, /\| read \|/);
   f.plan(goodPlan(f.cat));
   assert.doesNotMatch(f.L().stdout, /T2/);

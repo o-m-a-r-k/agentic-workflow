@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.16.3
+
+From tickets whose `links` refused most tests rows although the tests had run red on the base and green on the change. On those tickets the rows were refused for different reasons: a run that proved several rows named only one, a green on a tree a later commit replaced, red and green run with different words, a red in another checkout of the same repository.
+
+- **`links` says why a tests row is refused and what to run.** Each refused row names its reason: no proof line names it, green only on an earlier tree (and when the worktree has files that keep any run off HEAD's tree), never green, no failing base run, or a base red with other words than the green. Below the table, `Run` lists each command to run once, with the rows it proves: the red's exact words on HEAD, or a base run where the red ran in another repository; a line recorded before exact words were kept is printed as its text, and a word that names an output path is flagged. An implementer sent back by `links`, and the delivery worker after a base update, run what it lists instead of choosing their own words.
+- **`proof --test` takes several rows** (`T3,T4`): one command proving several rows writes a line for each; a `--base` run names only the rows whose assertion was seen failing. Lines keep the command's exact words (`argv`) and its repository.
+- **Runs pair by repository, not by worktree path:** a red in another worktree of the same repository counts, and so does a green after STATE.md points the repo at another worktree on the same tree.
+
 ## 0.16.2
 
 From parallel tickets sharing one machine.
