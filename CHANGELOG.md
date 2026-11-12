@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.6
+
+- **The covering suites run before the build, as part of red then green.** The tests table holds the existing suites that cover what the change touches, at every level the project names for that kind of change, its slow environment-backed ones included, each narrowed to the touched area, never the whole suite. Before the challenge the planner runs every row on the base: a "fails before: yes" row fails on its assertion, and each other passes; a failure there is a defect already on the ground, which the design takes in. `plan-shape` requires a passing base run for every "no" row (a failure, a run of nothing or a run on a tree with source changed is not one). The implementer's green on HEAD then proves them, and they stand while nothing touches the change's files, so verify doesn't run them again. Heavy checks are left for suites that can't be narrowed. Before, a covering slow suite ran first at verification, after review, and a failure there sent the ticket back through the build.
+
 ## 0.16.5
 
 - A worktree path in `STATE.md` is read from the ticket folder or, failing that, from the nearest folder above it where it exists. Two tickets in a row wrote the path from the workspace (`.work/<ticket>/<repo>`) and every script then saw the worktree as missing.

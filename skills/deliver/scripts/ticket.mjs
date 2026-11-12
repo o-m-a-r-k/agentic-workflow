@@ -170,6 +170,12 @@ export function proofRules(T, def) {
     const d = [...new Set([w.at, w.base])].filter(Boolean).map((b) => names(w, b, p.tree));
     return d.some((fs) => fs.length > 0 && fs.every((f) => isTest(f, w.name)) && fs.some((f) => pathIs(f, row.file, w.name)));
   };
+  // A base pass: a passing base run of the row on a tree that differs from the base in test files alone, or not at all.
+  const isBasePass = (p, row) => {
+    const w = W(p);
+    if (!w || !p.base || !ran(p) || p.exit !== 0 || p.test !== row.id) return false;
+    return [...new Set([w.at, w.base])].filter(Boolean).some((b) => names(w, b, p.tree).every((f) => isTest(f, w.name)));
+  };
   const isGreen = (p) => { const w = W(p); return !!w && !p.base && ran(p) && p.exit === 0 && (p.tree === w.tree || (p.tree === git(w.path, 'rev-parse', `${p.head}^{tree}`) && stands(w, p.head))); };
-  return { isTest, stands, isRed, isGreen, ran, worktreeOf: W, changeFiles };
+  return { isTest, stands, isRed, isBasePass, isGreen, ran, worktreeOf: W, changeFiles };
 }

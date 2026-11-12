@@ -22,6 +22,7 @@ const RENEW_TEST = "import { renew } from './renew.ts';\n// refuses the fourth r
 const RENEW_CHECK = "import { readFileSync } from 'node:fs';\nconsole.log('1 test passed');\nprocess.exit(readFileSync('src/loans/renew.ts', 'utf8').includes('>= limit)') ? 1 : 0);\n";
 const ORACLE = (says) => `console.log(${JSON.stringify(says)});\n`;
 const RENEW_WORDS = [process.execPath, 'test/renew.mjs'];
+const PASS_WORDS = [process.execPath, '-e', "console.log('1 test passed')"];
 
 // A ticket folder with one worktree ("catalog"), optionally a second ("web"), and a project definition whose folder
 // holds a canonical copy of the catalog's oracle. f.plan and f.checks write as the planner does: then run plan-shape.
@@ -87,12 +88,13 @@ const goodChecks = [{ id: 'C1', proves: 'the count shown equals the stored count
 const walkCheck = { ...goodChecks[0], id: 'C5', surface: [], verify: 'walk: renew four times on the loan page' };
 const walked = (f, id, sha, result = 'pass') => write(f.ev(`walk-${id}.md`), `Check: ${id}\nCommit: catalog@${sha}\nResult: ${result}\nSeen: three renewals, the fourth refused\n`);
 
-// What the planner does before the challenge: the tests first, as the ticket branch's first commit, T1 red there,
-// and each check run once.
+// What the planner does before the challenge: the tests first, as the ticket branch's first commit, T1 red there, T2
+// passing there, and each check run once.
 function onBase(f) {
   write(join(f.cat.path, 'test/renew.mjs'), RENEW_CHECK + '// T1: refuses the fourth renewal\n');
   const first = commit(f.cat.path, 'tests first');
   run('proof', f.t, '--in', 'catalog', '--test', 'T1', '--base', '--', ...RENEW_WORDS);
+  run('proof', f.t, '--in', 'catalog', '--test', 'T2', '--base', '--', ...PASS_WORDS);
   f.checks(goodChecks);
   f.C();
   return { first, r: f.plan(goodPlan(f.cat)) };
@@ -542,7 +544,7 @@ test('proof names several rows with one run; links lists the words to run once p
   const f = ticket();
   const fixed = deliverable(f);
   const lines = readFileSync(f.ev('proof.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
-  assert.deepEqual(lines.map((l) => l.test), ['T1', 'T1', 'T2']);
+  assert.deepEqual(lines.map((l) => l.test), ['T1', 'T2', 'T1', 'T2']);
   assert.equal(lines[0].repository, realpathSync(join(f.cat.path, '.git')));
   write(join(f.cat.path, 'src/loans/renew.ts'), readFileSync(join(f.cat.path, 'src/loans/renew.ts'), 'utf8') + '// later\n');
   const head = commit(f.cat.path, 'a later change');
@@ -662,5 +664,28 @@ test('a worktree path in STATE.md is found from the ticket folder or a folder ab
   assert.equal(readTicket(f.t).worktrees.catalog.path, realpathSync(f.cat.path));
   line('nowhere/catalog');
   assert.equal(readTicket(f.t).worktrees.catalog.path, null);
+  f.done();
+});
+
+test('plan-shape: a row that passes before is run on the base first; a failure there, a run of nothing or a run on a changed source is not a pass', () => {
+  const f = ticket();
+  write(join(f.cat.path, 'test/renew.mjs'), RENEW_CHECK + '// T1: refuses the fourth renewal\n');
+  commit(f.cat.path, 'tests first');
+  run('proof', f.t, '--in', 'catalog', '--test', 'T1', '--base', '--', ...RENEW_WORDS);
+  f.checks(goodChecks);
+  f.C();
+  const missing = /T2: passes before, and no proof line shows it passing on the base/;
+  assert.match(f.plan(goodPlan(f.cat)).stdout, missing);
+  run('proof', f.t, '--in', 'catalog', '--test', 'T2', '--base', '--', process.execPath, '-e', "console.log('1 failed'); process.exit(1)");
+  assert.match(f.S().stdout, missing, 'a failure on the base is a defect already there, not a pass');
+  run('proof', f.t, '--in', 'catalog', '--test', 'T2', '--base', '--', process.execPath, 'test/none.mjs');
+  assert.match(f.S().stdout, missing, 'a run that ran nothing is not a pass');
+  edit(join(f.cat.path, 'src/loans/renew.ts'), '>=', '>= 0 +');
+  run('proof', f.t, '--in', 'catalog', '--test', 'T2', '--base', '--', ...PASS_WORDS);
+  assert.match(f.S().stdout, missing, 'a run on a tree with the source changed is not the base');
+  git(f.cat.path, 'checkout', '--', 'src/loans/renew.ts');
+  run('proof', f.t, '--in', 'catalog', '--test', 'T2', '--base', '--', ...PASS_WORDS);
+  const r = f.S();
+  assert.equal(r.status, 0, r.stdout);
   f.done();
 });

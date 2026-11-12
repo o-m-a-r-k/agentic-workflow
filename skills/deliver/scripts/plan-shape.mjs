@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // plan-shape: can every later script read this plan, does each citation resolve at the commits it names, and did each
-// check and each "fails before: yes" row run once on the base before the challenge?
+// check and each tests row run once on the base before the challenge, a "yes" row failing and a "no" row passing?
 // Usage: node plan-shape.mjs <ticket-folder> --definition <project definition> [--definition <its .local.md>]
 //        node plan-shape.mjs <ticket-folder> --print reader|approval
 // Reads PLAN.md, CHECKS.json, STATE.md, evidence/ (proof.jsonl, checks/<id>.log, walk-<id>.md), git, and the definition's
@@ -91,11 +91,13 @@ for (const q of T.questions) fail(`${q.slice(2).split(/[:\s]/)[0]}: open; the de
 if (!T.deliveries.length) fail('Deliveries: lists no "1." line');
 const beyond = (n) => n > Math.max(0, ...T.deliveries.map(Number));
 
-// Tests rows: an id, a file that exists or "(new)", yes or no, a delivery the plan has, and a "yes" row seen red.
+// Tests rows: an id, a file that exists or "(new)", yes or no, a delivery the plan has, a "yes" row seen red on the base
+// and a "no" row seen passing there.
 for (const r of T.tests) {
   if (!/^T\d+$/.test(r.id)) { fail(`tests row "${r.raw}": no T<n> id`); continue; }
   if (!/^(yes|no)\b/.test(r.before)) fail(`${r.id}: "Fails before" is not yes or no`);
   else if (r.before.startsWith('yes') && !T.proofs.some((p) => R.isRed(p, r))) fail(`${r.id}: fails before, and no proof line shows it red: commit its test first on the ticket branch and run it there with proof --base (a run that ran no tests, or ran on a tree with more than tests changed, is not red)`);
+  else if (!r.before.startsWith('yes') && !T.proofs.some((p) => R.isBasePass(p, r))) fail(`${r.id}: passes before, and no proof line shows it passing on the base: run it there with proof --base (a failure there is a defect already on the change's ground, which the plan takes in)`);
   if (r.delivery && beyond(r.delivery)) fail(`${r.id}: delivery ${r.delivery} is not in Deliveries`);
   if (r.isNew) continue;
   const h = r.file ? locate(r.file) : { err: 'names no file' };
