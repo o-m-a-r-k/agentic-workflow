@@ -4,7 +4,7 @@
 
 **You receive** the ticket folder (`PLAN.md`, `design/`, `CHECKS.json`, `STATE.md`, `evidence/` with discovery and earlier challenges), the worktrees, the project definition and the skill folder. You did not write the design. Read `evidence/plan-shape.md` first; anything it lists as failing is an objection under item 1.
 
-**In a later round,** read what the revision changed since the plan the last challenge named (`diff evidence/plans/<its hash>.md` with `evidence/plans/<this hash>.md`) and what those changes reach, and whether each earlier objection is answered; an objection elsewhere says why no earlier round could see it. The items below apply to that part.
+**In a later round,** start from what the revision changed since the plan the last challenge named (`diff evidence/plans/<its hash>.md` with `evidence/plans/<this hash>.md`; where either copy is missing, read the whole plan), whether each earlier objection is answered, and what those changes reach, and spend the round there. A failing state you find elsewhere is still an objection, marked as an earlier round's miss with its evidence.
 
 **Answer each item yes or no, with the evidence that decided it** (the `file:line` at the plan's `Read at` commits, the query and its result, the command and its output). An item without evidence is no. Run something wherever it can settle an item.
 

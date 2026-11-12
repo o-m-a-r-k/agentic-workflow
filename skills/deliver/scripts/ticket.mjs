@@ -11,6 +11,7 @@ export const git = (cwd, ...a) => { try { return execFileSync('git', a, { cwd, e
 export const vals = (args, k) => args.flatMap((a, i) => (a === k ? [args[i + 1]] : []));
 export const field = (t, k) => (t.match(new RegExp(`^[\\s>*_-]*${k}[*_]*:[*_]*[ \\t]*(.*)$`, 'im')) || [])[1]?.trim() ?? '';
 export const fields = (t, k) => [...t.matchAll(new RegExp(`^[\\s>*_-]*${k}[*_]*:[*_]*[ \\t]*(.*)$`, 'gim'))].map((m) => m[1].trim());
+export const designOf = (dir) => (existsSync(join(dir, 'design')) ? readdirSync(join(dir, 'design')).filter((f) => !f.startsWith('.')).sort().map((f) => `\n## design/${f}\n\n${read(join(dir, 'design', f))}`).join('') : '');
 export const section = (t, name) => { const s = t.split(/^## /m).find((c) => c.split('\n')[0].trim().toLowerCase() === name.toLowerCase()); return s ? s.slice(s.indexOf('\n') + 1) : ''; };
 export const sha = (t) => createHash('sha256').update(t).digest('hex').slice(0, 12);
 // One path form: no backticks, forward slashes, no leading ./
@@ -122,9 +123,9 @@ export function ticket(dir) {
     seen,
     // The states screenshots carry: `States: <name>, <name>`, short names only.
     states: seen && !/^none\b/i.test(seen) ? field(seen, 'States').split(',').map((s) => s.trim()).filter(Boolean) : null,
-    planHash: sha(`${plan}\n${read(join(dir, 'CHECKS.json'))}`),
-    // What a high-risk approval is of, and its hash: a revision that leaves these alone keeps the approval.
-    approval: ['Outcome', 'Risk', 'Surface', 'Decisions'].map((s) => `## ${s}\n${section(plan, s).trim()}`).join('\n\n'),
+    // The design documents count as the plan: a challenge or approval of a hash covers them too.
+    design: designOf(dir),
+    planHash: sha(`${plan}\n${read(join(dir, 'CHECKS.json'))}${designOf(dir)}`),
     proofs: read(join(ev, 'proof.jsonl')).split('\n').filter(Boolean).flatMap((l) => { try { return [JSON.parse(l)]; } catch { return []; } }),
   };
 }

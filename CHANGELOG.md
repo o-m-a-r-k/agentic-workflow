@@ -2,10 +2,11 @@
 
 ## 0.16.8
 
-From a new-feature ticket whose design took 7 hours over four challenge rounds on a 17,000-word plan, then an hour waiting on an approval the method says never holds the build.
+From a new-feature ticket whose design took 7 hours over four challenge rounds on a 17,000-word plan, then an hour waiting on an approval the method says never holds the build, and an approval asked again after each revision.
 
-- **A later challenge reads what the revision changed,** and what that reaches, as review's later rounds do; an objection elsewhere says why no earlier round could see it. `plan-shape` keeps a copy of the plan at each hash in `evidence/plans/`, so the change can be read.
-- **The high-risk approval is of what it shows:** `plan-shape --print approval` names the hash of the outcome, risk, Surface and decisions, and `links` holds the approval while those stand, so a revision elsewhere isn't asked again. It is sent in the same cycle that starts the build, which never waits for the answer.
+- **A later challenge starts from what the revision changed,** and what that reaches, and spends its round there; a failing state found elsewhere is still an objection, marked as an earlier round's miss. `plan-shape` keeps a copy of the plan, `CHECKS.json` and `design/` at each hash in `evidence/plans/`, so the change can be read; without a copy, the challenger reads the whole plan.
+- **The high-risk approval is asked once, when the design is ready,** in the same cycle that starts the build, which never waits for the answer.
+- **`design/` is part of the plan:** its documents count in the plan's hash, so a rewritten contract or state machine is challenged again, like any other revision.
 
 ## 0.16.7
 

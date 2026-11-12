@@ -15,7 +15,7 @@ Worktree <repo>: <path from this folder or a folder above it, or absolute> on <b
 Lane <name>: <path>, a lane's worktree, merged into its repo's
 Delivery 1: <what it carries>: step <discover | design | challenge | build | read | review | verify | release | audit | clean> | delivered <ISO time> <where>
 Plan: revision <n>; plan-shape <pass | fail n>; plan <hash>
-Approval: none | asked <time> | <the person's words>, <time>, approval <hash from plan-shape --print approval>
+Approval: none | asked <time> | <the person's words>, <time>, plan <hash>
 Waiting for: nothing | worker: <role, started time> | outside: <what, link>
 Left behind: none | <worker, run, server, container, data or file>: <created by, how to remove>
 Standing instructions: none | <the person's words, time>

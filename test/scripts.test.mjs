@@ -417,19 +417,23 @@ test('a red counts only on a tree that changes tests alone, the row\'s own among
   f.done();
 });
 
-test('links: risk is the plan\'s or the last a challenger stated; the approval names what it showed, and holds while that stands', () => {
+test('links: risk is the plan\'s or the last a challenger stated; the approval names the plan it approved', () => {
   const f = ticket();
   deliverable(f);
   f.challenge(2, 'build', 'Risk: high\n');
-  assert.match(f.L().stdout, /approval \| no .*does not name approval .* \| the person \|/);
-  const ah = run('plan-shape', f.t, '--print', 'approval').stdout.match(/^Approval of ([0-9a-f]{12})/)[1];
-  f.state(`Approval: "go ahead", 2026-01-05T10:00Z, approval ${ah}`);
+  assert.match(f.L().stdout, /approval \| no .*does not name plan .* \| the person \|/);
+  f.state(`Approval: "go ahead", 2026-01-05T10:00Z, plan ${f.hash()}`);
   assert.match(f.L().stdout, /approval \| yes/);
-  f.plan(goodPlan(f.cat).replace('| throws, count unchanged |', '| throws, and the count is unchanged |'));
-  f.challenge(3);
-  assert.match(f.L().stdout, /approval \| yes/, 'a revision that leaves what the approval showed alone keeps it');
-  assert.ok(existsSync(f.ev(`plans/${f.hash()}.md`)), 'plan-shape keeps a copy of the plan at each hash');
+  mkdirSync(join(f.t, 'design'), { recursive: true });
+  write(join(f.t, 'design', 'states.md'), 'free -> taken\n');
   f.plan(goodPlan(f.cat).replace('renewal count:', 'the renewal count, as stored:'));
+  assert.match(readFileSync(f.ev(`plans/${f.hash()}.md`), 'utf8'), /## CHECKS\.json[\s\S]*## design\/states\.md\n\nfree -> taken/, 'plan-shape keeps the plan, its checks and design/ at each hash');
+  const before = f.hash();
+  write(join(f.t, 'design', 'states.md'), 'free -> taken -> lost\n');
+  f.S();
+  assert.notEqual(f.hash(), before, 'a changed design document is a changed plan');
+  write(join(f.t, 'design', 'states.md'), 'free -> taken\n');
+  f.S();
   f.challenge(3);
   assert.match(f.L().stdout, /approval \| no/, 'a changed plan is approved again');
   f.challenge(4, 'build', 'Risk: low\n');
