@@ -38,7 +38,7 @@ function ticket({ web = false } = {}) {
     git(p, 'checkout', '-q', '-b', 'fix/EX-1');
     return { path: p, sha };
   };
-  const cat = repo('catalog', { 'src/loans/renew.ts': RENEW, 'src/loans/renew.test.ts': RENEW_TEST, 'scripts/oracle.mjs': ORACLE('0 disagreements'), 'test/renew.mjs': RENEW_CHECK, 'test/none.mjs': "console.log('No tests found')\n", Dockerfile: 'FROM node\nRUN true\n' });
+  const cat = repo('catalog', { 'src/loans/renew.ts': RENEW, 'src/loans/renew.test.ts': RENEW_TEST, 'scripts/oracle.mjs': ORACLE('0 disagreements'), 'test/renew.mjs': RENEW_CHECK, 'test/none.mjs': "console.log('No tests found')\n", 'test/old.mjs': "console.log('1 failed');\nprocess.exit(1);\n", Dockerfile: 'FROM node\nRUN true\n' });
   const w = web ? repo('web', { 'src/loans/renew.ts': RENEW, 'src/pages/loan.tsx': 'export const Loan = () => null;\n', 'messages/en.json': '{}\n' }) : null;
   write(join(root, 'catalog', 'scripts', 'oracle.mjs'), ORACLE('0 disagreements'));
   const state = (extra = '') => write(join(t, 'STATE.md'), [
@@ -92,6 +92,7 @@ const walked = (f, id, sha, result = 'pass') => write(f.ev(`walk-${id}.md`), `Ch
 // passing there, and each check run once.
 function onBase(f) {
   write(join(f.cat.path, 'test/renew.mjs'), RENEW_CHECK + '// T1: refuses the fourth renewal\n');
+  write(join(f.cat.path, 'src/loans/loan.test.ts'), '// T2: shows the count\n');
   const first = commit(f.cat.path, 'tests first');
   run('proof', f.t, '--in', 'catalog', '--test', 'T1', '--base', '--', ...RENEW_WORDS);
   run('proof', f.t, '--in', 'catalog', '--test', 'T2', '--base', '--', ...PASS_WORDS);
@@ -107,7 +108,8 @@ function deliverable(f, review = 'Verdict: clean') {
   edit(join(f.cat.path, 'src/loans/renew.ts'), '>=', '>= 0 +');
   const head = commit(f.cat.path, 'fix');
   write(f.ev('review-1-1.md'), `Commit: catalog@${head.slice(0, 12)}\n${review}\n`);
-  run('proof', f.t, '--in', 'catalog', '--test', 'T1,T2', '--', ...RENEW_WORDS);
+  run('proof', f.t, '--in', 'catalog', '--test', 'T1', '--', ...RENEW_WORDS);
+  run('proof', f.t, '--in', 'catalog', '--test', 'T2', '--', ...PASS_WORDS);
   assert.equal(f.C().status, 0);
   return head;
 }
@@ -531,7 +533,8 @@ test('a booking fact flows end to end: an appointment time on the Surface, its o
   f.challenge(1);
   edit(join(f.cat.path, 'src/loans/renew.ts'), '>=', '>= 0 +');
   const head = commit(f.cat.path, 'fix');
-  run('proof', f.t, '--in', 'catalog', '--test', 'T1,T2', '--', ...RENEW_WORDS);
+  run('proof', f.t, '--in', 'catalog', '--test', 'T1', '--', ...RENEW_WORDS);
+  run('proof', f.t, '--in', 'catalog', '--test', 'T2', '--', ...PASS_WORDS);
   write(f.ev('review-1-1.md'), `Commit: catalog@${head}\nVerdict: clean\n`);
   assert.match(f.C().stdout, /C1 \[S1\]: pass/);
   r = f.L();
@@ -552,8 +555,9 @@ test('proof names several rows with one run; links lists the words to run once p
   const out = f.L().stdout;
   assert.match(out, /T1 red then green \| no \| not green on a commit that stands for HEAD; run the words below/);
   const listed = out.split('\n').filter((l) => l.startsWith('- proof '));
-  assert.equal(listed.length, 1);
-  assert.match(listed[0], /--in catalog --test T1,T2 -- \S+ test\/renew\.mjs$/);
+  assert.equal(listed.length, 2, 'each row runs the words it ran on the base');
+  assert.match(listed[0], /--in catalog --test T1 -- \S+ test\/renew\.mjs$/);
+  assert.match(listed[1], /--in catalog --test T2 -- \S+ -e /);
   // The red ran in a second worktree of the same repository, named as a lane.
   const side = join(f.root, 'side');
   git(f.cat.path, 'worktree', 'add', '-q', '--detach', side, fixed);
@@ -670,6 +674,7 @@ test('a worktree path in STATE.md is found from the ticket folder or a folder ab
 test('plan-shape: a row that passes before is run on the base first; a failure there, a run of nothing or a run on a changed source is not a pass', () => {
   const f = ticket();
   write(join(f.cat.path, 'test/renew.mjs'), RENEW_CHECK + '// T1: refuses the fourth renewal\n');
+  write(join(f.cat.path, 'src/loans/loan.test.ts'), '// T2: shows the count\n');
   commit(f.cat.path, 'tests first');
   run('proof', f.t, '--in', 'catalog', '--test', 'T1', '--base', '--', ...RENEW_WORDS);
   f.checks(goodChecks);
@@ -687,5 +692,31 @@ test('plan-shape: a row that passes before is run on the base first; a failure t
   run('proof', f.t, '--in', 'catalog', '--test', 'T2', '--base', '--', ...PASS_WORDS);
   const r = f.S();
   assert.equal(r.status, 0, r.stdout);
+  f.done();
+});
+
+test('plan-shape: an existing test already failing on the base is a red as it stands; a base pass is in the row\'s repository, on a tree git can read; a new migration row needs none', () => {
+  const f = ticket({ web: true });
+  write(join(f.cat.path, 'src/loans/loan.test.ts'), '// T2: shows the count\n');
+  commit(f.cat.path, 'tests first');
+  run('proof', f.t, '--in', 'catalog', '--test', 'T1', '--base', '--', ...RENEW_WORDS);
+  f.checks(goodChecks);
+  f.C();
+  const missing = /T2: passes before, and no proof line shows it passing on the base/;
+  run('proof', f.t, '--in', 'web', '--test', 'T2', '--base', '--', ...PASS_WORDS);
+  assert.match(f.plan(goodPlan(f.cat)).stdout, missing, 'a pass in another repository is not the row\'s');
+  const line = JSON.parse(readFileSync(f.ev('proof.jsonl'), 'utf8').trim().split('\n')[0]);
+  writeFileSync(f.ev('proof.jsonl'), readFileSync(f.ev('proof.jsonl'), 'utf8') + JSON.stringify({ ...line, test: 'T2', exit: 0, tree: '0'.repeat(40), log: '1 test passed' }) + '\n');
+  assert.match(f.S().stdout, missing, 'a tree git cannot read is not a pass');
+  // T1 points at an existing test the ticket leaves untouched, already failing on the base: red as it stands.
+  const untouched = goodPlan(f.cat).replace('`test/renew.mjs › refuses the fourth renewal`', '`test/old.mjs › refuses the fourth renewal`');
+  run('proof', f.t, '--in', 'catalog', '--test', 'T1', '--base', '--', process.execPath, 'test/old.mjs');
+  run('proof', f.t, '--in', 'catalog', '--test', 'T2', '--base', '--', ...PASS_WORDS);
+  let r = f.plan(untouched);
+  assert.doesNotMatch(r.stdout, /T1: fails before, and no proof line shows it red/, r.stdout);
+  assert.doesNotMatch(r.stdout, missing, r.stdout);
+  // A new migration run up and down passes before only trivially; it needs no base pass.
+  r = f.plan(untouched.replace('| T2 | The page shows the count | (new) `loan.test.ts › shows the count` | the count | no | 1 |', '| T2 | The migration runs up and down | (new) `db/migrations/0002-count.sql` | up, down, up | no | 1 |'));
+  assert.doesNotMatch(r.stdout, /T2: passes before/, r.stdout);
   f.done();
 });

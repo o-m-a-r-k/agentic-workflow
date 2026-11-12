@@ -92,12 +92,12 @@ if (!T.deliveries.length) fail('Deliveries: lists no "1." line');
 const beyond = (n) => n > Math.max(0, ...T.deliveries.map(Number));
 
 // Tests rows: an id, a file that exists or "(new)", yes or no, a delivery the plan has, a "yes" row seen red on the base
-// and a "no" row seen passing there.
+// and a "no" row seen passing there, but a new one that isn't a test file (a migration run up and down).
 for (const r of T.tests) {
   if (!/^T\d+$/.test(r.id)) { fail(`tests row "${r.raw}": no T<n> id`); continue; }
   if (!/^(yes|no)\b/.test(r.before)) fail(`${r.id}: "Fails before" is not yes or no`);
-  else if (r.before.startsWith('yes') && !T.proofs.some((p) => R.isRed(p, r))) fail(`${r.id}: fails before, and no proof line shows it red: commit its test first on the ticket branch and run it there with proof --base (a run that ran no tests, or ran on a tree with more than tests changed, is not red)`);
-  else if (!r.before.startsWith('yes') && !T.proofs.some((p) => R.isBasePass(p, r))) fail(`${r.id}: passes before, and no proof line shows it passing on the base: run it there with proof --base (a failure there is a defect already on the change's ground, which the plan takes in)`);
+  else if (r.before.startsWith('yes') && !T.proofs.some((p) => R.isRed(p, r))) fail(`${r.id}: fails before, and no proof line shows it red: commit its test first on the ticket branch and run it there with proof --base (a run that ran no tests, or ran on a tree with more than tests changed, is not red; an existing test already failing there is red as it stands)`);
+  else if (!r.before.startsWith('yes') && !(r.isNew && r.file && !R.isTestFile(r.file)) && !T.proofs.some((p) => R.isBasePass(p, r))) fail(`${r.id}: passes before, and no proof line shows it passing on the base: run it there with proof --base, on the base as it is or narrowed to leave the new tests out (if it fails there, it is a defect already on the change's ground: the plan takes it in and the row becomes "yes")`);
   if (r.delivery && beyond(r.delivery)) fail(`${r.id}: delivery ${r.delivery} is not in Deliveries`);
   if (r.isNew) continue;
   const h = r.file ? locate(r.file) : { err: 'names no file' };

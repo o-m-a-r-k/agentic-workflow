@@ -54,21 +54,22 @@ else {
 }
 
 // Every tests row due is green on a commit that stands; a row that fails before the change also went red on the base
-// with the same words, in the same repository. The words to run are listed under "Run", once per command.
+// with the same words, in the same repository, and a row that passes before, where it passed on the base, too. The words to run are listed under "Run", once per command.
 const words = (p) => JSON.stringify(p.argv);
 const quote = (x) => (/^[\w@%+=:,./-]+$/.test(x) ? x : `'${x.replace(/'/g, `'\\''`)}'`);
 const runs = new Map();
 const toRun = (p, id, onBase) => { const w = R.worktreeOf(p); if (!w) return; const k = `${w.name} ${onBase} ${words(p)}`; runs.set(k, { w, p, onBase, ids: [...(runs.get(k)?.ids || []), id] }); };
 for (const t of T.tests.filter((x) => /^T\d+$/.test(x.id) && (!x.delivery || x.delivery <= d))) {
   const mine = T.proofs.filter((p) => p.test === t.id), before = t.before.startsWith('yes');
-  const reds = mine.filter((p) => R.isRed(p, t)), greens = mine.filter((p) => R.isGreen(p));
-  const paired = greens.filter((g) => !before || reds.some((r) => r.repository === g.repository && words(r) === words(g)));
+  const reds = mine.filter((p) => R.isRed(p, t)), passes = mine.filter((p) => R.isBasePass(p, t)), greens = mine.filter((p) => R.isGreen(p));
+  const firsts = before ? reds : passes;
+  const paired = greens.filter((g) => (!before && !passes.length) || firsts.some((r) => r.repository === g.repository && words(r) === words(g)));
   const ok = paired.length > 0;
   let why = ok ? `green on a commit that stands${before ? ', red on the base with the same words' : ''}` : '';
   if (ok) {} else if (!mine.length) why = `no proof line names ${t.id}: run its test with --test ${t.id}`;
   else if (before && !reds.length) why = 'no red on the base: on a tree that differs from the base only in tests, the row\'s own among them, run its test with --base and see it fail on its assertion';
   else if (!greens.length) { why = 'not green on a commit that stands for HEAD; run the words below'; toRun(reds.at(-1) || mine.at(-1), t.id, false); }
-  else { why = 'the base red and the green ran different words or repositories; run the words below'; toRun(reds.at(-1), t.id, false); }
+  else { why = `the base ${before ? 'red' : 'pass'} and the green ran different words or repositories; run the words below`; toRun(firsts.at(-1), t.id, false); }
   row(before ? `${t.id} red then green` : `${t.id} green`, ok, why, 'implement');
 }
 

@@ -140,7 +140,8 @@ export function proofRules(T, def) {
     const g = def.list('test_files');
     return (g?.length ? g : DEF).map((x) => new RegExp(`^${x.replace(/[.+^$()|[\]\\]/g, '\\$&').replace(/\*\*\//g, '\u0000').replace(/\*\*/g, '\u0001').replace(/\*/g, '[^/]*').replace(/\u0000/g, '(?:.*/)?').replace(/\u0001/g, '.*')}$`)); })();
   const nothingRan = def.list('nothing_ran') || [];
-  const isTest = (f, r) => tests.some((x) => x.test(f)) || T.tests.some((t) => t.file && pathIs(f, t.file, r));
+  const isTestFile = (f) => tests.some((x) => x.test(normPath(f)));
+  const isTest = (f, r) => isTestFile(f) || T.tests.some((t) => t.file && pathIs(f, t.file, r));
   const W = (p) => Object.values(T.worktrees).find((w) => w.path && w.repository === p.repository && !w.lane) || Object.values(T.worktrees).find((w) => w.path && w.repository === p.repository);
   const names = (w, a, b) => (git(w.path, 'diff', '--name-only', a, b) || '').split('\n').filter(Boolean);
   const changed = {};
@@ -160,22 +161,25 @@ export function proofRules(T, def) {
     const mine = changeFiles(w);
     return names(w, c, 'HEAD').every((f) => !mine.includes(f) || isTest(f, w.name) || also.some((x) => pathIs(f, x, w.name)));
   };
-  // A run ran something: an exit code, and output that matches no nothing_ran pattern. A red is a failing base run on
-  // a tree that differs from the base only in test files, the row's own among them. A green ran the row's words on a
-  // commit that stands for HEAD with a clean worktree, or on HEAD's tree.
+  // A run ran something: an exit code, and output that matches no nothing_ran pattern. A base run is one on a tree that
+  // differs from the base (or the commit STATE.md names) in test files alone, read from git, never assumed: the row's
+  // own file among them for a new test, or, for an existing test, that file present in the tree it ran on, so the run
+  // is in the row's repository. A red is such a run that failed; a base pass, one that passed. A green ran the row's
+  // words on a commit that stands for HEAD with a clean worktree, or on HEAD's tree.
   const ran = (p) => typeof p.exit === 'number' && !nothingRan.some((x) => matches(p.log || '', x));
-  const isRed = (p, row) => {
+  const onBaseOf = (p, row) => {
     const w = W(p);
-    if (!w || !p.base || !ran(p) || p.exit === 0 || p.test !== row.id) return false;
-    const d = [...new Set([w.at, w.base])].filter(Boolean).map((b) => names(w, b, p.tree));
-    return d.some((fs) => fs.length > 0 && fs.every((f) => isTest(f, w.name)) && fs.some((f) => pathIs(f, row.file, w.name)));
+    if (!w || !p.base || !ran(p) || p.test !== row.id) return false;
+    const has = () => (git(w.path, 'ls-tree', '-r', '--name-only', p.tree) || '').split('\n').some((f) => f && pathIs(f, row.file, w.name));
+    return [...new Set([w.at, w.base])].filter(Boolean).some((b) => {
+      const out = git(w.path, 'diff', '--name-only', b, p.tree);
+      if (out === null) return false;
+      const fs = out.split('\n').filter(Boolean);
+      return fs.every((f) => isTest(f, w.name)) && (fs.some((f) => pathIs(f, row.file, w.name)) || (!row.isNew && !!row.file && has()));
+    });
   };
-  // A base pass: a passing base run of the row on a tree that differs from the base in test files alone, or not at all.
-  const isBasePass = (p, row) => {
-    const w = W(p);
-    if (!w || !p.base || !ran(p) || p.exit !== 0 || p.test !== row.id) return false;
-    return [...new Set([w.at, w.base])].filter(Boolean).some((b) => names(w, b, p.tree).every((f) => isTest(f, w.name)));
-  };
+  const isRed = (p, row) => p.exit !== 0 && onBaseOf(p, row);
+  const isBasePass = (p, row) => p.exit === 0 && onBaseOf(p, row);
   const isGreen = (p) => { const w = W(p); return !!w && !p.base && ran(p) && p.exit === 0 && (p.tree === w.tree || (p.tree === git(w.path, 'rev-parse', `${p.head}^{tree}`) && stands(w, p.head))); };
-  return { isTest, stands, isRed, isBasePass, isGreen, ran, worktreeOf: W, changeFiles };
+  return { isTest, isTestFile, stands, isRed, isBasePass, isGreen, ran, worktreeOf: W, changeFiles };
 }
