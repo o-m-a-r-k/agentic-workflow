@@ -3,11 +3,9 @@
     "id": "C1",
     "proves": "<the behaviour this check proves, end to end, in the users' terms>",
     "surface": ["S1"],
-    "verify": "cmd: <a command starting with an entry of the definition's checks_allow, no shell> | walk: <the environment, the test account, the steps, what to capture>",
+    "verify": "cmd: <a command starting with an entry of the definition's checks_allow, no shell> | walk: <the environment, the test account, the steps, what to capture in evidence/walk-C1.md>",
     "in": "<repo whose worktree it runs in>",
     "expect": "<text the output holds, or /regex/; for a walk, what must be seen>",
-    "due": "before delivery <n> | after <the delivery step that reaches its environment> in delivery <n>",
-    "passes": false,
-    "evidence": "null until verified; then the path of a file in evidence/ (the run's log, or for a walk a file naming the commit with a seen: line)"
+    "due": "before delivery <n> | after <the delivery step that reaches its environment> in delivery <n>"
   }
 ]

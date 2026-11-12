@@ -6,12 +6,13 @@ Read at: <repo>@<sha>, <repo>@<sha>
 
 ## Outcome
 
-What is true in the users' world once this is delivered (the ticket as source), its most direct evidence, how soon; how this change reaches it.
+What is true in the users' world once this is delivered (the ticket as source), its most direct evidence, how soon; how this design reaches it from the current state (`evidence/discover-<angle>.md`).
 
 ## Deliveries
 
-1. The users' part: <what it carries>; ships alone, or why not.
-2. <the rest, when large>
+1. <the ticket's work>
+
+A second only when people are failing now and part 1 ends that sooner: who they are.
 
 ## Surface
 
@@ -20,22 +21,23 @@ What is true in the users' world once this is delivered (the ticket as source), 
 
 ## Risk
 
-| By | Level | Reach, reversibility, uncertainty (sources) |
-|---|---|---|
-| plan | | |
-| judge | | |
+Reach, reversibility, uncertainty, with sources.
+
+## Design
+
+The backend: contracts, data and migrations with their way back, state machines, sequences, idempotency and failure paths, linking the documents in `design/`. Every defect and impact Discover found, and where the design covers it.
 
 ## Decisions
 
 ### D1: <question>
 
 - Choice: <what>
-- Source: `src/loans/renew.ts:42` `if (loan.renewals >= limit)`
+- Source: `src/loans/renew.ts:42` `if (loan.renewals >= limit)`, or the decision judge's file with what its sources establish
 - Beats: <the alternative>, because <why>
 
-## Reach
+## Questions
 
-- <consumer or sibling>: `path:line`; covered by <T<n> | C<n> | an existing test, named>
+- Q1: <a product question no source here settles>: until the decision judge answers it and it becomes a decision.
 
 ## Tests
 
@@ -45,20 +47,10 @@ What is true in the users' world once this is delivered (the ticket as source), 
 
 ## What people see
 
-Purpose: who it is for, what they must come away knowing or doing.
+Purpose: who it is for, what they must come away knowing or doing, and whether it brings them value.
 Questions: their five to eight questions, in the order they bring them.
-States: <state> (<widths, languages, themes>), <state> (<…>)
-
-A state is a short name each of its screenshots carries, with the commit it shows.
+States: <name>, <name>
+Pictured at: <for each state, its widths, languages and themes>
 Follows: the product's best existing screen of the same kind.
 
 Write `None.` here when nothing people see changes.
-
-## Memos
-
-### M1: <product question>
-
-- Due: before delivery <n>
-- Options: each with what the users or the business get, and its cost.
-- Recommendation: <option>, because <why>.
-- Decided: open | <the person's answer, time>

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // plan-shape: can every later script read this plan, does each citation resolve at the commits it names, and did each
-// check and each "fails before: yes" row run once on the base before the judge?
+// check and each "fails before: yes" row run once on the base before the challenger?
 // Usage: node plan-shape.mjs <ticket-folder> --definition <project definition> [--definition <its .local.md>]
 //        node plan-shape.mjs <ticket-folder> --print reader
 // Reads PLAN.md, CHECKS.json, STATE.md, evidence/ (proof.jsonl, checks/<id>.log, walk-<id>.md), git, and the definition's
@@ -72,7 +72,7 @@ for (let m; (m = cite.exec(T.plan)); ) {
 // Every evidence file the plan names exists, with or without a line.
 for (const p of new Set(T.plan.match(/\bevidence\/[\w./-]*\w/g) || [])) if (!existsSync(join(dir, p))) fail(`${p}: missing from the ticket folder`);
 
-// Decisions name a source and the alternative they beat; questions are answered before the judge.
+// Decisions name a source and the alternative they beat; questions are answered before the design is challenged.
 const has = (block, k) => new RegExp(`^-[ \\t]*\\**${k}:\\**[ \\t]*\\S`, 'm').test(block);
 for (const d of T.decisions) {
   const id = d.split(/[:\s]/)[0];
@@ -116,7 +116,7 @@ for (const c of T.checks) {
   if (/^cmd:/.test(c.verify || '') && trivial(c.expect)) fail(`${id}: expect is empty or matches anything, so the check can't fail`);
   if (c.due && !/^(before delivery \d+|after .+ in delivery \d+)$/.test(c.due)) fail(`${id}: due is neither "before delivery <n>" nor "after <step> in delivery <n>"`);
   const ran = /^cmd:/.test(c.verify || '') ? `evidence/checks/${id}.log` : `evidence/walk-${id}.md`;
-  if (/^before/.test(c.due || '') && !existsSync(join(dir, ran))) fail(`${id}: never run on the base (no ${ran}): run it once before the judge`);
+  if (/^before/.test(c.due || '') && !existsSync(join(dir, ran))) fail(`${id}: never run on the base (no ${ran}): run it once before the challenge`);
 }
 
 // What people see: the states screenshots will carry, as short names.
@@ -124,16 +124,16 @@ if (T.states && !T.states.length) fail('What people see has no "States: <name>, 
 for (const s of T.states || []) if (!/^[\p{L}\p{N}][\p{L}\p{N}_-]*$/u.test(s)) fail(`States: "${s}" is not a short name; widths, languages and reasons go on other lines`);
 
 const hash = sha(T.surface.map((l) => l.key).join('\n'));
-// For the judge: a kept draft line whose record or touched state changed.
+// For the challenger: a kept draft line whose record or touched state changed.
 const pairs = T.draft.flatMap((d) => { const p = T.surface.find((l) => l.id === d.id); return p && p.key !== d.key ? [`- ${d.id} draft: ${d.text.slice(2)}`, `  ${d.id} plan:  ${p.text.slice(2)}`] : []; });
 const missingKinds = critical.filter((k) => !T.surface.some((l) => l.kind === k));
 const out = [
   `plan-shape: ${fails.length ? `fail ${fails.length}` : 'pass'}`,
   `revision ${T.revision || '?'}, risk ${T.risk || '?'}, ${T.plan.split(/\s+/).filter(Boolean).length} words, ${T.decisions.length} decisions, ${cites} citations, ${T.tests.length} tests rows, ${T.checks.length} checks, surface ${hash}, plan ${T.planHash}`,
   ...fails.map((f) => `- ${f}`),
-  ...(pairs.length ? ['', 'Surface lines whose meaning changed from the draft (for the judge):', ...pairs] : []),
-  ...(missingKinds.length ? ['', `Critical kinds with no Surface line (for the judge: does the change show or write one?): ${missingKinds.join(', ')}`] : []),
-  ...(unknownKinds.length ? ['', `Kinds the definition doesn't name (for the judge): ${unknownKinds.join(', ')}; it names ${kinds.join(', ') || 'none'}`] : []),
+  ...(pairs.length ? ['', 'Surface lines whose meaning changed from the draft (for the challenger):', ...pairs] : []),
+  ...(missingKinds.length ? ['', `Critical kinds with no Surface line (for the challenger: does the change show or write one?): ${missingKinds.join(', ')}`] : []),
+  ...(unknownKinds.length ? ['', `Kinds the definition doesn't name (for the challenger): ${unknownKinds.join(', ')}; it names ${kinds.join(', ') || 'none'}`] : []),
 ].join('\n');
 mkdirSync(T.ev, { recursive: true });
 writeFileSync(join(T.ev, 'plan-shape.md'), out + '\n');

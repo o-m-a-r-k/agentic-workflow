@@ -2,7 +2,7 @@
 // links: is every link between the proof and what would be delivered in place, at the trees it would deliver?
 // Usage: node links.mjs <ticket-folder> --delivery <n> [--final] --definition <project definition> [--definition <its .local.md>]
 //   --final  before the delivery's last step: checks due after its earlier steps must have passed too (checks --after)
-// Reads STATE.md, PLAN.md, CHECKS.json, evidence/ (plan-shape, judge, review and read Verdict:/Commit: lines,
+// Reads STATE.md, PLAN.md, CHECKS.json, evidence/ (plan-shape, challenge, review and read Verdict:/Commit: lines,
 // checks.json, proof.jsonl, screenshots) and git. Every comparison of proof is by tree: a commit whose tree is HEAD's
 // is HEAD. Writes evidence/links-<n>.md: one row per link, and for a broken one the worker to start.
 // Exit 1 when any link is broken. A round count over its cap is reported in the table, never a stop.
@@ -48,12 +48,12 @@ for (const r of Object.keys(W)) {
 // The plan as its planner last left it: only the planner writes PLAN.md and CHECKS.json, and runs plan-shape after.
 const left = (read(join(ev, 'plan-shape.md')).match(/\bplan ([0-9a-f]{12})\b/) || [])[1];
 row('plan as its planner left it', left === T.planHash, left === T.planHash ? `plan ${left}` : left ? `PLAN.md or CHECKS.json changed since plan-shape recorded plan ${left}: the planner reads the change, folds or rejects it, and runs plan-shape` : 'no plan-shape run with --definition', 'plan');
-// The plan judged at its current revision, by this delivery's judge or an earlier one.
+// The design challenged at its current revision: every challenge of that revision found no failing state ("build").
 const revision = (t) => (t.match(/revision[\s:*_]*r?(\d+)/i) || [])[1];
-const judges = T.names.filter((f) => +(f.match(/^judge-(\d+)\.md$/) || [0, 99])[1] <= d);
-const judge = judges.filter((f) => revision(read(join(ev, f))) === T.revision).at(-1);
-const judgeText = read(join(ev, judge || judges.at(-1) || '-'));
-row('plan judged', !!judge && !!verdict(judgeText), judge ? `${judge}: ${verdict(judgeText) || 'no Verdict: line'}, revision ${T.revision}` : judges.length ? `${judges.join(', ')} judged revision ${revision(judgeText) || '(none named)'}, the plan is ${T.revision}; after "plan wrong", move it aside and judge again` : `no judge-${d}.md`, 'judge');
+const challenges = T.names.filter((f) => /^challenge-\d+\.md$/.test(f) && revision(read(join(ev, f))) === T.revision);
+const challengeText = challenges.map((f) => read(join(ev, f))).join('\n');
+const open = challenges.filter((f) => verdict(read(join(ev, f))) !== 'build');
+row('design challenged', challenges.length > 0 && !open.length, !challenges.length ? `no challenge-<k>.md names revision ${T.revision}` : open.length ? `${open.join(', ')}: not build` : `${challenges.join(', ')}: build, revision ${T.revision}`, !challenges.length ? 'challenge' : 'plan, then challenge');
 
 // The last review: clean, or fixed and read again, up to the narrow third. Each changed worktree's tree is the one its
 // Commit: lines name, the same change on a moved base, or one whose diff since stays within its findings' files plus tests.
@@ -154,17 +154,17 @@ for (const m of T.state.matchAll(/^Delivery (\d+):.*(?<!not )\bdelivered \d{4}-\
   if (k !== d) row(`audit ${k}`, has, has ? `audit-${k}.md` : `delivery ${k} is delivered and has no evidence/audit-${k}.md`, 'audit');
 }
 
-// High risk (the plan's or its judge's): approved at a revision, on the Surface as it stands.
+// High risk (the plan's or a challenger's): approved at a revision, on the Surface as it stands.
 const hash = sha(T.surface.map((l) => l.key).join('\n'));
 const noOracle = [...new Set(T.surface.filter((l) => l.touched && !oracleKinds.includes(l.kind)).map((l) => l.kind || '(no kind)'))];
 if (noOracle.length) rows.push({ link: 'oracles', ok: true, detail: `no oracle for ${noOracle.join(', ')}: checked only by walk, as the handoff says`, worker: '' });
-if (T.risk === 'high' || /^[\s*_-]*risk[\s*_]*:[\s*_]*high/im.test(judgeText)) {
+if (T.risk === 'high' || /^[\s*_-]*risk[\s*_]*:[\s*_]*high/im.test(challengeText)) {
   const a = field(T.state, 'Approval'), ok = /revision \d+/.test(a) && a.includes(`surface ${hash}`);
   row('approval', ok, ok ? a : `Approval "${a || 'none'}" does not hold a revision and surface ${hash}`, 'the person');
 }
 
 // Round counts: reported, never a stop.
-const counts = ['judge', 'read', 'review'].map((k) => [k, roundsOf(T.names, k, d).length, cap(ev, k, d)]);
+const counts = ['read', 'review'].map((k) => [k, roundsOf(T.names, k, d).length, cap(ev, k, d)]);
 const over = counts.some(([, n, c]) => n > c);
 const broken = rows.filter((r) => !r.ok);
 const out = [

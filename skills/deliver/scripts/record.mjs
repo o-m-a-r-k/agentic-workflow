@@ -15,10 +15,10 @@ const records = vals(args, '--records')[0] ? resolve(vals(args, '--records')[0])
 const T = ticket(dir);
 if (!T.state) { console.error(`record: no STATE.md in ${dir}`); process.exit(1); }
 const names = T.names.filter((f) => !f.includes('/'));
-// Judges moved aside after "plan wrong" count as rounds; a round file over its cap, or for an unlisted delivery, is over.
-const count = (k) => names.filter((f) => ROUND[k].test(f) || (k === 'judge' && /^judge-\d+-r\d+\.md$/.test(f))).length;
+// A round file over its cap, or for an unlisted delivery, is over.
+const count = (k) => names.filter((f) => ROUND[k].test(f)).length;
 const ds = new Set(names.flatMap((f) => Object.values(ROUND).map((r) => (f.match(r) || [])[1]).filter(Boolean)));
-const over = [...ds].some((d) => ['judge', 'read', 'review'].some((k) => roundsOf(names, k, d).length > cap(T.ev, k, d)) || (T.deliveries.length && !T.deliveries.includes(d)));
+const over = [...ds].some((d) => ['read', 'review'].some((k) => roundsOf(names, k, d).length > cap(T.ev, k, d)) || (T.deliveries.length && !T.deliveries.includes(d)));
 const delivered = [...T.state.matchAll(/^Delivery (\d+):.*(?<!not )\bdelivered (\d{4}-\d\d-\d\d\S*)/gm)];
 const audits = names.filter((f) => /^audit(?:-\d+)?\.md$/.test(f)).map((f) => read(join(T.ev, f)));
 const missed = existsSync(join(T.ev, 'missed.md')) ? read(join(T.ev, 'missed.md')).split('\n').filter((l) => /^- /.test(l)).map((l) => l.slice(2).trim()) : null;
@@ -34,7 +34,7 @@ const line = {
   finished: new Date().toISOString(),
   risk: ['low', 'high'].includes(T.risk) ? T.risk : null,
   plan_revisions: +T.revision || 0,
-  judge_rounds: count('judge'),
+  challenge_rounds: names.filter((f) => /^challenge-\d+\.md$/.test(f)).length,
   read_rounds: count('read'),
   review_rounds: count('review'),
   rounds_over: over,
@@ -48,6 +48,8 @@ const line = {
   cold_audit: audits.length ? audits.reduce((n, a) => n + (parseInt(field(a, 'Findings'), 10) || 0), 0) : null,
   audits_missing: delivered.map((m) => +m[1]).filter((k) => !names.includes(`audit-${k}.md`)),
   missed,
+  // What was there before the change and found after the design: a miss of Discover.
+  discover_misses: missed && missed.filter((l) => /\bdiscover/i.test(l)).length,
   profile: profile && profile !== 'none' ? profile : null,
 };
 const text = JSON.stringify(line);

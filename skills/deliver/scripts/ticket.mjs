@@ -52,14 +52,14 @@ export function spawnArgs(argv) {
   return { argv, env: {} };
 }
 
-// A review's or judge's state is its `Verdict:` line, as models write it: "**Verdict:** Fix: 2." -> "fix"; "fix: 0" -> "clean".
+// A review's or challenge's state is its `Verdict:` line, as models write it: "**Verdict:** Fix: 2." -> "fix"; "fix: 0" -> "clean".
 export const verdict = (t) => { const v = ((t.match(/^[\s>#*_-]*verdict[\s*_`]*:[\s*_`]*(.+)$/im) || [])[1] || '').replace(/[*_`]/g, '').trim().toLowerCase(); return /^fix\w*:?\s*0\b/.test(v) ? 'clean' : (v.match(/^(clean|fix|build)/) || [])[1] || ''; };
 // The files a review's findings name: `path:line` under its "## Findings" heading, nowhere else.
 export const findingFiles = (t) => [...section(t, 'Findings').matchAll(/([^\s`'"()]+\.\w+):\d+/g)].map((m) => m[1]);
-export const ROUND = { judge: /^judge-(\d+)\.md$/, read: /^read-(\d+)\.md$/, review: /^review-(\d+)-(\d+)\.md$/ };
+export const ROUND = { read: /^read-(\d+)\.md$/, review: /^review-(\d+)-(\d+)\.md$/ };
 export const roundsOf = (names, kind, d) => names.filter((f) => (f.match(ROUND[kind]) || [])[1] === String(d)).sort((a, b) => +(a.match(/(\d+)\.md$/)[1]) - +(b.match(/(\d+)\.md$/)[1]));
 // A delivery's third review is the narrow one: review 2's verdict asked for fixes, or links named review 3 for a diff after review.
-export const cap = (ev, kind, d) => (kind !== 'review' ? 1 : verdict(read(join(ev, `review-${d}-2.md`))) === 'fix' || new RegExp(`\\| review-${d}-3\\b`).test(read(join(ev, `links-${d}.md`))) ? 3 : 2);
+export const cap = (ev, kind, d) => (kind === 'read' ? 1 : verdict(read(join(ev, `review-${d}-2.md`))) === 'fix' || new RegExp(`\\| review-${d}-3\\b`).test(read(join(ev, `links-${d}.md`))) ? 3 : 2);
 
 const LINE = /^- (S\d+)(?: \(([^)]+)\))?:[ \t]*(.*)$/;
 // A Surface line: `- S<n> (<kind>): <fact>: <where>; equals <its record>`, or `- S<n> (<kind>): not touched: <why>`.

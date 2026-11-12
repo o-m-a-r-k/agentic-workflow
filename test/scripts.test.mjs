@@ -81,7 +81,7 @@ ${extra}`;
 const goodChecks = [{ id: 'C1', proves: 'the count shown equals the stored count', surface: ['S1'], verify: 'cmd: node ./catalog/scripts/oracle.mjs --stack {worktree}', in: 'catalog', expect: '0 disagreements', due: 'before delivery 1' }];
 const walkCheck = { ...goodChecks[0], id: 'C5', surface: [], verify: 'walk: renew four times on the loan page' };
 
-// What the planner runs on the base before the judge: T1's red and each check once.
+// What the planner runs on the base before the challenge: T1's red and each check once.
 function onBase(f) {
   run('proof', f.t, '--in', 'catalog', '--test', 'T1', '--base', '--', ...RENEW_WORDS);
   f.checks(goodChecks);
@@ -89,12 +89,12 @@ function onBase(f) {
   return f.plan(goodPlan(f.cat));
 }
 
-// A delivery whose links all hold: judged, red then green with one command, reviewed at HEAD, checks passed.
+// A delivery whose links all hold: challenged, red then green with one command, reviewed at HEAD, checks passed.
 function deliverable(f, review = 'Verdict: clean') {
   onBase(f);
   edit(join(f.cat.path, 'src/loans/renew.ts'), '>=', '>= 0 +');
   const head = commit(f.cat.path, 'fix');
-  write(f.ev('judge-1.md'), 'Revision: 2\n**Verdict:** build\n');
+  write(f.ev('challenge-1.md'), 'Revision: 2\n**Verdict:** build\n');
   write(f.ev('review-1-1.md'), `Commit: catalog@${head.slice(0, 12)}\n${review}\n`);
   run('proof', f.t, '--in', 'catalog', '--test', 'T1', '--', ...RENEW_WORDS);
   assert.equal(f.C().status, 0);
@@ -114,12 +114,12 @@ test('plan-shape passes a plan whose citations resolve, whose red ran and whose 
 test('plan-shape fails what a later script could not read: drifted citations, a prose source, an open question, a missing evidence file, a prose States line, a row never red, a check never run', () => {
   const f = ticket();
   f.checks([{ ...goodChecks[0], surface: [] }, { ...goodChecks[0], id: 'C2', surface: ['S9'], expect: '/.*/s' }]);
-  const r = f.plan(goodPlan(f.cat, '\nSee `renew.ts:99`, `src/loans/gone.ts:1`, `renew.ts:3` `return null`, `app/[id]/page.tsx:3` and evidence/investigate-ground.md, not `127.0.0.1:5432`.\n\n## Questions\n- Q1: Show the fee on the receipt?\n\n## What people see\nPurpose: a member sees renewals left.\nStates: free (390 en ar, 1440 en), taken because the loan is overdue\n')
+  const r = f.plan(goodPlan(f.cat, '\nSee `renew.ts:99`, `src/loans/gone.ts:1`, `renew.ts:3` `return null`, `app/[id]/page.tsx:3` and evidence/discover-ground.md, not `127.0.0.1:5432`.\n\n## Questions\n- Q1: Show the fee on the receipt?\n\n## What people see\nPurpose: a member sees renewals left.\nStates: free (390 en ar, 1440 en), taken because the loan is overdue\n')
     .replace('Risk: low', 'Risk: medium').replace('- Beats: a check in the page, which a job would skip\n', '').replace('- S1 (', '- S9 (')
-    .replace(/- Source: .*/, '- Source: the investigation and the ticket'));
+    .replace(/- Source: .*/, '- Source: the discovery and the ticket'));
   assert.equal(r.status, 1);
   for (const want of [/app\/\[id\]\/page\.tsx:3: missing/, /renew\.ts:99: past the end/, /gone\.ts:1: missing/, /renew\.ts:3: `return null` is not on those lines/, /Risk: "medium"/, /D1: no Beats/, /D1: Source names no/, /C2: expect is empty or matches anything/, /S9: no check/, /S1: in STATE\.md's Surface draft/,
-    /Q1: open; the decision judge answers it/, /evidence\/investigate-ground\.md: missing/, /States: "taken because the loan is overdue" is not a short name/, /States: "free \(390/, /T1: fails before, and no red proof line names it/, /C1: never run on the base \(no evidence\/checks\/C1\.log\)/])
+    /Q1: open; the decision judge answers it/, /evidence\/discover-ground\.md: missing/, /States: "taken because the loan is overdue" is not a short name/, /States: "free \(390/, /T1: fails before, and no red proof line names it/, /C1: never run on the base \(no evidence\/checks\/C1\.log\)/])
     assert.match(r.stdout, want);
   assert.doesNotMatch(r.stdout, /127\.0\.0\.1/);
   assert.match(f.plan(goodPlan(f.cat).replace(/## Deliveries\n1\..*\n/, '## Deliveries\nall at once\n')).stdout, /Deliveries: lists no "1\." line/);
@@ -152,7 +152,6 @@ test('the Surface hash ignores wording and citations, changes with what a line m
 test('rounds counts exact names only, reads only Verdict: lines, earns a narrow third review from review 2\'s fix verdict, and refuses an unplanned delivery', () => {
   const f = ticket();
   f.plan(goodPlan(f.cat));
-  write(f.ev('judge-1.md'), 'x');
   assert.equal(run('rounds', f.t, 'review', '1').status, 0);
   write(f.ev('review-1-1.md'), 'Verdict: fix: 2\nF1 was here and F2 too, under no heading\n');
   write(f.ev('review-1-1-draft.md'), 'notes');
@@ -165,8 +164,8 @@ test('rounds counts exact names only, reads only Verdict: lines, earns a narrow 
   assert.match(run('rounds', f.t, 'review', '1').stdout, /refused: .*review-1-3\.md exist \(cap 3\)/);
   write(f.ev('review-1-2.md'), 'Verdict: clean\n');
   assert.equal(run('rounds', f.t, 'review', '1').status, 1);
-  assert.match(run('rounds', f.t).stdout, /delivery 1: judge 1\/1, read 0\/1, review 3\/2 over/);
-  assert.match(run('rounds', f.t, 'judge', '2').stdout, /refused: delivery 2 is not in the plan's Deliveries \(1\)/);
+  assert.match(run('rounds', f.t).stdout, /delivery 1: read 0\/1, review 3\/2 over/);
+  assert.match(run('rounds', f.t, 'read', '2').stdout, /refused: delivery 2 is not in the plan's Deliveries \(1\)/);
   f.done();
 });
 
@@ -267,7 +266,7 @@ test('links: a plan changed by anyone but its planner stops until the planner ru
   f.done();
 });
 
-test('links reads only Commit: and Verdict: lines, and stops on a fix verdict, a crash-only red, a nothing-ran green, a judge\'s high risk, and an after-step check', () => {
+test('links reads only Commit: and Verdict: lines, and stops on a fix verdict, a crash-only red, a nothing-ran green, a challenger\'s high risk, and an after-step check', () => {
   const f = ticket();
   const head = deliverable(f);
   write(join(f.cat.path, 'src/loans/other.ts'), 'x\n');
@@ -283,9 +282,9 @@ test('links reads only Commit: and Verdict: lines, and stops on a fix verdict, a
   run('proof', f.t, '--in', 'catalog', '--test', 'T1', '--', 'no-such-runner');
   run('proof', f.t, '--in', 'catalog', '--test', 'T1', '--', process.execPath, 'test/none.mjs');
   assert.match(f.L().stdout, /T1 red then green \| no \| no failing base run: run its test with --base/);
-  write(f.ev('judge-1.md'), 'Revision: 2\nRisk: high\nVerdict: build\n');
+  write(f.ev('challenge-2.md'), 'Revision: 2\nRisk: high\nVerdict: build\n');
   assert.match(f.L().stdout, /approval \| no .* \| the person \|/);
-  write(f.ev('judge-1.md'), 'Revision: 2\nVerdict: build\n');
+  rmSync(f.ev('challenge-2.md'));
   f.checks([...goodChecks, { ...walkCheck, id: 'C2', verify: 'walk: the count after deploy', due: 'after deploy to staging in delivery 1' }]);
   f.C();
   assert.match(f.L('--final').stdout, /checks \| no \| checks due after this delivery's steps have not run/);
@@ -391,7 +390,7 @@ test('a base update that leaves the change the same keeps the review and the wal
 test('record writes the counts from the files and counts earlier records as reopenings', () => {
   const f = ticket();
   f.plan(goodPlan(f.cat).replace('Risk: low', 'Risk: high').replace('## Decisions', '- S2 (fee): not touched: fees, `src/fees.ts:1`\n\n## Decisions'));
-  for (const n of ['judge-1.md', 'review-1-1.md', 'review-1-2.md', 'review-1-2-notes.md', 'read-1.md']) write(f.ev(n), 'x');
+  for (const n of ['challenge-1.md', 'challenge-2.md', 'review-1-1.md', 'review-1-2.md', 'review-1-2-notes.md', 'read-1.md']) write(f.ev(n), 'x');
   write(f.ev('audit-1.md'), 'Findings: 1 confirmed\n');
   write(f.ev('missed.md'), '- the count was off by one on a renewed loan (review; already there before the change: a discovery miss)\n');
   const records = join(f.root, 'records.jsonl');
@@ -399,16 +398,16 @@ test('record writes the counts from the files and counts earlier records as reop
   assert.equal(run('record', f.t, '--records', records).status, 0);
   const line = JSON.parse(readFileSync(records, 'utf8').trim().split('\n').at(-1));
   assert.deepEqual(
-    [line.type, line.risk, line.plan_revisions, line.judge_rounds, line.read_rounds, line.review_rounds, line.rounds_over, line.reopened, line.surface_lines, line.surface_not_touched, line.surface_draft, line.surface_extras, line.decisions, line.cold_audit, line.first_delivered, line.profile],
-    ['bug', 'high', 2, 1, 1, 2, false, 1, 1, 1, 1, 1, 1, 1, '2026-01-05T15:00Z', null],
+    [line.type, line.risk, line.plan_revisions, line.challenge_rounds, line.read_rounds, line.review_rounds, line.rounds_over, line.reopened, line.surface_lines, line.surface_not_touched, line.surface_draft, line.surface_extras, line.decisions, line.cold_audit, line.first_delivered, line.profile],
+    ['bug', 'high', 2, 2, 1, 2, false, 1, 1, 1, 1, 1, 1, 1, '2026-01-05T15:00Z', null],
   );
-  assert.equal(line.missed.length, 1);
+  assert.deepEqual([line.missed.length, line.discover_misses], [1, 1]);
   assert.deepEqual(line.audits_missing, []);
   assert.deepEqual(line.surface_kinds, ['renewal-count', 'fee']);
-  write(f.ev('judge-2.md'), 'a second judge, named as another delivery');
+  write(f.ev('read-2.md'), 'a reader, named as another delivery');
   run('record', f.t, '--records', records);
   assert.equal(JSON.parse(readFileSync(records, 'utf8').trim().split('\n').at(-1)).rounds_over, true);
-  assert.match(run('rounds', f.t).stdout, /delivery 2: judge 1\/1, read 0\/1, review 0\/2 \(not in the plan's Deliveries\)/);
+  assert.match(run('rounds', f.t).stdout, /delivery 2: read 1\/1, review 0\/2 \(not in the plan's Deliveries\)/);
   assert.equal(run('rounds', f.t).status, 1);
   f.done();
 });
@@ -443,7 +442,7 @@ test('a booking fact flows end to end: an appointment time on the Surface, its o
   assert.equal(r.status, 1);
   assert.match(r.stdout, /S1: the project names an oracle for appointment-time \(node \.\/tools\/time-check\.mjs --stack\), and no check of this line runs it/);
   assert.match(r.stdout, /Critical kinds with no Surface line .*: availability/);
-  assert.match(f.plan(booking.replace('(appointment-time)', '(time)')).stdout, /Kinds the definition doesn't name \(for the judge\): S1 \(time\); it names appointment-time, availability/);
+  assert.match(f.plan(booking.replace('(appointment-time)', '(time)')).stdout, /Kinds the definition doesn't name \(for the challenger\): S1 \(time\); it names appointment-time, availability/);
   assert.match(run('plan-shape', f.t, '--print', 'reader').stdout, /no What people see section/);
   f.plan(booking);
   f.checks([{ ...goodChecks[0], verify: 'cmd: node ./tools/time-check.mjs --stack {worktree} spec.json', expect: '0 disagreements' }]);
@@ -453,7 +452,7 @@ test('a booking fact flows end to end: an appointment time on the Surface, its o
   edit(join(f.cat.path, 'src/loans/renew.ts'), '>=', '>= 0 +');
   const head = commit(f.cat.path, 'fix');
   run('proof', f.t, '--in', 'catalog', '--test', 'T1', '--', ...RENEW_WORDS);
-  write(f.ev('judge-1.md'), 'Revision: 2\nVerdict: build\n');
+  write(f.ev('challenge-1.md'), 'Revision: 2\nVerdict: build\n');
   write(f.ev('review-1-1.md'), `Commit: catalog@${head}\nVerdict: clean\n`);
   assert.match(f.C().stdout, /C1 \[S1\]: pass/);
   r = f.L();
@@ -482,22 +481,17 @@ test('links: a diff after review 2 goes to a narrow review 3, and after it any f
   f.done();
 });
 
-test('links: the judge must have judged this revision; a re-plan moves it aside, a third is refused', () => {
+test('links: every challenge of the current revision found no failing state; a new revision needs its own', () => {
   const f = ticket();
   deliverable(f);
   f.plan(goodPlan(f.cat).replace('Revision: 2', 'Revision: 3'));
-  assert.match(f.L().stdout, /plan judged \| no \| judge-1\.md judged revision 2, the plan is 3/);
-  writeFileSync(f.ev('judge-1-r2.md'), readFileSync(f.ev('judge-1.md')));
-  rmSync(f.ev('judge-1.md'));
-  assert.match(run('rounds', f.t, 'judge', '1').stdout, /next: evidence\/judge-1\.md/);
-  write(f.ev('judge-1-r3.md'), 'Revision: 3');
-  assert.match(run('rounds', f.t, 'judge', '1').stdout, /refused: a third re-plan/);
-  rmSync(f.ev('judge-1-r3.md'));
-  write(f.ev('judge-1.md'), 'Revision: 3\nVerdict: build\n');
-  assert.match(f.L().stdout, /plan judged \| yes/);
-  const rec = join(f.root, 'r.jsonl');
-  run('record', f.t, '--records', rec);
-  assert.equal(JSON.parse(readFileSync(rec, 'utf8')).judge_rounds, 2);
+  assert.match(f.L().stdout, /design challenged \| no \| no challenge-<k>\.md names revision 3 \| challenge \|/);
+  write(f.ev('challenge-2.md'), 'Revision: 3\nVerdict: fix items 1\n');
+  write(f.ev('challenge-3.md'), 'Revision: 3\nVerdict: build\n');
+  assert.match(f.L().stdout, /design challenged \| no \| challenge-2\.md: not build \| plan, then challenge \|/);
+  write(f.ev('challenge-2.md'), 'Revision: 2\nVerdict: fix items 1\n');
+  assert.match(f.L().stdout, /design challenged \| yes \| challenge-3\.md: build, revision 3/);
+  assert.match(run('rounds', f.t).stdout, /plan revision 3, 3 challenges/);
   f.done();
 });
 
@@ -632,22 +626,19 @@ test('the test_files key and a non-ASCII kind name: a repair within a definition
   f.done();
 });
 
-test('links: a bare commit in the reader file, aside judges, and an unearned third review', () => {
+test('links: a bare commit in the reader file and an unearned third review', () => {
   const f = ticket({ web: true });
   const head = deliverable(f);
   f.plan(goodPlan(f.cat, `\n## What people see\nPurpose: renewals left.\nStates: free, taken\n`));
   write(f.ev('read-1.md'), `Commit read: ${f.cat.sha}\n`);
   write(f.ev(`screens/free-390-en-${head.slice(0, 10)}.png`), 'png');
-  write(f.ev('judge-1-r1.md'), 'Revision: 1');
   write(f.ev('review-1-2.md'), `Commit: catalog@${head}\nVerdict: clean\n`);
   write(f.ev('review-1-3.md'), `Commit: catalog@${head}\nVerdict: clean\n`);
   const r = f.L();
   assert.match(r.stdout, /screenshot free \| yes/);
   assert.match(r.stdout, /screenshot taken \| no \| no screenshot whose name holds "taken"/);
   assert.match(r.stdout, /reader catalog \| yes \| reader read .*screens changed since in catalog\/src\/loans\/renew\.ts/);
-  assert.doesNotMatch(r.stdout, /judge-1-r1\.md/);
   assert.match(r.stdout, /review 3\/2 \(over the cap/);
-  assert.match(run('rounds', f.t).stdout, /judge 1\/1 \(\+1 moved aside\)/);
   f.done();
 });
 

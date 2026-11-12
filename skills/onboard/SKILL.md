@@ -49,7 +49,7 @@ The deliver skill's scripts read these front-matter keys, each a list as `[a, b]
 - `nothing_ran`: what each runner prints when it ran no test (text or `/regex/flags`); such a run fails whatever its exit code.
 - `test_files`: globs of the project's test files (`**/*.test.*`, `tests/**`); unset, a default covers common layouts in JavaScript, TypeScript, Python, Go, Ruby, PHP, Java, Kotlin and C#. A change after review or a walk that touches only these and the findings' files keeps them standing.
 - `screen_paths`: `<repo>/<path>` prefixes of the screen source and locale files; a screenshot from an earlier commit stands while the diff since touches none, and a repo with no entry counts as all screen (`!<repo>` says a repo has none).
-- `surface_kinds`: the kinds of fact users act on that must never be wrong. A Surface line's kind is one of these or of `oracles`; `plan-shape` lists those a Surface leaves out, for the judge.
+- `surface_kinds`: the kinds of fact users act on that must never be wrong. A Surface line's kind is one of these or of `oracles`; `plan-shape` lists those a Surface leaves out, for the challenger.
 - `oracles`: a map, one indented `<kind>: <command>` line per kind that has one, each command also on `checks_allow`. A Surface line of that kind must have a check that runs it, and the cold audit runs for it; a kind with none is stated in the handoff.
 
 A screenshot is any file under `evidence/` whose name holds the state's name from the plan's `States:` line and the commit it shows (7 to 40 hex characters), such as `limit-reached-390-en-light-<sha>.png`.

@@ -1,49 +1,46 @@
 # agentic-workflow
 
-You give it a ticket, or a group of tickets, and they get delivered. You see the plan. You get one message per ticket: the product decisions, each with its options and a recommendation, and, for a high-risk change, the outcome and the facts people act on that it shows or writes, to approve.
+You give it a ticket, or a group of tickets, and they get delivered. Nothing waits on you: product decisions are decided by a fresh agent from established practice (vendors' documentation, standards, law, published research), with their sources, and listed in the handoff for you to overrule. The only thing you are asked, in one plain message, is approval of a change the project can't undo, and that holds only the irreversible delivery step.
 
-The plugin is four skills (deliver, onboard, test, design), the files they read, and six small Node scripts with no dependencies. Agents do the work and judge its meaning; fresh agents check it against raw sources (code, git, logs, data, the running app). The scripts count, match and compare: they check that a plan's citations resolve, count review rounds, record test runs, run each ticket's allow-listed checks (one run at a time per ticket, which only that ticket stops or partly reruns) and confirm every link before delivery. None of them decides what the work is, and no hook enforces anything. It works in Claude Code and in Codex.
+The plugin is four skills (deliver, onboard, test, design), the files they read, and six small Node scripts with no dependencies that share one reader of a ticket's files. Agents do the work and judge its meaning; fresh agents check it against raw sources (code, git, logs, data, the running app). The scripts count, match and compare: they check that a plan can be read by every later script and that its citations resolve, count review rounds, record test runs by the tree they ran on, run each ticket's allow-listed checks without rerunning what an identical tree already proved, and confirm every link before delivery. None of them decides what the work is, and no hook enforces anything. It works in Claude Code and in Codex.
 
 ## How it works
 
-Each ticket starts from its outcome: what is true for its users once it is delivered, and the most direct evidence of it. The orchestrator tracks how far the work is from that outcome and picks each next move by what shortens the distance; its type (hotfix, bug, enhancement, new feature) and size set how many agents work on it, and the outcome how deep each step goes; every plan is judged, and every change reviewed and verified:
+Each ticket starts from its outcome: what is true for its users once it is delivered, and the most direct evidence of it. Defects are found before the build, where they cost minutes: the work discovers the current state of everything the change touches, designs from it, and has the design attacked until nobody can name a state where it fails. Review and verification then find only what the build introduced. The ticket's size (hotfix, small, new feature, big change) sets how deep each step goes, from one table:
 
 1. take the ticket: a folder, fresh worktrees, and a first list of the facts its users act on that it shows or writes, such as amounts, appointment times or who may do what (its Surface);
-2. understand it, one pass per angle;
-3. plan it short: decisions with sources, a test table, the Surface with a runnable check per line;
-4. one fresh judge per plan revision answers eight questions; a second judge comes only after a builder finds the plan wrong;
-5. one message to you: product decisions, and approval of a high-risk outcome and Surface;
-6. build, each new test shown red on the base where it should fail, and green after;
-7. for a screen, one fresh reader who has only the screenshots and their purpose;
-8. review against eight questions, at most two rounds, then one narrow third only for a Surface fix or a change made after review;
-9. verify in the target environment;
-10. deliver, once a script confirms every link from proof to commit; a remaining delivery that can only wait on an outside party or elapsed time becomes a follow-up ticket once the rest is delivered;
-11. after each delivery, a cold audit compares every fact on the Surface with its record;
-12. record and clean up.
+2. discover: the current state of everything the change touches, what is already broken there, every impact, and a reproduction for a bug, each finding shown by running something;
+3. design: from the outcome and the current state, the screen's purpose (by the `design` skill) and the backend's contracts, data, migrations, state machines and failure paths, with diagrams where there are states; the acceptance tests, each seen failing on the base, and every check run once on the base;
+4. challenge: fresh challengers attack the design; each objection names a state where it fails; the designer revises until none can, and a decision judge rules on product questions and disputes, with sources;
+5. build, red then green against the acceptance tests;
+6. for a screen, one fresh reader who has only the screenshots and their purpose;
+7. review, at most two rounds and a narrow third, alongside 8. verification in the target environment; anything there before the change is fixed in that round and counted as a discovery miss;
+9. release, one delivery unless people are failing now, once a script confirms every link from proof to tree;
+10. after each delivery, a cold audit compares every fact on the Surface with its record; then record and clean up.
 
-Every loop has a limit. A third "plan wrong" holds the ticket; a finding on the outcome or the Surface still open after the narrow third review holds the delivery; either way you get the evidence. Findings outside the outcome left after round 2 go into the handoff. Nothing on the Surface or in the outcome is dropped to get it through.
+A finding still open after the narrow third review holds the delivery, with the evidence. Nothing on the Surface or in the outcome is dropped to get it through.
 
 ```mermaid
 flowchart TD
-  T["1 Take: worktrees, outcome, Surface draft"] --> U["2 Understand: one pass per angle"]
-  U --> P["3 Plan: decisions, tests, Surface checks"]
-  P --> J["4 Judge: one per plan revision"]
-  J -- "product decisions or high risk" --> Y["5 You: one message"]
-  J --> B["6 Build: new tests red, then green"]
-  Y --> B
-  B -- "plan wrong (3rd time: ticket held)" --> P
-  B --> Rd["7 Read screens, once"]
-  Rd --> Rv["8 Review"]
+  T["1 Take: worktrees, outcome, Surface draft"] --> Di["2 Discover: current state, defects, impacts"]
+  Di --> De["3 Design: purpose, contracts, data, acceptance tests run on the base"]
+  De --> Ch["4 Challenge: a failing state, or build"]
+  Ch -- "objection: revise" --> De
+  De -. "product question or dispute" .-> Dj["Decision judge: sources, reversible pick"]
+  Dj -.-> De
+  Ch --> B["5 Build: red, then green"]
+  B -- "plan wrong" --> De
+  B --> Rd["6 Read screens, once"]
+  Rd --> Rv["7 Review"]
+  B --> V["8 Verify on the final tree"]
   Rv -- "findings: fix (2 rounds, then a narrow third)" --> B
-  Rv --> V["9 Verify on the final tree"]
   V -- "defect: fix, narrow review" --> B
-  V --> L["10 links: every proof to its commit"]
-  L --> D["Deliver"]
-  D --> A["11 Cold audit: Surface vs records"]
-  D -- "next delivery (its links need this audit)" --> B
-  A --> C["12 Record and clean"]
+  Rv --> L["links: every proof to its tree"]
+  V --> L
+  L --> R["9 Release (high risk: your approval first)"]
+  R --> A["10 Cold audit, record, clean"]
   A -. "wrong fact" .-> H["New hotfix ticket"]
-  D -. "only an outside wait left" .-> F["Follow-up ticket"]
+  R -. "decision overruled" .-> N["Next delivery"]
 ```
 
 The full method is [`skills/deliver/WORKFLOW.md`](skills/deliver/WORKFLOW.md). It takes about fifteen minutes to read.
@@ -68,7 +65,7 @@ Claude Code sets each worker's effort from version 2.1.292, and reads `AGENTS.md
 
 ## Use
 
-Four skills: `deliver`, `onboard`, `test`, which planning, building and review follow so every test earns its place, and `design`, which they follow for anything people see.
+Four skills: `deliver`, `onboard`, `test`, which design, building and review follow so every test earns its place, and `design`, which they follow for anything people see.
 
 1. **Onboard a project once:** ask for the `onboard` skill. An agent describes how your project delivers, from its repos, CI and your words, then proves the description by walking a practice ticket through every safe step, and shows you what it found, what it proved and what proving a change costs. Run it again at any time. It writes only what you confirm.
 2. **Deliver:** ask for the `deliver` skill with one or more tickets and their type, for example "deliver EX-41 and EX-42, both bugs".
