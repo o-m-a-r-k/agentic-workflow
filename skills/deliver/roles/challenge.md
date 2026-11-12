@@ -10,7 +10,7 @@
 2. Built exactly, the outcome holds for its users in every state you tried, through real paths; list them: each state the data can be in, existing data at real volume, a migration and its way back, the same event twice or at once, a write that fails halfway, consumers beyond the worktrees, and on a screen its empty, loading and error states.
 3. Every defect and impact Discover found is covered; for a bug or hotfix the cause is removed, not routed around.
 4. No Surface line can be wrong through a real path, a line marked "not touched" included. Each line's check would fail on the wrong state (name that state and how the check reads the record apart from the code that shows the fact). Each rule a Surface fact follows has one owner.
-5. What people see answers its purpose and follows the plugin's `design` skill; each contract, migration and state machine is complete.
+5. What people see answers its purpose and follows the plugin's `design` skill; each contract, migration and state machine is complete; the structure keeps one owner per rule and follows the codebase's patterns, and a breach names the rule it duplicates or the coupling it adds and where that drifts.
 6. Each acceptance test catches a failure that matters and was seen failing on the base where it says it does.
 7. The design carries nothing the outcome doesn't need; it is one delivery, or a split names the people failing now whom the first part helps sooner.
 8. Risk is high when the definition's way of undoing a delivery can't reverse what the change does, else low; where the evidence is equal, the higher stands.
