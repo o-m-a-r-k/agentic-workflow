@@ -7,7 +7,7 @@ import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { spawnArgs, verdict } from '../skills/deliver/scripts/ticket.mjs';
+import { spawnArgs, verdict, ticket as readTicket } from '../skills/deliver/scripts/ticket.mjs';
 
 const scripts = join(dirname(fileURLToPath(import.meta.url)), '..', 'skills', 'deliver', 'scripts');
 const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.com', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.com', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
@@ -654,3 +654,13 @@ test('checks: an unfinished run leaves no result; --stop refuses a wrong folder 
   assert.equal(existsSync(f.ev('checks.run')), false);
   f.done();
 }, { timeout: 60000 });
+
+test('a worktree path in STATE.md is found from the ticket folder or a folder above it', () => {
+  const f = ticket();
+  const line = (p) => writeFileSync(join(f.t, 'STATE.md'), readFileSync(join(f.t, 'STATE.md'), 'utf8').replace(/^Worktree catalog: \S+/m, `Worktree catalog: ${p}`));
+  line('EX-1/catalog');
+  assert.equal(readTicket(f.t).worktrees.catalog.path, realpathSync(f.cat.path));
+  line('nowhere/catalog');
+  assert.equal(readTicket(f.t).worktrees.catalog.path, null);
+  f.done();
+});

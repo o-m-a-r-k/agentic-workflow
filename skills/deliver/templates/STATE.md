@@ -11,7 +11,7 @@ Target: <delivery target>, delivered status <status>
 Started: <ISO time>
 Driven by: <harness> session <id>, last cycle <time>
 Profile: <name> | none
-Worktree <repo>: <path from this folder, or absolute> on <branch>, from <base> at <sha>
+Worktree <repo>: <path from this folder or a folder above it, or absolute> on <branch>, from <base> at <sha>
 Lane <name>: <path>, a lane's worktree, merged into its repo's
 Delivery 1: <what it carries>: step <discover | design | challenge | build | read | review | verify | release | audit | clean> | delivered <ISO time> <where>
 Plan: revision <n>; plan-shape <pass | fail n>; plan <hash>

@@ -81,13 +81,16 @@ const surface = (t) => section(t, 'Surface').split('\n').filter((l) => LINE.test
 // A table row's cells, split on pipes that aren't escaped.
 const cells = (l) => l.split(/(?<!\\)\|/).slice(1, -1).map((s) => s.replace(/\\\|/g, '|').trim());
 
+// A path in STATE.md is read from the ticket folder or, failing that, from the nearest folder above it where it exists.
+const within = (dir, p) => { for (let d = dir; ; d = dirname(d)) { const q = resolve(d, p); if (existsSync(q)) return q; if (dirname(d) === d) return null; } };
+
 // Everything a script reads from a ticket folder. A `Lane <name>: <path>` line is a worktree proof may run in; it is
 // not delivered.
 export function ticket(dir) {
   const state = read(join(dir, 'STATE.md')), plan = read(join(dir, 'PLAN.md')), ev = join(dir, 'evidence');
   const worktrees = {};
   for (const m of state.matchAll(/^(Worktree|Lane) ([\w.-]+):[ \t]*(\S+)(?:.*?\bfrom (\S+))?.*?(?:\bat ([0-9a-f]{7,40}))?[ \t]*$/gm)) {
-    const p = resolve(dir, m[3]), w = (worktrees[m[2]] = { name: m[2], lane: m[1] === 'Lane', path: existsSync(p) ? realpathSync(p) : null, from: (m[4] || '').replace(/,$/, ''), at: m[5] || '' });
+    const p = within(dir, m[3]), w = (worktrees[m[2]] = { name: m[2], lane: m[1] === 'Lane', path: p && realpathSync(p), from: (m[4] || '').replace(/,$/, ''), at: m[5] || '' });
     if (!w.path) continue;
     const common = git(w.path, 'rev-parse', '--git-common-dir');
     Object.assign(w, { head: git(w.path, 'rev-parse', 'HEAD'), tree: git(w.path, 'rev-parse', 'HEAD^{tree}'), repository: common && realpathSync(resolve(w.path, common)) });

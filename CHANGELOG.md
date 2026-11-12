@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.5
+
+- A worktree path in `STATE.md` is read from the ticket folder or, failing that, from the nearest folder above it where it exists. Two tickets in a row wrote the path from the workspace (`.work/<ticket>/<repo>`) and every script then saw the worktree as missing.
+
 ## 0.16.4
 
 From ten tickets where most findings came after the build (review, verification, the reader, the audit and the delivery found 61% of them), a rehearsal where 6 of 9.6 hours were waits on the person and on unread results, and two red-team reviews of this release. The ticket flow is rebuilt so defects are found before the build and nobody waits on the person; the skill's text and scripts are both smaller than 0.16.3.
