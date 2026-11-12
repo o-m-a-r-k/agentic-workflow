@@ -4,9 +4,9 @@
 
 **You receive** the ticket folder (`PLAN.md`, `design/`, `CHECKS.json`, `evidence/` with the reader's file and earlier reviews), the worktrees, the commit to review, the delivery number, the project definition and the skill folder. You did not write the change. Scripts run as `node <skill folder>/scripts/<name>.mjs`.
 
-**First** run `rounds <ticket folder> review <delivery>`. If it refuses, write nothing and return `review: refused — <the files that exist>`. Its `next:` line names your file and round.
+**First** run `rounds <ticket folder> review <delivery>`; its `next:` line names your file and round.
 
-**Answer each item yes or no, with the evidence that decided it.** Read the whole diff in round 1; in round 2, the fixes and what they reach; in round 3, only what `rounds` names. Read each test's assertion. The proof lines on HEAD's tree stand; rerun through `proof` only what a finding needs, the oracles through `checks`, and look at the screen in the running app. If you saw only a screenshot or the code, say so.
+**Answer each item yes or no, with the evidence that decided it.** Read the whole diff in round 1; in a later round, the fixes, what they reach, and any diff after review `links` reported. Read each test's assertion. The proof lines on HEAD's tree stand; rerun through `proof` only what a finding needs, the oracles through `checks`, and look at the screen in the running app. If you saw only a screenshot or the code, say so.
 
 1. The outcome is reached on this commit (the test or walk named).
 2. Every tests row is green here and, where it fails before, went red on base (from `evidence/proof.jsonl`), each asserting what its row says; the missing ones named.
@@ -17,8 +17,8 @@
 7. Nothing outside the plan changed behaviour.
 8. Each reader "no" is confirmed on the running screen or refuted with where the answer is; for a bug or hotfix the cause is removed.
 
-A finding names its `file:line`, the input or state that triggers it, and why the guards already there don't stop it; without all three it isn't a finding. A defect on the ground that was there before the change is a finding like any other, fixed in this round, and marked `[before]`: a Discover miss. Settle earlier disputes from the evidence on both sides. Round 2 adds no finding in code round 1 read without saying why round 1 couldn't see it.
+A finding names its `file:line`, the input or state that triggers it, and why the guards already there don't stop it; without all three it isn't a finding. A defect on the ground that was there before the change is a finding like any other, fixed in this round, and marked `[before]`: a Discover miss. A dispute goes to the decision judge. A later round adds a finding only in code changed since the last, or saying why earlier rounds couldn't see it. A clean verdict ends the rounds.
 
-**You write** the file `rounds` named (`evidence/review-<delivery>-<round>.md`): first a line `Commit: <repo>@<sha>` for each worktree you read, then `Verdict: clean` or `Verdict: fix: <count>`, the eight answers with evidence, the findings under `## Findings` and nowhere else (an earlier round's finding fixed is named under your answers, not there), `## Questions` for what no source settles, and under `## Outside the ticket` what lies beyond the ground, shown, or a lead with what would show it. Scripts read only the `Verdict:` and `Commit:` lines and the files named under `## Findings`.
+**You write** the file `rounds` named (`evidence/review-<delivery>-<round>.md`): first a line `Commit: <repo>@<sha>` for each worktree you read, then one line `Verdict: clean` or `Verdict: fix: <count>`, the count of your findings, the eight answers with evidence, the findings under `## Findings` and nowhere else (an earlier round's finding fixed is named under your answers, not there), `## Questions` for what no source settles, and under `## Outside the ticket` what lies beyond the ground, shown, or a lead with what would show it. Scripts read only the `Verdict:` and `Commit:` lines and the files named under `## Findings`.
 
-**You return** one line: `review <sha>: clean | fix: <count> findings`.
+**You return** one line: `review <sha>: clean | fix: <count> findings, questions <n>`.

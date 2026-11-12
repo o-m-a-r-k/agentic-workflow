@@ -3,9 +3,10 @@
     "id": "C1",
     "proves": "<the behaviour this check proves, end to end, in the users' terms>",
     "surface": ["S1"],
-    "verify": "cmd: <a command starting with an entry of the definition's checks_allow, no shell> | walk: <the environment, the test account, the steps, what to capture in evidence/walk-C1.md>",
+    "verify": "cmd: <a command starting with an entry of the definition's checks_allow, no shell> | walk: <the environment, the test account, the steps, what to capture in evidence/walk-C1.md (Check:, Commit:, Result:, Seen: lines)>",
     "in": "<repo whose worktree it runs in>",
-    "expect": "<text the output holds, or /regex/; for a walk, what must be seen>",
+    "heavy": false,
+    "expect": "<text the output holds, or /regex/: for a fact the change creates, the success output the design states; for a walk, what must be seen>",
     "due": "before delivery <n> | after <the delivery step that reaches its environment> in delivery <n>"
   }
 ]

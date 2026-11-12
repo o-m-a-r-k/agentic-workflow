@@ -2,23 +2,23 @@
 
 You give it a ticket, or a group of tickets, and they get delivered. Nothing waits on you: product decisions are decided by a fresh agent from established practice (vendors' documentation, standards, law, published research), with their sources, and listed in the handoff for you to overrule. The only thing you are asked, in one plain message, is approval of a change the project can't undo, and that holds only the irreversible delivery step.
 
-The plugin is four skills (deliver, onboard, test, design), the files they read, and six small Node scripts with no dependencies that share one reader of a ticket's files. Agents do the work and judge its meaning; fresh agents check it against raw sources (code, git, logs, data, the running app). The scripts count, match and compare: they check that a plan can be read by every later script and that its citations resolve, count review rounds, record test runs by the tree they ran on, run each ticket's allow-listed checks without rerunning what an identical tree already proved, and confirm every link before delivery. None of them decides what the work is, and no hook enforces anything. It works in Claude Code and in Codex.
+The plugin is four skills (deliver, onboard, test, design), the files they read, and six small Node scripts with no dependencies that share one reader of a ticket's files. Agents do the work and judge its meaning; fresh agents check it against raw sources (code, git, logs, data, the running app). The scripts count, match and compare: they check that a plan can be read by every later script and that its citations resolve, count review rounds, record test runs, run each ticket's allow-listed checks without rerunning what still stands (a merge or base move that leaves the change's files alone proves nothing again), and confirm every link before delivery. None of them decides what the work is, and no hook enforces anything. It works in Claude Code and in Codex.
 
 ## How it works
 
-Each ticket starts from its outcome: what is true for its users once it is delivered, and the most direct evidence of it. Defects are found before the build, where they cost minutes: the work discovers the current state of everything the change touches, designs from it, and has the design attacked until nobody can name a state where it fails. Review and verification then find only what the build introduced. The ticket's size (hotfix, small, new feature, big change) sets how deep each step goes, from one table:
+Each ticket starts from its outcome: what is true for its users once it is delivered, and the most direct evidence of it. Defects are found before the build, where they cost minutes: the work discovers the current state of everything the change touches, designs from it, and has the design attacked until nobody can name a state where it fails. Review and verification then find only what the build introduced. The ticket's size (hotfix, small, new feature, big change) sets how deep each step goes, from one table; it never changes when a step is done:
 
 1. take the ticket: a folder, fresh worktrees, and a first list of the facts its users act on that it shows or writes, such as amounts, appointment times or who may do what (its Surface);
 2. discover: the current state of everything the change touches, what is already broken there, every impact, and a reproduction for a bug, each finding shown by running something;
 3. design: from the outcome and the current state, the screen's purpose (by the `design` skill) and the backend's contracts, data, migrations, state machines and failure paths, with diagrams where there are states; the acceptance tests, each seen failing on the base, and every check run once on the base;
-4. challenge: fresh challengers attack the design; each objection names a state where it fails; the designer revises until none can, and a decision judge rules on product questions and disputes, with sources;
+4. challenge: fresh challengers attack the design; each objection names a state where it fails; the designer revises until none can, and a decision judge rules on product questions and disputes, with sources, which the plan records;
 5. build, red then green against the acceptance tests;
 6. for a screen, one fresh reader who has only the screenshots and their purpose;
-7. review, at most two rounds and a narrow third, alongside 8. verification in the target environment; anything there before the change is fixed in that round and counted as a discovery miss;
-9. release, one delivery unless people are failing now, once a script confirms every link from proof to tree;
+7. review, round after round while a reviewer names a state where the change fails, alongside 8. verification in the target environment, its heavy checks once review is clean; anything there before the change is fixed in that round and counted as a Discover miss;
+9. release, one delivery unless people are failing now, once a script confirms every link from proof to what is delivered;
 10. after each delivery, a cold audit compares every fact on the Surface with its record; then record and clean up.
 
-A finding still open after the narrow third review holds the delivery, with the evidence. Nothing on the Surface or in the outcome is dropped to get it through.
+Nothing on the Surface or in the outcome is dropped to get it through.
 
 ```mermaid
 flowchart TD
@@ -33,9 +33,9 @@ flowchart TD
   B --> Rd["6 Read screens, once"]
   Rd --> Rv["7 Review"]
   B --> V["8 Verify on the final tree"]
-  Rv -- "findings: fix (2 rounds, then a narrow third)" --> B
-  V -- "defect: fix, narrow review" --> B
-  Rv --> L["links: every proof to its tree"]
+  Rv -- "a failing state: fix, review again" --> B
+  V -- "product wrong: fix; check wrong: planner" --> B
+  Rv --> L["links: every proof stands for HEAD"]
   V --> L
   L --> R["9 Release (high risk: your approval first)"]
   R --> A["10 Cold audit, record, clean"]

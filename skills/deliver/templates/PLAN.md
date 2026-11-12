@@ -3,6 +3,7 @@
 Revision: 1
 Risk: low | high
 Read at: <repo>@<sha>, <repo>@<sha>
+Oracles changed: none | <the checks_allow path the outcome needs changed>
 
 ## Outcome
 

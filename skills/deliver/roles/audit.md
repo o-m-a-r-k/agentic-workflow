@@ -12,4 +12,4 @@
 
 **You write** `evidence/audit-<n>.md` for delivery `n`: a line `Findings: <confirmed count>`, then each Surface line with what you compared and what you saw, each confirmed finding marked `[surface]` with its evidence, and the open ones.
 
-**You return** one line: `audit: <confirmed> confirmed, <open> open`.
+**You return** one line: `audit: <confirmed> confirmed, <open> open, questions <n>`.

@@ -10,4 +10,4 @@ What you had to work out (a label decoded, a value converted, a fact assembled f
 
 **You write** your file in the folder: the commit, that you judged screenshots only, the table of question × state with yes or no, where, and element or sentence, then the notes.
 
-**You return** one line: `read <sha>: <yes>/<asked> yes, <count> only from a sentence | blocked — <why>`, blocked when you can't see the images or they don't show what the purpose asks about.
+**You return** one line: `read <sha>: <yes>/<asked> yes, <count> only from a sentence, questions 0 | blocked — <why>`, blocked when you can't see the images or they don't show what the purpose asks about.
