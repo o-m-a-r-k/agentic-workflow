@@ -417,13 +417,18 @@ test('a red counts only on a tree that changes tests alone, the row\'s own among
   f.done();
 });
 
-test('links: risk is the plan\'s or the last a challenger stated; the approval names the plan it approved', () => {
+test('links: risk is the plan\'s or the last a challenger stated; the approval names what it showed, and holds while that stands', () => {
   const f = ticket();
   deliverable(f);
   f.challenge(2, 'build', 'Risk: high\n');
-  assert.match(f.L().stdout, /approval \| no .*does not name plan .* \| the person \|/);
-  f.state(`Approval: "go ahead", 2026-01-05T10:00Z, plan ${f.hash()}`);
+  assert.match(f.L().stdout, /approval \| no .*does not name approval .* \| the person \|/);
+  const ah = run('plan-shape', f.t, '--print', 'approval').stdout.match(/^Approval of ([0-9a-f]{12})/)[1];
+  f.state(`Approval: "go ahead", 2026-01-05T10:00Z, approval ${ah}`);
   assert.match(f.L().stdout, /approval \| yes/);
+  f.plan(goodPlan(f.cat).replace('| throws, count unchanged |', '| throws, and the count is unchanged |'));
+  f.challenge(3);
+  assert.match(f.L().stdout, /approval \| yes/, 'a revision that leaves what the approval showed alone keeps it');
+  assert.ok(existsSync(f.ev(`plans/${f.hash()}.md`)), 'plan-shape keeps a copy of the plan at each hash');
   f.plan(goodPlan(f.cat).replace('renewal count:', 'the renewal count, as stored:'));
   f.challenge(3);
   assert.match(f.L().stdout, /approval \| no/, 'a changed plan is approved again');

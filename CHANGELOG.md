@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.16.8
+
+From a new-feature ticket whose design took 7 hours over four challenge rounds on a 17,000-word plan, then an hour waiting on an approval the method says never holds the build.
+
+- **A later challenge reads what the revision changed,** and what that reaches, as review's later rounds do; an objection elsewhere says why no earlier round could see it. `plan-shape` keeps a copy of the plan at each hash in `evidence/plans/`, so the change can be read.
+- **The high-risk approval is of what it shows:** `plan-shape --print approval` names the hash of the outcome, risk, Surface and decisions, and `links` holds the approval while those stand, so a revision elsewhere isn't asked again. It is sent in the same cycle that starts the build, which never waits for the answer.
+
 ## 0.16.7
 
 - **A screen's questions are asked where its person asks them.** Each question in the plan's purpose (up to eight, no minimum) names the states where the person asks it (`asked at:`), which `plan-shape` checks against `States:`; the challenger cuts a question nobody asks or a state where nobody would, and adds a pictured state where the person does; the reader answers each question on those states only. Before, every question was asked of every pictured state (one plan: 8 questions over 29 states), so a Send button was marked down for not saying whether it can be undone, and review spent rounds on "no"s no user would raise.

@@ -17,7 +17,7 @@ const T = ticket(dir);
 if (args.includes('--print')) {
   const what = vals(args, '--print')[0];
   if (what === 'reader') console.log(T.seen || '(no What people see section)');
-  else if (what === 'approval') console.log(['Outcome', 'Risk', 'Surface', 'Decisions'].map((s) => `## ${s}\n${section(T.plan, s).trim()}`).join('\n\n'));
+  else if (what === 'approval') console.log(`Approval of ${sha(T.approval)}: record the answer as "Approval: <answer>, approval ${sha(T.approval)}"\n\n${T.approval}`);
   else { console.error('--print takes reader or approval'); process.exit(2); }
   process.exit(0);
 }
@@ -164,5 +164,8 @@ const out = [
 ].join('\n');
 mkdirSync(T.ev, { recursive: true });
 writeFileSync(join(T.ev, 'plan-shape.md'), out + '\n');
+// A copy of the plan at this hash, so a later challenger can read what a revision changed.
+mkdirSync(join(T.ev, 'plans'), { recursive: true });
+writeFileSync(join(T.ev, 'plans', `${T.planHash}.md`), `${T.plan}\n\n## CHECKS.json\n\n${read(join(dir, 'CHECKS.json'))}\n`);
 console.log(out);
 process.exit(fails.length ? 1 : 0);

@@ -127,8 +127,8 @@ const noOracle = [...new Set(T.surface.filter((l) => l.touched && !oracleKinds.i
 if (noOracle.length) rows.push({ link: 'oracles', ok: true, detail: `no oracle for ${noOracle.join(', ')}: checked only by walk, as the handoff says`, worker: '' });
 const stated = challenges.map((f) => field(read(join(ev, f)), 'risk').toLowerCase()).filter(Boolean).at(-1);
 if (T.risk === 'high' || stated === 'high') {
-  const a = field(T.state, 'Approval'), ok = new RegExp(`\\bplan ${T.planHash}\\b`).test(a);
-  row('approval', ok, ok ? a : `Approval "${a || 'none'}" does not name plan ${T.planHash}: ask with plan-shape --print approval`, 'the person');
+  const a = field(T.state, 'Approval'), ah = sha(T.approval), ok = new RegExp(`\\b(plan ${T.planHash}|approval ${ah})\\b`).test(a);
+  row('approval', ok, ok ? a : `Approval "${a || 'none'}" does not name approval ${ah}: what it showed changed since; ask again with plan-shape --print approval`, 'the person');
 }
 
 const broken = rows.filter((r) => !r.ok);

@@ -123,6 +123,8 @@ export function ticket(dir) {
     // The states screenshots carry: `States: <name>, <name>`, short names only.
     states: seen && !/^none\b/i.test(seen) ? field(seen, 'States').split(',').map((s) => s.trim()).filter(Boolean) : null,
     planHash: sha(`${plan}\n${read(join(dir, 'CHECKS.json'))}`),
+    // What a high-risk approval is of, and its hash: a revision that leaves these alone keeps the approval.
+    approval: ['Outcome', 'Risk', 'Surface', 'Decisions'].map((s) => `## ${s}\n${section(plan, s).trim()}`).join('\n\n'),
     proofs: read(join(ev, 'proof.jsonl')).split('\n').filter(Boolean).flatMap((l) => { try { return [JSON.parse(l)]; } catch { return []; } }),
   };
 }
