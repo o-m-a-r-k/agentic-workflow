@@ -1,146 +1,113 @@
 #!/usr/bin/env node
-// links: is every link between the proof and what would be delivered in place, at the trees it would deliver?
+// links: is every link between the proof and what would be delivered in place, on commits that stand for HEAD?
 // Usage: node links.mjs <ticket-folder> --delivery <n> [--final] --definition <project definition> [--definition <its .local.md>]
 //   --final  before the delivery's last step: checks due after its earlier steps must have passed too (checks --after)
-// Reads STATE.md, PLAN.md, CHECKS.json, evidence/ (plan-shape, challenge, review and read Verdict:/Commit: lines,
-// checks.json, proof.jsonl, screenshots) and git. Every comparison of proof is by tree: a commit whose tree is HEAD's
-// is HEAD. Writes evidence/links-<n>.md: one row per link, and for a broken one the worker to start.
-// Exit 1 when any link is broken. A round count over its cap is reported in the table, never a stop.
-import { writeFileSync, mkdirSync, existsSync, realpathSync } from 'node:fs';
+// Reads STATE.md, PLAN.md, CHECKS.json, evidence/ (plan-shape.md; the Plan:, Risk:, Verdict: and Commit: lines of
+// challenges, reviews and reads; verify-<n>.md's "Failing <id>:" lines; checks.json; proof.jsonl; screenshots) and git.
+// What stands as proof is ticket.mjs's rule. Writes evidence/links-<n>.md: one row per link, and for a broken one the
+// worker to start. Exit 1 when any link is broken.
+import { writeFileSync, mkdirSync } from 'node:fs';
 import { join, resolve, basename } from 'node:path';
-import { execFileSync } from 'node:child_process';
-import { ticket, definition, read, git, field, vals, sha, matches, testMatcher, verdict, findingFiles, roundsOf, cap } from './ticket.mjs';
+import { ticket, definitionOf, proofRules, read, git, field, fields, vals, sha, verdict, findingFiles, roundsOf, due, specOf, normPath } from './ticket.mjs';
 
 const args = process.argv.slice(2);
 const dir = resolve(args[0] || '.');
 const d = +vals(args, '--delivery')[0];
-if (!d || !vals(args, '--definition').length) {
-  console.error('usage: node links.mjs <ticket-folder> --delivery <n> [--final] --definition <file> [--definition <file>]');
-  process.exit(2);
-}
-const def = definition(vals(args, '--definition'));
-const screenPaths = def.list('screen_paths'), nothingRan = def.list('nothing_ran') || [], oracleKinds = Object.keys(def.map('oracles'));
-const T = ticket(dir), ev = T.ev, W = Object.fromEntries(Object.entries(T.worktrees).filter(([, w]) => w.path));
+if (!d) { console.error('usage: node links.mjs <ticket-folder> --delivery <n> [--final] --definition <file> [--definition <file>]'); process.exit(2); }
+const def = definitionOf(args);
+const T = ticket(dir), ev = T.ev, R = proofRules(T, def), W = Object.fromEntries(T.delivered.map((w) => [w.name, w]));
+const screenPaths = def.list('screen_paths'), oracleKinds = Object.keys(def.map('oracles'));
 const rows = [];
 const row = (link, ok, detail, worker = '') => rows.push({ link, ok, detail, worker: ok ? '' : worker });
-const HELD = 'none: held, reported in the handoff as not delivered';
-// A repository is its shared git folder, so every worktree and lane of it is the same repository.
-const repoOfLine = (p) => p.repository || (existsSync(p.worktree || '') ? realpathSync(resolve(p.worktree, git(p.worktree, 'rev-parse', '--git-common-dir') || '.git')) : p.worktree);
-const repoNamed = (p) => Object.keys(W).find((k) => k === p.in && W[k].repository === repoOfLine(p)) || Object.keys(W).find((k) => W[k].repository === repoOfLine(p));
-const treeIsHead = (r, c) => git(W[r].path, 'rev-parse', `${c}^{tree}`) === W[r].tree;
-const isTest = testMatcher(def.list('test_files'));
-// The same change on a moved base: the diff from where each commit meets the base is the same patch.
-const patch = (r, a, b) => { const t = git(W[r].path, 'diff', a, b); try { return t ? execFileSync('git', ['patch-id', '--stable'], { cwd: W[r].path, input: t + '\n', encoding: 'utf8' }).split(' ')[0] : ''; } catch { return ''; } };
-const rebased = (r, s) => { const b = W[r].baseRef, p1 = b && patch(r, git(W[r].path, 'merge-base', s, b), s); return !!p1 && p1 === patch(r, git(W[r].path, 'merge-base', 'HEAD', b), 'HEAD'); };
-const testsDue = T.tests.filter((t) => /^T\d+$/.test(t.id) && (!t.delivery || t.delivery <= d));
-const rowTest = (f, r) => isTest(f) || testsDue.some((t) => t.file && (f === t.file || `${r}/${f}` === t.file || f.endsWith(`/${t.file}`)));
-const screenTouched = (r, c) => {
-  if (screenPaths?.includes(`!${r}`)) return [];
-  const diff = (git(W[r].path, 'diff', '--name-only', c, 'HEAD') || '').split('\n').filter(Boolean).map((x) => `${r}/${x}`);
-  return screenPaths?.some((p) => p.startsWith(`${r}/`)) ? diff.filter((x) => screenPaths.some((p) => x === p || x.startsWith(p.replace(/\/?$/, '/')))) : diff;
+const commitsOf = (t, r) => fields(t, 'commit').flatMap((v) => [...v.matchAll(new RegExp(`(?:^|\\s)${r.replace(/[.]/g, '\\.')}@([0-9a-f]{7,40})`, 'g'))].map((m) => m[1]));
+const screenTouched = (w, c) => {
+  if (screenPaths?.includes(`!${w.name}`)) return [];
+  const diff = (git(w.path, 'diff', '--name-only', c, 'HEAD') || '').split('\n').filter(Boolean).map((x) => `${w.name}/${x}`);
+  return screenPaths?.some((p) => p.startsWith(`${w.name}/`)) ? diff.filter((x) => screenPaths.some((p) => x === p || x.startsWith(p.replace(/\/?$/, '/')))) : diff;
 };
 
-if (!Object.keys(W).length) row('worktrees', false, 'STATE.md names no existing "Worktree <repo>: <path>"', 'the orchestrator');
-for (const r of Object.keys(W)) {
-  const dirty = git(W[r].path, 'status', '--porcelain');
-  row(`${r} clean`, dirty === '', dirty === null ? 'not a git worktree' : dirty ? `uncommitted: ${dirty.split('\n').length} paths` : `HEAD ${W[r].head?.slice(0, 12)}`, 'implement');
+if (!T.delivered.length) row('worktrees', false, 'STATE.md names no existing "Worktree <repo>: <path>"', 'the orchestrator');
+for (const w of T.delivered) {
+  const dirty = git(w.path, 'status', '--porcelain');
+  row(`${w.name} clean`, dirty === '', dirty === null ? 'not a git worktree' : dirty ? `uncommitted: ${dirty.split('\n').length} paths` : `HEAD ${w.head?.slice(0, 12)}`, 'implement');
 }
-// The plan as its planner last left it: only the planner writes PLAN.md and CHECKS.json, and runs plan-shape after.
-const left = (read(join(ev, 'plan-shape.md')).match(/\bplan ([0-9a-f]{12})\b/) || [])[1];
-row('plan as its planner left it', left === T.planHash, left === T.planHash ? `plan ${left}` : left ? `PLAN.md or CHECKS.json changed since plan-shape recorded plan ${left}: the planner reads the change, folds or rejects it, and runs plan-shape` : 'no plan-shape run with --definition', 'plan');
-// The design challenged at its current revision: every challenge of that revision found no failing state ("build").
-const revision = (t) => (t.match(/revision[\s:*_]*r?(\d+)/i) || [])[1];
-const challenges = T.names.filter((f) => /^challenge-\d+\.md$/.test(f) && revision(read(join(ev, f))) === T.revision);
-const challengeText = challenges.map((f) => read(join(ev, f))).join('\n');
-const open = challenges.filter((f) => verdict(read(join(ev, f))) !== 'build');
-row('design challenged', challenges.length > 0 && !open.length, !challenges.length ? `no challenge-<k>.md names revision ${T.revision}` : open.length ? `${open.join(', ')}: not build` : `${challenges.join(', ')}: build, revision ${T.revision}`, !challenges.length ? 'challenge' : 'plan, then challenge');
+// The plan as its planner last left it, passing plan-shape: only the planner writes PLAN.md and CHECKS.json.
+const shape = read(join(ev, 'plan-shape.md')), left = (shape.match(/\bplan ([0-9a-f]{12})\b/) || [])[1], passed = /^plan-shape: pass$/m.test(shape);
+row('plan as its planner left it', left === T.planHash && passed, left !== T.planHash ? `PLAN.md or CHECKS.json changed since plan-shape recorded plan ${left || '(none)'}: the planner reads the change, folds or disputes it, and runs plan-shape` : passed ? `plan ${left}, plan-shape pass` : `plan-shape fails on plan ${left}: ${shape.split('\n').find((l) => l.startsWith('- ')) || ''}`, 'plan');
+// The design challenged as it stands: every challenge whose Plan: line names the current plan says build.
+const challenges = T.names.filter((f) => /^challenge-\d+\.md$/.test(f)).sort((a, b) => +a.match(/\d+/)[0] - +b.match(/\d+/)[0]);
+const current = challenges.filter((f) => field(read(join(ev, f)), 'plan') === T.planHash), open = current.filter((f) => verdict(read(join(ev, f))) !== 'build');
+row('design challenged', current.length > 0 && !open.length, !current.length ? `no challenge-<k>.md has "Plan: ${T.planHash}"` : open.length ? `${open.join(', ')}: ${open.map((f) => verdict(read(join(ev, f)))).join(', ')}` : `${current.join(', ')}: build`, !current.length ? 'challenge' : 'plan, then challenge');
 
-// The last review: clean, or fixed and read again, up to the narrow third. Each changed worktree's tree is the one its
-// Commit: lines name, the same change on a moved base, or one whose diff since stays within its findings' files plus tests.
+// The newest review is clean, and names, for each worktree the change touches, a commit that stands for HEAD (its
+// findings' files may differ since).
 const reviews = roundsOf(T.names, 'review', d), last = reviews.at(-1);
 if (!last) row('reviewed', false, `no review-${d}-<round>.md`, 'review');
 else {
-  const text = read(join(ev, last)), n = +last.match(/-(\d+)\.md$/)[1], v = verdict(text), files = findingFiles(text);
-  row('review verdict', v === 'clean', `${last}: ${v || 'no Verdict: line'}`, !v ? 'review' : n < 2 ? 'implement, then review' : n === 2 ? `implement, then review-${d}-3 on the fixes` : HELD);
-  const shas = (r) => [...text.split('\n').filter((l) => /^[\s>*_-]*commit/i.test(l)).join('\n').matchAll(new RegExp(`${r.replace(/[.]/g, '\\.')}@([0-9a-f]{7,40})`, 'g'))].map((m) => m[1]);
-  for (const r of Object.keys(W)) {
-    if (W[r].at && W[r].head?.startsWith(W[r].at)) continue;
-    const s = shas(r);
-    if (s.some((c) => treeIsHead(r, c))) { row(`${r} reviewed`, true, `${last} names HEAD's tree`); continue; }
-    if (s.some((c) => rebased(r, c))) { row(`${r} reviewed`, true, `${last} names the same change on the earlier base`); continue; }
-    if (!s.length) { row(`${r} reviewed`, false, `${last} has no Commit: line naming ${r}@<sha>`, 'review'); continue; }
-    const outside = (git(W[r].path, 'diff', '--name-only', s.at(-1), 'HEAD') || '').split('\n').filter((f) => f && !rowTest(f, r) && !files.some((x) => f === x || f.endsWith(`/${x}`) || x.endsWith(`/${f}`) || x === `${r}/${f}`));
-    row(`${r} reviewed`, !outside.length, outside.length ? `commits since ${s.at(-1).slice(0, 12)} touch files no finding names: ${outside.slice(0, 3).join(', ')}` : `${last} names ${s.at(-1).slice(0, 12)}; the diff since stays within its findings and tests`, n < 2 ? 'review' : n === 2 ? `review-${d}-3 (narrow: reads the diff since ${s.at(-1).slice(0, 12)})` : HELD);
+  const text = read(join(ev, last)), v = verdict(text);
+  row('review verdict', v === 'clean', `${last}: ${v}`, v === 'fix' ? 'implement, then review' : 'review');
+  for (const w of T.delivered.filter((x) => x.tree !== x.baseTree)) {
+    const s = commitsOf(text, w.name);
+    const ok = s.some((c) => R.stands(w, c, findingFiles(text)));
+    row(`${w.name} reviewed`, ok, ok ? `${last} names ${s.find((c) => R.stands(w, c, findingFiles(text))).slice(0, 12)}, which stands for HEAD` : s.length ? `${last} names ${s.map((c) => c.slice(0, 12)).join(', ')}: not a commit here, or the change's files changed since outside its findings` : `${last} has no Commit: line naming ${w.name}@<sha>`, 'review');
   }
 }
 
-// Every tests row due is green on HEAD's tree, having run something; a row that fails before the change also went red
-// on the base with the words of a green in the same repository, and that pair stands whatever moves after it.
-// A broken row names the missing link; the words to run are listed under "Run", once per command.
-const words = (p) => JSON.stringify(p.argv || p.command);
-const same = (a, b) => repoOfLine(a) === repoOfLine(b) && words(a) === words(b);
-const quote = (w) => (/^[\w@%+=:,./-]+$/.test(w) ? w : `'${w.replace(/'/g, `'\\''`)}'`);
+// Every tests row due is green on a commit that stands; a row that fails before the change also went red on the base
+// with the same words, in the same repository. The words to run are listed under "Run", once per command.
+const words = (p) => JSON.stringify(p.argv);
+const quote = (x) => (/^[\w@%+=:,./-]+$/.test(x) ? x : `'${x.replace(/'/g, `'\\''`)}'`);
 const runs = new Map();
-const due = (p, id, onBase = false, r = repoNamed(p)) => {
-  if (!r) return `; ${p.in} is not a worktree STATE.md names`;
-  const k = `${r} ${onBase} ${words(p)}`;
-  runs.set(k, { r, p, onBase, ids: [...(runs.get(k)?.ids || []), id] });
-  return `; run the words below${onBase ? ' with --base, on the base tree with only the test applied' : ''}`;
-};
-for (const t of testsDue) {
-  const mine = T.proofs.filter((p) => p.test === t.id && !nothingRan.some((x) => matches(p.log || '', x)));
-  const greens = mine.filter((p) => !p.base && p.exit === 0), green = greens.filter((p) => { const r = repoNamed(p); return r && W[r].tree === p.tree; });
-  const before = t.before.startsWith('yes'), reds = mine.filter((p) => p.base && typeof p.exit === 'number' && p.exit !== 0);
-  const paired = reds.filter((p) => greens.some((g) => same(g, p)));
-  let why;
-  if (green.length && (!before || paired.length)) why = `green on HEAD's tree${before ? `; red on base, same words (last line: ${(paired[0].log || '').trim().split('\n').at(-1)?.slice(0, 80)})` : ''}`;
-  else if (!mine.length) why = `no proof line names ${t.id}: run its test with --test ${t.id} (one command proving several rows names them all)`;
-  else if (before && !reds.length) why = 'no failing base run: run its test with --base on the base tree with only the test applied, then the same words on HEAD';
-  else if (!green.length) {
-    const dirty = Object.values(W).some((w) => w.repository === repoOfLine(mine.at(-1)) && git(w.path, 'status', '--porcelain'));
-    why = `${greens.length ? 'green only on an earlier tree' : 'never green'}${dirty ? ' (the worktree has uncommitted or untracked files, so no run there is on HEAD\'s tree until they are committed or removed)' : ''}${due(reds.at(-1) || mine.at(-1), t.id)}`;
-  } else {
-    // A red with the green's words in another repository (a clone) can't pair: run it again in this repository.
-    const elsewhere = reds.find((p) => green.some((g) => words(g) === words(p)));
-    why = elsewhere ? `green on HEAD's tree; the base red ran in another repository (${elsewhere.worktree})${due(green.at(-1), t.id, true)}` : `green on HEAD's tree; the base red ran other words${due(reds.at(-1), t.id)}, so red and green share them`;
-  }
-  row(before ? `${t.id} red then green` : `${t.id} green`, why.startsWith("green on HEAD's tree") && !why.includes('; run'), why, 'implement');
+const toRun = (p, id, onBase) => { const w = R.worktreeOf(p); if (!w) return; const k = `${w.name} ${onBase} ${words(p)}`; runs.set(k, { w, p, onBase, ids: [...(runs.get(k)?.ids || []), id] }); };
+for (const t of T.tests.filter((x) => /^T\d+$/.test(x.id) && (!x.delivery || x.delivery <= d))) {
+  const mine = T.proofs.filter((p) => p.test === t.id), before = t.before.startsWith('yes');
+  const reds = mine.filter((p) => R.isRed(p, t)), greens = mine.filter((p) => R.isGreen(p));
+  const paired = greens.filter((g) => !before || reds.some((r) => r.repository === g.repository && words(r) === words(g)));
+  const ok = paired.length > 0;
+  let why = ok ? `green on a commit that stands${before ? ', red on the base with the same words' : ''}` : '';
+  if (ok) {} else if (!mine.length) why = `no proof line names ${t.id}: run its test with --test ${t.id}`;
+  else if (before && !reds.length) why = 'no red on the base: on a tree that differs from the base only in tests, the row\'s own among them, run its test with --base and see it fail on its assertion';
+  else if (!greens.length) { why = 'not green on a commit that stands for HEAD; run the words below'; toRun(reds.at(-1) || mine.at(-1), t.id, false); }
+  else { why = 'the base red and the green ran different words or repositories; run the words below'; toRun(reds.at(-1), t.id, false); }
+  row(before ? `${t.id} red then green` : `${t.id} green`, ok, why, 'implement');
 }
 
-// checks ran for this delivery on these trees and passed (with --final, including those due after its steps).
+// checks ran for this delivery as CHECKS.json now says, on commits that stand, and every due check passed.
 const checks = (() => { try { return JSON.parse(read(join(ev, 'checks.json'))); } catch { return null; } })();
-const fresh = checks && checks.delivery === d && Object.keys(W).every((r) => checks.trees?.[r] === W[r].tree);
-const afterDue = args.includes('--final') && T.checks.some((c) => new RegExp(`^after .+ in delivery ${d}$`).test(c.due));
-const fail = !checks ? 'no evidence/checks.json' : !fresh ? 'checks.json is for another delivery or tree' : !checks.ok ? `failing: ${checks.results.filter((x) => !x.ok).map((x) => x.id).join(', ')}` : afterDue && !checks.after ? "checks due after this delivery's steps have not run (checks --after)" : '';
-row('checks', !fail, fail || 'every due check passes', 'verify');
+const after = !!checks?.after, dueNow = T.checks.filter((c) => due(c, d, after));
+const stale = checks && dueNow.filter((c) => { const x = checks.results.find((y) => y.id === c.id); return !x || x.spec !== specOf(c, def) || !T.delivered.every((w) => R.stands(w, x.heads?.[w.name])); }).map((c) => c.id);
+const failing = checks ? checks.results.filter((x) => !x.ok).map((x) => x.id) : [];
+const verifyText = read(join(ev, `verify-${d}.md`)), kind = (id) => field(verifyText, `failing ${id}`).toLowerCase();
+const fixer = failing.every((id) => /^product/.test(kind(id))) ? 'implement' : failing.every((id) => /^(product|check)/.test(kind(id))) ? 'plan (the checks), implement (the product)' : 'verify';
+const needAfter = args.includes('--final') && T.checks.some((c) => due(c, d, true) && !due(c, d, false));
+const cf = !T.checks.length ? '' : !dueNow.length ? `no check is due for delivery ${d}` : !checks || checks.delivery !== d ? 'no evidence/checks.json for this delivery' : stale.length ? `stale for ${stale.join(', ')}: changed in CHECKS.json, never run, or run on commits that no longer stand` : failing.length ? `failing: ${failing.map((id) => `${id}${kind(id) ? ` (${kind(id)})` : ''}`).join(', ')}` : needAfter && !after ? "checks due after this delivery's steps have not run (checks --after)" : '';
+row('checks', !cf, cf || `every due check passes (definition ${def.files.join(', ')})`, failing.length && !stale.length ? fixer : 'verify');
 
-// The oracles and scripts checks_allow names by path are unchanged on the branch.
-for (const w of [...new Set((def.list('checks_allow') || []).flatMap((a) => a.split(/\s+/)).filter((x) => x.includes('/')))]) {
-  const [first, ...rest] = w.replace(/^\.\//, '').split('/');
-  if (!W[first]?.at) continue;
-  const touched = (git(W[first].path, 'diff', '--name-only', W[first].at, 'HEAD') || '').split('\n').filter((f) => f === rest.join('/') || f.startsWith(`${rest.join('/')}/`));
-  if (touched.length) row(`oracle ${w}`, false, `changed on the branch: ${touched.join(', ')}; a change to it is reviewed on its own`, 'review');
+// The oracles and scripts checks_allow names by path are unchanged on the branch, unless the plan names the change.
+for (const x of [...new Set((def.list('checks_allow') || []).flatMap((a) => a.split(/\s+/)).filter((y) => y.includes('/')).map(normPath))]) {
+  const [first, ...rest] = x.split('/'), w = W[first];
+  if (!w?.base) continue;
+  const touched = (git(w.path, 'diff', '--name-only', w.base, 'HEAD') || '').split('\n').filter((f) => f === rest.join('/') || f.startsWith(`${rest.join('/')}/`));
+  const named = T.oraclesChanged.includes(x);
+  if (touched.length) row(`oracle ${x}`, named, named ? 'changed as the plan\'s "Oracles changed:" names; checks runs the worktree\'s copy and review reads it' : `changed on the branch: ${touched.join(', ')}; the plan names it under "Oracles changed:", or the change is undone`, 'plan');
 }
 
-// A plan with states to picture: a reader's file, and a screenshot of each state at a commit whose screens are HEAD's.
-// A screenshot is any file whose name holds the state's name (its words joined by spaces, dashes or underscores) and a
+// A plan with states to picture: a read of the screens HEAD shows, and a screenshot of each state at such a commit.
+// A screenshot is any file whose name holds the state's name (words joined by spaces, dashes or underscores) and a
 // commit; a file goes to the longest state name it matches, so "empty" doesn't take "non-empty".
-const commitIn = (c) => Object.keys(W).find((k) => git(W[k].path, 'cat-file', '-e', `${c}^{commit}`) !== null);
+const commitIn = (c) => T.delivered.find((w) => git(w.path, 'cat-file', '-e', `${c}^{commit}`) !== null);
 if (T.states) {
-  const readFile = roundsOf(T.names, 'read', d)[0];
-  row('read', !!readFile, readFile || `no read-${d}.md`, 'read');
-  for (const c of new Set(read(join(ev, readFile || '-')).match(/(?<![0-9a-f])[0-9a-f]{7,40}(?![0-9a-f])/g) || [])) {
-    const r = commitIn(c), t = r && !W[r].head.startsWith(c) ? screenTouched(r, c) : [];
-    if (t.length) rows.push({ link: `reader ${r}`, ok: true, detail: `reader read ${c.slice(0, 12)}; screens changed since in ${t.slice(0, 3).join(', ')} (in the handoff)`, worker: '' });
-  }
+  const reads = roundsOf(T.names, 'read', d), readFile = reads.at(-1), rt = read(join(ev, readFile || '-'));
+  const changed = [...new Set(fields(rt, 'commit').join(' ').match(/[0-9a-f]{7,40}/g) || rt.match(/(?<![0-9a-f])[0-9a-f]{7,40}(?![0-9a-f])/g) || [])].flatMap((c) => { const w = commitIn(c); return w && !w.head.startsWith(c) ? screenTouched(w, c) : []; });
+  row('read', !!readFile && !changed.length, !readFile ? `no read-${d}.md` : changed.length ? `${readFile}: screens changed since in ${changed.slice(0, 3).join(', ')}; read those screens again` : readFile, 'read');
   const rx = (s) => new RegExp(`(^|[^\\p{L}\\p{N}])(?<!(?:^|[^\\p{L}])(?:non|not|no)[\\s_-])${s.split(/[\s_-]+/).map((x) => x.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')).join('[\\s_-]+')}(?=[^\\p{L}\\p{N}]|$)`, 'iu');
   const owner = (f) => T.states.filter((s) => rx(s).test(basename(f))).sort((a, b) => b.length - a.length)[0];
   for (const s of T.states) {
     let why = `no screenshot whose name holds "${s}" and a commit`;
     for (const c of T.names.filter((x) => owner(x) === s).flatMap((f) => basename(f).match(/(?<![0-9a-f])[0-9a-f]{7,40}(?![0-9a-f])/gi) || [])) {
-      const r = commitIn(c);
-      if (!r) continue;
-      const touched = W[r].head.startsWith(c.toLowerCase()) ? [] : screenTouched(r, c);
+      const w = commitIn(c);
+      if (!w) continue;
+      const touched = w.head.startsWith(c.toLowerCase()) ? [] : screenTouched(w, c);
       why = touched.length ? `retake: ${c.slice(0, 12)}..HEAD touches ${touched.slice(0, 3).join(', ')}` : '';
       if (!why) break;
     }
@@ -154,29 +121,23 @@ for (const m of T.state.matchAll(/^Delivery (\d+):.*(?<!not )\bdelivered \d{4}-\
   if (k !== d) row(`audit ${k}`, has, has ? `audit-${k}.md` : `delivery ${k} is delivered and has no evidence/audit-${k}.md`, 'audit');
 }
 
-// High risk (the plan's or a challenger's): approved at a revision, on the Surface as it stands.
-const hash = sha(T.surface.map((l) => l.key).join('\n'));
+// High risk: the plan's, or the last risk a challenger stated. The approval names the plan it approved.
 const noOracle = [...new Set(T.surface.filter((l) => l.touched && !oracleKinds.includes(l.kind)).map((l) => l.kind || '(no kind)'))];
 if (noOracle.length) rows.push({ link: 'oracles', ok: true, detail: `no oracle for ${noOracle.join(', ')}: checked only by walk, as the handoff says`, worker: '' });
-if (T.risk === 'high' || /^[\s*_-]*risk[\s*_]*:[\s*_]*high/im.test(challengeText)) {
-  const a = field(T.state, 'Approval'), ok = /revision \d+/.test(a) && a.includes(`surface ${hash}`);
-  row('approval', ok, ok ? a : `Approval "${a || 'none'}" does not hold a revision and surface ${hash}`, 'the person');
+const stated = challenges.map((f) => field(read(join(ev, f)), 'risk').toLowerCase()).filter(Boolean).at(-1);
+if (T.risk === 'high' || stated === 'high') {
+  const a = field(T.state, 'Approval'), ok = new RegExp(`\\bplan ${T.planHash}\\b`).test(a);
+  row('approval', ok, ok ? a : `Approval "${a || 'none'}" does not name plan ${T.planHash}: ask with plan-shape --print approval`, 'the person');
 }
 
-// Round counts: reported, never a stop.
-const counts = ['read', 'review'].map((k) => [k, roundsOf(T.names, k, d).length, cap(ev, k, d)]);
-const over = counts.some(([, n, c]) => n > c);
 const broken = rows.filter((r) => !r.ok);
 const out = [
-  `links ${d}: ${broken.length ? `stop, ${broken.length} broken` : 'pass'}; rounds ${counts.map(([k, n, c]) => `${k} ${n}/${c}`).join(', ')}${over ? ' (over the cap: reported in the handoff and the record)' : ''}`,
+  `links ${d}: ${broken.length ? `stop, ${broken.length} broken` : 'pass'}; rounds: review ${reviews.length}, read ${roundsOf(T.names, 'read', d).length}, challenge ${challenges.length}; definition ${def.files.join(', ')}`,
   '',
   '| Link | Holds | Detail | Start |',
   '|---|---|---|---|',
   ...rows.map((r) => `| ${r.link} | ${r.ok ? 'yes' : 'no'} | ${String(r.detail).replace(/\|/g, '/')} | ${r.worker} |`),
-  ...(runs.size ? ['', 'Run (each once, on HEAD unless it says --base; heavy ones when there is room):', ...[...runs.values()].map(({ r, p, onBase, ids }) => {
-    const argv = p.argv || String(p.command).split(' ');
-    return `- proof ${quote(dir)} --in ${r} --test ${ids.join(',')}${onBase ? ' --base' : ''} -- ${argv.map(quote).join(' ')}${argv.some((x) => /(^|\/)evidence\/|^\/tmp\/|^\/private\/|\.log$/.test(x)) ? '   (names an output path: remove it so this run does not overwrite another)' : ''}`;
-  })] : []),
+  ...(runs.size ? ['', 'Run (each once, on HEAD unless it says --base; heavy ones when there is room):', ...[...runs.values()].map(({ w, p, onBase, ids }) => `- proof ${quote(dir)} --in ${w.name} --test ${ids.join(',')}${onBase ? ' --base' : ''} -- ${p.argv.map(quote).join(' ')}${p.argv.some((x) => /(^|\/)evidence\/|^\/tmp\/|^\/private\/|\.log$/.test(x)) ? '   (names an output path: remove it so this run does not overwrite another)' : ''}`)] : []),
 ].join('\n');
 mkdirSync(ev, { recursive: true });
 writeFileSync(join(ev, `links-${d}.md`), out + '\n');
