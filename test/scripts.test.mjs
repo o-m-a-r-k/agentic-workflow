@@ -209,10 +209,10 @@ test('proof records the exit and the working tree, untracked files included, and
 
 test('on Windows a word with a quote is refused before cmd.exe sees it', () => {
   const bin = mkdtempSync(join(tmpdir(), 'aw-bin-'));
-  write(join(bin, 'runner.cmd'), '@echo off\n');
+  write(join(bin, 'runner.CMD'), '@echo off\n');
   const e = { PATH: bin, PATHEXT: '.CMD' };
   assert.match(spawnArgs(['runner', 'a"&calc'], true, e).error, /quote/);
-  assert.deepEqual(Object.values(spawnArgs(['runner', 'a&b'], true, e).env).map((x) => x.toLowerCase()), [join(bin, 'runner.cmd').toLowerCase(), 'a&b']);
+  assert.deepEqual(Object.values(spawnArgs(['runner', 'a&b'], true, e).env).map((x) => x.toLowerCase()), [join(bin, 'runner.CMD').toLowerCase(), 'a&b']);
   rmSync(bin, { recursive: true });
 });
 
