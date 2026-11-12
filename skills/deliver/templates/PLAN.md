@@ -49,7 +49,9 @@ The backend: contracts, data and migrations with their way back, state machines,
 ## What people see
 
 Purpose: who it is for, what they must come away knowing or doing, and whether it brings them value.
-Questions: their five to eight questions, in the order they bring them.
+Questions: up to eight, in the order they bring them, one per line:
+1. Is this copy free? (asked at: free, taken)
+2. When can I have it? (asked at: taken)
 States: <name>, <name>
 Pictured at: <for each state, its widths, languages and themes>
 Follows: the product's best existing screen of the same kind.

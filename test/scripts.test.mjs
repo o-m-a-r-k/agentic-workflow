@@ -448,7 +448,11 @@ test('links: a failing check names who fixes it from verify\'s classification', 
 test('links: a screenshot stands while no screen path changed since its commit; screens changed after the read are read again; a branch change to an oracle needs the plan to name it', () => {
   const f = ticket({ web: true });
   const head = deliverable(f);
-  f.plan(goodPlan(f.cat, `\n## What people see\nPurpose: a member sees how many renewals are left.\nStates: limit-reached, empty\n`));
+  const seen = (qs) => goodPlan(f.cat, `\n## What people see\nPurpose: a member sees how many renewals are left.\nQuestions:\n${qs}\nStates: limit-reached, empty\n`);
+  const bad = f.plan(seen('1. How many renewals are left? (asked at: all)\n2. Why can I not renew? (asked at: limit-reched)\n3. Can I undo it?')).stdout;
+  assert.match(bad, /Question "2\. Why can I not renew\? \(asked at: limit-reched\)": asked at "limit-reched", which States doesn't name/);
+  assert.match(bad, /Question "3\. Can I undo it\?": no "\(asked at: <states> \| all\)"/);
+  assert.equal(f.plan(seen('1. How many renewals are left? (asked at: all)\n2. Why can I not renew? (asked at: limit-reached)')).status, 0);
   f.challenge(2);
   const old = f.w.sha;
   write(f.ev('read-1.md'), `Commit: web@${old}`);

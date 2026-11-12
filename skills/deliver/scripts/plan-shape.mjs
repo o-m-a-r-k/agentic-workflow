@@ -136,6 +136,18 @@ for (const c of T.checks) {
 // What people see: the states screenshots will carry, as short names.
 if (T.states && !T.states.length) fail('What people see has no "States: <name>, <name>" line');
 for (const s of T.states || []) if (!/^[\p{L}\p{N}][\p{L}\p{N}_-]*$/u.test(s)) fail(`States: "${s}" is not a short name; widths, languages and reasons go on other lines`);
+// Each question names where it is asked: "all", or states from the States line.
+if (T.states) {
+  const qs = ((T.seen.match(/^Questions:[^\n]*\n((?:\d+\..*\n?)*)/m) || [])[1] || '').split('\n').filter((l) => /^\d+\./.test(l));
+  if (!qs.length) fail('What people see: no "Questions:" line followed by numbered questions, each "(asked at: <states> | all)"');
+  for (const q of qs) {
+    const at = (q.match(/\(asked at:\s*([^)]*)\)/i) || [])[1];
+    if (at === undefined) { fail(`Question "${q.slice(0, 60)}": no "(asked at: <states> | all)"`); continue; }
+    const names = at.split(',').map((s) => s.trim()).filter(Boolean);
+    if (!names.length) fail(`Question "${q.slice(0, 60)}": asked at no state`);
+    else if (!(names.length === 1 && names[0] === 'all')) for (const n of names) if (!T.states.includes(n)) fail(`Question "${q.slice(0, 60)}": asked at "${n}", which States doesn't name`);
+  }
+}
 
 const hash = sha(T.surface.map((l) => l.key).join('\n'));
 // For the challenger: a kept draft line whose record or touched state changed.

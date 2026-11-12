@@ -53,7 +53,7 @@ The type is hotfix, bug, enhancement or new feature, as the person names it, the
 |---|---|---|---|---|
 | Hotfix (people failing in production now) | the failure and its blast radius | the guard, then the root fix; no diagrams | one at a time | review, the failure's path verified, the audit |
 | Small: a bug or small enhancement | the touched screens and flows | short; a diagram only where there are states | one at a time | review, verify, a reader for touched screens, the audit |
-| New feature | the area's whole current state | full design and its documents | one at a time | all of them, every pictured state |
+| New feature | the area's whole current state | full design and its documents | one at a time | all of them |
 | Big change: new data, migrations or many consumers | the whole area, its data and migrations | full, with the way back | two independent each round | all of them, two reviewers each round |
 
 The one who checks is never the one who wrote. A small ticket's discovery and design may be one worker; a backend change has no reader.
@@ -70,7 +70,7 @@ The one who checks is never the one who wrote. A small ticket's discovery and de
 
 5. **Build** (`roles/implement.md`). Fresh implementers take the plan as their brief, lanes for independent items in their own worktrees; the last lane's implementer merges them in order. Each acceptance test runs red on the base, then green on HEAD with the same words, through `proof`; the commands the definition says every change runs, run too. The implementer decides nothing the plan and the `design` skill leave open: a fact that changes the design goes to the planner, and a product choice to the decision judge. Done is `done at <sha>`.
 
-6. **Read** (screens only, `roles/read.md`). One fresh reader per delivery, on the built screenshots alone, answers the purpose's questions for each pictured state; the orchestrator runs `rounds` for it. Its "no"s go to review. Screens changed after the read get a read of those screens.
+6. **Read** (screens only, `roles/read.md`). One fresh reader per delivery, on the built screenshots alone, answers each of the purpose's questions on the pictured states where it is asked; the orchestrator runs `rounds` for it. Its "no"s go to review. Screens changed after the read get a read of those screens.
 
 7. **Review** (`roles/review.md`). A fresh reviewer reads the whole change against the review rubric; each later round reads the fixes and any diff after review that `links` reports. Rounds go on while a review names a concrete failing state, and end when one is clean; a later round adds a finding only in code changed since, or says why earlier rounds couldn't see it. A defect already there before the change is fixed in the round that found it and recorded as a Discover miss.
 
