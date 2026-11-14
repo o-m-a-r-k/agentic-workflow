@@ -33,9 +33,19 @@ roles: {}                         # optional: <harness>.<role>: { model, effort 
 checks_allow: [npm test, npx vitest run, ./tools/read-db.sh, node ./tools/fact-check.mjs, node ./tools/access-matrix.mjs]
 nothing_ran: [No tests found, /^0 passing/m]
 screen_paths: [web/src/pages, web/src/components, web/messages]
-surface_kinds: [due-date, fee, availability, access]
+page_paths: [web/src/pages/**]
+boundaries:
+  fee: [catalog/src/fees/**, catalog/src/loans/renew.*]
+  access: [catalog/src/auth/**, catalog/src/policies/**]
+  contract: [catalog/src/api/**, web/src/api/**]
+migrations: [catalog/migrations/**]
+gate:
+  - catalog | always | npm test -- --changed
+  - web | always | npx vitest run {files}
+  - web | boundary:contract | npx vitest run src/api
+  - catalog | migrations/** | npm test -- migrations | heavy
+surface_kinds: [fee, access]
 oracles:
-  due-date: node ./tools/fact-check.mjs --kind due-date --stack {worktree}
   fee: node ./tools/fact-check.mjs --kind fee --stack {worktree}
   access: node ./tools/access-matrix.mjs --stack {worktree}
 ---
@@ -43,22 +53,27 @@ oracles:
 
 This is the repo-held form: paths are relative to the folder that holds `.agents/`. In `~/.agents/projects/<project>.md`, add `roots: [<the project's folder>]` and use absolute paths.
 
-The deliver skill's scripts read these front-matter keys, each a list as `[a, b]` or as `- a` lines:
+The deliver skill's scripts read these front-matter keys, each a list as `[a, b]` or as `- a` lines (`gate` only as `- a` lines, since its entries hold commas). Path lists take `**`, `*`, `?` and a leading `!` to leave files out; a plain path covers everything under it. `boundaries`, `migrations`, `page_paths` and `screen_paths` are written with the repo first (`web/src/pages/**`); `test_files` and a `gate` line's globs are relative to their repo.
 
 - `checks_allow`: the command prefixes a check's `cmd:` may start with, word for word (`npm test` allows `npm test -- renew`, never `npm exec`); nothing else runs, never through a shell. A word starting `./`, `../` or `/` is a file in the definition's folder and runs from there, never from the branch under test; other commands run in the check's worktree. `{worktree}` and `{ticket}` become those folders' paths.
 - `nothing_ran`: what each runner prints when it ran no test (text or `/regex/flags`); such a run fails whatever its exit code.
-- `test_files`: globs of the project's test files (`**/*.test.*`, `tests/**`); unset, a default covers common layouts in JavaScript, TypeScript, Python, Go, Ruby, PHP, Java, Kotlin and C#. A change after review or a walk that touches only these and the findings' files keeps them standing.
-- `screen_paths`: `<repo>/<path>` prefixes of the screen source and locale files; a screenshot from an earlier commit stands while the diff since touches none, and a repo with no entry counts as all screen (`!<repo>` says a repo has none).
-- `surface_kinds`: the kinds of fact users act on that must never be wrong. A Surface line's kind is one of these or of `oracles`; `plan-shape` lists those a Surface leaves out, for the challenger.
-- `oracles`: a map, one indented `<kind>: <command>` line per kind that has one, each command also on `checks_allow`. A Surface line of that kind must have a check that runs it, and the cold audit runs for it; a kind with none is stated in the handoff.
+- `test_files`: globs of the project's test files (`**/*.test.*`, `tests/**`); unset, a default covers common layouts in JavaScript, TypeScript, Python, Go, Ruby, PHP, Java, Kotlin and C#. `gate` lists the ones a change deleted or altered for the verifier.
+- `screen_paths`: `<repo>/<path>` prefixes of the screen source and locale files; a diff that touches one is a visible change and gets a read (`!<repo>` says a repo has none).
+- `page_paths`: globs of the files that are pages or routes; one added there is a new page, which is shaped.
+- `boundaries`: a map, one indented `<kind>: [<glob>, <glob>]` line per boundary: the code that computes or enforces that kind of fact, not every file that displays it. A change touching one runs on the critical lane. Draw it narrowly, and add a path whenever a verifier finds a fact people act on outside it.
+- `migrations`: globs of migration files; a change touching one runs on the critical lane.
+- `gate`: the runs that prove a change, each a line `<repo> | <when> | <command>`, with a fourth field `heavy` for a run that must go alone. `<when>` is `always`, globs within the repo, or `boundary:<kind>`, which runs the line whenever that boundary is touched in any repo: this is how a consumer's tests in another repository are run. `{files}` becomes the changed files that matched. Each command starts with an entry of `checks_allow`. A line is rerun only when what its `<when>` names is touched, so put lockfiles and shared configuration in the globs of the runs they affect.
+- `skip_markers`: the strings that mark a skipped or focused test in this project's runners; unset, a default covers the common ones.
+- `surface_kinds`: the kinds of fact users act on that must never be wrong; each is a key of `boundaries`.
+- `oracles`: a map, one indented `<kind>: <command>` line per kind that has one, each command also on `checks_allow`. The design gives a Surface line of that kind a check that runs it, the boundary's verifier and the audit run it, and a kind with none is stated in the handoff.
 
-A screenshot is any file under `evidence/` whose name holds the state's name from the plan's `States:` line and the commit it shows (7 to 40 hex characters), such as `limit-reached-390-en-light-<sha>.png`.
+A capture is `evidence/screens/<state>@<sha>.png`, with the screen's visible text beside it as `<state>@<sha>.txt`; `<state>` is the scenario or axis value from the question sheet.
 
 Then a short section per thing a delivering agent does:
 
 - **Set up** a fresh worktree, including what a worker starting there wouldn't find.
-- **Screens**, for a project with any: its design system and where it lives, its best reference screen for each kind of surface, and the widths, languages and themes each kind of state needs.
-- **Prove** a change: the checks available, what each one covers, how long it takes, which are heavy, and, where machines are shared, how a heavy run waits for room. A ticket picks the ones that cover what it alters and its reach, and runs a broad suite only when that reach justifies it, unless CI already does. Also: the real data volumes and how to produce them locally, how failures (a provider down, a conflict, a race) are produced in the test environment, and how two tickets' stacks are kept apart so each oracle runs against its ticket's own.
+- **Screens**, for a project with any: its design system and where it lives; six to ten screens the person has accepted, each with one line on why; which composition suits which job; the state axes its screens have (how much data, the role, the plan, a pending change, loading or failed) and how to seed each; how a screen is captured with its visible text; the widths, languages and themes to sample; and the rulings log, each rejection as a before and after with its principle.
+- **Prove** a change (this is what the `gate` lines encode): the checks available, what each one covers, how long it takes, which are heavy, and, where machines are shared, how a heavy run waits for room. A ticket picks the ones that cover what it alters and its reach, and runs a broad suite only when that reach justifies it, unless CI already does. Also: the real data volumes and how to produce them locally, how failures (a provider down, a conflict, a race) are produced in the test environment, and how two tickets' stacks are kept apart so each oracle runs against its ticket's own.
 - **Check** the facts users act on. Ask the person which facts their users act on that must never be wrong (an amount owed, an appointment time, a slot's availability, a stock level, who may see or do what) and how each is read from its record (the stored state, a provider's record, the rules the `AGENTS.md` states). Those are `surface_kinds`. An oracle for a kind compares what the product shows or writes in a given state with that record, read apart from the code that shows it; a workable form is `<command> --stack <worktree> <spec.json>`, the spec naming the states and facts to compare, printing how many it compared and every disagreement, and exiting 0 when all agree, 1 on a disagreement, a value it couldn't read or nothing compared, 2 on a bad spec. Name how each runs, what it covers and how long it takes; where a kind has none yet, writing one is the person's decision, with a recommendation.
 - **Reach** the environments, test accounts (by reference, never secrets) and read-only data; how an agent gets the app running to walk through as its users would; which contracts and consumers leave the project; and how everything a ticket starts, runs included, is found and removed afterwards.
 - **Deliver** to each target, step by step to its delivered status: how each is taken, confirmed and undone, how long an outside step (a pipeline, a deploy) may take, which other bases a hotfix must reach, and who may take each step without asking, quoted.

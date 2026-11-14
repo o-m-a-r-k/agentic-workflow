@@ -1,68 +1,77 @@
 ---
 name: deliver
-description: Deliver one ticket or several, from discovery and design to verified delivery and cleanup, with fresh agents checking each step. Use when the person asks to fix, implement, build or deliver a ticket, or to continue one.
+description: Deliver one ticket or several, at a depth set by what the change can damage, from discovery to verified delivery and cleanup, with fresh agents checking the work. Use when the person asks to fix, implement, build or deliver a ticket, or to continue one.
 ---
 
 # Deliver
 
-You orchestrate, in the session the person talks to, since workers return to it and not to a sub-agent. You own each ticket's outcome, as `WORKFLOW.md` "The outcome" describes. Workers do the work and write it to the ticket folder; you read the state and the scripts' output, decide the next move and start workers. Keep the work itself out of your context: you run no tests, builds, containers or servers, and you don't read `PLAN.md` to decide.
+You orchestrate, in the session the person talks to. You own each ticket's outcome. Workers do the work and write it to the ticket folder; you read the state and the scripts' output, decide the next move and start workers. Keep the work out of your context: you run no tests, builds or servers.
 
-**The skill folder** is the folder containing this file: `${CLAUDE_SKILL_DIR}` in Claude Code. In another harness, where that text is not replaced, use the path this file was loaded from. Its scripts run as `node <skill folder>/scripts/<name>.mjs`.
+**The skill folder** is the folder containing this file: `${CLAUDE_SKILL_DIR}` in Claude Code, or the path this file was loaded from. Scripts run as `node <skill folder>/scripts/<name>.mjs`.
 
 ## At the start of a session
 
 Read once, and again after the harness compacts your context:
 
-1. `WORKFLOW.md` in the skill folder: the way of working.
-2. The project definition: a repo-held `.agents/project.md` in the current directory, the nearest directory above it that has one, or a sibling folder beside the current repo (among several, the one whose `repos` include the current repo; if several or none qualify, ask the person). Its repo `path`s resolve against the folder that holds `.agents/`, or else the checkout of the same repo beside it. Otherwise `~/.agents/projects/<project>.md`, the one whose `roots` contain the current directory. If both exist, use the repo-held one and tell the person once to move the personal file's machine-only facts into `<project>.local.md`. A `~/.agents/projects/<project>.local.md` may set what the shared definition leaves unset and give this machine's paths, never remove a step, check or delivery rule. With no definition, run the onboard skill first.
-3. The user settings, `~/.agents/workflow.yaml`, with the active profile applied (see Settings).
+1. `WORKFLOW.md` in the skill folder.
+2. The project definition: a repo-held `.agents/project.md` in the current directory, the nearest directory above it, or a sibling folder (the one whose `repos` include the current repo; if several or none qualify, ask). Otherwise `~/.agents/projects/<project>.md` whose `roots` contain the current directory. A `~/.agents/projects/<project>.local.md` adds this machine's facts and never removes a step. With no definition, run the `onboard` skill first.
+3. `~/.agents/workflow.yaml`, with the active profile applied (see Settings).
 
 ## Each cycle
 
-A cycle runs whenever anything returns or the person writes. Read `STATE.md` for every ticket in the definition's `work` folder, the return line, and the result file of any script that ran since (`evidence/plan-shape.md`, `rounds.md`, `checks.json`, `links-<n>.md`); each gives a summary line per item: read those, not the logs. Then, for each ticket you were asked to deliver or continue, decide the next move following `WORKFLOW.md` and start its workers. Tickets move independently, so start whatever is ready, as many workers at once as `agents_at_once` allows; review and verification start together. Every return line ends with `questions <n>`: a worker's questions, and the open ones `plan-shape` names, go to a decision judge at once, with the files that hold them, while other work goes on; its answers go to the planner. Run `rounds` for the reader, which can't. Before starting the delivery worker, run `links` with the project definition (`--definition`); a broken row names the worker to start instead (or to wait for). For the reader's purpose, run `plan-shape <ticket folder> --print reader` rather than reading the plan.
+A cycle runs whenever a worker returns or the person writes. Read each ticket's `STATE.md`, the return line, and the result file of any script that ran (`evidence/lane.md`, `gate.md`, `words.md`, `checks.json`). Then decide each ticket's next move by `WORKFLOW.md` and start its workers. Tickets move independently.
 
-Take a new ticket (step 1) yourself, from the files in the skill folder's `templates/`; the first discover worker sets up the worktrees. Record each lane's worktree as a `Lane <name>: <path>` line.
+- **Take** a new ticket yourself: the folder from `templates/`, the worktrees, the tracker status, `STATE.md`. Tell the person in one line the outcome and the lane you expect.
+- **After Discover:** run `lane <ticket> --paths --definition …`. A floor above the brief's lane raises it; a path it cannot place goes back to Discover. Record the lane and `Screen:` in `STATE.md`. Where the brief says `Undo: no`, ask for the approval now, or on the critical lane once the challenge is answered.
+- **After every build, fix rounds included:** run `lane <ticket> --definition …` on the diff. A rise starts the skipped steps, and you tell the builder what they conclude.
+- **Verifiers:** the direct lane's runs as role `verify-direct`. On the critical lane start one per boundary `lane` named, each told its boundary; where it named none (a migration, or a change that cannot be undone), one for the data and its way back.
+- **Start Verify and Read together** where both apply: three readers for a shaped screen, one otherwise, and after a fix one reader on the changed states. Run `words <ticket>` after each capture; name a state whose words grew to the builder in that fix round, once, and show the counts in the handoff.
+- **Score the readers' answers against the answer key yourself** (`roles/read.md`): the reader never sees the key. Write the result to `evidence/read-<n>.md`.
+- **Freeze the question sheet** when the person has seen it (for an unshaped change, when Discover returns): record `Question sheet: <first 12 of its sha256>` in `STATE.md` (as `shasum -a 256` prints it). A later change to it is shown to the person before you record the new value.
+- **Count the open findings after every round** and stop the loop as `WORKFLOW.md` "How loops end" rule 3 says. Give each confirming checker the earlier confirm files, so it can tell a finding reported not closed before.
+- **Found items:** a builder or verifier returns them placed by the `triage` skill; you record them under `## Found on the way`, open the tickets rows 2 and 4 call for, and tell the person.
+- **Gate and ready:** have the builder run `gate`; before any delivery step `ready <ticket> --definition …` must exit 0. When `gate` reports a consumer repository with no worktree, add that worktree at its base and run it again.
+- **A worker's questions** (its return line ends `questions <n>`) go to a decision judge at once, while other work goes on.
 
 ## Where things stand
 
-You alone write `STATE.md`: its fixed fields, overwritten each cycle, never a narrative. Append one line per return to `evidence/log.md` (time, role, status); the worker writing `missed.md` reads it. Check every wait and every ticket's tracker status against its source. A worker whose files have stopped moving for far longer than its step needs, or whose session has ended, is gone, and a fresh worker restarts its step from what was left; a worker waiting for room for a heavy run is waiting, not gone. When your context grows heavy, or the session may end, make sure `STATE.md` is current; the next cycle resumes from the files.
+You alone write `STATE.md`: its fixed fields, overwritten each cycle, never a narrative. Append to `evidence/log.md` one line when a worker starts, `<ISO time> start <role>`, and one when it returns, `<ISO time> return <role>: <status>`; `record` measures idle time from them. A worker whose files have stopped moving for far longer than its step needs, or whose session ended, is gone: a fresh worker restarts its step from what was left. When your context grows heavy, make sure `STATE.md` is current; the next cycle resumes from the files.
 
 ## Starting a worker
 
-Every worker is fresh: started through the harness's own general-purpose sub-agent from this session, without its history, not a fork, and never a worker kept alive and messaged across revisions. In Codex, pass `fork_turns: "none"` where the spawn tool offers it. Its brief is paths:
+Every worker is fresh: started through the harness's general-purpose sub-agent, without your history, never a fork. In Codex, pass `fork_turns: "none"` where the spawn tool offers it. Its brief is paths and facts:
 
-- its role file, `roles/<role>.md` in the skill folder, which it reads first, whole;
-- the absolute paths of the ticket folder, the worktrees, the project definition (and its `.local.md`), `WORKFLOW.md`, and the skill folder for the scripts;
-- its particular job: the angle, the questions, the delivery number, and how to take a heavy run (as `WORKFLOW.md` Several tickets says);
-- that it asks for what it needs the way the harness grants permissions, and names what a refusal stopped rather than working around it;
-- this, in these words: "You start outside the worktrees. Before you work in a repo, read the `AGENTS.md` of the worktree, of each directory you touch, and any instruction file the project definition names. Run every command from inside the worktree, and record the worktree's `HEAD` with every result. Keep what you found (with its source) apart from what you propose; a question no source settles goes under `## Questions` in your file, and you never decide it yourself; your return line ends with `questions <n>`. Before you finish, remove what you started or created and what your runs left behind (compare before and after, and remove only what you can trace to your own runs; name what you can't trace); what the next step needs, name with how to remove it in your return line. What the project's environments can produce, you produce and check; never report it as unchecked."
+- its role file, `roles/<role>.md`, which it reads first, whole, and the skills that file names;
+- the absolute paths of the ticket folder, the worktrees, the project definition (and its `.local.md`), `WORKFLOW.md` and the skill folder;
+- its particular job: the lane, the boundary, the findings to confirm;
+- this, in these words: "Before you work in a repo, read the `AGENTS.md` of the worktree and of each directory you touch. Run every command from inside the worktree. Keep what you found, with its source, apart from what you propose. A question no source settles goes under `## Questions` in your file; you never decide it yourself, and your return line ends `questions <n>`. Ask for an access the way the harness grants permissions, and name what a refusal stopped rather than working around it. Before you finish, remove what you started or created that the next step does not need, and name what it does need with how to remove it. What the project's environments can produce, you produce and check; never report it as unchecked."
 
-**The reader is the exception.** Copy the built screenshots into a folder of their own outside the ticket folder (record it under Left behind) with the purpose `plan-shape --print reader` prints, word for word, and the commit they show. Give it only that folder, its role file and the permission line above; no worktree, no plan, no data. You move its file to `evidence/read-<delivery>.md`.
+**Readers and direction builders get less.** A reader gets a folder holding only the screenshots and the questions, and its role file: no worktree, no brief, no answer key, no earlier round. Each direction builder gets the question sheet and its one organising idea, not the other directions.
 
-The brief adds the ticket's facts; it never narrows the method or decides a worker's findings.
+The brief adds the ticket's facts. It never narrows the method or decides a worker's findings.
 
-Size the model to the work. If the settings say `models: session`, pass no model: every role runs on the session's model, and effort still comes from the list below. Otherwise take each role's model and effort, each separately, from the first of these that sets it:
+**Models.** If the settings say `models: session`, pass no model. Otherwise take each role's model and effort from the first of these that sets it: the project definition's `roles.<harness>.<role>`; `~/.agents/workflow.yaml` `roles.<harness>.<role>`; `defaults.yaml` in the skill folder; the session's own. `<harness>` is `claude` or `codex`.
 
-1. the project definition's `roles.<harness>.<role>`;
-2. `~/.agents/workflow.yaml`, `roles.<harness>.<role>`;
-3. `defaults.yaml` in the skill folder;
-4. the session's own model and effort.
+A worker returns one line. Record it, and read its file only when the next decision needs it.
 
-`<harness>` is `claude` or `codex`. Pass them where the harness accepts them: in Claude Code, `model` and `effort`; in Codex, the model and reasoning effort the spawn tool offers.
+## The person
 
-A worker returns one line. Record it, and read the details from the files only when the next decision needs them. Judge each item workers list as outside the ticket by `WORKFLOW.md` Scope.
+Write to the person only for what `WORKFLOW.md` "Decisions and the person" lists, and for a finished delivery. Never put a blocking dialog in front of them while any step can proceed. Each message opens with where the outcome stands, then what you need, if anything.
+
+- **A screen's direction:** one message with the question sheet, the three screenshots side by side, one line each on what that direction gives up, and your recommendation.
+- **A finished delivery:** the handoff, in full.
+- **A rejection:** restate it in one line with the class you took it as, and act; they correct the class if it is wrong. Add it under `## Rejections` in `STATE.md`.
+- **A hotfix or next ticket opened:** one line saying what and why.
+
+Record their standing instructions in `STATE.md`, in their words, and never ask again what they settle.
 
 ## Settings
 
 `~/.agents/workflow.yaml` holds the person's settings. A key left out keeps its default.
 
-- `agents_at_once`: how many workers run at the same time, across every ticket. Unset, as many as the work allows. At `1`, update `STATE.md` first, start the worker as the last thing you do, then end your turn or block on the harness's wait until it returns.
-- `heavy_runs`: an outer limit on how many heavy test runs go at once; unset, the project definition's admission alone decides.
-- `context_tokens`: the context window of the session's model. When set, tell each worker the window, to read only the parts of files it needs, send long output to `evidence/` and write findings as it goes.
-- `models: session`: every role runs on the session's own model, for a harness whose sub-agents can't choose one.
-- `roles.<harness>.<role>`: a role's model and effort, as above.
-- `profiles.<name>`: any of the keys above, merged over the top-level keys field by field. A profile is active when the person names it in the session, or else when `AGENTS_WORKFLOW_PROFILE` names it; an unknown name is reported, not guessed. An active profile's keys also win over the project definition's `roles`. Record the active profile in `STATE.md`.
-
-## The person
-
-Never wait on the person while any step can proceed, and never put a blocking question dialog in front of them: product decisions go to the decision judge, and the handoff shows them to overrule. Write to the person, as plain messages, only for: the high-risk approval (one message with what `plan-shape <ticket folder> --print approval` prints, sent once, when every challenger of the plan as it stands returns `build`, in the same cycle that starts the build, which never waits for the answer; record it with `plan <hash>`, and ask again only if the plan changes after that; record the answer with `plan <hash>`); an access or permission a worker couldn't get (ask, then restart the worker; never do that work yourself); a Surface extra; a finished delivery. Record their standing instructions in `STATE.md`, in their words, and never ask again what they settle. Every message opens with where the outcome stands and its evidence, then what you need from them, if anything, and links the file. A finished delivery ends with its report, `~/.agents/reports/<project>/<ticket>/report.md` where one was written, otherwise the tracker comment: give it in full.
+- `agents_at_once`: how many workers run at once, across every ticket. Unset, as many as the work allows.
+- `heavy_runs`: how many heavy test runs go at once. Unset, the project definition decides.
+- `context_tokens`: the session model's context window. When set, tell each worker to read only the parts of files it needs and send long output to `evidence/`.
+- `models: session`: every role runs on the session's model.
+- `roles.<harness>.<role>`: a role's model and effort.
+- `profiles.<name>`: any of the keys above, merged over the top-level keys. A profile is active when the person names it, or when `AGENTS_WORKFLOW_PROFILE` does; record it in `STATE.md`.

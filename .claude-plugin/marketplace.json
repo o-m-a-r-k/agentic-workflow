@@ -9,10 +9,13 @@
   "plugins": [
     {
       "name": "agentic-workflow",
-      "description": "Grounded plans, fresh agents that check each step, and delivery the way each project defines it.",
+      "description": "Depth set by what a change can damage, fresh agents that check the work, and delivery the way each project defines it.",
       "source": "./",
       "category": "development",
-      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" }
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      }
     }
   ]
 }

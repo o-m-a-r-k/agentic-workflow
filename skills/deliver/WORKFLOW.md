@@ -1,89 +1,92 @@
 # The way of working
 
-The goal: a ticket goes in, and the outcome it exists for comes true for its users, right and as soon as it can be done right, with no impact nobody saw coming. Nothing wrong reaches them, above all the facts they act on. Nobody waits on the person: product decisions are decided with sources and shown to them to overrule, and the only thing they are asked is approval of a change the project can't undo.
+The goal: a ticket goes in, and the outcome it exists for comes true for its users, right, and in hours. How deep the work goes is set by what the change can damage, never by the ticket's label. Nothing wrong reaches users on the facts they act on.
 
-## The outcome
+## Words
 
-Everything else in this method serves this section.
+- **Outcome:** what is true in the users' world once the ticket is delivered. Not the code, the tests or the steps.
+- **Fact people act on:** an amount, a date or time, a status, a balance, who may do what. Each must equal its record: the stored state, a provider's, or the rule that derives it.
+- **Boundary:** a kind of such fact the project names (money, access, dates, stored data, a contract between repositories). The project definition maps each to the code that computes or enforces it.
+- **Oracle:** a project-owned check that compares a shown or written fact with its record, apart from the code under test.
 
-- **Every ticket is for an outcome:** what is true in its users' world once it is delivered, not the code, the tests or the steps: the failing request now completes for the customer who hit it; the new report gives the totals its readers act on. Write down the outcome, its most direct evidence (the users' own data and logs, read-only; the screen as they meet it; the money the feature produces) and how soon it is needed.
-- **The orchestrator owns the distance to it.** The next move is the one that most shortens it, or removes the largest uncertainty about it, for its cost. The steps below are the usual moves in their usual order; the outcome and the size table decide how deep each goes, never that the challenge, review, verification, a high-risk approval or the delivery links are skipped.
-- **Direct evidence first; stand-ins only while they track it.** A local reproduction, a mocked state, a passing suite, a reader's answers and a challenger's verdict stand in for the outcome's own evidence, and count only while they move with it. When one doesn't, the work goes back to the outcome's evidence.
-- **A move earns its place by what it could still reveal or change about the outcome,** weighed against the time it costs the people waiting. A wrong fact people act on, or wrong data or state, once shown reachable through the product's real paths (its users, providers and jobs), however rare, is never an accepted risk: a path that writes such a fact is made to stop safely (stuck, visible, correctable by an operator).
-- **Find it before building, not after.** Every cycle after the build repeats review, verification and delivery; a defect found at Discover or Design costs minutes. Review, verification and the reader should find only what the build introduced.
-- **One delivery, unless users are failing now.** Each delivery repeats the whole cycle, so the ticket's work ships as one. It splits only when people are failing now and a part ends that sooner: that part ships first, proven and leaving nothing wrong reachable, and the rest follows as the next delivery.
+## Lanes
 
-## The Surface
+| Lane | When | Who says |
+|---|---|---|
+| **Direct** | No boundary path touched, and the change restores or adjusts behaviour that already exists | Discover, with its reason |
+| **Standard** | No boundary path touched; new behaviour | Discover, with its reason |
+| **Critical** | A boundary path or a migration is touched, or the effect cannot be undone by the project's way of undoing a delivery | The `lane` script for paths; Discover and every verifier for "cannot be undone" |
 
-A change shows or writes facts people act on: an amount, an appointment time, a slot's availability, a status, a balance, who may do what. Each must equal its record (the stored state, a provider's, or the rule that derives it from them) in every reachable state. The Surface lists, one line each, every such fact the change shows or writes: its kind, where it is met, and the record it must equal. The project definition names its kinds and their oracles. It is drafted when the ticket is taken (`STATE.md`), possibly empty, and finalised in the plan; a draft line the plan drops is marked "not touched" with its source, and the challenger judges that claim like any other. Each line has a check in `CHECKS.json` whose `expect` would fail on the wrong state, comparing what is shown or written with the record read apart from the code that shows it: the oracle for its kind where the project has one (run from the project definition's folder, never from the branch under test), otherwise a read-only query or a walk. The Surface is part of what the person approves on a high-risk ticket, what review and verification prove, and what the cold audit compares after delivery. Nothing on the Surface, and nothing the outcome names, is ever dropped, cut or delivered as a stated limit.
+- `lane --paths` runs on the paths Discover expects to touch, before anything is built. `lane` runs again on the real diff before verification. Either can raise the lane; nothing lowers it.
+- A verifier who finds the diff showing or writing a fact people act on outside the mapped paths raises the lane, and names the path for the project's map.
+- A rise runs the steps the lower lane skipped, and the build is revised to what they conclude. Built code is evidence for a design, never a constraint on it.
+
+## Steps
+
+| # | Step | Kind | Direct | Standard | Critical |
+|---|---|---|---|---|---|
+| 1 | Take | the orchestrator, from the definition | ✓ | ✓ | ✓ |
+| 2 | Discover | judgement | with Build | ✓ | ✓ |
+| 3 | Shape | judgement, then the person | a new or restructured screen, on any lane | | |
+| 4 | Design, challenge, confirm | judgement | | | ✓ |
+| 5 | Build | judgement | ✓ | ✓ | ✓ |
+| 6 | Verify | judgement, fresh | ✓ | ✓ | one per boundary touched; one for the data where none is |
+| 7 | Gate | the `gate` script | ✓ | ✓ | ✓ with `checks` |
+| 8 | Read | the project's captures, `words`, a fresh reader | any visible change, on any lane | | |
+| 9 | Deliver | the definition's steps; `ready` first | ✓ | ✓ | ✓ |
+| 10 | Audit | judgement, fresh | | | where delivery puts the change somewhere Verify did not run |
+| 11 | Accept | the person | ✓ | ✓ | ✓ |
+
+1. **Take.** Create the ticket folder from the templates and a worktree per repository from its freshly fetched base, as the definition says. Move the ticket to its started status. Fill `STATE.md`.
+2. **Discover** (`roles/discover.md`) writes `BRIEF.md`, one page: the outcome, the acceptance checks, for a bug its reproduction and root cause, the paths it expects to touch, the lane, whether the effect can be undone, whether a person will see the change (`Screen:`), and what it found on the way, each placed by the `triage` skill. For a visible change that is not shaped, Discover also writes the question sheet and answer key, limited to the questions the change affects. On the direct lane the same worker runs `lane --paths` itself and goes on to build only when it passes.
+3. **Shape** (`roles/shape.md`), for a new page, a screen whose structure changes, a change to how a kind of thing looks across the product, or a screen the person asked to have redesigned. A question sheet and answer key, three rough directions in the real app, and one message to the person, who picks. A single label, spacing or token correction skips it. Discover says which it is; `lane` reports new pages; the person may name a redesign. On the critical lane the order is: the question sheet, the design's contract drafted alongside, the directions on stand-in data, the designer's word on what each direction needs, the person's pick, then the challenge.
+4. **Design** (`roles/design.md`) writes `DESIGN.md` and `CHECKS.json`. One fresh challenger (`roles/challenge.md`) reads it once. The designer answers. A confirming checker (`roles/confirm.md`) reads the objections and the changes. No shaping, design or challenge is repeated for a fix.
+5. **Build** (`roles/build.md`): a failing test first, then the code, then a look at the running app. Extras the rubric puts in the ticket are separate commits, made before Verify.
+6. **Verify** (`roles/verify.md`): a fresh agent with the brief and the diff, never the builder's account.
+7. **Gate.** `gate` runs once on the settled tree, brought up to date with its base first. After a fix it reruns only what the fix reaches; a base that moved without touching the change's files leaves the result standing. On the critical lane `checks` runs the oracles.
+8. **Read** (`roles/read.md`): the project captures the touched screens across their state axes; `words` counts the visible words; fresh readers answer the questions from the screenshots alone, and the orchestrator scores them against the answer key. After a fix, one reader reads the changed states only.
+9. **Deliver** (`roles/deliver.md`): `ready` must pass at the tree to be delivered: the gate, the branch up to date with its base, the lane not below its floor, the newest verification clean, the checks and the read where they apply, the approval where the change cannot be undone, and the question sheet unchanged since the person saw it. Then the definition's steps, each confirmed from its output, and the handoff.
+10. **Audit** (`roles/audit.md`): each fact people act on compared with its record where the change now runs.
+11. **Accept.** The person tries it. The orchestrator restates each rejection in one line with the class it took it as; the person corrects the class if it is wrong. The ticket folder and worktrees stay until the person accepts or says to close; then `record`, and cleanup.
+
+| Rejection | What happens |
+|---|---|
+| Missed purpose: the screen answers the wrong question | Back to Shape, from the question sheet restated with the person |
+| Defect: it does not do what was agreed, or a bug the person met on a touched screen | One fix round, on the ticket's lane: build, `lane` on the new diff, a confirming check (on the critical lane with the boundary's oracle), `gate`, a read of the changed states, then Deliver again with `ready` first |
+| New wish | Placed by the `triage` skill |
+
+A second rejection of the same screen for how it reads or what it offers, not for a wrong value, is a missed purpose. A rejection that states a rule goes into the project's design reference, so the next screen starts with it.
+
+## Hotfix
+
+People are failing in production now. The order changes; nothing is skipped for the root fix.
+
+1. **Guard first:** the smallest change that stops the wrong thing and can be undone by reverting it, with a test that reproduces the failure. Its steps are exactly these, whatever its paths: discover (the reproduction), build, one verifier on the failure's path with the boundary's oracle where one exists, `gate`, deliver, audit. No shaping, design or challenge. It is delivered to the base production is built from and carried to every base the definition names, each proven the way the definition says for that base. A guard that cannot be undone by reverting needs the person's approval.
+2. **Root fix second,** in the same ticket, from a worktree at the base the guard landed on, on the lane its paths give it.
+
+## How loops end
+
+1. **Evidence or it is a note.** After the build, a finding blocks only with a failing test, a reproduction, or a cited line together with the acceptance check or rule it breaks. Before the build, with the input or state that makes the design fail and the real path that reaches it. Everything else goes in the handoff as a note. Taste and "could be better" are not findings. A dispute over whether something is wrong is settled by running it: a failing test or a reproduction decides, and without one it is a note. The decision judge rules on product questions, not on correctness.
+2. **One full read, then the fix only.** A confirming checker's brief is the earlier findings and the changes since. It answers whether each is closed and whether the fix broke what it reaches. It raises a new finding only in changed code, or for a wrong fact people act on, with evidence.
+3. **The open set must shrink.** The orchestrator counts the open findings after every round, new ones included. A round that ends with as many open as it began with, or that reports the same finding not closed a second time, ends the loop: the choice behind those findings is wrong, the work returns to that choice, and the person is asked one question about it. The same holds for reads: a re-read counts only on the states that changed.
 
 ## How the work is trusted
 
-- **Agents judge meaning; scripts count, match and compare.** No script decides what the work is. The six in the skill folder's `scripts/` (`plan-shape`, `rounds`, `proof`, `checks`, `links`, `record`) run as `node <skill folder>/scripts/<name>.mjs` and read the ticket's files through one shared reader, `ticket.mjs`, so a field a later script reads is the one `plan-shape` checked at design time; each writes at most one result file in `evidence/`, exits 0 or 1, and says at its top what it compares. A `checks` run is its ticket's alone: `evidence/checks.run` names it and `checks <folder> --stop` ends it, or clears what a killed run left; wait or stop by that, never by matching process names.
-- **Agents check agents.** A fresh agent checks the work against raw sources: code, git, logs, data, the running app; confidence never comes from the author's own account. A challenger or reviewer answers each rubric item yes or no with the evidence that decided it; an item without evidence is no. It runs on a different model or effort than the author where the harness allows.
-- **Grounded.** Every claim names its source: `file:line` at a named commit, a read-only query and its result, a log line, a screenshot, the ticket, or an external source opened, with its date and the words that establish the point. A source counts only for what it establishes; an agent's file counts only for the raw facts it quotes, never for its own proposal. A choice no source establishes is a question for the decision judge, never built on. Whoever passes a claim on keeps its basis: found (with its source) or proposed (by whom).
-- **Findings are claims too.** Whoever receives one checks it first and disputes a false one with evidence; a dispute goes to the decision judge, which rules with sources. A finding names the state or path where something fails; taste and "could be better" are not findings.
-- **Prove by running.** A question the design hinges on is settled by running something. Whoever writes a test runs it, through `proof`. Whatever the project's environments can produce (a state, an account, data, a running app) is produced and checked, never reported as unchecked; only what can't be produced there, such as a real third party, real money or elapsed time, is reported, first, as work not done, with why.
-- **Proof stands while what it ran on stands.** A proof line, check result, walk or review stands for HEAD while nothing since touches the change's files (what it alters since its base) but tests and, for a review, its findings' files: a merge that changes no byte, or a base move away from the change, proves nothing again. A red is a failing run that ran something, on the base with only tests changed; its green uses the same words. Focused tests are cheap to run again; a check marked heavy runs once, on the tree review left clean.
-- **One writer per file.** Only the planner writes `PLAN.md` and `CHECKS.json`, and runs `plan-shape` after each change; anyone else sends the planner the item. Only the orchestrator writes `STATE.md`.
-- **Meaning first.** What a person sees exists so they understand and can act; the plugin's `design` skill holds how.
+- **Agents judge meaning; scripts count, match and compare.** `lane`, `gate`, `ready`, `words`, `checks`, `proof` and `record` (with two shared modules, `ticket` and `runner`) run as `node <skill folder>/scripts/<name>.mjs`; each says at its top what it compares.
+- **Fresh agents check.** The one who checks never wrote what it checks, and works from raw sources: the code, git, logs, data, the running app.
+- **Grounded.** A claim names its source: `file:line` at a named commit, a query and its result, a log line, a screenshot, an external source opened. Whoever passes a claim on says whether it was found or proposed.
+- **Prove by running.** Whatever the project's environments can produce (a state, an account, data) is produced and checked, never reported as unchecked. Only what cannot be produced there (a real third party, real money, elapsed time) is reported, first, as work not done.
+- **A sentence is not an answer.** What a person sees is judged by the `design` skill. An answer the screen gives only in a sentence counts as not given.
 - **Files, not memory.** The ticket folder is the state.
 
-## Decisions
+## Decisions and the person
 
-A product decision is one whose answer changes what the users or the business get and that the code, the design system and the project's rules don't settle. A fresh decision judge (`roles/decide.md`) answers every such question, whoever raises it, so nobody waits on the person: by established industry practice (vendors' own documentation, standards, regulators and law, published research on how people use products), the users' experience, and safety; on money, tax, law, access and data, established practice wins over convenience. Where sources disagree or none exists, it picks the option easiest to reverse and marks it so. The planner records each answer, a ruling on a dispute included, as a decision with its sources, quoted, and the alternatives it beats; a changed decision raises the revision, so the next challenge reads it. The handoff, the report and the record list every decision for the person to overrule; an overrule is that ticket's next delivery.
+A product question (one whose answer changes what users or the business get, and that the code and the project's rules do not settle) goes to a fresh decision judge (`roles/decide.md`), who answers from sources. The handoff lists every decision for the person to overrule. A product question is never a reason to file something.
 
-The one approval left is a high-risk change, whose effect the project's way of undoing a delivery can't reverse (data lost or rewritten, a write outside the project, access widened). The orchestrator asks it as one plain message with what `plan-shape --print approval` prints (the outcome, risk, Surface and decisions), and records the answer with the plan's hash in `STATE.md`; it is asked once the design is ready, never of a revision still being challenged; it blocks only the irreversible delivery step, never design, build, review or verification. The orchestrator never uses a blocking question dialog while any step can proceed.
+The person is asked for: a screen's direction; approval of a change the project cannot undo, on any lane, asked once the brief (on the critical lane, the design after its challenge) is settled, and asked again if that changes afterwards; an access a worker could not get; and the one question rule 3 produces. The person is told, not asked, when a hotfix ticket or a next ticket is opened; starting such a ticket follows the project's own rules on who may start work. The person does not approve plans. Never wait on the person while any other step can proceed.
 
-## Scope
-
-The outcome as its users meet it, whatever they can't get it without, and whatever the change causes or breaks are the ticket's, fixed in it at their root. So are defects already present on the ticket's ground (what the change touches and what users meet on the way to the outcome): Discover finds them and the design folds them in. One found later is fixed in the round that found it, and counted in `evidence/missed.md` as a Discover miss. Everything beyond the ground is extra, recorded under "Outside the ticket" in `STATE.md`. An extra is a finding like any other: it names the state that triggers it and shows it by running it; one that can't be shown in the project's environments is a lead in the handoff with what would show it.
-
-- **A Surface extra,** a wrong fact people act on, shown reachable by users now, opens a hotfix ticket at once and the person is told; it starts after the current delivery unless they say now.
-- **A change to an oracle** is the ticket's when its outcome needs it, and the plan names it under `Oracles changed:`; any other is its own ticket.
-- **Every other extra** goes to the decision judge (fix now, after, or file it) and into the handoff in plain words.
-
-The project's `AGENTS.md` files and the person's own instructions add to this method; where they ask for more, they win. They never remove a step: authority to deliver doesn't approve a high-risk change. Only the person, of their own accord, can waive a step, for the ticket they name; never ask them to.
-
-## Size
-
-The type is hotfix, bug, enhancement or new feature, as the person names it, the project definition says, or inferred and recorded so. The size, recorded in `STATE.md`, sets how deep each step goes, and nothing else in the method varies by it: whatever the size, a design is ready only when no challenger can name a failing state, and review goes on while one names a failing state.
-
-| Size | Discover (the ground's reach) | Design | Challengers | After the build |
-|---|---|---|---|---|
-| Hotfix (people failing in production now) | the failure and its blast radius | the guard, then the root fix; no diagrams | one at a time | review, the failure's path verified, the audit |
-| Small: a bug or small enhancement | the touched screens and flows | short; a diagram only where there are states | one at a time | review, verify, a reader for touched screens, the audit |
-| New feature | the area's whole current state | full design and its documents | one at a time | all of them |
-| Big change: new data, migrations or many consumers | the whole area, its data and migrations | full, with the way back | two independent each round | all of them, two reviewers each round |
-
-The one who checks is never the one who wrote. A small ticket's discovery and design may be one worker; a backend change has no reader.
-
-## The steps
-
-1. **Take.** Choose the delivery target as the project definition says (a hotfix's is the one production is built from). Create `<work>/<ticket>/` from the templates and a worktree per repo the ticket needs, each from its freshly fetched base and set up by the first discover worker as the definition says; a repo found later gets its worktree then. If the work folder lies inside a repo, its `.git/info/exclude` lists it. Move the ticket to `started`. Fill `STATE.md`: the outcome, type, size, the worktrees (paths from the ticket folder, or absolute; a lane's as `Lane <name>: <path>`) and a first draft of the Surface. Tell the person in one line the outcome, size and the moves you expect.
-
-2. **Discover** (`roles/discover.md`). Fresh agents, one angle each, review the current state of everything the change touches: what exists, what is already broken there, every impact (consumers, data, flows, events, contracts, inside the worktrees or beyond), and for a bug or hotfix a reproduction where the failure happens. One angle is always the ground as it is today, as far as the size table reaches, read with the rubric review and the reader apply at the end. Each finding is shown by running something; each writes `evidence/discover-<angle>.md`. One pass per angle; a gap a challenger shows gets a discover of that gap.
-
-3. **Design** (`roles/plan.md`). The planner designs the solution from the outcome and the current state, not from the ticket text alone, and writes it as `PLAN.md` and `CHECKS.json` in the templates' form: for what people see, the purpose first, by the plugin's `design` skill; for the backend, contracts, data and migrations with their way back, state machines, sequences, idempotency and failure paths, and the structure: the codebase's patterns or a named design pattern where the problem needs one, for clean code; documents the complexity calls for in `design/`; the Surface with a check per line; the tests table, which is the acceptance tests; one delivery unless users are failing now. Before the challenge, the planner commits the acceptance tests as the ticket branch's first commit, runs every row there, the narrowed slow suites included, seeing each "fails before: yes" test fail and each other pass (an existing test failing there is a defect on the ground, a "yes" row the design takes in), and runs each check once, writing for a check of a new fact the output it must give on success; so a check or row that could never work is found now. A migration has a row running it up and down through the project's way of running migrations. Product questions go to the decision judge; the planner folds its answers. `plan-shape` passes before a challenge starts.
-
-4. **Challenge** (`roles/challenge.md`). A fresh challenger attacks the design and writes `evidence/challenge-<k>.md`, naming the plan's hash: `build`, or the objections, each naming the concrete state or path where the design fails. The planner answers each with a new revision, or disputes it with evidence; the decision judge rules on a dispute, and the planner records the ruling as a decision. A fresh challenger of a later round starts from what the revision changed and what that reaches; a failing state found elsewhere is still an objection, marked as an earlier round's miss. The design is ready when every challenger of the plan as it stands returns `build`. An implementer's `plan wrong` reopens this step.
-
-5. **Build** (`roles/implement.md`). Fresh implementers take the plan as their brief, lanes for independent items in their own worktrees; the last lane's implementer merges them in order. Each acceptance test runs red on the base, then green on HEAD with the same words, through `proof`; the commands the definition says every change runs, run too. The implementer decides nothing the plan and the `design` skill leave open: a fact that changes the design goes to the planner, and a product choice to the decision judge. Done is `done at <sha>`.
-
-6. **Read** (screens only, `roles/read.md`). One fresh reader per delivery, on the built screenshots alone, answers each of the purpose's questions on the pictured states where it is asked; the orchestrator runs `rounds` for it. Its "no"s go to review. Screens changed after the read get a read of those screens.
-
-7. **Review** (`roles/review.md`). A fresh reviewer reads the whole change against the review rubric; each later round reads the fixes and any diff after review that `links` reports. Rounds go on while a review names a concrete failing state, and end when one is clean; a later round adds a finding only in code changed since, or says why earlier rounds couldn't see it. A defect already there before the change is fixed in the round that found it and recorded as a Discover miss.
-
-8. **Verify** (`roles/verify.md`) on the final tree, in the target environment, alongside review: each check as written, `checks` for the runnable ones, the walks through the product's real paths, screenshots of the named states; the heavy checks once review is clean. A check that fails is this ticket's to fix: verify says whether the product or the check is wrong, and the implementer or the planner fixes it.
-
-9. **Release** (`roles/deliver.md`). `links` first: a broken link names the worker to start. A fresh delivery worker brings the branch up to date where needed, takes each irreversible step once `links` holds at that tree and the high-risk approval, where needed, is recorded, confirms each from its output, and looks for the outcome where it lives. The handoff opens with the outcome and its evidence, then the approval asked, the decisions to overrule, the `links` table, the screenshots and the extras. A delivery that can only wait for an outside party or elapsed time becomes a follow-up ticket carrying its plan and branch, listed first as work not done. The ticket moves to its delivered status only after its last delivery.
-
-10. **Cold audit** (`roles/audit.md`), right after each delivery: a fresh agent compares every Surface fact with its record through the oracle for its kind; a confirmed wrong fact opens a hotfix as Scope says. Then, after the last delivery, the auditor records and cleans: `evidence/missed.md`, `record` (which keeps the decisions), and removing what the ticket left, the ticket folder last.
-
-## Several tickets
-
-Each ticket is independent and is delivered when it is ready; a pause for one never pauses another. A heavy test run starts when there is room for it by measured memory, as the project definition says; otherwise it waits, never skipped. The most urgent outcome goes first.
+The project's `AGENTS.md` files and the person's own instructions add to this method; where they ask for more, they win.
 
 ## Learning
 
-The records, their `missed` lists, the cold audits and the reopened tickets show where the method fails. A kind of miss that repeats points at the method: find what let the work drift from the outcome and change that, rather than adding a clause for the case. Learning is its own piece of work, never done inside a ticket or in the installed copy.
+`record` writes each ticket's numbers: time to delivery and to acceptance, idle time, the person's rejections by class, agents started, gate runs, lane raises, words per screen. A kind of miss that repeats points at the method: change what let the work drift, rather than adding a clause for the case. A check that keeps finding nothing in a lane is removed from that lane. Learning is its own piece of work, never done inside a ticket.

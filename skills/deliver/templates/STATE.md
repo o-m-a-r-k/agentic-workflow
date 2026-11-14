@@ -1,33 +1,37 @@
 # State: <ticket id>
 
-Fixed fields, written only by the orchestrator and overwritten each cycle. The scripts read the fields named here; the narrative goes to `evidence/log.md`.
+Fixed fields, written only by the orchestrator and overwritten each cycle. The scripts read them; the narrative goes to `evidence/log.md`. `Risk lane:` stays empty until Discover has returned and `lane --paths` has run; then it is `direct`, `standard` or `critical`.
 
 Project: <project>
 Ticket: <ticket id>
 Type: hotfix | bug | enhancement | new feature (named by: the person | the ticket | inferred)
-Size: hotfix | small | new feature | big change
-Outcome: <what is true for the users once delivered>; seen in: <its most direct evidence>; needed by: <when>
+Risk lane:
+Screen: none | touched | shaped
+Hotfix: yes | no
+Outcome: <what is true for the users once delivered>
 Target: <delivery target>, delivered status <status>
 Started: <ISO time>
-Driven by: <harness> session <id>, last cycle <time>
 Profile: <name> | none
 Worktree <repo>: <path from this folder or a folder above it, or absolute> on <branch>, from <base> at <sha>
-Lane <name>: <path>, a lane's worktree, merged into its repo's
-Delivery 1: <what it carries>: step <discover | design | challenge | build | read | review | verify | release | audit | clean> | delivered <ISO time> <where>
-Plan: revision <n>; plan-shape <pass | fail n>; plan <hash>
-Approval: none | asked <time> | <the person's words>, <time>, plan <hash>
-Waiting for: nothing | worker: <role, started time> | outside: <what, link>
+Lane <name>: <path>, an extra worktree for a part built in parallel, merged into its repo's
+Step: take | discover | shape | design | build | verify | gate | read | deliver | audit | accept
+Waiting for: nothing | worker: <role, started time> | the person: <what> | outside: <what, link>
+Approval: none | asked <time> | <the person's words>, <time>
+Question sheet: <first 12 of QUESTIONS.md's sha256, once the person has seen it>
+Delivered: <ISO time> <where>
+Accepted: <ISO time>
 Left behind: none | <worker, run, server, container, data or file>: <created by, how to remove>
 Standing instructions: none | <the person's words, time>
-Lanes: <what runs together, what each writes, where they merge>
-Last return: <lane>: <role> <status>, <time>
 
-## Surface
+## Rejections
 
-- S1 (<kind>): <fact shown or written>: <where users meet it>; equals <its record: the stored state or the provider's>
+- <missed purpose | defect | new wish>: <the rejection in one line, the person's word on its class, time>
 
-## Outside the ticket
+## Found on the way
 
-- [surface] <a wrong fact people act on, shown reachable now>, <what showed it>: hotfix <ticket> opened <time>, told <time>
-- lead: <what may be wrong>, <why it can't be shown here>, <what would show it>: in the handoff
-- <other extra>, <source>, <who meets it, what fixing takes>: decided <fix now | after | file>, evidence/decide-<k>.md
+- [fixed] <what, where, the commit>
+- [hotfix <ticket>] <a wrong fact people act on, reachable now, outside this ticket>
+- [next <ticket>] <a bug whose fix touches a boundary or needs a design>
+- [filed <ticket>] <not a bug, not needed here, worth having>
+- [dropped] <what and why>
+- [lead] <what may be wrong, why it could not be shown, what would show it>

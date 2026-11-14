@@ -7,6 +7,6 @@
     "in": "<repo whose worktree it runs in>",
     "heavy": false,
     "expect": "<text the output holds, or /regex/: for a fact the change creates, the success output the design states; for a walk, what must be seen>",
-    "due": "before delivery <n> | after <the delivery step that reaches its environment> in delivery <n>"
+    "due": "before delivery | after <the delivery step that reaches its environment>"
   }
 ]

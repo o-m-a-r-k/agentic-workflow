@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.17.0
+
+A replacement of the method, from tickets that took days: a fifth delivery of one ticket, a plan at its sixth revision after 41 worker returns, small bugs with four to six challenge rounds, and a screen read three times whose fixes were added sentences.
+
+- **Depth follows what the change can damage.** Three lanes: direct, standard, critical. Discover names the lane; `lane` raises it when the paths touch a boundary or a migration the project has mapped, before the build and again on the diff. The smallest ticket is one worker, a fresh verifier and one gate run.
+- **A one-page brief replaces the plan.** `DESIGN.md` exists only on the critical lane, with one challenge and a confirming check of the answers. `plan-shape`, `links` and `rounds` are removed.
+- **One verifier does review and verification,** from the brief and the diff, never the builder's account. On the critical lane, one per boundary, with the project's oracles.
+- **One gate.** `gate` runs the project's proof once on the settled tree, reruns after a fix only what the fix reaches, keeps a result when the base moved without overlap, and lists deleted, changed and skipped tests for the verifier. Before any delivery step, `ready` confirms the gate, the base, the lane, the newest verification, the checks, the read, the approval and the question sheet at the tree being delivered.
+- **Loops end by rule:** a finding needs evidence or it is a note; a confirming checker reads only the fix; a finding still open a second time returns the work to the choice behind it, with one question to the person.
+- **Screens start from the person's questions.** A question sheet and an answer key before any layout; three rough directions in the real app; the person picks from screenshots. Readers answer the questions from screenshots alone and are scored against the key. An answer found only in a sentence counts as not given, a question nobody would ask in a state is dropped, and `words` shows where a fix grew a screen's text. The `design` skill is rewritten around this.
+- **Bugs found on the way are fixed in the ticket** as their own commits, never as a new delivery cycle; one that touches a boundary or needs a design is the next ticket started. The new `triage` skill holds the rubric.
+- **The person** picks a screen's direction and approves what cannot be undone, and no longer approves plans.
+- **`record`** writes time to delivery and to acceptance, idle time, rejections by class, agents started, gate runs, lane raises and words per screen.
+- **The definition** gains `boundaries`, `migrations`, `page_paths`, `gate` and `skip_markers`.
+
 ## 0.16.8
 
 From a new-feature ticket whose design took 7 hours over four challenge rounds on a 17,000-word plan, then an hour waiting on an approval the method says never holds the build, and an approval asked again after each revision.
