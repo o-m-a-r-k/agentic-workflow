@@ -18,7 +18,7 @@ The plugin is five skills (deliver, onboard, design, test, triage), the files th
 
 **Loops end by rule.** A finding needs evidence or it is a note. A recheck reads only the fix. When the same finding stays open twice, the choice behind it is wrong and you are asked one question.
 
-**Bugs found on the way** are fixed in the ticket as their own commits. A wrong fact users can reach now gets a hotfix ticket, and a bug whose fix touches a boundary becomes the next ticket started; anything else found is a line in the handoff that the person turns into a ticket by saying so. The `triage` skill holds the rubric.
+**What is found on the way** is reported by the workers and placed once, together, by one fresh triage judge. What the change broke is always fixed. A wrong fact users can reach now gets a hotfix ticket, and a fix that touches a boundary becomes the next ticket. The rest is weighed: fixed in the ticket when it is near the change and cheap now, otherwise a line in the handoff that the person turns into a ticket by saying so. The `triage` skill holds the judge's brief.
 
 **You are asked for** a screen's direction, approval of a step the project cannot undo, and an access a worker could not get. Product questions are answered by a fresh agent from sources and listed in the handoff for you to overrule.
 
@@ -70,7 +70,7 @@ Claude Code sets each worker's effort from version 2.1.292, and reads `AGENTS.md
 
 ## Use
 
-Five skills: `deliver`; `onboard`; `design`, which shaping, building and reading follow for anything people see; `test`, so every test earns its place; and `triage`, which decides what becomes of anything found on the way.
+Five skills: `deliver`; `onboard`; `design`, which shaping, building and reading follow for anything people see; `test`, so every test earns its place; and `triage`, which says how found items are reported and judged.
 
 1. **Onboard a project once:** ask for the `onboard` skill. An agent describes how your project delivers, from its repos, CI and your words, then proves the description by walking a practice ticket through every safe step, and shows you what it found, what it proved and what proving a change costs. Run it again at any time. It writes only what you confirm.
 2. **Deliver:** ask for the `deliver` skill with one or more tickets and their type, for example "deliver EX-41 and EX-42, both bugs".

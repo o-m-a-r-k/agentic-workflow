@@ -30,9 +30,10 @@ Standing instructions: none | <the person's words, time>
 
 ## Found on the way
 
-- [fixed] <what, where, the commit>
+The triage judge's rulings (`evidence/triage-<n>.md`).
+
+- [fixed] <what, where; the commit once it is made>
 - [hotfix <ticket>] <a wrong fact people act on, reachable now, outside this ticket>
 - [next <ticket>] <a bug whose fix touches a boundary>
 - [note] <wrong or worth having, not this ticket's; what shows it; in the handoff, no ticket>
-- [dropped] <what and why>
 - [lead] <what may be wrong, why it could not be shown, what would show it>

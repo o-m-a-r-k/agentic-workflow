@@ -10,6 +10,7 @@ roles:
     confirm:     { model: opus,   effort: high }
     decide:      { model: opus,   effort: high }
     reconsider:  { model: opus,   effort: xhigh }
+    triage:      { model: opus,   effort: high }
     build:       { model: sonnet, effort: medium }
     verify:      { model: opus,   effort: high }
     verify-direct: { model: sonnet, effort: high }
@@ -24,6 +25,7 @@ roles:
     confirm:     { effort: high }
     decide:      { effort: high }
     reconsider:  { effort: xhigh }
+    triage:      { effort: high }
     build:       { effort: medium }
     verify:      { effort: high }
     verify-direct: { effort: medium }

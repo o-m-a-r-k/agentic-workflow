@@ -1,46 +1,47 @@
 ---
 name: triage
-description: Decide what becomes of a defect or idea found while working on a ticket (fix it in this ticket, open a hotfix or next ticket, note it in the handoff, or drop it) so related bugs get fixed without the backlog or the ticket growing. Use whenever work on a ticket turns up something the ticket did not ask for.
+description: Decide what becomes of everything found while working on a ticket (fix it here, open a hotfix or next ticket, note it in the handoff), once, by one fresh judge who sees all of it together, so related bugs get fixed without the ticket or the backlog growing. Use when reporting something a ticket did not ask for, and when judging what was reported.
 ---
 
 # What a found item becomes
 
-Related bugs get fixed where they are found; a ticket still ends.
+Work on a ticket turns up things it did not ask for. The workers report them. One fresh judge places them all, once, with the whole ticket in view.
 
-The ticket's ground is in its `STATE.md` (`WORKFLOW.md`, Words). An **extra** is a fix row 3 makes in the ticket. A **bug** is the product showing or doing something that contradicts its record, its rules or what it says of the same thing elsewhere; a wrong word is one.
+## What is not a found item
 
-**Decide first.** An item whose fix depends on a product choice, one the code and the project's rules do not settle, goes to the decision judge and is placed once it is answered. It is never fixed or noted undecided.
+- **What this change broke.** Something right on the base and wrong on the change is a finding: it is fixed in the ticket, always. Which it is, is shown by running it on both; when that cannot be shown, it is a finding.
+- **What the outcome needs.** While an acceptance check fails, the ticket is not done.
 
-Then ask in order. The first yes decides, and the answer is the same on every lane.
+Everything else the work met that is wrong, and was so before the change, is a found item. An idea for something new is reported the same way, without `shown`, and is always a note.
 
-| # | Question | Result |
-|---|---|---|
-| 1 | Did this change cause or worsen it, or would acceptance be false with it present? | **Fix in this ticket** |
-| 2 | Is a fact people act on wrong and reachable by users now? | **Its own hotfix ticket,** opened at once; the person is told |
-| 3 | Is it a bug on the ground, or met on the ticket's own path, whose fix touches no boundary, needs no design and stays in the repositories the ticket is already in? | **Fix in this ticket,** as its own commit with its own test |
-| 4 | Is it a bug whose fix touches a boundary? | **The next ticket:** its own ticket, opened now and first in the handoff, started right after this delivery where the project's rules let work start without the person |
-| 5 | Anything else | A **note:** one line in the handoff with what shows it, not fixed, no ticket. The person says which notes become tickets |
+## Reporting one: every worker
 
-## Rules that keep it honest
+You place nothing and fix nothing you found. Write one line each under `## Found on the way` in your file:
 
-- **Show it.** An item is shown by running something: a failing test, a reproduction, a query and its result. One that cannot be shown in the project's environments is a lead in the handoff, with what would show it. A lead is never work.
-- **Know where it lives.** An item placed in the ticket names the paths its fix needs, found by searching every place the thing is defined or shown, never assumed from the one place it was met.
-- **The root cause is fixed where it lives,** shared code included: that is the ticket. The same kind of defect in another place is a bug off the ground: rows 3 and 4.
-- **The ground does not grow.** Shared code the ticket changes is checked wherever it is used, for what the change broke there: row 1. Row 3 is for what the ticket's own path meets. What is met only where that shared code is used, or while building or checking an extra or added work, and is shown to be on the base already, is a note unless row 2 or 4 applies.
-- **An in-ticket fix reopens nothing** unless it changes the contract or what a screen is for. One that touches a boundary raises the lane, like any other change.
-- **Before verification,** an in-ticket fix is a commit in the build. **After it,** in-ticket fixes are gathered into one fix round, and the confirming checker's brief lists them.
-- **Taste is dropped.** "Could be better" with no failing state behind it is not an item.
+`- <what is wrong, and for whom> | shown: <the run, query or reproduction> | where: <every path its fix needs> | urgent`
 
-## Examples
+- **Shown** by running something. One the project's environments cannot show is a **lead**: say what would show it.
+- **Where** is found by searching each place the thing is defined or shown, never assumed from the one place it was met.
+- **Urgent** only when a fact people act on is wrong where real users are today. Say so in your return line too.
+- You do not go looking: report what the ticket's own work met. Taste, "could be better" with no failing state behind it, is not reported.
 
-| Found while | The item | Row | Result |
-|---|---|---|---|
-| Fixing a filter on a list page | The same page's empty state shows a raw error code | 3 | Fix in this ticket, own commit: same screen, one place, no boundary |
-| Fixing a filter on a list page | The same page's totals are labelled by a service in another repository, wrongly | 5 | A note: on the screen, but its fix is not where the ticket is |
-| Changing a label on a settings page | A total on an unrelated statement is computed without a discount | 2 | Hotfix ticket now; this ticket carries on |
-| Adding a column to a table | The date helper that column uses drops the timezone in a tooltip, with no stored value affected | 3 | Fix in this ticket, own commit, own test |
-| Fixing a notification's wording | The endpoint behind it, which no screen calls yet, lets any member through | 4 | Next ticket, started right after this delivery |
-| Building a detail page | The list it links from could use a saved-filter feature | 5 | A note in the handoff: not needed here |
-| Reviewing a form | "The spacing here feels tight" | — | Dropped: taste |
+## Judging them: the triage judge
 
-Record each item in the brief's "Found on the way" (Discover) or the ticket's `STATE.md` (later), with the row that decided it.
+Two rulings are facts, not judgement:
+
+1. **A fact people act on, wrong where real users are today:** its own hotfix ticket, opened at once. A product with no users yet has none of these.
+2. **A fix that touches a boundary,** by the project definition's map: never fixed here. The next ticket if it is shown wrong; a note otherwise.
+
+Every other item is `fix here` or `note`, weighed together:
+
+- **Towards fixing here:** the person trying the delivery will meet it, on the ticket's ground; its fix sits in files the ticket already changes, or beside them; it is cheap to fix and check now, and would be dear to find again. Where the verifier asked for no fix round, a fix here costs one: weigh that too.
+- **Towards a note:** its fix needs a design, a product choice nobody has made, or another part of the product; it was met only where shared code is used, or while checking another item; fixing it would need acceptance checks of its own.
+- **The whole.** What you take in, added up, leaves a ticket the person would still recognise as the one they asked for, with its own change the larger part. When the items are many, take those nearest the ticket's change and note the rest.
+
+A product choice is never decided to make room for a fix: the item is a note that carries the question.
+
+**A note** is one line in the handoff with what shows it and the reason it was not fixed. It opens no ticket; the person turns it into one by saying so. A lead goes in the same list.
+
+## When
+
+When every verifier of the delivery has returned; an urgent item is ruled at once, on its own. What is ruled `fix here` joins the verifier's findings in the one fix round, each as its own commit with its own test. What is found after that is a note unless it is urgent; the handoff lists it.

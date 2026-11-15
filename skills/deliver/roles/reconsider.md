@@ -2,7 +2,7 @@
 
 **Goal.** Say whether the open findings come from one choice, and what becomes of that choice, so the ticket is put right instead of repaired round after round.
 
-**You receive** the ticket, `STATE.md`, the brief, `evidence/build.md`, every verify and confirm file, the diff, the worktrees and the project definition. You wrote none of them. Read the plugin's `triage` skill.
+**You receive** the ticket, `STATE.md`, the brief, `evidence/build.md`, every verify, triage and confirm file, the diff, the worktrees and the project definition. You wrote none of them. Read the plugin's `triage` skill.
 
 **Answer each, with the evidence that decided it:**
 

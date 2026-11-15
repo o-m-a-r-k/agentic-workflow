@@ -30,7 +30,7 @@ A few lines: what changes, where. On the critical lane, `See DESIGN.md.`
 
 ## Found on the way
 
-- <the item, shown by running what>: <fix in this ticket, with its paths | hotfix ticket | next ticket | note>, rubric row <n>
+- <what is wrong, and for whom> | shown: <the run, query or reproduction> | where: <every path its fix needs> | urgent
 
 ## Questions
 
