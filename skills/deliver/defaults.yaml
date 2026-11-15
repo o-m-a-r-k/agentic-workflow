@@ -9,6 +9,7 @@ roles:
     challenge:   { model: opus,   effort: xhigh }
     confirm:     { model: opus,   effort: high }
     decide:      { model: opus,   effort: high }
+    reconsider:  { model: opus,   effort: xhigh }
     build:       { model: sonnet, effort: medium }
     verify:      { model: opus,   effort: high }
     verify-direct: { model: sonnet, effort: high }
@@ -22,6 +23,7 @@ roles:
     challenge:   { effort: xhigh }
     confirm:     { effort: high }
     decide:      { effort: high }
+    reconsider:  { effort: xhigh }
     build:       { effort: medium }
     verify:      { effort: high }
     verify-direct: { effort: medium }

@@ -7,7 +7,7 @@ The goal: a ticket goes in, and the outcome it exists for comes true for its use
 - **Outcome:** what is true in the users' world once the ticket is delivered. Not the code, the tests or the steps.
 - **Fact people act on:** an amount, a date or time, a status, a balance, who may do what. Each must equal its record: the stored state, a provider's, or the rule that derives it.
 - **Boundary:** a kind of such fact the project names (money, access, dates, stored data, a contract between repositories). The project definition maps each to the code that computes or enforces it.
-- **Ground:** the places people or other systems meet that the ticket itself names: its screens, endpoints, messages, files. The orchestrator writes it from the ticket's words when it takes the ticket. Code is never ground, and nothing later adds to it.
+- **Ground:** the places people or other systems meet that the ticket itself names: its screens, endpoints, messages, files. The orchestrator writes it from the ticket's words when it takes the ticket. Code is never ground, and only the person's own words add to it later.
 - **Oracle:** a project-owned check that compares a shown or written fact with its record, apart from the code under test.
 
 ## Lanes
@@ -56,6 +56,8 @@ The goal: a ticket goes in, and the outcome it exists for comes true for its use
 | Defect: it does not do what was agreed, or a bug the person met on the ticket's ground | One fix round, on the ticket's lane: build, `lane` on the new diff, a confirming check (on the critical lane with the boundary's oracle), `gate`, a read of the changed states, then Deliver again with `ready` first |
 | New wish | Placed by the `triage` skill |
 
+**Work the person adds to a ticket** after Discover is discovered before it is built: Discover adds a section to the brief with its acceptance checks, paths and questions, the orchestrator adds what the person named to `Ground:`, in their terms, and `lane --paths` runs again.
+
 A second rejection of the same screen for how it reads or what it offers, not for a wrong value, is a missed purpose. A rejection that states a rule goes into the project's design reference, so the next screen starts with it.
 
 ## Hotfix
@@ -69,7 +71,7 @@ People are failing in production now. The order changes; nothing is skipped for 
 
 1. **Evidence or it is a note.** After the build, a finding blocks only with a failing test, a reproduction, or a cited line together with the acceptance check or rule it breaks. Before the build, with the input or state that makes the design fail and the real path that reaches it. Everything else goes in the handoff as a note. Taste and "could be better" are not findings. A dispute over whether something is wrong is settled by running it: a failing test or a reproduction decides, and without one it is a note. The decision judge rules on product questions, not on correctness.
 2. **One full read, then the fix only.** A confirming checker's brief is the earlier findings and the changes since. It answers whether each is closed and whether the fix broke what it reaches. It raises a new finding only in changed code, or for a wrong fact people act on, with evidence.
-3. **The open set must shrink.** The orchestrator counts the open findings after every round, new ones included. A round that ends with as many open as it began with, or that reports the same finding not closed a second time, ends the loop: the choice behind those findings is wrong, the work returns to that choice, and the person is asked one question about it. The same holds for reads: a re-read counts only on the states that changed.
+3. **The open set must shrink, and a second round is reconsidered first.** The orchestrator counts the open findings after every round, new ones included. Before a second fix round starts in one delivery, a fresh reconsider (`roles/reconsider.md`) says whether the open findings share a choice and rules on it; the orchestrator acts on the ruling and the handoff shows it. After that, a round that ends with as many open as it began with, or that reports the same finding not closed a second time, ends the loop, and the person is asked one question about the choice behind those findings. A recapture is not a fix round. The same holds for reads: a re-read counts only on the states that changed.
 
 ## How the work is trusted
 
@@ -82,9 +84,9 @@ People are failing in production now. The order changes; nothing is skipped for 
 
 ## Decisions and the person
 
-A product question (one whose answer changes what users or the business get, and that the code and the project's rules do not settle) goes to a fresh decision judge (`roles/decide.md`), who answers from sources. The handoff lists every decision for the person to overrule. A product question is never a reason to file something.
+A product question (one whose answer changes what users or the business get, and that the code and the project's rules do not settle) goes to a fresh decision judge (`roles/decide.md`), who answers from sources. The handoff lists every decision for the person to overrule.
 
-The person is asked for: a screen's direction; approval of a change the project cannot undo, on any lane, asked once the brief (on the critical lane, the design after its challenge) is settled, and asked again if that changes afterwards; an access a worker could not get; and the one question rule 3 produces. The person is told, not asked, when a hotfix ticket or a next ticket is opened; starting such a ticket follows the project's own rules on who may start work. The person does not approve plans. Never wait on the person while any other step can proceed.
+The person is asked for: a screen's direction; approval of a change the project cannot undo, on any lane, asked once the brief (on the critical lane, the design after its challenge) is settled, and asked again if that changes afterwards; an access a worker could not get; and the one question rule 3 ends in. The person is told, not asked, when a hotfix ticket or a next ticket is opened; starting such a ticket follows the project's own rules on who may start work. The person does not approve plans. Never wait on the person while any other step can proceed.
 
 The project's `AGENTS.md` files and the person's own instructions add to this method; where they ask for more, they win.
 

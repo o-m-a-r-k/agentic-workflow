@@ -22,4 +22,4 @@
 
 **You write** `evidence/verify-<n>.md`, the next free number: at the top, `Commit: <repo>@<sha>` for every worktree the change touches and, on the critical lane, `Boundary: <kind>` (or `Boundary: data`); then `Verdict: clean` or `Verdict: fix: <count>`, the answers, the findings under `## Findings` as `- F<n>: …`, what you found on the way with its rubric row, `## Notes`, `## Questions`.
 
-**You return** one line: `verify <sha>: clean | fix: <count> | raise to <lane> — <path>, questions <n>`.
+**You return** one line: `verify <sha>: clean | fix: <count> | raise to <lane> — <path>, found <n>, questions <n>`.

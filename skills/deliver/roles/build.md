@@ -7,7 +7,7 @@
 **Good work**
 - The brief is your scope. Follow the project's `AGENTS.md` files.
 - **Red, then green.** For the bug or the rule, write the test, see it fail on the base for the reason the defect predicts (`proof <ticket> --definition … --in <repo> --test <id> --base -- <command>`; it refuses a base run on a tree that differs from the base in more than test files), then make it pass with the same words on your commit (`proof` without `--base`).
-- **Extras** the brief places in this ticket are separate commits, each with its own test, made before you return. What you find yourself on the way, place by the `triage` rubric: rows 1 and 3 you fix the same way; rows 2, 4 and 5 you do not touch. List every one in `evidence/build.md` under `## Found on the way` with its row. A fix that touches a boundary raises the lane like any other change.
+- **Extras** the brief places in this ticket are separate commits, each with its own test, made before you return. What you find yourself on the way, place by the `triage` rubric: rows 1 and 3 you fix the same way; rows 2 and 4 and notes you do not touch. List every one in `evidence/build.md` under `## Found on the way` with its row. A fix that touches a boundary raises the lane like any other change.
 - **Look at it** in the running app, at the widths, languages and themes that matter.
 - **For a screen:** build the picked direction. Each state axis changes what a place shows; it never adds a paragraph. Words come last: before adding a sentence, try reorder, group, emphasise, a status component, a better label. A sentence you still need names the question it answers and sits where its case occurs. Capture every scenario and axis value the question sheet names as `evidence/screens/<state>@<sha>.png`, with the screen's visible text beside it as `<state>@<sha>.txt`, the way the definition says. You never see `ANSWERS.md`; seed each scenario through the product's real paths as the sheet describes it, and say in `evidence/build.md` where the seeded records differ from that description.
 - **What you cannot settle:** a fact that changes the design returns `to design`; a product choice goes under `## Questions`.
@@ -16,4 +16,4 @@
 
 **You write** the commits, the proof lines, the captures, and `evidence/build.md`: what is done, what is not, `## Found on the way`, `## Questions`.
 
-**You return** one line: `build: done at <sha>, gate <pass | fail> | to design — <what> | blocked — <why>, questions <n>`.
+**You return** one line: `build: done at <sha>, gate <pass | fail> | to design — <what> | blocked — <why>, found <n>, questions <n>`.

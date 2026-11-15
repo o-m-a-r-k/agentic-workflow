@@ -32,8 +32,7 @@ Standing instructions: none | <the person's words, time>
 
 - [fixed] <what, where, the commit>
 - [hotfix <ticket>] <a wrong fact people act on, reachable now, outside this ticket>
-- [next <ticket>] <a bug whose fix touches a boundary or needs a design>
-- [filed <ticket>] <not a bug, not needed here, worth having>
-- [note] <already wrong in a place the ticket only reached; what shows it>
+- [next <ticket>] <a bug whose fix touches a boundary>
+- [note] <wrong or worth having, not this ticket's; what shows it; in the handoff, no ticket>
 - [dropped] <what and why>
 - [lead] <what may be wrong, why it could not be shown, what would show it>

@@ -152,7 +152,7 @@ export function ticket(dir) {
     deliveries: fields(state, 'Delivered').map((v) => ({ time: v.split(/\s/)[0], where: v.split(/\s/).slice(1).join(' ') })).filter((d) => d.time),
     accepted: field(state, 'Accepted').split(/\s/)[0],
     rejections: bullets(section(state, 'Rejections')).map((l) => { const m = l.match(/^(missed purpose|defect|new wish)\s*:\s*(.*)$/i); return m ? { class: m[1].toLowerCase(), text: m[2] } : { class: '', text: l }; }),
-    found: bullets(section(state, 'Found on the way')).map((l) => { const m = l.match(/^\[(fixed|hotfix|next|filed|dropped|lead)\b([^\]]*)\]\s*(.*)$/i); return m ? { tag: m[1].toLowerCase(), id: m[2].trim(), text: m[3] } : { tag: '', id: '', text: l }; }),
+    found: bullets(section(state, 'Found on the way')).map((l) => { const m = l.match(/^\[(fixed|hotfix|next|filed|note|dropped|lead)\b([^\]]*)\]\s*(.*)$/i); return m ? { tag: m[1].toLowerCase(), id: m[2].trim(), text: m[3] } : { tag: '', id: '', text: l }; }),
     briefLane: word(brief, 'Lane'),
     undo: word(brief, 'Undo'),
     // A Paths line's first word is the path; anything after it is a note.

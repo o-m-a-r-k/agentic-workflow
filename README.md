@@ -18,7 +18,7 @@ The plugin is five skills (deliver, onboard, design, test, triage), the files th
 
 **Loops end by rule.** A finding needs evidence or it is a note. A recheck reads only the fix. When the same finding stays open twice, the choice behind it is wrong and you are asked one question.
 
-**Bugs found on the way** are fixed in the ticket as their own commits. One that touches a boundary or needs a design becomes the next ticket started. The `triage` skill holds the rubric.
+**Bugs found on the way** are fixed in the ticket as their own commits. A wrong fact users can reach now gets a hotfix ticket, and a bug whose fix touches a boundary becomes the next ticket started; anything else found is a line in the handoff that the person turns into a ticket by saying so. The `triage` skill holds the rubric.
 
 **You are asked for** a screen's direction, approval of a step the project cannot undo, and an access a worker could not get. Product questions are answered by a fresh agent from sources and listed in the handoff for you to overrule.
 

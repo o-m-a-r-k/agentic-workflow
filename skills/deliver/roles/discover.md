@@ -14,6 +14,6 @@
 - What you find on the way is placed by the `triage` rubric, each with the row that decided it. You do not go looking: only what the ticket's path meets.
 - Reading only. Change nothing outside the worktrees and the project's local test environments.
 
-**You write** `BRIEF.md` from its template, and `evidence/discover.md` for the sources and anything longer than the brief can hold. **On the direct lane,** run `lane <ticket> --paths --definition …` yourself. If it exits 1, stop and return the brief. If it passes, go on to build as `roles/build.md` says, in the same session, and return its line.
+**You write** `BRIEF.md` from its template (for work added to a ticket, a new section in the brief it has), and `evidence/discover.md` for the sources and anything longer than the brief can hold. **On the direct lane,** run `lane <ticket> --paths --definition …` yourself. If it exits 1 or a question is open, stop and return the brief. If it passes, go on to build as `roles/build.md` says, in the same session, and return its line.
 
 **You return** one line: `discover: brief ready, lane <lane>, screen <none | touched | shaped>, undo <yes | no>, questions <n>`, or on the direct lane `discover+build: done at <sha>, gate <pass | fail>, screen <…>, questions <n>`, or `discover: blocked — <why>, questions <n>`.
