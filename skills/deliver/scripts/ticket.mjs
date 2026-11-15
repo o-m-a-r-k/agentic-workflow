@@ -129,13 +129,20 @@ export const laneRank = (l) => LANES.indexOf(String(l || '').toLowerCase().split
 export function ticket(dir) {
   const state = read(join(dir, 'STATE.md')), brief = read(join(dir, 'BRIEF.md')), design = read(join(dir, 'DESIGN.md')), ev = join(dir, 'evidence');
   const worktrees = {};
+  // What `ready` last passed on, per repo: the tree and the base its change was measured from.
+  let passed = {};
+  try { passed = JSON.parse(read(join(ev, 'ready.json'))).repos || {}; } catch {}
   for (const m of state.matchAll(/^(Worktree|Lane) ([\w.-]+):[ \t]*(\S+)(?:.*?\bfrom (\S+))?.*?(?:\bat ([0-9a-f]{7,40}))?[ \t]*$/gm)) {
     const p = within(dir, m[3]), w = (worktrees[m[2]] = { name: m[2], lane: m[1] === 'Lane', path: p && realpathSync(p), from: (m[4] || '').replace(/,$/, ''), at: m[5] || '' });
     if (!w.path) continue;
     const common = git(w.path, 'rev-parse', '--git-common-dir');
     Object.assign(w, { head: git(w.path, 'rev-parse', 'HEAD'), tree: git(w.path, 'rev-parse', 'HEAD^{tree}'), repository: common && realpathSync(resolve(w.path, common)) });
     w.baseRef = w.from ? [`origin/${w.from}`, w.from].find((b) => git(w.path, 'rev-parse', '--verify', '-q', b)) : null;
-    w.base = (w.baseRef && git(w.path, 'merge-base', 'HEAD', w.baseRef)) || w.at;
+    // A delivery that landed leaves the base holding the branch, so the change would read as empty or behind. While the
+    // base's tip and HEAD both hold exactly the tree `ready` passed on, the change is measured from the base it had then.
+    const mb = w.baseRef && git(w.path, 'merge-base', 'HEAD', w.baseRef), was = passed[w.name];
+    w.landed = !!w.baseRef && !!was && was.tree === w.tree && was.base !== w.head && git(w.path, 'rev-parse', `${w.baseRef}^{tree}`) === w.tree;
+    w.base = (w.landed ? was.base : mb) || w.at;
     w.baseTree = w.base ? git(w.path, 'rev-parse', `${w.base}^{tree}`) : null;
   }
   let checks = [], checksError = '';
@@ -205,9 +212,9 @@ export function proofRules(T, def) {
   return { isTest: isTestFile, isTestFile, stands, isGreen, ran, worktreeOf: W, changeFiles };
 }
 
-// Whether HEAD contains the tip of the base ref STATE.md names (origin/<from>, else <from>; local refs, no fetch).
-// null when no such ref exists here.
-export const containsBase = (w) => (!w.baseRef ? null : git(w.path, 'merge-base', '--is-ancestor', w.baseRef, 'HEAD') !== null);
+// Whether HEAD contains the tip of the base ref STATE.md names (origin/<from>, else <from>; local refs, no fetch),
+// or the base's tip is exactly the tree `ready` passed on (its delivery landed, and nothing else has since). null when no such ref exists here.
+export const containsBase = (w) => (!w.baseRef ? null : w.landed || git(w.path, 'merge-base', '--is-ancestor', w.baseRef, 'HEAD') !== null);
 export const behindOf = (T) => T.repos.flatMap((w) => { const c = containsBase(w); return c === true ? [] : [{ name: w.name, why: c === null ? `no base ref ${w.from ? `"${w.from}" ` : ''}found locally` : `HEAD does not contain ${w.baseRef}` }]; });
 
 // The facts that set the lane's floor: the paths the brief lists (fromBrief) or the files each worktree changed from

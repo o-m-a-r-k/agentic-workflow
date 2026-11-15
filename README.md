@@ -12,7 +12,7 @@ The plugin is five skills (deliver, onboard, design, test, triage), the files th
 |---|---|---|
 | Direct | Restores or adjusts behaviour that already exists | Discover and build in one worker, a fresh verifier, the gate |
 | Standard | New behaviour, no boundary touched | A brief, a build, a fresh verifier, the gate |
-| Critical | A boundary or a migration is touched, or it cannot be undone | A short design with one challenge, a verifier per boundary with the project's fact checks, the gate, an audit where it is deployed |
+| Critical | A boundary or a migration is touched, it adds or alters how a fact people act on is computed or enforced outside the mapped code, or it cannot be undone | A short design with one challenge, a verifier per boundary with the project's fact checks, the gate, an audit where it is deployed |
 
 **Screens start from questions.** A new or restructured screen begins with a half-page question sheet (who arrives, what they ask, in what order) and an answer key written from seeded data. Three rough directions are built in the real app and you pick one from screenshots: the one planned wait on you. The built screen is then judged by fresh readers answering the questions from screenshots alone, scored against the key. An answer found only in a sentence counts as not given, so a screen cannot be passed by adding text.
 

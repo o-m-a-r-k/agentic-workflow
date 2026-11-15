@@ -4,7 +4,9 @@
 // Usage: node ready.mjs <ticket-folder> --definition <project definition> [--definition <its .local.md>]
 // Rows:
 //   gate      what `gate --check` decides (ticket.mjs's gateCheck)
-//   base      each worktree's HEAD contains its base ref's tip (origin/<from>, else <from>; local refs)
+//   base      each worktree's HEAD contains its base ref's tip (origin/<from>, else <from>; local refs), or the base's
+//             tip is exactly the tree this script last passed on: a repo whose delivery landed stays ready while the
+//             next repo's step is taken
 //   lane      the floor from the current diff (ticket.mjs's laneFacts) is not above STATE.md's "Risk lane:"
 //   verify    at least one evidence/verify-<n>.md. Per stream (on the critical lane each "Boundary: <kind>" a verify or
 //             confirm file names is its own stream; otherwise one stream): the newest verify by number, unless the
@@ -18,7 +20,8 @@
 //             since (a base that moved without touching the change's screen files keeps the read, as it keeps a verify)
 //   approval  with BRIEF.md's "Undo: no": STATE.md's "Approval:" is set, and is not "none" or "asked…"
 //   questions with QUESTIONS.md: STATE.md's "Question sheet: <12 hex>" is the first 12 hex of its sha256
-// Writes evidence/ready.md (its History line counts the runs and the failed ones). Exit 0 when every row holds, else 1.
+// Writes evidence/ready.md (its History line counts the runs and the failed ones) and, on a pass, evidence/ready.json
+// (each repo's tree and the base its change was measured from). Exit 0 when every row holds, else 1.
 import { existsSync, readFileSync, statSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { ticket, definitionOf, proofRules, read, field, fields, sha, laneFacts, laneRank, gateCheck, behindOf, dueKind, specOf, namesBetween, screenOf } from './ticket.mjs';
@@ -124,5 +127,6 @@ const out = [
 ].join('\n');
 mkdirSync(T.ev, { recursive: true });
 writeFileSync(join(T.ev, 'ready.md'), out + '\n');
+if (!failed.length) writeFileSync(join(T.ev, 'ready.json'), JSON.stringify({ repos: Object.fromEntries(T.repos.map((w) => [w.name, { tree: w.tree, base: w.base }])) }, null, 2) + '\n');
 console.log(out);
 process.exit(failed.length ? 1 : 0);

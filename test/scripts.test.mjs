@@ -827,3 +827,46 @@ test('ready keeps a read when the base moved through screen files the change doe
   commit(f.w.path, 'the ticket changes its own page again');
   assert.match(row('read'), /^fail: read-1\.md: web\/src\/pages\/loan\.tsx changed since/);
 });
+
+test('ready holds while a two-repo delivery lands one repo at a time, and only on the tree it passed', () => {
+  const f = ticket({ web: true });
+  edit(join(f.cat.path, 'docs/readme.md'), 'library', 'the library');
+  const head = commit(f.cat.path, 'the change');
+  edit(join(f.w.path, 'src/api.ts'), '{}', '{ }');
+  const whead = commit(f.w.path, 'its consumer');
+  f.brief('standard', ['catalog/docs/readme.md', 'web/src/api.ts']);
+  assert.equal(f.G().status, 0);
+  write(f.ev('verify-1.md'), `Commit: catalog@${head} web@${whead}\nVerdict: clean\n`);
+  const R = () => { const r = f.R(); return { status: r.status, out: r.stdout, row: (n) => (r.stdout.match(new RegExp(`^\\| ${n} \\| (.*) \\|$`, 'm')) || [])[1] }; };
+  const land = (p) => { git(p, 'checkout', '-q', 'main'); git(p, 'merge', '-q', '--no-ff', '--no-edit', 'fix/EX-1'); git(p, 'checkout', '-q', 'fix/EX-1'); };
+  // a landed repo with no pass recorded reads as behind its base
+  land(f.cat.path);
+  assert.match(R().row('base'), /^fail: catalog: HEAD does not contain main/);
+  git(f.cat.path, 'branch', '-qf', 'main', 'main~1');
+  let r = R();
+  assert.equal(r.status, 0, r.out);
+  // the first repo lands: the second repo's step still finds ready
+  land(f.cat.path);
+  r = R();
+  assert.equal(r.status, 0, r.out);
+  // the branch is moved up to the merge: the change is still the one that passed
+  git(f.cat.path, 'merge', '-q', '--ff-only', 'main');
+  r = R();
+  assert.equal(r.status, 0, r.out);
+  assert.match(r.row('gate'), /^ok/);
+  land(f.w.path);
+  assert.equal(R().status, 0);
+  // a commit after the landing is a new change, measured from the base that holds the old one
+  edit(join(f.w.path, 'src/api.ts'), '{ }', '{  }');
+  commit(f.w.path, 'a fix after delivery');
+  r = R();
+  assert.equal(r.status, 1);
+  assert.match(r.row('verify'), /does not stand for HEAD/);
+  // another delivery moves a landed repo's base: what is there is no longer the tree that passed
+  git(f.cat.path, 'checkout', '-q', 'main');
+  edit(join(f.cat.path, 'docs/readme.md'), 'the library', 'library');
+  commit(f.cat.path, 'another delivery undoes the change');
+  git(f.cat.path, 'checkout', '-q', 'fix/EX-1');
+  assert.match(R().row('base'), /^fail: catalog: HEAD does not contain main/);
+  f.done();
+});

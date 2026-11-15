@@ -6,7 +6,7 @@
 
 **Answer each, with the evidence that decided it:**
 
-1. **Which facts people act on does this diff show or write?** One outside the brief's lane or the definition's mapped paths raises the lane: say so first, with the path.
+1. **Which facts people act on does this diff show or write, and which rule that computes, selects or enforces one does it add or alter?** Such a rule in code the definition's map does not cover raises a lane below critical: say so first, with the path.
 2. **Does each acceptance check pass when you run it,** and does each new test fail without the change (`evidence/proof.jsonl`, or run it)?
 3. **Was any test deleted, skipped or loosened?** `evidence/gate.md` lists the changed and removed tests and the skip markers; judge each.
 4. **Does the outcome hold in the running app,** used as a hurried user would: submit twice, go back, enter long or unusual text?

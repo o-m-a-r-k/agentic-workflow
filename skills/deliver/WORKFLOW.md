@@ -16,10 +16,10 @@ The goal: a ticket goes in, and the outcome it exists for comes true for its use
 |---|---|---|
 | **Direct** | No boundary path touched, and the change restores or adjusts behaviour that already exists | Discover, with its reason |
 | **Standard** | No boundary path touched; new behaviour | Discover, with its reason |
-| **Critical** | A boundary path or a migration is touched, or the effect cannot be undone by the project's way of undoing a delivery | The `lane` script for paths; Discover and every verifier for "cannot be undone" |
+| **Critical** | A boundary path or a migration is touched, the change adds or alters a rule that computes, selects or enforces a fact people act on in code the map does not cover, or the effect cannot be undone by the project's way of undoing a delivery | The `lane` script for paths; Discover and every verifier for the other two |
 
 - `lane --paths` runs on the paths Discover expects to touch, before anything is built. `lane` runs again on the real diff before verification. Either can raise the lane; nothing lowers it.
-- A verifier who finds the diff showing or writing a fact people act on outside the mapped paths raises the lane, and names the path for the project's map.
+- Discover judges the planned change for such a rule before anything is built; a verifier who finds one in the diff that Discover did not raises the lane. Either names the path for the project's map. Showing a fact through the code that already derives it is not such a rule.
 - A rise runs the steps the lower lane skipped, and the build is revised to what they conclude. Built code is evidence for a design, never a constraint on it.
 
 ## Steps
@@ -53,7 +53,7 @@ The goal: a ticket goes in, and the outcome it exists for comes true for its use
 | Rejection | What happens |
 |---|---|
 | Missed purpose: the screen answers the wrong question | Back to Shape, from the question sheet restated with the person |
-| Defect: it does not do what was agreed, or a bug the person met on the ticket's ground | One fix round, on the ticket's lane: build, `lane` on the new diff, a confirming check (on the critical lane with the boundary's oracle), `gate`, a read of the changed states, then Deliver again with `ready` first |
+| Defect: it does not do what was agreed, or a bug the person met on the ticket's ground | One fix round, on the ticket's lane: build, `lane` on the new diff, a confirming check (on the critical lane one per verifier, with its boundary's oracle where the fix touches it), `gate`, a read of the changed states, then Deliver again with `ready` first |
 | New wish | Added to the ticket only at the person's word, as below; otherwise a note |
 
 **Work the person adds to a ticket** after Discover is discovered before it is built: Discover adds a section to the brief with its acceptance checks, paths and questions, the orchestrator adds what the person named to `Ground:`, in their terms, and `lane --paths` runs again.
