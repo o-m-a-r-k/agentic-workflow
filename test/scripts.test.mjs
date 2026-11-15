@@ -802,3 +802,28 @@ test('lane: a path in a watch list and a boundary raises the floor by the bounda
   assert.match(l.stdout, /^Floor: critical$/m);
   f.done();
 });
+
+test('ready keeps a read when the base moved through screen files the change does not touch, and drops it when it touched one', () => {
+  const f = ticket({ web: true });
+  edit(join(f.w.path, 'src/pages/loan.tsx'), 'null', '1');
+  const whead = commit(f.w.path, 'the page');
+  f.state('Screen: touched', 'standard');
+  edit(join(f.t, 'STATE.md'), 'Screen: none\n', '');
+  f.brief('standard', ['web/src/pages/loan.tsx']);
+  write(f.ev('verify-1.md'), `Commit: web@${whead}\nVerdict: clean\n`);
+  write(f.ev('read-1.md'), `Commit: web@${whead}\nVerdict: pass\n`);
+  const row = (n) => (f.R().stdout.match(new RegExp(`^\\| ${n} \\| (.*) \\|$`, 'm')) || [])[1];
+  assert.match(row('read'), /^ok \(read-1\.md\)/);
+  const branch = git(f.w.path, 'rev-parse', '--abbrev-ref', 'HEAD');
+  git(f.w.path, 'checkout', '-q', 'main');
+  write(join(f.w.path, 'messages/other.json'), '{"a": "b"}\n');
+  commit(f.w.path, 'another delivery lands a screen file');
+  git(f.w.path, 'checkout', '-q', branch);
+  git(f.w.path, 'merge', '-q', '--no-edit', 'main');
+  assert.match(row('base'), /^ok/);
+  assert.match(row('read'), /^ok \(read-1\.md\)/, 'another ticket\'s screen file leaves the read standing');
+  assert.match(row('verify'), /^ok/);
+  edit(join(f.w.path, 'src/pages/loan.tsx'), '1', '2');
+  commit(f.w.path, 'the ticket changes its own page again');
+  assert.match(row('read'), /^fail: read-1\.md: web\/src\/pages\/loan\.tsx changed since/);
+});

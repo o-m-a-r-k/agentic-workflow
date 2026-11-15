@@ -14,7 +14,8 @@
 //   checks    every CHECKS.json check due "before delivery" passed in evidence/checks.json with its current spec, on
 //             commits that stand. On the critical lane at least one such check is needed; elsewhere none is "ok (none)"
 //   read      with "Screen: touched" or "shaped": the highest-numbered evidence/read-<n>.md says "Verdict: pass" and its
-//             "Commit:" lines name every worktree whose change touches screen_paths, with no screen file changed since
+//             "Commit:" lines name every worktree whose change touches screen_paths, with no screen file of the change changed
+//             since (a base that moved without touching the change's screen files keeps the read, as it keeps a verify)
 //   approval  with BRIEF.md's "Undo: no": STATE.md's "Approval:" is set, and is not "none" or "asked…"
 //   questions with QUESTIONS.md: STATE.md's "Question sheet: <12 hex>" is the first 12 hex of its sha256
 // Writes evidence/ready.md (its History line counts the runs and the failed ones). Exit 0 when every row holds, else 1.
@@ -99,7 +100,7 @@ else {
     const t = read(join(T.ev, f)), cs = commitsOf(t);
     const screenRepos = T.repos.filter((w) => (namesBetween(w.path, w.base, 'HEAD') || []).some((x) => screen(`${w.name}/${x}`))).map((w) => w.name);
     const missing = screenRepos.filter((r) => !cs.some((c) => c.repo === r));
-    const stale = cs.flatMap((c) => { const w = W[c.repo], n = w && namesBetween(w.path, c.sha, 'HEAD'); return !n ? [`${c.repo}@${c.sha.slice(0, 12)} is not a commit here`] : n.filter((x) => screen(`${c.repo}/${x}`)).slice(0, 3).map((x) => `${c.repo}/${x} changed since`); });
+    const stale = cs.flatMap((c) => { const w = W[c.repo], n = w && namesBetween(w.path, c.sha, 'HEAD'); return !n ? [`${c.repo}@${c.sha.slice(0, 12)} is not a commit here`] : n.filter((x) => screen(`${c.repo}/${x}`) && R.changeFiles(w).includes(x)).slice(0, 3).map((x) => `${c.repo}/${x} changed since`); });
     row('read', verdictOf(t) !== 'pass' ? fail(`${f} says Verdict: ${verdictOf(t) || '(none)'}`) : !cs.length ? fail(`${f} has no "Commit: <repo>@<sha>" line`) : missing.length ? fail(`${f} names no commit of ${missing.join(', ')}`) : stale.length ? fail(`${f}: ${stale.join(', ')}`) : `ok (${f})`);
   }
 }
