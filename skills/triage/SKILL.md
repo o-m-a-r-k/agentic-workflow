@@ -7,7 +7,7 @@ description: Decide what becomes of a defect or idea found while working on a ti
 
 Related bugs get fixed where they are found; a ticket still ends.
 
-The ticket's ground is in its `STATE.md` (`WORKFLOW.md`, Words). An **extra** is a fix row 3 makes in the ticket.
+The ticket's ground is in its `STATE.md` (`WORKFLOW.md`, Words). An **extra** is a fix row 3 makes in the ticket. A **bug** is the product showing or doing something that contradicts its record, its rules or what it says of the same thing elsewhere; a wrong word is one.
 
 Ask in order. The first yes decides, and the answer is the same on every lane.
 
