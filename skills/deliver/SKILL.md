@@ -40,7 +40,7 @@ You alone write `STATE.md`: its fixed fields, overwritten each cycle, never a na
 
 ## Starting a worker
 
-Every worker is fresh: started through the harness's general-purpose sub-agent, without your history, never a fork. In Codex, pass `fork_turns: "none"` where the spawn tool offers it. Its brief is paths and facts:
+Every worker is fresh: started through the harness's general-purpose sub-agent, without your history, never a fork. In Codex, pass `fork_turns: "none"` where the spawn tool offers it. Where the harness shows a worker's name or description, give its role and ticket, so the person can tell the workers apart. Its brief is paths and facts:
 
 - its role file, `roles/<role>.md`, which it reads first, whole, and the skills that file names;
 - the absolute paths of the ticket folder, the worktrees, the project definition (and its `.local.md`), `WORKFLOW.md` and the skill folder;
