@@ -749,3 +749,56 @@ test('ready off the critical lane: no checks, no screen, no approval needed; a t
   assert.match(r.stdout, /^\| verify \| ok \(money: verify-1\.md says clean\) \|$/m);
   f.done();
 });
+
+test('watch: a gate entry runs a consumer\'s checks in another repo without raising the lane; kept and rerun like a boundary; a kind may be in both maps', () => {
+  const f = ticket({ web: true });
+  const WATCH = 'watch:\n  contract: [catalog/src/api/**, "!catalog/src/api/**/*.md"]\n  loans: [catalog/docs/**]\n';
+  const lines = ['web | watch:contract | node gate.mjs web-contract', 'catalog | watch:loans | node gate.mjs cat-docs'];
+  write(join(f.cat.path, 'src/api/loans.dto.ts'), 'export type Loan = {};\n');
+  commit(f.cat.path, 'a DTO');
+  f.defWith([...lines, 'web | watch:nowhere | node gate.mjs x', 'web | watch:contract | node gate.mjs y {files}'], WATCH);
+  let r = f.G();
+  assert.equal(r.status, 1);
+  assert.match(r.stdout, /3 web \| watch:nowhere .*: fail, the definition's watch have no "nowhere"/);
+  assert.match(r.stdout, /4 web \| watch:contract .*: fail, a watch entry can't use \{files\}/);
+  f.defWith(lines, WATCH);
+  r = f.G();
+  assert.equal(r.status, 0, r.stdout);
+  assert.deepEqual(f.ran().slice(-1), ['web-contract'], 'selected by a file of the other repo, run in its own');
+  assert.match(r.stdout, /Not selected: 2/);
+  let l = f.L();
+  assert.equal(l.status, 0, l.stdout);
+  assert.match(l.stdout, /^Floor: none$/m);
+  assert.match(l.stdout, /^Watch contract: catalog\/src\/api\/loans\.dto\.ts$/m);
+  write(join(f.cat.path, 'docs/notes.md'), 'x\n');
+  commit(f.cat.path, 'docs');
+  r = f.G();
+  assert.equal(r.status, 0, r.stdout);
+  assert.deepEqual(f.ran().slice(-1), ['cat-docs']);
+  assert.match(r.stdout, /1 web \| watch:contract .*: kept/);
+  l = f.L();
+  assert.match(l.stdout, /^Watch loans: catalog\/docs\/notes\.md$/m, 'watch loans is its own list, not the boundary of that name');
+  assert.match(l.stdout, /^Boundaries: none$/m);
+  assert.match(l.stdout, /^Floor: none$/m);
+  edit(join(f.cat.path, 'src/api/loans.dto.ts'), '{}', '{ id: string }');
+  commit(f.cat.path, 'the DTO changes');
+  r = f.G();
+  assert.deepEqual(f.ran().slice(-1), ['web-contract']);
+  assert.match(r.stdout, /2 catalog \| watch:loans .*: kept/);
+  assert.equal(f.G('--check').status, 0);
+  f.done();
+});
+
+test('lane: a path in a watch list and a boundary raises the floor by the boundary; with no watch list it says Watch: none', () => {
+  const f = ticket();
+  edit(join(f.cat.path, 'src/fees/fee.ts'), '1', '2');
+  commit(f.cat.path, 'fees');
+  let l = f.L();
+  assert.match(l.stdout, /^Watch: none$/m);
+  f.defWith(GATE_LINES, 'watch:\n  fees: [catalog/src/fees/**]\n');
+  l = f.L();
+  assert.match(l.stdout, /^Watch fees: catalog\/src\/fees\/fee\.ts$/m);
+  assert.match(l.stdout, /^Boundary money: catalog\/src\/fees\/fee\.ts$/m);
+  assert.match(l.stdout, /^Floor: critical$/m);
+  f.done();
+});

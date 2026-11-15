@@ -13,7 +13,7 @@ A replacement of the method, from tickets that took days: a fifth delivery of on
 - **Bugs found on the way are fixed in the ticket** as their own commits, never as a new delivery cycle; one that touches a boundary or needs a design is the next ticket started. The new `triage` skill holds the rubric.
 - **The person** picks a screen's direction and approves what cannot be undone, and no longer approves plans.
 - **`record`** writes time to delivery and to acceptance, idle time, rejections by class, agents started, gate runs, lane raises and words per screen.
-- **The definition** gains `boundaries`, `migrations`, `page_paths`, `gate` and `skip_markers`.
+- **The definition** gains `boundaries`, `watch`, `migrations`, `page_paths`, `gate` and `skip_markers`.
 
 ## 0.16.8
 

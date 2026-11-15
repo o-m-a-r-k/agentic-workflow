@@ -211,7 +211,8 @@ export const containsBase = (w) => (!w.baseRef ? null : git(w.path, 'merge-base'
 export const behindOf = (T) => T.repos.flatMap((w) => { const c = containsBase(w); return c === true ? [] : [{ name: w.name, why: c === null ? `no base ref ${w.from ? `"${w.from}" ` : ''}found locally` : `HEAD does not contain ${w.baseRef}` }]; });
 
 // The facts that set the lane's floor: the paths the brief lists (fromBrief) or the files each worktree changed from
-// its base to HEAD, against the definition's boundaries, migrations, page_paths and screen_paths. A brief path is
+// its base to HEAD, against the definition's boundaries, migrations, page_paths and screen_paths, and its watch lists
+// (kind → repo-prefixed globs, like boundaries), which are reported and never touch the floor. A brief path is
 // placed when its first segment is one of the ticket's repos and it holds no brace; it is then taken as itself and as
 // the base files it names. Paths it cannot place are listed, never guessed.
 export function laneFacts(T, def, fromBrief) {
@@ -239,14 +240,15 @@ export function laneFacts(T, def, fromBrief) {
   }
   const any = (take, x) => x.forms.some((f) => take(f));
   const kinds = boundaries.map((b) => ({ kind: b.kind, paths: paths.filter((x) => any(b.take, x)).map((x) => x.path) })).filter((b) => b.paths.length);
+  const watched = Object.entries(def.lists('watch')).map(([kind, globs]) => { const take = matcher(globs); return { kind, paths: paths.filter((x) => any(take, x)).map((x) => x.path) }; }).filter((b) => b.paths.length);
   const migrations = paths.filter((x) => any(migration, x)).map((x) => x.path);
-  return { boundaries: boundaries.length, paths, notes, unplaced, kinds, migrations, pages: paths.filter((x) => x.added && page(x.path)).map((x) => x.path), screenTouched: paths.some((x) => any(screen, x)), floor: kinds.length || migrations.length ? 'critical' : 'none' };
+  return { boundaries: boundaries.length, paths, notes, unplaced, kinds, watched, migrations, pages: paths.filter((x) => x.added && page(x.path)).map((x) => x.path), screenTouched: paths.some((x) => any(screen, x)), floor: kinds.length || migrations.length ? 'critical' : 'none' };
 }
 
 // The gate as the definition and the current diff make it: each `gate:` entry, what selects it and the files that
 // did, and whether an earlier pass is reached by what changed since. See gate.mjs.
 export function gatePlan(T, def) {
-  const allow = def.list('checks_allow') || [], nothingRan = def.list('nothing_ran') || [], boundaries = def.lists('boundaries');
+  const allow = def.list('checks_allow') || [], nothingRan = def.list('nothing_ran') || [], boundaries = def.lists('boundaries'), watch = def.lists('watch');
   const W = Object.fromEntries(T.repos.map((w) => [w.name, w]));
   const errors = [], changes = {};
   if (!T.repos.length) errors.push('STATE.md names no existing "Worktree <repo>: <path>"');
@@ -265,11 +267,13 @@ export function gatePlan(T, def) {
     const e = { n: i + 1, line, repo, when, command, words, allowedBy, own, heavy: flag === 'heavy', bad: '' };
     e.spec = sha(JSON.stringify([repo, when, command, flag, allow, nothingRan, own.map((x) => sha(read(resolve(def.dir, x))))]));
     if (parts.length < 3 || parts.length > 4 || !repo || !when || !command || (flag && flag !== 'heavy')) e.bad = 'not "<repo> | <when> | <command>" with an optional "| heavy"';
-    const kind = (when.match(/^boundary:\s*(\S+)$/i) || [])[1]?.toLowerCase();
-    if (!e.bad && kind && !boundaries[kind]) e.bad = `the definition's boundaries have no "${kind}"`;
-    if (!e.bad && kind && command.includes('{files}')) e.bad = 'a boundary entry can\'t use {files}: it names files of other repos';
+    // boundary:<kind> and watch:<kind> select alike, from either map: a changed file in any repo in that list.
+    const [, mapName, k] = when.match(/^(boundary|watch):\s*(\S+)$/i) || [], kind = k?.toLowerCase(), lists = /^watch$/i.test(mapName || '') ? watch : boundaries;
+    const label = /^watch$/i.test(mapName || '') ? 'watch' : 'boundaries';
+    if (!e.bad && kind && !lists[kind]) e.bad = `the definition's ${label} have no "${kind}"`;
+    if (!e.bad && kind && command.includes('{files}')) e.bad = `a ${mapName.toLowerCase()} entry can't use {files}: it names files of other repos`;
     if (e.bad) return e;
-    if (kind) { const m = matcher(boundaries[kind]); Object.assign(e, { scope: Object.keys(W), takes: (r, f) => m(`${r}/${f}`) }); }
+    if (kind) { const m = matcher(lists[kind]); Object.assign(e, { scope: Object.keys(W), takes: (r, f) => m(`${r}/${f}`) }); }
     else if (/^always$/i.test(when)) Object.assign(e, { scope: [repo], takes: () => true });
     else { const m = matcher(when.split(',').map((s) => s.trim()).filter(Boolean)); Object.assign(e, { scope: [repo], takes: (r, f) => m(f) }); }
     const hit = e.scope.flatMap((r) => (changes[r] || []).filter((c) => e.takes(r, c.path)).map((c) => ({ ...c, repo: r })));

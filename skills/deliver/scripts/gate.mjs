@@ -7,14 +7,15 @@
 //   always              the repo has any change
 //   <glob>, <glob>      a changed file of the repo, repo-relative, is taken by them ("!<glob>" leaves files out)
 //   boundary:<kind>     a changed file in any repo, repo-prefixed, is in that boundary of the definition's boundaries
+//   watch:<kind>        the same, from the definition's watch lists (they select gate entries; they never raise a lane)
 // In the command, {files} becomes the changed files that selected the entry, deletions left out (an entry whose
-// {files} would be empty is not selected; a boundary entry can't use {files}), {worktree} and {ticket} those folders.
+// {files} would be empty is not selected; a boundary or watch entry can't use {files}), {worktree} and {ticket} those folders.
 // It runs without a shell, only when its words start with an entry of checks_allow, in the repo's worktree; but a word
 // of that entry starting ./ ../ or / names a file of the definition's folder (an oracle), and then it runs from there,
 // never the branch's copy. It passes when it exits 0 and its output matches none of nothing_ran. Heavy entries run
 // last, and not after a failure.
 // A pass is kept: an entry that passed on earlier trees is not run again while the files changed since those trees
-// are none it reaches (always: no file of its repo; globs: none they take; boundary: none of that boundary, any repo).
+// are none it reaches (always: no file of its repo; globs: none they take; boundary or watch: none of that list, any repo).
 // Lists for the verifier, from the diff since each base: test files deleted, test files changed, and added lines of
 // test files that hold a skip marker (the definition's skip_markers, or common ones).
 // Records per repo whether HEAD contains its base ref's tip. A dirty worktree is refused (exit 2). One run per ticket

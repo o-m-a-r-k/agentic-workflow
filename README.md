@@ -88,7 +88,7 @@ Five skills: `deliver`; `onboard`; `design`, which shaping, building and reading
 
 ## Coming from 0.16
 
-0.17 replaces the method. A ticket already running stays on the version it started with. For new tickets, run `onboard` again for each project: the definition gains `boundaries`, `migrations`, `page_paths` and `gate`, and its Screens section gains the accepted screens, the state axes and how a screen is captured with its visible text. There is no `PLAN.md`, and `plan-shape`, `links` and `rounds` are gone.
+0.17 replaces the method. A ticket already running stays on the version it started with. For new tickets, run `onboard` again for each project: the definition gains `boundaries`, `watch`, `migrations`, `page_paths` and `gate`, and its Screens section gains the accepted screens, the state axes and how a screen is captured with its visible text. There is no `PLAN.md`, and `plan-shape`, `links` and `rounds` are gone.
 
 ## License
 

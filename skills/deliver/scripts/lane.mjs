@@ -7,6 +7,7 @@
 //   without  read the files each worktree changed from its base to HEAD (after the build); build lanes are left out
 // Compares those paths with the definition's boundaries (kind → repo-prefixed globs), migrations and page_paths, and
 // screen_paths (ticket.mjs's screenOf). The floor is critical when a path is in a boundary or a migration, else none.
+// The definition's watch lists (same shape as boundaries) are reported under Watch, for the verifier; never the floor.
 // New pages: added files under page_paths; with --paths, listed paths under page_paths that name no file at the base.
 // It never lowers a lane and never judges whether the change can be undone.
 // Writes evidence/lane.md. Exit 1 when the floor is critical and the ticket's lane (STATE.md's "Risk lane:", else
@@ -31,6 +32,7 @@ const out = [
   `Source: ${fromBrief ? "BRIEF.md's Paths" : 'files changed since each base'} (${F.paths.length} paths)`,
   `Floor: ${F.floor}`,
   ...(F.kinds.length ? F.kinds.map((b) => `Boundary ${b.kind}: ${b.paths.join(', ')}`) : ['Boundaries: none']),
+  ...(F.watched.length ? F.watched.map((b) => `Watch ${b.kind}: ${b.paths.join(', ')}`) : ['Watch: none']),
   `Migrations: ${list(F.migrations)}`,
   `Screen: ${F.screenTouched ? 'touched' : 'none'}`,
   `New pages: ${list(F.pages)}`,
