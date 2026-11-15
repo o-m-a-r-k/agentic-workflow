@@ -10,7 +10,7 @@ Read at: <repo>@<sha>
 
 ## Outcome
 
-What is true in the users' world once this is delivered, and where that will be seen.
+What is true in the users' world once this is delivered, on the ground `STATE.md` names. What the ticket did not ask for is not outcome.
 
 ## Acceptance
 

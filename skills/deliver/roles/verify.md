@@ -16,7 +16,7 @@
 
 **On the critical lane, for your boundary:** run its oracle through `checks <ticket> --definition …`; read the real paths (existing data at real volume, a migration and its way back, the same event twice or at once, a write that fails halfway, the consumers in other repositories); produce the failures the definition says how to produce. A walk is written to `evidence/walk-<id>.md` with `Check:`, `Commit:`, `Result:` and `Seen:` lines.
 
-**A finding** names its `file:line`, the input or state that triggers it, and why the guards already there do not stop it, or it is a failing test or a reproduction. Anything less is a note. Something wrong that was there before the change is placed by the `triage` skill, not silently fixed or ignored.
+**A finding** names its `file:line`, the input or state that triggers it, and why the guards already there do not stop it, or it is a failing test or a reproduction. Anything less is a note. Where the change alters shared code, check what it broke where that code is used. Something wrong that was there before the change is placed by the `triage` skill, not silently fixed or ignored.
 
 **For a reader's wrong answer** you are given: confirm it on the running screen, or refute it by naming the element that gives the answer. A sentence, a tooltip or a note does not refute it.
 

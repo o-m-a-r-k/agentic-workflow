@@ -5,21 +5,26 @@ description: Decide what becomes of a defect or idea found while working on a ti
 
 # What a found item becomes
 
-Related bugs get fixed where they are found; a ticket still ends. Ask in order. The first yes decides, and the answer is the same on every lane.
+Related bugs get fixed where they are found; a ticket still ends.
+
+The ticket's ground is in its `STATE.md` (`WORKFLOW.md`, Words). An **extra** is a fix row 3 makes in the ticket.
+
+Ask in order. The first yes decides, and the answer is the same on every lane.
 
 | # | Question | Result |
 |---|---|---|
-| 1 | Did this change cause or worsen it, is it on a screen, endpoint or code path the ticket touches, or would acceptance be false with it present? | **Fix in this ticket** |
-| 2 | Is a fact people act on wrong, reachable by users now, somewhere the ticket does not touch? | **Its own hotfix ticket,** opened at once; the person is told |
-| 3 | Is it a bug elsewhere whose fix touches no boundary and needs no design? | **Fix in this ticket,** as its own commit with its own test |
-| 4 | Is it a bug elsewhere whose fix touches a boundary or needs a design? | **The next ticket:** its own ticket, opened now and first in the handoff, started right after this delivery where the project's rules let work start without the person |
+| 1 | Did this change cause or worsen it, is it on the ticket's ground, or would acceptance be false with it present? | **Fix in this ticket** |
+| 2 | Is a fact people act on wrong, reachable by users now, off the ground? | **Its own hotfix ticket,** opened at once; the person is told |
+| 3 | Is it a bug off the ground, whose fix touches no boundary and needs no design? | **Fix in this ticket,** as its own commit with its own test |
+| 4 | Is it such a bug whose fix touches a boundary or needs a design? | **The next ticket:** its own ticket, opened now and first in the handoff, started right after this delivery where the project's rules let work start without the person |
 | 5 | Not a bug: is it needed for acceptance? | In the ticket if yes. Otherwise **file** one line if the person would value it, else **drop** it with a line in the handoff |
 
 ## Rules that keep it honest
 
 - **Show it.** An item is shown by running something: a failing test, a reproduction, a query and its result. One that cannot be shown in the project's environments is a lead in the handoff, with what would show it. A lead is never work.
 - **A product question is not a reason to file.** It goes to the decision judge, and the item is placed once it is answered.
-- **"The same defect elsewhere"** means the ticket's own defect in another place: row 1. Other defects of the same kind go through rows 3 and 4.
+- **The root cause is fixed where it lives,** shared code included: that is the ticket. The same kind of defect in another place is a bug off the ground: rows 3 and 4.
+- **The ground does not grow.** Shared code the ticket changes is checked wherever it is used, for what the change broke there: row 1. What is met only there, or while building or checking an extra, and is shown to be on the base already, is a **note** unless row 2 applies: one line in the handoff with what shows it, not fixed, no ticket.
 - **An in-ticket fix reopens nothing** unless it changes the contract or what a screen is for. One that touches a boundary raises the lane, like any other change.
 - **Before verification,** an in-ticket fix is a commit in the build. **After it,** in-ticket fixes are gathered into one fix round, and the confirming checker's brief lists them.
 - **Taste is dropped.** "Could be better" with no failing state behind it is not an item.

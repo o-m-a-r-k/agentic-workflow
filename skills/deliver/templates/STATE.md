@@ -9,6 +9,7 @@ Risk lane:
 Screen: none | touched | shaped
 Hotfix: yes | no
 Outcome: <what is true for the users once delivered>
+Ground: <the screens, endpoints, messages or files the ticket names; never code>
 Target: <delivery target>, delivered status <status>
 Started: <ISO time>
 Profile: <name> | none
@@ -33,5 +34,6 @@ Standing instructions: none | <the person's words, time>
 - [hotfix <ticket>] <a wrong fact people act on, reachable now, outside this ticket>
 - [next <ticket>] <a bug whose fix touches a boundary or needs a design>
 - [filed <ticket>] <not a bug, not needed here, worth having>
+- [note] <already wrong in a place the ticket only reached; what shows it>
 - [dropped] <what and why>
 - [lead] <what may be wrong, why it could not be shown, what would show it>

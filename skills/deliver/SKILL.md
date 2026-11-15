@@ -21,7 +21,7 @@ Read once, and again after the harness compacts your context:
 
 A cycle runs whenever a worker returns or the person writes. Read each ticket's `STATE.md`, the return line, and the result file of any script that ran (`evidence/lane.md`, `gate.md`, `words.md`, `checks.json`). Then decide each ticket's next move by `WORKFLOW.md` and start its workers. Tickets move independently.
 
-- **Take** a new ticket yourself: the folder from `templates/`, the worktrees, the tracker status, `STATE.md`. Tell the person in one line the outcome and the lane you expect.
+- **Take** a new ticket yourself: the folder from `templates/`, the worktrees, the tracker status, `STATE.md` with the outcome and the `Ground:` in the ticket's own terms. Tell the person in one line the outcome and the lane you expect.
 - **After Discover:** run `lane <ticket> --paths --definition …`. A floor above the brief's lane raises it; a path it cannot place goes back to Discover. Record the lane and `Screen:` in `STATE.md`. Where the brief says `Undo: no`, ask for the approval now, or on the critical lane once the challenge is answered.
 - **After every build, fix rounds included:** run `lane <ticket> --definition …` on the diff. A rise starts the skipped steps, and you tell the builder what they conclude.
 - **Verifiers:** the direct lane's runs as role `verify-direct`. On the critical lane start one per boundary `lane` named, each told its boundary; where it named none (a migration, or a change that cannot be undone), one for the data and its way back.
@@ -29,7 +29,7 @@ A cycle runs whenever a worker returns or the person writes. Read each ticket's 
 - **Score the readers' answers against the answer key yourself** (`roles/read.md`): the reader never sees the key. Write the result to `evidence/read-<n>.md`.
 - **Freeze the question sheet** when the person has seen it (for an unshaped change, when Discover returns): record `Question sheet: <first 12 of its sha256>` in `STATE.md` (as `shasum -a 256` prints it). A later change to it is shown to the person before you record the new value.
 - **Count the open findings after every round** and stop the loop as `WORKFLOW.md` "How loops end" rule 3 says. Give each confirming checker the earlier confirm files, so it can tell a finding reported not closed before.
-- **Found items:** a builder or verifier returns them placed by the `triage` skill; you record them under `## Found on the way`, open the tickets rows 2 and 4 call for, and tell the person.
+- **Found items:** a builder or verifier returns them placed by the `triage` skill; you record them under `## Found on the way`, open the tickets rows 2 and 4 call for, and tell the person. A note is recorded as `[note]` and opens nothing.
 - **Gate and ready:** have the builder run `gate`; before any delivery step `ready <ticket> --definition …` must exit 0. When `gate` reports a consumer repository with no worktree, add that worktree at its base and run it again.
 - **A worker's questions** (its return line ends `questions <n>`) go to a decision judge at once, while other work goes on.
 
